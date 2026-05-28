@@ -4,6 +4,47 @@
     <span id="code-scheduler-info" style="font-size:10px;color:var(--text-muted)"></span>
   </div>
 
+  <section class="project-autopilot-shell" aria-label="Project Autopilot">
+    <div class="project-autopilot-command">
+      <textarea
+        id="project-autopilot-prompt"
+        class="project-autopilot-input"
+        rows="2"
+        placeholder="Ask Project Autopilot to implement a repo change..."
+      ></textarea>
+      <div class="project-autopilot-actions">
+        <button id="project-autopilot-run-btn" class="project-mini-btn success" onclick="startProjectAutopilot()">Run Autopilot</button>
+        <button class="project-mini-btn danger" onclick="cancelProjectAutopilot()">Cancel</button>
+        <button class="project-mini-btn info" onclick="mergeProjectAutopilot()">Merge</button>
+        <button class="project-mini-btn muted" onclick="loadAutonomyRuns()">Refresh</button>
+      </div>
+    </div>
+    <div id="project-autopilot-status" class="project-autopilot-status">Idle</div>
+    <div id="project-autopilot-panel" class="project-autopilot-panel">
+      <div id="project-autopilot-run-summary" class="project-autopilot-summary">
+        <div class="project-inline-muted">No autonomous runs yet.</div>
+      </div>
+      <div class="project-autopilot-grid">
+        <div class="project-autopilot-block">
+          <div class="project-autopilot-title">Architect Plan</div>
+          <div id="project-autopilot-plan" class="project-autopilot-body"></div>
+        </div>
+        <div class="project-autopilot-block">
+          <div class="project-autopilot-title">Agent Lanes</div>
+          <div id="project-autopilot-lanes" class="project-autopilot-body"></div>
+        </div>
+        <div class="project-autopilot-block">
+          <div class="project-autopilot-title">Commands And Validation</div>
+          <div id="project-autopilot-validation" class="project-autopilot-body"></div>
+        </div>
+        <div class="project-autopilot-block">
+          <div class="project-autopilot-title">Live Steps</div>
+          <div id="project-autopilot-steps" class="project-autopilot-body"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
   {% include "brain_project_workspace_header.html" %}
   {% include "brain_project_pane_handoff.html" %}
   {% include "brain_project_pane_workspace.html" %}

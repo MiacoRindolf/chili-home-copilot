@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -174,8 +175,10 @@ class _AvatarViewState extends State<AvatarView> {
 
   void _onStatusChanged() {
     final status = widget.wakeWordStatus?.value ?? '';
-    final wasTranscribing = _prevWakeWordStatus?.startsWith('Transcribing') ?? false;
-    final nowListening = status.contains('say your command') || status.contains('follow-up');
+    final wasTranscribing =
+        _prevWakeWordStatus?.startsWith('Transcribing') ?? false;
+    final nowListening =
+        status.contains('say your command') || status.contains('follow-up');
     if (wasTranscribing && nowListening && status.isNotEmpty) {
       SoundEffects.playWakeDetected();
       if (mounted) {
@@ -198,8 +201,12 @@ class _AvatarViewState extends State<AvatarView> {
     if (_showHappyBriefly) return AvatarState.happy;
     if (_actionPerforming) return AvatarState.actionPerforming;
     if (showListeningState) return AvatarState.listening;
-    if (_userMuted && _avatarState == AvatarState.idle) return AvatarState.muted;
-    if (_chatInputHasFocus && _avatarState == AvatarState.idle && _showChat) return AvatarState.reading;
+    if (_userMuted && _avatarState == AvatarState.idle) {
+      return AvatarState.muted;
+    }
+    if (_chatInputHasFocus && _avatarState == AvatarState.idle && _showChat) {
+      return AvatarState.reading;
+    }
     if (_focus.isFocused.value && _avatarState == AvatarState.idle) {
       return AvatarState.focused;
     }
@@ -267,7 +274,9 @@ class _AvatarViewState extends State<AvatarView> {
     if (!_showChat) return;
     _lastChatWindowSize = await windowManager.getSize();
     final pos = await windowManager.getPosition();
-    final dx = (_lastChatWindowSize.width - LayoutConstants.avatarWindowSmall.width) / 2;
+    final dx =
+        (_lastChatWindowSize.width - LayoutConstants.avatarWindowSmall.width) /
+            2;
     await windowManager.setSize(LayoutConstants.avatarWindowSmall);
     await windowManager.setPosition(Offset(pos.dx + dx, pos.dy));
     if (mounted) setState(() => _showChat = false);
@@ -367,11 +376,13 @@ class _AvatarViewState extends State<AvatarView> {
     final cancelToken = CancelToken();
     _activeCancelToken = cancelToken;
 
-    final displayText = text.isNotEmpty ? text : (images.isNotEmpty ? '(image)' : '');
+    final displayText =
+        text.isNotEmpty ? text : (images.isNotEmpty ? '(image)' : '');
     final messageToSend = _focus.isFocused.value
         ? '[User has Focus Mode active on ${_focus.target?.label ?? 'screen'}. The attached image shows their current view.] $displayText'
         : displayText;
-    widget.sharedHistory.addUser(displayText, imagePaths: images.isNotEmpty ? images : null);
+    widget.sharedHistory
+        .addUser(displayText, imagePaths: images.isNotEmpty ? images : null);
     setState(() {
       _isSending = true;
       _streamingReply = '';
@@ -383,7 +394,8 @@ class _AvatarViewState extends State<AvatarView> {
     _thinkingTimer?.cancel();
     _thinkingTimer = Timer.periodic(const Duration(milliseconds: 2500), (_) {
       if (!mounted || !_isSending) return;
-      setState(() => _thinkingIndex = (_thinkingIndex + 1) % _thinkingMessages.length);
+      setState(() =>
+          _thinkingIndex = (_thinkingIndex + 1) % _thinkingMessages.length);
     });
     _scrollToBottom();
 
@@ -425,7 +437,8 @@ class _AvatarViewState extends State<AvatarView> {
       }
     } catch (e) {
       if (!mounted) return;
-      widget.sharedHistory.addAssistant('Could not reach CHILI. Is the server running?');
+      widget.sharedHistory
+          .addAssistant('Could not reach CHILI. Is the server running?');
       setState(() {
         _streamingReply = '';
         _lastFailedMessage = displayText;
@@ -489,14 +502,30 @@ class _AvatarViewState extends State<AvatarView> {
     final isWeekend = DateTime.now().weekday >= DateTime.saturday;
     final labels = <String>[];
     if (h >= 5 && h < 12) {
-      labels.addAll(["What's the weather?", "List my chores", "What's on my schedule?"]);
+      labels.addAll(
+          ["What's the weather?", "List my chores", "What's on my schedule?"]);
       if (isWeekend) labels.add('Play music');
     } else if (h >= 12 && h < 17) {
-      labels.addAll(['Search the web', 'Add a chore', 'Open Notepad', "What's the weather?"]);
+      labels.addAll([
+        'Search the web',
+        'Add a chore',
+        'Open Notepad',
+        "What's the weather?"
+      ]);
     } else if (h >= 17 && h < 21) {
-      labels.addAll(['Play relaxing music', 'List my chores', "What's the weather?", 'Search the web']);
+      labels.addAll([
+        'Play relaxing music',
+        'List my chores',
+        "What's the weather?",
+        'Search the web'
+      ]);
     } else {
-      labels.addAll(['Play lofi', 'What time is it?', 'Search the web', 'List my chores']);
+      labels.addAll([
+        'Play lofi',
+        'What time is it?',
+        'Search the web',
+        'List my chores'
+      ]);
     }
     return labels.map((l) => _suggestionChip(l)).toList();
   }
@@ -523,7 +552,9 @@ class _AvatarViewState extends State<AvatarView> {
     final effectiveStatus = followUpActive && (status == null || status.isEmpty)
         ? 'Listening... (follow-up)'
         : status;
-    final showListeningState = followUpActive && _avatarState != AvatarState.speaking && _avatarState != AvatarState.thinking;
+    final showListeningState = followUpActive &&
+        _avatarState != AvatarState.speaking &&
+        _avatarState != AvatarState.thinking;
     return Scaffold(
       backgroundColor: Colors.transparent,
       body: Stack(
@@ -532,198 +563,228 @@ class _AvatarViewState extends State<AvatarView> {
             onDragEntered: (_) => setState(() => _isDraggingFile = true),
             onDragExited: (_) => setState(() => _isDraggingFile = false),
             onDragDone: _onFilesDropped,
-            child: Column(
-              children: [
-                // ── Avatar + overlaid status chip ──
-                SizedBox(
-                  height: 200,
-                  width: 200,
-                  child: Stack(
-                    alignment: Alignment.center,
-                    children: [
-                      // Draggable / tappable background area
-                      GestureDetector(
-                        onPanStart: (_) => windowManager.startDragging(),
-                        onTap: _toggleChat,
-                        onDoubleTap: widget.onOpenFullApp,
-                        behavior: HitTestBehavior.translucent,
-                        child: const SizedBox.expand(),
-                      ),
-                      // Focus + mic mute toggles (outside GestureDetector)
-                      Positioned(
-                        top: 4,
-                        right: 4,
-                        child: Material(
-                          color: Colors.transparent,
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              ValueListenableBuilder<bool>(
-                                valueListenable: _focus.isFocused,
-                                builder: (_, focused, __) => IconButton(
-                                  icon: Icon(
-                                    focused ? Icons.center_focus_strong : Icons.center_focus_weak,
-                                    size: 18,
-                                    color: focused
-                                        ? const Color(0xFF7E57C2)
-                                        : Colors.white70,
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final shortestSide = constraints.biggest.shortestSide;
+                final avatarBoxSize = shortestSide.isFinite
+                    ? math.min(200.0, shortestSide)
+                    : 200.0;
+                return Column(
+                  children: [
+                    // ── Avatar + overlaid status chip ──
+                    SizedBox(
+                      height: avatarBoxSize,
+                      width: avatarBoxSize,
+                      child: Stack(
+                        alignment: Alignment.center,
+                        children: [
+                          // Draggable / tappable background area
+                          GestureDetector(
+                            onPanStart: (_) => windowManager.startDragging(),
+                            onTap: _toggleChat,
+                            onDoubleTap: widget.onOpenFullApp,
+                            behavior: HitTestBehavior.translucent,
+                            child: const SizedBox.expand(),
+                          ),
+                          // Focus + mic mute toggles (outside GestureDetector)
+                          Positioned(
+                            top: 4,
+                            right: 4,
+                            child: Material(
+                              color: Colors.transparent,
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  ValueListenableBuilder<bool>(
+                                    valueListenable: _focus.isFocused,
+                                    builder: (_, focused, __) => IconButton(
+                                      icon: Icon(
+                                        focused
+                                            ? Icons.center_focus_strong
+                                            : Icons.center_focus_weak,
+                                        size: 18,
+                                        color: focused
+                                            ? const Color(0xFF7E57C2)
+                                            : Colors.white70,
+                                      ),
+                                      onPressed: _toggleFocus,
+                                      tooltip: focused
+                                          ? 'Stop Focus Mode'
+                                          : 'Focus Mode',
+                                      padding: const EdgeInsets.all(4),
+                                      constraints: const BoxConstraints(
+                                          minWidth: 28, minHeight: 28),
+                                    ),
                                   ),
-                                  onPressed: _toggleFocus,
-                                  tooltip: focused
-                                      ? 'Stop Focus Mode'
-                                      : 'Focus Mode',
-                                  padding: const EdgeInsets.all(4),
-                                  constraints: const BoxConstraints(
-                                      minWidth: 28, minHeight: 28),
-                                ),
+                                  IconButton(
+                                    icon: Icon(
+                                      _userMuted
+                                          ? Icons.mic_off
+                                          : Icons.mic_none,
+                                      size: 18,
+                                      color: Colors.white70,
+                                    ),
+                                    onPressed: () {
+                                      setState(() {
+                                        _userMuted = !_userMuted;
+                                        widget.pauseWakeWord?.value =
+                                            _recording || _userMuted;
+                                      });
+                                    },
+                                    tooltip: _userMuted
+                                        ? 'Resume listening'
+                                        : 'Pause listening',
+                                    padding: const EdgeInsets.all(4),
+                                    constraints: const BoxConstraints(
+                                        minWidth: 28, minHeight: 28),
+                                  ),
+                                ],
                               ),
-                              IconButton(
-                                icon: Icon(
-                                  _userMuted ? Icons.mic_off : Icons.mic_none,
-                                  size: 18,
+                            ),
+                          ),
+                          // Avatar & drag indicator (non-interactive — pass through to drag handler)
+                          if (_isDraggingFile)
+                            IgnorePointer(
+                              child: Container(
+                                height: 160,
+                                width: 160,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: const Color(0xFF42A5F5)
+                                      .withValues(alpha: 0.4),
+                                  border: Border.all(
+                                    color: const Color(0xFF42A5F5),
+                                    width: 3,
+                                  ),
+                                ),
+                                child: const Icon(
+                                  Icons.file_present,
+                                  size: 48,
                                   color: Colors.white70,
                                 ),
-                                onPressed: () {
-                                  setState(() {
-                                    _userMuted = !_userMuted;
-                                    widget.pauseWakeWord?.value =
-                                        _recording || _userMuted;
-                                  });
-                                },
-                                tooltip: _userMuted
-                                    ? 'Resume listening'
-                                    : 'Pause listening',
-                                padding: const EdgeInsets.all(4),
-                                constraints: const BoxConstraints(
-                                    minWidth: 28, minHeight: 28),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                      // Avatar & drag indicator (non-interactive — pass through to drag handler)
-                      if (_isDraggingFile)
-                        IgnorePointer(
-                          child: Container(
-                            height: 160,
-                            width: 160,
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: const Color(0xFF42A5F5).withValues(alpha: 0.4),
-                              border: Border.all(
-                                color: const Color(0xFF42A5F5),
-                                width: 3,
                               ),
                             ),
-                            child: const Icon(
-                              Icons.file_present,
-                              size: 48,
-                              color: Colors.white70,
-                            ),
-                          ),
-                        ),
-                      if (!_isDraggingFile)
-                        Positioned(
-                          top: 0,
-                          child: IgnorePointer(
-                            child: AnimatedSwitcher(
-                              duration: const Duration(milliseconds: 220),
-                              switchInCurve: Curves.easeOut,
-                              switchOutCurve: Curves.easeIn,
-                              child: ChiliAvatar(
-                                key: ValueKey(_effectiveAvatarState(showListeningState).index),
-                                state: _effectiveAvatarState(showListeningState),
-                                reduceMotion: AppConfig.instance.reduceMotion,
-                              ),
-                            ),
-                          ),
-                        ),
-                      // Status chip + partial transcription (non-interactive)
-                      Positioned(
-                        bottom: 2,
-                        left: 6,
-                        right: 6,
-                        child: IgnorePointer(
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              if ((widget.wakeWordPartial?.value ?? '').isNotEmpty)
-                                Padding(
-                                  padding: const EdgeInsets.only(bottom: 2),
-                                  child: Text(
-                                    widget.wakeWordPartial!.value!,
-                                    textAlign: TextAlign.center,
-                                    style: TextStyle(
-                                      fontSize: 9,
-                                      color: Colors.white.withValues(alpha: 0.85),
-                                      fontStyle: FontStyle.italic,
-                                    ),
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis,
+                          if (!_isDraggingFile)
+                            Positioned(
+                              top: 0,
+                              child: IgnorePointer(
+                                child: AnimatedSwitcher(
+                                  duration: const Duration(milliseconds: 220),
+                                  switchInCurve: Curves.easeOut,
+                                  switchOutCurve: Curves.easeIn,
+                                  child: ChiliAvatar(
+                                    key: ValueKey(_effectiveAvatarState(
+                                            showListeningState)
+                                        .index),
+                                    state: _effectiveAvatarState(
+                                        showListeningState),
+                                    reduceMotion:
+                                        AppConfig.instance.reduceMotion,
                                   ),
                                 ),
-                              if (effectiveStatus != null && effectiveStatus.isNotEmpty)
-                                Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                                  decoration: BoxDecoration(
-                                    color: _statusColor(effectiveStatus).withValues(alpha: 0.85),
-                                    borderRadius: BorderRadius.circular(12),
-                                  ),
-                                  child: Text(
-                                    effectiveStatus,
-                                    textAlign: TextAlign.center,
-                                    style: const TextStyle(
-                                      fontSize: 10,
-                                      color: Colors.white,
-                                      fontWeight: FontWeight.w500,
-                                    ),
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                ),
-                              ValueListenableBuilder<bool>(
-                                valueListenable: _focus.isFocused,
-                                builder: (_, focused, __) {
-                                  if (!focused) return const SizedBox.shrink();
-                                  return Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                                    decoration: BoxDecoration(
-                                      color: const Color(0xFF7E57C2).withValues(alpha: 0.85),
-                                      borderRadius: BorderRadius.circular(12),
-                                    ),
-                                    child: Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        const Icon(Icons.center_focus_strong, size: 12, color: Colors.white),
-                                        const SizedBox(width: 4),
-                                        Text(
-                                          'Focus: ${_focus.target?.label ?? 'Screen'}',
-                                          style: const TextStyle(
-                                            fontSize: 10,
-                                            color: Colors.white,
-                                            fontWeight: FontWeight.w500,
-                                          ),
+                              ),
+                            ),
+                          // Status chip + partial transcription (non-interactive)
+                          Positioned(
+                            bottom: 2,
+                            left: 6,
+                            right: 6,
+                            child: IgnorePointer(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  if ((widget.wakeWordPartial?.value ?? '')
+                                      .isNotEmpty)
+                                    Padding(
+                                      padding: const EdgeInsets.only(bottom: 2),
+                                      child: Text(
+                                        widget.wakeWordPartial!.value!,
+                                        textAlign: TextAlign.center,
+                                        style: TextStyle(
+                                          fontSize: 9,
+                                          color: Colors.white
+                                              .withValues(alpha: 0.85),
+                                          fontStyle: FontStyle.italic,
                                         ),
-                                      ],
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
                                     ),
-                                  );
-                                },
+                                  if (effectiveStatus != null &&
+                                      effectiveStatus.isNotEmpty)
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 10, vertical: 4),
+                                      decoration: BoxDecoration(
+                                        color: _statusColor(effectiveStatus)
+                                            .withValues(alpha: 0.85),
+                                        borderRadius: BorderRadius.circular(12),
+                                      ),
+                                      child: Text(
+                                        effectiveStatus,
+                                        textAlign: TextAlign.center,
+                                        style: const TextStyle(
+                                          fontSize: 10,
+                                          color: Colors.white,
+                                          fontWeight: FontWeight.w500,
+                                        ),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                  ValueListenableBuilder<bool>(
+                                    valueListenable: _focus.isFocused,
+                                    builder: (_, focused, __) {
+                                      if (!focused) {
+                                        return const SizedBox.shrink();
+                                      }
+                                      return Container(
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 10, vertical: 4),
+                                        decoration: BoxDecoration(
+                                          color: const Color(0xFF7E57C2)
+                                              .withValues(alpha: 0.85),
+                                          borderRadius:
+                                              BorderRadius.circular(12),
+                                        ),
+                                        child: Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            const Icon(
+                                                Icons.center_focus_strong,
+                                                size: 12,
+                                                color: Colors.white),
+                                            const SizedBox(width: 4),
+                                            Text(
+                                              'Focus: ${_focus.target?.label ?? 'Screen'}',
+                                              style: const TextStyle(
+                                                fontSize: 10,
+                                                color: Colors.white,
+                                                fontWeight: FontWeight.w500,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                ],
                               ),
-                            ],
+                            ),
                           ),
-                        ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
-                  ),
 
-                // ── Focus status chip (below avatar, outside Stack) ──
-                if (_showChat) ...[
-                  const SizedBox(height: 6),
-                  Expanded(child: _buildChatBubble()),
-                  _buildResizeHandle(),
-                ],
-              ],
+                    // ── Focus status chip (below avatar, outside Stack) ──
+                    if (_showChat) ...[
+                      const SizedBox(height: 6),
+                      Expanded(child: _buildChatBubble()),
+                      _buildResizeHandle(),
+                    ],
+                  ],
+                );
+              },
             ),
           ),
           if (_showOnboarding) _buildOnboardingOverlay(),
@@ -836,7 +897,8 @@ class _AvatarViewState extends State<AvatarView> {
                               shape: BoxShape.circle,
                             ),
                             padding: const EdgeInsets.all(2),
-                            child: const Icon(Icons.close, size: 12, color: Colors.white),
+                            child: const Icon(Icons.close,
+                                size: 12, color: Colors.white),
                           ),
                         ),
                       ),
@@ -875,8 +937,9 @@ class _AvatarViewState extends State<AvatarView> {
                   onTranscribing: (transcribing) {
                     if (mounted) {
                       setState(() {
-                        _avatarState =
-                            transcribing ? AvatarState.thinking : AvatarState.idle;
+                        _avatarState = transcribing
+                            ? AvatarState.thinking
+                            : AvatarState.idle;
                       });
                     }
                   },
@@ -889,9 +952,13 @@ class _AvatarViewState extends State<AvatarView> {
                     padding: EdgeInsets.zero,
                     iconSize: 18,
                     icon: Icon(
-                      _pendingImages.isNotEmpty ? Icons.collections : Icons.attach_file,
+                      _pendingImages.isNotEmpty
+                          ? Icons.collections
+                          : Icons.attach_file,
                       size: 18,
-                      color: _pendingImages.isNotEmpty ? const Color(0xFFEF5350) : null,
+                      color: _pendingImages.isNotEmpty
+                          ? const Color(0xFFEF5350)
+                          : null,
                     ),
                     tooltip: 'Attach images',
                     onSelected: (value) async {
@@ -904,9 +971,12 @@ class _AvatarViewState extends State<AvatarView> {
                       }
                     },
                     itemBuilder: (_) => const [
-                      PopupMenuItem(value: 'pick', child: Text('Browse files…')),
-                      PopupMenuItem(value: 'paste', child: Text('Paste from clipboard')),
-                      PopupMenuItem(value: 'screenshot', child: Text('Paste screenshot')),
+                      PopupMenuItem(
+                          value: 'pick', child: Text('Browse files…')),
+                      PopupMenuItem(
+                          value: 'paste', child: Text('Paste from clipboard')),
+                      PopupMenuItem(
+                          value: 'screenshot', child: Text('Paste screenshot')),
                     ],
                   ),
                 ),
@@ -1025,12 +1095,14 @@ class _AvatarViewState extends State<AvatarView> {
             ],
 
             // Scrollable message history (includes streaming reply when present)
-            if (widget.sharedHistory.messages.isNotEmpty || _streamingReply.isNotEmpty) ...[
+            if (widget.sharedHistory.messages.isNotEmpty ||
+                _streamingReply.isNotEmpty) ...[
               const SizedBox(height: 8),
               Expanded(
                 child: ListView.builder(
                   controller: _scrollController,
-                  itemCount: widget.sharedHistory.messages.length + (_streamingReply.isNotEmpty ? 1 : 0),
+                  itemCount: widget.sharedHistory.messages.length +
+                      (_streamingReply.isNotEmpty ? 1 : 0),
                   padding: EdgeInsets.zero,
                   itemBuilder: (context, index) {
                     final history = widget.sharedHistory.messages;
@@ -1041,7 +1113,7 @@ class _AvatarViewState extends State<AvatarView> {
                           margin: const EdgeInsets.symmetric(vertical: 3),
                           padding: const EdgeInsets.symmetric(
                               horizontal: 10, vertical: 7),
-                        constraints: const BoxConstraints(maxWidth: 220),
+                          constraints: const BoxConstraints(maxWidth: 220),
                           decoration: BoxDecoration(
                             color: const Color(0xFFF5F5F5),
                             borderRadius: BorderRadius.circular(12),
@@ -1089,7 +1161,8 @@ class _AvatarViewState extends State<AvatarView> {
             if (_lastFailedMessage != null &&
                 widget.sharedHistory.messages.length >= 2 &&
                 widget.sharedHistory.messages.last.role == 'assistant' &&
-                widget.sharedHistory.messages.last.content == 'Could not reach CHILI. Is the server running?') ...[
+                widget.sharedHistory.messages.last.content ==
+                    'Could not reach CHILI. Is the server running?') ...[
               const SizedBox(height: 6),
               SizedBox(
                 height: 28,

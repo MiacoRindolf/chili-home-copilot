@@ -14,7 +14,8 @@ import 'network_error_message.dart' show userMessageForHttpStatus;
 
 /// Structured response from the chat endpoint.
 class ChatResponse {
-  ChatResponse({required this.reply, this.clientAction, this.wasCancelled = false});
+  ChatResponse(
+      {required this.reply, this.clientAction, this.wasCancelled = false});
 
   final String reply;
   final Map<String, dynamic>? clientAction;
@@ -145,7 +146,8 @@ class ChiliApiClient {
       final err = decoded?['error'] ?? decoded?['detail'] ?? response.body;
       throw Exception(err is String ? err : 'HTTP ${response.statusCode}');
     }
-    final reply = (decoded?['reply'] as String?) ?? 'CHILI did not send a reply.';
+    final reply =
+        (decoded?['reply'] as String?) ?? 'CHILI did not send a reply.';
     final clientAction = decoded?['client_action'] as Map<String, dynamic>?;
     return ChatResponse(reply: reply, clientAction: clientAction);
   }
@@ -171,10 +173,12 @@ class ChiliApiClient {
         decoded = jsonDecode(body) as Map<String, dynamic>?;
       } catch (_) {}
       final err = decoded?['error'] ?? decoded?['detail'] ?? body;
-      throw Exception(err is String ? err : 'HTTP ${streamedResponse.statusCode}');
+      throw Exception(
+          err is String ? err : 'HTTP ${streamedResponse.statusCode}');
     }
 
-    return _consumeSseStream(streamedResponse, onToken: onToken, cancelToken: cancelToken);
+    return _consumeSseStream(streamedResponse,
+        onToken: onToken, cancelToken: cancelToken);
   }
 
   /// Stream chat with image attachments via multipart form data.
@@ -189,7 +193,8 @@ class ChiliApiClient {
     CancelToken? cancelToken,
   }) async {
     if (imagePaths.isEmpty) {
-      return sendMessageStream(message, onToken: onToken, cancelToken: cancelToken);
+      return sendMessageStream(message,
+          onToken: onToken, cancelToken: cancelToken);
     }
 
     final uri = Uri.parse('$baseUrl/api/chat/stream');
@@ -225,10 +230,12 @@ class ChiliApiClient {
         decoded = jsonDecode(body) as Map<String, dynamic>?;
       } catch (_) {}
       final err = decoded?['error'] ?? decoded?['detail'] ?? body;
-      throw Exception(err is String ? err : 'HTTP ${streamedResponse.statusCode}');
+      throw Exception(
+          err is String ? err : 'HTTP ${streamedResponse.statusCode}');
     }
 
-    return _consumeSseStream(streamedResponse, onToken: onToken, cancelToken: cancelToken);
+    return _consumeSseStream(streamedResponse,
+        onToken: onToken, cancelToken: cancelToken);
   }
 
   /// Shared SSE consumer used by both text and image streaming methods.
@@ -437,7 +444,8 @@ class ChiliApiClient {
     if (_token != null && _token!.isNotEmpty) {
       request.headers['Authorization'] = 'Bearer $_token';
     }
-    request.files.add(await http.MultipartFile.fromPath('audio', audioFile.path));
+    request.files
+        .add(await http.MultipartFile.fromPath('audio', audioFile.path));
     request.fields['mime_type'] = 'audio/wav';
 
     final streamedResponse = await _client.send(request);
@@ -507,7 +515,8 @@ class ChiliApiClient {
     return decoded ?? {};
   }
 
-  Future<List<Map<String, dynamic>>> getContextBrainAssemblies({int limit = 50}) async {
+  Future<List<Map<String, dynamic>>> getContextBrainAssemblies(
+      {int limit = 50}) async {
     final res = await _client.get(
       Uri.parse('$baseUrl/api/brain/context/assemblies?limit=$limit'),
       headers: _headers(json: false),
@@ -543,8 +552,8 @@ class ChiliApiClient {
     if (taskId != null) {
       q['task_id'] = '$taskId';
     }
-    final uri =
-        Uri.parse('$baseUrl/api/brain/dispatch/runs').replace(queryParameters: q);
+    final uri = Uri.parse('$baseUrl/api/brain/dispatch/runs')
+        .replace(queryParameters: q);
     final res = await _client.get(uri, headers: _headers(json: false));
     Map<String, dynamic>? decoded;
     try {
@@ -589,6 +598,131 @@ class ChiliApiClient {
       throw Exception(err is String ? err : 'HTTP ${res.statusCode}');
     }
     return decoded ?? {};
+  }
+
+  Future<List<Map<String, dynamic>>> getProjectAutonomyRuns({
+    int limit = 20,
+  }) async {
+    final uri = Uri.parse('$baseUrl/api/brain/project/autonomy/runs')
+        .replace(queryParameters: {'limit': '$limit'});
+    final res = await _client.get(uri, headers: _headers(json: false));
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>?;
+    } catch (_) {}
+    if (res.statusCode != 200) {
+      final err = decoded?['error'] ??
+          decoded?['message'] ??
+          decoded?['detail'] ??
+          res.body;
+      throw Exception(err is String ? err : 'HTTP ${res.statusCode}');
+    }
+    final raw = (decoded?['runs'] ?? []) as List<dynamic>;
+    return raw.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+  }
+
+  Future<Map<String, dynamic>> getProjectAutonomyRun(String runId) async {
+    final res = await _client.get(
+      Uri.parse('$baseUrl/api/brain/project/autonomy/runs/$runId'),
+      headers: _headers(json: false),
+    );
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>?;
+    } catch (_) {}
+    if (res.statusCode != 200) {
+      final err = decoded?['error'] ??
+          decoded?['message'] ??
+          decoded?['detail'] ??
+          res.body;
+      throw Exception(err is String ? err : 'HTTP ${res.statusCode}');
+    }
+    return Map<String, dynamic>.from((decoded?['run'] ?? {}) as Map);
+  }
+
+  Future<Map<String, dynamic>> createProjectAutonomyRun({
+    required String prompt,
+    int? repoId,
+  }) async {
+    final body = <String, dynamic>{
+      'prompt': prompt.trim(),
+      if (repoId != null) 'repo_id': repoId,
+    };
+    final res = await _client.post(
+      Uri.parse('$baseUrl/api/brain/project/autonomy/runs'),
+      headers: _headers(),
+      body: jsonEncode(body),
+    );
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>?;
+    } catch (_) {}
+    if (res.statusCode != 200) {
+      final err = decoded?['error'] ??
+          decoded?['message'] ??
+          decoded?['detail'] ??
+          res.body;
+      throw Exception(err is String ? err : 'HTTP ${res.statusCode}');
+    }
+    return Map<String, dynamic>.from((decoded?['run'] ?? {}) as Map);
+  }
+
+  Future<List<Map<String, dynamic>>> getCodeBrainRepos() async {
+    final res = await _client.get(
+      Uri.parse('$baseUrl/api/brain/code/repos'),
+      headers: _headers(json: false),
+    );
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>?;
+    } catch (_) {}
+    if (res.statusCode != 200) {
+      final err = decoded?['error'] ??
+          decoded?['message'] ??
+          decoded?['detail'] ??
+          res.body;
+      throw Exception(err is String ? err : 'HTTP ${res.statusCode}');
+    }
+    final raw = (decoded?['repos'] ?? []) as List<dynamic>;
+    return raw.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+  }
+
+  Future<Map<String, dynamic>> cancelProjectAutonomyRun(String runId) async {
+    final res = await _client.post(
+      Uri.parse('$baseUrl/api/brain/project/autonomy/runs/$runId/cancel'),
+      headers: _headers(),
+    );
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>?;
+    } catch (_) {}
+    if (res.statusCode != 200) {
+      final err = decoded?['error'] ??
+          decoded?['message'] ??
+          decoded?['detail'] ??
+          res.body;
+      throw Exception(err is String ? err : 'HTTP ${res.statusCode}');
+    }
+    return Map<String, dynamic>.from((decoded?['run'] ?? {}) as Map);
+  }
+
+  Future<Map<String, dynamic>> mergeProjectAutonomyRun(String runId) async {
+    final res = await _client.post(
+      Uri.parse('$baseUrl/api/brain/project/autonomy/runs/$runId/merge'),
+      headers: _headers(),
+    );
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>?;
+    } catch (_) {}
+    if (res.statusCode != 200) {
+      final err = decoded?['error'] ??
+          decoded?['message'] ??
+          decoded?['detail'] ??
+          res.body;
+      throw Exception(err is String ? err : 'HTTP ${res.statusCode}');
+    }
+    return Map<String, dynamic>.from((decoded?['run'] ?? {}) as Map);
   }
 
   Future<Map<String, dynamic>> toggleKillSwitch({

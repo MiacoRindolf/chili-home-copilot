@@ -1,10 +1,10 @@
-"""Durable project-domain runs and analysis snapshots."""
+"""Durable project-domain runs, analysis snapshots, and autonomous runs."""
 from __future__ import annotations
 
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
 
 from ..db import Base
 
@@ -43,4 +43,111 @@ class ProjectAnalysisSnapshot(Base):
     summary_json = Column(Text, nullable=False, default="{}")
     perspectives_json = Column(Text, nullable=False, default="{}")
     timeline_json = Column(Text, nullable=False, default="[]")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class ProjectAutonomyRun(Base):
+    """A durable Project Brain Local Autopilot run."""
+
+    __tablename__ = "project_autonomy_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_id = Column(String(64), nullable=False, unique=True, index=True)
+    project_run_id = Column(
+        Integer,
+        ForeignKey("project_domain_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    repo_id = Column(Integer, ForeignKey("code_repos.id", ondelete="SET NULL"), nullable=True, index=True)
+    prompt = Column(Text, nullable=False)
+    status = Column(String(24), nullable=False, default="queued", index=True)
+    current_stage = Column(String(40), nullable=False, default="queued", index=True)
+    autonomy_level = Column(String(40), nullable=False, default="full_local")
+    model_policy = Column(String(40), nullable=False, default="local_first")
+    target_branch = Column(String(200), nullable=True)
+    base_branch = Column(String(200), nullable=True)
+    base_sha = Column(String(64), nullable=True)
+    integration_branch = Column(String(200), nullable=True)
+    worktree_path = Column(Text, nullable=True)
+    merge_status = Column(String(40), nullable=False, default="pending")
+    merge_message = Column(Text, nullable=True)
+    plan_json = Column(Text, nullable=False, default="{}")
+    agents_json = Column(Text, nullable=False, default="[]")
+    files_json = Column(Text, nullable=False, default="[]")
+    commands_json = Column(Text, nullable=False, default="[]")
+    validation_json = Column(Text, nullable=False, default="[]")
+    learning_json = Column(Text, nullable=False, default="{}")
+    error_message = Column(Text, nullable=True)
+    cancel_requested = Column(Boolean, nullable=False, default=False)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class ProjectAutonomyStep(Base):
+    """One visible stage or agent lane update for an autonomous run."""
+
+    __tablename__ = "project_autonomy_steps"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_id = Column(String(64), nullable=False, index=True)
+    step_index = Column(Integer, nullable=False, default=0)
+    stage = Column(String(40), nullable=False, index=True)
+    agent_name = Column(String(80), nullable=False, default="architect")
+    status = Column(String(24), nullable=False, default="running")
+    title = Column(String(240), nullable=False)
+    detail_json = Column(Text, nullable=False, default="{}")
+    started_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    finished_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class ProjectAutonomyArtifact(Base):
+    """Payloads produced by autonomy runs: plans, diffs, commands, validation, learning."""
+
+    __tablename__ = "project_autonomy_artifacts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_id = Column(String(64), nullable=False, index=True)
+    artifact_type = Column(String(40), nullable=False, index=True)
+    name = Column(String(200), nullable=False)
+    content = Column(Text, nullable=True)
+    content_json = Column(Text, nullable=True)
+    byte_length = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class ProjectAutonomyLease(Base):
+    """Repo/file/merge leases that keep concurrent autonomous runs from colliding."""
+
+    __tablename__ = "project_autonomy_leases"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_id = Column(String(64), nullable=False, index=True)
+    repo_id = Column(Integer, ForeignKey("code_repos.id", ondelete="CASCADE"), nullable=False, index=True)
+    lease_key = Column(String(700), nullable=False, index=True)
+    file_path = Column(Text, nullable=True)
+    holder = Column(String(80), nullable=False, default="architect")
+    status = Column(String(24), nullable=False, default="active", index=True)
+    acquired_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    released_at = Column(DateTime, nullable=True)
+    expires_at = Column(DateTime, nullable=True)
+
+
+class ProjectAutonomyLearningSample(Base):
+    """Evidence-gated learning data from autonomous coding trajectories."""
+
+    __tablename__ = "project_autonomy_learning_samples"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_id = Column(String(64), nullable=False, index=True)
+    repo_id = Column(Integer, ForeignKey("code_repos.id", ondelete="SET NULL"), nullable=True, index=True)
+    sample_type = Column(String(40), nullable=False, index=True)
+    prompt = Column(Text, nullable=True)
+    outcome = Column(String(40), nullable=False, default="observed", index=True)
+    payload_json = Column(Text, nullable=False, default="{}")
+    promoted = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

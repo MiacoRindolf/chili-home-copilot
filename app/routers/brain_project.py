@@ -5,10 +5,12 @@ project/code workspace APIs behind a dedicated router.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -30,9 +32,11 @@ from ..services.code_brain import trends as cb_trends
 from ..services import project_analysis
 from ..services.project_domain_feed import list_operator_feed
 from ..services.project_domain_runs import record_completed_run, status_payload
+from ..services.project_autonomy import orchestrator as project_autonomy
 from ..services.project_brain import learning as pb_learning
 from ..services.project_brain import registry as pb_registry
 from ..services.coding_task.workspaces import select_runtime_workspace_repo_for_task
+from .chat_streaming import sse_done, sse_error, sse_event
 
 router = APIRouter(
     tags=["brain"],
@@ -79,6 +83,35 @@ def _resolve_visible_repo_id(db: Session, user_id: int | None, repo_id: int | No
 
 def _timeline_messages(db: Session, user_id: int | None) -> list[dict]:
     return list_operator_feed(db, user_id=user_id, limit=30)
+
+
+def _autonomy_requires_paired(ctx: dict) -> JSONResponse | None:
+    if ctx.get("is_guest") or ctx.get("user_id") is None:
+        return JSONResponse(
+            {"ok": False, "message": "Pair this device to use Project Autopilot."},
+            status_code=403,
+        )
+    return None
+
+
+def _run_autonomy_worker(run_id: str) -> None:
+    from ..db import SessionLocal
+
+    sdb = SessionLocal()
+    try:
+        project_autonomy.run_autonomy_sync(sdb, run_id)
+    finally:
+        sdb.close()
+
+
+def _start_autonomy_thread(run_id: str) -> None:
+    thread = threading.Thread(
+        target=_run_autonomy_worker,
+        args=(run_id,),
+        name=f"project-autopilot-{run_id}",
+        daemon=True,
+    )
+    thread.start()
 
 
 # Code Brain domain
@@ -596,6 +629,12 @@ class _ProjectAnalysisRunBody(BaseModel):
     planner_task_id: int | None = None
 
 
+class _ProjectAutonomyRunBody(BaseModel):
+    prompt: str
+    repo_id: int | None = None
+    autonomy_level: str | None = "full_local"
+
+
 # Product owner endpoints
 
 
@@ -843,6 +882,161 @@ def api_brain_project_status(request: Request, db: Session = Depends(get_db)):
     """Durable project-domain status backed by persisted run records."""
     ctx = get_identity_ctx(request, db)
     return JSONResponse({"ok": True, **status_payload(db, user_id=ctx["user_id"])})
+
+
+@router.post("/api/brain/project/autonomy/runs")
+def api_brain_project_autonomy_create(
+    body: _ProjectAutonomyRunBody,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Start a durable architect-led Project Autopilot run."""
+    ctx = get_identity_ctx(request, db)
+    blocked = _autonomy_requires_paired(ctx)
+    if blocked is not None:
+        return blocked
+    try:
+        run = project_autonomy.create_run(
+            db,
+            prompt=body.prompt,
+            repo_id=body.repo_id,
+            user_id=ctx["user_id"],
+            autonomy_level=body.autonomy_level or "full_local",
+        )
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=409)
+    _start_autonomy_thread(run.run_id)
+    return JSONResponse({"ok": True, "run": project_autonomy.run_payload(db, run, include_events=True)})
+
+
+@router.get("/api/brain/project/autonomy/runs")
+def api_brain_project_autonomy_list(
+    request: Request,
+    db: Session = Depends(get_db),
+    repo_id: int | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+):
+    """List recent Project Autopilot runs for the current operator."""
+    ctx = get_identity_ctx(request, db)
+    blocked = _autonomy_requires_paired(ctx)
+    if blocked is not None:
+        return blocked
+    resolved_repo_id = _resolve_visible_repo_id(db, ctx["user_id"], repo_id)
+    if repo_id is not None and resolved_repo_id is None:
+        return _not_found("Repo not found")
+    return JSONResponse(
+        {
+            "ok": True,
+            "runs": project_autonomy.list_runs(
+                db,
+                user_id=ctx["user_id"],
+                repo_id=resolved_repo_id,
+                limit=limit,
+            ),
+        }
+    )
+
+
+@router.get("/api/brain/project/autonomy/runs/{run_id}")
+def api_brain_project_autonomy_detail(
+    run_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Return full persisted state for one Project Autopilot run."""
+    ctx = get_identity_ctx(request, db)
+    blocked = _autonomy_requires_paired(ctx)
+    if blocked is not None:
+        return blocked
+    run = project_autonomy.get_run(db, run_id, user_id=ctx["user_id"], include_events=True)
+    if run is None:
+        return _not_found("Autopilot run not found")
+    return JSONResponse({"ok": True, "run": run})
+
+
+@router.get("/api/brain/project/autonomy/runs/{run_id}/events")
+async def api_brain_project_autonomy_events(run_id: str, request: Request):
+    """SSE stream of Project Autopilot run steps and artifacts."""
+    from ..db import SessionLocal
+
+    async def _gen():
+        sdb = SessionLocal()
+        after_step_id = 0
+        after_artifact_id = 0
+        try:
+            ctx = get_identity_ctx(request, sdb)
+            if ctx.get("is_guest") or ctx.get("user_id") is None:
+                yield sse_error("Pair this device to use Project Autopilot.")
+                return
+            run = project_autonomy.get_run(sdb, run_id, user_id=ctx["user_id"], include_events=True)
+            if run is None:
+                yield sse_error("Autopilot run not found")
+                return
+            yield sse_event({"type": "snapshot", "run": run})
+            after_step_id = max([int(step["id"]) for step in run.get("steps", [])], default=0)
+            after_artifact_id = max([int(artifact["id"]) for artifact in run.get("artifacts", [])], default=0)
+            if run.get("status") in project_autonomy.TERMINAL_STATUSES:
+                yield sse_done()
+                return
+            while True:
+                if await request.is_disconnected():
+                    return
+                events = project_autonomy.events_after(
+                    sdb,
+                    run_id,
+                    after_step_id=after_step_id,
+                    after_artifact_id=after_artifact_id,
+                )
+                after_step_id = int(events.get("after_step_id") or after_step_id)
+                after_artifact_id = int(events.get("after_artifact_id") or after_artifact_id)
+                if events["steps"] or events["artifacts"]:
+                    yield sse_event({"type": "events", **events})
+                latest = project_autonomy.get_run(sdb, run_id, user_id=ctx["user_id"], include_events=False)
+                if latest and latest.get("status") in project_autonomy.TERMINAL_STATUSES:
+                    yield sse_event({"type": "complete", "run": latest})
+                    yield sse_done()
+                    return
+                await asyncio.sleep(1.0)
+        except Exception as exc:
+            yield sse_error(str(exc))
+        finally:
+            sdb.close()
+
+    return StreamingResponse(_gen(), media_type="text/event-stream")
+
+
+@router.post("/api/brain/project/autonomy/runs/{run_id}/cancel")
+def api_brain_project_autonomy_cancel(
+    run_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Request cancellation for an active Project Autopilot run."""
+    ctx = get_identity_ctx(request, db)
+    blocked = _autonomy_requires_paired(ctx)
+    if blocked is not None:
+        return blocked
+    run = project_autonomy.request_cancel(db, run_id, user_id=ctx["user_id"])
+    if run is None:
+        return _not_found("Autopilot run not found")
+    return JSONResponse({"ok": True, "run": run})
+
+
+@router.post("/api/brain/project/autonomy/runs/{run_id}/merge")
+def api_brain_project_autonomy_merge(
+    run_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Retry safe merge gates for a completed Project Autopilot branch."""
+    ctx = get_identity_ctx(request, db)
+    blocked = _autonomy_requires_paired(ctx)
+    if blocked is not None:
+        return blocked
+    run = project_autonomy.merge_run(db, run_id, user_id=ctx["user_id"])
+    if run is None:
+        return _not_found("Autopilot run not found")
+    return JSONResponse({"ok": True, "run": run})
 
 
 @router.post("/api/brain/project/analysis/run")

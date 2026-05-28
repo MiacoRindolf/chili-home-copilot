@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from ..models import ProjectDomainRun
 
-RUN_KINDS = frozenset({"index", "analysis", "suggest", "dry_run", "apply", "validate"})
+RUN_KINDS = frozenset({"index", "analysis", "suggest", "dry_run", "apply", "validate", "autonomous"})
 
 
 def _json_text(payload: dict[str, Any] | None) -> str | None:

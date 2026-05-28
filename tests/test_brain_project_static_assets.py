@@ -26,6 +26,8 @@ def test_project_javascript_assets_export_expected_hooks() -> None:
             "window.brainProjectDomainInit = init;",
             "window.triggerCodeLearn = triggerCodeLearn;",
             "window.runCodeAgent = runCodeAgent;",
+            "window.startProjectAutopilot = startProjectAutopilot;",
+            "window.loadAutonomyRuns = loadAutonomyRuns;",
         ),
         "brain-project-agents.js": (
             "window.initProjectAgentBar = initProjectAgentBar;",
@@ -50,3 +52,4 @@ def test_project_stylesheet_contains_project_shell_utilities() -> None:
     assert ".project-pane-tab" in source
     assert ".project-summary-grid" in source
     assert ".project-inline-actions" in source
+    assert ".project-autopilot-shell" in source

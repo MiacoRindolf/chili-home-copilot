@@ -2,6 +2,9 @@
   var _projectBootstrap = null;
   var _selectedCodeRepoId = null;
   var _codePollTimer = null;
+  var _autonomyEventSource = null;
+  var _activeAutonomyRunId = null;
+  var _autonomyRefreshTimer = null;
 
   function el(id) {
     return document.getElementById(id);
@@ -1280,6 +1283,356 @@
       });
   }
 
+  function _autonomyStatusLabel(run) {
+    if (!run) return "Idle";
+    var bits = [];
+    if (run.status) bits.push(run.status);
+    if (run.current_stage) bits.push(run.current_stage);
+    if (run.merge_status && run.merge_status !== "pending") bits.push("merge " + run.merge_status);
+    return bits.join(" / ") || "Idle";
+  }
+
+  function _autonomyIsTerminal(run) {
+    var status = run && run.status ? String(run.status) : "";
+    return ["merged", "completed", "blocked", "failed", "cancelled"].indexOf(status) >= 0;
+  }
+
+  function _setAutopilotStatus(text) {
+    var node = el("project-autopilot-status");
+    if (node) node.textContent = text || "Idle";
+  }
+
+  function _renderAutonomyList(runs) {
+    var summary = el("project-autopilot-run-summary");
+    if (!summary) return;
+    if (!runs || !runs.length) {
+      summary.innerHTML = '<div class="project-inline-muted">No autonomous runs yet.</div>';
+      return;
+    }
+    if (!_activeAutonomyRunId) _activeAutonomyRunId = runs[0].run_id;
+    summary.innerHTML = runs
+      .slice(0, 5)
+      .map(function (run) {
+        var active = run.run_id === _activeAutonomyRunId ? " active" : "";
+        var ts = run.created_at ? window.timeSince(new Date(run.created_at)) + " ago" : "";
+        return (
+          '<button class="project-autopilot-run' +
+          active +
+          '" data-autonomy-run-id="' +
+          escHtml(run.run_id) +
+          '">' +
+          '<span class="project-autopilot-run-main">' +
+          escHtml((run.prompt || "").slice(0, 90) || run.run_id) +
+          "</span>" +
+          '<span class="project-autopilot-run-meta">' +
+          escHtml(_autonomyStatusLabel(run)) +
+          (ts ? " - " + escHtml(ts) : "") +
+          "</span>" +
+          "</button>"
+        );
+      })
+      .join("");
+    Array.prototype.forEach.call(summary.querySelectorAll("[data-autonomy-run-id]"), function (button) {
+      button.addEventListener("click", function () {
+        _activeAutonomyRunId = button.getAttribute("data-autonomy-run-id");
+        loadAutonomyRunDetail(_activeAutonomyRunId, true);
+      });
+    });
+  }
+
+  function _renderAutonomyPlan(run) {
+    var node = el("project-autopilot-plan");
+    if (!node) return;
+    var plan = (run && run.plan) || {};
+    var files = run && run.files ? run.files : [];
+    if (!plan.analysis && !files.length) {
+      node.innerHTML = '<div class="project-inline-muted">Plan will appear after repository scan.</div>';
+      return;
+    }
+    var fileHtml = files.length
+      ? '<div class="project-autopilot-chip-row">' +
+        files
+          .map(function (file) {
+            return '<span class="project-autopilot-chip">' + escHtml(file) + "</span>";
+          })
+          .join("") +
+        "</div>"
+      : "";
+    node.innerHTML =
+      '<div class="project-autopilot-copy">' +
+      escHtml(plan.analysis || plan.notes || "Plan is being assembled.") +
+      "</div>" +
+      fileHtml;
+  }
+
+  function _renderAutonomyLanes(run) {
+    var node = el("project-autopilot-lanes");
+    if (!node) return;
+    var agents = (run && run.agents) || [];
+    if (!agents.length) {
+      node.innerHTML = '<div class="project-inline-muted">Agent lanes will appear after planning.</div>';
+      return;
+    }
+    node.innerHTML = agents
+      .map(function (agent) {
+        var files = agent.files || [];
+        return (
+          '<div class="project-autopilot-lane">' +
+          '<div><strong>' +
+          escHtml(agent.name || agent.role || "agent") +
+          "</strong> <span>" +
+          escHtml(agent.status || "") +
+          "</span></div>" +
+          '<div class="project-autopilot-chip-row">' +
+          files
+            .slice(0, 8)
+            .map(function (file) {
+              return '<span class="project-autopilot-chip">' + escHtml(file) + "</span>";
+            })
+            .join("") +
+          "</div>" +
+          "</div>"
+        );
+      })
+      .join("");
+  }
+
+  function _renderAutonomyValidation(run) {
+    var node = el("project-autopilot-validation");
+    if (!node) return;
+    var validation = (run && run.validation) || [];
+    if (!validation.length) {
+      node.innerHTML = '<div class="project-inline-muted">Validation commands have not run yet.</div>';
+      return;
+    }
+    node.innerHTML = validation
+      .map(function (item) {
+        var passed = parseInt(item.exit_code || 0, 10) === 0;
+        return (
+          '<div class="project-autopilot-command-row ' +
+          (passed ? "passed" : "failed") +
+          '">' +
+          '<span>' +
+          escHtml(item.step_key || "command") +
+          "</span>" +
+          '<span>' +
+          (item.skipped ? "skipped" : passed ? "passed" : "failed") +
+          "</span>" +
+          "</div>"
+        );
+      })
+      .join("");
+  }
+
+  function _renderAutonomySteps(run) {
+    var node = el("project-autopilot-steps");
+    if (!node) return;
+    var steps = (run && run.steps) || [];
+    if (!steps.length) {
+      node.innerHTML = '<div class="project-inline-muted">No live steps yet.</div>';
+      return;
+    }
+    node.innerHTML = steps
+      .slice(-14)
+      .map(function (step) {
+        return (
+          '<div class="project-autopilot-step">' +
+          '<span class="project-autopilot-dot ' +
+          escHtml(step.status || "running") +
+          '"></span>' +
+          '<div><strong>' +
+          escHtml(step.title || step.stage || "step") +
+          "</strong><br><span>" +
+          escHtml((step.agent_name || "architect") + " - " + (step.stage || "")) +
+          "</span></div>" +
+          "</div>"
+        );
+      })
+      .join("");
+  }
+
+  function _renderAutonomyRun(run) {
+    if (!run) return;
+    _activeAutonomyRunId = run.run_id || _activeAutonomyRunId;
+    _setAutopilotStatus(_autonomyStatusLabel(run));
+    _renderAutonomyPlan(run);
+    _renderAutonomyLanes(run);
+    _renderAutonomyValidation(run);
+    _renderAutonomySteps(run);
+    if (run.merge_message) {
+      _setAutopilotStatus(_autonomyStatusLabel(run) + " - " + run.merge_message);
+    }
+  }
+
+  function loadAutonomyRunDetail(runId, connect) {
+    if (!runId) return Promise.resolve(null);
+    return fetch("/api/brain/project/autonomy/runs/" + encodeURIComponent(runId), { credentials: "same-origin" })
+      .then(function (response) {
+        return response.json();
+      })
+      .then(function (data) {
+        if (!data || !data.ok || !data.run) {
+          throw new Error((data && (data.message || data.error)) || "Autopilot run unavailable");
+        }
+        _renderAutonomyRun(data.run);
+        if (connect && !_autonomyIsTerminal(data.run)) {
+          connectAutonomyEvents(runId);
+        }
+        return data.run;
+      })
+      .catch(function (error) {
+        _setAutopilotStatus(error.message || "Autopilot run unavailable");
+        return null;
+      });
+  }
+
+  function loadAutonomyRuns() {
+    return fetch("/api/brain/project/autonomy/runs?limit=10", { credentials: "same-origin" })
+      .then(function (response) {
+        return response.json();
+      })
+      .then(function (data) {
+        if (!data || !data.ok) {
+          throw new Error((data && (data.message || data.error)) || "Could not load Autopilot runs");
+        }
+        _renderAutonomyList(data.runs || []);
+        if (data.runs && data.runs.length) {
+          return loadAutonomyRunDetail(_activeAutonomyRunId || data.runs[0].run_id, true);
+        }
+        return null;
+      })
+      .catch(function (error) {
+        _setAutopilotStatus(error.message || "Could not load Autopilot runs");
+        return null;
+      });
+  }
+
+  function connectAutonomyEvents(runId) {
+    if (!runId || typeof EventSource === "undefined") return;
+    if (_autonomyEventSource) {
+      _autonomyEventSource.close();
+      _autonomyEventSource = null;
+    }
+    _autonomyEventSource = new EventSource(
+      "/api/brain/project/autonomy/runs/" + encodeURIComponent(runId) + "/events"
+    );
+    _autonomyEventSource.onmessage = function (event) {
+      var data = null;
+      try {
+        data = JSON.parse(event.data || "{}");
+      } catch (err) {
+        return;
+      }
+      if (data.error) {
+        _setAutopilotStatus(data.error);
+        _autonomyEventSource.close();
+        _autonomyEventSource = null;
+        return;
+      }
+      if (data.type === "snapshot" && data.run) {
+        _renderAutonomyRun(data.run);
+      } else if (data.type === "events") {
+        if (_autonomyRefreshTimer) window.clearTimeout(_autonomyRefreshTimer);
+        _autonomyRefreshTimer = window.setTimeout(function () {
+          loadAutonomyRunDetail(runId, false);
+        }, 150);
+      } else if (data.type === "complete" && data.run) {
+        _renderAutonomyRun(data.run);
+        loadAutonomyRuns();
+        loadAgentMessageFeed();
+        refreshBootstrap();
+      }
+      if (data.done && _autonomyEventSource) {
+        _autonomyEventSource.close();
+        _autonomyEventSource = null;
+      }
+    };
+    _autonomyEventSource.onerror = function () {
+      if (_autonomyEventSource) {
+        _autonomyEventSource.close();
+        _autonomyEventSource = null;
+      }
+    };
+  }
+
+  function startProjectAutopilot() {
+    var input = el("project-autopilot-prompt");
+    var button = el("project-autopilot-run-btn");
+    var prompt = input ? input.value.trim() : "";
+    if (!prompt) {
+      _setAutopilotStatus("Enter a prompt first.");
+      return;
+    }
+    if (button) button.disabled = true;
+    _setAutopilotStatus("Starting Autopilot...");
+    fetch("/api/brain/project/autonomy/runs", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: prompt, repo_id: _currentCodeRepoId() }),
+    })
+      .then(function (response) {
+        return response.json().then(function (data) {
+          return { ok: response.ok, data: data };
+        });
+      })
+      .then(function (result) {
+        if (button) button.disabled = false;
+        if (!result.ok || !result.data || !result.data.ok) {
+          throw new Error((result.data && (result.data.message || result.data.error)) || "Autopilot could not start");
+        }
+        if (input) input.value = "";
+        _activeAutonomyRunId = result.data.run.run_id;
+        _renderAutonomyRun(result.data.run);
+        loadAutonomyRuns();
+        connectAutonomyEvents(_activeAutonomyRunId);
+      })
+      .catch(function (error) {
+        if (button) button.disabled = false;
+        _setAutopilotStatus(error.message || "Autopilot could not start");
+      });
+  }
+
+  function cancelProjectAutopilot(runId) {
+    var target = runId || _activeAutonomyRunId;
+    if (!target) return;
+    fetch("/api/brain/project/autonomy/runs/" + encodeURIComponent(target) + "/cancel", {
+      method: "POST",
+      credentials: "same-origin",
+    })
+      .then(function (response) {
+        return response.json();
+      })
+      .then(function (data) {
+        if (data && data.ok && data.run) {
+          _renderAutonomyRun(data.run);
+        }
+      })
+      .catch(function () {});
+  }
+
+  function mergeProjectAutopilot(runId) {
+    var target = runId || _activeAutonomyRunId;
+    if (!target) return;
+    _setAutopilotStatus("Checking merge gates...");
+    fetch("/api/brain/project/autonomy/runs/" + encodeURIComponent(target) + "/merge", {
+      method: "POST",
+      credentials: "same-origin",
+    })
+      .then(function (response) {
+        return response.json();
+      })
+      .then(function (data) {
+        if (data && data.ok && data.run) {
+          _renderAutonomyRun(data.run);
+          loadAutonomyRuns();
+        }
+      })
+      .catch(function (error) {
+        _setAutopilotStatus(error.message || "Merge retry failed");
+      });
+  }
+
   function bindNav() {
     var buttons = document.querySelectorAll("[data-project-pane-target]");
     buttons.forEach(function (button) {
@@ -1306,6 +1659,7 @@
     bindSearchInput();
     setPane("workspace");
     refreshBootstrap();
+    loadAutonomyRuns();
   }
 
   window.brainProjectDomainInit = init;
@@ -1330,6 +1684,12 @@
   window.pollCodeLearningStatus = pollCodeLearningStatus;
   window.codeAgentOpen = codeAgentOpen;
   window.runCodeAgent = runCodeAgent;
+  window.loadAutonomyRuns = loadAutonomyRuns;
+  window.loadAutonomyRunDetail = loadAutonomyRunDetail;
+  window.connectAutonomyEvents = connectAutonomyEvents;
+  window.startProjectAutopilot = startProjectAutopilot;
+  window.cancelProjectAutopilot = cancelProjectAutopilot;
+  window.mergeProjectAutopilot = mergeProjectAutopilot;
 
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", init, { once: true });
