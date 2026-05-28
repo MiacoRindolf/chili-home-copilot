@@ -278,17 +278,6 @@ def extract_trade_plan_mechanical(
                 "level": val if isinstance(val, (int, float)) else None,
             })
 
-    # Severity order: critical < warning < info
-    _sev_rank = {"critical": 0, "warning": 1, "info": 2}
-
-    def _inv_key(x: dict) -> tuple:
-        return (_sev_rank.get(x.get("severity"), 1), x.get("indicator", ""))
-
-    invalidations.sort(key=_inv_key)
-
-    cap_inv = 8 if complex_pattern else 5
-    invalidations = invalidations[:cap_inv]
-
     # Compute early warning + optional Fib-style cushion (long bias; still useful as distance)
     early_warning = None
     if stop_loss and entry_price:
@@ -299,6 +288,23 @@ def extract_trade_plan_mechanical(
             early_warning = round(max(fib_cushion, linear_cushion), 6)
         else:
             early_warning = round(stop_loss + (entry_price - stop_loss) * 0.3, 4)
+
+    _add_price_level_invalidations(
+        invalidations,
+        stop_loss=stop_loss,
+        early_warning=early_warning,
+    )
+
+    # Severity order: critical < warning < info
+    _sev_rank = {"critical": 0, "warning": 1, "info": 2}
+
+    def _inv_key(x: dict) -> tuple:
+        return (_sev_rank.get(x.get("severity"), 1), x.get("indicator", ""))
+
+    invalidations.sort(key=_inv_key)
+
+    cap_inv = 8 if complex_pattern else 5
+    invalidations = invalidations[:cap_inv]
 
     near_resistance = None
     if target_price and current_price and target_price > current_price:
@@ -380,6 +386,61 @@ def extract_trade_plan_mechanical(
         },
     }
     return _validate_plan(plan, entry_price=entry_price, stop_loss=stop_loss, target_price=target_price)
+
+
+def _add_price_level_invalidations(
+    invalidations: list[dict[str, Any]],
+    *,
+    stop_loss: float,
+    early_warning: float | None,
+) -> None:
+    """Ensure sparse mechanical plans still have executable price-level guards."""
+
+    def has_price_level(level: float | None) -> bool:
+        if level is None:
+            return False
+        try:
+            target = float(level)
+        except (TypeError, ValueError):
+            return False
+        for item in invalidations:
+            if item.get("indicator") != "price":
+                continue
+            if item.get("op") not in ("<", "<="):
+                continue
+            try:
+                existing = float(item.get("value"))
+            except (TypeError, ValueError):
+                continue
+            if abs(existing - target) <= max(0.0001, abs(target) * 0.0001):
+                return True
+        return False
+
+    try:
+        stop = float(stop_loss)
+    except (TypeError, ValueError):
+        stop = 0.0
+    if stop > 0 and not has_price_level(stop):
+        invalidations.append({
+            "desc": "Price breaks the hard stop level",
+            "indicator": "price",
+            "op": "<=",
+            "value": round(stop, 6),
+            "severity": "critical",
+        })
+
+    try:
+        warning = float(early_warning) if early_warning is not None else 0.0
+    except (TypeError, ValueError):
+        warning = 0.0
+    if warning > 0 and (stop <= 0 or warning > stop) and not has_price_level(warning):
+        invalidations.append({
+            "desc": "Price loses the early-warning cushion before the hard stop",
+            "indicator": "price",
+            "op": "<=",
+            "value": round(warning, 6),
+            "severity": "warning",
+        })
 
 
 def _invert_op(op: str) -> str | None:
