@@ -39,7 +39,6 @@ from ..code_brain import insights as insights_mod
 from ..code_brain.agent import (
     _MAX_FILES_PER_EDIT,
     _build_edit_prompt,
-    _build_plan_prompt,
     _gather_context,
     _parse_plan_json,
     _read_file_content,
@@ -73,6 +72,10 @@ _MODEL_PREFERENCE = (
     "llama3:latest",
     "llama3.2:1b",
 )
+
+_PLAN_TIMEOUT_SEC = float(os.environ.get("CHILI_PROJECT_AUTOPILOT_PLAN_TIMEOUT_SEC") or "150")
+_PLAN_NUM_PREDICT = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_PLAN_NUM_PREDICT") or "900")
+_PLAN_PROMPT_CHAR_LIMIT = int(os.environ.get("CHILI_PROJECT_AUTOPILOT_PLAN_PROMPT_CHARS") or "9000")
 
 _STAGE_ORDER = (
     "classify",
@@ -114,7 +117,7 @@ def _json_load(raw: str | None, fallback: Any) -> Any:
 
 
 def _clip(text: str | None, limit: int = 6000) -> str:
-    return truncate_text(text or "", limit=limit)[0]
+    return truncate_text(text or "", max_bytes=limit)[0]
 
 
 def _safe_rel_path(path: str | None) -> str | None:
@@ -559,18 +562,20 @@ def _check_cancel(db: Session, run: ProjectAutonomyRun) -> None:
 
 def select_local_model() -> dict[str, Any]:
     models = ollama_client.list_models()
-    model_set = set(models)
     for preferred in _MODEL_PREFERENCE:
-        if preferred in model_set:
+        exact = next((model for model in models if model == preferred), None)
+        if exact:
             return {
-                "model": preferred,
+                "model": exact,
                 "available": True,
                 "installed_models": models,
                 "recommendation": None,
             }
-    for preferred in _MODEL_PREFERENCE:
+        if ":" in preferred:
+            continue
+        prefix = f"{preferred}:"
         for model in models:
-            if model.startswith(preferred.rstrip(":")):
+            if model == preferred or model.startswith(prefix):
                 return {
                     "model": model,
                     "available": True,
@@ -585,13 +590,143 @@ def select_local_model() -> dict[str, Any]:
     }
 
 
+def _candidate_exists(repo_path: Path | None, rel_path: str) -> bool:
+    rel = _safe_rel_path(rel_path)
+    if rel is None:
+        return False
+    if repo_path is None:
+        return True
+    return (repo_path / rel).is_file()
+
+
+def _plan_candidate_files(context: dict[str, Any], repo_path: Path | None, prompt: str) -> list[str]:
+    prompt_lower = (prompt or "").lower()
+    seeded: list[str] = []
+    if any(token in prompt_lower for token in ("desktop", "flutter", "native", "ui", "screen", "autopilot")):
+        seeded.extend(
+            [
+                "chili_mobile/lib/src/brain/brain_dispatch_screen.dart",
+                "chili_mobile/lib/src/network/chili_api_client.dart",
+                "chili_mobile/lib/src/network/network_error_message.dart",
+            ]
+        )
+    if any(token in prompt_lower for token in ("project brain", "project autopilot", "autonomy", "autonomous")):
+        seeded.extend(
+            [
+                "app/services/project_autonomy/orchestrator.py",
+                "app/routers/brain_project.py",
+                "tests/test_project_autonomy_service.py",
+            ]
+        )
+
+    context_candidates: list[str] = []
+    for item in context.get("relevant_files") or []:
+        if isinstance(item, dict):
+            context_candidates.append(str(item.get("file") or ""))
+    for item in context.get("hotspots") or []:
+        if isinstance(item, dict):
+            context_candidates.append(str(item.get("file") or ""))
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in seeded + context_candidates:
+        rel = _safe_rel_path(raw)
+        if rel is None or rel in seen or not _candidate_exists(repo_path, rel):
+            continue
+        seen.add(rel)
+        out.append(rel)
+        if len(out) >= 12:
+            break
+    return out
+
+
+def _build_autonomy_plan_prompt(context: dict[str, Any], repo_path: Path | None) -> str:
+    request = str(context.get("operator_request") or "")
+    candidates = _plan_candidate_files(context, repo_path, request)
+    parts = [
+        "Produce compact JSON only for a safe local autonomous code run.",
+        "Choose concrete files, keep scope small, and avoid speculative rewrites.",
+        "",
+        "Operator request:",
+        request,
+        "",
+        "Repositories:",
+    ]
+    for repo in (context.get("repos") or [])[:3]:
+        if not isinstance(repo, dict):
+            continue
+        langs = repo.get("languages") if isinstance(repo.get("languages"), dict) else {}
+        lang_bits = ", ".join(f"{k}:{v}" for k, v in list(langs.items())[:5])
+        parts.append(
+            f"- {repo.get('name')} path={repo.get('runtime_path') or repo.get('path')} "
+            f"files={repo.get('file_count')} languages={lang_bits}"
+        )
+
+    if candidates:
+        parts.extend(["", "Candidate files:"])
+        parts.extend(f"- {path}" for path in candidates[:12])
+
+    insights = [
+        str(item.get("description") or "")
+        for item in (context.get("insights") or [])
+        if isinstance(item, dict) and item.get("description")
+    ][:6]
+    if insights:
+        parts.extend(["", "Repo patterns:"])
+        parts.extend(f"- {_clip(item, 220)}" for item in insights)
+
+    parts.extend(
+        [
+            "",
+            "Return this JSON shape only:",
+            '{"analysis":"one short paragraph","files":[{"path":"relative/path","action":"modify|create","description":"specific change"}],"notes":"caveats"}',
+            "Rules: max 4 files, prefer existing candidate files, include only repo-relative paths.",
+        ]
+    )
+    return _clip("\n".join(parts), _PLAN_PROMPT_CHAR_LIMIT)
+
+
+def _fallback_plan_from_context(
+    context: dict[str, Any],
+    repo_path: Path | None,
+    prompt: str,
+    reason: str,
+) -> dict[str, Any]:
+    files = _plan_candidate_files(context, repo_path, prompt)[:3]
+    if not files:
+        return {
+            "analysis": f"Local model planning was unavailable ({reason}); no safe candidate files were identified.",
+            "files": [],
+            "notes": "Heuristic fallback could not continue without candidate files.",
+        }
+    return {
+        "analysis": (
+            f"Local model planning was unavailable ({reason}), so the architect fell back to a conservative "
+            "repo-index plan using the operator request and known project files."
+        ),
+        "files": [
+            {
+                "path": rel,
+                "action": "modify",
+                "description": (
+                    "Make a small, low-risk implementation that directly responds to the operator request: "
+                    f"{_clip(prompt, 320)}. Preserve existing behavior and local project conventions."
+                ),
+            }
+            for rel in files
+        ],
+        "notes": "Heuristic fallback plan; generated diffs and validation gates still decide whether the run may merge.",
+    }
+
+
 def build_local_plan(db: Session, run: ProjectAutonomyRun, repo: CodeRepo) -> dict[str, Any]:
     model_info = select_local_model()
     if not model_info.get("model"):
         raise AutonomyBlocked(str(model_info.get("recommendation") or "No local Ollama model is available."))
     context = _gather_context(db, int(repo.id), run.prompt, user_id=run.user_id)
     context["operator_request"] = run.prompt
-    prompt = _build_plan_prompt(context)
+    repo_path = resolve_repo_runtime_path(repo)
+    prompt = _build_autonomy_plan_prompt(context, repo_path)
     messages = [
         {
             "role": "system",
@@ -600,14 +735,14 @@ def build_local_plan(db: Session, run: ProjectAutonomyRun, repo: CodeRepo) -> di
                 "Plan for safe autonomous implementation in a git worktree."
             ),
         },
-        {"role": "user", "content": prompt + "\n\nOperator request:\n" + run.prompt},
+        {"role": "user", "content": prompt},
     ]
     result = ollama_client.chat(
         messages,
         str(model_info["model"]),
         temperature=0.15,
-        timeout_sec=90,
-        options={"num_predict": 1800},
+        timeout_sec=_PLAN_TIMEOUT_SEC,
+        options={"num_predict": _PLAN_NUM_PREDICT},
     )
     _add_artifact(
         db,
@@ -620,12 +755,21 @@ def build_local_plan(db: Session, run: ProjectAutonomyRun, repo: CodeRepo) -> di
             "latency_ms": result.latency_ms,
             "error": result.error,
             "installed_models": model_info.get("installed_models"),
+            "prompt_chars": len(prompt),
         },
     )
     if not result.ok:
+        fallback = _fallback_plan_from_context(context, repo_path, run.prompt, result.error or "unknown error")
+        _add_artifact(db, run.run_id, "plan", "heuristic_plan_fallback", content_json=fallback)
+        if fallback.get("files"):
+            return fallback
         raise AutonomyBlocked(f"Local model planning failed: {result.error or 'unknown error'}")
     plan = _parse_plan_json(result.text)
     if not plan:
+        fallback = _fallback_plan_from_context(context, repo_path, run.prompt, "unusable model JSON")
+        _add_artifact(db, run.run_id, "plan", "heuristic_plan_fallback", content_json=fallback)
+        if fallback.get("files"):
+            return fallback
         raise AutonomyBlocked("Local model did not return a usable implementation plan.")
     plan.setdefault("analysis", "")
     plan.setdefault("files", [])

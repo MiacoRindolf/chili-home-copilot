@@ -38,6 +38,19 @@ def test_select_local_model_prefers_evidence_gated_current_model(monkeypatch):
     assert selected["model"] == "chili-coder:current"
 
 
+def test_select_local_model_prefers_coder_prefix_before_later_exact(monkeypatch):
+    monkeypatch.setattr(
+        orchestrator.ollama_client,
+        "list_models",
+        lambda: ["llama3.2:1b", "qwen2.5-coder:3b-instruct-q8_0"],
+    )
+
+    selected = orchestrator.select_local_model()
+
+    assert selected["available"] is True
+    assert selected["model"] == "qwen2.5-coder:3b-instruct-q8_0"
+
+
 def test_select_local_model_recommends_coder_model_when_empty(monkeypatch):
     monkeypatch.setattr(orchestrator.ollama_client, "list_models", lambda: [])
 
@@ -114,3 +127,25 @@ def test_agent_lane_assignment_keeps_architect_lead():
 def test_integration_branch_name_avoids_nested_ref_conflicts():
     assert orchestrator.integration_branch_name("pa_abc123") == "project-auto-pa_abc123"
     assert "/" not in orchestrator.integration_branch_name("pa/nested")
+
+
+def test_heuristic_plan_fallback_uses_desktop_candidates(tmp_path):
+    desktop_file = tmp_path / "chili_mobile/lib/src/brain/brain_dispatch_screen.dart"
+    desktop_file.parent.mkdir(parents=True)
+    desktop_file.write_text("// desktop brain screen\n", encoding="utf-8")
+    context = {
+        "repos": [{"name": "repo", "runtime_path": str(tmp_path)}],
+        "insights": [],
+        "hotspots": [],
+        "relevant_files": [],
+    }
+
+    plan = orchestrator._fallback_plan_from_context(
+        context,
+        tmp_path,
+        "find a small enhancement for the desktop app",
+        "TimeoutError: timed out",
+    )
+
+    assert plan["files"]
+    assert plan["files"][0]["path"] == "chili_mobile/lib/src/brain/brain_dispatch_screen.dart"
