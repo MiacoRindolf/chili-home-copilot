@@ -8,8 +8,23 @@ from app.services import planner_service
 class _FakeQuery:
     def __init__(self, rows):
         self._rows = rows
+        self.filter_calls = 0
         self.group_by_calls = 0
+        self.join_calls = 0
+        self.options_calls = 0
         self.outerjoin_calls = 0
+
+    def join(self, *_args, **_kwargs):
+        self.join_calls += 1
+        return self
+
+    def options(self, *_args, **_kwargs):
+        self.options_calls += 1
+        return self
+
+    def filter(self, *_args, **_kwargs):
+        self.filter_calls += 1
+        return self
 
     def outerjoin(self, *_args, **_kwargs):
         self.outerjoin_calls += 1
@@ -78,3 +93,46 @@ def test_all_users_task_summary_batches_across_users():
     assert db.query_calls == 1
     assert db.last_query.outerjoin_calls == 2
     assert db.last_query.group_by_calls == 1
+
+
+def test_user_project_summary_eager_loads_tasks_and_assignees():
+    assignee = SimpleNamespace(name="Alice")
+    project = SimpleNamespace(
+        id=1,
+        key="PRJ",
+        name="Project",
+        end_date=None,
+        tasks=[
+            SimpleNamespace(
+                id=1,
+                sort_order=0,
+                status="todo",
+                priority="high",
+                end_date=None,
+                assigned_to=7,
+                assignee=assignee,
+                title="Do it",
+            ),
+            SimpleNamespace(
+                id=2,
+                sort_order=1,
+                status="done",
+                priority="medium",
+                end_date=None,
+                assigned_to=None,
+                assignee=None,
+                title="Done",
+            ),
+        ],
+    )
+    db = _FakeSession([project])
+
+    summary = planner_service.get_user_project_summary(db, user_id=7)
+
+    assert "Project: Project (PRJ)" in summary
+    assert "1/2 tasks done" in summary
+    assert "- [todo] [high] Do it @Alice" in summary
+    assert db.query_calls == 1
+    assert db.last_query.join_calls == 1
+    assert db.last_query.options_calls == 1
+    assert db.last_query.filter_calls == 1

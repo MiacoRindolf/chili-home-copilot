@@ -5,7 +5,7 @@ import json
 from datetime import date, datetime
 from typing import Optional
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 from sqlalchemy import case, distinct, func, or_
 
 from ..models import (
@@ -671,6 +671,7 @@ def get_user_project_summary(db: Session, user_id: int) -> str:
     projects = (
         db.query(PlanProject)
         .join(ProjectMember, ProjectMember.project_id == PlanProject.id)
+        .options(selectinload(PlanProject.tasks).selectinload(PlanTask.assignee))
         .filter(ProjectMember.user_id == user_id, PlanProject.status == "active")
         .all()
     )
