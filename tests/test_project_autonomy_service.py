@@ -129,6 +129,15 @@ def test_integration_branch_name_avoids_nested_ref_conflicts():
     assert "/" not in orchestrator.integration_branch_name("pa/nested")
 
 
+def test_live_monitoring_prompt_is_not_treated_as_repo_edit():
+    assert orchestrator._looks_like_live_monitoring_prompt(
+        "monitor it right now as I'm testing... debug the errors live"
+    )
+    assert not orchestrator._looks_like_live_monitoring_prompt(
+        "while I'm testing, update chili_mobile/lib/src/brain/foo.dart to fix the layout"
+    )
+
+
 def test_heuristic_plan_fallback_uses_desktop_candidates(tmp_path):
     desktop_file = tmp_path / "chili_mobile/lib/src/brain/brain_dispatch_screen.dart"
     error_file = tmp_path / "chili_mobile/lib/src/network/network_error_message.dart"

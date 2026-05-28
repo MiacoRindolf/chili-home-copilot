@@ -131,6 +131,46 @@ def _safe_rel_path(path: str | None) -> str | None:
     return raw
 
 
+def _looks_like_live_monitoring_prompt(prompt: str) -> bool:
+    lower = (prompt or "").lower()
+    monitoring_markers = (
+        "monitor it",
+        "watch it",
+        "watch this",
+        "right now",
+        "live",
+        "as i'm testing",
+        "as im testing",
+        "while i'm testing",
+        "while im testing",
+    )
+    if not any(marker in lower for marker in monitoring_markers):
+        return False
+    implementation_markers = (
+        "implement",
+        "add ",
+        "change ",
+        "update ",
+        "modify ",
+        "create ",
+        "build ",
+        "refactor",
+        "fix in ",
+        "fix the file",
+        "patch ",
+        ".py",
+        ".dart",
+        ".js",
+        ".ts",
+        ".html",
+        ".css",
+        "app/",
+        "chili_mobile/",
+        "tests/",
+    )
+    return not any(marker in lower for marker in implementation_markers)
+
+
 def _run_payload(row: ProjectAutonomyRun) -> dict[str, Any]:
     return {
         "id": row.id,
@@ -1491,6 +1531,12 @@ def run_autonomy_sync(db: Session, run_id: str, on_event: Callable[[dict[str, An
 
         _record_step(db, run, "classify", "Classifying request", detail={"prompt_preview": run.prompt[:240]})
         _check_cancel(db, run)
+        if _looks_like_live_monitoring_prompt(run.prompt):
+            raise AutonomyBlocked(
+                "This looks like a live monitoring/debugging request rather than a repo-editing task. "
+                "Project Autopilot only starts autonomous worktrees for implementation prompts; use the live "
+                "operator/chat monitor for this request, or ask Autopilot for a specific code change."
+            )
         _ensure_git_repo(repo_path)
         base_branch = _git_text(repo_path, ["branch", "--show-current"], timeout=60)
         base_sha = _git_text(repo_path, ["rev-parse", "HEAD"], timeout=60)
