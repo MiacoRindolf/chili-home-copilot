@@ -32,6 +32,23 @@ _ARCH_ROLE_PROMPT = (
 )
 
 
+def _dependency_counts_by_repo(
+    db: Session,
+    repo_ids: list[int],
+    *,
+    circular_only: bool = False,
+) -> Dict[int, int]:
+    if not repo_ids:
+        return {}
+    q = db.query(CodeDependency.repo_id, func.count(CodeDependency.id)).filter(
+        CodeDependency.repo_id.in_(repo_ids)
+    )
+    if circular_only:
+        q = q.filter(CodeDependency.is_circular.is_(True))
+    rows = q.group_by(CodeDependency.repo_id).all()
+    return {int(repo_id): int(count or 0) for repo_id, count in rows}
+
+
 class ArchitectAgent(AgentBase):
     name = "architect"
     label = "Architect"
@@ -125,17 +142,16 @@ class ArchitectAgent(AgentBase):
         total_deps = db.query(func.count(CodeDependency.id)).scalar() or 0
         total_hotspots = db.query(func.count(CodeHotspot.id)).scalar() or 0
 
+        repo_ids = [int(r.id) for r in repos]
+        dep_counts = _dependency_counts_by_repo(db, repo_ids)
+        circ_counts = _dependency_counts_by_repo(db, repo_ids, circular_only=True)
+
         repo_infos = []
         for r in repos:
-            dep_count = db.query(func.count(CodeDependency.id)).filter(
-                CodeDependency.repo_id == r.id
-            ).scalar() or 0
-            circ_count = db.query(func.count(CodeDependency.id)).filter(
-                CodeDependency.repo_id == r.id, CodeDependency.is_circular.is_(True)
-            ).scalar() or 0
             repo_infos.append({
                 "id": r.id, "name": r.name or r.local_path,
-                "deps": dep_count, "circular": circ_count,
+                "deps": dep_counts.get(int(r.id), 0),
+                "circular": circ_counts.get(int(r.id), 0),
             })
 
         return {
