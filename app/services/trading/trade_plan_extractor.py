@@ -230,12 +230,15 @@ def extract_trade_plan_mechanical(
     ind_alias = dict(indicators)
     if "bb_pct_b" not in ind_alias and ind_alias.get("bb_pct") is not None:
         ind_alias["bb_pct_b"] = ind_alias["bb_pct"]
+    if "volume_ratio" not in ind_alias and ind_alias.get("rel_vol") is not None:
+        ind_alias["volume_ratio"] = ind_alias["rel_vol"]
 
     for cond in pattern_conditions:
-        ind = cond.get("indicator", "")
+        raw_ind = str(cond.get("indicator", "") or "")
+        ind = _normalize_trade_plan_indicator(raw_ind)
         op = cond.get("op", "")
         val = cond.get("value")
-        ref = cond.get("ref")
+        ref = _normalize_trade_plan_indicator(cond.get("ref")) if cond.get("ref") else None
 
         if ind not in VALID_INDICATORS:
             continue
@@ -441,6 +444,20 @@ def _add_price_level_invalidations(
             "value": round(warning, 6),
             "severity": "warning",
         })
+
+
+def _normalize_trade_plan_indicator(indicator: Any) -> str:
+    """Map parser/scanner aliases onto trade-plan evaluator indicator keys."""
+    key = str(indicator or "").strip()
+    aliases = {
+        "rel_vol": "volume_ratio",
+        "relative_volume": "volume_ratio",
+        "rvol": "volume_ratio",
+        "vwap_reclaim": "vwap",
+        "bollinger_pct": "bb_pct",
+        "bb_percent": "bb_pct",
+    }
+    return aliases.get(key, key)
 
 
 def _invert_op(op: str) -> str | None:
