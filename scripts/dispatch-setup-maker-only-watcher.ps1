@@ -1,5 +1,5 @@
 $ErrorActionPreference = "Continue"
-$repo = "C:\dev\chili-home-copilot"
+$repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Set-Location $repo
 $out = "$PSScriptRoot\dispatch-setup-maker-only-watcher-out.txt"
 "# $(Get-Date -Format o) -- setup maker-only TCA watcher" | Out-File $out -Encoding utf8

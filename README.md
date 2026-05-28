@@ -256,7 +256,7 @@ Or let the repo pick the first free port among 8000, 8010, 8020, …:
 **Brain worker won’t stop / port still stuck:** run a full reset **in Windows PowerShell** (Cursor’s sandbox cannot always kill your processes):
 
 ```powershell
-cd C:\dev\chili-home-copilot
+cd D:\dev\chili-home-copilot
 .\scripts\reset-chili-dev.ps1
 # optional: free port + open new window with HTTPS uvicorn
 .\scripts\reset-chili-dev.ps1 -StartUvicorn

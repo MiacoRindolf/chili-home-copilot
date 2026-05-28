@@ -2,7 +2,7 @@
 # Re-launches as Administrator if needed to kill protected processes.
 #
 # Run in YOUR Windows PowerShell (outside Cursor if needed), from anywhere:
-#   powershell -ExecutionPolicy Bypass -File C:\dev\chili-home-copilot\scripts\reset-chili-dev.ps1
+#   powershell -ExecutionPolicy Bypass -File D:\dev\chili-home-copilot\scripts\reset-chili-dev.ps1
 #
 # Optional: also launch HTTPS uvicorn on port 8000:
 #   .\scripts\reset-chili-dev.ps1 -StartUvicorn

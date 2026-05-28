@@ -4,7 +4,7 @@
 # dedicated batch host.
 
 $ErrorActionPreference = "Stop"
-$projectPath = "c:\dev\chili-home-copilot"
+$projectPath = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $logFile = "$projectPath\fast_orderbook_retention_scheduled.log"
 $lockFile = "$projectPath\data\fast_orderbook_retention_scheduled.lock"
 

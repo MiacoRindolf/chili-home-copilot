@@ -3,7 +3,7 @@
 The user gives us a string (in the desktop app's Queue tab, an API request,
 or a SQL one-liner) and we figure out what they meant:
 
-  * **Local Windows path** like ``C:\\dev\\my-project`` or ``D:/code/foo`` —
+  * **Local Windows path** like ``D:\\dev\\my-project`` —
     we map it to the container side via the ``/host_dev`` mount and require
     that the directory contains ``.git/``. No clone.
   * **Local container path** like ``/workspace`` or ``/host_dev/foo`` —
@@ -46,13 +46,17 @@ logger = logging.getLogger(__name__)
 # ``chili_dispatch_clones`` named volume in docker-compose.yml.
 _MANAGED_CLONE_ROOT = "/workspace_managed"
 
-# Where the brain looks for already-on-disk local projects, mounted from
-# the host's ``C:\dev`` directory.
-_HOST_DEV_MOUNT = "/host_dev"
+# Where the brain looks for already-on-disk local projects. In local Docker,
+# docker-compose mounts the host's ``D:\dev`` directory at ``/host_dev``.
+_HOST_DEV_MOUNT = (
+    os.environ.get("CHILI_HOST_DEV_MOUNT", "/host_dev").rstrip("/")
+    or "/host_dev"
+)
+_DEFAULT_HOST_DEV_ROOTS = "D:/dev"
 
 
 class InputKind(str, Enum):
-    LOCAL_HOST_PATH = "local_host_path"          # C:\dev\foo or /host_dev/foo
+    LOCAL_HOST_PATH = "local_host_path"          # D:\dev\foo or /host_dev/foo
     LOCAL_CONTAINER_PATH = "local_container_path"  # /workspace etc
     GIT_HTTPS_URL = "git_https_url"
     GIT_SSH_URL = "git_ssh_url"
@@ -83,28 +87,35 @@ _GITHUB_HTTPS_RE = re.compile(r"^https?://(?:www\.)?github\.com/([^/]+)/([^/?#]+
 _GITHUB_SSH_RE = re.compile(r"^git@github\.com:([^/]+)/([^/]+?)(?:\.git)?/?$")
 
 
+def _configured_host_dev_roots() -> list[str]:
+    raw = (
+        os.environ.get("CHILI_HOST_DEV_ROOTS")
+        or os.environ.get("CHILI_HOST_DEV_ROOT")
+        or _DEFAULT_HOST_DEV_ROOTS
+    )
+    roots: list[str] = []
+    for item in re.split(r"[;,]", raw):
+        cleaned = item.strip().replace("\\", "/").rstrip("/")
+        if re.match(r"^[A-Za-z]:/", cleaned):
+            roots.append(cleaned.lower())
+    return roots
+
+
 def _windows_to_container_path(host_path: str) -> Optional[str]:
-    """Map ``C:\\dev\\foo`` → ``/host_dev/foo``. Returns None if the path is
-    not under C:\\dev (we only mount that one drive root).
-    """
-    p = host_path.strip().replace("\\", "/")
-    # Strip drive letter and check it's under "dev"
-    m = re.match(r"^([A-Za-z]):/(.*)$", p)
+    """Map a configured Windows dev root to ``/host_dev``."""
+    p = host_path.strip().replace("\\", "/").rstrip("/")
+    m = re.match(r"^([A-Za-z]:)/(.*)$", p)
     if not m:
         return None
-    drive = m.group(1).lower()
-    rest = m.group(2).rstrip("/")
-    if drive != "c":
-        # Only C: is mounted today. Could extend later by adding more
-        # drive mounts in docker-compose.yml.
-        return None
-    parts = rest.split("/")
-    if not parts or parts[0].lower() != "dev":
-        return None
-    inner = "/".join(parts[1:])
-    if inner:
-        return f"{_HOST_DEV_MOUNT}/{inner}"
-    return _HOST_DEV_MOUNT
+    normalized = p.lower()
+    for root in _configured_host_dev_roots():
+        if normalized == root:
+            return _HOST_DEV_MOUNT
+        prefix = f"{root}/"
+        if normalized.startswith(prefix):
+            inner = p[len(prefix) :]
+            return f"{_HOST_DEV_MOUNT}/{inner}" if inner else _HOST_DEV_MOUNT
+    return None
 
 
 def parse_input(raw: str) -> ParsedInput:
@@ -320,7 +331,7 @@ def resolve_or_register(db: Session, raw_input: str, *, allow_clone: bool = True
         if not cp:
             raise ValueError(
                 f"local path {parsed.host_path!r} is not under the /host_dev mount "
-                "(only C:\\dev\\* is exposed today)"
+                f"(configured host roots: {', '.join(_configured_host_dev_roots())})"
             )
         existing = _existing_by_path(db, parsed.host_path, cp)
         if existing:

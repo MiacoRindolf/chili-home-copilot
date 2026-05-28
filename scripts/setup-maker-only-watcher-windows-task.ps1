@@ -6,9 +6,9 @@
 # TCA probe. Output goes to scripts/dispatch-maker-only-tca-probe-out.txt.
 
 $ErrorActionPreference = "Stop"
-$repo = "C:\dev\chili-home-copilot"
+$repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $taskName = "CHILI-maker-only-tca-probe"
-$pendingFile = "$repo\scripts\_claude_pending.txt"
+$pendingFile = Join-Path $repo 'scripts\_claude_pending.txt'
 
 $dispatchLine = "TIMEOUT=60s .\scripts\dispatch-maker-only-tca-probe.ps1"
 $argList = @(

@@ -10,7 +10,7 @@
 #
 # Register as a daily scheduled task with (run from an elevated PowerShell):
 #   schtasks /Create /TN "CHILI pg_dump daily" /SC DAILY /ST 03:30 ^
-#     /TR "powershell -ExecutionPolicy Bypass -File C:\dev\chili-home-copilot\scripts\backup_chili_db.ps1" ^
+#     /TR "powershell -ExecutionPolicy Bypass -File D:\dev\chili-home-copilot\scripts\backup_chili_db.ps1" ^
 #     /RL HIGHEST /F
 
 $ErrorActionPreference = 'Stop'

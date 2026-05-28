@@ -4,7 +4,7 @@
 # because CREATE INDEX CONCURRENTLY can run for a long time on large tables.
 
 $ErrorActionPreference = "Stop"
-$projectPath = "c:\dev\chili-home-copilot"
+$projectPath = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $logFile = "$projectPath\trading_storage_maintenance_scheduled.log"
 $lockFile = "$projectPath\data\trading_storage_maintenance_scheduled.lock"
 

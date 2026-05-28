@@ -1,7 +1,7 @@
 # Register any kind of project with the brain.
 #
 # Detects the input shape automatically:
-#   * Local Windows path:   C:\dev\some-project   (must be under C:\dev\)
+#   * Local Windows path:   D:\dev\some-project   (must be under configured CHILI_HOST_DEV_ROOTS)
 #   * Container path:       /host_dev/foo   /workspace   /workspace_managed/...
 #   * GitHub HTTPS URL:     https://github.com/USER/REPO
 #   * GitHub SSH URL:       git@github.com:USER/REPO.git
@@ -9,7 +9,7 @@
 #   * Bare name:            chili-home-copilot   (looks up existing row)
 #
 # Usage:
-#   .\scripts\brain-add-repo.ps1 "C:\dev\some-other-project"
+#   .\scripts\brain-add-repo.ps1 "D:\dev\some-other-project"
 #   .\scripts\brain-add-repo.ps1 "https://github.com/MiacoRindolf/another-repo"
 #   .\scripts\brain-add-repo.ps1 "MiacoRindolf/another-repo"
 #

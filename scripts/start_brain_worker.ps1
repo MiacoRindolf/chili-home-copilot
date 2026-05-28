@@ -2,7 +2,7 @@
 # This script starts the brain worker if it's not already running
 # Designed to be run by Windows Task Scheduler on system startup
 
-$projectPath = "c:\dev\chili-home-copilot"
+$projectPath = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $statusFile = "$projectPath\data\brain_worker_status.json"
 $logFile = "$projectPath\brain_worker_startup.log"
 $pythonPath = "python"  # Adjust if using a specific Python installation

@@ -3,7 +3,7 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
-DATA = Path(r"c:\dev\chili-home-copilot\scripts\sql\imminent_alerts_from_telegram.json")
+DATA = Path(__file__).resolve().parent / "sql" / "imminent_alerts_from_telegram.json"
 OPEN_TICKERS = {
     "ABM", "ACHC", "ACHR", "AFJK", "AIDX", "AIFF", "AIXI", "AMUU",
     "AVR", "BNRG", "BULX", "CCCC", "CRDL", "DHC", "EKSO", "ELTX",

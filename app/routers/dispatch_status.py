@@ -68,7 +68,7 @@ class QueueTaskBody(BaseModel):
     intended_files: list[str] = Field(default_factory=list)
     force_tier: int | None = None
     # Phase E.2 — optional dynamic source. The resolver accepts:
-    #   * Local Windows path (C:\dev\foo) — must be under C:\dev
+    #   * Local Windows path (D:\dev\foo) — must be under CHILI_HOST_DEV_ROOTS
     #   * Container path (/workspace, /host_dev/foo)
     #   * GitHub HTTPS URL
     #   * GitHub SSH URL (translated to HTTPS for clone)

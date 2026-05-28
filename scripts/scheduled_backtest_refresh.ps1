@@ -3,7 +3,7 @@
 # this task runs on the operator PC, not a dedicated batch host.
 
 $ErrorActionPreference = "Stop"
-$projectPath = "c:\dev\chili-home-copilot"
+$projectPath = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $logFile = "$projectPath\backtest_refresh_scheduled.log"
 $python = "C:\Users\rindo\miniconda3\python.exe"
 if (-not (Test-Path $python)) {

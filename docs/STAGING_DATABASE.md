@@ -46,7 +46,7 @@ Or set `STAGING_DATABASE_URL` in `.env` and copy it when running scripts (the ap
 
 ## Daily refresh (Docker + Windows)
 
-**Canonical local checkout (this project / live app):** `C:\dev\chili-home-copilot` — scheduled-task examples and script headers in this doc use that path. Only the Docker **container name** may need changing (`docker ps`); paths should not.
+**Canonical local checkout (this project / live app):** `D:\dev\chili-home-copilot`. Scheduled-task examples and script headers in this doc use that path. Only the Docker **container name** may need changing (`docker ps`).
 
 | Script | Role |
 |--------|------|
@@ -81,13 +81,13 @@ Use the same `DATABASE_URL` override for `scripts/backfill_regime.py` and other 
 **Typical two-task setup:** **03:30** backup → **04:00** `chili_staging` refresh. Register the refresh task (after your backup task exists) with:
 
 ```powershell
-schtasks /Create /TN "CHILI refresh staging" /SC DAILY /ST 04:00 /RL HIGHEST /F /TR "powershell -NoProfile -ExecutionPolicy Bypass -File C:\dev\chili-home-copilot\scripts\refresh_staging_from_backup.ps1"
+schtasks /Create /TN "CHILI refresh staging" /SC DAILY /ST 04:00 /RL HIGHEST /F /TR "powershell -NoProfile -ExecutionPolicy Bypass -File D:\dev\chili-home-copilot\scripts\refresh_staging_from_backup.ps1"
 ```
 
 **Or** a single job that runs `backup_and_refresh_staging.ps1` (chain backup + refresh); pick a time that finishes the dump before the refresh step (e.g. 03:45 if backup alone is ~minutes):
 
 ```powershell
-schtasks /Create /TN "CHILI backup and staging" /SC DAILY /ST 03:45 /RL HIGHEST /F /TR "powershell -NoProfile -ExecutionPolicy Bypass -File C:\dev\chili-home-copilot\scripts\backup_and_refresh_staging.ps1"
+schtasks /Create /TN "CHILI backup and staging" /SC DAILY /ST 03:45 /RL HIGHEST /F /TR "powershell -NoProfile -ExecutionPolicy Bypass -File D:\dev\chili-home-copilot\scripts\backup_and_refresh_staging.ps1"
 ```
 
 ### Failure behavior

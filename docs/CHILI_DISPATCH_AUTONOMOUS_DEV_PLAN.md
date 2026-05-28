@@ -443,7 +443,7 @@ Channels: existing intercom in `chili_mobile/` for mobile push; desktop toast vi
 
 ## 9. What I have already scaffolded
 
-In `C:\dev\chili-home-copilot/` (separate files, none auto-applied — review and integrate when ready):
+In `D:\dev\chili-home-copilot/` (separate files, none auto-applied — review and integrate when ready):
 
 - `docs/CHILI_DISPATCH_AUTONOMOUS_DEV_PLAN.md` — this document
 - `docs/CHILI_DISPATCH_RUNBOOK.md` — operator runbook (kill switch, manual override, budget cap, distillation rollback)

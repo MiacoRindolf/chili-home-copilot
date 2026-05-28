@@ -1,5 +1,5 @@
 $ErrorActionPreference = "Continue"
-$repo = "C:\dev\chili-home-copilot"
+$repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Set-Location $repo
 $out = "$PSScriptRoot\dispatch-maker-only-soak-start-out.txt"
 "# $(Get-Date -Format o) -- maker-only paper-soak start" | Out-File $out -Encoding utf8

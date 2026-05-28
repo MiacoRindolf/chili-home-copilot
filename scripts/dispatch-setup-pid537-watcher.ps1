@@ -1,5 +1,5 @@
 $ErrorActionPreference = "Continue"
-$repo = "C:\dev\chili-home-copilot"
+$repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Set-Location $repo
 $out = "$PSScriptRoot\dispatch-setup-pid537-watcher-out.txt"
 "# $(Get-Date -Format o) -- setup pid537 watcher windows task" | Out-File $out -Encoding utf8

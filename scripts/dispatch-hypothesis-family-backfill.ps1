@@ -1,5 +1,5 @@
 $ErrorActionPreference = "Continue"
-$repo = "C:\dev\chili-home-copilot"
+$repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Set-Location $repo
 
 $out = "$PSScriptRoot\dispatch-hypothesis-family-backfill-output.txt"

@@ -37,6 +37,7 @@ Emit "host=$env:COMPUTERNAME  user=$env:USERNAME"
 
 $BrainWorker = 'chili-home-copilot-brain-worker-1'
 $Postgres    = 'chili-home-copilot-postgres-1'
+$RepoRoot    = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $AllWorkers  = @(
     'brain-worker', 'scheduler-worker', 'autotrader-worker',
     'broker-sync-worker', 'fast-data-worker', 'chili'
@@ -81,7 +82,7 @@ if ($nDisp -gt 0) {
 
 Emit ''
 Emit 'Bootstrap call sites for run_brain_work_dispatch_round / run_brain_work_batch:'
-$callSites = Select-String -Path 'C:\dev\chili-home-copilot\scripts\brain_worker.py' `
+$callSites = Select-String -Path (Join-Path $RepoRoot 'scripts\brain_worker.py') `
     -Pattern '_maybe_run_brain_work_batch|run_brain_work_batch\(' -SimpleMatch:$false
 $callSites | ForEach-Object {
     Emit ("  {0}:{1}: {2}" -f $_.Filename, $_.LineNumber, $_.Line.Trim())
@@ -91,9 +92,9 @@ $callSites | ForEach-Object {
 Section 'H2 -- Logger filtered? Prefix mismatch?'
 Emit ''
 Emit 'Per-module LOG_PREFIX values (grepped):'
-$prefixes = Select-String -Path 'C:\dev\chili-home-copilot\app\services\trading\brain_work\*.py' `
+$prefixes = Select-String -Path (Join-Path $RepoRoot 'app\services\trading\brain_work\*.py') `
     -Pattern '^LOG_PREFIX\s*='
-$prefixes += Select-String -Path 'C:\dev\chili-home-copilot\app\services\trading\brain_work\handlers\*.py' `
+$prefixes += Select-String -Path (Join-Path $RepoRoot 'app\services\trading\brain_work\handlers\*.py') `
     -Pattern '^LOG_PREFIX\s*='
 $prefixes | ForEach-Object {
     $rel = $_.Filename
@@ -136,7 +137,7 @@ $pyOut | ForEach-Object { Emit "  $_" }
 Section 'H4 -- learning.py marking events done directly?'
 Emit ''
 Emit 'Searching app/services/trading/learning.py for BrainWorkEvent / brain_work_events refs:'
-$lh = Select-String -Path 'C:\dev\chili-home-copilot\app\services\trading\learning.py' `
+$lh = Select-String -Path (Join-Path $RepoRoot 'app\services\trading\learning.py') `
     -Pattern 'BrainWorkEvent|brain_work_events|status.*=.*[''"]done[''"]'
 if ($null -eq $lh -or $lh.Count -eq 0) {
     Emit '  (no matches -- learning.py does not touch brain_work_events)'
@@ -145,7 +146,7 @@ if ($null -eq $lh -or $lh.Count -eq 0) {
 }
 Emit ''
 Emit 'Repository-wide BrainWorkEvent / brain_work_events references (app/ only):'
-$allRefs = Get-ChildItem -Path 'C:\dev\chili-home-copilot\app' -Recurse -Filter '*.py' |
+$allRefs = Get-ChildItem -Path (Join-Path $RepoRoot 'app') -Recurse -Filter '*.py' |
     Select-String -Pattern 'brain_work_events|BrainWorkEvent'
 $grouped = $allRefs | Group-Object -Property Filename | Sort-Object Name
 $grouped | ForEach-Object {
@@ -156,7 +157,7 @@ $grouped | ForEach-Object {
 Section 'H5 -- backtest_queue_worker emitting done directly?'
 Emit ''
 Emit 'Direct writes of brain_work_events.status outside ledger.py:'
-$statusWrites = Get-ChildItem -Path 'C:\dev\chili-home-copilot\app' -Recurse -Filter '*.py' |
+$statusWrites = Get-ChildItem -Path (Join-Path $RepoRoot 'app') -Recurse -Filter '*.py' |
     Select-String -Pattern 'brain_work_events.*SET\s+status|UPDATE\s+brain_work_events|\.status\s*=\s*[''"]done[''"]' |
     Where-Object { $_.Filename -ne 'ledger.py' }
 if ($null -eq $statusWrites -or $statusWrites.Count -eq 0) {
@@ -168,14 +169,14 @@ if ($null -eq $statusWrites -or $statusWrites.Count -eq 0) {
 }
 Emit ''
 Emit 'enqueue_outcome_event INSERT writing status="done" directly (ledger.py):'
-$insertSite = Select-String -Path 'C:\dev\chili-home-copilot\app\services\trading\brain_work\ledger.py' `
+$insertSite = Select-String -Path (Join-Path $RepoRoot 'app\services\trading\brain_work\ledger.py') `
     -Pattern 'status=\"done\"|status=''done'''
 $insertSite | ForEach-Object {
     Emit ("  ledger.py:L{0}: {1}" -f $_.LineNumber, $_.Line.Trim())
 }
 Emit ''
 Emit 'Callers of enqueue_outcome_event / emit_backtest_completed_outcome:'
-$callers = Get-ChildItem -Path 'C:\dev\chili-home-copilot\app' -Recurse -Filter '*.py' |
+$callers = Get-ChildItem -Path (Join-Path $RepoRoot 'app') -Recurse -Filter '*.py' |
     Select-String -Pattern 'enqueue_outcome_event|emit_backtest_completed_outcome'
 $callers | ForEach-Object {
     Emit ("  {0}:L{1}: {2}" -f $_.Filename, $_.LineNumber, $_.Line.Trim())
@@ -203,7 +204,7 @@ foreach ($c in $AllWorkers) {
 }
 Emit ''
 Emit 'Registered handler functions in dispatcher.py:'
-$hwiring = Select-String -Path 'C:\dev\chili-home-copilot\app\services\trading\brain_work\dispatcher.py' `
+$hwiring = Select-String -Path (Join-Path $RepoRoot 'app\services\trading\brain_work\dispatcher.py') `
     -Pattern 'elif event_type ==|from .handlers'
 $hwiring | ForEach-Object {
     Emit ("  L{0}: {1}" -f $_.LineNumber, $_.Line.Trim())
@@ -221,7 +222,7 @@ $rows | ForEach-Object { Emit "  $_" }
 # ---------------------------------------------------------------- claim_work_batch SQL
 Section 'claim_work_batch SQL filter (proves work-only)'
 Emit ''
-$claim = Get-Content 'C:\dev\chili-home-copilot\app\services\trading\brain_work\ledger.py' |
+$claim = Get-Content (Join-Path $RepoRoot 'app\services\trading\brain_work\ledger.py') |
     Select-String -Pattern 'event_kind\s*=\s*''work''' -SimpleMatch:$false
 $claim | ForEach-Object { Emit "  ledger.py: $_" }
 

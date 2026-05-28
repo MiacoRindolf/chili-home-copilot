@@ -5,10 +5,10 @@
 #
 # Run AFTER the daily backup task (e.g. backup 03:30, this job 04:00). See docs/STAGING_DATABASE.md.
 # Register a scheduled task (run from elevated PowerShell), e.g.:
-#   schtasks /Create /TN "CHILI refresh staging" /SC DAILY /ST 04:00 /RL HIGHEST /F /TR "powershell -ExecutionPolicy Bypass -File C:\dev\chili-home-copilot\scripts\refresh_staging_from_backup.ps1"
+#   schtasks /Create /TN "CHILI refresh staging" /SC DAILY /ST 04:00 /RL HIGHEST /F /TR "powershell -ExecutionPolicy Bypass -File D:\dev\chili-home-copilot\scripts\refresh_staging_from_backup.ps1"
 #
-# On restore failure, chili_staging may be empty or missing — re-run after fixing the dump path or container.
-# Optional: -ParallelJobs 4  →  pg_restore -j 4 (faster on large DBs; 0 = omit -j)
+# On restore failure, chili_staging may be empty or missing; re-run after fixing the dump path or container.
+# Optional: -ParallelJobs 4 -> pg_restore -j 4 (faster on large DBs; 0 = omit -j)
 
 [CmdletBinding()]
 param(
@@ -51,7 +51,7 @@ try {
         exit 1
     }
 
-    # pg_stat_activity has datname/pid only — not datistemplate (that is on pg_database)
+    # pg_stat_activity has datname/pid only, not datistemplate (that is on pg_database)
     $term = "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$StagingDb' AND pid <> pg_backend_pid();"
     & docker exec $Container psql -U chili -d $PostgresDb -c $term 2>>$log
     & docker exec $Container psql -U chili -d $PostgresDb -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS $StagingDb WITH (FORCE);" 2>>$log
@@ -75,7 +75,7 @@ try {
     & docker exec $Container rm -f $tmpInContainer 2>>$log | Out-Null
 
     if ($restoreCode -ne 0) {
-        Write-Log "FAILED: pg_restore exit $restoreCode — $StagingDb may be empty; fix issue and re-run"
+        Write-Log "FAILED: pg_restore exit $restoreCode; $StagingDb may be empty; fix issue and re-run"
         exit 1
     }
 

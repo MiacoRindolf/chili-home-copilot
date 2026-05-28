@@ -7,9 +7,9 @@
 # Re-running the script is safe: existing task is unregistered first.
 
 $ErrorActionPreference = "Stop"
-$repo = "C:\dev\chili-home-copilot"
+$repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $taskName = "CHILI-pid537-watcher"
-$pendingFile = "$repo\scripts\_claude_pending.txt"
+$pendingFile = Join-Path $repo 'scripts\_claude_pending.txt'
 
 # The action: write a single line to _claude_pending.txt. Use Out-File with
 # UTF8NoBOM-equivalent so the daemon (which expects plain ASCII) doesn't choke

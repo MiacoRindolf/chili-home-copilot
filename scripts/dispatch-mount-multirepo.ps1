@@ -1,4 +1,4 @@
-# Recreate scheduler-worker so the new multi-repo mounts (C:/dev:/host_dev
+# Recreate scheduler-worker so the new multi-repo mounts (D:/dev:/host_dev
 # and chili_dispatch_clones:/workspace_managed) take effect, then verify
 # everything is in place.
 #
@@ -23,7 +23,7 @@ Write-Host "[3/4] Capturing diagnostic..." -ForegroundColor Yellow
 Section "Container status"
 docker compose ps scheduler-worker 2>&1 | Add-Content $out
 
-Section "Mount /host_dev sanity (should show contents of C:\dev)"
+Section "Mount /host_dev sanity (should show contents of D:\dev)"
 docker compose exec -T scheduler-worker bash -c "ls /host_dev | head -25; echo total=`$(ls /host_dev | wc -l)" 2>&1 | Add-Content $out
 
 Section "Mount /workspace_managed sanity (should exist, may be empty)"
@@ -39,8 +39,8 @@ print('parse_input:', callable(repo_resolver.parse_input))
 print('resolve_or_register:', callable(repo_resolver.resolve_or_register))
 # Quick parse smoke test
 samples = [
-    'C:\\\\dev\\\\example-project',
-    'D:/code/foo',
+    'D:\\\\dev\\\\example-project',
+    'E:/code/foo',
     '/workspace',
     'https://github.com/MiacoRindolf/chili-home-copilot',
     'git@github.com:MiacoRindolf/chili-home-copilot.git',

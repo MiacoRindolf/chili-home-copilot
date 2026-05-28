@@ -1,5 +1,5 @@
 $ErrorActionPreference = "Continue"
-$repo = "C:\dev\chili-home-copilot"
+$repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Set-Location $repo
 $out = "$PSScriptRoot\dispatch-maker-only-tca-probe-out.txt"
 "# $(Get-Date -Format o) -- maker-only TCA probe" | Out-File $out -Encoding utf8

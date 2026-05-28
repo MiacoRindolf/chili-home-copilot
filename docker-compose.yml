@@ -113,6 +113,7 @@ services:
       # LOCAL DEV ONLY — overrides host .env paths that do not exist inside Linux containers.
       # Must match the read-only checkout mount target below (/workspace).
       - CODE_BRAIN_REPOS=/workspace
+      - CHILI_HOST_DEV_ROOTS=D:/dev
       # HTTPS in the container (self-signed). Hardcoded so host .env cannot accidentally
       # set CHILI_TLS=0 and break https:// in the browser (PR_END_OF_FILE_ERROR).
       # For plain HTTP in Docker, use: docker compose run -e CHILI_TLS=0 … or a compose override.
@@ -150,6 +151,8 @@ services:
       # worktrees/branches and in-container coding validation (CODE_BRAIN_REPOS=/workspace).
       # Omit for production-like deploys.
       - .:/workspace
+      # LOCAL DEV - expose sibling repos under D:\dev for Code Brain registration.
+      - D:/dev:/host_dev
       # Brain Worker UI controls the separate ``brain-worker`` service — needs engine access
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
@@ -573,12 +576,12 @@ services:
       # to /tmp/chili-dispatch) which lives inside the container, NOT in this mount.
       - .:/workspace
       # Phase E.2 — multi-repo support. Wide mount so the brain can address any
-      # local project under C:\dev\... by host path (resolver maps it to
+      # local project under D:\dev\... by host path (resolver maps it to
       # /host_dev/<project>). Without this, adding a new local project would
       # require a docker-compose edit + recreate; with it, the resolver just
       # detects the host path, computes /host_dev/<project>, and registers a
       # code_repos row. No restart needed for new projects.
-      - C:/dev:/host_dev
+      - D:/dev:/host_dev
       # Named volume for repos that the brain CLONES on demand (e.g. when you
       # give it a github.com URL it doesn't have locally). Lives inside
       # Docker's volume manager so it survives container recreate.

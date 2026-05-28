@@ -44,7 +44,7 @@ Followed by `--- details ---` and the full pid 537 row state.
 ### Read current verdict
 
 ```powershell
-Get-Content C:\dev\chili-home-copilot\scripts\dispatch-pid537-watcher-out.txt -Head 15
+Get-Content D:\dev\chili-home-copilot\scripts\dispatch-pid537-watcher-out.txt -Head 15
 ```
 
 ### Manually trigger between scheduled runs
