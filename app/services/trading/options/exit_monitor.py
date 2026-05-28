@@ -197,6 +197,18 @@ def _option_exit_float(value: Any) -> float | None:
         return None
 
 
+def _option_quote_is_crossed(quote: dict[str, Any]) -> bool:
+    bid = _option_exit_float(quote.get("bid_price") or quote.get("bid"))
+    ask = _option_exit_float(quote.get("ask_price") or quote.get("ask"))
+    return bool(
+        bid is not None
+        and ask is not None
+        and bid > 0.0
+        and ask > 0.0
+        and bid > ask
+    )
+
+
 def _option_exit_filled_quantity(raw_order: dict[str, Any]) -> float | None:
     for key in (
         "cumulative_quantity",
@@ -521,6 +533,16 @@ def run_options_exit_pass(db: Session) -> dict[str, int]:
             continue
         quote = adapter.get_quote(str(contract.get("id", "")))
         if not quote:
+            summary["skipped_no_quote"] += 1
+            continue
+        if _option_quote_is_crossed(quote):
+            logger.warning(
+                "[options_exit_monitor] trade=%s crossed option quote bid=%s ask=%s; "
+                "refusing automated exit on untrusted market data",
+                t.id,
+                quote.get("bid_price") or quote.get("bid"),
+                quote.get("ask_price") or quote.get("ask"),
+            )
             summary["skipped_no_quote"] += 1
             continue
         if _record_exit_quote_snapshot(db, t, meta, quote):

@@ -254,6 +254,14 @@ def test_options_exit_rejects_malformed_contract_quantity():
     assert _option_exit_contract_quantity(SimpleNamespace(quantity=0)) is None
 
 
+def test_options_exit_rejects_crossed_quotes_as_untrusted():
+    from app.services.trading.options.exit_monitor import _option_quote_is_crossed
+
+    assert _option_quote_is_crossed({"bid_price": "4.10", "ask_price": "4.00"}) is True
+    assert _option_quote_is_crossed({"bid_price": "3.95", "ask_price": "4.05"}) is False
+    assert _option_quote_is_crossed({"bid_price": "4.10"}) is False
+
+
 def test_options_exit_never_defaults_contract_quantity_to_one():
     options_src = (REPO / "app/services/trading/options/exit_monitor.py").read_text()
 

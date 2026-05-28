@@ -267,6 +267,7 @@ def _close_option_trade_now(
         _has_active_pending_exit,
         _opt_meta,
         _option_exit_order_state,
+        _option_quote_is_crossed,
         _option_exit_raw_order,
         _option_exit_submit_fill_is_complete,
         _parse_option_order_time,
@@ -304,6 +305,8 @@ def _close_option_trade_now(
     quote = adapter.get_quote(str(contract.get("id") or ""))
     if not quote:
         return {"ok": False, "error": "no_option_quote"}
+    if _option_quote_is_crossed(quote):
+        return {"ok": False, "error": "crossed_option_quote"}
 
     try:
         bid = float(quote.get("bid_price") or 0.0)

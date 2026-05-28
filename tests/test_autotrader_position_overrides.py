@@ -612,6 +612,35 @@ def test_close_position_now_live_option_rejects_fractional_contract_quantity() -
     fake_db.commit.assert_not_called()
 
 
+def test_close_position_now_live_option_rejects_crossed_quote() -> None:
+    t = _option_trade_stub()
+    fake_db = _fake_trade_db(t)
+
+    fake_options = MagicMock()
+    fake_options.is_enabled.return_value = True
+    fake_options.find_contract.return_value = {"id": "opt-contract-1"}
+    fake_options.get_quote.return_value = {
+        "bid_price": "1.50",
+        "ask_price": "1.40",
+        "mark_price": "1.45",
+    }
+
+    with patch(
+        "app.services.trading.venue.robinhood_options.RobinhoodOptionsAdapter",
+        return_value=fake_options,
+    ), patch(
+        "app.services.trading.venue.robinhood_spot.RobinhoodSpotAdapter",
+        side_effect=AssertionError("option close-now must not use the spot adapter"),
+    ):
+        res = close_position_now(fake_db, kind="trade", trade_id=int(t.id))
+
+    assert res == {"ok": False, "error": "crossed_option_quote"}
+    assert t.status == "open"
+    fake_options.place_option_sell.assert_not_called()
+    fake_db.add.assert_not_called()
+    fake_db.commit.assert_not_called()
+
+
 def test_close_position_now_live_option_finalizes_terminal_complete_fill() -> None:
     now = datetime.utcnow()
     t = _option_trade_stub()
