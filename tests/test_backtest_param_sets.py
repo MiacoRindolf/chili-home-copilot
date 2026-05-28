@@ -1,7 +1,10 @@
 """Selective normalization: canonical params + ``trading_backtest_param_sets``."""
 from __future__ import annotations
 
+import json
+import math
 import uuid
+from decimal import Decimal
 
 import pytest
 from sqlalchemy.orm import Session
@@ -29,6 +32,25 @@ def test_distinct_params_distinct_hash() -> None:
     assert param_hash_sha256(x) != param_hash_sha256(y)
 
 
+def test_canonical_params_scrub_non_finite_json_values() -> None:
+    canon = canonical_params_dict(
+        {
+            "oos_win_rate": math.nan,
+            "payoff": Decimal("Infinity"),
+            "nested": {"pos_inf": math.inf, "neg_inf": -math.inf},
+            "series": (1.25, math.nan),
+        }
+    )
+    assert canon == {
+        "nested": {"neg_inf": None, "pos_inf": None},
+        "oos_win_rate": None,
+        "payoff": None,
+        "series": [1.25, None],
+    }
+    assert "NaN" not in json.dumps(canon, allow_nan=False)
+    assert param_hash_sha256({"oos_win_rate": math.nan}) == param_hash_sha256({"oos_win_rate": None})
+
+
 @pytest.mark.usefixtures("db")
 def test_get_or_create_reuses_same_param_set(db: Session) -> None:
     p = {"period": "6mo", "interval": "1d", "ohlc_bars": 120}
@@ -38,6 +60,28 @@ def test_get_or_create_reuses_same_param_set(db: Session) -> None:
     assert id1 is not None and id2 is not None
     assert id1 == id2
     assert db.query(BacktestParamSet).count() == 1
+
+
+@pytest.mark.usefixtures("db")
+def test_get_or_create_persists_jsonb_safe_non_finite_params(db: Session) -> None:
+    params = {
+        "period": "6mo",
+        "oos_win_rate": math.nan,
+        "nested": {"inf": math.inf},
+        "series": [1.0, -math.inf],
+    }
+    param_set_id = get_or_create_backtest_param_set(db, params)
+    db.commit()
+
+    assert param_set_id is not None
+    row = db.get(BacktestParamSet, param_set_id)
+    assert row is not None
+    assert row.params_json == {
+        "nested": {"inf": None},
+        "oos_win_rate": None,
+        "period": "6mo",
+        "series": [1.0, None],
+    }
 
 
 @pytest.mark.usefixtures("db")

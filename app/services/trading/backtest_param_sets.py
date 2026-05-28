@@ -7,6 +7,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
+from decimal import Decimal
+from numbers import Integral, Real
 from typing import Any
 
 from sqlalchemy.exc import IntegrityError
@@ -18,9 +21,11 @@ logger = logging.getLogger(__name__)
 
 
 def canonicalize_json_value(value: Any) -> Any:
-    """Recursively sort dict keys for stable hashing; preserve list order.
+    """Return a stable, JSONB-safe value for hashing and storage.
 
-    Non-dict/list scalars are returned as-is. Sets are not supported (treated via default=str at dump).
+    PostgreSQL JSONB rejects IEEE non-finite values such as NaN and Infinity.
+    Those can leak out of OOS and calibration math, so normalize them to null
+    before the queue attempts to persist evidence fingerprints.
     """
     if isinstance(value, dict):
         return {str(k): canonicalize_json_value(value[k]) for k in sorted(value.keys(), key=lambda x: str(x))}
@@ -28,7 +33,20 @@ def canonicalize_json_value(value: Any) -> Any:
         return [canonicalize_json_value(v) for v in value]
     if isinstance(value, tuple):
         return [canonicalize_json_value(v) for v in value]
-    return value
+    if isinstance(value, (set, frozenset)):
+        return [canonicalize_json_value(v) for v in sorted(value, key=lambda x: str(x))]
+    if isinstance(value, bool) or value is None or isinstance(value, str):
+        return value
+    if isinstance(value, Integral):
+        return int(value)
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, Real):
+        numeric = float(value)
+        return numeric if math.isfinite(numeric) else None
+    if isinstance(value, Decimal):
+        return float(value) if value.is_finite() else None
+    return str(value)
 
 
 def canonical_params_dict(params_obj: dict[str, Any]) -> dict[str, Any]:
@@ -41,11 +59,13 @@ def canonical_params_dict(params_obj: dict[str, Any]) -> dict[str, Any]:
 
 def param_hash_sha256(canon: dict[str, Any]) -> str:
     """Stable SHA-256 hex digest of canonical JSON (not for cryptography — dedupe only)."""
+    safe_canon = canonical_params_dict(canon)
     payload = json.dumps(
-        canon,
+        safe_canon,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=True,
+        allow_nan=False,
         default=str,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
