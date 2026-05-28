@@ -11,7 +11,7 @@ from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import case, or_, text
-from sqlalchemy.orm import Session, aliased
+from sqlalchemy.orm import Session
 
 from ...config import (
     AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE,
@@ -2694,14 +2694,17 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
     # writes alerts without a specific owner; treating them as processable by
     # the configured autotrader user is the intended behavior (single-tenant
     # deployment). Use ``OR`` so explicit-user alerts are still honored.
-    ar = aliased(AutoTraderRun)
+    processed_alert_exists = (
+        db.query(AutoTraderRun.id)
+        .filter(AutoTraderRun.breakout_alert_id == BreakoutAlert.id)
+        .exists()
+    )
     candidate_base = (
         db.query(BreakoutAlert)
-        .outerjoin(ar, ar.breakout_alert_id == BreakoutAlert.id)
         .filter(
             BreakoutAlert.alert_tier == "pattern_imminent",
             or_(BreakoutAlert.user_id == uid, BreakoutAlert.user_id.is_(None)),
-            ar.id.is_(None),
+            ~processed_alert_exists,
         )
     )
     stock_defer = _stock_session_defer_state()
@@ -2732,11 +2735,10 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
     if stock_defer.get("enabled"):
         stock_unprocessed_base = (
             db.query(BreakoutAlert)
-            .outerjoin(ar, ar.breakout_alert_id == BreakoutAlert.id)
             .filter(
                 BreakoutAlert.alert_tier == "pattern_imminent",
                 or_(BreakoutAlert.user_id == uid, BreakoutAlert.user_id.is_(None)),
-                ar.id.is_(None),
+                ~processed_alert_exists,
                 stock_asset_filter,
             )
         )
