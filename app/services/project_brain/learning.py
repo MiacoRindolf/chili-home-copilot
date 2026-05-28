@@ -62,14 +62,23 @@ def _prioritize_agents(agents_to_run: List[Tuple[str, Any]], db: Session, user_i
     """Sort agents by priority: those with pending messages first, then by pipeline order."""
     from ...models.project_brain import AgentMessage
 
-    message_counts: Dict[str, int] = {}
-    for name, _ in agents_to_run:
-        count = (
-            db.query(func.count(AgentMessage.id))
-            .filter(AgentMessage.to_agent == name, AgentMessage.user_id == user_id, AgentMessage.acknowledged.is_(False))
-            .scalar() or 0
+    agent_names = [name for name, _ in agents_to_run]
+    if not agent_names:
+        return agents_to_run
+
+    message_counts: Dict[str, int] = {
+        str(name): int(count or 0)
+        for name, count in (
+            db.query(AgentMessage.to_agent, func.count(AgentMessage.id))
+            .filter(
+                AgentMessage.to_agent.in_(agent_names),
+                AgentMessage.user_id == user_id,
+                AgentMessage.acknowledged.is_(False),
+            )
+            .group_by(AgentMessage.to_agent)
+            .all()
         )
-        message_counts[name] = count
+    }
 
     def _sort_key(item):
         name = item[0]
