@@ -19675,6 +19675,29 @@ def _migration_281_llm_cost_observability(conn) -> None:
     logger.info("[mig281] LLM cost observability fields and trading policies installed")
 
 
+def _migration_282_autotrader_imminent_selector_indexes(conn) -> None:
+    """Speed up AutoTrader's unprocessed pattern-imminent alert selector."""
+
+    tables = _tables(conn)
+    if "trading_breakout_alerts" in tables:
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_breakout_alerts_imminent_user_alerted "
+            "ON trading_breakout_alerts (user_id, alerted_at DESC, id DESC) "
+            "WHERE alert_tier = 'pattern_imminent'"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_breakout_alerts_imminent_user_asset_alerted "
+            "ON trading_breakout_alerts (user_id, asset_type, alerted_at DESC, id DESC) "
+            "WHERE alert_tier = 'pattern_imminent'"
+        ))
+        conn.execute(text("ANALYZE trading_breakout_alerts"))
+    if "trading_autotrader_runs" in tables:
+        conn.execute(text("ANALYZE trading_autotrader_runs"))
+
+    conn.commit()
+    logger.info("[mig282] AutoTrader imminent selector indexes installed")
+
+
 
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -20018,6 +20041,8 @@ MIGRATIONS = [
      _migration_279_project_autonomy_architect_reviews),
     ("281_llm_cost_observability",
      _migration_281_llm_cost_observability),
+    ("282_autotrader_imminent_selector_indexes",
+     _migration_282_autotrader_imminent_selector_indexes),
 ]
 
 
