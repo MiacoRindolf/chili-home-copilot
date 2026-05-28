@@ -122,6 +122,16 @@ def _mechanical_condition_from_segment(segment: str) -> dict[str, Any] | None:
     if not segment:
         return None
 
+    if re.search(r"\bgolden\s+cross\b", segment):
+        return {"indicator": "ema_50", "op": ">", "ref": "ema_200"}
+    if re.search(r"\bdeath\s+cross\b", segment):
+        return {"indicator": "ema_50", "op": "<", "ref": "ema_200"}
+    if re.search(r"\bmacd\b.*\b(?:positive|bullish|above\s+zero|over\s+zero)\b", segment):
+        return {"indicator": "macd_hist", "op": ">", "value": 0.0}
+    if re.search(r"\bmacd\b.*\b(?:negative|bearish|below\s+zero|under\s+zero)\b", segment):
+        return {"indicator": "macd_hist", "op": "<", "value": 0.0}
+    if re.search(r"\b(?:volume\s+spike|high\s+volume|surging\s+volume|rvol\s+spike)\b", segment):
+        return {"indicator": "rel_vol", "op": ">=", "value": 1.5}
     if re.search(r"\b(?:bb|bollinger)\b.*\bsqueeze\b|\bsqueeze\b.*\b(?:bb|bollinger)\b", segment):
         return {"indicator": "bb_squeeze", "op": "==", "value": True}
     if re.search(

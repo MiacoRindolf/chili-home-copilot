@@ -371,6 +371,7 @@ def api_suggest_pattern(
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=800,
                 trace_id="pattern-suggest",
+                cacheable=True,
                 purpose="pattern_suggest",
             )
             if not resp:

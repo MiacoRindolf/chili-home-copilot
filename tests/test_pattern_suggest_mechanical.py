@@ -49,6 +49,25 @@ def test_mechanical_pattern_suggestion_parses_vwap_and_narrow_range():
     assert {"indicator": "narrow_range", "op": "==", "value": "NR7"} in parsed["conditions"]
 
 
+def test_mechanical_pattern_suggestion_parses_trader_shorthand():
+    parsed = _mechanical_pattern_suggestion(
+        "golden cross with MACD positive and volume spike"
+    )
+
+    assert parsed is not None
+    assert {"indicator": "ema_50", "op": ">", "ref": "ema_200"} in parsed["conditions"]
+    assert {"indicator": "macd_hist", "op": ">", "value": 0.0} in parsed["conditions"]
+    assert {"indicator": "rel_vol", "op": ">=", "value": 1.5} in parsed["conditions"]
+
+
+def test_mechanical_pattern_suggestion_parses_bearish_trader_shorthand():
+    parsed = _mechanical_pattern_suggestion("death cross and MACD below zero")
+
+    assert parsed is not None
+    assert {"indicator": "ema_50", "op": "<", "ref": "ema_200"} in parsed["conditions"]
+    assert {"indicator": "macd_hist", "op": "<", "value": 0.0} in parsed["conditions"]
+
+
 def test_mechanical_pattern_suggestion_requires_two_conditions():
     assert _mechanical_pattern_suggestion("breakout after good news") is None
     assert _mechanical_pattern_suggestion("RSI above 55") is None
