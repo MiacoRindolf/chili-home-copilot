@@ -193,12 +193,9 @@ def extract_profile(user_id: int, db: Session, trace_id: str = "personality") ->
                 system_prompt="You are a personality analysis assistant. Return only valid JSON.",
                 trace_id=trace_id,
             )
-        except Exception:
-            result = openai_client.chat(
-                messages=[{"role": "user", "content": prompt}],
-                system_prompt="You are a personality analysis assistant. Return only valid JSON.",
-                trace_id=trace_id,
-            )
+        except Exception as e:
+            log_info(trace_id, f"personality_gateway_error={e}")
+            return None
 
         if not result.get("reply"):
             return None

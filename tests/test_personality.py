@@ -1,5 +1,6 @@
 """Tests for housemate personality profiling."""
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 from datetime import datetime
@@ -141,20 +142,23 @@ class TestExtractProfile:
             ))
         db.commit()
 
-        mock_oc.chat.return_value = {
-            "reply": json.dumps({
-                "interests": ["cooking", "gardening"],
-                "dietary": "none",
-                "tone": "casual",
-                "notes": "Enjoys Italian food",
-            }),
-            "tokens_used": 100,
-            "model": "gpt-4o-mini",
-        }
+        with patch("app.services.context_brain.llm_gateway.gateway_chat") as mock_gateway:
+            mock_gateway.return_value = {
+                "reply": json.dumps({
+                    "interests": ["cooking", "gardening"],
+                    "dietary": "none",
+                    "tone": "casual",
+                    "notes": "Enjoys Italian food",
+                }),
+                "tokens_used": 100,
+                "model": "gpt-4o-mini",
+            }
 
-        result = extract_profile(user.id, db)
+            result = extract_profile(user.id, db)
         assert result is not None
         assert "cooking" in result["interests"]
+        assert mock_gateway.call_args.kwargs["purpose"] == "personality_apply"
+        mock_oc.chat.assert_not_called()
 
         profile = db.query(HousemateProfile).filter(
             HousemateProfile.user_id == user.id
@@ -179,19 +183,21 @@ class TestExtractProfile:
         ))
         db.commit()
 
-        mock_oc.chat.return_value = {
-            "reply": json.dumps({
-                "interests": ["cooking", "gaming"],
-                "dietary": "vegetarian",
-                "tone": "casual",
-                "notes": "Night owl",
-            }),
-            "tokens_used": 80,
-            "model": "gpt-4o-mini",
-        }
+        with patch("app.services.context_brain.llm_gateway.gateway_chat") as mock_gateway:
+            mock_gateway.return_value = {
+                "reply": json.dumps({
+                    "interests": ["cooking", "gaming"],
+                    "dietary": "vegetarian",
+                    "tone": "casual",
+                    "notes": "Night owl",
+                }),
+                "tokens_used": 80,
+                "model": "gpt-4o-mini",
+            }
 
-        result = extract_profile(user.id, db)
+            result = extract_profile(user.id, db)
         assert result is not None
+        mock_oc.chat.assert_not_called()
 
         profile = db.query(HousemateProfile).filter(
             HousemateProfile.user_id == user.id
@@ -212,14 +218,16 @@ class TestExtractProfile:
         ))
         db.commit()
 
-        mock_oc.chat.return_value = {
-            "reply": "",
-            "tokens_used": 0,
-            "model": "error",
-        }
+        with patch("app.services.context_brain.llm_gateway.gateway_chat") as mock_gateway:
+            mock_gateway.return_value = {
+                "reply": "",
+                "tokens_used": 0,
+                "model": "error",
+            }
 
-        result = extract_profile(user.id, db)
+            result = extract_profile(user.id, db)
         assert result is None
+        mock_oc.chat.assert_not_called()
 
     @patch("app.personality.openai_client")
     def test_handles_invalid_json(self, mock_oc, db):
@@ -233,14 +241,43 @@ class TestExtractProfile:
         ))
         db.commit()
 
-        mock_oc.chat.return_value = {
-            "reply": "This is not JSON at all!",
-            "tokens_used": 50,
-            "model": "gpt-4o-mini",
-        }
+        with patch("app.services.context_brain.llm_gateway.gateway_chat") as mock_gateway:
+            mock_gateway.return_value = {
+                "reply": "This is not JSON at all!",
+                "tokens_used": 50,
+                "model": "gpt-4o-mini",
+            }
 
-        result = extract_profile(user.id, db)
+            result = extract_profile(user.id, db)
         assert result is None
+        mock_oc.chat.assert_not_called()
+
+    @patch("app.personality.openai_client")
+    def test_gateway_exception_does_not_fall_back_to_direct_openai(self, mock_oc, db):
+        user = User(name="TestUser")
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+        db.add(ChatMessage(
+            convo_key=f"user:{user.id}", role="user", content="I have a few personal preferences"
+        ))
+        db.commit()
+
+        mock_oc.chat = MagicMock(side_effect=AssertionError("personality_apply must not bypass gateway"))
+        with patch("app.services.context_brain.llm_gateway.gateway_chat") as mock_gateway:
+            mock_gateway.side_effect = RuntimeError("gateway unavailable")
+
+            result = extract_profile(user.id, db)
+
+        assert result is None
+        mock_oc.chat.assert_not_called()
+
+    def test_personality_source_has_no_direct_chat_fallback(self):
+        import app.personality as personality
+
+        source = Path(personality.__file__).read_text(encoding="utf-8")
+        assert "openai_client.chat(" not in source
 
 
 class TestGetProfileContext:
