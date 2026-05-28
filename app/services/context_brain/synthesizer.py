@@ -22,8 +22,6 @@ import time
 from typing import Optional
 
 from ... import openai_client
-from .purpose_policy import default_synthesizer
-
 logger = logging.getLogger(__name__)
 
 
@@ -85,6 +83,7 @@ def synthesize(
             system_prompt=system_prompt,
             trace_id=trace_id,
             user_message=user_query,
+            model_override=model,
         )
     except Exception as e:
         logger.exception("[context_brain.synthesizer] openai_client.chat() raised")

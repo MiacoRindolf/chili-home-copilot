@@ -130,6 +130,7 @@ def run_tree(
         outcome.synthesize_latency_ms = synth_ms
         outcome.premium_calls_count += 1
         outcome.premium_total_tokens += int(synth_result.get("tokens_used") or 0)
+        outcome.premium_cost_usd += float(synth_result.get("estimated_cost_usd") or 0.0)
         outcome.final_text = (synth_result.get("reply") or "").strip()
         # If the synthesizer returned the empty error sentinel, fall back
         # to the compiled context so the user gets SOMETHING actionable.

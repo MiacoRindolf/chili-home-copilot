@@ -691,6 +691,8 @@ def gateway_chat(
                     ollama_tokens=outcome.ollama_total_tokens,
                     premium_tokens=outcome.premium_total_tokens,
                     premium_cost_usd=outcome.premium_cost_usd,
+                    total_tokens=outcome.premium_total_tokens + outcome.ollama_total_tokens,
+                    estimated_cost_usd=outcome.premium_cost_usd,
                     decompose_ms=outcome.decompose_latency_ms,
                     chunk_ms=outcome.chunk_latency_ms,
                     compile_ms=outcome.compile_latency_ms,
