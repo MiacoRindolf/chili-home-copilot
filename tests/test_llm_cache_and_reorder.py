@@ -102,6 +102,46 @@ def test_call_llm_different_max_tokens_different_cache_keys(_cfg):
 
 
 @patch("app.services.llm_caller._cache_config", return_value=(256, 600))
+def test_call_llm_cache_key_includes_purpose_model_policy(_cfg, monkeypatch):
+    gateway = MagicMock(side_effect=[
+        {"reply": "mini-policy-reply", "model": "gpt-5.4-mini", "gateway_log_id": 11},
+        {"reply": "nano-policy-reply", "model": "gpt-5.4-nano", "gateway_log_id": 12},
+    ])
+    monkeypatch.setattr("app.openai_client.is_configured", lambda: True)
+    monkeypatch.setattr("app.services.context_brain.llm_gateway.gateway_chat", gateway)
+
+    msgs = [{"role": "user", "content": "deterministic code search"}]
+    monkeypatch.setattr(
+        "app.config.settings.chili_llm_purpose_model_overrides_json",
+        '{"code_search":"gpt-5.4-mini"}',
+    )
+    r1 = llm_caller.call_llm(
+        messages=msgs,
+        max_tokens=100,
+        cacheable=True,
+        purpose="code_search",
+    )
+
+    monkeypatch.setattr(
+        "app.config.settings.chili_llm_purpose_model_overrides_json",
+        '{"code_search":"gpt-5.4-nano"}',
+    )
+    r2 = llm_caller.call_llm(
+        messages=msgs,
+        max_tokens=100,
+        cacheable=True,
+        purpose="code_search",
+    )
+
+    assert r1 == "mini-policy-reply"
+    assert r2 == "nano-policy-reply"
+    assert gateway.call_count == 2
+    stats = llm_caller.get_cache_stats()
+    assert stats["misses"] == 2
+    assert stats["hits"] == 0
+
+
+@patch("app.services.llm_caller._cache_config", return_value=(256, 600))
 def test_call_llm_cacheable_false_never_caches(_cfg):
     mock_chat = MagicMock(return_value={"reply": "ok", "model": "m1"})
     with patch("app.openai_client.chat", mock_chat), patch(

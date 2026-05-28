@@ -79,12 +79,28 @@ def _cache_key(
     payload = {
         "m": primary_model,
         "p": purpose or "",
+        "policy": _cache_policy_salt(purpose),
         "t": int(max_tokens or 0),
         "s": system_prompt or "",
         "u": json.dumps(messages, sort_keys=True, default=str),
     }
     blob = json.dumps(payload, sort_keys=True).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()
+
+
+def _cache_policy_salt(purpose: str | None) -> str:
+    if not purpose:
+        return ""
+    try:
+        from ..config import settings
+
+        return json.dumps({
+            "default_cheap": getattr(settings, "chili_llm_default_cheap_model", ""),
+            "escalation": getattr(settings, "chili_llm_escalation_model", ""),
+            "purpose_overrides": getattr(settings, "chili_llm_purpose_model_overrides_json", ""),
+        }, sort_keys=True, default=str)
+    except Exception:
+        return ""
 
 
 def _cache_get(key: str) -> str | None:
