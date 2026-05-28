@@ -44,6 +44,20 @@ def _holder_id() -> str:
     return f"{host}:{os.getpid()}"
 
 
+def _recover_dispatch_session(db: Session, context: str) -> None:
+    """Clear a failed dispatcher transaction after a swallowed handler error."""
+    try:
+        db.rollback()
+    except Exception as exc:
+        logger.debug(
+            "%s rollback after swallowed %s failed: %s",
+            LOG_PREFIX,
+            context,
+            exc,
+            exc_info=True,
+        )
+
+
 def _handle_backtest_requested(db: Session, ev, user_id: int | None) -> None:
     from ....db import SessionLocal
     from ....models.trading import ScanPattern
@@ -118,6 +132,7 @@ def _handle_backtest_requested(db: Session, ev, user_id: int | None) -> None:
         )
     except Exception as e:
         logger.debug("%s mesh publish skipped: %s", LOG_PREFIX, e)
+        _recover_dispatch_session(db, "backtest mesh publish")
 
 
 def _handle_execution_feedback_digest(db: Session, ev, user_id: int | None) -> None:
@@ -202,6 +217,7 @@ def _handle_execution_feedback_digest(db: Session, ev, user_id: int | None) -> N
         )
     except Exception as e:
         logger.debug("%s mesh exec-quality publish skipped: %s", LOG_PREFIX, e)
+        _recover_dispatch_session(db, "execution-quality mesh publish")
 
 
 def _dispatch_limits(
@@ -347,6 +363,7 @@ def run_brain_work_dispatch_round(
         claimed_total += len(rows)
         n_done = 0
         for ev in rows:
+            ev_id = int(ev.id)
             try:
                 if event_type == "backtest_requested":
                     _handle_backtest_requested(db, ev, user_id)
@@ -389,8 +406,9 @@ def run_brain_work_dispatch_round(
                         logger.warning(
                             "%s quality_score (backtest_completed) handler "
                             "failed ev_id=%s: %s",
-                            LOG_PREFIX, ev.id, _qs_err,
+                            LOG_PREFIX, ev_id, _qs_err,
                         )
+                        _recover_dispatch_session(db, "backtest quality_score")
                 elif event_type == "pattern_eligible_promotion":
                     # FIX 38 (Phase 2 #3, 2026-04-29): promote handler.
                     # Sole authority for flipping lifecycle to 'promoted'.
@@ -428,8 +446,9 @@ def run_brain_work_dispatch_round(
                         logger.warning(
                             "%s pattern_stats handler failed ev_id=%s: %s "
                             "— proceeding to demote with stale evidence",
-                            LOG_PREFIX, ev.id, _ps,
+                            LOG_PREFIX, ev_id, _ps,
                         )
+                        _recover_dispatch_session(db, "pattern_stats")
                     demote_err: Exception | None = None
                     try:
                         from .handlers.demote import handle_trade_closed
@@ -438,8 +457,9 @@ def run_brain_work_dispatch_round(
                         demote_err = _de
                         logger.warning(
                             "%s demote handler failed ev_id=%s: %s — proceeding to regime_ledger",
-                            LOG_PREFIX, ev.id, _de,
+                            LOG_PREFIX, ev_id, _de,
                         )
+                        _recover_dispatch_session(db, "demote")
                     # f-handler-live-drift + f-handler-execution-robustness
                     # (2026-05-06, Phase 6 of f-overnight-jumbo): both
                     # subscribe to trade-close events; both swallow their
@@ -461,8 +481,9 @@ def run_brain_work_dispatch_round(
                     except Exception as _ld_err:
                         logger.warning(
                             "%s live_drift handler failed ev_id=%s: %s",
-                            LOG_PREFIX, ev.id, _ld_err,
+                            LOG_PREFIX, ev_id, _ld_err,
                         )
+                        _recover_dispatch_session(db, "live_drift")
                     try:
                         from .handlers.execution_robustness import (
                             handle_paper_trade_closed as _er_paper,
@@ -478,8 +499,9 @@ def run_brain_work_dispatch_round(
                     except Exception as _er_err:
                         logger.warning(
                             "%s execution_robustness handler failed ev_id=%s: %s",
-                            LOG_PREFIX, ev.id, _er_err,
+                            LOG_PREFIX, ev_id, _er_err,
                         )
+                        _recover_dispatch_session(db, "execution_robustness")
 
                     try:
                         from .handlers.regime_ledger import handle_trade_closed_for_ledger
@@ -490,7 +512,7 @@ def run_brain_work_dispatch_round(
                         # Both failed — re-raise the earlier one for retry.
                         logger.warning(
                             "%s regime_ledger handler also failed ev_id=%s: %s",
-                            LOG_PREFIX, ev.id, _re,
+                            LOG_PREFIX, ev_id, _re,
                         )
                         raise demote_err
                     # f-composite-quality-event-driven (Phase 3,
@@ -508,32 +530,33 @@ def run_brain_work_dispatch_round(
                         logger.warning(
                             "%s quality_score (trade_closed) handler "
                             "failed ev_id=%s: %s",
-                            LOG_PREFIX, ev.id, _qs_err,
+                            LOG_PREFIX, ev_id, _qs_err,
                         )
+                        _recover_dispatch_session(db, "trade-close quality_score")
                     if demote_err is not None:
                         raise demote_err
                 else:
                     raise ValueError(f"unknown work event_type={event_type}")
-                mark_work_done(db, int(ev.id))
+                mark_work_done(db, ev_id)
                 db.commit()
                 n_done += 1
                 processed += 1
             except Exception as e:
-                logger.warning("%s work id=%s type=%s failed: %s", LOG_PREFIX, ev.id, event_type, e, exc_info=True)
+                logger.warning("%s work id=%s type=%s failed: %s", LOG_PREFIX, ev_id, event_type, e, exc_info=True)
                 try:
                     db.rollback()
                 except Exception:
                     pass
                 try:
-                    mark_work_retry_or_dead(db, int(ev.id), str(e))
+                    mark_work_retry_or_dead(db, ev_id, str(e))
                     db.commit()
                 except Exception as e2:
-                    logger.warning("%s mark retry failed id=%s: %s", LOG_PREFIX, ev.id, e2)
+                    logger.warning("%s mark retry failed id=%s: %s", LOG_PREFIX, ev_id, e2)
                     try:
                         db.rollback()
                     except Exception:
                         pass
-                errors.append(f"id={ev.id}:{event_type}:{e!s}")
+                errors.append(f"id={ev_id}:{event_type}:{e!s}")
         per_type[event_type] = n_done
 
     # f-pattern-demote-sweep-wiring-fix (2026-05-09): per-cycle
