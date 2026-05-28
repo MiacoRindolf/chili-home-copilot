@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 from app.config import AUTOTRADER_OPTIONS_SUBSTITUTE_DEFAULT_REQUIRES_UNDERLYING_POSITIVE_EDGE
 from app.services.trading import auto_trader as at_mod
+
+
+REPO = Path(__file__).resolve().parent.parent
 
 
 def _stock_alert() -> SimpleNamespace:
@@ -146,7 +150,13 @@ def test_options_substitute_runs_after_underlying_positive_edge(monkeypatch):
     assert synth_calls["count"] == 1
     assert alert.asset_type == "options"
     assert alert.entry_price == 1.23
+    assert alert.indicator_snapshot["options_path"] is True
+    assert alert.indicator_snapshot["asset_kind"] == "option"
+    assert alert.indicator_snapshot["option_contract_key"] == (
+        "XYZ:2026-06-18:call:105.000"
+    )
     assert alert.indicator_snapshot["option_meta"]["strike"] == 105.0
+    assert alert.indicator_snapshot["option_meta"]["price_domain"] == "option_premium"
 
 
 def test_options_alert_skips_equity_llm_revalidation(monkeypatch):
@@ -303,6 +313,35 @@ def test_option_terminal_partial_entry_preserves_filled_contract_only():
     assert filled_qty == 1.0
     assert remaining_qty == 0.0
     assert trade_qty == 1.0
+
+
+def test_option_terminal_zero_fill_is_cancelled_not_open_zero_quantity():
+    status, broker_status, filled_qty, remaining_qty = (
+        at_mod._entry_lifecycle_from_response(
+            broker_source="robinhood",
+            res={
+                "ok": True,
+                "order_id": "oid",
+                "state": "cancelled",
+                "processed_quantity": "0",
+            },
+            snap={"options_path": True},
+            qty=2.0,
+        )
+    )
+
+    assert status == "cancelled"
+    assert broker_status == "cancelled"
+    assert filled_qty == 0.0
+    assert remaining_qty == 0.0
+
+
+def test_option_entry_rejects_invalid_contract_quantity_instead_of_defaulting_to_one():
+    src = (REPO / "app/services/trading/auto_trader.py").read_text()
+
+    assert "parse_contract_quantity(_opt_meta.get(\"quantity\"))" in src
+    assert "options_meta_invalid_quantity" in src
+    assert "int(_opt_meta.get(\"quantity\") or 1)" not in src
 
 
 def test_option_terminal_complete_entry_fill_opens_requested_contracts():

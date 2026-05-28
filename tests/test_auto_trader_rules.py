@@ -906,6 +906,10 @@ def test_passes_rule_gate_options_skips_underlying_stop_target_validation(
                 "option_type": "call",
                 "limit_price": 5.40,
                 "quantity": 1,
+                "delta": 0.42,
+                "gamma": 0.03,
+                "theta": -0.08,
+                "vega": 0.11,
             }
         },
     )
@@ -924,6 +928,79 @@ def test_passes_rule_gate_options_skips_underlying_stop_target_validation(
     _mock_port.assert_called_once()
     assert _mock_port.call_args.kwargs.get("asset_type") == "options"
     assert snap.get("portfolio_asset_type") == "options"
+
+
+@patch("app.services.trading.auto_trader_rules.resolve_effective_capital", return_value=(100_000.0, "test"))
+@patch("app.services.trading.auto_trader_rules.resolve_brain_risk_context", return_value={"dial_value": 1.0})
+@patch("app.services.trading.auto_trader_rules.resolve_effective_slippage_pct", return_value=(2.0, "test"))
+@patch("app.services.trading.portfolio_risk.check_new_trade_allowed", return_value=(True, "ok"))
+def test_passes_rule_gate_options_blocks_missing_complete_greeks(
+    _mock_port,
+    _mock_slippage,
+    _mock_brain,
+    _mock_capital,
+    monkeypatch,
+):
+    monkeypatch.delenv("CHILI_OPTIONS_BUDGET_BYPASS", raising=False)
+    db = None
+    settings = SimpleNamespace(
+        chili_autotrader_rth_only=False,
+        chili_autotrader_confidence_floor=0.5,
+        chili_autotrader_min_projected_profit_pct=5.0,
+        chili_autotrader_max_symbol_price_usd=50.0,
+        chili_autotrader_max_entry_slippage_pct=2.0,
+        chili_autotrader_daily_loss_cap_usd=500.0,
+        chili_autotrader_daily_loss_cap_pct=0.0,
+        chili_autotrader_max_concurrent=60,
+        chili_autotrader_max_concurrent_equity=2,
+        chili_autotrader_max_concurrent_crypto=2,
+        chili_autotrader_max_concurrent_options=2,
+        chili_autotrader_crypto_enabled=False,
+        chili_autotrader_options_enabled=True,
+        chili_autotrader_options_min_underlying_reward_risk=1.0,
+        chili_autotrader_options_min_option_reward_risk=1.0,
+        chili_autotrader_options_min_expected_value_pct=0.0,
+        chili_autotrader_assumed_capital_usd=100_000.0,
+        chili_autotrader_broker_equity_cache_enabled=False,
+    )
+    ctx = RuleGateContext(
+        current_price=113.25,
+        autotrader_open_count=0,
+        realized_loss_today_usd=0.0,
+        autotrader_open_count_by_lane={"equity": 0, "crypto": 0, "options": 0},
+    )
+    alert = BreakoutAlert(
+        ticker="A",
+        asset_type="options",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.7,
+        price_at_alert=113.25,
+        entry_price=5.40,
+        stop_loss=110.0,
+        target_price=130.0,
+        user_id=1,
+        indicator_snapshot={
+            "option_meta": {
+                "strike": 115.0,
+                "expiration": "2026-06-18",
+                "option_type": "call",
+                "limit_price": 5.40,
+                "quantity": 1,
+            }
+        },
+    )
+
+    ok, reason, snap = passes_rule_gate(
+        db, alert, settings=settings, ctx=ctx, for_new_entry=True
+    )
+
+    assert not ok
+    assert reason == "options_budget:missing_complete_greeks"
+    assert snap["options_budget_check"]["ok"] is False
+    assert snap["options_budget_check"]["reasons"] == [
+        "missing_complete_greeks:delta,gamma,theta,vega"
+    ]
+    _mock_port.assert_not_called()
 
 
 @patch("app.services.trading.auto_trader_rules.resolve_effective_capital", return_value=(100_000.0, "test"))
@@ -980,6 +1057,10 @@ def test_passes_rule_gate_options_blocks_when_target_cannot_pay_premium(
                 "option_type": "call",
                 "limit_price": 5.40,
                 "quantity": 1,
+                "delta": 0.42,
+                "gamma": 0.03,
+                "theta": -0.08,
+                "vega": 0.11,
             }
         },
     )

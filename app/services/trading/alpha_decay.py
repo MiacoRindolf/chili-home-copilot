@@ -136,12 +136,16 @@ def check_alpha_decay(
 
     evidence_by_sp: dict[int, list[dict]] = {}
     for t in recent_trades:
-        pnl_pct = trade_return_pct(t) or 0.0
+        pnl_pct = trade_return_pct(t)
+        if pnl_pct is None:
+            continue
         evidence_by_sp.setdefault(t.scan_pattern_id, []).append(
             {"pnl": t.pnl or 0, "pnl_pct": pnl_pct, "source": "live"}
         )
     for pt in recent_paper:
-        pnl_pct = paper_trade_return_pct(pt) or 0.0
+        pnl_pct = paper_trade_return_pct(pt)
+        if pnl_pct is None:
+            continue
         evidence_by_sp.setdefault(pt.scan_pattern_id, []).append(
             {"pnl": pt.pnl or 0, "pnl_pct": pnl_pct, "source": "paper"}
         )

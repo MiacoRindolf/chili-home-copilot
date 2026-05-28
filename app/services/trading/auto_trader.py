@@ -80,6 +80,11 @@ from .auto_trader_synergy import (
     maybe_scale_in,
     used_scale_in_pattern_ids,
 )
+from .options.contracts import (
+    normalize_option_meta,
+    option_price_domains_snapshot,
+    parse_contract_quantity,
+)
 from .coinbase_maker_pricing import plan_post_only_buy_limit
 from .management_scope import MANAGEMENT_SCOPE_AUTO_TRADER_V1
 from .ops_log_prefixes import CHILI_MARKET_DATA
@@ -257,6 +262,19 @@ def _float_or_none(value: Any) -> float | None:
     return out if out > 0 else None
 
 
+def _normalize_option_meta_for_alert(
+    alert: BreakoutAlert,
+    meta: dict[str, Any],
+    *,
+    underlying_price: float | None = None,
+) -> dict[str, Any]:
+    return normalize_option_meta(
+        meta,
+        underlying=getattr(alert, "ticker", None),
+        current_underlying_price=underlying_price,
+    )
+
+
 def _paper_entry_context_for_alert(
     alert: BreakoutAlert,
     *,
@@ -268,6 +286,7 @@ def _paper_entry_context_for_alert(
     option_meta = snap.get("option_meta") if isinstance(snap.get("option_meta"), dict) else {}
     if not (snap.get("options_path") and option_meta):
         return float(px), {}
+    option_meta = _normalize_option_meta_for_alert(alert, option_meta, underlying_price=px)
     premium = (
         _float_or_none(option_meta.get("limit_price"))
         or _float_or_none(alert.entry_price)
@@ -275,8 +294,11 @@ def _paper_entry_context_for_alert(
     )
     return float(premium), {
         "asset_type": "options",
+        "asset_kind": "option",
         "options_path": True,
-        "option_meta": dict(option_meta),
+        "option_meta": option_meta,
+        "option_contract_key": option_meta.get("contract_key"),
+        "price_domains": option_price_domains_snapshot(),
         "underlying_price_at_entry": float(px),
         "paper_entry_price_source": "option_premium",
     }
@@ -408,6 +430,8 @@ def _entry_lifecycle_from_response(
             if filled + 1e-9 < qty:
                 return "open", "partially_filled_cancelled", filled, 0.0
             return "open", "filled", filled, 0.0
+        if state in _OPTION_ENTRY_TERMINAL_STATES:
+            return "cancelled", state or "cancelled", 0.0, 0.0
         return "working", state or "accepted", 0.0, qty
 
     return "open", None, None, None
@@ -429,6 +453,56 @@ def _entry_quantity_for_trade(
     ):
         return float(entry_filled_qty)
     return float(requested_qty)
+
+
+def _detach_mismatched_option_position_link(db: Session, trade: Trade) -> bool:
+    """Remove a trigger-created link from an option trade to an equity position.
+
+    The current trading_positions natural key does not include option contract
+    identity. Until the position schema grows an instrument dimension, the
+    safer behavior is no position_id for option trades rather than a false link
+    to the underlying equity row.
+    """
+    try:
+        pos_id = getattr(trade, "position_id", None)
+        if pos_id is None:
+            return False
+        row = db.execute(
+            text("SELECT asset_kind FROM trading_positions WHERE id = :pid"),
+            {"pid": int(pos_id)},
+        ).first()
+        asset_kind = str((row[0] if row else "") or "").strip().lower()
+        if asset_kind in {"option", "options"}:
+            return False
+        db.execute(
+            text(
+                "UPDATE trading_trades "
+                "SET position_id = NULL "
+                "WHERE id = :tid AND position_id = :pid"
+            ),
+            {"tid": int(getattr(trade, "id")), "pid": int(pos_id)},
+        )
+        trade.position_id = None
+        db.commit()
+        logger.warning(
+            "[autotrader_options] detached option trade_id=%s from non-option "
+            "position_id=%s asset_kind=%s",
+            getattr(trade, "id", None),
+            pos_id,
+            asset_kind or "unknown",
+        )
+        return True
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.debug(
+            "[autotrader_options] position-link detach failed for trade_id=%s",
+            getattr(trade, "id", None),
+            exc_info=True,
+        )
+        return False
 
 
 def _autotrader_tick_note(
@@ -2867,10 +2941,20 @@ def _maybe_substitute_with_options(
         )
         if not opt_meta:
             return
+        opt_meta = _normalize_option_meta_for_alert(
+            alert,
+            opt_meta,
+            underlying_price=float(spot),
+        )
 
         snap = alert.indicator_snapshot if isinstance(alert.indicator_snapshot, dict) else {}
         snap = dict(snap)  # copy so we don't mutate ORM state inadvertently
+        snap["asset_type"] = "options"
+        snap["asset_kind"] = "option"
+        snap["options_path"] = True
         snap["option_meta"] = opt_meta
+        snap["option_contract_key"] = opt_meta.get("contract_key")
+        snap["price_domains"] = option_price_domains_snapshot()
         snap["original_asset_type"] = alert.asset_type
         alert.indicator_snapshot = snap
         alert.asset_type = "options"
@@ -3897,7 +3981,16 @@ def _execute_broker_buy(
     # extract it and call place_option_buy. snap['option_meta'] is set
     # by the gate when options_path=True.
     if snap.get("options_path") and snap.get("option_meta"):
-        opt_meta = snap["option_meta"]
+        opt_meta = _normalize_option_meta_for_alert(
+            alert,
+            snap["option_meta"],
+            underlying_price=px,
+        )
+        snap["option_meta"] = opt_meta
+        snap["asset_type"] = "options"
+        snap["asset_kind"] = "option"
+        snap["option_contract_key"] = opt_meta.get("contract_key")
+        snap["price_domains"] = option_price_domains_snapshot()
         venue_reason = _live_venue_health_block_reason(db, venue="robinhood")
         if venue_reason is not None:
             _block_live_order(
@@ -5220,12 +5313,25 @@ def _execute_new_entry(
     # the venue supports it.
     if snap.get("options_path") and snap.get("option_meta"):
         _opt_meta = snap["option_meta"]
-        try:
-            qty = int(_opt_meta.get("quantity") or 1)
-            if qty < 1:
-                qty = 1
-        except Exception:
-            qty = 1
+        qty = parse_contract_quantity(_opt_meta.get("quantity"))
+        if qty is None:
+            snap["options_quantity_error"] = "invalid_contract_quantity"
+            _audit(
+                db,
+                user_id=uid,
+                alert=alert,
+                decision="skipped",
+                reason="options_meta_invalid_quantity",
+                rule_snapshot=snap,
+            )
+            out["skipped"] += 1
+            _autotrader_tick_note(
+                out,
+                kind="skipped",
+                reason="options_meta_invalid_quantity",
+                alert=alert,
+            )
+            return
         try:
             _premium = float(_opt_meta.get("limit_price") or alert.entry_price or 0)
         except Exception:
@@ -5481,6 +5587,29 @@ def _execute_new_entry(
             entry_broker_status=_entry_broker_status,
             entry_filled_qty=_entry_filled_qty,
         )
+        if (
+            _is_option_entry
+            and _entry_status == "cancelled"
+            and float(_entry_filled_qty or 0.0) <= 0.0
+        ):
+            snap["option_entry_terminal_state"] = _entry_broker_status
+            _audit(
+                db,
+                user_id=uid,
+                alert=alert,
+                decision="blocked",
+                reason=f"broker:option_entry_no_fill:{_entry_broker_status or 'terminal'}",
+                rule_snapshot=snap,
+                llm_snapshot=llm_snap,
+            )
+            out["skipped"] += 1
+            _autotrader_tick_note(
+                out,
+                kind="blocked",
+                reason="broker:option_entry_no_fill",
+                alert=alert,
+            )
+            return
         _option_terminal_partial_entry = (
             _is_option_entry
             and _entry_broker_status == "partially_filled_cancelled"
@@ -5492,6 +5621,15 @@ def _execute_new_entry(
         _entry_is_async = _is_coinbase_entry or _is_option_entry
         _trade_stop, _trade_target, _managed_exit_execution = (
             _managed_edge_execution_levels(alert, px=px, snap=snap)
+        )
+        _option_meta_for_trade = (
+            _normalize_option_meta_for_alert(
+                alert,
+                snap.get("option_meta") if isinstance(snap.get("option_meta"), dict) else {},
+                underlying_price=px,
+            )
+            if _is_option_entry
+            else {}
         )
         _entry_execution_snapshot = {
             "broker_source": _broker_source_for_trade,
@@ -5518,6 +5656,23 @@ def _execute_new_entry(
             ),
             "option_order_state": res.get("_chili_option_order_state"),
             "option_position_verified": bool(res.get("_chili_option_position_verified")),
+            "option_contract_key": _option_meta_for_trade.get("contract_key"),
+            "option_occ_symbol": _option_meta_for_trade.get("occ_symbol"),
+            "option_underlying": _option_meta_for_trade.get("underlying"),
+            "option_price_domain": (
+                "option_premium" if _is_option_entry else None
+            ),
+            "option_contract_multiplier": (
+                _option_meta_for_trade.get("contract_multiplier")
+                if _is_option_entry
+                else None
+            ),
+            "underlying_price_at_entry": px if _is_option_entry else None,
+            "option_limit_price": (
+                _option_meta_for_trade.get("limit_price")
+                if _is_option_entry
+                else None
+            ),
             "coinbase_maker_only": bool(res.get("_chili_maker_only")),
             "maker_limit_price": res.get("_chili_maker_limit_price") or res.get("limit_price"),
             "maker_best_bid": res.get("_chili_maker_bid"),
@@ -5557,6 +5712,22 @@ def _execute_new_entry(
             "cost_gate_tca_cost_bps": snap.get("cost_gate_tca_cost_bps"),
             "managed_exit_execution": _managed_exit_execution,
         }
+        _trade_indicator_snapshot = {
+            "breakout_alert": alert.indicator_snapshot,
+            "signals": alert.signals_snapshot,
+            "entry_execution": _entry_execution_snapshot,
+        }
+        if _is_option_entry:
+            _trade_indicator_snapshot.update(
+                {
+                    "asset_type": "options",
+                    "asset_kind": "option",
+                    "options_path": True,
+                    "option_meta": _option_meta_for_trade,
+                    "option_contract_key": _option_meta_for_trade.get("contract_key"),
+                    "price_domains": option_price_domains_snapshot(),
+                }
+            )
         # f-tca-writer-wiring (2026-05-18): capture the entry-side TCA
         # reference in the same price domain as the fill: underlying spot for
         # equities/crypto, option premium for options. The difference is the
@@ -5583,12 +5754,8 @@ def _execute_new_entry(
             management_scope=MANAGEMENT_SCOPE_AUTO_TRADER_V1,
             broker_order_id=str(order_id_raw).strip(),
             asset_kind="option" if _is_option_entry else None,
-            indicator_snapshot={
-                "breakout_alert": alert.indicator_snapshot,
-                "signals": alert.signals_snapshot,
-                "entry_execution": _entry_execution_snapshot,
-            },
-            tags="autotrader_v1",
+            indicator_snapshot=_trade_indicator_snapshot,
+            tags="autotrader_v1 options" if _is_option_entry else "autotrader_v1",
             auto_trader_version=AUTOTRADER_VERSION,
             scale_in_count=0,
             tca_reference_entry_price=_tca_ref_entry,
@@ -5596,6 +5763,8 @@ def _execute_new_entry(
         db.add(tr)
         db.commit()
         db.refresh(tr)
+        if _is_option_entry:
+            _detach_mismatched_option_position_link(db, tr)
         # f-tca-writer-wiring (2026-05-18): compute entry slippage NOW, using
         # the same-domain reference and the broker's actual fill price.
         # Without this,
