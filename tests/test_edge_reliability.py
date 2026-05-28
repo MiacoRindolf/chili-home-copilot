@@ -343,6 +343,66 @@ def test_recert_rescue_diagnostic_never_clears_hard_recert(db):
     )
 
 
+def test_recert_rescue_hard_oos_positive_edge_enqueues_backtest_refresh(db):
+    pat = _pattern(
+        db,
+        recert_required=True,
+        recert_reason="negative_oos_recert",
+        cpcv_median_sharpe=2.0,
+        promotion_gate_passed=True,
+        oos_evaluated_at=datetime.utcnow(),
+        oos_trade_count=20,
+        oos_win_rate=0.55,
+        oos_avg_return_pct=-0.3,
+        raw_realized_trade_count=8,
+        raw_realized_avg_return_pct=1.0,
+    )
+    for idx in range(6):
+        alert = _alert(db, pat, f"REBT{idx}")
+        _run(db, pat, alert, expected=2.5)
+    db.commit()
+
+    ev_id = enqueue_work_event(
+        db,
+        event_type=RECERT_RESCUE_REFRESH,
+        dedupe_key=f"test:recert-bt:{pat.id}",
+        payload={"scan_pattern_id": pat.id, "window_days": 7, "asset_class": "stock"},
+        lease_scope="edge",
+    )
+    db.commit()
+    ev = db.get(BrainWorkEvent, ev_id)
+    assert ev is not None
+    handle_recert_rescue_refresh(db, ev, user_id=None)
+    db.commit()
+    db.refresh(pat)
+
+    assert pat.recert_required is True
+    assert pat.recert_reason == "negative_oos_recert"
+    outcome = (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_type == RECERT_RESCUE_DIAGNOSTIC)
+        .one()
+    )
+    refresh = outcome.payload["recert_backtest_refresh"]
+    assert refresh["requested"] is True
+    assert refresh["reason"] == "positive_edge_supply_needs_asset_sliced_oos_refresh"
+    assert refresh["asset_class"] == "stock"
+    assert outcome.payload["safe_to_bypass_live"] is False
+    assert outcome.payload["recert_rescue_status"] == "hard_blocked"
+    assert outcome.payload["recommended_next_action"] == (
+        "run_recert_backtest_refresh_keep_live_blocked"
+    )
+
+    queued = (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_type == "backtest_requested")
+        .one()
+    )
+    assert queued.payload["source"] == "recert_rescue_refresh"
+    assert queued.payload["scan_pattern_id"] == pat.id
+    assert queued.lease_scope == "backtest"
+
+
 def test_recert_rescue_refresh_removes_stale_soft_reason_but_preserves_hard_oos(
     db,
     monkeypatch,

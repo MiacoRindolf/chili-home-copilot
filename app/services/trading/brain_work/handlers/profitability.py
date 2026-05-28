@@ -19,6 +19,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 LOG_PREFIX = "[brain_work:profitability]"
 
+_RECERT_RESCUE_MIN_EDGE_EVALS = 5
+_RECERT_RESCUE_MIN_POSITIVE_EV_PCT = 0.0
+
 
 def _payload(ev: Any) -> dict[str, Any]:
     raw = getattr(ev, "payload", None)
@@ -171,6 +174,78 @@ def _recert_rescue_diagnostic_status(
     return "needs_review", "inspect_recert_diagnostic"
 
 
+def _recert_rescue_backtest_refresh(
+    db: "Session",
+    *,
+    scan_pattern_id: int,
+    reliability: dict[str, Any],
+    hard_reasons: list[str],
+    soft_reasons: list[str],
+    parent_event_id: int,
+) -> dict[str, Any]:
+    """Queue a targeted backtest refresh when recert debt has positive edge supply."""
+    edge_eval_count = _safe_int(reliability.get("edge_eval_count")) or 0
+    calibrated_ev = _safe_float(reliability.get("calibrated_ev_pct"))
+    expected_ev = _safe_float(reliability.get("expected_ev_pct"))
+    ev_for_gate = calibrated_ev if calibrated_ev is not None else expected_ev
+    asset_class = str(
+        reliability.get("slice_asset_class")
+        or reliability.get("asset_class")
+        or "all"
+    ).strip() or "all"
+    fingerprint = str(reliability.get("evidence_fingerprint") or "none").strip() or "none"
+
+    out = {
+        "requested": False,
+        "event_id": None,
+        "reason": None,
+        "asset_class": asset_class,
+        "edge_eval_count": edge_eval_count,
+        "calibrated_ev_pct": calibrated_ev,
+        "expected_ev_pct": expected_ev,
+        "evidence_fingerprint": fingerprint,
+    }
+    if edge_eval_count < _RECERT_RESCUE_MIN_EDGE_EVALS:
+        out["reason"] = "insufficient_positive_edge_evaluations"
+        return out
+    if ev_for_gate is None or ev_for_gate <= _RECERT_RESCUE_MIN_POSITIVE_EV_PCT:
+        out["reason"] = "non_positive_recent_edge"
+        return out
+
+    if "negative_oos_recert" in set(hard_reasons):
+        refresh_reason = "positive_edge_supply_needs_asset_sliced_oos_refresh"
+    elif soft_reasons:
+        refresh_reason = "soft_recert_needs_oos_quality_refresh"
+    else:
+        out["reason"] = "no_recert_refresh_needed"
+        return out
+
+    from app.services.trading.brain_work.ledger import enqueue_work_event
+
+    event_id = enqueue_work_event(
+        db,
+        event_type="backtest_requested",
+        dedupe_key=(
+            f"bt_req:recert_rescue:p{int(scan_pattern_id)}:"
+            f"{asset_class}:{fingerprint}"
+        ),
+        payload={
+            "scan_pattern_id": int(scan_pattern_id),
+            "source": "recert_rescue_refresh",
+            "asset_class": asset_class,
+            "recert_refresh_reason": refresh_reason,
+            "evidence_fingerprint": fingerprint,
+            "parent_event_id": int(parent_event_id or 0),
+        },
+        parent_event_id=int(parent_event_id or 0),
+        lease_scope="backtest",
+    )
+    out["requested"] = event_id is not None
+    out["event_id"] = event_id
+    out["reason"] = refresh_reason
+    return out
+
+
 def handle_edge_reliability_refresh(
     db: "Session",
     ev: Any,
@@ -284,6 +359,16 @@ def handle_recert_rescue_refresh(
         graduation_blocker=reliability.get("graduation_blocker"),
         hard_recert_reasons=set(HARD_RECERT_REASONS),
     )
+    backtest_refresh = _recert_rescue_backtest_refresh(
+        db,
+        scan_pattern_id=pid,
+        reliability=reliability,
+        hard_reasons=hard_reasons,
+        soft_reasons=soft_reasons,
+        parent_event_id=int(getattr(ev, "id", 0) or 0),
+    )
+    if backtest_refresh.get("requested"):
+        next_action = "run_recert_backtest_refresh_keep_live_blocked"
     payload = {
         "scan_pattern_id": pid,
         "source": "recert_rescue_refresh",
@@ -296,6 +381,7 @@ def handle_recert_rescue_refresh(
         "graduation_blocker": reliability.get("graduation_blocker"),
         "quality_recomputed": quality_recomputed,
         "recert_reconcile": recert_reconcile,
+        "recert_backtest_refresh": backtest_refresh,
         "safe_to_bypass_live": False,
         "uses_existing_probation_only": True,
         "calibrated_ev_pct": reliability.get("calibrated_ev_pct"),
