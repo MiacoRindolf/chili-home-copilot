@@ -442,6 +442,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
               prompt: prompt,
               repoId: _autonomyRepoId,
               executionMode: 'plan_approval',
+              startPlanning: false,
             );
       if (!mounted) return;
       setState(() {
@@ -475,6 +476,25 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     });
     try {
       final run = await _api.approveProjectAutonomyPlan(runId);
+      if (mounted) setState(() => _activeAutonomyRun = run);
+      await _loadAutonomyRuns(silent: true);
+      await _refreshActiveAutonomyRun(silent: true, force: true);
+    } catch (e) {
+      if (mounted) setState(() => _autonomyError = userVisibleNetworkError(e));
+    } finally {
+      if (mounted) setState(() => _autonomyBusy = false);
+    }
+  }
+
+  Future<void> _startAutopilotPlan() async {
+    final runId = _activeAutonomyRun?['run_id']?.toString();
+    if (runId == null || runId.isEmpty) return;
+    setState(() {
+      _autonomyBusy = true;
+      _autonomyError = null;
+    });
+    try {
+      final run = await _api.startProjectAutonomyPlan(runId);
       if (mounted) setState(() => _activeAutonomyRun = run);
       await _loadAutonomyRuns(silent: true);
       await _refreshActiveAutonomyRun(silent: true, force: true);
@@ -1060,6 +1080,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         return dark ? Colors.indigo.shade200 : Colors.indigo.shade700;
       case 'awaiting_approval':
         return dark ? Colors.teal.shade200 : Colors.teal.shade700;
+      case 'chatting':
+        return dark ? Colors.cyan.shade200 : Colors.cyan.shade700;
       case 'running':
         return dark ? Colors.blue.shade300 : Colors.blue.shade700;
       default:
@@ -1642,6 +1664,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final canApprove = status == 'awaiting_approval' &&
         planStatus == 'awaiting_approval' &&
         _asMap(run['plan']).isNotEmpty;
+    final canStartPlan = status == 'chatting' || planStatus == 'chatting';
     final canMerge = terminal &&
         branch.isNotEmpty &&
         status != 'merged' &&
@@ -1651,6 +1674,13 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
       children: [
         _buildAutonomyRepoPicker(),
         const SizedBox(height: 10),
+        if (canStartPlan)
+          FilledButton.icon(
+            onPressed: _autonomyBusy ? null : _startAutopilotPlan,
+            icon: const Icon(Icons.account_tree_outlined, size: 18),
+            label: const Text('Start plan'),
+          ),
+        if (canStartPlan) const SizedBox(height: 8),
         if (canApprove)
           FilledButton.icon(
             onPressed: _autonomyBusy ? null : _approveAutopilotPlan,
@@ -1710,6 +1740,12 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
           const SizedBox(height: 10),
           Text(
             'Plan Mode is waiting. Send feedback in chat to revise, or approve when it looks right.',
+            style: TextStyle(color: _mutedTextColor(), fontSize: 12),
+          ),
+        ] else if (canStartPlan) ...[
+          const SizedBox(height: 10),
+          Text(
+            'Brainstorming mode is active. I will not scan or edit the repo until you start a plan.',
             style: TextStyle(color: _mutedTextColor(), fontSize: 12),
           ),
         ],
@@ -1841,6 +1877,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         return Icons.merge_type;
       case 'awaiting_approval':
         return Icons.rule_folder_outlined;
+      case 'chatting':
+        return Icons.forum_outlined;
       case 'running':
         return Icons.autorenew;
       default:

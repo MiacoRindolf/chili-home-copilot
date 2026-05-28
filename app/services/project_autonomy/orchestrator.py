@@ -61,7 +61,7 @@ from ..context_brain import ollama_client
 from ..project_domain_runs import finish_run, start_run
 
 TERMINAL_STATUSES = frozenset({"merged", "completed", "blocked", "failed", "cancelled"})
-IDLE_STATUSES = frozenset({"awaiting_approval"})
+IDLE_STATUSES = frozenset({"awaiting_approval", "chatting"})
 ACTIVE_STATUSES = frozenset({"queued", "running", "validating", "merging", "revising"})
 AUTONOMOUS_KIND = "autonomous"
 
@@ -178,6 +178,46 @@ def _looks_like_live_monitoring_prompt(prompt: str) -> bool:
         "tests/",
     )
     return not any(marker in lower for marker in implementation_markers)
+
+
+def _looks_like_greeting_or_chat(prompt: str) -> bool:
+    lower = (prompt or "").strip().lower()
+    if not lower:
+        return True
+    greeting = lower.strip(" .!?,")
+    if greeting in {"hi", "hello", "hey", "yo", "sup", "good morning", "good afternoon", "good evening"}:
+        return True
+    chat_markers = (
+        "brainstorm",
+        "talk through",
+        "think through",
+        "discuss",
+        "what do you think",
+        "i have an idea",
+        "i want your expertise",
+    )
+    implementation_markers = (
+        "implement",
+        "code ",
+        "change ",
+        "fix ",
+        "add ",
+        "update ",
+        "modify ",
+        "create ",
+        "build ",
+        "refactor",
+        ".py",
+        ".dart",
+        ".js",
+        ".ts",
+        "app/",
+        "chili_mobile/",
+        "tests/",
+    )
+    return any(marker in lower for marker in chat_markers) and not any(
+        marker in lower for marker in implementation_markers
+    )
 
 
 def _run_payload(row: ProjectAutonomyRun) -> dict[str, Any]:
@@ -421,6 +461,7 @@ def create_run(
     autonomy_level: str = "full_local",
     model_policy: str = "local_first",
     execution_mode: str = "plan_approval",
+    start_planning: bool = False,
 ) -> ProjectAutonomyRun:
     clean_prompt = (prompt or "").strip()
     if not clean_prompt:
@@ -431,6 +472,9 @@ def create_run(
     if resolve_repo_runtime_path(repo) is None:
         raise ValueError("The selected repo is registered but not reachable from this runtime.")
     clean_execution_mode = execution_mode if execution_mode in {"plan_approval", "full_autopilot"} else "plan_approval"
+    initial_status = "queued" if start_planning else "chatting"
+    initial_stage = "queued" if start_planning else "chat"
+    initial_plan_status = "drafting" if start_planning else "chatting"
 
     run_id = "pa_" + uuid.uuid4().hex[:14]
     project_run = start_run(
@@ -452,11 +496,11 @@ def create_run(
         user_id=user_id,
         repo_id=int(repo.id),
         prompt=clean_prompt,
-        status="queued",
-        current_stage="queued",
+        status=initial_status,
+        current_stage=initial_stage,
         autonomy_level=autonomy_level,
         execution_mode=clean_execution_mode,
-        plan_status="drafting",
+        plan_status=initial_plan_status,
         chat_title=clean_prompt[:120],
         model_policy=model_policy,
         merge_status="pending",
@@ -466,8 +510,8 @@ def create_run(
     _record_step(
         db,
         row,
-        "queued",
-        "Autopilot run queued",
+        initial_stage,
+        "Autopilot run queued" if start_planning else "Autopilot chat opened",
         status="completed",
         detail={"repo_id": int(repo.id), "repo_name": repo.name},
         commit=False,
@@ -489,6 +533,16 @@ def create_run(
         metadata={"repo_id": int(repo.id), "repo_name": repo.name},
         commit=False,
     )
+    if not start_planning:
+        _record_message(
+            db,
+            row,
+            "assistant",
+            _initial_chat_reply(clean_prompt),
+            message_type="chat",
+            metadata={"repo_id": int(repo.id), "repo_name": repo.name},
+            commit=False,
+        )
     db.commit()
     db.refresh(row)
     return row
@@ -567,6 +621,9 @@ def append_user_message(
     if not clean:
         raise ValueError("Message is required.")
     _record_message(db, row, "user", clean, commit=False)
+    if row.status == "chatting":
+        reply = _chat_reply(db, row, clean)
+        _record_message(db, row, "assistant", reply, message_type="chat", commit=False)
     if row.plan_status in {"awaiting_approval", "revising"} and row.status == "awaiting_approval":
         row.status = "queued"
         row.plan_status = "revising"
@@ -600,6 +657,42 @@ def approve_plan(db: Session, run_id: str, *, user_id: int | None = None) -> dic
         row,
         "assistant",
         "Plan approved. I’m starting implementation in an isolated worktree now.",
+        message_type="status",
+        commit=False,
+    )
+    db.commit()
+    db.refresh(row)
+    return run_payload(db, row, include_events=True)
+
+
+def start_plan(db: Session, run_id: str, *, user_id: int | None = None) -> dict[str, Any] | None:
+    row = _get_run_row(db, run_id, user_id=user_id)
+    if row is None:
+        return None
+    if row.status not in {"chatting", "awaiting_approval", "blocked", "cancelled"} and row.status in ACTIVE_STATUSES:
+        raise ValueError("This Autopilot run is already working.")
+    row.prompt = _conversation_prompt(db, row)
+    row.status = "queued"
+    row.current_stage = "queued"
+    row.plan_status = "drafting"
+    row.merge_status = "pending"
+    row.error_message = None
+    row.merge_message = None
+    row.cancel_requested = False
+    _record_step(
+        db,
+        row,
+        "queued",
+        "Autopilot plan requested",
+        status="completed",
+        detail={"prompt_preview": row.prompt[:240], "repo_id": row.repo_id},
+        commit=False,
+    )
+    _record_message(
+        db,
+        row,
+        "assistant",
+        "Got it. I’ll scan the repo and draft a plan, then wait for your approval before editing files.",
         message_type="status",
         commit=False,
     )
@@ -801,6 +894,81 @@ def _completion_message(run: ProjectAutonomyRun) -> str:
     if status == "cancelled":
         return "This Autopilot run was cancelled."
     return str(run.merge_message or "Implementation finished.")
+
+
+def _initial_chat_reply(prompt: str) -> str:
+    if _looks_like_greeting_or_chat(prompt):
+        return (
+            "Hey, I’m here. We can brainstorm, inspect ideas, or shape a plan together. "
+            "I won’t scan or edit the repo until you start a plan."
+        )
+    return (
+        "I’m ready to help shape this. We can talk it through here first; when you want me "
+        "to inspect the repo and draft an implementation plan, use Start plan in the sidebar."
+    )
+
+
+def _chat_reply(db: Session, run: ProjectAutonomyRun, latest_user_message: str) -> str:
+    if _looks_like_greeting_or_chat(latest_user_message):
+        return _initial_chat_reply(latest_user_message)
+    if any(token in latest_user_message.lower() for token in ("implement", "change", "fix", "add", "update", "build")):
+        return (
+            "That sounds implementation-shaped. I can keep brainstorming here, or you can use "
+            "Start plan in the sidebar when you want me to scan the repo and draft a safe plan."
+        )
+    model_info = select_local_model()
+    if not model_info.get("model"):
+        return (
+            "I’m with you. We can keep shaping the idea here; local model chat is unavailable, "
+            "but planning and implementation can still use the repo-aware Autopilot flow when you start a plan."
+        )
+    recent = (
+        db.query(ProjectAutonomyMessage)
+        .filter(ProjectAutonomyMessage.run_id == run.run_id)
+        .order_by(ProjectAutonomyMessage.id.desc())
+        .limit(8)
+        .all()
+    )
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are CHILI, a local project architect chat. This is a brainstorming conversation, "
+                "not an implementation run. Be concise, warm, and useful. Do not claim you changed files. "
+                "If implementation is needed, tell the user to start a plan."
+            ),
+        }
+    ]
+    for row in reversed(recent):
+        role = "assistant" if row.role == "assistant" else "user"
+        messages.append({"role": role, "content": row.content})
+    result = ollama_client.chat(
+        messages,
+        str(model_info["model"]),
+        temperature=0.35,
+        timeout_sec=45,
+        options={"num_predict": 220, "num_ctx": 2048, "keep_alive": _OLLAMA_KEEP_ALIVE},
+    )
+    _add_artifact(
+        db,
+        run.run_id,
+        "model_call",
+        "chat_model_call",
+        content_json={
+            "model": model_info["model"],
+            "ok": result.ok,
+            "latency_ms": result.latency_ms,
+            "error": result.error,
+            "purpose": "brainstorm_chat",
+        },
+        commit=False,
+    )
+    if result.ok and result.text.strip():
+        return _clip(result.text.strip(), 1800)
+    return (
+        "I’m here for the brainstorming. The local chat model didn’t answer cleanly, "
+        "but we can still keep the idea moving or start a plan when you’re ready."
+    )
 
 
 def _sync_project_run(db: Session, run: ProjectAutonomyRun, *, title: str | None = None) -> None:

@@ -644,16 +644,37 @@ class ChiliApiClient {
     required String prompt,
     int? repoId,
     String executionMode = 'plan_approval',
+    bool startPlanning = false,
   }) async {
     final body = <String, dynamic>{
       'prompt': prompt.trim(),
       if (repoId != null) 'repo_id': repoId,
       'execution_mode': executionMode,
+      'start_planning': startPlanning,
     };
     final res = await _client.post(
       Uri.parse('$baseUrl/api/brain/project/autonomy/runs'),
       headers: _headers(),
       body: jsonEncode(body),
+    );
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>?;
+    } catch (_) {}
+    if (res.statusCode != 200) {
+      final err = decoded?['error'] ??
+          decoded?['message'] ??
+          decoded?['detail'] ??
+          res.body;
+      throw Exception(err is String ? err : 'HTTP ${res.statusCode}');
+    }
+    return Map<String, dynamic>.from((decoded?['run'] ?? {}) as Map);
+  }
+
+  Future<Map<String, dynamic>> startProjectAutonomyPlan(String runId) async {
+    final res = await _client.post(
+      Uri.parse('$baseUrl/api/brain/project/autonomy/runs/$runId/plan/start'),
+      headers: _headers(),
     );
     Map<String, dynamic>? decoded;
     try {

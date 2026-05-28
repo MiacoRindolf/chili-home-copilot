@@ -634,6 +634,7 @@ class _ProjectAutonomyRunBody(BaseModel):
     repo_id: int | None = None
     autonomy_level: str | None = "full_local"
     execution_mode: str | None = "plan_approval"
+    start_planning: bool = False
 
 
 class _ProjectAutonomyMessageBody(BaseModel):
@@ -915,10 +916,12 @@ def api_brain_project_autonomy_create(
             user_id=ctx["user_id"],
             autonomy_level=body.autonomy_level or "full_local",
             execution_mode=body.execution_mode or "plan_approval",
+            start_planning=bool(body.start_planning),
         )
     except ValueError as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=409)
-    _start_autonomy_thread(run.run_id)
+    if run.status == "queued":
+        _start_autonomy_thread(run.run_id)
     return JSONResponse({"ok": True, "run": project_autonomy.run_payload(db, run, include_events=True)})
 
 
@@ -963,6 +966,27 @@ def api_brain_project_autonomy_approve_plan(
         return blocked
     try:
         run = project_autonomy.approve_plan(db, run_id, user_id=ctx["user_id"])
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=409)
+    if run is None:
+        return _not_found("Autopilot run not found")
+    _start_autonomy_thread(run_id)
+    return JSONResponse({"ok": True, "run": run})
+
+
+@router.post("/api/brain/project/autonomy/runs/{run_id}/plan/start")
+def api_brain_project_autonomy_start_plan(
+    run_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Start repo scanning and plan drafting from the current chat."""
+    ctx = get_identity_ctx(request, db)
+    blocked = _autonomy_requires_paired(ctx)
+    if blocked is not None:
+        return blocked
+    try:
+        run = project_autonomy.start_plan(db, run_id, user_id=ctx["user_id"])
     except ValueError as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=409)
     if run is None:

@@ -391,6 +391,50 @@ def test_events_after_includes_chat_messages():
         db.close()
 
 
+def test_create_run_defaults_to_chatting_without_planning_worker(tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        run = orchestrator.create_run(db, prompt="hi", repo_id=repo.id)
+
+        payload = orchestrator.run_payload(db, run, include_events=True)
+
+        assert payload["status"] == "chatting"
+        assert payload["plan_status"] == "chatting"
+        assert payload["steps"][0]["stage"] == "chat"
+        assert payload["messages"][0]["role"] == "user"
+        assert payload["messages"][1]["role"] == "assistant"
+        assert "won’t scan or edit" in payload["messages"][1]["content"]
+    finally:
+        db.close()
+
+
+def test_start_plan_transitions_chat_to_queued_plan(tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        run = orchestrator.create_run(db, prompt="hi", repo_id=repo.id)
+        orchestrator.append_user_message(
+            db,
+            run.run_id,
+            content="Let's implement a safer settings flow.",
+        )
+
+        payload = orchestrator.start_plan(db, run.run_id)
+
+        assert payload is not None
+        assert payload["status"] == "queued"
+        assert payload["plan_status"] == "drafting"
+        assert "Let's implement a safer settings flow." in payload["prompt"]
+        assert payload["messages"][-1]["message_type"] == "status"
+    finally:
+        db.close()
+
+
 def test_recover_orphaned_runs_blocks_pre_restart_active_run(monkeypatch):
     db = _sqlite_autonomy_session()
     try:
