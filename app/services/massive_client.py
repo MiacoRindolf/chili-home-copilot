@@ -48,6 +48,11 @@ _dead_tickers: dict[str, float] = {}
 _dead_lock = threading.Lock()
 _TTL_DEAD = 14400      # 4 hours — skip tickers that 404'd
 
+_entitlement_denied: dict[str, float] = {}
+_entitlement_log_throttle_until: dict[str, float] = {}
+_entitlement_lock = threading.Lock()
+_TTL_ENTITLEMENT_DENIED = 21600  # 6 hours: plan entitlement failures are stable
+
 _NOT_FOUND = object()  # sentinel returned by _get() on HTTP 404
 
 
@@ -81,6 +86,7 @@ _metrics: dict[str, int] = {
     "cache_misses": 0,
     "errors": 0,
     "rate_limits": 0,
+    "entitlement_blocks": 0,
 }
 
 
@@ -92,6 +98,60 @@ def get_metrics() -> dict[str, int]:
 def _bump(key: str = "requests"):
     with _metrics_lock:
         _metrics[key] = _metrics.get(key, 0) + 1
+
+
+def _request_cache_key(url: str, params: dict[str, Any] | None) -> str:
+    safe_params = [
+        (str(k), str(v))
+        for k, v in sorted((params or {}).items())
+        if str(k) != "apiKey"
+    ]
+    return json.dumps([url, safe_params], sort_keys=True, separators=(",", ":"))
+
+
+def _looks_like_entitlement_denied(status_code: int, body: str) -> bool:
+    if status_code != 403:
+        return False
+    text = (body or "").lower()
+    return (
+        "not_authorized" in text
+        or "not entitled" in text
+        or "upgrade your plan" in text
+    )
+
+
+def _entitlement_denied_active(key: str, url: str) -> bool:
+    now = time.time()
+    with _entitlement_lock:
+        expires_at = _entitlement_denied.get(key)
+        if expires_at is None:
+            return False
+        if expires_at <= now:
+            _entitlement_denied.pop(key, None)
+            _entitlement_log_throttle_until.pop(key, None)
+            return False
+        log_at = _entitlement_log_throttle_until.get(key, 0.0)
+        if now >= log_at:
+            logger.warning(
+                "[massive] entitlement-denied cache active for %s (%ds remaining)",
+                url,
+                int(expires_at - now),
+            )
+            _entitlement_log_throttle_until[key] = now + 300
+        return True
+
+
+def _mark_entitlement_denied(key: str, url: str, body: str) -> None:
+    now = time.time()
+    with _entitlement_lock:
+        _entitlement_denied[key] = now + _TTL_ENTITLEMENT_DENIED
+        _entitlement_log_throttle_until[key] = now + 300
+    logger.warning(
+        "[massive] 403 entitlement denied for %s; suppressing matching calls for %ds: %s",
+        url,
+        _TTL_ENTITLEMENT_DENIED,
+        (body or "")[:200],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -298,13 +358,17 @@ def get_breaker_status() -> dict[str, Any]:
 
 def _get(url: str, params: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """GET with retries, backoff, and rate-limit awareness."""
-    if not _api_key():
+    api_key = _api_key()
+    if not api_key:
         return None
     if not _breaker_allow_request():
         return None
-    if params is None:
-        params = {}
-    params["apiKey"] = _api_key()
+    params = dict(params or {})
+    entitlement_key = _request_cache_key(url, params)
+    if _entitlement_denied_active(entitlement_key, url):
+        _bump("entitlement_blocks")
+        return None
+    params["apiKey"] = api_key
 
     for attempt in range(_MAX_RETRIES + 1):
         try:
@@ -331,6 +395,10 @@ def _get(url: str, params: dict[str, Any] | None = None) -> dict[str, Any] | Non
                 logger.debug(f"[massive] 404 for {url}")
                 _breaker_record_success()
                 return _NOT_FOUND
+            if _looks_like_entitlement_denied(resp.status_code, resp.text):
+                _mark_entitlement_denied(entitlement_key, url, resp.text)
+                _bump("entitlement_blocks")
+                return None
             logger.warning(f"[massive] {resp.status_code} for {url}: {resp.text[:200]}")
             return None
         except requests.RequestException as e:

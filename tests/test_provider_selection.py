@@ -515,6 +515,37 @@ class TestMassiveClient:
         assert bars[0]["close"] == 149.5
         assert bars[1]["time"] == 1700086400
 
+    def test_get_caches_entitlement_denied_403(self, monkeypatch):
+        from app.services import massive_client as mc
+
+        class _Resp:
+            status_code = 403
+            text = (
+                '{"status":"NOT_AUTHORIZED","message":"You are not entitled '
+                'to this data. Please upgrade your plan."}'
+            )
+
+        calls = []
+
+        def _fake_get(url, *, params=None, timeout=None):
+            calls.append((url, dict(params or {}), timeout))
+            return _Resp()
+
+        mc._entitlement_denied.clear()
+        mc._entitlement_log_throttle_until.clear()
+        monkeypatch.setattr(mc, "_api_key", lambda: "test-key")
+        monkeypatch.setattr(mc, "_rate_limit_wait", lambda: None)
+        monkeypatch.setattr(mc._session, "get", _fake_get)
+
+        url = "https://api.massive.com/v2/aggs/ticker/I:VIX/range/1/day/2025-05-28/2026-05-28"
+        params = {"adjusted": "true", "sort": "asc"}
+
+        assert mc._get(url, params) is None
+        assert mc._get(url, params) is None
+
+        assert len(calls) == 1
+        assert calls[0][1]["apiKey"] == "test-key"
+
     @patch("app.services.massive_client._get")
     @patch("app.services.massive_client._api_key", return_value="test-key")
     def test_get_stock_snapshot_fallback_to_prev_close(self, _key, mock_get):
