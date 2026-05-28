@@ -36,6 +36,22 @@ def test_extract_patterns_uses_mechanical_parser_without_llm(monkeypatch):
     assert {"indicator": "rel_vol", "op": ">=", "value": 1.5} in result[0]["conditions"]
 
 
+def test_extract_patterns_uses_reversed_ma_notation_without_llm(monkeypatch):
+    def fail_call_llm(*_args, **_kwargs):
+        raise AssertionError("reversed MA notation should be mechanical")
+
+    monkeypatch.setattr(researcher, "call_llm", fail_call_llm)
+
+    result = researcher._extract_patterns_from_content(
+        "A trend setup is 50 EMA crossing above 200 EMA with volume breakout.",
+        existing_names=set(),
+    )
+
+    assert len(result) == 1
+    assert {"indicator": "ema_50", "op": ">", "ref": "ema_200"} in result[0]["conditions"]
+    assert {"indicator": "rel_vol", "op": ">=", "value": 1.5} in result[0]["conditions"]
+
+
 def test_pattern_extract_prompt_keeps_variable_content_last():
     prompt = researcher._build_pattern_extract_prompt(
         "RSI breakout above 55 with price over EMA 20.",

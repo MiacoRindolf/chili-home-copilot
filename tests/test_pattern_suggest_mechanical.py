@@ -60,6 +60,24 @@ def test_mechanical_pattern_suggestion_parses_trader_shorthand():
     assert {"indicator": "rel_vol", "op": ">=", "value": 1.5} in parsed["conditions"]
 
 
+def test_mechanical_pattern_suggestion_parses_reversed_moving_average_notation():
+    parsed = _mechanical_pattern_suggestion(
+        "50 EMA crosses above 200 EMA with volume breakout"
+    )
+
+    assert parsed is not None
+    assert {"indicator": "ema_50", "op": ">", "ref": "ema_200"} in parsed["conditions"]
+    assert {"indicator": "rel_vol", "op": ">=", "value": 1.5} in parsed["conditions"]
+
+
+def test_mechanical_pattern_suggestion_parses_reversed_sma_notation():
+    parsed = _mechanical_pattern_suggestion("20 day SMA below 50 day SMA and RSI < 45")
+
+    assert parsed is not None
+    assert {"indicator": "sma_20", "op": "<", "ref": "sma_50"} in parsed["conditions"]
+    assert {"indicator": "rsi_14", "op": "<", "value": 45.0} in parsed["conditions"]
+
+
 def test_mechanical_pattern_suggestion_parses_bearish_trader_shorthand():
     parsed = _mechanical_pattern_suggestion("death cross and MACD below zero")
 

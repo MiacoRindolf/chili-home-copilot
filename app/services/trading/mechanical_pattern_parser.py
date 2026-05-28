@@ -6,15 +6,25 @@ import re
 from typing import Any
 
 _MECHANICAL_INDICATORS: tuple[tuple[str, str], ...] = (
+    (r"\b200[\s_-]?(?:day\s+)?ema\b", "ema_200"),
     (r"\bema[\s_-]?200\b", "ema_200"),
+    (r"\b100[\s_-]?(?:day\s+)?ema\b", "ema_100"),
     (r"\bema[\s_-]?100\b", "ema_100"),
+    (r"\b50[\s_-]?(?:day\s+)?ema\b", "ema_50"),
     (r"\bema[\s_-]?50\b", "ema_50"),
+    (r"\b21[\s_-]?(?:day\s+)?ema\b", "ema_21"),
     (r"\bema[\s_-]?21\b", "ema_21"),
+    (r"\b20[\s_-]?(?:day\s+)?ema\b", "ema_20"),
     (r"\bema[\s_-]?20\b", "ema_20"),
+    (r"\b9[\s_-]?(?:day\s+)?ema\b", "ema_9"),
     (r"\bema[\s_-]?9\b", "ema_9"),
+    (r"\b200[\s_-]?(?:day\s+)?sma\b", "sma_200"),
     (r"\bsma[\s_-]?200\b", "sma_200"),
+    (r"\b100[\s_-]?(?:day\s+)?sma\b", "sma_100"),
     (r"\bsma[\s_-]?100\b", "sma_100"),
+    (r"\b50[\s_-]?(?:day\s+)?sma\b", "sma_50"),
     (r"\bsma[\s_-]?50\b", "sma_50"),
+    (r"\b20[\s_-]?(?:day\s+)?sma\b", "sma_20"),
     (r"\bsma[\s_-]?20\b", "sma_20"),
     (r"\brsi(?:[\s_-]?14)?\b", "rsi_14"),
     (r"\bmacd(?:[\s_-]?hist(?:ogram)?)\b", "macd_hist"),
@@ -130,7 +140,11 @@ def _mechanical_condition_from_segment(segment: str) -> dict[str, Any] | None:
         return {"indicator": "macd_hist", "op": ">", "value": 0.0}
     if re.search(r"\bmacd\b.*\b(?:negative|bearish|below\s+zero|under\s+zero)\b", segment):
         return {"indicator": "macd_hist", "op": "<", "value": 0.0}
-    if re.search(r"\b(?:volume\s+spike|high\s+volume|surging\s+volume|rvol\s+spike)\b", segment):
+    if re.search(
+        r"\b(?:volume\s+spike|volume\s+breakout|high\s+volume|"
+        r"surging\s+volume|rvol\s+spike)\b",
+        segment,
+    ):
         return {"indicator": "rel_vol", "op": ">=", "value": 1.5}
     if re.search(r"\b(?:bb|bollinger)\b.*\bsqueeze\b|\bsqueeze\b.*\b(?:bb|bollinger)\b", segment):
         return {"indicator": "bb_squeeze", "op": "==", "value": True}
@@ -153,6 +167,12 @@ def _mechanical_condition_from_segment(segment: str) -> dict[str, Any] | None:
     between = _mechanical_between_condition(segment, indicators[0])
     if between:
         return between
+
+    if len(indicators) >= 2:
+        if re.search(r"\b(?:cross(?:es|ing)?|break(?:s|ing)?|move(?:s|ing)?)\s+above\b|\babove\b|\bover\b", segment):
+            return {"indicator": indicators[0], "op": ">", "ref": indicators[1]}
+        if re.search(r"\b(?:cross(?:es|ing)?|break(?:s|ing)?|move(?:s|ing)?)\s+below\b|\bbelow\b|\bunder\b", segment):
+            return {"indicator": indicators[0], "op": "<", "ref": indicators[1]}
 
     op_match = _mechanical_operator(segment)
     if not op_match:
