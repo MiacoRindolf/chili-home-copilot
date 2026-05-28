@@ -41,6 +41,33 @@ def _window_days(ev: Any) -> int:
         return 30
 
 
+def _recert_reason_set(raw: Any) -> set[str]:
+    if isinstance(raw, str):
+        return {part.strip() for part in raw.split(",") if part.strip()}
+    if isinstance(raw, (list, tuple, set)):
+        return {str(part).strip() for part in raw if str(part).strip()}
+    return set()
+
+
+def _recert_rescue_diagnostic_status(
+    *,
+    recert_required: bool,
+    recert_reason: Any,
+    graduation_blocker: Any,
+    hard_recert_reasons: set[str],
+) -> tuple[str, str]:
+    if not recert_required:
+        return "not_recert_required", "no_recert_action_needed"
+
+    blocker = str(graduation_blocker or "").strip().lower()
+    reasons = _recert_reason_set(recert_reason)
+    if reasons & hard_recert_reasons or blocker == "hard_recert_blocked":
+        return "hard_blocked", "keep_live_blocked_until_hard_recert_clears"
+    if blocker == "recert_blocked":
+        return "soft_blocked", "complete_oos_recert_and_quality_refresh"
+    return "needs_review", "inspect_recert_diagnostic"
+
+
 def handle_edge_reliability_refresh(
     db: "Session",
     ev: Any,
@@ -106,6 +133,7 @@ def handle_recert_rescue_refresh(
     """Refresh quality evidence for a recert-blocked pattern; never bypass recert."""
     from app.models.trading import ScanPattern
     from app.services.trading.edge_reliability import (
+        HARD_RECERT_REASONS,
         RECERT_RESCUE_DIAGNOSTIC,
         compute_pattern_edge_reliability,
     )
@@ -140,11 +168,25 @@ def handle_recert_rescue_refresh(
         window_days=_window_days(ev),
     )
     reasons = reliability.get("recert_reason")
+    reason_set = _recert_reason_set(reasons)
+    hard_reasons = sorted(reason_set & HARD_RECERT_REASONS)
+    soft_reasons = sorted(reason_set - set(hard_reasons))
+    recert_required = bool(getattr(pattern, "recert_required", False))
+    rescue_status, next_action = _recert_rescue_diagnostic_status(
+        recert_required=recert_required,
+        recert_reason=reasons,
+        graduation_blocker=reliability.get("graduation_blocker"),
+        hard_recert_reasons=set(HARD_RECERT_REASONS),
+    )
     payload = {
         "scan_pattern_id": pid,
         "source": "recert_rescue_refresh",
-        "recert_required": bool(getattr(pattern, "recert_required", False)),
+        "recert_required": recert_required,
         "recert_reason": reasons,
+        "recert_rescue_status": rescue_status,
+        "hard_recert_reasons": hard_reasons,
+        "soft_recert_reasons": soft_reasons,
+        "recommended_next_action": next_action,
         "graduation_blocker": reliability.get("graduation_blocker"),
         "quality_recomputed": quality_recomputed,
         "safe_to_bypass_live": False,

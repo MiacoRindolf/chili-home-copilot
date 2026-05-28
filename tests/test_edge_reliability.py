@@ -269,6 +269,57 @@ def test_recert_rescue_diagnostic_never_clears_hard_recert(db):
     )
     assert outcome.payload["safe_to_bypass_live"] is False
     assert outcome.payload["graduation_blocker"] == "hard_recert_blocked"
+    assert outcome.payload["recert_rescue_status"] == "hard_blocked"
+    assert outcome.payload["hard_recert_reasons"] == ["negative_oos_recert"]
+    assert outcome.payload["soft_recert_reasons"] == ["thin_realized_ev"]
+    assert outcome.payload["recommended_next_action"] == (
+        "keep_live_blocked_until_hard_recert_clears"
+    )
+
+
+def test_recert_rescue_diagnostic_explains_soft_recert_next_action(db):
+    pat = _pattern(
+        db,
+        recert_required=True,
+        recert_reason="missing_oos_recert,missing_quality_composite_score",
+        cpcv_median_sharpe=2.0,
+        promotion_gate_passed=True,
+    )
+    alert = _alert(db, pat, "SOFTR")
+    _run(db, pat, alert, expected=1.2)
+    db.commit()
+
+    row = compute_pattern_edge_reliability(db, pat.id, window_days=7)
+    assert row["graduation_blocker"] == "recert_blocked"
+
+    ev_id = enqueue_work_event(
+        db,
+        event_type=RECERT_RESCUE_REFRESH,
+        dedupe_key=f"test:soft-recert:{pat.id}",
+        payload={"scan_pattern_id": pat.id, "window_days": 7},
+        lease_scope="edge",
+    )
+    db.commit()
+    ev = db.get(BrainWorkEvent, ev_id)
+    assert ev is not None
+    handle_recert_rescue_refresh(db, ev, user_id=None)
+    db.commit()
+
+    outcome = (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_type == RECERT_RESCUE_DIAGNOSTIC)
+        .one()
+    )
+    assert outcome.payload["safe_to_bypass_live"] is False
+    assert outcome.payload["recert_rescue_status"] == "soft_blocked"
+    assert outcome.payload["hard_recert_reasons"] == []
+    assert outcome.payload["soft_recert_reasons"] == [
+        "missing_oos_recert",
+        "missing_quality_composite_score",
+    ]
+    assert outcome.payload["recommended_next_action"] == (
+        "complete_oos_recert_and_quality_refresh"
+    )
 
 
 def test_edge_reliability_work_dedupe_and_dispatch(db):
