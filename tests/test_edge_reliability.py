@@ -343,6 +343,118 @@ def test_recert_rescue_diagnostic_never_clears_hard_recert(db):
     )
 
 
+def test_recert_rescue_refresh_removes_stale_soft_reason_but_preserves_hard_oos(
+    db,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "app.services.trading.brain_work.handlers.quality_score._recompute_for_pattern",
+        lambda *args, **kwargs: (0.62, 0.62, False),
+    )
+    pat = _pattern(
+        db,
+        recert_required=True,
+        recert_reason="negative_oos_recert,missing_quality_composite_score",
+        cpcv_median_sharpe=2.0,
+        promotion_gate_passed=True,
+        quality_composite_score=0.62,
+        oos_evaluated_at=datetime.utcnow(),
+        oos_trade_count=20,
+        oos_win_rate=0.55,
+        oos_avg_return_pct=-0.25,
+        raw_realized_trade_count=8,
+        raw_realized_avg_return_pct=2.0,
+    )
+    alert = _alert(db, pat, "RECLEAN")
+    _run(db, pat, alert, expected=4.0)
+    db.commit()
+
+    ev_id = enqueue_work_event(
+        db,
+        event_type=RECERT_RESCUE_REFRESH,
+        dedupe_key=f"test:recert-clean:{pat.id}",
+        payload={"scan_pattern_id": pat.id, "window_days": 7},
+        lease_scope="edge",
+    )
+    db.commit()
+    ev = db.get(BrainWorkEvent, ev_id)
+    assert ev is not None
+    handle_recert_rescue_refresh(db, ev, user_id=None)
+    db.commit()
+    db.refresh(pat)
+
+    assert pat.recert_required is True
+    assert pat.recert_reason == "negative_oos_recert"
+    outcome = (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_type == RECERT_RESCUE_DIAGNOSTIC)
+        .one()
+    )
+    reconcile = outcome.payload["recert_reconcile"]
+    assert reconcile["changed"] is True
+    assert reconcile["cleared_recert_reasons"] == ["missing_quality_composite_score"]
+    assert reconcile["persisted_recert_reasons"] == ["negative_oos_recert"]
+    assert outcome.payload["recert_rescue_status"] == "hard_blocked"
+
+
+def test_recert_rescue_refresh_clears_stale_soft_recert_when_current_evidence_passes(
+    db,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "app.services.trading.brain_work.handlers.quality_score._recompute_for_pattern",
+        lambda *args, **kwargs: (0.71, 0.71, False),
+    )
+    pat = _pattern(
+        db,
+        recert_required=True,
+        recert_reason="missing_oos_recert,missing_quality_composite_score,thin_realized_ev",
+        cpcv_median_sharpe=2.0,
+        promotion_gate_passed=True,
+        quality_composite_score=0.71,
+        oos_evaluated_at=datetime.utcnow(),
+        oos_trade_count=30,
+        oos_win_rate=0.57,
+        oos_avg_return_pct=1.4,
+        raw_realized_trade_count=9,
+        raw_realized_avg_return_pct=1.1,
+    )
+    alert = _alert(db, pat, "RECLEAR")
+    _run(db, pat, alert, expected=2.0)
+    db.commit()
+
+    ev_id = enqueue_work_event(
+        db,
+        event_type=RECERT_RESCUE_REFRESH,
+        dedupe_key=f"test:recert-clear:{pat.id}",
+        payload={"scan_pattern_id": pat.id, "window_days": 7},
+        lease_scope="edge",
+    )
+    db.commit()
+    ev = db.get(BrainWorkEvent, ev_id)
+    assert ev is not None
+    handle_recert_rescue_refresh(db, ev, user_id=None)
+    db.commit()
+    db.refresh(pat)
+
+    assert pat.recert_required is False
+    assert pat.recert_reason is None
+    outcome = (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_type == RECERT_RESCUE_DIAGNOSTIC)
+        .one()
+    )
+    reconcile = outcome.payload["recert_reconcile"]
+    assert reconcile["changed"] is True
+    assert reconcile["persisted_recert_reasons"] == []
+    assert set(reconcile["cleared_recert_reasons"]) == {
+        "missing_oos_recert",
+        "missing_quality_composite_score",
+        "thin_realized_ev",
+    }
+    assert outcome.payload["recert_rescue_status"] == "not_recert_required"
+
+
 def test_recert_rescue_diagnostic_explains_soft_recert_next_action(db):
     pat = _pattern(
         db,

@@ -49,6 +49,109 @@ def _recert_reason_set(raw: Any) -> set[str]:
     return set()
 
 
+def _recert_reason_list(raw: Any) -> list[str]:
+    if isinstance(raw, str):
+        return [part.strip() for part in raw.split(",") if part.strip()]
+    if isinstance(raw, (list, tuple, set)):
+        return [str(part).strip() for part in raw if str(part).strip()]
+    return []
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
+def _safe_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _hard_reason_still_unresolved(pattern: Any, reason: str, config: Any) -> bool:
+    reason = str(reason or "").strip()
+    if reason == "negative_oos_recert":
+        oos_avg = _safe_float(getattr(pattern, "oos_avg_return_pct", None))
+        if oos_avg is None:
+            return True
+        return oos_avg < float(getattr(config, "min_oos_avg_return_pct", 0.0) or 0.0)
+    if reason == "negative_realized_ev":
+        raw_avg = _safe_float(getattr(pattern, "raw_realized_avg_return_pct", None))
+        if raw_avg is None:
+            return True
+        raw_n = _safe_int(getattr(pattern, "raw_realized_trade_count", None)) or 0
+        payoff = _safe_float(getattr(pattern, "payoff_ratio", None))
+        payoff_n = _safe_int(getattr(pattern, "payoff_ratio_n", None)) or 0
+        payoff_protected = (
+            payoff is not None
+            and payoff >= 1.5
+            and payoff_n >= int(getattr(config, "min_realized_trades", 5) or 5)
+        )
+        return raw_avg < 0.0 and not payoff_protected and raw_n > 0
+    if reason in {
+        "promotion_gate_not_currently_passed",
+        "promotion_gate_not_passed",
+        "promotion_gate_failed",
+        "cpcv_promotion_gate_failed",
+    }:
+        return getattr(pattern, "promotion_gate_passed", None) is not True
+    return True
+
+
+def _refresh_pattern_recert_state(
+    pattern: Any,
+    hard_recert_reasons: set[str],
+) -> dict[str, Any]:
+    """Reconcile stale persisted recert flags with current evidence, without bypassing hard debt."""
+    from app.config import settings
+    from app.services.trading.alpha_portfolio_gate import (
+        config_from_settings,
+        recert_reasons_for_pattern,
+    )
+
+    config = config_from_settings(settings)
+    previous = _recert_reason_list(getattr(pattern, "recert_reason", None))
+    previous_set = set(previous)
+    current = recert_reasons_for_pattern(pattern, config=config)
+    current_set = set(current)
+
+    if previous:
+        refreshed: list[str] = []
+        for reason in previous:
+            if reason in current_set:
+                refreshed.append(reason)
+                continue
+            if (
+                reason in hard_recert_reasons
+                and _hard_reason_still_unresolved(pattern, reason, config)
+            ):
+                refreshed.append(reason)
+
+        for reason in current:
+            if reason in hard_recert_reasons and reason not in refreshed:
+                refreshed.append(reason)
+        if not refreshed and current:
+            refreshed = list(current)
+    else:
+        refreshed = list(current)
+
+    changed = previous != refreshed
+    pattern.recert_required = bool(refreshed)
+    pattern.recert_reason = ",".join(refreshed) if refreshed else None
+    return {
+        "previous_recert_reasons": previous,
+        "current_recert_reasons": current,
+        "persisted_recert_reasons": refreshed,
+        "cleared_recert_reasons": [r for r in previous if r not in set(refreshed)],
+        "added_recert_reasons": [r for r in refreshed if r not in previous_set],
+        "changed": changed,
+    }
+
+
 def _recert_rescue_diagnostic_status(
     *,
     recert_required: bool,
@@ -161,6 +264,9 @@ def handle_recert_rescue_refresh(
     except Exception:
         logger.debug("%s quality recompute skipped pattern_id=%s", LOG_PREFIX, pid, exc_info=True)
 
+    recert_reconcile = _refresh_pattern_recert_state(pattern, set(HARD_RECERT_REASONS))
+    db.flush()
+
     reliability = compute_pattern_edge_reliability(
         db,
         pid,
@@ -189,6 +295,7 @@ def handle_recert_rescue_refresh(
         "recommended_next_action": next_action,
         "graduation_blocker": reliability.get("graduation_blocker"),
         "quality_recomputed": quality_recomputed,
+        "recert_reconcile": recert_reconcile,
         "safe_to_bypass_live": False,
         "uses_existing_probation_only": True,
         "calibrated_ev_pct": reliability.get("calibrated_ev_pct"),
