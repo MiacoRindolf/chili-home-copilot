@@ -212,6 +212,7 @@ _TRADING_DOMAIN_TARGETED_TESTS = (
     "test_canonical_outcome_layer.py",
     "test_cash_deployment.py",
     "test_composite_reweight.py",
+    "test_cpcv_promotion_gate.py",
     "test_crypto_exit_monitor_pattern_exit_now.py",
     "test_governance_daily_loss.py",
     "test_edge_aware_evolution.py",
@@ -220,6 +221,7 @@ _TRADING_DOMAIN_TARGETED_TESTS = (
     "test_market_data_dead_cache_fallback.py",
     "test_monitor_api_execution_state.py",
     "test_paper_shadow_mode.py",
+    "test_phase3_stop_bleed.py",
     "test_portfolio_options_close.py",
     "test_portfolio_risk_options_mtm.py",
     "test_pattern_directional_outcome.py",
@@ -229,6 +231,7 @@ _TRADING_DOMAIN_TARGETED_TESTS = (
     "test_stuck_order_watchdog.py",
     "test_trade_assign_pattern.py",
     "test_trades_sync.py",
+    "test_trading_decision_stack.py",
     "test_venue_robinhood_adapter.py",
 )
 _TRADING_DEFAULT_USER_TESTS = (
