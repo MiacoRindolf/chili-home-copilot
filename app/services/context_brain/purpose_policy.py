@@ -121,6 +121,11 @@ _PURPOSE_DEFAULTS: dict[str, PurposePolicy] = {
         use_premium_synthesis=True,
         high_stakes=False,
     ),
+    "wellness_chat": _passthrough_policy(
+        "wellness_chat",
+        use_premium_synthesis=True,
+        high_stakes=True,
+    ),
     "autotrader_revalidation": _passthrough_policy(
         "autotrader_revalidation",
         use_premium_synthesis=False,

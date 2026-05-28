@@ -225,10 +225,31 @@ def wellness_chat_stream(
         log_info(trace_id, f"wellness_ollama_stream_error={e}, falling back to groq")
         from . import openai_client
         if openai_client.is_configured():
+            user_message = messages[-1]["content"] if messages else ""
+            gateway_yielded = False
+            try:
+                from .services.context_brain.llm_gateway import gateway_chat_stream
+
+                for tok, model in gateway_chat_stream(
+                    messages=messages,
+                    purpose="wellness_chat",
+                    system_prompt=system,
+                    trace_id=trace_id,
+                    user_message=user_message,
+                ):
+                    gateway_yielded = True
+                    yield tok, model + "-wellness"
+                return
+            except Exception as gw_error:
+                if gateway_yielded:
+                    log_info(trace_id, f"wellness_gateway_stream_error_after_tokens={gw_error}")
+                    raise
+                log_info(trace_id, f"wellness_gateway_stream_error={gw_error}, falling back direct")
+
             for tok, model in openai_client.chat_stream(
                 messages=messages,
                 system_prompt=system,
                 trace_id=trace_id,
-                user_message=messages[-1]["content"] if messages else "",
+                user_message=user_message,
             ):
                 yield tok, model + "-wellness"

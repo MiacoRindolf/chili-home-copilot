@@ -345,6 +345,30 @@ def test_project_playwright_has_offline_code_default_when_db_seed_missing():
     assert db.calls == 1
 
 
+def test_wellness_chat_has_high_stakes_passthrough_default_when_db_seed_missing():
+    class EmptyResult:
+        def fetchone(self):
+            return None
+
+    class EmptyDb:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, *_args, **_kwargs):
+            self.calls += 1
+            return EmptyResult()
+
+    db = EmptyDb()
+
+    policy = policy_mod.get_policy(db, "wellness_chat")
+
+    assert policy.purpose == "wellness_chat"
+    assert policy.routing_strategy == "passthrough"
+    assert policy.use_premium_synthesis is True
+    assert policy.high_stakes is True
+    assert db.calls == 1
+
+
 @pytest.mark.parametrize(
     ("purpose", "use_premium_synthesis", "high_stakes"),
     [

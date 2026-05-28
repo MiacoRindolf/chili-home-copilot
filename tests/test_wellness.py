@@ -7,6 +7,7 @@ from app.wellness import (
     detect_wellness_topic,
     CRISIS_RESPONSE,
     wellness_chat,
+    wellness_chat_stream,
 )
 
 
@@ -129,3 +130,31 @@ class TestWellnessChat:
         )
         assert "try again" in result["reply"].lower()
         assert result["model"] == "offline-wellness"
+
+    @patch("app.wellness.requests.post", side_effect=Exception("connection refused"))
+    @patch("app.openai_client.is_configured", return_value=True)
+    def test_stream_fallback_routes_through_gateway(self, mock_configured, mock_post, monkeypatch):
+        gateway_stream = MagicMock(return_value=iter([
+            ("I'm here ", "gpt-5.5"),
+            ("with you.", "gpt-5.5"),
+        ]))
+        direct_stream = MagicMock()
+        monkeypatch.setattr(
+            "app.services.context_brain.llm_gateway.gateway_chat_stream",
+            gateway_stream,
+        )
+        monkeypatch.setattr("app.openai_client.chat_stream", direct_stream)
+
+        out = list(wellness_chat_stream(
+            messages=[{"role": "user", "content": "I'm feeling anxious"}],
+            user_name="Bob",
+            trace_id="wellness-stream-test",
+        ))
+
+        assert out == [
+            ("I'm here ", "gpt-5.5-wellness"),
+            ("with you.", "gpt-5.5-wellness"),
+        ]
+        assert gateway_stream.call_count == 1
+        assert gateway_stream.call_args.kwargs["purpose"] == "wellness_chat"
+        assert direct_stream.call_count == 0
