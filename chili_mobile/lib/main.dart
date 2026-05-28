@@ -60,11 +60,18 @@ class ChiliDesktopCompanion extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'CHILI Companion',
-      debugShowCheckedModeBanner: false,
-      theme: buildChiliTheme(),
-      home: const CompanionShell(),
+    return ValueListenableBuilder<String>(
+      valueListenable: AppConfig.instance.themeModeNotifier,
+      builder: (context, themeMode, _) {
+        return MaterialApp(
+          title: 'CHILI Companion',
+          debugShowCheckedModeBanner: false,
+          theme: buildChiliLightTheme(),
+          darkTheme: buildChiliDarkTheme(),
+          themeMode: chiliThemeModeFromString(themeMode),
+          home: const CompanionShell(),
+        );
+      },
     );
   }
 }

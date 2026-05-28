@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
+import difflib
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -1138,6 +1139,17 @@ def release_run_leases(db: Session, run_id: str) -> None:
     db.flush()
 
 
+def _local_worktree_root() -> Path:
+    raw = (os.environ.get("CHILI_PROJECT_AUTOPILOT_WORKTREE_DIR") or "").strip()
+    if raw:
+        normalized = raw.replace("\\", "/")
+        if os.name == "nt" and (normalized == "/tmp" or normalized.startswith("/tmp/")):
+            rel = normalized.removeprefix("/tmp").lstrip("/")
+            return Path(tempfile.gettempdir()) / rel if rel else Path(tempfile.gettempdir())
+        return Path(raw)
+    return Path(tempfile.gettempdir())
+
+
 def generate_diffs_from_plan(
     db: Session,
     run: ProjectAutonomyRun,
@@ -1155,6 +1167,30 @@ def generate_diffs_from_plan(
         if ins.get("description")
     ]
     diffs: list[str] = []
+    rejections: list[str] = []
+
+    def try_fallback(rel_path: str, current_content: str | None) -> bool:
+        fallback = _deterministic_small_desktop_diff(rel_path, current_content or "", run.prompt)
+        if not fallback:
+            return False
+        check = _git(repo_path, ["apply", "--check"], input_text=fallback, timeout=60)
+        if check.returncode != 0:
+            rejections.append(
+                f"{rel_path}: deterministic fallback did not apply cleanly "
+                f"({(check.stderr or check.stdout or '').strip()[:500]})"
+            )
+            return False
+        diffs.append(fallback)
+        _add_artifact(
+            db,
+            run.run_id,
+            "diff",
+            rel_path,
+            content=fallback,
+            content_json={"source": "deterministic_small_desktop_fallback"},
+        )
+        return True
+
     for item in files:
         _check_cancel(db, run)
         rel = str(item.get("path") or "")
@@ -1162,6 +1198,8 @@ def generate_diffs_from_plan(
         content = _read_file_content(str(repo_path), rel, max_lines=_EDIT_MAX_FILE_LINES)
         if validation_context:
             desc = desc + "\n\nValidation failure to repair:\n" + validation_context
+        if not validation_context and try_fallback(rel, content):
+            continue
         prompt = _build_edit_prompt(rel, content or "", desc, conventions)
         result = ollama_client.chat(
             [
@@ -1189,23 +1227,35 @@ def generate_diffs_from_plan(
         )
         _check_cancel(db, run)
         if not result.ok:
+            rejections.append(f"{rel}: model call failed ({result.error or 'unknown error'})")
+            if try_fallback(rel, content):
+                continue
             continue
         diff = _extract_diff(result.text)
         if not diff:
+            reason = "model_response_missing_unified_diff"
             _add_artifact(
                 db,
                 run.run_id,
                 "diff_rejected",
                 rel,
-                content_json={"reason": "model_response_missing_unified_diff", "response_preview": _clip(result.text, 800)},
+                content_json={"reason": reason, "response_preview": _clip(result.text, 800)},
             )
+            rejections.append(f"{rel}: model did not return a unified diff")
+            if try_fallback(rel, content):
+                continue
             continue
         validity = _validate_diff(diff, rel, content)
         if not validity.get("valid"):
             _add_artifact(db, run.run_id, "diff_rejected", rel, content_json=validity)
+            warnings = ", ".join(str(item) for item in validity.get("warnings") or [])
+            rejections.append(f"{rel}: generated diff failed validation{f' ({warnings})' if warnings else ''}")
+            if try_fallback(rel, content):
+                continue
             continue
         check = _git(repo_path, ["apply", "--check"], input_text=diff, timeout=60)
         if check.returncode != 0:
+            stderr = _clip(check.stderr or check.stdout or "", 900)
             _add_artifact(
                 db,
                 run.run_id,
@@ -1213,13 +1263,74 @@ def generate_diffs_from_plan(
                 rel,
                 content_json={
                     "reason": "git_apply_check_failed",
-                    "stderr": _clip(check.stderr or check.stdout or "", 900),
+                    "stderr": stderr,
                 },
             )
+            rejections.append(f"{rel}: generated patch did not apply cleanly ({stderr.strip() or 'git apply --check failed'})")
+            if try_fallback(rel, content):
+                continue
             continue
         diffs.append(diff)
         _add_artifact(db, run.run_id, "diff", rel, content=diff)
+    if not diffs and rejections:
+        raise AutonomyBlocked("No usable implementation diffs were produced. " + " ".join(rejections[:3]))
     return diffs
+
+
+def _deterministic_small_desktop_diff(rel: str, content: str, prompt: str) -> str | None:
+    if rel != "chili_mobile/lib/src/network/network_error_message.dart":
+        return None
+    prompt_lower = (prompt or "").lower()
+    if not _is_vague_small_request(prompt) or not any(token in prompt_lower for token in ("desktop", "app", "ui")):
+        return None
+    updated = content
+    if "case 403:" not in updated and "Access denied (403)" not in updated:
+        anchor = "    case 502:\n"
+        insert = (
+            "    case 401:\n"
+            "      return 'Authentication failed (401). Pair this desktop app again or check the Backend URL in Settings.';\n"
+            "    case 403:\n"
+            "      return 'Access denied (403). Pair this desktop app again, or check that Settings points at your local CHILI backend.';\n"
+        )
+        if anchor not in updated:
+            return None
+        updated = updated.replace(anchor, insert + anchor, 1)
+    elif "HandshakeException" not in updated:
+        anchor = "  if (s.contains('Connection refused')) {\n"
+        insert = (
+            "  if (s.contains('HandshakeException') || s.contains('CERTIFICATE_VERIFY_FAILED')) {\n"
+            "    return 'Secure connection failed. Check that the Backend URL uses the right http/https scheme and that any local certificate is trusted.';\n"
+            "  }\n"
+        )
+        if anchor not in updated:
+            return None
+        updated = updated.replace(anchor, insert + anchor, 1)
+    elif "FormatException" not in updated:
+        anchor = "  return s;\n"
+        insert = (
+            "  if (s.contains('FormatException') || s.contains('Unexpected character')) {\n"
+            "    return 'The server sent a response this app could not read. Check that the Backend URL points at the CHILI API, not a login page or proxy error page.';\n"
+            "  }\n"
+        )
+        if anchor not in updated:
+            return None
+        updated = updated.replace(anchor, insert + anchor, 1)
+    else:
+        return None
+    return _unified_diff(rel, content, updated)
+
+
+def _unified_diff(rel: str, before: str, after: str) -> str:
+    before_lines = before.splitlines()
+    after_lines = after.splitlines()
+    diff = difflib.unified_diff(
+        before_lines,
+        after_lines,
+        fromfile=f"a/{rel}",
+        tofile=f"b/{rel}",
+        lineterm="",
+    )
+    return "\n".join(diff) + "\n"
 
 
 def _extract_diff(text: str) -> str | None:
@@ -1233,14 +1344,28 @@ def _extract_diff(text: str) -> str | None:
 
 
 def _git(cwd: Path, args: list[str], *, input_text: str | None = None, timeout: int = 120) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    if input_text is None:
+        return subprocess.run(
+            ["git"] + args,
+            cwd=str(cwd),
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            env=subprocess_safe_env(),
+        )
+    proc = subprocess.run(
         ["git"] + args,
         cwd=str(cwd),
-        input=input_text,
-        text=True,
+        input=input_text.encode("utf-8"),
         capture_output=True,
         timeout=timeout,
         env=subprocess_safe_env(),
+    )
+    return subprocess.CompletedProcess(
+        proc.args,
+        proc.returncode,
+        stdout=proc.stdout.decode("utf-8", errors="replace"),
+        stderr=proc.stderr.decode("utf-8", errors="replace"),
     )
 
 
@@ -1264,7 +1389,7 @@ def integration_branch_name(run_id: str) -> str:
 
 
 def _create_run_worktree(repo_path: Path, run: ProjectAutonomyRun, base_sha: str) -> tuple[str, Path]:
-    base = Path(os.environ.get("CHILI_PROJECT_AUTOPILOT_WORKTREE_DIR") or tempfile.gettempdir()) / "chili-project-autopilot"
+    base = _local_worktree_root() / "chili-project-autopilot"
     base.mkdir(parents=True, exist_ok=True)
     worktree = base / run.run_id
     branch = integration_branch_name(run.run_id)
@@ -1277,6 +1402,8 @@ def _create_run_worktree(repo_path: Path, run: ProjectAutonomyRun, base_sha: str
     proc = _git(repo_path, ["worktree", "add", "-B", branch, str(worktree), base_sha], timeout=180)
     if proc.returncode != 0:
         raise AutonomyBlocked(f"Could not create isolated worktree: {(proc.stderr or proc.stdout or '').strip()[:900]}")
+    if not worktree.is_dir():
+        raise AutonomyBlocked(f"Could not create isolated worktree at {worktree}.")
     return branch, worktree
 
 

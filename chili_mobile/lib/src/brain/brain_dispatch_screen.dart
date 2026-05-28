@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../network/chili_api_client.dart';
 import '../network/network_error_message.dart';
+import 'autonomy_run_presenter.dart';
 import 'device_auth_store.dart';
 
 /// Dispatch monitor: status, queue task, run history.
@@ -445,6 +446,24 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     } finally {
       if (mounted) setState(() => _autonomyBusy = false);
     }
+  }
+
+  void _prefillAutopilotRerun(Map<String, dynamic> run) {
+    final prompt = run['prompt']?.toString() ?? '';
+    final repoId = _asInt(run['repo_id']);
+    setState(() {
+      _autopilotPromptCtrl.text = prompt;
+      _autopilotPromptCtrl.selection = TextSelection.collapsed(
+        offset: _autopilotPromptCtrl.text.length,
+      );
+      if (repoId != null) _autonomyRepoId = repoId;
+      _autonomyError = null;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Prompt restored. Press Run to start a fresh safe run.'),
+      ),
+    );
   }
 
   Future<void> _cancelAutopilot() async {
@@ -941,23 +960,48 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   }
 
   Color _autonomyStatusColor(String status) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
     switch (status) {
       case 'merged':
       case 'completed':
-        return Colors.green.shade700;
+        return dark ? Colors.green.shade300 : Colors.green.shade700;
       case 'blocked':
-        return Colors.orange.shade800;
+        return dark ? Colors.orange.shade300 : Colors.orange.shade800;
       case 'failed':
       case 'cancelled':
-        return Colors.red.shade700;
+        return dark ? Colors.red.shade300 : Colors.red.shade700;
       case 'validating':
       case 'merging':
-        return Colors.indigo.shade700;
+        return dark ? Colors.indigo.shade200 : Colors.indigo.shade700;
       case 'running':
-        return Colors.blue.shade700;
+        return dark ? Colors.blue.shade300 : Colors.blue.shade700;
       default:
-        return Colors.grey.shade700;
+        return dark ? Colors.grey.shade400 : Colors.grey.shade700;
     }
+  }
+
+  Color _autonomyPanelColor() => Theme.of(context).colorScheme.surface;
+
+  Color _autonomySidebarColor() {
+    final scheme = Theme.of(context).colorScheme;
+    final tint = Theme.of(context).brightness == Brightness.dark ? 0.08 : 0.035;
+    return Color.alphaBlend(
+      scheme.primary.withValues(alpha: tint),
+      scheme.surface,
+    );
+  }
+
+  Color _autonomyDividerColor() => Theme.of(context).dividerColor;
+
+  Color _mutedTextColor() => Theme.of(context).colorScheme.onSurfaceVariant;
+
+  Color _autonomyBubbleBackground(Color color, {double alpha = 0.10}) {
+    final scheme = Theme.of(context).colorScheme;
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    return Color.alphaBlend(
+      color.withValues(alpha: dark ? alpha + 0.10 : alpha),
+      scheme.surface,
+    );
   }
 
   Widget _buildAutopilotTab() {
@@ -975,9 +1019,9 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   SizedBox(width: 280, child: _buildAutonomyThreadSidebar()),
-                  VerticalDivider(width: 1, color: Colors.grey.shade300),
+                  VerticalDivider(width: 1, color: _autonomyDividerColor()),
                   Expanded(child: _buildAutonomyConversationPane()),
-                  VerticalDivider(width: 1, color: Colors.grey.shade300),
+                  VerticalDivider(width: 1, color: _autonomyDividerColor()),
                   SizedBox(
                     width: rightWidth,
                     child: _buildAutonomyTrackingSidebar(),
@@ -1009,19 +1053,20 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   }
 
   Widget _buildAutonomyErrorBanner({bool compact = false}) {
+    final scheme = Theme.of(context).colorScheme;
     return Container(
       width: double.infinity,
       padding: EdgeInsets.all(compact ? 10 : 12),
-      color: Colors.red.shade50,
+      color: scheme.errorContainer,
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(Icons.error_outline, color: Colors.red.shade800, size: 20),
+          Icon(Icons.error_outline, color: scheme.onErrorContainer, size: 20),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
               _autonomyError!,
-              style: TextStyle(color: Colors.red.shade900, fontSize: 13),
+              style: TextStyle(color: scheme.onErrorContainer, fontSize: 13),
             ),
           ),
         ],
@@ -1031,7 +1076,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
 
   Widget _buildAutonomyThreadSidebar() {
     return Container(
-      color: Colors.grey.shade50,
+      color: _autonomySidebarColor(),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -1099,7 +1144,12 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
       child: Material(
-        color: selected ? Colors.indigo.shade50 : Colors.transparent,
+        color: selected
+            ? _autonomyBubbleBackground(
+                Theme.of(context).colorScheme.primary,
+                alpha: 0.12,
+              )
+            : Colors.transparent,
         borderRadius: BorderRadius.circular(8),
         child: InkWell(
           borderRadius: BorderRadius.circular(8),
@@ -1133,7 +1183,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                   prompt.isEmpty ? '(no prompt recorded)' : prompt,
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyle(color: Colors.grey.shade800, fontSize: 12),
+                  style: TextStyle(color: _mutedTextColor(), fontSize: 12),
                 ),
                 const SizedBox(height: 8),
                 Wrap(
@@ -1142,14 +1192,17 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                   children: [
                     _miniChip(status, color.withValues(alpha: 0.12), color),
                     if (stage.isNotEmpty)
-                      _miniChip(stage, Colors.blueGrey.shade50,
-                          Colors.blueGrey.shade800),
+                      _miniChip(
+                        stage,
+                        _autonomyBubbleBackground(Colors.blueGrey),
+                        Colors.blueGrey.shade800,
+                      ),
                   ],
                 ),
                 const SizedBox(height: 6),
                 Text(
                   _shortStamp(run['updated_at'] ?? run['created_at']),
-                  style: TextStyle(color: Colors.grey.shade600, fontSize: 11),
+                  style: TextStyle(color: _mutedTextColor(), fontSize: 11),
                 ),
               ],
             ),
@@ -1162,7 +1215,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   Widget _buildAutonomyConversationPane() {
     final run = _activeAutonomyRun;
     return Container(
-      color: Colors.white,
+      color: _autonomyPanelColor(),
       child: Column(
         children: [
           _buildAutonomyConversationHeader(run),
@@ -1184,6 +1237,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final color = _autonomyStatusColor(status);
     final terminal = _autonomyTerminal(run);
     final branch = run?['integration_branch']?.toString() ?? '';
+    final canRerun = AutonomyRunPresenter.canRerun(run);
     final canMerge = terminal &&
         branch.isNotEmpty &&
         status != 'merged' &&
@@ -1191,7 +1245,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     return Container(
       padding: const EdgeInsets.fromLTRB(18, 12, 14, 12),
       decoration: BoxDecoration(
-        border: Border(bottom: BorderSide(color: Colors.grey.shade300)),
+        border: Border(bottom: BorderSide(color: _autonomyDividerColor())),
       ),
       child: Row(
         children: [
@@ -1216,15 +1270,31 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                     _miniChip(status, color.withValues(alpha: 0.12), color),
                     if (stage.isNotEmpty)
                       _miniChip(
-                          stage, Colors.indigo.shade50, Colors.indigo.shade800),
+                        stage,
+                        _autonomyBubbleBackground(Colors.indigo),
+                        Colors.indigo.shade800,
+                      ),
                     if (merge.isNotEmpty)
-                      _miniChip('merge: $merge', Colors.blueGrey.shade50,
-                          Colors.blueGrey.shade800),
+                      _miniChip(
+                        'merge: $merge',
+                        _autonomyBubbleBackground(Colors.blueGrey),
+                        Colors.blueGrey.shade800,
+                      ),
                   ],
                 ),
               ],
             ),
           ),
+          if (canRerun) ...[
+            OutlinedButton.icon(
+              onPressed: _autonomyBusy || run == null
+                  ? null
+                  : () => _prefillAutopilotRerun(run),
+              icon: const Icon(Icons.replay, size: 18),
+              label: const Text('Rerun prompt'),
+            ),
+            const SizedBox(width: 6),
+          ],
           IconButton(
             tooltip: 'Refresh',
             onPressed: _autonomyBusy || run == null
@@ -1260,6 +1330,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final validation = _asMapList(run['validation']);
     final error = run['error_message']?.toString() ?? '';
     final merge = run['merge_message']?.toString() ?? '';
+    final blockedBody = AutonomyRunPresenter.blockedRunMessage(run);
+    final showMerge = merge.isNotEmpty && merge.trim() != error.trim();
     final widgets = <Widget>[
       if (prompt.isNotEmpty)
         _buildChatBubble(
@@ -1267,31 +1339,51 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
           title: 'Operator',
           body: prompt,
           alignRight: true,
-          color: Colors.indigo.shade700,
-          background: Colors.indigo.shade50,
+          color: Theme.of(context).colorScheme.primary,
+          background: _autonomyBubbleBackground(
+            Theme.of(context).colorScheme.primary,
+            alpha: 0.12,
+          ),
         ),
       ...steps.map(_buildAutonomyStepBubble),
       if (plan.isNotEmpty) _buildAutonomyPlanBubble(plan),
       ...artifacts
-          .where((artifact) => {'model_call', 'diff', 'diff_rejected', 'commit'}
-              .contains(artifact['artifact_type']?.toString()))
+          .where((artifact) => {
+                'model_call',
+                'worktree',
+                'diff',
+                'diff_rejected',
+                'commit'
+              }.contains(artifact['artifact_type']?.toString()))
           .map(_buildAutonomyArtifactBubble),
       if (validation.isNotEmpty) _buildAutonomyValidationBubble(validation),
-      if (merge.isNotEmpty)
+      if (showMerge)
         _buildChatBubble(
           icon: Icons.merge_type,
           title: 'Merge gate',
           body: merge,
-          color: Colors.blueGrey.shade700,
-          background: Colors.blueGrey.shade50,
+          color: _autonomyStatusColor(run['merge_status']?.toString() ?? ''),
+          background: _autonomyBubbleBackground(Colors.blueGrey),
         ),
       if (error.isNotEmpty)
         _buildChatBubble(
           icon: Icons.warning_amber_outlined,
           title: 'Blocked reason',
-          body: error,
-          color: Colors.orange.shade900,
-          background: Colors.orange.shade50,
+          body: blockedBody,
+          color: _autonomyStatusColor('blocked'),
+          background: _autonomyBubbleBackground(Colors.orange, alpha: 0.14),
+        ),
+      if (AutonomyRunPresenter.canRerun(run))
+        _buildChatBubble(
+          icon: Icons.replay,
+          title: 'Next step',
+          body:
+              'This run has ended. Use Rerun prompt above to start a fresh run with the repaired worker.',
+          color: Theme.of(context).colorScheme.primary,
+          background: _autonomyBubbleBackground(
+            Theme.of(context).colorScheme.primary,
+            alpha: 0.10,
+          ),
         ),
     ];
     return ListView(
@@ -1307,7 +1399,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final stage = step['stage']?.toString() ?? '';
     final status = step['status']?.toString() ?? '';
     final title = step['title']?.toString() ?? stage;
-    final detail = _detailPreview(step['detail']);
+    final detail = AutonomyRunPresenter.stepBody(step);
     final color = _autonomyStatusColor(status);
     return _buildChatBubble(
       icon: _autonomyStageIcon(stage),
@@ -1316,12 +1408,16 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
       meta: _shortStamp(step['created_at']),
       chips: [
         if (stage.isNotEmpty)
-          _miniChip(stage, Colors.blueGrey.shade50, Colors.blueGrey.shade800),
+          _miniChip(
+            stage,
+            _autonomyBubbleBackground(Colors.blueGrey),
+            Colors.blueGrey.shade800,
+          ),
         if (status.isNotEmpty)
           _miniChip(status, color.withValues(alpha: 0.12), color),
       ],
       color: color,
-      background: Colors.grey.shade50,
+      background: _autonomyBubbleBackground(color, alpha: 0.06),
     );
   }
 
@@ -1337,11 +1433,11 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
       title: 'Architect plan',
       body: [analysis, if (notes.isNotEmpty) notes].join('\n\n').trim(),
       chips: files
-          .map((file) =>
-              _miniChip(file, Colors.teal.shade50, Colors.teal.shade900))
+          .map((file) => _miniChip(file, _autonomyBubbleBackground(Colors.teal),
+              Colors.teal.shade900))
           .toList(),
-      color: Colors.teal.shade900,
-      background: Colors.teal.shade50,
+      color: _autonomyStatusColor('completed'),
+      background: _autonomyBubbleBackground(Colors.teal, alpha: 0.11),
     );
   }
 
@@ -1350,25 +1446,34 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final name = artifact['name']?.toString() ?? type;
     final json = _asMap(artifact['content_json']);
     final ok = json['ok'];
-    final body = artifact['content']?.toString().trim().isNotEmpty == true
-        ? artifact['content'].toString()
-        : _detailPreview(json);
-    final color = ok == false ? Colors.orange.shade900 : Colors.blue.shade800;
+    final body = AutonomyRunPresenter.artifactBody(artifact);
+    final color = ok == false
+        ? _autonomyStatusColor('blocked')
+        : _autonomyStatusColor('running');
     return _buildChatBubble(
       icon: _autonomyArtifactIcon(type),
       title: name,
       body: body,
       meta: _shortStamp(artifact['created_at']),
       chips: [
-        _miniChip(type, Colors.blueGrey.shade50, Colors.blueGrey.shade800),
+        _miniChip(
+          type,
+          _autonomyBubbleBackground(Colors.blueGrey),
+          Colors.blueGrey.shade800,
+        ),
         if (ok != null)
           _miniChip(
               ok == true ? 'ok' : 'rejected',
-              ok == true ? Colors.green.shade50 : Colors.orange.shade50,
+              ok == true
+                  ? _autonomyBubbleBackground(Colors.green)
+                  : _autonomyBubbleBackground(Colors.orange),
               ok == true ? Colors.green.shade800 : Colors.orange.shade900),
       ],
       color: color,
-      background: Colors.white,
+      background: _autonomyBubbleBackground(
+        ok == false ? Colors.orange : Colors.blue,
+        alpha: 0.06,
+      ),
     );
   }
 
@@ -1378,23 +1483,24 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
       return code == 0 || code == '0' || item['passed'] == true;
     }).length;
     final failed = validation.length - passed;
-    final body = validation
-        .map((item) =>
-            '${item['step_key'] ?? 'command'}: exit ${item['exit_code'] ?? '-'}')
-        .join('\n');
+    final body = AutonomyRunPresenter.validationBody(validation);
     return _buildChatBubble(
       icon: failed == 0 ? Icons.verified_outlined : Icons.report_outlined,
       title: 'Validation',
       body: body,
       chips: [
-        _miniChip(
-            '$passed passed', Colors.green.shade50, Colors.green.shade800),
+        _miniChip('$passed passed', _autonomyBubbleBackground(Colors.green),
+            Colors.green.shade800),
         if (failed > 0)
-          _miniChip(
-              '$failed failed', Colors.orange.shade50, Colors.orange.shade900),
+          _miniChip('$failed failed', _autonomyBubbleBackground(Colors.orange),
+              Colors.orange.shade900),
       ],
-      color: failed == 0 ? Colors.green.shade800 : Colors.orange.shade900,
-      background: failed == 0 ? Colors.green.shade50 : Colors.orange.shade50,
+      color: failed == 0
+          ? _autonomyStatusColor('completed')
+          : _autonomyStatusColor('blocked'),
+      background: failed == 0
+          ? _autonomyBubbleBackground(Colors.green, alpha: 0.12)
+          : _autonomyBubbleBackground(Colors.orange, alpha: 0.14),
     );
   }
 
@@ -1432,8 +1538,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                 ),
                 if (meta.isNotEmpty)
                   Text(meta,
-                      style:
-                          TextStyle(color: Colors.grey.shade600, fontSize: 11)),
+                      style: TextStyle(color: _mutedTextColor(), fontSize: 11)),
               ],
             ),
             if (body.trim().isNotEmpty) ...[
@@ -1441,7 +1546,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
               SelectableText(
                 body.length > 1400 ? '${body.substring(0, 1400)}...' : body,
                 style: TextStyle(
-                  color: Colors.grey.shade900,
+                  color: Theme.of(context).colorScheme.onSurface,
                   fontSize: 13,
                   height: 1.35,
                 ),
@@ -1465,8 +1570,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     return Container(
       padding: const EdgeInsets.fromLTRB(18, 12, 18, 14),
       decoration: BoxDecoration(
-        color: Colors.grey.shade50,
-        border: Border(top: BorderSide(color: Colors.grey.shade300)),
+        color: _autonomySidebarColor(),
+        border: Border(top: BorderSide(color: _autonomyDividerColor())),
       ),
       child: Column(
         children: [
@@ -1525,7 +1630,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
             const SizedBox(height: 8),
             Text(
               'No registered local repos are visible to this desktop backend.',
-              style: TextStyle(color: Colors.orange.shade900, fontSize: 13),
+              style: TextStyle(
+                  color: _autonomyStatusColor('blocked'), fontSize: 13),
             ),
           ],
         ],
@@ -1564,7 +1670,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final run = _activeAutonomyRun;
     if (run == null) {
       return Container(
-        color: Colors.grey.shade50,
+        color: _autonomySidebarColor(),
         child: _emptyAutonomyState('Tracking details appear here'),
       );
     }
@@ -1578,7 +1684,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final mergeMessage = run['merge_message']?.toString() ?? '';
     final errorMessage = run['error_message']?.toString() ?? '';
     return Container(
-      color: Colors.grey.shade50,
+      color: _autonomySidebarColor(),
       child: ListView(
         padding: const EdgeInsets.all(16),
         children: [
@@ -1594,18 +1700,26 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                       .withValues(alpha: 0.12),
                   _autonomyStatusColor(run['status']?.toString() ?? '')),
               if (run['current_stage'] != null)
-                _miniChip('${run['current_stage']}', Colors.indigo.shade50,
-                    Colors.indigo.shade800),
+                _miniChip(
+                  '${run['current_stage']}',
+                  _autonomyBubbleBackground(Colors.indigo),
+                  Colors.indigo.shade800,
+                ),
               if (run['merge_status'] != null)
-                _miniChip('merge: ${run['merge_status']}',
-                    Colors.blueGrey.shade50, Colors.blueGrey.shade800),
+                _miniChip(
+                  'merge: ${run['merge_status']}',
+                  _autonomyBubbleBackground(Colors.blueGrey),
+                  Colors.blueGrey.shade800,
+                ),
             ],
           ),
           const SizedBox(height: 12),
           if (branch.isNotEmpty) _kvSelectable('Branch', branch),
           if (worktree.isNotEmpty) _kvSelectable('Worktree', worktree),
           if (mergeMessage.isNotEmpty) _kvSelectable('Merge', mergeMessage),
-          if (errorMessage.isNotEmpty) _kvSelectable('Blocked', errorMessage),
+          if (errorMessage.isNotEmpty)
+            _kvSelectable(
+                'Blocked', AutonomyRunPresenter.blockedRunMessage(run)),
           const Divider(height: 28),
           _buildAutonomyPlan(plan, files),
           const Divider(height: 28),
@@ -1623,22 +1737,9 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(20),
-        child: Text(label, style: TextStyle(color: Colors.grey.shade700)),
+        child: Text(label, style: TextStyle(color: _mutedTextColor())),
       ),
     );
-  }
-
-  String _detailPreview(dynamic detail) {
-    if (detail == null) return '';
-    if (detail is Map && detail.isEmpty) return '';
-    if (detail is List && detail.isEmpty) return '';
-    if (detail is String) return detail;
-    try {
-      final text = const JsonEncoder.withIndent('  ').convert(detail);
-      return text.length > 900 ? '${text.substring(0, 900)}...' : text;
-    } catch (_) {
-      return detail.toString();
-    }
   }
 
   IconData _autonomyStatusIcon(String status) {
@@ -1693,6 +1794,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     switch (type) {
       case 'model_call':
         return Icons.memory;
+      case 'worktree':
+        return Icons.account_tree_outlined;
       case 'diff':
         return Icons.difference_outlined;
       case 'diff_rejected':
@@ -1746,8 +1849,11 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                 _miniChip(
                     status, statusColor.withValues(alpha: 0.12), statusColor),
                 const SizedBox(width: 6),
-                _miniChip('merge: $merge', Colors.blueGrey.shade50,
-                    Colors.blueGrey.shade800),
+                _miniChip(
+                  'merge: $merge',
+                  _autonomyBubbleBackground(Colors.blueGrey),
+                  Colors.blueGrey.shade800,
+                ),
               ],
             ),
             const SizedBox(height: 10),
@@ -1757,13 +1863,22 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
               children: [
                 if (stage.isNotEmpty)
                   _miniChip(
-                      stage, Colors.indigo.shade50, Colors.indigo.shade800),
+                    stage,
+                    _autonomyBubbleBackground(Colors.indigo),
+                    Colors.indigo.shade800,
+                  ),
                 if (run['repo_id'] != null)
-                  _miniChip('repo #${run['repo_id']}', Colors.grey.shade100,
-                      Colors.grey.shade800),
+                  _miniChip(
+                    'repo #${run['repo_id']}',
+                    _autonomyBubbleBackground(Colors.grey),
+                    Colors.grey.shade800,
+                  ),
                 if (branch.isNotEmpty)
                   _miniChip(
-                      branch, Colors.purple.shade50, Colors.purple.shade800),
+                    branch,
+                    _autonomyBubbleBackground(Colors.purple),
+                    Colors.purple.shade800,
+                  ),
               ],
             ),
             const SizedBox(height: 12),
@@ -1797,7 +1912,9 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
               _kvSelectable('Worktree', worktree),
             ],
             if (mergeMessage.isNotEmpty) _kvSelectable('Merge', mergeMessage),
-            if (errorMessage.isNotEmpty) _kvSelectable('Blocked', errorMessage),
+            if (errorMessage.isNotEmpty)
+              _kvSelectable(
+                  'Blocked', AutonomyRunPresenter.blockedRunMessage(run)),
             const Divider(height: 28),
             _buildAutonomyPlan(plan, files),
             const Divider(height: 28),
@@ -1823,15 +1940,14 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         Text('Architect plan', style: Theme.of(context).textTheme.titleSmall),
         const SizedBox(height: 8),
         if (analysis.isEmpty && notes.isEmpty && files.isEmpty)
-          Text('Waiting for plan',
-              style: TextStyle(color: Colors.grey.shade700))
+          Text('Waiting for plan', style: TextStyle(color: _mutedTextColor()))
         else ...[
           if (analysis.isNotEmpty)
             SelectableText(analysis, style: const TextStyle(fontSize: 13)),
           if (notes.isNotEmpty) ...[
             const SizedBox(height: 8),
             SelectableText(notes,
-                style: TextStyle(fontSize: 13, color: Colors.grey.shade800)),
+                style: TextStyle(fontSize: 13, color: _mutedTextColor())),
           ],
           if (files.isNotEmpty) ...[
             const SizedBox(height: 10),
@@ -1840,7 +1956,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
               runSpacing: 6,
               children: files
                   .map((file) => _miniChip(
-                      file, Colors.teal.shade50, Colors.teal.shade900))
+                        file,
+                        _autonomyBubbleBackground(Colors.teal),
+                        Colors.teal.shade900,
+                      ))
                   .toList(),
             ),
           ],
@@ -1857,7 +1976,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         const SizedBox(height: 8),
         if (agents.isEmpty)
           Text('Waiting for lane assignment',
-              style: TextStyle(color: Colors.grey.shade700))
+              style: TextStyle(color: _mutedTextColor()))
         else
           ...agents.map((agent) {
             final name = agent['name']?.toString() ??
@@ -1877,20 +1996,29 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                     crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
                       _miniChip(
-                          name, Colors.indigo.shade50, Colors.indigo.shade800),
+                        name,
+                        _autonomyBubbleBackground(Colors.indigo),
+                        Colors.indigo.shade800,
+                      ),
                       if (role.isNotEmpty && role != name)
-                        _miniChip(role, Colors.blueGrey.shade50,
-                            Colors.blueGrey.shade800),
+                        _miniChip(
+                          role,
+                          _autonomyBubbleBackground(Colors.blueGrey),
+                          Colors.blueGrey.shade800,
+                        ),
                       if (status.isNotEmpty)
-                        _miniChip(status, Colors.green.shade50,
-                            Colors.green.shade800),
+                        _miniChip(
+                          status,
+                          _autonomyBubbleBackground(Colors.green),
+                          Colors.green.shade800,
+                        ),
                     ],
                   ),
                   if (files.isNotEmpty) ...[
                     const SizedBox(height: 4),
                     Text(files.join(', '),
-                        style: TextStyle(
-                            color: Colors.grey.shade700, fontSize: 12)),
+                        style:
+                            TextStyle(color: _mutedTextColor(), fontSize: 12)),
                   ],
                 ],
               ),
@@ -1908,7 +2036,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         const SizedBox(height: 8),
         if (validation.isEmpty)
           Text('No validation results yet',
-              style: TextStyle(color: Colors.grey.shade700))
+              style: TextStyle(color: _mutedTextColor()))
         else
           ...validation.map((item) {
             final key = item['step_key']?.toString() ??
@@ -1930,15 +2058,17 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                     children: [
                       Icon(ok ? Icons.check_circle : Icons.warning_amber,
                           color: ok
-                              ? Colors.green.shade700
-                              : Colors.orange.shade800,
+                              ? _autonomyStatusColor('completed')
+                              : _autonomyStatusColor('blocked'),
                           size: 18),
                       Text(key,
                           style: const TextStyle(fontWeight: FontWeight.w600)),
                       if (code != null)
                         _miniChip(
                             'exit $code',
-                            ok ? Colors.green.shade50 : Colors.orange.shade50,
+                            ok
+                                ? _autonomyBubbleBackground(Colors.green)
+                                : _autonomyBubbleBackground(Colors.orange),
                             ok
                                 ? Colors.green.shade800
                                 : Colors.orange.shade900),
@@ -1953,7 +2083,6 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                       style: const TextStyle(
                         fontFamily: 'monospace',
                         fontSize: 12,
-                        color: Colors.black54,
                       ),
                     ),
                   ],
@@ -1973,14 +2102,16 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         const SizedBox(height: 8),
         if (learning.isEmpty)
           Text('No learning sample recorded yet',
-              style: TextStyle(color: Colors.grey.shade700))
+              style: TextStyle(color: _mutedTextColor()))
         else
           Wrap(
             spacing: 8,
             runSpacing: 8,
             children: learning.entries
-                .map((entry) => _miniChip('${entry.key}: ${entry.value}',
-                    Colors.cyan.shade50, Colors.cyan.shade900))
+                .map((entry) => _miniChip(
+                    '${entry.key}: ${entry.value}',
+                    _autonomyBubbleBackground(Colors.cyan),
+                    Colors.cyan.shade900))
                 .toList(),
           ),
       ],
@@ -1994,8 +2125,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         Text('Run steps', style: Theme.of(context).textTheme.titleSmall),
         const SizedBox(height: 8),
         if (steps.isEmpty)
-          Text('Waiting for events',
-              style: TextStyle(color: Colors.grey.shade700))
+          Text('Waiting for events', style: TextStyle(color: _mutedTextColor()))
         else
           ...steps.map((step) {
             final stage = step['stage']?.toString() ?? '';
@@ -2006,29 +2136,36 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
             return ListTile(
               dense: true,
               contentPadding: EdgeInsets.zero,
-              leading:
-                  Icon(Icons.circle, size: 10, color: Colors.blueGrey.shade500),
+              leading: Icon(Icons.circle, size: 10, color: _mutedTextColor()),
               title: Text(title, overflow: TextOverflow.ellipsis),
               subtitle: Wrap(
                 spacing: 6,
                 runSpacing: 4,
                 children: [
                   if (stage.isNotEmpty)
-                    _miniChip(stage, Colors.blueGrey.shade50,
-                        Colors.blueGrey.shade800),
+                    _miniChip(
+                      stage,
+                      _autonomyBubbleBackground(Colors.blueGrey),
+                      Colors.blueGrey.shade800,
+                    ),
                   if (status.isNotEmpty)
                     _miniChip(
-                        status, Colors.green.shade50, Colors.green.shade800),
+                      status,
+                      _autonomyBubbleBackground(Colors.green),
+                      Colors.green.shade800,
+                    ),
                   if (agent.isNotEmpty)
                     _miniChip(
-                        agent, Colors.indigo.shade50, Colors.indigo.shade800),
+                      agent,
+                      _autonomyBubbleBackground(Colors.indigo),
+                      Colors.indigo.shade800,
+                    ),
                 ],
               ),
               trailing: time.isEmpty
                   ? null
                   : Text(time,
-                      style:
-                          TextStyle(color: Colors.grey.shade600, fontSize: 11)),
+                      style: TextStyle(color: _mutedTextColor(), fontSize: 11)),
             );
           }),
       ],
@@ -2571,15 +2708,27 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   }
 
   Widget _miniChip(String label, Color bg, Color fg) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final effectiveBg = dark
+        ? Color.alphaBlend(
+            fg.withValues(alpha: 0.18),
+            Theme.of(context).colorScheme.surface,
+          )
+        : bg;
+    final effectiveFg = dark ? Color.lerp(fg, Colors.white, 0.42)! : fg;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
       decoration: BoxDecoration(
-        color: bg,
+        color: effectiveBg,
         borderRadius: BorderRadius.circular(10),
       ),
       child: Text(
         label,
-        style: TextStyle(color: fg, fontSize: 11, fontWeight: FontWeight.w500),
+        style: TextStyle(
+          color: effectiveFg,
+          fontSize: 11,
+          fontWeight: FontWeight.w500,
+        ),
       ),
     );
   }
@@ -2590,7 +2739,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
       child: Text(
         label,
         style: TextStyle(
-          color: Colors.grey.shade600,
+          color: _mutedTextColor(),
           fontSize: 11,
           fontWeight: FontWeight.w500,
         ),
@@ -2607,11 +2756,15 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
           SizedBox(
             width: 130,
             child: Text(k,
-                style: TextStyle(color: Colors.grey.shade700, fontSize: 12)),
+                style: TextStyle(color: _mutedTextColor(), fontSize: 12)),
           ),
           Expanded(
             child: SelectableText(v,
-                style: const TextStyle(fontFamily: 'monospace', fontSize: 12)),
+                style: TextStyle(
+                  color: Theme.of(context).colorScheme.onSurface,
+                  fontFamily: 'monospace',
+                  fontSize: 12,
+                )),
           ),
         ],
       ),

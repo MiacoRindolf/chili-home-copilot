@@ -28,6 +28,12 @@ PHASE1_STEP_KEYS: tuple[str, ...] = (
 )
 
 _MAX_PY_FILES = 200
+_PYTEST_SAFE_DB_MESSAGES = (
+    "Tests require TEST_DATABASE_URL",
+    "TEST_DATABASE_URL must be a PostgreSQL URL",
+    "database name must end with '_test'",
+)
+_PYTEST_SAFE_DB_SKIP_REASON = "safe TEST_DATABASE_URL not configured"
 
 
 @dataclass
@@ -86,6 +92,25 @@ def _run_subprocess_allowlisted(
         except Exception:
             out, err = "", ""
         return -1, True, out or "", (err or "") + "\n[timeout]"
+
+
+def _pytest_safe_database_guard_triggered(stdout: str, stderr: str) -> bool:
+    combined = f"{stdout or ''}\n{stderr or ''}"
+    return any(message in combined for message in _PYTEST_SAFE_DB_MESSAGES)
+
+
+def _pytest_safe_database_skip(step_key: str, timed_out: bool, stdout: str, stderr: str) -> StepResult:
+    out_t, _ = truncate_text(stdout or "")
+    err_t, _ = truncate_text(stderr or "")
+    return StepResult(
+        step_key,
+        0,
+        timed_out,
+        out_t,
+        err_t,
+        True,
+        _PYTEST_SAFE_DB_SKIP_REASON,
+    )
 
 
 def run_ast_syntax(cwd: Path) -> StepResult:
@@ -158,6 +183,8 @@ def run_pytest_collect(cwd: Path) -> StepResult:
     if code == 127 or (code == 1 and "No module named pytest" in err):
         msg, _ = truncate_text(out + "\n" + err + "\n[pytest not available; step skipped]")
         return StepResult("pytest_collect", 0, to, msg, "", True, "pytest not available")
+    if _pytest_safe_database_guard_triggered(out, err):
+        return _pytest_safe_database_skip("pytest_collect", to, out, err)
     out_t, _ = truncate_text(out)
     err_t, _ = truncate_text(err)
     # pytest exits 5 when no tests collected (still non-destructive).
@@ -257,6 +284,8 @@ def run_pytest_targeted(cwd: Path, changed_files: list[str] | None = None) -> St
     code, to, out, err = _run_subprocess_allowlisted(argv, cwd, timeout=300)
     if code == 127 or (code == 1 and "No module named pytest" in (err or "")):
         return StepResult("pytest_targeted", 0, to, out or "", err or "", True, "pytest not available")
+    if _pytest_safe_database_guard_triggered(out, err):
+        return _pytest_safe_database_skip("pytest_targeted", to, out, err)
     out_t, _ = truncate_text(out or "")
     err_t, _ = truncate_text(err or "")
     ok = code in (0, 5)  # 5 = no tests collected

@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// App-wide config persisted via SharedPreferences.
@@ -15,6 +16,7 @@ class AppConfig {
   static const _keyWakeWord = 'chili_wake_word';
   static const _keyAlwaysListening = 'chili_always_listening';
   static const _keyOnboardingDone = 'chili_onboarding_done';
+  static const _keyThemeMode = 'chili_theme_mode';
   static const _keyReduceMotion = 'chili_reduce_motion';
   static const _keyFontSize = 'chili_font_size'; // 'small' | 'medium' | 'large'
   static const _keyLargerTargets = 'chili_larger_targets';
@@ -27,7 +29,10 @@ class AppConfig {
   static const _defaultAmbientRms = 200.0;
 
   SharedPreferences? _prefs;
+  final ValueNotifier<String> themeModeNotifier =
+      ValueNotifier<String>('system');
   String _wakeWord = _defaultWakeWord;
+  String _themeMode = 'system';
   bool _alwaysListening = _defaultAlwaysListening;
   bool _reduceMotion = false;
   String _fontSize = 'medium';
@@ -40,6 +45,7 @@ class AppConfig {
   String get wakeWord => _wakeWord;
   bool get alwaysListening => _alwaysListening;
   bool get onboardingDone => _prefs?.getBool(_keyOnboardingDone) ?? false;
+  String get themeMode => _themeMode;
   bool get reduceMotion => _reduceMotion;
   String get fontSize => _fontSize;
   bool get largerTargets => _largerTargets;
@@ -80,7 +86,10 @@ class AppConfig {
       _prefs!.getString(_keyBaseUrl) ?? defaultApiBaseUrl,
     );
     _wakeWord = _prefs!.getString(_keyWakeWord) ?? _defaultWakeWord;
-    _alwaysListening = _prefs!.getBool(_keyAlwaysListening) ?? _defaultAlwaysListening;
+    _themeMode = _normalizeThemeMode(_prefs!.getString(_keyThemeMode));
+    themeModeNotifier.value = _themeMode;
+    _alwaysListening =
+        _prefs!.getBool(_keyAlwaysListening) ?? _defaultAlwaysListening;
     _reduceMotion = _prefs!.getBool(_keyReduceMotion) ?? false;
     _fontSize = _prefs!.getString(_keyFontSize) ?? 'medium';
     _largerTargets = _prefs!.getBool(_keyLargerTargets) ?? false;
@@ -90,9 +99,8 @@ class AppConfig {
     final variantsJson = _prefs!.getString(_keyCalibratedVariants);
     if (variantsJson != null) {
       try {
-        _calibratedVariants = (jsonDecode(variantsJson) as List)
-            .cast<String>()
-            .toList();
+        _calibratedVariants =
+            (jsonDecode(variantsJson) as List).cast<String>().toList();
       } catch (_) {
         _calibratedVariants = [];
       }
@@ -104,6 +112,13 @@ class AppConfig {
   Future<void> setReduceMotion(bool value) async {
     _reduceMotion = value;
     await _prefs?.setBool(_keyReduceMotion, value);
+  }
+
+  Future<void> setThemeMode(String value) async {
+    final normalized = _normalizeThemeMode(value);
+    _themeMode = normalized;
+    themeModeNotifier.value = normalized;
+    await _prefs?.setString(_keyThemeMode, normalized);
   }
 
   Future<void> setFontSize(String value) async {
@@ -160,17 +175,45 @@ class AppConfig {
   /// Known phonetic variants for common wake words (STT often mistranscribes "chili" many ways).
   static const Map<String, List<String>> _phoneticVariants = {
     'chili': [
-      'chilly', 'chile', 'chilli', 'chillie', 'chily', 'chilii',
-      'julie', 'jilly', 'july',
-      'jimmy', 'gilly', 'chilee', 'chelsea', 'tilly', 'shilly', 'chilley',
-      'chilii', 'chelie', 'chilie', 'gillie', 'jemmy', 'chily',
+      'chilly',
+      'chile',
+      'chilli',
+      'chillie',
+      'chily',
+      'chilii',
+      'julie',
+      'jilly',
+      'july',
+      'jimmy',
+      'gilly',
+      'chilee',
+      'chelsea',
+      'tilly',
+      'shilly',
+      'chilley',
+      'chilii',
+      'chelie',
+      'chilie',
+      'gillie',
+      'jemmy',
+      'chily',
     ],
   };
 
   /// Short filler words that can appear before the wake word (e.g. "a chilly", "hi julie" → match).
   static const Set<String> _leadingFillers = {
-    'a', 'ah', 'oh', 'um', 'uh', 'the', 'and', 'or',
-    'hi', 'he', 'i', 'its',
+    'a',
+    'ah',
+    'oh',
+    'um',
+    'uh',
+    'the',
+    'and',
+    'or',
+    'hi',
+    'he',
+    'i',
+    'its',
   };
 
   /// Levenshtein distance so we can fuzzy-match minor transcription errors.
@@ -299,5 +342,16 @@ class AppConfig {
     var rest = cleaned.substring(_firstWordLength(cleaned)).trim();
     if (rest.startsWith(',')) rest = rest.substring(1).trim();
     return rest;
+  }
+
+  static String _normalizeThemeMode(String? value) {
+    switch (value) {
+      case 'light':
+      case 'dark':
+      case 'system':
+        return value!;
+      default:
+        return 'system';
+    }
   }
 }

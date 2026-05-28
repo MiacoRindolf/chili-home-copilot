@@ -50,7 +50,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Enter a valid URL (e.g. https://getchili.app)')),
+        const SnackBar(
+            content: Text('Enter a valid URL (e.g. https://getchili.app)')),
       );
       return;
     }
@@ -97,13 +98,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final mutedColor = Theme.of(context).colorScheme.onSurfaceVariant;
     return SingleChildScrollView(
       padding: const EdgeInsets.all(24),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Settings',
-              style: Theme.of(context).textTheme.headlineMedium),
+          Text('Settings', style: Theme.of(context).textTheme.headlineMedium),
           const SizedBox(height: 24),
 
           // Server connection
@@ -136,6 +137,51 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           const SizedBox(height: 16),
 
+          // Appearance
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Appearance',
+                      style: Theme.of(context).textTheme.titleMedium),
+                  const SizedBox(height: 12),
+                  Text(
+                    'Theme',
+                    style: TextStyle(fontSize: 14, color: mutedColor),
+                  ),
+                  const SizedBox(height: 8),
+                  SegmentedButton<String>(
+                    segments: const [
+                      ButtonSegment(
+                        value: 'system',
+                        icon: Icon(Icons.brightness_auto_outlined),
+                        label: Text('System'),
+                      ),
+                      ButtonSegment(
+                        value: 'light',
+                        icon: Icon(Icons.light_mode_outlined),
+                        label: Text('Light'),
+                      ),
+                      ButtonSegment(
+                        value: 'dark',
+                        icon: Icon(Icons.dark_mode_outlined),
+                        label: Text('Dark'),
+                      ),
+                    ],
+                    selected: {AppConfig.instance.themeMode},
+                    onSelectionChanged: (Set<String> selected) async {
+                      await AppConfig.instance.setThemeMode(selected.first);
+                      if (mounted) setState(() {});
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+
           // Privacy
           Card(
             child: Padding(
@@ -148,7 +194,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   const SizedBox(height: 12),
                   const Text(
                     'Clear conversation history from the quick chat and full app. This does not affect the server.',
-                    style: TextStyle(fontSize: 13, color: Colors.grey),
+                    style: TextStyle(fontSize: 13),
                   ),
                   const SizedBox(height: 12),
                   OutlinedButton.icon(
@@ -156,7 +202,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       widget.sharedHistory.clear();
                       if (mounted) {
                         ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Conversation history cleared')),
+                          const SnackBar(
+                              content: Text('Conversation history cleared')),
                         );
                       }
                     },
@@ -198,7 +245,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           'Always listening for wake word',
                           style: TextStyle(
                             fontSize: 14,
-                            color: Colors.grey.shade700,
+                            color: mutedColor,
                           ),
                         ),
                       ),
@@ -265,7 +312,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           'Reduce motion (disable avatar animations)',
                           style: TextStyle(
                             fontSize: 14,
-                            color: Colors.grey.shade700,
+                            color: mutedColor,
                           ),
                         ),
                       ),
@@ -305,7 +352,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           'Larger touch targets',
                           style: TextStyle(
                             fontSize: 14,
-                            color: Colors.grey.shade700,
+                            color: mutedColor,
                           ),
                         ),
                       ),
@@ -326,7 +373,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           'Sound effects (wake word, reply, buttons)',
                           style: TextStyle(
                             fontSize: 14,
-                            color: Colors.grey.shade700,
+                            color: mutedColor,
                           ),
                         ),
                       ),
@@ -362,8 +409,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   _shortcutRow('Ctrl+Shift+C', 'Global hotkey: summon CHILI'),
                   _shortcutRow('Long-press mic button', 'Record voice message'),
                   _shortcutRow('Drop files on avatar', 'Send files to CHILI'),
-                  _shortcutRow('System tray icon', 'Click to show, right-click for menu'),
-                  _shortcutRow('Wake word', 'Say "Chili" or "Hey Chili" then your question for hands-free'),
+                  _shortcutRow('System tray icon',
+                      'Click to show, right-click for menu'),
+                  _shortcutRow('Wake word',
+                      'Say "Chili" or "Hey Chili" then your question for hands-free'),
                 ],
               ),
             ),
@@ -377,14 +426,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('About',
-                      style: Theme.of(context).textTheme.titleMedium),
+                  Text('About', style: Theme.of(context).textTheme.titleMedium),
                   const SizedBox(height: 12),
                   const Text('CHILI Desktop Companion v0.1.0'),
                   const SizedBox(height: 4),
                   Text(
                     'Conversational Home Interface & Life Intelligence',
-                    style: TextStyle(color: Colors.grey.shade600),
+                    style: TextStyle(color: mutedColor),
                   ),
                 ],
               ),
@@ -402,7 +450,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
         SizedBox(
           width: 200,
           child: Text(action,
-              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+              style:
+                  const TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
         ),
         Expanded(
             child: Text(desc,

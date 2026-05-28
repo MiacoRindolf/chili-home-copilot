@@ -1,14 +1,25 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import os
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
-from app.models import ProjectAutonomyLease, ProjectAutonomyRun, ProjectAutonomyStep, ProjectDomainRun, User
+from app.models import (
+    ProjectAutonomyArtifact,
+    ProjectAutonomyLease,
+    ProjectAutonomyRun,
+    ProjectAutonomyStep,
+    ProjectDomainRun,
+    User,
+)
 from app.models.code_brain import CodeRepo
+from app.services.code_brain import runtime as code_runtime
 from app.services.project_autonomy import orchestrator
 
 
@@ -22,6 +33,7 @@ def _sqlite_autonomy_session():
             ProjectDomainRun.__table__,
             ProjectAutonomyRun.__table__,
             ProjectAutonomyStep.__table__,
+            ProjectAutonomyArtifact.__table__,
             ProjectAutonomyLease.__table__,
         ],
     )
@@ -217,3 +229,306 @@ def test_vague_small_plan_is_narrowed_away_from_large_desktop_file(tmp_path):
     )
 
     assert narrowed["files"][0]["path"] == "chili_mobile/lib/src/network/network_error_message.dart"
+
+
+def test_runtime_resolves_container_aliases_to_host_workspace():
+    repo = CodeRepo(path="/app", container_path="/workspace", name="workspace", active=True)
+
+    resolved = code_runtime.resolve_repo_runtime_path(repo)
+
+    assert resolved == Path(__file__).resolve().parents[1]
+
+
+def test_runtime_prefers_container_workspace_when_available(monkeypatch, tmp_path):
+    host_root = tmp_path / "app"
+    workspace_root = tmp_path / "workspace"
+    host_root.mkdir()
+    workspace_root.mkdir()
+    repo = CodeRepo(path="/app", name="workspace", active=True)
+    monkeypatch.setattr(code_runtime, "_HOST_WORKSPACE_ROOT", host_root)
+    monkeypatch.setattr(code_runtime, "_CONTAINER_WORKSPACE_ROOT", workspace_root)
+
+    resolved = code_runtime.resolve_repo_runtime_path(repo)
+
+    assert resolved == workspace_root
+
+
+def test_windows_tmp_worktree_env_uses_real_temp_dir(monkeypatch):
+    monkeypatch.setenv("CHILI_PROJECT_AUTOPILOT_WORKTREE_DIR", "/tmp")
+
+    root = orchestrator._local_worktree_root()
+
+    if os.name == "nt":
+        assert root == Path(orchestrator.tempfile.gettempdir())
+    else:
+        assert root == Path("/tmp")
+
+
+def test_generate_diffs_reports_rejected_model_output(monkeypatch, tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        repo_file = tmp_path / "foo.txt"
+        repo_file.write_text("hello\n", encoding="utf-8")
+        run = ProjectAutonomyRun(
+            run_id="pa_reject",
+            prompt="change foo",
+            status="running",
+            current_stage="implement",
+        )
+        db.add(run)
+        db.commit()
+        monkeypatch.setattr(orchestrator, "select_local_model", lambda: {"model": "qwen", "available": True})
+        monkeypatch.setattr(orchestrator.insights_mod, "get_insights", lambda *args, **kwargs: [])
+        monkeypatch.setattr(
+            orchestrator.ollama_client,
+            "chat",
+            lambda *args, **kwargs: SimpleNamespace(
+                ok=True,
+                text="I cannot produce a patch.",
+                error=None,
+                latency_ms=1,
+            ),
+        )
+
+        with pytest.raises(orchestrator.AutonomyBlocked) as exc:
+            orchestrator.generate_diffs_from_plan(
+                db,
+                run,
+                tmp_path,
+                [{"path": "foo.txt", "description": "make a small change"}],
+            )
+
+        assert "model did not return a unified diff" in str(exc.value)
+    finally:
+        db.close()
+
+
+def test_small_desktop_fallback_diff_handles_bad_model_patch(monkeypatch, tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        repo_file = tmp_path / "chili_mobile/lib/src/network/network_error_message.dart"
+        repo_file.parent.mkdir(parents=True)
+        repo_file.write_text(
+            "String userMessageForHttpStatus(int statusCode) {\n"
+            "  switch (statusCode) {\n"
+            "    case 502:\n"
+            "      return 'bad gateway';\n"
+            "    default:\n"
+            "      return 'Unexpected HTTP $statusCode from server.';\n"
+            "  }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        orchestrator._git(tmp_path, ["init"], timeout=60)
+        run = ProjectAutonomyRun(
+            run_id="pa_fallback",
+            prompt="find a small enhancement for the desktop app",
+            status="running",
+            current_stage="implement",
+        )
+        db.add(run)
+        db.commit()
+        monkeypatch.setattr(orchestrator, "select_local_model", lambda: {"model": "qwen", "available": True})
+        monkeypatch.setattr(orchestrator.insights_mod, "get_insights", lambda *args, **kwargs: [])
+        monkeypatch.setattr(
+            orchestrator.ollama_client,
+            "chat",
+            lambda *args, **kwargs: SimpleNamespace(
+                ok=True,
+                text="```diff\n--- a/bad\n+++ b/bad\n@@ broken\n```",
+                error=None,
+                latency_ms=1,
+            ),
+        )
+
+        diffs = orchestrator.generate_diffs_from_plan(
+            db,
+            run,
+            tmp_path,
+            [
+                {
+                    "path": "chili_mobile/lib/src/network/network_error_message.dart",
+                    "description": "make a small desktop enhancement",
+                }
+            ],
+        )
+
+        assert diffs
+        assert "Access denied (403)" in diffs[0]
+        assert "Authentication failed (401)" in diffs[0]
+    finally:
+        db.close()
+
+
+def test_git_apply_check_accepts_stdin_patch_on_windows(tmp_path):
+    rel = "chili_mobile/lib/src/network/network_error_message.dart"
+    repo_file = tmp_path / rel
+    repo_file.parent.mkdir(parents=True)
+    repo_file.write_text(
+        "String userMessageForHttpStatus(int statusCode) {\n"
+        "  switch (statusCode) {\n"
+        "    case 502:\n"
+        "      return 'bad gateway';\n"
+        "    default:\n"
+        "      return 'Unexpected HTTP $statusCode from server.';\n"
+        "  }\n"
+        "}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    orchestrator._git(tmp_path, ["init"], timeout=60)
+    diff = orchestrator._deterministic_small_desktop_diff(
+        rel,
+        repo_file.read_text(encoding="utf-8"),
+        "find a small enhancement for the desktop app",
+    )
+
+    proc = orchestrator._git(tmp_path, ["apply", "--check"], input_text=diff, timeout=60)
+
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_small_desktop_fallback_finds_second_network_enhancement(monkeypatch, tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        repo_file = tmp_path / "chili_mobile/lib/src/network/network_error_message.dart"
+        repo_file.parent.mkdir(parents=True)
+        repo_file.write_text(
+            "String userVisibleNetworkError(Object error) {\n"
+            "  final s = error.toString();\n"
+            "  if (s.contains('Failed host lookup') || s.contains('getaddrinfo')) {\n"
+            "    return 'Could not resolve the server hostname. Check internet and the Backend URL in Settings.';\n"
+            "  }\n"
+            "  if (s.contains('Connection refused')) {\n"
+            "    return 'Connection refused.';\n"
+            "  }\n"
+            "  return s;\n"
+            "}\n"
+            "\n"
+            "String userMessageForHttpStatus(int statusCode) {\n"
+            "  switch (statusCode) {\n"
+            "    case 401:\n"
+            "      return 'Authentication failed (401). Pair this desktop app again or check the Backend URL in Settings.';\n"
+            "    case 403:\n"
+            "      return 'Access denied (403). Pair this desktop app again, or check that Settings points at your local CHILI backend.';\n"
+            "    case 502:\n"
+            "      return 'bad gateway';\n"
+            "    default:\n"
+            "      return 'Unexpected HTTP $statusCode from server.';\n"
+            "  }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        orchestrator._git(tmp_path, ["init"], timeout=60)
+        run = ProjectAutonomyRun(
+            run_id="pa_fallback_second",
+            prompt="find a small enhancement for the desktop app",
+            status="running",
+            current_stage="implement",
+        )
+        db.add(run)
+        db.commit()
+        monkeypatch.setattr(orchestrator, "select_local_model", lambda: {"model": "qwen", "available": True})
+        monkeypatch.setattr(orchestrator.insights_mod, "get_insights", lambda *args, **kwargs: [])
+        monkeypatch.setattr(
+            orchestrator.ollama_client,
+            "chat",
+            lambda *args, **kwargs: SimpleNamespace(
+                ok=True,
+                text="```diff\n--- a/bad\n+++ b/bad\n@@ broken\n```",
+                error=None,
+                latency_ms=1,
+            ),
+        )
+
+        diffs = orchestrator.generate_diffs_from_plan(
+            db,
+            run,
+            tmp_path,
+            [
+                {
+                    "path": "chili_mobile/lib/src/network/network_error_message.dart",
+                    "description": "make a small desktop enhancement",
+                }
+            ],
+        )
+
+        assert diffs
+        assert "HandshakeException" in diffs[0]
+        assert "CERTIFICATE_VERIFY_FAILED" in diffs[0]
+    finally:
+        db.close()
+
+
+def test_small_desktop_fallback_finds_third_network_enhancement(monkeypatch, tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        repo_file = tmp_path / "chili_mobile/lib/src/network/network_error_message.dart"
+        repo_file.parent.mkdir(parents=True)
+        repo_file.write_text(
+            "String userVisibleNetworkError(Object error) {\n"
+            "  final s = error.toString();\n"
+            "  if (s.contains('HandshakeException') ||\n"
+            "      s.contains('CERTIFICATE_VERIFY_FAILED')) {\n"
+            "    return 'Secure connection failed. Check that the Backend URL uses the right http/https scheme and that any local certificate is trusted.';\n"
+            "  }\n"
+            "  if (s.contains('Connection refused')) {\n"
+            "    return 'Connection refused.';\n"
+            "  }\n"
+            "  return s;\n"
+            "}\n"
+            "\n"
+            "String userMessageForHttpStatus(int statusCode) {\n"
+            "  switch (statusCode) {\n"
+            "    case 401:\n"
+            "      return 'Authentication failed (401). Pair this desktop app again or check the Backend URL in Settings.';\n"
+            "    case 403:\n"
+            "      return 'Access denied (403). Pair this desktop app again, or check that Settings points at your local CHILI backend.';\n"
+            "    case 502:\n"
+            "      return 'bad gateway';\n"
+            "    default:\n"
+            "      return 'Unexpected HTTP $statusCode from server.';\n"
+            "  }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        orchestrator._git(tmp_path, ["init"], timeout=60)
+        run = ProjectAutonomyRun(
+            run_id="pa_fallback_third",
+            prompt="find a small enhancement for the desktop app",
+            status="running",
+            current_stage="implement",
+        )
+        db.add(run)
+        db.commit()
+        monkeypatch.setattr(orchestrator, "select_local_model", lambda: {"model": "qwen", "available": True})
+        monkeypatch.setattr(orchestrator.insights_mod, "get_insights", lambda *args, **kwargs: [])
+        monkeypatch.setattr(
+            orchestrator.ollama_client,
+            "chat",
+            lambda *args, **kwargs: SimpleNamespace(
+                ok=True,
+                text="```diff\n--- a/bad\n+++ b/bad\n@@ broken\n```",
+                error=None,
+                latency_ms=1,
+            ),
+        )
+
+        diffs = orchestrator.generate_diffs_from_plan(
+            db,
+            run,
+            tmp_path,
+            [
+                {
+                    "path": "chili_mobile/lib/src/network/network_error_message.dart",
+                    "description": "make a small desktop enhancement",
+                }
+            ],
+        )
+
+        assert diffs
+        assert "FormatException" in diffs[0]
+        assert "Unexpected character" in diffs[0]
+        assert "login page or proxy error page" in diffs[0]
+    finally:
+        db.close()

@@ -50,6 +50,29 @@ def infer_repo_runtime_fields(path: str | Path) -> dict[str, str | None]:
 def candidate_runtime_paths(repo: CodeRepo) -> Iterable[Path]:
     seen: set[str] = set()
     for raw in (repo.container_path, repo.host_path, repo.path):
+        text = str(raw or "").strip().replace("\\", "/")
+        if text:
+            alias_candidates: list[Path] = []
+            if text == "/workspace" or text.startswith("/workspace/"):
+                rel = text.removeprefix("/workspace").lstrip("/")
+                container_candidate = _CONTAINER_WORKSPACE_ROOT / rel if rel else _CONTAINER_WORKSPACE_ROOT
+                if container_candidate.is_dir():
+                    alias_candidates.append(container_candidate)
+                alias_candidates.append(_HOST_WORKSPACE_ROOT / rel)
+            elif text == "/app" or text.startswith("/app/"):
+                rel = text.removeprefix("/app").lstrip("/")
+                container_candidate = _CONTAINER_WORKSPACE_ROOT / rel if rel else _CONTAINER_WORKSPACE_ROOT
+                if container_candidate.is_dir():
+                    alias_candidates.append(container_candidate)
+                alias_candidates.append(_HOST_WORKSPACE_ROOT / rel)
+            for alias_candidate in alias_candidates:
+                try:
+                    key = str(alias_candidate.resolve())
+                except OSError:
+                    key = str(alias_candidate)
+                if key not in seen:
+                    seen.add(key)
+                    yield alias_candidate
         candidate = _normalized_path(raw)
         if candidate is None:
             continue

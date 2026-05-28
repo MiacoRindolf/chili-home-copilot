@@ -13,6 +13,10 @@ String userVisibleNetworkError(Object error) {
   if (s.contains('Failed host lookup') || s.contains('getaddrinfo')) {
     return 'Could not resolve the server hostname. Check internet and the Backend URL in Settings.';
   }
+  if (s.contains('HandshakeException') ||
+      s.contains('CERTIFICATE_VERIFY_FAILED')) {
+    return 'Secure connection failed. Check that the Backend URL uses the right http/https scheme and that any local certificate is trusted.';
+  }
   if (s.contains('Connection refused')) {
     return 'Connection refused. Is the server running, and is the Backend URL in Settings correct?';
   }
@@ -25,6 +29,10 @@ String userVisibleNetworkError(Object error) {
 /// Short copy when the HTTP response is an error and the body is not app JSON (e.g. 502 HTML from a proxy).
 String userMessageForHttpStatus(int statusCode) {
   switch (statusCode) {
+    case 401:
+      return 'Authentication failed (401). Pair this desktop app again or check the Backend URL in Settings.';
+    case 403:
+      return 'Access denied (403). Pair this desktop app again, or check that Settings points at your local CHILI backend.';
     case 502:
       return 'The server is temporarily unavailable (502 bad gateway). A proxy in front of '
           'the site (for example Cloudflare) could not reach the CHILI backend. Try again later, '
