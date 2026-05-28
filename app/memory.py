@@ -33,13 +33,14 @@ MEMORY_SIGNAL_RE = re.compile(
     r"allerg(?:y|ic|ies)|diet|vegetarian|vegan|gluten|"
     r"work|job|career|school|class|study|goal|habit|routine|"
     r"birthday|anniversary|family|mom|mother|dad|father|"
-    r"wife|husband|partner|son|daughter|friend|personal"
+    r"wife|husband|partner|son|daughter|friend|personal|"
+    r"usually|always|often|every"
     r")\b",
     re.IGNORECASE,
 )
 
 _CLAUSE_SPLIT_RE = re.compile(
-    r"[.;!\n]+|\s+(?:and|also|but)\s+(?=(?:i\b|i[' ]?m\b|im\b|i[' ]?ve\b|ive\b|my\b))",
+    r"[.;!\n]+|\s+(?:and|also|but)\s+(?=(?:i\b|i[' ]?m\b|im\b|i[' ]?ve\b|ive\b|my\b|every\b|each\b))",
     re.IGNORECASE,
 )
 _INTEREST_RE = re.compile(
@@ -64,6 +65,34 @@ _WORK_RE = re.compile(
 )
 _GOAL_RE = re.compile(
     r"^(?:i\s+)?(?:want\s+to|plan\s+to|hope\s+to|my\s+goal\s+is\s+to|goal\s+is\s+to)\s+(.+)$",
+    re.IGNORECASE,
+)
+_PREFERENCE_RE = re.compile(
+    r"^(?:i\s+)?(?:prefer|would\s+rather|like\s+it\s+when)\s+(.+)$",
+    re.IGNORECASE,
+)
+_DISLIKE_RE = re.compile(
+    r"^(?:i\s+)?(?:hate|dislike|do\s+not\s+like|don't\s+like)\s+(.+)$",
+    re.IGNORECASE,
+)
+_HABIT_RE = re.compile(
+    r"^(?:i\s+)?(?P<freq>usually|always|often)\s+(?P<habit>.+)$",
+    re.IGNORECASE,
+)
+_SCHEDULE_RE = re.compile(
+    r"^(?:every|each)\s+(?P<when>[\w -]{3,40})\s+i\s+(?P<event>.+)$",
+    re.IGNORECASE,
+)
+_SCHEDULE_IS_RE = re.compile(
+    r"^my\s+(?:work\s+)?schedule\s+is\s+(.+)$",
+    re.IGNORECASE,
+)
+_BIRTHDAY_RE = re.compile(
+    r"^my\s+(birthday|anniversary)\s+is\s+(.+)$",
+    re.IGNORECASE,
+)
+_PERSON_RE = re.compile(
+    r"^my\s+(wife|husband|partner|mom|mother|dad|father|son|daughter|friend)\s+is\s+(.+)$",
     re.IGNORECASE,
 )
 _DUPLICATE_PREFIX_RE = re.compile(r"^(?:likes|loves|enjoys)\s+", re.IGNORECASE)
@@ -138,6 +167,59 @@ def _mechanical_fact_for_clause(clause: str) -> dict | None:
         goal = _clean_mechanical_value(match.group(1))
         if goal and goal.casefold() not in _VAGUE_OBJECTS:
             return {"category": "goal", "content": f"Goal: {goal}"}
+        return None
+
+    match = _PREFERENCE_RE.match(text)
+    if match:
+        pref = _clean_mechanical_value(match.group(1))
+        if pref and pref.casefold() not in _VAGUE_OBJECTS:
+            return {"category": "preference", "content": f"Prefers {pref}"}
+        return None
+
+    match = _DISLIKE_RE.match(text)
+    if match:
+        pref = _clean_mechanical_value(match.group(1))
+        if pref and pref.casefold() not in _VAGUE_OBJECTS:
+            return {"category": "preference", "content": f"Dislikes {pref}"}
+        return None
+
+    match = _HABIT_RE.match(text)
+    if match:
+        freq = match.group("freq").title()
+        habit = _clean_mechanical_value(match.group("habit"))
+        if habit and habit.casefold() not in _VAGUE_OBJECTS:
+            return {"category": "habit", "content": f"{freq} {habit}"}
+        return None
+
+    match = _SCHEDULE_RE.match(text)
+    if match:
+        when = _clean_mechanical_value(match.group("when")).lower()
+        event = _clean_mechanical_value(match.group("event"))
+        if event and event.casefold() not in _VAGUE_OBJECTS:
+            return {"category": "schedule", "content": f"Every {when}: {event}"}
+        return None
+
+    match = _SCHEDULE_IS_RE.match(text)
+    if match:
+        schedule = _clean_mechanical_value(match.group(1))
+        if schedule and schedule.casefold() not in _VAGUE_OBJECTS:
+            return {"category": "schedule", "content": f"Schedule: {schedule}"}
+        return None
+
+    match = _BIRTHDAY_RE.match(text)
+    if match:
+        label = match.group(1).title()
+        value = _clean_mechanical_value(match.group(2))
+        if value and value.casefold() not in _VAGUE_OBJECTS:
+            return {"category": "event", "content": f"{label}: {value}"}
+        return None
+
+    match = _PERSON_RE.match(text)
+    if match:
+        relation = match.group(1).title()
+        name = _clean_mechanical_value(match.group(2))
+        if name and name.casefold() not in _VAGUE_OBJECTS:
+            return {"category": "person", "content": f"{relation} is {name}"}
         return None
 
     match = _FAVORITE_RE.match(text)
@@ -276,12 +358,17 @@ def extract_facts(
                 system_prompt="You are a fact extraction assistant. Return only valid JSON arrays.",
                 trace_id=trace_id,
             )
-        except Exception:
-            result = openai_client.chat(
-                messages=[{"role": "user", "content": prompt}],
-                system_prompt="You are a fact extraction assistant. Return only valid JSON arrays.",
-                trace_id=trace_id,
-            )
+        except Exception as e:
+            log_info(trace_id, f"memory_gateway_error={e}")
+            if mechanical_facts:
+                return _store_facts(
+                    user_id=user_id,
+                    facts=mechanical_facts,
+                    db=db,
+                    source_message_id=source_message_id,
+                    trace_id=trace_id,
+                )
+            return []
     except Exception as e:
         log_info(trace_id, f"memory_extraction_error={e}")
         if mechanical_facts:
