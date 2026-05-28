@@ -187,6 +187,22 @@ def _fetch_path_edge_ids(db: Session, correlation_id: str) -> list[int]:
     return [int(r[0]) for r in rows if r[0] is not None]
 
 
+def _brain_graph_edges_by_id(db: Session, edge_ids: set[int]) -> dict[int, BrainGraphEdge]:
+    ids = sorted({int(edge_id) for edge_id in edge_ids if int(edge_id) > 0})
+    if not ids:
+        return {}
+    rows = db.query(BrainGraphEdge).filter(BrainGraphEdge.id.in_(ids)).all()
+    return {int(row.id): row for row in rows if row.id is not None}
+
+
+def _brain_node_states_by_id(db: Session, node_ids: set[str]) -> dict[str, BrainNodeState]:
+    ids = sorted({str(node_id) for node_id in node_ids if str(node_id or "").strip()})
+    if not ids:
+        return {}
+    rows = db.query(BrainNodeState).filter(BrainNodeState.node_id.in_(ids)).all()
+    return {str(row.node_id): row for row in rows if row.node_id}
+
+
 def apply_outcome_plasticity(
     db: Session,
     *,
@@ -227,12 +243,22 @@ def apply_outcome_plasticity(
     edge_ids = _fetch_path_edge_ids(db, correlation_id)
     if not edge_ids:
         return out
+    edges_by_id = _brain_graph_edges_by_id(db, set(edge_ids))
+    node_states_by_id = _brain_node_states_by_id(
+        db,
+        {
+            node_id
+            for edge in edges_by_id.values()
+            for node_id in (edge.source_node_id, edge.target_node_id)
+            if node_id
+        },
+    )
 
     # Budget used so far today per edge_type (cached — no need to re-query each edge).
     budget_used_by_type: dict[str, float] = {}
 
     for eid in edge_ids:
-        edge = db.query(BrainGraphEdge).filter(BrainGraphEdge.id == eid).one_or_none()
+        edge = edges_by_id.get(eid)
         if edge is None:
             continue
         etype = (edge.edge_type or "dataflow")
@@ -243,16 +269,8 @@ def apply_outcome_plasticity(
             continue
 
         # Pull node states for confidences
-        src_state = (
-            db.query(BrainNodeState)
-            .filter(BrainNodeState.node_id == edge.source_node_id)
-            .one_or_none()
-        )
-        tgt_state = (
-            db.query(BrainNodeState)
-            .filter(BrainNodeState.node_id == edge.target_node_id)
-            .one_or_none()
-        )
+        src_state = node_states_by_id.get(edge.source_node_id)
+        tgt_state = node_states_by_id.get(edge.target_node_id)
         src_c = float(src_state.confidence) if src_state else 0.5
         tgt_c = float(tgt_state.confidence) if tgt_state else 0.5
 
