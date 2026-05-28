@@ -30,6 +30,27 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _latest_exit_dates_by_pattern(db: "Session", pattern_ids: list[int]) -> dict[int, datetime]:
+    if not pattern_ids:
+        return {}
+
+    from sqlalchemy import func
+
+    from app.models.trading import Trade
+
+    rows = (
+        db.query(Trade.scan_pattern_id, func.max(Trade.exit_date))
+        .filter(Trade.scan_pattern_id.in_(sorted(set(pattern_ids))))
+        .group_by(Trade.scan_pattern_id)
+        .all()
+    )
+    return {
+        int(pattern_id): latest_exit
+        for pattern_id, latest_exit in rows
+        if pattern_id is not None
+    }
+
+
 def run_stale_promoted_sweep(db: "Session") -> dict[str, Any]:
     """Iterate promoted patterns; demote any whose realized-EV gate
     fails AND who haven't had a trade close in the last 7 days.
@@ -40,7 +61,7 @@ def run_stale_promoted_sweep(db: "Session") -> dict[str, Any]:
     Returns a stats dict for log visibility:
       {patterns_checked, patterns_skipped_recent, patterns_demoted}
     """
-    from app.models.trading import ScanPattern, Trade
+    from app.models.trading import ScanPattern
     from app.services.trading.realized_ev_gate import evaluate_realized_ev
 
     stale_cutoff = datetime.utcnow() - timedelta(days=7)
@@ -48,22 +69,17 @@ def run_stale_promoted_sweep(db: "Session") -> dict[str, Any]:
         ScanPattern.lifecycle_stage == "promoted",
         ScanPattern.active.is_(True),
     ).all()
+    latest_exit_by_pattern = _latest_exit_dates_by_pattern(
+        db,
+        [int(p.id) for p in patterns if p.id is not None],
+    )
 
     demoted = 0
     checked = 0
     skipped_recent = 0
     for p in patterns:
-        last_trade = (
-            db.query(Trade)
-            .filter(Trade.scan_pattern_id == p.id)
-            .order_by(Trade.exit_date.desc().nulls_last())
-            .first()
-        )
-        if (
-            last_trade is not None
-            and last_trade.exit_date is not None
-            and last_trade.exit_date >= stale_cutoff
-        ):
+        last_exit = latest_exit_by_pattern.get(int(p.id)) if p.id is not None else None
+        if last_exit is not None and last_exit >= stale_cutoff:
             skipped_recent += 1
             continue
         checked += 1

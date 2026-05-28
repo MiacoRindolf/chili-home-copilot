@@ -7,6 +7,7 @@ sweep catches them.
 """
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -15,6 +16,65 @@ REPO = Path(__file__).resolve().parent.parent
 def test_module_imports_cleanly():
     from app.services.trading.cron_jobs import stale_promoted_sweep
     assert callable(stale_promoted_sweep.run_stale_promoted_sweep)
+
+
+class _FakeQuery:
+    def __init__(self, rows: list[tuple[int | None, datetime | None]]) -> None:
+        self.rows = rows
+        self.filter_calls = 0
+        self.group_by_calls = 0
+
+    def filter(self, *args: object) -> "_FakeQuery":
+        self.filter_calls += 1
+        return self
+
+    def group_by(self, *args: object) -> "_FakeQuery":
+        self.group_by_calls += 1
+        return self
+
+    def all(self) -> list[tuple[int | None, datetime | None]]:
+        return self.rows
+
+
+class _FakeSession:
+    def __init__(self, rows: list[tuple[int | None, datetime | None]]) -> None:
+        self.rows = rows
+        self.query_calls = 0
+        self.last_query: _FakeQuery | None = None
+
+    def query(self, *args: object) -> _FakeQuery:
+        self.query_calls += 1
+        self.last_query = _FakeQuery(self.rows)
+        return self.last_query
+
+
+def test_latest_exit_dates_by_pattern_batches_trade_lookup():
+    from app.services.trading.cron_jobs.stale_promoted_sweep import (
+        _latest_exit_dates_by_pattern,
+    )
+
+    latest = datetime(2026, 5, 28, 12, 0)
+    older = datetime(2026, 5, 20, 12, 0)
+    db = _FakeSession([(2, latest), (1, older), (None, latest)])
+
+    result = _latest_exit_dates_by_pattern(db, [2, 1, 2])
+
+    assert result == {1: older, 2: latest}
+    assert db.query_calls == 1
+    assert db.last_query is not None
+    assert db.last_query.filter_calls == 1
+    assert db.last_query.group_by_calls == 1
+
+
+def test_latest_exit_dates_by_pattern_skips_empty_lookup():
+    from app.services.trading.cron_jobs.stale_promoted_sweep import (
+        _latest_exit_dates_by_pattern,
+    )
+
+    db = _FakeSession([])
+
+    assert _latest_exit_dates_by_pattern(db, []) == {}
+    assert db.query_calls == 0
 
 
 def test_uses_with_sessionlocal_in_wrapper():
