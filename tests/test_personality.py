@@ -1,10 +1,17 @@
 """Tests for housemate personality profiling."""
 import json
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 from datetime import datetime
 
 from app.models import ChatMessage, HousemateProfile, User
-from app.personality import should_update, extract_profile, get_profile_context, EXTRACTION_THRESHOLD
+from app.personality import (
+    should_update,
+    extract_profile,
+    get_profile_context,
+    EXTRACTION_THRESHOLD,
+    _profile_from_memories,
+)
 
 
 class TestShouldUpdate:
@@ -69,7 +76,57 @@ class TestShouldUpdate:
             assert should_update(user.id, db) is True
 
 
+class TestMechanicalProfile:
+    def test_builds_profile_from_memory_facts_without_llm_shape(self):
+        memories = [
+            SimpleNamespace(category="interest", content="Enjoys hiking"),
+            SimpleNamespace(category="interest", content="Likes cooking"),
+            SimpleNamespace(category="dietary", content="Vegetarian"),
+            SimpleNamespace(category="preference", content="Prefers brief direct answers"),
+            SimpleNamespace(category="work", content="Works as a nurse"),
+            SimpleNamespace(category="habit", content="Runs every morning"),
+        ]
+
+        profile = _profile_from_memories(memories)
+
+        assert profile["interests"] == ["hiking", "cooking"]
+        assert profile["dietary"] == "Vegetarian"
+        assert profile["tone"] == "brief"
+        assert "[work] nurse" in profile["notes"]
+        assert "[habit] Runs every morning" in profile["notes"]
+
+
 class TestExtractProfile:
+    @patch("app.personality.openai_client")
+    def test_uses_memory_facts_without_llm_when_available(self, mock_oc, db):
+        user = User(name="TestUser")
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+        from app.models import UserMemory
+
+        db.add(UserMemory(user_id=user.id, category="interest", content="Enjoys hiking"))
+        db.add(UserMemory(user_id=user.id, category="dietary", content="Vegetarian"))
+        db.commit()
+
+        result = extract_profile(user.id, db)
+
+        assert result == {
+            "interests": ["hiking"],
+            "dietary": "Vegetarian",
+            "tone": "",
+            "notes": "",
+        }
+        mock_oc.chat.assert_not_called()
+
+        profile = db.query(HousemateProfile).filter(
+            HousemateProfile.user_id == user.id
+        ).first()
+        assert profile is not None
+        assert json.loads(profile.interests) == ["hiking"]
+        assert profile.dietary == "Vegetarian"
+
     @patch("app.personality.openai_client")
     def test_creates_profile_on_first_extraction(self, mock_oc, db):
         user = User(name="TestUser")
