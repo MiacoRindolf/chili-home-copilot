@@ -213,6 +213,15 @@ def _gateway_inflight_wait(inflight: _GatewayInflight) -> dict[str, Any] | None:
     return dict(inflight.result) if inflight.result is not None else None
 
 
+def _gateway_error_result() -> dict[str, Any]:
+    return {
+        "reply": "",
+        "tokens_used": 0,
+        "model": "gateway_error",
+        "gateway_log_id": None,
+    }
+
+
 def _prompt_text_for_cache_accounting(
     messages: list[dict],
     system_prompt: Optional[str],
@@ -575,12 +584,11 @@ def gateway_chat(
             db = _open_db_session()
             own_db = True
         except Exception as e:
-            logger.warning("[context_brain.gateway] no db session, falling through: %s", e)
-            return _passthrough(
-                messages, system_prompt=system_prompt, trace_id=trace_id,
-                user_message=user_message, max_tokens=max_tokens,
-                strict_escalation=strict_escalation,
+            logger.warning(
+                "[context_brain.gateway] no db session; direct paid fallback disabled: %s",
+                e,
             )
+            return _gateway_error_result()
 
     try:
         # Resolve policy. Disabled purposes always passthrough.
@@ -757,19 +765,14 @@ def gateway_chat(
                     result["gateway_log_id"] = int(log_id) if log_id else None
                 return result
         except Exception as e:
-            logger.exception("[context_brain.gateway] dispatch raised; passthrough fallback")
+            logger.exception("[context_brain.gateway] dispatch raised; direct paid fallback disabled")
             if gateway_cache_key and gateway_cache_owner:
                 _gateway_inflight_finish(gateway_cache_key, None)
             _finalize_gateway_log(
                 db, log_id, success=False, started_at_mono=started_at,
                 error_kind="exception", error_message=str(e),
             )
-            return _passthrough(
-                messages,
-                system_prompt=system_prompt, trace_id=trace_id,
-                user_message=user_message, max_tokens=max_tokens,
-                strict_escalation=strict_escalation,
-            )
+            return _gateway_error_result()
     finally:
         if own_db and db is not None:
             try: db.close()
@@ -808,15 +811,9 @@ def gateway_chat_stream(
             db = _open_db_session()
             own_db = True
         except Exception as e:
-            logger.warning("[context_brain.gateway] no db session for stream, falling through: %s", e)
-            yield from openai_client.chat_stream(
-                messages=messages,
-                system_prompt=system_prompt,
-                trace_id=trace_id,
-                user_message=user_message,
-                max_tokens=max_tokens,
-                strict_escalation=strict_escalation,
-                model_override=_purpose_model_override(purpose),
+            logger.warning(
+                "[context_brain.gateway] no db session for stream; direct paid fallback disabled: %s",
+                e,
             )
             return
 
@@ -839,21 +836,10 @@ def gateway_chat_stream(
         try:
             policy = policy_mod.get_policy(db, purpose)
         except Exception as e:
-            logger.warning("[context_brain.gateway] stream policy failed, falling through: %s", e)
-            model_override = _purpose_model_override(purpose)
-            for tok, model in openai_client.chat_stream(
-                messages=messages,
-                system_prompt=prompt,
-                trace_id=trace_id,
-                user_message=inferred_user_message,
-                max_tokens=max_tokens,
-                strict_escalation=strict_escalation,
-                model_override=model_override,
-            ):
-                reply_parts.append(tok)
-                model_seen = model
-                yield tok, model
-            success = bool(reply_parts)
+            logger.warning(
+                "[context_brain.gateway] stream policy failed; direct paid fallback disabled: %s",
+                e,
+            )
             return
         if not policy.enabled or policy.routing_strategy == "tree":
             policy = PurposePolicy(

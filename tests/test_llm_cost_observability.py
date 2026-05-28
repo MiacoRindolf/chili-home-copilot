@@ -940,6 +940,87 @@ def test_gateway_stream_replays_exact_cache_for_low_stakes_stream(monkeypatch):
     assert finalize.call_args_list[1].kwargs["premium_calls"] == 0
 
 
+def test_gateway_dispatch_error_skips_direct_paid_fallback(monkeypatch):
+    direct = MagicMock(side_effect=RuntimeError("provider down"))
+    finalize = MagicMock()
+
+    monkeypatch.setattr(
+        "app.services.context_brain.llm_gateway.policy_mod.get_policy",
+        lambda db, purpose: PurposePolicy(
+            purpose=purpose,
+            routing_strategy="passthrough",
+            decompose=False,
+            cross_examine=False,
+            use_premium_synthesis=True,
+            high_stakes=False,
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.context_brain.llm_gateway._write_gateway_log_start",
+        lambda *a, **k: 9901,
+    )
+    monkeypatch.setattr("app.services.context_brain.llm_gateway._finalize_gateway_log", finalize)
+    monkeypatch.setattr(oc, "chat", direct)
+
+    result = gateway_chat(
+        [{"role": "user", "content": "do not bypass budget"}],
+        purpose="trading_reflect",
+        system_prompt="json only",
+        db=object(),
+    )
+
+    assert result == {
+        "reply": "",
+        "tokens_used": 0,
+        "model": "gateway_error",
+        "gateway_log_id": None,
+    }
+    assert direct.call_count == 1
+    assert finalize.call_args.kwargs["error_kind"] == "exception"
+
+
+def test_gateway_missing_db_skips_direct_paid_fallback(monkeypatch):
+    direct = MagicMock(side_effect=AssertionError("direct OpenAI bypassed gateway"))
+
+    monkeypatch.setattr(
+        "app.services.context_brain.llm_gateway._open_db_session",
+        MagicMock(side_effect=RuntimeError("db down")),
+    )
+    monkeypatch.setattr(oc, "chat", direct)
+
+    result = gateway_chat(
+        [{"role": "user", "content": "db unavailable"}],
+        purpose="memory_extract",
+        system_prompt="json only",
+    )
+
+    assert result["model"] == "gateway_error"
+    assert result["tokens_used"] == 0
+    direct.assert_not_called()
+
+
+def test_gateway_stream_policy_error_skips_direct_paid_fallback(monkeypatch):
+    direct_stream = MagicMock(side_effect=AssertionError("direct OpenAI stream bypassed gateway"))
+
+    monkeypatch.setattr(
+        "app.services.context_brain.llm_gateway.policy_mod.get_policy",
+        MagicMock(side_effect=RuntimeError("policy unavailable")),
+    )
+    monkeypatch.setattr(oc, "chat_stream", direct_stream)
+
+    out = list(
+        gateway_chat_stream(
+            [{"role": "user", "content": "stream without policy"}],
+            purpose="smart_pick_stream",
+            system_prompt="static stream policy",
+            db=object(),
+        )
+    )
+
+    assert out == []
+    direct_stream.assert_not_called()
+
+
 def test_no_direct_paid_openai_calls_outside_gateway_voice_vision():
     allowed = {
         Path("app/openai_client.py"),
