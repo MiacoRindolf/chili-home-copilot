@@ -187,6 +187,8 @@ def _paper_current_mark_price(pt: PaperTrade, *, purpose: str = "display") -> fl
                 indicator_snapshot=getattr(pt, "signal_json", None) or {},
             )
             quote = broker_quote_for_trade(proxy, purpose=purpose)
+            if purpose == "exit":
+                return _positive_float(quote.get("executable_price"))
             return _positive_float(
                 quote.get("price")
                 or quote.get("mark_price")
@@ -1168,7 +1170,8 @@ def check_paper_exits(
             meta = (pt.signal_json or {}).get("_paper_meta", {})
             expiry = meta.get("expiry_days", PAPER_TRADE_EXPIRY_DAYS)
 
-            price = _paper_current_mark_price(pt)
+            quote_purpose = "exit" if _is_option_paper_trade(pt) else "display"
+            price = _paper_current_mark_price(pt, purpose=quote_purpose)
             if price is None:
                 if pt.entry_date and (datetime.utcnow() - pt.entry_date).days >= expiry:
                     exit_p = _apply_slippage(pt.entry_price, pt.direction, is_entry=False)

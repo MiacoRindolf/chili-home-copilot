@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -39,11 +40,26 @@ class _FakeQuery:
         return None
 
 
+class _RowsQuery(_FakeQuery):
+    def __init__(self, rows):
+        self._rows = rows
+
+    def all(self):
+        return list(self._rows)
+
+    def count(self):
+        return len(self._rows)
+
+
 class _FakeDb:
-    def __init__(self):
+    def __init__(self, rows=None):
         self.added = []
+        self.commits = 0
+        self._rows = list(rows or [])
 
     def query(self, _model):
+        if self._rows:
+            return _RowsQuery(self._rows)
         return _FakeQuery()
 
     def add(self, row):
@@ -54,6 +70,7 @@ class _FakeDb:
             row.id = idx
 
     def commit(self):
+        self.commits += 1
         return None
 
 
@@ -191,6 +208,100 @@ def test_paper_option_mark_uses_option_quote_not_underlying(monkeypatch) -> None
     assert mark == pytest.approx(1.45)
     proxy = quote.call_args.args[0]
     assert proxy.indicator_snapshot["option_meta"]["limit_price"] == pytest.approx(1.25)
+
+
+def test_paper_option_exit_quote_requires_executable_side() -> None:
+    from app.services.trading import paper_trading
+
+    trade = PaperTrade(
+        ticker="SPY",
+        direction="long",
+        entry_price=1.25,
+        quantity=2.0,
+        status="open",
+        signal_json=_option_signal(),
+    )
+
+    with patch(
+        "app.services.trading.broker_quotes.broker_quote_for_trade",
+        return_value={
+            "price": 2.55,
+            "mark_price": 2.55,
+            "executable_price": 2.05,
+            "source": "robinhood_options",
+        },
+    ) as quote:
+        exit_price = paper_trading._paper_current_mark_price(trade, purpose="exit")
+
+    assert exit_price == pytest.approx(2.05)
+    assert quote.call_args.kwargs["purpose"] == "exit"
+
+
+def test_paper_option_exit_refuses_mark_without_executable_side() -> None:
+    from app.services.trading import paper_trading
+
+    trade = PaperTrade(
+        ticker="SPY",
+        direction="long",
+        entry_price=1.25,
+        quantity=2.0,
+        status="open",
+        signal_json=_option_signal(),
+    )
+
+    with patch(
+        "app.services.trading.broker_quotes.broker_quote_for_trade",
+        return_value={
+            "price": 2.55,
+            "mark_price": 2.55,
+            "executable_price": None,
+            "source": "robinhood_options",
+        },
+    ):
+        exit_price = paper_trading._paper_current_mark_price(trade, purpose="exit")
+
+    assert exit_price is None
+
+
+def test_check_paper_exits_option_target_waits_for_executable_bid(monkeypatch) -> None:
+    from app.services.trading import paper_trading
+
+    monkeypatch.setattr(paper_trading.settings, "backtest_spread", 0.0, raising=False)
+    trade = PaperTrade(
+        id=101,
+        ticker="SPY",
+        direction="long",
+        entry_price=1.25,
+        stop_price=0.60,
+        target_price=2.50,
+        quantity=2.0,
+        status="open",
+        entry_date=datetime.utcnow(),
+        signal_json={
+            **_option_signal(),
+            "_paper_meta": {"expiry_days": 5, "trailing_enabled": False},
+        },
+    )
+    db = _FakeDb(rows=[trade])
+
+    with patch(
+        "app.services.trading.broker_quotes.broker_quote_for_trade",
+        return_value={
+            "price": 2.65,
+            "mark_price": 2.65,
+            "executable_price": 2.10,
+            "source": "robinhood_options",
+        },
+    ) as quote, patch(
+        "app.services.trading.paper_trading._paper_dynamic_monitor_decision",
+        return_value=None,
+    ):
+        result = paper_trading.check_paper_exits(db, user_id=1)
+
+    assert result == {"checked": 1, "closed": 0, "trailing_updated": 0}
+    assert trade.status == "open"
+    assert db.commits == 0
+    assert quote.call_args.kwargs["purpose"] == "exit"
 
 
 def test_auto_enter_option_signal_uses_asset_gate_and_meta_contract_quantity(
