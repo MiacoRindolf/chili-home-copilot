@@ -33,7 +33,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Any, Iterable
+from typing import Any
 
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
@@ -322,17 +322,36 @@ def _load_training_pairs(
     cutoff = datetime.utcnow() - timedelta(days=lookback_days)
     pairs: list[tuple[float, int]] = []
 
-    trades: Iterable[Trade] = (
+    trades: list[Trade] = (
         db.query(Trade)
         .filter(Trade.exit_date.isnot(None), Trade.entry_date >= cutoff)
         .order_by(desc(Trade.exit_date))
         .limit(2000)
         .all()
     )
+    papers: list[PaperTrade] = (
+        db.query(PaperTrade)
+        .filter(PaperTrade.exit_date.isnot(None), PaperTrade.entry_date >= cutoff)
+        .order_by(desc(PaperTrade.exit_date))
+        .limit(4000)
+        .all()
+    )
+    pattern_ids = {
+        int(t.scan_pattern_id)
+        for t in trades
+        if t.scan_pattern_id and t.pnl is not None
+    }
+    pattern_ids.update(
+        int(pt.scan_pattern_id)
+        for pt in papers
+        if pt.scan_pattern_id and pt.exit_price is not None and pt.entry_price is not None
+    )
+    patterns_by_id = _scan_patterns_by_id(db, pattern_ids)
+
     for t in trades:
         if not t.scan_pattern_id or t.pnl is None:
             continue
-        pat = db.query(ScanPattern).filter(ScanPattern.id == int(t.scan_pattern_id)).one_or_none()
+        pat = patterns_by_id.get(int(t.scan_pattern_id))
         if pat is None:
             continue
         raw = _pattern_raw_prob(pat)
@@ -342,17 +361,10 @@ def _load_training_pairs(
             continue
         pairs.append((raw, 1 if float(t.pnl) > 0 else 0))
 
-    papers: Iterable[PaperTrade] = (
-        db.query(PaperTrade)
-        .filter(PaperTrade.exit_date.isnot(None), PaperTrade.entry_date >= cutoff)
-        .order_by(desc(PaperTrade.exit_date))
-        .limit(4000)
-        .all()
-    )
     for pt in papers:
         if not pt.scan_pattern_id or pt.exit_price is None or pt.entry_price is None:
             continue
-        pat = db.query(ScanPattern).filter(ScanPattern.id == int(pt.scan_pattern_id)).one_or_none()
+        pat = patterns_by_id.get(int(pt.scan_pattern_id))
         if pat is None:
             continue
         raw = _pattern_raw_prob(pat)
@@ -364,6 +376,14 @@ def _load_training_pairs(
         pairs.append((raw, win))
 
     return pairs
+
+
+def _scan_patterns_by_id(db: Session, pattern_ids: set[int]) -> dict[int, ScanPattern]:
+    ids = sorted({int(pattern_id) for pattern_id in pattern_ids if int(pattern_id) > 0})
+    if not ids:
+        return {}
+    rows = db.query(ScanPattern).filter(ScanPattern.id.in_(ids)).all()
+    return {int(row.id): row for row in rows if row.id is not None}
 
 
 def _pattern_raw_prob(pat: ScanPattern) -> float | None:
