@@ -3,11 +3,21 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from app import openai_client as oc
 from app.config import Settings
+from app.services.context_brain import llm_gateway as gw
 from app.services.context_brain.llm_gateway import gateway_chat, gateway_chat_stream
 from app.services.context_brain.tree_types import PurposePolicy
 from app.services.llm_cost import estimate_cost_usd, provider_from_base_url
+
+
+@pytest.fixture(autouse=True)
+def reset_gateway_exact_cache():
+    gw.reset_gateway_cache()
+    yield
+    gw.reset_gateway_cache()
 
 
 def test_provider_from_base_url_labels_openai_not_config_slot():
@@ -154,6 +164,87 @@ def test_gateway_purpose_override_ignored_for_high_stakes(monkeypatch):
     )
 
     assert chat.call_args.kwargs["model_override"] is None
+
+
+def test_gateway_exact_cache_replays_offline_passthrough_without_paid_call(monkeypatch):
+    chat = MagicMock(
+        return_value={
+            "reply": "stable reflection",
+            "model": "gpt-5.5",
+            "provider": "openai",
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+            "tokens_used": 120,
+            "estimated_cost_usd": 0.0011,
+        }
+    )
+    finalize = MagicMock()
+    log_ids = iter([101, 102])
+
+    monkeypatch.setattr(
+        "app.services.context_brain.llm_gateway.policy_mod.get_policy",
+        lambda db, purpose: PurposePolicy(
+            purpose=purpose,
+            routing_strategy="passthrough",
+            decompose=False,
+            cross_examine=False,
+            use_premium_synthesis=False,
+            high_stakes=False,
+        ),
+    )
+    monkeypatch.setattr("app.services.context_brain.llm_gateway._write_gateway_log_start", lambda *a, **k: next(log_ids))
+    monkeypatch.setattr("app.services.context_brain.llm_gateway._finalize_gateway_log", finalize)
+    monkeypatch.setattr(oc, "chat", chat)
+
+    messages = [{"role": "user", "content": "reflect on the close"}]
+    first = gateway_chat(messages, purpose="trading_reflect", system_prompt="sys", db=object())
+    second = gateway_chat(messages, purpose="trading_reflect", system_prompt="sys", db=object())
+
+    assert first["reply"] == "stable reflection"
+    assert second["reply"] == "stable reflection"
+    assert chat.call_count == 1
+    assert first["gateway_log_id"] == 101
+    assert second["gateway_log_id"] == 102
+    assert finalize.call_args_list[0].kwargs["cache_status"] == "gateway_cache_miss"
+    cache_kwargs = finalize.call_args_list[1].kwargs
+    assert cache_kwargs["cache_status"] == "gateway_cache_hit"
+    assert cache_kwargs["provider"] == "cache"
+    assert cache_kwargs["premium_calls"] == 0
+    assert cache_kwargs["premium_tokens"] == 0
+    assert cache_kwargs["estimated_cost_usd"] == 0.0
+
+
+def test_gateway_exact_cache_never_caches_high_stakes_passthrough(monkeypatch):
+    chat = MagicMock(
+        side_effect=[
+            {"reply": "allow only with evidence", "model": "gpt-5.5", "tokens_used": 12},
+            {"reply": "allow only with evidence", "model": "gpt-5.5", "tokens_used": 12},
+        ]
+    )
+    finalize = MagicMock()
+
+    monkeypatch.setattr(
+        "app.services.context_brain.llm_gateway.policy_mod.get_policy",
+        lambda db, purpose: PurposePolicy(
+            purpose="autotrader_revalidation",
+            routing_strategy="passthrough",
+            decompose=False,
+            cross_examine=False,
+            use_premium_synthesis=True,
+            high_stakes=True,
+        ),
+    )
+    monkeypatch.setattr("app.services.context_brain.llm_gateway._write_gateway_log_start", lambda *a, **k: 201)
+    monkeypatch.setattr("app.services.context_brain.llm_gateway._finalize_gateway_log", finalize)
+    monkeypatch.setattr(oc, "chat", chat)
+
+    messages = [{"role": "user", "content": "validate live order"}]
+    gateway_chat(messages, purpose="autotrader_revalidation", db=object())
+    gateway_chat(messages, purpose="autotrader_revalidation", db=object())
+
+    assert chat.call_count == 2
+    assert all(call.kwargs.get("cache_status") is None for call in finalize.call_args_list)
 
 
 def test_gateway_stream_logs_provider_and_estimated_cost(monkeypatch):

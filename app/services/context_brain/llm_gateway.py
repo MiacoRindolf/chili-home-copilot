@@ -25,9 +25,12 @@ where the tree pipeline is buying us quality vs just adding latency.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import threading
 import time
+from collections import OrderedDict
 from typing import Any, Optional
 
 from sqlalchemy import text
@@ -41,6 +44,193 @@ from . import tree_coordinator as tree_mod
 from .tree_types import GatewayCallResult, PurposePolicy
 
 logger = logging.getLogger(__name__)
+
+_GATEWAY_EXACT_CACHEABLE_PURPOSES = frozenset({
+    "trading_pattern_mine",
+    "trading_reflect",
+    "pattern_research_extract",
+})
+_GATEWAY_EXACT_CACHE_TTL_SEC = 600
+_GATEWAY_EXACT_CACHE_MAX_ENTRIES = 128
+
+
+class _GatewayInflight:
+    def __init__(self) -> None:
+        self.event = threading.Event()
+        self.result: dict[str, Any] | None = None
+
+
+_gateway_exact_cache_lock = threading.Lock()
+_gateway_exact_cache: OrderedDict[str, tuple[float, dict[str, Any]]] = OrderedDict()
+_gateway_exact_inflight: dict[str, _GatewayInflight] = {}
+
+
+def reset_gateway_cache() -> None:
+    """Clear direct gateway exact-cache state for tests and maintenance hooks."""
+    with _gateway_exact_cache_lock:
+        _gateway_exact_cache.clear()
+        _gateway_exact_inflight.clear()
+
+
+def _gateway_cache_allowed(policy: PurposePolicy) -> bool:
+    return (
+        bool(policy.enabled)
+        and not bool(policy.high_stakes)
+        and policy.routing_strategy == "passthrough"
+        and policy.purpose in _GATEWAY_EXACT_CACHEABLE_PURPOSES
+    )
+
+
+def _normalizable_messages(messages: list[dict]) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
+    for message in messages or []:
+        if isinstance(message, dict):
+            normalized.append({
+                "role": str(message.get("role") or ""),
+                "content": str(message.get("content") or ""),
+            })
+        else:
+            normalized.append({"role": "", "content": str(message)})
+    return normalized
+
+
+def _gateway_cache_key(
+    *,
+    policy: PurposePolicy,
+    messages: list[dict],
+    system_prompt: Optional[str],
+    user_message: str,
+    max_tokens: int,
+    strict_escalation: bool,
+    model_override: Optional[str],
+    user_id: Optional[int],
+    project_id: Optional[int],
+) -> str:
+    payload = {
+        "v": 1,
+        "purpose": policy.purpose,
+        "routing_strategy": policy.routing_strategy,
+        "messages": _normalizable_messages(messages),
+        "system_prompt": system_prompt or "",
+        "user_message": user_message or "",
+        "max_tokens": int(max_tokens or 0),
+        "strict_escalation": bool(strict_escalation),
+        "model_override": model_override or "",
+        "user_id": user_id,
+        "project_id": project_id,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _gateway_cache_snapshot(result: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(result, dict):
+        return None
+    if not result.get("reply") or result.get("model") == "error":
+        return None
+    snapshot = dict(result)
+    snapshot.pop("gateway_log_id", None)
+    return snapshot
+
+
+def _gateway_cache_get(key: str) -> dict[str, Any] | None:
+    now = time.monotonic()
+    with _gateway_exact_cache_lock:
+        entry = _gateway_exact_cache.get(key)
+        if not entry:
+            return None
+        stored_at, result = entry
+        if now - stored_at > _GATEWAY_EXACT_CACHE_TTL_SEC:
+            _gateway_exact_cache.pop(key, None)
+            return None
+        _gateway_exact_cache.move_to_end(key)
+        return dict(result)
+
+
+def _gateway_cache_put(key: str, result: dict[str, Any] | None) -> dict[str, Any] | None:
+    snapshot = _gateway_cache_snapshot(result)
+    if snapshot is None:
+        return None
+    with _gateway_exact_cache_lock:
+        _gateway_exact_cache[key] = (time.monotonic(), snapshot)
+        _gateway_exact_cache.move_to_end(key)
+        while len(_gateway_exact_cache) > _GATEWAY_EXACT_CACHE_MAX_ENTRIES:
+            _gateway_exact_cache.popitem(last=False)
+    return dict(snapshot)
+
+
+def _gateway_inflight_begin(key: str) -> tuple[bool, _GatewayInflight]:
+    with _gateway_exact_cache_lock:
+        inflight = _gateway_exact_inflight.get(key)
+        if inflight is not None:
+            return False, inflight
+        inflight = _GatewayInflight()
+        _gateway_exact_inflight[key] = inflight
+        return True, inflight
+
+
+def _gateway_inflight_finish(key: str, result: dict[str, Any] | None) -> None:
+    with _gateway_exact_cache_lock:
+        inflight = _gateway_exact_inflight.pop(key, None)
+        if inflight is None:
+            return
+        inflight.result = _gateway_cache_snapshot(result)
+        inflight.event.set()
+
+
+def _gateway_inflight_wait(inflight: _GatewayInflight) -> dict[str, Any] | None:
+    inflight.event.wait(_GATEWAY_EXACT_CACHE_TTL_SEC)
+    return dict(inflight.result) if inflight.result is not None else None
+
+
+def _prompt_text_for_cache_accounting(
+    messages: list[dict],
+    system_prompt: Optional[str],
+    user_message: str,
+) -> str:
+    pieces = [system_prompt or ""]
+    pieces.extend(str(m.get("content") or "") for m in messages if isinstance(m, dict))
+    if user_message:
+        pieces.append(user_message)
+    return "\n".join(p for p in pieces if p)
+
+
+def _return_gateway_cache_hit(
+    *,
+    db: Session,
+    log_id: Optional[int],
+    started_at: float,
+    messages: list[dict],
+    system_prompt: Optional[str],
+    user_message: str,
+    cached: dict[str, Any],
+    cache_status: str,
+) -> dict[str, Any]:
+    result = dict(cached)
+    prompt_tokens = approximate_tokens(
+        _prompt_text_for_cache_accounting(messages, system_prompt, user_message)
+    )
+    completion_tokens = approximate_tokens(str(result.get("reply") or ""))
+    total_tokens = prompt_tokens + completion_tokens
+    _finalize_gateway_log(
+        db,
+        log_id,
+        success=True,
+        started_at_mono=started_at,
+        premium_calls=0,
+        premium_tokens=0,
+        premium_cost_usd=0.0,
+        provider="cache",
+        provider_base_url=None,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        cached_tokens=0,
+        total_tokens=total_tokens,
+        cache_status=cache_status,
+        estimated_cost_usd=0.0,
+    )
+    result["gateway_log_id"] = int(log_id) if log_id else None
+    return result
 
 
 def _purpose_model_override(purpose: str, policy: PurposePolicy | None = None) -> str | None:
@@ -383,6 +573,8 @@ def gateway_chat(
         )
 
         try:
+            gateway_cache_key: str | None = None
+            gateway_cache_owner = False
             # Inferred user message when caller didn't pass one
             inferred_user_message = user_message
             if not inferred_user_message and messages:
@@ -392,6 +584,47 @@ def gateway_chat(
                 )
                 if last_user:
                     inferred_user_message = (last_user.get("content") or "").strip()
+
+            if _gateway_cache_allowed(policy):
+                gateway_cache_key = _gateway_cache_key(
+                    policy=policy,
+                    messages=messages,
+                    system_prompt=system_prompt,
+                    user_message=inferred_user_message,
+                    max_tokens=max_tokens,
+                    strict_escalation=strict_escalation,
+                    model_override=model_override,
+                    user_id=user_id,
+                    project_id=project_id,
+                )
+                cached = _gateway_cache_get(gateway_cache_key)
+                if cached is not None:
+                    return _return_gateway_cache_hit(
+                        db=db,
+                        log_id=log_id,
+                        started_at=started_at,
+                        messages=messages,
+                        system_prompt=system_prompt,
+                        user_message=inferred_user_message,
+                        cached=cached,
+                        cache_status="gateway_cache_hit",
+                    )
+
+                gateway_cache_owner, inflight = _gateway_inflight_begin(gateway_cache_key)
+                if not gateway_cache_owner:
+                    coalesced = _gateway_inflight_wait(inflight)
+                    if coalesced is not None:
+                        return _return_gateway_cache_hit(
+                            db=db,
+                            log_id=log_id,
+                            started_at=started_at,
+                            messages=messages,
+                            system_prompt=system_prompt,
+                            user_message=inferred_user_message,
+                            cached=coalesced,
+                            cache_status="gateway_inflight_coalesced",
+                        )
+                    gateway_cache_key = None
 
             if policy.routing_strategy == "tree":
                 outcome = tree_mod.run_tree(
@@ -477,17 +710,24 @@ def gateway_chat(
                     model_override=model_override,
                 )
                 cost_fields = _cost_fields_from_result(result)
+                if gateway_cache_key:
+                    cost_fields["cache_status"] = "gateway_cache_miss"
                 _finalize_gateway_log(
                     db, log_id,
                     success=bool(result.get("reply")) and result.get("model") != "error",
                     started_at_mono=started_at,
                     **cost_fields,
                 )
+                if gateway_cache_key and gateway_cache_owner:
+                    snapshot = _gateway_cache_put(gateway_cache_key, result)
+                    _gateway_inflight_finish(gateway_cache_key, snapshot)
                 if isinstance(result, dict):
                     result["gateway_log_id"] = int(log_id) if log_id else None
                 return result
         except Exception as e:
             logger.exception("[context_brain.gateway] dispatch raised; passthrough fallback")
+            if gateway_cache_key and gateway_cache_owner:
+                _gateway_inflight_finish(gateway_cache_key, None)
             _finalize_gateway_log(
                 db, log_id, success=False, started_at_mono=started_at,
                 error_kind="exception", error_message=str(e),
