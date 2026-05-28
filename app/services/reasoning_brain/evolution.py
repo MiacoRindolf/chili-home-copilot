@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
@@ -14,6 +14,8 @@ from ...models import (
     ReasoningLearningGoal,
     ReasoningUserModel,
 )
+
+_VALID_DOMAINS = {"trading", "code", "general", "life", "other"}
 
 
 def snapshot_confidence(db: Session, user_id: int) -> None:
@@ -74,25 +76,182 @@ def detect_model_drift(db: Session, user_id: int) -> Dict[str, str]:
     return drift
 
 
-def generate_hypotheses(db: Session, user_id: int) -> List[ReasoningHypothesis]:
-    """Use LLM to generate testable hypotheses about the user."""
-    if not openai_client.is_configured():
-        return []
-
-    um = (
+def _current_user_model(db: Session, user_id: int) -> Optional[ReasoningUserModel]:
+    return (
         db.query(ReasoningUserModel)
         .filter(ReasoningUserModel.user_id == user_id, ReasoningUserModel.active.is_(True))
         .order_by(ReasoningUserModel.created_at.desc())
         .first()
     )
+
+
+def _json_list(raw: str | None) -> list[Any]:
+    try:
+        data = json.loads(raw or "[]")
+    except Exception:
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _item_text(item: Any, *keys: str) -> str:
+    if isinstance(item, dict):
+        for key in keys:
+            value = str(item.get(key) or "").strip()
+            if value:
+                return value
+        return ""
+    return str(item or "").strip()
+
+
+def _domain_for(item: Any, text: str) -> str:
+    area = str(item.get("area") or item.get("domain") or "").strip().lower() if isinstance(item, dict) else ""
+    lower = f"{area} {text}".lower()
+    if any(
+        word in lower
+        for word in (
+            "trading",
+            "trade",
+            "portfolio",
+            "option",
+            "stock",
+            "crypto",
+            "cpcv",
+            "drawdown",
+            "risk sizing",
+            "promotion gate",
+            "overfitting",
+        )
+    ):
+        return "trading"
+    if any(word in lower for word in ("coding", "code", "software", "project", "repo", "python", "app")):
+        return "code"
+    if any(word in lower for word in ("life", "routine", "health", "home", "family", "sleep", "fitness")):
+        return "life"
+    if area in _VALID_DOMAINS:
+        return area
+    return "general"
+
+
+def _mechanical_hypothesis_items(model: ReasoningUserModel, *, max_items: int = 5) -> list[dict]:
+    """Create conservative, testable hypotheses from structured model fields."""
+    items: list[dict] = []
+    seen: set[str] = set()
+
+    def add(claim: str, domain: str) -> None:
+        claim = claim.strip()
+        if not claim:
+            return
+        key = claim.casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        items.append({"claim": claim, "domain": domain if domain in _VALID_DOMAINS else "general"})
+
+    for goal in _json_list(getattr(model, "active_goals", None)):
+        goal_text = _item_text(goal, "goal", "description", "topic")
+        if not goal_text:
+            continue
+        domain = _domain_for(goal, goal_text)
+        add(f"User will engage more when CHILI offers practical next steps for {goal_text}.", domain)
+        if len(items) >= max_items:
+            return items
+
+    for gap in _json_list(getattr(model, "knowledge_gaps", None)):
+        topic = _item_text(gap, "topic", "goal", "description")
+        if not topic:
+            continue
+        description = _item_text(gap, "description")
+        domain = _domain_for(gap, f"{topic} {description}")
+        if description and description != topic:
+            add(f"User may need clearer explanations about {topic}: {description}.", domain)
+        else:
+            add(f"User may need clearer explanations about {topic}.", domain)
+        if len(items) >= max_items:
+            return items
+
+    decision_style = str(getattr(model, "decision_style", "") or "").strip()
+    if decision_style and decision_style != "unsure":
+        add(f"User responds well to {decision_style} decision framing.", "general")
+    risk_tolerance = str(getattr(model, "risk_tolerance", "") or "").strip()
+    if risk_tolerance and risk_tolerance != "unsure":
+        add(f"User prefers recommendations calibrated to {risk_tolerance} risk tolerance.", "trading")
+
+    return items[:max_items]
+
+
+def _existing_active_claims(db: Session, user_id: int) -> set[str]:
+    try:
+        rows = (
+            db.query(ReasoningHypothesis)
+            .filter(ReasoningHypothesis.user_id == user_id, ReasoningHypothesis.active.is_(True))
+            .all()
+        )
+    except Exception:
+        return set()
+    return {
+        str(getattr(row, "claim", "") or "").strip().casefold()
+        for row in rows
+        if str(getattr(row, "claim", "") or "").strip()
+    }
+
+
+def _store_hypotheses(
+    db: Session,
+    *,
+    user_id: int,
+    items: list[dict],
+    source: str,
+) -> List[ReasoningHypothesis]:
+    out: List[ReasoningHypothesis] = []
+    existing = _existing_active_claims(db, user_id)
+    seen = set(existing)
+    for item in items or []:
+        claim = (item.get("claim") or "").strip()
+        if not claim:
+            continue
+        key = claim.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        domain = (item.get("domain") or "general").strip()
+        hyp = ReasoningHypothesis(
+            user_id=user_id,
+            claim=claim,
+            domain=domain,
+            confidence=0.5,
+            evidence_for=0,
+            evidence_against=0,
+            created_at=datetime.utcnow(),
+            active=True,
+        )
+        db.add(hyp)
+        out.append(hyp)
+    if out:
+        db.commit()
+        log_info("reasoning_hypotheses", f"hypotheses_saved source={source} user_id={user_id} count={len(out)}")
+    return out
+
+
+def generate_hypotheses(db: Session, user_id: int) -> List[ReasoningHypothesis]:
+    """Generate testable hypotheses about the user."""
+    um = _current_user_model(db, user_id)
     if not um:
         return []
 
-    try:
-        goals = json.loads(um.active_goals or "[]")
-        gaps = json.loads(um.knowledge_gaps or "[]")
-    except Exception:
-        goals, gaps = [], []
+    mechanical_items = _mechanical_hypothesis_items(um)
+    if mechanical_items:
+        return _store_hypotheses(
+            db,
+            user_id=user_id,
+            items=mechanical_items,
+            source="mechanical",
+        )
+
+    if not openai_client.is_configured():
+        return []
+
+    goals = _json_list(um.active_goals)
+    gaps = _json_list(um.knowledge_gaps)
 
     prompt = (
         "You are Chili's Reasoning Brain. Propose 3-5 concrete, testable hypotheses "
@@ -113,12 +272,9 @@ def generate_hypotheses(db: Session, user_id: int) -> List[ReasoningHypothesis]:
             system_prompt="You are a disciplined hypothesis generator. Return only JSON.",
             trace_id="reasoning_hypotheses",
         )
-    except Exception:
-        result = openai_client.chat(
-            messages=[{"role": "user", "content": prompt}],
-            system_prompt="You are a disciplined hypothesis generator. Return only JSON.",
-            trace_id="reasoning_hypotheses",
-        )
+    except Exception as e:
+        log_info("reasoning_hypotheses", f"gateway_error={e}")
+        return []
     if not result.get("reply"):
         return []
 
@@ -133,26 +289,12 @@ def generate_hypotheses(db: Session, user_id: int) -> List[ReasoningHypothesis]:
         log_info("reasoning_hypotheses", f"parse_error={e}")
         return []
 
-    out: List[ReasoningHypothesis] = []
-    for item in data or []:
-        claim = (item.get("claim") or "").strip()
-        if not claim:
-            continue
-        domain = (item.get("domain") or "general").strip()
-        hyp = ReasoningHypothesis(
-            user_id=user_id,
-            claim=claim,
-            domain=domain,
-            confidence=0.5,
-            evidence_for=0,
-            evidence_against=0,
-            created_at=datetime.utcnow(),
-            active=True,
-        )
-        db.add(hyp)
-        out.append(hyp)
-    db.commit()
-    return out
+    return _store_hypotheses(
+        db,
+        user_id=user_id,
+        items=data or [],
+        source="gateway",
+    )
 
 
 def test_hypotheses(db: Session, user_id: int) -> None:
