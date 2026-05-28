@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import time
+import traceback
 from datetime import datetime, time as datetime_time, timedelta, timezone
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
@@ -1829,6 +1830,59 @@ def _audit(
         logger.debug("[autotrader] shadow_consume failed; ignored", exc_info=True)
 
 
+def _classify_autotrader_exception(exc: BaseException) -> str:
+    msg = str(exc or "")
+    if "Query.filter()" in msg and "LIMIT or OFFSET" in msg:
+        return "query_filter_after_limit"
+    if "timeout" in msg.lower():
+        return "timeout"
+    if isinstance(exc, OSError):
+        return "transport"
+    return "unclassified"
+
+
+def _exception_audit_snapshot(
+    alert: BreakoutAlert,
+    exc: BaseException,
+    *,
+    phase: str,
+) -> dict[str, Any]:
+    frames: list[dict[str, Any]] = []
+    try:
+        extracted = traceback.extract_tb(exc.__traceback__)
+    except Exception:
+        extracted = []
+    for frame in extracted[-8:]:
+        filename = str(frame.filename or "").replace("\\", "/")
+        app_idx = filename.find("/app/")
+        if app_idx >= 0:
+            filename = filename[app_idx + 1:]
+        frames.append(
+            {
+                "file": filename,
+                "line": int(frame.lineno or 0),
+                "function": str(frame.name or ""),
+            }
+        )
+    try:
+        exc_only = "".join(traceback.format_exception_only(type(exc), exc)).strip()
+    except Exception:
+        exc_only = str(exc or "")
+    return {
+        "autotrader_exception": True,
+        "error_phase": phase,
+        "error_type": type(exc).__name__,
+        "error_classification": _classify_autotrader_exception(exc),
+        "error_message": str(exc or "")[:500],
+        "error_summary": exc_only[:500],
+        "error_frames": frames,
+        "alert_id": getattr(alert, "id", None),
+        "alert_ticker": (getattr(alert, "ticker", None) or "").upper() or None,
+        "alert_asset_type": getattr(alert, "asset_type", None),
+        "alert_scan_pattern_id": getattr(alert, "scan_pattern_id", None),
+    }
+
+
 def _broker_reject_action_fingerprint(
     alert: BreakoutAlert,
     *,
@@ -2411,7 +2465,18 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
                 _process_one_alert(db, uid, alert, out, rt)
             except Exception as e:
                 logger.exception("[autotrader] alert %s failed: %s", alert.id, e)
-                _audit(db, user_id=uid, alert=alert, decision="error", reason=str(e)[:500])
+                _audit(
+                    db,
+                    user_id=uid,
+                    alert=alert,
+                    decision="error",
+                    reason=str(e)[:500],
+                    rule_snapshot=_exception_audit_snapshot(
+                        alert,
+                        e,
+                        phase="process_alert",
+                    ),
+                )
                 _autotrader_tick_note(
                     out, kind="error", reason=str(e)[:500], alert=alert
                 )

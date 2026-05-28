@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app import models
-from app.models.trading import AutoTraderRun, BreakoutAlert, PaperTrade
+from app.models.trading import AutoTraderRun, BreakoutAlert, PaperTrade, ScanPattern
 from app.services.trading import auto_trader as at_mod
 
 
@@ -176,3 +176,80 @@ def test_run_auto_trader_tick_matches_null_user_alerts(db, monkeypatch):
     # The null-user alert must have been picked up (either placed or audited).
     run = db.query(AutoTraderRun).filter(AutoTraderRun.breakout_alert_id == alert.id).first()
     assert run is not None, "null-user alert was not processed"
+
+
+def test_run_auto_trader_tick_audits_exception_context(db, monkeypatch):
+    u = models.User(name="at_int_error_u")
+    pat = ScanPattern(
+        id=585,
+        name="error pattern",
+        rules_json={},
+        active=True,
+        lifecycle_stage="promoted",
+    )
+    db.add(pat)
+    db.add(u)
+    db.flush()
+
+    alert = BreakoutAlert(
+        ticker="ERRQ",
+        asset_type="crypto",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.75,
+        price_at_alert=10.0,
+        entry_price=10.0,
+        stop_loss=9.0,
+        target_price=12.0,
+        user_id=None,
+        scan_pattern_id=585,
+    )
+    db.add(alert)
+    db.commit()
+    db.refresh(alert)
+
+    cfg = SimpleNamespace(
+        chili_autotrader_enabled=True,
+        chili_autotrader_live_enabled=False,
+        chili_autotrader_user_id=u.id,
+        brain_default_user_id=u.id,
+        chili_autotrader_synergy_enabled=False,
+    )
+    monkeypatch.setattr(at_mod, "settings", cfg)
+    monkeypatch.setattr(
+        at_mod,
+        "effective_autotrader_runtime",
+        lambda _db: {
+            "tick_allowed": True,
+            "paused": False,
+            "live_orders_effective": False,
+            "live_orders_env": False,
+            "desk_live_override": False,
+            "monitor_entries_allowed": True,
+            "payload": {},
+        },
+    )
+
+    exc_msg = (
+        "Query.filter() being called on a Query which already has LIMIT or "
+        "OFFSET applied.  Call filter() before limit() or offset() are applied."
+    )
+    with patch.object(at_mod, "_process_one_alert", side_effect=RuntimeError(exc_msg)):
+        out = at_mod.run_auto_trader_tick(db)
+
+    assert out.get("ok") is True
+    assert out.get("processed") == 1
+    run = (
+        db.query(AutoTraderRun)
+        .filter(AutoTraderRun.breakout_alert_id == alert.id)
+        .one()
+    )
+    assert run.decision == "error"
+    snap = run.rule_snapshot or {}
+    assert snap["autotrader_exception"] is True
+    assert snap["error_phase"] == "process_alert"
+    assert snap["error_type"] == "RuntimeError"
+    assert snap["error_classification"] == "query_filter_after_limit"
+    assert snap["alert_ticker"] == "ERRQ"
+    assert snap["alert_asset_type"] == "crypto"
+    assert snap["alert_scan_pattern_id"] == 585
+    assert snap["error_frames"]

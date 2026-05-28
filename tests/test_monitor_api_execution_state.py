@@ -115,7 +115,16 @@ def test_imminent_alerts_exposes_edge_supply_diagnostics(db, paired_client):
         active=True,
         lifecycle_stage="promoted",
     )
-    db.add_all([recert_pat, negative_pat, slippage_pat])
+    error_pat = ScanPattern(
+        name="diag_error",
+        rules_json={},
+        origin="brain",
+        asset_class="crypto",
+        timeframe="1d",
+        active=True,
+        lifecycle_stage="promoted",
+    )
+    db.add_all([recert_pat, negative_pat, slippage_pat, error_pat])
     db.flush()
 
     recert_alert = BreakoutAlert(
@@ -165,7 +174,22 @@ def test_imminent_alerts_exposes_edge_supply_diagnostics(db, paired_client):
         alerted_at=datetime.utcnow(),
         indicator_snapshot={},
     )
-    db.add_all([recert_alert, negative_alert, slippage_alert])
+    error_alert = BreakoutAlert(
+        user_id=user.id,
+        scan_pattern_id=error_pat.id,
+        ticker="ERRQ",
+        asset_type="crypto",
+        alert_tier="pattern_imminent",
+        outcome="pending",
+        score_at_alert=79.0,
+        price_at_alert=10.0,
+        entry_price=10.0,
+        stop_loss=9.0,
+        target_price=12.0,
+        alerted_at=datetime.utcnow(),
+        indicator_snapshot={},
+    )
+    db.add_all([recert_alert, negative_alert, slippage_alert, error_alert])
     db.flush()
     db.add_all([
         AutoTraderRun(
@@ -229,6 +253,20 @@ def test_imminent_alerts_exposes_edge_supply_diagnostics(db, paired_client):
                 "slippage_reprice_edge_reason": "non_positive_expected_edge",
             },
         ),
+        AutoTraderRun(
+            user_id=user.id,
+            breakout_alert_id=error_alert.id,
+            scan_pattern_id=error_pat.id,
+            ticker="ERRQ",
+            decision="error",
+            reason="Query.filter() being called on a Query which already has LIMIT",
+            rule_snapshot={
+                "autotrader_exception": True,
+                "error_phase": "process_alert",
+                "error_type": "InvalidRequestError",
+                "error_classification": "query_filter_after_limit",
+            },
+        ),
     ])
     db.commit()
 
@@ -254,9 +292,21 @@ def test_imminent_alerts_exposes_edge_supply_diagnostics(db, paired_client):
         by_ticker["SLIP"]["slippage_reprice_next_action"]
         == "wait_for_fresh_entry_or_tighter_price"
     )
+    assert (
+        by_ticker["ERRQ"]["autotrader_blocker_category"]
+        == "autotrader_execution_error"
+    )
+    assert by_ticker["ERRQ"]["autotrader_next_action"] == "inspect_autotrader_exception"
+    assert by_ticker["ERRQ"]["autotrader_error_type"] == "InvalidRequestError"
+    assert (
+        by_ticker["ERRQ"]["autotrader_error_classification"]
+        == "query_filter_after_limit"
+    )
+    assert by_ticker["ERRQ"]["autotrader_error_phase"] == "process_alert"
     assert body["summary"]["positive_edge_recert_debt"] >= 1
     assert body["summary"]["negative_expected_edge"] >= 1
     assert body["summary"]["missed_entry_slippage"] >= 1
+    assert body["summary"]["autotrader_execution_errors"] >= 1
 
 
 def test_edge_supply_endpoint_exposes_profitability_diagnostics(db, paired_client):

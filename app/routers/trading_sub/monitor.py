@@ -257,6 +257,8 @@ def _imminent_blocker_category(
 
     if decision == "placed":
         return "placed"
+    if decision == "error":
+        return "autotrader_execution_error"
     if reason == "non_positive_expected_edge":
         return "negative_expected_edge"
     if reason == "missed_entry_slippage":
@@ -291,6 +293,7 @@ def _imminent_next_action(category: str) -> str:
         "recert_required": "complete_recert_before_live",
         "missed_entry_slippage": "wait_for_fresh_entry_or_reprice",
         "broker_execution_reject": "fix_execution_lane",
+        "autotrader_execution_error": "inspect_autotrader_exception",
         "live_eligible_candidate": "await_autotrader_processing",
         "placed": "already_placed",
         "pending_autotrader": "await_autotrader_processing",
@@ -306,6 +309,7 @@ def _empty_imminent_summary() -> dict[str, int]:
         "positive_edge_recert_debt": 0,
         "missed_entry_slippage": 0,
         "broker_execution_rejects": 0,
+        "autotrader_execution_errors": 0,
         "live_eligible_candidates": 0,
         "other": 0,
     }
@@ -323,6 +327,10 @@ def _bump_imminent_summary(summary: dict[str, int], category: str) -> None:
     elif category == "broker_execution_reject":
         summary["broker_execution_rejects"] = (
             int(summary.get("broker_execution_rejects", 0)) + 1
+        )
+    elif category == "autotrader_execution_error":
+        summary["autotrader_execution_errors"] = (
+            int(summary.get("autotrader_execution_errors", 0)) + 1
         )
     elif category == "live_eligible_candidate":
         summary["live_eligible_candidates"] = (
@@ -809,6 +817,12 @@ def api_monitor_imminent_alerts(
                     "slippage_reprice_error",
                 ),
                 "slippage_reprice_next_action": _slippage_reprice_next_action(run),
+                "autotrader_error_type": _snapshot_text(run, "error_type"),
+                "autotrader_error_classification": _snapshot_text(
+                    run,
+                    "error_classification",
+                ),
+                "autotrader_error_phase": _snapshot_text(run, "error_phase"),
                 "paper_observation_signal_lane": signal_lane,
                 "autotrader_blocker_category": blocker_category,
                 "autotrader_next_action": _imminent_next_action(blocker_category),
