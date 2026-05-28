@@ -300,6 +300,7 @@ def _graduation_blocker(
     realized_ev_pct: float | None,
     closed_n: int,
     broker_rejects: int,
+    slippage_misses: int,
     edge_eval_count: int,
     min_closed: int = DEFAULT_MIN_CLOSED_EVIDENCE,
 ) -> str:
@@ -310,7 +311,7 @@ def _graduation_blocker(
         if reasons & HARD_RECERT_REASONS:
             return "hard_recert_blocked"
         return "recert_blocked"
-    if edge_eval_count > 0 and broker_rejects > 0:
+    if edge_eval_count > 0 and (broker_rejects > 0 or slippage_misses > 0):
         return "execution_blocked"
     if expected_ev_pct is not None and expected_ev_pct <= 0.0:
         return "quality_blocked"
@@ -563,6 +564,7 @@ def compute_pattern_edge_reliability(
         realized_ev_pct=realized_ev,
         closed_n=closed_n,
         broker_rejects=broker_rejects,
+        slippage_misses=slippage_misses,
         edge_eval_count=edge_eval_count,
         min_closed=min_closed_evidence,
     )

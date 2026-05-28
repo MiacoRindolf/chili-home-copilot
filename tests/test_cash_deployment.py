@@ -192,6 +192,7 @@ def test_cash_deployment_categorizes_positive_blocks_without_live_shortcuts(db, 
 
     assert by_pattern[reject.id]["cash_deployment_category"] == "positive_ev_execution_blocked"
     assert by_pattern[reject.id]["live_deployable"] is False
+    assert by_pattern[reject.id]["execution_blocker"] == "broker_rejects"
 
     assert by_pattern[negative.id]["cash_deployment_category"] == "negative_ev"
     assert by_pattern[negative.id]["cash_deployment_rank"] is None
@@ -202,6 +203,29 @@ def test_cash_deployment_categorizes_positive_blocks_without_live_shortcuts(db, 
     assert summary["positive_ev_shadow"] >= 1
     assert summary["positive_ev_execution_blocked"] >= 1
     assert summary["negative_ev"] >= 1
+
+
+def test_cash_deployment_blocks_positive_slippage_miss_as_execution_debt(db, monkeypatch):
+    monkeypatch.setattr(settings, "chili_autotrader_live_enabled", True)
+    monkeypatch.setattr(settings, "chili_cash_deployment_equity_cost_pct", 0.05)
+    monkeypatch.setattr(settings, "chili_cash_deployment_min_closed_evidence", 5)
+    monkeypatch.setattr(settings, "chili_cash_deployment_max_brier_score", 0.28)
+
+    pat = _pattern(db, name="cash slippage blocked")
+    alert = _alert(db, pat, ticker="SLIP")
+    _run(db, pat, alert, expected=2.0, reason="missed_entry_slippage")
+    _closed_paper(db, pat, alert)
+    db.commit()
+
+    rows = cash_deployment_rows(db, window_days=7, limit=10)
+    row = next(x for x in rows if x["scan_pattern_id"] == pat.id)
+
+    assert row["cash_deployment_category"] == "positive_ev_execution_blocked"
+    assert row["graduation_blocker"] == "execution_blocked"
+    assert row["execution_blocker"] == "missed_entry_slippage"
+    assert row["slippage_miss_count"] == 1
+    assert row["live_deployable"] is False
+    assert row["max_safe_notional"] == 0.0
 
 
 def test_cash_deployment_exposure_cap_blocks_sizing(db, monkeypatch):

@@ -430,6 +430,22 @@ def _recommended_work_event(row: dict[str, Any], category: str) -> str:
     return str(row.get("recommended_work_event") or EDGE_RELIABILITY_REFRESH)
 
 
+def _execution_blocker_for_row(
+    row: dict[str, Any],
+    *,
+    venue_blocker: str | None,
+) -> str | None:
+    if venue_blocker:
+        return venue_blocker
+    if _safe_int(row.get("broker_reject_count")) > 0:
+        return "broker_rejects"
+    if _safe_int(row.get("slippage_miss_count")) > 0:
+        return "missed_entry_slippage"
+    if str(row.get("graduation_blocker") or "").strip().lower() in EXECUTION_BLOCKERS:
+        return "execution_blocked"
+    return None
+
+
 def _allocation_score(
     row: dict[str, Any],
     *,
@@ -495,7 +511,7 @@ def annotate_cash_deployment_row(
         user_id=user_id,
         asset_class=asset_class,
     )
-    execution_blocker = venue_blocker
+    execution_blocker = _execution_blocker_for_row(out, venue_blocker=venue_blocker)
     stale_symbols = set(exposure.get("stale_broker_symbols") or [])
     stale_match = bool(symbol and symbol in stale_symbols)
     if stale_match:
