@@ -524,7 +524,8 @@ def _autotrader_tick_note(
 def _record_slowest_tick_alert(
     out: dict[str, Any],
     *,
-    alert: BreakoutAlert,
+    alert_id: int,
+    ticker: str | None,
     elapsed_seconds: float,
 ) -> None:
     """Track the slowest alert in a tick for execution-latency forensics."""
@@ -533,8 +534,8 @@ def _record_slowest_tick_alert(
     if elapsed < current:
         return
     out["tick_slowest_alert_elapsed_seconds"] = elapsed
-    out["tick_slowest_alert_id"] = int(alert.id)
-    out["tick_slowest_alert_ticker"] = (alert.ticker or "").upper()
+    out["tick_slowest_alert_id"] = int(alert_id)
+    out["tick_slowest_alert_ticker"] = (ticker or "").upper()
 
 
 _CANDIDATE_POOL_ZERO_DIAG_INTERVAL_S = 300.0
@@ -2753,33 +2754,78 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
                 BreakoutAlert.alerted_at < stock_defer["cutoff"]
             ).count()
         )
-    candidate_rows = (
-        candidate_base.order_by(
-            *_candidate_order_by_clauses(fresh_fastlane)
-        ).limit(candidate_query_limit).all()
-    )
     fresh_cutoff = fresh_fastlane.get("cutoff")
+    if bool(fresh_fastlane.get("enabled")) and isinstance(fresh_cutoff, datetime):
+        fresh_candidate_refs = (
+            candidate_base.filter(BreakoutAlert.alerted_at >= fresh_cutoff)
+            .order_by(BreakoutAlert.alerted_at.desc(), BreakoutAlert.id.desc())
+            .with_entities(BreakoutAlert.id, BreakoutAlert.alerted_at)
+            .limit(candidate_query_limit)
+            .all()
+        )
+        remaining_candidate_slots = max(
+            0,
+            int(candidate_query_limit) - len(fresh_candidate_refs),
+        )
+        if remaining_candidate_slots > 0:
+            older_candidate_refs = (
+                candidate_base.filter(
+                    or_(
+                        BreakoutAlert.alerted_at < fresh_cutoff,
+                        BreakoutAlert.alerted_at.is_(None),
+                    )
+                )
+                .order_by(BreakoutAlert.alerted_at.desc(), BreakoutAlert.id.desc())
+                .with_entities(BreakoutAlert.id, BreakoutAlert.alerted_at)
+                .limit(remaining_candidate_slots)
+                .all()
+            )
+        else:
+            older_candidate_refs = []
+        candidate_refs = [*fresh_candidate_refs, *older_candidate_refs]
+        fresh_candidate_pool = len(fresh_candidate_refs)
+        fresh_candidate_pool_exact = len(fresh_candidate_refs) < candidate_query_limit
+    else:
+        candidate_refs = (
+            candidate_base.order_by(BreakoutAlert.id.asc())
+            .with_entities(BreakoutAlert.id, BreakoutAlert.alerted_at)
+            .limit(candidate_query_limit)
+            .all()
+        )
+        fresh_candidate_pool = len(candidate_refs)
+        fresh_candidate_pool_exact = len(candidate_refs) < candidate_query_limit
     if bool(fresh_fastlane.get("enabled")) and isinstance(fresh_cutoff, datetime):
         fresh_candidate_pool = sum(
             1
-            for candidate in candidate_rows
-            if candidate.alerted_at is not None and candidate.alerted_at >= fresh_cutoff
+            for _, alerted_at in candidate_refs
+            if alerted_at is not None and alerted_at >= fresh_cutoff
         )
         fresh_candidate_pool_exact = (
-            len(candidate_rows) < candidate_query_limit
-            or fresh_candidate_pool < len(candidate_rows)
+            len(candidate_refs) < candidate_query_limit
+            or fresh_candidate_pool < len(candidate_refs)
         )
-    else:
-        fresh_candidate_pool = len(candidate_rows)
-        fresh_candidate_pool_exact = len(candidate_rows) < candidate_query_limit
     effective_batch_limit, fresh_burst_meta = _fresh_candidate_burst_batch_size(
         base_limit=batch_limit,
         fresh_fastlane_state=fresh_fastlane,
         fresh_candidate_count=fresh_candidate_pool,
     )
-    candidate_pool_base = len(candidate_rows)
-    candidate_pool_exact = len(candidate_rows) < candidate_query_limit
-    candidates = candidate_rows[:effective_batch_limit]
+    candidate_pool_base = len(candidate_refs)
+    candidate_pool_exact = len(candidate_refs) < candidate_query_limit
+    candidate_ids = [int(row_id) for row_id, _ in candidate_refs[:effective_batch_limit]]
+    if candidate_ids:
+        selected_candidates = (
+            db.query(BreakoutAlert)
+            .filter(BreakoutAlert.id.in_(candidate_ids))
+            .all()
+        )
+        candidate_by_id = {int(candidate.id): candidate for candidate in selected_candidates}
+        candidates = [
+            candidate_by_id[candidate_id]
+            for candidate_id in candidate_ids
+            if candidate_id in candidate_by_id
+        ]
+    else:
+        candidates = []
     retry_pool = 0
     retry_candidates: list[BreakoutAlert] = []
     spare_slots = max(0, batch_limit - len(candidates))
@@ -2884,11 +2930,13 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
             )
             break
         alert_started = time.monotonic()
+        alert_id = int(alert.id)
+        alert_ticker = (alert.ticker or "").upper()
         # P0.2 — acquire advisory lock before the TOCTOU window. Without
         # this, two ticks (different scheduler replicas) can both pass the
         # audit-row check and both call place_market_order. The lock is
         # held until we explicitly unlock or the session closes.
-        if not _try_claim_alert(db, int(alert.id)):
+        if not _try_claim_alert(db, alert_id):
             _autotrader_tick_note(
                 out,
                 kind="unclaimed",
@@ -2897,7 +2945,8 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
             )
             _record_slowest_tick_alert(
                 out,
-                alert=alert,
+                alert_id=alert_id,
+                ticker=alert_ticker,
                 elapsed_seconds=time.monotonic() - alert_started,
             )
             continue
@@ -2908,7 +2957,7 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
             db.expire_all()
             is_synergy_retry = bool(getattr(alert, "_chili_synergy_retry", False))
             if (
-                breakout_alert_already_processed(db, int(alert.id))
+                breakout_alert_already_processed(db, alert_id)
                 and not is_synergy_retry
             ):
                 _autotrader_tick_note(
@@ -2922,7 +2971,7 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
             try:
                 _process_one_alert(db, uid, alert, out, rt)
             except Exception as e:
-                logger.exception("[autotrader] alert %s failed: %s", alert.id, e)
+                logger.exception("[autotrader] alert %s failed: %s", alert_id, e)
                 _audit(
                     db,
                     user_id=uid,
@@ -2941,11 +2990,12 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
             out["processed"] += 1
         finally:
             try:
-                _release_alert_claim(db, int(alert.id))
+                _release_alert_claim(db, alert_id)
             finally:
                 _record_slowest_tick_alert(
                     out,
-                    alert=alert,
+                    alert_id=alert_id,
+                    ticker=alert_ticker,
                     elapsed_seconds=time.monotonic() - alert_started,
                 )
 
