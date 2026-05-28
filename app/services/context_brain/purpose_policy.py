@@ -52,6 +52,7 @@ _PROJECT_AGENT_PURPOSES = frozenset({
 _REASONING_BACKGROUND_PURPOSES = frozenset({
     "reasoning_anticipate",
     "reasoning_evolve",
+    "reasoning_proactive",
     "reasoning_user_model",
     "reasoning_web_research",
 })

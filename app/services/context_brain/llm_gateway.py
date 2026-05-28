@@ -67,6 +67,7 @@ _GATEWAY_EXACT_CACHEABLE_PURPOSES = frozenset({
     "project_web_research",
     "reasoning_anticipate",
     "reasoning_evolve",
+    "reasoning_proactive",
     "reasoning_user_model",
     "reasoning_web_research",
     "trading_analyze",

@@ -256,6 +256,7 @@ def test_gateway_exact_cache_never_caches_high_stakes_passthrough(monkeypatch):
     [
         "reasoning_anticipate",
         "reasoning_evolve",
+        "reasoning_proactive",
         "reasoning_user_model",
         "reasoning_web_research",
     ],
@@ -492,7 +493,8 @@ def test_gateway_exact_cache_uses_web_research_code_default(monkeypatch):
     assert finalize.call_args_list[1].kwargs["premium_calls"] == 0
 
 
-def test_gateway_exact_cache_uses_reasoning_background_code_default(monkeypatch):
+@pytest.mark.parametrize("purpose", ["reasoning_anticipate", "reasoning_proactive"])
+def test_gateway_exact_cache_uses_reasoning_background_code_default(monkeypatch, purpose):
     class EmptyResult:
         def fetchone(self):
             return None
@@ -517,8 +519,8 @@ def test_gateway_exact_cache_uses_reasoning_background_code_default(monkeypatch)
     monkeypatch.setattr(oc, "chat", chat)
 
     messages = [{"role": "user", "content": "anticipate from stable model"}]
-    gateway_chat(messages, purpose="reasoning_anticipate", system_prompt="json only", db=EmptyDb())
-    gateway_chat(messages, purpose="reasoning_anticipate", system_prompt="json only", db=EmptyDb())
+    gateway_chat(messages, purpose=purpose, system_prompt="json only", db=EmptyDb())
+    gateway_chat(messages, purpose=purpose, system_prompt="json only", db=EmptyDb())
 
     assert chat.call_count == 1
     assert finalize.call_args_list[0].kwargs["cache_status"] == "gateway_cache_miss"
