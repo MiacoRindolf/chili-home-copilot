@@ -20,7 +20,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_UP
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import or_, text
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -4802,6 +4802,11 @@ def _robinhood_order_lookup_for_trade(
     return get_order_by_id(str(order_id or ""))
 
 
+def _is_robinhood_entry_order_sync_candidate(trade: Any) -> bool:
+    source = str(getattr(trade, "broker_source", "") or "").strip().lower()
+    return source in {"", "robinhood"}
+
+
 def _first_present_float(mapping: dict[str, Any], keys: tuple[str, ...]) -> float | None:
     for key in keys:
         value = mapping.get(key)
@@ -4940,6 +4945,7 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
         db.query(Trade)
         .filter(
             Trade.user_id == user_id,
+            or_(Trade.broker_source == "robinhood", Trade.broker_source.is_(None)),
             Trade.broker_order_id.isnot(None),
             Trade.status == "open",
         )
@@ -5101,6 +5107,8 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     for trade in open_with_order_id:
         try:
             if _is_option_trade_for_order_sync(trade):
+                continue
+            if not _is_robinhood_entry_order_sync_candidate(trade):
                 continue
             rh_order = get_order_by_id(trade.broker_order_id)
             if not rh_order:
