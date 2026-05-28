@@ -71,6 +71,7 @@ def _offline_passthrough_policy(purpose: str) -> PurposePolicy:
 _CODE_DEFAULTS: dict[str, PurposePolicy] = {
     "code_review": _offline_passthrough_policy("code_review"),
     "code_search": _offline_passthrough_policy("code_search"),
+    "project_playwright": _offline_passthrough_policy("project_playwright"),
     "project_web_research": _offline_passthrough_policy("project_web_research"),
     **{
         purpose: _offline_passthrough_policy(purpose)

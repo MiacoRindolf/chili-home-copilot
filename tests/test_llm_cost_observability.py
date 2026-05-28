@@ -306,6 +306,30 @@ def test_code_purpose_has_offline_code_default_when_db_seed_missing(purpose):
     assert db.calls == 1
 
 
+def test_project_playwright_has_offline_code_default_when_db_seed_missing():
+    class EmptyResult:
+        def fetchone(self):
+            return None
+
+    class EmptyDb:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, *_args, **_kwargs):
+            self.calls += 1
+            return EmptyResult()
+
+    db = EmptyDb()
+
+    policy = policy_mod.get_policy(db, "project_playwright")
+
+    assert policy.purpose == "project_playwright"
+    assert policy.routing_strategy == "passthrough"
+    assert policy.use_premium_synthesis is False
+    assert policy.high_stakes is False
+    assert db.calls == 1
+
+
 @pytest.mark.parametrize(
     "purpose",
     [
