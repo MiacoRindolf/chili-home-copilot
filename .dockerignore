@@ -1,7 +1,13 @@
 __pycache__/
 *.pyc
 .venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 .env
+.env.*
 data/
 .git/
 .gitignore
@@ -9,3 +15,31 @@ data/
 tests/
 *.plan.md
 .cursor/
+.claude/
+.codex/
+.vscode/
+
+# Local logs, certificates, and one-off operator artifacts should never be
+# baked into the backend image or sent over Docker's build socket.
+*.log
+*.out.log
+_pytest_*.txt
+pytest_*.txt
+p*_test*.txt
+after_d*_trading_risk.txt
+HARDCODED_MAGIC_NUMBERS_AUDIT.txt
+routes_dump.txt
+*.pem
+*.key
+mkcert.exe
+tmp/
+.tmp/
+_tmp*/
+
+# Frontend/mobile workspaces are mounted from the host for dev workflows; the
+# Python backend image does not need to carry their toolchains or build output.
+chili_mobile/
+node_modules/
+.dart_tool/
+build/
+dist/
