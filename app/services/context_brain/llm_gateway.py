@@ -63,8 +63,11 @@ _GATEWAY_EXACT_CACHEABLE_PURPOSES = frozenset({
     "reasoning_evolve",
     "reasoning_user_model",
     "reasoning_web_research",
+    "trading_analyze",
     "trading_pattern_mine",
     "trading_reflect",
+    "trading_reasoning",
+    "trading_smart_pick",
     "pattern_research_extract",
 })
 _GATEWAY_EXACT_CACHE_TTL_SEC = 600

@@ -565,6 +565,66 @@ def test_gateway_exact_cache_uses_trading_reflect_default_when_db_seed_missing(m
     assert finalize.call_args_list[1].kwargs["premium_calls"] == 0
 
 
+@pytest.mark.parametrize(
+    "purpose",
+    ["trading_analyze", "trading_reasoning", "trading_smart_pick"],
+)
+def test_gateway_exact_cache_uses_low_stakes_trading_defaults_when_db_seed_missing(
+    monkeypatch,
+    purpose,
+):
+    class EmptyResult:
+        def fetchone(self):
+            return None
+
+    class EmptyDb:
+        def execute(self, *_args, **_kwargs):
+            return EmptyResult()
+
+    chat = MagicMock(
+        return_value={
+            "reply": '{"verdict":"stable"}',
+            "model": "gpt-5.5",
+            "provider": "openai",
+            "tokens_used": 84,
+        }
+    )
+    finalize = MagicMock()
+    log_ids = iter([701, 702])
+
+    monkeypatch.setattr(
+        "app.services.context_brain.llm_gateway._write_gateway_log_start",
+        lambda *a, **k: next(log_ids),
+    )
+    monkeypatch.setattr("app.services.context_brain.llm_gateway._finalize_gateway_log", finalize)
+    monkeypatch.setattr(oc, "chat", chat)
+
+    messages = [{"role": "user", "content": "analyze the same stable market context"}]
+    first = gateway_chat(
+        messages,
+        purpose=purpose,
+        system_prompt="stable context snapshot",
+        user_message="same request",
+        user_id=99,
+        db=EmptyDb(),
+    )
+    second = gateway_chat(
+        messages,
+        purpose=purpose,
+        system_prompt="stable context snapshot",
+        user_message="same request",
+        user_id=99,
+        db=EmptyDb(),
+    )
+
+    assert first["reply"] == second["reply"] == '{"verdict":"stable"}'
+    assert chat.call_count == 1
+    assert finalize.call_args_list[0].kwargs["cache_status"] == "gateway_cache_miss"
+    assert finalize.call_args_list[1].kwargs["cache_status"] == "gateway_cache_hit"
+    assert finalize.call_args_list[1].kwargs["provider"] == "cache"
+    assert finalize.call_args_list[1].kwargs["premium_calls"] == 0
+
+
 def test_gateway_stream_logs_provider_and_estimated_cost(monkeypatch):
     finalize = MagicMock()
     monkeypatch.setattr(
