@@ -85,6 +85,7 @@ def _review_diff_with_llm(diff_text: str, repo_context: str, commit_info: Dict[s
         max_tokens=800,
         trace_id="code-reviewer",
         cacheable=True,
+        purpose="code_review",
     )
     if not text:
         return {"summary": "Review failed", "findings": [], "score": 5.0}
