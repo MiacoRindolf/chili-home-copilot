@@ -253,6 +253,7 @@ def _paper_return_pct(row: PaperTrade) -> float | None:
         realized = _realized_paper_return_pct(row)
         if realized is not None:
             return realized
+        return None
     pct = _safe_float(getattr(row, "pnl_pct", None))
     if pct is not None:
         return pct
@@ -270,6 +271,7 @@ def _live_return_pct(row: Trade) -> float | None:
         realized = _realized_trade_return_pct(row)
         if realized is not None:
             return realized
+        return None
     pnl = _safe_float(getattr(row, "pnl", None))
     entry = (
         _safe_float(getattr(row, "avg_fill_price", None))

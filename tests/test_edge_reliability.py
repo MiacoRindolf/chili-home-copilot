@@ -214,6 +214,72 @@ def test_edge_reliability_slices_all_asset_patterns_by_asset(db):
     assert by_asset["crypto"]["primary_symbol"] == "BTC-USD"
 
 
+def test_edge_reliability_excludes_ambiguous_option_paper_pct(db):
+    pat = _pattern(db, asset_class="option")
+    alert = _alert(db, pat, "OPT")
+    alert.asset_type = "option"
+    db.add(
+        PaperTrade(
+            scan_pattern_id=pat.id,
+            paper_shadow_of_alert_id=alert.id,
+            ticker="OPT",
+            direction="long",
+            entry_price=4.01,
+            stop_price=2.0,
+            target_price=8.0,
+            quantity=1.0,
+            status="closed",
+            entry_date=datetime.utcnow(),
+            exit_date=datetime.utcnow(),
+            exit_price=716.0,
+            pnl=None,
+            pnl_pct=17755.61,
+            signal_json={"asset_type": "options", "option_meta": {"strike": 700.0}},
+        )
+    )
+    db.commit()
+
+    row = compute_pattern_edge_reliability(db, pat.id, window_days=7)
+
+    assert row["closed_evidence_count"] == 0
+    assert row["paper_closed_count"] == 0
+    assert row["realized_ev_pct"] is None
+    assert row["paper_realized_ev_pct"] is None
+
+
+def test_edge_reliability_counts_option_paper_with_realized_pnl(db):
+    pat = _pattern(db, asset_class="option")
+    alert = _alert(db, pat, "OPT")
+    alert.asset_type = "option"
+    db.add(
+        PaperTrade(
+            scan_pattern_id=pat.id,
+            paper_shadow_of_alert_id=alert.id,
+            ticker="OPT",
+            direction="long",
+            entry_price=1.25,
+            stop_price=0.75,
+            target_price=2.0,
+            quantity=2.0,
+            status="closed",
+            entry_date=datetime.utcnow(),
+            exit_date=datetime.utcnow(),
+            exit_price=1.45,
+            pnl=40.0,
+            pnl_pct=1600.0,
+            signal_json={"asset_type": "options", "option_meta": {"strike": 500.0}},
+        )
+    )
+    db.commit()
+
+    row = compute_pattern_edge_reliability(db, pat.id, window_days=7)
+
+    assert row["closed_evidence_count"] == 1
+    assert row["paper_closed_count"] == 1
+    assert row["realized_ev_pct"] == pytest.approx(16.0)
+    assert row["paper_realized_ev_pct"] == pytest.approx(16.0)
+
+
 def test_edge_supply_prefers_recent_positive_edge_over_arbitrary_distinct_order(db):
     for idx in range(12):
         pat = _pattern(db, name=f"low value pattern {idx}")
