@@ -45,6 +45,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   bool _runsLoading = false;
 
   final TextEditingController _autopilotPromptCtrl = TextEditingController();
+  final ScrollController _autopilotChatScroll = ScrollController();
   List<Map<String, dynamic>> _codeRepos = [];
   int? _autonomyRepoId;
   List<Map<String, dynamic>> _autonomyRuns = [];
@@ -382,7 +383,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         _autonomyLoading = false;
         _autonomyError = null;
       });
-      await _refreshActiveAutonomyRun(silent: true);
+      await _refreshActiveAutonomyRun(silent: true, force: true);
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -392,10 +393,13 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     }
   }
 
-  Future<void> _refreshActiveAutonomyRun({bool silent = true}) async {
+  Future<void> _refreshActiveAutonomyRun({
+    bool silent = true,
+    bool force = false,
+  }) async {
     final runId = _activeAutonomyRun?['run_id']?.toString();
     if (runId == null || runId.isEmpty) return;
-    if (_autonomyTerminal(_activeAutonomyRun) && silent) return;
+    if (_autonomyTerminal(_activeAutonomyRun) && silent && !force) return;
     try {
       final run = await _api.getProjectAutonomyRun(runId);
       if (!mounted) return;
@@ -430,6 +434,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         _autopilotPromptCtrl.clear();
       });
       await _loadAutonomyRuns(silent: true);
+      await _refreshActiveAutonomyRun(silent: true, force: true);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Autopilot started: ${run['run_id']}')),
@@ -452,6 +457,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     try {
       final run = await _api.cancelProjectAutonomyRun(runId);
       if (mounted) setState(() => _activeAutonomyRun = run);
+      await _refreshActiveAutonomyRun(silent: true, force: true);
     } catch (e) {
       if (mounted) setState(() => _autonomyError = userVisibleNetworkError(e));
     } finally {
@@ -597,6 +603,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     _descCtrl.dispose();
     _sourceCtrl.dispose();
     _autopilotPromptCtrl.dispose();
+    _autopilotChatScroll.dispose();
     _pairEmailCtrl.dispose();
     _pairCodeCtrl.dispose();
     _pairLabelCtrl.dispose();
@@ -954,158 +961,747 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   }
 
   Widget _buildAutopilotTab() {
-    return RefreshIndicator(
-      onRefresh: () async {
-        await _loadCodeRepos();
-        await _loadAutonomyRuns();
-      },
-      child: ListView(
-        physics: const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.all(24),
-        children: [
-          if (_autonomyError != null)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 12),
-              child: Material(
-                color: Colors.red.shade50,
-                borderRadius: BorderRadius.circular(8),
-                child: Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Icon(Icons.error_outline,
-                          color: Colors.red.shade800, size: 20),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          _autonomyError!,
-                          style: TextStyle(
-                              color: Colors.red.shade900, fontSize: 13),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (constraints.maxWidth < 980) {
+          return _buildAutonomyStackedCockpit();
+        }
+        final rightWidth = constraints.maxWidth >= 1320 ? 380.0 : 330.0;
+        return Column(
+          children: [
+            if (_autonomyError != null) _buildAutonomyErrorBanner(),
+            Expanded(
+              child: Row(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Row(
-                    children: [
-                      Icon(Icons.rocket_launch_outlined,
-                          color: Theme.of(context).colorScheme.primary),
-                      const SizedBox(width: 8),
-                      Text('Project Autopilot',
-                          style: Theme.of(context).textTheme.titleMedium),
-                      const Spacer(),
-                      IconButton(
-                        tooltip: 'Refresh',
-                        onPressed: _autonomyBusy
-                            ? null
-                            : () async {
-                                await _loadCodeRepos();
-                                await _loadAutonomyRuns();
-                              },
-                        icon: const Icon(Icons.refresh),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  DropdownButtonFormField<int>(
-                    key: ValueKey<int?>(_autonomyRepoId),
-                    initialValue: _autonomyRepoId,
-                    decoration: const InputDecoration(
-                      labelText: 'Local repo',
-                      border: OutlineInputBorder(),
-                    ),
-                    items: [
-                      for (final repo in _codeRepos)
-                        if (_asInt(repo['id']) != null)
-                          DropdownMenuItem<int>(
-                            value: _asInt(repo['id']),
-                            child: Text(
-                              '${repo['name']?.toString() ?? 'repo ${repo['id']}'}'
-                              '${repo['reachable_in_current_runtime'] == true ? '' : ' (not reachable here)'}',
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                    ],
-                    onChanged: _autonomyBusy
-                        ? null
-                        : (value) => setState(() => _autonomyRepoId = value),
-                  ),
-                  if (_codeRepos.isEmpty) ...[
-                    const SizedBox(height: 8),
-                    Text(
-                      'No registered local repos are visible to this desktop backend.',
-                      style: TextStyle(
-                          color: Colors.orange.shade900, fontSize: 13),
-                    ),
-                  ],
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: _autopilotPromptCtrl,
-                    minLines: 3,
-                    maxLines: 8,
-                    decoration: const InputDecoration(
-                      labelText: 'Prompt',
-                      alignLabelWithHint: true,
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  Align(
-                    alignment: Alignment.centerRight,
-                    child: FilledButton.icon(
-                      onPressed: _autonomyBusy || _codeRepos.isEmpty
-                          ? null
-                          : _startAutopilot,
-                      icon: _autonomyBusy
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.play_arrow),
-                      label: const Text('Run Autopilot'),
-                    ),
+                  SizedBox(width: 280, child: _buildAutonomyThreadSidebar()),
+                  VerticalDivider(width: 1, color: Colors.grey.shade300),
+                  Expanded(child: _buildAutonomyConversationPane()),
+                  VerticalDivider(width: 1, color: Colors.grey.shade300),
+                  SizedBox(
+                    width: rightWidth,
+                    child: _buildAutonomyTrackingSidebar(),
                   ),
                 ],
               ),
             ),
-          ),
-          const SizedBox(height: 16),
-          if (_autonomyLoading)
-            const Center(
-              child: Padding(
-                padding: EdgeInsets.all(24),
-                child: CircularProgressIndicator(),
-              ),
-            )
-          else if (_activeAutonomyRun != null)
-            _buildAutonomyActiveRun(_activeAutonomyRun!)
-          else
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 24),
-              child: Center(
-                child: Text('No Project Autopilot runs yet',
-                    style: TextStyle(color: Colors.grey.shade700)),
-              ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildAutonomyStackedCockpit() {
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        if (_autonomyError != null) _buildAutonomyErrorBanner(compact: true),
+        SizedBox(height: 360, child: _buildAutonomyConversationPane()),
+        const SizedBox(height: 12),
+        SizedBox(height: 260, child: _buildAutonomyThreadSidebar()),
+        const SizedBox(height: 12),
+        if (_activeAutonomyRun != null)
+          _buildAutonomyActiveRun(_activeAutonomyRun!)
+        else
+          _emptyAutonomyState('No Project Autopilot run selected'),
+      ],
+    );
+  }
+
+  Widget _buildAutonomyErrorBanner({bool compact = false}) {
+    return Container(
+      width: double.infinity,
+      padding: EdgeInsets.all(compact ? 10 : 12),
+      color: Colors.red.shade50,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.error_outline, color: Colors.red.shade800, size: 20),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              _autonomyError!,
+              style: TextStyle(color: Colors.red.shade900, fontSize: 13),
             ),
-          if (_autonomyRuns.isNotEmpty) ...[
-            const SizedBox(height: 16),
-            Text('Recent runs', style: Theme.of(context).textTheme.titleMedium),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAutonomyThreadSidebar() {
+    return Container(
+      color: Colors.grey.shade50,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 14, 10, 10),
+            child: Row(
+              children: [
+                Icon(Icons.forum_outlined,
+                    color: Theme.of(context).colorScheme.primary, size: 20),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text('Autopilot',
+                      style: Theme.of(context).textTheme.titleMedium),
+                ),
+                IconButton(
+                  tooltip: 'Refresh runs',
+                  onPressed: _autonomyBusy
+                      ? null
+                      : () async {
+                          await _loadCodeRepos();
+                          await _loadAutonomyRuns();
+                        },
+                  icon: const Icon(Icons.refresh, size: 20),
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 0, 14, 12),
+            child: FilledButton.icon(
+              onPressed: _autonomyBusy
+                  ? null
+                  : () {
+                      _autopilotPromptCtrl.clear();
+                      setState(() => _activeAutonomyRun = null);
+                    },
+              icon: const Icon(Icons.add, size: 18),
+              label: const Text('New run'),
+            ),
+          ),
+          Expanded(
+            child: _autonomyLoading
+                ? const Center(child: CircularProgressIndicator())
+                : _autonomyRuns.isEmpty
+                    ? _emptyAutonomyState('No run history yet')
+                    : ListView.builder(
+                        padding: const EdgeInsets.fromLTRB(8, 0, 8, 12),
+                        itemCount: _autonomyRuns.length,
+                        itemBuilder: (context, index) =>
+                            _buildAutonomyThreadTile(_autonomyRuns[index]),
+                      ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAutonomyThreadTile(Map<String, dynamic> run) {
+    final runId = run['run_id']?.toString() ?? '';
+    final status = run['status']?.toString() ?? 'unknown';
+    final stage = run['current_stage']?.toString() ?? '';
+    final prompt = run['prompt']?.toString() ?? '';
+    final selected = _activeAutonomyRun?['run_id']?.toString() == runId;
+    final color = _autonomyStatusColor(status);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Material(
+        color: selected ? Colors.indigo.shade50 : Colors.transparent,
+        borderRadius: BorderRadius.circular(8),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(8),
+          onTap: () {
+            setState(() => _activeAutonomyRun = run);
+            unawaited(_refreshActiveAutonomyRun(silent: false, force: true));
+          },
+          child: Padding(
+            padding: const EdgeInsets.all(10),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(_autonomyStatusIcon(status), color: color, size: 18),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        runId.isEmpty ? 'Autopilot run' : runId,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w700,
+                          fontSize: 12,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  prompt.isEmpty ? '(no prompt recorded)' : prompt,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: Colors.grey.shade800, fontSize: 12),
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 4,
+                  children: [
+                    _miniChip(status, color.withValues(alpha: 0.12), color),
+                    if (stage.isNotEmpty)
+                      _miniChip(stage, Colors.blueGrey.shade50,
+                          Colors.blueGrey.shade800),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  _shortStamp(run['updated_at'] ?? run['created_at']),
+                  style: TextStyle(color: Colors.grey.shade600, fontSize: 11),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAutonomyConversationPane() {
+    final run = _activeAutonomyRun;
+    return Container(
+      color: Colors.white,
+      child: Column(
+        children: [
+          _buildAutonomyConversationHeader(run),
+          Expanded(
+            child: run == null
+                ? _emptyAutonomyState('Start or select an Autopilot run')
+                : _buildAutonomyChatTimeline(run),
+          ),
+          _buildAutonomyComposer(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAutonomyConversationHeader(Map<String, dynamic>? run) {
+    final status = run?['status']?.toString() ?? 'ready';
+    final stage = run?['current_stage']?.toString() ?? '';
+    final merge = run?['merge_status']?.toString() ?? '';
+    final color = _autonomyStatusColor(status);
+    final terminal = _autonomyTerminal(run);
+    final branch = run?['integration_branch']?.toString() ?? '';
+    final canMerge = terminal &&
+        branch.isNotEmpty &&
+        status != 'merged' &&
+        merge != 'merged';
+    return Container(
+      padding: const EdgeInsets.fromLTRB(18, 12, 14, 12),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: Colors.grey.shade300)),
+      ),
+      child: Row(
+        children: [
+          Icon(_autonomyStatusIcon(status), color: color, size: 22),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  run?['run_id']?.toString().isNotEmpty == true
+                      ? run!['run_id'].toString()
+                      : 'Project Autopilot',
+                  style: Theme.of(context).textTheme.titleMedium,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: 4),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 4,
+                  children: [
+                    _miniChip(status, color.withValues(alpha: 0.12), color),
+                    if (stage.isNotEmpty)
+                      _miniChip(
+                          stage, Colors.indigo.shade50, Colors.indigo.shade800),
+                    if (merge.isNotEmpty)
+                      _miniChip('merge: $merge', Colors.blueGrey.shade50,
+                          Colors.blueGrey.shade800),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            tooltip: 'Refresh',
+            onPressed: _autonomyBusy || run == null
+                ? null
+                : () => _refreshActiveAutonomyRun(
+                      silent: false,
+                      force: true,
+                    ),
+            icon: const Icon(Icons.refresh),
+          ),
+          IconButton(
+            tooltip: 'Cancel run',
+            onPressed: _autonomyBusy || run == null || terminal
+                ? null
+                : _cancelAutopilot,
+            icon: const Icon(Icons.stop_circle_outlined),
+          ),
+          IconButton(
+            tooltip: 'Merge validated branch',
+            onPressed: _autonomyBusy || !canMerge ? null : _mergeAutopilot,
+            icon: const Icon(Icons.merge_type),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAutonomyChatTimeline(Map<String, dynamic> run) {
+    final prompt = run['prompt']?.toString() ?? '';
+    final plan = _asMap(run['plan']);
+    final steps = _asMapList(run['steps']);
+    final artifacts = _asMapList(run['artifacts']);
+    final validation = _asMapList(run['validation']);
+    final error = run['error_message']?.toString() ?? '';
+    final merge = run['merge_message']?.toString() ?? '';
+    final widgets = <Widget>[
+      if (prompt.isNotEmpty)
+        _buildChatBubble(
+          icon: Icons.person_outline,
+          title: 'Operator',
+          body: prompt,
+          alignRight: true,
+          color: Colors.indigo.shade700,
+          background: Colors.indigo.shade50,
+        ),
+      ...steps.map(_buildAutonomyStepBubble),
+      if (plan.isNotEmpty) _buildAutonomyPlanBubble(plan),
+      ...artifacts
+          .where((artifact) => {'model_call', 'diff', 'diff_rejected', 'commit'}
+              .contains(artifact['artifact_type']?.toString()))
+          .map(_buildAutonomyArtifactBubble),
+      if (validation.isNotEmpty) _buildAutonomyValidationBubble(validation),
+      if (merge.isNotEmpty)
+        _buildChatBubble(
+          icon: Icons.merge_type,
+          title: 'Merge gate',
+          body: merge,
+          color: Colors.blueGrey.shade700,
+          background: Colors.blueGrey.shade50,
+        ),
+      if (error.isNotEmpty)
+        _buildChatBubble(
+          icon: Icons.warning_amber_outlined,
+          title: 'Blocked reason',
+          body: error,
+          color: Colors.orange.shade900,
+          background: Colors.orange.shade50,
+        ),
+    ];
+    return ListView(
+      controller: _autopilotChatScroll,
+      padding: const EdgeInsets.fromLTRB(18, 16, 18, 24),
+      children: widgets.isEmpty
+          ? [_emptyAutonomyState('Waiting for run events')]
+          : widgets,
+    );
+  }
+
+  Widget _buildAutonomyStepBubble(Map<String, dynamic> step) {
+    final stage = step['stage']?.toString() ?? '';
+    final status = step['status']?.toString() ?? '';
+    final title = step['title']?.toString() ?? stage;
+    final detail = _detailPreview(step['detail']);
+    final color = _autonomyStatusColor(status);
+    return _buildChatBubble(
+      icon: _autonomyStageIcon(stage),
+      title: title,
+      body: detail,
+      meta: _shortStamp(step['created_at']),
+      chips: [
+        if (stage.isNotEmpty)
+          _miniChip(stage, Colors.blueGrey.shade50, Colors.blueGrey.shade800),
+        if (status.isNotEmpty)
+          _miniChip(status, color.withValues(alpha: 0.12), color),
+      ],
+      color: color,
+      background: Colors.grey.shade50,
+    );
+  }
+
+  Widget _buildAutonomyPlanBubble(Map<String, dynamic> plan) {
+    final analysis = plan['analysis']?.toString() ?? '';
+    final notes = plan['notes']?.toString() ?? '';
+    final files = _asMapList(plan['files'])
+        .map((file) => file['path']?.toString() ?? '')
+        .where((path) => path.isNotEmpty)
+        .toList();
+    return _buildChatBubble(
+      icon: Icons.account_tree_outlined,
+      title: 'Architect plan',
+      body: [analysis, if (notes.isNotEmpty) notes].join('\n\n').trim(),
+      chips: files
+          .map((file) =>
+              _miniChip(file, Colors.teal.shade50, Colors.teal.shade900))
+          .toList(),
+      color: Colors.teal.shade900,
+      background: Colors.teal.shade50,
+    );
+  }
+
+  Widget _buildAutonomyArtifactBubble(Map<String, dynamic> artifact) {
+    final type = artifact['artifact_type']?.toString() ?? 'artifact';
+    final name = artifact['name']?.toString() ?? type;
+    final json = _asMap(artifact['content_json']);
+    final ok = json['ok'];
+    final body = artifact['content']?.toString().trim().isNotEmpty == true
+        ? artifact['content'].toString()
+        : _detailPreview(json);
+    final color = ok == false ? Colors.orange.shade900 : Colors.blue.shade800;
+    return _buildChatBubble(
+      icon: _autonomyArtifactIcon(type),
+      title: name,
+      body: body,
+      meta: _shortStamp(artifact['created_at']),
+      chips: [
+        _miniChip(type, Colors.blueGrey.shade50, Colors.blueGrey.shade800),
+        if (ok != null)
+          _miniChip(
+              ok == true ? 'ok' : 'rejected',
+              ok == true ? Colors.green.shade50 : Colors.orange.shade50,
+              ok == true ? Colors.green.shade800 : Colors.orange.shade900),
+      ],
+      color: color,
+      background: Colors.white,
+    );
+  }
+
+  Widget _buildAutonomyValidationBubble(List<Map<String, dynamic>> validation) {
+    final passed = validation.where((item) {
+      final code = item['exit_code'];
+      return code == 0 || code == '0' || item['passed'] == true;
+    }).length;
+    final failed = validation.length - passed;
+    final body = validation
+        .map((item) =>
+            '${item['step_key'] ?? 'command'}: exit ${item['exit_code'] ?? '-'}')
+        .join('\n');
+    return _buildChatBubble(
+      icon: failed == 0 ? Icons.verified_outlined : Icons.report_outlined,
+      title: 'Validation',
+      body: body,
+      chips: [
+        _miniChip(
+            '$passed passed', Colors.green.shade50, Colors.green.shade800),
+        if (failed > 0)
+          _miniChip(
+              '$failed failed', Colors.orange.shade50, Colors.orange.shade900),
+      ],
+      color: failed == 0 ? Colors.green.shade800 : Colors.orange.shade900,
+      background: failed == 0 ? Colors.green.shade50 : Colors.orange.shade50,
+    );
+  }
+
+  Widget _buildChatBubble({
+    required IconData icon,
+    required String title,
+    required Color color,
+    required Color background,
+    String body = '',
+    String meta = '',
+    List<Widget> chips = const [],
+    bool alignRight = false,
+  }) {
+    final content = ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 720),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: background,
+          border: Border.all(color: color.withValues(alpha: 0.18)),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(icon, color: color, size: 18),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(title,
+                      style: const TextStyle(fontWeight: FontWeight.w700),
+                      overflow: TextOverflow.ellipsis),
+                ),
+                if (meta.isNotEmpty)
+                  Text(meta,
+                      style:
+                          TextStyle(color: Colors.grey.shade600, fontSize: 11)),
+              ],
+            ),
+            if (body.trim().isNotEmpty) ...[
+              const SizedBox(height: 8),
+              SelectableText(
+                body.length > 1400 ? '${body.substring(0, 1400)}...' : body,
+                style: TextStyle(
+                  color: Colors.grey.shade900,
+                  fontSize: 13,
+                  height: 1.35,
+                ),
+              ),
+            ],
+            if (chips.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Wrap(spacing: 6, runSpacing: 6, children: chips),
+            ],
+          ],
+        ),
+      ),
+    );
+    return Align(
+      alignment: alignRight ? Alignment.centerRight : Alignment.centerLeft,
+      child: content,
+    );
+  }
+
+  Widget _buildAutonomyComposer() {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(18, 12, 18, 14),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade50,
+        border: Border(top: BorderSide(color: Colors.grey.shade300)),
+      ),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              Expanded(child: _buildAutonomyRepoPicker()),
+              const SizedBox(width: 10),
+              IconButton(
+                tooltip: 'Refresh repos and runs',
+                onPressed: _autonomyBusy
+                    ? null
+                    : () async {
+                        await _loadCodeRepos();
+                        await _loadAutonomyRuns();
+                      },
+                icon: const Icon(Icons.sync),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _autopilotPromptCtrl,
+                  minLines: 2,
+                  maxLines: 5,
+                  decoration: const InputDecoration(
+                    labelText: 'Ask Project Autopilot to change this repo',
+                    alignLabelWithHint: true,
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              SizedBox(
+                height: 48,
+                child: FilledButton.icon(
+                  onPressed: _autonomyBusy || _codeRepos.isEmpty
+                      ? null
+                      : _startAutopilot,
+                  icon: _autonomyBusy
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.send),
+                  label: const Text('Run'),
+                ),
+              ),
+            ],
+          ),
+          if (_codeRepos.isEmpty) ...[
             const SizedBox(height: 8),
-            ..._autonomyRuns.map(_buildAutonomyRecentRun),
+            Text(
+              'No registered local repos are visible to this desktop backend.',
+              style: TextStyle(color: Colors.orange.shade900, fontSize: 13),
+            ),
           ],
         ],
       ),
     );
+  }
+
+  Widget _buildAutonomyRepoPicker() {
+    return DropdownButtonFormField<int>(
+      key: ValueKey<int?>(_autonomyRepoId),
+      initialValue: _autonomyRepoId,
+      decoration: const InputDecoration(
+        labelText: 'Local repo',
+        border: OutlineInputBorder(),
+        isDense: true,
+      ),
+      items: [
+        for (final repo in _codeRepos)
+          if (_asInt(repo['id']) != null)
+            DropdownMenuItem<int>(
+              value: _asInt(repo['id']),
+              child: Text(
+                '${repo['name']?.toString() ?? 'repo ${repo['id']}'}'
+                '${repo['reachable_in_current_runtime'] == true ? '' : ' (not reachable here)'}',
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+      ],
+      onChanged: _autonomyBusy
+          ? null
+          : (value) => setState(() => _autonomyRepoId = value),
+    );
+  }
+
+  Widget _buildAutonomyTrackingSidebar() {
+    final run = _activeAutonomyRun;
+    if (run == null) {
+      return Container(
+        color: Colors.grey.shade50,
+        child: _emptyAutonomyState('Tracking details appear here'),
+      );
+    }
+    final plan = _asMap(run['plan']);
+    final agents = _asMapList(run['agents']);
+    final files = _asStringList(run['files']);
+    final validation = _asMapList(run['validation']);
+    final learning = _asMap(run['learning']);
+    final branch = run['integration_branch']?.toString() ?? '';
+    final worktree = run['worktree_path']?.toString() ?? '';
+    final mergeMessage = run['merge_message']?.toString() ?? '';
+    final errorMessage = run['error_message']?.toString() ?? '';
+    return Container(
+      color: Colors.grey.shade50,
+      child: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          Text('Tracking', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              _miniChip(
+                  run['status']?.toString() ?? 'unknown',
+                  _autonomyStatusColor(run['status']?.toString() ?? '')
+                      .withValues(alpha: 0.12),
+                  _autonomyStatusColor(run['status']?.toString() ?? '')),
+              if (run['current_stage'] != null)
+                _miniChip('${run['current_stage']}', Colors.indigo.shade50,
+                    Colors.indigo.shade800),
+              if (run['merge_status'] != null)
+                _miniChip('merge: ${run['merge_status']}',
+                    Colors.blueGrey.shade50, Colors.blueGrey.shade800),
+            ],
+          ),
+          const SizedBox(height: 12),
+          if (branch.isNotEmpty) _kvSelectable('Branch', branch),
+          if (worktree.isNotEmpty) _kvSelectable('Worktree', worktree),
+          if (mergeMessage.isNotEmpty) _kvSelectable('Merge', mergeMessage),
+          if (errorMessage.isNotEmpty) _kvSelectable('Blocked', errorMessage),
+          const Divider(height: 28),
+          _buildAutonomyPlan(plan, files),
+          const Divider(height: 28),
+          _buildAutonomyAgents(agents),
+          const Divider(height: 28),
+          _buildAutonomyValidation(validation),
+          const Divider(height: 28),
+          _buildAutonomyLearning(learning),
+        ],
+      ),
+    );
+  }
+
+  Widget _emptyAutonomyState(String label) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Text(label, style: TextStyle(color: Colors.grey.shade700)),
+      ),
+    );
+  }
+
+  String _detailPreview(dynamic detail) {
+    if (detail == null) return '';
+    if (detail is Map && detail.isEmpty) return '';
+    if (detail is List && detail.isEmpty) return '';
+    if (detail is String) return detail;
+    try {
+      final text = const JsonEncoder.withIndent('  ').convert(detail);
+      return text.length > 900 ? '${text.substring(0, 900)}...' : text;
+    } catch (_) {
+      return detail.toString();
+    }
+  }
+
+  IconData _autonomyStatusIcon(String status) {
+    switch (status) {
+      case 'merged':
+      case 'completed':
+        return Icons.check_circle_outline;
+      case 'blocked':
+        return Icons.pause_circle_outline;
+      case 'failed':
+      case 'cancelled':
+        return Icons.error_outline;
+      case 'validating':
+        return Icons.fact_check_outlined;
+      case 'merging':
+        return Icons.merge_type;
+      case 'running':
+        return Icons.autorenew;
+      default:
+        return Icons.radio_button_unchecked;
+    }
+  }
+
+  IconData _autonomyStageIcon(String stage) {
+    switch (stage) {
+      case 'classify':
+        return Icons.manage_search;
+      case 'repo_scan':
+        return Icons.folder_open;
+      case 'plan':
+        return Icons.account_tree_outlined;
+      case 'assign_roles':
+        return Icons.groups_outlined;
+      case 'implement':
+        return Icons.code;
+      case 'integrate':
+        return Icons.call_merge;
+      case 'validate':
+        return Icons.fact_check_outlined;
+      case 'repair':
+        return Icons.build_outlined;
+      case 'merge':
+        return Icons.merge_type;
+      case 'learn':
+        return Icons.school_outlined;
+      default:
+        return Icons.circle_outlined;
+    }
+  }
+
+  IconData _autonomyArtifactIcon(String type) {
+    switch (type) {
+      case 'model_call':
+        return Icons.memory;
+      case 'diff':
+        return Icons.difference_outlined;
+      case 'diff_rejected':
+        return Icons.warning_amber_outlined;
+      case 'commit':
+        return Icons.commit;
+      default:
+        return Icons.inventory_2_outlined;
+    }
   }
 
   Widget _buildAutonomyActiveRun(Map<String, dynamic> run) {
@@ -1436,41 +2032,6 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
             );
           }),
       ],
-    );
-  }
-
-  Widget _buildAutonomyRecentRun(Map<String, dynamic> run) {
-    final runId = run['run_id']?.toString() ?? '';
-    final status = run['status']?.toString() ?? 'unknown';
-    final color = _autonomyStatusColor(status);
-    final selected = _activeAutonomyRun?['run_id']?.toString() == runId;
-    final prompt = run['prompt']?.toString() ?? '';
-    return Card(
-      margin: const EdgeInsets.only(bottom: 6),
-      color: selected ? Colors.indigo.shade50 : null,
-      child: ListTile(
-        dense: true,
-        leading: Icon(Icons.memory, color: color),
-        title: Row(
-          children: [
-            Expanded(
-              child: Text(runId, overflow: TextOverflow.ellipsis),
-            ),
-            _miniChip(status, color.withValues(alpha: 0.12), color),
-          ],
-        ),
-        subtitle: Text(
-          prompt,
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
-        ),
-        trailing: Text(_shortStamp(run['created_at']),
-            style: TextStyle(color: Colors.grey.shade600, fontSize: 11)),
-        onTap: () {
-          setState(() => _activeAutonomyRun = run);
-          unawaited(_refreshActiveAutonomyRun(silent: false));
-        },
-      ),
     );
   }
 
