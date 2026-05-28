@@ -80,6 +80,21 @@ _WALK_FORWARD_MIN_TICKERS = 2
 # which empirically matches operator expectations for "works across regimes".
 _WALK_FORWARD_MIN_TICKER_PASS_FRACTION = 0.5
 
+_ACTIONABLE_PATTERN_SIGNAL_RE = re.compile(
+    r"\b("
+    r"breakout|break\s+out|squeeze|bollinger|bb\s+squeeze|"
+    r"rsi|ema|sma|vwap|macd|adx|relative\s+volume|rel\s+vol|rvol|"
+    r"narrow\s+range|nr\s*[47]|vcp|resistance|support|retest|"
+    r"pullback|momentum|trend|volume\s+(?:surge|spike|expansion)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_PATTERN_EXTRACT_SYSTEM_PROMPT = (
+    "You are a precise technical analyst and pattern extraction engine. "
+    "You convert qualitative trading knowledge into quantitative rule sets."
+)
+
 logger = logging.getLogger(__name__)
 
 # ── Search topics rotated across runs ──────────────────────────────────
@@ -301,6 +316,10 @@ def _extract_patterns_from_content(
     existing_names: set[str],
 ) -> list[dict[str, Any]]:
     """Use LLM to extract tradable pattern definitions from web content."""
+    if not _content_has_actionable_pattern_signal(content):
+        logger.debug("[web_research] Skipping LLM extract: no actionable pattern signal")
+        return []
+
     existing_list = ", ".join(list(existing_names)[:15]) if existing_names else "(none)"
 
     prompt = (
@@ -339,6 +358,8 @@ def _extract_patterns_from_content(
         "- Respond with ONLY the JSON array, no other text"
     )
 
+    prompt = _build_pattern_extract_prompt(content, existing_names)
+
     try:
         response = call_llm(
             messages=[{"role": "user", "content": prompt}],
@@ -346,10 +367,7 @@ def _extract_patterns_from_content(
             trace_id="web_pattern_extract",
             cacheable=True,
             purpose="pattern_research_extract",
-            system_prompt=(
-                "You are a precise technical analyst and pattern extraction engine. "
-                "You convert qualitative trading knowledge into quantitative rule sets."
-            ),
+            system_prompt=_PATTERN_EXTRACT_SYSTEM_PROMPT,
         )
 
         if not response:
@@ -390,6 +408,55 @@ def _extract_patterns_from_content(
     except Exception as e:
         logger.warning("[web_research] Pattern extraction failed: %s", e)
         return []
+
+
+def _content_has_actionable_pattern_signal(content: str) -> bool:
+    """Cheap guard before spending tokens on web content extraction."""
+    text = (content or "").strip()
+    if not text:
+        return False
+    return bool(_ACTIONABLE_PATTERN_SIGNAL_RE.search(text))
+
+
+def _build_pattern_extract_prompt(content: str, existing_names: set[str]) -> str:
+    """Build a prompt with stable instructions before variable web content."""
+    existing_list = ", ".join(sorted(existing_names)[:15]) if existing_names else "(none)"
+    return (
+        "You are a quantitative trading analyst. Extract DISTINCT, actionable "
+        "breakout/technical patterns from web content.\n\n"
+        "For each pattern found, define it as a structured JSON rule set that a "
+        "scanner can evaluate mechanically.\n\n"
+        "## Available Indicators for conditions:\n"
+        "rsi_14, ema_20, ema_50, ema_100, price, bb_squeeze, adx, rel_vol, "
+        "macd_hist, resistance_retests, dist_to_resistance_pct, narrow_range, "
+        "vcp_count, vwap_reclaim\n\n"
+        "## Available operators: >, >=, <, <=, ==, between, any_of\n"
+        "For price vs indicator comparisons, use 'ref' key pointing to indicator name.\n\n"
+        "## Output format - respond ONLY with a JSON array:\n"
+        "[\n"
+        "  {\n"
+        '    "name": "Short unique pattern name",\n'
+        '    "description": "1-2 sentence description of when/why this pattern works",\n'
+        '    "asset_class": "all" or "stocks" or "crypto",\n'
+        '    "conditions": [\n'
+        '      {"indicator": "rsi_14", "op": ">", "value": 50},\n'
+        '      {"indicator": "price", "op": ">", "ref": "ema_20"}\n'
+        "    ],\n"
+        '    "score_boost": 1.5,\n'
+        '    "min_base_score": 4.0\n'
+        "  }\n"
+        "]\n\n"
+        "RULES:\n"
+        "- Only extract patterns with clear, measurable entry conditions\n"
+        "- Skip vague or subjective patterns that can't be coded\n"
+        "- Maximum 3 patterns per response\n"
+        "- Each pattern must have at least 2 conditions\n"
+        "- Return an empty array [] if nothing new/actionable is found\n"
+        "- Respond with ONLY the JSON array, no other text\n\n"
+        "## Variable Inputs\n"
+        f"Already Known Patterns (DO NOT duplicate these):\n{existing_list}\n\n"
+        f"Web Content:\n{(content or '')[:6000]}"
+    )
 
 
 def _walk_forward_verdict_for_pattern(
