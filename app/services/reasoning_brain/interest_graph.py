@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections import Counter
 from datetime import datetime
 from typing import Iterable, Optional
@@ -22,43 +23,57 @@ def _bump_interest(
     source: str,
     related_topics: Optional[list[str]] = None,
 ) -> None:
-    topic = topic.strip()
-    if not topic:
+    _bump_interests(db, user_id, [(topic, category, weight_delta, source, related_topics)])
+
+
+def _bump_interests(
+    db: Session,
+    user_id: int,
+    updates: Iterable[tuple[str, str, float, str, Optional[list[str]]]],
+) -> None:
+    normalized = [
+        (topic.strip(), category, weight_delta, source, related_topics)
+        for topic, category, weight_delta, source, related_topics in updates
+        if topic.strip()
+    ]
+    if not normalized:
         return
 
-    row = (
+    topics = sorted({topic for topic, *_rest in normalized})
+    rows = (
         db.query(ReasoningInterest)
         .filter(
             ReasoningInterest.user_id == user_id,
-            ReasoningInterest.topic == topic,
+            ReasoningInterest.topic.in_(topics),
         )
-        .first()
+        .all()
     )
+    existing_by_topic = {row.topic: row for row in rows}
     now = datetime.utcnow()
-    if row:
-        row.weight = max(0.0, (row.weight or 0.0) + weight_delta)
-        row.category = category or row.category
-        row.source = source or row.source
-        row.last_seen = now
-        if related_topics:
-            import json as _json
 
-            row.related_topics = _json.dumps(related_topics)
-    else:
-        import json as _json
-
-        row = ReasoningInterest(
-            user_id=user_id,
-            topic=topic,
-            category=category,
-            weight=max(0.0, weight_delta),
-            source=source,
-            related_topics=_json.dumps(related_topics or []),
-            last_seen=now,
-            created_at=now,
-            active=True,
-        )
-        db.add(row)
+    for topic, category, weight_delta, source, related_topics in normalized:
+        row = existing_by_topic.get(topic)
+        if row:
+            row.weight = max(0.0, (row.weight or 0.0) + weight_delta)
+            row.category = category or row.category
+            row.source = source or row.source
+            row.last_seen = now
+            if related_topics:
+                row.related_topics = json.dumps(related_topics)
+        else:
+            row = ReasoningInterest(
+                user_id=user_id,
+                topic=topic,
+                category=category,
+                weight=max(0.0, weight_delta),
+                source=source,
+                related_topics=json.dumps(related_topics or []),
+                last_seen=now,
+                created_at=now,
+                active=True,
+            )
+            existing_by_topic[topic] = row
+            db.add(row)
 
 
 def rebuild_interest_graph(db: Session, user_id: int) -> None:
@@ -90,15 +105,10 @@ def rebuild_interest_graph(db: Session, user_id: int) -> None:
             if token.startswith(("http://", "https://")):
                 continue
             words[token] += 1
-    for word, count in words.most_common(40):
-        _bump_interest(
-            db,
-            user_id=user_id,
-            topic=word,
-            category="explicit",
-            weight_delta=0.5 + 0.2 * count,
-            source="chat",
-        )
+    updates: list[tuple[str, str, float, str, Optional[list[str]]]] = [
+        (word, "explicit", 0.5 + 0.2 * count, "chat", None)
+        for word, count in words.most_common(40)
+    ]
 
     # Trading-derived topics (tickers)
     trades: Iterable[Trade] = (
@@ -112,15 +122,11 @@ def rebuild_interest_graph(db: Session, user_id: int) -> None:
     for t in trades:
         if t.ticker:
             ticker_counts[t.ticker.upper()] += 1
-    for ticker, count in ticker_counts.most_common(50):
-        _bump_interest(
-            db,
-            user_id=user_id,
-            topic=ticker,
-            category="inferred_trading",
-            weight_delta=1.0 + 0.3 * count,
-            source="trading",
-        )
+    updates.extend(
+        (ticker, "inferred_trading", 1.0 + 0.3 * count, "trading", None)
+        for ticker, count in ticker_counts.most_common(50)
+    )
+    _bump_interests(db, user_id, updates)
 
     db.commit()
 
@@ -145,4 +151,3 @@ def get_top_interests(db: Session, user_id: int, limit: int = 20) -> list[dict]:
             }
         )
     return result
-
