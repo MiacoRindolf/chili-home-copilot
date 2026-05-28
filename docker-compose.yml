@@ -3,16 +3,16 @@
 # Logical groups (single file, no extra infra for neural mesh v1):
 #   1) Foundation: postgres, ollama
 #   2) App / control plane: chili (FastAPI), brain (HTTP delegate)
-#   3) Orchestration: scheduler-worker (APScheduler + market snapshots, etc.)
-#   4) Neural processing: brain-worker — ``lean-cycle`` (full learning cycle + optional Postgres
-#      activation batch when TRADING_BRAIN_NEURAL_MESH_ENABLED=1). For queue-only soak use
-#      ``--mode activation-loop`` (see scripts/brain_worker.py).
-#   5) Specialized execution: backtest-worker + fast-scan-worker are part of the normal stack; optional workers profile adds mining
-#      — each uses the matching ``brain_worker.py --mode`` (mining / backtest / fast-scan).
+#   3) Minimal trading runtime: broker-sync-worker, autotrader-worker, fast-scan-worker.
+#   4) Heavy/offline lanes live behind profiles so Docker Desktop restarts do not
+#      resurrect every memory-heavy worker at once.
+#      Use: docker compose --profile heavy-workers up -d scheduler-worker brain-worker backtest-worker brain-work-dispatcher
+#      Use: docker compose --profile fast-path up -d fast-data-worker
 #
-# Note: backtest-worker is now part of the normal stack so the queue has a
-# dedicated owner. fast-scan-worker is also normal-stack so activity discovery
-# keeps running after ordinary stack restarts; the workers profile remains for mining-worker.
+# Note: fast-scan-worker remains in the normal stack so activity discovery keeps
+# running after ordinary stack restarts. Heavy queue/research workers are opt-in;
+# this prevents a Docker Desktop crash loop from auto-starting the full fleet
+# before Postgres and the web/API have stabilized.
 #
 # Persistent data: Postgres, Ollama, and /app/data bind to D:/CHILI-Docker/{postgres,ollama,chili-data} so large state
 # lives off C:. Change these paths if your drive letter or folder differs.
@@ -40,10 +40,10 @@ services:
         max-file: "3"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U chili -d chili"]
-      interval: 5s
+      interval: 10s
       timeout: 5s
-      retries: 10
-      start_period: 10s
+      retries: 30
+      start_period: 120s
     deploy:
       resources:
         limits:
@@ -237,7 +237,9 @@ services:
   # after each successful cycle when TRADING_BRAIN_NEURAL_MESH_ENABLED=1.
   brain-worker:
     image: chili-app:local
-    restart: unless-stopped
+    profiles:
+      - heavy-workers
+    restart: "${CHILI_HEAVY_WORKER_RESTART_POLICY:-no}"
     labels:
       com.chili.service: brain-worker
       com.chili.entrypoint: brain_worker_lean_cycle
@@ -306,7 +308,9 @@ services:
   # mining/backtest/OHLCV work. Heavy producers stay on brain-worker.
   brain-work-dispatcher:
     image: chili-app:local
-    restart: unless-stopped
+    profiles:
+      - heavy-workers
+    restart: "${CHILI_HEAVY_WORKER_RESTART_POLICY:-no}"
     command: ["python", "scripts/brain_work_fast_lane.py", "--interval", "10", "--max-cpcv-gate", "4"]
     env_file:
       - path: .env
@@ -393,7 +397,9 @@ services:
   # Continuous backtest worker. Drains the ScanPattern queue with walk-forward backtests.
   backtest-worker:
     image: chili-app:local
-    restart: unless-stopped
+    profiles:
+      - heavy-workers
+    restart: "${CHILI_HEAVY_WORKER_RESTART_POLICY:-no}"
     command: ["python", "scripts/brain_worker.py", "--mode", "backtest"]
     env_file:
       - path: .env
@@ -478,7 +484,9 @@ services:
   # All APScheduler jobs (broker sync, scans, code/reasoning cycles, …). ``chili`` uses role ``none``.
   scheduler-worker:
     image: chili-app:local
-    restart: unless-stopped
+    profiles:
+      - heavy-workers
+    restart: "${CHILI_HEAVY_WORKER_RESTART_POLICY:-no}"
     labels:
       com.chili.service: scheduler-worker
       com.chili.entrypoint: scheduler_worker
@@ -582,10 +590,9 @@ services:
       # detects the host path, computes /host_dev/<project>, and registers a
       # code_repos row. No restart needed for new projects.
       - D:/dev:/host_dev
-      # Named volume for repos that the brain CLONES on demand (e.g. when you
-      # give it a github.com URL it doesn't have locally). Lives inside
-      # Docker's volume manager so it survives container recreate.
-      - chili_dispatch_clones:/workspace_managed
+      # D-backed workspace for repos that the brain clones on demand. Keep this
+      # outside Docker's named volume store so clone churn does not grow C:.
+      - D:/CHILI-Docker/dispatch-clones:/workspace_managed
     depends_on:
       postgres:
         condition: service_healthy
@@ -792,11 +799,13 @@ services:
   # for the contract. Runs alongside the swing brain; neither depends
   # on the other for liveness. Default off — set
   # CHILI_FAST_PATH_ENABLED=1 to actually subscribe to Coinbase WS.
-  # The container always starts (so /healthz is reachable) but parks
-  # every pair in state=paused when disabled.
+  # Opt-in via the fast-path profile; when enabled it parks every pair in
+  # state=paused unless CHILI_FAST_PATH_ENABLED is true.
   fast-data-worker:
     image: chili-app:local
-    restart: unless-stopped
+    profiles:
+      - fast-path
+    restart: "${CHILI_FAST_PATH_WORKER_RESTART_POLICY:-no}"
     labels:
       com.chili.service: fast-data-worker
       com.chili.entrypoint: fast_data_worker
@@ -865,10 +874,4 @@ services:
         max-size: "50m"
         max-file: "3"
 
-# ── Named volumes ───────────────────────────────────────────────────
-# Phase E.2: chili_dispatch_clones holds repos the brain clones on demand
-# (i.e. you point it at a github.com URL that isn't already on disk). The
-# volume persists across container recreate so we don't re-clone every
-# time scheduler-worker is rebuilt.
-volumes:
-  chili_dispatch_clones:
+# No named volumes: large persistent state is D-backed bind mounts.
