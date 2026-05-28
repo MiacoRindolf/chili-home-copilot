@@ -49,6 +49,13 @@ _PROJECT_AGENT_PURPOSES = frozenset({
     "project_ux_designer",
 })
 
+_REASONING_BACKGROUND_PURPOSES = frozenset({
+    "reasoning_anticipate",
+    "reasoning_evolve",
+    "reasoning_user_model",
+    "reasoning_web_research",
+})
+
 
 def _offline_passthrough_policy(purpose: str) -> PurposePolicy:
     return PurposePolicy(
@@ -65,10 +72,13 @@ _CODE_DEFAULTS: dict[str, PurposePolicy] = {
     "code_review": _offline_passthrough_policy("code_review"),
     "code_search": _offline_passthrough_policy("code_search"),
     "project_web_research": _offline_passthrough_policy("project_web_research"),
-    "reasoning_web_research": _offline_passthrough_policy("reasoning_web_research"),
     **{
         purpose: _offline_passthrough_policy(purpose)
         for purpose in _PROJECT_AGENT_PURPOSES
+    },
+    **{
+        purpose: _offline_passthrough_policy(purpose)
+        for purpose in _REASONING_BACKGROUND_PURPOSES
     },
 }
 
