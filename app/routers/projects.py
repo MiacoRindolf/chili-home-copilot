@@ -1,6 +1,7 @@
 """Project Space routes: CRUD for projects, file management, conversation assignment."""
 from fastapi import APIRouter, Depends, Request, File, UploadFile, Form
 from fastapi.responses import JSONResponse
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from typing import Optional
 
@@ -31,6 +32,18 @@ def _require_user(request: Request, db: Session):
     return uid
 
 
+def _count_by_project(db: Session, model, project_ids: list[int]) -> dict[int, int]:
+    if not project_ids:
+        return {}
+    rows = (
+        db.query(model.project_id, func.count(model.id))
+        .filter(model.project_id.in_(project_ids))
+        .group_by(model.project_id)
+        .all()
+    )
+    return {int(project_id): int(count or 0) for project_id, count in rows}
+
+
 # ── Project CRUD ─────────────────────────────────────────────────────────────
 
 @router.get("/api/projects", response_class=JSONResponse)
@@ -45,17 +58,18 @@ def list_projects(request: Request, db: Session = Depends(get_db)):
         .order_by(Project.updated_at.desc())
         .all()
     )
+    project_ids = [p.id for p in projects]
+    file_counts = _count_by_project(db, ProjectFile, project_ids)
+    convo_counts = _count_by_project(db, Conversation, project_ids)
     result = []
     for p in projects:
-        file_count = db.query(ProjectFile).filter(ProjectFile.project_id == p.id).count()
-        convo_count = db.query(Conversation).filter(Conversation.project_id == p.id).count()
         result.append({
             "id": p.id,
             "name": p.name,
             "description": p.description,
             "color": p.color,
-            "file_count": file_count,
-            "convo_count": convo_count,
+            "file_count": file_counts.get(p.id, 0),
+            "convo_count": convo_counts.get(p.id, 0),
             "created_at": str(p.created_at),
             "updated_at": str(p.updated_at),
         })

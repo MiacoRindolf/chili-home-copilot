@@ -2,6 +2,7 @@
 import io
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -22,6 +23,33 @@ def _make_paired(db):
     db.add(Device(token=token, user_id=user.id, label="test", client_ip_last="127.0.0.1"))
     db.commit()
     return user, token
+
+
+class _FakeProjectQuery:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def filter(self, *_args, **_kwargs):
+        return self
+
+    def order_by(self, *_args, **_kwargs):
+        return self
+
+    def group_by(self, *_args, **_kwargs):
+        return self
+
+    def all(self):
+        return self._rows
+
+
+class _ProjectListSession:
+    def __init__(self, query_rows):
+        self._query_rows = list(query_rows)
+        self.query_calls = 0
+
+    def query(self, *_entities):
+        self.query_calls += 1
+        return _FakeProjectQuery(self._query_rows.pop(0))
 
 
 # ── File validation tests ────────────────────────────────────────────────────
@@ -123,6 +151,43 @@ class TestProjectCRUD:
         names = {p["name"] for p in data["projects"]}
         assert "P1" in names
         assert "P2" in names
+
+    def test_list_projects_batches_counts(self, monkeypatch):
+        from app.routers import projects as projects_router
+
+        project_rows = [
+            SimpleNamespace(
+                id=1,
+                name="P1",
+                description=None,
+                color="#111111",
+                created_at="created-1",
+                updated_at="updated-1",
+            ),
+            SimpleNamespace(
+                id=2,
+                name="P2",
+                description="desc",
+                color="#222222",
+                created_at="created-2",
+                updated_at="updated-2",
+            ),
+        ]
+        db = _ProjectListSession([
+            project_rows,
+            [(1, 3)],
+            [(1, 2), (2, 1)],
+        ])
+        request = SimpleNamespace(cookies={})
+        monkeypatch.setattr(projects_router, "_get_user_id", lambda _request, _db: 7)
+
+        result = projects_router.list_projects(request, db)
+
+        assert db.query_calls == 3
+        assert result["projects"][0]["file_count"] == 3
+        assert result["projects"][0]["convo_count"] == 2
+        assert result["projects"][1]["file_count"] == 0
+        assert result["projects"][1]["convo_count"] == 1
 
     def test_update_project(self, db, client):
         user, token = _make_paired(db)
