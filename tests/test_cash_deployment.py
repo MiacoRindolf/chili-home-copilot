@@ -110,6 +110,33 @@ def _closed_paper(db, pat: ScanPattern, alert: BreakoutAlert, *, count: int = 5,
         )
 
 
+def _closed_live(
+    db,
+    pat: ScanPattern,
+    *,
+    ticker: str,
+    pnl: float,
+    asset_kind: str = "equity",
+    entry_price: float = 100.0,
+    quantity: float = 1.0,
+):
+    db.add(
+        Trade(
+            scan_pattern_id=pat.id,
+            ticker=ticker,
+            direction="long",
+            entry_price=entry_price,
+            quantity=quantity,
+            status="closed",
+            entry_date=datetime.utcnow() - timedelta(hours=2),
+            exit_date=datetime.utcnow() - timedelta(hours=1),
+            exit_price=entry_price + (pnl / quantity),
+            pnl=pnl,
+            asset_kind=asset_kind,
+        )
+    )
+
+
 def test_cash_deployment_categorizes_positive_blocks_without_live_shortcuts(db, monkeypatch):
     monkeypatch.setattr(settings, "chili_autotrader_live_enabled", True)
     monkeypatch.setattr(settings, "chili_cash_deployment_equity_cost_pct", 0.05)
@@ -261,6 +288,55 @@ def test_cash_deployment_zero_ranks_stale_broker_local_open(db, monkeypatch):
     assert row["cash_deployment_rank"] is None
     assert row["max_safe_notional"] == 0.0
     assert summary["stale_broker_local_open"] >= 1
+
+
+def test_cash_deployment_exposes_live_asset_slice_performance(db, monkeypatch):
+    monkeypatch.setattr(settings, "chili_autotrader_live_enabled", True)
+    monkeypatch.setattr(settings, "chili_cash_deployment_equity_cost_pct", 0.05)
+    monkeypatch.setattr(settings, "chili_cash_deployment_min_closed_evidence", 5)
+    monkeypatch.setattr(settings, "chili_cash_deployment_max_brier_score", 0.28)
+
+    pat = _pattern(db, name="cash live perf")
+    alert = _alert(db, pat, ticker="LPERF")
+    _run(db, pat, alert, expected=2.0)
+    _closed_paper(db, pat, alert)
+    _closed_live(db, pat, ticker="LPERF", pnl=4.0, asset_kind="equity")
+    _closed_live(db, pat, ticker="BTC-USD", pnl=50.0, asset_kind="crypto")
+    db.commit()
+
+    rows = cash_deployment_rows(db, pattern_ids=[pat.id], window_days=7, limit=10)
+    row = next(x for x in rows if x["scan_pattern_id"] == pat.id)
+
+    assert row["asset_class"] == "stock"
+    assert row["cash_deployment_category"] == "live_deployable"
+    assert row["live_realized_asset_closed_count"] == 1
+    assert row["live_realized_asset_pnl_usd"] == pytest.approx(4.0)
+    assert row["live_realized_asset_avg_return_pct"] == pytest.approx(4.0)
+    assert row["live_realized_asset_win_rate"] == pytest.approx(1.0)
+    assert row["live_realized_asset_last_exit_at"] is not None
+
+
+def test_cash_deployment_blocks_live_deployable_on_negative_live_asset_perf(db, monkeypatch):
+    monkeypatch.setattr(settings, "chili_autotrader_live_enabled", True)
+    monkeypatch.setattr(settings, "chili_cash_deployment_equity_cost_pct", 0.05)
+    monkeypatch.setattr(settings, "chili_cash_deployment_min_closed_evidence", 5)
+    monkeypatch.setattr(settings, "chili_cash_deployment_max_brier_score", 0.28)
+
+    pat = _pattern(db, name="cash negative live perf")
+    alert = _alert(db, pat, ticker="NLPERF")
+    _run(db, pat, alert, expected=2.0)
+    _closed_paper(db, pat, alert, count=6, pnl_pct=4.0)
+    _closed_live(db, pat, ticker="NLPERF", pnl=-2.0, asset_kind="equity")
+    db.commit()
+
+    rows = cash_deployment_rows(db, pattern_ids=[pat.id], window_days=7, limit=10)
+    row = next(x for x in rows if x["scan_pattern_id"] == pat.id)
+
+    assert row["live_realized_asset_closed_count"] == 1
+    assert row["live_realized_asset_avg_return_pct"] == pytest.approx(-2.0)
+    assert row["cash_deployment_category"] == "needs_calibration"
+    assert row["live_deployable"] is False
+    assert row["max_safe_notional"] == 0.0
 
 
 def test_cash_deployment_work_producer_enqueues_targeted_deduped_work(db, monkeypatch):

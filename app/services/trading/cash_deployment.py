@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import math
 from collections import Counter
+from datetime import datetime, timedelta
 from typing import Any
 
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from ...config import settings
@@ -192,6 +194,82 @@ def _trade_heat_pct(trade: Any, *, capital: float) -> float:
     return max(0.0, risk / capital * 100.0)
 
 
+def _trade_return_pct(trade: Any) -> float | None:
+    pnl = _safe_float(getattr(trade, "pnl", None))
+    entry = (
+        _safe_float(getattr(trade, "avg_fill_price", None))
+        or _safe_float(getattr(trade, "entry_price", None))
+    )
+    qty = (
+        _safe_float(getattr(trade, "filled_quantity", None))
+        or _safe_float(getattr(trade, "quantity", None))
+    )
+    notional = abs((entry or 0.0) * (qty or 0.0))
+    if pnl is None or notional <= 0.0:
+        return None
+    return (pnl / notional) * 100.0
+
+
+def _live_asset_performance(
+    db: Session,
+    *,
+    scan_pattern_id: int | None,
+    asset_class: str,
+    user_id: int | None,
+    window_days: int,
+) -> dict[str, Any]:
+    if scan_pattern_id is None:
+        return {
+            "live_realized_asset_window_days": int(window_days),
+            "live_realized_asset_closed_count": 0,
+            "live_realized_asset_pnl_usd": 0.0,
+            "live_realized_asset_avg_return_pct": None,
+            "live_realized_asset_win_rate": None,
+            "live_realized_asset_last_exit_at": None,
+        }
+
+    from ...models.trading import Trade
+
+    cutoff = datetime.utcnow() - timedelta(days=max(1, int(window_days)))
+    q = (
+        db.query(Trade)
+        .filter(Trade.scan_pattern_id == int(scan_pattern_id))
+        .filter(Trade.status == "closed")
+        .filter(
+            or_(
+                Trade.exit_date >= cutoff,
+                and_(Trade.exit_date.is_(None), Trade.entry_date >= cutoff),
+            )
+        )
+    )
+    if user_id is not None:
+        q = q.filter(Trade.user_id == user_id)
+    rows = [row for row in q.all() if _trade_asset_class(row) == asset_class]
+
+    returns = [ret for ret in (_trade_return_pct(row) for row in rows) if ret is not None]
+    pnl_values = [_safe_float(getattr(row, "pnl", None), 0.0) or 0.0 for row in rows]
+    wins = [1.0 if (_safe_float(getattr(row, "pnl", None), 0.0) or 0.0) > 0.0 else 0.0 for row in rows]
+    latest = max(
+        (
+            getattr(row, "exit_date", None) or getattr(row, "entry_date", None)
+            for row in rows
+        ),
+        default=None,
+    )
+    return {
+        "live_realized_asset_window_days": int(window_days),
+        "live_realized_asset_closed_count": len(rows),
+        "live_realized_asset_pnl_usd": _round(sum(pnl_values), 6),
+        "live_realized_asset_avg_return_pct": (
+            _round(sum(returns) / len(returns), 6) if returns else None
+        ),
+        "live_realized_asset_win_rate": (
+            _round(sum(wins) / len(wins), 6) if wins else None
+        ),
+        "live_realized_asset_last_exit_at": latest.isoformat() if latest else None,
+    }
+
+
 def _exposure_and_notional(
     db: Session,
     *,
@@ -317,6 +395,10 @@ def _cash_category(
         return "needs_calibration"
     if gap is not None and max_gap > 0.0 and abs(gap) > max_gap:
         return "needs_calibration"
+    live_closed_n = _safe_int(row.get("live_realized_asset_closed_count"))
+    live_avg = _safe_float(row.get("live_realized_asset_avg_return_pct"))
+    if live_closed_n > 0 and live_avg is not None and live_avg <= 0.0:
+        return "needs_calibration" if positive_supply else "negative_ev"
     if exposure_blocker or execution_blocker:
         return "positive_ev_execution_blocked"
     if blocker == "graduation_ready":
@@ -359,6 +441,9 @@ def _allocation_score(
     max_brier = _safe_float(getattr(settings, "chili_cash_deployment_max_brier_score", 0.28), 0.28) or 0.28
     calibration_component = 0.35 if brier is None else _clamp(1.0 - (brier / max_brier))
     realized_component = _clamp((_safe_float(row.get("realized_ev_pct"), 0.0) or 0.0) / 5.0)
+    live_closed_n = _safe_int(row.get("live_realized_asset_closed_count"))
+    live_avg = _safe_float(row.get("live_realized_asset_avg_return_pct"))
+    live_component = 0.35 if live_closed_n <= 0 or live_avg is None else _clamp(live_avg / 5.0)
     gap = _safe_float(row.get("paper_live_gap_pct"))
     max_gap = _safe_float(
         getattr(settings, "chili_cash_deployment_max_abs_paper_live_gap_pct", 3.0),
@@ -367,10 +452,11 @@ def _allocation_score(
     gap_component = 1.0 if gap is None else _clamp(1.0 - (abs(gap) / max_gap))
     exposure_component = 0.0 if exposure_blocker else 1.0
     score = (
-        ev_component * 0.32
-        + evidence_component * 0.18
-        + calibration_component * 0.18
-        + realized_component * 0.14
+        ev_component * 0.30
+        + evidence_component * 0.16
+        + calibration_component * 0.16
+        + realized_component * 0.10
+        + live_component * 0.10
         + gap_component * 0.08
         + venue_score * 0.06
         + exposure_component * 0.04
@@ -388,6 +474,14 @@ def annotate_cash_deployment_row(
     out = dict(row)
     asset_class = _asset_class_for_row(out)
     symbol = _symbol_for_row(out)
+    live_perf = _live_asset_performance(
+        db,
+        scan_pattern_id=_safe_int(out.get("scan_pattern_id")) if out.get("scan_pattern_id") is not None else None,
+        asset_class=asset_class,
+        user_id=user_id,
+        window_days=max(1, int(out.get("window_days") or DEFAULT_WINDOW_DAYS)),
+    )
+    out.update(live_perf)
     cost = _cost_pct(asset_class, out)
     calibrated = _safe_float(out.get("calibrated_ev_pct"))
     after_cost = calibrated - cost if calibrated is not None else None
