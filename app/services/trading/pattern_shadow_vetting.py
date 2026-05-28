@@ -29,6 +29,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ...models.trading import ScanPattern
+from .realized_pnl_sql import paper_trade_return_fraction_sql
 
 logger = logging.getLogger(__name__)
 LOG_PREFIX = "[pattern_shadow_vetting]"
@@ -199,30 +200,30 @@ def _load_directional_evidence(
         try:
             paper_rows = db.execute(
                 text(
-                    """
+                    f"""
                     SELECT
-                        scan_pattern_id,
-                        pnl,
-                        pnl_pct,
-                        entry_date,
-                        exit_date,
-                        exit_reason,
-                        EXTRACT(EPOCH FROM (exit_date - entry_date)) / 3600.0 AS hold_window_hours
-                    FROM trading_paper_trades
-                    WHERE status = 'closed'
-                      AND scan_pattern_id IS NOT NULL
-                      AND scan_pattern_id != -1
-                      AND entry_date IS NOT NULL
-                      AND exit_date IS NOT NULL
-                      AND pnl IS NOT NULL
-                      AND entry_price > 0
-                      AND quantity > 0
+                        pt.scan_pattern_id,
+                        pt.pnl,
+                        ({paper_trade_return_fraction_sql("pt")}) * 100.0 AS realized_return_pct,
+                        pt.entry_date,
+                        pt.exit_date,
+                        pt.exit_reason,
+                        EXTRACT(EPOCH FROM (pt.exit_date - pt.entry_date)) / 3600.0 AS hold_window_hours
+                    FROM trading_paper_trades pt
+                    WHERE pt.status = 'closed'
+                      AND pt.scan_pattern_id IS NOT NULL
+                      AND pt.scan_pattern_id != -1
+                      AND pt.entry_date IS NOT NULL
+                      AND pt.exit_date IS NOT NULL
+                      AND pt.pnl IS NOT NULL
+                      AND pt.entry_price > 0
+                      AND pt.quantity > 0
                       AND (
-                        paper_shadow_of_alert_id IS NOT NULL
-                        OR COALESCE(signal_json, '{}'::jsonb) @> '{"auto_trader_v1": true}'::jsonb
-                        OR COALESCE(signal_json, '{}'::jsonb) @> '{"paper_shadow": true}'::jsonb
+                        pt.paper_shadow_of_alert_id IS NOT NULL
+                        OR COALESCE(pt.signal_json, '{{}}'::jsonb) @> '{{"auto_trader_v1": true}}'::jsonb
+                        OR COALESCE(pt.signal_json, '{{}}'::jsonb) @> '{{"paper_shadow": true}}'::jsonb
                       )
-                    ORDER BY scan_pattern_id, entry_date DESC
+                    ORDER BY pt.scan_pattern_id, pt.entry_date DESC
                     """
                 )
             ).mappings().all()
@@ -231,15 +232,15 @@ def _load_directional_evidence(
             logger.debug("%s paper dynamic evidence query failed", LOG_PREFIX, exc_info=True)
         for r in paper_rows:
             pid = int(r["scan_pattern_id"])
-            pnl_pct = _safe_float(r.get("pnl_pct"), 0.0) or 0.0
+            realized_return_pct = _safe_float(r.get("realized_return_pct"), 0.0) or 0.0
             grouped.setdefault(pid, []).append(
                 {
                     "directional_correct": (_safe_float(r.get("pnl"), 0.0) or 0.0) > 0.0,
                     "alert_at": r.get("entry_date"),
                     "evaluated_at": r.get("exit_date"),
                     "hold_window_hours": _safe_float(r.get("hold_window_hours"), 0.0) or 0.0,
-                    "window_max_favorable_pct": max(0.0, pnl_pct),
-                    "window_max_adverse_pct": min(0.0, pnl_pct),
+                    "window_max_favorable_pct": max(0.0, realized_return_pct),
+                    "window_max_adverse_pct": min(0.0, realized_return_pct),
                     "source": "autotrader_paper_dynamic",
                     "exit_reason": r.get("exit_reason"),
                 }

@@ -10,6 +10,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
+import pytest
+
 from app.models.trading import PaperTrade
 from app.services.trading.pattern_shadow_vetting import (
     pilot_promoted_risk_multiplier,
@@ -87,6 +89,73 @@ def test_shadow_vetting_counts_autotrader_paper_dynamic_outcomes(db):
     assert row["paper_dynamic_sample_n"] == 1
     assert row["paper_dynamic_exit_sample_n"] == 1
     assert row["weighted_directional_wr"] > 0.5
+
+
+def test_shadow_vetting_option_paper_dynamic_uses_realized_contract_return(db):
+    _truncate_phase4_state(db)
+    now = datetime.utcnow().replace(microsecond=0)
+    pat = _make_pattern(
+        db,
+        name="option_paper_dynamic_shadow",
+        lifecycle="shadow_promoted",
+        cpcv=1.5,
+        dsr=0.8,
+        pbo=0.1,
+        quality_score=None,
+    )
+    common = dict(
+        user_id=None,
+        scan_pattern_id=pat.id,
+        ticker="OPT",
+        direction="long",
+        entry_price=1.25,
+        stop_price=0.75,
+        target_price=2.0,
+        quantity=2.0,
+        status="closed",
+        entry_date=now - timedelta(hours=1),
+        exit_date=now,
+        exit_reason="pattern_exit_now",
+        signal_json={
+            "auto_trader_v1": True,
+            "paper_shadow": True,
+            "asset_type": "options",
+            "option_meta": {"strike": 500.0},
+        },
+        paper_shadow_of_alert_id=None,
+    )
+    db.add_all(
+        [
+            PaperTrade(
+                **common,
+                exit_price=1.45,
+                pnl=40.0,
+                pnl_pct=5000.0,
+            ),
+            PaperTrade(
+                **common,
+                exit_price=1.05,
+                pnl=-40.0,
+                pnl_pct=-1.0,
+            ),
+        ]
+    )
+    db.commit()
+
+    rows = select_shadow_vetting_candidates(
+        db,
+        settings_=_settings(
+            chili_shadow_vetting_include_paper_dynamic_outcomes=True,
+        ),
+        now=now,
+    )
+    row = next(r for r in rows if r["scan_pattern_id"] == pat.id)
+
+    assert row["raw_sample_n"] == 2
+    assert row["paper_dynamic_sample_n"] == 2
+    assert row["paper_dynamic_exit_sample_n"] == 2
+    assert row["weighted_directional_wr"] == pytest.approx(0.5)
+    assert row["path_quality"] == pytest.approx(0.5)
 
 
 def test_shadow_vetting_advances_strong_shadow_to_pilot_before_full_ev(db, monkeypatch):
