@@ -394,6 +394,7 @@ def _missing_qty_local_qty_fallback_ready(
     trade: Trade,
     *,
     local_qty: float,
+    include_current_miss: bool = False,
 ) -> bool:
     """Allow Coinbase to validate the local quantity after persistent misses."""
     if _broker_source_for_trade(trade) != "coinbase":
@@ -404,6 +405,8 @@ def _missing_qty_local_qty_fallback_ready(
     except (TypeError, ValueError):
         return False
     streak = int(getattr(trade, "crypto_broker_zero_qty_streak", 0) or 0)
+    if include_current_miss:
+        streak += 1
     return streak >= int(CRYPTO_EXIT_MISSING_QTY_BACKOFF_MAX_START_STREAK)
 
 
@@ -807,7 +810,11 @@ def run_crypto_exit_pass(db: Session) -> dict[str, Any]:
             used_local_qty_fallback = False
 
             if _broker_qty is None:
-                if _missing_qty_local_qty_fallback_ready(t, local_qty=qty):
+                if _missing_qty_local_qty_fallback_ready(
+                    t,
+                    local_qty=qty,
+                    include_current_miss=True,
+                ):
                     _broker_qty = qty
                     used_local_qty_fallback = True
                     prior_missing_qty_streak = int(

@@ -445,6 +445,62 @@ def test_coinbase_missing_qty_long_streak_attempts_local_qty_exit(db):
     assert crypto_exit.CRYPTO_EXIT_MISSING_QTY_SNAPSHOT_KEY not in t.indicator_snapshot
 
 
+def test_coinbase_missing_qty_threshold_counts_current_miss(db):
+    """The miss that reaches the persistent threshold should attempt the exit."""
+    from app.services.trading.crypto import exit_monitor as crypto_exit
+
+    t = _seed_open_crypto_trade(
+        db,
+        ticker="00-USD",
+        name_suffix="coinbase_missing_qty_threshold",
+        broker_source="coinbase",
+    )
+    t.crypto_broker_zero_qty_streak = (
+        crypto_exit.CRYPTO_EXIT_MISSING_QTY_BACKOFF_MAX_START_STREAK - 1
+    )
+    db.add(t)
+    db.commit()
+
+    cb_positions = MagicMock(return_value=[])
+    cb_adapter = MagicMock()
+    cb_adapter.place_market_order.return_value = {
+        "ok": True,
+        "order_id": "cb-threshold-fallback",
+        "raw": {},
+    }
+
+    with patch(
+        "app.services.trading.crypto.exit_monitor._current_crypto_price",
+        return_value=8.50,
+    ), patch(
+        "app.services.coinbase_service.get_positions",
+        cb_positions,
+    ), patch(
+        "app.services.trading.crypto.exit_monitor._coinbase_spot_adapter",
+        return_value=cb_adapter,
+    ), patch(
+        "app.services.trading.governance.is_kill_switch_active",
+        return_value=False,
+    ):
+        out = crypto_exit.run_crypto_exit_pass(db)
+
+    assert out.get("closed") == 1
+    assert out.get("missing_qty_local_qty_fallback") == 1
+    assert out.get("missing_qty_deferred") in (None, 0)
+    cb_adapter.place_market_order.assert_called_once_with(
+        product_id="00-USD",
+        side="sell",
+        base_size="5.0",
+    )
+    db.refresh(t)
+    assert t.pending_exit_order_id == "cb-threshold-fallback"
+    assert t.pending_exit_status == "submitted"
+    assert t.crypto_broker_zero_qty_streak == 0
+    assert crypto_exit.CRYPTO_EXIT_MISSING_QTY_SNAPSHOT_KEY not in (
+        t.indicator_snapshot or {}
+    )
+
+
 def test_coinbase_stop_hit_cancels_stale_sell_hold_and_retries(db):
     """Coinbase open stop-limit orders hold base currency. When the
     monitor promotes an exit to market, it must cancel stale open sells
