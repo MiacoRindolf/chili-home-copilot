@@ -246,6 +246,26 @@ def _bt_wr_pct_for_display(bt_wr: float | None) -> float | None:
     return backtest_win_rate_db_to_display_pct(bt_wr)
 
 
+def _best_backtests_by_ticker(db: Session, tickers: set[str]) -> dict[str, Any]:
+    if not tickers:
+        return {}
+
+    from ...models.trading import BacktestResult
+
+    rows = (
+        db.query(BacktestResult)
+        .filter(BacktestResult.ticker.in_(sorted(tickers)))
+        .order_by(BacktestResult.ticker.asc(), BacktestResult.return_pct.desc())
+        .all()
+    )
+    best: dict[str, Any] = {}
+    for row in rows:
+        ticker = str(row.ticker)
+        if ticker not in best:
+            best[ticker] = row
+    return best
+
+
 def build_conversational_thesis(pick: dict[str, Any]) -> str:
     """Produce a 2-4 sentence plain-English thesis that 'sells' the pick."""
     ticker = pick.get("ticker", "")
@@ -400,8 +420,6 @@ def make_plain_english(scored: dict, insights: str) -> str:
 
 def build_smart_pick_context_strings(db: Session, ctx: dict[str, Any]) -> str:
     """Render the human-readable context string for the LLM from structured ctx."""
-    from ...models.trading import BacktestResult
-
     top_picks: list[dict[str, Any]] = ctx["top_picks"]
     total_scanned: int = ctx["total_scanned"]
     stats: dict[str, Any] = ctx.get("stats") or {}
@@ -409,6 +427,7 @@ def build_smart_pick_context_strings(db: Session, ctx: dict[str, Any]) -> str:
     budget = ctx.get("budget")
     risk_tolerance: str = ctx.get("risk_tolerance", "medium")
     portfolio_ctx: str | None = ctx.get("portfolio_ctx")
+    best_backtests = _best_backtests_by_ticker(db, {str(p["ticker"]) for p in top_picks})
 
     pick_details: list[str] = []
     for p in top_picks:
@@ -421,9 +440,7 @@ def build_smart_pick_context_strings(db: Session, ctx: dict[str, Any]) -> str:
             f"ADX={p['indicators'].get('adx', 'N/A')}"
         )
 
-        best_bt = db.query(BacktestResult).filter(
-            BacktestResult.ticker == p["ticker"],
-        ).order_by(BacktestResult.return_pct.desc()).first()
+        best_bt = best_backtests.get(str(p["ticker"]))
         if best_bt:
             _wrp = _bt_wr_pct_for_display(best_bt.win_rate)
             _wr_txt = f"{_wrp:.0f}%" if _wrp is not None else "N/A"
