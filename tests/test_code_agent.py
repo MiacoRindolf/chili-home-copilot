@@ -7,6 +7,7 @@ import pytest
 from app.services.code_brain.agent import (
     _gather_context,
     _parse_plan_json,
+    _snapshots_by_repo,
     _validate_diff,
     _build_plan_prompt,
     _build_edit_prompt,
@@ -124,3 +125,43 @@ class TestGatherContext:
         assert "insights" in context
         assert "relevant_files" in context
         assert len(context["repos"]) == 1
+
+    def test_snapshot_fallback_batches_repo_lookup(self):
+        from app.models.code_brain import CodeSnapshot
+
+        class FakeQuery:
+            def __init__(self, rows):
+                self._rows = rows
+                self.filter_calls = 0
+
+            def filter(self, *_args, **_kwargs):
+                self.filter_calls += 1
+                return self
+
+            def all(self):
+                return self._rows
+
+        class FakeSession:
+            def __init__(self, rows):
+                self._rows = rows
+                self.last_query = None
+                self.query_calls = 0
+
+            def query(self, model):
+                assert model is CodeSnapshot
+                self.query_calls += 1
+                self.last_query = FakeQuery(self._rows)
+                return self.last_query
+
+        rows = [
+            CodeSnapshot(repo_id=1, file_path="app/auth.py"),
+            CodeSnapshot(repo_id=2, file_path="app/chat.py"),
+        ]
+        db = FakeSession(rows)
+
+        grouped = _snapshots_by_repo(db, [1, 2])
+
+        assert [snap.file_path for snap in grouped[1]] == ["app/auth.py"]
+        assert [snap.file_path for snap in grouped[2]] == ["app/chat.py"]
+        assert db.query_calls == 1
+        assert db.last_query.filter_calls == 1

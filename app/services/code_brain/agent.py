@@ -25,6 +25,16 @@ _MAX_FILE_LINES = 600
 _MAX_FILES_PER_EDIT = 8
 
 
+def _snapshots_by_repo(db: Session, repo_ids: list[int]) -> dict[int, list[CodeSnapshot]]:
+    if not repo_ids:
+        return {}
+    rows = db.query(CodeSnapshot).filter(CodeSnapshot.repo_id.in_(repo_ids)).all()
+    grouped: dict[int, list[CodeSnapshot]] = {repo_id: [] for repo_id in repo_ids}
+    for row in rows:
+        grouped.setdefault(int(row.repo_id), []).append(row)
+    return grouped
+
+
 def _gather_context(
     db: Session,
     repo_id: Optional[int],
@@ -107,9 +117,9 @@ def _gather_context(
     # Fallback: if search returned nothing, use path-word matching
     if not context["relevant_files"]:
         prompt_lower = prompt.lower()
+        snapshots_by_repo = _snapshots_by_repo(db, repo_ids)
         for repo in repos:
-            snaps = db.query(CodeSnapshot).filter(CodeSnapshot.repo_id == repo.id).all()
-            for snap in snaps:
+            for snap in snapshots_by_repo.get(int(repo.id), []):
                 file_lower = snap.file_path.lower()
                 relevance = sum(1 for word in prompt_lower.split() if len(word) > 2 and word in file_lower)
                 if relevance > 0:
