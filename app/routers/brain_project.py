@@ -633,6 +633,18 @@ class _ProjectAutonomyRunBody(BaseModel):
     prompt: str
     repo_id: int | None = None
     autonomy_level: str | None = "full_local"
+    execution_mode: str | None = "plan_approval"
+
+
+class _ProjectAutonomyMessageBody(BaseModel):
+    content: str
+
+
+class _ProjectAutonomyVisualValidationBody(BaseModel):
+    kind: str = "screenshot"
+    path: str | None = None
+    url: str | None = None
+    note: str | None = None
 
 
 # Product owner endpoints
@@ -902,11 +914,87 @@ def api_brain_project_autonomy_create(
             repo_id=body.repo_id,
             user_id=ctx["user_id"],
             autonomy_level=body.autonomy_level or "full_local",
+            execution_mode=body.execution_mode or "plan_approval",
         )
     except ValueError as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=409)
     _start_autonomy_thread(run.run_id)
     return JSONResponse({"ok": True, "run": project_autonomy.run_payload(db, run, include_events=True)})
+
+
+@router.post("/api/brain/project/autonomy/runs/{run_id}/messages")
+def api_brain_project_autonomy_message(
+    run_id: str,
+    body: _ProjectAutonomyMessageBody,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Append a user message to an Autopilot chat; revise pending plans."""
+    ctx = get_identity_ctx(request, db)
+    blocked = _autonomy_requires_paired(ctx)
+    if blocked is not None:
+        return blocked
+    try:
+        run = project_autonomy.append_user_message(
+            db,
+            run_id,
+            content=body.content,
+            user_id=ctx["user_id"],
+        )
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+    if run is None:
+        return _not_found("Autopilot run not found")
+    if run.get("plan_status") == "revising" or run.get("status") == "queued":
+        _start_autonomy_thread(run_id)
+    return JSONResponse({"ok": True, "run": run})
+
+
+@router.post("/api/brain/project/autonomy/runs/{run_id}/plan/approve")
+def api_brain_project_autonomy_approve_plan(
+    run_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Approve the current architect plan and start implementation."""
+    ctx = get_identity_ctx(request, db)
+    blocked = _autonomy_requires_paired(ctx)
+    if blocked is not None:
+        return blocked
+    try:
+        run = project_autonomy.approve_plan(db, run_id, user_id=ctx["user_id"])
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=409)
+    if run is None:
+        return _not_found("Autopilot run not found")
+    _start_autonomy_thread(run_id)
+    return JSONResponse({"ok": True, "run": run})
+
+
+@router.post("/api/brain/project/autonomy/runs/{run_id}/visual-validation")
+def api_brain_project_autonomy_visual_validation(
+    run_id: str,
+    body: _ProjectAutonomyVisualValidationBody,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Attach screenshot/video evidence and lightweight UI/UX review artifacts."""
+    ctx = get_identity_ctx(request, db)
+    blocked = _autonomy_requires_paired(ctx)
+    if blocked is not None:
+        return blocked
+    run = project_autonomy.record_visual_validation(
+        db,
+        run_id,
+        kind=body.kind,
+        path=body.path,
+        url=body.url,
+        note=body.note,
+        user_id=ctx["user_id"],
+    )
+    if run is None:
+        return _not_found("Autopilot run not found")
+    return JSONResponse({"ok": True, "run": run})
 
 
 @router.get("/api/brain/project/autonomy/runs")
@@ -961,6 +1049,7 @@ async def api_brain_project_autonomy_events(run_id: str, request: Request):
 
     async def _gen():
         sdb = SessionLocal()
+        after_message_id = 0
         after_step_id = 0
         after_artifact_id = 0
         try:
@@ -973,9 +1062,10 @@ async def api_brain_project_autonomy_events(run_id: str, request: Request):
                 yield sse_error("Autopilot run not found")
                 return
             yield sse_event({"type": "snapshot", "run": run})
+            after_message_id = max([int(message["id"]) for message in run.get("messages", [])], default=0)
             after_step_id = max([int(step["id"]) for step in run.get("steps", [])], default=0)
             after_artifact_id = max([int(artifact["id"]) for artifact in run.get("artifacts", [])], default=0)
-            if run.get("status") in project_autonomy.TERMINAL_STATUSES:
+            if run.get("status") in project_autonomy.TERMINAL_STATUSES | project_autonomy.IDLE_STATUSES:
                 yield sse_done()
                 return
             while True:
@@ -984,15 +1074,17 @@ async def api_brain_project_autonomy_events(run_id: str, request: Request):
                 events = project_autonomy.events_after(
                     sdb,
                     run_id,
+                    after_message_id=after_message_id,
                     after_step_id=after_step_id,
                     after_artifact_id=after_artifact_id,
                 )
+                after_message_id = int(events.get("after_message_id") or after_message_id)
                 after_step_id = int(events.get("after_step_id") or after_step_id)
                 after_artifact_id = int(events.get("after_artifact_id") or after_artifact_id)
-                if events["steps"] or events["artifacts"]:
+                if events["messages"] or events["steps"] or events["artifacts"]:
                     yield sse_event({"type": "events", **events})
                 latest = project_autonomy.get_run(sdb, run_id, user_id=ctx["user_id"], include_events=False)
-                if latest and latest.get("status") in project_autonomy.TERMINAL_STATUSES:
+                if latest and latest.get("status") in project_autonomy.TERMINAL_STATUSES | project_autonomy.IDLE_STATUSES:
                     yield sse_event({"type": "complete", "run": latest})
                     yield sse_done()
                     return

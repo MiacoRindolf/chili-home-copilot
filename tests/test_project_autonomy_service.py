@@ -13,6 +13,7 @@ from app.db import Base
 from app.models import (
     ProjectAutonomyArtifact,
     ProjectAutonomyLease,
+    ProjectAutonomyMessage,
     ProjectAutonomyRun,
     ProjectAutonomyStep,
     ProjectDomainRun,
@@ -32,6 +33,7 @@ def _sqlite_autonomy_session():
             CodeRepo.__table__,
             ProjectDomainRun.__table__,
             ProjectAutonomyRun.__table__,
+            ProjectAutonomyMessage.__table__,
             ProjectAutonomyStep.__table__,
             ProjectAutonomyArtifact.__table__,
             ProjectAutonomyLease.__table__,
@@ -245,6 +247,148 @@ def test_live_monitoring_prompt_is_not_treated_as_repo_edit():
     assert not orchestrator._looks_like_live_monitoring_prompt(
         "while I'm testing, update chili_mobile/lib/src/brain/foo.dart to fix the layout"
     )
+
+
+def test_plan_approval_run_stops_before_worktree(monkeypatch, tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        repo_file = tmp_path / "app/example.py"
+        repo_file.parent.mkdir(parents=True)
+        repo_file.write_text("VALUE = 1\n", encoding="utf-8")
+        orchestrator._git(tmp_path, ["init"], timeout=60)
+        orchestrator._git(tmp_path, ["add", "."], timeout=60)
+        orchestrator._git(
+            tmp_path,
+            [
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                "init",
+            ],
+            timeout=60,
+        )
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        run = ProjectAutonomyRun(
+            run_id="pa_plan_only",
+            repo_id=repo.id,
+            prompt="change example",
+            status="queued",
+            current_stage="queued",
+            execution_mode="plan_approval",
+            plan_status="drafting",
+        )
+        db.add(run)
+        db.commit()
+        monkeypatch.setattr(
+            orchestrator,
+            "build_local_plan",
+            lambda *args, **kwargs: {
+                "analysis": "Change the example constant.",
+                "files": [{"path": "app/example.py", "action": "modify"}],
+                "notes": "",
+            },
+        )
+        monkeypatch.setattr(
+            orchestrator,
+            "_create_run_worktree",
+            lambda *args, **kwargs: pytest.fail("plan mode must not create a worktree before approval"),
+        )
+
+        payload = orchestrator.run_autonomy_sync(db, run.run_id)
+
+        assert payload["status"] == "awaiting_approval"
+        assert payload["plan_status"] == "awaiting_approval"
+        assert payload["worktree_path"] is None
+        assert any(m["message_type"] == "plan" for m in payload["messages"])
+        assert not any(a["artifact_type"] == "diff" for a in payload["artifacts"])
+    finally:
+        db.close()
+
+
+def test_approved_plan_resumes_implementation_phase(monkeypatch, tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        run = ProjectAutonomyRun(
+            run_id="pa_approved",
+            repo_id=repo.id,
+            prompt="change example",
+            status="queued",
+            current_stage="implement",
+            execution_mode="plan_approval",
+            plan_status="approved",
+            plan_json='{"analysis":"ok","files":[{"path":"app/example.py","action":"modify"}],"notes":""}',
+        )
+        db.add(run)
+        db.commit()
+        called = {}
+
+        def fake_impl(db_arg, run_arg, repo_arg, repo_path_arg):
+            called["run_id"] = run_arg.run_id
+            return {"run_id": run_arg.run_id, "status": "merged"}
+
+        monkeypatch.setattr(orchestrator, "_run_implementation_phase", fake_impl)
+        monkeypatch.setattr(orchestrator, "resolve_repo_runtime_path", lambda repo_arg: tmp_path)
+
+        payload = orchestrator.run_autonomy_sync(db, run.run_id)
+
+        assert called["run_id"] == "pa_approved"
+        assert payload["status"] == "merged"
+    finally:
+        db.close()
+
+
+def test_visual_validation_records_video_skip_as_non_blocking_artifact():
+    db = _sqlite_autonomy_session()
+    try:
+        run = ProjectAutonomyRun(
+            run_id="pa_visual",
+            prompt="review the UI",
+            status="awaiting_approval",
+            current_stage="plan",
+            execution_mode="plan_approval",
+            plan_status="awaiting_approval",
+        )
+        db.add(run)
+        db.commit()
+
+        payload = orchestrator.record_visual_validation(db, run.run_id, kind="video")
+
+        assert payload is not None
+        video = next(a for a in payload["artifacts"] if a["artifact_type"] == "visual_video")
+        assert video["content_json"]["skipped"] is True
+        assert any(a["artifact_type"] == "ux_review" for a in payload["artifacts"])
+        assert payload["messages"][-1]["message_type"] == "validation"
+    finally:
+        db.close()
+
+
+def test_events_after_includes_chat_messages():
+    db = _sqlite_autonomy_session()
+    try:
+        run = ProjectAutonomyRun(
+            run_id="pa_events",
+            prompt="hello",
+            status="awaiting_approval",
+            current_stage="plan",
+        )
+        db.add(run)
+        db.commit()
+        orchestrator._record_message(db, run, "assistant", "Plan ready.", message_type="plan")
+
+        events = orchestrator.events_after(db, run.run_id)
+
+        assert events["messages"][0]["content"] == "Plan ready."
+        assert events["after_message_id"] == events["messages"][0]["id"]
+    finally:
+        db.close()
 
 
 def test_recover_orphaned_runs_blocks_pre_restart_active_run(monkeypatch):

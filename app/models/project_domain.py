@@ -65,6 +65,9 @@ class ProjectAutonomyRun(Base):
     status = Column(String(24), nullable=False, default="queued", index=True)
     current_stage = Column(String(40), nullable=False, default="queued", index=True)
     autonomy_level = Column(String(40), nullable=False, default="full_local")
+    execution_mode = Column(String(40), nullable=False, default="plan_approval")
+    plan_status = Column(String(40), nullable=False, default="drafting", index=True)
+    chat_title = Column(String(200), nullable=True)
     model_policy = Column(String(40), nullable=False, default="local_first")
     target_branch = Column(String(200), nullable=True)
     base_branch = Column(String(200), nullable=True)
@@ -85,6 +88,20 @@ class ProjectAutonomyRun(Base):
     finished_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class ProjectAutonomyMessage(Base):
+    """Persistent user/assistant chat messages for one Autopilot instance."""
+
+    __tablename__ = "project_autonomy_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_id = Column(String(64), nullable=False, index=True)
+    role = Column(String(24), nullable=False, default="assistant", index=True)
+    message_type = Column(String(40), nullable=False, default="chat", index=True)
+    content = Column(Text, nullable=False, default="")
+    metadata_json = Column(Text, nullable=False, default="{}")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 class ProjectAutonomyStep(Base):

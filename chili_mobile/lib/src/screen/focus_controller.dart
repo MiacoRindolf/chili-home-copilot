@@ -29,10 +29,12 @@ class FocusController {
   }
 
   /// Exit Focus Mode and clean up the last captured file.
-  void stop() {
+  void stop({bool deleteLastFile = true}) {
     isFocused.value = false;
     _target = null;
-    _cleanupLastFile();
+    if (deleteLastFile) {
+      _cleanupLastFile();
+    }
   }
 
   /// Take a single screenshot based on the stored [FocusTarget] and return the
@@ -76,9 +78,8 @@ class FocusController {
         width: captured.width,
         height: captured.height,
         bytes: Uint8List.fromList(captured.buffer).buffer,
-        order: Platform.isWindows
-            ? img.ChannelOrder.bgra
-            : captured.channelOrder,
+        order:
+            Platform.isWindows ? img.ChannelOrder.bgra : captured.channelOrder,
       );
       final Uint8List pngBytes = Uint8List.fromList(img.encodePng(image));
       final ts = DateTime.now().millisecondsSinceEpoch;

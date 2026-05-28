@@ -178,6 +178,25 @@ class AutonomyRunPresenter {
         }
         if (sha.isNotEmpty) return 'Created commit ${_shortSha(sha)}.';
         break;
+      case 'visual_screenshot':
+        final path = _firstText(json, ['path', 'url']);
+        if (path.isNotEmpty) return 'Attached screenshot evidence: $path';
+        return 'Requested screenshot evidence for UI/UX validation.';
+      case 'visual_video':
+        if (json['skipped'] == true) {
+          final reason = _firstText(json, ['skip_reason', 'reason']);
+          return reason.isEmpty
+              ? 'Video validation was skipped.'
+              : 'Video validation was skipped: $reason';
+        }
+        final path = _firstText(json, ['path', 'url']);
+        if (path.isNotEmpty) return 'Attached video evidence: $path';
+        return 'Requested video evidence for UI/UX validation.';
+      case 'ui_review':
+      case 'ux_review':
+        final summary = _firstText(json, ['summary', 'message']);
+        if (summary.isNotEmpty) return summary;
+        break;
     }
 
     if (content.isNotEmpty && !_looksStructured(content)) return content;
@@ -209,14 +228,33 @@ class AutonomyRunPresenter {
     }).toList();
     String summary;
     if (failed == 0 && skipped == 0) {
-      summary = '$passed validation ${passed == 1 ? 'check' : 'checks'} passed.';
+      summary =
+          '$passed validation ${passed == 1 ? 'check' : 'checks'} passed.';
     } else if (failed == 0) {
-      summary = '$passed validation ${passed == 1 ? 'check' : 'checks'} passed; '
+      summary =
+          '$passed validation ${passed == 1 ? 'check' : 'checks'} passed; '
           '$skipped skipped.';
     } else {
       summary = '$failed of ${validation.length} validation checks failed.';
     }
     return [summary, ...lines].join('\n');
+  }
+
+  static String planBody(Map<String, dynamic> plan) {
+    if (plan.isEmpty) return '';
+    final analysis = _text(plan['analysis']).trim();
+    final notes = _text(plan['notes']).trim();
+    final files = _mapList(plan['files'])
+        .map((file) => _firstText(file, ['path', 'file']))
+        .where((path) => path.isNotEmpty)
+        .toList();
+    final parts = <String>[];
+    if (analysis.isNotEmpty) parts.add(analysis);
+    if (files.isNotEmpty) {
+      parts.add('Files: ${_listSummary(files, limit: 6)}.');
+    }
+    if (notes.isNotEmpty) parts.add(notes);
+    return parts.join('\n\n');
   }
 
   static String compact(dynamic value) {

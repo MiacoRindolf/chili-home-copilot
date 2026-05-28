@@ -19405,6 +19405,49 @@ def _migration_277_project_autonomy_tables(conn) -> None:
     logger.info("[mig277] project autonomy tables installed")
 
 
+def _migration_278_project_autonomy_chat_plan_mode(conn) -> None:
+    """Add chat-backed plan approval state for Project Autopilot."""
+
+    tables = _tables(conn)
+    if "project_autonomy_runs" in tables:
+        cols = _columns(conn, "project_autonomy_runs")
+        if "execution_mode" not in cols:
+            conn.execute(text(
+                "ALTER TABLE project_autonomy_runs "
+                "ADD COLUMN execution_mode VARCHAR(40) NOT NULL DEFAULT 'plan_approval'"
+            ))
+        if "plan_status" not in cols:
+            conn.execute(text(
+                "ALTER TABLE project_autonomy_runs "
+                "ADD COLUMN plan_status VARCHAR(40) NOT NULL DEFAULT 'drafting'"
+            ))
+        if "chat_title" not in cols:
+            conn.execute(text("ALTER TABLE project_autonomy_runs ADD COLUMN chat_title VARCHAR(200) NULL"))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_project_autonomy_runs_plan_status "
+            "ON project_autonomy_runs(plan_status)"
+        ))
+
+    if "project_autonomy_messages" not in tables:
+        conn.execute(text("""
+            CREATE TABLE project_autonomy_messages (
+                id SERIAL PRIMARY KEY,
+                run_id VARCHAR(64) NOT NULL,
+                role VARCHAR(24) NOT NULL DEFAULT 'assistant',
+                message_type VARCHAR(40) NOT NULL DEFAULT 'chat',
+                content TEXT NOT NULL DEFAULT '',
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+        conn.execute(text("CREATE INDEX ix_project_autonomy_messages_run_id ON project_autonomy_messages(run_id, id)"))
+        conn.execute(text("CREATE INDEX ix_project_autonomy_messages_role ON project_autonomy_messages(role)"))
+        conn.execute(text("CREATE INDEX ix_project_autonomy_messages_type ON project_autonomy_messages(message_type)"))
+
+    conn.commit()
+    logger.info("[mig278] project autonomy chat/plan mode installed")
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -19741,6 +19784,8 @@ MIGRATIONS = [
      _migration_276_exit_parity_pattern_created_index),
     ("277_project_autonomy_tables",
      _migration_277_project_autonomy_tables),
+    ("278_project_autonomy_chat_plan_mode",
+     _migration_278_project_autonomy_chat_plan_mode),
 ]
 
 

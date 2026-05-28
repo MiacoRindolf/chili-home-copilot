@@ -643,13 +643,90 @@ class ChiliApiClient {
   Future<Map<String, dynamic>> createProjectAutonomyRun({
     required String prompt,
     int? repoId,
+    String executionMode = 'plan_approval',
   }) async {
     final body = <String, dynamic>{
       'prompt': prompt.trim(),
       if (repoId != null) 'repo_id': repoId,
+      'execution_mode': executionMode,
     };
     final res = await _client.post(
       Uri.parse('$baseUrl/api/brain/project/autonomy/runs'),
+      headers: _headers(),
+      body: jsonEncode(body),
+    );
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>?;
+    } catch (_) {}
+    if (res.statusCode != 200) {
+      final err = decoded?['error'] ??
+          decoded?['message'] ??
+          decoded?['detail'] ??
+          res.body;
+      throw Exception(err is String ? err : 'HTTP ${res.statusCode}');
+    }
+    return Map<String, dynamic>.from((decoded?['run'] ?? {}) as Map);
+  }
+
+  Future<Map<String, dynamic>> sendProjectAutonomyMessage({
+    required String runId,
+    required String content,
+  }) async {
+    final res = await _client.post(
+      Uri.parse('$baseUrl/api/brain/project/autonomy/runs/$runId/messages'),
+      headers: _headers(),
+      body: jsonEncode({'content': content.trim()}),
+    );
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>?;
+    } catch (_) {}
+    if (res.statusCode != 200) {
+      final err = decoded?['error'] ??
+          decoded?['message'] ??
+          decoded?['detail'] ??
+          res.body;
+      throw Exception(err is String ? err : 'HTTP ${res.statusCode}');
+    }
+    return Map<String, dynamic>.from((decoded?['run'] ?? {}) as Map);
+  }
+
+  Future<Map<String, dynamic>> approveProjectAutonomyPlan(String runId) async {
+    final res = await _client.post(
+      Uri.parse('$baseUrl/api/brain/project/autonomy/runs/$runId/plan/approve'),
+      headers: _headers(),
+    );
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>?;
+    } catch (_) {}
+    if (res.statusCode != 200) {
+      final err = decoded?['error'] ??
+          decoded?['message'] ??
+          decoded?['detail'] ??
+          res.body;
+      throw Exception(err is String ? err : 'HTTP ${res.statusCode}');
+    }
+    return Map<String, dynamic>.from((decoded?['run'] ?? {}) as Map);
+  }
+
+  Future<Map<String, dynamic>> recordProjectAutonomyVisualValidation({
+    required String runId,
+    required String kind,
+    String? path,
+    String? url,
+    String? note,
+  }) async {
+    final body = <String, dynamic>{
+      'kind': kind,
+      if (path != null && path.trim().isNotEmpty) 'path': path.trim(),
+      if (url != null && url.trim().isNotEmpty) 'url': url.trim(),
+      if (note != null && note.trim().isNotEmpty) 'note': note.trim(),
+    };
+    final res = await _client.post(
+      Uri.parse(
+          '$baseUrl/api/brain/project/autonomy/runs/$runId/visual-validation'),
       headers: _headers(),
       body: jsonEncode(body),
     );

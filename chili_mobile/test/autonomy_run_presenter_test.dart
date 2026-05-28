@@ -87,6 +87,35 @@ void main() {
     }
   });
 
+  test('plan and visual artifacts summarize for chat cockpit', () {
+    final plan = AutonomyRunPresenter.planBody({
+      'analysis': 'Refactor the Autopilot panel into a chat cockpit.',
+      'files': [
+        {'path': 'chili_mobile/lib/src/brain/brain_dispatch_screen.dart'},
+      ],
+      'notes': 'Wait for approval before implementation.',
+    });
+    final screenshot = AutonomyRunPresenter.artifactBody({
+      'artifact_type': 'visual_screenshot',
+      'content_json': {'path': 'C:/tmp/chili_focus.png'},
+    });
+    final video = AutonomyRunPresenter.artifactBody({
+      'artifact_type': 'visual_video',
+      'content_json': {
+        'skipped': true,
+        'skip_reason': 'Desktop video capture is not available yet',
+      },
+    });
+
+    expect(plan, contains('Refactor the Autopilot panel'));
+    expect(plan, contains('brain_dispatch_screen.dart'));
+    expect(screenshot, contains('screenshot evidence'));
+    expect(video, contains('Video validation was skipped'));
+    for (final body in [plan, screenshot, video]) {
+      expect(body, isNot(contains('{')));
+    }
+  });
+
   test('validation output names skipped local gates', () {
     final validation = AutonomyRunPresenter.validationBody([
       {'step_key': 'ast_syntax', 'exit_code': 0},
@@ -107,7 +136,8 @@ void main() {
     expect(validation, contains('1 validation check passed; 2 skipped.'));
     expect(
       validation,
-      contains('pytest_targeted skipped: safe TEST_DATABASE_URL not configured'),
+      contains(
+          'pytest_targeted skipped: safe TEST_DATABASE_URL not configured'),
     );
     expect(validation, isNot(contains('"skipped"')));
   });
@@ -115,18 +145,22 @@ void main() {
   test('dirty checkout merge blocks are explained as operator next steps', () {
     final run = {
       'status': 'blocked',
-      'merge_message': 'Target checkout has dirty changes touching the autopilot scope.',
+      'merge_message':
+          'Target checkout has dirty changes touching the autopilot scope.',
     };
     final step = AutonomyRunPresenter.stepBody({
       'stage': 'merge',
       'status': 'blocked',
       'detail': {
-        'merge_message': 'Target checkout has dirty changes touching the autopilot scope.',
+        'merge_message':
+            'Target checkout has dirty changes touching the autopilot scope.',
       },
     });
 
-    expect(AutonomyRunPresenter.blockedRunMessage(run), contains('validated branch'));
-    expect(AutonomyRunPresenter.blockedRunMessage(run), contains('Commit or stash'));
+    expect(AutonomyRunPresenter.blockedRunMessage(run),
+        contains('validated branch'));
+    expect(AutonomyRunPresenter.blockedRunMessage(run),
+        contains('Commit or stash'));
     expect(step, contains('validated branch'));
     expect(step, isNot(contains('dirty changes touching the autopilot scope')));
   });
@@ -139,7 +173,8 @@ void main() {
 
     final message = AutonomyRunPresenter.blockedRunMessage(run);
 
-    expect(message, contains('could not turn this run into a usable code patch'));
+    expect(
+        message, contains('could not turn this run into a usable code patch'));
     expect(message, contains('No changes were merged'));
     expect(message, isNot(contains('No implementation diffs were generated')));
   });

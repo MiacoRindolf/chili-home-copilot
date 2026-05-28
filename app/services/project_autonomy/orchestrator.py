@@ -30,6 +30,7 @@ from ...models import (
     ProjectAutonomyArtifact,
     ProjectAutonomyLearningSample,
     ProjectAutonomyLease,
+    ProjectAutonomyMessage,
     ProjectAutonomyRun,
     ProjectAutonomyStep,
     ProjectDomainRun,
@@ -60,7 +61,8 @@ from ..context_brain import ollama_client
 from ..project_domain_runs import finish_run, start_run
 
 TERMINAL_STATUSES = frozenset({"merged", "completed", "blocked", "failed", "cancelled"})
-ACTIVE_STATUSES = frozenset({"queued", "running", "validating", "merging"})
+IDLE_STATUSES = frozenset({"awaiting_approval"})
+ACTIVE_STATUSES = frozenset({"queued", "running", "validating", "merging", "revising"})
 AUTONOMOUS_KIND = "autonomous"
 
 _MODEL_PREFERENCE = (
@@ -189,6 +191,9 @@ def _run_payload(row: ProjectAutonomyRun) -> dict[str, Any]:
         "status": row.status,
         "current_stage": row.current_stage,
         "autonomy_level": row.autonomy_level,
+        "execution_mode": row.execution_mode,
+        "plan_status": row.plan_status,
+        "chat_title": row.chat_title,
         "model_policy": row.model_policy,
         "target_branch": row.target_branch,
         "base_branch": row.base_branch,
@@ -241,9 +246,31 @@ def _artifact_payload(row: ProjectAutonomyArtifact) -> dict[str, Any]:
     }
 
 
+def _message_payload(row: ProjectAutonomyMessage) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "run_id": row.run_id,
+        "role": row.role,
+        "message_type": row.message_type,
+        "content": row.content,
+        "metadata": _json_load(row.metadata_json, {}),
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+    }
+
+
 def run_payload(db: Session, row: ProjectAutonomyRun, *, include_events: bool = False) -> dict[str, Any]:
     payload = _run_payload(row)
     if include_events:
+        payload["messages"] = [
+            _message_payload(message)
+            for message in (
+                db.query(ProjectAutonomyMessage)
+                .filter(ProjectAutonomyMessage.run_id == row.run_id)
+                .order_by(ProjectAutonomyMessage.id.asc())
+                .limit(300)
+                .all()
+            )
+        ]
         payload["steps"] = [
             _step_payload(step)
             for step in (
@@ -332,9 +359,17 @@ def events_after(
     db: Session,
     run_id: str,
     *,
+    after_message_id: int = 0,
     after_step_id: int = 0,
     after_artifact_id: int = 0,
 ) -> dict[str, Any]:
+    messages = (
+        db.query(ProjectAutonomyMessage)
+        .filter(ProjectAutonomyMessage.run_id == run_id, ProjectAutonomyMessage.id > int(after_message_id or 0))
+        .order_by(ProjectAutonomyMessage.id.asc())
+        .limit(100)
+        .all()
+    )
     steps = (
         db.query(ProjectAutonomyStep)
         .filter(ProjectAutonomyStep.run_id == run_id, ProjectAutonomyStep.id > int(after_step_id or 0))
@@ -350,8 +385,10 @@ def events_after(
         .all()
     )
     return {
+        "messages": [_message_payload(message) for message in messages],
         "steps": [_step_payload(step) for step in steps],
         "artifacts": [_artifact_payload(artifact) for artifact in artifacts],
+        "after_message_id": max([int(message.id) for message in messages], default=int(after_message_id or 0)),
         "after_step_id": max([int(step.id) for step in steps], default=int(after_step_id or 0)),
         "after_artifact_id": max([int(artifact.id) for artifact in artifacts], default=int(after_artifact_id or 0)),
     }
@@ -383,6 +420,7 @@ def create_run(
     user_id: int | None = None,
     autonomy_level: str = "full_local",
     model_policy: str = "local_first",
+    execution_mode: str = "plan_approval",
 ) -> ProjectAutonomyRun:
     clean_prompt = (prompt or "").strip()
     if not clean_prompt:
@@ -392,6 +430,7 @@ def create_run(
         raise ValueError("No reachable registered repo is available for Project Autopilot.")
     if resolve_repo_runtime_path(repo) is None:
         raise ValueError("The selected repo is registered but not reachable from this runtime.")
+    clean_execution_mode = execution_mode if execution_mode in {"plan_approval", "full_autopilot"} else "plan_approval"
 
     run_id = "pa_" + uuid.uuid4().hex[:14]
     project_run = start_run(
@@ -416,6 +455,9 @@ def create_run(
         status="queued",
         current_stage="queued",
         autonomy_level=autonomy_level,
+        execution_mode=clean_execution_mode,
+        plan_status="drafting",
+        chat_title=clean_prompt[:120],
         model_policy=model_policy,
         merge_status="pending",
     )
@@ -438,6 +480,15 @@ def create_run(
         content=clean_prompt,
         commit=False,
     )
+    _record_message(
+        db,
+        row,
+        "user",
+        clean_prompt,
+        message_type="prompt",
+        metadata={"repo_id": int(repo.id), "repo_name": repo.name},
+        commit=False,
+    )
     db.commit()
     db.refresh(row)
     return row
@@ -448,6 +499,19 @@ def request_cancel(db: Session, run_id: str, *, user_id: int | None = None) -> d
     if row is None:
         return None
     row.cancel_requested = True
+    if row.status in IDLE_STATUSES:
+        _finish(
+            db,
+            row,
+            status="cancelled",
+            stage=row.current_stage or "cancelled",
+            title="Autopilot cancelled",
+            error_message="Run cancelled by operator.",
+            merge_status="cancelled",
+            merge_message="Cancelled before implementation.",
+        )
+        db.refresh(row)
+        return run_payload(db, row, include_events=True)
     if row.status in ACTIVE_STATUSES:
         _record_step(
             db,
@@ -487,6 +551,135 @@ def merge_run(db: Session, run_id: str, *, user_id: int | None = None) -> dict[s
     finally:
         release_run_leases(db, row.run_id)
         db.commit()
+
+
+def append_user_message(
+    db: Session,
+    run_id: str,
+    *,
+    content: str,
+    user_id: int | None = None,
+) -> dict[str, Any] | None:
+    row = _get_run_row(db, run_id, user_id=user_id)
+    if row is None:
+        return None
+    clean = (content or "").strip()
+    if not clean:
+        raise ValueError("Message is required.")
+    _record_message(db, row, "user", clean, commit=False)
+    if row.plan_status in {"awaiting_approval", "revising"} and row.status == "awaiting_approval":
+        row.status = "queued"
+        row.plan_status = "revising"
+        row.current_stage = "plan"
+        row.prompt = _conversation_prompt(db, row)
+        _record_message(
+            db,
+            row,
+            "assistant",
+            "I’ll revise the plan with that feedback before making any code changes.",
+            message_type="status",
+            commit=False,
+        )
+    db.commit()
+    db.refresh(row)
+    return run_payload(db, row, include_events=True)
+
+
+def approve_plan(db: Session, run_id: str, *, user_id: int | None = None) -> dict[str, Any] | None:
+    row = _get_run_row(db, run_id, user_id=user_id)
+    if row is None:
+        return None
+    plan = _json_load(row.plan_json, {})
+    if not plan:
+        raise ValueError("This run does not have a plan to approve yet.")
+    row.plan_status = "approved"
+    row.status = "queued"
+    row.current_stage = "implement"
+    _record_message(
+        db,
+        row,
+        "assistant",
+        "Plan approved. I’m starting implementation in an isolated worktree now.",
+        message_type="status",
+        commit=False,
+    )
+    db.commit()
+    db.refresh(row)
+    return run_payload(db, row, include_events=True)
+
+
+def record_visual_validation(
+    db: Session,
+    run_id: str,
+    *,
+    kind: str,
+    path: str | None = None,
+    url: str | None = None,
+    note: str | None = None,
+    user_id: int | None = None,
+) -> dict[str, Any] | None:
+    row = _get_run_row(db, run_id, user_id=user_id)
+    if row is None:
+        return None
+    clean_kind = (kind or "screenshot").strip().lower()
+    if clean_kind not in {"screenshot", "video"}:
+        clean_kind = "screenshot"
+    clean_path = (path or "").strip()
+    clean_url = (url or "").strip()
+    clean_note = (note or "").strip()
+    artifact_type = "visual_video" if clean_kind == "video" else "visual_screenshot"
+    payload = {
+        "kind": clean_kind,
+        "source": "desktop" if clean_path else "backend",
+        "path": clean_path or None,
+        "url": clean_url or None,
+        "note": clean_note or None,
+        "skipped": clean_kind == "video" and not clean_path,
+        "skip_reason": "Desktop video capture is not available yet for this run." if clean_kind == "video" and not clean_path else None,
+    }
+    _add_artifact(db, row.run_id, artifact_type, f"{clean_kind}_evidence", content_json=payload, commit=False)
+    if clean_kind == "screenshot":
+        review = "UI evidence attached. The UI and UX agents can use this screenshot when reviewing the run."
+        _add_artifact(
+            db,
+            row.run_id,
+            "ui_review",
+            "ui_agent_review",
+            content_json={"summary": review, "evidence_type": artifact_type, "path": clean_path or None},
+            commit=False,
+        )
+    else:
+        review = (
+            "Video evidence attached for UI/UX validation."
+            if clean_path
+            else "Video validation was requested, but no recording was available. This does not block code validation."
+        )
+        _add_artifact(
+            db,
+            row.run_id,
+            "ux_review",
+            "ux_agent_review",
+            content_json={"summary": review, "evidence_type": artifact_type, "path": clean_path or None},
+            commit=False,
+        )
+    _record_message(db, row, "assistant", review, message_type="validation", metadata=payload, commit=False)
+    db.commit()
+    db.refresh(row)
+    return run_payload(db, row, include_events=True)
+
+
+def _conversation_prompt(db: Session, run: ProjectAutonomyRun) -> str:
+    rows = (
+        db.query(ProjectAutonomyMessage)
+        .filter(ProjectAutonomyMessage.run_id == run.run_id, ProjectAutonomyMessage.role == "user")
+        .order_by(ProjectAutonomyMessage.id.asc())
+        .limit(20)
+        .all()
+    )
+    if not rows:
+        return run.prompt
+    parts = [f"User message {idx + 1}: {row.content}" for idx, row in enumerate(rows)]
+    return "\n\n".join(parts)
 
 
 def _record_step(
@@ -554,6 +747,62 @@ def _add_artifact(
     return row
 
 
+def _record_message(
+    db: Session,
+    run: ProjectAutonomyRun,
+    role: str,
+    content: str,
+    *,
+    message_type: str = "chat",
+    metadata: dict[str, Any] | None = None,
+    commit: bool = True,
+) -> ProjectAutonomyMessage:
+    row = ProjectAutonomyMessage(
+        run_id=run.run_id,
+        role=role,
+        message_type=message_type,
+        content=content.strip(),
+        metadata_json=_json_text(metadata or {}),
+    )
+    db.add(row)
+    run.updated_at = _utcnow()
+    db.flush()
+    if commit:
+        db.commit()
+    return row
+
+
+def _plan_message(plan: dict[str, Any], files: list[dict[str, Any]], agents: list[dict[str, Any]]) -> str:
+    analysis = str(plan.get("analysis") or "").strip()
+    notes = str(plan.get("notes") or "").strip()
+    file_paths = [str(item.get("path") or "") for item in files if item.get("path")]
+    agent_names = [str(item.get("name") or "") for item in agents if item.get("name")]
+    parts = ["I drafted a plan and I’m waiting for your approval before changing files."]
+    if analysis:
+        parts.append(analysis)
+    if file_paths:
+        parts.append("I expect to work in: " + ", ".join(file_paths[:6]) + ("." if len(file_paths) <= 6 else f", and {len(file_paths) - 6} more."))
+    if agent_names:
+        parts.append("Lanes: " + ", ".join(agent_names[:6]) + ".")
+    if notes:
+        parts.append(notes)
+    parts.append("Send feedback to revise the plan, or approve it to let me implement in an isolated worktree.")
+    return "\n\n".join(parts)
+
+
+def _completion_message(run: ProjectAutonomyRun) -> str:
+    status = str(run.status or "")
+    if status == "merged":
+        return str(run.merge_message or "Implementation is complete and merged safely.")
+    if status == "blocked":
+        return str(run.merge_message or run.error_message or "Implementation is blocked. Review the inspector for the safe next step.")
+    if status == "failed":
+        return str(run.error_message or "Implementation failed before completion.")
+    if status == "cancelled":
+        return "This Autopilot run was cancelled."
+    return str(run.merge_message or "Implementation finished.")
+
+
 def _sync_project_run(db: Session, run: ProjectAutonomyRun, *, title: str | None = None) -> None:
     if not run.project_run_id:
         return
@@ -588,6 +837,8 @@ def _finish(
     now = _utcnow()
     run.status = status
     run.current_stage = stage
+    if status in TERMINAL_STATUSES:
+        run.plan_status = "implemented" if run.plan_status == "approved" else run.plan_status
     run.error_message = error_message
     if merge_status is not None:
         run.merge_status = merge_status
@@ -602,6 +853,15 @@ def _finish(
         title,
         status=status if status in {"failed", "blocked", "cancelled"} else "completed",
         detail={"error_message": error_message, "merge_message": merge_message},
+        commit=False,
+    )
+    _record_message(
+        db,
+        run,
+        "assistant",
+        _completion_message(run),
+        message_type="result",
+        metadata={"status": status, "stage": stage, "merge_status": run.merge_status},
         commit=False,
     )
     if run.project_run_id:
@@ -1731,155 +1991,205 @@ def _record_learning(
     return payload
 
 
-def run_autonomy_sync(db: Session, run_id: str, on_event: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
-    run = _get_run_row(db, run_id)
-    if run is None:
-        raise ValueError(f"Unknown autonomy run: {run_id}")
-    repo = _repo_for_row(db, run)
-    repo_path = resolve_repo_runtime_path(repo) if repo is not None else None
-    plan: dict[str, Any] = {}
-    validation: list[dict[str, Any]] = []
-    changed_files: list[str] = []
-    try:
-        if repo is None or repo_path is None:
-            raise AutonomyBlocked("Selected repo is no longer reachable.")
-        run.status = "running"
+def _run_planning_phase(db: Session, run: ProjectAutonomyRun, repo: CodeRepo, repo_path: Path) -> dict[str, Any]:
+    run.status = "running"
+    run.plan_status = "drafting" if run.plan_status not in {"revising"} else "revising"
+    if run.started_at is None:
         run.started_at = _utcnow()
-        db.commit()
+    db.commit()
 
-        _record_step(db, run, "classify", "Classifying request", detail={"prompt_preview": run.prompt[:240]})
-        _check_cancel(db, run)
-        if _looks_like_live_monitoring_prompt(run.prompt):
-            raise AutonomyBlocked(
-                "This looks like a live monitoring/debugging request rather than a repo-editing task. "
-                "Project Autopilot only starts autonomous worktrees for implementation prompts; use the live "
-                "operator/chat monitor for this request, or ask Autopilot for a specific code change."
-            )
-        _ensure_git_repo(repo_path)
-        base_branch = _git_text(repo_path, ["branch", "--show-current"], timeout=60)
-        base_sha = _git_text(repo_path, ["rev-parse", "HEAD"], timeout=60)
-        run.base_branch = base_branch
-        run.target_branch = base_branch
-        run.base_sha = base_sha
-        db.commit()
+    _record_step(db, run, "classify", "Classifying request", detail={"prompt_preview": run.prompt[:240]})
+    _check_cancel(db, run)
+    if _looks_like_live_monitoring_prompt(run.prompt):
+        raise AutonomyBlocked(
+            "This looks like a live monitoring/debugging request rather than a repo-editing task. "
+            "Project Autopilot only starts autonomous worktrees for implementation prompts; use the live "
+            "operator/chat monitor for this request, or ask Autopilot for a specific code change."
+        )
+    _ensure_git_repo(repo_path)
+    base_branch = _git_text(repo_path, ["branch", "--show-current"], timeout=60)
+    base_sha = _git_text(repo_path, ["rev-parse", "HEAD"], timeout=60)
+    run.base_branch = base_branch
+    run.target_branch = base_branch
+    run.base_sha = base_sha
+    db.commit()
 
-        _record_step(db, run, "repo_scan", "Scanning repository context", detail={"repo": repo.name, "path": str(repo_path)})
-        _check_cancel(db, run)
-        branch, worktree = _create_run_worktree(repo_path, run, base_sha)
-        run.integration_branch = branch
-        run.worktree_path = str(worktree)
-        acquire_repo_lease(db, run, int(repo.id))
-        db.commit()
-        _add_artifact(db, run.run_id, "worktree", "integration_worktree", content_json={"branch": branch, "path": str(worktree)})
+    _record_step(db, run, "repo_scan", "Scanning repository context", detail={"repo": repo.name, "path": str(repo_path)})
+    _check_cancel(db, run)
+    _record_step(db, run, "plan", "Architect is drafting an implementation plan")
+    plan = build_local_plan(db, run, repo)
+    files = _plan_files(plan)
+    if not files:
+        raise AutonomyBlocked("The plan did not identify concrete files to change.")
+    run.plan_json = _json_text(plan)
+    run.files_json = _json_text([item["path"] for item in files])
+    _add_artifact(db, run.run_id, "plan", "architect_plan", content_json=plan, commit=False)
 
-        _record_step(db, run, "plan", "Architect is drafting an implementation plan")
-        _check_cancel(db, run)
-        plan = build_local_plan(db, run, repo)
-        files = _plan_files(plan)
-        if not files:
-            raise AutonomyBlocked("The plan did not identify concrete files to change.")
-        run.plan_json = _json_text(plan)
-        run.files_json = _json_text([item["path"] for item in files])
-        _add_artifact(db, run.run_id, "plan", "architect_plan", content_json=plan, commit=False)
+    agents = assign_agent_lanes(files)
+    run.agents_json = _json_text(agents)
+    _record_step(db, run, "assign_roles", "Architect assigned agent lanes", detail={"agents": agents}, commit=False)
+    _record_message(
+        db,
+        run,
+        "assistant",
+        _plan_message(plan, files, agents),
+        message_type="plan",
+        metadata={"plan": plan, "files": files, "agents": agents},
+        commit=False,
+    )
+    if run.execution_mode == "full_autopilot":
+        run.plan_status = "approved"
         db.commit()
+        return _run_implementation_phase(db, run, repo, repo_path)
 
+    run.status = "awaiting_approval"
+    run.current_stage = "plan"
+    run.plan_status = "awaiting_approval"
+    run.updated_at = _utcnow()
+    db.commit()
+    db.refresh(run)
+    return run_payload(db, run, include_events=True)
+
+
+def _run_implementation_phase(db: Session, run: ProjectAutonomyRun, repo: CodeRepo, repo_path: Path) -> dict[str, Any]:
+    plan = _json_load(run.plan_json, {})
+    validation: list[dict[str, Any]] = []
+    files = _plan_files(plan)
+    if not files:
+        raise AutonomyBlocked("The approved plan does not identify concrete files to change.")
+    _ensure_git_repo(repo_path)
+    if not run.base_branch:
+        run.base_branch = _git_text(repo_path, ["branch", "--show-current"], timeout=60)
+        run.target_branch = run.base_branch
+    if not run.base_sha:
+        run.base_sha = _git_text(repo_path, ["rev-parse", "HEAD"], timeout=60)
+    run.status = "running"
+    run.current_stage = "implement"
+    run.plan_status = "approved"
+    if run.started_at is None:
+        run.started_at = _utcnow()
+    db.commit()
+
+    base_sha = str(run.base_sha)
+    branch, worktree = _create_run_worktree(repo_path, run, base_sha)
+    run.integration_branch = branch
+    run.worktree_path = str(worktree)
+    acquire_repo_lease(db, run, int(repo.id))
+    db.commit()
+    _add_artifact(db, run.run_id, "worktree", "integration_worktree", content_json={"branch": branch, "path": str(worktree)})
+
+    agents = _json_load(run.agents_json, [])
+    if not agents:
         agents = assign_agent_lanes(files)
         run.agents_json = _json_text(agents)
-        _record_step(db, run, "assign_roles", "Architect assigned agent lanes", detail={"agents": agents})
-        acquire_agent_file_leases(db, run, int(repo.id), agents)
-        db.commit()
+    acquire_agent_file_leases(db, run, int(repo.id), agents)
+    db.commit()
 
-        _record_step(db, run, "implement", "Generating local implementation diffs", detail={"files": [f["path"] for f in files]})
-        _check_cancel(db, run)
-        diffs = generate_diffs_from_plan(db, run, worktree, files)
-        _apply_diffs(worktree, diffs)
-        changed_files = _changed_files(worktree)
-        run.files_json = _json_text(changed_files)
-        _record_step(db, run, "integrate", "Integrated generated diffs in isolated worktree", detail={"files": changed_files})
-        db.commit()
+    _record_step(db, run, "implement", "Generating local implementation diffs", detail={"files": [f["path"] for f in files]})
+    _check_cancel(db, run)
+    diffs = generate_diffs_from_plan(db, run, worktree, files)
+    _apply_diffs(worktree, diffs)
+    changed_files = _changed_files(worktree)
+    run.files_json = _json_text(changed_files)
+    _record_step(db, run, "integrate", "Integrated generated diffs in isolated worktree", detail={"files": changed_files})
+    db.commit()
 
-        run.status = "validating"
-        _record_step(db, run, "validate", "Running allowlisted validation commands", detail={"files": changed_files})
-        validation = run_validation(worktree, changed_files)
-        run.validation_json = _json_text(validation)
-        run.commands_json = _json_text([{"step_key": item.get("step_key"), "exit_code": item.get("exit_code")} for item in validation])
-        _add_artifact(db, run.run_id, "validation", "validation_results", content_json=validation, commit=False)
-        db.commit()
+    run.status = "validating"
+    _record_step(db, run, "validate", "Running allowlisted validation commands", detail={"files": changed_files})
+    validation = run_validation(worktree, changed_files)
+    run.validation_json = _json_text(validation)
+    run.commands_json = _json_text([{"step_key": item.get("step_key"), "exit_code": item.get("exit_code")} for item in validation])
+    _add_artifact(db, run.run_id, "validation", "validation_results", content_json=validation, commit=False)
+    db.commit()
 
-        if not validation_passed(validation):
-            _record_step(db, run, "repair", "Validation failed; attempting one local repair pass", status="completed")
-            repair_context = _validation_failure_text(validation)
-            repair_diffs = generate_diffs_from_plan(db, run, worktree, files, validation_context=repair_context)
-            if repair_diffs:
-                _apply_diffs(worktree, repair_diffs)
-                changed_files = _changed_files(worktree)
-                validation = run_validation(worktree, changed_files)
-                run.files_json = _json_text(changed_files)
-                run.validation_json = _json_text(validation)
-                _add_artifact(db, run.run_id, "validation", "repair_validation_results", content_json=validation, commit=False)
-                db.commit()
+    if not validation_passed(validation):
+        _record_step(db, run, "repair", "Validation failed; attempting one local repair pass", status="completed")
+        repair_context = _validation_failure_text(validation)
+        repair_diffs = generate_diffs_from_plan(db, run, worktree, files, validation_context=repair_context)
+        if repair_diffs:
+            _apply_diffs(worktree, repair_diffs)
+            changed_files = _changed_files(worktree)
+            validation = run_validation(worktree, changed_files)
+            run.files_json = _json_text(changed_files)
+            run.validation_json = _json_text(validation)
+            _add_artifact(db, run.run_id, "validation", "repair_validation_results", content_json=validation, commit=False)
+            db.commit()
 
-        commit_sha = _commit_if_needed(worktree, run)
-        _add_artifact(db, run.run_id, "commit", "integration_commit", content_json={"commit_sha": commit_sha, "branch": branch})
+    commit_sha = _commit_if_needed(worktree, run)
+    _add_artifact(db, run.run_id, "commit", "integration_commit", content_json={"commit_sha": commit_sha, "branch": branch})
 
-        _record_step(db, run, "learn", "Recording evidence-gated learning sample")
-        _record_learning(
-            db,
-            run,
-            outcome="validated" if validation_passed(validation) else "validation_failed",
-            plan=plan,
-            validation=validation,
-        )
-        db.commit()
+    _record_step(db, run, "learn", "Recording evidence-gated learning sample")
+    _record_learning(
+        db,
+        run,
+        outcome="validated" if validation_passed(validation) else "validation_failed",
+        plan=plan,
+        validation=validation,
+    )
+    db.commit()
 
-        if not validation_passed(validation):
-            return run_payload(
-                db,
-                _finish(
-                    db,
-                    run,
-                    status="blocked",
-                    stage="validate",
-                    title="Autopilot blocked by validation",
-                    error_message=_validation_failure_text(validation),
-                    merge_status="blocked",
-                    merge_message="Validation failed after repair.",
-                ),
-                include_events=True,
-            )
-
-        run.status = "merging"
-        _record_step(db, run, "merge", "Checking merge gates")
-        merge_result = _attempt_merge(db, run, repo_path, changed_files)
-        if merge_result.get("ok"):
-            _record_learning(db, run, outcome="merged", plan=plan, validation=validation)
-            return run_payload(
-                db,
-                _finish(
-                    db,
-                    run,
-                    status="merged",
-                    stage="merge",
-                    title="Autopilot merged safely",
-                    merge_status="merged",
-                    merge_message=str(merge_result.get("message") or "Merged."),
-                ),
-                include_events=True,
-            )
-        _record_learning(db, run, outcome="blocked", plan=plan, validation=validation)
+    if not validation_passed(validation):
         return run_payload(
             db,
             _finish(
                 db,
                 run,
                 status="blocked",
-                stage="merge",
-                title="Autopilot produced a validated branch",
+                stage="validate",
+                title="Autopilot blocked by validation",
+                error_message=_validation_failure_text(validation),
                 merge_status="blocked",
-                merge_message=str(merge_result.get("reason") or "Merge gate blocked."),
+                merge_message="Validation failed after repair.",
             ),
             include_events=True,
         )
+
+    run.status = "merging"
+    _record_step(db, run, "merge", "Checking merge gates")
+    merge_result = _attempt_merge(db, run, repo_path, changed_files)
+    if merge_result.get("ok"):
+        _record_learning(db, run, outcome="merged", plan=plan, validation=validation)
+        return run_payload(
+            db,
+            _finish(
+                db,
+                run,
+                status="merged",
+                stage="merge",
+                title="Autopilot merged safely",
+                merge_status="merged",
+                merge_message=str(merge_result.get("message") or "Merged."),
+            ),
+            include_events=True,
+        )
+    _record_learning(db, run, outcome="blocked", plan=plan, validation=validation)
+    return run_payload(
+        db,
+        _finish(
+            db,
+            run,
+            status="blocked",
+            stage="merge",
+            title="Autopilot produced a validated branch",
+            merge_status="blocked",
+            merge_message=str(merge_result.get("reason") or "Merge gate blocked."),
+        ),
+        include_events=True,
+    )
+
+
+def run_autonomy_sync(db: Session, run_id: str, on_event: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
+    run = _get_run_row(db, run_id)
+    if run is None:
+        raise ValueError(f"Unknown autonomy run: {run_id}")
+    repo = _repo_for_row(db, run)
+    repo_path = resolve_repo_runtime_path(repo) if repo is not None else None
+    try:
+        if repo is None or repo_path is None:
+            raise AutonomyBlocked("Selected repo is no longer reachable.")
+        if run.plan_status == "approved" and _json_load(run.plan_json, {}):
+            return _run_implementation_phase(db, run, repo, repo_path)
+        return _run_planning_phase(db, run, repo, repo_path)
     except AutonomyCancelled as exc:
         return run_payload(
             db,
@@ -1896,6 +2206,8 @@ def run_autonomy_sync(db: Session, run_id: str, on_event: Callable[[dict[str, An
             include_events=True,
         )
     except AutonomyBlocked as exc:
+        plan = _json_load(run.plan_json, {})
+        validation = _json_load(run.validation_json, [])
         _record_learning(db, run, outcome="blocked", plan=plan, validation=validation)
         return run_payload(
             db,

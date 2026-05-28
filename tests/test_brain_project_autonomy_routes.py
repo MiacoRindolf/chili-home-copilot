@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.models import ProjectDomainRun
+from app.models import ProjectAutonomyRun, ProjectDomainRun
 from app.models.code_brain import CodeRepo
 
 
@@ -12,6 +12,9 @@ def test_project_autonomy_routes_are_registered(fastapi_app):
         ("GET", "/api/brain/project/autonomy/runs"),
         ("GET", "/api/brain/project/autonomy/runs/{run_id}"),
         ("GET", "/api/brain/project/autonomy/runs/{run_id}/events"),
+        ("POST", "/api/brain/project/autonomy/runs/{run_id}/messages"),
+        ("POST", "/api/brain/project/autonomy/runs/{run_id}/plan/approve"),
+        ("POST", "/api/brain/project/autonomy/runs/{run_id}/visual-validation"),
         ("POST", "/api/brain/project/autonomy/runs/{run_id}/cancel"),
         ("POST", "/api/brain/project/autonomy/runs/{run_id}/merge"),
     }
@@ -55,7 +58,11 @@ def test_project_autonomy_create_list_detail_cancel_and_merge(
     assert payload["ok"] is True
     run_id = payload["run"]["run_id"]
     assert payload["run"]["status"] == "queued"
+    assert payload["run"]["execution_mode"] == "plan_approval"
+    assert payload["run"]["plan_status"] == "drafting"
     assert payload["run"]["repo_id"] == repo.id
+    assert payload["run"]["messages"][0]["role"] == "user"
+    assert payload["run"]["messages"][0]["content"] == "Add a tiny project autopilot test hook"
 
     domain_run = db.query(ProjectDomainRun).filter(ProjectDomainRun.run_kind == "autonomous").first()
     assert domain_run is not None
@@ -68,6 +75,33 @@ def test_project_autonomy_create_list_detail_cancel_and_merge(
     detail = client.get(f"/api/brain/project/autonomy/runs/{run_id}")
     assert detail.status_code == 200
     assert detail.json()["run"]["steps"][0]["stage"] == "queued"
+    assert detail.json()["run"]["messages"][0]["message_type"] == "prompt"
+
+    visual = client.post(
+        f"/api/brain/project/autonomy/runs/{run_id}/visual-validation",
+        json={"kind": "video"},
+    )
+    assert visual.status_code == 200
+    artifacts = visual.json()["run"]["artifacts"]
+    assert any(a["artifact_type"] == "visual_video" for a in artifacts)
+    assert any(a["artifact_type"] == "ux_review" for a in artifacts)
+
+    message = client.post(
+        f"/api/brain/project/autonomy/runs/{run_id}/messages",
+        json={"content": "Please keep the change narrow."},
+    )
+    assert message.status_code == 200
+    assert message.json()["run"]["messages"][-1]["content"] == "Please keep the change narrow."
+
+    db_run = db.query(ProjectAutonomyRun).filter(ProjectAutonomyRun.run_id == run_id).one()
+    db_run.status = "awaiting_approval"
+    db_run.current_stage = "plan"
+    db_run.plan_status = "awaiting_approval"
+    db_run.plan_json = '{"analysis":"ok","files":[{"path":"app/example.py","action":"modify"}],"notes":""}'
+    db.commit()
+    approved = client.post(f"/api/brain/project/autonomy/runs/{run_id}/plan/approve")
+    assert approved.status_code == 200
+    assert approved.json()["run"]["plan_status"] == "approved"
 
     cancelled = client.post(f"/api/brain/project/autonomy/runs/{run_id}/cancel")
     assert cancelled.status_code == 200
