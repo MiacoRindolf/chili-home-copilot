@@ -71,6 +71,7 @@ _GATEWAY_EXACT_CACHEABLE_PURPOSES = frozenset({
     "reasoning_web_research",
     "trading_analyze",
     "trading_analyze_stream",
+    "trading_brain_assistant",
     "trading_pattern_mine",
     "trading_reflect",
     "trading_reasoning",

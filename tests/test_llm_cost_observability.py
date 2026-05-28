@@ -770,7 +770,7 @@ def test_gateway_exact_cache_uses_trading_reflect_default_when_db_seed_missing(m
 
 @pytest.mark.parametrize(
     "purpose",
-    ["trading_analyze", "trading_reasoning", "trading_smart_pick"],
+    ["trading_analyze", "trading_reasoning", "trading_smart_pick", "trading_brain_assistant"],
 )
 def test_gateway_exact_cache_uses_low_stakes_trading_defaults_when_db_seed_missing(
     monkeypatch,
