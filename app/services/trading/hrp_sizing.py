@@ -220,11 +220,11 @@ def _fetch_returns_matrix(
         rows = db.execute(
             text(
                 """
-                SELECT ticker, bar_start_at, last_price
+                SELECT ticker, bar_start_at, close_price AS price
                 FROM trading_snapshots
                 WHERE bar_start_at >= :cutoff
                   AND ticker = ANY(:symbols)
-                  AND last_price IS NOT NULL AND last_price > 0
+                  AND close_price IS NOT NULL AND close_price > 0
                 ORDER BY ticker, bar_start_at
                 """
             ),
