@@ -108,6 +108,14 @@ def provider_base_url_for_model(model: str | None) -> str:
         return PAID_OPENAI_BASE_URL
     if m == settings.premium_model and _premium_configured():
         return settings.premium_base_url
+    if m.lower().startswith(("gpt-", "o1", "o3")) and _openai_official_configured():
+        return PAID_OPENAI_BASE_URL
+    if (
+        m.lower().startswith(("gpt-", "o1", "o3"))
+        and _premium_configured()
+        and provider_from_base_url(settings.premium_base_url) == "openai"
+    ):
+        return settings.premium_base_url
     return ""
 
 
@@ -528,7 +536,15 @@ def _log_cascade_order_once(trace_id: str) -> None:
         log_info(trace_id, "llm_cascade_order=legacy (openai→groq→groq_secondary→gemini)")
 
 
-def _chat_openai(prompt, messages, user_message, trace_id, max_tokens, strict_escalation):
+def _chat_openai(
+    prompt,
+    messages,
+    user_message,
+    trace_id,
+    max_tokens,
+    strict_escalation,
+    model_override: str | None = None,
+):
     if not _openai_official_configured():
         return None
     if _is_auth_failed(PAID_OPENAI_BASE_URL):
@@ -539,7 +555,8 @@ def _chat_openai(prompt, messages, user_message, trace_id, max_tokens, strict_es
     if _near_paid_budget_limit(PAID_OPENAI_BASE_URL, trace_id):
         return None
     try:
-        result = _call_provider(PAID_OPENAI_API_KEY, PAID_OPENAI_BASE_URL, PAID_OPENAI_MODEL,
+        model = (model_override or PAID_OPENAI_MODEL).strip() or PAID_OPENAI_MODEL
+        result = _call_provider(PAID_OPENAI_API_KEY, PAID_OPENAI_BASE_URL, model,
                                 messages, prompt, trace_id, max_tokens=max_tokens)
         if not _is_weak_response(result["reply"], user_message, strict_escalation):
             return result
@@ -601,7 +618,15 @@ def _chat_groq(prompt, messages, user_message, trace_id, max_tokens, strict_esca
     return None
 
 
-def _chat_gemini(prompt, messages, user_message, trace_id, max_tokens, strict_escalation):
+def _chat_gemini(
+    prompt,
+    messages,
+    user_message,
+    trace_id,
+    max_tokens,
+    strict_escalation,
+    model_override: str | None = None,
+):
     if not _premium_configured():
         return None
     if _near_daily_limit(settings.premium_base_url):
@@ -612,7 +637,10 @@ def _chat_gemini(prompt, messages, user_message, trace_id, max_tokens, strict_es
         return None
     try:
         log_info(trace_id, f"falling back to premium provider={_provider_host(settings.premium_base_url)}")
-        return _call_provider(settings.premium_api_key, settings.premium_base_url, settings.premium_model,
+        model = settings.premium_model
+        if provider_from_base_url(settings.premium_base_url) == "openai" and model_override:
+            model = model_override
+        return _call_provider(settings.premium_api_key, settings.premium_base_url, model,
                               messages, prompt, trace_id, max_tokens=max_tokens)
     except Exception as e2:
         log_info(trace_id, f"premium_fallback_error={e2}")
@@ -728,6 +756,7 @@ def chat(
     user_message: str = "",
     max_tokens: int = 1024,
     strict_escalation: bool = True,
+    model_override: str | None = None,
 ) -> dict:
     """Chat cascade. Order depends on ``settings.llm_free_tier_first``:
 
@@ -762,7 +791,18 @@ def chat(
 
     for step, provider_name, tier_num in order:
         _t0 = time.monotonic()
-        result = step(prompt, messages, user_message, trace_id, max_tokens, strict_escalation)
+        if step in (_chat_openai, _chat_gemini):
+            result = step(
+                prompt,
+                messages,
+                user_message,
+                trace_id,
+                max_tokens,
+                strict_escalation,
+                model_override,
+            )
+        else:
+            result = step(prompt, messages, user_message, trace_id, max_tokens, strict_escalation)
         _latency_ms = int((time.monotonic() - _t0) * 1000)
         if result and result.get("reply"):
             _safe_log_llm_call(
@@ -796,7 +836,7 @@ def chat(
     return {"reply": "", "tokens_used": 0, "model": "error"}
 
 
-def _stream_tier_openai(messages, prompt, trace_id, max_tokens, flags):
+def _stream_tier_openai(messages, prompt, trace_id, max_tokens, flags, model_override: str | None = None):
     if not _openai_official_configured():
         return
     if _near_daily_limit(PAID_OPENAI_BASE_URL):
@@ -806,7 +846,8 @@ def _stream_tier_openai(messages, prompt, trace_id, max_tokens, flags):
         return
     try:
         got = False
-        for tok, model in _stream_provider(PAID_OPENAI_API_KEY, PAID_OPENAI_BASE_URL, PAID_OPENAI_MODEL,
+        model_name = (model_override or PAID_OPENAI_MODEL).strip() or PAID_OPENAI_MODEL
+        for tok, model in _stream_provider(PAID_OPENAI_API_KEY, PAID_OPENAI_BASE_URL, model_name,
                                            messages, prompt, trace_id, max_tokens=max_tokens):
             got = True
             yield tok, model
@@ -867,7 +908,7 @@ def _stream_tier_groq(messages, prompt, trace_id, max_tokens, flags):
         log_info(trace_id, f"secondary_stream_error={e}")
 
 
-def _stream_tier_gemini(messages, prompt, trace_id, max_tokens, flags):
+def _stream_tier_gemini(messages, prompt, trace_id, max_tokens, flags, model_override: str | None = None):
     if not _premium_configured():
         return
     if _near_daily_limit(settings.premium_base_url):
@@ -879,7 +920,10 @@ def _stream_tier_gemini(messages, prompt, trace_id, max_tokens, flags):
     try:
         log_info(trace_id, f"stream falling back to premium provider={_provider_host(settings.premium_base_url)}")
         got = False
-        for tok, model in _stream_provider(settings.premium_api_key, settings.premium_base_url, settings.premium_model,
+        model_name = settings.premium_model
+        if provider_from_base_url(settings.premium_base_url) == "openai" and model_override:
+            model_name = model_override
+        for tok, model in _stream_provider(settings.premium_api_key, settings.premium_base_url, model_name,
                                            messages, prompt, trace_id, max_tokens=max_tokens):
             got = True
             yield tok, model
@@ -903,6 +947,7 @@ def chat_stream(
     user_message: str = "",
     max_tokens: int = 1024,
     strict_escalation: bool = True,
+    model_override: str | None = None,
 ):
     """Stream cascade (order depends on ``settings.llm_free_tier_first``).
 
@@ -921,7 +966,10 @@ def chat_stream(
 
     flags = {"done": False, "saw_permanent": False, "saw_transient_429": False}
     for tier in tiers:
-        yield from tier(messages, prompt, trace_id, max_tokens, flags)
+        if tier in (_stream_tier_openai, _stream_tier_gemini):
+            yield from tier(messages, prompt, trace_id, max_tokens, flags, model_override)
+        else:
+            yield from tier(messages, prompt, trace_id, max_tokens, flags)
         if flags["done"]:
             return
 
@@ -941,6 +989,7 @@ def chat_stream(
             user_message=user_message,
             max_tokens=max_tokens,
             strict_escalation=strict_escalation,
+            model_override=model_override,
         )
         reply = (result.get("reply") or "").strip()
         if reply:

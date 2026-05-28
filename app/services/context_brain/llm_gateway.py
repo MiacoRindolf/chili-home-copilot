@@ -25,6 +25,7 @@ where the tree pipeline is buying us quality vs just adding latency.
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import Any, Optional
@@ -33,12 +34,37 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ... import openai_client
+from ...config import settings
 from ..llm_cost import approximate_tokens, estimate_cost_usd, provider_from_base_url
 from . import purpose_policy as policy_mod
 from . import tree_coordinator as tree_mod
 from .tree_types import GatewayCallResult, PurposePolicy
 
 logger = logging.getLogger(__name__)
+
+
+def _purpose_model_override(purpose: str, policy: PurposePolicy | None = None) -> str | None:
+    """Configured non-high-stakes paid model override for a gateway purpose."""
+    raw = getattr(settings, "chili_llm_purpose_model_overrides_json", "") or ""
+    if not raw.strip():
+        return None
+    try:
+        parsed = json.loads(raw)
+    except Exception as e:
+        logger.debug("[context_brain.gateway] invalid purpose override JSON: %s", e)
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    model = parsed.get(purpose) or parsed.get("*")
+    if not isinstance(model, str) or not model.strip():
+        return None
+    if policy is not None and policy.high_stakes:
+        logger.info(
+            "[context_brain.gateway] ignoring model override for high-stakes purpose=%s",
+            purpose,
+        )
+        return None
+    return model.strip()
 
 
 def _open_db_session():
@@ -193,6 +219,7 @@ def _passthrough(
     user_message: str,
     max_tokens: int,
     strict_escalation: bool,
+    model_override: Optional[str] = None,
 ) -> dict:
     """Direct call to the legacy openai_client.chat() cascade."""
     return openai_client.chat(
@@ -202,6 +229,7 @@ def _passthrough(
         user_message=user_message,
         max_tokens=max_tokens,
         strict_escalation=strict_escalation,
+        model_override=model_override,
     )
 
 
@@ -255,6 +283,7 @@ def _augmented(
     db: Session,
     user_id: Optional[int],
     project_id: Optional[int],
+    model_override: Optional[str] = None,
 ) -> dict:
     """Phase F.1-F.3 pipeline: assemble structured context, single LLM
     call. Same as ``chat_service.gather_context_only`` but invokable
@@ -280,6 +309,7 @@ def _augmented(
                     user_message=user_message,
                     max_tokens=max_tokens,
                     strict_escalation=strict_escalation,
+                    model_override=model_override,
                 )
     except Exception as e:
         logger.debug("[context_brain.gateway] augmented failed, passthrough: %s", e)
@@ -290,6 +320,7 @@ def _augmented(
         system_prompt=system_prompt, trace_id=trace_id,
         user_message=user_message, max_tokens=max_tokens,
         strict_escalation=strict_escalation,
+        model_override=model_override,
     )
 
 
@@ -338,6 +369,7 @@ def gateway_chat(
             policy = PurposePolicy(
                 **{**policy.__dict__, "routing_strategy": "passthrough"},
             )
+        model_override = _purpose_model_override(policy.purpose, policy)
 
         log_id = _write_gateway_log_start(
             db,
@@ -421,6 +453,7 @@ def gateway_chat(
                     max_tokens=max_tokens,
                     strict_escalation=strict_escalation,
                     db=db, user_id=user_id, project_id=project_id,
+                    model_override=model_override,
                 )
                 cost_fields = _cost_fields_from_result(result)
                 _finalize_gateway_log(
@@ -441,6 +474,7 @@ def gateway_chat(
                     user_message=inferred_user_message,
                     max_tokens=max_tokens,
                     strict_escalation=strict_escalation,
+                    model_override=model_override,
                 )
                 cost_fields = _cost_fields_from_result(result)
                 _finalize_gateway_log(
@@ -507,6 +541,7 @@ def gateway_chat_stream(
                 user_message=user_message,
                 max_tokens=max_tokens,
                 strict_escalation=strict_escalation,
+                model_override=_purpose_model_override(purpose),
             )
             return
 
@@ -530,6 +565,7 @@ def gateway_chat_stream(
             policy = policy_mod.get_policy(db, purpose)
         except Exception as e:
             logger.warning("[context_brain.gateway] stream policy failed, falling through: %s", e)
+            model_override = _purpose_model_override(purpose)
             for tok, model in openai_client.chat_stream(
                 messages=messages,
                 system_prompt=prompt,
@@ -537,6 +573,7 @@ def gateway_chat_stream(
                 user_message=inferred_user_message,
                 max_tokens=max_tokens,
                 strict_escalation=strict_escalation,
+                model_override=model_override,
             ):
                 reply_parts.append(tok)
                 model_seen = model
@@ -547,6 +584,7 @@ def gateway_chat_stream(
             policy = PurposePolicy(
                 **{**policy.__dict__, "routing_strategy": "passthrough"},
             )
+        model_override = _purpose_model_override(policy.purpose, policy)
 
         log_id = _write_gateway_log_start(
             db,
@@ -582,6 +620,7 @@ def gateway_chat_stream(
             user_message=inferred_user_message,
             max_tokens=max_tokens,
             strict_escalation=strict_escalation,
+            model_override=model_override,
         ):
             if model:
                 model_seen = model

@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 from app import openai_client as oc
 from app.config import Settings
-from app.services.context_brain.llm_gateway import gateway_chat_stream
+from app.services.context_brain.llm_gateway import gateway_chat, gateway_chat_stream
 from app.services.context_brain.tree_types import PurposePolicy
 from app.services.llm_cost import estimate_cost_usd, provider_from_base_url
 
@@ -55,6 +55,105 @@ def test_paid_budget_enforce_blocks_openai(monkeypatch):
     monkeypatch.setattr(oc, "_provider_spend_today_usd", lambda provider="openai": 1.5)
 
     assert oc._near_paid_budget_limit("https://api.openai.com/v1", "test") is True
+
+
+def test_model_override_uses_cheaper_paid_model(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(oc.settings, "llm_free_tier_first", False)
+
+    def fake_call(api_key, base_url, model, *args, **kwargs):
+        calls.append(model)
+        return {
+            "reply": "This is a strong enough reply for the override path.",
+            "tokens_used": 10,
+            "model": model,
+        }
+
+    monkeypatch.setattr(oc, "_openai_official_configured", lambda: True)
+    monkeypatch.setattr(oc, "_groq_stack_configured", lambda: False)
+    monkeypatch.setattr(oc, "_premium_configured", lambda: False)
+    monkeypatch.setattr(oc, "_near_daily_limit", lambda *args, **kwargs: False)
+    monkeypatch.setattr(oc, "_near_paid_budget_limit", lambda *args, **kwargs: False)
+    monkeypatch.setattr(oc, "_safe_log_llm_call", lambda **kwargs: None)
+    monkeypatch.setattr(oc, "_call_provider", fake_call)
+
+    result = oc.chat(
+        messages=[{"role": "user", "content": "rank this"}],
+        user_message="rank this",
+        model_override="gpt-5.4-mini",
+    )
+
+    assert result["model"] == "gpt-5.4-mini"
+    assert calls == ["gpt-5.4-mini"]
+    assert oc.provider_base_url_for_model("gpt-5.4-mini") == oc.PAID_OPENAI_BASE_URL
+
+
+def test_gateway_purpose_override_for_non_high_stakes(monkeypatch):
+    chat = MagicMock(
+        return_value={
+            "reply": "ok",
+            "model": "gpt-5.4-mini",
+            "provider": "openai",
+            "tokens_used": 10,
+        }
+    )
+    monkeypatch.setattr(
+        "app.services.context_brain.llm_gateway.settings.chili_llm_purpose_model_overrides_json",
+        '{"pattern_research_extract":"gpt-5.4-mini"}',
+    )
+    monkeypatch.setattr(
+        "app.services.context_brain.llm_gateway.policy_mod.get_policy",
+        lambda db, purpose: PurposePolicy(
+            purpose=purpose,
+            routing_strategy="passthrough",
+            decompose=False,
+            cross_examine=False,
+            use_premium_synthesis=False,
+            high_stakes=False,
+        ),
+    )
+    monkeypatch.setattr("app.services.context_brain.llm_gateway._write_gateway_log_start", lambda *a, **k: 1)
+    monkeypatch.setattr("app.services.context_brain.llm_gateway._finalize_gateway_log", lambda *a, **k: None)
+    monkeypatch.setattr(oc, "chat", chat)
+
+    result = gateway_chat(
+        [{"role": "user", "content": "extract"}],
+        purpose="pattern_research_extract",
+        db=object(),
+    )
+
+    assert result["reply"] == "ok"
+    assert chat.call_args.kwargs["model_override"] == "gpt-5.4-mini"
+
+
+def test_gateway_purpose_override_ignored_for_high_stakes(monkeypatch):
+    chat = MagicMock(return_value={"reply": "ok", "model": "gpt-5.5", "tokens_used": 10})
+    monkeypatch.setattr(
+        "app.services.context_brain.llm_gateway.settings.chili_llm_purpose_model_overrides_json",
+        '{"autotrader_revalidation":"gpt-5.4-mini"}',
+    )
+    monkeypatch.setattr(
+        "app.services.context_brain.llm_gateway.policy_mod.get_policy",
+        lambda db, purpose: PurposePolicy(
+            purpose=purpose,
+            routing_strategy="passthrough",
+            decompose=False,
+            cross_examine=False,
+            use_premium_synthesis=False,
+            high_stakes=True,
+        ),
+    )
+    monkeypatch.setattr("app.services.context_brain.llm_gateway._write_gateway_log_start", lambda *a, **k: 1)
+    monkeypatch.setattr("app.services.context_brain.llm_gateway._finalize_gateway_log", lambda *a, **k: None)
+    monkeypatch.setattr(oc, "chat", chat)
+
+    gateway_chat(
+        [{"role": "user", "content": "validate"}],
+        purpose="autotrader_revalidation",
+        db=object(),
+    )
+
+    assert chat.call_args.kwargs["model_override"] is None
 
 
 def test_gateway_stream_logs_provider_and_estimated_cost(monkeypatch):
