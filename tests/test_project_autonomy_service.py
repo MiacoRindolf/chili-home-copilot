@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db import Base
-from app.models import ProjectAutonomyLease, ProjectAutonomyRun, ProjectDomainRun, User
+from app.models import ProjectAutonomyLease, ProjectAutonomyRun, ProjectAutonomyStep, ProjectDomainRun, User
 from app.models.code_brain import CodeRepo
 from app.services.project_autonomy import orchestrator
 
@@ -19,6 +21,7 @@ def _sqlite_autonomy_session():
             CodeRepo.__table__,
             ProjectDomainRun.__table__,
             ProjectAutonomyRun.__table__,
+            ProjectAutonomyStep.__table__,
             ProjectAutonomyLease.__table__,
         ],
     )
@@ -136,6 +139,34 @@ def test_live_monitoring_prompt_is_not_treated_as_repo_edit():
     assert not orchestrator._looks_like_live_monitoring_prompt(
         "while I'm testing, update chili_mobile/lib/src/brain/foo.dart to fix the layout"
     )
+
+
+def test_recover_orphaned_runs_blocks_pre_restart_active_run(monkeypatch):
+    db = _sqlite_autonomy_session()
+    try:
+        before_restart = datetime.utcnow() - timedelta(minutes=5)
+        monkeypatch.setattr(orchestrator, "_PROCESS_STARTED_AT", datetime.utcnow())
+        run = ProjectAutonomyRun(
+            run_id="pa_orphaned",
+            prompt="make a change",
+            status="running",
+            current_stage="implement",
+            merge_status="pending",
+            started_at=before_restart,
+            updated_at=before_restart,
+        )
+        db.add(run)
+        db.commit()
+
+        recovered = orchestrator.recover_orphaned_runs(db)
+        db.refresh(run)
+
+        assert recovered == 1
+        assert run.status == "blocked"
+        assert run.merge_status == "blocked"
+        assert "interrupted" in (run.error_message or "")
+    finally:
+        db.close()
 
 
 def test_heuristic_plan_fallback_uses_desktop_candidates(tmp_path):

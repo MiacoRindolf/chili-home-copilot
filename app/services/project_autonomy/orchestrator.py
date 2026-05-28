@@ -106,6 +106,9 @@ def _utcnow() -> datetime:
     return datetime.utcnow()
 
 
+_PROCESS_STARTED_AT = _utcnow()
+
+
 def _json_text(value: Any) -> str:
     return json.dumps(value, default=str)
 
@@ -267,6 +270,7 @@ def list_runs(
     repo_id: int | None = None,
     limit: int = 20,
 ) -> list[dict[str, Any]]:
+    recover_orphaned_runs(db, user_id=user_id)
     q = db.query(ProjectAutonomyRun)
     if user_id is not None:
         q = q.filter(ProjectAutonomyRun.user_id == user_id)
@@ -283,10 +287,41 @@ def get_run(
     user_id: int | None = None,
     include_events: bool = True,
 ) -> dict[str, Any] | None:
+    recover_orphaned_runs(db, user_id=user_id)
     row = _get_run_row(db, run_id, user_id=user_id)
     if row is None:
         return None
     return run_payload(db, row, include_events=include_events)
+
+
+def recover_orphaned_runs(db: Session, *, user_id: int | None = None) -> int:
+    q = db.query(ProjectAutonomyRun).filter(ProjectAutonomyRun.status.in_(tuple(ACTIVE_STATUSES)))
+    if user_id is not None:
+        q = q.filter(ProjectAutonomyRun.user_id == user_id)
+    rows = q.all()
+    recovered = 0
+    for row in rows:
+        last_seen = row.updated_at or row.started_at or row.created_at
+        if last_seen and last_seen >= _PROCESS_STARTED_AT:
+            continue
+        _finish(
+            db,
+            row,
+            status="blocked",
+            stage=row.current_stage or "interrupted",
+            title="Autopilot worker interrupted",
+            error_message=(
+                "Autopilot worker was interrupted by an API restart before this durable run completed. "
+                "Start a new run so the current process can own the worktree safely."
+            ),
+            merge_status="blocked",
+            merge_message="Worker interrupted by API restart.",
+        )
+        release_run_leases(db, row.run_id)
+        recovered += 1
+    if recovered:
+        db.commit()
+    return recovered
 
 
 def events_after(
