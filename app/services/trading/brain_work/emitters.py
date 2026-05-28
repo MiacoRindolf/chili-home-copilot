@@ -32,6 +32,7 @@ def emit_edge_reliability_refresh_requested(
     scan_pattern_id: int,
     *,
     source: str,
+    asset_class: str | None = None,
     window_days: int = 30,
     evidence_fingerprint: str | None = None,
 ) -> int | None:
@@ -46,6 +47,7 @@ def emit_edge_reliability_refresh_requested(
         db,
         int(scan_pattern_id),
         source=source,
+        asset_class=asset_class,
         window_days=window_days,
         evidence_fingerprint=evidence_fingerprint,
     )
@@ -57,6 +59,7 @@ def emit_profitability_followup_requested(
     event_type: str,
     scan_pattern_id: int | None,
     source: str,
+    asset_class: str | None = None,
     evidence_fingerprint: str | None = None,
     payload: dict[str, Any] | None = None,
 ) -> int | None:
@@ -68,6 +71,7 @@ def emit_profitability_followup_requested(
         event_type=event_type,
         scan_pattern_id=scan_pattern_id,
         source=source,
+        asset_class=asset_class,
         evidence_fingerprint=evidence_fingerprint,
         payload=payload,
     )

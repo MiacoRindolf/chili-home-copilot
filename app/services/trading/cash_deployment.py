@@ -22,6 +22,8 @@ from .edge_reliability import (
     PROVENANCE_BACKFILL,
     RECERT_RESCUE_REFRESH,
     edge_supply_rows,
+    emit_edge_reliability_refresh_requested,
+    emit_targeted_profitability_work,
     null_lineage_short_paper_candidates,
 )
 from .portfolio_risk import get_risk_limits
@@ -559,3 +561,110 @@ def cash_deployment_null_lineage_candidates(
         )
         out.append(item)
     return out
+
+
+def enqueue_cash_deployment_work(
+    db: Session,
+    *,
+    user_id: int | None = None,
+    window_days: int = DEFAULT_WINDOW_DAYS,
+    limit: int = DEFAULT_TOP_LIMIT,
+    include_null_lineage: bool = True,
+) -> dict[str, Any]:
+    """Turn cash-deployment diagnostics into deduped brain work.
+
+    This is intentionally conservative: it queues reliability refreshes,
+    recert rescue, learned-variant refresh, and provenance work. It never
+    promotes a pattern or routes an order.
+    """
+    rows = cash_deployment_rows(
+        db,
+        user_id=user_id,
+        window_days=window_days,
+        limit=limit,
+    )
+    created: list[int] = []
+    considered = 0
+    skipped = 0
+    by_event: Counter[str] = Counter()
+    for row in rows:
+        event_type = str(row.get("recommended_work_event") or "").strip()
+        pid = row.get("scan_pattern_id")
+        if not event_type or pid is None:
+            skipped += 1
+            continue
+        considered += 1
+        payload = {
+            "cash_deployment_category": row.get("cash_deployment_category"),
+            "asset_class": row.get("asset_class"),
+            "slice_asset_class": row.get("slice_asset_class"),
+            "edge_slice_id": row.get("edge_slice_id"),
+            "calibrated_ev_after_cost_pct": row.get("calibrated_ev_after_cost_pct"),
+            "allocation_score": row.get("allocation_score"),
+            "expected_evidence_value": row.get("expected_evidence_value"),
+            "graduation_blocker": row.get("graduation_blocker"),
+        }
+        if event_type == EDGE_RELIABILITY_REFRESH:
+            event_id = emit_edge_reliability_refresh_requested(
+                db,
+                int(pid),
+                source="cash_deployment",
+                asset_class=row.get("asset_class"),
+                window_days=window_days,
+                evidence_fingerprint=str(row.get("evidence_fingerprint") or ""),
+            )
+        else:
+            event_id = emit_targeted_profitability_work(
+                db,
+                event_type=event_type,
+                scan_pattern_id=int(pid),
+                source="cash_deployment",
+                asset_class=row.get("asset_class"),
+                evidence_fingerprint=str(row.get("evidence_fingerprint") or ""),
+                payload=payload,
+            )
+        if event_id is None:
+            skipped += 1
+            continue
+        created.append(int(event_id))
+        by_event[event_type] += 1
+
+    null_created: list[int] = []
+    if include_null_lineage:
+        for row in cash_deployment_null_lineage_candidates(
+            db,
+            window_days=window_days,
+            limit=min(10, max(1, int(limit))),
+        ):
+            considered += 1
+            event_id = emit_targeted_profitability_work(
+                db,
+                event_type=PROVENANCE_BACKFILL,
+                scan_pattern_id=None,
+                source="cash_deployment",
+                evidence_fingerprint=str(row.get("evidence_fingerprint") or ""),
+                payload={
+                    "cash_deployment_category": "needs_provenance",
+                    "ticker": row.get("ticker"),
+                    "family": row.get("family"),
+                    "closed_count": row.get("closed_count"),
+                    "total_pnl": row.get("total_pnl"),
+                    "paper_trade_ids": row.get("paper_trade_ids"),
+                    "expected_evidence_value": max(0.0, _safe_float(row.get("total_pnl"), 0.0) or 0.0),
+                },
+            )
+            if event_id is None:
+                skipped += 1
+                continue
+            null_created.append(int(event_id))
+            by_event[PROVENANCE_BACKFILL] += 1
+
+    return {
+        "ok": True,
+        "window_days": int(window_days),
+        "considered": considered,
+        "created": len(created) + len(null_created),
+        "skipped": skipped,
+        "event_ids": created + null_created,
+        "event_types": dict(by_event),
+    }

@@ -3535,6 +3535,43 @@ def _run_realized_stats_sync_job() -> None:
     run_scheduler_job_guarded("realized_stats_sync", _work)
 
 
+def _run_cash_deployment_work_producer_job() -> None:
+    """Queue targeted profitability work from the cash-deployment funnel."""
+    from ..config import settings as _settings
+
+    if not bool(getattr(_settings, "brain_work_cash_deployment_producer_enabled", True)):
+        return
+
+    from ..db import SessionLocal
+
+    def _work() -> None:
+        from .trading.cash_deployment import enqueue_cash_deployment_work
+
+        sess = SessionLocal()
+        try:
+            out = enqueue_cash_deployment_work(
+                sess,
+                window_days=max(
+                    1,
+                    int(getattr(_settings, "brain_work_cash_deployment_producer_window_days", 30) or 30),
+                ),
+                limit=max(
+                    1,
+                    int(getattr(_settings, "brain_work_cash_deployment_producer_limit", 25) or 25),
+                ),
+            )
+            sess.commit()
+            logger.info("[scheduler] cash_deployment_work_producer result=%s", out)
+        finally:
+            try:
+                sess.rollback()
+            except Exception:
+                pass
+            sess.close()
+
+    run_scheduler_job_guarded("cash_deployment_work_producer", _work)
+
+
 def _run_pattern_cohort_promote_job() -> None:
     """f-promotion-pipeline-rebalance Phase 4: weekly cohort
     auto-promote.
@@ -4472,6 +4509,26 @@ def start_scheduler():
                     replace_existing=True,
                     max_instances=1,
                     next_run_time=datetime.now() + timedelta(seconds=85),
+                )
+                _cd_interval = max(
+                    15,
+                    int(getattr(
+                        settings,
+                        "brain_work_cash_deployment_producer_interval_minutes",
+                        30,
+                    ) or 30),
+                )
+                _scheduler.add_job(
+                    _run_cash_deployment_work_producer_job,
+                    trigger=IntervalTrigger(minutes=_cd_interval),
+                    id="cash_deployment_work_producer",
+                    name=(
+                        "Cash-deployment profitability work producer "
+                        f"(every {_cd_interval}min)"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=90),
                 )
                 _scheduler.add_job(
                     _run_pattern_cohort_promote_job,

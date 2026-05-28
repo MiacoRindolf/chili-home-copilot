@@ -93,6 +93,91 @@ def _round(value: float | None, digits: int = 6) -> float | None:
     return round(float(value), digits) if value is not None else None
 
 
+def _canonical_asset_class(value: Any) -> str | None:
+    raw = str(value or "").strip().lower()
+    if raw in {"stock", "stocks", "equity", "equities"}:
+        return "stock"
+    if raw in {"crypto", "cryptocurrency", "coin", "coinbase_spot"}:
+        return "crypto"
+    if raw in {"option", "options"}:
+        return "options"
+    if raw in {"all", "mixed", "unknown", ""}:
+        return None
+    return raw
+
+
+def _asset_from_symbol(symbol: Any) -> str | None:
+    sym = str(symbol or "").strip().upper()
+    if not sym:
+        return None
+    if sym.endswith("-USD"):
+        return "crypto"
+    return "stock"
+
+
+def _asset_class_for_alert(alert: BreakoutAlert | None, pattern: ScanPattern | None) -> str | None:
+    if alert is not None:
+        explicit = _canonical_asset_class(getattr(alert, "asset_type", None))
+        if explicit:
+            return explicit
+        inferred = _asset_from_symbol(getattr(alert, "ticker", None))
+        if inferred:
+            return inferred
+    explicit = _canonical_asset_class(getattr(pattern, "asset_class", None))
+    if explicit:
+        return explicit
+    return None
+
+
+def _asset_class_for_run(
+    run: AutoTraderRun,
+    alert: BreakoutAlert | None,
+    pattern: ScanPattern | None,
+) -> str | None:
+    snap = _json_dict(getattr(run, "rule_snapshot", None))
+    for key in ("asset_class", "asset_type"):
+        explicit = _canonical_asset_class(snap.get(key))
+        if explicit:
+            return explicit
+    return (
+        _asset_class_for_alert(alert, pattern)
+        or _asset_from_symbol(getattr(run, "ticker", None))
+        or _canonical_asset_class(getattr(pattern, "asset_class", None))
+    )
+
+
+def _asset_class_for_paper(
+    row: PaperTrade,
+    alert: BreakoutAlert | None,
+    pattern: ScanPattern | None,
+) -> str | None:
+    signal = _json_dict(getattr(row, "signal_json", None))
+    for key in ("asset_class", "asset_type", "asset_kind"):
+        explicit = _canonical_asset_class(signal.get(key))
+        if explicit:
+            return explicit
+    return (
+        _asset_class_for_alert(alert, pattern)
+        or _asset_from_symbol(getattr(row, "ticker", None))
+        or _canonical_asset_class(getattr(pattern, "asset_class", None))
+    )
+
+
+def _asset_class_for_trade(row: Trade, pattern: ScanPattern | None) -> str | None:
+    explicit = _canonical_asset_class(getattr(row, "asset_kind", None))
+    if explicit:
+        return explicit
+    snap = _json_dict(getattr(row, "indicator_snapshot", None))
+    for key in ("asset_class", "asset_type", "asset_kind"):
+        explicit = _canonical_asset_class(snap.get(key))
+        if explicit:
+            return explicit
+    return (
+        _asset_from_symbol(getattr(row, "ticker", None))
+        or _canonical_asset_class(getattr(pattern, "asset_class", None))
+    )
+
+
 def _event_time(row: Any) -> datetime | None:
     for name in ("created_at", "entry_date", "exit_date", "submitted_at", "filled_at"):
         value = getattr(row, name, None)
@@ -248,6 +333,8 @@ def _recommended_work_event(blocker: str, *, scan_pattern_id: int | None) -> str
 def _row_fingerprint(row: dict[str, Any]) -> str:
     payload = {
         "scan_pattern_id": row.get("scan_pattern_id"),
+        "asset_class": row.get("asset_class"),
+        "slice_asset_class": row.get("slice_asset_class"),
         "window_days": row.get("window_days"),
         "edge_eval_count": row.get("edge_eval_count"),
         "closed_evidence_count": row.get("closed_evidence_count"),
@@ -264,12 +351,14 @@ def compute_pattern_edge_reliability(
     db: Session,
     scan_pattern_id: int,
     *,
+    asset_class: str | None = None,
     window_days: int = DEFAULT_WINDOW_DAYS,
     min_closed_evidence: int = DEFAULT_MIN_CLOSED_EVIDENCE,
 ) -> dict[str, Any]:
     """Compute one pattern's aggregate expected-vs-realized reliability."""
     pid = int(scan_pattern_id)
     pattern = db.get(ScanPattern, pid)
+    asset_slice = _canonical_asset_class(asset_class)
     cutoff = datetime.utcnow() - timedelta(days=max(1, int(window_days)))
 
     runs = (
@@ -290,6 +379,17 @@ def compute_pattern_edge_reliability(
             int(row.id): row
             for row in db.query(BreakoutAlert).filter(BreakoutAlert.id.in_(alert_ids)).all()
         }
+    if asset_slice:
+        runs = [
+            run
+            for run in runs
+            if _asset_class_for_run(
+                run,
+                alerts_by_id.get(int(run.breakout_alert_id)) if run.breakout_alert_id else None,
+                pattern,
+            )
+            == asset_slice
+        ]
 
     expected_values: list[float] = []
     probabilities: list[float] = []
@@ -332,22 +432,21 @@ def compute_pattern_edge_reliability(
         ).strip().upper()
         if ticker:
             tickers[ticker] += 1
-        asset = str(
-            getattr(alert, "asset_type", None)
-            or getattr(pattern, "asset_class", None)
-            or "unknown"
-        ).strip().lower()
+        asset = _asset_class_for_run(run, alert, pattern)
         asset_types[asset or "unknown"] += 1
 
-    pattern_alert_ids = [
-        int(row.id)
-        for row in (
-            db.query(BreakoutAlert.id)
-            .filter(BreakoutAlert.scan_pattern_id == pid)
-            .filter(BreakoutAlert.alerted_at >= cutoff)
-            .all()
-        )
-    ]
+    pattern_alerts = (
+        db.query(BreakoutAlert)
+        .filter(BreakoutAlert.scan_pattern_id == pid)
+        .filter(BreakoutAlert.alerted_at >= cutoff)
+        .all()
+    )
+    if asset_slice:
+        pattern_alerts = [
+            row for row in pattern_alerts if _asset_class_for_alert(row, pattern) == asset_slice
+        ]
+    pattern_alert_ids = [int(row.id) for row in pattern_alerts]
+    alerts_by_id.update({int(row.id): row for row in pattern_alerts})
 
     paper_link_filter = (
         PaperTrade.paper_shadow_of_alert_id.in_(pattern_alert_ids)
@@ -365,9 +464,20 @@ def compute_pattern_edge_reliability(
         row
         for row in paper_q.all()
         if (_event_time(row) is None or _event_time(row) >= cutoff)
+        and (
+            not asset_slice
+            or _asset_class_for_paper(
+                row,
+                alerts_by_id.get(int(row.paper_shadow_of_alert_id))
+                if row.paper_shadow_of_alert_id
+                else None,
+                pattern,
+            )
+            == asset_slice
+        )
     ]
 
-    live_rows = (
+    live_rows_all = (
         db.query(Trade)
         .filter(Trade.scan_pattern_id == pid)
         .filter(Trade.status == "closed")
@@ -380,6 +490,11 @@ def compute_pattern_edge_reliability(
         )
         .all()
     )
+    live_rows = [
+        row
+        for row in live_rows_all
+        if not asset_slice or _asset_class_for_trade(row, pattern) == asset_slice
+    ]
 
     paper_returns = [_paper_return_pct(row) for row in paper_rows]
     paper_returns_f = [v for v in paper_returns if v is not None]
@@ -445,7 +560,10 @@ def compute_pattern_edge_reliability(
     row = {
         "scan_pattern_id": pid,
         "pattern_name": getattr(pattern, "name", None),
-        "asset_class": getattr(pattern, "asset_class", None),
+        "asset_class": asset_slice or getattr(pattern, "asset_class", None),
+        "pattern_asset_class": getattr(pattern, "asset_class", None),
+        "slice_asset_class": asset_slice or "all",
+        "edge_slice_id": f"pattern:{pid}:asset:{asset_slice or 'all'}",
         "timeframe": getattr(pattern, "timeframe", None),
         "lifecycle_stage": getattr(pattern, "lifecycle_stage", None),
         "promotion_status": getattr(pattern, "promotion_status", None),
@@ -509,6 +627,7 @@ def persist_edge_reliability_snapshot(
     db: Session,
     scan_pattern_id: int,
     *,
+    asset_class: str | None = None,
     window_days: int = DEFAULT_WINDOW_DAYS,
     source: str = "edge_reliability_refresh",
     parent_event_id: int | None = None,
@@ -516,12 +635,14 @@ def persist_edge_reliability_snapshot(
     row = compute_pattern_edge_reliability(
         db,
         int(scan_pattern_id),
+        asset_class=asset_class,
         window_days=window_days,
     )
     fingerprint = str(row.get("evidence_fingerprint") or "none")
+    slice_key = str(row.get("slice_asset_class") or "all")
     dedupe = (
         f"{EDGE_RELIABILITY_SNAPSHOT}:p{int(scan_pattern_id)}:"
-        f"w{int(window_days)}:{fingerprint}"
+        f"a{slice_key}:w{int(window_days)}:{fingerprint}"
     )
     event_id = enqueue_outcome_event(
         db,
@@ -540,16 +661,22 @@ def emit_edge_reliability_refresh_requested(
     scan_pattern_id: int,
     *,
     source: str,
+    asset_class: str | None = None,
     window_days: int = DEFAULT_WINDOW_DAYS,
     evidence_fingerprint: str | None = None,
 ) -> int | None:
     fp = (evidence_fingerprint or "latest").strip()[:40]
+    slice_key = _canonical_asset_class(asset_class) or "all"
     return enqueue_work_event(
         db,
         event_type=EDGE_RELIABILITY_REFRESH,
-        dedupe_key=f"{EDGE_RELIABILITY_REFRESH}:p{int(scan_pattern_id)}:w{int(window_days)}:{fp}",
+        dedupe_key=(
+            f"{EDGE_RELIABILITY_REFRESH}:p{int(scan_pattern_id)}:"
+            f"a{slice_key}:w{int(window_days)}:{fp}"
+        ),
         payload={
             "scan_pattern_id": int(scan_pattern_id),
+            "asset_class": _canonical_asset_class(asset_class),
             "window_days": int(window_days),
             "source": source,
             "evidence_fingerprint": evidence_fingerprint,
@@ -564,6 +691,7 @@ def emit_targeted_profitability_work(
     event_type: str,
     scan_pattern_id: int | None,
     source: str,
+    asset_class: str | None = None,
     evidence_fingerprint: str | None = None,
     payload: dict[str, Any] | None = None,
 ) -> int | None:
@@ -575,14 +703,16 @@ def emit_targeted_profitability_work(
         raise ValueError(f"unsupported profitability work event_type={event_type}")
     pid_key = f"p{int(scan_pattern_id)}" if scan_pattern_id is not None else "null_lineage"
     fp = (evidence_fingerprint or "latest").strip()[:40]
+    slice_key = _canonical_asset_class(asset_class) or "all"
     body = dict(payload or {})
     if scan_pattern_id is not None:
         body["scan_pattern_id"] = int(scan_pattern_id)
+    body["asset_class"] = _canonical_asset_class(asset_class)
     body.update({"source": source, "evidence_fingerprint": evidence_fingerprint})
     return enqueue_work_event(
         db,
         event_type=event_type,
-        dedupe_key=f"{event_type}:{pid_key}:{fp}",
+        dedupe_key=f"{event_type}:{pid_key}:a{slice_key}:{fp}",
         payload=body,
         lease_scope="edge",
     )
@@ -616,6 +746,69 @@ def latest_edge_reliability_snapshots(
     return out
 
 
+def _observed_asset_slices_for_pattern(
+    db: Session,
+    scan_pattern_id: int,
+    *,
+    cutoff: datetime,
+    pattern: ScanPattern | None,
+) -> list[str | None]:
+    pattern_asset = _canonical_asset_class(getattr(pattern, "asset_class", None))
+    if pattern_asset:
+        return [pattern_asset]
+
+    slices: set[str] = set()
+    recent_runs = (
+        db.query(AutoTraderRun)
+        .filter(AutoTraderRun.scan_pattern_id == int(scan_pattern_id))
+        .filter(AutoTraderRun.created_at >= cutoff)
+        .order_by(AutoTraderRun.created_at.desc())
+        .limit(1000)
+        .all()
+    )
+    alert_ids = {
+        int(row.breakout_alert_id)
+        for row in recent_runs
+        if getattr(row, "breakout_alert_id", None) is not None
+    }
+    alerts_by_id: dict[int, BreakoutAlert] = {}
+    if alert_ids:
+        alerts_by_id = {
+            int(row.id): row
+            for row in db.query(BreakoutAlert).filter(BreakoutAlert.id.in_(alert_ids)).all()
+        }
+    for run in recent_runs:
+        cls = _asset_class_for_run(
+            run,
+            alerts_by_id.get(int(run.breakout_alert_id)) if run.breakout_alert_id else None,
+            pattern,
+        )
+        if cls:
+            slices.add(cls)
+
+    recent_trades = (
+        db.query(Trade)
+        .filter(Trade.scan_pattern_id == int(scan_pattern_id))
+        .filter(
+            or_(
+                Trade.entry_date.is_(None),
+                Trade.entry_date >= cutoff,
+                Trade.exit_date >= cutoff,
+            )
+        )
+        .order_by(Trade.id.desc())
+        .limit(250)
+        .all()
+    )
+    for trade in recent_trades:
+        cls = _asset_class_for_trade(trade, pattern)
+        if cls:
+            slices.add(cls)
+
+    order = {"stock": 0, "crypto": 1, "options": 2}
+    return sorted(slices, key=lambda item: (order.get(item, 99), item)) or [None]
+
+
 def edge_supply_rows(
     db: Session,
     *,
@@ -639,16 +832,37 @@ def edge_supply_rows(
 
     out: list[dict[str, Any]] = []
     for pid in ids[: max(1, int(limit) * 4)]:
-        try:
-            out.append(
-                compute_pattern_edge_reliability(
+        pattern = db.get(ScanPattern, pid)
+        slices = _observed_asset_slices_for_pattern(
+            db,
+            pid,
+            cutoff=datetime.utcnow() - timedelta(days=max(1, int(window_days))),
+            pattern=pattern,
+        )
+        for asset_slice in slices:
+            try:
+                row = compute_pattern_edge_reliability(
                     db,
                     pid,
+                    asset_class=asset_slice,
                     window_days=window_days,
                 )
-            )
-        except Exception:
-            continue
+            except Exception:
+                continue
+            if row.get("edge_eval_count") or row.get("closed_evidence_count"):
+                out.append(row)
+    if not out:
+        for pid in ids[: max(1, int(limit) * 4)]:
+            try:
+                out.append(
+                    compute_pattern_edge_reliability(
+                        db,
+                        pid,
+                        window_days=window_days,
+                    )
+                )
+            except Exception:
+                continue
 
     def score(row: dict[str, Any]) -> float:
         if row.get("graduation_blocker") != "graduation_ready":

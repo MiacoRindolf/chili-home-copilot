@@ -235,3 +235,53 @@ def test_kill_switch_not_re_activated_when_already_active(db, monkeypatch):
     assert res2["breached"] is True
     assert governance.is_kill_switch_active() is True
     assert governance.get_kill_switch_status()["reason"] == reason1
+
+
+def test_transient_db_fail_closed_clears_after_successful_empty_poll(monkeypatch):
+    monkeypatch.setattr(governance.settings, "chili_kill_switch_db_poll_enabled", True, raising=False)
+    monkeypatch.setattr(governance.settings, "chili_kill_switch_db_poll_interval_s", 9999.0, raising=False)
+    monkeypatch.setattr(governance.settings, "chili_kill_switch_db_fail_closed", True, raising=False)
+
+    state = {"mode": "down"}
+
+    def _fetch():
+        if state["mode"] == "down":
+            raise RuntimeError("postgres starting up")
+        return None
+
+    monkeypatch.setattr(governance, "_fetch_latest_kill_switch_state_from_db", _fetch)
+    governance._refresh_kill_switch_from_db_if_due(force=True)
+
+    status = governance.get_kill_switch_status()
+    assert status["active"] is True
+    assert status["reason"] == "kill_switch_db_read_failed:RuntimeError"
+    assert status["transient_db_fail_closed"] is True
+
+    state["mode"] = "up"
+    governance._refresh_kill_switch_from_db_if_due(force=True)
+
+    status = governance.get_kill_switch_status()
+    assert status["active"] is False
+    assert status["reason"] is None
+    assert status["db_error"] is None
+    assert status["transient_db_fail_closed"] is False
+
+
+def test_transient_db_fail_closed_preserves_manual_halt_reason(monkeypatch):
+    monkeypatch.setattr(governance.settings, "chili_kill_switch_db_poll_enabled", True, raising=False)
+    monkeypatch.setattr(governance.settings, "chili_kill_switch_db_poll_interval_s", 9999.0, raising=False)
+    monkeypatch.setattr(governance.settings, "chili_kill_switch_db_fail_closed", True, raising=False)
+    monkeypatch.setattr(
+        governance,
+        "_fetch_latest_kill_switch_state_from_db",
+        lambda: (_ for _ in ()).throw(RuntimeError("postgres starting up")),
+    )
+
+    governance.activate_kill_switch("manual_halt")
+    governance._refresh_kill_switch_from_db_if_due(force=True)
+
+    status = governance.get_kill_switch_status()
+    assert status["active"] is True
+    assert status["reason"] == "manual_halt"
+    assert status["db_error"] is not None
+    assert status["transient_db_fail_closed"] is False

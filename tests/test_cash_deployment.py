@@ -7,13 +7,18 @@ import pytest
 from app.config import settings
 from app.models.trading import (
     AutoTraderRun,
+    BrainWorkEvent,
     BreakoutAlert,
     PaperTrade,
     ScanPattern,
     Trade,
     TradingPosition,
 )
-from app.services.trading.cash_deployment import cash_deployment_rows, cash_deployment_summary
+from app.services.trading.cash_deployment import (
+    cash_deployment_rows,
+    cash_deployment_summary,
+    enqueue_cash_deployment_work,
+)
 
 
 def _pattern(db, *, name: str, lifecycle: str = "promoted", recert: bool = False, recert_reason: str | None = None):
@@ -256,3 +261,46 @@ def test_cash_deployment_zero_ranks_stale_broker_local_open(db, monkeypatch):
     assert row["cash_deployment_rank"] is None
     assert row["max_safe_notional"] == 0.0
     assert summary["stale_broker_local_open"] >= 1
+
+
+def test_cash_deployment_work_producer_enqueues_targeted_deduped_work(db, monkeypatch):
+    monkeypatch.setattr(settings, "chili_autotrader_live_enabled", True)
+    monkeypatch.setattr(settings, "chili_cash_deployment_equity_cost_pct", 0.05)
+    monkeypatch.setattr(settings, "chili_cash_deployment_min_closed_evidence", 5)
+
+    recert = _pattern(
+        db,
+        name="cash work recert",
+        recert=True,
+        recert_reason="negative_oos_recert",
+    )
+    recert_alert = _alert(db, recert, ticker="WRCRT")
+    _run(db, recert, recert_alert, expected=3.0)
+    _closed_paper(db, recert, recert_alert)
+
+    shadow = _pattern(db, name="cash work shadow", lifecycle="shadow_promoted")
+    shadow_alert = _alert(db, shadow, ticker="WSHDW")
+    _run(db, shadow, shadow_alert, expected=2.5)
+    _closed_paper(db, shadow, shadow_alert)
+    db.commit()
+
+    first = enqueue_cash_deployment_work(db, window_days=7, limit=10, include_null_lineage=False)
+    db.commit()
+    second = enqueue_cash_deployment_work(db, window_days=7, limit=10, include_null_lineage=False)
+    db.commit()
+
+    rows = (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_type.in_(("recert_rescue_refresh", "exit_variant_refresh")))
+        .all()
+    )
+    by_type = {row.event_type: row for row in rows}
+
+    assert first["created"] == 2
+    assert second["created"] == 0
+    assert set(first["event_types"]) == {"recert_rescue_refresh", "exit_variant_refresh"}
+    assert set(by_type) == {"recert_rescue_refresh", "exit_variant_refresh"}
+    assert by_type["recert_rescue_refresh"].payload["scan_pattern_id"] == recert.id
+    assert by_type["recert_rescue_refresh"].payload["asset_class"] == "stock"
+    assert by_type["exit_variant_refresh"].payload["scan_pattern_id"] == shadow.id
+    assert by_type["exit_variant_refresh"].payload["cash_deployment_category"] == "positive_ev_shadow"

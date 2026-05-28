@@ -1453,3 +1453,79 @@ def test_coinbase_cap_uses_passed_price(monkeypatch):
         base_size="10.0",
         client_order_id="cid-88",
     )
+
+
+def test_broker_reject_suppression_applies_pattern_filter_before_limit(db, monkeypatch):
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_broker_reject_suppression_enabled",
+        True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_broker_reject_suppression_minutes",
+        60,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_broker_reject_suppression_threshold",
+        2,
+        raising=False,
+    )
+    pat = ScanPattern(
+        name="broker reject suppression",
+        rules_json={},
+        origin="test",
+        asset_class="crypto",
+        timeframe="1d",
+        active=True,
+        lifecycle_stage="promoted",
+    )
+    other = ScanPattern(
+        name="other broker reject suppression",
+        rules_json={},
+        origin="test",
+        asset_class="crypto",
+        timeframe="1d",
+        active=True,
+        lifecycle_stage="promoted",
+    )
+    db.add_all([pat, other])
+    db.flush()
+    alert = BreakoutAlert(
+        scan_pattern_id=pat.id,
+        ticker="TRUMP-USD",
+        asset_type="crypto",
+        alert_tier="pattern_imminent",
+        outcome="pending",
+        score_at_alert=90.0,
+        price_at_alert=10.0,
+        entry_price=10.0,
+        stop_loss=9.0,
+        target_price=12.0,
+        alerted_at=datetime.utcnow(),
+    )
+    db.add(alert)
+    db.flush()
+    now = datetime.utcnow()
+    for idx in range(3):
+        db.add(
+            AutoTraderRun(
+                breakout_alert_id=alert.id,
+                scan_pattern_id=other.id if idx == 0 else pat.id,
+                ticker="TRUMP-USD",
+                decision="error",
+                reason="broker:Robinhood returned no order_id",
+                rule_snapshot={"broker_reject_fingerprint": "same-fp"},
+                created_at=now - timedelta(minutes=idx),
+            )
+        )
+    db.commit()
+
+    suppression = at_mod._broker_reject_suppression(db, alert, "same-fp")
+
+    assert suppression is not None
+    assert suppression["recent_reject_count"] == 2
+    assert suppression["last_reject_reason"] == "broker:Robinhood returned no order_id"

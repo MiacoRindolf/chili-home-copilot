@@ -59,15 +59,16 @@ def handle_edge_reliability_refresh(
     row = persist_edge_reliability_snapshot(
         db,
         pid,
+        asset_class=_payload(ev).get("asset_class"),
         window_days=_window_days(ev),
         source=str(_payload(ev).get("source") or EDGE_RELIABILITY_REFRESH),
         parent_event_id=int(getattr(ev, "id", 0) or 0),
     )
     recommended = str(row.get("recommended_work_event") or "")
     if recommended and recommended != EDGE_RELIABILITY_REFRESH:
-        ev = row.get("calibrated_ev_pct")
+        calibrated_ev = row.get("calibrated_ev_pct")
         try:
-            evidence_value = max(0.0, float(ev or 0.0)) * math.log1p(
+            evidence_value = max(0.0, float(calibrated_ev or 0.0)) * math.log1p(
                 int(row.get("edge_eval_count") or 0)
                 + int(row.get("closed_evidence_count") or 0)
             )
@@ -78,9 +79,11 @@ def handle_edge_reliability_refresh(
             event_type=recommended,
             scan_pattern_id=pid,
             source="edge_reliability_snapshot",
+            asset_class=row.get("slice_asset_class"),
             evidence_fingerprint=str(row.get("evidence_fingerprint") or ""),
             payload={
                 "edge_snapshot_event_id": row.get("snapshot_event_id"),
+                "asset_class": row.get("slice_asset_class"),
                 "graduation_blocker": row.get("graduation_blocker"),
                 "calibrated_ev_pct": row.get("calibrated_ev_pct"),
                 "expected_evidence_value": round(evidence_value, 6),
@@ -133,6 +136,7 @@ def handle_recert_rescue_refresh(
     reliability = compute_pattern_edge_reliability(
         db,
         pid,
+        asset_class=_payload(ev).get("asset_class"),
         window_days=_window_days(ev),
     )
     reasons = reliability.get("recert_reason")

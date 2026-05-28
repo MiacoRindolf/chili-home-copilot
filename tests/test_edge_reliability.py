@@ -22,6 +22,7 @@ from app.services.trading.edge_reliability import (
     RECERT_RESCUE_REFRESH,
     RECERT_RESCUE_DIAGNOSTIC,
     compute_pattern_edge_reliability,
+    edge_supply_rows,
     emit_edge_reliability_refresh_requested,
 )
 
@@ -33,7 +34,7 @@ def _pattern(db, **kwargs) -> ScanPattern:
         name=kwargs.pop("name", "edge reliability pattern"),
         rules_json={},
         origin="test",
-        asset_class="stocks",
+        asset_class=kwargs.pop("asset_class", "stocks"),
         timeframe="1d",
         active=True,
         lifecycle_stage=kwargs.pop("lifecycle_stage", "promoted"),
@@ -136,6 +137,81 @@ def test_edge_reliability_attribution_from_runs_paper_and_live(db):
     assert row["closed_evidence_count"] == 2
     assert row["brier_score"] == pytest.approx(0.16)
     assert row["recommended_work_event"] == EDGE_RELIABILITY_REFRESH
+
+
+def test_edge_reliability_slices_all_asset_patterns_by_asset(db):
+    pat = _pattern(db, asset_class="all", lifecycle_stage="promoted")
+    stock_alert = _alert(db, pat, "STKA")
+    crypto_alert = _alert(db, pat, "BTC-USD")
+    crypto_alert.asset_type = "crypto"
+    _run(db, pat, stock_alert, expected=-1.0)
+    _run(db, pat, crypto_alert, expected=3.0)
+    db.add(
+        PaperTrade(
+            scan_pattern_id=pat.id,
+            paper_shadow_of_alert_id=stock_alert.id,
+            ticker="STKA",
+            direction="long",
+            entry_price=100.0,
+            stop_price=95.0,
+            target_price=110.0,
+            quantity=1.0,
+            status="closed",
+            entry_date=datetime.utcnow(),
+            exit_date=datetime.utcnow(),
+            exit_price=98.0,
+            pnl=-2.0,
+            pnl_pct=-2.0,
+            signal_json={"paper_shadow": True, "asset_type": "stock"},
+        )
+    )
+    db.add(
+        PaperTrade(
+            scan_pattern_id=pat.id,
+            paper_shadow_of_alert_id=crypto_alert.id,
+            ticker="BTC-USD",
+            direction="long",
+            entry_price=100.0,
+            stop_price=95.0,
+            target_price=110.0,
+            quantity=1.0,
+            status="closed",
+            entry_date=datetime.utcnow(),
+            exit_date=datetime.utcnow(),
+            exit_price=106.0,
+            pnl=6.0,
+            pnl_pct=6.0,
+            signal_json={"paper_shadow": True, "asset_type": "crypto"},
+        )
+    )
+    db.commit()
+
+    stock = compute_pattern_edge_reliability(db, pat.id, asset_class="stock", window_days=7)
+    crypto = compute_pattern_edge_reliability(db, pat.id, asset_class="crypto", window_days=7)
+    blended = compute_pattern_edge_reliability(db, pat.id, window_days=7)
+
+    assert stock["asset_class"] == "stock"
+    assert stock["slice_asset_class"] == "stock"
+    assert stock["edge_eval_count"] == 1
+    assert stock["expected_ev_pct"] == pytest.approx(-1.0)
+    assert stock["realized_ev_pct"] == pytest.approx(-2.0)
+    assert stock["primary_symbol"] == "STKA"
+
+    assert crypto["asset_class"] == "crypto"
+    assert crypto["edge_eval_count"] == 1
+    assert crypto["expected_ev_pct"] == pytest.approx(3.0)
+    assert crypto["realized_ev_pct"] == pytest.approx(6.0)
+    assert crypto["primary_symbol"] == "BTC-USD"
+
+    assert blended["asset_class"] == "all"
+    assert blended["edge_eval_count"] == 2
+    assert blended["realized_ev_pct"] == pytest.approx(2.0)
+
+    rows = edge_supply_rows(db, pattern_ids=[pat.id], window_days=7, limit=10)
+    by_asset = {row["asset_class"]: row for row in rows}
+    assert set(by_asset) == {"stock", "crypto"}
+    assert by_asset["stock"]["primary_symbol"] == "STKA"
+    assert by_asset["crypto"]["primary_symbol"] == "BTC-USD"
 
 
 def test_recert_rescue_diagnostic_never_clears_hard_recert(db):

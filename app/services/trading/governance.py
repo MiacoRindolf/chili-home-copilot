@@ -29,6 +29,7 @@ _kill_switch_reason: str | None = None
 _kill_switch_set_at: datetime | None = None
 _kill_switch_db_error: str | None = None
 _kill_switch_db_persisted: bool | None = None
+_kill_switch_db_fail_closed_active: bool = False
 _kill_switch_last_db_check_monotonic: float = 0.0
 _kill_switch_lock = threading.Lock()
 
@@ -61,13 +62,15 @@ def _apply_kill_switch_state(
     reason: str | None,
     set_at: datetime | None,
     db_error: str | None = None,
+    transient_db_fail_closed: bool = False,
 ) -> None:
-    global _kill_switch, _kill_switch_reason, _kill_switch_set_at, _kill_switch_db_error, _kill_switch_db_persisted
+    global _kill_switch, _kill_switch_reason, _kill_switch_set_at, _kill_switch_db_error, _kill_switch_db_persisted, _kill_switch_db_fail_closed_active
     with _kill_switch_lock:
         _kill_switch = bool(active)
         _kill_switch_reason = (reason or None) if active else None
         _kill_switch_set_at = set_at if active else None
         _kill_switch_db_error = db_error
+        _kill_switch_db_fail_closed_active = bool(active and transient_db_fail_closed)
         if db_error is None:
             _kill_switch_db_persisted = True
 
@@ -102,7 +105,9 @@ def _refresh_kill_switch_from_db_if_due(*, force: bool = False) -> None:
     ``is_kill_switch_active`` repeatedly, so this small DB-backed refresh makes
     a kill switch flipped in the API visible to the scheduler without restart.
     """
-    global _kill_switch_last_db_check_monotonic, _kill_switch_db_error
+    global _kill_switch, _kill_switch_reason, _kill_switch_set_at
+    global _kill_switch_db_error, _kill_switch_db_persisted, _kill_switch_db_fail_closed_active
+    global _kill_switch_last_db_check_monotonic
     if not _kill_switch_db_poll_enabled():
         return
     now = time.monotonic()
@@ -119,12 +124,18 @@ def _refresh_kill_switch_from_db_if_due(*, force: bool = False) -> None:
             return
         msg = f"kill_switch_db_read_failed:{type(exc).__name__}"
         if _kill_switch_db_fail_closed():
-            _apply_kill_switch_state(
-                active=True,
-                reason=msg,
-                set_at=datetime.utcnow(),
-                db_error=str(exc)[:500],
-            )
+            with _kill_switch_lock:
+                preserve_existing_halt = _kill_switch and not _kill_switch_db_fail_closed_active
+                if preserve_existing_halt:
+                    _kill_switch_db_error = str(exc)[:500]
+            if not preserve_existing_halt:
+                _apply_kill_switch_state(
+                    active=True,
+                    reason=msg,
+                    set_at=datetime.utcnow(),
+                    db_error=str(exc)[:500],
+                    transient_db_fail_closed=True,
+                )
             logger.warning("[governance] Kill-switch DB read failed; failing closed", exc_info=True)
         else:
             with _kill_switch_lock:
@@ -134,6 +145,12 @@ def _refresh_kill_switch_from_db_if_due(*, force: bool = False) -> None:
     if state is None:
         with _kill_switch_lock:
             _kill_switch_db_error = None
+            if _kill_switch_db_fail_closed_active:
+                _kill_switch = False
+                _kill_switch_reason = None
+                _kill_switch_set_at = None
+                _kill_switch_db_persisted = None
+                _kill_switch_db_fail_closed_active = False
         return
     active, reason, set_at = state
     _apply_kill_switch_state(active=active, reason=reason, set_at=set_at, db_error=None)
@@ -148,7 +165,7 @@ def activate_kill_switch(reason: str = "manual") -> None:
     activations from the price-monitor guardrail. Same-reason calls now
     no-op; a different reason still writes (state change worth recording).
     """
-    global _kill_switch, _kill_switch_reason, _kill_switch_set_at, _kill_switch_db_error, _kill_switch_db_persisted
+    global _kill_switch, _kill_switch_reason, _kill_switch_set_at, _kill_switch_db_error, _kill_switch_db_persisted, _kill_switch_db_fail_closed_active
     needs_persist = True
     with _kill_switch_lock:
         if _kill_switch and _kill_switch_reason == reason:
@@ -161,6 +178,7 @@ def activate_kill_switch(reason: str = "manual") -> None:
             _kill_switch_set_at = datetime.utcnow()
             _kill_switch_db_error = None
             _kill_switch_db_persisted = None
+            _kill_switch_db_fail_closed_active = False
     persisted = _persist_kill_switch_state(True, reason)
     with _kill_switch_lock:
         _kill_switch_db_persisted = bool(persisted)
@@ -170,13 +188,14 @@ def activate_kill_switch(reason: str = "manual") -> None:
 
 def deactivate_kill_switch() -> None:
     """Re-enable trading activity. Persists to DB."""
-    global _kill_switch, _kill_switch_reason, _kill_switch_set_at, _kill_switch_db_error, _kill_switch_db_persisted
+    global _kill_switch, _kill_switch_reason, _kill_switch_set_at, _kill_switch_db_error, _kill_switch_db_persisted, _kill_switch_db_fail_closed_active
     with _kill_switch_lock:
         _kill_switch = False
         _kill_switch_reason = None
         _kill_switch_set_at = None
         _kill_switch_db_error = None
         _kill_switch_db_persisted = None
+        _kill_switch_db_fail_closed_active = False
     persisted = _persist_kill_switch_state(False, None)
     with _kill_switch_lock:
         _kill_switch_db_persisted = bool(persisted)
@@ -197,6 +216,7 @@ def get_kill_switch_status() -> dict[str, Any]:
             "reason": _kill_switch_reason,
             "set_at": _kill_switch_set_at.isoformat() + "Z" if _kill_switch_set_at else None,
             "db_error": _kill_switch_db_error,
+            "transient_db_fail_closed": _kill_switch_db_fail_closed_active,
         }
 
 
@@ -233,7 +253,7 @@ def _persist_kill_switch_state(active: bool, reason: str | None) -> bool:
 
 def restore_kill_switch_from_db() -> None:
     """Restore kill-switch state from DB on startup."""
-    global _kill_switch, _kill_switch_reason, _kill_switch_set_at, _kill_switch_db_error, _kill_switch_db_persisted
+    global _kill_switch, _kill_switch_reason, _kill_switch_set_at, _kill_switch_db_error, _kill_switch_db_persisted, _kill_switch_db_fail_closed_active
     try:
         state = _fetch_latest_kill_switch_state_from_db()
         if state is None:
@@ -245,6 +265,7 @@ def restore_kill_switch_from_db() -> None:
             _kill_switch_set_at = set_at if active else None
             _kill_switch_db_error = None
             _kill_switch_db_persisted = True
+            _kill_switch_db_fail_closed_active = False
         if active:
             logger.warning("[governance] Kill switch restored from DB: %s", _kill_switch_reason)
     except Exception:
