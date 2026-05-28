@@ -20,10 +20,15 @@ from ...models.trading import (
 )
 from ...services import trading_service as ts
 from ...services.trading.broker_position_truth import filter_broker_stale_open_trades
+from ...services.trading.cash_deployment import (
+    annotate_cash_deployment_row,
+    cash_deployment_null_lineage_candidates,
+    cash_deployment_rows,
+    cash_deployment_summary,
+)
 from ...services.trading.edge_reliability import (
     edge_supply_rows,
     edge_supply_summary,
-    null_lineage_short_paper_candidates,
 )
 from ...services.trading.pattern_position_monitor import run_pattern_position_monitor_for_trades
 from ...services.trading.robinhood_exit_execution import describe_trade_execution_state
@@ -653,16 +658,17 @@ def api_monitor_imminent_alerts(
     edge_supply_by_pattern: dict[int, dict[str, Any]] = {}
     if pat_ids:
         try:
-            edge_supply_by_pattern = {
-                int(row["scan_pattern_id"]): row
-                for row in edge_supply_rows(
-                    db,
-                    pattern_ids=pat_ids,
-                    window_days=max(1, int(hours / 24) or 1),
-                    limit=max(30, len(pat_ids)),
+            for row in edge_supply_rows(
+                db,
+                pattern_ids=pat_ids,
+                window_days=max(1, int(hours / 24) or 1),
+                limit=max(30, len(pat_ids)),
+            ):
+                if row.get("scan_pattern_id") is None:
+                    continue
+                edge_supply_by_pattern[int(row["scan_pattern_id"])] = (
+                    annotate_cash_deployment_row(db, row, user_id=user_id)
                 )
-                if row.get("scan_pattern_id") is not None
-            }
         except Exception:
             logger.debug("[monitor] edge supply diagnostics failed", exc_info=True)
     alert_ids = [int(a.id) for a in alerts]
@@ -737,6 +743,9 @@ def api_monitor_imminent_alerts(
                 "autotrader_blocker_category": blocker_category,
                 "autotrader_next_action": _imminent_next_action(blocker_category),
                 "calibrated_ev_pct": json_safe(supply.get("calibrated_ev_pct")),
+                "calibrated_ev_after_cost_pct": json_safe(
+                    supply.get("calibrated_ev_after_cost_pct")
+                ),
                 "realized_ev_pct": json_safe(supply.get("realized_ev_pct")),
                 "ev_calibration_error": json_safe(supply.get("ev_calibration_error")),
                 "brier_score": json_safe(supply.get("brier_score")),
@@ -745,6 +754,13 @@ def api_monitor_imminent_alerts(
                 "graduation_blocker": supply.get("graduation_blocker"),
                 "recommended_work_event": supply.get("recommended_work_event"),
                 "cash_deployment_rank": supply.get("cash_deployment_rank"),
+                "allocation_score": json_safe(supply.get("allocation_score")),
+                "max_safe_notional": json_safe(supply.get("max_safe_notional")),
+                "venue_readiness": supply.get("venue_readiness"),
+                "correlation_bucket": supply.get("correlation_bucket"),
+                "exposure_blocker": supply.get("exposure_blocker"),
+                "execution_blocker": supply.get("execution_blocker"),
+                "recert_blocker": supply.get("recert_blocker"),
                 "trade_plan": a.trade_plan,
             }
         )
@@ -767,14 +783,18 @@ def api_monitor_edge_supply(
     limit: int = Query(25, ge=1, le=100),
 ):
     """Pattern-level edge reliability and live-candidate supply diagnostics."""
-    get_identity_ctx(request, db)
+    ctx = get_identity_ctx(request, db)
     try:
-        rows = edge_supply_rows(
+        edge_rows = edge_supply_rows(
             db,
             window_days=window_days,
             limit=limit,
         )
-        null_lineage = null_lineage_short_paper_candidates(
+        rows = [
+            annotate_cash_deployment_row(db, row, user_id=ctx["user_id"])
+            for row in edge_rows
+        ]
+        null_lineage = cash_deployment_null_lineage_candidates(
             db,
             window_days=window_days,
             limit=10,
@@ -789,6 +809,50 @@ def api_monitor_edge_supply(
             "window_days": window_days,
             "rows": json_safe(rows),
             "summary": json_safe(edge_supply_summary(rows)),
+            "cash_deployment_summary": json_safe(cash_deployment_summary(rows)),
+            "null_lineage_research_candidates": json_safe(null_lineage),
+        }
+    )
+
+
+@router.get("/monitor/cash-deployment")
+def api_monitor_cash_deployment(
+    request: Request,
+    db: Session = Depends(get_db),
+    window_days: int = Query(30, ge=1, le=120),
+    limit: int = Query(25, ge=1, le=100),
+):
+    """All-asset cash-deployment funnel: deployable candidates vs safe work."""
+    ctx = get_identity_ctx(request, db)
+    try:
+        rows = cash_deployment_rows(
+            db,
+            user_id=ctx["user_id"],
+            window_days=window_days,
+            limit=limit,
+        )
+        null_lineage = cash_deployment_null_lineage_candidates(
+            db,
+            window_days=window_days,
+            limit=10,
+        )
+    except Exception as exc:
+        logger.exception("[monitor] cash deployment failed")
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+
+    summary = cash_deployment_summary(rows)
+    if null_lineage:
+        summary["needs_provenance"] = int(summary.get("needs_provenance", 0)) + len(null_lineage)
+        cats = dict(summary.get("categories") or {})
+        cats["needs_provenance"] = int(cats.get("needs_provenance", 0)) + len(null_lineage)
+        summary["categories"] = cats
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "window_days": window_days,
+            "rows": json_safe(rows),
+            "summary": json_safe(summary),
             "null_lineage_research_candidates": json_safe(null_lineage),
         }
     )

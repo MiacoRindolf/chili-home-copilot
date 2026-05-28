@@ -9,6 +9,7 @@ Handlers here are deliberately conservative:
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime
 from typing import Any, TYPE_CHECKING
 
@@ -64,6 +65,14 @@ def handle_edge_reliability_refresh(
     )
     recommended = str(row.get("recommended_work_event") or "")
     if recommended and recommended != EDGE_RELIABILITY_REFRESH:
+        ev = row.get("calibrated_ev_pct")
+        try:
+            evidence_value = max(0.0, float(ev or 0.0)) * math.log1p(
+                int(row.get("edge_eval_count") or 0)
+                + int(row.get("closed_evidence_count") or 0)
+            )
+        except (TypeError, ValueError):
+            evidence_value = 0.0
         emit_targeted_profitability_work(
             db,
             event_type=recommended,
@@ -74,6 +83,7 @@ def handle_edge_reliability_refresh(
                 "edge_snapshot_event_id": row.get("snapshot_event_id"),
                 "graduation_blocker": row.get("graduation_blocker"),
                 "calibrated_ev_pct": row.get("calibrated_ev_pct"),
+                "expected_evidence_value": round(evidence_value, 6),
             },
         )
     logger.info(

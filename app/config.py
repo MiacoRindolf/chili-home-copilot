@@ -4704,6 +4704,61 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_BRAIN_ALLOCATOR_MAX_SAME_FAMILY_LIVE_SESSIONS"),
         description="Max active live automation sessions per strategy/hypothesis family; 0 disables.",
     )
+    chili_cash_deployment_min_closed_evidence: int = Field(
+        default=5,
+        ge=0,
+        validation_alias=AliasChoices("CHILI_CASH_DEPLOYMENT_MIN_CLOSED_EVIDENCE"),
+        description="Minimum closed paper/live evidence rows before cash-deployment ranking can mark a pattern live-deployable.",
+    )
+    chili_cash_deployment_max_brier_score: float = Field(
+        default=0.28,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_CASH_DEPLOYMENT_MAX_BRIER_SCORE"),
+        description="Probability calibration ceiling for live-deployable cash-deployment candidates.",
+    )
+    chili_cash_deployment_max_abs_paper_live_gap_pct: float = Field(
+        default=3.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_CASH_DEPLOYMENT_MAX_ABS_PAPER_LIVE_GAP_PCT"),
+        description="Absolute paper-vs-live EV gap above which cash deployment stays calibration-blocked.",
+    )
+    chili_cash_deployment_equity_cost_pct: float = Field(
+        default=0.05,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_CASH_DEPLOYMENT_EQUITY_COST_PCT"),
+        description="Conservative equity execution-cost drag used by the cash-deployment diagnostics.",
+    )
+    chili_cash_deployment_crypto_cost_pct: float = Field(
+        default=0.25,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_CASH_DEPLOYMENT_CRYPTO_COST_PCT"),
+        description="Conservative crypto execution-cost drag used by the cash-deployment diagnostics.",
+    )
+    chili_cash_deployment_options_cost_pct: float = Field(
+        default=1.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_CASH_DEPLOYMENT_OPTIONS_COST_PCT"),
+        description="Conservative option premium/spread execution-cost drag used by the cash-deployment diagnostics.",
+    )
+    chili_cash_deployment_unknown_asset_cost_pct: float = Field(
+        default=0.35,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_CASH_DEPLOYMENT_UNKNOWN_ASSET_COST_PCT"),
+        description="Fallback execution-cost drag for cash-deployment rows whose asset class is not yet explicit.",
+    )
+    chili_cash_deployment_slippage_miss_penalty_pct: float = Field(
+        default=0.5,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_CASH_DEPLOYMENT_SLIPPAGE_MISS_PENALTY_PCT"),
+        description="Extra EV drag applied when recent positive candidates missed entry on slippage.",
+    )
+    chili_cash_deployment_broker_reject_penalty_pct: float = Field(
+        default=1.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_CASH_DEPLOYMENT_BROKER_REJECT_PENALTY_PCT"),
+        description="Extra EV drag applied to patterns with recent broker rejects; hard execution blockers still prevent live deployability.",
+    )
 
     # Decision ledger + net-expectancy allocator (momentum autopilot / brain). Live enforcement OFF by default.
     brain_enable_decision_ledger: bool = Field(default=True, validation_alias=AliasChoices("CHILI_BRAIN_ENABLE_DECISION_LEDGER"))
