@@ -19289,6 +19289,122 @@ def _migration_276_exit_parity_pattern_created_index(conn) -> None:
     logger.info("[mig276] exit parity pattern/created index installed")
 
 
+def _migration_277_project_autonomy_tables(conn) -> None:
+    """Project Brain Local Autopilot durable run/step/artifact/lease state."""
+
+    tables = _tables(conn)
+    if "project_autonomy_runs" not in tables:
+        conn.execute(text("""
+            CREATE TABLE project_autonomy_runs (
+                id SERIAL PRIMARY KEY,
+                run_id VARCHAR(64) NOT NULL UNIQUE,
+                project_run_id INTEGER NULL REFERENCES project_domain_runs(id) ON DELETE SET NULL,
+                user_id INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                repo_id INTEGER NULL REFERENCES code_repos(id) ON DELETE SET NULL,
+                prompt TEXT NOT NULL,
+                status VARCHAR(24) NOT NULL DEFAULT 'queued',
+                current_stage VARCHAR(40) NOT NULL DEFAULT 'queued',
+                autonomy_level VARCHAR(40) NOT NULL DEFAULT 'full_local',
+                model_policy VARCHAR(40) NOT NULL DEFAULT 'local_first',
+                target_branch VARCHAR(200) NULL,
+                base_branch VARCHAR(200) NULL,
+                base_sha VARCHAR(64) NULL,
+                integration_branch VARCHAR(200) NULL,
+                worktree_path TEXT NULL,
+                merge_status VARCHAR(40) NOT NULL DEFAULT 'pending',
+                merge_message TEXT NULL,
+                plan_json TEXT NOT NULL DEFAULT '{}',
+                agents_json TEXT NOT NULL DEFAULT '[]',
+                files_json TEXT NOT NULL DEFAULT '[]',
+                commands_json TEXT NOT NULL DEFAULT '[]',
+                validation_json TEXT NOT NULL DEFAULT '[]',
+                learning_json TEXT NOT NULL DEFAULT '{}',
+                error_message TEXT NULL,
+                cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
+                started_at TIMESTAMP NULL,
+                finished_at TIMESTAMP NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+        conn.execute(text("CREATE INDEX ix_project_autonomy_runs_user_created ON project_autonomy_runs(user_id, created_at DESC)"))
+        conn.execute(text("CREATE INDEX ix_project_autonomy_runs_repo_status ON project_autonomy_runs(repo_id, status)"))
+        conn.execute(text("CREATE INDEX ix_project_autonomy_runs_stage ON project_autonomy_runs(current_stage)"))
+
+    if "project_autonomy_steps" not in tables:
+        conn.execute(text("""
+            CREATE TABLE project_autonomy_steps (
+                id SERIAL PRIMARY KEY,
+                run_id VARCHAR(64) NOT NULL,
+                step_index INTEGER NOT NULL DEFAULT 0,
+                stage VARCHAR(40) NOT NULL,
+                agent_name VARCHAR(80) NOT NULL DEFAULT 'architect',
+                status VARCHAR(24) NOT NULL DEFAULT 'running',
+                title VARCHAR(240) NOT NULL,
+                detail_json TEXT NOT NULL DEFAULT '{}',
+                started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                finished_at TIMESTAMP NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+        conn.execute(text("CREATE INDEX ix_project_autonomy_steps_run_id ON project_autonomy_steps(run_id, id)"))
+        conn.execute(text("CREATE INDEX ix_project_autonomy_steps_stage ON project_autonomy_steps(stage)"))
+
+    if "project_autonomy_artifacts" not in tables:
+        conn.execute(text("""
+            CREATE TABLE project_autonomy_artifacts (
+                id SERIAL PRIMARY KEY,
+                run_id VARCHAR(64) NOT NULL,
+                artifact_type VARCHAR(40) NOT NULL,
+                name VARCHAR(200) NOT NULL,
+                content TEXT NULL,
+                content_json TEXT NULL,
+                byte_length INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+        conn.execute(text("CREATE INDEX ix_project_autonomy_artifacts_run_id ON project_autonomy_artifacts(run_id, id)"))
+        conn.execute(text("CREATE INDEX ix_project_autonomy_artifacts_type ON project_autonomy_artifacts(artifact_type)"))
+
+    if "project_autonomy_leases" not in tables:
+        conn.execute(text("""
+            CREATE TABLE project_autonomy_leases (
+                id SERIAL PRIMARY KEY,
+                run_id VARCHAR(64) NOT NULL,
+                repo_id INTEGER NOT NULL REFERENCES code_repos(id) ON DELETE CASCADE,
+                lease_key VARCHAR(700) NOT NULL,
+                file_path TEXT NULL,
+                holder VARCHAR(80) NOT NULL DEFAULT 'architect',
+                status VARCHAR(24) NOT NULL DEFAULT 'active',
+                acquired_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                released_at TIMESTAMP NULL,
+                expires_at TIMESTAMP NULL
+            )
+        """))
+        conn.execute(text("CREATE INDEX ix_project_autonomy_leases_repo_key ON project_autonomy_leases(repo_id, lease_key, status)"))
+        conn.execute(text("CREATE INDEX ix_project_autonomy_leases_run_id ON project_autonomy_leases(run_id)"))
+
+    if "project_autonomy_learning_samples" not in tables:
+        conn.execute(text("""
+            CREATE TABLE project_autonomy_learning_samples (
+                id SERIAL PRIMARY KEY,
+                run_id VARCHAR(64) NOT NULL,
+                repo_id INTEGER NULL REFERENCES code_repos(id) ON DELETE SET NULL,
+                sample_type VARCHAR(40) NOT NULL,
+                prompt TEXT NULL,
+                outcome VARCHAR(40) NOT NULL DEFAULT 'observed',
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                promoted BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+        conn.execute(text("CREATE INDEX ix_project_autonomy_learning_run_id ON project_autonomy_learning_samples(run_id)"))
+        conn.execute(text("CREATE INDEX ix_project_autonomy_learning_type ON project_autonomy_learning_samples(sample_type, outcome)"))
+
+    conn.commit()
+    logger.info("[mig277] project autonomy tables installed")
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -19623,6 +19739,8 @@ MIGRATIONS = [
      _migration_275_position_identity_phase5d_decision_pattern_backfill),
     ("276_exit_parity_pattern_created_index",
      _migration_276_exit_parity_pattern_created_index),
+    ("277_project_autonomy_tables",
+     _migration_277_project_autonomy_tables),
 ]
 
 

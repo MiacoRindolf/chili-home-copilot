@@ -45,6 +45,219 @@
   margin-left: 8px;
 }
 
+.project-autopilot-shell {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  margin: 0 0 14px;
+  background: rgba(15, 23, 42, 0.28);
+}
+
+.project-autopilot-command {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: stretch;
+}
+
+.project-autopilot-input {
+  width: 100%;
+  min-height: 54px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.project-autopilot-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-content: flex-start;
+  justify-content: flex-end;
+  min-width: 170px;
+}
+
+.project-autopilot-status {
+  margin-top: 8px;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.project-autopilot-panel {
+  margin-top: 10px;
+  display: grid;
+  gap: 10px;
+}
+
+.project-autopilot-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 6px;
+}
+
+.project-autopilot-run {
+  display: grid;
+  gap: 4px;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: rgba(148, 163, 184, 0.06);
+  color: var(--text);
+}
+
+.project-autopilot-run.active {
+  border-color: rgba(34, 197, 94, 0.45);
+  background: rgba(34, 197, 94, 0.08);
+}
+
+.project-autopilot-run-main {
+  font-size: 11px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-autopilot-run-meta {
+  font-size: 9px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-autopilot-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.project-autopilot-block {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  background: rgba(2, 6, 23, 0.18);
+  min-height: 118px;
+}
+
+.project-autopilot-title {
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.project-autopilot-body {
+  display: grid;
+  gap: 7px;
+  max-height: 230px;
+  overflow: auto;
+  font-size: 10px;
+  color: var(--text);
+}
+
+.project-autopilot-copy {
+  line-height: 1.55;
+  color: var(--text);
+}
+
+.project-autopilot-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.project-autopilot-chip {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 9px;
+  color: var(--text-muted);
+  background: rgba(148, 163, 184, 0.06);
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.project-autopilot-lane,
+.project-autopilot-step,
+.project-autopilot-command-row {
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 8px;
+  padding: 7px 8px;
+  background: rgba(148, 163, 184, 0.05);
+}
+
+.project-autopilot-lane span,
+.project-autopilot-step span {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.project-autopilot-step {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+}
+
+.project-autopilot-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #38bdf8;
+  margin-top: 3px;
+}
+
+.project-autopilot-dot.completed,
+.project-autopilot-dot.merged {
+  background: #22c55e;
+}
+
+.project-autopilot-dot.failed,
+.project-autopilot-dot.blocked,
+.project-autopilot-dot.cancelled {
+  background: #ef4444;
+}
+
+.project-autopilot-command-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+}
+
+.project-autopilot-command-row.passed span:last-child {
+  color: #22c55e;
+  font-weight: 700;
+}
+
+.project-autopilot-command-row.failed span:last-child {
+  color: #ef4444;
+  font-weight: 700;
+}
+
+@media (max-width: 760px) {
+  .project-autopilot-command,
+  .project-autopilot-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .project-autopilot-actions {
+    justify-content: flex-start;
+    min-width: 0;
+  }
+}
+
 .project-inline-muted {
   font-size: 11px;
   color: var(--text-muted);

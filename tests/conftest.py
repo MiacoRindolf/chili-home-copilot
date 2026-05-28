@@ -162,6 +162,11 @@ _PROJECT_DOMAIN_TARGETED_TABLES = frozenset(
         "qa_bug_reports",
         "project_domain_runs",
         "project_analysis_snapshots",
+        "project_autonomy_runs",
+        "project_autonomy_steps",
+        "project_autonomy_artifacts",
+        "project_autonomy_leases",
+        "project_autonomy_learning_samples",
     }
 )
 _PROJECT_DOMAIN_TARGETED_TESTS = (

@@ -35,12 +35,11 @@ String userMessageForHttpStatus(int statusCode) {
       return 'Gateway timeout (504). The upstream server was too slow. Try again later.';
     default:
       if (statusCode >= 500) {
-        return 'Server error (HTTP ' + statusCode.toString() + '). The backend may be down. Try again later or change the Backend URL in Settings.';
+        return 'Server error (HTTP $statusCode). The backend may be down. Try again later or change the Backend URL in Settings.';
       }
       if (statusCode >= 400) {
-        return 'Request was rejected (HTTP ' + statusCode.toString() + '). Check the Backend URL and try again.';
+        return 'Request was rejected (HTTP $statusCode). Check the Backend URL and try again.';
       }
-      return 'Unexpected HTTP ' + statusCode.toString() + ' from server.';
+      return 'Unexpected HTTP $statusCode from server.';
   }
 }
-
