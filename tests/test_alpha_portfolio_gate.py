@@ -9,6 +9,7 @@ from sqlalchemy import text
 from app.models.trading import ScanPattern
 from app.services.trading.alpha_portfolio_gate import (
     AlphaPortfolioConfig,
+    _candidate_floor_blocks,
     broker_risk_probation_allows_live,
     candidate_base_score,
     infer_alpha_sleeve,
@@ -209,6 +210,26 @@ def test_broker_risk_probation_allows_only_strong_promoted_oos_debt():
     assert not broker_risk_probation_allows_live(weak_cpcv, settings_=_settings())
 
 
+def test_broker_risk_probation_rejects_boolean_numeric_evidence():
+    bogus_boolean_evidence = SimpleNamespace(
+        lifecycle_stage="promoted",
+        recert_required=True,
+        recert_reason="missing_oos_recert",
+        promotion_gate_passed=True,
+        cpcv_median_sharpe=True,
+        raw_realized_trade_count=True,
+        raw_realized_avg_return_pct=True,
+    )
+
+    assert not broker_risk_probation_allows_live(
+        bogus_boolean_evidence,
+        settings_=_settings(
+            chili_autotrader_probation_min_cpcv_sharpe=0.5,
+            chili_autotrader_probation_min_realized_trades=1,
+        ),
+    )
+
+
 def test_queue_recert_dry_run_skips_non_backtest_solvable_debt():
     out = queue_recert_for_required(
         None,
@@ -356,6 +377,89 @@ def test_portfolio_score_rewards_uncrowded_sleeve():
 
     assert uncrowded["portfolio_score"] > crowded["portfolio_score"]
     assert candidate_base_score(row)["score"] is not None
+
+
+def test_candidate_base_score_rejects_boolean_numeric_evidence():
+    row = {
+        "alpha_sleeve": "short_overbought",
+        "promotion_gate_passed": True,
+        "quality_composite_score": True,
+        "cpcv_median_sharpe": True,
+        "deflated_sharpe": True,
+        "pbo": False,
+        "realized_n_trades": True,
+        "realized_avg_pnl_pct": True,
+        "payoff_ratio": True,
+        "payoff_ratio_n": True,
+    }
+
+    out = candidate_base_score(
+        row,
+        config=AlphaPortfolioConfig(min_realized_trades=1),
+    )
+
+    assert out["score"] is None
+    assert out["components"] == {}
+
+
+def test_candidate_floor_blocks_boolean_gate_metrics_as_missing():
+    row = {
+        "promotion_gate_passed": True,
+        "cpcv_median_sharpe": True,
+        "deflated_sharpe": True,
+        "pbo": False,
+        "realized_n_trades": 5,
+        "realized_avg_pnl_pct": 0.01,
+    }
+
+    reasons = _candidate_floor_blocks(
+        row,
+        AlphaPortfolioConfig(min_realized_trades=5),
+    )
+
+    assert "missing_cpcv_median_sharpe" in reasons
+    assert "missing_deflated_sharpe" in reasons
+    assert "missing_pbo" in reasons
+
+
+def test_candidate_floor_blocks_negative_raw_realized_ev():
+    row = {
+        "promotion_gate_passed": True,
+        "cpcv_median_sharpe": 2.0,
+        "deflated_sharpe": 1.0,
+        "pbo": 0.0,
+        "realized_n_trades": 0,
+        "realized_avg_pnl_pct": None,
+        "raw_realized_trade_count": 12,
+        "raw_realized_avg_return_pct": -1.2,
+    }
+
+    reasons = _candidate_floor_blocks(
+        row,
+        AlphaPortfolioConfig(min_realized_trades=5),
+    )
+
+    assert "negative_realized_floor" in reasons
+
+
+def test_candidate_floor_preserves_valid_zero_as_nonpositive_ev():
+    row = {
+        "promotion_gate_passed": True,
+        "cpcv_median_sharpe": 2.0,
+        "deflated_sharpe": 1.0,
+        "pbo": 0.0,
+        "realized_n_trades": 5,
+        "realized_avg_pnl_pct": 0.0,
+        "raw_realized_trade_count": 12,
+        "raw_realized_avg_return_pct": 3.0,
+    }
+
+    reasons = _candidate_floor_blocks(
+        row,
+        AlphaPortfolioConfig(min_realized_trades=5),
+    )
+
+    assert "negative_realized_floor" in reasons
 
 
 def test_scan_alpha_portfolio_marks_recert_and_selects_sleeve_candidates(db):

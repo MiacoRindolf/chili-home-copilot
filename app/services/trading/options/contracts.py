@@ -8,16 +8,21 @@ schema migration a prerequisite for safer execution.
 from __future__ import annotations
 
 import math
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Mapping
 
 
 OPTION_CONTRACT_MULTIPLIER: float = 100.0
 PRICE_DOMAIN_OPTION_PREMIUM = "option_premium"
 PRICE_DOMAIN_UNDERLYING_SPOT = "underlying_spot"
+_QUOTE_SNAPSHOT_VOLATILE_KEYS = frozenset(
+    ("bid", "ask", "mid", "mark", "spread_pct", "quote_ts")
+)
 
 
 def _float_or_none(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
     try:
         out = float(value)
     except (TypeError, ValueError):
@@ -34,7 +39,16 @@ def _positive_float_or_none(value: Any) -> float | None:
     return out
 
 
+def _nonnegative_float_or_none(value: Any) -> float | None:
+    out = _float_or_none(value)
+    if out is None or out < 0:
+        return None
+    return out
+
+
 def _positive_int_or_none(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
     out = _positive_float_or_none(value)
     if out is None:
         return None
@@ -70,6 +84,18 @@ def normalize_expiration(value: Any) -> str | None:
         return datetime.fromisoformat(raw.replace("Z", "+00:00")).date().isoformat()
     except Exception:
         return None
+
+
+def expiration_is_expired(value: Any, *, as_of: date | None = None) -> bool | None:
+    exp = normalize_expiration(value)
+    if exp is None:
+        return None
+    try:
+        exp_date = datetime.strptime(exp, "%Y-%m-%d").date()
+    except Exception:
+        return None
+    today = as_of or datetime.now(timezone.utc).date()
+    return exp_date < today
 
 
 def option_contract_key(
@@ -111,11 +137,19 @@ def occ_symbol(
     return f"{under}{exp_dt:%y%m%d}{cp}{strike_code:08d}"
 
 
-def _quote_float(quote: Mapping[str, Any] | None, *keys: str) -> float | None:
+def _quote_float(
+    quote: Mapping[str, Any] | None,
+    *keys: str,
+    allow_zero: bool = False,
+) -> float | None:
     if not isinstance(quote, Mapping):
         return None
     for key in keys:
-        out = _positive_float_or_none(quote.get(key))
+        out = (
+            _nonnegative_float_or_none(quote.get(key))
+            if allow_zero
+            else _positive_float_or_none(quote.get(key))
+        )
         if out is not None:
             return out
     return None
@@ -174,12 +208,18 @@ def normalize_option_meta(
         src["expiration"] = exp
     if strike is not None:
         src["strike"] = strike
+    elif isinstance(src.get("strike"), bool):
+        src.pop("strike", None)
     if opt_type:
         src["option_type"] = opt_type
     if limit_price is not None:
         src["limit_price"] = limit_price
+    elif isinstance(src.get("limit_price"), bool):
+        src.pop("limit_price", None)
     if quantity is not None:
         src["quantity"] = quantity
+    elif isinstance(src.get("quantity"), bool):
+        src.pop("quantity", None)
 
     key = option_contract_key(
         underlying=under,
@@ -195,9 +235,14 @@ def normalize_option_meta(
     )
     if key:
         src["contract_key"] = key
-        src.setdefault("option_contract_key", key)
+        src["option_contract_key"] = key
+    else:
+        src.pop("contract_key", None)
+        src.pop("option_contract_key", None)
     if occ:
         src["occ_symbol"] = occ
+    else:
+        src.pop("occ_symbol", None)
 
     src["contract_multiplier"] = OPTION_CONTRACT_MULTIPLIER
     src["price_domain"] = PRICE_DOMAIN_OPTION_PREMIUM
@@ -207,10 +252,19 @@ def normalize_option_meta(
     if underlying_px is not None:
         src["underlying_price_at_entry"] = underlying_px
 
-    bid = _quote_float(quote, "bid_price", "bid")
+    bid = _quote_float(quote, "bid_price", "bid", allow_zero=True)
     ask = _quote_float(quote, "ask_price", "ask")
     mark = _quote_float(quote, "mark_price", "mark", "last_price")
     mid = _quote_float(quote, "mid_price", "mid")
+    crossed_bbo = (
+        bid is not None
+        and ask is not None
+        and bid > 0
+        and ask > 0
+        and bid > ask
+    )
+    if crossed_bbo:
+        bid = ask = mark = mid = None
     if mid is None and bid is not None and ask is not None:
         mid = (bid + ask) / 2.0
     quote_snapshot: dict[str, Any] = {}
@@ -227,11 +281,20 @@ def normalize_option_meta(
     ts = _quote_timestamp(quote)
     if ts is not None:
         quote_snapshot["quote_ts"] = ts
-    if quote_snapshot:
+    if quote_snapshot or crossed_bbo:
         existing_quote_snapshot = src.get("quote_snapshot")
         if not isinstance(existing_quote_snapshot, Mapping):
             existing_quote_snapshot = {}
-        src["quote_snapshot"] = {**existing_quote_snapshot, **quote_snapshot}
+        existing_quote_snapshot = {
+            key: value
+            for key, value in existing_quote_snapshot.items()
+            if key not in _QUOTE_SNAPSHOT_VOLATILE_KEYS
+        }
+        merged_quote_snapshot = {**existing_quote_snapshot, **quote_snapshot}
+        if merged_quote_snapshot:
+            src["quote_snapshot"] = merged_quote_snapshot
+        else:
+            src.pop("quote_snapshot", None)
 
     for greek in ("delta", "gamma", "theta", "vega"):
         value = _quote_greek(quote, greek)
@@ -247,8 +310,11 @@ def validate_single_leg_option_meta(meta: Mapping[str, Any] | None) -> list[str]
     missing: list[str] = []
     if not str(src.get("underlying") or "").strip():
         missing.append("underlying")
-    if normalize_expiration(src.get("expiration")) is None:
+    exp = normalize_expiration(src.get("expiration"))
+    if exp is None:
         missing.append("expiration")
+    elif expiration_is_expired(exp):
+        missing.append("expiration_expired")
     if _positive_float_or_none(src.get("strike")) is None:
         missing.append("strike")
     if normalize_option_type(src.get("option_type")) is None:
@@ -306,6 +372,7 @@ __all__ = [
     "normalize_option_meta",
     "normalize_option_type",
     "normalize_expiration",
+    "expiration_is_expired",
     "occ_symbol",
     "option_contract_key",
     "option_price_domains_snapshot",

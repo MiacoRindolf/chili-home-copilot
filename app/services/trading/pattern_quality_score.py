@@ -125,6 +125,32 @@ def _clip(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return x
 
 
+def _finite_float_or_none(value: Any) -> Optional[float]:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except Exception:
+        return None
+    if not _math.isfinite(out):
+        return None
+    return out
+
+
+def _finite_float_or_default(value: Any, default: float) -> float:
+    out = _finite_float_or_none(value)
+    return float(default) if out is None else out
+
+
+def _settings_float(settings_: Any, name: str, default: float) -> float:
+    return _finite_float_or_default(getattr(settings_, name, default), default)
+
+
+def _settings_int(settings_: Any, name: str, default: int) -> int:
+    out = _finite_float_or_none(getattr(settings_, name, default))
+    return int(default) if out is None else int(out)
+
+
 def realized_pnl_score(
     avg_pnl_pct: Optional[float],
     w_norm: float,
@@ -141,9 +167,11 @@ def realized_pnl_score(
     Returns ``None`` when ``avg_pnl_pct`` is ``None`` or ``w_norm`` is
     non-positive (NULL propagation — no magic-default fallback).
     """
-    if avg_pnl_pct is None or w_norm is None or float(w_norm) <= 0:
+    avg = _finite_float_or_none(avg_pnl_pct)
+    norm = _finite_float_or_none(w_norm)
+    if avg is None or norm is None or norm <= 0:
         return None
-    normed = float(avg_pnl_pct) / float(w_norm)
+    normed = avg / norm
     if normed < -1.0:
         normed = -1.0
     elif normed > 1.0:
@@ -164,9 +192,17 @@ def realized_evidence_score(
         raise TypeError("realized_evidence_score requires n, got None")
     if tau is None:
         raise TypeError("realized_evidence_score requires tau, got None")
-    if float(tau) <= 0:
+    n_val = _finite_float_or_none(n)
+    tau_val = _finite_float_or_none(tau)
+    if n_val is None:
+        raise TypeError("realized_evidence_score requires finite n")
+    if tau_val is None:
+        raise TypeError("realized_evidence_score requires finite tau")
+    if n_val < 0:
+        raise ValueError("realized_evidence_score requires n >= 0")
+    if tau_val <= 0:
         raise ValueError("realized_evidence_score requires tau > 0")
-    return 1.0 - _math.exp(-float(n) / float(tau))
+    return 1.0 - _math.exp(-n_val / tau_val)
 
 
 def compute_quality_composite_score(
@@ -213,32 +249,36 @@ def compute_quality_composite_score(
         Count of closed trades in the realized window (used to scale
         the realized component by ``realized_evidence_score``).
     """
-    cpcv = getattr(pat, "cpcv_median_sharpe", None)
-    dsr = getattr(pat, "deflated_sharpe", None)
-    pbo = getattr(pat, "pbo", None)
+    cpcv = _finite_float_or_none(getattr(pat, "cpcv_median_sharpe", None))
+    dsr = _finite_float_or_none(getattr(pat, "deflated_sharpe", None))
+    pbo = _finite_float_or_none(getattr(pat, "pbo", None))
+    directional_wr_f = _finite_float_or_none(directional_wr)
+    decay_f = _finite_float_or_none(decay)
 
     if cpcv is None or dsr is None or pbo is None:
         return None
-    if directional_wr is None or decay is None:
+    if directional_wr_f is None or decay_f is None:
         return None
 
-    cpcv_n = _clip(float(cpcv) / 2.0)
-    dsr_n = _clip(float(dsr) / 1.0)
-    pbo_inv = 1.0 - _clip(float(pbo))
-    wr = _clip(float(directional_wr))
-    dec_inv = 1.0 - _clip(float(decay))
+    cpcv_n = _clip(cpcv / 2.0)
+    dsr_n = _clip(dsr / 1.0)
+    pbo_inv = 1.0 - _clip(pbo)
+    wr = _clip(directional_wr_f)
+    dec_inv = 1.0 - _clip(decay_f)
 
-    w_cpcv = float(weights.get("cpcv_sharpe", 0.10))
-    w_dsr = float(weights.get("deflated_sharpe", 0.05))
-    w_pbo = float(weights.get("pbo_inverse", 0.05))
-    w_wr = float(weights.get("directional_wr", 0.35))
-    w_decay = float(weights.get("decay_inverse", 0.10))
-    w_realized = float(weights.get("realized", 0.35))
-    tau = float(weights.get("realized_evidence_tau", 30.0))
+    w_cpcv = _finite_float_or_default(weights.get("cpcv_sharpe", 0.10), 0.10)
+    w_dsr = _finite_float_or_default(weights.get("deflated_sharpe", 0.05), 0.05)
+    w_pbo = _finite_float_or_default(weights.get("pbo_inverse", 0.05), 0.05)
+    w_wr = _finite_float_or_default(weights.get("directional_wr", 0.35), 0.35)
+    w_decay = _finite_float_or_default(weights.get("decay_inverse", 0.10), 0.10)
+    w_realized = _finite_float_or_default(weights.get("realized", 0.35), 0.35)
+    tau = _finite_float_or_default(weights.get("realized_evidence_tau", 30.0), 30.0)
 
-    n = int(realized_n_trades or 0)
-    has_realized = realized_pnl_score is not None and n >= 5
-    realized_quality = _clip(float(realized_pnl_score)) if has_realized else None
+    n_raw = _finite_float_or_none(realized_n_trades)
+    n = int(n_raw) if n_raw is not None and n_raw > 0 else 0
+    realized_quality_input = _finite_float_or_none(realized_pnl_score)
+    has_realized = realized_quality_input is not None and n >= 5
+    realized_quality = _clip(realized_quality_input) if has_realized else None
     wr_component = wr * (realized_quality if realized_quality is not None else 1.0)
     non_realized_terms = (
         w_cpcv * cpcv_n
@@ -346,39 +386,42 @@ def _load_decay_map(db: Session) -> dict[int, Optional[float]]:
 
 def _resolve_weights(settings_: Any) -> dict:
     return {
-        "cpcv_sharpe": float(getattr(
+        "cpcv_sharpe": _settings_float(
             settings_, "chili_cohort_score_weight_cpcv_sharpe", 0.10,
-        )),
-        "deflated_sharpe": float(getattr(
+        ),
+        "deflated_sharpe": _settings_float(
             settings_, "chili_cohort_score_weight_deflated_sharpe", 0.05,
-        )),
-        "pbo_inverse": float(getattr(
+        ),
+        "pbo_inverse": _settings_float(
             settings_, "chili_cohort_score_weight_pbo_inverse", 0.05,
-        )),
-        "directional_wr": float(getattr(
+        ),
+        "directional_wr": _settings_float(
             settings_, "chili_cohort_score_weight_directional_wr", 0.35,
-        )),
-        "decay_inverse": float(getattr(
+        ),
+        "decay_inverse": _settings_float(
             settings_, "chili_cohort_score_weight_decay_inverse", 0.10,
-        )),
-        "realized": float(getattr(
+        ),
+        "realized": _settings_float(
             settings_, "chili_cohort_score_weight_realized", 0.35,
-        )),
-        "realized_pnl_normalizer_pct": float(getattr(
+        ),
+        "realized_pnl_normalizer_pct": _settings_float(
             settings_, "chili_cohort_score_realized_pnl_normalizer_pct", 0.01,
-        )),
-        "realized_evidence_tau": float(getattr(
+        ),
+        "realized_evidence_tau": _settings_float(
             settings_, "chili_cohort_score_realized_evidence_tau", 30.0,
-        )),
-        "realized_window_days": int(getattr(
+        ),
+        "realized_window_days": _settings_int(
             settings_, "chili_cohort_score_realized_window_days", 90,
-        )),
+        ),
     }
 
 
 def _composite_weight_sum(weights: dict[str, Any]) -> float:
     """Sum only the six score weights, excluding non-weight knobs."""
-    return sum(float(weights.get(key, 0.0) or 0.0) for key in COMPOSITE_WEIGHT_KEYS)
+    return sum(
+        _finite_float_or_default(weights.get(key, 0.0), 0.0)
+        for key in COMPOSITE_WEIGHT_KEYS
+    )
 
 
 def _load_realized_pnl_map(
@@ -502,11 +545,14 @@ def _realized_component_for_pattern(
     rec = realized_map.get(int(pid))
     if not rec:
         return (None, 0)
-    n = int(rec.get("n", 0) or 0)
+    n_raw = _finite_float_or_none(rec.get("n", 0))
+    n = int(n_raw) if n_raw is not None and n_raw > 0 else 0
     avg = rec.get("avg_pnl_pct")
     if n < 5 or avg is None:
         return (None, n)
-    w_norm = float(weights.get("realized_pnl_normalizer_pct", 0.01))
+    w_norm = _finite_float_or_none(weights.get("realized_pnl_normalizer_pct", 0.01))
+    if w_norm is None:
+        return (None, n)
     return (realized_pnl_score(avg, w_norm), n)
 
 

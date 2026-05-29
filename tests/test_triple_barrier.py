@@ -1,6 +1,8 @@
 """Unit tests for `app/services/trading/triple_barrier.py` (pure math)."""
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from app.services.trading.triple_barrier import (
@@ -25,17 +27,17 @@ class TestConfigValidation:
         assert cfg.tp_pct == 0.02
         assert cfg.side == "long"
 
-    @pytest.mark.parametrize("bad_tp", [0, -0.01, -1.0])
+    @pytest.mark.parametrize("bad_tp", [0, -0.01, -1.0, math.nan, math.inf, True])
     def test_invalid_tp(self, bad_tp: float) -> None:
         with pytest.raises(ValueError, match="tp_pct"):
             TripleBarrierConfig(tp_pct=bad_tp, sl_pct=0.01, max_bars=5)
 
-    @pytest.mark.parametrize("bad_sl", [0, -0.01])
+    @pytest.mark.parametrize("bad_sl", [0, -0.01, math.nan, math.inf, True])
     def test_invalid_sl(self, bad_sl: float) -> None:
         with pytest.raises(ValueError, match="sl_pct"):
             TripleBarrierConfig(tp_pct=0.02, sl_pct=bad_sl, max_bars=5)
 
-    @pytest.mark.parametrize("bad_n", [0, -1])
+    @pytest.mark.parametrize("bad_n", [0, -1, 2.5, True])
     def test_invalid_max_bars(self, bad_n: int) -> None:
         with pytest.raises(ValueError, match="max_bars"):
             TripleBarrierConfig(tp_pct=0.02, sl_pct=0.01, max_bars=bad_n)
@@ -201,7 +203,7 @@ class TestInputCoercion:
 
 
 class TestInvalidEntry:
-    @pytest.mark.parametrize("bad_price", [0, -10.0, None])
+    @pytest.mark.parametrize("bad_price", [0, -10.0, None, math.nan, math.inf, True])
     def test_bad_entry_close(self, bad_price: float) -> None:
         cfg = TripleBarrierConfig(tp_pct=0.02, sl_pct=0.01, max_bars=5, side="long")
         out = compute_label(
@@ -211,6 +213,45 @@ class TestInvalidEntry:
         )
         assert out.label == 0
         assert out.barrier_hit == "missing_data"
+        assert out.realized_return_pct == 0.0
+
+    @pytest.mark.parametrize(
+        "bad_bar",
+        [
+            _bar(100, math.nan, 99, 101),
+            _bar(100, math.inf, 99, 101),
+            _bar(100, True, 99, 101),  # type: ignore[arg-type]
+            {"open": 100.0, "high": 101.0, "low": 99.0, "close": math.nan},
+        ],
+    )
+    def test_bad_ohlc_bar_is_missing_data(self, bad_bar: object) -> None:
+        cfg = TripleBarrierConfig(tp_pct=0.02, sl_pct=0.01, max_bars=5, side="long")
+
+        out = compute_label(
+            entry_close=100.0,
+            future_bars=[bad_bar],
+            cfg=cfg,
+        )
+
+        assert out.label == 0
+        assert out.barrier_hit == "missing_data"
+        assert out.realized_return_pct == 0.0
+
+    def test_bad_ohlc_bar_is_skipped_without_poisoning_next_valid_bar(self) -> None:
+        cfg = TripleBarrierConfig(tp_pct=0.02, sl_pct=0.01, max_bars=5, side="long")
+
+        out = compute_label(
+            entry_close=100.0,
+            future_bars=[
+                _bar(100, math.nan, 99, 101),
+                _bar(100, 103, 99.5, 102),
+            ],
+            cfg=cfg,
+        )
+
+        assert out.label == 1
+        assert out.barrier_hit == "tp"
+        assert out.realized_return_pct == pytest.approx(0.02)
 
 
 # ───────────────── ATR variant ─────────────────
@@ -247,7 +288,7 @@ class TestATRVariant:
         assert out.label == -1
         assert out.sl_price == pytest.approx(98.0)
 
-    @pytest.mark.parametrize("bad_atr", [0, -1.0, None])
+    @pytest.mark.parametrize("bad_atr", [0, -1.0, None, math.nan, math.inf, True])
     def test_atr_invalid_atr_returns_missing(self, bad_atr: float) -> None:
         bars = [_bar(100, 105, 95, 102)]
         out = compute_label_atr(
@@ -255,6 +296,27 @@ class TestATRVariant:
             entry_atr=bad_atr,  # type: ignore[arg-type]
             future_bars=bars,
         )
+        assert out.label == 0
+        assert out.barrier_hit == "missing_data"
+
+    @pytest.mark.parametrize(
+        ("bad_tp_mult", "bad_sl_mult"),
+        [(math.nan, 1.0), (math.inf, 1.0), (True, 1.0), (2.0, True)],
+    )
+    def test_atr_invalid_multipliers_return_missing(
+        self,
+        bad_tp_mult: float,
+        bad_sl_mult: float,
+    ) -> None:
+        bars = [_bar(100, 105, 95, 102)]
+        out = compute_label_atr(
+            entry_close=100.0,
+            entry_atr=2.0,
+            future_bars=bars,
+            atr_mult_tp=bad_tp_mult,
+            atr_mult_sl=bad_sl_mult,
+        )
+
         assert out.label == 0
         assert out.barrier_hit == "missing_data"
 
