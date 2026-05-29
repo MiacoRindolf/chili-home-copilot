@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -1185,6 +1186,7 @@ def check_paper_exits(
     user_id: int | None = None,
     *,
     skip_trade_ids: set[int] | None = None,
+    trade_ids: set[int] | None = None,
 ) -> dict[str, Any]:
     """Check all open paper trades for stop/target/trailing-stop/expiry exits.
 
@@ -1200,6 +1202,10 @@ def check_paper_exits(
     )
     if user_id is not None:
         open_trades = open_trades.filter(PaperTrade.user_id == user_id)
+    if trade_ids is not None:
+        if not trade_ids:
+            return {"checked": 0, "closed": 0, "trailing_updated": 0}
+        open_trades = open_trades.filter(PaperTrade.id.in_(trade_ids))
     open_trades = open_trades.all()
 
     if skip_trade_ids:
@@ -1343,6 +1349,74 @@ def check_paper_exits(
         db.commit()
 
     return {"checked": len(open_trades), "closed": closed, "trailing_updated": trailing_updated}
+
+
+def _paper_trade_row_id(row: Any) -> int:
+    if isinstance(row, int):
+        return int(row)
+    if isinstance(row, tuple):
+        return int(row[0])
+    if hasattr(row, "id"):
+        return int(row.id)
+    return int(row[0])
+
+
+def _rollback_close_session(db: Session) -> None:
+    try:
+        db.rollback()
+    except Exception:
+        pass
+    db.close()
+
+
+def check_paper_exits_isolated(
+    session_factory: Callable[[], Session],
+    user_id: int | None = None,
+    *,
+    skip_trade_ids: set[int] | None = None,
+) -> dict[str, Any]:
+    """Scheduler-safe paper exit sweep with bounded session lifetimes.
+
+    The scheduler first lists candidate IDs in one short read session, closes
+    it, and then processes each paper trade in its own session. This prevents a
+    single scheduler transaction from spanning the whole quote/API loop.
+    """
+
+    list_db = session_factory()
+    try:
+        query = list_db.query(PaperTrade.id).filter(PaperTrade.status == "open")
+        if user_id is not None:
+            query = query.filter(PaperTrade.user_id == user_id)
+        trade_ids = [_paper_trade_row_id(row) for row in query.all()]
+    finally:
+        _rollback_close_session(list_db)
+
+    if skip_trade_ids:
+        trade_ids = [trade_id for trade_id in trade_ids if trade_id not in skip_trade_ids]
+
+    total_checked = 0
+    total_closed = 0
+    total_trailing_updated = 0
+    for trade_id in trade_ids:
+        db = session_factory()
+        try:
+            result = check_paper_exits(
+                db,
+                user_id=user_id,
+                skip_trade_ids=skip_trade_ids,
+                trade_ids={trade_id},
+            )
+            total_checked += int(result.get("checked", 0) or 0)
+            total_closed += int(result.get("closed", 0) or 0)
+            total_trailing_updated += int(result.get("trailing_updated", 0) or 0)
+        finally:
+            _rollback_close_session(db)
+
+    return {
+        "checked": total_checked,
+        "closed": total_closed,
+        "trailing_updated": total_trailing_updated,
+    }
 
 
 def place_partial_close(

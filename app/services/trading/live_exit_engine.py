@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -296,13 +297,29 @@ def _is_option_paper_trade_safe(trade: PaperTrade | Trade) -> bool:
         return False
 
 
-def run_exit_engine(db: Session, user_id: int | None = None) -> dict[str, Any]:
+def run_exit_engine(
+    db: Session,
+    user_id: int | None = None,
+    *,
+    position_ids: set[int] | None = None,
+) -> dict[str, Any]:
     """Evaluate all open positions through the exit engine. Returns action recommendations."""
     from .market_data import fetch_quote
 
     open_paper = db.query(PaperTrade).filter(PaperTrade.status == "open")
     if user_id is not None:
         open_paper = open_paper.filter(PaperTrade.user_id == user_id)
+    if position_ids is not None:
+        if not position_ids:
+            return {
+                "ok": True,
+                "evaluated": 0,
+                "actions": [],
+                "partial_actions": [],
+                "all": [],
+                "skipped_options": 0,
+            }
+        open_paper = open_paper.filter(PaperTrade.id.in_(position_ids))
     positions = open_paper.all()
 
     results = []
@@ -345,6 +362,66 @@ def run_exit_engine(db: Session, user_id: int | None = None) -> dict[str, Any]:
         "actions": terminal_actions,
         "partial_actions": partial_actions,
         "all": results,
+        "skipped_options": skipped_options,
+    }
+
+
+def _paper_position_row_id(row: Any) -> int:
+    if isinstance(row, int):
+        return int(row)
+    if isinstance(row, tuple):
+        return int(row[0])
+    if hasattr(row, "id"):
+        return int(row.id)
+    return int(row[0])
+
+
+def _rollback_close_session(db: Session) -> None:
+    try:
+        db.rollback()
+    except Exception:
+        pass
+    db.close()
+
+
+def run_exit_engine_isolated(
+    session_factory: Callable[[], Session],
+    user_id: int | None = None,
+) -> dict[str, Any]:
+    """Scheduler-safe exit engine sweep with per-position DB sessions."""
+
+    list_db = session_factory()
+    try:
+        query = list_db.query(PaperTrade.id).filter(PaperTrade.status == "open")
+        if user_id is not None:
+            query = query.filter(PaperTrade.user_id == user_id)
+        position_ids = [_paper_position_row_id(row) for row in query.all()]
+    finally:
+        _rollback_close_session(list_db)
+
+    all_results: list[dict[str, Any]] = []
+    terminal_actions: list[dict[str, Any]] = []
+    partial_actions: list[dict[str, Any]] = []
+    skipped_options = 0
+    evaluated = 0
+    for position_id in position_ids:
+        db = session_factory()
+        try:
+            result = run_exit_engine(db, user_id=user_id, position_ids={position_id})
+            all_results.extend(result.get("all", []) or [])
+            terminal_actions.extend(result.get("actions", []) or [])
+            partial_actions.extend(result.get("partial_actions", []) or [])
+            skipped_options += int(result.get("skipped_options", 0) or 0)
+            evaluated += int(result.get("evaluated", 0) or 0)
+        finally:
+            _rollback_close_session(db)
+
+    return {
+        "ok": True,
+        "evaluated": evaluated,
+        "actions": terminal_actions,
+        "partial_actions": partial_actions,
+        "all": all_results,
         "skipped_options": skipped_options,
     }
 
