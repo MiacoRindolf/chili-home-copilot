@@ -115,10 +115,21 @@ def _agent_ndjson(*, hypothesis_id: str, location: str, message: str, data: dict
 
 
 _schema_initialized = False
+_USER_DELETE_BLOCKING_TABLES = frozenset(
+    table.name
+    for table in Base.metadata.tables.values()
+    if any(
+        fk.target_fullname == "users.id"
+        and (fk.ondelete or "").upper() not in {"CASCADE", "SET NULL"}
+        for column in table.columns
+        for fk in column.foreign_keys
+    )
+)
 _PROJECT_DOMAIN_TARGETED_TABLES = frozenset(
     {
         "users",
         "devices",
+        *_USER_DELETE_BLOCKING_TABLES,
         "projects",
         "project_files",
         "conversations",
@@ -183,6 +194,7 @@ _TRADING_DOMAIN_TARGETED_TABLES = frozenset(
     {
         "users",
         "devices",
+        *_USER_DELETE_BLOCKING_TABLES,
         "brain_work_events",
         "broker_credentials",
         "broker_sessions",
@@ -563,7 +575,8 @@ def client(db, fastapi_app, _asgi_test_client):
 @pytest.fixture()
 def paired_client(db, client):
     """TestClient with a cookie representing a paired (non-guest) user."""
-    user = User(name="TestUser")
+    unique_suffix = f"{os.getpid()}-{time.time_ns()}"
+    user = User(name=f"TestUser-{unique_suffix}")
     db.add(user)
     db.flush()
     # #region agent log
@@ -575,7 +588,7 @@ def paired_client(db, client):
     )
     # #endregion
 
-    token = "test-device-token-abc123"
+    token = f"test-device-token-{unique_suffix}"
     db.add(
         Device(
             token=token,
