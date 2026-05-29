@@ -27,6 +27,91 @@ from ...models.trading import PaperTrade, ScanPattern, Trade
 logger = logging.getLogger(__name__)
 
 
+def _positive_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        out = float(value)
+        if math.isnan(out) or math.isinf(out) or out <= 0:
+            return None
+        return out
+    except Exception:
+        return None
+
+
+def _nonnegative_float(value: Any, *, default: float | None = None) -> float | None:
+    try:
+        if value is None:
+            return default
+        out = float(value)
+        if math.isnan(out) or math.isinf(out) or out < 0:
+            return default
+        return out
+    except Exception:
+        return default
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        if value is None:
+            return None
+        out = float(value)
+        if math.isnan(out) or math.isinf(out) or out <= 0 or not out.is_integer():
+            return None
+        return int(out)
+    except Exception:
+        return None
+
+
+def _partial_close_fraction(value: Any) -> float | None:
+    fraction = _positive_float(0.5 if value is None else value)
+    if fraction is None or fraction > 1.0:
+        return None
+    return fraction
+
+
+def _first_positive_attr(obj: Any, *names: str) -> float | None:
+    for name in names:
+        value = _positive_float(getattr(obj, name, None))
+        if value is not None:
+            return value
+    return None
+
+
+def _position_stop_price(trade: PaperTrade | Trade) -> float | None:
+    return _first_positive_attr(trade, "stop_price", "stop_loss")
+
+
+def _position_target_price(trade: PaperTrade | Trade) -> float | None:
+    return _first_positive_attr(trade, "target_price", "take_profit")
+
+
+def _fallback_stop_price(entry: float, is_long: bool, fallback_pct: float) -> float | None:
+    entry_f = _positive_float(entry)
+    if entry_f is None:
+        return None
+    pct = max(0.0, float(fallback_pct or 0.0))
+    return entry_f * (1.0 - pct if is_long else 1.0 + pct)
+
+
+def _directional_risk(entry: float, stop: float | None, is_long: bool) -> float | None:
+    entry_f = _positive_float(entry)
+    stop_f = _positive_float(stop)
+    if entry_f is None or stop_f is None:
+        return None
+    risk = entry_f - stop_f if is_long else stop_f - entry_f
+    return risk if risk > 0 else None
+
+
+def _directional_reward(entry: float, target: float | None, is_long: bool) -> float | None:
+    entry_f = _positive_float(entry)
+    target_f = _positive_float(target)
+    if entry_f is None or target_f is None:
+        return None
+    reward = target_f - entry_f if is_long else entry_f - target_f
+    return reward if reward > 0 else None
+
+
 def _compute_bars_held(db: Session, trade: PaperTrade | Trade) -> int:
     """Bars elapsed since ``trade.entry_date``, sized to the position's
     pattern timeframe.
@@ -84,21 +169,33 @@ def compute_live_exit_levels(
     result: dict[str, Any] = {"action": "hold"}
 
     exit_cfg = _load_exit_config(db, getattr(trade, "scan_pattern_id", None))
+    current_price_f = _positive_float(current_price)
+    if current_price_f is None:
+        result["skip_reason"] = "invalid_current_price"
+        result["exit_config"] = exit_cfg
+        return result
+    current_price = current_price_f
+
     entry = trade.entry_price
     # Phase 4 (2026-05-01): consolidated fallback (was inline 0.97).
     # Single source of truth in stop_engine_fallback_constants.
     from .stop_engine_fallback_constants import (
         FALLBACK_INITIAL_STOP_PCT, FALLBACK_DEFAULT_RISK_PCT,
     )
-    stop = trade.stop_price or entry * (1.0 - FALLBACK_INITIAL_STOP_PCT)
     is_long = getattr(trade, "direction", "long") == "long"
-    risk = abs(entry - stop) if entry and stop else entry * FALLBACK_DEFAULT_RISK_PCT
+    stop = _position_stop_price(trade)
+    if stop is None:
+        stop = _fallback_stop_price(entry, is_long, FALLBACK_INITIAL_STOP_PCT)
+    risk = _directional_risk(entry, stop, is_long)
+    if risk is None and _positive_float(stop) is None:
+        entry_f = _positive_float(entry)
+        risk = entry_f * FALLBACK_DEFAULT_RISK_PCT if entry_f is not None else None
 
     try:
         df = fetch_ohlcv_df(trade.ticker, period="3mo", interval="1d")
         if df is not None and len(df) >= 14:
             atr_arr = compute_atr(df["High"].values, df["Low"].values, df["Close"].values, period=14)
-            atr = float(atr_arr[-1]) if len(atr_arr) > 0 and not math.isnan(atr_arr[-1]) else None
+            atr = _positive_float(atr_arr[-1]) if len(atr_arr) > 0 else None
         else:
             atr = None
     except Exception:
@@ -116,24 +213,25 @@ def compute_live_exit_levels(
         if cfg_trail is None:
             trail_mult = _resolve_trailing_atr_mult(db)
         else:
-            trail_mult = float(cfg_trail)
-        result["trailing_atr_mult_used"] = trail_mult
-        if is_long:
-            trail_stop = current_price - (atr * trail_mult)
-            result["trailing_stop"] = round(trail_stop, 4)
-        else:
-            trail_stop = current_price + (atr * trail_mult)
-            result["trailing_stop"] = round(trail_stop, 4)
+            trail_mult = _positive_float(cfg_trail)
+        if trail_mult is not None:
+            result["trailing_atr_mult_used"] = trail_mult
+            if is_long:
+                trail_stop = current_price - (atr * trail_mult)
+                result["trailing_stop"] = round(trail_stop, 4)
+            else:
+                trail_stop = current_price + (atr * trail_mult)
+                result["trailing_stop"] = round(trail_stop, 4)
 
-    if is_long and current_price <= stop:
+    if risk is not None and is_long and current_price <= stop:
         result["action"] = "exit_stop"
         result["exit_price"] = stop
-    elif not is_long and current_price >= stop:
+    elif risk is not None and (not is_long) and current_price >= stop:
         result["action"] = "exit_stop"
         result["exit_price"] = stop
 
-    target = getattr(trade, "target_price", None)
-    if target:
+    target = _position_target_price(trade)
+    if target and _directional_reward(entry, target, is_long) is not None:
         if is_long and current_price >= target:
             result["action"] = "exit_target"
             result["exit_price"] = target
@@ -141,34 +239,48 @@ def compute_live_exit_levels(
             result["action"] = "exit_target"
             result["exit_price"] = target
 
-    max_bars = exit_cfg.get("max_bars")
-    if max_bars and trade.entry_date:
-        # Migration 227: bars-held is computed unit-aware via the
-        # position's pattern timeframe. Pre-fix this was wall-clock
-        # ``.days``, which silently broke time-decay on every non-1d
-        # pattern (181 1m + 116 5m + 84 15m + 170 1h + 74 4h patterns
-        # in production survey).
-        bars_held = _compute_bars_held(db, trade)
-        if bars_held >= max_bars and result["action"] == "hold":
-            result["action"] = "exit_time_decay"
-            result["exit_price"] = current_price
-            result["bars_held"] = bars_held
-
     swing_low_val: float | None = None
+    swing_high_val: float | None = None
     if atr and exit_cfg.get("use_bos", True):
         try:
             df_recent = fetch_ohlcv_df(trade.ticker, period="1mo", interval="1d")
             if df_recent is not None and len(df_recent) >= 5:
                 lows = df_recent["Low"].values[-5:]
-                swing_low_val = float(min(lows))
-                bos_buffer = exit_cfg.get("bos_buffer_pct", 0.5) / 100
-                bos_level = swing_low_val * (1 - bos_buffer) if is_long else swing_low_val * (1 + bos_buffer)
-                result["bos_level"] = round(bos_level, 4)
-                if is_long and current_price < bos_level:
-                    result["action"] = "exit_bos"
-                    result["exit_price"] = current_price
+                highs = df_recent["High"].values[-5:]
+                bos_buffer_pct = _nonnegative_float(
+                    exit_cfg.get("bos_buffer_pct", 0.5),
+                    default=0.5,
+                )
+                bos_buffer = float(bos_buffer_pct or 0.0) / 100.0
+                if is_long:
+                    swing_low_val = float(min(lows))
+                    bos_level = swing_low_val * (1 - bos_buffer)
+                    result["bos_level"] = round(bos_level, 4)
+                    if result["action"] == "hold" and current_price < bos_level:
+                        result["action"] = "exit_bos"
+                        result["exit_price"] = current_price
+                else:
+                    swing_high_val = float(max(highs))
+                    bos_level = swing_high_val * (1 + bos_buffer)
+                    result["bos_level"] = round(bos_level, 4)
+                    if result["action"] == "hold" and current_price > bos_level:
+                        result["action"] = "exit_bos"
+                        result["exit_price"] = current_price
         except Exception:
             pass
+
+    max_bars = _positive_int(exit_cfg.get("max_bars"))
+    if max_bars is not None and trade.entry_date:
+        # Migration 227: bars-held is computed unit-aware via the
+        # position's pattern timeframe. Pre-fix this was wall-clock
+        # ``.days``, which silently broke time-decay on every non-1d
+        # pattern (181 1m + 116 5m, 84 15m, 170 1h, 74 4h patterns in
+        # production survey).
+        bars_held = _compute_bars_held(db, trade)
+        if bars_held >= max_bars and result["action"] == "hold":
+            result["action"] = "exit_time_decay"
+            result["exit_price"] = current_price
+            result["bars_held"] = bars_held
 
     # Partial-profit emission (migration 226 wired this up). Priority
     # discipline: partial only fires when no terminal exit would, so the
@@ -178,19 +290,24 @@ def compute_live_exit_levels(
     # confirmed via grep); replaced with an actual ``action="partial"``
     # that ``run_exit_engine`` routes into the partial_actions bucket.
     if (
-        risk > 0
+        risk is not None
+        and risk > 0
         and exit_cfg.get("partial_at_1r", False)
         and not getattr(trade, "partial_taken", False)
         and result["action"] == "hold"
     ):
         r_move = (current_price - entry) / risk if is_long else (entry - current_price) / risk
         if r_move >= 1.0:
-            result["action"] = "partial"
-            result["exit_price"] = current_price
-            result["r_multiple"] = round(r_move, 2)
-            result["partial_close_fraction"] = float(
+            close_fraction = _partial_close_fraction(
                 exit_cfg.get("partial_close_fraction", 0.5)
             )
+            if close_fraction is not None:
+                result["action"] = "partial"
+                result["exit_price"] = current_price
+                result["r_multiple"] = round(r_move, 2)
+                result["partial_close_fraction"] = close_fraction
+            else:
+                result["partial_skip_reason"] = "invalid_partial_close_fraction"
 
     _phase_b_shadow_parity(
         db=db,
@@ -199,6 +316,7 @@ def compute_live_exit_levels(
         current_price=current_price,
         atr=atr,
         swing_low_val=swing_low_val,
+        swing_high_val=swing_high_val,
         legacy_result=result,
     )
 
@@ -307,15 +425,17 @@ def run_exit_engine(db: Session, user_id: int | None = None) -> dict[str, Any]:
 
     results = []
     skipped_options = 0
+    skipped_invalid_quotes = 0
     for pos in positions:
         try:
             if _is_option_paper_trade_safe(pos):
                 skipped_options += 1
                 continue
             q = fetch_quote(pos.ticker)
-            if not q or not q.get("price"):
+            price = _positive_float(q.get("price") if q else None)
+            if price is None:
+                skipped_invalid_quotes += 1
                 continue
-            price = float(q["price"])
             exit_rec = compute_live_exit_levels(db, pos, price)
             exit_rec["ticker"] = pos.ticker
             exit_rec["position_id"] = pos.id
@@ -346,6 +466,7 @@ def run_exit_engine(db: Session, user_id: int | None = None) -> dict[str, Any]:
         "partial_actions": partial_actions,
         "all": results,
         "skipped_options": skipped_options,
+        "skipped_invalid_quotes": skipped_invalid_quotes,
     }
 
 
@@ -357,6 +478,7 @@ def _phase_b_shadow_parity(
     current_price: float,
     atr: float | None,
     swing_low_val: float | None,
+    swing_high_val: float | None,
     legacy_result: dict[str, Any],
 ) -> None:
     """Phase B shadow hook: run the canonical ExitEvaluator and log parity.
@@ -390,8 +512,10 @@ def _phase_b_shadow_parity(
 
         is_long = getattr(trade, "direction", "long") == "long"
         entry = float(trade.entry_price)
-        stop = float(trade.stop_price) if trade.stop_price else entry * (0.97 if is_long else 1.03)
-        target = getattr(trade, "target_price", None)
+        stop = _position_stop_price(trade)
+        if stop is None:
+            stop = _fallback_stop_price(entry, is_long, 0.03)
+        target = _position_target_price(trade)
         target_f = float(target) if target else None
         # Migration 227: keep legacy and canonical adapters in sync via the
         # same unit-aware bars-held helper. Pre-fix this branch read
@@ -420,7 +544,7 @@ def _phase_b_shadow_parity(
             close=current_price,
             atr=atr,
             swing_low=swing_low_val,
-            swing_high=None,
+            swing_high=swing_high_val,
             bar_idx=bars_held,
             bar_ts=None,
         )
@@ -489,6 +613,7 @@ def _phase_b_shadow_parity(
                 "current_price": float(current_price),
                 "atr": atr,
                 "swing_low": swing_low_val,
+                "swing_high": swing_high_val,
                 "bars_held_estimate": bars_held,
                 "reason_code": decision.reason_code,
             },
