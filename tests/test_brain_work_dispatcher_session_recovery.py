@@ -157,6 +157,58 @@ def test_mark_done_recovers_isolated_handler_disconnect(monkeypatch) -> None:
     assert isolated.closed is True
 
 
+def test_mark_done_recovers_market_snapshot_batch_disconnect(monkeypatch) -> None:
+    """Completed mining batches should not replay when only the marker write disconnects."""
+    from app.services.trading.brain_work import dispatcher
+
+    class DispatchSession:
+        def __init__(self) -> None:
+            self.rollbacks = 0
+
+        def rollback(self) -> None:
+            self.rollbacks += 1
+
+    class IsolatedSession:
+        def __init__(self) -> None:
+            self.commits = 0
+            self.rollbacks = 0
+            self.closed = False
+
+        def commit(self) -> None:
+            self.commits += 1
+
+        def rollback(self) -> None:
+            self.rollbacks += 1
+
+        def close(self) -> None:
+            self.closed = True
+
+    dispatch_db = DispatchSession()
+    isolated = IsolatedSession()
+    calls: list[tuple[object, int]] = []
+
+    def flaky_mark_done(session, event_id: int) -> None:
+        calls.append((session, event_id))
+        if len(calls) == 1:
+            raise RuntimeError("server closed the connection unexpectedly")
+
+    monkeypatch.setattr(dispatcher, "mark_work_done", flaky_mark_done)
+    monkeypatch.setattr("app.db.SessionLocal", lambda: isolated)
+
+    result = dispatcher._mark_work_done_after_handler_success(
+        dispatch_db,
+        event_id=17407,
+        event_type="market_snapshots_batch",
+    )
+
+    assert result == {"ok": True, "isolated": True}
+    assert calls == [(dispatch_db, 17407), (isolated, 17407)]
+    assert dispatch_db.rollbacks == 1
+    assert isolated.commits == 1
+    assert isolated.rollbacks == 0
+    assert isolated.closed is True
+
+
 def test_mark_done_keeps_same_session_handlers_retryable(monkeypatch) -> None:
     """Same-session handlers must not be marked done after a broken uncommitted txn."""
     from app.services.trading.brain_work import dispatcher

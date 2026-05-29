@@ -48,6 +48,7 @@ _TRANSIENT_DB_DISCONNECT_MARKERS = (
 _ISOLATED_SIDE_EFFECT_EVENT_TYPES = frozenset({
     "backtest_requested",
     "backtest_completed",
+    "market_snapshots_batch",
     "pattern_eligible_promotion",
     "live_trade_closed",
     "paper_trade_closed",
