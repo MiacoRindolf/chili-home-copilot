@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from sqlalchemy import text
 
 from app.models.trading import BrainWorkEvent
@@ -102,6 +103,88 @@ def test_isolated_mesh_publish_rolls_back_private_session(monkeypatch) -> None:
     assert session.commits == 1
     assert session.rollbacks == 1
     assert session.closed is True
+
+
+def test_mark_done_recovers_isolated_handler_disconnect(monkeypatch) -> None:
+    """If only the done marker loses its socket, isolated side effects should not replay."""
+    from app.services.trading.brain_work import dispatcher
+
+    class DispatchSession:
+        def __init__(self) -> None:
+            self.rollbacks = 0
+
+        def rollback(self) -> None:
+            self.rollbacks += 1
+
+    class IsolatedSession:
+        def __init__(self) -> None:
+            self.commits = 0
+            self.rollbacks = 0
+            self.closed = False
+
+        def commit(self) -> None:
+            self.commits += 1
+
+        def rollback(self) -> None:
+            self.rollbacks += 1
+
+        def close(self) -> None:
+            self.closed = True
+
+    dispatch_db = DispatchSession()
+    isolated = IsolatedSession()
+    calls: list[tuple[object, int]] = []
+
+    def flaky_mark_done(session, event_id: int) -> None:
+        calls.append((session, event_id))
+        if len(calls) == 1:
+            raise RuntimeError("server closed the connection unexpectedly")
+
+    monkeypatch.setattr(dispatcher, "mark_work_done", flaky_mark_done)
+    monkeypatch.setattr("app.db.SessionLocal", lambda: isolated)
+
+    result = dispatcher._mark_work_done_after_handler_success(
+        dispatch_db,
+        event_id=17416,
+        event_type="paper_trade_closed",
+    )
+
+    assert result == {"ok": True, "isolated": True}
+    assert calls == [(dispatch_db, 17416), (isolated, 17416)]
+    assert dispatch_db.rollbacks == 1
+    assert isolated.commits == 1
+    assert isolated.rollbacks == 0
+    assert isolated.closed is True
+
+
+def test_mark_done_keeps_same_session_handlers_retryable(monkeypatch) -> None:
+    """Same-session handlers must not be marked done after a broken uncommitted txn."""
+    from app.services.trading.brain_work import dispatcher
+
+    class DispatchSession:
+        def rollback(self) -> None:
+            raise AssertionError("same-session handler should not be recovered here")
+
+    opened: list[object] = []
+
+    def session_factory():
+        opened.append(object())
+        return opened[-1]
+
+    def broken_mark_done(_session, _event_id: int) -> None:
+        raise RuntimeError("server closed the connection unexpectedly")
+
+    monkeypatch.setattr(dispatcher, "mark_work_done", broken_mark_done)
+    monkeypatch.setattr("app.db.SessionLocal", session_factory)
+
+    with pytest.raises(RuntimeError, match="server closed"):
+        dispatcher._mark_work_done_after_handler_success(
+            DispatchSession(),
+            event_id=17409,
+            event_type="exit_variant_refresh",
+        )
+
+    assert opened == []
 
 
 def test_backtest_handler_rolls_back_dispatch_session_before_done(monkeypatch) -> None:
