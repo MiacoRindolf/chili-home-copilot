@@ -576,7 +576,7 @@ def client(db, fastapi_app, _asgi_test_client):
 def paired_client(db, client):
     """TestClient with a cookie representing a paired (non-guest) user."""
     unique_suffix = f"{os.getpid()}-{time.time_ns()}"
-    user = User(name=f"TestUser-{unique_suffix}")
+    user = User(name="TestUser")
     db.add(user)
     db.flush()
     # #region agent log
