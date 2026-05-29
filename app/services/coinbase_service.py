@@ -60,6 +60,32 @@ _COINBASE_RECONCILE_MISSING_STREAK_MIN = int(
 _COINBASE_RECONCILE_CONFIRM_WINDOW = int(
     getattr(settings, "broker_reconcile_confirm_seconds", 300)
 )
+_ABSENT_NO_FILL_STREAK_MULTIPLIER = 6
+_ABSENT_NO_FILL_STREAK_FLOOR = 12
+_ABSENT_NO_FILL_MIN_AGE_MULTIPLIER = 3
+_ABSENT_NO_FILL_MIN_AGE_FLOOR_SECONDS = 1800
+_COINBASE_ABSENT_NO_FILL_STREAK_MIN = int(
+    getattr(
+        settings,
+        "chili_coinbase_absent_no_fill_reconcile_streak_min",
+        max(
+            _ABSENT_NO_FILL_STREAK_FLOOR,
+            _COINBASE_RECONCILE_MISSING_STREAK_MIN
+            * _ABSENT_NO_FILL_STREAK_MULTIPLIER,
+        ),
+    )
+)
+_COINBASE_ABSENT_NO_FILL_MIN_AGE_SECONDS = int(
+    getattr(
+        settings,
+        "chili_coinbase_absent_no_fill_reconcile_min_age_seconds",
+        max(
+            _ABSENT_NO_FILL_MIN_AGE_FLOOR_SECONDS,
+            _COINBASE_RECONCILE_CONFIRM_WINDOW
+            * _ABSENT_NO_FILL_MIN_AGE_MULTIPLIER,
+        ),
+    )
+)
 
 # Recent bookkeeping closes are eligible for inverse reconcile when Coinbase
 # still reports the position and no real sell fill is recorded.
@@ -1613,6 +1639,110 @@ def _close_coinbase_position_identity_for_trade(db: Session, trade: Any) -> None
         )
 
 
+def _close_coinbase_absent_no_fill_trade(
+    db: Session,
+    trade: Any,
+    *,
+    missing_streak: int,
+    live_ticker_count: int,
+) -> None:
+    """Close stale local Coinbase bookkeeping without inventing PnL.
+
+    This is the strong-evidence fallback after repeated non-empty Coinbase
+    snapshots omit the ticker, no working sell order exists, and no sell fill is
+    recoverable. The broker is flat, but the execution price is unknown.
+    """
+    now = datetime.utcnow()
+    trade.status = "closed"
+    trade.exit_date = now
+    trade.exit_price = None
+    trade.pnl = None
+    trade.exit_reason = "broker_reconcile_no_exit_price"
+    trade.broker_status = "no_position"
+    trade.last_broker_sync = now
+    _clear_pending_exit_fields(trade)
+    trade.notes = (
+        (trade.notes or "")
+        + "\nAuto-closed: Coinbase omitted this asset from repeated non-empty "
+        + f"broker snapshots at {now.strftime('%Y-%m-%d %H:%M')} UTC "
+        + f"(missing_streak={missing_streak}, live_tickers={live_ticker_count}) "
+        + "and no confirming sell fill was recoverable. Exit price unknown; "
+        + "PnL left NULL."
+    )
+    db.add(trade)
+
+    try:
+        from .trading.brain_work.execution_hooks import on_broker_reconciled_close
+
+        on_broker_reconciled_close(db, trade, source="coinbase_absent_no_fill")
+    except Exception:
+        logger.debug(
+            "[coinbase] no-fill broker close hook failed for trade#%s",
+            getattr(trade, "id", None),
+            exc_info=True,
+        )
+
+    try:
+        from .trading.execution_audit import record_execution_event
+
+        record_execution_event(
+            db,
+            user_id=getattr(trade, "user_id", None),
+            ticker=getattr(trade, "ticker", None),
+            trade=trade,
+            scan_pattern_id=getattr(trade, "scan_pattern_id", None),
+            broker_source="coinbase",
+            order_id=None,
+            event_type="coinbase_position_absent_no_fill_close",
+            status="closed",
+            requested_quantity=float(getattr(trade, "quantity", 0.0) or 0.0),
+            cumulative_filled_quantity=0.0,
+            average_fill_price=None,
+            payload_json={
+                "side": "sell",
+                "synthetic": True,
+                "source": "coinbase_position_sync",
+                "reason": "broker_reconcile_no_exit_price",
+                "confirmation": "repeated_non_empty_snapshot_absent",
+                "missing_streak": missing_streak,
+                "live_ticker_count": live_ticker_count,
+            },
+        )
+    except Exception:
+        logger.debug(
+            "[coinbase] no-fill close execution_event failed for trade#%s",
+            getattr(trade, "id", None),
+            exc_info=True,
+        )
+
+    try:
+        from .trading.bracket_intent_writer import mark_closed
+
+        intent_ids = db.execute(
+            text(
+                "SELECT id FROM trading_bracket_intents "
+                "WHERE trade_id = :tid AND intent_state <> 'closed'"
+            ),
+            {"tid": int(getattr(trade, "id"))},
+        ).scalars().all()
+        for intent_id in intent_ids:
+            mark_closed(
+                db,
+                int(intent_id),
+                reason="coinbase_absent_no_fill_reconcile",
+            )
+    except Exception:
+        logger.debug(
+            "[coinbase] no-fill bracket close failed for trade#%s",
+            getattr(trade, "id", None),
+            exc_info=True,
+        )
+
+    trade.broker_status = "no_position"
+    trade.exit_reason = "broker_reconcile_no_exit_price"
+    _close_coinbase_position_identity_for_trade(db, trade)
+
+
 def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     """Sync Coinbase positions into local Trade model."""
     from ..models.trading import BreakoutAlert, Trade
@@ -1851,13 +1981,40 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             continue
         close_fill = _coinbase_stale_close_fill(trade)
         if close_fill is None:
+            absent_no_fill_streak = int(
+                getattr(trade, "broker_sync_missing_streak", 0) or 0
+            )
+            ref_age_ok = True
+            if ref_ts is not None:
+                ref_age_ok = (
+                    (datetime.utcnow() - ref_ts).total_seconds()
+                    >= _COINBASE_ABSENT_NO_FILL_MIN_AGE_SECONDS
+                )
+            if (
+                absent_no_fill_streak >= _COINBASE_ABSENT_NO_FILL_STREAK_MIN
+                and ref_age_ok
+            ):
+                _close_coinbase_absent_no_fill_trade(
+                    db,
+                    trade,
+                    missing_streak=absent_no_fill_streak,
+                    live_ticker_count=len(cb_tickers),
+                )
+                closed += 1
+                continue
             logger.warning(
                 "[coinbase] Skipping stale-close for %s trade#%s: missing "
                 "from current Coinbase position snapshot but no confirming "
                 "sell fill was found. Keeping trade open/monitored because "
-                "position snapshots can be partial or stale.",
+                "position snapshots can be partial or stale. "
+                "missing_streak=%s absent_no_fill_threshold=%s min_age_sec=%s "
+                "ref_age_ok=%s",
                 trade.ticker,
                 trade.id,
+                absent_no_fill_streak,
+                _COINBASE_ABSENT_NO_FILL_STREAK_MIN,
+                _COINBASE_ABSENT_NO_FILL_MIN_AGE_SECONDS,
+                ref_age_ok,
             )
             continue
         trade.status = "closed"
