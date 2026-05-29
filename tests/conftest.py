@@ -115,10 +115,21 @@ def _agent_ndjson(*, hypothesis_id: str, location: str, message: str, data: dict
 
 
 _schema_initialized = False
+_USER_DELETE_BLOCKING_TABLES = frozenset(
+    table.name
+    for table in Base.metadata.tables.values()
+    if any(
+        fk.target_fullname == "users.id"
+        and (fk.ondelete or "").upper() not in {"CASCADE", "SET NULL"}
+        for column in table.columns
+        for fk in column.foreign_keys
+    )
+)
 _PROJECT_DOMAIN_TARGETED_TABLES = frozenset(
     {
         "users",
         "devices",
+        *_USER_DELETE_BLOCKING_TABLES,
         "projects",
         "project_files",
         "conversations",
@@ -183,6 +194,7 @@ _TRADING_DOMAIN_TARGETED_TABLES = frozenset(
     {
         "users",
         "devices",
+        *_USER_DELETE_BLOCKING_TABLES,
         "brain_work_events",
         "broker_credentials",
         "broker_sessions",
