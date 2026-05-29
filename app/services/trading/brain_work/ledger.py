@@ -368,6 +368,68 @@ def release_stale_leases(db: Session) -> int:
     return int(r.rowcount or 0)
 
 
+def coalesce_duplicate_open_work(
+    db: Session,
+    *,
+    event_types: tuple[str, ...] | None = None,
+) -> dict[str, Any]:
+    """Retire duplicate open work rows with the same logical dedupe key.
+
+    Duplicate open rows can appear after historical dead-letter recovery. Keeping
+    one logical row preserves the work while preventing one pattern/config from
+    consuming multiple queue slots.
+    """
+    types = tuple(event_types or ())
+    q = db.query(BrainWorkEvent).filter(
+        BrainWorkEvent.domain == "trading",
+        BrainWorkEvent.event_kind == "work",
+        BrainWorkEvent.status.in_(("pending", "processing", "retry_wait")),
+        BrainWorkEvent.dedupe_key.isnot(None),
+    )
+    if types:
+        q = q.filter(BrainWorkEvent.event_type.in_(types))
+    rows = q.all()
+
+    def _rank(row: BrainWorkEvent) -> tuple[int, int, datetime, datetime, int]:
+        status_rank = {"processing": 0, "pending": 1, "retry_wait": 2}.get(
+            str(row.status or ""),
+            3,
+        )
+        return (
+            status_rank,
+            int(row.attempts or 0),
+            row.next_run_at or datetime.min,
+            row.created_at or datetime.min,
+            int(row.id),
+        )
+
+    groups: dict[tuple[str, str], list[BrainWorkEvent]] = {}
+    for row in rows:
+        groups.setdefault((str(row.event_type), str(row.dedupe_key)), []).append(row)
+
+    now = datetime.utcnow()
+    ids: list[int] = []
+    for group_rows in groups.values():
+        if len(group_rows) <= 1:
+            continue
+        group_rows.sort(key=_rank)
+        for row in group_rows[1:]:
+            if row.status == "processing":
+                continue
+            payload = dict(row.payload or {}) if isinstance(row.payload, dict) else {}
+            payload["duplicate_open_work_suppressed"] = True
+            payload["duplicate_open_work_suppressed_at"] = now.isoformat()
+            row.payload = payload
+            row.status = "done"
+            row.processed_at = row.processed_at or now
+            row.lease_holder = None
+            row.lease_expires_at = None
+            row.updated_at = now
+            ids.append(int(row.id))
+    db.flush()
+    return {"ok": True, "coalesced": len(ids), "ids": ids}
+
+
 def _dead_recovery_marker(error: str | None) -> str | None:
     text_l = (error or "").lower()
     for marker in _DEAD_RECOVERY_ERROR_MARKERS:
@@ -586,9 +648,35 @@ def recover_retryable_dead_work(
     recovered_by_marker: dict[str, int] = {}
     skipped_non_retryable = 0
     skipped_max_recoveries = 0
+    skipped_duplicate_dedupe = 0
+    open_dedupe_keys = {
+        (str(event_type), str(dedupe_key))
+        for event_type, dedupe_key in (
+            db.query(BrainWorkEvent.event_type, BrainWorkEvent.dedupe_key)
+            .filter(
+                BrainWorkEvent.domain == "trading",
+                BrainWorkEvent.event_kind == "work",
+                BrainWorkEvent.status.in_(("pending", "processing", "retry_wait")),
+                BrainWorkEvent.event_type.in_(types),
+            )
+            .all()
+        )
+        if dedupe_key is not None
+    }
+    recovered_dedupe_keys: set[tuple[str, str]] = set()
     for row in rows:
         if len(recovered_ids) >= lim:
             break
+        dedupe_key = (
+            (str(row.event_type), str(row.dedupe_key))
+            if row.dedupe_key is not None
+            else None
+        )
+        if dedupe_key is not None and (
+            dedupe_key in open_dedupe_keys or dedupe_key in recovered_dedupe_keys
+        ):
+            skipped_duplicate_dedupe += 1
+            continue
         marker = _dead_recovery_marker(row.last_error)
         if marker is None:
             skipped_non_retryable += 1
@@ -613,6 +701,8 @@ def recover_retryable_dead_work(
         row.next_run_at = now + timedelta(seconds=max(0, delay))
         row.updated_at = now
         recovered_ids.append(int(row.id))
+        if dedupe_key is not None:
+            recovered_dedupe_keys.add(dedupe_key)
         recovered_by_marker[marker] = recovered_by_marker.get(marker, 0) + 1
 
     db.flush()
@@ -625,6 +715,7 @@ def recover_retryable_dead_work(
         "recovered_by_marker": recovered_by_marker,
         "skipped_non_retryable": skipped_non_retryable,
         "skipped_max_recoveries": skipped_max_recoveries,
+        "skipped_duplicate_dedupe": skipped_duplicate_dedupe,
     }
 
 

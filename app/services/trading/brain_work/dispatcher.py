@@ -14,6 +14,7 @@ from .emitters import emit_execution_quality_updated_outcome
 from .ledger import (
     brain_work_ledger_enabled,
     claim_work_batch,
+    coalesce_duplicate_open_work,
     enqueue_outcome_event,
     mark_work_done,
     mark_work_retry_or_dead,
@@ -363,6 +364,7 @@ def run_brain_work_dispatch_round(
 
     stale_leases_released = release_stale_leases(db)
     dead_letter_recovery = recover_retryable_dead_work(db)
+    duplicate_open_work = coalesce_duplicate_open_work(db)
     db.commit()
 
     lease_s = int(getattr(settings, "brain_work_lease_seconds", 900))
@@ -686,6 +688,7 @@ def run_brain_work_dispatch_round(
         "errors": errors,
         "stale_leases_released": stale_leases_released,
         "dead_letter_recovery": dead_letter_recovery,
+        "duplicate_open_work": duplicate_open_work,
         "thin_evidence_sweep": thin_evidence_sweep,
         "market_snapshots": market_snapshots,
     }

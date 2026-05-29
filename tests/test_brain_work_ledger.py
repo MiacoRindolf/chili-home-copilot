@@ -6,6 +6,7 @@ from app.models.trading import BrainWorkEvent
 from app.services.trading.brain_work import ledger as ledger_mod
 from app.services.trading.brain_work.ledger import (
     claim_work_batch,
+    coalesce_duplicate_open_work,
     enqueue_or_refresh_debounced_work,
     enqueue_outcome_event,
     enqueue_work_event,
@@ -282,6 +283,92 @@ def test_retryable_dead_work_default_recovers_multiple_infra_failures(db) -> Non
     recovered = db.get(BrainWorkEvent, eid)
     assert recovered.status == "retry_wait"
     assert recovered.payload["transient_dead_recovery_count"] == 2
+
+
+def test_retryable_dead_work_recovery_skips_duplicate_dedupe(db) -> None:
+    dedupe_key = "bt_req:retryable-dead-duplicate-dedupe"
+    ids: list[int] = []
+    for idx in range(2):
+        row = BrainWorkEvent(
+            domain="trading",
+            event_type="backtest_requested",
+            event_kind="work",
+            dedupe_key=dedupe_key,
+            payload={"scan_pattern_id": 537, "source": f"dead-{idx}"},
+            lease_scope="backtest",
+            status="dead",
+            attempts=1,
+            max_attempts=2,
+            last_error="Can't reconnect until invalid transaction is rolled back.",
+        )
+        db.add(row)
+        db.flush()
+        ids.append(int(row.id))
+    db.commit()
+
+    result = recover_retryable_dead_work(
+        db,
+        event_types=("backtest_requested",),
+        limit=4,
+        max_recoveries_per_event=1,
+        delay_seconds=0,
+    )
+    db.commit()
+
+    assert result["recovered"] == 1
+    assert result["skipped_duplicate_dedupe"] == 1
+    rows = (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.id.in_(ids))
+        .order_by(BrainWorkEvent.id.asc())
+        .all()
+    )
+    assert [row.status for row in rows].count("retry_wait") == 1
+    assert [row.status for row in rows].count("dead") == 1
+
+
+def test_coalesce_duplicate_open_work_keeps_one_logical_row(db) -> None:
+    keep = enqueue_work_event(
+        db,
+        event_type="backtest_requested",
+        dedupe_key="bt_req:duplicate-open-537",
+        payload={"scan_pattern_id": 537, "source": "operator_boost"},
+        lease_scope="backtest",
+    )
+    db.commit()
+    assert keep is not None
+
+    duplicate = BrainWorkEvent(
+        domain="trading",
+        event_type="backtest_requested",
+        event_kind="work",
+        dedupe_key="bt_req:duplicate-open-537",
+        payload={"scan_pattern_id": 537, "source": "operator_boost"},
+        lease_scope="backtest",
+        status="retry_wait",
+        attempts=4,
+        max_attempts=5,
+    )
+    db.add(duplicate)
+    db.commit()
+
+    result = coalesce_duplicate_open_work(
+        db,
+        event_types=("backtest_requested",),
+    )
+    db.commit()
+
+    assert result["coalesced"] == 1
+    rows = (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.dedupe_key == "bt_req:duplicate-open-537")
+        .order_by(BrainWorkEvent.id.asc())
+        .all()
+    )
+    assert len(rows) == 2
+    assert rows[0].status == "pending"
+    assert rows[1].status == "done"
+    assert rows[1].payload["duplicate_open_work_suppressed"] is True
 
 
 def test_enqueue_work_reuses_retryable_dead_dedupe(db, monkeypatch) -> None:
