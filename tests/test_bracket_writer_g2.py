@@ -303,6 +303,27 @@ def test_place_missing_stop_happy_path(db, monkeypatch):
     assert "limit_price" not in call_kwargs
 
 
+def test_place_missing_stop_skips_robinhood_fractional_equity(db, monkeypatch):
+    monkeypatch.setattr(g2, "settings", _on_cfg())
+
+    factory = MagicMock()
+    result = g2.place_missing_stop(
+        db,
+        trade_id=55,
+        bracket_intent_id=9009,
+        ticker="AAOX",
+        broker_source="robinhood",
+        decision=_missing_stop_decision(),
+        local_quantity=0.759019,
+        stop_price=42.8645,
+        adapter_factory=factory,
+    )
+
+    assert result.ok is False
+    assert result.reason == "software_stop_managed_robinhood_fractional_equity"
+    factory.assert_not_called()
+
+
 # ── Failure modes ──────────────────────────────────────────────────────
 
 

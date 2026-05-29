@@ -582,6 +582,19 @@ def mark_reconciled(
         to_state=IntentState.RECONCILED,
         reason=reason or "mark_reconciled",
     )
+    if result.ok and result.prev_state == result.new_state:
+        # Idempotent reconciled sweeps still need to clear stale error labels
+        # such as "missing_stop:error" after the broker/local view agrees again.
+        db.execute(text(
+            "UPDATE trading_bracket_intents "
+            "SET last_diff_reason = COALESCE(:reason, last_diff_reason), "
+            "    last_observed_at = NOW(), "
+            "    updated_at = NOW() "
+            "WHERE id = :id"
+        ), {
+            "id": int(intent_id),
+            "reason": (reason or "mark_reconciled")[:128] or None,
+        })
     if result.ok:
         db.commit()
     return bool(result.ok)

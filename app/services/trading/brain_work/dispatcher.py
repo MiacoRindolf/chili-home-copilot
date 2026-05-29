@@ -59,6 +59,48 @@ def _recover_dispatch_session(db: Session, context: str) -> None:
         )
 
 
+def _publish_brain_work_outcome_isolated(
+    *,
+    outcome_type: str,
+    scan_pattern_id: int | None = None,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    """Publish non-critical mesh observations without risking the dispatcher DB session."""
+    try:
+        from ....db import SessionLocal
+        from ..brain_neural_mesh.publisher import publish_brain_work_outcome
+    except Exception as exc:
+        logger.debug("%s mesh publisher import skipped: %s", LOG_PREFIX, exc)
+        return
+
+    sess = SessionLocal()
+    try:
+        publish_brain_work_outcome(
+            sess,
+            outcome_type=outcome_type,
+            scan_pattern_id=scan_pattern_id,
+            extra=extra,
+        )
+        sess.commit()
+    except Exception as exc:
+        logger.debug(
+            "%s isolated mesh publish skipped type=%s: %s",
+            LOG_PREFIX,
+            outcome_type,
+            exc,
+            exc_info=True,
+        )
+        try:
+            sess.rollback()
+        except Exception:
+            pass
+    finally:
+        try:
+            sess.close()
+        except Exception:
+            pass
+
+
 def _handle_backtest_requested(db: Session, ev, user_id: int | None) -> None:
     from ....db import SessionLocal
     from ....models.trading import ScanPattern
@@ -122,18 +164,12 @@ def _handle_backtest_requested(db: Session, ev, user_id: int | None) -> None:
             pass
         s1.close()
 
-    try:
-        from ..brain_neural_mesh.publisher import publish_brain_work_outcome
-
-        publish_brain_work_outcome(
-            db,
-            outcome_type="backtest_completed",
-            scan_pattern_id=pid,
-            extra={"work_event_id": int(ev.id), "backtests_run": bt_run},
-        )
-    except Exception as e:
-        logger.debug("%s mesh publish skipped: %s", LOG_PREFIX, e)
-        _recover_dispatch_session(db, "backtest mesh publish")
+    _recover_dispatch_session(db, "backtest completion handoff")
+    _publish_brain_work_outcome_isolated(
+        outcome_type="backtest_completed",
+        scan_pattern_id=pid,
+        extra={"work_event_id": int(ev.id), "backtests_run": bt_run},
+    )
 
 
 def _handle_execution_feedback_digest(db: Session, ev, user_id: int | None) -> None:
@@ -207,18 +243,11 @@ def _handle_execution_feedback_digest(db: Session, ev, user_id: int | None) -> N
         parent_work_event_id=int(ev.id),
         attribution_summary=attribution_summary,
     )
-    try:
-        from ..brain_neural_mesh.publisher import publish_brain_work_outcome
-
-        publish_brain_work_outcome(
-            db,
-            outcome_type="execution_quality_updated",
-            scan_pattern_id=None,
-            extra={"work_event_id": int(ev.id), "user_id": int(uid)},
-        )
-    except Exception as e:
-        logger.debug("%s mesh exec-quality publish skipped: %s", LOG_PREFIX, e)
-        _recover_dispatch_session(db, "execution-quality mesh publish")
+    _publish_brain_work_outcome_isolated(
+        outcome_type="execution_quality_updated",
+        scan_pattern_id=None,
+        extra={"work_event_id": int(ev.id), "user_id": int(uid)},
+    )
 
 
 def _dispatch_limits(

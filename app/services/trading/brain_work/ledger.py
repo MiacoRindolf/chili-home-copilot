@@ -27,7 +27,7 @@ _DEAD_RECOVERY_ERROR_MARKERS = (
     "connection not open",
 )
 _DEAD_RECOVERY_DEFAULT_LIMIT = 8
-_DEAD_RECOVERY_DEFAULT_MAX_PER_EVENT = 1
+_DEAD_RECOVERY_DEFAULT_MAX_PER_EVENT = 3
 _DEAD_RECOVERY_DEFAULT_DELAY_SECONDS = 10
 _DEAD_DEDUPE_SUPPRESSED = object()
 
@@ -583,6 +583,7 @@ def recover_retryable_dead_work(
     )
 
     recovered_ids: list[int] = []
+    recovered_by_marker: dict[str, int] = {}
     skipped_non_retryable = 0
     skipped_max_recoveries = 0
     for row in rows:
@@ -612,6 +613,7 @@ def recover_retryable_dead_work(
         row.next_run_at = now + timedelta(seconds=max(0, delay))
         row.updated_at = now
         recovered_ids.append(int(row.id))
+        recovered_by_marker[marker] = recovered_by_marker.get(marker, 0) + 1
 
     db.flush()
     return {
@@ -620,6 +622,7 @@ def recover_retryable_dead_work(
         "event_types": list(types),
         "recovered": len(recovered_ids),
         "ids": recovered_ids,
+        "recovered_by_marker": recovered_by_marker,
         "skipped_non_retryable": skipped_non_retryable,
         "skipped_max_recoveries": skipped_max_recoveries,
     }

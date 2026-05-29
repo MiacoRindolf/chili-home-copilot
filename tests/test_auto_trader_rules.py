@@ -11,6 +11,7 @@ from app.models.trading import AutoTraderRun, BreakoutAlert
 from app.services.trading.auto_trader_rules import (
     EntryEdgeDecision,
     RuleGateContext,
+    _non_positive_reprice_marker,
     alert_confidence_from_score,
     count_autotrader_v1_open,
     count_autotrader_v1_open_by_lane,
@@ -51,6 +52,15 @@ def test_alert_confidence_from_score():
         price_at_alert=10.0,
     )
     assert abs(alert_confidence_from_score(a) - min(0.95, 0.55 + 0.2)) < 1e-6
+
+
+def test_non_positive_reprice_marker_handles_numeric_snapshot_without_name_error():
+    assert _non_positive_reprice_marker(
+        {"slippage_reprice_expected_net_pct": "-0.1018"}
+    )
+    assert not _non_positive_reprice_marker(
+        {"slippage_reprice_expected_net_pct": "Infinity"}
+    )
 
 
 class _FakeQuery:
@@ -372,6 +382,89 @@ def test_passes_rule_gate_shadow_observation_skips_live_risk_authority():
     assert snap["entry_edge_expected_net_pct"] == 1.25
     assert snap["shadow_observation_risk_authority_skipped"] is True
     assert snap["portfolio_check"]["reason"] == "shadow_observation_only"
+
+
+def test_daily_loss_cap_uses_static_dollar_cap_when_equity_is_unproven():
+    db = MagicMock()
+    settings = SimpleNamespace(
+        chili_autotrader_rth_only=False,
+        chili_autotrader_allow_extended_hours=False,
+        chili_autotrader_crypto_enabled=False,
+        chili_autotrader_options_enabled=False,
+        chili_autotrader_confidence_floor=0.5,
+        chili_autotrader_min_projected_profit_pct=0.0,
+        chili_autotrader_max_symbol_price_usd=500.0,
+        chili_autotrader_fractional_equity_enabled=True,
+        chili_autotrader_max_entry_slippage_pct=5.0,
+        chili_autotrader_daily_loss_cap_usd=500.0,
+        chili_autotrader_daily_loss_cap_pct=1.5,
+        chili_autotrader_max_concurrent=60,
+        chili_autotrader_max_concurrent_equity=20,
+        chili_autotrader_max_concurrent_crypto=20,
+        chili_autotrader_max_concurrent_options=20,
+        chili_autotrader_assumed_capital_usd=100_000.0,
+        chili_autotrader_broker_equity_cache_enabled=False,
+        chili_autotrader_broker_equity_cache_ttl_seconds=300,
+        chili_autotrader_broker_equity_cache_max_stale_seconds=900,
+    )
+    alert = BreakoutAlert(
+        ticker="LOSS",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.7,
+        price_at_alert=100.0,
+        entry_price=100.0,
+        stop_loss=90.0,
+        target_price=115.0,
+        user_id=1,
+    )
+    ctx = RuleGateContext(
+        current_price=100.0,
+        autotrader_open_count=0,
+        realized_loss_today_usd=-600.0,
+        autotrader_open_count_by_lane={"equity": 0, "crypto": 0, "options": 0},
+    )
+
+    with (
+        patch(
+            "app.services.trading.auto_trader_rules.resolve_pattern_signal_context",
+            return_value={},
+        ),
+        patch(
+            "app.services.trading.auto_trader_rules.evaluate_entry_edge",
+            return_value=EntryEdgeDecision(
+                True,
+                "positive_expected_edge",
+                {"expected_net_pct": 1.25},
+            ),
+        ),
+        patch(
+            "app.services.trading.auto_trader_rules.resolve_effective_slippage_pct",
+            return_value=(5.0, "test"),
+        ),
+        patch(
+            "app.services.trading.auto_trader_rules.resolve_brain_risk_context",
+            return_value={"dial_value": 1.0},
+        ),
+        patch(
+            "app.services.trading.auto_trader_rules.resolve_effective_capital",
+            return_value=(100_000.0, "fallback:broker_disconnected"),
+        ),
+        patch(
+            "app.services.trading.portfolio_risk.check_new_trade_allowed",
+            side_effect=AssertionError("portfolio gate must not run after loss cap"),
+        ),
+    ):
+        ok, reason, snap = passes_rule_gate(
+            db, alert, settings=settings, ctx=ctx, for_new_entry=True
+        )
+
+    assert not ok
+    assert reason == "daily_loss_cap_already_hit"
+    assert snap["daily_loss_cap_source"] == "env_dollar_dial"
+    assert snap["daily_loss_cap_capital_source"] == "fallback:broker_disconnected"
+    assert snap["daily_loss_cap_unproven_equity_usd"] == 100_000.0
+    assert snap["daily_loss_cap_usd"] == 500.0
 
 
 def test_passes_rule_gate_keeps_stock_price_cap_when_fractional_equity_disabled():
@@ -799,6 +892,58 @@ def test_evaluate_entry_edge_uses_dynamic_exit_payoff_distribution():
     assert decision.snapshot["expected_net_pct"] > 0
 
 
+def test_evaluate_entry_edge_blocks_absurd_stock_execution_stop_geometry():
+    class _EmptyExec:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return []
+
+        def first(self):
+            return None
+
+    class _Query:
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def one_or_none(self):
+            return None
+
+    class _Db:
+        def query(self, *_args, **_kwargs):
+            return _Query()
+
+        def execute(self, *_args, **_kwargs):
+            return _EmptyExec()
+
+    alert = BreakoutAlert(
+        ticker="AAOX",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        scan_pattern_id=1256,
+        score_at_alert=0.7,
+        price_at_alert=42.87,
+        entry_price=42.87,
+        stop_loss=7.58,
+        target_price=85.22,
+        user_id=1,
+    )
+
+    decision = evaluate_entry_edge(
+        _Db(),
+        alert,
+        settings=SimpleNamespace(chili_autotrader_stock_max_execution_stop_loss_pct=30.0),
+        pat_ctx={},
+        confidence=0.95,
+    )
+
+    assert not decision.allowed
+    assert decision.reason == "execution_stop_loss_too_wide"
+    assert decision.snapshot["execution_stop_loss_fraction"] > 0.8
+    assert decision.snapshot["max_execution_stop_loss_pct"] == 30.0
+
+
 def test_evaluate_entry_edge_guards_probability_sample_count_to_closed_trades():
     class _EmptyExec:
         def mappings(self):
@@ -1090,6 +1235,78 @@ def test_passes_rule_gate_options_blocks_missing_complete_greeks(
         "missing_complete_greeks:delta,gamma,theta,vega"
     ]
     _mock_port.assert_not_called()
+
+
+def test_passes_rule_gate_options_blocks_budget_book_error(monkeypatch):
+    monkeypatch.delenv("CHILI_OPTIONS_BUDGET_BYPASS", raising=False)
+    db = MagicMock()
+    settings = SimpleNamespace(
+        chili_autotrader_rth_only=False,
+        chili_autotrader_confidence_floor=0.5,
+        chili_autotrader_min_projected_profit_pct=5.0,
+        chili_autotrader_max_symbol_price_usd=50.0,
+        chili_autotrader_max_entry_slippage_pct=2.0,
+        chili_autotrader_daily_loss_cap_usd=500.0,
+        chili_autotrader_daily_loss_cap_pct=0.0,
+        chili_autotrader_max_concurrent=60,
+        chili_autotrader_max_concurrent_equity=2,
+        chili_autotrader_max_concurrent_crypto=2,
+        chili_autotrader_max_concurrent_options=2,
+        chili_autotrader_crypto_enabled=False,
+        chili_autotrader_options_enabled=True,
+        chili_autotrader_options_min_underlying_reward_risk=1.0,
+        chili_autotrader_options_min_option_reward_risk=1.0,
+        chili_autotrader_options_min_expected_value_pct=0.0,
+        chili_autotrader_assumed_capital_usd=100_000.0,
+        chili_autotrader_broker_equity_cache_enabled=False,
+    )
+    ctx = RuleGateContext(
+        current_price=113.25,
+        autotrader_open_count=0,
+        realized_loss_today_usd=0.0,
+        autotrader_open_count_by_lane={"equity": 0, "crypto": 0, "options": 0},
+    )
+    alert = BreakoutAlert(
+        ticker="A",
+        asset_type="options",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.7,
+        price_at_alert=113.25,
+        entry_price=5.40,
+        stop_loss=110.0,
+        target_price=130.0,
+        user_id=1,
+        indicator_snapshot={
+            "option_meta": {
+                "strike": 115.0,
+                "expiration": "2026-06-18",
+                "option_type": "call",
+                "limit_price": 5.40,
+                "quantity": 1,
+                "delta": 0.42,
+                "gamma": 0.03,
+                "theta": -0.08,
+                "vega": 0.11,
+            }
+        },
+    )
+
+    with patch(
+        "app.services.trading.options.portfolio_budget._sum_open_position_greeks",
+        side_effect=RuntimeError("budget unavailable"),
+    ) as open_book, patch(
+        "app.services.trading.portfolio_risk.check_new_trade_allowed",
+        side_effect=AssertionError("portfolio gate must not run after budget failure"),
+    ):
+        ok, reason, snap = passes_rule_gate(
+            db, alert, settings=settings, ctx=ctx, for_new_entry=True
+        )
+
+    assert not ok
+    assert reason == "options_budget:budget_error:RuntimeError"
+    assert snap["options_budget_check"]["ok"] is False
+    assert snap["options_budget_check"]["reasons"] == ["budget_error:RuntimeError"]
+    open_book.assert_called_once()
 
 
 @patch("app.services.trading.auto_trader_rules.resolve_effective_capital", return_value=(100_000.0, "test"))

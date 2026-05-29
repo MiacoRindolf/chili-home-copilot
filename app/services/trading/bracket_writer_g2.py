@@ -123,6 +123,7 @@ _intent_reject_cooldown: dict[int, float] = {}
 _TERMINAL_REJECT_PATTERNS = (
     "not enough shares",   # Robinhood "Not enough shares to sell."
     "insufficient shares",
+    "insufficient balance",
     "instrument suspended",
     "instrument is not allowed",
     "uncovered",            # uncovered short
@@ -164,6 +165,11 @@ _CODE_BUG_ERROR_PATTERNS = (
     "crypto_ticker_unsupported_via_equity_primitive",
 )
 
+_TRANSIENT_DATA_UNAVAILABLE_ERROR_PATTERNS = (
+    "product info fetch failed",
+    "product_info_unavailable",
+)
+
 
 def _is_code_bug_error(error_text: str | None) -> bool:
     """Return True if the broker error string looks like a swallowed
@@ -173,6 +179,20 @@ def _is_code_bug_error(error_text: str | None) -> bool:
         return False
     needle = str(error_text).lower()
     return any(pat in needle for pat in _CODE_BUG_ERROR_PATTERNS)
+
+
+def _is_transient_data_unavailable_error(error_text: str | None) -> bool:
+    """Return True for broker-adapter data dependencies worth cooldown.
+
+    These are not terminal broker rejects and must not mark an intent
+    terminal_reject, but retrying every sweep just hammers the same
+    unproven placement path. Example: Coinbase product metadata unavailable,
+    where placing an unquantized stop would violate no-magic-fallback policy.
+    """
+    if not error_text:
+        return False
+    needle = str(error_text).lower()
+    return any(pat in needle for pat in _TRANSIENT_DATA_UNAVAILABLE_ERROR_PATTERNS)
 
 
 def _is_in_reject_cooldown(bracket_intent_id: int) -> bool:
@@ -365,6 +385,14 @@ def warn_if_silent_exposure(*, log: "logging.Logger | None" = None) -> bool:
 # Coinbase later can't accidentally trip on a stale Robinhood code path.
 
 _SUPPORTED_VENUES = frozenset({"robinhood", "coinbase"})
+
+
+def _is_fractional_share_quantity(value: Any) -> bool:
+    try:
+        qty = float(value)
+    except (TypeError, ValueError):
+        return False
+    return qty > 0.0 and abs(qty - round(qty)) > 1e-9
 
 
 @dataclass(frozen=True)
@@ -1316,6 +1344,27 @@ def place_missing_stop(
             broker_source=broker_source, ticker=ticker,
         )
 
+    _t_upper = (ticker or "").upper()
+    _bs_lower = (broker_source or "").strip().lower()
+    if (
+        _bs_lower == "robinhood"
+        and not _t_upper.endswith("-USD")
+        and _is_fractional_share_quantity(local_quantity)
+    ):
+        logger.info(
+            f"{BRACKET_WRITER_G2} place_missing_stop SKIPPED intent=%s "
+            "ticker=%s reason=software_stop_managed_robinhood_fractional_equity "
+            "qty=%s",
+            bracket_intent_id, ticker, local_quantity,
+        )
+        return WriterAction(
+            action="place_missing_stop",
+            ok=False,
+            reason="software_stop_managed_robinhood_fractional_equity",
+            broker_source=broker_source,
+            ticker=ticker,
+        )
+
     if _is_option_trade_for_bracket_writer(db, trade_id):
         logger.info(
             f"{BRACKET_WRITER_G2} place_missing_stop SKIPPED intent=%s "
@@ -1359,8 +1408,6 @@ def place_missing_stop(
     # still crashes on crypto bases via the SDK's
     # get_instruments_by_symbols([])[0] failure, so RH crypto still
     # SKIPPED-audits with the original reason string.
-    _t_upper = (ticker or "").upper()
-    _bs_lower = (broker_source or "").strip().lower()
     if _t_upper.endswith("-USD") and _bs_lower == "robinhood":
         logger.warning(
             f"{BRACKET_WRITER_G2} place_missing_stop SKIPPED intent=%s "
@@ -1792,6 +1839,7 @@ def place_missing_stop(
         # 60s sweep skips for `_exception_cooldown_secs()` instead of
         # re-firing.
         code_bug = _is_code_bug_error(err_text)
+        transient_data_unavailable = _is_transient_data_unavailable_error(err_text)
         if terminal:
             # Phase 3.3 (2026-05-01): persist the terminal reject in the
             # state machine, not just the in-process dict. The reconciler
@@ -1815,14 +1863,18 @@ def place_missing_stop(
                 _TERMINAL_REJECT_COOLDOWN_SECS, bracket_intent_id, ticker,
                 err_text[:200],
             )
-        elif code_bug:
+        elif code_bug or transient_data_unavailable:
             _arm_exception_cooldown(bracket_intent_id)
+            cooldown_class = (
+                "code-bug class"
+                if code_bug
+                else "transient data-unavailable class"
+            )
             logger.warning(
                 f"{BRACKET_WRITER_G2} place_missing_stop broker error matches "
-                "code-bug class (likely an upstream IndexError caught and "
-                "packaged as ok=False); arming %ss exception cooldown "
+                "%s; arming %ss exception cooldown "
                 "intent=%s ticker=%s err=%s",
-                _exception_cooldown_secs(), bracket_intent_id, ticker,
+                cooldown_class, _exception_cooldown_secs(), bracket_intent_id, ticker,
                 err_text[:200],
             )
         else:
@@ -1839,6 +1891,8 @@ def place_missing_stop(
             extra={
                 "terminal_reject": terminal,
                 "code_bug_cooldown_armed": code_bug,
+                "transient_data_cooldown_armed": transient_data_unavailable,
+                "exception_cooldown_armed": code_bug or transient_data_unavailable,
             },
         )
         return WriterAction(

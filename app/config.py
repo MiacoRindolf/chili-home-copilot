@@ -544,6 +544,7 @@ class Settings(BaseSettings):
     brain_work_cash_deployment_producer_window_days: int = 30
     brain_work_cash_deployment_producer_limit: int = 25
     brain_work_cash_deployment_noop_cooldown_minutes: int = 360
+    brain_work_recent_done_dedupe_minutes: int = 120
     # Emit ``market_snapshots_batch`` outcome when scheduler snapshot job finishes.
     brain_work_snapshots_outcome_enabled: bool = True
     # Phase 1b of f-adaptive-promotion-architecture (2026-05-11).
@@ -1696,11 +1697,11 @@ class Settings(BaseSettings):
         ),
     )
 
-    # APScheduler process split: ``all`` (default, single process), ``web`` (no heavy market scans),
+    # APScheduler process split: ``all`` (single process), ``web`` (no heavy market scans),
     # ``worker`` (heavy scans + heartbeat only), ``none`` (no scheduler — use with a separate worker).
-    # Docker Compose: ``chili`` uses ``none``, ``scheduler-worker`` uses ``all`` + ``CHILI_SCHEDULER_EMIT_HEARTBEAT=1``.
+    # Default ``none`` keeps stray host uvicorn processes from duplicating Docker workers.
     chili_scheduler_role: str = Field(
-        default="all",
+        default="none",
         validation_alias=AliasChoices("CHILI_SCHEDULER_ROLE"),
     )
     # Set to true in the web (chili) container when a separate scheduler-worker runs APScheduler.

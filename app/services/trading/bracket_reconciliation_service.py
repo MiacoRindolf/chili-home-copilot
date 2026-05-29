@@ -28,6 +28,7 @@ from ...trading_brain.infrastructure.bracket_reconciliation_ops_log import (
 from .bracket_intent_writer import (
     bump_last_observed,
     mark_auto_reconciled_after_terminal_reject,
+    mark_closed,
     mark_reconciled,
     sync_broker_stop_order_id_mirror,
 )
@@ -1027,6 +1028,42 @@ def _try_cancelled_limit_replacement_eval(
 # ── Stage 4: log_all (DB writes + intent bumps + ops-log emission) ─────
 
 
+def _agree_reconciliation_reason(decision: ReconciliationDecision) -> str:
+    """Keep the intent's latest reason aligned with explainable agree cases."""
+    raw_reason = None
+    if isinstance(decision.delta_payload, dict):
+        raw_reason = decision.delta_payload.get("reason")
+    if isinstance(raw_reason, str) and raw_reason.strip():
+        return f"agree:{raw_reason.strip()}"[:128]
+    return "agree"
+
+
+def _mark_agree_intent(
+    db: Session,
+    *,
+    local: LocalView,
+    decision: ReconciliationDecision,
+    mode: str,
+) -> None:
+    if local.bracket_intent_id is None:
+        return
+    reason = _agree_reconciliation_reason(decision)
+    if (local.trade_status or "").lower() != "open":
+        mark_closed(
+            db,
+            int(local.bracket_intent_id),
+            reason=f"trade_closed:{reason}",
+            mode_override=mode,
+        )
+        return
+    mark_reconciled(
+        db,
+        int(local.bracket_intent_id),
+        reason=reason,
+        mode_override=mode,
+    )
+
+
 def _stage_log_all(db: Session, batch: SweepBatch) -> int:
     """Persist one reconciliation-log row per decision + bump intents.
 
@@ -1058,15 +1095,15 @@ def _stage_log_all(db: Session, batch: SweepBatch) -> int:
 
         if decision.kind == "agree" and lv.bracket_intent_id is not None:
             try:
-                mark_reconciled(
+                _mark_agree_intent(
                     db,
-                    int(lv.bracket_intent_id),
-                    reason="agree",
-                    mode_override=batch.mode,
+                    local=lv,
+                    decision=decision,
+                    mode=batch.mode,
                 )
             except Exception:  # pragma: no cover - defensive
                 logger.debug(
-                    f"{BRACKET_RECONCILIATION} mark_reconciled failed for intent %s",
+                    f"{BRACKET_RECONCILIATION} agree intent update failed for intent %s",
                     lv.bracket_intent_id,
                 )
         elif lv.bracket_intent_id is not None:
@@ -1333,6 +1370,14 @@ def _try_emergency_repair_terminal_reject(
                 )
                 return None  # fall through to state_gated_skip
 
+        if _writer_reject_cooldown_active(int(local.bracket_intent_id)):
+            logger.info(
+                f"{BRACKET_RECONCILIATION} EMERGENCY-REPAIR THROTTLED "
+                "trade=%s intent=%s ticker=%s reason=writer_reject_cooldown",
+                local.trade_id, local.bracket_intent_id, local.ticker,
+            )
+            return None  # fall through to state_gated_skip
+
         local_qty = float(local.quantity or 0.0)
         if local_qty <= 0.0 or local.stop_price is None:
             return {
@@ -1428,6 +1473,22 @@ def _try_emergency_repair_terminal_reject(
             "qty": None,
             "stop_price": None,
         }
+
+
+def _writer_reject_cooldown_active(bracket_intent_id: int) -> bool:
+    """Return True when the G2 writer just classified a terminal reject.
+
+    Emergency terminal-reject repair is for old parked intents whose
+    broker condition may have changed. If the same process has just
+    observed a terminal broker reject, retrying immediately only turns a
+    deliberate cooldown into a critical log loop.
+    """
+    try:
+        from . import bracket_writer_g2
+
+        return bool(bracket_writer_g2._is_in_reject_cooldown(int(bracket_intent_id)))
+    except Exception:
+        return False
 
 
 def _utc_now_naive():
@@ -2317,15 +2378,15 @@ def _run_sweep_legacy(
 
         if decision.kind == "agree" and local.bracket_intent_id is not None:
             try:
-                mark_reconciled(
+                _mark_agree_intent(
                     db,
-                    int(local.bracket_intent_id),
-                    reason="agree",
-                    mode_override=mode,
+                    local=local,
+                    decision=decision,
+                    mode=mode,
                 )
             except Exception:  # pragma: no cover - defensive
                 logger.debug(
-                    f"{BRACKET_RECONCILIATION} mark_reconciled failed for intent %s",
+                    f"{BRACKET_RECONCILIATION} agree intent update failed for intent %s",
                     local.bracket_intent_id,
                 )
         elif local.bracket_intent_id is not None:

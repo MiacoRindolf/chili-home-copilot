@@ -243,6 +243,47 @@ def test_retryable_dead_work_recovery_requeues_once(db) -> None:
     assert second["skipped_max_recoveries"] >= 1
 
 
+def test_retryable_dead_work_default_recovers_multiple_infra_failures(db) -> None:
+    eid = enqueue_work_event(
+        db,
+        event_type="backtest_requested",
+        dedupe_key="bt_req:retryable-dead-default-multi",
+        payload={
+            "scan_pattern_id": 537,
+            "source": "operator_boost",
+            "transient_dead_recovery_count": 1,
+        },
+        lease_scope="backtest",
+        max_attempts=1,
+    )
+    db.commit()
+    assert eid is not None
+
+    row = db.get(BrainWorkEvent, eid)
+    row.status = "dead"
+    row.attempts = 1
+    row.processed_at = row.updated_at
+    row.last_error = "Can't reconnect until invalid transaction is rolled back."
+    db.commit()
+
+    result = recover_retryable_dead_work(
+        db,
+        event_types=("backtest_requested",),
+        limit=4,
+        delay_seconds=0,
+    )
+    db.commit()
+
+    assert result["recovered"] == 1
+    assert result["ids"] == [eid]
+    assert result["recovered_by_marker"] == {
+        "can't reconnect until invalid transaction is rolled back": 1,
+    }
+    recovered = db.get(BrainWorkEvent, eid)
+    assert recovered.status == "retry_wait"
+    assert recovered.payload["transient_dead_recovery_count"] == 2
+
+
 def test_enqueue_work_reuses_retryable_dead_dedupe(db, monkeypatch) -> None:
     monkeypatch.setattr(
         ledger_mod,
