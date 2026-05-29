@@ -46,6 +46,7 @@ PROVENANCE_BACKFILL_DIAGNOSTIC = "provenance_backfill_diagnostic"
 DEFAULT_WINDOW_DAYS = 30
 DEFAULT_MIN_CLOSED_EVIDENCE = 5
 DEFAULT_TOP_LIMIT = 25
+DEFAULT_RECENT_DONE_DEDUPE_MINUTES = 120
 
 HARD_RECERT_REASONS = frozenset({
     "negative_oos_recert",
@@ -684,6 +685,40 @@ def persist_edge_reliability_snapshot(
     return row
 
 
+def _recent_completed_work_exists(
+    db: Session,
+    *,
+    event_type: str,
+    dedupe_key: str,
+) -> bool:
+    """Return True when the exact same fingerprinted work finished recently."""
+    try:
+        from ...config import settings
+
+        minutes = int(
+            getattr(
+                settings,
+                "brain_work_recent_done_dedupe_minutes",
+                DEFAULT_RECENT_DONE_DEDUPE_MINUTES,
+            )
+        )
+    except Exception:
+        minutes = DEFAULT_RECENT_DONE_DEDUPE_MINUTES
+    if minutes <= 0:
+        return False
+    cutoff = datetime.utcnow() - timedelta(minutes=minutes)
+    return (
+        db.query(BrainWorkEvent.id)
+        .filter(BrainWorkEvent.event_kind == "work")
+        .filter(BrainWorkEvent.event_type == event_type)
+        .filter(BrainWorkEvent.dedupe_key == dedupe_key)
+        .filter(BrainWorkEvent.status == "done")
+        .filter(BrainWorkEvent.updated_at >= cutoff)
+        .first()
+        is not None
+    )
+
+
 def emit_edge_reliability_refresh_requested(
     db: Session,
     scan_pattern_id: int,
@@ -695,13 +730,20 @@ def emit_edge_reliability_refresh_requested(
 ) -> int | None:
     fp = (evidence_fingerprint or "latest").strip()[:40]
     slice_key = _canonical_asset_class(asset_class) or "all"
+    dedupe_key = (
+        f"{EDGE_RELIABILITY_REFRESH}:p{int(scan_pattern_id)}:"
+        f"a{slice_key}:w{int(window_days)}:{fp}"
+    )
+    if _recent_completed_work_exists(
+        db,
+        event_type=EDGE_RELIABILITY_REFRESH,
+        dedupe_key=dedupe_key,
+    ):
+        return None
     return enqueue_work_event(
         db,
         event_type=EDGE_RELIABILITY_REFRESH,
-        dedupe_key=(
-            f"{EDGE_RELIABILITY_REFRESH}:p{int(scan_pattern_id)}:"
-            f"a{slice_key}:w{int(window_days)}:{fp}"
-        ),
+        dedupe_key=dedupe_key,
         payload={
             "scan_pattern_id": int(scan_pattern_id),
             "asset_class": _canonical_asset_class(asset_class),
@@ -732,6 +774,13 @@ def emit_targeted_profitability_work(
     pid_key = f"p{int(scan_pattern_id)}" if scan_pattern_id is not None else "null_lineage"
     fp = (evidence_fingerprint or "latest").strip()[:40]
     slice_key = _canonical_asset_class(asset_class) or "all"
+    dedupe_key = f"{event_type}:{pid_key}:a{slice_key}:{fp}"
+    if _recent_completed_work_exists(
+        db,
+        event_type=event_type,
+        dedupe_key=dedupe_key,
+    ):
+        return None
     body = dict(payload or {})
     if scan_pattern_id is not None:
         body["scan_pattern_id"] = int(scan_pattern_id)
@@ -740,7 +789,7 @@ def emit_targeted_profitability_work(
     return enqueue_work_event(
         db,
         event_type=event_type,
-        dedupe_key=f"{event_type}:{pid_key}:a{slice_key}:{fp}",
+        dedupe_key=dedupe_key,
         payload=body,
         lease_scope="edge",
     )

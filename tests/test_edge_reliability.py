@@ -25,6 +25,7 @@ from app.services.trading.edge_reliability import (
     compute_pattern_edge_reliability,
     edge_supply_rows,
     emit_edge_reliability_refresh_requested,
+    emit_targeted_profitability_work,
 )
 
 
@@ -635,20 +636,21 @@ def test_recert_rescue_diagnostic_explains_soft_recert_next_action(db):
 
 def test_edge_reliability_work_dedupe_and_dispatch(db):
     pat = _pattern(db)
+    pat_id = pat.id
     alert = _alert(db, pat)
     _run(db, pat, alert, expected=1.25)
     db.commit()
 
     first = emit_edge_reliability_refresh_requested(
         db,
-        pat.id,
+        pat_id,
         source="test",
         window_days=7,
         evidence_fingerprint="same",
     )
     second = emit_edge_reliability_refresh_requested(
         db,
-        pat.id,
+        pat_id,
         source="test",
         window_days=7,
         evidence_fingerprint="same",
@@ -680,5 +682,60 @@ def test_edge_reliability_work_dedupe_and_dispatch(db):
         .filter(BrainWorkEvent.event_type == EDGE_RELIABILITY_SNAPSHOT)
         .one()
     )
-    assert snapshot.payload["scan_pattern_id"] == pat.id
+    assert snapshot.payload["scan_pattern_id"] == pat_id
     assert snapshot.payload["expected_ev_pct"] == pytest.approx(1.25)
+
+    recent_repeat = emit_edge_reliability_refresh_requested(
+        db,
+        pat_id,
+        source="test",
+        window_days=7,
+        evidence_fingerprint="same",
+    )
+    db.commit()
+    assert recent_repeat is None
+
+
+def test_profitability_work_dedupe_skips_recent_done_same_fingerprint(db):
+    pat = _pattern(db)
+    pat_id = pat.id
+
+    first = emit_targeted_profitability_work(
+        db,
+        event_type=RECERT_RESCUE_REFRESH,
+        scan_pattern_id=pat_id,
+        source="test",
+        asset_class="stock",
+        evidence_fingerprint="same-fingerprint",
+        payload={"expected_evidence_value": 10.0},
+    )
+    db.commit()
+    assert first is not None
+
+    row = db.get(BrainWorkEvent, first)
+    row.status = "done"
+    row.processed_at = datetime.utcnow()
+    db.commit()
+
+    repeat = emit_targeted_profitability_work(
+        db,
+        event_type=RECERT_RESCUE_REFRESH,
+        scan_pattern_id=pat_id,
+        source="test",
+        asset_class="stock",
+        evidence_fingerprint="same-fingerprint",
+        payload={"expected_evidence_value": 11.0},
+    )
+    fresh = emit_targeted_profitability_work(
+        db,
+        event_type=RECERT_RESCUE_REFRESH,
+        scan_pattern_id=pat_id,
+        source="test",
+        asset_class="stock",
+        evidence_fingerprint="new-fingerprint",
+        payload={"expected_evidence_value": 12.0},
+    )
+    db.commit()
+
+    assert repeat is None
+    assert fresh is not None
