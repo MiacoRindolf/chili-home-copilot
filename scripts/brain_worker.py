@@ -43,7 +43,7 @@ os.environ.setdefault("BRAIN_PREDICTION_IO_WORKERS", "2")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.db import SessionLocal
+from app.db import SessionLocal, is_disconnect_error, recover_session_after_db_error
 
 try:
     from app.services.trading.brain_io_concurrency import log_brain_io_profile
@@ -1351,8 +1351,7 @@ def _maybe_run_neural_activation_batch() -> None:
 
 def _maybe_run_brain_work_batch() -> None:
     """Durable work ledger: dispatch round (execution_feedback_digest + backtest_requested)."""
-    db = SessionLocal()
-    try:
+    def _run_once(db) -> dict:
         from app.config import settings as _settings
         from app.services.trading.brain_work.dispatcher import run_brain_work_batch
 
@@ -1366,12 +1365,38 @@ def _maybe_run_brain_work_batch() -> None:
             summary.get("per_type"),
             summary.get("errors"),
         )
+        return summary
+
+    db = SessionLocal()
+    try:
+        _run_once(db)
     except Exception as e:
         logger.warning("[brain] work ledger batch failed: %s", e)
-        try:
-            db.rollback()
-        except Exception:
-            pass
+        recover_session_after_db_error(
+            db,
+            e,
+            logger=logger,
+            context="[brain] work ledger dispatch",
+        )
+        if is_disconnect_error(e):
+            retry_db = SessionLocal()
+            try:
+                _run_once(retry_db)
+                logger.info("[brain] work ledger dispatch recovered on fresh DB session")
+            except Exception as retry_e:
+                logger.warning("[brain] work ledger retry failed: %s", retry_e)
+                recover_session_after_db_error(
+                    retry_db,
+                    retry_e,
+                    logger=logger,
+                    context="[brain] work ledger retry",
+                )
+            finally:
+                try:
+                    retry_db.rollback()
+                except Exception:
+                    pass
+                retry_db.close()
     finally:
         # FIX 46 pattern: rollback before close (read txn cleanup).
         try:

@@ -19,10 +19,14 @@ class _FakeBatchSession:
         self.name = name
         self.rollbacks = 0
         self.commits = 0
+        self.invalidates = 0
         self.closed = False
 
     def rollback(self) -> None:
         self.rollbacks += 1
+
+    def invalidate(self) -> None:
+        self.invalidates += 1
 
     def commit(self) -> None:
         self.commits += 1
@@ -105,6 +109,7 @@ def test_scheduler_failure_recording_falls_back_after_broken_primary_session():
         ("fresh", "job-1", False, "server closed the connection unexpectedly"),
     ]
     assert primary.rollbacks >= 2
+    assert primary.invalidates == 1
     assert fresh.commits == 1
     assert fresh.closed is True
 
@@ -159,6 +164,7 @@ def test_daily_market_scan_failure_uses_fresh_session_and_surfaces_to_guard(monk
         ("fresh", "scan-job-1", False, "server closed the connection unexpectedly"),
     ]
     assert primary.rollbacks >= 2
+    assert primary.invalidates == 1
     assert primary.closed is True
     assert fresh.commits == 1
     assert fresh.closed is True
