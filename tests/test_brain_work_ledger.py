@@ -371,6 +371,73 @@ def test_coalesce_duplicate_open_work_keeps_one_logical_row(db) -> None:
     assert rows[1].payload["duplicate_open_work_suppressed"] is True
 
 
+def test_coalesce_duplicate_open_work_thins_recert_rescue_pattern_asset(db) -> None:
+    older = enqueue_work_event(
+        db,
+        event_type="backtest_requested",
+        dedupe_key="bt_req:recert_rescue:p537:stock:older-fp",
+        payload={
+            "scan_pattern_id": 537,
+            "source": "recert_rescue_refresh",
+            "asset_class": "stock",
+            "evidence_fingerprint": "older-fp",
+        },
+        lease_scope="backtest",
+    )
+    newer = enqueue_work_event(
+        db,
+        event_type="backtest_requested",
+        dedupe_key="bt_req:recert_rescue:p537:stock:newer-fp",
+        payload={
+            "scan_pattern_id": 537,
+            "source": "recert_rescue_refresh",
+            "asset_class": "stock",
+            "evidence_fingerprint": "newer-fp",
+        },
+        lease_scope="backtest",
+    )
+    other_asset = enqueue_work_event(
+        db,
+        event_type="backtest_requested",
+        dedupe_key="bt_req:recert_rescue:p537:crypto:newer-fp",
+        payload={
+            "scan_pattern_id": 537,
+            "source": "recert_rescue_refresh",
+            "asset_class": "crypto",
+            "evidence_fingerprint": "newer-fp",
+        },
+        lease_scope="backtest",
+    )
+    db.commit()
+    assert older is not None
+    assert newer is not None
+    assert other_asset is not None
+
+    result = coalesce_duplicate_open_work(
+        db,
+        event_types=("backtest_requested",),
+    )
+    db.commit()
+
+    rows = {
+        int(row.id): row
+        for row in db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.id.in_([older, newer, other_asset]))
+        .all()
+    }
+    assert result["coalesced"] == 1
+    assert result["reasons"] == {"recert_rescue_pattern_asset_superseded": 1}
+    assert rows[older].status == "done"
+    assert rows[older].payload["duplicate_open_work_suppressed"] is True
+    assert (
+        rows[older].payload["duplicate_open_work_suppressed_reason"]
+        == "recert_rescue_pattern_asset_superseded"
+    )
+    assert rows[older].payload["duplicate_open_work_kept_event_id"] == newer
+    assert rows[newer].status == "pending"
+    assert rows[other_asset].status == "pending"
+
+
 def test_enqueue_work_reuses_retryable_dead_dedupe(db, monkeypatch) -> None:
     monkeypatch.setattr(
         ledger_mod,
