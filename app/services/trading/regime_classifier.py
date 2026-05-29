@@ -515,11 +515,47 @@ def _trade_simple_return(tr: Any) -> float | None:
     return (xp - ep) / ep
 
 
+def _scan_patterns_by_id(db: Session, pattern_ids: set[int]) -> dict[int, Any]:
+    if not pattern_ids:
+        return {}
+
+    from ...models.trading import ScanPattern
+
+    rows = db.query(ScanPattern).filter(ScanPattern.id.in_(sorted(pattern_ids))).all()
+    return {int(row.id): row for row in rows if row.id is not None}
+
+
+def _latest_regime_snapshots_by_date(
+    db: Session,
+    dates: set[date],
+) -> dict[date, Any]:
+    if not dates:
+        return {}
+
+    from ...models.trading import RegimeSnapshot
+
+    rows = (
+        db.query(RegimeSnapshot)
+        .filter(cast(RegimeSnapshot.as_of, Date).in_(sorted(dates)))
+        .order_by(RegimeSnapshot.as_of.desc())
+        .all()
+    )
+    latest: dict[date, Any] = {}
+    for row in rows:
+        as_of = getattr(row, "as_of", None)
+        if as_of is None:
+            continue
+        regime_date = _normalize_utc(as_of).date()
+        if regime_date not in latest:
+            latest[regime_date] = row
+    return latest
+
+
 def build_regime_scanner_sharpe_heatmap(db: Session) -> dict[str, Any]:
     """30d realized Sharpe by regime × scanner (closed trades)."""
     from datetime import datetime as dt_module
 
-    from ...models.trading import RegimeSnapshot, ScanPattern, Trade
+    from ...models.trading import RegimeSnapshot, Trade
     from .promotion_gate import SCANNER_BUCKETS, infer_scanner_bucket
 
     now = dt_module.utcnow()
@@ -534,7 +570,14 @@ def build_regime_scanner_sharpe_heatmap(db: Session) -> dict[str, Any]:
         )
         .all()
     )
-    pat_cache: dict[int, Any] = {}
+    pattern_ids = {int(tr.scan_pattern_id) for tr in trades if tr.scan_pattern_id}
+    patterns_by_id = _scan_patterns_by_id(db, pattern_ids)
+    entry_dates = {
+        _normalize_utc(tr.entry_date).date()
+        for tr in trades
+        if tr.entry_date is not None
+    }
+    regimes_by_date = _latest_regime_snapshots_by_date(db, entry_dates)
     cells: dict[tuple[str, str], list[float]] = {}
 
     for tr in trades:
@@ -542,9 +585,7 @@ def build_regime_scanner_sharpe_heatmap(db: Session) -> dict[str, Any]:
         if ret is None:
             continue
         pid = int(tr.scan_pattern_id)
-        if pid not in pat_cache:
-            pat_cache[pid] = db.query(ScanPattern).filter(ScanPattern.id == pid).first()
-        pat = pat_cache[pid]
+        pat = patterns_by_id.get(pid)
         if pat is None:
             continue
         scanner = infer_scanner_bucket(pat)
@@ -554,12 +595,7 @@ def build_regime_scanner_sharpe_heatmap(db: Session) -> dict[str, Any]:
         if ent is None:
             continue
         ent = _normalize_utc(ent)
-        rrow = (
-            db.query(RegimeSnapshot)
-            .filter(cast(RegimeSnapshot.as_of, Date) == ent.date())
-            .order_by(RegimeSnapshot.as_of.desc())
-            .first()
-        )
+        rrow = regimes_by_date.get(ent.date())
         if rrow is None:
             continue
         reg = rrow.regime
