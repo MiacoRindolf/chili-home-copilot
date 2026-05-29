@@ -1374,6 +1374,29 @@ def export_conversation(
 
 # --- Guest chat visibility for housemates ---
 
+def _first_guest_user_messages_by_convo_key(
+    db: Session,
+    convo_keys: set[str],
+) -> dict[str, ChatMessage]:
+    if not convo_keys:
+        return {}
+    rows = (
+        db.query(ChatMessage)
+        .filter(
+            ChatMessage.convo_key.in_(sorted(convo_keys)),
+            ChatMessage.role == "user",
+        )
+        .order_by(ChatMessage.convo_key.asc(), ChatMessage.id.asc())
+        .all()
+    )
+    first_by_key: dict[str, ChatMessage] = {}
+    for msg in rows:
+        key = str(msg.convo_key)
+        if key not in first_by_key:
+            first_by_key[key] = msg
+    return first_by_key
+
+
 @router.get("/api/conversations/guests", response_class=JSONResponse)
 def list_guest_conversations(request: Request, db: Session = Depends(get_db)):
     """Return guest conversations visible to paired housemates only."""
@@ -1396,14 +1419,13 @@ def list_guest_conversations(request: Request, db: Session = Depends(get_db)):
         .all()
     )
 
+    first_messages = _first_guest_user_messages_by_convo_key(
+        db,
+        {str(convo_key_val) for convo_key_val, _msg_count, _last_active in guest_convos},
+    )
     results = []
     for convo_key_val, msg_count, last_active in guest_convos:
-        first_msg = (
-            db.query(ChatMessage)
-            .filter(ChatMessage.convo_key == convo_key_val, ChatMessage.role == "user")
-            .order_by(ChatMessage.id.asc())
-            .first()
-        )
+        first_msg = first_messages.get(str(convo_key_val))
         title = (first_msg.content[:40] + "...") if first_msg and len(first_msg.content) > 40 else (first_msg.content if first_msg else "Guest Chat")
         results.append({
             "convo_key": convo_key_val,
