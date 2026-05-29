@@ -184,6 +184,40 @@ class TestMarkReconciled:
         assert row[0] == "reconciled"
         assert row[1] == "agree"
 
+    def test_mark_reconciled_refreshes_stale_reason_when_already_reconciled(
+        self, db, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "app.services.trading.bracket_intent_writer.settings.brain_live_brackets_mode",
+            "shadow",
+            raising=False,
+        )
+        t = _make_trade(db, ticker="RECI_PHG")
+        first = upsert_bracket_intent(
+            db, trade_id=t.id, user_id=None, bracket_input=_input_for(t),
+        )
+        assert first is not None
+        assert mark_reconciled(db, first.intent_id, reason="agree")
+        db.execute(text(
+            "UPDATE trading_bracket_intents "
+            "SET last_diff_reason = 'missing_stop:error' "
+            "WHERE id = :id"
+        ), {"id": first.intent_id})
+        db.commit()
+
+        assert mark_reconciled(
+            db,
+            first.intent_id,
+            reason="agree:software_stop_managed_robinhood_fractional_equity",
+        )
+
+        row = db.execute(text(
+            "SELECT intent_state, last_diff_reason "
+            "FROM trading_bracket_intents WHERE id = :id"
+        ), {"id": first.intent_id}).fetchone()
+        assert row[0] == "reconciled"
+        assert row[1] == "agree:software_stop_managed_robinhood_fractional_equity"
+
     def test_mark_reconciled_skips_authoritative(self, db, monkeypatch):
         monkeypatch.setattr(
             "app.services.trading.bracket_intent_writer.settings.brain_live_brackets_mode",

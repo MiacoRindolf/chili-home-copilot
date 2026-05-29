@@ -183,6 +183,59 @@ def test_autotrader_tick_soft_budget_clamps_to_config_bounds(monkeypatch):
     assert at_mod._autotrader_tick_soft_budget_seconds() == AUTOTRADER_MAX_TICK_MAX_SECONDS
 
 
+def test_recent_live_exit_cooldown_blocks_stock_reentry(db, monkeypatch):
+    user = models.User(name="recent_live_exit_cooldown")
+    db.add(user)
+    db.flush()
+    monkeypatch.setattr(at_mod, "settings", _minimal_settings(user.id))
+    now = datetime.utcnow()
+    pattern = ScanPattern(name="Churn guard", rules_json={}, active=True)
+    db.add(pattern)
+    db.flush()
+    trade = Trade(
+        user_id=user.id,
+        ticker="CHURN",
+        direction="long",
+        status="closed",
+        broker_source="robinhood",
+        quantity=1.0,
+        entry_price=10.0,
+        exit_price=9.8,
+        pnl=-0.2,
+        entry_date=now - timedelta(minutes=10),
+        exit_date=now - timedelta(minutes=5),
+        exit_reason="stop",
+        scan_pattern_id=pattern.id,
+    )
+    alert = BreakoutAlert(
+        user_id=user.id,
+        ticker="CHURN",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.9,
+        price_at_alert=10.0,
+        entry_price=10.0,
+        stop_loss=9.5,
+        target_price=12.0,
+        scan_pattern_id=pattern.id,
+        alerted_at=now,
+    )
+    db.add_all([trade, alert])
+    db.flush()
+
+    snap = at_mod._recent_live_exit_cooldown_snapshot(
+        db,
+        user_id=user.id,
+        alert=alert,
+        now=now,
+    )
+
+    assert snap is not None
+    assert snap["recent_exit_trade_id"] == trade.id
+    assert snap["recent_exit_scan_pattern_id"] == pattern.id
+    assert snap["cooldown_policy"] == "stop_reentry"
+
+
 def test_closed_stock_session_defers_stock_without_starving_crypto(db, monkeypatch):
     user = models.User(name="stock_defer_closed")
     db.add(user)

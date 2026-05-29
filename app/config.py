@@ -1696,11 +1696,11 @@ class Settings(BaseSettings):
         ),
     )
 
-    # APScheduler process split: ``all`` (default, single process), ``web`` (no heavy market scans),
+    # APScheduler process split: ``all`` (single process), ``web`` (no heavy market scans),
     # ``worker`` (heavy scans + heartbeat only), ``none`` (no scheduler — use with a separate worker).
-    # Docker Compose: ``chili`` uses ``none``, ``scheduler-worker`` uses ``all`` + ``CHILI_SCHEDULER_EMIT_HEARTBEAT=1``.
+    # Default ``none`` keeps stray host uvicorn processes from duplicating Docker workers.
     chili_scheduler_role: str = Field(
-        default="all",
+        default="none",
         validation_alias=AliasChoices("CHILI_SCHEDULER_ROLE"),
     )
     # Set to true in the web (chili) container when a separate scheduler-worker runs APScheduler.

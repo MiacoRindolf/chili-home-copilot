@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import time
 import traceback
 from datetime import datetime, time as datetime_time, timedelta, timezone
@@ -193,6 +194,12 @@ SHADOW_OBSERVATION_NOTIONAL_SOURCE_UNAVAILABLE = "shadow_observation_capital_una
 LLM_REVALIDATION_SKIP_REASON_SHADOW_OBSERVATION = "shadow_observation_only"
 LLM_REVALIDATION_SKIP_REASON_OPTIONS_PATH = "options_path"
 PENDING_ENTRY_ALREADY_WORKING_REASON = "pending_entry_already_working"
+RECENT_LIVE_EXIT_COOLDOWN_REASON = "recent_live_exit_cooldown"
+LIVE_REENTRY_COOLDOWN_DEFAULT_ASSET_TYPES = "stock"
+LIVE_REENTRY_COOLDOWN_DEFAULT_MINUTES = 30.0
+LIVE_STOP_REENTRY_COOLDOWN_DEFAULT_MINUTES = 120.0
+LIVE_REENTRY_COOLDOWN_MINUTES_FLOOR = 0.0
+LIVE_REENTRY_COOLDOWN_MINUTES_CEILING = 24.0 * 60.0
 STOCK_ASSET_TYPE = "stock"
 STOCK_SESSION_DEFER_REASON_CLOSED = "stock_session_closed"
 STOCK_SESSION_DEFER_REASON_DISABLED = "stock_session_defer_disabled"
@@ -259,6 +266,108 @@ def _llm_revalidation_block_reason(llm_snapshot: dict[str, Any] | None) -> str:
     return "llm_not_viable"
 
 
+def _bounded_minutes_setting(name: str, default: float) -> float:
+    try:
+        value = float(getattr(settings, name, default))
+    except (TypeError, ValueError):
+        value = float(default)
+    if not math.isfinite(value):
+        return float(default)
+    return max(
+        LIVE_REENTRY_COOLDOWN_MINUTES_FLOOR,
+        min(LIVE_REENTRY_COOLDOWN_MINUTES_CEILING, value),
+    )
+
+
+def _live_reentry_cooldown_asset_enabled(asset_type: str) -> bool:
+    raw = str(
+        getattr(
+            settings,
+            "chili_autotrader_live_reentry_cooldown_asset_types",
+            LIVE_REENTRY_COOLDOWN_DEFAULT_ASSET_TYPES,
+        )
+        or ""
+    )
+    allowed = {part.strip().lower() for part in raw.split(",") if part.strip()}
+    if not allowed:
+        return False
+    asset = (asset_type or "").strip().lower() or STOCK_ASSET_TYPE
+    return "*" in allowed or "all" in allowed or asset in allowed
+
+
+def _recent_live_exit_cooldown_snapshot(
+    db: Session,
+    *,
+    user_id: int | None,
+    alert: BreakoutAlert,
+    now: datetime | None = None,
+) -> dict[str, Any] | None:
+    """Return a block snapshot when a ticker is churning after a live exit."""
+    asset_type = str(getattr(alert, "asset_type", "") or STOCK_ASSET_TYPE).lower()
+    if not _live_reentry_cooldown_asset_enabled(asset_type):
+        return None
+
+    base_minutes = _bounded_minutes_setting(
+        "chili_autotrader_live_reentry_cooldown_minutes",
+        LIVE_REENTRY_COOLDOWN_DEFAULT_MINUTES,
+    )
+    stop_minutes = _bounded_minutes_setting(
+        "chili_autotrader_live_stop_reentry_cooldown_minutes",
+        LIVE_STOP_REENTRY_COOLDOWN_DEFAULT_MINUTES,
+    )
+    if base_minutes <= 0 and stop_minutes <= 0:
+        return None
+
+    now_utc = now or datetime.utcnow()
+    lookback_minutes = max(base_minutes, stop_minutes)
+    cutoff = now_utc - timedelta(minutes=lookback_minutes)
+    ticker = str(getattr(alert, "ticker", "") or "").upper()
+    if not ticker:
+        return None
+
+    q = (
+        db.query(Trade)
+        .filter(
+            Trade.ticker == ticker,
+            Trade.status == "closed",
+            Trade.exit_date.isnot(None),
+            Trade.exit_date >= cutoff,
+            Trade.scan_pattern_id.isnot(None),
+        )
+    )
+    if user_id is not None:
+        q = q.filter(or_(Trade.user_id == user_id, Trade.user_id.is_(None)))
+    q = q.order_by(Trade.exit_date.desc(), Trade.id.desc()).limit(10)
+
+    for trade in q.all():
+        exit_dt = getattr(trade, "exit_date", None)
+        if exit_dt is None:
+            continue
+        exit_reason = str(getattr(trade, "exit_reason", "") or "").lower()
+        is_stop = "stop" in exit_reason
+        active_minutes = stop_minutes if is_stop else base_minutes
+        if active_minutes <= 0:
+            continue
+        cooldown_until = exit_dt + timedelta(minutes=active_minutes)
+        if now_utc < cooldown_until:
+            return {
+                "ticker": ticker,
+                "asset_type": asset_type,
+                "recent_exit_trade_id": getattr(trade, "id", None),
+                "recent_exit_scan_pattern_id": getattr(trade, "scan_pattern_id", None),
+                "candidate_scan_pattern_id": getattr(alert, "scan_pattern_id", None),
+                "recent_exit_reason": getattr(trade, "exit_reason", None),
+                "recent_exit_at": exit_dt.isoformat(),
+                "cooldown_until": cooldown_until.isoformat(),
+                "cooldown_minutes": active_minutes,
+                "cooldown_scope": "ticker",
+                "cooldown_policy": (
+                    "stop_reentry" if is_stop else "post_exit_reentry"
+                ),
+            }
+    return None
+
+
 def _float_or_none(value: Any) -> float | None:
     try:
         if value is None:
@@ -266,7 +375,7 @@ def _float_or_none(value: Any) -> float | None:
         out = float(value)
     except (TypeError, ValueError):
         return None
-    return out if out > 0 else None
+    return out if math.isfinite(out) and out > 0 else None
 
 
 def _normalize_option_meta_for_alert(
@@ -287,28 +396,45 @@ def _paper_entry_context_for_alert(
     *,
     px: float,
     snap: dict[str, Any] | None,
-) -> tuple[float, dict[str, Any]]:
+) -> tuple[float | None, dict[str, Any]]:
+    underlying = _float_or_none(px)
     if not isinstance(snap, dict):
-        return float(px), {}
+        return underlying, {}
     option_meta = snap.get("option_meta") if isinstance(snap.get("option_meta"), dict) else {}
     if not (snap.get("options_path") and option_meta):
-        return float(px), {}
-    option_meta = _normalize_option_meta_for_alert(alert, option_meta, underlying_price=px)
+        return underlying, {}
+    if underlying is None:
+        return None, {
+            "asset_type": "options",
+            "asset_kind": "option",
+            "options_path": True,
+            "option_meta": dict(option_meta),
+            "price_domains": option_price_domains_snapshot(),
+            "paper_entry_price_error": "invalid_underlying_price",
+        }
+    option_meta = _normalize_option_meta_for_alert(
+        alert,
+        option_meta,
+        underlying_price=underlying,
+    )
     premium = (
         _float_or_none(option_meta.get("limit_price"))
         or _float_or_none(alert.entry_price)
-        or float(px)
     )
-    return float(premium), {
+    signal = {
         "asset_type": "options",
         "asset_kind": "option",
         "options_path": True,
         "option_meta": option_meta,
         "option_contract_key": option_meta.get("contract_key"),
         "price_domains": option_price_domains_snapshot(),
-        "underlying_price_at_entry": float(px),
+        "underlying_price_at_entry": underlying,
         "paper_entry_price_source": "option_premium",
     }
+    if premium is None:
+        signal["paper_entry_price_error"] = "missing_option_premium"
+        return None, signal
+    return float(premium), signal
 
 
 def _order_state_from_response(res: dict[str, Any]) -> str:
@@ -394,6 +520,16 @@ def _entry_tca_reference_price(
 
 def _filled_qty_from_response(res: dict[str, Any], *, default_qty: float) -> float | None:
     raw = res.get("raw") if isinstance(res.get("raw"), dict) else {}
+
+    def _nonnegative_float(value: Any) -> float | None:
+        try:
+            if value is None:
+                return None
+            out = float(value)
+        except (TypeError, ValueError):
+            return None
+        return out if math.isfinite(out) and out >= 0.0 else None
+
     for key in (
         "filled_quantity",
         "cumulative_filled_quantity",
@@ -402,10 +538,10 @@ def _filled_qty_from_response(res: dict[str, Any], *, default_qty: float) -> flo
         "quantity_filled",
         "filled_size",
     ):
-        parsed = _float_or_none(res.get(key))
+        parsed = _nonnegative_float(res.get(key))
         if parsed is not None:
             return min(parsed, default_qty)
-        parsed = _float_or_none(raw.get(key))
+        parsed = _nonnegative_float(raw.get(key))
         if parsed is not None:
             return min(parsed, default_qty)
     return None
@@ -427,6 +563,11 @@ def _entry_lifecycle_from_response(
         state = _order_state_from_response(res)
         filled_qty = _filled_qty_from_response(res, default_qty=qty)
         if state in _OPTION_ENTRY_FILLED_STATES:
+            if filled_qty is not None:
+                if filled_qty <= 0.0:
+                    return "cancelled", "filled_zero_quantity", 0.0, 0.0
+                if filled_qty + 1e-9 < qty:
+                    return "open", "partially_filled_cancelled", filled_qty, 0.0
             filled = filled_qty if filled_qty is not None else qty
             return "open", state or "filled", filled, max(qty - filled, 0.0)
         if state in _OPTION_ENTRY_PARTIAL_STATES:
@@ -1792,6 +1933,14 @@ def _maybe_open_paper_shadow(
             px=px,
             snap=snap,
         )
+        if paper_entry_px is None:
+            logger.info(
+                "[autotrader_paper_shadow] alert_id=%s ticker=%s skipped: "
+                "paper entry price unavailable",
+                alert.id,
+                alert.ticker,
+            )
+            return
         if option_paper_sig:
             sig.update(option_paper_sig)
         shadow_stop, shadow_target, managed_exit_execution = (
@@ -1893,7 +2042,7 @@ def _maybe_open_reject_paper_shadow(
         px_f = float(px or 0.0)
     except (TypeError, ValueError):
         px_f = 0.0
-    if px_f <= 0.0:
+    if not math.isfinite(px_f) or px_f <= 0.0:
         return
 
     shadow_snap = dict(snap or {})
@@ -4010,6 +4159,38 @@ def _process_one_alert(
 
     for_new = scale_plan is None
 
+    if live and for_new:
+        cooldown_snap = _recent_live_exit_cooldown_snapshot(
+            db,
+            user_id=uid,
+            alert=alert,
+        )
+        if cooldown_snap is not None:
+            _audit(
+                db,
+                user_id=uid,
+                alert=alert,
+                decision="blocked",
+                reason=RECENT_LIVE_EXIT_COOLDOWN_REASON,
+                rule_snapshot=cooldown_snap,
+            )
+            _maybe_open_reject_paper_shadow(
+                db,
+                uid=uid,
+                alert=alert,
+                px=px,
+                snap=cooldown_snap,
+                reason=RECENT_LIVE_EXIT_COOLDOWN_REASON,
+            )
+            out["skipped"] += 1
+            _autotrader_tick_note(
+                out,
+                kind="blocked",
+                reason=RECENT_LIVE_EXIT_COOLDOWN_REASON,
+                alert=alert,
+            )
+            return
+
     # Venue health is checked after broker selection in _execute_broker_buy so
     # Coinbase-routed alerts are gated on Coinbase health instead of RH health.
 
@@ -4360,6 +4541,43 @@ def _execute_broker_buy(
         snap["asset_kind"] = "option"
         snap["option_contract_key"] = opt_meta.get("contract_key")
         snap["price_domains"] = option_price_domains_snapshot()
+        contract_qty = parse_contract_quantity(qty)
+        option_limit_price = (
+            _float_or_none(opt_meta.get("limit_price"))
+            or _float_or_none(alert.entry_price)
+        )
+        if contract_qty is None:
+            snap["options_quantity_error"] = "invalid_contract_quantity"
+            _audit(
+                db,
+                user_id=uid,
+                alert=alert,
+                decision="blocked",
+                reason="options_order_invalid_quantity",
+                rule_snapshot=snap,
+                llm_snapshot=llm_snap,
+            )
+            out["skipped"] += 1
+            _autotrader_tick_note(
+                out, kind="blocked", reason="options_order_invalid_quantity", alert=alert,
+            )
+            return None
+        if option_limit_price is None:
+            snap["options_limit_price_error"] = "invalid_limit_price"
+            _audit(
+                db,
+                user_id=uid,
+                alert=alert,
+                decision="blocked",
+                reason="options_order_invalid_limit_price",
+                rule_snapshot=snap,
+                llm_snapshot=llm_snap,
+            )
+            out["skipped"] += 1
+            _autotrader_tick_note(
+                out, kind="blocked", reason="options_order_invalid_limit_price", alert=alert,
+            )
+            return None
         venue_reason = _live_venue_health_block_reason(db, venue="robinhood")
         if venue_reason is not None:
             _block_live_order(
@@ -4398,7 +4616,7 @@ def _execute_broker_buy(
             alert,
             venue="robinhood_options",
             side="buy",
-            qty=float(qty),
+            qty=float(contract_qty),
             snap=snap,
             order_hint=option_order_hint,
         )
@@ -4417,8 +4635,8 @@ def _execute_broker_buy(
                 res = opt_ad.place_spread(
                     underlying=str(alert.ticker),
                     legs=legs,
-                    quantity=int(qty),
-                    limit_price=float(opt_meta.get("limit_price") or alert.entry_price or 0),
+                    quantity=contract_qty,
+                    limit_price=option_limit_price,
                     direction=str(opt_meta.get("direction", "debit")),
                 )
             else:
@@ -4430,8 +4648,8 @@ def _execute_broker_buy(
                     expiration=str(opt_meta["expiration"]),
                     strike=float(opt_meta["strike"]),
                     option_type=str(opt_meta["option_type"]),
-                    quantity=int(qty),
-                    limit_price=float(opt_meta.get("limit_price") or alert.entry_price or 0),
+                    quantity=contract_qty,
+                    limit_price=option_limit_price,
                 )
         except Exception as exc:
             res = {"ok": False, "error": f"options_adapter_exception:{exc}"}
@@ -4456,8 +4674,8 @@ def _execute_broker_buy(
         res["_chili_options_path"] = True
         res["_chili_option_meta"] = opt_meta
         res["_chili_option_order_state"] = _order_state_from_response(res)
-        res.setdefault("base_size", int(qty))
-        res.setdefault("limit_price", float(opt_meta.get("limit_price") or alert.entry_price or 0))
+        res.setdefault("base_size", contract_qty)
+        res.setdefault("limit_price", option_limit_price)
         return res
 
     # f-coinbase-autotrader-enablement-phase-5-cost-aware-sizing
@@ -5259,7 +5477,11 @@ def _execute_new_entry(
     live: bool,
     out: dict[str, Any],
 ) -> None:
-    if px <= 0:
+    try:
+        px = float(px)
+    except (TypeError, ValueError):
+        px = 0.0
+    if not math.isfinite(px) or px <= 0:
         _audit(db, user_id=uid, alert=alert, decision="skipped", reason="bad_px", rule_snapshot=snap)
         out["skipped"] += 1
         _autotrader_tick_note(out, kind="skipped", reason="bad_px", alert=alert)
@@ -6222,6 +6444,24 @@ def _execute_new_entry(
     )
     if option_paper_sig:
         sig.update(option_paper_sig)
+        if paper_entry_px is None:
+            _audit(
+                db,
+                user_id=uid,
+                alert=alert,
+                decision="blocked",
+                reason="option_paper_entry_premium_unavailable",
+                rule_snapshot=snap,
+                llm_snapshot=llm_snap,
+            )
+            out["skipped"] += 1
+            _autotrader_tick_note(
+                out,
+                kind="blocked",
+                reason="option_paper_entry_premium_unavailable",
+                alert=alert,
+            )
+            return
     paper_stop, paper_target, managed_exit_execution = (
         _managed_edge_execution_levels(alert, px=px, snap=snap)
     )
