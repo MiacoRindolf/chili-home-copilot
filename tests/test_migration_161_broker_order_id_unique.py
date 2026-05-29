@@ -23,12 +23,29 @@ from app.models.trading import Trade
 
 
 def test_unique_index_exists(db):
+    relation_rows = db.execute(text(
+        """
+        SELECT c.relname, c.relkind
+          FROM pg_class c
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = ANY(current_schemas(false))
+           AND c.relname IN ('trading_trades', 'trading_management_envelopes')
+        """
+    )).fetchall()
+    relation_kinds = {str(row[0]): str(row[1]) for row in relation_rows}
+    index_table = (
+        "trading_management_envelopes"
+        if relation_kinds.get("trading_trades") == "v"
+        and relation_kinds.get("trading_management_envelopes") == "r"
+        else "trading_trades"
+    )
+
     row = db.execute(text(
         "SELECT 1 FROM pg_indexes "
         "WHERE schemaname = 'public' "
-        "  AND tablename = 'trading_trades' "
+        "  AND tablename = :index_table "
         "  AND indexname = 'ix_trading_trades_broker_order_id_unique'"
-    )).fetchone()
+    ), {"index_table": index_table}).fetchone()
     assert row is not None, "migration 161 did not create the unique index"
 
 

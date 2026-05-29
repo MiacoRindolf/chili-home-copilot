@@ -17,6 +17,7 @@ import logging
 import re
 from typing import Optional
 
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -88,6 +89,17 @@ def _score_keywords(message: str) -> dict[str, tuple[float, list[str]]]:
     return out
 
 
+def _chat_logs_columns(db: Session) -> set[str]:
+    """Best-effort chat_logs column discovery for schema-tolerant recency."""
+    try:
+        bind = db.get_bind()
+        if bind is None:
+            return set()
+        return {c["name"] for c in sa_inspect(bind).get_columns("chat_logs")}
+    except Exception:
+        return set()
+
+
 def _recency_signal(db: Session, user_id: Optional[int]) -> dict[str, float]:
     """Boost intents the user has been engaged with recently.
 
@@ -97,6 +109,9 @@ def _recency_signal(db: Session, user_id: Optional[int]) -> dict[str, float]:
     but doesn't overpower a strong keyword match.
     """
     if user_id is None:
+        return {}
+
+    if "user_id" not in _chat_logs_columns(db):
         return {}
 
     try:

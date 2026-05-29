@@ -16957,31 +16957,41 @@ def _migration_251_tca_reference_entry_backfill(conn) -> None:
     Both wrapped separately so a partial failure leaves a working
     intermediate state.
     """
-    # Step 1: backfill reference price from trading_alerts.
+    # Step 1: backfill reference price from trading_alerts. Later migrations
+    # correct this source table, so skip cleanly when fresh schemas no longer
+    # have the historical trading_alerts.entry_price column.
     ref_backfilled = 0
-    try:
-        result = conn.execute(text(
-            """
-            UPDATE trading_trades t
-               SET tca_reference_entry_price = a.entry_price
-              FROM trading_alerts a
-             WHERE t.related_alert_id = a.id
-               AND t.tca_reference_entry_price IS NULL
-               AND a.entry_price IS NOT NULL
-               AND a.entry_price > 0
-            """
-        ))
-        ref_backfilled = result.rowcount if result.rowcount is not None else 0
-        conn.commit()
+    tables = _tables(conn)
+    trading_alert_cols = _columns(conn, "trading_alerts") if "trading_alerts" in tables else set()
+    if "entry_price" not in trading_alert_cols:
         logger.info(
-            "[mig251] tca_reference_entry_price backfilled on %d trades",
-            ref_backfilled,
+            "[mig251] skipping trading_alerts reference backfill; "
+            "trading_alerts.entry_price is unavailable"
         )
-    except Exception:
-        conn.rollback()
-        logger.warning(
-            "[mig251] tca_reference_entry_price backfill failed", exc_info=True,
-        )
+    else:
+        try:
+            result = conn.execute(text(
+                """
+                UPDATE trading_trades t
+                   SET tca_reference_entry_price = a.entry_price
+                  FROM trading_alerts a
+                 WHERE t.related_alert_id = a.id
+                   AND t.tca_reference_entry_price IS NULL
+                   AND a.entry_price IS NOT NULL
+                   AND a.entry_price > 0
+                """
+            ))
+            ref_backfilled = result.rowcount if result.rowcount is not None else 0
+            conn.commit()
+            logger.info(
+                "[mig251] tca_reference_entry_price backfilled on %d trades",
+                ref_backfilled,
+            )
+        except Exception:
+            conn.rollback()
+            logger.warning(
+                "[mig251] tca_reference_entry_price backfill failed", exc_info=True,
+            )
 
     # Step 2: compute tca_entry_slippage_bps where reference + fill known.
     bps_backfilled = 0
