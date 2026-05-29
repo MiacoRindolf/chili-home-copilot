@@ -164,6 +164,7 @@ def _handle_backtest_requested(db: Session, ev, user_id: int | None) -> None:
             pass
         s1.close()
 
+    _recover_dispatch_session(db, "backtest completion handoff")
     _publish_brain_work_outcome_isolated(
         outcome_type="backtest_completed",
         scan_pattern_id=pid,

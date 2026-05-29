@@ -102,3 +102,62 @@ def test_isolated_mesh_publish_rolls_back_private_session(monkeypatch) -> None:
     assert session.commits == 1
     assert session.rollbacks == 1
     assert session.closed is True
+
+
+def test_backtest_handler_rolls_back_dispatch_session_before_done(monkeypatch) -> None:
+    """Long backtests use separate sessions, so clear the dispatcher session before mark-done."""
+    from types import SimpleNamespace
+
+    from app.services.trading.brain_work import dispatcher
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.commits = 0
+            self.rollbacks = 0
+            self.closed = False
+
+        def get(self, _model, _pid):
+            return SimpleNamespace(
+                promotion_status="candidate",
+                lifecycle_stage="pilot_promoted",
+            )
+
+        def commit(self) -> None:
+            self.commits += 1
+
+        def rollback(self) -> None:
+            self.rollbacks += 1
+
+        def close(self) -> None:
+            self.closed = True
+
+    opened_sessions: list[FakeSession] = []
+
+    def session_factory() -> FakeSession:
+        sess = FakeSession()
+        opened_sessions.append(sess)
+        return sess
+
+    class DispatchSession:
+        def __init__(self) -> None:
+            self.rollbacks = 0
+
+        def rollback(self) -> None:
+            self.rollbacks += 1
+
+    dispatch_db = DispatchSession()
+    monkeypatch.setattr("app.db.SessionLocal", session_factory)
+    monkeypatch.setattr(
+        "app.services.trading.backtest_queue_worker.execute_queue_backtest_for_pattern",
+        lambda _pid, _uid: (3, 3),
+    )
+    monkeypatch.setattr(dispatcher, "enqueue_outcome_event", lambda *a, **kw: 1)
+    monkeypatch.setattr(dispatcher, "emit_promotion_surface_change", lambda *a, **kw: None)
+    monkeypatch.setattr(dispatcher, "_publish_brain_work_outcome_isolated", lambda **kw: None)
+
+    ev = SimpleNamespace(id=42, payload={"scan_pattern_id": 1256})
+    dispatcher._handle_backtest_requested(dispatch_db, ev, user_id=None)
+
+    assert dispatch_db.rollbacks == 1
+    assert len(opened_sessions) == 2
+    assert all(sess.closed for sess in opened_sessions)
