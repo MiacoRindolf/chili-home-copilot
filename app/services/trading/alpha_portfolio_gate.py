@@ -125,7 +125,7 @@ def _get(obj: Any, key: str, default: Any = None) -> Any:
 
 
 def _safe_float(value: Any) -> float | None:
-    if value is None:
+    if value is None or isinstance(value, bool):
         return None
     try:
         out = float(value)
@@ -137,7 +137,7 @@ def _safe_float(value: Any) -> float | None:
 
 
 def _safe_int(value: Any) -> int | None:
-    if value is None:
+    if value is None or isinstance(value, bool):
         return None
     try:
         return int(value)
@@ -547,11 +547,10 @@ def _candidate_floor_blocks(row: Mapping[str, Any], cfg: AlphaPortfolioConfig) -
     if row.get("promotion_gate_passed") is not True:
         reasons.append("promotion_gate_not_passed")
     for key in ("cpcv_median_sharpe", "deflated_sharpe", "pbo"):
-        if row.get(key) is None:
+        if _safe_float(row.get(key)) is None:
             reasons.append(f"missing_{key}")
 
-    realized_n = _safe_int(row.get("realized_n_trades")) or 0
-    realized_avg = _safe_float(row.get("realized_avg_pnl_pct"))
+    realized_avg, realized_n = _realized_edge_fraction(row)
     if realized_n >= cfg.min_realized_trades and realized_avg is not None and realized_avg <= 0.0:
         reasons.append("negative_realized_floor")
     oos_at = row.get("oos_evaluated_at")
