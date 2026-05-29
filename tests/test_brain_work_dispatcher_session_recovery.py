@@ -59,3 +59,46 @@ def test_dispatcher_recovers_after_swallowed_db_handler_failure(db, monkeypatch)
     assert row is not None
     assert row.status == "done"
     assert row.last_error in (None, "")
+
+
+def test_isolated_mesh_publish_rolls_back_private_session(monkeypatch) -> None:
+    """A swallowed mesh DB failure is contained in the helper-owned session."""
+    from app.services.trading.brain_neural_mesh import publisher
+    from app.services.trading.brain_work import dispatcher
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.poisoned = False
+            self.commits = 0
+            self.rollbacks = 0
+            self.closed = False
+
+        def commit(self) -> None:
+            self.commits += 1
+            if self.poisoned:
+                raise RuntimeError("mesh transaction poisoned")
+
+        def rollback(self) -> None:
+            self.rollbacks += 1
+
+        def close(self) -> None:
+            self.closed = True
+
+    session = FakeSession()
+    monkeypatch.setattr("app.db.SessionLocal", lambda: session)
+
+    def swallowed_poisoned_publish(mesh_db, **_kwargs) -> None:
+        assert mesh_db is session
+        mesh_db.poisoned = True
+
+    monkeypatch.setattr(publisher, "publish_brain_work_outcome", swallowed_poisoned_publish)
+
+    dispatcher._publish_brain_work_outcome_isolated(
+        outcome_type="execution_quality_updated",
+        scan_pattern_id=None,
+        extra={"work_event_id": 1},
+    )
+
+    assert session.commits == 1
+    assert session.rollbacks == 1
+    assert session.closed is True
