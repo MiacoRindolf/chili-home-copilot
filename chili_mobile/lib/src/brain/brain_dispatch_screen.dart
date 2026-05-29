@@ -78,8 +78,20 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   // Breakpoints align with PM-20260529-015 QA targets: desktop, wide desktop,
   // and ultra-wide cockpit review widths.
   static const _autopilotDesktopBreakpoint = 980.0;
+  static const _autopilotReviewDesktopBreakpoint = 1200.0;
   static const _autopilotWideDesktopBreakpoint = 1320.0;
   static const _autopilotUltraDesktopBreakpoint = 1600.0;
+  static const _autopilotDesktopThreadWidth = 300.0;
+  static const _autopilotReviewThreadWidth = 292.0;
+  static const _autopilotWideThreadWidth = 316.0;
+  static const _autopilotUltraThreadWidth = 348.0;
+  static const _autopilotDesktopRightRailWidth = 390.0;
+  static const _autopilotReviewRightRailWidth = 460.0;
+  static const _autopilotWideRightRailWidth = 520.0;
+  static const _autopilotUltraRightRailWidth = 620.0;
+  static const _autopilotAgentBenchTwoColumnWidth = 420.0;
+  static const _autopilotAgentBenchGap = 10.0;
+  static const _autopilotAgentCardMinHeight = 112.0;
   static const _autopilotMessagePreviewLimit = 1400;
   static const _autopilotChatFollowThreshold = 96.0;
   static const _autopilotPastedImagePrefix = 'chili_autopilot_paste';
@@ -1660,16 +1672,20 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         }
         final threadWidth =
             constraints.maxWidth >= _autopilotUltraDesktopBreakpoint
-                ? 348.0
+                ? _autopilotUltraThreadWidth
                 : constraints.maxWidth >= _autopilotWideDesktopBreakpoint
-                    ? 324.0
-                    : 300.0;
+                    ? _autopilotWideThreadWidth
+                    : constraints.maxWidth >= _autopilotReviewDesktopBreakpoint
+                        ? _autopilotReviewThreadWidth
+                        : _autopilotDesktopThreadWidth;
         final rightWidth =
             constraints.maxWidth >= _autopilotUltraDesktopBreakpoint
-                ? 520.0
+                ? _autopilotUltraRightRailWidth
                 : constraints.maxWidth >= _autopilotWideDesktopBreakpoint
-                    ? 460.0
-                    : 390.0;
+                    ? _autopilotWideRightRailWidth
+                    : constraints.maxWidth >= _autopilotReviewDesktopBreakpoint
+                        ? _autopilotReviewRightRailWidth
+                        : _autopilotDesktopRightRailWidth;
         return Column(
           children: [
             if (_autonomyError != null) _buildAutonomyErrorBanner(),
@@ -3046,11 +3062,14 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
             builder: (context, constraints) {
               final bounded =
                   constraints.maxWidth.isFinite ? constraints.maxWidth : 360.0;
-              final columns = bounded >= 500 ? 2 : 1;
-              final tileWidth = columns == 2 ? (bounded - 10) / 2 : bounded;
+              final columns =
+                  bounded >= _autopilotAgentBenchTwoColumnWidth ? 2 : 1;
+              final tileWidth = columns == 2
+                  ? (bounded - _autopilotAgentBenchGap) / 2
+                  : bounded;
               return Wrap(
-                spacing: 10,
-                runSpacing: 10,
+                spacing: _autopilotAgentBenchGap,
+                runSpacing: _autopilotAgentBenchGap,
                 children: [
                   for (final agent in agents)
                     SizedBox(
@@ -3105,7 +3124,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final visibleFiles = files.take(2).toList();
     final hiddenFiles = files.length - visibleFiles.length;
     return Container(
-      constraints: const BoxConstraints(minHeight: 128),
+      constraints:
+          const BoxConstraints(minHeight: _autopilotAgentCardMinHeight),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: _autonomyBubbleBackground(color, alpha: active ? 0.11 : 0.055),
