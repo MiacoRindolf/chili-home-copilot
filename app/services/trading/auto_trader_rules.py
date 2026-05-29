@@ -2470,7 +2470,7 @@ def passes_rule_gate(
                 "error": type(exc).__name__,
             }
             if not bypass:
-                return False, "options_budget:error", snap
+                return False, f"options_budget:{reason}", snap
     else:
         ppp = projected_profit_pct(entry, target)
         snap["projected_profit_pct"] = ppp
