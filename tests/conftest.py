@@ -575,7 +575,8 @@ def client(db, fastapi_app, _asgi_test_client):
 @pytest.fixture()
 def paired_client(db, client):
     """TestClient with a cookie representing a paired (non-guest) user."""
-    user = User(name="TestUser")
+    unique_suffix = f"{os.getpid()}-{time.time_ns()}"
+    user = User(name=f"TestUser-{unique_suffix}")
     db.add(user)
     db.flush()
     # #region agent log
@@ -587,7 +588,7 @@ def paired_client(db, client):
     )
     # #endregion
 
-    token = "test-device-token-abc123"
+    token = f"test-device-token-{unique_suffix}"
     db.add(
         Device(
             token=token,
