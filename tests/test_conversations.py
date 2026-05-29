@@ -394,7 +394,7 @@ class TestGuestChatVisibility:
         assert resp.json()["ok"] is True
 
         history = pc.get("/api/chat/guest-history?guest_convo_key=guest:test-ip").json()
-        assert any("[TestUser]" in m["content"] for m in history["messages"])
+        assert any(f"[{user.name}]" in m["content"] for m in history["messages"])
 
     def test_guest_cannot_reply(self, client, db):
         self._seed_guest_messages(db)
