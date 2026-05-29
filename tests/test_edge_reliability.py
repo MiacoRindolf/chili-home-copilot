@@ -405,6 +405,71 @@ def test_recert_rescue_hard_oos_positive_edge_enqueues_backtest_refresh(db):
     assert queued.lease_scope == "backtest"
 
 
+def test_recert_rescue_reuses_open_backtest_refresh_for_pattern_asset(db):
+    pat = _pattern(
+        db,
+        recert_required=True,
+        recert_reason="negative_oos_recert",
+        cpcv_median_sharpe=2.0,
+        promotion_gate_passed=True,
+        oos_evaluated_at=datetime.utcnow(),
+        oos_trade_count=20,
+        oos_win_rate=0.55,
+        oos_avg_return_pct=-0.3,
+        raw_realized_trade_count=8,
+        raw_realized_avg_return_pct=1.0,
+    )
+    pat_id = pat.id
+    open_id = enqueue_work_event(
+        db,
+        event_type="backtest_requested",
+        dedupe_key=f"test:open-recert-bt:{pat_id}:old",
+        payload={
+            "scan_pattern_id": pat_id,
+            "source": "recert_rescue_refresh",
+            "asset_class": "stock",
+            "evidence_fingerprint": "old-fingerprint",
+        },
+        lease_scope="backtest",
+    )
+    for idx in range(6):
+        alert = _alert(db, pat, f"REOPEN{idx}")
+        _run(db, pat, alert, expected=2.5)
+    db.commit()
+    assert open_id is not None
+
+    ev_id = enqueue_work_event(
+        db,
+        event_type=RECERT_RESCUE_REFRESH,
+        dedupe_key=f"test:recert-bt-open:{pat_id}",
+        payload={"scan_pattern_id": pat_id, "window_days": 7, "asset_class": "stock"},
+        lease_scope="edge",
+    )
+    db.commit()
+    ev = db.get(BrainWorkEvent, ev_id)
+    assert ev is not None
+
+    handle_recert_rescue_refresh(db, ev, user_id=None)
+    db.commit()
+
+    backtests = (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_type == "backtest_requested")
+        .all()
+    )
+    assert len(backtests) == 1
+    outcome = (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_type == RECERT_RESCUE_DIAGNOSTIC)
+        .one()
+    )
+    refresh = outcome.payload["recert_backtest_refresh"]
+    assert refresh["requested"] is False
+    assert refresh["event_id"] == open_id
+    assert refresh["reason"] == "recert_backtest_refresh_already_open"
+    assert outcome.payload["safe_to_bypass_live"] is False
+
+
 def test_recert_rescue_post_backtest_reconciles_without_requeue(db):
     pat = _pattern(
         db,
