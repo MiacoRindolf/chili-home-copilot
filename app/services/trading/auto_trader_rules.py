@@ -801,6 +801,16 @@ def _settings_float(
     return value
 
 
+def _safe_float(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(parsed):
+        return None
+    return parsed
+
+
 _TRUE_SETTING_TOKENS = frozenset({"1", "true", "yes", "on"})
 _FALSE_SETTING_TOKENS = frozenset({"0", "false", "no", "off"})
 
