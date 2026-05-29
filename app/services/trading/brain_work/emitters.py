@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from .ledger import enqueue_outcome_event, enqueue_work_event
@@ -123,11 +125,15 @@ def emit_market_snapshots_batch_outcome(
     snapshot_driver: str | None = None,
 ) -> int | None:
     """Scheduler-owned snapshot batch completion (edge / source refresh)."""
-    from datetime import datetime
-
-    bucket = datetime.utcnow().strftime("%Y%m%d%H%M")
+    now = datetime.utcnow()
+    bucket = now.strftime("%Y%m%d%H%M")
     jkey = (job_id or "").strip()
     dedupe_key = f"mkt_snap_batch:{jkey}" if jkey else f"mkt_snap_batch:{bucket}"
+    coalesced_count = _retire_obsolete_market_snapshot_batches(
+        db,
+        now=now,
+        newest_job_id=jkey or bucket,
+    )
     return enqueue_outcome_event(
         db,
         event_type="market_snapshots_batch",
@@ -138,8 +144,57 @@ def emit_market_snapshots_batch_outcome(
             "universe_size": int(universe_size),
             "job_id": job_id,
             "snapshot_driver": snapshot_driver,
+            "coalesced_obsolete_batches": coalesced_count,
         },
     )
+
+
+def _retire_obsolete_market_snapshot_batches(
+    db: Session,
+    *,
+    now: datetime,
+    newest_job_id: str,
+) -> int:
+    """Mark stale pending snapshot outcomes done; newer batches supersede them."""
+    try:
+        from app.config import settings
+
+        grace_seconds = int(
+            getattr(settings, "brain_mine_handler_obsolete_event_grace_seconds", 900)
+        )
+    except Exception:
+        grace_seconds = 900
+    cutoff = now - timedelta(seconds=max(0, grace_seconds))
+    result = db.execute(
+        text(
+            """
+            UPDATE brain_work_events
+               SET status = 'done',
+                   processed_at = COALESCE(processed_at, :now),
+                   lease_holder = NULL,
+                   lease_expires_at = NULL,
+                   updated_at = :now,
+                   payload = COALESCE(payload, '{}'::jsonb)
+                             || jsonb_build_object(
+                                  'coalesced_by_market_snapshot_batch', true,
+                                  'coalesced_by_job_id', :newest_job_id,
+                                  'coalesced_at', :now_iso
+                                )
+             WHERE domain = 'trading'
+               AND event_kind = 'outcome'
+               AND event_type = 'market_snapshots_batch'
+               AND status IN ('pending', 'retry_wait')
+               AND created_at < :cutoff
+            """
+        ),
+        {
+            "now": now,
+            "now_iso": now.isoformat(),
+            "cutoff": cutoff,
+            "newest_job_id": newest_job_id,
+        },
+    )
+    return int(result.rowcount or 0)
 
 
 def emit_paper_trade_closed_outcome(
