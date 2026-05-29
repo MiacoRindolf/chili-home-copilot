@@ -416,6 +416,26 @@ class Settings(BaseSettings):
     google_client_id: str = ""
     google_client_secret: str = ""
     session_secret: str = "chili-session-change-me"  # sign session cookies
+    chili_environment: str = Field(
+        default="development",
+        validation_alias=AliasChoices("CHILI_ENV", "APP_ENV", "ENVIRONMENT"),
+    )
+    web_boundary_mode: str = Field(
+        default="auto",
+        validation_alias=AliasChoices("CHILI_WEB_BOUNDARY_MODE", "WEB_BOUNDARY_MODE"),
+    )
+    web_public_origin: str = Field(
+        default="",
+        validation_alias=AliasChoices("CHILI_WEB_PUBLIC_ORIGIN", "PUBLIC_ORIGIN"),
+    )
+    web_cors_allow_origins: str = Field(
+        default="*",
+        validation_alias=AliasChoices("CHILI_WEB_CORS_ALLOW_ORIGINS", "CORS_ALLOW_ORIGINS"),
+    )
+    web_cookie_secure: str = Field(
+        default="auto",
+        validation_alias=AliasChoices("CHILI_WEB_COOKIE_SECURE", "WEB_COOKIE_SECURE"),
+    )
 
     # Broker credentials â€” DEPRECATED: use the in-app setup dialogs instead.
     # These .env values serve as a fallback when no per-user DB credentials exist.
@@ -5200,6 +5220,24 @@ class Settings(BaseSettings):
                 "STAGING_DATABASE_URL must be a PostgreSQL URL or empty. See docs/STAGING_DATABASE.md."
             )
         return url
+
+    @field_validator("web_boundary_mode")
+    @classmethod
+    def _web_boundary_mode(cls, v: str) -> str:
+        mode = (v or "auto").strip().lower()
+        if mode not in {"auto", "development", "production"}:
+            raise ValueError(
+                "CHILI_WEB_BOUNDARY_MODE must be 'auto', 'development', or 'production'"
+            )
+        return mode
+
+    @field_validator("web_cookie_secure")
+    @classmethod
+    def _web_cookie_secure(cls, v: str) -> str:
+        mode = (v or "auto").strip().lower()
+        if mode not in {"auto", "always", "never"}:
+            raise ValueError("CHILI_WEB_COOKIE_SECURE must be 'auto', 'always', or 'never'")
+        return mode
 
     @field_validator("chili_llm_cost_mode")
     @classmethod

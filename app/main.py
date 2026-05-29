@@ -937,12 +937,15 @@ async def _sqlalchemy_operational_error_handler(request: Request, exc: Operation
 
 # Session middleware (authlib OAuth stores nonce/state here)
 from .config import settings as _cfg
+from .web_security import cors_allow_origins, validate_web_boundary
+
+validate_web_boundary(_cfg)
 app.add_middleware(SessionMiddleware, secret_key=_cfg.session_secret)
 
 # CORS for web and mobile clients (development-friendly defaults).
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_allow_origins(_cfg),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

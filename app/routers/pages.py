@@ -13,6 +13,7 @@ from ..pairing import (
     DEVICE_COOKIE_NAME, redeem_pair_code, register_device,
     get_identity_record, generate_pair_code,
 )
+from ..web_security import set_device_cookie
 from .. import email_service
 from ..services import home_service
 
@@ -444,7 +445,7 @@ def pair_submit(
 
     token = register_device(db, user_id=pc.user_id, label=label.strip(), client_ip=client_ip)
     resp = RedirectResponse("/chat", status_code=303)
-    resp.set_cookie(DEVICE_COOKIE_NAME, token, httponly=True, samesite="lax")
+    set_device_cookie(resp, token, request=request)
     return resp
 
 
@@ -510,5 +511,5 @@ def pair_verify(body: PairVerifyBody, request: Request, db: Session = Depends(ge
             "token": token,
         }
     )
-    resp.set_cookie(DEVICE_COOKIE_NAME, token, httponly=True, samesite="lax")
+    set_device_cookie(resp, token, request=request)
     return resp

@@ -18,6 +18,7 @@ from ..db import SessionLocal
 from ..deps import get_db
 from ..models.core import User, Device
 from ..pairing import DEVICE_COOKIE_NAME
+from ..web_security import delete_device_cookie, set_device_cookie
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["auth"])
@@ -151,13 +152,7 @@ async def auth_google_callback(request: Request, db: Session = Depends(get_db)):
         db.commit()
 
     resp = RedirectResponse("/trading", status_code=302)
-    resp.set_cookie(
-        DEVICE_COOKIE_NAME,
-        device_token,
-        httponly=True,
-        samesite="lax",
-        max_age=60 * 60 * 24 * 365,
-    )
+    set_device_cookie(resp, device_token, request=request, max_age=60 * 60 * 24 * 365)
     return resp
 
 
@@ -167,5 +162,5 @@ async def auth_google_callback(request: Request, db: Session = Depends(get_db)):
 async def auth_logout(request: Request):
     """Clear the device cookie and redirect to trading page."""
     resp = RedirectResponse("/trading", status_code=302)
-    resp.delete_cookie(DEVICE_COOKIE_NAME)
+    delete_device_cookie(resp, request=request)
     return resp
