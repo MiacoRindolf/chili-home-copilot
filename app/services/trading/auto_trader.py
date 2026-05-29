@@ -178,6 +178,8 @@ SHADOW_OBSERVATION_REASON_SIGNAL_LANE = "selector:shadow_observation_signal_lane
 SHADOW_OBSERVATION_REASON_SIGNAL_LANE_DISABLED = (
     "selector:shadow_observation_signal_lane_disabled"
 )
+EXIT_GEOMETRY_REFRESH_REASON = "execution_stop_loss_too_wide"
+EXIT_GEOMETRY_REFRESH_SOURCE = "autotrader_execution_stop_loss_too_wide"
 SHADOW_OBSERVATION_SIZING_MODE_BASE_RISK = "base_risk_notional"
 SHADOW_OBSERVATION_SIZING_MODE_FULL_DIAGNOSTICS = "full_diagnostics"
 SHADOW_OBSERVATION_DIAGNOSTIC_SIZING_SETTING = (
@@ -2190,6 +2192,159 @@ def _expected_net_pct_from_snapshot(snap: dict[str, Any] | None) -> float | None
     if value != value:
         return None
     return value
+
+
+def _entry_edge_from_snapshot(snap: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(snap, dict):
+        return {}
+    edge = snap.get("entry_edge")
+    return edge if isinstance(edge, dict) else snap
+
+
+def _snapshot_float(snap: dict[str, Any] | None, key: str) -> float | None:
+    if not isinstance(snap, dict):
+        return None
+    edge = _entry_edge_from_snapshot(snap)
+    raw = edge.get(key)
+    if raw is None:
+        raw = snap.get(key)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value):
+        return None
+    return value
+
+
+def _queue_exit_geometry_variant_work(
+    db: Session,
+    *,
+    alert: BreakoutAlert,
+    pattern: ScanPattern | None,
+    reason: str,
+    snap: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Send positive-EV but unexecutable stop geometry into learned exit evolution."""
+    if str(reason or "") != EXIT_GEOMETRY_REFRESH_REASON:
+        return None
+    try:
+        pattern_id = int(getattr(alert, "scan_pattern_id", None) or 0)
+    except (TypeError, ValueError):
+        pattern_id = 0
+    if pattern_id <= 0 or pattern is None:
+        return None
+
+    expected_net_pct = _expected_net_pct_from_snapshot(snap)
+    if expected_net_pct is None or expected_net_pct <= 0.0:
+        return {
+            "queued": False,
+            "reason": "expected_net_not_positive_for_exit_geometry_work",
+            "expected_net_pct": expected_net_pct,
+        }
+
+    execution_loss = _snapshot_float(snap, "execution_stop_loss_fraction")
+    max_execution_loss = _snapshot_float(snap, "max_execution_stop_loss_fraction")
+    if (
+        execution_loss is None
+        or max_execution_loss is None
+        or execution_loss <= max_execution_loss
+    ):
+        return {
+            "queued": False,
+            "reason": "missing_or_not_wide_execution_geometry",
+            "execution_stop_loss_fraction": execution_loss,
+            "max_execution_stop_loss_fraction": max_execution_loss,
+        }
+
+    edge = _entry_edge_from_snapshot(snap)
+    ticker = (getattr(alert, "ticker", "") or "").upper()
+    asset_class = (getattr(alert, "asset_type", "") or "").strip().lower() or None
+    fingerprint_body = {
+        "reason": EXIT_GEOMETRY_REFRESH_REASON,
+        "scan_pattern_id": pattern_id,
+        "ticker": ticker,
+        "asset_class": asset_class,
+        "entry_price": edge.get("entry_price") or snap.get("entry_price"),
+        "stop_price": edge.get("stop_price") or snap.get("stop_price"),
+        "target_price": edge.get("target_price") or snap.get("target_price"),
+        "execution_stop_loss_fraction": execution_loss,
+        "max_execution_stop_loss_fraction": max_execution_loss,
+        "execution_stop_loss_source": edge.get("execution_stop_loss_source")
+        or snap.get("execution_stop_loss_source"),
+        "expected_net_pct": expected_net_pct,
+    }
+    evidence_fingerprint = hashlib.sha256(
+        json.dumps(fingerprint_body, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+    stop_excess_fraction = max(0.0, execution_loss - max_execution_loss)
+    expected_evidence_value = max(0.0, expected_net_pct) + (
+        stop_excess_fraction * PERCENT_SCALE
+    )
+    payload = {
+        "alert_id": int(getattr(alert, "id", 0) or 0),
+        "ticker": ticker,
+        "reason": EXIT_GEOMETRY_REFRESH_REASON,
+        "source": EXIT_GEOMETRY_REFRESH_SOURCE,
+        "lifecycle_stage": getattr(pattern, "lifecycle_stage", None),
+        "promotion_status": getattr(pattern, "promotion_status", None),
+        "entry_price": fingerprint_body["entry_price"],
+        "stop_price": fingerprint_body["stop_price"],
+        "target_price": fingerprint_body["target_price"],
+        "expected_net_pct": expected_net_pct,
+        "probability": edge.get("probability"),
+        "probability_source": edge.get("probability_source"),
+        "probability_sample_n": edge.get("probability_sample_n"),
+        "reward_fraction": edge.get("reward_fraction"),
+        "stop_loss_fraction": edge.get("stop_loss_fraction"),
+        "static_reward_fraction": edge.get("target_reward_fraction"),
+        "static_stop_loss_fraction": edge.get("hard_stop_loss_fraction"),
+        "execution_stop_loss_fraction": execution_loss,
+        "max_execution_stop_loss_fraction": max_execution_loss,
+        "stop_excess_fraction": round(stop_excess_fraction, 8),
+        "execution_stop_loss_source": fingerprint_body["execution_stop_loss_source"],
+        "cash_deployment_category": "positive_ev_execution_blocked",
+        "graduation_blocker": EXIT_GEOMETRY_REFRESH_REASON,
+        "recommended_work_event": "exit_variant_refresh",
+        "expected_evidence_value": round(expected_evidence_value, 6),
+    }
+    try:
+        from .edge_reliability import (
+            EXIT_VARIANT_REFRESH,
+            emit_targeted_profitability_work,
+        )
+
+        event_id = emit_targeted_profitability_work(
+            db,
+            event_type=EXIT_VARIANT_REFRESH,
+            scan_pattern_id=pattern_id,
+            source=EXIT_GEOMETRY_REFRESH_SOURCE,
+            asset_class=asset_class,
+            evidence_fingerprint=evidence_fingerprint,
+            payload=payload,
+        )
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.debug(
+            "[autotrader] exit geometry variant work enqueue failed alert_id=%s pattern_id=%s",
+            getattr(alert, "id", None),
+            pattern_id,
+            exc_info=True,
+        )
+        return {"queued": False, "reason": "queue_failed"}
+
+    return {
+        "queued": event_id is not None,
+        "event_id": event_id,
+        "pattern_id": pattern_id,
+        "expected_net_pct": expected_net_pct,
+        "execution_stop_loss_fraction": execution_loss,
+        "max_execution_stop_loss_fraction": max_execution_loss,
+        "evidence_fingerprint": evidence_fingerprint,
+    }
 
 
 def _queue_shadow_stock_fastlane_for_observation(
@@ -4249,6 +4404,17 @@ def _process_one_alert(
                 snap["paper_observation_signal_lane"] = shadow_signal_lane
         if reason == "non_positive_expected_edge":
             _log_expected_edge_reject(alert, snap)
+        if reason == EXIT_GEOMETRY_REFRESH_REASON:
+            pattern = _pattern_row(db, alert.scan_pattern_id)
+            exit_geometry_work = _queue_exit_geometry_variant_work(
+                db,
+                alert=alert,
+                pattern=pattern,
+                reason=reason,
+                snap=snap,
+            )
+            if exit_geometry_work is not None:
+                snap["exit_geometry_variant_work"] = exit_geometry_work
         _audit(db, user_id=uid, alert=alert, decision="skipped", reason=reason, rule_snapshot=snap)
         if live:
             _maybe_open_reject_paper_shadow(
