@@ -47,10 +47,14 @@ def get_identity_ctx(request: Request, db: Session = Depends(get_db)):
 
 
 def require_paired(request: Request, db: Session = Depends(get_db)):
-    """Gate for admin routes -- redirects guests to /chat."""
+    """Gate for admin routes -- fail closed before handlers run."""
     ctx = get_identity_ctx(request, db)
-    if ctx["is_guest"]:
-        return None
+    if ctx["is_guest"] or ctx["user_id"] is None:
+        raise HTTPException(
+            status_code=303,
+            detail="Pair this device to use admin routes.",
+            headers={"Location": "/chat"},
+        )
     return ctx
 
 
