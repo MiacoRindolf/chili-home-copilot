@@ -1,51 +1,65 @@
-# NEXT_TASK: f-position-identity-phase-5k-i-live-path-closeout-audit
+# NEXT_TASK: f-position-identity-phase-5l-contract-hardening
 
 STATUS: PENDING
 
 ## Goal
 
-Close Phase 5K with a fresh remaining-reference audit now that every safe
-single-reader parity group has been flipped and soaked.
+Make the post-rename contracts explicit before any attempt to retire the
+`trading_trades` compatibility view.
+
+Phase 5K closed successfully: every safe aggregate live reader was moved behind
+an envelope flag and promoted, and the final closeout audit found no remaining
+blind single-reader cutover worth doing. The next risk is contract confusion,
+not data parity.
 
 ## Current State
 
-Live on `trading_management_envelopes`:
-
-- Coinbase cap
-- PDT
-- Cohort-promote realized
-- Pattern-quality realized
-- Portfolio-risk drawdown
-- Position-integrity
-- Alpha-portfolio gate realized aggregate
-
-Both safety probes remain green:
+Physical relation state:
 
 ```text
-Phase 5K-A: COMPLETE_POSITIVE
-Phase 5I: COMPLETE_POSITIVE
+trading_management_envelopes = physical base table
+trading_trades               = legacy compatibility view
+```
+
+Live flags currently promoted:
+
+- `CHILI_PHASE5K_COINBASE_CAP_USE_ENVELOPES=true`
+- `CHILI_PHASE5K_PDT_USE_ENVELOPES=true`
+- `CHILI_PHASE5K_COHORT_PROMOTE_USE_ENVELOPES=true`
+- `CHILI_PHASE5K_PATTERN_QUALITY_USE_ENVELOPES=true`
+- `CHILI_PHASE5K_PORTFOLIO_RISK_USE_ENVELOPES=true`
+- `CHILI_PHASE5K_POSITION_INTEGRITY_USE_ENVELOPES=true`
+- `CHILI_PHASE5K_ALPHA_PORTFOLIO_GATE_USE_ENVELOPES=true`
+
+Fresh evidence from the Phase 5K-I closeout:
+
+```text
+Phase 5K-A: COMPLETE_POSITIVE, 6/6 checks, 0 mismatches
+Phase 5I:   COMPLETE_POSITIVE, 20 fresh decisions, 20 fresh envelopes,
+            10 fresh closes, 0 hard linkage issues, 0 attribution drift
 ```
 
 ## Work Shape
 
-1. Re-run a focused remaining-reference scan for:
-   - direct `FROM trading_trades` / `JOIN trading_trades`
-   - `Trade` ORM live reader/writer surfaces
-   - compatibility-contract migrations/tests/scripts
-2. Classify remaining references into:
-   - compatibility contract
-   - migration/test/history
-   - live writer/order/broker/reconcile path
-   - live reader still eligible for a flag
-   - dirty local worktree candidate
-3. Run Phase 5K-A and Phase 5I once more.
-4. If no safe reader remains, write a Phase 5K closeout report and set the next
-   phase to compatibility-contract hardening instead of more blind cutovers.
+1. Add a small management-envelope reader contract module or extend the existing
+   helper module so common reads do not hand-write relation names.
+2. Convert low-risk reporting/analytics readers that still directly read
+   `trading_trades`, starting with:
+   - `attribution_service.py` closed-pattern live stats
+   - `cost_aware_gate.py` TCA usable-sample backing count
+3. Add canaries that block new raw live-reader SQL against `trading_trades`
+   outside allow-listed compatibility/migration/test/history files.
+4. Leave broker/order/reconcile writer paths alone unless they are migrated
+   behind explicit envelope/position APIs.
+5. Re-run Phase 5K-A and Phase 5I after each small slice.
 
 ## Guardrails
 
-- Do not remove the `trading_trades` compatibility view.
-- Do not cut over broker/order/reconcile writer paths by search-replace.
+- Do not drop the `trading_trades` compatibility view.
+- Do not rename the `Trade` ORM class in this phase.
+- Do not search-replace writer/order/broker/reconcile code.
 - Do not absorb unrelated dirty worktree files.
-- Treat `Trade` ORM surfaces as semantic code that needs separate design, not
-  a mechanical table-name replacement.
+- Preserve the three-layer model:
+  - `trading_decisions`: immutable entry intent
+  - `trading_management_envelopes`: mutable management envelope
+  - `trading_positions`: broker-authoritative position identity
