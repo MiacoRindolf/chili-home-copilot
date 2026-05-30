@@ -7,7 +7,6 @@ management envelope.
 """
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -27,9 +26,20 @@ def _truthy_flag(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _position_integrity_source_relation(use_envelopes: bool | None = None) -> str:
+def _position_integrity_source_relation(
+    use_envelopes: bool | None = None,
+    *,
+    settings_: Any | None = None,
+) -> str:
     if use_envelopes is None:
-        use_envelopes = _truthy_flag(os.environ.get(PHASE5K_POSITION_INTEGRITY_ENV))
+        if settings_ is None:
+            try:
+                from ...config import settings as settings_
+            except Exception:
+                settings_ = None
+        use_envelopes = _truthy_flag(
+            getattr(settings_, "chili_phase5k_position_integrity_use_envelopes", False)
+        )
     if use_envelopes:
         return _POSITION_INTEGRITY_ENVELOPE_RELATION
     return _POSITION_INTEGRITY_COMPAT_RELATION
@@ -85,6 +95,7 @@ def audit_position_identity(
     *,
     limit: int = 100,
     use_envelopes: bool | None = None,
+    settings_obj: Any | None = None,
 ) -> PositionIntegrityReport:
     """Return the current position/envelope invariant breaks.
 
@@ -92,7 +103,10 @@ def audit_position_identity(
     health checks, and pre-live readiness checks.
     """
     lim = max(1, int(limit or 100))
-    relation = _position_integrity_source_relation(use_envelopes)
+    relation = _position_integrity_source_relation(
+        use_envelopes,
+        settings_=settings_obj,
+    )
 
     open_positions_without_open_trade = _rows(db, f"""
         SELECT p.id AS position_id, p.user_id, p.broker_source, p.account_type,
@@ -203,6 +217,7 @@ def repair_current_envelope_links(
     *,
     dry_run: bool = True,
     use_envelopes: bool | None = None,
+    settings_obj: Any | None = None,
 ) -> dict[str, Any]:
     """Repair ``trading_positions.current_envelope_id`` safely.
 
@@ -211,7 +226,10 @@ def repair_current_envelope_links(
     open position has exactly one matching open trade by natural key. Ambiguous
     or missing matches stay untouched for human/ops review.
     """
-    relation = _position_integrity_source_relation(use_envelopes)
+    relation = _position_integrity_source_relation(
+        use_envelopes,
+        settings_=settings_obj,
+    )
     stale_candidates = _rows(db, f"""
         SELECT p.id AS position_id, p.current_envelope_id
         FROM trading_positions p

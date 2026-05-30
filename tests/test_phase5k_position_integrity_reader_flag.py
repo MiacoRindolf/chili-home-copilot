@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
+from app import config as app_config
 from app.config import Settings
 from app.services.trading import position_integrity
 
@@ -71,6 +73,27 @@ def test_position_integrity_env_does_not_override_explicit_settings_object(monke
         )
         == "trading_trades"
     )
+
+
+def test_position_integrity_source_relation_defaults_to_app_settings(monkeypatch):
+    monkeypatch.setattr(
+        app_config,
+        "settings",
+        SimpleNamespace(chili_phase5k_position_integrity_use_envelopes=True),
+    )
+
+    assert (
+        position_integrity._position_integrity_source_relation()
+        == "trading_management_envelopes"
+    )
+
+
+def test_position_integrity_reader_flag_has_no_direct_env_read():
+    source = Path(position_integrity.__file__).read_text()
+
+    assert "import os" not in source
+    assert "os.environ" not in source
+    assert "os.getenv" not in source
 
 
 def test_position_integrity_source_relation_explicit_override(monkeypatch):

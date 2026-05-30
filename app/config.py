@@ -3648,6 +3648,12 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_PHASE5K_PORTFOLIO_RISK_USE_ENVELOPES"),
     )
+    # Phase 5K-G: default-OFF reader cutover for position identity/integrity
+    # evidence. Keep typed so source and runtime evidence name the exact flag.
+    chili_phase5k_position_integrity_use_envelopes: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_PHASE5K_POSITION_INTEGRITY_USE_ENVELOPES"),
+    )
     # f-promotion-pipeline-rebalance Phase 1 (2026-05-09): sample-size
     # floor for the thin-evidence demote sweep. The original Phase D
     # threshold (10 trades) was wrong-sense: a pattern with 8 realized
