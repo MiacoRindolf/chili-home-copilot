@@ -9,6 +9,7 @@ import json
 import logging
 import time as _time
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 from typing import Any
 
@@ -130,6 +131,70 @@ AUTOTRADER_POSITION_DEFLECTION_STATUSES = (
     AUTOTRADER_POSITION_DEFLECTION_OPEN_STATUS,
     AUTOTRADER_POSITION_DEFLECTION_WORKING_STATUS,
 )
+
+
+@dataclass(frozen=True)
+class PatternImminentPatternSnapshot:
+    """Detached pattern fields needed after the read transaction is closed."""
+
+    id: int
+    active: bool
+    name: str | None
+    description: str | None
+    rules_json: Any
+    timeframe: str | None
+    ticker_scope: str | None
+    scope_tickers: Any
+    asset_class: str | None
+    lifecycle_stage: str | None
+    promotion_status: str | None
+    quality_composite_score: float | None
+    win_rate: float | None
+    evidence_count: int | None
+    backtest_count: int | None
+    oos_win_rate: float | None
+    confidence: float | None
+    recert_required: bool | None
+    recert_reason: Any
+    portfolio_gate_json: Any
+    avg_return_pct: float | None
+
+
+def _scan_pattern_snapshot(pat: ScanPattern) -> PatternImminentPatternSnapshot:
+    return PatternImminentPatternSnapshot(
+        id=int(getattr(pat, "id", 0) or 0),
+        active=bool(getattr(pat, "active", False)),
+        name=getattr(pat, "name", None),
+        description=getattr(pat, "description", None),
+        rules_json=getattr(pat, "rules_json", None),
+        timeframe=getattr(pat, "timeframe", None),
+        ticker_scope=getattr(pat, "ticker_scope", None),
+        scope_tickers=getattr(pat, "scope_tickers", None),
+        asset_class=getattr(pat, "asset_class", None),
+        lifecycle_stage=getattr(pat, "lifecycle_stage", None),
+        promotion_status=getattr(pat, "promotion_status", None),
+        quality_composite_score=getattr(pat, "quality_composite_score", None),
+        win_rate=getattr(pat, "win_rate", None),
+        evidence_count=getattr(pat, "evidence_count", None),
+        backtest_count=getattr(pat, "backtest_count", None),
+        oos_win_rate=getattr(pat, "oos_win_rate", None),
+        confidence=getattr(pat, "confidence", None),
+        recert_required=getattr(pat, "recert_required", None),
+        recert_reason=getattr(pat, "recert_reason", None),
+        portfolio_gate_json=getattr(pat, "portfolio_gate_json", None),
+        avg_return_pct=getattr(pat, "avg_return_pct", None),
+    )
+
+
+def _release_pattern_imminent_read_transaction(db: Session) -> None:
+    try:
+        db.rollback()
+    except Exception:
+        logger.warning(
+            "[pattern_imminent] failed to release read transaction before scoring",
+            exc_info=True,
+        )
+        raise
 PATTERN_IMMINENT_SCAN_ELIGIBLE_PRIORITY = 0
 PATTERN_IMMINENT_SCAN_INELIGIBLE_PRIORITY = 1
 PATTERN_IMMINENT_SCAN_PROMOTED_PRIORITY = 0
@@ -1222,6 +1287,7 @@ def gather_imminent_candidate_rows(
     all_active_patterns: bool = False,
     apply_main_dispatch_filters: bool = False,
     for_opportunity_board: bool = False,
+    release_read_transaction_before_scoring: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Score (pattern × ticker) rows using shared composite math.
 
@@ -1230,6 +1296,8 @@ def gather_imminent_candidate_rows(
     *for_opportunity_board*: when True, apply tighter universe/per-pattern/total score caps so
       the HTTP board stays within latency budgets. Does **not** change main imminent dispatch
       (call with ``for_opportunity_board=False`` there).
+    *release_read_transaction_before_scoring*: when True, materialize DB-backed inputs as
+      DTOs and rollback the read transaction before market scoring or dispatch work.
     """
     eq_open = equity_session_open if equity_session_open is not None else us_stock_session_open()
     max_eta = float(settings.pattern_imminent_max_eta_hours)
@@ -1340,8 +1408,9 @@ def gather_imminent_candidate_rows(
         and not bool(for_opportunity_board)
     )
 
+    pattern_rows = db.query(ScanPattern).filter(ScanPattern.active.is_(True)).all()
     patterns = sorted(
-        db.query(ScanPattern).filter(ScanPattern.active.is_(True)).all(),
+        (_scan_pattern_snapshot(pat) for pat in pattern_rows),
         key=_imminent_scan_priority_key,
     )
     (
@@ -1360,6 +1429,8 @@ def gather_imminent_candidate_rows(
         if open_position_deflection_enabled
         else set()
     )
+    if release_read_transaction_before_scoring:
+        _release_pattern_imminent_read_transaction(db)
 
     candidates: list[dict[str, Any]] = []
     patterns_tried = 0
@@ -1974,6 +2045,9 @@ def gather_imminent_candidate_rows(
         "ticker_rotation_samples": ticker_rotation_samples,
         "open_position_deflection_enabled": open_position_deflection_enabled,
         "open_position_deflection_keys": len(open_position_keys),
+        "read_transaction_released_before_scoring": bool(
+            release_read_transaction_before_scoring
+        ),
         "pattern_priority_top_stage_counts": dict(pattern_priority_top_stage_counts),
         "top_suppressed": suppressed,
         "equity_session_open": eq_open,
@@ -2082,13 +2156,28 @@ def run_pattern_imminent_scan(
     min_cov_main = float(getattr(settings, "pattern_imminent_min_feature_coverage_main", 0.45))
     min_comp_main = float(getattr(settings, "pattern_imminent_min_composite_main", 0.42))
 
-    candidates, meta = gather_imminent_candidate_rows(
-        db,
-        user_id,
-        equity_session_open=eq_open,
-        all_active_patterns=False,
-        apply_main_dispatch_filters=True,
-    )
+    from ...db import SessionLocal as _PatternReadSessionLocal
+
+    read_db = _PatternReadSessionLocal()
+    try:
+        candidates, meta = gather_imminent_candidate_rows(
+            read_db,
+            user_id,
+            equity_session_open=eq_open,
+            all_active_patterns=False,
+            apply_main_dispatch_filters=True,
+            release_read_transaction_before_scoring=True,
+        )
+    finally:
+        try:
+            read_db.rollback()
+        except Exception:
+            logger.debug(
+                "[pattern_imminent] read session rollback-before-close failed",
+                exc_info=True,
+            )
+        read_db.close()
+    meta["read_session_isolated_from_dispatch"] = True
 
     sent = 0
     main_sent = 0
@@ -2284,6 +2373,7 @@ def run_pattern_imminent_scan(
 
 # Re-export for tests / pattern_engine consumers
 __all__ = [
+    "PatternImminentPatternSnapshot",
     "build_imminent_ticker_universe",
     "gather_imminent_candidate_rows",
     "describe_us_session_context",

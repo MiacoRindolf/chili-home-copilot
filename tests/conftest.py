@@ -352,6 +352,81 @@ def _truncate_lock_recoverable(exc: BaseException) -> bool:
     return "locknotavailable" in low.replace(" ", "") or "lock timeout" in low
 
 
+def _ensure_cleanup_database_is_test(conn) -> str:
+    db_name = str(conn.execute(text("SELECT current_database()")).scalar() or "")
+    if not db_name.lower().endswith("_test"):
+        raise RuntimeError(
+            f"Refusing pytest cleanup against database {db_name!r}: "
+            "database name must end with '_test'."
+        )
+    return db_name
+
+
+def _pytest_cleanup_lock_timeout_seconds() -> int:
+    return max(1, int(os.environ.get("CHILI_PYTEST_CLEANUP_LOCK_TIMEOUT_S", "10")))
+
+
+def _cleanup_lock_diagnostics(conn, *, limit: int = 12) -> list[dict]:
+    rows = conn.execute(
+        text(
+            """
+            SELECT a.pid,
+                   a.state,
+                   now() - a.query_start AS query_age,
+                   left(coalesce(a.query, ''), 180) AS query,
+                   l.locktype,
+                   l.mode,
+                   l.granted,
+                   c.relname
+              FROM pg_stat_activity a
+              LEFT JOIN pg_locks l ON l.pid = a.pid
+              LEFT JOIN pg_class c ON c.oid = l.relation
+             WHERE a.datname = current_database()
+               AND a.pid <> pg_backend_pid()
+             ORDER BY l.granted ASC NULLS LAST, a.query_start NULLS LAST
+             LIMIT :limit
+            """
+        ),
+        {"limit": int(limit)},
+    ).mappings()
+    return [dict(row) for row in rows]
+
+
+def _log_cleanup_lock_diagnostics(
+    *,
+    table_names: frozenset[str] | None,
+    error: BaseException,
+) -> None:
+    import sys
+
+    try:
+        with engine.connect() as conn:
+            db_name = _ensure_cleanup_database_is_test(conn)
+            diagnostics = _cleanup_lock_diagnostics(conn)
+    except Exception as diag_error:
+        db_name = "<diagnostic-unavailable>"
+        diagnostics = [{"error": str(diag_error)}]
+
+    payload = {
+        "database": db_name,
+        "targeted": table_names is not None,
+        "table_count": len(table_names or ()),
+        "error": str(error),
+        "diagnostics": diagnostics,
+    }
+    sys.stderr.write(
+        "pytest: DB cleanup lock timeout on %s; diagnostics=%s\n"
+        % (db_name, json.dumps(payload, default=str))
+    )
+    sys.stderr.flush()
+    _agent_ndjson(
+        hypothesis_id="H5",
+        location="conftest.py:_truncate_app_tables",
+        message="DELETE cleanup lock contention; failing fast with diagnostics",
+        data=payload,
+    )
+
+
 def _terminate_stale_truncate_peers(max_age_s: int = 90) -> None:
     """Kill stale active TRUNCATE sessions left behind by timed-out pytest runs."""
     if not (os.environ.get("CHILI_PYTEST") or "").strip():
@@ -411,55 +486,26 @@ def _truncate_app_tables(table_names: frozenset[str] | None = None) -> None:
     # Static neural mesh topology is seeded by migration 086; keep nodes/edges so tests
     # do not need to re-seed the graph definition every time.
     _skip_truncate = frozenset({"schema_version", "brain_graph_nodes", "brain_graph_edges"})
-    if table_names is not None:
-        _evict_idle_in_transaction_peers()
-        _terminate_stale_truncate_peers()
-        with engine.begin() as conn:
-            for table in reversed(Base.metadata.sorted_tables):
-                if table.name in _skip_truncate or table.name not in table_names:
-                    continue
-                conn.execute(text(f'DELETE FROM "{table.name}"'))
-        return
-    logical_names = [
+    cleanup_names = frozenset(
         t.name
         for t in Base.metadata.sorted_tables
         if t.name not in _skip_truncate and (table_names is None or t.name in table_names)
-    ]
-    if not logical_names:
+    )
+    if not cleanup_names:
         return
-    attempts = max(1, int(os.environ.get("CHILI_PYTEST_TRUNCATE_ATTEMPTS", "6")))
-    lock_s = max(30, int(os.environ.get("CHILI_PYTEST_LOCK_TIMEOUT_S", "120")))
-    for attempt in range(attempts):
-        _evict_idle_in_transaction_peers()
-        _terminate_stale_truncate_peers()
-        try:
-            with engine.begin() as conn:
-                conn.execute(text(f"SET LOCAL lock_timeout = '{lock_s}s'"))
-                names = [f'"{name}"' for name in _truncate_relation_names(conn, logical_names)]
-                stmt = text(f"TRUNCATE {', '.join(names)} RESTART IDENTITY CASCADE")
-                conn.execute(stmt)
-            # #region agent log
-            if attempt:
-                _agent_ndjson(
-                    hypothesis_id="H5",
-                    location="conftest.py:_truncate_app_tables",
-                    message="TRUNCATE succeeded after retry",
-                    data={"attempt": attempt + 1},
-                )
-            # #endregion
-            return
-        except OperationalError as e:
-            if not _truncate_lock_recoverable(e) or attempt + 1 >= attempts:
-                raise
-            # #region agent log
-            _agent_ndjson(
-                hypothesis_id="H5",
-                location="conftest.py:_truncate_app_tables",
-                message="TRUNCATE lock contention, will retry",
-                data={"attempt": attempt + 1, "max": attempts},
-            )
-            # #endregion
-            time.sleep(0.4 * (attempt + 1))
+    lock_s = _pytest_cleanup_lock_timeout_seconds()
+    try:
+        with engine.begin() as conn:
+            _ensure_cleanup_database_is_test(conn)
+            conn.execute(text(f"SET LOCAL lock_timeout = '{lock_s}s'"))
+            for table in reversed(Base.metadata.sorted_tables):
+                if table.name not in cleanup_names:
+                    continue
+                conn.execute(text(f'DELETE FROM "{table.name}"'))
+    except OperationalError as e:
+        if _truncate_lock_recoverable(e):
+            _log_cleanup_lock_diagnostics(table_names=table_names, error=e)
+        raise
 
 
 def _test_prefers_targeted_cleanup(request) -> bool:

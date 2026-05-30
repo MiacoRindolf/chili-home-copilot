@@ -2548,6 +2548,159 @@ def test_gather_imminent_deflects_open_position_before_ticker_cap(
     assert meta["top_suppressed"][0]["reason"] == "open_position_deflected"
 
 
+def test_gather_imminent_releases_read_transaction_before_scoring(monkeypatch) -> None:
+    rules = {
+        "conditions": [
+            {"indicator": "rsi_14", "op": ">", "value": TEST_RSI_BREAKOUT_TRIGGER}
+        ]
+    }
+    pattern = SimpleNamespace(
+        id=77,
+        name="Detached read-stage pattern",
+        rules_json=rules,
+        asset_class="crypto",
+        ticker_scope="explicit_list",
+        scope_tickers=f'["{TEST_EXECUTABLE_CRYPTO_TICKER}"]',
+        lifecycle_stage="promoted",
+        promotion_status=None,
+        active=True,
+        description="session split regression",
+        timeframe="1h",
+        avg_return_pct=TEST_PATTERN_AVG_RETURN_PCT,
+        win_rate=TEST_PATTERN_WIN_RATE,
+        evidence_count=TEST_PATTERN_EVIDENCE_COUNT,
+        backtest_count=3,
+        oos_win_rate=0.5,
+        confidence=0.7,
+        quality_composite_score=None,
+        recert_required=False,
+        recert_reason=None,
+        portfolio_gate_json=None,
+    )
+
+    events: list[str] = []
+
+    class _PatternQuery:
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def all(self):
+            return [pattern]
+
+    class _FakeDb:
+        def query(self, *_args, **_kwargs):
+            return _PatternQuery()
+
+        def rollback(self):
+            events.append("rollback")
+
+    fake_db = _FakeDb()
+
+    def _fake_score_ticker(
+        ticker: str,
+        skip_fundamentals: bool = True,
+        skip_pattern_engine: bool = False,
+    ):
+        events.append("score")
+        assert events[0] == "rollback"
+        return {
+            "price": TEST_SCORE_PRICE,
+            "entry_price": TEST_SCORE_PRICE,
+            "stop_loss": TEST_SCORE_STOP_LOSS,
+            "take_profit": TEST_SCORE_TAKE_PROFIT,
+            "signals": ["test"],
+            "indicators": {
+                "rsi": TEST_SCORE_RSI,
+                "adx": TEST_SCORE_ADX,
+                "atr": TEST_SCORE_ATR,
+            },
+        }
+
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_min_readiness",
+        TEST_MIN_READINESS,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_readiness_cap",
+        TEST_FULL_READINESS_CAP,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_min_composite_main",
+        TEST_MIN_COMPOSITE_DISABLED,
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "_coinbase_spot_ticker_set",
+        lambda: frozenset({TEST_EXECUTABLE_CRYPTO_TICKER}),
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_open_position_deflection_enabled",
+        False,
+    )
+    monkeypatch.setattr(imminent_mod, "_score_ticker", _fake_score_ticker)
+    monkeypatch.setattr(imminent_mod, "recent_swing_resistance", lambda ticker: None)
+
+    candidates, meta = gather_imminent_candidate_rows(
+        fake_db,
+        user_id=TEST_USER_ID,
+        equity_session_open=False,
+        apply_main_dispatch_filters=True,
+        release_read_transaction_before_scoring=True,
+    )
+
+    assert events[:2] == ["rollback", "score"]
+    assert [c["ticker"] for c in candidates] == [TEST_EXECUTABLE_CRYPTO_TICKER]
+    assert isinstance(
+        candidates[0]["pattern"],
+        imminent_mod.PatternImminentPatternSnapshot,
+    )
+    assert candidates[0]["pattern"].id == 77
+    assert meta["read_transaction_released_before_scoring"] is True
+
+
+def test_run_pattern_imminent_scan_uses_isolated_read_session(monkeypatch) -> None:
+    from app import db as app_db
+
+    events: list[str] = []
+
+    class _ReadDb:
+        def rollback(self):
+            events.append("read_rollback")
+
+        def close(self):
+            events.append("read_close")
+
+    read_db = _ReadDb()
+    dispatch_db = SimpleNamespace()
+    seen: dict[str, object] = {}
+
+    def _fake_session_local():
+        events.append("read_open")
+        return read_db
+
+    def _fake_gather(db_arg, *_args, **kwargs):
+        seen["db"] = db_arg
+        seen["release_read_transaction_before_scoring"] = kwargs.get(
+            "release_read_transaction_before_scoring"
+        )
+        return [], {"patterns_active": 0, "tickers_scored": 0}
+
+    monkeypatch.setattr(app_db, "SessionLocal", _fake_session_local)
+    monkeypatch.setattr(imminent_mod, "gather_imminent_candidate_rows", _fake_gather)
+
+    result = run_pattern_imminent_scan(dispatch_db, user_id=TEST_USER_ID)
+
+    assert seen["db"] is read_db
+    assert seen["db"] is not dispatch_db
+    assert seen["release_read_transaction_before_scoring"] is True
+    assert events == ["read_open", "read_rollback", "read_close"]
+    assert result["read_session_isolated_from_dispatch"] is True
+
+
 def test_run_pattern_imminent_scan_counts_persisted_alert_when_delivery_fails(
     db,
     monkeypatch,

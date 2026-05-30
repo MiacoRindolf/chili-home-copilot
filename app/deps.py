@@ -1,4 +1,6 @@
 """Shared FastAPI dependencies for CHILI routes."""
+import logging
+
 from fastapi import Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
@@ -7,12 +9,18 @@ from .config import settings
 from .db import SessionLocal
 from .pairing import DEVICE_COOKIE_NAME, get_identity, get_identity_record
 
+logger = logging.getLogger(__name__)
+
 
 def get_db():
     db = SessionLocal()
     try:
         yield db
     finally:
+        try:
+            db.rollback()
+        except Exception:
+            logger.debug("request DB session rollback-before-close failed", exc_info=True)
         db.close()
 
 
