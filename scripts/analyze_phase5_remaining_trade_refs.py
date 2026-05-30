@@ -286,6 +286,27 @@ def build_inventory(
     }
 
 
+def filter_inventory_by_bucket(report: dict, bucket: str | None) -> dict:
+    """Return a copy of *report* narrowed to one bucket for focused audits."""
+    if not bucket:
+        return report
+    entries = [entry for entry in report["entries"] if entry["bucket"] == bucket]
+    raw_reader_buckets: dict[str, int] = {}
+    for entry in entries:
+        if entry["raw_sql_references"]:
+            raw_reader_buckets[entry["bucket"]] = (
+                raw_reader_buckets.get(entry["bucket"], 0) + 1
+            )
+    return {
+        **report,
+        "file_count": len(entries),
+        "raw_sql_file_count": sum(1 for entry in entries if entry["raw_sql_references"]),
+        "buckets": {bucket: len(entries)} if entries else {},
+        "raw_reader_buckets": dict(sorted(raw_reader_buckets.items())),
+        "entries": entries,
+    }
+
+
 def _print_table(report: dict) -> None:
     print("bucket | files")
     print("-------+------")
@@ -325,6 +346,10 @@ def main() -> int:
         dest="include_dirs",
         help="Directory or file to scan. May be passed more than once.",
     )
+    parser.add_argument(
+        "--bucket",
+        help="Only print entries from a single classification bucket.",
+    )
     args = parser.parse_args()
 
     report = build_inventory(
@@ -332,10 +357,11 @@ def main() -> int:
         args.include_dirs or DEFAULT_INCLUDE_DIRS,
         raw_sql_only=args.raw_sql_only,
     )
+    report_to_print = filter_inventory_by_bucket(report, args.bucket)
     if args.json:
-        print(json.dumps(report, sort_keys=True))
+        print(json.dumps(report_to_print, sort_keys=True))
     else:
-        _print_table(report)
+        _print_table(report_to_print)
     if args.fail_on_unexpected_runtime and not report["ok"]:
         return 1
     return 0

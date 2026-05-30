@@ -1,31 +1,50 @@
-# NEXT_TASK: f-position-identity-phase-5m-orm-symbol-contract-audit
+# NEXT_TASK: f-position-identity-phase-5n-semantic-envelope-helper-slice
 
 STATUS: PENDING
 
 ## Goal
 
-Classify the remaining runtime `Trade` ORM-symbol compatibility surface after Phase 5L-H, without renaming the class and without changing live broker/order/close behavior.
+Reduce the remaining `Trade` ORM-symbol semantic debt by moving low-risk read/report callers behind management-envelope helper APIs, without renaming the ORM class and without changing live broker/order/close behavior.
 
-Phase 5L-H proved there are no unexpected runtime raw readers/mutations and only two intentional relation-symbol anchors remain. The next ambiguity is semantic: many files still import or type against `Trade`, even though the physical table is now `trading_management_envelopes` and `trading_trades` is a compatibility view.
+Phase 5M found 105 runtime `Trade` ORM-symbol files. That is not a table-rename blocker, but it is still a human-modeling problem: the database object is now a management envelope while many callers still speak "trade".
 
 ## Recommended Work Shape
 
-1. Extend or reuse `scripts/analyze_phase5_remaining_trade_refs.py` to emit only `orm_trade_symbol_compat` runtime-app entries.
-2. Split the `Trade` ORM surface into:
-   - live writer/order/broker/reconcile paths that must keep the compatibility ORM for now
-   - read/report paths that should eventually use semantic envelope helpers
-   - API/schema naming that can be renamed later without DB impact
-   - tests/migrations/history that are intentionally compatibility-bound
-3. Make no behavior change unless there is a trivial comment/docstring cleanup.
-4. Produce a closeout report with counts and a next-step recommendation.
+1. Start with analytics/learning/reporting files from the Phase 5M candidate pool, not broker/order/reconcile or capital-gate paths.
+2. Add narrow helper functions to `app/services/trading/management_envelopes.py` when a repeated read pattern exists.
+3. Convert one small slice of callers to the helper API.
+4. Avoid behavior changes. This is a naming/contract slice, not an alpha or execution change.
+5. Re-run:
+   - `tests/test_phase5_remaining_trade_refs.py`
+   - `tests/test_phase5l_reader_allowlist.py`
+   - `scripts/analyze_phase5_remaining_trade_refs.py --bucket orm_trade_symbol_compat --fail-on-unexpected-runtime`
+
+## Candidate Pool
+
+Best first candidates from Phase 5M:
+
+- analytics / learning / reporting services
+- attribution and execution-quality reports
+- pattern performance readers
+- AI context / journal / daily playbook surfaces
+
+Avoid in this slice:
+
+- broker sync
+- bracket writers
+- stop/exit execution
+- autotrader order placement
+- PDT / capital / portfolio-risk gates
+- ORM class rename
+- API/UI product rename
 
 ## Guardrails
 
-- Do not rename the `Trade` ORM class in this task.
-- Do not drop or rewrite the `trading_trades` compatibility view.
+- Do not rename `Trade`.
+- Do not rewrite `trading_trades` compatibility view usage in writer/ORM paths.
 - Do not touch order placement, broker sync, close, stop, or reconcile semantics.
 - Do not absorb unrelated dirty worktree files.
 
 ## Architect Verdict
 
-This is a map-before-cut task. The physical rename and relation-symbol cleanup are healthy; the next risk is human misunderstanding of `Trade` meaning in code. We classify that surface before attempting any semantic ORM rename or API naming cleanup.
+Phase 5M says the rename is semantically safe only if we keep cutting by behavior surface. Phase 5N should make the read/report brain speak the new entity language first. The live-money paths stay boring until each one has an explicit parity gate.

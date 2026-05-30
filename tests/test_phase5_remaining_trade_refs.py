@@ -210,3 +210,24 @@ def test_raw_sql_only_filters_symbol_and_doc_references(tmp_path: Path) -> None:
     assert report["entries"][0]["path"] == "app/services/trading/pattern_regime_ledger.py"
     assert report["entries"][0]["reference_kind"] == "raw_sql_reader"
     assert report["entries"][0]["raw_sql_references"] == ["FROM trading_trades"]
+
+
+def test_bucket_filter_keeps_global_verdict_and_narrows_entries(tmp_path: Path) -> None:
+    module = _load_module()
+    app_dir = tmp_path / "app" / "services" / "trading"
+    app_dir.mkdir(parents=True)
+    (app_dir / "reader.py").write_text(
+        "SELECT * FROM trading_trades WHERE id = :id\n", encoding="utf-8"
+    )
+    (app_dir / "symbol.py").write_text("from app.models.trading import Trade\n", encoding="utf-8")
+
+    report = module.build_inventory(tmp_path, include_dirs=("app",))
+    narrowed = module.filter_inventory_by_bucket(report, "orm_trade_symbol_compat")
+
+    assert report["ok"] is False
+    assert narrowed["ok"] is False
+    assert narrowed["file_count"] == 1
+    assert narrowed["buckets"] == {"orm_trade_symbol_compat": 1}
+    assert [entry["path"] for entry in narrowed["entries"]] == [
+        "app/services/trading/symbol.py"
+    ]
