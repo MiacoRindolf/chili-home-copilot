@@ -747,31 +747,53 @@ def get_all_users_task_summary(db: Session) -> list[dict]:
 
 
 def get_user_task_summary_stats(db: Session, user_id: int) -> list[dict]:
-    user = db.query(User).filter(User.id == user_id).first()
-    member_projects = (
-        db.query(PlanProject)
-        .join(ProjectMember, ProjectMember.project_id == PlanProject.id)
-        .filter(ProjectMember.user_id == user_id)
-        .all()
-    )
-    total_tasks = 0
-    done_tasks = 0
-    overdue_tasks = 0
     today = date.today()
-    for project in member_projects:
-        for task in project.tasks:
-            total_tasks += 1
-            if task.status == "done":
-                done_tasks += 1
-            elif task.end_date and task.end_date < today and task.status != "done":
-                overdue_tasks += 1
+    row = (
+        db.query(
+            User.name.label("user_name"),
+            func.count(distinct(ProjectMember.project_id)).label("project_count"),
+            func.count(PlanTask.id).label("total_tasks"),
+            func.coalesce(
+                func.sum(case((PlanTask.status == "done", 1), else_=0)),
+                0,
+            ).label("done_tasks"),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            PlanTask.end_date < today,
+                            case((PlanTask.status != "done", 1), else_=0),
+                        ),
+                        else_=0,
+                    )
+                ),
+                0,
+            ).label("overdue_tasks"),
+        )
+        .outerjoin(ProjectMember, ProjectMember.user_id == User.id)
+        .outerjoin(PlanTask, PlanTask.project_id == ProjectMember.project_id)
+        .filter(User.id == user_id)
+        .group_by(User.id, User.name)
+        .one_or_none()
+    )
+    if row is None:
+        return [
+            {
+                "user_id": user_id,
+                "user_name": "",
+                "project_count": 0,
+                "total_tasks": 0,
+                "done_tasks": 0,
+                "overdue_tasks": 0,
+            }
+        ]
     return [
         {
             "user_id": user_id,
-            "user_name": user.name if user else "",
-            "project_count": len(member_projects),
-            "total_tasks": total_tasks,
-            "done_tasks": done_tasks,
-            "overdue_tasks": overdue_tasks,
+            "user_name": row.user_name or "",
+            "project_count": int(row.project_count or 0),
+            "total_tasks": int(row.total_tasks or 0),
+            "done_tasks": int(row.done_tasks or 0),
+            "overdue_tasks": int(row.overdue_tasks or 0),
         }
     ]

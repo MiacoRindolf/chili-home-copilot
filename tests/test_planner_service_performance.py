@@ -13,6 +13,7 @@ class _FakeQuery:
         self.join_calls = 0
         self.options_calls = 0
         self.outerjoin_calls = 0
+        self.one_or_none_calls = 0
 
     def join(self, *_args, **_kwargs):
         self.join_calls += 1
@@ -36,6 +37,10 @@ class _FakeQuery:
 
     def all(self):
         return self._rows
+
+    def one_or_none(self):
+        self.one_or_none_calls += 1
+        return self._rows[0] if self._rows else None
 
 
 class _FakeSession:
@@ -136,3 +141,52 @@ def test_user_project_summary_eager_loads_tasks_and_assignees():
     assert db.last_query.join_calls == 1
     assert db.last_query.options_calls == 1
     assert db.last_query.filter_calls == 1
+
+
+def test_user_task_summary_stats_aggregates_in_one_query():
+    db = _FakeSession([
+        SimpleNamespace(
+            user_name="Alice",
+            project_count=2,
+            total_tasks=5,
+            done_tasks=3,
+            overdue_tasks=1,
+        )
+    ])
+
+    result = planner_service.get_user_task_summary_stats(db, user_id=7)
+
+    assert result == [
+        {
+            "user_id": 7,
+            "user_name": "Alice",
+            "project_count": 2,
+            "total_tasks": 5,
+            "done_tasks": 3,
+            "overdue_tasks": 1,
+        }
+    ]
+    assert db.query_calls == 1
+    assert db.last_query.outerjoin_calls == 2
+    assert db.last_query.filter_calls == 1
+    assert db.last_query.group_by_calls == 1
+    assert db.last_query.one_or_none_calls == 1
+
+
+def test_user_task_summary_stats_handles_missing_user_without_followup_queries():
+    db = _FakeSession([])
+
+    result = planner_service.get_user_task_summary_stats(db, user_id=404)
+
+    assert result == [
+        {
+            "user_id": 404,
+            "user_name": "",
+            "project_count": 0,
+            "total_tasks": 0,
+            "done_tasks": 0,
+            "overdue_tasks": 0,
+        }
+    ]
+    assert db.query_calls == 1
+    assert db.last_query.one_or_none_calls == 1
