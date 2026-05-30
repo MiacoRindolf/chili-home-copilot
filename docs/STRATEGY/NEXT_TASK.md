@@ -1,65 +1,73 @@
-# NEXT_TASK: f-position-identity-phase-5k-live-path-cutover-brief
+# NEXT_TASK: f-position-identity-phase-5k-a-live-path-parity-probe
 
 STATUS: PENDING
 
 ## Goal
 
-Write the Phase 5K cutover brief for live paths that still intentionally use
-the `trading_trades` compatibility view or `Trade` ORM class after Phase 5J.
+Add a read-only Phase 5K-A probe that compares the remaining live decision
+surfaces through both names:
 
-Do not implement live-path code changes in this task. The purpose is to decide
-which references should remain permanent compatibility contracts and which ones
-deserve a future feature-flagged, owner-reviewed cutover.
+- old compatibility view: `trading_trades`
+- semantic physical base table: `trading_management_envelopes`
+
+The probe should prove that live capital/promotion/risk readers would receive
+identical inputs before any live path is cut over.
 
 ## Current Gate State
 
 - Phase 5I post-rename soak: `COMPLETE_POSITIVE`
-- Phase 5J slices 1-5 shipped.
-- Phase 5J remaining-reference audit closed:
-  - no more safe reader-only conversions
-  - compatibility view remains required
-  - Python `Trade` ORM class remains required
-- Pid 537 watcher closed and scheduled task disabled.
+- Phase 5J reader cleanup: closed
+- Phase 5K live-path brief: shipped
+- Recommendation: evidence-first parity probe before any live behavior change
 
 ## Scope
 
-1. Re-read:
+1. Create a read-only probe script, for example:
 
-   - `docs/STRATEGY/CC_REPORTS/2026-05-30_f-position-identity-phase-5j-remaining-reference-audit-closeout.md`
-   - `docs/RUNBOOKS/PHASE5J_SELECTIVE_READER_CLEANUP.md`
-   - `docs/DESIGN/POSITION_IDENTITY.md`
+   ```text
+   scripts/d-phase5k-live-path-parity-probe.py
+   ```
 
-2. Build a live-path matrix for remaining app references:
+2. Compare old-vs-new aggregates for:
 
-   - **permanent keep:** ORM/FK/API compatibility
-   - **feature-flag future:** live capital/promotion readers where the semantic
-     base table may be useful but behavior must be proven neutral
-   - **writer boundary:** broker/order/reconcile/stop paths that should keep
-     `Trade`/compatibility until a larger envelope-writer cutover is designed
-   - **dirty/defer:** files with unrelated local edits
+   - Coinbase venue cap: open auto-trader Coinbase count and notional
+   - PDT guard: true 5-business-day equity day-trade count
+   - promotion/cohort realized aggregates by `scan_pattern_id`
+   - pattern-quality realized aggregates by `scan_pattern_id`
+   - portfolio-risk open exposure by broker/asset kind
+   - position-integrity linkage counts for open envelopes
 
-3. Propose the smallest safe Phase 5K implementation slice, if any.
+3. Emit a verdict:
 
-4. Keep Phase 5I green:
+   - `COMPLETE_POSITIVE` when all aggregates match
+   - `REGRESSION_PARITY` when any mismatch appears
+   - `ALERT` when the probe cannot run
+
+4. Add a focused test that pins:
+
+   - the script is read-only
+   - both relation names are intentionally present
+   - no DDL/DML keywords are present outside comments/strings needed for select
+
+5. Run:
 
    ```powershell
    python -m pytest tests\test_phase5j_reader_cleanup.py tests\test_phase5i_post_rename_probe.py
    python scripts\d-phase5i-post-rename-soak-probe.py
    powershell -NoProfile -ExecutionPolicy Bypass -File scripts\dispatch-phase5i-post-rename-soak-probe.ps1
+   python scripts\d-phase5k-live-path-parity-probe.py
    ```
 
 ## Guardrails
 
-- Do not drop the `trading_trades` compatibility view.
+- Do not edit live broker/order/stop/reconcile paths.
+- Do not edit dirty local files.
+- Do not drop or replace the `trading_trades` compatibility view.
 - Do not rename the Python `Trade` ORM class.
-- Do not edit live broker/order/stop/reconcile paths in this brief.
-- Do not edit dirty local files unless their current diff has been inspected and
-  deliberately included.
-- No live trading behavior change without a separate operator-approved
-  implementation task.
+- No database writes, service restarts, migrations, or broker/API calls.
 
 ## Acceptance
 
-- A CC report exists with the live-path matrix and recommendation.
-- No code behavior changes unless explicitly split into a later task.
-- Phase 5I still reports `COMPLETE_POSITIVE`.
+- Probe emits `COMPLETE_POSITIVE` or a precise mismatch report.
+- Phase 5I remains `COMPLETE_POSITIVE`.
+- No live trading behavior changes.
