@@ -20,6 +20,10 @@ from app.services.trading.evidence_consumer_manifest import (
     REQUIRED_SAFETY_CONSTRAINTS,
     V33_POLICY,
     V34_POLICY,
+    V40_CURRENT_BRANCH_HEAD,
+    V40_POLICY,
+    V39_CURRENT_BRANCH_HEAD,
+    V39_POLICY,
     V38_CURRENT_BRANCH_HEAD,
     V38_POLICY,
     V37_CURRENT_BRANCH_HEAD,
@@ -43,7 +47,11 @@ def _valid_manifest(
     ancestor_heads: list[str] | None = None,
 ) -> dict[str, object]:
     head = target_head or sorted(policy.accepted_target_heads)[0]
-    if policy is V38_POLICY and ancestor_heads is None:
+    if policy is V40_POLICY and ancestor_heads is None:
+        ancestor_heads = [V39_CURRENT_BRANCH_HEAD]
+    elif policy is V39_POLICY and ancestor_heads is None:
+        ancestor_heads = [V37_CURRENT_BRANCH_HEAD]
+    elif policy is V38_POLICY and ancestor_heads is None:
         ancestor_heads = [V37_CURRENT_BRANCH_HEAD]
     elif policy is V37_POLICY and ancestor_heads is None:
         ancestor_heads = [V37_PREDECESSOR_4C68_HEAD, V36_CURRENT_BRANCH_HEAD]
@@ -94,14 +102,25 @@ def _error_set(manifest: dict[str, object]) -> set[str]:
     return set(validate_consumer_manifest(manifest).errors)
 
 
-def test_current_v38_v18_manifest_passes_only_as_non_clearance() -> None:
+def test_current_v40_v20_manifest_passes_only_as_non_clearance() -> None:
     result = validate_consumer_manifest(
-        _valid_manifest(V38_POLICY, target_head=V38_CURRENT_BRANCH_HEAD)
+        _valid_manifest(V40_POLICY, target_head=V40_CURRENT_BRANCH_HEAD)
     )
 
     assert result.accepted is True
     assert result.status == "EVIDENCE_GOVERNED_NON_CLEARANCE"
-    assert result.policy == "v38_v18_12ea7c_current_head"
+    assert result.policy == "v40_v20_ae2eb03_current_head"
+    assert result.errors == ()
+
+
+def test_current_v39_v19_manifest_passes_only_as_non_clearance() -> None:
+    result = validate_consumer_manifest(
+        _valid_manifest(V39_POLICY, target_head=V39_CURRENT_BRANCH_HEAD)
+    )
+
+    assert result.accepted is True
+    assert result.status == "EVIDENCE_GOVERNED_NON_CLEARANCE"
+    assert result.policy == "v39_v19_12ea7c_clean_head"
     assert result.errors == ()
 
 
@@ -219,20 +238,52 @@ def test_v36_v16_only_manifest_for_v37_heads_fails_closed() -> None:
         assert "v37_v17_fc30_current_head:validator_spec_sha_required" in errors
 
 
-def test_v37_v17_only_manifest_for_v38_current_head_fails_closed() -> None:
+def test_v37_v17_only_manifest_for_v39_current_head_fails_closed() -> None:
     manifest = _valid_manifest(
         V37_POLICY,
-        target_head=V38_CURRENT_BRANCH_HEAD,
+        target_head=V39_CURRENT_BRANCH_HEAD,
         ancestor_heads=[V37_CURRENT_BRANCH_HEAD],
     )
 
     errors = _error_set(manifest)
 
-    assert "v37_v17_stale_for_v38_target_head" in errors
-    assert "v38_v18_12ea7c_current_head:blocker_index_artifact_required" in errors
-    assert "v38_v18_12ea7c_current_head:blocker_index_sha_required" in errors
-    assert "v38_v18_12ea7c_current_head:validator_spec_artifact_required" in errors
-    assert "v38_v18_12ea7c_current_head:validator_spec_sha_required" in errors
+    assert "v37_v17_stale_for_v39_target_head" in errors
+    assert "v39_v19_12ea7c_clean_head:blocker_index_artifact_required" in errors
+    assert "v39_v19_12ea7c_clean_head:blocker_index_sha_required" in errors
+    assert "v39_v19_12ea7c_clean_head:validator_spec_artifact_required" in errors
+    assert "v39_v19_12ea7c_clean_head:validator_spec_sha_required" in errors
+
+
+def test_v38_v18_only_manifest_for_v39_current_head_fails_closed() -> None:
+    manifest = _valid_manifest(
+        V38_POLICY,
+        target_head=V39_CURRENT_BRANCH_HEAD,
+        ancestor_heads=[V37_CURRENT_BRANCH_HEAD],
+    )
+
+    errors = _error_set(manifest)
+
+    assert "v38_v18_stale_for_v39_target_head" in errors
+    assert "v39_v19_12ea7c_clean_head:blocker_index_artifact_required" in errors
+    assert "v39_v19_12ea7c_clean_head:blocker_index_sha_required" in errors
+    assert "v39_v19_12ea7c_clean_head:validator_spec_artifact_required" in errors
+    assert "v39_v19_12ea7c_clean_head:validator_spec_sha_required" in errors
+
+
+def test_v39_v19_only_manifest_for_v40_current_head_fails_closed() -> None:
+    manifest = _valid_manifest(
+        V39_POLICY,
+        target_head=V40_CURRENT_BRANCH_HEAD,
+        ancestor_heads=[V39_CURRENT_BRANCH_HEAD],
+    )
+
+    errors = _error_set(manifest)
+
+    assert "v39_v19_stale_for_v40_target_head" in errors
+    assert "v40_v20_ae2eb03_current_head:blocker_index_artifact_required" in errors
+    assert "v40_v20_ae2eb03_current_head:blocker_index_sha_required" in errors
+    assert "v40_v20_ae2eb03_current_head:validator_spec_artifact_required" in errors
+    assert "v40_v20_ae2eb03_current_head:validator_spec_sha_required" in errors
 
 
 def test_v35_v15_only_manifest_for_fc30_current_head_fails_closed() -> None:
