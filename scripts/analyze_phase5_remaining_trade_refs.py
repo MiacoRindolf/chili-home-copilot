@@ -16,11 +16,9 @@ from typing import Iterable
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-REFERENCE_PATTERNS = (
-    re.compile(r"\b(?:FROM|JOIN)\s+trading_trades\b", re.IGNORECASE),
-    re.compile(r"\btrading_trades\b", re.IGNORECASE),
-    re.compile(r"\bTrade\b"),
-)
+RAW_SQL_RE = re.compile(r"\b(?:FROM|JOIN)\s+trading_trades\b", re.IGNORECASE)
+TABLE_SYMBOL_RE = re.compile(r"\btrading_trades\b", re.IGNORECASE)
+MODEL_SYMBOL_RE = re.compile(r"\bTrade\b")
 
 SKIP_DIRS = {
     ".git",
@@ -110,14 +108,22 @@ def _iter_source_files(root: Path, include_dirs: Iterable[str]) -> Iterable[Path
                 yield path
 
 
-def _matches(source: str) -> list[str]:
+def _unique_matches(pattern: re.Pattern[str], source: str) -> list[str]:
     found: list[str] = []
-    for pattern in REFERENCE_PATTERNS:
-        for match in pattern.finditer(source):
-            text = match.group(0)
-            if text not in found:
-                found.append(text)
+    for match in pattern.finditer(source):
+        text = match.group(0)
+        if text not in found:
+            found.append(text)
     return found
+
+
+def _reference_matches(source: str) -> dict[str, list[str]]:
+    raw_sql = _unique_matches(RAW_SQL_RE, source)
+    symbols = _unique_matches(TABLE_SYMBOL_RE, source) + _unique_matches(MODEL_SYMBOL_RE, source)
+    return {
+        "raw_sql": raw_sql,
+        "symbols": [symbol for symbol in symbols if symbol not in raw_sql],
+    }
 
 
 def classify_path(relative_path: str) -> Classification:
@@ -128,28 +134,41 @@ def classify_path(relative_path: str) -> Classification:
     return DEFAULT_CLASSIFICATION
 
 
-def build_inventory(root: Path = REPO_ROOT, include_dirs: Iterable[str] = DEFAULT_INCLUDE_DIRS) -> dict:
+def build_inventory(
+    root: Path = REPO_ROOT,
+    include_dirs: Iterable[str] = DEFAULT_INCLUDE_DIRS,
+    *,
+    raw_sql_only: bool = False,
+) -> dict:
     entries: list[dict] = []
     buckets: dict[str, int] = {}
+    raw_reader_buckets: dict[str, int] = {}
 
     for path in sorted(_iter_source_files(root, include_dirs)):
         try:
             source = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             continue
-        matches = _matches(source)
-        if not matches:
+        matches = _reference_matches(source)
+        if raw_sql_only and not matches["raw_sql"]:
+            continue
+        if not matches["raw_sql"] and not matches["symbols"]:
             continue
         relative_path = path.relative_to(root).as_posix()
         classification = classify_path(relative_path)
         buckets[classification.bucket] = buckets.get(classification.bucket, 0) + 1
+        if matches["raw_sql"]:
+            raw_reader_buckets[classification.bucket] = raw_reader_buckets.get(classification.bucket, 0) + 1
         entries.append(
             {
                 "path": relative_path,
                 "bucket": classification.bucket,
                 "owner": classification.owner,
                 "decision": classification.decision,
-                "references": matches,
+                "reference_kind": "raw_sql_reader" if matches["raw_sql"] else "symbol_or_text_reference",
+                "raw_sql_references": matches["raw_sql"],
+                "symbol_references": matches["symbols"],
+                "references": matches["raw_sql"] + matches["symbols"],
             }
         )
 
@@ -157,7 +176,9 @@ def build_inventory(root: Path = REPO_ROOT, include_dirs: Iterable[str] = DEFAUL
         "ok": True,
         "root": str(root),
         "file_count": len(entries),
+        "raw_sql_file_count": sum(1 for entry in entries if entry["raw_sql_references"]),
         "buckets": dict(sorted(buckets.items())),
+        "raw_reader_buckets": dict(sorted(raw_reader_buckets.items())),
         "entries": entries,
     }
 
@@ -168,15 +189,28 @@ def _print_table(report: dict) -> None:
     for bucket, count in report["buckets"].items():
         print(f"{bucket} | {count}")
     print()
-    print("path | bucket | owner")
-    print("-----+--------+------")
+    print("raw reader bucket | files")
+    print("------------------+------")
+    if report["raw_reader_buckets"]:
+        for bucket, count in report["raw_reader_buckets"].items():
+            print(f"{bucket} | {count}")
+    else:
+        print("(none) | 0")
+    print()
+    print("path | kind | bucket | owner")
+    print("-----+------+--------+------")
     for entry in report["entries"]:
-        print(f"{entry['path']} | {entry['bucket']} | {entry['owner']}")
+        print(f"{entry['path']} | {entry['reference_kind']} | {entry['bucket']} | {entry['owner']}")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    parser.add_argument(
+        "--raw-sql-only",
+        action="store_true",
+        help="Only include files with raw FROM/JOIN trading_trades readers.",
+    )
     parser.add_argument(
         "--include",
         action="append",
@@ -185,7 +219,11 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    report = build_inventory(REPO_ROOT, args.include_dirs or DEFAULT_INCLUDE_DIRS)
+    report = build_inventory(
+        REPO_ROOT,
+        args.include_dirs or DEFAULT_INCLUDE_DIRS,
+        raw_sql_only=args.raw_sql_only,
+    )
     if args.json:
         print(json.dumps(report, sort_keys=True))
     else:

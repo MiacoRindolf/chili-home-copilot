@@ -55,6 +55,8 @@ def test_build_inventory_scans_sources_and_skips_workspace_noise(tmp_path: Path)
 
     assert report["ok"] is True
     assert report["file_count"] == 2
+    assert report["raw_sql_file_count"] == 1
+    assert report["raw_reader_buckets"] == {"evidence_model_capital_reader": 1}
     assert report["buckets"] == {
         "evidence_model_capital_reader": 1,
         "unclassified_trade_surface_reference": 1,
@@ -62,6 +64,10 @@ def test_build_inventory_scans_sources_and_skips_workspace_noise(tmp_path: Path)
     assert [entry["path"] for entry in report["entries"]] == [
         "app/services/trading/attribution_service.py",
         "app/services/trading/new_reader.py",
+    ]
+    assert [entry["reference_kind"] for entry in report["entries"]] == [
+        "raw_sql_reader",
+        "symbol_or_text_reference",
     ]
 
 
@@ -76,4 +82,26 @@ def test_live_order_paths_are_kept_distinct_from_analytics_readers(tmp_path: Pat
     report = module.build_inventory(tmp_path, include_dirs=("app",))
 
     assert report["buckets"] == {"live_writer_order_broker_reconcile": 1}
+    assert report["raw_reader_buckets"] == {"live_writer_order_broker_reconcile": 1}
+    assert report["raw_sql_file_count"] == 1
     assert report["entries"][0]["owner"] == "Algo Trader Architect / Risk"
+
+
+def test_raw_sql_only_filters_symbol_and_doc_references(tmp_path: Path) -> None:
+    module = _load_module()
+    app_dir = tmp_path / "app" / "services" / "trading"
+    app_dir.mkdir(parents=True)
+    (app_dir / "doc_only.py").write_text(
+        '"""Mentions trading_trades and Trade without reading it."""\n', encoding="utf-8"
+    )
+    (app_dir / "pattern_regime_ledger.py").write_text(
+        "SELECT * FROM trading_trades t WHERE t.status = 'closed'\n", encoding="utf-8"
+    )
+
+    report = module.build_inventory(tmp_path, include_dirs=("app",), raw_sql_only=True)
+
+    assert report["file_count"] == 1
+    assert report["raw_sql_file_count"] == 1
+    assert report["entries"][0]["path"] == "app/services/trading/pattern_regime_ledger.py"
+    assert report["entries"][0]["reference_kind"] == "raw_sql_reader"
+    assert report["entries"][0]["raw_sql_references"] == ["FROM trading_trades"]
