@@ -366,14 +366,14 @@ async def api_broker_poll(
 @router.get("/api/trading/broker/positions")
 async def api_broker_positions():
     """Return combined positions from all connected brokers."""
-    positions = broker_manager.get_combined_positions()
+    positions = broker_manager.get_combined_positions(fresh=True)
     return JSONResponse({"ok": True, "positions": positions})
 
 
 @router.get("/api/trading/broker/portfolio")
 async def api_broker_portfolio():
     """Return combined portfolio from all connected brokers."""
-    portfolio = broker_manager.get_combined_portfolio()
+    portfolio = broker_manager.get_combined_portfolio(fresh=True)
     return JSONResponse({"ok": True, "portfolio": portfolio})
 
 

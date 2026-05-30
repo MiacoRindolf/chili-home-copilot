@@ -763,6 +763,72 @@ def _stage_backfill_missing_intents(
     return backfilled
 
 
+def _stage_close_shadowed_nonopen_intents(
+    db: Session,
+    local_rows_or_views: list[Any],
+    *,
+    mode: str,
+) -> int:
+    """Close stale non-open intents shadowed by an open same-broker position.
+
+    The orphan-candidate scope intentionally scans non-open trades so CHILI can
+    detect broker stops left behind after a local close. Duplicate local
+    envelopes are different: if a cancelled/closed trade shares
+    ``(ticker, broker_source)`` with an open live trade, the broker stop belongs
+    to the account-level open position, not the stale envelope. Leaving the old
+    intent active turns valid protection into repeated false ``orphan_stop``
+    errors.
+    """
+    if str(mode or "").lower() != "authoritative":
+        return 0
+
+    def _field(entry: Any, name: str) -> Any:
+        return entry.get(name) if isinstance(entry, dict) else getattr(entry, name, None)
+
+    open_keys: set[tuple[str, str]] = set()
+    for entry in local_rows_or_views:
+        if str(_field(entry, "trade_status") or "").lower() != "open":
+            continue
+        ticker = str(_field(entry, "ticker") or "").upper()
+        broker_source = str(_field(entry, "broker_source") or "").lower()
+        if ticker and broker_source:
+            open_keys.add((ticker, broker_source))
+
+    if not open_keys:
+        return 0
+
+    closed = 0
+    for entry in local_rows_or_views:
+        if str(_field(entry, "trade_status") or "").lower() == "open":
+            continue
+        intent_id = _field(entry, "bracket_intent_id")
+        if intent_id is None:
+            continue
+        intent_state = str(_field(entry, "intent_state") or "").lower()
+        if intent_state in {"closed", "authoritative_closed"}:
+            continue
+        ticker = str(_field(entry, "ticker") or "").upper()
+        broker_source = str(_field(entry, "broker_source") or "").lower()
+        if (ticker, broker_source) not in open_keys:
+            continue
+        if mark_closed(
+            db,
+            int(intent_id),
+            reason="superseded_by_open_trade_same_broker",
+            mode_override=mode,
+        ):
+            closed += 1
+            logger.info(
+                "%s closed shadowed non-open intent trade=%s intent=%s ticker=%s broker=%s",
+                BRACKET_RECONCILIATION,
+                _field(entry, "trade_id"),
+                intent_id,
+                ticker,
+                broker_source,
+            )
+    return closed
+
+
 # ── Stage 2: fetch_broker ──────────────────────────────────────────────
 
 
@@ -2303,6 +2369,11 @@ def _run_sweep_staged(
     )
     if backfilled:
         _stage_load_local(db, batch, user_id=user_id)
+    closed_shadowed = _stage_close_shadowed_nonopen_intents(
+        db, batch.local_views, mode=mode,
+    )
+    if closed_shadowed:
+        _stage_load_local(db, batch, user_id=user_id)
     _stage_fetch_broker(batch, broker_view_fn)
     _stage_classify_all(batch)
     _stage_log_all(db, batch)
@@ -2329,6 +2400,11 @@ def _run_sweep_legacy(
     # loop sees the new bracket_intent_id values.
     backfilled = _stage_backfill_missing_intents(db, local_rows, mode=mode)
     if backfilled:
+        local_rows = _load_local_view(db, user_id=user_id)
+    closed_shadowed = _stage_close_shadowed_nonopen_intents(
+        db, local_rows, mode=mode,
+    )
+    if closed_shadowed:
         local_rows = _load_local_view(db, user_id=user_id)
     broker_input: list[dict[str, Any]] = [
         {

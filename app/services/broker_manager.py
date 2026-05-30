@@ -177,7 +177,7 @@ def map_status(broker: str, raw_state: str) -> str:
 
 # ── Combined portfolio / positions ───────────────────────────────────
 
-def get_combined_portfolio() -> dict[str, Any]:
+def get_combined_portfolio(*, fresh: bool = False) -> dict[str, Any]:
     """Merge portfolio data from all connected brokers."""
     result: dict[str, Any] = {
         "total_equity": 0.0,
@@ -195,7 +195,7 @@ def get_combined_portfolio() -> dict[str, Any]:
             result["total_cash"] += rh.get("cash", 0)
 
     if coinbase_service.is_connected():
-        cb = coinbase_service.get_portfolio()
+        cb = coinbase_service.get_portfolio(use_cache=not fresh)
         if cb:
             result["brokers"]["coinbase"] = cb
             result["total_equity"] += cb.get("equity", 0)
@@ -208,7 +208,7 @@ def get_combined_portfolio() -> dict[str, Any]:
     return result
 
 
-def get_combined_positions() -> list[dict[str, Any]]:
+def get_combined_positions(*, fresh: bool = False) -> list[dict[str, Any]]:
     """Merge positions from all connected brokers, tagged with broker_source."""
     positions: list[dict[str, Any]] = []
 
@@ -221,7 +221,7 @@ def get_combined_positions() -> list[dict[str, Any]]:
             positions.append(p)
 
     if coinbase_service.is_connected():
-        for p in coinbase_service.get_positions():
+        for p in coinbase_service.get_positions(use_cache=not fresh):
             p["broker_source"] = BROKER_COINBASE
             positions.append(p)
 

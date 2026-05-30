@@ -213,6 +213,7 @@ _TRADING_DOMAIN_TARGETED_TESTS = (
     "test_autotrader_position_overrides.py",
     "test_broker_sync.py",
     "test_broker_truth_safety.py",
+    "test_bracket_reconciliation_service.py",
     "test_bracket_reconciler_hardening.py",
     "test_brain_work_ledger.py",
     "test_canonical_outcome_layer.py",
@@ -365,6 +366,44 @@ def _terminate_stale_truncate_peers(max_age_s: int = 90) -> None:
                     """
                 ),
                 {"max_age_s": int(max_age_s)},
+            )
+    except Exception:
+        pass
+
+
+def _terminate_stale_pytest_lock_holders(max_age_s: int = 90) -> None:
+    """Kill stale pytest advisory-lock holders from timed-out local runs.
+
+    The DB fixture serializes destructive cleanup with a session-level advisory
+    lock. A killed pytest process can leave its backend alive briefly; plain
+    ``pg_advisory_lock`` then waits forever and makes the next focused test look
+    hung. This only targets our dedicated pytest lock in the current test DB.
+    """
+    if not (os.environ.get("CHILI_PYTEST") or "").strip():
+        return
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    SELECT pg_terminate_backend(a.pid)
+                    FROM pg_locks AS l
+                    JOIN pg_stat_activity AS a ON a.pid = l.pid
+                    WHERE l.locktype = 'advisory'
+                      AND l.classid = :classid
+                      AND l.objid = :objid
+                      AND l.granted
+                      AND a.datname = current_database()
+                      AND a.pid <> pg_backend_pid()
+                      AND now() - COALESCE(a.xact_start, a.query_start, a.backend_start)
+                          > make_interval(secs => :max_age_s)
+                    """
+                ),
+                {
+                    "classid": _PYTEST_DB_LOCK_CLASSID,
+                    "objid": _PYTEST_DB_LOCK_OBJID,
+                    "max_age_s": int(max_age_s),
+                },
             )
     except Exception:
         pass
@@ -540,15 +579,35 @@ def _pytest_db_isolation_lock():
     conn = lock_engine.connect()
     locked = False
     try:
-        conn.execute(
-            text("SELECT pg_advisory_lock(:classid, :objid)"),
-            {
-                "classid": _PYTEST_DB_LOCK_CLASSID,
-                "objid": _PYTEST_DB_LOCK_OBJID,
-            },
-        )
-        conn.commit()
-        locked = True
+        wait_s = max(5, int(os.environ.get("CHILI_PYTEST_DB_LOCK_WAIT_S", "30")))
+        stale_after_s = max(5, int(os.environ.get("CHILI_PYTEST_DB_LOCK_STALE_S", "90")))
+        deadline = time.monotonic() + wait_s
+        last_reap = 0.0
+        while True:
+            locked = bool(
+                conn.execute(
+                    text("SELECT pg_try_advisory_lock(:classid, :objid)"),
+                    {
+                        "classid": _PYTEST_DB_LOCK_CLASSID,
+                        "objid": _PYTEST_DB_LOCK_OBJID,
+                    },
+                ).scalar()
+            )
+            conn.commit()
+            if locked:
+                break
+            now = time.monotonic()
+            if now - last_reap >= 5.0:
+                _terminate_stale_pytest_lock_holders(max_age_s=stale_after_s)
+                last_reap = now
+            if now >= deadline:
+                raise TimeoutError(
+                    "Timed out waiting for pytest DB advisory lock. "
+                    "Another pytest process is probably still using the shared "
+                    "test database; stale holders are now reaped automatically "
+                    "after CHILI_PYTEST_DB_LOCK_STALE_S seconds."
+                )
+            time.sleep(0.25)
         yield
     finally:
         if locked:

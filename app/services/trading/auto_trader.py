@@ -2951,6 +2951,100 @@ def _block_live_order(
     _autotrader_tick_note(out, kind="blocked", reason=rsn, alert=alert)
 
 
+def _coinbase_broker_position_preflight_blocks_entry(
+    db: Session,
+    *,
+    uid: int,
+    alert: BreakoutAlert,
+    snap: dict[str, Any],
+    llm_snap: dict[str, Any] | None,
+    out: dict[str, Any],
+) -> bool:
+    """Fail closed when a fresh Coinbase account snapshot already holds ticker.
+
+    Local ``Trade`` rows can lag asynchronous Coinbase fills. Before opening a
+    new live Coinbase entry, ask the broker directly whether an inventory lot
+    already exists. Scale-ins pass a separate allow flag and skip this guard.
+    """
+    try:
+        from .. import coinbase_service
+    except Exception as exc:
+        snap["broker_truth_status"] = "unavailable"
+        snap["broker_truth_reason"] = "coinbase_service_import_failed"
+        _block_live_order(
+            db,
+            uid=uid,
+            alert=alert,
+            reason=f"broker_position_preflight_unavailable:{type(exc).__name__}",
+            snap=snap,
+            llm_snap=llm_snap,
+            out=out,
+        )
+        return True
+
+    ticker = str(getattr(alert, "ticker", "") or "").upper()
+    try:
+        positions = coinbase_service.get_fresh_positions()
+    except Exception as exc:
+        snap["broker_truth_status"] = "unavailable"
+        snap["broker_truth_reason"] = "coinbase_position_snapshot_failed"
+        _block_live_order(
+            db,
+            uid=uid,
+            alert=alert,
+            reason=f"broker_position_preflight_unavailable:{type(exc).__name__}",
+            snap=snap,
+            llm_snap=llm_snap,
+            out=out,
+        )
+        return True
+
+    for position in positions or []:
+        pos_ticker = str(position.get("ticker") or "").upper()
+        if pos_ticker != ticker:
+            continue
+        quantity = _float_or_none(position.get("quantity")) or 0.0
+        if quantity <= 0.0:
+            continue
+        snap["broker_truth_status"] = "position_already_open"
+        snap["broker_truth_reason"] = "coinbase_existing_position_preflight"
+        snap["broker_truth_existing_quantity"] = quantity
+        avg_entry = _float_or_none(position.get("average_buy_price"))
+        current_price = _float_or_none(position.get("current_price"))
+        equity = _float_or_none(position.get("equity") or position.get("market_value"))
+        if avg_entry is not None:
+            snap["broker_truth_existing_avg_entry"] = avg_entry
+        if current_price is not None:
+            snap["broker_truth_existing_current_price"] = current_price
+        if equity is not None:
+            snap["broker_truth_existing_equity"] = equity
+        try:
+            snap["broker_truth_sync_result"] = coinbase_service.sync_positions_to_db(
+                db,
+                uid,
+            )
+        except Exception as exc:
+            snap["broker_truth_sync_error"] = type(exc).__name__
+            logger.warning(
+                "[autotrader] Coinbase position preflight sync failed for %s",
+                ticker,
+                exc_info=True,
+            )
+        _block_live_order(
+            db,
+            uid=uid,
+            alert=alert,
+            reason="broker_position_already_open",
+            snap=snap,
+            llm_snap=llm_snap,
+            out=out,
+        )
+        return True
+
+    snap.setdefault("broker_truth_status", "no_existing_coinbase_position")
+    return False
+
+
 def _live_venue_health_block_reason(db: Session, *, venue: str) -> str | None:
     venue_key = (venue or "").strip().lower() or "unknown"
     require_healthy = bool(
@@ -4776,6 +4870,7 @@ def _execute_broker_buy(
     llm_snap: dict[str, Any] | None,
     out: dict[str, Any],
     px: float | None = None,
+    allow_existing_broker_position: bool = False,
 ) -> dict[str, Any] | None:
     """Place a live buy via Robinhood with the full safety envelope.
 
@@ -5138,6 +5233,19 @@ def _execute_broker_buy(
                 llm_snap=llm_snap,
                 out=out,
             )
+            return None
+
+        if (
+            not allow_existing_broker_position
+            and _coinbase_broker_position_preflight_blocks_entry(
+                db,
+                uid=uid,
+                alert=alert,
+                snap=snap,
+                llm_snap=llm_snap,
+                out=out,
+            )
+        ):
             return None
 
         # f-coinbase-autotrader-enablement-phase-5-cost-aware-sizing
@@ -5661,6 +5769,7 @@ def _execute_scale_in(
             llm_snap=llm_snap,
             out=out,
             px=px,
+            allow_existing_broker_position=True,
         )
         if res is None:
             return

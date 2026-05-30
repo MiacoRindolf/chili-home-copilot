@@ -1,8 +1,100 @@
 from __future__ import annotations
 
+import pytest
 from sqlalchemy import text
 
 from app.models.trading import ScanPattern, Trade, TradingExecutionEvent
+
+
+def test_coinbase_positions_and_portfolio_use_live_usd_marks(monkeypatch):
+    from app.services import coinbase_service
+
+    coinbase_service.clear_cache()
+
+    class Client:
+        def get_accounts(self, limit: int = 250):
+            assert limit == 250
+            return {
+                "accounts": [
+                    {
+                        "currency": "USD",
+                        "available_balance": {"value": "100", "currency": "USD"},
+                        "hold": {"value": "0", "currency": "USD"},
+                    },
+                    {
+                        "currency": "ACX",
+                        "name": "Across Protocol",
+                        "available_balance": {"value": "0", "currency": "ACX"},
+                        "hold": {"value": "3822", "currency": "ACX"},
+                    },
+                    {
+                        "currency": "USDC",
+                        "name": "USDC",
+                        "available_balance": {"value": "50", "currency": "USDC"},
+                        "hold": {"value": "0", "currency": "USDC"},
+                    },
+                ]
+            }
+
+        def get_market_trades(self, product_id: str, limit: int = 1):
+            assert product_id == "ACX-USD"
+            assert limit == 1
+            return {"trades": [{"price": "0.0426"}]}
+
+        def get_best_bid_ask(self, product_ids):
+            return {
+                "pricebooks": [
+                    {
+                        "product_id": "ACX-USD",
+                        "bids": [{"price": "0.0425"}],
+                        "asks": [{"price": "0.0427"}],
+                    }
+                ]
+            }
+
+        def get_fills(self, product_id: str, limit: int = 250):
+            if product_id == "USDC-USD":
+                return {"fills": []}
+            assert product_id == "ACX-USD"
+            return {
+                "fills": [
+                    {
+                        "order_id": "acx-buy",
+                        "trade_time": "2026-05-30T03:36:55Z",
+                        "side": "BUY",
+                        "price": "0.0427",
+                        "size": "3822",
+                        "commission": "0.6527976",
+                    }
+                ]
+            }
+
+    monkeypatch.setattr(coinbase_service, "is_connected", lambda: True)
+    monkeypatch.setattr(coinbase_service, "_get_client", lambda: Client())
+
+    positions = coinbase_service.get_positions(use_cache=False)
+
+    acx = next(p for p in positions if p["ticker"] == "ACX-USD")
+    assert acx["quantity"] == pytest.approx(3822.0)
+    assert acx["available_quantity"] == pytest.approx(0.0)
+    assert acx["held_quantity"] == pytest.approx(3822.0)
+    assert acx["current_price"] == pytest.approx(0.0426)
+    assert acx["equity"] == pytest.approx(3822.0 * 0.0426)
+    assert acx["average_buy_price"] == pytest.approx(
+        ((3822.0 * 0.0427) + 0.6527976) / 3822.0,
+        rel=1e-7,
+    )
+    assert acx["equity_change"] < 0
+    assert acx["percent_change"] < 0
+    usdc = next(p for p in positions if p["ticker"] == "USDC-USD")
+    assert usdc["current_price"] == pytest.approx(1.0)
+    assert usdc["equity"] == pytest.approx(50.0)
+
+    coinbase_service.clear_cache()
+    portfolio = coinbase_service.get_portfolio()
+    assert portfolio["cash"] == pytest.approx(100.0)
+    assert portfolio["buying_power"] == pytest.approx(100.0)
+    assert portfolio["equity"] == pytest.approx(round(150.0 + 3822.0 * 0.0426, 2))
 
 
 def test_coinbase_position_sync_aligns_existing_trade_to_broker_truth(

@@ -90,6 +90,7 @@ _COINBASE_ABSENT_NO_FILL_MIN_AGE_SECONDS = int(
 # Recent bookkeeping closes are eligible for inverse reconcile when Coinbase
 # still reports the position and no real sell fill is recorded.
 _COINBASE_BOOKKEEPING_REOPEN_LOOKBACK_HOURS = 72
+_USD_PEGGED_ACCOUNT_CURRENCIES = frozenset({"USDC"})
 
 
 def _cache_get(key: str) -> Any | None:
@@ -173,6 +174,21 @@ def connect() -> dict[str, Any]:
         _connected = False
         logger.error(f"[coinbase] Connect failed: {e}")
         return {"status": "error", "message": f"Connection failed: {e}"}
+
+
+def connect_env_credentials() -> dict[str, Any]:
+    """Make the configured environment Coinbase credentials the active client."""
+    global _client, _client_source, _connected, _last_check
+    if not _credentials_configured():
+        return {
+            "status": "needs_credentials",
+            "message": "Coinbase environment credentials are not configured.",
+        }
+    _client = None
+    _client_source = ""
+    _connected = False
+    _last_check = 0
+    return connect()
 
 
 def connect_with_credentials(api_key: str, api_secret: str) -> dict[str, Any]:
@@ -312,11 +328,12 @@ def get_fee_rates_bps(*, prefer_env_credentials: bool = False) -> dict[str, Any]
 
 # ── Data fetching ────────────────────────────────────────────────────
 
-def get_accounts_raw() -> list[dict]:
+def get_accounts_raw(*, use_cache: bool = True) -> list[dict]:
     """Fetch all Coinbase accounts (wallets). Cached."""
-    cached = _cache_get("accounts")
-    if cached is not None:
-        return cached
+    if use_cache:
+        cached = _cache_get("accounts")
+        if cached is not None:
+            return cached
     client = _get_client()
     if not client or not is_connected():
         return []
@@ -334,36 +351,171 @@ def get_accounts_raw() -> list[dict]:
         return []
 
 
-def get_portfolio() -> dict[str, Any]:
-    """Account balances: total value and available cash."""
-    cached = _cache_get("portfolio")
+def _balance_component_value(component: Any) -> float:
+    if isinstance(component, dict):
+        return _safe_float(component.get("value"))
+    return _safe_float(getattr(component, "value", 0))
+
+
+def _account_currency(acc: dict[str, Any], balance: Any | None = None) -> str:
+    if balance is None:
+        balance = acc.get("available_balance", {})
+    currency = acc.get("currency")
+    if not currency:
+        if isinstance(balance, dict):
+            currency = balance.get("currency")
+        else:
+            currency = getattr(balance, "currency", "")
+    return str(currency or "").upper()
+
+
+def _quote_price_from_pricebook_entry(entry: Any) -> float:
+    if isinstance(entry, dict):
+        for key in ("price", "price_level"):
+            price = _safe_float(entry.get(key))
+            if price > 0:
+                return price
+        return 0.0
+    for key in ("price", "price_level"):
+        price = _safe_float(getattr(entry, key, 0))
+        if price > 0:
+            return price
+    return 0.0
+
+
+def _extract_pricebooks(resp: Any) -> list[Any]:
+    if isinstance(resp, dict):
+        raw = resp.get("pricebooks") or resp.get("pricebook") or []
+    else:
+        raw = getattr(resp, "pricebooks", None) or getattr(resp, "pricebook", None) or []
+    if isinstance(raw, list):
+        return raw
+    return [raw] if raw else []
+
+
+def _coinbase_product_unavailable_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (
+        "productid" in text and "could not be found" in text
+    ) or (
+        "invalid product_id" in text
+    )
+
+
+def _coinbase_current_price(
+    product_id: str,
+    price_cache: dict[str, float] | None = None,
+) -> float:
+    """Return a fresh USD mark for a Coinbase product.
+
+    Coinbase account balances are unit truth, but the UI and portfolio need a
+    USD mark. Prefer the last trade; fall back to BBO mid/bid/ask if trades are
+    unavailable. A zero return means "unknown", never "free".
+    """
+    product_key = str(product_id or "").upper()
+    if not product_key:
+        return 0.0
+    base_currency = product_key.split("-", 1)[0]
+    if base_currency in _USD_PEGGED_ACCOUNT_CURRENCIES:
+        return 1.0
+    if price_cache is not None and product_key in price_cache:
+        return float(price_cache[product_key] or 0.0)
+    cached = _cache_get(f"product_price:{product_key}")
     if cached is not None:
-        return cached
-    accounts = get_accounts_raw()
+        price = float(cached or 0.0)
+        if price_cache is not None:
+            price_cache[product_key] = price
+        return price
+
+    client = _get_client()
+    if not client:
+        return 0.0
+
+    candidates: list[float] = []
+    try:
+        resp = client.get_market_trades(product_id=product_key, limit=1)
+        trades = (
+            resp.get("trades", [])
+            if isinstance(resp, dict)
+            else getattr(resp, "trades", [])
+        )
+        for trade in trades or []:
+            if isinstance(trade, dict):
+                price = _safe_float(trade.get("price"))
+            else:
+                price = _safe_float(getattr(trade, "price", 0))
+            if price > 0:
+                candidates.append(price)
+                break
+    except Exception as exc:
+        if _coinbase_product_unavailable_error(exc):
+            if price_cache is not None:
+                price_cache[product_key] = 0.0
+            _cache_set(f"product_price:{product_key}", 0.0)
+            return 0.0
+        logger.debug("[coinbase] market trade price unavailable for %s", product_key, exc_info=True)
+
+    try:
+        resp = client.get_best_bid_ask(product_ids=[product_key])
+        for book in _extract_pricebooks(resp):
+            bids = book.get("bids", []) if isinstance(book, dict) else getattr(book, "bids", [])
+            asks = book.get("asks", []) if isinstance(book, dict) else getattr(book, "asks", [])
+            bid = _quote_price_from_pricebook_entry((bids or [None])[0])
+            ask = _quote_price_from_pricebook_entry((asks or [None])[0])
+            if bid > 0 and ask > 0:
+                candidates.append((bid + ask) / 2.0)
+            if bid > 0:
+                candidates.append(bid)
+            if ask > 0:
+                candidates.append(ask)
+            if candidates:
+                break
+    except Exception:
+        logger.debug("[coinbase] best bid/ask price unavailable for %s", product_key, exc_info=True)
+
+    price = next((float(p) for p in candidates if p and p > 0), 0.0)
+    if price_cache is not None:
+        price_cache[product_key] = price
+    _cache_set(f"product_price:{product_key}", price)
+    return price
+
+
+def get_portfolio(*, use_cache: bool = True) -> dict[str, Any]:
+    """Account balances: total value and available cash."""
+    if use_cache:
+        cached = _cache_get("portfolio")
+        if cached is not None:
+            return cached
+    accounts = get_accounts_raw(use_cache=use_cache)
     if not accounts:
         return {}
     total_value = 0.0
     available_cash = 0.0
+    price_cache: dict[str, float] = {}
     for acc in accounts:
         bal = acc.get("available_balance", {})
-        val = _safe_float(bal.get("value") if isinstance(bal, dict) else getattr(bal, "value", 0))
+        val = _balance_component_value(bal)
         hold_bal = acc.get("hold", {})
-        hold_val = _safe_float(hold_bal.get("value") if isinstance(hold_bal, dict) else getattr(hold_bal, "value", 0))
-        currency = (
-            acc.get("currency")
-            or (bal.get("currency") if isinstance(bal, dict) else getattr(bal, "currency", ""))
-            or ""
-        ).upper()
+        hold_val = _balance_component_value(hold_bal)
+        currency = _account_currency(acc, bal)
         if currency == "USD":
             available_cash += val
-        total_value += val + hold_val
+            total_value += val + hold_val
+            continue
+        total_qty = val + hold_val
+        if total_qty <= 0:
+            continue
+        price = _coinbase_current_price(f"{currency}-USD", price_cache)
+        if price > 0:
+            total_value += total_qty * price
     result = {
         "equity": round(total_value, 2),
         "buying_power": round(available_cash, 2),
         "cash": round(available_cash, 2),
         "last_updated": datetime.utcnow().isoformat(),
     }
-    _cache_set("portfolio", result)
+    if use_cache:
+        _cache_set("portfolio", result)
     return result
 
 
@@ -483,46 +635,70 @@ def _get_cost_basis_from_fills(product_id: str, current_qty: float | None = None
         return 0.0
 
 
-def get_positions() -> list[dict[str, Any]]:
+def get_positions(*, use_cache: bool = True) -> list[dict[str, Any]]:
     """Current crypto holdings with non-zero balances, with cost basis from fills."""
-    cached = _cache_get("positions")
-    if cached is not None:
-        return cached
-    accounts = get_accounts_raw()
+    if use_cache:
+        cached = _cache_get("positions")
+        if cached is not None:
+            return cached
+    accounts = get_accounts_raw(use_cache=use_cache)
     if not accounts:
         return []
     positions = []
+    price_cache: dict[str, float] = {}
     for acc in accounts:
         bal = acc.get("available_balance", {})
-        val = _safe_float(bal.get("value") if isinstance(bal, dict) else getattr(bal, "value", 0))
-        currency = (
-            acc.get("currency")
-            or (bal.get("currency") if isinstance(bal, dict) else getattr(bal, "currency", ""))
-            or ""
-        ).upper()
+        val = _balance_component_value(bal)
+        currency = _account_currency(acc, bal)
         if currency == "USD":
             continue
         hold_bal = acc.get("hold", {})
-        hold_val = _safe_float(hold_bal.get("value") if isinstance(hold_bal, dict) else getattr(hold_bal, "value", 0))
+        hold_val = _balance_component_value(hold_bal)
         total_qty = val + hold_val
         if total_qty <= 0:
             continue
         ticker = f"{currency}-USD"
         avg_price = _get_cost_basis_from_fills(ticker, current_qty=total_qty)
+        current_price = _coinbase_current_price(ticker, price_cache)
+        equity = total_qty * current_price if current_price > 0 else 0.0
+        equity_change = (
+            (current_price - avg_price) * total_qty
+            if current_price > 0 and avg_price > 0
+            else 0.0
+        )
+        percent_change = (
+            ((current_price - avg_price) / avg_price) * 100.0
+            if current_price > 0 and avg_price > 0
+            else 0.0
+        )
         positions.append({
             "ticker": ticker,
             "quantity": total_qty,
+            "available_quantity": val,
+            "held_quantity": hold_val,
             "average_buy_price": avg_price,
             "average_buy_price_source": "coinbase_current_lot_fills_fifo_with_fees",
-            "equity": 0,
-            "current_price": 0,
+            "equity": round(equity, 8),
+            "market_value": round(equity, 8),
+            "current_price": current_price,
+            "equity_change": round(equity_change, 8),
+            "percent_change": round(percent_change, 8),
             "name": acc.get("name", currency),
             "type": "crypto",
             "broker_source": "coinbase",
         })
-    positions.sort(key=lambda p: p.get("quantity", 0), reverse=True)
-    _cache_set("positions", positions)
+    positions.sort(
+        key=lambda p: (p.get("equity", 0) or 0, p.get("quantity", 0) or 0),
+        reverse=True,
+    )
+    if use_cache:
+        _cache_set("positions", positions)
     return positions
+
+
+def get_fresh_positions() -> list[dict[str, Any]]:
+    """Fresh Coinbase holdings for pre-trade broker-truth checks."""
+    return get_positions(use_cache=False)
 
 
 def get_recent_orders(limit: int = 20) -> list[dict[str, Any]]:

@@ -800,18 +800,41 @@ def _restore_broker_sessions():
             if not cb_creds:
                 _log.debug("[startup] No Coinbase credentials in vault")
             else:
-                connected = False
+                from .config import settings as _settings
+
+                env_key = str(getattr(_settings, "coinbase_api_key", "") or "").strip()
+                decrypted_creds = []
                 for cb_cred in cb_creds:
                     creds = decrypt_credentials(cb_cred.encrypted_data)
                     if not (creds and creds.get("api_key") and creds.get("api_secret")):
                         continue
-                    if not connected:
-                        result = coinbase_service.connect_with_credentials(
-                            creds["api_key"], creds["api_secret"],
-                        )
-                        _log.info("[startup] Coinbase auto-reconnect: %s", result.get("status"))
-                        connected = result.get("status") == "connected"
+                    decrypted_creds.append((cb_cred, creds))
+                decrypted_creds.sort(
+                    key=lambda item: (
+                        str(item[1].get("api_key") or "").strip() != env_key,
+                        getattr(item[0], "updated_at", None),
+                        getattr(item[0], "id", 0),
+                    )
+                )
+                primary_creds = None
+                for cb_cred, creds in decrypted_creds:
+                    result = coinbase_service.connect_with_credentials(
+                        creds["api_key"], creds["api_secret"],
+                    )
+                    _log.info(
+                        "[startup] Coinbase auto-reconnect user=%s source=%s: %s",
+                        cb_cred.user_id,
+                        (
+                            "env_matching_vault"
+                            if str(creds.get("api_key") or "").strip() == env_key
+                            else "vault"
+                        ),
+                        result.get("status"),
+                    )
+                    connected = result.get("status") == "connected"
                     if connected:
+                        if primary_creds is None:
+                            primary_creds = creds
                         # CB-cred-owner syncs ONLY CB. Prior code called
                         # broker_manager.sync_all(db, cb_cred.user_id) which
                         # syncs RH too — attaching RH positions to whichever
@@ -828,6 +851,22 @@ def _restore_broker_sessions():
                             )
                         except Exception:
                             _log.debug("[startup] CB sync failed", exc_info=True)
+                if env_key:
+                    result = coinbase_service.connect_env_credentials()
+                    _log.info(
+                        "[startup] Coinbase active client reset to env credentials: %s",
+                        result.get("status"),
+                    )
+                    if result.get("status") != "connected" and primary_creds is not None:
+                        coinbase_service.connect_with_credentials(
+                            primary_creds["api_key"],
+                            primary_creds["api_secret"],
+                        )
+                elif primary_creds is not None:
+                    coinbase_service.connect_with_credentials(
+                        primary_creds["api_key"],
+                        primary_creds["api_secret"],
+                    )
 
             # RH sync: attribute to the RH session owner (from
             # broker_sessions.username → users.email), regardless of

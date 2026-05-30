@@ -13,6 +13,7 @@ from app.services.trading.bracket_reconciler import BrokerView, LocalView, Toler
 from app.services.trading.bracket_reconciliation_service import (
     SweepBatch,
     _stage_classify_all,
+    _stage_close_shadowed_nonopen_intents,
     _stage_fetch_broker,
     _stage_load_local,
     _stage_log_all,
@@ -437,6 +438,84 @@ class TestStagedLoadLocalStage:
         _stage_load_local(db, batch)
         tickers = [lv.ticker for lv in batch.local_views]
         assert "LOAD_STAGE" in tickers
+
+    def test_closes_nonopen_intent_shadowed_by_open_same_broker_position(
+        self, db, monkeypatch,
+    ):
+        monkeypatch.setattr(
+            "app.services.trading.bracket_intent_writer.settings.brain_live_brackets_mode",
+            "authoritative", raising=False,
+        )
+        monkeypatch.setattr(
+            "app.services.trading.bracket_reconciliation_service.settings.brain_live_brackets_mode",
+            "authoritative", raising=False,
+        )
+        open_trade = _make_trade(db, ticker="SHADOW_ACX-USD", broker_source="coinbase")
+        _intent(db, open_trade)
+        stale_trade = _make_trade(db, ticker="SHADOW_ACX-USD", broker_source="coinbase")
+        stale_intent_id = _intent(db, stale_trade)
+        stale_trade.status = "cancelled"
+        db.add(stale_trade)
+        db.commit()
+
+        batch = SweepBatch(sweep_id="x", mode="authoritative", tolerances=Tolerances())
+        _stage_load_local(db, batch)
+
+        closed = _stage_close_shadowed_nonopen_intents(
+            db,
+            batch.local_views,
+            mode="authoritative",
+        )
+
+        assert closed == 1
+        row = db.execute(text("""
+            SELECT intent_state, last_diff_reason
+            FROM trading_bracket_intents
+            WHERE id = :id
+        """), {"id": stale_intent_id}).one()
+        assert row[0] == "closed"
+        assert row[1] == "superseded_by_open_trade_same_broker"
+
+        _stage_load_local(db, batch)
+        trade_ids = {lv.trade_id for lv in batch.local_views}
+        assert open_trade.id in trade_ids
+        assert stale_trade.id not in trade_ids
+
+    def test_shadow_mode_does_not_close_shadowed_nonopen_intent(
+        self, db, monkeypatch,
+    ):
+        monkeypatch.setattr(
+            "app.services.trading.bracket_intent_writer.settings.brain_live_brackets_mode",
+            "shadow", raising=False,
+        )
+        monkeypatch.setattr(
+            "app.services.trading.bracket_reconciliation_service.settings.brain_live_brackets_mode",
+            "shadow", raising=False,
+        )
+        open_trade = _make_trade(db, ticker="SHADOW_MODE_ACX-USD", broker_source="coinbase")
+        _intent(db, open_trade)
+        stale_trade = _make_trade(db, ticker="SHADOW_MODE_ACX-USD", broker_source="coinbase")
+        stale_intent_id = _intent(db, stale_trade)
+        stale_trade.status = "cancelled"
+        db.add(stale_trade)
+        db.commit()
+
+        batch = SweepBatch(sweep_id="x", mode="shadow", tolerances=Tolerances())
+        _stage_load_local(db, batch)
+
+        closed = _stage_close_shadowed_nonopen_intents(
+            db,
+            batch.local_views,
+            mode="shadow",
+        )
+
+        assert closed == 0
+        state = db.execute(text("""
+            SELECT intent_state
+            FROM trading_bracket_intents
+            WHERE id = :id
+        """), {"id": stale_intent_id}).scalar_one()
+        assert state != "closed"
 
 
 class TestStagedLogAllStage:
