@@ -97,6 +97,10 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ...models.trading import ScanPattern
+from .management_envelopes import (
+    LEGACY_TRADES_COMPAT_RELATION,
+    MANAGEMENT_ENVELOPES_RELATION,
+)
 from .realized_pnl_sql import (
     paper_trade_return_fraction_sql,
     trade_return_fraction_sql,
@@ -113,8 +117,8 @@ COMPOSITE_WEIGHT_KEYS = (
     "realized",
 )
 PHASE5K_PATTERN_QUALITY_ENV = "CHILI_PHASE5K_PATTERN_QUALITY_USE_ENVELOPES"
-_PATTERN_QUALITY_COMPAT_RELATION = "trading_trades"
-_PATTERN_QUALITY_ENVELOPE_RELATION = "trading_management_envelopes"
+_PATTERN_QUALITY_COMPAT_RELATION = LEGACY_TRADES_COMPAT_RELATION
+_PATTERN_QUALITY_ENVELOPE_RELATION = MANAGEMENT_ENVELOPES_RELATION
 
 
 def _truthy_flag(value: Any) -> bool:

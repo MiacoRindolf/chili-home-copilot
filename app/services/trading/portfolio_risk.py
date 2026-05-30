@@ -15,11 +15,15 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from ...models.trading import Trade
+from .management_envelopes import (
+    LEGACY_TRADES_COMPAT_RELATION,
+    MANAGEMENT_ENVELOPES_RELATION,
+)
 
 logger = logging.getLogger(__name__)
 PHASE5K_PORTFOLIO_RISK_ENV = "CHILI_PHASE5K_PORTFOLIO_RISK_USE_ENVELOPES"
-_PORTFOLIO_RISK_COMPAT_RELATION = "trading_trades"
-_PORTFOLIO_RISK_ENVELOPE_RELATION = "trading_management_envelopes"
+_PORTFOLIO_RISK_COMPAT_RELATION = LEGACY_TRADES_COMPAT_RELATION
+_PORTFOLIO_RISK_ENVELOPE_RELATION = MANAGEMENT_ENVELOPES_RELATION
 
 
 def _truthy_flag(value: Any) -> bool:

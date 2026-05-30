@@ -427,7 +427,19 @@ def test_recommended_work_status_marks_exit_refresh_on_cooldown(
                 SimpleNamespace(
                     payload={
                         "scan_pattern_id": 537,
+                        "source": "exit_variant_refresh",
                         "evidence_fingerprint": "same-fp",
+                        "fast_skipped": True,
+                        "created_count": 0,
+                        "skip_reason": "non_positive_quality_evidence_no_exit_variant_birth",
+                    }
+                ),
+                SimpleNamespace(
+                    payload={
+                        "scan_pattern_id": 537,
+                        "source": "exit_variant_refresh",
+                        "evidence_fingerprint": "same-fp-2",
+                        "fast_skipped": True,
                         "created_count": 0,
                         "skip_reason": "non_positive_quality_evidence_no_exit_variant_birth",
                     }
@@ -454,6 +466,9 @@ def test_recommended_work_status_marks_exit_refresh_on_cooldown(
         status["blocker_detail"]
         == "non_positive_quality_evidence_no_exit_variant_birth"
     )
+    assert status["blocker_count"] == 2
+    assert status["blocker_source"] == "exit_variant_refresh"
+    assert status["blocker_fast_skipped"] is True
 
 
 def test_recommended_work_status_keeps_exit_refresh_actionable_for_new_evidence(
@@ -569,6 +584,78 @@ def test_recommended_work_statuses_batches_exit_diagnostic_lookup(monkeypatch):
         "blocker": None,
     }
     assert statuses[2] == {"event_type": None, "actionable": None, "blocker": None}
+
+
+def test_recommended_work_status_marks_recert_refresh_blocked_with_rollup_context(
+    monkeypatch,
+):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360)
+
+    class QueryStub:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def order_by(self, *args, **kwargs):
+            return self
+
+        def limit(self, *args, **kwargs):
+            return self
+
+        def all(self):
+            return [
+                SimpleNamespace(
+                    payload={
+                        "scan_pattern_id": 1260,
+                        "source": "recert_rescue_refresh",
+                        "recert_rescue_status": "soft_blocked",
+                        "recommended_next_action": (
+                            "wait_for_recert_backtest_cooldown_keep_live_blocked"
+                        ),
+                    }
+                ),
+                SimpleNamespace(
+                    payload={
+                        "scan_pattern_id": 1260,
+                        "source": "recert_rescue_refresh",
+                        "recert_rescue_status": "soft_blocked",
+                        "recommended_next_action": (
+                            "wait_for_recert_backtest_cooldown_keep_live_blocked"
+                        ),
+                    }
+                ),
+                SimpleNamespace(
+                    payload={
+                        "scan_pattern_id": 1260,
+                        "source": "recert_rescue_post_backtest",
+                        "recert_rescue_status": "soft_blocked",
+                        "recommended_next_action": (
+                            "complete_oos_recert_and_quality_refresh"
+                        ),
+                    }
+                ),
+            ]
+
+    class DbStub:
+        def query(self, *args, **kwargs):
+            return QueryStub()
+
+    status = _recommended_work_status(
+        DbStub(),
+        {
+            "scan_pattern_id": 1260,
+            "recommended_work_event": "recert_rescue_refresh",
+        },
+    )
+
+    assert status["event_type"] == "recert_rescue_refresh"
+    assert status["actionable"] is False
+    assert status["blocker"] == "recent_recert_blocker_diagnostic"
+    assert status["blocker_detail"] == "wait_for_recert_backtest_cooldown_keep_live_blocked"
+    assert status["blocker_count"] == 2
+    assert status["blocker_status"] == "soft_blocked"
+    assert status["blocker_source"] == "recert_rescue_refresh"
 
 
 def test_imminent_alerts_keep_cached_edge_snapshots_asset_sliced(db, paired_client):
