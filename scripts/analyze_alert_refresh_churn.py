@@ -177,6 +177,85 @@ def _top_noop_exit_patterns(hours: int, limit: int) -> list[dict]:
     )
 
 
+def _open_exit_work_with_recent_noop(hours: int, limit: int) -> list[dict]:
+    return _rows(
+        """
+        WITH open_work AS (
+          SELECT
+            id,
+            status,
+            created_at,
+            payload,
+            CASE
+              WHEN COALESCE(payload->>'scan_pattern_id', '') ~ '^[0-9]+$'
+              THEN (payload->>'scan_pattern_id')::bigint
+              ELSE NULL
+            END AS scan_pattern_id,
+            COALESCE(payload->>'evidence_fingerprint', '') AS evidence_fingerprint
+          FROM brain_work_events
+          WHERE event_kind = 'work'
+            AND event_type = 'exit_variant_refresh'
+            AND status IN ('pending', 'retry_wait', 'processing')
+            AND created_at >= now() - (:hours * interval '1 hour')
+        ),
+        noop_diag AS (
+          SELECT
+            id,
+            created_at,
+            payload,
+            (payload->>'scan_pattern_id')::bigint AS scan_pattern_id,
+            COALESCE(payload->>'evidence_fingerprint', '') AS evidence_fingerprint,
+            COALESCE(payload->>'skip_reason', '<none>') AS skip_reason
+          FROM brain_work_events
+          WHERE event_kind = 'outcome'
+            AND event_type = 'exit_variant_diagnostic'
+            AND created_at >= now() - (:hours * interval '1 hour')
+            AND COALESCE(payload->>'scan_pattern_id', '') ~ '^[0-9]+$'
+            AND (
+              COALESCE(payload->>'created_count', '') = ''
+              OR (
+                COALESCE(payload->>'created_count', '') ~ '^-?[0-9]+$'
+                AND (payload->>'created_count')::int = 0
+              )
+            )
+        )
+        SELECT DISTINCT ON (w.id)
+          w.id AS work_id,
+          w.status,
+          w.scan_pattern_id,
+          COALESCE(sp.name, '<missing>') AS pattern_name,
+          COALESCE(w.payload->>'asset_class', '<none>') AS asset_class,
+          COALESCE(w.payload->>'source', '<none>') AS work_source,
+          COALESCE(NULLIF(w.evidence_fingerprint, ''), '<none>') AS work_fingerprint,
+          d.id AS diagnostic_id,
+          d.skip_reason,
+          d.created_at AS diagnostic_seen,
+          w.created_at AS work_created
+        FROM open_work w
+        JOIN noop_diag d
+          ON d.scan_pattern_id = w.scan_pattern_id
+         AND (
+           d.evidence_fingerprint = w.evidence_fingerprint
+           OR d.skip_reason IN (
+             'duplicate_learned_exit_label',
+             'missing_parent_payoff_geometry',
+             'non_positive_quality_evidence_no_exit_variant_birth',
+             'no_loss_report',
+             'no_parent_returns'
+           )
+           OR d.skip_reason LIKE 'edge_debt_too_negative_for_exit_child:%%'
+           OR d.skip_reason LIKE 'insufficient_parent_payoff_samples:%%'
+           OR d.skip_reason LIKE 'reward_risk_below_floor:%%'
+         )
+        LEFT JOIN scan_patterns sp ON sp.id = w.scan_pattern_id
+        WHERE w.scan_pattern_id IS NOT NULL
+        ORDER BY w.id, d.created_at DESC, d.id DESC
+        LIMIT :limit
+        """,
+        {"hours": int(hours), "limit": int(limit)},
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hours", type=int, default=24, help="lookback window")
@@ -190,6 +269,10 @@ def main() -> int:
     _print_table("Diagnostic Outcomes", _diagnostic_counts(hours))
     _print_table("Top Work-Producing Patterns", _top_patterns(hours, limit))
     _print_table("Top No-Op Exit Variant Diagnostics", _top_noop_exit_patterns(hours, limit))
+    _print_table(
+        "Open Exit Variant Work With Recent No-Op Evidence",
+        _open_exit_work_with_recent_noop(hours, limit),
+    )
     return 0
 
 
