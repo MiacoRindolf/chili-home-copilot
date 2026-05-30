@@ -204,6 +204,142 @@ def count_probation_envelopes_since(
     return int(row or 0)
 
 
+def _option_envelope_predicate_sql(alias: str = "t") -> str:
+    """SQL predicate matching option envelopes that bracket code must skip."""
+    snap = f"COALESCE({alias}.indicator_snapshot, '{{}}'::jsonb)"
+    breakout = f"({snap}->'breakout_alert')"
+    return f"""
+        (
+            LOWER(COALESCE({alias}.asset_kind, '')) IN ('option', 'options')
+            OR LOWER(COALESCE({alias}.tags, '')) LIKE '%option%'
+            OR COALESCE({snap} ? 'option_meta', FALSE)
+            OR LOWER(COALESCE({snap}->>'asset_type', '')) IN ('option', 'options')
+            OR LOWER(COALESCE({snap}->>'options_path', '')) IN ('1', 'true', 'yes', 'on')
+            OR COALESCE({breakout} ? 'option_meta', FALSE)
+            OR LOWER(COALESCE({breakout}->>'asset_type', '')) IN ('option', 'options')
+            OR LOWER(COALESCE({breakout}->>'options_path', '')) IN ('1', 'true', 'yes', 'on')
+        )
+    """
+
+
+def load_bracket_reconciliation_scope(
+    db: Session,
+    *,
+    user_id: int | None = None,
+) -> list[dict[str, Any]]:
+    """Load non-option broker envelopes eligible for bracket reconciliation."""
+    params: dict[str, Any] = {}
+    scope_clause = (
+        "( (t.status = 'open' AND t.broker_source IS NOT NULL)"
+        " OR ("
+        "     bi.id IS NOT NULL"
+        "     AND t.broker_source IS NOT NULL"
+        "     AND t.status <> 'open'"
+        "     AND bi.intent_state NOT IN ('reconciled', 'authoritative_closed', 'closed')"
+        "   )"
+        " )"
+    )
+    filters = [scope_clause, f"NOT {_option_envelope_predicate_sql('t')}"]
+    if user_id is not None:
+        filters.append("t.user_id = :uid")
+        params["uid"] = int(user_id)
+
+    return _rows(db, f"""
+        SELECT
+            t.id AS trade_id,
+            t.user_id,
+            t.ticker,
+            t.direction,
+            t.quantity,
+            t.status AS trade_status,
+            t.pending_exit_status,
+            t.pending_exit_reason,
+            t.broker_source,
+            bi.id AS bracket_intent_id,
+            bi.intent_state,
+            bi.stop_price,
+            bi.target_price
+        FROM {MANAGEMENT_ENVELOPES_RELATION} AS t
+        LEFT JOIN trading_bracket_intents AS bi
+          ON bi.trade_id = t.id
+        WHERE {' AND '.join(filters)}
+        ORDER BY t.id
+    """, params)
+
+
+def load_stale_bracket_watchdog_candidates(
+    db: Session,
+    *,
+    user_id: int | None = None,
+    stale_after_sec: int,
+) -> list[dict[str, Any]]:
+    """Load open non-option broker envelopes for the missing-stop watchdog."""
+    params: dict[str, Any] = {"stale_sec": int(stale_after_sec)}
+    user_filter = ""
+    if user_id is not None:
+        user_filter = " AND t.user_id = :uid"
+        params["uid"] = int(user_id)
+
+    return _rows(db, f"""
+        WITH last_rec AS (
+            SELECT DISTINCT ON (trade_id)
+                trade_id, kind, severity, observed_at
+            FROM trading_bracket_reconciliation_log
+            WHERE observed_at >= (NOW() - INTERVAL '24 hours')
+            ORDER BY trade_id, observed_at DESC
+        )
+        SELECT
+            t.id AS trade_id,
+            t.ticker,
+            t.broker_source,
+            bi.id AS bracket_intent_id,
+            bi.last_observed_at,
+            r.kind,
+            r.severity,
+            r.observed_at,
+            EXTRACT(EPOCH FROM (NOW() - COALESCE(r.observed_at, bi.created_at))) AS age_sec
+        FROM {MANAGEMENT_ENVELOPES_RELATION} AS t
+        JOIN trading_bracket_intents AS bi ON bi.trade_id = t.id
+        LEFT JOIN last_rec AS r ON r.trade_id = t.id
+        WHERE t.status = 'open'
+          AND t.broker_source IS NOT NULL
+          AND NOT {_option_envelope_predicate_sql('t')}
+          AND bi.intent_state NOT IN ('reconciled', 'authoritative_closed', 'closed')
+          {user_filter}
+        ORDER BY t.id
+    """, params)
+
+
+def fetch_naked_coinbase_bracket_intent_rows(
+    db: Session,
+    *,
+    adoptable_states: list[str] | tuple[str, ...] | set[str] | frozenset[str],
+) -> list[dict[str, Any]]:
+    """Fetch Coinbase bracket intents missing a broker stop for open envelopes."""
+    states: list[str] = []
+    for state in adoptable_states:
+        normalized = str(state or "").strip().lower()
+        if normalized:
+            states.append(normalized)
+    return _rows(db, f"""
+        SELECT
+            bi.id           AS intent_id,
+            bi.trade_id     AS trade_id,
+            bi.ticker       AS ticker,
+            bi.quantity     AS quantity,
+            bi.intent_state AS intent_state,
+            bi.broker_source AS broker_source
+        FROM trading_bracket_intents bi
+        JOIN {MANAGEMENT_ENVELOPES_RELATION} t ON t.id = bi.trade_id
+        WHERE t.status = 'open'
+          AND LOWER(COALESCE(t.broker_source, '')) = 'coinbase'
+          AND LOWER(COALESCE(bi.broker_source, '')) = 'coinbase'
+          AND bi.broker_stop_order_id IS NULL
+          AND LOWER(bi.intent_state) = ANY(:states)
+        ORDER BY bi.id
+    """, {"states": states})
+
+
 def phase5b_parity_summary(db: Session) -> Phase5BParitySummary:
     """Return the Phase 5B read-model health counters.
 
