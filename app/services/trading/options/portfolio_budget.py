@@ -60,13 +60,13 @@ def _get_budget(db: Session, user_id: Optional[int]) -> dict:
             {"uid": user_id},
         ).fetchone()
         if row:
-            return {
-                "max_abs_delta": float(row[0]),
-                "max_abs_gamma": float(row[1]),
+            return _sanitize_budget({
+                "max_abs_delta": row[0],
+                "max_abs_gamma": row[1],
                 "max_vega_per_tenor": row[2] or {},
-                "max_total_vega": float(row[3]),
-                "max_theta_burn_per_day": float(row[4]) if row[4] is not None else None,
-            }
+                "max_total_vega": row[3],
+                "max_theta_burn_per_day": row[4],
+            })
     except Exception as e:
         logger.debug("[options.budget] _get_budget failed: %s", e)
     return _default_budget()
@@ -117,20 +117,81 @@ def _add_greek_totals(left: dict, right: dict) -> dict:
         "net_vega": _finite_number_or_zero(left.get("net_vega"))
         + _finite_number_or_zero(right.get("net_vega")),
     }
-    out["missing_greeks_count"] = int(left.get("missing_greeks_count") or 0) + int(
-        right.get("missing_greeks_count") or 0
+    out["missing_greeks_count"] = _nonnegative_int_or_zero(
+        left.get("missing_greeks_count")
+    ) + _nonnegative_int_or_zero(
+        right.get("missing_greeks_count")
     )
     return out
 
 
-def _finite_number_or_zero(value: Any) -> float:
+def _finite_number_or_none(value: Any) -> float | None:
     if value is None or isinstance(value, bool):
-        return 0.0
+        return None
     try:
         out = float(value)
     except (TypeError, ValueError):
-        return 0.0
-    return out if math.isfinite(out) else 0.0
+        return None
+    return out if math.isfinite(out) else None
+
+
+def _finite_number_or_zero(value: Any) -> float:
+    out = _finite_number_or_none(value)
+    return out if out is not None else 0.0
+
+
+def _nonnegative_int_or_zero(value: Any) -> int:
+    out = _finite_number_or_none(value)
+    if out is None or out < 0:
+        return 0
+    return int(out)
+
+
+def _positive_limit_or_default(value: Any, default: float) -> float:
+    out = _finite_number_or_none(value)
+    return out if out is not None and out > 0.0 else default
+
+
+def _sanitize_vega_per_tenor(value: Any, default: dict) -> dict:
+    out = dict(default)
+    if not isinstance(value, dict):
+        return out
+    for tenor, raw_limit in value.items():
+        limit = _finite_number_or_none(raw_limit)
+        if limit is not None and limit > 0:
+            out[str(tenor)] = limit
+    return out
+
+
+def _sanitize_budget(raw: dict[str, Any]) -> dict:
+    default = _default_budget()
+    theta_raw = raw.get("max_theta_burn_per_day")
+    theta_limit = None
+    if theta_raw is not None:
+        theta_limit = _positive_limit_or_default(
+            theta_raw,
+            float(default["max_theta_burn_per_day"]),
+        )
+    return {
+        "max_abs_delta": _positive_limit_or_default(
+            raw.get("max_abs_delta"),
+            float(default["max_abs_delta"]),
+        ),
+        "max_abs_gamma": _positive_limit_or_default(
+            raw.get("max_abs_gamma"),
+            float(default["max_abs_gamma"]),
+        ),
+        "max_vega_per_tenor": _sanitize_vega_per_tenor(
+            raw.get("max_vega_per_tenor"),
+            default["max_vega_per_tenor"],
+        ),
+        "max_total_vega": _positive_limit_or_default(
+            raw.get("max_total_vega"),
+            float(default["max_total_vega"]),
+        ),
+        "max_theta_burn_per_day": theta_limit,
+    }
+
 
 
 def _proposal_greek(proposal: StrategyProposal, name: str) -> float | None:
@@ -187,8 +248,8 @@ def _sum_open_position_greeks(db: Session, user_id: Optional[int]) -> dict:
             if isinstance(legs, str):
                 legs = json.loads(legs)
             for leg in legs or []:
-                qty = float(leg.get("qty") or 0)
-                if not math.isfinite(qty):
+                qty = _finite_number_or_none(leg.get("qty"))
+                if qty is None:
                     missing_count += 1
                     continue
                 d = leg.get("delta")
@@ -461,6 +522,15 @@ def upsert_budget(
     max_theta_burn_per_day: Optional[float] = 50.0,
 ) -> bool:
     """Idempotent upsert of the per-user options greeks budget."""
+    clean = _sanitize_budget(
+        {
+            "max_abs_delta": max_abs_delta,
+            "max_abs_gamma": max_abs_gamma,
+            "max_vega_per_tenor": max_vega_per_tenor or {},
+            "max_total_vega": max_total_vega,
+            "max_theta_burn_per_day": max_theta_burn_per_day,
+        }
+    )
     try:
         db.execute(
             text(
@@ -480,11 +550,11 @@ def upsert_budget(
             ),
             {
                 "uid": user_id,
-                "d": max_abs_delta,
-                "g": max_abs_gamma,
-                "vt": json.dumps(max_vega_per_tenor or {}),
-                "tv": max_total_vega,
-                "tb": max_theta_burn_per_day,
+                "d": clean["max_abs_delta"],
+                "g": clean["max_abs_gamma"],
+                "vt": json.dumps(clean["max_vega_per_tenor"]),
+                "tv": clean["max_total_vega"],
+                "tb": clean["max_theta_burn_per_day"],
             },
         )
         db.commit()

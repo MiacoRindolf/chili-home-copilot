@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -183,6 +184,64 @@ def test_option_synthesis_ranking_preserves_zero_spread_tiebreaker():
     assert _quality_sort_key(zero_spread) > _quality_sort_key(wider_spread)
 
 
+def test_option_synthesis_ranking_ignores_nonfinite_score_fields():
+    bad_metrics = {
+        "synthesis_spread_pct": float("nan"),
+        "synthesis_contract_notional_usd": float("inf"),
+        "entry_quality": {
+            "expected_value_after_cost_pct_of_premium": float("nan"),
+            "option_reward_risk_after_cost": float("inf"),
+        },
+    }
+
+    key = _quality_sort_key(bad_metrics)
+
+    assert all(math.isfinite(value) for value in key)
+    assert key == (0.0, 0.0, -100.0, -0.0)
+
+
+def test_synthesize_option_meta_rejects_nonfinite_top_level_price_inputs():
+    assert synthesize_option_meta(
+        db=None,
+        underlying="XYZ",
+        spot=float("nan"),
+        notional_usd=300.0,
+    ) is None
+    assert synthesize_option_meta(
+        db=None,
+        underlying="XYZ",
+        spot=100.0,
+        notional_usd=float("inf"),
+    ) is None
+    assert synthesize_option_meta(
+        db=None,
+        underlying="XYZ",
+        spot=True,
+        notional_usd=300.0,
+    ) is None
+
+
+def test_synthesize_option_meta_rejects_bad_quality_inputs_before_selection():
+    assert synthesize_option_meta(
+        db=None,
+        underlying="XYZ",
+        spot=100.0,
+        notional_usd=300.0,
+        underlying_target=True,
+        underlying_stop=96.0,
+        confidence=0.9,
+    ) is None
+    assert synthesize_option_meta(
+        db=None,
+        underlying="XYZ",
+        spot=100.0,
+        notional_usd=300.0,
+        underlying_target=112.0,
+        underlying_stop=96.0,
+        confidence=float("nan"),
+    ) is None
+
+
 def test_synthesize_option_meta_rejects_when_contract_exceeds_budget(monkeypatch):
     _wire_synthesis_fakes(
         monkeypatch,
@@ -262,6 +321,51 @@ def test_synthesize_option_meta_rejects_boolean_option_quotes(monkeypatch):
     )
 
     assert meta is None
+
+
+def test_synthesize_option_meta_clamps_bad_adaptive_synthesis_knobs(monkeypatch):
+    from app.services.trading import strategy_parameter
+
+    _wire_synthesis_fakes(
+        monkeypatch,
+        {
+            105.0: {"bid_price": "1.45", "ask_price": "1.50"},
+        },
+    )
+
+    def _bad_parameter(_db, _family, parameter_key, **kwargs):
+        if parameter_key == "synthesis_target_dte":
+            return float("nan")
+        if parameter_key == "synthesis_max_spread_pct":
+            return 999.0
+        if parameter_key == "synthesis_strike_increment":
+            return True
+        return kwargs.get("default")
+
+    monkeypatch.setattr(strategy_parameter, "get_parameter", _bad_parameter)
+    monkeypatch.setattr(
+        settings,
+        "chili_autotrader_options_max_contract_notional_usd",
+        float("nan"),
+    )
+
+    meta = synthesize_option_meta(
+        db=None,
+        underlying="XYZ",
+        spot=100.0,
+        notional_usd=300.0,
+        underlying_target=112.0,
+        underlying_stop=96.0,
+        confidence=1.25,
+    )
+
+    assert meta is not None
+    assert meta["strike"] == 105.0
+    assert meta["quantity"] == 2
+    assert meta["synthesis_target_dte"] == 30
+    assert meta["synthesis_max_spread_pct"] == 30.0
+    assert meta["synthesis_budget_usd"] == 300.0
+    assert meta["entry_quality"]["confidence_probability"] == 1.0
 
 
 def test_synthesize_option_meta_caches_recent_no_survivor_context(monkeypatch):

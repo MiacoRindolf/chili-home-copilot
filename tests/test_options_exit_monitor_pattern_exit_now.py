@@ -314,6 +314,26 @@ def test_options_exit_rejects_malformed_contract_quantity():
     assert _option_exit_contract_quantity(SimpleNamespace(quantity=0)) is None
 
 
+def test_options_exit_entry_premium_uses_valid_avg_fill_then_entry_fallback():
+    from app.services.trading.options.exit_monitor import _option_exit_entry_premium
+
+    assert _option_exit_entry_premium(
+        SimpleNamespace(avg_fill_price=1.23, entry_price=1.11)
+    ) == pytest.approx(1.23)
+    assert _option_exit_entry_premium(
+        SimpleNamespace(avg_fill_price=True, entry_price=1.11)
+    ) == pytest.approx(1.11)
+    assert _option_exit_entry_premium(
+        SimpleNamespace(avg_fill_price=float("nan"), entry_price=1.11)
+    ) == pytest.approx(1.11)
+    assert _option_exit_entry_premium(
+        SimpleNamespace(avg_fill_price=None, entry_price=True)
+    ) is None
+    assert _option_exit_entry_premium(
+        SimpleNamespace(avg_fill_price=None, entry_price=float("inf"))
+    ) is None
+
+
 def test_options_exit_rejects_crossed_quotes_as_untrusted():
     from app.services.trading.options.exit_monitor import _option_quote_is_crossed
 

@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 
 
 def _float_or_none(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
     try:
         out = float(value)
     except (TypeError, ValueError):
@@ -26,11 +28,15 @@ def _float_or_none(value: Any) -> float | None:
 
 
 def _int_or_none(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
     try:
-        out = int(float(value))
+        out = float(value)
     except (TypeError, ValueError):
         return None
-    return out if out >= 0 else None
+    if not math.isfinite(out) or out < 0 or not out.is_integer():
+        return None
+    return int(out)
 
 
 def _quote_float(quote: Mapping[str, Any], *keys: str) -> float | None:
@@ -100,6 +106,10 @@ def create_chain_snapshot(
     if not sym:
         return None
     exp = normalize_expiration(expiration)
+    spot = _float_or_none(spot_price)
+    if spot is not None and spot <= 0:
+        spot = None
+    contracts_count = _int_or_none(n_contracts)
     try:
         with _best_effort_write_scope(db):
             row = db.execute(
@@ -118,8 +128,8 @@ def create_chain_snapshot(
                     "underlying": sym,
                     "venue": (venue or "unknown").strip().lower(),
                     "expirations_json": json.dumps([exp] if exp else []),
-                    "n_contracts": n_contracts,
-                    "spot_price": spot_price,
+                    "n_contracts": contracts_count,
+                    "spot_price": spot,
                 },
             ).first()
         return int(row[0]) if row else None

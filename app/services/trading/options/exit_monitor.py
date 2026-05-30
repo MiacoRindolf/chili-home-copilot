@@ -317,6 +317,17 @@ def _option_exit_contract_quantity(trade: Trade) -> int | None:
     return parse_contract_quantity(getattr(trade, "quantity", None))
 
 
+def _option_exit_entry_premium(trade: Trade) -> float | None:
+    """Return the realized option entry premium used for exit math."""
+    avg_fill = _option_exit_float(getattr(trade, "avg_fill_price", None))
+    if avg_fill is not None and avg_fill > 0.0:
+        return avg_fill
+    entry = _option_exit_float(getattr(trade, "entry_price", None))
+    if entry is not None and entry > 0.0:
+        return entry
+    return None
+
+
 def _record_exit_quote_snapshot(
     db: Session,
     trade: Trade,
@@ -698,13 +709,7 @@ def run_options_exit_pass(db: Session) -> dict[str, int]:
         else:
             current_premium = None
 
-        entry_premium = 0.0
-        try:
-            # Prefer avg_fill_price when available (actual fill), fall
-            # back to entry_price (the limit) otherwise.
-            entry_premium = float(t.avg_fill_price or t.entry_price or 0.0)
-        except (TypeError, ValueError):
-            entry_premium = 0.0
+        entry_premium = _option_exit_entry_premium(t) or 0.0
 
         reason, abstained_implausible = _evaluate_exit_triggers(
             dte=_dte(expiration),

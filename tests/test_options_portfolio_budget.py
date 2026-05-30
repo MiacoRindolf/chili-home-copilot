@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date
 
 import pytest
@@ -100,6 +101,61 @@ class _OpenTradeGreeksUnavailableDb:
         raise AssertionError(f"unexpected SQL: {sql}")
 
 
+class _BadBudgetDb:
+    def execute(self, stmt, params=None):
+        sql = str(stmt)
+        if "FROM options_greeks_budget" in sql:
+            return _Result(
+                row=(
+                    float("nan"),
+                    True,
+                    {"30d": float("inf"), "60d": 70.0, "bad": -1.0},
+                    float("inf"),
+                    True,
+                )
+            )
+        raise AssertionError(f"unexpected SQL: {sql}")
+
+
+class _BooleanPositionQtyDb:
+    def execute(self, stmt, params=None):
+        sql = str(stmt)
+        if "FROM options_position" in sql:
+            return _Result(
+                rows=[
+                    (
+                        [
+                            {
+                                "qty": True,
+                                "delta": 0.10,
+                                "gamma": 0.01,
+                                "theta": -0.02,
+                                "vega": 0.03,
+                            }
+                        ],
+                    )
+                ]
+            )
+        if "FROM trading_trades" in sql:
+            return _Result(rows=[])
+        raise AssertionError(f"unexpected SQL: {sql}")
+
+
+class _CaptureBudgetUpsertDb:
+    def __init__(self):
+        self.params = None
+        self.committed = False
+
+    def execute(self, _stmt, params=None):
+        self.params = dict(params or {})
+
+    def commit(self):
+        self.committed = True
+
+    def rollback(self):
+        raise AssertionError("rollback should not be called")
+
+
 def _proposal(**overrides) -> StrategyProposal:
     base = dict(
         underlying="SPY",
@@ -153,6 +209,45 @@ def test_sum_open_trade_greeks_marks_fetch_failure_as_unproven():
 
     assert totals["net_delta"] == 0.0
     assert totals["missing_greeks_count"] == 1
+
+
+def test_get_budget_sanitizes_bad_persisted_limits():
+    budget = mod._get_budget(_BadBudgetDb(), user_id=1)
+
+    assert budget["max_abs_delta"] == 0.50
+    assert budget["max_abs_gamma"] == 0.05
+    assert budget["max_total_vega"] == 200.0
+    assert budget["max_theta_burn_per_day"] == 50.0
+    assert budget["max_vega_per_tenor"] == {"30d": 100, "60d": 70.0, "90d": 60}
+
+
+def test_sum_open_position_greeks_marks_boolean_leg_qty_as_unproven():
+    totals = mod._sum_open_position_greeks(_BooleanPositionQtyDb(), user_id=1)
+
+    assert totals["net_delta"] == 0.0
+    assert totals["net_gamma"] == 0.0
+    assert totals["missing_greeks_count"] == 1
+
+
+def test_upsert_budget_sanitizes_bad_limits_before_persisting():
+    db = _CaptureBudgetUpsertDb()
+
+    assert mod.upsert_budget(
+        db,
+        1,
+        max_abs_delta=float("nan"),
+        max_abs_gamma=True,
+        max_vega_per_tenor={"30d": float("inf"), "45d": 44.0},
+        max_total_vega=float("inf"),
+        max_theta_burn_per_day=True,
+    ) is True
+
+    assert db.committed is True
+    assert db.params["d"] == 0.50
+    assert db.params["g"] == 0.05
+    assert db.params["tv"] == 200.0
+    assert db.params["tb"] == 50.0
+    assert json.loads(db.params["vt"]) == {"30d": 100, "60d": 80, "90d": 60, "45d": 44.0}
 
 
 def test_check_proposal_blocks_when_open_trade_greeks_are_unavailable(monkeypatch):

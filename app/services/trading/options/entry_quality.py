@@ -62,6 +62,20 @@ class OptionEntryDecision:
     snapshot: dict[str, Any]
 
 
+def _finite_float_or_none(value: Any) -> Optional[float]:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
+def _clamp_float(value: float, *, min_value: float, max_value: float) -> float:
+    return min(float(max_value), max(float(min_value), float(value)))
+
+
 def _setting_float(settings: Any, names: tuple[str, ...], default: float) -> float:
     explicit_attrs = vars(settings) if hasattr(settings, "__dict__") else {}
     for name in names:
@@ -72,37 +86,27 @@ def _setting_float(settings: Any, names: tuple[str, ...], default: float) -> flo
             continue
         if value.__class__.__module__ == "unittest.mock":
             continue
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            continue
+        out = _finite_float_or_none(value)
+        if out is not None:
+            return out
     return default
 
 
 def _coerce_positive_float(value: Any) -> Optional[float]:
-    try:
-        out = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(out) or out <= ZERO_PAYOFF:
+    out = _finite_float_or_none(value)
+    if out is None or out <= ZERO_PAYOFF:
         return None
     return out
 
 
 def _coerce_float(value: Any) -> Optional[float]:
-    try:
-        out = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(out):
-        return None
-    return out
+    return _finite_float_or_none(value)
 
 
 def _round_optional(value: Optional[float], places: int = SNAPSHOT_PRICE_DECIMALS) -> Optional[float]:
     if value is None:
         return None
-    if math.isinf(value):
+    if not math.isfinite(value):
         return None
     return round(value, places)
 
@@ -131,7 +135,7 @@ def _adaptive_parameter(
     description: str,
 ) -> float:
     if db is None:
-        return initial_value
+        return _clamp_float(initial_value, min_value=min_value, max_value=max_value)
     try:
         strategy_parameter.register_parameter(
             db,
@@ -150,9 +154,12 @@ def _adaptive_parameter(
             parameter_key=parameter_key,
             default=float(initial_value),
         )
-        return float(learned) if learned is not None else initial_value
+        learned_f = _finite_float_or_none(learned)
+        if learned_f is None:
+            learned_f = initial_value
+        return _clamp_float(learned_f, min_value=min_value, max_value=max_value)
     except Exception:
-        return initial_value
+        return _clamp_float(initial_value, min_value=min_value, max_value=max_value)
 
 
 def resolve_option_entry_thresholds(
@@ -264,6 +271,7 @@ def evaluate_long_option_entry(
     target = _coerce_float(getattr(alert, "target_price", None))
     stop = _coerce_float(getattr(alert, "stop_loss", None))
     option_type = str(option_meta.get("option_type") or "").lower()
+    probability = _coerce_float(confidence)
 
     snapshot.update(
         {
@@ -290,6 +298,8 @@ def evaluate_long_option_entry(
         return OptionEntryDecision(False, "missing_underlying_target", snapshot)
     if stop is None:
         return OptionEntryDecision(False, "missing_underlying_stop", snapshot)
+    if probability is None:
+        return OptionEntryDecision(False, "invalid_confidence_probability", snapshot)
 
     underlying_reward = abs(target - underlying)
     underlying_risk = abs(underlying - stop)
@@ -322,7 +332,7 @@ def evaluate_long_option_entry(
         else math.inf
     )
 
-    probability = min(PROBABILITY_CEILING, max(PROBABILITY_FLOOR, float(confidence)))
+    probability = min(PROBABILITY_CEILING, max(PROBABILITY_FLOOR, probability))
     expected_value_per_share = (
         probability * option_profit_at_target
         - (PROBABILITY_CEILING - probability) * option_loss_at_stop

@@ -57,6 +57,58 @@ STRIKE_QUANTUM = Decimal("0.01")
 _NO_SURVIVOR_CACHE: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
 
 
+def _finite_float_or_none(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
+def _positive_float_or_none(value: Any) -> float | None:
+    out = _finite_float_or_none(value)
+    if out is None or out <= 0.0:
+        return None
+    return out
+
+
+def _clamped_float(
+    value: Any,
+    *,
+    default: float,
+    min_value: float | None = None,
+    max_value: float | None = None,
+) -> float:
+    out = _finite_float_or_none(value)
+    if out is None:
+        out = float(default)
+    if min_value is not None:
+        out = max(float(min_value), out)
+    if max_value is not None:
+        out = min(float(max_value), out)
+    return out
+
+
+def _clamped_int(
+    value: Any,
+    *,
+    default: int,
+    min_value: int | None = None,
+    max_value: int | None = None,
+) -> int:
+    out = int(
+        _clamped_float(
+            value,
+            default=float(default),
+            min_value=float(min_value) if min_value is not None else None,
+            max_value=float(max_value) if max_value is not None else None,
+        )
+    )
+    return out
+
+
 def _register_synthesis_parameters(db: Session) -> None:
     """Idempotently register the adaptive synthesis knobs."""
     try:
@@ -186,12 +238,10 @@ def clear_synthesis_no_survivor_cache() -> None:
 
 
 def _cache_float(value: Optional[float], places: int) -> Optional[float]:
-    if value is None:
+    value_f = _finite_float_or_none(value)
+    if value_f is None:
         return None
-    try:
-        return round(float(value), places)
-    except (TypeError, ValueError):
-        return None
+    return round(value_f, places)
 
 
 def _no_survivor_cache_ttl_seconds(settings: Any) -> float:
@@ -202,18 +252,18 @@ def _no_survivor_cache_ttl_seconds(settings: Any) -> float:
     )
 
     try:
-        raw = float(
-            getattr(
-                settings,
-                "chili_autotrader_options_synthesis_no_survivor_cache_ttl_seconds",
-                AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_DEFAULT_TTL_SECONDS,
-            )
+        raw = getattr(
+            settings,
+            "chili_autotrader_options_synthesis_no_survivor_cache_ttl_seconds",
+            AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_DEFAULT_TTL_SECONDS,
         )
-    except (TypeError, ValueError):
-        raw = float(AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_DEFAULT_TTL_SECONDS)
-    return max(
-        float(AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_MIN_TTL_SECONDS),
-        min(float(AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_MAX_TTL_SECONDS), raw),
+    except Exception:
+        raw = AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_DEFAULT_TTL_SECONDS
+    return _clamped_float(
+        raw,
+        default=float(AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_DEFAULT_TTL_SECONDS),
+        min_value=float(AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_MIN_TTL_SECONDS),
+        max_value=float(AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_MAX_TTL_SECONDS),
     )
 
 
@@ -307,15 +357,12 @@ def _quote_prices(quote: dict[str, Any]) -> Optional[tuple[float, float, float, 
 def _quote_price_float(value: Any, *, default: float | None = None) -> Optional[float]:
     if value in (None, ""):
         return default
-    if isinstance(value, bool):
-        return None
-    try:
-        out = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(out):
-        return None
-    return out
+    return _finite_float_or_none(value)
+
+
+def _sort_float(value: Any, *, default: float = 0.0) -> float:
+    out = _finite_float_or_none(value)
+    return out if out is not None else default
 
 
 def _quality_sort_key(meta: dict[str, Any]) -> tuple[float, float, float, float]:
@@ -325,18 +372,20 @@ def _quality_sort_key(meta: dict[str, Any]) -> tuple[float, float, float, float]
     reward_after_cost = quality.get("option_reward_risk_after_cost")
     spread_pct = meta.get("synthesis_spread_pct")
     return (
-        float(
+        _sort_float(
             ev_after_cost
             if ev_after_cost is not None
-            else quality.get("expected_value_pct_of_premium") or 0.0
+            else quality.get("expected_value_pct_of_premium"),
+            default=0.0,
         ),
-        float(
+        _sort_float(
             reward_after_cost
             if reward_after_cost is not None
-            else quality.get("option_reward_risk") or 0.0
+            else quality.get("option_reward_risk"),
+            default=0.0,
         ),
-        -float(spread_pct if spread_pct is not None else NO_BID_SPREAD_PCT),
-        -float(meta.get("synthesis_contract_notional_usd") or 0.0),
+        -_sort_float(spread_pct, default=NO_BID_SPREAD_PCT),
+        -_sort_float(meta.get("synthesis_contract_notional_usd"), default=0.0),
     )
 
 
@@ -356,8 +405,20 @@ def synthesize_option_meta(
     gates reject all nearby contracts.
     """
     sym = (underlying or "").strip().upper()
-    if not sym or spot <= 0 or notional_usd <= 0:
+    spot_f = _positive_float_or_none(spot)
+    notional_f = _positive_float_or_none(notional_usd)
+    if not sym or spot_f is None or notional_f is None:
         return None
+    target_f = _positive_float_or_none(underlying_target)
+    stop_f = _positive_float_or_none(underlying_stop)
+    confidence_f = _finite_float_or_none(confidence)
+    quality_inputs = (underlying_target, underlying_stop, confidence)
+    if any(value is not None for value in quality_inputs) and not all(
+        value is not None for value in (target_f, stop_f, confidence_f)
+    ):
+        return None
+    if confidence_f is not None:
+        confidence_f = max(0.0, min(1.0, confidence_f))
 
     from ....config import settings
     from ..strategy_parameter import get_parameter
@@ -369,7 +430,7 @@ def synthesize_option_meta(
 
     _register_synthesis_parameters(db)
 
-    target_dte = int(
+    target_dte = _clamped_int(
         get_parameter(
             db,
             STRATEGY_FAMILY,
@@ -382,18 +443,24 @@ def synthesize_option_meta(
                 )
             ),
         )
-        or DEFAULT_TARGET_DTE_DAYS
+        or DEFAULT_TARGET_DTE_DAYS,
+        default=DEFAULT_TARGET_DTE_DAYS,
+        min_value=int(TARGET_DTE_MIN_DAYS),
+        max_value=int(TARGET_DTE_MAX_DAYS),
     )
-    max_spread_pct = float(
+    max_spread_pct = _clamped_float(
         get_parameter(
             db,
             STRATEGY_FAMILY,
             "synthesis_max_spread_pct",
             default=DEFAULT_MAX_SPREAD_PCT,
         )
-        or DEFAULT_MAX_SPREAD_PCT
+        or DEFAULT_MAX_SPREAD_PCT,
+        default=DEFAULT_MAX_SPREAD_PCT,
+        min_value=MAX_SPREAD_MIN_PCT,
+        max_value=MAX_SPREAD_MAX_PCT,
     )
-    strike_increment = float(
+    strike_increment = _clamped_float(
         get_parameter(
             db,
             STRATEGY_FAMILY,
@@ -410,23 +477,28 @@ def synthesize_option_meta(
                 or DEFAULT_STRIKE_INCREMENT
             ),
         )
-        or DEFAULT_STRIKE_INCREMENT
+        or DEFAULT_STRIKE_INCREMENT,
+        default=DEFAULT_STRIKE_INCREMENT,
+        min_value=STRIKE_INCREMENT_MIN,
+        max_value=STRIKE_INCREMENT_MAX,
     )
 
-    max_contract_notional_usd = float(
+    max_contract_notional_usd = _clamped_float(
         getattr(
             settings,
             "chili_autotrader_options_max_contract_notional_usd",
             DEFAULT_MAX_CONTRACT_NOTIONAL_USD,
         )
-        or DEFAULT_MAX_CONTRACT_NOTIONAL_USD
+        or DEFAULT_MAX_CONTRACT_NOTIONAL_USD,
+        default=DEFAULT_MAX_CONTRACT_NOTIONAL_USD,
+        min_value=0.0,
     )
     contract_budget_usd = (
-        min(notional_usd, max_contract_notional_usd)
+        min(notional_f, max_contract_notional_usd)
         if max_contract_notional_usd > 0
-        else notional_usd
+        else notional_f
     )
-    base_strike = _pick_strike(spot, increment=strike_increment)
+    base_strike = _pick_strike(spot_f, increment=strike_increment)
     candidate_strikes = _candidate_strikes(base_strike, strike_increment)
     cache_ttl_s = _no_survivor_cache_ttl_seconds(settings)
     cache_key = _no_survivor_cache_key(
@@ -436,9 +508,9 @@ def synthesize_option_meta(
         strike_increment=strike_increment,
         base_strike=base_strike,
         contract_budget_usd=contract_budget_usd,
-        underlying_target=underlying_target,
-        underlying_stop=underlying_stop,
-        confidence=confidence,
+        underlying_target=target_f,
+        underlying_stop=stop_f,
+        confidence=confidence_f,
     )
     now = time.monotonic()
     cached_reject = _no_survivor_cache_hit(
@@ -476,7 +548,7 @@ def synthesize_option_meta(
         underlying=sym,
         expiration=expiration,
         venue="robinhood",
-        spot_price=float(spot),
+        spot_price=spot_f,
         n_contracts=len(candidate_strikes),
     )
 
@@ -521,7 +593,7 @@ def synthesize_option_meta(
             "synthesis_bid": round(bid, 4),
             "synthesis_ask": round(ask, 4),
             "synthesis_mid": round(mid, 4),
-            "synthesis_spot_at_pick": round(spot, 4),
+            "synthesis_spot_at_pick": round(spot_f, 4),
             "synthesis_contract_notional_usd": round(contract_notional_usd, 2),
             "synthesis_budget_usd": round(contract_budget_usd, 2),
             "synthesis_candidate_count": len(candidate_strikes),
@@ -529,7 +601,7 @@ def synthesize_option_meta(
         meta = normalize_option_meta(
             meta,
             underlying=sym,
-            current_underlying_price=spot,
+            current_underlying_price=spot_f,
             quote=quote,
         )
         quote_recorded = record_quote_snapshot(
@@ -543,21 +615,21 @@ def synthesize_option_meta(
             meta["chain_snapshot_id"] = int(chain_snapshot_id)
 
         if (
-            underlying_target is not None
-            and underlying_stop is not None
-            and confidence is not None
+            target_f is not None
+            and stop_f is not None
+            and confidence_f is not None
         ):
             quality_alert = SimpleNamespace(
                 entry_price=limit_price,
-                target_price=underlying_target,
-                stop_loss=underlying_stop,
+                target_price=target_f,
+                stop_loss=stop_f,
             )
             quality = evaluate_long_option_entry(
                 db,
                 alert=quality_alert,
                 option_meta=meta,
-                current_underlying_price=spot,
-                confidence=float(confidence),
+                current_underlying_price=spot_f,
+                confidence=confidence_f,
                 settings=settings,
             )
             meta["entry_quality"] = quality.snapshot

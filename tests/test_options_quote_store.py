@@ -80,6 +80,24 @@ def test_create_chain_snapshot_writes_lightweight_chain_row() -> None:
     assert params["spot_price"] == 715.37
 
 
+def test_create_chain_snapshot_sanitizes_bad_numeric_telemetry() -> None:
+    db = _FakeDb()
+
+    chain_id = create_chain_snapshot(
+        db,
+        underlying="spy",
+        expiration="20260619",
+        venue="Robinhood",
+        spot_price=float("inf"),
+        n_contracts=True,
+    )
+
+    assert chain_id == 123
+    _sql, params = db.calls[0]
+    assert params["spot_price"] is None
+    assert params["n_contracts"] is None
+
+
 def test_record_quote_snapshot_writes_tradeable_quote_row() -> None:
     db = _FakeDb()
 
@@ -190,6 +208,69 @@ def test_record_quote_snapshot_rejects_quote_without_positive_premium() -> None:
 
     assert ok is False
     assert db.calls == []
+
+
+def test_record_quote_snapshot_rejects_boolean_premium_quote() -> None:
+    db = _FakeDb()
+
+    ok = record_quote_snapshot(
+        db,
+        chain_id=123,
+        option_meta={
+            "underlying": "SPY",
+            "expiration": "2026-06-19",
+            "strike": 729.0,
+            "option_type": "call",
+        },
+        quote={"bid_price": True, "ask_price": False, "mark_price": False},
+    )
+
+    assert ok is False
+    assert db.calls == []
+
+
+def test_record_quote_snapshot_ignores_bad_quote_metrics_but_keeps_valid_premium() -> None:
+    db = _FakeDb()
+
+    ok = record_quote_snapshot(
+        db,
+        chain_id=123,
+        option_meta={
+            "underlying": "SPY",
+            "expiration": "2026-06-19",
+            "strike": 729.0,
+            "option_type": "call",
+        },
+        quote={
+            "bid_price": True,
+            "ask_price": "4.05",
+            "mark_price": "4.00",
+            "implied_volatility": float("inf"),
+            "open_interest": True,
+            "volume": "12.5",
+            "greeks": {
+                "delta": True,
+                "gamma": float("nan"),
+                "theta": "-0.08",
+                "vega": "0.11",
+                "rho": True,
+            },
+        },
+    )
+
+    assert ok is True
+    _sql, params = db.calls[0]
+    assert params["bid"] is None
+    assert params["ask"] == 4.05
+    assert params["last"] == 4.0
+    assert params["implied_vol"] is None
+    assert params["open_interest"] is None
+    assert params["volume"] is None
+    assert params["delta"] is None
+    assert params["gamma"] is None
+    assert params["theta"] == -0.08
+    assert params["vega"] == 0.11
+    assert params["rho"] is None
 
 
 def test_record_quote_snapshot_is_best_effort_for_incomplete_meta() -> None:
