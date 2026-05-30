@@ -43,6 +43,7 @@ import json
 import logging
 import math
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -54,11 +55,12 @@ logger = logging.getLogger(__name__)
 
 # --- Cache --------------------------------------------------------------
 
-_CACHE: dict[tuple[str, str, str, Optional[str]], tuple[float, float]] = {}
+_CACHE: "OrderedDict[tuple[str, str, str, Optional[str]], tuple[float, float]]" = OrderedDict()
 _CACHE_TTL_SEC = 60.0
+_CACHE_MAX = 512
 
 
-def _cache_get(key: tuple) -> Optional[float]:
+def _cache_get(key: tuple[str, str, str, Optional[str]]) -> Optional[float]:
     rec = _CACHE.get(key)
     if rec is None:
         return None
@@ -66,11 +68,26 @@ def _cache_get(key: tuple) -> Optional[float]:
     if expires < time.monotonic():
         _CACHE.pop(key, None)
         return None
+    _CACHE.move_to_end(key)
     return value
 
 
-def _cache_put(key: tuple, value: float) -> None:
-    _CACHE[key] = (time.monotonic() + _CACHE_TTL_SEC, value)
+def _cache_put(key: tuple[str, str, str, Optional[str]], value: float) -> None:
+    now = time.monotonic()
+    _CACHE.pop(key, None)
+    _CACHE[key] = (now + _CACHE_TTL_SEC, value)
+    _prune_cache(now)
+
+
+def _prune_cache(now: float) -> None:
+    while _CACHE:
+        oldest_key = next(iter(_CACHE))
+        expires, _value = _CACHE[oldest_key]
+        if expires >= now:
+            break
+        _CACHE.pop(oldest_key, None)
+    while len(_CACHE) > _CACHE_MAX:
+        _CACHE.popitem(last=False)
 
 
 def invalidate_cache() -> None:
