@@ -81,6 +81,7 @@ class EstimateRow:
     median_slippage_bps: float
     p90_slippage_bps: float
     avg_daily_volume_usd: float
+    # Count trades with at least one finite TCA observation; closed-row count is not enough.
     sample_trades: int
 
 
@@ -109,6 +110,16 @@ def _notional(trade: Any) -> float:
         return 0.0
 
 
+def _finite_float_or_none(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
 def _estimate_from_rows(
     *,
     ticker: str,
@@ -123,20 +134,12 @@ def _estimate_from_rows(
     slip_bps: list[float] = []
     spread_bps: list[float] = []
     notional_sum = 0.0
+    usable_trade_samples = 0
 
     for t in rows:
-        entry = None
-        exit_ = None
-        if t.tca_entry_slippage_bps is not None:
-            try:
-                entry = float(t.tca_entry_slippage_bps)
-            except Exception:
-                entry = None
-        if t.tca_exit_slippage_bps is not None:
-            try:
-                exit_ = float(t.tca_exit_slippage_bps)
-            except Exception:
-                exit_ = None
+        entry = _finite_float_or_none(getattr(t, "tca_entry_slippage_bps", None))
+        exit_ = _finite_float_or_none(getattr(t, "tca_exit_slippage_bps", None))
+        has_usable_tca = entry is not None or exit_ is not None
 
         if entry is not None:
             slip_bps.append(abs(entry))
@@ -144,6 +147,8 @@ def _estimate_from_rows(
             spread_bps.append(abs(entry))
         if exit_ is not None:
             slip_bps.append(abs(exit_))
+        if has_usable_tca:
+            usable_trade_samples += 1
         notional_sum += _notional(t)
 
     if not slip_bps:
@@ -168,7 +173,7 @@ def _estimate_from_rows(
         median_slippage_bps=_percentile(slip_bps, 0.5),
         p90_slippage_bps=_percentile(slip_bps, 0.9),
         avg_daily_volume_usd=max(0.0, adv_usd),
-        sample_trades=len(rows),
+        sample_trades=usable_trade_samples,
     )
 
 
