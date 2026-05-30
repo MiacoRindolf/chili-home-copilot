@@ -7,6 +7,14 @@ from typing import Any
 
 __all__ = [
     "CURRENT_EVIDENCE_TARGET_BRANCH",
+    "CURRENT_V18_VALIDATOR_ARTIFACT",
+    "CURRENT_V18_VALIDATOR_SHA256",
+    "CURRENT_V38_INDEX_ARTIFACT",
+    "CURRENT_V38_INDEX_SHA256",
+    "CURRENT_V17_VALIDATOR_ARTIFACT",
+    "CURRENT_V17_VALIDATOR_SHA256",
+    "CURRENT_V37_INDEX_ARTIFACT",
+    "CURRENT_V37_INDEX_SHA256",
     "CURRENT_V16_VALIDATOR_ARTIFACT",
     "CURRENT_V16_VALIDATOR_SHA256",
     "CURRENT_V36_INDEX_ARTIFACT",
@@ -29,6 +37,8 @@ __all__ = [
     "V34_POLICY",
     "V35_POLICY",
     "V36_POLICY",
+    "V37_POLICY",
+    "V38_POLICY",
     "validate_consumer_manifest",
     "validate_manifest",
 ]
@@ -37,6 +47,9 @@ __all__ = [
 CURRENT_EVIDENCE_TARGET_BRANCH = "codex/brain-work-done-marker-recovery"
 CURRENT_EVIDENCE_TARGET_REMOTE_REF = "origin/codex/brain-work-done-marker-recovery"
 
+V38_CURRENT_BRANCH_HEAD = "12ea7c6005410510897509d4a8d72052d83d33a7"
+V37_CURRENT_BRANCH_HEAD = "fc30c803c3b0ea18455195b368793fbfdddbaaae"
+V37_PREDECESSOR_4C68_HEAD = "4c68e3026f58b902fe7453bb15eabef8cfa2876b"
 V36_CURRENT_BRANCH_HEAD = "85e777c5e6e679fc55856e6d9398bfef556685d0"
 V36_PREDECESSOR_EFE9_HEAD = "efe9c14e7850265caa2137db8ddbc52d9fccdeaf"
 V36_PREDECESSOR_571_HEAD = "571445d1d6f6fdfe786d537962f4388b15add7df"
@@ -46,6 +59,36 @@ V34_PREVIOUS_GOVERNED_HEAD = "b8bee4bd26cb17cd679b74c31de98bcf4a50218f"
 V33_PRIOR_INCIDENT_HEAD = "8426169fbef6da11331a0bcd95ca77ca9f08da07"
 MERGED_PR_122_HEAD = "3ba5aacaeca3c2433e3bf5ec09d6c483e6bc2984"
 PR_123_MAIN_HEAD = "dd468151409ce2e9d467477201827d7f773db182"
+
+CURRENT_V38_INDEX_ARTIFACT = (
+    "project_ws/MLOps/OUT/20260530-080700Z-"
+    "mlops-governed-evidence-blocker-index-v38.json"
+)
+CURRENT_V38_INDEX_SHA256 = (
+    "2D7D885A2186AB3787ACD507148176EFDCA1A9A3E6A3E32999708B124DB26028"
+)
+CURRENT_V18_VALIDATOR_ARTIFACT = (
+    "project_ws/MLOps/OUT/20260530-080700Z-"
+    "pm065-v38-consumer-manifest-validator-spec-v18.json"
+)
+CURRENT_V18_VALIDATOR_SHA256 = (
+    "8EFA18F2AAC9193D80A8ED2DD9A3D0302D3EF300CA4127D3A17BEC9C29E80EC9"
+)
+
+CURRENT_V37_INDEX_ARTIFACT = (
+    "project_ws/MLOps/OUT/20260530-073900Z-"
+    "mlops-governed-evidence-blocker-index-v37.json"
+)
+CURRENT_V37_INDEX_SHA256 = (
+    "9697C64E72C2188E189B907718F0CD3D112702ED75611F3833173817EE228D9F"
+)
+CURRENT_V17_VALIDATOR_ARTIFACT = (
+    "project_ws/MLOps/OUT/20260530-073900Z-"
+    "pm065-v37-consumer-manifest-validator-spec.json"
+)
+CURRENT_V17_VALIDATOR_SHA256 = (
+    "25E78AF9AAF35F2B707680BC950FCDC924607151545F31E179E8BD1DA08DB81D"
+)
 
 CURRENT_V36_INDEX_ARTIFACT = (
     "project_ws/MLOps/OUT/20260530-070600Z-"
@@ -175,6 +218,32 @@ REQUIRED_V36_FAIL_CLOSED_EXCLUSIONS = frozenset(
     }
 )
 
+REQUIRED_V37_FAIL_CLOSED_EXCLUSIONS = REQUIRED_V36_FAIL_CLOSED_EXCLUSIONS | frozenset(
+    {
+        "post0700_85e777_v36_stream_stale_for_exact_fc30_head",
+        "post0735_fc30_current_branch_head_not_clean_source_lineage",
+        "post0735_fc30_no_github_checks_not_ci_evidence",
+        "post0735_fc30_no_branch_workflow_not_release_readiness",
+        "post0735_fc30_no_open_pr_not_pr_readiness",
+        "post0735_fc30_brain_work_lineage_requires_owner_review",
+        "post0738_fc30_dirty_bind_mount_not_runtime_trust",
+    }
+)
+
+REQUIRED_V38_FAIL_CLOSED_EXCLUSIONS = REQUIRED_V37_FAIL_CLOSED_EXCLUSIONS | frozenset(
+    {
+        "post0735_fc30_v37_stream_stale_for_exact_12ea7c_head",
+        "post0752_12ea7c_current_branch_head_not_clean_source_lineage",
+        "post0752_12ea7c_no_github_checks_not_ci_evidence",
+        "post0752_12ea7c_no_branch_workflow_not_release_readiness",
+        "post0752_12ea7c_no_open_pr_not_pr_readiness",
+        "post0752_12ea7c_recert_fastlane_cooldown_not_clean_absence_of_work",
+        "post0752_12ea7c_recert_fastlane_cooldown_not_clean_recert_resolution",
+        "post0752_12ea7c_suppressed_profitability_work_not_clean_lineage",
+        "post0752_12ea7c_cooldown_semantics_not_clean_model_health_evidence",
+    }
+)
+
 REQUIRED_V35_FAIL_CLOSED_EXCLUSIONS = frozenset(
     {
         "post0614_b8bee_v34_stream_stale_for_exact_7e394_head",
@@ -245,6 +314,21 @@ REQUIRED_V36_CONSUMER_SURFACES = frozenset(
         "position_sizing_evidence",
         "evidence_promotion",
         "model_promotion",
+    }
+)
+
+REQUIRED_V37_CONSUMER_SURFACES = REQUIRED_V36_CONSUMER_SURFACES | frozenset(
+    {
+        "brain_work_lineage",
+        "learning_reliability_evidence",
+    }
+)
+
+REQUIRED_V38_CONSUMER_SURFACES = REQUIRED_V37_CONSUMER_SURFACES | frozenset(
+    {
+        "recert_lineage",
+        "profitability_work_lineage",
+        "promotion_demotion_evidence",
     }
 )
 
@@ -342,6 +426,20 @@ REQUIRED_V36_NON_CLEARANCE_FALSE = REQUIRED_V35_NON_CLEARANCE_FALSE | frozenset(
         "approved_for_position_sizing_evidence",
     }
 )
+REQUIRED_V37_NON_CLEARANCE_FALSE = REQUIRED_V36_NON_CLEARANCE_FALSE | frozenset(
+    {
+        "approved_for_brain_work_lineage",
+        "approved_for_learning_reliability",
+    }
+)
+REQUIRED_V38_NON_CLEARANCE_FALSE = REQUIRED_V37_NON_CLEARANCE_FALSE | frozenset(
+    {
+        "approved_for_recert_resolution",
+        "approved_for_profitability_work_lineage",
+        "approved_for_promotion_demotion_evidence",
+        "approved_for_model_health_evidence",
+    }
+)
 REQUIRED_V34_NON_CLEARANCE_FALSE = REQUIRED_V35_NON_CLEARANCE_FALSE - frozenset(
     {"approved_for_runtime_refresh"}
 )
@@ -393,6 +491,32 @@ REQUIRED_V36_SOURCE_ARTIFACTS = (
         CURRENT_V35_INDEX_SHA256,
     ),
 )
+
+REQUIRED_V37_SOURCE_ARTIFACTS = (
+    (
+        "project_ws/MLOps/OUT/20260530-073800Z-current-branch-fc30c80-mlops-evidence.json",
+        "01C275D310BE4129F4DD29D755E74B7E4E0E774AC52D4974766964EBAF05D34A",
+    ),
+    (
+        "project_ws/MLOps/OUT/20260530-074000Z-fc30c80-v37-v17-binding-response.md",
+        "6F8120D899C224EA57F778C78B6A02E4BE26267F54579F7F2084E499A3FC2BF2",
+    ),
+    (
+        "project_ws/PM/OUT/20260530-074700Z-pm-fc30-v37-restart-disposition.md",
+        "5DC0067D96CD8D95401B91807F8D88677A998126F56D64C5A73B61BB4D92C018",
+    ),
+) + REQUIRED_V36_SOURCE_ARTIFACTS
+
+REQUIRED_V38_SOURCE_ARTIFACTS = (
+    (
+        "project_ws/MLOps/OUT/20260530-080600Z-current-branch-12ea7c6-mlops-evidence.json",
+        "3B38B69FC7A36E131BBD271D24F74050940ECF61F8BC81511C043B27CDBAADE4",
+    ),
+    (
+        "project_ws/MLOps/OUT/20260530-082400Z-12ea7c6-v38-v18-binding-response.md",
+        "8F8DCD3156E1B7B12BC3DA1FCE0B389E1117C44301F1A001E6091FD253FF6020",
+    ),
+) + REQUIRED_V37_SOURCE_ARTIFACTS
 
 REQUIRED_V35_SOURCE_ARTIFACTS = (
     (
@@ -521,6 +645,79 @@ REQUIRED_V36_EXCLUDED_REFERENCES = {
     ),
 }
 
+REQUIRED_V37_EXCLUDED_REFERENCES = {
+    "excluded_commit_ids": frozenset(
+        {
+            MERGED_PR_122_HEAD,
+            V33_PRIOR_INCIDENT_HEAD,
+            V34_PREVIOUS_GOVERNED_HEAD,
+            V35_INTERMEDIATE_HEAD_AFTER_B8BEE,
+            V35_CURRENT_BRANCH_HEAD,
+            V36_PREDECESSOR_571_HEAD,
+            V36_PREDECESSOR_EFE9_HEAD,
+            V36_CURRENT_BRANCH_HEAD,
+            V37_PREDECESSOR_4C68_HEAD,
+            V37_CURRENT_BRANCH_HEAD,
+            PR_123_MAIN_HEAD,
+        }
+    ),
+    "excluded_remote_refs": frozenset({CURRENT_EVIDENCE_TARGET_REMOTE_REF, "origin/main"}),
+    "excluded_branch_refs": frozenset({CURRENT_EVIDENCE_TARGET_BRANCH}),
+    "excluded_pr_refs": frozenset({"PR #122", "PR #123"}),
+    "excluded_check_run_refs": frozenset(
+        {
+            "GitHub check-runs count 0 for fc30c803c3b0ea18455195b368793fbfdddbaaae",
+            "GitHub status contexts total 0 and pending for fc30c803c3b0ea18455195b368793fbfdddbaaae",
+            "No branch workflow run for fc30c803c3b0ea18455195b368793fbfdddbaaae",
+            "PR #123 main CI run 26676647858 success applies only to dd468151409ce2e9d467477201827d7f773db182",
+        }
+    ),
+    "excluded_runtime_windows": frozenset(
+        {
+            "post-2026-05-30T07:35:02Z fc30 current branch-head stream",
+            "post-2026-05-30T06:32:55Z PR #123 main-CI-green release-block stream",
+            "post-2026-05-30T07:40:00Z active-target containment floor",
+        }
+    ),
+}
+
+REQUIRED_V38_EXCLUDED_REFERENCES = {
+    "excluded_commit_ids": frozenset(
+        {
+            MERGED_PR_122_HEAD,
+            V33_PRIOR_INCIDENT_HEAD,
+            V34_PREVIOUS_GOVERNED_HEAD,
+            V35_INTERMEDIATE_HEAD_AFTER_B8BEE,
+            V35_CURRENT_BRANCH_HEAD,
+            V36_PREDECESSOR_571_HEAD,
+            V36_PREDECESSOR_EFE9_HEAD,
+            V36_CURRENT_BRANCH_HEAD,
+            V37_PREDECESSOR_4C68_HEAD,
+            V37_CURRENT_BRANCH_HEAD,
+            V38_CURRENT_BRANCH_HEAD,
+            PR_123_MAIN_HEAD,
+        }
+    ),
+    "excluded_remote_refs": frozenset({CURRENT_EVIDENCE_TARGET_REMOTE_REF, "origin/main"}),
+    "excluded_branch_refs": frozenset({CURRENT_EVIDENCE_TARGET_BRANCH}),
+    "excluded_pr_refs": frozenset({"PR #122", "PR #123"}),
+    "excluded_check_run_refs": frozenset(
+        {
+            "GitHub check-runs count 0 for 12ea7c6005410510897509d4a8d72052d83d33a7",
+            "GitHub status contexts total 0 and pending for 12ea7c6005410510897509d4a8d72052d83d33a7",
+            "No branch workflow run for 12ea7c6005410510897509d4a8d72052d83d33a7",
+            "PR #123 main CI run 26676647858 success applies only to dd468151409ce2e9d467477201827d7f773db182",
+        }
+    ),
+    "excluded_runtime_windows": frozenset(
+        {
+            "post-2026-05-30T07:52:09Z 12ea7c current branch-head stream",
+            "post-2026-05-30T06:32:55Z PR #123 main-CI-green release-block stream",
+            "post-2026-05-30T08:24:00Z active-target containment floor",
+        }
+    ),
+}
+
 REQUIRED_V35_EXCLUDED_REFERENCES = {
     "excluded_commit_ids": frozenset(
         {
@@ -608,7 +805,56 @@ class ManifestBindingPolicy:
     required_excluded_references: dict[str, frozenset[str]]
     required_non_clearance_false: frozenset[str]
     latest_required_containment_floor_utc: str
+    lineage_required_heads: frozenset[str] = frozenset()
 
+
+V38_POLICY = ManifestBindingPolicy(
+    name="v38_v18_12ea7c_current_head",
+    accepted_target_heads=frozenset({V38_CURRENT_BRANCH_HEAD}),
+    descendant_marker_heads=frozenset({V38_CURRENT_BRANCH_HEAD}),
+    blocker_index_artifact=CURRENT_V38_INDEX_ARTIFACT,
+    blocker_index_sha256=CURRENT_V38_INDEX_SHA256,
+    validator_spec_artifact=CURRENT_V18_VALIDATOR_ARTIFACT,
+    validator_spec_sha256=CURRENT_V18_VALIDATOR_SHA256,
+    required_source_artifacts=REQUIRED_V38_SOURCE_ARTIFACTS,
+    required_fail_closed_exclusions=REQUIRED_V38_FAIL_CLOSED_EXCLUSIONS,
+    required_consumer_surfaces=REQUIRED_V38_CONSUMER_SURFACES,
+    required_excluded_references=REQUIRED_V38_EXCLUDED_REFERENCES,
+    required_non_clearance_false=REQUIRED_V38_NON_CLEARANCE_FALSE,
+    latest_required_containment_floor_utc="2026-05-30T08:24:00Z",
+    lineage_required_heads=frozenset(
+        {V37_CURRENT_BRANCH_HEAD, V38_CURRENT_BRANCH_HEAD}
+    ),
+)
+
+V37_POLICY = ManifestBindingPolicy(
+    name="v37_v17_fc30_current_head",
+    accepted_target_heads=frozenset(
+        {V37_CURRENT_BRANCH_HEAD, V37_PREDECESSOR_4C68_HEAD}
+    ),
+    descendant_marker_heads=frozenset(
+        {V37_CURRENT_BRANCH_HEAD, V37_PREDECESSOR_4C68_HEAD}
+    ),
+    blocker_index_artifact=CURRENT_V37_INDEX_ARTIFACT,
+    blocker_index_sha256=CURRENT_V37_INDEX_SHA256,
+    validator_spec_artifact=CURRENT_V17_VALIDATOR_ARTIFACT,
+    validator_spec_sha256=CURRENT_V17_VALIDATOR_SHA256,
+    required_source_artifacts=REQUIRED_V37_SOURCE_ARTIFACTS,
+    required_fail_closed_exclusions=REQUIRED_V37_FAIL_CLOSED_EXCLUSIONS,
+    required_consumer_surfaces=REQUIRED_V37_CONSUMER_SURFACES,
+    required_excluded_references=REQUIRED_V37_EXCLUDED_REFERENCES,
+    required_non_clearance_false=REQUIRED_V37_NON_CLEARANCE_FALSE,
+    latest_required_containment_floor_utc="2026-05-30T07:40:00Z",
+    lineage_required_heads=frozenset(
+        {
+            V36_CURRENT_BRANCH_HEAD,
+            V36_PREDECESSOR_EFE9_HEAD,
+            V36_PREDECESSOR_571_HEAD,
+            V37_PREDECESSOR_4C68_HEAD,
+            V37_CURRENT_BRANCH_HEAD,
+        }
+    ),
+)
 
 V36_POLICY = ManifestBindingPolicy(
     name="v36_v16_85e777_current_head",
@@ -636,6 +882,13 @@ V36_POLICY = ManifestBindingPolicy(
     required_excluded_references=REQUIRED_V36_EXCLUDED_REFERENCES,
     required_non_clearance_false=REQUIRED_V36_NON_CLEARANCE_FALSE,
     latest_required_containment_floor_utc="2026-05-30T07:02:32.9704738Z",
+    lineage_required_heads=frozenset(
+        {
+            V36_CURRENT_BRANCH_HEAD,
+            V36_PREDECESSOR_EFE9_HEAD,
+            V36_PREDECESSOR_571_HEAD,
+        }
+    ),
 )
 
 V35_POLICY = ManifestBindingPolicy(
@@ -643,9 +896,7 @@ V35_POLICY = ManifestBindingPolicy(
     accepted_target_heads=frozenset(
         {V35_CURRENT_BRANCH_HEAD, V35_INTERMEDIATE_HEAD_AFTER_B8BEE}
     ),
-    descendant_marker_heads=frozenset(
-        {V35_CURRENT_BRANCH_HEAD, V35_INTERMEDIATE_HEAD_AFTER_B8BEE}
-    ),
+    descendant_marker_heads=frozenset(),
     blocker_index_artifact=CURRENT_V35_INDEX_ARTIFACT,
     blocker_index_sha256=CURRENT_V35_INDEX_SHA256,
     validator_spec_artifact=CURRENT_V15_VALIDATOR_ARTIFACT,
@@ -690,7 +941,7 @@ V33_POLICY = ManifestBindingPolicy(
     latest_required_containment_floor_utc="2026-05-30T06:08:25Z",
 )
 
-POLICIES = (V36_POLICY, V35_POLICY, V34_POLICY, V33_POLICY)
+POLICIES = (V38_POLICY, V37_POLICY, V36_POLICY, V35_POLICY, V34_POLICY, V33_POLICY)
 
 # Backwards-compatible aliases for callers/tests created against the first PM-070 request.
 CURRENT_V34_INDEX_ARTIFACT = LEGACY_V34_INDEX_ARTIFACT
@@ -874,24 +1125,36 @@ def _require_policy_binding(
     blocker_sha = _normalize_sha(manifest.get("mlops_blocker_index_sha256"))
     validator_sha = _normalize_sha(manifest.get("mlops_validator_spec_sha256"))
 
+    def _matches_binding(candidate: ManifestBindingPolicy) -> bool:
+        return (
+            blocker_sha == candidate.blocker_index_sha256
+            or validator_sha == candidate.validator_spec_sha256
+            or blocker_artifact == candidate.blocker_index_artifact
+            or validator_artifact == candidate.validator_spec_artifact
+        )
+
     if blocker_sha == PRELIMINARY_0629_V34_INDEX_SHA256:
         errors.append("preliminary_0629_v34_index_hash_not_accepted")
     if validator_sha == PRELIMINARY_0629_V14_VALIDATOR_SHA256:
         errors.append("preliminary_0629_v14_validator_hash_not_accepted")
-    if policy is V35_POLICY and (
-        blocker_sha == LEGACY_V34_INDEX_SHA256
-        or validator_sha == LEGACY_V14_VALIDATOR_SHA256
-        or blocker_artifact == LEGACY_V34_INDEX_ARTIFACT
-        or validator_artifact == LEGACY_V14_VALIDATOR_ARTIFACT
-    ):
+    if policy is V35_POLICY and _matches_binding(V34_POLICY):
         errors.append("v34_v14_stale_for_v35_target_head")
-    if policy is V36_POLICY and (
-        blocker_sha == CURRENT_V35_INDEX_SHA256
-        or validator_sha == CURRENT_V15_VALIDATOR_SHA256
-        or blocker_artifact == CURRENT_V35_INDEX_ARTIFACT
-        or validator_artifact == CURRENT_V15_VALIDATOR_ARTIFACT
-    ):
+    if policy is V36_POLICY and _matches_binding(V35_POLICY):
         errors.append("v35_v15_stale_for_v36_target_head")
+    if policy is V36_POLICY and _matches_binding(V34_POLICY):
+        errors.append("v34_v14_stale_for_v36_target_head")
+    if policy is V37_POLICY and _matches_binding(V36_POLICY):
+        errors.append("v36_v16_stale_for_v37_target_head")
+    if policy is V37_POLICY and _matches_binding(V35_POLICY):
+        errors.append("v35_v15_stale_for_v37_target_head")
+    if policy is V37_POLICY and _matches_binding(V34_POLICY):
+        errors.append("v34_v14_stale_for_v37_target_head")
+    if policy is V38_POLICY and _matches_binding(V37_POLICY):
+        errors.append("v37_v17_stale_for_v38_target_head")
+    if policy is V38_POLICY and _matches_binding(V36_POLICY):
+        errors.append("v36_v16_stale_for_v38_target_head")
+    if policy is V38_POLICY and _matches_binding(V35_POLICY):
+        errors.append("v35_v15_stale_for_v38_target_head")
     if blocker_artifact != policy.blocker_index_artifact:
         errors.append(f"{policy.name}:blocker_index_artifact_required")
     if blocker_sha != policy.blocker_index_sha256:
@@ -907,7 +1170,7 @@ def _require_policy_lineage(
     errors: list[str],
     policy: ManifestBindingPolicy,
 ) -> None:
-    if policy is not V36_POLICY:
+    if not policy.lineage_required_heads:
         return
 
     if "evidence_target_ancestor_heads" not in manifest:
@@ -920,8 +1183,12 @@ def _require_policy_lineage(
         return
 
     observed = {str(head) for head in ancestor_heads}
-    if not observed & policy.descendant_marker_heads:
-        errors.append("v36_v16_lineage_binding_required:evidence_target_ancestor_heads")
+    if not observed & policy.lineage_required_heads:
+        lineage_version = "_".join(policy.name.split("_")[:2])
+        errors.append(
+            f"{lineage_version}_lineage_binding_required:"
+            "evidence_target_ancestor_heads"
+        )
 
 
 def _require_source_artifacts(

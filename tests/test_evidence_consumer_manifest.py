@@ -20,6 +20,11 @@ from app.services.trading.evidence_consumer_manifest import (
     REQUIRED_SAFETY_CONSTRAINTS,
     V33_POLICY,
     V34_POLICY,
+    V38_CURRENT_BRANCH_HEAD,
+    V38_POLICY,
+    V37_CURRENT_BRANCH_HEAD,
+    V37_POLICY,
+    V37_PREDECESSOR_4C68_HEAD,
     V36_CURRENT_BRANCH_HEAD,
     V36_POLICY,
     V36_PREDECESSOR_571_HEAD,
@@ -38,7 +43,11 @@ def _valid_manifest(
     ancestor_heads: list[str] | None = None,
 ) -> dict[str, object]:
     head = target_head or sorted(policy.accepted_target_heads)[0]
-    if policy is V36_POLICY and ancestor_heads is None:
+    if policy is V38_POLICY and ancestor_heads is None:
+        ancestor_heads = [V37_CURRENT_BRANCH_HEAD]
+    elif policy is V37_POLICY and ancestor_heads is None:
+        ancestor_heads = [V37_PREDECESSOR_4C68_HEAD, V36_CURRENT_BRANCH_HEAD]
+    elif policy is V36_POLICY and ancestor_heads is None:
         ancestor_heads = [V36_PREDECESSOR_EFE9_HEAD, V36_PREDECESSOR_571_HEAD]
     manifest = {
         "manifest_schema": f"sswe.consumer_manifest.{policy.name}",
@@ -83,6 +92,43 @@ def _valid_manifest(
 
 def _error_set(manifest: dict[str, object]) -> set[str]:
     return set(validate_consumer_manifest(manifest).errors)
+
+
+def test_current_v38_v18_manifest_passes_only_as_non_clearance() -> None:
+    result = validate_consumer_manifest(
+        _valid_manifest(V38_POLICY, target_head=V38_CURRENT_BRANCH_HEAD)
+    )
+
+    assert result.accepted is True
+    assert result.status == "EVIDENCE_GOVERNED_NON_CLEARANCE"
+    assert result.policy == "v38_v18_12ea7c_current_head"
+    assert result.errors == ()
+
+
+def test_current_v37_v17_manifest_passes_only_as_non_clearance() -> None:
+    result = validate_consumer_manifest(
+        _valid_manifest(V37_POLICY, target_head=V37_CURRENT_BRANCH_HEAD)
+    )
+
+    assert result.accepted is True
+    assert result.status == "EVIDENCE_GOVERNED_NON_CLEARANCE"
+    assert result.policy == "v37_v17_fc30_current_head"
+    assert result.errors == ()
+
+
+def test_v37_v17_manifest_remains_valid_for_4c68_scope() -> None:
+    result = validate_consumer_manifest(
+        _valid_manifest(
+            V37_POLICY,
+            target_head=V37_PREDECESSOR_4C68_HEAD,
+            ancestor_heads=[V36_CURRENT_BRANCH_HEAD],
+        )
+    )
+
+    assert result.accepted is True
+    assert result.status == "EVIDENCE_GOVERNED_NON_CLEARANCE"
+    assert result.policy == "v37_v17_fc30_current_head"
+    assert result.errors == ()
 
 
 def test_current_v36_v16_manifest_passes_only_as_non_clearance() -> None:
@@ -156,6 +202,55 @@ def test_v35_v15_only_manifest_for_v36_predecessor_heads_fails_closed() -> None:
         assert "v35_v15_stale_for_v36_target_head" in _error_set(manifest)
 
 
+def test_v36_v16_only_manifest_for_v37_heads_fails_closed() -> None:
+    for head in (V37_PREDECESSOR_4C68_HEAD, V37_CURRENT_BRANCH_HEAD):
+        manifest = _valid_manifest(
+            V36_POLICY,
+            target_head=head,
+            ancestor_heads=[V36_CURRENT_BRANCH_HEAD],
+        )
+
+        errors = _error_set(manifest)
+
+        assert "v36_v16_stale_for_v37_target_head" in errors
+        assert "v37_v17_fc30_current_head:blocker_index_artifact_required" in errors
+        assert "v37_v17_fc30_current_head:blocker_index_sha_required" in errors
+        assert "v37_v17_fc30_current_head:validator_spec_artifact_required" in errors
+        assert "v37_v17_fc30_current_head:validator_spec_sha_required" in errors
+
+
+def test_v37_v17_only_manifest_for_v38_current_head_fails_closed() -> None:
+    manifest = _valid_manifest(
+        V37_POLICY,
+        target_head=V38_CURRENT_BRANCH_HEAD,
+        ancestor_heads=[V37_CURRENT_BRANCH_HEAD],
+    )
+
+    errors = _error_set(manifest)
+
+    assert "v37_v17_stale_for_v38_target_head" in errors
+    assert "v38_v18_12ea7c_current_head:blocker_index_artifact_required" in errors
+    assert "v38_v18_12ea7c_current_head:blocker_index_sha_required" in errors
+    assert "v38_v18_12ea7c_current_head:validator_spec_artifact_required" in errors
+    assert "v38_v18_12ea7c_current_head:validator_spec_sha_required" in errors
+
+
+def test_v35_v15_only_manifest_for_fc30_current_head_fails_closed() -> None:
+    manifest = _valid_manifest(
+        V35_POLICY,
+        target_head=V37_CURRENT_BRANCH_HEAD,
+        ancestor_heads=[V35_CURRENT_BRANCH_HEAD],
+    )
+
+    errors = _error_set(manifest)
+
+    assert "v35_v15_stale_for_v37_target_head" in errors
+    assert "v37_v17_fc30_current_head:blocker_index_artifact_required" in errors
+    assert "v37_v17_fc30_current_head:blocker_index_sha_required" in errors
+    assert "v37_v17_fc30_current_head:validator_spec_artifact_required" in errors
+    assert "v37_v17_fc30_current_head:validator_spec_sha_required" in errors
+
+
 def test_v34_v14_only_manifest_for_intermediate_head_fails_closed() -> None:
     manifest = _valid_manifest(V34_POLICY, target_head=V35_INTERMEDIATE_HEAD_AFTER_B8BEE)
 
@@ -221,14 +316,19 @@ def test_descendant_branch_head_with_stale_lineage_fails_closed() -> None:
     assert result.status == "FAIL_CLOSED"
 
 
-def test_descendant_branch_head_requires_v35_v15_binding() -> None:
+def test_descendant_branch_head_with_only_v35_ancestry_is_not_accepted() -> None:
     manifest = _valid_manifest(
         V34_POLICY,
         target_head="1111111111111111111111111111111111111111",
         ancestor_heads=[V35_CURRENT_BRANCH_HEAD],
     )
 
-    assert "v34_v14_stale_for_v35_target_head" in _error_set(manifest)
+    errors = _error_set(manifest)
+
+    assert (
+        "unsupported_evidence_target_head:"
+        "1111111111111111111111111111111111111111"
+    ) in errors
 
 
 def test_preliminary_0629_hashes_fail_closed_for_b8bee_scope() -> None:
