@@ -1,5 +1,13 @@
 # Watcher runbook — pid 537 + Tier A health
 
+## Status
+
+**Closed 2026-05-30.** The watcher reached `COMPLETE_POSITIVE` with
+`PID_537_N=17`, `PID_537_WR=0.6471`, `PID_537_PAYOFF=13.0411`, and
+`PID_537_STAGE=promoted`. The Windows scheduled task
+`CHILI-pid537-watcher` was disabled after verification. Re-enable only if pid
+537 is demoted/reworked and needs a fresh watch window.
+
 ## What this watches
 
 The Windows scheduled task `CHILI-pid537-watcher` fires **daily at 18:00 local time** and dispatches `scripts/dispatch-pid537-watcher.ps1` via the dev daemon. The probe (`scripts/d-pid537-watcher.py`) is read-only against the chili DB and emits a structured verdict.
@@ -39,6 +47,12 @@ Followed by `--- details ---` and the full pid 537 row state.
 | **ALERT** | Mid-flight degradation OR pid 537 unexpectedly demoted | Investigate. The brain may have demoted via a path the Tier A protection doesn't cover. |
 | **REGRESSION** | Tier A protection count is 0 OR composite floor isn't firing | URGENT. The protection may have been silently disabled. Check `.env` for `CHILI_PATTERN_DEMOTE_PAYOFF_RATIO_FLOOR` and `CHILI_COMPOSITE_MIN_REALIZED_TRADES`. Rollback path: `git revert 23bde18` or restore correct env values. |
 
+Treat any table instruction to disable or unregister the watcher as an operator
+recommendation until PM/operator authorization is explicit. SRE review or idle
+patrols can publish a closeout report, but must not mutate the Windows scheduled
+task unless the request names `CHILI-pid537-watcher` and includes accepted
+owner-lane evidence.
+
 ## Operating the watcher
 
 ### Read current verdict
@@ -60,7 +74,13 @@ Or via the dev daemon (which is the path the scheduled task itself uses):
 TIMEOUT=60s .\scripts\dispatch-pid537-watcher.ps1
 ```
 
-### Disable
+### Authorized disable or removal
+
+`Disable-ScheduledTask` and `Unregister-ScheduledTask` are write actions. Before
+running either command, record the latest watcher output, exact source head,
+scheduled-task state, next run time, PM disposition, and whether Phase 5J or
+source-trust gates remain blocked. If authorization is missing, stop at a
+report-only closeout recommendation.
 
 ```powershell
 Disable-ScheduledTask -TaskName 'CHILI-pid537-watcher'
@@ -110,7 +130,8 @@ Windows Task Scheduler                       Dev Daemon                Probe
 
 ## When to retire the watcher
 
-Disable after one of:
+Retire or disable only after one of these conditions is true and the PM/operator
+authorization gate above is satisfied:
 
 - Pid 537 reaches n=15 AND a verdict (POSITIVE or NEGATIVE) is acted on.
 - Operator decides the watch is no longer useful (e.g. the brain has decisively moved 537 to `promoted` or `retired` and there's nothing left to learn).
