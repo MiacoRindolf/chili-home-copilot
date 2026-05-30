@@ -424,6 +424,7 @@ def upsert_bracket_intent(
             ticker=bracket_input.ticker,
             broker_source=broker_source,
             direction=bracket_input.direction,
+            open_only=True,
         )
     except Exception:
         # Belt-and-suspenders: resolver swallows internally, but never

@@ -36,6 +36,7 @@ def resolve_position_id(
     broker_source: str | None = None,
     direction: str | None = None,
     account_type: str | None = None,
+    open_only: bool = False,
 ) -> int | None:
     """Resolve a ``trading_positions.id`` from event/intent context.
 
@@ -53,6 +54,10 @@ def resolve_position_id(
     - broker_source or ticker is missing/empty
     - no matching ``trading_positions`` row exists
     - the DB query raises any exception (swallowed silently)
+
+    When ``open_only`` is true, closed historical identities are ignored.
+    Use that for active order/intent paths; falling back to a closed row is
+    useful for old event lineage but unsafe for fresh broker actions.
 
     Returns the ``id`` of the matched position otherwise.
     """
@@ -95,6 +100,7 @@ def resolve_position_id(
         if is_option:
             return None
 
+        state_clause = "AND state = 'open'" if open_only else ""
         row = db.execute(text(
             """
             SELECT id FROM trading_positions
@@ -103,11 +109,12 @@ def resolve_position_id(
               AND account_type = :account_type
               AND ticker = :tkr
               AND direction = :direction
+              {state_clause}
             ORDER BY
               CASE state WHEN 'open' THEN 0 ELSE 1 END,
               id DESC
             LIMIT 1
-            """
+            """.format(state_clause=state_clause)
         ), {
             "uid": uid,
             "broker": broker,

@@ -258,6 +258,7 @@ def _resolve_position_id_for_event(
     user_id: int | None,
     ticker: str | None,
     broker_source: str | None,
+    open_only: bool = False,
 ) -> int | None:
     """f-position-identity-phase-2 (2026-05-18): resolve a trading_positions.id
     for an execution event via the (user, broker, ticker, direction) natural
@@ -277,7 +278,40 @@ def _resolve_position_id_for_event(
         user_id=user_id,
         ticker=ticker,
         broker_source=broker_source,
+        open_only=open_only,
     )
+
+
+def _event_should_require_open_position(
+    *,
+    event_type: str | None,
+    status: str | None,
+    cumulative_filled_quantity: float | None,
+    payload_json: dict[str, Any] | None,
+) -> bool:
+    """Avoid linking active order telemetry to closed historical positions."""
+    event = (event_type or "").strip().lower()
+    st = (status or "").strip().lower()
+    side = str((payload_json or {}).get("side") or "").strip().lower()
+    cumulative = _safe_float(cumulative_filled_quantity) or 0.0
+
+    if side == "buy":
+        return True
+    if event in {"ack", "status", "submitting", "submit"}:
+        return True
+    if st in {
+        "queued",
+        "pending",
+        "confirmed",
+        "open",
+        "unconfirmed",
+        "submitted",
+        "accepted",
+    }:
+        return True
+    if cumulative <= 0 and st in {"cancelled", "canceled", "rejected", "failed", "expired"}:
+        return True
+    return False
 
 
 def record_execution_event(
@@ -334,6 +368,12 @@ def record_execution_event(
         user_id=user_id,
         ticker=ticker,
         broker_source=broker,
+        open_only=_event_should_require_open_position(
+            event_type=event_type,
+            status=status,
+            cumulative_filled_quantity=cumulative_filled_quantity,
+            payload_json=payload_json,
+        ),
     )
     event_row = TradingExecutionEvent(
         user_id=user_id,

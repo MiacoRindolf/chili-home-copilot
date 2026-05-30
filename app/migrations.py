@@ -19537,6 +19537,149 @@ def _migration_279_project_autonomy_architect_reviews(conn) -> None:
     logger.info("[mig279] project autonomy architect reviews installed")
 
 
+def _migration_285_project_autonomy_agent_os_v1(conn) -> None:
+    """Repo-scoped Autopilot agent profiles, safe archives, and operator questions."""
+
+    tables = _tables(conn)
+
+    if "project_autonomy_agent_profiles" not in tables:
+        conn.execute(text("""
+            CREATE TABLE project_autonomy_agent_profiles (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                repo_id INTEGER NOT NULL REFERENCES code_repos(id) ON DELETE CASCADE,
+                profile_key VARCHAR(80) NOT NULL,
+                name VARCHAR(160) NOT NULL,
+                role VARCHAR(80) NOT NULL,
+                tier VARCHAR(24) NOT NULL DEFAULT 'micro',
+                status VARCHAR(24) NOT NULL DEFAULT 'paused',
+                model_policy VARCHAR(40) NOT NULL DEFAULT 'local_first',
+                prompt_setting_json TEXT NOT NULL DEFAULT '{}',
+                permissions_json TEXT NOT NULL DEFAULT '{}',
+                schedule_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+                schedule_json TEXT NOT NULL DEFAULT '{}',
+                parent_profile_id INTEGER NULL REFERENCES project_autonomy_agent_profiles(id) ON DELETE SET NULL,
+                generated BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_project_autonomy_agent_profiles_repo_key "
+            "ON project_autonomy_agent_profiles(repo_id, profile_key)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_project_autonomy_agent_profiles_user_repo "
+            "ON project_autonomy_agent_profiles(user_id, repo_id, status)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_project_autonomy_agent_profiles_tier "
+            "ON project_autonomy_agent_profiles(tier, role)"
+        ))
+
+    if "project_autonomy_agent_schedules" not in tables:
+        conn.execute(text("""
+            CREATE TABLE project_autonomy_agent_schedules (
+                id SERIAL PRIMARY KEY,
+                profile_id INTEGER NOT NULL REFERENCES project_autonomy_agent_profiles(id) ON DELETE CASCADE,
+                status VARCHAR(24) NOT NULL DEFAULT 'paused',
+                rrule VARCHAR(240) NULL,
+                budget_json TEXT NOT NULL DEFAULT '{}',
+                last_run_at TIMESTAMP NULL,
+                next_run_at TIMESTAMP NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_project_autonomy_agent_schedules_profile "
+            "ON project_autonomy_agent_schedules(profile_id, status)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_project_autonomy_agent_schedules_next "
+            "ON project_autonomy_agent_schedules(next_run_at)"
+        ))
+
+    if "project_autonomy_delegations" not in tables:
+        conn.execute(text("""
+            CREATE TABLE project_autonomy_delegations (
+                id SERIAL PRIMARY KEY,
+                parent_run_id VARCHAR(64) NOT NULL,
+                child_run_id VARCHAR(64) NOT NULL,
+                parent_agent_profile_id INTEGER NULL REFERENCES project_autonomy_agent_profiles(id) ON DELETE SET NULL,
+                child_agent_profile_id INTEGER NULL REFERENCES project_autonomy_agent_profiles(id) ON DELETE SET NULL,
+                status VARCHAR(24) NOT NULL DEFAULT 'planned',
+                intent TEXT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_project_autonomy_delegations_parent "
+            "ON project_autonomy_delegations(parent_run_id)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_project_autonomy_delegations_child "
+            "ON project_autonomy_delegations(child_run_id)"
+        ))
+
+    if "project_autonomy_operator_questions" not in tables:
+        conn.execute(text("""
+            CREATE TABLE project_autonomy_operator_questions (
+                id SERIAL PRIMARY KEY,
+                run_id VARCHAR(64) NULL,
+                agent_profile_id INTEGER NULL REFERENCES project_autonomy_agent_profiles(id) ON DELETE SET NULL,
+                user_id INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                repo_id INTEGER NULL REFERENCES code_repos(id) ON DELETE SET NULL,
+                question TEXT NOT NULL,
+                context_json TEXT NOT NULL DEFAULT '{}',
+                status VARCHAR(24) NOT NULL DEFAULT 'pending',
+                answer TEXT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                answered_at TIMESTAMP NULL
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_project_autonomy_operator_questions_run "
+            "ON project_autonomy_operator_questions(run_id, status)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_project_autonomy_operator_questions_agent "
+            "ON project_autonomy_operator_questions(agent_profile_id, status)"
+        ))
+
+    if "project_autonomy_runs" in tables:
+        cols = _columns(conn, "project_autonomy_runs")
+        additions = {
+            "agent_profile_id": (
+                "INTEGER NULL REFERENCES project_autonomy_agent_profiles(id) "
+                "ON DELETE SET NULL"
+            ),
+            "parent_run_id": "VARCHAR(64) NULL",
+            "agent_snapshot_json": "TEXT NOT NULL DEFAULT '{}'",
+            "archived_at": "TIMESTAMP NULL",
+            "archive_reason": "TEXT NULL",
+        }
+        for col, ddl in additions.items():
+            if col not in cols:
+                conn.execute(text(f"ALTER TABLE project_autonomy_runs ADD COLUMN {col} {ddl}"))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_project_autonomy_runs_agent_profile "
+            "ON project_autonomy_runs(agent_profile_id, created_at DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_project_autonomy_runs_parent_run "
+            "ON project_autonomy_runs(parent_run_id)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_project_autonomy_runs_archived "
+            "ON project_autonomy_runs(archived_at)"
+        ))
+
+    conn.commit()
+    logger.info("[mig285] project autonomy agent OS v1 installed")
+
+
 def _migration_281_llm_cost_observability(conn) -> None:
     """Add provider/cost fields and seed trading LLM gateway purposes."""
 
@@ -19807,6 +19950,312 @@ def _migration_283_position_identity_phase5h_physical_rename(conn) -> None:
     logger.info(
         "[mig283] trading_trades physically renamed to trading_management_envelopes "
         "with trading_trades compatibility view"
+    )
+
+
+def _migration_284_position_identity_option_link_guard(conn) -> None:
+    """Prevent option envelopes from linking to underlying equity positions.
+
+    The Phase 5A trigger predates first-class option identity and linked new
+    envelopes to ``trading_positions`` by user/broker/ticker/direction. That
+    natural key is correct for equity/crypto inventory, but it is unsafe for
+    options because ``trading_positions`` has no contract dimension today. A
+    SPY call must not inherit the SPY share position_id.
+    """
+
+    conn.execute(text("""
+        CREATE OR REPLACE FUNCTION trading_trades_phase5a_after_insert()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+            v_decision_id BIGINT;
+            v_position_id BIGINT;
+            v_snapshot JSONB;
+        BEGIN
+            BEGIN
+                IF NEW.indicator_snapshot IS NOT NULL THEN
+                    v_snapshot := NEW.indicator_snapshot::jsonb;
+                ELSE
+                    v_snapshot := NULL;
+                END IF;
+            EXCEPTION WHEN others THEN
+                v_snapshot := NULL;
+            END;
+
+            IF NEW.broker_source IS NOT NULL
+               AND btrim(NEW.broker_source) <> ''
+               AND LOWER(COALESCE(NEW.asset_kind, '')) NOT IN ('option', 'options')
+               AND NOT (
+                   COALESCE(v_snapshot ? 'option_meta', FALSE)
+                   OR COALESCE(v_snapshot ? 'options_path', FALSE)
+                   OR COALESCE((v_snapshot -> 'breakout_alert') ? 'option_meta', FALSE)
+               ) THEN
+                SELECT p.id
+                  INTO v_position_id
+                  FROM trading_positions p
+                 WHERE COALESCE(p.user_id, -1) = COALESCE(NEW.user_id, -1)
+                   AND p.broker_source = LOWER(NEW.broker_source)
+                   AND p.account_type = CASE
+                       WHEN LOWER(NEW.broker_source) = 'coinbase' THEN 'spot'
+                       ELSE 'cash'
+                   END
+                   AND p.ticker = NEW.ticker
+                   AND p.direction = COALESCE(NULLIF(LOWER(NEW.direction), ''), 'long')
+                 ORDER BY
+                   CASE WHEN p.current_envelope_id = NEW.id THEN 0 ELSE 1 END,
+                   CASE WHEN p.state = 'open' THEN 0 ELSE 1 END,
+                   p.id DESC
+                 LIMIT 1;
+            END IF;
+
+            INSERT INTO trading_decisions (
+                source_trade_id, user_id, ticker, direction, entry_date,
+                indicator_snapshot, tca_reference_entry_price, scan_pattern_id,
+                related_alert_id, strategy_proposal_id, pattern_tags,
+                mesh_entry_correlation_id, auto_trader_version, asset_kind,
+                notes, created_at
+            ) VALUES (
+                NEW.id,
+                NEW.user_id,
+                NEW.ticker,
+                COALESCE(NULLIF(LOWER(NEW.direction), ''), 'long'),
+                COALESCE(NEW.entry_date, NOW()),
+                v_snapshot,
+                NEW.tca_reference_entry_price,
+                NEW.scan_pattern_id,
+                NEW.related_alert_id,
+                NEW.strategy_proposal_id,
+                NEW.pattern_tags,
+                NEW.mesh_entry_correlation_id,
+                NEW.auto_trader_version,
+                NEW.asset_kind,
+                ('phase5a_insert_trigger_from_trade_id=' || NEW.id::text),
+                COALESCE(NEW.entry_date, NOW())
+            )
+            ON CONFLICT (source_trade_id)
+            DO UPDATE SET source_trade_id = EXCLUDED.source_trade_id
+            RETURNING id INTO v_decision_id;
+
+            UPDATE trading_trades
+               SET decision_id = COALESCE(decision_id, v_decision_id),
+                   position_id = COALESCE(position_id, v_position_id)
+             WHERE id = NEW.id;
+
+            RETURN NEW;
+        END;
+        $$;
+    """))
+
+    target_relation = conn.execute(text("""
+        SELECT CASE
+            WHEN to_regclass('public.trading_management_envelopes') IS NOT NULL
+                THEN 'trading_management_envelopes'
+            WHEN to_regclass('public.trading_trades') IS NOT NULL
+                THEN 'trading_trades'
+            ELSE NULL
+        END
+    """)).scalar()
+
+    if target_relation:
+        conn.execute(text(
+            "DROP TRIGGER IF EXISTS trg_trading_trades_phase5a_after_insert "
+            f"ON {target_relation}"
+        ))
+        conn.execute(text(
+            "CREATE TRIGGER trg_trading_trades_phase5a_after_insert "
+            f"AFTER INSERT ON {target_relation} "
+            "FOR EACH ROW "
+            "EXECUTE FUNCTION trading_trades_phase5a_after_insert()"
+        ))
+
+        result = conn.execute(text(f"""
+            UPDATE {target_relation} t
+               SET position_id = NULL
+              FROM trading_positions p
+             WHERE t.position_id = p.id
+               AND (
+                   LOWER(COALESCE(t.asset_kind, '')) IN ('option', 'options')
+                   OR COALESCE(t.indicator_snapshot ? 'option_meta', FALSE)
+                   OR COALESCE(t.indicator_snapshot ? 'options_path', FALSE)
+                   OR COALESCE((t.indicator_snapshot -> 'breakout_alert') ? 'option_meta', FALSE)
+               )
+               AND LOWER(COALESCE(p.asset_kind, '')) NOT IN ('option', 'options')
+        """))
+        detached = int(result.rowcount or 0)
+    else:
+        detached = 0
+
+    conn.commit()
+    logger.info(
+        "[mig284] option position-link guard installed; detached %d option envelopes",
+        detached,
+    )
+
+
+def _migration_286_position_identity_active_link_guard(conn) -> None:
+    """Prevent fresh active envelopes from inheriting closed positions.
+
+    Phase 5A's trade insert trigger linked new envelopes to the best matching
+    ``trading_positions`` row. It preferred open rows but still fell back to
+    closed historical identities. That is acceptable for offline lineage
+    backfills, but unsafe for live active orders: an unfilled Coinbase maker
+    entry can look attached to old closed inventory and pollute exposure,
+    bracket, stop, and cash-deployment readers.
+
+    This replaces the trigger so new non-option envelopes only link to
+    broker-live position identities, then detaches zero-fill active envelopes
+    and active bracket intents already linked to closed/zero identities.
+    """
+
+    conn.execute(text("""
+        CREATE OR REPLACE FUNCTION trading_trades_phase5a_after_insert()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        DECLARE
+            v_decision_id BIGINT;
+            v_position_id BIGINT;
+            v_snapshot JSONB;
+        BEGIN
+            BEGIN
+                IF NEW.indicator_snapshot IS NOT NULL THEN
+                    v_snapshot := NEW.indicator_snapshot::jsonb;
+                ELSE
+                    v_snapshot := NULL;
+                END IF;
+            EXCEPTION WHEN others THEN
+                v_snapshot := NULL;
+            END;
+
+            IF NEW.broker_source IS NOT NULL
+               AND btrim(NEW.broker_source) <> ''
+               AND LOWER(COALESCE(NEW.asset_kind, '')) NOT IN ('option', 'options')
+               AND NOT (
+                   COALESCE(v_snapshot ? 'option_meta', FALSE)
+                   OR COALESCE(v_snapshot ? 'options_path', FALSE)
+                   OR COALESCE((v_snapshot -> 'breakout_alert') ? 'option_meta', FALSE)
+               ) THEN
+                SELECT p.id
+                  INTO v_position_id
+                  FROM trading_positions p
+                 WHERE COALESCE(p.user_id, -1) = COALESCE(NEW.user_id, -1)
+                   AND p.broker_source = LOWER(NEW.broker_source)
+                   AND p.account_type = CASE
+                       WHEN LOWER(NEW.broker_source) = 'coinbase' THEN 'spot'
+                       ELSE 'cash'
+                   END
+                   AND p.ticker = NEW.ticker
+                   AND p.direction = COALESCE(NULLIF(LOWER(NEW.direction), ''), 'long')
+                   AND p.state = 'open'
+                   AND ABS(COALESCE(p.current_quantity, 0)) > 0
+                 ORDER BY
+                   CASE WHEN p.current_envelope_id = NEW.id THEN 0 ELSE 1 END,
+                   p.id DESC
+                 LIMIT 1;
+            END IF;
+
+            INSERT INTO trading_decisions (
+                source_trade_id, user_id, ticker, direction, entry_date,
+                indicator_snapshot, tca_reference_entry_price, scan_pattern_id,
+                related_alert_id, strategy_proposal_id, pattern_tags,
+                mesh_entry_correlation_id, auto_trader_version, asset_kind,
+                notes, created_at
+            ) VALUES (
+                NEW.id,
+                NEW.user_id,
+                NEW.ticker,
+                COALESCE(NULLIF(LOWER(NEW.direction), ''), 'long'),
+                COALESCE(NEW.entry_date, NOW()),
+                v_snapshot,
+                NEW.tca_reference_entry_price,
+                NEW.scan_pattern_id,
+                NEW.related_alert_id,
+                NEW.strategy_proposal_id,
+                NEW.pattern_tags,
+                NEW.mesh_entry_correlation_id,
+                NEW.auto_trader_version,
+                NEW.asset_kind,
+                ('phase5a_insert_trigger_from_trade_id=' || NEW.id::text),
+                COALESCE(NEW.entry_date, NOW())
+            )
+            ON CONFLICT (source_trade_id)
+            DO UPDATE SET source_trade_id = EXCLUDED.source_trade_id
+            RETURNING id INTO v_decision_id;
+
+            UPDATE trading_trades
+               SET decision_id = COALESCE(decision_id, v_decision_id),
+                   position_id = COALESCE(position_id, v_position_id)
+             WHERE id = NEW.id;
+
+            RETURN NEW;
+        END;
+        $$;
+    """))
+
+    target_relation = conn.execute(text("""
+        SELECT CASE
+            WHEN to_regclass('public.trading_management_envelopes') IS NOT NULL
+                THEN 'trading_management_envelopes'
+            WHEN to_regclass('public.trading_trades') IS NOT NULL
+                THEN 'trading_trades'
+            ELSE NULL
+        END
+    """)).scalar()
+
+    if target_relation:
+        conn.execute(text(
+            "DROP TRIGGER IF EXISTS trg_trading_trades_phase5a_after_insert "
+            f"ON {target_relation}"
+        ))
+        conn.execute(text(
+            "CREATE TRIGGER trg_trading_trades_phase5a_after_insert "
+            f"AFTER INSERT ON {target_relation} "
+            "FOR EACH ROW "
+            "EXECUTE FUNCTION trading_trades_phase5a_after_insert()"
+        ))
+
+        trade_result = conn.execute(text(f"""
+            UPDATE {target_relation} t
+               SET position_id = NULL
+              FROM trading_positions p
+             WHERE t.position_id = p.id
+               AND LOWER(COALESCE(t.status, '')) IN (
+                   'working', 'pending', 'queued', 'submitted'
+               )
+               AND COALESCE(t.filled_quantity, 0) <= 0
+               AND (
+                   p.state <> 'open'
+                   OR ABS(COALESCE(p.current_quantity, 0)) <= 0
+               )
+        """))
+        detached_trades = int(trade_result.rowcount or 0)
+    else:
+        detached_trades = 0
+
+    intent_result = conn.execute(text("""
+        UPDATE trading_bracket_intents bi
+           SET position_id = NULL,
+               updated_at = NOW(),
+               last_diff_reason = 'position_identity_active_link_guard'
+          FROM trading_positions p
+         WHERE bi.position_id = p.id
+           AND LOWER(COALESCE(bi.intent_state, '')) IN (
+               'intent', 'working', 'pending', 'queued'
+           )
+           AND (
+               p.state <> 'open'
+               OR ABS(COALESCE(p.current_quantity, 0)) <= 0
+           )
+    """))
+    detached_intents = int(intent_result.rowcount or 0)
+
+    conn.commit()
+    logger.info(
+        "[mig286] active position-link guard installed; "
+        "detached_trades=%d detached_intents=%d",
+        detached_trades,
+        detached_intents,
     )
 
 
@@ -20157,6 +20606,12 @@ MIGRATIONS = [
      _migration_282_autotrader_imminent_selector_indexes),
     ("283_position_identity_phase5h_physical_rename",
      _migration_283_position_identity_phase5h_physical_rename),
+    ("284_position_identity_option_link_guard",
+     _migration_284_position_identity_option_link_guard),
+    ("285_project_autonomy_agent_os_v1",
+     _migration_285_project_autonomy_agent_os_v1),
+    ("286_position_identity_active_link_guard",
+     _migration_286_position_identity_active_link_guard),
 ]
 
 

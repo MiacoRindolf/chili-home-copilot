@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from app.services.trading.execution_audit import _event_should_require_open_position
 from app.services.trading.position_resolver import resolve_position_id
 
 
@@ -72,3 +73,42 @@ def test_equity_position_resolution_defaults_coinbase_to_spot_account() -> None:
     )
 
     assert db.params["account_type"] == "spot"
+
+
+def test_open_only_position_resolution_filters_closed_identities() -> None:
+    db = _Db(row=None)
+
+    assert (
+        resolve_position_id(
+            db,
+            user_id=1,
+            broker_source="coinbase",
+            ticker="ACX-USD",
+            direction="long",
+            open_only=True,
+        )
+        is None
+    )
+
+    assert "AND state = 'open'" in db.sql
+
+
+def test_active_order_events_require_open_position_identity() -> None:
+    assert _event_should_require_open_position(
+        event_type="ack",
+        status="open",
+        cumulative_filled_quantity=0,
+        payload_json={"side": "buy"},
+    )
+    assert _event_should_require_open_position(
+        event_type="status",
+        status="cancelled",
+        cumulative_filled_quantity=0,
+        payload_json={},
+    )
+    assert not _event_should_require_open_position(
+        event_type="fill",
+        status="filled",
+        cumulative_filled_quantity=10,
+        payload_json={"side": "sell"},
+    )
