@@ -2,7 +2,7 @@
 
 Date: 2026-05-30
 
-Status: SHIPPED default-off. Live flip pending.
+Status: PROMOTED. Live flag is ON.
 
 ## What Changed
 
@@ -19,7 +19,7 @@ The switched reader surface is the realized-trade aggregate inside
 No candidate scoring math, portfolio crowding penalty, recert rules, lifecycle
 staging behavior, or write paths changed.
 
-## Verification
+## Default-Off Verification
 
 Focused tests:
 
@@ -55,3 +55,53 @@ ALPHA_MATCH True
 
 Leave or set `CHILI_PHASE5K_ALPHA_PORTFOLIO_GATE_USE_ENVELOPES=false`, then
 recreate the consumer worker(s).
+
+## Live Soak
+
+Flag flipped:
+
+```text
+CHILI_PHASE5K_ALPHA_PORTFOLIO_GATE_USE_ENVELOPES=true
+```
+
+Consumers recreated:
+
+- `chili`
+- `scheduler-worker`
+- `brain-work-dispatcher`
+
+Runtime flag visibility:
+
+```text
+chili=true
+scheduler-worker=true
+brain-work-dispatcher=true
+```
+
+Post-flip verification:
+
+```text
+ALPHA_ROWS_OLD 446
+ALPHA_ROWS_NEW 446
+ALPHA_MATCH True
+Phase 5K-A: COMPLETE_POSITIVE, PARITY_MISMATCHES=0
+Phase 5I: COMPLETE_POSITIVE
+```
+
+The scheduled alpha portfolio maintenance job fired during the soak and
+completed successfully:
+
+```text
+job_id=alpha_portfolio_gate_maintenance phase=ok duration_ms=13303
+active_pattern_count=446
+updates_written=446
+audit_rows_written=5
+full_promotion_blocked=True
+pilot_risk_allowed=True
+```
+
+Post-flip log scan:
+
+```text
+alpha-portfolio/relation/query errors: none
+```
