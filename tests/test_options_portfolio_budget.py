@@ -44,7 +44,7 @@ class _Db:
                     )
                 ]
             )
-        if "FROM trading_trades" in sql:
+        if "FROM trading_management_envelopes" in sql:
             return _Result(
                 rows=[
                     (
@@ -70,7 +70,7 @@ class _MalformedTradeQuantityDb:
         sql = str(stmt)
         if "FROM options_position" in sql:
             return _Result(rows=[])
-        if "FROM trading_trades" in sql:
+        if "FROM trading_management_envelopes" in sql:
             return _Result(
                 rows=[
                     (
@@ -115,7 +115,7 @@ class _MalformedPositionQuantityDb:
                     )
                 ]
             )
-        if "FROM trading_trades" in sql:
+        if "FROM trading_management_envelopes" in sql:
             return _Result(rows=[])
         if "FROM options_greeks_budget" in sql:
             return _Result(row=None)
@@ -127,7 +127,7 @@ class _MalformedPositionLegsJsonDb:
         sql = str(stmt)
         if "FROM options_position" in sql:
             return _Result(rows=[("{bad-json",)])
-        if "FROM trading_trades" in sql:
+        if "FROM trading_management_envelopes" in sql:
             return _Result(rows=[])
         if "FROM options_greeks_budget" in sql:
             return _Result(row=None)
@@ -153,7 +153,7 @@ class _SignedPositionQuantityDb:
                     )
                 ]
             )
-        if "FROM trading_trades" in sql:
+        if "FROM trading_management_envelopes" in sql:
             return _Result(rows=[])
         if "FROM options_greeks_budget" in sql:
             return _Result(row=None)
@@ -165,7 +165,7 @@ class _ZeroTradeQuantityWithMetaFallbackDb:
         sql = str(stmt)
         if "FROM options_position" in sql:
             return _Result(rows=[])
-        if "FROM trading_trades" in sql:
+        if "FROM trading_management_envelopes" in sql:
             return _Result(
                 rows=[
                     (
@@ -192,7 +192,7 @@ class _OpenTradeMissingOptionMetaDb:
         sql = str(stmt)
         if "FROM options_position" in sql:
             return _Result(rows=[])
-        if "FROM trading_trades" in sql:
+        if "FROM trading_management_envelopes" in sql:
             return _Result(rows=[(1, {"options_path": {"selected": True}})])
         if "FROM options_greeks_budget" in sql:
             return _Result(row=None)
@@ -204,7 +204,7 @@ class _OpenTradeGreeksUnavailableDb:
         sql = str(stmt)
         if "FROM options_position" in sql:
             return _Result(rows=[])
-        if "FROM trading_trades" in sql:
+        if "FROM trading_management_envelopes" in sql:
             raise RuntimeError("trade projection unavailable")
         if "FROM options_greeks_budget" in sql:
             return _Result(row=None)

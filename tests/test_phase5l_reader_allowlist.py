@@ -31,14 +31,6 @@ ALLOWED_LINE_COUNTS: dict[tuple[str, str], int] = {
         "FROM trading_trades AS t",
     ): 2,
     (
-        "app/services/trading/crypto/pattern_miner.py",
-        "FROM trading_trades t",
-    ): 1,
-    (
-        "app/services/trading/options/portfolio_budget.py",
-        "FROM trading_trades",
-    ): 1,
-    (
         "app/services/trading/pattern_regime_ledger.py",
         "FROM trading_trades t",
     ): 4,
@@ -84,5 +76,11 @@ def test_no_new_raw_trading_trades_live_reader_sql() -> None:
         for key, count in sorted(seen.items())
         if count > ALLOWED_LINE_COUNTS.get(key, 0)
     }
+    stale_allowlist = {
+        key: expected
+        for key, expected in sorted(ALLOWED_LINE_COUNTS.items())
+        if seen.get(key, 0) < expected
+    }
 
     assert unexpected == {}
+    assert stale_allowlist == {}

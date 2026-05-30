@@ -59,6 +59,8 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from ..management_envelopes import MANAGEMENT_ENVELOPES_RELATION
+
 logger = logging.getLogger(__name__)
 LOG_PREFIX = "[crypto_miner]"
 
@@ -176,12 +178,12 @@ def discover_crypto_winners(
     Trades without a usable indicator_snapshot are filtered out.
     """
     rows = sess.execute(text(
-        """
+        f"""
         SELECT t.id AS trade_id, t.ticker, t.scan_pattern_id,
                t.pnl, t.entry_price, t.exit_price,
                t.entry_date, t.exit_date,
                t.indicator_snapshot
-        FROM trading_trades t
+        FROM {MANAGEMENT_ENVELOPES_RELATION} t
         WHERE t.asset_kind = 'crypto'
           AND t.status = 'closed'
           AND t.pnl IS NOT NULL

@@ -31,6 +31,7 @@ from .contracts import (
     parse_contract_quantity,
 )
 from .strategies import StrategyProposal
+from ..management_envelopes import MANAGEMENT_ENVELOPES_RELATION
 
 logger = logging.getLogger(__name__)
 GREEK_KEYS = ("delta", "gamma", "theta", "vega")
@@ -339,9 +340,9 @@ def _sum_open_trade_greeks(db: Session, user_id: Optional[int]) -> dict:
     try:
         rows = db.execute(
             text(
-                """
+                f"""
                 SELECT quantity, indicator_snapshot
-                FROM trading_trades
+                FROM {MANAGEMENT_ENVELOPES_RELATION}
                 WHERE (user_id = :uid OR :uid IS NULL)
                   AND status IN ('open', 'working')
                   AND (
