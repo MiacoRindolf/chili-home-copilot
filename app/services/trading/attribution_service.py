@@ -9,6 +9,8 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from .management_envelopes import MANAGEMENT_ENVELOPES_RELATION
+
 
 def _scan_patterns_by_id(db: Session, pattern_ids: set[int]) -> dict[int, Any]:
     ids = sorted({int(pid) for pid in pattern_ids if int(pid) > 0})
@@ -54,7 +56,7 @@ def _closed_pattern_live_stats(
     """Aggregate closed-trade pattern stats in the database for the attribution endpoint."""
     rows = db.execute(
         text(
-            """
+            f"""
             SELECT
                 scan_pattern_id,
                 COUNT(*)::bigint AS live_closed_trades,
@@ -63,7 +65,7 @@ def _closed_pattern_live_stats(
                 AVG(COALESCE(pnl, 0))::double precision AS live_avg_pnl,
                 AVG(tca_entry_slippage_bps)::double precision AS live_avg_entry_slippage_bps,
                 AVG(tca_exit_slippage_bps)::double precision AS live_avg_exit_slippage_bps
-              FROM trading_trades
+              FROM {MANAGEMENT_ENVELOPES_RELATION}
              WHERE user_id = :user_id
                AND status = 'closed'
                AND scan_pattern_id IS NOT NULL

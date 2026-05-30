@@ -40,6 +40,8 @@ from typing import Any, Optional
 
 from sqlalchemy import text
 
+from .management_envelopes import MANAGEMENT_ENVELOPES_RELATION
+
 logger = logging.getLogger(__name__)
 
 
@@ -56,7 +58,7 @@ REASON_CAP_POSITIONS = "venue_concurrent_positions_cap_exceeded"
 
 PHASE5K_COINBASE_CAP_ENV = "CHILI_PHASE5K_COINBASE_CAP_USE_ENVELOPES"
 _COINBASE_CAP_COMPAT_RELATION = "trading_trades"
-_COINBASE_CAP_ENVELOPE_RELATION = "trading_management_envelopes"
+_COINBASE_CAP_ENVELOPE_RELATION = MANAGEMENT_ENVELOPES_RELATION
 
 
 @dataclass(frozen=True)
@@ -447,9 +449,9 @@ def _coinbase_tca_backing_usable_samples(
     window_days: int,
 ) -> int | None:
     try:
-        result = db.execute(text("""
+        result = db.execute(text(f"""
             SELECT CAST(COUNT(*) AS INTEGER) AS usable_samples
-            FROM trading_trades
+            FROM {MANAGEMENT_ENVELOPES_RELATION}
             WHERE UPPER(ticker) = UPPER(:ticker)
               AND status = 'closed'
               AND LOWER(COALESCE(direction, 'long')) = LOWER(:side)

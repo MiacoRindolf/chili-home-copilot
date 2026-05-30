@@ -1,3 +1,6 @@
+import inspect
+
+from app.services.trading import attribution_service
 from app.services.trading.attribution_service import (
     _top_high_slippage_trades,
     _top_pattern_deltas,
@@ -40,3 +43,10 @@ def test_top_pattern_deltas_handles_outperformers_and_underperformers() -> None:
 def test_attribution_top_helpers_empty_for_non_positive_limits() -> None:
     assert _top_high_slippage_trades([{"total_slippage_bps": 1.0}], 0) == []
     assert _top_pattern_deltas([{"delta_pct": 1.0}], 0, reverse=True) == []
+
+
+def test_closed_pattern_live_stats_reads_management_envelopes_contract() -> None:
+    source = inspect.getsource(attribution_service._closed_pattern_live_stats)
+
+    assert "MANAGEMENT_ENVELOPES_RELATION" in source
+    assert "FROM trading_trades" not in source

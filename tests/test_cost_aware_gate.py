@@ -21,6 +21,7 @@ Helper-level (no DB except cap test).
 """
 from __future__ import annotations
 
+import inspect
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -60,6 +61,13 @@ def _settings_stub(
         chili_coinbase_cost_gate_min_tca_samples=min_tca_samples,
         chili_broker_selector_rh_crypto_degraded_fallback_enabled=False,
     )
+
+
+def test_tca_backing_sample_reader_uses_management_envelopes_contract() -> None:
+    source = inspect.getsource(cag._coinbase_tca_backing_usable_samples)
+
+    assert "MANAGEMENT_ENVELOPES_RELATION" in source
+    assert "FROM trading_trades" not in source
 
 
 class _FakeCapRows:

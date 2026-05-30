@@ -14,6 +14,10 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 
+MANAGEMENT_ENVELOPES_RELATION = "trading_management_envelopes"
+LEGACY_TRADES_COMPAT_RELATION = "trading_trades"
+
+
 @dataclass(frozen=True)
 class Phase5BParitySummary:
     valid_trades_missing_decision: int
