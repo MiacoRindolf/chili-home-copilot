@@ -285,7 +285,12 @@ def cost_aware_min_edge_gate(
             tca_reason = str(tca_snapshot.get("reason") or "")
             reason = (
                 REASON_GATE_TCA_INVALID
-                if tca_reason in {"invalid_tca_estimate", "usable_sample_check_failed"}
+                if tca_reason
+                in {
+                    "invalid_tca_estimate",
+                    "tca_estimate_query_failed",
+                    "usable_sample_check_failed",
+                }
                 else REASON_GATE_TCA_UNPROVEN
             )
             return CostGateDecision(
@@ -338,7 +343,19 @@ def _coinbase_tca_cost_bps(
             LIMIT 1
         """), {"ticker": ticker, "side": side}).mappings().first()
     except Exception:
-        return 0, None
+        logger.warning(
+            "[cost_aware_gate] TCA estimate query failed for %s/%s",
+            ticker,
+            side,
+            exc_info=True,
+        )
+        min_samples_i = max(1, int(min_samples or 1))
+        return 0, {
+            "sample_trades": 0,
+            "min_samples": min_samples_i,
+            "used": False,
+            "reason": "tca_estimate_query_failed",
+        }
 
     if not row:
         return 0, None

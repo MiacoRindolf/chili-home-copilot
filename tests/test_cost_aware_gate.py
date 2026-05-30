@@ -108,9 +108,17 @@ class _FakeScalarResult:
 
 
 class _FakeCostDb:
-    def __init__(self, row, *, usable_samples=9, raise_on_usable_count=False):
+    def __init__(
+        self,
+        row,
+        *,
+        usable_samples=9,
+        raise_on_estimate_query=False,
+        raise_on_usable_count=False,
+    ):
         self.row = row
         self.usable_samples = usable_samples
+        self.raise_on_estimate_query = raise_on_estimate_query
         self.raise_on_usable_count = raise_on_usable_count
         self.sqls = []
         self.params = []
@@ -123,6 +131,8 @@ class _FakeCostDb:
             if self.raise_on_usable_count:
                 raise RuntimeError("usable sample check unavailable")
             return _FakeScalarResult(self.usable_samples)
+        if self.raise_on_estimate_query:
+            raise RuntimeError("estimate query unavailable")
         return _FakeResult(self.row)
 
 
@@ -400,6 +410,22 @@ def test_gate_coinbase_tca_estimate_blocks_when_usable_check_fails():
     assert res.tca_snapshot is not None
     assert res.tca_snapshot["used"] is False
     assert res.tca_snapshot["reason"] == "usable_sample_check_failed"
+
+
+def test_gate_coinbase_tca_estimate_query_failure_blocks():
+    s = _settings_stub(include_tca=True, min_tca_samples=5)
+    db = _FakeCostDb(None, raise_on_estimate_query=True)
+
+    res = cost_aware_min_edge_gate(
+        ticker="AKT-USD", projected_profit_pct=12.0, settings_=s, db=db,
+    )
+
+    assert res.allowed is False
+    assert res.reason == REASON_GATE_TCA_INVALID
+    assert res.tca_cost_bps == 0
+    assert res.tca_snapshot is not None
+    assert res.tca_snapshot["used"] is False
+    assert res.tca_snapshot["reason"] == "tca_estimate_query_failed"
 
 
 def test_gate_coinbase_tca_estimate_blocks_nonfinite_cost_row():
