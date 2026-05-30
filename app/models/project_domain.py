@@ -61,6 +61,14 @@ class ProjectAutonomyRun(Base):
     )
     user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     repo_id = Column(Integer, ForeignKey("code_repos.id", ondelete="SET NULL"), nullable=True, index=True)
+    agent_profile_id = Column(
+        Integer,
+        ForeignKey("project_autonomy_agent_profiles.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    parent_run_id = Column(String(64), nullable=True, index=True)
+    agent_snapshot_json = Column(Text, nullable=False, default="{}")
     prompt = Column(Text, nullable=False)
     status = Column(String(24), nullable=False, default="queued", index=True)
     current_stage = Column(String(40), nullable=False, default="queued", index=True)
@@ -84,10 +92,111 @@ class ProjectAutonomyRun(Base):
     learning_json = Column(Text, nullable=False, default="{}")
     error_message = Column(Text, nullable=True)
     cancel_requested = Column(Boolean, nullable=False, default=False)
+    archived_at = Column(DateTime, nullable=True, index=True)
+    archive_reason = Column(Text, nullable=True)
     started_at = Column(DateTime, nullable=True)
     finished_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class ProjectAutonomyAgentProfile(Base):
+    """Repo-scoped durable agent identity and default operating policy."""
+
+    __tablename__ = "project_autonomy_agent_profiles"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    repo_id = Column(Integer, ForeignKey("code_repos.id", ondelete="CASCADE"), nullable=False, index=True)
+    profile_key = Column(String(80), nullable=False, index=True)
+    name = Column(String(160), nullable=False)
+    role = Column(String(80), nullable=False, index=True)
+    tier = Column(String(24), nullable=False, default="micro", index=True)
+    status = Column(String(24), nullable=False, default="paused", index=True)
+    model_policy = Column(String(40), nullable=False, default="local_first")
+    prompt_setting_json = Column(Text, nullable=False, default="{}")
+    permissions_json = Column(Text, nullable=False, default="{}")
+    schedule_enabled = Column(Boolean, nullable=False, default=False)
+    schedule_json = Column(Text, nullable=False, default="{}")
+    parent_profile_id = Column(
+        Integer,
+        ForeignKey("project_autonomy_agent_profiles.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    generated = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class ProjectAutonomyAgentSchedule(Base):
+    """Bounded recurring work configuration for one agent profile."""
+
+    __tablename__ = "project_autonomy_agent_schedules"
+
+    id = Column(Integer, primary_key=True, index=True)
+    profile_id = Column(
+        Integer,
+        ForeignKey("project_autonomy_agent_profiles.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    status = Column(String(24), nullable=False, default="paused", index=True)
+    rrule = Column(String(240), nullable=True)
+    budget_json = Column(Text, nullable=False, default="{}")
+    last_run_at = Column(DateTime, nullable=True)
+    next_run_at = Column(DateTime, nullable=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class ProjectAutonomyDelegation(Base):
+    """Parent/child relationship when a macro agent delegates work."""
+
+    __tablename__ = "project_autonomy_delegations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    parent_run_id = Column(String(64), nullable=False, index=True)
+    child_run_id = Column(String(64), nullable=False, index=True)
+    parent_agent_profile_id = Column(
+        Integer,
+        ForeignKey("project_autonomy_agent_profiles.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    child_agent_profile_id = Column(
+        Integer,
+        ForeignKey("project_autonomy_agent_profiles.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    status = Column(String(24), nullable=False, default="planned", index=True)
+    intent = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class ProjectAutonomyOperatorQuestion(Base):
+    """Question an Autopilot agent needs the operator to answer."""
+
+    __tablename__ = "project_autonomy_operator_questions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_id = Column(String(64), nullable=True, index=True)
+    agent_profile_id = Column(
+        Integer,
+        ForeignKey("project_autonomy_agent_profiles.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    repo_id = Column(Integer, ForeignKey("code_repos.id", ondelete="SET NULL"), nullable=True, index=True)
+    question = Column(Text, nullable=False)
+    context_json = Column(Text, nullable=False, default="{}")
+    status = Column(String(24), nullable=False, default="pending", index=True)
+    answer = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    answered_at = Column(DateTime, nullable=True)
 
 
 class ProjectAutonomyMessage(Base):
