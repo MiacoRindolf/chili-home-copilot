@@ -120,15 +120,119 @@ def _symbol_for_row(row: dict[str, Any]) -> str | None:
     return None
 
 
-def _cost_pct(asset_class: str, row: dict[str, Any]) -> float:
+def _base_cost_pct(asset_class: str) -> float:
     if asset_class == "crypto":
-        base = _safe_float(getattr(settings, "chili_cash_deployment_crypto_cost_pct", 0.25), 0.25) or 0.0
+        return _safe_float(getattr(settings, "chili_cash_deployment_crypto_cost_pct", 0.25), 0.25) or 0.0
+    if asset_class == "options":
+        return _safe_float(getattr(settings, "chili_cash_deployment_options_cost_pct", 1.0), 1.0) or 0.0
+    if asset_class == "stock":
+        return _safe_float(getattr(settings, "chili_cash_deployment_equity_cost_pct", 0.05), 0.05) or 0.0
+    return _safe_float(getattr(settings, "chili_cash_deployment_unknown_asset_cost_pct", 0.35), 0.35) or 0.0
+
+
+def _cost_model_notional_usd(asset_class: str) -> float:
+    explicit = _safe_float(
+        getattr(settings, "chili_autotrader_per_trade_notional_usd", 0.0),
+        0.0,
+    ) or 0.0
+    capital = _safe_float(
+        getattr(settings, "chili_autotrader_assumed_capital_usd", 25_000.0),
+        25_000.0,
+    ) or 0.0
+    try:
+        risk_pct = float(get_risk_limits().max_risk_per_trade_pct)
+    except Exception:
+        risk_pct = 0.0
+    notional = explicit if explicit > 0.0 else capital * max(0.0, risk_pct) / 100.0
+    if asset_class == "crypto":
+        cap = _safe_float(getattr(settings, "chili_coinbase_max_notional_usd", 0.0), 0.0) or 0.0
+        if cap > 0.0 and notional > 0.0:
+            notional = min(notional, cap)
     elif asset_class == "options":
-        base = _safe_float(getattr(settings, "chili_cash_deployment_options_cost_pct", 1.0), 1.0) or 0.0
-    elif asset_class == "stock":
-        base = _safe_float(getattr(settings, "chili_cash_deployment_equity_cost_pct", 0.05), 0.05) or 0.0
+        cap = _safe_float(
+            getattr(settings, "chili_autotrader_options_max_contract_notional_usd", 0.0),
+            0.0,
+        ) or 0.0
+        if cap > 0.0 and notional > 0.0:
+            notional = min(notional, cap)
+    return max(1.0, notional)
+
+
+def _rolling_execution_cost_pct(
+    db: Session,
+    *,
+    symbol: str | None,
+    asset_class: str,
+    window_days: int,
+) -> tuple[float | None, dict[str, Any]]:
+    if not symbol:
+        return None, {}
+    try:
+        from ...models.trading import ExecutionCostEstimate
+        from .execution_cost_model import estimate_cost_fraction
+
+        estimate_window_days = 30
+        row = (
+            db.query(ExecutionCostEstimate)
+            .filter(ExecutionCostEstimate.ticker == str(symbol).strip().upper())
+            .filter(ExecutionCostEstimate.side.in_(("long", "buy")))
+            .filter(ExecutionCostEstimate.window_days == estimate_window_days)
+            .order_by(ExecutionCostEstimate.last_updated_at.desc())
+            .first()
+        )
+        if row is None:
+            return None, {}
+        notional = _cost_model_notional_usd(asset_class)
+        fee_bps = _safe_float(
+            getattr(settings, "brain_execution_cost_default_fee_bps", 1.0),
+            1.0,
+        ) or 0.0
+        impact_cap_bps = _safe_float(
+            getattr(settings, "brain_execution_cost_impact_cap_bps", 50.0),
+            50.0,
+        ) or 0.0
+        breakdown = estimate_cost_fraction(
+            symbol,
+            row.side,
+            notional,
+            row,
+            fee_bps=fee_bps,
+            impact_cap_bps=impact_cap_bps,
+            use_p90=True,
+        )
+        cost_pct = max(0.0, float(breakdown.total) * 100.0)
+        return cost_pct, {
+            "execution_cost_source": "rolling_execution_cost_estimate",
+            "execution_cost_estimate_id": int(row.id),
+            "execution_cost_estimate_window_days": int(row.window_days),
+            "execution_cost_estimate_side": row.side,
+            "execution_cost_estimate_sample_trades": int(row.sample_trades),
+            "execution_cost_model_notional_usd": round(notional, 6),
+            "execution_cost_requested_window_days": max(1, int(window_days)),
+        }
+    except Exception:
+        return None, {}
+
+
+def _cost_details(
+    db: Session,
+    *,
+    asset_class: str,
+    row: dict[str, Any],
+    symbol: str | None,
+    window_days: int,
+) -> tuple[float, dict[str, Any]]:
+    base = _base_cost_pct(asset_class)
+    rolling, meta = _rolling_execution_cost_pct(
+        db,
+        symbol=symbol,
+        asset_class=asset_class,
+        window_days=window_days,
+    )
+    if rolling is not None and rolling > base:
+        base = rolling
     else:
-        base = _safe_float(getattr(settings, "chili_cash_deployment_unknown_asset_cost_pct", 0.35), 0.35) or 0.0
+        meta = {"execution_cost_source": "static_asset_cost"}
 
     slip_rate = _safe_float(row.get("slippage_miss_rate"), 0.0) or 0.0
     reject_rate = _safe_float(row.get("broker_reject_rate"), 0.0) or 0.0
@@ -140,7 +244,9 @@ def _cost_pct(asset_class: str, row: dict[str, Any]) -> float:
         getattr(settings, "chili_cash_deployment_broker_reject_penalty_pct", 1.0),
         1.0,
     ) or 0.0
-    return max(0.0, base + (slip_rate * slip_penalty) + (reject_rate * reject_penalty))
+    total = max(0.0, base + (slip_rate * slip_penalty) + (reject_rate * reject_penalty))
+    meta["execution_cost_base_pct"] = _round(base, 6)
+    return total, meta
 
 
 def _venue_readiness(asset_class: str) -> tuple[str, float, str | None]:
@@ -502,15 +608,22 @@ def annotate_cash_deployment_row(
     out = dict(row)
     asset_class = _asset_class_for_row(out)
     symbol = _symbol_for_row(out)
+    window_days = max(1, int(out.get("window_days") or DEFAULT_WINDOW_DAYS))
     live_perf = _live_asset_performance(
         db,
         scan_pattern_id=_safe_int(out.get("scan_pattern_id")) if out.get("scan_pattern_id") is not None else None,
         asset_class=asset_class,
         user_id=user_id,
-        window_days=max(1, int(out.get("window_days") or DEFAULT_WINDOW_DAYS)),
+        window_days=window_days,
     )
     out.update(live_perf)
-    cost = _cost_pct(asset_class, out)
+    cost, cost_meta = _cost_details(
+        db,
+        asset_class=asset_class,
+        row=out,
+        symbol=symbol,
+        window_days=window_days,
+    )
     calibrated = _safe_float(out.get("calibrated_ev_pct"))
     after_cost = calibrated - cost if calibrated is not None else None
     venue, venue_score, venue_blocker = _venue_readiness(asset_class)
@@ -571,6 +684,7 @@ def annotate_cash_deployment_row(
             "primary_symbol": symbol,
             "calibrated_ev_after_cost_pct": _round(after_cost, 6),
             "estimated_execution_cost_pct": _round(cost, 6),
+            **cost_meta,
             "allocation_score": _allocation_score(
                 out,
                 calibrated_ev_after_cost=after_cost,
