@@ -2,18 +2,19 @@
 
 ## Summary
 
-Phase 5K-C was attempted but not promoted. The code gate is sound and the
-pre-flip probes were green, but the local Docker stack became unhealthy during
-the autotrader-only restart.
+Phase 5K-C was initially attempted and rolled back, then retried successfully
+after the local runtime root cause was isolated.
 
-The live flag was rolled back to false in `.env`:
+The live flag is now enabled in `.env` and visible inside the autotrader
+container:
 
 ```text
-CHILI_PHASE5K_COINBASE_CAP_USE_ENVELOPES=false
+CHILI_PHASE5K_COINBASE_CAP_USE_ENVELOPES=true
 ```
 
-No source-code rollback is needed because Phase 5K-B defaults off and remains
-safe.
+The Coinbase venue-cap reader is now using the physical
+`trading_management_envelopes` base table instead of the legacy
+`trading_trades` compatibility view.
 
 ## Pre-Flip Evidence
 
@@ -67,9 +68,12 @@ MISMATCHED_ROWS=0
 ## Status
 
 - Phase 5K-B source code remains pushed and default-off safe.
-- Phase 5K-C live soak is **not complete**.
-- `.env` is conservative again (`false`).
-- Docker/Postgres local runtime needs recovery before retrying the soak.
+- Phase 5K-C live soak is **promoted**.
+- `.env` now has `CHILI_PHASE5K_COINBASE_CAP_USE_ENVELOPES=true`.
+- Postgres is healthy.
+- Autotrader is running with the Phase 5K flag set to true.
+- The live-runtime watchdog was re-registered from the correct
+  `D:\dev\chili-home-copilot` root and reports `runtime_ok=true`.
 
 ## Retry Note
 
@@ -98,20 +102,66 @@ Postgres close the connection and the database container re-entered
 The repeated failure pattern is now runtime/Docker/Postgres instability, not
 the Phase 5K-B code path.
 
+## Successful Retry
+
+The later retry succeeded after isolating two runtime causes:
+
+1. The `CHILI-live-runtime-watchdog` Windows task was registered against the
+   stale root `D:\dev\chili-home-copilot-options-alpha-evidence-pr`. While
+   Postgres was recovering, it kept treating the real runtime as a wrong
+   worktree and recreated Compose containers under the same project name.
+2. The project-autonomy agent scheduler and already-launched Codex pytest jobs
+   were colliding with the live database immediately after recovery. The
+   project-autonomy scheduler was disabled in `.env`:
+
+   ```text
+   PROJECT_AUTONOMY_AGENT_SCHEDULER_ENABLED=false
+   ```
+
+After Postgres completed recovery:
+
+```text
+Postgres: healthy
+Autotrader: running
+CHILI_PHASE5K_COINBASE_CAP_USE_ENVELOPES=true
+PROJECT_AUTONOMY_AGENT_SCHEDULER_ENABLED=false
+```
+
+Post-flip validation:
+
+```text
+Phase 5K-A parity probe: COMPLETE_POSITIVE
+PARITY_CHECKS=6
+PARITY_MISMATCHES=0
+
+Phase 5I post-rename probe: COMPLETE_POSITIVE
+FRESH_DECISIONS=20
+FRESH_ENVELOPES=20
+FRESH_CLOSES=10
+HARD_LINKAGE_ISSUES=0
+MISMATCHED_ROWS=0
+
+Live-runtime watchdog: runtime_ok=true
+services_wrong_worktree=[]
+services_to_start=[]
+action=noop
+```
+
 ## Architect Read
 
-This was an infrastructure failure, not a data-model or code-path failure. The
-pre-flip parity evidence was exactly what we wanted, and the default-off code
-still protects the live path.
+The original rollback was an infrastructure failure, not a data-model or
+code-path failure. Once the stale watchdog root and non-trading test launchers
+were removed from the equation, the Phase 5K-C flag behaved as expected.
 
-Do not retry the flag flip until Docker is healthy and Postgres can complete
-startup cleanly. The next attempt should:
+Keep this as a narrow soak before cutting over more live readers. The right
+next Phase 5K move is another default-off reader flag plus a parity probe, not a
+bulk live-path rename.
 
-1. confirm Docker API health
-2. confirm Postgres is healthy
-3. run Phase 5K-A and Phase 5I probes
-4. flip the one flag
-5. restart only autotrader
-6. verify fresh autotrader logs after Postgres is already healthy
+Operational guardrails from the retry:
 
-No live trading behavior should be assumed changed from this attempt.
+1. Keep `PROJECT_AUTONOMY_AGENT_SCHEDULER_ENABLED=false` during live trading
+   work unless explicitly testing project-autonomy behavior.
+2. Keep the live-runtime watchdog registered from
+   `D:\dev\chili-home-copilot`.
+3. Do not run DB-backed pytest jobs against the live Docker Postgres while
+   trading workers are active.
