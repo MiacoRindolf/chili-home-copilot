@@ -29,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -80,6 +81,52 @@ _DEFAULT_PARTIAL_FILL_BPS_EQUITY = 1.0
 _DEFAULT_PARTIAL_FILL_BPS_CRYPTO = 3.0
 
 
+def _finite_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def _positive_finite_float(value: Any) -> float | None:
+    f = _finite_float(value)
+    return f if f is not None and f > 0 else None
+
+
+def _nonnegative_cost_fraction(value: Any, *, default: float = 0.0) -> float:
+    f = _finite_float(value)
+    if f is None or f < 0:
+        return default
+    return f
+
+
+def _normalized_direction(value: Any) -> str:
+    side = str(value or "long").strip().lower()
+    return "short" if side == "short" else "long"
+
+
+def _probability_or_none(value: Any) -> float | None:
+    f = _finite_float(value)
+    if f is None:
+        return None
+    return max(0.0, min(1.0, f))
+
+
+def _hash_float(value: Any, digits: int) -> float | None:
+    f = _finite_float(value)
+    return round(f, digits) if f is not None else None
+
+
+def _settings_spread_fraction() -> float:
+    return _nonnegative_cost_fraction(
+        getattr(settings, "backtest_spread", None),
+        default=0.0005,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Dataclasses
 # ---------------------------------------------------------------------------
@@ -104,6 +151,7 @@ class NetEdgeSignalContext:
     entry_price: float
     stop_price: float
     target_price: float | None = None
+    direction: str = "long"
     regime: str | None = None
     timeframe: str | None = None
     quote_mid: float | None = None
@@ -125,11 +173,11 @@ class NetEdgeCostBreakdown:
     @property
     def total(self) -> float:
         return (
-            self.spread_cost
-            + self.slippage_cost
-            + self.fees_cost
-            + self.miss_prob_cost
-            + self.partial_fill_cost
+            _nonnegative_cost_fraction(self.spread_cost)
+            + _nonnegative_cost_fraction(self.slippage_cost)
+            + _nonnegative_cost_fraction(self.fees_cost)
+            + _nonnegative_cost_fraction(self.miss_prob_cost)
+            + _nonnegative_cost_fraction(self.partial_fill_cost)
         )
 
 
@@ -225,17 +273,16 @@ def _is_crypto_ctx(asset_class: str) -> bool:
 
 def _spread_cost_fraction(db: Session, ctx: NetEdgeSignalContext) -> float:
     """Return spread cost in fraction-of-notional (one-way)."""
+    fallback = _settings_spread_fraction()
     try:
         from .execution_quality import suggest_adaptive_spread
 
         sug = suggest_adaptive_spread(db)
-        raw = sug.get("suggested_spread")
-        if raw is None:
-            raw = float(settings.backtest_spread)
-        return max(0.0, float(raw))
+        raw = sug.get("suggested_spread") if isinstance(sug, dict) else None
+        return _nonnegative_cost_fraction(raw, default=fallback)
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("[net_edge] spread cost fell back to settings: %s", exc)
-        return max(0.0, float(getattr(settings, "backtest_spread", 0.0005)))
+        return fallback
 
 
 def _slippage_cost_fraction(db: Session, ctx: NetEdgeSignalContext) -> float:
@@ -262,7 +309,7 @@ def _miss_prob_cost_fraction(ctx: NetEdgeSignalContext) -> float:
         _DEFAULT_MISS_PROB_CRYPTO if _is_crypto_ctx(ctx.asset_class) else _DEFAULT_MISS_PROB_EQUITY
     )
     # Use a static spread estimate here to keep this function cheap and DB-free.
-    spread_fraction = float(getattr(settings, "backtest_spread", 0.0005))
+    spread_fraction = _settings_spread_fraction()
     return max(0.0, miss_prob * spread_fraction)
 
 
@@ -276,9 +323,10 @@ def _partial_fill_cost_fraction(ctx: NetEdgeSignalContext) -> float:
 
 
 def _compose_costs(db: Session, ctx: NetEdgeSignalContext) -> NetEdgeCostBreakdown:
+    spread = _spread_cost_fraction(db, ctx)
     return NetEdgeCostBreakdown(
-        spread_cost=_spread_cost_fraction(db, ctx),
-        slippage_cost=_slippage_cost_fraction(db, ctx),
+        spread_cost=spread,
+        slippage_cost=0.5 * spread,
         fees_cost=_fees_cost_fraction(ctx),
         miss_prob_cost=_miss_prob_cost_fraction(ctx),
         partial_fill_cost=_partial_fill_cost_fraction(ctx),
@@ -433,14 +481,17 @@ class _Calibrator:
         self._fit = fit
 
     def apply(self, raw_prob: float) -> float:
-        p = max(0.0, min(1.0, float(raw_prob)))
+        p = _probability_or_none(raw_prob)
+        if p is None:
+            return 0.0
         if self._fit is None:
             return p
         try:
             import numpy as np
 
             out = float(self._fit.predict(np.asarray([p]))[0])
-            return max(0.0, min(1.0, out))
+            calibrated = _probability_or_none(out)
+            return p if calibrated is None else calibrated
         except Exception:  # pragma: no cover - defensive
             return p
 
@@ -554,21 +605,29 @@ def _calibrator_for(db: Session, ctx: NetEdgeSignalContext) -> _Calibrator:
 def _fraction_to_stop(ctx: NetEdgeSignalContext) -> float | None:
     if ctx.entry_price is None or ctx.stop_price is None:
         return None
-    e = float(ctx.entry_price)
-    s = float(ctx.stop_price)
-    if e <= 0 or s <= 0:
+    e = _positive_finite_float(ctx.entry_price)
+    s = _positive_finite_float(ctx.stop_price)
+    if e is None or s is None:
         return None
-    return abs(e - s) / e
+    side = _normalized_direction(ctx.direction)
+    risk = s - e if side == "short" else e - s
+    if risk <= 0:
+        return None
+    return risk / e
 
 
 def _payoff_fraction(ctx: NetEdgeSignalContext, loss_per_unit: float) -> float:
-    if ctx.target_price and ctx.entry_price:
-        e = float(ctx.entry_price)
-        t = float(ctx.target_price)
-        if e > 0 and t > 0:
-            return max(0.0, abs(t - e) / e)
+    if ctx.target_price is not None:
+        e = _positive_finite_float(ctx.entry_price)
+        t = _positive_finite_float(ctx.target_price)
+        if e is None or t is None:
+            return 0.0
+        side = _normalized_direction(ctx.direction)
+        reward = e - t if side == "short" else t - e
+        return max(0.0, reward / e)
     # Default to 2R if no explicit target.
-    return 2.0 * loss_per_unit
+    loss = _positive_finite_float(loss_per_unit)
+    return 2.0 * loss if loss is not None else 0.0
 
 
 def _ctx_hash(ctx: NetEdgeSignalContext) -> str:
@@ -577,10 +636,11 @@ def _ctx_hash(ctx: NetEdgeSignalContext) -> str:
             "t": ctx.ticker,
             "ac": ctx.asset_class,
             "pid": ctx.scan_pattern_id,
-            "rp": round(float(ctx.raw_prob or 0.0), 4),
-            "e": round(float(ctx.entry_price or 0.0), 6),
-            "s": round(float(ctx.stop_price or 0.0), 6),
-            "tg": round(float(ctx.target_price or 0.0), 6),
+            "rp": _hash_float(ctx.raw_prob, 4),
+            "e": _hash_float(ctx.entry_price, 6),
+            "s": _hash_float(ctx.stop_price, 6),
+            "tg": _hash_float(ctx.target_price, 6),
+            "d": _normalized_direction(ctx.direction),
             "rg": _regime_bucket(ctx.regime),
             "tf": ctx.timeframe or "na",
         },
@@ -593,10 +653,11 @@ def _is_disagreement(net_edge: float, heuristic: float | None) -> bool:
     """Cheap disagreement test: do we flip sign vs heuristic?"""
     if heuristic is None:
         return False
-    try:
-        return (float(net_edge) > 0.0) != (float(heuristic) > 0.0)
-    except (TypeError, ValueError):
+    net_edge_v = _finite_float(net_edge)
+    heuristic_v = _finite_float(heuristic)
+    if net_edge_v is None or heuristic_v is None:
         return False
+    return (net_edge_v > 0.0) != (heuristic_v > 0.0)
 
 
 def score(db: Session, ctx: NetEdgeSignalContext) -> NetEdgeScore | None:
@@ -612,6 +673,21 @@ def score(db: Session, ctx: NetEdgeSignalContext) -> NetEdgeScore | None:
         return None
 
     try:
+        raw_prob = _probability_or_none(ctx.raw_prob)
+        if raw_prob is None:
+            _emit_ops_log(
+                mode=mode,
+                read=READ_ERROR,
+                decision_id=ctx.decision_id,
+                pattern_id=ctx.scan_pattern_id,
+                asset_class=ctx.asset_class,
+                regime=_regime_bucket(ctx.regime),
+                net_edge=None,
+                heuristic_score=ctx.heuristic_score,
+                disagree=False,
+            )
+            return None
+
         loss_per_unit = _fraction_to_stop(ctx)
         if loss_per_unit is None or loss_per_unit <= 0:
             _emit_ops_log(
@@ -628,7 +704,7 @@ def score(db: Session, ctx: NetEdgeSignalContext) -> NetEdgeScore | None:
             return None
 
         cal = _calibrator_for(db, ctx)
-        calibrated_prob = cal.apply(ctx.raw_prob)
+        calibrated_prob = cal.apply(raw_prob)
         payoff = _payoff_fraction(ctx, loss_per_unit)
         costs = _compose_costs(db, ctx)
 
@@ -637,6 +713,19 @@ def score(db: Session, ctx: NetEdgeSignalContext) -> NetEdgeScore | None:
             - (1.0 - calibrated_prob) * loss_per_unit
             - costs.total
         )
+        if not math.isfinite(expected_net_pnl):
+            _emit_ops_log(
+                mode=mode,
+                read=READ_ERROR,
+                decision_id=ctx.decision_id,
+                pattern_id=ctx.scan_pattern_id,
+                asset_class=ctx.asset_class,
+                regime=_regime_bucket(ctx.regime),
+                net_edge=None,
+                heuristic_score=ctx.heuristic_score,
+                disagree=False,
+            )
+            return None
 
         disagree = _is_disagreement(expected_net_pnl, ctx.heuristic_score)
         read_source = _classify_read(mode=mode, cold_start=cal.cold_start, disagree=disagree)

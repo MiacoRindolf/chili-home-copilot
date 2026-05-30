@@ -3891,6 +3891,7 @@ def _emit_netedge_shadow_score(
                 entry_price=float(entry_price),
                 stop_price=stop,
                 target_price=target,
+                direction=str(getattr(alert, "direction", None) or "long"),
                 regime=regime,
                 timeframe=timeframe,
                 heuristic_score=None,

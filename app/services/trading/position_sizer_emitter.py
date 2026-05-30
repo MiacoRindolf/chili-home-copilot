@@ -25,6 +25,7 @@ portfolio budgets, or the write API. The helper is:
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -36,6 +37,7 @@ from .correlation_budget import (
     compute_portfolio_budget,
     is_crypto_symbol,
 )
+from .options.contracts import OPTION_CONTRACT_MULTIPLIER
 from .position_sizer_model import PositionSizerInput
 from .position_sizer_writer import (
     LegacySizing,
@@ -92,10 +94,20 @@ def _infer_asset_class(ticker: str, explicit: Optional[str]) -> str:
     return "crypto" if is_crypto_symbol(ticker) else "equity"
 
 
+def _unit_multiplier(asset_class: str) -> float:
+    return (
+        OPTION_CONTRACT_MULTIPLIER
+        if (asset_class or "").strip().lower() in {"option", "options"}
+        else 1.0
+    )
+
+
 def _clamp01(value: float, lo: float = 0.01, hi: float = 0.99) -> float:
     try:
         v = float(value)
     except Exception:
+        return 0.55
+    if not math.isfinite(v):
         return 0.55
     if v < 0:
         v = 0.0
@@ -105,25 +117,53 @@ def _clamp01(value: float, lo: float = 0.01, hi: float = 0.99) -> float:
     return max(lo, min(hi, v))
 
 
-def _loss_per_unit(entry: float, stop: float) -> float:
-    if entry <= 0 or stop <= 0:
+def _direction(value: Any) -> str:
+    side = str(value or "long").strip().lower()
+    return "short" if side == "short" else "long"
+
+
+def _finite_float(value: Any) -> Optional[float]:
+    try:
+        v = float(value)
+    except Exception:
+        return None
+    return v if math.isfinite(v) else None
+
+
+def _loss_per_unit(entry: float, stop: float, direction: str = "long") -> float:
+    entry_v = _finite_float(entry)
+    stop_v = _finite_float(stop)
+    if entry_v is None or stop_v is None or entry_v <= 0 or stop_v <= 0:
         return 0.0
-    return max(1e-6, abs(entry - stop) / entry)
+    side = _direction(direction)
+    risk = stop_v - entry_v if side == "short" else entry_v - stop_v
+    if risk <= 0:
+        return 0.0
+    return max(1e-6, risk / entry_v)
 
 
-def _payoff_fraction(entry: float, target: Optional[float], loss: float) -> float:
+def _payoff_fraction(
+    entry: float,
+    target: Optional[float],
+    loss: float,
+    direction: str = "long",
+) -> float:
     """Estimate win-leg payoff as fraction of notional.
 
     When the caller has an explicit target, use it. Otherwise assume
     a 1.5R win (symmetric-ish R-multiple) so the shadow log is not
     biased against signals that simply forgot to pass ``target``.
     """
-    if target and target > 0 and entry > 0:
-        try:
-            return max(0.0, float(target - entry) / entry)
-        except Exception:
-            pass
-    return max(0.0, loss * 1.5)
+    loss_v = _finite_float(loss)
+    if loss_v is None or loss_v <= 0:
+        return 0.0
+    entry_v = _finite_float(entry)
+    target_v = _finite_float(target)
+    if target_v is not None and entry_v is not None and target_v > 0 and entry_v > 0:
+        side = _direction(direction)
+        reward = entry_v - target_v if side == "short" else target_v - entry_v
+        return max(0.0, reward / entry_v)
+    return max(0.0, loss_v * 1.5)
 
 
 def _try_netedge_score(db: Session, signal: EmitterSignal) -> Optional[Any]:
@@ -132,6 +172,7 @@ def _try_netedge_score(db: Session, signal: EmitterSignal) -> Optional[Any]:
         from . import net_edge_ranker as _net  # type: ignore
         if not _net.mode_is_active():
             return None
+        target_price = _finite_float(signal.target_price)
         ctx = _net.NetEdgeSignalContext(
             ticker=signal.ticker,
             asset_class=_infer_asset_class(signal.ticker, signal.asset_class),
@@ -139,7 +180,8 @@ def _try_netedge_score(db: Session, signal: EmitterSignal) -> Optional[Any]:
             raw_prob=float(signal.confidence or 0.55),
             entry_price=float(signal.entry_price),
             stop_price=float(signal.stop_price),
-            target_price=float(signal.target_price) if signal.target_price else None,
+            target_price=target_price if target_price and target_price > 0 else None,
+            direction=signal.direction,
             regime=signal.regime,
             timeframe=None,
             heuristic_score=None,
@@ -156,17 +198,34 @@ def _build_input(
 ) -> PositionSizerInput:
     """Translate the emitter-facing signal + optional ranker score into the pure sizer input."""
     asset_class = _infer_asset_class(signal.ticker, signal.asset_class)
+    unit_multiplier = _unit_multiplier(asset_class)
+    target_price = _finite_float(signal.target_price)
     if net_edge_score is not None:
-        calibrated_prob = float(getattr(net_edge_score, "calibrated_prob", signal.confidence or 0.55))
-        payoff_fraction = float(getattr(net_edge_score, "expected_payoff", 0.0))
-        loss_per_unit = float(getattr(net_edge_score, "loss_per_unit", 0.0))
+        calibrated_prob = _clamp01(getattr(net_edge_score, "calibrated_prob", signal.confidence or 0.55))
+        payoff_fraction = max(0.0, _finite_float(getattr(net_edge_score, "expected_payoff", 0.0)) or 0.0)
+        loss_per_unit = max(0.0, _finite_float(getattr(net_edge_score, "loss_per_unit", 0.0)) or 0.0)
         costs = getattr(net_edge_score, "costs", None)
-        cost_fraction = float(getattr(costs, "total", 0.0)) if costs is not None else 0.0
-        expected_net_pnl = float(getattr(net_edge_score, "expected_net_pnl", 0.0))
+        cost_fraction = (
+            max(0.0, _finite_float(getattr(costs, "total", 0.0)) or 0.0)
+            if costs is not None
+            else 0.0
+        )
+        expected_net_pnl = _finite_float(getattr(net_edge_score, "expected_net_pnl", 0.0))
+        if expected_net_pnl is None:
+            expected_net_pnl = calibrated_prob * payoff_fraction - (1.0 - calibrated_prob) * loss_per_unit
     else:
-        loss = _loss_per_unit(signal.entry_price, signal.stop_price)
+        loss = _loss_per_unit(
+            signal.entry_price,
+            signal.stop_price,
+            signal.direction,
+        )
         calibrated_prob = _clamp01(signal.confidence if signal.confidence is not None else 0.55)
-        payoff_fraction = _payoff_fraction(signal.entry_price, signal.target_price, loss)
+        payoff_fraction = _payoff_fraction(
+            signal.entry_price,
+            signal.target_price,
+            loss,
+            signal.direction,
+        )
         loss_per_unit = loss
         cost_fraction = 0.0
         expected_net_pnl = calibrated_prob * payoff_fraction - (1.0 - calibrated_prob) * loss_per_unit
@@ -184,7 +243,7 @@ def _build_input(
         loss_per_unit=loss_per_unit,
         cost_fraction=cost_fraction,
         expected_net_pnl=expected_net_pnl,
-        target_price=float(signal.target_price) if signal.target_price else None,
+        target_price=target_price if target_price and target_price > 0 else None,
         regime=signal.regime,
         pattern_id=signal.pattern_id,
         user_id=signal.user_id,
@@ -200,6 +259,7 @@ def _build_input(
             getattr(settings, "brain_position_sizer_single_ticker_cap_pct", 7.5),
         ),
         qty_rounding=qty_rounding,
+        unit_multiplier=unit_multiplier,
     )
 
 
@@ -226,11 +286,14 @@ def emit_shadow_proposal(
     try:
         if not mode_is_active():
             return None
-        if signal.entry_price is None or signal.stop_price is None:
+        entry = _finite_float(signal.entry_price)
+        stop = _finite_float(signal.stop_price)
+        capital = _finite_float(signal.capital)
+        if entry is None or stop is None or capital is None:
             return None
-        if float(signal.entry_price) <= 0 or float(signal.stop_price) <= 0:
+        if entry <= 0 or stop <= 0:
             return None
-        if float(signal.capital) <= 0:
+        if capital <= 0:
             return None
 
         score_obj = net_edge_score or _try_netedge_score(db, signal)

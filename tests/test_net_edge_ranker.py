@@ -183,6 +183,46 @@ def test_cost_breakdown_total_is_sum_of_parts():
     assert br.total == pytest.approx(expected, rel=1e-9)
 
 
+def test_cost_breakdown_total_ignores_nonfinite_or_negative_costs():
+    br = ner.NetEdgeCostBreakdown(
+        spread_cost=float("inf"),
+        slippage_cost=-0.01,
+        fees_cost=float("nan"),
+        miss_prob_cost=0.001,
+        partial_fill_cost=True,
+    )
+
+    assert br.total == pytest.approx(0.001, rel=1e-9)
+
+
+def test_spread_cost_defaults_malformed_adaptive_spread(monkeypatch):
+    from app.services.trading import execution_quality
+
+    monkeypatch.setattr(settings, "backtest_spread", 0.0007)
+    monkeypatch.setattr(
+        execution_quality,
+        "suggest_adaptive_spread",
+        lambda _db: {"suggested_spread": float("inf")},
+    )
+    ctx = ner.NetEdgeSignalContext(
+        ticker="AAPL", asset_class="stock", scan_pattern_id=None,
+        raw_prob=0.5, entry_price=100.0, stop_price=97.0,
+    )
+
+    assert ner._spread_cost_fraction(SimpleNamespace(), ctx) == pytest.approx(0.0007)
+
+
+def test_miss_prob_cost_defaults_malformed_backtest_spread(monkeypatch):
+    monkeypatch.setattr(settings, "backtest_spread", "NaN")
+    ctx = ner.NetEdgeSignalContext(
+        ticker="AAPL", asset_class="stock", scan_pattern_id=None,
+        raw_prob=0.5, entry_price=100.0, stop_price=97.0,
+    )
+
+    expected = ner._DEFAULT_MISS_PROB_EQUITY * 0.0005
+    assert ner._miss_prob_cost_fraction(ctx) == pytest.approx(expected, rel=1e-9)
+
+
 def test_fees_cost_is_higher_for_crypto_than_equity():
     ctx_eq = ner.NetEdgeSignalContext(
         ticker="AAPL", asset_class="stock", scan_pattern_id=None,
@@ -225,6 +265,38 @@ def test_fraction_to_stop_zero_or_negative_entry_returns_none():
     assert ner._fraction_to_stop(ctx) is None
 
 
+def test_fraction_to_stop_rejects_nonfinite_or_boolean_levels():
+    ctx_nan = ner.NetEdgeSignalContext(
+        ticker="AAPL", asset_class="stock", scan_pattern_id=None,
+        raw_prob=0.5, entry_price=float("nan"), stop_price=97.0,
+    )
+    ctx_bool = ner.NetEdgeSignalContext(
+        ticker="AAPL", asset_class="stock", scan_pattern_id=None,
+        raw_prob=0.5, entry_price=True, stop_price=97.0,
+    )
+
+    assert ner._fraction_to_stop(ctx_nan) is None
+    assert ner._fraction_to_stop(ctx_bool) is None
+
+
+def test_fraction_to_stop_rejects_wrong_side_long_stop():
+    ctx = ner.NetEdgeSignalContext(
+        ticker="AAPL", asset_class="stock", scan_pattern_id=None,
+        raw_prob=0.5, entry_price=100.0, stop_price=105.0,
+        direction="long",
+    )
+    assert ner._fraction_to_stop(ctx) is None
+
+
+def test_fraction_to_stop_supports_short_direction():
+    ctx = ner.NetEdgeSignalContext(
+        ticker="AAPL", asset_class="stock", scan_pattern_id=None,
+        raw_prob=0.5, entry_price=100.0, stop_price=105.0,
+        direction="short",
+    )
+    assert ner._fraction_to_stop(ctx) == pytest.approx(0.05, rel=1e-9)
+
+
 def test_payoff_defaults_to_2R_when_no_target():
     ctx = ner.NetEdgeSignalContext(
         ticker="AAPL", asset_class="stock", scan_pattern_id=None,
@@ -243,6 +315,75 @@ def test_explicit_target_price_overrides_2R_default():
     loss = ner._fraction_to_stop(ctx)
     payoff = ner._payoff_fraction(ctx, loss)
     assert payoff == pytest.approx(0.10, rel=1e-9)  # (110-100)/100
+
+
+def test_explicit_target_price_is_directional_for_short():
+    ctx = ner.NetEdgeSignalContext(
+        ticker="AAPL", asset_class="stock", scan_pattern_id=None,
+        raw_prob=0.5, entry_price=100.0, stop_price=105.0,
+        target_price=90.0, direction="short",
+    )
+    loss = ner._fraction_to_stop(ctx)
+    payoff = ner._payoff_fraction(ctx, loss)
+    assert loss == pytest.approx(0.05, rel=1e-9)
+    assert payoff == pytest.approx(0.10, rel=1e-9)
+
+
+def test_explicit_target_price_rejects_wrong_side_long_target():
+    ctx = ner.NetEdgeSignalContext(
+        ticker="AAPL", asset_class="stock", scan_pattern_id=None,
+        raw_prob=0.5, entry_price=100.0, stop_price=97.0,
+        target_price=90.0, direction="long",
+    )
+    loss = ner._fraction_to_stop(ctx)
+    payoff = ner._payoff_fraction(ctx, loss)
+    assert loss == pytest.approx(0.03, rel=1e-9)
+    assert payoff == pytest.approx(0.0, abs=1e-12)
+
+
+def test_explicit_target_price_rejects_nonfinite_target():
+    ctx = ner.NetEdgeSignalContext(
+        ticker="AAPL", asset_class="stock", scan_pattern_id=None,
+        raw_prob=0.5, entry_price=100.0, stop_price=97.0,
+        target_price=float("inf"),
+    )
+
+    assert ner._payoff_fraction(ctx, 0.03) == pytest.approx(0.0, abs=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Calibrator finite-math guardrails
+# ---------------------------------------------------------------------------
+
+
+def test_calibrator_rejects_nonfinite_raw_probability():
+    cal = ner._Calibrator(
+        method="cold_start",
+        sample_count=0,
+        version_id="test",
+        regime_bucket="risk_on",
+        asset_class="stock",
+        fit=None,
+    )
+
+    assert cal.apply(float("nan")) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_calibrator_ignores_nonfinite_model_output():
+    class _BadFit:
+        def predict(self, _values):
+            return [float("nan")]
+
+    cal = ner._Calibrator(
+        method="isotonic",
+        sample_count=100,
+        version_id="test",
+        regime_bucket="risk_on",
+        asset_class="stock",
+        fit=_BadFit(),
+    )
+
+    assert cal.apply(0.7) == pytest.approx(0.7, rel=1e-9)
 
 
 # ---------------------------------------------------------------------------
@@ -371,6 +512,41 @@ def test_score_zero_or_bad_stop_returns_none_and_does_not_log_score(db, shadow_m
     result = ner.score(db, ctx)
     assert result is None
     # Error ops-log line is emitted but no DB row written.
+    assert any("read=error" in rec.getMessage() for rec in caplog.records)
+
+
+def test_score_wrong_side_long_stop_returns_none_without_db_read(shadow_mode, caplog):
+    caplog.set_level(logging.INFO, logger="app.services.trading.net_edge_ranker")
+    ctx = ner.NetEdgeSignalContext(
+        ticker="AAPL",
+        asset_class="stock",
+        scan_pattern_id=None,
+        raw_prob=0.6,
+        entry_price=100.0,
+        stop_price=105.0,
+        direction="long",
+    )
+
+    result = ner.score(SimpleNamespace(), ctx)
+
+    assert result is None
+    assert any("read=error" in rec.getMessage() for rec in caplog.records)
+
+
+def test_score_nonfinite_raw_probability_returns_none_without_db_read(shadow_mode, caplog):
+    caplog.set_level(logging.INFO, logger="app.services.trading.net_edge_ranker")
+    ctx = ner.NetEdgeSignalContext(
+        ticker="AAPL",
+        asset_class="stock",
+        scan_pattern_id=None,
+        raw_prob=float("nan"),
+        entry_price=100.0,
+        stop_price=97.0,
+    )
+
+    result = ner.score(SimpleNamespace(), ctx)
+
+    assert result is None
     assert any("read=error" in rec.getMessage() for rec in caplog.records)
 
 

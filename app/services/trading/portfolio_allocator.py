@@ -878,6 +878,11 @@ def allocate_momentum_session_entry(
                         entry_price=float(_entry),
                         stop_price=float(_stop),
                         target_price=_target,
+                        direction=str(
+                            (ex or {}).get("direction")
+                            or getattr(variant, "direction", None)
+                            or "long"
+                        ),
                         regime=str((regime_snapshot or {}).get("regime") or "").strip() or None,
                         timeframe=str(
                             getattr(variant, "timeframe", None) or ""
