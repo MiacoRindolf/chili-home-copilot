@@ -527,6 +527,85 @@ def test_coalesce_duplicate_open_work_keeps_latest_queued_market_snapshot_batch(
     assert rows[int(middle.id)].payload["duplicate_open_work_kept_event_id"] == int(latest.id)
 
 
+def test_coalesce_duplicate_open_work_retires_queued_market_snapshot_older_than_processing(
+    db,
+) -> None:
+    now = datetime.utcnow()
+
+    older_retry = BrainWorkEvent(
+        domain="trading",
+        event_type="market_snapshots_batch",
+        event_kind="outcome",
+        dedupe_key="mine:older-retry",
+        payload={"job_id": "older-retry", "snapshots_taken_daily": 120},
+        lease_scope="mine",
+        status="retry_wait",
+        attempts=1,
+        max_attempts=5,
+        next_run_at=now - timedelta(minutes=10),
+        created_at=now - timedelta(minutes=10),
+        updated_at=now - timedelta(minutes=5),
+    )
+    processing = BrainWorkEvent(
+        domain="trading",
+        event_type="market_snapshots_batch",
+        event_kind="outcome",
+        dedupe_key="mine:newer-processing",
+        payload={"job_id": "newer-processing", "snapshots_taken_daily": 120},
+        lease_scope="mine",
+        status="processing",
+        attempts=1,
+        max_attempts=5,
+        next_run_at=now - timedelta(minutes=2),
+        lease_holder="pytest:mine",
+        lease_expires_at=now + timedelta(minutes=10),
+        created_at=now - timedelta(minutes=2),
+        updated_at=now - timedelta(minutes=2),
+    )
+    future_pending = BrainWorkEvent(
+        domain="trading",
+        event_type="market_snapshots_batch",
+        event_kind="outcome",
+        dedupe_key="mine:future-pending",
+        payload={"job_id": "future-pending", "snapshots_taken_daily": 120},
+        lease_scope="mine",
+        status="pending",
+        attempts=0,
+        max_attempts=5,
+        next_run_at=now,
+        created_at=now + timedelta(seconds=1),
+        updated_at=now + timedelta(seconds=1),
+    )
+    db.add_all([older_retry, processing, future_pending])
+    db.commit()
+    ids = [int(older_retry.id), int(processing.id), int(future_pending.id)]
+
+    result = coalesce_duplicate_open_work(
+        db,
+        event_types=("market_snapshots_batch",),
+    )
+    db.commit()
+
+    rows = {
+        int(row.id): row
+        for row in db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.id.in_(ids))
+        .all()
+    }
+    assert result["coalesced"] == 1
+    assert result["reasons"] == {"market_snapshot_batch_superseded_by_processing": 1}
+    assert rows[int(older_retry.id)].status == "done"
+    assert (
+        rows[int(older_retry.id)].payload["duplicate_open_work_suppressed_reason"]
+        == "market_snapshot_batch_superseded_by_processing"
+    )
+    assert rows[int(older_retry.id)].payload["duplicate_open_work_kept_event_id"] == int(
+        processing.id
+    )
+    assert rows[int(processing.id)].status == "processing"
+    assert rows[int(future_pending.id)].status == "pending"
+
+
 def test_enqueue_work_reuses_retryable_dead_dedupe(db, monkeypatch) -> None:
     monkeypatch.setattr(
         ledger_mod,

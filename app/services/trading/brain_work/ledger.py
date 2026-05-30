@@ -503,18 +503,39 @@ def coalesce_duplicate_open_work(
 
     # Snapshot-triggered mining is global-universe work. When snapshot batches
     # arrive faster than a mine can finish, queued older batches mostly replay
-    # the same expensive discovery pass. Keep the freshest queued batch and
-    # leave any in-flight mine alone.
+    # the same expensive discovery pass. Keep the freshest queued batch unless
+    # a newer batch is already in flight, in which case older queued batches are
+    # stale by construction.
     queued_mine_rows = [
         row
         for row in rows
         if str(row.event_type or "") == "market_snapshots_batch"
         and row.status in ("pending", "retry_wait")
     ]
+    processing_mine_rows = [
+        row
+        for row in rows
+        if str(row.event_type or "") == "market_snapshots_batch"
+        and row.status == "processing"
+    ]
 
     def _mine_rank(row: BrainWorkEvent) -> tuple[float, int, int]:
         created = row.created_at or row.updated_at or datetime.min
         return (-created.timestamp(), int(row.attempts or 0), -int(row.id))
+
+    if processing_mine_rows and queued_mine_rows:
+        processing_mine_rows.sort(key=_mine_rank)
+        newest_processing = processing_mine_rows[0]
+        newest_processing_at = newest_processing.created_at or newest_processing.updated_at or datetime.min
+        for row in list(queued_mine_rows):
+            row_created = row.created_at or row.updated_at or datetime.min
+            if row_created <= newest_processing_at:
+                _retire_duplicate(
+                    row,
+                    reason="market_snapshot_batch_superseded_by_processing",
+                    keep_id=int(newest_processing.id),
+                )
+                queued_mine_rows.remove(row)
 
     if len(queued_mine_rows) > 1:
         queued_mine_rows.sort(key=_mine_rank)
