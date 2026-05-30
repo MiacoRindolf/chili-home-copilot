@@ -7,7 +7,6 @@ operator can see which surfaces still need stronger closed-loop truth.
 """
 from __future__ import annotations
 
-import heapq
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -146,23 +145,8 @@ def _recommended_next_fixes(
             }
         )
 
-    return _top_recommended_fixes(fixes, limit=5)
-
-
-def _fix_priority(row: dict[str, Any]) -> tuple[int, str]:
-    return (-int(row.get("missing") or 0), str(row.get("surface") or ""))
-
-
-def _top_recommended_fixes(fixes: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
-    if limit <= 0 or not fixes:
-        return []
-    return [
-        row
-        for _, _, row in heapq.nsmallest(
-            limit,
-            ((_fix_priority(row), idx, row) for idx, row in enumerate(fixes)),
-        )
-    ]
+    fixes.sort(key=lambda row: (-int(row.get("missing") or 0), str(row.get("surface") or "")))
+    return fixes[:5]
 
 
 def decision_packet_coverage_summary(

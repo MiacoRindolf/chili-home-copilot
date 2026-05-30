@@ -208,7 +208,7 @@ def get_combined_portfolio(*, fresh: bool = False) -> dict[str, Any]:
     return result
 
 
-def get_combined_positions(*, fresh: bool = False, sort_by_equity: bool = True) -> list[dict[str, Any]]:
+def get_combined_positions(*, fresh: bool = False) -> list[dict[str, Any]]:
     """Merge positions from all connected brokers, tagged with broker_source."""
     positions: list[dict[str, Any]] = []
 
@@ -225,8 +225,7 @@ def get_combined_positions(*, fresh: bool = False, sort_by_equity: bool = True) 
             p["broker_source"] = BROKER_COINBASE
             positions.append(p)
 
-    if sort_by_equity:
-        positions.sort(key=lambda p: p.get("equity", 0) or 0, reverse=True)
+    positions.sort(key=lambda p: p.get("equity", 0) or 0, reverse=True)
     return positions
 
 
@@ -234,7 +233,7 @@ def check_duplicate_position(ticker: str) -> list[str]:
     """Return broker names where a position in *ticker* already exists."""
     dupes = []
     t = ticker.upper()
-    for p in get_combined_positions(sort_by_equity=False):
+    for p in get_combined_positions():
         if p.get("ticker", "").upper() == t and p.get("quantity", 0) > 0:
             dupes.append(p.get("broker_source", "unknown"))
     return dupes

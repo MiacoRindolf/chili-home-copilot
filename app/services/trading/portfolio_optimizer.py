@@ -8,7 +8,6 @@ Implements:
 from __future__ import annotations
 
 import logging
-import heapq
 import math
 from datetime import datetime, timedelta
 from typing import Any
@@ -53,7 +52,7 @@ def compute_rolling_correlations(
     if len(tickers) < 2:
         return {"ok": True, "tickers": list(tickers), "correlation_matrix": {}}
 
-    ticker_list = _first_sorted_tickers(tickers, limit=20)
+    ticker_list = sorted(tickers)[:20]
     returns_map: dict[str, list[float]] = {}
 
     for ticker in ticker_list:
@@ -89,12 +88,6 @@ def compute_rolling_correlations(
         "computed_at": datetime.utcnow().isoformat() + "Z",
         "correlation_matrix": corr_dict,
     }
-
-
-def _first_sorted_tickers(tickers: set[str], *, limit: int) -> list[str]:
-    if limit <= 0 or not tickers:
-        return []
-    return heapq.nsmallest(limit, tickers)
 
 
 def equal_risk_contribution(

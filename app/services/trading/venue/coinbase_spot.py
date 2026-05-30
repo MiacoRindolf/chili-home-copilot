@@ -1,7 +1,8 @@
-"""Coinbase Advanced Trade spot adapter — thin over REST SDK; normalized DTOs."""
+﻿"""Coinbase Advanced Trade spot adapter — thin over REST SDK; normalized DTOs."""
 
 from __future__ import annotations
 
+import heapq
 import logging
 import re
 import threading
@@ -39,6 +40,12 @@ _PRODUCT_INFO_CACHE: "dict[str, tuple[NormalizedProduct, float]]" = {}
 _PRODUCT_INFO_CACHE_LOCK = threading.Lock()
 _PRODUCT_INFO_TTL_SEC = 3600.0
 
+def _top_book_levels(levels: list[Any], *, limit: int, bid_side: bool) -> list[Any]:
+    if limit <= 0 or not levels:
+        return []
+    if bid_side:
+        return heapq.nlargest(limit, levels, key=lambda level: level.price)
+    return heapq.nsmallest(limit, levels, key=lambda level: level.price)
 
 def reset_product_info_cache_for_tests() -> None:
     """Clear product-info cache (pytest only)."""
@@ -1684,12 +1691,10 @@ class CoinbaseWebSocketSeam:
                     asks.append(lvl)
 
             if bids or asks:
-                bids.sort(key=lambda l: l.price, reverse=True)
-                asks.sort(key=lambda l: l.price)
                 snap = BookSnapshot(
                     product_id=pid,
-                    bids=bids[:20],
-                    asks=asks[:20],
+                    bids=_top_book_levels(bids, limit=20, bid_side=True),
+                    asks=_top_book_levels(asks, limit=20, bid_side=False),
                     ts=_time.time(),
                 )
                 buf.update(snap)
