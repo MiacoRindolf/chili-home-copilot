@@ -26,6 +26,7 @@ from .promotion_surface import emit_promotion_surface_change
 
 logger = logging.getLogger(__name__)
 LOG_PREFIX = "[brain_work_dispatch]"
+_BACKTEST_REQUESTED_SERIAL_CLAIM_LIMIT = 1
 
 # f-brain-phase2-producer-completion (2026-05-09): watchdog-style
 # mining producer. The APScheduler brain_market_snapshots job is
@@ -340,7 +341,17 @@ def _dispatch_limits(
     max_trade_close: int | None = None,
 ) -> list[tuple[str, int]]:
     """Order: execution feedback, mine, backtests, cpcv_gate, promote, trade-close fanout."""
-    bt = int(max_backtest if max_backtest is not None else getattr(settings, "brain_work_dispatch_batch_size", 8))
+    bt_requested = int(
+        max_backtest
+        if max_backtest is not None
+        else getattr(settings, "brain_work_dispatch_batch_size", 8)
+    )
+    # ``backtest_requested`` executes synchronously and can run for many minutes.
+    # Claiming several rows at once gives later rows the same lease while they
+    # wait behind the first backtest, which turns healthy queue pressure into
+    # stale-lease retries. Keep this event type one-at-a-time inside a single
+    # dispatcher round; service-level parallelism should come from workers.
+    bt = min(max(0, bt_requested), _BACKTEST_REQUESTED_SERIAL_CLAIM_LIMIT)
     ex = int(
         max_exec_feedback
         if max_exec_feedback is not None
