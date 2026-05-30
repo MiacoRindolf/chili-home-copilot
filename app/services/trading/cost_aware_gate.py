@@ -33,6 +33,7 @@ without hitting production state.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -69,6 +70,30 @@ class CapDecision:
     reason: str
     current_positions: int
     current_notional_usd: float
+
+
+def _finite_float_or_none(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
+def _nonnegative_float(value: Any) -> float | None:
+    out = _finite_float_or_none(value)
+    if out is None or out < 0.0:
+        return None
+    return out
+
+
+def _nonnegative_int(value: Any, *, default: int = 0) -> int:
+    out = _nonnegative_float(value)
+    if out is None:
+        return int(default)
+    return max(0, int(out))
 
 
 # ── Buying-power resolver ────────────────────────────────────────────
@@ -131,10 +156,7 @@ def resolve_coinbase_buying_power(
         )
         positions = []
 
-    try:
-        usd = float(portfolio.get("cash") or 0.0)
-    except (TypeError, ValueError):
-        usd = 0.0
+    usd = _nonnegative_float(portfolio.get("cash")) or 0.0
 
     usdc_qty = 0.0
     for p in positions:
@@ -142,10 +164,7 @@ def resolve_coinbase_buying_power(
             continue
         ticker = str(p.get("ticker") or "").upper()
         if ticker in ("USDC-USD", "USDC"):
-            try:
-                usdc_qty = float(p.get("quantity") or 0.0)
-            except (TypeError, ValueError):
-                usdc_qty = 0.0
+            usdc_qty = _nonnegative_float(p.get("quantity")) or 0.0
             break
 
     total = usd + usdc_qty
@@ -185,15 +204,18 @@ def cost_aware_min_edge_gate(
         except Exception:
             s = None
 
-    fee_bps = int(getattr(s, "chili_coinbase_taker_fee_bps_round_trip", 120))
-    buffer_bps = int(getattr(s, "chili_min_edge_safety_buffer_bps", 30))
+    fee_bps = _nonnegative_int(
+        getattr(s, "chili_coinbase_taker_fee_bps_round_trip", 120),
+        default=120,
+    )
+    buffer_bps = _nonnegative_int(
+        getattr(s, "chili_min_edge_safety_buffer_bps", 30),
+        default=30,
+    )
     threshold_bps = fee_bps + buffer_bps
 
-    edge_bps = (
-        int(round(float(projected_profit_pct) * 100.0))
-        if projected_profit_pct is not None
-        else 0
-    )
+    projected_edge = _finite_float_or_none(projected_profit_pct)
+    edge_bps = int(round(projected_edge * 100.0)) if projected_edge is not None else 0
 
     # Routing-aware: RH-eligible tickers pay no fee at the autotrader
     # level (RH crypto fee-free; equities sub-bps and absorbed by
@@ -241,7 +263,10 @@ def cost_aware_min_edge_gate(
     tca_cost_bps = 0
     tca_snapshot: dict[str, Any] | None = None
     if bool(getattr(s, "chili_coinbase_cost_gate_include_tca_estimates", False)):
-        min_samples = int(getattr(s, "chili_coinbase_cost_gate_min_tca_samples", 5))
+        min_samples = _nonnegative_int(
+            getattr(s, "chili_coinbase_cost_gate_min_tca_samples", 5),
+            default=5,
+        )
         tca_cost_bps, tca_snapshot = _coinbase_tca_cost_bps(
             db=db, ticker=ticker, side="buy", min_samples=min_samples
         )
@@ -293,11 +318,8 @@ def _coinbase_tca_cost_bps(
     if not row:
         return 0, None
 
-    try:
-        samples = int(row.get("sample_trades") or 0)
-    except (TypeError, ValueError):
-        samples = 0
-    min_samples_i = max(1, int(min_samples or 1))
+    samples = _nonnegative_int(row.get("sample_trades"), default=0)
+    min_samples_i = max(1, _nonnegative_int(min_samples, default=1))
     if samples < min_samples_i:
         return 0, {
             "sample_trades": samples,
@@ -307,11 +329,7 @@ def _coinbase_tca_cost_bps(
         }
 
     def _f(name: str) -> float:
-        try:
-            value = float(row.get(name) or 0.0)
-            return value if value > 0.0 else 0.0
-        except (TypeError, ValueError):
-            return 0.0
+        return _nonnegative_float(row.get(name)) or 0.0
 
     spread_bps = _f("p90_spread_bps")
     slippage_bps = _f("p90_slippage_bps")
@@ -372,11 +390,13 @@ def per_venue_cap_check(
             current_positions=0, current_notional_usd=0.0,
         )
 
-    max_notional = float(
-        getattr(s, "chili_coinbase_max_notional_usd", 0.0) or 0.0
+    max_notional = (
+        _nonnegative_float(getattr(s, "chili_coinbase_max_notional_usd", 0.0))
+        or 0.0
     )
-    max_positions = int(
-        getattr(s, "chili_coinbase_max_concurrent_positions", 0) or 0
+    max_positions = _nonnegative_int(
+        getattr(s, "chili_coinbase_max_concurrent_positions", 0),
+        default=0,
     )
 
     try:
@@ -393,7 +413,7 @@ def per_venue_cap_check(
                )
         """)).fetchall()
         current_positions = len(rows)
-        current_notional = sum(float(r.notional or 0.0) for r in rows)
+        current_notional = sum(_nonnegative_float(r.notional) or 0.0 for r in rows)
     except Exception as exc:
         logger.warning(
             "[cost_aware_gate] per_venue_cap_check query failed: %s", exc,
@@ -411,7 +431,14 @@ def per_venue_cap_check(
             current_positions=current_positions,
             current_notional_usd=current_notional,
         )
-    if max_notional > 0 and (current_notional + float(proposed_notional_usd)) > max_notional:
+    proposed_notional = _nonnegative_float(proposed_notional_usd)
+    if proposed_notional is None:
+        return CapDecision(
+            allowed=False, reason=REASON_CAP_NOTIONAL,
+            current_positions=current_positions,
+            current_notional_usd=current_notional,
+        )
+    if max_notional > 0 and (current_notional + proposed_notional) > max_notional:
         return CapDecision(
             allowed=False, reason=REASON_CAP_NOTIONAL,
             current_positions=current_positions,

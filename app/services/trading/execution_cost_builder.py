@@ -54,9 +54,10 @@ def _ops_log_enabled() -> bool:
 
 def _percentile(values: list[float], q: float) -> float:
     """Classic linear-interpolation percentile. ``q`` in [0, 1]."""
-    if not values:
+    clean = [float(v) for v in values if _finite_float_or_none(v) is not None]
+    if not clean:
         return 0.0
-    sorted_v = sorted(values)
+    sorted_v = sorted(clean)
     if len(sorted_v) == 1:
         return sorted_v[0]
     q = max(0.0, min(1.0, q))
@@ -100,13 +101,31 @@ def _ensure_side(direction: str | None) -> str:
     return "short" if d == "short" else "long"
 
 
-def _notional(trade: Any) -> float:
+def _finite_float_or_none(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
     try:
-        px = float(trade.entry_price or 0.0)
-        qty = float(trade.quantity or 0.0)
-        return abs(px * qty)
+        out = float(value)
     except Exception:
+        return None
+    if not math.isfinite(out):
+        return None
+    return out
+
+
+def _positive_finite_float(value: Any) -> float | None:
+    out = _finite_float_or_none(value)
+    if out is None or out <= 0:
+        return None
+    return out
+
+
+def _notional(trade: Any) -> float:
+    px = _positive_finite_float(getattr(trade, "entry_price", None))
+    qty = _positive_finite_float(getattr(trade, "quantity", None))
+    if px is None or qty is None:
         return 0.0
+    return abs(px * qty)
 
 
 def compute_rolling_estimate(
@@ -161,18 +180,8 @@ def compute_rolling_estimate(
     notional_sum = 0.0
 
     for t in rows:
-        entry = None
-        exit_ = None
-        if t.tca_entry_slippage_bps is not None:
-            try:
-                entry = float(t.tca_entry_slippage_bps)
-            except Exception:
-                entry = None
-        if t.tca_exit_slippage_bps is not None:
-            try:
-                exit_ = float(t.tca_exit_slippage_bps)
-            except Exception:
-                exit_ = None
+        entry = _finite_float_or_none(t.tca_entry_slippage_bps)
+        exit_ = _finite_float_or_none(t.tca_exit_slippage_bps)
 
         if entry is not None:
             slip_bps.append(abs(entry))
@@ -189,7 +198,7 @@ def compute_rolling_estimate(
     adv_usd = 0.0
     if adv_lookup_fn is not None:
         try:
-            adv_usd = float(adv_lookup_fn(ticker, int(window_days)) or 0.0)
+            adv_usd = _positive_finite_float(adv_lookup_fn(ticker, int(window_days))) or 0.0
         except Exception:
             adv_usd = 0.0
     if adv_usd <= 0 and window_days > 0:
@@ -254,11 +263,11 @@ def upsert_estimate(
         "ticker": row.ticker,
         "side": row.side,
         "window_days": int(row.window_days),
-        "median_spread_bps": float(row.median_spread_bps),
-        "p90_spread_bps": float(row.p90_spread_bps),
-        "median_slippage_bps": float(row.median_slippage_bps),
-        "p90_slippage_bps": float(row.p90_slippage_bps),
-        "avg_daily_volume_usd": float(row.avg_daily_volume_usd),
+        "median_spread_bps": max(0.0, _finite_float_or_none(row.median_spread_bps) or 0.0),
+        "p90_spread_bps": max(0.0, _finite_float_or_none(row.p90_spread_bps) or 0.0),
+        "median_slippage_bps": max(0.0, _finite_float_or_none(row.median_slippage_bps) or 0.0),
+        "p90_slippage_bps": max(0.0, _finite_float_or_none(row.p90_slippage_bps) or 0.0),
+        "avg_daily_volume_usd": _positive_finite_float(row.avg_daily_volume_usd) or 0.0,
         "sample_trades": int(row.sample_trades),
     })
     db.commit()

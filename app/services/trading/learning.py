@@ -8265,7 +8265,6 @@ def test_pattern_hypothesis(
             timeframe=r.timeframe,
             features_json=_fj,
         )
-        _row_d["ret_5d"] = float(r.outcome_return_pct or 0.0)
         _ensemble_rows.append(_row_d)
     _ensemble_ok, _ensemble_detail = check_promotion_ready(
         _ensemble_rows,

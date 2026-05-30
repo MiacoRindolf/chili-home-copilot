@@ -112,7 +112,6 @@ def handle_backtest_completed(db: "Session", ev, user_id: int | None) -> None:
                 timeframe=r.timeframe,
                 features_json=fj,
             )
-            row_d["ret_5d"] = float(r.outcome_return_pct or 0.0)
             ensemble_rows.append(row_d)
 
         # Phase E of f-evidence-fidelity-architecture (2026-05-14): the

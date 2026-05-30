@@ -268,6 +268,46 @@ def test_gate_coinbase_tca_estimate_raises_threshold():
     assert res.tca_snapshot["used"] is True
 
 
+@pytest.mark.parametrize("projected_edge", [float("nan"), float("inf"), True])
+def test_gate_coinbase_nonfinite_projected_edge_blocks(projected_edge):
+    s = _settings_stub()
+
+    res = cost_aware_min_edge_gate(
+        ticker="AKT-USD", projected_profit_pct=projected_edge, settings_=s,
+    )
+
+    assert res.allowed is False
+    assert res.reason == REASON_GATE_COINBASE_BLOCKED
+    assert res.edge_bps == 0
+    assert res.threshold_bps == 150
+
+
+def test_gate_coinbase_nonfinite_tca_estimate_ignored():
+    s = _settings_stub(include_tca=True)
+    db = _FakeCostDb({
+        "sample_trades": 9,
+        "p90_spread_bps": float("inf"),
+        "p90_slippage_bps": float("nan"),
+        "median_spread_bps": -3.0,
+        "median_slippage_bps": True,
+        "last_updated_at": None,
+    })
+
+    res = cost_aware_min_edge_gate(
+        ticker="AKT-USD", projected_profit_pct=1.5, settings_=s, db=db,
+    )
+
+    assert res.allowed is True
+    assert res.threshold_bps == 150
+    assert res.tca_cost_bps == 0
+    assert res.tca_snapshot is not None
+    assert res.tca_snapshot["used"] is True
+    assert res.tca_snapshot["p90_spread_bps"] == 0.0
+    assert res.tca_snapshot["p90_slippage_bps"] == 0.0
+    assert res.tca_snapshot["median_spread_bps"] == 0.0
+    assert res.tca_snapshot["median_slippage_bps"] == 0.0
+
+
 # ── Per-venue cap cases ─────────────────────────────────────────────
 
 
@@ -384,6 +424,25 @@ def test_cap_robinhood_venue_no_op(db):
     assert res.allowed is True
 
 
+@pytest.mark.parametrize("proposed_notional", [float("nan"), float("inf"), True])
+def test_cap_invalid_proposed_notional_blocks(proposed_notional):
+    db = MagicMock()
+    db.execute.return_value.fetchall.return_value = []
+    s = _settings_stub(max_positions=0, max_notional=50.0)
+
+    res = per_venue_cap_check(
+        venue="coinbase",
+        proposed_notional_usd=proposed_notional,
+        db=db,
+        settings_=s,
+    )
+
+    assert res.allowed is False
+    assert res.reason == REASON_CAP_NOTIONAL
+    assert res.current_positions == 0
+    assert res.current_notional_usd == 0.0
+
+
 # ── Buying-power resolver ───────────────────────────────────────────
 
 
@@ -433,6 +492,29 @@ def test_buying_power_resilient_to_fetch_failure():
     # Total resolves to 0 (conservative); upstream caller can decide
     # to skip Coinbase routing on zero buying power.
     assert res["usd"] == 0.0
+    assert res["total"] == 0.0
+
+
+@pytest.mark.parametrize(
+    ("cash", "quantity"),
+    [
+        (float("inf"), float("nan")),
+        (True, True),
+        (-1.0, -2.0),
+    ],
+)
+def test_buying_power_rejects_nonfinite_boolean_and_negative_balances(cash, quantity):
+    cag._BUYING_POWER_CACHE["value"] = None
+    cag._BUYING_POWER_CACHE["ts"] = 0.0
+
+    res = resolve_coinbase_buying_power(
+        force_refresh=True,
+        portfolio_fn=lambda: {"cash": cash},
+        positions_fn=lambda: [{"ticker": "USDC-USD", "quantity": quantity}],
+    )
+
+    assert res["usd"] == 0.0
+    assert res["usdc"] == 0.0
     assert res["total"] == 0.0
 
 

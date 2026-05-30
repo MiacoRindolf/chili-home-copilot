@@ -106,7 +106,6 @@ def _rows_for_pattern(db, scan_pattern_id: int) -> list[dict]:
             timeframe=r.timeframe,
             features_json=fj,
         )
-        d["ret_5d"] = float(r.outcome_return_pct or 0.0)
         out.append(d)
     return out
 

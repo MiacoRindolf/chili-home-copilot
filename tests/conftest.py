@@ -224,12 +224,14 @@ _TRADING_DOMAIN_TARGETED_TESTS = (
     "test_canonical_outcome_layer.py",
     "test_cash_deployment.py",
     "test_composite_reweight.py",
+    "test_cost_aware_gate.py",
     "test_cpcv_promotion_gate.py",
     "test_crypto_exit_monitor_pattern_exit_now.py",
     "test_governance_daily_loss.py",
     "test_edge_aware_evolution.py",
     "test_edge_reliability.py",
     "test_emergency_liquidation_no_quote.py",
+    "test_execution_cost_builder.py",
     "test_market_data_dead_cache_fallback.py",
     "test_monitor_api_execution_state.py",
     "test_paper_shadow_mode.py",
@@ -475,7 +477,7 @@ def _test_targeted_cleanup_tables(request) -> frozenset[str] | None:
         return None
     if any(token in name for token in _PROJECT_DOMAIN_TARGETED_TESTS):
         return _PROJECT_DOMAIN_TARGETED_TABLES
-    if name in _TRADING_DOMAIN_TARGETED_TESTS:
+    if any(token in name for token in _TRADING_DOMAIN_TARGETED_TESTS):
         return _TRADING_DOMAIN_TARGETED_TABLES
     return None
 
@@ -485,7 +487,7 @@ def _test_needs_default_trading_users(request) -> bool:
         name = Path(str(request.node.fspath)).name.lower()
     except Exception:
         return False
-    return name in _TRADING_DEFAULT_USER_TESTS
+    return any(token in name for token in _TRADING_DEFAULT_USER_TESTS)
 
 
 def _seed_default_trading_users() -> None:

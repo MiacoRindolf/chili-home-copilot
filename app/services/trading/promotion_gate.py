@@ -41,7 +41,11 @@ from typing import Any, Mapping
 
 import numpy as np
 import pandas as pd
-from skfolio.model_selection import CombinatorialPurgedCV, optimal_folds_number
+try:
+    from skfolio.model_selection import CombinatorialPurgedCV, optimal_folds_number
+except ImportError:
+    CombinatorialPurgedCV = None
+    optimal_folds_number = None
 
 from ...config import settings
 from .triple_barrier import compute_label_atr
@@ -217,6 +221,18 @@ def _row_to_float_features(row: Mapping[str, Any]) -> np.ndarray | None:
     return np.array(vec, dtype=float)
 
 
+def _finite_return_or_none(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(out):
+        return None
+    return out
+
+
 def normalize_mining_row_features(row: Mapping[str, Any]) -> np.ndarray | None:
     """Map a mining ``_mine_from_history`` row (or flat dict) to **X**."""
     return _row_to_float_features(row)
@@ -233,7 +249,7 @@ def normalize_ptr_row_features(
     """Build a mining-shaped dict from :class:`~app.models.trading.PatternTradeRow` data."""
     fj = features_json or {}
     out: dict[str, Any] = {
-        "ret_5d": float(outcome_return_pct or 0.0),
+        "ret_5d": _finite_return_or_none(outcome_return_pct),
         "bar_start_utc": as_of_ts,
         "ticker": ticker,
         "bar_interval": (timeframe or "1d").strip() or "1d",
@@ -437,6 +453,8 @@ def _cpcv_build_feasible_cv_and_splits(
     embargo_size: int,
 ) -> tuple[CombinatorialPurgedCV | None, int, int, list | None]:
     """Shrink purge/embargo until each train fold can absorb purge+embargo (López de Prado)."""
+    if CombinatorialPurgedCV is None:
+        return None, purged_size, embargo_size, None
     ps, es = purged_size, embargo_size
     cap = max(200, X.shape[0] + 50)
     for _ in range(cap):
@@ -482,15 +500,18 @@ def filtered_rows_to_realized_series(
     ordered = sorted(filtered, key=_bar_start_ts)
     rets: list[float] = []
     ts: list[datetime] = []
+    missing_ts = False
     for r in ordered:
-        b = r.get("bar_start_utc")
-        if not isinstance(b, datetime):
+        ret = _finite_return_or_none(r.get("ret_5d"))
+        if ret is None:
             continue
-        rets.append(float(r.get("ret_5d") or 0))
-        ts.append(b)
-    if len(rets) < len(ordered):
-        return [float(r.get("ret_5d") or 0) for r in ordered], None
-    return rets, ts if len(ts) == len(rets) else None
+        rets.append(ret)
+        b = r.get("bar_start_utc")
+        if isinstance(b, datetime):
+            ts.append(b)
+        else:
+            missing_ts = True
+    return rets, None if missing_ts or len(ts) != len(rets) else ts
 
 
 def trade_sequence_annualization(
@@ -530,7 +551,22 @@ def evaluate_pattern_cpcv_realized_pnl(
     time-shifted copy).
     """
     pid_for_seed = int(pattern_id) if pattern_id is not None else 0
-    rets = np.asarray(trade_returns, dtype=float).ravel()
+    raw_rets = np.asarray(trade_returns, dtype=object).ravel().tolist()
+    raw_ts = (
+        trade_timestamps
+        if trade_timestamps is not None and len(trade_timestamps) == len(raw_rets)
+        else None
+    )
+    clean_rets: list[float] = []
+    clean_ts: list[datetime] = []
+    for idx, raw_ret in enumerate(raw_rets):
+        ret = _finite_return_or_none(raw_ret)
+        if ret is None:
+            continue
+        clean_rets.append(ret)
+        if raw_ts is not None:
+            clean_ts.append(raw_ts[idx])
+    rets = np.asarray(clean_rets, dtype=float)
     n = int(rets.size)
     if n < 1:
         return {
@@ -545,8 +581,8 @@ def evaluate_pattern_cpcv_realized_pnl(
             "evaluator": "realized_pnl",
         }
 
-    ts_list = trade_timestamps
-    if ts_list is not None and len(ts_list) != n:
+    ts_list = clean_ts if raw_ts is not None and len(clean_ts) == n else None
+    if ts_list is not None and any(not isinstance(t, datetime) for t in ts_list):
         ts_list = None
 
     cap = int(max_labeled_rows) if max_labeled_rows is not None else int(
@@ -566,6 +602,19 @@ def evaluate_pattern_cpcv_realized_pnl(
         return {
             "skipped": True,
             "reason": "insufficient_trades",
+            "cpcv_n_paths": 0,
+            "cpcv_median_sharpe": None,
+            "cpcv_median_sharpe_by_regime": None,
+            "deflated_sharpe": None,
+            "pbo": None,
+            "n_effective_trials": int(max(1, n_hypotheses_tested)),
+            "evaluator": "realized_pnl",
+        }
+
+    if optimal_folds_number is None or CombinatorialPurgedCV is None:
+        return {
+            "skipped": True,
+            "reason": "cpcv_dependency_missing:skfolio",
             "cpcv_n_paths": 0,
             "cpcv_median_sharpe": None,
             "cpcv_median_sharpe_by_regime": None,
@@ -768,6 +817,18 @@ def evaluate_pattern_cpcv(
         return {
             "skipped": True,
             "reason": "insufficient_rows_after_barrier",
+            "cpcv_n_paths": 0,
+            "cpcv_median_sharpe": None,
+            "cpcv_median_sharpe_by_regime": None,
+            "deflated_sharpe": None,
+            "pbo": None,
+            "n_effective_trials": int(max(1, n_hypotheses_tested)),
+        }
+
+    if optimal_folds_number is None or CombinatorialPurgedCV is None:
+        return {
+            "skipped": True,
+            "reason": "cpcv_dependency_missing:skfolio",
             "cpcv_n_paths": 0,
             "cpcv_median_sharpe": None,
             "cpcv_median_sharpe_by_regime": None,

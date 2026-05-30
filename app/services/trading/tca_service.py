@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -12,20 +13,27 @@ from sqlalchemy.orm import Session
 logger = logging.getLogger(__name__)
 
 
+def _positive_finite_float(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(out) or out <= 0:
+        return None
+    return out
+
+
 def entry_slippage_bps(
     reference_price: float,
     fill_price: float,
     direction: str = "long",
 ) -> float | None:
     """Slippage in basis points: positive = paid more (long) / worse fill."""
-    if reference_price is None or fill_price is None:
-        return None
-    try:
-        ref = float(reference_price)
-        fil = float(fill_price)
-    except (TypeError, ValueError):
-        return None
-    if ref <= 0 or fil <= 0:
+    ref = _positive_finite_float(reference_price)
+    fil = _positive_finite_float(fill_price)
+    if ref is None or fil is None:
         return None
     d = (direction or "long").strip().lower()
     if d == "short":
@@ -36,10 +44,11 @@ def entry_slippage_bps(
 def apply_tca_on_trade_fill(trade) -> None:
     """Set ``tca_entry_slippage_bps`` when reference and fill prices exist."""
     ref = getattr(trade, "tca_reference_entry_price", None)
-    fill = getattr(trade, "avg_fill_price", None) or getattr(trade, "entry_price", None)
+    avg_fill = getattr(trade, "avg_fill_price", None)
+    fill = avg_fill if avg_fill is not None else getattr(trade, "entry_price", None)
     if ref is None or fill is None:
         return
-    bps = entry_slippage_bps(ref, float(fill), getattr(trade, "direction", None) or "long")
+    bps = entry_slippage_bps(ref, fill, getattr(trade, "direction", None) or "long")
     if bps is not None:
         trade.tca_entry_slippage_bps = bps
 
@@ -50,14 +59,9 @@ def exit_slippage_bps(
     direction: str = "long",
 ) -> float | None:
     """Exit slippage in bps. Long exit: positive = received less than ref (worse)."""
-    if reference_price is None or fill_price is None:
-        return None
-    try:
-        ref = float(reference_price)
-        fil = float(fill_price)
-    except (TypeError, ValueError):
-        return None
-    if ref <= 0 or fil <= 0:
+    ref = _positive_finite_float(reference_price)
+    fil = _positive_finite_float(fill_price)
+    if ref is None or fil is None:
         return None
     d = (direction or "long").strip().lower()
     if d == "short":
@@ -82,28 +86,29 @@ def resolve_arrival_price(
         from .market_data import fetch_quote
         q = fetch_quote(ticker)
         if q:
-            price = q.get("price")
-            bid = q.get("bid")
-            ask = q.get("ask")
-            if bid and ask and float(bid) > 0 and float(ask) > 0:
-                mid = (float(bid) + float(ask)) / 2
+            price = _positive_finite_float(q.get("price"))
+            bid = _positive_finite_float(q.get("bid"))
+            ask = _positive_finite_float(q.get("ask"))
+            if bid is not None and ask is not None and ask >= bid:
+                mid = (bid + ask) / 2
                 result["arrival_price"] = mid
                 result["source"] = "mid_quote"
-                result["bid"] = float(bid)
-                result["ask"] = float(ask)
+                result["bid"] = bid
+                result["ask"] = ask
                 result["quoted_spread_bps"] = round(
-                    (float(ask) - float(bid)) / mid * 10000, 2,
+                    (ask - bid) / mid * 10000, 2,
                 )
                 return result
-            elif price and float(price) > 0:
-                result["arrival_price"] = float(price)
+            elif price is not None:
+                result["arrival_price"] = price
                 result["source"] = "last_trade"
                 return result
     except Exception:
         pass
 
-    if signal_price and float(signal_price) > 0:
-        result["arrival_price"] = float(signal_price)
+    signal = _positive_finite_float(signal_price)
+    if signal is not None:
+        result["arrival_price"] = signal
         result["source"] = "signal_price"
         return result
 
@@ -119,17 +124,19 @@ def resolve_exit_reference_price(
     fill_fallback: float,
 ) -> float:
     """Reference price for exit TCA: explicit, else live quote, else fill (0 bps)."""
-    if explicit is not None and float(explicit) > 0:
-        return float(explicit)
+    explicit_price = _positive_finite_float(explicit)
+    if explicit_price is not None:
+        return explicit_price
     try:
         from .market_data import fetch_quote
 
         q = fetch_quote(ticker)
-        if q and q.get("price"):
-            return float(q["price"])
+        quote_price = _positive_finite_float(q.get("price")) if q else None
+        if quote_price is not None:
+            return quote_price
     except Exception as e:
         logger.debug("[tca] exit reference quote failed for %s: %s", ticker, e)
-    return float(fill_fallback)
+    return _positive_finite_float(fill_fallback) or 0.0
 
 
 def apply_tca_on_trade_close(trade) -> None:
@@ -139,7 +146,7 @@ def apply_tca_on_trade_close(trade) -> None:
     if ref is None or fill is None:
         return
     bps = exit_slippage_bps(
-        float(ref), float(fill), getattr(trade, "direction", None) or "long",
+        ref, fill, getattr(trade, "direction", None) or "long",
     )
     if bps is not None:
         trade.tca_exit_slippage_bps = bps

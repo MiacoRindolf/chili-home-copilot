@@ -91,7 +91,6 @@ try:
                 timeframe=r.timeframe,
                 features_json=fj,
             )
-            d["ret_5d"] = float(r.outcome_return_pct or 0.0)
             ensemble.append(d)
 
         result["stage"] = "check_promotion_ready"

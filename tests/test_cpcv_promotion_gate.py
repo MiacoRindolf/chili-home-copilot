@@ -14,7 +14,7 @@ from sqlalchemy import text
 from app.config import settings
 from app.models.trading import PatternTradeRow, ScanPattern
 from app.services.trading.mining_validation import compute_deflated_sharpe_ratio, compute_pbo
-from skfolio.model_selection import optimal_folds_number
+from app.services.trading import promotion_gate as promotion_gate_module
 
 from app.services.trading.promotion_gate import (
     CPCV_FEATURE_NAMES,
@@ -26,9 +26,12 @@ from app.services.trading.promotion_gate import (
     cpcv_vertical_max_bars,
     evaluate_pattern_cpcv,
     evaluate_pattern_cpcv_realized_pnl,
+    filtered_rows_to_realized_series,
     finalize_promotion_with_cpcv,
     infer_scanner_bucket,
     normalize_mining_row_features,
+    normalize_ptr_row_features,
+    optimal_folds_number,
     promotion_gate_passes,
 )
 
@@ -37,6 +40,21 @@ class _Pat:
     def __init__(self, **kw):
         for k, v in kw.items():
             setattr(self, k, v)
+
+
+def _skip_without_skfolio():
+    if optimal_folds_number is None:
+        pytest.skip("skfolio is not installed")
+
+
+def _disable_adaptive_shadow_db(monkeypatch):
+    def _legacy_only(_payload, *, legacy_pass, legacy_reasons, **_kwargs):
+        return bool(legacy_pass), list(legacy_reasons or [])
+
+    monkeypatch.setattr(
+        "app.services.trading.cpcv_adaptive_gate.maybe_apply_adaptive_gate",
+        _legacy_only,
+    )
 
 
 def test_infer_scanner_bucket_heuristics():
@@ -56,6 +74,74 @@ def test_cpcv_feature_vector_order_and_lgbm_params_locked():
     row["stoch_bull_div"] = False
     v = normalize_mining_row_features(row)
     assert v is not None and v.shape[0] == len(CPCV_FEATURE_NAMES)
+
+
+def test_ptr_row_normalization_keeps_zero_but_not_missing_return():
+    now = datetime(2026, 1, 1, 12, 0, 0)
+    common = {
+        "as_of_ts": now,
+        "ticker": "SPY",
+        "timeframe": "1d",
+        "features_json": {},
+    }
+
+    zero = normalize_ptr_row_features(outcome_return_pct=0.0, **common)
+    missing = normalize_ptr_row_features(outcome_return_pct=None, **common)
+    nonfinite = normalize_ptr_row_features(outcome_return_pct=float("nan"), **common)
+    boolean = normalize_ptr_row_features(outcome_return_pct=True, **common)
+
+    assert zero["ret_5d"] == 0.0
+    assert missing["ret_5d"] is None
+    assert nonfinite["ret_5d"] is None
+    assert boolean["ret_5d"] is None
+
+
+def test_realized_series_skips_bad_returns_without_synthetic_zero():
+    base = datetime(2026, 1, 1, 12, 0, 0)
+    rows = [
+        {"ret_5d": None, "bar_start_utc": base},
+        {"ret_5d": float("nan"), "bar_start_utc": base + timedelta(minutes=1)},
+        {"ret_5d": True, "bar_start_utc": base + timedelta(minutes=2)},
+        {"ret_5d": 0.0, "bar_start_utc": base + timedelta(minutes=3)},
+        {"ret_5d": -0.2, "bar_start_utc": base + timedelta(minutes=4)},
+        {"ret_5d": float("inf"), "bar_start_utc": base + timedelta(minutes=5)},
+    ]
+
+    rets, ts = filtered_rows_to_realized_series(rows)
+
+    assert rets == [0.0, -0.2]
+    assert ts == [base + timedelta(minutes=3), base + timedelta(minutes=4)]
+
+
+def test_realized_pnl_evaluator_drops_bad_returns_before_empty_gate():
+    base = datetime(2026, 1, 1, 12, 0, 0)
+    out = evaluate_pattern_cpcv_realized_pnl(
+        123,
+        [None, float("nan"), float("inf"), True],
+        [base + timedelta(minutes=i) for i in range(4)],
+        n_hypotheses_tested=1,
+    )
+
+    assert out["skipped"] is True
+    assert out["reason"] == "empty_returns"
+    assert out["cpcv_n_paths"] == 0
+
+
+def test_realized_pnl_evaluator_fails_closed_without_cpcv_dependency(monkeypatch):
+    base = datetime(2026, 1, 1, 12, 0, 0)
+    monkeypatch.setattr(promotion_gate_module, "optimal_folds_number", None)
+    monkeypatch.setattr(promotion_gate_module, "CombinatorialPurgedCV", None)
+
+    out = evaluate_pattern_cpcv_realized_pnl(
+        123,
+        [0.01, -0.005, 0.02, 0.0, 0.01] * 4,
+        [base + timedelta(minutes=i) for i in range(20)],
+        n_hypotheses_tested=1,
+    )
+
+    assert out["skipped"] is True
+    assert out["reason"] == "cpcv_dependency_missing:skfolio"
+    assert out["cpcv_n_paths"] == 0
 
 
 def test_dsr_closed_form_matches_mining_helper():
@@ -137,6 +223,7 @@ def test_strict_promotion_tier_30_plus_trades():
 
 def test_cpcv_autoscales_purge_embargo_for_small_data():
     """~CHILI-scale n: autoscaled purge/embargo fit inside smallest train fold."""
+    _skip_without_skfolio()
     n = 158
     X = np.random.default_rng(42).normal(size=(n, len(CPCV_FEATURE_NAMES)))
     ps, es = _cpcv_autoscaled_purge_embargo(n, 0.05, 0.02)
@@ -162,6 +249,8 @@ def test_cpcv_autoscales_purge_embargo_for_small_data():
 
 
 def test_cpcv_preflight_returns_clear_reason_when_infeasible(monkeypatch):
+    _skip_without_skfolio()
+
     def _prep(_rows: list):
         n = 40
         rng = np.random.default_rng(0)
@@ -202,6 +291,8 @@ def test_bars_per_year_and_vertical_cap():
 
 
 def test_finalize_shadow_does_not_block_on_failed_metrics(monkeypatch):
+    _disable_adaptive_shadow_db(monkeypatch)
+
     def _fake_eval(*_a, **_kw):
         return {
             "skipped": False,
@@ -232,6 +323,8 @@ def test_finalize_shadow_does_not_block_on_failed_metrics(monkeypatch):
 
 
 def test_finalize_enforced_blocks(monkeypatch):
+    _disable_adaptive_shadow_db(monkeypatch)
+
     def _fake_eval(*_a, **_kw):
         return {
             "skipped": False,
@@ -262,6 +355,7 @@ def test_finalize_enforced_blocks(monkeypatch):
 
 def test_evaluate_pattern_cpcv_max_labeled_rows_subsamples(monkeypatch):
     """Huge labeled sets are capped before CV to avoid OOM (backfill / prod-shaped DB)."""
+    _skip_without_skfolio()
 
     def _fake_prep(_rows: list) -> tuple:
         n = 2000
@@ -294,6 +388,7 @@ def test_cpcv_realized_pnl_matches_direct_sharpe_on_single_path():
 
 
 def test_cpcv_realized_pnl_on_pattern_1047_fixture():
+    _skip_without_skfolio()
     rng = np.random.default_rng(1047)
     n = 158
     # Synthetic n=158 series (positive drift, moderate vol) — stable DSR > 0.5 in CI;
@@ -409,6 +504,7 @@ def test_n_paths_below_provisional_min_fails():
 
 
 def test_pattern_1047_fixture_passes_provisional():
+    _skip_without_skfolio()
     rng = np.random.default_rng(1047)
     n = 158
     rets = rng.normal(0.25, 1.2, n).tolist()
@@ -425,7 +521,8 @@ def test_pattern_1047_fixture_passes_provisional():
 
 
 def test_purged_cv_splits_respect_sample_count():
-    from skfolio.model_selection import CombinatorialPurgedCV
+    model_selection = pytest.importorskip("skfolio.model_selection")
+    CombinatorialPurgedCV = model_selection.CombinatorialPurgedCV
 
     n = 200
     X = np.random.default_rng(1).normal(size=(n, 4))
@@ -521,7 +618,11 @@ def test_backfill_dry_run_is_write_free(db):
         text=True,
         timeout=180,
     )
-    assert proc.returncode in (0, 2), proc.stdout + "\n" + proc.stderr
+    missing_skfolio = (
+        proc.returncode == 1
+        and "missing dependency `skfolio`" in proc.stderr
+    )
+    assert proc.returncode in (0, 2) or missing_skfolio, proc.stdout + "\n" + proc.stderr
 
     db.expire_all()
     after_counts = _counts()

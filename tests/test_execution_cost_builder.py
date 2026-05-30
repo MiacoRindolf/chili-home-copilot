@@ -97,6 +97,25 @@ class TestComputeRollingEstimate:
         assert est.p90_slippage_bps == pytest.approx(7.0)  # only one slip value
         _cleanup(db, ["MSFT_PHF"])
 
+    def test_ignores_nonfinite_tca_slippage_rows(self, db):
+        _cleanup(db, ["BADTCA_PHF"])
+        db.add(_mk_trade("BADTCA_PHF", entry_slip=7.0, exit_slip=None))
+        db.add(_mk_trade("BADTCA_PHF", entry_slip=float("nan"), exit_slip=None, days_ago=2))
+        db.add(_mk_trade("BADTCA_PHF", entry_slip=None, exit_slip=float("inf"), days_ago=3))
+        db.commit()
+
+        est = compute_rolling_estimate(
+            db, ticker="BADTCA_PHF", side="long", window_days=30
+        )
+
+        assert est is not None
+        assert est.sample_trades == 3
+        assert est.median_spread_bps == pytest.approx(7.0)
+        assert est.p90_spread_bps == pytest.approx(7.0)
+        assert est.median_slippage_bps == pytest.approx(7.0)
+        assert est.p90_slippage_bps == pytest.approx(7.0)
+        _cleanup(db, ["BADTCA_PHF"])
+
     def test_filters_by_direction(self, db):
         _cleanup(db, ["NVDA_PHF"])
         db.add(_mk_trade("NVDA_PHF", direction="long", entry_slip=3.0))
@@ -137,6 +156,20 @@ class TestComputeRollingEstimate:
         # notional = 100 * 200 = 20_000; window_days = 30 → adv fallback ≈ 666.67
         assert est.avg_daily_volume_usd == pytest.approx(20_000 / 30)
         _cleanup(db, ["AMD_PHF"])
+
+    def test_adv_fallback_when_lookup_returns_nonfinite(self, db):
+        _cleanup(db, ["ADVNF_PHF"])
+        db.add(_mk_trade("ADVNF_PHF", entry_slip=4.0, qty=100, price=200))
+        db.commit()
+
+        est = compute_rolling_estimate(
+            db, ticker="ADVNF_PHF", side="long", window_days=30,
+            adv_lookup_fn=lambda _t, _w: float("nan"),
+        )
+
+        assert est is not None
+        assert est.avg_daily_volume_usd == pytest.approx(20_000 / 30)
+        _cleanup(db, ["ADVNF_PHF"])
 
 
 class TestUpsertEstimate:
@@ -196,6 +229,38 @@ class TestUpsertEstimate:
         assert rows[0].sample_trades == 20
         assert rows[0].last_updated_at >= first_ts
         _cleanup(db, ["SHADOW_PHF"])
+
+    def test_upsert_sanitizes_nonfinite_cost_fields(self, db, monkeypatch):
+        _cleanup(db, ["SAN_PHF"])
+        monkeypatch.setattr(
+            "app.services.trading.execution_cost_builder.settings.brain_execution_cost_mode",
+            "shadow",
+            raising=False,
+        )
+        row = EstimateRow(
+            ticker="SAN_PHF",
+            side="long",
+            window_days=30,
+            median_spread_bps=float("nan"),
+            p90_spread_bps=float("inf"),
+            median_slippage_bps=-2.0,
+            p90_slippage_bps=4.0,
+            avg_daily_volume_usd=float("nan"),
+            sample_trades=3,
+        )
+
+        assert upsert_estimate(db, row) is True
+        saved = (
+            db.query(ExecutionCostEstimate)
+            .filter_by(ticker="SAN_PHF", side="long", window_days=30)
+            .one()
+        )
+        assert saved.median_spread_bps == pytest.approx(0.0)
+        assert saved.p90_spread_bps == pytest.approx(0.0)
+        assert saved.median_slippage_bps == pytest.approx(0.0)
+        assert saved.p90_slippage_bps == pytest.approx(4.0)
+        assert saved.avg_daily_volume_usd == pytest.approx(0.0)
+        _cleanup(db, ["SAN_PHF"])
 
 
 class TestRebuildAll:
