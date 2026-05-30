@@ -331,7 +331,7 @@ def decision_packet_coverage_summary(
             SELECT
                 COUNT(*) AS total,
                 COUNT(*) FILTER (WHERE p.id IS NOT NULL) AS linked
-            FROM trading_trades t
+            FROM trading_management_envelopes t
             LEFT JOIN trading_decision_packets p ON p.linked_trade_id = t.id
             WHERE t.entry_date >= :since
               AND COALESCE(t.status, '') NOT IN ('cancelled', 'rejected')
@@ -351,7 +351,7 @@ def decision_packet_coverage_summary(
                     t.broker_source,
                     t.status,
                     t.entry_date
-                FROM trading_trades t
+                FROM trading_management_envelopes t
                 LEFT JOIN trading_decision_packets p ON p.linked_trade_id = t.id
                 WHERE t.entry_date >= :since
                   AND COALESCE(t.status, '') NOT IN ('cancelled', 'rejected')
@@ -832,7 +832,7 @@ def repair_trade_packet_links_from_proposals(
                 t.strategy_proposal_id,
                 t.entry_date,
                 pr.allocation_decision_json ->> 'decision_packet_id' AS decision_packet_id_text
-            FROM trading_trades t
+            FROM trading_management_envelopes t
             JOIN trading_proposals pr ON pr.id = t.strategy_proposal_id
             WHERE t.entry_date >= :since
               AND COALESCE(t.status, '') NOT IN ('cancelled', 'rejected')

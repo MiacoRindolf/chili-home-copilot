@@ -255,7 +255,7 @@ def gather_signals_for_pattern(
     row = db.execute(text("""
         SELECT vt.realized_slippage_bps, vt.expected_slippage_bps, vt.id
         FROM trading_venue_truth_log vt
-        LEFT JOIN trading_trades t ON t.id = vt.trade_id
+        LEFT JOIN trading_management_envelopes t ON t.id = vt.trade_id
         WHERE t.scan_pattern_id = :pid
           AND vt.created_at >= (NOW() - (:ld || ' days')::INTERVAL)
         ORDER BY vt.created_at DESC
@@ -282,7 +282,7 @@ def gather_signals_for_pattern(
     row = db.execute(text("""
         SELECT br.kind, br.severity, br.id
         FROM trading_bracket_reconciliation_log br
-        LEFT JOIN trading_trades t ON t.id = br.trade_id
+        LEFT JOIN trading_management_envelopes t ON t.id = br.trade_id
         WHERE t.scan_pattern_id = :pid
           AND br.observed_at >= (NOW() - (:ld || ' days')::INTERVAL)
         ORDER BY br.observed_at DESC
@@ -502,13 +502,13 @@ def discover_active_patterns(
             UNION
             SELECT DISTINCT t.scan_pattern_id
               FROM trading_venue_truth_log v
-              JOIN trading_trades t ON t.id = v.trade_id
+              JOIN trading_management_envelopes t ON t.id = v.trade_id
              WHERE v.created_at >= (NOW() - (:ld || ' days')::INTERVAL)
                AND t.scan_pattern_id IS NOT NULL
             UNION
             SELECT DISTINCT t.scan_pattern_id
               FROM trading_bracket_reconciliation_log br
-              JOIN trading_trades t ON t.id = br.trade_id
+              JOIN trading_management_envelopes t ON t.id = br.trade_id
              WHERE br.observed_at >= (NOW() - (:ld || ' days')::INTERVAL)
                AND t.scan_pattern_id IS NOT NULL
             UNION

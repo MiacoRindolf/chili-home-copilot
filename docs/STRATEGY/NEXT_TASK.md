@@ -1,12 +1,11 @@
-# NEXT_TASK: f-position-identity-phase-5j-selective-reader-cleanup-slice-2
+# NEXT_TASK: f-position-identity-phase-5j-selective-reader-cleanup-slice-3
 
 STATUS: PENDING
 
 ## Goal
 
-Continue Phase 5J by migrating another small batch of read-only analytics from
-the legacy `trading_trades` compatibility view to the semantic physical table
-`trading_management_envelopes`.
+Continue Phase 5J by migrating another small read-only analytics batch from the
+legacy `trading_trades` compatibility view to `trading_management_envelopes`.
 
 Keep the compatibility view and the Python `Trade` ORM class in place.
 
@@ -23,20 +22,22 @@ Keep the compatibility view and the Python `Trade` ORM class in place.
   - `scripts/d-cb-phase6-soak-probe.py`
   - `scripts/d-maker-only-tca-probe.py`
   - `scripts/d-imminent-silence-audit.py`
+- Phase 5J slice 2 shipped:
+  - `app/services/trading/decision_packet_coverage.py`
+  - `app/services/trading/divergence_service.py`
 - Latest post-slice verification:
   - Phase 5I probe: `COMPLETE_POSITIVE`
   - schema-specific log hits: 0
-  - brain KPI smoke: `ok=True`
 
-## Candidate Slice 2 Targets
+## Candidate Slice 3 Targets
 
-Prefer read-only analytics/reporting code:
+Prefer read-only learning/reporting code:
 
-- `app/services/trading/decision_packet_coverage.py`
-- `app/services/trading/divergence_service.py`
-- `scripts/analyze_trade_quality_funnel.py` if its current local edits are
-  understood and safe to build on
-- read-only dashboard/reporting scripts
+- `app/services/trading/dynamic_priors.py`
+- `app/services/trading/ticker_scope_autotune.py`
+- `app/services/trading/pattern_stats_recompute.py` only if the update/write
+  behavior is intentionally limited to pattern aggregate maintenance
+- read-only scripts without existing unrelated local edits
 
 Defer live writer paths:
 
@@ -44,12 +45,13 @@ Defer live writer paths:
 - reconciliation close paths
 - stop execution
 - autotrader placement paths
-- migrations that intentionally preserve historical compatibility
+- migrations preserving historical compatibility
+- broad mechanical rewrites
 
 ## Tasks
 
-1. Audit the candidate files and classify each reference as convert/keep/defer.
-2. Convert only one small read-only group.
+1. Audit candidate files and classify each reference as convert/keep/defer.
+2. Convert one small read-only group.
 3. Add or extend guard tests.
 4. Verify:
 
@@ -76,6 +78,6 @@ Defer live writer paths:
 
 ## References
 
+- `docs/STRATEGY/CC_REPORTS/2026-05-30_f-position-identity-phase-5j-selective-reader-cleanup-slice-2.md`
 - `docs/STRATEGY/CC_REPORTS/2026-05-30_f-position-identity-phase-5j-selective-reader-cleanup-slice-1.md`
 - `docs/STRATEGY/CC_REPORTS/2026-05-30_f-position-identity-phase-5i-post-rename-soak-closeout.md`
-- `scripts/d-phase5i-post-rename-soak-probe.py`

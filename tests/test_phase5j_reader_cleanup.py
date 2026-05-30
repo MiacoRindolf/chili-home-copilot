@@ -28,3 +28,14 @@ def test_phase5j_probe_scripts_use_management_envelope_reader() -> None:
         source = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
         assert "FROM trading_management_envelopes" in source
         assert "FROM trading_trades" not in source
+
+
+def test_phase5j_slice2_analytics_use_management_envelope_reader() -> None:
+    for relative_path in (
+        "app/services/trading/decision_packet_coverage.py",
+        "app/services/trading/divergence_service.py",
+    ):
+        source = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+        assert "trading_management_envelopes" in source
+        assert "FROM trading_trades" not in source
+        assert "JOIN trading_trades" not in source
