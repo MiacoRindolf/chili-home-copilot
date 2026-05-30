@@ -501,6 +501,69 @@ def coalesce_duplicate_open_work(
                 keep_id=keep_id,
             )
 
+    # Exit-variant refreshes may be born from asset-sliced reliability, cash
+    # deployment, or execution-block evidence. The current ScanPattern evolution
+    # handler still forks children at the parent-pattern level, so running more
+    # than one open exit refresh for the same parent just repeats the same
+    # lineage mutation pressure and burns scarce queue slots. Keep one open row
+    # per pattern, preferring any in-flight work and otherwise the row with the
+    # highest expected evidence value / best calibrated edge.
+    exit_variant_groups: dict[int, list[BrainWorkEvent]] = {}
+    for row in rows:
+        if row.status not in ("pending", "processing", "retry_wait"):
+            continue
+        if str(row.event_type or "") != "exit_variant_refresh":
+            continue
+        payload = row.payload if isinstance(row.payload, dict) else {}
+        try:
+            pid = int(payload.get("scan_pattern_id") or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        if pid <= 0:
+            continue
+        exit_variant_groups.setdefault(pid, []).append(row)
+
+    def _exit_variant_edge_value(row: BrainWorkEvent) -> float:
+        payload = row.payload if isinstance(row.payload, dict) else {}
+        for key in (
+            "calibrated_ev_after_cost_pct",
+            "calibrated_ev_pct",
+            "expected_net_pct",
+        ):
+            try:
+                return float(payload.get(key))
+            except (TypeError, ValueError):
+                continue
+        return 0.0
+
+    def _exit_variant_rank(row: BrainWorkEvent) -> tuple[int, float, float, int, float, int]:
+        status_rank = 0 if row.status == "processing" else 1
+        updated = row.updated_at or row.created_at or now
+        return (
+            status_rank,
+            -_expected_evidence_value(row),
+            -_exit_variant_edge_value(row),
+            int(row.attempts or 0),
+            -updated.timestamp(),
+            -int(row.id),
+        )
+
+    for group_rows in exit_variant_groups.values():
+        if len(group_rows) <= 1:
+            continue
+        group_rows.sort(key=_exit_variant_rank)
+        keep = group_rows[0]
+        keep_id = int(keep.id)
+        reason = (
+            "exit_variant_pattern_superseded_by_processing"
+            if keep.status == "processing"
+            else "exit_variant_pattern_superseded"
+        )
+        for row in group_rows[1:]:
+            if row.status == "processing":
+                continue
+            _retire_duplicate(row, reason=reason, keep_id=keep_id)
+
     # Snapshot-triggered mining is global-universe work. When snapshot batches
     # arrive faster than a mine can finish, queued older batches mostly replay
     # the same expensive discovery pass. Keep the freshest queued batch unless

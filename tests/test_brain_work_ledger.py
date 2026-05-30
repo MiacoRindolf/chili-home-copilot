@@ -440,6 +440,136 @@ def test_coalesce_duplicate_open_work_thins_recert_rescue_pattern_asset(db) -> N
     assert rows[other_asset].status == "pending"
 
 
+def test_coalesce_duplicate_open_work_thins_exit_variant_by_parent_pattern(db) -> None:
+    low_value = enqueue_work_event(
+        db,
+        event_type="exit_variant_refresh",
+        dedupe_key="exit_variant_refresh:p537:astock:low-fp",
+        payload={
+            "scan_pattern_id": 537,
+            "asset_class": "stock",
+            "expected_evidence_value": 1.25,
+            "calibrated_ev_after_cost_pct": 0.2,
+        },
+        lease_scope="evolution",
+    )
+    high_value = enqueue_work_event(
+        db,
+        event_type="exit_variant_refresh",
+        dedupe_key="exit_variant_refresh:p537:acrypto:high-fp",
+        payload={
+            "scan_pattern_id": 537,
+            "asset_class": "crypto",
+            "expected_evidence_value": 5.0,
+            "calibrated_ev_after_cost_pct": 0.6,
+        },
+        lease_scope="evolution",
+    )
+    other_pattern = enqueue_work_event(
+        db,
+        event_type="exit_variant_refresh",
+        dedupe_key="exit_variant_refresh:p538:astock:other-fp",
+        payload={
+            "scan_pattern_id": 538,
+            "asset_class": "stock",
+            "expected_evidence_value": 0.5,
+        },
+        lease_scope="evolution",
+    )
+    db.commit()
+    assert low_value is not None
+    assert high_value is not None
+    assert other_pattern is not None
+
+    result = coalesce_duplicate_open_work(
+        db,
+        event_types=("exit_variant_refresh",),
+    )
+    db.commit()
+
+    rows = {
+        int(row.id): row
+        for row in db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.id.in_([low_value, high_value, other_pattern]))
+        .all()
+    }
+    assert result["coalesced"] == 1
+    assert result["reasons"] == {"exit_variant_pattern_superseded": 1}
+    assert rows[low_value].status == "done"
+    assert (
+        rows[low_value].payload["duplicate_open_work_suppressed_reason"]
+        == "exit_variant_pattern_superseded"
+    )
+    assert rows[low_value].payload["duplicate_open_work_kept_event_id"] == high_value
+    assert rows[high_value].status == "pending"
+    assert rows[other_pattern].status == "pending"
+
+
+def test_coalesce_duplicate_open_work_keeps_processing_exit_variant(db) -> None:
+    now = datetime.utcnow()
+    processing = BrainWorkEvent(
+        domain="trading",
+        event_type="exit_variant_refresh",
+        event_kind="work",
+        dedupe_key="exit_variant_refresh:p537:astock:processing-fp",
+        payload={
+            "scan_pattern_id": 537,
+            "asset_class": "stock",
+            "expected_evidence_value": 1.0,
+        },
+        lease_scope="evolution",
+        status="processing",
+        attempts=1,
+        max_attempts=5,
+        next_run_at=now - timedelta(minutes=2),
+        lease_holder="pytest:evolution",
+        lease_expires_at=now + timedelta(minutes=10),
+        created_at=now - timedelta(minutes=3),
+        updated_at=now - timedelta(minutes=1),
+    )
+    queued = BrainWorkEvent(
+        domain="trading",
+        event_type="exit_variant_refresh",
+        event_kind="work",
+        dedupe_key="exit_variant_refresh:p537:acrypto:queued-fp",
+        payload={
+            "scan_pattern_id": 537,
+            "asset_class": "crypto",
+            "expected_evidence_value": 50.0,
+        },
+        lease_scope="evolution",
+        status="pending",
+        attempts=0,
+        max_attempts=5,
+        next_run_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add_all([processing, queued])
+    db.commit()
+    ids = [int(processing.id), int(queued.id)]
+
+    result = coalesce_duplicate_open_work(
+        db,
+        event_types=("exit_variant_refresh",),
+    )
+    db.commit()
+
+    rows = {
+        int(row.id): row
+        for row in db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.id.in_(ids))
+        .all()
+    }
+    assert result["coalesced"] == 1
+    assert result["reasons"] == {"exit_variant_pattern_superseded_by_processing": 1}
+    assert rows[int(processing.id)].status == "processing"
+    assert rows[int(queued.id)].status == "done"
+    assert rows[int(queued.id)].payload["duplicate_open_work_kept_event_id"] == int(
+        processing.id
+    )
+
+
 def test_coalesce_duplicate_open_work_keeps_latest_queued_market_snapshot_batch(db) -> None:
     now = datetime.utcnow()
 
