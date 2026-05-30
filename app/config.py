@@ -3630,6 +3630,17 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_PHASE5K_PDT_USE_ENVELOPES"),
     )
+    # Phase 5K-E: default-OFF reader cutovers for promotion and pattern-quality
+    # evidence. Keep these typed so source smoke and runtime provenance can
+    # name the exact active setting without hidden direct environment reads.
+    chili_phase5k_cohort_promote_use_envelopes: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_PHASE5K_COHORT_PROMOTE_USE_ENVELOPES"),
+    )
+    chili_phase5k_pattern_quality_use_envelopes: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_PHASE5K_PATTERN_QUALITY_USE_ENVELOPES"),
+    )
     # f-promotion-pipeline-rebalance Phase 1 (2026-05-09): sample-size
     # floor for the thin-evidence demote sweep. The original Phase D
     # threshold (10 trades) was wrong-sense: a pattern with 8 realized

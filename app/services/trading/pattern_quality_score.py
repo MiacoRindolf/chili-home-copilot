@@ -91,7 +91,6 @@ from __future__ import annotations
 
 import logging
 import math as _math
-import os
 from typing import Any, Optional
 
 from sqlalchemy import text
@@ -126,9 +125,15 @@ def _truthy_flag(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _pattern_quality_source_relation(use_envelopes: bool | None = None) -> str:
+def _pattern_quality_source_relation(
+    use_envelopes: bool | None = None,
+    *,
+    settings_: Any | None = None,
+) -> str:
     if use_envelopes is None:
-        use_envelopes = _truthy_flag(os.environ.get(PHASE5K_PATTERN_QUALITY_ENV))
+        use_envelopes = _truthy_flag(
+            getattr(settings_, "chili_phase5k_pattern_quality_use_envelopes", False)
+        )
     if use_envelopes:
         return _PATTERN_QUALITY_ENVELOPE_RELATION
     return _PATTERN_QUALITY_COMPAT_RELATION
@@ -407,6 +412,7 @@ def _load_realized_pnl_map(
     *,
     include_autotrader_paper_dynamic: bool = False,
     use_envelopes: bool | None = None,
+    settings_: Any | None = None,
 ) -> dict[int, dict[str, Any]]:
     """Per-pattern realized PnL stats over the trailing window.
 
@@ -423,7 +429,10 @@ def _load_realized_pnl_map(
     them for safety. Sentinel ``scan_pattern_id = -1`` is excluded
     (``_NO_PATTERN_SENTINEL`` — see ``app/models/trading.py``).
     """
-    source_relation = _pattern_quality_source_relation(use_envelopes)
+    source_relation = _pattern_quality_source_relation(
+        use_envelopes,
+        settings_=settings_,
+    )
     rows = db.execute(
         text(f"""
             SELECT scan_pattern_id,
@@ -581,6 +590,7 @@ def compute_and_persist_scores(
         db,
         int(weights.get("realized_window_days", 90)),
         include_autotrader_paper_dynamic=include_paper_dynamic,
+        settings_=settings_,
     )
 
     patterns = (
@@ -712,6 +722,7 @@ def compute_and_persist_scores_streaming(
         db,
         int(weights.get("realized_window_days", 90)),
         include_autotrader_paper_dynamic=include_paper_dynamic,
+        settings_=settings_,
     )
 
     patterns = (

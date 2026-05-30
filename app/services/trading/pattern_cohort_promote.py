@@ -48,7 +48,6 @@ from __future__ import annotations
 import bisect
 import logging
 import math
-import os
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
@@ -75,9 +74,15 @@ def _truthy_flag(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _cohort_promote_source_relation(use_envelopes: bool | None = None) -> str:
+def _cohort_promote_source_relation(
+    use_envelopes: bool | None = None,
+    *,
+    settings_: Any | None = None,
+) -> str:
     if use_envelopes is None:
-        use_envelopes = _truthy_flag(os.environ.get(PHASE5K_COHORT_PROMOTE_ENV))
+        use_envelopes = _truthy_flag(
+            getattr(settings_, "chili_phase5k_cohort_promote_use_envelopes", False)
+        )
     if use_envelopes:
         return _COHORT_PROMOTE_ENVELOPE_RELATION
     return _COHORT_PROMOTE_COMPAT_RELATION
@@ -247,7 +252,7 @@ def select_cohort_candidates(
     max_negative_pct = float(getattr(
         settings_, "chili_cohort_promote_max_realized_avg_pnl_pct_negative", 0.0,
     ))
-    source_relation = _cohort_promote_source_relation()
+    source_relation = _cohort_promote_source_relation(settings_=settings_)
 
     # Do not require directional outcomes here. shadow_promoted is the
     # observation stage that lets a pattern collect those outcomes without
