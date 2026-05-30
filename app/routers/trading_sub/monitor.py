@@ -375,9 +375,35 @@ def _structural_exit_noop_reason(reason: Any) -> bool:
     )
 
 
-def _recommended_work_status(
-    db: Session,
+def _exit_noop_payload_blocks_refresh(
+    payload: dict[str, Any],
+    *,
+    evidence_fingerprint: str,
+) -> bool:
+    if _safe_int(payload.get("created_count")) != 0:
+        return False
+    same_fingerprint = (
+        bool(evidence_fingerprint)
+        and str(payload.get("evidence_fingerprint") or "") == evidence_fingerprint
+    )
+    return same_fingerprint or _structural_exit_noop_reason(payload.get("skip_reason"))
+
+
+def _recert_payload_blocks_refresh(payload: dict[str, Any]) -> tuple[bool, str | None]:
+    action = str(payload.get("recommended_next_action") or "").strip().lower()
+    if action in _RECENT_RECERT_BLOCKER_ACTIONS:
+        return True, action
+    refresh = payload.get("recert_backtest_refresh")
+    if isinstance(refresh, dict):
+        reason = str(refresh.get("reason") or "").strip().lower()
+        if reason in _RECENT_RECERT_BLOCKER_REASONS:
+            return True, reason
+    return False, None
+
+
+def _recommended_work_status_from_diagnostics(
     supply: dict[str, Any],
+    diagnostics: dict[tuple[str, int], list[dict[str, Any]]],
 ) -> dict[str, Any]:
     event_type = str(supply.get("recommended_work_event") or "").strip()
     pid = _safe_int(supply.get("scan_pattern_id"))
@@ -386,34 +412,13 @@ def _recommended_work_status(
     if pid is None or pid <= 0:
         return {"event_type": event_type, "actionable": True, "blocker": None}
 
-    minutes = _safe_int(
-        getattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360)
-    )
-    if minutes is None or minutes <= 0:
-        return {"event_type": event_type, "actionable": True, "blocker": None}
-    cutoff = datetime.utcnow() - timedelta(minutes=minutes)
-
     if event_type == EXIT_VARIANT_REFRESH:
         fingerprint = str(supply.get("evidence_fingerprint") or "")
-        rows = (
-            db.query(BrainWorkEvent)
-            .filter(BrainWorkEvent.event_kind == "outcome")
-            .filter(BrainWorkEvent.event_type == EXIT_VARIANT_DIAGNOSTIC)
-            .filter(BrainWorkEvent.created_at >= cutoff)
-            .filter(BrainWorkEvent.payload["scan_pattern_id"].astext == str(pid))
-            .order_by(BrainWorkEvent.created_at.desc(), BrainWorkEvent.id.desc())
-            .limit(20)
-            .all()
-        )
-        for row in rows:
-            payload = row.payload if isinstance(row.payload, dict) else {}
-            if _safe_int(payload.get("created_count")) != 0:
-                continue
-            same_fingerprint = (
-                bool(fingerprint)
-                and str(payload.get("evidence_fingerprint") or "") == fingerprint
-            )
-            if same_fingerprint or _structural_exit_noop_reason(payload.get("skip_reason")):
+        for payload in diagnostics.get((EXIT_VARIANT_DIAGNOSTIC, pid), []):
+            if _exit_noop_payload_blocks_refresh(
+                payload,
+                evidence_fingerprint=fingerprint,
+            ):
                 return {
                     "event_type": event_type,
                     "actionable": False,
@@ -422,38 +427,89 @@ def _recommended_work_status(
                 }
 
     if event_type == RECERT_RESCUE_REFRESH:
-        rows = (
-            db.query(BrainWorkEvent)
-            .filter(BrainWorkEvent.event_kind == "outcome")
-            .filter(BrainWorkEvent.event_type == RECERT_RESCUE_DIAGNOSTIC)
-            .filter(BrainWorkEvent.created_at >= cutoff)
-            .filter(BrainWorkEvent.payload["scan_pattern_id"].astext == str(pid))
-            .order_by(BrainWorkEvent.created_at.desc(), BrainWorkEvent.id.desc())
-            .limit(20)
-            .all()
-        )
-        for row in rows:
-            payload = row.payload if isinstance(row.payload, dict) else {}
-            action = str(payload.get("recommended_next_action") or "").strip().lower()
-            if action in _RECENT_RECERT_BLOCKER_ACTIONS:
+        for payload in diagnostics.get((RECERT_RESCUE_DIAGNOSTIC, pid), []):
+            blocked, detail = _recert_payload_blocks_refresh(payload)
+            if blocked:
                 return {
                     "event_type": event_type,
                     "actionable": False,
                     "blocker": "recent_recert_blocker_diagnostic",
-                    "blocker_detail": action,
+                    "blocker_detail": detail,
                 }
-            refresh = payload.get("recert_backtest_refresh")
-            if isinstance(refresh, dict):
-                reason = str(refresh.get("reason") or "").strip().lower()
-                if reason in _RECENT_RECERT_BLOCKER_REASONS:
-                    return {
-                        "event_type": event_type,
-                        "actionable": False,
-                        "blocker": "recent_recert_blocker_diagnostic",
-                        "blocker_detail": reason,
-                    }
 
     return {"event_type": event_type, "actionable": True, "blocker": None}
+
+
+def _recent_refresh_diagnostics_for_supplies(
+    db: Session,
+    supplies: list[dict[str, Any]],
+) -> dict[tuple[str, int], list[dict[str, Any]]]:
+    minutes = _safe_int(
+        getattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360)
+    )
+    if minutes is None or minutes <= 0:
+        return {}
+
+    pids_by_type: dict[str, set[int]] = {
+        EXIT_VARIANT_DIAGNOSTIC: set(),
+        RECERT_RESCUE_DIAGNOSTIC: set(),
+    }
+    for supply in supplies:
+        pid = _safe_int(supply.get("scan_pattern_id"))
+        if pid is None or pid <= 0:
+            continue
+        event_type = str(supply.get("recommended_work_event") or "").strip()
+        if event_type == EXIT_VARIANT_REFRESH:
+            pids_by_type[EXIT_VARIANT_DIAGNOSTIC].add(pid)
+        elif event_type == RECERT_RESCUE_REFRESH:
+            pids_by_type[RECERT_RESCUE_DIAGNOSTIC].add(pid)
+
+    cutoff = datetime.utcnow() - timedelta(minutes=minutes)
+    out: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    for diagnostic_type, pids in pids_by_type.items():
+        if not pids:
+            continue
+        rows = (
+            db.query(BrainWorkEvent)
+            .filter(BrainWorkEvent.event_kind == "outcome")
+            .filter(BrainWorkEvent.event_type == diagnostic_type)
+            .filter(BrainWorkEvent.created_at >= cutoff)
+            .filter(
+                BrainWorkEvent.payload["scan_pattern_id"].astext.in_(
+                    [str(pid) for pid in sorted(pids)]
+                )
+            )
+            .order_by(BrainWorkEvent.created_at.desc(), BrainWorkEvent.id.desc())
+            .limit(20 * len(pids))
+            .all()
+        )
+        for row in rows:
+            payload = row.payload if isinstance(row.payload, dict) else {}
+            pid = _safe_int(payload.get("scan_pattern_id"))
+            if pid is None or pid <= 0:
+                continue
+            bucket = out.setdefault((diagnostic_type, pid), [])
+            if len(bucket) < 20:
+                bucket.append(payload)
+    return out
+
+
+def _recommended_work_statuses(
+    db: Session,
+    supplies: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    diagnostics = _recent_refresh_diagnostics_for_supplies(db, supplies)
+    return [
+        _recommended_work_status_from_diagnostics(supply, diagnostics)
+        for supply in supplies
+    ]
+
+
+def _recommended_work_status(
+    db: Session,
+    supply: dict[str, Any],
+) -> dict[str, Any]:
+    return _recommended_work_statuses(db, [supply])[0]
 
 
 def _empty_imminent_summary() -> dict[str, int]:
@@ -893,6 +949,26 @@ def api_monitor_imminent_alerts(
             if aid not in runs_by_alert:
                 runs_by_alert[aid] = run
 
+    supplies_by_alert_id: dict[int, dict[str, Any]] = {}
+    for a in alerts:
+        supply: dict[str, Any] = {}
+        if a.scan_pattern_id:
+            pid = int(a.scan_pattern_id)
+            asset_key = _canonical_imminent_asset_class(a.asset_type)
+            supply = (
+                edge_supply_by_pattern_asset.get((pid, asset_key))
+                or edge_supply_by_pattern_asset.get((pid, "all"))
+                or {}
+            )
+        supplies_by_alert_id[int(a.id)] = supply
+    work_statuses = _recommended_work_statuses(
+        db,
+        [supplies_by_alert_id[int(a.id)] for a in alerts],
+    )
+    work_status_by_alert_id = {
+        int(alert.id): status for alert, status in zip(alerts, work_statuses)
+    }
+
     items: list[dict[str, Any]] = []
     summary = _empty_imminent_summary()
     for a in alerts:
@@ -906,16 +982,11 @@ def api_monitor_imminent_alerts(
         )
         blocker_category = _imminent_blocker_category(run, pat, signal_lane)
         _bump_imminent_summary(summary, blocker_category)
-        supply: dict[str, Any] = {}
-        if a.scan_pattern_id:
-            pid = int(a.scan_pattern_id)
-            asset_key = _canonical_imminent_asset_class(a.asset_type)
-            supply = (
-                edge_supply_by_pattern_asset.get((pid, asset_key))
-                or edge_supply_by_pattern_asset.get((pid, "all"))
-                or {}
-            )
-        work_status = _recommended_work_status(db, supply)
+        supply = supplies_by_alert_id.get(int(a.id), {})
+        work_status = work_status_by_alert_id.get(
+            int(a.id),
+            {"event_type": None, "actionable": None, "blocker": None},
+        )
         items.append(
             {
                 "id": a.id,
