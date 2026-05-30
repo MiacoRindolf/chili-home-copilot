@@ -37,6 +37,7 @@ rule. Documented as such inline.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -51,6 +52,9 @@ logger = logging.getLogger(__name__)
 # SEC PDT rule constants (not configurable; these come from regulation):
 PDT_EQUITY_THRESHOLD_USD = 25_000.0
 PDT_MAX_DAY_TRADES_5D = 3   # 4th would trigger PDT designation
+PHASE5K_PDT_ENV = "CHILI_PHASE5K_PDT_USE_ENVELOPES"
+_PDT_COMPAT_RELATION = "trading_trades"
+_PDT_ENVELOPE_RELATION = "trading_management_envelopes"
 
 
 # f-pdt-count-broker-confirmed-only (2026-05-08): exit reasons that mark a
@@ -74,6 +78,22 @@ _RECONCILE_ARTIFACT_EXIT_REASONS = frozenset({
 # multiple users this would need to key by user_id.
 _PORTFOLIO_CACHE: dict[str, Any] = {"ts": 0.0, "value": None}
 _PORTFOLIO_CACHE_TTL_S = 60.0
+
+
+def _truthy_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _pdt_source_relation(use_envelopes: bool | None = None) -> str:
+    if use_envelopes is None:
+        use_envelopes = _truthy_flag(os.environ.get(PHASE5K_PDT_ENV))
+    if use_envelopes:
+        return _PDT_ENVELOPE_RELATION
+    return _PDT_COMPAT_RELATION
 
 
 @dataclass(frozen=True)
@@ -161,7 +181,12 @@ def _earliest_business_day_in_window(
     return datetime(d.year, d.month, d.day)
 
 
-def _count_day_trades_5d(db: Session, *, user_id: int | None = None) -> int | None:
+def _count_day_trades_5d(
+    db: Session,
+    *,
+    user_id: int | None = None,
+    use_envelopes: bool | None = None,
+) -> int | None:
     """Count round-trip day trades (opened AND closed same calendar day)
     in the trailing 5 business days from ``trading_trades``.
 
@@ -191,6 +216,7 @@ def _count_day_trades_5d(db: Session, *, user_id: int | None = None) -> int | No
         cutoff = _earliest_business_day_in_window(
             datetime.utcnow(), window_business_days=5,
         )
+        source_relation = _pdt_source_relation(use_envelopes)
         # f-pdt-count-broker-confirmed-only (2026-05-08): three new
         # exclusions so the count covers ONLY broker-confirmed day-trades.
         #   * ``broker_order_id IS NOT NULL``: the exit was a real
@@ -202,9 +228,9 @@ def _count_day_trades_5d(db: Session, *, user_id: int | None = None) -> int | No
         #   * ``exit_reason NOT IN`` reconcile-artifact set: rows whose
         #     close was driven by the reconciler not finding the position
         #     are R31/R32-style wipeouts, not FINRA day-trades.
-        sql = """
+        sql = f"""
             SELECT COUNT(*) AS n
-            FROM trading_trades
+            FROM {source_relation}
             WHERE status = 'closed'
               AND entry_date IS NOT NULL
               AND exit_date IS NOT NULL
