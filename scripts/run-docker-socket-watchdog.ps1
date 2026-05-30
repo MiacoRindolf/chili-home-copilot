@@ -18,6 +18,8 @@ param(
     [int]$WarnBoundSockets = 2000,
     [int]$CriticalDockerBoundSockets = 8000,
     [int]$MaxProcessRows = 25,
+    [string]$ComposeProjectName = "chili-home-copilot",
+    [int]$ComposeCollisionEventLookbackMinutes = 20,
     [switch]$Json,
     [string]$LogPath
 )
@@ -185,6 +187,156 @@ function Test-NamedPipe {
     }
 }
 
+function Normalize-PathForCompare {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return ""
+    }
+    return $Path.Replace("/", "\").TrimEnd("\").ToLowerInvariant()
+}
+
+function Resolve-CanonicalRoot {
+    param([string]$Path)
+
+    $resolved = (Resolve-Path -LiteralPath $Path).Path
+    $gitCommand = Get-Command git -ErrorAction SilentlyContinue
+    if ($null -eq $gitCommand) {
+        return $resolved
+    }
+
+    try {
+        $gitResult = Invoke-NativeCapture -FilePath "git" -Arguments @(
+            "-C", $resolved, "rev-parse", "--show-toplevel"
+        )
+        if ($gitResult.exit_code -eq 0 -and $gitResult.output.Count -gt 0) {
+            $top = [string]$gitResult.output[0]
+            if (-not [string]::IsNullOrWhiteSpace($top)) {
+                return $top.Replace("/", "\")
+            }
+        }
+    } catch {
+        return $resolved
+    }
+
+    return $resolved
+}
+
+function Get-ComposeCollisionSummary {
+    param(
+        [string]$ExpectedRoot,
+        [string]$ProjectName,
+        [int]$EventLookbackMinutes
+    )
+
+    $expected = Normalize-PathForCompare -Path $ExpectedRoot
+    $summary = [ordered]@{
+        available = $false
+        project_name = $ProjectName
+        expected_working_dir = $ExpectedRoot
+        current_collision_count = 0
+        recent_event_collision_count = 0
+        current_collisions = @()
+        recent_event_collisions = @()
+        error = $null
+    }
+
+    if ([string]::IsNullOrWhiteSpace($ProjectName)) {
+        $summary.error = "compose_project_name_missing"
+        return $summary
+    }
+
+    try {
+        $idResult = Invoke-NativeCapture -FilePath "docker" -Arguments @(
+            "ps", "-a",
+            "--filter", "label=com.docker.compose.project=$ProjectName",
+            "--format", "{{.ID}}"
+        )
+        if ($idResult.exit_code -ne 0) {
+            $summary.error = ($idResult.output -join "`n")
+            return $summary
+        }
+
+        $ids = @($idResult.output | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        if ($ids.Count -gt 0) {
+            $inspectArgs = @("inspect") + $ids
+            $inspectResult = Invoke-NativeCapture -FilePath "docker" -Arguments $inspectArgs
+            if ($inspectResult.exit_code -eq 0) {
+                $objects = @()
+                ($inspectResult.output -join "`n") |
+                    ConvertFrom-Json |
+                    ForEach-Object { $objects += $_ }
+                $currentCollisions = @()
+                foreach ($object in $objects) {
+                    $labels = $object.Config.Labels
+                    $workingDir = [string]$labels."com.docker.compose.project.working_dir"
+                    if ((Normalize-PathForCompare -Path $workingDir) -eq $expected) {
+                        continue
+                    }
+                    $currentCollisions += [pscustomobject]@{
+                        container = ([string]$object.Name).TrimStart("/")
+                        service = [string]$labels."com.docker.compose.service"
+                        working_dir = $workingDir
+                        state = [string]$object.State.Status
+                    }
+                }
+                $summary.current_collisions = $currentCollisions
+                $summary.current_collision_count = $currentCollisions.Count
+            }
+        }
+
+        $lookback = [math]::Max(1, $EventLookbackMinutes)
+        $eventResult = Invoke-NativeCapture -FilePath "docker" -Arguments @(
+            "events",
+            "--since", ("{0}m" -f $lookback),
+            "--until", "0s",
+            "--filter", "type=container",
+            "--filter", "event=create",
+            "--filter", "event=destroy",
+            "--filter", "event=rename",
+            "--format", "{{json .}}"
+        )
+        if ($eventResult.exit_code -eq 0) {
+            $eventCollisions = @()
+            foreach ($line in @($eventResult.output | Select-Object -Last 200)) {
+                if ([string]::IsNullOrWhiteSpace($line)) {
+                    continue
+                }
+                try {
+                    $event = $line | ConvertFrom-Json
+                } catch {
+                    continue
+                }
+                $attrs = $event.Actor.Attributes
+                if ([string]$attrs."com.docker.compose.project" -ne $ProjectName) {
+                    continue
+                }
+                $workingDir = [string]$attrs."com.docker.compose.project.working_dir"
+                if ((Normalize-PathForCompare -Path $workingDir) -eq $expected) {
+                    continue
+                }
+                $eventCollisions += [pscustomobject]@{
+                    action = [string]$event.Action
+                    container = [string]$attrs.name
+                    service = [string]$attrs."com.docker.compose.service"
+                    working_dir = $workingDir
+                    time = $event.time
+                }
+            }
+            $summary.recent_event_collisions = $eventCollisions
+            $summary.recent_event_collision_count = $eventCollisions.Count
+        } elseif ([string]::IsNullOrWhiteSpace([string]$summary.error)) {
+            $summary.error = ($eventResult.output -join "`n")
+        }
+
+        $summary.available = $true
+        return $summary
+    } catch {
+        $summary.error = $_.Exception.Message
+        return $summary
+    }
+}
+
 function Write-Summary {
     param([object]$Summary)
 
@@ -220,7 +372,7 @@ try {
     } else {
         $Root
     }
-    $resolvedRoot = (Resolve-Path -LiteralPath $rootToResolve).Path
+    $resolvedRoot = Resolve-CanonicalRoot -Path $rootToResolve
     if ([string]::IsNullOrWhiteSpace($LogPath)) {
         $LogPath = Join-Path $resolvedRoot "logs\docker-socket-watchdog.jsonl"
     }
@@ -275,6 +427,22 @@ try {
     }
 
     $engineReachable = ($dockerPs.exit_code -eq 0 -or $dockerInfo.exit_code -eq 0)
+    $composeCollisions = [ordered]@{
+        available = $false
+        project_name = $ComposeProjectName
+        expected_working_dir = $resolvedRoot
+        current_collision_count = 0
+        recent_event_collision_count = 0
+        current_collisions = @()
+        recent_event_collisions = @()
+        error = $null
+    }
+    if ($engineReachable) {
+        $composeCollisions = Get-ComposeCollisionSummary `
+            -ExpectedRoot $resolvedRoot `
+            -ProjectName $ComposeProjectName `
+            -EventLookbackMinutes $ComposeCollisionEventLookbackMinutes
+    }
     $socketCount = $socketSummary.docker_bound_count
     $socketCritical = $false
     $socketWarning = $false
@@ -284,7 +452,12 @@ try {
     }
 
     $severity = "info"
-    if (-not $engineReachable -or $socketCritical) {
+    $composeCollisionCritical = (
+        ([int]$composeCollisions.current_collision_count -gt 0) -or
+        ([int]$composeCollisions.recent_event_collision_count -gt 0)
+    )
+
+    if (-not $engineReachable -or $socketCritical -or $composeCollisionCritical) {
         $severity = "critical"
     } elseif ($socketWarning) {
         $severity = "warning"
@@ -309,6 +482,7 @@ try {
             info = $dockerInfo
             ps = $dockerPs
         }
+        compose = $composeCollisions
         processes = [ordered]@{
             docker_related_count = $dockerProcesses.Count
             docker_related_sample_limit = $MaxProcessRows
