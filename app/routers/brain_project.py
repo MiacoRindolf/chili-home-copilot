@@ -1390,6 +1390,37 @@ def api_brain_project_autonomy_start_plan(
     return JSONResponse({"ok": True, "run": run})
 
 
+@router.post("/api/brain/project/autonomy/runs/{run_id}/wake")
+def api_brain_project_autonomy_wake_run(
+    run_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Wake a queued Project Autopilot worker without changing the run plan."""
+    ctx = get_identity_ctx(request, db)
+    blocked = _autonomy_requires_paired(ctx)
+    if blocked is not None:
+        return blocked
+    run = project_autonomy.get_run(
+        db,
+        run_id,
+        user_id=ctx["user_id"],
+        include_events=True,
+    )
+    if run is None:
+        return _not_found("Autopilot run not found")
+    if str(run.get("status") or "").strip().lower() != "queued":
+        return JSONResponse(
+            {
+                "ok": False,
+                "message": "Autopilot run is not queued; only queued runs can be woken.",
+            },
+            status_code=409,
+        )
+    worker = _start_autonomy_thread(run_id)
+    return JSONResponse({"ok": True, "run": run, "worker": worker})
+
+
 @router.post("/api/brain/project/autonomy/runs/{run_id}/visual-validation")
 def api_brain_project_autonomy_visual_validation(
     run_id: str,

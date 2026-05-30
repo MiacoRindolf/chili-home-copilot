@@ -17,6 +17,7 @@ def test_project_autonomy_routes_are_registered(fastapi_app):
         ("POST", "/api/brain/project/autonomy/runs/{run_id}/messages"),
         ("POST", "/api/brain/project/autonomy/runs/{run_id}/plan/start"),
         ("POST", "/api/brain/project/autonomy/runs/{run_id}/plan/approve"),
+        ("POST", "/api/brain/project/autonomy/runs/{run_id}/wake"),
         ("POST", "/api/brain/project/autonomy/runs/{run_id}/visual-validation"),
         ("POST", "/api/brain/project/autonomy/runs/{run_id}/cancel"),
         ("POST", "/api/brain/project/autonomy/runs/{run_id}/merge"),
@@ -158,6 +159,12 @@ def test_project_autonomy_create_list_detail_cancel_and_merge(
     assert started.json()["run"]["plan_status"] == "drafting"
     assert started_threads == [run_id]
 
+    woken = client.post(f"/api/brain/project/autonomy/runs/{run_id}/wake")
+    assert woken.status_code == 200
+    assert woken.json()["run"]["run_id"] == run_id
+    assert woken.json()["run"]["status"] == "queued"
+    assert started_threads == [run_id, run_id]
+
     db_run = db.query(ProjectAutonomyRun).filter(ProjectAutonomyRun.run_id == run_id).one()
     db_run.status = "awaiting_approval"
     db_run.current_stage = "plan"
@@ -183,6 +190,11 @@ def test_project_autonomy_create_list_detail_cancel_and_merge(
         },
     )
     db.commit()
+
+    blocked_wake = client.post(f"/api/brain/project/autonomy/runs/{run_id}/wake")
+    assert blocked_wake.status_code == 409
+    assert "not queued" in blocked_wake.json()["message"]
+
     approved = client.post(f"/api/brain/project/autonomy/runs/{run_id}/plan/approve")
     assert approved.status_code == 200
     assert approved.json()["run"]["plan_status"] == "approved"

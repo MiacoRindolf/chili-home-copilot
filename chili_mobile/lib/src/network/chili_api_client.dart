@@ -33,6 +33,119 @@ class CancelToken {
   void cancel() => _cancelled = true;
 }
 
+/// Incremental parser for backend Server-Sent Events carrying JSON payloads.
+class ProjectAutonomySseDecoder {
+  String _pendingLine = '';
+  final StringBuffer _data = StringBuffer();
+
+  List<Map<String, dynamic>> add(String chunk) {
+    if (chunk.isEmpty) return const [];
+    _pendingLine += chunk;
+    final events = <Map<String, dynamic>>[];
+    while (true) {
+      final newline = _pendingLine.indexOf('\n');
+      if (newline < 0) break;
+      var line = _pendingLine.substring(0, newline);
+      _pendingLine = _pendingLine.substring(newline + 1);
+      if (line.endsWith('\r')) {
+        line = line.substring(0, line.length - 1);
+      }
+      final event = _handleLine(line);
+      if (event != null) events.add(event);
+    }
+    return events;
+  }
+
+  List<Map<String, dynamic>> close() {
+    final events = <Map<String, dynamic>>[];
+    if (_pendingLine.isNotEmpty) {
+      final event = _handleLine(_pendingLine);
+      if (event != null) events.add(event);
+      _pendingLine = '';
+    }
+    final event = _flushData();
+    if (event != null) events.add(event);
+    return events;
+  }
+
+  Map<String, dynamic>? _handleLine(String line) {
+    if (line.isEmpty) return _flushData();
+    if (line.startsWith(':') || !line.startsWith('data:')) return null;
+    var payload = line.substring('data:'.length);
+    if (payload.startsWith(' ')) payload = payload.substring(1);
+    if (_data.isNotEmpty) _data.write('\n');
+    _data.write(payload);
+    return null;
+  }
+
+  Map<String, dynamic>? _flushData() {
+    if (_data.isEmpty) return null;
+    final raw = _data.toString().trim();
+    _data.clear();
+    if (raw.isEmpty || raw == '[DONE]') return null;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map) return Map<String, dynamic>.from(decoded);
+    } catch (_) {}
+    return null;
+  }
+}
+
+class ProjectAutonomySseException implements Exception {
+  ProjectAutonomySseException(this.message, {required this.retriable});
+
+  final String message;
+  final bool retriable;
+
+  static ProjectAutonomySseException fromHttpStatus(
+    int statusCode,
+    Object? error,
+  ) {
+    final message = error is String && error.trim().isNotEmpty
+        ? error.trim()
+        : userMessageForHttpStatus(statusCode);
+    return ProjectAutonomySseException(
+      message,
+      retriable: statusCode >= 500 || statusCode == 408 || statusCode == 429,
+    );
+  }
+
+  static ProjectAutonomySseException fromStreamError(Object? error) {
+    final message = error?.toString().trim() ?? 'Autopilot stream failed.';
+    final lower = message.toLowerCase();
+    final fatal = lower.contains('pair this device') ||
+        lower.contains('not found') ||
+        lower.contains('unauthorized') ||
+        lower.contains('forbidden') ||
+        lower.contains('access denied') ||
+        lower.contains('authentication failed');
+    return ProjectAutonomySseException(message, retriable: !fatal);
+  }
+
+  @override
+  String toString() => message;
+}
+
+class ProjectAutonomySseRetryPolicy {
+  static const baseDelayMilliseconds = 350;
+  static const maxDelayMilliseconds = 8000;
+  static const maxExponent = 5;
+  static const degradedNoticeAttempt = 3;
+
+  static Duration delayForAttempt(int attempt) {
+    final safeAttempt = attempt < 0 ? 0 : attempt;
+    final exponent = safeAttempt > maxExponent ? maxExponent : safeAttempt;
+    final delay = baseDelayMilliseconds * (1 << exponent);
+    return Duration(
+      milliseconds: delay > maxDelayMilliseconds ? maxDelayMilliseconds : delay,
+    );
+  }
+
+  static bool shouldShowDegradedNotice(int attempt) {
+    return attempt >= degradedNoticeAttempt;
+  }
+}
+
 /// API client for the CHILI backend.
 ///
 /// Uses an [IOClient] that trusts all certificates so self-signed
@@ -90,6 +203,23 @@ class ChiliApiClient {
     return _client
         .post(uri, headers: headers, body: body)
         .timeout(_requestTimeout);
+  }
+
+  Future<http.Response> _patch(
+    Uri uri, {
+    Map<String, String>? headers,
+    Object? body,
+  }) {
+    return _client
+        .patch(uri, headers: headers, body: body)
+        .timeout(_requestTimeout);
+  }
+
+  Future<http.Response> _delete(
+    Uri uri, {
+    Map<String, String>? headers,
+  }) {
+    return _client.delete(uri, headers: headers).timeout(_requestTimeout);
   }
 
   static const Map<String, String> _pairingJsonHeaders = {
@@ -626,9 +756,16 @@ class ChiliApiClient {
 
   Future<List<Map<String, dynamic>>> getProjectAutonomyRuns({
     int limit = 20,
+    int? repoId,
+    int? agentProfileId,
+    bool includeArchived = false,
   }) async {
+    final query = <String, String>{'limit': '$limit'};
+    if (repoId != null) query['repo_id'] = '$repoId';
+    if (agentProfileId != null) query['agent_profile_id'] = '$agentProfileId';
+    if (includeArchived) query['include_archived'] = 'true';
     final uri = Uri.parse('$baseUrl/api/brain/project/autonomy/runs')
-        .replace(queryParameters: {'limit': '$limit'});
+        .replace(queryParameters: query);
     final res = await _get(uri, headers: _headers(json: false));
     Map<String, dynamic>? decoded;
     try {
@@ -643,6 +780,292 @@ class ChiliApiClient {
     }
     final raw = (decoded?['runs'] ?? []) as List<dynamic>;
     return raw.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+  }
+
+  Future<List<Map<String, dynamic>>> getProjectAutonomyAgentProfiles({
+    int? repoId,
+  }) async {
+    final query = <String, String>{};
+    if (repoId != null) query['repo_id'] = '$repoId';
+    final uri = Uri.parse('$baseUrl/api/brain/project/agent-profiles')
+        .replace(queryParameters: query.isEmpty ? null : query);
+    final res = await _get(uri, headers: _headers(json: false));
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>?;
+    } catch (_) {}
+    if (res.statusCode != 200) {
+      final err = decoded?['error'] ??
+          decoded?['message'] ??
+          decoded?['detail'] ??
+          res.body;
+      throw Exception(err is String ? err : 'HTTP ${res.statusCode}');
+    }
+    final raw = (decoded?['agents'] ?? []) as List<dynamic>;
+    return raw.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+  }
+
+  Future<Map<String, dynamic>> getProjectAutonomyAgentScheduler() async {
+    final res = await _get(
+      Uri.parse('$baseUrl/api/brain/project/agent-profiles/scheduler'),
+      headers: _headers(json: false),
+    );
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>?;
+    } catch (_) {}
+    if (res.statusCode != 200) {
+      final err = decoded?['error'] ??
+          decoded?['message'] ??
+          decoded?['detail'] ??
+          res.body;
+      throw Exception(err is String ? err : 'HTTP ${res.statusCode}');
+    }
+    return Map<String, dynamic>.from((decoded?['scheduler'] ?? {}) as Map);
+  }
+
+  Future<Map<String, dynamic>> runProjectAutonomyAgentSchedulesNow({
+    required int repoId,
+    bool codexOnly = true,
+    int? limit,
+  }) async {
+    final res = await _post(
+      Uri.parse('$baseUrl/api/brain/project/agent-profiles/scheduler/run-now'),
+      headers: _headers(),
+      body: jsonEncode({
+        'repo_id': repoId,
+        'codex_only': codexOnly,
+        if (limit != null) 'limit': limit,
+      }),
+    );
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>?;
+    } catch (_) {}
+    if (res.statusCode != 200) {
+      final err = decoded?['error'] ??
+          decoded?['message'] ??
+          decoded?['detail'] ??
+          res.body;
+      throw Exception(err is String ? err : 'HTTP ${res.statusCode}');
+    }
+    return Map<String, dynamic>.from(decoded ?? const {});
+  }
+
+  Future<Map<String, dynamic>> getProjectAutonomyAgentReadiness({
+    int? repoId,
+  }) async {
+    final query = <String, String>{};
+    if (repoId != null) query['repo_id'] = '$repoId';
+    final uri = Uri.parse('$baseUrl/api/brain/project/agent-profiles/readiness')
+        .replace(queryParameters: query.isEmpty ? null : query);
+    final res = await _get(uri, headers: _headers(json: false));
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>?;
+    } catch (_) {}
+    if (res.statusCode != 200) {
+      final err = decoded?['error'] ??
+          decoded?['message'] ??
+          decoded?['detail'] ??
+          res.body;
+      throw Exception(err is String ? err : 'HTTP ${res.statusCode}');
+    }
+    return Map<String, dynamic>.from((decoded?['readiness'] ?? {}) as Map);
+  }
+
+  Future<List<Map<String, dynamic>>> bootstrapProjectAutonomyAgentProfiles({
+    required int repoId,
+  }) async {
+    final res = await _post(
+      Uri.parse('$baseUrl/api/brain/project/agent-profiles/bootstrap'),
+      headers: _headers(),
+      body: jsonEncode({'repo_id': repoId}),
+    );
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>?;
+    } catch (_) {}
+    if (res.statusCode != 200) {
+      final err = decoded?['error'] ??
+          decoded?['message'] ??
+          decoded?['detail'] ??
+          res.body;
+      throw Exception(err is String ? err : 'HTTP ${res.statusCode}');
+    }
+    final raw = (decoded?['agents'] ?? []) as List<dynamic>;
+    return raw.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+  }
+
+  Future<Map<String, dynamic>> syncProjectAutonomyCodexProfiles({
+    required int repoId,
+  }) async {
+    final res = await _post(
+      Uri.parse('$baseUrl/api/brain/project/agent-profiles/codex-sync'),
+      headers: _headers(),
+      body: jsonEncode({'repo_id': repoId}),
+    );
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>?;
+    } catch (_) {}
+    if (res.statusCode != 200) {
+      final err = decoded?['error'] ??
+          decoded?['message'] ??
+          decoded?['detail'] ??
+          res.body;
+      throw Exception(err is String ? err : 'HTTP ${res.statusCode}');
+    }
+    return Map<String, dynamic>.from(decoded ?? const {});
+  }
+
+  Future<Map<String, dynamic>> setProjectAutonomyCodexSchedules({
+    required int repoId,
+    required bool enableSourceActive,
+    bool alwaysOn = false,
+  }) async {
+    final res = await _post(
+      Uri.parse('$baseUrl/api/brain/project/agent-profiles/codex-schedules'),
+      headers: _headers(),
+      body: jsonEncode({
+        'repo_id': repoId,
+        'enable_source_active': enableSourceActive,
+        'always_on': alwaysOn,
+      }),
+    );
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>?;
+    } catch (_) {}
+    if (res.statusCode != 200) {
+      final err = decoded?['error'] ??
+          decoded?['message'] ??
+          decoded?['detail'] ??
+          res.body;
+      throw Exception(err is String ? err : 'HTTP ${res.statusCode}');
+    }
+    return Map<String, dynamic>.from(decoded ?? const {});
+  }
+
+  Future<Map<String, dynamic>> adoptProjectAutonomyCodexAgentLoop({
+    required int repoId,
+    bool wakeNow = true,
+    int? limit,
+  }) async {
+    final body = <String, dynamic>{
+      'repo_id': repoId,
+      'wake_now': wakeNow,
+    };
+    if (limit != null) body['limit'] = limit;
+    final res = await _post(
+      Uri.parse('$baseUrl/api/brain/project/agent-profiles/codex-adopt'),
+      headers: _headers(),
+      body: jsonEncode(body),
+    );
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>?;
+    } catch (_) {}
+    if (res.statusCode != 200) {
+      final err = decoded?['error'] ??
+          decoded?['message'] ??
+          decoded?['detail'] ??
+          res.body;
+      throw Exception(err is String ? err : 'HTTP ${res.statusCode}');
+    }
+    return Map<String, dynamic>.from(decoded ?? const {});
+  }
+
+  Future<Map<String, dynamic>> pauseProjectAutonomyAgentProfile(
+    int profileId,
+  ) async {
+    return _agentProfileAction(profileId, 'pause');
+  }
+
+  Future<Map<String, dynamic>> resumeProjectAutonomyAgentProfile(
+    int profileId,
+  ) async {
+    return _agentProfileAction(profileId, 'resume');
+  }
+
+  Future<Map<String, dynamic>> updateProjectAutonomyAgentProfile(
+    int profileId, {
+    String? status,
+    String? modelPolicy,
+    Map<String, dynamic>? promptSetting,
+    Map<String, dynamic>? permissions,
+    bool? scheduleEnabled,
+    Map<String, dynamic>? schedule,
+  }) async {
+    final body = <String, dynamic>{
+      if (status != null && status.trim().isNotEmpty) 'status': status.trim(),
+      if (modelPolicy != null && modelPolicy.trim().isNotEmpty)
+        'model_policy': modelPolicy.trim(),
+      if (promptSetting != null) 'prompt_setting': promptSetting,
+      if (permissions != null) 'permissions': permissions,
+      if (scheduleEnabled != null) 'schedule_enabled': scheduleEnabled,
+      if (schedule != null) 'schedule': schedule,
+    };
+    final res = await _patch(
+      Uri.parse('$baseUrl/api/brain/project/agent-profiles/$profileId'),
+      headers: _headers(),
+      body: jsonEncode(body),
+    );
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>?;
+    } catch (_) {}
+    if (res.statusCode != 200) {
+      final err = decoded?['error'] ??
+          decoded?['message'] ??
+          decoded?['detail'] ??
+          res.body;
+      throw Exception(err is String ? err : 'HTTP ${res.statusCode}');
+    }
+    return Map<String, dynamic>.from((decoded?['agent'] ?? {}) as Map);
+  }
+
+  Future<Map<String, dynamic>> startProjectAutonomyAgentCycle(
+    int profileId,
+  ) async {
+    final res = await _post(
+      Uri.parse('$baseUrl/api/brain/project/agent-profiles/$profileId/cycle'),
+      headers: _headers(),
+    );
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>?;
+    } catch (_) {}
+    if (res.statusCode != 200) {
+      final err = decoded?['error'] ??
+          decoded?['message'] ??
+          decoded?['detail'] ??
+          res.body;
+      throw Exception(err is String ? err : 'HTTP ${res.statusCode}');
+    }
+    return Map<String, dynamic>.from((decoded?['run'] ?? {}) as Map);
+  }
+
+  Future<Map<String, dynamic>> _agentProfileAction(
+    int profileId,
+    String action,
+  ) async {
+    final res = await _post(
+      Uri.parse('$baseUrl/api/brain/project/agent-profiles/$profileId/$action'),
+      headers: _headers(),
+    );
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>?;
+    } catch (_) {}
+    if (res.statusCode != 200) {
+      final err = decoded?['error'] ??
+          decoded?['message'] ??
+          decoded?['detail'] ??
+          res.body;
+      throw Exception(err is String ? err : 'HTTP ${res.statusCode}');
+    }
+    return Map<String, dynamic>.from((decoded?['agent'] ?? {}) as Map);
   }
 
   Future<Map<String, dynamic>> getProjectAutonomyRun(String runId) async {
@@ -664,9 +1087,68 @@ class ChiliApiClient {
     return Map<String, dynamic>.from((decoded?['run'] ?? {}) as Map);
   }
 
+  Stream<Map<String, dynamic>> streamProjectAutonomyEvents(
+      String runId) async* {
+    final request = http.Request(
+      'GET',
+      Uri.parse('$baseUrl/api/brain/project/autonomy/runs/$runId/events'),
+    );
+    request.headers.addAll(_headers(json: false));
+    request.headers['Accept'] = 'text/event-stream';
+
+    late final http.StreamedResponse streamedResponse;
+    try {
+      streamedResponse =
+          await _client.send(request).timeout(_connectionTimeout);
+    } catch (error) {
+      throw ProjectAutonomySseException.fromStreamError(error);
+    }
+    if (streamedResponse.statusCode != 200) {
+      final body = await streamedResponse.stream.bytesToString();
+      Map<String, dynamic>? decoded;
+      try {
+        decoded = jsonDecode(body) as Map<String, dynamic>?;
+      } catch (_) {}
+      final err = decoded?['error'] ??
+          decoded?['message'] ??
+          decoded?['detail'] ??
+          body;
+      throw ProjectAutonomySseException.fromHttpStatus(
+        streamedResponse.statusCode,
+        err,
+      );
+    }
+
+    final decoder = ProjectAutonomySseDecoder();
+    try {
+      await for (final chunk
+          in streamedResponse.stream.transform(utf8.decoder)) {
+        for (final event in decoder.add(chunk)) {
+          if (event['error'] != null) {
+            throw ProjectAutonomySseException.fromStreamError(event['error']);
+          }
+          yield event;
+          if (event['done'] == true) return;
+        }
+      }
+    } catch (error) {
+      if (error is ProjectAutonomySseException) rethrow;
+      throw ProjectAutonomySseException.fromStreamError(error);
+    }
+    for (final event in decoder.close()) {
+      if (event['error'] != null) {
+        throw ProjectAutonomySseException.fromStreamError(event['error']);
+      }
+      yield event;
+      if (event['done'] == true) return;
+    }
+  }
+
   Future<Map<String, dynamic>> createProjectAutonomyRun({
     required String prompt,
     int? repoId,
+    int? agentProfileId,
+    String? parentRunId,
     String executionMode = projectAutonomyPlanApprovalMode,
     bool startPlanning = false,
     List<Map<String, dynamic>> attachments = const [],
@@ -674,6 +1156,9 @@ class ChiliApiClient {
     final body = <String, dynamic>{
       'prompt': prompt.trim(),
       if (repoId != null) 'repo_id': repoId,
+      if (agentProfileId != null) 'agent_profile_id': agentProfileId,
+      if (parentRunId != null && parentRunId.trim().isNotEmpty)
+        'parent_run_id': parentRunId.trim(),
       'execution_mode': executionMode,
       'start_planning': startPlanning,
       if (attachments.isNotEmpty) 'attachments': attachments,
@@ -700,6 +1185,25 @@ class ChiliApiClient {
   Future<Map<String, dynamic>> startProjectAutonomyPlan(String runId) async {
     final res = await _post(
       Uri.parse('$baseUrl/api/brain/project/autonomy/runs/$runId/plan/start'),
+      headers: _headers(),
+    );
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>?;
+    } catch (_) {}
+    if (res.statusCode != 200) {
+      final err = decoded?['error'] ??
+          decoded?['message'] ??
+          decoded?['detail'] ??
+          res.body;
+      throw Exception(err is String ? err : 'HTTP ${res.statusCode}');
+    }
+    return Map<String, dynamic>.from((decoded?['run'] ?? {}) as Map);
+  }
+
+  Future<Map<String, dynamic>> wakeProjectAutonomyRun(String runId) async {
+    final res = await _post(
+      Uri.parse('$baseUrl/api/brain/project/autonomy/runs/$runId/wake'),
       headers: _headers(),
     );
     Map<String, dynamic>? decoded;
@@ -816,6 +1320,51 @@ class ChiliApiClient {
     return raw.map((e) => Map<String, dynamic>.from(e as Map)).toList();
   }
 
+  Future<Map<String, dynamic>> addCodeBrainRepo({
+    required String path,
+    String? name,
+  }) async {
+    final body = {
+      'path': path,
+      if (name != null && name.trim().isNotEmpty) 'name': name.trim(),
+    };
+    final res = await _post(
+      Uri.parse('$baseUrl/api/brain/code/repos'),
+      headers: _headers(),
+      body: jsonEncode(body),
+    );
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>?;
+    } catch (_) {}
+    if (res.statusCode != 200) {
+      final err = decoded?['error'] ??
+          decoded?['message'] ??
+          decoded?['detail'] ??
+          res.body;
+      throw Exception(err is String ? err : 'HTTP ${res.statusCode}');
+    }
+    return Map<String, dynamic>.from(decoded ?? {});
+  }
+
+  Future<void> removeCodeBrainRepo(int repoId) async {
+    final res = await _delete(
+      Uri.parse('$baseUrl/api/brain/code/repos/$repoId'),
+      headers: _headers(json: false),
+    );
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>?;
+    } catch (_) {}
+    if (res.statusCode != 200) {
+      final err = decoded?['error'] ??
+          decoded?['message'] ??
+          decoded?['detail'] ??
+          res.body;
+      throw Exception(err is String ? err : 'HTTP ${res.statusCode}');
+    }
+  }
+
   Future<Map<String, dynamic>> cancelProjectAutonomyRun(String runId) async {
     final res = await _post(
       Uri.parse('$baseUrl/api/brain/project/autonomy/runs/$runId/cancel'),
@@ -833,6 +1382,35 @@ class ChiliApiClient {
       throw Exception(err is String ? err : 'HTTP ${res.statusCode}');
     }
     return Map<String, dynamic>.from((decoded?['run'] ?? {}) as Map);
+  }
+
+  Future<Map<String, dynamic>> archiveProjectAutonomyRuns({
+    int? repoId,
+    int? agentProfileId,
+    String reason = 'operator_clear',
+  }) async {
+    final body = <String, dynamic>{
+      if (repoId != null) 'repo_id': repoId,
+      if (agentProfileId != null) 'agent_profile_id': agentProfileId,
+      'reason': reason,
+    };
+    final res = await _post(
+      Uri.parse('$baseUrl/api/brain/project/autonomy/runs/archive'),
+      headers: _headers(),
+      body: jsonEncode(body),
+    );
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(res.body) as Map<String, dynamic>?;
+    } catch (_) {}
+    if (res.statusCode != 200) {
+      final err = decoded?['error'] ??
+          decoded?['message'] ??
+          decoded?['detail'] ??
+          res.body;
+      throw Exception(err is String ? err : 'HTTP ${res.statusCode}');
+    }
+    return decoded ?? {};
   }
 
   Future<Map<String, dynamic>> mergeProjectAutonomyRun(String runId) async {

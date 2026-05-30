@@ -53,6 +53,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   bool _runsLoading = false;
 
   final TextEditingController _autopilotPromptCtrl = TextEditingController();
+  final TextEditingController _autonomyAgentBenchSearchCtrl =
+      TextEditingController();
   final FocusNode _autopilotPromptFocusNode =
       FocusNode(debugLabel: 'autopilotPrompt');
   final ScrollController _autopilotChatScroll = ScrollController();
@@ -110,9 +112,9 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     _autopilotAgentBenchFilterActive,
     _autopilotAgentBenchFilterNeedsInput,
   ];
-  static const _autopilotAgentBenchListMinHeight = 280.0;
-  static const _autopilotAgentBenchListMaxHeight = 440.0;
-  static const _autopilotAgentBenchViewportRatio = 0.36;
+  static const _autopilotAgentBenchListMinHeight = 320.0;
+  static const _autopilotAgentBenchListMaxHeight = 620.0;
+  static const _autopilotAgentBenchViewportRatio = 0.48;
   static const _autopilotCodexSourceStatusActive = 'ACTIVE';
   static const _autopilotPermissionObserve = 'observe';
   static const _autopilotPermissionResearch = 'research';
@@ -354,6 +356,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   Map<String, dynamic> _autonomyAgentScheduler = {};
   Map<String, dynamic> _autonomyAgentReadiness = {};
   String _autonomyAgentBenchFilter = _autopilotAgentBenchFilterAll;
+  String _autonomyAgentBenchQuery = '';
   Map<String, dynamic>? _activeAutonomyRun;
   bool _autonomyLoading = false;
   bool _autonomyAgentsLoading = false;
@@ -400,7 +403,16 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     super.initState();
     _tabs = TabController(length: 5, vsync: this);
     _tabs.addListener(_onTabChanged);
+    _autonomyAgentBenchSearchCtrl.addListener(
+      _onAutonomyAgentBenchSearchChanged,
+    );
     unawaited(_boot());
+  }
+
+  void _onAutonomyAgentBenchSearchChanged() {
+    final query = _autonomyAgentBenchSearchCtrl.text.trim();
+    if (query == _autonomyAgentBenchQuery || !mounted) return;
+    setState(() => _autonomyAgentBenchQuery = query);
   }
 
   void _onTabChanged() {
@@ -843,11 +855,38 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     }
   }
 
-  List<Map<String, dynamic>> _filteredAutonomyBenchAgents() {
-    final filter = _autonomyAgentBenchFilter;
+  bool _agentMatchesBenchSearch(Map<String, dynamic> profile, String query) {
+    final normalized = query.trim().toLowerCase();
+    if (normalized.isEmpty) return true;
+    final operatingState = _asMap(profile[_autopilotAgentOperatingState]);
+    final promptSetting = _asMap(profile['prompt_setting']);
+    final haystack = [
+      _agentDisplayName(profile),
+      profile['profile_key']?.toString() ?? '',
+      profile['role']?.toString() ?? '',
+      profile['tier']?.toString() ?? '',
+      profile['status']?.toString() ?? '',
+      operatingState['title']?.toString() ?? '',
+      operatingState['detail']?.toString() ?? '',
+      _agentOperatingSafetyLabel(operatingState['safety']?.toString() ?? ''),
+      ..._agentEnabledPermissionLabels(profile),
+      promptSetting['source']?.toString() ?? '',
+      _agentScheduleSummary(profile),
+    ].join(' ').toLowerCase();
+    return haystack.contains(normalized);
+  }
+
+  List<Map<String, dynamic>> _filteredAutonomyBenchAgents({
+    String? filter,
+    String? query,
+  }) {
+    final selectedFilter = filter ?? _autonomyAgentBenchFilter;
+    final selectedQuery = query ?? _autonomyAgentBenchQuery;
     return [
       for (final agent in _autonomyAgents)
-        if (_agentMatchesBenchFilter(agent, filter)) agent,
+        if (_agentMatchesBenchFilter(agent, selectedFilter) &&
+            _agentMatchesBenchSearch(agent, selectedQuery))
+          agent,
     ];
   }
 
@@ -1033,6 +1072,13 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     return [
       for (final entry in labels.entries)
         if (permissions[entry.key] == true) entry.value,
+    ];
+  }
+
+  List<String> _agentMutationPermissionLabels(Map<String, dynamic> profile) {
+    return [
+      for (final permission in _agentEnabledPermissionLabels(profile))
+        if (permission == 'patch' || permission == 'merge') permission,
     ];
   }
 
@@ -2063,6 +2109,11 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   Future<void> _cancelAutopilot() async {
     final runId = _activeAutonomyRun?['run_id']?.toString();
     if (runId == null || runId.isEmpty) return;
+    await _cancelAutopilotRunById(runId);
+  }
+
+  Future<void> _cancelAutopilotRunById(String runId) async {
+    if (runId.isEmpty) return;
     setState(() {
       _autonomyBusy = true;
       _autonomyError = null;
@@ -2071,12 +2122,62 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
       final run = await _api.cancelProjectAutonomyRun(runId);
       if (mounted) {
         setState(() {
-          _activeAutonomyRun = run;
+          if ((_activeAutonomyRun?['run_id']?.toString() ?? '') == runId) {
+            _activeAutonomyRun = run;
+          }
           _autonomyDraftOpen = false;
           _syncAutonomyRunListState(run);
         });
       }
-      await _refreshActiveAutonomyRun(silent: true, force: true);
+      await _loadAutonomyAgentReadiness();
+      await _loadAutonomyRuns(silent: true);
+      if ((_activeAutonomyRun?['run_id']?.toString() ?? '') == runId) {
+        await _refreshActiveAutonomyRun(silent: true, force: true);
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Stop requested for Autopilot run.')),
+        );
+      }
+    } catch (e) {
+      if (mounted) setState(() => _autonomyError = userVisibleNetworkError(e));
+    } finally {
+      if (mounted) setState(() => _autonomyBusy = false);
+    }
+  }
+
+  Future<void> _wakeAutopilotRunById(String runId) async {
+    if (runId.isEmpty) return;
+    setState(() {
+      _autonomyBusy = true;
+      _autonomyError = null;
+    });
+    try {
+      final run = await _api.wakeProjectAutonomyRun(runId);
+      if (mounted) {
+        setState(() {
+          if ((_activeAutonomyRun?['run_id']?.toString() ?? '') == runId) {
+            _activeAutonomyRun = run;
+            _autonomyDraftOpen = false;
+          }
+          _syncAutonomyRunListState(run);
+        });
+        if ((_activeAutonomyRun?['run_id']?.toString() ?? '') == runId) {
+          _syncAutonomyEventStream();
+        }
+      }
+      await _loadAutonomyAgentReadiness();
+      await _loadAutonomyRuns(silent: true);
+      if ((_activeAutonomyRun?['run_id']?.toString() ?? '') == runId) {
+        await _refreshActiveAutonomyRun(silent: true, force: true);
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Worker start requested for queued Autopilot run.'),
+          ),
+        );
+      }
     } catch (e) {
       if (mounted) setState(() => _autonomyError = userVisibleNetworkError(e));
     } finally {
@@ -2275,6 +2376,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     _descCtrl.dispose();
     _sourceCtrl.dispose();
     _autopilotPromptCtrl.dispose();
+    _autonomyAgentBenchSearchCtrl.removeListener(
+      _onAutonomyAgentBenchSearchChanged,
+    );
+    _autonomyAgentBenchSearchCtrl.dispose();
     _autopilotPromptFocusNode.dispose();
     _autopilotChatScroll.dispose();
     _autonomyAgentBenchScroll.dispose();
@@ -3037,6 +3142,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final repoId = _autonomyAgentRepoId;
     final scheme = Theme.of(context).colorScheme;
     final filteredAgents = _filteredAutonomyBenchAgents();
+    final filteredCount = filteredAgents.length;
     final viewportHeight = MediaQuery.sizeOf(context).height;
     final benchListHeight = (viewportHeight * _autopilotAgentBenchViewportRatio)
         .clamp(
@@ -3088,11 +3194,22 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
                 else
-                  Text(
-                    _repoDisplayName(repoId),
-                    style: TextStyle(color: _mutedTextColor(), fontSize: 11),
-                    overflow: TextOverflow.ellipsis,
+                  Flexible(
+                    child: Text(
+                      _repoDisplayName(repoId),
+                      style: TextStyle(color: _mutedTextColor(), fontSize: 11),
+                      overflow: TextOverflow.ellipsis,
+                    ),
                   ),
+                const SizedBox(width: 4),
+                IconButton(
+                  tooltip: 'Open full bench',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: _autonomyAgents.isEmpty
+                      ? null
+                      : _showAutonomyAgentBenchDialog,
+                  icon: const Icon(Icons.open_in_full, size: 17),
+                ),
               ],
             ),
             const SizedBox(height: 8),
@@ -3104,8 +3221,13 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
               )
             else ...[
               Text(
-                '$codexCount Codex-seeded, $sourceActiveCount source-active, $enabledCount enabled, $needsInputCount need input.',
+                '$filteredCount/${_autonomyAgents.length} shown. $codexCount Codex-seeded, $sourceActiveCount source-active, $enabledCount enabled, $needsInputCount need input.',
                 style: TextStyle(color: _mutedTextColor(), fontSize: 12),
+              ),
+              const SizedBox(height: 8),
+              _buildAutonomyAgentBenchSearchField(
+                controller: _autonomyAgentBenchSearchCtrl,
+                onClear: _autonomyAgentBenchSearchCtrl.clear,
               ),
               const SizedBox(height: 8),
               Wrap(
@@ -3135,7 +3257,9 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                             vertical: 10,
                           ),
                           child: Text(
-                            'No ${_agentBenchFilterLabel(_autonomyAgentBenchFilter).toLowerCase()} agents in this repo.',
+                            _autonomyAgentBenchQuery.isEmpty
+                                ? 'No ${_agentBenchFilterLabel(_autonomyAgentBenchFilter).toLowerCase()} agents in this repo.'
+                                : 'No agents match "$_autonomyAgentBenchQuery".',
                             style: TextStyle(
                               color: _mutedTextColor(),
                               fontSize: 12,
@@ -3155,8 +3279,183 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     );
   }
 
-  Widget _buildAutonomyAgentBenchFilterChip(String filter) {
-    final selected = _autonomyAgentBenchFilter == filter;
+  Widget _buildAutonomyAgentBenchSearchField({
+    required TextEditingController controller,
+    ValueChanged<String>? onChanged,
+    VoidCallback? onClear,
+  }) {
+    final hasQuery = controller.text.trim().isNotEmpty;
+    return TextField(
+      controller: controller,
+      enabled: !_autonomyBusy,
+      onChanged: onChanged,
+      textInputAction: TextInputAction.search,
+      decoration: InputDecoration(
+        hintText: 'Find agents',
+        prefixIcon: const Icon(Icons.search, size: 18),
+        suffixIcon: hasQuery
+            ? IconButton(
+                tooltip: 'Clear search',
+                icon: const Icon(Icons.close, size: 18),
+                onPressed: onClear ?? controller.clear,
+              )
+            : null,
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+        isDense: true,
+        contentPadding:
+            const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+      ),
+    );
+  }
+
+  Future<void> _showAutonomyAgentBenchDialog() async {
+    final repoId = _autonomyAgentRepoId;
+    if (repoId == null) return;
+    final searchController =
+        TextEditingController(text: _autonomyAgentBenchQuery);
+    final scrollController = ScrollController();
+    var selectedFilter = _autonomyAgentBenchFilter;
+    var query = _autonomyAgentBenchQuery;
+    try {
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) {
+          return StatefulBuilder(
+            builder: (context, setDialogState) {
+              final size = MediaQuery.sizeOf(context);
+              final width = (size.width - 40).clamp(320.0, 1040.0).toDouble();
+              final height = (size.height - 120).clamp(360.0, 780.0).toDouble();
+              final visibleAgents = _filteredAutonomyBenchAgents(
+                filter: selectedFilter,
+                query: query,
+              );
+              return AlertDialog(
+                insetPadding:
+                    const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
+                title: Row(
+                  children: [
+                    const Icon(Icons.groups_outlined, size: 19),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Agent bench',
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: 'Close',
+                      visualDensity: VisualDensity.compact,
+                      onPressed: () => Navigator.of(dialogContext).pop(),
+                      icon: const Icon(Icons.close, size: 18),
+                    ),
+                  ],
+                ),
+                content: SizedBox(
+                  width: width,
+                  height: height,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Text(
+                        '${_repoDisplayName(repoId)} - ${visibleAgents.length}/${_autonomyAgents.length} shown',
+                        overflow: TextOverflow.ellipsis,
+                        style:
+                            TextStyle(color: _mutedTextColor(), fontSize: 12),
+                      ),
+                      const SizedBox(height: 10),
+                      _buildAutonomyAgentBenchSearchField(
+                        controller: searchController,
+                        onChanged: (value) {
+                          setDialogState(() => query = value.trim());
+                        },
+                        onClear: () {
+                          searchController.clear();
+                          setDialogState(() => query = '');
+                        },
+                      ),
+                      const SizedBox(height: 10),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: [
+                          for (final filter in _autopilotAgentBenchFilters)
+                            _buildAutonomyAgentBenchFilterChip(
+                              filter,
+                              selectedFilter: selectedFilter,
+                              onSelected: (value) {
+                                setDialogState(() => selectedFilter = value);
+                                setState(
+                                    () => _autonomyAgentBenchFilter = value);
+                              },
+                            ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      if (visibleAgents.isEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: Text(
+                            query.isEmpty
+                                ? 'No ${_agentBenchFilterLabel(selectedFilter).toLowerCase()} agents in this repo.'
+                                : 'No agents match "$query".',
+                            style: TextStyle(
+                              color: _mutedTextColor(),
+                              fontSize: 12,
+                            ),
+                          ),
+                        ),
+                      Expanded(
+                        child: Scrollbar(
+                          controller: scrollController,
+                          thumbVisibility: true,
+                          child: ListView.builder(
+                            controller: scrollController,
+                            physics: const AlwaysScrollableScrollPhysics(),
+                            padding: const EdgeInsets.only(right: 8),
+                            itemCount: visibleAgents.length + 1,
+                            itemBuilder: (context, index) {
+                              if (index == 0) {
+                                return _buildAutonomyAgentFilterTile(
+                                  null,
+                                  afterSelect: () =>
+                                      Navigator.of(dialogContext).pop(),
+                                );
+                              }
+                              return _buildAutonomyAgentFilterTile(
+                                visibleAgents[index - 1],
+                                afterSelect: () =>
+                                    Navigator.of(dialogContext).pop(),
+                              );
+                            },
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          );
+        },
+      );
+      if (!mounted) return;
+      setState(() => _autonomyAgentBenchFilter = selectedFilter);
+      if (_autonomyAgentBenchSearchCtrl.text.trim() != query.trim()) {
+        _autonomyAgentBenchSearchCtrl.text = query.trim();
+      }
+    } finally {
+      searchController.dispose();
+      scrollController.dispose();
+    }
+  }
+
+  Widget _buildAutonomyAgentBenchFilterChip(
+    String filter, {
+    String? selectedFilter,
+    ValueChanged<String>? onSelected,
+  }) {
+    final selected = (selectedFilter ?? _autonomyAgentBenchFilter) == filter;
     final count = _agentBenchFilterCount(filter);
     final color = _agentBenchFilterColor(filter);
     return ChoiceChip(
@@ -3164,7 +3463,13 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
       selected: selected,
       onSelected: _autonomyBusy
           ? null
-          : (_) => setState(() => _autonomyAgentBenchFilter = filter),
+          : (_) {
+              if (onSelected != null) {
+                onSelected(filter);
+              } else {
+                setState(() => _autonomyAgentBenchFilter = filter);
+              }
+            },
       labelStyle: TextStyle(
         color: selected
             ? Theme.of(context).colorScheme.onPrimary
@@ -3180,7 +3485,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     );
   }
 
-  Widget _buildAutonomyAgentFilterTile(Map<String, dynamic>? agent) {
+  Widget _buildAutonomyAgentFilterTile(
+    Map<String, dynamic>? agent, {
+    VoidCallback? afterSelect,
+  }) {
     final selected = agent == null
         ? _autonomyAgentProfileId == null
         : _autonomyAgentProfileId == _asInt(agent['id']);
@@ -3197,6 +3505,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         ? const <String, dynamic>{}
         : _asMap(agent[_autopilotAgentOperatingState]);
     final operatingTitle = operatingState['title']?.toString().trim() ?? '';
+    final safety = operatingState['safety']?.toString().trim() ?? '';
+    final mutationPermissions = agent == null
+        ? const <String>[]
+        : _agentMutationPermissionLabels(agent);
     final schedule = agent == null ? '' : _agentScheduleSummary(agent);
     final subtitle = agent == null
         ? 'show every chat in this repo'
@@ -3218,8 +3530,11 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         borderRadius: BorderRadius.circular(8),
         onTap: _autonomyBusy
             ? null
-            : () => _selectAutonomyAgent(
-                agent == null ? null : _asInt(agent['id'])),
+            : () {
+                _selectAutonomyAgent(
+                    agent == null ? null : _asInt(agent['id']));
+                afterSelect?.call();
+              },
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
           decoration: BoxDecoration(
@@ -3260,6 +3575,37 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(color: _mutedTextColor(), fontSize: 11),
                     ),
+                    if (agent != null &&
+                        (safety.isNotEmpty ||
+                            mutationPermissions.isNotEmpty)) ...[
+                      const SizedBox(height: 5),
+                      Wrap(
+                        spacing: 4,
+                        runSpacing: 4,
+                        children: [
+                          if (safety.isNotEmpty)
+                            _miniChip(
+                              _agentOperatingSafetyLabel(safety),
+                              _autonomyBubbleBackground(
+                                _agentOperatingSafetyColor(safety),
+                              ),
+                              _agentOperatingSafetyColor(safety),
+                            ),
+                          for (final permission in mutationPermissions)
+                            _miniChip(
+                              permission,
+                              _autonomyBubbleBackground(
+                                permission == 'merge'
+                                    ? _autonomyStatusColor('failed')
+                                    : Colors.orange,
+                              ),
+                              permission == 'merge'
+                                  ? _autonomyStatusColor('failed')
+                                  : Colors.orange.shade900,
+                            ),
+                        ],
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -6453,33 +6799,19 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final questions = _asInt(queue['pending_question_count']) ?? 0;
     final alwaysOn = _asInt(queue['always_on_profile_count']) ?? 0;
     final alwaysOnOpen = _asInt(queue['always_on_open_count']) ?? 0;
-    final queuedRuns =
-        _asMapList(queue[_autopilotRuntimeQueueQueuedRuns]).take(2).toList();
-    final staleRuns = _asMapList(queue[_autopilotRuntimeQueueStaleActiveRuns])
-        .take(2)
-        .toList();
-    final staleRunIds = staleRuns
-        .map((run) => run['run_id']?.toString().trim() ?? '')
-        .where((runId) => runId.isNotEmpty)
-        .toSet();
-    final freshActiveRuns = _asMapList(
-      queue[_autopilotRuntimeQueueFreshActiveRuns],
-    );
-    final activeSource =
-        queue.containsKey(_autopilotRuntimeQueueFreshActiveRuns)
-            ? freshActiveRuns
-            : _asMapList(queue[_autopilotRuntimeQueueActiveRuns]);
-    final activeRuns = activeSource
-        .where((run) =>
-            !staleRunIds.contains(run['run_id']?.toString().trim() ?? ''))
-        .take(2)
-        .toList();
-    final waitingRuns =
-        _asMapList(queue[_autopilotRuntimeQueueWaitingRuns]).take(2).toList();
-    final hasRunPreviews = queuedRuns.isNotEmpty ||
-        activeRuns.isNotEmpty ||
-        waitingRuns.isNotEmpty ||
-        staleRuns.isNotEmpty;
+    final queuedAll = _asMapList(queue[_autopilotRuntimeQueueQueuedRuns]);
+    final staleAll = _runtimeQueueStaleRuns(queue);
+    final activeAll = _runtimeQueueFreshActiveRuns(queue);
+    final waitingAll = _asMapList(queue[_autopilotRuntimeQueueWaitingRuns]);
+    final queuedRuns = queuedAll.take(2).toList();
+    final staleRuns = staleAll.take(2).toList();
+    final activeRuns = activeAll.take(2).toList();
+    final waitingRuns = waitingAll.take(2).toList();
+    final runPreviewCount = staleAll.length +
+        activeAll.length +
+        queuedAll.length +
+        waitingAll.length;
+    final hasRunPreviews = runPreviewCount > 0;
     final nextAction =
         queue[_autopilotRuntimeQueueNextAction]?.toString().trim() ?? '';
     final nextActionLabel =
@@ -6519,6 +6851,15 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                 _autonomyBubbleBackground(color),
                 color,
               ),
+              if (hasRunPreviews) ...[
+                const SizedBox(width: 4),
+                IconButton(
+                  tooltip: 'Open recovery queue',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () => _showAutonomyRuntimeQueueDialog(queue),
+                  icon: const Icon(Icons.open_in_full, size: 17),
+                ),
+              ],
             ],
           ),
           if (detail.isNotEmpty) ...[
@@ -6715,7 +7056,198 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                 color: Colors.deepPurple.shade600,
                 icon: Icons.pause_circle_outline,
               ),
+            if (runPreviewCount >
+                staleRuns.length +
+                    activeRuns.length +
+                    queuedRuns.length +
+                    waitingRuns.length) ...[
+              const SizedBox(height: 6),
+              OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                ),
+                onPressed: () => _showAutonomyRuntimeQueueDialog(queue),
+                icon: const Icon(Icons.open_in_full, size: 15),
+                label: Text('Open recovery queue ($runPreviewCount)'),
+              ),
+            ],
           ],
+        ],
+      ),
+    );
+  }
+
+  List<Map<String, dynamic>> _runtimeQueueStaleRuns(
+    Map<String, dynamic> queue,
+  ) {
+    return _asMapList(queue[_autopilotRuntimeQueueStaleActiveRuns]);
+  }
+
+  List<Map<String, dynamic>> _runtimeQueueFreshActiveRuns(
+    Map<String, dynamic> queue,
+  ) {
+    final staleRunIds = _runtimeQueueStaleRuns(queue)
+        .map((run) => run['run_id']?.toString().trim() ?? '')
+        .where((runId) => runId.isNotEmpty)
+        .toSet();
+    final activeSource =
+        queue.containsKey(_autopilotRuntimeQueueFreshActiveRuns)
+            ? _asMapList(queue[_autopilotRuntimeQueueFreshActiveRuns])
+            : _asMapList(queue[_autopilotRuntimeQueueActiveRuns]);
+    return activeSource
+        .where(
+          (run) => !staleRunIds.contains(
+            run['run_id']?.toString().trim() ?? '',
+          ),
+        )
+        .toList();
+  }
+
+  Future<void> _showAutonomyRuntimeQueueDialog(
+    Map<String, dynamic> queue,
+  ) async {
+    final staleRuns = _runtimeQueueStaleRuns(queue);
+    final activeRuns = _runtimeQueueFreshActiveRuns(queue);
+    final queuedRuns = _asMapList(queue[_autopilotRuntimeQueueQueuedRuns]);
+    final waitingRuns = _asMapList(queue[_autopilotRuntimeQueueWaitingRuns]);
+    final total = staleRuns.length +
+        activeRuns.length +
+        queuedRuns.length +
+        waitingRuns.length;
+    final scrollController = ScrollController();
+    try {
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) {
+          return AlertDialog(
+            insetPadding:
+                const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
+            title: Row(
+              children: [
+                const Icon(Icons.dynamic_feed_outlined, size: 19),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Runtime recovery queue',
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Close',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  icon: const Icon(Icons.close, size: 18),
+                ),
+              ],
+            ),
+            content: SizedBox(
+              width: (MediaQuery.sizeOf(context).width - 40)
+                  .clamp(320.0, 920.0)
+                  .toDouble(),
+              height: (MediaQuery.sizeOf(context).height - 120)
+                  .clamp(340.0, 720.0)
+                  .toDouble(),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    '$total run target${total == 1 ? '' : 's'} shown from readiness',
+                    style: TextStyle(color: _mutedTextColor(), fontSize: 12),
+                  ),
+                  const SizedBox(height: 10),
+                  Expanded(
+                    child: Scrollbar(
+                      controller: scrollController,
+                      thumbVisibility: true,
+                      child: ListView(
+                        controller: scrollController,
+                        padding: const EdgeInsets.only(right: 8),
+                        children: [
+                          if (total == 0)
+                            Text(
+                              'No runtime recovery targets are waiting.',
+                              style: TextStyle(
+                                color: _mutedTextColor(),
+                                fontSize: 12,
+                              ),
+                            ),
+                          _buildAutonomyRuntimeQueueDialogGroup(
+                            dialogContext,
+                            label: 'Stale',
+                            runs: staleRuns,
+                            color: _autonomyStatusColor('failed'),
+                            icon: Icons.manage_search_outlined,
+                          ),
+                          _buildAutonomyRuntimeQueueDialogGroup(
+                            dialogContext,
+                            label: 'Active',
+                            runs: activeRuns,
+                            color: Colors.green.shade700,
+                            icon: Icons.play_circle_outline,
+                          ),
+                          _buildAutonomyRuntimeQueueDialogGroup(
+                            dialogContext,
+                            label: 'Queued',
+                            runs: queuedRuns,
+                            color: Colors.orange.shade700,
+                            icon: Icons.pending_actions_outlined,
+                          ),
+                          _buildAutonomyRuntimeQueueDialogGroup(
+                            dialogContext,
+                            label: 'Waiting',
+                            runs: waitingRuns,
+                            color: Colors.deepPurple.shade600,
+                            icon: Icons.pause_circle_outline,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      );
+    } finally {
+      scrollController.dispose();
+    }
+  }
+
+  Widget _buildAutonomyRuntimeQueueDialogGroup(
+    BuildContext dialogContext, {
+    required String label,
+    required List<Map<String, dynamic>> runs,
+    required Color color,
+    required IconData icon,
+  }) {
+    if (runs.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '$label (${runs.length})',
+            style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                  fontWeight: FontWeight.w800,
+                ),
+          ),
+          const SizedBox(height: 2),
+          for (final run in runs)
+            _buildAutonomyRuntimeQueueRun(
+              run,
+              label: label,
+              color: color,
+              icon: icon,
+              showLastSeen: true,
+              showStop: label == 'Stale' || label == 'Active',
+              showWake: label == 'Queued',
+              afterOpen: () => Navigator.of(dialogContext).pop(),
+              afterStop: () => Navigator.of(dialogContext).pop(),
+              afterWake: () => Navigator.of(dialogContext).pop(),
+            ),
         ],
       ),
     );
@@ -6726,6 +7258,12 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     required String label,
     required Color color,
     required IconData icon,
+    bool showLastSeen = false,
+    bool showStop = false,
+    bool showWake = false,
+    VoidCallback? afterOpen,
+    VoidCallback? afterStop,
+    VoidCallback? afterWake,
   }) {
     final runId = run['run_id']?.toString().trim() ?? '';
     final agent = run['agent_profile_id']?.toString().trim() ?? '';
@@ -6739,7 +7277,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
       if (status.isNotEmpty) status.replaceAll('_', ' '),
       if (stage.isNotEmpty) stage.replaceAll('_', ' '),
       if (planStatus.isNotEmpty) 'plan ${planStatus.replaceAll('_', ' ')}',
-      if (label == 'Stale' && lastSeen.isNotEmpty)
+      if ((label == 'Stale' || showLastSeen) && lastSeen.isNotEmpty)
         'last seen ${_agoLabel(lastSeen)}',
     ].join(' - ');
     final title = agent.isEmpty ? label : '$label - $agent';
@@ -6794,15 +7332,55 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
           ),
           if (runId.isNotEmpty) ...[
             const SizedBox(width: 6),
-            OutlinedButton.icon(
-              style: OutlinedButton.styleFrom(
-                visualDensity: VisualDensity.compact,
-                padding: const EdgeInsets.symmetric(horizontal: 8),
-              ),
-              onPressed:
-                  _autonomyBusy ? null : () => _openAutonomyRunById(runId),
-              icon: const Icon(Icons.open_in_new, size: 15),
-              label: const Text('Open'),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: [
+                if (showWake)
+                  OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                    ),
+                    onPressed: _autonomyBusy
+                        ? null
+                        : () {
+                            afterWake?.call();
+                            unawaited(_wakeAutopilotRunById(runId));
+                          },
+                    icon: const Icon(Icons.play_arrow, size: 15),
+                    label: const Text('Start'),
+                  ),
+                if (showStop)
+                  OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                    ),
+                    onPressed: _autonomyBusy
+                        ? null
+                        : () {
+                            afterStop?.call();
+                            unawaited(_cancelAutopilotRunById(runId));
+                          },
+                    icon: const Icon(Icons.stop_circle_outlined, size: 15),
+                    label: const Text('Stop'),
+                  ),
+                OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                  ),
+                  onPressed: _autonomyBusy
+                      ? null
+                      : () {
+                          afterOpen?.call();
+                          unawaited(_openAutonomyRunById(runId));
+                        },
+                  icon: const Icon(Icons.open_in_new, size: 15),
+                  label: const Text('Open'),
+                ),
+              ],
             ),
           ],
         ],
@@ -6923,6 +7501,15 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                 _autonomyBubbleBackground(color),
                 color,
               ),
+              if (items.isNotEmpty) ...[
+                const SizedBox(width: 4),
+                IconButton(
+                  tooltip: 'Open triage inbox',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () => _showAutonomyOperatorInboxDialog(inbox),
+                  icon: const Icon(Icons.open_in_full, size: 17),
+                ),
+              ],
             ],
           ),
           if (detail.isNotEmpty) ...[
@@ -7033,19 +7620,120 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
             const SizedBox(height: 8),
             for (final item in items.take(4))
               _buildAutonomyOperatorInboxItem(item),
+            if (items.length > 4 || total > items.length) ...[
+              const SizedBox(height: 6),
+              OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                ),
+                onPressed: () => _showAutonomyOperatorInboxDialog(inbox),
+                icon: const Icon(Icons.open_in_full, size: 15),
+                label: Text('Open triage inbox (${items.length}/$total)'),
+              ),
+            ],
           ],
         ],
       ),
     );
   }
 
-  Widget _buildAutonomyOperatorInboxItem(Map<String, dynamic> item) {
+  Future<void> _showAutonomyOperatorInboxDialog(
+    Map<String, dynamic> inbox,
+  ) async {
+    final items = _asMapList(inbox[_autopilotOperatorInboxItems]);
+    final total = _asInt(inbox['total_action_count']) ?? items.length;
+    final scrollController = ScrollController();
+    try {
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) {
+          return AlertDialog(
+            insetPadding:
+                const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
+            title: Row(
+              children: [
+                const Icon(Icons.inbox_outlined, size: 19),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Operator inbox',
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Close',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  icon: const Icon(Icons.close, size: 18),
+                ),
+              ],
+            ),
+            content: SizedBox(
+              width: (MediaQuery.sizeOf(context).width - 40)
+                  .clamp(320.0, 920.0)
+                  .toDouble(),
+              height: (MediaQuery.sizeOf(context).height - 120)
+                  .clamp(340.0, 720.0)
+                  .toDouble(),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    total > items.length
+                        ? '${items.length}/$total action(s) shown from the readiness preview'
+                        : '$total action(s) waiting',
+                    style: TextStyle(color: _mutedTextColor(), fontSize: 12),
+                  ),
+                  const SizedBox(height: 10),
+                  Expanded(
+                    child: Scrollbar(
+                      controller: scrollController,
+                      thumbVisibility: true,
+                      child: ListView(
+                        controller: scrollController,
+                        padding: const EdgeInsets.only(right: 8),
+                        children: [
+                          if (items.isEmpty)
+                            Text(
+                              'No operator actions are waiting.',
+                              style: TextStyle(
+                                color: _mutedTextColor(),
+                                fontSize: 12,
+                              ),
+                            ),
+                          for (final item in items)
+                            _buildAutonomyOperatorInboxItem(
+                              item,
+                              afterOpen: () =>
+                                  Navigator.of(dialogContext).pop(),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      );
+    } finally {
+      scrollController.dispose();
+    }
+  }
+
+  Widget _buildAutonomyOperatorInboxItem(
+    Map<String, dynamic> item, {
+    VoidCallback? afterOpen,
+  }) {
     final kind = item['kind']?.toString() ?? '';
     final color = _operatorInboxItemColor(kind);
     final label = item['label']?.toString().trim() ?? 'Inbox item';
     final agent = item['agent']?.toString().trim() ?? '';
     final reason = item['reason']?.toString().trim() ?? '';
     final runId = item['run_id']?.toString().trim() ?? '';
+    final createdAt = item['created_at']?.toString().trim() ?? '';
     final actionLabel = _operatorInboxItemActionLabel(kind);
     final actionIcon = _operatorInboxItemActionIcon(kind);
     return Padding(
@@ -7088,6 +7776,17 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                       ),
                     ),
                   ),
+                if (createdAt.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      'Created ${_agoLabel(createdAt)}',
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
               ],
             ),
           ),
@@ -7098,8 +7797,12 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                 visualDensity: VisualDensity.compact,
                 padding: const EdgeInsets.symmetric(horizontal: 8),
               ),
-              onPressed:
-                  _autonomyBusy ? null : () => _openAutonomyInboxItem(item),
+              onPressed: _autonomyBusy
+                  ? null
+                  : () {
+                      afterOpen?.call();
+                      unawaited(_openAutonomyInboxItem(item));
+                    },
               icon: Icon(actionIcon, size: 15),
               label: Text(actionLabel),
             ),
