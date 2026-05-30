@@ -1,8 +1,37 @@
 """Tests for the intercom feature: consent, status, voice messages, WebSocket auth."""
+from types import SimpleNamespace
+
 import pytest
 from app.models import User, Device, UserStatus, IntercomConsent, IntercomMessage
 from app.pairing import DEVICE_COOKIE_NAME
 from app.services import intercom_service as svc
+
+
+class _SequenceQuery:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def filter(self, *_args, **_kwargs):
+        return self
+
+    def order_by(self, *_args, **_kwargs):
+        return self
+
+    def limit(self, *_args, **_kwargs):
+        return self
+
+    def all(self):
+        return self._rows
+
+
+class _SequenceSession:
+    def __init__(self, rows_by_query):
+        self._rows_by_query = list(rows_by_query)
+        self.query_calls = 0
+
+    def query(self, *_args, **_kwargs):
+        self.query_calls += 1
+        return _SequenceQuery(self._rows_by_query.pop(0))
 
 
 class TestIntercomConsent:
@@ -154,6 +183,44 @@ class TestIntercomService:
         svc.mark_read(msg.id, user.id, db)
         unreads = svc.get_unread_messages(user.id, db)
         assert not any(m["id"] == msg.id for m in unreads)
+
+    def test_message_listing_batches_user_name_lookup(self):
+        messages = [
+            SimpleNamespace(
+                id=1,
+                from_user_id=2,
+                to_user_id=1,
+                is_broadcast=False,
+                audio_path="one.webm",
+                duration_ms=100,
+                delivered=True,
+                read=False,
+                created_at="now",
+            ),
+            SimpleNamespace(
+                id=2,
+                from_user_id=3,
+                to_user_id=1,
+                is_broadcast=False,
+                audio_path="two.webm",
+                duration_ms=200,
+                delivered=True,
+                read=False,
+                created_at="now",
+            ),
+        ]
+        users = [
+            SimpleNamespace(id=1, name="Recipient"),
+            SimpleNamespace(id=2, name="Sender A"),
+            SimpleNamespace(id=3, name="Sender B"),
+        ]
+        db = _SequenceSession([messages, users])
+
+        result = svc.get_all_messages(user_id=1, db=db)
+
+        assert [m["from_name"] for m in result] == ["Sender A", "Sender B"]
+        assert [m["to_name"] for m in result] == ["Recipient", "Recipient"]
+        assert db.query_calls == 2
 
     def test_all_statuses(self, paired_client, db):
         _, user = paired_client

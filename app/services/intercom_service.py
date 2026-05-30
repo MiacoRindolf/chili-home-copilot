@@ -100,7 +100,8 @@ def get_unread_messages(user_id: int, db: Session) -> list[dict]:
         .limit(50)
         .all()
     )
-    return [_msg_to_dict(m, db) for m in msgs]
+    user_names = _message_user_names(msgs, db)
+    return [_msg_to_dict(m, user_names) for m in msgs]
 
 
 def get_all_messages(user_id: int, db: Session) -> list[dict]:
@@ -116,7 +117,8 @@ def get_all_messages(user_id: int, db: Session) -> list[dict]:
         .limit(100)
         .all()
     )
-    return [_msg_to_dict(m, db) for m in msgs]
+    user_names = _message_user_names(msgs, db)
+    return [_msg_to_dict(m, user_names) for m in msgs]
 
 
 def mark_read(message_id: int, user_id: int, db: Session) -> bool:
@@ -172,15 +174,26 @@ def delete_message(message_id: int, user_id: int, db: Session) -> bool:
     return True
 
 
-def _msg_to_dict(m: IntercomMessage, db: Session) -> dict:
+def _message_user_names(messages: list[IntercomMessage], db: Session) -> dict[int, str]:
+    user_ids = {
+        user_id
+        for m in messages
+        for user_id in (m.from_user_id, m.to_user_id)
+        if user_id is not None
+    }
+    if not user_ids:
+        return {}
+    users = db.query(User).filter(User.id.in_(sorted(user_ids))).all()
+    return {u.id: u.name for u in users}
+
+
+def _msg_to_dict(m: IntercomMessage, user_names: dict[int, str]) -> dict:
     from_name = "CHILI"
     if m.from_user_id:
-        u = db.query(User).filter(User.id == m.from_user_id).first()
-        from_name = u.name if u else "Unknown"
+        from_name = user_names.get(m.from_user_id, "Unknown")
     to_name = "Everyone" if m.is_broadcast else None
     if m.to_user_id and not m.is_broadcast:
-        u = db.query(User).filter(User.id == m.to_user_id).first()
-        to_name = u.name if u else "Unknown"
+        to_name = user_names.get(m.to_user_id, "Unknown")
     return {
         "id": m.id,
         "from_user_id": m.from_user_id,
