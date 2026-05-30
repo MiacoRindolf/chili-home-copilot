@@ -13,6 +13,10 @@ from . import desktop_app_aliases as alias_module
 _DESKTOP_VERB = re.compile(
     r"(?i)^\s*(?:open|launch|start|run|close|quit|kill|exit|stop)\s+(?:the\s+)?(?:my\s+)?\S",
 )
+_DESKTOP_COMMAND_RE = re.compile(
+    r"(?i)^\s*(?P<verb>open|launch|start|run|close|quit|kill|exit|stop)"
+    r"\s+(?:the\s+)?(?:my\s+)?(?P<app>.+?)(?:\s+app)?\s*$",
+)
 _APP_NAME_CLEAN_RE = re.compile(r"[^a-z0-9+]+")
 _SPOKEN_ALIAS_OVERRIDES = {
     "note pad": "notepad",
@@ -74,6 +78,21 @@ def _deterministic_app_alias(app_name: str) -> str | None:
     return None
 
 
+def _deterministic_desktop_transcription(message: str) -> str | None:
+    match = _DESKTOP_COMMAND_RE.match(message or "")
+    if not match:
+        return None
+
+    app_name = re.sub(r"(?i)^my\s+", "", match.group("app").strip()).strip()
+    alias = _deterministic_app_alias(app_name)
+    if not alias:
+        return None
+
+    verb = match.group("verb").lower()
+    normalized_verb = "open" if verb in {"open", "launch", "start", "run"} else "close"
+    return f"{normalized_verb} {alias}"
+
+
 def looks_like_desktop_command(message: str) -> bool:
     """True if the message likely is a desktop command (open/close app, etc.)."""
     if not message or not message.strip():
@@ -87,6 +106,14 @@ def refine_desktop_transcription(message: str, trace_id: str = "desktop_refine")
         return message
     if not message or not message.strip():
         return message
+
+    deterministic = _deterministic_desktop_transcription(message)
+    if deterministic:
+        if deterministic != message.strip():
+            log_info(trace_id, f"desktop_refine_mechanical original={message!r} refined={deterministic!r}")
+        else:
+            log_info(trace_id, f"desktop_refine_mechanical original={message!r}")
+        return deterministic
 
     from .. import openai_client
 

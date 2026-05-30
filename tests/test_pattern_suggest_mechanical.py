@@ -26,6 +26,18 @@ def test_mechanical_pattern_suggestion_parses_numeric_and_ref_conditions():
     assert {"indicator": "rel_vol", "op": ">=", "value": 1.5} in parsed["conditions"]
 
 
+def test_mechanical_pattern_suggestion_parses_close_alias_without_llm():
+    parsed = _mechanical_pattern_suggestion(
+        "close above EMA20 and RSI > 55 with relative volume >= 1.5"
+    )
+
+    assert parsed is not None
+    assert parsed["source"] == "mechanical"
+    assert {"indicator": "price", "op": ">", "ref": "ema_20"} in parsed["conditions"]
+    assert {"indicator": "rsi_14", "op": ">", "value": 55.0} in parsed["conditions"]
+    assert {"indicator": "rel_vol", "op": ">=", "value": 1.5} in parsed["conditions"]
+
+
 def test_mechanical_pattern_suggestion_parses_boolean_and_between_conditions():
     parsed = _mechanical_pattern_suggestion(
         "BB squeeze and ADX below 20 and RSI between 40 and 65"
@@ -57,6 +69,17 @@ def test_mechanical_pattern_suggestion_parses_trader_shorthand():
     assert parsed is not None
     assert {"indicator": "ema_50", "op": ">", "ref": "ema_200"} in parsed["conditions"]
     assert {"indicator": "macd_hist", "op": ">", "value": 0.0} in parsed["conditions"]
+    assert {"indicator": "rel_vol", "op": ">=", "value": 1.5} in parsed["conditions"]
+
+
+def test_mechanical_pattern_suggestion_parses_rising_volume_phrase():
+    parsed = _mechanical_pattern_suggestion(
+        "close above EMA20 with RSI > 55 and rising volume"
+    )
+
+    assert parsed is not None
+    assert {"indicator": "price", "op": ">", "ref": "ema_20"} in parsed["conditions"]
+    assert {"indicator": "rsi_14", "op": ">", "value": 55.0} in parsed["conditions"]
     assert {"indicator": "rel_vol", "op": ">=", "value": 1.5} in parsed["conditions"]
 
 

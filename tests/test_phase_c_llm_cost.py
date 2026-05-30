@@ -173,6 +173,24 @@ def test_input_gate_misses_when_health_moves_outside_bucket():
 
 # ── c4: agent_shared.txt loads ──────────────────────────────────────────
 
+def test_input_gate_misses_when_material_health_summary_changes():
+    mock_llm = MagicMock(return_value='{"action":"hold","new_stop":null,"new_target":null,"confidence":0.5,"reasoning":"ok"}')
+    with patch("app.services.llm_caller.call_llm", mock_llm):
+        paa.get_adjustment(**_make_inputs(health_summary="RSI holding; volume confirming"))
+        paa.get_adjustment(**_make_inputs(health_summary="RSI breaking down; volume fading"))
+
+    assert mock_llm.call_count == 2
+
+
+def test_input_gate_misses_when_material_plan_levels_change():
+    mock_llm = MagicMock(return_value='{"action":"hold","new_stop":null,"new_target":null,"confidence":0.5,"reasoning":"ok"}')
+    with patch("app.services.llm_caller.call_llm", mock_llm):
+        paa.get_adjustment(**_make_inputs(pattern_stop=90.0, pattern_target=115.0))
+        paa.get_adjustment(**_make_inputs(pattern_stop=88.0, pattern_target=120.0))
+
+    assert mock_llm.call_count == 2
+
+
 def test_pattern_adjustment_parses_fenced_json_reply():
     mock_llm = MagicMock(return_value='Sure.\n```json\n{"action":"hold","new_stop":null,"new_target":null,"confidence":0.6,"reasoning":"ok"}\n```')
     with patch("app.services.llm_caller.call_llm", mock_llm):

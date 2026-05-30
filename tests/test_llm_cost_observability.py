@@ -251,6 +251,43 @@ def test_gateway_exact_cache_never_caches_high_stakes_passthrough(monkeypatch):
     assert all(call.kwargs.get("cache_status") is None for call in finalize.call_args_list)
 
 
+def test_gateway_exact_cache_respects_shared_cache_disable(monkeypatch):
+    chat = MagicMock(
+        side_effect=[
+            {"reply": "fresh deterministic reply", "model": "gpt-5.5", "tokens_used": 12},
+            {"reply": "fresh deterministic reply", "model": "gpt-5.5", "tokens_used": 12},
+        ]
+    )
+    finalize = MagicMock()
+
+    monkeypatch.setattr(gw.settings, "llm_cache_max_entries", 0)
+    monkeypatch.setattr(gw.settings, "llm_cache_ttl_seconds", 600)
+    monkeypatch.setattr(
+        "app.services.context_brain.llm_gateway.policy_mod.get_policy",
+        lambda db, purpose: PurposePolicy(
+            purpose="trading_reflect",
+            routing_strategy="passthrough",
+            decompose=False,
+            cross_examine=False,
+            use_premium_synthesis=False,
+            high_stakes=False,
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.context_brain.llm_gateway._write_gateway_log_start",
+        MagicMock(side_effect=[301, 302]),
+    )
+    monkeypatch.setattr("app.services.context_brain.llm_gateway._finalize_gateway_log", finalize)
+    monkeypatch.setattr(oc, "chat", chat)
+
+    messages = [{"role": "user", "content": "same deterministic reflection"}]
+    gateway_chat(messages, purpose="trading_reflect", system_prompt="sys", db=object())
+    gateway_chat(messages, purpose="trading_reflect", system_prompt="sys", db=object())
+
+    assert chat.call_count == 2
+    assert all(call.kwargs.get("cache_status") is None for call in finalize.call_args_list)
+
+
 @pytest.mark.parametrize(
     "purpose",
     [
