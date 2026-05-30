@@ -48,6 +48,21 @@ DEFAULT_MIN_CLOSED_EVIDENCE = 5
 DEFAULT_TOP_LIMIT = 25
 DEFAULT_RECENT_DONE_DEDUPE_MINUTES = 120
 
+_STRUCTURAL_EXIT_NOOP_REASONS = frozenset(
+    {
+        "duplicate_learned_exit_label",
+        "missing_parent_payoff_geometry",
+        "non_positive_quality_evidence_no_exit_variant_birth",
+        "no_loss_report",
+        "no_parent_returns",
+    }
+)
+_STRUCTURAL_EXIT_NOOP_PREFIXES = (
+    "edge_debt_too_negative_for_exit_child:",
+    "insufficient_parent_payoff_samples:",
+    "reward_risk_below_floor:",
+)
+
 HARD_RECERT_REASONS = frozenset({
     "negative_oos_recert",
     "negative_realized_ev",
@@ -782,6 +797,59 @@ def _payload_priority_tickers(payload: dict[str, Any]) -> set[str]:
     return out
 
 
+def _structural_exit_noop_reason(reason: Any) -> bool:
+    value = str(reason or "").strip().lower()
+    return value in _STRUCTURAL_EXIT_NOOP_REASONS or any(
+        value.startswith(prefix) for prefix in _STRUCTURAL_EXIT_NOOP_PREFIXES
+    )
+
+
+def _recent_noop_exit_variant_exists(
+    db: Session,
+    *,
+    scan_pattern_id: int | None,
+    evidence_fingerprint: str | None,
+) -> bool:
+    """Return True when a recent exit variant diagnostic already proved no-op."""
+    if scan_pattern_id is None:
+        return False
+    try:
+        from ...config import settings
+
+        minutes = int(
+            getattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360)
+        )
+    except Exception:
+        minutes = 360
+    if minutes <= 0:
+        return False
+    cutoff = datetime.utcnow() - timedelta(minutes=minutes)
+    rows = (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_kind == "outcome")
+        .filter(BrainWorkEvent.event_type == EXIT_VARIANT_DIAGNOSTIC)
+        .filter(BrainWorkEvent.created_at >= cutoff)
+        .filter(BrainWorkEvent.payload["scan_pattern_id"].astext == str(int(scan_pattern_id)))
+        .order_by(BrainWorkEvent.created_at.desc(), BrainWorkEvent.id.desc())
+        .limit(20)
+        .all()
+    )
+    fingerprint = str(evidence_fingerprint or "")
+    for row in rows:
+        payload = row.payload if isinstance(row.payload, dict) else {}
+        try:
+            created_count = int(payload.get("created_count"))
+        except (TypeError, ValueError):
+            continue
+        if created_count != 0:
+            continue
+        if fingerprint and str(payload.get("evidence_fingerprint") or "") == fingerprint:
+            return True
+        if _structural_exit_noop_reason(payload.get("skip_reason")):
+            return True
+    return False
+
+
 def emit_edge_reliability_refresh_requested(
     db: Session,
     scan_pattern_id: int,
@@ -839,6 +907,12 @@ def emit_targeted_profitability_work(
     slice_key = _canonical_asset_class(asset_class) or "all"
     dedupe_key = f"{event_type}:{pid_key}:a{slice_key}:{fp}"
     body = dict(payload or {})
+    if event_type == EXIT_VARIANT_REFRESH and _recent_noop_exit_variant_exists(
+        db,
+        scan_pattern_id=scan_pattern_id,
+        evidence_fingerprint=evidence_fingerprint,
+    ):
+        return None
     completed_payload = _recent_completed_work_payload(
         db,
         event_type=event_type,
