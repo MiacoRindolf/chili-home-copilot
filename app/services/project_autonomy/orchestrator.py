@@ -507,6 +507,21 @@ AGENT_QUALITY_MONITOR_ACTION_REVIEW_REPORTS = "review_scheduled_reports"
 AGENT_QUALITY_MONITOR_ACTION_RUN_VALIDATION = "run_validation"
 AGENT_QUALITY_MONITOR_ACTION_SYNC_CODEX = "sync_codex_profiles"
 AGENT_QUALITY_MONITOR_ACTION_DRAIN_QUEUE = "drain_runtime_queue"
+AGENT_CODING_QUALITY_BAR_KEY = "agent_coding_quality_bar"
+AGENT_CODING_QUALITY_BAR_TARGET_SCORE = 90
+AGENT_CODING_QUALITY_BAR_DIMENSION_LOCAL_MODEL = "local_model_bridge"
+AGENT_CODING_QUALITY_BAR_DIMENSION_QUALITY = "quality_governance"
+AGENT_CODING_QUALITY_BAR_DIMENSION_CAPABILITY = "agent_os_capability"
+AGENT_CODING_QUALITY_BAR_DIMENSION_CODEX = "codex_alignment"
+AGENT_CODING_QUALITY_BAR_DIMENSION_RUNTIME = "runtime_control"
+AGENT_CODING_QUALITY_BAR_DIMENSION_OPERATOR = "operator_recovery"
+AGENT_CODING_QUALITY_BAR_ACTION_KEEP_MONITORING = "keep_monitoring"
+AGENT_CODING_QUALITY_BAR_ACTION_INSTALL_MODEL = "install_coder_model"
+AGENT_CODING_QUALITY_BAR_ACTION_REVIEW_QUALITY = "review_quality"
+AGENT_CODING_QUALITY_BAR_ACTION_REVIEW_CAPABILITY = "review_agent_os_capability"
+AGENT_CODING_QUALITY_BAR_ACTION_REVIEW_CODEX = "review_codex_alignment"
+AGENT_CODING_QUALITY_BAR_ACTION_DRAIN_QUEUE = "drain_runtime_queue"
+AGENT_CODING_QUALITY_BAR_ACTION_ANSWER_INBOX = "answer_operator_inbox"
 DEFAULT_AGENT_PERMISSIONS = {
     AGENT_PERMISSION_OBSERVE: True,
     AGENT_PERMISSION_RESEARCH: True,
@@ -5199,6 +5214,196 @@ def _agent_quality_monitor_payload(
     }
 
 
+def _bounded_quality_score(raw: Any, *, default: int = 0) -> int:
+    try:
+        score = int(raw)
+    except (TypeError, ValueError):
+        score = default
+    return max(0, min(100, score))
+
+
+def _quality_status_score(status: str, *, passed: int = 100, warning: int = 70, failed: int = 25) -> int:
+    if status == AGENT_OS_READINESS_CHECK_PASSED:
+        return passed
+    if status == AGENT_OS_READINESS_CHECK_WARNING:
+        return warning
+    return failed
+
+
+def _agent_coding_quality_bar_dimension(
+    key: str,
+    label: str,
+    score: int,
+    detail: str,
+    *,
+    next_action: str,
+    next_action_label: str,
+    next_action_detail: str = "",
+) -> dict[str, Any]:
+    bounded = _bounded_quality_score(score)
+    return {
+        "key": key,
+        "label": label,
+        "score": bounded,
+        "status": (
+            AGENT_OS_READINESS_CHECK_PASSED
+            if bounded >= AGENT_CODING_QUALITY_BAR_TARGET_SCORE
+            else AGENT_OS_READINESS_CHECK_WARNING
+        ),
+        "detail": detail,
+        "next_action": next_action,
+        "next_action_label": next_action_label,
+        "next_action_detail": next_action_detail,
+    }
+
+
+def _agent_coding_quality_bar_payload(
+    *,
+    local_model: Mapping[str, Any],
+    quality_monitor: Mapping[str, Any],
+    capability_audit: Mapping[str, Any],
+    codex_alignment: Mapping[str, Any],
+    runtime_queue: Mapping[str, Any],
+    operator_inbox: Mapping[str, Any],
+) -> dict[str, Any]:
+    local_model_ready = bool(local_model.get("coding_ready"))
+    local_model_score = 100 if local_model_ready else 60 if bool(local_model.get("available")) else 25
+    runtime_status = str(runtime_queue.get("status") or AGENT_OS_READINESS_CHECK_WARNING)
+    inbox_total = int(operator_inbox.get("total_action_count") or 0)
+    inbox_next_action = str(operator_inbox.get("next_action") or "").strip()
+    inbox_has_next_action = bool(operator_inbox.get("next_action_label"))
+    inbox_score = (
+        100
+        if inbox_total == 0
+        else 82
+        if inbox_has_next_action and inbox_next_action != AGENT_OPERATOR_INBOX_ACTION_KEEP_MONITORING
+        else 45
+    )
+    dimensions = [
+        _agent_coding_quality_bar_dimension(
+            AGENT_CODING_QUALITY_BAR_DIMENSION_LOCAL_MODEL,
+            "Local model bridge",
+            local_model_score,
+            str(local_model.get("detail") or "Local model readiness has not reported yet."),
+            next_action=(
+                AGENT_CODING_QUALITY_BAR_ACTION_KEEP_MONITORING
+                if local_model_ready
+                else AGENT_CODING_QUALITY_BAR_ACTION_INSTALL_MODEL
+            ),
+            next_action_label="Keep monitoring" if local_model_ready else "Install coder model",
+            next_action_detail=str(local_model.get("recommendation") or AGENT_OS_LOCAL_MODEL_RECOMMENDATION),
+        ),
+        _agent_coding_quality_bar_dimension(
+            AGENT_CODING_QUALITY_BAR_DIMENSION_QUALITY,
+            "Quality governance",
+            _bounded_quality_score(quality_monitor.get("score")),
+            str(quality_monitor.get("detail") or "Quality monitor has not reported yet."),
+            next_action=str(
+                quality_monitor.get("next_action")
+                or AGENT_CODING_QUALITY_BAR_ACTION_REVIEW_QUALITY
+            ),
+            next_action_label=str(quality_monitor.get("next_action_label") or "Review quality"),
+            next_action_detail=str(quality_monitor.get("next_action_detail") or ""),
+        ),
+        _agent_coding_quality_bar_dimension(
+            AGENT_CODING_QUALITY_BAR_DIMENSION_CAPABILITY,
+            "Agent OS capability",
+            _bounded_quality_score(capability_audit.get("score")),
+            str(capability_audit.get("detail") or "Agent OS capability audit has not reported yet."),
+            next_action=str(
+                capability_audit.get("next_action")
+                or AGENT_CODING_QUALITY_BAR_ACTION_REVIEW_CAPABILITY
+            ),
+            next_action_label=str(capability_audit.get("next_action_label") or "Review capability"),
+            next_action_detail=str(capability_audit.get("next_action_detail") or ""),
+        ),
+        _agent_coding_quality_bar_dimension(
+            AGENT_CODING_QUALITY_BAR_DIMENSION_CODEX,
+            "Codex/Claude parity",
+            _bounded_quality_score(codex_alignment.get("score"), default=100),
+            str(codex_alignment.get("detail") or "No Codex automation comparison is required for this repo."),
+            next_action=(
+                AGENT_CODING_QUALITY_BAR_ACTION_KEEP_MONITORING
+                if str(codex_alignment.get("status") or "") == AGENT_OS_READINESS_CHECK_PASSED
+                else AGENT_CODING_QUALITY_BAR_ACTION_REVIEW_CODEX
+            ),
+            next_action_label=(
+                "Keep monitoring"
+                if str(codex_alignment.get("status") or "") == AGENT_OS_READINESS_CHECK_PASSED
+                else "Review Codex parity"
+            ),
+            next_action_detail=str(codex_alignment.get("detail") or ""),
+        ),
+        _agent_coding_quality_bar_dimension(
+            AGENT_CODING_QUALITY_BAR_DIMENSION_RUNTIME,
+            "Runtime control",
+            _quality_status_score(runtime_status),
+            str(runtime_queue.get("detail") or "Runtime queue has not reported yet."),
+            next_action=(
+                AGENT_CODING_QUALITY_BAR_ACTION_KEEP_MONITORING
+                if runtime_status == AGENT_OS_READINESS_CHECK_PASSED
+                else AGENT_CODING_QUALITY_BAR_ACTION_DRAIN_QUEUE
+            ),
+            next_action_label="Keep monitoring" if runtime_status == AGENT_OS_READINESS_CHECK_PASSED else "Drain queue",
+            next_action_detail=str(runtime_queue.get("detail") or ""),
+        ),
+        _agent_coding_quality_bar_dimension(
+            AGENT_CODING_QUALITY_BAR_DIMENSION_OPERATOR,
+            "Operator recovery",
+            inbox_score,
+            str(operator_inbox.get("detail") or "Operator inbox has not reported yet."),
+            next_action=(
+                AGENT_CODING_QUALITY_BAR_ACTION_KEEP_MONITORING
+                if inbox_total == 0
+                else AGENT_CODING_QUALITY_BAR_ACTION_ANSWER_INBOX
+            ),
+            next_action_label="Keep monitoring" if inbox_total == 0 else "Answer operator inbox",
+            next_action_detail=str(operator_inbox.get("next_action_detail") or operator_inbox.get("detail") or ""),
+        ),
+    ]
+    score = round(sum(int(dimension["score"]) for dimension in dimensions) / max(len(dimensions), 1))
+    gaps = [
+        dimension
+        for dimension in dimensions
+        if int(dimension.get("score") or 0) < AGENT_CODING_QUALITY_BAR_TARGET_SCORE
+    ]
+    competitive = score >= AGENT_CODING_QUALITY_BAR_TARGET_SCORE and not gaps
+    if gaps:
+        weakest = min(gaps, key=lambda item: int(item.get("score") or 0))
+        next_action = str(weakest.get("next_action") or AGENT_CODING_QUALITY_BAR_ACTION_REVIEW_QUALITY)
+        next_action_label = str(weakest.get("next_action_label") or "Review quality bar")
+        next_action_detail = str(weakest.get("detail") or "")
+        detail = (
+            f"Local coding cockpit is {score}/100 against the "
+            f"{AGENT_CODING_QUALITY_BAR_TARGET_SCORE}/100 Codex/Claude-class target; "
+            f"weakest signal is {weakest.get('label')} at {weakest.get('score')}/100."
+        )
+    else:
+        next_action = AGENT_CODING_QUALITY_BAR_ACTION_KEEP_MONITORING
+        next_action_label = "Keep monitoring"
+        next_action_detail = "The local coding cockpit is at or above the current Codex/Claude-class operating bar."
+        detail = (
+            f"Local coding cockpit is {score}/100 against the "
+            f"{AGENT_CODING_QUALITY_BAR_TARGET_SCORE}/100 Codex/Claude-class target."
+        )
+    return {
+        "status": (
+            AGENT_OS_READINESS_CHECK_PASSED
+            if competitive
+            else AGENT_OS_READINESS_CHECK_WARNING
+        ),
+        "score": score,
+        "target_score": AGENT_CODING_QUALITY_BAR_TARGET_SCORE,
+        "competitive": competitive,
+        "detail": detail,
+        "dimensions": dimensions,
+        "gaps": gaps[:AGENT_OS_QUALITY_PROBLEM_PREVIEW_LIMIT],
+        "next_action": next_action,
+        "next_action_label": next_action_label,
+        "next_action_detail": next_action_detail,
+    }
+
+
 def _agent_runtime_queue_state(
     db: Session,
     *,
@@ -5685,6 +5890,14 @@ def agent_os_readiness(
         worktree_enabled_count=len(worktree_enabled),
         merge_enabled_count=len(merge_enabled),
     )
+    coding_quality_bar = _agent_coding_quality_bar_payload(
+        local_model=local_model,
+        quality_monitor=quality_monitor,
+        capability_audit=capability_audit,
+        codex_alignment=codex_alignment,
+        runtime_queue=runtime_queue,
+        operator_inbox=operator_inbox,
+    )
     checks = [
         _readiness_check(
             AGENT_OS_READINESS_CHECK_REPO,
@@ -5897,6 +6110,7 @@ def agent_os_readiness(
         AGENT_CODEX_BENCH_KEY: codex_bench,
         AGENT_QUALITY_MONITOR_KEY: quality_monitor,
         AGENT_OS_CAPABILITY_AUDIT_KEY: capability_audit,
+        AGENT_CODING_QUALITY_BAR_KEY: coding_quality_bar,
         "codex_automations": {
             "matching": len(codex_definitions),
             "imported": len(imported_codex),
@@ -6309,7 +6523,21 @@ def create_run(
         metadata=prompt_metadata,
         commit=False,
     )
-    if not start_planning:
+    slash_command = (
+        None
+        if start_planning or clean_attachments
+        else _parse_autopilot_slash_command(clean_prompt)
+    )
+    if not start_planning and slash_command is not None:
+        command, args = slash_command
+        _handle_autopilot_slash_command(
+            db,
+            row,
+            command=command,
+            args=args,
+            user_id=user_id,
+        )
+    elif not start_planning:
         _record_message(
             db,
             row,
@@ -6777,6 +7005,57 @@ def _readiness_check_detail(
     return fallback
 
 
+def _autopilot_coding_quality_bar_lines(readiness: Mapping[str, Any]) -> list[str]:
+    bar = _mapping_payload(readiness.get(AGENT_CODING_QUALITY_BAR_KEY))
+    if not bar:
+        return []
+    score = int(bar.get("score") or 0)
+    target = int(bar.get("target_score") or AGENT_CODING_QUALITY_BAR_TARGET_SCORE)
+    status = str(bar.get("status") or "checking").replace("_", " ")
+    detail = str(bar.get("detail") or "").strip()
+    next_action_label = str(bar.get("next_action_label") or "").strip()
+    next_action_detail = str(bar.get("next_action_detail") or "").strip()
+    lines = [f"Codex/Claude quality bar: {score}/{target} ({status})."]
+    if detail:
+        lines.append(f"Quality bar verdict: {detail}")
+    if next_action_label:
+        action_line = f"Quality bar next action: {next_action_label}"
+        if next_action_detail:
+            action_line += f" - {next_action_detail}"
+        lines.append(action_line)
+    gaps = bar.get("gaps")
+    if isinstance(gaps, list) and gaps:
+        lines.append("Quality bar gaps:")
+        for gap in gaps[:AGENT_OS_QUALITY_PROBLEM_PREVIEW_LIMIT]:
+            if not isinstance(gap, Mapping):
+                continue
+            label = str(gap.get("label") or gap.get("key") or "Quality signal").strip()
+            gap_score = int(gap.get("score") or 0)
+            lines.append(f"- {label}: {gap_score}/{target}")
+    return lines
+
+
+def _autopilot_operator_inbox_lines(readiness: Mapping[str, Any]) -> list[str]:
+    inbox = _mapping_payload(readiness.get("operator_inbox"))
+    if not inbox:
+        return []
+    next_action_label = str(inbox.get("next_action_label") or "").strip()
+    if not next_action_label:
+        return []
+    next_action_detail = str(inbox.get("next_action_detail") or "").strip()
+    next_action_agent = str(inbox.get("next_action_agent") or "").strip()
+    next_action_run_id = str(inbox.get("next_action_run_id") or "").strip()
+    line = f"Operator inbox next action: {next_action_label}"
+    if next_action_agent:
+        line += f" - {next_action_agent}"
+    if next_action_detail:
+        line += f". {next_action_detail}"
+    lines = [line]
+    if next_action_run_id:
+        lines.append(f"Operator inbox target run: {next_action_run_id}")
+    return lines
+
+
 def _autopilot_quality_monitor_lines(readiness: Mapping[str, Any]) -> list[str]:
     monitor = _mapping_payload(readiness.get(AGENT_QUALITY_MONITOR_KEY))
     if not monitor:
@@ -6947,6 +7226,8 @@ def _autopilot_command_doctor(
     quality_monitor_lines = _autopilot_quality_monitor_lines(readiness)
     codex_bench_lines = _autopilot_codex_bench_lines(readiness)
     capability_audit_lines = _autopilot_capability_audit_lines(readiness)
+    coding_quality_bar_lines = _autopilot_coding_quality_bar_lines(readiness)
+    operator_inbox_lines = _autopilot_operator_inbox_lines(readiness)
     if not bool(local_model.get("coding_ready")):
         lines.append(f"Model next step: {local_model.get('recommendation') or AGENT_OS_LOCAL_MODEL_RECOMMENDATION}")
     lines.extend(
@@ -6976,6 +7257,8 @@ def _autopilot_command_doctor(
         ]
     )
     lines.extend(codex_bench_lines)
+    lines.extend(coding_quality_bar_lines)
+    lines.extend(operator_inbox_lines)
     lines.extend(quality_monitor_lines)
     lines.extend(capability_audit_lines)
 
@@ -7049,6 +7332,8 @@ def _autopilot_command_quality(
             capability_audit_lines = _autopilot_capability_audit_lines(readiness)
             problems = _string_items(scorecard.get("problems"), limit=AGENT_OS_QUALITY_PROBLEM_PREVIEW_LIMIT)
             quality_monitor_lines = _autopilot_quality_monitor_lines(readiness)
+            coding_quality_bar_lines = _autopilot_coding_quality_bar_lines(readiness)
+            operator_inbox_lines = _autopilot_operator_inbox_lines(readiness)
             quality_lines.extend(
                 [
                     (
@@ -7094,6 +7379,8 @@ def _autopilot_command_quality(
                 ]
             )
             quality_lines.extend(f"- {line}" for line in codex_bench_lines)
+            quality_lines.extend(f"- {line}" for line in coding_quality_bar_lines)
+            quality_lines.extend(f"- {line}" for line in operator_inbox_lines)
             quality_lines.extend(f"- {line}" for line in quality_monitor_lines)
             quality_lines.extend(f"- {line}" for line in capability_audit_lines)
             if problems:

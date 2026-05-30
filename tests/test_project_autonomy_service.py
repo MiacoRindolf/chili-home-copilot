@@ -3442,6 +3442,10 @@ def test_agent_os_readiness_compares_codex_automations_and_safety(
             orchestrator.AGENT_CODEX_ALIGNMENT_DIMENSION_RUNTIME,
             orchestrator.AGENT_CODEX_ALIGNMENT_DIMENSION_MODEL,
         }
+        quality_bar = readiness[orchestrator.AGENT_CODING_QUALITY_BAR_KEY]
+        assert quality_bar["score"] >= orchestrator.AGENT_CODING_QUALITY_BAR_TARGET_SCORE
+        assert quality_bar["competitive"] is True
+        assert quality_bar["gaps"] == []
         codex_alignment_check = next(
             check
             for check in readiness["checks"]
@@ -3823,6 +3827,16 @@ def test_agent_os_readiness_warns_when_only_general_local_model_exists(
         assert readiness["status"] == orchestrator.AGENT_OS_READINESS_NEEDS_ATTENTION
         assert readiness["warnings"] == 1
         assert readiness["local_model"]["coding_ready"] is False
+        quality_bar = readiness[orchestrator.AGENT_CODING_QUALITY_BAR_KEY]
+        assert quality_bar["status"] == orchestrator.AGENT_OS_READINESS_CHECK_WARNING
+        assert quality_bar["target_score"] == orchestrator.AGENT_CODING_QUALITY_BAR_TARGET_SCORE
+        assert quality_bar["competitive"] is False
+        assert quality_bar["next_action"] == orchestrator.AGENT_CODING_QUALITY_BAR_ACTION_INSTALL_MODEL
+        assert any(
+            dimension["key"] == orchestrator.AGENT_CODING_QUALITY_BAR_DIMENSION_LOCAL_MODEL
+            and dimension["score"] < orchestrator.AGENT_CODING_QUALITY_BAR_TARGET_SCORE
+            for dimension in quality_bar["dimensions"]
+        )
         local_model_check = next(
             check
             for check in readiness["checks"]
@@ -4033,6 +4047,8 @@ def test_autopilot_doctor_command_summarizes_agent_os_readiness(
         assert "Agent OS capability audit" in reply
         assert "Capability gaps:" in reply
         assert "Local model bridge" in reply
+        assert "Codex/Claude quality bar" in reply
+        assert "Quality bar next action: Install coder model" in reply
         assert "Quality next action: Install coder model" in reply
     finally:
         db.close()
@@ -4080,7 +4096,106 @@ def test_autopilot_quality_command_explains_local_model_guardrails(
         assert "Agent OS capability audit" in reply
         assert "Capability gaps:" in reply
         assert "Local model bridge" in reply
+        assert "Codex/Claude quality bar" in reply
+        assert "Quality bar next action: Install coder model" in reply
         assert "Quality next action: Install coder model" in reply
+    finally:
+        db.close()
+
+
+def test_autopilot_commands_surface_operator_inbox_next_action(
+    tmp_path,
+    monkeypatch,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        monkeypatch.setattr(orchestrator, "_codex_automation_roots", lambda: [])
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {
+                "model": "qwen2.5-coder:7b",
+                "available": True,
+                "installed_models": ["qwen2.5-coder:7b"],
+                "skipped_models": {},
+                "recommendation": None,
+            },
+        )
+        repo = CodeRepo(path=str(tmp_path), host_path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        orchestrator.bootstrap_agent_profiles(db, repo_id=repo.id)
+        run = orchestrator.create_run(
+            db,
+            prompt="Improve the Autopilot cockpit.",
+            repo_id=repo.id,
+            start_planning=True,
+        )
+        run.status = orchestrator.RUN_STATUS_AWAITING_CLARIFICATION
+        run.plan_status = orchestrator.PLAN_STATUS_AWAITING_CLARIFICATION
+        run.error_message = "Pick the cockpit workflow before planning."
+        orchestrator.record_operator_question(
+            db,
+            run,
+            "Which cockpit workflow should the architect inspect first?",
+        )
+        db.commit()
+
+        doctor_payload = orchestrator.append_user_message(
+            db,
+            run.run_id,
+            content="/doctor",
+        )
+        quality_payload = orchestrator.append_user_message(
+            db,
+            run.run_id,
+            content="/quality",
+        )
+
+        doctor_reply = doctor_payload["messages"][-1]["content"]
+        quality_reply = quality_payload["messages"][-1]["content"]
+        for reply in (doctor_reply, quality_reply):
+            assert "Operator inbox next action: Answer question - Product PM" in reply
+            assert "Which cockpit workflow should the architect inspect first?" in reply
+            assert f"Operator inbox target run: {run.run_id}" in reply
+    finally:
+        db.close()
+
+
+def test_autopilot_cold_slash_command_run_returns_command_report(
+    tmp_path,
+    monkeypatch,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        monkeypatch.setattr(orchestrator, "_codex_automation_roots", lambda: [])
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {
+                "model": "qwen2.5-coder:7b",
+                "available": True,
+                "installed_models": ["qwen2.5-coder:7b"],
+                "skipped_models": {},
+                "recommendation": None,
+            },
+        )
+        repo = CodeRepo(path=str(tmp_path), host_path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+
+        run = orchestrator.create_run(
+            db,
+            prompt="/quality",
+            repo_id=repo.id,
+            start_planning=False,
+        )
+        payload = orchestrator.run_payload(db, run, include_events=True)
+
+        assert payload["status"] == orchestrator.RUN_STATUS_CHATTING
+        assert payload["messages"][-1]["message_type"] == orchestrator.AUTOPILOT_COMMAND_MESSAGE_TYPE
+        assert "Autopilot quality report" in payload["messages"][-1]["content"]
+        assert "Codex/Claude quality bar" in payload["messages"][-1]["content"]
     finally:
         db.close()
 

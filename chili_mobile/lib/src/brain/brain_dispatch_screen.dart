@@ -192,6 +192,9 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   static const _autopilotQualityDefaultWindowDays = 7;
   static const _autopilotRuntimeQueue = 'runtime_queue';
   static const _autopilotRuntimeQueueProblems = 'problems';
+  static const _autopilotRuntimeQueueQueuedRuns = 'queued_runs';
+  static const _autopilotRuntimeQueueActiveRuns = 'active_runs';
+  static const _autopilotRuntimeQueueWaitingRuns = 'waiting_runs';
   static const _autopilotOperatorInbox = 'operator_inbox';
   static const _autopilotOperatorInboxItems = 'items';
   static const _autopilotOperatorInboxNextAction = 'next_action';
@@ -228,6 +231,13 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   static const _autopilotReadinessPassed = 'passed';
   static const _autopilotReadinessFailed = 'failed';
   static const _autopilotCodexBench = 'codex_bench';
+  static const _autopilotCodingQualityBar = 'agent_coding_quality_bar';
+  static const _autopilotCodingQualityTargetScore = 'target_score';
+  static const _autopilotCodingQualityCompetitive = 'competitive';
+  static const _autopilotCodingQualityDimensions = 'dimensions';
+  static const _autopilotCodingQualityGaps = 'gaps';
+  static const _autopilotCodingQualityNextActionLabel = 'next_action_label';
+  static const _autopilotCodingQualityNextActionDetail = 'next_action_detail';
   static const _autopilotAgentQualityMonitor = 'agent_quality_monitor';
   static const _autopilotAgentCapabilityAudit = 'agent_os_capability_audit';
   static const _autopilotAgentCapabilityItems = 'capabilities';
@@ -1885,20 +1895,14 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   }
 
   void _submitAutopilotCommand(String command) {
-    if (_autonomyBusy || _codeRepos.isEmpty || !_canSendAutopilotCommand) {
+    final clean = command.trim();
+    if (_autonomyBusy || _codeRepos.isEmpty || clean.isEmpty) {
       return;
     }
     unawaited(_startAutopilot(
-      promptOverride: command,
+      promptOverride: clean,
       clearComposer: false,
     ));
-  }
-
-  bool get _canSendAutopilotCommand {
-    final runId = _activeAutonomyRun?['run_id']?.toString() ?? '';
-    return runId.isNotEmpty &&
-        !_autonomyTerminal(_activeAutonomyRun) &&
-        _activeAutonomyRun?['status']?.toString() != 'merged';
   }
 
   TextEditingValue _formatAutopilotComposerInput(
@@ -4548,7 +4552,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
               );
             }),
           ],
-          if (_canSendAutopilotCommand) ...[
+          if (_codeRepos.isNotEmpty) ...[
             _buildAutopilotCommandStrip(),
             const SizedBox(height: 10),
           ],
@@ -4726,7 +4730,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                 size: 16,
               ),
               label: Text(action['label'] ?? ''),
-              onPressed: _autonomyBusy
+              onPressed: _autonomyBusy || _codeRepos.isEmpty
                   ? null
                   : () => _submitAutopilotCommand(action['command'] ?? ''),
             ),
@@ -5468,6 +5472,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final localModel = _asMap(readiness['local_model']);
     final qualityScorecard = _asMap(readiness[_autopilotQualityScorecard]);
     final codexBench = _asMap(readiness[_autopilotCodexBench]);
+    final codingQualityBar = _asMap(readiness[_autopilotCodingQualityBar]);
     final qualityMonitor = _asMap(readiness[_autopilotAgentQualityMonitor]);
     final capabilityAudit = _asMap(readiness[_autopilotAgentCapabilityAudit]);
     final runtimeQueue = _asMap(readiness[_autopilotRuntimeQueue]);
@@ -5711,6 +5716,18 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                       ? Colors.teal.shade900
                       : Colors.orange.shade900,
                 ),
+              if (codingQualityBar.isNotEmpty)
+                _miniChip(
+                  '${_asInt(codingQualityBar['score']) ?? 0}/${_asInt(codingQualityBar[_autopilotCodingQualityTargetScore]) ?? 90} bar',
+                  _autonomyBubbleBackground(
+                    codingQualityBar[_autopilotCodingQualityCompetitive] == true
+                        ? Colors.teal
+                        : Colors.orange,
+                  ),
+                  codingQualityBar[_autopilotCodingQualityCompetitive] == true
+                      ? Colors.teal.shade900
+                      : Colors.orange.shade900,
+                ),
               if ((_asInt(agents['pending_questions']) ?? 0) > 0)
                 _miniChip(
                   '${_asInt(agents['pending_questions'])} questions',
@@ -5726,6 +5743,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
           if (codexBench.isNotEmpty) ...[
             const SizedBox(height: 10),
             _buildAutonomyCodexBench(codexBench),
+          ],
+          if (codingQualityBar.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            _buildAutonomyCodingQualityBar(codingQualityBar),
           ],
           if (capabilityAudit.isNotEmpty) ...[
             const SizedBox(height: 10),
@@ -5930,6 +5951,150 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
             const SizedBox(height: 8),
             for (final capability in visibleCapabilities)
               _buildAutonomyAgentQualityDimension(capability),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAutonomyCodingQualityBar(Map<String, dynamic> bar) {
+    final status = bar['status']?.toString() ?? '';
+    final score = _asInt(bar['score']) ?? 0;
+    final target = _asInt(bar[_autopilotCodingQualityTargetScore]) ?? 90;
+    final competitive = bar[_autopilotCodingQualityCompetitive] == true;
+    final color = competitive || status == _autopilotReadinessPassed
+        ? _autonomyStatusColor('completed')
+        : status == _autopilotReadinessFailed
+            ? _autonomyStatusColor('failed')
+            : Colors.orange;
+    final detail = bar['detail']?.toString().trim() ?? '';
+    final nextAction =
+        bar[_autopilotCodingQualityNextActionLabel]?.toString().trim() ?? '';
+    final nextActionDetail =
+        bar[_autopilotCodingQualityNextActionDetail]?.toString().trim() ?? '';
+    final gaps = _asMapList(bar[_autopilotCodingQualityGaps]);
+    final dimensions = _asMapList(bar[_autopilotCodingQualityDimensions]);
+    final visibleDimensions =
+        gaps.isNotEmpty ? gaps : dimensions.take(6).toList();
+    final progress =
+        target > 0 ? (score / target).clamp(0.0, 1.0).toDouble() : 0.0;
+    final canRunCommand = !_autonomyBusy && _codeRepos.isNotEmpty;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(9),
+      decoration: BoxDecoration(
+        color: _autonomyBubbleBackground(color, alpha: 0.06),
+        border: Border.all(color: color.withValues(alpha: 0.22)),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.workspace_premium_outlined, color: color, size: 16),
+              const SizedBox(width: 7),
+              Expanded(
+                child: Text(
+                  'Codex/Claude quality bar',
+                  style: Theme.of(context).textTheme.labelLarge,
+                ),
+              ),
+              _miniChip(
+                  '$score/$target', _autonomyBubbleBackground(color), color),
+              const SizedBox(width: 6),
+              _miniChip(
+                competitive ? 'competitive' : 'below target',
+                _autonomyBubbleBackground(color),
+                color,
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(999),
+            child: LinearProgressIndicator(
+              value: progress,
+              minHeight: 6,
+              backgroundColor: color.withValues(alpha: 0.13),
+              valueColor: AlwaysStoppedAnimation<Color>(color),
+            ),
+          ),
+          if (detail.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text(
+              detail,
+              style: TextStyle(color: _mutedTextColor(), fontSize: 12),
+            ),
+          ],
+          if (nextAction.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: _autonomyBubbleBackground(color, alpha: 0.08),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(Icons.flag_outlined, color: color, size: 15),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          nextAction,
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        if (nextActionDetail.isNotEmpty)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 2),
+                            child: Text(
+                              nextActionDetail,
+                              style: TextStyle(
+                                color: _mutedTextColor(),
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              FilledButton.tonalIcon(
+                onPressed: canRunCommand
+                    ? () => _submitAutopilotCommand(_autopilotSlashQuality)
+                    : null,
+                icon: const Icon(Icons.verified_outlined, size: 16),
+                label: const Text('Quality report'),
+              ),
+              OutlinedButton.icon(
+                onPressed: canRunCommand
+                    ? () => _submitAutopilotCommand(_autopilotSlashDoctor)
+                    : null,
+                icon: const Icon(Icons.health_and_safety_outlined, size: 16),
+                label: const Text('Doctor audit'),
+              ),
+            ],
+          ),
+          if (visibleDimensions.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            for (final dimension in visibleDimensions)
+              _buildAutonomyAgentQualityDimension(dimension),
           ],
         ],
       ),
@@ -6276,6 +6441,15 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final questions = _asInt(queue['pending_question_count']) ?? 0;
     final alwaysOn = _asInt(queue['always_on_profile_count']) ?? 0;
     final alwaysOnOpen = _asInt(queue['always_on_open_count']) ?? 0;
+    final queuedRuns =
+        _asMapList(queue[_autopilotRuntimeQueueQueuedRuns]).take(2).toList();
+    final activeRuns =
+        _asMapList(queue[_autopilotRuntimeQueueActiveRuns]).take(2).toList();
+    final waitingRuns =
+        _asMapList(queue[_autopilotRuntimeQueueWaitingRuns]).take(2).toList();
+    final hasRunPreviews = queuedRuns.isNotEmpty ||
+        activeRuns.isNotEmpty ||
+        waitingRuns.isNotEmpty;
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(9),
@@ -6377,6 +6551,121 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                   ],
                 ),
               ),
+          ],
+          if (hasRunPreviews) ...[
+            const SizedBox(height: 8),
+            Text(
+              'Run preview',
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                    fontWeight: FontWeight.w800,
+                  ),
+            ),
+            const SizedBox(height: 2),
+            for (final run in activeRuns)
+              _buildAutonomyRuntimeQueueRun(
+                run,
+                label: 'Active',
+                color: Colors.green.shade700,
+                icon: Icons.play_circle_outline,
+              ),
+            for (final run in queuedRuns)
+              _buildAutonomyRuntimeQueueRun(
+                run,
+                label: 'Queued',
+                color: Colors.orange.shade700,
+                icon: Icons.pending_actions_outlined,
+              ),
+            for (final run in waitingRuns)
+              _buildAutonomyRuntimeQueueRun(
+                run,
+                label: 'Waiting',
+                color: Colors.deepPurple.shade600,
+                icon: Icons.pause_circle_outline,
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAutonomyRuntimeQueueRun(
+    Map<String, dynamic> run, {
+    required String label,
+    required Color color,
+    required IconData icon,
+  }) {
+    final runId = run['run_id']?.toString().trim() ?? '';
+    final agent = run['agent_profile_id']?.toString().trim() ?? '';
+    final status = run['status']?.toString().trim() ?? '';
+    final stage = run['stage']?.toString().trim() ?? '';
+    final planStatus = run['plan_status']?.toString().trim() ?? '';
+    final details = [
+      if (status.isNotEmpty) status.replaceAll('_', ' '),
+      if (stage.isNotEmpty) stage.replaceAll('_', ' '),
+      if (planStatus.isNotEmpty) 'plan ${planStatus.replaceAll('_', ' ')}',
+    ].join(' - ');
+    final title = agent.isEmpty ? label : '$label - $agent';
+    return Padding(
+      padding: const EdgeInsets.only(top: 5),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, color: color, size: 14),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                if (details.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      details,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                if (runId.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      runId,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          if (runId.isNotEmpty) ...[
+            const SizedBox(width: 6),
+            OutlinedButton.icon(
+              style: OutlinedButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+              ),
+              onPressed:
+                  _autonomyBusy ? null : () => _openAutonomyRunById(runId),
+              icon: const Icon(Icons.open_in_new, size: 15),
+              label: const Text('Open'),
+            ),
           ],
         ],
       ),
@@ -7542,7 +7831,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final scheduled = _asInt(mirror['source_active_scheduled']) ?? 0;
     final color =
         disabled > 0 ? Colors.orange : _autonomyStatusColor('completed');
-    final canExplain = !_autonomyBusy && _canSendAutopilotCommand;
+    final canExplain = !_autonomyBusy && _codeRepos.isNotEmpty;
     final canEnable =
         !_autonomyBusy && sourceActive > 0 && (disabled > 0 || alwaysOn > 0);
     final canEnableAlwaysOn =
