@@ -304,6 +304,42 @@ def test_cash_deployment_option_heat_uses_premium_risk_not_underlying_stop(
     assert _trade_heat_pct(trade, capital=10_000.0) == pytest.approx(1.25)
 
 
+def test_cash_deployment_sparse_asset_class_option_uses_contract_return() -> None:
+    from app.services.trading.cash_deployment import _trade_asset_class, _trade_return_pct
+
+    trade = SimpleNamespace(
+        ticker="SPY",
+        direction="long",
+        entry_price=1.25,
+        quantity=2.0,
+        pnl=40.0,
+        asset_kind=None,
+        tags=None,
+        indicator_snapshot={"asset_class": "options"},
+    )
+
+    assert _trade_asset_class(trade) == "options"
+    assert _trade_return_pct(trade) == pytest.approx(16.0)
+
+
+def test_cash_deployment_nested_asset_class_option_uses_contract_return() -> None:
+    from app.services.trading.cash_deployment import _trade_asset_class, _trade_return_pct
+
+    trade = SimpleNamespace(
+        ticker="SPY",
+        direction="long",
+        entry_price=1.25,
+        quantity=2.0,
+        pnl=40.0,
+        asset_kind=None,
+        tags=None,
+        indicator_snapshot={"breakout_alert": {"asset_class": "option"}},
+    )
+
+    assert _trade_asset_class(trade) == "options"
+    assert _trade_return_pct(trade) == pytest.approx(16.0)
+
+
 def test_cash_deployment_zero_ranks_stale_broker_local_open(db, monkeypatch):
     monkeypatch.setattr(settings, "chili_autotrader_live_enabled", True)
     monkeypatch.setattr(settings, "chili_cash_deployment_equity_cost_pct", 0.05)

@@ -63,9 +63,11 @@ def test_shadow_vetting_skips_paper_dynamic_without_realized_return():
     class _FakeDb:
         def __init__(self):
             self.calls = 0
+            self.sql_texts = []
 
         def execute(self, _stmt):
             self.calls += 1
+            self.sql_texts.append(str(_stmt))
             if self.calls == 1:
                 return _Result([])
             return _Result(
@@ -100,11 +102,18 @@ def test_shadow_vetting_skips_paper_dynamic_without_realized_return():
                 ]
             )
 
+    fake_db = _FakeDb()
     evidence = _load_directional_evidence(
-        _FakeDb(),
+        fake_db,
         now=now,
         settings_=_settings(chili_shadow_vetting_include_paper_dynamic_outcomes=True),
     )
+
+    paper_sql = fake_db.sql_texts[1]
+    assert "AS realized_return_pct" in paper_sql
+    assert "pt.pnl /" in paper_sql
+    assert "pt.entry_price * pt.quantity" in paper_sql
+    assert "pnl_pct" not in paper_sql
 
     row = evidence[123]
     assert row["raw_sample_n"] == 2

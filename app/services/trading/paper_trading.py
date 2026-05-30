@@ -130,6 +130,14 @@ def _truthy_option_marker(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _option_multiplier_marker(value: Any) -> bool:
+    multiplier = _finite_float(value)
+    return (
+        multiplier is not None
+        and abs(multiplier - OPTION_CONTRACT_MULTIPLIER) < 1e-9
+    )
+
+
 def _paper_option_meta_from_signal(signal_json: Any) -> dict[str, Any]:
     sig = _as_dict(signal_json)
     meta = sig.get("option_meta")
@@ -152,10 +160,46 @@ def _is_option_signal(signal_json: Any) -> bool:
         return True
     if str(sig.get("asset_type") or "").strip().lower() in {"option", "options"}:
         return True
+    if str(sig.get("asset_class") or "").strip().lower() in {"option", "options"}:
+        return True
+    if _option_multiplier_marker(sig.get("option_contract_multiplier")):
+        return True
+    if _option_multiplier_marker(sig.get("contract_multiplier")):
+        return True
+    paper_meta = _as_dict(sig.get("_paper_meta"))
+    if paper_meta.get("option_meta"):
+        return True
+    if _truthy_option_marker(paper_meta.get("options_path")):
+        return True
+    if str(paper_meta.get("asset_kind") or "").strip().lower() in {
+        "option",
+        "options",
+    }:
+        return True
+    if str(paper_meta.get("asset_type") or "").strip().lower() in {
+        "option",
+        "options",
+    }:
+        return True
+    if str(paper_meta.get("asset_class") or "").strip().lower() in {
+        "option",
+        "options",
+    }:
+        return True
+    if _option_multiplier_marker(paper_meta.get("option_contract_multiplier")):
+        return True
+    if _option_multiplier_marker(paper_meta.get("contract_multiplier")):
+        return True
     breakout = _as_dict(sig.get("breakout_alert"))
     if str(breakout.get("asset_kind") or "").strip().lower() in {"option", "options"}:
         return True
     if str(breakout.get("asset_type") or "").strip().lower() in {"option", "options"}:
+        return True
+    if str(breakout.get("asset_class") or "").strip().lower() in {"option", "options"}:
+        return True
+    if _option_multiplier_marker(breakout.get("option_contract_multiplier")):
+        return True
+    if _option_multiplier_marker(breakout.get("contract_multiplier")):
         return True
     return _truthy_option_marker(breakout.get("options_path"))
 

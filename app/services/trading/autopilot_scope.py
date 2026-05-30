@@ -58,8 +58,19 @@ def is_option_trade(trade: Trade) -> bool:
     repaired rows can be option-typed even when metadata is sparse.
     """
     import json as _json
+    import math as _math
+
     def _optionish(value: object) -> bool:
         return str(value or "").strip().lower() in {"option", "options"}
+
+    def _option_multiplier(value: object) -> bool:
+        if isinstance(value, bool):
+            return False
+        try:
+            out = float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return False
+        return _math.isfinite(out) and abs(out - 100.0) < 1e-9
 
     try:
         if _optionish(getattr(trade, "asset_kind", None)):
@@ -90,7 +101,13 @@ def is_option_trade(trade: Trade) -> bool:
         return True
     if _optionish(snap.get("asset_type")):
         return True
+    if _optionish(snap.get("asset_class")):
+        return True
     if str(snap.get("options_path") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    if _option_multiplier(snap.get("option_contract_multiplier")):
+        return True
+    if _option_multiplier(snap.get("contract_multiplier")):
         return True
     ba = snap.get("breakout_alert")
     if isinstance(ba, str):
@@ -103,7 +120,13 @@ def is_option_trade(trade: Trade) -> bool:
             return True
         if _optionish(ba.get("asset_type")):
             return True
+        if _optionish(ba.get("asset_class")):
+            return True
         if str(ba.get("options_path") or "").strip().lower() in {"1", "true", "yes", "on"}:
+            return True
+        if _option_multiplier(ba.get("option_contract_multiplier")):
+            return True
+        if _option_multiplier(ba.get("contract_multiplier")):
             return True
         if ba.get("option_meta"):
             return True

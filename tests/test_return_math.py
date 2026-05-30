@@ -44,6 +44,66 @@ def test_trade_return_pct_snapshot_asset_kind_uses_contract_multiplier() -> None
     assert trade_return_pct(trade) == pytest.approx(16.0)
 
 
+def test_trade_return_pct_snapshot_asset_class_uses_contract_multiplier() -> None:
+    trade = SimpleNamespace(
+        entry_price=1.25,
+        exit_price=1.45,
+        quantity=2.0,
+        pnl=40.0,
+        direction="long",
+        asset_kind=None,
+        tags=None,
+        indicator_snapshot={"asset_class": "options"},
+    )
+
+    assert trade_return_pct(trade) == pytest.approx(16.0)
+
+
+def test_trade_return_pct_snapshot_multiplier_uses_contract_multiplier() -> None:
+    trade = SimpleNamespace(
+        entry_price=1.25,
+        exit_price=1.45,
+        quantity=2.0,
+        pnl=40.0,
+        direction="long",
+        asset_kind=None,
+        tags=None,
+        indicator_snapshot={"option_contract_multiplier": 100.0},
+    )
+
+    assert trade_return_pct(trade) == pytest.approx(16.0)
+
+
+def test_trade_return_pct_nested_snapshot_multiplier_uses_contract_multiplier() -> None:
+    trade = SimpleNamespace(
+        entry_price=1.25,
+        exit_price=1.45,
+        quantity=2.0,
+        pnl=40.0,
+        direction="long",
+        asset_kind=None,
+        tags=None,
+        indicator_snapshot={"breakout_alert": {"contract_multiplier": 100.0}},
+    )
+
+    assert trade_return_pct(trade) == pytest.approx(16.0)
+
+
+def test_trade_return_pct_rejects_boolean_prices_and_pnl() -> None:
+    trade = SimpleNamespace(
+        entry_price=True,
+        exit_price=1.45,
+        quantity=2.0,
+        pnl=True,
+        direction="long",
+        asset_kind=None,
+        tags=None,
+        indicator_snapshot={"asset_type": "stock"},
+    )
+
+    assert trade_return_pct(trade) is None
+
+
 def test_trade_return_pct_option_price_fallback_requires_premium_domain() -> None:
     trade = SimpleNamespace(
         entry_price=1.25,
@@ -129,6 +189,20 @@ def test_paper_trade_return_pct_asset_kind_uses_contract_multiplier() -> None:
     assert paper_trade_return_pct(trade) == pytest.approx(16.0)
 
 
+def test_paper_trade_return_pct_asset_class_uses_contract_multiplier() -> None:
+    trade = SimpleNamespace(
+        entry_price=1.25,
+        exit_price=1.45,
+        quantity=2.0,
+        pnl=40.0,
+        pnl_pct=1600.0,
+        direction="long",
+        signal_json={"asset_class": "options"},
+    )
+
+    assert paper_trade_return_pct(trade) == pytest.approx(16.0)
+
+
 def test_paper_trade_return_pct_nested_asset_kind_uses_contract_multiplier() -> None:
     trade = SimpleNamespace(
         entry_price=1.25,
@@ -141,6 +215,118 @@ def test_paper_trade_return_pct_nested_asset_kind_uses_contract_multiplier() -> 
     )
 
     assert paper_trade_return_pct(trade) == pytest.approx(16.0)
+
+
+def test_paper_trade_return_pct_paper_meta_multiplier_uses_contract_multiplier() -> None:
+    trade = SimpleNamespace(
+        entry_price=1.25,
+        exit_price=1.45,
+        quantity=2.0,
+        pnl=40.0,
+        pnl_pct=1600.0,
+        direction="long",
+        signal_json={"_paper_meta": {"contract_multiplier": 100.0}},
+    )
+
+    assert paper_trade_return_pct(trade) == pytest.approx(16.0)
+
+
+def test_paper_trade_return_pct_paper_meta_options_path_uses_contract_multiplier() -> None:
+    trade = SimpleNamespace(
+        entry_price=1.25,
+        exit_price=1.45,
+        quantity=2.0,
+        pnl=40.0,
+        pnl_pct=1600.0,
+        direction="long",
+        signal_json={"_paper_meta": {"options_path": True}},
+    )
+
+    assert paper_trade_return_pct(trade) == pytest.approx(16.0)
+
+
+def test_paper_trade_return_pct_paper_meta_option_meta_uses_contract_multiplier() -> None:
+    trade = SimpleNamespace(
+        entry_price=1.25,
+        exit_price=1.45,
+        quantity=2.0,
+        pnl=40.0,
+        pnl_pct=1600.0,
+        direction="long",
+        signal_json={"_paper_meta": {"option_meta": {"strike": 500.0}}},
+    )
+
+    assert paper_trade_return_pct(trade) == pytest.approx(16.0)
+
+
+def test_paper_trade_return_pct_paper_meta_asset_class_uses_contract_multiplier() -> None:
+    trade = SimpleNamespace(
+        entry_price=1.25,
+        exit_price=1.45,
+        quantity=2.0,
+        pnl=40.0,
+        pnl_pct=1600.0,
+        direction="long",
+        signal_json={"_paper_meta": {"asset_class": "option"}},
+    )
+
+    assert paper_trade_return_pct(trade) == pytest.approx(16.0)
+
+
+def test_paper_trade_return_pct_paper_meta_option_multiplier_uses_contract_multiplier() -> None:
+    trade = SimpleNamespace(
+        entry_price=1.25,
+        exit_price=1.45,
+        quantity=2.0,
+        pnl=40.0,
+        pnl_pct=1600.0,
+        direction="long",
+        signal_json={"_paper_meta": {"option_contract_multiplier": 100.0}},
+    )
+
+    assert paper_trade_return_pct(trade) == pytest.approx(16.0)
+
+
+def test_paper_trade_return_pct_signal_multiplier_uses_contract_multiplier() -> None:
+    trade = SimpleNamespace(
+        entry_price=1.25,
+        exit_price=1.45,
+        quantity=2.0,
+        pnl=40.0,
+        pnl_pct=1600.0,
+        direction="long",
+        signal_json={"option_contract_multiplier": 100.0},
+    )
+
+    assert paper_trade_return_pct(trade) == pytest.approx(16.0)
+
+
+def test_paper_trade_return_pct_nested_multiplier_uses_contract_multiplier() -> None:
+    trade = SimpleNamespace(
+        entry_price=1.25,
+        exit_price=1.45,
+        quantity=2.0,
+        pnl=40.0,
+        pnl_pct=1600.0,
+        direction="long",
+        signal_json={"breakout_alert": {"contract_multiplier": 100.0}},
+    )
+
+    assert paper_trade_return_pct(trade) == pytest.approx(16.0)
+
+
+def test_paper_trade_return_pct_rejects_boolean_prices_and_pnl() -> None:
+    trade = SimpleNamespace(
+        entry_price=True,
+        exit_price=1.45,
+        quantity=2.0,
+        pnl=True,
+        pnl_pct=None,
+        direction="long",
+        signal_json={"asset_type": "stock"},
+    )
+
+    assert paper_trade_return_pct(trade) is None
 
 
 def test_paper_trade_return_pct_option_rejects_ambiguous_price_fallback() -> None:

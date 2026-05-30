@@ -35,7 +35,21 @@ def test_is_option_trade_honors_top_level_option_markers() -> None:
         SimpleNamespace(
             asset_kind=None,
             tags=None,
+            indicator_snapshot={"asset_class": "options"},
+        )
+    ) is True
+    assert is_option_trade(
+        SimpleNamespace(
+            asset_kind=None,
+            tags=None,
             indicator_snapshot={"options_path": True},
+        )
+    ) is True
+    assert is_option_trade(
+        SimpleNamespace(
+            asset_kind=None,
+            tags=None,
+            indicator_snapshot={"option_contract_multiplier": 100.0},
         )
     ) is True
 
@@ -67,6 +81,30 @@ def test_is_option_trade_honors_nested_asset_kind_snapshot() -> None:
         asset_kind=None,
         tags=None,
         indicator_snapshot='{"breakout_alert":{"asset_kind":"option"}}',
+    )
+
+    assert is_option_trade(trade) is True
+
+
+def test_is_option_trade_honors_nested_asset_class_snapshot() -> None:
+    from app.services.trading.autopilot_scope import is_option_trade
+
+    trade = SimpleNamespace(
+        asset_kind=None,
+        tags=None,
+        indicator_snapshot='{"breakout_alert":{"asset_class":"options"}}',
+    )
+
+    assert is_option_trade(trade) is True
+
+
+def test_is_option_trade_honors_nested_contract_multiplier_snapshot() -> None:
+    from app.services.trading.autopilot_scope import is_option_trade
+
+    trade = SimpleNamespace(
+        asset_kind=None,
+        tags=None,
+        indicator_snapshot='{"breakout_alert":{"contract_multiplier":100.0}}',
     )
 
     assert is_option_trade(trade) is True

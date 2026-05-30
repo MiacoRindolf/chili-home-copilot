@@ -95,6 +95,13 @@ def _is_option_trade_for_execution_event(trade: Any | None) -> bool:
 
     if trade is None:
         return False
+    try:
+        from .autopilot_scope import is_option_trade
+
+        if is_option_trade(trade):
+            return True
+    except Exception:
+        pass
     if _optionish(getattr(trade, "asset_kind", None)):
         return True
     if "option" in str(getattr(trade, "tags", "") or "").strip().lower():

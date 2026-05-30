@@ -172,6 +172,13 @@ def _correlation_bucket(symbol: str | None, asset_class: str) -> str:
 
 
 def _trade_asset_class(trade: Any) -> str:
+    try:
+        from .autopilot_scope import is_option_trade
+
+        if is_option_trade(trade):
+            return "options"
+    except Exception:
+        pass
     explicit = _canonical_asset_class(getattr(trade, "asset_kind", None))
     if explicit:
         return explicit
@@ -180,9 +187,20 @@ def _trade_asset_class(trade: Any) -> str:
         return "crypto"
     snap = getattr(trade, "indicator_snapshot", None)
     if isinstance(snap, dict):
+        explicit = _canonical_asset_class(snap.get("asset_class"))
+        if explicit:
+            return explicit
         explicit = _canonical_asset_class(snap.get("asset_type"))
         if explicit:
             return explicit
+        breakout = snap.get("breakout_alert")
+        if isinstance(breakout, dict):
+            explicit = _canonical_asset_class(breakout.get("asset_class"))
+            if explicit:
+                return explicit
+            explicit = _canonical_asset_class(breakout.get("asset_type"))
+            if explicit:
+                return explicit
     return "stock"
 
 

@@ -60,6 +60,54 @@ def test_normalize_robinhood_option_event_uses_option_family():
     assert event["average_fill_price"] == 1.30
 
 
+def test_normalize_robinhood_sparse_option_asset_class_uses_option_family():
+    trade = SimpleNamespace(
+        ticker="SPY",
+        broker_order_id="opt-rh-asset-class",
+        asset_kind=None,
+        tags=None,
+        indicator_snapshot={"asset_class": "options"},
+        tca_reference_entry_price=1.25,
+    )
+
+    event = normalize_robinhood_order_event(
+        order={
+            "id": "opt-rh-asset-class",
+            "state": "filled",
+            "quantity": "1",
+            "cumulative_quantity": "1",
+            "average_price": "1.30",
+        },
+        trade=trade,
+    )
+
+    assert event["execution_family"] == "robinhood_options"
+
+
+def test_normalize_robinhood_sparse_option_multiplier_uses_option_family():
+    trade = SimpleNamespace(
+        ticker="SPY",
+        broker_order_id="opt-rh-multiplier",
+        asset_kind=None,
+        tags=None,
+        indicator_snapshot={"breakout_alert": {"contract_multiplier": 100.0}},
+        tca_reference_entry_price=1.25,
+    )
+
+    event = normalize_robinhood_order_event(
+        order={
+            "id": "opt-rh-multiplier",
+            "state": "filled",
+            "quantity": "1",
+            "cumulative_quantity": "1",
+            "average_price": "1.30",
+        },
+        trade=trade,
+    )
+
+    assert event["execution_family"] == "robinhood_options"
+
+
 def test_normalize_coinbase_fill_event():
     trade = SimpleNamespace(ticker="BTC-USD", broker_order_id="cb-1", tca_reference_entry_price=50000.0)
     event = normalize_coinbase_order_event(
@@ -240,4 +288,3 @@ def test_aggregate_execution_events_partial_fill_then_cancel(db):
     assert stats["fill_rate"] == 1.0
     assert stats["partial_fill_rate"] == 1.0
     assert stats["provider_truth_mode"] == "broker_event_audited"
-

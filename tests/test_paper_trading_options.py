@@ -554,14 +554,42 @@ def test_option_signal_honors_nested_options_path() -> None:
     from app.services.trading import paper_trading
 
     assert paper_trading._is_option_signal({"asset_kind": "option"})
+    assert paper_trading._is_option_signal({"asset_class": "options"})
     assert paper_trading._is_option_signal(
         {"breakout_alert": {"asset_kind": "options"}},
+    )
+    assert paper_trading._is_option_signal(
+        {"breakout_alert": {"asset_class": "option"}},
     )
     assert paper_trading._is_option_signal(
         {"breakout_alert": {"options_path": True}},
     )
     assert paper_trading._is_option_signal(
         {"breakout_alert": {"options_path": "yes"}},
+    )
+    assert paper_trading._is_option_signal(
+        {"option_contract_multiplier": 100.0},
+    )
+    assert paper_trading._is_option_signal(
+        {"breakout_alert": {"contract_multiplier": 100.0}},
+    )
+    assert paper_trading._is_option_signal(
+        {"_paper_meta": {"asset_type": "options"}},
+    )
+    assert paper_trading._is_option_signal(
+        {"_paper_meta": {"options_path": True}},
+    )
+    assert paper_trading._is_option_signal(
+        {"_paper_meta": {"option_meta": {"strike": 500.0}}},
+    )
+    assert paper_trading._is_option_signal(
+        {"_paper_meta": {"asset_class": "options"}},
+    )
+    assert paper_trading._is_option_signal(
+        {"_paper_meta": {"option_contract_multiplier": 100.0}},
+    )
+    assert paper_trading._is_option_signal(
+        {"_paper_meta": {"contract_multiplier": 100.0}},
     )
     assert not paper_trading._is_option_signal(
         {"options_path": "false", "breakout_alert": {"options_path": "false"}},
@@ -598,6 +626,27 @@ def test_close_paper_trade_asset_kind_signal_uses_contract_multiplier(monkeypatc
         quantity=2.0,
         status="open",
         signal_json={"asset_kind": "option"},
+    )
+
+    paper_trading._close_paper_trade(trade, 1.45, "target")
+
+    assert trade.pnl == pytest.approx(40.0)
+    assert trade.pnl_pct == pytest.approx(16.0)
+
+
+def test_close_paper_trade_paper_meta_multiplier_uses_contract_multiplier(
+    monkeypatch,
+) -> None:
+    from app.services.trading import paper_trading
+
+    monkeypatch.setattr(paper_trading.settings, "backtest_commission", 0.0, raising=False)
+    trade = PaperTrade(
+        ticker="SPY",
+        direction="long",
+        entry_price=1.25,
+        quantity=2.0,
+        status="open",
+        signal_json={"_paper_meta": {"contract_multiplier": 100.0}},
     )
 
     paper_trading._close_paper_trade(trade, 1.45, "target")

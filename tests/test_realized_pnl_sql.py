@@ -15,10 +15,35 @@ def test_live_contract_multiplier_sql_honors_snapshot_asset_kind() -> None:
 
     assert "t.indicator_snapshot" in sql
     assert sql.count("->> 'asset_kind'") == 2
+    assert sql.count("->> 'asset_class'") == 2
+
+
+def test_live_contract_multiplier_sql_honors_snapshot_multiplier() -> None:
+    sql = _compact(trade_contract_multiplier_sql("t"))
+
+    assert "->> 'option_contract_multiplier'" in sql
+    assert "->> 'contract_multiplier'" in sql
+    assert "BTRIM(COALESCE(" in sql
+    assert "[eE][+-]?[0-9]+" in sql
+    assert "ELSE FALSE END" in sql
 
 
 def test_paper_contract_multiplier_sql_honors_signal_asset_kind() -> None:
     sql = _compact(paper_trade_contract_multiplier_sql("pt"))
 
     assert "pt.signal_json" in sql
-    assert sql.count("->> 'asset_kind'") == 2
+    assert sql.count("->> 'asset_kind'") == 3
+    assert sql.count("->> 'asset_class'") == 3
+
+
+def test_paper_contract_multiplier_sql_honors_paper_meta_multiplier() -> None:
+    sql = _compact(paper_trade_contract_multiplier_sql("pt"))
+
+    assert "-> '_paper_meta'" in sql
+    assert "-> '_paper_meta') ? 'option_meta'" in sql
+    assert "-> '_paper_meta') ->> 'options_path'" in sql
+    assert "->> 'option_contract_multiplier'" in sql
+    assert "->> 'contract_multiplier'" in sql
+    assert sql.count("->> 'option_contract_multiplier'") >= 3
+    assert "ELSE FALSE END" in sql
+    assert "::numeric = 100.0" in sql

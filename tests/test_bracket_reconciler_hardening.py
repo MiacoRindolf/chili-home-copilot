@@ -44,6 +44,7 @@ from app.services.trading.bracket_reconciler import (
 )
 from app.services.trading.bracket_reconciliation_service import (
     _load_local_view,
+    _option_trade_predicate_sql,
     _stage_backfill_missing_intents,
     run_missing_stop_watchdog,
     run_reconciliation_sweep,
@@ -141,6 +142,16 @@ def _broker_fn(*views: BrokerView):
 
 
 # ── Option contracts are delegated out of stock bracket reconciliation ────────
+
+
+def test_reconciliation_option_predicate_uses_canonical_contract_identity() -> None:
+    sql = " ".join(_option_trade_predicate_sql("t").split())
+
+    assert "t.indicator_snapshot" in sql
+    assert "->> 'asset_class'" in sql
+    assert "->> 'option_contract_multiplier'" in sql
+    assert "->> 'contract_multiplier'" in sql
+    assert "= 100.0" in sql
 
 
 def test_reconciliation_backfill_skips_option_trades(db):

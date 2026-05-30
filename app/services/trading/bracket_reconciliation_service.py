@@ -39,6 +39,7 @@ from .bracket_reconciler import (
     Tolerances,
     classify_discrepancy,
 )
+from .realized_pnl_sql import trade_contract_multiplier_sql
 
 # Structured log prefixes. Kept local — the shared ``ops_log_prefixes``
 # module landed on ``main`` after this branch diverged; duplicating the
@@ -89,20 +90,7 @@ def _option_trade_predicate_sql(alias: str = "t") -> str:
     monitor, so option trades must never enter this reconciler even when they
     have legacy bracket_intent rows.
     """
-    snap = f"COALESCE({alias}.indicator_snapshot, '{{}}'::jsonb)"
-    breakout = f"({snap}->'breakout_alert')"
-    return f"""
-        (
-            LOWER(COALESCE({alias}.asset_kind, '')) IN ('option', 'options')
-            OR LOWER(COALESCE({alias}.tags, '')) LIKE '%option%'
-            OR COALESCE({snap} ? 'option_meta', FALSE)
-            OR LOWER(COALESCE({snap}->>'asset_type', '')) IN ('option', 'options')
-            OR LOWER(COALESCE({snap}->>'options_path', '')) IN ('1', 'true', 'yes', 'on')
-            OR COALESCE({breakout} ? 'option_meta', FALSE)
-            OR LOWER(COALESCE({breakout}->>'asset_type', '')) IN ('option', 'options')
-            OR LOWER(COALESCE({breakout}->>'options_path', '')) IN ('1', 'true', 'yes', 'on')
-        )
-    """
+    return f"(({trade_contract_multiplier_sql(alias)}) = 100.0)"
 
 
 def _effective_mode(override: str | None = None) -> str:

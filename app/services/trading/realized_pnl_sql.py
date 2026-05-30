@@ -21,6 +21,14 @@ def _json_truthy_sql(json_expr: str, key: str) -> str:
     )
 
 
+def _json_numeric_equals_sql(json_expr: str, key: str, expected: str) -> str:
+    raw = f"BTRIM(COALESCE({json_expr} ->> '{key}', ''))"
+    return (
+        f"CASE WHEN {raw} ~ '^[+-]?([0-9]+(\\.[0-9]*)?|\\.[0-9]+)([eE][+-]?[0-9]+)?$' "
+        f"THEN ({raw})::numeric = {expected} ELSE FALSE END"
+    )
+
+
 def trade_contract_multiplier_sql(alias: str | None = None) -> str:
     """Return a PostgreSQL expression for a live trade contract multiplier."""
     asset_kind = _col(alias, "asset_kind")
@@ -34,13 +42,20 @@ def trade_contract_multiplier_sql(alias: str | None = None) -> str:
             OR {snap} ? 'option_meta'
             OR LOWER(COALESCE({snap} ->> 'asset_kind', '')) IN ('option', 'options')
             OR LOWER(COALESCE({snap} ->> 'asset_type', '')) IN ('option', 'options')
+            OR LOWER(COALESCE({snap} ->> 'asset_class', '')) IN ('option', 'options')
             OR {_json_truthy_sql(snap, 'options_path')}
+            OR {_json_numeric_equals_sql(snap, 'option_contract_multiplier', OPTION_CONTRACT_MULTIPLIER_SQL)}
+            OR {_json_numeric_equals_sql(snap, 'contract_multiplier', OPTION_CONTRACT_MULTIPLIER_SQL)}
             OR {breakout} ? 'option_meta'
             OR LOWER(COALESCE({breakout} ->> 'asset_kind', ''))
                IN ('option', 'options')
             OR LOWER(COALESCE({breakout} ->> 'asset_type', ''))
                IN ('option', 'options')
+            OR LOWER(COALESCE({breakout} ->> 'asset_class', ''))
+               IN ('option', 'options')
             OR {_json_truthy_sql(breakout, 'options_path')}
+            OR {_json_numeric_equals_sql(breakout, 'option_contract_multiplier', OPTION_CONTRACT_MULTIPLIER_SQL)}
+            OR {_json_numeric_equals_sql(breakout, 'contract_multiplier', OPTION_CONTRACT_MULTIPLIER_SQL)}
           THEN {OPTION_CONTRACT_MULTIPLIER_SQL}
           ELSE 1.0
         END
@@ -51,18 +66,33 @@ def paper_trade_contract_multiplier_sql(alias: str | None = None) -> str:
     """Return a PostgreSQL expression for a paper trade contract multiplier."""
     signal = f"COALESCE({_col(alias, 'signal_json')}, '{{}}'::jsonb)"
     breakout = f"({signal} -> 'breakout_alert')"
+    paper_meta = f"({signal} -> '_paper_meta')"
     return f"""
         CASE
           WHEN {signal} ? 'option_meta'
             OR LOWER(COALESCE({signal} ->> 'asset_kind', '')) IN ('option', 'options')
             OR LOWER(COALESCE({signal} ->> 'asset_type', '')) IN ('option', 'options')
+            OR LOWER(COALESCE({signal} ->> 'asset_class', '')) IN ('option', 'options')
             OR {_json_truthy_sql(signal, 'options_path')}
+            OR {_json_numeric_equals_sql(signal, 'option_contract_multiplier', OPTION_CONTRACT_MULTIPLIER_SQL)}
+            OR {_json_numeric_equals_sql(signal, 'contract_multiplier', OPTION_CONTRACT_MULTIPLIER_SQL)}
+            OR {paper_meta} ? 'option_meta'
+            OR {_json_truthy_sql(paper_meta, 'options_path')}
+            OR LOWER(COALESCE({paper_meta} ->> 'asset_kind', '')) IN ('option', 'options')
+            OR LOWER(COALESCE({paper_meta} ->> 'asset_type', '')) IN ('option', 'options')
+            OR LOWER(COALESCE({paper_meta} ->> 'asset_class', '')) IN ('option', 'options')
+            OR {_json_numeric_equals_sql(paper_meta, 'option_contract_multiplier', OPTION_CONTRACT_MULTIPLIER_SQL)}
+            OR {_json_numeric_equals_sql(paper_meta, 'contract_multiplier', OPTION_CONTRACT_MULTIPLIER_SQL)}
             OR {breakout} ? 'option_meta'
             OR LOWER(COALESCE({breakout} ->> 'asset_kind', ''))
                IN ('option', 'options')
             OR LOWER(COALESCE({breakout} ->> 'asset_type', ''))
                IN ('option', 'options')
+            OR LOWER(COALESCE({breakout} ->> 'asset_class', ''))
+               IN ('option', 'options')
             OR {_json_truthy_sql(breakout, 'options_path')}
+            OR {_json_numeric_equals_sql(breakout, 'option_contract_multiplier', OPTION_CONTRACT_MULTIPLIER_SQL)}
+            OR {_json_numeric_equals_sql(breakout, 'contract_multiplier', OPTION_CONTRACT_MULTIPLIER_SQL)}
           THEN {OPTION_CONTRACT_MULTIPLIER_SQL}
           ELSE 1.0
         END

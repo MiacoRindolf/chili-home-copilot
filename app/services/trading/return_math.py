@@ -26,7 +26,7 @@ _OPTION_PRICE_FALLBACK_MAX_RATIO = 50.0
 
 def _float_or_none(value: Any) -> float | None:
     try:
-        if value is None:
+        if value is None or isinstance(value, bool):
             return None
         out = float(value)
     except (TypeError, ValueError):
@@ -64,6 +64,14 @@ def _nested_mapping(source: Mapping[str, Any] | None, key: str) -> Mapping[str, 
 
 def _price_domain_is_option_premium(value: Any) -> bool:
     return str(value or "").strip().lower() == PRICE_DOMAIN_OPTION_PREMIUM
+
+
+def _contract_multiplier_is_option(value: Any) -> bool:
+    multiplier = _float_or_none(value)
+    return (
+        multiplier is not None
+        and abs(multiplier - OPTION_CONTRACT_MULTIPLIER) < 1e-9
+    )
 
 
 def _option_price_domain_confirmed(source: Any, price_field: str) -> bool:
@@ -171,6 +179,8 @@ def trade_contract_multiplier(trade: Any) -> float:
             return OPTION_CONTRACT_MULTIPLIER
     except Exception:
         pass
+    if _signal_json_is_option(getattr(trade, "indicator_snapshot", None)):
+        return OPTION_CONTRACT_MULTIPLIER
     return 1.0
 
 
@@ -184,8 +194,39 @@ def _signal_json_is_option(signal: Any) -> bool:
         return True
     if str(signal.get("asset_type") or "").strip().lower() in {"option", "options"}:
         return True
+    if str(signal.get("asset_class") or "").strip().lower() in {"option", "options"}:
+        return True
     if _truthy(signal.get("options_path")):
         return True
+    if _contract_multiplier_is_option(signal.get("option_contract_multiplier")):
+        return True
+    if _contract_multiplier_is_option(signal.get("contract_multiplier")):
+        return True
+    paper_meta = _nested_mapping(signal, "_paper_meta")
+    if isinstance(paper_meta, Mapping):
+        if paper_meta.get("option_meta"):
+            return True
+        if _truthy(paper_meta.get("options_path")):
+            return True
+        if str(paper_meta.get("asset_kind") or "").strip().lower() in {
+            "option",
+            "options",
+        }:
+            return True
+        if str(paper_meta.get("asset_type") or "").strip().lower() in {
+            "option",
+            "options",
+        }:
+            return True
+        if str(paper_meta.get("asset_class") or "").strip().lower() in {
+            "option",
+            "options",
+        }:
+            return True
+        if _contract_multiplier_is_option(paper_meta.get("option_contract_multiplier")):
+            return True
+        if _contract_multiplier_is_option(paper_meta.get("contract_multiplier")):
+            return True
     breakout = _as_mapping(signal.get("breakout_alert"))
     if isinstance(breakout, Mapping):
         if breakout.get("option_meta"):
@@ -194,7 +235,16 @@ def _signal_json_is_option(signal: Any) -> bool:
             return True
         if str(breakout.get("asset_type") or "").strip().lower() in {"option", "options"}:
             return True
+        if str(breakout.get("asset_class") or "").strip().lower() in {
+            "option",
+            "options",
+        }:
+            return True
         if _truthy(breakout.get("options_path")):
+            return True
+        if _contract_multiplier_is_option(breakout.get("option_contract_multiplier")):
+            return True
+        if _contract_multiplier_is_option(breakout.get("contract_multiplier")):
             return True
     return False
 
