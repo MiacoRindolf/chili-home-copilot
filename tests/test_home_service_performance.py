@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from app.services.home_service import get_insights
+from datetime import date
+from types import SimpleNamespace
+
+from app.services.home_service import get_calendar_events, get_insights
 
 
 class _InsightFakeQuery:
@@ -50,6 +53,36 @@ class _InsightFakeSession:
         return query
 
 
+class _CalendarFakeQuery:
+    def __init__(self, kind: str, rows: list[object]) -> None:
+        self.kind = kind
+        self.rows = rows
+        self.filter_calls = 0
+        self.all_calls = 0
+
+    def filter(self, *args: object) -> "_CalendarFakeQuery":
+        self.filter_calls += 1
+        return self
+
+    def all(self) -> list[object]:
+        self.all_calls += 1
+        return self.rows
+
+
+class _CalendarFakeSession:
+    def __init__(self, *, chores: list[object], birthdays: list[object]) -> None:
+        self.chores = chores
+        self.birthdays = birthdays
+        self.queries: list[_CalendarFakeQuery] = []
+
+    def query(self, *args: object) -> _CalendarFakeQuery:
+        rows = self.chores if not self.queries else self.birthdays
+        kind = "chores" if not self.queries else "birthdays"
+        query = _CalendarFakeQuery(kind, rows)
+        self.queries.append(query)
+        return query
+
+
 def test_get_insights_batches_chore_status_counts() -> None:
     db = _InsightFakeSession((5, 2, 1))
 
@@ -71,3 +104,25 @@ def test_get_insights_coerces_empty_chore_sums_to_zero() -> None:
 
     assert [row["text"] for row in insights] == ["All chores are done! Great job!"]
     assert len(db.queries) == 2
+
+
+def test_get_calendar_events_filters_birthdays_by_month() -> None:
+    db = _CalendarFakeSession(
+        chores=[],
+        birthdays=[SimpleNamespace(id=1, name="Ada", date=date(1990, 5, 12))],
+    )
+
+    result = get_calendar_events(db, 2026, 5)  # type: ignore[arg-type]
+
+    assert result == [
+        {
+            "date": "2026-05-12",
+            "type": "birthday",
+            "title": "Ada's birthday",
+        }
+    ]
+    assert len(db.queries) == 2
+    assert db.queries[0].kind == "chores"
+    assert db.queries[1].kind == "birthdays"
+    assert db.queries[1].filter_calls == 1
+    assert db.queries[1].all_calls == 1

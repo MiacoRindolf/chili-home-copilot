@@ -5,7 +5,7 @@ from typing import Optional
 
 import requests
 from sqlalchemy.orm import Session
-from sqlalchemy import case, func, desc
+from sqlalchemy import case, desc, extract, func
 
 from ..config import settings
 from ..models import (
@@ -237,7 +237,7 @@ def get_calendar_events(db: Session, year: int, month: int) -> list[dict]:
             "priority": c.priority or "medium",
         })
 
-    birthdays = db.query(Birthday).all()
+    birthdays = db.query(Birthday).filter(extract("month", Birthday.date) == month).all()
     for b in birthdays:
         bday_this = b.date.replace(year=year)
         if start <= bday_this <= end:
