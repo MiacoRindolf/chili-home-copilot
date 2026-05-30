@@ -55,7 +55,12 @@ def _make_trade(
     return t
 
 
-def _fake_normalized(status: str, order_id: str = "abc") -> NormalizedOrder:
+def _fake_normalized(
+    status: str,
+    order_id: str = "abc",
+    *,
+    filled_size: float = 0.0,
+) -> NormalizedOrder:
     return NormalizedOrder(
         order_id=order_id,
         client_order_id=None,
@@ -63,7 +68,7 @@ def _fake_normalized(status: str, order_id: str = "abc") -> NormalizedOrder:
         side="buy",
         status=status,
         order_type="market",
-        filled_size=0.0,
+        filled_size=filled_size,
         average_filled_price=None,
         created_time=None,
         raw={"state": status},
@@ -679,6 +684,92 @@ def test_coinbase_maker_first_falls_back_to_takerable_limit_when_edge_survives(d
     assert entry["active_order_type"] == "limit_takerable"
     assert entry["maker_first_fallback_submitted"] is True
     assert entry["maker_first_original_order_id"] == "cb-maker-old"
+
+
+def test_coinbase_maker_first_partial_fill_reprices_remaining_after_timeout(db, monkeypatch):
+    u = models.User(name="stuck_wd_cb_partial_reprice")
+    db.add(u)
+    db.flush()
+
+    t = _make_trade(
+        db,
+        user_id=u.id,
+        broker_order_id="cb-maker-partial",
+        broker_status="open",
+        entry_date=datetime.utcnow() - timedelta(seconds=180),
+        broker_source="coinbase",
+        status="working",
+        quantity=2.0,
+        remaining_quantity=2.0,
+        indicator_snapshot={
+            "entry_execution": {
+                "active_order_type": "limit_post_only",
+                "coinbase_maker_only": True,
+                "entry_edge_expected_net_pct": 5.0,
+                "cost_gate_fee_bps": 120,
+            }
+        },
+    )
+    db.add(
+        AutoTraderRun(
+            user_id=u.id,
+            ticker="ZZTEST",
+            decision="placed",
+            reason="submitted",
+            trade_id=t.id,
+            rule_snapshot={"entry_edge_expected_net_pct": 5.0, "cost_gate_fee_bps": 120},
+            management_scope="auto_trader_v1",
+        )
+    )
+    db.commit()
+
+    cfg = SimpleNamespace(
+        chili_stuck_order_watchdog_enabled=True,
+        chili_stuck_order_market_timeout_seconds=300,
+        chili_stuck_order_limit_timeout_seconds=1800,
+        chili_coinbase_maker_first_fallback_enabled=True,
+        chili_coinbase_maker_first_fallback_after_seconds=120,
+        chili_coinbase_maker_first_min_net_after_cost_pct=0.0,
+        chili_coinbase_maker_first_taker_price_buffer_bps=10.0,
+        chili_coinbase_taker_fee_bps_round_trip=120,
+        chili_min_edge_safety_buffer_bps=30,
+    )
+    monkeypatch.setattr(wd, "settings", cfg)
+
+    fake_adapter = MagicMock()
+    fake_adapter.get_order.return_value = (
+        _fake_normalized("open", order_id="cb-maker-partial", filled_size=1.0),
+        FreshnessMeta(retrieved_at_utc=datetime.utcnow(), max_age_seconds=15.0),
+    )
+    fake_adapter.get_best_bid_ask.return_value = (
+        NormalizedTicker(product_id="ZZTEST", bid=100.0, ask=100.1, spread_bps=10.0),
+        FreshnessMeta(retrieved_at_utc=datetime.utcnow(), max_age_seconds=15.0),
+    )
+    fake_adapter.cancel_order.return_value = {"ok": True}
+    fake_adapter.place_limit_order_gtc.return_value = {
+        "ok": True,
+        "order_id": "cb-partial-fallback",
+        "client_order_id": "fb-partial",
+        "base_size": "1.0",
+        "limit_price": "100.2001",
+    }
+    monkeypatch.setattr(wd, "_get_adapter", lambda _src: fake_adapter)
+
+    out = wd.tick_stuck_order_watchdog(db)
+
+    assert out["outcomes"].get("maker_first_fallback_submitted") == 1
+    fake_adapter.cancel_order.assert_called_once_with("cb-maker-partial")
+    assert float(fake_adapter.place_limit_order_gtc.call_args.kwargs["base_size"]) == 1.0
+
+    db.refresh(t)
+    assert t.status == "working"
+    assert t.filled_quantity == 1.0
+    assert t.remaining_quantity == 1.0
+    assert t.broker_order_id == "cb-partial-fallback"
+    entry = t.indicator_snapshot["entry_execution"]
+    assert entry["maker_first_partial_fill_size"] == 1.0
+    assert entry["maker_first_remaining_after_partial"] == 1.0
+    assert entry["maker_first_fallback_submitted"] is True
 
 
 def test_coinbase_maker_first_cancels_when_fallback_edge_is_too_thin(db, monkeypatch):
