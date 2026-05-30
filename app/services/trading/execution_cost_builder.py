@@ -235,7 +235,7 @@ def compute_rolling_estimate(
 
     return _estimate_from_rows(
         ticker=ticker,
-        side=side_norm,
+        side_norm=side_norm,
         window_days=int(window_days),
         rows=rows,
         adv_lookup_fn=adv_lookup_fn,
