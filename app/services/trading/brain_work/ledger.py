@@ -30,6 +30,10 @@ _DEAD_RECOVERY_DEFAULT_LIMIT = 8
 _DEAD_RECOVERY_DEFAULT_MAX_PER_EVENT = 3
 _DEAD_RECOVERY_DEFAULT_DELAY_SECONDS = 10
 _DEAD_DEDUPE_SUPPRESSED = object()
+_DEAD_RECOVERY_CAP_RESET_PAYLOAD_KEY = "transient_dead_recovery_cap_reset_count"
+_DEAD_RECOVERY_TOTAL_PAYLOAD_KEY = "transient_dead_recovery_total_count"
+_DEAD_RECOVERY_DEFAULT_CAP_RESET_DELAY_SECONDS = 3600
+_DEAD_RECOVERY_DEFAULT_MAX_CAP_RESETS = 2
 
 
 def brain_work_ledger_enabled() -> bool:
@@ -698,6 +702,60 @@ def _dead_recovery_delay_seconds(value: int | None = None) -> int:
     )
 
 
+def _dead_recovery_cap_reset_delay_seconds(value: int | None = None) -> int:
+    return int(
+        value
+        if value is not None
+        else getattr(
+            settings,
+            "brain_work_dead_letter_recovery_cap_reset_delay_seconds",
+            _DEAD_RECOVERY_DEFAULT_CAP_RESET_DELAY_SECONDS,
+        )
+    )
+
+
+def _dead_recovery_max_cap_resets(value: int | None = None) -> int:
+    return int(
+        value
+        if value is not None
+        else getattr(
+            settings,
+            "brain_work_dead_letter_recovery_max_cap_resets",
+            _DEAD_RECOVERY_DEFAULT_MAX_CAP_RESETS,
+        )
+    )
+
+
+def _dead_recovery_cap_reset_updates(
+    row: BrainWorkEvent,
+    *,
+    now: datetime,
+    payload: dict[str, Any],
+    recovery_count: int,
+    delay_seconds: int,
+    max_resets: int,
+) -> dict[str, Any] | None:
+    if max_resets <= 0:
+        return None
+    reset_count = _payload_int(payload, _DEAD_RECOVERY_CAP_RESET_PAYLOAD_KEY)
+    if reset_count >= max_resets:
+        return None
+    last_dead_at = row.updated_at or row.processed_at or row.created_at
+    if last_dead_at is None:
+        return None
+    if last_dead_at.tzinfo is not None:
+        last_dead_at = last_dead_at.replace(tzinfo=None)
+    if (now - last_dead_at).total_seconds() < max(0, delay_seconds):
+        return None
+    total_count = _payload_int(payload, _DEAD_RECOVERY_TOTAL_PAYLOAD_KEY)
+    return {
+        _DEAD_RECOVERY_CAP_RESET_PAYLOAD_KEY: reset_count + 1,
+        _DEAD_RECOVERY_TOTAL_PAYLOAD_KEY: total_count + max(0, recovery_count),
+        "transient_dead_recovery_cap_reset_at": now.isoformat(),
+        "transient_dead_recovery_prior_count": recovery_count,
+    }
+
+
 def _recover_retryable_dead_row(
     row: BrainWorkEvent,
     *,
@@ -769,15 +827,39 @@ def _reuse_retryable_dead_dedupe(
 
     row_payload = dict(row.payload or {}) if isinstance(row.payload, dict) else {}
     recovery_count = _payload_int(row_payload, _DEAD_RECOVERY_PAYLOAD_KEY)
+    max_recoveries = _dead_recovery_max_per_event()
+    payload_updates = dict(payload)
     now = datetime.utcnow()
+    if recovery_count >= max(0, max_recoveries):
+        reset_updates = _dead_recovery_cap_reset_updates(
+            row,
+            now=now,
+            payload=row_payload,
+            recovery_count=recovery_count,
+            delay_seconds=_dead_recovery_cap_reset_delay_seconds(),
+            max_resets=_dead_recovery_max_cap_resets(),
+        )
+        if reset_updates is None:
+            logger.info(
+                "%s suppressed duplicate retryable-dead dedupe type=%s id=%s dedupe=%s "
+                "recovery_count=%s",
+                LOG_PREFIX,
+                event_type,
+                row.id,
+                dedupe_key,
+                recovery_count,
+            )
+            return _DEAD_DEDUPE_SUPPRESSED
+        recovery_count = 0
+        payload_updates.update(reset_updates)
     recovered = _recover_retryable_dead_row(
         row,
         now=now,
         marker=marker,
         recovery_count=recovery_count,
-        max_recoveries=_dead_recovery_max_per_event(),
+        max_recoveries=max_recoveries,
         delay_seconds=_dead_recovery_delay_seconds(),
-        payload_updates=payload,
+        payload_updates=payload_updates,
         lease_scope=lease_scope,
         max_attempts=max_attempts,
     )
@@ -793,15 +875,6 @@ def _reuse_retryable_dead_dedupe(
         db.flush()
         return int(row.id)
 
-    logger.info(
-        "%s suppressed duplicate retryable-dead dedupe type=%s id=%s dedupe=%s "
-        "recovery_count=%s",
-        LOG_PREFIX,
-        event_type,
-        row.id,
-        dedupe_key,
-        recovery_count,
-    )
     return _DEAD_DEDUPE_SUPPRESSED
 
 
@@ -877,6 +950,7 @@ def recover_retryable_dead_work(
     recovered_by_marker: dict[str, int] = {}
     skipped_non_retryable = 0
     skipped_max_recoveries = 0
+    recovered_after_cap_reset = 0
     skipped_duplicate_dedupe = 0
     open_dedupe_keys = {
         (str(event_type), str(dedupe_key))
@@ -912,27 +986,36 @@ def recover_retryable_dead_work(
             continue
         payload = dict(row.payload or {}) if isinstance(row.payload, dict) else {}
         recovery_count = _payload_int(payload, _DEAD_RECOVERY_PAYLOAD_KEY)
+        payload_updates: dict[str, Any] | None = None
         if recovery_count >= max(0, max_recoveries):
-            skipped_max_recoveries += 1
-            continue
+            payload_updates = _dead_recovery_cap_reset_updates(
+                row,
+                now=now,
+                payload=payload,
+                recovery_count=recovery_count,
+                delay_seconds=_dead_recovery_cap_reset_delay_seconds(),
+                max_resets=_dead_recovery_max_cap_resets(),
+            )
+            if payload_updates is None:
+                skipped_max_recoveries += 1
+                continue
+            recovery_count = 0
+            recovered_after_cap_reset += 1
 
-        max_attempts = max(1, int(row.max_attempts or 1))
-        payload[_DEAD_RECOVERY_PAYLOAD_KEY] = recovery_count + 1
-        payload["transient_dead_recovered_at"] = now.isoformat()
-        payload["transient_dead_recovery_marker"] = marker
-        row.payload = payload
-        row.status = "retry_wait"
-        row.attempts = min(int(row.attempts or 0), max_attempts - 1)
-        row.max_attempts = max_attempts
-        row.lease_holder = None
-        row.lease_expires_at = None
-        row.processed_at = None
-        row.next_run_at = now + timedelta(seconds=max(0, delay))
-        row.updated_at = now
-        recovered_ids.append(int(row.id))
-        if dedupe_key is not None:
-            recovered_dedupe_keys.add(dedupe_key)
-        recovered_by_marker[marker] = recovered_by_marker.get(marker, 0) + 1
+        recovered = _recover_retryable_dead_row(
+            row,
+            now=now,
+            marker=marker,
+            recovery_count=recovery_count,
+            max_recoveries=max_recoveries,
+            delay_seconds=delay,
+            payload_updates=payload_updates,
+        )
+        if recovered:
+            recovered_ids.append(int(row.id))
+            if dedupe_key is not None:
+                recovered_dedupe_keys.add(dedupe_key)
+            recovered_by_marker[marker] = recovered_by_marker.get(marker, 0) + 1
 
     db.flush()
     return {
@@ -944,6 +1027,7 @@ def recover_retryable_dead_work(
         "recovered_by_marker": recovered_by_marker,
         "skipped_non_retryable": skipped_non_retryable,
         "skipped_max_recoveries": skipped_max_recoveries,
+        "recovered_after_cap_reset": recovered_after_cap_reset,
         "skipped_duplicate_dedupe": skipped_duplicate_dedupe,
     }
 

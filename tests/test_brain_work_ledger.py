@@ -358,6 +358,59 @@ def test_retryable_dead_work_default_recovers_multiple_infra_failures(db) -> Non
     assert recovered.payload["transient_dead_recovery_count"] == 2
 
 
+def test_retryable_dead_work_cap_resets_after_cooldown(db, monkeypatch) -> None:
+    monkeypatch.setattr(
+        ledger_mod,
+        "_dead_recovery_cap_reset_delay_seconds",
+        lambda value=None: 60,
+    )
+    monkeypatch.setattr(
+        ledger_mod,
+        "_dead_recovery_max_cap_resets",
+        lambda value=None: 1,
+    )
+    old_at = datetime.utcnow() - timedelta(minutes=5)
+    row = BrainWorkEvent(
+        domain="trading",
+        event_type="backtest_requested",
+        event_kind="work",
+        dedupe_key="bt_req:retryable-dead-cap-reset",
+        payload={
+            "scan_pattern_id": 1016,
+            "source": "recert_rescue_refresh",
+            "transient_dead_recovery_count": 1,
+        },
+        lease_scope="backtest",
+        status="dead",
+        attempts=1,
+        max_attempts=1,
+        last_error="Can't reconnect until invalid transaction is rolled back.",
+        processed_at=old_at,
+        updated_at=old_at,
+    )
+    db.add(row)
+    db.commit()
+
+    result = recover_retryable_dead_work(
+        db,
+        event_types=("backtest_requested",),
+        limit=4,
+        max_recoveries_per_event=1,
+        delay_seconds=0,
+    )
+    db.commit()
+
+    assert result["recovered"] == 1
+    assert result["recovered_after_cap_reset"] == 1
+    recovered = db.get(BrainWorkEvent, int(row.id))
+    assert recovered.status == "retry_wait"
+    assert recovered.attempts == 0
+    assert recovered.payload["transient_dead_recovery_count"] == 1
+    assert recovered.payload["transient_dead_recovery_cap_reset_count"] == 1
+    assert recovered.payload["transient_dead_recovery_total_count"] == 1
+    assert recovered.payload["transient_dead_recovery_prior_count"] == 1
+
+
 def test_retryable_dead_work_recovery_skips_duplicate_dedupe(db) -> None:
     dedupe_key = "bt_req:retryable-dead-duplicate-dedupe"
     ids: list[int] = []
