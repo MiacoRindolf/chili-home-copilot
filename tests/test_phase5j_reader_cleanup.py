@@ -39,3 +39,15 @@ def test_phase5j_slice2_analytics_use_management_envelope_reader() -> None:
         assert "trading_management_envelopes" in source
         assert "FROM trading_trades" not in source
         assert "JOIN trading_trades" not in source
+
+
+def test_phase5j_slice3_learning_readers_use_management_envelopes() -> None:
+    for relative_path in (
+        "app/services/trading/dynamic_priors.py",
+        "app/services/trading/ticker_scope_autotune.py",
+        "app/services/trading/pattern_stats_recompute.py",
+    ):
+        source = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+        assert "trading_management_envelopes" in source
+        assert "FROM trading_trades" not in source
+        assert "JOIN trading_trades" not in source

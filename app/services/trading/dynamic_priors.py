@@ -91,7 +91,7 @@ def population_win_rate(db: Session, *, lookback_days: int = 90) -> float | None
                 SELECT
                   COUNT(*) AS n,
                   AVG(CASE WHEN pnl > 0 THEN 1.0 ELSE 0.0 END) AS wr
-                FROM trading_trades
+                FROM trading_management_envelopes
                 WHERE status = 'closed'
                   AND pnl IS NOT NULL
                   AND entry_price IS NOT NULL
@@ -127,7 +127,7 @@ def population_avg_return_pct(db: Session, *, lookback_days: int = 90) -> float 
                 SELECT
                   COUNT(*) AS n,
                   AVG(({trade_return_fraction_sql()} * 100.0)) AS ar
-                FROM trading_trades
+                FROM trading_management_envelopes
                 WHERE status = 'closed'
                   AND pnl IS NOT NULL
                   AND entry_price IS NOT NULL

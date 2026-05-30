@@ -50,7 +50,7 @@ def recompute_scan_pattern_stats(engine: Engine) -> None:
         SET trade_count = sub.cnt
         FROM (
             SELECT scan_pattern_id, COUNT(*) AS cnt
-            FROM trading_trades
+            FROM trading_management_envelopes
             WHERE scan_pattern_id IS NOT NULL
             GROUP BY scan_pattern_id
         ) sub
@@ -63,7 +63,7 @@ def recompute_scan_pattern_stats(engine: Engine) -> None:
         UPDATE scan_patterns
         SET trade_count = 0
         WHERE id NOT IN (
-            SELECT DISTINCT scan_pattern_id FROM trading_trades
+            SELECT DISTINCT scan_pattern_id FROM trading_management_envelopes
             WHERE scan_pattern_id IS NOT NULL
         ) AND trade_count > 0
         """
@@ -77,7 +77,7 @@ def recompute_scan_pattern_stats(engine: Engine) -> None:
                    CASE WHEN COUNT(*) > 0
                         THEN COUNT(*) FILTER (WHERE pnl > 0)::float / COUNT(*)
                         ELSE 0 END AS wr
-            FROM trading_trades
+            FROM trading_management_envelopes
             WHERE scan_pattern_id IS NOT NULL
               AND status = 'closed'
             GROUP BY scan_pattern_id
@@ -94,7 +94,10 @@ def recompute_scan_pattern_stats(engine: Engine) -> None:
         for sql in stmts:
             if "trading_backtests" in sql and "trading_backtests" not in tables:
                 continue
-            if "trading_trades" in sql and "trading_trades" not in tables:
+            if (
+                "trading_management_envelopes" in sql
+                and "trading_management_envelopes" not in tables
+            ):
                 continue
             conn.execute(text(sql))
     logger.info("[pattern_stats_recompute] scan_patterns aggregates updated")

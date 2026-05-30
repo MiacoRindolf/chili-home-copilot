@@ -1,4 +1,4 @@
-# NEXT_TASK: f-position-identity-phase-5j-selective-reader-cleanup-slice-3
+# NEXT_TASK: f-position-identity-phase-5j-selective-reader-cleanup-slice-4
 
 STATUS: PENDING
 
@@ -16,27 +16,21 @@ Keep the compatibility view and the Python `Trade` ORM class in place.
 - Physical base table: `trading_management_envelopes` (`relkind='r'`)
 - Legacy compatibility view: `trading_trades` (`relkind='v'`)
 - Phase 5I closeout: `COMPLETE_POSITIVE`
-- Phase 5J slice 1 shipped:
-  - `app/routers/brain.py`
-  - `app/services/trading/management_envelopes.py`
-  - `scripts/d-cb-phase6-soak-probe.py`
-  - `scripts/d-maker-only-tca-probe.py`
-  - `scripts/d-imminent-silence-audit.py`
-- Phase 5J slice 2 shipped:
-  - `app/services/trading/decision_packet_coverage.py`
-  - `app/services/trading/divergence_service.py`
+- Phase 5J slices shipped:
+  - slice 1: brain KPI, management-envelope helper, Coinbase/maker/imminent probes
+  - slice 2: decision-packet coverage and divergence analytics
+  - slice 3: dynamic priors, ticker-scope autotune, pattern-stats recompute
 - Latest post-slice verification:
   - Phase 5I probe: `COMPLETE_POSITIVE`
   - schema-specific log hits: 0
 
-## Candidate Slice 3 Targets
+## Candidate Slice 4 Targets
 
 Prefer read-only learning/reporting code:
 
-- `app/services/trading/dynamic_priors.py`
-- `app/services/trading/ticker_scope_autotune.py`
-- `app/services/trading/pattern_stats_recompute.py` only if the update/write
-  behavior is intentionally limited to pattern aggregate maintenance
+- `app/services/trading/realized_stats_sync.py`
+- `app/services/trading/net_edge_ranker.py`
+- `app/services/trading/hrp_sizing.py`
 - read-only scripts without existing unrelated local edits
 
 Defer live writer paths:
@@ -78,6 +72,6 @@ Defer live writer paths:
 
 ## References
 
+- `docs/STRATEGY/CC_REPORTS/2026-05-30_f-position-identity-phase-5j-selective-reader-cleanup-slice-3.md`
 - `docs/STRATEGY/CC_REPORTS/2026-05-30_f-position-identity-phase-5j-selective-reader-cleanup-slice-2.md`
-- `docs/STRATEGY/CC_REPORTS/2026-05-30_f-position-identity-phase-5j-selective-reader-cleanup-slice-1.md`
 - `docs/STRATEGY/CC_REPORTS/2026-05-30_f-position-identity-phase-5i-post-rename-soak-closeout.md`

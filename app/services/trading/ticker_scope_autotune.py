@@ -80,7 +80,7 @@ def _query_per_ticker_stats(
                sum(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
                sum(coalesce(pnl, 0)) AS total_pnl,
                avg(coalesce(pnl, 0)) AS avg_pnl
-        FROM trading_trades
+        FROM trading_management_envelopes
         WHERE status = 'closed'
           AND scan_pattern_id IS NOT NULL
           AND ticker IS NOT NULL
