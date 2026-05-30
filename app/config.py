@@ -3641,6 +3641,13 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_PHASE5K_PATTERN_QUALITY_USE_ENVELOPES"),
     )
+    # Phase 5K-F: default-OFF reader cutover for portfolio-risk drawdown
+    # and closed-PnL evidence. Keep typed so runtime evidence can name the
+    # exact active setting without hidden direct environment reads.
+    chili_phase5k_portfolio_risk_use_envelopes: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_PHASE5K_PORTFOLIO_RISK_USE_ENVELOPES"),
+    )
     # f-promotion-pipeline-rebalance Phase 1 (2026-05-09): sample-size
     # floor for the thin-evidence demote sweep. The original Phase D
     # threshold (10 trades) was wrong-sense: a pattern with 8 realized

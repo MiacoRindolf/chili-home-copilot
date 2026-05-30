@@ -9,7 +9,6 @@ Enforces hard caps before any new position is opened:
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -31,9 +30,20 @@ def _truthy_flag(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _portfolio_risk_source_relation(use_envelopes: bool | None = None) -> str:
+def _portfolio_risk_source_relation(
+    use_envelopes: bool | None = None,
+    *,
+    settings_: Any | None = None,
+) -> str:
     if use_envelopes is None:
-        use_envelopes = _truthy_flag(os.environ.get(PHASE5K_PORTFOLIO_RISK_ENV))
+        if settings_ is None:
+            try:
+                from ...config import settings as settings_
+            except Exception:
+                settings_ = None
+        use_envelopes = _truthy_flag(
+            getattr(settings_, "chili_phase5k_portfolio_risk_use_envelopes", False)
+        )
     if use_envelopes:
         return _PORTFOLIO_RISK_ENVELOPE_RELATION
     return _PORTFOLIO_RISK_COMPAT_RELATION
@@ -1143,7 +1153,10 @@ def _monthly_dd_threshold(
     """
     from sqlalchemy import text
 
-    relation = _portfolio_risk_source_relation(use_envelopes)
+    relation = _portfolio_risk_source_relation(
+        use_envelopes,
+        settings_=settings_obj,
+    )
     rows = db.execute(
         text(
             f"""
@@ -1185,6 +1198,7 @@ def _monthly_dd_threshold(
 def _monthly_attributed_pnl(
     db: Session,
     user_id: int | None,
+    settings_obj: Any | None = None,
     *,
     use_envelopes: bool | None = None,
 ) -> float:
@@ -1208,7 +1222,10 @@ def _monthly_attributed_pnl(
     """
     from sqlalchemy import text
 
-    relation = _portfolio_risk_source_relation(use_envelopes)
+    relation = _portfolio_risk_source_relation(
+        use_envelopes,
+        settings_=settings_obj,
+    )
     result = db.execute(
         text(
             f"""
@@ -1262,7 +1279,10 @@ def _portfolio_dd_threshold(
     """
     from sqlalchemy import text
 
-    relation = _portfolio_risk_source_relation(use_envelopes)
+    relation = _portfolio_risk_source_relation(
+        use_envelopes,
+        settings_=settings_obj,
+    )
     rows = db.execute(
         text(
             f"""
@@ -1304,6 +1324,7 @@ def _portfolio_dd_threshold(
 def _monthly_total_pnl(
     db: Session,
     user_id: int | None,
+    settings_obj: Any | None = None,
     *,
     use_envelopes: bool | None = None,
 ) -> float:
@@ -1323,7 +1344,10 @@ def _monthly_total_pnl(
     """
     from sqlalchemy import text
 
-    relation = _portfolio_risk_source_relation(use_envelopes)
+    relation = _portfolio_risk_source_relation(
+        use_envelopes,
+        settings_=settings_obj,
+    )
     result = db.execute(
         text(
             f"""
@@ -1433,7 +1457,7 @@ def check_portfolio_drawdown_breaker(
         return False, None
 
     try:
-        monthly_pnl = _monthly_total_pnl(db, user_id)
+        monthly_pnl = _monthly_total_pnl(db, user_id, settings_obj=_s)
     except Exception:
         logger.warning(
             "[portfolio_breaker] _monthly_total_pnl failed; skipping check",
@@ -1649,7 +1673,7 @@ def check_drawdown_breaker(
             # bleed pushes the numerator down without widening the threshold's
             # variance estimate -- see ARCHITECT-FLAG in
             # 2026-05-16_phase3-monthly-dd-breaker-arming-watch.md.
-            monthly_pnl = _monthly_attributed_pnl(db, user_id)
+            monthly_pnl = _monthly_attributed_pnl(db, user_id, settings_obj=_s_dd)
             if float(monthly_pnl) < float(threshold):
                 _breaker_tripped = True
                 k_val = float(getattr(
