@@ -1,57 +1,71 @@
-# NEXT_TASK: f-position-identity-phase-5k-b-coinbase-cap-reader-flag
+# NEXT_TASK: f-position-identity-phase-5k-c-coinbase-cap-flag-soak
 
 STATUS: PENDING
 
 ## Goal
 
-Cut over exactly one low-risk live reader behind a default-OFF feature flag:
-the Coinbase venue-cap open-position aggregate in
-`app/services/trading/cost_aware_gate.py`.
+Flip `CHILI_PHASE5K_COINBASE_CAP_USE_ENVELOPES=true` for the autotrader worker
+and run a short soak of the Coinbase venue-cap reader.
 
-This is the first Phase 5K live-path cutover because Phase 5K-A proved the
-`trading_trades` compatibility view and `trading_management_envelopes` base
-table produce identical Coinbase-cap aggregate inputs.
+This is behavior-neutral if Phase 5K-A parity remains green, but it is still a
+live gate. Treat as a separate flag-flip soak.
 
-## Scope
+## Preconditions
 
-1. Add a setting, default `False`, for example:
+- Phase 5K-A parity probe emits `COMPLETE_POSITIVE`.
+- Phase 5I post-rename probe emits `COMPLETE_POSITIVE`.
+- Phase 5K-B code is deployed.
 
-   ```text
-   CHILI_PHASE5K_COINBASE_CAP_USE_ENVELOPES=false
-   ```
+## Steps
 
-2. In `per_venue_cap_check`, choose the source relation:
-
-   - flag OFF: `trading_trades` compatibility view
-   - flag ON: `trading_management_envelopes` base table
-
-3. Keep all filters and behavior identical.
-
-4. Add tests for:
-
-   - default flag uses `trading_trades`
-   - flag ON uses `trading_management_envelopes`
-   - failure behavior remains conservative
-
-5. Run:
+1. Run:
 
    ```powershell
-   python -m pytest tests\test_phase5k_live_path_parity_probe.py tests\test_phase5j_reader_cleanup.py tests\test_phase5i_post_rename_probe.py
    python scripts\d-phase5k-live-path-parity-probe.py
    python scripts\d-phase5i-post-rename-soak-probe.py
    ```
 
+2. If both are green, set in `.env`:
+
+   ```text
+   CHILI_PHASE5K_COINBASE_CAP_USE_ENVELOPES=true
+   ```
+
+3. Restart only the autotrader worker.
+
+4. Watch logs for:
+
+   - no `per_venue_cap_check query failed`
+   - no Phase 5K parity mismatches
+   - normal Coinbase cap reasons
+
+5. Re-run:
+
+   ```powershell
+   python scripts\d-phase5k-live-path-parity-probe.py
+   python scripts\d-phase5i-post-rename-soak-probe.py
+   ```
+
+## Rollback
+
+Set:
+
+```text
+CHILI_PHASE5K_COINBASE_CAP_USE_ENVELOPES=false
+```
+
+Then restart only the autotrader worker.
+
 ## Guardrails
 
-- Do not flip the flag in `.env`.
-- Do not restart services.
-- Do not edit broker/order/stop/reconcile paths.
-- Do not edit dirty local files.
-- No live behavior change in this slice.
+- Do not touch broker/order/stop/reconcile paths.
+- Do not change any other flag.
+- Do not run migrations.
+- Do not restart services other than the autotrader worker.
 
 ## Acceptance
 
-- Tests pass.
-- Phase 5K-A parity probe remains `COMPLETE_POSITIVE`.
+- Flag is live in the autotrader worker.
+- No cap query failures in logs.
+- Phase 5K-A remains `COMPLETE_POSITIVE`.
 - Phase 5I remains `COMPLETE_POSITIVE`.
-- Feature flag default keeps current behavior.

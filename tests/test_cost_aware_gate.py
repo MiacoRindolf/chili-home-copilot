@@ -60,6 +60,27 @@ def _settings_stub(
     )
 
 
+class _FakeCapRows:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def fetchall(self):
+        return self._rows
+
+
+class _FakeCapDb:
+    def __init__(self, rows=None, *, raise_on_execute: bool = False):
+        self.rows = rows or []
+        self.raise_on_execute = raise_on_execute
+        self.sql = ""
+
+    def execute(self, stmt):
+        self.sql = str(stmt)
+        if self.raise_on_execute:
+            raise RuntimeError("boom")
+        return _FakeCapRows(self.rows)
+
+
 class _FakeMappings:
     def __init__(self, row):
         self._row = row
@@ -382,6 +403,50 @@ def test_cap_robinhood_venue_no_op(db):
         db=db, settings_=s,
     )
     assert res.allowed is True
+
+
+def test_cap_phase5k_flag_defaults_to_compatibility_view():
+    fake_db = _FakeCapDb([SimpleNamespace(notional=5.0)])
+    s = _settings_stub(max_positions=3, max_notional=100.0)
+
+    res = per_venue_cap_check(
+        venue="coinbase", proposed_notional_usd=10.0,
+        db=fake_db, settings_=s,
+    )
+
+    assert res.allowed is True
+    assert "FROM trading_trades" in fake_db.sql
+    assert "trading_management_envelopes" not in fake_db.sql
+
+
+def test_cap_phase5k_flag_can_use_management_envelopes():
+    fake_db = _FakeCapDb([SimpleNamespace(notional=5.0)])
+    s = _settings_stub(max_positions=3, max_notional=100.0)
+    s.chili_phase5k_coinbase_cap_use_envelopes = True
+
+    res = per_venue_cap_check(
+        venue="coinbase", proposed_notional_usd=10.0,
+        db=fake_db, settings_=s,
+    )
+
+    assert res.allowed is True
+    assert "FROM trading_management_envelopes" in fake_db.sql
+    assert "FROM trading_trades" not in fake_db.sql
+
+
+def test_cap_phase5k_query_failure_stays_conservative():
+    fake_db = _FakeCapDb(raise_on_execute=True)
+    s = _settings_stub(max_positions=3, max_notional=100.0)
+    s.chili_phase5k_coinbase_cap_use_envelopes = True
+
+    res = per_venue_cap_check(
+        venue="coinbase", proposed_notional_usd=10.0,
+        db=fake_db, settings_=s,
+    )
+
+    assert res.allowed is False
+    assert res.reason == REASON_CAP_NOTIONAL
+    assert res.current_positions == 999
 
 
 # ── Buying-power resolver ───────────────────────────────────────────
