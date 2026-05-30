@@ -198,6 +198,52 @@ def _fast_backtest_queue_status_snapshot() -> dict[str, object]:
         db.close()
 
 
+def _due_brain_work_backtest_requests_snapshot() -> dict[str, object]:
+    """Return due durable backtest work that should outrank generic queue drain."""
+    db = SessionLocal()
+    try:
+        from sqlalchemy import text
+
+        rows = db.execute(
+            text(
+                """
+                SELECT
+                    COALESCE(payload->>'source', '') AS source,
+                    COUNT(*) AS n,
+                    MIN(created_at) AS oldest
+                  FROM brain_work_events
+                 WHERE domain = 'trading'
+                   AND event_kind = 'work'
+                   AND event_type = 'backtest_requested'
+                   AND status IN ('pending', 'retry_wait')
+                   AND next_run_at <= CURRENT_TIMESTAMP
+                 GROUP BY COALESCE(payload->>'source', '')
+                 ORDER BY n DESC, source ASC
+                """
+            )
+        ).fetchall()
+        by_source = {str(row.source or "unknown"): int(row.n or 0) for row in rows}
+        total = sum(by_source.values())
+        oldest = min(
+            (row.oldest for row in rows if getattr(row, "oldest", None) is not None),
+            default=None,
+        )
+        return {
+            "due": total,
+            "by_source": by_source,
+            "oldest": oldest.isoformat() if oldest is not None else None,
+        }
+    except Exception as exc:
+        logger.debug("[brain:subtask] brain_work backtest status unavailable: %s", exc)
+        return {"due": 0, "by_source": {}, "oldest": None, "error": str(exc)[:240]}
+    finally:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+
+
 def _lock_file_for_mode(mode: str | None) -> Path:
     normalized = (mode or FAST_BACKTEST_MODE_LEAN_CYCLE).strip().lower()
     if normalized == FAST_BACKTEST_MODE_LEAN_CYCLE:
@@ -690,6 +736,33 @@ def _run_subtask_fast_backtest(status: "BrainWorkerStatus") -> dict:
     uid = getattr(_s, "brain_default_user_id", None)
     queue_before = _fast_backtest_queue_status_snapshot()
     pending_before = int(queue_before.get("pending") or 0)
+    durable_backtests = _due_brain_work_backtest_requests_snapshot()
+    durable_due = int(durable_backtests.get("due") or 0)
+    if durable_due > 0:
+        logger.info(
+            "[brain:subtask] fast_backtest skipped - durable backtest work due "
+            "count=%d by_source=%s oldest=%s",
+            durable_due,
+            durable_backtests.get("by_source"),
+            durable_backtests.get("oldest"),
+        )
+        return {
+            "completed": 0,
+            "errors": 0,
+            "skipped": True,
+            "skip_reason": "brain_work_backtest_requests_due",
+            "durable_backtest_due": durable_due,
+            "durable_backtest_by_source": durable_backtests.get("by_source", {}),
+            "pending_before": pending_before,
+            "pending_after": pending_before,
+            "promotion_path_debt_pending_before": queue_before.get(
+                "promotion_path_debt_pending"
+            ),
+            "promotion_path_debt_pending_after": queue_before.get(
+                "promotion_path_debt_pending"
+            ),
+            "drain_rate_per_min": 0.0,
+        }
     batch_size = _fast_backtest_batch_size()
     if batch_size <= 0:
         log_fn = logger.warning if pending_before > 0 else logger.info

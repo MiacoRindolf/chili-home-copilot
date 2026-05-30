@@ -213,6 +213,11 @@ def test_fast_backtest_uses_shared_queue_executor(monkeypatch):
     )
     monkeypatch.setattr(
         brain_worker,
+        "_due_brain_work_backtest_requests_snapshot",
+        lambda: {"due": 0, "by_source": {}, "oldest": None},
+    )
+    monkeypatch.setattr(
+        brain_worker,
         "_fast_backtest_batch_size",
         lambda: BACKTEST_BATCH,
     )
@@ -238,3 +243,66 @@ def test_fast_backtest_uses_shared_queue_executor(monkeypatch):
     assert out["promotion_path_debt_pending_after"] == QUEUE_PROMOTION_PATH_DEBT_AFTER
     assert db.rolled_back is True
     assert db.closed is True
+
+
+def test_fast_backtest_stands_down_when_durable_backtest_work_is_due(
+    monkeypatch,
+) -> None:
+    from app.services.trading import learning
+
+    class _Status:
+        def set_step(self, *_args, **_kwargs):
+            return None
+
+    called = []
+
+    def _should_not_run(*_args, **_kwargs):
+        called.append(True)
+        raise AssertionError("generic queue executor should stand down")
+
+    monkeypatch.setattr(
+        learning,
+        "provider_egress_available_for_brain_work",
+        lambda: True,
+    )
+    monkeypatch.setattr(learning, "_auto_backtest_from_queue", _should_not_run)
+    monkeypatch.setattr(
+        settings,
+        "brain_fast_backtest_skip_when_provider_down",
+        False,
+    )
+    monkeypatch.setattr(
+        brain_worker,
+        "_fast_backtest_queue_status_snapshot",
+        lambda: {
+            "pending": QUEUE_PENDING_BEFORE,
+            "boosted": QUEUE_PENDING_BEFORE,
+            "needs_retest": QUEUE_PENDING_BEFORE,
+            "never_tested": 0,
+            "promotion_path_debt_pending": QUEUE_PROMOTION_PATH_DEBT_BEFORE,
+        },
+    )
+    monkeypatch.setattr(
+        brain_worker,
+        "_due_brain_work_backtest_requests_snapshot",
+        lambda: {
+            "due": 2,
+            "by_source": {"recert_rescue_refresh": 2},
+            "oldest": "2026-05-30T00:18:24",
+        },
+    )
+    monkeypatch.setattr(
+        brain_worker,
+        "_fast_backtest_batch_size",
+        lambda: BACKTEST_BATCH,
+    )
+
+    out = brain_worker._run_subtask_fast_backtest(_Status())
+
+    assert called == []
+    assert out["skipped"] is True
+    assert out["skip_reason"] == "brain_work_backtest_requests_due"
+    assert out["durable_backtest_due"] == 2
+    assert out["durable_backtest_by_source"] == {"recert_rescue_refresh": 2}
+    assert out["pending_before"] == QUEUE_PENDING_BEFORE
+    assert out["pending_after"] == QUEUE_PENDING_BEFORE
