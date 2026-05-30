@@ -319,7 +319,12 @@ def per_user_chore_stats(db: Session) -> list[dict]:
     return results
 
 
-def system_alerts(db: Session) -> list[dict]:
+def system_alerts(
+    db: Session,
+    *,
+    ollama_status: dict | None = None,
+    rag_status: dict | None = None,
+) -> list[dict]:
     """Generate system-level alerts for admin."""
     alerts = []
 
@@ -331,7 +336,7 @@ def system_alerts(db: Session) -> list[dict]:
         alerts.append({"level": "warning", "text": f"{overdue} chore{'s' if overdue != 1 else ''} overdue"})
 
     from .health import check_ollama
-    ollama = check_ollama()
+    ollama = ollama_status if ollama_status is not None else check_ollama()
     if not ollama.get("ok"):
         alerts.append({"level": "error", "text": "Ollama is offline"})
 
@@ -339,7 +344,7 @@ def system_alerts(db: Session) -> list[dict]:
     if not openai_client.is_configured():
         alerts.append({"level": "info", "text": "No OpenAI/Groq API key configured"})
 
-    rag = rag_stats()
+    rag = rag_status if rag_status is not None else rag_stats()
     if not rag.get("available"):
         alerts.append({"level": "info", "text": "RAG knowledge base not ingested"})
 
@@ -358,11 +363,13 @@ def admin_dashboard_json(db: Session) -> dict:
     from .health import check_db, check_ollama
     from . import openai_client
     action_types = action_type_stats(db)
+    ollama_status = check_ollama()
+    rag_status = rag_stats()
 
     return {
         "health": {
             "db": check_db(db),
-            "ollama": check_ollama(),
+            "ollama": ollama_status,
             "openai_configured": openai_client.is_configured(),
             "openai_model": openai_client.OPENAI_MODEL,
         },
@@ -379,8 +386,8 @@ def admin_dashboard_json(db: Session) -> dict:
         "conversation_stats": conversation_stats(db),
         "top_users": top_users(db),
         "per_user_chores": per_user_chore_stats(db),
-        "rag": rag_stats(),
-        "alerts": system_alerts(db),
+        "rag": rag_status,
+        "alerts": system_alerts(db, ollama_status=ollama_status, rag_status=rag_status),
     }
 
 

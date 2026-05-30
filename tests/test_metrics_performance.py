@@ -118,6 +118,19 @@ class _CountsFakeSession:
         return query
 
 
+class _ZeroCountQuery:
+    def filter(self, *args: object) -> "_ZeroCountQuery":
+        return self
+
+    def count(self) -> int:
+        return 0
+
+
+class _ZeroCountSession:
+    def query(self, *args: object) -> _ZeroCountQuery:
+        return _ZeroCountQuery()
+
+
 def test_conversation_stats_aggregates_message_lengths_in_database() -> None:
     db = _FakeSession(total=3, aggregate=(1.5, 2))
 
@@ -182,14 +195,31 @@ def test_feature_usage_reuses_supplied_action_stats(monkeypatch) -> None:
 
 def test_admin_dashboard_json_reuses_action_type_stats(monkeypatch) -> None:
     calls = 0
+    ollama_calls = 0
+    rag_calls = 0
 
     def fake_action_type_stats(db) -> dict:
         nonlocal calls
         calls += 1
         return {"web_search": 7, "add_chore": 2}
 
+    def fake_check_ollama() -> dict:
+        nonlocal ollama_calls
+        ollama_calls += 1
+        return {"ok": True}
+
+    def fake_rag_stats() -> dict:
+        nonlocal rag_calls
+        rag_calls += 1
+        return {"available": True}
+
+    def fake_system_alerts(db, *, ollama_status=None, rag_status=None) -> list[dict]:
+        assert ollama_status == {"ok": True}
+        assert rag_status == {"available": True}
+        return []
+
     monkeypatch.setattr(health, "check_db", lambda db: {"ok": True})
-    monkeypatch.setattr(health, "check_ollama", lambda: {"ok": True})
+    monkeypatch.setattr(health, "check_ollama", fake_check_ollama)
     monkeypatch.setattr(openai_client, "is_configured", lambda: True)
     monkeypatch.setattr(openai_client, "OPENAI_MODEL", "test-model")
     monkeypatch.setattr(metrics, "action_type_stats", fake_action_type_stats)
@@ -204,12 +234,39 @@ def test_admin_dashboard_json_reuses_action_type_stats(monkeypatch) -> None:
     monkeypatch.setattr(metrics, "conversation_stats", lambda db: {})
     monkeypatch.setattr(metrics, "top_users", lambda db: [])
     monkeypatch.setattr(metrics, "per_user_chore_stats", lambda db: [])
-    monkeypatch.setattr(metrics, "rag_stats", lambda: {"available": True})
-    monkeypatch.setattr(metrics, "system_alerts", lambda db: [])
+    monkeypatch.setattr(metrics, "rag_stats", fake_rag_stats)
+    monkeypatch.setattr(metrics, "system_alerts", fake_system_alerts)
 
     result = metrics.admin_dashboard_json(object())  # type: ignore[arg-type]
 
     assert calls == 1
+    assert ollama_calls == 1
+    assert rag_calls == 1
     assert result["action_types"] == {"web_search": 7, "add_chore": 2}
     assert result["features"]["web_search"] == 7
     assert result["features"]["tool_actions"] == 2
+
+
+def test_system_alerts_reuses_supplied_statuses(monkeypatch) -> None:
+    monkeypatch.setattr(
+        health,
+        "check_ollama",
+        lambda: (_ for _ in ()).throw(AssertionError("unexpected ollama check")),
+    )
+    monkeypatch.setattr(
+        metrics,
+        "rag_stats",
+        lambda: (_ for _ in ()).throw(AssertionError("unexpected rag stats")),
+    )
+    monkeypatch.setattr(openai_client, "is_configured", lambda: True)
+    monkeypatch.setattr(metrics, "latency_stats", lambda: {"p95_ms": None})
+
+    alerts = metrics.system_alerts(
+        _ZeroCountSession(),  # type: ignore[arg-type]
+        ollama_status={"ok": False},
+        rag_status={"available": False},
+    )
+
+    texts = [alert["text"] for alert in alerts]
+    assert "Ollama is offline" in texts
+    assert "RAG knowledge base not ingested" in texts
