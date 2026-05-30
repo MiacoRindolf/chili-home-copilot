@@ -121,6 +121,34 @@ def test_hard_stop_does_not_fire_in_backtest_config():
     assert out.action != ev.EXIT_ACTION_EXIT_STOP
 
 
+def test_hard_stop_ignores_wrong_side_long_stop():
+    cfg = ev.build_config_live(None)
+    state = _state_long(entry=100.0, stop=105.0, target=None)
+    bar = _bar(close=104.0, low=99.0, high=104.0, atr=1.0)
+    out = ev.evaluate_bar(cfg, state, bar)
+    assert out.action == ev.EXIT_ACTION_HOLD
+    assert out.r_multiple is None
+
+
+def test_hard_stop_ignores_wrong_side_short_stop():
+    cfg = ev.build_config_live(None)
+    state = ev.PositionState(
+        direction="short",
+        entry_price=100.0,
+        stop_price=95.0,
+        target_price=None,
+        bars_held=0,
+        highest_since_entry=100.0,
+        lowest_since_entry=100.0,
+        trailing_stop=None,
+        partial_taken=False,
+    )
+    bar = _bar(close=96.0, low=96.0, high=101.0, atr=1.0)
+    out = ev.evaluate_bar(cfg, state, bar)
+    assert out.action == ev.EXIT_ACTION_HOLD
+    assert out.r_multiple is None
+
+
 # ---------------------------------------------------------------------------
 # Rule 2: hard target (live only)
 # ---------------------------------------------------------------------------
@@ -134,6 +162,34 @@ def test_hard_target_fires_on_high_touch_long():
     assert out.exit_price == pytest.approx(106.0)
     assert out.reason_code == "hard_target"
     assert out.r_multiple == pytest.approx(2.0)
+
+
+def test_hard_target_ignores_wrong_side_long_target():
+    cfg = ev.build_config_live(None)
+    state = _state_long(entry=100.0, stop=95.0, target=90.0)
+    bar = _bar(close=100.0, low=96.0, high=101.0, atr=1.0)
+    out = ev.evaluate_bar(cfg, state, bar)
+    assert out.action == ev.EXIT_ACTION_HOLD
+    assert out.r_multiple == pytest.approx(0.0)
+
+
+def test_hard_target_ignores_wrong_side_short_target():
+    cfg = ev.build_config_live(None)
+    state = ev.PositionState(
+        direction="short",
+        entry_price=100.0,
+        stop_price=105.0,
+        target_price=110.0,
+        bars_held=0,
+        highest_since_entry=100.0,
+        lowest_since_entry=100.0,
+        trailing_stop=None,
+        partial_taken=False,
+    )
+    bar = _bar(close=100.0, low=99.0, high=104.0, atr=1.0)
+    out = ev.evaluate_bar(cfg, state, bar)
+    assert out.action == ev.EXIT_ACTION_HOLD
+    assert out.r_multiple == pytest.approx(0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +208,29 @@ def test_bos_fires_long_below_swing_with_buffer():
     assert out.action == ev.EXIT_ACTION_EXIT_BOS
     assert out.reason_code == "bos_long"
     assert out.exit_price == pytest.approx(98.5)
+
+
+def test_bos_fires_short_above_swing_with_buffer():
+    cfg = ev.build_config_backtest(exit_atr_mult=5.0, exit_max_bars=100,
+                                    use_bos=True, bos_buffer_frac=0.003,
+                                    bos_grace_bars=3)
+    state = ev.PositionState(
+        direction="short",
+        entry_price=100.0,
+        stop_price=None,
+        target_price=None,
+        bars_held=5,
+        highest_since_entry=100.0,
+        lowest_since_entry=98.0,
+        trailing_stop=None,
+        partial_taken=False,
+    )
+    # swing_high=101. BOS level = 101 * (1 + 0.003) = 101.303.
+    bar = _bar(close=101.5, low=100.5, high=101.7, atr=0.5, swing_high=101.0)
+    out = ev.evaluate_bar(cfg, state, bar)
+    assert out.action == ev.EXIT_ACTION_EXIT_BOS
+    assert out.reason_code == "bos_short"
+    assert out.exit_price == pytest.approx(101.5)
 
 
 def test_bos_suppressed_inside_grace_period():
