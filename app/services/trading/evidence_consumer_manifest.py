@@ -748,6 +748,7 @@ def validate_consumer_manifest(manifest: Any) -> ManifestValidationResult:
             policy.latest_required_containment_floor_utc,
         )
         _require_policy_binding(manifest, errors, policy)
+        _require_policy_lineage(manifest, errors, policy)
         _require_source_artifacts(manifest, errors, policy.required_source_artifacts)
         _require_set_field(
             manifest,
@@ -899,6 +900,28 @@ def _require_policy_binding(
         errors.append(f"{policy.name}:validator_spec_artifact_required")
     if validator_sha != policy.validator_spec_sha256:
         errors.append(f"{policy.name}:validator_spec_sha_required")
+
+
+def _require_policy_lineage(
+    manifest: dict[str, Any],
+    errors: list[str],
+    policy: ManifestBindingPolicy,
+) -> None:
+    if policy is not V36_POLICY:
+        return
+
+    if "evidence_target_ancestor_heads" not in manifest:
+        errors.append("missing_required_field:evidence_target_ancestor_heads")
+        return
+
+    ancestor_heads = manifest.get("evidence_target_ancestor_heads")
+    if not isinstance(ancestor_heads, list):
+        errors.append("evidence_target_ancestor_heads_not_list")
+        return
+
+    observed = {str(head) for head in ancestor_heads}
+    if not observed & policy.descendant_marker_heads:
+        errors.append("v36_v16_lineage_binding_required:evidence_target_ancestor_heads")
 
 
 def _require_source_artifacts(

@@ -38,6 +38,8 @@ def _valid_manifest(
     ancestor_heads: list[str] | None = None,
 ) -> dict[str, object]:
     head = target_head or sorted(policy.accepted_target_heads)[0]
+    if policy is V36_POLICY and ancestor_heads is None:
+        ancestor_heads = [V36_PREDECESSOR_EFE9_HEAD, V36_PREDECESSOR_571_HEAD]
     manifest = {
         "manifest_schema": f"sswe.consumer_manifest.{policy.name}",
         "manifest_generated_utc": "2026-05-30T06:52:00Z",
@@ -168,6 +170,55 @@ def test_descendant_branch_head_requires_v36_v16_binding() -> None:
     )
 
     assert "v35_v15_stale_for_v36_target_head" in _error_set(manifest)
+
+
+def test_v36_manifest_missing_ancestor_heads_fails_closed() -> None:
+    manifest = _valid_manifest(V36_POLICY, target_head=V36_CURRENT_BRANCH_HEAD)
+    del manifest["evidence_target_ancestor_heads"]
+
+    assert "missing_required_field:evidence_target_ancestor_heads" in _error_set(
+        manifest
+    )
+
+
+def test_v36_manifest_without_v36_lineage_binding_fails_closed() -> None:
+    manifest = _valid_manifest(
+        V36_POLICY,
+        target_head=V36_CURRENT_BRANCH_HEAD,
+        ancestor_heads=[V35_CURRENT_BRANCH_HEAD],
+    )
+
+    assert (
+        "v36_v16_lineage_binding_required:evidence_target_ancestor_heads"
+    ) in _error_set(manifest)
+
+
+def test_descendant_branch_head_without_lineage_fails_closed() -> None:
+    manifest = _valid_manifest(
+        V36_POLICY,
+        target_head="3333333333333333333333333333333333333333",
+    )
+    del manifest["evidence_target_ancestor_heads"]
+
+    errors = _error_set(manifest)
+
+    assert (
+        "unsupported_evidence_target_head:"
+        "3333333333333333333333333333333333333333"
+    ) in errors
+
+
+def test_descendant_branch_head_with_stale_lineage_fails_closed() -> None:
+    manifest = _valid_manifest(
+        V36_POLICY,
+        target_head="4444444444444444444444444444444444444444",
+        ancestor_heads=[V35_CURRENT_BRANCH_HEAD],
+    )
+
+    result = validate_consumer_manifest(manifest)
+
+    assert result.accepted is False
+    assert result.status == "FAIL_CLOSED"
 
 
 def test_descendant_branch_head_requires_v35_v15_binding() -> None:
