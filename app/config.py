@@ -4479,7 +4479,7 @@ class Settings(BaseSettings):
     # schedule still fire if it's only a few seconds late instead of
     # being dropped entirely.
     chili_autotrader_tick_max_instances: int = Field(
-        default=3,
+        default=1,
         ge=1,
         le=10,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_TICK_MAX_INSTANCES"),

@@ -810,12 +810,11 @@ services:
       # Autopilot real-time streaming: same env as scheduler-worker had.
       - CHILI_AUTOPILOT_PRICE_BUS_ENABLED=1
       - CHILI_COINBASE_WS_ENABLED=1
-      # AutoTrader entry ticks are per-alert advisory locked, so the
-      # dedicated worker can run one catch-up tick while a slow hot tick is
-      # finishing. This prevents fresh alert bursts from aging into slippage
-      # misses without allowing duplicate broker calls.
+      # AutoTrader entry ticks share broker state, paper-shadow capacity,
+      # and the same alert queue. Keep the dedicated worker single-instance;
+      # advisory locks are a last line of defense, not a scheduling strategy.
       - CHILI_AUTOTRADER_TICK_MAX_SECONDS=15
-      - CHILI_AUTOTRADER_TICK_MAX_INSTANCES=${CHILI_AUTOTRADER_TICK_MAX_INSTANCES:-2}
+      - CHILI_AUTOTRADER_TICK_MAX_INSTANCES=1
       - BRAIN_RISK_MAX_AVG_CORRELATION=0.85
       # f-add-paper-shadow-mode (mig 229, 2026-05-06): enable per-trade
       # paper-shadow alongside live for execution-alpha-drag measurement.
