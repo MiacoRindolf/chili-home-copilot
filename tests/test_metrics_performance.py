@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.metrics import conversation_stats
+from app.metrics import conversation_stats, get_counts
 
 
 class _SubqueryColumns:
@@ -67,6 +67,56 @@ class _FakeSession:
         return query
 
 
+class _CountsFakeQuery:
+    def __init__(
+        self,
+        kind: str,
+        *,
+        aggregate: tuple[int, int | None, int | None] = (0, None, None),
+        count: int = 0,
+    ) -> None:
+        self.kind = kind
+        self.aggregate = aggregate
+        self.count_value = count
+        self.one_calls = 0
+        self.count_calls = 0
+
+    def filter(self, *args: object) -> "_CountsFakeQuery":
+        raise AssertionError("get_counts should not issue separate filtered chore counts")
+
+    def one(self) -> tuple[int, int | None, int | None]:
+        if self.kind != "chore_aggregate":
+            raise AssertionError(f"unexpected one() on {self.kind}")
+        self.one_calls += 1
+        return self.aggregate
+
+    def count(self) -> int:
+        if self.kind != "birthday_count":
+            raise AssertionError(f"unexpected count() on {self.kind}")
+        self.count_calls += 1
+        return self.count_value
+
+
+class _CountsFakeSession:
+    def __init__(
+        self,
+        *,
+        chore_aggregate: tuple[int, int | None, int | None] = (4, 3, 1),
+        birthday_count: int = 2,
+    ) -> None:
+        self.chore_aggregate = chore_aggregate
+        self.birthday_count = birthday_count
+        self.queries: list[_CountsFakeQuery] = []
+
+    def query(self, *args: object) -> _CountsFakeQuery:
+        if not self.queries:
+            query = _CountsFakeQuery("chore_aggregate", aggregate=self.chore_aggregate)
+        else:
+            query = _CountsFakeQuery("birthday_count", count=self.birthday_count)
+        self.queries.append(query)
+        return query
+
+
 def test_conversation_stats_aggregates_message_lengths_in_database() -> None:
     db = _FakeSession(total=3, aggregate=(1.5, 2))
 
@@ -85,3 +135,28 @@ def test_conversation_stats_skips_message_aggregate_when_empty() -> None:
 
     assert conversation_stats(db) == {"total": 0, "avg_messages": 0, "longest": 0}  # type: ignore[arg-type]
     assert len(db.queries) == 1
+
+
+def test_get_counts_batches_chore_status_counts() -> None:
+    db = _CountsFakeSession(chore_aggregate=(4, 3, 1), birthday_count=2)
+
+    result = get_counts(db)  # type: ignore[arg-type]
+
+    assert result == {
+        "chores": {"total": 4, "pending": 3, "done": 1},
+        "birthdays": {"total": 2},
+    }
+    assert len(db.queries) == 2
+    assert db.queries[0].one_calls == 1
+    assert db.queries[1].count_calls == 1
+
+
+def test_get_counts_coerces_empty_chore_sums_to_zero() -> None:
+    db = _CountsFakeSession(chore_aggregate=(0, None, None), birthday_count=0)
+
+    result = get_counts(db)  # type: ignore[arg-type]
+
+    assert result == {
+        "chores": {"total": 0, "pending": 0, "done": 0},
+        "birthdays": {"total": 0},
+    }

@@ -26,16 +26,18 @@ def latency_history() -> list[dict]:
     return [{"t": int(t * 1000), "ms": ms} for t, ms in _LATENCIES_MS[-100:]]
 
 def get_counts(db: Session) -> dict:
-    total_chores = db.query(Chore).count()
-    pending_chores = db.query(Chore).filter(Chore.done == False).count()
-    done_chores = db.query(Chore).filter(Chore.done == True).count()
+    total_chores, pending_chores, done_chores = db.query(
+        func.count(Chore.id),
+        func.sum(case((Chore.done.is_(False), 1), else_=0)),
+        func.sum(case((Chore.done.is_(True), 1), else_=0)),
+    ).one()
     total_birthdays = db.query(Birthday).count()
 
     return {
         "chores": {
-            "total": total_chores,
-            "pending": pending_chores,
-            "done": done_chores,
+            "total": int(total_chores or 0),
+            "pending": int(pending_chores or 0),
+            "done": int(done_chores or 0),
         },
         "birthdays": {
             "total": total_birthdays,
