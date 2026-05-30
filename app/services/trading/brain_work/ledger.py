@@ -486,6 +486,31 @@ def coalesce_duplicate_open_work(
                 reason="recert_rescue_pattern_asset_superseded",
                 keep_id=keep_id,
             )
+
+    # Snapshot-triggered mining is global-universe work. When snapshot batches
+    # arrive faster than a mine can finish, queued older batches mostly replay
+    # the same expensive discovery pass. Keep the freshest queued batch and
+    # leave any in-flight mine alone.
+    queued_mine_rows = [
+        row
+        for row in rows
+        if str(row.event_type or "") == "market_snapshots_batch"
+        and row.status in ("pending", "retry_wait")
+    ]
+
+    def _mine_rank(row: BrainWorkEvent) -> tuple[float, int, int]:
+        created = row.created_at or row.updated_at or datetime.min
+        return (-created.timestamp(), int(row.attempts or 0), -int(row.id))
+
+    if len(queued_mine_rows) > 1:
+        queued_mine_rows.sort(key=_mine_rank)
+        keep_id = int(queued_mine_rows[0].id)
+        for row in queued_mine_rows[1:]:
+            _retire_duplicate(
+                row,
+                reason="market_snapshot_batch_superseded",
+                keep_id=keep_id,
+            )
     db.flush()
     return {"ok": True, "coalesced": len(ids), "ids": ids, "reasons": reasons}
 
