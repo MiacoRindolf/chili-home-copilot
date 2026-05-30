@@ -1,68 +1,65 @@
-# NEXT_TASK: f-position-identity-phase-5j-remaining-reference-audit
+# NEXT_TASK: f-position-identity-phase-5k-live-path-cutover-brief
 
 STATUS: PENDING
 
 ## Goal
 
-Audit the remaining `trading_trades` references after Phase 5J slices 1-5 and
-decide whether any more conversion is safe. Most remaining references are
-expected to be compatibility contracts, tests, historical docs, migrations, or
-live writer paths that should be deferred.
+Write the Phase 5K cutover brief for live paths that still intentionally use
+the `trading_trades` compatibility view or `Trade` ORM class after Phase 5J.
 
-Keep the `trading_trades` compatibility view and the Python `Trade` ORM class in
-place.
+Do not implement live-path code changes in this task. The purpose is to decide
+which references should remain permanent compatibility contracts and which ones
+deserve a future feature-flagged, owner-reviewed cutover.
 
 ## Current Gate State
 
-- Phase 5I closeout: `COMPLETE_POSITIVE`
+- Phase 5I post-rename soak: `COMPLETE_POSITIVE`
 - Phase 5J slices 1-5 shipped.
-- Pid 537 watcher closed:
-  - `VERDICT_STATUS=COMPLETE_POSITIVE`
-  - `PID_537_N=17`
-  - `PID_537_WR=0.6471`
-  - `PID_537_PAYOFF=13.0411`
-  - `PID_537_STAGE=promoted`
-  - scheduled task `CHILI-pid537-watcher`: disabled
+- Phase 5J remaining-reference audit closed:
+  - no more safe reader-only conversions
+  - compatibility view remains required
+  - Python `Trade` ORM class remains required
+- Pid 537 watcher closed and scheduled task disabled.
 
-## Tasks
+## Scope
 
-1. Generate a current reference inventory:
+1. Re-read:
 
-   ```powershell
-   rg -n "\btrading_trades\b" app scripts tests docs
-   ```
+   - `docs/STRATEGY/CC_REPORTS/2026-05-30_f-position-identity-phase-5j-remaining-reference-audit-closeout.md`
+   - `docs/RUNBOOKS/PHASE5J_SELECTIVE_READER_CLEANUP.md`
+   - `docs/DESIGN/POSITION_IDENTITY.md`
 
-2. Classify remaining runtime references:
-   - **keep:** ORM class/table name, FK metadata, compatibility-view tests
-   - **defer:** live writer/order/broker/stop/reconcile paths
-   - **convert:** clean read-only scripts/modules with no unrelated dirty work
-3. If a safe conversion remains, ship one small slice and rerun:
+2. Build a live-path matrix for remaining app references:
+
+   - **permanent keep:** ORM/FK/API compatibility
+   - **feature-flag future:** live capital/promotion readers where the semantic
+     base table may be useful but behavior must be proven neutral
+   - **writer boundary:** broker/order/reconcile/stop paths that should keep
+     `Trade`/compatibility until a larger envelope-writer cutover is designed
+   - **dirty/defer:** files with unrelated local edits
+
+3. Propose the smallest safe Phase 5K implementation slice, if any.
+
+4. Keep Phase 5I green:
 
    ```powershell
    python -m pytest tests\test_phase5j_reader_cleanup.py tests\test_phase5i_post_rename_probe.py
    python scripts\d-phase5i-post-rename-soak-probe.py
-   powershell -ExecutionPolicy Bypass -File scripts\dispatch-phase5i-post-rename-soak-probe.ps1
+   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\dispatch-phase5i-post-rename-soak-probe.ps1
    ```
-
-4. If no safe conversion remains, write a closeout report explaining why the
-   compatibility view and ORM name stay.
 
 ## Guardrails
 
 - Do not drop the `trading_trades` compatibility view.
 - Do not rename the Python `Trade` ORM class.
-- Do not touch live writer/order-placement paths.
-- Do not edit files with unrelated dirty work unless the current local diff is
-  inspected and deliberately preserved.
+- Do not edit live broker/order/stop/reconcile paths in this brief.
+- Do not edit dirty local files unless their current diff has been inspected and
+  deliberately included.
+- No live trading behavior change without a separate operator-approved
+  implementation task.
 
 ## Acceptance
 
-- Remaining references are classified with evidence.
-- Phase 5I remains `COMPLETE_POSITIVE`.
-- No schema-specific worker errors.
-
-## References
-
-- `docs/STRATEGY/CC_REPORTS/2026-05-30_f-position-identity-phase-5j-selective-reader-cleanup-slice-5.md`
-- `docs/STRATEGY/CC_REPORTS/2026-05-30_f-pid537-watcher-closeout.md`
-- `docs/RUNBOOKS/WATCHER_pid537.md`
+- A CC report exists with the live-path matrix and recommendation.
+- No code behavior changes unless explicitly split into a later task.
+- Phase 5I still reports `COMPLETE_POSITIVE`.
