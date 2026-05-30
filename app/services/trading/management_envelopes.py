@@ -235,7 +235,7 @@ def load_bracket_reconciliation_scope(
         "     bi.id IS NOT NULL"
         "     AND t.broker_source IS NOT NULL"
         "     AND t.status <> 'open'"
-        "     AND bi.intent_state NOT IN ('reconciled', 'authoritative_closed', 'closed')"
+        "     AND COALESCE(bi.intent_state, '') NOT IN ('reconciled', 'authoritative_closed', 'closed')"
         "   )"
         " )"
     )
@@ -304,7 +304,7 @@ def load_stale_bracket_watchdog_candidates(
         WHERE t.status = 'open'
           AND t.broker_source IS NOT NULL
           AND NOT {_option_envelope_predicate_sql('t')}
-          AND bi.intent_state NOT IN ('reconciled', 'authoritative_closed', 'closed')
+          AND COALESCE(bi.intent_state, '') NOT IN ('reconciled', 'authoritative_closed', 'closed')
           {user_filter}
         ORDER BY t.id
     """, params)
@@ -335,7 +335,7 @@ def fetch_naked_coinbase_bracket_intent_rows(
           AND LOWER(COALESCE(t.broker_source, '')) = 'coinbase'
           AND LOWER(COALESCE(bi.broker_source, '')) = 'coinbase'
           AND bi.broker_stop_order_id IS NULL
-          AND LOWER(bi.intent_state) = ANY(:states)
+          AND LOWER(COALESCE(bi.intent_state, '')) = ANY(:states)
         ORDER BY bi.id
     """, {"states": states})
 
