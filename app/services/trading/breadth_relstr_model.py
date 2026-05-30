@@ -390,10 +390,9 @@ def _pick_leader_laggard(
             continue
     if not candidates:
         return None, None, None, None
-    # Sort by (rs, sym) so ties break alphabetically both ways.
-    candidates.sort(key=lambda kv: (kv[1], kv[0]))
-    laggard_sym, laggard_rs = candidates[0]
-    leader_sym, leader_rs = candidates[-1]
+    # Rank by (rs, sym) so ties break alphabetically both ways.
+    laggard_sym, laggard_rs = min(candidates, key=lambda kv: (kv[1], kv[0]))
+    leader_sym, leader_rs = max(candidates, key=lambda kv: (kv[1], kv[0]))
     return leader_sym, laggard_sym, leader_rs, laggard_rs
 
 
