@@ -1,62 +1,31 @@
-# NEXT_TASK: f-position-identity-phase-5l-h-relation-symbol-contracts
+# NEXT_TASK: f-position-identity-phase-5m-orm-symbol-contract-audit
 
 STATUS: PENDING
 
 ## Goal
 
-Reduce the remaining runtime-app literal `trading_trades` relation-symbol
-surface without touching broker/order/close behavior and without renaming the
-legacy `Trade` ORM class.
+Classify the remaining runtime `Trade` ORM-symbol compatibility surface after Phase 5L-H, without renaming the class and without changing live broker/order/close behavior.
 
-Phase 5L-G proved there are no unexpected runtime raw readers or mutations.
-The remaining ambiguity is the 17 app-side relation-symbol contracts.
-
-## Current State
-
-Physical relation state:
-
-```text
-trading_management_envelopes = physical base table
-trading_trades               = legacy compatibility view
-```
-
-Fresh safety evidence after Phase 5L-G:
-
-```text
-Phase 5K-A: COMPLETE_POSITIVE, 6/6 checks, 0 mismatches
-Phase 5I:   COMPLETE_POSITIVE, 20 fresh decisions, 20 fresh envelopes,
-            10 fresh closes, 0 hard linkage issues, 0 attribution drift
-Classifier: OK=True, unexpected runtime readers=0,
-            unexpected runtime mutations=0, unclassified=0
-```
+Phase 5L-H proved there are no unexpected runtime raw readers/mutations and only two intentional relation-symbol anchors remain. The next ambiguity is semantic: many files still import or type against `Trade`, even though the physical table is now `trading_management_envelopes` and `trading_trades` is a compatibility view.
 
 ## Recommended Work Shape
 
-1. Run the Phase 5L-G classifier and list only
-   `compatibility_relation_symbol` entries.
-2. Split them into:
-   - true compatibility constants / ORM metadata
-   - raw writer/reconcile references that must stay on the view
-   - low-risk comments or diagnostics that can name the semantic relation
-3. Convert only low-risk relation-symbol references to shared constants or
-   clearer wording.
-4. Leave all live broker/order/close semantics unchanged.
-5. Re-run:
-   - `tests/test_phase5_remaining_trade_refs.py`
-   - `tests/test_phase5l_reader_allowlist.py`
-   - Phase 5K-A probe
-   - Phase 5I probe
+1. Extend or reuse `scripts/analyze_phase5_remaining_trade_refs.py` to emit only `orm_trade_symbol_compat` runtime-app entries.
+2. Split the `Trade` ORM surface into:
+   - live writer/order/broker/reconcile paths that must keep the compatibility ORM for now
+   - read/report paths that should eventually use semantic envelope helpers
+   - API/schema naming that can be renamed later without DB impact
+   - tests/migrations/history that are intentionally compatibility-bound
+3. Make no behavior change unless there is a trivial comment/docstring cleanup.
+4. Produce a closeout report with counts and a next-step recommendation.
 
 ## Guardrails
 
-- Do not drop the `trading_trades` compatibility view.
-- Do not rename the `Trade` ORM class.
-- Do not search-replace writer, broker, order, or reconcile code.
+- Do not rename the `Trade` ORM class in this task.
+- Do not drop or rewrite the `trading_trades` compatibility view.
+- Do not touch order placement, broker sync, close, stop, or reconcile semantics.
 - Do not absorb unrelated dirty worktree files.
-- Keep live close/order semantics unchanged.
 
 ## Architect Verdict
 
-This should be a conservative clarity pass, not a behavior change. The system is
-already safe from raw reader drift; now we make the remaining relation-symbol
-surface easier to reason about before any future ORM naming discussion.
+This is a map-before-cut task. The physical rename and relation-symbol cleanup are healthy; the next risk is human misunderstanding of `Trade` meaning in code. We classify that surface before attempting any semantic ORM rename or API naming cleanup.
