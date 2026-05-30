@@ -52,7 +52,6 @@ _STRUCTURAL_EXIT_NOOP_REASONS = frozenset(
     {
         "duplicate_learned_exit_label",
         "missing_parent_payoff_geometry",
-        "non_positive_quality_evidence_no_exit_variant_birth",
         "no_loss_report",
         "no_parent_returns",
     }
@@ -804,6 +803,23 @@ def _structural_exit_noop_reason(reason: Any) -> bool:
     )
 
 
+def _exit_noop_blocks_refresh(
+    payload: dict[str, Any],
+    *,
+    evidence_fingerprint: str | None,
+) -> bool:
+    try:
+        created_count = int(payload.get("created_count"))
+    except (TypeError, ValueError):
+        return False
+    if created_count != 0:
+        return False
+    fingerprint = str(evidence_fingerprint or "")
+    if fingerprint and str(payload.get("evidence_fingerprint") or "") == fingerprint:
+        return True
+    return _structural_exit_noop_reason(payload.get("skip_reason"))
+
+
 def _recent_noop_exit_variant_exists(
     db: Session,
     *,
@@ -834,18 +850,12 @@ def _recent_noop_exit_variant_exists(
         .limit(20)
         .all()
     )
-    fingerprint = str(evidence_fingerprint or "")
     for row in rows:
         payload = row.payload if isinstance(row.payload, dict) else {}
-        try:
-            created_count = int(payload.get("created_count"))
-        except (TypeError, ValueError):
-            continue
-        if created_count != 0:
-            continue
-        if fingerprint and str(payload.get("evidence_fingerprint") or "") == fingerprint:
-            return True
-        if _structural_exit_noop_reason(payload.get("skip_reason")):
+        if _exit_noop_blocks_refresh(
+            payload,
+            evidence_fingerprint=evidence_fingerprint,
+        ):
             return True
     return False
 
