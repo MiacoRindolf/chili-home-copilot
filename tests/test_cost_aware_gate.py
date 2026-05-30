@@ -419,6 +419,41 @@ def test_cap_phase5k_flag_defaults_to_compatibility_view():
     assert "trading_management_envelopes" not in fake_db.sql
 
 
+def test_cap_phase5k_flag_is_typed_default_false_in_settings(monkeypatch):
+    from app.config import Settings
+
+    monkeypatch.delenv(cag.PHASE5K_COINBASE_CAP_ENV, raising=False)
+
+    s = Settings(_env_file=None)
+
+    assert s.chili_phase5k_coinbase_cap_use_envelopes is False
+
+
+def test_cap_phase5k_env_alias_flows_through_typed_settings(monkeypatch):
+    from app.config import Settings
+
+    monkeypatch.setenv(cag.PHASE5K_COINBASE_CAP_ENV, "true")
+
+    s = Settings(_env_file=None)
+
+    assert s.chili_phase5k_coinbase_cap_use_envelopes is True
+
+
+def test_cap_phase5k_env_does_not_override_explicit_settings_object(monkeypatch):
+    monkeypatch.setenv(cag.PHASE5K_COINBASE_CAP_ENV, "true")
+    fake_db = _FakeCapDb([SimpleNamespace(notional=5.0)])
+    s = _settings_stub(max_positions=3, max_notional=100.0)
+
+    res = per_venue_cap_check(
+        venue="coinbase", proposed_notional_usd=10.0,
+        db=fake_db, settings_=s,
+    )
+
+    assert res.allowed is True
+    assert "FROM trading_trades" in fake_db.sql
+    assert "trading_management_envelopes" not in fake_db.sql
+
+
 def test_cap_phase5k_flag_can_use_management_envelopes():
     fake_db = _FakeCapDb([SimpleNamespace(notional=5.0)])
     s = _settings_stub(max_positions=3, max_notional=100.0)

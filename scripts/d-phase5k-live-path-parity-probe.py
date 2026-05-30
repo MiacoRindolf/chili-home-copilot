@@ -19,10 +19,17 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import psycopg2
 import psycopg2.extras
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path[:0] = [str(REPO_ROOT)]
+
+from app.services.trading.realized_pnl_sql import trade_return_fraction_sql
 
 
 DSN = os.environ.get(
@@ -64,6 +71,21 @@ def _fetch_all(conn, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, A
         return [_normalize_row(dict(row)) for row in cur.fetchall()]
 
 
+def _enforce_read_only(conn) -> None:
+    try:
+        conn.set_session(readonly=True, autocommit=False)
+    except Exception as exc:
+        raise RuntimeError(f"could not set read-only session: {exc}") from exc
+
+    with conn.cursor() as cur:
+        cur.execute("SET TRANSACTION READ ONLY")
+        cur.execute("SHOW transaction_read_only")
+        row = cur.fetchone()
+    value = row[0] if row else None
+    if str(value).strip().lower() not in {"on", "true", "1"}:
+        raise RuntimeError(f"read-only transaction not confirmed: {value!r}")
+
+
 def _normalize_scalar(value: Any) -> Any:
     if isinstance(value, Decimal):
         return str(value.normalize())
@@ -99,6 +121,7 @@ def _relation_kinds(conn) -> dict[str, str]:
 def _query_for_check(name: str, relation: str) -> tuple[str, tuple[Any, ...]]:
     if relation not in {OLD_RELATION, NEW_RELATION}:
         raise ValueError(f"unexpected relation: {relation!r}")
+    return_fraction = trade_return_fraction_sql("e")
 
     if name == "coinbase_cap":
         return (
@@ -120,17 +143,30 @@ def _query_for_check(name: str, relation: str) -> tuple[str, tuple[Any, ...]]:
         cutoff = _earliest_business_day_in_window(datetime.now(timezone.utc))
         return (
             f"""
-            SELECT COUNT(*)::int AS day_trades_5bd
-              FROM {relation}
-             WHERE status = 'closed'
-               AND entry_date IS NOT NULL
-               AND exit_date IS NOT NULL
-               AND DATE(entry_date) = DATE(exit_date)
-               AND exit_date > %s
-               AND ticker NOT LIKE '%%-USD'
-               AND broker_order_id IS NOT NULL
-               AND last_fill_at IS NOT NULL
-               AND NOT (COALESCE(exit_reason, '') = ANY(%s))
+            WITH eligible AS (
+                SELECT user_id
+                  FROM {relation}
+                 WHERE status = 'closed'
+                   AND entry_date IS NOT NULL
+                   AND exit_date IS NOT NULL
+                   AND DATE(entry_date) = DATE(exit_date)
+                   AND exit_date > %s
+                   AND ticker NOT LIKE '%%-USD'
+                   AND broker_order_id IS NOT NULL
+                   AND last_fill_at IS NOT NULL
+                   AND NOT (COALESCE(exit_reason, '') = ANY(%s))
+            )
+            SELECT 'all' AS scope,
+                   NULL::bigint AS user_id,
+                   COUNT(*)::int AS day_trades_5bd
+              FROM eligible
+            UNION ALL
+            SELECT 'user' AS scope,
+                   user_id,
+                   COUNT(*)::int AS day_trades_5bd
+              FROM eligible
+             GROUP BY user_id
+             ORDER BY scope, user_id NULLS FIRST
             """,
             (cutoff, list(RECONCILE_ARTIFACT_EXIT_REASONS)),
         )
@@ -140,15 +176,9 @@ def _query_for_check(name: str, relation: str) -> tuple[str, tuple[Any, ...]]:
             f"""
             SELECT scan_pattern_id,
                    COUNT(*)::int AS n,
-                   ROUND(COALESCE(SUM(pnl), 0)::numeric, 8) AS pnl,
-                   ROUND(AVG(
-                       CASE
-                         WHEN entry_price > 0 AND quantity > 0
-                         THEN pnl / NULLIF(entry_price * quantity, 0)
-                         ELSE NULL
-                       END
-                   )::numeric, 10) AS avg_return_fraction
-              FROM {relation}
+                   ROUND(COALESCE(SUM(pnl), 0)::numeric, 8) AS total_pnl,
+                   ROUND(AVG({return_fraction})::numeric, 10) AS avg_return_fraction
+              FROM {relation} e
              WHERE scan_pattern_id IS NOT NULL
                AND scan_pattern_id != -1
                AND status = 'closed'
@@ -166,13 +196,18 @@ def _query_for_check(name: str, relation: str) -> tuple[str, tuple[Any, ...]]:
         return (
             f"""
             SELECT scan_pattern_id,
-                   COUNT(*)::int AS trades,
+                   COUNT(*)::int AS n,
                    COUNT(*) FILTER (WHERE pnl > 0)::int AS winners,
                    COUNT(*) FILTER (WHERE pnl <= 0)::int AS losers,
-                   ROUND(COALESCE(SUM(pnl), 0)::numeric, 8) AS pnl
-              FROM {relation}
+                   ROUND(AVG({return_fraction})::numeric, 10) AS avg_return_fraction,
+                   ROUND(COALESCE(SUM(pnl), 0)::numeric, 8) AS total_pnl
+              FROM {relation} e
              WHERE scan_pattern_id IS NOT NULL
+               AND scan_pattern_id != -1
                AND status = 'closed'
+               AND pnl IS NOT NULL
+               AND entry_price > 0
+               AND quantity > 0
                AND exit_date > NOW() - INTERVAL '90 days'
              GROUP BY scan_pattern_id
              ORDER BY scan_pattern_id
@@ -198,20 +233,74 @@ def _query_for_check(name: str, relation: str) -> tuple[str, tuple[Any, ...]]:
     if name == "position_integrity_open":
         return (
             f"""
-            SELECT COUNT(*)::int AS open_envelopes,
-                   COUNT(*) FILTER (WHERE position_id IS NULL)::int AS missing_position_id,
-                   COUNT(*) FILTER (
-                       WHERE position_id IS NOT NULL
-                         AND p.id IS NULL
-                   )::int AS missing_position_row,
-                   COUNT(*) FILTER (
-                       WHERE position_id IS NOT NULL
-                         AND p.id IS NOT NULL
-                         AND p.current_envelope_id IS DISTINCT FROM e.id
-                   )::int AS current_envelope_mismatch
+            WITH matches AS (
+                SELECT p.id AS position_id,
+                       COUNT(*) AS open_trade_count
+                  FROM trading_positions p
+                  JOIN {relation} e
+                    ON e.status = 'open'
+                   AND e.user_id = p.user_id
+                   AND LOWER(COALESCE(e.broker_source, '')) = p.broker_source
+                   AND e.ticker = p.ticker
+                   AND LOWER(COALESCE(e.direction, 'long')) = p.direction
+                 WHERE p.state = 'open'
+                   AND p.current_envelope_id IS NULL
+                 GROUP BY p.id
+            )
+            SELECT 'open_positions_without_open_trade' AS invariant,
+                   COUNT(*)::int AS n
+              FROM trading_positions p
+             WHERE p.state = 'open'
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM {relation} e
+                    WHERE e.status = 'open'
+                      AND e.user_id = p.user_id
+                      AND LOWER(COALESCE(e.broker_source, '')) = p.broker_source
+                      AND e.ticker = p.ticker
+                      AND LOWER(COALESCE(e.direction, 'long')) = p.direction
+               )
+            UNION ALL
+            SELECT 'open_trades_without_open_position' AS invariant,
+                   COUNT(*)::int AS n
               FROM {relation} e
-              LEFT JOIN trading_positions p ON p.id = e.position_id
              WHERE e.status = 'open'
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM trading_positions p
+                    WHERE p.state = 'open'
+                      AND p.user_id = e.user_id
+                      AND p.broker_source = LOWER(COALESCE(e.broker_source, ''))
+                      AND p.ticker = e.ticker
+                      AND p.direction = LOWER(COALESCE(e.direction, 'long'))
+               )
+            UNION ALL
+            SELECT 'open_positions_missing_current_envelope' AS invariant,
+                   COUNT(*)::int AS n
+              FROM trading_positions p
+             WHERE p.state = 'open'
+               AND p.current_envelope_id IS NULL
+            UNION ALL
+            SELECT 'current_envelope_mismatches' AS invariant,
+                   COUNT(*)::int AS n
+              FROM trading_positions p
+              LEFT JOIN {relation} e ON e.id = p.current_envelope_id
+             WHERE p.state = 'open'
+               AND p.current_envelope_id IS NOT NULL
+               AND (
+                   e.id IS NULL
+                   OR e.status <> 'open'
+                   OR e.user_id <> p.user_id
+                   OR LOWER(COALESCE(e.broker_source, '')) <> p.broker_source
+                   OR e.ticker <> p.ticker
+                   OR LOWER(COALESCE(e.direction, 'long')) <> p.direction
+               )
+            UNION ALL
+            SELECT 'repairable_current_envelope_links' AS invariant,
+                   COUNT(*)::int AS n
+              FROM matches
+             WHERE open_trade_count = 1
+             ORDER BY invariant
             """,
             (),
         )
@@ -255,6 +344,7 @@ def _main() -> int:
         return 2
 
     try:
+        _enforce_read_only(conn)
         kinds = _relation_kinds(conn)
         schema_ok = kinds.get(OLD_RELATION) == "v" and kinds.get(NEW_RELATION) == "r"
         if not schema_ok:
@@ -282,6 +372,8 @@ def _main() -> int:
     print(f"VERDICT_STATUS={verdict}")
     print(f"VERDICT_REASON={reason}")
     print(f"RELATION_KINDS={kinds}")
+    print(f"PARITY_GROUPS={len(results)}")
+    print(f"MISMATCH_GROUPS={len(mismatches)}")
     print(f"PARITY_CHECKS={len(results)}")
     print(f"PARITY_MISMATCHES={len(mismatches)}")
     for result in results:

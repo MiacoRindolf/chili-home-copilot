@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -81,6 +82,32 @@ def _record_alert_sent(alert_type: str, ticker: str | None) -> None:
     if len(_recent_alerts) > 500:
         cutoff = time.time() - _THROTTLE_WINDOW_SECS * 2
         _recent_alerts.clear()
+
+
+def _positive_finite_float(value: Any) -> float | None:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(out) or out <= 0:
+        return None
+    return out
+
+
+def _validate_long_proposal_levels(
+    entry: Any,
+    stop: Any,
+    target: Any,
+) -> tuple[float | None, float | None, float | None, str | None]:
+    """Return normalized long levels or a stable reject reason."""
+    entry_f = _positive_finite_float(entry)
+    stop_f = _positive_finite_float(stop)
+    target_f = _positive_finite_float(target)
+    if entry_f is None or stop_f is None or target_f is None:
+        return entry_f, stop_f, target_f, "missing_or_invalid_levels"
+    if stop_f >= entry_f or target_f <= entry_f:
+        return entry_f, stop_f, target_f, "invalid_long_levels"
+    return entry_f, stop_f, target_f, None
 
 
 def classify_alert_tier(
@@ -212,15 +239,33 @@ def _compute_position_size(
     """Risk-based position sizing with regime, volatility, and instrument overlays.
 
     Returns (quantity, position_size_pct).  Both are None when buying_power
-    is zero or inputs are invalid.
+    is zero, inputs are invalid, or the risk-approved allocation cannot buy
+    one whole share without exceeding the sizing budget.
     """
-    risk_per_share = abs(price - stop)
-    if buying_power <= 0 or risk_per_share <= 0 or price <= 0:
+    try:
+        price_f = float(price)
+        stop_f = float(stop)
+        buying_power_f = float(buying_power)
+    except (TypeError, ValueError):
         return None, None
 
-    risk_dollars = buying_power * (_get_brain_weight("pos_max_risk_pct") / 100)
+    if (
+        not math.isfinite(price_f)
+        or not math.isfinite(stop_f)
+        or not math.isfinite(buying_power_f)
+        or buying_power_f <= 0
+        or price_f <= 0
+        or stop_f <= 0
+    ):
+        return None, None
+
+    risk_per_share = price_f - stop_f
+    if risk_per_share <= 0:
+        return None, None
+
+    risk_dollars = buying_power_f * (_get_brain_weight("pos_max_risk_pct") / 100)
     raw_shares = risk_dollars / risk_per_share
-    raw_pct = (raw_shares * price) / buying_power * 100
+    raw_pct = (raw_shares * price_f) / buying_power_f * 100
 
     # ── 1. Market-regime overlay ──────────────────────────────────────
     regime_label = "cautious"
@@ -245,7 +290,7 @@ def _compute_position_size(
         regime_mult *= _get_brain_weight("pos_vix_extreme_mult")
 
     # ── 2. Volatility overlay (wide stop -> more volatile) ────────────
-    stop_dist_pct = risk_per_share / price * 100
+    stop_dist_pct = risk_per_share / price_f * 100
     vol_mult = 1.0
     if stop_dist_pct > 10:
         vol_mult = _get_brain_weight("pos_vol_stop_10_mult")
@@ -283,9 +328,13 @@ def _compute_position_size(
         cap = min(cap, _get_brain_weight("pos_pct_speculative_cap"))
 
     final_pct = round(min(adjusted_pct, cap), 2)
+    if final_pct <= 0:
+        return None, None
 
-    position_dollars = buying_power * (final_pct / 100)
-    quantity = max(1, int(position_dollars / price))
+    position_dollars = buying_power_f * (final_pct / 100)
+    quantity = int(position_dollars / price_f)
+    if quantity <= 0:
+        return None, None
 
     return quantity, final_pct
 
@@ -887,8 +936,14 @@ def generate_strategy_proposals(
             skips["sector_cap"] += 1
             continue
 
-        # Supersede any existing non-executed proposal for this ticker
-        _supersede_proposals(db, user_id, ticker)
+        if buying_power is None or buying_power <= 0:
+            logger.warning(
+                "[proposals] skip %s: buying_power_unavailable buying_power=%r",
+                ticker,
+                buying_power,
+            )
+            skips["buying_power_unavailable"] += 1
+            continue
 
         # Use latest Massive-backed price for entry
         quote = fetch_quote(ticker) or {}
@@ -896,12 +951,23 @@ def generate_strategy_proposals(
         stop = pick.get("stop_loss") or pick.get("brain_stop") or 0
         target = pick.get("take_profit") or pick.get("brain_target") or 0
 
-        if not price or price <= 0 or not stop or not target:
+        price, stop, target, level_error = _validate_long_proposal_levels(price, stop, target)
+        if level_error == "missing_or_invalid_levels":
             skips["quote_missing_levels"] += 1
             continue
+        if level_error == "invalid_long_levels":
+            skips["invalid_long_levels"] += 1
+            logger.warning(
+                "[proposals] skip %s: invalid_long_levels entry=%r stop=%r target=%r",
+                ticker,
+                price,
+                stop,
+                target,
+            )
+            continue
 
-        risk_per_share = abs(price - stop)
-        reward_per_share = abs(target - price)
+        risk_per_share = price - stop
+        reward_per_share = target - price
 
         if risk_per_share <= 0:
             skips["risk_per_share_nonpositive"] += 1
@@ -922,15 +988,20 @@ def generate_strategy_proposals(
         quantity, position_size_pct = _compute_position_size(
             price, stop, buying_power, pick,
         )
-        # If no buying power (e.g. broker returned 0), use default so we still suggest a size
-        if quantity is None and position_size_pct is None:
-            quantity, position_size_pct = _compute_position_size(
-                price, stop, 10000.0, pick,
+        if quantity is None or quantity <= 0 or position_size_pct is None:
+            logger.warning(
+                "[proposals] skip %s: sizing_unavailable buying_power=%r "
+                "price=%r stop=%r",
+                ticker,
+                buying_power,
+                price,
+                stop,
             )
-        if quantity is None:
-            quantity = 1
-        if position_size_pct is None:
-            position_size_pct = round(min(_get_brain_weight("pos_pct_hard_cap"), (quantity * price) / max(buying_power, 10000.0) * 100), 2)
+            skips["sizing_unavailable"] += 1
+            continue
+
+        # Supersede only after the replacement proposal has passed level and sizing gates.
+        _supersede_proposals(db, user_id, ticker)
 
         _emit_phase_h_shadow_from_pick(
             db, user_id, pick, ticker,
@@ -1138,13 +1209,16 @@ def create_proposal_from_pick(
     stop = pick.get("stop_loss") or pick.get("brain_stop") or 0
     target = pick.get("take_profit") or pick.get("brain_target") or 0
 
-    if not price or price <= 0:
-        return None, "Could not get current price for this ticker."
-    if not stop or not target:
-        return None, "Missing stop loss or take profit; cannot create proposal."
+    price, stop, target, level_error = _validate_long_proposal_levels(price, stop, target)
+    if level_error == "missing_or_invalid_levels":
+        if price is None:
+            return None, "Could not get current price for this ticker."
+        return None, "Missing or invalid stop loss or take profit; cannot create proposal."
+    if level_error == "invalid_long_levels":
+        return None, "Invalid long proposal levels: stop loss must be below entry and take profit must be above entry."
 
-    risk_per_share = abs(price - stop)
-    reward_per_share = abs(target - price)
+    risk_per_share = price - stop
+    reward_per_share = target - price
     if risk_per_share <= 0:
         return None, "Stop loss must be different from entry."
 
@@ -1156,34 +1230,25 @@ def create_proposal_from_pick(
     if price < _min_price:
         return None, f"Price ${price} is below minimum ${_min_price}."
 
-    _supersede_proposals(db, user_id, ticker)
-
     projected_profit_pct = round((target - price) / price * 100, 2)
     projected_loss_pct = round((price - stop) / price * 100, 2)
 
     buying_power = _get_buying_power()
+    if buying_power is None or buying_power <= 0:
+        return None, "buying_power_unavailable"
+
     quantity, position_size_pct = _compute_position_size(price, stop, buying_power, pick)
-    # Phase 4 (2026-05-01): all four magic-number fallbacks routed through
-    # the centralized resolver. Every firing logs CRITICAL — operator can
-    # observe how often the broker fetch is failing.
-    if quantity is None and position_size_pct is None:
-        quantity, position_size_pct = _compute_position_size(
-            price, stop,
-            _resolve_capital(None, caller="alerts.create_proposal_from_pick:size_path"),
-            pick,
-        )
-    if quantity is None:
-        cap = _resolve_capital(buying_power, caller="alerts.create_proposal_from_pick:qty_fallback")
-        quantity = max(1, int(cap * (_MAX_RISK_PCT / 100) / risk_per_share))
-    if position_size_pct is None:
-        cap = _resolve_capital(buying_power, caller="alerts.create_proposal_from_pick:pct_fallback")
-        position_size_pct = round(min(_POS_PCT_HARD_CAP, (quantity * price) / max(cap, 1) * 100), 2)
+    if quantity is None or quantity <= 0 or position_size_pct is None:
+        return None, "sizing_unavailable"
+
+    # Supersede only after the replacement proposal has passed level, capital, and sizing gates.
+    _supersede_proposals(db, user_id, ticker)
 
     _emit_phase_h_shadow_from_pick(
         db, user_id, pick, ticker,
         entry=price, stop=stop, target=target,
         quantity=quantity,
-        buying_power=_resolve_capital(buying_power, caller="alerts.create_proposal_from_pick:emit"),
+        buying_power=buying_power,
         source="alerts.create_proposal_from_pick",
     )
     confidence = pick.get("brain_confidence") or (combined * 10)
@@ -1853,7 +1918,7 @@ def _execute_proposal(
     fill — this prevents marking trades as "executed" when the limit order
     is still sitting unfilled.
     """
-    from ..broker_manager import place_buy_order, map_status, get_best_broker_for, is_any_connected
+    from ..broker_manager import place_buy_order, map_status, get_best_broker_for
     from .decision_ledger import (
         mark_packet_executed,
         mark_packet_linked_trade,
@@ -1872,15 +1937,28 @@ def _execute_proposal(
 
     ticker = proposal.ticker
     quantity = proposal.quantity
+    buying_power = _get_buying_power()
+    if buying_power is None or buying_power <= 0:
+        msg = format_order_blocked(ticker, "buying_power_unavailable")
+        dispatch_alert(db, user_id, POSITION_OPENED, ticker, msg)
+        return {"status": "blocked", "error": "buying_power_unavailable"}
+
+    entry, stop, target, level_error = _validate_long_proposal_levels(
+        getattr(proposal, "entry_price", None),
+        getattr(proposal, "stop_loss", None),
+        getattr(proposal, "take_profit", None),
+    )
+    if level_error is not None:
+        error = "invalid_long_levels" if level_error == "invalid_long_levels" else "missing_or_invalid_levels"
+        msg = format_order_blocked(ticker, error)
+        dispatch_alert(db, user_id, POSITION_OPENED, ticker, msg)
+        return {"status": "blocked", "error": error}
 
     # Enforce the same portfolio risk gate used by paper auto-entry before any live/manual placement.
     try:
         from .portfolio_risk import check_new_trade_allowed
 
-        risk_capital = float(_get_buying_power() or 0.0)
-        if risk_capital <= 0:
-            risk_capital = 100000.0
-        allowed, reason = check_new_trade_allowed(db, user_id, ticker, capital=risk_capital)
+        allowed, reason = check_new_trade_allowed(db, user_id, ticker, capital=buying_power)
         if not allowed:
             msg = format_order_blocked(ticker, reason)
             dispatch_alert(db, user_id, POSITION_OPENED, ticker, msg)
@@ -1890,9 +1968,6 @@ def _execute_proposal(
         return {"status": "blocked", "error": "risk gate check failed"}
 
     if not quantity or quantity <= 0:
-        buying_power = _get_buying_power()
-        stop = proposal.stop_loss or proposal.entry_price
-        risk_per_share = abs(proposal.entry_price - stop) if stop else 0
         pick = {}
         if proposal.signals_json:
             try:
@@ -1901,33 +1976,33 @@ def _execute_proposal(
             except Exception:
                 pass
         pick["is_crypto"] = proposal.ticker.endswith("-USD")
-        bp = buying_power if buying_power > 0 else 10000.0
         quantity, position_size_pct = _compute_position_size(
-            proposal.entry_price, stop, bp, pick,
+            entry, stop, buying_power, pick,
         )
         if quantity is not None and quantity > 0:
             proposal.quantity = quantity
             if position_size_pct is not None:
                 proposal.position_size_pct = position_size_pct
-        elif buying_power > 0 and risk_per_share > 0:
-            risk_dollars = buying_power * (_MAX_RISK_PCT / 100)
-            quantity = max(1, int(risk_dollars / risk_per_share))
-            proposal.quantity = quantity
         else:
-            quantity = 1
-            proposal.quantity = 1
+            return {"status": "blocked", "error": "sizing_unavailable"}
 
         _emit_phase_h_shadow_from_pick(
             db, user_id, pick, ticker,
-            entry=float(proposal.entry_price),
-            stop=float(stop) if stop else float(proposal.entry_price),
-            target=float(proposal.take_profit) if getattr(proposal, "take_profit", None) else None,
+            entry=entry,
+            stop=stop,
+            target=target,
             quantity=quantity,
-            buying_power=bp,
+            buying_power=buying_power,
             source="alerts.execute_proposal",
         )
 
+    manual_requested = str(broker or "").strip().lower() == "manual"
     target_broker = broker or get_best_broker_for(ticker)
+    if target_broker == "manual" and not manual_requested:
+        msg = format_order_blocked(ticker, "broker_unavailable")
+        dispatch_alert(db, user_id, POSITION_OPENED, ticker, msg)
+        return {"status": "blocked", "error": "broker_unavailable"}
+
     decision_packet_id: int | None = None
     try:
         pkt = record_strategy_proposal_decision(
@@ -1954,7 +2029,7 @@ def _execute_proposal(
     except Exception:
         sector_label = None
 
-    if not is_any_connected() or target_broker == "manual":
+    if target_broker == "manual":
         trade = Trade(
             user_id=user_id,
             ticker=ticker,
@@ -2249,16 +2324,20 @@ def _safe_float(val) -> float:
         return 0.0
 
 
-def _get_buying_power() -> float:
-    """Get current buying power from Robinhood, or a sensible default."""
+def _get_buying_power() -> float | None:
+    """Return proven buying power, or None when capital is unknown."""
     try:
         from ..broker_service import is_connected, get_portfolio
-        if is_connected():
-            portfolio = get_portfolio()
-            return portfolio.get("buying_power", 0)
+        if not is_connected():
+            return None
+        portfolio = get_portfolio()
+        if not isinstance(portfolio, dict):
+            return None
+        buying_power = float(portfolio.get("buying_power"))
+        return buying_power if buying_power > 0 else None
     except Exception:
-        pass
-    return 10000.0  # default for position sizing when broker is not connected
+        logger.warning("[alerts] buying_power_unavailable", exc_info=True)
+        return None
 
 
 _PRICE_DRIFT_EXPIRE_PCT = 30  # expire proposals when price drifts >30% from entry

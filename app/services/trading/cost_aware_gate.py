@@ -33,7 +33,6 @@ without hitting production state.
 from __future__ import annotations
 
 import logging
-import os
 import time
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -85,9 +84,7 @@ def _truthy_flag(value: Any) -> bool:
 
 
 def _coinbase_cap_source_relation(settings_: Any | None) -> str:
-    raw = getattr(settings_, "chili_phase5k_coinbase_cap_use_envelopes", None)
-    if raw is None:
-        raw = os.environ.get(PHASE5K_COINBASE_CAP_ENV)
+    raw = getattr(settings_, "chili_phase5k_coinbase_cap_use_envelopes", False)
     if _truthy_flag(raw):
         return _COINBASE_CAP_ENVELOPE_RELATION
     return _COINBASE_CAP_COMPAT_RELATION
