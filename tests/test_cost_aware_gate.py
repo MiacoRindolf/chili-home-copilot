@@ -37,6 +37,8 @@ from app.services.trading.cost_aware_gate import (
     REASON_GATE_COINBASE_PASSED,
     REASON_GATE_NO_VENUE,
     REASON_GATE_RH_FEE_FREE,
+    REASON_GATE_TCA_INVALID,
+    REASON_GATE_TCA_UNPROVEN,
     cost_aware_min_edge_gate,
     per_venue_cap_check,
     resolve_coinbase_buying_power,
@@ -76,11 +78,30 @@ class _FakeResult:
         return _FakeMappings(self._row)
 
 
-class _FakeCostDb:
-    def __init__(self, row):
-        self.row = row
+class _FakeScalarResult:
+    def __init__(self, value):
+        self.value = value
 
-    def execute(self, *_args, **_kwargs):
+    def scalar(self):
+        return self.value
+
+
+class _FakeCostDb:
+    def __init__(self, row, *, usable_samples=9, raise_on_usable_count=False):
+        self.row = row
+        self.usable_samples = usable_samples
+        self.raise_on_usable_count = raise_on_usable_count
+        self.sqls = []
+        self.params = []
+
+    def execute(self, stmt, params=None):
+        sql = str(stmt)
+        self.sqls.append(sql)
+        self.params.append(params or {})
+        if "COUNT(*)" in sql:
+            if self.raise_on_usable_count:
+                raise RuntimeError("usable sample check unavailable")
+            return _FakeScalarResult(self.usable_samples)
         return _FakeResult(self.row)
 
 
@@ -234,6 +255,20 @@ def test_gate_coinbase_none_edge_treated_as_zero_blocks():
     assert res.edge_bps == 0
 
 
+@pytest.mark.parametrize("projected_edge", [float("nan"), float("inf"), True, "bad"])
+def test_gate_coinbase_nonfinite_projected_edge_blocks(projected_edge):
+    s = _settings_stub()
+
+    res = cost_aware_min_edge_gate(
+        ticker="AKT-USD", projected_profit_pct=projected_edge, settings_=s,
+    )
+
+    assert res.allowed is False
+    assert res.reason == REASON_GATE_COINBASE_BLOCKED
+    assert res.edge_bps == 0
+    assert res.threshold_bps == 150
+
+
 def test_gate_empty_ticker_returns_no_venue():
     s = _settings_stub()
     res = cost_aware_min_edge_gate(
@@ -271,6 +306,7 @@ def test_gate_coinbase_tca_estimate_raises_threshold():
     s = _settings_stub(include_tca=True)
     db = _FakeCostDb({
         "sample_trades": 9,
+        "window_days": 30,
         "p90_spread_bps": 12.0,
         "p90_slippage_bps": 88.0,
         "median_spread_bps": 3.0,
@@ -287,6 +323,111 @@ def test_gate_coinbase_tca_estimate_raises_threshold():
     assert res.tca_cost_bps == 100
     assert res.tca_snapshot is not None
     assert res.tca_snapshot["used"] is True
+    assert res.tca_snapshot["sample_basis"] == "usable_finite_tca_trades"
+    assert res.tca_snapshot["usable_samples"] == 9
+    assert db.params[0]["side"] == "long"
+    assert db.params[1]["side"] == "long"
+
+
+def test_gate_coinbase_tca_estimate_requires_usable_sample_count():
+    s = _settings_stub(include_tca=True, min_tca_samples=5)
+    db = _FakeCostDb({
+        "sample_trades": 4,
+        "window_days": 30,
+        "p90_spread_bps": 12.0,
+        "p90_slippage_bps": 88.0,
+        "median_spread_bps": 3.0,
+        "median_slippage_bps": 40.0,
+        "last_updated_at": None,
+    })
+
+    res = cost_aware_min_edge_gate(
+        ticker="AKT-USD", projected_profit_pct=2.0, settings_=s, db=db,
+    )
+
+    assert res.allowed is False
+    assert res.reason == REASON_GATE_TCA_UNPROVEN
+    assert res.tca_cost_bps == 0
+    assert res.tca_snapshot is not None
+    assert res.tca_snapshot["used"] is False
+    assert res.tca_snapshot["reason"] == "insufficient_samples"
+
+
+def test_gate_coinbase_tca_estimate_rechecks_usable_backing_samples():
+    s = _settings_stub(include_tca=True, min_tca_samples=5)
+    db = _FakeCostDb({
+        "sample_trades": 9,
+        "window_days": 30,
+        "p90_spread_bps": 12.0,
+        "p90_slippage_bps": 88.0,
+        "median_spread_bps": 3.0,
+        "median_slippage_bps": 40.0,
+        "last_updated_at": None,
+    }, usable_samples=4)
+
+    res = cost_aware_min_edge_gate(
+        ticker="AKT-USD", projected_profit_pct=12.0, settings_=s, db=db,
+    )
+
+    assert res.allowed is False
+    assert res.reason == REASON_GATE_TCA_UNPROVEN
+    assert res.tca_cost_bps == 0
+    assert res.tca_snapshot is not None
+    assert res.tca_snapshot["used"] is False
+    assert res.tca_snapshot["reason"] == "insufficient_usable_samples"
+    assert res.tca_snapshot["usable_samples"] == 4
+
+
+def test_gate_coinbase_tca_estimate_blocks_when_usable_check_fails():
+    s = _settings_stub(include_tca=True, min_tca_samples=5)
+    db = _FakeCostDb({
+        "sample_trades": 9,
+        "window_days": 30,
+        "p90_spread_bps": 12.0,
+        "p90_slippage_bps": 88.0,
+        "median_spread_bps": 3.0,
+        "median_slippage_bps": 40.0,
+        "last_updated_at": None,
+    }, raise_on_usable_count=True)
+
+    res = cost_aware_min_edge_gate(
+        ticker="AKT-USD", projected_profit_pct=12.0, settings_=s, db=db,
+    )
+
+    assert res.allowed is False
+    assert res.reason == REASON_GATE_TCA_INVALID
+    assert res.tca_cost_bps == 0
+    assert res.tca_snapshot is not None
+    assert res.tca_snapshot["used"] is False
+    assert res.tca_snapshot["reason"] == "usable_sample_check_failed"
+
+
+def test_gate_coinbase_tca_estimate_blocks_nonfinite_cost_row():
+    s = _settings_stub(include_tca=True, min_tca_samples=5)
+    db = _FakeCostDb({
+        "sample_trades": 9,
+        "window_days": 30,
+        "p90_spread_bps": float("inf"),
+        "p90_slippage_bps": 88.0,
+        "median_spread_bps": 3.0,
+        "median_slippage_bps": float("nan"),
+        "last_updated_at": None,
+    })
+
+    res = cost_aware_min_edge_gate(
+        ticker="AKT-USD", projected_profit_pct=12.0, settings_=s, db=db,
+    )
+
+    assert res.allowed is False
+    assert res.reason == REASON_GATE_TCA_INVALID
+    assert res.tca_cost_bps == 0
+    assert res.tca_snapshot is not None
+    assert res.tca_snapshot["used"] is False
+    assert res.tca_snapshot["reason"] == "invalid_tca_estimate"
+    assert res.tca_snapshot["invalid_fields"] == [
+        "median_slippage_bps",
+        "p90_spread_bps",
+    ]
 
 
 @pytest.mark.parametrize("projected_edge", [float("nan"), float("inf"), True])

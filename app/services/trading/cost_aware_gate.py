@@ -48,6 +48,8 @@ REASON_GATE_RH_FEE_FREE = "rh_fee_free"
 REASON_GATE_COINBASE_PASSED = "coinbase_clears_fee_threshold"
 REASON_GATE_COINBASE_BLOCKED = "coinbase_below_fee_threshold"
 REASON_GATE_NO_VENUE = "no_venue_supports"
+REASON_GATE_TCA_INVALID = "coinbase_tca_estimate_invalid"
+REASON_GATE_TCA_UNPROVEN = "coinbase_tca_estimate_unproven"
 REASON_CAP_OK = "within_cap"
 REASON_CAP_NOTIONAL = "venue_notional_cap_exceeded"
 REASON_CAP_POSITIONS = "venue_concurrent_positions_cap_exceeded"
@@ -287,8 +289,21 @@ def cost_aware_min_edge_gate(
             default=5,
         )
         tca_cost_bps, tca_snapshot = _coinbase_tca_cost_bps(
-            db=db, ticker=ticker, side="buy", min_samples=min_samples
+            db=db, ticker=ticker, side="long", min_samples=min_samples
         )
+        if tca_snapshot and tca_snapshot.get("used") is False:
+            tca_reason = str(tca_snapshot.get("reason") or "")
+            reason = (
+                REASON_GATE_TCA_INVALID
+                if tca_reason in {"invalid_tca_estimate", "usable_sample_check_failed"}
+                else REASON_GATE_TCA_UNPROVEN
+            )
+            return CostGateDecision(
+                allowed=False, reason=reason,
+                fee_bps=fee_bps, threshold_bps=threshold_bps,
+                edge_bps=edge_bps, tca_cost_bps=tca_cost_bps,
+                tca_snapshot=tca_snapshot,
+            )
         threshold_bps += tca_cost_bps
 
     if edge_bps >= threshold_bps:
@@ -315,15 +330,16 @@ def _coinbase_tca_cost_bps(
 ) -> tuple[int, dict[str, Any] | None]:
     """Return p90 spread+slippage bps from execution-cost estimates.
 
-    Missing/unavailable estimates are treated as zero extra cost so the
-    legacy fee+buffer gate remains the fallback. When present, this lets live
-    TCA erode gross projected edge before the order reaches Coinbase.
+    Missing estimates are treated as zero extra cost so the legacy fee+buffer
+    gate remains the fallback. When a persisted estimate is present, it must
+    prove finite cost fields and enough usable backing TCA observations before
+    it can approve Coinbase entry.
     """
     if db is None:
         return 0, None
     try:
         row = db.execute(text("""
-            SELECT sample_trades, p90_spread_bps, p90_slippage_bps,
+            SELECT sample_trades, window_days, p90_spread_bps, p90_slippage_bps,
                    median_spread_bps, median_slippage_bps, last_updated_at
             FROM trading_execution_cost_estimates
             WHERE UPPER(ticker) = UPPER(:ticker)
@@ -346,26 +362,114 @@ def _coinbase_tca_cost_bps(
             "used": False,
             "reason": "insufficient_samples",
         }
+    raw_window_days = row.get("window_days")
+    try:
+        window_days = 30 if isinstance(raw_window_days, bool) else int(raw_window_days or 30)
+    except (TypeError, ValueError):
+        window_days = 30
+    window_days = max(1, window_days)
 
-    def _f(name: str) -> float:
-        return _nonnegative_float(row.get(name)) or 0.0
+    fields = {
+        name: _nonnegative_float(row.get(name))
+        for name in (
+            "p90_spread_bps",
+            "p90_slippage_bps",
+            "median_spread_bps",
+            "median_slippage_bps",
+        )
+    }
+    invalid_fields = sorted(name for name, value in fields.items() if value is None)
+    if invalid_fields:
+        return 0, {
+            "sample_trades": samples,
+            "min_samples": min_samples_i,
+            "used": False,
+            "reason": "invalid_tca_estimate",
+            "invalid_fields": invalid_fields,
+        }
 
-    spread_bps = _f("p90_spread_bps")
-    slippage_bps = _f("p90_slippage_bps")
+    usable_samples = _coinbase_tca_backing_usable_samples(
+        db=db, ticker=ticker, side=side, window_days=window_days,
+    )
+    if usable_samples is None:
+        return 0, {
+            "sample_trades": samples,
+            "min_samples": min_samples_i,
+            "used": False,
+            "reason": "usable_sample_check_failed",
+        }
+    if usable_samples < min_samples_i:
+        return 0, {
+            "sample_trades": samples,
+            "usable_samples": usable_samples,
+            "min_samples": min_samples_i,
+            "used": False,
+            "reason": "insufficient_usable_samples",
+        }
+
+    spread_bps = fields["p90_spread_bps"] or 0.0
+    slippage_bps = fields["p90_slippage_bps"] or 0.0
     tca_cost_bps = int(round(spread_bps + slippage_bps))
     last_updated = row.get("last_updated_at")
     return tca_cost_bps, {
         "sample_trades": samples,
+        "usable_samples": usable_samples,
+        "sample_basis": "usable_finite_tca_trades",
+        "window_days": window_days,
         "p90_spread_bps": spread_bps,
         "p90_slippage_bps": slippage_bps,
-        "median_spread_bps": _f("median_spread_bps"),
-        "median_slippage_bps": _f("median_slippage_bps"),
+        "median_spread_bps": fields["median_spread_bps"] or 0.0,
+        "median_slippage_bps": fields["median_slippage_bps"] or 0.0,
         "tca_cost_bps": tca_cost_bps,
         "last_updated_at": (
             last_updated.isoformat() if hasattr(last_updated, "isoformat") else last_updated
         ),
         "used": True,
     }
+
+
+def _coinbase_tca_backing_usable_samples(
+    *,
+    db,
+    ticker: str,
+    side: str,
+    window_days: int,
+) -> int | None:
+    try:
+        result = db.execute(text("""
+            SELECT CAST(COUNT(*) AS INTEGER) AS usable_samples
+            FROM trading_trades
+            WHERE UPPER(ticker) = UPPER(:ticker)
+              AND status = 'closed'
+              AND LOWER(COALESCE(direction, 'long')) = LOWER(:side)
+              AND entry_date >= NOW() - (:window_days * INTERVAL '1 day')
+              AND (
+                  (
+                      tca_entry_slippage_bps IS NOT NULL
+                      AND CAST(tca_entry_slippage_bps AS TEXT) NOT IN ('NaN', 'Infinity', '-Infinity')
+                  )
+                  OR (
+                      tca_exit_slippage_bps IS NOT NULL
+                      AND CAST(tca_exit_slippage_bps AS TEXT) NOT IN ('NaN', 'Infinity', '-Infinity')
+                  )
+              )
+        """), {
+            "ticker": ticker,
+            "side": side,
+            "window_days": int(max(1, window_days)),
+        })
+        value = result.scalar()
+        if isinstance(value, bool):
+            return None
+        return max(0, int(value or 0))
+    except Exception:
+        logger.warning(
+            "[cost_aware_gate] TCA usable-sample validation failed for %s/%s",
+            ticker,
+            side,
+            exc_info=True,
+        )
+        return None
 
 
 # ── Per-venue cap check ──────────────────────────────────────────────
@@ -481,6 +585,8 @@ __all__ = [
     "REASON_GATE_COINBASE_PASSED",
     "REASON_GATE_NO_VENUE",
     "REASON_GATE_RH_FEE_FREE",
+    "REASON_GATE_TCA_INVALID",
+    "REASON_GATE_TCA_UNPROVEN",
     "cost_aware_min_edge_gate",
     "per_venue_cap_check",
     "resolve_coinbase_buying_power",

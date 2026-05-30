@@ -82,6 +82,7 @@ class EstimateRow:
     median_slippage_bps: float
     p90_slippage_bps: float
     avg_daily_volume_usd: float
+    # Count trades with at least one finite TCA observation; closed-row count is not enough.
     sample_trades: int
 
 
@@ -126,6 +127,63 @@ def _notional(trade: Any) -> float:
     if px is None or qty is None:
         return 0.0
     return abs(px * qty)
+
+
+def _estimate_from_rows(
+    *,
+    ticker: str,
+    side_norm: str,
+    window_days: int,
+    rows: list[Any],
+    adv_lookup_fn: Callable[[str, int], float] | None = None,
+) -> EstimateRow | None:
+    if not rows:
+        return None
+
+    slip_bps: list[float] = []
+    spread_bps: list[float] = []
+    notional_sum = 0.0
+    usable_trade_samples = 0
+
+    for t in rows:
+        entry = _finite_float_or_none(getattr(t, "tca_entry_slippage_bps", None))
+        exit_ = _finite_float_or_none(getattr(t, "tca_exit_slippage_bps", None))
+        has_usable_tca = entry is not None or exit_ is not None
+
+        if entry is not None:
+            slip_bps.append(abs(entry))
+            # Treat entry slippage as a proxy for spread paid
+            spread_bps.append(abs(entry))
+        if exit_ is not None:
+            slip_bps.append(abs(exit_))
+        if has_usable_tca:
+            usable_trade_samples += 1
+        notional_sum += _notional(t)
+
+    if not slip_bps:
+        return None
+
+    # ADV: prefer external lookup, otherwise crude notional / window_days.
+    adv_usd = 0.0
+    if adv_lookup_fn is not None:
+        try:
+            adv_usd = _positive_finite_float(adv_lookup_fn(ticker, int(window_days))) or 0.0
+        except Exception:
+            adv_usd = 0.0
+    if adv_usd <= 0 and window_days > 0:
+        adv_usd = notional_sum / float(window_days)
+
+    return EstimateRow(
+        ticker=ticker,
+        side=side_norm,
+        window_days=int(window_days),
+        median_spread_bps=_percentile(spread_bps, 0.5) if spread_bps else 0.0,
+        p90_spread_bps=_percentile(spread_bps, 0.9) if spread_bps else 0.0,
+        median_slippage_bps=_percentile(slip_bps, 0.5),
+        p90_slippage_bps=_percentile(slip_bps, 0.9),
+        avg_daily_volume_usd=max(0.0, adv_usd),
+        sample_trades=usable_trade_samples,
+    )
 
 
 def compute_rolling_estimate(
@@ -175,45 +233,12 @@ def compute_rolling_estimate(
     if not rows:
         return None
 
-    slip_bps: list[float] = []
-    spread_bps: list[float] = []
-    notional_sum = 0.0
-
-    for t in rows:
-        entry = _finite_float_or_none(t.tca_entry_slippage_bps)
-        exit_ = _finite_float_or_none(t.tca_exit_slippage_bps)
-
-        if entry is not None:
-            slip_bps.append(abs(entry))
-            # Treat entry slippage as a proxy for spread paid
-            spread_bps.append(abs(entry))
-        if exit_ is not None:
-            slip_bps.append(abs(exit_))
-        notional_sum += _notional(t)
-
-    if not slip_bps:
-        return None
-
-    # ADV: prefer external lookup, otherwise crude notional / window_days.
-    adv_usd = 0.0
-    if adv_lookup_fn is not None:
-        try:
-            adv_usd = _positive_finite_float(adv_lookup_fn(ticker, int(window_days))) or 0.0
-        except Exception:
-            adv_usd = 0.0
-    if adv_usd <= 0 and window_days > 0:
-        adv_usd = notional_sum / float(window_days)
-
-    return EstimateRow(
+    return _estimate_from_rows(
         ticker=ticker,
         side=side_norm,
         window_days=int(window_days),
-        median_spread_bps=_percentile(spread_bps, 0.5) if spread_bps else 0.0,
-        p90_spread_bps=_percentile(spread_bps, 0.9) if spread_bps else 0.0,
-        median_slippage_bps=_percentile(slip_bps, 0.5),
-        p90_slippage_bps=_percentile(slip_bps, 0.9),
-        avg_daily_volume_usd=max(0.0, adv_usd),
-        sample_trades=len(rows),
+        rows=rows,
+        adv_lookup_fn=adv_lookup_fn,
     )
 
 

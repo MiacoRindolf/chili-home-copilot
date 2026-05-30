@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -9,6 +10,7 @@ from app.models.trading import ExecutionCostEstimate, Trade
 from app.services.trading.execution_cost_builder import (
     BuilderReport,
     EstimateRow,
+    _estimate_from_rows,
     compute_rolling_estimate,
     estimates_summary,
     mode_is_active,
@@ -93,7 +95,7 @@ class TestComputeRollingEstimate:
             db, ticker="MSFT_PHF", side="long", window_days=30
         )
         assert est is not None
-        assert est.sample_trades == 2   # both trades counted as "window samples"
+        assert est.sample_trades == 1   # only trades with usable finite TCA count
         assert est.p90_slippage_bps == pytest.approx(7.0)  # only one slip value
         _cleanup(db, ["MSFT_PHF"])
 
@@ -109,12 +111,72 @@ class TestComputeRollingEstimate:
         )
 
         assert est is not None
-        assert est.sample_trades == 3
+        assert est.sample_trades == 1
         assert est.median_spread_bps == pytest.approx(7.0)
         assert est.p90_spread_bps == pytest.approx(7.0)
         assert est.median_slippage_bps == pytest.approx(7.0)
         assert est.p90_slippage_bps == pytest.approx(7.0)
         _cleanup(db, ["BADTCA_PHF"])
+
+    def test_estimate_counts_only_usable_finite_tca_trades(self):
+        rows = [
+            SimpleNamespace(
+                tca_entry_slippage_bps=4.0,
+                tca_exit_slippage_bps=2.0,
+                entry_price=10.0,
+                quantity=1.0,
+            ),
+            SimpleNamespace(
+                tca_entry_slippage_bps=float("nan"),
+                tca_exit_slippage_bps=float("inf"),
+                entry_price=10.0,
+                quantity=1.0,
+            ),
+            SimpleNamespace(
+                tca_entry_slippage_bps=None,
+                tca_exit_slippage_bps="3.0",
+                entry_price=10.0,
+                quantity=1.0,
+            ),
+        ]
+
+        est = _estimate_from_rows(
+            ticker="FINITE_PHF",
+            side_norm="long",
+            window_days=30,
+            rows=rows,
+            adv_lookup_fn=lambda _ticker, _window: 1_000_000.0,
+        )
+
+        assert est is not None
+        assert est.sample_trades == 2
+        assert est.median_slippage_bps == pytest.approx(3.0)
+        assert est.p90_slippage_bps == pytest.approx(3.8)
+
+    def test_estimate_returns_none_when_all_tca_values_are_nonfinite(self):
+        rows = [
+            SimpleNamespace(
+                tca_entry_slippage_bps=float("nan"),
+                tca_exit_slippage_bps=float("inf"),
+                entry_price=10.0,
+                quantity=1.0,
+            ),
+            SimpleNamespace(
+                tca_entry_slippage_bps=True,
+                tca_exit_slippage_bps=None,
+                entry_price=10.0,
+                quantity=1.0,
+            ),
+        ]
+
+        est = _estimate_from_rows(
+            ticker="NO_TCA_PHF",
+            side_norm="long",
+            window_days=30,
+            rows=rows,
+        )
+
+        assert est is None
 
     def test_filters_by_direction(self, db):
         _cleanup(db, ["NVDA_PHF"])
