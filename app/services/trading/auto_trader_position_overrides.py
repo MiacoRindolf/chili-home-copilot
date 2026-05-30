@@ -275,6 +275,8 @@ def _close_option_trade_now(
     from .options.exit_monitor import (
         _has_active_pending_exit,
         _opt_meta,
+        _option_contract_id,
+        _option_exit_contract_identity,
         _option_exit_order_state,
         _option_exit_quote_price,
         _option_quote_is_crossed,
@@ -295,12 +297,10 @@ def _close_option_trade_now(
         }
 
     meta = _opt_meta(t)
-    expiration = str(meta.get("expiration") or "")
-    strike = meta.get("strike")
-    option_type = str(meta.get("option_type") or "").lower()
-    strike_f = _positive_finite_float(strike)
-    if not (expiration and strike_f is not None and option_type in ("call", "put")):
+    identity = _option_exit_contract_identity(t, meta)
+    if identity is None:
         return {"ok": False, "error": "missing_option_meta"}
+    underlying, expiration, strike, option_type = identity
 
     qty = parse_contract_quantity(getattr(t, "quantity", None))
     if qty is None:
@@ -310,11 +310,13 @@ def _close_option_trade_now(
     if not adapter.is_enabled():
         return {"ok": False, "error": "rh_options_adapter_off"}
 
-    underlying = str(meta.get("underlying") or t.ticker or "").upper()
-    contract = adapter.find_contract(underlying, expiration, strike_f, option_type)
+    contract = adapter.find_contract(underlying, expiration, strike, option_type)
     if not contract:
         return {"ok": False, "error": "option_contract_not_found"}
-    quote = adapter.get_quote(str(contract.get("id") or ""))
+    contract_id = _option_contract_id(contract)
+    if contract_id is None:
+        return {"ok": False, "error": "option_contract_not_found"}
+    quote = adapter.get_quote(contract_id)
     if not quote:
         return {"ok": False, "error": "no_option_quote"}
     if _option_quote_has_malformed_price(quote):
@@ -332,7 +334,7 @@ def _close_option_trade_now(
     res = adapter.place_option_sell(
         underlying=underlying,
         expiration=expiration,
-        strike=strike_f,
+        strike=strike,
         option_type=option_type,
         quantity=qty,
         limit_price=float(limit_price),

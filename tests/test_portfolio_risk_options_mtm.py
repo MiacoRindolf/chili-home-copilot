@@ -175,6 +175,125 @@ def test_unrealized_pnl_for_options_rejects_crossed_premium_bbo() -> None:
     assert pnl == 0.0
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("strike", True),
+        ("strike", 0.0),
+        ("strike", float("nan")),
+        ("strike", float("inf")),
+        ("expiration", "not-a-date"),
+        ("option_type", "banana"),
+    ],
+)
+def test_unrealized_pnl_for_options_rejects_invalid_contract_identity(field, value) -> None:
+    from app.services.trading.portfolio_risk import _compute_unrealized_pnl
+
+    trade = _option_trade_stub()
+    trade.indicator_snapshot["breakout_alert"]["option_meta"][field] = value
+    fake_options = MagicMock()
+    fake_options.is_enabled.return_value = True
+
+    with patch(
+        "app.services.trading.market_data.fetch_quote",
+        side_effect=AssertionError("option MTM must not fall back to underlying spot"),
+    ), patch(
+        "app.services.trading.venue.robinhood_options.RobinhoodOptionsAdapter",
+        return_value=fake_options,
+    ) as adapter_cls:
+        pnl = _compute_unrealized_pnl(_FakeDb([trade]), user_id=None)
+
+    assert pnl == 0.0
+    adapter_cls.assert_not_called()
+    fake_options.find_contract.assert_not_called()
+    fake_options.get_quote.assert_not_called()
+
+
+@pytest.mark.parametrize("contract", [{"id": ""}, {"id": None}, {"id": "   "}])
+def test_unrealized_pnl_for_options_skips_blank_contract_id(contract) -> None:
+    from app.services.trading.portfolio_risk import _compute_unrealized_pnl
+
+    trade = _option_trade_stub()
+    fake_options = MagicMock()
+    fake_options.is_enabled.return_value = True
+    fake_options.find_contract.return_value = contract
+    fake_options.get_quote.side_effect = AssertionError("blank contract id must not fetch quote")
+
+    with patch(
+        "app.services.trading.market_data.fetch_quote",
+        side_effect=AssertionError("option MTM must not fall back to underlying spot"),
+    ), patch(
+        "app.services.trading.venue.robinhood_options.RobinhoodOptionsAdapter",
+        return_value=fake_options,
+    ):
+        pnl = _compute_unrealized_pnl(_FakeDb([trade]), user_id=None)
+
+    assert pnl == 0.0
+    fake_options.get_quote.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("entry_price", "quantity"),
+    [
+        (0.0, 2.0),
+        (float("nan"), 2.0),
+        (float("inf"), 2.0),
+        (True, 2.0),
+        (1.25, 0.0),
+        (1.25, float("inf")),
+        (1.25, True),
+    ],
+)
+def test_unrealized_pnl_for_options_skips_invalid_pnl_basis(entry_price, quantity) -> None:
+    from app.services.trading.portfolio_risk import _compute_unrealized_pnl
+
+    trade = _option_trade_stub(entry_price=entry_price, quantity=quantity)
+    fake_options = MagicMock()
+    fake_options.is_enabled.return_value = True
+    fake_options.find_contract.return_value = {"id": "opt-contract-1"}
+    fake_options.get_quote.return_value = {"mark_price": "1.45"}
+
+    with patch(
+        "app.services.trading.market_data.fetch_quote",
+        side_effect=AssertionError("option MTM must not fall back to underlying spot"),
+    ), patch(
+        "app.services.trading.venue.robinhood_options.RobinhoodOptionsAdapter",
+        return_value=fake_options,
+    ):
+        pnl = _compute_unrealized_pnl(_FakeDb([trade]), user_id=None)
+
+    assert pnl == 0.0
+
+
+@pytest.mark.parametrize(
+    ("quote_price", "entry_price", "quantity"),
+    [
+        ("NaN", 100.0, 1.0),
+        ("Infinity", 100.0, 1.0),
+        (105.0, float("inf"), 1.0),
+        (105.0, True, 1.0),
+        (105.0, 100.0, float("inf")),
+        (105.0, 100.0, True),
+    ],
+)
+def test_unrealized_pnl_for_stocks_skips_invalid_pnl_basis(
+    quote_price,
+    entry_price,
+    quantity,
+) -> None:
+    from app.services.trading.portfolio_risk import _compute_unrealized_pnl
+
+    trade = _stock_trade_stub(entry_price=entry_price, quantity=quantity)
+
+    with patch(
+        "app.services.trading.market_data.fetch_quote",
+        return_value={"price": quote_price},
+    ):
+        pnl = _compute_unrealized_pnl(_FakeDb([trade]), user_id=None)
+
+    assert pnl == 0.0
+
+
 def test_option_entry_notional_uses_contract_multiplier() -> None:
     from app.services.trading.portfolio_risk import _trade_entry_notional
 

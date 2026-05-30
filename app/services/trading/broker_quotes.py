@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -17,13 +18,39 @@ _LIVE_BROKER_SOURCES = frozenset({"robinhood", "coinbase"})
 
 
 def _safe_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
     if value in (None, ""):
         return None
     try:
         out = float(value)
     except (TypeError, ValueError):
         return None
-    return out if out > 0 else None
+    return out if math.isfinite(out) and out > 0 else None
+
+
+def _option_quote_price(
+    quote: dict[str, Any],
+    *keys: str,
+) -> tuple[float | None, bool]:
+    for key in keys:
+        raw = quote.get(key)
+        if raw is None:
+            continue
+        if isinstance(raw, str) and not raw.strip():
+            continue
+        if isinstance(raw, bool):
+            return None, True
+        try:
+            out = float(raw)
+        except (TypeError, ValueError):
+            return None, True
+        if not math.isfinite(out) or out < 0:
+            return None, True
+        if out == 0:
+            return None, False
+        return out, False
+    return None, False
 
 
 def _is_option_trade_safe(trade: Any) -> bool:
@@ -235,13 +262,14 @@ def _option_quote_for_trade(
     """Option-premium quote for an option Trade row; never use underlying spot."""
     unavailable = {**base, "source": "robinhood_options_unavailable"}
     try:
+        from .options.contracts import normalize_expiration, normalize_option_type
         from .options.exit_monitor import _opt_meta
         from .venue.robinhood_options import RobinhoodOptionsAdapter
 
         meta = _opt_meta(trade)
-        expiration = str(meta.get("expiration") or "").strip()
+        expiration = normalize_expiration(meta.get("expiration"))
         strike = _safe_float(meta.get("strike"))
-        option_type = str(meta.get("option_type") or "").strip().lower()
+        option_type = normalize_option_type(meta.get("option_type"))
         if not (expiration and strike is not None and option_type in ("call", "put")):
             return unavailable
 
@@ -257,7 +285,7 @@ def _option_quote_for_trade(
         option_id = str(meta.get("option_id") or meta.get("contract_id") or "").strip()
         contract: dict[str, Any] | None = None
         if not option_id:
-            contract = adapter.find_contract(underlying, expiration, float(strike), option_type)
+            contract = adapter.find_contract(underlying, expiration, strike, option_type)
             if not contract:
                 return unavailable
             option_id = str(contract.get("id") or "").strip()
@@ -268,14 +296,30 @@ def _option_quote_for_trade(
         if not quote:
             return unavailable
 
-        bid = _safe_float(quote.get("bid_price"))
-        ask = _safe_float(quote.get("ask_price"))
+        bid, bid_malformed = _option_quote_price(quote, "bid_price", "bid")
+        ask, ask_malformed = _option_quote_price(quote, "ask_price", "ask")
+        mark, mark_malformed = _option_quote_price(quote, "mark_price", "mark")
+        adjusted_mark, adjusted_mark_malformed = _option_quote_price(
+            quote,
+            "adjusted_mark_price",
+            "adjusted_mark",
+        )
+        last, last_malformed = _option_quote_price(
+            quote,
+            "last_trade_price",
+            "last_price",
+        )
+        if (
+            bid_malformed
+            or ask_malformed
+            or mark_malformed
+            or adjusted_mark_malformed
+            or last_malformed
+        ):
+            return {**unavailable, "quote_error": "malformed_option_quote"}
         if bid is not None and ask is not None and bid > ask:
             return {**unavailable, "quote_error": "crossed_option_market"}
         mid = ((bid + ask) / 2.0) if bid is not None and ask is not None else None
-        mark = _safe_float(quote.get("mark_price"))
-        adjusted_mark = _safe_float(quote.get("adjusted_mark_price"))
-        last = _safe_float(quote.get("last_trade_price") or quote.get("last_price"))
         side = (getattr(trade, "direction", None) or "long").strip().lower()
         executable = ask if side == "short" else bid
         if purpose == "exit":

@@ -1181,23 +1181,24 @@ def _compute_unrealized_pnl(db: Session, user_id: int | None) -> float:
             except Exception:
                 is_option_trade = None
             if callable(is_option_trade) and is_option_trade(t):
-                current_premium = _option_unrealized_mark_price(t)
+                current_premium = _float_or_none(_option_unrealized_mark_price(t))
                 if current_premium is None:
                     continue
-                qty = float(t.quantity or 0)
-                entry = float(t.entry_price or 0)
-                if qty > 0 and entry > 0:
-                    if (getattr(t, "direction", "") or "").lower() == "short":
-                        total_unrealized += (entry - current_premium) * qty * 100.0
-                    else:
-                        total_unrealized += (current_premium - entry) * qty * 100.0
+                qty = _float_or_none(getattr(t, "quantity", None))
+                entry = _float_or_none(getattr(t, "entry_price", None))
+                if qty is None or entry is None:
+                    continue
+                if (getattr(t, "direction", "") or "").lower() == "short":
+                    total_unrealized += (entry - current_premium) * qty * 100.0
+                else:
+                    total_unrealized += (current_premium - entry) * qty * 100.0
                 continue
             q = fetch_quote(t.ticker)
             if q and q.get("price"):
-                current_price = float(q["price"])
-                qty = float(t.quantity or 0)
-                entry = float(t.entry_price or 0)
-                if qty > 0 and entry > 0:
+                current_price = _float_or_none(q["price"])
+                qty = _float_or_none(getattr(t, "quantity", None))
+                entry = _float_or_none(getattr(t, "entry_price", None))
+                if current_price is not None and qty is not None and entry is not None:
                     total_unrealized += (current_price - entry) * qty
         except Exception:
             continue
@@ -1214,22 +1215,28 @@ def _option_unrealized_mark_price(trade: Trade) -> float | None:
             _option_quote_has_malformed_price,
             _option_quote_is_crossed,
         )
+        from .options.contracts import normalize_expiration, normalize_option_type
         from .venue.robinhood_options import RobinhoodOptionsAdapter
 
         meta = _opt_meta(trade)
-        expiration = str(meta.get("expiration") or "")
-        strike = meta.get("strike")
-        option_type = str(meta.get("option_type") or "").lower()
-        if not (expiration and strike and option_type in ("call", "put")):
+        expiration = normalize_expiration(meta.get("expiration"))
+        strike = _float_or_none(meta.get("strike"))
+        option_type = normalize_option_type(meta.get("option_type"))
+        if not (expiration and strike is not None and option_type in ("call", "put")):
             return None
-        underlying = str(meta.get("underlying") or trade.ticker or "").upper()
+        underlying = str(meta.get("underlying") or trade.ticker or "").strip().upper()
+        if not underlying:
+            return None
         adapter = RobinhoodOptionsAdapter()
         if not adapter.is_enabled():
             return None
-        contract = adapter.find_contract(underlying, expiration, float(strike), option_type)
+        contract = adapter.find_contract(underlying, expiration, strike, option_type)
         if not contract:
             return None
-        quote = adapter.get_quote(str(contract.get("id") or ""))
+        contract_id = str(contract.get("id") or "").strip()
+        if not contract_id:
+            return None
+        quote = adapter.get_quote(contract_id)
         if not quote:
             return None
         if _option_quote_has_malformed_price(quote) or _option_quote_is_crossed(quote):

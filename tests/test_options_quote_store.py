@@ -229,7 +229,7 @@ def test_record_quote_snapshot_rejects_boolean_premium_quote() -> None:
     assert db.calls == []
 
 
-def test_record_quote_snapshot_ignores_bad_quote_metrics_but_keeps_valid_premium() -> None:
+def test_record_quote_snapshot_rejects_malformed_premium_field() -> None:
     db = _FakeDb()
 
     ok = record_quote_snapshot(
@@ -243,6 +243,29 @@ def test_record_quote_snapshot_ignores_bad_quote_metrics_but_keeps_valid_premium
         },
         quote={
             "bid_price": True,
+            "ask_price": "4.05",
+            "mark_price": "4.00",
+        },
+    )
+
+    assert ok is False
+    assert db.calls == []
+
+
+def test_record_quote_snapshot_ignores_bad_quote_metrics_but_keeps_valid_premium() -> None:
+    db = _FakeDb()
+
+    ok = record_quote_snapshot(
+        db,
+        chain_id=123,
+        option_meta={
+            "underlying": "SPY",
+            "expiration": "2026-06-19",
+            "strike": 729.0,
+            "option_type": "call",
+        },
+        quote={
+            "bid_price": "",
             "ask_price": "4.05",
             "mark_price": "4.00",
             "implied_volatility": float("inf"),

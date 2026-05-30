@@ -150,6 +150,72 @@ def test_options_exit_candidates_skip_active_pending_exit():
     )
 
 
+def test_options_exit_contract_identity_normalizes_metadata():
+    from app.services.trading.options.exit_monitor import _option_exit_contract_identity
+
+    trade = _option_trade()
+    trade.ticker = "SPY"
+    meta = {
+        "underlying": "spy",
+        "expiration": "20260619",
+        "strike": "729",
+        "option_type": "C",
+    }
+
+    assert _option_exit_contract_identity(trade, meta) == (
+        "SPY",
+        "2026-06-19",
+        729.0,
+        "call",
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("strike", True),
+        ("strike", 0.0),
+        ("strike", float("nan")),
+        ("strike", float("inf")),
+        ("expiration", "not-a-date"),
+        ("option_type", "banana"),
+        ("underlying", ""),
+    ],
+)
+def test_options_exit_contract_identity_rejects_invalid_metadata(field, value):
+    from app.services.trading.options.exit_monitor import _option_exit_contract_identity
+
+    trade = _option_trade()
+    trade.ticker = "SPY"
+    meta = {
+        "underlying": "SPY",
+        "expiration": "2026-06-19",
+        "strike": 729.0,
+        "option_type": "call",
+    }
+    meta[field] = value
+    if field == "underlying":
+        trade.ticker = ""
+
+    assert _option_exit_contract_identity(trade, meta) is None
+
+
+@pytest.mark.parametrize(
+    "contract",
+    [
+        None,
+        {},
+        {"id": None},
+        {"id": ""},
+        {"id": "   "},
+    ],
+)
+def test_options_exit_contract_id_rejects_blank_values(contract):
+    from app.services.trading.options.exit_monitor import _option_contract_id
+
+    assert _option_contract_id(contract) is None
+
+
 def test_options_exit_order_state_and_raw_order_normalization():
     from app.services.trading.options.exit_monitor import (
         _option_exit_order_state,

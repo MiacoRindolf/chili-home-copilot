@@ -10,6 +10,7 @@ Also supports partial exposure reduction (softer alternative to full close-all).
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -24,6 +25,41 @@ DISCONNECT_TIMEOUT_MINUTES = 10
 PARTIAL_REDUCE_FRACTION = 0.5
 
 _last_price_update: datetime | None = None
+
+
+def _positive_float_or_none(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        if value is None:
+            return None
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) and out > 0 else None
+
+
+def _paper_exit_pnl(
+    pt: PaperTrade,
+    *,
+    exit_price: Any,
+    multiplier: Any,
+) -> tuple[float, float] | None:
+    entry = _positive_float_or_none(getattr(pt, "entry_price", None))
+    price = _positive_float_or_none(exit_price)
+    qty = _positive_float_or_none(getattr(pt, "quantity", None))
+    mult = _positive_float_or_none(multiplier)
+    if entry is None or price is None or qty is None or mult is None:
+        return None
+
+    if str(getattr(pt, "direction", "") or "").strip().lower() == "short":
+        price_diff = entry - price
+    else:
+        price_diff = price - entry
+    return (
+        round(price_diff * qty * mult, 2),
+        round((price_diff / entry) * 100.0, 2),
+    )
 
 
 def record_price_heartbeat() -> None:
@@ -79,12 +115,13 @@ def emergency_close_all(
             else:
                 pt.exit_reason = f"emergency_{reason}"
                 multiplier = _paper_contract_multiplier(pt)
-                if pt.direction == "long":
-                    pt.pnl = round((price - pt.entry_price) * pt.quantity * multiplier, 2)
-                    pt.pnl_pct = round((price - pt.entry_price) / pt.entry_price * 100, 2)
+                pnl = _paper_exit_pnl(pt, exit_price=price, multiplier=multiplier)
+                if pnl is None:
+                    pt.exit_reason = f"emergency_{reason}:invalid_pnl_basis"
+                    pt.pnl = None
+                    pt.pnl_pct = None
                 else:
-                    pt.pnl = round((pt.entry_price - price) * pt.quantity * multiplier, 2)
-                    pt.pnl_pct = round((pt.entry_price - price) / pt.entry_price * 100, 2)
+                    pt.pnl, pt.pnl_pct = pnl
             closed_paper += 1
         except Exception as e:
             errors.append(f"Paper {pt.ticker}: {e}")
@@ -207,11 +244,10 @@ def partial_reduce_exposure(
             price = _paper_current_mark_price(pos, purpose="exit")
             if price is not None:
                 multiplier = _paper_contract_multiplier(pos)
-                unrealized = (
-                    (price - pos.entry_price) * pos.quantity * multiplier
-                    if pos.direction == "long"
-                    else (pos.entry_price - price) * pos.quantity * multiplier
-                )
+                pnl = _paper_exit_pnl(pos, exit_price=price, multiplier=multiplier)
+                if pnl is None:
+                    continue
+                unrealized, _ = pnl
                 position_pnl.append((pos, unrealized, price))
         except Exception:
             continue
@@ -227,12 +263,13 @@ def partial_reduce_exposure(
         pos.exit_price = price
         pos.exit_reason = f"partial_reduce_{reason}"
         multiplier = _paper_contract_multiplier(pos)
-        if pos.direction == "long":
-            pos.pnl = round((price - pos.entry_price) * pos.quantity * multiplier, 2)
-            pos.pnl_pct = round((price - pos.entry_price) / pos.entry_price * 100, 2)
+        pnl = _paper_exit_pnl(pos, exit_price=price, multiplier=multiplier)
+        if pnl is None:
+            pos.exit_reason = f"partial_reduce_{reason}:invalid_pnl_basis"
+            pos.pnl = None
+            pos.pnl_pct = None
         else:
-            pos.pnl = round((pos.entry_price - price) * pos.quantity * multiplier, 2)
-            pos.pnl_pct = round((pos.entry_price - price) / pos.entry_price * 100, 2)
+            pos.pnl, pos.pnl_pct = pnl
         closed += 1
 
     db.commit()

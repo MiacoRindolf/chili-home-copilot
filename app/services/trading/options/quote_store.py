@@ -52,6 +52,25 @@ def _quote_float(quote: Mapping[str, Any], *keys: str) -> float | None:
     return None
 
 
+def _premium_quote_float(
+    quote: Mapping[str, Any],
+    *keys: str,
+) -> tuple[float | None, bool]:
+    for key in keys:
+        raw = quote.get(key)
+        if raw is None:
+            continue
+        if isinstance(raw, str) and not raw.strip():
+            continue
+        if isinstance(raw, bool):
+            return None, True
+        value = _float_or_none(raw)
+        if value is None or value < 0:
+            return None, True
+        return value, False
+    return None, False
+
+
 def _quote_int(quote: Mapping[str, Any], *keys: str) -> int | None:
     for key in keys:
         value = _int_or_none(quote.get(key))
@@ -61,9 +80,9 @@ def _quote_int(quote: Mapping[str, Any], *keys: str) -> int | None:
 
 
 def _premium_quote_is_persistable(quote: Mapping[str, Any]) -> bool:
-    bid = _quote_float(quote, "bid_price", "bid")
-    ask = _quote_float(quote, "ask_price", "ask")
-    last = _quote_float(
+    bid, bid_malformed = _premium_quote_float(quote, "bid_price", "bid")
+    ask, ask_malformed = _premium_quote_float(quote, "ask_price", "ask")
+    last, last_malformed = _premium_quote_float(
         quote,
         "last_trade_price",
         "last_price",
@@ -71,9 +90,9 @@ def _premium_quote_is_persistable(quote: Mapping[str, Any]) -> bool:
         "adjusted_mark_price",
         "mark",
     )
-    prices = (bid, ask, last)
-    if any(value is not None and value < 0 for value in prices):
+    if bid_malformed or ask_malformed or last_malformed:
         return False
+    prices = (bid, ask, last)
     if bid is not None and ask is not None and bid > 0 and ask > 0 and bid > ask:
         return False
     return any(value is not None and value > 0 for value in prices)

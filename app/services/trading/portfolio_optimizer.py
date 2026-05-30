@@ -20,6 +20,41 @@ from ...models.trading import PaperTrade, ScanPattern
 logger = logging.getLogger(__name__)
 
 
+def _finite_float_or_none(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        if value is None:
+            return None
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
+def _positive_float_or_none(value: Any) -> float | None:
+    out = _finite_float_or_none(value)
+    return out if out is not None and out > 0 else None
+
+
+def _paper_unrealized_pnl(
+    pos: PaperTrade,
+    *,
+    current_price: Any,
+    multiplier: Any,
+) -> float | None:
+    entry = _positive_float_or_none(getattr(pos, "entry_price", None))
+    price = _positive_float_or_none(current_price)
+    qty = _positive_float_or_none(getattr(pos, "quantity", None))
+    mult = _positive_float_or_none(multiplier)
+    if entry is None or price is None or qty is None or mult is None:
+        return None
+
+    if str(getattr(pos, "direction", "") or "").strip().lower() == "short":
+        return (entry - price) * qty * mult
+    return (price - entry) * qty * mult
+
+
 def compute_rolling_correlations(
     db: Session,
     window_days: int = 60,
@@ -197,20 +232,19 @@ def check_portfolio_drawdown(
             is_option = callable(_is_option_paper_trade) and _is_option_paper_trade(pos)
             if is_option:
                 if callable(_paper_contract_multiplier):
-                    multiplier = float(_paper_contract_multiplier(pos))
+                    multiplier = _paper_contract_multiplier(pos)
                 if callable(_paper_current_mark_price):
                     mark = _paper_current_mark_price(pos, purpose="portfolio_drawdown")
-                    price = float(mark) if mark is not None else None
+                    price = _positive_float_or_none(mark)
             else:
                 q = fetch_quote(pos.ticker)
                 if q and q.get("price"):
-                    price = float(q["price"])
+                    price = _positive_float_or_none(q["price"])
             if price is None:
                 continue
-            if pos.direction == "long":
-                total_unrealized += (price - pos.entry_price) * pos.quantity * multiplier
-            else:
-                total_unrealized += (pos.entry_price - price) * pos.quantity * multiplier
+            pnl = _paper_unrealized_pnl(pos, current_price=price, multiplier=multiplier)
+            if pnl is not None:
+                total_unrealized += pnl
         except Exception:
             continue
 
@@ -223,10 +257,13 @@ def check_portfolio_drawdown(
     if user_id is not None:
         closed = closed.filter(PaperTrade.user_id == user_id)
     for t in closed.all():
-        closed_pnl += t.pnl or 0
+        pnl = _finite_float_or_none(getattr(t, "pnl", None))
+        if pnl is not None:
+            closed_pnl += pnl
 
     total_pnl = total_unrealized + closed_pnl
-    dd_pct = (total_pnl / capital * 100) if capital > 0 else 0
+    capital_f = _positive_float_or_none(capital)
+    dd_pct = (total_pnl / capital_f * 100) if capital_f is not None else 0
 
     breached = dd_pct < -max_dd_pct
 

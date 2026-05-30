@@ -323,6 +323,53 @@ def test_synthesize_option_meta_rejects_boolean_option_quotes(monkeypatch):
     assert meta is None
 
 
+def test_synthesize_option_meta_rejects_blank_contract_id(monkeypatch):
+    from app.services import broker_service
+    from app.services.trading import strategy_parameter
+    from app.services.trading.options import synthesis
+    from app.services.trading.venue import robinhood_options
+
+    class _BlankContractAdapter:
+        def find_contract(self, *_args):
+            return {"id": "   "}
+
+        def get_quote(self, _option_id: str):
+            raise AssertionError("blank contract id must not fetch quote")
+
+    clear_synthesis_no_survivor_cache()
+    expiration = (datetime.utcnow().date() + timedelta(days=21)).isoformat()
+    monkeypatch.setattr(
+        broker_service,
+        "get_option_chains",
+        lambda _underlying: {"expiration_dates": [expiration]},
+    )
+    monkeypatch.setattr(
+        robinhood_options,
+        "RobinhoodOptionsAdapter",
+        lambda: _BlankContractAdapter(),
+    )
+    monkeypatch.setattr(synthesis, "_register_synthesis_parameters", lambda _db: None)
+    monkeypatch.setattr(
+        strategy_parameter,
+        "get_parameter",
+        lambda *_args, default=None, **_kwargs: default,
+    )
+    monkeypatch.setattr(settings, "chili_autotrader_options_substitute_dte", 21)
+    monkeypatch.setattr(settings, "chili_autotrader_options_max_contract_notional_usd", 300.0)
+
+    meta = synthesize_option_meta(
+        db=None,
+        underlying="XYZ",
+        spot=100.0,
+        notional_usd=300.0,
+        underlying_target=112.0,
+        underlying_stop=96.0,
+        confidence=0.9,
+    )
+
+    assert meta is None
+
+
 def test_synthesize_option_meta_clamps_bad_adaptive_synthesis_knobs(monkeypatch):
     from app.services.trading import strategy_parameter
 

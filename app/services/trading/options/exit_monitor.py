@@ -38,7 +38,7 @@ from sqlalchemy.orm import Session
 
 from ....config import settings
 from ....models.trading import Trade
-from .contracts import parse_contract_quantity
+from .contracts import normalize_expiration, normalize_option_type, parse_contract_quantity
 from .quote_store import record_quote_snapshot
 
 logger = logging.getLogger(__name__)
@@ -326,6 +326,32 @@ def _option_exit_entry_premium(trade: Trade) -> float | None:
     if entry is not None and entry > 0.0:
         return entry
     return None
+
+
+def _option_exit_contract_identity(
+    trade: Trade,
+    meta: dict[str, Any],
+) -> tuple[str, str, float, str] | None:
+    underlying = str(meta.get("underlying") or getattr(trade, "ticker", "") or "").strip().upper()
+    expiration = normalize_expiration(meta.get("expiration"))
+    strike = _option_exit_float(meta.get("strike"))
+    option_type = normalize_option_type(meta.get("option_type"))
+    if not (
+        underlying
+        and expiration
+        and strike is not None
+        and strike > 0.0
+        and option_type in ("call", "put")
+    ):
+        return None
+    return underlying, expiration, strike, option_type
+
+
+def _option_contract_id(contract: dict[str, Any] | None) -> str | None:
+    if not isinstance(contract, dict):
+        return None
+    contract_id = str(contract.get("id") or "").strip()
+    return contract_id or None
 
 
 def _record_exit_quote_snapshot(
@@ -644,17 +670,27 @@ def run_options_exit_pass(db: Session) -> dict[str, int]:
             summary["working"] += 1
             continue
         meta = _opt_meta(t)
-        expiration = str(meta.get("expiration") or "")
-        strike = meta.get("strike")
-        option_type = str(meta.get("option_type") or "").lower()
-        if not (expiration and strike and option_type in ("call", "put")):
+        identity = _option_exit_contract_identity(t, meta)
+        if identity is None:
             continue
+        underlying, expiration, strike, option_type = identity
+        normalized_meta = {
+            **meta,
+            "underlying": underlying,
+            "expiration": expiration,
+            "strike": strike,
+            "option_type": option_type,
+        }
 
-        contract = adapter.find_contract(meta.get("underlying") or t.ticker, expiration, float(strike), option_type)
+        contract = adapter.find_contract(underlying, expiration, strike, option_type)
         if not contract:
             summary["skipped_no_quote"] += 1
             continue
-        quote = adapter.get_quote(str(contract.get("id", "")))
+        contract_id = _option_contract_id(contract)
+        if contract_id is None:
+            summary["skipped_no_quote"] += 1
+            continue
+        quote = adapter.get_quote(contract_id)
         if not quote:
             summary["skipped_no_quote"] += 1
             continue
@@ -683,7 +719,7 @@ def run_options_exit_pass(db: Session) -> dict[str, int]:
             )
             summary["skipped_no_quote"] += 1
             continue
-        if _record_exit_quote_snapshot(db, t, meta, quote):
+        if _record_exit_quote_snapshot(db, t, normalized_meta, quote):
             summary["quote_snapshots"] += 1
         bid = _option_exit_quote_price(quote, "bid_price", "bid")[0] or 0.0
         mark = (
@@ -789,9 +825,9 @@ def run_options_exit_pass(db: Session) -> dict[str, int]:
             continue
         try:
             res = adapter.place_option_sell(
-                underlying=str(meta.get("underlying") or t.ticker),
+                underlying=underlying,
                 expiration=expiration,
-                strike=float(strike),
+                strike=strike,
                 option_type=option_type,
                 quantity=exit_qty,
                 limit_price=float(limit_price),

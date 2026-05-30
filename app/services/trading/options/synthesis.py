@@ -558,7 +558,11 @@ def synthesize_option_meta(
             reject_counts["no_contract"] += 1
             continue
 
-        quote = adapter.get_quote(str(contract.get("id", "")))
+        contract_id = str(contract.get("id") or "").strip()
+        if not contract_id:
+            reject_counts["no_contract_id"] += 1
+            continue
+        quote = adapter.get_quote(contract_id)
         if not quote:
             reject_counts["no_quote"] += 1
             continue

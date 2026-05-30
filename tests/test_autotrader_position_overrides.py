@@ -650,6 +650,55 @@ def test_close_position_now_live_option_routes_sell_to_close() -> None:
     )
 
 
+def test_close_position_now_live_option_normalizes_contract_identity() -> None:
+    t = _option_trade_stub(
+        indicator_snapshot={
+            "breakout_alert": {
+                "asset_type": "options",
+                "option_meta": {
+                    "underlying": "spy",
+                    "expiration": "20260619",
+                    "strike": "729",
+                    "option_type": "C",
+                },
+            }
+        },
+    )
+    fake_db = _fake_trade_db(t)
+
+    fake_options = MagicMock()
+    fake_options.is_enabled.return_value = True
+    fake_options.find_contract.return_value = {"id": "opt-contract-1"}
+    fake_options.get_quote.return_value = {"bid_price": "1.40", "mark_price": "1.45"}
+    fake_options.place_option_sell.return_value = {
+        "ok": True,
+        "order_id": "opt-close-1",
+        "state": "queued",
+        "raw": {"state": "queued"},
+    }
+
+    with patch(
+        "app.services.trading.venue.robinhood_options.RobinhoodOptionsAdapter",
+        return_value=fake_options,
+    ), patch(
+        "app.services.trading.venue.robinhood_spot.RobinhoodSpotAdapter",
+        side_effect=AssertionError("option close-now must not use the spot adapter"),
+    ):
+        res = close_position_now(fake_db, kind="trade", trade_id=int(t.id))
+
+    assert res["ok"] is True
+    fake_options.find_contract.assert_called_once_with("SPY", "2026-06-19", 729.0, "call")
+    fake_options.place_option_sell.assert_called_once_with(
+        underlying="SPY",
+        expiration="2026-06-19",
+        strike=729.0,
+        option_type="call",
+        quantity=1,
+        limit_price=1.40,
+        position_effect="close",
+    )
+
+
 def test_close_position_now_live_option_rejects_fractional_contract_quantity() -> None:
     t = _option_trade_stub(quantity=1.5)
     fake_db = _fake_trade_db(t)
@@ -669,17 +718,33 @@ def test_close_position_now_live_option_rejects_fractional_contract_quantity() -
     fake_db.commit.assert_not_called()
 
 
-def test_close_position_now_live_option_rejects_boolean_strike() -> None:
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("strike", True),
+        ("strike", 0.0),
+        ("strike", float("nan")),
+        ("strike", float("inf")),
+        ("expiration", "not-a-date"),
+        ("option_type", "banana"),
+    ],
+)
+def test_close_position_now_live_option_rejects_invalid_contract_identity(
+    field,
+    value,
+) -> None:
+    option_meta = {
+        "underlying": "SPY",
+        "expiration": "2026-06-19",
+        "strike": 729.0,
+        "option_type": "call",
+    }
+    option_meta[field] = value
     t = _option_trade_stub(
         indicator_snapshot={
             "breakout_alert": {
                 "asset_type": "options",
-                "option_meta": {
-                    "underlying": "SPY",
-                    "expiration": "2026-06-19",
-                    "strike": True,
-                    "option_type": "call",
-                },
+                "option_meta": option_meta,
             }
         },
     )
@@ -696,6 +761,33 @@ def test_close_position_now_live_option_rejects_boolean_strike() -> None:
 
     assert res == {"ok": False, "error": "missing_option_meta"}
     assert t.status == "open"
+    fake_db.add.assert_not_called()
+    fake_db.commit.assert_not_called()
+
+
+@pytest.mark.parametrize("contract", [{"id": ""}, {"id": None}, {"id": "   "}])
+def test_close_position_now_live_option_rejects_blank_contract_id(contract) -> None:
+    t = _option_trade_stub()
+    fake_db = _fake_trade_db(t)
+
+    fake_options = MagicMock()
+    fake_options.is_enabled.return_value = True
+    fake_options.find_contract.return_value = contract
+    fake_options.get_quote.side_effect = AssertionError("blank contract id must not fetch quote")
+
+    with patch(
+        "app.services.trading.venue.robinhood_options.RobinhoodOptionsAdapter",
+        return_value=fake_options,
+    ), patch(
+        "app.services.trading.venue.robinhood_spot.RobinhoodSpotAdapter",
+        side_effect=AssertionError("option close-now must not use the spot adapter"),
+    ):
+        res = close_position_now(fake_db, kind="trade", trade_id=int(t.id))
+
+    assert res == {"ok": False, "error": "option_contract_not_found"}
+    assert t.status == "open"
+    fake_options.get_quote.assert_not_called()
+    fake_options.place_option_sell.assert_not_called()
     fake_db.add.assert_not_called()
     fake_db.commit.assert_not_called()
 

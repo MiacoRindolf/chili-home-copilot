@@ -209,6 +209,124 @@ def test_emergency_close_all_paper_option_rejects_mark_without_executable_quote(
     assert paper.pnl_pct is None
 
 
+def test_partial_reduce_paper_option_uses_executable_premium_and_multiplier():
+    from app.services.trading import emergency_liquidation as elq
+
+    paper = SimpleNamespace(
+        id=8803,
+        user_id=None,
+        ticker="SPY",
+        direction="long",
+        entry_price=1.25,
+        quantity=2.0,
+        entry_date=datetime.utcnow(),
+        status="open",
+        signal_json={
+            "asset_kind": "option",
+            "option_meta": {
+                "underlying": "SPY",
+                "expiration": "2026-06-19",
+                "strike": 729.0,
+                "option_type": "call",
+            },
+        },
+    )
+    fake_db = _FakeEmergencyDb(live_rows=[], paper_rows=[paper])
+
+    with (
+        patch(
+            "app.services.trading.market_data.fetch_quote",
+            side_effect=AssertionError("paper option reduction must not fetch underlying spot"),
+        ),
+        patch(
+            "app.services.trading.broker_quotes.broker_quote_for_trade",
+            return_value={
+                "price": 1.45,
+                "mark_price": 1.45,
+                "executable_price": 1.40,
+                "source": "robinhood_options",
+            },
+        ),
+    ):
+        result = elq.partial_reduce_exposure(
+            fake_db,
+            user_id=None,
+            reduce_fraction=1.0,
+            reason="test_paper_option_reduce",
+        )
+
+    assert result["ok"] is True
+    assert result["closed"] == 1
+    assert paper.status == "closed"
+    assert paper.exit_price == pytest.approx(1.40)
+    assert paper.pnl == pytest.approx(30.0)
+    assert paper.pnl_pct == pytest.approx(12.0)
+
+
+@pytest.mark.parametrize(
+    ("entry_price", "quantity"),
+    [
+        (0.0, 2.0),
+        (float("nan"), 2.0),
+        (True, 2.0),
+        (1.25, 0.0),
+        (1.25, True),
+    ],
+)
+def test_partial_reduce_paper_option_skips_invalid_pnl_basis(entry_price, quantity):
+    from app.services.trading import emergency_liquidation as elq
+
+    paper = SimpleNamespace(
+        id=8804,
+        user_id=None,
+        ticker="SPY",
+        direction="long",
+        entry_price=entry_price,
+        quantity=quantity,
+        entry_date=datetime.utcnow(),
+        status="open",
+        signal_json={
+            "asset_kind": "option",
+            "option_meta": {
+                "underlying": "SPY",
+                "expiration": "2026-06-19",
+                "strike": 729.0,
+                "option_type": "call",
+            },
+        },
+    )
+    fake_db = _FakeEmergencyDb(live_rows=[], paper_rows=[paper])
+
+    with (
+        patch(
+            "app.services.trading.market_data.fetch_quote",
+            side_effect=AssertionError("paper option reduction must not fetch underlying spot"),
+        ),
+        patch(
+            "app.services.trading.broker_quotes.broker_quote_for_trade",
+            return_value={
+                "price": 1.45,
+                "mark_price": 1.45,
+                "executable_price": 1.40,
+                "source": "robinhood_options",
+            },
+        ),
+    ):
+        result = elq.partial_reduce_exposure(
+            fake_db,
+            user_id=None,
+            reduce_fraction=1.0,
+            reason="test_bad_pnl_basis",
+        )
+
+    assert result["ok"] is True
+    assert result["closed"] == 0
+    assert paper.status == "open"
+    assert not hasattr(paper, "exit_price")
+    assert not hasattr(paper, "pnl")
+    assert not hasattr(paper, "pnl_pct")
+
+
 def test_emergency_close_all_option_routes_sell_to_close_without_underlying_quote():
     from app.services.trading import emergency_liquidation as elq
 
