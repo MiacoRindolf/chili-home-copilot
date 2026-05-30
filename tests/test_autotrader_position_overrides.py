@@ -381,6 +381,63 @@ def test_close_position_now_paper_option_without_mark_does_not_fake_fill(
     )
 
 
+def test_close_position_now_paper_option_rejects_boolean_mark(
+) -> None:
+    class _FakePaperDb:
+        def __init__(self, row):
+            self.row = row
+            self.add_called = False
+            self.commit_called = False
+
+        def get(self, _model, _trade_id):
+            return self.row
+
+        def add(self, _row):
+            self.add_called = True
+
+        def commit(self):
+            self.commit_called = True
+
+    pt = SimpleNamespace(
+        id=4401,
+        user_id=1,
+        ticker="SPY",
+        direction="long",
+        entry_price=1.25,
+        quantity=2,
+        status="open",
+        exit_price=None,
+        signal_json={
+            "auto_trader_v1": True,
+            "asset_type": "options",
+            "options_path": True,
+            "option_meta": {
+                "underlying": "SPY",
+                "expiration": "2026-06-19",
+                "strike": 729.0,
+                "option_type": "call",
+            },
+        },
+        scan_pattern_id=None,
+    )
+    fake_db = _FakePaperDb(pt)
+
+    with patch(
+        "app.services.trading.auto_trader_position_overrides._current_quote_price",
+        side_effect=AssertionError("option paper close must not fetch underlying spot"),
+    ), patch(
+        "app.services.trading.paper_trading._paper_current_mark_price",
+        return_value=True,
+    ):
+        res = close_position_now(fake_db, kind="paper", trade_id=int(pt.id))
+
+    assert res == {"ok": False, "error": "no_quote"}
+    assert pt.status == "open"
+    assert pt.exit_price is None
+    assert fake_db.add_called is False
+    assert fake_db.commit_called is False
+
+
 def test_close_position_now_live(paired_client, db: Session) -> None:
     _c, user = paired_client
     t = _mk_autotrader_trade(db, user.id, "CLT1")
@@ -612,6 +669,37 @@ def test_close_position_now_live_option_rejects_fractional_contract_quantity() -
     fake_db.commit.assert_not_called()
 
 
+def test_close_position_now_live_option_rejects_boolean_strike() -> None:
+    t = _option_trade_stub(
+        indicator_snapshot={
+            "breakout_alert": {
+                "asset_type": "options",
+                "option_meta": {
+                    "underlying": "SPY",
+                    "expiration": "2026-06-19",
+                    "strike": True,
+                    "option_type": "call",
+                },
+            }
+        },
+    )
+    fake_db = _fake_trade_db(t)
+
+    with patch(
+        "app.services.trading.venue.robinhood_options.RobinhoodOptionsAdapter",
+        side_effect=AssertionError("invalid option strike must not touch broker"),
+    ), patch(
+        "app.services.trading.venue.robinhood_spot.RobinhoodSpotAdapter",
+        side_effect=AssertionError("option close-now must not use the spot adapter"),
+    ):
+        res = close_position_now(fake_db, kind="trade", trade_id=int(t.id))
+
+    assert res == {"ok": False, "error": "missing_option_meta"}
+    assert t.status == "open"
+    fake_db.add.assert_not_called()
+    fake_db.commit.assert_not_called()
+
+
 def test_close_position_now_live_option_rejects_crossed_quote() -> None:
     t = _option_trade_stub()
     fake_db = _fake_trade_db(t)
@@ -635,6 +723,35 @@ def test_close_position_now_live_option_rejects_crossed_quote() -> None:
         res = close_position_now(fake_db, kind="trade", trade_id=int(t.id))
 
     assert res == {"ok": False, "error": "crossed_option_quote"}
+    assert t.status == "open"
+    fake_options.place_option_sell.assert_not_called()
+    fake_db.add.assert_not_called()
+    fake_db.commit.assert_not_called()
+
+
+def test_close_position_now_live_option_rejects_nonfinite_quote() -> None:
+    t = _option_trade_stub()
+    fake_db = _fake_trade_db(t)
+
+    fake_options = MagicMock()
+    fake_options.is_enabled.return_value = True
+    fake_options.find_contract.return_value = {"id": "opt-contract-1"}
+    fake_options.get_quote.return_value = {
+        "bid_price": "Infinity",
+        "ask_price": "1.50",
+        "mark_price": "1.45",
+    }
+
+    with patch(
+        "app.services.trading.venue.robinhood_options.RobinhoodOptionsAdapter",
+        return_value=fake_options,
+    ), patch(
+        "app.services.trading.venue.robinhood_spot.RobinhoodSpotAdapter",
+        side_effect=AssertionError("option close-now must not use the spot adapter"),
+    ):
+        res = close_position_now(fake_db, kind="trade", trade_id=int(t.id))
+
+    assert res == {"ok": False, "error": "malformed_option_quote"}
     assert t.status == "open"
     fake_options.place_option_sell.assert_not_called()
     fake_db.add.assert_not_called()
@@ -706,6 +823,30 @@ def test_option_exit_submit_fill_requires_local_quantity_complete() -> None:
         t,
         {"state": "cancelled", "quantity": "2", "processed_quantity": "2"},
         "cancelled",
+    ) is True
+
+
+def test_option_exit_submit_filled_state_rejects_explicit_zero_or_partial_quantity() -> None:
+    from app.services.trading.options.exit_monitor import (
+        _option_exit_submit_fill_is_complete,
+    )
+
+    t = _option_trade_stub(quantity=2.0)
+
+    assert _option_exit_submit_fill_is_complete(
+        t,
+        {"state": "filled", "quantity": "2", "processed_quantity": "0"},
+        "filled",
+    ) is False
+    assert _option_exit_submit_fill_is_complete(
+        t,
+        {"state": "filled", "quantity": "2", "processed_quantity": "1"},
+        "filled",
+    ) is False
+    assert _option_exit_submit_fill_is_complete(
+        t,
+        {"state": "filled", "quantity": "2", "processed_quantity": "2"},
+        "filled",
     ) is True
 
 

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -95,6 +96,10 @@ class PositionSizerInput:
         If ``"int"`` the proposed quantity is rounded to a whole
         share count (equities). If ``"decimal"`` it is left as a
         float (crypto, fractional shares).
+    unit_multiplier
+        Notional multiplier per one quoted unit. Equities/crypto use
+        ``1``; listed option contracts use ``100`` because entry/stop
+        are option premiums but quantity is whole contracts.
     """
 
     ticker: str
@@ -119,6 +124,7 @@ class PositionSizerInput:
     single_ticker_cap_pct: float = 7.5
     qty_rounding: Literal["int", "decimal"] = "int"
     correlation_bucket: str | None = None
+    unit_multiplier: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -216,10 +222,16 @@ def _is_crypto(asset_class: str) -> bool:
     return (asset_class or "").strip().lower() == "crypto"
 
 
-def _round_qty(notional: float, price: float, qty_rounding: str) -> float:
-    if price <= 0 or notional <= 0:
+def _round_qty(
+    notional: float,
+    price: float,
+    qty_rounding: str,
+    unit_multiplier: float = 1.0,
+) -> float:
+    unit_notional = price * unit_multiplier
+    if unit_notional <= 0 or notional <= 0:
         return 0.0
-    raw = notional / price
+    raw = notional / unit_notional
     if qty_rounding == "int":
         return float(int(raw))
     # Keep 8 decimals for crypto-style precision without float noise.
@@ -228,6 +240,16 @@ def _round_qty(notional: float, price: float, qty_rounding: str) -> float:
 
 def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
+
+
+def _finite_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
 
 
 # ---------------------------------------------------------------------------
@@ -285,30 +307,81 @@ def compute_proposal(
     time the legacy sizer ran, so divergence logs are meaningful.
     """
     reasoning: dict[str, Any] = {}
-    entry = float(inp.entry_price or 0.0)
-    stop = float(inp.stop_price or 0.0)
-    capital = float(inp.capital or 0.0)
+    entry = _finite_float(inp.entry_price) or 0.0
+    stop = _finite_float(inp.stop_price) or 0.0
+    capital = _finite_float(inp.capital) or 0.0
+    unit_multiplier = _finite_float(inp.unit_multiplier) or 0.0
+    loss_per_unit = _finite_float(inp.loss_per_unit) or 0.0
+    calibrated_prob = _finite_float(inp.calibrated_prob)
+    payoff_fraction = _finite_float(inp.payoff_fraction)
+    cost_fraction = _finite_float(inp.cost_fraction)
+    kelly_scale = _finite_float(inp.kelly_scale)
+    max_risk_pct = _finite_float(inp.max_risk_pct)
+    equity_bucket_cap_pct = _finite_float(inp.equity_bucket_cap_pct)
+    crypto_bucket_cap_pct = _finite_float(inp.crypto_bucket_cap_pct)
+    single_ticker_cap_pct = _finite_float(inp.single_ticker_cap_pct)
+    expected_net_pnl_override = (
+        _finite_float(inp.expected_net_pnl)
+        if inp.expected_net_pnl is not None
+        else None
+    )
 
     # --- Input sanity --------------------------------------------------
-    if entry <= 0 or stop <= 0 or entry == stop or capital <= 0:
-        reasoning["reject_reason"] = "invalid_prices_or_capital"
+    reject_reason: str | None = None
+    if (
+        not math.isfinite(entry)
+        or not math.isfinite(stop)
+        or not math.isfinite(capital)
+        or not math.isfinite(unit_multiplier)
+        or entry <= 0
+        or stop <= 0
+        or entry == stop
+        or capital <= 0
+        or unit_multiplier <= 0
+    ):
+        reject_reason = "invalid_prices_or_capital"
+    elif not math.isfinite(loss_per_unit) or loss_per_unit <= 0:
+        reject_reason = "invalid_loss_per_unit"
+    elif (
+        calibrated_prob is None
+        or payoff_fraction is None
+        or cost_fraction is None
+        or kelly_scale is None
+        or max_risk_pct is None
+        or equity_bucket_cap_pct is None
+        or crypto_bucket_cap_pct is None
+        or single_ticker_cap_pct is None
+        or (
+            inp.expected_net_pnl is not None
+            and expected_net_pnl_override is None
+        )
+    ):
+        reject_reason = "invalid_edge_inputs"
+
+    if reject_reason:
+        reasoning["reject_reason"] = reject_reason
+        id_entry = entry if math.isfinite(entry) else 0.0
+        id_stop = stop if math.isfinite(stop) else 0.0
+        id_loss = loss_per_unit if math.isfinite(loss_per_unit) else 0.0
+        id_prob = calibrated_prob if calibrated_prob is not None else 0.0
+        id_payoff = payoff_fraction if payoff_fraction is not None else 0.0
         return PositionSizerOutput(
             proposal_id=compute_proposal_id(
                 source=source,
                 ticker=inp.ticker,
                 user_id=inp.user_id,
-                entry_price=entry,
-                stop_price=stop,
-                calibrated_prob=inp.calibrated_prob,
-                payoff_fraction=inp.payoff_fraction,
-                loss_per_unit=inp.loss_per_unit,
+                entry_price=id_entry,
+                stop_price=id_stop,
+                calibrated_prob=id_prob,
+                payoff_fraction=id_payoff,
+                loss_per_unit=id_loss,
             ),
             proposed_notional=0.0,
             proposed_quantity=0.0,
             proposed_risk_pct=0.0,
             kelly_fraction=0.0,
             kelly_scaled_fraction=0.0,
-            expected_net_pnl=float(inp.expected_net_pnl or 0.0),
+            expected_net_pnl=expected_net_pnl_override or 0.0,
             correlation_cap_triggered=False,
             correlation_bucket=(correlation.bucket if correlation else inp.correlation_bucket),
             max_bucket_notional=(correlation.max_bucket_notional if correlation else None),
@@ -318,15 +391,17 @@ def compute_proposal(
 
     # --- Kelly math ----------------------------------------------------
     kelly_raw, net_pnl = _kelly_raw(
-        calibrated_prob=inp.calibrated_prob,
-        payoff_fraction=inp.payoff_fraction,
-        loss_per_unit=inp.loss_per_unit,
-        cost_fraction=inp.cost_fraction,
+        calibrated_prob=calibrated_prob,
+        payoff_fraction=payoff_fraction,
+        loss_per_unit=loss_per_unit,
+        cost_fraction=cost_fraction,
     )
-    kelly_scaled = max(0.0, kelly_raw * max(0.0, float(inp.kelly_scale)))
+    kelly_scaled = max(0.0, kelly_raw * max(0.0, kelly_scale))
 
-    expected_net_pnl = float(
-        inp.expected_net_pnl if inp.expected_net_pnl is not None else net_pnl
+    expected_net_pnl = (
+        expected_net_pnl_override
+        if expected_net_pnl_override is not None
+        else net_pnl
     )
     reasoning["expected_net_pnl"] = expected_net_pnl
     reasoning["kelly_raw"] = kelly_raw
@@ -341,9 +416,9 @@ def compute_proposal(
                 user_id=inp.user_id,
                 entry_price=entry,
                 stop_price=stop,
-                calibrated_prob=inp.calibrated_prob,
-                payoff_fraction=inp.payoff_fraction,
-                loss_per_unit=inp.loss_per_unit,
+                calibrated_prob=calibrated_prob,
+                payoff_fraction=payoff_fraction,
+                loss_per_unit=loss_per_unit,
             ),
             proposed_notional=0.0,
             proposed_quantity=0.0,
@@ -361,9 +436,9 @@ def compute_proposal(
     # --- Translate kelly fraction-of-capital into risk-of-capital -----
     # Kelly is the fraction of capital to *stake*. Here the stake is the
     # notional, and the at-risk amount per trade is ``notional * loss``.
-    loss_fraction = max(1e-9, float(inp.loss_per_unit))
+    loss_fraction = max(1e-9, loss_per_unit)
     risk_of_capital = kelly_scaled * loss_fraction  # fraction of capital
-    max_risk_frac = max(0.0, float(inp.max_risk_pct)) / 100.0
+    max_risk_frac = max(0.0, max_risk_pct) / 100.0
     if risk_of_capital > max_risk_frac:
         # Trim Kelly so the per-trade risk equals the cap.
         kelly_scaled = max_risk_frac / loss_fraction
@@ -375,7 +450,7 @@ def compute_proposal(
     proposed_notional = kelly_scaled * capital
 
     # --- Hard caps: single-ticker + correlation bucket ----------------
-    single_ticker_cap = max(0.0, float(inp.single_ticker_cap_pct)) / 100.0 * capital
+    single_ticker_cap = max(0.0, single_ticker_cap_pct) / 100.0 * capital
     # Deduct what is already open in this exact ticker.
     ticker_open = float(portfolio.ticker_open_notional) if portfolio else 0.0
     ticker_headroom = max(0.0, single_ticker_cap - ticker_open)
@@ -403,8 +478,8 @@ def compute_proposal(
         # Derive a reasonable bucket cap even when caller did not pass
         # a correlation budget (pure unit-test callers).
         bucket_cap_pct = (
-            inp.crypto_bucket_cap_pct if _is_crypto(inp.asset_class)
-            else inp.equity_bucket_cap_pct
+            crypto_bucket_cap_pct if _is_crypto(inp.asset_class)
+            else equity_bucket_cap_pct
         )
         max_bucket_notional = max(0.0, bucket_cap_pct) / 100.0 * capital
 
@@ -420,10 +495,15 @@ def compute_proposal(
 
     # --- Finalize ----------------------------------------------------
     proposed_notional = max(0.0, proposed_notional)
-    proposed_quantity = _round_qty(proposed_notional, entry, inp.qty_rounding)
+    proposed_quantity = _round_qty(
+        proposed_notional,
+        entry,
+        inp.qty_rounding,
+        unit_multiplier,
+    )
     # If rounding to whole shares pushed notional below the proposal,
     # reflect the *achievable* notional so divergence math is fair.
-    achievable_notional = proposed_quantity * entry
+    achievable_notional = proposed_quantity * entry * unit_multiplier
     if achievable_notional < proposed_notional:
         proposed_notional = achievable_notional
 
@@ -436,9 +516,9 @@ def compute_proposal(
             user_id=inp.user_id,
             entry_price=entry,
             stop_price=stop,
-            calibrated_prob=inp.calibrated_prob,
-            payoff_fraction=inp.payoff_fraction,
-            loss_per_unit=inp.loss_per_unit,
+            calibrated_prob=calibrated_prob,
+            payoff_fraction=payoff_fraction,
+            loss_per_unit=loss_per_unit,
         ),
         proposed_notional=round(proposed_notional, 6),
         proposed_quantity=round(proposed_quantity, 8),

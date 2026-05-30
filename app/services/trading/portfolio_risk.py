@@ -9,6 +9,7 @@ Enforces hard caps before any new position is opened:
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -17,6 +18,9 @@ from sqlalchemy.orm import Session
 from ...models.trading import Trade
 
 logger = logging.getLogger(__name__)
+OPTION_HEAT_STOP_PCT_DEFAULT = 50.0
+OPTION_HEAT_STOP_PCT_MIN = 10.0
+OPTION_HEAT_STOP_PCT_MAX = 80.0
 
 
 @dataclass
@@ -52,16 +56,95 @@ def get_risk_limits(settings: Any | None = None) -> RiskLimits:
     if settings is None:
         from ...config import settings as _s
         settings = _s
+    defaults = RiskLimits()
     return RiskLimits(
-        max_open_positions=int(getattr(settings, "brain_risk_max_positions", 10)),
-        max_crypto_positions=int(getattr(settings, "brain_risk_max_crypto", 5)),
-        max_stock_positions=int(getattr(settings, "brain_risk_max_stocks", 8)),
-        max_portfolio_heat_pct=float(getattr(settings, "brain_risk_max_heat_pct", 6.0)),
-        max_risk_per_trade_pct=float(getattr(settings, "brain_risk_per_trade_pct", 1.0)),
-        max_same_ticker=int(getattr(settings, "brain_risk_max_same_ticker", 2)),
-        max_sector_pct=float(getattr(settings, "brain_risk_max_sector_pct", 40.0)),
-        max_avg_correlation=float(getattr(settings, "brain_risk_max_avg_correlation", 0.75)),
+        max_open_positions=_risk_limit_int(
+            settings,
+            "brain_risk_max_positions",
+            defaults.max_open_positions,
+        ),
+        max_crypto_positions=_risk_limit_int(
+            settings,
+            "brain_risk_max_crypto",
+            defaults.max_crypto_positions,
+        ),
+        max_stock_positions=_risk_limit_int(
+            settings,
+            "brain_risk_max_stocks",
+            defaults.max_stock_positions,
+        ),
+        max_portfolio_heat_pct=_risk_limit_float(
+            settings,
+            "brain_risk_max_heat_pct",
+            defaults.max_portfolio_heat_pct,
+            max_value=100.0,
+        ),
+        max_risk_per_trade_pct=_risk_limit_float(
+            settings,
+            "brain_risk_per_trade_pct",
+            defaults.max_risk_per_trade_pct,
+            max_value=100.0,
+        ),
+        max_same_ticker=_risk_limit_int(
+            settings,
+            "brain_risk_max_same_ticker",
+            defaults.max_same_ticker,
+        ),
+        max_sector_pct=_risk_limit_float(
+            settings,
+            "brain_risk_max_sector_pct",
+            defaults.max_sector_pct,
+            max_value=100.0,
+        ),
+        max_avg_correlation=_risk_limit_float(
+            settings,
+            "brain_risk_max_avg_correlation",
+            defaults.max_avg_correlation,
+            max_value=1.0,
+        ),
     )
+
+
+def _risk_limit_float(
+    settings: Any,
+    name: str,
+    default: float,
+    *,
+    min_value: float = 0.0,
+    max_value: float | None = None,
+) -> float:
+    value = _risk_limit_number(getattr(settings, name, None))
+    if value is None or value < min_value:
+        return float(default)
+    if max_value is not None and value > max_value:
+        return float(default)
+    return value
+
+
+def _risk_limit_number(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        if value in (None, ""):
+            return None
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
+def _risk_limit_int(
+    settings: Any,
+    name: str,
+    default: int,
+    *,
+    min_value: int = 0,
+) -> int:
+    raw = getattr(settings, name, None)
+    value = _risk_limit_number(raw)
+    if value is None or value < min_value:
+        return int(default)
+    return int(value)
 
 
 def compute_trade_risk_pct(
@@ -69,23 +152,35 @@ def compute_trade_risk_pct(
     stop_price: float,
     quantity: float,
     capital: float,
+    *,
+    direction: str = "long",
 ) -> float:
     """Return risk as a percentage of capital for a single trade."""
-    if capital <= 0 or entry_price <= 0:
+    entry = _float_or_none(entry_price)
+    stop = _float_or_none(stop_price)
+    qty = _float_or_none(quantity)
+    capital_f = _float_or_none(capital)
+    if entry is None or stop is None or qty is None or capital_f is None:
         return 0.0
-    risk_per_share = abs(entry_price - stop_price)
-    total_risk = risk_per_share * quantity
-    return round(total_risk / capital * 100, 4)
+    side = str(direction or "long").strip().lower()
+    if side == "short":
+        risk_per_share = max(stop - entry, 0.0)
+    else:
+        risk_per_share = max(entry - stop, 0.0)
+    total_risk = risk_per_share * qty
+    return round(total_risk / capital_f * 100, 4)
 
 
 def _float_or_none(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
     try:
         if value in (None, ""):
             return None
         out = float(value)
     except (TypeError, ValueError):
         return None
-    return out if out > 0 else None
+    return out if math.isfinite(out) and out > 0 else None
 
 
 def _is_option_trade_safe(trade: Any) -> bool:
@@ -140,6 +235,24 @@ def _trade_contract_multiplier(trade: Any) -> float:
     return 100.0 if _is_option_trade_safe(trade) else 1.0
 
 
+def _option_heat_stop_fraction() -> float:
+    try:
+        from ...config import settings
+
+        stop_pct = _float_or_none(
+            getattr(settings, "chili_autotrader_options_exit_stop_pct", None)
+        )
+    except Exception:
+        stop_pct = None
+    if (
+        stop_pct is None
+        or stop_pct < OPTION_HEAT_STOP_PCT_MIN
+        or stop_pct > OPTION_HEAT_STOP_PCT_MAX
+    ):
+        stop_pct = OPTION_HEAT_STOP_PCT_DEFAULT
+    return stop_pct / 100.0
+
+
 def _trade_entry_notional(trade: Any) -> float:
     entry = _float_or_none(getattr(trade, "entry_price", None))
     qty = _float_or_none(getattr(trade, "quantity", None))
@@ -167,16 +280,7 @@ def _option_premium_risk_dollars(trade: Any) -> float | None:
             risk_per_contract = entry - explicit_stop
 
     if risk_per_contract is None:
-        try:
-            from ...config import settings
-
-            stop_pct = float(
-                getattr(settings, "chili_autotrader_options_exit_stop_pct", 50.0)
-                or 50.0
-            )
-        except Exception:
-            stop_pct = 50.0
-        stop_fraction = abs(stop_pct) / 100.0
+        stop_fraction = _option_heat_stop_fraction()
         if direction == "short":
             risk_fraction = max(stop_fraction, 1.0)
         else:
@@ -194,7 +298,10 @@ def _trade_risk_dollars(trade: Any) -> float:
     entry = _float_or_none(getattr(trade, "entry_price", None))
     qty = _float_or_none(getattr(trade, "quantity", None))
     if stop and entry is not None and qty is not None:
-        return abs(entry - stop) * qty
+        direction = str(getattr(trade, "direction", "") or "long").strip().lower()
+        if direction == "short":
+            return max(stop - entry, 0.0) * qty
+        return max(entry - stop, 0.0) * qty
     return 0.0
 
 
@@ -249,11 +356,17 @@ def get_portfolio_risk_snapshot(
     budget.stock_positions = asset_counts.get("equity", 0)
     budget.option_positions = asset_counts.get("option", 0)
 
+    capital_f = _float_or_none(capital)
+    if capital_f is None:
+        budget.can_open_new = False
+        budget.rejection_reason = "invalid_capital"
+        budget.available_heat_pct = 0.0
+        return budget
+
     total_heat = 0.0
     for t in open_trades:
-        if capital > 0:
-            risk = _trade_risk_dollars(t)
-            total_heat += risk / capital * 100
+        risk = _float_or_none(_trade_risk_dollars(t)) or 0.0
+        total_heat += risk / capital_f * 100
     budget.total_heat_pct = round(total_heat, 2)
     budget.available_heat_pct = round(max(0, limits.max_portfolio_heat_pct - total_heat), 2)
 
@@ -273,11 +386,11 @@ def get_portfolio_risk_snapshot(
     # VaR is expensive (fetches OHLCV); compute only when positions exist
     if budget.open_positions > 0:
         try:
-            budget.portfolio_var_pct = estimate_portfolio_var(db, user_id, capital)
+            budget.portfolio_var_pct = estimate_portfolio_var(db, user_id, capital_f)
         except Exception:
             pass
         try:
-            budget.portfolio_cvar_pct = estimate_portfolio_cvar(db, user_id, capital)
+            budget.portfolio_cvar_pct = estimate_portfolio_cvar(db, user_id, capital_f)
         except Exception:
             pass
 
@@ -305,14 +418,18 @@ def check_new_trade_allowed(
     if is_breaker_tripped():
         return False, f"Circuit breaker active: {_breaker_reason}"
 
-    tripped, reason = check_drawdown_breaker(db, user_id, capital)
+    capital_f = _float_or_none(capital)
+    if capital_f is None:
+        return False, "invalid_capital"
+
+    tripped, reason = check_drawdown_breaker(db, user_id, capital_f)
     if tripped:
         return False, f"Circuit breaker triggered: {reason}"
 
     if limits is None:
         limits = get_risk_limits()
 
-    budget = get_portfolio_risk_snapshot(db, user_id, capital, limits)
+    budget = get_portfolio_risk_snapshot(db, user_id, capital_f, limits)
     if not budget.can_open_new:
         return False, budget.rejection_reason or "Risk limit exceeded"
 
@@ -365,7 +482,7 @@ def size_position(
     risk_pct: float | None = None,
     limits: RiskLimits | None = None,
 ) -> int:
-    """Calculate position size (shares) for a given risk budget.
+    """Calculate long position size (shares) for a given risk budget.
 
     Uses fixed-fractional sizing: risk_pct% of capital = max loss.
     """
@@ -374,14 +491,33 @@ def size_position(
     if risk_pct is None:
         risk_pct = limits.max_risk_per_trade_pct
 
-    risk_amount = capital * (risk_pct / 100)
-    risk_per_share = abs(entry_price - stop_price)
-    if risk_per_share <= 0 or entry_price <= 0:
+    try:
+        capital_f = float(capital)
+        entry_f = float(entry_price)
+        stop_f = float(stop_price)
+        risk_pct_f = float(risk_pct)
+    except (TypeError, ValueError):
+        return 0
+    if (
+        not math.isfinite(capital_f)
+        or not math.isfinite(entry_f)
+        or not math.isfinite(stop_f)
+        or not math.isfinite(risk_pct_f)
+        or capital_f <= 0
+        or entry_f <= 0
+        or stop_f <= 0
+        or risk_pct_f <= 0
+    ):
+        return 0
+
+    risk_amount = capital_f * (risk_pct_f / 100)
+    risk_per_share = entry_f - stop_f
+    if risk_per_share <= 0:
         return 0
 
     shares = int(risk_amount / risk_per_share)
-    max_notional = capital * 0.20  # never more than 20% of capital in one position
-    max_by_notional = int(max_notional / entry_price)
+    max_notional = capital_f * 0.20  # never more than 20% of capital in one position
+    max_by_notional = int(max_notional / entry_f)
     return max(0, min(shares, max_by_notional))
 
 
@@ -876,24 +1012,38 @@ def estimate_portfolio_cvar(
 def _infer_stop(trade: Trade) -> float | None:
     """Infer stop-loss price from trade tags/notes or use a default ATR-based estimate."""
     import json
+    explicit_stop = _float_or_none(getattr(trade, "stop_loss", None))
+    if explicit_stop is not None:
+        return explicit_stop
     if trade.tags:
         try:
             tag_data = json.loads(trade.tags) if trade.tags.startswith("{") else {}
             sl = tag_data.get("stop_loss") or tag_data.get("stop")
-            if sl:
-                return float(sl)
+            sl_f = _float_or_none(sl)
+            if sl_f is not None:
+                return sl_f
         except Exception:
             pass
     if trade.indicator_snapshot:
         try:
-            snap = json.loads(trade.indicator_snapshot)
+            snap = (
+                json.loads(trade.indicator_snapshot)
+                if isinstance(trade.indicator_snapshot, str)
+                else trade.indicator_snapshot
+            )
+            if not isinstance(snap, dict):
+                snap = {}
             atr = snap.get("atr", {}).get("value")
-            if atr:
-                return trade.entry_price - (2.0 * float(atr))
+            atr_f = _float_or_none(atr)
+            entry = _float_or_none(getattr(trade, "entry_price", None))
+            if atr_f is not None and entry is not None:
+                inferred = entry - (2.0 * atr_f)
+                return inferred if inferred > 0 else None
         except Exception:
             pass
     # Default: assume 2% stop from entry
-    return trade.entry_price * 0.98
+    entry = _float_or_none(getattr(trade, "entry_price", None))
+    return entry * 0.98 if entry is not None else None
 
 
 # ── Drawdown Circuit Breaker ──────────────────────────────────────────
@@ -1058,7 +1208,12 @@ def _compute_unrealized_pnl(db: Session, user_id: int | None) -> float:
 def _option_unrealized_mark_price(trade: Trade) -> float | None:
     """Return the current option premium mark for MTM, never underlying spot."""
     try:
-        from .options.exit_monitor import _opt_meta
+        from .options.exit_monitor import (
+            _opt_meta,
+            _option_exit_quote_price,
+            _option_quote_has_malformed_price,
+            _option_quote_is_crossed,
+        )
         from .venue.robinhood_options import RobinhoodOptionsAdapter
 
         meta = _opt_meta(trade)
@@ -1077,19 +1232,19 @@ def _option_unrealized_mark_price(trade: Trade) -> float | None:
         quote = adapter.get_quote(str(contract.get("id") or ""))
         if not quote:
             return None
-        for key in ("mark_price", "adjusted_mark_price", "last_trade_price"):
-            try:
-                value = float(quote.get(key) or 0.0)
-            except (TypeError, ValueError):
-                value = 0.0
-            if value > 0:
-                return value
-        try:
-            bid = float(quote.get("bid_price") or 0.0)
-            ask = float(quote.get("ask_price") or 0.0)
-        except (TypeError, ValueError):
+        if _option_quote_has_malformed_price(quote) or _option_quote_is_crossed(quote):
             return None
-        if bid > 0 and ask > 0:
+        for key in ("mark_price", "adjusted_mark_price", "last_trade_price"):
+            value, malformed = _option_exit_quote_price(quote, key)
+            if malformed:
+                return None
+            if value is not None and value > 0:
+                return value
+        bid, bid_malformed = _option_exit_quote_price(quote, "bid_price", "bid")
+        ask, ask_malformed = _option_exit_quote_price(quote, "ask_price", "ask")
+        if bid_malformed or ask_malformed:
+            return None
+        if bid is not None and ask is not None and bid > 0 and ask > 0:
             return (bid + ask) / 2.0
     except Exception:
         logger.debug("[portfolio_risk] option MTM mark failed", exc_info=True)
@@ -1665,12 +1820,17 @@ def check_drawdown_breaker(
     qcons = db.query(Trade).filter(
         Trade.user_id == user_id,
         Trade.status == "closed",
+        Trade.exit_date.isnot(None),
         # exit_reason can be NULL on legitimate closes, so the test must
         # accept NULL.
         (Trade.exit_reason.is_(None) | Trade.exit_reason.notin_(SYNTHETIC_EXIT_REASONS)),
     )
     qcons = _breaker_trade_filter(qcons)
-    last_n = qcons.order_by(Trade.exit_date.desc()).limit(limits.max_consecutive_losses).all()
+    last_n = (
+        qcons.order_by(Trade.exit_date.desc().nulls_last())
+        .limit(limits.max_consecutive_losses)
+        .all()
+    )
     if len(last_n) >= limits.max_consecutive_losses:
         if all((t.pnl or 0) < 0 for t in last_n):
             streak_loss = sum(float(t.pnl or 0.0) for t in last_n)
@@ -1857,14 +2017,19 @@ def unified_risk_check(
         return False, "Kill-switch check failed — blocking as precaution", detail
 
     # 2. Circuit breaker (now includes MTM)
-    tripped, reason = check_drawdown_breaker(db, user_id, capital)
+    capital_f = _float_or_none(capital)
+    if capital_f is None:
+        detail["capital_valid"] = False
+        return False, "invalid_capital", detail
+
+    tripped, reason = check_drawdown_breaker(db, user_id, capital_f)
     if tripped:
         detail["breaker_reason"] = reason
         return False, f"Circuit breaker: {reason}", detail
 
     # 3. Position limits
     limits = get_risk_limits()
-    budget = get_portfolio_risk_snapshot(db, user_id, capital, limits)
+    budget = get_portfolio_risk_snapshot(db, user_id, capital_f, limits)
     detail["portfolio_heat_pct"] = budget.total_heat_pct
     detail["open_positions"] = budget.open_positions
 

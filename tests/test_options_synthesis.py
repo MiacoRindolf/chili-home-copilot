@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from typing import Any
 
 from app.config import (
     AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_DEFAULT_TTL_SECONDS,
@@ -8,13 +9,15 @@ from app.config import (
 )
 from app.services.trading.options.synthesis import (
     clear_synthesis_no_survivor_cache,
+    _pick_expiration,
+    _quote_prices,
     _quality_sort_key,
     synthesize_option_meta,
 )
 
 
 class _FakeOptionsAdapter:
-    def __init__(self, quotes: dict[float, dict[str, str]]):
+    def __init__(self, quotes: dict[float, dict[str, Any]]):
         self.quotes = quotes
 
     def find_contract(self, _underlying: str, _expiration: str, strike: float, _option_type: str):
@@ -26,7 +29,7 @@ class _FakeOptionsAdapter:
         return self.quotes.get(float(option_id))
 
 
-def _wire_synthesis_fakes(monkeypatch, quotes: dict[float, dict[str, str]]) -> None:
+def _wire_synthesis_fakes(monkeypatch, quotes: dict[float, dict[str, Any]]) -> None:
     from app.services import broker_service
     from app.services.trading import strategy_parameter
     from app.services.trading.options import synthesis
@@ -57,6 +60,48 @@ def _wire_synthesis_fakes(monkeypatch, quotes: dict[float, dict[str, str]]) -> N
         "chili_autotrader_options_synthesis_no_survivor_cache_ttl_seconds",
         AUTOTRADER_OPTIONS_SYNTHESIS_NO_SURVIVOR_CACHE_DEFAULT_TTL_SECONDS,
     )
+
+
+def test_pick_expiration_ignores_expired_and_malformed_chain_dates(monkeypatch):
+    from app.services import broker_service
+
+    today = datetime.utcnow().date()
+    expired = (today - timedelta(days=3)).isoformat()
+    near_future = (today + timedelta(days=7)).isoformat()
+    target_future = (today + timedelta(days=21)).isoformat()
+
+    monkeypatch.setattr(
+        broker_service,
+        "get_option_chains",
+        lambda _underlying: {
+            "expiration_dates": [
+                expired,
+                "not-a-date",
+                near_future,
+                target_future,
+            ]
+        },
+    )
+
+    assert _pick_expiration(None, "XYZ", target_dte=21) == target_future
+
+
+def test_pick_expiration_returns_none_when_chain_has_no_tradeable_dates(monkeypatch):
+    from app.services import broker_service
+
+    today = datetime.utcnow().date()
+    monkeypatch.setattr(
+        broker_service,
+        "get_option_chains",
+        lambda _underlying: {
+            "expiration_dates": [
+                (today - timedelta(days=2)).isoformat(),
+                "bad-date",
+            ]
+        },
+    )
+
+    assert _pick_expiration(None, "XYZ", target_dte=21) is None
 
 
 def test_synthesize_option_meta_selects_affordable_quality_contract(monkeypatch):
@@ -117,6 +162,27 @@ def test_option_synthesis_ranks_contracts_by_after_cost_edge():
     )
 
 
+def test_option_synthesis_ranking_preserves_zero_spread_tiebreaker():
+    zero_spread = {
+        "synthesis_spread_pct": 0.0,
+        "synthesis_contract_notional_usd": 120.0,
+        "entry_quality": {
+            "expected_value_after_cost_pct_of_premium": 45.0,
+            "option_reward_risk_after_cost": 1.8,
+        },
+    }
+    wider_spread = {
+        "synthesis_spread_pct": 5.0,
+        "synthesis_contract_notional_usd": 120.0,
+        "entry_quality": {
+            "expected_value_after_cost_pct_of_premium": 45.0,
+            "option_reward_risk_after_cost": 1.8,
+        },
+    }
+
+    assert _quality_sort_key(zero_spread) > _quality_sort_key(wider_spread)
+
+
 def test_synthesize_option_meta_rejects_when_contract_exceeds_budget(monkeypatch):
     _wire_synthesis_fakes(
         monkeypatch,
@@ -147,6 +213,41 @@ def test_synthesize_option_meta_rejects_crossed_option_quotes(monkeypatch):
             100.0: {"bid_price": "8.10", "ask_price": "8.00"},
             95.0: {"bid_price": "9.10", "ask_price": "9.00"},
             105.0: {"bid_price": "1.55", "ask_price": "1.50"},
+        },
+    )
+
+    meta = synthesize_option_meta(
+        db=None,
+        underlying="XYZ",
+        spot=100.0,
+        notional_usd=300.0,
+        underlying_target=112.0,
+        underlying_stop=96.0,
+        confidence=0.9,
+    )
+
+    assert meta is None
+
+
+def test_quote_prices_rejects_nonfinite_option_premiums():
+    assert _quote_prices({"bid_price": "NaN", "ask_price": "1.50"}) is None
+    assert _quote_prices({"bid_price": "1.45", "ask_price": "Infinity"}) is None
+    assert _quote_prices({"bid_price": "-Infinity", "ask_price": "1.50"}) is None
+
+
+def test_quote_prices_rejects_boolean_option_premiums():
+    assert _quote_prices({"bid_price": True, "ask_price": "1.50"}) is None
+    assert _quote_prices({"bid_price": False, "ask_price": "1.50"}) is None
+    assert _quote_prices({"bid_price": "1.45", "ask_price": True}) is None
+
+
+def test_synthesize_option_meta_rejects_boolean_option_quotes(monkeypatch):
+    _wire_synthesis_fakes(
+        monkeypatch,
+        {
+            100.0: {"bid_price": True, "ask_price": "8.00"},
+            95.0: {"bid_price": "8.90", "ask_price": True},
+            105.0: {"bid_price": False, "ask_price": "1.50"},
         },
     )
 

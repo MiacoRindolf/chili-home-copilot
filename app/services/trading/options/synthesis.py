@@ -9,14 +9,17 @@ entry-quality model agrees with the underlying stop/target scenario.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from collections import Counter
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 from types import SimpleNamespace
 from typing import Any, Optional
 
 from sqlalchemy.orm import Session
+
+from .contracts import normalize_expiration
 
 logger = logging.getLogger(__name__)
 
@@ -124,15 +127,26 @@ def _pick_expiration(_adapter: Any, underlying: str, target_dte: int = DEFAULT_T
         if not expirations:
             return None
         today = datetime.utcnow().date()
-
-        def _gap(expiration: str) -> int:
+        valid_expirations: list[tuple[str, date]] = []
+        for expiration in expirations:
+            exp = normalize_expiration(expiration)
+            if not exp:
+                continue
             try:
-                exp_date = datetime.strptime(expiration, "%Y-%m-%d").date()
-                return abs((exp_date - today).days - target_dte)
+                exp_date = datetime.strptime(exp, "%Y-%m-%d").date()
             except Exception:
-                return 9999
+                continue
+            if exp_date < today:
+                continue
+            valid_expirations.append((exp, exp_date))
+        if not valid_expirations:
+            return None
 
-        return sorted(expirations, key=_gap)[0]
+        def _gap(row: tuple[str, date]) -> int:
+            _exp, exp_date = row
+            return abs((exp_date - today).days - target_dte)
+
+        return sorted(valid_expirations, key=_gap)[0][0]
     except Exception as exc:
         logger.debug("[options_synth] expiration pick failed for %s: %s", underlying, exc)
         return None
@@ -273,10 +287,9 @@ def _remember_no_survivor_cache(
 
 def _quote_prices(quote: dict[str, Any]) -> Optional[tuple[float, float, float, float]]:
     """Return bid, ask, mid, and spread percent from a broker quote."""
-    try:
-        bid = float(quote.get("bid_price") or 0)
-        ask = float(quote.get("ask_price") or 0)
-    except (TypeError, ValueError):
+    bid = _quote_price_float(quote.get("bid_price"), default=0.0)
+    ask = _quote_price_float(quote.get("ask_price"))
+    if bid is None or ask is None:
         return None
     if bid < 0 or ask <= 0:
         return None
@@ -291,11 +304,26 @@ def _quote_prices(quote: dict[str, Any]) -> Optional[tuple[float, float, float, 
     return bid, ask, mid, spread_pct
 
 
+def _quote_price_float(value: Any, *, default: float | None = None) -> Optional[float]:
+    if value in (None, ""):
+        return default
+    if isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(out):
+        return None
+    return out
+
+
 def _quality_sort_key(meta: dict[str, Any]) -> tuple[float, float, float, float]:
     """Rank accepted contracts without hidden weights."""
     quality = meta.get("entry_quality") if isinstance(meta.get("entry_quality"), dict) else {}
     ev_after_cost = quality.get("expected_value_after_cost_pct_of_premium")
     reward_after_cost = quality.get("option_reward_risk_after_cost")
+    spread_pct = meta.get("synthesis_spread_pct")
     return (
         float(
             ev_after_cost
@@ -307,7 +335,7 @@ def _quality_sort_key(meta: dict[str, Any]) -> tuple[float, float, float, float]
             if reward_after_cost is not None
             else quality.get("option_reward_risk") or 0.0
         ),
-        -float(meta.get("synthesis_spread_pct") or NO_BID_SPREAD_PCT),
+        -float(spread_pct if spread_pct is not None else NO_BID_SPREAD_PCT),
         -float(meta.get("synthesis_contract_notional_usd") or 0.0),
     )
 

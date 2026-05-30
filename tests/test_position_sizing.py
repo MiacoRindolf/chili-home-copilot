@@ -57,6 +57,33 @@ class TestBasicRiskMath:
 
 # ── BTE-like scenario ──────────────────────────────────────────────────
 
+@patch(_REGIME_PATCH, return_value=_regime("risk_on", "normal"))
+def test_returns_none_when_long_stop_is_above_entry(_mock):
+    pick = {"signals": []}
+    qty, pct = _compute_position_size(
+        price=10.0, stop=10.50, buying_power=10_000, pick=pick,
+    )
+    assert qty is None
+    assert pct is None
+
+
+@patch(_REGIME_PATCH, return_value=_regime("risk_on", "normal"))
+def test_returns_none_for_non_finite_sizing_inputs(_mock):
+    pick = {"signals": []}
+    for price, stop, buying_power in (
+        (float("nan"), 9.0, 10_000),
+        (10.0, float("inf"), 10_000),
+        (10.0, 9.0, float("-inf")),
+    ):
+        qty, pct = _compute_position_size(
+            price=price,
+            stop=stop,
+            buying_power=buying_power,
+            pick=pick,
+        )
+        assert qty is None
+        assert pct is None
+
 
 class TestBTEScenario:
     """BTE: $4.02 entry, $3.74 stop, risk-off, high-risk fundamentals.
@@ -278,13 +305,13 @@ class TestHardCaps:
 class TestQuantity:
 
     @patch(_REGIME_PATCH, return_value=_regime("risk_on", "normal"))
-    def test_quantity_at_least_one(self, _mock):
+    def test_quantity_none_when_allocation_cannot_buy_one_share(self, _mock):
         pick = {"signals": [], "risk_level": "medium"}
         qty, pct = _compute_position_size(
             price=1000.0, stop=950.0, buying_power=500, pick=pick,
         )
-        assert qty is not None
-        assert qty >= 1
+        assert qty is None
+        assert pct is None
 
     @patch(_REGIME_PATCH, return_value=_regime("risk_on", "normal"))
     def test_quantity_consistent_with_pct(self, _mock):

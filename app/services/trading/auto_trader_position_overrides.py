@@ -18,6 +18,7 @@ Desk wiring calls into these helpers from:
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timezone
 from typing import Any, Iterable, Literal, Optional
 
@@ -37,6 +38,16 @@ logger = logging.getLogger(__name__)
 PositionKind = Literal["trade", "paper"]
 
 _DEFAULT = {"monitor_paused": False, "synergy_excluded": False}
+
+
+def _positive_finite_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) and out > 0.0 else None
 
 
 def _slice_name(kind: PositionKind, trade_id: int) -> str:
@@ -154,8 +165,9 @@ def _current_quote_price(ticker: str, *, prefer_rh: bool = False) -> float | Non
             adapter = RobinhoodSpotAdapter()
             if adapter.is_enabled():
                 px = adapter.get_quote_price(ticker)
-                if px is not None:
-                    return float(px)
+                parsed = _positive_finite_float(px)
+                if parsed is not None:
+                    return parsed
         except Exception:
             logger.debug("[autotrader_pos_override] RH quote failed; falling back", exc_info=True)
 
@@ -165,10 +177,7 @@ def _current_quote_price(ticker: str, *, prefer_rh: bool = False) -> float | Non
     if not q:
         return None
     p = q.get("price") or q.get("last_price")
-    try:
-        return float(p) if p is not None else None
-    except (TypeError, ValueError):
-        return None
+    return _positive_finite_float(p)
 
 
 def close_position_now(
@@ -267,7 +276,9 @@ def _close_option_trade_now(
         _has_active_pending_exit,
         _opt_meta,
         _option_exit_order_state,
+        _option_exit_quote_price,
         _option_quote_is_crossed,
+        _option_quote_has_malformed_price,
         _option_exit_raw_order,
         _option_exit_submit_fill_is_complete,
         _parse_option_order_time,
@@ -287,7 +298,8 @@ def _close_option_trade_now(
     expiration = str(meta.get("expiration") or "")
     strike = meta.get("strike")
     option_type = str(meta.get("option_type") or "").lower()
-    if not (expiration and strike and option_type in ("call", "put")):
+    strike_f = _positive_finite_float(strike)
+    if not (expiration and strike_f is not None and option_type in ("call", "put")):
         return {"ok": False, "error": "missing_option_meta"}
 
     qty = parse_contract_quantity(getattr(t, "quantity", None))
@@ -299,23 +311,19 @@ def _close_option_trade_now(
         return {"ok": False, "error": "rh_options_adapter_off"}
 
     underlying = str(meta.get("underlying") or t.ticker or "").upper()
-    contract = adapter.find_contract(underlying, expiration, float(strike), option_type)
+    contract = adapter.find_contract(underlying, expiration, strike_f, option_type)
     if not contract:
         return {"ok": False, "error": "option_contract_not_found"}
     quote = adapter.get_quote(str(contract.get("id") or ""))
     if not quote:
         return {"ok": False, "error": "no_option_quote"}
+    if _option_quote_has_malformed_price(quote):
+        return {"ok": False, "error": "malformed_option_quote"}
     if _option_quote_is_crossed(quote):
         return {"ok": False, "error": "crossed_option_quote"}
 
-    try:
-        bid = float(quote.get("bid_price") or 0.0)
-    except (TypeError, ValueError):
-        bid = 0.0
-    try:
-        mark = float(quote.get("mark_price") or 0.0)
-    except (TypeError, ValueError):
-        mark = 0.0
+    bid = _option_exit_quote_price(quote, "bid_price", "bid")[0] or 0.0
+    mark = _option_exit_quote_price(quote, "mark_price", "mark")[0] or 0.0
     current_premium = mark if mark > 0 else (bid if bid > 0 else None)
     limit_price = bid if bid > 0 else (mark if mark > 0 else None)
     if limit_price is None or limit_price <= 0:
@@ -324,7 +332,7 @@ def _close_option_trade_now(
     res = adapter.place_option_sell(
         underlying=underlying,
         expiration=expiration,
-        strike=float(strike),
+        strike=strike_f,
         option_type=option_type,
         quantity=qty,
         limit_price=float(limit_price),
@@ -395,7 +403,7 @@ def _close_paper_now(db: Session, *, trade_id: int, updated_by: str) -> dict[str
         return {"ok": False, "error": "not_pattern_linked"}
 
     if _is_option_paper_trade(pt):
-        px = _paper_current_mark_price(pt, purpose="exit")
+        px = _positive_finite_float(_paper_current_mark_price(pt, purpose="exit"))
         if px is None:
             return {"ok": False, "error": "no_quote"}
     else:

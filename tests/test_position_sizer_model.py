@@ -95,6 +95,41 @@ def test_invalid_prices_return_zero():
     assert out.proposed_notional == 0.0
 
 
+def test_zero_loss_per_unit_returns_zero():
+    out = compute_proposal(inp=_default_input(loss_per_unit=0.0), source="unit")
+
+    assert out.proposed_notional == 0.0
+    assert out.proposed_quantity == 0.0
+    assert out.proposed_risk_pct == 0.0
+    assert out.reasoning.get("reject_reason") == "invalid_loss_per_unit"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("calibrated_prob", float("nan")),
+        ("payoff_fraction", float("inf")),
+        ("cost_fraction", "-Infinity"),
+        ("kelly_scale", "not-a-number"),
+        ("max_risk_pct", float("nan")),
+        ("equity_bucket_cap_pct", True),
+        ("crypto_bucket_cap_pct", float("inf")),
+        ("single_ticker_cap_pct", "-Infinity"),
+        ("expected_net_pnl", float("nan")),
+    ],
+)
+def test_nonfinite_edge_or_cap_inputs_return_zero(field, value):
+    out = compute_proposal(inp=_default_input(**{field: value}), source="unit")
+
+    assert out.proposed_notional == 0.0
+    assert out.proposed_quantity == 0.0
+    assert out.proposed_risk_pct == 0.0
+    assert out.kelly_fraction == 0.0
+    assert out.kelly_scaled_fraction == 0.0
+    assert out.expected_net_pnl == 0.0
+    assert out.reasoning.get("reject_reason") == "invalid_edge_inputs"
+
+
 def test_higher_probability_increases_kelly():
     base = compute_proposal(inp=_default_input(calibrated_prob=0.55), source="unit")
     better = compute_proposal(inp=_default_input(calibrated_prob=0.70), source="unit")
@@ -286,6 +321,29 @@ def test_notional_equals_quantity_times_entry_within_rounding():
     out = compute_proposal(inp=_default_input(), source="unit")
     assert out.proposed_notional == pytest.approx(
         out.proposed_quantity * 100.0, rel=1e-9, abs=1e-4,
+    )
+
+
+def test_option_quantity_uses_contract_multiplier_for_notional():
+    inp = _default_input(
+        ticker="SPY",
+        asset_class="options",
+        entry_price=1.25,
+        stop_price=0.75,
+        payoff_fraction=0.20,
+        loss_per_unit=0.40,
+        capital=10_000.0,
+        unit_multiplier=100.0,
+        qty_rounding="int",
+    )
+
+    out = compute_proposal(inp=inp, source="unit")
+
+    assert out.proposed_quantity == float(int(out.proposed_quantity))
+    assert out.proposed_notional == pytest.approx(
+        out.proposed_quantity * 1.25 * 100.0,
+        rel=1e-9,
+        abs=1e-4,
     )
 
 

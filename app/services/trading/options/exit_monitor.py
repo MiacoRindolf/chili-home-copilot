@@ -29,6 +29,7 @@ OFF). When OFF, no option Trade rows are touched by this pass.
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -63,6 +64,24 @@ _OPTION_EXIT_TERMINAL_STATES = {
     "failed",
     "expired",
 }
+_OPTION_EXIT_FILLED_QTY_KEYS = (
+    "cumulative_quantity",
+    "cumulative_filled_quantity",
+    "filled_quantity",
+    "processed_quantity",
+    "quantity_filled",
+    "filled_size",
+)
+_OPTION_EXIT_REQUESTED_QTY_KEYS = ("quantity", "requested_quantity")
+EXIT_DTE_DEFAULT = 7.0
+EXIT_DTE_MIN = 0.0
+EXIT_DTE_MAX = 30.0
+EXIT_STOP_PCT_DEFAULT = 50.0
+EXIT_STOP_PCT_MIN = 10.0
+EXIT_STOP_PCT_MAX = 80.0
+EXIT_TP_PCT_DEFAULT = 100.0
+EXIT_TP_PCT_MIN = 20.0
+EXIT_TP_PCT_MAX = 500.0
 
 
 def _register_exit_parameters(db: Session) -> None:
@@ -77,8 +96,11 @@ def _register_exit_parameters(db: Session) -> None:
         register_parameter(db, ParameterSpec(
             strategy_family=STRATEGY_FAMILY,
             parameter_key="exit_dte",
-            initial_value=float(getattr(settings, "chili_autotrader_options_exit_dte", 7)),
-            min_value=0.0, max_value=30.0,
+            initial_value=_option_exit_setting_float(
+                "chili_autotrader_options_exit_dte",
+                EXIT_DTE_DEFAULT,
+            ),
+            min_value=EXIT_DTE_MIN, max_value=EXIT_DTE_MAX,
             description=(
                 "Days-to-expiration threshold below which open option "
                 "positions auto-close. Lower exposes the position to "
@@ -90,8 +112,11 @@ def _register_exit_parameters(db: Session) -> None:
         register_parameter(db, ParameterSpec(
             strategy_family=STRATEGY_FAMILY,
             parameter_key="exit_stop_pct",
-            initial_value=float(getattr(settings, "chili_autotrader_options_exit_stop_pct", 50.0)),
-            min_value=10.0, max_value=80.0,
+            initial_value=_option_exit_setting_float(
+                "chili_autotrader_options_exit_stop_pct",
+                EXIT_STOP_PCT_DEFAULT,
+            ),
+            min_value=EXIT_STOP_PCT_MIN, max_value=EXIT_STOP_PCT_MAX,
             description=(
                 "Premium drop %% below entry that triggers stop-loss "
                 "exit. Tighter = exit losers earlier, more frequent "
@@ -102,8 +127,11 @@ def _register_exit_parameters(db: Session) -> None:
         register_parameter(db, ParameterSpec(
             strategy_family=STRATEGY_FAMILY,
             parameter_key="exit_tp_pct",
-            initial_value=float(getattr(settings, "chili_autotrader_options_exit_tp_pct", 100.0)),
-            min_value=20.0, max_value=500.0,
+            initial_value=_option_exit_setting_float(
+                "chili_autotrader_options_exit_tp_pct",
+                EXIT_TP_PCT_DEFAULT,
+            ),
+            min_value=EXIT_TP_PCT_MIN, max_value=EXIT_TP_PCT_MAX,
             description=(
                 "Premium gain %% above entry that triggers "
                 "take-profit exit. Lower = lock smaller wins more "
@@ -191,15 +219,68 @@ def _option_exit_raw_order(
 
 
 def _option_exit_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
     try:
-        return float(value)
+        parsed = float(value)
     except (TypeError, ValueError):
         return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _option_exit_setting_float(name: str, default: float) -> float:
+    parsed = _option_exit_float(getattr(settings, name, None))
+    return parsed if parsed is not None else float(default)
+
+
+def _option_exit_bounded_parameter_value(
+    value: Any,
+    default: float,
+    *,
+    min_value: float,
+    max_value: float,
+    integer: bool = False,
+) -> float | int:
+    parsed = _option_exit_float(_parameter_value_or_default(value, default))
+    if parsed is None or parsed < min_value or parsed > max_value:
+        parsed = float(default)
+    return int(parsed) if integer else parsed
+
+
+def _option_exit_quote_price(
+    quote: dict[str, Any],
+    *keys: str,
+) -> tuple[float | None, bool]:
+    for key in keys:
+        raw = quote.get(key)
+        if raw is None:
+            continue
+        if isinstance(raw, str) and not raw.strip():
+            continue
+        value = _option_exit_float(raw)
+        if value is None or value < 0.0:
+            return None, True
+        return value, False
+    return None, False
+
+
+def _option_quote_has_malformed_price(quote: dict[str, Any]) -> bool:
+    for keys in (
+        ("bid_price", "bid"),
+        ("ask_price", "ask"),
+        ("mark_price", "mark"),
+    ):
+        _, malformed = _option_exit_quote_price(quote, *keys)
+        if malformed:
+            return True
+    return False
 
 
 def _option_quote_is_crossed(quote: dict[str, Any]) -> bool:
-    bid = _option_exit_float(quote.get("bid_price") or quote.get("bid"))
-    ask = _option_exit_float(quote.get("ask_price") or quote.get("ask"))
+    bid, bid_malformed = _option_exit_quote_price(quote, "bid_price", "bid")
+    ask, ask_malformed = _option_exit_quote_price(quote, "ask_price", "ask")
+    if bid_malformed or ask_malformed:
+        return False
     return bool(
         bid is not None
         and ask is not None
@@ -210,27 +291,26 @@ def _option_quote_is_crossed(quote: dict[str, Any]) -> bool:
 
 
 def _option_exit_filled_quantity(raw_order: dict[str, Any]) -> float | None:
-    for key in (
-        "cumulative_quantity",
-        "cumulative_filled_quantity",
-        "filled_quantity",
-        "processed_quantity",
-        "quantity_filled",
-        "filled_size",
-    ):
+    for key in _OPTION_EXIT_FILLED_QTY_KEYS:
         qty = _option_exit_float(raw_order.get(key))
         if qty is not None:
+            if qty < 0.0 or not float(qty).is_integer():
+                return None
             return max(0.0, qty)
     return None
 
 
+def _option_exit_has_filled_quantity(raw_order: dict[str, Any]) -> bool:
+    return any(raw_order.get(key) is not None for key in _OPTION_EXIT_FILLED_QTY_KEYS)
+
+
 def _option_exit_requested_quantity(trade: Trade, raw_order: dict[str, Any]) -> float | None:
-    for key in ("quantity", "requested_quantity"):
-        qty = _option_exit_float(raw_order.get(key))
-        if qty is not None and qty > 0:
-            return qty
-    qty = _option_exit_float(getattr(trade, "quantity", None))
-    return qty if qty is not None and qty > 0 else None
+    for key in _OPTION_EXIT_REQUESTED_QTY_KEYS:
+        qty = parse_contract_quantity(raw_order.get(key))
+        if qty is not None:
+            return float(qty)
+    qty = parse_contract_quantity(getattr(trade, "quantity", None))
+    return float(qty) if qty is not None else None
 
 
 def _option_exit_contract_quantity(trade: Trade) -> int | None:
@@ -268,15 +348,22 @@ def _option_exit_submit_fill_is_complete(
     state: str,
 ) -> bool:
     state = str(state or "").strip().lower()
+    filled_qty = _option_exit_filled_quantity(raw_order)
+    has_filled_qty = _option_exit_has_filled_quantity(raw_order)
+    local_qty = _option_exit_contract_quantity(trade)
+    requested_qty = _option_exit_requested_quantity(trade, raw_order)
+    target_qty = float(local_qty) if local_qty is not None else requested_qty
     if state in _OPTION_EXIT_FILLED_STATES:
-        return True
+        if has_filled_qty:
+            return (
+                filled_qty is not None
+                and target_qty is not None
+                and filled_qty + 1e-9 >= target_qty
+            )
+        return target_qty is not None
     if state not in _OPTION_EXIT_TERMINAL_STATES:
         return False
 
-    filled_qty = _option_exit_filled_quantity(raw_order)
-    local_qty = _option_exit_float(getattr(trade, "quantity", None))
-    requested_qty = _option_exit_requested_quantity(trade, raw_order)
-    target_qty = local_qty if local_qty is not None and local_qty > 0 else requested_qty
     if filled_qty is None or target_qty is None or target_qty <= 0:
         return False
     return filled_qty + 1e-9 >= target_qty
@@ -460,19 +547,44 @@ def run_options_exit_pass(db: Session) -> dict[str, int]:
 
     dte_threshold_raw = get_parameter(
         db, STRATEGY_FAMILY, "exit_dte",
-        default=float(getattr(settings, "chili_autotrader_options_exit_dte", 7)),
+        default=_option_exit_setting_float(
+            "chili_autotrader_options_exit_dte",
+            EXIT_DTE_DEFAULT,
+        ),
     )
-    dte_threshold = int(_parameter_value_or_default(dte_threshold_raw, 7))
+    dte_threshold = _option_exit_bounded_parameter_value(
+        dte_threshold_raw,
+        EXIT_DTE_DEFAULT,
+        min_value=EXIT_DTE_MIN,
+        max_value=EXIT_DTE_MAX,
+        integer=True,
+    )
     stop_pct_raw = get_parameter(
         db, STRATEGY_FAMILY, "exit_stop_pct",
-        default=float(getattr(settings, "chili_autotrader_options_exit_stop_pct", 50.0)),
+        default=_option_exit_setting_float(
+            "chili_autotrader_options_exit_stop_pct",
+            EXIT_STOP_PCT_DEFAULT,
+        ),
     )
-    stop_pct = float(_parameter_value_or_default(stop_pct_raw, 50.0))
+    stop_pct = _option_exit_bounded_parameter_value(
+        stop_pct_raw,
+        EXIT_STOP_PCT_DEFAULT,
+        min_value=EXIT_STOP_PCT_MIN,
+        max_value=EXIT_STOP_PCT_MAX,
+    )
     tp_pct_raw = get_parameter(
         db, STRATEGY_FAMILY, "exit_tp_pct",
-        default=float(getattr(settings, "chili_autotrader_options_exit_tp_pct", 100.0)),
+        default=_option_exit_setting_float(
+            "chili_autotrader_options_exit_tp_pct",
+            EXIT_TP_PCT_DEFAULT,
+        ),
     )
-    tp_pct = float(_parameter_value_or_default(tp_pct_raw, 100.0))
+    tp_pct = _option_exit_bounded_parameter_value(
+        tp_pct_raw,
+        EXIT_TP_PCT_DEFAULT,
+        min_value=EXIT_TP_PCT_MIN,
+        max_value=EXIT_TP_PCT_MAX,
+    )
 
     # Lazy import to avoid a hard module-load dependency on the
     # adapter (broker_service ultimately imports robin_stocks).
@@ -535,6 +647,21 @@ def run_options_exit_pass(db: Session) -> dict[str, int]:
         if not quote:
             summary["skipped_no_quote"] += 1
             continue
+        if _option_quote_has_malformed_price(quote):
+            logger.warning(
+                "[options_exit_monitor] trade=%s malformed option quote "
+                "bid=%s ask=%s mark=%s; refusing automated exit on "
+                "untrusted market data",
+                t.id,
+                quote.get("bid_price") or quote.get("bid"),
+                quote.get("ask_price") or quote.get("ask"),
+                (
+                    quote.get("mark_price")
+                    or quote.get("mark")
+                ),
+            )
+            summary["skipped_no_quote"] += 1
+            continue
         if _option_quote_is_crossed(quote):
             logger.warning(
                 "[options_exit_monitor] trade=%s crossed option quote bid=%s ask=%s; "
@@ -547,14 +674,15 @@ def run_options_exit_pass(db: Session) -> dict[str, int]:
             continue
         if _record_exit_quote_snapshot(db, t, meta, quote):
             summary["quote_snapshots"] += 1
-        try:
-            bid = float(quote.get("bid_price") or 0)
-        except (TypeError, ValueError):
-            bid = 0.0
-        try:
-            mark = float(quote.get("mark_price") or 0)
-        except (TypeError, ValueError):
-            mark = 0.0
+        bid = _option_exit_quote_price(quote, "bid_price", "bid")[0] or 0.0
+        mark = (
+            _option_exit_quote_price(
+                quote,
+                "mark_price",
+                "mark",
+            )[0]
+            or 0.0
+        )
         # Round-15 (2026-04-30): use MARK for change calculation rather
         # than bid. Bid-vs-entry-ask is apples-to-oranges and biases
         # toward false stops by the bid-ask spread amount immediately

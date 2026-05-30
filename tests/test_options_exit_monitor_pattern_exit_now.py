@@ -239,11 +239,71 @@ def test_options_exit_pass_is_scoped_to_configured_autopilot_user():
 
 
 def test_options_exit_preserves_zero_dte_parameter_value():
-    from app.services.trading.options.exit_monitor import _parameter_value_or_default
+    from app.services.trading.options.exit_monitor import (
+        _option_exit_bounded_parameter_value,
+        _parameter_value_or_default,
+    )
 
     assert _parameter_value_or_default(0, 7) == 0
     assert _parameter_value_or_default(0.0, 7) == 0.0
     assert _parameter_value_or_default(None, 7) == 7
+    assert _option_exit_bounded_parameter_value(
+        0,
+        7.0,
+        min_value=0.0,
+        max_value=30.0,
+        integer=True,
+    ) == 0
+
+
+def test_options_exit_parameter_defaults_on_malformed_or_nonfinite_value():
+    from app.services.trading.options.exit_monitor import (
+        _option_exit_bounded_parameter_value,
+    )
+
+    assert _option_exit_bounded_parameter_value(
+        "bad",
+        50.0,
+        min_value=10.0,
+        max_value=80.0,
+    ) == pytest.approx(50.0)
+    assert _option_exit_bounded_parameter_value(
+        "NaN",
+        50.0,
+        min_value=10.0,
+        max_value=80.0,
+    ) == pytest.approx(50.0)
+    assert _option_exit_bounded_parameter_value(
+        True,
+        50.0,
+        min_value=10.0,
+        max_value=80.0,
+    ) == pytest.approx(50.0)
+
+
+def test_options_exit_parameter_defaults_on_out_of_bounds_stop_or_target_pct():
+    from app.services.trading.options.exit_monitor import (
+        _option_exit_bounded_parameter_value,
+    )
+
+    assert _option_exit_bounded_parameter_value(
+        0,
+        50.0,
+        min_value=10.0,
+        max_value=80.0,
+    ) == pytest.approx(50.0)
+    assert _option_exit_bounded_parameter_value(
+        5000,
+        100.0,
+        min_value=20.0,
+        max_value=500.0,
+    ) == pytest.approx(100.0)
+    assert _option_exit_bounded_parameter_value(
+        20,
+        100.0,
+        min_value=20.0,
+        max_value=500.0,
+    ) == pytest.approx(20.0)
 
 
 def test_options_exit_rejects_malformed_contract_quantity():
@@ -260,6 +320,46 @@ def test_options_exit_rejects_crossed_quotes_as_untrusted():
     assert _option_quote_is_crossed({"bid_price": "4.10", "ask_price": "4.00"}) is True
     assert _option_quote_is_crossed({"bid_price": "3.95", "ask_price": "4.05"}) is False
     assert _option_quote_is_crossed({"bid_price": "4.10"}) is False
+
+
+def test_options_exit_rejects_nonfinite_quote_prices_as_untrusted():
+    from app.services.trading.options.exit_monitor import (
+        _option_exit_quote_price,
+        _option_quote_has_malformed_price,
+    )
+
+    assert _option_quote_has_malformed_price(
+        {"bid_price": "NaN", "ask_price": "1.50", "mark_price": "1.45"}
+    ) is True
+    assert _option_quote_has_malformed_price(
+        {"bid_price": "1.40", "ask_price": "Infinity", "mark_price": "1.45"}
+    ) is True
+    assert _option_quote_has_malformed_price(
+        {"bid_price": "1.40", "ask_price": "1.50", "mark_price": "-Infinity"}
+    ) is True
+    assert _option_quote_has_malformed_price(
+        {"bid_price": "1.40", "ask_price": "1.50", "mark_price": "-0.01"}
+    ) is True
+    assert _option_quote_has_malformed_price(
+        {"bid_price": True, "ask_price": "1.50", "mark_price": "1.45"}
+    ) is True
+
+    price, malformed = _option_exit_quote_price(
+        {"bid_price": "", "bid": "1.40"},
+        "bid_price",
+        "bid",
+    )
+
+    assert price == pytest.approx(1.40)
+    assert malformed is False
+    assert _option_quote_has_malformed_price(
+        {"bid_price": "0", "ask_price": "1.50", "mark_price": "0"}
+    ) is False
+
+    price, malformed = _option_exit_quote_price({"bid_price": True}, "bid_price")
+
+    assert price is None
+    assert malformed is True
 
 
 def test_options_exit_never_defaults_contract_quantity_to_one():

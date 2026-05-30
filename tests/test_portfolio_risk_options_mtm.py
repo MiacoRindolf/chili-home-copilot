@@ -126,12 +126,75 @@ def test_unrealized_pnl_for_options_skips_when_no_premium_quote() -> None:
     assert pnl == 0.0
 
 
+def test_unrealized_pnl_for_options_rejects_nonfinite_premium_quote() -> None:
+    from app.services.trading.portfolio_risk import _compute_unrealized_pnl
+
+    trade = _option_trade_stub()
+    fake_options = MagicMock()
+    fake_options.is_enabled.return_value = True
+    fake_options.find_contract.return_value = {"id": "opt-contract-1"}
+    fake_options.get_quote.return_value = {
+        "mark_price": "Infinity",
+        "bid_price": "1.40",
+        "ask_price": "1.50",
+    }
+
+    with patch(
+        "app.services.trading.market_data.fetch_quote",
+        side_effect=AssertionError("option MTM must not fall back to underlying spot"),
+    ), patch(
+        "app.services.trading.venue.robinhood_options.RobinhoodOptionsAdapter",
+        return_value=fake_options,
+    ):
+        pnl = _compute_unrealized_pnl(_FakeDb([trade]), user_id=None)
+
+    assert pnl == 0.0
+
+
+def test_unrealized_pnl_for_options_rejects_crossed_premium_bbo() -> None:
+    from app.services.trading.portfolio_risk import _compute_unrealized_pnl
+
+    trade = _option_trade_stub()
+    fake_options = MagicMock()
+    fake_options.is_enabled.return_value = True
+    fake_options.find_contract.return_value = {"id": "opt-contract-1"}
+    fake_options.get_quote.return_value = {
+        "bid_price": "1.50",
+        "ask_price": "1.40",
+    }
+
+    with patch(
+        "app.services.trading.market_data.fetch_quote",
+        side_effect=AssertionError("option MTM must not fall back to underlying spot"),
+    ), patch(
+        "app.services.trading.venue.robinhood_options.RobinhoodOptionsAdapter",
+        return_value=fake_options,
+    ):
+        pnl = _compute_unrealized_pnl(_FakeDb([trade]), user_id=None)
+
+    assert pnl == 0.0
+
+
 def test_option_entry_notional_uses_contract_multiplier() -> None:
     from app.services.trading.portfolio_risk import _trade_entry_notional
 
     trade = _option_trade_stub()
 
     assert _trade_entry_notional(trade) == pytest.approx(250.0)
+
+
+def test_option_entry_notional_rejects_boolean_notional_fields() -> None:
+    from app.services.trading.portfolio_risk import _trade_entry_notional
+
+    assert _trade_entry_notional(_option_trade_stub(entry_price=True)) == 0.0
+    assert _trade_entry_notional(_option_trade_stub(quantity=True)) == 0.0
+
+
+def test_portfolio_heat_for_options_rejects_boolean_notional_fields() -> None:
+    from app.services.trading.portfolio_risk import _trade_risk_dollars
+
+    assert _trade_risk_dollars(_option_trade_stub(entry_price=True)) == 0.0
+    assert _trade_risk_dollars(_option_trade_stub(quantity=True)) == 0.0
 
 
 def test_portfolio_heat_for_options_uses_premium_risk_and_multiplier(
@@ -159,6 +222,145 @@ def test_portfolio_heat_for_options_uses_premium_risk_and_multiplier(
 
     assert budget.total_heat_pct == pytest.approx(1.25)
     assert budget.available_heat_pct == pytest.approx(4.75)
+
+
+@pytest.mark.parametrize("bad_stop_pct", ["NaN", "Infinity", 0.0, 5000.0, True])
+def test_portfolio_heat_for_options_defaults_malformed_stop_pct(
+    monkeypatch,
+    bad_stop_pct,
+) -> None:
+    from app import config as app_config
+    from app.services.trading.portfolio_risk import get_portfolio_risk_snapshot
+
+    monkeypatch.setattr(
+        app_config.settings,
+        "chili_autotrader_options_exit_stop_pct",
+        bad_stop_pct,
+        raising=False,
+    )
+    trade = _option_trade_stub(stop_loss=None)
+
+    with patch(
+        "app.services.trading.portfolio_risk.estimate_portfolio_var",
+        return_value=None,
+    ), patch(
+        "app.services.trading.portfolio_risk.estimate_portfolio_cvar",
+        return_value=None,
+    ):
+        budget = get_portfolio_risk_snapshot(
+            _FakeDb([trade]),
+            user_id=None,
+            capital=10_000.0,
+        )
+
+    assert budget.total_heat_pct == pytest.approx(1.25)
+    assert budget.available_heat_pct == pytest.approx(4.75)
+    assert budget.can_open_new is True
+
+
+def test_portfolio_heat_for_stock_uses_explicit_stop_loss_column() -> None:
+    from app.services.trading.portfolio_risk import get_portfolio_risk_snapshot
+
+    trade = _stock_trade_stub(entry_price=100.0, stop_loss=90.0, quantity=2.0)
+
+    with patch(
+        "app.services.trading.portfolio_risk.estimate_portfolio_var",
+        return_value=None,
+    ), patch(
+        "app.services.trading.portfolio_risk.estimate_portfolio_cvar",
+        return_value=None,
+    ):
+        budget = get_portfolio_risk_snapshot(
+            _FakeDb([trade]),
+            user_id=None,
+            capital=10_000.0,
+        )
+
+    assert budget.total_heat_pct == pytest.approx(0.2)
+
+
+def test_portfolio_heat_for_long_stock_stop_above_entry_has_no_entry_risk() -> None:
+    from app.services.trading.portfolio_risk import _trade_risk_dollars
+
+    trade = _stock_trade_stub(entry_price=100.0, stop_loss=105.0, quantity=2.0)
+
+    assert _trade_risk_dollars(trade) == 0.0
+
+
+def test_portfolio_heat_for_short_stock_uses_stop_above_entry() -> None:
+    from app.services.trading.portfolio_risk import _trade_risk_dollars
+
+    trade = _stock_trade_stub(
+        direction="short",
+        entry_price=100.0,
+        stop_loss=105.0,
+        quantity=2.0,
+    )
+
+    assert _trade_risk_dollars(trade) == pytest.approx(10.0)
+
+
+@pytest.mark.parametrize("capital", [None, 0.0, "NaN", "not-a-number", True])
+def test_portfolio_snapshot_blocks_when_capital_is_not_proven(capital) -> None:
+    from app.services.trading.portfolio_risk import get_portfolio_risk_snapshot
+
+    with patch(
+        "app.services.trading.portfolio_risk.estimate_portfolio_var",
+        side_effect=AssertionError("invalid capital must not reach VaR"),
+    ), patch(
+        "app.services.trading.portfolio_risk.estimate_portfolio_cvar",
+        side_effect=AssertionError("invalid capital must not reach CVaR"),
+    ):
+        budget = get_portfolio_risk_snapshot(
+            _FakeDb([_stock_trade_stub()]),
+            user_id=None,
+            capital=capital,
+        )
+
+    assert budget.can_open_new is False
+    assert budget.rejection_reason == "invalid_capital"
+    assert budget.available_heat_pct == 0.0
+
+
+def test_check_new_trade_allowed_blocks_invalid_capital_before_drawdown_or_sizing() -> None:
+    from app.services.trading.portfolio_risk import RiskLimits, check_new_trade_allowed
+
+    limits = RiskLimits(
+        max_open_positions=10,
+        max_crypto_positions=10,
+        max_stock_positions=10,
+        max_portfolio_heat_pct=100.0,
+        max_same_ticker=10,
+        max_sector_pct=100.0,
+        max_avg_correlation=1.0,
+    )
+
+    with patch(
+        "app.services.trading.governance.is_kill_switch_active",
+        return_value=False,
+    ), patch(
+        "app.services.trading.portfolio_risk.is_breaker_tripped",
+        return_value=False,
+    ), patch(
+        "app.services.trading.portfolio_risk.check_drawdown_breaker",
+    ) as drawdown, patch(
+        "app.services.trading.portfolio_risk.check_sector_concentration",
+    ) as sector_check, patch(
+        "app.services.trading.portfolio_risk.check_correlation_risk",
+    ) as correlation_check:
+        ok, reason = check_new_trade_allowed(
+            _FakeDb([]),
+            None,
+            "SPY",
+            capital="not-a-number",
+            limits=limits,
+        )
+
+    assert ok is False
+    assert reason == "invalid_capital"
+    drawdown.assert_not_called()
+    sector_check.assert_not_called()
+    correlation_check.assert_not_called()
 
 
 def test_portfolio_budget_counts_options_outside_stock_cap() -> None:
