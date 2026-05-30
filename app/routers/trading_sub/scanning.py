@@ -6,7 +6,9 @@ trading router.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+import threading
+import time
+from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
@@ -22,6 +24,11 @@ from ...schemas.trading import ScanRequest
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/trading", tags=["trading-scanning"])
+
+_BRAIN_TICKERS_CACHE_TTL_SECONDS = 30.0
+_BRAIN_TICKERS_LOOKBACK_DAYS = 30
+_brain_tickers_cache_lock = threading.Lock()
+_brain_tickers_cache: tuple[float, dict[str, list[dict[str, float | str]]]] | None = None
 
 
 # ── Crypto Breakout Scanner ──────────────────────────────────────────────────
@@ -272,11 +279,49 @@ def api_top_picks(request: Request, db: Session = Depends(get_db)):
 @router.get("/brain/tickers")
 def api_brain_tickers(db: Session = Depends(get_db)):
     """Return the brain's top known tickers — crypto and stocks — for UI population."""
+    payload = _cached_brain_tickers_payload(db)
+    return JSONResponse({"ok": True, **payload})
+
+
+def _copy_brain_tickers_payload(
+    payload: dict[str, list[dict[str, float | str]]],
+) -> dict[str, list[dict[str, float | str]]]:
+    return {
+        "crypto": [dict(row) for row in payload.get("crypto", [])],
+        "stocks": [dict(row) for row in payload.get("stocks", [])],
+    }
+
+
+def _cached_brain_tickers_payload(db: Session) -> dict[str, list[dict[str, float | str]]]:
+    global _brain_tickers_cache
+    now = time.monotonic()
+    with _brain_tickers_cache_lock:
+        if _brain_tickers_cache is not None:
+            expires_at, payload = _brain_tickers_cache
+            if now < expires_at:
+                return _copy_brain_tickers_payload(payload)
+
+    payload = _fetch_brain_tickers_payload(db)
+    with _brain_tickers_cache_lock:
+        _brain_tickers_cache = (
+            time.monotonic() + _BRAIN_TICKERS_CACHE_TTL_SECONDS,
+            _copy_brain_tickers_payload(payload),
+        )
+    return _copy_brain_tickers_payload(payload)
+
+
+def _fetch_brain_tickers_payload(db: Session) -> dict[str, list[dict[str, float | str]]]:
     from ...models.trading import MarketSnapshot
+
+    latest_snapshot = db.query(func.max(MarketSnapshot.snapshot_date)).scalar()
+    if latest_snapshot is None:
+        return {"crypto": [], "stocks": []}
+    cutoff = latest_snapshot - timedelta(days=_BRAIN_TICKERS_LOOKBACK_DAYS)
 
     top_crypto = (
         db.query(MarketSnapshot.ticker, func.max(MarketSnapshot.predicted_score).label("best"))
         .filter(MarketSnapshot.ticker.like("%-USD"))
+        .filter(MarketSnapshot.snapshot_date >= cutoff)
         .group_by(MarketSnapshot.ticker)
         .order_by(desc("best"))
         .limit(20)
@@ -285,13 +330,13 @@ def api_brain_tickers(db: Session = Depends(get_db)):
     top_stocks = (
         db.query(MarketSnapshot.ticker, func.max(MarketSnapshot.predicted_score).label("best"))
         .filter(~MarketSnapshot.ticker.like("%-USD"))
+        .filter(MarketSnapshot.snapshot_date >= cutoff)
         .group_by(MarketSnapshot.ticker)
         .order_by(desc("best"))
         .limit(20)
         .all()
     )
-    return JSONResponse({
-        "ok": True,
+    return {
         "crypto": [{"ticker": r[0], "score": round(float(r[1] or 0), 1)} for r in top_crypto],
         "stocks": [{"ticker": r[0], "score": round(float(r[1] or 0), 1)} for r in top_stocks],
-    })
+    }
