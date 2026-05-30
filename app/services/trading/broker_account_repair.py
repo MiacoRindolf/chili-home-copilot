@@ -52,19 +52,25 @@ def _choose_canonical_user_id(
         int(u.id): u
         for u in db.query(User).filter(User.id.in_(ids)).all()
     }
-    email_ids = sorted(
-        uid for uid in ids
-        if users.get(uid) is not None and bool(users[uid].email)
+    email_id = min(
+        (
+            uid for uid in ids
+            if users.get(uid) is not None and bool(users[uid].email)
+        ),
+        default=None,
     )
-    if email_ids:
-        return int(email_ids[0])
-    named_ids = sorted(
-        uid for uid in ids
-        if users.get(uid) is not None and not _guest_like_user(users[uid])
+    if email_id is not None:
+        return int(email_id)
+    named_id = min(
+        (
+            uid for uid in ids
+            if users.get(uid) is not None and not _guest_like_user(users[uid])
+        ),
+        default=None,
     )
-    if named_ids:
-        return int(named_ids[0])
-    return int(sorted(ids)[0])
+    if named_id is not None:
+        return int(named_id)
+    return int(min(ids))
 
 
 def resolve_canonical_broker_user(

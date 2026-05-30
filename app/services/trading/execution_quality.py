@@ -12,6 +12,7 @@ Decision-stack realism rollups for momentum viability JSON live in
 """
 from __future__ import annotations
 
+import heapq
 import logging
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -89,9 +90,25 @@ def compute_execution_stats(
         "measurable": len(slippages),
         "avg_slippage_pct": round(avg_slip, 4),
         "p90_slippage_pct": round(p90_slip, 4),
-        "by_ticker": dict(sorted(ticker_stats.items(), key=lambda x: x[1]["avg_slippage_pct"], reverse=True)[:20]),
+        "by_ticker": _top_ticker_stats(ticker_stats, limit=20),
         "by_class": class_stats,
     }
+
+
+def _top_ticker_stats(
+    ticker_stats: dict[str, dict[str, Any]],
+    *,
+    limit: int,
+) -> dict[str, dict[str, Any]]:
+    if limit <= 0 or not ticker_stats:
+        return {}
+    return dict(
+        heapq.nlargest(
+            limit,
+            ticker_stats.items(),
+            key=lambda item: item[1]["avg_slippage_pct"],
+        )
+    )
 
 
 def suggest_adaptive_spread(

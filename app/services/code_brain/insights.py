@@ -1,6 +1,7 @@
 """Mine conventions and architectural patterns from indexed data."""
 from __future__ import annotations
 
+import heapq
 import json
 import logging
 from collections import Counter
@@ -158,7 +159,7 @@ def mine_insights(db: Session, repo_id: int, user_id: Optional[int] = None) -> D
             f"{len(high_complexity)} files have high complexity (score > 50)",
             confidence=0.85,
             evidence_count=len(high_complexity),
-            evidence_files=[h.file_path for h in sorted(high_complexity, key=lambda x: -x.complexity_score)[:20]],
+            evidence_files=_top_complexity_files(high_complexity, limit=20),
             user_id=user_id,
         )
         discovered += 1
@@ -197,6 +198,19 @@ def mine_insights(db: Session, repo_id: int, user_id: Optional[int] = None) -> D
 
     db.commit()
     return {"discovered": discovered}
+
+
+def _top_complexity_files(snapshots: list[CodeSnapshot], *, limit: int) -> list[str]:
+    if limit <= 0 or not snapshots:
+        return []
+    return [
+        snap.file_path
+        for snap in heapq.nlargest(
+            limit,
+            snapshots,
+            key=lambda snap: snap.complexity_score,
+        )
+    ]
 
 
 def get_insights(

@@ -44,6 +44,7 @@ level".
 """
 from __future__ import annotations
 
+import heapq
 import logging
 import time
 from dataclasses import dataclass, field
@@ -206,8 +207,8 @@ class OrderBookAggregator:
             return None
 
         # Top-N best per side: bids descending, asks ascending.
-        bid_prices = sorted(book.bids.keys(), reverse=True)[:self._output_levels]
-        ask_prices = sorted(book.asks.keys())[:self._output_levels]
+        bid_prices = self._best_prices(book.bids.keys(), descending=True)
+        ask_prices = self._best_prices(book.asks.keys(), descending=False)
         bid_levels = [(p, book.bids[p]) for p in bid_prices]
         ask_levels = [(p, book.asks[p]) for p in ask_prices]
         bid_total = sum(s for _, s in bid_levels)
@@ -235,6 +236,11 @@ class OrderBookAggregator:
             "imbalance": float(imbalance),
             "spread_bps": float(spread_bps),
         }
+
+    def _best_prices(self, prices: Iterable[float], *, descending: bool) -> list[float]:
+        if descending:
+            return heapq.nlargest(self._output_levels, prices)
+        return heapq.nsmallest(self._output_levels, prices)
 
     # ── Observability ─────────────────────────────────────────────────
 

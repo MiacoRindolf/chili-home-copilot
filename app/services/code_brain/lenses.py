@@ -6,6 +6,7 @@ a specific role's perspective (e.g. Backend Dev, QA, DevOps).
 from __future__ import annotations
 
 import fnmatch
+import heapq
 import json
 import logging
 from dataclasses import dataclass, field
@@ -310,7 +311,7 @@ def get_lens_metrics(
                 "description": i.description,
                 "confidence": round(i.confidence, 2),
             }
-            for i in sorted(filtered_insights, key=lambda x: x.confidence, reverse=True)[:10]
+            for i in _top_confidence_insights(filtered_insights, limit=10)
         ],
         "recent_events": [
             {
@@ -345,6 +346,12 @@ def get_lens_hotspots(db: Session, lens_name: str, repo_id: Optional[int] = None
         }
         for h in filtered[:limit]
     ]
+
+
+def _top_confidence_insights(insights: list[CodeInsight], *, limit: int) -> list[CodeInsight]:
+    if limit <= 0 or not insights:
+        return []
+    return heapq.nlargest(limit, insights, key=lambda insight: insight.confidence)
 
 
 def get_lens_insights(db: Session, lens_name: str, repo_id: Optional[int] = None, limit: int = 20) -> List[Dict[str, Any]]:

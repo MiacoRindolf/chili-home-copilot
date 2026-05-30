@@ -32,11 +32,11 @@ processes gets its own state per process by default.
 from __future__ import annotations
 
 import gc as _gc
+import heapq
 import logging
 import os as _os
 import threading
 import time
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -81,18 +81,15 @@ def run_memory_watcher_tick(
                     qualname_counts[qn] = qualname_counts.get(qn, 0) + 1
         total = sum(counts.values())
 
-        top_abs = sorted(counts.items(), key=lambda x: -x[1])[:12]
+        top_abs = _top_count_items(counts, 12)
         prev = prev_counts_ref[0] if prev_counts_ref else {}
         deltas: list[tuple[int, str, int]] = []
         for t, n in counts.items():
             d = n - prev.get(t, n)
             if d > 0:
                 deltas.append((d, t, n))
-        deltas.sort(reverse=True)
-        top_delta = deltas[:5]
-        top_qualnames = sorted(
-            qualname_counts.items(), key=lambda x: -x[1]
-        )[:5]
+        top_delta = heapq.nlargest(5, deltas)
+        top_qualnames = _top_count_items(qualname_counts, 5)
 
         logger.info(
             "%s vm_rss=%dMB vm_size=%dMB threads=%d py_objects=%d "
@@ -108,6 +105,12 @@ def run_memory_watcher_tick(
             prev_counts_ref[0] = counts
     except Exception as e:
         logger.warning("%s tick failed: %s", log_prefix, e)
+
+
+def _top_count_items(counts: dict[str, int], limit: int) -> list[tuple[str, int]]:
+    if limit <= 0 or not counts:
+        return []
+    return heapq.nlargest(limit, counts.items(), key=lambda item: item[1])
 
 
 def start_thread_watcher(
