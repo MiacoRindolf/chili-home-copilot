@@ -1,8 +1,8 @@
 """Read-only Phase 5B helpers for decision/envelope/position reporting.
 
-Phase 5A created the decision bridge. Phase 5B gives application code a
-semantic surface for "management envelopes" without physically renaming
-``trading_trades`` yet. These helpers intentionally read from views only; they
+Phase 5A created the decision bridge. Phase 5B gave application code a semantic
+surface for "management envelopes"; Phase 5H made that surface the physical
+base table. These helpers intentionally read the semantic envelope surface and
 do not mutate live trading state.
 """
 from __future__ import annotations
@@ -83,7 +83,7 @@ def phase5b_parity_summary(db: Session) -> Phase5BParitySummary:
                       AND btrim(broker_source) <> ''
                       AND position_id IS NULL
                 )::bigint AS open_broker_trades_missing_position
-            FROM trading_trades
+            FROM trading_management_envelopes
         ),
         phase5a_view AS (
             SELECT COALESCE(orphan_decisions, 0)::bigint AS orphan_decisions

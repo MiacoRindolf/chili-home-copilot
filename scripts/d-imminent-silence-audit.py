@@ -222,15 +222,15 @@ def main():
 
     # ----- L7: Recent Trade rows -----
     print_section("L7 — Recent Trade rows")
-    res = safe_query("SELECT count(*) FROM trading_trades WHERE entry_date >= now() - interval '24 hours'")
+    res = safe_query("SELECT count(*) FROM trading_management_envelopes WHERE entry_date >= now() - interval '24 hours'")
     if isinstance(res, list):
         print(f"  Trades placed last 24h: {res[0][0]}")
-    res = safe_query("SELECT count(*) FROM trading_trades WHERE entry_date >= now() - interval '7 days'")
+    res = safe_query("SELECT count(*) FROM trading_management_envelopes WHERE entry_date >= now() - interval '7 days'")
     if isinstance(res, list):
         print(f"  Trades placed last 7d:  {res[0][0]}")
     res = safe_query("""
         SELECT id, ticker, broker_source, status, entry_date
-        FROM trading_trades
+        FROM trading_management_envelopes
         ORDER BY entry_date DESC
         LIMIT 10
     """)

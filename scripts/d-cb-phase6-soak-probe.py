@@ -128,7 +128,7 @@ def section_coinbase_fills(cur, since):
         SELECT id, ticker, status, quantity, entry_price,
                COALESCE(quantity * entry_price, 0.0) AS notional,
                entry_date, exit_date, exit_reason, last_fill_at
-          FROM trading_trades
+          FROM trading_management_envelopes
          WHERE LOWER(COALESCE(broker_source, '')) = 'coinbase'
            AND entry_date >= %(since)s
          ORDER BY entry_date ASC
@@ -153,7 +153,7 @@ def section_bracket_coverage(cur, since):
     rows = _q(cur, """
         WITH cb_trades AS (
             SELECT id AS trade_id, ticker, entry_date
-              FROM trading_trades
+              FROM trading_management_envelopes
              WHERE LOWER(COALESCE(broker_source, '')) = 'coinbase'
                AND entry_date >= %(since)s
         )

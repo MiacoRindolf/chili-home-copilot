@@ -1,16 +1,14 @@
-# NEXT_TASK: f-position-identity-phase-5j-selective-reader-cleanup
+# NEXT_TASK: f-position-identity-phase-5j-selective-reader-cleanup-slice-2
 
 STATUS: PENDING
 
 ## Goal
 
-Begin the low-risk reader cleanup after the Phase 5H physical rename and Phase
-5I soak.
+Continue Phase 5J by migrating another small batch of read-only analytics from
+the legacy `trading_trades` compatibility view to the semantic physical table
+`trading_management_envelopes`.
 
-This is not a destructive rename phase. Keep the `trading_trades` compatibility
-view and the Python `Trade` ORM class in place. The objective is to move
-analytics/reporting/read-only SQL toward the semantic name
-`trading_management_envelopes` while preserving live writer compatibility.
+Keep the compatibility view and the Python `Trade` ORM class in place.
 
 ## Current Gate State
 
@@ -19,29 +17,44 @@ analytics/reporting/read-only SQL toward the semantic name
 - Physical base table: `trading_management_envelopes` (`relkind='r'`)
 - Legacy compatibility view: `trading_trades` (`relkind='v'`)
 - Phase 5I closeout: `COMPLETE_POSITIVE`
-  - fresh decisions: 20
-  - fresh envelopes: 20
-  - fresh closes: 10
-  - fresh close mismatches: 0
-  - hard linkage issues: 0
-  - 30d mismatched rows: 0
-  - 30d mismatched PnL: $0.0000
+- Phase 5J slice 1 shipped:
+  - `app/routers/brain.py`
+  - `app/services/trading/management_envelopes.py`
+  - `scripts/d-cb-phase6-soak-probe.py`
+  - `scripts/d-maker-only-tca-probe.py`
+  - `scripts/d-imminent-silence-audit.py`
+- Latest post-slice verification:
+  - Phase 5I probe: `COMPLETE_POSITIVE`
   - schema-specific log hits: 0
-- Mig 288 installed: delayed envelope `scan_pattern_id` updates now backfill
-  missing decision attribution.
+  - brain KPI smoke: `ok=True`
+
+## Candidate Slice 2 Targets
+
+Prefer read-only analytics/reporting code:
+
+- `app/services/trading/decision_packet_coverage.py`
+- `app/services/trading/divergence_service.py`
+- `scripts/analyze_trade_quality_funnel.py` if its current local edits are
+  understood and safe to build on
+- read-only dashboard/reporting scripts
+
+Defer live writer paths:
+
+- broker/order management
+- reconciliation close paths
+- stop execution
+- autotrader placement paths
+- migrations that intentionally preserve historical compatibility
 
 ## Tasks
 
-1. Audit runtime `trading_trades` references and classify them:
-   - Keep: ORM model/table-name compatibility, writes, old API contracts.
-   - Convert: reports, dashboards, audit scripts, read-only analytics.
-   - Defer: anything touching live broker/order management.
-2. Convert a small first slice of read-only SQL to
-   `trading_management_envelopes`.
-3. Add/adjust tests around converted readers.
-4. Rerun Phase 5I probe after the cleanup:
+1. Audit the candidate files and classify each reference as convert/keep/defer.
+2. Convert only one small read-only group.
+3. Add or extend guard tests.
+4. Verify:
 
    ```powershell
+   python -m pytest tests\test_phase5j_reader_cleanup.py tests\test_phase5i_post_rename_probe.py
    python scripts\d-phase5i-post-rename-soak-probe.py
    powershell -ExecutionPolicy Bypass -File scripts\dispatch-phase5i-post-rename-soak-probe.ps1
    ```
@@ -50,20 +63,19 @@ analytics/reporting/read-only SQL toward the semantic name
 
 - Do not drop the `trading_trades` compatibility view.
 - Do not rename the Python `Trade` ORM class.
-- Do not touch live writer/order-placement paths unless a reader is impossible
-  to isolate.
-- Do not rewrite broad swaths mechanically; migrate reader references in small,
-  reviewable groups.
+- Do not touch live writer/order-placement paths.
+- Do not edit files with unrelated dirty work unless the current local diff is
+  inspected and deliberately preserved.
 
 ## Acceptance
 
 - Converted readers use `trading_management_envelopes`.
-- Live writer paths still work through the compatibility view.
-- Phase 5I probe remains `COMPLETE_POSITIVE`.
-- Tests for the converted readers pass.
+- Phase 5I remains `COMPLETE_POSITIVE`.
+- Tests for converted readers pass.
+- No schema-specific worker errors.
 
 ## References
 
+- `docs/STRATEGY/CC_REPORTS/2026-05-30_f-position-identity-phase-5j-selective-reader-cleanup-slice-1.md`
 - `docs/STRATEGY/CC_REPORTS/2026-05-30_f-position-identity-phase-5i-post-rename-soak-closeout.md`
-- `docs/STRATEGY/CC_REPORTS/2026-05-28_f-position-identity-phase-5h-production-physical-rename.md`
 - `scripts/d-phase5i-post-rename-soak-probe.py`

@@ -486,7 +486,7 @@ def api_brain_health_kpi(db: Session = Depends(get_db)):
                   ROUND(SUM(pnl) FILTER (WHERE exit_date >= NOW() - INTERVAL '30 days')::numeric, 2) AS pnl_30d,
                   ROUND(SUM(pnl) FILTER (WHERE exit_date >= NOW() - INTERVAL '7 days')::numeric, 2)  AS pnl_7d,
                   ROUND(MIN(pnl) FILTER (WHERE exit_date >= NOW() - INTERVAL '30 days')::numeric, 2) AS worst_30d
-                FROM trading_trades
+                FROM trading_management_envelopes
                 WHERE pnl IS NOT NULL
                 """
             )
@@ -642,7 +642,7 @@ def api_brain_health_kpi(db: Session = Depends(get_db)):
                 """
                 SELECT COALESCE(p.hypothesis_family, 'unclassified') AS family,
                        COALESCE(SUM(t.pnl), 0)::numeric AS pnl_30d
-                FROM trading_trades t
+                FROM trading_management_envelopes t
                 JOIN scan_patterns p ON p.id = t.scan_pattern_id
                 WHERE t.exit_date >= NOW() - INTERVAL '30 days'
                   AND t.pnl IS NOT NULL
@@ -664,7 +664,7 @@ def api_brain_health_kpi(db: Session = Depends(get_db)):
                 """
                 SELECT COALESCE(SUM(t.pnl), 0)::numeric,
                        COUNT(*)::int
-                FROM trading_trades t
+                FROM trading_management_envelopes t
                 WHERE t.exit_date >= NOW() - INTERVAL '30 days'
                   AND t.pnl IS NOT NULL
                   AND t.scan_pattern_id IS NULL
@@ -708,7 +708,7 @@ def api_brain_health_kpi(db: Session = Depends(get_db)):
                 COALESCE(SUM(pnl), 0)::numeric                      AS pnl,
                 AVG(CASE WHEN pnl > 0 THEN 1.0 ELSE 0.0 END)::numeric AS hit_rate,
                 AVG(EXTRACT(EPOCH FROM (exit_date - entry_date)) / 3600.0)::numeric AS avg_hold_hours
-            FROM trading_trades
+            FROM trading_management_envelopes
             WHERE exit_date >= NOW() - INTERVAL '30 days'
               AND pnl IS NOT NULL
               AND scan_pattern_id IS NULL
@@ -718,7 +718,7 @@ def api_brain_health_kpi(db: Session = Depends(get_db)):
         top_winners = db.execute(text(
             """
             SELECT ticker, COUNT(*)::int AS n, SUM(pnl)::numeric AS pnl
-            FROM trading_trades
+            FROM trading_management_envelopes
             WHERE exit_date >= NOW() - INTERVAL '30 days'
               AND pnl IS NOT NULL
               AND scan_pattern_id IS NULL
@@ -732,7 +732,7 @@ def api_brain_health_kpi(db: Session = Depends(get_db)):
         top_losers = db.execute(text(
             """
             SELECT ticker, COUNT(*)::int AS n, SUM(pnl)::numeric AS pnl
-            FROM trading_trades
+            FROM trading_management_envelopes
             WHERE exit_date >= NOW() - INTERVAL '30 days'
               AND pnl IS NOT NULL
               AND scan_pattern_id IS NULL

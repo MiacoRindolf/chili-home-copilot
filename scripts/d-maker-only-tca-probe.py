@@ -69,7 +69,7 @@ cur.execute(
       STDDEV(tca_entry_slippage_bps) AS sd_bps,
       MIN(tca_entry_slippage_bps) AS min_bps,
       MAX(tca_entry_slippage_bps) AS max_bps
-    FROM trading_trades
+    FROM trading_management_envelopes
     WHERE broker_source = 'coinbase'
       AND tca_entry_slippage_bps IS NOT NULL
       AND entry_date > %s::timestamp
