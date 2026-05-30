@@ -91,6 +91,7 @@ from __future__ import annotations
 
 import logging
 import math as _math
+import os
 from typing import Any, Optional
 
 from sqlalchemy import text
@@ -112,6 +113,25 @@ COMPOSITE_WEIGHT_KEYS = (
     "decay_inverse",
     "realized",
 )
+PHASE5K_PATTERN_QUALITY_ENV = "CHILI_PHASE5K_PATTERN_QUALITY_USE_ENVELOPES"
+_PATTERN_QUALITY_COMPAT_RELATION = "trading_trades"
+_PATTERN_QUALITY_ENVELOPE_RELATION = "trading_management_envelopes"
+
+
+def _truthy_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _pattern_quality_source_relation(use_envelopes: bool | None = None) -> str:
+    if use_envelopes is None:
+        use_envelopes = _truthy_flag(os.environ.get(PHASE5K_PATTERN_QUALITY_ENV))
+    if use_envelopes:
+        return _PATTERN_QUALITY_ENVELOPE_RELATION
+    return _PATTERN_QUALITY_COMPAT_RELATION
 
 
 def _clip(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
@@ -386,6 +406,7 @@ def _load_realized_pnl_map(
     window_days: int,
     *,
     include_autotrader_paper_dynamic: bool = False,
+    use_envelopes: bool | None = None,
 ) -> dict[int, dict[str, Any]]:
     """Per-pattern realized PnL stats over the trailing window.
 
@@ -402,13 +423,14 @@ def _load_realized_pnl_map(
     them for safety. Sentinel ``scan_pattern_id = -1`` is excluded
     (``_NO_PATTERN_SENTINEL`` — see ``app/models/trading.py``).
     """
+    source_relation = _pattern_quality_source_relation(use_envelopes)
     rows = db.execute(
         text(f"""
             SELECT scan_pattern_id,
                    COUNT(*) AS n,
                    AVG({trade_return_fraction_sql()}) AS avg_pnl_pct,
                    SUM(pnl) AS total_pnl
-            FROM trading_trades
+            FROM {source_relation}
             WHERE scan_pattern_id IS NOT NULL
               AND scan_pattern_id != -1
               AND status = 'closed'

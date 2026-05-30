@@ -1,51 +1,68 @@
-# NEXT_TASK: f-position-identity-phase-5k-e-promotion-pattern-quality-reader-flags
+# NEXT_TASK: f-position-identity-phase-5k-e-promotion-pattern-quality-flag-soak
 
 STATUS: PENDING
 
 ## Goal
 
-Continue Phase 5K with the next narrow live readers: promotion realized
-statistics and pattern-quality realized aggregates.
+Run the narrow live soak for the promotion realized and pattern-quality realized
+reader flags.
 
-These readers already matched in the Phase 5K parity probe:
+Phase 5K-E source is already default-off safe:
 
 ```text
-CHECK_PROMOTION_REALIZED=OK old_rows=30 new_rows=30
-CHECK_PATTERN_QUALITY=OK old_rows=30 new_rows=30
+CHILI_PHASE5K_COHORT_PROMOTE_USE_ENVELOPES=false
+CHILI_PHASE5K_PATTERN_QUALITY_USE_ENVELOPES=false
 ```
 
-Do not bulk-cut all remaining references. Add default-off reader switches for
-the specific realized-aggregate functions only, run focused tests, then do the
-same short live soak pattern used for Coinbase cap and PDT.
+## Pre-Soak Evidence
 
-## Current State
+- Phase 5K-A live-path parity: `COMPLETE_POSITIVE`.
+- Promotion realized parity: `CHECK_PROMOTION_REALIZED=OK`.
+- Pattern-quality parity: `CHECK_PATTERN_QUALITY=OK`.
+- Direct production function checks:
 
-- Phase 5K-C Coinbase cap reader is live on
-  `trading_management_envelopes`.
-- Phase 5K-D PDT reader is live on `trading_management_envelopes`.
-- Phase 5K-A parity remains `COMPLETE_POSITIVE`.
-- Phase 5I post-rename soak remains `COMPLETE_POSITIVE`.
+  ```text
+  PATTERN_QUALITY_OLD_ROWS 30
+  PATTERN_QUALITY_NEW_ROWS 30
+  PATTERN_QUALITY_MATCH True
 
-## Implementation Shape
+  COHORT_PROMOTE_OLD_COUNT 9
+  COHORT_PROMOTE_NEW_COUNT 9
+  COHORT_PROMOTE_MATCH True
+  ```
 
-1. Locate promotion and pattern-quality live readers still using
-   `trading_trades`.
-2. Add default-off source-selection flags.
-3. Preserve filters and formulas exactly.
-4. Add focused tests pinning OFF/ON relation selection.
-5. Run Phase 5K-A parity and direct function-level old/new checks.
-6. Commit/push the default-off code.
-7. Only then run a narrow flag soak.
+- Focused tests:
 
-## Guardrails
+  ```text
+  python -m pytest tests\test_phase5k_promotion_pattern_quality_reader_flags.py tests\test_phase5k_live_path_parity_probe.py -q
+  14 passed
+  ```
 
-- Do not touch broker/order/stop/reconcile write paths.
-- Do not change formulas, lookback windows, or eligibility filters.
-- Do not change lifecycle promotion/demotion thresholds.
-- Do not run DB-backed pytest against live Postgres.
-- Stage only the files intentionally touched by this brief.
+## Soak Steps
+
+1. Confirm Postgres is healthy and workers are running.
+2. Confirm Phase 5K-A and Phase 5I probes are green.
+3. Set:
+
+   ```text
+   CHILI_PHASE5K_COHORT_PROMOTE_USE_ENVELOPES=true
+   CHILI_PHASE5K_PATTERN_QUALITY_USE_ENVELOPES=true
+   ```
+
+4. Recreate the consumer worker(s), starting with `autotrader-worker`.
+5. Verify the flags are visible inside the container.
+6. Re-run Phase 5K-A, Phase 5I, and direct function-level checks.
+7. Watch fresh logs for query/relation errors.
 
 ## Rollback
 
-Each reader flag must default to false. If a live soak misbehaves, set the new
-flag(s) false and recreate only the consuming worker.
+Set both flags false and recreate the affected worker(s).
+
+## Acceptance
+
+- Both flags visible inside the relevant worker(s).
+- Phase 5K-A remains `COMPLETE_POSITIVE`.
+- Phase 5I remains `COMPLETE_POSITIVE`.
+- Direct pattern-quality realized maps still match.
+- Direct cohort-promote candidate IDs still match.
+- No fresh query/relation errors.

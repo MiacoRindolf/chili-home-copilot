@@ -48,6 +48,7 @@ from __future__ import annotations
 import bisect
 import logging
 import math
+import os
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
@@ -61,6 +62,25 @@ logger = logging.getLogger(__name__)
 
 
 COHORT_ELIGIBLE_LIFECYCLE_STAGES = ("backtested", "candidate", "challenged")
+PHASE5K_COHORT_PROMOTE_ENV = "CHILI_PHASE5K_COHORT_PROMOTE_USE_ENVELOPES"
+_COHORT_PROMOTE_COMPAT_RELATION = "trading_trades"
+_COHORT_PROMOTE_ENVELOPE_RELATION = "trading_management_envelopes"
+
+
+def _truthy_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _cohort_promote_source_relation(use_envelopes: bool | None = None) -> str:
+    if use_envelopes is None:
+        use_envelopes = _truthy_flag(os.environ.get(PHASE5K_COHORT_PROMOTE_ENV))
+    if use_envelopes:
+        return _COHORT_PROMOTE_ENVELOPE_RELATION
+    return _COHORT_PROMOTE_COMPAT_RELATION
 
 
 def _is_number(value: Any) -> bool:
@@ -227,6 +247,7 @@ def select_cohort_candidates(
     max_negative_pct = float(getattr(
         settings_, "chili_cohort_promote_max_realized_avg_pnl_pct_negative", 0.0,
     ))
+    source_relation = _cohort_promote_source_relation()
 
     # Do not require directional outcomes here. shadow_promoted is the
     # observation stage that lets a pattern collect those outcomes without
@@ -239,7 +260,7 @@ def select_cohort_candidates(
             SELECT scan_pattern_id,
                    COUNT(*) AS n_realized,
                    AVG({trade_return_fraction_sql()}) AS avg_pnl_pct
-            FROM trading_trades
+            FROM {source_relation}
             WHERE scan_pattern_id IS NOT NULL
               AND scan_pattern_id != -1
               AND status = 'closed'
