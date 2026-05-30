@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Iterable
 
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError, OperationalError
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -28,12 +29,21 @@ TARGET_WORK = ("recert_rescue_refresh", "exit_variant_refresh")
 TARGET_DIAGNOSTICS = ("recert_rescue_diagnostic", "exit_variant_diagnostic")
 
 
+class DatabaseUnavailable(RuntimeError):
+    pass
+
+
 def _rows(sql: str, params: dict) -> list[dict]:
-    with SessionLocal() as db:
-        db.execute(text("SET TRANSACTION READ ONLY"))
-        rows = db.execute(text(sql), params).fetchall()
-        db.rollback()
-        return [dict(row._mapping) for row in rows]
+    try:
+        with SessionLocal() as db:
+            try:
+                db.execute(text("SET TRANSACTION READ ONLY"))
+                rows = db.execute(text(sql), params).fetchall()
+                return [dict(row._mapping) for row in rows]
+            finally:
+                db.rollback()
+    except (OperationalError, DBAPIError) as exc:
+        raise DatabaseUnavailable(str(exc)) from exc
 
 
 def _print_table(title: str, rows: Iterable[dict]) -> None:
@@ -265,14 +275,24 @@ def main() -> int:
     limit = max(1, int(args.limit))
 
     print(f"# alert-refresh-churn hours={hours} limit={limit}")
-    _print_table("Work Counts", _work_counts(hours))
-    _print_table("Diagnostic Outcomes", _diagnostic_counts(hours))
-    _print_table("Top Work-Producing Patterns", _top_patterns(hours, limit))
-    _print_table("Top No-Op Exit Variant Diagnostics", _top_noop_exit_patterns(hours, limit))
-    _print_table(
-        "Open Exit Variant Work With Recent No-Op Evidence",
-        _open_exit_work_with_recent_noop(hours, limit),
-    )
+    try:
+        _print_table("Work Counts", _work_counts(hours))
+        _print_table("Diagnostic Outcomes", _diagnostic_counts(hours))
+        _print_table("Top Work-Producing Patterns", _top_patterns(hours, limit))
+        _print_table("Top No-Op Exit Variant Diagnostics", _top_noop_exit_patterns(hours, limit))
+        _print_table(
+            "Open Exit Variant Work With Recent No-Op Evidence",
+            _open_exit_work_with_recent_noop(hours, limit),
+        )
+    except DatabaseUnavailable as exc:
+        print(
+            "Database is not accepting read-only connections yet; "
+            "retry after Postgres health is healthy.",
+            file=sys.stderr,
+        )
+        detail = str(exc).splitlines()[0] if str(exc) else "connection unavailable"
+        print(f"Detail: {detail}", file=sys.stderr)
+        return 2
     return 0
 
 
