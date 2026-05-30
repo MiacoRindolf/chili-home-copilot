@@ -37,7 +37,6 @@ rule. Documented as such inline.
 from __future__ import annotations
 
 import logging
-import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -45,6 +44,8 @@ from typing import Any
 
 from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
+
+from ...config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -88,9 +89,16 @@ def _truthy_flag(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _pdt_source_relation(use_envelopes: bool | None = None) -> str:
+def _pdt_source_relation(
+    use_envelopes: bool | None = None,
+    *,
+    settings_: Any | None = None,
+) -> str:
     if use_envelopes is None:
-        use_envelopes = _truthy_flag(os.environ.get(PHASE5K_PDT_ENV))
+        settings_obj = settings if settings_ is None else settings_
+        use_envelopes = _truthy_flag(
+            getattr(settings_obj, "chili_phase5k_pdt_use_envelopes", False)
+        )
     if use_envelopes:
         return _PDT_ENVELOPE_RELATION
     return _PDT_COMPAT_RELATION
@@ -186,6 +194,7 @@ def _count_day_trades_5d(
     *,
     user_id: int | None = None,
     use_envelopes: bool | None = None,
+    settings_: Any | None = None,
 ) -> int | None:
     """Count round-trip day trades (opened AND closed same calendar day)
     in the trailing 5 business days from ``trading_trades``.
@@ -216,7 +225,10 @@ def _count_day_trades_5d(
         cutoff = _earliest_business_day_in_window(
             datetime.utcnow(), window_business_days=5,
         )
-        source_relation = _pdt_source_relation(use_envelopes)
+        source_relation = _pdt_source_relation(
+            use_envelopes,
+            settings_=settings_,
+        )
         # f-pdt-count-broker-confirmed-only (2026-05-08): three new
         # exclusions so the count covers ONLY broker-confirmed day-trades.
         #   * ``broker_order_id IS NOT NULL``: the exit was a real

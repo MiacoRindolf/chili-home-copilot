@@ -3623,6 +3623,13 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_PHASE5K_COINBASE_CAP_USE_ENVELOPES"),
     )
+    # Phase 5K-D: default-OFF reader cutover for PDT day-trade counts.
+    # Keep this typed so runtime evidence can name the exact active setting
+    # instead of relying on a hidden direct environment read.
+    chili_phase5k_pdt_use_envelopes: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_PHASE5K_PDT_USE_ENVELOPES"),
+    )
     # f-promotion-pipeline-rebalance Phase 1 (2026-05-09): sample-size
     # floor for the thin-evidence demote sweep. The original Phase D
     # threshold (10 trades) was wrong-sense: a pattern with 8 realized
