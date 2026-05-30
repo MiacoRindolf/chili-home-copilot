@@ -19547,6 +19547,40 @@ def _migration_279_project_autonomy_architect_reviews(conn) -> None:
     logger.info("[mig279] project autonomy architect reviews installed")
 
 
+def _migration_280_option_trade_position_identity_detach(conn) -> None:
+    """Detach option envelopes from underlying-equity position identities.
+
+    The position natural key does not include option contract identity yet.
+    Phase 5A's insert trigger can therefore link an option management envelope
+    for an underlying ticker such as SPY to the SPY equity position row. For
+    option trades, no ``position_id`` is safer than a false underlying-equity
+    link until positions gain an instrument dimension.
+    """
+
+    tables = _tables(conn)
+    if "trading_trades" not in tables:
+        conn.commit()
+        return
+    trade_cols = _columns(conn, "trading_trades")
+    if "position_id" not in trade_cols or "asset_kind" not in trade_cols:
+        conn.commit()
+        return
+    if "trading_positions" not in tables:
+        conn.commit()
+        return
+
+    conn.execute(text("""
+        UPDATE trading_trades t
+           SET position_id = NULL
+          FROM trading_positions p
+         WHERE t.position_id = p.id
+           AND LOWER(COALESCE(t.asset_kind, '')) IN ('option', 'options')
+           AND LOWER(COALESCE(p.asset_kind, '')) NOT IN ('option', 'options')
+    """))
+    conn.commit()
+    logger.info("[mig280] detached option envelopes from non-option positions")
+
+
 def _migration_281_llm_cost_observability(conn) -> None:
     """Add provider/cost fields and seed trading LLM gateway purposes."""
 
@@ -20161,6 +20195,8 @@ MIGRATIONS = [
      _migration_278_project_autonomy_chat_plan_mode),
     ("279_project_autonomy_architect_reviews",
      _migration_279_project_autonomy_architect_reviews),
+    ("280_option_trade_position_identity_detach",
+     _migration_280_option_trade_position_identity_detach),
     ("281_llm_cost_observability",
      _migration_281_llm_cost_observability),
     ("282_autotrader_imminent_selector_indexes",
