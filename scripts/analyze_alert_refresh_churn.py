@@ -250,7 +250,6 @@ def _open_exit_work_with_recent_noop(hours: int, limit: int) -> list[dict]:
            OR d.skip_reason IN (
              'duplicate_learned_exit_label',
              'missing_parent_payoff_geometry',
-             'non_positive_quality_evidence_no_exit_variant_birth',
              'no_loss_report',
              'no_parent_returns'
            )

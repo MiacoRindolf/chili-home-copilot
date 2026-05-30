@@ -131,3 +131,22 @@ def test_churn_audit_json_unavailable_database(monkeypatch, capsys):
     assert payload["hours"] == 1
     assert payload["limit"] == 3
     assert "database system is starting up" in payload["detail"]
+
+
+def test_open_exit_noop_query_keeps_non_positive_skip_evidence_specific(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def capture_rows(sql: str, params: dict):
+        captured["sql"] = sql
+        captured["params"] = params
+        return []
+
+    monkeypatch.setattr(audit, "_rows", capture_rows)
+
+    assert audit._open_exit_work_with_recent_noop(hours=3, limit=7) == []
+
+    sql = str(captured["sql"])
+    structural_clause = sql.split("d.skip_reason IN", 1)[1].split(")", 1)[0]
+    assert "d.evidence_fingerprint = w.evidence_fingerprint" in sql
+    assert "non_positive_quality_evidence_no_exit_variant_birth" not in structural_clause
+    assert captured["params"] == {"hours": 3, "limit": 7}
