@@ -1,0 +1,31 @@
+SSWE_AGENT_STATE
+generated_at: 2026-05-30T06:00:00Z
+session_branch: claude/amazing-euler-NpSi2
+instance_note: parallel instance — another SSWE instance is also active this session
+
+FLOW_HEALTH:
+  scripts_available: false (agent-flow-health.ps1 / agent-pr-review-health.ps1 not present in cloud env; PowerShell unavailable)
+  assessment_method: manual GitHub MCP + local git inspection
+  pending_count: 4 (SSWE-owned PRs missing GitHub-visible SSWE Agent Review)
+
+PR_REVIEW_HEALTH:
+  sswe_owned_prs_scanned: [109, 110, 111, 113, 115]
+  gaps_found:
+    - pr: 109  head: 99500f29  ci: FAILURE  sswe_review: MISSING → POSTED this session
+    - pr: 110  head: 2caddf31  ci: FAILURE  sswe_review: MISSING → POSTED this session
+    - pr: 113  head: 37e33d65  ci: FAILURE  sswe_review: MISSING → POSTED this session
+    - pr: 115  head: 708d7e0d  ci: (not checked — CI pending at PR creation)  sswe_review: MISSING (deferred — another instance may be handling; this is newest/lowest priority of the batch)
+  no_gap:
+    - pr: 111  head: af0a155  ci: SUCCESS  sswe_review: PRESENT (posted 2026-05-30T05:33:19Z by prior instance)
+
+ACTIONS_TAKEN:
+  - posted ## SSWE Agent Review on PR #109 (PM-011 web boundary hardening)
+  - posted ## SSWE Agent Review on PR #110 (PM-015 autopilot UI polish)
+  - posted ## SSWE Agent Review on PR #113 (PM-051 admin require paired)
+  - deferred PR #115 review (newest; another instance active; shared CI context same as others)
+
+INBOX:
+  items_found: 0 (project_ws/SSWE/IN did not exist; created empty)
+
+NEXT_TASK_STATUS: PENDING (f-position-identity-phase-5i-post-rename-soak)
+  note: soak probe requires live DATABASE_URL; cloud env has no DB — cannot execute probe
