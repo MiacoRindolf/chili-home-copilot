@@ -67,7 +67,10 @@ def _earliest_business_day_in_window(
 
 def _fetch_all(conn, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(sql, params)
+        if params:
+            cur.execute(sql, params)
+        else:
+            cur.execute(sql)
         return [_normalize_row(dict(row)) for row in cur.fetchall()]
 
 

@@ -71,6 +71,33 @@ MISMATCHED_ROWS=0
 - `.env` is conservative again (`false`).
 - Docker/Postgres local runtime needs recovery before retrying the soak.
 
+## Retry Note
+
+After Docker recovered, Postgres became healthy and autotrader was recreated
+with the flag false. The Phase 5K-A probe initially exposed a probe-only
+psycopg2 formatting bug in checks whose SQL includes literal `%option%`
+patterns through the shared return-math expression. The probe was fixed so
+parameterless SELECTs call `cursor.execute(sql)` without an empty params tuple.
+
+Post-fix verification:
+
+```text
+Phase 5K-A parity probe: COMPLETE_POSITIVE
+PARITY_CHECKS=6
+PARITY_MISMATCHES=0
+
+Focused probe tests: 8 passed
+```
+
+The flag was retried using `docker compose up -d --no-deps --force-recreate
+autotrader-worker` to avoid touching Postgres. Autotrader started and showed
+`CHILI_PHASE5K_COINBASE_CAP_USE_ENVELOPES=true`, but host-side probes then saw
+Postgres close the connection and the database container re-entered
+`health: starting` recovery. The flag was rolled back to false again.
+
+The repeated failure pattern is now runtime/Docker/Postgres instability, not
+the Phase 5K-B code path.
+
 ## Architect Read
 
 This was an infrastructure failure, not a data-model or code-path failure. The

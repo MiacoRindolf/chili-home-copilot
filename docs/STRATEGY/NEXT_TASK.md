@@ -20,6 +20,8 @@ CHILI_PHASE5K_COINBASE_CAP_USE_ENVELOPES=false
 - Phase 5I before the flip attempt: `COMPLETE_POSITIVE`.
 - Phase 5K-C attempt: rolled back because Docker/Postgres became unhealthy
   during autotrader restart.
+- Phase 5K-C retry: also rolled back after autotrader `--no-deps` recreate
+  caused/was followed by Postgres re-entering startup recovery.
 - Source code does not need rollback.
 
 ## Recovery Steps
