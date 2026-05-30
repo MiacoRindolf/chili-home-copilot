@@ -65,6 +65,40 @@ def _rows(
         return [dict(r._mapping) for r in result.fetchall()]
 
 
+def count_open_autotrader_envelopes_by_lane(
+    db: Session,
+    *,
+    user_id: int | None,
+    autotrader_version: str = "v1",
+) -> dict[str, int]:
+    """Count active live AutoTrader management envelopes by asset lane."""
+    out = {"equity": 0, "crypto": 0, "options": 0}
+    params: dict[str, Any] = {"version": autotrader_version}
+    sql = f"""
+        SELECT COALESCE(LOWER(NULLIF(t.asset_kind, '')),
+                      LOWER(NULLIF(a.asset_type, '')), 'stock') AS at,
+               COUNT(*) AS n
+          FROM {MANAGEMENT_ENVELOPES_RELATION} t
+          LEFT JOIN trading_breakout_alerts a ON a.id = t.related_alert_id
+         WHERE t.auto_trader_version = :version
+           AND t.status IN ('open', 'working')
+    """
+    if user_id is not None:
+        sql += " AND t.user_id = :uid"
+        params["uid"] = user_id
+    sql += " GROUP BY at"
+
+    for at, n in db.execute(text(sql), params).fetchall() or []:
+        lane = (at or "stock").lower()
+        if lane == "crypto":
+            out["crypto"] += int(n)
+        elif lane in ("option", "options"):
+            out["options"] += int(n)
+        else:
+            out["equity"] += int(n)
+    return out
+
+
 def phase5b_parity_summary(db: Session) -> Phase5BParitySummary:
     """Return the Phase 5B read-model health counters.
 

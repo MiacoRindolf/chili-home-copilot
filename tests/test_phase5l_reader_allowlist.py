@@ -23,16 +23,9 @@ ALLOWED_LINE_COUNTS: dict[tuple[str, str], int] = {
         "FROM trading_trades",
     ): 1,
     (
-        "app/services/trading/auto_trader_rules.py",
-        '"FROM trading_trades t "',
-    ): 1,
-    (
         "app/services/trading/bracket_reconciliation_service.py",
         "FROM trading_trades AS t",
     ): 2,
-
-
-
     (
         "app/services/trading/venue/coinbase_orphan_adopt.py",
         "JOIN trading_trades t ON t.id = bi.trade_id",

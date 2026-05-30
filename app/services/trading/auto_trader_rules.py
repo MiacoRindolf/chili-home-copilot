@@ -43,6 +43,7 @@ from ...config import (
     AUTOTRADER_MANAGED_EDGE_DEFAULT_STATIC_TO_MANAGED_REWARD_RATIO,
 )
 from ...models.trading import AutoTraderRun, BreakoutAlert, PaperTrade, ScanPattern, Trade
+from .management_envelopes import count_open_autotrader_envelopes_by_lane
 from .ops_log_prefixes import CHILI_RISK_CACHE
 
 logger = logging.getLogger(__name__)
@@ -2808,10 +2809,10 @@ def count_autotrader_v1_open(db: Session, user_id: Optional[int], *, paper_mode:
     return int(q.count())
 
 
-# VV — per-lane open counts. JOINs trading_trades ↔ trading_breakout_alerts
-# via related_alert_id. Prefer Trade.asset_kind because option substitution
-# mutates the in-memory alert for execution but can leave the stored alert row
-# as stock; fall back to alert.asset_type for legacy rows without asset_kind.
+# VV — per-lane open counts. Live rows are management-envelope semantics:
+# prefer envelope.asset_kind because option substitution mutates the in-memory
+# alert for execution but can leave the stored alert row as stock; fall back to
+# alert.asset_type for legacy rows without asset_kind.
 def count_autotrader_v1_open_by_lane(
     db: Session,
     user_id: Optional[int],
@@ -2844,32 +2845,11 @@ def count_autotrader_v1_open_by_lane(
                 out[lane] = out.get(lane, 0) + 1
             return out
 
-        # Live trades — JOIN to BreakoutAlert via related_alert_id.
-        from sqlalchemy import text as _text
-        params = {}
-        sql = (
-            "SELECT COALESCE(LOWER(NULLIF(t.asset_kind, '')), "
-            "              LOWER(NULLIF(a.asset_type, '')), 'stock') AS at, "
-            "       COUNT(*) AS n "
-            "FROM trading_trades t "
-            "LEFT JOIN trading_breakout_alerts a ON a.id = t.related_alert_id "
-            "WHERE t.auto_trader_version = 'v1' "
-            "  AND t.status IN ('open', 'working') "
+        return count_open_autotrader_envelopes_by_lane(
+            db,
+            user_id=user_id,
+            autotrader_version="v1",
         )
-        if user_id is not None:
-            sql += " AND t.user_id = :uid"
-            params["uid"] = user_id
-        sql += " GROUP BY at"
-        rows = db.execute(_text(sql), params).fetchall()
-        for at, n in rows or []:
-            at_l = (at or "stock").lower()
-            if at_l == "crypto":
-                out["crypto"] += int(n)
-            elif at_l in ("option", "options"):
-                out["options"] += int(n)
-            else:
-                # 'stock', NULL/empty, forex, anything unrecognized → equity bucket
-                out["equity"] += int(n)
     except Exception as e:
         logger.debug("[autotrader] count_open_by_lane failed (returning zeros): %s", e)
     return out
