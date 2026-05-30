@@ -139,10 +139,19 @@ def _chore_insight_counts(db: Session, today: date) -> tuple[int, int, int]:
     return int(pending or 0), int(overdue or 0), int(due_today or 0)
 
 
-def get_insights(db: Session, user_id: int | None = None) -> list[dict]:
+def get_insights(
+    db: Session,
+    user_id: int | None = None,
+    *,
+    today: date | None = None,
+    chore_counts: tuple[int, int, int] | None = None,
+    birthdays: list[Birthday] | None = None,
+) -> list[dict]:
     insights = []
-    today = date.today()
-    pending, overdue, due_today = _chore_insight_counts(db, today)
+    today = today or date.today()
+    pending, overdue, due_today = (
+        chore_counts if chore_counts is not None else _chore_insight_counts(db, today)
+    )
 
     if overdue:
         insights.append({
@@ -164,7 +173,7 @@ def get_insights(db: Session, user_id: int | None = None) -> list[dict]:
             "text": f"{pending} chores pending - time to get busy!",
         })
 
-    upcoming = db.query(Birthday).all()
+    upcoming = birthdays if birthdays is not None else db.query(Birthday).all()
     for b in upcoming:
         this_year = b.date.replace(year=today.year)
         if this_year < today:
@@ -267,11 +276,16 @@ def _users_by_id(db: Session, user_ids: list[int]) -> dict[int, User]:
 
 
 def get_dashboard_data(db: Session, identity: dict) -> dict:
+    today = date.today()
     chores = db.query(Chore).order_by(Chore.id.desc()).all()
     pending_chores = sum(1 for c in chores if not c.done)
     overdue_chores = sum(
         1 for c in chores
-        if not c.done and c.due_date and c.due_date < date.today()
+        if not c.done and c.due_date and c.due_date < today
+    )
+    due_today_chores = sum(
+        1 for c in chores
+        if not c.done and c.due_date == today
     )
 
     birthdays = db.query(Birthday).all()
@@ -331,7 +345,6 @@ def get_dashboard_data(db: Session, identity: dict) -> dict:
             if status == "available":
                 housemates_online += 1
 
-    today = date.today()
     week_ago = today - timedelta(days=7)
     chores_done_week = db.query(Chore).filter(
         Chore.done == True,
@@ -357,6 +370,12 @@ def get_dashboard_data(db: Session, identity: dict) -> dict:
         "users": users_list,
         "chores_done_week": chores_done_week,
         "total_conversations": total_conversations,
-        "insights": get_insights(db, identity.get("user_id")),
+        "insights": get_insights(
+            db,
+            identity.get("user_id"),
+            today=today,
+            chore_counts=(pending_chores, overdue_chores, due_today_chores),
+            birthdays=birthdays,
+        ),
         "weather": get_weather(),
     }

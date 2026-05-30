@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from types import SimpleNamespace
 
+from app.services import home_service
 from app.services.home_service import get_calendar_events, get_insights
 
 
@@ -83,6 +84,11 @@ class _CalendarFakeSession:
         return query
 
 
+class _NoQuerySession:
+    def query(self, *args: object) -> object:
+        raise AssertionError("precomputed insight inputs should avoid chore/birthday queries")
+
+
 def test_get_insights_batches_chore_status_counts() -> None:
     db = _InsightFakeSession((5, 2, 1))
 
@@ -126,3 +132,103 @@ def test_get_calendar_events_filters_birthdays_by_month() -> None:
     assert db.queries[1].kind == "birthdays"
     assert db.queries[1].filter_calls == 1
     assert db.queries[1].all_calls == 1
+
+
+def test_get_insights_reuses_precomputed_dashboard_counts_and_birthdays() -> None:
+    insights = get_insights(
+        _NoQuerySession(),  # type: ignore[arg-type]
+        today=date(2026, 5, 30),
+        chore_counts=(5, 2, 1),
+        birthdays=[SimpleNamespace(id=1, name="Ada", date=date(1990, 6, 1))],
+    )
+
+    texts = [row["text"] for row in insights]
+    assert "2 chores overdue" in texts
+    assert "5 chores pending - time to get busy!" in texts
+    assert "Ada's birthday is in 2 days" in texts
+    assert "1 chore due today" in texts
+
+
+def test_get_dashboard_data_passes_precomputed_inputs_to_insights(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    birthday = SimpleNamespace(id=1, name="Ada", date=date(1990, 6, 1))
+    done_chore = SimpleNamespace(
+        id=1,
+        title="Done",
+        done=True,
+        due_date=date(2026, 5, 29),
+        priority="medium",
+        recurrence=None,
+        assigned_to=None,
+        created_at=None,
+        completed_at=None,
+    )
+    today = date.today()
+    overdue_chore = SimpleNamespace(
+        id=2,
+        title="Late",
+        done=False,
+        due_date=today - timedelta(days=1),
+        priority="high",
+        recurrence=None,
+        assigned_to=None,
+        created_at=None,
+        completed_at=None,
+    )
+    today_chore = SimpleNamespace(
+        id=3,
+        title="Today",
+        done=False,
+        due_date=today,
+        priority="low",
+        recurrence=None,
+        assigned_to=None,
+        created_at=None,
+        completed_at=None,
+    )
+
+    class _DashboardQuery:
+        def __init__(self, rows: list[object], *, count_value: int = 0) -> None:
+            self.rows = rows
+            self.count_value = count_value
+
+        def order_by(self, *args: object) -> "_DashboardQuery":
+            return self
+
+        def filter(self, *args: object) -> "_DashboardQuery":
+            return self
+
+        def all(self) -> list[object]:
+            return self.rows
+
+        def count(self) -> int:
+            return self.count_value
+
+    class _DashboardSession:
+        def __init__(self) -> None:
+            self.query_count = 0
+
+        def query(self, *args: object) -> _DashboardQuery:
+            self.query_count += 1
+            if self.query_count == 1:
+                return _DashboardQuery([done_chore, overdue_chore, today_chore])
+            if self.query_count == 2:
+                return _DashboardQuery([birthday])
+            return _DashboardQuery([], count_value=0)
+
+    def fake_get_insights(db, user_id=None, **kwargs):
+        captured.update(kwargs)
+        return [{"type": "ok", "icon": "check", "text": "cached"}]
+
+    monkeypatch.setattr(home_service, "_users_by_id", lambda db, user_ids: {})
+    monkeypatch.setattr(home_service, "get_insights", fake_get_insights)
+    monkeypatch.setattr(home_service, "get_weather", lambda: None)
+
+    result = home_service.get_dashboard_data(
+        _DashboardSession(),  # type: ignore[arg-type]
+        {"is_guest": True},
+    )
+
+    assert result["insights"] == [{"type": "ok", "icon": "check", "text": "cached"}]
+    assert captured["chore_counts"] == (2, 1, 1)
+    assert captured["birthdays"] == [birthday]
