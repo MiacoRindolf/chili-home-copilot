@@ -40,6 +40,17 @@ def _fetch_all(conn, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, A
         return [dict(row) for row in cur.fetchall()]
 
 
+def _enforce_read_only(conn) -> None:
+    conn.set_session(readonly=True, autocommit=False)
+    with conn.cursor() as cur:
+        cur.execute("SET TRANSACTION READ ONLY")
+        cur.execute("SHOW transaction_read_only")
+        row = cur.fetchone()
+    value = row[0] if isinstance(row, (tuple, list)) else row
+    if str(value).strip().lower() != "on":
+        raise RuntimeError("database did not enter read-only transaction mode")
+
+
 def _num(value: Any) -> float:
     if value is None:
         return 0.0
@@ -58,6 +69,8 @@ def _main() -> int:
         return 2
 
     try:
+        _enforce_read_only(conn)
+
         mig = _fetch_one(
             conn,
             """

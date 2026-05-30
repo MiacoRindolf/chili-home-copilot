@@ -22,11 +22,38 @@ def test_phase5i_probe_cancelled_pattern_drift_is_diagnostic(
 ):
     module = _load_probe_module()
 
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.executed: list[str] = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, sql: str, *_args, **_kwargs) -> None:
+            self.executed.append(sql)
+
+        def fetchone(self):
+            return ("on",)
+
     class FakeConn:
+        def __init__(self) -> None:
+            self.cursor_obj = FakeCursor()
+            self.session_args = None
+
+        def set_session(self, **kwargs) -> None:
+            self.session_args = kwargs
+
+        def cursor(self):
+            return self.cursor_obj
+
         def close(self) -> None:
             pass
 
-    monkeypatch.setattr(module.psycopg2, "connect", lambda _dsn: FakeConn())
+    conn = FakeConn()
+    monkeypatch.setattr(module.psycopg2, "connect", lambda _dsn: conn)
     monkeypatch.setattr(
         module,
         "_fetch_all",
@@ -72,3 +99,80 @@ def test_phase5i_probe_cancelled_pattern_drift_is_diagnostic(
     assert "FRESH_CLOSE_MISMATCHES=0" in out
     assert "FRESH_CANCELLED_MISMATCHES=1" in out
     assert calls["n"] == 1
+    assert conn.session_args == {"readonly": True, "autocommit": False}
+    assert conn.cursor_obj.executed == [
+        "SET TRANSACTION READ ONLY",
+        "SHOW transaction_read_only",
+    ]
+
+
+def test_phase5i_probe_enforces_read_only_transaction():
+    module = _load_probe_module()
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self.executed: list[str] = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, sql: str, *_args, **_kwargs) -> None:
+            self.executed.append(sql)
+
+        def fetchone(self):
+            return ("on",)
+
+    class FakeConn:
+        def __init__(self) -> None:
+            self.cursor_obj = FakeCursor()
+            self.session_args = None
+
+        def set_session(self, **kwargs) -> None:
+            self.session_args = kwargs
+
+        def cursor(self):
+            return self.cursor_obj
+
+    conn = FakeConn()
+
+    module._enforce_read_only(conn)
+
+    assert conn.session_args == {"readonly": True, "autocommit": False}
+    assert conn.cursor_obj.executed == [
+        "SET TRANSACTION READ ONLY",
+        "SHOW transaction_read_only",
+    ]
+
+
+def test_phase5i_probe_rejects_non_read_only_transaction():
+    module = _load_probe_module()
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, *_args, **_kwargs) -> None:
+            pass
+
+        def fetchone(self):
+            return ("off",)
+
+    class FakeConn:
+        def set_session(self, **_kwargs) -> None:
+            pass
+
+        def cursor(self):
+            return FakeCursor()
+
+    try:
+        module._enforce_read_only(FakeConn())
+    except RuntimeError as exc:
+        assert "read-only transaction mode" in str(exc)
+    else:
+        raise AssertionError("expected read-only enforcement to fail")

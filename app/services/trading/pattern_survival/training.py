@@ -11,7 +11,7 @@ Three orchestrated stages run sequentially in
 
     "Survived" definition:
       lifecycle_stage IN ('live', 'challenged')
-      AND (active=True OR trade_count > 0 in last 30d)
+      AND (active=True OR trade entered during the label horizon)
 
     Patterns that drifted to 'demoted' / 'candidate' or went silent
     (active=False with no recent trades) count as did-not-survive.
@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import os
 import pickle
 from datetime import datetime, timezone
@@ -53,6 +54,8 @@ from typing import Any, Optional
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+
+from app.services.trading.management_envelopes import MANAGEMENT_ENVELOPES_RELATION
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +67,16 @@ _MIN_FEATURE_AGE_DAYS = 1     # don't score same-day features (no settling time)
 _DEFAULT_DECISION_THRESHOLD = 0.5
 _MODEL_DIR = Path("/app/models/pattern_survival")
 _MODEL_NAME = "survival_clf"
+
+
+def _feature_value_or_nan(value: Any) -> float:
+    if value is None:
+        return float("nan")
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return float("nan")
+    return f if math.isfinite(f) else float("nan")
 
 
 # Feature columns pulled from pattern_survival_features. Ordered; the
@@ -96,28 +109,38 @@ def backfill_survival_labels(
 
     For each unresolved prediction (snapshot_date >= horizon_days ago,
     actual_survived IS NULL), look up the scan_pattern's CURRENT state
-    and decide:
+    and realized trade activity during the resolved label horizon:
 
       survived = lifecycle_stage IN ('live', 'challenged')
-                 AND (active = TRUE OR trade_count > 0 in 30d)
+                 AND (active = TRUE OR horizon_trade_count > 0)
 
     The "OR active=TRUE" branch catches patterns that survived but
     happened to not trade in the rolling window — they're still live,
-    just quiet. The trade_count fallback catches patterns flipped
-    inactive but still trading via grandfathered paths.
+    just quiet. The trade-count fallback catches patterns flipped
+    inactive but still trading via grandfathered paths without using
+    stale scan_patterns.trade_count.
 
     Returns counts: rows_resolved, rows_survived, rows_dnf.
     """
-    cutoff = text(
-        "NOW() - make_interval(days => :h)"
-    )
     try:
         rows = db.execute(text(
-            """
+            f"""
             SELECT pp.id, pp.scan_pattern_id, pp.snapshot_date,
                    sp.lifecycle_stage,
                    COALESCE(sp.active, FALSE) AS active,
-                   COALESCE(sp.trade_count, 0) AS trade_count
+                   COALESCE((
+                       SELECT COUNT(*)::int
+                       FROM {MANAGEMENT_ENVELOPES_RELATION} t
+                       WHERE t.scan_pattern_id = pp.scan_pattern_id
+                         AND t.entry_date >= pp.snapshot_date::timestamp
+                         AND t.entry_date < (
+                             pp.snapshot_date::timestamp
+                             + make_interval(days => :h)
+                         )
+                         AND COALESCE(t.status, '') NOT IN (
+                             'cancelled', 'rejected'
+                         )
+                   ), 0) AS horizon_trade_count
             FROM pattern_survival_predictions pp
             JOIN scan_patterns sp ON sp.id = pp.scan_pattern_id
             WHERE pp.actual_survived IS NULL
@@ -138,7 +161,11 @@ def backfill_survival_labels(
             stage in ("live", "challenged")
             and (bool(active) or int(tc or 0) > 0)
         )
-        reason = None if ok else f"lifecycle={stage} active={active} trades={tc}"
+        reason = (
+            None
+            if ok
+            else f"lifecycle={stage} active={active} horizon_trades={tc}"
+        )
         try:
             db.execute(text(
                 """
@@ -250,7 +277,7 @@ def train_survival_classifier(
     for i, r in enumerate(rows):
         for j in range(n_cols):
             v = r[j]
-            X[i, j] = float(v) if v is not None else float("nan")
+            X[i, j] = _feature_value_or_nan(v)
         y[i] = 1 if r[n_cols] else 0
 
     n_pos = int(y.sum())
@@ -343,7 +370,7 @@ def score_pending_features(
         snapshot_dates.append(r[2])
         for j in range(n_cols):
             v = r[3 + j]
-            X[i, j] = float(v) if v is not None else float("nan")
+            X[i, j] = _feature_value_or_nan(v)
 
     try:
         proba = model.predict_proba(X)[:, 1]
