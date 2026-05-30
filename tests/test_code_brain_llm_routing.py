@@ -27,6 +27,9 @@ def test_code_reviewer_routes_llm_through_code_review_purpose(monkeypatch):
     assert result["findings"][0]["file"] == "x.py"
     assert llm.call_args.kwargs["purpose"] == "code_review"
     assert llm.call_args.kwargs["cacheable"] is True
+    messages = llm.call_args.args[0]
+    assert "Repository context:" not in messages[0]["content"]
+    assert messages[1]["content"].startswith("Repository context:\nRepo: demo")
 
 
 def test_code_search_routes_llm_through_cacheable_code_search_purpose(monkeypatch):

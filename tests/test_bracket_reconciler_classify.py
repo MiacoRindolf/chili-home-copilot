@@ -60,6 +60,15 @@ def test_broker_down_when_snapshot_unavailable():
     assert d.severity == "warn"
 
 
+def test_closed_trade_with_unavailable_broker_agrees_for_intent_closure():
+    d = classify_discrepancy(
+        _local(trade_status="closed", intent_state="confirmed_at_broker"),
+        _broker(available=False),
+    )
+    assert d.kind == "agree"
+    assert d.delta_payload["reason"] == "local_trade_closed_broker_snapshot_unavailable"
+
+
 def test_orphan_stop_when_local_closed_but_broker_has_working_stop():
     d = classify_discrepancy(
         _local(trade_status="closed"),
@@ -77,6 +86,42 @@ def test_missing_stop_when_open_trade_but_no_broker_stop():
                 target_order_state=None, target_order_id=None, target_order_price=None),
     )
     assert d.kind == "missing_stop"
+
+
+def test_robinhood_fractional_equity_missing_stop_is_software_managed():
+    d = classify_discrepancy(
+        _local(quantity=0.759, intent_state="terminal_reject"),
+        _broker(
+            position_quantity=0.759,
+            stop_order_state=None,
+            stop_order_id=None,
+            stop_order_price=None,
+            target_order_state=None,
+            target_order_id=None,
+            target_order_price=None,
+        ),
+    )
+
+    assert d.kind == "agree"
+    assert d.delta_payload["reason"] == "software_stop_managed_robinhood_fractional_equity"
+
+
+def test_robinhood_non_integer_equity_missing_stop_is_software_managed():
+    d = classify_discrepancy(
+        _local(quantity=1.25, intent_state="terminal_reject"),
+        _broker(
+            position_quantity=1.25,
+            stop_order_state=None,
+            stop_order_id=None,
+            stop_order_price=None,
+            target_order_state=None,
+            target_order_id=None,
+            target_order_price=None,
+        ),
+    )
+
+    assert d.kind == "agree"
+    assert d.delta_payload["reason"] == "software_stop_managed_robinhood_fractional_equity"
 
 
 def test_missing_stop_severity_warn_for_intent_state():

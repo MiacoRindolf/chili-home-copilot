@@ -3,37 +3,54 @@
 When the local llama3 planner returns type=unknown and OpenAI is configured,
 the message should be routed to OpenAI for a general chat response.
 """
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from app.models import ChatMessage
 
 
 class TestOpenAIFallbackRouting:
     """When planner returns unknown, route to OpenAI if configured."""
 
-    @patch("app.routers.chat.openai_client")
-    @patch("app.services.chat_service.plan_action")
-    def test_routes_to_openai_when_configured(self, mock_plan, mock_oc, paired_client, db):
-        client, user = paired_client
-        mock_plan.return_value = {
+    def test_routes_to_openai_when_configured(self, paired_client, db):
+        client, _user = paired_client
+        context_only = {
             "type": "unknown",
             "data": {"reason": "ambiguous"},
             "reply": "What would you like?",
         }
-        mock_oc.is_configured.return_value = True
-        mock_oc.SYSTEM_PROMPT = "You are CHILI."
-        mock_oc.chat.return_value = {
-            "reply": "Hey! I'm CHILI, your household assistant.",
-            "tokens_used": 42,
-            "model": "gpt-4o-mini",
-        }
 
-        resp = client.post("/api/chat", data={"message": "tell me a joke"})
+        with patch("app.routers.chat.openai_client") as mock_oc, patch(
+            "app.routers.chat.gather_context_only"
+        ) as mock_gather_context, patch(
+            "app.services.context_brain.llm_gateway.gateway_chat"
+        ) as mock_gateway:
+            mock_oc.is_configured.return_value = True
+            mock_oc.SYSTEM_PROMPT = "You are CHILI."
+            mock_gather_context.return_value = {
+                "planned": context_only,
+                "rag_context": None,
+                "rag_hits": [],
+                "personality_context": None,
+                "brain_prompt": None,
+            }
+            mock_gateway.return_value = {
+                "reply": "Hey! I'm CHILI, your household assistant.",
+                "tokens_used": 42,
+                "model": "gpt-4o-mini",
+                "gateway_log_id": 123,
+            }
+
+            resp = client.post("/api/chat", data={"message": "tell me a joke"})
+
+        mock_gather_context.assert_called_once()
+        mock_gateway.assert_called_once()
+        gateway_kwargs = mock_gateway.call_args.kwargs
+        assert gateway_kwargs["purpose"] == "chat_user"
+        assert gateway_kwargs["user_message"] == "tell me a joke"
         data = resp.json()
 
         assert data["action_type"] == "general_chat"
         assert data["model_used"] == "gpt-4o-mini"
         assert "CHILI" in data["reply"]
-        mock_oc.chat.assert_called_once()
 
     @patch("app.routers.chat.openai_client")
     @patch("app.services.chat_service.plan_action")

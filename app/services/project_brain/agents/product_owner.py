@@ -35,6 +35,84 @@ _QUESTION_CATEGORIES = [
     "users", "success_criteria", "constraints", "domain", "general",
 ]
 
+_MECHANICAL_REQUIREMENT_CATEGORIES = {
+    "vision", "features", "priorities", "tech_stack",
+    "users", "success_criteria", "constraints", "domain",
+}
+
+_AMBIGUOUS_ANSWERS = {
+    "unknown", "unsure", "not sure", "tbd", "todo", "n/a", "na",
+    "none", "maybe", "later", "skip",
+}
+
+
+def _clean_requirement_text(value: Any, *, limit: int = 220) -> str:
+    text = " ".join(str(value or "").split())
+    return text[:limit].strip()
+
+
+def _is_ambiguous_answer(answer: str) -> bool:
+    lowered = answer.lower().strip(" .,!?:;-")
+    return lowered in _AMBIGUOUS_ANSWERS or any(
+        lowered.startswith(prefix)
+        for prefix in ("not sure", "unsure", "maybe", "tbd")
+    )
+
+
+def _mechanical_priority(category: str, answer: str) -> str:
+    lowered = answer.lower()
+    if any(token in lowered for token in ("must", "critical", "required", "blocker")):
+        return "high"
+    if category in {"success_criteria", "constraints", "priorities"}:
+        return "high"
+    if category in {"features", "users", "tech_stack"}:
+        return "medium"
+    return "low"
+
+
+def _mechanical_requirement_title(category: str, question: str, answer: str) -> str:
+    prefix = {
+        "features": "Support",
+        "users": "Serve",
+        "tech_stack": "Use",
+        "success_criteria": "Measure",
+        "constraints": "Respect",
+        "priorities": "Prioritize",
+        "vision": "Align Around",
+        "domain": "Model",
+    }.get(category, "Capture")
+    subject = answer.split(".")[0].strip(" :-")
+    if not subject:
+        subject = question.strip(" ?.")
+    title = f"{prefix} {subject}"
+    return title[:120].strip()
+
+
+def _mechanical_requirements_from_questions(questions: list[Any]) -> list[dict[str, Any]]:
+    requirements: list[dict[str, Any]] = []
+    for q in questions:
+        category = str(getattr(q, "category", "") or "general").strip() or "general"
+        answer = _clean_requirement_text(getattr(q, "answer", ""))
+        question = _clean_requirement_text(getattr(q, "question", ""), limit=180)
+        if category not in _MECHANICAL_REQUIREMENT_CATEGORIES:
+            continue
+        if len(answer) < 8 or _is_ambiguous_answer(answer):
+            continue
+        qid = getattr(q, "id", None)
+        requirements.append({
+            "title": _mechanical_requirement_title(category, question, answer),
+            "description": f"User answered '{question}' with: {answer}",
+            "priority": _mechanical_priority(category, answer),
+            "acceptance_criteria": (
+                "Decision is documented; implementation reflects the answer; "
+                "stakeholders can verify the outcome"
+            ),
+            "source_question_ids": [qid] if qid is not None else [],
+        })
+        if len(requirements) >= 3:
+            break
+    return requirements
+
 
 class ProductOwnerAgent(AgentBase):
     name = "product_owner"
@@ -486,6 +564,27 @@ class ProductOwnerAgent(AgentBase):
         new_questions = [q for q in unprocessed if q.id not in already_sourced]
         if not new_questions:
             return 0
+
+        mechanical_reqs = _mechanical_requirements_from_questions(new_questions[:5])
+        if mechanical_reqs:
+            added = 0
+            for req in mechanical_reqs:
+                title = req.get("title", "").strip()
+                if not title:
+                    continue
+                source_ids = req.get("source_question_ids") or []
+                db.add(PORequirement(
+                    user_id=user_id,
+                    title=title,
+                    description=req.get("description", ""),
+                    priority=req.get("priority", "medium"),
+                    acceptance_criteria=req.get("acceptance_criteria", ""),
+                    source_questions_json=json.dumps(source_ids),
+                ))
+                added += 1
+            if added:
+                db.commit()
+                return added
 
         qa_text = "\n".join(
             f"- [{q.category}] Q: {q.question} A: {q.answer}"

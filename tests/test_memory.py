@@ -389,7 +389,7 @@ class TestProfileAPI:
         r = client.get("/api/profile")
         assert r.status_code == 200
         data = r.json()
-        assert data["user_name"] == "TestUser"
+        assert data["user_name"] == user.name
         assert "profile" in data
         assert "memory_count" in data
 

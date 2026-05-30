@@ -21,6 +21,7 @@ from sqlalchemy import text
 
 from app.config import settings
 from app.models.trading import BrainWorkEvent
+from app.services.trading.brain_work.emitters import emit_market_snapshots_batch_outcome
 from app.services.trading.brain_work.ledger import (
     claim_work_batch,
     enqueue_outcome_event,
@@ -267,3 +268,85 @@ def test_flag_on_explicit_audit_outcome_stays_terminal(db, monkeypatch) -> None:
     )
     db.commit()
     assert rows == []
+
+
+def test_market_snapshot_emitter_coalesces_obsolete_pending_outcomes(
+    db,
+    monkeypatch,
+) -> None:
+    """Newest snapshot evidence supersedes old unclaimed mining triggers."""
+    monkeypatch.setattr(settings, "chili_brain_outcome_claimable_enabled", True)
+    monkeypatch.setattr(settings, "brain_mine_handler_obsolete_event_grace_seconds", 60)
+
+    old_id = emit_market_snapshots_batch_outcome(
+        db,
+        daily=120,
+        intraday=80,
+        universe_size=120,
+        job_id="old-snapshot",
+        snapshot_driver="pytest",
+    )
+    recent_id = emit_market_snapshots_batch_outcome(
+        db,
+        daily=120,
+        intraday=81,
+        universe_size=120,
+        job_id="recent-snapshot",
+        snapshot_driver="pytest",
+    )
+    db.commit()
+    assert old_id is not None
+    assert recent_id is not None
+
+    now = datetime.utcnow()
+    db.execute(
+        text(
+            """
+            UPDATE brain_work_events
+               SET created_at = :old_created,
+                   updated_at = :old_created,
+                   next_run_at = :old_created
+             WHERE id = :old_id
+            """
+        ),
+        {"old_id": int(old_id), "old_created": now - timedelta(minutes=5)},
+    )
+    db.execute(
+        text(
+            """
+            UPDATE brain_work_events
+               SET created_at = :recent_created,
+                   updated_at = :recent_created,
+                   next_run_at = :recent_created
+             WHERE id = :recent_id
+            """
+        ),
+        {
+            "recent_id": int(recent_id),
+            "recent_created": now - timedelta(seconds=30),
+        },
+    )
+    db.commit()
+
+    new_id = emit_market_snapshots_batch_outcome(
+        db,
+        daily=120,
+        intraday=82,
+        universe_size=120,
+        job_id="new-snapshot",
+        snapshot_driver="pytest",
+    )
+    db.commit()
+    assert new_id is not None
+
+    old = _outcome_row(db, int(old_id))
+    recent = _outcome_row(db, int(recent_id))
+    new = _outcome_row(db, int(new_id))
+
+    assert old.status == "done"
+    assert old.processed_at is not None
+    assert old.payload["coalesced_by_market_snapshot_batch"] is True
+    assert old.payload["coalesced_by_job_id"] == "new-snapshot"
+    assert recent.status == "pending"
+    assert new.status == "pending"
+    assert new.payload["coalesced_obsolete_batches"] == 1

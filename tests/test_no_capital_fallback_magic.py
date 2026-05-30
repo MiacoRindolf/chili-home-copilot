@@ -35,11 +35,29 @@ EXEMPT_PATHS = {
     APP_ROOT / "services" / "trading" / "stop_engine_fallback_constants.py",
 }
 
+NON_CAPITAL_FALLBACK_ALLOWLIST = {
+    (
+        APP_ROOT / "services" / "trading_scheduler.py",
+        "learning_cycle_stale_seconds",
+    ),
+    (
+        APP_ROOT / "services" / "trading" / "learning.py",
+        "learning_cycle_stale_seconds",
+    ),
+}
+
 # Match `or NNNN(.0)?` and `or NNN(.0)?` where the number is a likely
 # dollar placeholder ($100+, no other digits adjacent). Captures things
 # like ``or 10000``, ``or 10000.0``, ``or 100``, but not ``or 0.5``,
 # ``or 0.95``, ``or 14`` (those are tunable multipliers, not capital).
 PATTERN = re.compile(r"\bor\s+1\d{3,5}(?:\.\d+)?\b")
+
+
+def _is_allowlisted_non_capital_fallback(py: Path, line: str) -> bool:
+    return any(
+        py == allowed_path and token in line
+        for allowed_path, token in NON_CAPITAL_FALLBACK_ALLOWLIST
+    )
 
 
 def test_no_inline_capital_or_fallback():
@@ -53,6 +71,8 @@ def test_no_inline_capital_or_fallback():
             continue
         for i, line in enumerate(text.splitlines(), start=1):
             stripped = line.split("#", 1)[0]
+            if _is_allowlisted_non_capital_fallback(py, stripped):
+                continue
             if PATTERN.search(stripped):
                 rel = py.relative_to(REPO_ROOT)
                 failures.append(f"{rel}:{i}: {line.rstrip()}")

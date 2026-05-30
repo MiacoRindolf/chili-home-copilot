@@ -78,6 +78,9 @@ MANAGED_EDGE_ACTIVE_MODES = frozenset(
 MANAGED_EDGE_GEOMETRY_SOURCE = "managed_directional_exit"
 REALIZED_DYNAMIC_GEOMETRY_SOURCE = "realized_dynamic_exit_blend"
 STATIC_TARGET_STOP_GEOMETRY_SOURCE = "static_target_stop"
+AUTOTRADER_EDGE_MAX_STOCK_EXECUTION_STOP_LOSS_PCT = 30.0
+AUTOTRADER_EDGE_MAX_CRYPTO_EXECUTION_STOP_LOSS_PCT = 60.0
+AUTOTRADER_EDGE_MAX_OPTIONS_EXECUTION_STOP_LOSS_PCT = 0.0
 AUTOTRADER_POSITIVE_REPRICE_DEFAULT_ENABLED = True
 AUTOTRADER_POSITIVE_REPRICE_DEFAULT_ASSET_TYPES = "stock,crypto"
 
@@ -727,6 +730,18 @@ def _finite_float(value: Any) -> float | None:
     return v
 
 
+def _safe_float(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(out):
+        return None
+    return out
+
+
 def _load_scan_pattern_for_edge(db: Session, pattern_id: Any) -> ScanPattern | None:
     try:
         pid = int(pattern_id)
@@ -799,6 +814,30 @@ def _settings_float(
     if maximum is not None:
         value = min(float(maximum), value)
     return value
+
+
+def _max_execution_stop_loss_fraction(settings: Any, asset_type: Any) -> float | None:
+    """Asset-aware cap for the stop distance the live executor will actually use."""
+    asset = str(asset_type or "stock").strip().lower()
+    if asset in {"crypto", "cryptocurrency"}:
+        setting_name = "chili_autotrader_crypto_max_execution_stop_loss_pct"
+        default_pct = AUTOTRADER_EDGE_MAX_CRYPTO_EXECUTION_STOP_LOSS_PCT
+    elif asset in {"option", "options"}:
+        setting_name = "chili_autotrader_options_max_execution_stop_loss_pct"
+        default_pct = AUTOTRADER_EDGE_MAX_OPTIONS_EXECUTION_STOP_LOSS_PCT
+    else:
+        setting_name = "chili_autotrader_stock_max_execution_stop_loss_pct"
+        default_pct = AUTOTRADER_EDGE_MAX_STOCK_EXECUTION_STOP_LOSS_PCT
+    cap_pct = _settings_float(
+        settings,
+        setting_name,
+        default_pct,
+        minimum=0.0,
+        maximum=100.0,
+    )
+    if cap_pct <= 0.0:
+        return None
+    return cap_pct / 100.0
 
 
 _TRUE_SETTING_TOKENS = frozenset({"1", "true", "yes", "on"})
@@ -2115,6 +2154,30 @@ def evaluate_entry_edge(
                 )
             )
     snap["managed_exit_edge"] = managed_edge
+    execution_loss = (
+        float(snap.get("stop_loss_fraction") or 0.0)
+        if snap.get("edge_geometry_source") == MANAGED_EDGE_GEOMETRY_SOURCE
+        else static_loss
+    )
+    max_execution_loss = _max_execution_stop_loss_fraction(
+        settings,
+        getattr(alert, "asset_type", None),
+    )
+    if max_execution_loss is not None and execution_loss > max_execution_loss:
+        snap.update(
+            execution_stop_loss_fraction=round(float(execution_loss), 8),
+            max_execution_stop_loss_fraction=round(float(max_execution_loss), 8),
+            max_execution_stop_loss_pct=round(float(max_execution_loss) * 100.0, 4),
+            execution_stop_loss_source=(
+                MANAGED_EDGE_GEOMETRY_SOURCE
+                if snap.get("edge_geometry_source") == MANAGED_EDGE_GEOMETRY_SOURCE
+                else STATIC_TARGET_STOP_GEOMETRY_SOURCE
+            ),
+            entry_price=round(float(e), 8),
+            stop_price=round(float(s), 8),
+            target_price=round(float(t), 8),
+        )
+        return EntryEdgeDecision(False, "execution_stop_loss_too_wide", snap)
     if expected_net <= 0.0:
         return EntryEdgeDecision(False, "non_positive_expected_edge", snap)
     return EntryEdgeDecision(True, "positive_expected_edge", snap)
@@ -2389,11 +2452,25 @@ def passes_rule_gate(
                     "reason": "no_db",
                 }
         except Exception as exc:
+            reason = f"budget_error:{type(exc).__name__}"
+            try:
+                from .options.portfolio_budget import (
+                    options_budget_bypass_enabled as _options_budget_bypass_enabled,
+                )
+                bypass = _options_budget_bypass_enabled()
+            except Exception:
+                bypass = False
             snap["options_budget_check"] = {
-                "ok": None,
+                "ok": True if bypass else False,
+                "reasons": (
+                    ["BYPASS_VIA_CHILI_OPTIONS_BUDGET_BYPASS", reason]
+                    if bypass else [reason]
+                ),
                 "reason": "error",
                 "error": type(exc).__name__,
             }
+            if not bypass:
+                return False, f"options_budget:{reason}", snap
     else:
         ppp = projected_profit_pct(entry, target)
         snap["projected_profit_pct"] = ppp
@@ -2581,17 +2658,24 @@ def passes_rule_gate(
     snap["brain_context"] = brain_ctx
     dial = float(brain_ctx.get("dial_value", 1.0))
 
-    # Daily loss cap: prefer a percent-of-equity cap (dial-scaled) over the
-    # static dollar cap. Falls back to the env dollar cap when equity is
-    # unavailable — preserves current behavior in degraded environments.
+    # Daily loss cap: prefer a percent-of-equity cap only when equity is
+    # proven. Assumed fallback capital is telemetry, not loss authority.
     cap_pct = gs.daily_loss_cap_pct  # 1.5% of equity default
-    equity_for_cap, _ = resolve_effective_capital(db, settings)
-    if equity_for_cap > 0 and cap_pct > 0:
+    equity_for_cap, equity_cap_source = resolve_effective_capital(db, settings)
+    snap["daily_loss_cap_capital_source"] = equity_cap_source
+    equity_cap_proven = (
+        equity_for_cap > 0
+        and cap_pct > 0
+        and not str(equity_cap_source or "").startswith("fallback:")
+    )
+    if equity_cap_proven:
         cap_loss = equity_for_cap * (cap_pct / 100.0) * dial
         snap["daily_loss_cap_source"] = "equity_pct_dial"
     else:
         cap_loss = gs.daily_loss_cap_usd * dial
         snap["daily_loss_cap_source"] = "env_dollar_dial"
+        if equity_for_cap > 0 and cap_pct > 0:
+            snap["daily_loss_cap_unproven_equity_usd"] = round(equity_for_cap, 2)
     snap["daily_loss_cap_usd"] = round(cap_loss, 2)
     snap["realized_loss_today_usd"] = ctx.realized_loss_today_usd
     if cap_loss > 0 and ctx.realized_loss_today_usd <= -cap_loss:

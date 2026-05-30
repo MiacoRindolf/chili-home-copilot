@@ -9090,6 +9090,11 @@ EDGE_EXIT_VARIANT_ORIGIN = "edge_exit_variant"
 EDGE_EXIT_CONFIG_SOURCE = "autotrader_edge_debt_v1"
 EDGE_EXIT_PROMOTION_STATUS = "edge_shadow_collecting_ev"
 EDGE_DEBT_REJECT_REASON = "non_positive_expected_edge"
+EDGE_GEOMETRY_REJECT_REASON = "execution_stop_loss_too_wide"
+EDGE_EVOLUTION_REJECT_REASONS = frozenset({
+    EDGE_DEBT_REJECT_REASON,
+    EDGE_GEOMETRY_REJECT_REASON,
+})
 
 _EDGE_EVOLUTION_DEFAULT_LOOKBACK_DAYS = 7
 _EDGE_EVOLUTION_DEFAULT_MIN_REJECTS = 5
@@ -9114,6 +9119,7 @@ _EDGE_PAYOFF_RESCUE_ROOT_CAUSES = frozenset({
     "shadow_near_miss_noise",
     "managed_reward_risk_below_floor",
     "static_geometry_or_probability_mismatch",
+    EDGE_GEOMETRY_REJECT_REASON,
 })
 
 
@@ -9226,6 +9232,7 @@ def _edge_signal_lane(alert: Any, snapshot: dict[str, Any]) -> str:
 def _edge_report_root_cause(report: dict[str, Any]) -> str:
     lanes = report.get("signal_lanes") or {}
     managed_reasons = report.get("managed_geometry_reasons") or {}
+    reject_reasons = report.get("reject_reasons") or {}
     avg_net = float(report.get("avg_expected_net_pct") or 0.0)
     n = int(report.get("total_rejects") or 0)
     near_miss_n = int(lanes.get("shadow_near_miss") or 0)
@@ -9249,6 +9256,8 @@ def _edge_report_root_cause(report: dict[str, Any]) -> str:
         )
     ):
         return "insufficient_directional_evidence"
+    if _counter_share(reject_reasons, EDGE_GEOMETRY_REJECT_REASON, n) >= 0.4:
+        return EDGE_GEOMETRY_REJECT_REASON
     if _counter_share(managed_reasons, "managed_reward_risk_below_floor", n) >= 0.4:
         return "managed_reward_risk_below_floor"
     if _counter_share(managed_reasons, "managed_stop_not_tighter_than_base", n) >= 0.4:
@@ -9271,7 +9280,7 @@ def _edge_debt_loss_reports(
     now: datetime | None = None,
     lookback_days: int | None = None,
 ) -> dict[int, dict[str, Any]]:
-    """Group recent AutoTrader non-positive-edge rejects into evolution loss reports."""
+    """Group recent AutoTrader edge/geometry rejects into evolution loss reports."""
     if not _settings_edge_enabled():
         return {}
     from ...models.trading import AutoTraderRun, BreakoutAlert
@@ -9290,7 +9299,7 @@ def _edge_debt_loss_reports(
             .outerjoin(BreakoutAlert, BreakoutAlert.id == AutoTraderRun.breakout_alert_id)
             .filter(
                 AutoTraderRun.created_at >= cutoff,
-                AutoTraderRun.reason == EDGE_DEBT_REJECT_REASON,
+                AutoTraderRun.reason.in_(tuple(EDGE_EVOLUTION_REJECT_REASONS)),
             )
             .all()
         )
@@ -9321,11 +9330,13 @@ def _edge_debt_loss_reports(
                 "signal_lanes": {},
                 "managed_geometry_reasons": {},
                 "probability_sources": {},
+                "reject_reasons": {},
                 "sample_ns": [],
             },
         )
         edge = _edge_snapshot_from_run(run)
         report["total_rejects"] += 1
+        _counter_increment(report["reject_reasons"], getattr(run, "reason", None))
         _counter_increment(report["tickers"], getattr(run, "ticker", None) or getattr(alert, "ticker", None))
         _counter_increment(report["asset_types"], getattr(alert, "asset_type", None))
         _counter_increment(report["signal_lanes"], _edge_signal_lane(alert, edge), fallback="standard")

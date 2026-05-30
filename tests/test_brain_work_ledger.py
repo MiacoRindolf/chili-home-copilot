@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 from app.models.trading import BrainWorkEvent
 from app.services.trading.brain_work import ledger as ledger_mod
 from app.services.trading.brain_work.ledger import (
     claim_work_batch,
+    coalesce_duplicate_open_work,
     enqueue_or_refresh_debounced_work,
     enqueue_outcome_event,
     enqueue_work_event,
@@ -241,6 +244,287 @@ def test_retryable_dead_work_recovery_requeues_once(db) -> None:
 
     assert second["recovered"] == 0
     assert second["skipped_max_recoveries"] >= 1
+
+
+def test_retryable_dead_work_default_recovers_multiple_infra_failures(db) -> None:
+    eid = enqueue_work_event(
+        db,
+        event_type="backtest_requested",
+        dedupe_key="bt_req:retryable-dead-default-multi",
+        payload={
+            "scan_pattern_id": 537,
+            "source": "operator_boost",
+            "transient_dead_recovery_count": 1,
+        },
+        lease_scope="backtest",
+        max_attempts=1,
+    )
+    db.commit()
+    assert eid is not None
+
+    row = db.get(BrainWorkEvent, eid)
+    row.status = "dead"
+    row.attempts = 1
+    row.processed_at = row.updated_at
+    row.last_error = "Can't reconnect until invalid transaction is rolled back."
+    db.commit()
+
+    result = recover_retryable_dead_work(
+        db,
+        event_types=("backtest_requested",),
+        limit=4,
+        delay_seconds=0,
+    )
+    db.commit()
+
+    assert result["recovered"] == 1
+    assert result["ids"] == [eid]
+    assert result["recovered_by_marker"] == {
+        "can't reconnect until invalid transaction is rolled back": 1,
+    }
+    recovered = db.get(BrainWorkEvent, eid)
+    assert recovered.status == "retry_wait"
+    assert recovered.payload["transient_dead_recovery_count"] == 2
+
+
+def test_retryable_dead_work_recovery_skips_duplicate_dedupe(db) -> None:
+    dedupe_key = "bt_req:retryable-dead-duplicate-dedupe"
+    ids: list[int] = []
+    for idx in range(2):
+        row = BrainWorkEvent(
+            domain="trading",
+            event_type="backtest_requested",
+            event_kind="work",
+            dedupe_key=dedupe_key,
+            payload={"scan_pattern_id": 537, "source": f"dead-{idx}"},
+            lease_scope="backtest",
+            status="dead",
+            attempts=1,
+            max_attempts=2,
+            last_error="Can't reconnect until invalid transaction is rolled back.",
+        )
+        db.add(row)
+        db.flush()
+        ids.append(int(row.id))
+    db.commit()
+
+    result = recover_retryable_dead_work(
+        db,
+        event_types=("backtest_requested",),
+        limit=4,
+        max_recoveries_per_event=1,
+        delay_seconds=0,
+    )
+    db.commit()
+
+    assert result["recovered"] == 1
+    assert result["skipped_duplicate_dedupe"] == 1
+    rows = (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.id.in_(ids))
+        .order_by(BrainWorkEvent.id.asc())
+        .all()
+    )
+    assert [row.status for row in rows].count("retry_wait") == 1
+    assert [row.status for row in rows].count("dead") == 1
+
+
+def test_coalesce_duplicate_open_work_keeps_one_logical_row(db) -> None:
+    keep = enqueue_work_event(
+        db,
+        event_type="backtest_requested",
+        dedupe_key="bt_req:duplicate-open-537",
+        payload={"scan_pattern_id": 537, "source": "operator_boost"},
+        lease_scope="backtest",
+    )
+    db.commit()
+    assert keep is not None
+
+    duplicate = BrainWorkEvent(
+        domain="trading",
+        event_type="backtest_requested",
+        event_kind="work",
+        dedupe_key="bt_req:duplicate-open-537",
+        payload={"scan_pattern_id": 537, "source": "operator_boost"},
+        lease_scope="backtest",
+        status="retry_wait",
+        attempts=4,
+        max_attempts=5,
+    )
+    db.add(duplicate)
+    db.commit()
+
+    result = coalesce_duplicate_open_work(
+        db,
+        event_types=("backtest_requested",),
+    )
+    db.commit()
+
+    assert result["coalesced"] == 1
+    rows = (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.dedupe_key == "bt_req:duplicate-open-537")
+        .order_by(BrainWorkEvent.id.asc())
+        .all()
+    )
+    assert len(rows) == 2
+    assert rows[0].status == "pending"
+    assert rows[1].status == "done"
+    assert rows[1].payload["duplicate_open_work_suppressed"] is True
+
+
+def test_coalesce_duplicate_open_work_thins_recert_rescue_pattern_asset(db) -> None:
+    older = enqueue_work_event(
+        db,
+        event_type="backtest_requested",
+        dedupe_key="bt_req:recert_rescue:p537:stock:older-fp",
+        payload={
+            "scan_pattern_id": 537,
+            "source": "recert_rescue_refresh",
+            "asset_class": "stock",
+            "evidence_fingerprint": "older-fp",
+        },
+        lease_scope="backtest",
+    )
+    newer = enqueue_work_event(
+        db,
+        event_type="backtest_requested",
+        dedupe_key="bt_req:recert_rescue:p537:stock:newer-fp",
+        payload={
+            "scan_pattern_id": 537,
+            "source": "recert_rescue_refresh",
+            "asset_class": "stock",
+            "evidence_fingerprint": "newer-fp",
+        },
+        lease_scope="backtest",
+    )
+    other_asset = enqueue_work_event(
+        db,
+        event_type="backtest_requested",
+        dedupe_key="bt_req:recert_rescue:p537:crypto:newer-fp",
+        payload={
+            "scan_pattern_id": 537,
+            "source": "recert_rescue_refresh",
+            "asset_class": "crypto",
+            "evidence_fingerprint": "newer-fp",
+        },
+        lease_scope="backtest",
+    )
+    db.commit()
+    assert older is not None
+    assert newer is not None
+    assert other_asset is not None
+
+    result = coalesce_duplicate_open_work(
+        db,
+        event_types=("backtest_requested",),
+    )
+    db.commit()
+
+    rows = {
+        int(row.id): row
+        for row in db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.id.in_([older, newer, other_asset]))
+        .all()
+    }
+    assert result["coalesced"] == 1
+    assert result["reasons"] == {"recert_rescue_pattern_asset_superseded": 1}
+    assert rows[older].status == "done"
+    assert rows[older].payload["duplicate_open_work_suppressed"] is True
+    assert (
+        rows[older].payload["duplicate_open_work_suppressed_reason"]
+        == "recert_rescue_pattern_asset_superseded"
+    )
+    assert rows[older].payload["duplicate_open_work_kept_event_id"] == newer
+    assert rows[newer].status == "pending"
+    assert rows[other_asset].status == "pending"
+
+
+def test_coalesce_duplicate_open_work_keeps_latest_queued_market_snapshot_batch(db) -> None:
+    now = datetime.utcnow()
+
+    processing = BrainWorkEvent(
+        domain="trading",
+        event_type="market_snapshots_batch",
+        event_kind="outcome",
+        dedupe_key="mine:processing",
+        payload={"job_id": "processing", "snapshots_taken_daily": 120},
+        lease_scope="mine",
+        status="processing",
+        attempts=1,
+        max_attempts=5,
+        next_run_at=now - timedelta(minutes=5),
+        lease_holder="pytest:mine",
+        lease_expires_at=now + timedelta(minutes=10),
+        created_at=now - timedelta(minutes=5),
+        updated_at=now,
+    )
+    older = BrainWorkEvent(
+        domain="trading",
+        event_type="market_snapshots_batch",
+        event_kind="outcome",
+        dedupe_key="mine:older",
+        payload={"job_id": "older", "snapshots_taken_daily": 120},
+        lease_scope="mine",
+        status="pending",
+        attempts=0,
+        max_attempts=5,
+        next_run_at=now - timedelta(minutes=4),
+        created_at=now - timedelta(minutes=4),
+        updated_at=now - timedelta(minutes=4),
+    )
+    middle = BrainWorkEvent(
+        domain="trading",
+        event_type="market_snapshots_batch",
+        event_kind="outcome",
+        dedupe_key="mine:middle",
+        payload={"job_id": "middle", "snapshots_taken_daily": 120},
+        lease_scope="mine",
+        status="pending",
+        attempts=0,
+        max_attempts=5,
+        next_run_at=now - timedelta(minutes=2),
+        created_at=now - timedelta(minutes=2),
+        updated_at=now - timedelta(minutes=2),
+    )
+    latest = BrainWorkEvent(
+        domain="trading",
+        event_type="market_snapshots_batch",
+        event_kind="outcome",
+        dedupe_key="mine:latest",
+        payload={"job_id": "latest", "snapshots_taken_daily": 120},
+        lease_scope="mine",
+        status="retry_wait",
+        attempts=1,
+        max_attempts=5,
+        next_run_at=now - timedelta(minutes=1),
+        created_at=now - timedelta(minutes=1),
+        updated_at=now - timedelta(minutes=1),
+    )
+    db.add_all([processing, older, middle, latest])
+    db.commit()
+    ids = [int(processing.id), int(older.id), int(middle.id), int(latest.id)]
+
+    result = coalesce_duplicate_open_work(
+        db,
+        event_types=("market_snapshots_batch",),
+    )
+    db.commit()
+
+    rows = {
+        int(row.id): row
+        for row in db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.id.in_(ids))
+        .all()
+    }
+    assert result["coalesced"] == 2
+    assert result["reasons"] == {"market_snapshot_batch_superseded": 2}
+    assert rows[int(processing.id)].status == "processing"
+    assert rows[int(latest.id)].status == "retry_wait"
+    assert rows[int(older.id)].status == "done"
+    assert rows[int(middle.id)].status == "done"
+    assert rows[int(older.id)].payload["duplicate_open_work_kept_event_id"] == int(latest.id)
+    assert rows[int(middle.id)].payload["duplicate_open_work_kept_event_id"] == int(latest.id)
 
 
 def test_enqueue_work_reuses_retryable_dead_dedupe(db, monkeypatch) -> None:

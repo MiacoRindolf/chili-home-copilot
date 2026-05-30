@@ -69,6 +69,7 @@ CANDLE_FRESHNESS_WINDOW_S = 300.0
 # /healthz purposes; the tracker itself flips it to PAUSED.
 WS_ERROR_CIRCUIT_BREAKER = 5
 HEALTH_REASON_NO_SUBSCRIBED_PAIRS = "no_subscribed_pairs"
+HEALTH_REASON_IDLE_NO_SUBSCRIBED_PAIRS = "idle_no_subscribed_pairs"
 HEALTH_REASON_EXECUTOR_LEARNING_STALE = "executor_learning_stale"
 HEALTH_SUBSCRIBED_PAIR_STATES = frozenset({"streaming", "degraded"})
 
@@ -199,6 +200,20 @@ class HealthzServer:
         tracked_pairs = (snap.get("status") or {}).get("pairs") or {}
         pairs = self._subscribed_pairs(tracked_pairs)
         if not pairs:
+            if not tracked_pairs:
+                return True, {
+                    "ws_connected": True,
+                    "candle_freshness": True,
+                    "executor_learning_freshness": True,
+                    "reason": HEALTH_REASON_IDLE_NO_SUBSCRIBED_PAIRS,
+                    "details": {
+                        "ws_window_s": WS_FRESHNESS_WINDOW_S,
+                        "candle_window_s": CANDLE_FRESHNESS_WINDOW_S,
+                        "tracked_pairs": 0,
+                        "subscribed_pairs": 0,
+                        "ignored_pair_states": {},
+                    },
+                }
             return False, {
                 "ws_connected": False,
                 "candle_freshness": False,

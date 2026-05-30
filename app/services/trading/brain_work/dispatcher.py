@@ -7,6 +7,7 @@ import os
 import socket
 from typing import Any
 
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 from ....config import settings
@@ -14,6 +15,7 @@ from .emitters import emit_execution_quality_updated_outcome
 from .ledger import (
     brain_work_ledger_enabled,
     claim_work_batch,
+    coalesce_duplicate_open_work,
     enqueue_outcome_event,
     mark_work_done,
     mark_work_retry_or_dead,
@@ -36,6 +38,23 @@ LOG_PREFIX = "[brain_work_dispatch]"
 # after a restart, which is the right behaviour for catch-up).
 _LAST_DISPATCH_MARKET_SNAPSHOTS_AT: float = 0.0
 
+_TRANSIENT_DB_DISCONNECT_MARKERS = (
+    "server closed the connection unexpectedly",
+    "connection already closed",
+    "connection not open",
+    "can't reconnect until invalid transaction is rolled back",
+)
+
+_ISOLATED_SIDE_EFFECT_EVENT_TYPES = frozenset({
+    "backtest_requested",
+    "backtest_completed",
+    "market_snapshots_batch",
+    "pattern_eligible_promotion",
+    "live_trade_closed",
+    "paper_trade_closed",
+    "broker_fill_closed",
+})
+
 
 def _holder_id() -> str:
     try:
@@ -57,6 +76,105 @@ def _recover_dispatch_session(db: Session, context: str) -> None:
             exc,
             exc_info=True,
         )
+
+
+def _looks_like_transient_db_disconnect(exc: BaseException) -> bool:
+    if isinstance(exc, DBAPIError) and getattr(exc, "connection_invalidated", False):
+        return True
+    msg = str(exc or "").lower()
+    return any(marker in msg for marker in _TRANSIENT_DB_DISCONNECT_MARKERS)
+
+
+def _mark_work_done_after_handler_success(
+    db: Session,
+    *,
+    event_id: int,
+    event_type: str,
+) -> dict[str, Any]:
+    """Mark completed work done, recovering isolated-handler rows from DB disconnects.
+
+    Some handler families already commit their real side effects through fresh
+    ``SessionLocal`` instances. If the dispatcher connection dies only while
+    writing the final done marker, retrying the whole work item duplicates heavy
+    side effects. For those isolated families only, finish the done marker in a
+    fresh session. Same-session handlers still retry, which is safer because
+    their uncommitted writes may have been lost with the broken connection.
+    """
+    try:
+        mark_work_done(db, event_id)
+        db.commit()
+        return {"ok": True, "isolated": False}
+    except Exception as exc:
+        if (
+            event_type not in _ISOLATED_SIDE_EFFECT_EVENT_TYPES
+            or not _looks_like_transient_db_disconnect(exc)
+        ):
+            raise
+        logger.warning(
+            "%s mark done lost dispatcher DB connection id=%s type=%s; "
+            "retrying done marker in isolated session",
+            LOG_PREFIX,
+            event_id,
+            event_type,
+        )
+        _recover_dispatch_session(db, "mark_work_done transient disconnect")
+        from ....db import SessionLocal
+
+        sess = SessionLocal()
+        try:
+            mark_work_done(sess, event_id)
+            sess.commit()
+            return {"ok": True, "isolated": True}
+        except Exception:
+            try:
+                sess.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            sess.close()
+
+
+def _publish_brain_work_outcome_isolated(
+    *,
+    outcome_type: str,
+    scan_pattern_id: int | None = None,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    """Publish non-critical mesh observations without risking the dispatcher DB session."""
+    try:
+        from ....db import SessionLocal
+        from ..brain_neural_mesh.publisher import publish_brain_work_outcome
+    except Exception as exc:
+        logger.debug("%s mesh publisher import skipped: %s", LOG_PREFIX, exc)
+        return
+
+    sess = SessionLocal()
+    try:
+        publish_brain_work_outcome(
+            sess,
+            outcome_type=outcome_type,
+            scan_pattern_id=scan_pattern_id,
+            extra=extra,
+        )
+        sess.commit()
+    except Exception as exc:
+        logger.debug(
+            "%s isolated mesh publish skipped type=%s: %s",
+            LOG_PREFIX,
+            outcome_type,
+            exc,
+            exc_info=True,
+        )
+        try:
+            sess.rollback()
+        except Exception:
+            pass
+    finally:
+        try:
+            sess.close()
+        except Exception:
+            pass
 
 
 def _handle_backtest_requested(db: Session, ev, user_id: int | None) -> None:
@@ -122,18 +240,12 @@ def _handle_backtest_requested(db: Session, ev, user_id: int | None) -> None:
             pass
         s1.close()
 
-    try:
-        from ..brain_neural_mesh.publisher import publish_brain_work_outcome
-
-        publish_brain_work_outcome(
-            db,
-            outcome_type="backtest_completed",
-            scan_pattern_id=pid,
-            extra={"work_event_id": int(ev.id), "backtests_run": bt_run},
-        )
-    except Exception as e:
-        logger.debug("%s mesh publish skipped: %s", LOG_PREFIX, e)
-        _recover_dispatch_session(db, "backtest mesh publish")
+    _recover_dispatch_session(db, "backtest completion handoff")
+    _publish_brain_work_outcome_isolated(
+        outcome_type="backtest_completed",
+        scan_pattern_id=pid,
+        extra={"work_event_id": int(ev.id), "backtests_run": bt_run},
+    )
 
 
 def _handle_execution_feedback_digest(db: Session, ev, user_id: int | None) -> None:
@@ -207,18 +319,11 @@ def _handle_execution_feedback_digest(db: Session, ev, user_id: int | None) -> N
         parent_work_event_id=int(ev.id),
         attribution_summary=attribution_summary,
     )
-    try:
-        from ..brain_neural_mesh.publisher import publish_brain_work_outcome
-
-        publish_brain_work_outcome(
-            db,
-            outcome_type="execution_quality_updated",
-            scan_pattern_id=None,
-            extra={"work_event_id": int(ev.id), "user_id": int(uid)},
-        )
-    except Exception as e:
-        logger.debug("%s mesh exec-quality publish skipped: %s", LOG_PREFIX, e)
-        _recover_dispatch_session(db, "execution-quality mesh publish")
+    _publish_brain_work_outcome_isolated(
+        outcome_type="execution_quality_updated",
+        scan_pattern_id=None,
+        extra={"work_event_id": int(ev.id), "user_id": int(uid)},
+    )
 
 
 def _dispatch_limits(
@@ -334,6 +439,7 @@ def run_brain_work_dispatch_round(
 
     stale_leases_released = release_stale_leases(db)
     dead_letter_recovery = recover_retryable_dead_work(db)
+    duplicate_open_work = coalesce_duplicate_open_work(db)
     db.commit()
 
     lease_s = int(getattr(settings, "brain_work_lease_seconds", 900))
@@ -551,8 +657,11 @@ def run_brain_work_dispatch_round(
                         raise demote_err
                 else:
                     raise ValueError(f"unknown work event_type={event_type}")
-                mark_work_done(db, ev_id)
-                db.commit()
+                _mark_work_done_after_handler_success(
+                    db,
+                    event_id=ev_id,
+                    event_type=event_type,
+                )
                 n_done += 1
                 processed += 1
             except Exception as e:
@@ -657,6 +766,7 @@ def run_brain_work_dispatch_round(
         "errors": errors,
         "stale_leases_released": stale_leases_released,
         "dead_letter_recovery": dead_letter_recovery,
+        "duplicate_open_work": duplicate_open_work,
         "thin_evidence_sweep": thin_evidence_sweep,
         "market_snapshots": market_snapshots,
     }

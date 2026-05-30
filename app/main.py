@@ -580,6 +580,19 @@ def _warn_dual_path_broker_credentials(_settings) -> None:
     except Exception:
         _log.debug("[startup] dual-path broker cred check failed", exc_info=True)
 
+def _scheduler_role_value(settings_obj) -> str:
+    role = (getattr(settings_obj, "chili_scheduler_role", None) or "none").strip().lower()
+    return role or "none"
+
+
+def _deferred_startup_side_effects_disabled(settings_obj, scheduler_role: str | None = None) -> bool:
+    """True for accidental host API processes that should not touch trading side effects."""
+    role = (scheduler_role or _scheduler_role_value(settings_obj)).strip().lower()
+    if role != "none":
+        return False
+    return not bool(getattr(settings_obj, "chili_scheduler_runs_externally", False))
+
+
 
 def _run_deferred_startup() -> None:
     """Heavy startup work (runs in a daemon thread).
@@ -600,7 +613,13 @@ def _run_deferred_startup() -> None:
     try:
         from .config import settings as _settings
 
-        _sched_role = (getattr(_settings, "chili_scheduler_role", None) or "all").strip().lower()
+        _sched_role = _scheduler_role_value(_settings)
+        if _deferred_startup_side_effects_disabled(_settings, _sched_role):
+            _log.warning(
+                "[startup] CHILI_SCHEDULER_ROLE=none without CHILI_SCHEDULER_RUNS_EXTERNALLY=1: "
+                "skipping broker restore, DB maintenance, market streams, and deferred scheduler side effects"
+            )
+            return
         # Robinhood restore can block on device approval / MFA — must not run in lifespan
         # before yield or HTTP never becomes ready (empty reply / TLS handshake failure).
         _restore_broker_sessions()

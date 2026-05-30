@@ -13,11 +13,13 @@ Covers the whole `/trading/autopilot` surface before we go live:
 """
 from __future__ import annotations
 
+from datetime import datetime
 from unittest.mock import patch
 
 import pytest
 from sqlalchemy.orm import Session
 
+from app.config import AUTOTRADER_FRESH_CANDIDATE_FASTLANE_DEFAULT_MAX_AGE_SECONDS
 from app.models.trading import AutoTraderRun, BreakoutAlert, PaperTrade, ScanPattern
 from app.services.trading.auto_trader import run_auto_trader_tick
 from app.services.trading.auto_trader_monitor import tick_auto_trader_monitor
@@ -115,6 +117,7 @@ def test_orchestrator_paper_tags_scan_pattern_and_alert(
         target_price=11.5,
         user_id=user.id,
         scan_pattern_id=sp.id,
+        alerted_at=datetime.utcnow(),
     )
     db.add(ba)
     db.commit()
@@ -128,9 +131,24 @@ def test_orchestrator_paper_tags_scan_pattern_and_alert(
     monkeypatch.setattr(_s, "chili_autotrader_user_id", user.id)
     monkeypatch.setattr(_s, "brain_default_user_id", user.id)
     monkeypatch.setattr(_s, "chili_autotrader_eligible_lifecycle_stages", "promoted,live")
+    monkeypatch.setattr(
+        _s,
+        "chili_autotrader_per_trade_notional_usd",
+        float(ba.target_price or ba.entry_price or 0.0),
+    )
+    monkeypatch.setattr(_s, "chili_autotrader_candidate_batch_size", 1)
+    monkeypatch.setattr(_s, "chili_autotrader_fresh_candidate_fastlane_enabled", True)
+    monkeypatch.setattr(
+        _s,
+        "chili_autotrader_fresh_candidate_fastlane_max_age_seconds",
+        AUTOTRADER_FRESH_CANDIDATE_FASTLANE_DEFAULT_MAX_AGE_SECONDS,
+    )
 
     with patch(
         "app.services.trading.auto_trader._current_price", return_value=10.05
+    ), patch(
+        "app.services.trading.auto_trader.effective_autotrader_runtime",
+        return_value={"tick_allowed": True, "live_orders_effective": False},
     ), patch(
         "app.services.trading.auto_trader._try_claim_alert", return_value=True
     ), patch(
@@ -146,19 +164,29 @@ def test_orchestrator_paper_tags_scan_pattern_and_alert(
 
     assert result.get("ok") is True, result
 
-    pt = db.query(PaperTrade).filter(PaperTrade.ticker == "SMOKE").first()
-    assert pt is not None, "paper trade not created"
+    audit = (
+        db.query(AutoTraderRun)
+        .filter(AutoTraderRun.breakout_alert_id == ba.id)
+        .first()
+    )
+    pt = (
+        db.query(PaperTrade)
+        .filter(PaperTrade.user_id == user.id, PaperTrade.ticker == "SMOKE")
+        .first()
+    )
+    assert pt is not None, {
+        "message": "paper trade not created",
+        "result": result,
+        "audit_decision": getattr(audit, "decision", None),
+        "audit_reason": getattr(audit, "reason", None),
+        "audit_rule_snapshot": getattr(audit, "rule_snapshot", None),
+    }
     assert pt.scan_pattern_id == sp.id, "scan_pattern_id not tagged"
     sj = pt.signal_json or {}
     assert sj.get("auto_trader_v1") is True
     assert sj.get("breakout_alert_id") == ba.id
 
     # audit row present
-    audit = (
-        db.query(AutoTraderRun)
-        .filter(AutoTraderRun.breakout_alert_id == ba.id)
-        .first()
-    )
     assert audit is not None
     assert audit.decision == "placed"
     assert audit.scan_pattern_id == sp.id

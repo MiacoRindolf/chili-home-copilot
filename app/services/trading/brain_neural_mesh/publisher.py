@@ -16,6 +16,14 @@ from .schema import LOG_PREFIX, mesh_enabled
 _log = logging.getLogger(__name__)
 
 
+def _rollback_publish_session(db: Session, *, context: str) -> None:
+    """Clear a failed publisher transaction before returning to the caller."""
+    try:
+        db.rollback()
+    except Exception as exc:
+        _log.debug("%s %s rollback failed: %s", LOG_PREFIX, context, exc, exc_info=True)
+
+
 def publish_market_snapshots_refreshed(db: Session, *, meta: Optional[dict[str, Any]] = None) -> None:
     if not mesh_enabled():
         return
@@ -287,6 +295,7 @@ def publish_brain_work_outcome(
         _log.debug("%s brain_work_outcome type=%s pattern=%s", LOG_PREFIX, outcome_type, scan_pattern_id)
     except Exception as e:
         _log.warning("%s publish_brain_work_outcome failed: %s", LOG_PREFIX, e)
+        _rollback_publish_session(db, context="publish_brain_work_outcome")
 
 
 # ── Sensor node publishers (Phase 2: edge nodes publish structured output) ──
