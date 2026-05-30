@@ -132,8 +132,69 @@ function Get-ComposeRows {
     )
 }
 
+function Normalize-PathForCompare {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return ""
+    }
+    return $Path.Replace("/", "\").TrimEnd("\").ToLowerInvariant()
+}
+
+function Resolve-CanonicalRoot {
+    param([string]$Path)
+
+    $resolved = (Resolve-Path -LiteralPath $Path).Path
+    $gitCommand = Get-Command git -ErrorAction SilentlyContinue
+    if ($null -eq $gitCommand) {
+        return $resolved
+    }
+
+    try {
+        $gitResult = Invoke-NativeCapture -FilePath "git" -Arguments @(
+            "-C", $resolved, "rev-parse", "--show-toplevel"
+        )
+        if ($gitResult.exit_code -eq 0 -and $gitResult.output.Count -gt 0) {
+            $top = [string]$gitResult.output[0]
+            if (-not [string]::IsNullOrWhiteSpace($top)) {
+                return $top.Replace("/", "\")
+            }
+        }
+    } catch {
+        return $resolved
+    }
+
+    return $resolved
+}
+
+function Get-ComposeLabelValue {
+    param(
+        [object]$Row,
+        [string]$Name
+    )
+
+    $labels = $Row.Labels
+    if ($null -eq $labels) {
+        return $null
+    }
+
+    if ($labels -is [System.Collections.IDictionary]) {
+        return $labels[$Name]
+    }
+
+    $pattern = "(?:^|,)" + [regex]::Escape($Name) + "=([^,]*)"
+    $match = [regex]::Match([string]$labels, $pattern)
+    if (-not $match.Success) {
+        return $null
+    }
+    return $match.Groups[1].Value
+}
+
 function Get-ServiceStates {
-    param([string[]]$ServiceNames)
+    param(
+        [string[]]$ServiceNames,
+        [string]$ExpectedWorkingDir
+    )
 
     $rowsByService = @{}
     foreach ($row in Get-ComposeRows) {
@@ -153,9 +214,20 @@ function Get-ServiceStates {
                     status = $null
                     exit_code = $null
                     running = $false
+                    working_dir = $null
+                    expected_working_dir = $ExpectedWorkingDir
+                    wrong_worktree = $false
                 }
                 continue
             }
+
+            $workingDir = Get-ComposeLabelValue -Row $row -Name "com.docker.compose.project.working_dir"
+            $wrongWorktree = (
+                -not [string]::IsNullOrWhiteSpace($ExpectedWorkingDir) -and
+                -not [string]::IsNullOrWhiteSpace([string]$workingDir) -and
+                (Normalize-PathForCompare -Path $workingDir) -ne
+                    (Normalize-PathForCompare -Path $ExpectedWorkingDir)
+            )
 
             [pscustomobject]@{
                 service = $service
@@ -164,6 +236,9 @@ function Get-ServiceStates {
                 status = if ($null -ne $row.Status) { [string]$row.Status } else { $null }
                 exit_code = $row.ExitCode
                 running = ([string]$row.State -eq "running")
+                working_dir = if ($null -ne $workingDir) { [string]$workingDir } else { $null }
+                expected_working_dir = $ExpectedWorkingDir
+                wrong_worktree = [bool]$wrongWorktree
             }
         }
     )
@@ -193,7 +268,7 @@ function Write-Summary {
     }
 }
 
-$resolvedRoot = (Resolve-Path -LiteralPath $Root).Path
+$resolvedRoot = Resolve-CanonicalRoot -Path $Root
 Set-Location -LiteralPath $resolvedRoot
 
 $envPath = Join-Path $resolvedRoot ".env"
@@ -251,7 +326,7 @@ foreach ($service in $FoundationServices) {
     $foundationLookup[$service] = $true
 }
 
-$before = @(Get-ServiceStates -ServiceNames $Services)
+$before = @(Get-ServiceStates -ServiceNames $Services -ExpectedWorkingDir $resolvedRoot)
 $toStart = @($before | Where-Object { -not $_.running } | ForEach-Object { $_.service })
 $servicesStarted = @()
 $servicesDeferred = @()
@@ -278,7 +353,7 @@ if ($foundationToStart.Count -gt 0) {
         if ($WaitSeconds -gt 0) {
             Start-Sleep -Seconds $WaitSeconds
         }
-        $before = @(Get-ServiceStates -ServiceNames $Services)
+        $before = @(Get-ServiceStates -ServiceNames $Services -ExpectedWorkingDir $resolvedRoot)
     }
 }
 
@@ -335,10 +410,15 @@ if ($dependentToStart.Count -gt 0) {
 $after = if ($DryRun -or ($servicesStarted.Count -eq 0)) {
     $before
 } else {
-    @(Get-ServiceStates -ServiceNames $Services)
+    @(Get-ServiceStates -ServiceNames $Services -ExpectedWorkingDir $resolvedRoot)
 }
 
 $notRunning = @($after | Where-Object { -not $_.running } | ForEach-Object { $_.service })
+$wrongWorktree = @(
+    $after |
+        Where-Object { $_.wrong_worktree } |
+        ForEach-Object { $_.service }
+)
 $unhealthy = @(
     $after |
         Where-Object {
@@ -366,7 +446,7 @@ $healthNotReady = @(
         } |
         ForEach-Object { $_.service }
 )
-$ok = ($notRunning.Count -eq 0)
+$ok = ($notRunning.Count -eq 0 -and $wrongWorktree.Count -eq 0)
 $healthOk = ($healthNotReady.Count -eq 0)
 $runtimeOk = $ok -and $healthOk
 
@@ -383,6 +463,7 @@ $summary = [ordered]@{
     services_deferred = $servicesDeferred
     foundation_unready = $foundationUnready
     services_not_running = $notRunning
+    services_wrong_worktree = $wrongWorktree
     services_unhealthy = $unhealthy
     services_starting = $starting
     services_health_not_ready = $healthNotReady
