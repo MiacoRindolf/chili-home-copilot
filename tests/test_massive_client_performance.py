@@ -21,6 +21,63 @@ def test_cache_set_prunes_fresh_overflow_in_batches(monkeypatch) -> None:
         massive_client._cache.clear()
 
 
+def test_set_ws_quote_prunes_stale_entries_before_capping(monkeypatch) -> None:
+    monkeypatch.setattr(massive_client, "_MAX_WS_CACHE", 3)
+    massive_client._ws_cache.clear()
+    try:
+        for idx in range(4):
+            massive_client._ws_cache[f"OLD{idx}"] = massive_client.QuoteSnapshot(
+                price=float(idx),
+                timestamp=100.0 + idx,
+            )
+
+        massive_client._set_ws_quote(
+            "NEW",
+            massive_client.QuoteSnapshot(price=10.0, timestamp=1_000.0),
+            now=1_000.0,
+        )
+
+        assert list(massive_client._ws_cache) == ["NEW"]
+    finally:
+        massive_client._ws_cache.clear()
+
+
+def test_set_ws_quote_caps_fresh_entries_by_oldest_timestamp(monkeypatch) -> None:
+    monkeypatch.setattr(massive_client, "_MAX_WS_CACHE", 3)
+    massive_client._ws_cache.clear()
+    try:
+        for idx, sym in enumerate(["AAA", "BBB", "CCC"]):
+            massive_client._ws_cache[sym] = massive_client.QuoteSnapshot(
+                price=float(idx),
+                timestamp=990.0 + idx,
+            )
+
+        massive_client._set_ws_quote(
+            "DDD",
+            massive_client.QuoteSnapshot(price=4.0, timestamp=1_000.0),
+            now=993.0,
+        )
+
+        assert set(massive_client._ws_cache) == {"CCC", "DDD"}
+    finally:
+        massive_client._ws_cache.clear()
+
+
+def test_get_ws_quote_removes_stale_entry(monkeypatch) -> None:
+    monkeypatch.setattr(massive_client.time, "time", lambda: 1_000.0)
+    massive_client._ws_cache.clear()
+    try:
+        massive_client._ws_cache["OLD"] = massive_client.QuoteSnapshot(
+            price=1.0,
+            timestamp=0.0,
+        )
+
+        assert massive_client.get_ws_quote("OLD") is None
+        assert "OLD" not in massive_client._ws_cache
+    finally:
+        massive_client._ws_cache.clear()
+
+
 def test_top_ranked_preserves_stable_ties() -> None:
     rows = [
         {"ticker": "AAA", "score": 1},
@@ -32,6 +89,23 @@ def test_top_ranked_preserves_stable_ties() -> None:
     top = massive_client._top_ranked(rows, 3, lambda row: row["score"])
 
     assert [row["ticker"] for row in top] == ["BBB", "CCC", "DDD"]
+
+
+def test_screen_top_losers_fallback_uses_bounded_ranked_snapshot(monkeypatch) -> None:
+    monkeypatch.setattr(massive_client, "get_top_movers", lambda _direction: [])
+    monkeypatch.setattr(
+        massive_client,
+        "get_full_market_snapshot",
+        lambda: [
+            {"ticker": "LOWVOL", "todaysChangePerc": -99, "day": {"v": 9_999}},
+            {"ticker": "AAA", "todaysChangePerc": -3.5, "day": {"v": 20_000}},
+            {"ticker": "BBB", "todaysChangePerc": -9.0, "day": {"v": 20_000}},
+            {"ticker": "CCC", "todaysChangePerc": -9.0, "day": {"v": 20_000}},
+            {"ticker": "DDD", "todaysChangePerc": 1.0, "day": {"v": 20_000}},
+        ],
+    )
+
+    assert massive_client.screen_top_losers(limit=3) == ["BBB", "CCC", "AAA"]
 
 
 def test_screen_most_volatile_uses_bounded_ranked_snapshot(monkeypatch) -> None:

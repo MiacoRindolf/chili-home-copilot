@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 _TV_WS_URL = "wss://data.tradingview.com/socket.io/websocket?from=chart%2F"
 _CACHE: dict[tuple[str, str, int], tuple[float, list[dict[str, Any]]]] = {}
+_CACHE_MAX = 1_024
 
 
 def _safe_float(value: Any) -> float | None:
@@ -60,6 +61,49 @@ def _frame(message: dict[str, Any]) -> str:
 
 def _send(ws: Any, method: str, params: list[Any]) -> None:
     ws.send(_frame({"m": method, "p": params}))
+
+
+def _cache_get(
+    key: tuple[str, str, int],
+    *,
+    now: float,
+    ttl: float,
+) -> list[dict[str, Any]] | None:
+    cached = _CACHE.get(key)
+    if not cached:
+        return None
+    ts, bars = cached
+    if (now - ts) <= ttl:
+        return list(bars)
+    _CACHE.pop(key, None)
+    return None
+
+
+def _cache_set(
+    key: tuple[str, str, int],
+    bars: list[dict[str, Any]],
+    *,
+    now: float,
+    ttl: float,
+) -> None:
+    _CACHE.pop(key, None)
+    _CACHE[key] = (now, bars)
+    _prune_cache(now=now, ttl=ttl)
+
+
+def _prune_cache(*, now: float, ttl: float) -> None:
+    cutoff = now - ttl
+    while _CACHE:
+        oldest = next(iter(_CACHE))
+        ts = _CACHE[oldest][0]
+        if ts >= cutoff:
+            break
+        _CACHE.pop(oldest, None)
+    while len(_CACHE) > _CACHE_MAX:
+        oldest = next(iter(_CACHE), None)
+        if oldest is None:
+            break
+        _CACHE.pop(oldest, None)
 
 
 def _parse_frames(raw: str) -> list[dict[str, Any]]:
@@ -105,9 +149,10 @@ def fetch_boats_ohlcv(
     n = max(1, min(int(bars or 150), 500))
     ttl = max(1.0, float(getattr(settings, "chili_robinhood_legend_quote_cache_seconds", 10)))
     cache_key = (symbol, tv_int, n)
-    cached = _CACHE.get(cache_key)
-    if cached and (time.monotonic() - cached[0]) <= ttl:
-        return list(cached[1])
+    now = time.monotonic()
+    cached = _cache_get(cache_key, now=now, ttl=ttl)
+    if cached is not None:
+        return cached
 
     try:
         import websocket
@@ -163,7 +208,7 @@ def fetch_boats_ohlcv(
                 pass
 
     if parsed:
-        _CACHE[cache_key] = (time.monotonic(), parsed)
+        _cache_set(cache_key, parsed, now=time.monotonic(), ttl=ttl)
     return list(parsed)
 
 

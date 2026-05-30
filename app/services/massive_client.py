@@ -1043,6 +1043,7 @@ class TradeSnapshot:
 _ws_cache: dict[str, QuoteSnapshot] = {}
 _ws_cache_lock = threading.Lock()
 _WS_STALENESS = 5.0  # seconds before a WS quote is considered stale
+_MAX_WS_CACHE = 5_000
 
 # Tick listener registry — callbacks receive (symbol, QuoteSnapshot|TradeSnapshot)
 from typing import Callable
@@ -1080,6 +1081,30 @@ def _fire_tick_listeners(sym: str, snap: QuoteSnapshot | TradeSnapshot) -> None:
             cb(sym, snap)
         except Exception:
             pass
+
+
+def _prune_ws_cache_locked(now: float) -> None:
+    expired = [sym for sym, snap in _ws_cache.items() if now - snap.timestamp > _WS_STALENESS]
+    for sym in expired:
+        _ws_cache.pop(sym, None)
+    if len(_ws_cache) <= _MAX_WS_CACHE:
+        return
+
+    target_size = max(1, int(_MAX_WS_CACHE * 0.9))
+    overflow = len(_ws_cache) - target_size
+    for sym, _snap in heapq.nsmallest(
+        overflow,
+        _ws_cache.items(),
+        key=lambda item: (item[1].timestamp, item[0]),
+    ):
+        _ws_cache.pop(sym, None)
+
+
+def _set_ws_quote(sym: str, snap: QuoteSnapshot, *, now: float | None = None) -> None:
+    with _ws_cache_lock:
+        _ws_cache[sym] = snap
+        if len(_ws_cache) > _MAX_WS_CACHE:
+            _prune_ws_cache_locked(time.time() if now is None else now)
 
 
 # ── Candle aggregation (trade ticks → OHLCV bars) ────────────────────────────
@@ -1205,11 +1230,14 @@ def unregister_candle_listener(ticker: str, interval_seconds: int, cb: CandleCal
 
 def get_ws_quote(ticker: str) -> QuoteSnapshot | None:
     """Return a fresh WebSocket-cached quote, or None if stale/missing."""
+    now = time.time()
     with _ws_cache_lock:
-        snap = _ws_cache.get(ticker.upper())
+        sym = ticker.upper()
+        snap = _ws_cache.get(sym)
+        if snap is not None and now - snap.timestamp > _WS_STALENESS:
+            _ws_cache.pop(sym, None)
+            snap = None
     if snap is None:
-        return None
-    if time.time() - snap.timestamp > _WS_STALENESS:
         return None
     return snap
 
@@ -1356,8 +1384,7 @@ class MassiveWSClient:
                     ask_size=msg.get("as"),
                     timestamp=now,
                 )
-                with _ws_cache_lock:
-                    _ws_cache[sym] = snap
+                _set_ws_quote(sym, snap, now=now)
                 _fire_tick_listeners(sym, snap)
 
             elif ev == "T":
@@ -1633,8 +1660,8 @@ def screen_top_losers(limit: int = 100) -> list[str]:
     valid = [s for s in snaps
              if s.get("todaysChangePerc") is not None
              and (s.get("day") or {}).get("v", 0) >= 10_000]
-    valid.sort(key=lambda s: s.get("todaysChangePerc", 0))
-    return _snap_tickers(valid[:limit])
+    top = _top_ranked(valid, limit, lambda s: s.get("todaysChangePerc", 0), reverse=False)
+    return _snap_tickers(top)
 
 
 def screen_most_volatile(limit: int = 100, min_price: float = 1.0) -> list[str]:

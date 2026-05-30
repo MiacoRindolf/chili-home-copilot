@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import OrderedDict
 from typing import Any
 
 import requests
@@ -54,8 +55,9 @@ def _zerox_headers() -> dict[str, str]:
 
 # ── Token list cache ─────────────────────────────────────────────────
 
-_token_cache: dict[int, tuple[float, list[dict]]] = {}
+_token_cache: "OrderedDict[int, tuple[float, list[dict]]]" = OrderedDict()
 _TOKEN_CACHE_TTL = 3600
+_TOKEN_CACHE_MAX = 32
 
 _POPULAR_TOKENS: dict[int, list[dict[str, str]]] = {
     1: [
@@ -148,13 +150,42 @@ def _fetch_zerox_tokens(chain_id: int) -> list[dict]:
         return []
 
 
+def _token_cache_get(chain_id: int, *, now: float) -> list[dict] | None:
+    cached = _token_cache.get(chain_id)
+    if cached is None:
+        return None
+    ts, tokens = cached
+    if now - ts < _TOKEN_CACHE_TTL:
+        _token_cache.move_to_end(chain_id)
+        return tokens
+    _token_cache.pop(chain_id, None)
+    return None
+
+
+def _token_cache_set(chain_id: int, tokens: list[dict], *, now: float) -> None:
+    _token_cache.pop(chain_id, None)
+    _token_cache[chain_id] = (now, tokens)
+    _prune_token_cache(now=now)
+
+
+def _prune_token_cache(*, now: float) -> None:
+    cutoff = now - _TOKEN_CACHE_TTL
+    while _token_cache:
+        oldest = next(iter(_token_cache))
+        ts = _token_cache[oldest][0]
+        if ts >= cutoff:
+            break
+        _token_cache.pop(oldest, None)
+    while len(_token_cache) > _TOKEN_CACHE_MAX:
+        _token_cache.popitem(last=False)
+
+
 def get_token_list(chain_id: int) -> list[dict]:
     """Return a list of tokens for a chain (popular + 0x list, cached)."""
     now = time.time()
-    if chain_id in _token_cache:
-        ts, tokens = _token_cache[chain_id]
-        if now - ts < _TOKEN_CACHE_TTL:
-            return tokens
+    cached = _token_cache_get(chain_id, now=now)
+    if cached is not None:
+        return cached
 
     # Start from curated popular tokens so they always appear first
     base = list(_POPULAR_TOKENS.get(chain_id, []))
@@ -169,7 +200,7 @@ def get_token_list(chain_id: int) -> list[dict]:
 
     # Keep list to a reasonable size for the UI
     tokens = base[:500]
-    _token_cache[chain_id] = (now, tokens)
+    _token_cache_set(chain_id, tokens, now=now)
     return tokens
 
 

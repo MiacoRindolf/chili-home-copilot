@@ -376,6 +376,7 @@ import time
 _user_sessions: dict[int, dict[str, Any]] = {}
 _session_lock = threading.Lock()
 _SESSION_TTL = 3600  # 1 hour
+_SESSION_CACHE_MAX = 256
 
 
 class UserBrokerSession:
@@ -392,6 +393,7 @@ class UserBrokerSession:
         self.connections: dict[str, bool] = {}
         self._cache: dict[str, tuple[float, Any]] = {}
         self._cache_ttl = 300
+        self._cache_max = _SESSION_CACHE_MAX
 
     def is_expired(self) -> bool:
         return (time.time() - self.last_active) > _SESSION_TTL
@@ -400,13 +402,34 @@ class UserBrokerSession:
         self.last_active = time.time()
 
     def cache_get(self, key: str) -> Any | None:
+        now = time.time()
         entry = self._cache.get(key)
-        if entry and (time.time() - entry[0]) < self._cache_ttl:
+        if entry is None:
+            return None
+        if (now - entry[0]) < self._cache_ttl:
             return entry[1]
+        self._cache.pop(key, None)
         return None
 
     def cache_set(self, key: str, value: Any) -> None:
-        self._cache[key] = (time.time(), value)
+        now = time.time()
+        self._cache.pop(key, None)
+        self._cache[key] = (now, value)
+        self._prune_cache(now)
+
+    def _prune_cache(self, now: float) -> None:
+        cutoff = now - self._cache_ttl
+        while self._cache:
+            oldest = next(iter(self._cache))
+            ts = self._cache[oldest][0]
+            if ts >= cutoff:
+                break
+            self._cache.pop(oldest, None)
+        while len(self._cache) > self._cache_max:
+            oldest = next(iter(self._cache), None)
+            if oldest is None:
+                break
+            self._cache.pop(oldest, None)
 
     def mark_connected(self, broker: str) -> None:
         self.connections[broker] = True

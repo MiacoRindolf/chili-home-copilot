@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 _BRAIN_WORKER_STATUS_FILE = Path("data/brain_worker_status.json")
 _SNAPSHOT_CACHE_TTL = 45  # seconds
+_SNAPSHOT_CACHE_MAX = 256
 _snapshot_cache: dict[tuple[int, str], tuple[float, dict[str, Any]]] = {}
 _snapshot_cache_lock = threading.Lock()
 
@@ -34,6 +35,40 @@ PATTERNS_SUMMARY_LIMIT = 25
 PATTERNS_SEARCH_LIMIT = 20
 RECENT_ACTIVITY_LIMIT = 15
 RECENT_INSIGHTS_LIMIT = 10
+
+
+def _snapshot_cache_get(key: tuple[int, str], *, now: float) -> dict[str, Any] | None:
+    entry = _snapshot_cache.get(key)
+    if entry is None:
+        return None
+    ts, data = entry
+    if (now - ts) < _SNAPSHOT_CACHE_TTL:
+        _snapshot_cache.pop(key, None)
+        _snapshot_cache[key] = (ts, data)
+        return data.copy()
+    _snapshot_cache.pop(key, None)
+    return None
+
+
+def _snapshot_cache_set(key: tuple[int, str], snapshot: dict[str, Any], *, now: float) -> None:
+    _snapshot_cache.pop(key, None)
+    _snapshot_cache[key] = (now, snapshot)
+    _prune_snapshot_cache(now=now)
+
+
+def _prune_snapshot_cache(*, now: float) -> None:
+    cutoff = now - _SNAPSHOT_CACHE_TTL
+    while _snapshot_cache:
+        oldest = next(iter(_snapshot_cache))
+        ts = _snapshot_cache[oldest][0]
+        if ts >= cutoff:
+            break
+        _snapshot_cache.pop(oldest, None)
+    while len(_snapshot_cache) > _SNAPSHOT_CACHE_MAX:
+        oldest = next(iter(_snapshot_cache), None)
+        if oldest is None:
+            break
+        _snapshot_cache.pop(oldest, None)
 
 
 def _read_worker_status() -> dict[str, Any]:
@@ -230,12 +265,9 @@ def build_snapshot(
     cache_key = (user_id if user_id is not None else 0, keyword or "__default__")
     if use_cache:
         with _snapshot_cache_lock:
-            entry = _snapshot_cache.get(cache_key)
-            if entry:
-                ts, data = entry
-                if (time.time() - ts) < _SNAPSHOT_CACHE_TTL:
-                    return data.copy()
-                del _snapshot_cache[cache_key]
+            cached = _snapshot_cache_get(cache_key, now=time.time())
+            if cached is not None:
+                return cached
 
     queue = get_queue_status(db)
     worker = _read_worker_status()
@@ -321,6 +353,6 @@ def build_snapshot(
 
     if use_cache:
         with _snapshot_cache_lock:
-            _snapshot_cache[cache_key] = (time.time(), snapshot)
+            _snapshot_cache_set(cache_key, snapshot, now=time.time())
 
     return snapshot
