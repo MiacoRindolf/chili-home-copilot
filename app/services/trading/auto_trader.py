@@ -81,6 +81,10 @@ from .autopilot_scope import (
     AUTOPILOT_AUTO_TRADER_V1,
     check_autopilot_entry_gate,
 )
+from .management_envelopes import (
+    count_probation_envelopes_since,
+    fetch_synergy_retry_envelope_candidates,
+)
 from .auto_trader_synergy import (
     SCALE_IN_ALERT_IDS_SNAPSHOT_KEY,
     SCALE_IN_PATTERN_IDS_SNAPSHOT_KEY,
@@ -1219,59 +1223,14 @@ def _synergy_retry_candidates(
     if not enabled:
         return 0, []
 
-    rows = db.execute(
-        text(
-            """
-            WITH latest AS (
-                SELECT DISTINCT ON (ar.breakout_alert_id)
-                       ar.breakout_alert_id,
-                       ar.id AS source_run_id,
-                       ar.reason,
-                       ar.created_at
-                  FROM trading_autotrader_runs ar
-                  JOIN trading_breakout_alerts ba
-                    ON ba.id = ar.breakout_alert_id
-                 WHERE ar.created_at >= NOW() - (:lookback_minutes * INTERVAL '1 minute')
-                   AND ba.alert_tier = 'pattern_imminent'
-                   AND (ba.user_id = :uid OR ba.user_id IS NULL)
-                 ORDER BY ar.breakout_alert_id, ar.created_at DESC, ar.id DESC
-            ),
-            eligible AS (
-                SELECT ba.id AS alert_id,
-                       latest.source_run_id,
-                       latest.created_at,
-                       COUNT(*) OVER () AS retry_pool
-                  FROM latest
-                  JOIN trading_breakout_alerts ba
-                    ON ba.id = latest.breakout_alert_id
-                  JOIN LATERAL (
-                        SELECT t.id, t.scan_pattern_id, t.entry_date
-                          FROM trading_trades t
-                         WHERE UPPER(t.ticker) = UPPER(ba.ticker)
-                           AND t.status = 'open'
-                           AND t.auto_trader_version = :autotrader_version
-                           AND (t.user_id = :uid OR t.user_id IS NULL)
-                         ORDER BY t.entry_date DESC NULLS LAST, t.id DESC
-                         LIMIT 1
-                  ) open_trade ON TRUE
-                 WHERE latest.reason = :source_reason
-                   AND COALESCE(open_trade.scan_pattern_id, 0)
-                       <> COALESCE(ba.scan_pattern_id, 0)
-                 ORDER BY latest.created_at DESC, ba.id DESC
-                 LIMIT :query_limit
-            )
-            SELECT alert_id, source_run_id, retry_pool
-              FROM eligible
-            """
-        ),
-        {
-            "uid": int(uid),
-            "lookback_minutes": int(lookback_minutes),
-            "query_limit": int(AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE),
-            "source_reason": SYNERGY_RETRY_SOURCE_REASON,
-            "autotrader_version": AUTOTRADER_VERSION,
-        },
-    ).mappings().all()
+    rows = fetch_synergy_retry_envelope_candidates(
+        db,
+        uid=int(uid),
+        lookback_minutes=int(lookback_minutes),
+        query_limit=int(AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE),
+        source_reason=SYNERGY_RETRY_SOURCE_REASON,
+        autotrader_version=AUTOTRADER_VERSION,
+    )
     if not rows:
         return 0, []
 
@@ -4273,38 +4232,17 @@ def _probation_trade_count_today(
     now: datetime | None = None,
 ) -> int:
     start_utc = _probation_day_start_utc(now)
-    pattern_clause = ""
-    params: dict[str, Any] = {
-        "uid": uid,
-        "version": AUTOTRADER_VERSION,
-        "start_utc": start_utc,
-        "flag": PROBATION_JSON_TRUE,
-    }
-    if pattern_id is not None:
-        pattern_clause = "AND scan_pattern_id = :pattern_id"
-        params["pattern_id"] = int(pattern_id)
-    row = db.execute(text(f"""
-        SELECT COUNT(*) AS n
-        FROM trading_trades
-        WHERE user_id IS NOT DISTINCT FROM :uid
-          AND COALESCE(auto_trader_version, '') = :version
-          AND entry_date >= :start_utc
-          AND COALESCE(
-              jsonb_extract_path_text(
-                  indicator_snapshot,
-                  :entry_execution_key,
-                  :probation_flag_key
-              ),
-              :false_flag
-          ) = :flag
-          {pattern_clause}
-    """), {
-        **params,
-        "entry_execution_key": ENTRY_EXECUTION_SNAPSHOT_KEY,
-        "probation_flag_key": PROBATION_ENTRY_FLAG,
-        "false_flag": PROBATION_JSON_FALSE,
-    }).scalar()
-    return int(row or 0)
+    return count_probation_envelopes_since(
+        db,
+        uid=uid,
+        autotrader_version=AUTOTRADER_VERSION,
+        start_utc=start_utc,
+        entry_execution_key=ENTRY_EXECUTION_SNAPSHOT_KEY,
+        probation_flag_key=PROBATION_ENTRY_FLAG,
+        probation_true_flag=PROBATION_JSON_TRUE,
+        probation_false_flag=PROBATION_JSON_FALSE,
+        pattern_id=pattern_id,
+    )
 
 
 def _probation_quota_block_reason(
