@@ -389,6 +389,20 @@ def coalesce_duplicate_open_work(
     if types:
         q = q.filter(BrainWorkEvent.event_type.in_(types))
     rows = q.all()
+    if not types or "market_snapshots_batch" in types:
+        # ``market_snapshots_batch`` is born from the outcome lane, but when
+        # claimable outcomes are enabled it behaves as executable work.
+        rows.extend(
+            db.query(BrainWorkEvent)
+            .filter(
+                BrainWorkEvent.domain == "trading",
+                BrainWorkEvent.event_kind == "outcome",
+                BrainWorkEvent.event_type == "market_snapshots_batch",
+                BrainWorkEvent.status.in_(("pending", "processing", "retry_wait")),
+                BrainWorkEvent.dedupe_key.isnot(None),
+            )
+            .all()
+        )
 
     def _rank(row: BrainWorkEvent) -> tuple[int, int, datetime, datetime, int]:
         status_rank = {"processing": 0, "pending": 1, "retry_wait": 2}.get(
@@ -409,25 +423,110 @@ def coalesce_duplicate_open_work(
 
     now = datetime.utcnow()
     ids: list[int] = []
+    reasons: dict[str, int] = {}
+
+    def _retire_duplicate(row: BrainWorkEvent, *, reason: str, keep_id: int | None = None) -> None:
+        payload = dict(row.payload or {}) if isinstance(row.payload, dict) else {}
+        payload["duplicate_open_work_suppressed"] = True
+        payload["duplicate_open_work_suppressed_at"] = now.isoformat()
+        payload["duplicate_open_work_suppressed_reason"] = reason
+        if keep_id is not None:
+            payload["duplicate_open_work_kept_event_id"] = int(keep_id)
+        row.payload = payload
+        row.status = "done"
+        row.processed_at = row.processed_at or now
+        row.lease_holder = None
+        row.lease_expires_at = None
+        row.updated_at = now
+        ids.append(int(row.id))
+        reasons[reason] = reasons.get(reason, 0) + 1
+
     for group_rows in groups.values():
         if len(group_rows) <= 1:
             continue
         group_rows.sort(key=_rank)
+        keep_id = int(group_rows[0].id)
         for row in group_rows[1:]:
             if row.status == "processing":
                 continue
-            payload = dict(row.payload or {}) if isinstance(row.payload, dict) else {}
-            payload["duplicate_open_work_suppressed"] = True
-            payload["duplicate_open_work_suppressed_at"] = now.isoformat()
-            row.payload = payload
-            row.status = "done"
-            row.processed_at = row.processed_at or now
-            row.lease_holder = None
-            row.lease_expires_at = None
-            row.updated_at = now
-            ids.append(int(row.id))
+            _retire_duplicate(row, reason="same_dedupe_key", keep_id=keep_id)
+
+    # Recert rescue backtests are fingerprinted by evidence slice so a genuinely
+    # new evidence snapshot can request fresh work. In production those refreshes
+    # can race for the same pattern/asset while a previous refresh is still open,
+    # which lets one recert parent consume many scarce backtest slots. Keep one
+    # open row per pattern/asset and let the next reliability pass enqueue a new
+    # fingerprint after the current refresh completes.
+    recert_groups: dict[tuple[str, str], list[BrainWorkEvent]] = {}
+    for row in rows:
+        if row.status not in ("pending", "processing", "retry_wait"):
+            continue
+        if str(row.event_type or "") != "backtest_requested":
+            continue
+        payload = row.payload if isinstance(row.payload, dict) else {}
+        if str(payload.get("source") or "") != "recert_rescue_refresh":
+            continue
+        try:
+            pid = int(payload.get("scan_pattern_id") or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        if pid <= 0:
+            continue
+        asset = str(payload.get("asset_class") or "all").strip().lower() or "all"
+        recert_groups.setdefault((str(pid), asset), []).append(row)
+
+    def _recert_rank(row: BrainWorkEvent) -> tuple[int, int, float, int]:
+        # Keep any already-running item; otherwise keep the freshest low-attempt
+        # request so a stale fingerprint does not crowd out newer evidence.
+        status_rank = 0 if row.status == "processing" else 1
+        updated = row.updated_at or row.created_at or datetime.min
+        return (
+            status_rank,
+            int(row.attempts or 0),
+            -updated.timestamp(),
+            -int(row.id),
+        )
+
+    for group_rows in recert_groups.values():
+        if len(group_rows) <= 1:
+            continue
+        group_rows.sort(key=_recert_rank)
+        keep_id = int(group_rows[0].id)
+        for row in group_rows[1:]:
+            if row.status == "processing":
+                continue
+            _retire_duplicate(
+                row,
+                reason="recert_rescue_pattern_asset_superseded",
+                keep_id=keep_id,
+            )
+
+    # Snapshot-triggered mining is global-universe work. When snapshot batches
+    # arrive faster than a mine can finish, queued older batches mostly replay
+    # the same expensive discovery pass. Keep the freshest queued batch and
+    # leave any in-flight mine alone.
+    queued_mine_rows = [
+        row
+        for row in rows
+        if str(row.event_type or "") == "market_snapshots_batch"
+        and row.status in ("pending", "retry_wait")
+    ]
+
+    def _mine_rank(row: BrainWorkEvent) -> tuple[float, int, int]:
+        created = row.created_at or row.updated_at or datetime.min
+        return (-created.timestamp(), int(row.attempts or 0), -int(row.id))
+
+    if len(queued_mine_rows) > 1:
+        queued_mine_rows.sort(key=_mine_rank)
+        keep_id = int(queued_mine_rows[0].id)
+        for row in queued_mine_rows[1:]:
+            _retire_duplicate(
+                row,
+                reason="market_snapshot_batch_superseded",
+                keep_id=keep_id,
+            )
     db.flush()
-    return {"ok": True, "coalesced": len(ids), "ids": ids}
+    return {"ok": True, "coalesced": len(ids), "ids": ids, "reasons": reasons}
 
 
 def _dead_recovery_marker(error: str | None) -> str | None:
@@ -720,16 +819,18 @@ def recover_retryable_dead_work(
 
 
 def mark_work_done(db: Session, event_id: int) -> None:
-    ev = db.query(BrainWorkEvent).filter(BrainWorkEvent.id == event_id).one_or_none()
-    if not ev:
-        return
     now = datetime.utcnow()
-    ev.status = "done"
-    ev.processed_at = now
-    ev.lease_holder = None
-    ev.lease_expires_at = None
-    ev.last_error = None
-    ev.updated_at = now
+    db.query(BrainWorkEvent).filter(BrainWorkEvent.id == event_id).update(
+        {
+            BrainWorkEvent.status: "done",
+            BrainWorkEvent.processed_at: now,
+            BrainWorkEvent.lease_holder: None,
+            BrainWorkEvent.lease_expires_at: None,
+            BrainWorkEvent.last_error: None,
+            BrainWorkEvent.updated_at: now,
+        },
+        synchronize_session=False,
+    )
 
 
 def mark_work_retry_or_dead(db: Session, event_id: int, error: str) -> None:

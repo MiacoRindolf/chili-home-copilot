@@ -7,6 +7,7 @@ import os
 import socket
 from typing import Any
 
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 from ....config import settings
@@ -37,6 +38,23 @@ LOG_PREFIX = "[brain_work_dispatch]"
 # after a restart, which is the right behaviour for catch-up).
 _LAST_DISPATCH_MARKET_SNAPSHOTS_AT: float = 0.0
 
+_TRANSIENT_DB_DISCONNECT_MARKERS = (
+    "server closed the connection unexpectedly",
+    "connection already closed",
+    "connection not open",
+    "can't reconnect until invalid transaction is rolled back",
+)
+
+_ISOLATED_SIDE_EFFECT_EVENT_TYPES = frozenset({
+    "backtest_requested",
+    "backtest_completed",
+    "market_snapshots_batch",
+    "pattern_eligible_promotion",
+    "live_trade_closed",
+    "paper_trade_closed",
+    "broker_fill_closed",
+})
+
 
 def _holder_id() -> str:
     try:
@@ -58,6 +76,63 @@ def _recover_dispatch_session(db: Session, context: str) -> None:
             exc,
             exc_info=True,
         )
+
+
+def _looks_like_transient_db_disconnect(exc: BaseException) -> bool:
+    if isinstance(exc, DBAPIError) and getattr(exc, "connection_invalidated", False):
+        return True
+    msg = str(exc or "").lower()
+    return any(marker in msg for marker in _TRANSIENT_DB_DISCONNECT_MARKERS)
+
+
+def _mark_work_done_after_handler_success(
+    db: Session,
+    *,
+    event_id: int,
+    event_type: str,
+) -> dict[str, Any]:
+    """Mark completed work done, recovering isolated-handler rows from DB disconnects.
+
+    Some handler families already commit their real side effects through fresh
+    ``SessionLocal`` instances. If the dispatcher connection dies only while
+    writing the final done marker, retrying the whole work item duplicates heavy
+    side effects. For those isolated families only, finish the done marker in a
+    fresh session. Same-session handlers still retry, which is safer because
+    their uncommitted writes may have been lost with the broken connection.
+    """
+    try:
+        mark_work_done(db, event_id)
+        db.commit()
+        return {"ok": True, "isolated": False}
+    except Exception as exc:
+        if (
+            event_type not in _ISOLATED_SIDE_EFFECT_EVENT_TYPES
+            or not _looks_like_transient_db_disconnect(exc)
+        ):
+            raise
+        logger.warning(
+            "%s mark done lost dispatcher DB connection id=%s type=%s; "
+            "retrying done marker in isolated session",
+            LOG_PREFIX,
+            event_id,
+            event_type,
+        )
+        _recover_dispatch_session(db, "mark_work_done transient disconnect")
+        from ....db import SessionLocal
+
+        sess = SessionLocal()
+        try:
+            mark_work_done(sess, event_id)
+            sess.commit()
+            return {"ok": True, "isolated": True}
+        except Exception:
+            try:
+                sess.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            sess.close()
 
 
 def _publish_brain_work_outcome_isolated(
@@ -582,8 +657,11 @@ def run_brain_work_dispatch_round(
                         raise demote_err
                 else:
                     raise ValueError(f"unknown work event_type={event_type}")
-                mark_work_done(db, ev_id)
-                db.commit()
+                _mark_work_done_after_handler_success(
+                    db,
+                    event_id=ev_id,
+                    event_type=event_type,
+                )
                 n_done += 1
                 processed += 1
             except Exception as e:
