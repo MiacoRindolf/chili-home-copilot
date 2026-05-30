@@ -5,7 +5,7 @@ from typing import Optional
 
 import requests
 from sqlalchemy.orm import Session
-from sqlalchemy import func, desc
+from sqlalchemy import case, func, desc
 
 from ..config import settings
 from ..models import (
@@ -112,14 +112,38 @@ def get_activity_feed(db: Session, limit: int = 20, before_id: int | None = None
 
 # ── Smart Insights ────────────────────────────────────────────────────────────
 
+def _chore_insight_counts(db: Session, today: date) -> tuple[int, int, int]:
+    pending, overdue, due_today = db.query(
+        func.sum(case((Chore.done.is_(False), 1), else_=0)),
+        func.sum(
+            case(
+                (
+                    Chore.done.is_(False)
+                    & Chore.due_date.isnot(None)
+                    & (Chore.due_date < today),
+                    1,
+                ),
+                else_=0,
+            )
+        ),
+        func.sum(
+            case(
+                (
+                    Chore.done.is_(False) & (Chore.due_date == today),
+                    1,
+                ),
+                else_=0,
+            )
+        ),
+    ).one()
+    return int(pending or 0), int(overdue or 0), int(due_today or 0)
+
+
 def get_insights(db: Session, user_id: int | None = None) -> list[dict]:
     insights = []
+    today = date.today()
+    pending, overdue, due_today = _chore_insight_counts(db, today)
 
-    overdue = db.query(Chore).filter(
-        Chore.done == False,
-        Chore.due_date != None,
-        Chore.due_date < date.today(),
-    ).count()
     if overdue:
         insights.append({
             "type": "warning",
@@ -127,7 +151,6 @@ def get_insights(db: Session, user_id: int | None = None) -> list[dict]:
             "text": f"{overdue} chore{'s' if overdue != 1 else ''} overdue",
         })
 
-    pending = db.query(Chore).filter(Chore.done == False).count()
     if pending == 0:
         insights.append({
             "type": "success",
@@ -141,7 +164,6 @@ def get_insights(db: Session, user_id: int | None = None) -> list[dict]:
             "text": f"{pending} chores pending - time to get busy!",
         })
 
-    today = date.today()
     upcoming = db.query(Birthday).all()
     for b in upcoming:
         this_year = b.date.replace(year=today.year)
@@ -161,10 +183,6 @@ def get_insights(db: Session, user_id: int | None = None) -> list[dict]:
                 "text": f"{b.name}'s birthday is in {days} day{'s' if days != 1 else ''}",
             })
 
-    due_today = db.query(Chore).filter(
-        Chore.done == False,
-        Chore.due_date == today,
-    ).count()
     if due_today:
         insights.append({
             "type": "info",
