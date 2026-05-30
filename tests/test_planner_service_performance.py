@@ -39,6 +39,9 @@ class _FakeQuery:
     def order_by(self, *_args, **_kwargs):
         return self
 
+    def limit(self, *_args, **_kwargs):
+        return self
+
     def all(self):
         return self._rows
 
@@ -61,6 +64,18 @@ class _FakeSession:
         self.query_calls += 1
         self.last_query = _FakeQuery(self._rows)
         return self.last_query
+
+
+class _SequenceSession:
+    def __init__(self, rows_by_query):
+        self._rows_by_query = list(rows_by_query)
+        self.queries = []
+
+    def query(self, *_args, **_kwargs):
+        rows = self._rows_by_query.pop(0)
+        query = _FakeQuery(rows)
+        self.queries.append(query)
+        return query
 
 
 def _project_for_list(project_id: int = 1) -> SimpleNamespace:
@@ -244,6 +259,86 @@ def test_get_task_eager_loads_task_detail_relationships(monkeypatch):
     assert db.last_query.options_calls == 1
     assert db.last_query.filter_calls == 1
     assert db.last_query.first_calls == 1
+
+
+def test_list_comments_eager_loads_comment_users(monkeypatch):
+    task = SimpleNamespace(project_id=1)
+    user = SimpleNamespace(name="Alice")
+    comment = SimpleNamespace(
+        id=1,
+        task_id=1,
+        user_id=7,
+        user=user,
+        content="hello",
+        created_at=None,
+        updated_at=None,
+    )
+    db = _SequenceSession([[task], [comment]])
+    monkeypatch.setattr(planner_service, "_user_can_access", lambda *_args, **_kwargs: True)
+
+    result = planner_service.list_comments(db, task_id=1, user_id=7)
+
+    assert result == [
+        {
+            "id": 1,
+            "task_id": 1,
+            "user_id": 7,
+            "user_name": "Alice",
+            "content": "hello",
+            "created_at": None,
+            "updated_at": None,
+        }
+    ]
+    assert len(db.queries) == 2
+    assert db.queries[1].options_calls == 1
+    assert db.queries[1].filter_calls == 1
+
+
+def test_get_task_activity_eager_loads_activity_users(monkeypatch):
+    task = SimpleNamespace(project_id=1)
+    user = SimpleNamespace(name="Alice")
+    activity = SimpleNamespace(
+        id=1,
+        task_id=1,
+        user_id=7,
+        user=user,
+        action="created",
+        detail="made it",
+        created_at=None,
+    )
+    db = _SequenceSession([[task], [activity]])
+    monkeypatch.setattr(planner_service, "_user_can_access", lambda *_args, **_kwargs: True)
+
+    result = planner_service.get_task_activity(db, task_id=1, user_id=7)
+
+    assert result == [
+        {
+            "id": 1,
+            "task_id": 1,
+            "user_id": 7,
+            "user_name": "Alice",
+            "action": "created",
+            "detail": "made it",
+            "created_at": None,
+        }
+    ]
+    assert len(db.queries) == 2
+    assert db.queries[1].options_calls == 1
+    assert db.queries[1].filter_calls == 1
+
+
+def test_list_watchers_eager_loads_watcher_users(monkeypatch):
+    task = SimpleNamespace(project_id=1)
+    watcher = SimpleNamespace(user_id=7, user=SimpleNamespace(name="Alice"))
+    db = _SequenceSession([[task], [watcher]])
+    monkeypatch.setattr(planner_service, "_user_can_access", lambda *_args, **_kwargs: True)
+
+    result = planner_service.list_watchers(db, task_id=1, user_id=7)
+
+    assert result == [{"user_id": 7, "user_name": "Alice"}]
+    assert len(db.queries) == 2
+    assert db.queries[1].options_calls == 1
+    assert db.queries[1].filter_calls == 1
 
 
 def test_user_project_summary_eager_loads_tasks_and_assignees():

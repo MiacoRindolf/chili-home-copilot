@@ -588,6 +588,7 @@ def list_comments(db: Session, task_id: int, user_id: int) -> list[dict] | None:
         return None
     comments = (
         db.query(TaskComment)
+        .options(selectinload(TaskComment.user))
         .filter(TaskComment.task_id == task_id)
         .order_by(TaskComment.created_at.asc())
         .all()
@@ -624,6 +625,7 @@ def get_task_activity(db: Session, task_id: int, user_id: int) -> list[dict] | N
         return None
     activities = (
         db.query(TaskActivity)
+        .options(selectinload(TaskActivity.user))
         .filter(TaskActivity.task_id == task_id)
         .order_by(TaskActivity.created_at.desc())
         .limit(50)
@@ -720,7 +722,12 @@ def list_watchers(db: Session, task_id: int, user_id: int) -> list[dict] | None:
     t = db.query(PlanTask).filter(PlanTask.id == task_id).first()
     if not t or not _user_can_access(db, t.project_id, user_id):
         return None
-    watchers = db.query(TaskWatcher).filter(TaskWatcher.task_id == task_id).all()
+    watchers = (
+        db.query(TaskWatcher)
+        .options(selectinload(TaskWatcher.user))
+        .filter(TaskWatcher.task_id == task_id)
+        .all()
+    )
     return [
         {"user_id": w.user_id, "user_name": w.user.name if w.user else ""}
         for w in watchers
