@@ -51,10 +51,6 @@ ALLOWED_LINE_COUNTS: dict[tuple[str, str], int] = {
         "FROM trading_trades t",
     ): 1,
     (
-        "app/services/trading/pattern_survival/training.py",
-        "FROM trading_trades t",
-    ): 1,
-    (
         "app/services/trading/venue/coinbase_orphan_adopt.py",
         "JOIN trading_trades t ON t.id = bi.trade_id",
     ): 1,
@@ -84,5 +80,11 @@ def test_no_new_raw_trading_trades_live_reader_sql() -> None:
         for key, count in sorted(seen.items())
         if count > ALLOWED_LINE_COUNTS.get(key, 0)
     }
+    stale_allowlist = {
+        key: expected
+        for key, expected in sorted(ALLOWED_LINE_COUNTS.items())
+        if seen.get(key, 0) < expected
+    }
 
     assert unexpected == {}
+    assert stale_allowlist == {}
