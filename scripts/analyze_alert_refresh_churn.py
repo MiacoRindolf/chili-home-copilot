@@ -245,6 +245,56 @@ def _top_noop_exit_pattern_rollups(hours: int, limit: int) -> list[dict]:
     )
 
 
+def _top_recert_rescue_blocker_rollups(hours: int, limit: int) -> list[dict]:
+    return _rows(
+        """
+        WITH recert_blockers AS (
+          SELECT
+            (e.payload->>'scan_pattern_id')::bigint AS scan_pattern_id,
+            COALESCE(e.payload->>'recert_rescue_status', '<none>') AS recert_status,
+            COALESCE(e.payload->>'recommended_next_action', '<none>') AS next_action,
+            COALESCE(e.payload->>'source', '<none>') AS source,
+            e.created_at
+          FROM brain_work_events e
+          WHERE e.event_kind = 'outcome'
+            AND e.event_type = 'recert_rescue_diagnostic'
+            AND e.created_at >= now() - (:hours * interval '1 hour')
+            AND COALESCE(e.payload->>'scan_pattern_id', '') ~ '^[0-9]+$'
+            AND COALESCE(e.payload->>'recommended_next_action', '') IN (
+              'complete_oos_recert_and_quality_refresh',
+              'inspect_recert_backtest_no_oos_evidence_keep_live_blocked',
+              'wait_for_recert_backtest_cooldown_keep_live_blocked',
+              'live_blocked_recert_debt_no_refresh'
+            )
+        )
+        SELECT
+          r.scan_pattern_id,
+          COALESCE(sp.name, '<missing>') AS pattern_name,
+          COALESCE(sp.lifecycle_stage, '<null>') AS lifecycle_stage,
+          COALESCE(sp.recert_reason, '<none>') AS recert_reason,
+          r.recert_status,
+          r.next_action,
+          r.source,
+          count(*) AS blocker_diagnostics,
+          min(r.created_at) AS first_seen,
+          max(r.created_at) AS last_seen
+        FROM recert_blockers r
+        LEFT JOIN scan_patterns sp ON sp.id = r.scan_pattern_id
+        GROUP BY
+          r.scan_pattern_id,
+          COALESCE(sp.name, '<missing>'),
+          COALESCE(sp.lifecycle_stage, '<null>'),
+          COALESCE(sp.recert_reason, '<none>'),
+          r.recert_status,
+          r.next_action,
+          r.source
+        ORDER BY blocker_diagnostics DESC, last_seen DESC
+        LIMIT :limit
+        """,
+        {"hours": int(hours), "limit": int(limit)},
+    )
+
+
 def _open_exit_work_with_recent_noop(hours: int, limit: int) -> list[dict]:
     return _rows(
         """
@@ -481,6 +531,10 @@ def _build_report(hours: int, limit: int) -> dict[str, object]:
             hours,
             limit,
         ),
+        "top_recert_rescue_blocker_rollups": _top_recert_rescue_blocker_rollups(
+            hours,
+            limit,
+        ),
         "open_exit_variant_work_with_recent_noop": _open_exit_work_with_recent_noop(
             hours,
             limit,
@@ -507,6 +561,10 @@ def _print_report(report: dict[str, object]) -> None:
     _print_table(
         "Top No-Op Exit Variant Pattern Rollups",
         report["top_noop_exit_variant_pattern_rollups"],
+    )
+    _print_table(
+        "Top Recert Rescue Blocker Rollups",
+        report["top_recert_rescue_blocker_rollups"],
     )
     _print_table(
         "Open Exit Variant Work With Recent No-Op Evidence",
