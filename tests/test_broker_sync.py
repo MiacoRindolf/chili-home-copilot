@@ -1170,13 +1170,31 @@ class TestExecuteProposalStatus:
         assert proposal.executed_at is not None
 
     @patch("app.services.trading.portfolio_risk.check_new_trade_allowed", return_value=(True, None))
+    @patch("app.services.trading.alerts._get_buying_power", return_value=10000)
     @patch("app.services.broker_service.is_connected", return_value=False)
-    def test_no_broker_records_locally(self, mock_conn, mock_risk, db):
+    def test_no_broker_auto_route_blocks_without_manual_record(self, mock_conn, mock_bp, mock_risk, db):
         from app.services.trading.alerts import _execute_proposal
+        from app.models.trading import Trade
 
         proposal = self._seed_proposal(db)
 
         result = _execute_proposal(db, proposal, user_id=None)
+
+        db.refresh(proposal)
+        assert result == {"status": "blocked", "error": "broker_unavailable"}
+        assert proposal.status == "approved"
+        assert proposal.trade_id is None
+        assert db.query(Trade).filter(Trade.strategy_proposal_id == proposal.id).count() == 0
+
+    @patch("app.services.trading.portfolio_risk.check_new_trade_allowed", return_value=(True, None))
+    @patch("app.services.trading.alerts._get_buying_power", return_value=10000)
+    @patch("app.services.broker_service.is_connected", return_value=False)
+    def test_explicit_manual_with_known_capital_records_locally(self, mock_conn, mock_bp, mock_risk, db):
+        from app.services.trading.alerts import _execute_proposal
+
+        proposal = self._seed_proposal(db)
+
+        result = _execute_proposal(db, proposal, user_id=None, broker="manual")
 
         db.refresh(proposal)
         assert result["status"] == "recorded"

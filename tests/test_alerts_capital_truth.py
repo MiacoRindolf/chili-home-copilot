@@ -295,3 +295,28 @@ def test_execute_proposal_blocks_when_stale_quantity_cannot_be_resized():
     risk_gate.assert_called_once()
     place_buy_order.assert_not_called()
     assert proposal.quantity is None
+
+
+def test_execute_proposal_blocks_auto_manual_fallback_before_local_record():
+    proposal = _proposal()
+    db = _FakeDb()
+
+    with patch("app.services.trading.alerts._get_buying_power", return_value=10_000.0), patch(
+        "app.services.trading.portfolio_risk.check_new_trade_allowed",
+        return_value=(True, None),
+    ) as risk_gate, patch(
+        "app.services.broker_manager.get_best_broker_for",
+        return_value="manual",
+    ), patch(
+        "app.services.trading.alerts.dispatch_alert"
+    ) as dispatch_alert, patch(
+        "app.services.broker_manager.place_buy_order"
+    ) as place_buy_order:
+        result = alerts._execute_proposal(db, proposal, user_id=None)
+
+    assert result == {"status": "blocked", "error": "broker_unavailable"}
+    risk_gate.assert_called_once()
+    dispatch_alert.assert_called_once()
+    place_buy_order.assert_not_called()
+    assert proposal.status == "approved"
+    assert not hasattr(proposal, "trade_id")

@@ -1918,7 +1918,7 @@ def _execute_proposal(
     fill — this prevents marking trades as "executed" when the limit order
     is still sitting unfilled.
     """
-    from ..broker_manager import place_buy_order, map_status, get_best_broker_for, is_any_connected
+    from ..broker_manager import place_buy_order, map_status, get_best_broker_for
     from .decision_ledger import (
         mark_packet_executed,
         mark_packet_linked_trade,
@@ -1996,7 +1996,13 @@ def _execute_proposal(
             source="alerts.execute_proposal",
         )
 
+    manual_requested = str(broker or "").strip().lower() == "manual"
     target_broker = broker or get_best_broker_for(ticker)
+    if target_broker == "manual" and not manual_requested:
+        msg = format_order_blocked(ticker, "broker_unavailable")
+        dispatch_alert(db, user_id, POSITION_OPENED, ticker, msg)
+        return {"status": "blocked", "error": "broker_unavailable"}
+
     decision_packet_id: int | None = None
     try:
         pkt = record_strategy_proposal_decision(
@@ -2023,7 +2029,7 @@ def _execute_proposal(
     except Exception:
         sector_label = None
 
-    if not is_any_connected() or target_broker == "manual":
+    if target_broker == "manual":
         trade = Trade(
             user_id=user_id,
             ticker=ticker,

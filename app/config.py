@@ -3616,6 +3616,13 @@ class Settings(BaseSettings):
         ge=0,
         validation_alias=AliasChoices("CHILI_COINBASE_MAX_CONCURRENT_POSITIONS"),
     )
+    # Phase 5K-B/C: default-OFF reader cutover for Coinbase cap truth.
+    # Operators flip this through typed Settings; the cap gate does not
+    # independently read a hidden environment fallback.
+    chili_phase5k_coinbase_cap_use_envelopes: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_PHASE5K_COINBASE_CAP_USE_ENVELOPES"),
+    )
     # f-promotion-pipeline-rebalance Phase 1 (2026-05-09): sample-size
     # floor for the thin-evidence demote sweep. The original Phase D
     # threshold (10 trades) was wrong-sense: a pattern with 8 realized
