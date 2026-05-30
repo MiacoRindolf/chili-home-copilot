@@ -897,6 +897,9 @@ def build_imminent_ticker_universe(
     db: Session,
     user_id: int | None,
     cap: int,
+    *,
+    apply_crypto_execution_filter: bool = True,
+    coinbase_spot_tickers: frozenset[str] | None = None,
 ) -> tuple[list[str], dict[str, int]]:
     """Merge watchlist, prescreen, predictions, scanner, defaults; dedupe; source counts."""
     seen: list[str] = []
@@ -957,9 +960,16 @@ def build_imminent_ticker_universe(
     for t in DEFAULT_CRYPTO_TICKERS[:20]:
         add(t)
     counts["defaults"] = len(seen) - n4
-    seen, dropped, spot_count = _filter_crypto_to_execution_universe(seen)
-    counts["crypto_execution_filter_dropped"] = dropped
-    counts["crypto_execution_filter_spot_tickers"] = spot_count
+    if apply_crypto_execution_filter:
+        seen, dropped, spot_count = _filter_crypto_to_execution_universe(
+            seen,
+            coinbase_spot_tickers=coinbase_spot_tickers,
+        )
+        counts["crypto_execution_filter_dropped"] = dropped
+        counts["crypto_execution_filter_spot_tickers"] = spot_count
+    else:
+        counts["crypto_execution_filter_dropped"] = 0
+        counts["crypto_execution_filter_spot_tickers"] = 0
 
     return seen[:cap], counts
 
@@ -1422,8 +1432,13 @@ def gather_imminent_candidate_rows(
         patterns,
         user_id,
     )
-    global_uni, uni_counts = build_imminent_ticker_universe(db, user_id, max_tickers)
-    coinbase_spot_tickers = _coinbase_spot_ticker_set()
+    split_external_universe_filter = bool(release_read_transaction_before_scoring)
+    global_uni, uni_counts = build_imminent_ticker_universe(
+        db,
+        user_id,
+        max_tickers,
+        apply_crypto_execution_filter=not split_external_universe_filter,
+    )
     open_position_keys = (
         _open_autotrader_position_keys(db, user_id)
         if open_position_deflection_enabled
@@ -1431,6 +1446,16 @@ def gather_imminent_candidate_rows(
     )
     if release_read_transaction_before_scoring:
         _release_pattern_imminent_read_transaction(db)
+    coinbase_spot_tickers = _coinbase_spot_ticker_set()
+    if split_external_universe_filter:
+        global_uni, dropped_crypto_global, spot_count_global = (
+            _filter_crypto_to_execution_universe(
+                global_uni,
+                coinbase_spot_tickers=coinbase_spot_tickers,
+            )
+        )
+        uni_counts["crypto_execution_filter_dropped"] = dropped_crypto_global
+        uni_counts["crypto_execution_filter_spot_tickers"] = spot_count_global
 
     candidates: list[dict[str, Any]] = []
     patterns_tried = 0

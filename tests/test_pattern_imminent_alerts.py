@@ -2634,7 +2634,10 @@ def test_gather_imminent_releases_read_transaction_before_scoring(monkeypatch) -
     monkeypatch.setattr(
         imminent_mod,
         "_coinbase_spot_ticker_set",
-        lambda: frozenset({TEST_EXECUTABLE_CRYPTO_TICKER}),
+        lambda: (
+            events.append("coinbase_universe"),
+            frozenset({TEST_EXECUTABLE_CRYPTO_TICKER}),
+        )[1],
     )
     monkeypatch.setattr(
         imminent_mod.settings,
@@ -2652,7 +2655,7 @@ def test_gather_imminent_releases_read_transaction_before_scoring(monkeypatch) -
         release_read_transaction_before_scoring=True,
     )
 
-    assert events[:2] == ["rollback", "score"]
+    assert events[:3] == ["rollback", "coinbase_universe", "score"]
     assert [c["ticker"] for c in candidates] == [TEST_EXECUTABLE_CRYPTO_TICKER]
     assert isinstance(
         candidates[0]["pattern"],
