@@ -1127,12 +1127,18 @@ def test_shadow_stock_fastlane_boosts_pattern_for_positive_edge(monkeypatch):
     monkeypatch.setattr(at_mod, "settings", settings)
     emitted: list[dict] = []
     invalidated: list[bool] = []
-    monkeypatch.setattr(
-        "app.services.trading.brain_work.emitters.emit_backtest_requested_for_pattern",
-        lambda db, scan_pattern_id, source: emitted.append({
+
+    def _emit_backtest_requested(db, scan_pattern_id, *, source, **kwargs):
+        emitted.append({
             "scan_pattern_id": scan_pattern_id,
             "source": source,
-        }) or 1,
+            **kwargs,
+        })
+        return 1
+
+    monkeypatch.setattr(
+        "app.services.trading.brain_work.emitters.emit_backtest_requested_for_pattern",
+        _emit_backtest_requested,
     )
     monkeypatch.setattr(
         "app.services.trading.backtest_queue.invalidate_queue_status_cache",
@@ -1178,6 +1184,19 @@ def test_shadow_stock_fastlane_boosts_pattern_for_positive_edge(monkeypatch):
     assert emitted == [{
         "scan_pattern_id": pat.id,
         "source": "autotrader_shadow_stock_fastlane",
+        "asset_class": "stock",
+        "expected_evidence_value": TEST_POSITIVE_EXPECTED_NET_PCT,
+        "payload": {
+            "alert_id": alert.id,
+            "ticker": "FASTL",
+            "reason": at_mod.SHADOW_OBSERVATION_REASON_STAGE,
+            "lifecycle_stage": "shadow_promoted",
+            "promotion_status": None,
+            "expected_net_pct": TEST_POSITIVE_EXPECTED_NET_PCT,
+            "cash_deployment_category": "positive_ev_shadow",
+            "graduation_blocker": "shadow_observation_signal_lane",
+            "recommended_work_event": "backtest_requested",
+        },
     }]
     assert invalidated == [True]
     db.flush.assert_called_once()

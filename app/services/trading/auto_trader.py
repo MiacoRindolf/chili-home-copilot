@@ -2372,6 +2372,7 @@ def _queue_shadow_stock_fastlane_for_observation(
         return None
     if (getattr(alert, "asset_type", "") or "").strip().lower() != "stock":
         return None
+    ticker = str(getattr(alert, "ticker", "") or "").strip().upper()
     try:
         pattern_id = int(getattr(alert, "scan_pattern_id", None) or 0)
     except (TypeError, ValueError):
@@ -2470,6 +2471,19 @@ def _queue_shadow_stock_fastlane_for_observation(
             db,
             pattern_id,
             source="autotrader_shadow_stock_fastlane",
+            asset_class="stock",
+            expected_evidence_value=expected_net_pct,
+            payload={
+                "alert_id": int(getattr(alert, "id", 0) or 0),
+                "ticker": ticker,
+                "reason": reason,
+                "lifecycle_stage": lifecycle,
+                "promotion_status": getattr(pattern, "promotion_status", None),
+                "expected_net_pct": round(float(expected_net_pct), 6),
+                "cash_deployment_category": "positive_ev_shadow",
+                "graduation_blocker": "shadow_observation_signal_lane",
+                "recommended_work_event": "backtest_requested",
+            },
         )
         invalidate_queue_status_cache()
     except Exception:

@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 
 from app.models.trading import BrainWorkEvent
 from app.services.trading.brain_work import ledger as ledger_mod
+from app.services.trading.brain_work.emitters import emit_backtest_requested_for_pattern
 from app.services.trading.brain_work.ledger import (
     claim_work_batch,
     coalesce_duplicate_open_work,
@@ -37,6 +38,76 @@ def test_enqueue_work_open_dedupe_second_returns_none(db) -> None:
     )
     db.commit()
     assert b is None
+
+
+def test_emit_backtest_requested_carries_evidence_payload(db) -> None:
+    eid = emit_backtest_requested_for_pattern(
+        db,
+        424243,
+        source="autotrader_shadow_stock_fastlane",
+        asset_class="stock",
+        expected_evidence_value=1.23456789,
+        payload={
+            "alert_id": 77,
+            "ticker": "FASTL",
+            "expected_net_pct": 1.23456789,
+            "cash_deployment_category": "positive_ev_shadow",
+        },
+    )
+    db.commit()
+
+    row = db.get(BrainWorkEvent, eid)
+
+    assert row is not None
+    assert row.event_type == "backtest_requested"
+    assert row.lease_scope == "backtest"
+    assert row.payload["scan_pattern_id"] == 424243
+    assert row.payload["source"] == "autotrader_shadow_stock_fastlane"
+    assert row.payload["asset_class"] == "stock"
+    assert row.payload["alert_id"] == 77
+    assert row.payload["ticker"] == "FASTL"
+    assert row.payload["expected_evidence_value"] == 1.234568
+    assert row.payload["expected_net_pct"] == 1.23456789
+
+
+def test_emit_backtest_requested_refreshes_open_evidence_payload(db) -> None:
+    first = emit_backtest_requested_for_pattern(
+        db,
+        424244,
+        source="operator_boost",
+    )
+    db.commit()
+
+    second = emit_backtest_requested_for_pattern(
+        db,
+        424244,
+        source="autotrader_shadow_stock_fastlane",
+        asset_class="stock",
+        expected_evidence_value=4.5,
+        payload={
+            "alert_id": 88,
+            "ticker": "BOOST",
+            "expected_net_pct": 4.5,
+            "cash_deployment_category": "positive_ev_shadow",
+        },
+    )
+    db.commit()
+
+    row = db.get(BrainWorkEvent, first)
+
+    assert second == first
+    assert row is not None
+    assert row.payload["scan_pattern_id"] == 424244
+    assert row.payload["source"] == "operator_boost"
+    assert row.payload["latest_source"] == "autotrader_shadow_stock_fastlane"
+    assert row.payload["sources"] == [
+        "autotrader_shadow_stock_fastlane",
+        "operator_boost",
+    ]
+    assert row.payload["asset_class"] == "stock"
+    assert row.payload["alert_id"] == 88
+    assert row.payload["ticker"] == "BOOST"
+    assert row.payload["expected_evidence_value"] == 4.5
 
 
 def test_enqueue_outcome_idempotent(db) -> None:
