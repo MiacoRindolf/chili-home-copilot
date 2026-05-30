@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -57,6 +58,25 @@ BROKER_RISK_PROBATION_LIFECYCLES = frozenset({"promoted"})
 BROKER_RISK_PROBATION_DEFAULT_MIN_CPCV_SHARPE = 1.0
 BROKER_RISK_PROBATION_DEFAULT_MIN_REALIZED_TRADES = 5
 PRIORITY_RECERT_PATTERN_IDS_SETTING = "brain_recert_queue_priority_pattern_ids"
+PHASE5K_ALPHA_PORTFOLIO_GATE_ENV = "CHILI_PHASE5K_ALPHA_PORTFOLIO_GATE_USE_ENVELOPES"
+_ALPHA_PORTFOLIO_GATE_COMPAT_RELATION = "trading_trades"
+_ALPHA_PORTFOLIO_GATE_ENVELOPE_RELATION = "trading_management_envelopes"
+
+
+def _truthy_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _alpha_portfolio_gate_source_relation(use_envelopes: bool | None = None) -> str:
+    if use_envelopes is None:
+        use_envelopes = _truthy_flag(os.environ.get(PHASE5K_ALPHA_PORTFOLIO_GATE_ENV))
+    if use_envelopes:
+        return _ALPHA_PORTFOLIO_GATE_ENVELOPE_RELATION
+    return _ALPHA_PORTFOLIO_GATE_COMPAT_RELATION
 
 
 @dataclass(frozen=True)
@@ -570,7 +590,9 @@ def _load_pattern_rows(
     *,
     pattern_id: int | None = None,
     realized_window_days: int = 90,
+    use_envelopes: bool | None = None,
 ) -> list[dict[str, Any]]:
+    relation = _alpha_portfolio_gate_source_relation(use_envelopes)
     rows = db.execute(
         text(f"""
             WITH realized AS (
@@ -578,7 +600,7 @@ def _load_pattern_rows(
                        COUNT(*) AS n_trades,
                        AVG({trade_return_fraction_sql()}) AS avg_pnl_pct,
                        SUM(pnl) AS total_pnl
-                FROM trading_trades
+                FROM {relation}
                 WHERE scan_pattern_id IS NOT NULL
                   AND scan_pattern_id != -1
                   AND status = 'closed'
