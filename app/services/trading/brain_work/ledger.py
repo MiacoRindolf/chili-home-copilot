@@ -501,6 +501,45 @@ def coalesce_duplicate_open_work(
                 keep_id=keep_id,
             )
 
+    # Generic operator boosts are exploration work; recert rescue is a targeted
+    # graduation unblocker. If both are open for the same pattern, keep the
+    # recert row and retire any non-running generic boost so the backtest queue
+    # spends its next slot on the blocker that can actually move live eligibility.
+    recert_by_pattern: dict[int, BrainWorkEvent] = {}
+    for group_rows in recert_groups.values():
+        group_rows.sort(key=_recert_rank)
+        keep = group_rows[0]
+        payload = keep.payload if isinstance(keep.payload, dict) else {}
+        try:
+            pid = int(payload.get("scan_pattern_id") or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        if pid > 0:
+            existing = recert_by_pattern.get(pid)
+            if existing is None or _recert_rank(keep) < _recert_rank(existing):
+                recert_by_pattern[pid] = keep
+
+    for row in rows:
+        if row.status not in ("pending", "retry_wait"):
+            continue
+        if str(row.event_type or "") != "backtest_requested":
+            continue
+        payload = row.payload if isinstance(row.payload, dict) else {}
+        if str(payload.get("source") or "") != "operator_boost":
+            continue
+        try:
+            pid = int(payload.get("scan_pattern_id") or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        recert_keep = recert_by_pattern.get(pid)
+        if recert_keep is None:
+            continue
+        _retire_duplicate(
+            row,
+            reason="operator_boost_backtest_superseded_by_recert_rescue",
+            keep_id=int(recert_keep.id),
+        )
+
     # Exit-variant refreshes may be born from asset-sliced reliability, cash
     # deployment, or execution-block evidence. The current ScanPattern evolution
     # handler still forks children at the parent-pattern level, so running more

@@ -440,6 +440,81 @@ def test_coalesce_duplicate_open_work_thins_recert_rescue_pattern_asset(db) -> N
     assert rows[other_asset].status == "pending"
 
 
+def test_coalesce_duplicate_open_work_prefers_recert_rescue_over_operator_boost(
+    db,
+) -> None:
+    recert = enqueue_work_event(
+        db,
+        event_type="backtest_requested",
+        dedupe_key="bt_req:recert_rescue:p537:stock:recert-fp",
+        payload={
+            "scan_pattern_id": 537,
+            "source": "recert_rescue_refresh",
+            "asset_class": "stock",
+            "evidence_fingerprint": "recert-fp",
+        },
+        lease_scope="backtest",
+    )
+    generic = enqueue_work_event(
+        db,
+        event_type="backtest_requested",
+        dedupe_key="bt_req:operator_boost:p537:generic",
+        payload={"scan_pattern_id": 537, "source": "operator_boost"},
+        lease_scope="backtest",
+    )
+    running_generic = enqueue_work_event(
+        db,
+        event_type="backtest_requested",
+        dedupe_key="bt_req:operator_boost:p537:running",
+        payload={"scan_pattern_id": 537, "source": "operator_boost"},
+        lease_scope="backtest",
+    )
+    other_pattern = enqueue_work_event(
+        db,
+        event_type="backtest_requested",
+        dedupe_key="bt_req:operator_boost:p538:generic",
+        payload={"scan_pattern_id": 538, "source": "operator_boost"},
+        lease_scope="backtest",
+    )
+    db.commit()
+    assert recert is not None
+    assert generic is not None
+    assert running_generic is not None
+    assert other_pattern is not None
+
+    running = db.get(BrainWorkEvent, running_generic)
+    running.status = "processing"
+    running.lease_holder = "pytest:operator-boost-running"
+    running.lease_expires_at = datetime.utcnow() + timedelta(minutes=5)
+    db.commit()
+
+    result = coalesce_duplicate_open_work(
+        db,
+        event_types=("backtest_requested",),
+    )
+    db.commit()
+
+    rows = {
+        int(row.id): row
+        for row in db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.id.in_([recert, generic, running_generic, other_pattern]))
+        .all()
+    }
+    assert result["coalesced"] == 1
+    assert result["reasons"] == {
+        "operator_boost_backtest_superseded_by_recert_rescue": 1,
+    }
+    assert rows[recert].status == "pending"
+    assert rows[generic].status == "done"
+    assert (
+        rows[generic].payload["duplicate_open_work_suppressed_reason"]
+        == "operator_boost_backtest_superseded_by_recert_rescue"
+    )
+    assert rows[generic].payload["duplicate_open_work_kept_event_id"] == recert
+    assert rows[running_generic].status == "processing"
+    assert rows[other_pattern].status == "pending"
+
+
 def test_coalesce_duplicate_open_work_thins_exit_variant_by_parent_pattern(db) -> None:
     low_value = enqueue_work_event(
         db,
