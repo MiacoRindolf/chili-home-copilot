@@ -104,6 +104,7 @@ class NetEdgeSignalContext:
     entry_price: float
     stop_price: float
     target_price: float | None = None
+    direction: str = "long"
     regime: str | None = None
     timeframe: str | None = None
     quote_mid: float | None = None

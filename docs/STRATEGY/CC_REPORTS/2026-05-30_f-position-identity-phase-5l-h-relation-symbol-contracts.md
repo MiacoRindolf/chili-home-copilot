@@ -19,6 +19,7 @@ This keeps the physical state explicit: `trading_management_envelopes` is the ba
 - Routed low-risk relation-symbol references through shared Phase 5 relation constants.
 - Preserved remote monitor and pattern-regime performance work that landed concurrently.
 - Repaired a branch hygiene issue exposed by clean-worktree verification: Project Autonomy migrations already created the Agent OS tables, but the ORM did not declare/export the corresponding model classes. The model declarations now match the existing schema so monitor/API imports are healthy.
+- Repaired a small NetEdge safety regression exposed by the concurrently-added autotrader safety suite: `NetEdgeSignalContext` now carries `direction`, allowing short-alert shadow scores to be logged instead of silently swallowed.
 
 No live trading behavior changed in this slice.
 
@@ -32,6 +33,8 @@ Clean worktree at `8c92f9b`:
 - `tests/test_phase5_remaining_trade_refs.py`
 - `tests/test_phase5l_reader_allowlist.py`
 - Result: `29 passed`.
+- `tests/test_auto_trader_safety.py`: `36 passed`.
+- New remote performance cache tests: `32 passed`.
 
 Classifier:
 
