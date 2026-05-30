@@ -430,11 +430,21 @@ def _recommended_work_status_from_diagnostics(
         for payload in diagnostics.get((RECERT_RESCUE_DIAGNOSTIC, pid), []):
             blocked, detail = _recert_payload_blocks_refresh(payload)
             if blocked:
+                blocker_count = 0
+                for candidate in diagnostics.get((RECERT_RESCUE_DIAGNOSTIC, pid), []):
+                    candidate_blocked, candidate_detail = _recert_payload_blocks_refresh(
+                        candidate
+                    )
+                    if candidate_blocked and candidate_detail == detail:
+                        blocker_count += 1
                 return {
                     "event_type": event_type,
                     "actionable": False,
                     "blocker": "recent_recert_blocker_diagnostic",
                     "blocker_detail": detail,
+                    "blocker_count": blocker_count,
+                    "blocker_status": payload.get("recert_rescue_status"),
+                    "blocker_source": payload.get("source"),
                 }
 
     return {"event_type": event_type, "actionable": True, "blocker": None}
@@ -1114,6 +1124,9 @@ def api_monitor_imminent_alerts(
                 "recommended_work_actionable": work_status.get("actionable"),
                 "recommended_work_blocker": work_status.get("blocker"),
                 "recommended_work_blocker_detail": work_status.get("blocker_detail"),
+                "recommended_work_blocker_count": work_status.get("blocker_count"),
+                "recommended_work_blocker_status": work_status.get("blocker_status"),
+                "recommended_work_blocker_source": work_status.get("blocker_source"),
                 "cash_deployment_rank": supply.get("cash_deployment_rank"),
                 "edge_reliability_snapshot_event_id": supply.get("snapshot_event_id"),
                 "edge_reliability_snapshot_at": supply.get("snapshot_created_at"),
