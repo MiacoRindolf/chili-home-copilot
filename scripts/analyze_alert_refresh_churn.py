@@ -330,6 +330,53 @@ def _open_recert_work_with_recent_blocker_diagnostic(hours: int, limit: int) -> 
     )
 
 
+def _duplicate_open_refresh_work(hours: int, limit: int) -> list[dict]:
+    return _rows(
+        """
+        WITH open_work AS (
+          SELECT
+            event_type,
+            status,
+            created_at,
+            dedupe_key,
+            payload,
+            CASE
+              WHEN COALESCE(payload->>'scan_pattern_id', '') ~ '^[0-9]+$'
+              THEN (payload->>'scan_pattern_id')::bigint
+              ELSE NULL
+            END AS scan_pattern_id
+          FROM brain_work_events
+          WHERE event_kind = 'work'
+            AND event_type = ANY(:event_types)
+            AND status IN ('pending', 'retry_wait', 'processing')
+            AND created_at >= now() - (:hours * interval '1 hour')
+        )
+        SELECT
+          event_type,
+          scan_pattern_id,
+          COALESCE(sp.name, '<missing>') AS pattern_name,
+          COALESCE(payload->>'asset_class', '<none>') AS asset_class,
+          COALESCE(payload->>'source', '<none>') AS source,
+          count(*) AS open_work,
+          count(DISTINCT dedupe_key) AS distinct_dedupe_keys,
+          min(created_at) AS oldest_open,
+          max(created_at) AS newest_open
+        FROM open_work
+        LEFT JOIN scan_patterns sp ON sp.id = open_work.scan_pattern_id
+        WHERE scan_pattern_id IS NOT NULL
+        GROUP BY event_type, scan_pattern_id, pattern_name, asset_class, source
+        HAVING count(*) > 1
+        ORDER BY open_work DESC, newest_open DESC
+        LIMIT :limit
+        """,
+        {
+            "event_types": list(TARGET_WORK),
+            "hours": int(hours),
+            "limit": int(limit),
+        },
+    )
+
+
 def _build_report(hours: int, limit: int) -> dict[str, object]:
     return {
         "hours": int(hours),
@@ -345,6 +392,7 @@ def _build_report(hours: int, limit: int) -> dict[str, object]:
         "open_recert_work_with_recent_blocker_diagnostic": (
             _open_recert_work_with_recent_blocker_diagnostic(hours, limit)
         ),
+        "duplicate_open_refresh_work": _duplicate_open_refresh_work(hours, limit),
     }
 
 
@@ -367,6 +415,7 @@ def _print_report(report: dict[str, object]) -> None:
         "Open Recert Work With Recent Blocker Diagnostic",
         report["open_recert_work_with_recent_blocker_diagnostic"],
     )
+    _print_table("Duplicate Open Refresh Work", report["duplicate_open_refresh_work"])
 
 
 def _database_unavailable_payload(

@@ -33,6 +33,10 @@ def test_churn_audit_prints_all_sections_without_db(monkeypatch, capsys):
         calls.append(("open_recert", hours, limit))
         return [{"work_id": 88, "next_action": "wait_for_recert_backtest_cooldown_keep_live_blocked"}]
 
+    def duplicate_open_refresh_work(hours: int, limit: int):
+        calls.append(("duplicates", hours, limit))
+        return [{"event_type": "recert_rescue_refresh", "open_work": 2}]
+
     monkeypatch.setattr(audit, "_work_counts", work_counts)
     monkeypatch.setattr(audit, "_diagnostic_counts", diagnostic_counts)
     monkeypatch.setattr(audit, "_top_patterns", top_patterns)
@@ -47,6 +51,7 @@ def test_churn_audit_prints_all_sections_without_db(monkeypatch, capsys):
         "_open_recert_work_with_recent_blocker_diagnostic",
         open_recert_work_with_recent_blocker_diagnostic,
     )
+    monkeypatch.setattr(audit, "_duplicate_open_refresh_work", duplicate_open_refresh_work)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -63,6 +68,7 @@ def test_churn_audit_prints_all_sections_without_db(monkeypatch, capsys):
     assert "## Top No-Op Exit Variant Diagnostics" in out
     assert "## Open Exit Variant Work With Recent No-Op Evidence" in out
     assert "## Open Recert Work With Recent Blocker Diagnostic" in out
+    assert "## Duplicate Open Refresh Work" in out
     assert calls == [
         ("work", 6, None),
         ("diagnostics", 6, None),
@@ -70,6 +76,7 @@ def test_churn_audit_prints_all_sections_without_db(monkeypatch, capsys):
         ("noop", 6, 4),
         ("open_noop", 6, 4),
         ("open_recert", 6, 4),
+        ("duplicates", 6, 4),
     ]
 
 
@@ -105,6 +112,7 @@ def test_churn_audit_json_output_without_db(monkeypatch, capsys):
             "top_noop_exit_variant_diagnostics": [],
             "open_exit_variant_work_with_recent_noop": [],
             "open_recert_work_with_recent_blocker_diagnostic": [],
+            "duplicate_open_refresh_work": [],
         },
     )
     monkeypatch.setattr(
@@ -164,6 +172,7 @@ def test_churn_audit_waits_for_database(monkeypatch, capsys):
             "top_noop_exit_variant_diagnostics": [],
             "open_exit_variant_work_with_recent_noop": [],
             "open_recert_work_with_recent_blocker_diagnostic": [],
+            "duplicate_open_refresh_work": [],
         }
 
     monkeypatch.setattr(audit, "_build_report", flaky_report)
@@ -231,3 +240,27 @@ def test_open_recert_query_reports_wait_or_inspect_actions(monkeypatch):
     assert "inspect_recert_backtest_no_oos_evidence_keep_live_blocked" in sql
     assert "wait_for_recert_backtest_cooldown_keep_live_blocked" in sql
     assert captured["params"] == {"hours": 4, "limit": 9}
+
+
+def test_duplicate_open_refresh_work_groups_refresh_churn(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def capture_rows(sql: str, params: dict):
+        captured["sql"] = sql
+        captured["params"] = params
+        return []
+
+    monkeypatch.setattr(audit, "_rows", capture_rows)
+
+    assert audit._duplicate_open_refresh_work(hours=8, limit=11) == []
+
+    sql = str(captured["sql"])
+    assert "event_type = ANY(:event_types)" in sql
+    assert "status IN ('pending', 'retry_wait', 'processing')" in sql
+    assert "HAVING count(*) > 1" in sql
+    assert "count(DISTINCT dedupe_key)" in sql
+    assert captured["params"] == {
+        "event_types": ["recert_rescue_refresh", "exit_variant_refresh"],
+        "hours": 8,
+        "limit": 11,
+    }
