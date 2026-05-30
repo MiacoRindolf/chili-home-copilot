@@ -56,9 +56,9 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional
 
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from ..management_envelopes import load_coinbase_orphan_adoption_candidates
 from ..bracket_intent_writer import (
     IntentState,
     _coerce_state,
@@ -209,38 +209,26 @@ def _load_naked_coinbase_intents(db: Session) -> list[_NakedIntent]:
     * already-adopted intents (``broker_stop_order_id IS NOT NULL``),
     * closed / reconciled / shadow_logged rows.
     """
-    rows = db.execute(text("""
-        SELECT
-            bi.id           AS intent_id,
-            bi.trade_id     AS trade_id,
-            bi.ticker       AS ticker,
-            bi.quantity     AS quantity,
-            bi.intent_state AS intent_state,
-            bi.broker_source AS broker_source
-        FROM trading_bracket_intents bi
-        JOIN trading_trades t ON t.id = bi.trade_id
-        WHERE t.status = 'open'
-          AND bi.broker_source = 'coinbase'
-          AND bi.broker_stop_order_id IS NULL
-          AND LOWER(bi.intent_state) = ANY(:states)
-        ORDER BY bi.id
-    """), {"states": list(_ADOPTABLE_STATES)}).fetchall()
+    rows = load_coinbase_orphan_adoption_candidates(
+        db,
+        adoptable_states=_ADOPTABLE_STATES,
+    )
 
     out: list[_NakedIntent] = []
     for r in rows:
         try:
             out.append(_NakedIntent(
-                intent_id=int(r[0]),
-                trade_id=int(r[1]),
-                ticker=str(r[2] or "").upper(),
-                quantity=float(r[3] or 0.0),
-                intent_state=str(r[4] or "").lower(),
-                broker_source=str(r[5] or "").lower(),
+                intent_id=int(r["intent_id"]),
+                trade_id=int(r["trade_id"]),
+                ticker=str(r["ticker"] or "").upper(),
+                quantity=float(r["quantity"] or 0.0),
+                intent_state=str(r["intent_state"] or "").lower(),
+                broker_source=str(r["broker_source"] or "").lower(),
             ))
         except (TypeError, ValueError) as e:
             logger.warning(
                 "[coinbase_orphan_adopt] skipping malformed naked-intent row "
-                "intent_id=%s: %s", r[0], e,
+                "intent_id=%s: %s", r.get("intent_id"), e,
             )
     return out
 

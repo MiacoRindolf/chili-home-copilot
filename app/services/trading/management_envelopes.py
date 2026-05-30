@@ -313,6 +313,37 @@ def load_stale_bracket_watchdog_candidates(
     """, params)
 
 
+def load_coinbase_orphan_adoption_candidates(
+    db: Session,
+    *,
+    adoptable_states: list[str] | tuple[str, ...] | set[str],
+) -> list[dict[str, Any]]:
+    """Load naked Coinbase bracket intents from the management-envelope surface.
+
+    Candidate rows are intentionally narrow: open Coinbase envelopes whose
+    bracket intent has no broker stop id and is still in an adoption-capable
+    state. This keeps the one-shot orphan adoption pass away from the legacy
+    trade compatibility table while preserving its broker-truth contract.
+    """
+    return _rows(db, f"""
+        SELECT
+            bi.id            AS intent_id,
+            bi.trade_id      AS trade_id,
+            bi.ticker        AS ticker,
+            bi.quantity      AS quantity,
+            bi.intent_state  AS intent_state,
+            bi.broker_source AS broker_source
+        FROM trading_bracket_intents bi
+        JOIN {MANAGEMENT_ENVELOPES_RELATION} t ON t.id = bi.trade_id
+        WHERE t.status = 'open'
+          AND LOWER(COALESCE(t.broker_source, '')) = 'coinbase'
+          AND bi.broker_source = 'coinbase'
+          AND bi.broker_stop_order_id IS NULL
+          AND LOWER(bi.intent_state) = ANY(:states)
+        ORDER BY bi.id
+    """, {"states": list(adoptable_states)})
+
+
 def phase5b_parity_summary(db: Session) -> Phase5BParitySummary:
     """Return the Phase 5B read-model health counters.
 

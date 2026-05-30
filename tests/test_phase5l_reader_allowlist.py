@@ -13,12 +13,7 @@ READ_SQL_RE = re.compile(r"\b(?:FROM|JOIN)\s+trading_trades\b", re.IGNORECASE)
 # Exact current compatibility-view live-reader surface after Phase 5L-A. This
 # is intentionally narrow: a new raw reader line against trading_trades must
 # either move to trading_management_envelopes or make its contract explicit here.
-ALLOWED_LINE_COUNTS: dict[tuple[str, str], int] = {
-    (
-        "app/services/trading/venue/coinbase_orphan_adopt.py",
-        "JOIN trading_trades t ON t.id = bi.trade_id",
-    ): 1,
-}
+ALLOWED_LINE_COUNTS: dict[tuple[str, str], int] = {}
 
 SKIP_FILES = {
     "app/migrations.py",
