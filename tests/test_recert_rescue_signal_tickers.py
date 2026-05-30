@@ -139,3 +139,85 @@ def test_recert_rescue_updates_open_backtest_request_with_signal_priority(db):
     assert result["updated_open_request_priority_tickers"] is True
     assert row.payload["signal_ticker"] == "AAVE-USD"
     assert row.payload["priority_tickers"] == ["AAVE-USD", "BTC-USD"]
+
+
+def test_completed_recert_rescue_without_signal_priority_does_not_suppress_upgrade(db):
+    from app.models.trading import BrainWorkEvent
+    from app.services.trading.edge_reliability import (
+        RECERT_RESCUE_REFRESH,
+        emit_targeted_profitability_work,
+    )
+
+    first = emit_targeted_profitability_work(
+        db,
+        event_type=RECERT_RESCUE_REFRESH,
+        scan_pattern_id=1260,
+        source="edge_reliability_snapshot",
+        asset_class="crypto",
+        evidence_fingerprint="same-fp",
+        payload={"expected_evidence_value": 9.0},
+    )
+    db.commit()
+    row = db.get(BrainWorkEvent, first)
+    row.status = "done"
+    db.commit()
+
+    upgraded = emit_targeted_profitability_work(
+        db,
+        event_type=RECERT_RESCUE_REFRESH,
+        scan_pattern_id=1260,
+        source="autotrader_signal_fastlane",
+        asset_class="crypto",
+        evidence_fingerprint="same-fp",
+        payload={
+            "signal_ticker": "AAVE-USD",
+            "priority_tickers": ["AAVE-USD"],
+        },
+    )
+    db.commit()
+
+    assert upgraded is not None
+    upgraded_row = db.get(BrainWorkEvent, upgraded)
+    assert upgraded_row.payload["signal_ticker"] == "AAVE-USD"
+    assert upgraded_row.payload["priority_tickers"] == ["AAVE-USD"]
+
+
+def test_completed_recert_rescue_with_signal_priority_suppresses_repeat(db):
+    from app.models.trading import BrainWorkEvent
+    from app.services.trading.edge_reliability import (
+        RECERT_RESCUE_REFRESH,
+        emit_targeted_profitability_work,
+    )
+
+    first = emit_targeted_profitability_work(
+        db,
+        event_type=RECERT_RESCUE_REFRESH,
+        scan_pattern_id=1260,
+        source="autotrader_signal_fastlane",
+        asset_class="crypto",
+        evidence_fingerprint="same-priority-fp",
+        payload={
+            "signal_ticker": "AAVE-USD",
+            "priority_tickers": ["AAVE-USD"],
+        },
+    )
+    db.commit()
+    row = db.get(BrainWorkEvent, first)
+    row.status = "done"
+    db.commit()
+
+    repeat = emit_targeted_profitability_work(
+        db,
+        event_type=RECERT_RESCUE_REFRESH,
+        scan_pattern_id=1260,
+        source="autotrader_signal_fastlane",
+        asset_class="crypto",
+        evidence_fingerprint="same-priority-fp",
+        payload={
+            "signal_ticker": "AAVE-USD",
+            "priority_tickers": ["AAVE-USD"],
+        },
+    )
+    db.commit()
+
+    assert repeat is None

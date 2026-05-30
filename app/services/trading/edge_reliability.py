@@ -64,6 +64,8 @@ SHADOW_REASONS = frozenset({
 
 
 def _safe_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
     try:
         out = float(value)
     except (TypeError, ValueError):
@@ -72,6 +74,8 @@ def _safe_float(value: Any) -> float | None:
 
 
 def _safe_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
     try:
         return int(value)
     except (TypeError, ValueError):
@@ -719,6 +723,86 @@ def _recent_completed_work_exists(
     )
 
 
+def _recent_completed_work_payload(
+    db: Session,
+    *,
+    event_type: str,
+    dedupe_key: str,
+) -> dict[str, Any] | None:
+    """Return the latest recent completed work payload for dedupe decisions."""
+    try:
+        minutes = int(
+            getattr(
+                settings,
+                "brain_work_recent_done_dedupe_minutes",
+                DEFAULT_RECENT_DONE_DEDUPE_MINUTES,
+            )
+        )
+    except Exception:
+        minutes = DEFAULT_RECENT_DONE_DEDUPE_MINUTES
+    if minutes <= 0:
+        return None
+    cutoff = datetime.utcnow() - timedelta(minutes=minutes)
+    row = (
+        db.query(BrainWorkEvent.payload)
+        .filter(BrainWorkEvent.event_kind == "work")
+        .filter(BrainWorkEvent.event_type == event_type)
+        .filter(BrainWorkEvent.dedupe_key == dedupe_key)
+        .filter(BrainWorkEvent.status == "done")
+        .filter(BrainWorkEvent.updated_at >= cutoff)
+        .order_by(BrainWorkEvent.updated_at.desc(), BrainWorkEvent.id.desc())
+        .first()
+    )
+    if not row:
+        return None
+    payload = row[0]
+    return payload if isinstance(payload, dict) else {}
+
+
+def _payload_priority_tickers(payload: dict[str, Any]) -> set[str]:
+    out: set[str] = set()
+    for key in ("signal_ticker", "ticker", "primary_symbol"):
+        ticker = str(payload.get(key) or "").strip().upper()
+        if ticker:
+            out.add(ticker)
+    for key in ("priority_tickers", "top_tickers"):
+        raw = payload.get(key)
+        if isinstance(raw, str):
+            values = raw.split(",")
+        elif isinstance(raw, dict):
+            values = raw.keys()
+        elif isinstance(raw, (list, tuple, set)):
+            values = raw
+        else:
+            values = []
+        for value in values:
+            ticker = str(value or "").strip().upper()
+            if ticker:
+                out.add(ticker)
+    return out
+
+
+def _recent_completed_work_covers_requested_priority(
+    db: Session,
+    *,
+    event_type: str,
+    dedupe_key: str,
+    payload: dict[str, Any],
+) -> bool:
+    completed_payload = _recent_completed_work_payload(
+        db,
+        event_type=event_type,
+        dedupe_key=dedupe_key,
+    )
+    if completed_payload is None:
+        return False
+    requested = _payload_priority_tickers(payload)
+    if event_type != RECERT_RESCUE_REFRESH or not requested:
+        return True
+    completed = _payload_priority_tickers(completed_payload)
+    return bool(completed) and requested.issubset(completed)
+
+
 def emit_edge_reliability_refresh_requested(
     db: Session,
     scan_pattern_id: int,
@@ -775,13 +859,14 @@ def emit_targeted_profitability_work(
     fp = (evidence_fingerprint or "latest").strip()[:40]
     slice_key = _canonical_asset_class(asset_class) or "all"
     dedupe_key = f"{event_type}:{pid_key}:a{slice_key}:{fp}"
-    if _recent_completed_work_exists(
+    body = dict(payload or {})
+    if _recent_completed_work_covers_requested_priority(
         db,
         event_type=event_type,
         dedupe_key=dedupe_key,
+        payload=body,
     ):
         return None
-    body = dict(payload or {})
     if scan_pattern_id is not None:
         body["scan_pattern_id"] = int(scan_pattern_id)
     body["asset_class"] = _canonical_asset_class(asset_class)
