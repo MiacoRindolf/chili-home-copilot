@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime
+import math
 from typing import Any
 
 from sqlalchemy import or_, text
@@ -44,6 +45,99 @@ def _positive_qty(pos: TradingPosition | None) -> bool:
         return float(pos.current_quantity or 0.0) > 0.0
     except (TypeError, ValueError):
         return False
+
+
+def _positive_float(value: Any) -> float | None:
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) and out > 0 else None
+
+
+def _trade_matches_position(trade: Trade, position: TradingPosition) -> bool:
+    return (
+        (getattr(trade, "user_id", None) == getattr(position, "user_id", None))
+        and _source(trade) == (getattr(position, "broker_source", "") or "").strip().lower()
+        and (getattr(trade, "ticker", "") or "").strip().upper()
+        == (getattr(position, "ticker", "") or "").strip().upper()
+        and (getattr(trade, "direction", None) or "long").strip().lower()
+        == (getattr(position, "direction", None) or "long").strip().lower()
+    )
+
+
+def broker_position_identity_for_trade(
+    db: Session,
+    trade: Trade,
+) -> TradingPosition | None:
+    """Return the broker-position identity row that owns ``trade``."""
+    if not _is_live_broker_trade(trade) or _is_option_trade(trade):
+        return None
+    pos_id = getattr(trade, "position_id", None)
+    if pos_id is not None:
+        try:
+            pos = db.get(TradingPosition, int(pos_id))
+        except Exception:
+            pos = None
+        if pos is not None:
+            return pos
+    return _natural_key_position(db, trade)
+
+
+def broker_position_display_metrics(
+    db: Session,
+    trade: Trade,
+) -> dict[str, Any] | None:
+    """Broker-authoritative quantity/average-entry overlay for UI/risk surfaces.
+
+    ``Trade`` rows are management envelopes and can lag during order sync,
+    duplicate collapse, or broker-side averaging. When a live broker position
+    identity row exists, display and floating P&L should use its held quantity
+    and average entry instead of stale envelope fields.
+    """
+    pos = broker_position_identity_for_trade(db, trade)
+    if pos is None or (pos.state or "").lower() != "open":
+        return None
+    qty = _positive_float(pos.current_quantity)
+    avg = _positive_float(pos.current_avg_price)
+    if qty is None and avg is None:
+        return None
+    return {
+        "position_id": int(pos.id),
+        "quantity": qty,
+        "entry_price": avg,
+        "current_envelope_id": (
+            int(pos.current_envelope_id)
+            if pos.current_envelope_id is not None
+            else None
+        ),
+        "source": "broker_position_identity",
+    }
+
+
+def _owned_by_other_open_envelope(
+    db: Session,
+    trade: Trade,
+    pos: TradingPosition | None,
+) -> bool:
+    if pos is None or (pos.state or "").lower() != "open" or not _positive_qty(pos):
+        return False
+    owner_id = getattr(pos, "current_envelope_id", None)
+    if owner_id is None:
+        return False
+    try:
+        owner_id_i = int(owner_id)
+        trade_id_i = int(getattr(trade, "id", 0) or 0)
+    except Exception:
+        return False
+    if owner_id_i == trade_id_i:
+        return False
+    owner = db.get(Trade, owner_id_i)
+    if owner is None or getattr(owner, "status", None) != "open":
+        return False
+    return _trade_matches_position(owner, pos)
 
 
 def _within_grace(
@@ -146,7 +240,16 @@ def broker_stale_open_trade_snapshot(
     if getattr(trade, "status", None) != "open" or not _is_live_broker_trade(trade):
         return None
 
+    now = now or datetime.utcnow()
+
     if _source(trade) == "coinbase":
+        pos = broker_position_identity_for_trade(db, trade)
+        if _owned_by_other_open_envelope(db, trade, pos):
+            return _snapshot(
+                trade,
+                reason="position_identity_owned_by_other_envelope",
+                position=pos,
+            )
         # Coinbase position snapshots have proven partial during API/egress
         # failures. The Coinbase sync layer owns the close decision and now
         # requires a confirming sell fill before changing Trade.status.
@@ -159,7 +262,6 @@ def broker_stale_open_trade_snapshot(
         # share row hides real option exposure after the grace window.
         return None
 
-    now = now or datetime.utcnow()
     pos: TradingPosition | None = None
     pos_id = getattr(trade, "position_id", None)
     if pos_id is not None:

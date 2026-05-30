@@ -19,7 +19,10 @@ from ...models.trading import (
     Trade,
 )
 from ...services import trading_service as ts
-from ...services.trading.broker_position_truth import filter_broker_stale_open_trades
+from ...services.trading.broker_position_truth import (
+    broker_position_display_metrics,
+    filter_broker_stale_open_trades,
+)
 from ...services.trading.cash_deployment import (
     annotate_cash_deployment_row,
     cash_deployment_null_lineage_candidates,
@@ -488,7 +491,14 @@ def api_monitor_active(
         if (not q or q.get("price") is None) and not trade_is_option:
             q = quotes_map.get(trade.ticker.upper()) or quotes_map.get(trade.ticker)
         cur = _quote_price(q)
-        entry = float(trade.entry_price)
+        broker_metrics = (
+            broker_position_display_metrics(db, trade)
+            if not trade_is_option
+            else None
+        ) or {}
+        display_entry = broker_metrics.get("entry_price") or trade.entry_price
+        display_quantity = broker_metrics.get("quantity") or trade.quantity
+        entry = float(display_entry)
         pnl_pct = None
         if cur is not None and entry:
             if trade.direction == "short":
@@ -527,13 +537,19 @@ def api_monitor_active(
                 "plan_label": plan_label,
                 "pattern_id": trade.scan_pattern_id or (latest.scan_pattern_id if latest else None),
                 "timeframe": pat.timeframe if pat else None,
-                "entry_price": json_safe(trade.entry_price),
+                "entry_price": json_safe(display_entry),
+                "quantity": json_safe(display_quantity),
                 "stop_loss": json_safe(eff_sl) if eff_sl is not None else None,
                 "take_profit": json_safe(eff_tp) if eff_tp is not None else None,
                 "entry_date": trade.entry_date.isoformat() if trade.entry_date else None,
                 "current_price": json_safe(cur) if cur is not None else None,
                 "quote_source": q.get("source") if isinstance(q, dict) else None,
                 "pnl_pct": json_safe(pnl_pct) if pnl_pct is not None else None,
+                "broker_truth_entry_price": json_safe(broker_metrics.get("entry_price")),
+                "broker_truth_quantity": json_safe(broker_metrics.get("quantity")),
+                "broker_truth_position_id": broker_metrics.get("position_id"),
+                "broker_truth_current_envelope_id": broker_metrics.get("current_envelope_id"),
+                "broker_truth_metrics_source": broker_metrics.get("source"),
                 "latest_decision": _serialize_decision(latest) if latest else None,
                 "decision_count": len(decs),
                 "recent_decisions": recent,

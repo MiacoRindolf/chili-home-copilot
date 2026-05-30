@@ -16,8 +16,22 @@ from ...models.trading import (
 )
 from .management_scope import MANAGEMENT_SCOPE_MANUAL
 from .market_data import fetch_quote, get_indicator_snapshot, is_crypto
+from .broker_position_truth import (
+    broker_position_display_metrics,
+    filter_broker_stale_open_trades,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _positive_finite_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) and out > 0.0 else None
 
 
 def _is_option_trade_safe(trade: Trade) -> bool:
@@ -1074,6 +1088,10 @@ def get_portfolio_summary(db: Session, user_id: int | None) -> dict[str, Any]:
     open_trades = db.query(Trade).filter(
         Trade.user_id == user_id, Trade.status == "open",
     ).all()
+    open_trades, _suppressed_stale_trades = filter_broker_stale_open_trades(
+        db,
+        open_trades,
+    )
     closed_trades = db.query(Trade).filter(
         Trade.user_id == user_id, Trade.status == "closed",
     ).order_by(Trade.exit_date.asc()).all()
@@ -1086,7 +1104,8 @@ def get_portfolio_summary(db: Session, user_id: int | None) -> dict[str, Any]:
 
     for t in open_trades:
         trade_is_option = _is_option_trade_safe(t)
-        if trade_is_option:
+        broker_source = (t.broker_source or "").strip().lower()
+        if trade_is_option or broker_source in {"coinbase", "robinhood"}:
             try:
                 from .broker_quotes import broker_quote_for_trade
 
@@ -1104,35 +1123,59 @@ def get_portfolio_summary(db: Session, user_id: int | None) -> dict[str, Any]:
         raw_price = quote.get("price") if quote else None
         if raw_price in (None, "") and quote:
             raw_price = quote.get("last")
-        try:
-            current_price = (
-                float(raw_price)
-                if raw_price not in (None, "")
-                else float(t.entry_price)
-            )
-        except (TypeError, ValueError):
-            current_price = float(t.entry_price)
+        current_price = _positive_finite_float(raw_price)
+        if current_price is None and not trade_is_option:
+            current_price = _positive_finite_float(t.entry_price)
         multiplier = 100.0 if trade_is_option else 1.0
-        unrealized = (current_price - t.entry_price) * t.quantity * multiplier
-        if t.direction == "short":
-            unrealized = -unrealized
-        position_value = current_price * t.quantity * multiplier
-        invested = t.entry_price * t.quantity * multiplier
+        broker_metrics = (
+            broker_position_display_metrics(db, t)
+            if not trade_is_option
+            else None
+        ) or {}
+        entry_price = (
+            _positive_finite_float(broker_metrics.get("entry_price"))
+            or _positive_finite_float(t.entry_price)
+            or 0.0
+        )
+        quantity = (
+            _positive_finite_float(broker_metrics.get("quantity"))
+            or _positive_finite_float(t.quantity)
+            or 0.0
+        )
+        invested = entry_price * quantity * multiplier
+        if current_price is None or invested <= 0:
+            unrealized = None
+            position_value = 0.0
+        else:
+            unrealized = (current_price - entry_price) * quantity * multiplier
+            if t.direction == "short":
+                unrealized = -unrealized
+            position_value = current_price * quantity * multiplier
         asset_type = "options" if trade_is_option else (
             "crypto" if is_crypto(t.ticker) else "stock"
         )
 
         positions.append({
             "id": t.id, "ticker": t.ticker, "direction": t.direction,
-            "entry_price": t.entry_price, "current_price": current_price,
-            "quantity": t.quantity, "unrealized_pnl": round(unrealized, 2),
-            "unrealized_pct": round(unrealized / invested * 100, 2) if invested > 0 else 0,
+            "entry_price": entry_price, "current_price": current_price,
+            "quantity": quantity,
+            "unrealized_pnl": round(unrealized, 2) if unrealized is not None else None,
+            "unrealized_pct": (
+                round(unrealized / invested * 100, 2)
+                if unrealized is not None and invested > 0
+                else None
+            ),
             "asset_type": asset_type,
             "contract_multiplier": multiplier if trade_is_option else None,
+            "broker_truth_entry_price": broker_metrics.get("entry_price"),
+            "broker_truth_quantity": broker_metrics.get("quantity"),
+            "broker_truth_position_id": broker_metrics.get("position_id"),
+            "broker_truth_metrics_source": broker_metrics.get("source"),
         })
         total_invested += invested
         total_current += position_value
-        total_unrealized += unrealized
+        if unrealized is not None:
+            total_unrealized += unrealized
         allocation[t.ticker] = allocation.get(t.ticker, 0) + position_value
 
     realized_pnl = 0.0

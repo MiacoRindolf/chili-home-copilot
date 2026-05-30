@@ -11,6 +11,7 @@ Env flags remain the server-wide master; the desk row refines behavior when
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Optional
 
 from sqlalchemy.orm import Session
@@ -22,7 +23,11 @@ from .autopilot_scope import (
     is_option_trade,
     live_autopilot_trade_filter,
 )
-from .broker_position_truth import filter_broker_stale_open_trades
+from .broker_position_truth import (
+    broker_position_display_metrics,
+    broker_stale_open_trade_snapshot,
+    filter_broker_stale_open_trades,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -107,13 +112,15 @@ def set_desk_live_orders(db: Session, live_orders: bool | None, *, updated_by: s
 
 
 def _safe_quote_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
     if value in (None, ""):
         return None
     try:
         out = float(value)
     except (TypeError, ValueError):
         return None
-    return out if out > 0 else None
+    return out if math.isfinite(out) and out > 0 else None
 
 
 def _broker_quote_price_for_trade(trade: Trade) -> tuple[float | None, str]:
@@ -146,7 +153,7 @@ def _fallback_quote(ticker: str) -> float | None:
 
         q = fetch_quote(ticker) or {}
         p = q.get("price") or q.get("last_price")
-        return float(p) if p is not None else None
+        return _safe_quote_float(p)
     except Exception:
         return None
 
@@ -161,13 +168,24 @@ def _compute_unrealized(
 ) -> tuple[float | None, float | None]:
     """(pnl_usd, pnl_pct) — long/short aware. Returns (None, None) when unknown."""
     try:
+        if any(isinstance(v, bool) for v in (entry_price, current_price, quantity, multiplier)):
+            return (None, None)
         if entry_price is None or current_price is None or not quantity:
             return (None, None)
         entry = float(entry_price)
         curr = float(current_price)
         qty = float(quantity)
         mult = float(multiplier or 1.0)
-        if entry <= 0 or qty <= 0 or mult <= 0:
+        if (
+            not math.isfinite(entry)
+            or not math.isfinite(curr)
+            or not math.isfinite(qty)
+            or not math.isfinite(mult)
+            or entry <= 0
+            or curr <= 0
+            or qty <= 0
+            or mult <= 0
+        ):
             return (None, None)
         side = (direction or "long").lower()
         per_unit = (curr - entry) if side != "short" else (entry - curr)
@@ -218,6 +236,19 @@ def list_pattern_linked_open_positions(db: Session, user_id: int) -> dict[str, A
         .all()
     )
     trades, suppressed_stale_trades = filter_broker_stale_open_trades(db, trades)
+    desk_live_trades: list[Trade] = []
+    for t in trades:
+        snap = None
+        if getattr(t, "position_id", None) is not None:
+            snap = broker_stale_open_trade_snapshot(db, t, grace_seconds=0)
+        if snap and snap.get("reason") in {
+            "position_identity_closed",
+            "position_identity_zero_qty",
+        }:
+            suppressed_stale_trades.append(snap)
+            continue
+        desk_live_trades.append(t)
+    trades = desk_live_trades
 
     papers = (
         db.query(PaperTrade)
@@ -254,10 +285,17 @@ def list_pattern_linked_open_positions(db: Session, user_id: int) -> dict[str, A
         if current_price is None and not trade_is_option and not (t.broker_source or "").strip():
             current_price = _fallback_quote(t.ticker)
             quote_source = "market_data" if current_price is not None else "unavailable"
+        broker_metrics = (
+            broker_position_display_metrics(db, t)
+            if not trade_is_option
+            else None
+        ) or {}
+        display_entry = broker_metrics.get("entry_price") or t.entry_price
+        display_quantity = broker_metrics.get("quantity") or t.quantity
         pnl_usd, pnl_pct = _compute_unrealized(
-            entry_price=float(t.entry_price),
+            entry_price=float(display_entry),
             current_price=current_price,
-            quantity=float(t.quantity or 0),
+            quantity=float(display_quantity or 0),
             direction=t.direction,
             multiplier=100.0 if trade_is_option else 1.0,
         )
@@ -267,9 +305,9 @@ def list_pattern_linked_open_positions(db: Session, user_id: int) -> dict[str, A
                 "id": t.id,
                 "ticker": t.ticker,
                 "direction": t.direction,
-                "entry_price": float(t.entry_price),
+                "entry_price": float(display_entry),
                 "entry_date": t.entry_date.isoformat() if t.entry_date else None,
-                "quantity": float(t.quantity or 0),
+                "quantity": float(display_quantity or 0),
                 "stop_loss": float(t.stop_loss) if t.stop_loss is not None else None,
                 "take_profit": float(t.take_profit) if t.take_profit is not None else None,
                 "scan_pattern_id": t.scan_pattern_id,
@@ -289,6 +327,11 @@ def list_pattern_linked_open_positions(db: Session, user_id: int) -> dict[str, A
                 "unrealized_pnl_usd": pnl_usd,
                 "unrealized_pnl_pct": pnl_pct,
                 "quote_source": quote_source,
+                "broker_truth_entry_price": broker_metrics.get("entry_price"),
+                "broker_truth_quantity": broker_metrics.get("quantity"),
+                "broker_truth_position_id": broker_metrics.get("position_id"),
+                "broker_truth_current_envelope_id": broker_metrics.get("current_envelope_id"),
+                "broker_truth_metrics_source": broker_metrics.get("source"),
             }
         )
 
@@ -312,7 +355,9 @@ def list_pattern_linked_open_positions(db: Session, user_id: int) -> dict[str, A
             paper_is_option = False
         if paper_is_option:
             try:
-                current_price = _paper_current_mark_price(pt, purpose="display")  # type: ignore[name-defined]
+                current_price = _safe_quote_float(
+                    _paper_current_mark_price(pt, purpose="display")  # type: ignore[name-defined]
+                )
             except Exception:
                 current_price = None
             quote_source = (

@@ -883,6 +883,127 @@ def test_active_setups_suppresses_closed_broker_position(db, paired_client):
     )
 
 
+def test_active_setups_suppresses_coinbase_duplicate_envelope_owner(db, paired_client):
+    client, user = paired_client
+
+    canonical = Trade(
+        user_id=user.id,
+        ticker="ACX-USD",
+        direction="long",
+        entry_price=0.04282061,
+        quantity=7641.8,
+        entry_date=datetime.utcnow() - timedelta(hours=2),
+        status="open",
+        broker_source="coinbase",
+        asset_kind="crypto",
+    )
+    duplicate = Trade(
+        user_id=user.id,
+        ticker="ACX-USD",
+        direction="long",
+        entry_price=0.04466266,
+        quantity=3822.0,
+        entry_date=datetime.utcnow() - timedelta(hours=2),
+        status="open",
+        broker_source="coinbase",
+        asset_kind="crypto",
+    )
+    db.add_all([canonical, duplicate])
+    db.flush()
+    pos = TradingPosition(
+        user_id=user.id,
+        broker_source="coinbase",
+        account_type="spot",
+        ticker="ACX-USD",
+        direction="long",
+        asset_kind="crypto",
+        current_quantity=7641.8,
+        current_avg_price=0.04282061,
+        state="open",
+        current_envelope_id=canonical.id,
+    )
+    db.add(pos)
+    db.flush()
+    canonical.position_id = pos.id
+    duplicate.position_id = pos.id
+    db.commit()
+
+    with patch(
+        "app.services.trading.broker_quotes.broker_quote_for_trade",
+        return_value={"price": 0.0426, "source": "coinbase"},
+    ), patch(
+        "app.routers.trading_sub.monitor.describe_trade_execution_state",
+        return_value={},
+    ):
+        resp = client.get("/api/trading/active-setups")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    tickers = [row["ticker"] for row in body["setups"]]
+    assert tickers.count("ACX-USD") == 1
+    setup = next(row for row in body["setups"] if row["ticker"] == "ACX-USD")
+    assert setup["trade_id"] == canonical.id
+    assert setup["entry_price"] == pytest.approx(0.04282061)
+    assert setup["quantity"] == pytest.approx(7641.8)
+    assert setup["pnl_pct"] == pytest.approx(-0.51519584)
+    assert any(
+        row["id"] == duplicate.id
+        and row["reason"] == "position_identity_owned_by_other_envelope"
+        for row in body["suppressed_stale_trades"]
+    )
+
+
+def test_active_setups_uses_broker_truth_metrics_for_coinbase_pnl(db, paired_client):
+    client, user = paired_client
+
+    trade = Trade(
+        user_id=user.id,
+        ticker="ACX-USD",
+        direction="long",
+        entry_price=0.04466266,
+        quantity=3822.0,
+        entry_date=datetime.utcnow() - timedelta(hours=2),
+        status="open",
+        broker_source="coinbase",
+        asset_kind="crypto",
+    )
+    db.add(trade)
+    db.flush()
+    pos = TradingPosition(
+        user_id=user.id,
+        broker_source="coinbase",
+        account_type="spot",
+        ticker="ACX-USD",
+        direction="long",
+        asset_kind="crypto",
+        current_quantity=7641.8,
+        current_avg_price=0.04282061,
+        state="open",
+        current_envelope_id=trade.id,
+    )
+    db.add(pos)
+    db.flush()
+    trade.position_id = pos.id
+    db.commit()
+
+    with patch(
+        "app.services.trading.broker_quotes.broker_quote_for_trade",
+        return_value={"price": 0.0426, "source": "coinbase"},
+    ), patch(
+        "app.routers.trading_sub.monitor.describe_trade_execution_state",
+        return_value={},
+    ):
+        resp = client.get("/api/trading/active-setups")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    setup = next(row for row in body["setups"] if row["trade_id"] == trade.id)
+    assert setup["entry_price"] == pytest.approx(0.04282061)
+    assert setup["quantity"] == pytest.approx(7641.8)
+    assert setup["pnl_pct"] == pytest.approx(-0.51519584)
+    assert setup["broker_truth_metrics_source"] == "broker_position_identity"
+
+
 def test_active_setups_option_uses_premium_quote_not_underlying(db, paired_client):
     client, user = paired_client
     trade = Trade(
