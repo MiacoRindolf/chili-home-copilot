@@ -713,6 +713,29 @@ def test_passes_rule_gate_accepts_bounded_positive_reprice_after_edge_recheck():
     assert snap["entry_edge_expected_net_pct"] == 0.31
 
 
+@pytest.mark.parametrize(
+    ("snapshot", "expected"),
+    [
+        ({"slippage_reprice_expected_net_pct": -0.01}, True),
+        ({"slippage_reprice_expected_net_pct": "0.25"}, False),
+        ({"slippage_reprice_expected_net_pct": "not-a-number"}, False),
+        ({}, False),
+        (
+            {
+                "slippage_reprice_expected_net_pct": "not-a-number",
+                "slippage_reprice_positive_edge": False,
+            },
+            True,
+        ),
+        ({"slippage_reprice_edge_reason": "non_positive_expected_edge"}, True),
+    ],
+)
+def test_non_positive_reprice_marker_handles_expected_net_pct_values(
+    snapshot, expected
+):
+    assert _non_positive_reprice_marker(snapshot) is expected
+
+
 def test_passes_rule_gate_cools_down_repeated_non_positive_reprice():
     db = MagicMock()
     query = db.query.return_value
@@ -806,6 +829,10 @@ def test_passes_rule_gate_cools_down_repeated_non_positive_reprice():
             "app.services.trading.auto_trader_rules.resolve_effective_slippage_pct",
             return_value=(1.0, "test"),
         ),
+        patch(
+            "app.services.trading.portfolio_risk.check_new_trade_allowed",
+            return_value=(True, "ok"),
+        ) as portfolio_mock,
     ):
         ok, reason, snap = passes_rule_gate(
             db, alert, settings=settings, ctx=ctx, for_new_entry=True
@@ -820,6 +847,7 @@ def test_passes_rule_gate_cools_down_repeated_non_positive_reprice():
     assert snap["slippage_reprice_cooldown_threshold"] == 2
     assert snap["slippage_reprice_cooldown_reason"] == "repeated_non_positive_reprice_edge"
     assert "slippage_reprice_expected_net_pct" not in snap
+    portfolio_mock.assert_not_called()
 
 
 def test_evaluate_entry_edge_uses_dynamic_exit_payoff_distribution():
