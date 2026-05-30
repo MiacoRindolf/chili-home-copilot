@@ -188,7 +188,34 @@ def list_all_projects(db: Session) -> list[dict]:
 def get_project(db: Session, project_id: int, user_id: int) -> dict | None:
     if not _user_can_access(db, project_id, user_id):
         return None
-    p = db.query(PlanProject).filter(PlanProject.id == project_id).first()
+    p = (
+        db.query(PlanProject)
+        .options(
+            selectinload(PlanProject.members).selectinload(ProjectMember.user),
+            selectinload(PlanProject.labels),
+            selectinload(PlanProject.tasks).selectinload(PlanTask.assignee),
+            selectinload(PlanProject.tasks).selectinload(PlanTask.reporter),
+            selectinload(PlanProject.tasks)
+            .selectinload(PlanTask.task_labels)
+            .selectinload(TaskLabel.label),
+            selectinload(PlanProject.tasks).selectinload(PlanTask.watchers),
+            selectinload(PlanProject.tasks)
+            .selectinload(PlanTask.subtasks)
+            .selectinload(PlanTask.assignee),
+            selectinload(PlanProject.tasks)
+            .selectinload(PlanTask.subtasks)
+            .selectinload(PlanTask.reporter),
+            selectinload(PlanProject.tasks)
+            .selectinload(PlanTask.subtasks)
+            .selectinload(PlanTask.task_labels)
+            .selectinload(TaskLabel.label),
+            selectinload(PlanProject.tasks)
+            .selectinload(PlanTask.subtasks)
+            .selectinload(PlanTask.watchers),
+        )
+        .filter(PlanProject.id == project_id)
+        .first()
+    )
     if not p:
         return None
     return _project_dict(p, include_tasks=True)

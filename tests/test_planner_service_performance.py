@@ -14,6 +14,7 @@ class _FakeQuery:
         self.options_calls = 0
         self.outerjoin_calls = 0
         self.one_or_none_calls = 0
+        self.first_calls = 0
 
     def join(self, *_args, **_kwargs):
         self.join_calls += 1
@@ -43,6 +44,10 @@ class _FakeQuery:
 
     def one_or_none(self):
         self.one_or_none_calls += 1
+        return self._rows[0] if self._rows else None
+
+    def first(self):
+        self.first_calls += 1
         return self._rows[0] if self._rows else None
 
 
@@ -77,6 +82,36 @@ def _project_for_list(project_id: int = 1) -> SimpleNamespace:
         ],
         members=[],
         labels=[],
+    )
+
+
+def _task_for_detail(task_id: int = 1, *, subtasks: list[SimpleNamespace] | None = None) -> SimpleNamespace:
+    assignee = SimpleNamespace(name="Alice")
+    reporter = SimpleNamespace(name="Reporter")
+    return SimpleNamespace(
+        id=task_id,
+        project_id=1,
+        parent_id=None,
+        title="Do it",
+        description="",
+        status="todo",
+        priority="high",
+        start_date=None,
+        end_date=None,
+        assigned_to=7,
+        assignee=assignee,
+        reporter_id=8,
+        reporter=reporter,
+        depends_on=None,
+        progress=0,
+        sort_order=0,
+        created_at=None,
+        updated_at=None,
+        task_labels=[],
+        watchers=[],
+        subtasks=subtasks or [],
+        coding_workflow_mode="tracked",
+        coding_readiness_state="not_started",
     )
 
 
@@ -147,6 +182,24 @@ def test_list_all_projects_eager_loads_summary_relationships():
     assert result[0]["done_count"] == 1
     assert db.query_calls == 1
     assert db.last_query.options_calls == 1
+
+
+def test_get_project_eager_loads_detail_relationships(monkeypatch):
+    project = _project_for_list()
+    project.tasks = [_task_for_detail()]
+    db = _FakeSession([project])
+    monkeypatch.setattr(planner_service, "_user_can_access", lambda *_args, **_kwargs: True)
+
+    result = planner_service.get_project(db, project_id=1, user_id=7)
+
+    assert result is not None
+    assert result["tasks"][0]["title"] == "Do it"
+    assert result["tasks"][0]["assignee_name"] == "Alice"
+    assert result["tasks"][0]["reporter_name"] == "Reporter"
+    assert db.query_calls == 1
+    assert db.last_query.options_calls == 1
+    assert db.last_query.filter_calls == 1
+    assert db.last_query.first_calls == 1
 
 
 def test_user_project_summary_eager_loads_tasks_and_assignees():
