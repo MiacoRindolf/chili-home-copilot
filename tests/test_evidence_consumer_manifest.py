@@ -6,53 +6,67 @@ import sys
 
 from app.services.trading.evidence_consumer_manifest import (
     CURRENT_EVIDENCE_TARGET_BRANCH,
-    CURRENT_EVIDENCE_TARGET_HEAD,
-    CURRENT_V14_VALIDATOR_ARTIFACT,
-    CURRENT_V14_VALIDATOR_SHA256,
-    CURRENT_V34_INDEX_ARTIFACT,
-    CURRENT_V34_INDEX_SHA256,
+    LEGACY_V14_VALIDATOR_ARTIFACT,
+    LEGACY_V14_VALIDATOR_SHA256,
+    LEGACY_V34_INDEX_ARTIFACT,
+    LEGACY_V34_INDEX_SHA256,
+    ManifestBindingPolicy,
     PRELIMINARY_0629_V14_VALIDATOR_SHA256,
     PRELIMINARY_0629_V34_INDEX_SHA256,
-    REQUIRED_CONSUMER_SURFACES,
-    REQUIRED_EXCLUDED_REFERENCES,
-    REQUIRED_FAIL_CLOSED_EXCLUSIONS,
-    REQUIRED_NON_CLEARANCE_FALSE,
     REQUIRED_SAFETY_CONSTRAINTS,
-    REQUIRED_SOURCE_ARTIFACTS,
+    V33_POLICY,
+    V34_POLICY,
+    V35_CURRENT_BRANCH_HEAD,
+    V35_INTERMEDIATE_HEAD_AFTER_B8BEE,
+    V35_POLICY,
     validate_consumer_manifest,
 )
 
 
-def _valid_manifest() -> dict[str, object]:
+def _valid_manifest(
+    policy: ManifestBindingPolicy,
+    *,
+    target_head: str | None = None,
+    ancestor_heads: list[str] | None = None,
+) -> dict[str, object]:
+    head = target_head or sorted(policy.accepted_target_heads)[0]
     manifest = {
-        "manifest_schema": "sswe.consumer_manifest.v34.v14",
-        "manifest_generated_utc": "2026-05-30T06:42:00Z",
+        "manifest_schema": f"sswe.consumer_manifest.{policy.name}",
+        "manifest_generated_utc": "2026-05-30T06:52:00Z",
         "consumer_name": "unit-test-consumer",
         "evidence_target_branch": CURRENT_EVIDENCE_TARGET_BRANCH,
-        "evidence_target_head": CURRENT_EVIDENCE_TARGET_HEAD,
-        "mlops_blocker_index_artifact": CURRENT_V34_INDEX_ARTIFACT,
-        "mlops_blocker_index_sha256": CURRENT_V34_INDEX_SHA256,
-        "mlops_validator_spec_artifact": CURRENT_V14_VALIDATOR_ARTIFACT,
-        "mlops_validator_spec_sha256": CURRENT_V14_VALIDATOR_SHA256,
+        "evidence_target_head": head,
+        "mlops_blocker_index_artifact": policy.blocker_index_artifact,
+        "mlops_blocker_index_sha256": policy.blocker_index_sha256,
+        "mlops_validator_spec_artifact": policy.validator_spec_artifact,
+        "mlops_validator_spec_sha256": policy.validator_spec_sha256,
         "source_artifacts": [
             {"artifact": artifact, "sha256": sha256}
-            for artifact, sha256 in REQUIRED_SOURCE_ARTIFACTS
+            for artifact, sha256 in policy.required_source_artifacts
         ],
-        "required_fail_closed_exclusions": list(REQUIRED_FAIL_CLOSED_EXCLUSIONS),
-        "consumer_surfaces_fail_closed": list(REQUIRED_CONSUMER_SURFACES),
+        "required_fail_closed_exclusions": list(
+            policy.required_fail_closed_exclusions
+        ),
+        "required_consumer_surfaces_fail_closed": list(
+            policy.required_consumer_surfaces
+        ),
         "non_clearance_assertions": {
-            name: False for name in REQUIRED_NON_CLEARANCE_FALSE
+            name: False for name in policy.required_non_clearance_false
         },
-        "latest_required_containment_floor_utc": "2026-05-30T06:27:14Z",
+        "latest_required_containment_floor_utc": (
+            policy.latest_required_containment_floor_utc
+        ),
         "checks_run_or_skipped": [
             "No production database, broker API, release, deploy, restart, or migration action."
         ],
         "remaining_risks": [
-            "Current b8bee4b branch-head stream remains evidence-governed non-clearance."
+            "Governed branch-head evidence remains evidence-only non-clearance."
         ],
         "safety_constraints": list(REQUIRED_SAFETY_CONSTRAINTS),
     }
-    for field_name, values in REQUIRED_EXCLUDED_REFERENCES.items():
+    if ancestor_heads:
+        manifest["evidence_target_ancestor_heads"] = ancestor_heads
+    for field_name, values in policy.required_excluded_references.items():
         manifest[field_name] = list(values)
     return manifest
 
@@ -61,41 +75,65 @@ def _error_set(manifest: dict[str, object]) -> set[str]:
     return set(validate_consumer_manifest(manifest).errors)
 
 
-def test_current_v34_v14_manifest_passes_only_as_non_clearance() -> None:
-    result = validate_consumer_manifest(_valid_manifest())
+def test_current_v35_v15_manifest_passes_only_as_non_clearance() -> None:
+    result = validate_consumer_manifest(
+        _valid_manifest(V35_POLICY, target_head=V35_CURRENT_BRANCH_HEAD)
+    )
 
     assert result.accepted is True
     assert result.status == "EVIDENCE_GOVERNED_NON_CLEARANCE"
+    assert result.policy == "v35_v15_7e394_current_head"
     assert result.errors == ()
 
 
-def test_stale_v33_v13_only_manifest_for_current_head_fails_closed() -> None:
-    manifest = _valid_manifest()
-    manifest["mlops_blocker_index_artifact"] = (
-        "project_ws/MLOps/OUT/20260530-060400Z-"
-        "mlops-governed-evidence-blocker-index-v33.json"
-    )
-    manifest["mlops_blocker_index_sha256"] = (
-        "B6D7634D1FF83959E919CE66AB287B31F2F619906E79432E6E032F844F700E61"
-    )
-    manifest["mlops_validator_spec_artifact"] = (
-        "project_ws/MLOps/OUT/20260530-060400Z-"
-        "pm065-v33-consumer-manifest-validator-spec.json"
-    )
-    manifest["mlops_validator_spec_sha256"] = (
-        "731C5F0B8526685F2BC567E5CDA4BBD99AA89815D6A26644857921BBDF4467AA"
-    )
+def test_v34_v14_manifest_remains_valid_only_for_b8bee_scope() -> None:
+    result = validate_consumer_manifest(_valid_manifest(V34_POLICY))
+
+    assert result.accepted is True
+    assert result.status == "EVIDENCE_GOVERNED_NON_CLEARANCE"
+    assert result.policy == "v34_v14_b8bee_inherited_head"
+    assert result.errors == ()
+
+
+def test_v33_v13_manifest_remains_valid_only_for_8426169_scope() -> None:
+    result = validate_consumer_manifest(_valid_manifest(V33_POLICY))
+
+    assert result.accepted is True
+    assert result.status == "EVIDENCE_GOVERNED_NON_CLEARANCE"
+    assert result.policy == "v33_v13_8426169_prior_incident_head"
+    assert result.errors == ()
+
+
+def test_v34_v14_only_manifest_for_7e394_current_head_fails_closed() -> None:
+    manifest = _valid_manifest(V34_POLICY, target_head=V35_CURRENT_BRANCH_HEAD)
 
     errors = _error_set(manifest)
 
-    assert "current_v34_index_artifact_required" in errors
-    assert "current_v34_index_sha_required" in errors
-    assert "current_v14_validator_artifact_required" in errors
-    assert "current_v14_validator_sha_required" in errors
+    assert "v34_v14_stale_for_v35_target_head" in errors
+    assert "v35_v15_7e394_current_head:blocker_index_artifact_required" in errors
+    assert "v35_v15_7e394_current_head:blocker_index_sha_required" in errors
+    assert "v35_v15_7e394_current_head:validator_spec_artifact_required" in errors
+    assert "v35_v15_7e394_current_head:validator_spec_sha_required" in errors
 
 
-def test_preliminary_0629_hashes_fail_closed() -> None:
-    manifest = _valid_manifest()
+def test_v34_v14_only_manifest_for_intermediate_head_fails_closed() -> None:
+    manifest = _valid_manifest(V34_POLICY, target_head=V35_INTERMEDIATE_HEAD_AFTER_B8BEE)
+
+    assert "v34_v14_stale_for_v35_target_head" in _error_set(manifest)
+
+
+def test_descendant_branch_head_requires_v35_v15_binding() -> None:
+    manifest = _valid_manifest(
+        V34_POLICY,
+        target_head="1111111111111111111111111111111111111111",
+        ancestor_heads=[V35_CURRENT_BRANCH_HEAD],
+    )
+
+    assert "v34_v14_stale_for_v35_target_head" in _error_set(manifest)
+
+
+def test_preliminary_0629_hashes_fail_closed_for_b8bee_scope() -> None:
+    manifest = _valid_manifest(V34_POLICY)
     manifest["mlops_blocker_index_sha256"] = PRELIMINARY_0629_V34_INDEX_SHA256
     manifest["mlops_validator_spec_sha256"] = PRELIMINARY_0629_V14_VALIDATOR_SHA256
 
@@ -103,47 +141,69 @@ def test_preliminary_0629_hashes_fail_closed() -> None:
 
     assert "preliminary_0629_v34_index_hash_not_accepted" in errors
     assert "preliminary_0629_v14_validator_hash_not_accepted" in errors
-    assert "current_v34_index_sha_required" in errors
-    assert "current_v14_validator_sha_required" in errors
+    assert "v34_v14_b8bee_inherited_head:blocker_index_sha_required" in errors
+    assert "v34_v14_b8bee_inherited_head:validator_spec_sha_required" in errors
 
 
-def test_missing_required_fail_closed_exclusion_fails_closed() -> None:
-    manifest = _valid_manifest()
+def test_missing_required_v35_fail_closed_exclusion_fails_closed() -> None:
+    manifest = _valid_manifest(V35_POLICY, target_head=V35_CURRENT_BRANCH_HEAD)
     manifest["required_fail_closed_exclusions"] = [
         value
-        for value in REQUIRED_FAIL_CLOSED_EXCLUSIONS
-        if value != "post0614_b8bee4b_no_github_checks_not_ci_evidence"
+        for value in V35_POLICY.required_fail_closed_exclusions
+        if value != "post0632_pr123_main_ci_green_not_nonmain_runtime_or_evidence_clearance"
     ]
 
     assert (
         "missing_fail_closed_exclusion:"
-        "post0614_b8bee4b_no_github_checks_not_ci_evidence"
+        "post0632_pr123_main_ci_green_not_nonmain_runtime_or_evidence_clearance"
     ) in _error_set(manifest)
 
 
-def test_weakening_non_clearance_assertion_fails_closed() -> None:
-    manifest = _valid_manifest()
+def test_weakening_v35_non_clearance_assertion_fails_closed() -> None:
+    manifest = _valid_manifest(V35_POLICY, target_head=V35_CURRENT_BRANCH_HEAD)
     assertions = dict(manifest["non_clearance_assertions"])
-    assertions["approved_for_release"] = True
+    assertions["approved_for_runtime_refresh"] = True
     manifest["non_clearance_assertions"] = assertions
 
-    assert "non_clearance_assertion_must_be_false:approved_for_release" in _error_set(
-        manifest
-    )
+    assert (
+        "non_clearance_assertion_must_be_false:approved_for_runtime_refresh"
+    ) in _error_set(manifest)
 
 
-def test_missing_protected_surface_fails_closed() -> None:
-    manifest = _valid_manifest()
-    manifest["consumer_surfaces_fail_closed"] = [
-        value for value in REQUIRED_CONSUMER_SURFACES if value != "broker_truth_claims"
+def test_missing_v35_protected_surface_fails_closed() -> None:
+    manifest = _valid_manifest(V35_POLICY, target_head=V35_CURRENT_BRANCH_HEAD)
+    manifest["required_consumer_surfaces_fail_closed"] = [
+        value
+        for value in V35_POLICY.required_consumer_surfaces
+        if value != "scanner_metrics"
     ]
 
-    assert "missing_consumer_surface:broker_truth_claims" in _error_set(manifest)
+    assert "missing_consumer_surface:scanner_metrics" in _error_set(manifest)
 
 
-def test_cli_returns_json_and_nonzero_for_fail_closed_manifest(tmp_path) -> None:
-    manifest = _valid_manifest()
-    manifest["mlops_blocker_index_sha256"] = PRELIMINARY_0629_V34_INDEX_SHA256
+def test_pr123_ci_scope_reference_is_required_for_v35() -> None:
+    manifest = _valid_manifest(V35_POLICY, target_head=V35_CURRENT_BRANCH_HEAD)
+    manifest["excluded_check_run_refs"] = [
+        value
+        for value in V35_POLICY.required_excluded_references["excluded_check_run_refs"]
+        if not value.startswith("PR #123 main CI run")
+    ]
+
+    assert (
+        "missing_excluded_check_run_ref:"
+        "PR #123 main CI run 26676647858 success applies only to "
+        "dd468151409ce2e9d467477201827d7f773db182"
+    ) in _error_set(manifest)
+
+
+def test_cli_returns_json_and_nonzero_for_stale_v34_current_head_manifest(
+    tmp_path,
+) -> None:
+    manifest = _valid_manifest(V35_POLICY, target_head=V35_CURRENT_BRANCH_HEAD)
+    manifest["mlops_blocker_index_artifact"] = LEGACY_V34_INDEX_ARTIFACT
+    manifest["mlops_blocker_index_sha256"] = LEGACY_V34_INDEX_SHA256
+    manifest["mlops_validator_spec_artifact"] = LEGACY_V14_VALIDATOR_ARTIFACT
+    manifest["mlops_validator_spec_sha256"] = LEGACY_V14_VALIDATOR_SHA256
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
@@ -162,4 +222,5 @@ def test_cli_returns_json_and_nonzero_for_fail_closed_manifest(tmp_path) -> None
     assert completed.returncode == 2
     assert payload["accepted"] is False
     assert payload["status"] == "FAIL_CLOSED"
-    assert "preliminary_0629_v34_index_hash_not_accepted" in payload["errors"]
+    assert payload["policy"] == "v35_v15_7e394_current_head"
+    assert "v34_v14_stale_for_v35_target_head" in payload["errors"]
