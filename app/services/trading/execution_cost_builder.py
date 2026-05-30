@@ -102,12 +102,12 @@ def _ensure_side(direction: str | None) -> str:
 
 
 def _notional(trade: Any) -> float:
-    try:
-        px = float(trade.entry_price or 0.0)
-        qty = float(trade.quantity or 0.0)
-        return abs(px * qty)
-    except Exception:
+    px = _finite_float_or_none(getattr(trade, "entry_price", None))
+    qty = _finite_float_or_none(getattr(trade, "quantity", None))
+    if px is None or qty is None:
         return 0.0
+    notional = abs(px * qty)
+    return notional if math.isfinite(notional) else 0.0
 
 
 def _finite_float_or_none(value: Any) -> float | None:
@@ -158,11 +158,13 @@ def _estimate_from_rows(
     adv_usd = 0.0
     if adv_lookup_fn is not None:
         try:
-            adv_usd = float(adv_lookup_fn(ticker, int(window_days)) or 0.0)
+            adv_usd = _finite_float_or_none(adv_lookup_fn(ticker, int(window_days))) or 0.0
         except Exception:
             adv_usd = 0.0
     if adv_usd <= 0 and window_days > 0:
         adv_usd = notional_sum / float(window_days)
+    if not math.isfinite(adv_usd) or adv_usd < 0:
+        adv_usd = 0.0
 
     return EstimateRow(
         ticker=ticker,

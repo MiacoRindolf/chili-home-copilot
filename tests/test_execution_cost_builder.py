@@ -160,6 +160,106 @@ class TestComputeRollingEstimate:
 
         assert est is None
 
+    def test_estimate_nonfinite_adv_lookup_uses_finite_notional_fallback(self):
+        rows = [
+            SimpleNamespace(
+                tca_entry_slippage_bps=2.0,
+                tca_exit_slippage_bps=None,
+                entry_price=10.0,
+                quantity=2.0,
+            ),
+            SimpleNamespace(
+                tca_entry_slippage_bps=None,
+                tca_exit_slippage_bps=4.0,
+                entry_price=float("nan"),
+                quantity=99.0,
+            ),
+            SimpleNamespace(
+                tca_entry_slippage_bps=6.0,
+                tca_exit_slippage_bps=None,
+                entry_price=1e308,
+                quantity=1e308,
+            ),
+        ]
+
+        est = _estimate_from_rows(
+            ticker="ADV_FALLBACK_PHF",
+            side_norm="long",
+            window_days=10,
+            rows=rows,
+            adv_lookup_fn=lambda _ticker, _window: float("inf"),
+        )
+
+        assert est is not None
+        assert est.sample_trades == 3
+        assert est.median_slippage_bps == pytest.approx(4.0)
+        assert est.avg_daily_volume_usd == pytest.approx(2.0)
+
+    def test_estimate_boolean_price_quantity_do_not_create_fallback_adv(self):
+        rows = [
+            SimpleNamespace(
+                tca_entry_slippage_bps=2.0,
+                tca_exit_slippage_bps=None,
+                entry_price=True,
+                quantity=100.0,
+            ),
+            SimpleNamespace(
+                tca_entry_slippage_bps=None,
+                tca_exit_slippage_bps=4.0,
+                entry_price=10.0,
+                quantity=False,
+            ),
+        ]
+
+        est = _estimate_from_rows(
+            ticker="BOOL_NOTIONAL_PHF",
+            side_norm="long",
+            window_days=10,
+            rows=rows,
+            adv_lookup_fn=lambda _ticker, _window: float("nan"),
+        )
+
+        assert est is not None
+        assert est.sample_trades == 2
+        assert est.avg_daily_volume_usd == 0.0
+
+    def test_compute_rolling_estimate_uses_helper_side_norm_contract(self):
+        class _FakeQuery:
+            def __init__(self, rows):
+                self.rows = rows
+
+            def filter(self, *args):
+                return self
+
+            def all(self):
+                return self.rows
+
+        class _FakeSession:
+            def query(self, model):
+                assert model is Trade
+                return _FakeQuery([
+                    SimpleNamespace(
+                        direction="long",
+                        tca_entry_slippage_bps=2.0,
+                        tca_exit_slippage_bps=1.0,
+                        entry_price=10.0,
+                        quantity=2.0,
+                    )
+                ])
+
+        est = compute_rolling_estimate(
+            _FakeSession(),  # type: ignore[arg-type]
+            ticker="CONTRACT_PHF",
+            side="long",
+            window_days=30,
+            adv_lookup_fn=lambda _ticker, _window: 1_000_000.0,
+        )
+
+        assert est is not None
+        assert est.side == "long"
+        assert est.sample_trades == 1
+        assert est.median_spread_bps == pytest.approx(2.0)
+
     def test_filters_by_direction(self, db):
         _cleanup(db, ["NVDA_PHF"])
         db.add(_mk_trade("NVDA_PHF", direction="long", entry_slip=3.0))
