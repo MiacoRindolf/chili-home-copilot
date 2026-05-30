@@ -15,9 +15,11 @@
 # this prevents a Docker Desktop crash loop from auto-starting the full fleet
 # before Postgres and the web/API have stabilized.
 #
-# Bind-mounted app/worker services default to restart=no. This keeps a dirty
-# local checkout from auto-resurrecting live code after an operator stops it;
-# set CHILI_BIND_MOUNTED_SERVICE_RESTART_POLICY=unless-stopped to opt back in.
+# Bind-mounted research/app services default to restart=no. The live trading
+# runtime is different: broker truth, autotrader, fast scan, and market
+# snapshots must recover after OOM/host hiccups or the UI drifts away from
+# broker reality. Override those with CHILI_LIVE_RUNTIME_RESTART_POLICY=no
+# only for deliberate maintenance.
 #
 # Persistent data: Postgres, Ollama, and /app/data bind to D:/CHILI-Docker/{postgres,ollama,chili-data} so large state
 # lives off C:. Change these paths if your drive letter or folder differs.
@@ -160,7 +162,7 @@ services:
       - D:/dev:/host_dev
       # Brain Worker UI controls the separate ``brain-worker`` service — needs engine access
       - /var/run/docker.sock:/var/run/docker.sock
-    restart: "${CHILI_BIND_MOUNTED_SERVICE_RESTART_POLICY:-no}"
+    restart: "${CHILI_LIVE_RUNTIME_RESTART_POLICY:-unless-stopped}"
     logging:
       driver: json-file
       options:
@@ -449,7 +451,7 @@ services:
   # Fast scan worker. 1-5 min breakout/momentum detection on promoted patterns, fires alerts.
   fast-scan-worker:
     image: chili-app:local
-    restart: "${CHILI_BIND_MOUNTED_SERVICE_RESTART_POLICY:-no}"
+    restart: "${CHILI_LIVE_RUNTIME_RESTART_POLICY:-unless-stopped}"
     command: ["python", "scripts/brain_worker.py", "--mode", "fast-scan", "--interval", "${CHILI_FAST_SCAN_INTERVAL_MINUTES:-1}"]
     env_file:
       - path: .env
@@ -491,7 +493,7 @@ services:
   # requiring the full heavy scheduler/research profile.
   market-snapshot-worker:
     image: chili-app:local
-    restart: "${CHILI_BIND_MOUNTED_SERVICE_RESTART_POLICY:-no}"
+    restart: "${CHILI_LIVE_RUNTIME_RESTART_POLICY:-unless-stopped}"
     labels:
       com.chili.service: market-snapshot-worker
       com.chili.entrypoint: scheduler_worker_market_snapshots
@@ -680,7 +682,7 @@ services:
   #     in the broker-sync code path; isolated bisection.
   broker-sync-worker:
     image: chili-app:local
-    restart: "${CHILI_BIND_MOUNTED_SERVICE_RESTART_POLICY:-no}"
+    restart: "${CHILI_LIVE_RUNTIME_RESTART_POLICY:-unless-stopped}"
     labels:
       com.chili.service: broker-sync-worker
       com.chili.entrypoint: scheduler_worker
@@ -783,7 +785,7 @@ services:
   #     OOMs, only autotrader is affected and Compose auto-restarts.
   autotrader-worker:
     image: chili-app:local
-    restart: "${CHILI_BIND_MOUNTED_SERVICE_RESTART_POLICY:-no}"
+    restart: "${CHILI_LIVE_RUNTIME_RESTART_POLICY:-unless-stopped}"
     labels:
       com.chili.service: autotrader-worker
       com.chili.entrypoint: scheduler_worker
