@@ -1,17 +1,17 @@
-# NEXT_TASK: f-position-identity-phase-5l-d-dirty-evidence-reader-slice
+# NEXT_TASK: f-position-identity-phase-5l-e-trade-id-semantic-reader-contracts
 
 STATUS: PENDING
 
 ## Goal
 
-Move the remaining dirty evidence/model reader candidates from the legacy
-compatibility view name to the semantic management-envelope relation without
-absorbing unrelated local edits.
+Design and ship the next Phase 5L slice by moving remaining live
+`trade_id`/`trading_trades` semantic readers behind named management-envelope
+helper APIs instead of doing another mechanical table-name replacement.
 
-Phase 5L-C converted the clean candidates (`crypto/pattern_miner.py` and
-`options/portfolio_budget.py`) and reduced the reader allowlist. The next
-candidates are still legitimate, but the files are already dirty in the
-worktree.
+Phase 5L-A through 5L-D removed the safe reader-only evidence/reporting
+surfaces. The remaining runtime references are semantic: they reason about
+management envelopes, retry windows, broker reconciliation, order placement, or
+compatibility behavior.
 
 ## Current State
 
@@ -22,40 +22,31 @@ trading_management_envelopes = physical base table
 trading_trades               = legacy compatibility view
 ```
 
-Live flags currently promoted:
-
-- `CHILI_PHASE5K_COINBASE_CAP_USE_ENVELOPES=true`
-- `CHILI_PHASE5K_PDT_USE_ENVELOPES=true`
-- `CHILI_PHASE5K_COHORT_PROMOTE_USE_ENVELOPES=true`
-- `CHILI_PHASE5K_PATTERN_QUALITY_USE_ENVELOPES=true`
-- `CHILI_PHASE5K_PORTFOLIO_RISK_USE_ENVELOPES=true`
-- `CHILI_PHASE5K_POSITION_INTEGRITY_USE_ENVELOPES=true`
-- `CHILI_PHASE5K_ALPHA_PORTFOLIO_GATE_USE_ENVELOPES=true`
-
-Fresh evidence after Phase 5L-C:
+Fresh safety evidence after Phase 5L-D:
 
 ```text
 Phase 5K-A: COMPLETE_POSITIVE, 6/6 checks, 0 mismatches
 Phase 5I:   COMPLETE_POSITIVE, 20 fresh decisions, 20 fresh envelopes,
             10 fresh closes, 0 hard linkage issues, 0 attribution drift
-Reader/options focused tests: 22 passed
+Phase 5L reader allowlist: 1 passed
 ```
 
-## Work Shape
+## Recommended Work Shape
 
-1. Inspect dirty local diffs before editing:
-   - `app/services/trading/pattern_regime_ledger.py`
-   - `app/services/trading/pattern_survival/features.py`
-2. Convert only the raw reader relation names to `MANAGEMENT_ENVELOPES_RELATION`.
-3. Use isolated staging or blob-level staging so unrelated dirty edits are not
-   committed.
-4. Update the Phase 5L reader allowlist to remove converted lines.
-5. Re-run:
-   - targeted tests for touched modules/canary
-   - Phase 5K-A parity probe
-   - Phase 5I post-rename soak probe
-6. Leave broker/order/reconcile writer paths alone unless they are migrated
-   behind explicit envelope/position APIs.
+1. Run the current remaining-reference classifier.
+2. Pick one semantic-reader family, not a broad sweep. Recommended first family:
+   - autotrader retry/probation/open-by-lane readers
+   - bracket watchdog/readback surfaces
+   - Coinbase orphan/adoption reads
+3. Introduce named helper APIs in `management_envelopes.py` or a sibling module
+   that express the business meaning, for example:
+   - `count_open_management_envelopes_by_lane(...)`
+   - `load_recent_envelope_attempts(...)`
+   - `load_position_envelope_for_reconcile(...)`
+4. Convert only callers whose semantics are covered by the helper.
+5. Add tests that pin behavior against both the compatibility view and the base
+   table where parity matters.
+6. Re-run Phase 5K-A, Phase 5I, and the Phase 5L canary.
 
 ## Guardrails
 
@@ -63,10 +54,15 @@ Reader/options focused tests: 22 passed
 - Do not rename the `Trade` ORM class in this phase.
 - Do not search-replace writer/order/broker/reconcile code.
 - Do not absorb unrelated dirty worktree files.
-- Do not make the allow-list broad enough to hide new live-reader drift.
-- `pattern_regime_ledger.py` and `pattern_survival/features.py` are dirty local
-  candidates; inspect before touching and do not absorb unrelated edits.
+- Treat writer/order/broker/reconcile paths as behavioral code requiring helper
+  contracts and focused tests.
 - Preserve the three-layer model:
   - `trading_decisions`: immutable entry intent
   - `trading_management_envelopes`: mutable management envelope
   - `trading_positions`: broker-authoritative position identity
+
+## Architect Verdict
+
+Phase 5L-E is a design-and-contract slice. It is still shippable in small steps,
+but the shape is now semantic. If a remaining query still says
+`trading_trades`, ask what envelope behavior it represents before touching it.
