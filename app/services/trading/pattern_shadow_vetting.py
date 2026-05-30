@@ -232,10 +232,13 @@ def _load_directional_evidence(
             logger.debug("%s paper dynamic evidence query failed", LOG_PREFIX, exc_info=True)
         for r in paper_rows:
             pid = int(r["scan_pattern_id"])
-            realized_return_pct = _safe_float(r.get("realized_return_pct"), 0.0) or 0.0
+            realized_return_pct = _safe_float(r.get("realized_return_pct"))
+            pnl = _safe_float(r.get("pnl"))
+            if realized_return_pct is None or pnl is None:
+                continue
             grouped.setdefault(pid, []).append(
                 {
-                    "directional_correct": (_safe_float(r.get("pnl"), 0.0) or 0.0) > 0.0,
+                    "directional_correct": pnl > 0.0,
                     "alert_at": r.get("entry_date"),
                     "evaluated_at": r.get("exit_date"),
                     "hold_window_hours": _safe_float(r.get("hold_window_hours"), 0.0) or 0.0,

@@ -14,6 +14,7 @@ import pytest
 
 from app.models.trading import PaperTrade
 from app.services.trading.pattern_shadow_vetting import (
+    _load_directional_evidence,
     pilot_promoted_risk_multiplier,
     run_shadow_vetting_cycle,
     select_shadow_vetting_candidates,
@@ -40,6 +41,77 @@ def _settings(**overrides):
     )
     base.update(overrides)
     return SimpleNamespace(**base)
+
+
+def test_shadow_vetting_skips_paper_dynamic_without_realized_return():
+    now = datetime(2026, 1, 1, 12, 0, 0)
+
+    class _Rows:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return list(self._rows)
+
+    class _Result:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def mappings(self):
+            return _Rows(self._rows)
+
+    class _FakeDb:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, _stmt):
+            self.calls += 1
+            if self.calls == 1:
+                return _Result([])
+            return _Result(
+                [
+                    {
+                        "scan_pattern_id": 123,
+                        "pnl": 99.0,
+                        "realized_return_pct": None,
+                        "entry_date": now - timedelta(hours=3),
+                        "exit_date": now - timedelta(hours=2),
+                        "exit_reason": "bad_missing_return",
+                        "hold_window_hours": 1.0,
+                    },
+                    {
+                        "scan_pattern_id": 123,
+                        "pnl": 0.0,
+                        "realized_return_pct": 0.0,
+                        "entry_date": now - timedelta(hours=2),
+                        "exit_date": now,
+                        "exit_reason": "pattern_exit_now",
+                        "hold_window_hours": 1.0,
+                    },
+                    {
+                        "scan_pattern_id": 123,
+                        "pnl": 12.5,
+                        "realized_return_pct": 12.5,
+                        "entry_date": now - timedelta(hours=1),
+                        "exit_date": now,
+                        "exit_reason": "pattern_exit_now",
+                        "hold_window_hours": 1.0,
+                    },
+                ]
+            )
+
+    evidence = _load_directional_evidence(
+        _FakeDb(),
+        now=now,
+        settings_=_settings(chili_shadow_vetting_include_paper_dynamic_outcomes=True),
+    )
+
+    row = evidence[123]
+    assert row["raw_sample_n"] == 2
+    assert row["paper_dynamic_sample_n"] == 2
+    assert row["paper_dynamic_exit_sample_n"] == 2
+    assert row["weighted_directional_wr"] == pytest.approx(0.5)
+    assert row["path_quality"] == pytest.approx(1.0)
 
 
 def test_shadow_vetting_counts_autotrader_paper_dynamic_outcomes(db):
