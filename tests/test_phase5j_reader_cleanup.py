@@ -62,3 +62,17 @@ def test_phase5j_slice4_realized_and_sizing_readers_use_management_envelopes() -
         assert "trading_management_envelopes" in source
         assert "FROM trading_trades" not in source
         assert "JOIN trading_trades" not in source
+
+
+def test_phase5j_slice5_routes_and_watchers_use_management_envelopes() -> None:
+    for relative_path in (
+        "app/routers/admin.py",
+        "app/routers/trading_sub/ai.py",
+        "app/services/trading/brain_work/handlers/quality_score.py",
+        "scripts/d-pid537-watcher.py",
+        "scripts/walkforward_monthly_dd_breaker.py",
+    ):
+        source = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+        assert "trading_management_envelopes" in source
+        assert "FROM trading_trades" not in source
+        assert "JOIN trading_trades" not in source

@@ -56,7 +56,7 @@ def _load_daily_pnls(
         SELECT DATE_TRUNC('day',
                    COALESCE(exit_date, last_fill_at, filled_at))::date AS d,
                COALESCE(SUM(pnl), 0)::float AS daily_pnl
-          FROM trading_trades
+          FROM trading_management_envelopes
          WHERE status = 'closed'
            AND pnl IS NOT NULL
            AND scan_pattern_id IS NOT NULL

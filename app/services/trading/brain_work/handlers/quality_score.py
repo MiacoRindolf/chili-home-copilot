@@ -268,7 +268,7 @@ def _load_realized_pnl_for_pattern(
             _text(f"""
                 SELECT COUNT(*) AS n,
                        AVG({trade_return_fraction_sql()}) AS avg_pnl_pct
-                FROM trading_trades
+                FROM trading_management_envelopes
                 WHERE scan_pattern_id = :pid
                   AND scan_pattern_id != -1
                   AND status = 'closed'

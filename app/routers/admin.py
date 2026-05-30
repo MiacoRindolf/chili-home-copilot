@@ -235,7 +235,7 @@ def api_admin_bracket_cover_policy_snapshot(ctx=Depends(require_paired)):
         "       bi.broker_stop_order_id, t.status AS trade_status, "
         "       bi.updated_at "
         "FROM trading_bracket_intents bi "
-        "JOIN trading_trades t ON t.id = bi.trade_id "
+        "JOIN trading_management_envelopes t ON t.id = bi.trade_id "
         "WHERE bi.last_diff_reason LIKE 'covered_by_existing_sell%' "
         "  AND t.status = 'open' "
         "ORDER BY bi.updated_at DESC NULLS LAST"

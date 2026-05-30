@@ -93,7 +93,7 @@ def main() -> int:
     # ---------- 7d realized PnL ----------
     cur.execute("""
         SELECT COUNT(*) AS n, SUM(pnl)::numeric(12,2) AS pnl
-        FROM trading_trades
+        FROM trading_management_envelopes
         WHERE status='closed' AND pnl IS NOT NULL
           AND entry_date > NOW() - INTERVAL '7 days'
     """)
@@ -101,7 +101,7 @@ def main() -> int:
 
     cur.execute("""
         SELECT COUNT(*) AS n, SUM(pnl)::numeric(12,2) AS pnl
-        FROM trading_trades
+        FROM trading_management_envelopes
         WHERE status='closed' AND pnl IS NOT NULL
           AND scan_pattern_id=537
     """)

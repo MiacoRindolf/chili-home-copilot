@@ -1514,7 +1514,7 @@ def api_data_health(db: Session = Depends(get_db)):
 
     try:
         checks["total_trades"] = db.execute(
-            text("SELECT COUNT(*) FROM trading_trades")
+            text("SELECT COUNT(*) FROM trading_management_envelopes")
         ).scalar() or 0
     except Exception:
         checks["total_trades"] = -1
