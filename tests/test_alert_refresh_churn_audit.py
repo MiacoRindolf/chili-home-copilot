@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 
 from scripts import analyze_alert_refresh_churn as audit
@@ -78,3 +79,55 @@ def test_churn_audit_handles_unavailable_database(monkeypatch, capsys):
     assert "# alert-refresh-churn hours=1 limit=3" in captured.out
     assert "Database is not accepting read-only connections yet" in captured.err
     assert "database system is starting up" in captured.err
+
+
+def test_churn_audit_json_output_without_db(monkeypatch, capsys):
+    monkeypatch.setattr(
+        audit,
+        "_build_report",
+        lambda hours, limit: {
+            "hours": hours,
+            "limit": limit,
+            "work_counts": [{"event_type": "recert_rescue_refresh", "events": 3}],
+            "diagnostic_outcomes": [],
+            "top_work_producing_patterns": [],
+            "top_noop_exit_variant_diagnostics": [],
+            "open_exit_variant_work_with_recent_noop": [],
+        },
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["analyze_alert_refresh_churn.py", "--hours", "12", "--limit", "5", "--json"],
+    )
+
+    assert audit.main() == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["hours"] == 12
+    assert payload["limit"] == 5
+    assert payload["work_counts"][0]["event_type"] == "recert_rescue_refresh"
+
+
+def test_churn_audit_json_unavailable_database(monkeypatch, capsys):
+    def unavailable(_hours: int):
+        raise audit.DatabaseUnavailable("database system is starting up")
+
+    monkeypatch.setattr(audit, "_work_counts", unavailable)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["analyze_alert_refresh_churn.py", "--hours", "1", "--limit", "3", "--json"],
+    )
+
+    assert audit.main() == 2
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert captured.err == ""
+    assert payload["ok"] is False
+    assert payload["error"] == "database_unavailable"
+    assert payload["hours"] == 1
+    assert payload["limit"] == 3
+    assert "database system is starting up" in payload["detail"]

@@ -8,6 +8,7 @@ visible recommendation mix from actual queued work and diagnostic outcomes.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -266,33 +267,77 @@ def _open_exit_work_with_recent_noop(hours: int, limit: int) -> list[dict]:
     )
 
 
+def _build_report(hours: int, limit: int) -> dict[str, object]:
+    return {
+        "hours": int(hours),
+        "limit": int(limit),
+        "work_counts": _work_counts(hours),
+        "diagnostic_outcomes": _diagnostic_counts(hours),
+        "top_work_producing_patterns": _top_patterns(hours, limit),
+        "top_noop_exit_variant_diagnostics": _top_noop_exit_patterns(hours, limit),
+        "open_exit_variant_work_with_recent_noop": _open_exit_work_with_recent_noop(
+            hours,
+            limit,
+        ),
+    }
+
+
+def _print_report(report: dict[str, object]) -> None:
+    hours = int(report["hours"])
+    limit = int(report["limit"])
+    print(f"# alert-refresh-churn hours={hours} limit={limit}")
+    _print_table("Work Counts", report["work_counts"])
+    _print_table("Diagnostic Outcomes", report["diagnostic_outcomes"])
+    _print_table("Top Work-Producing Patterns", report["top_work_producing_patterns"])
+    _print_table(
+        "Top No-Op Exit Variant Diagnostics",
+        report["top_noop_exit_variant_diagnostics"],
+    )
+    _print_table(
+        "Open Exit Variant Work With Recent No-Op Evidence",
+        report["open_exit_variant_work_with_recent_noop"],
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hours", type=int, default=24, help="lookback window")
     parser.add_argument("--limit", type=int, default=20, help="rows per top-pattern section")
+    parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     args = parser.parse_args()
     hours = max(1, int(args.hours))
     limit = max(1, int(args.limit))
 
-    print(f"# alert-refresh-churn hours={hours} limit={limit}")
     try:
-        _print_table("Work Counts", _work_counts(hours))
-        _print_table("Diagnostic Outcomes", _diagnostic_counts(hours))
-        _print_table("Top Work-Producing Patterns", _top_patterns(hours, limit))
-        _print_table("Top No-Op Exit Variant Diagnostics", _top_noop_exit_patterns(hours, limit))
-        _print_table(
-            "Open Exit Variant Work With Recent No-Op Evidence",
-            _open_exit_work_with_recent_noop(hours, limit),
-        )
+        report = _build_report(hours, limit)
     except DatabaseUnavailable as exc:
-        print(
-            "Database is not accepting read-only connections yet; "
-            "retry after Postgres health is healthy.",
-            file=sys.stderr,
-        )
         detail = str(exc).splitlines()[0] if str(exc) else "connection unavailable"
-        print(f"Detail: {detail}", file=sys.stderr)
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "error": "database_unavailable",
+                        "detail": detail,
+                        "hours": hours,
+                        "limit": limit,
+                    },
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(f"# alert-refresh-churn hours={hours} limit={limit}")
+            print(
+                "Database is not accepting read-only connections yet; "
+                "retry after Postgres health is healthy.",
+                file=sys.stderr,
+            )
+            print(f"Detail: {detail}", file=sys.stderr)
         return 2
+    if args.json:
+        print(json.dumps({"ok": True, **report}, default=str, sort_keys=True))
+    else:
+        _print_report(report)
     return 0
 
 
