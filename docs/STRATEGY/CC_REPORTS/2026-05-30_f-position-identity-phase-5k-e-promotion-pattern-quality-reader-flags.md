@@ -67,14 +67,49 @@ live flag soak with both flags enabled together.
 Do not roll this into portfolio-risk yet. Portfolio open-exposure is a separate
 risk surface and should get its own flag, probe, and rollback lever.
 
-## Next Step
+## Live Soak Result
 
-Run the narrow live soak:
+Phase 5K-E was promoted after the default-off source commit.
+
+The live flags are now enabled in `.env` and visible inside both `chili` and
+`autotrader-worker`:
 
 ```text
 CHILI_PHASE5K_COHORT_PROMOTE_USE_ENVELOPES=true
 CHILI_PHASE5K_PATTERN_QUALITY_USE_ENVELOPES=true
 ```
 
-Then recreate only the worker(s) that consume these readers and re-run the
-same parity/function checks.
+Post-flip validation:
+
+```text
+Phase 5K-A parity probe: COMPLETE_POSITIVE
+PARITY_CHECKS=6
+PARITY_MISMATCHES=0
+CHECK_PROMOTION_REALIZED=OK old_rows=30 new_rows=30
+CHECK_PATTERN_QUALITY=OK old_rows=30 new_rows=30
+
+Phase 5I post-rename probe: COMPLETE_POSITIVE
+FRESH_DECISIONS=20
+FRESH_ENVELOPES=20
+FRESH_CLOSES=10
+HARD_LINKAGE_ISSUES=0
+MISMATCHED_ROWS=0
+
+Direct pattern-quality function:
+PATTERN_QUALITY_OLD_ROWS 30
+PATTERN_QUALITY_NEW_ROWS 30
+PATTERN_QUALITY_MATCH True
+
+Direct cohort-promote function:
+COHORT_PROMOTE_OLD_COUNT 9
+COHORT_PROMOTE_NEW_COUNT 9
+COHORT_PROMOTE_MATCH True
+```
+
+Fresh logs from the restarted consumer workers showed no relation, query, or
+Phase 5K reader errors.
+
+## Next Step
+
+Ship the portfolio-risk open-exposure reader under its own default-off flag and
+repeat the same proof/soak cycle.
