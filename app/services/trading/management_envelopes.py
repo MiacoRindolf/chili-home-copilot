@@ -203,9 +203,7 @@ def count_probation_envelopes_since(
     """), params).scalar()
     return int(row or 0)
 
-
 def _option_envelope_predicate_sql(alias: str = "t") -> str:
-    """SQL predicate matching option envelopes that bracket code must skip."""
     snap = f"COALESCE({alias}.indicator_snapshot, '{{}}'::jsonb)"
     breakout = f"({snap}->'breakout_alert')"
     return f"""
@@ -227,7 +225,12 @@ def load_bracket_reconciliation_scope(
     *,
     user_id: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Load non-option broker envelopes eligible for bracket reconciliation."""
+    """Load management envelopes eligible for bracket reconciliation.
+
+    The contract mirrors the reconciler's historical compatibility-view scope:
+    open broker-backed envelopes plus non-open envelopes whose bracket intent is
+    still unresolved. Paper and option envelopes remain out of scope.
+    """
     params: dict[str, Any] = {}
     scope_clause = (
         "( (t.status = 'open' AND t.broker_source IS NOT NULL)"
@@ -235,7 +238,7 @@ def load_bracket_reconciliation_scope(
         "     bi.id IS NOT NULL"
         "     AND t.broker_source IS NOT NULL"
         "     AND t.status <> 'open'"
-        "     AND COALESCE(bi.intent_state, '') NOT IN ('reconciled', 'authoritative_closed', 'closed')"
+        "     AND bi.intent_state NOT IN ('reconciled', 'authoritative_closed', 'closed')"
         "   )"
         " )"
     )
@@ -273,7 +276,7 @@ def load_stale_bracket_watchdog_candidates(
     user_id: int | None = None,
     stale_after_sec: int,
 ) -> list[dict[str, Any]]:
-    """Load open non-option broker envelopes for the missing-stop watchdog."""
+    """Load open broker-backed envelopes for the missing-stop watchdog."""
     params: dict[str, Any] = {"stale_sec": int(stale_after_sec)}
     user_filter = ""
     if user_id is not None:
@@ -304,40 +307,41 @@ def load_stale_bracket_watchdog_candidates(
         WHERE t.status = 'open'
           AND t.broker_source IS NOT NULL
           AND NOT {_option_envelope_predicate_sql('t')}
-          AND COALESCE(bi.intent_state, '') NOT IN ('reconciled', 'authoritative_closed', 'closed')
+          AND bi.intent_state NOT IN ('reconciled', 'authoritative_closed', 'closed')
           {user_filter}
         ORDER BY t.id
     """, params)
 
 
-def fetch_naked_coinbase_bracket_intent_rows(
+def load_coinbase_orphan_adoption_candidates(
     db: Session,
     *,
-    adoptable_states: list[str] | tuple[str, ...] | set[str] | frozenset[str],
+    adoptable_states: list[str] | tuple[str, ...] | set[str],
 ) -> list[dict[str, Any]]:
-    """Fetch Coinbase bracket intents missing a broker stop for open envelopes."""
-    states: list[str] = []
-    for state in adoptable_states:
-        normalized = str(state or "").strip().lower()
-        if normalized:
-            states.append(normalized)
+    """Load naked Coinbase bracket intents from the management-envelope surface.
+
+    Candidate rows are intentionally narrow: open Coinbase envelopes whose
+    bracket intent has no broker stop id and is still in an adoption-capable
+    state. This keeps the one-shot orphan adoption pass away from the legacy
+    trade compatibility table while preserving its broker-truth contract.
+    """
     return _rows(db, f"""
         SELECT
-            bi.id           AS intent_id,
-            bi.trade_id     AS trade_id,
-            bi.ticker       AS ticker,
-            bi.quantity     AS quantity,
-            bi.intent_state AS intent_state,
+            bi.id            AS intent_id,
+            bi.trade_id      AS trade_id,
+            bi.ticker        AS ticker,
+            bi.quantity      AS quantity,
+            bi.intent_state  AS intent_state,
             bi.broker_source AS broker_source
         FROM trading_bracket_intents bi
         JOIN {MANAGEMENT_ENVELOPES_RELATION} t ON t.id = bi.trade_id
         WHERE t.status = 'open'
           AND LOWER(COALESCE(t.broker_source, '')) = 'coinbase'
-          AND LOWER(COALESCE(bi.broker_source, '')) = 'coinbase'
+          AND bi.broker_source = 'coinbase'
           AND bi.broker_stop_order_id IS NULL
-          AND LOWER(COALESCE(bi.intent_state, '')) = ANY(:states)
+          AND LOWER(bi.intent_state) = ANY(:states)
         ORDER BY bi.id
-    """, {"states": states})
+    """, {"states": list(adoptable_states)})
 
 
 def phase5b_parity_summary(db: Session) -> Phase5BParitySummary:

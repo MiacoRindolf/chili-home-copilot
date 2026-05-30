@@ -40,6 +40,7 @@ from .bracket_reconciler import (
     classify_discrepancy,
 )
 from .management_envelopes import (
+    MANAGEMENT_ENVELOPES_RELATION,
     load_bracket_reconciliation_scope,
     load_stale_bracket_watchdog_candidates,
 )
@@ -83,6 +84,30 @@ BRACKET_WATCHDOG = "[bracket_watchdog]"
 
 logger = logging.getLogger(__name__)
 _ALLOWED_MODES = ("off", "shadow", "compare", "authoritative")
+
+
+def _option_trade_predicate_sql(alias: str = "t") -> str:
+    """SQL predicate matching the canonical option-trade markers.
+
+    Bracket reconciliation writes stock/crypto stop coverage against broker
+    position views. Option exits and protection live in the dedicated options
+    monitor, so option trades must never enter this reconciler even when they
+    have legacy bracket_intent rows.
+    """
+    snap = f"COALESCE({alias}.indicator_snapshot, '{{}}'::jsonb)"
+    breakout = f"({snap}->'breakout_alert')"
+    return f"""
+        (
+            LOWER(COALESCE({alias}.asset_kind, '')) IN ('option', 'options')
+            OR LOWER(COALESCE({alias}.tags, '')) LIKE '%option%'
+            OR COALESCE({snap} ? 'option_meta', FALSE)
+            OR LOWER(COALESCE({snap}->>'asset_type', '')) IN ('option', 'options')
+            OR LOWER(COALESCE({snap}->>'options_path', '')) IN ('1', 'true', 'yes', 'on')
+            OR COALESCE({breakout} ? 'option_meta', FALSE)
+            OR LOWER(COALESCE({breakout}->>'asset_type', '')) IN ('option', 'options')
+            OR LOWER(COALESCE({breakout}->>'options_path', '')) IN ('1', 'true', 'yes', 'on')
+        )
+    """
 
 
 def _effective_mode(override: str | None = None) -> str:
@@ -2656,6 +2681,51 @@ def _load_local_view(
     protected by the dedicated options exit monitor rather than stock bracket
     orders on the underlying ticker.
     """
+    params: dict[str, Any] = {}
+    # Two disjoint scopes joined with OR:
+    #   scope A — the classical "open live trade" scope.
+    #   scope B — the orphan candidate scope: the Trade is no longer
+    #             open, but its BracketIntent still thinks it should be
+    #             protected. These rows are exactly the ones at risk of
+    #             leaving a stop working at the broker for a position
+    #             we no longer hold.
+    scope_clause = (
+        "( (t.status = 'open' AND t.broker_source IS NOT NULL)"
+        " OR ("
+        "     bi.id IS NOT NULL"
+        "     AND t.broker_source IS NOT NULL"
+        "     AND t.status <> 'open'"
+        "     AND bi.intent_state NOT IN ('reconciled', 'authoritative_closed', 'closed')"
+        "   )"
+        " )"
+    )
+    filters = [scope_clause]
+    filters.append(f"NOT {_option_trade_predicate_sql('t')}")
+    if user_id is not None:
+        filters.append("t.user_id = :uid")
+        params["uid"] = int(user_id)
+
+    sql = text(f"""
+        SELECT
+            t.id AS trade_id,
+            t.user_id,
+            t.ticker,
+            t.direction,
+            t.quantity,
+            t.status AS trade_status,
+            t.pending_exit_status,
+            t.pending_exit_reason,
+            t.broker_source,
+            bi.id AS bracket_intent_id,
+            bi.intent_state,
+            bi.stop_price,
+            bi.target_price
+        FROM {MANAGEMENT_ENVELOPES_RELATION} AS t
+        LEFT JOIN trading_bracket_intents AS bi
+          ON bi.trade_id = t.id
+        WHERE {' AND '.join(filters)}
+        ORDER BY t.id
+    """)
     rows = load_bracket_reconciliation_scope(db, user_id=user_id)
     return [
         {
@@ -2911,6 +2981,43 @@ def run_missing_stop_watchdog(
             hits=[],
         )
 
+    # Latest reconciliation row per trade within a generous lookback,
+    # joined to the live open-trade set. Paper trades are excluded
+    # (``broker_source IS NOT NULL``) for the same reason as the sweep.
+    params: dict[str, Any] = {"stale_sec": int(stale_sec)}
+    user_filter = ""
+    if user_id is not None:
+        user_filter = " AND t.user_id = :uid"
+        params["uid"] = int(user_id)
+
+    sql = text(f"""
+        WITH last_rec AS (
+            SELECT DISTINCT ON (trade_id)
+                trade_id, kind, severity, observed_at
+            FROM trading_bracket_reconciliation_log
+            WHERE observed_at >= (NOW() - INTERVAL '24 hours')
+            ORDER BY trade_id, observed_at DESC
+        )
+        SELECT
+            t.id AS trade_id,
+            t.ticker,
+            t.broker_source,
+            bi.id AS bracket_intent_id,
+            bi.last_observed_at,
+            r.kind,
+            r.severity,
+            r.observed_at,
+            EXTRACT(EPOCH FROM (NOW() - COALESCE(r.observed_at, bi.created_at))) AS age_sec
+        FROM {MANAGEMENT_ENVELOPES_RELATION} AS t
+        JOIN trading_bracket_intents AS bi ON bi.trade_id = t.id
+        LEFT JOIN last_rec AS r ON r.trade_id = t.id
+        WHERE t.status = 'open'
+          AND t.broker_source IS NOT NULL
+          AND NOT {_option_trade_predicate_sql('t')}
+          AND bi.intent_state NOT IN ('reconciled', 'authoritative_closed', 'closed')
+          {user_filter}
+        ORDER BY t.id
+    """)
     rows = load_stale_bracket_watchdog_candidates(
         db,
         user_id=user_id,

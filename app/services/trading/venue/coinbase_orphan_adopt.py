@@ -58,6 +58,7 @@ from typing import Any, Iterable, Optional
 
 from sqlalchemy.orm import Session
 
+from ..management_envelopes import load_coinbase_orphan_adoption_candidates
 from ..bracket_intent_writer import (
     IntentState,
     _coerce_state,
@@ -65,7 +66,6 @@ from ..bracket_intent_writer import (
     sync_broker_stop_order_id_mirror,
     transition,
 )
-from ..management_envelopes import fetch_naked_coinbase_bracket_intent_rows
 from .coinbase_spot import CoinbaseSpotAdapter
 from .protocol import NormalizedOrder, VenueAdapterError
 
@@ -209,7 +209,7 @@ def _load_naked_coinbase_intents(db: Session) -> list[_NakedIntent]:
     * already-adopted intents (``broker_stop_order_id IS NOT NULL``),
     * closed / reconciled / shadow_logged rows.
     """
-    rows = fetch_naked_coinbase_bracket_intent_rows(
+    rows = load_coinbase_orphan_adoption_candidates(
         db,
         adoptable_states=_ADOPTABLE_STATES,
     )
