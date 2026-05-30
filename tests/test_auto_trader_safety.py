@@ -1045,7 +1045,7 @@ def test_run_tick_processes_synergy_retry_even_when_alert_has_prior_run(
     assert seen == [{"alert_id": alert.id, "retry": True}]
 
 
-def test_live_entry_blocks_recert_required_pattern_after_sizing_before_broker(db, monkeypatch):
+def test_live_entry_blocks_recert_required_pattern_before_sizing_or_broker(db, monkeypatch):
     u = models.User(name="recert_block_u")
     db.add(u)
     db.flush()
@@ -1094,6 +1094,10 @@ def test_live_entry_blocks_recert_required_pattern_after_sizing_before_broker(db
         "_execute_broker_buy",
         lambda *a, **k: pytest.fail("recert block should happen before broker buy"),
     )
+    monkeypatch.setattr(
+        "app.services.trading.position_sizer_emitter.emit_shadow_proposal",
+        lambda *a, **k: pytest.fail("hard recert block should skip position sizing"),
+    )
     shadow_calls: list[dict] = []
     monkeypatch.setattr(
         at_mod,
@@ -1108,6 +1112,8 @@ def test_live_entry_blocks_recert_required_pattern_after_sizing_before_broker(db
     runs = db.query(AutoTraderRun).filter(AutoTraderRun.breakout_alert_id == alert.id).all()
     assert runs
     assert {r.reason for r in runs} == {"pattern_recert_required"}
+    assert runs[0].rule_snapshot["position_sizer_skipped_reason"] == "hard_recert_required"
+    assert "position_sizer_proposal_id" not in runs[0].rule_snapshot
     assert runs[0].rule_snapshot["recert_signal_fastlane"]["queued"] is True
     assert shadow_calls
     assert shadow_calls[0]["decision"] == "blocked_recert_required"

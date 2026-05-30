@@ -6293,9 +6293,17 @@ def _execute_new_entry(
         except Exception as _po_e:
             snap["payoff_sizing_error"] = str(_po_e)[:200]
 
+    hard_recert_live_block = (
+        live
+        and bool(getattr(alert, "_chili_recert_required", False))
+        and not bool(getattr(alert, "_chili_probation_recert_allowed", False))
+    )
+    if hard_recert_live_block:
+        snap["position_sizer_skipped_reason"] = "hard_recert_required"
+
     # Canonical Kelly/cost/correlation sizer for stock/crypto entries. Options
     # keep their dedicated option-quality and contract-sizing path.
-    if not snap.get("options_path"):
+    if not snap.get("options_path") and not hard_recert_live_block:
         try:
             from .position_sizer_emitter import EmitterSignal, emit_shadow_proposal
             from .position_sizer_writer import LegacySizing, mode_is_authoritative
