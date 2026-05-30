@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from app.metrics import conversation_stats, get_counts
+from app import health, metrics, openai_client
+from app.metrics import conversation_stats, feature_usage, get_counts
 
 
 class _SubqueryColumns:
@@ -160,3 +161,55 @@ def test_get_counts_coerces_empty_chore_sums_to_zero() -> None:
         "chores": {"total": 0, "pending": 0, "done": 0},
         "birthdays": {"total": 0},
     }
+
+
+def test_feature_usage_reuses_supplied_action_stats(monkeypatch) -> None:
+    monkeypatch.setattr(
+        metrics,
+        "action_type_stats",
+        lambda db: (_ for _ in ()).throw(AssertionError("unexpected query")),
+    )
+
+    result = feature_usage(
+        object(),  # type: ignore[arg-type]
+        {"web_search": 2, "general_chat": 3, "add_chore": 4, "pair_device": 1},
+    )
+
+    assert result["web_search"] == 2
+    assert result["general_chat"] == 3
+    assert result["tool_actions"] == 5
+
+
+def test_admin_dashboard_json_reuses_action_type_stats(monkeypatch) -> None:
+    calls = 0
+
+    def fake_action_type_stats(db) -> dict:
+        nonlocal calls
+        calls += 1
+        return {"web_search": 7, "add_chore": 2}
+
+    monkeypatch.setattr(health, "check_db", lambda db: {"ok": True})
+    monkeypatch.setattr(health, "check_ollama", lambda: {"ok": True})
+    monkeypatch.setattr(openai_client, "is_configured", lambda: True)
+    monkeypatch.setattr(openai_client, "OPENAI_MODEL", "test-model")
+    monkeypatch.setattr(metrics, "action_type_stats", fake_action_type_stats)
+    monkeypatch.setattr(metrics, "total_stats", lambda db: {})
+    monkeypatch.setattr(metrics, "get_counts", lambda db: {})
+    monkeypatch.setattr(metrics, "latency_stats", lambda: {})
+    monkeypatch.setattr(metrics, "latency_history", lambda: [])
+    monkeypatch.setattr(metrics, "model_stats", lambda db: {})
+    monkeypatch.setattr(metrics, "messages_per_day", lambda db: [])
+    monkeypatch.setattr(metrics, "hourly_activity", lambda db: [])
+    monkeypatch.setattr(metrics, "response_time_trend", lambda db: [])
+    monkeypatch.setattr(metrics, "conversation_stats", lambda db: {})
+    monkeypatch.setattr(metrics, "top_users", lambda db: [])
+    monkeypatch.setattr(metrics, "per_user_chore_stats", lambda db: [])
+    monkeypatch.setattr(metrics, "rag_stats", lambda: {"available": True})
+    monkeypatch.setattr(metrics, "system_alerts", lambda db: [])
+
+    result = metrics.admin_dashboard_json(object())  # type: ignore[arg-type]
+
+    assert calls == 1
+    assert result["action_types"] == {"web_search": 7, "add_chore": 2}
+    assert result["features"]["web_search"] == 7
+    assert result["features"]["tool_actions"] == 2

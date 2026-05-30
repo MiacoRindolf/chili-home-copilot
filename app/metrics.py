@@ -190,9 +190,10 @@ def action_type_stats(db: Session) -> dict:
     return {action or "unknown": count for action, count in rows}
 
 
-def feature_usage(db: Session) -> dict:
+def feature_usage(db: Session, stats: dict | None = None) -> dict:
     """Aggregate counts for key features: web_search, wellness, crisis, vision, intercom, general_chat."""
-    stats = action_type_stats(db)
+    if stats is None:
+        stats = action_type_stats(db)
     return {
         "web_search": stats.get("web_search", 0),
         "wellness_support": stats.get("wellness_support", 0),
@@ -356,6 +357,7 @@ def admin_dashboard_json(db: Session) -> dict:
     """Full admin dashboard data as JSON for AJAX rendering."""
     from .health import check_db, check_ollama
     from . import openai_client
+    action_types = action_type_stats(db)
 
     return {
         "health": {
@@ -369,8 +371,8 @@ def admin_dashboard_json(db: Session) -> dict:
         "latency": latency_stats(),
         "latency_history": latency_history(),
         "model_stats": model_stats(db),
-        "action_types": action_type_stats(db),
-        "features": feature_usage(db),
+        "action_types": action_types,
+        "features": feature_usage(db, action_types),
         "messages_per_day": messages_per_day(db),
         "hourly_activity": hourly_activity(db),
         "response_time_trend": response_time_trend(db),
