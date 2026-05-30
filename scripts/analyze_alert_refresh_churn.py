@@ -198,6 +198,53 @@ def _top_noop_exit_patterns(hours: int, limit: int) -> list[dict]:
     )
 
 
+def _top_noop_exit_pattern_rollups(hours: int, limit: int) -> list[dict]:
+    return _rows(
+        """
+        WITH noop AS (
+          SELECT
+            (e.payload->>'scan_pattern_id')::bigint AS scan_pattern_id,
+            COALESCE(e.payload->>'skip_reason', '<none>') AS skip_reason,
+            NULLIF(COALESCE(e.payload->>'evidence_fingerprint', ''), '') AS evidence_fingerprint,
+            e.created_at
+          FROM brain_work_events e
+          WHERE e.event_kind = 'outcome'
+            AND e.event_type = 'exit_variant_diagnostic'
+            AND e.created_at >= now() - (:hours * interval '1 hour')
+            AND COALESCE(e.payload->>'scan_pattern_id', '') ~ '^[0-9]+$'
+            AND (
+              COALESCE(e.payload->>'created_count', '') = ''
+              OR (
+                COALESCE(e.payload->>'created_count', '') ~ '^-?[0-9]+$'
+                AND (e.payload->>'created_count')::int = 0
+              )
+            )
+        )
+        SELECT
+          n.scan_pattern_id,
+          COALESCE(sp.name, '<missing>') AS pattern_name,
+          COALESCE(sp.lifecycle_stage, '<null>') AS lifecycle_stage,
+          n.skip_reason,
+          count(*) AS noop_diagnostics,
+          count(DISTINCT n.evidence_fingerprint) FILTER (
+            WHERE n.evidence_fingerprint IS NOT NULL
+          ) AS distinct_fingerprints,
+          min(n.created_at) AS first_seen,
+          max(n.created_at) AS last_seen
+        FROM noop n
+        LEFT JOIN scan_patterns sp ON sp.id = n.scan_pattern_id
+        GROUP BY
+          n.scan_pattern_id,
+          COALESCE(sp.name, '<missing>'),
+          COALESCE(sp.lifecycle_stage, '<null>'),
+          n.skip_reason
+        ORDER BY noop_diagnostics DESC, distinct_fingerprints DESC, last_seen DESC
+        LIMIT :limit
+        """,
+        {"hours": int(hours), "limit": int(limit)},
+    )
+
+
 def _open_exit_work_with_recent_noop(hours: int, limit: int) -> list[dict]:
     return _rows(
         """
@@ -430,6 +477,10 @@ def _build_report(hours: int, limit: int) -> dict[str, object]:
         "diagnostic_outcomes": _diagnostic_counts(hours),
         "top_work_producing_patterns": _top_patterns(hours, limit),
         "top_noop_exit_variant_diagnostics": _top_noop_exit_patterns(hours, limit),
+        "top_noop_exit_variant_pattern_rollups": _top_noop_exit_pattern_rollups(
+            hours,
+            limit,
+        ),
         "open_exit_variant_work_with_recent_noop": _open_exit_work_with_recent_noop(
             hours,
             limit,
@@ -452,6 +503,10 @@ def _print_report(report: dict[str, object]) -> None:
     _print_table(
         "Top No-Op Exit Variant Diagnostics",
         report["top_noop_exit_variant_diagnostics"],
+    )
+    _print_table(
+        "Top No-Op Exit Variant Pattern Rollups",
+        report["top_noop_exit_variant_pattern_rollups"],
     )
     _print_table(
         "Open Exit Variant Work With Recent No-Op Evidence",
