@@ -130,7 +130,55 @@ def test_churn_audit_json_unavailable_database(monkeypatch, capsys):
     assert payload["error"] == "database_unavailable"
     assert payload["hours"] == 1
     assert payload["limit"] == 3
+    assert payload["wait_seconds"] == 0
     assert "database system is starting up" in payload["detail"]
+
+
+def test_churn_audit_waits_for_database(monkeypatch, capsys):
+    calls = 0
+    sleeps: list[float] = []
+
+    def flaky_report(hours: int, limit: int):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise audit.DatabaseUnavailable("database system is starting up")
+        return {
+            "hours": hours,
+            "limit": limit,
+            "work_counts": [],
+            "diagnostic_outcomes": [],
+            "top_work_producing_patterns": [],
+            "top_noop_exit_variant_diagnostics": [],
+            "open_exit_variant_work_with_recent_noop": [],
+        }
+
+    monkeypatch.setattr(audit, "_build_report", flaky_report)
+    monkeypatch.setattr(audit.time, "sleep", lambda seconds: sleeps.append(seconds))
+    times = iter([100.0, 100.0, 101.0])
+    monkeypatch.setattr(audit.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "analyze_alert_refresh_churn.py",
+            "--hours",
+            "2",
+            "--limit",
+            "3",
+            "--wait-seconds",
+            "5",
+            "--json",
+        ],
+    )
+
+    assert audit.main() == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["wait_seconds"] == 5
+    assert calls == 2
+    assert sleeps == [4.0]
 
 
 def test_open_exit_noop_query_keeps_non_positive_skip_evidence_specific(monkeypatch):

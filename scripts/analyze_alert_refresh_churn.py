@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Iterable
 
@@ -298,32 +299,63 @@ def _print_report(report: dict[str, object]) -> None:
     )
 
 
+def _database_unavailable_payload(
+    *,
+    detail: str,
+    hours: int,
+    limit: int,
+    wait_seconds: int,
+) -> dict[str, object]:
+    return {
+        "ok": False,
+        "error": "database_unavailable",
+        "detail": detail,
+        "hours": int(hours),
+        "limit": int(limit),
+        "wait_seconds": int(wait_seconds),
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hours", type=int, default=24, help="lookback window")
     parser.add_argument("--limit", type=int, default=20, help="rows per top-pattern section")
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+    parser.add_argument(
+        "--wait-seconds",
+        type=int,
+        default=0,
+        help="retry read-only connection attempts for this many seconds",
+    )
     args = parser.parse_args()
     hours = max(1, int(args.hours))
     limit = max(1, int(args.limit))
+    wait_seconds = max(0, int(args.wait_seconds))
 
+    deadline = time.monotonic() + wait_seconds
+    last_unavailable: DatabaseUnavailable | None = None
     try:
-        report = _build_report(hours, limit)
+        while True:
+            try:
+                report = _build_report(hours, limit)
+                break
+            except DatabaseUnavailable as exc:
+                last_unavailable = exc
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(min(5.0, max(0.25, deadline - time.monotonic())))
     except DatabaseUnavailable as exc:
+        if last_unavailable is not None:
+            exc = last_unavailable
         detail = str(exc).splitlines()[0] if str(exc) else "connection unavailable"
         if args.json:
-            print(
-                json.dumps(
-                    {
-                        "ok": False,
-                        "error": "database_unavailable",
-                        "detail": detail,
-                        "hours": hours,
-                        "limit": limit,
-                    },
-                    sort_keys=True,
-                )
+            payload = _database_unavailable_payload(
+                detail=detail,
+                hours=hours,
+                limit=limit,
+                wait_seconds=wait_seconds,
             )
+            print(json.dumps(payload, sort_keys=True))
         else:
             print(f"# alert-refresh-churn hours={hours} limit={limit}")
             print(
@@ -334,7 +366,13 @@ def main() -> int:
             print(f"Detail: {detail}", file=sys.stderr)
         return 2
     if args.json:
-        print(json.dumps({"ok": True, **report}, default=str, sort_keys=True))
+        print(
+            json.dumps(
+                {"ok": True, "wait_seconds": wait_seconds, **report},
+                default=str,
+                sort_keys=True,
+            )
+        )
     else:
         _print_report(report)
     return 0
