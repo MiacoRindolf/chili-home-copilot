@@ -18,6 +18,7 @@ from .return_math import trade_return_pct
 logger = logging.getLogger(__name__)
 
 _BENCHMARK_TICKER = "SPY"
+_BENCHMARK_RETURN_UNSET = object()
 
 
 def _is_option_trade_safe(trade: Any) -> bool:
@@ -56,32 +57,74 @@ def _fetch_benchmark_return(
 
         days = max(1, (exit_date - entry_date).days + 5)
         df = fetch_ohlcv_df(_BENCHMARK_TICKER, period=f"{days + 30}d", interval="1d")
-        if df is None or len(df) < 2:
-            return None
-
-        df.index = df.index.tz_localize(None) if df.index.tz else df.index
-
-        entry_dt = entry_date.replace(tzinfo=None) if entry_date.tzinfo else entry_date
-        exit_dt = exit_date.replace(tzinfo=None) if exit_date.tzinfo else exit_date
-
-        entry_idx = df.index.searchsorted(entry_dt)
-        exit_idx = df.index.searchsorted(exit_dt)
-        entry_idx = min(entry_idx, len(df) - 1)
-        exit_idx = min(exit_idx, len(df) - 1)
-
-        if entry_idx >= exit_idx:
-            return 0.0
-
-        entry_price = float(df["Close"].iloc[entry_idx])
-        exit_price = float(df["Close"].iloc[exit_idx])
-        if entry_price <= 0:
-            return None
-        return (exit_price - entry_price) / entry_price * 100
+        return _benchmark_return_from_df(df, entry_date, exit_date)
     except Exception:
         return None
 
 
-def attribute_trade(trade: Trade) -> dict[str, Any]:
+def _naive_dt(value: datetime) -> datetime:
+    return value.replace(tzinfo=None) if value.tzinfo else value
+
+
+def _benchmark_return_from_df(
+    df: Any,
+    entry_date: datetime | None,
+    exit_date: datetime | None,
+) -> float | None:
+    if not entry_date or not exit_date or df is None or len(df) < 2:
+        return None
+
+    index = df.index.tz_localize(None) if df.index.tz else df.index
+    entry_dt = _naive_dt(entry_date)
+    exit_dt = _naive_dt(exit_date)
+
+    entry_idx = index.searchsorted(entry_dt)
+    exit_idx = index.searchsorted(exit_dt)
+    entry_idx = min(entry_idx, len(df) - 1)
+    exit_idx = min(exit_idx, len(df) - 1)
+
+    if entry_idx >= exit_idx:
+        return 0.0
+
+    entry_price = float(df["Close"].iloc[entry_idx])
+    exit_price = float(df["Close"].iloc[exit_idx])
+    if entry_price <= 0:
+        return None
+    return (exit_price - entry_price) / entry_price * 100
+
+
+def _fetch_benchmark_returns(
+    windows: set[tuple[datetime | None, datetime | None]],
+) -> dict[tuple[datetime | None, datetime | None], float | None]:
+    """Fetch SPY once for a batch of holding windows and compute each return."""
+    out = {window: None for window in windows}
+    valid_windows = [
+        (entry_date, exit_date)
+        for entry_date, exit_date in windows
+        if entry_date is not None and exit_date is not None
+    ]
+    if not valid_windows:
+        return out
+
+    try:
+        from .market_data import fetch_ohlcv_df
+
+        earliest_entry = min(_naive_dt(entry_date) for entry_date, _ in valid_windows)
+        latest_exit = max(_naive_dt(exit_date) for _, exit_date in valid_windows)
+        days = max(1, (latest_exit - earliest_entry).days + 5)
+        df = fetch_ohlcv_df(_BENCHMARK_TICKER, period=f"{days + 30}d", interval="1d")
+        for window in valid_windows:
+            out[window] = _benchmark_return_from_df(df, *window)
+    except Exception:
+        logger.debug("benchmark_return_batch_failed", exc_info=True)
+    return out
+
+
+def attribute_trade(
+    trade: Trade,
+    *,
+    benchmark_return: float | None | object = _BENCHMARK_RETURN_UNSET,
+) -> dict[str, Any]:
     """Decompose a single closed trade's P&L into components.
 
     Returns:
@@ -103,7 +146,11 @@ def attribute_trade(trade: Trade) -> dict[str, Any]:
         return result
     result["gross_return_pct"] = round(gross_return_pct, 4)
 
-    benchmark_ret = _fetch_benchmark_return(trade.entry_date, trade.exit_date)
+    benchmark_ret = (
+        _fetch_benchmark_return(trade.entry_date, trade.exit_date)
+        if benchmark_return is _BENCHMARK_RETURN_UNSET
+        else benchmark_return
+    )
     result["benchmark_return_pct"] = round(benchmark_ret, 4) if benchmark_ret is not None else None
 
     if benchmark_ret is not None:
@@ -159,8 +206,12 @@ def attribute_pattern_trades(
     betas = []
     costs = []
 
+    benchmark_cache = _fetch_benchmark_returns(
+        {(t.entry_date, t.exit_date) for t in trades}
+    )
     for t in trades:
-        attr = attribute_trade(t)
+        benchmark_key = (t.entry_date, t.exit_date)
+        attr = attribute_trade(t, benchmark_return=benchmark_cache[benchmark_key])
         attributions.append(attr)
         if attr.get("alpha_pct") is not None:
             alphas.append(attr["alpha_pct"])

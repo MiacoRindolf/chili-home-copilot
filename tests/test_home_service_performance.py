@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
 from app.services import home_service
@@ -151,6 +151,7 @@ def test_get_insights_reuses_precomputed_dashboard_counts_and_birthdays() -> Non
 
 def test_get_dashboard_data_passes_precomputed_inputs_to_insights(monkeypatch) -> None:
     captured: dict[str, object] = {}
+    today = date.today()
     birthday = SimpleNamespace(id=1, name="Ada", date=date(1990, 6, 1))
     done_chore = SimpleNamespace(
         id=1,
@@ -161,9 +162,19 @@ def test_get_dashboard_data_passes_precomputed_inputs_to_insights(monkeypatch) -
         recurrence=None,
         assigned_to=None,
         created_at=None,
-        completed_at=None,
+        completed_at=datetime.combine(today, datetime.min.time()),
     )
-    today = date.today()
+    old_done_chore = SimpleNamespace(
+        id=4,
+        title="Old Done",
+        done=True,
+        due_date=date(2026, 5, 20),
+        priority="medium",
+        recurrence=None,
+        assigned_to=None,
+        created_at=None,
+        completed_at=datetime.combine(today - timedelta(days=8), datetime.min.time()),
+    )
     overdue_chore = SimpleNamespace(
         id=2,
         title="Late",
@@ -211,10 +222,10 @@ def test_get_dashboard_data_passes_precomputed_inputs_to_insights(monkeypatch) -
         def query(self, *args: object) -> _DashboardQuery:
             self.query_count += 1
             if self.query_count == 1:
-                return _DashboardQuery([done_chore, overdue_chore, today_chore])
+                return _DashboardQuery([done_chore, old_done_chore, overdue_chore, today_chore])
             if self.query_count == 2:
                 return _DashboardQuery([birthday])
-            return _DashboardQuery([], count_value=0)
+            raise AssertionError("dashboard should derive chores_done_week from loaded chores")
 
     def fake_get_insights(db, user_id=None, **kwargs):
         captured.update(kwargs)
@@ -230,5 +241,16 @@ def test_get_dashboard_data_passes_precomputed_inputs_to_insights(monkeypatch) -
     )
 
     assert result["insights"] == [{"type": "ok", "icon": "check", "text": "cached"}]
+    assert result["chores_done_week"] == 1
+    assert result["birthdays"] == [
+        {
+            "id": 1,
+            "name": "Ada",
+            "date": "1990-06-01",
+            "days_until": (date(today.year, 6, 1) - today).days
+            if date(today.year, 6, 1) >= today
+            else (date(today.year + 1, 6, 1) - today).days,
+        }
+    ]
     assert captured["chore_counts"] == (2, 1, 1)
     assert captured["birthdays"] == [birthday]

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -151,22 +152,28 @@ def get_execution_quality_report(
     if not _FILL_LOG.exists():
         return {"ok": True, "fills": 0, "report": {}}
 
-    fills = []
     try:
-        for line in _FILL_LOG.read_text().strip().split("\n"):
-            if not line.strip():
-                continue
-            try:
-                entry = json.loads(line)
-                if ticker and entry.get("ticker") != ticker:
+        safe_limit = int(limit)
+    except (TypeError, ValueError):
+        safe_limit = 100
+    bounded_fills: deque[dict[str, Any]] | list[dict[str, Any]]
+    bounded_fills = deque(maxlen=safe_limit) if safe_limit > 0 else []
+    try:
+        with _FILL_LOG.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                if not line.strip():
                     continue
-                fills.append(entry)
-            except json.JSONDecodeError:
-                continue
+                try:
+                    entry = json.loads(line)
+                    if ticker and entry.get("ticker") != ticker:
+                        continue
+                    bounded_fills.append(entry)
+                except json.JSONDecodeError:
+                    continue
     except Exception:
         return {"ok": True, "fills": 0, "report": {}}
 
-    fills = fills[-limit:]
+    fills = list(bounded_fills)
     if not fills:
         return {"ok": True, "fills": 0, "report": {}}
 

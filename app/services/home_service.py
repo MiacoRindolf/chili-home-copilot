@@ -216,12 +216,15 @@ def get_insights(
 
 # ── Calendar Data ─────────────────────────────────────────────────────────────
 
-def days_until(bday_date: date) -> int:
-    today = date.today()
+def _days_until_from(bday_date: date, today: date) -> int:
     this_year = bday_date.replace(year=today.year)
     if this_year < today:
         this_year = this_year.replace(year=today.year + 1)
     return (this_year - today).days
+
+
+def days_until(bday_date: date) -> int:
+    return _days_until_from(bday_date, date.today())
 
 
 def get_calendar_events(db: Session, year: int, month: int) -> list[dict]:
@@ -275,6 +278,14 @@ def _users_by_id(db: Session, user_ids: list[int]) -> dict[int, User]:
     return {int(row.id): row for row in rows}
 
 
+def _as_date(value: date | datetime | None) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return None
+
+
 def get_dashboard_data(db: Session, identity: dict) -> dict:
     today = date.today()
     chores = db.query(Chore).order_by(Chore.id.desc()).all()
@@ -294,7 +305,7 @@ def get_dashboard_data(db: Session, identity: dict) -> dict:
             {
                 "id": b.id, "name": b.name,
                 "date": b.date.isoformat(),
-                "days_until": days_until(b.date),
+                "days_until": _days_until_from(b.date, today),
             }
             for b in birthdays
         ],
@@ -346,11 +357,13 @@ def get_dashboard_data(db: Session, identity: dict) -> dict:
                 housemates_online += 1
 
     week_ago = today - timedelta(days=7)
-    chores_done_week = db.query(Chore).filter(
-        Chore.done == True,
-        Chore.completed_at != None,
-        func.date(Chore.completed_at) >= week_ago,
-    ).count()
+    chores_done_week = sum(
+        1
+        for c in chores
+        if c.done
+        and (completed_on := _as_date(c.completed_at)) is not None
+        and completed_on >= week_ago
+    )
 
     total_conversations = 0
     if not identity["is_guest"]:

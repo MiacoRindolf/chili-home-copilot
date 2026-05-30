@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -9,6 +10,7 @@ from app.models.trading import ExecutionCostEstimate, Trade
 from app.services.trading.execution_cost_builder import (
     BuilderReport,
     EstimateRow,
+    _compute_rolling_estimates_for_ticker,
     compute_rolling_estimate,
     estimates_summary,
     mode_is_active,
@@ -137,6 +139,68 @@ class TestComputeRollingEstimate:
         # notional = 100 * 200 = 20_000; window_days = 30 → adv fallback ≈ 666.67
         assert est.avg_daily_volume_usd == pytest.approx(20_000 / 30)
         _cleanup(db, ["AMD_PHF"])
+
+    def test_batch_ticker_estimates_reads_requested_sides_once(self):
+        class _FakeQuery:
+            def __init__(self, rows):
+                self.rows = rows
+                self.filter_calls = 0
+
+            def filter(self, *args):
+                self.filter_calls += 1
+                return self
+
+            def all(self):
+                return self.rows
+
+        class _FakeSession:
+            def __init__(self, rows):
+                self.rows = rows
+                self.query_calls = 0
+                self.last_query = None
+
+            def query(self, model):
+                assert model is Trade
+                self.query_calls += 1
+                self.last_query = _FakeQuery(self.rows)
+                return self.last_query
+
+        db = _FakeSession(
+            [
+                SimpleNamespace(
+                    direction="long",
+                    tca_entry_slippage_bps=3.0,
+                    tca_exit_slippage_bps=1.0,
+                    entry_price=10.0,
+                    quantity=2.0,
+                ),
+                SimpleNamespace(
+                    direction="short",
+                    tca_entry_slippage_bps=9.0,
+                    tca_exit_slippage_bps=4.0,
+                    entry_price=20.0,
+                    quantity=3.0,
+                ),
+            ]
+        )
+
+        result = _compute_rolling_estimates_for_ticker(
+            db,  # type: ignore[arg-type]
+            ticker="BATCH_PHF",
+            sides=["long", "short"],
+            window_days=30,
+            adv_lookup_fn=lambda _ticker, _window: 1_000_000.0,
+        )
+
+        assert db.query_calls == 1
+        assert db.last_query is not None
+        assert db.last_query.filter_calls == 1
+        assert result["long"] is not None
+        assert result["short"] is not None
+        assert result["long"].sample_trades == 1
+        assert result["short"].sample_trades == 1
+        assert result["long"].median_spread_bps == pytest.approx(3.0)
+        assert result["short"].median_spread_bps == pytest.approx(9.0)
 
 
 class TestUpsertEstimate:
@@ -267,6 +331,55 @@ class TestRebuildAll:
         }
         assert written_tickers == {"DISC_PHF_A", "DISC_PHF_B"}
         _cleanup(db, ["DISC_PHF_A", "DISC_PHF_B"])
+
+    def test_dedupes_explicit_tickers_and_sides_before_compute(self, monkeypatch):
+        calls: list[tuple[str, tuple[str, ...]]] = []
+
+        monkeypatch.setattr(
+            "app.services.trading.execution_cost_builder.settings.brain_execution_cost_mode",
+            "shadow",
+            raising=False,
+        )
+
+        def fake_compute(db, *, ticker, sides, **kwargs):
+            calls.append((ticker, tuple(sides)))
+            return {
+                side: EstimateRow(
+                    ticker=ticker,
+                    side=side,
+                    window_days=30,
+                    median_spread_bps=1.0,
+                    p90_spread_bps=2.0,
+                    median_slippage_bps=1.0,
+                    p90_slippage_bps=2.0,
+                    avg_daily_volume_usd=1000.0,
+                    sample_trades=1,
+                )
+                for side in sides
+            }
+
+        monkeypatch.setattr(
+            "app.services.trading.execution_cost_builder._compute_rolling_estimates_for_ticker",
+            fake_compute,
+        )
+        monkeypatch.setattr(
+            "app.services.trading.execution_cost_builder.upsert_estimate",
+            lambda *_args, **_kwargs: True,
+        )
+
+        report = rebuild_all(
+            object(),  # type: ignore[arg-type]
+            tickers=["DUP_PHF", "DUP_PHF", "OTHER_PHF"],
+            sides=("long", "LONG", "short", "short"),
+            mode_override="shadow",
+        )
+
+        assert calls == [
+            ("DUP_PHF", ("long", "short")),
+            ("OTHER_PHF", ("long", "short")),
+        ]
+        assert report.tickers_seen == 2
+        assert report.estimates_written == 4
 
 
 class TestModeIsActive:

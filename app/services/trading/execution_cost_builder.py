@@ -109,50 +109,14 @@ def _notional(trade: Any) -> float:
         return 0.0
 
 
-def compute_rolling_estimate(
-    db: Session,
+def _estimate_from_rows(
     *,
     ticker: str,
-    side: str,
-    window_days: int = 30,
+    side_norm: str,
+    window_days: int,
+    rows: list[Any],
     adv_lookup_fn: Callable[[str, int], float] | None = None,
-    now: datetime | None = None,
 ) -> EstimateRow | None:
-    """Compute a rolling execution-cost estimate from closed trades.
-
-    Parameters
-    ----------
-    ticker, side, window_days:
-        Key used for both the filter and the output row.
-    adv_lookup_fn:
-        Optional ``(ticker, window_days) -> avg_daily_volume_usd`` callable.
-        When None we fall back to "sum of trade notional / window_days" which
-        is a conservative under-estimate of ADV (good for capacity cap).
-    now:
-        Injected clock for testability; defaults to ``datetime.utcnow()``.
-
-    Returns
-    -------
-    EstimateRow when at least one closed trade has a usable TCA slippage,
-    None otherwise (caller should treat as "no estimate yet").
-    """
-    from ...models.trading import Trade  # late import to avoid cycles
-
-    _now = now or datetime.utcnow()
-    cutoff = _now - timedelta(days=max(1, int(window_days)))
-    side_norm = _ensure_side(side)
-
-    rows = (
-        db.query(Trade)
-        .filter(
-            Trade.ticker == ticker,
-            Trade.status == "closed",
-            Trade.entry_date >= cutoff,
-            Trade.direction == side_norm,
-        )
-        .all()
-    )
-
     if not rows:
         return None
 
@@ -208,7 +172,106 @@ def compute_rolling_estimate(
     )
 
 
+def compute_rolling_estimate(
+    db: Session,
+    *,
+    ticker: str,
+    side: str,
+    window_days: int = 30,
+    adv_lookup_fn: Callable[[str, int], float] | None = None,
+    now: datetime | None = None,
+) -> EstimateRow | None:
+    """Compute a rolling execution-cost estimate from closed trades.
+
+    Parameters
+    ----------
+    ticker, side, window_days:
+        Key used for both the filter and the output row.
+    adv_lookup_fn:
+        Optional ``(ticker, window_days) -> avg_daily_volume_usd`` callable.
+        When None we fall back to "sum of trade notional / window_days" which
+        is a conservative under-estimate of ADV (good for capacity cap).
+    now:
+        Injected clock for testability; defaults to ``datetime.utcnow()``.
+
+    Returns
+    -------
+    EstimateRow when at least one closed trade has a usable TCA slippage,
+    None otherwise (caller should treat as "no estimate yet").
+    """
+    from ...models.trading import Trade  # late import to avoid cycles
+
+    _now = now or datetime.utcnow()
+    cutoff = _now - timedelta(days=max(1, int(window_days)))
+    side_norm = _ensure_side(side)
+
+    rows = (
+        db.query(Trade)
+        .filter(
+            Trade.ticker == ticker,
+            Trade.status == "closed",
+            Trade.entry_date >= cutoff,
+            Trade.direction == side_norm,
+        )
+        .all()
+    )
+
+    return _estimate_from_rows(
+        ticker=ticker,
+        side_norm=side_norm,
+        window_days=int(window_days),
+        rows=list(rows),
+        adv_lookup_fn=adv_lookup_fn,
+    )
+
+
 # ── Persistence ────────────────────────────────────────────────────────
+
+def _compute_rolling_estimates_for_ticker(
+    db: Session,
+    *,
+    ticker: str,
+    sides: list[str],
+    window_days: int = 30,
+    adv_lookup_fn: Callable[[str, int], float] | None = None,
+    now: datetime | None = None,
+) -> dict[str, EstimateRow | None]:
+    """Compute requested side estimates for one ticker with a single trade read."""
+    if not sides:
+        return {}
+
+    from ...models.trading import Trade  # late import to avoid cycles
+
+    _now = now or datetime.utcnow()
+    cutoff = _now - timedelta(days=max(1, int(window_days)))
+    rows = (
+        db.query(Trade)
+        .filter(
+            Trade.ticker == ticker,
+            Trade.status == "closed",
+            Trade.entry_date >= cutoff,
+            Trade.direction.in_(sides),
+        )
+        .all()
+    )
+
+    rows_by_side: dict[str, list[Any]] = {side: [] for side in sides}
+    for row in rows:
+        side_norm = _ensure_side(getattr(row, "direction", None))
+        if side_norm in rows_by_side:
+            rows_by_side[side_norm].append(row)
+
+    return {
+        side: _estimate_from_rows(
+            ticker=ticker,
+            side_norm=side,
+            window_days=int(window_days),
+            rows=rows_by_side.get(side, []),
+            adv_lookup_fn=adv_lookup_fn,
+        )
+        for side in sides
+    }
+
 
 def upsert_estimate(
     db: Session,
@@ -312,22 +375,31 @@ def rebuild_all(
             .distinct()
             .all()
         )
-        ticker_list = [t[0] for t in discovered if t[0]]
+        ticker_list = list(dict.fromkeys(str(t[0]).strip() for t in discovered if t[0]))
     else:
-        ticker_list = [str(t).strip() for t in tickers if t]
+        ticker_list = list(dict.fromkeys(str(t).strip() for t in tickers if str(t).strip()))
+    side_list = list(dict.fromkeys(_ensure_side(str(side)) for side in sides))
 
     report.tickers_seen = len(ticker_list)
 
     for tkr in ticker_list:
-        for side in sides:
+        try:
+            estimates = _compute_rolling_estimates_for_ticker(
+                db,
+                ticker=tkr,
+                sides=side_list,
+                window_days=window_days,
+                adv_lookup_fn=adv_lookup_fn,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[execution_cost_builder] failed for %s/*: %s",
+                tkr, exc,
+            )
+            report.errors.append(f"{tkr}/*: {exc}")
+            continue
+        for side, est in estimates.items():
             try:
-                est = compute_rolling_estimate(
-                    db,
-                    ticker=tkr,
-                    side=side,
-                    window_days=window_days,
-                    adv_lookup_fn=adv_lookup_fn,
-                )
                 if est is None:
                     report.estimates_skipped += 1
                     continue
