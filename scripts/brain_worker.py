@@ -1349,15 +1349,26 @@ def _maybe_run_neural_activation_batch() -> None:
         db.close()
 
 
-def _maybe_run_brain_work_batch() -> None:
+def _brain_work_dispatch_kwargs_for_mode(mode: str | None) -> dict:
+    """Mode-specific guardrails for durable work dispatch."""
+    mode_key = (mode or "").strip().lower()
+    if mode_key == "backtest":
+        return {
+            "max_mine": 0,
+            "run_market_snapshots_watchdog": False,
+        }
+    return {}
+
+
+def _maybe_run_brain_work_batch(**dispatch_kwargs) -> None:
     """Durable work ledger: dispatch round (execution_feedback_digest + backtest_requested)."""
     db = SessionLocal()
     try:
         from app.config import settings as _settings
-        from app.services.trading.brain_work.dispatcher import run_brain_work_batch
+        from app.services.trading.brain_work.dispatcher import run_brain_work_dispatch_round
 
         _uid = getattr(_settings, "brain_default_user_id", None)
-        summary = run_brain_work_batch(db, user_id=_uid)
+        summary = run_brain_work_dispatch_round(db, user_id=_uid, **dispatch_kwargs)
         # Always log once per call so production logs prove dispatch ran before cycle (even when idle).
         logger.info(
             "[brain] work ledger dispatch round processed=%s claimed=%s per_type=%s errors=%s",
@@ -1959,7 +1970,7 @@ def _run_backtest_loop(args: argparse.Namespace, status: BrainWorkerStatus) -> N
             break
         status.status = "running"
         try:
-            _maybe_run_brain_work_batch()
+            _maybe_run_brain_work_batch(**_brain_work_dispatch_kwargs_for_mode("backtest"))
         except Exception as _we:
             logger.warning("[brain] work ledger in backtest mode skipped: %s", _we)
         try:
