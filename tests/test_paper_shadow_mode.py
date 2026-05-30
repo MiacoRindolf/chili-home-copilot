@@ -1165,7 +1165,7 @@ def test_shadow_capacity_janitor_preserves_mature_same_priority_evidence(
     assert younger.exit_reason == PAPER_SHADOW_CAPACITY_EVICTED_REASON
 
 
-def test_reject_shadow_reclaims_buffer_slot_when_capacity_full(db, monkeypatch):
+def test_reject_shadow_skips_equal_priority_when_capacity_full(db, monkeypatch):
     pat, alert = _seed_pattern_and_alert(db)
     monkeypatch.setattr(
         at_mod.settings, "chili_autotrader_paper_shadow_enabled", False,
@@ -1202,7 +1202,11 @@ def test_reject_shadow_reclaims_buffer_slot_when_capacity_full(db, monkeypatch):
             quantity=1,
             status="open",
             entry_date=datetime.utcnow() - timedelta(hours=2),
-            signal_json={"auto_trader_v1": True, "paper_shadow": True},
+            signal_json={
+                "auto_trader_v1": True,
+                "paper_shadow": True,
+                "shadow_decision": "skipped_non_positive_expected_edge",
+            },
         ),
         PaperTrade(
             user_id=alert.user_id,
@@ -1215,18 +1219,18 @@ def test_reject_shadow_reclaims_buffer_slot_when_capacity_full(db, monkeypatch):
             quantity=1,
             status="open",
             entry_date=datetime.utcnow() - timedelta(hours=1),
-            signal_json={"auto_trader_v1": True, "paper_shadow": True},
+            signal_json={
+                "auto_trader_v1": True,
+                "paper_shadow": True,
+                "shadow_decision": "skipped_non_positive_expected_edge",
+            },
         ),
     ])
     db.commit()
 
     monkeypatch.setattr(
         "app.services.trading.market_data.fetch_quote",
-        lambda ticker: {"price": 101.0},
-    )
-    monkeypatch.setattr(
-        "app.services.trading.paper_trading._apply_slippage",
-        lambda price, direction, is_entry: price,
+        lambda ticker: pytest.fail("equal-priority capacity skip should not quote"),
     )
 
     _maybe_open_reject_paper_shadow(
@@ -1237,6 +1241,83 @@ def test_reject_shadow_reclaims_buffer_slot_when_capacity_full(db, monkeypatch):
         snap={},
         reason="non_positive_expected_edge",
         existing_qty=TEST_SHADOW_QUANTITY,
+    )
+
+    rows = db.query(PaperTrade).filter(PaperTrade.user_id == alert.user_id).all()
+    assert sum(1 for row in rows if row.status == "open") == 2
+    assert all(row.paper_shadow_of_alert_id != alert.id for row in rows)
+    assert all(row.exit_reason != PAPER_SHADOW_CAPACITY_EVICTED_REASON for row in rows)
+
+
+def test_shadow_promoted_shadow_replaces_weaker_capacity_row(db, monkeypatch):
+    pat, alert = _seed_pattern_and_alert(db)
+    monkeypatch.setattr(
+        at_mod.settings, "chili_autotrader_paper_shadow_enabled", True,
+    )
+    monkeypatch.setattr(
+        at_mod.settings, "chili_autotrader_paper_shadow_max_open", 2,
+    )
+    monkeypatch.setattr(
+        at_mod.settings, "chili_autotrader_paper_shadow_janitor_enabled", True,
+    )
+    monkeypatch.setattr(
+        at_mod.settings, "chili_autotrader_paper_shadow_janitor_max_age_hours", 100,
+    )
+    monkeypatch.setattr(
+        at_mod.settings, "chili_autotrader_paper_shadow_janitor_buffer", 0,
+    )
+    db.add_all([
+        PaperTrade(
+            user_id=alert.user_id,
+            scan_pattern_id=pat.id,
+            ticker="OLD1",
+            direction="long",
+            entry_price=100.0,
+            stop_price=95.0,
+            target_price=110.0,
+            quantity=1,
+            status="open",
+            entry_date=datetime.utcnow() - timedelta(hours=2),
+            signal_json={
+                "auto_trader_v1": True,
+                "paper_shadow": True,
+                "shadow_decision": "skipped_non_positive_expected_edge",
+            },
+        ),
+        PaperTrade(
+            user_id=alert.user_id,
+            scan_pattern_id=pat.id,
+            ticker="OLD2",
+            direction="long",
+            entry_price=100.0,
+            stop_price=95.0,
+            target_price=110.0,
+            quantity=1,
+            status="open",
+            entry_date=datetime.utcnow() - timedelta(hours=1),
+            signal_json={
+                "auto_trader_v1": True,
+                "paper_shadow": True,
+                "shadow_decision": "skipped_non_positive_expected_edge",
+            },
+        ),
+    ])
+    db.commit()
+
+    monkeypatch.setattr(
+        "app.services.trading.paper_trading._apply_slippage",
+        lambda price, direction, is_entry: price,
+    )
+
+    _maybe_open_paper_shadow(
+        db,
+        uid=alert.user_id,
+        alert=alert,
+        qty=TEST_SHADOW_QUANTITY,
+        px=100.0,
+        snap={},
+        decision="blocked_shadow_promoted",
+        allow_duplicate_open=True,
     )
 
     rows = db.query(PaperTrade).filter(PaperTrade.user_id == alert.user_id).all()

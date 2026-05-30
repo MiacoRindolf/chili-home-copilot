@@ -8,6 +8,7 @@ import math
 import time
 import traceback
 from datetime import datetime, time as datetime_time, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
@@ -1766,6 +1767,88 @@ def _find_recent_candidate_reason_family_shadow(
     return None, None
 
 
+def _paper_shadow_capacity_admission(
+    db: Session,
+    *,
+    uid: int | None,
+    scan_pattern_id: int | None,
+    signal_json: dict[str, Any],
+    shadow_max_open: int,
+    buffer: int,
+) -> dict[str, Any]:
+    """Decide whether a new shadow row is worth evicting existing evidence."""
+    open_limit = max(1, int(shadow_max_open or 1))
+    target_open = max(0, open_limit - max(0, int(buffer or 0)))
+    capacity_trigger = max(1, target_open)
+    try:
+        from .paper_trading import (
+            _is_autotrader_paper_shadow_row,
+            _paper_shadow_evidence_priority,
+            _paper_shadow_evict_key,
+            _paper_shadow_pattern_stage_map,
+        )
+
+        q = db.query(PaperTrade).filter(PaperTrade.status == "open")
+        if uid is not None:
+            q = q.filter(PaperTrade.user_id == uid)
+        rows = [pt for pt in q.all() if _is_autotrader_paper_shadow_row(pt)]
+        if len(rows) < capacity_trigger:
+            return {
+                "admit": True,
+                "reason": "capacity_available",
+                "open_count": len(rows),
+                "capacity_trigger": capacity_trigger,
+            }
+
+        candidate = SimpleNamespace(
+            scan_pattern_id=scan_pattern_id,
+            signal_json=dict(signal_json or {}),
+            entry_date=datetime.utcnow(),
+        )
+        pattern_stage_by_id = _paper_shadow_pattern_stage_map(
+            db,
+            [*rows, candidate],
+        )
+        candidate_priority = int(
+            _paper_shadow_evidence_priority(
+                candidate,
+                pattern_stage_by_id=pattern_stage_by_id,
+            ).get("priority")
+            or 0
+        )
+        weakest = min(
+            rows,
+            key=lambda pt: _paper_shadow_evict_key(
+                pt,
+                pattern_stage_by_id=pattern_stage_by_id,
+            ),
+        )
+        weakest_priority = int(
+            _paper_shadow_evidence_priority(
+                weakest,
+                pattern_stage_by_id=pattern_stage_by_id,
+            ).get("priority")
+            or 0
+        )
+        admit = candidate_priority > weakest_priority
+        return {
+            "admit": admit,
+            "reason": (
+                "candidate_priority_beats_weakest"
+                if admit
+                else "candidate_priority_not_above_capacity_floor"
+            ),
+            "open_count": len(rows),
+            "capacity_trigger": capacity_trigger,
+            "candidate_priority": candidate_priority,
+            "weakest_priority": weakest_priority,
+            "weakest_paper_trade_id": getattr(weakest, "id", None),
+        }
+    except Exception:
+        logger.debug("[autotrader_paper_shadow] capacity admission failed", exc_info=True)
+        return {"admit": True, "reason": "admission_check_failed_open"}
+
+
 def _maybe_open_paper_shadow(
     db: Session,
     *,
@@ -1908,6 +1991,33 @@ def _maybe_open_paper_shadow(
             )
             or AUTOTRADER_PAPER_SHADOW_DEFAULT_MAX_OPEN
         )
+        shadow_buffer = int(
+            getattr(
+                settings,
+                "chili_autotrader_paper_shadow_janitor_buffer",
+                AUTOTRADER_PAPER_SHADOW_DEFAULT_JANITOR_BUFFER,
+            )
+            or 0
+        )
+        capacity_admission = _paper_shadow_capacity_admission(
+            db,
+            uid=uid,
+            scan_pattern_id=alert.scan_pattern_id,
+            signal_json=sig,
+            shadow_max_open=shadow_max_open,
+            buffer=shadow_buffer,
+        )
+        if not bool(capacity_admission.get("admit", True)):
+            logger.info(
+                "[autotrader_paper_shadow] alert_id=%s pattern_id=%s ticker=%s "
+                "decision=%s skipped reason=shadow_capacity_floor %s",
+                alert.id,
+                alert.scan_pattern_id,
+                alert.ticker,
+                decision,
+                capacity_admission,
+            )
+            return
         if bool(getattr(settings, "chili_autotrader_paper_shadow_janitor_enabled", True)):
             prune_autotrader_paper_shadow_capacity(
                 db,
@@ -1921,14 +2031,7 @@ def _maybe_open_paper_shadow(
                     )
                     or AUTOTRADER_PAPER_SHADOW_DEFAULT_JANITOR_MAX_AGE_HOURS
                 ),
-                buffer=int(
-                    getattr(
-                        settings,
-                        "chili_autotrader_paper_shadow_janitor_buffer",
-                        AUTOTRADER_PAPER_SHADOW_DEFAULT_JANITOR_BUFFER,
-                    )
-                    or 0
-                ),
+                buffer=shadow_buffer,
             )
         paper_entry_px, option_paper_sig = _paper_entry_context_for_alert(
             alert,
