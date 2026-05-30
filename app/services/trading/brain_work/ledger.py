@@ -542,6 +542,51 @@ def coalesce_duplicate_open_work(
                 continue
             _retire_duplicate(row, reason="same_dedupe_key", keep_id=keep_id)
 
+    # Recert rescue refreshes can be emitted by cash deployment, reliability
+    # snapshots, and live signal fast-lanes. Different evidence fingerprints are
+    # useful over time, but concurrent open refreshes for the same pattern/asset
+    # all diagnose the same live-trading blocker. Keep one so the edge lane
+    # cannot be crowded by one recert debt pocket.
+    recert_refresh_groups: dict[tuple[int, str], list[BrainWorkEvent]] = {}
+    for row in rows:
+        if row.status not in ("pending", "processing", "retry_wait"):
+            continue
+        if str(row.event_type or "") != "recert_rescue_refresh":
+            continue
+        payload = row.payload if isinstance(row.payload, dict) else {}
+        try:
+            pid = int(payload.get("scan_pattern_id") or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        if pid <= 0:
+            continue
+        asset = str(payload.get("asset_class") or "all").strip().lower() or "all"
+        recert_refresh_groups.setdefault((pid, asset), []).append(row)
+
+    def _recert_refresh_rank(row: BrainWorkEvent) -> tuple[int, int, float, int]:
+        status_rank = 0 if row.status == "processing" else 1
+        updated = row.updated_at or row.created_at or datetime.min
+        return (
+            status_rank,
+            int(row.attempts or 0),
+            -updated.timestamp(),
+            -int(row.id),
+        )
+
+    for group_rows in recert_refresh_groups.values():
+        if len(group_rows) <= 1:
+            continue
+        group_rows.sort(key=_recert_refresh_rank)
+        keep_id = int(group_rows[0].id)
+        for row in group_rows[1:]:
+            if row.status == "processing":
+                continue
+            _retire_duplicate(
+                row,
+                reason="recert_rescue_refresh_pattern_asset_superseded",
+                keep_id=keep_id,
+            )
+
     # Recert rescue backtests are fingerprinted by evidence slice so a genuinely
     # new evidence snapshot can request fresh work. In production those refreshes
     # can race for the same pattern/asset while a previous refresh is still open,

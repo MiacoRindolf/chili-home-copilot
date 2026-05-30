@@ -700,6 +700,71 @@ def test_coalesce_duplicate_open_work_thins_recert_rescue_pattern_asset(db) -> N
     assert rows[other_asset].status == "pending"
 
 
+def test_coalesce_duplicate_open_work_thins_recert_rescue_refresh_pattern_asset(
+    db,
+) -> None:
+    older = enqueue_work_event(
+        db,
+        event_type="recert_rescue_refresh",
+        dedupe_key="recert_rescue_refresh:p537:astock:older-fp",
+        payload={
+            "scan_pattern_id": 537,
+            "asset_class": "stock",
+            "evidence_fingerprint": "older-fp",
+        },
+        lease_scope="edge",
+    )
+    newer = enqueue_work_event(
+        db,
+        event_type="recert_rescue_refresh",
+        dedupe_key="recert_rescue_refresh:p537:astock:newer-fp",
+        payload={
+            "scan_pattern_id": 537,
+            "asset_class": "stock",
+            "evidence_fingerprint": "newer-fp",
+        },
+        lease_scope="edge",
+    )
+    other_asset = enqueue_work_event(
+        db,
+        event_type="recert_rescue_refresh",
+        dedupe_key="recert_rescue_refresh:p537:acrypto:newer-fp",
+        payload={
+            "scan_pattern_id": 537,
+            "asset_class": "crypto",
+            "evidence_fingerprint": "newer-fp",
+        },
+        lease_scope="edge",
+    )
+    db.commit()
+    assert older is not None
+    assert newer is not None
+    assert other_asset is not None
+
+    result = coalesce_duplicate_open_work(
+        db,
+        event_types=("recert_rescue_refresh",),
+    )
+    db.commit()
+
+    rows = {
+        int(row.id): row
+        for row in db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.id.in_([older, newer, other_asset]))
+        .all()
+    }
+    assert result["coalesced"] == 1
+    assert result["reasons"] == {"recert_rescue_refresh_pattern_asset_superseded": 1}
+    assert rows[older].status == "done"
+    assert (
+        rows[older].payload["duplicate_open_work_suppressed_reason"]
+        == "recert_rescue_refresh_pattern_asset_superseded"
+    )
+    assert rows[older].payload["duplicate_open_work_kept_event_id"] == newer
+    assert rows[newer].status == "pending"
+    assert rows[other_asset].status == "pending"
+
+
 def test_coalesce_duplicate_open_work_prefers_recert_rescue_over_operator_boost(
     db,
 ) -> None:
