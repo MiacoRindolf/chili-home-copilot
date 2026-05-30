@@ -15,10 +15,6 @@ READ_SQL_RE = re.compile(r"\b(?:FROM|JOIN)\s+trading_trades\b", re.IGNORECASE)
 # either move to trading_management_envelopes or make its contract explicit here.
 ALLOWED_LINE_COUNTS: dict[tuple[str, str], int] = {
     (
-        "app/services/trading/bracket_reconciliation_service.py",
-        "FROM trading_trades AS t",
-    ): 2,
-    (
         "app/services/trading/venue/coinbase_orphan_adopt.py",
         "JOIN trading_trades t ON t.id = bi.trade_id",
     ): 1,

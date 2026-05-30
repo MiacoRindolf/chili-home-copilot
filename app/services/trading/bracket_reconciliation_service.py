@@ -39,6 +39,11 @@ from .bracket_reconciler import (
     Tolerances,
     classify_discrepancy,
 )
+from .management_envelopes import (
+    MANAGEMENT_ENVELOPES_RELATION,
+    load_bracket_reconciliation_scope,
+    load_stale_bracket_watchdog_candidates,
+)
 
 # Structured log prefixes. Kept local — the shared ``ops_log_prefixes``
 # module landed on ``main`` after this branch diverged; duplicating the
@@ -2715,28 +2720,36 @@ def _load_local_view(
             bi.intent_state,
             bi.stop_price,
             bi.target_price
-        FROM trading_trades AS t
+        FROM {MANAGEMENT_ENVELOPES_RELATION} AS t
         LEFT JOIN trading_bracket_intents AS bi
           ON bi.trade_id = t.id
         WHERE {' AND '.join(filters)}
         ORDER BY t.id
     """)
-    rows = db.execute(sql, params).fetchall()
+    rows = load_bracket_reconciliation_scope(db, user_id=user_id)
     return [
         {
-            "trade_id": int(r[0]),
-            "user_id": r[1],
-            "ticker": r[2],
-            "direction": r[3],
-            "quantity": float(r[4]) if r[4] is not None else None,
-            "trade_status": r[5],
-            "pending_exit_status": r[6],
-            "pending_exit_reason": r[7],
-            "broker_source": r[8],
-            "bracket_intent_id": int(r[9]) if r[9] is not None else None,
-            "intent_state": r[10],
-            "stop_price": float(r[11]) if r[11] is not None else None,
-            "target_price": float(r[12]) if r[12] is not None else None,
+            "trade_id": int(r["trade_id"]),
+            "user_id": r["user_id"],
+            "ticker": r["ticker"],
+            "direction": r["direction"],
+            "quantity": float(r["quantity"]) if r["quantity"] is not None else None,
+            "trade_status": r["trade_status"],
+            "pending_exit_status": r["pending_exit_status"],
+            "pending_exit_reason": r["pending_exit_reason"],
+            "broker_source": r["broker_source"],
+            "bracket_intent_id": (
+                int(r["bracket_intent_id"])
+                if r["bracket_intent_id"] is not None
+                else None
+            ),
+            "intent_state": r["intent_state"],
+            "stop_price": (
+                float(r["stop_price"]) if r["stop_price"] is not None else None
+            ),
+            "target_price": (
+                float(r["target_price"]) if r["target_price"] is not None else None
+            ),
         }
         for r in rows
     ]
@@ -2995,7 +3008,7 @@ def run_missing_stop_watchdog(
             r.severity,
             r.observed_at,
             EXTRACT(EPOCH FROM (NOW() - COALESCE(r.observed_at, bi.created_at))) AS age_sec
-        FROM trading_trades AS t
+        FROM {MANAGEMENT_ENVELOPES_RELATION} AS t
         JOIN trading_bracket_intents AS bi ON bi.trade_id = t.id
         LEFT JOIN last_rec AS r ON r.trade_id = t.id
         WHERE t.status = 'open'
@@ -3005,18 +3018,22 @@ def run_missing_stop_watchdog(
           {user_filter}
         ORDER BY t.id
     """)
-    rows = db.execute(sql, params).fetchall()
+    rows = load_stale_bracket_watchdog_candidates(
+        db,
+        user_id=user_id,
+        stale_after_sec=stale_sec,
+    )
 
     hits: list[WatchdogHit] = []
     for row in rows:
-        trade_id = int(row[0])
-        ticker = row[1]
-        broker_source = row[2]
-        last_observed_at = row[4]
-        kind = row[5]
-        severity = row[6]
-        observed_at = row[7]
-        age_sec = float(row[8]) if row[8] is not None else 0.0
+        trade_id = int(row["trade_id"])
+        ticker = row["ticker"]
+        broker_source = row["broker_source"]
+        last_observed_at = row["last_observed_at"]
+        kind = row["kind"]
+        severity = row["severity"]
+        observed_at = row["observed_at"]
+        age_sec = float(row["age_sec"]) if row["age_sec"] is not None else 0.0
 
         hit_kind: str | None = None
         hit_severity: str = severity or "warn"
