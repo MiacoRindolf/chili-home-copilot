@@ -5,9 +5,13 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from app.services.trading.brain_work.handlers.profitability import (
+    handle_edge_reliability_refresh,
     handle_exit_variant_refresh,
 )
-from app.services.trading.edge_reliability import EXIT_VARIANT_DIAGNOSTIC
+from app.services.trading.edge_reliability import (
+    EXIT_VARIANT_DIAGNOSTIC,
+    RECERT_RESCUE_REFRESH,
+)
 
 
 def test_exit_variant_refresh_fast_skips_negative_ev_without_learning(monkeypatch) -> None:
@@ -112,3 +116,82 @@ def test_exit_variant_refresh_uses_evolution_for_positive_evidence(monkeypatch) 
     assert payload["created_child_ids"] == [9001]
     assert payload["variant_label"] == "learned_exit_ev_positive"
     assert payload.get("fast_skipped") is None
+
+
+def test_edge_reliability_refresh_skips_recent_blocked_recert_rescue(monkeypatch) -> None:
+    import app.services.trading.brain_work.handlers.profitability as prof_mod
+    import app.services.trading.edge_reliability as edge_mod
+
+    calls: list[dict[str, object]] = []
+
+    def _persist(_db, pattern_id, **kwargs):
+        assert pattern_id == 537
+        return {
+            "recommended_work_event": RECERT_RESCUE_REFRESH,
+            "snapshot_event_id": 7001,
+            "slice_asset_class": "crypto",
+            "graduation_blocker": "recert_blocked",
+            "calibrated_ev_pct": 2.0,
+            "edge_eval_count": 9,
+            "closed_evidence_count": 6,
+            "evidence_fingerprint": "edge-fp",
+        }
+
+    def _emit(*args, **kwargs):
+        calls.append(kwargs)
+        raise AssertionError("blocked recert diagnostic should suppress edge snapshot requeue")
+
+    monkeypatch.setattr(edge_mod, "persist_edge_reliability_snapshot", _persist)
+    monkeypatch.setattr(edge_mod, "emit_targeted_profitability_work", _emit)
+    monkeypatch.setattr(
+        prof_mod,
+        "_recent_blocked_recert_rescue_diagnostic",
+        lambda _db, *, scan_pattern_id: scan_pattern_id == 537,
+    )
+
+    ev = SimpleNamespace(id=903, payload={"scan_pattern_id": 537, "window_days": 30})
+
+    handle_edge_reliability_refresh(object(), ev, user_id=None)
+
+    assert calls == []
+
+
+def test_edge_reliability_refresh_emits_recert_rescue_without_blocker(monkeypatch) -> None:
+    import app.services.trading.brain_work.handlers.profitability as prof_mod
+    import app.services.trading.edge_reliability as edge_mod
+
+    calls: list[dict[str, object]] = []
+
+    def _persist(_db, pattern_id, **kwargs):
+        assert pattern_id == 537
+        return {
+            "recommended_work_event": RECERT_RESCUE_REFRESH,
+            "snapshot_event_id": 7002,
+            "slice_asset_class": "crypto",
+            "graduation_blocker": "recert_blocked",
+            "calibrated_ev_pct": 2.0,
+            "edge_eval_count": 9,
+            "closed_evidence_count": 6,
+            "evidence_fingerprint": "edge-fp",
+        }
+
+    def _emit(_db, **kwargs):
+        calls.append(kwargs)
+        return 8001
+
+    monkeypatch.setattr(edge_mod, "persist_edge_reliability_snapshot", _persist)
+    monkeypatch.setattr(edge_mod, "emit_targeted_profitability_work", _emit)
+    monkeypatch.setattr(
+        prof_mod,
+        "_recent_blocked_recert_rescue_diagnostic",
+        lambda _db, *, scan_pattern_id: False,
+    )
+
+    ev = SimpleNamespace(id=904, payload={"scan_pattern_id": 537, "window_days": 30})
+
+    handle_edge_reliability_refresh(object(), ev, user_id=None)
+
+    assert len(calls) == 1
+    assert calls[0]["event_type"] == RECERT_RESCUE_REFRESH
+    assert calls[0]["scan_pattern_id"] == 537
+    assert calls[0]["source"] == "edge_reliability_snapshot"

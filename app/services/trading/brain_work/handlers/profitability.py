@@ -21,6 +21,20 @@ LOG_PREFIX = "[brain_work:profitability]"
 
 _RECERT_RESCUE_MIN_EDGE_EVALS = 5
 _RECERT_RESCUE_MIN_POSITIVE_EV_PCT = 0.0
+_RECERT_RESCUE_BLOCKER_ACTIONS = frozenset(
+    {
+        "inspect_recert_backtest_no_oos_evidence_keep_live_blocked",
+        "wait_for_recert_backtest_cooldown_keep_live_blocked",
+        "live_blocked_recert_debt_no_refresh",
+    }
+)
+_RECERT_RESCUE_BLOCKER_REASONS = frozenset(
+    {
+        "recent_recert_backtest_cooldown",
+        "recert_backtest_refresh_already_open",
+        "no_recert_refresh_needed",
+    }
+)
 
 
 def _payload(ev: Any) -> dict[str, Any]:
@@ -550,6 +564,45 @@ def handle_recert_rescue_post_backtest(
     return True
 
 
+def _recent_blocked_recert_rescue_diagnostic(
+    db: "Session",
+    *,
+    scan_pattern_id: int,
+) -> bool:
+    """True when a recent diagnostic says another rescue refresh would churn."""
+    from app.config import settings
+    from app.models.trading import BrainWorkEvent
+    from app.services.trading.edge_reliability import RECERT_RESCUE_DIAGNOSTIC
+
+    minutes = _safe_int(
+        getattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360)
+    )
+    if minutes is None or minutes <= 0:
+        return False
+    cutoff = datetime.utcnow() - timedelta(minutes=minutes)
+    rows = (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_kind == "outcome")
+        .filter(BrainWorkEvent.event_type == RECERT_RESCUE_DIAGNOSTIC)
+        .filter(BrainWorkEvent.created_at >= cutoff)
+        .filter(BrainWorkEvent.payload["scan_pattern_id"].astext == str(int(scan_pattern_id)))
+        .order_by(BrainWorkEvent.created_at.desc(), BrainWorkEvent.id.desc())
+        .limit(20)
+        .all()
+    )
+    for row in rows:
+        payload = row.payload if isinstance(row.payload, dict) else {}
+        action = str(payload.get("recommended_next_action") or "").strip().lower()
+        if action in _RECERT_RESCUE_BLOCKER_ACTIONS:
+            return True
+        refresh = payload.get("recert_backtest_refresh")
+        if isinstance(refresh, dict):
+            reason = str(refresh.get("reason") or "").strip().lower()
+            if reason in _RECERT_RESCUE_BLOCKER_REASONS:
+                return True
+    return False
+
+
 def handle_edge_reliability_refresh(
     db: "Session",
     ev: Any,
@@ -558,6 +611,7 @@ def handle_edge_reliability_refresh(
     """Persist a rolling reliability snapshot and enqueue the next safe work item."""
     from app.services.trading.edge_reliability import (
         EDGE_RELIABILITY_REFRESH,
+        RECERT_RESCUE_REFRESH,
         emit_targeted_profitability_work,
         persist_edge_reliability_snapshot,
     )
@@ -575,6 +629,21 @@ def handle_edge_reliability_refresh(
     )
     recommended = str(row.get("recommended_work_event") or "")
     if recommended and recommended != EDGE_RELIABILITY_REFRESH:
+        if (
+            recommended == RECERT_RESCUE_REFRESH
+            and _recent_blocked_recert_rescue_diagnostic(
+                db,
+                scan_pattern_id=pid,
+            )
+        ):
+            logger.info(
+                "%s edge_reliability_refresh ev_id=%s pattern_id=%s suppressed=%s",
+                LOG_PREFIX,
+                getattr(ev, "id", None),
+                pid,
+                "recent_recert_blocker_diagnostic",
+            )
+            return
         calibrated_ev = row.get("calibrated_ev_pct")
         try:
             evidence_value = max(0.0, float(calibrated_ev or 0.0)) * math.log1p(
