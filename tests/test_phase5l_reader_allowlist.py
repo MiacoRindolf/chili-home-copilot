@@ -43,10 +43,6 @@ ALLOWED_LINE_COUNTS: dict[tuple[str, str], int] = {
         "FROM trading_trades t",
     ): 1,
     (
-        "app/services/trading/pattern_survival/training.py",
-        "FROM trading_trades t",
-    ): 1,
-    (
         "app/services/trading/venue/coinbase_orphan_adopt.py",
         "JOIN trading_trades t ON t.id = bi.trade_id",
     ): 1,
