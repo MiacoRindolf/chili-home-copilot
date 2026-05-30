@@ -107,6 +107,43 @@ def _variant_id_for_family(db: Session, family_id: str, version: int) -> Optiona
     return int(row[0]) if row else None
 
 
+def _variant_ids_for_tick_rows(
+    db: Session,
+    row_dicts: list[dict[str, Any]],
+) -> tuple[dict[str, int], dict[tuple[str, str, int], int]]:
+    family_ids = {
+        str(row.get("family_id"))
+        for row in row_dicts
+        if row.get("family_id")
+    }
+    if not family_ids:
+        return {}, {}
+
+    rows = (
+        db.query(MomentumStrategyVariant)
+        .filter(MomentumStrategyVariant.family.in_(family_ids))
+        .all()
+    )
+    active_by_family: dict[str, tuple[int, int, int]] = {}
+    by_key: dict[tuple[str, str, int], int] = {}
+    for row in rows:
+        family = str(row.family)
+        variant_key = str(row.variant_key)
+        version = int(row.version)
+        row_id = int(row.id)
+        by_key[(family, variant_key, version)] = row_id
+        if bool(row.is_active):
+            current = active_by_family.get(family)
+            rank = (version, row_id, row_id)
+            if current is None or rank > current:
+                active_by_family[family] = rank
+
+    return (
+        {family: row_id for family, (_version, _rank_id, row_id) in active_by_family.items()},
+        by_key,
+    )
+
+
 def active_variant_for_family(db: Session, family_id: str) -> MomentumStrategyVariant | None:
     fam = (family_id or "").strip()
     if not fam:
@@ -416,6 +453,7 @@ def persist_neural_momentum_tick(
         return 0
 
     ensure_momentum_strategy_variants(db)
+    active_variant_ids, variant_ids_by_key = _variant_ids_for_tick_rows(db, row_dicts)
 
     exec_json = features.to_public_dict()
     now = datetime.utcnow()
@@ -425,11 +463,10 @@ def persist_neural_momentum_tick(
         fam_ver = int(row.get("family_version") or 1)
         if not fam_id:
             continue
-        active_variant = active_variant_for_family(db, str(fam_id))
-        if active_variant is not None:
-            vid = int(active_variant.id)
-        else:
-            vid = _variant_id_for_family(db, str(fam_id), fam_ver)
+        fam_key = str(fam_id)
+        vid = active_variant_ids.get(fam_key)
+        if vid is None:
+            vid = variant_ids_by_key.get((fam_key, fam_key, fam_ver))
         if vid is None:
             _log.warning("momentum persistence: no variant row for family=%s", fam_id)
             continue

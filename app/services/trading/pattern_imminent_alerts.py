@@ -5,6 +5,7 @@ Stock patterns use US session gates; crypto runs 24/7. ETA is heuristic, not gua
 """
 from __future__ import annotations
 
+import heapq
 import json
 import logging
 import time as _time
@@ -340,6 +341,41 @@ def _imminent_scan_priority_key(pat: ScanPattern) -> tuple[int, int, int, float,
         -evidence_count,
         pattern_id,
     )
+
+
+def _pending_shadow_near_miss_priority(row: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        float(row.get("readiness_gap_to_min") or 0.0),
+        -float(row.get("readiness") or 0.0),
+        -float(row.get("coverage_ratio") or 0.0),
+        _imminent_scan_priority_key(row["pattern"]),
+        str(row.get("ticker") or ""),
+    )
+
+
+def _readiness_band_near_miss_priority(row: dict[str, Any]) -> tuple[float, float]:
+    return (
+        float(row.get("gap") or 0.0),
+        -float(row.get("readiness") or 0.0),
+    )
+
+
+def _top_pending_shadow_near_misses(
+    rows: list[dict[str, Any]],
+    limit: int,
+) -> list[dict[str, Any]]:
+    if limit <= 0:
+        return []
+    return heapq.nsmallest(limit, rows, key=_pending_shadow_near_miss_priority)
+
+
+def _top_readiness_band_near_misses(
+    rows: list[dict[str, Any]],
+    limit: int,
+) -> list[dict[str, Any]]:
+    if limit <= 0:
+        return []
+    return heapq.nsmallest(limit, rows, key=_readiness_band_near_miss_priority)
 
 
 def _pattern_id_for_rotation(pat: ScanPattern) -> int:
@@ -1618,15 +1654,6 @@ def gather_imminent_candidate_rows(
             offsession_stock_shadow_admitted += 1
         return True
 
-    def _pending_shadow_near_miss_priority(row: dict[str, Any]) -> tuple[Any, ...]:
-        return (
-            float(row.get("readiness_gap_to_min") or 0.0),
-            -float(row.get("readiness") or 0.0),
-            -float(row.get("coverage_ratio") or 0.0),
-            _imminent_scan_priority_key(row["pattern"]),
-            str(row.get("ticker") or ""),
-        )
-
     for pat in patterns:
         if not all_active_patterns and not scan_pattern_eligible_main_imminent(pat):
             skip["excluded_promotion_lifecycle"] += 1
@@ -1882,10 +1909,10 @@ def gather_imminent_candidate_rows(
         if board_budget_hit or score_time_budget_hit:
             break
 
-    pending_shadow_near_misses.sort(key=_pending_shadow_near_miss_priority)
-    selected_shadow_near_misses = pending_shadow_near_misses[
-        :shadow_near_miss_adaptive_max_per_run
-    ]
+    selected_shadow_near_misses = _top_pending_shadow_near_misses(
+        pending_shadow_near_misses,
+        shadow_near_miss_adaptive_max_per_run,
+    )
     shadow_near_miss_adaptive_selected = len(selected_shadow_near_misses)
     shadow_near_miss_adaptive_skipped_not_selected = max(
         0,
@@ -1909,7 +1936,6 @@ def gather_imminent_candidate_rows(
         )
 
     candidates.sort(key=lambda x: (-x["composite"], x["eta_hi"]))
-    readiness_band_near_misses.sort(key=lambda row: (row["gap"], -row["readiness"]))
     meta = {
         "patterns_active": len(patterns),
         "patterns_with_tickers_evaluated": patterns_tried,
@@ -1928,7 +1954,10 @@ def gather_imminent_candidate_rows(
         "crypto_execution_filter_spot_tickers": len(coinbase_spot_tickers),
         "skip_reasons": skip,
         "excluded_lifecycle_by_stage": dict(excluded_lifecycle_by_stage),
-        "readiness_band_near_misses": readiness_band_near_misses[:readiness_near_miss_limit],
+        "readiness_band_near_misses": _top_readiness_band_near_misses(
+            readiness_band_near_misses,
+            readiness_near_miss_limit,
+        ),
         "shadow_near_miss_enabled": shadow_near_miss_enabled,
         "shadow_near_miss_max_gap": shadow_near_miss_max_gap,
         "shadow_near_miss_lifecycle_stages": sorted(shadow_near_miss_lifecycle_stages),
