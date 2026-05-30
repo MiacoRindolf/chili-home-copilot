@@ -1186,13 +1186,13 @@ def _ensure_coinbase_position_identity(
         if not ticker:
             return None
         qty = float(
-            getattr(trade, "quantity", None)
-            or (broker_payload or {}).get("quantity")
+            (broker_payload or {}).get("quantity")
+            or getattr(trade, "quantity", None)
             or 0.0
         )
         avg = (
-            getattr(trade, "entry_price", None)
-            or (broker_payload or {}).get("average_buy_price")
+            (broker_payload or {}).get("average_buy_price")
+            or getattr(trade, "entry_price", None)
             or getattr(trade, "avg_fill_price", None)
         )
         avg_f = float(avg) if avg not in (None, "") else None
@@ -1361,6 +1361,96 @@ def _ensure_coinbase_sync_entry_event(
             db.rollback()
         except Exception:
             pass
+
+
+def _align_coinbase_trade_to_position_truth(
+    db: Session,
+    *,
+    trade: Any,
+    broker_payload: dict[str, Any] | None,
+    position_id: int | None,
+) -> bool:
+    """Project Coinbase position truth onto the open management envelope.
+
+    Order sync can miss or partially describe a Coinbase fill, but position
+    sync has the broker-held inventory. Keep the Trade envelope aligned so
+    UI P&L, exposure, scale-ins, and exit sizing do not run from stale
+    ``filled_quantity`` or ``remaining_quantity`` fields.
+    """
+    payload = broker_payload or {}
+    qty = _safe_float(payload.get("quantity"))
+    if qty <= 0:
+        return False
+    status = str(getattr(trade, "status", "") or "").strip().lower()
+    if status in {"closed", "cancelled", "rejected"}:
+        return False
+
+    avg = _safe_float(payload.get("average_buy_price"))
+    now = datetime.utcnow()
+    trade.quantity = qty
+    trade.filled_quantity = qty
+    trade.remaining_quantity = 0.0
+    trade.status = "open"
+    trade.broker_status = "filled"
+    trade.last_broker_sync = now
+    if getattr(trade, "filled_at", None) is None:
+        trade.filled_at = now
+    if avg > 0:
+        trade.entry_price = avg
+        trade.avg_fill_price = avg
+    if position_id is not None:
+        try:
+            trade.position_id = int(position_id)
+        except Exception:
+            pass
+    db.add(trade)
+
+    try:
+        exists = db.execute(
+            text(
+                """
+                SELECT id
+                FROM trading_execution_events
+                WHERE trade_id = :trade_id
+                  AND event_type = 'coinbase_position_sync_inventory'
+                LIMIT 1
+                """
+            ),
+            {"trade_id": int(getattr(trade, "id"))},
+        ).first()
+        if exists is None:
+            from .trading.execution_audit import record_execution_event
+
+            record_execution_event(
+                db,
+                user_id=getattr(trade, "user_id", None),
+                ticker=getattr(trade, "ticker", None),
+                trade=trade,
+                scan_pattern_id=getattr(trade, "scan_pattern_id", None),
+                broker_source="coinbase",
+                event_type="coinbase_position_sync_inventory",
+                status="filled",
+                requested_quantity=qty,
+                cumulative_filled_quantity=qty,
+                last_fill_quantity=qty,
+                average_fill_price=avg if avg > 0 else None,
+                event_at=now,
+                payload_json={
+                    "side": "buy",
+                    "source": "coinbase_position_sync",
+                    "synthetic": True,
+                    "position_id": position_id,
+                    "broker_position": payload,
+                },
+                apply_to_trade=False,
+            )
+    except Exception:
+        logger.debug(
+            "[coinbase] position-truth execution event failed for trade#%s",
+            getattr(trade, "id", None),
+            exc_info=True,
+        )
+    return True
 
 
 def _coinbase_has_working_sell_orders(ticker: str | None) -> bool:
@@ -1801,6 +1891,9 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                 db, trade=existing, broker_payload=pos,
             )
             _ensure_coinbase_sync_entry_event(
+                db, trade=existing, broker_payload=pos, position_id=position_id,
+            )
+            _align_coinbase_trade_to_position_truth(
                 db, trade=existing, broker_payload=pos, position_id=position_id,
             )
             updated += 1
