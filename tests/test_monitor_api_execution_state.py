@@ -17,7 +17,12 @@ from app.models.trading import (
     Trade,
     TradingPosition,
 )
-from app.routers.trading_sub.monitor import _imminent_blocker_category, _serialize_decision
+from app.routers.trading_sub.monitor import (
+    _imminent_blocker_category,
+    _recommended_work_status,
+    _recommended_work_statuses,
+    _serialize_decision,
+)
 
 
 def test_serialize_decision_normalizes_legacy_llm_unavailable_reason():
@@ -398,6 +403,172 @@ def test_imminent_alerts_use_cached_edge_snapshots(db, paired_client):
     assert row["edge_reliability_snapshot_event_id"] is not None
     assert row["edge_reliability_snapshot_at"] is not None
     assert row["cash_deployment_rank"] in (None, 1)
+
+
+def test_recommended_work_status_marks_exit_refresh_on_cooldown(
+    monkeypatch,
+):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360)
+
+    class QueryStub:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def order_by(self, *args, **kwargs):
+            return self
+
+        def limit(self, *args, **kwargs):
+            return self
+
+        def all(self):
+            return [
+                SimpleNamespace(
+                    payload={
+                        "scan_pattern_id": 537,
+                        "evidence_fingerprint": "same-fp",
+                        "created_count": 0,
+                        "skip_reason": "non_positive_quality_evidence_no_exit_variant_birth",
+                    }
+                )
+            ]
+
+    class DbStub:
+        def query(self, *args, **kwargs):
+            return QueryStub()
+
+    status = _recommended_work_status(
+        DbStub(),
+        {
+            "scan_pattern_id": 537,
+            "recommended_work_event": "exit_variant_refresh",
+            "evidence_fingerprint": "same-fp",
+        },
+    )
+
+    assert status["event_type"] == "exit_variant_refresh"
+    assert status["actionable"] is False
+    assert status["blocker"] == "recent_exit_noop_diagnostic"
+    assert (
+        status["blocker_detail"]
+        == "non_positive_quality_evidence_no_exit_variant_birth"
+    )
+
+
+def test_recommended_work_status_keeps_exit_refresh_actionable_for_new_evidence(
+    monkeypatch,
+):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360)
+
+    class QueryStub:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def order_by(self, *args, **kwargs):
+            return self
+
+        def limit(self, *args, **kwargs):
+            return self
+
+        def all(self):
+            return [
+                SimpleNamespace(
+                    payload={
+                        "scan_pattern_id": 537,
+                        "evidence_fingerprint": "old-fp",
+                        "created_count": 0,
+                        "skip_reason": "non_positive_quality_evidence_no_exit_variant_birth",
+                    }
+                )
+            ]
+
+    class DbStub:
+        def query(self, *args, **kwargs):
+            return QueryStub()
+
+    status = _recommended_work_status(
+        DbStub(),
+        {
+            "scan_pattern_id": 537,
+            "recommended_work_event": "exit_variant_refresh",
+            "evidence_fingerprint": "new-fp",
+        },
+    )
+
+    assert status == {
+        "event_type": "exit_variant_refresh",
+        "actionable": True,
+        "blocker": None,
+    }
+
+
+def test_recommended_work_statuses_batches_exit_diagnostic_lookup(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360)
+
+    class QueryStub:
+        def __init__(self, db):
+            self.db = db
+
+        def filter(self, *args, **kwargs):
+            return self
+
+        def order_by(self, *args, **kwargs):
+            return self
+
+        def limit(self, *args, **kwargs):
+            return self
+
+        def all(self):
+            return [
+                SimpleNamespace(
+                    payload={
+                        "scan_pattern_id": 537,
+                        "evidence_fingerprint": "same-fp",
+                        "created_count": 0,
+                    }
+                )
+            ]
+
+    class DbStub:
+        def __init__(self):
+            self.queries = 0
+
+        def query(self, *args, **kwargs):
+            self.queries += 1
+            return QueryStub(self)
+
+    db = DbStub()
+    statuses = _recommended_work_statuses(
+        db,
+        [
+            {
+                "scan_pattern_id": 537,
+                "recommended_work_event": "exit_variant_refresh",
+                "evidence_fingerprint": "same-fp",
+            },
+            {
+                "scan_pattern_id": 538,
+                "recommended_work_event": "exit_variant_refresh",
+                "evidence_fingerprint": "new-fp",
+            },
+            {"scan_pattern_id": 539},
+        ],
+    )
+
+    assert db.queries == 1
+    assert statuses[0]["actionable"] is False
+    assert statuses[0]["blocker"] == "recent_exit_noop_diagnostic"
+    assert statuses[1] == {
+        "event_type": "exit_variant_refresh",
+        "actionable": True,
+        "blocker": None,
+    }
+    assert statuses[2] == {"event_type": None, "actionable": None, "blocker": None}
 
 
 def test_imminent_alerts_keep_cached_edge_snapshots_asset_sliced(db, paired_client):
