@@ -1858,6 +1858,76 @@ def test_scale_in_blocks_live_capital_fallback(monkeypatch):
     assert blocked[0]["reason"] == "capital_unavailable:fallback:get_portfolio_timeout"
 
 
+def test_scale_in_blocks_live_recert_debt_before_broker(monkeypatch):
+    db = MagicMock()
+    alert = SimpleNamespace(
+        id=76,
+        ticker="QNT-USD",
+        scan_pattern_id=1260,
+        _chili_recert_required=True,
+    )
+    trade = SimpleNamespace(
+        id=2134,
+        entry_price=TEST_ENTRY_PRICE,
+        quantity=1.0,
+        stop_loss=TEST_STOP_PRICE,
+        take_profit=TEST_TARGET_PRICE,
+        scale_in_count=0,
+        indicator_snapshot={},
+    )
+    plan = SimpleNamespace(
+        trade=trade,
+        added_quantity=0.5,
+        new_avg_entry=51.0,
+        new_stop=TEST_STOP_PRICE,
+        new_target=TEST_TARGET_PRICE,
+    )
+    audit_rows: list[dict[str, object]] = []
+    shadow_rows: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        at_mod,
+        "settings",
+        SimpleNamespace(chili_autotrader_block_live_on_capital_fallback=False),
+    )
+    monkeypatch.setattr(at_mod, "_pattern_row", lambda *a, **k: SimpleNamespace(id=1260))
+    monkeypatch.setattr(
+        at_mod,
+        "_queue_recert_for_blocked_signal",
+        lambda *a, **k: {"queued": True, "recert_id": "recert-1260"},
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_execute_broker_buy",
+        lambda *a, **k: pytest.fail("recert scale-in should not reach broker"),
+    )
+    monkeypatch.setattr(at_mod, "_audit", lambda *a, **k: audit_rows.append(k))
+    monkeypatch.setattr(
+        at_mod,
+        "_maybe_open_paper_shadow",
+        lambda *a, **k: shadow_rows.append(k),
+    )
+    monkeypatch.setattr(at_mod, "_autotrader_tick_note", lambda *a, **k: None)
+
+    out = {"scaled_in": 0, "skipped": 0}
+    snap: dict[str, object] = {}
+
+    at_mod._execute_scale_in(db, 1, alert, plan, TEST_ENTRY_PRICE, snap, None, True, out)
+
+    assert out["skipped"] == 1
+    assert out["scaled_in"] == 0
+    assert trade.quantity == 1.0
+    assert trade.scale_in_count == 0
+    assert audit_rows[0]["decision"] == "blocked"
+    assert audit_rows[0]["reason"] == "pattern_recert_required"
+    assert audit_rows[0]["trade_id"] == trade.id
+    assert snap["scale_in_blocked_recert_required"] is True
+    assert snap["scale_in_existing_trade_id"] == trade.id
+    assert snap["recert_signal_fastlane"]["recert_id"] == "recert-1260"
+    assert shadow_rows[0]["decision"] == "blocked_recert_required"
+    assert shadow_rows[0]["qty"] == pytest.approx(0.5)
+
+
 def test_scale_in_records_confirming_pattern_history(monkeypatch):
     db = MagicMock()
     alert = SimpleNamespace(id=77, ticker="SCAP", scan_pattern_id=12)

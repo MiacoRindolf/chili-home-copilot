@@ -5589,6 +5589,48 @@ def _execute_scale_in(
         )
         return
     if live:
+        pattern = None
+        pattern_id = getattr(alert, "scan_pattern_id", None)
+        if pattern_id:
+            pattern = _pattern_row(db, pattern_id)
+        recert_blocked = bool(getattr(alert, "_chili_recert_required", False))
+        if not recert_blocked and isinstance(pattern, ScanPattern):
+            recert_blocked = _live_recert_block_applies(pattern)
+        if recert_blocked:
+            reason = "pattern_recert_required"
+            snap["scale_in_blocked_recert_required"] = True
+            snap["scale_in_existing_trade_id"] = getattr(t, "id", None)
+            snap["paper_observation_reason"] = reason
+            recert_fastlane = _queue_recert_for_blocked_signal(
+                db,
+                alert=alert,
+                pattern=pattern,
+                reason=reason,
+            )
+            if recert_fastlane is not None:
+                snap["recert_signal_fastlane"] = recert_fastlane
+            _audit(
+                db,
+                user_id=uid,
+                alert=alert,
+                decision="blocked",
+                reason=reason,
+                rule_snapshot=snap,
+                llm_snapshot=llm_snap,
+                trade_id=getattr(t, "id", None),
+            )
+            out["skipped"] = out.get("skipped", 0) + 1
+            _autotrader_tick_note(out, kind="blocked", reason=reason, alert=alert)
+            _maybe_open_paper_shadow(
+                db,
+                uid=uid,
+                alert=alert,
+                qty=add_q,
+                px=px,
+                snap=snap,
+                decision="blocked_recert_required",
+            )
+            return
         if bool(getattr(settings, "chili_autotrader_block_live_on_capital_fallback", True)):
             try:
                 from .auto_trader_rules import resolve_effective_capital
