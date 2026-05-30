@@ -202,6 +202,50 @@ def test_get_project_eager_loads_detail_relationships(monkeypatch):
     assert db.last_query.first_calls == 1
 
 
+def test_list_tasks_eager_loads_task_detail_relationships(monkeypatch):
+    db = _FakeSession([_task_for_detail()])
+    monkeypatch.setattr(planner_service, "_user_can_access", lambda *_args, **_kwargs: True)
+
+    result = planner_service.list_tasks(db, project_id=1, user_id=7)
+
+    assert result[0]["title"] == "Do it"
+    assert result[0]["assignee_name"] == "Alice"
+    assert result[0]["reporter_name"] == "Reporter"
+    assert db.query_calls == 1
+    assert db.last_query.options_calls == 1
+    assert db.last_query.filter_calls == 1
+
+
+def test_list_tasks_filtered_eager_loads_task_detail_relationships(monkeypatch):
+    db = _FakeSession([_task_for_detail()])
+    monkeypatch.setattr(planner_service, "_user_can_access", lambda *_args, **_kwargs: True)
+
+    result = planner_service.list_tasks_filtered(db, project_id=1, user_id=7)
+
+    assert result[0]["title"] == "Do it"
+    assert result[0]["assignee_name"] == "Alice"
+    assert result[0]["reporter_name"] == "Reporter"
+    assert db.query_calls == 1
+    assert db.last_query.options_calls == 1
+    assert db.last_query.filter_calls == 1
+
+
+def test_get_task_eager_loads_task_detail_relationships(monkeypatch):
+    db = _FakeSession([_task_for_detail()])
+    monkeypatch.setattr(planner_service, "_user_can_access", lambda *_args, **_kwargs: True)
+
+    result = planner_service.get_task(db, task_id=1, user_id=7)
+
+    assert result is not None
+    assert result["title"] == "Do it"
+    assert result["assignee_name"] == "Alice"
+    assert result["reporter_name"] == "Reporter"
+    assert db.query_calls == 1
+    assert db.last_query.options_calls == 1
+    assert db.last_query.filter_calls == 1
+    assert db.last_query.first_calls == 1
+
+
 def test_user_project_summary_eager_loads_tasks_and_assignees():
     assignee = SimpleNamespace(name="Alice")
     project = SimpleNamespace(

@@ -147,6 +147,21 @@ def _task_dict(t: PlanTask) -> dict:
 
 # ── Activity logging ────────────────────────────────────────────────────────
 
+def _task_detail_load_options():
+    return (
+        selectinload(PlanTask.assignee),
+        selectinload(PlanTask.reporter),
+        selectinload(PlanTask.task_labels).selectinload(TaskLabel.label),
+        selectinload(PlanTask.watchers),
+        selectinload(PlanTask.subtasks).selectinload(PlanTask.assignee),
+        selectinload(PlanTask.subtasks).selectinload(PlanTask.reporter),
+        selectinload(PlanTask.subtasks)
+        .selectinload(PlanTask.task_labels)
+        .selectinload(TaskLabel.label),
+        selectinload(PlanTask.subtasks).selectinload(PlanTask.watchers),
+    )
+
+
 def _log_activity(db: Session, task_id: int, user_id: int | None, action: str, detail: str = ""):
     db.add(TaskActivity(task_id=task_id, user_id=user_id, action=action, detail=detail))
     db.flush()
@@ -376,6 +391,7 @@ def list_tasks(db: Session, project_id: int, user_id: int) -> list[dict]:
         return []
     tasks = (
         db.query(PlanTask)
+        .options(*_task_detail_load_options())
         .filter(PlanTask.project_id == project_id, PlanTask.parent_id.is_(None))
         .order_by(PlanTask.sort_order, PlanTask.id)
         .all()
@@ -391,7 +407,7 @@ def list_tasks_filtered(
 ) -> list[dict]:
     if not _user_can_access(db, project_id, user_id):
         return []
-    q = db.query(PlanTask).filter(PlanTask.project_id == project_id)
+    q = db.query(PlanTask).options(*_task_detail_load_options()).filter(PlanTask.project_id == project_id)
     if assignee is not None:
         q = q.filter(PlanTask.assigned_to == assignee)
     if status:
@@ -531,7 +547,12 @@ def delete_task(db: Session, task_id: int, user_id: int) -> bool:
 
 
 def get_task(db: Session, task_id: int, user_id: int) -> dict | None:
-    t = db.query(PlanTask).filter(PlanTask.id == task_id).first()
+    t = (
+        db.query(PlanTask)
+        .options(*_task_detail_load_options())
+        .filter(PlanTask.id == task_id)
+        .first()
+    )
     if not t:
         return None
     if not _user_can_access(db, t.project_id, user_id):
