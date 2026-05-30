@@ -10,12 +10,14 @@ from app.models.trading import (
     AutoTraderRun,
     BrainWorkEvent,
     BreakoutAlert,
+    ExecutionCostEstimate,
     PaperTrade,
     ScanPattern,
     Trade,
     TradingPosition,
 )
 from app.services.trading.cash_deployment import (
+    _rolling_execution_cost_pct,
     cash_deployment_rows,
     cash_deployment_summary,
     enqueue_cash_deployment_work,
@@ -237,6 +239,85 @@ def test_cash_deployment_blocks_positive_slippage_miss_as_execution_debt(db, mon
     assert row["slippage_miss_count"] == 1
     assert row["live_deployable"] is False
     assert row["max_safe_notional"] == 0.0
+
+
+def test_cash_deployment_uses_rolling_execution_cost_estimate(db, monkeypatch):
+    monkeypatch.setattr(settings, "chili_autotrader_live_enabled", True)
+    monkeypatch.setattr(settings, "chili_cash_deployment_equity_cost_pct", 0.05)
+    monkeypatch.setattr(settings, "chili_cash_deployment_min_closed_evidence", 5)
+    monkeypatch.setattr(settings, "chili_cash_deployment_max_brier_score", 0.28)
+    monkeypatch.setattr(settings, "brain_execution_cost_default_fee_bps", 1.0)
+    monkeypatch.setattr(settings, "brain_execution_cost_impact_cap_bps", 0.0)
+    monkeypatch.setattr(settings, "chili_autotrader_per_trade_notional_usd", 1_000.0)
+
+    pat = _pattern(db, name="cash execution cost aware")
+    alert = _alert(db, pat, ticker="XCOST")
+    _run(db, pat, alert, expected=2.0)
+    _closed_paper(db, pat, alert)
+    db.add(
+        ExecutionCostEstimate(
+            ticker="XCOST",
+            side="long",
+            window_days=30,
+            median_spread_bps=25.0,
+            p90_spread_bps=150.0,
+            median_slippage_bps=10.0,
+            p90_slippage_bps=50.0,
+            avg_daily_volume_usd=1_000_000.0,
+            sample_trades=12,
+            last_updated_at=datetime.utcnow(),
+        )
+    )
+    db.commit()
+
+    rows = cash_deployment_rows(db, window_days=30, limit=10)
+    row = next(x for x in rows if x["scan_pattern_id"] == pat.id)
+
+    assert row["execution_cost_source"] == "rolling_execution_cost_estimate"
+    assert row["estimated_execution_cost_pct"] == pytest.approx(2.01)
+    assert row["calibrated_ev_after_cost_pct"] == pytest.approx(0.49)
+    assert row["cash_deployment_category"] == "live_deployable"
+
+
+def test_rolling_execution_cost_uses_30_day_model_without_db_fixture(monkeypatch):
+    monkeypatch.setattr(settings, "brain_execution_cost_default_fee_bps", 1.0)
+    monkeypatch.setattr(settings, "brain_execution_cost_impact_cap_bps", 0.0)
+    monkeypatch.setattr(settings, "chili_autotrader_per_trade_notional_usd", 1_000.0)
+
+    class _Query:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def order_by(self, *args, **kwargs):
+            return self
+
+        def first(self):
+            return SimpleNamespace(
+                id=42,
+                ticker="XCOST",
+                side="long",
+                window_days=30,
+                median_spread_bps=25.0,
+                p90_spread_bps=150.0,
+                median_slippage_bps=10.0,
+                p90_slippage_bps=50.0,
+                avg_daily_volume_usd=1_000_000.0,
+                sample_trades=12,
+            )
+
+    db = SimpleNamespace(query=lambda model: _Query())
+
+    cost, meta = _rolling_execution_cost_pct(
+        db,
+        symbol="XCOST",
+        asset_class="stock",
+        window_days=7,
+    )
+
+    assert cost == pytest.approx(2.01)
+    assert meta["execution_cost_source"] == "rolling_execution_cost_estimate"
+    assert meta["execution_cost_estimate_window_days"] == 30
+    assert meta["execution_cost_requested_window_days"] == 7
 
 
 def test_cash_deployment_exposure_cap_blocks_sizing(db, monkeypatch):
