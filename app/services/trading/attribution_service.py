@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -21,6 +20,42 @@ def _scan_patterns_by_id(db: Session, pattern_ids: set[int]) -> dict[int, Any]:
     return {int(row.id): row for row in rows if row.id is not None}
 
 
+def _closed_pattern_live_stats(
+    db: Session,
+    *,
+    user_id: int,
+    since: datetime,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Aggregate closed-trade pattern stats in the database for the attribution endpoint."""
+    rows = db.execute(
+        text(
+            """
+            SELECT
+                scan_pattern_id,
+                COUNT(*)::bigint AS live_closed_trades,
+                SUM(CASE WHEN COALESCE(pnl, 0) > 0 THEN 1 ELSE 0 END)::bigint AS live_wins,
+                SUM(COALESCE(pnl, 0))::double precision AS live_total_pnl,
+                AVG(COALESCE(pnl, 0))::double precision AS live_avg_pnl,
+                AVG(tca_entry_slippage_bps)::double precision AS live_avg_entry_slippage_bps,
+                AVG(tca_exit_slippage_bps)::double precision AS live_avg_exit_slippage_bps
+              FROM trading_trades
+             WHERE user_id = :user_id
+               AND status = 'closed'
+               AND scan_pattern_id IS NOT NULL
+               AND exit_date IS NOT NULL
+               AND exit_date >= :since
+             GROUP BY scan_pattern_id
+             ORDER BY live_closed_trades DESC, scan_pattern_id ASC
+             LIMIT :limit
+            """
+        ),
+        {"user_id": user_id, "since": since, "limit": limit},
+    ).mappings().all()
+
+    return [dict(row) for row in rows]
+
+
 def live_vs_research_by_pattern(
     db: Session,
     user_id: int | None,
@@ -30,8 +65,6 @@ def live_vs_research_by_pattern(
     include_phase5b_compare: bool = False,
 ) -> dict[str, Any]:
     """Aggregate closed trades with ``scan_pattern_id`` vs ``ScanPattern`` research fields."""
-    from ...models.trading import Trade
-
     from .backtest_metrics import backtest_win_rate_db_to_display_pct
 
     if user_id is None:
@@ -46,40 +79,29 @@ def live_vs_research_by_pattern(
     since = datetime.utcnow() - timedelta(days=max(1, int(days)))
     safe_days = max(1, int(days))
     safe_limit = max(1, min(200, int(limit)))
-    trades = (
-        db.query(Trade)
-        .filter(
-            Trade.user_id == user_id,
-            Trade.status == "closed",
-            Trade.scan_pattern_id.isnot(None),
-            Trade.exit_date.isnot(None),
-            Trade.exit_date >= since,
-        )
-        .all()
+    live_stats = _closed_pattern_live_stats(
+        db,
+        user_id=int(user_id),
+        since=since,
+        limit=safe_limit,
     )
-    by_pid: dict[int, list[Trade]] = defaultdict(list)
-    for t in trades:
-        by_pid[int(t.scan_pattern_id or 0)].append(t)
 
     rows: list[dict[str, Any]] = []
-    patterns_by_id = _scan_patterns_by_id(db, set(by_pid))
-    for pid, tlist in by_pid.items():
+    patterns_by_id = _scan_patterns_by_id(
+        db,
+        {int(row["scan_pattern_id"] or 0) for row in live_stats},
+    )
+    for stat in live_stats:
+        pid = int(stat["scan_pattern_id"] or 0)
         if pid <= 0:
             continue
         pat = patterns_by_id.get(pid)
-        pnls = [float(t.pnl or 0) for t in tlist]
-        wins = sum(1 for p in pnls if p > 0)
-        n = len(tlist)
-        entry_slips = [
-            float(t.tca_entry_slippage_bps)
-            for t in tlist
-            if t.tca_entry_slippage_bps is not None
-        ]
-        exit_slips = [
-            float(t.tca_exit_slippage_bps)
-            for t in tlist
-            if t.tca_exit_slippage_bps is not None
-        ]
+        n = int(stat["live_closed_trades"] or 0)
+        wins = int(stat["live_wins"] or 0)
+        total_pnl = round(float(stat["live_total_pnl"] or 0.0), 2)
+        avg_pnl = round(float(stat["live_avg_pnl"] or 0.0), 2) if n else 0.0
+        entry_slip_avg = stat["live_avg_entry_slippage_bps"]
+        exit_slip_avg = stat["live_avg_exit_slippage_bps"]
         rows.append(
             {
                 "scan_pattern_id": pid,
@@ -100,19 +122,16 @@ def live_vs_research_by_pattern(
                 else None,
                 "live_closed_trades": n,
                 "live_win_rate_pct": round(wins / n * 100.0, 1) if n else 0.0,
-                "live_total_pnl": round(sum(pnls), 2),
-                "live_avg_pnl": round(sum(pnls) / n, 2) if n else 0.0,
-                "live_avg_entry_slippage_bps": round(sum(entry_slips) / len(entry_slips), 2)
-                if entry_slips
+                "live_total_pnl": total_pnl,
+                "live_avg_pnl": avg_pnl,
+                "live_avg_entry_slippage_bps": round(float(entry_slip_avg), 2)
+                if entry_slip_avg is not None
                 else None,
-                "live_avg_exit_slippage_bps": round(sum(exit_slips) / len(exit_slips), 2)
-                if exit_slips
+                "live_avg_exit_slippage_bps": round(float(exit_slip_avg), 2)
+                if exit_slip_avg is not None
                 else None,
             }
         )
-
-    rows.sort(key=lambda r: r["live_closed_trades"], reverse=True)
-    rows = rows[:safe_limit]
 
     out = {"ok": True, "window_days": days, "patterns": rows}
     if include_phase5b_compare:
