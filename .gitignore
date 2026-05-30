@@ -68,6 +68,7 @@ backtest_refresh_scheduled.log
 # frequently contain credentials or user data.
 *.log
 *.log.*
+logs/
 
 # Local DB backups (pg_dump output). Treat as secret — full state of the
 # live trading DB. Keep them out of git even if a commit slips through.

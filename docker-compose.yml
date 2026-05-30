@@ -50,7 +50,10 @@ services:
       interval: 10s
       timeout: 5s
       retries: 30
-      start_period: 120s
+      # Crash recovery on the large bind-mounted live database can spend
+      # 20+ minutes fsyncing after an abrupt Docker/host stop. Keep Compose
+      # in "starting" instead of declaring dependency failure too early.
+      start_period: ${CHILI_POSTGRES_HEALTH_START_PERIOD:-1800s}
     deploy:
       resources:
         limits:
