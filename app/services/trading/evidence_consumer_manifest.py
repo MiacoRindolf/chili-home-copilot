@@ -7,6 +7,10 @@ from typing import Any
 
 __all__ = [
     "CURRENT_EVIDENCE_TARGET_BRANCH",
+    "CURRENT_V16_VALIDATOR_ARTIFACT",
+    "CURRENT_V16_VALIDATOR_SHA256",
+    "CURRENT_V36_INDEX_ARTIFACT",
+    "CURRENT_V36_INDEX_SHA256",
     "CURRENT_V15_VALIDATOR_ARTIFACT",
     "CURRENT_V15_VALIDATOR_SHA256",
     "CURRENT_V35_INDEX_ARTIFACT",
@@ -24,6 +28,7 @@ __all__ = [
     "V33_POLICY",
     "V34_POLICY",
     "V35_POLICY",
+    "V36_POLICY",
     "validate_consumer_manifest",
     "validate_manifest",
 ]
@@ -32,12 +37,30 @@ __all__ = [
 CURRENT_EVIDENCE_TARGET_BRANCH = "codex/brain-work-done-marker-recovery"
 CURRENT_EVIDENCE_TARGET_REMOTE_REF = "origin/codex/brain-work-done-marker-recovery"
 
+V36_CURRENT_BRANCH_HEAD = "85e777c5e6e679fc55856e6d9398bfef556685d0"
+V36_PREDECESSOR_EFE9_HEAD = "efe9c14e7850265caa2137db8ddbc52d9fccdeaf"
+V36_PREDECESSOR_571_HEAD = "571445d1d6f6fdfe786d537962f4388b15add7df"
 V35_CURRENT_BRANCH_HEAD = "7e394580016236ef484f937b9a5f8a3847cdc1b5"
 V35_INTERMEDIATE_HEAD_AFTER_B8BEE = "78f10e8d5feb5b1d944c3b5a18eec9f317dc92fd"
 V34_PREVIOUS_GOVERNED_HEAD = "b8bee4bd26cb17cd679b74c31de98bcf4a50218f"
 V33_PRIOR_INCIDENT_HEAD = "8426169fbef6da11331a0bcd95ca77ca9f08da07"
 MERGED_PR_122_HEAD = "3ba5aacaeca3c2433e3bf5ec09d6c483e6bc2984"
 PR_123_MAIN_HEAD = "dd468151409ce2e9d467477201827d7f773db182"
+
+CURRENT_V36_INDEX_ARTIFACT = (
+    "project_ws/MLOps/OUT/20260530-070600Z-"
+    "mlops-governed-evidence-blocker-index-v36.json"
+)
+CURRENT_V36_INDEX_SHA256 = (
+    "7FAC696C0B09A0F5AA7BB1908A562206F9E590E97EF1BCC18352CF4175A676B2"
+)
+CURRENT_V16_VALIDATOR_ARTIFACT = (
+    "project_ws/MLOps/OUT/20260530-070600Z-"
+    "pm065-v36-consumer-manifest-validator-spec.json"
+)
+CURRENT_V16_VALIDATOR_SHA256 = (
+    "4E49874F81116AADC5250DC4A0E69125CF866A26531A825D56D4F56C8B8BC1AC"
+)
 
 CURRENT_V35_INDEX_ARTIFACT = (
     "project_ws/MLOps/OUT/20260530-064200Z-"
@@ -135,6 +158,23 @@ REQUIRED_SAFETY_CONSTRAINTS = frozenset(
     }
 )
 
+REQUIRED_V36_FAIL_CLOSED_EXCLUSIONS = frozenset(
+    {
+        "post0636_7e394_v35_stream_stale_for_exact_85e777_head",
+        "post0652_571445_coinbase_product_cache_not_clean_broker_truth_or_valuation_evidence",
+        "post0656_efe9_stop_position_display_not_clean_runtime_or_protective_stop_evidence",
+        "post0700_current_branch_head_85e777_not_clean_source_lineage",
+        "post0700_85e777_no_github_checks_not_ci_evidence",
+        "post0700_85e777_no_branch_workflow_not_release_readiness",
+        "post0700_85e777_no_open_pr_not_pr_readiness",
+        "post0700_85e777_autotrader_position_sizer_skip_requires_owner_review",
+        "post0700_85e777_dirty_bind_mount_not_runtime_trust",
+        "post0702_quarantined_target_active_after_85e777_branch_movement",
+        "post0632_pr123_main_ci_green_not_nonmain_runtime_or_evidence_clearance",
+        "pm065_source_lineage_not_satisfied_without_manifest_exact_hash_binding",
+    }
+)
+
 REQUIRED_V35_FAIL_CLOSED_EXCLUSIONS = frozenset(
     {
         "post0614_b8bee_v34_stream_stale_for_exact_7e394_head",
@@ -181,6 +221,30 @@ REQUIRED_V33_FAIL_CLOSED_EXCLUSIONS = frozenset(
         "post0556_active_target_after_branch_push_control_plane_failure",
         "post0608_active_target_after_branch_push_control_plane_failure",
         "post0546_branch_push_stream_requires_v33_manifest_binding",
+    }
+)
+
+REQUIRED_V36_CONSUMER_SURFACES = frozenset(
+    {
+        "labels",
+        "training",
+        "evaluation",
+        "backtests",
+        "scanner_metrics",
+        "transaction_cost_analysis",
+        "pnl_statistics",
+        "calibration",
+        "threshold_tuning",
+        "model_health",
+        "release_readiness",
+        "pr_readiness",
+        "source_lineage",
+        "runtime_provenance",
+        "broker_truth_claims",
+        "autotrader_execution_evidence",
+        "position_sizing_evidence",
+        "evidence_promotion",
+        "model_promotion",
     }
 )
 
@@ -272,10 +336,63 @@ REQUIRED_V35_NON_CLEARANCE_FALSE = frozenset(
     }
 )
 
+REQUIRED_V36_NON_CLEARANCE_FALSE = REQUIRED_V35_NON_CLEARANCE_FALSE | frozenset(
+    {
+        "approved_for_autotrader_execution_trust",
+        "approved_for_position_sizing_evidence",
+    }
+)
 REQUIRED_V34_NON_CLEARANCE_FALSE = REQUIRED_V35_NON_CLEARANCE_FALSE - frozenset(
     {"approved_for_runtime_refresh"}
 )
 REQUIRED_V33_NON_CLEARANCE_FALSE = REQUIRED_V34_NON_CLEARANCE_FALSE
+
+REQUIRED_V36_SOURCE_ARTIFACTS = (
+    (
+        "project_ws/MLOps/OUT/20260530-070500Z-current-branch-85e777-mlops-evidence.json",
+        "295262A6520B65C8B2D24A208C57B3F580864B46E5DC284CA905B2B203B10ADF",
+    ),
+    (
+        "project_ws/MLOps/IN/20260530-070000Z-from-AlgoTraderArchitect-to-MLOps-pm070-85e777-successor-binding.md",
+        "C7370AD6469446922FFCDF4F37F6E59340998E9E86DED3F962B665459636BD03",
+    ),
+    (
+        "project_ws/AlgoTraderArchitect/OUT/20260530-070000Z-85e777-current-head-governance-note.md",
+        "228CEE30FD55E046D093ED2525B13E552E4DBE177115A7B4A5CDE1E4B3E417F2",
+    ),
+    (
+        "project_ws/PM/IN/20260530-070000Z-from-AlgoTraderArchitect-to-PM-pm070-85e777-current-head.md",
+        "279756D5BA62463B6A895E208C2AF6266384D143262A2171A4F2DB4494D18F90",
+    ),
+    (
+        "project_ws/Risk/IN/20260530-070000Z-from-AlgoTraderArchitect-to-Risk-pm070-85e777-live-control-review.md",
+        "D220195232E3236CCD2E52A3E8B13DF4DD7465D94224763B6190BDBBD26E1A23",
+    ),
+    (
+        "project_ws/AgentOps/OUT/20260530-070234Z-agentops-85e777-containment-refresh.md",
+        "A85A0F4529B82BEA3A5E1929AE140B1BAE647F53D050711172EA795BC4123558",
+    ),
+    (
+        "project_ws/PM/OUT/20260530-070100Z-pm-efe9c14-successor-head-disposition.md",
+        "DD253D0AE0BAC2900E7DD48221DB7E136F68128553CE5D36C5820607119A167E",
+    ),
+    (
+        "project_ws/Risk/OUT/20260530-065600Z-devops-571445-branch-head-risk-classification.md",
+        "F0CD8C540A087C664C39E99BC6770B85194487ACA450746D0B549C141DCAA72E",
+    ),
+    (
+        "project_ws/DevOps/OUT/20260530-065200Z-devops-571445-current-head-release-block-refresh.md",
+        "2E3C7155ACE00DE231D017E67918FD3C22D291DF1127016FD80B79318F6272A5",
+    ),
+    (
+        "project_ws/PM/OUT/20260530-064900Z-pm-7e394-v35-v15-binding.md",
+        "17AF884068FCFFB143845C42E4F3B7F18EEF9FF91625FCCBB3B488E1FDF2225C",
+    ),
+    (
+        CURRENT_V35_INDEX_ARTIFACT,
+        CURRENT_V35_INDEX_SHA256,
+    ),
+)
 
 REQUIRED_V35_SOURCE_ARTIFACTS = (
     (
@@ -370,6 +487,40 @@ REQUIRED_V33_SOURCE_ARTIFACTS = (
     ),
 )
 
+REQUIRED_V36_EXCLUDED_REFERENCES = {
+    "excluded_commit_ids": frozenset(
+        {
+            MERGED_PR_122_HEAD,
+            V33_PRIOR_INCIDENT_HEAD,
+            V34_PREVIOUS_GOVERNED_HEAD,
+            V35_INTERMEDIATE_HEAD_AFTER_B8BEE,
+            V35_CURRENT_BRANCH_HEAD,
+            V36_PREDECESSOR_571_HEAD,
+            V36_PREDECESSOR_EFE9_HEAD,
+            V36_CURRENT_BRANCH_HEAD,
+            PR_123_MAIN_HEAD,
+        }
+    ),
+    "excluded_remote_refs": frozenset({CURRENT_EVIDENCE_TARGET_REMOTE_REF, "origin/main"}),
+    "excluded_branch_refs": frozenset({CURRENT_EVIDENCE_TARGET_BRANCH}),
+    "excluded_pr_refs": frozenset({"PR #122", "PR #123"}),
+    "excluded_check_run_refs": frozenset(
+        {
+            "GitHub check-runs count 0 for 85e777c5e6e679fc55856e6d9398bfef556685d0",
+            "GitHub status contexts total 0 and pending for 85e777c5e6e679fc55856e6d9398bfef556685d0",
+            "No branch workflow run for 85e777c5e6e679fc55856e6d9398bfef556685d0",
+            "PR #123 main CI run 26676647858 success applies only to dd468151409ce2e9d467477201827d7f773db182",
+        }
+    ),
+    "excluded_runtime_windows": frozenset(
+        {
+            "post-2026-05-30T07:00:00Z 85e777 current branch-head stream",
+            "post-2026-05-30T06:32:55Z PR #123 main-CI-green release-block stream",
+            "post-2026-05-30T07:02:32.9704738Z active-target containment floor",
+        }
+    ),
+}
+
 REQUIRED_V35_EXCLUDED_REFERENCES = {
     "excluded_commit_ids": frozenset(
         {
@@ -459,6 +610,34 @@ class ManifestBindingPolicy:
     latest_required_containment_floor_utc: str
 
 
+V36_POLICY = ManifestBindingPolicy(
+    name="v36_v16_85e777_current_head",
+    accepted_target_heads=frozenset(
+        {
+            V36_CURRENT_BRANCH_HEAD,
+            V36_PREDECESSOR_EFE9_HEAD,
+            V36_PREDECESSOR_571_HEAD,
+        }
+    ),
+    descendant_marker_heads=frozenset(
+        {
+            V36_CURRENT_BRANCH_HEAD,
+            V36_PREDECESSOR_EFE9_HEAD,
+            V36_PREDECESSOR_571_HEAD,
+        }
+    ),
+    blocker_index_artifact=CURRENT_V36_INDEX_ARTIFACT,
+    blocker_index_sha256=CURRENT_V36_INDEX_SHA256,
+    validator_spec_artifact=CURRENT_V16_VALIDATOR_ARTIFACT,
+    validator_spec_sha256=CURRENT_V16_VALIDATOR_SHA256,
+    required_source_artifacts=REQUIRED_V36_SOURCE_ARTIFACTS,
+    required_fail_closed_exclusions=REQUIRED_V36_FAIL_CLOSED_EXCLUSIONS,
+    required_consumer_surfaces=REQUIRED_V36_CONSUMER_SURFACES,
+    required_excluded_references=REQUIRED_V36_EXCLUDED_REFERENCES,
+    required_non_clearance_false=REQUIRED_V36_NON_CLEARANCE_FALSE,
+    latest_required_containment_floor_utc="2026-05-30T07:02:32.9704738Z",
+)
+
 V35_POLICY = ManifestBindingPolicy(
     name="v35_v15_7e394_current_head",
     accepted_target_heads=frozenset(
@@ -511,7 +690,7 @@ V33_POLICY = ManifestBindingPolicy(
     latest_required_containment_floor_utc="2026-05-30T06:08:25Z",
 )
 
-POLICIES = (V35_POLICY, V34_POLICY, V33_POLICY)
+POLICIES = (V36_POLICY, V35_POLICY, V34_POLICY, V33_POLICY)
 
 # Backwards-compatible aliases for callers/tests created against the first PM-070 request.
 CURRENT_V34_INDEX_ARTIFACT = LEGACY_V34_INDEX_ARTIFACT
@@ -705,6 +884,13 @@ def _require_policy_binding(
         or validator_artifact == LEGACY_V14_VALIDATOR_ARTIFACT
     ):
         errors.append("v34_v14_stale_for_v35_target_head")
+    if policy is V36_POLICY and (
+        blocker_sha == CURRENT_V35_INDEX_SHA256
+        or validator_sha == CURRENT_V15_VALIDATOR_SHA256
+        or blocker_artifact == CURRENT_V35_INDEX_ARTIFACT
+        or validator_artifact == CURRENT_V15_VALIDATOR_ARTIFACT
+    ):
+        errors.append("v35_v15_stale_for_v36_target_head")
     if blocker_artifact != policy.blocker_index_artifact:
         errors.append(f"{policy.name}:blocker_index_artifact_required")
     if blocker_sha != policy.blocker_index_sha256:

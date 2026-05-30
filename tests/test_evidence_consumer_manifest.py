@@ -6,6 +6,10 @@ import sys
 
 from app.services.trading.evidence_consumer_manifest import (
     CURRENT_EVIDENCE_TARGET_BRANCH,
+    CURRENT_V15_VALIDATOR_ARTIFACT,
+    CURRENT_V15_VALIDATOR_SHA256,
+    CURRENT_V35_INDEX_ARTIFACT,
+    CURRENT_V35_INDEX_SHA256,
     LEGACY_V14_VALIDATOR_ARTIFACT,
     LEGACY_V14_VALIDATOR_SHA256,
     LEGACY_V34_INDEX_ARTIFACT,
@@ -16,6 +20,10 @@ from app.services.trading.evidence_consumer_manifest import (
     REQUIRED_SAFETY_CONSTRAINTS,
     V33_POLICY,
     V34_POLICY,
+    V36_CURRENT_BRANCH_HEAD,
+    V36_POLICY,
+    V36_PREDECESSOR_571_HEAD,
+    V36_PREDECESSOR_EFE9_HEAD,
     V35_CURRENT_BRANCH_HEAD,
     V35_INTERMEDIATE_HEAD_AFTER_B8BEE,
     V35_POLICY,
@@ -75,7 +83,18 @@ def _error_set(manifest: dict[str, object]) -> set[str]:
     return set(validate_consumer_manifest(manifest).errors)
 
 
-def test_current_v35_v15_manifest_passes_only_as_non_clearance() -> None:
+def test_current_v36_v16_manifest_passes_only_as_non_clearance() -> None:
+    result = validate_consumer_manifest(
+        _valid_manifest(V36_POLICY, target_head=V36_CURRENT_BRANCH_HEAD)
+    )
+
+    assert result.accepted is True
+    assert result.status == "EVIDENCE_GOVERNED_NON_CLEARANCE"
+    assert result.policy == "v36_v16_85e777_current_head"
+    assert result.errors == ()
+
+
+def test_v35_v15_manifest_remains_valid_only_for_7e394_scope() -> None:
     result = validate_consumer_manifest(
         _valid_manifest(V35_POLICY, target_head=V35_CURRENT_BRANCH_HEAD)
     )
@@ -116,10 +135,39 @@ def test_v34_v14_only_manifest_for_7e394_current_head_fails_closed() -> None:
     assert "v35_v15_7e394_current_head:validator_spec_sha_required" in errors
 
 
+def test_v35_v15_only_manifest_for_85e777_current_head_fails_closed() -> None:
+    manifest = _valid_manifest(V35_POLICY, target_head=V36_CURRENT_BRANCH_HEAD)
+
+    errors = _error_set(manifest)
+
+    assert "v35_v15_stale_for_v36_target_head" in errors
+    assert "v36_v16_85e777_current_head:blocker_index_artifact_required" in errors
+    assert "v36_v16_85e777_current_head:blocker_index_sha_required" in errors
+    assert "v36_v16_85e777_current_head:validator_spec_artifact_required" in errors
+    assert "v36_v16_85e777_current_head:validator_spec_sha_required" in errors
+
+
+def test_v35_v15_only_manifest_for_v36_predecessor_heads_fails_closed() -> None:
+    for head in (V36_PREDECESSOR_EFE9_HEAD, V36_PREDECESSOR_571_HEAD):
+        manifest = _valid_manifest(V35_POLICY, target_head=head)
+
+        assert "v35_v15_stale_for_v36_target_head" in _error_set(manifest)
+
+
 def test_v34_v14_only_manifest_for_intermediate_head_fails_closed() -> None:
     manifest = _valid_manifest(V34_POLICY, target_head=V35_INTERMEDIATE_HEAD_AFTER_B8BEE)
 
     assert "v34_v14_stale_for_v35_target_head" in _error_set(manifest)
+
+
+def test_descendant_branch_head_requires_v36_v16_binding() -> None:
+    manifest = _valid_manifest(
+        V35_POLICY,
+        target_head="2222222222222222222222222222222222222222",
+        ancestor_heads=[V36_CURRENT_BRANCH_HEAD],
+    )
+
+    assert "v35_v15_stale_for_v36_target_head" in _error_set(manifest)
 
 
 def test_descendant_branch_head_requires_v35_v15_binding() -> None:
@@ -170,6 +218,18 @@ def test_weakening_v35_non_clearance_assertion_fails_closed() -> None:
     ) in _error_set(manifest)
 
 
+def test_weakening_v36_position_sizing_non_clearance_assertion_fails_closed() -> None:
+    manifest = _valid_manifest(V36_POLICY, target_head=V36_CURRENT_BRANCH_HEAD)
+    assertions = dict(manifest["non_clearance_assertions"])
+    assertions["approved_for_position_sizing_evidence"] = True
+    manifest["non_clearance_assertions"] = assertions
+
+    assert (
+        "non_clearance_assertion_must_be_false:"
+        "approved_for_position_sizing_evidence"
+    ) in _error_set(manifest)
+
+
 def test_missing_v35_protected_surface_fails_closed() -> None:
     manifest = _valid_manifest(V35_POLICY, target_head=V35_CURRENT_BRANCH_HEAD)
     manifest["required_consumer_surfaces_fail_closed"] = [
@@ -179,6 +239,33 @@ def test_missing_v35_protected_surface_fails_closed() -> None:
     ]
 
     assert "missing_consumer_surface:scanner_metrics" in _error_set(manifest)
+
+
+def test_missing_v36_autotrader_surface_fails_closed() -> None:
+    manifest = _valid_manifest(V36_POLICY, target_head=V36_CURRENT_BRANCH_HEAD)
+    manifest["required_consumer_surfaces_fail_closed"] = [
+        value
+        for value in V36_POLICY.required_consumer_surfaces
+        if value != "autotrader_execution_evidence"
+    ]
+
+    assert "missing_consumer_surface:autotrader_execution_evidence" in _error_set(
+        manifest
+    )
+
+
+def test_v36_branch_workflow_scope_reference_is_required() -> None:
+    manifest = _valid_manifest(V36_POLICY, target_head=V36_CURRENT_BRANCH_HEAD)
+    manifest["excluded_check_run_refs"] = [
+        value
+        for value in V36_POLICY.required_excluded_references["excluded_check_run_refs"]
+        if not value.startswith("No branch workflow run")
+    ]
+
+    assert (
+        "missing_excluded_check_run_ref:"
+        "No branch workflow run for 85e777c5e6e679fc55856e6d9398bfef556685d0"
+    ) in _error_set(manifest)
 
 
 def test_pr123_ci_scope_reference_is_required_for_v35() -> None:
@@ -224,3 +311,33 @@ def test_cli_returns_json_and_nonzero_for_stale_v34_current_head_manifest(
     assert payload["status"] == "FAIL_CLOSED"
     assert payload["policy"] == "v35_v15_7e394_current_head"
     assert "v34_v14_stale_for_v35_target_head" in payload["errors"]
+
+
+def test_cli_returns_json_and_nonzero_for_stale_v35_v36_current_head_manifest(
+    tmp_path,
+) -> None:
+    manifest = _valid_manifest(V36_POLICY, target_head=V36_CURRENT_BRANCH_HEAD)
+    manifest["mlops_blocker_index_artifact"] = CURRENT_V35_INDEX_ARTIFACT
+    manifest["mlops_blocker_index_sha256"] = CURRENT_V35_INDEX_SHA256
+    manifest["mlops_validator_spec_artifact"] = CURRENT_V15_VALIDATOR_ARTIFACT
+    manifest["mlops_validator_spec_sha256"] = CURRENT_V15_VALIDATOR_SHA256
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "scripts/validate_evidence_consumer_manifest.py",
+            str(manifest_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    payload = json.loads(completed.stdout)
+    assert completed.returncode == 2
+    assert payload["accepted"] is False
+    assert payload["status"] == "FAIL_CLOSED"
+    assert payload["policy"] == "v36_v16_85e777_current_head"
+    assert "v35_v15_stale_for_v36_target_head" in payload["errors"]
