@@ -188,3 +188,71 @@ def test_repair_current_envelope_links_env_does_not_override_typed_settings(monk
     joined = "\n".join(db.sqls)
     assert "trading_trades" in joined
     assert "trading_management_envelopes" not in joined
+
+
+def test_audit_position_identity_matches_full_position_natural_key():
+    db = _FakeDb()
+
+    position_integrity.audit_position_identity(db, use_envelopes=True)
+
+    joined = "\n".join(db.sqls)
+    account_expr = (
+        "CASE WHEN LOWER(COALESCE(t.broker_source, '')) = 'coinbase' "
+        "THEN 'spot' ELSE 'cash' END"
+    )
+    assert joined.count(f"p.account_type = {account_expr}") == 3
+    assert f"{account_expr} AS trade_account_type" in joined
+    assert f"{account_expr} <> p.account_type" in joined
+
+
+def test_repair_current_envelope_links_matches_full_position_natural_key():
+    db = _FakeDb()
+
+    position_integrity.repair_current_envelope_links(
+        db,
+        dry_run=True,
+        use_envelopes=True,
+    )
+
+    joined = "\n".join(db.sqls)
+    account_expr = (
+        "CASE WHEN LOWER(COALESCE(t.broker_source, '')) = 'coinbase' "
+        "THEN 'spot' ELSE 'cash' END"
+    )
+    assert f"p.account_type = {account_expr}" in joined
+
+
+def test_repair_current_envelope_link_updates_match_full_position_natural_key():
+    db = _FakeDb()
+
+    position_integrity.repair_current_envelope_links(
+        db,
+        dry_run=False,
+        use_envelopes=True,
+    )
+
+    joined = "\n".join(db.sqls)
+    account_expr = (
+        "CASE WHEN LOWER(COALESCE(t.broker_source, '')) = 'coinbase' "
+        "THEN 'spot' ELSE 'cash' END"
+    )
+    assert joined.count(f"p.account_type = {account_expr}") == 2
+    assert joined.count(f"{account_expr} <> p.account_type") == 2
+    assert f"{account_expr} <> p.account_type" in joined
+
+
+def test_close_orphaned_position_identities_matches_full_position_natural_key():
+    db = _FakeDb()
+
+    position_integrity.close_orphaned_position_identities(
+        db,
+        dry_run=True,
+        use_envelopes=True,
+    )
+
+    joined = "\n".join(db.sqls)
+    account_expr = (
+        "CASE WHEN LOWER(COALESCE(open_t.broker_source, '')) = 'coinbase' "
+        "THEN 'spot' ELSE 'cash' END"
+    )
+    assert f"p.account_type = {account_expr}" in joined

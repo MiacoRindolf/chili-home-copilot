@@ -241,10 +241,14 @@ def _query_for_check(name: str, relation: str) -> tuple[str, tuple[Any, ...]]:
                        COUNT(*) AS open_trade_count
                   FROM trading_positions p
                   JOIN {relation} e
-                    ON e.status = 'open'
-                   AND e.user_id = p.user_id
-                   AND LOWER(COALESCE(e.broker_source, '')) = p.broker_source
-                   AND e.ticker = p.ticker
+                   ON e.status = 'open'
+                  AND e.user_id = p.user_id
+                  AND LOWER(COALESCE(e.broker_source, '')) = p.broker_source
+                  AND p.account_type = CASE
+                      WHEN LOWER(COALESCE(e.broker_source, '')) = 'coinbase'
+                      THEN 'spot' ELSE 'cash'
+                  END
+                  AND e.ticker = p.ticker
                    AND LOWER(COALESCE(e.direction, 'long')) = p.direction
                  WHERE p.state = 'open'
                    AND p.current_envelope_id IS NULL
@@ -260,6 +264,10 @@ def _query_for_check(name: str, relation: str) -> tuple[str, tuple[Any, ...]]:
                     WHERE e.status = 'open'
                       AND e.user_id = p.user_id
                       AND LOWER(COALESCE(e.broker_source, '')) = p.broker_source
+                      AND p.account_type = CASE
+                          WHEN LOWER(COALESCE(e.broker_source, '')) = 'coinbase'
+                          THEN 'spot' ELSE 'cash'
+                      END
                       AND e.ticker = p.ticker
                       AND LOWER(COALESCE(e.direction, 'long')) = p.direction
                )
@@ -274,6 +282,10 @@ def _query_for_check(name: str, relation: str) -> tuple[str, tuple[Any, ...]]:
                     WHERE p.state = 'open'
                       AND p.user_id = e.user_id
                       AND p.broker_source = LOWER(COALESCE(e.broker_source, ''))
+                      AND p.account_type = CASE
+                          WHEN LOWER(COALESCE(e.broker_source, '')) = 'coinbase'
+                          THEN 'spot' ELSE 'cash'
+                      END
                       AND p.ticker = e.ticker
                       AND p.direction = LOWER(COALESCE(e.direction, 'long'))
                )
@@ -295,6 +307,10 @@ def _query_for_check(name: str, relation: str) -> tuple[str, tuple[Any, ...]]:
                    OR e.status <> 'open'
                    OR e.user_id <> p.user_id
                    OR LOWER(COALESCE(e.broker_source, '')) <> p.broker_source
+                   OR CASE
+                       WHEN LOWER(COALESCE(e.broker_source, '')) = 'coinbase'
+                       THEN 'spot' ELSE 'cash'
+                   END <> p.account_type
                    OR e.ticker <> p.ticker
                    OR LOWER(COALESCE(e.direction, 'long')) <> p.direction
                )

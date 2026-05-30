@@ -139,6 +139,10 @@ def test_phase5k_probe_position_integrity_covers_full_invariant_groups() -> None
     ):
         assert invariant in sql
 
+    assert "p.account_type = CASE" in sql
+    assert "THEN 'spot' ELSE 'cash'" in sql
+    assert "END <> p.account_type" in sql
+
 
 def test_phase5k_probe_detects_old_new_row_mismatch(monkeypatch) -> None:
     module = _load_probe_module()
