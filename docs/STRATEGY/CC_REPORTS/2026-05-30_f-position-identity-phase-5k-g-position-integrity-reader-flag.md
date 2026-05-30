@@ -2,7 +2,7 @@
 
 Date: 2026-05-30
 
-Status: SHIPPED default-off. Live flip pending.
+Status: PROMOTED. Live flag is ON.
 
 ## What Changed
 
@@ -25,7 +25,7 @@ sidecar feature.
 No integrity verdict semantics, repair predicates, broker paths, order paths,
 stop paths, or reconcile write paths changed.
 
-## Verification
+## Default-Off Verification
 
 Focused tests:
 
@@ -65,3 +65,43 @@ REPAIR_MATCH True
 
 Leave or set `CHILI_PHASE5K_POSITION_INTEGRITY_USE_ENVELOPES=false`, then
 recreate the consumer worker(s).
+
+## Live Soak
+
+Flag flipped:
+
+```text
+CHILI_PHASE5K_POSITION_INTEGRITY_USE_ENVELOPES=true
+```
+
+Consumers recreated:
+
+- `chili`
+- `broker-sync-worker`
+- `autotrader-worker`
+
+Runtime flag visibility:
+
+```text
+chili=true
+broker-sync-worker=true
+autotrader-worker=true
+```
+
+Post-flip verification:
+
+```text
+Phase 5K-A: COMPLETE_POSITIVE, PARITY_MISMATCHES=0
+Phase 5I: COMPLETE_POSITIVE, HARD_LINKAGE_ISSUES=0, MISMATCHED_ROWS=0
+AUDIT_MATCH=True
+REPAIR_MATCH=True
+```
+
+Post-flip log evidence:
+
+```text
+position-integrity/relation/query errors: none
+```
+
+The live sidecar cleanup path also ran after the flip and reported
+`position sidecars closed=0`, with no relation or query errors.

@@ -1,50 +1,51 @@
-# NEXT_TASK: f-position-identity-phase-5k-g-position-integrity-flag-soak
+# NEXT_TASK: f-position-identity-phase-5k-h-alpha-portfolio-gate-reader-flag
 
 STATUS: PENDING
 
 ## Goal
 
-Flip and soak the default-off position-integrity reader flag shipped in Phase
-5K-G.
-
-```text
-CHILI_PHASE5K_POSITION_INTEGRITY_USE_ENVELOPES=false  # default-off code shipped
-```
+Audit and, if clean, add a default-off envelope reader flag for the remaining
+`alpha_portfolio_gate.py` live capital reader that still has a direct
+`trading_trades` SQL reference.
 
 ## Current State
 
-- Coinbase cap reader is live on `trading_management_envelopes`.
-- PDT reader is live on `trading_management_envelopes`.
-- Cohort-promote realized reader is live on `trading_management_envelopes`.
-- Pattern-quality realized reader is live on `trading_management_envelopes`.
-- Portfolio-risk drawdown reader is live on `trading_management_envelopes`.
-- Position-integrity reader has a default-off flag.
-- Phase 5K-A parity remains `COMPLETE_POSITIVE`.
-- Direct old/new position-integrity audit and dry-run repair checks match.
+The six Phase 5K-A parity groups are now live or promoted:
 
-## Soak Shape
+- Coinbase cap
+- PDT
+- Cohort-promote realized
+- Pattern-quality realized
+- Portfolio-risk drawdown
+- Position-integrity
 
-1. Set `CHILI_PHASE5K_POSITION_INTEGRITY_USE_ENVELOPES=true` in `.env`.
-2. Recreate consumer workers that call position-integrity helpers:
-   - `chili`
-   - `broker-sync-worker`
-   - `autotrader-worker` only if runtime imports require it
-3. Verify runtime flag visibility.
-4. Re-run:
-   - Phase 5K-A parity probe
-   - Phase 5I post-rename soak probe
-   - direct old/new position-integrity audit + dry-run repair comparison
-5. Scan logs for position-integrity / relation / query errors.
-6. If clean, promote Phase 5K-G and choose the next live-path reader.
+Phase 5K-A remains `COMPLETE_POSITIVE`, and Phase 5I remains
+`COMPLETE_POSITIVE`.
+
+## Implementation Shape
+
+1. Read `app/services/trading/alpha_portfolio_gate.py` around the remaining
+   `FROM trading_trades` query.
+2. Decide whether the reader is live capital gating, reporting-only, or a
+   compatibility contract.
+3. If it is a safe reader cutover:
+   - add `CHILI_PHASE5K_ALPHA_PORTFOLIO_GATE_USE_ENVELOPES=false`
+   - preserve every filter/formula exactly
+   - add focused OFF/ON relation tests
+   - run direct old/new function-level checks
+   - commit/push default-off code
+   - flip/soak only if parity is exact
+4. If it is not a safe cutover, write a closeout note and leave the
+   compatibility view in place.
 
 ## Guardrails
 
 - Do not touch broker/order/stop/reconcile write paths.
-- Do not change integrity verdict semantics.
-- Do not run DB-backed pytest against live Postgres.
+- Do not change portfolio-gate math, caps, thresholds, or rejection semantics.
 - Do not absorb unrelated dirty worktree files.
+- Do not remove the `trading_trades` compatibility view.
 
 ## Rollback
 
-Set `CHILI_PHASE5K_POSITION_INTEGRITY_USE_ENVELOPES=false` and recreate the
-same consumer worker(s).
+Any new flag must default false. Rollback is setting it false and recreating
+the affected consumer worker(s).
