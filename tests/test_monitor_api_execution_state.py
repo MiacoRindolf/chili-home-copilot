@@ -19,6 +19,7 @@ from app.models.trading import (
 )
 from app.routers.trading_sub.monitor import (
     _imminent_blocker_category,
+    _refresh_work_rollups,
     _recommended_work_status,
     _recommended_work_statuses,
     _serialize_decision,
@@ -656,6 +657,60 @@ def test_recommended_work_status_marks_recert_refresh_blocked_with_rollup_contex
     assert status["blocker_count"] == 2
     assert status["blocker_status"] == "soft_blocked"
     assert status["blocker_source"] == "recert_rescue_refresh"
+
+
+def test_refresh_work_rollups_group_repeated_blocked_refresh_context():
+    rollups = _refresh_work_rollups(
+        [
+            {
+                "ticker": "BTC-USD",
+                "pattern_id": 1260,
+                "recommended_work_event": "recert_rescue_refresh",
+                "recommended_work_actionable": False,
+                "recommended_work_blocker": "recent_recert_blocker_diagnostic",
+                "recommended_work_blocker_detail": (
+                    "wait_for_recert_backtest_cooldown_keep_live_blocked"
+                ),
+                "recommended_work_blocker_count": 3,
+                "recommended_work_blocker_status": "soft_blocked",
+                "recommended_work_blocker_source": "recert_rescue_refresh",
+            },
+            {
+                "ticker": "ETH-USD",
+                "pattern_id": 1260,
+                "recommended_work_event": "recert_rescue_refresh",
+                "recommended_work_actionable": False,
+                "recommended_work_blocker": "recent_recert_blocker_diagnostic",
+                "recommended_work_blocker_detail": (
+                    "wait_for_recert_backtest_cooldown_keep_live_blocked"
+                ),
+                "recommended_work_blocker_count": 2,
+                "recommended_work_blocker_status": "soft_blocked",
+                "recommended_work_blocker_source": "recert_rescue_refresh",
+            },
+            {
+                "ticker": "AAPL",
+                "pattern_id": 1247,
+                "recommended_work_event": "exit_variant_refresh",
+                "recommended_work_actionable": False,
+                "recommended_work_blocker": "recent_exit_noop_diagnostic",
+                "recommended_work_blocker_detail": (
+                    "non_positive_quality_evidence_no_exit_variant_birth"
+                ),
+                "recommended_work_blocker_count": 1,
+                "recommended_work_blocker_source": "exit_variant_refresh",
+            },
+        ]
+    )
+
+    recert = rollups[0]
+    assert recert["event_type"] == "recert_rescue_refresh"
+    assert recert["blocked"] is True
+    assert recert["alert_count"] == 2
+    assert recert["pattern_count"] == 1
+    assert recert["diagnostic_count"] == 5
+    assert recert["sample_tickers"] == ["BTC-USD", "ETH-USD"]
+    assert len(rollups) == 2
 
 
 def test_imminent_alerts_keep_cached_edge_snapshots_asset_sliced(db, paired_client):
