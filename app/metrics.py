@@ -229,17 +229,23 @@ def conversation_stats(db: Session) -> dict:
     if total == 0:
         return {"total": 0, "avg_messages": 0, "longest": 0}
 
-    msg_counts = (
-        db.query(func.count(ChatMessage.id))
+    message_counts = (
+        db.query(
+            ChatMessage.conversation_id.label("conversation_id"),
+            func.count(ChatMessage.id).label("message_count"),
+        )
         .filter(ChatMessage.conversation_id.isnot(None))
         .group_by(ChatMessage.conversation_id)
-        .all()
+        .subquery()
     )
-    counts = [c for (c,) in msg_counts]
+    avg_messages, longest = db.query(
+        func.avg(message_counts.c.message_count),
+        func.max(message_counts.c.message_count),
+    ).one()
     return {
         "total": total,
-        "avg_messages": round(sum(counts) / len(counts), 1) if counts else 0,
-        "longest": max(counts) if counts else 0,
+        "avg_messages": round(float(avg_messages), 1) if avg_messages is not None else 0,
+        "longest": int(longest) if longest is not None else 0,
     }
 
 
