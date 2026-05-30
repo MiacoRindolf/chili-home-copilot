@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from app.models.trading import MonitorDecisionRule, PatternMonitorDecision, ScanPattern
 from app.services.trading.monitor_rules_engine import (
     _monitor_decision_rules_by_key,
+    _recent_decisions,
     _scan_pattern_names_by_id,
     aggregate_decision_outcomes,
 )
@@ -110,6 +111,20 @@ def test_monitor_decision_rules_by_key_skips_empty_lookup() -> None:
 
     assert _monitor_decision_rules_by_key(db, set()) == {}  # type: ignore[arg-type]
     assert db.query_calls == 0
+
+
+def test_recent_decisions_uses_bounded_latest_window_with_stable_ties() -> None:
+    first = SimpleNamespace(created_at=datetime(2026, 5, 28, 12, 0))
+    second = SimpleNamespace(created_at=datetime(2026, 5, 28, 14, 0))
+    third = SimpleNamespace(created_at=datetime(2026, 5, 28, 14, 0))
+    fourth = SimpleNamespace(created_at=datetime(2026, 5, 28, 13, 0))
+
+    assert _recent_decisions([first, second, third, fourth], limit=3) == [
+        second,
+        third,
+        fourth,
+    ]
+    assert _recent_decisions([first], limit=0) == []
 
 
 def test_aggregate_decision_outcomes_batches_rule_inputs() -> None:

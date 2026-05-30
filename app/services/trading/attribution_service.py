@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import heapq
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -18,6 +19,29 @@ def _scan_patterns_by_id(db: Session, pattern_ids: set[int]) -> dict[int, Any]:
 
     rows = db.query(ScanPattern).filter(ScanPattern.id.in_(ids)).all()
     return {int(row.id): row for row in rows if row.id is not None}
+
+
+def _top_high_slippage_trades(
+    rows: list[dict[str, Any]],
+    limit: int,
+) -> list[dict[str, Any]]:
+    if limit <= 0 or not rows:
+        return []
+    return heapq.nlargest(limit, rows, key=lambda row: row["total_slippage_bps"])
+
+
+def _top_pattern_deltas(
+    rows: list[dict[str, Any]],
+    limit: int,
+    *,
+    reverse: bool,
+) -> list[dict[str, Any]]:
+    if limit <= 0 or not rows:
+        return []
+    key = lambda row: row["delta_pct"] or 0
+    if reverse:
+        return heapq.nlargest(limit, rows, key=key)
+    return heapq.nsmallest(limit, rows, key=key)
 
 
 def _closed_pattern_live_stats(
@@ -357,8 +381,6 @@ def post_trade_review(
                 "total_slippage_bps": round(total_slip, 1),
                 "pnl": float(t.pnl or 0),
             })
-    high_slip_trades.sort(key=lambda x: x["total_slippage_bps"], reverse=True)
-
     # --- Pattern performance ---
     from collections import defaultdict
     by_pid: dict[int, list[Trade]] = defaultdict(list)
@@ -416,8 +438,9 @@ def post_trade_review(
                     "reason": f"Live win rate {live_wr}% lagged research {research_wr}% by {abs(delta)}pp over {t_n} trades",
                 })
 
-    outperformers.sort(key=lambda r: r["delta_pct"] or 0, reverse=True)
-    underperformers.sort(key=lambda r: r["delta_pct"] or 0)
+    top_high_slip_trades = _top_high_slippage_trades(high_slip_trades, 5)
+    top_outperformers = _top_pattern_deltas(outperformers, 5, reverse=True)
+    top_underperformers = _top_pattern_deltas(underperformers, 5, reverse=False)
 
     # --- Takeaways ---
     takeaways: list[str] = []
@@ -456,9 +479,9 @@ def post_trade_review(
             "total_pnl": total_pnl,
             "avg_pnl": avg_pnl,
             "max_consecutive_losses": max_consec_losses,
-            "high_slippage_trades": high_slip_trades[:5],
-            "outperforming_patterns": outperformers[:5],
-            "underperforming_patterns": underperformers[:5],
+            "high_slippage_trades": top_high_slip_trades,
+            "outperforming_patterns": top_outperformers,
+            "underperforming_patterns": top_underperformers,
             "takeaways": takeaways,
         },
         "feedback_signals": feedback_signals,

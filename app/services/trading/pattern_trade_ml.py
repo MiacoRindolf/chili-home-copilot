@@ -1,6 +1,7 @@
 """Optional ML on PatternTradeRow (tabular baseline; LightGBM if installed)."""
 from __future__ import annotations
 
+import heapq
 import logging
 from datetime import datetime, timedelta
 from typing import Any
@@ -14,6 +15,15 @@ from ...models.trading import PatternTradeRow
 logger = logging.getLogger(__name__)
 
 _MIN_ROWS = 40
+
+
+def _top_feature_importances(
+    importances: dict[str, float],
+    limit: int = 20,
+) -> dict[str, float]:
+    if limit <= 0:
+        return {}
+    return dict(heapq.nlargest(limit, importances.items(), key=lambda item: item[1]))
 
 
 def train_on_pattern_trades(
@@ -79,7 +89,7 @@ def train_on_pattern_trades(
         model_name = "sklearn_gbc"
 
     imp = dict(zip(feat_names, [float(x) for x in clf.feature_importances_]))
-    imp = dict(sorted(imp.items(), key=lambda x: -x[1])[:20])
+    imp = _top_feature_importances(imp, 20)
 
     return {
         "ok": True,

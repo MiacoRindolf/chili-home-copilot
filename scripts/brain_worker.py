@@ -2006,8 +2006,7 @@ def _pg_listen_thread(wake_event: threading.Event, stop_flag: list[bool]) -> Non
         while not stop_flag[0]:
             if select.select([conn], [], [], 5.0) != ([], [], []):
                 conn.poll()
-                while conn.notifies:
-                    conn.notifies.pop(0)
+                if _drain_pg_notifies(conn):
                     wake_event.set()
     except ImportError:
         logger.info("[brain] psycopg2 not available for LISTEN/NOTIFY; polling fallback")
@@ -2018,6 +2017,14 @@ def _pg_listen_thread(wake_event: threading.Event, stop_flag: list[bool]) -> Non
             conn.close()  # type: ignore[possibly-undefined]
         except Exception:
             pass
+
+
+def _drain_pg_notifies(conn) -> int:
+    """Clear pending psycopg notifications without O(n^2) front pops."""
+    count = len(conn.notifies)
+    if count:
+        del conn.notifies[:]
+    return count
 
 
 def _run_activation_loop(args: argparse.Namespace, status: BrainWorkerStatus) -> None:

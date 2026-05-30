@@ -99,6 +99,17 @@ def test_status_tmp_files_are_process_thread_specific(monkeypatch):
     )
 
 
+def test_pg_notify_drain_clears_pending_notifications():
+    class _Conn:
+        notifies = ["n1", "n2", "n3"]
+
+    conn = _Conn()
+
+    assert brain_worker._drain_pg_notifies(conn) == 3
+    assert conn.notifies == []
+    assert brain_worker._drain_pg_notifies(conn) == 0
+
+
 def test_lean_cycle_fast_backtest_timer_stays_off_when_batch_is_zero(monkeypatch):
     monkeypatch.setattr(
         brain_worker,

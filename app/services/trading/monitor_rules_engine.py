@@ -11,6 +11,7 @@ Key concepts:
 """
 from __future__ import annotations
 
+import heapq
 import json
 import logging
 import math
@@ -469,6 +470,12 @@ def _monitor_decision_rules_by_key(
     }
 
 
+def _recent_decisions(decisions: list[Any], limit: int = REGRESSION_WINDOW) -> list[Any]:
+    if limit <= 0:
+        return []
+    return heapq.nlargest(limit, decisions, key=lambda d: d.created_at)
+
+
 def aggregate_decision_outcomes(db: Session) -> dict[str, Any]:
     """Aggregate resolved PatternMonitorDecision rows into MonitorDecisionRule
     entries.  Called by learn_from_monitor_decisions.
@@ -557,7 +564,7 @@ def aggregate_decision_outcomes(db: Session) -> dict[str, Any]:
         agreement_rate = agreement_count / mech_total if mech_total else 0.0
 
         # Rolling benefit (last REGRESSION_WINDOW decisions)
-        recent = sorted(decisions, key=lambda d: d.created_at, reverse=True)[:REGRESSION_WINDOW]
+        recent = _recent_decisions(decisions)
         rolling = [bool(d.was_beneficial) for d in recent]
 
         # Determine graduation status

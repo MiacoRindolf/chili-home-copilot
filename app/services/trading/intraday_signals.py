@@ -11,6 +11,7 @@ or alert dispatch.
 """
 from __future__ import annotations
 
+import heapq
 import logging
 from datetime import UTC, datetime
 from typing import Any, Optional
@@ -143,6 +144,17 @@ def _signal_strength(sig: dict[str, Any]) -> float:
     return 0.0
 
 
+def _top_intraday_signals(
+    signals: list[dict[str, Any]],
+    limit: int,
+    *,
+    key,
+) -> list[dict[str, Any]]:
+    if limit <= 0 or not signals:
+        return []
+    return heapq.nlargest(limit, signals, key=key)
+
+
 def _auto_paper_candidates(
     signals: list[dict[str, Any]],
     *,
@@ -179,15 +191,15 @@ def _auto_paper_candidates(
             continue
         candidates.append(dict(sig))
 
-    candidates.sort(
+    selected = _top_intraday_signals(
+        candidates,
+        max(0, int(max_candidates)),
         key=lambda sig: (
             float(sig.get("confidence") or 0.0),
             SIGNAL_TYPE_AUTO_PAPER_PRIORITY.get(str(sig.get("signal_type")), 0),
             _signal_strength(sig),
         ),
-        reverse=True,
     )
-    selected = candidates[:max(0, int(max_candidates))]
     return selected, {
         "auto_paper_candidates_considered": len(signals),
         "auto_paper_candidates_eligible": len(candidates),
@@ -238,8 +250,11 @@ def scan_premarket_gaps(
         except Exception:
             continue
 
-    gaps.sort(key=lambda x: abs(x["gap_pct"]), reverse=True)
-    return gaps[:PREMARKET_GAP_MAX_SIGNALS]
+    return _top_intraday_signals(
+        gaps,
+        PREMARKET_GAP_MAX_SIGNALS,
+        key=lambda x: abs(x["gap_pct"]),
+    )
 
 
 def scan_opening_range_breakout(
@@ -310,8 +325,11 @@ def scan_opening_range_breakout(
         except Exception:
             continue
 
-    signals.sort(key=lambda x: abs(x.get("breakout_pct", 0)), reverse=True)
-    return signals[:ORB_MAX_SIGNALS]
+    return _top_intraday_signals(
+        signals,
+        ORB_MAX_SIGNALS,
+        key=lambda x: abs(x.get("breakout_pct", 0)),
+    )
 
 
 def _resolve_momentum_rvol_min(db: Optional[Session]) -> float:
@@ -430,8 +448,11 @@ def scan_momentum_continuation(
         except Exception:
             continue
 
-    signals.sort(key=lambda x: x.get("momentum_pct", 0), reverse=True)
-    return signals[:MOMENTUM_MAX_SIGNALS]
+    return _top_intraday_signals(
+        signals,
+        MOMENTUM_MAX_SIGNALS,
+        key=lambda x: x.get("momentum_pct", 0),
+    )
 
 
 def run_intraday_signal_sweep(

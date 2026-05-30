@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import heapq
 import logging
 from datetime import datetime, timedelta
 from typing import Any
@@ -20,6 +21,17 @@ from .viability_scope import VIABILITY_SCOPE_SYMBOL
 _log = logging.getLogger(__name__)
 
 _INLINE_ASSESS_MAX_TICKERS = 20
+
+
+def _top_opportunity_rows(
+    rows: list[dict[str, Any]],
+    limit: int,
+    *,
+    key,
+) -> list[dict[str, Any]]:
+    if limit <= 0 or not rows:
+        return []
+    return heapq.nlargest(limit, rows, key=key)
 
 
 def _auto_assess_scan_only(db: Session, tickers: list[str]) -> None:
@@ -379,8 +391,17 @@ def list_momentum_opportunities(
             freshness_ts,
         )
 
-    visible.sort(key=_sort_key, reverse=True)
-    discovered.sort(key=lambda d: float((d.get("scan_context") or {}).get("score") or 0), reverse=True)
+    opportunity_limit = max(1, min(int(limit), 200))
+    selected_visible = _top_opportunity_rows(
+        visible,
+        opportunity_limit,
+        key=_sort_key,
+    )
+    selected_discovered = _top_opportunity_rows(
+        discovered,
+        20,
+        key=lambda d: float((d.get("scan_context") or {}).get("score") or 0),
+    )
 
     if scan_only_tickers:
         _auto_assess_scan_only(db, scan_only_tickers[:_INLINE_ASSESS_MAX_TICKERS])
@@ -390,8 +411,8 @@ def list_momentum_opportunities(
         "ok": True,
         "mode": selected_mode,
         "asset_filter": selected_asset,
-        "opportunities": visible[: max(1, min(int(limit), 200))],
-        "discovered": discovered[:20],
+        "opportunities": selected_visible,
+        "discovered": selected_discovered,
         "metadata": {
             "fresh_cutoff_utc": fresh_cutoff.isoformat(),
             "stock_scan_count": len(stock_rows),

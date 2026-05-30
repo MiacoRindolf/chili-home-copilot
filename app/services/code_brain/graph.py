@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import heapq
 import logging
 import os
 import re
@@ -23,6 +24,12 @@ _JS_IMPORT_RE = re.compile(
     r"""|export\s+.*?\s+from\s+['"](.+?)['"])""",
     re.MULTILINE,
 )
+
+
+def _top_degree_items(items, limit: int) -> list[tuple[str, int]]:
+    if limit <= 0:
+        return []
+    return heapq.nlargest(limit, items, key=lambda item: item[1])
 
 
 def _resolve_python_import(module_name: str, repo_path: Path, source_dir: Path) -> Optional[str]:
@@ -121,24 +128,29 @@ def _find_cycles(adj: Dict[str, List[str]]) -> List[List[str]]:
     """DFS-based cycle detection. Returns list of cycles (each a list of file paths)."""
     visited: set[str] = set()
     on_stack: set[str] = set()
+    stack: List[str] = []
+    stack_pos: dict[str, int] = {}
     cycles: List[List[str]] = []
 
-    def dfs(node: str, path: List[str]):
+    def dfs(node: str):
         if node in on_stack:
-            idx = path.index(node)
-            cycles.append(path[idx:])
+            cycles.append(stack[stack_pos[node]:] + [node])
             return
         if node in visited:
             return
         visited.add(node)
         on_stack.add(node)
+        stack_pos[node] = len(stack)
+        stack.append(node)
         for neighbor in adj.get(node, []):
-            dfs(neighbor, path + [neighbor])
+            dfs(neighbor)
+        stack.pop()
+        stack_pos.pop(node, None)
         on_stack.discard(node)
 
     for n in adj:
         if n not in visited:
-            dfs(n, [n])
+            dfs(n)
     return cycles
 
 
@@ -236,8 +248,8 @@ def get_graph_data(db: Session, repo_id: int) -> Dict[str, Any]:
             coupling.append({"source_dir": src_dir, "target_dir": tgt_dir, "edge_count": count})
     coupling.sort(key=lambda x: x["edge_count"], reverse=True)
 
-    most_depended = sorted(in_degree.items(), key=lambda x: x[1], reverse=True)[:10]
-    most_dependent = sorted(out_degree.items(), key=lambda x: x[1], reverse=True)[:10]
+    most_depended = _top_degree_items(in_degree.items(), 10)
+    most_dependent = _top_degree_items(out_degree.items(), 10)
 
     nodes = [{"file": f, "in": in_degree.get(f, 0), "out": out_degree.get(f, 0)} for f in nodes_set]
 

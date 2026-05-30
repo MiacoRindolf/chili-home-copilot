@@ -1,6 +1,7 @@
 """Bucket and stability analysis for PatternTradeRow."""
 from __future__ import annotations
 
+import heapq
 import logging
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
@@ -67,6 +68,24 @@ def _profit_factor(returns: list[float]) -> float | None:
     if losses <= 0:
         return None if gains <= 0 else gains
     return gains / losses
+
+
+def _top_ticker_return_items(
+    by_ticker: dict[str, list[float]],
+    limit: int,
+) -> list[tuple[str, list[float]]]:
+    if limit <= 0:
+        return []
+    return heapq.nlargest(limit, by_ticker.items(), key=lambda item: len(item[1]))
+
+
+def _top_score_items(
+    scores: list[tuple[str, float]],
+    limit: int,
+) -> list[tuple[str, float]]:
+    if limit <= 0:
+        return []
+    return heapq.nlargest(limit, scores, key=lambda item: item[1])
 
 
 def analyze_pattern_trades(
@@ -150,7 +169,7 @@ def analyze_pattern_trades(
         })
 
     # Ticker rollup
-    for tkr, rets in sorted(by_ticker.items(), key=lambda x: -len(x[1]))[:200]:
+    for tkr, rets in _top_ticker_return_items(by_ticker, 200):
         if len(rets) < 1:
             continue
         report.ticker_rollup.append({
@@ -168,10 +187,10 @@ def analyze_pattern_trades(
         for tk, v in by_ticker.items():
             mag = abs(sum(v) / len(v)) * len(v) if v else 0.0
             scores.append((tk, mag))
-        scores.sort(key=lambda x: -x[1])
+        top_scores = _top_score_items(scores, top_k_drop)
         total_score = sum(s for _, s in scores) or 1.0
-        top_share = sum(s for _, s in scores[:top_k_drop]) / total_score
-        report.stability["top_k_tickers"] = [x[0] for x in scores[:top_k_drop]]
+        top_share = sum(s for _, s in top_scores) / total_score
+        report.stability["top_k_tickers"] = [x[0] for x in top_scores]
         report.stability["top_k_pnl_proxy_share"] = round(top_share, 3)
         if top_share > 0.8:
             report.warnings.append(
