@@ -100,3 +100,87 @@ def test_targeted_exit_variant_allows_after_noop_cooldown(db, monkeypatch):
     )
 
     assert event_id is not None
+
+
+def test_targeted_exit_variant_skips_repeated_nonpositive_noops(db, monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360)
+    pat = _pattern(db, name="edge targeted repeated nonpositive exit")
+    for idx in range(3):
+        db.add(
+            BrainWorkEvent(
+                domain="trading",
+                event_type="exit_variant_diagnostic",
+                event_kind="outcome",
+                dedupe_key=f"exit-nonpositive-noop:{pat.id}:{idx}",
+                status="done",
+                payload={
+                    "scan_pattern_id": pat.id,
+                    "evidence_fingerprint": f"old-fp-{idx}",
+                    "created_count": 0,
+                    "skip_reason": "non_positive_quality_evidence_no_exit_variant_birth",
+                },
+                created_at=datetime.utcnow() - timedelta(minutes=idx),
+            )
+        )
+    db.commit()
+
+    event_id = emit_targeted_profitability_work(
+        db,
+        event_type=EXIT_VARIANT_REFRESH,
+        scan_pattern_id=pat.id,
+        source="edge_reliability_snapshot",
+        asset_class="stock",
+        evidence_fingerprint="new-fp",
+        payload={"expected_evidence_value": 0.0, "calibrated_ev_pct": 0.0},
+    )
+
+    assert event_id is None
+    assert (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_kind == "work")
+        .filter(BrainWorkEvent.event_type == EXIT_VARIANT_REFRESH)
+        .count()
+        == 0
+    )
+
+
+def test_targeted_exit_variant_allows_positive_evidence_after_repeated_noops(
+    db,
+    monkeypatch,
+):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360)
+    pat = _pattern(db, name="edge targeted recovered positive exit")
+    for idx in range(3):
+        db.add(
+            BrainWorkEvent(
+                domain="trading",
+                event_type="exit_variant_diagnostic",
+                event_kind="outcome",
+                dedupe_key=f"exit-recovered-noop:{pat.id}:{idx}",
+                status="done",
+                payload={
+                    "scan_pattern_id": pat.id,
+                    "evidence_fingerprint": f"old-fp-{idx}",
+                    "created_count": 0,
+                    "skip_reason": "non_positive_quality_evidence_no_exit_variant_birth",
+                },
+                created_at=datetime.utcnow() - timedelta(minutes=idx),
+            )
+        )
+    db.commit()
+
+    event_id = emit_targeted_profitability_work(
+        db,
+        event_type=EXIT_VARIANT_REFRESH,
+        scan_pattern_id=pat.id,
+        source="edge_reliability_snapshot",
+        asset_class="stock",
+        evidence_fingerprint="new-fp",
+        payload={"expected_evidence_value": 1.25, "calibrated_ev_pct": 0.4},
+    )
+
+    assert event_id is not None
