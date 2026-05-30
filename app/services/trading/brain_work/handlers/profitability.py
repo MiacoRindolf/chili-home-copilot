@@ -542,6 +542,33 @@ def handle_recert_rescue_refresh(
     )
 
 
+def _exit_variant_fast_skip_reason(payload: dict[str, Any]) -> str | None:
+    """Return a safe skip reason when an exit refresh has no positive evidence to mine."""
+    expected_value = _safe_float(payload.get("expected_evidence_value"))
+    if expected_value is not None and expected_value > 0.0:
+        return None
+
+    category = str(payload.get("cash_deployment_category") or "").strip().lower()
+    if category == "negative_ev":
+        return "negative_ev_no_exit_variant_birth"
+
+    edge_values = [
+        _safe_float(payload.get("calibrated_ev_after_cost_pct")),
+        _safe_float(payload.get("calibrated_ev_pct")),
+        _safe_float(payload.get("expected_net_pct")),
+    ]
+    non_positive_edges = [
+        value for value in edge_values if value is not None and value <= 0.0
+    ]
+    if not non_positive_edges:
+        return None
+
+    blocker = str(payload.get("graduation_blocker") or "").strip().lower()
+    if blocker in {"quality_blocked", "negative_ev", "non_positive_expected_edge"}:
+        return "non_positive_quality_evidence_no_exit_variant_birth"
+    return None
+
+
 def handle_exit_variant_refresh(
     db: "Session",
     ev: Any,
@@ -550,14 +577,52 @@ def handle_exit_variant_refresh(
     """Ask existing edge-aware ScanPattern evolution for learned exit children."""
     from app.services.trading.brain_work.ledger import enqueue_outcome_event
     from app.services.trading.edge_reliability import EXIT_VARIANT_DIAGNOSTIC
+
+    pid = _pattern_id(ev)
+    if pid is None:
+        raise ValueError("exit_variant_refresh missing scan_pattern_id")
+    payload_in = _payload(ev)
+    fast_skip_reason = _exit_variant_fast_skip_reason(payload_in)
+    if fast_skip_reason:
+        enqueue_outcome_event(
+            db,
+            event_type=EXIT_VARIANT_DIAGNOSTIC,
+            dedupe_key=(
+                f"{EXIT_VARIANT_DIAGNOSTIC}:p{pid}:fast_skip:"
+                f"{fast_skip_reason}:{payload_in.get('evidence_fingerprint') or 'none'}"
+            ),
+            payload={
+                "scan_pattern_id": pid,
+                "source": "exit_variant_refresh",
+                "asset_class": payload_in.get("asset_class"),
+                "cash_deployment_category": payload_in.get("cash_deployment_category"),
+                "evidence_fingerprint": payload_in.get("evidence_fingerprint"),
+                "graduation_blocker": payload_in.get("graduation_blocker"),
+                "skip_reason": fast_skip_reason,
+                "created_child_ids": [],
+                "created_count": 0,
+                "loss_report": None,
+                "fast_skipped": True,
+                "shadow_only": True,
+                "observed_at": datetime.utcnow().isoformat(),
+            },
+            parent_event_id=int(getattr(ev, "id", 0) or 0),
+            claimable=False,
+        )
+        logger.info(
+            "%s exit_variant_refresh ev_id=%s pattern_id=%s fast_skip=%s",
+            LOG_PREFIX,
+            getattr(ev, "id", None),
+            pid,
+            fast_skip_reason,
+        )
+        return
+
     from app.services.trading.learning import (
         _edge_debt_loss_reports,
         fork_edge_learned_exit_variants,
     )
 
-    pid = _pattern_id(ev)
-    if pid is None:
-        raise ValueError("exit_variant_refresh missing scan_pattern_id")
     report = _edge_debt_loss_reports(db, lookback_days=_window_days(ev)).get(pid)
     variant_diag: dict[str, Any] = {}
     created_ids = fork_edge_learned_exit_variants(
@@ -569,10 +634,10 @@ def handle_exit_variant_refresh(
     payload = {
         "scan_pattern_id": pid,
         "source": "exit_variant_refresh",
-        "asset_class": _payload(ev).get("asset_class"),
-        "cash_deployment_category": _payload(ev).get("cash_deployment_category"),
-        "evidence_fingerprint": _payload(ev).get("evidence_fingerprint"),
-        "graduation_blocker": _payload(ev).get("graduation_blocker"),
+        "asset_class": payload_in.get("asset_class"),
+        "cash_deployment_category": payload_in.get("cash_deployment_category"),
+        "evidence_fingerprint": payload_in.get("evidence_fingerprint"),
+        "graduation_blocker": payload_in.get("graduation_blocker"),
         "skip_reason": variant_diag.get("skip_reason"),
         "variant_label": variant_diag.get("variant_label"),
         "created_child_ids": created_ids,
