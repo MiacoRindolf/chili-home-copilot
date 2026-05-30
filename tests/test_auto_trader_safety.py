@@ -183,6 +183,59 @@ def test_autotrader_tick_soft_budget_clamps_to_config_bounds(monkeypatch):
     assert at_mod._autotrader_tick_soft_budget_seconds() == AUTOTRADER_MAX_TICK_MAX_SECONDS
 
 
+def test_recent_live_exit_cooldown_blocks_stock_reentry(db, monkeypatch):
+    user = models.User(name="recent_live_exit_cooldown")
+    db.add(user)
+    db.flush()
+    monkeypatch.setattr(at_mod, "settings", _minimal_settings(user.id))
+    now = datetime.utcnow()
+    pattern = ScanPattern(name="Churn guard", rules_json={}, active=True)
+    db.add(pattern)
+    db.flush()
+    trade = Trade(
+        user_id=user.id,
+        ticker="CHURN",
+        direction="long",
+        status="closed",
+        broker_source="robinhood",
+        quantity=1.0,
+        entry_price=10.0,
+        exit_price=9.8,
+        pnl=-0.2,
+        entry_date=now - timedelta(minutes=10),
+        exit_date=now - timedelta(minutes=5),
+        exit_reason="stop",
+        scan_pattern_id=pattern.id,
+    )
+    alert = BreakoutAlert(
+        user_id=user.id,
+        ticker="CHURN",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.9,
+        price_at_alert=10.0,
+        entry_price=10.0,
+        stop_loss=9.5,
+        target_price=12.0,
+        scan_pattern_id=pattern.id,
+        alerted_at=now,
+    )
+    db.add_all([trade, alert])
+    db.flush()
+
+    snap = at_mod._recent_live_exit_cooldown_snapshot(
+        db,
+        user_id=user.id,
+        alert=alert,
+        now=now,
+    )
+
+    assert snap is not None
+    assert snap["recent_exit_trade_id"] == trade.id
+    assert snap["recent_exit_scan_pattern_id"] == pattern.id
+    assert snap["cooldown_policy"] == "stop_reentry"
+
+
 def test_closed_stock_session_defers_stock_without_starving_crypto(db, monkeypatch):
     user = models.User(name="stock_defer_closed")
     db.add(user)
@@ -1183,6 +1236,81 @@ def test_shadow_stock_fastlane_respects_recent_backtest_cooldown(monkeypatch):
     assert pat.backtest_priority == 0
     assert emitted == []
     db.flush.assert_not_called()
+
+
+def test_exit_geometry_variant_work_queues_positive_ev_wide_stop(monkeypatch):
+    captured: list[dict] = []
+    monkeypatch.setattr(
+        "app.services.trading.edge_reliability.emit_targeted_profitability_work",
+        lambda db, **kwargs: captured.append(kwargs) or 77,
+    )
+    db = MagicMock()
+    pat = ScanPattern(
+        id=321,
+        name="Wide bracket parent",
+        rules_json={},
+        lifecycle_stage="pilot_promoted",
+        promotion_status="promoted",
+        active=True,
+    )
+    alert = BreakoutAlert(
+        id=654,
+        ticker="AAOX",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.9,
+        price_at_alert=45.5,
+        entry_price=45.5,
+        stop_loss=10.21,
+        target_price=87.85,
+        user_id=1,
+        scan_pattern_id=pat.id,
+    )
+    snap = {
+        "entry_edge": {
+            "expected_net_pct": 19.25,
+            "probability": 0.71,
+            "probability_source": "directional_mfe_mae_pattern",
+            "probability_sample_n": 14,
+            "reward_fraction": 0.93076923,
+            "stop_loss_fraction": 0.7756044,
+            "target_reward_fraction": 0.93076923,
+            "hard_stop_loss_fraction": 0.7756044,
+            "execution_stop_loss_fraction": 0.7756044,
+            "max_execution_stop_loss_fraction": 0.30,
+            "execution_stop_loss_source": "static_target_stop_geometry",
+            "entry_price": 45.5,
+            "stop_price": 10.21,
+            "target_price": 87.85,
+        }
+    }
+
+    result = at_mod._queue_exit_geometry_variant_work(
+        db,
+        alert=alert,
+        pattern=pat,
+        reason=at_mod.EXIT_GEOMETRY_REFRESH_REASON,
+        snap=snap,
+    )
+
+    assert result is not None
+    assert result["queued"] is True
+    assert result["event_id"] == 77
+    assert len(result["evidence_fingerprint"]) == 64
+    assert captured
+    work = captured[0]
+    assert work["event_type"] == "exit_variant_refresh"
+    assert work["scan_pattern_id"] == pat.id
+    assert work["source"] == at_mod.EXIT_GEOMETRY_REFRESH_SOURCE
+    assert work["asset_class"] == "stock"
+    assert work["evidence_fingerprint"] == result["evidence_fingerprint"]
+    payload = work["payload"]
+    assert payload["cash_deployment_category"] == "positive_ev_execution_blocked"
+    assert payload["recommended_work_event"] == "exit_variant_refresh"
+    assert payload["expected_net_pct"] == 19.25
+    assert payload["execution_stop_loss_fraction"] == 0.7756044
+    assert payload["max_execution_stop_loss_fraction"] == 0.30
+    assert payload["expected_evidence_value"] > payload["expected_net_pct"]
 
 
 def test_shadow_observation_uses_lightweight_sizing_path(monkeypatch):

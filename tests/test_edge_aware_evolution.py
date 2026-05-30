@@ -10,6 +10,7 @@ from app.services.trading.learning import (
     EDGE_EXIT_CONFIG_SOURCE,
     EDGE_EXIT_PROMOTION_STATUS,
     EDGE_EXIT_VARIANT_ORIGIN,
+    EDGE_GEOMETRY_REJECT_REASON,
     _edge_debt_loss_reports,
     _edge_report_root_cause,
     _learned_exit_config_from_edge_report,
@@ -96,6 +97,56 @@ def _add_edge_reject(
     )
 
 
+def _add_too_wide_execution_reject(
+    db,
+    *,
+    pattern_id: int,
+    ticker: str = "AAOX",
+    expected_net_pct: float = 19.25,
+    created_at: datetime | None = None,
+) -> None:
+    now = created_at or datetime.utcnow()
+    alert = BreakoutAlert(
+        ticker=ticker,
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        scan_pattern_id=pattern_id,
+        score_at_alert=0.9,
+        price_at_alert=45.5,
+        entry_price=45.5,
+        stop_loss=10.21,
+        target_price=87.85,
+        indicator_snapshot={"imminent_scorecard": {"signal_lane": "standard"}},
+        alerted_at=now,
+    )
+    db.add(alert)
+    db.flush()
+    db.add(
+        AutoTraderRun(
+            breakout_alert_id=alert.id,
+            scan_pattern_id=pattern_id,
+            ticker=ticker,
+            decision="skipped",
+            reason=EDGE_GEOMETRY_REJECT_REASON,
+            rule_snapshot={
+                "entry_edge": {
+                    "expected_net_pct": expected_net_pct,
+                    "reward_fraction": 0.93076923,
+                    "stop_loss_fraction": 0.7756044,
+                    "target_reward_fraction": 0.93076923,
+                    "hard_stop_loss_fraction": 0.7756044,
+                    "execution_stop_loss_fraction": 0.7756044,
+                    "max_execution_stop_loss_fraction": 0.30,
+                    "execution_stop_loss_source": "static_target_stop_geometry",
+                    "probability_source": "directional_mfe_mae_pattern",
+                    "probability_sample_n": 14,
+                }
+            },
+            created_at=now,
+        )
+    )
+
+
 def test_edge_debt_loss_report_groups_autotrader_rejects(db):
     pat = _make_pattern(db)
     now = datetime.utcnow().replace(microsecond=0)
@@ -118,6 +169,44 @@ def test_edge_debt_loss_report_groups_autotrader_rejects(db):
     assert report["avg_static_stop_loss_fraction"] == 0.03
     assert report["signal_lanes"]["shadow_near_miss"] == 5
     assert report["root_cause"] == "shadow_near_miss_noise"
+
+
+def test_edge_debt_loss_report_includes_positive_ev_unusable_execution_geometry(db):
+    pat = _make_pattern(db)
+    now = datetime.utcnow().replace(microsecond=0)
+    for i in range(5):
+        _add_too_wide_execution_reject(
+            db,
+            pattern_id=pat.id,
+            ticker=f"AAOX{i}",
+            expected_net_pct=19.25 + i,
+            created_at=now - timedelta(minutes=i),
+        )
+    db.commit()
+
+    report = _edge_debt_loss_reports(db, now=now, lookback_days=1)[pat.id]
+
+    assert report["total_rejects"] == 5
+    assert report["thin_sample"] is False
+    assert report["reject_reasons"][EDGE_GEOMETRY_REJECT_REASON] == 5
+    assert report["avg_expected_net_pct"] == 21.25
+    assert report["avg_static_reward_fraction"] == 0.93076923
+    assert report["avg_static_stop_loss_fraction"] == 0.7756044
+    assert report["root_cause"] == EDGE_GEOMETRY_REJECT_REASON
+
+    ids = fork_edge_learned_exit_variants(db, pat.id, edge_loss_report=report)
+
+    assert len(ids) == 1
+    child = db.get(ScanPattern, ids[0])
+    assert child is not None
+    assert child.parent_id == pat.id
+    assert child.lifecycle_stage == "challenged"
+    cfg = child.exit_config if isinstance(child.exit_config, dict) else json.loads(child.exit_config)
+    assert cfg["source"] == EDGE_EXIT_CONFIG_SOURCE
+    assert cfg["avg_rejected_expected_net_pct"] == 21.25
+    assert cfg["total_edge_rejects"] == 5
+    assert cfg["target_reward_fraction"] == 0.02211
+    assert cfg["stop_loss_fraction"] == 0.0053
 
 
 def test_edge_debt_loss_report_severe_negative_trumps_near_miss_noise(db):

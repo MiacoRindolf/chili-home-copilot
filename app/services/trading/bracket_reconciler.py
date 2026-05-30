@@ -135,13 +135,6 @@ def classify_discrepancy(
     the price-drift threshold must be venue-aware in the future.
     """
     # ── broker unavailable ───────────────────────────────────────
-    if not broker.available:
-        return ReconciliationDecision(
-            kind="broker_down",
-            severity="warn",
-            delta_payload={"reason": "broker snapshot unavailable"},
-        )
-
     trade_open = (local.trade_status or "").lower() == "open"
     has_local_intent = local.bracket_intent_id is not None
     broker_has_stop = _is_working_state(broker.stop_order_state)
@@ -151,6 +144,22 @@ def classify_discrepancy(
         and (local.pending_exit_status or "").lower()
         in ("deferred", "pending", "submitted", "working")
     )
+
+    if not broker.available:
+        if not trade_open and has_local_intent:
+            return ReconciliationDecision(
+                kind="agree",
+                severity="info",
+                delta_payload={
+                    "reason": "local_trade_closed_broker_snapshot_unavailable",
+                    "local_trade_status": local.trade_status,
+                },
+            )
+        return ReconciliationDecision(
+            kind="broker_down",
+            severity="warn",
+            delta_payload={"reason": "broker snapshot unavailable"},
+        )
 
     # ── orphan stop: broker has working child but local not open ─
     if (broker_has_stop or broker_has_target) and not trade_open:
@@ -221,6 +230,40 @@ def classify_discrepancy(
                 "intent_state": local.intent_state,
                 "local_stop_price": local.stop_price,
                 "broker_stop_order_state": broker.stop_order_state,
+            },
+        )
+
+    # Robinhood rejects broker-side stop orders for fractional equities. The
+    # software stop monitor owns protection for these rows; retrying a broker
+    # stop every reconciliation sweep creates a false "missing stop" incident
+    # and can cascade into noisy repair attempts.
+    qty_for_fractional_check = (
+        local.quantity
+        if local.quantity is not None
+        else broker.position_quantity
+    )
+    try:
+        qty_float = float(qty_for_fractional_check)
+        is_fractional_robinhood_equity = (
+            qty_for_fractional_check is not None
+            and qty_float > 0.0
+            and abs(qty_float - round(qty_float)) > 1e-9
+            and (local.broker_source or broker.broker_source or "").lower()
+            == "robinhood"
+            and not (local.ticker or broker.ticker or "").upper().endswith("-USD")
+        )
+    except (TypeError, ValueError):
+        is_fractional_robinhood_equity = False
+    if trade_open and has_local_intent and not broker_has_stop and is_fractional_robinhood_equity:
+        return ReconciliationDecision(
+            kind="agree",
+            severity="info",
+            delta_payload={
+                "reason": "software_stop_managed_robinhood_fractional_equity",
+                "intent_state": local.intent_state,
+                "local_stop_price": local.stop_price,
+                "broker_stop_order_state": broker.stop_order_state,
+                "quantity": qty_for_fractional_check,
             },
         )
 

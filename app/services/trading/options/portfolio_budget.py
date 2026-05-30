@@ -69,7 +69,11 @@ def _get_budget(db: Session, user_id: Optional[int]) -> dict:
             }
     except Exception as e:
         logger.debug("[options.budget] _get_budget failed: %s", e)
-    # Conservative defaults.
+    return _default_budget()
+
+
+def _default_budget() -> dict:
+    """Conservative fallback budget used when the persisted budget is absent."""
     return {
         "max_abs_delta": 0.50,
         "max_abs_gamma": 0.05,
@@ -96,16 +100,22 @@ def _zero_greeks() -> dict:
     }
 
 
+def _unproven_greeks() -> dict:
+    out = _zero_greeks()
+    out["missing_greeks_count"] = 1
+    return out
+
+
 def _add_greek_totals(left: dict, right: dict) -> dict:
     out = {
-        "net_delta": float(left.get("net_delta") or 0.0)
-        + float(right.get("net_delta") or 0.0),
-        "net_gamma": float(left.get("net_gamma") or 0.0)
-        + float(right.get("net_gamma") or 0.0),
-        "net_theta": float(left.get("net_theta") or 0.0)
-        + float(right.get("net_theta") or 0.0),
-        "net_vega": float(left.get("net_vega") or 0.0)
-        + float(right.get("net_vega") or 0.0),
+        "net_delta": _finite_number_or_zero(left.get("net_delta"))
+        + _finite_number_or_zero(right.get("net_delta")),
+        "net_gamma": _finite_number_or_zero(left.get("net_gamma"))
+        + _finite_number_or_zero(right.get("net_gamma")),
+        "net_theta": _finite_number_or_zero(left.get("net_theta"))
+        + _finite_number_or_zero(right.get("net_theta")),
+        "net_vega": _finite_number_or_zero(left.get("net_vega"))
+        + _finite_number_or_zero(right.get("net_vega")),
     }
     out["missing_greeks_count"] = int(left.get("missing_greeks_count") or 0) + int(
         right.get("missing_greeks_count") or 0
@@ -113,19 +123,24 @@ def _add_greek_totals(left: dict, right: dict) -> dict:
     return out
 
 
+def _finite_number_or_zero(value: Any) -> float:
+    if value is None or isinstance(value, bool):
+        return 0.0
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return out if math.isfinite(out) else 0.0
+
+
+def _proposal_greek(proposal: StrategyProposal, name: str) -> float | None:
+    return finite_greek(getattr(proposal, f"net_{name}", None))
+
+
 def _proposal_missing_greeks(proposal: StrategyProposal) -> list[str]:
     missing: list[str] = []
     for name in ("delta", "gamma", "theta", "vega"):
-        value = getattr(proposal, f"net_{name}", None)
-        if value is None:
-            missing.append(name)
-            continue
-        try:
-            f = float(value)
-        except (TypeError, ValueError):
-            missing.append(name)
-            continue
-        if not math.isfinite(f):
+        if _proposal_greek(proposal, name) is None:
             missing.append(name)
     return missing
 
@@ -258,7 +273,7 @@ def _sum_open_trade_greeks(db: Session, user_id: Optional[int]) -> dict:
         ).fetchall()
     except Exception as e:
         logger.debug("[options.budget] open trade greeks fetch failed: %s", e)
-        return _zero_greeks()
+        return _unproven_greeks()
 
     net_d = net_g = net_t = net_v = 0.0
     missing_count = 0
@@ -365,44 +380,61 @@ def check_proposal_against_budget(
     operator-supervised testing only.
     """
     bypass = options_budget_bypass_enabled()
-    budget = _get_budget(db, user_id)
-    current = _sum_open_position_greeks(db, user_id)
-
+    budget = _default_budget()
+    current = _zero_greeks()
     after = {
-        "net_delta": current["net_delta"] + (proposal.net_delta or 0),
-        "net_gamma": current["net_gamma"] + (proposal.net_gamma or 0),
-        "net_theta": current["net_theta"] + (proposal.net_theta or 0),
-        "net_vega": current["net_vega"] + (proposal.net_vega or 0),
+        "net_delta": 0.0,
+        "net_gamma": 0.0,
+        "net_theta": 0.0,
+        "net_vega": 0.0,
     }
+    try:
+        budget = _get_budget(db, user_id)
+        current = _sum_open_position_greeks(db, user_id)
 
-    reasons: list[str] = []
-    if int(current.get("missing_greeks_count") or 0) > 0:
-        reasons.append(
-            f"missing_complete_greeks:open_positions:{int(current.get('missing_greeks_count') or 0)}"
+        after_totals = _add_greek_totals(
+            current,
+            {
+                "net_delta": _proposal_greek(proposal, "delta"),
+                "net_gamma": _proposal_greek(proposal, "gamma"),
+                "net_theta": _proposal_greek(proposal, "theta"),
+                "net_vega": _proposal_greek(proposal, "vega"),
+                "missing_greeks_count": 0,
+            },
         )
-    missing = _proposal_missing_greeks(proposal)
-    if missing:
-        reasons.append("missing_complete_greeks:" + ",".join(missing))
-    if abs(after["net_delta"]) > budget["max_abs_delta"]:
-        reasons.append(
-            f"abs_delta_breach: |{after['net_delta']:.4f}| > {budget['max_abs_delta']}"
-        )
-    if abs(after["net_gamma"]) > budget["max_abs_gamma"]:
-        reasons.append(
-            f"abs_gamma_breach: |{after['net_gamma']:.6f}| > {budget['max_abs_gamma']}"
-        )
-    if abs(after["net_vega"]) > budget["max_total_vega"]:
-        reasons.append(
-            f"total_vega_breach: |{after['net_vega']:.4f}| > {budget['max_total_vega']}"
-        )
-    if (
-        budget["max_theta_burn_per_day"] is not None
-        and after["net_theta"] < -budget["max_theta_burn_per_day"]
-    ):
-        reasons.append(
-            f"theta_burn_breach: {after['net_theta']:.4f} < "
-            f"-{budget['max_theta_burn_per_day']}/day"
-        )
+        after = {key: after_totals[key] for key in ("net_delta", "net_gamma", "net_theta", "net_vega")}
+
+        reasons: list[str] = []
+        if int(current.get("missing_greeks_count") or 0) > 0:
+            reasons.append(
+                f"missing_complete_greeks:open_positions:{int(current.get('missing_greeks_count') or 0)}"
+            )
+        missing = _proposal_missing_greeks(proposal)
+        if missing:
+            reasons.append("missing_complete_greeks:" + ",".join(missing))
+        if abs(after["net_delta"]) > budget["max_abs_delta"]:
+            reasons.append(
+                f"abs_delta_breach: |{after['net_delta']:.4f}| > {budget['max_abs_delta']}"
+            )
+        if abs(after["net_gamma"]) > budget["max_abs_gamma"]:
+            reasons.append(
+                f"abs_gamma_breach: |{after['net_gamma']:.6f}| > {budget['max_abs_gamma']}"
+            )
+        if abs(after["net_vega"]) > budget["max_total_vega"]:
+            reasons.append(
+                f"total_vega_breach: |{after['net_vega']:.4f}| > {budget['max_total_vega']}"
+            )
+        if (
+            budget["max_theta_burn_per_day"] is not None
+            and after["net_theta"] < -budget["max_theta_burn_per_day"]
+        ):
+            reasons.append(
+                f"theta_burn_breach: {after['net_theta']:.4f} < "
+                f"-{budget['max_theta_burn_per_day']}/day"
+            )
+    except Exception as e:
+        logger.warning("[options.budget] check failed closed: %s", e)
+        reasons = [f"budget_error:{type(e).__name__}"]
 
     accepted = len(reasons) == 0
     if not accepted and bypass:

@@ -72,7 +72,47 @@ def test_genuine_broker_rejects_do_not_match(err):
     assert bw._is_code_bug_error(err) is False
 
 
+def test_robinhood_error_extractor_preserves_non_field_errors():
+    from app.services import broker_service as bs
+
+    err = bs._extract_robinhood_error_message(
+        {"non_field_errors": ["Invalid time in force for fractional order."]},
+        "Robinhood returned no order_id",
+    )
+
+    assert err == "non_field_errors: Invalid time in force for fractional order."
+
+
+def test_fractional_time_in_force_reject_is_terminal():
+    assert bw._is_terminal_reject(
+        "non_field_errors: Invalid time in force for fractional order."
+    )
+
+
+def test_coinbase_insufficient_balance_reject_is_terminal():
+    assert bw._is_terminal_reject("Insufficient balance in source account")
+
+
 # ── Broker layer: ADA refused before any SDK call ────────────────────
+
+
+@pytest.mark.parametrize("err", [
+    "product info fetch failed for ALCX-USD - refusing to place stop",
+    "product_info_unavailable",
+])
+def test_transient_data_unavailable_patterns_match(err):
+    assert bw._is_transient_data_unavailable_error(err) is True
+
+
+@pytest.mark.parametrize("err", [
+    "Not enough shares to sell",
+    "Insufficient shares",
+    "list index out of range",
+    "",
+    None,
+])
+def test_transient_data_unavailable_does_not_match_terminal_or_code_bug(err):
+    assert bw._is_transient_data_unavailable_error(err) is False
 
 
 def test_broker_layer_refuses_ada_crypto_base(monkeypatch):
@@ -188,6 +228,55 @@ def test_swallowed_index_error_arms_exception_cooldown(
     assert bw._is_in_exception_cooldown(intent_id) is True
 
 
+def test_product_info_unavailable_arms_exception_cooldown(
+    reset_cooldowns, monkeypatch,
+):
+    """Coinbase metadata failures must not loosen quantization.
+
+    They are transient data-dependency failures, so one reject arms the
+    short exception cooldown instead of retrying every sweep.
+    """
+    from app.config import settings
+    monkeypatch.setattr(settings, "chili_bracket_writer_g2_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "chili_bracket_writer_g2_place_missing_stop", True, raising=False)
+
+    intent_id = 5004
+    monkeypatch.setattr(
+        "app.services.broker_service.get_position_held_for_sells",
+        lambda *a, **kw: None,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.bracket_writer_g2._g2_event",
+        lambda *a, **kw: None,
+    )
+
+    adapter = MagicMock()
+    adapter.get_products.return_value = ([], True)
+    adapter.place_stop_limit_order_gtc.return_value = {
+        "ok": False,
+        "error": (
+            "product info fetch failed for ALCX-USD - refusing to place "
+            "stop with unquantized price (no magic-fallback policy)"
+        ),
+    }
+
+    assert bw._is_in_exception_cooldown(intent_id) is False
+    res = bw.place_missing_stop(
+        db=MagicMock(),
+        trade_id=1,
+        bracket_intent_id=intent_id,
+        ticker="ALCX-USD",
+        broker_source="coinbase",
+        decision=_decision_missing_stop(),
+        local_quantity=4.3931,
+        stop_price=3.560422,
+        adapter_factory=lambda src: adapter,
+    )
+    assert res.ok is False
+    assert res.reason == "place_failed"
+    assert bw._is_in_exception_cooldown(intent_id) is True
+
+
 def test_subsequent_sweep_after_swallowed_index_error_skips(
     reset_cooldowns, monkeypatch,
 ):
@@ -266,6 +355,53 @@ def test_genuine_broker_reject_does_not_arm_exception_cooldown(
     assert res.reason == "terminal_reject"
     # Terminal-reject cooldown engaged; exception cooldown did NOT.
     assert bw._is_in_reject_cooldown(intent_id) is True
+    assert bw._is_in_exception_cooldown(intent_id) is False
+
+
+def test_fractional_stop_time_in_force_reject_is_skipped_before_broker(
+    reset_cooldowns, monkeypatch,
+):
+    """Robinhood fractional equity stops are software-managed before broker IO."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "chili_bracket_writer_g2_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "chili_bracket_writer_g2_place_missing_stop", True, raising=False)
+    monkeypatch.setattr(
+        "app.services.broker_service.get_position_held_for_sells",
+        lambda *a, **kw: None,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.bracket_writer_g2._g2_event",
+        lambda *a, **kw: None,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.bracket_intent_writer.mark_terminal_reject",
+        lambda *a, **kw: True,
+    )
+
+    intent_id = 5005
+    adapter = MagicMock()
+    adapter.get_products.return_value = ([], True)
+    adapter.place_stop_loss_sell_order.return_value = {
+        "ok": False,
+        "error": "non_field_errors: Invalid time in force for fractional order.",
+    }
+
+    res = bw.place_missing_stop(
+        db=MagicMock(),
+        trade_id=1,
+        bracket_intent_id=intent_id,
+        ticker="AAOX",
+        broker_source="robinhood",
+        decision=_decision_missing_stop(),
+        local_quantity=0.758481,
+        stop_price=7.58,
+        adapter_factory=MagicMock(return_value=adapter),
+    )
+
+    assert res.reason == "software_stop_managed_robinhood_fractional_equity"
+    assert adapter.place_stop_loss_sell_order.call_count == 0
+    assert bw._is_in_reject_cooldown(intent_id) is False
     assert bw._is_in_exception_cooldown(intent_id) is False
 
 

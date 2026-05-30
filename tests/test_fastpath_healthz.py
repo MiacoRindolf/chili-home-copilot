@@ -7,6 +7,7 @@ from app.services.trading.fast_path.healthz import (
     EXECUTOR_LEARNING_ACTIVE_ALERT_WINDOW_S,
     EXECUTOR_LEARNING_MAX_LAG_S,
     FAST_LEARNING_FRESHNESS_KEY,
+    HEALTH_REASON_IDLE_NO_SUBSCRIBED_PAIRS,
     HEALTH_REASON_EXECUTOR_LEARNING_STALE,
     HEALTH_REASON_NO_SUBSCRIBED_PAIRS,
     LEARNING_ALERT_TO_DECISION_LAG_S_KEY,
@@ -33,7 +34,7 @@ SAMPLE_PAIR = "SUI-USD"
 ROTATED_PAIR = "TAO-USD"
 
 
-def test_healthz_fails_after_boot_when_universe_has_no_pairs():
+def test_healthz_is_idle_after_boot_when_universe_has_no_pairs():
     server = HealthzServer(port=8090, snapshot_fn=lambda: {})
     server._started_at -= BOOT_GRACE_S + 1.0
 
@@ -48,8 +49,8 @@ def test_healthz_fails_after_boot_when_universe_has_no_pairs():
         "ws": {"book": {}},
     })
 
-    assert ok is False
-    assert body["reason"] == HEALTH_REASON_NO_SUBSCRIBED_PAIRS
+    assert ok is True
+    assert body["reason"] == HEALTH_REASON_IDLE_NO_SUBSCRIBED_PAIRS
     assert body["details"]["subscribed_pairs"] == 0
 
 

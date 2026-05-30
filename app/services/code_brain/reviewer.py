@@ -87,10 +87,10 @@ def _review_diff_with_llm(diff_text: str, repo_context: str, commit_info: Dict[s
         "SUMMARY: <one sentence>\n"
         "FINDINGS: [<json array>]\n"
         "SCORE: <number>\n\n"
-        f"Repository context:\n{repo_context}\n"
     )
 
-    user_msg = f"Commit: {commit_info.get('hash', '')[:8]} by {commit_info.get('author', 'unknown')}\n"
+    user_msg = f"Repository context:\n{repo_context}\n\n"
+    user_msg += f"Commit: {commit_info.get('hash', '')[:8]} by {commit_info.get('author', 'unknown')}\n"
     user_msg += f"Message: {commit_info.get('message', '')}\n\n"
     user_msg += f"Diff:\n{diff_text[:_MAX_DIFF_CHARS]}"
 

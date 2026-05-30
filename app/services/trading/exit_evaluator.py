@@ -170,14 +170,34 @@ def _compute_r_multiple(state: PositionState, ref_price: float) -> float | None:
     R is ``(entry - stop)`` for longs or ``(stop - entry)`` for shorts. If
     no stop is known the function returns ``None``.
     """
-    if state.stop_price is None:
-        return None
-    risk = abs(state.entry_price - state.stop_price)
-    if risk <= 0:
+    risk = _risk_amount(state)
+    if risk is None:
         return None
     if _is_long(state):
         return (ref_price - state.entry_price) / risk
     return (state.entry_price - ref_price) / risk
+
+
+def _risk_amount(state: PositionState) -> float | None:
+    if state.stop_price is None:
+        return None
+    entry = _safe_float(state.entry_price, None)
+    stop = _safe_float(state.stop_price, None)
+    if entry is None or stop is None or entry <= 0 or stop <= 0:
+        return None
+    risk = entry - stop if _is_long(state) else stop - entry
+    return risk if risk > 0 else None
+
+
+def _reward_amount(state: PositionState) -> float | None:
+    if state.target_price is None:
+        return None
+    entry = _safe_float(state.entry_price, None)
+    target = _safe_float(state.target_price, None)
+    if entry is None or target is None or entry <= 0 or target <= 0:
+        return None
+    reward = target - entry if _is_long(state) else entry - target
+    return reward if reward > 0 else None
 
 
 def _update_extremes(state: PositionState, bar: BarContext) -> PositionState:
@@ -244,7 +264,7 @@ def evaluate_bar(
     is_long = _is_long(state)
 
     # 1. Hard stop (live paths). Long: if bar low breaches stop, exit at stop.
-    if config.hard_stop_enabled and state.stop_price is not None:
+    if config.hard_stop_enabled and _risk_amount(state) is not None:
         if is_long and bar.low <= state.stop_price:
             r = _compute_r_multiple(state, state.stop_price)
             return ExitDecision(
@@ -267,7 +287,7 @@ def evaluate_bar(
             )
 
     # 2. Hard target (live paths). Long: if bar high reaches target, exit at target.
-    if config.hard_target_enabled and state.target_price is not None:
+    if config.hard_target_enabled and _reward_amount(state) is not None:
         if is_long and bar.high >= state.target_price:
             r = _compute_r_multiple(state, state.target_price)
             return ExitDecision(

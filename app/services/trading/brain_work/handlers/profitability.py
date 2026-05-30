@@ -220,7 +220,23 @@ def _recert_rescue_backtest_refresh(
         out["reason"] = "no_recert_refresh_needed"
         return out
 
+    from app.models.trading import BrainWorkEvent
     from app.services.trading.brain_work.ledger import enqueue_work_event
+
+    open_refresh = (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_type == "backtest_requested")
+        .filter(BrainWorkEvent.status.in_(("pending", "processing", "retry_wait")))
+        .filter(BrainWorkEvent.payload["scan_pattern_id"].astext == str(int(scan_pattern_id)))
+        .filter(BrainWorkEvent.payload["source"].astext == "recert_rescue_refresh")
+        .filter(BrainWorkEvent.payload["asset_class"].astext == asset_class)
+        .order_by(BrainWorkEvent.updated_at.desc().nullslast(), BrainWorkEvent.id.desc())
+        .first()
+    )
+    if open_refresh is not None:
+        out["event_id"] = int(open_refresh.id)
+        out["reason"] = "recert_backtest_refresh_already_open"
+        return out
 
     event_id = enqueue_work_event(
         db,

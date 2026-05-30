@@ -88,6 +88,18 @@ class _MalformedTradeQuantityDb:
         raise AssertionError(f"unexpected SQL: {sql}")
 
 
+class _OpenTradeGreeksUnavailableDb:
+    def execute(self, stmt, params=None):
+        sql = str(stmt)
+        if "FROM options_position" in sql:
+            return _Result(rows=[])
+        if "FROM trading_trades" in sql:
+            raise RuntimeError("trade projection unavailable")
+        if "FROM options_greeks_budget" in sql:
+            return _Result(row=None)
+        raise AssertionError(f"unexpected SQL: {sql}")
+
+
 def _proposal(**overrides) -> StrategyProposal:
     base = dict(
         underlying="SPY",
@@ -134,6 +146,26 @@ def test_sum_open_trade_greeks_marks_malformed_open_quantity_as_unproven():
 
     assert totals["net_delta"] == 0.0
     assert totals["missing_greeks_count"] == 1
+
+
+def test_sum_open_trade_greeks_marks_fetch_failure_as_unproven():
+    totals = mod._sum_open_position_greeks(_OpenTradeGreeksUnavailableDb(), user_id=1)
+
+    assert totals["net_delta"] == 0.0
+    assert totals["missing_greeks_count"] == 1
+
+
+def test_check_proposal_blocks_when_open_trade_greeks_are_unavailable(monkeypatch):
+    monkeypatch.delenv("CHILI_OPTIONS_BUDGET_BYPASS", raising=False)
+
+    result = check_proposal_against_budget(
+        _OpenTradeGreeksUnavailableDb(),
+        1,
+        _proposal(),
+    )
+
+    assert result.accepted is False
+    assert result.reasons == ["missing_complete_greeks:open_positions:1"]
 
 
 def test_single_leg_proposal_requires_complete_finite_greeks():
@@ -201,6 +233,51 @@ def test_check_proposal_against_budget_blocks_missing_complete_greeks(monkeypatc
     assert result.reasons == ["missing_complete_greeks:gamma"]
 
 
+def test_check_proposal_against_budget_rejects_boolean_proposal_greeks(monkeypatch):
+    monkeypatch.delenv("CHILI_OPTIONS_BUDGET_BYPASS", raising=False)
+    monkeypatch.setattr(
+        mod,
+        "_get_budget",
+        lambda *_args, **_kwargs: {
+            "max_abs_delta": 100.0,
+            "max_abs_gamma": 100.0,
+            "max_total_vega": 100.0,
+            "max_theta_burn_per_day": 100.0,
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "_sum_open_position_greeks",
+        lambda *_args, **_kwargs: {
+            "net_delta": 0.0,
+            "net_gamma": 0.0,
+            "net_theta": 0.0,
+            "net_vega": 0.0,
+            "missing_greeks_count": 0,
+        },
+    )
+
+    result = check_proposal_against_budget(
+        None,
+        1,
+        _proposal(
+            net_delta=True,
+            net_gamma=True,
+            net_theta=True,
+            net_vega=True,
+        ),
+    )
+
+    assert result.accepted is False
+    assert result.reasons == ["missing_complete_greeks:delta,gamma,theta,vega"]
+    assert result.after_proposal == {
+        "net_delta": 0.0,
+        "net_gamma": 0.0,
+        "net_theta": 0.0,
+        "net_vega": 0.0,
+    }
+
+
 def test_check_proposal_against_budget_blocks_unproven_open_book(monkeypatch):
     monkeypatch.delenv("CHILI_OPTIONS_BUDGET_BYPASS", raising=False)
     monkeypatch.setattr(
@@ -229,6 +306,49 @@ def test_check_proposal_against_budget_blocks_unproven_open_book(monkeypatch):
 
     assert result.accepted is False
     assert result.reasons == ["missing_complete_greeks:open_positions:2"]
+
+
+def test_check_proposal_against_budget_fails_closed_on_book_error(monkeypatch):
+    monkeypatch.delenv("CHILI_OPTIONS_BUDGET_BYPASS", raising=False)
+
+    def _raise(*_args, **_kwargs):
+        raise RuntimeError("open book unavailable")
+
+    monkeypatch.setattr(
+        mod,
+        "_get_budget",
+        lambda *_args, **_kwargs: {
+            "max_abs_delta": 100.0,
+            "max_abs_gamma": 100.0,
+            "max_total_vega": 100.0,
+            "max_theta_burn_per_day": 100.0,
+        },
+    )
+    monkeypatch.setattr(mod, "_sum_open_position_greeks", _raise)
+
+    result = check_proposal_against_budget(None, 1, _proposal())
+
+    assert result.accepted is False
+    assert result.reasons == ["budget_error:RuntimeError"]
+    assert result.current_portfolio["missing_greeks_count"] == 0
+    assert result.after_proposal["net_delta"] == 0.0
+
+
+def test_check_proposal_against_budget_bypass_audits_book_error(monkeypatch):
+    monkeypatch.setenv("CHILI_OPTIONS_BUDGET_BYPASS", "true")
+
+    def _raise(*_args, **_kwargs):
+        raise RuntimeError("open book unavailable")
+
+    monkeypatch.setattr(mod, "_sum_open_position_greeks", _raise)
+
+    result = check_proposal_against_budget(None, 1, _proposal())
+
+    assert result.accepted is True
+    assert result.reasons == [
+        "BYPASS_VIA_CHILI_OPTIONS_BUDGET_BYPASS",
+        "budget_error:RuntimeError",
+    ]
 
 
 def test_explicit_options_budget_bypass_is_auditable(monkeypatch):

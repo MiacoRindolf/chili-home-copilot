@@ -27,6 +27,7 @@ service in ``triple_barrier_labeler.py``.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Iterable, Literal, Sequence
 
 Side = Literal["long", "short"]
@@ -57,11 +58,19 @@ class TripleBarrierConfig:
     side: Side = "long"
 
     def __post_init__(self) -> None:
-        if self.tp_pct <= 0:
+        tp = _finite_float_or_none(self.tp_pct)
+        sl = _finite_float_or_none(self.sl_pct)
+        if tp is None or tp <= 0:
             raise ValueError(f"tp_pct must be > 0, got {self.tp_pct}")
-        if self.sl_pct <= 0:
+        if sl is None or sl <= 0:
             raise ValueError(f"sl_pct must be > 0, got {self.sl_pct}")
-        if self.max_bars <= 0:
+        if isinstance(self.max_bars, bool):
+            raise ValueError(f"max_bars must be > 0, got {self.max_bars}")
+        try:
+            bars = int(self.max_bars)
+        except Exception as exc:
+            raise ValueError(f"max_bars must be > 0, got {self.max_bars}") from exc
+        if bars <= 0 or float(bars) != float(self.max_bars):
             raise ValueError(f"max_bars must be > 0, got {self.max_bars}")
         if self.side not in ("long", "short"):
             raise ValueError(f"side must be 'long' or 'short', got {self.side!r}")
@@ -89,26 +98,47 @@ class TripleBarrierLabel:
     sl_price: float
 
 
+def _finite_float_or_none(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except Exception:
+        return None
+    return out if math.isfinite(out) else None
+
+
 def _coerce_bar(b: object) -> OHLCVBar | None:
     """Accept dict-like or dataclass-like bars; return None on bad input."""
     if b is None:
         return None
     if isinstance(b, OHLCVBar):
-        return b
+        o = _finite_float_or_none(b.open)
+        h = _finite_float_or_none(b.high)
+        lo = _finite_float_or_none(b.low)
+        c = _finite_float_or_none(b.close)
+        v = _finite_float_or_none(b.volume)
+        if o is None or h is None or lo is None or c is None:
+            return None
+        return OHLCVBar(open=o, high=h, low=lo, close=c, volume=v or 0.0)
     try:
         if isinstance(b, dict):
-            o = float(b.get("open") if b.get("open") is not None else b.get("Open"))
-            h = float(b.get("high") if b.get("high") is not None else b.get("High"))
-            lo = float(b.get("low") if b.get("low") is not None else b.get("Low"))
-            c = float(b.get("close") if b.get("close") is not None else b.get("Close"))
-            v = float(b.get("volume") if b.get("volume") is not None else (b.get("Volume") or 0.0))
+            o = _finite_float_or_none(b.get("open") if b.get("open") is not None else b.get("Open"))
+            h = _finite_float_or_none(b.get("high") if b.get("high") is not None else b.get("High"))
+            lo = _finite_float_or_none(b.get("low") if b.get("low") is not None else b.get("Low"))
+            c = _finite_float_or_none(b.get("close") if b.get("close") is not None else b.get("Close"))
+            v = _finite_float_or_none(
+                b.get("volume") if b.get("volume") is not None else (b.get("Volume") or 0.0)
+            )
         else:
-            o = float(getattr(b, "open", getattr(b, "Open")))
-            h = float(getattr(b, "high", getattr(b, "High")))
-            lo = float(getattr(b, "low", getattr(b, "Low")))
-            c = float(getattr(b, "close", getattr(b, "Close")))
-            v = float(getattr(b, "volume", getattr(b, "Volume", 0.0)) or 0.0)
-        return OHLCVBar(open=o, high=h, low=lo, close=c, volume=v)
+            o = _finite_float_or_none(getattr(b, "open", getattr(b, "Open")))
+            h = _finite_float_or_none(getattr(b, "high", getattr(b, "High")))
+            lo = _finite_float_or_none(getattr(b, "low", getattr(b, "Low")))
+            c = _finite_float_or_none(getattr(b, "close", getattr(b, "Close")))
+            v = _finite_float_or_none(getattr(b, "volume", getattr(b, "Volume", 0.0)) or 0.0)
+        if o is None or h is None or lo is None or c is None:
+            return None
+        return OHLCVBar(open=o, high=h, low=lo, close=c, volume=v or 0.0)
     except Exception:
         return None
 
@@ -123,28 +153,43 @@ def compute_label(
     ``future_bars`` must be ordered chronologically and represent the bars
     that come **after** the entry (bar 0 is the first bar after entry).
     """
-    if entry_close is None or entry_close <= 0:
+    entry = _finite_float_or_none(entry_close)
+    if entry is None or entry <= 0:
         return TripleBarrierLabel(
             label=0,
             exit_bar_idx=-1,
             realized_return_pct=0.0,
             barrier_hit="missing_data",
-            entry_close=float(entry_close or 0.0),
+            entry_close=entry or 0.0,
             tp_price=0.0,
             sl_price=0.0,
         )
 
-    bars = [b for b in (list(future_bars)[: cfg.max_bars]) if _coerce_bar(b) is not None]
+    max_bars = int(cfg.max_bars)
+    tp_pct = _finite_float_or_none(cfg.tp_pct)
+    sl_pct = _finite_float_or_none(cfg.sl_pct)
+    if tp_pct is None or tp_pct <= 0 or sl_pct is None or sl_pct <= 0:
+        return TripleBarrierLabel(
+            label=0,
+            exit_bar_idx=-1,
+            realized_return_pct=0.0,
+            barrier_hit="missing_data",
+            entry_close=entry,
+            tp_price=0.0,
+            sl_price=0.0,
+        )
+
+    bars = [b for b in (list(future_bars)[:max_bars]) if _coerce_bar(b) is not None]
     coerced = [_coerce_bar(b) for b in bars]
     # mypy/pyright: coerced entries are not None because of the filter above
     coerced_bars: list[OHLCVBar] = [b for b in coerced if b is not None]
 
     if cfg.side == "long":
-        tp_price = entry_close * (1.0 + cfg.tp_pct)
-        sl_price = entry_close * (1.0 - cfg.sl_pct)
+        tp_price = entry * (1.0 + tp_pct)
+        sl_price = entry * (1.0 - sl_pct)
     else:
-        tp_price = entry_close * (1.0 - cfg.tp_pct)
-        sl_price = entry_close * (1.0 + cfg.sl_pct)
+        tp_price = entry * (1.0 - tp_pct)
+        sl_price = entry * (1.0 + sl_pct)
 
     if not coerced_bars:
         return TripleBarrierLabel(
@@ -152,7 +197,7 @@ def compute_label(
             exit_bar_idx=-1,
             realized_return_pct=0.0,
             barrier_hit="missing_data",
-            entry_close=entry_close,
+            entry_close=entry,
             tp_price=tp_price,
             sl_price=sl_price,
         )
@@ -164,35 +209,35 @@ def compute_label(
             sl_hit = lo <= sl_price
             if tp_hit and sl_hit:
                 # Conservative tie-break: SL first.
-                realized = (sl_price - entry_close) / entry_close
+                realized = (sl_price - entry) / entry
                 return TripleBarrierLabel(
                     label=-1,
                     exit_bar_idx=idx,
                     realized_return_pct=realized,
                     barrier_hit="sl",
-                    entry_close=entry_close,
+                    entry_close=entry,
                     tp_price=tp_price,
                     sl_price=sl_price,
                 )
             if sl_hit:
-                realized = (sl_price - entry_close) / entry_close
+                realized = (sl_price - entry) / entry
                 return TripleBarrierLabel(
                     label=-1,
                     exit_bar_idx=idx,
                     realized_return_pct=realized,
                     barrier_hit="sl",
-                    entry_close=entry_close,
+                    entry_close=entry,
                     tp_price=tp_price,
                     sl_price=sl_price,
                 )
             if tp_hit:
-                realized = (tp_price - entry_close) / entry_close
+                realized = (tp_price - entry) / entry
                 return TripleBarrierLabel(
                     label=+1,
                     exit_bar_idx=idx,
                     realized_return_pct=realized,
                     barrier_hit="tp",
-                    entry_close=entry_close,
+                    entry_close=entry,
                     tp_price=tp_price,
                     sl_price=sl_price,
                 )
@@ -200,35 +245,35 @@ def compute_label(
             tp_hit = lo <= tp_price
             sl_hit = hi >= sl_price
             if tp_hit and sl_hit:
-                realized = (entry_close - sl_price) / entry_close
+                realized = (entry - sl_price) / entry
                 return TripleBarrierLabel(
                     label=-1,
                     exit_bar_idx=idx,
                     realized_return_pct=realized,
                     barrier_hit="sl",
-                    entry_close=entry_close,
+                    entry_close=entry,
                     tp_price=tp_price,
                     sl_price=sl_price,
                 )
             if sl_hit:
-                realized = (entry_close - sl_price) / entry_close
+                realized = (entry - sl_price) / entry
                 return TripleBarrierLabel(
                     label=-1,
                     exit_bar_idx=idx,
                     realized_return_pct=realized,
                     barrier_hit="sl",
-                    entry_close=entry_close,
+                    entry_close=entry,
                     tp_price=tp_price,
                     sl_price=sl_price,
                 )
             if tp_hit:
-                realized = (entry_close - tp_price) / entry_close
+                realized = (entry - tp_price) / entry
                 return TripleBarrierLabel(
                     label=+1,
                     exit_bar_idx=idx,
                     realized_return_pct=realized,
                     barrier_hit="tp",
-                    entry_close=entry_close,
+                    entry_close=entry,
                     tp_price=tp_price,
                     sl_price=sl_price,
                 )
@@ -236,15 +281,15 @@ def compute_label(
     # Timeout — use final close to compute realized return.
     last = coerced_bars[-1]
     if cfg.side == "long":
-        realized = (last.close - entry_close) / entry_close
+        realized = (last.close - entry) / entry
     else:
-        realized = (entry_close - last.close) / entry_close
+        realized = (entry - last.close) / entry
     return TripleBarrierLabel(
         label=0,
         exit_bar_idx=len(coerced_bars) - 1,
         realized_return_pct=realized,
         barrier_hit="timeout",
-        entry_close=entry_close,
+        entry_close=entry,
         tp_price=tp_price,
         sl_price=sl_price,
     )
@@ -261,26 +306,39 @@ def compute_label_atr(
     side: Side = "long",
 ) -> TripleBarrierLabel:
     """ATR-scaled variant: barriers are ``atr_mult * entry_atr`` away from entry."""
-    if entry_close is None or entry_close <= 0 or entry_atr is None or entry_atr <= 0:
+    entry = _finite_float_or_none(entry_close)
+    atr = _finite_float_or_none(entry_atr)
+    tp_mult = _finite_float_or_none(atr_mult_tp)
+    sl_mult = _finite_float_or_none(atr_mult_sl)
+    if (
+        entry is None
+        or entry <= 0
+        or atr is None
+        or atr <= 0
+        or tp_mult is None
+        or tp_mult <= 0
+        or sl_mult is None
+        or sl_mult <= 0
+    ):
         return TripleBarrierLabel(
             label=0,
             exit_bar_idx=-1,
             realized_return_pct=0.0,
             barrier_hit="missing_data",
-            entry_close=float(entry_close or 0.0),
+            entry_close=entry or 0.0,
             tp_price=0.0,
             sl_price=0.0,
         )
 
-    tp_pct = (atr_mult_tp * entry_atr) / entry_close
-    sl_pct = (atr_mult_sl * entry_atr) / entry_close
+    tp_pct = (tp_mult * atr) / entry
+    sl_pct = (sl_mult * atr) / entry
     cfg = TripleBarrierConfig(
         tp_pct=tp_pct,
         sl_pct=sl_pct,
         max_bars=max_bars,
         side=side,
     )
-    return compute_label(entry_close, future_bars, cfg)
+    return compute_label(entry, future_bars, cfg)
 
 
 __all__ = [

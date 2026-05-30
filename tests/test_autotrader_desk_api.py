@@ -1,6 +1,7 @@
 """API tests for Autopilot pattern desk + autotrader desk PATCH."""
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -14,6 +15,7 @@ from app.models.trading import (
     Trade,
     TradingPosition,
 )
+from app.services.trading.broker_position_truth import DEFAULT_BROKER_TRUTH_GRACE_SECONDS
 from app.services.trading.autotrader_desk import AUTOTRADER_DESK_SLICE
 
 
@@ -251,6 +253,9 @@ def test_autotrader_desk_suppresses_closed_broker_position(
     db: Session,
 ) -> None:
     c, user = paired_client
+    stale_broker_ref = datetime.utcnow() - timedelta(
+        seconds=DEFAULT_BROKER_TRUTH_GRACE_SECONDS + 1
+    )
     pos = TradingPosition(
         user_id=user.id,
         broker_source="robinhood",
@@ -274,6 +279,9 @@ def test_autotrader_desk_suppresses_closed_broker_position(
         take_profit=12.0,
         broker_source="robinhood",
         position_id=pos.id,
+        entry_date=stale_broker_ref,
+        submitted_at=stale_broker_ref,
+        filled_at=stale_broker_ref,
     )
     db.add(t)
     db.commit()

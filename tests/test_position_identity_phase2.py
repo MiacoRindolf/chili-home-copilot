@@ -205,7 +205,10 @@ def test_no_reader_consults_position_id_in_app_services():
                 # or comments.
                 lines = text.splitlines()
                 for ln, body in enumerate(lines, 1):
-                    if re.search(pat, body) and not body.strip().startswith("#"):
+                    body_without_comment = body.split("#", 1)[0]
+                    if re.search(r"\.position_id\s*=\s*None\b", body_without_comment):
+                        continue
+                    if re.search(pat, body_without_comment):
                         offenders.append(f"{path}:{ln}: {body.strip()}")
 
     assert not offenders, (
