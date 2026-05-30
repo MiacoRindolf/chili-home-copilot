@@ -203,7 +203,11 @@ def _handle_backtest_requested(db: Session, ev, user_id: int | None) -> None:
             pass
         s0.close()
 
-    bt_run, _proc = execute_queue_backtest_for_pattern(pid, user_id)
+    bt_run, _proc = execute_queue_backtest_for_pattern(
+        pid,
+        user_id,
+        request_payload=payload,
+    )
 
     s1 = SessionLocal()
     try:

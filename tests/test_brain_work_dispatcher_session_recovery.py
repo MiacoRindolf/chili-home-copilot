@@ -284,7 +284,7 @@ def test_backtest_handler_rolls_back_dispatch_session_before_done(monkeypatch) -
     monkeypatch.setattr("app.db.SessionLocal", session_factory)
     monkeypatch.setattr(
         "app.services.trading.backtest_queue_worker.execute_queue_backtest_for_pattern",
-        lambda _pid, _uid: (3, 3),
+        lambda _pid, _uid, **_kwargs: (3, 3),
     )
     monkeypatch.setattr(dispatcher, "enqueue_outcome_event", lambda *a, **kw: 1)
     monkeypatch.setattr(dispatcher, "emit_promotion_surface_change", lambda *a, **kw: None)

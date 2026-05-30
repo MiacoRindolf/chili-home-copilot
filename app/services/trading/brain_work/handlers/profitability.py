@@ -75,6 +75,62 @@ def _safe_int(value: Any) -> int | None:
         return None
 
 
+def _append_priority_ticker(out: list[str], seen: set[str], value: Any) -> None:
+    ticker = str(value or "").strip().upper()
+    if not ticker or ticker in seen:
+        return
+    out.append(ticker)
+    seen.add(ticker)
+
+
+def _coerce_priority_tickers(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        values = value.split(",")
+    elif isinstance(value, dict):
+        values = [
+            key for key, _count in sorted(
+                value.items(),
+                key=lambda item: _safe_float(item[1]) or 0.0,
+                reverse=True,
+            )
+        ]
+    elif isinstance(value, (list, tuple, set)):
+        values = list(value)
+    else:
+        values = [value]
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        _append_priority_ticker(out, seen, item)
+    return out
+
+
+def _recert_rescue_priority_tickers(
+    *,
+    payload: dict[str, Any],
+    reliability: dict[str, Any],
+) -> list[str]:
+    """Return signal-first tickers for recert backtests.
+
+    Recert rescue is only useful if it retests the asset slice that is actively
+    blocked. Pattern-level queues can otherwise spend their whole budget on an
+    unrelated broad universe and leave the live blocker unchanged.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for key in ("signal_ticker", "ticker", "primary_symbol"):
+        _append_priority_ticker(out, seen, payload.get(key))
+    for key in ("priority_tickers", "top_tickers"):
+        for ticker in _coerce_priority_tickers(payload.get(key)):
+            _append_priority_ticker(out, seen, ticker)
+    _append_priority_ticker(out, seen, reliability.get("primary_symbol"))
+    for ticker in _coerce_priority_tickers(reliability.get("tickers")):
+        _append_priority_ticker(out, seen, ticker)
+    return out
+
+
 def _hard_reason_still_unresolved(pattern: Any, reason: str, config: Any) -> bool:
     reason = str(reason or "").strip()
     if reason == "negative_oos_recert":
@@ -179,6 +235,7 @@ def _recert_rescue_backtest_refresh(
     *,
     scan_pattern_id: int,
     reliability: dict[str, Any],
+    request_payload: dict[str, Any],
     hard_reasons: list[str],
     soft_reasons: list[str],
     parent_event_id: int,
@@ -194,12 +251,17 @@ def _recert_rescue_backtest_refresh(
         or "all"
     ).strip() or "all"
     fingerprint = str(reliability.get("evidence_fingerprint") or "none").strip() or "none"
+    priority_tickers = _recert_rescue_priority_tickers(
+        payload=request_payload,
+        reliability=reliability,
+    )
 
     out = {
         "requested": False,
         "event_id": None,
         "reason": None,
         "asset_class": asset_class,
+        "priority_tickers": priority_tickers,
         "edge_eval_count": edge_eval_count,
         "calibrated_ev_pct": calibrated_ev,
         "expected_ev_pct": expected_ev,
@@ -234,8 +296,30 @@ def _recert_rescue_backtest_refresh(
         .first()
     )
     if open_refresh is not None:
+        existing_payload = (
+            dict(open_refresh.payload)
+            if isinstance(open_refresh.payload, dict)
+            else {}
+        )
+        existing_priority = _coerce_priority_tickers(
+            existing_payload.get("priority_tickers")
+        )
+        merged_priority: list[str] = []
+        seen_priority: set[str] = set()
+        for ticker in priority_tickers + existing_priority:
+            _append_priority_ticker(merged_priority, seen_priority, ticker)
+        updated_open_request = False
+        if merged_priority and merged_priority != existing_priority:
+            existing_payload["priority_tickers"] = merged_priority
+            existing_payload["signal_ticker"] = merged_priority[0]
+            open_refresh.payload = existing_payload
+            db.add(open_refresh)
+            db.flush()
+            updated_open_request = True
         out["event_id"] = int(open_refresh.id)
         out["reason"] = "recert_backtest_refresh_already_open"
+        out["updated_open_request_priority_tickers"] = updated_open_request
+        out["priority_tickers"] = merged_priority or priority_tickers
         return out
 
     event_id = enqueue_work_event(
@@ -252,6 +336,8 @@ def _recert_rescue_backtest_refresh(
             "recert_refresh_reason": refresh_reason,
             "evidence_fingerprint": fingerprint,
             "parent_event_id": int(parent_event_id or 0),
+            "signal_ticker": priority_tickers[0] if priority_tickers else None,
+            "priority_tickers": priority_tickers,
         },
         parent_event_id=int(parent_event_id or 0),
         lease_scope="backtest",
@@ -507,6 +593,7 @@ def handle_recert_rescue_refresh(
         db,
         scan_pattern_id=pid,
         reliability=reliability,
+        request_payload=_payload(ev),
         hard_reasons=hard_reasons,
         soft_reasons=soft_reasons,
         parent_event_id=int(getattr(ev, "id", 0) or 0),

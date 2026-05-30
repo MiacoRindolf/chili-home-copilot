@@ -235,6 +235,7 @@ _TRADING_DOMAIN_TARGETED_TESTS = (
     "test_pattern_directional_outcome.py",
     "test_pattern_cohort_promote.py",
     "test_pattern_imminent_alerts.py",
+    "test_recert_rescue_signal_tickers.py",
     "test_stop_engine_options_auto_exec.py",
     "test_stuck_order_watchdog.py",
     "test_trade_assign_pattern.py",

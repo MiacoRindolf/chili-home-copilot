@@ -226,6 +226,65 @@ def queue_backtest_can_certify_result(result: Mapping[str, object]) -> bool:
     return selected <= 0 or attempted >= selected
 
 
+def _append_request_priority_ticker(out: list[str], seen: set[str], value: object) -> None:
+    ticker = str(value or "").strip().upper()
+    if not ticker or ticker in seen:
+        return
+    out.append(ticker)
+    seen.add(ticker)
+
+
+def request_priority_tickers_from_payload(
+    payload: Mapping[str, object] | None,
+    *,
+    max_tickers: int,
+) -> list[str]:
+    """Extract signal-first tickers from a backtest work request."""
+    if not payload:
+        return []
+    limit = max(MIN_QUEUE_TICKER_COUNT, int(max_tickers or MIN_QUEUE_TICKER_COUNT))
+    out: list[str] = []
+    seen: set[str] = set()
+
+    for key in ("signal_ticker", "ticker", "primary_symbol"):
+        _append_request_priority_ticker(out, seen, payload.get(key))
+        if len(out) >= limit:
+            return out[:limit]
+
+    raw_lists = [payload.get("priority_tickers"), payload.get("top_tickers")]
+    for raw in raw_lists:
+        if raw is None:
+            continue
+        if isinstance(raw, str):
+            values = raw.split(",")
+        elif isinstance(raw, Mapping):
+            values = [
+                key for key, _count in sorted(
+                    raw.items(),
+                    key=lambda item: _non_negative_int(item[1]),
+                    reverse=True,
+                )
+            ]
+        elif isinstance(raw, (list, tuple, set)):
+            values = list(raw)
+        else:
+            values = [raw]
+        for value in values:
+            _append_request_priority_ticker(out, seen, value)
+            if len(out) >= limit:
+                return out[:limit]
+    return out[:limit]
+
+
+def merge_priority_tickers(*ticker_lists: list[str] | None) -> list[str] | None:
+    out: list[str] = []
+    seen: set[str] = set()
+    for tickers in ticker_lists:
+        for ticker in tickers or []:
+            _append_request_priority_ticker(out, seen, ticker)
+    return out or None
+
+
 def queue_stored_refresh_max_tickers_for_pattern(settings: object, pattern: object) -> int:
     full_target = _positive_int(
         getattr(settings, "brain_queue_stored_refresh_max_tickers", None),
@@ -289,7 +348,12 @@ def configure_multiprocess_child_db_env(pool_size: int, max_overflow: int) -> No
     os.environ["DATABASE_MAX_OVERFLOW"] = str(max(0, int(max_overflow)))
 
 
-def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> tuple[int, int]:
+def execute_queue_backtest_for_pattern(
+    pattern_id: int,
+    user_id: int | None,
+    *,
+    request_payload: Mapping[str, object] | None = None,
+) -> tuple[int, int]:
     """Run queue backtest for one pattern (thread-safe: own session). Used by parent threads."""
     from ...config import settings
     from ...db import SessionLocal
@@ -395,6 +459,10 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
         db.refresh(pattern)
 
         target_tickers = queue_target_tickers_for_pattern(settings, pattern)
+        request_priority_tickers = request_priority_tickers_from_payload(
+            request_payload,
+            max_tickers=target_tickers,
+        )
         stored_refresh_max_tickers = queue_stored_refresh_max_tickers_for_pattern(
             settings, pattern,
         )
@@ -442,6 +510,14 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
                     len(prio),
                     prio[:8],
                 )
+        priority_tickers = merge_priority_tickers(request_priority_tickers, prio)
+        if request_priority_tickers:
+            logger.info(
+                "[backtest_queue] request_priority_tickers pattern_id=%s n=%d sample=%s",
+                pattern.id,
+                len(request_priority_tickers),
+                request_priority_tickers[:8],
+            )
 
         _tier = (getattr(pattern, "queue_tier", None) or "full").strip().lower()
         _prescreen = bool(getattr(settings, "brain_queue_prescreen_enabled", False))
@@ -461,7 +537,7 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
                 ),
                 update_confidence=True,
                 period=getattr(settings, "brain_queue_prescreen_period", "3mo"),
-                priority_tickers=prio if prio else None,
+                priority_tickers=priority_tickers,
                 max_runtime_seconds=soft_runtime_seconds,
             )
             total = result.get("total", 0)
@@ -585,7 +661,7 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
             insight,
             target_tickers=target_tickers,
             update_confidence=True,
-            priority_tickers=prio if prio else None,
+            priority_tickers=priority_tickers,
             max_runtime_seconds=soft_runtime_seconds,
         )
         total = result.get("total", 0)

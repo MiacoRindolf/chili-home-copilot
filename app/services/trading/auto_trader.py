@@ -2229,6 +2229,12 @@ def _queue_recert_for_blocked_signal(
         pattern_id = 0
     if pattern_id <= 0:
         return None
+    ticker = (getattr(alert, "ticker", "") or "").upper()
+    asset_class = (getattr(alert, "asset_type", "") or "").strip().lower() or None
+    if not asset_class and ticker.endswith("-USD"):
+        asset_class = "crypto"
+    as_of_date = datetime.utcnow().date()
+    recert_queue_result: dict[str, Any] = {}
     try:
         from .recert_queue_service import queue_scheduler
 
@@ -2236,27 +2242,29 @@ def _queue_recert_for_blocked_signal(
             db,
             scan_pattern_id=pattern_id,
             pattern_name=getattr(pattern, "name", None),
-            as_of_date=datetime.utcnow().date(),
+            as_of_date=as_of_date,
             reason=f"autotrader_signal:{reason}",
             severity="red",
             payload={
                 "origin": "autotrader_signal_fastlane",
                 "alert_id": int(getattr(alert, "id", 0) or 0),
-                "ticker": (getattr(alert, "ticker", "") or "").upper(),
+                "ticker": ticker,
+                "asset_class": asset_class,
                 "pattern_recert_reason": getattr(pattern, "recert_reason", None),
                 "pattern_lifecycle_stage": getattr(pattern, "lifecycle_stage", None),
             },
             mode_override=getattr(settings, "brain_recert_queue_mode", None),
         )
         if result is None:
-            return {"queued": False, "reason": "recert_queue_off"}
-        return {
-            "queued": True,
-            "log_id": result.log_id,
-            "recert_id": result.recert_id,
-            "status": result.status,
-            "mode": result.mode,
-        }
+            recert_queue_result = {"queued": False, "reason": "recert_queue_off"}
+        else:
+            recert_queue_result = {
+                "queued": True,
+                "log_id": result.log_id,
+                "recert_id": result.recert_id,
+                "status": result.status,
+                "mode": result.mode,
+            }
     except Exception:
         try:
             db.rollback()
@@ -2268,7 +2276,75 @@ def _queue_recert_for_blocked_signal(
             pattern_id,
             exc_info=True,
         )
-        return {"queued": False, "reason": "queue_failed"}
+        recert_queue_result = {"queued": False, "reason": "queue_failed"}
+
+    profitability_work: dict[str, Any] = {}
+    try:
+        from .edge_reliability import (
+            RECERT_RESCUE_REFRESH,
+            emit_targeted_profitability_work,
+        )
+
+        fingerprint_body = {
+            "source": "autotrader_signal_fastlane",
+            "scan_pattern_id": pattern_id,
+            "ticker": ticker,
+            "asset_class": asset_class,
+            "reason": reason,
+            "recert_reason": getattr(pattern, "recert_reason", None),
+            "as_of_date": as_of_date.isoformat(),
+        }
+        evidence_fingerprint = hashlib.sha256(
+            json.dumps(fingerprint_body, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+        event_id = emit_targeted_profitability_work(
+            db,
+            event_type=RECERT_RESCUE_REFRESH,
+            scan_pattern_id=pattern_id,
+            source="autotrader_signal_fastlane",
+            asset_class=asset_class,
+            evidence_fingerprint=evidence_fingerprint,
+            payload={
+                "alert_id": int(getattr(alert, "id", 0) or 0),
+                "ticker": ticker,
+                "signal_ticker": ticker,
+                "priority_tickers": [ticker] if ticker else [],
+                "reason": reason,
+                "pattern_recert_reason": getattr(pattern, "recert_reason", None),
+                "pattern_lifecycle_stage": getattr(pattern, "lifecycle_stage", None),
+                "promotion_status": getattr(pattern, "promotion_status", None),
+                "recommended_work_event": RECERT_RESCUE_REFRESH,
+            },
+        )
+        profitability_work = {
+            "profitability_work_queued": event_id is not None,
+            "profitability_work_event_id": event_id,
+            "profitability_work_type": RECERT_RESCUE_REFRESH,
+            "evidence_fingerprint": evidence_fingerprint,
+            "signal_ticker": ticker,
+            "asset_class": asset_class,
+        }
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.debug(
+            "[autotrader] recert profitability work enqueue failed alert_id=%s pattern_id=%s",
+            getattr(alert, "id", None),
+            pattern_id,
+            exc_info=True,
+        )
+        profitability_work = {
+            "profitability_work_queued": False,
+            "profitability_work_reason": "queue_failed",
+            "signal_ticker": ticker,
+            "asset_class": asset_class,
+        }
+
+    out = dict(recert_queue_result)
+    out.update(profitability_work)
+    return out
 
 
 def _csv_tokens(raw: Any) -> frozenset[str]:
