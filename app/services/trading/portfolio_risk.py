@@ -9,6 +9,7 @@ Enforces hard caps before any new position is opened:
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -17,6 +18,25 @@ from sqlalchemy.orm import Session
 from ...models.trading import Trade
 
 logger = logging.getLogger(__name__)
+PHASE5K_PORTFOLIO_RISK_ENV = "CHILI_PHASE5K_PORTFOLIO_RISK_USE_ENVELOPES"
+_PORTFOLIO_RISK_COMPAT_RELATION = "trading_trades"
+_PORTFOLIO_RISK_ENVELOPE_RELATION = "trading_management_envelopes"
+
+
+def _truthy_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _portfolio_risk_source_relation(use_envelopes: bool | None = None) -> str:
+    if use_envelopes is None:
+        use_envelopes = _truthy_flag(os.environ.get(PHASE5K_PORTFOLIO_RISK_ENV))
+    if use_envelopes:
+        return _PORTFOLIO_RISK_ENVELOPE_RELATION
+    return _PORTFOLIO_RISK_COMPAT_RELATION
 
 
 @dataclass
@@ -1100,6 +1120,8 @@ def _monthly_dd_threshold(
     db: Session,
     user_id: int | None,
     settings_obj: Any | None = None,
+    *,
+    use_envelopes: bool | None = None,
 ) -> tuple[float | None, int]:
     """Empirical Gaussian lower-bound on 30-day realized PnL.
 
@@ -1121,13 +1143,14 @@ def _monthly_dd_threshold(
     """
     from sqlalchemy import text
 
+    relation = _portfolio_risk_source_relation(use_envelopes)
     rows = db.execute(
         text(
-            """
+            f"""
             SELECT DATE_TRUNC('day',
                        COALESCE(exit_date, last_fill_at, filled_at))::date AS d,
                    COALESCE(SUM(pnl), 0)::float AS daily_pnl
-              FROM trading_trades
+              FROM {relation}
              WHERE user_id = :uid
                AND status = 'closed'
                AND pnl IS NOT NULL
@@ -1162,6 +1185,8 @@ def _monthly_dd_threshold(
 def _monthly_attributed_pnl(
     db: Session,
     user_id: int | None,
+    *,
+    use_envelopes: bool | None = None,
 ) -> float:
     """Sum of realized PnL on CHILI-attributed closed trades over the
     trailing 30 days.
@@ -1183,11 +1208,12 @@ def _monthly_attributed_pnl(
     """
     from sqlalchemy import text
 
+    relation = _portfolio_risk_source_relation(use_envelopes)
     result = db.execute(
         text(
-            """
+            f"""
             SELECT COALESCE(SUM(pnl), 0)::float
-              FROM trading_trades
+              FROM {relation}
              WHERE user_id = :uid
                AND status = 'closed'
                AND pnl IS NOT NULL
@@ -1206,6 +1232,8 @@ def _portfolio_dd_threshold(
     db: Session,
     user_id: int | None,
     settings_obj: Any | None = None,
+    *,
+    use_envelopes: bool | None = None,
 ) -> tuple[float | None, int]:
     """Empirical Gaussian lower-bound on 30-day realized PnL, ALL-CLOSED scope.
 
@@ -1234,13 +1262,14 @@ def _portfolio_dd_threshold(
     """
     from sqlalchemy import text
 
+    relation = _portfolio_risk_source_relation(use_envelopes)
     rows = db.execute(
         text(
-            """
+            f"""
             SELECT DATE_TRUNC('day',
                        COALESCE(exit_date, last_fill_at, filled_at))::date AS d,
                    COALESCE(SUM(pnl), 0)::float AS daily_pnl
-              FROM trading_trades
+              FROM {relation}
              WHERE (:uid IS NULL OR user_id = :uid)
                AND status = 'closed'
                AND pnl IS NOT NULL
@@ -1275,6 +1304,8 @@ def _portfolio_dd_threshold(
 def _monthly_total_pnl(
     db: Session,
     user_id: int | None,
+    *,
+    use_envelopes: bool | None = None,
 ) -> float:
     """Sum of realized PnL on ALL closed trades over the trailing 30 days.
 
@@ -1292,11 +1323,12 @@ def _monthly_total_pnl(
     """
     from sqlalchemy import text
 
+    relation = _portfolio_risk_source_relation(use_envelopes)
     result = db.execute(
         text(
-            """
+            f"""
             SELECT COALESCE(SUM(pnl), 0)::float
-              FROM trading_trades
+              FROM {relation}
              WHERE (:uid IS NULL OR user_id = :uid)
                AND status = 'closed'
                AND pnl IS NOT NULL

@@ -1,16 +1,19 @@
-# NEXT_TASK: f-position-identity-phase-5k-f-portfolio-risk-reader-flag
+# NEXT_TASK: f-position-identity-phase-5k-f-portfolio-risk-flag-soak
 
 STATUS: PENDING
 
 ## Goal
 
-Cut over the portfolio-risk open-exposure reader with the same single-reader
-default-off pattern.
+Flip and soak the default-off portfolio-risk drawdown reader flag shipped in
+Phase 5K-F.
 
-This reader already matched in the Phase 5K parity probe:
+The implementation intentionally targets the concrete raw SQL reader surface in
+`portfolio_risk.py`: drawdown/closed-PnL breaker math. The earlier brief called
+this "open exposure", but open exposure is still an ORM `Trade` path and is not
+a safe one-line relation switch.
 
 ```text
-CHECK_PORTFOLIO_RISK_OPEN=OK old_rows=2 new_rows=2
+CHILI_PHASE5K_PORTFOLIO_RISK_USE_ENVELOPES=false  # default-off code shipped
 ```
 
 ## Current State
@@ -19,27 +22,32 @@ CHECK_PORTFOLIO_RISK_OPEN=OK old_rows=2 new_rows=2
 - PDT reader is live on `trading_management_envelopes`.
 - Cohort-promote realized reader is live on `trading_management_envelopes`.
 - Pattern-quality realized reader is live on `trading_management_envelopes`.
+- Portfolio-risk drawdown reader has a default-off flag.
 - Phase 5K-A parity remains `COMPLETE_POSITIVE`.
 - Phase 5I post-rename soak remains `COMPLETE_POSITIVE`.
+- Direct old/new drawdown checks match for global account and user 1.
 
-## Implementation Shape
+## Soak Shape
 
-1. Locate portfolio-risk open-exposure reads that still use `trading_trades`.
-2. Add a default-off reader switch.
-3. Preserve all filters, exposure formulas, and risk thresholds exactly.
-4. Add focused tests for OFF/ON relation selection.
-5. Run Phase 5K-A and a direct function-level old/new check.
-6. Commit/push the default-off code.
-7. Run a narrow flag soak only if parity remains green.
+1. Set `CHILI_PHASE5K_PORTFOLIO_RISK_USE_ENVELOPES=true` in `.env`.
+2. Recreate the consumer workers (`autotrader-worker`, plus `chili` for API
+   risk checks).
+3. Verify the flag is visible in runtime env.
+4. Re-run:
+   - Phase 5K-A parity probe
+   - Phase 5I post-rename soak probe
+   - direct old/new drawdown helper comparison
+5. Scan logs for portfolio-risk / drawdown / relation errors.
+6. If clean, promote the soak and update CURRENT_PLAN.
 
 ## Guardrails
 
 - Do not touch broker/order/stop/reconcile write paths.
 - Do not change risk formulas, caps, thresholds, or drawdown logic.
 - Do not run DB-backed pytest against live Postgres.
-- Stage only files intentionally touched by this brief.
+- Do not absorb unrelated dirty worktree files.
 
 ## Rollback
 
-The new flag must default false. If the live soak misbehaves, set it false and
-recreate only the affected consumer worker(s).
+Set `CHILI_PHASE5K_PORTFOLIO_RISK_USE_ENVELOPES=false` and recreate the same
+consumer worker(s).
