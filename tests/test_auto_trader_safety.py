@@ -959,6 +959,50 @@ def test_synergy_retry_candidates_revisit_recent_distinct_pattern(db, monkeypatc
     assert getattr(alerts[0], "_chili_synergy_retry_source_run_id") == source_run.id
 
 
+def test_netedge_shadow_score_preserves_alert_direction(monkeypatch):
+    from app.services.trading import net_edge_ranker
+    from app.services.trading import pattern_stats_accessor
+
+    class _PatternQuery:
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def one_or_none(self):
+            return SimpleNamespace(id=123)
+
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(net_edge_ranker, "mode_is_active", lambda: True)
+    monkeypatch.setattr(
+        pattern_stats_accessor,
+        "get_corrected_pattern_stats",
+        lambda _pattern: SimpleNamespace(win_rate=62.0),
+    )
+    monkeypatch.setattr(
+        net_edge_ranker,
+        "score",
+        lambda _db, ctx: seen.setdefault("ctx", ctx),
+    )
+
+    alert = SimpleNamespace(
+        ticker="SHRT",
+        asset_type="stock",
+        scan_pattern_id=123,
+        stop_loss=105.0,
+        target_price=90.0,
+        direction="short",
+        regime_at_alert="risk_off",
+        timeframe="1d",
+    )
+    db = SimpleNamespace(query=lambda _model: _PatternQuery())
+
+    at_mod._emit_netedge_shadow_score(db, alert, 100.0)
+
+    ctx = seen["ctx"]
+    assert ctx.direction == "short"
+    assert ctx.stop_price == 105.0
+    assert ctx.target_price == 90.0
+
+
 def test_run_tick_processes_synergy_retry_even_when_alert_has_prior_run(
     db,
     monkeypatch,
