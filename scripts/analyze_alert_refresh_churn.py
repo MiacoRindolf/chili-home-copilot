@@ -353,6 +353,7 @@ def _duplicate_open_refresh_work(hours: int, limit: int) -> list[dict]:
         )
         SELECT
           event_type,
+          status,
           scan_pattern_id,
           COALESCE(sp.name, '<missing>') AS pattern_name,
           COALESCE(payload->>'asset_class', '<none>') AS asset_class,
@@ -364,7 +365,7 @@ def _duplicate_open_refresh_work(hours: int, limit: int) -> list[dict]:
         FROM open_work
         LEFT JOIN scan_patterns sp ON sp.id = open_work.scan_pattern_id
         WHERE scan_pattern_id IS NOT NULL
-        GROUP BY event_type, scan_pattern_id, pattern_name, asset_class, source
+        GROUP BY event_type, status, scan_pattern_id, pattern_name, asset_class, source
         HAVING count(*) > 1
         ORDER BY open_work DESC, newest_open DESC
         LIMIT :limit

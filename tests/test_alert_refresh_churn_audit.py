@@ -266,6 +266,8 @@ def test_duplicate_open_refresh_work_groups_refresh_churn(monkeypatch):
     sql = str(captured["sql"])
     assert "event_type = ANY(:event_types)" in sql
     assert "status IN ('pending', 'retry_wait', 'processing')" in sql
+    assert "status," in sql
+    assert "GROUP BY event_type, status, scan_pattern_id" in sql
     assert "HAVING count(*) > 1" in sql
     assert "count(DISTINCT dedupe_key)" in sql
     assert captured["params"] == {
