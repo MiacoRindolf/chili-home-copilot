@@ -1535,6 +1535,12 @@ def api_stop_positions(
         Trade.user_id == ctx["user_id"],
         Trade.status == "open",
     ).order_by(Trade.entry_date.desc()).all()
+    from ..services.trading.broker_position_truth import (
+        broker_position_display_metrics,
+        filter_broker_stale_open_trades,
+    )
+
+    trades, suppressed_stale_trades = filter_broker_stale_open_trades(db, trades)
 
     from ..services.trading.stop_engine import _build_brain_context
     try:
@@ -1543,10 +1549,33 @@ def api_stop_positions(
         def is_option_trade(_trade: Trade) -> bool:  # type: ignore[no-redef]
             return False
 
+    def _positive_float(value):
+        if value in (None, ""):
+            return None
+        try:
+            out = float(value)
+        except (TypeError, ValueError):
+            return None
+        return out if out > 0 else None
+
     result = []
     for t in trades:
         trade_is_option = is_option_trade(t)
-        entry = t.entry_price or 0
+        broker_metrics = (
+            broker_position_display_metrics(db, t)
+            if not trade_is_option
+            else None
+        ) or {}
+        entry = (
+            _positive_float(broker_metrics.get("entry_price"))
+            or _positive_float(t.entry_price)
+            or 0
+        )
+        quantity = (
+            _positive_float(broker_metrics.get("quantity"))
+            or _positive_float(t.quantity)
+            or 0
+        )
         stop = t.stop_loss
         target = t.take_profit
         R = abs(entry - stop) if stop and entry else 0
@@ -1614,8 +1643,13 @@ def api_stop_positions(
             "trail_stop": t.trail_stop,
             "high_watermark": hwm,
             "stop_model": t.stop_model,
-            "quantity": t.quantity,
+            "quantity": quantity,
             "broker_source": t.broker_source,
+            "broker_truth_entry_price": broker_metrics.get("entry_price"),
+            "broker_truth_quantity": broker_metrics.get("quantity"),
+            "broker_truth_position_id": broker_metrics.get("position_id"),
+            "broker_truth_current_envelope_id": broker_metrics.get("current_envelope_id"),
+            "broker_truth_metrics_source": broker_metrics.get("source"),
             "R": round(R, 4),
             "current_r": current_r,
             "stop_distance_pct": stop_distance_pct,
@@ -1625,7 +1659,12 @@ def api_stop_positions(
             "brain": brain_ctx,
         })
 
-    return JSONResponse({"ok": True, "positions": result})
+    return JSONResponse({
+        "ok": True,
+        "positions": result,
+        "suppressed_stale_trades": suppressed_stale_trades,
+        "suppressed_stale_count": len(suppressed_stale_trades),
+    })
 
 
 @router.get("/api/trading/stops/decisions")

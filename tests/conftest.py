@@ -439,6 +439,26 @@ def _truncate_relation_names(conn, logical_names: list[str]) -> list[str]:
     return logical_names
 
 
+def _targeted_users_delete_sql(table_names: frozenset[str]):
+    """Delete only users that are not protected by out-of-scope NO ACTION FKs."""
+    blockers: list[str] = []
+    for table in Base.metadata.sorted_tables:
+        if table.name in table_names:
+            continue
+        for column in table.columns:
+            for fk in column.foreign_keys:
+                if fk.column.table.name != "users":
+                    continue
+                if (fk.ondelete or "").upper() in {"CASCADE", "SET NULL"}:
+                    continue
+                blockers.append(
+                    f'NOT EXISTS (SELECT 1 FROM "{table.name}" AS child '
+                    f'WHERE child."{column.name}" = u."id")'
+                )
+    predicate = " AND ".join(blockers) if blockers else "TRUE"
+    return text(f'DELETE FROM "users" AS u WHERE {predicate}')
+
+
 def _truncate_app_tables(table_names: frozenset[str] | None = None) -> None:
     """Remove row data between tests; keep schema_version so migrations are not re-run."""
     # Static neural mesh topology is seeded by migration 086; keep nodes/edges so tests
@@ -448,10 +468,20 @@ def _truncate_app_tables(table_names: frozenset[str] | None = None) -> None:
         _evict_idle_in_transaction_peers()
         _terminate_stale_truncate_peers()
         with engine.begin() as conn:
-            for table in reversed(Base.metadata.sorted_tables):
-                if table.name in _skip_truncate or table.name not in table_names:
+            targeted_tables = [
+                table
+                for table in reversed(Base.metadata.sorted_tables)
+                if table.name not in _skip_truncate and table.name in table_names
+            ]
+            for table in targeted_tables:
+                if table.name == "users":
                     continue
                 conn.execute(text(f'DELETE FROM "{table.name}"'))
+            for table in targeted_tables:
+                if table.name in _skip_truncate or table.name not in table_names:
+                    continue
+                if table.name == "users":
+                    conn.execute(_targeted_users_delete_sql(table_names))
         return
     logical_names = [
         t.name

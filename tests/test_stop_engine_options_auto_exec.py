@@ -213,3 +213,78 @@ def test_stop_positions_option_uses_premium_quote_not_underlying(paired_client, 
     assert row["asset_type"] == "options"
     assert row["current_price"] == pytest.approx(1.45)
     assert row["pnl_pct"] == pytest.approx(16.0)
+
+
+def test_stop_positions_use_broker_truth_and_hide_duplicate_coinbase_envelope(
+    paired_client,
+    db,
+) -> None:
+    from app.models.trading import Trade, TradingPosition
+
+    client, user = paired_client
+    stale = Trade(
+        user_id=user.id,
+        ticker="ACX-USD",
+        direction="long",
+        entry_price=0.04466266,
+        quantity=3822.0,
+        entry_date=datetime.utcnow(),
+        status="open",
+        broker_source="coinbase",
+        asset_kind="crypto",
+        stop_loss=0.040199,
+        take_profit=0.046452,
+    )
+    owner = Trade(
+        user_id=user.id,
+        ticker="ACX-USD",
+        direction="long",
+        entry_price=0.04282061,
+        quantity=3822.0,
+        entry_date=datetime.utcnow(),
+        status="open",
+        broker_source="coinbase",
+        asset_kind="crypto",
+        stop_loss=0.040199,
+        take_profit=0.046452,
+    )
+    db.add_all([stale, owner])
+    db.flush()
+    pos = TradingPosition(
+        user_id=user.id,
+        broker_source="coinbase",
+        account_type="spot",
+        ticker="ACX-USD",
+        direction="long",
+        asset_kind="crypto",
+        current_quantity=7641.8,
+        current_avg_price=0.04282061,
+        state="open",
+        current_envelope_id=owner.id,
+    )
+    db.add(pos)
+    db.flush()
+    stale.position_id = pos.id
+    owner.position_id = pos.id
+    db.commit()
+
+    with patch(
+        "app.services.trading.broker_quotes.broker_quote_for_trade",
+        return_value={"price": 0.0426, "source": "coinbase"},
+    ), patch(
+        "app.services.trading.stop_engine._build_brain_context",
+        return_value=SimpleNamespace(summary_dict=lambda: {}),
+    ):
+        resp = client.get("/api/trading/stops/positions")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    acx_rows = [x for x in payload["positions"] if x["ticker"] == "ACX-USD"]
+    assert [x["id"] for x in acx_rows] == [owner.id]
+    row = acx_rows[0]
+    assert row["entry_price"] == pytest.approx(0.04282061)
+    assert row["quantity"] == pytest.approx(7641.8)
+    assert row["pnl_pct"] == pytest.approx(-0.52)
+    assert row["broker_truth_metrics_source"] == "broker_position_identity"
+    assert payload["suppressed_stale_count"] == 1
+    assert payload["suppressed_stale_trades"][0]["id"] == stale.id
