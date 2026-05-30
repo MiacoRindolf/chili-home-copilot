@@ -79,6 +79,34 @@ def test_should_fire_respects_cooldown_for_naive_utc_last_fired() -> None:
     assert prop.should_fire(node, state, now) is False
 
 
+def test_brain_work_outcome_publish_rolls_back_swallowed_db_error(monkeypatch) -> None:
+    """Publisher helpers must not return a poisoned SQLAlchemy session."""
+    from app.services.trading.brain_neural_mesh import publisher
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.rollbacks = 0
+
+        def rollback(self) -> None:
+            self.rollbacks += 1
+
+    def broken_enqueue(*_args, **_kwargs) -> int:
+        raise RuntimeError("server closed the connection unexpectedly")
+
+    fake_db = FakeSession()
+    monkeypatch.setattr(publisher, "mesh_enabled", lambda: True)
+    monkeypatch.setattr(publisher, "enqueue_activation", broken_enqueue)
+
+    publisher.publish_brain_work_outcome(
+        fake_db,
+        outcome_type="backtest_completed",
+        scan_pattern_id=537,
+        extra={"work_event_id": 7569},
+    )
+
+    assert fake_db.rollbacks == 1
+
+
 @pytest.mark.usefixtures("db")
 def test_enqueue_and_activation_batch(db: Session) -> None:
     src = db.query(BrainGraphNode).filter(BrainGraphNode.id == "nm_snap_daily").one_or_none()
