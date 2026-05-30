@@ -10,7 +10,7 @@ from typing import Any, Mapping
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from .contracts import normalize_expiration, normalize_option_meta
+from .contracts import finite_option_greek, normalize_expiration, normalize_option_meta
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +74,23 @@ def _premium_quote_float(
 def _quote_int(quote: Mapping[str, Any], *keys: str) -> int | None:
     for key in keys:
         value = _int_or_none(quote.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _nonnegative_quote_float(quote: Mapping[str, Any], *keys: str) -> float | None:
+    value = _quote_float(quote, *keys)
+    if value is None or value < 0:
+        return None
+    return value
+
+
+def _quote_greek(quote: Mapping[str, Any], key: str) -> float | None:
+    for source in (quote, quote.get("greeks")):
+        if not isinstance(source, Mapping):
+            continue
+        value = finite_option_greek(source.get(key), key)
         if value is not None:
             return value
     return None
@@ -218,17 +235,17 @@ def record_quote_snapshot(
                     ),
                     "volume": _quote_int(quote, "volume"),
                     "open_interest": _quote_int(quote, "open_interest"),
-                    "implied_vol": _quote_float(
+                    "implied_vol": _nonnegative_quote_float(
                         quote,
                         "implied_volatility",
                         "implied_vol",
                         "iv",
                     ),
-                    "delta": _quote_float(quote, "delta"),
-                    "gamma": _quote_float(quote, "gamma"),
-                    "theta": _quote_float(quote, "theta"),
-                    "vega": _quote_float(quote, "vega"),
-                    "rho": _quote_float(quote, "rho"),
+                    "delta": _quote_greek(quote, "delta"),
+                    "gamma": _quote_greek(quote, "gamma"),
+                    "theta": _quote_greek(quote, "theta"),
+                    "vega": _quote_greek(quote, "vega"),
+                    "rho": _quote_greek(quote, "rho"),
                 },
             )
         return True

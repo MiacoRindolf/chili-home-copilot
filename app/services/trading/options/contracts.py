@@ -176,10 +176,28 @@ def _quote_greek(quote: Mapping[str, Any] | None, key: str) -> float | None:
         return None
     greeks = quote.get("greeks")
     if isinstance(greeks, Mapping):
-        out = _float_or_none(greeks.get(key))
+        out = finite_option_greek(greeks.get(key), key)
         if out is not None:
             return out
-    return _float_or_none(quote.get(key))
+    return finite_option_greek(quote.get(key), key)
+
+
+def finite_option_greek(value: Any, key: str) -> float | None:
+    """Return a plausible per-contract vanilla-option Greek, or None.
+
+    Net portfolio Greeks can legitimately exceed these bounds after quantity
+    aggregation, but single-leg quote/metadata Greeks should not. Treating
+    impossible vendor values as missing keeps the risk budget fail-closed.
+    """
+    out = _float_or_none(value)
+    if out is None:
+        return None
+    name = str(key or "").strip().lower()
+    if name == "delta" and not -1.0 <= out <= 1.0:
+        return None
+    if name in {"gamma", "vega"} and out < 0.0:
+        return None
+    return out
 
 
 def normalize_option_meta(
@@ -298,8 +316,12 @@ def normalize_option_meta(
 
     for greek in ("delta", "gamma", "theta", "vega"):
         value = _quote_greek(quote, greek)
+        if value is None:
+            value = finite_option_greek(src.get(greek), greek)
         if value is not None:
             src[greek] = value
+        else:
+            src.pop(greek, None)
 
     return src
 
@@ -342,10 +364,10 @@ def missing_greeks(meta: Mapping[str, Any] | None) -> list[str]:
     src = meta or {}
     missing: list[str] = []
     for greek in ("delta", "gamma", "theta", "vega"):
-        value = src.get(greek)
+        value = finite_option_greek(src.get(greek), greek)
         if value is None and isinstance(src.get("quote_snapshot"), Mapping):
-            value = src["quote_snapshot"].get(greek)
-        if finite_greek(value) is None:
+            value = finite_option_greek(src["quote_snapshot"].get(greek), greek)
+        if value is None:
             missing.append(greek)
     return missing
 
@@ -378,6 +400,7 @@ __all__ = [
     "option_price_domains_snapshot",
     "parse_contract_quantity",
     "complete_greeks",
+    "finite_option_greek",
     "finite_greek",
     "missing_greeks",
     "validate_single_leg_option_meta",

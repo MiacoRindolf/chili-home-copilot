@@ -5,6 +5,7 @@ from datetime import date, timedelta
 from app.services.trading.options.contracts import (
     complete_greeks,
     expiration_is_expired,
+    finite_option_greek,
     missing_greeks,
     normalize_expiration,
     normalize_option_meta,
@@ -311,6 +312,58 @@ def test_normalize_option_meta_rejects_boolean_numeric_fields() -> None:
     assert "quantity" in missing
 
 
+def test_normalize_option_meta_rejects_implausible_quote_greeks() -> None:
+    meta = normalize_option_meta(
+        {
+            "underlying": "SPY",
+            "expiration": "2026-06-19",
+            "strike": 729.0,
+            "option_type": "call",
+            "limit_price": 4.01,
+            "quantity": 1,
+        },
+        quote={
+            "bid_price": "3.95",
+            "ask_price": "4.05",
+            "greeks": {
+                "delta": "4.2",
+                "gamma": "-0.03",
+                "theta": "-0.08",
+                "vega": "-0.11",
+            },
+        },
+    )
+
+    assert "delta" not in meta
+    assert "gamma" not in meta
+    assert meta["theta"] == -0.08
+    assert "vega" not in meta
+    assert missing_greeks(meta) == ["delta", "gamma", "vega"]
+
+
+def test_normalize_option_meta_sanitizes_existing_top_level_greeks() -> None:
+    meta = normalize_option_meta(
+        {
+            "underlying": "SPY",
+            "expiration": "2026-06-19",
+            "strike": 729.0,
+            "option_type": "call",
+            "limit_price": 4.01,
+            "quantity": 1,
+            "delta": "0.42",
+            "gamma": "-0.01",
+            "theta": "-0.08",
+            "vega": "-0.11",
+        }
+    )
+
+    assert meta["delta"] == 0.42
+    assert "gamma" not in meta
+    assert meta["theta"] == -0.08
+    assert "vega" not in meta
+    assert missing_greeks(meta) == ["gamma", "vega"]
+
+
 def test_complete_greeks_require_all_finite_values() -> None:
     complete = {
         "delta": "0.42",
@@ -332,3 +385,28 @@ def test_complete_greeks_require_all_finite_values() -> None:
     assert complete_greeks(via_snapshot) is True
     assert complete_greeks(missing) is False
     assert missing_greeks(missing) == ["vega"]
+
+
+def test_missing_greeks_falls_back_to_valid_quote_snapshot_greeks() -> None:
+    meta = {
+        "delta": 4.20,
+        "gamma": -0.01,
+        "theta": "-0.08",
+        "vega": -0.11,
+        "quote_snapshot": {
+            "delta": 0.42,
+            "gamma": 0.03,
+            "vega": 0.11,
+        },
+    }
+
+    assert complete_greeks(meta) is True
+    assert missing_greeks(meta) == []
+
+
+def test_finite_option_greek_bounds_per_contract_values() -> None:
+    assert finite_option_greek("0.42", "delta") == 0.42
+    assert finite_option_greek("-1.5", "delta") is None
+    assert finite_option_greek("-0.01", "gamma") is None
+    assert finite_option_greek("-0.08", "theta") == -0.08
+    assert finite_option_greek("-0.11", "vega") is None

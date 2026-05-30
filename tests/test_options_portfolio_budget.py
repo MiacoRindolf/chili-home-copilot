@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -141,6 +141,96 @@ class _BooleanPositionQtyDb:
         raise AssertionError(f"unexpected SQL: {sql}")
 
 
+class _ImplausibleOpenGreeksDb:
+    def execute(self, stmt, params=None):
+        sql = str(stmt)
+        if "FROM options_position" in sql:
+            return _Result(
+                rows=[
+                    (
+                        [
+                            {
+                                "qty": 1,
+                                "expiration": date.today() + timedelta(days=20),
+                                "delta": 4.20,
+                                "gamma": -0.01,
+                                "theta": -0.02,
+                                "vega": -0.03,
+                            }
+                        ],
+                    )
+                ]
+            )
+        if "FROM trading_trades" in sql:
+            return _Result(
+                rows=[
+                    (
+                        1,
+                        {
+                            "option_meta": {
+                                "delta": 0.20,
+                                "gamma": -0.02,
+                                "theta": -0.03,
+                                "vega": 0.04,
+                            }
+                        },
+                    )
+                ]
+            )
+        raise AssertionError(f"unexpected SQL: {sql}")
+
+
+class _OpenGreeksSnapshotFallbackDb:
+    def execute(self, stmt, params=None):
+        sql = str(stmt)
+        if "FROM options_position" in sql:
+            return _Result(
+                rows=[
+                    (
+                        [
+                            {
+                                "qty": 1,
+                                "expiration": date.today() + timedelta(days=20),
+                                "delta": 4.20,
+                                "gamma": -0.01,
+                                "theta": -0.02,
+                                "vega": -0.03,
+                                "quote_snapshot": {
+                                    "delta": 0.10,
+                                    "gamma": 0.01,
+                                    "vega": 0.03,
+                                },
+                            }
+                        ],
+                    )
+                ]
+            )
+        if "FROM trading_trades" in sql:
+            return _Result(
+                rows=[
+                    (
+                        2,
+                        {
+                            "option_meta": {
+                                "expiration": (
+                                    date.today() + timedelta(days=20)
+                                ).isoformat(),
+                                "delta": 5.0,
+                                "gamma": -0.02,
+                                "theta": -0.03,
+                                "vega": 0.04,
+                                "quote_snapshot": {
+                                    "delta": 0.20,
+                                    "gamma": 0.02,
+                                },
+                            }
+                        },
+                    )
+                ]
+            )
+        raise AssertionError(f"unexpected SQL: {sql}")
+
+
 class _CaptureBudgetUpsertDb:
     def __init__(self):
         self.params = None
@@ -229,6 +319,27 @@ def test_sum_open_position_greeks_marks_boolean_leg_qty_as_unproven():
     assert totals["missing_greeks_count"] == 1
 
 
+def test_sum_open_position_greeks_marks_implausible_leg_greeks_as_unproven():
+    totals = mod._sum_open_position_greeks(_ImplausibleOpenGreeksDb(), user_id=1)
+
+    assert totals["net_delta"] == pytest.approx(0.20)
+    assert totals["net_gamma"] == 0.0
+    assert totals["net_theta"] == pytest.approx(-0.05)
+    assert totals["net_vega"] == pytest.approx(0.04)
+    assert totals["missing_greeks_count"] == 2
+
+
+def test_sum_open_position_greeks_uses_valid_snapshot_when_stale_top_level_bad():
+    totals = mod._sum_open_position_greeks(_OpenGreeksSnapshotFallbackDb(), user_id=1)
+
+    assert totals["net_delta"] == pytest.approx(0.50)
+    assert totals["net_gamma"] == pytest.approx(0.05)
+    assert totals["net_theta"] == pytest.approx(-0.08)
+    assert totals["net_vega"] == pytest.approx(0.11)
+    assert totals["vega_by_tenor"]["30d"] == pytest.approx(0.11)
+    assert totals["missing_greeks_count"] == 0
+
+
 def test_upsert_budget_sanitizes_bad_limits_before_persisting():
     db = _CaptureBudgetUpsertDb()
 
@@ -296,6 +407,51 @@ def test_single_leg_proposal_rejects_malformed_contract_quantity():
                 "vega": 0.11,
             }
         )
+
+
+def test_single_leg_proposal_rejects_implausible_per_contract_greeks():
+    with pytest.raises(ValueError, match="missing_greeks:delta,gamma,vega"):
+        single_leg_proposal_from_option_meta(
+            {
+                "underlying": "SPY",
+                "expiration": "2026-06-19",
+                "strike": 729.0,
+                "option_type": "call",
+                "limit_price": 4.01,
+                "quantity": 1,
+                "delta": 4.20,
+                "gamma": -0.03,
+                "theta": -0.08,
+                "vega": -0.11,
+            }
+        )
+
+
+def test_single_leg_proposal_uses_snapshot_greeks_when_top_level_is_stale_bad():
+    proposal = single_leg_proposal_from_option_meta(
+        {
+            "underlying": "SPY",
+            "expiration": "2026-06-19",
+            "strike": 729.0,
+            "option_type": "call",
+            "limit_price": 4.01,
+            "quantity": 2,
+            "delta": 4.20,
+            "gamma": -0.03,
+            "theta": -0.08,
+            "vega": -0.11,
+            "quote_snapshot": {
+                "delta": 0.42,
+                "gamma": 0.03,
+                "vega": 0.11,
+            },
+        }
+    )
+
+    assert proposal.net_delta == pytest.approx(0.84)
+    assert proposal.net_gamma == pytest.approx(0.06)
+    assert proposal.net_theta == pytest.approx(-0.16)
+    assert proposal.net_vega == pytest.approx(0.22)
 
 
 def test_check_proposal_against_budget_blocks_missing_complete_greeks(monkeypatch):
@@ -370,6 +526,7 @@ def test_check_proposal_against_budget_rejects_boolean_proposal_greeks(monkeypat
         "net_gamma": 0.0,
         "net_theta": 0.0,
         "net_vega": 0.0,
+        "vega_by_tenor": {},
     }
 
 
@@ -401,6 +558,54 @@ def test_check_proposal_against_budget_blocks_unproven_open_book(monkeypatch):
 
     assert result.accepted is False
     assert result.reasons == ["missing_complete_greeks:open_positions:2"]
+
+
+def test_check_proposal_against_budget_enforces_tenor_vega_limit(monkeypatch):
+    monkeypatch.delenv("CHILI_OPTIONS_BUDGET_BYPASS", raising=False)
+    monkeypatch.setattr(
+        mod,
+        "_get_budget",
+        lambda *_args, **_kwargs: {
+            "max_abs_delta": 100.0,
+            "max_abs_gamma": 100.0,
+            "max_vega_per_tenor": {"30d": 0.05, "60d": 100.0, "90d": 100.0},
+            "max_total_vega": 100.0,
+            "max_theta_burn_per_day": 100.0,
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "_sum_open_position_greeks",
+        lambda *_args, **_kwargs: {
+            "net_delta": 0.0,
+            "net_gamma": 0.0,
+            "net_theta": 0.0,
+            "net_vega": 0.03,
+            "vega_by_tenor": {"30d": 0.03},
+            "missing_greeks_count": 0,
+        },
+    )
+
+    proposal = _proposal(
+        net_vega=0.03,
+        legs=[
+            Leg(
+                occ_symbol="SPY_FUTURE_CALL",
+                underlying="SPY",
+                expiration=date.today() + timedelta(days=20),
+                strike=729.0,
+                opt_type="call",
+                qty=1,
+                entry_price=4.01,
+            )
+        ],
+    )
+    result = check_proposal_against_budget(None, 1, proposal)
+
+    assert result.accepted is False
+    assert result.after_proposal["net_vega"] == pytest.approx(0.06)
+    assert result.after_proposal["vega_by_tenor"]["30d"] == pytest.approx(0.06)
+    assert result.reasons == ["tenor_vega_breach:30d: |0.0600| > 0.05"]
 
 
 def test_check_proposal_against_budget_fails_closed_on_book_error(monkeypatch):

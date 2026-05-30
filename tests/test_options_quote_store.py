@@ -296,6 +296,41 @@ def test_record_quote_snapshot_ignores_bad_quote_metrics_but_keeps_valid_premium
     assert params["rho"] is None
 
 
+def test_record_quote_snapshot_drops_implausible_greeks_and_negative_iv() -> None:
+    db = _FakeDb()
+
+    ok = record_quote_snapshot(
+        db,
+        chain_id=123,
+        option_meta={
+            "underlying": "SPY",
+            "expiration": "2026-06-19",
+            "strike": 729.0,
+            "option_type": "call",
+        },
+        quote={
+            "bid_price": "3.95",
+            "ask_price": "4.05",
+            "mark_price": "4.00",
+            "implied_volatility": "-0.25",
+            "greeks": {
+                "delta": "5.0",
+                "gamma": "-0.01",
+                "theta": "-0.08",
+                "vega": "-0.11",
+            },
+        },
+    )
+
+    assert ok is True
+    _sql, params = db.calls[0]
+    assert params["implied_vol"] is None
+    assert params["delta"] is None
+    assert params["gamma"] is None
+    assert params["theta"] == -0.08
+    assert params["vega"] is None
+
+
 def test_record_quote_snapshot_is_best_effort_for_incomplete_meta() -> None:
     db = _FakeDb()
 

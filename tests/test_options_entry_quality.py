@@ -47,6 +47,33 @@ def test_option_entry_quality_penalizes_bid_ask_spread_before_acceptance() -> No
     )
 
 
+def test_option_entry_quality_penalizes_zero_bid_liquidity() -> None:
+    decision = evaluate_long_option_entry(
+        None,
+        alert=SimpleNamespace(entry_price=3.40, target_price=112.0, stop_loss=99.0),
+        option_meta={
+            "underlying": "XYZ",
+            "strike": 105.0,
+            "expiration": "2026-06-19",
+            "option_type": "call",
+            "limit_price": 3.40,
+            "quantity": 1,
+            "quote_snapshot": {"bid": 0.0, "ask": 3.40},
+        },
+        current_underlying_price=100.0,
+        confidence=0.9,
+        settings=_settings(),
+    )
+
+    assert decision.accepted is False
+    assert decision.reason == "option_reward_risk_after_cost_below_min"
+    assert decision.snapshot["entry_bid"] == 0.0
+    assert decision.snapshot["entry_ask"] == 3.4
+    assert decision.snapshot["liquidity_cost_per_share"] == pytest.approx(3.40)
+    assert decision.snapshot["option_reward_risk"] > 1.0
+    assert decision.snapshot["option_reward_risk_after_cost"] < 1.0
+
+
 def test_option_entry_quality_rejects_crossed_quote_snapshot() -> None:
     decision = evaluate_long_option_entry(
         None,

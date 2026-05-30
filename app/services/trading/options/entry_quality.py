@@ -99,6 +99,13 @@ def _coerce_positive_float(value: Any) -> Optional[float]:
     return out
 
 
+def _coerce_nonnegative_float(value: Any) -> Optional[float]:
+    out = _finite_float_or_none(value)
+    if out is None or out < ZERO_PAYOFF:
+        return None
+    return out
+
+
 def _coerce_float(value: Any) -> Optional[float]:
     return _finite_float_or_none(value)
 
@@ -111,15 +118,20 @@ def _round_optional(value: Optional[float], places: int = SNAPSHOT_PRICE_DECIMAL
     return round(value, places)
 
 
-def _quote_snapshot_price(option_meta: Mapping[str, Any], *keys: str) -> Optional[float]:
+def _quote_snapshot_price(
+    option_meta: Mapping[str, Any],
+    *keys: str,
+    allow_zero: bool = False,
+) -> Optional[float]:
+    coerce = _coerce_nonnegative_float if allow_zero else _coerce_positive_float
     quote_snapshot = option_meta.get("quote_snapshot")
     if isinstance(quote_snapshot, Mapping):
         for key in keys:
-            value = _coerce_positive_float(quote_snapshot.get(key))
+            value = coerce(quote_snapshot.get(key))
             if value is not None:
                 return value
     for key in keys:
-        value = _coerce_positive_float(option_meta.get(f"synthesis_{key}"))
+        value = coerce(option_meta.get(f"synthesis_{key}"))
         if value is not None:
             return value
     return None
@@ -364,7 +376,12 @@ def evaluate_long_option_entry(
         }
     )
 
-    quote_bid = _quote_snapshot_price(option_meta, "bid", "bid_price")
+    quote_bid = _quote_snapshot_price(
+        option_meta,
+        "bid",
+        "bid_price",
+        allow_zero=True,
+    )
     quote_ask = _quote_snapshot_price(option_meta, "ask", "ask_price")
     liquidity_cost_per_share = ZERO_PAYOFF
     if quote_bid is not None and quote_ask is not None:

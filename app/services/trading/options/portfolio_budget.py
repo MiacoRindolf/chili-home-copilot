@@ -18,7 +18,7 @@ import logging
 import math
 import os
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timezone
 from typing import Any, Optional
 
 from sqlalchemy import text
@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 
 from .contracts import (
     complete_greeks,
+    finite_option_greek,
     finite_greek,
     missing_greeks,
     parse_contract_quantity,
@@ -96,6 +97,7 @@ def _zero_greeks() -> dict:
         "net_gamma": 0.0,
         "net_theta": 0.0,
         "net_vega": 0.0,
+        "vega_by_tenor": {},
         "missing_greeks_count": 0,
     }
 
@@ -122,7 +124,27 @@ def _add_greek_totals(left: dict, right: dict) -> dict:
     ) + _nonnegative_int_or_zero(
         right.get("missing_greeks_count")
     )
+    out["vega_by_tenor"] = _add_vega_by_tenor(
+        left.get("vega_by_tenor"),
+        right.get("vega_by_tenor"),
+    )
     return out
+
+
+def _add_vega_by_tenor(left: Any, right: Any) -> dict[str, float]:
+    totals: dict[str, float] = {}
+    for source in (left, right):
+        if not isinstance(source, dict):
+            continue
+        for tenor, raw_value in source.items():
+            value = _finite_number_or_none(raw_value)
+            if value is None:
+                continue
+            key = str(tenor or "").strip().lower()
+            if not key:
+                continue
+            totals[key] = totals.get(key, 0.0) + value
+    return totals
 
 
 def _finite_number_or_none(value: Any) -> float | None:
@@ -152,15 +174,88 @@ def _positive_limit_or_default(value: Any, default: float) -> float:
     return out if out is not None and out > 0.0 else default
 
 
+def _tenor_days(label: Any) -> int | None:
+    raw = str(label or "").strip().lower()
+    if not raw.endswith("d"):
+        return None
+    number = _finite_number_or_none(raw[:-1])
+    if number is None or number <= 0 or not float(number).is_integer():
+        return None
+    return int(number)
+
+
 def _sanitize_vega_per_tenor(value: Any, default: dict) -> dict:
     out = dict(default)
     if not isinstance(value, dict):
         return out
     for tenor, raw_limit in value.items():
+        if _tenor_days(tenor) is None:
+            continue
         limit = _finite_number_or_none(raw_limit)
         if limit is not None and limit > 0:
-            out[str(tenor)] = limit
+            out[str(tenor).strip().lower()] = limit
     return out
+
+
+def _budget_tenor_limits(budget: dict[str, Any]) -> list[tuple[str, int, float]]:
+    raw = budget.get("max_vega_per_tenor")
+    if not isinstance(raw, dict):
+        return []
+    limits: list[tuple[str, int, float]] = []
+    for tenor, raw_limit in raw.items():
+        days = _tenor_days(tenor)
+        limit = _finite_number_or_none(raw_limit)
+        if days is not None and limit is not None and limit > 0.0:
+            limits.append((str(tenor).strip().lower(), days, limit))
+    return sorted(limits, key=lambda item: item[1])
+
+
+def _expiration_date(value: Any) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).date()
+    except Exception:
+        return None
+
+
+def _tenor_bucket_for_expiration(
+    expiration: Any,
+    budget: dict[str, Any],
+    *,
+    today: date | None = None,
+) -> str | None:
+    exp = _expiration_date(expiration)
+    limits = _budget_tenor_limits(budget)
+    if exp is None or not limits:
+        return None
+    today = today or datetime.now(timezone.utc).date()
+    dte = max(0, (exp - today).days)
+    for tenor, days, _limit in limits:
+        if dte <= days:
+            return tenor
+    return limits[-1][0]
+
+
+def _add_vega_to_tenor(
+    target: dict[str, float],
+    *,
+    expiration: Any,
+    vega: Any,
+    quantity: Any = 1,
+    budget: dict[str, Any],
+) -> None:
+    bucket = _tenor_bucket_for_expiration(expiration, budget)
+    vega_f = _finite_number_or_none(vega)
+    qty = _finite_number_or_none(quantity)
+    if bucket is None or vega_f is None or qty is None:
+        return
+    target[bucket] = target.get(bucket, 0.0) + vega_f * qty
 
 
 def _sanitize_budget(raw: dict[str, Any]) -> dict:
@@ -207,16 +302,27 @@ def _proposal_missing_greeks(proposal: StrategyProposal) -> list[str]:
 
 
 def _meta_greek(meta: dict[str, Any], key: str) -> float:
-    value = meta.get(key)
-    if value is None and isinstance(meta.get("quote_snapshot"), dict):
-        value = meta["quote_snapshot"].get(key)
-    parsed = finite_greek(value)
+    parsed = finite_option_greek(meta.get(key), key)
+    if parsed is None and isinstance(meta.get("quote_snapshot"), dict):
+        parsed = finite_option_greek(meta["quote_snapshot"].get(key), key)
     if parsed is None:
-        raise ValueError(f"missing_greek:{key}")
+        raise ValueError(f"invalid_greek:{key}")
     return parsed
 
 
-def _sum_open_position_greeks(db: Session, user_id: Optional[int]) -> dict:
+def _position_leg_greek(source: dict[str, Any], key: str) -> float | None:
+    parsed = finite_option_greek(source.get(key), key)
+    if parsed is None and isinstance(source.get("quote_snapshot"), dict):
+        parsed = finite_option_greek(source["quote_snapshot"].get(key), key)
+    return parsed
+
+
+def _sum_open_position_greeks(
+    db: Session,
+    user_id: Optional[int],
+    *,
+    budget: dict[str, Any] | None = None,
+) -> dict:
     """Aggregate net greeks across all open option positions.
 
     For phase-1 scaffolding, we trust the persisted leg greeks; a follow-up
@@ -238,9 +344,11 @@ def _sum_open_position_greeks(db: Session, user_id: Optional[int]) -> dict:
         ).fetchall()
     except Exception as e:
         logger.debug("[options.budget] open positions fetch failed: %s", e)
-        return _sum_open_trade_greeks(db, user_id)
+        return _sum_open_trade_greeks(db, user_id, budget=budget)
 
+    budget = budget or _default_budget()
     net_d = net_g = net_t = net_v = 0.0
+    vega_by_tenor: dict[str, float] = {}
     missing_count = 0
     for r in rows or []:
         try:
@@ -252,15 +360,11 @@ def _sum_open_position_greeks(db: Session, user_id: Optional[int]) -> dict:
                 if qty is None:
                     missing_count += 1
                     continue
-                d = leg.get("delta")
-                g = leg.get("gamma")
-                t = leg.get("theta")
-                v = leg.get("vega")
                 vals = {
-                    "delta": finite_greek(d),
-                    "gamma": finite_greek(g),
-                    "theta": finite_greek(t),
-                    "vega": finite_greek(v),
+                    "delta": _position_leg_greek(leg, "delta"),
+                    "gamma": _position_leg_greek(leg, "gamma"),
+                    "theta": _position_leg_greek(leg, "theta"),
+                    "vega": _position_leg_greek(leg, "vega"),
                 }
                 if any(value is None for value in vals.values()):
                     missing_count += 1
@@ -272,6 +376,13 @@ def _sum_open_position_greeks(db: Session, user_id: Optional[int]) -> dict:
                     net_t += vals["theta"] * qty
                 if vals["vega"] is not None:
                     net_v += vals["vega"] * qty
+                    _add_vega_to_tenor(
+                        vega_by_tenor,
+                        expiration=leg.get("expiration"),
+                        vega=vals["vega"],
+                        quantity=qty,
+                        budget=budget,
+                    )
         except Exception:
             continue
     position_totals = {
@@ -279,9 +390,13 @@ def _sum_open_position_greeks(db: Session, user_id: Optional[int]) -> dict:
         "net_gamma": net_g,
         "net_theta": net_t,
         "net_vega": net_v,
+        "vega_by_tenor": vega_by_tenor,
         "missing_greeks_count": missing_count,
     }
-    return _add_greek_totals(position_totals, _sum_open_trade_greeks(db, user_id))
+    return _add_greek_totals(
+        position_totals,
+        _sum_open_trade_greeks(db, user_id, budget=budget),
+    )
 
 
 def _extract_option_meta(snapshot: Any) -> dict[str, Any]:
@@ -306,7 +421,12 @@ def _extract_option_meta(snapshot: Any) -> dict[str, Any]:
     return {}
 
 
-def _sum_open_trade_greeks(db: Session, user_id: Optional[int]) -> dict:
+def _sum_open_trade_greeks(
+    db: Session,
+    user_id: Optional[int],
+    *,
+    budget: dict[str, Any] | None = None,
+) -> dict:
     """Fallback Greek aggregation from open Trade snapshots.
 
     The original budget path only read ``options_position``. Live AutoTrader
@@ -336,7 +456,9 @@ def _sum_open_trade_greeks(db: Session, user_id: Optional[int]) -> dict:
         logger.debug("[options.budget] open trade greeks fetch failed: %s", e)
         return _unproven_greeks()
 
+    budget = budget or _default_budget()
     net_d = net_g = net_t = net_v = 0.0
+    vega_by_tenor: dict[str, float] = {}
     missing_count = 0
     for qty_raw, snapshot in rows or []:
         meta = _extract_option_meta(snapshot)
@@ -354,10 +476,7 @@ def _sum_open_trade_greeks(db: Session, user_id: Optional[int]) -> dict:
             ("theta", "net_t"),
             ("vega", "net_v"),
         ):
-            value = meta.get(key)
-            if value is None and isinstance(meta.get("quote_snapshot"), dict):
-                value = meta["quote_snapshot"].get(key)
-            f = finite_greek(value)
+            f = _position_leg_greek(meta, key)
             if f is None:
                 continue
             if acc == "net_d":
@@ -368,11 +487,19 @@ def _sum_open_trade_greeks(db: Session, user_id: Optional[int]) -> dict:
                 net_t += f * qty
             elif acc == "net_v":
                 net_v += f * qty
+                _add_vega_to_tenor(
+                    vega_by_tenor,
+                    expiration=meta.get("expiration"),
+                    vega=f,
+                    quantity=qty,
+                    budget=budget,
+                )
     return {
         "net_delta": net_d,
         "net_gamma": net_g,
         "net_theta": net_t,
         "net_vega": net_v,
+        "vega_by_tenor": vega_by_tenor,
         "missing_greeks_count": missing_count,
     }
 
@@ -425,6 +552,32 @@ def single_leg_proposal_from_option_meta(
     )
 
 
+def _proposal_vega_by_tenor(
+    proposal: StrategyProposal,
+    budget: dict[str, Any],
+) -> dict[str, float]:
+    raw = proposal.meta.get("vega_by_tenor") if isinstance(proposal.meta, dict) else None
+    if isinstance(raw, dict):
+        return _add_vega_by_tenor(raw, {})
+
+    net_vega = _proposal_greek(proposal, "vega")
+    if net_vega is None:
+        return {}
+
+    expirations = {
+        exp
+        for leg in (proposal.legs or [])
+        for exp in (_expiration_date(getattr(leg, "expiration", None)),)
+        if exp is not None
+    }
+    if len(expirations) != 1:
+        return {}
+    bucket = _tenor_bucket_for_expiration(next(iter(expirations)), budget)
+    if bucket is None:
+        return {}
+    return {bucket: net_vega}
+
+
 def check_proposal_against_budget(
     db: Session,
     user_id: Optional[int],
@@ -451,7 +604,7 @@ def check_proposal_against_budget(
     }
     try:
         budget = _get_budget(db, user_id)
-        current = _sum_open_position_greeks(db, user_id)
+        current = _sum_open_position_greeks(db, user_id, budget=budget)
 
         after_totals = _add_greek_totals(
             current,
@@ -460,10 +613,15 @@ def check_proposal_against_budget(
                 "net_gamma": _proposal_greek(proposal, "gamma"),
                 "net_theta": _proposal_greek(proposal, "theta"),
                 "net_vega": _proposal_greek(proposal, "vega"),
+                "vega_by_tenor": _proposal_vega_by_tenor(proposal, budget),
                 "missing_greeks_count": 0,
             },
         )
-        after = {key: after_totals[key] for key in ("net_delta", "net_gamma", "net_theta", "net_vega")}
+        after = {
+            key: after_totals[key]
+            for key in ("net_delta", "net_gamma", "net_theta", "net_vega")
+        }
+        after["vega_by_tenor"] = after_totals.get("vega_by_tenor") or {}
 
         reasons: list[str] = []
         if int(current.get("missing_greeks_count") or 0) > 0:
@@ -485,6 +643,12 @@ def check_proposal_against_budget(
             reasons.append(
                 f"total_vega_breach: |{after['net_vega']:.4f}| > {budget['max_total_vega']}"
             )
+        for tenor, _days, limit in _budget_tenor_limits(budget):
+            tenor_vega = _finite_number_or_none(after["vega_by_tenor"].get(tenor))
+            if tenor_vega is not None and abs(tenor_vega) > limit:
+                reasons.append(
+                    f"tenor_vega_breach:{tenor}: |{tenor_vega:.4f}| > {limit}"
+                )
         if (
             budget["max_theta_burn_per_day"] is not None
             and after["net_theta"] < -budget["max_theta_burn_per_day"]
