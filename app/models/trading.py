@@ -25,6 +25,45 @@ from sqlalchemy.orm import relationship, validates
 from ..db import Base
 
 
+_BREAKOUT_ALERT_ASSET_TYPE_ALIASES = {
+    "stock": "stock",
+    "stocks": "stock",
+    "equity": "stock",
+    "equities": "stock",
+    "crypto": "crypto",
+    "cryptocurrency": "crypto",
+    "digital_asset": "crypto",
+    "digital_assets": "crypto",
+    "option": "options",
+    "options": "options",
+    "robinhood_option": "options",
+    "robinhood_options": "options",
+    "robinhood_options_unavailable": "options",
+    "option_limit": "options",
+    "option_spread": "options",
+}
+
+
+def normalize_breakout_alert_asset_type(value: object) -> str:
+    """Return the compact asset-class token stored on breakout alerts."""
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return "crypto"
+    direct = _BREAKOUT_ALERT_ASSET_TYPE_ALIASES.get(raw)
+    if direct:
+        return direct
+    if "option" in raw:
+        return "options"
+    if "crypto" in raw:
+        return "crypto"
+    if "stock" in raw or "equity" in raw:
+        return "stock"
+    raise ValueError(
+        "BreakoutAlert.asset_type must be one of stock, crypto, or options; "
+        f"got {value!r}"
+    )
+
+
 class WatchlistItem(Base):
     __tablename__ = "trading_watchlist"
 
@@ -838,6 +877,10 @@ class BreakoutAlert(Base):
     )
     trade_plan: Optional[dict] = Column(JSONB, nullable=True)
     trade_plan_mechanical: Optional[dict] = Column(JSONB, nullable=True)
+
+    @validates("asset_type")
+    def _validate_asset_type(self, key: str, value: object) -> str:
+        return normalize_breakout_alert_asset_type(value)
 
 
 class MonitorDecisionRule(Base):
