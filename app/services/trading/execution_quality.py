@@ -20,7 +20,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from ...models.trading import Trade
+from .management_envelopes import load_closed_envelope_execution_rows
 
 logger = logging.getLogger(__name__)
 
@@ -33,11 +33,11 @@ def compute_execution_stats(
     """Compute execution quality metrics from closed trades."""
     cutoff = datetime.utcnow() - timedelta(days=lookback_days)
 
-    trades = db.query(Trade).filter(
-        Trade.user_id == user_id,
-        Trade.status == "closed",
-        Trade.entry_date >= cutoff,
-    ).all()
+    trades = load_closed_envelope_execution_rows(
+        db,
+        user_id=user_id,
+        since=cutoff,
+    )
 
     if not trades:
         return {"ok": True, "trades_analyzed": 0}
@@ -51,11 +51,16 @@ def compute_execution_stats(
         if signal_price is None or signal_price <= 0:
             continue
 
-        slip_pct = abs(t.entry_price - signal_price) / signal_price * 100
-        slippages.append(slip_pct)
-        by_ticker[t.ticker].append(slip_pct)
+        entry_price = _safe_float(_field(t, "entry_price"))
+        if entry_price is None:
+            continue
 
-        asset_class = "crypto" if t.ticker.endswith("-USD") else "stock"
+        slip_pct = abs(entry_price - signal_price) / signal_price * 100
+        slippages.append(slip_pct)
+        ticker = str(_field(t, "ticker") or "")
+        by_ticker[ticker].append(slip_pct)
+
+        asset_class = "crypto" if ticker.endswith("-USD") else "stock"
         by_class[asset_class].append(slip_pct)
 
     if not slippages:
@@ -180,22 +185,39 @@ def flag_poor_execution_tickers(
     return sorted(flagged, key=lambda x: x["avg_slippage_pct"], reverse=True)
 
 
-def _extract_signal_price(trade: Trade) -> float | None:
+def _field(row: Any, name: str) -> Any:
+    if isinstance(row, dict):
+        return row.get(name)
+    return getattr(row, name, None)
+
+
+def _safe_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_signal_price(trade: Any) -> float | None:
     """Extract the signal/brain-recommended price from trade metadata."""
     import json
 
-    if trade.indicator_snapshot:
+    indicator_snapshot = _field(trade, "indicator_snapshot")
+    if indicator_snapshot:
         try:
-            snap = json.loads(trade.indicator_snapshot) if isinstance(trade.indicator_snapshot, str) else trade.indicator_snapshot
+            snap = json.loads(indicator_snapshot) if isinstance(indicator_snapshot, str) else indicator_snapshot
             sp = snap.get("signal_price") or snap.get("brain_price") or snap.get("price", {}).get("value")
             if sp:
                 return float(sp)
         except Exception:
             pass
 
-    if trade.tags:
+    tags_raw = _field(trade, "tags")
+    if tags_raw:
         try:
-            tags = json.loads(trade.tags) if isinstance(trade.tags, str) and trade.tags.startswith("{") else {}
+            tags = json.loads(tags_raw) if isinstance(tags_raw, str) and tags_raw.startswith("{") else {}
             sp = tags.get("signal_price") or tags.get("brain_entry")
             if sp:
                 return float(sp)
@@ -224,11 +246,11 @@ def compute_implementation_shortfall(
     """
     cutoff = datetime.utcnow() - timedelta(days=lookback_days)
 
-    trades = db.query(Trade).filter(
-        Trade.user_id == user_id,
-        Trade.status == "closed",
-        Trade.entry_date >= cutoff,
-    ).all()
+    trades = load_closed_envelope_execution_rows(
+        db,
+        user_id=user_id,
+        since=cutoff,
+    )
 
     if not trades:
         return {"ok": True, "trades_analyzed": 0}
@@ -241,16 +263,17 @@ def compute_implementation_shortfall(
 
     for t in trades:
         signal_price = _extract_signal_price(t)
-        if signal_price is None or signal_price <= 0 or not t.entry_price:
+        entry_price = _safe_float(_field(t, "entry_price"))
+        if signal_price is None or signal_price <= 0 or not entry_price:
             continue
 
         # Delay cost: signal_price -> arrival_price (use entry_price as proxy)
-        delay_bps = abs(t.entry_price - signal_price) / signal_price * 10000
+        delay_bps = abs(entry_price - signal_price) / signal_price * 10000
         components["delay_bps"].append(delay_bps)
 
         # Spread cost from TCA
-        entry_slip = float(t.tca_entry_slippage_bps or 0)
-        exit_slip = float(t.tca_exit_slippage_bps or 0)
+        entry_slip = float(_field(t, "tca_entry_slippage_bps") or 0)
+        exit_slip = float(_field(t, "tca_exit_slippage_bps") or 0)
         spread_bps = entry_slip + exit_slip
         components["spread_bps"].append(spread_bps)
 

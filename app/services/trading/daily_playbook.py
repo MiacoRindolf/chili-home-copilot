@@ -16,7 +16,8 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from ...models.trading import ScanPattern, Trade
+from ...models.trading import ScanPattern
+from .management_envelopes import summarize_closed_envelope_performance
 
 logger = logging.getLogger(__name__)
 
@@ -214,27 +215,17 @@ def _generate_trade_ideas(db: Session, user_id: int | None, capital: float) -> l
 def _recent_performance(db: Session, user_id: int | None, capital: float) -> dict[str, Any]:
     """7-day and 30-day P&L summary."""
     now = datetime.utcnow()
-    week_trades = db.query(Trade).filter(
-        Trade.user_id == user_id, Trade.status == "closed",
-        Trade.exit_date >= now - timedelta(days=7),
-    ).all()
-    month_trades = db.query(Trade).filter(
-        Trade.user_id == user_id, Trade.status == "closed",
-        Trade.exit_date >= now - timedelta(days=30),
-    ).all()
-
-    def _stats(trades):
-        if not trades:
-            return {"trades": 0, "pnl": 0, "win_rate": 0}
-        pnl = sum(t.pnl or 0 for t in trades)
-        wins = sum(1 for t in trades if (t.pnl or 0) > 0)
-        return {
-            "trades": len(trades),
-            "pnl": round(pnl, 2),
-            "win_rate": round(wins / len(trades) * 100, 1),
-        }
-
-    return {"week": _stats(week_trades), "month": _stats(month_trades)}
+    week = summarize_closed_envelope_performance(
+        db,
+        user_id=user_id,
+        since=now - timedelta(days=7),
+    )
+    month = summarize_closed_envelope_performance(
+        db,
+        user_id=user_id,
+        since=now - timedelta(days=30),
+    )
+    return {"week": week.to_payload(), "month": month.to_payload()}
 
 
 def _safe_float(v: Any, default: float = 0.0) -> float:

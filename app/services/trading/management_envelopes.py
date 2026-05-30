@@ -8,6 +8,7 @@ do not mutate live trading state.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import text
@@ -50,6 +51,26 @@ class Phase5BParitySummary:
             "decisions_without_envelope": self.decisions_without_envelope,
             "broker_envelopes_missing_position": self.broker_envelopes_missing_position,
             "open_position_envelope_mismatches": self.open_position_envelope_mismatches,
+        }
+
+
+@dataclass(frozen=True)
+class ClosedEnvelopePerformanceSummary:
+    trades: int
+    wins: int
+    pnl: float
+
+    @property
+    def win_rate_pct(self) -> float:
+        if self.trades <= 0:
+            return 0.0
+        return round(self.wins / self.trades * 100.0, 1)
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "trades": int(self.trades),
+            "pnl": round(float(self.pnl or 0.0), 2),
+            "win_rate": self.win_rate_pct,
         }
 
 
@@ -202,6 +223,55 @@ def count_probation_envelopes_since(
           {pattern_clause}
     """), params).scalar()
     return int(row or 0)
+
+
+def summarize_closed_envelope_performance(
+    db: Session,
+    *,
+    user_id: int | None,
+    since: datetime,
+) -> ClosedEnvelopePerformanceSummary:
+    """Summarize closed management-envelope PnL since a cutoff."""
+    row = db.execute(text(f"""
+        SELECT
+            COUNT(*)::bigint AS trades,
+            SUM(CASE WHEN COALESCE(pnl, 0) > 0 THEN 1 ELSE 0 END)::bigint AS wins,
+            SUM(COALESCE(pnl, 0))::double precision AS pnl
+          FROM {MANAGEMENT_ENVELOPES_RELATION}
+         WHERE user_id IS NOT DISTINCT FROM :uid
+           AND status = 'closed'
+           AND exit_date >= :since
+    """), {"uid": user_id, "since": since}).mappings().first()
+    if not row:
+        return ClosedEnvelopePerformanceSummary(trades=0, wins=0, pnl=0.0)
+    return ClosedEnvelopePerformanceSummary(
+        trades=int(row["trades"] or 0),
+        wins=int(row["wins"] or 0),
+        pnl=float(row["pnl"] or 0.0),
+    )
+
+
+def load_closed_envelope_execution_rows(
+    db: Session,
+    *,
+    user_id: int | None,
+    since: datetime,
+) -> list[dict[str, Any]]:
+    """Load closed management-envelope fields needed for execution-quality reports."""
+    return _rows(db, f"""
+        SELECT
+            id,
+            ticker,
+            entry_price,
+            indicator_snapshot,
+            tags,
+            tca_entry_slippage_bps,
+            tca_exit_slippage_bps
+          FROM {MANAGEMENT_ENVELOPES_RELATION}
+         WHERE user_id IS NOT DISTINCT FROM :uid
+           AND status = 'closed'
+           AND entry_date >= :since
+    """, {"uid": user_id, "since": since})
 
 def _option_envelope_predicate_sql(alias: str = "t") -> str:
     snap = f"COALESCE({alias}.indicator_snapshot, '{{}}'::jsonb)"

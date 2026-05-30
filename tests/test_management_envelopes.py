@@ -5,6 +5,8 @@ from datetime import datetime
 from app.services.trading.management_envelopes import (
     count_probation_envelopes_since,
     fetch_synergy_retry_envelope_candidates,
+    load_closed_envelope_execution_rows,
+    summarize_closed_envelope_performance,
 )
 
 
@@ -17,6 +19,9 @@ class _RowsResult:
 
     def all(self):
         return self._rows
+
+    def first(self):
+        return self._rows[0] if self._rows else None
 
 
 class _ScalarResult:
@@ -98,3 +103,45 @@ def test_count_probation_envelopes_reads_management_envelopes_with_pattern_claus
         "false_flag": "false",
         "pattern_id": 99,
     }
+
+
+def test_closed_envelope_performance_summary_reads_management_envelopes():
+    since = datetime(2026, 5, 30, 15, 0)
+    db = _FakeDb(_RowsResult([{"trades": 4, "wins": 3, "pnl": 12.345}]))
+
+    summary = summarize_closed_envelope_performance(db, user_id=7, since=since)
+
+    assert summary.to_payload() == {"trades": 4, "pnl": 12.35, "win_rate": 75.0}
+    assert "FROM trading_management_envelopes" in db.sql
+    assert "trading_trades" not in db.sql
+    assert "status = 'closed'" in db.sql
+    assert "exit_date >= :since" in db.sql
+    assert db.params == {"uid": 7, "since": since}
+
+
+def test_closed_envelope_execution_rows_read_management_envelopes():
+    since = datetime(2026, 5, 30, 15, 0)
+    db = _FakeDb(
+        _RowsResult(
+            [
+                {
+                    "id": 1,
+                    "ticker": "ABC",
+                    "entry_price": 10.0,
+                    "indicator_snapshot": {"signal_price": 9.9},
+                    "tags": None,
+                    "tca_entry_slippage_bps": 12,
+                    "tca_exit_slippage_bps": 8,
+                }
+            ]
+        )
+    )
+
+    rows = load_closed_envelope_execution_rows(db, user_id=7, since=since)
+
+    assert rows[0]["ticker"] == "ABC"
+    assert "FROM trading_management_envelopes" in db.sql
+    assert "trading_trades" not in db.sql
+    assert "status = 'closed'" in db.sql
+    assert "entry_date >= :since" in db.sql
+    assert db.params == {"uid": 7, "since": since}
