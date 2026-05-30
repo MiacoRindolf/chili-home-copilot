@@ -427,7 +427,19 @@ def test_recommended_work_status_marks_exit_refresh_on_cooldown(
                 SimpleNamespace(
                     payload={
                         "scan_pattern_id": 537,
+                        "source": "exit_variant_refresh",
                         "evidence_fingerprint": "same-fp",
+                        "fast_skipped": True,
+                        "created_count": 0,
+                        "skip_reason": "non_positive_quality_evidence_no_exit_variant_birth",
+                    }
+                ),
+                SimpleNamespace(
+                    payload={
+                        "scan_pattern_id": 537,
+                        "source": "exit_variant_refresh",
+                        "evidence_fingerprint": "same-fp-2",
+                        "fast_skipped": True,
                         "created_count": 0,
                         "skip_reason": "non_positive_quality_evidence_no_exit_variant_birth",
                     }
@@ -454,6 +466,9 @@ def test_recommended_work_status_marks_exit_refresh_on_cooldown(
         status["blocker_detail"]
         == "non_positive_quality_evidence_no_exit_variant_birth"
     )
+    assert status["blocker_count"] == 2
+    assert status["blocker_source"] == "exit_variant_refresh"
+    assert status["blocker_fast_skipped"] is True
 
 
 def test_recommended_work_status_keeps_exit_refresh_actionable_for_new_evidence(
