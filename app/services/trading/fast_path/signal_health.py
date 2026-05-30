@@ -8,6 +8,7 @@ the diagnosis and the hot path cannot drift apart.
 """
 from __future__ import annotations
 
+import heapq
 from collections import defaultdict
 from typing import Any, Iterable
 
@@ -756,34 +757,60 @@ def _fetch_latest_market_velocity_context(
 
 
 def _sort_signal_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return sorted(
-        rows,
-        key=lambda row: (
-            _VERDICT_RANK.get(str(row.get("verdict")), 99),
-            -(row.get("best_mean_net") or {}).get("mean_net_bps", -1e12),
-            row.get("rank") if row.get("rank") is not None else 999_999,
-            str(row.get("ticker") or ""),
-            str(row.get("alert_type") or ""),
-            str(row.get("score_bucket") or ""),
-        ),
+    return sorted(rows, key=_signal_row_sort_key)
+
+
+def _signal_row_sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        _VERDICT_RANK.get(str(row.get("verdict")), 99),
+        -(row.get("best_mean_net") or {}).get("mean_net_bps", -1e12),
+        row.get("rank") if row.get("rank") is not None else 999_999,
+        str(row.get("ticker") or ""),
+        str(row.get("alert_type") or ""),
+        str(row.get("score_bucket") or ""),
     )
+
+
+def _top_signal_rows(
+    rows: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    if limit <= 0 or not rows:
+        return []
+    if len(rows) <= limit:
+        return _sort_signal_rows(rows)
+    return heapq.nsmallest(limit, rows, key=_signal_row_sort_key)
 
 
 def _sort_attempt_health_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return sorted(
-        rows,
-        key=lambda row: (
-            -len(row.get("pain_points") or []),
-            row.get("filled_avg_side_mid_drift_bps")
-            if row.get("filled_avg_side_mid_drift_bps") is not None
-            else 1e12,
-            -float(row.get("unfilled_favorable_rate") or 0.0),
-            -int(row.get("attempts") or 0),
-            str(row.get("ticker") or ""),
-            str(row.get("alert_type") or ""),
-            str(row.get("score_bucket") or ""),
-        ),
+    return sorted(rows, key=_attempt_health_sort_key)
+
+
+def _attempt_health_sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        -len(row.get("pain_points") or []),
+        row.get("filled_avg_side_mid_drift_bps")
+        if row.get("filled_avg_side_mid_drift_bps") is not None
+        else 1e12,
+        -float(row.get("unfilled_favorable_rate") or 0.0),
+        -int(row.get("attempts") or 0),
+        str(row.get("ticker") or ""),
+        str(row.get("alert_type") or ""),
+        str(row.get("score_bucket") or ""),
     )
+
+
+def _top_attempt_health_rows(
+    rows: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    if limit <= 0 or not rows:
+        return []
+    if len(rows) <= limit:
+        return _sort_attempt_health_rows(rows)
+    return heapq.nsmallest(limit, rows, key=_attempt_health_sort_key)
 
 
 def _net_metric(row: dict[str, Any], section: str, field: str) -> float | None:
@@ -922,15 +949,19 @@ def _build_maker_attempt_health(
         summarize_maker_attempt_group(group, scope="pooled")
         for group in _group_attempt_rows(rows, include_ticker=False)
     ]
-    pooled = _sort_attempt_health_rows(pooled)
+    pooled_total = len(pooled)
+    pooled_top = _top_attempt_health_rows(pooled, limit=limit)
 
     tickers_all: list[dict[str, Any]] = []
+    ticker_lanes_total = 0
+    ticker_lanes_top: list[dict[str, Any]] = []
     if include_tickers:
         tickers_all = [
             summarize_maker_attempt_group(group, scope="ticker")
             for group in _group_attempt_rows(rows, include_ticker=True)
         ]
-        tickers_all = _sort_attempt_health_rows(tickers_all)
+        ticker_lanes_total = len(tickers_all)
+        ticker_lanes_top = _top_attempt_health_rows(tickers_all, limit=limit)
 
     summary = summarize_maker_attempt_group(rows, scope="all") if rows else {
         "scope": "all",
@@ -947,10 +978,10 @@ def _build_maker_attempt_health(
     return {
         "window_hours": int(window_hours),
         "summary": summary,
-        "pooled_lanes": pooled[:limit],
-        "ticker_lanes": tickers_all[:limit],
-        "pooled_lanes_total": len(pooled),
-        "ticker_lanes_total": len(tickers_all),
+        "pooled_lanes": pooled_top,
+        "ticker_lanes": ticker_lanes_top,
+        "pooled_lanes_total": pooled_total,
+        "ticker_lanes_total": ticker_lanes_total,
     }
 
 
@@ -989,9 +1020,10 @@ def build_signal_health_report(
         )
         for group in _group_rows(pooled_rows, include_ticker=False)
     ]
-    pooled = _sort_signal_rows(pooled)
+    pooled_top = _top_signal_rows(pooled, limit=max_rows)
 
     ticker_health_all: list[dict[str, Any]] = []
+    ticker_health: list[dict[str, Any]] = []
     if include_tickers:
         ticker_rows = _fetch_ticker_decay_rows(engine, table=decay_table)
         for group in _group_rows(ticker_rows, include_ticker=True):
@@ -1008,8 +1040,7 @@ def build_signal_health_report(
                     min_net_bps=min_net_bps,
                 )
             )
-        ticker_health_all = _sort_signal_rows(ticker_health_all)
-    ticker_health = ticker_health_all[:max_rows]
+        ticker_health = _top_signal_rows(ticker_health_all, limit=max_rows)
 
     verdict_counts: dict[str, int] = {}
     for row in pooled + ticker_health_all:
@@ -1060,7 +1091,7 @@ def build_signal_health_report(
             "edge_diagnosis": edge_diagnosis,
             "market_velocity": market_velocity,
         },
-        "pooled": pooled[:max_rows],
+        "pooled": pooled_top,
         "tickers": ticker_health,
         "maker_attempts": maker_attempt_health,
     }

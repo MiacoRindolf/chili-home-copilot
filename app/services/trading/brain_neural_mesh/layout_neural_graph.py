@@ -78,9 +78,12 @@ def compute_neural_positions(nodes_min: list[_NodeLay]) -> tuple[dict[str, tuple
     """
     positions: dict[str, tuple[float, float]] = {}
     used_core_radii: set[float] = set()
+    nodes_by_layer: dict[int, list[_NodeLay]] = {}
+    for node in nodes_min:
+        nodes_by_layer.setdefault(node["layer"], []).append(node)
 
     hubs = sorted(
-        (n for n in nodes_min if n["layer"] == 3 and n["id"] in HUB_IDS),
+        (n for n in nodes_by_layer.get(3, []) if n["id"] in HUB_IDS),
         key=lambda x: x["id"],
     )
     hub_pos = _hub_positions_ordered([h["id"] for h in hubs])
@@ -89,7 +92,7 @@ def compute_neural_positions(nodes_min: list[_NodeLay]) -> tuple[dict[str, tuple
 
     for layer in range(1, 10):
         r_core = CORE_RING_RADIUS.get(layer, 78.0)
-        layer_nodes = [n for n in nodes_min if n["layer"] == layer]
+        layer_nodes = nodes_by_layer.get(layer, [])
         # Exclude hubs from ring placement
         ring_candidates = [n for n in layer_nodes if not (layer == 3 and n["id"] in HUB_IDS)]
         core_nodes = sorted([n for n in ring_candidates if not n["is_observer"]], key=lambda x: x["id"])

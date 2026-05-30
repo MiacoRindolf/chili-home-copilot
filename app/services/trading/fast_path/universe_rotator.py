@@ -52,6 +52,7 @@ Rate-limited to ~8 req/s (below the documented 10 req/s).
 """
 from __future__ import annotations
 
+import heapq
 import json
 import logging
 import math
@@ -129,6 +130,7 @@ _MAKER_ATTEMPT_SPARSE_VERDICTS = frozenset({
 _DEFAULT_MAKER_ATTEMPT_ADVERSE_FILTER_WINDOW_H = 24
 _DEFAULT_MARKET_VELOCITY_COST_PARITY_RATIO = 1.0
 _DEFAULT_MARKET_VELOCITY_DEADLOCK_PROBE_ENABLED = True
+_RANGE_FLOOR_HEAP_MIN_CANDIDATES = 20_000
 _HTTP_THREAD_LOCAL = threading.local()
 _HTTP_PACE_LOCK = threading.Lock()
 _HTTP_NEXT_REQUEST_AT = 0.0
@@ -842,18 +844,34 @@ def _adaptive_range_floor_bps(
     floor = max(float(static_floor_bps or 0.0), 0.0)
     if not enabled or not candidates:
         return floor, None
-    ranges = sorted(
-        (float(c.range_24h_bps) for c in candidates if c.range_24h_bps > 0.0),
-        reverse=True,
+    dynamic = _dynamic_range_floor_component(
+        candidates,
+        target_count=target_count,
     )
-    if not ranges:
+    if dynamic is None:
         return floor, None
-    slot = max(1, int(target_count or 1))
-    if len(ranges) < slot:
-        dynamic = ranges[len(ranges) // 2]
-    else:
-        dynamic = ranges[slot - 1]
     return max(floor, dynamic), dynamic
+
+
+def _dynamic_range_floor_component(
+    candidates: list[_PairCandidate],
+    *,
+    target_count: int,
+) -> float | None:
+    ranges = [
+        float(c.range_24h_bps)
+        for c in candidates
+        if c.range_24h_bps > 0.0
+    ]
+    if not ranges:
+        return None
+    slot = max(1, int(target_count or 1))
+    if len(ranges) < slot or len(ranges) < _RANGE_FLOOR_HEAP_MIN_CANDIDATES:
+        ranges.sort(reverse=True)
+        if len(ranges) >= slot:
+            return ranges[slot - 1]
+        return ranges[len(ranges) // 2]
+    return heapq.nlargest(slot, ranges)[-1]
 
 
 def _effective_min_shadow_exploration_n(settings, target_ranked: int) -> int:

@@ -48,9 +48,19 @@ logger = logging.getLogger(__name__)
 def _percentile(values: list[float], q: float) -> float | None:
     if not values:
         return None
+    return _percentiles(values, q)[0]
+
+
+def _percentiles(values: list[float], *qs: float) -> tuple[float | None, ...]:
+    if not values:
+        return tuple(None for _q in qs)
     rows = sorted(float(v) for v in values)
-    idx = max(0, min(len(rows) - 1, int(round((len(rows) - 1) * q))))
-    return rows[idx]
+    last = len(rows) - 1
+    out: list[float | None] = []
+    for q in qs:
+        idx = max(0, min(last, int(round(last * q))))
+        out.append(rows[idx])
+    return tuple(out)
 
 
 def _warn_p95_ms() -> float:
@@ -178,9 +188,7 @@ def measure_execution_event_lag(
         key = venue or "unknown"
         per_venue_lags.setdefault(key, []).append(v)
 
-    p50 = _percentile(all_lags, 0.50)
-    p95 = _percentile(all_lags, 0.95)
-    p99 = _percentile(all_lags, 0.99)
+    p50, p95, p99 = _percentiles(all_lags, 0.50, 0.95, 0.99)
     mx = max(all_lags) if all_lags else None
 
     # FIX 48 (2026-04-29): require a minimum sample count before declaring
@@ -198,10 +206,11 @@ def measure_execution_event_lag(
 
     per_venue: dict[str, dict[str, float | int | None]] = {}
     for v, vals in per_venue_lags.items():
+        venue_p50, venue_p95 = _percentiles(vals, 0.50, 0.95)
         per_venue[v] = {
             "sample_size": len(vals),
-            "p50_ms": _percentile(vals, 0.50),
-            "p95_ms": _percentile(vals, 0.95),
+            "p50_ms": venue_p50,
+            "p95_ms": venue_p95,
             "max_ms": max(vals) if vals else None,
         }
 
