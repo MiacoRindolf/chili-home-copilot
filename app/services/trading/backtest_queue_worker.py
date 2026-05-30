@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import heapq
 import logging
 import os
 import signal
@@ -259,10 +260,10 @@ def request_priority_tickers_from_payload(
             values = raw.split(",")
         elif isinstance(raw, Mapping):
             values = [
-                key for key, _count in sorted(
+                key for key, _count in heapq.nlargest(
+                    limit,
                     raw.items(),
                     key=lambda item: _non_negative_int(item[1]),
-                    reverse=True,
                 )
             ]
         elif isinstance(raw, (list, tuple, set)):

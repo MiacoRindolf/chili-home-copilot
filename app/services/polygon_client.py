@@ -10,6 +10,7 @@ Symbol conventions:
 """
 from __future__ import annotations
 
+import heapq
 import logging
 import threading
 import time
@@ -119,12 +120,24 @@ def _cache_get(key: str) -> Any | None:
 
 def _cache_set(key: str, val: Any) -> None:
     with _cache_lock:
+        now = time.time()
+        _cache[key] = (now, val)
         if len(_cache) > _MAX_CACHE:
-            cutoff = time.time() - 60
-            expired = [k for k, (t, _) in _cache.items() if t < cutoff]
-            for k in expired:
-                del _cache[k]
-        _cache[key] = (time.time(), val)
+            _prune_cache_locked(now)
+
+
+def _prune_cache_locked(now: float) -> None:
+    cutoff = now - 60
+    expired = [k for k, (t, _) in _cache.items() if t < cutoff]
+    for k in expired:
+        del _cache[k]
+    if len(_cache) <= _MAX_CACHE:
+        return
+
+    target_size = max(1, int(_MAX_CACHE * 0.9))
+    overflow = len(_cache) - target_size
+    for k, _entry in heapq.nsmallest(overflow, _cache.items(), key=lambda item: item[1][0]):
+        del _cache[k]
 
 
 # ---------------------------------------------------------------------------

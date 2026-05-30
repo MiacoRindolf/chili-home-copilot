@@ -10,6 +10,7 @@ Symbol conventions:
 """
 from __future__ import annotations
 
+import heapq
 import json
 import logging
 import threading
@@ -17,7 +18,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import date, timedelta
-from typing import Any
+from typing import Any, Callable, Iterable, TypeVar
 
 import requests
 
@@ -25,6 +26,7 @@ from ..config import settings
 from .socket_budget import mount_bounded_http_adapters
 
 logger = logging.getLogger(__name__)
+_T = TypeVar("_T")
 
 
 def _massive_ws_allowed_in_this_process() -> bool:
@@ -195,12 +197,24 @@ def _cache_get(key: str) -> Any | None:
 
 def _cache_set(key: str, val: Any) -> None:
     with _cache_lock:
+        now = time.time()
+        _cache[key] = (now, val)
         if len(_cache) > _MAX_CACHE:
-            cutoff = time.time() - 60
-            expired = [k for k, (t, _) in _cache.items() if t < cutoff]
-            for k in expired:
-                del _cache[k]
-        _cache[key] = (time.time(), val)
+            _prune_cache_locked(now)
+
+
+def _prune_cache_locked(now: float) -> None:
+    cutoff = now - 60
+    expired = [k for k, (t, _) in _cache.items() if t < cutoff]
+    for k in expired:
+        del _cache[k]
+    if len(_cache) <= _MAX_CACHE:
+        return
+
+    target_size = max(1, int(_MAX_CACHE * 0.9))
+    overflow = len(_cache) - target_size
+    for k, _entry in heapq.nsmallest(overflow, _cache.items(), key=lambda item: item[1][0]):
+        del _cache[k]
 
 
 # ---------------------------------------------------------------------------
@@ -1555,6 +1569,34 @@ def _snap_tickers(snaps: list[dict[str, Any]]) -> list[str]:
     return [s.get("ticker", "") for s in snaps if s.get("ticker")]
 
 
+def _top_ranked(
+    items: Iterable[_T],
+    limit: int,
+    key: Callable[[_T], float],
+    *,
+    reverse: bool = True,
+) -> list[_T]:
+    if limit == 0:
+        return []
+    if limit < 0:
+        return sorted(items, key=key, reverse=reverse)[:limit]
+    if reverse:
+        return [
+            item
+            for _score, _idx, item in heapq.nsmallest(
+                limit,
+                ((-key(item), idx, item) for idx, item in enumerate(items)),
+            )
+        ]
+    return [
+        item
+        for _score, _idx, item in heapq.nsmallest(
+            limit,
+            ((key(item), idx, item) for idx, item in enumerate(items)),
+        )
+    ]
+
+
 def screen_most_active(limit: int = 200) -> list[str]:
     """Top stocks by today's volume."""
     snaps = get_full_market_snapshot()
@@ -1576,8 +1618,8 @@ def screen_top_gainers(limit: int = 100) -> list[str]:
     valid = [s for s in snaps
              if s.get("todaysChangePerc") is not None
              and (s.get("day") or {}).get("v", 0) >= 10_000]
-    valid.sort(key=lambda s: s.get("todaysChangePerc", 0), reverse=True)
-    return _snap_tickers(valid[:limit])
+    top = _top_ranked(valid, limit, lambda s: s.get("todaysChangePerc", 0))
+    return _snap_tickers(top)
 
 
 def screen_top_losers(limit: int = 100) -> list[str]:
@@ -1608,8 +1650,7 @@ def screen_most_volatile(limit: int = 100, min_price: float = 1.0) -> list[str]:
             continue
         volatility = (h - l) / c
         scored.append((s.get("ticker", ""), volatility))
-    scored.sort(key=lambda x: x[1], reverse=True)
-    return [t for t, _ in scored[:limit]]
+    return [t for t, _ in _top_ranked(scored, limit, lambda x: x[1])]
 
 
 def screen_unusual_volume(limit: int = 200) -> list[str]:
@@ -1626,8 +1667,7 @@ def screen_unusual_volume(limit: int = 200) -> list[str]:
         ratio = day_v / prev_v
         if ratio > 1.5:
             scored.append((s.get("ticker", ""), ratio))
-    scored.sort(key=lambda x: x[1], reverse=True)
-    return [t for t, _ in scored[:limit]]
+    return [t for t, _ in _top_ranked(scored, limit, lambda x: x[1])]
 
 
 def screen_high_volume(limit: int = 200, min_vol: int = 1_000_000,
@@ -1643,8 +1683,7 @@ def screen_high_volume(limit: int = 200, min_vol: int = 1_000_000,
         c = day.get("c", 0)
         if v >= min_vol and c >= min_price:
             valid.append((s.get("ticker", ""), v))
-    valid.sort(key=lambda x: x[1], reverse=True)
-    return [t for t, _ in valid[:limit]]
+    return [t for t, _ in _top_ranked(valid, limit, lambda x: x[1])]
 
 
 def screen_high_relative_volume(limit: int = 200, min_ratio: float = 2.0,

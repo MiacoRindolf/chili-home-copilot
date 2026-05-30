@@ -2036,6 +2036,13 @@ _market_regime_cache: dict[str, Any] = {"data": None, "ts": 0.0}
 _MARKET_REGIME_TTL = 300  # 5 minutes
 
 
+def _percentile_rank_percent(values: list[float], current: float) -> float | None:
+    if not values:
+        return None
+    rank = sum(1 for value in values if value <= current)
+    return round(rank / len(values) * 100, 1)
+
+
 def get_market_regime() -> dict[str, Any]:
     """Return combined SPY/VIX market regime, cached for 5 minutes.
 
@@ -2107,9 +2114,8 @@ def get_market_regime() -> dict[str, Any]:
         if vix_val is not None:
             vix_df = fetch_ohlcv_df("^VIX", period="1y", interval="1d")
             if vix_df is not None and len(vix_df) >= 20:
-                vix_hist = sorted(vix_df["Close"].dropna().tolist())
-                rank = sum(1 for v in vix_hist if v <= vix_val)
-                volatility_percentile = round(rank / len(vix_hist) * 100, 1)
+                vix_hist = vix_df["Close"].dropna().tolist()
+                volatility_percentile = _percentile_rank_percent(vix_hist, vix_val)
     except Exception:
         pass
 

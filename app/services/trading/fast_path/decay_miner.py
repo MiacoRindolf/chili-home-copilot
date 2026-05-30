@@ -414,9 +414,8 @@ class FastPathDecayMiner:
         if ready == ([], [], []):
             return []
         self._listen_conn.poll()
-        out = []
-        while self._listen_conn.notifies:
-            out.append(self._listen_conn.notifies.pop(0))
+        out = self._listen_conn.notifies[:]
+        del self._listen_conn.notifies[:]
         return out
 
     # ── Notification handlers ─────────────────────────────────────────
