@@ -9400,7 +9400,13 @@ function loadImminentAlerts() {
         html += '<div style="font-size:9px;color:var(--text-muted);margin-top:2px;">' + escHtml(a.autotrader_blocker_category) + (a.autotrader_next_action ? ' -> ' + escHtml(a.autotrader_next_action) : '') + '</div>';
       }
       if (a.graduation_blocker || a.recommended_work_event) {
-        html += '<div style="font-size:9px;color:var(--text-muted);margin-top:2px;">Reliability: ' + escHtml(a.graduation_blocker || 'pending') + (a.recommended_work_event ? ' -> ' + escHtml(a.recommended_work_event) : '') + '</div>';
+        var workText = '';
+        if (a.recommended_work_event) {
+          workText = a.recommended_work_actionable === false
+            ? ' -> cooldown: ' + escHtml(a.recommended_work_blocker || 'recent diagnostic')
+            : ' -> ' + escHtml(a.recommended_work_event);
+        }
+        html += '<div style="font-size:9px;color:var(--text-muted);margin-top:2px;">Reliability: ' + escHtml(a.graduation_blocker || 'pending') + workText + '</div>';
       }
       html += '</div>';
       html += '<div style="text-align:right;">';

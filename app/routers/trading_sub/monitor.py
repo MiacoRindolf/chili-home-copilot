@@ -10,9 +10,11 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import and_, exists, or_
 from sqlalchemy.orm import Session
 
+from ...config import settings
 from ...deps import get_db, get_identity_ctx
 from ...models.trading import (
     AutoTraderRun,
+    BrainWorkEvent,
     BreakoutAlert,
     PatternMonitorDecision,
     ScanPattern,
@@ -31,6 +33,10 @@ from ...services.trading.cash_deployment import (
     cash_deployment_summary,
 )
 from ...services.trading.edge_reliability import (
+    EXIT_VARIANT_DIAGNOSTIC,
+    EXIT_VARIANT_REFRESH,
+    RECERT_RESCUE_DIAGNOSTIC,
+    RECERT_RESCUE_REFRESH,
     edge_supply_rows,
     edge_supply_snapshot_rows,
     edge_supply_summary,
@@ -43,6 +49,34 @@ from ._utils import json_safe
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/trading", tags=["trading-monitor"])
+
+_STRUCTURAL_EXIT_NOOP_REASONS = frozenset(
+    {
+        "duplicate_learned_exit_label",
+        "missing_parent_payoff_geometry",
+        "no_loss_report",
+        "no_parent_returns",
+    }
+)
+_STRUCTURAL_EXIT_NOOP_PREFIXES = (
+    "edge_debt_too_negative_for_exit_child:",
+    "insufficient_parent_payoff_samples:",
+    "reward_risk_below_floor:",
+)
+_RECENT_RECERT_BLOCKER_ACTIONS = frozenset(
+    {
+        "inspect_recert_backtest_no_oos_evidence_keep_live_blocked",
+        "wait_for_recert_backtest_cooldown_keep_live_blocked",
+        "live_blocked_recert_debt_no_refresh",
+    }
+)
+_RECENT_RECERT_BLOCKER_REASONS = frozenset(
+    {
+        "recent_recert_backtest_cooldown",
+        "recert_backtest_refresh_already_open",
+        "no_recert_refresh_needed",
+    }
+)
 
 
 def _user_trade_filter(query, user_id: int | None):
@@ -324,6 +358,102 @@ def _imminent_next_action(category: str) -> str:
         "pending_autotrader": "await_autotrader_processing",
         "positive_edge_other_block": "inspect_secondary_gate",
     }.get(category, "inspect_secondary_gate")
+
+
+def _safe_int(value: Any) -> int | None:
+    try:
+        out = int(value)
+    except (TypeError, ValueError):
+        return None
+    return out
+
+
+def _structural_exit_noop_reason(reason: Any) -> bool:
+    value = str(reason or "").strip().lower()
+    return value in _STRUCTURAL_EXIT_NOOP_REASONS or any(
+        value.startswith(prefix) for prefix in _STRUCTURAL_EXIT_NOOP_PREFIXES
+    )
+
+
+def _recommended_work_status(
+    db: Session,
+    supply: dict[str, Any],
+) -> dict[str, Any]:
+    event_type = str(supply.get("recommended_work_event") or "").strip()
+    pid = _safe_int(supply.get("scan_pattern_id"))
+    if not event_type:
+        return {"event_type": None, "actionable": None, "blocker": None}
+    if pid is None or pid <= 0:
+        return {"event_type": event_type, "actionable": True, "blocker": None}
+
+    minutes = _safe_int(
+        getattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360)
+    )
+    if minutes is None or minutes <= 0:
+        return {"event_type": event_type, "actionable": True, "blocker": None}
+    cutoff = datetime.utcnow() - timedelta(minutes=minutes)
+
+    if event_type == EXIT_VARIANT_REFRESH:
+        fingerprint = str(supply.get("evidence_fingerprint") or "")
+        rows = (
+            db.query(BrainWorkEvent)
+            .filter(BrainWorkEvent.event_kind == "outcome")
+            .filter(BrainWorkEvent.event_type == EXIT_VARIANT_DIAGNOSTIC)
+            .filter(BrainWorkEvent.created_at >= cutoff)
+            .filter(BrainWorkEvent.payload["scan_pattern_id"].astext == str(pid))
+            .order_by(BrainWorkEvent.created_at.desc(), BrainWorkEvent.id.desc())
+            .limit(20)
+            .all()
+        )
+        for row in rows:
+            payload = row.payload if isinstance(row.payload, dict) else {}
+            if _safe_int(payload.get("created_count")) != 0:
+                continue
+            same_fingerprint = (
+                bool(fingerprint)
+                and str(payload.get("evidence_fingerprint") or "") == fingerprint
+            )
+            if same_fingerprint or _structural_exit_noop_reason(payload.get("skip_reason")):
+                return {
+                    "event_type": event_type,
+                    "actionable": False,
+                    "blocker": "recent_exit_noop_diagnostic",
+                    "blocker_detail": payload.get("skip_reason"),
+                }
+
+    if event_type == RECERT_RESCUE_REFRESH:
+        rows = (
+            db.query(BrainWorkEvent)
+            .filter(BrainWorkEvent.event_kind == "outcome")
+            .filter(BrainWorkEvent.event_type == RECERT_RESCUE_DIAGNOSTIC)
+            .filter(BrainWorkEvent.created_at >= cutoff)
+            .filter(BrainWorkEvent.payload["scan_pattern_id"].astext == str(pid))
+            .order_by(BrainWorkEvent.created_at.desc(), BrainWorkEvent.id.desc())
+            .limit(20)
+            .all()
+        )
+        for row in rows:
+            payload = row.payload if isinstance(row.payload, dict) else {}
+            action = str(payload.get("recommended_next_action") or "").strip().lower()
+            if action in _RECENT_RECERT_BLOCKER_ACTIONS:
+                return {
+                    "event_type": event_type,
+                    "actionable": False,
+                    "blocker": "recent_recert_blocker_diagnostic",
+                    "blocker_detail": action,
+                }
+            refresh = payload.get("recert_backtest_refresh")
+            if isinstance(refresh, dict):
+                reason = str(refresh.get("reason") or "").strip().lower()
+                if reason in _RECENT_RECERT_BLOCKER_REASONS:
+                    return {
+                        "event_type": event_type,
+                        "actionable": False,
+                        "blocker": "recent_recert_blocker_diagnostic",
+                        "blocker_detail": reason,
+                    }
+
+    return {"event_type": event_type, "actionable": True, "blocker": None}
 
 
 def _empty_imminent_summary() -> dict[str, int]:
@@ -785,6 +915,7 @@ def api_monitor_imminent_alerts(
                 or edge_supply_by_pattern_asset.get((pid, "all"))
                 or {}
             )
+        work_status = _recommended_work_status(db, supply)
         items.append(
             {
                 "id": a.id,
@@ -908,7 +1039,10 @@ def api_monitor_imminent_alerts(
                 "closed_evidence_count": supply.get("closed_evidence_count"),
                 "paper_live_gap_pct": json_safe(supply.get("paper_live_gap_pct")),
                 "graduation_blocker": supply.get("graduation_blocker"),
-                "recommended_work_event": supply.get("recommended_work_event"),
+                "recommended_work_event": work_status.get("event_type"),
+                "recommended_work_actionable": work_status.get("actionable"),
+                "recommended_work_blocker": work_status.get("blocker"),
+                "recommended_work_blocker_detail": work_status.get("blocker_detail"),
                 "cash_deployment_rank": supply.get("cash_deployment_rank"),
                 "edge_reliability_snapshot_event_id": supply.get("snapshot_event_id"),
                 "edge_reliability_snapshot_at": supply.get("snapshot_created_at"),
