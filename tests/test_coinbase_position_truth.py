@@ -97,6 +97,45 @@ def test_coinbase_positions_and_portfolio_use_live_usd_marks(monkeypatch):
     assert portfolio["equity"] == pytest.approx(round(150.0 + 3822.0 * 0.0426, 2))
 
 
+def test_coinbase_unavailable_product_suppresses_repeated_position_mark_queries(monkeypatch):
+    from app.services import coinbase_service
+
+    coinbase_service.clear_cache()
+
+    class Client:
+        fills_calls = 0
+        market_trade_calls = 0
+        bbo_calls = 0
+
+        def get_fills(self, product_id: str, limit: int = 250):
+            self.fills_calls += 1
+            assert product_id == "GAL-USD"
+            raise RuntimeError('ProductID "GAL-USD" could not be found.')
+
+        def get_market_trades(self, product_id: str, limit: int = 1):
+            self.market_trade_calls += 1
+            raise AssertionError("unavailable products should not be re-priced")
+
+        def get_best_bid_ask(self, product_ids):
+            self.bbo_calls += 1
+            raise AssertionError("unavailable products should not fetch BBO")
+
+    client = Client()
+    monkeypatch.setattr(coinbase_service, "_get_client", lambda: client)
+
+    assert coinbase_service._get_cost_basis_from_fills("GAL-USD", current_qty=1.0) == 0.0
+    assert client.fills_calls == 1
+
+    price_cache: dict[str, float] = {}
+    assert coinbase_service._coinbase_current_price("GAL-USD", price_cache) == 0.0
+    assert price_cache["GAL-USD"] == 0.0
+    assert client.market_trade_calls == 0
+    assert client.bbo_calls == 0
+
+    assert coinbase_service._get_cost_basis_from_fills("GAL-USD", current_qty=1.0) == 0.0
+    assert client.fills_calls == 1
+
+
 def test_coinbase_position_sync_aligns_existing_trade_to_broker_truth(
     db,
     monkeypatch,

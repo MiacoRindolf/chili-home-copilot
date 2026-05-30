@@ -40,6 +40,10 @@ _CHECK_TTL = 600
 _cache: dict[str, tuple[float, Any]] = {}
 _CACHE_TTL = 300
 _TRANSACTION_SUMMARY_CACHE_TTL = 60
+_COINBASE_UNAVAILABLE_PRODUCT_TTL_SECONDS = int(
+    getattr(settings, "chili_coinbase_unavailable_product_ttl_seconds", 6 * 60 * 60)
+)
+_unavailable_products: dict[str, float] = {}
 
 # f-coinbase-dust-auto-create-skip (2026-05-19): minimum dollar notional
 # below which ``sync_positions_to_db`` will refuse to auto-create a Trade
@@ -402,6 +406,34 @@ def _coinbase_product_unavailable_error(exc: Exception) -> bool:
     )
 
 
+def _coinbase_product_key(product_id: str | None) -> str:
+    return str(product_id or "").strip().upper()
+
+
+def _coinbase_product_marked_unavailable(product_id: str | None) -> bool:
+    product_key = _coinbase_product_key(product_id)
+    if not product_key:
+        return False
+    marked_at = _unavailable_products.get(product_key)
+    if marked_at is None:
+        return False
+    ttl = max(0, int(_COINBASE_UNAVAILABLE_PRODUCT_TTL_SECONDS or 0))
+    if ttl <= 0:
+        return False
+    if (time.time() - marked_at) <= ttl:
+        return True
+    _unavailable_products.pop(product_key, None)
+    return False
+
+
+def _mark_coinbase_product_unavailable(product_id: str | None) -> None:
+    product_key = _coinbase_product_key(product_id)
+    if not product_key:
+        return
+    _unavailable_products[product_key] = time.time()
+    _cache_set(f"product_price:{product_key}", 0.0)
+
+
 def _coinbase_current_price(
     product_id: str,
     price_cache: dict[str, float] | None = None,
@@ -412,12 +444,16 @@ def _coinbase_current_price(
     USD mark. Prefer the last trade; fall back to BBO mid/bid/ask if trades are
     unavailable. A zero return means "unknown", never "free".
     """
-    product_key = str(product_id or "").upper()
+    product_key = _coinbase_product_key(product_id)
     if not product_key:
         return 0.0
     base_currency = product_key.split("-", 1)[0]
     if base_currency in _USD_PEGGED_ACCOUNT_CURRENCIES:
         return 1.0
+    if _coinbase_product_marked_unavailable(product_key):
+        if price_cache is not None:
+            price_cache[product_key] = 0.0
+        return 0.0
     if price_cache is not None and product_key in price_cache:
         return float(price_cache[product_key] or 0.0)
     cached = _cache_get(f"product_price:{product_key}")
@@ -451,7 +487,7 @@ def _coinbase_current_price(
         if _coinbase_product_unavailable_error(exc):
             if price_cache is not None:
                 price_cache[product_key] = 0.0
-            _cache_set(f"product_price:{product_key}", 0.0)
+            _mark_coinbase_product_unavailable(product_key)
             return 0.0
         logger.debug("[coinbase] market trade price unavailable for %s", product_key, exc_info=True)
 
@@ -470,7 +506,12 @@ def _coinbase_current_price(
                 candidates.append(ask)
             if candidates:
                 break
-    except Exception:
+    except Exception as exc:
+        if _coinbase_product_unavailable_error(exc):
+            _mark_coinbase_product_unavailable(product_key)
+            if price_cache is not None:
+                price_cache[product_key] = 0.0
+            return 0.0
         logger.debug("[coinbase] best bid/ask price unavailable for %s", product_key, exc_info=True)
 
     price = next((float(p) for p in candidates if p and p > 0), 0.0)
@@ -614,24 +655,31 @@ def _get_cost_basis_from_fills(product_id: str, current_qty: float | None = None
     Compute weighted-average cost basis for the currently held product lots.
     Returns average buy price per unit, or 0 if unavailable.
     """
+    product_key = _coinbase_product_key(product_id)
+    if _coinbase_product_marked_unavailable(product_key):
+        return 0.0
     qty_key = "" if current_qty is None else f":{round(float(current_qty or 0.0), 8)}"
-    cached = _cache_get(f"cost_basis_{product_id}{qty_key}")
+    cached = _cache_get(f"cost_basis_{product_key}{qty_key}")
     if cached is not None:
         return cached
     client = _get_client()
     if not client:
         return 0.0
     try:
-        resp = client.get_fills(product_id=product_id, limit=250)
+        resp = client.get_fills(product_id=product_key, limit=250)
         fills_raw = resp.get("fills", []) if isinstance(resp, dict) else getattr(resp, "fills", [])
         avg = _current_lot_average_from_fills(
             list(fills_raw or []),
             current_qty=current_qty,
         )
-        _cache_set(f"cost_basis_{product_id}{qty_key}", avg)
+        _cache_set(f"cost_basis_{product_key}{qty_key}", avg)
         return avg
     except Exception as e:
-        logger.debug("[coinbase] cost basis from fills failed for %s: %s", product_id, e)
+        if _coinbase_product_unavailable_error(e):
+            _mark_coinbase_product_unavailable(product_key)
+            _cache_set(f"cost_basis_{product_key}{qty_key}", 0.0)
+            return 0.0
+        logger.debug("[coinbase] cost basis from fills failed for %s: %s", product_key, e)
         return 0.0
 
 
@@ -3070,6 +3118,7 @@ def get_usdc_deposit_address() -> dict[str, Any]:
 
 def clear_cache() -> None:
     _cache.clear()
+    _unavailable_products.clear()
     global _client, _connected, _last_check
     _client = None
     _connected = False
