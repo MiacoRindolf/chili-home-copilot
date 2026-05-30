@@ -29,6 +29,21 @@ def test_trade_return_pct_option_uses_contract_multiplier() -> None:
     assert trade_return_pct(trade) == pytest.approx(16.0)
 
 
+def test_trade_return_pct_snapshot_asset_kind_uses_contract_multiplier() -> None:
+    trade = SimpleNamespace(
+        entry_price=1.25,
+        exit_price=1.45,
+        quantity=2.0,
+        pnl=40.0,
+        direction="long",
+        asset_kind=None,
+        tags=None,
+        indicator_snapshot={"asset_kind": "option"},
+    )
+
+    assert trade_return_pct(trade) == pytest.approx(16.0)
+
+
 def test_trade_return_pct_option_price_fallback_requires_premium_domain() -> None:
     trade = SimpleNamespace(
         entry_price=1.25,
@@ -95,6 +110,34 @@ def test_paper_trade_return_pct_option_uses_contract_multiplier() -> None:
         pnl_pct=None,
         direction="long",
         signal_json={"asset_type": "options", "option_meta": {"strike": 500.0}},
+    )
+
+    assert paper_trade_return_pct(trade) == pytest.approx(16.0)
+
+
+def test_paper_trade_return_pct_asset_kind_uses_contract_multiplier() -> None:
+    trade = SimpleNamespace(
+        entry_price=1.25,
+        exit_price=1.45,
+        quantity=2.0,
+        pnl=40.0,
+        pnl_pct=1600.0,
+        direction="long",
+        signal_json={"asset_kind": "option"},
+    )
+
+    assert paper_trade_return_pct(trade) == pytest.approx(16.0)
+
+
+def test_paper_trade_return_pct_nested_asset_kind_uses_contract_multiplier() -> None:
+    trade = SimpleNamespace(
+        entry_price=1.25,
+        exit_price=1.45,
+        quantity=2.0,
+        pnl=40.0,
+        pnl_pct=1600.0,
+        direction="long",
+        signal_json='{"breakout_alert":{"asset_kind":"option"}}',
     )
 
     assert paper_trade_return_pct(trade) == pytest.approx(16.0)

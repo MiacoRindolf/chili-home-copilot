@@ -159,6 +159,48 @@ def test_position_plan_option_context_never_falls_back_to_underlying_quote() -> 
     assert pos["stop_loss"] is None
 
 
+@pytest.mark.parametrize("bad_price", [True, float("nan"), float("inf"), 0, -1, "bad"])
+def test_position_plan_option_context_rejects_bad_premium_quote(bad_price) -> None:
+    from app.services.trading.position_plan_generator import _build_position_context
+
+    trade = _option_trade_stub()
+    positions = _build_position_context(
+        _FakeDb(),
+        [trade],
+        quotes={"SPY": {"price": 729.0}},
+        trade_quotes={trade.id: {"price": bad_price, "source": "robinhood_options"}},
+    )
+
+    pos = positions[0]
+    assert pos["asset_type"] == "options"
+    assert pos["current_price"] is None
+    assert pos["pnl_pct"] is None
+    assert pos["current_value_usd"] is None
+    assert pos["unrealized_pnl_usd"] is None
+    assert pos["quote_source"] == "robinhood_options"
+
+
+@pytest.mark.parametrize("bad_entry", [True, float("nan"), float("inf"), 0, -1, "bad"])
+def test_position_plan_option_context_rejects_bad_entry_price(bad_entry) -> None:
+    from app.services.trading.position_plan_generator import _build_position_context
+
+    trade = _option_trade_stub(entry_price=bad_entry)
+    positions = _build_position_context(
+        _FakeDb(),
+        [trade],
+        quotes={},
+        trade_quotes={trade.id: {"price": 1.45, "source": "robinhood_options"}},
+    )
+
+    pos = positions[0]
+    assert pos["asset_type"] == "options"
+    assert pos["entry_price"] is None
+    assert pos["pnl_pct"] is None
+    assert pos["entry_value_usd"] is None
+    assert pos["unrealized_pnl_usd"] is None
+    assert pos["max_premium_at_risk_usd"] is None
+
+
 def test_position_plan_option_context_does_not_default_bad_quantity_to_one() -> None:
     from app.services.trading.position_plan_generator import _build_position_context
 

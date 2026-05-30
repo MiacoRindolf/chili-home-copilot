@@ -10,7 +10,9 @@ Env flags remain the server-wide master; the desk row refines behavior when
 """
 from __future__ import annotations
 
+import json
 import logging
+import math
 from typing import Any, Optional
 
 from sqlalchemy.orm import Session
@@ -107,13 +109,28 @@ def set_desk_live_orders(db: Session, live_orders: bool | None, *, updated_by: s
 
 
 def _safe_quote_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
     if value in (None, ""):
         return None
     try:
         out = float(value)
     except (TypeError, ValueError):
         return None
-    return out if out > 0 else None
+    return out if math.isfinite(out) and out > 0 else None
+
+
+def _paper_signal_json(pt: PaperTrade) -> dict[str, Any]:
+    signal = getattr(pt, "signal_json", None)
+    if isinstance(signal, dict):
+        return dict(signal)
+    if isinstance(signal, str):
+        try:
+            parsed = json.loads(signal)
+        except Exception:
+            return {}
+        return dict(parsed) if isinstance(parsed, dict) else {}
+    return {}
 
 
 def _broker_quote_price_for_trade(trade: Trade) -> tuple[float | None, str]:
@@ -146,7 +163,7 @@ def _fallback_quote(ticker: str) -> float | None:
 
         q = fetch_quote(ticker) or {}
         p = q.get("price") or q.get("last_price")
-        return float(p) if p is not None else None
+        return _safe_quote_float(p)
     except Exception:
         return None
 
@@ -161,13 +178,24 @@ def _compute_unrealized(
 ) -> tuple[float | None, float | None]:
     """(pnl_usd, pnl_pct) — long/short aware. Returns (None, None) when unknown."""
     try:
+        if any(isinstance(v, bool) for v in (entry_price, current_price, quantity, multiplier)):
+            return (None, None)
         if entry_price is None or current_price is None or not quantity:
             return (None, None)
         entry = float(entry_price)
         curr = float(current_price)
         qty = float(quantity)
         mult = float(multiplier or 1.0)
-        if entry <= 0 or qty <= 0 or mult <= 0:
+        if (
+            not math.isfinite(entry)
+            or not math.isfinite(curr)
+            or not math.isfinite(qty)
+            or not math.isfinite(mult)
+            or entry <= 0
+            or curr <= 0
+            or qty <= 0
+            or mult <= 0
+        ):
             return (None, None)
         side = (direction or "long").lower()
         per_unit = (curr - entry) if side != "short" else (entry - curr)
@@ -299,7 +327,7 @@ def list_pattern_linked_open_positions(db: Session, user_id: int) -> dict[str, A
             p = db.get(ScanPattern, int(pt.scan_pattern_id))
             if p:
                 pat_name = p.name
-        sj = pt.signal_json or {}
+        sj = _paper_signal_json(pt)
         is_atv1 = bool(sj.get("auto_trader_v1"))
         ov = overrides_map.get(("paper", int(pt.id)))
         opened_today = bool(pt.entry_date and _opened_today_et(pt.entry_date))
@@ -312,7 +340,9 @@ def list_pattern_linked_open_positions(db: Session, user_id: int) -> dict[str, A
             paper_is_option = False
         if paper_is_option:
             try:
-                current_price = _paper_current_mark_price(pt, purpose="display")  # type: ignore[name-defined]
+                current_price = _safe_quote_float(
+                    _paper_current_mark_price(pt, purpose="display")  # type: ignore[name-defined]
+                )
             except Exception:
                 current_price = None
             quote_source = (

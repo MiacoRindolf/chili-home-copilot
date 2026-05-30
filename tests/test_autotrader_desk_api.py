@@ -16,12 +16,54 @@ from app.models.trading import (
     TradingPosition,
 )
 from app.services.trading.broker_position_truth import DEFAULT_BROKER_TRUTH_GRACE_SECONDS
-from app.services.trading.autotrader_desk import AUTOTRADER_DESK_SLICE
+from app.services.trading.autotrader_desk import (
+    AUTOTRADER_DESK_SLICE,
+    _compute_unrealized,
+    _paper_signal_json,
+    _safe_quote_float,
+)
 
 
 def test_autotrader_desk_guest_403(client) -> None:
     r = client.get("/api/trading/autotrader/desk")
     assert r.status_code == 403
+
+
+def test_autotrader_desk_accepts_serialized_paper_signal_json() -> None:
+    pt = PaperTrade(
+        signal_json='{"auto_trader_v1": true, "asset_kind": "option"}',
+    )
+
+    signal = _paper_signal_json(pt)
+
+    assert signal["auto_trader_v1"] is True
+    assert signal["asset_kind"] == "option"
+
+
+@pytest.mark.parametrize("bad_quote", [True, float("nan"), float("inf"), 0, -1, ""])
+def test_autotrader_desk_rejects_bad_quote_prices(bad_quote) -> None:
+    assert _safe_quote_float(bad_quote) is None
+
+
+@pytest.mark.parametrize("bad_current", [True, float("nan"), float("inf"), 0, -1])
+def test_autotrader_desk_unrealized_rejects_bad_current_price(bad_current) -> None:
+    assert _compute_unrealized(
+        entry_price=1.25,
+        current_price=bad_current,
+        quantity=2.0,
+        direction="long",
+        multiplier=100.0,
+    ) == (None, None)
+
+
+def test_autotrader_desk_unrealized_option_contract_return() -> None:
+    assert _compute_unrealized(
+        entry_price=1.25,
+        current_price="1.45",
+        quantity=2.0,
+        direction="long",
+        multiplier=100.0,
+    ) == pytest.approx((40.0, 16.0))
 
 
 def test_autotrader_desk_paired_get_patch(paired_client, db: Session) -> None:
@@ -244,6 +286,60 @@ def test_autotrader_desk_paper_option_uses_premium_mark(
     assert row["contract_multiplier"] == 100.0
     assert row["current_price"] == pytest.approx(1.45)
     assert row["quote_source"] == "robinhood_options"
+    assert row["unrealized_pnl_usd"] == pytest.approx(40.0)
+    assert row["unrealized_pnl_pct"] == pytest.approx(16.0)
+
+
+def test_autotrader_desk_paper_option_accepts_serialized_signal_json(
+    paired_client,
+    db: Session,
+) -> None:
+    c, user = paired_client
+    pat = ScanPattern(
+        user_id=user.id,
+        name="desk_serialized_paper_option_pattern",
+        rules_json={"test": True},
+        origin="unit",
+        asset_class="stock",
+        timeframe="1d",
+        active=True,
+        trade_count=0,
+    )
+    db.add(pat)
+    db.flush()
+    pt = PaperTrade(
+        user_id=user.id,
+        scan_pattern_id=pat.id,
+        ticker="SPY",
+        direction="long",
+        entry_price=1.25,
+        quantity=2.0,
+        status="open",
+        signal_json=(
+            '{"auto_trader_v1": true, "asset_kind": "option", '
+            '"option_meta": {"underlying": "SPY", "expiration": "2026-06-19", '
+            '"strike": 729.0, "option_type": "call"}}'
+        ),
+    )
+    db.add(pt)
+    db.commit()
+
+    with patch(
+        "app.services.trading.market_data.fetch_quote",
+        side_effect=AssertionError("serialized paper option rows must not fetch underlying spot"),
+    ), patch(
+        "app.services.trading.broker_quotes.broker_quote_for_trade",
+        return_value={"price": 1.45, "source": "robinhood_options"},
+    ):
+        r = c.get("/api/trading/autotrader/desk")
+
+    assert r.status_code == 200
+    payload = r.json()
+    row = next(x for x in payload["paper_trades"] if x["ticker"] == "SPY")
+    assert row["asset_type"] == "options"
+    assert row["auto_trader_v1"] is True
+    assert row["contract_multiplier"] == 100.0
+    assert row["current_price"] == pytest.approx(1.45)
     assert row["unrealized_pnl_usd"] == pytest.approx(40.0)
     assert row["unrealized_pnl_pct"] == pytest.approx(16.0)
 

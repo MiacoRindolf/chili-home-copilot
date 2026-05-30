@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -52,6 +53,16 @@ _last_vitals_composite: dict[int, float] = {}
 # exit_now always sends. Cleared opportunistically when oversized.
 _last_monitor_alert_sig: dict[str, str] = {}
 _MONITOR_ALERT_DEDUP_MAX_KEYS = 500
+
+
+def _positive_float_or_none(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) and out > 0 else None
 
 
 def _condition_health_evaluable_count(health: ConditionHealth) -> int:
@@ -174,8 +185,8 @@ def _trade_pnl_pct(
     Pattern health for option substitutions can still use the underlying
     ticker, but P&L must compare option premium to option premium.
     """
-    entry = float(trade.entry_price or 0)
-    if entry <= 0:
+    entry = _positive_float_or_none(getattr(trade, "entry_price", None))
+    if entry is None:
         return None, "entry_unavailable"
 
     if _is_option_trade_safe(trade):
@@ -184,8 +195,8 @@ def _trade_pnl_pct(
 
             q = broker_quote_for_trade(trade, purpose="display")
             premium = q.get("price") if q else None
-            premium = float(premium) if premium is not None else None
-            if premium and premium > 0:
+            premium = _positive_float_or_none(premium)
+            if premium is not None:
                 if (trade.direction or "long") == "short":
                     return ((entry - premium) / entry * 100), str(q.get("source") or "option_premium")
                 return ((premium - entry) / entry * 100), str(q.get("source") or "option_premium")
@@ -193,11 +204,12 @@ def _trade_pnl_pct(
             logger.debug("[pattern_monitor] option P&L quote failed for %s", trade.ticker, exc_info=True)
         return None, "option_premium_unavailable"
 
-    if not current_price:
+    current = _positive_float_or_none(current_price)
+    if current is None:
         return None, "price_unavailable"
     if (trade.direction or "long") == "short":
-        return ((entry - current_price) / entry * 100), "underlying_spot"
-    return ((current_price - entry) / entry * 100), "underlying_spot"
+        return ((entry - current) / entry * 100), "underlying_spot"
+    return ((current - entry) / entry * 100), "underlying_spot"
 
 
 def _monitor_alert_dedup_key(ticker: str, scan_pattern_id: int | None, action: str) -> str:

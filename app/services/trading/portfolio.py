@@ -29,6 +29,16 @@ def _is_option_trade_safe(trade: Trade) -> bool:
         return False
 
 
+def _positive_float_or_none(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) and out > 0 else None
+
+
 # ── Watchlist CRUD ────────────────────────────────────────────────────
 
 def get_watchlist(db: Session, user_id: int | None) -> list[WatchlistItem]:
@@ -1104,36 +1114,45 @@ def get_portfolio_summary(db: Session, user_id: int | None) -> dict[str, Any]:
         raw_price = quote.get("price") if quote else None
         if raw_price in (None, "") and quote:
             raw_price = quote.get("last")
-        try:
-            current_price = (
-                float(raw_price)
-                if raw_price not in (None, "")
-                else float(t.entry_price)
-            )
-        except (TypeError, ValueError):
-            current_price = float(t.entry_price)
+        current_price = _positive_float_or_none(raw_price)
+        entry_price = _positive_float_or_none(getattr(t, "entry_price", None))
+        quantity = _positive_float_or_none(getattr(t, "quantity", None))
+        if current_price is None and not trade_is_option:
+            current_price = entry_price
         multiplier = 100.0 if trade_is_option else 1.0
-        unrealized = (current_price - t.entry_price) * t.quantity * multiplier
-        if t.direction == "short":
-            unrealized = -unrealized
-        position_value = current_price * t.quantity * multiplier
-        invested = t.entry_price * t.quantity * multiplier
+        invested = (
+            entry_price * quantity * multiplier
+            if entry_price is not None and quantity is not None
+            else 0.0
+        )
+        if current_price is not None and entry_price is not None and quantity is not None:
+            unrealized = (current_price - entry_price) * quantity * multiplier
+            if t.direction == "short":
+                unrealized = -unrealized
+            position_value = current_price * quantity * multiplier
+            unrealized_pct = round(unrealized / invested * 100, 2) if invested > 0 else None
+        else:
+            unrealized = None
+            position_value = 0.0
+            unrealized_pct = None
         asset_type = "options" if trade_is_option else (
             "crypto" if is_crypto(t.ticker) else "stock"
         )
 
         positions.append({
             "id": t.id, "ticker": t.ticker, "direction": t.direction,
-            "entry_price": t.entry_price, "current_price": current_price,
-            "quantity": t.quantity, "unrealized_pnl": round(unrealized, 2),
-            "unrealized_pct": round(unrealized / invested * 100, 2) if invested > 0 else 0,
+            "entry_price": entry_price, "current_price": current_price,
+            "quantity": quantity, "unrealized_pnl": round(unrealized, 2) if unrealized is not None else None,
+            "unrealized_pct": unrealized_pct,
             "asset_type": asset_type,
             "contract_multiplier": multiplier if trade_is_option else None,
         })
         total_invested += invested
         total_current += position_value
-        total_unrealized += unrealized
-        allocation[t.ticker] = allocation.get(t.ticker, 0) + position_value
+        if unrealized is not None:
+            total_unrealized += unrealized
+        if position_value > 0:
+            allocation[t.ticker] = allocation.get(t.ticker, 0) + position_value
 
     realized_pnl = 0.0
     equity_curve = []

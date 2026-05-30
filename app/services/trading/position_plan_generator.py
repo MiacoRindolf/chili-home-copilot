@@ -30,6 +30,8 @@ MATERIAL_SIGNATURE_VERSION = 1
 
 
 def _positive_float_or_none(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
     try:
         out = float(value)
     except (TypeError, ValueError):
@@ -40,6 +42,8 @@ def _positive_float_or_none(value: Any) -> float | None:
 
 
 def _bucket_number(value: Any, *, step: float, digits: int = 4) -> float | None:
+    if isinstance(value, bool):
+        return None
     try:
         number = float(value)
     except (TypeError, ValueError):
@@ -71,6 +75,8 @@ def _bucket_price(value: Any) -> float | None:
 
 
 def _bucket_bars(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
     try:
         bars = int(value)
     except (TypeError, ValueError):
@@ -132,7 +138,16 @@ def _signed_price_pnl(
 ) -> float | None:
     if entry is None or current is None or quantity is None:
         return None
-    if entry <= 0.0 or current <= 0.0 or quantity <= 0.0 or multiplier <= 0.0:
+    if (
+        not math.isfinite(entry)
+        or not math.isfinite(current)
+        or not math.isfinite(quantity)
+        or not math.isfinite(multiplier)
+        or entry <= 0.0
+        or current <= 0.0
+        or quantity <= 0.0
+        or multiplier <= 0.0
+    ):
         return None
     per_unit = current - entry
     if str(direction or "").strip().lower() == "short":
@@ -300,15 +315,13 @@ def _build_position_context(
         q = trade_quotes.get(int(trade.id)) or {}
         if not q and not trade_is_option:
             q = quotes.get(trade.ticker.upper()) or quotes.get(trade.ticker) or {}
-        cur_price = q.get("price") or q.get("last_price")
-        try:
-            cur_price = float(cur_price) if cur_price is not None else None
-        except (TypeError, ValueError):
-            cur_price = None
+        cur_price = _positive_float_or_none(q.get("price"))
+        if cur_price is None:
+            cur_price = _positive_float_or_none(q.get("last_price"))
 
-        entry = float(trade.entry_price) if trade.entry_price else 0
+        entry = _positive_float_or_none(getattr(trade, "entry_price", None))
         pnl_pct = None
-        if cur_price and entry:
+        if cur_price is not None and entry is not None:
             if trade.direction == "short":
                 pnl_pct = round((entry - cur_price) / entry * 100, 2)
             else:
@@ -321,7 +334,7 @@ def _build_position_context(
         multiplier = OPTION_CONTRACT_MULTIPLIER if trade_is_option else 1.0
         entry_value_usd = (
             round(entry * quantity * multiplier, 2)
-            if entry > 0.0 and quantity is not None and quantity > 0.0
+            if entry is not None and entry > 0.0 and quantity is not None and quantity > 0.0
             else None
         )
         current_value_usd = (

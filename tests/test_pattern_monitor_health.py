@@ -138,6 +138,59 @@ def test_option_pattern_monitor_pnl_does_not_fallback_to_underlying() -> None:
     assert source == "option_premium_unavailable"
 
 
+@pytest.mark.parametrize("bad_price", [True, float("nan"), float("inf"), 0, -1, "bad"])
+def test_option_pattern_monitor_pnl_rejects_bad_premium_quote(bad_price) -> None:
+    trade = SimpleNamespace(
+        ticker="SPY",
+        direction="long",
+        entry_price=1.25,
+        indicator_snapshot={"asset_kind": "option"},
+    )
+
+    with patch(
+        "app.services.trading.broker_quotes.broker_quote_for_trade",
+        return_value={"price": bad_price, "source": "robinhood_options"},
+    ):
+        pnl_pct, source = _trade_pnl_pct(trade, current_price=729.0)
+
+    assert pnl_pct is None
+    assert source == "option_premium_unavailable"
+
+
+@pytest.mark.parametrize("bad_entry", [True, float("nan"), float("inf"), 0, -1, "bad"])
+def test_option_pattern_monitor_pnl_rejects_bad_entry_price(bad_entry) -> None:
+    trade = SimpleNamespace(
+        ticker="SPY",
+        direction="long",
+        entry_price=bad_entry,
+        indicator_snapshot={"asset_kind": "option"},
+    )
+
+    with patch(
+        "app.services.trading.broker_quotes.broker_quote_for_trade",
+        return_value={"price": 1.45, "source": "robinhood_options"},
+    ):
+        pnl_pct, source = _trade_pnl_pct(trade, current_price=729.0)
+
+    assert pnl_pct is None
+    assert source == "entry_unavailable"
+
+
+@pytest.mark.parametrize("bad_price", [True, float("nan"), float("inf"), 0, -1, "bad"])
+def test_stock_pattern_monitor_pnl_rejects_bad_current_price(bad_price) -> None:
+    trade = SimpleNamespace(
+        ticker="SPY",
+        direction="long",
+        entry_price=100.0,
+        indicator_snapshot={},
+    )
+
+    pnl_pct, source = _trade_pnl_pct(trade, current_price=bad_price)
+
+    assert pnl_pct is None
+    assert source == "price_unavailable"
+
+
 def test_compute_indicators_exposes_pattern_canonical_inputs() -> None:
     dates = pd.date_range("2026-01-01", periods=30, freq="D")
     df = pd.DataFrame(

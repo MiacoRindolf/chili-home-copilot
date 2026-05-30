@@ -32,9 +32,12 @@ def trade_contract_multiplier_sql(alias: str | None = None) -> str:
           WHEN LOWER(COALESCE({asset_kind}, '')) IN ('option', 'options')
             OR LOWER(COALESCE({tags}, '')) LIKE '%option%'
             OR {snap} ? 'option_meta'
+            OR LOWER(COALESCE({snap} ->> 'asset_kind', '')) IN ('option', 'options')
             OR LOWER(COALESCE({snap} ->> 'asset_type', '')) IN ('option', 'options')
             OR {_json_truthy_sql(snap, 'options_path')}
             OR {breakout} ? 'option_meta'
+            OR LOWER(COALESCE({breakout} ->> 'asset_kind', ''))
+               IN ('option', 'options')
             OR LOWER(COALESCE({breakout} ->> 'asset_type', ''))
                IN ('option', 'options')
             OR {_json_truthy_sql(breakout, 'options_path')}
@@ -51,9 +54,12 @@ def paper_trade_contract_multiplier_sql(alias: str | None = None) -> str:
     return f"""
         CASE
           WHEN {signal} ? 'option_meta'
+            OR LOWER(COALESCE({signal} ->> 'asset_kind', '')) IN ('option', 'options')
             OR LOWER(COALESCE({signal} ->> 'asset_type', '')) IN ('option', 'options')
             OR {_json_truthy_sql(signal, 'options_path')}
             OR {breakout} ? 'option_meta'
+            OR LOWER(COALESCE({breakout} ->> 'asset_kind', ''))
+               IN ('option', 'options')
             OR LOWER(COALESCE({breakout} ->> 'asset_type', ''))
                IN ('option', 'options')
             OR {_json_truthy_sql(breakout, 'options_path')}

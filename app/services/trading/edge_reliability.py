@@ -159,6 +159,8 @@ def _asset_class_for_paper(
     alert: BreakoutAlert | None,
     pattern: ScanPattern | None,
 ) -> str | None:
+    if paper_trade_contract_multiplier(row) == OPTION_CONTRACT_MULTIPLIER:
+        return "options"
     signal = _json_dict(getattr(row, "signal_json", None))
     for key in ("asset_class", "asset_type", "asset_kind"):
         explicit = _canonical_asset_class(signal.get(key))
@@ -172,6 +174,8 @@ def _asset_class_for_paper(
 
 
 def _asset_class_for_trade(row: Trade, pattern: ScanPattern | None) -> str | None:
+    if trade_contract_multiplier(row) == OPTION_CONTRACT_MULTIPLIER:
+        return "options"
     explicit = _canonical_asset_class(getattr(row, "asset_kind", None))
     if explicit:
         return explicit

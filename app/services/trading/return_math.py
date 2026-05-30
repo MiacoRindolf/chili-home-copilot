@@ -175,17 +175,22 @@ def trade_contract_multiplier(trade: Any) -> float:
 
 
 def _signal_json_is_option(signal: Any) -> bool:
-    if not isinstance(signal, dict):
+    signal = _as_mapping(signal)
+    if not isinstance(signal, Mapping):
         return False
     if signal.get("option_meta"):
+        return True
+    if str(signal.get("asset_kind") or "").strip().lower() in {"option", "options"}:
         return True
     if str(signal.get("asset_type") or "").strip().lower() in {"option", "options"}:
         return True
     if _truthy(signal.get("options_path")):
         return True
-    breakout = signal.get("breakout_alert")
-    if isinstance(breakout, dict):
+    breakout = _as_mapping(signal.get("breakout_alert"))
+    if isinstance(breakout, Mapping):
         if breakout.get("option_meta"):
+            return True
+        if str(breakout.get("asset_kind") or "").strip().lower() in {"option", "options"}:
             return True
         if str(breakout.get("asset_type") or "").strip().lower() in {"option", "options"}:
             return True

@@ -86,6 +86,8 @@ def is_option_trade(trade: Trade) -> bool:
         return False
     if snap.get("option_meta"):
         return True
+    if _optionish(snap.get("asset_kind")):
+        return True
     if _optionish(snap.get("asset_type")):
         return True
     if str(snap.get("options_path") or "").strip().lower() in {"1", "true", "yes", "on"}:
@@ -97,6 +99,8 @@ def is_option_trade(trade: Trade) -> bool:
         except Exception:
             ba = None
     if isinstance(ba, dict):
+        if _optionish(ba.get("asset_kind")):
+            return True
         if _optionish(ba.get("asset_type")):
             return True
         if str(ba.get("options_path") or "").strip().lower() in {"1", "true", "yes", "on"}:

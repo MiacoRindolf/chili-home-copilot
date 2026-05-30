@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import threading
 import time as _time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -31,13 +32,20 @@ logger = logging.getLogger(__name__)
 
 
 def _coerce_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
     if value in (None, ""):
         return None
     try:
         out = float(value)
     except (TypeError, ValueError):
         return None
-    return out
+    return out if math.isfinite(out) else None
+
+
+def _positive_float(value: Any) -> float | None:
+    out = _coerce_float(value)
+    return out if out is not None and out > 0 else None
 
 
 def _trade_date_label(trade: Any) -> str:
@@ -95,7 +103,7 @@ def _format_open_trade_context_line(trade: Any) -> str:
     """Human/LLM-facing open-position row with option price domains explicit."""
     direction = str(getattr(trade, "direction", "") or "").upper()
     qty = getattr(trade, "quantity", None)
-    entry = _coerce_float(getattr(trade, "entry_price", None))
+    entry = _positive_float(getattr(trade, "entry_price", None))
     entered = _trade_date_label(trade)
 
     if not _is_option_trade_safe(trade):
@@ -111,11 +119,11 @@ def _format_open_trade_context_line(trade: Any) -> str:
         quote = broker_quote_for_trade(trade, purpose="display")
     except Exception:
         quote = None
-    current = _coerce_float((quote or {}).get("price"))
+    current = _positive_float((quote or {}).get("price"))
     quote_source = str((quote or {}).get("source") or "option_premium_unavailable")
-    qty_f = _coerce_float(qty)
+    qty_f = _positive_float(qty)
     pnl_text = "P&L unavailable"
-    if entry and current and qty_f:
+    if entry is not None and current is not None and qty_f is not None:
         per_contract = current - entry
         if str(getattr(trade, "direction", "") or "").lower() == "short":
             per_contract = -per_contract

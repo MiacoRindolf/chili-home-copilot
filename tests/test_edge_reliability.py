@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from types import SimpleNamespace
 import pytest
 
 from app.models.trading import (
@@ -22,6 +23,8 @@ from app.services.trading.edge_reliability import (
     EDGE_RELIABILITY_SNAPSHOT,
     RECERT_RESCUE_REFRESH,
     RECERT_RESCUE_DIAGNOSTIC,
+    _asset_class_for_paper,
+    _asset_class_for_trade,
     compute_pattern_edge_reliability,
     edge_supply_rows,
     emit_edge_reliability_refresh_requested,
@@ -89,6 +92,26 @@ def _run(db, pat: ScanPattern, alert: BreakoutAlert, *, expected: float = 2.0):
     db.add(row)
     db.flush()
     return row
+
+
+def test_edge_reliability_asset_class_for_paper_uses_contract_identity() -> None:
+    row = SimpleNamespace(
+        ticker="SPY",
+        signal_json='{"breakout_alert":{"asset_kind":"option"}}',
+    )
+
+    assert _asset_class_for_paper(row, alert=None, pattern=None) == "options"
+
+
+def test_edge_reliability_asset_class_for_trade_uses_contract_identity() -> None:
+    row = SimpleNamespace(
+        ticker="SPY",
+        asset_kind=None,
+        tags=None,
+        indicator_snapshot='{"breakout_alert":{"asset_kind":"option"}}',
+    )
+
+    assert _asset_class_for_trade(row, pattern=None) == "options"
 
 
 def test_edge_reliability_attribution_from_runs_paper_and_live(db):
