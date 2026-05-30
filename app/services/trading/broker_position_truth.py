@@ -83,6 +83,8 @@ def broker_position_identity_for_trade(
             pos = None
         if pos is not None:
             return pos
+    if db is None:
+        return None
     return _natural_key_position(db, trade)
 
 
@@ -99,6 +101,8 @@ def broker_position_display_metrics(
     """
     pos = broker_position_identity_for_trade(db, trade)
     if pos is None or (pos.state or "").lower() != "open":
+        return None
+    if _owned_by_other_open_envelope(db, trade, pos):
         return None
     qty = _positive_float(pos.current_quantity)
     avg = _positive_float(pos.current_avg_price)

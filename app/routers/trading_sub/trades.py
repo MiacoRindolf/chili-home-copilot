@@ -15,6 +15,10 @@ from sqlalchemy.orm import Session
 from ...deps import get_db, get_identity_ctx
 from ...services import broker_manager, broker_service
 from ...services import trading_service as ts
+from ...services.trading.broker_position_truth import (
+    broker_position_display_metrics,
+    filter_broker_stale_open_trades,
+)
 from ...schemas.trading import (
     JournalCreate,
     TradeApplyLevels,
@@ -40,28 +44,65 @@ def api_get_trades(
 ):
     ctx = get_identity_ctx(request, db)
     trades = ts.get_trades(db, ctx["user_id"], status=status)
-    return JSONResponse({"ok": True, "trades": [
-        {
-            "id": t.id, "ticker": t.ticker, "direction": t.direction,
-            "entry_price": t.entry_price, "exit_price": t.exit_price,
-            "quantity": t.quantity,
-            "entry_date": t.entry_date.isoformat() if t.entry_date else None,
-            "exit_date": t.exit_date.isoformat() if t.exit_date else None,
-            "status": t.status, "pnl": t.pnl, "tags": t.tags, "notes": t.notes,
-            "broker_source": t.broker_source,
-            "broker_status": t.broker_status,
-            "broker_order_id": t.broker_order_id,
-            "filled_at": t.filled_at.isoformat() if t.filled_at else None,
-            "avg_fill_price": t.avg_fill_price,
-            "tca_reference_entry_price": t.tca_reference_entry_price,
-            "tca_entry_slippage_bps": t.tca_entry_slippage_bps,
-            "tca_reference_exit_price": t.tca_reference_exit_price,
-            "tca_exit_slippage_bps": t.tca_exit_slippage_bps,
-            "strategy_proposal_id": t.strategy_proposal_id,
-            "scan_pattern_id": t.scan_pattern_id,
-        }
-        for t in trades
-    ]})
+    suppressed_stale_trades = []
+    if status is None or str(status).strip().lower() == "open":
+        open_trades = [t for t in trades if t.status == "open"]
+        live_open_trades, suppressed_stale_trades = filter_broker_stale_open_trades(
+            db,
+            open_trades,
+        )
+        live_open_ids = {int(t.id) for t in live_open_trades}
+        trades = [
+            t for t in trades
+            if t.status != "open" or int(t.id) in live_open_ids
+        ]
+
+    rows = []
+    for t in trades:
+        broker_metrics = (
+            broker_position_display_metrics(db, t)
+            if t.status == "open"
+            else None
+        ) or {}
+        display_entry = broker_metrics.get("entry_price") or t.entry_price
+        display_quantity = broker_metrics.get("quantity") or t.quantity
+        rows.append(
+            {
+                "id": t.id, "ticker": t.ticker, "direction": t.direction,
+                "entry_price": display_entry, "exit_price": t.exit_price,
+                "quantity": display_quantity,
+                "local_entry_price": t.entry_price,
+                "local_quantity": t.quantity,
+                "entry_date": t.entry_date.isoformat() if t.entry_date else None,
+                "exit_date": t.exit_date.isoformat() if t.exit_date else None,
+                "status": t.status, "pnl": t.pnl, "tags": t.tags, "notes": t.notes,
+                "broker_source": t.broker_source,
+                "broker_status": t.broker_status,
+                "broker_order_id": t.broker_order_id,
+                "filled_at": t.filled_at.isoformat() if t.filled_at else None,
+                "avg_fill_price": t.avg_fill_price,
+                "tca_reference_entry_price": t.tca_reference_entry_price,
+                "tca_entry_slippage_bps": t.tca_entry_slippage_bps,
+                "tca_reference_exit_price": t.tca_reference_exit_price,
+                "tca_exit_slippage_bps": t.tca_exit_slippage_bps,
+                "strategy_proposal_id": t.strategy_proposal_id,
+                "scan_pattern_id": t.scan_pattern_id,
+                "position_id": t.position_id,
+                "broker_truth_entry_price": broker_metrics.get("entry_price"),
+                "broker_truth_quantity": broker_metrics.get("quantity"),
+                "broker_truth_position_id": broker_metrics.get("position_id"),
+                "broker_truth_current_envelope_id": broker_metrics.get(
+                    "current_envelope_id"
+                ),
+                "broker_truth_metrics_source": broker_metrics.get("source"),
+            }
+        )
+    return JSONResponse({
+        "ok": True,
+        "trades": rows,
+        "suppressed_stale_trades": json_safe(suppressed_stale_trades),
+        "suppressed_stale_count": len(suppressed_stale_trades),
+    })
 
 
 @router.post("/trades")

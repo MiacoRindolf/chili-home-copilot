@@ -239,6 +239,7 @@ _TRADING_DOMAIN_TARGETED_TESTS = (
     "test_stop_engine_options_auto_exec.py",
     "test_stuck_order_watchdog.py",
     "test_trade_assign_pattern.py",
+    "test_trades_api_broker_truth.py",
     "test_trades_sync.py",
     "test_trading_decision_stack.py",
     "test_venue_robinhood_adapter.py",
