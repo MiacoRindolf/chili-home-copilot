@@ -20259,6 +20259,94 @@ def _migration_286_position_identity_active_link_guard(conn) -> None:
     )
 
 
+def _migration_288_position_identity_phase5i_pattern_sync(conn) -> None:
+    """Keep decision pattern attribution synced when envelopes are updated later.
+
+    Phase 5A creates the decision row at envelope insert time. Coinbase and
+    duplicate-sync paths can finalize ``scan_pattern_id`` after that insert,
+    leaving the decision with NULL attribution while the management envelope is
+    correctly attributed. The Phase 5I soak gate caught this as small fresh
+    post-rename drift. Repair only missing decision attribution from the linked
+    envelope; non-NULL disagreements remain diagnostic.
+    """
+
+    target_relation = conn.execute(text("""
+        SELECT CASE
+            WHEN to_regclass('public.trading_management_envelopes') IS NOT NULL
+                THEN 'trading_management_envelopes'
+            WHEN to_regclass('public.trading_trades') IS NOT NULL
+                THEN 'trading_trades'
+            ELSE NULL
+        END
+    """)).scalar()
+
+    if not target_relation:
+        conn.commit()
+        logger.info("[mig288] skipped decision pattern sync; no envelope relation")
+        return
+
+    result = conn.execute(text(f"""
+        UPDATE trading_decisions d
+           SET scan_pattern_id = e.scan_pattern_id,
+               notes = CASE
+                   WHEN d.notes IS NULL OR d.notes = '' THEN
+                       'phase5i_pattern_sync_from_envelope source_trade_id=' || e.id::text
+                   WHEN d.notes NOT LIKE '%phase5i_pattern_sync_from_envelope%' THEN
+                       d.notes || '; phase5i_pattern_sync_from_envelope source_trade_id=' || e.id::text
+                   ELSE d.notes
+               END
+          FROM {target_relation} e
+         WHERE d.source_trade_id = e.id
+           AND d.scan_pattern_id IS NULL
+           AND e.scan_pattern_id IS NOT NULL
+    """))
+    backfilled = int(result.rowcount or 0)
+
+    conn.execute(text("""
+        CREATE OR REPLACE FUNCTION trading_envelopes_phase5i_after_pattern_update()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            IF NEW.scan_pattern_id IS NOT NULL THEN
+                UPDATE trading_decisions d
+                   SET scan_pattern_id = NEW.scan_pattern_id,
+                       notes = CASE
+                           WHEN d.notes IS NULL OR d.notes = '' THEN
+                               'phase5i_pattern_sync_from_envelope source_trade_id=' || NEW.id::text
+                           WHEN d.notes NOT LIKE '%phase5i_pattern_sync_from_envelope%' THEN
+                               d.notes || '; phase5i_pattern_sync_from_envelope source_trade_id=' || NEW.id::text
+                           ELSE d.notes
+                       END
+                 WHERE d.source_trade_id = NEW.id
+                   AND d.scan_pattern_id IS NULL;
+            END IF;
+
+            RETURN NEW;
+        END;
+        $$;
+    """))
+
+    conn.execute(text(
+        "DROP TRIGGER IF EXISTS trg_trading_envelopes_phase5i_after_pattern_update "
+        f"ON {target_relation}"
+    ))
+    conn.execute(text(
+        "CREATE TRIGGER trg_trading_envelopes_phase5i_after_pattern_update "
+        f"AFTER UPDATE OF scan_pattern_id ON {target_relation} "
+        "FOR EACH ROW "
+        "WHEN (OLD.scan_pattern_id IS DISTINCT FROM NEW.scan_pattern_id) "
+        "EXECUTE FUNCTION trading_envelopes_phase5i_after_pattern_update()"
+    ))
+
+    conn.commit()
+    logger.info(
+        "[mig288] decision pattern sync installed; backfilled=%d target=%s",
+        backfilled,
+        target_relation,
+    )
+
+
 
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -20612,6 +20700,8 @@ MIGRATIONS = [
      _migration_285_project_autonomy_agent_os_v1),
     ("286_position_identity_active_link_guard",
      _migration_286_position_identity_active_link_guard),
+    ("288_position_identity_phase5i_pattern_sync",
+     _migration_288_position_identity_phase5i_pattern_sync),
 ]
 
 

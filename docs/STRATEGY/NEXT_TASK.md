@@ -1,92 +1,69 @@
-# NEXT_TASK: f-position-identity-phase-5i-post-rename-soak
+# NEXT_TASK: f-position-identity-phase-5j-selective-reader-cleanup
 
 STATUS: PENDING
 
 ## Goal
 
-Soak the Phase 5H physical rename after production DDL.
+Begin the low-risk reader cleanup after the Phase 5H physical rename and Phase
+5I soak.
 
-The compatibility view must stay in place. This task is observation plus
-selective cleanup planning, not another destructive schema change.
+This is not a destructive rename phase. Keep the `trading_trades` compatibility
+view and the Python `Trade` ORM class in place. The objective is to move
+analytics/reporting/read-only SQL toward the semantic name
+`trading_management_envelopes` while preserving live writer compatibility.
 
 ## Current Gate State
 
-- Phase 5H migration applied: `283_position_identity_phase5h_physical_rename`
+- Phase 5H physical rename: applied as
+  `283_position_identity_phase5h_physical_rename`
 - Physical base table: `trading_management_envelopes` (`relkind='r'`)
 - Legacy compatibility view: `trading_trades` (`relkind='v'`)
-- Phase 5E compare after rename: `READY_FOR_RENAME_BRIEF`
-- Fresh decisions: 3
-- Fresh envelopes: 3
-- Fresh closes: 7
-- Hard linkage issues: 0
-- 30d attribution mismatched rows: 0
-- 30d attribution drift: $0.0000
-- Live rollback smoke:
-  - old SQL through `trading_trades`: green
-  - new SQL through `trading_management_envelopes`: green
-  - SQLAlchemy `Trade` flush through compatibility view: green
-  - Phase 5A trigger created/linked 3/3 decisions: green
-  - row count before/after rollback: 705 -> 705
-- Schema-specific log scan: no rename-path errors.
-- Phase 5I watcher installed: `CHILI-phase5i-post-rename-soak-probe`
-  - cadence: every 30 minutes for 14 days
-  - output: `scripts/dispatch-phase5i-post-rename-soak-probe-out.txt`
-  - latest manual run: `IN_FLIGHT`, 0 fresh decisions/envelopes/closes, 0
-    hard linkage issues, 0 schema-specific log errors
+- Phase 5I closeout: `COMPLETE_POSITIVE`
+  - fresh decisions: 20
+  - fresh envelopes: 20
+  - fresh closes: 10
+  - fresh close mismatches: 0
+  - hard linkage issues: 0
+  - 30d mismatched rows: 0
+  - 30d mismatched PnL: $0.0000
+  - schema-specific log hits: 0
+- Mig 288 installed: delayed envelope `scan_pattern_id` updates now backfill
+  missing decision attribution.
 
 ## Tasks
 
-1. Let at least one fresh entry and one fresh close occur after mig 283. The
-   scheduled watcher now checks this automatically.
-2. Rerun manually when needed:
+1. Audit runtime `trading_trades` references and classify them:
+   - Keep: ORM model/table-name compatibility, writes, old API contracts.
+   - Convert: reports, dashboards, audit scripts, read-only analytics.
+   - Defer: anything touching live broker/order management.
+2. Convert a small first slice of read-only SQL to
+   `trading_management_envelopes`.
+3. Add/adjust tests around converted readers.
+4. Rerun Phase 5I probe after the cleanup:
 
    ```powershell
-   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\dispatch-phase5i-post-rename-soak-probe.ps1
+   python scripts\d-phase5i-post-rename-soak-probe.py
+   powershell -ExecutionPolicy Bypass -File scripts\dispatch-phase5i-post-rename-soak-probe.ps1
    ```
 
-3. Verify:
-   - `HARD_LINKAGE_ISSUES=0`
-   - `FRESH_CLOSE_MISMATCHES=0`
-   - `MISMATCHED_ROWS=0`
-   - `MISMATCHED_PNL=0.0000`
-4. Scan worker logs for schema-specific errors:
-   - `NoReferencedTableError`
-   - `UndefinedTable`
-   - `relation trading_* does not exist`
-   - `PendingRollbackError`
-   - `cannot truncate`
-5. If clean, write Phase 5I closeout and queue Phase 5J selective reader cleanup:
-   - Prefer `trading_management_envelopes` in new analytics/reporting SQL.
-   - Keep `trading_trades` compatibility view.
-   - Do not rename the Python `Trade` class yet.
+## Guardrails
+
+- Do not drop the `trading_trades` compatibility view.
+- Do not rename the Python `Trade` ORM class.
+- Do not touch live writer/order-placement paths unless a reader is impossible
+  to isolate.
+- Do not rewrite broad swaths mechanically; migrate reader references in small,
+  reviewable groups.
 
 ## Acceptance
 
-- Fresh post-mig-283 entry/close represented in read models.
-- Phase 5E compare remains clean.
-- No schema-specific worker errors.
-- Compatibility view still works.
-- No live trading behavior changed.
-
-## Rollback
-
-Only if a rename-specific production issue appears:
-
-```sql
-DROP VIEW IF EXISTS trading_trades;
-ALTER TABLE trading_management_envelopes RENAME TO trading_trades;
-CREATE VIEW trading_management_envelopes AS
-SELECT * FROM trading_trades;
-DELETE FROM schema_version
- WHERE version_id = '283_position_identity_phase5h_physical_rename';
-```
-
-Then force-recreate affected workers and rerun the Phase 5E compare.
+- Converted readers use `trading_management_envelopes`.
+- Live writer paths still work through the compatibility view.
+- Phase 5I probe remains `COMPLETE_POSITIVE`.
+- Tests for the converted readers pass.
 
 ## References
 
+- `docs/STRATEGY/CC_REPORTS/2026-05-30_f-position-identity-phase-5i-post-rename-soak-closeout.md`
 - `docs/STRATEGY/CC_REPORTS/2026-05-28_f-position-identity-phase-5h-production-physical-rename.md`
-- `scripts/d-phase5e-reporting-soak-probe.py`
-- `scripts/d-phase5g-rename-dry-run.py`
 - `scripts/d-phase5i-post-rename-soak-probe.py`
-- `docs/RUNBOOKS/WATCHER_phase5i_post_rename_soak.md`

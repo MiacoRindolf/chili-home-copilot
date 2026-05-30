@@ -95,11 +95,24 @@ def _main() -> int:
             SELECT
                 COUNT(*) FILTER (WHERE decision_entry_date > %s)::int AS fresh_decisions,
                 COUNT(*) FILTER (WHERE envelope_entry_date > %s)::int AS fresh_envelopes,
-                COUNT(*) FILTER (WHERE envelope_exit_date > %s)::int AS fresh_closes,
                 COUNT(*) FILTER (
                     WHERE envelope_exit_date > %s
+                      AND envelope_status = 'closed'
+                )::int AS fresh_closes,
+                COUNT(*) FILTER (
+                    WHERE envelope_exit_date > %s
+                      AND envelope_status = 'closed'
                       AND decision_scan_pattern_id IS DISTINCT FROM envelope_scan_pattern_id
                 )::int AS fresh_close_mismatches,
+                COUNT(*) FILTER (
+                    WHERE envelope_exit_date > %s
+                      AND envelope_status IS DISTINCT FROM 'closed'
+                )::int AS fresh_terminal_non_closed,
+                COUNT(*) FILTER (
+                    WHERE envelope_exit_date > %s
+                      AND envelope_status = 'cancelled'
+                      AND decision_scan_pattern_id IS DISTINCT FROM envelope_scan_pattern_id
+                )::int AS fresh_cancelled_mismatches,
                 COUNT(*) FILTER (
                     WHERE linkage_status NOT IN (
                         'linked',
@@ -108,7 +121,14 @@ def _main() -> int:
                 )::int AS hard_linkage_issues
               FROM trading_phase5b_decision_envelope_position
             """,
-            (applied_at, applied_at, applied_at, applied_at),
+            (
+                applied_at,
+                applied_at,
+                applied_at,
+                applied_at,
+                applied_at,
+                applied_at,
+            ),
         )
 
         compare = _fetch_one(
@@ -183,6 +203,8 @@ def _main() -> int:
         "fresh_envelopes",
         "fresh_closes",
         "fresh_close_mismatches",
+        "fresh_terminal_non_closed",
+        "fresh_cancelled_mismatches",
         "hard_linkage_issues",
     ):
         print(f"{key.upper()}={gate.get(key)}")
