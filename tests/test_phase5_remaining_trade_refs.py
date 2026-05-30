@@ -22,15 +22,41 @@ def _load_module():
 def test_classifies_known_reference_owners() -> None:
     module = _load_module()
 
-    assert module.classify_path("app/services/trading/attribution_service.py").bucket == (
-        "evidence_model_capital_reader"
+    assert module.classify_reference_contract(
+        "app/services/trading/new_reader.py",
+        {
+            "raw_readers": ["FROM trading_trades"],
+            "raw_mutations": [],
+            "table_symbols": [],
+            "model_symbols": [],
+        },
+    ).bucket == "unexpected_runtime_reader"
+    assert module.classify_reference_contract(
+        "app/services/trading/auto_trader.py",
+        {
+            "raw_readers": [],
+            "raw_mutations": ["UPDATE trading_trades"],
+            "table_symbols": [],
+            "model_symbols": [],
+        },
+    ).bucket == (
+        "allowed_compatibility_writer_update"
     )
-    assert module.classify_path("app/services/trading/venue/coinbase_orphan_adopt.py").bucket == (
-        "live_writer_order_broker_reconcile"
+    assert module.classify_reference_contract(
+        "app/services/trading/venue/coinbase_orphan_adopt.py",
+        {
+            "raw_readers": [],
+            "raw_mutations": [],
+            "table_symbols": [],
+            "model_symbols": ["Trade"],
+        },
+    ).bucket == (
+        "orm_trade_symbol_compat"
     )
     assert module.classify_path("tests/test_position_identity.py").bucket == (
         "compatibility_migration_test_history"
     )
+    assert module.classify_path("docs/RUNBOOKS/phase5.md").bucket == "docs_runbooks"
     assert module.classify_path("scripts/analyze_phase5_remaining_trade_refs.py").bucket == (
         "compatibility_migration_test_history"
     )
@@ -53,21 +79,24 @@ def test_build_inventory_scans_sources_and_skips_workspace_noise(tmp_path: Path)
 
     report = module.build_inventory(tmp_path, include_dirs=("app", "project_ws"))
 
-    assert report["ok"] is True
+    assert report["ok"] is False
     assert report["file_count"] == 2
     assert report["raw_sql_file_count"] == 1
-    assert report["raw_reader_buckets"] == {"evidence_model_capital_reader": 1}
+    assert report["raw_reader_buckets"] == {"unexpected_runtime_reader": 1}
     assert report["buckets"] == {
-        "evidence_model_capital_reader": 1,
-        "unclassified_trade_surface_reference": 1,
+        "orm_trade_symbol_compat": 1,
+        "unexpected_runtime_reader": 1,
     }
+    assert report["unexpected_runtime_readers"] == [
+        "app/services/trading/attribution_service.py"
+    ]
     assert [entry["path"] for entry in report["entries"]] == [
         "app/services/trading/attribution_service.py",
         "app/services/trading/new_reader.py",
     ]
     assert [entry["reference_kind"] for entry in report["entries"]] == [
         "raw_sql_reader",
-        "symbol_or_text_reference",
+        "orm_symbol",
     ]
 
 
@@ -81,10 +110,30 @@ def test_live_order_paths_are_kept_distinct_from_analytics_readers(tmp_path: Pat
 
     report = module.build_inventory(tmp_path, include_dirs=("app",))
 
-    assert report["buckets"] == {"live_writer_order_broker_reconcile": 1}
-    assert report["raw_reader_buckets"] == {"live_writer_order_broker_reconcile": 1}
+    assert report["ok"] is False
+    assert report["buckets"] == {"unexpected_runtime_reader": 1}
+    assert report["raw_reader_buckets"] == {"unexpected_runtime_reader": 1}
     assert report["raw_sql_file_count"] == 1
-    assert report["entries"][0]["owner"] == "Algo Trader Architect / Risk"
+    assert report["unexpected_runtime_readers"] == [
+        "app/services/trading/venue/coinbase_orphan_adopt.py"
+    ]
+
+
+def test_writer_updates_are_allowed_when_owned_by_live_broker_path(tmp_path: Path) -> None:
+    module = _load_module()
+    trading_dir = tmp_path / "app" / "services" / "trading"
+    trading_dir.mkdir(parents=True)
+    (trading_dir / "auto_trader.py").write_text(
+        "UPDATE trading_trades SET status = 'open' WHERE id = :id\n",
+        encoding="utf-8",
+    )
+
+    report = module.build_inventory(tmp_path, include_dirs=("app",))
+
+    assert report["ok"] is True
+    assert report["buckets"] == {"allowed_compatibility_writer_update": 1}
+    assert report["entries"][0]["reference_kind"] == "raw_sql_mutation"
+    assert report["entries"][0]["raw_mutation_references"] == ["UPDATE trading_trades"]
 
 
 def test_raw_sql_only_filters_symbol_and_doc_references(tmp_path: Path) -> None:
@@ -92,10 +141,12 @@ def test_raw_sql_only_filters_symbol_and_doc_references(tmp_path: Path) -> None:
     app_dir = tmp_path / "app" / "services" / "trading"
     app_dir.mkdir(parents=True)
     (app_dir / "doc_only.py").write_text(
-        '"""Mentions trading_trades and Trade without reading it."""\n', encoding="utf-8"
+        '"""Mentions trading_trades and Trade without reading it."""\n',
+        encoding="utf-8",
     )
     (app_dir / "pattern_regime_ledger.py").write_text(
-        "SELECT * FROM trading_trades t WHERE t.status = 'closed'\n", encoding="utf-8"
+        "SELECT * FROM trading_trades t WHERE t.status = 'closed'\n",
+        encoding="utf-8",
     )
 
     report = module.build_inventory(tmp_path, include_dirs=("app",), raw_sql_only=True)
