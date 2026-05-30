@@ -7,11 +7,32 @@ management envelope.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+
+PHASE5K_POSITION_INTEGRITY_ENV = "CHILI_PHASE5K_POSITION_INTEGRITY_USE_ENVELOPES"
+_POSITION_INTEGRITY_COMPAT_RELATION = "trading_trades"
+_POSITION_INTEGRITY_ENVELOPE_RELATION = "trading_management_envelopes"
+
+
+def _truthy_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _position_integrity_source_relation(use_envelopes: bool | None = None) -> str:
+    if use_envelopes is None:
+        use_envelopes = _truthy_flag(os.environ.get(PHASE5K_POSITION_INTEGRITY_ENV))
+    if use_envelopes:
+        return _POSITION_INTEGRITY_ENVELOPE_RELATION
+    return _POSITION_INTEGRITY_COMPAT_RELATION
 
 
 @dataclass(frozen=True)
@@ -59,15 +80,21 @@ def _rows(db: Session, sql: str, params: dict[str, Any] | None = None) -> list[d
         return [dict(r._mapping) for r in result.fetchall()]
 
 
-def audit_position_identity(db: Session, *, limit: int = 100) -> PositionIntegrityReport:
+def audit_position_identity(
+    db: Session,
+    *,
+    limit: int = 100,
+    use_envelopes: bool | None = None,
+) -> PositionIntegrityReport:
     """Return the current position/envelope invariant breaks.
 
     The report intentionally does not mutate. It is safe for dashboards,
     health checks, and pre-live readiness checks.
     """
     lim = max(1, int(limit or 100))
+    relation = _position_integrity_source_relation(use_envelopes)
 
-    open_positions_without_open_trade = _rows(db, """
+    open_positions_without_open_trade = _rows(db, f"""
         SELECT p.id AS position_id, p.user_id, p.broker_source, p.account_type,
                p.ticker, p.direction, p.current_quantity, p.current_avg_price,
                p.current_envelope_id, p.last_observed_at
@@ -75,7 +102,7 @@ def audit_position_identity(db: Session, *, limit: int = 100) -> PositionIntegri
         WHERE p.state = 'open'
           AND NOT EXISTS (
               SELECT 1
-              FROM trading_trades t
+              FROM {relation} t
               WHERE t.status = 'open'
                 AND t.user_id = p.user_id
                 AND LOWER(COALESCE(t.broker_source, '')) = p.broker_source
@@ -86,11 +113,11 @@ def audit_position_identity(db: Session, *, limit: int = 100) -> PositionIntegri
         LIMIT :limit
     """, {"limit": lim})
 
-    open_trades_without_open_position = _rows(db, """
+    open_trades_without_open_position = _rows(db, f"""
         SELECT t.id AS trade_id, t.user_id, LOWER(COALESCE(t.broker_source, '')) AS broker_source,
                t.ticker, LOWER(COALESCE(t.direction, 'long')) AS direction,
                t.quantity, t.entry_price, t.entry_date
-        FROM trading_trades t
+        FROM {relation} t
         WHERE t.status = 'open'
           AND NOT EXISTS (
               SELECT 1
@@ -116,7 +143,7 @@ def audit_position_identity(db: Session, *, limit: int = 100) -> PositionIntegri
         LIMIT :limit
     """, {"limit": lim})
 
-    current_envelope_mismatches = _rows(db, """
+    current_envelope_mismatches = _rows(db, f"""
         SELECT p.id AS position_id, p.user_id AS position_user_id,
                p.broker_source AS position_broker_source, p.ticker AS position_ticker,
                p.direction AS position_direction, p.current_envelope_id,
@@ -125,7 +152,7 @@ def audit_position_identity(db: Session, *, limit: int = 100) -> PositionIntegri
                t.ticker AS trade_ticker, LOWER(COALESCE(t.direction, 'long')) AS trade_direction,
                t.status AS trade_status
         FROM trading_positions p
-        LEFT JOIN trading_trades t ON t.id = p.current_envelope_id
+        LEFT JOIN {relation} t ON t.id = p.current_envelope_id
         WHERE p.current_envelope_id IS NOT NULL
           AND (
               t.id IS NULL
@@ -139,13 +166,13 @@ def audit_position_identity(db: Session, *, limit: int = 100) -> PositionIntegri
         LIMIT :limit
     """, {"limit": lim})
 
-    repairable_current_envelope_links = _rows(db, """
+    repairable_current_envelope_links = _rows(db, f"""
         WITH matches AS (
             SELECT p.id AS position_id,
                    MIN(t.id) AS trade_id,
                    COUNT(*) AS open_trade_count
             FROM trading_positions p
-            JOIN trading_trades t
+            JOIN {relation} t
               ON t.status = 'open'
              AND t.user_id = p.user_id
              AND LOWER(COALESCE(t.broker_source, '')) = p.broker_source
@@ -171,7 +198,12 @@ def audit_position_identity(db: Session, *, limit: int = 100) -> PositionIntegri
     )
 
 
-def repair_current_envelope_links(db: Session, *, dry_run: bool = True) -> dict[str, Any]:
+def repair_current_envelope_links(
+    db: Session,
+    *,
+    dry_run: bool = True,
+    use_envelopes: bool | None = None,
+) -> dict[str, Any]:
     """Repair ``trading_positions.current_envelope_id`` safely.
 
     This does not create/close trades or positions. It clears pointers that no
@@ -179,10 +211,11 @@ def repair_current_envelope_links(db: Session, *, dry_run: bool = True) -> dict[
     open position has exactly one matching open trade by natural key. Ambiguous
     or missing matches stay untouched for human/ops review.
     """
-    stale_candidates = _rows(db, """
+    relation = _position_integrity_source_relation(use_envelopes)
+    stale_candidates = _rows(db, f"""
         SELECT p.id AS position_id, p.current_envelope_id
         FROM trading_positions p
-        LEFT JOIN trading_trades t ON t.id = p.current_envelope_id
+        LEFT JOIN {relation} t ON t.id = p.current_envelope_id
         WHERE p.current_envelope_id IS NOT NULL
           AND (
               t.id IS NULL
@@ -195,13 +228,13 @@ def repair_current_envelope_links(db: Session, *, dry_run: bool = True) -> dict[
         ORDER BY p.id
     """)
 
-    candidates = _rows(db, """
+    candidates = _rows(db, f"""
         WITH matches AS (
             SELECT p.id AS position_id,
                    MIN(t.id) AS trade_id,
                    COUNT(*) AS open_trade_count
             FROM trading_positions p
-            JOIN trading_trades t
+            JOIN {relation} t
               ON t.status = 'open'
              AND t.user_id = p.user_id
              AND LOWER(COALESCE(t.broker_source, '')) = p.broker_source
@@ -228,11 +261,11 @@ def repair_current_envelope_links(db: Session, *, dry_run: bool = True) -> dict[
             "stale_candidates": stale_candidates,
         }
 
-    clear_result = db.execute(text("""
+    clear_result = db.execute(text(f"""
         WITH bad AS (
             SELECT p.id AS position_id
             FROM trading_positions p
-            LEFT JOIN trading_trades t ON t.id = p.current_envelope_id
+            LEFT JOIN {relation} t ON t.id = p.current_envelope_id
             WHERE p.current_envelope_id IS NOT NULL
               AND (
                   t.id IS NULL
@@ -250,13 +283,13 @@ def repair_current_envelope_links(db: Session, *, dry_run: bool = True) -> dict[
          WHERE p.id = bad.position_id
     """))
 
-    result = db.execute(text("""
+    result = db.execute(text(f"""
         WITH matches AS (
             SELECT p.id AS position_id,
                    MIN(t.id) AS trade_id,
                    COUNT(*) AS open_trade_count
             FROM trading_positions p
-            JOIN trading_trades t
+            JOIN {relation} t
               ON t.status = 'open'
              AND t.user_id = p.user_id
              AND LOWER(COALESCE(t.broker_source, '')) = p.broker_source

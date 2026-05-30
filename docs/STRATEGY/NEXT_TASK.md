@@ -1,16 +1,14 @@
-# NEXT_TASK: f-position-identity-phase-5k-g-position-integrity-reader-flag
+# NEXT_TASK: f-position-identity-phase-5k-g-position-integrity-flag-soak
 
 STATUS: PENDING
 
 ## Goal
 
-Cut over the position-integrity open-position reader with the same single-reader
-default-off pattern used in Phase 5K-C through Phase 5K-F.
-
-This reader already matched in the Phase 5K parity probe:
+Flip and soak the default-off position-integrity reader flag shipped in Phase
+5K-G.
 
 ```text
-CHECK_POSITION_INTEGRITY_OPEN=OK old_rows=5 new_rows=5
+CHILI_PHASE5K_POSITION_INTEGRITY_USE_ENVELOPES=false  # default-off code shipped
 ```
 
 ## Current State
@@ -20,20 +18,24 @@ CHECK_POSITION_INTEGRITY_OPEN=OK old_rows=5 new_rows=5
 - Cohort-promote realized reader is live on `trading_management_envelopes`.
 - Pattern-quality realized reader is live on `trading_management_envelopes`.
 - Portfolio-risk drawdown reader is live on `trading_management_envelopes`.
+- Position-integrity reader has a default-off flag.
 - Phase 5K-A parity remains `COMPLETE_POSITIVE`.
-- Phase 5I post-rename soak remains `COMPLETE_POSITIVE`.
+- Direct old/new position-integrity audit and dry-run repair checks match.
 
-## Implementation Shape
+## Soak Shape
 
-1. Locate `position_integrity.py` reads that still use `trading_trades`.
-2. Add a default-off reader switch:
-   `CHILI_PHASE5K_POSITION_INTEGRITY_USE_ENVELOPES=false`.
-3. Preserve every filter, join, state predicate, and position-integrity verdict
-   exactly.
-4. Add focused tests for OFF/ON relation selection.
-5. Run Phase 5K-A and a direct old/new function-level check.
-6. Commit/push the default-off code.
-7. If green, flip and soak the flag in the consumer worker(s).
+1. Set `CHILI_PHASE5K_POSITION_INTEGRITY_USE_ENVELOPES=true` in `.env`.
+2. Recreate consumer workers that call position-integrity helpers:
+   - `chili`
+   - `broker-sync-worker`
+   - `autotrader-worker` only if runtime imports require it
+3. Verify runtime flag visibility.
+4. Re-run:
+   - Phase 5K-A parity probe
+   - Phase 5I post-rename soak probe
+   - direct old/new position-integrity audit + dry-run repair comparison
+5. Scan logs for position-integrity / relation / query errors.
+6. If clean, promote Phase 5K-G and choose the next live-path reader.
 
 ## Guardrails
 
@@ -44,6 +46,5 @@ CHECK_POSITION_INTEGRITY_OPEN=OK old_rows=5 new_rows=5
 
 ## Rollback
 
-The flag must default false. If the live soak misbehaves, set
-`CHILI_PHASE5K_POSITION_INTEGRITY_USE_ENVELOPES=false` and recreate the affected
-consumer worker(s).
+Set `CHILI_PHASE5K_POSITION_INTEGRITY_USE_ENVELOPES=false` and recreate the
+same consumer worker(s).
