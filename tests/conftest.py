@@ -20,12 +20,12 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
 from fastapi.testclient import TestClient
 
 
 _PYTEST_DB_LOCK_CLASSID = 0x4348494C
 _PYTEST_DB_LOCK_OBJID = 0x54455354
+_pytest_db_lock_engine = None
 
 
 def _hydrate_test_database_url_from_dotenv() -> None:
@@ -603,11 +603,7 @@ def _pytest_db_isolation_lock():
         yield
         return
 
-    lock_engine = create_engine(
-        engine.url.render_as_string(hide_password=False),
-        poolclass=NullPool,
-        future=True,
-    )
+    lock_engine = _get_pytest_db_lock_engine()
     conn = lock_engine.connect()
     locked = False
     try:
@@ -655,7 +651,26 @@ def _pytest_db_isolation_lock():
             except Exception:
                 conn.rollback()
         conn.close()
-        lock_engine.dispose()
+
+
+def _get_pytest_db_lock_engine():
+    """Reuse the pytest advisory-lock socket instead of opening one per test.
+
+    Windows can temporarily exhaust local TCP ports when a focused DB suite
+    rapidly creates short-lived PostgreSQL connections. A one-connection pool
+    preserves the session-level advisory lock behavior while avoiding socket
+    churn between tests.
+    """
+    global _pytest_db_lock_engine
+    if _pytest_db_lock_engine is None:
+        _pytest_db_lock_engine = create_engine(
+            engine.url.render_as_string(hide_password=False),
+            pool_size=1,
+            max_overflow=0,
+            pool_pre_ping=True,
+            future=True,
+        )
+    return _pytest_db_lock_engine
 
 
 @pytest.fixture()

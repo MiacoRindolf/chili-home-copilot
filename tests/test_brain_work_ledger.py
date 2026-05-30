@@ -40,6 +40,85 @@ def test_enqueue_work_open_dedupe_second_returns_none(db) -> None:
     assert b is None
 
 
+def test_enqueue_work_recent_done_dedupe_second_returns_none(db) -> None:
+    key = "bt_req:recent-done-dedupe"
+    first = enqueue_work_event(
+        db,
+        event_type="backtest_requested",
+        dedupe_key=key,
+        payload={"scan_pattern_id": 424245, "source": "recert_rescue_refresh"},
+        lease_scope="backtest",
+    )
+    db.commit()
+    assert first is not None
+
+    mark_work_done(db, int(first))
+    db.commit()
+
+    duplicate = enqueue_work_event(
+        db,
+        event_type="backtest_requested",
+        dedupe_key=key,
+        payload={"scan_pattern_id": 424245, "source": "recert_rescue_refresh"},
+        lease_scope="backtest",
+    )
+    db.commit()
+
+    rows = db.query(BrainWorkEvent).filter(BrainWorkEvent.dedupe_key == key).all()
+    assert duplicate is None
+    assert [int(row.id) for row in rows] == [first]
+
+
+def test_enqueue_work_allows_same_dedupe_after_done_window(db) -> None:
+    key = "edge_reliability_refresh:p424246:astock:w30:old-fp"
+    minutes = int(getattr(ledger_mod.settings, "brain_work_recent_done_dedupe_minutes", 120))
+    old_at = datetime.utcnow() - timedelta(minutes=minutes + 5)
+    done = BrainWorkEvent(
+        domain="trading",
+        event_type="edge_reliability_refresh",
+        event_kind="work",
+        dedupe_key=key,
+        payload={
+            "scan_pattern_id": 424246,
+            "asset_class": "stock",
+            "evidence_fingerprint": "old-fp",
+        },
+        lease_scope="edge",
+        status="done",
+        attempts=1,
+        max_attempts=5,
+        next_run_at=old_at,
+        processed_at=old_at,
+        created_at=old_at,
+        updated_at=old_at,
+    )
+    db.add(done)
+    db.commit()
+
+    refreshed = enqueue_work_event(
+        db,
+        event_type="edge_reliability_refresh",
+        dedupe_key=key,
+        payload={
+            "scan_pattern_id": 424246,
+            "asset_class": "stock",
+            "evidence_fingerprint": "old-fp",
+        },
+        lease_scope="edge",
+    )
+    db.commit()
+
+    rows = (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.dedupe_key == key)
+        .order_by(BrainWorkEvent.id.asc())
+        .all()
+    )
+    assert refreshed is not None
+    assert refreshed != int(done.id)
+    assert [row.status for row in rows] == ["done", "pending"]
+
+
 def test_emit_backtest_requested_carries_evidence_payload(db) -> None:
     eid = emit_backtest_requested_for_pattern(
         db,

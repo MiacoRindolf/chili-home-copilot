@@ -59,6 +59,48 @@ def _transient_recovery_claim_rank(ev: BrainWorkEvent) -> int:
     return 1
 
 
+def _recent_done_dedupe_cutoff() -> datetime | None:
+    """Return the central completed-work dedupe cutoff, or None when disabled."""
+    try:
+        minutes = int(getattr(settings, "brain_work_recent_done_dedupe_minutes", 120))
+    except (TypeError, ValueError):
+        minutes = 120
+    if minutes <= 0:
+        return None
+    return datetime.utcnow() - timedelta(minutes=minutes)
+
+
+def _recent_completed_work_exists(
+    db: Session,
+    *,
+    event_type: str,
+    dedupe_key: str,
+) -> bool:
+    """True when identical fingerprinted work already completed recently.
+
+    Dedupe keys are expected to include the evidence/config fingerprint. A
+    recent done row therefore means rerunning the same work would only churn
+    the queue until new evidence changes the key.
+    """
+    cutoff = _recent_done_dedupe_cutoff()
+    if cutoff is None:
+        return False
+    return (
+        db.query(BrainWorkEvent.id)
+        .filter(
+            BrainWorkEvent.domain == "trading",
+            BrainWorkEvent.event_kind == "work",
+            BrainWorkEvent.event_type == event_type,
+            BrainWorkEvent.dedupe_key == dedupe_key,
+            BrainWorkEvent.status == "done",
+            BrainWorkEvent.updated_at >= cutoff,
+        )
+        .order_by(BrainWorkEvent.updated_at.desc().nullslast(), BrainWorkEvent.id.desc())
+        .first()
+        is not None
+    )
+
+
 def enqueue_work_event(
     db: Session,
     *,
@@ -70,7 +112,11 @@ def enqueue_work_event(
     max_attempts: Optional[int] = None,
     lease_scope: str = "general",
 ) -> int | None:
-    """Insert a pending work item. Returns id, or None if an open row with same dedupe_key exists or disabled."""
+    """Insert a pending work item.
+
+    Returns id, or None if an equivalent open/recently-completed row exists or
+    the ledger is disabled.
+    """
     if not brain_work_ledger_enabled():
         return None
     ma = max_attempts if max_attempts is not None else int(
@@ -80,12 +126,27 @@ def enqueue_work_event(
     open_exists = (
         db.query(BrainWorkEvent.id)
         .filter(
+            BrainWorkEvent.domain == "trading",
+            BrainWorkEvent.event_kind == "work",
+            BrainWorkEvent.event_type == event_type,
             BrainWorkEvent.dedupe_key == dedupe_key,
             BrainWorkEvent.status.in_(("pending", "processing", "retry_wait")),
         )
         .first()
     )
     if open_exists:
+        return None
+    if _recent_completed_work_exists(
+        db,
+        event_type=event_type,
+        dedupe_key=dedupe_key,
+    ):
+        logger.debug(
+            "%s suppressed recent completed duplicate type=%s dedupe=%s",
+            LOG_PREFIX,
+            event_type,
+            dedupe_key,
+        )
         return None
     payload_dict = dict(payload or {})
     recovered_dead_id = _reuse_retryable_dead_dedupe(
