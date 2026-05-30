@@ -1,6 +1,7 @@
 """Trading Brain opportunity board: tiered manual-trading view (shared scoring with imminent)."""
 from __future__ import annotations
 
+import heapq
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -33,6 +34,24 @@ OPPORTUNITY_ENGINE_PREDICTION = "prediction_context"
 OPPORTUNITY_ENGINE_SCANNER = "scanner_context"
 OPPORTUNITY_ENGINE_UNIVERSE = "universe_context"
 OPPORTUNITY_ENGINE_PATTERN_RESEARCH = "pattern_research"
+
+
+def _tier_strength_key(row: dict[str, Any]) -> tuple[int, float]:
+    return (
+        0 if row.get("composite") is not None else 1,
+        -float(row.get("composite") or 0.0),
+    )
+
+
+def _top_tier_rows(
+    rows: list[dict[str, Any]],
+    limit: int,
+) -> tuple[list[dict[str, Any]], bool]:
+    if limit <= 0:
+        return [], bool(rows)
+    if len(rows) <= limit:
+        return sorted(rows, key=_tier_strength_key), False
+    return heapq.nsmallest(limit, rows, key=_tier_strength_key), True
 
 
 def _safe_float(value: Any, default: float | None = None) -> float | None:
@@ -862,10 +881,6 @@ def get_trading_opportunity_board(
     tier_c.extend(scan_c)
     tier_c.extend(_prescreener_fallback_rows(db, seen, max_rows=ps_max))
 
-    # Re-sort tiers so stronger pattern rows stay first; fallbacks follow.
-    tier_b.sort(key=lambda x: (0 if x.get("composite") is not None else 1, -(x.get("composite") or 0)))
-    tier_c.sort(key=lambda x: (0 if x.get("composite") is not None else 1, -(x.get("composite") or 0)))
-
     caps = {
         "A": int(settings.opportunity_max_tier_a),
         "B": int(settings.opportunity_max_tier_b),
@@ -887,8 +902,9 @@ def get_trading_opportunity_board(
         return lst[:n], True
 
     tier_a, more_a = cap(tier_a, max_a)
-    tier_b, more_b = cap(tier_b, max_b)
-    tier_c, more_c = cap(tier_c, max_c)
+    # Re-rank tiers so stronger pattern rows stay first; fallbacks follow.
+    tier_b, more_b = _top_tier_rows(tier_b, max_b)
+    tier_c, more_c = _top_tier_rows(tier_c, max_c)
 
     tier_d: list[dict] = []
     if include_research:
