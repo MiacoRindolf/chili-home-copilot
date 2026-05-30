@@ -138,6 +138,43 @@ def test_apply_execution_event_to_trade_partial_fill_updates_fill_state():
     assert trade.avg_fill_price == 100.5
 
 
+def test_apply_execution_event_to_trade_filled_zero_quantity_is_not_open():
+    trade = SimpleNamespace(
+        quantity=10.0,
+        filled_quantity=None,
+        remaining_quantity=None,
+        submitted_at=None,
+        acknowledged_at=None,
+        first_fill_at=None,
+        last_fill_at=None,
+        filled_at=None,
+        avg_fill_price=None,
+        entry_price=100.0,
+        status="working",
+        broker_status="accepted",
+        last_broker_sync=None,
+    )
+    event = SimpleNamespace(
+        requested_quantity=10.0,
+        cumulative_filled_quantity=0.0,
+        average_fill_price=None,
+        submitted_at=datetime.utcnow(),
+        acknowledged_at=datetime.utcnow(),
+        first_fill_at=None,
+        last_fill_at=None,
+        event_at=datetime.utcnow(),
+        status="filled",
+    )
+
+    apply_execution_event_to_trade(trade, event)
+
+    assert trade.status == "cancelled"
+    assert trade.broker_status == "filled_zero_quantity"
+    assert trade.filled_quantity == 0.0
+    assert trade.remaining_quantity == 0.0
+    assert trade.filled_at is None
+
+
 def test_aggregate_execution_events_partial_fill_then_cancel(db):
     user = User(name="Exec Audit")
     db.add(user)
@@ -240,4 +277,3 @@ def test_aggregate_execution_events_partial_fill_then_cancel(db):
     assert stats["fill_rate"] == 1.0
     assert stats["partial_fill_rate"] == 1.0
     assert stats["provider_truth_mode"] == "broker_event_audited"
-

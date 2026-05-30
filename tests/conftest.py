@@ -13,13 +13,19 @@ from __future__ import annotations
 import json
 import os
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import NullPool
 from fastapi.testclient import TestClient
+
+
+_PYTEST_DB_LOCK_CLASSID = 0x4348494C
+_PYTEST_DB_LOCK_OBJID = 0x54455354
 
 
 def _hydrate_test_database_url_from_dotenv() -> None:
@@ -211,6 +217,7 @@ _TRADING_DOMAIN_TARGETED_TESTS = (
     "test_brain_work_ledger.py",
     "test_canonical_outcome_layer.py",
     "test_cash_deployment.py",
+    "test_coinbase_zero_fill_guard.py",
     "test_composite_reweight.py",
     "test_cpcv_promotion_gate.py",
     "test_crypto_exit_monitor_pattern_exit_now.py",
@@ -511,6 +518,55 @@ def _reset_trading_test_process_state() -> None:
         pass
 
 
+@contextmanager
+def _pytest_db_isolation_lock():
+    """Serialize DB-backed tests that share the dedicated pytest database.
+
+    The fixture truncates most application tables before each DB test. Running
+    multiple pytest processes against the same ``*_test`` database can deadlock
+    when two sessions try to TRUNCATE/DELETE overlapping FK graphs at once.
+    Hold a session-level advisory lock across setup and the test body so DB
+    tests are isolated even when focused pytest commands overlap.
+    """
+    if os.environ.get("CHILI_PYTEST_DB_LOCK_DISABLED", "").lower() in {"1", "true", "yes"}:
+        yield
+        return
+
+    lock_engine = create_engine(
+        engine.url.render_as_string(hide_password=False),
+        poolclass=NullPool,
+        future=True,
+    )
+    conn = lock_engine.connect()
+    locked = False
+    try:
+        conn.execute(
+            text("SELECT pg_advisory_lock(:classid, :objid)"),
+            {
+                "classid": _PYTEST_DB_LOCK_CLASSID,
+                "objid": _PYTEST_DB_LOCK_OBJID,
+            },
+        )
+        conn.commit()
+        locked = True
+        yield
+    finally:
+        if locked:
+            try:
+                conn.execute(
+                    text("SELECT pg_advisory_unlock(:classid, :objid)"),
+                    {
+                        "classid": _PYTEST_DB_LOCK_CLASSID,
+                        "objid": _PYTEST_DB_LOCK_OBJID,
+                    },
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+        conn.close()
+        lock_engine.dispose()
+
+
 @pytest.fixture()
 def db(request):
     """Yield a DB session; tables are truncated at test start.
@@ -519,18 +575,19 @@ def db(request):
     the app lifespan open; post-test truncate races request/engine cleanup and caused
     teardown errors (lock timeout) after PASSED.
     """
-    _bootstrap_test_schema()
-    _reset_trading_test_process_state()
-    _truncate_app_tables(_test_targeted_cleanup_tables(request))
-    if _test_needs_default_trading_users(request):
-        _seed_default_trading_users()
-    SessionTesting = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-    session = SessionTesting()
-    try:
-        yield session
-    finally:
-        session.close()
+    with _pytest_db_isolation_lock():
+        _bootstrap_test_schema()
         _reset_trading_test_process_state()
+        _truncate_app_tables(_test_targeted_cleanup_tables(request))
+        if _test_needs_default_trading_users(request):
+            _seed_default_trading_users()
+        SessionTesting = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+        session = SessionTesting()
+        try:
+            yield session
+        finally:
+            session.close()
+            _reset_trading_test_process_state()
 
 
 @pytest.fixture()

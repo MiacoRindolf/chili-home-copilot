@@ -480,11 +480,41 @@ def _apply_terminal_state(t: Trade, broker_status: str, raw: dict[str, Any] | No
     t.broker_status = bs or t.broker_status
     t.last_broker_sync = datetime.utcnow()
     if bs in _TERMINAL_FILLED:
+        filled_size = _raw_order_filled_size(raw)
+        if filled_size <= 0.0:
+            t.broker_status = "filled_zero_quantity"
+            if t.filled_quantity is None:
+                t.filled_quantity = 0.0
+            if str(getattr(t, "broker_source", "") or "").strip().lower() == "coinbase":
+                # Coinbase has been observed returning FILLED with zero size
+                # from the order endpoint while fills/account positions already
+                # contain the real inventory. Leave the entry working for
+                # coinbase_service's fill/position truth reconciler instead of
+                # locally erasing broker-held exposure.
+                return
+            t.status = "cancelled"
+            t.filled_quantity = 0.0
+            t.remaining_quantity = 0.0
+            if not t.exit_reason:
+                t.exit_reason = "stuck_order_terminal_filled_zero_quantity"
+            return
         t.status = "open"
+        t.filled_quantity = max(float(t.filled_quantity or 0.0), filled_size)
+        requested = _as_float(getattr(t, "quantity", None))
+        if requested is not None and requested > 0.0:
+            t.remaining_quantity = max(0.0, requested - t.filled_quantity)
+        elif not getattr(t, "quantity", None):
+            t.quantity = filled_size
+            t.remaining_quantity = 0.0
         # Don't flip status=closed — a FILLED entry is an *opened* position.
         # The exit evaluator closes when the exit fills. Leave status='open'.
         if raw:
-            avg = raw.get("average_price") or raw.get("price")
+            avg = (
+                raw.get("average_filled_price")
+                or raw.get("averageFilledPrice")
+                or raw.get("average_price")
+                or raw.get("price")
+            )
             try:
                 if avg is not None:
                     t.avg_fill_price = float(avg)
@@ -542,6 +572,24 @@ def _as_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _raw_order_filled_size(raw: dict[str, Any] | None) -> float:
+    if not raw:
+        return 0.0
+    for key in (
+        "filled_size",
+        "filledSize",
+        "filled_quantity",
+        "filledQuantity",
+        "cumulative_quantity",
+        "processed_quantity",
+        "executed_quantity",
+    ):
+        value = _as_float(raw.get(key))
+        if value is not None:
+            return max(0.0, value)
+    return 0.0
 
 
 def _order_filled_size(order_normalized: Any) -> float:

@@ -392,6 +392,32 @@ class TestStagedFetchBrokerStage:
         assert batch.broker_views[1].ticker == "BBB"
         assert batch.broker_views[1].available is False
 
+    def test_preserves_parallel_views_for_duplicate_ticker_rows(self):
+        batch = SweepBatch(
+            sweep_id="x", mode="shadow", tolerances=Tolerances(),
+            local_views=[
+                _local(trade_id=1, ticker="ACX-USD", broker_source="coinbase", quantity=3822.0),
+                _local(trade_id=2, ticker="ACX-USD", broker_source="coinbase", quantity=7641.8),
+                _local(trade_id=3, ticker="ACX-USD", broker_source="coinbase", quantity=3822.0),
+            ],
+        )
+
+        def broker_fn(local_rows):
+            assert [row["trade_id"] for row in local_rows] == [1, 2, 3]
+            return [
+                _bv(ticker="ACX-USD", broker_source="coinbase", stop_order_id="covered"),
+                _bv(ticker="ACX-USD", broker_source="coinbase", stop_order_id=None),
+                _bv(ticker="ACX-USD", broker_source="coinbase", stop_order_id="covered"),
+            ]
+
+        _stage_fetch_broker(batch, broker_fn)
+
+        assert [bv.stop_order_id for bv in batch.broker_views] == [
+            "covered",
+            None,
+            "covered",
+        ]
+
 
 class TestStagedLoadLocalStage:
     """``_stage_load_local`` populates ``local_views`` via the scope query."""

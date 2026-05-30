@@ -158,6 +158,18 @@ def _tolerances_from_settings() -> Tolerances:
 BrokerViewFn = Callable[[list[dict[str, Any]]], list[BrokerView]]
 
 
+def _broker_view_matches_row(bv: BrokerView, row: dict[str, Any] | LocalView) -> bool:
+    ticker = row.ticker if isinstance(row, LocalView) else row.get("ticker")
+    broker_source = (
+        row.broker_source if isinstance(row, LocalView) else row.get("broker_source")
+    )
+    return (
+        str(bv.ticker or "").upper() == str(ticker or "").upper()
+        and str(bv.broker_source or "").lower()
+        == str(broker_source or "").lower()
+    )
+
+
 def _noop_broker_view_fn(local_rows: list[dict[str, Any]]) -> list[BrokerView]:
     """Default broker provider: flags every ticker as ``available=False``.
 
@@ -775,8 +787,12 @@ def _stage_fetch_broker(batch: SweepBatch, broker_view_fn: BrokerViewFn) -> None
     raw_views = broker_view_fn(broker_input)
     by_key = {(bv.ticker, bv.broker_source): bv for bv in raw_views}
     aligned: list[BrokerView] = []
-    for lv in batch.local_views:
-        bv = by_key.get((lv.ticker, lv.broker_source))
+    for idx, lv in enumerate(batch.local_views):
+        bv = raw_views[idx] if idx < len(raw_views) else None
+        if bv is not None and not _broker_view_matches_row(bv, lv):
+            bv = None
+        if bv is None:
+            bv = by_key.get((lv.ticker, lv.broker_source))
         if bv is None:
             bv = BrokerView(
                 available=False,
@@ -2332,9 +2348,13 @@ def _run_sweep_legacy(
     rows_written = 0
     decisions: list[dict[str, Any]] = []
 
-    for row in local_rows:
+    for idx, row in enumerate(local_rows):
         local = _row_to_local_view(row)
-        broker = broker_by_ticker.get((local.ticker, local.broker_source))
+        broker = broker_views[idx] if idx < len(broker_views) else None
+        if broker is not None and not _broker_view_matches_row(broker, local):
+            broker = None
+        if broker is None:
+            broker = broker_by_ticker.get((local.ticker, local.broker_source))
         if broker is None:
             broker = BrokerView(
                 available=False,

@@ -367,32 +367,116 @@ def get_portfolio() -> dict[str, Any]:
     return result
 
 
-def _get_cost_basis_from_fills(product_id: str) -> float:
+def _fill_payload(fill: Any) -> dict[str, Any]:
+    if isinstance(fill, dict):
+        return fill
+    return getattr(fill, "__dict__", {}) if hasattr(fill, "__dict__") else {}
+
+
+def _fill_commission_quote(fd: dict[str, Any]) -> float:
+    detail = fd.get("commission_detail_total")
+    if isinstance(detail, dict):
+        total = _safe_float(detail.get("total_commission"))
+        if total > 0:
+            return total
+    return _safe_float(fd.get("commission") or fd.get("fee"))
+
+
+def _current_lot_average_from_fills(
+    fills_raw: list[Any],
+    *,
+    current_qty: float | None,
+) -> float:
+    """Reconstruct current-position average entry from Coinbase fills.
+
+    Coinbase account balances are position truth. A naive average of all BUY
+    fills overstates entry after a fully or partially sold lot. Keep FIFO lots,
+    deplete them with SELL fills, and include quote commissions in BUY cost so
+    local P&L lines up with the broker's displayed average entry.
     """
-    Compute weighted-average cost basis for a product from historical fills.
+    fills = [_fill_payload(fill) for fill in fills_raw or []]
+    fills.sort(
+        key=lambda fd: (
+            _parse_cb_datetime(
+                fd.get("trade_time")
+                or fd.get("sequence_timestamp")
+                or fd.get("created_time")
+            )
+            or datetime.min,
+            str(fd.get("entry_id") or fd.get("trade_id") or fd.get("order_id") or ""),
+        )
+    )
+    lots: list[list[float]] = []
+    for fd in fills:
+        side = str(fd.get("side") or fd.get("order_side") or "").strip().upper()
+        price = _safe_float(fd.get("price") or fd.get("trade_price"))
+        qty = _safe_float(fd.get("size") or fd.get("trade_size") or fd.get("filled_size"))
+        if price <= 0 or qty <= 0:
+            continue
+        if side == "BUY":
+            fee = _fill_commission_quote(fd)
+            lots.append([qty, (price * qty + fee) / qty])
+            continue
+        if side != "SELL":
+            continue
+        remaining_sell = qty
+        while remaining_sell > 0 and lots:
+            lot_qty, lot_cost = lots[0]
+            take = min(lot_qty, remaining_sell)
+            lot_qty -= take
+            remaining_sell -= take
+            if lot_qty <= 1e-12:
+                lots.pop(0)
+            else:
+                lots[0] = [lot_qty, lot_cost]
+
+    target_qty = float(current_qty or 0.0)
+    if target_qty > 0:
+        lot_qty = sum(qty for qty, _cost in lots)
+        excess = lot_qty - target_qty
+        tolerance = max(1e-8, target_qty * 1e-6)
+        if excess > tolerance:
+            # If the fill window still contains too much inventory, trim the
+            # oldest lots first. That matches FIFO depletion and avoids letting
+            # stale sold lots leak back into the displayed broker-average cost.
+            remaining_trim = excess
+            while remaining_trim > 0 and lots:
+                lot_qty, lot_cost = lots[0]
+                take = min(lot_qty, remaining_trim)
+                lot_qty -= take
+                remaining_trim -= take
+                if lot_qty <= 1e-12:
+                    lots.pop(0)
+                else:
+                    lots[0] = [lot_qty, lot_cost]
+
+    total_qty = sum(qty for qty, _cost in lots)
+    total_cost = sum(qty * cost for qty, cost in lots)
+    if total_qty <= 0 or total_cost <= 0:
+        return 0.0
+    return round(total_cost / total_qty, 8)
+
+
+def _get_cost_basis_from_fills(product_id: str, current_qty: float | None = None) -> float:
+    """
+    Compute weighted-average cost basis for the currently held product lots.
     Returns average buy price per unit, or 0 if unavailable.
     """
-    cached = _cache_get(f"cost_basis_{product_id}")
+    qty_key = "" if current_qty is None else f":{round(float(current_qty or 0.0), 8)}"
+    cached = _cache_get(f"cost_basis_{product_id}{qty_key}")
     if cached is not None:
         return cached
     client = _get_client()
     if not client:
         return 0.0
     try:
-        resp = client.get_fills(product_id=product_id, limit=100)
+        resp = client.get_fills(product_id=product_id, limit=250)
         fills_raw = resp.get("fills", []) if isinstance(resp, dict) else getattr(resp, "fills", [])
-        total_cost = 0.0
-        total_qty = 0.0
-        for f in (fills_raw or []):
-            fd = f if isinstance(f, dict) else f.__dict__ if hasattr(f, "__dict__") else {}
-            side = fd.get("side", "")
-            price = _safe_float(fd.get("price", 0))
-            size = _safe_float(fd.get("size", 0))
-            if side == "BUY" and price > 0 and size > 0:
-                total_cost += price * size
-                total_qty += size
-        avg = round(total_cost / total_qty, 8) if total_qty > 0 else 0.0
-        _cache_set(f"cost_basis_{product_id}", avg)
+        avg = _current_lot_average_from_fills(
+            list(fills_raw or []),
+            current_qty=current_qty,
+        )
+        _cache_set(f"cost_basis_{product_id}{qty_key}", avg)
         return avg
     except Exception as e:
         logger.debug("[coinbase] cost basis from fills failed for %s: %s", product_id, e)
@@ -424,11 +508,12 @@ def get_positions() -> list[dict[str, Any]]:
         if total_qty <= 0:
             continue
         ticker = f"{currency}-USD"
-        avg_price = _get_cost_basis_from_fills(ticker)
+        avg_price = _get_cost_basis_from_fills(ticker, current_qty=total_qty)
         positions.append({
             "ticker": ticker,
             "quantity": total_qty,
             "average_buy_price": avg_price,
+            "average_buy_price_source": "coinbase_current_lot_fills_fifo_with_fees",
             "equity": 0,
             "current_price": 0,
             "name": acc.get("name", currency),
@@ -991,17 +1076,87 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             )
             normalized.setdefault("submitted_at", getattr(trade, "submitted_at", None) or now)
             normalized.setdefault("acknowledged_at", now)
+            normalized_filled_qty = _safe_float(normalized.get("cumulative_filled_quantity"))
+            terminal_zero_fill = cb_state == "filled" and normalized_filled_qty <= 0
             record_execution_event(
                 db,
                 user_id=trade.user_id,
                 ticker=trade.ticker,
                 trade=trade,
                 scan_pattern_id=getattr(trade, "scan_pattern_id", None),
+                apply_to_trade=not terminal_zero_fill,
                 **normalized,
             )
             trade.last_broker_sync = now
 
-            if cb_state == "filled":
+            if terminal_zero_fill:
+                fill_truth = _coinbase_order_fill_truth(trade.broker_order_id, trade.ticker)
+                position_truth = _coinbase_position_truth_for_ticker(trade.ticker)
+                broker_truth = position_truth or fill_truth
+                if broker_truth is not None:
+                    position_id = _ensure_coinbase_position_identity(
+                        db,
+                        trade=trade,
+                        broker_payload=broker_truth,
+                    )
+                    _align_coinbase_trade_to_position_truth(
+                        db,
+                        trade=trade,
+                        broker_payload=broker_truth,
+                        position_id=position_id,
+                    )
+                    _ensure_coinbase_sync_entry_event(
+                        db,
+                        trade=trade,
+                        broker_payload=broker_truth,
+                        position_id=position_id,
+                    )
+                    mark_linked_trade_packets_executed(
+                        db,
+                        trade_id=int(trade.id),
+                        source="coinbase_order_sync_broker_truth",
+                        broker_order_id=trade.broker_order_id,
+                    )
+                    filled += 1
+                    logger.warning(
+                        "[coinbase] Order %s for %s reported FILLED with zero filled_size, "
+                        "but %s showed qty=%s avg=%s; adopting broker truth",
+                        trade.broker_order_id,
+                        trade.ticker,
+                        "position truth" if position_truth is not None else "fill truth",
+                        broker_truth.get("quantity"),
+                        broker_truth.get("average_buy_price"),
+                    )
+                    _update_proposal_on_fill(db, trade)
+                    synced += 1
+                    continue
+
+                trade.status = "cancelled"
+                trade.broker_status = "filled_zero_quantity"
+                trade.filled_quantity = 0.0
+                trade.remaining_quantity = 0.0
+                trade.exit_reason = "coinbase_order_filled_zero_quantity"
+                trade.last_broker_sync = now
+                db.add(trade)
+                mark_linked_trade_packets_terminal(
+                    db,
+                    trade_id=int(trade.id),
+                    outcome_status="cancelled",
+                    source="coinbase_order_sync",
+                    reason_code="coinbase_order_filled_zero_quantity",
+                    reason_text="Coinbase reported filled but filled_size was zero",
+                    broker_order_id=trade.broker_order_id,
+                )
+                cancelled += 1
+                logger.warning(
+                    "[coinbase] Order %s for %s reported FILLED with zero filled_size; "
+                    "treating as no-fill terminal",
+                    trade.broker_order_id,
+                    trade.ticker,
+                )
+                _update_proposal_on_cancel(db, trade, "filled_zero_quantity")
+
+            elif cb_state == "filled":
                 mark_linked_trade_packets_executed(
                     db,
                     trade_id=int(trade.id),
@@ -1156,6 +1311,96 @@ def _canonical_coinbase_user_id(db: Session, requested_user_id: int | None) -> i
         return int(row[0]) if row and row[0] is not None else None
     except Exception:
         return requested_user_id
+
+
+def _coinbase_position_truth_for_ticker(ticker: str | None) -> dict[str, Any] | None:
+    raw_ticker = str(ticker or "").strip()
+    if not raw_ticker:
+        return None
+    product_id = _to_product_id(raw_ticker)
+    if not product_id:
+        return None
+    try:
+        for pos in dedupe_positions_by_ticker(get_positions()):
+            if str(pos.get("ticker") or "").upper() != product_id:
+                continue
+            if _safe_float(pos.get("quantity")) > 0:
+                return pos
+    except Exception:
+        logger.warning(
+            "[coinbase] position-truth lookup failed for %s; deferring zero-fill adjudication",
+            product_id,
+            exc_info=True,
+        )
+    return None
+
+
+def _coinbase_order_fill_truth(
+    order_id: str | None,
+    product_id: str | None,
+) -> dict[str, Any] | None:
+    """Return positive fill truth for an order when get_order is incomplete."""
+    oid = str(order_id or "").strip()
+    raw_product = str(product_id or "").strip()
+    if not oid or not raw_product:
+        return None
+    product = _to_product_id(raw_product)
+    if not product:
+        return None
+    client = _get_client()
+    if not client:
+        return None
+    try:
+        resp = client.get_fills(product_id=product, limit=250)
+        fills_raw = resp.get("fills", []) if isinstance(resp, dict) else getattr(resp, "fills", [])
+    except Exception:
+        logger.warning(
+            "[coinbase] fill-truth lookup failed order_id=%s product=%s",
+            oid,
+            product,
+            exc_info=True,
+        )
+        return None
+
+    matched = [
+        _fill_payload(fill)
+        for fill in fills_raw or []
+        if str(_fill_payload(fill).get("order_id") or "") == oid
+    ]
+    buy_fills = [
+        fill for fill in matched
+        if str(fill.get("side") or "").strip().upper() == "BUY"
+    ]
+    if not buy_fills:
+        return None
+    qty = 0.0
+    cost = 0.0
+    latest_at: datetime | None = None
+    for fill in buy_fills:
+        size = _safe_float(fill.get("size") or fill.get("trade_size") or fill.get("filled_size"))
+        price = _safe_float(fill.get("price") or fill.get("trade_price"))
+        if size <= 0 or price <= 0:
+            continue
+        qty += size
+        cost += price * size + _fill_commission_quote(fill)
+        fill_at = _parse_cb_datetime(
+            fill.get("trade_time")
+            or fill.get("sequence_timestamp")
+            or fill.get("created_time")
+        )
+        if fill_at is not None and (latest_at is None or fill_at > latest_at):
+            latest_at = fill_at
+    if qty <= 0 or cost <= 0:
+        return None
+    return {
+        "ticker": product,
+        "quantity": qty,
+        "average_buy_price": round(cost / qty, 8),
+        "average_buy_price_source": "coinbase_order_fills_with_fees",
+        "broker_source": "coinbase",
+        "order_id": oid,
+        "filled_at": latest_at,
+    }
 
 
 def _ensure_coinbase_position_identity(
@@ -1404,6 +1649,37 @@ def _align_coinbase_trade_to_position_truth(
         except Exception:
             pass
     db.add(trade)
+    try:
+        db.execute(
+            text(
+                """
+                UPDATE trading_bracket_intents
+                   SET quantity = :qty,
+                       entry_price = COALESCE(:avg, entry_price),
+                       position_id = COALESCE(:pid, position_id),
+                       last_diff_reason = CASE
+                           WHEN ABS(COALESCE(quantity, 0) - :qty) > 1e-8
+                               THEN 'coinbase_position_truth_quantity'
+                           ELSE last_diff_reason
+                       END,
+                       updated_at = NOW()
+                 WHERE trade_id = :trade_id
+                   AND intent_state NOT IN ('closed', 'reconciled', 'terminal_reject')
+                """
+            ),
+            {
+                "trade_id": int(getattr(trade, "id")),
+                "qty": qty,
+                "avg": avg if avg > 0 else None,
+                "pid": int(position_id) if position_id is not None else None,
+            },
+        )
+    except Exception:
+        logger.debug(
+            "[coinbase] bracket-intent quantity projection failed for trade#%s",
+            getattr(trade, "id", None),
+            exc_info=True,
+        )
 
     try:
         exists = db.execute(
@@ -1833,6 +2109,109 @@ def _close_coinbase_absent_no_fill_trade(
     _close_coinbase_position_identity_for_trade(db, trade)
 
 
+def _cancel_duplicate_coinbase_entry_orders(
+    db: Session,
+    *,
+    canonical_user_id: int | None,
+    ticker: str,
+    broker_position_qty: float,
+    canonical_trade_id: int | None,
+) -> int:
+    """Cancel zero-fill Coinbase BUY orders once broker position exists.
+
+    Scale-ins mutate the existing open Trade envelope. A separate working BUY
+    for the same Coinbase product while the broker already holds inventory is
+    a duplicate-entry risk, especially after order-status/position-status races.
+    Cancel only if Coinbase still reports the order open, BUY-side, and with no
+    filled quantity.
+    """
+    from ..models.trading import Trade
+
+    product_id = _to_product_id(ticker)
+    q = db.query(Trade).filter(
+        Trade.ticker == product_id,
+        Trade.broker_source == "coinbase",
+        Trade.status == "working",
+        Trade.broker_order_id.isnot(None),
+    )
+    if canonical_user_id is not None:
+        q = q.filter(or_(Trade.user_id == canonical_user_id, Trade.user_id.is_(None)))
+    else:
+        q = q.filter(Trade.user_id.is_(None))
+    candidates = q.order_by(Trade.id.desc()).all()
+    cancelled = 0
+    for trade in candidates:
+        if canonical_trade_id is not None and int(trade.id) == int(canonical_trade_id):
+            continue
+        if _safe_float(getattr(trade, "filled_quantity", None)) > 0:
+            continue
+        order = get_order_by_id(str(trade.broker_order_id))
+        if not order:
+            continue
+        side = str(order.get("side") or "").strip().upper()
+        if side and side != "BUY":
+            continue
+        filled_qty = _safe_float(
+            order.get("filled_size")
+            or order.get("filled_quantity")
+            or order.get("cumulative_quantity")
+        )
+        if filled_qty > 0:
+            continue
+        state = str(order.get("status") or order.get("state") or "").strip().lower()
+        if state in {"filled", "done"}:
+            # The order endpoint is contradictory; let the zero-fill/fill-truth
+            # path adjudicate instead of cancelling a possibly filled order.
+            continue
+        if state in _CB_TERMINAL_STATES:
+            trade.status = "cancelled" if state in {"cancelled", "expired"} else "rejected"
+            trade.broker_status = state
+            trade.exit_reason = f"coinbase_duplicate_entry_terminal:{state}"[:50]
+            trade.last_broker_sync = datetime.utcnow()
+            db.add(trade)
+            cancelled += 1
+            continue
+        result = cancel_order_by_id(str(trade.broker_order_id))
+        if not isinstance(result, dict) or not result.get("ok"):
+            logger.warning(
+                "[coinbase] duplicate BUY cancel failed ticker=%s trade#%s order=%s err=%s",
+                product_id,
+                trade.id,
+                trade.broker_order_id,
+                (result or {}).get("error") if isinstance(result, dict) else result,
+            )
+            continue
+        now = datetime.utcnow()
+        trade.status = "cancelled"
+        trade.broker_status = "cancelled"
+        trade.remaining_quantity = _safe_float(getattr(trade, "remaining_quantity", None))
+        trade.exit_reason = "coinbase_duplicate_entry_live_position"
+        trade.last_broker_sync = now
+        note = (
+            f"Cancelled duplicate Coinbase BUY on {now.strftime('%Y-%m-%d %H:%M')} "
+            f"because broker already held {broker_position_qty:g} {product_id}"
+            + (
+                f" on trade_id={canonical_trade_id}."
+                if canonical_trade_id is not None
+                else "."
+            )
+        )
+        trade.notes = ((trade.notes or "").rstrip() + "\n" + note).strip()
+        db.add(trade)
+        _update_proposal_on_cancel(db, trade, "duplicate_entry_live_position")
+        logger.warning(
+            "[coinbase] cancelled duplicate BUY order ticker=%s trade#%s order=%s; "
+            "broker position qty=%s canonical_trade_id=%s",
+            product_id,
+            trade.id,
+            trade.broker_order_id,
+            broker_position_qty,
+            canonical_trade_id,
+        )
+        cancelled += 1
+    return cancelled
+
+
 def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     """Sync Coinbase positions into local Trade model."""
     from ..models.trading import BreakoutAlert, Trade
@@ -1850,7 +2229,7 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     )
 
     all_positions = dedupe_positions_by_ticker(get_positions())
-    created = updated = closed = reopened = 0
+    created = updated = closed = reopened = duplicate_entry_cancelled = 0
     cb_tickers: set[str] = set()
 
     for pos in all_positions:
@@ -1896,6 +2275,13 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             _align_coinbase_trade_to_position_truth(
                 db, trade=existing, broker_payload=pos, position_id=position_id,
             )
+            duplicate_entry_cancelled += _cancel_duplicate_coinbase_entry_orders(
+                db,
+                canonical_user_id=canonical_user_id,
+                ticker=ticker,
+                broker_position_qty=float(qty or 0.0),
+                canonical_trade_id=int(existing.id),
+            )
             updated += 1
         else:
             avg_price = pos.get("average_buy_price", 0)
@@ -1914,6 +2300,13 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                 broker_payload=pos,
             )
             if reopened_trade is not None:
+                duplicate_entry_cancelled += _cancel_duplicate_coinbase_entry_orders(
+                    db,
+                    canonical_user_id=canonical_user_id,
+                    ticker=ticker,
+                    broker_position_qty=float(qty or 0.0),
+                    canonical_trade_id=int(reopened_trade.id),
+                )
                 reopened += 1
                 continue
             # f-coinbase-dust-auto-create-skip (2026-05-19): refuse auto-
@@ -1962,6 +2355,13 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             )
             _ensure_coinbase_sync_entry_event(
                 db, trade=trade, broker_payload=pos, position_id=position_id,
+            )
+            duplicate_entry_cancelled += _cancel_duplicate_coinbase_entry_orders(
+                db,
+                canonical_user_id=canonical_user_id,
+                ticker=ticker,
+                broker_position_qty=float(qty or 0.0),
+                canonical_trade_id=int(trade.id),
             )
             created += 1
 
@@ -2221,12 +2621,14 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
 
     db.commit()
     logger.info(
-        "[coinbase] Position sync: %d created, %d updated, %d reopened, %d closed, %d duplicates cancelled",
+        "[coinbase] Position sync: %d created, %d updated, %d reopened, %d closed, "
+        "%d duplicates cancelled, %d duplicate entry orders cancelled",
         created,
         updated,
         reopened,
         closed,
         cleanup["cancelled"],
+        duplicate_entry_cancelled,
     )
     return {
         "created": created,
@@ -2234,6 +2636,7 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
         "reopened": reopened,
         "closed": closed,
         "deduped": cleanup["cancelled"],
+        "duplicate_entry_orders_cancelled": duplicate_entry_cancelled,
         "_live_tickers": cb_tickers,
     }
 

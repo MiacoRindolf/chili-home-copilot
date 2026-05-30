@@ -71,7 +71,7 @@ def _fake_normalized(
         filled_size=filled_size,
         average_filled_price=None,
         created_time=None,
-        raw={"state": status},
+        raw={"state": status, "filled_size": str(filled_size)},
     )
 
 
@@ -185,7 +185,7 @@ def test_broker_reports_terminal_mirrors_state_no_cancel(db, monkeypatch):
 
     fake_adapter = MagicMock()
     fake_adapter.get_order.return_value = (
-        _fake_normalized("filled", order_id="rh-filled"),
+        _fake_normalized("filled", order_id="rh-filled", filled_size=1.0),
         FreshnessMeta(retrieved_at_utc=datetime.utcnow(), max_age_seconds=15.0),
     )
     monkeypatch.setattr(wd, "_get_adapter", lambda _src: fake_adapter)
@@ -200,6 +200,49 @@ def test_broker_reports_terminal_mirrors_state_no_cancel(db, monkeypatch):
     # flips.
     assert t.status == "open"
     assert t.broker_status == "filled"
+    assert t.filled_quantity == 1.0
+
+
+def test_coinbase_terminal_filled_zero_quantity_waits_for_position_truth(db, monkeypatch):
+    u = models.User(name="stuck_wd_zero_fill")
+    db.add(u)
+    db.flush()
+
+    t = _make_trade(
+        db,
+        user_id=u.id,
+        broker_order_id="cb-zero-fill",
+        broker_status="accepted",
+        entry_date=datetime.utcnow() - timedelta(seconds=900),
+        broker_source="coinbase",
+        status="working",
+        remaining_quantity=1.0,
+    )
+
+    cfg = SimpleNamespace(
+        chili_stuck_order_watchdog_enabled=True,
+        chili_stuck_order_market_timeout_seconds=300,
+        chili_stuck_order_limit_timeout_seconds=1800,
+    )
+    monkeypatch.setattr(wd, "settings", cfg)
+
+    fake_adapter = MagicMock()
+    fake_adapter.get_order.return_value = (
+        _fake_normalized("filled", order_id="cb-zero-fill", filled_size=0.0),
+        FreshnessMeta(retrieved_at_utc=datetime.utcnow(), max_age_seconds=15.0),
+    )
+    monkeypatch.setattr(wd, "_get_adapter", lambda _src: fake_adapter)
+
+    out = wd.tick_stuck_order_watchdog(db)
+
+    assert out["outcomes"].get("mirrored:filled") == 1
+    fake_adapter.cancel_order.assert_not_called()
+
+    db.refresh(t)
+    assert t.status == "working"
+    assert t.broker_status == "filled_zero_quantity"
+    assert t.filled_quantity == 0.0
+    assert t.remaining_quantity == 1.0
 
 
 def test_option_working_order_promotes_to_open_from_position_truth(monkeypatch):

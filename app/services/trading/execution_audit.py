@@ -170,6 +170,8 @@ def apply_execution_event_to_trade(trade: Any, event: Any) -> None:
     cumulative = _safe_float(getattr(event, "cumulative_filled_quantity", None))
     avg_fill = _safe_float(getattr(event, "average_fill_price", None))
     status = (getattr(event, "status", None) or "").strip().lower()
+    has_real_fill = cumulative is not None and cumulative > 0
+    filled_zero_quantity = status == "filled" and cumulative is not None and cumulative <= 0
 
     # R27 (2026-04-30): respect terminal trade states. This function does
     # NOT distinguish ENTRY fills from EXIT fills -- both look like
@@ -197,10 +199,10 @@ def apply_execution_event_to_trade(trade: Any, event: Any) -> None:
         trade.acknowledged_at = event.acknowledged_at
     if getattr(event, "first_fill_at", None) and getattr(trade, "first_fill_at", None) is None:
         trade.first_fill_at = event.first_fill_at
-    if getattr(event, "last_fill_at", None):
+    if getattr(event, "last_fill_at", None) and not filled_zero_quantity:
         trade.last_fill_at = event.last_fill_at
         trade.filled_at = event.last_fill_at
-    elif status == "filled":
+    elif status == "filled" and not filled_zero_quantity:
         trade.filled_at = getattr(event, "event_at", None) or getattr(event, "acknowledged_at", None) or _utcnow()
 
     if requested is not None:
@@ -228,7 +230,6 @@ def apply_execution_event_to_trade(trade: Any, event: Any) -> None:
     # WGS/GH/INFQ on 2026-04-21, broker_order_ids 69e7a26d / 69e7a261 /
     # 69e7a52f all reported filled via rh.orders.get_stock_order_info
     # but had state 'cancelled' at the moment of sync).
-    has_real_fill = cumulative is not None and cumulative > 0
     if not _is_terminal:
         if status in ("cancelled", "canceled"):
             trade.status = "open" if has_real_fill else "cancelled"
@@ -240,11 +241,15 @@ def apply_execution_event_to_trade(trade: Any, event: Any) -> None:
         elif status in ("queued", "pending", "confirmed", "unconfirmed", "open", "partially_filled"):
             trade.status = "working"
         elif status == "filled":
-            trade.status = "open"
+            trade.status = "open" if has_real_fill else "cancelled"
     # Broker_status: record the actual broker-reported status for audit,
     # unless we've overridden it due to cumulative-fill evidence — in
     # that case, record "filled" so downstream consumers see truth.
-    if has_real_fill and status in ("cancelled", "canceled", "rejected", "failed"):
+    if filled_zero_quantity:
+        trade.broker_status = "filled_zero_quantity"
+        if requested is not None:
+            trade.remaining_quantity = 0.0
+    elif has_real_fill and status in ("cancelled", "canceled", "rejected", "failed"):
         trade.broker_status = "filled"
     else:
         trade.broker_status = status or trade.broker_status
