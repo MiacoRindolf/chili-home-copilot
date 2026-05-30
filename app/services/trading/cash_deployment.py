@@ -24,6 +24,7 @@ from .edge_reliability import (
     EXIT_VARIANT_DIAGNOSTIC,
     EXIT_VARIANT_REFRESH,
     PROVENANCE_BACKFILL,
+    RECERT_RESCUE_DIAGNOSTIC,
     RECERT_RESCUE_REFRESH,
     edge_supply_rows,
     edge_supply_snapshot_rows,
@@ -739,6 +740,20 @@ _STRUCTURAL_EXIT_NOOP_PREFIXES = (
     "insufficient_parent_payoff_samples:",
     "reward_risk_below_floor:",
 )
+_RECENT_RECERT_BLOCKER_ACTIONS = frozenset(
+    {
+        "inspect_recert_backtest_no_oos_evidence_keep_live_blocked",
+        "wait_for_recert_backtest_cooldown_keep_live_blocked",
+        "live_blocked_recert_debt_no_refresh",
+    }
+)
+_RECENT_RECERT_BLOCKER_REASONS = frozenset(
+    {
+        "recent_recert_backtest_cooldown",
+        "recert_backtest_refresh_already_open",
+        "no_recert_refresh_needed",
+    }
+)
 
 
 def _structural_exit_noop_reason(reason: Any) -> bool:
@@ -755,16 +770,20 @@ def _recent_noop_profitability_work(
     scan_pattern_id: int,
     evidence_fingerprint: str,
 ) -> bool:
-    if event_type != EXIT_VARIANT_REFRESH or not evidence_fingerprint:
-        return False
     minutes = _safe_int(
         getattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360),
         360,
     )
     if minutes <= 0:
         return False
-
-    from ...models.trading import BrainWorkEvent
+    if event_type == RECERT_RESCUE_REFRESH:
+        return _recent_blocked_recert_rescue_work(
+            db,
+            scan_pattern_id=scan_pattern_id,
+            minutes=minutes,
+        )
+    if event_type != EXIT_VARIANT_REFRESH or not evidence_fingerprint:
+        return False
 
     cutoff = datetime.utcnow() - timedelta(minutes=minutes)
     rows = (
@@ -785,6 +804,36 @@ def _recent_noop_profitability_work(
             return True
         if _structural_exit_noop_reason(payload.get("skip_reason")):
             return True
+    return False
+
+
+def _recent_blocked_recert_rescue_work(
+    db: Session,
+    *,
+    scan_pattern_id: int,
+    minutes: int,
+) -> bool:
+    cutoff = datetime.utcnow() - timedelta(minutes=max(1, int(minutes)))
+    rows = (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_kind == "outcome")
+        .filter(BrainWorkEvent.event_type == RECERT_RESCUE_DIAGNOSTIC)
+        .filter(BrainWorkEvent.created_at >= cutoff)
+        .filter(BrainWorkEvent.payload["scan_pattern_id"].astext == str(int(scan_pattern_id)))
+        .order_by(BrainWorkEvent.created_at.desc(), BrainWorkEvent.id.desc())
+        .limit(20)
+        .all()
+    )
+    for row in rows:
+        payload = row.payload if isinstance(row.payload, dict) else {}
+        action = str(payload.get("recommended_next_action") or "").strip().lower()
+        if action in _RECENT_RECERT_BLOCKER_ACTIONS:
+            return True
+        refresh = payload.get("recert_backtest_refresh")
+        if isinstance(refresh, dict):
+            reason = str(refresh.get("reason") or "").strip().lower()
+            if reason in _RECENT_RECERT_BLOCKER_REASONS:
+                return True
     return False
 
 

@@ -606,6 +606,125 @@ def test_cash_deployment_skips_recent_noop_exit_variant_same_evidence(db, monkey
     )
 
 
+def test_cash_deployment_skips_recent_blocked_recert_rescue(db, monkeypatch):
+    monkeypatch.setattr(settings, "chili_autotrader_live_enabled", True)
+    monkeypatch.setattr(settings, "chili_cash_deployment_equity_cost_pct", 0.05)
+    monkeypatch.setattr(settings, "chili_cash_deployment_min_closed_evidence", 5)
+    monkeypatch.setattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360)
+
+    recert = _pattern(
+        db,
+        name="cash work blocked recert",
+        recert=True,
+        recert_reason="negative_oos_recert",
+    )
+    alert = _alert(db, recert, ticker="WBRCRT")
+    _run(db, recert, alert, expected=3.0)
+    _closed_paper(db, recert, alert)
+    db.add(
+        BrainWorkEvent(
+            domain="trading",
+            event_type="recert_rescue_diagnostic",
+            event_kind="outcome",
+            dedupe_key=f"blocked-recert-rescue:{recert.id}",
+            status="done",
+            payload={
+                "scan_pattern_id": recert.id,
+                "recert_rescue_status": "hard_blocked",
+                "recommended_next_action": "wait_for_recert_backtest_cooldown_keep_live_blocked",
+                "recert_backtest_refresh": {
+                    "reason": "recent_recert_backtest_cooldown",
+                    "requested": False,
+                },
+            },
+            created_at=datetime.utcnow(),
+        )
+    )
+    db.commit()
+
+    row = cash_deployment_rows(db, window_days=7, limit=10)[0]
+    assert row["scan_pattern_id"] == recert.id
+    assert row["recommended_work_event"] == "recert_rescue_refresh"
+
+    out = enqueue_cash_deployment_work(
+        db,
+        window_days=7,
+        limit=10,
+        include_null_lineage=False,
+        include_snapshot_coverage=False,
+    )
+    db.commit()
+
+    assert out["created"] == 0
+    assert out["skipped_noop_cooldown"] == 1
+    assert (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_kind == "work")
+        .filter(BrainWorkEvent.event_type == "recert_rescue_refresh")
+        .count()
+        == 0
+    )
+
+
+def test_cash_deployment_allows_recert_rescue_after_useful_recent_diagnostic(
+    db,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "chili_autotrader_live_enabled", True)
+    monkeypatch.setattr(settings, "chili_cash_deployment_equity_cost_pct", 0.05)
+    monkeypatch.setattr(settings, "chili_cash_deployment_min_closed_evidence", 5)
+    monkeypatch.setattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360)
+
+    recert = _pattern(
+        db,
+        name="cash work useful recert",
+        recert=True,
+        recert_reason="negative_oos_recert",
+    )
+    alert = _alert(db, recert, ticker="WURCRT")
+    _run(db, recert, alert, expected=3.0)
+    _closed_paper(db, recert, alert)
+    db.add(
+        BrainWorkEvent(
+            domain="trading",
+            event_type="recert_rescue_diagnostic",
+            event_kind="outcome",
+            dedupe_key=f"useful-recert-rescue:{recert.id}",
+            status="done",
+            payload={
+                "scan_pattern_id": recert.id,
+                "recert_rescue_status": "soft_blocked",
+                "recommended_next_action": "run_recert_backtest_refresh_keep_live_blocked",
+                "recert_backtest_refresh": {
+                    "reason": "positive_edge_supply_needs_asset_sliced_oos_refresh",
+                    "requested": True,
+                },
+            },
+            created_at=datetime.utcnow(),
+        )
+    )
+    db.commit()
+
+    out = enqueue_cash_deployment_work(
+        db,
+        window_days=7,
+        limit=10,
+        include_null_lineage=False,
+        include_snapshot_coverage=False,
+    )
+    db.commit()
+
+    assert out["created"] == 1
+    assert out["skipped_noop_cooldown"] == 0
+    assert (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_kind == "work")
+        .filter(BrainWorkEvent.event_type == "recert_rescue_refresh")
+        .count()
+        == 1
+    )
+
+
 def test_cash_deployment_skips_structural_noop_exit_variant_with_new_fingerprint(
     db,
     monkeypatch,
