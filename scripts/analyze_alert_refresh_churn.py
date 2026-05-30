@@ -267,6 +267,69 @@ def _open_exit_work_with_recent_noop(hours: int, limit: int) -> list[dict]:
     )
 
 
+def _open_recert_work_with_recent_blocker_diagnostic(hours: int, limit: int) -> list[dict]:
+    return _rows(
+        """
+        WITH open_work AS (
+          SELECT
+            id,
+            status,
+            created_at,
+            payload,
+            CASE
+              WHEN COALESCE(payload->>'scan_pattern_id', '') ~ '^[0-9]+$'
+              THEN (payload->>'scan_pattern_id')::bigint
+              ELSE NULL
+            END AS scan_pattern_id
+          FROM brain_work_events
+          WHERE event_kind = 'work'
+            AND event_type = 'recert_rescue_refresh'
+            AND status IN ('pending', 'retry_wait', 'processing')
+            AND created_at >= now() - (:hours * interval '1 hour')
+        ),
+        recert_diag AS (
+          SELECT
+            id,
+            created_at,
+            payload,
+            (payload->>'scan_pattern_id')::bigint AS scan_pattern_id,
+            COALESCE(payload->>'recert_rescue_status', '<none>') AS recert_status,
+            COALESCE(payload->>'recommended_next_action', '<none>') AS next_action
+          FROM brain_work_events
+          WHERE event_kind = 'outcome'
+            AND event_type = 'recert_rescue_diagnostic'
+            AND created_at >= now() - (:hours * interval '1 hour')
+            AND COALESCE(payload->>'scan_pattern_id', '') ~ '^[0-9]+$'
+            AND COALESCE(payload->>'recommended_next_action', '') IN (
+              'inspect_recert_backtest_no_oos_evidence_keep_live_blocked',
+              'wait_for_recert_backtest_cooldown_keep_live_blocked',
+              'live_blocked_recert_debt_no_refresh'
+            )
+        )
+        SELECT DISTINCT ON (w.id)
+          w.id AS work_id,
+          w.status,
+          w.scan_pattern_id,
+          COALESCE(sp.name, '<missing>') AS pattern_name,
+          COALESCE(sp.recert_reason, '<none>') AS recert_reason,
+          COALESCE(w.payload->>'asset_class', '<none>') AS asset_class,
+          COALESCE(w.payload->>'source', '<none>') AS work_source,
+          d.id AS diagnostic_id,
+          d.recert_status,
+          d.next_action,
+          d.created_at AS diagnostic_seen,
+          w.created_at AS work_created
+        FROM open_work w
+        JOIN recert_diag d ON d.scan_pattern_id = w.scan_pattern_id
+        LEFT JOIN scan_patterns sp ON sp.id = w.scan_pattern_id
+        WHERE w.scan_pattern_id IS NOT NULL
+        ORDER BY w.id, d.created_at DESC, d.id DESC
+        LIMIT :limit
+        """,
+        {"hours": int(hours), "limit": int(limit)},
+    )
+
+
 def _build_report(hours: int, limit: int) -> dict[str, object]:
     return {
         "hours": int(hours),
@@ -278,6 +341,9 @@ def _build_report(hours: int, limit: int) -> dict[str, object]:
         "open_exit_variant_work_with_recent_noop": _open_exit_work_with_recent_noop(
             hours,
             limit,
+        ),
+        "open_recert_work_with_recent_blocker_diagnostic": (
+            _open_recert_work_with_recent_blocker_diagnostic(hours, limit)
         ),
     }
 
@@ -296,6 +362,10 @@ def _print_report(report: dict[str, object]) -> None:
     _print_table(
         "Open Exit Variant Work With Recent No-Op Evidence",
         report["open_exit_variant_work_with_recent_noop"],
+    )
+    _print_table(
+        "Open Recert Work With Recent Blocker Diagnostic",
+        report["open_recert_work_with_recent_blocker_diagnostic"],
     )
 
 
