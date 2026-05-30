@@ -197,6 +197,10 @@ _DESC_CONDITION_RULES: list[tuple[re.Pattern, list[dict[str, Any]]]] = [
      [{"indicator": "stoch_k", "op": "<", "value": 20}]),
 ]
 
+_CHILI_REFINEMENT_RE = re.compile(
+    r"(?:chili\s+refinement:\s*)(\w+)\s+(gt|lt|gte|lte|eq)\s+(\d+(?:\.\d+)?)", re.I
+)
+
 
 def _parse_conditions_from_description(desc: str) -> list[dict[str, Any]]:
     """Extract structured backtest conditions from a natural-language description.
@@ -255,7 +259,7 @@ def _parse_conditions_from_description(desc: str) -> list[dict[str, Any]]:
             conditions.append(cond)
 
     # Handle CHILI refinement descriptions: "rsi gt 70", "adx gt 30", etc.
-    chili_m = re.search(r"(?:chili\s+refinement:\s*)(\w+)\s+(gt|lt|gte|lte|eq)\s+(\d+(?:\.\d+)?)", desc, re.I)
+    chili_m = _CHILI_REFINEMENT_RE.search(desc)
     if chili_m:
         ind_raw = chili_m.group(1).lower()
         op_map = {"gt": ">", "lt": "<", "gte": ">=", "lte": "<=", "eq": "=="}

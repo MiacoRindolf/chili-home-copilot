@@ -1659,8 +1659,10 @@ def _compute_indicators(df: pd.DataFrame, *, crypto: bool = False) -> dict[str, 
 
 # ── Shared breakout pattern helpers ──────────────────────────────────
 
-_sector_cache: dict[str, tuple[str, float]] = {}
+_sector_cache: dict[str, tuple[float, str]] = {}
+_sector_cache_lock = threading.Lock()
 _SECTOR_CACHE_TTL = 7200  # 2 hours — sectors rarely change
+_SECTOR_CACHE_MAX = 2000  # ticker-keyed; bound growth over the full universe
 
 
 _CRYPTO_CATEGORIES: dict[str, str] = {
@@ -1689,8 +1691,8 @@ def _get_sector_for_ticker(ticker: str) -> str:
 
     now = _t.time()
     cached = _sector_cache.get(ticker)
-    if cached and now - cached[1] < _SECTOR_CACHE_TTL:
-        return cached[0]
+    if cached and now - cached[0] < _SECTOR_CACHE_TTL:
+        return cached[1]
 
     try:
         from ..yf_session import _cache_get as _yf_cache_get
@@ -1702,7 +1704,8 @@ def _get_sector_for_ticker(ticker: str) -> str:
     except Exception:
         sector = "unknown"
 
-    _sector_cache[ticker] = (sector, now)
+    _cache_put(_sector_cache, _sector_cache_lock, ticker, sector,
+               _SECTOR_CACHE_TTL, _SECTOR_CACHE_MAX)
     return sector
 
 
@@ -2275,7 +2278,9 @@ def _detect_resistance_retests(
 
 
 _news_sentiment_cache: dict[str, tuple[float, float]] = {}
+_news_sentiment_cache_lock = threading.Lock()
 _NEWS_SENTIMENT_TTL = 1800  # 30 min — keep sentiment cached longer
+_NEWS_SENTIMENT_MAX = 2000  # ticker-keyed; bound growth over the full universe
 
 
 def _get_cached_news_sentiment(ticker: str) -> float | None:
@@ -2287,8 +2292,8 @@ def _get_cached_news_sentiment(ticker: str) -> float | None:
 
     now = _t.time()
     cached = _news_sentiment_cache.get(ticker)
-    if cached and now - cached[1] < _NEWS_SENTIMENT_TTL:
-        return cached[0]
+    if cached and now - cached[0] < _NEWS_SENTIMENT_TTL:
+        return cached[1]
 
     try:
         from ..yf_session import get_ticker_news
@@ -2296,17 +2301,20 @@ def _get_cached_news_sentiment(ticker: str) -> float | None:
 
         news = get_ticker_news(ticker, limit=5)
         if not news:
-            _news_sentiment_cache[ticker] = (0.0, now)
+            _cache_put(_news_sentiment_cache, _news_sentiment_cache_lock, ticker,
+                       0.0, _NEWS_SENTIMENT_TTL, _NEWS_SENTIMENT_MAX)
             return 0.0
 
         titles = [n.get("title", "") for n in news if n.get("title")]
         if not titles:
-            _news_sentiment_cache[ticker] = (0.0, now)
+            _cache_put(_news_sentiment_cache, _news_sentiment_cache_lock, ticker,
+                       0.0, _NEWS_SENTIMENT_TTL, _NEWS_SENTIMENT_MAX)
             return 0.0
 
         agg = aggregate_sentiment(titles)
         score = agg.get("avg_score", 0.0)
-        _news_sentiment_cache[ticker] = (score, now)
+        _cache_put(_news_sentiment_cache, _news_sentiment_cache_lock, ticker,
+                   score, _NEWS_SENTIMENT_TTL, _NEWS_SENTIMENT_MAX)
         return score
     except Exception:
         return None
