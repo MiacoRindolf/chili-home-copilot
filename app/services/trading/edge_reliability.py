@@ -25,6 +25,7 @@ from ...models.trading import (
     ScanPattern,
     Trade,
 )
+from .autotrader_evidence import clean_autotrader_runs, partition_autotrader_runs
 from .brain_work.ledger import enqueue_outcome_event, enqueue_work_event
 from .return_math import (
     OPTION_CONTRACT_MULTIPLIER,
@@ -436,6 +437,8 @@ def compute_pattern_edge_reliability(
             )
             == asset_slice
         ]
+    evidence_partition = partition_autotrader_runs(runs)
+    runs = evidence_partition.clean
 
     expected_values: list[float] = []
     probabilities: list[float] = []
@@ -662,6 +665,7 @@ def compute_pattern_edge_reliability(
         "primary_symbol": tickers.most_common(1)[0][0] if tickers else None,
         "reason_counts": dict(reason_counts),
         "decision_counts": dict(decision_counts),
+        "autotrader_evidence": evidence_partition.to_summary(),
         "graduation_blocker": blocker,
         "recommended_work_event": _recommended_work_event(blocker, scan_pattern_id=pid),
         "latest_observed_at": latest_seen.isoformat() if latest_seen else None,
@@ -1111,6 +1115,7 @@ def _candidate_pattern_ids_from_recent_runs(
         .limit(fetch_limit)
         .all()
     )
+    rows = clean_autotrader_runs(rows)
     buckets: dict[int, dict[str, Any]] = {}
     for run in rows:
         pid = getattr(run, "scan_pattern_id", None)
@@ -1186,6 +1191,7 @@ def _observed_asset_slices_for_pattern(
         .limit(1000)
         .all()
     )
+    recent_runs = clean_autotrader_runs(recent_runs)
     alert_ids = {
         int(row.breakout_alert_id)
         for row in recent_runs
