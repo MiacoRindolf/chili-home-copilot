@@ -158,6 +158,11 @@ def list_projects(db: Session, user_id: int) -> list[dict]:
     projects = (
         db.query(PlanProject)
         .join(ProjectMember, ProjectMember.project_id == PlanProject.id)
+        .options(
+            selectinload(PlanProject.tasks),
+            selectinload(PlanProject.members).selectinload(ProjectMember.user),
+            selectinload(PlanProject.labels),
+        )
         .filter(ProjectMember.user_id == user_id)
         .order_by(PlanProject.updated_at.desc())
         .all()
@@ -167,7 +172,16 @@ def list_projects(db: Session, user_id: int) -> list[dict]:
 
 def list_all_projects(db: Session) -> list[dict]:
     """Return every project in the household (home app — no multi-tenant isolation)."""
-    projects = db.query(PlanProject).order_by(PlanProject.updated_at.desc()).all()
+    projects = (
+        db.query(PlanProject)
+        .options(
+            selectinload(PlanProject.tasks),
+            selectinload(PlanProject.members).selectinload(ProjectMember.user),
+            selectinload(PlanProject.labels),
+        )
+        .order_by(PlanProject.updated_at.desc())
+        .all()
+    )
     return [_project_dict(p) for p in projects]
 
 

@@ -35,6 +35,9 @@ class _FakeQuery:
         self.group_by_calls += 1
         return self
 
+    def order_by(self, *_args, **_kwargs):
+        return self
+
     def all(self):
         return self._rows
 
@@ -53,6 +56,28 @@ class _FakeSession:
         self.query_calls += 1
         self.last_query = _FakeQuery(self._rows)
         return self.last_query
+
+
+def _project_for_list(project_id: int = 1) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=project_id,
+        user_id=7,
+        key="PRJ",
+        name="Project",
+        description="",
+        status="active",
+        color="#6366f1",
+        start_date=None,
+        end_date=None,
+        created_at=None,
+        updated_at=None,
+        tasks=[
+            SimpleNamespace(id=1, status="done"),
+            SimpleNamespace(id=2, status="todo"),
+        ],
+        members=[],
+        labels=[],
+    )
 
 
 def test_all_users_task_summary_batches_across_users():
@@ -98,6 +123,30 @@ def test_all_users_task_summary_batches_across_users():
     assert db.query_calls == 1
     assert db.last_query.outerjoin_calls == 2
     assert db.last_query.group_by_calls == 1
+
+
+def test_list_projects_eager_loads_summary_relationships():
+    db = _FakeSession([_project_for_list()])
+
+    result = planner_service.list_projects(db, user_id=7)
+
+    assert result[0]["task_count"] == 2
+    assert result[0]["done_count"] == 1
+    assert db.query_calls == 1
+    assert db.last_query.join_calls == 1
+    assert db.last_query.options_calls == 1
+    assert db.last_query.filter_calls == 1
+
+
+def test_list_all_projects_eager_loads_summary_relationships():
+    db = _FakeSession([_project_for_list()])
+
+    result = planner_service.list_all_projects(db)
+
+    assert result[0]["task_count"] == 2
+    assert result[0]["done_count"] == 1
+    assert db.query_calls == 1
+    assert db.last_query.options_calls == 1
 
 
 def test_user_project_summary_eager_loads_tasks_and_assignees():
