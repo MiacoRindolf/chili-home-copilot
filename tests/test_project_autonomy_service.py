@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -3697,6 +3697,13 @@ def test_agent_os_readiness_runtime_queue_flags_backlog(
         runtime_queue = readiness["runtime_queue"]
         assert runtime_queue["status"] == orchestrator.AGENT_OS_READINESS_CHECK_WARNING
         assert runtime_queue["queued_count"] == orchestrator.AGENT_RUNTIME_QUEUE_WARNING_DEPTH + 1
+        assert runtime_queue["active_count"] == 0
+        assert runtime_queue["fresh_active_count"] == 0
+        assert runtime_queue["active_runs"] == []
+        assert len(runtime_queue["queued_runs"]) == orchestrator.AGENT_RUNTIME_QUEUE_PREVIEW_LIMIT
+        assert runtime_queue["next_action"] == orchestrator.AGENT_RUNTIME_QUEUE_ACTION_DRAIN_QUEUED
+        assert runtime_queue["next_action_label"] == "Drain queued run"
+        assert runtime_queue["next_action_run_id"] == runtime_queue["queued_runs"][0]["run_id"]
         assert "queued run" in runtime_queue["detail"]
         runtime_check = next(
             check
@@ -3704,6 +3711,77 @@ def test_agent_os_readiness_runtime_queue_flags_backlog(
             if check["key"] == orchestrator.AGENT_OS_READINESS_CHECK_RUNTIME_QUEUE
         )
         assert runtime_check["status"] == orchestrator.AGENT_OS_READINESS_CHECK_WARNING
+    finally:
+        db.close()
+
+
+def test_autopilot_commands_prioritize_stale_runtime_targets(
+    tmp_path,
+    monkeypatch,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        monkeypatch.setattr(orchestrator, "_codex_automation_roots", lambda: [])
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {
+                "model": "qwen2.5-coder:7b",
+                "available": True,
+                "installed_models": ["qwen2.5-coder:7b"],
+                "skipped_models": {},
+                "recommendation": None,
+            },
+        )
+        repo = CodeRepo(path=str(tmp_path), host_path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        orchestrator.bootstrap_agent_profiles(db, repo_id=repo.id)
+
+        stale = orchestrator.create_run(
+            db,
+            prompt="Active run with no recent progress.",
+            repo_id=repo.id,
+            start_planning=True,
+        )
+        stale.status = orchestrator.RUN_STATUS_RUNNING
+        stale.current_stage = orchestrator.STAGE_IMPLEMENT
+        stale.updated_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+            minutes=orchestrator.AGENT_RUNTIME_QUEUE_STALE_ACTIVE_MINUTES + 5
+        )
+        command_run = orchestrator.create_run(db, prompt="hello", repo_id=repo.id)
+        db.commit()
+
+        readiness = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+        runtime_queue = readiness["runtime_queue"]
+        assert runtime_queue["status"] == orchestrator.AGENT_OS_READINESS_CHECK_WARNING
+        assert runtime_queue["stale_active_count"] == 1
+        assert runtime_queue["fresh_active_count"] == 0
+        assert runtime_queue["fresh_active_runs"] == []
+        assert runtime_queue["next_action"] == orchestrator.AGENT_RUNTIME_QUEUE_ACTION_INSPECT_STALE
+        assert runtime_queue["next_action_label"] == "Inspect stale run"
+        assert runtime_queue["next_action_run_id"] == stale.run_id
+        assert runtime_queue["next_action_last_seen_at"]
+        assert (
+            runtime_queue["next_action_last_seen_age_minutes"]
+            >= orchestrator.AGENT_RUNTIME_QUEUE_STALE_ACTIVE_MINUTES
+        )
+        assert runtime_queue["stale_active_runs"][0]["run_id"] == stale.run_id
+        assert (
+            runtime_queue["stale_active_runs"][0]["last_seen_age_minutes"]
+            >= orchestrator.AGENT_RUNTIME_QUEUE_STALE_ACTIVE_MINUTES
+        )
+
+        payload = orchestrator.append_user_message(
+            db,
+            command_run.run_id,
+            content="/doctor",
+        )
+        reply = payload["messages"][-1]["content"]
+        assert "Runtime queue next action: Inspect stale run" in reply
+        assert f"Runtime queue target run: {stale.run_id}" in reply
+        assert f"Runtime stale target: {stale.run_id}" in reply
+        assert "last seen" in reply
     finally:
         db.close()
 
@@ -3897,6 +3975,10 @@ def test_autopilot_slash_commands_answer_in_chat_and_start_plan(tmp_path):
         ("which model are you using?", "model policy"),
         ("what quality guardrails are active?", "Local model quality guardrails"),
         ("any pending questions?", "No pending operator questions"),
+        ("how do I attach a screenshot?", "attachment control"),
+        ("where do I start the plan?", orchestrator.PLAN_START_CHAT_ACTION_LABEL),
+        ("how do I approve and merge this?", "approval-ready plan"),
+        ("how can I stop this run?", "cancel or stop action"),
     ],
 )
 def test_autopilot_chat_read_only_questions_use_mechanics_without_model(
@@ -3914,6 +3996,52 @@ def test_autopilot_chat_read_only_questions_use_mechanics_without_model(
 
         def fail_model_selection():
             raise AssertionError("read-only Autopilot cockpit questions should not call a model")
+
+        monkeypatch.setattr(orchestrator, "select_local_model", fail_model_selection)
+
+        payload = orchestrator.append_user_message(db, run.run_id, content=content)
+
+        assert payload["status"] == orchestrator.RUN_STATUS_CHATTING
+        assert expected in payload["messages"][-1]["content"]
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        ("what files did you change?", "app/example.py"),
+        ("what tests ran?", "pytest tests/test_example.py -q"),
+        ("show me the evidence", "validation: validation_results"),
+    ],
+)
+def test_autopilot_chat_audit_questions_use_recorded_artifacts_without_model(
+    tmp_path,
+    monkeypatch,
+    content,
+    expected,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        run = orchestrator.create_run(db, prompt="hello", repo_id=repo.id)
+        run.files_json = json.dumps(["app/example.py", "tests/test_example.py"])
+        run.validation_json = json.dumps([{"command": "pytest tests/test_example.py -q"}])
+        db.add(
+            ProjectAutonomyArtifact(
+                run_id=run.run_id,
+                artifact_type="validation",
+                name="validation_results",
+                content_json=json.dumps({"status": "passed"}),
+                byte_length=20,
+            )
+        )
+        db.commit()
+
+        def fail_model_selection():
+            raise AssertionError("Autopilot audit questions should not call a model")
 
         monkeypatch.setattr(orchestrator, "select_local_model", fail_model_selection)
 
@@ -4099,6 +4227,85 @@ def test_autopilot_quality_command_explains_local_model_guardrails(
         assert "Codex/Claude quality bar" in reply
         assert "Quality bar next action: Install coder model" in reply
         assert "Quality next action: Install coder model" in reply
+    finally:
+        db.close()
+
+
+def test_autopilot_commands_surface_runtime_queue_run_targets(
+    tmp_path,
+    monkeypatch,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        monkeypatch.setattr(orchestrator, "_codex_automation_roots", lambda: [])
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {
+                "model": "qwen2.5-coder:7b",
+                "available": True,
+                "installed_models": ["qwen2.5-coder:7b"],
+                "skipped_models": {},
+                "recommendation": None,
+            },
+        )
+        repo = CodeRepo(path=str(tmp_path), host_path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        orchestrator.bootstrap_agent_profiles(db, repo_id=repo.id)
+
+        queued = orchestrator.create_run(
+            db,
+            prompt="Queued recovery target.",
+            repo_id=repo.id,
+            start_planning=True,
+        )
+        queued.status = orchestrator.RUN_STATUS_QUEUED
+        queued.current_stage = orchestrator.STAGE_QUEUED
+        active = orchestrator.create_run(
+            db,
+            prompt="Active recovery target.",
+            repo_id=repo.id,
+            start_planning=True,
+        )
+        active.status = orchestrator.RUN_STATUS_RUNNING
+        active.current_stage = orchestrator.STAGE_IMPLEMENT
+        waiting = orchestrator.create_run(
+            db,
+            prompt="Waiting recovery target.",
+            repo_id=repo.id,
+            start_planning=True,
+        )
+        waiting.status = orchestrator.RUN_STATUS_AWAITING_APPROVAL
+        waiting.plan_status = orchestrator.PLAN_STATUS_AWAITING_APPROVAL
+        waiting.current_stage = orchestrator.STAGE_PLAN
+        command_run = orchestrator.create_run(db, prompt="hello", repo_id=repo.id)
+        db.commit()
+
+        doctor_payload = orchestrator.append_user_message(
+            db,
+            command_run.run_id,
+            content="/doctor",
+        )
+        quality_payload = orchestrator.append_user_message(
+            db,
+            command_run.run_id,
+            content="/quality",
+        )
+
+        doctor_reply = doctor_payload["messages"][-1]["content"]
+        quality_reply = quality_payload["messages"][-1]["content"]
+        for reply in (doctor_reply, quality_reply):
+            assert "Runtime queue recovery:" in reply
+            assert "Runtime queue next action: Inspect active run" in reply
+            assert f"Runtime queue target run: {active.run_id}" in reply
+            assert "Runtime queue targets:" in reply
+            assert f"Runtime queued target: {queued.run_id}" in reply
+            assert f"Runtime active target: {active.run_id}" in reply
+        readiness = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+        runtime_queue = readiness["runtime_queue"]
+        assert runtime_queue["fresh_active_count"] == 1
+        assert runtime_queue["fresh_active_runs"][0]["run_id"] == active.run_id
     finally:
         db.close()
 

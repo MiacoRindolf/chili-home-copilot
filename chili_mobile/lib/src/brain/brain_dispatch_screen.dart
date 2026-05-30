@@ -194,7 +194,17 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   static const _autopilotRuntimeQueueProblems = 'problems';
   static const _autopilotRuntimeQueueQueuedRuns = 'queued_runs';
   static const _autopilotRuntimeQueueActiveRuns = 'active_runs';
+  static const _autopilotRuntimeQueueFreshActiveRuns = 'fresh_active_runs';
   static const _autopilotRuntimeQueueWaitingRuns = 'waiting_runs';
+  static const _autopilotRuntimeQueueStaleActiveRuns = 'stale_active_runs';
+  static const _autopilotRuntimeQueueNextAction = 'next_action';
+  static const _autopilotRuntimeQueueNextActionLabel = 'next_action_label';
+  static const _autopilotRuntimeQueueNextActionDetail = 'next_action_detail';
+  static const _autopilotRuntimeQueueNextActionRunId = 'next_action_run_id';
+  static const _autopilotRuntimeQueueNextActionLastSeenAt =
+      'next_action_last_seen_at';
+  static const _autopilotRuntimeQueueActionKeepMonitoring = 'keep_monitoring';
+  static const _autopilotRuntimeQueueActionInspectStale = 'inspect_stale_run';
   static const _autopilotOperatorInbox = 'operator_inbox';
   static const _autopilotOperatorInboxItems = 'items';
   static const _autopilotOperatorInboxNextAction = 'next_action';
@@ -6437,19 +6447,52 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final problems = _asStringList(queue[_autopilotRuntimeQueueProblems]);
     final queued = _asInt(queue['queued_count']) ?? 0;
     final active = _asInt(queue['active_count']) ?? 0;
+    final freshActive = _asInt(queue['fresh_active_count']) ?? active;
     final waiting = _asInt(queue['waiting_count']) ?? 0;
+    final staleActive = _asInt(queue['stale_active_count']) ?? 0;
     final questions = _asInt(queue['pending_question_count']) ?? 0;
     final alwaysOn = _asInt(queue['always_on_profile_count']) ?? 0;
     final alwaysOnOpen = _asInt(queue['always_on_open_count']) ?? 0;
     final queuedRuns =
         _asMapList(queue[_autopilotRuntimeQueueQueuedRuns]).take(2).toList();
-    final activeRuns =
-        _asMapList(queue[_autopilotRuntimeQueueActiveRuns]).take(2).toList();
+    final staleRuns = _asMapList(queue[_autopilotRuntimeQueueStaleActiveRuns])
+        .take(2)
+        .toList();
+    final staleRunIds = staleRuns
+        .map((run) => run['run_id']?.toString().trim() ?? '')
+        .where((runId) => runId.isNotEmpty)
+        .toSet();
+    final freshActiveRuns = _asMapList(
+      queue[_autopilotRuntimeQueueFreshActiveRuns],
+    );
+    final activeSource =
+        queue.containsKey(_autopilotRuntimeQueueFreshActiveRuns)
+            ? freshActiveRuns
+            : _asMapList(queue[_autopilotRuntimeQueueActiveRuns]);
+    final activeRuns = activeSource
+        .where((run) =>
+            !staleRunIds.contains(run['run_id']?.toString().trim() ?? ''))
+        .take(2)
+        .toList();
     final waitingRuns =
         _asMapList(queue[_autopilotRuntimeQueueWaitingRuns]).take(2).toList();
     final hasRunPreviews = queuedRuns.isNotEmpty ||
         activeRuns.isNotEmpty ||
-        waitingRuns.isNotEmpty;
+        waitingRuns.isNotEmpty ||
+        staleRuns.isNotEmpty;
+    final nextAction =
+        queue[_autopilotRuntimeQueueNextAction]?.toString().trim() ?? '';
+    final nextActionLabel =
+        queue[_autopilotRuntimeQueueNextActionLabel]?.toString().trim() ?? '';
+    final nextActionDetail =
+        queue[_autopilotRuntimeQueueNextActionDetail]?.toString().trim() ?? '';
+    final nextActionRunId =
+        queue[_autopilotRuntimeQueueNextActionRunId]?.toString().trim() ?? '';
+    final nextActionLastSeenAt =
+        queue[_autopilotRuntimeQueueNextActionLastSeenAt]?.toString().trim() ??
+            '';
+    final showNextAction = nextActionLabel.isNotEmpty &&
+        nextAction != _autopilotRuntimeQueueActionKeepMonitoring;
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(9),
@@ -6485,6 +6528,81 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
               style: TextStyle(color: _mutedTextColor(), fontSize: 12),
             ),
           ],
+          if (showNextAction) ...[
+            const SizedBox(height: 8),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.manage_search_outlined, color: color, size: 16),
+                const SizedBox(width: 7),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        nextActionLabel,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      if (nextActionDetail.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 2),
+                          child: Text(
+                            nextActionDetail,
+                            style: TextStyle(
+                              color: _mutedTextColor(),
+                              fontSize: 12,
+                            ),
+                          ),
+                        ),
+                      if (nextActionRunId.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 2),
+                          child: Text(
+                            nextActionRunId,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: _mutedTextColor(),
+                              fontSize: 11,
+                            ),
+                          ),
+                        ),
+                      if (nextAction ==
+                              _autopilotRuntimeQueueActionInspectStale &&
+                          nextActionLastSeenAt.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 2),
+                          child: Text(
+                            'Last seen ${_agoLabel(nextActionLastSeenAt)}',
+                            style: TextStyle(
+                              color: _mutedTextColor(),
+                              fontSize: 11,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                if (nextActionRunId.isNotEmpty) ...[
+                  const SizedBox(width: 6),
+                  OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                    ),
+                    onPressed: _autonomyBusy
+                        ? null
+                        : () => _openAutonomyRunById(nextActionRunId),
+                    icon: const Icon(Icons.open_in_new, size: 15),
+                    label: const Text('Open'),
+                  ),
+                ],
+              ],
+            ),
+          ],
           const SizedBox(height: 8),
           Wrap(
             spacing: 6,
@@ -6497,10 +6615,12 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                 queued == 0 ? Colors.blueGrey.shade800 : Colors.orange.shade900,
               ),
               _miniChip(
-                '$active active',
+                '$freshActive active',
                 _autonomyBubbleBackground(
-                    active == 0 ? Colors.blueGrey : Colors.green),
-                active == 0 ? Colors.blueGrey.shade800 : Colors.green.shade800,
+                    freshActive == 0 ? Colors.blueGrey : Colors.green),
+                freshActive == 0
+                    ? Colors.blueGrey.shade800
+                    : Colors.green.shade800,
               ),
               _miniChip(
                 '$waiting waiting',
@@ -6527,6 +6647,12 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                   '$questions questions',
                   _autonomyBubbleBackground(Colors.orange),
                   Colors.orange.shade900,
+                ),
+              if (staleActive > 0)
+                _miniChip(
+                  '$staleActive stale',
+                  _autonomyBubbleBackground(_autonomyStatusColor('failed')),
+                  _autonomyStatusColor('failed'),
                 ),
             ],
           ),
@@ -6561,6 +6687,13 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                   ),
             ),
             const SizedBox(height: 2),
+            for (final run in staleRuns)
+              _buildAutonomyRuntimeQueueRun(
+                run,
+                label: 'Stale',
+                color: _autonomyStatusColor('failed'),
+                icon: Icons.manage_search_outlined,
+              ),
             for (final run in activeRuns)
               _buildAutonomyRuntimeQueueRun(
                 run,
@@ -6599,10 +6732,15 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final status = run['status']?.toString().trim() ?? '';
     final stage = run['stage']?.toString().trim() ?? '';
     final planStatus = run['plan_status']?.toString().trim() ?? '';
+    final lastSeen = run['last_seen_at']?.toString().trim() ??
+        run['updated_at']?.toString().trim() ??
+        '';
     final details = [
       if (status.isNotEmpty) status.replaceAll('_', ' '),
       if (stage.isNotEmpty) stage.replaceAll('_', ' '),
       if (planStatus.isNotEmpty) 'plan ${planStatus.replaceAll('_', ' ')}',
+      if (label == 'Stale' && lastSeen.isNotEmpty)
+        'last seen ${_agoLabel(lastSeen)}',
     ].join(' - ');
     final title = agent.isEmpty ? label : '$label - $agent';
     return Padding(

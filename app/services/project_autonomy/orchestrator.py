@@ -431,6 +431,12 @@ AGENT_OS_QUALITY_PROBLEM_PREVIEW_LIMIT = 3
 AGENT_RUNTIME_QUEUE_RECENT_LIMIT = 80
 AGENT_RUNTIME_QUEUE_WARNING_DEPTH = 5
 AGENT_RUNTIME_QUEUE_PREVIEW_LIMIT = 5
+AGENT_RUNTIME_QUEUE_STALE_ACTIVE_MINUTES = 30
+AGENT_RUNTIME_QUEUE_ACTION_KEEP_MONITORING = "keep_monitoring"
+AGENT_RUNTIME_QUEUE_ACTION_INSPECT_STALE = "inspect_stale_run"
+AGENT_RUNTIME_QUEUE_ACTION_INSPECT_ACTIVE = "inspect_active_run"
+AGENT_RUNTIME_QUEUE_ACTION_DRAIN_QUEUED = "drain_queued_run"
+AGENT_RUNTIME_QUEUE_ACTION_REVIEW_WAITING = "review_waiting_run"
 AGENT_OPERATOR_INBOX_RECENT_LIMIT = 80
 AGENT_OPERATOR_INBOX_PREVIEW_LIMIT = 6
 AGENT_OPERATOR_INBOX_ITEM_APPROVAL = "approval"
@@ -931,6 +937,14 @@ RUN_CANCEL_FEEDBACK_MARKERS = frozenset({
     "should",
     "text",
 })
+RUN_CANCEL_INFORMATIONAL_MARKERS = frozenset({
+    "how can",
+    "how do",
+    "what happens",
+    "what should",
+    "where can",
+    "where do",
+})
 CONCRETE_FILE_REFERENCE_MARKERS = frozenset({
     "/",
     ".py",
@@ -1430,6 +1444,8 @@ def _looks_like_plan_approval_message(message: str) -> bool:
 def _looks_like_run_cancel_message(message: str) -> bool:
     normalised = _normalised_choice_text(message)
     if not normalised:
+        return False
+    if any(_choice_text_contains_phrase(normalised, marker) for marker in RUN_CANCEL_INFORMATIONAL_MARKERS):
         return False
     if any(_choice_text_contains_phrase(normalised, marker) for marker in RUN_CANCEL_FEEDBACK_MARKERS):
         return False
@@ -5440,12 +5456,15 @@ def _agent_runtime_queue_state(
     active_runs: list[ProjectAutonomyRun] = []
     waiting_runs: list[ProjectAutonomyRun] = []
     always_on_open_runs: list[ProjectAutonomyRun] = []
+    queue_active_statuses = ACTIVE_STATUSES - {RUN_STATUS_QUEUED}
+    now = _utcnow()
+    stale_cutoff = now - timedelta(minutes=AGENT_RUNTIME_QUEUE_STALE_ACTIVE_MINUTES)
     for row in rows:
         status = str(row.status or "")
         status_counts[status] = status_counts.get(status, 0) + 1
         if status == RUN_STATUS_QUEUED:
             queued_runs.append(row)
-        if status in ACTIVE_STATUSES:
+        if status in queue_active_statuses:
             active_runs.append(row)
         if status in IDLE_STATUSES:
             waiting_runs.append(row)
@@ -5455,6 +5474,16 @@ def _agent_runtime_queue_state(
             and status not in TERMINAL_STATUSES
         ):
             always_on_open_runs.append(row)
+    stale_active_runs = [
+        row
+        for row in active_runs
+        if (row.updated_at or row.started_at or row.created_at)
+        and (row.updated_at or row.started_at or row.created_at) < stale_cutoff
+    ]
+    stale_active_run_ids = {row.run_id for row in stale_active_runs}
+    fresh_active_runs = [
+        row for row in active_runs if row.run_id not in stale_active_run_ids
+    ]
 
     pending_questions = (
         db.query(ProjectAutonomyOperatorQuestion)
@@ -5469,11 +5498,18 @@ def _agent_runtime_queue_state(
 
     queued_count = len(queued_runs)
     active_count = len(active_runs)
+    stale_active_count = len(stale_active_runs)
+    fresh_active_count = max(0, active_count - stale_active_count)
     waiting_count = len(waiting_runs)
     open_count = sum(1 for row in rows if str(row.status or "") not in TERMINAL_STATUSES)
     problems: list[str] = []
     if queued_count > AGENT_RUNTIME_QUEUE_WARNING_DEPTH:
         problems.append(f"{queued_count} queued run(s) are waiting for workers.")
+    if stale_active_runs:
+        problems.append(
+            f"{len(stale_active_runs)} active run(s) have not reported progress for "
+            f"{AGENT_RUNTIME_QUEUE_STALE_ACTIVE_MINUTES}+ minute(s)."
+        )
     if always_on_profile_ids and len(always_on_open_runs) > len(always_on_profile_ids):
         problems.append("Always-on agents have more open runs than active runtime profiles.")
     if pending_question_count:
@@ -5493,6 +5529,12 @@ def _agent_runtime_queue_state(
         )
 
     def _run_preview(row: ProjectAutonomyRun) -> dict[str, Any]:
+        last_seen_at = row.updated_at or row.started_at or row.created_at
+        last_seen_age_minutes = (
+            max(0, int((now - last_seen_at).total_seconds() // 60))
+            if last_seen_at
+            else None
+        )
         return {
             "run_id": row.run_id,
             "agent_profile_id": row.agent_profile_id,
@@ -5500,7 +5542,38 @@ def _agent_runtime_queue_state(
             "stage": row.current_stage,
             "plan_status": row.plan_status,
             "created_at": row.created_at.isoformat() if row.created_at else None,
+            "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+            "last_seen_at": last_seen_at.isoformat() if last_seen_at else None,
+            "last_seen_age_minutes": last_seen_age_minutes,
         }
+
+    if stale_active_runs:
+        next_action = AGENT_RUNTIME_QUEUE_ACTION_INSPECT_STALE
+        next_action_label = "Inspect stale run"
+        next_action_detail = (
+            "Open the stale active run and recover or restart it if the worker is no longer progressing."
+        )
+        next_action_run = _run_preview(stale_active_runs[0])
+    elif active_runs:
+        next_action = AGENT_RUNTIME_QUEUE_ACTION_INSPECT_ACTIVE
+        next_action_label = "Inspect active run"
+        next_action_detail = "Open the active run and confirm the worker is still making progress."
+        next_action_run = _run_preview(active_runs[0])
+    elif queued_runs:
+        next_action = AGENT_RUNTIME_QUEUE_ACTION_DRAIN_QUEUED
+        next_action_label = "Drain queued run"
+        next_action_detail = "Open the queued run, then start or inspect the runtime worker if it is not moving."
+        next_action_run = _run_preview(queued_runs[0])
+    elif waiting_runs:
+        next_action = AGENT_RUNTIME_QUEUE_ACTION_REVIEW_WAITING
+        next_action_label = "Review waiting run"
+        next_action_detail = "Open the waiting run and handle the approval, clarification, or chat handoff."
+        next_action_run = _run_preview(waiting_runs[0])
+    else:
+        next_action = AGENT_RUNTIME_QUEUE_ACTION_KEEP_MONITORING
+        next_action_label = "Keep monitoring"
+        next_action_detail = "No open runtime work needs operator recovery."
+        next_action_run = {}
 
     return {
         "status": AGENT_OS_READINESS_CHECK_WARNING if problems else AGENT_OS_READINESS_CHECK_PASSED,
@@ -5511,11 +5584,30 @@ def _agent_runtime_queue_state(
         "open_count": open_count,
         "queued_count": queued_count,
         "active_count": active_count,
+        "fresh_active_count": fresh_active_count,
         "waiting_count": waiting_count,
+        "stale_active_count": stale_active_count,
+        "stale_after_minutes": AGENT_RUNTIME_QUEUE_STALE_ACTIVE_MINUTES,
         "pending_question_count": pending_question_count,
         "always_on_open_count": len(always_on_open_runs),
         "status_counts": status_counts,
         "problems": problems[:AGENT_OS_QUALITY_PROBLEM_PREVIEW_LIMIT],
+        "next_action": next_action,
+        "next_action_label": next_action_label,
+        "next_action_detail": next_action_detail,
+        "next_action_run_id": next_action_run.get("run_id"),
+        "next_action_agent_profile_id": next_action_run.get("agent_profile_id"),
+        "next_action_status": next_action_run.get("status"),
+        "next_action_stage": next_action_run.get("stage"),
+        "next_action_plan_status": next_action_run.get("plan_status"),
+        "next_action_last_seen_at": next_action_run.get("last_seen_at"),
+        "next_action_last_seen_age_minutes": next_action_run.get("last_seen_age_minutes"),
+        "stale_active_runs": [
+            _run_preview(row) for row in stale_active_runs[:AGENT_RUNTIME_QUEUE_PREVIEW_LIMIT]
+        ],
+        "fresh_active_runs": [
+            _run_preview(row) for row in fresh_active_runs[:AGENT_RUNTIME_QUEUE_PREVIEW_LIMIT]
+        ],
         "queued_runs": [_run_preview(row) for row in queued_runs[:AGENT_RUNTIME_QUEUE_PREVIEW_LIMIT]],
         "active_runs": [_run_preview(row) for row in active_runs[:AGENT_RUNTIME_QUEUE_PREVIEW_LIMIT]],
         "waiting_runs": [_run_preview(row) for row in waiting_runs[:AGENT_RUNTIME_QUEUE_PREVIEW_LIMIT]],
@@ -6922,6 +7014,92 @@ def _autopilot_command_status(
     )
 
 
+def _autopilot_changed_files_reply(
+    db: Session,
+    row: ProjectAutonomyRun,
+) -> str:
+    files = [str(item) for item in _json_load(row.files_json, []) if str(item or "").strip()]
+    if not files:
+        diff_artifacts = (
+            db.query(ProjectAutonomyArtifact)
+            .filter(
+                ProjectAutonomyArtifact.run_id == row.run_id,
+                ProjectAutonomyArtifact.artifact_type == "diff",
+            )
+            .order_by(ProjectAutonomyArtifact.id.asc())
+            .limit(20)
+            .all()
+        )
+        files = [str(artifact.name) for artifact in diff_artifacts if str(artifact.name or "").strip()]
+    if not files:
+        return "No changed files are recorded for this run yet."
+    visible = files[:8]
+    suffix = f"\n...and {len(files) - len(visible)} more." if len(files) > len(visible) else ""
+    return "Changed files recorded for this run:\n" + "\n".join(f"- {path}" for path in visible) + suffix
+
+
+def _validation_command_label(item: Any) -> str:
+    if isinstance(item, str):
+        return item.strip()
+    if isinstance(item, Mapping):
+        for key in ("command", "cmd", "name", "label"):
+            value = str(item.get(key) or "").strip()
+            if value:
+                return value
+    return ""
+
+
+def _autopilot_validation_reply(
+    db: Session,
+    row: ProjectAutonomyRun,
+) -> str:
+    commands = [
+        label
+        for item in _json_load(row.validation_json, [])
+        if (label := _validation_command_label(item))
+    ]
+    latest = _latest_artifact_json(
+        db,
+        row.run_id,
+        artifact_type="validation",
+        name="validation_results",
+    )
+    if not commands and isinstance(latest.get("commands"), list):
+        commands = [_validation_command_label(item) for item in latest.get("commands") or []]
+        commands = [cmd for cmd in commands if cmd]
+    status = str(latest.get("status") or latest.get("result") or "").strip()
+    if not commands and not status:
+        return "No validation or test results are recorded for this run yet."
+    lines = ["Validation recorded for this run:"]
+    if status:
+        lines.append(f"- Status: {status}")
+    for command in commands[:8]:
+        lines.append(f"- {command}")
+    if len(commands) > 8:
+        lines.append(f"...and {len(commands) - 8} more.")
+    return "\n".join(lines)
+
+
+def _autopilot_evidence_reply(
+    db: Session,
+    row: ProjectAutonomyRun,
+) -> str:
+    artifacts = (
+        db.query(ProjectAutonomyArtifact)
+        .filter(ProjectAutonomyArtifact.run_id == row.run_id)
+        .order_by(ProjectAutonomyArtifact.id.desc())
+        .limit(8)
+        .all()
+    )
+    if not artifacts:
+        return "No artifacts or evidence are recorded for this run yet."
+    lines = ["Latest run artifacts:"]
+    for artifact in artifacts:
+        size = f" ({artifact.byte_length} bytes)" if int(artifact.byte_length or 0) else ""
+        lines.append(f"- {artifact.artifact_type}: {artifact.name}{size}")
+    return "\n".join(lines)
+
+
 def _autopilot_command_agents(
     db: Session,
     row: ProjectAutonomyRun,
@@ -7053,6 +7231,100 @@ def _autopilot_operator_inbox_lines(readiness: Mapping[str, Any]) -> list[str]:
     lines = [line]
     if next_action_run_id:
         lines.append(f"Operator inbox target run: {next_action_run_id}")
+    return lines
+
+
+def _autopilot_runtime_queue_lines(readiness: Mapping[str, Any]) -> list[str]:
+    queue = _mapping_payload(readiness.get("runtime_queue"))
+    if not queue:
+        return []
+    status = str(queue.get("status") or "checking").replace("_", " ")
+    detail = str(queue.get("detail") or "").strip()
+    fresh_active_raw = queue.get("fresh_active_count")
+    fresh_active_count = (
+        int(fresh_active_raw)
+        if fresh_active_raw is not None
+        else int(queue.get("active_count") or 0)
+    )
+    lines = [
+        (
+            "Runtime queue recovery: "
+            f"{int(queue.get('queued_count') or 0)} queued, "
+            f"{fresh_active_count} active, "
+            f"{int(queue.get('waiting_count') or 0)} waiting, "
+            f"{int(queue.get('stale_active_count') or 0)} stale ({status})."
+        )
+    ]
+    if detail:
+        lines.append(f"Runtime queue detail: {detail}")
+    next_action_label = str(queue.get("next_action_label") or "").strip()
+    next_action_detail = str(queue.get("next_action_detail") or "").strip()
+    next_action_run_id = str(queue.get("next_action_run_id") or "").strip()
+    if next_action_label:
+        action_line = f"Runtime queue next action: {next_action_label}"
+        if next_action_detail:
+            action_line += f" - {next_action_detail}"
+        lines.append(action_line)
+    if next_action_run_id:
+        lines.append(f"Runtime queue target run: {next_action_run_id}")
+    problems = _string_items(
+        queue.get("problems"),
+        limit=AGENT_OS_QUALITY_PROBLEM_PREVIEW_LIMIT,
+    )
+    for problem in problems:
+        lines.append(f"Runtime queue problem: {problem}")
+
+    preview_lines: list[str] = []
+    preview_run_ids: set[str] = set()
+    for label, key in (
+        ("stale", "stale_active_runs"),
+        ("active", "fresh_active_runs"),
+        ("queued", "queued_runs"),
+        ("waiting", "waiting_runs"),
+    ):
+        runs = queue.get(key)
+        if key == "fresh_active_runs" and not isinstance(runs, list):
+            runs = queue.get("active_runs")
+        if not isinstance(runs, list):
+            continue
+        for item in runs:
+            if not isinstance(item, Mapping):
+                continue
+            run_id = str(item.get("run_id") or "").strip()
+            if not run_id:
+                continue
+            if run_id in preview_run_ids:
+                continue
+            preview_run_ids.add(run_id)
+            status_label = str(item.get("status") or "").strip().replace("_", " ")
+            stage_label = str(item.get("stage") or "").strip().replace("_", " ")
+            plan_label = str(item.get("plan_status") or "").strip().replace("_", " ")
+            agent_profile_id = item.get("agent_profile_id")
+            last_seen_age = item.get("last_seen_age_minutes")
+            details = [
+                part
+                for part in (
+                    f"profile {agent_profile_id}" if agent_profile_id else "",
+                    status_label,
+                    f"stage {stage_label}" if stage_label else "",
+                    f"plan {plan_label}" if plan_label else "",
+                    (
+                        f"last seen {int(last_seen_age)}m ago"
+                        if label == "stale" and last_seen_age is not None
+                        else ""
+                    ),
+                )
+                if part
+            ]
+            suffix = f" ({'; '.join(details)})" if details else ""
+            preview_lines.append(f"Runtime {label} target: {run_id}{suffix}")
+            if len(preview_lines) >= AGENT_OS_QUALITY_PROBLEM_PREVIEW_LIMIT:
+                break
+        if len(preview_lines) >= AGENT_OS_QUALITY_PROBLEM_PREVIEW_LIMIT:
+            break
+    if preview_lines:
+        lines.append("Runtime queue targets:")
+        lines.extend(preview_lines)
     return lines
 
 
@@ -7227,6 +7499,7 @@ def _autopilot_command_doctor(
     codex_bench_lines = _autopilot_codex_bench_lines(readiness)
     capability_audit_lines = _autopilot_capability_audit_lines(readiness)
     coding_quality_bar_lines = _autopilot_coding_quality_bar_lines(readiness)
+    runtime_queue_lines = _autopilot_runtime_queue_lines(readiness)
     operator_inbox_lines = _autopilot_operator_inbox_lines(readiness)
     if not bool(local_model.get("coding_ready")):
         lines.append(f"Model next step: {local_model.get('recommendation') or AGENT_OS_LOCAL_MODEL_RECOMMENDATION}")
@@ -7258,6 +7531,7 @@ def _autopilot_command_doctor(
     )
     lines.extend(codex_bench_lines)
     lines.extend(coding_quality_bar_lines)
+    lines.extend(runtime_queue_lines)
     lines.extend(operator_inbox_lines)
     lines.extend(quality_monitor_lines)
     lines.extend(capability_audit_lines)
@@ -7333,6 +7607,7 @@ def _autopilot_command_quality(
             problems = _string_items(scorecard.get("problems"), limit=AGENT_OS_QUALITY_PROBLEM_PREVIEW_LIMIT)
             quality_monitor_lines = _autopilot_quality_monitor_lines(readiness)
             coding_quality_bar_lines = _autopilot_coding_quality_bar_lines(readiness)
+            runtime_queue_lines = _autopilot_runtime_queue_lines(readiness)
             operator_inbox_lines = _autopilot_operator_inbox_lines(readiness)
             quality_lines.extend(
                 [
@@ -7380,6 +7655,7 @@ def _autopilot_command_quality(
             )
             quality_lines.extend(f"- {line}" for line in codex_bench_lines)
             quality_lines.extend(f"- {line}" for line in coding_quality_bar_lines)
+            quality_lines.extend(f"- {line}" for line in runtime_queue_lines)
             quality_lines.extend(f"- {line}" for line in operator_inbox_lines)
             quality_lines.extend(f"- {line}" for line in quality_monitor_lines)
             quality_lines.extend(f"- {line}" for line in capability_audit_lines)
@@ -9151,6 +9427,63 @@ def _mechanical_autopilot_chat_reply(
     lower = re.sub(r"\s+", " ", (latest_user_message or "").strip().lower())
     if not lower:
         return None
+    normalized = lower.strip(" .!?,")
+
+    is_how_to = any(
+        marker in lower
+        for marker in (
+            "how do i",
+            "how can i",
+            "where do i",
+            "where can i",
+            "can i",
+            "can you show me",
+            "what should i do",
+            "what happens next",
+            "next step",
+        )
+    )
+    if is_how_to and any(
+        marker in lower
+        for marker in ("image", "screenshot", "attachment", "attach", "photo", "picture", "upload")
+    ):
+        return (
+            "Use the attachment control beside the Autopilot chat composer to add a local image or screenshot. "
+            "I will keep the file as prompt context for this run, and unsafe or remote-looking sources are blocked."
+        )
+    if is_how_to and any(marker in lower for marker in ("cancel", "stop", "pause")):
+        return (
+            "Use the cockpit cancel or stop action to halt this run. If work has already started, I keep the "
+            "run record and evidence so the next step is auditable."
+        )
+    if is_how_to and any(marker in lower for marker in ("start", "plan", "begin", "kick off", "run")):
+        return (
+            f"Use {PLAN_START_CHAT_ACTION_LABEL} when you want me to inspect the repo and draft a plan. "
+            "I will stay in chat mode until then, so casual questions do not trigger repo work."
+        )
+    if is_how_to and any(marker in lower for marker in ("approve", "merge", "finish", "ship")):
+        return (
+            "Review the drafted plan and validation notes first. When the cockpit shows an approval-ready plan, "
+            "use the approve action there; merge stays gated until validation passes."
+        )
+
+    if any(marker in lower for marker in ("what files", "which files", "files changed", "changed files")):
+        return _autopilot_changed_files_reply(db, run)
+    if any(
+        marker in lower
+        for marker in (
+            "what tests",
+            "which tests",
+            "tests ran",
+            "test results",
+            "validation",
+            "validated",
+        )
+    ):
+        return _autopilot_validation_reply(db, run)
+    if any(marker in lower for marker in ("artifact", "artifacts", "evidence", "audit trail", "proof")):
+        return _autopilot_evidence_reply(db, run)
+
     if any(
         marker in lower
         for marker in (
@@ -9166,7 +9499,6 @@ def _mechanical_autopilot_chat_reply(
     ):
         return None
 
-    normalized = lower.strip(" .!?,")
     if normalized in {"help", "commands", "what can you do", "what can i ask"}:
         return _autopilot_command_help()
     if any(marker in lower for marker in ("status", "state", "where are we", "what stage", "progress")):
@@ -9202,14 +9534,14 @@ def _mechanical_autopilot_chat_reply(
 def _chat_reply(db: Session, run: ProjectAutonomyRun, latest_user_message: str) -> str:
     if _looks_like_greeting_or_chat(latest_user_message):
         return _initial_chat_reply(latest_user_message)
+    mechanical_reply = _mechanical_autopilot_chat_reply(db, run, latest_user_message)
+    if mechanical_reply:
+        return mechanical_reply
     if any(token in latest_user_message.lower() for token in ("implement", "change", "fix", "add", "update", "build")):
         return (
             "That sounds implementation-shaped. I can keep brainstorming here, or you can use "
             f"{PLAN_START_CHAT_ACTION_LABEL} in the sidebar when you want me to scan the repo and draft a safe plan."
         )
-    mechanical_reply = _mechanical_autopilot_chat_reply(db, run, latest_user_message)
-    if mechanical_reply:
-        return mechanical_reply
     model_info = select_local_model()
     if not model_info.get("model"):
         return (
