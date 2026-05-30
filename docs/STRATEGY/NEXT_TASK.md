@@ -1,11 +1,11 @@
-# NEXT_TASK: f-position-identity-phase-5j-selective-reader-cleanup-slice-4
+# NEXT_TASK: f-position-identity-phase-5j-selective-reader-cleanup-slice-5
 
 STATUS: PENDING
 
 ## Goal
 
-Continue Phase 5J by migrating another small read-only analytics batch from the
-legacy `trading_trades` compatibility view to `trading_management_envelopes`.
+Continue Phase 5J by migrating clean read-only scripts or analytics modules from
+the legacy `trading_trades` compatibility view to `trading_management_envelopes`.
 
 Keep the compatibility view and the Python `Trade` ORM class in place.
 
@@ -20,18 +20,20 @@ Keep the compatibility view and the Python `Trade` ORM class in place.
   - slice 1: brain KPI, management-envelope helper, Coinbase/maker/imminent probes
   - slice 2: decision-packet coverage and divergence analytics
   - slice 3: dynamic priors, ticker-scope autotune, pattern-stats recompute
+  - slice 4: realized stats sync and HRP active-position reader
 - Latest post-slice verification:
   - Phase 5I probe: `COMPLETE_POSITIVE`
   - schema-specific log hits: 0
 
-## Candidate Slice 4 Targets
+## Candidate Slice 5 Targets
 
-Prefer read-only learning/reporting code:
+Prefer clean read-only scripts/modules:
 
-- `app/services/trading/realized_stats_sync.py`
-- `app/services/trading/net_edge_ranker.py`
-- `app/services/trading/hrp_sizing.py`
-- read-only scripts without existing unrelated local edits
+- `scripts/analyze_trade_quality_funnel.py` only after inspecting its current
+  local edits
+- `app/services/trading/net_edge_ranker.py` only after unrelated local edits are
+  resolved or deliberately included
+- other read-only reporting scripts without dirty local edits
 
 Defer live writer paths:
 
@@ -72,6 +74,6 @@ Defer live writer paths:
 
 ## References
 
+- `docs/STRATEGY/CC_REPORTS/2026-05-30_f-position-identity-phase-5j-selective-reader-cleanup-slice-4.md`
 - `docs/STRATEGY/CC_REPORTS/2026-05-30_f-position-identity-phase-5j-selective-reader-cleanup-slice-3.md`
-- `docs/STRATEGY/CC_REPORTS/2026-05-30_f-position-identity-phase-5j-selective-reader-cleanup-slice-2.md`
 - `docs/STRATEGY/CC_REPORTS/2026-05-30_f-position-identity-phase-5i-post-rename-soak-closeout.md`

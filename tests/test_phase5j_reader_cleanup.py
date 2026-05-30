@@ -51,3 +51,14 @@ def test_phase5j_slice3_learning_readers_use_management_envelopes() -> None:
         assert "trading_management_envelopes" in source
         assert "FROM trading_trades" not in source
         assert "JOIN trading_trades" not in source
+
+
+def test_phase5j_slice4_realized_and_sizing_readers_use_management_envelopes() -> None:
+    for relative_path in (
+        "app/services/trading/realized_stats_sync.py",
+        "app/services/trading/hrp_sizing.py",
+    ):
+        source = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+        assert "trading_management_envelopes" in source
+        assert "FROM trading_trades" not in source
+        assert "JOIN trading_trades" not in source

@@ -126,7 +126,7 @@ def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, in
                    exit_date,
                    {trade_contract_multiplier_sql()} AS contract_multiplier,
                    'live' AS source
-            FROM trading_trades
+            FROM trading_management_envelopes
             WHERE status = 'closed'
               AND scan_pattern_id IS NOT NULL
               AND scan_pattern_id != -1
@@ -285,7 +285,7 @@ def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, in
     no_trades = sess.execute(text("""
         SELECT count(*) FROM scan_patterns
         WHERE NOT EXISTS (
-            SELECT 1 FROM trading_trades
+            SELECT 1 FROM trading_management_envelopes
             WHERE scan_pattern_id = scan_patterns.id
               AND scan_pattern_id != -1
               AND status = 'closed'

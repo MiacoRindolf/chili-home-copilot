@@ -350,7 +350,7 @@ def _fetch_active_position_symbols(db: Session, user_id: Optional[int]) -> list[
         rows = db.execute(
             text(
                 """
-                SELECT DISTINCT ticker FROM trading_trades
+                SELECT DISTINCT ticker FROM trading_management_envelopes
                 WHERE status IN ('open', 'pending')
                   AND (user_id = :uid OR :uid IS NULL)
                 """
