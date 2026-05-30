@@ -268,3 +268,115 @@ def test_position_sync_cancels_duplicate_zero_fill_buy_order(
     assert intent.quantity == 3822.0
     assert intent.entry_price == 0.0428708
     assert intent.last_diff_reason == "coinbase_position_truth_quantity"
+
+
+def test_pending_exit_sync_closes_trade_sidecars_and_cancels_stale_buy(
+    monkeypatch,
+    db,
+) -> None:
+    from app.models.trading import BracketIntent, Trade, TradingPosition
+    from app.services import coinbase_service
+
+    trade = Trade(
+        user_id=None,
+        ticker="RLS-USD",
+        direction="long",
+        entry_price=0.00333144,
+        quantity=6401.0,
+        filled_quantity=6401.0,
+        remaining_quantity=0.0,
+        status="open",
+        broker_source="coinbase",
+        broker_order_id="entry-buy",
+        broker_status="filled",
+        pending_exit_order_id="exit-sell",
+        pending_exit_status="submitted",
+        pending_exit_reason="stop_loss_hit",
+        entry_date=datetime.utcnow(),
+    )
+    db.add(trade)
+    db.flush()
+    position = TradingPosition(
+        user_id=None,
+        broker_source="coinbase",
+        account_type="cash",
+        ticker="RLS-USD",
+        direction="long",
+        asset_kind="crypto",
+        current_quantity=6401.0,
+        current_avg_price=0.00333144,
+        state="open",
+        current_envelope_id=trade.id,
+    )
+    intent = BracketIntent(
+        trade_id=trade.id,
+        user_id=None,
+        ticker="RLS-USD",
+        direction="long",
+        quantity=6401.0,
+        entry_price=0.00333144,
+        stop_price=0.00365,
+        target_price=0.00543,
+        intent_state="reconciled",
+        shadow_mode=False,
+        broker_source="coinbase",
+    )
+    db.add_all([position, intent])
+    db.flush()
+    trade.position_id = position.id
+    db.commit()
+    db.refresh(trade)
+    db.refresh(position)
+    db.refresh(intent)
+
+    exit_order = {
+        "order_id": "exit-sell",
+        "product_id": "RLS-USD",
+        "side": "SELL",
+        "status": "FILLED",
+        "filled_size": "6401",
+        "average_filled_price": "0.0036462865177316",
+        "last_fill_time": "2026-05-30T04:22:01.692143Z",
+    }
+    stale_buy = {
+        "order_id": "stale-scale-buy",
+        "product_id": "RLS-USD",
+        "side": "BUY",
+        "status": "OPEN",
+        "filled_size": "0",
+        "created_time": "2026-05-30T00:10:19.694541Z",
+        "client_order_id": "atv1-47328-scale",
+    }
+    cancelled: list[str] = []
+    monkeypatch.setattr(
+        coinbase_service,
+        "get_order_by_id",
+        lambda order_id: exit_order if order_id == "exit-sell" else None,
+    )
+    monkeypatch.setattr(
+        coinbase_service,
+        "get_open_orders",
+        lambda product_ids=None: [stale_buy],
+    )
+    monkeypatch.setattr(
+        coinbase_service,
+        "cancel_order_by_id",
+        lambda order_id: cancelled.append(order_id) or {"ok": True, "order_id": order_id},
+    )
+
+    result = coinbase_service.sync_pending_exit_for_trade(db, trade)
+
+    db.refresh(trade)
+    db.refresh(position)
+    db.refresh(intent)
+    assert result["closed"] is True
+    assert trade.status == "closed"
+    assert trade.exit_price == pytest.approx(0.0036462865177316)
+    assert trade.pending_exit_order_id is None
+    assert trade.pending_exit_status is None
+    assert trade.broker_status == "filled"
+    assert trade.pnl == round((0.0036462865177316 - 0.00333144) * 6401.0, 4)
+    assert position.state == "closed"
+    assert position.current_quantity == 0
+    assert intent.intent_state == "closed"
+    assert cancelled == ["stale-scale-buy"]

@@ -723,8 +723,39 @@ def run_crypto_exit_pass(db: Session) -> dict[str, Any]:
 
     for t in crypto_rows:
         out["checked"] += 1
-        # Already submitted exit -- defer
+        # Already submitted exit -- poll broker truth before deferring. Coinbase
+        # market exits can fill immediately; if normal broker order sync lags,
+        # leaving the local envelope open creates repeated stop/monitor noise.
         if t.pending_exit_order_id:
+            if _broker_source_for_trade(t) == "coinbase":
+                try:
+                    from ... import coinbase_service
+
+                    pending = coinbase_service.sync_pending_exit_for_trade(db, t)
+                    if pending.get("closed"):
+                        out["closed"] += 1
+                        out["coinbase_pending_exit_synced"] = int(
+                            out.get("coinbase_pending_exit_synced") or 0
+                        ) + 1
+                        continue
+                    if pending.get("cleared"):
+                        out["coinbase_pending_exit_cleared"] = int(
+                            out.get("coinbase_pending_exit_cleared") or 0
+                        ) + 1
+                        continue
+                    if pending.get("error"):
+                        out["errors"].append(
+                            f"pending_exit_sync:{t.ticker}:{pending.get('error')}"
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "[crypto_exit] Coinbase pending-exit sync failed "
+                        "trade#%s ticker=%s: %s",
+                        t.id,
+                        t.ticker,
+                        exc,
+                    )
+                    out["errors"].append(f"pending_exit_sync:{t.ticker}:{type(exc).__name__}")
             out["deferred"] += 1
             continue
         entry = float(t.entry_price or 0.0)

@@ -844,6 +844,101 @@ def _clear_pending_exit_fields(trade: Any) -> None:
     trade.pending_exit_limit_price = None
 
 
+def _cancel_coinbase_stale_buy_orders_after_exit(
+    ticker: str | None,
+    *,
+    exit_at: datetime | None,
+) -> int:
+    """Cancel stale zero-fill Coinbase BUY orders once a local exit fills.
+
+    Scale-in orders can outlive the position they were meant to add to. After a
+    confirmed SELL fill closes the broker position, any older zero-fill BUY for
+    the same product is stale risk, not candidate supply. Newer buys are left
+    alone because they may be a separate post-exit entry decision.
+    """
+    product_id = _to_product_id(str(ticker or ""))
+    if not product_id:
+        return 0
+    cutoff = exit_at or datetime.utcnow()
+    cancelled = 0
+    try:
+        orders = get_open_orders(product_ids=[product_id])
+    except Exception:
+        logger.warning(
+            "[coinbase] stale BUY cleanup failed to list open orders for %s",
+            product_id,
+            exc_info=True,
+        )
+        return 0
+
+    for order in orders or []:
+        raw = _dictish(order)
+        if not raw:
+            continue
+        oid = str(raw.get("order_id") or raw.get("id") or "").strip()
+        if not oid:
+            continue
+        side = str(raw.get("side") or "").strip().upper()
+        state = str(raw.get("status") or raw.get("state") or "").strip().lower()
+        if side != "BUY" or state in _CB_TERMINAL_STATES:
+            continue
+        filled = _safe_float(
+            raw.get("filled_size")
+            or raw.get("filled_quantity")
+            or raw.get("cumulative_quantity")
+        )
+        if filled > 0:
+            continue
+        created_at = _parse_cb_datetime(raw.get("created_time") or raw.get("created_at"))
+        if created_at is not None and created_at > cutoff:
+            continue
+        result = cancel_order_by_id(oid)
+        if isinstance(result, dict) and result.get("ok"):
+            cancelled += 1
+            logger.warning(
+                "[coinbase] cancelled stale zero-fill BUY order %s for %s after exit_at=%s",
+                oid,
+                product_id,
+                cutoff.isoformat() if hasattr(cutoff, "isoformat") else cutoff,
+            )
+        else:
+            logger.warning(
+                "[coinbase] stale zero-fill BUY cancel failed for %s %s: %s",
+                product_id,
+                oid,
+                (result or {}).get("error") if isinstance(result, dict) else result,
+            )
+    return cancelled
+
+
+def _mark_coinbase_trade_closed_sidecars(
+    db: Session,
+    trade: Any,
+    *,
+    reason: str,
+) -> None:
+    """Close bracket and position sidecars after a confirmed Coinbase exit."""
+    try:
+        from .trading.bracket_intent_writer import mark_closed
+
+        intent_ids = db.execute(
+            text(
+                "SELECT id FROM trading_bracket_intents "
+                "WHERE trade_id = :tid AND intent_state <> 'closed'"
+            ),
+            {"tid": int(getattr(trade, "id"))},
+        ).scalars().all()
+        for intent_id in intent_ids:
+            mark_closed(db, int(intent_id), reason=reason[:128])
+    except Exception:
+        logger.debug(
+            "[coinbase] bracket intent close failed for trade#%s",
+            getattr(trade, "id", None),
+            exc_info=True,
+        )
+    _close_coinbase_position_identity_for_trade(db, trade)
+
+
 def _finalize_coinbase_pending_exit(db: Session, trade: Any, order: dict[str, Any]) -> float:
     filled_qty = _safe_float(order.get("filled_size") or order.get("base_size"))
     qty = filled_qty if filled_qty and filled_qty > 0 else float(trade.quantity or 0.0)
@@ -875,6 +970,23 @@ def _finalize_coinbase_pending_exit(db: Session, trade: Any, order: dict[str, An
     trade.last_broker_sync = exit_at
     _clear_pending_exit_fields(trade)
     db.add(trade)
+    stale_buys = _cancel_coinbase_stale_buy_orders_after_exit(
+        getattr(trade, "ticker", None),
+        exit_at=exit_at,
+    )
+    if stale_buys:
+        trade.notes = (
+            (trade.notes or "").rstrip()
+            + "\nCancelled "
+            + str(stale_buys)
+            + " stale zero-fill Coinbase BUY order(s) after confirmed exit fill."
+        ).strip()
+        db.add(trade)
+    _mark_coinbase_trade_closed_sidecars(
+        db,
+        trade,
+        reason=str(exit_reason or "coinbase_pending_exit_filled"),
+    )
     db.commit()
 
     try:
@@ -898,6 +1010,47 @@ def _finalize_coinbase_pending_exit(db: Session, trade: Any, order: dict[str, An
             exc_info=True,
         )
     return round(pnl, 4)
+
+
+def sync_pending_exit_for_trade(db: Session, trade: Any) -> dict[str, Any]:
+    """Poll and reconcile a single Coinbase pending-exit order.
+
+    This is intentionally callable from both broker sync and the live crypto
+    exit monitor. A submitted exit is not enough to keep monitoring the local
+    envelope forever; once Coinbase reports the SELL filled, broker truth closes
+    the trade and clears stale pending state immediately.
+    """
+    pending_order_id = str(getattr(trade, "pending_exit_order_id", "") or "").strip()
+    if not pending_order_id:
+        return {"checked": False, "reason": "no_pending_exit_order"}
+    cb_order = get_order_by_id(pending_order_id)
+    if not cb_order:
+        return {"checked": True, "error": "order_not_found"}
+
+    cb_state = str(cb_order.get("status") or cb_order.get("state") or "").lower()
+    now = datetime.utcnow()
+    trade.pending_exit_status = cb_state or getattr(trade, "pending_exit_status", None)
+    trade.last_broker_sync = now
+    db.add(trade)
+
+    if cb_state == "filled":
+        pnl = _finalize_coinbase_pending_exit(
+            db,
+            trade,
+            {**cb_order, "order_id": pending_order_id},
+        )
+        return {"checked": True, "closed": True, "pnl": pnl, "status": cb_state}
+
+    if cb_state in _CB_TERMINAL_STATES:
+        _clear_pending_exit_fields(trade)
+        trade.broker_status = cb_state
+        trade.last_broker_sync = now
+        db.add(trade)
+        db.commit()
+        return {"checked": True, "cleared": True, "status": cb_state}
+
+    db.commit()
+    return {"checked": True, "pending": True, "status": cb_state}
 
 
 def _dictish(obj: Any) -> dict[str, Any]:
@@ -1197,32 +1350,21 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
         ticker_for_log = getattr(trade, "ticker", "?")
         try:
             pending_order_id = str(trade.pending_exit_order_id or "")
-            cb_order = get_order_by_id(pending_order_id)
-            if not cb_order:
+            result = sync_pending_exit_for_trade(db, trade)
+            if result.get("error"):
                 errors += 1
                 continue
 
-            cb_state = (cb_order.get("status") or cb_order.get("state") or "").lower()
-            now = datetime.utcnow()
-            trade.pending_exit_status = cb_state or trade.pending_exit_status
-            trade.last_broker_sync = now
-            db.add(trade)
-
-            if cb_state == "filled":
-                order_payload = {**cb_order, "order_id": pending_order_id}
-                pnl = _finalize_coinbase_pending_exit(db, trade, order_payload)
+            cb_state = str(result.get("status") or "").lower()
+            if result.get("closed"):
                 filled += 1
                 logger.info(
                     "[coinbase] Pending exit %s for %s FILLED pnl=%s",
                     pending_order_id,
                     trade.ticker,
-                    pnl,
+                    result.get("pnl"),
                 )
-            elif cb_state in _CB_TERMINAL_STATES and cb_state != "filled":
-                _clear_pending_exit_fields(trade)
-                trade.broker_status = cb_state
-                trade.last_broker_sync = now
-                db.add(trade)
+            elif result.get("cleared"):
                 cancelled += 1
                 logger.info(
                     "[coinbase] Pending exit %s for %s %s; cleared pending exit",
