@@ -308,7 +308,7 @@ def _build_regime_lookup(
     lookup.market_wide[DIMENSION_MACRO_REGIME] = _load_market_wide_labels(
         db,
         table="trading_macro_regime_snapshots",
-        col="regime_label",
+        col="macro_label",
         start=load_start,
         end=load_end,
     )
@@ -317,7 +317,7 @@ def _build_regime_lookup(
     lookup.market_wide[DIMENSION_BREADTH_LABEL] = _load_market_wide_labels(
         db,
         table="trading_breadth_relstr_snapshots",
-        col="breadth_composite_label",
+        col="breadth_label",
         start=load_start,
         end=load_end,
     )
@@ -328,7 +328,7 @@ def _build_regime_lookup(
     ] = _load_market_wide_labels(
         db,
         table="trading_cross_asset_snapshots",
-        col="composite_label",
+        col="cross_asset_label",
         start=load_start,
         end=load_end,
     )
@@ -387,7 +387,7 @@ def _build_regime_lookup(
     lookup.ticker_keyed[DIMENSION_TICKER_REGIME] = _load_ticker_keyed_labels(
         db,
         table="trading_ticker_regime_snapshots",
-        col="regime_label",
+        col="ticker_regime_label",
         tickers=tickers,
         start=load_start,
         end=load_end,
