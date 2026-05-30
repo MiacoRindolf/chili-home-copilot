@@ -46,6 +46,7 @@ Determinism
 from __future__ import annotations
 
 import hashlib
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Mapping, Sequence
@@ -371,8 +372,8 @@ def _crypto_equity_beta(
         return None, None
     if n < 5:
         return None, None
-    b = [float(x) for x in list(btc_returns)[-n:]]
-    s = [float(x) for x in list(spy_returns)[-n:]]
+    b = _tail_floats(btc_returns, n)
+    s = _tail_floats(spy_returns, n)
     mean_b = sum(b) / n
     mean_s = sum(s) / n
     num = 0.0
@@ -389,6 +390,16 @@ def _crypto_equity_beta(
     beta = num / den_s
     corr = num / ((den_b ** 0.5) * (den_s ** 0.5))
     return float(beta), float(corr)
+
+
+def _tail_floats(values: Sequence[float], n: int) -> list[float]:
+    if n <= 0:
+        return []
+    try:
+        tail = values[-n:]
+    except Exception:
+        tail = deque(values, maxlen=n)
+    return [float(x) for x in tail]
 
 
 # ---------------------------------------------------------------------------

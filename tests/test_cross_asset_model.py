@@ -33,6 +33,7 @@ from app.services.trading.cross_asset_model import (
     CrossAssetInput,
     compute_cross_asset,
     compute_snapshot_id,
+    _tail_floats,
 )
 
 
@@ -304,6 +305,35 @@ def test_beta_computed_on_sufficient_series():
     assert 1.8 < out.crypto_equity_beta < 2.2
     assert out.crypto_equity_correlation is not None
     assert out.crypto_equity_correlation > 0.99
+
+
+def test_beta_tail_helper_slices_only_window():
+    class WindowedReturns:
+        def __init__(self, values: tuple[float, ...]) -> None:
+            self.values = values
+            self.full_iteration_attempted = False
+            self.last_slice = None
+
+        def __len__(self) -> int:
+            return len(self.values)
+
+        def __getitem__(self, key):
+            if isinstance(key, slice):
+                self.last_slice = key
+                return self.values[key]
+            return self.values[key]
+
+        def __iter__(self):
+            self.full_iteration_attempted = True
+            return iter(self.values)
+
+    returns = WindowedReturns(tuple(float(i) for i in range(100)))
+
+    tail = _tail_floats(returns, 7)
+
+    assert tail == [93.0, 94.0, 95.0, 96.0, 97.0, 98.0, 99.0]
+    assert returns.last_slice == slice(-7, None, None)
+    assert returns.full_iteration_attempted is False
 
 
 def test_beta_none_when_series_too_short():

@@ -553,4 +553,23 @@ class TestPercentileHelper:
         assert p95 == 10.0  # index 9 → 10
 
 
+    def test_batch_percentiles_sort_once(self, monkeypatch):
+        calls = 0
+        original = venue_health._sorted_float_values
+
+        def _counting_sort(values):
+            nonlocal calls
+            calls += 1
+            return original(values)
+
+        monkeypatch.setattr(venue_health, "_sorted_float_values", _counting_sort)
+
+        vals = [10.0, 2.0, 8.0, 4.0, 6.0]
+        p50, p95 = venue_health._percentiles(vals, 0.50, 0.95)
+
+        assert calls == 1
+        assert p50 == venue_health._percentile(vals, 0.50)
+        assert p95 == venue_health._percentile(vals, 0.95)
+
+
 __all__: list[str] = []  # tests/ is not an import target

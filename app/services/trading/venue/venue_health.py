@@ -136,9 +136,25 @@ def _resolve_thresholds() -> dict[str, Any]:
 def _percentile(values: list[float], q: float) -> Optional[float]:
     if not values:
         return None
-    rows = sorted(float(v) for v in values)
+    rows = _sorted_float_values(values)
     idx = max(0, min(len(rows) - 1, int(round((len(rows) - 1) * q))))
     return rows[idx]
+
+
+def _sorted_float_values(values: list[float]) -> list[float]:
+    return sorted(float(v) for v in values)
+
+
+def _percentiles(values: list[float], *qs: float) -> tuple[Optional[float], ...]:
+    if not values:
+        return tuple(None for _ in qs)
+    rows = _sorted_float_values(values)
+    last = len(rows) - 1
+    out: list[Optional[float]] = []
+    for q in qs:
+        idx = max(0, min(last, int(round(last * q))))
+        out.append(rows[idx])
+    return tuple(out)
 
 
 # ── Core reader ───────────────────────────────────────────────────────
@@ -274,10 +290,8 @@ def summarize_venue(
     err_rate = round((n_errors + n_rate_limits) / denom, 4)
     rl_rate = round(n_rate_limits / denom, 4)
 
-    s2a_p50 = _percentile(submit_acks, 0.50)
-    s2a_p95 = _percentile(submit_acks, 0.95)
-    a2f_p50 = _percentile(ack_fills, 0.50)
-    a2f_p95 = _percentile(ack_fills, 0.95)
+    s2a_p50, s2a_p95 = _percentiles(submit_acks, 0.50, 0.95)
+    a2f_p50, a2f_p95 = _percentiles(ack_fills, 0.50, 0.95)
 
     out = dict(base)
     out.update({

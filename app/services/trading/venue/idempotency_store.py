@@ -51,13 +51,13 @@ def _mem_remember(key: str) -> None:
         # prune by size
         while len(_mem_cache) > _MEM_MAX:
             _mem_cache.popitem(last=False)
-        # prune by TTL (walk from oldest)
+        # prune by TTL (walk from oldest without snapshotting every key)
         cutoff = now - _MEM_TTL_SEC
-        for k in list(_mem_cache.keys()):
-            if _mem_cache[k] < cutoff:
-                del _mem_cache[k]
-            else:
+        while _mem_cache:
+            oldest_key, oldest_ts = next(iter(_mem_cache.items()))
+            if oldest_ts >= cutoff:
                 break
+            _mem_cache.pop(oldest_key, None)
 
 
 def _mem_is_duplicate(key: str) -> bool:
