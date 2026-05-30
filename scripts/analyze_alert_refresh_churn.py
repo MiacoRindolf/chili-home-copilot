@@ -377,6 +377,33 @@ def _duplicate_open_refresh_work(hours: int, limit: int) -> list[dict]:
     )
 
 
+def _recent_duplicate_suppressions(hours: int, limit: int) -> list[dict]:
+    return _rows(
+        """
+        SELECT
+          event_type,
+          COALESCE(payload->>'duplicate_open_work_suppressed_reason', '<none>') AS reason,
+          count(*) AS suppressed,
+          count(DISTINCT payload->>'duplicate_open_work_kept_event_id') AS kept_events,
+          max(updated_at) AS last_suppressed
+        FROM brain_work_events
+        WHERE event_kind = 'work'
+          AND status = 'done'
+          AND event_type = ANY(:event_types)
+          AND updated_at >= now() - (:hours * interval '1 hour')
+          AND COALESCE(payload->>'duplicate_open_work_suppressed', 'false') = 'true'
+        GROUP BY event_type, reason
+        ORDER BY suppressed DESC, last_suppressed DESC
+        LIMIT :limit
+        """,
+        {
+            "event_types": list(TARGET_WORK),
+            "hours": int(hours),
+            "limit": int(limit),
+        },
+    )
+
+
 def _build_report(hours: int, limit: int) -> dict[str, object]:
     return {
         "hours": int(hours),
@@ -393,6 +420,7 @@ def _build_report(hours: int, limit: int) -> dict[str, object]:
             _open_recert_work_with_recent_blocker_diagnostic(hours, limit)
         ),
         "duplicate_open_refresh_work": _duplicate_open_refresh_work(hours, limit),
+        "recent_duplicate_suppressions": _recent_duplicate_suppressions(hours, limit),
     }
 
 
@@ -416,6 +444,7 @@ def _print_report(report: dict[str, object]) -> None:
         report["open_recert_work_with_recent_blocker_diagnostic"],
     )
     _print_table("Duplicate Open Refresh Work", report["duplicate_open_refresh_work"])
+    _print_table("Recent Duplicate Suppressions", report["recent_duplicate_suppressions"])
 
 
 def _database_unavailable_payload(
