@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import threading
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
@@ -15,6 +14,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..deps import (
     get_db,
     get_identity_ctx,
@@ -33,6 +33,7 @@ from ..services.code_brain import trends as cb_trends
 from ..services import project_analysis
 from ..services.project_domain_feed import list_operator_feed
 from ..services.project_domain_runs import record_completed_run, status_payload
+from ..services.project_autonomy import agent_scheduler as project_agent_scheduler
 from ..services.project_autonomy import orchestrator as project_autonomy
 from ..services.project_brain import learning as pb_learning
 from ..services.project_brain import registry as pb_registry
@@ -40,6 +41,16 @@ from ..services.coding_task.workspaces import select_runtime_workspace_repo_for_
 from .chat_streaming import sse_done, sse_error, sse_event
 
 AUTONOMY_EVENTS_POLL_SECONDS = 1.0
+AUTONOMY_EVENTS_KEEPALIVE_POLLS = 15
+_AUTONOMY_SSE_STATE_KEYS = (
+    "run_id",
+    "status",
+    "current_stage",
+    "plan_status",
+    "merge_status",
+    "updated_at",
+    "architect_review",
+)
 
 router = APIRouter(
     tags=["brain"],
@@ -66,6 +77,26 @@ def _parse_json_array(raw: str | None) -> list:
 
 def _not_found(message: str = "Not found") -> JSONResponse:
     return JSONResponse({"ok": False, "message": message}, status_code=404)
+
+
+def _autonomy_sse_state_signature(run: dict[str, Any] | None) -> str:
+    """Return a compact signature for visible run state changes."""
+    if not run:
+        return ""
+    payload = {key: run.get(key) for key in _AUTONOMY_SSE_STATE_KEYS}
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _autonomy_sse_should_complete(run: dict[str, Any] | None) -> bool:
+    """SSE should stay open for idle chat/approval states and close only once terminal."""
+    if not run:
+        return True
+    return run.get("status") in project_autonomy.TERMINAL_STATUSES
+
+
+def _autonomy_sse_keepalive() -> str:
+    """SSE comment heartbeat that clients may ignore but proxies can see."""
+    return ": keep-alive\n\n"
 
 
 def _visible_repo_ids(db: Session, user_id: int | None) -> list[int]:
@@ -97,24 +128,31 @@ def _autonomy_requires_paired(ctx: dict) -> JSONResponse | None:
     return None
 
 
-def _run_autonomy_worker(run_id: str) -> None:
-    from ..db import SessionLocal
-
-    sdb = SessionLocal()
-    try:
-        project_autonomy.run_autonomy_sync(sdb, run_id)
-    finally:
-        sdb.close()
+def _start_autonomy_thread(run_id: str) -> dict[str, Any]:
+    return project_agent_scheduler.start_worker(run_id)
 
 
-def _start_autonomy_thread(run_id: str) -> None:
-    thread = threading.Thread(
-        target=_run_autonomy_worker,
-        args=(run_id,),
-        name=f"project-autopilot-{run_id}",
-        daemon=True,
-    )
-    thread.start()
+def _start_autonomy_threads_for_runs(runs: list[dict[str, Any]]) -> dict[str, Any]:
+    worker_started = 0
+    worker_deferred: list[dict[str, Any]] = []
+    for run in runs:
+        run_id = str(run.get("run_id") or "").strip()
+        if not run_id:
+            continue
+        result = _start_autonomy_thread(run_id)
+        if not isinstance(result, dict) or result.get("started"):
+            worker_started += 1
+        else:
+            worker_deferred.append(
+                {
+                    "run_id": run_id,
+                    "reason": result.get("reason") or "not_started",
+                }
+            )
+    return {
+        project_agent_scheduler.SCHEDULER_RESULT_WORKER_STARTED: worker_started,
+        project_agent_scheduler.SCHEDULER_RESULT_WORKER_DEFERRED: worker_deferred,
+    }
 
 
 # Code Brain domain
@@ -643,10 +681,49 @@ class _ProjectAutonomyAttachmentBody(BaseModel):
 class _ProjectAutonomyRunBody(BaseModel):
     prompt: str
     repo_id: int | None = None
+    agent_profile_id: int | None = None
+    parent_run_id: str | None = None
     autonomy_level: str | None = "full_local"
     execution_mode: str | None = project_autonomy.EXECUTION_MODE_PLAN_APPROVAL
     start_planning: bool = False
     attachments: list[_ProjectAutonomyAttachmentBody] | None = None
+
+
+class _ProjectAutonomyAgentBootstrapBody(BaseModel):
+    repo_id: int
+
+
+class _ProjectAutonomyAgentUpdateBody(BaseModel):
+    status: str | None = None
+    model_policy: str | None = None
+    prompt_setting: dict[str, Any] | None = None
+    permissions: dict[str, Any] | None = None
+    schedule_enabled: bool | None = None
+    schedule: dict[str, Any] | None = None
+
+
+class _ProjectAutonomyCodexScheduleBody(BaseModel):
+    repo_id: int
+    enable_source_active: bool = True
+    always_on: bool = False
+
+
+class _ProjectAutonomyCodexAdoptBody(BaseModel):
+    repo_id: int
+    wake_now: bool = True
+    limit: int = project_autonomy.AGENT_SCHEDULE_DUE_CYCLE_LIMIT
+
+
+class _ProjectAutonomySchedulerRunNowBody(BaseModel):
+    repo_id: int
+    codex_only: bool = True
+    limit: int = project_autonomy.AGENT_SCHEDULE_DUE_CYCLE_LIMIT
+
+
+class _ProjectAutonomyArchiveBody(BaseModel):
+    repo_id: int | None = None
+    agent_profile_id: int | None = None
+    reason: str | None = project_autonomy.ARCHIVE_REASON_OPERATOR_CLEAR
 
 
 class _ProjectAutonomyMessageBody(BaseModel):
@@ -910,6 +987,307 @@ def api_brain_project_status(request: Request, db: Session = Depends(get_db)):
     return JSONResponse({"ok": True, **status_payload(db, user_id=ctx["user_id"])})
 
 
+@router.get("/api/brain/project/agent-profiles")
+def api_brain_project_autonomy_agent_profiles(
+    request: Request,
+    db: Session = Depends(get_db),
+    repo_id: int | None = Query(default=None),
+):
+    """List repo-scoped Project Autopilot agent profiles."""
+    ctx = get_identity_ctx(request, db)
+    blocked = _autonomy_requires_paired(ctx)
+    if blocked is not None:
+        return blocked
+    resolved_repo_id = _resolve_visible_repo_id(db, ctx["user_id"], repo_id)
+    if repo_id is not None and resolved_repo_id is None:
+        return _not_found("Repo not found")
+    return JSONResponse(
+        {
+            "ok": True,
+            "agents": project_autonomy.list_agent_profiles(
+                db,
+                repo_id=resolved_repo_id,
+                user_id=ctx["user_id"],
+                bootstrap=resolved_repo_id is not None,
+            ),
+        }
+    )
+
+
+@router.post("/api/brain/project/agent-profiles/bootstrap")
+def api_brain_project_autonomy_agent_bootstrap(
+    body: _ProjectAutonomyAgentBootstrapBody,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Create the default paused agent bench for a repo."""
+    ctx = get_identity_ctx(request, db)
+    blocked = _autonomy_requires_paired(ctx)
+    if blocked is not None:
+        return blocked
+    resolved_repo_id = _resolve_visible_repo_id(db, ctx["user_id"], body.repo_id)
+    if resolved_repo_id is None:
+        return _not_found("Repo not found")
+    try:
+        agents = project_autonomy.bootstrap_agent_profiles(
+            db,
+            repo_id=resolved_repo_id,
+            user_id=ctx["user_id"],
+        )
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=409)
+    return JSONResponse({"ok": True, "agents": agents})
+
+
+@router.post("/api/brain/project/agent-profiles/codex-sync")
+def api_brain_project_autonomy_agent_codex_sync(
+    body: _ProjectAutonomyAgentBootstrapBody,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Refresh imported Codex automation profiles from local automation files."""
+    ctx = get_identity_ctx(request, db)
+    blocked = _autonomy_requires_paired(ctx)
+    if blocked is not None:
+        return blocked
+    resolved_repo_id = _resolve_visible_repo_id(db, ctx["user_id"], body.repo_id)
+    if resolved_repo_id is None:
+        return _not_found("Repo not found")
+    try:
+        payload = project_autonomy.sync_codex_agent_profiles(
+            db,
+            repo_id=resolved_repo_id,
+            user_id=ctx["user_id"],
+        )
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=409)
+    return JSONResponse({"ok": True, **payload})
+
+
+@router.get("/api/brain/project/agent-profiles/scheduler")
+def api_brain_project_autonomy_agent_scheduler(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Report Agent OS scheduler runtime state for the desktop cockpit."""
+    ctx = get_identity_ctx(request, db)
+    blocked = _autonomy_requires_paired(ctx)
+    if blocked is not None:
+        return blocked
+    scheduler_role = (getattr(settings, "chili_scheduler_role", None) or "all").strip().lower()
+    info = project_agent_scheduler.scheduler_info()
+    info.update(
+        {
+            "scheduler_role": scheduler_role,
+            "mode": (
+                "standalone"
+                if project_agent_scheduler.should_start_standalone_scheduler(scheduler_role)
+                else "apscheduler"
+            ),
+        }
+    )
+    return JSONResponse({"ok": True, "scheduler": info})
+
+
+@router.post("/api/brain/project/agent-profiles/scheduler/run-now")
+def api_brain_project_autonomy_agent_scheduler_run_now(
+    body: _ProjectAutonomySchedulerRunNowBody,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Wake active repo agent schedules and start bounded cycles immediately."""
+    ctx = get_identity_ctx(request, db)
+    blocked = _autonomy_requires_paired(ctx)
+    if blocked is not None:
+        return blocked
+    resolved_repo_id = _resolve_visible_repo_id(db, ctx["user_id"], body.repo_id)
+    if resolved_repo_id is None:
+        return _not_found("Repo not found")
+    try:
+        result = project_autonomy.run_agent_schedules_now(
+            db,
+            repo_id=resolved_repo_id,
+            user_id=ctx["user_id"],
+            codex_only=body.codex_only,
+            limit=body.limit,
+        )
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=409)
+    result.update(_start_autonomy_threads_for_runs(result.get("runs", [])))
+    project_agent_scheduler.record_manual_wake_result(result)
+    return JSONResponse({"ok": True, **result})
+
+
+@router.get("/api/brain/project/agent-profiles/readiness")
+def api_brain_project_autonomy_agent_readiness(
+    request: Request,
+    db: Session = Depends(get_db),
+    repo_id: int | None = Query(default=None),
+):
+    """Compare the repo Agent OS against local Codex automation and safety invariants."""
+    ctx = get_identity_ctx(request, db)
+    blocked = _autonomy_requires_paired(ctx)
+    if blocked is not None:
+        return blocked
+    resolved_repo_id = _resolve_visible_repo_id(db, ctx["user_id"], repo_id)
+    if resolved_repo_id is None:
+        return _not_found("Repo not found")
+    try:
+        readiness = project_autonomy.agent_os_readiness(
+            db,
+            repo_id=resolved_repo_id,
+            user_id=ctx["user_id"],
+        )
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=409)
+    return JSONResponse({"ok": True, "readiness": readiness})
+
+
+@router.post("/api/brain/project/agent-profiles/codex-schedules")
+def api_brain_project_autonomy_codex_schedules(
+    body: _ProjectAutonomyCodexScheduleBody,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Enable or pause imported Codex automation mirrors for a repo."""
+    ctx = get_identity_ctx(request, db)
+    blocked = _autonomy_requires_paired(ctx)
+    if blocked is not None:
+        return blocked
+    resolved_repo_id = _resolve_visible_repo_id(db, ctx["user_id"], body.repo_id)
+    if resolved_repo_id is None:
+        return _not_found("Repo not found")
+    try:
+        payload = project_autonomy.set_codex_agent_schedules(
+            db,
+            repo_id=resolved_repo_id,
+            user_id=ctx["user_id"],
+            enable_source_active=body.enable_source_active,
+            always_on=body.always_on,
+        )
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=409)
+    return JSONResponse({"ok": True, **payload})
+
+
+@router.post("/api/brain/project/agent-profiles/codex-adopt")
+def api_brain_project_autonomy_codex_adopt(
+    body: _ProjectAutonomyCodexAdoptBody,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Adopt local Codex automations as CHILI always-on, plan-only agent queues."""
+    ctx = get_identity_ctx(request, db)
+    blocked = _autonomy_requires_paired(ctx)
+    if blocked is not None:
+        return blocked
+    resolved_repo_id = _resolve_visible_repo_id(db, ctx["user_id"], body.repo_id)
+    if resolved_repo_id is None:
+        return _not_found("Repo not found")
+    try:
+        payload = project_autonomy.adopt_codex_agent_system(
+            db,
+            repo_id=resolved_repo_id,
+            user_id=ctx["user_id"],
+            wake_now=body.wake_now,
+            limit=body.limit,
+        )
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=409)
+    wake_payload = payload.get("wake") if isinstance(payload.get("wake"), dict) else {}
+    wake_payload.update(_start_autonomy_threads_for_runs(wake_payload.get("runs", [])))
+    if body.wake_now:
+        project_agent_scheduler.record_manual_wake_result(wake_payload)
+    return JSONResponse({"ok": True, **payload})
+
+
+@router.patch("/api/brain/project/agent-profiles/{profile_id}")
+def api_brain_project_autonomy_agent_update(
+    profile_id: int,
+    body: _ProjectAutonomyAgentUpdateBody,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Update an Autopilot agent profile's safe operating settings."""
+    ctx = get_identity_ctx(request, db)
+    blocked = _autonomy_requires_paired(ctx)
+    if blocked is not None:
+        return blocked
+    try:
+        agent = project_autonomy.update_agent_profile(
+            db,
+            profile_id,
+            user_id=ctx["user_id"],
+            status=body.status,
+            model_policy=body.model_policy,
+            prompt_setting=body.prompt_setting,
+            permissions=body.permissions,
+            schedule_enabled=body.schedule_enabled,
+            schedule=body.schedule,
+        )
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+    if agent is None:
+        return _not_found("Agent profile not found")
+    return JSONResponse({"ok": True, "agent": agent})
+
+
+@router.post("/api/brain/project/agent-profiles/{profile_id}/pause")
+def api_brain_project_autonomy_agent_pause(
+    profile_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Pause an Autopilot agent profile and scheduled cycles."""
+    ctx = get_identity_ctx(request, db)
+    blocked = _autonomy_requires_paired(ctx)
+    if blocked is not None:
+        return blocked
+    agent = project_autonomy.pause_agent_profile(db, profile_id, user_id=ctx["user_id"])
+    if agent is None:
+        return _not_found("Agent profile not found")
+    return JSONResponse({"ok": True, "agent": agent})
+
+
+@router.post("/api/brain/project/agent-profiles/{profile_id}/resume")
+def api_brain_project_autonomy_agent_resume(
+    profile_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Resume an Autopilot agent profile without enabling mutation permissions."""
+    ctx = get_identity_ctx(request, db)
+    blocked = _autonomy_requires_paired(ctx)
+    if blocked is not None:
+        return blocked
+    agent = project_autonomy.resume_agent_profile(db, profile_id, user_id=ctx["user_id"])
+    if agent is None:
+        return _not_found("Agent profile not found")
+    return JSONResponse({"ok": True, "agent": agent})
+
+
+@router.post("/api/brain/project/agent-profiles/{profile_id}/cycle")
+def api_brain_project_autonomy_agent_cycle(
+    profile_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Start a bounded approval-first cycle for one active agent."""
+    ctx = get_identity_ctx(request, db)
+    blocked = _autonomy_requires_paired(ctx)
+    if blocked is not None:
+        return blocked
+    try:
+        run = project_autonomy.start_agent_cycle(db, profile_id, user_id=ctx["user_id"])
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=409)
+    if run is None:
+        return _not_found("Agent profile not found")
+    if run.get("status") == "queued":
+        _start_autonomy_thread(run["run_id"])
+    return JSONResponse({"ok": True, "run": run})
+
+
 @router.post("/api/brain/project/autonomy/runs")
 def api_brain_project_autonomy_create(
     body: _ProjectAutonomyRunBody,
@@ -927,6 +1305,8 @@ def api_brain_project_autonomy_create(
             prompt=body.prompt,
             repo_id=body.repo_id,
             user_id=ctx["user_id"],
+            agent_profile_id=body.agent_profile_id,
+            parent_run_id=body.parent_run_id,
             autonomy_level=body.autonomy_level or "full_local",
             execution_mode=body.execution_mode or project_autonomy.EXECUTION_MODE_PLAN_APPROVAL,
             start_planning=bool(body.start_planning),
@@ -1041,6 +1421,8 @@ def api_brain_project_autonomy_list(
     request: Request,
     db: Session = Depends(get_db),
     repo_id: int | None = Query(default=None),
+    agent_profile_id: int | None = Query(default=None),
+    include_archived: bool = Query(default=False),
     limit: int = Query(default=20, ge=1, le=100),
 ):
     """List recent Project Autopilot runs for the current operator."""
@@ -1058,10 +1440,36 @@ def api_brain_project_autonomy_list(
                 db,
                 user_id=ctx["user_id"],
                 repo_id=resolved_repo_id,
+                agent_profile_id=agent_profile_id,
+                include_archived=include_archived,
                 limit=limit,
             ),
         }
     )
+
+
+@router.post("/api/brain/project/autonomy/runs/archive")
+def api_brain_project_autonomy_archive(
+    body: _ProjectAutonomyArchiveBody,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Archive visible Autopilot run instances without deleting audit data."""
+    ctx = get_identity_ctx(request, db)
+    blocked = _autonomy_requires_paired(ctx)
+    if blocked is not None:
+        return blocked
+    resolved_repo_id = _resolve_visible_repo_id(db, ctx["user_id"], body.repo_id)
+    if body.repo_id is not None and resolved_repo_id is None:
+        return _not_found("Repo not found")
+    result = project_autonomy.archive_runs(
+        db,
+        user_id=ctx["user_id"],
+        repo_id=resolved_repo_id,
+        agent_profile_id=body.agent_profile_id,
+        reason=body.reason or project_autonomy.ARCHIVE_REASON_OPERATOR_CLEAR,
+    )
+    return JSONResponse({"ok": True, **result})
 
 
 @router.get("/api/brain/project/autonomy/runs/{run_id}")
@@ -1113,12 +1521,14 @@ async def api_brain_project_autonomy_events(run_id: str, request: Request):
                 yield sse_error("Autopilot run not found")
                 return
             yield sse_event({"type": "snapshot", "run": run})
+            state_signature = _autonomy_sse_state_signature(run)
             after_message_id = max([int(message["id"]) for message in run.get("messages", [])], default=0)
             after_step_id = max([int(step["id"]) for step in run.get("steps", [])], default=0)
             after_artifact_id = max([int(artifact["id"]) for artifact in run.get("artifacts", [])], default=0)
-            if run.get("status") in project_autonomy.TERMINAL_STATUSES | project_autonomy.IDLE_STATUSES:
+            if _autonomy_sse_should_complete(run):
                 yield sse_done()
                 return
+            idle_polls = 0
             while True:
                 if await request.is_disconnected():
                     return
@@ -1126,6 +1536,7 @@ async def api_brain_project_autonomy_events(run_id: str, request: Request):
                     events = project_autonomy.events_after(
                         sdb,
                         run_id,
+                        user_id=user_id,
                         after_message_id=after_message_id,
                         after_step_id=after_step_id,
                         after_artifact_id=after_artifact_id,
@@ -1136,12 +1547,26 @@ async def api_brain_project_autonomy_events(run_id: str, request: Request):
                         user_id=user_id,
                         include_events=False,
                     )
+                current_run = events.get("run") or latest
                 after_message_id = int(events.get("after_message_id") or after_message_id)
                 after_step_id = int(events.get("after_step_id") or after_step_id)
                 after_artifact_id = int(events.get("after_artifact_id") or after_artifact_id)
                 if events["messages"] or events["steps"] or events["artifacts"]:
                     yield sse_event({"type": "events", **events})
-                if latest and latest.get("status") in project_autonomy.TERMINAL_STATUSES | project_autonomy.IDLE_STATUSES:
+                    idle_polls = 0
+                    state_signature = _autonomy_sse_state_signature(current_run)
+                else:
+                    next_signature = _autonomy_sse_state_signature(current_run)
+                    if next_signature and next_signature != state_signature:
+                        yield sse_event({"type": "state", "run": current_run})
+                        idle_polls = 0
+                        state_signature = next_signature
+                    else:
+                        idle_polls += 1
+                        if idle_polls >= AUTONOMY_EVENTS_KEEPALIVE_POLLS:
+                            yield _autonomy_sse_keepalive()
+                            idle_polls = 0
+                if _autonomy_sse_should_complete(latest):
                     yield sse_event({"type": "complete", "run": latest})
                     yield sse_done()
                     return
