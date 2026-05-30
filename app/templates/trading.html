@@ -9348,6 +9348,24 @@ function loadImminentAlerts() {
       });
       html += '</div></div></div>';
     }
+    var refreshRollups = (summary.refresh_work_rollups || []).slice(0, 3);
+    if (refreshRollups.length) {
+      html += '<div class="mon-imm-card" style="cursor:default;border-color:rgba(251,146,60,0.35);">';
+      html += '<div style="width:100%;">';
+      html += '<div style="font-size:10px;font-weight:800;color:var(--text-secondary);margin-bottom:5px;">Refresh pressure</div>';
+      refreshRollups.forEach(function(r) {
+        var label = r.event_type === 'recert_rescue_refresh' ? 'recert rescue' : 'exit variant';
+        var state = r.blocked ? (r.blocker_detail || r.blocker || 'cooldown') : 'actionable';
+        var samples = (r.sample_tickers || []).length ? ' · ' + escHtml((r.sample_tickers || []).join(', ')) : '';
+        html += '<div style="font-size:9px;color:var(--text-muted);line-height:1.45;">';
+        html += '<b style="color:' + (r.blocked ? '#fb923c' : '#86efac') + ';">' + escHtml(label) + '</b>';
+        html += ' · alerts ' + Number(r.alert_count || 0).toFixed(0);
+        html += ' · patterns ' + Number(r.pattern_count || 0).toFixed(0);
+        if (r.diagnostic_count) html += ' · diagnostics ' + Number(r.diagnostic_count || 0).toFixed(0);
+        html += ' · ' + escHtml(state) + samples + '</div>';
+      });
+      html += '</div></div>';
+    }
     alerts.forEach(function(a) {
       var scoreClass = 'mon-imm-score-low';
       if (a.score != null && a.score >= 75) scoreClass = 'mon-imm-score-high';

@@ -532,7 +532,7 @@ def _recommended_work_status(
     return _recommended_work_statuses(db, [supply])[0]
 
 
-def _empty_imminent_summary() -> dict[str, int]:
+def _empty_imminent_summary() -> dict[str, Any]:
     return {
         "total": 0,
         "negative_expected_edge": 0,
@@ -548,7 +548,7 @@ def _empty_imminent_summary() -> dict[str, int]:
     }
 
 
-def _bump_imminent_summary(summary: dict[str, int], category: str) -> None:
+def _bump_imminent_summary(summary: dict[str, Any], category: str) -> None:
     summary["total"] = int(summary.get("total", 0)) + 1
     if category in {
         "negative_expected_edge",
@@ -579,6 +579,70 @@ def _bump_imminent_summary(summary: dict[str, int], category: str) -> None:
         )
     else:
         summary["other"] = int(summary.get("other", 0)) + 1
+
+
+def _refresh_work_rollups(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rollups: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for item in items:
+        event_type = item.get("recommended_work_event")
+        if event_type not in {EXIT_VARIANT_REFRESH, RECERT_RESCUE_REFRESH}:
+            continue
+        blocked = item.get("recommended_work_actionable") is False
+        key = (
+            event_type,
+            bool(blocked),
+            item.get("recommended_work_blocker"),
+            item.get("recommended_work_blocker_detail"),
+            item.get("recommended_work_blocker_status"),
+            item.get("recommended_work_blocker_source"),
+        )
+        rollup = rollups.setdefault(
+            key,
+            {
+                "event_type": event_type,
+                "blocked": blocked,
+                "blocker": item.get("recommended_work_blocker"),
+                "blocker_detail": item.get("recommended_work_blocker_detail"),
+                "blocker_status": item.get("recommended_work_blocker_status"),
+                "blocker_source": item.get("recommended_work_blocker_source"),
+                "alert_count": 0,
+                "pattern_count": 0,
+                "diagnostic_count": 0,
+                "sample_tickers": [],
+                "_pattern_ids": set(),
+                "_sample_seen": set(),
+            },
+        )
+        rollup["alert_count"] = int(rollup.get("alert_count", 0)) + 1
+        pattern_id = item.get("pattern_id")
+        if pattern_id is not None:
+            rollup["_pattern_ids"].add(pattern_id)
+            rollup["pattern_count"] = len(rollup["_pattern_ids"])
+        blocker_count = _safe_int(item.get("recommended_work_blocker_count")) or 0
+        rollup["diagnostic_count"] = int(rollup.get("diagnostic_count", 0)) + blocker_count
+        ticker = str(item.get("ticker") or "").strip()
+        if (
+            ticker
+            and ticker not in rollup["_sample_seen"]
+            and len(rollup["sample_tickers"]) < 4
+        ):
+            rollup["_sample_seen"].add(ticker)
+            rollup["sample_tickers"].append(ticker)
+
+    out: list[dict[str, Any]] = []
+    for rollup in rollups.values():
+        rollup.pop("_pattern_ids", None)
+        rollup.pop("_sample_seen", None)
+        out.append(rollup)
+    return sorted(
+        out,
+        key=lambda row: (
+            row["blocked"],
+            int(row.get("diagnostic_count", 0)),
+            int(row.get("alert_count", 0)),
+        ),
+        reverse=True,
+    )
 
 
 @router.get("/monitor/active")
@@ -1158,6 +1222,7 @@ def api_monitor_imminent_alerts(
             }
         )
 
+    summary["refresh_work_rollups"] = _refresh_work_rollups(items)
     return JSONResponse(
         {
             "ok": True,
