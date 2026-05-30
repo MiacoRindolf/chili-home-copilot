@@ -2,7 +2,7 @@
 
 Date: 2026-05-30
 
-Status: SHIPPED default-off. Live flip pending.
+Status: PROMOTED. Live flag is ON.
 
 ## What Changed
 
@@ -22,7 +22,7 @@ The concrete reader surface is the portfolio/drawdown breaker closed-PnL math:
 No formulas, caps, thresholds, filters, broker paths, order paths, stop paths,
 or reconcile paths changed.
 
-## Verification
+## Default-Off Verification
 
 Focused local tests:
 
@@ -90,6 +90,47 @@ remaining raw SQL surface in `portfolio_risk.py` is the drawdown/closed-PnL
 breaker math. Open-position exposure still flows through the `Trade` ORM and
 is not a clean single SQL relation switch. This implementation intentionally
 cuts over the actual direct reader surface available in the module.
+
+## Live Soak
+
+Flag flipped:
+
+```text
+CHILI_PHASE5K_PORTFOLIO_RISK_USE_ENVELOPES=true
+```
+
+Consumers recreated:
+
+- `chili`
+- `autotrader-worker`
+- `scheduler-worker`
+- `broker-sync-worker`
+
+Runtime flag visibility:
+
+```text
+autotrader-worker=true
+chili=true
+scheduler-worker=true
+broker-sync-worker=true
+```
+
+Post-flip verification:
+
+```text
+Phase 5K-A: COMPLETE_POSITIVE, PARITY_MISMATCHES=0
+Phase 5I: COMPLETE_POSITIVE, HARD_LINKAGE_ISSUES=0, MISMATCHED_ROWS=0
+PORTFOLIO_RISK_DRAWDOWN_MATCH=True
+```
+
+Post-flip log scan:
+
+```text
+portfolio-risk/relation/query errors: none
+```
+
+Known unrelated noise: Coinbase product 404s for delisted/unavailable product
+IDs. No portfolio-risk query, relation, or drawdown breaker errors appeared.
 
 ## Rollback
 

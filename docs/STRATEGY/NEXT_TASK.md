@@ -1,19 +1,16 @@
-# NEXT_TASK: f-position-identity-phase-5k-f-portfolio-risk-flag-soak
+# NEXT_TASK: f-position-identity-phase-5k-g-position-integrity-reader-flag
 
 STATUS: PENDING
 
 ## Goal
 
-Flip and soak the default-off portfolio-risk drawdown reader flag shipped in
-Phase 5K-F.
+Cut over the position-integrity open-position reader with the same single-reader
+default-off pattern used in Phase 5K-C through Phase 5K-F.
 
-The implementation intentionally targets the concrete raw SQL reader surface in
-`portfolio_risk.py`: drawdown/closed-PnL breaker math. The earlier brief called
-this "open exposure", but open exposure is still an ORM `Trade` path and is not
-a safe one-line relation switch.
+This reader already matched in the Phase 5K parity probe:
 
 ```text
-CHILI_PHASE5K_PORTFOLIO_RISK_USE_ENVELOPES=false  # default-off code shipped
+CHECK_POSITION_INTEGRITY_OPEN=OK old_rows=5 new_rows=5
 ```
 
 ## Current State
@@ -22,32 +19,31 @@ CHILI_PHASE5K_PORTFOLIO_RISK_USE_ENVELOPES=false  # default-off code shipped
 - PDT reader is live on `trading_management_envelopes`.
 - Cohort-promote realized reader is live on `trading_management_envelopes`.
 - Pattern-quality realized reader is live on `trading_management_envelopes`.
-- Portfolio-risk drawdown reader has a default-off flag.
+- Portfolio-risk drawdown reader is live on `trading_management_envelopes`.
 - Phase 5K-A parity remains `COMPLETE_POSITIVE`.
 - Phase 5I post-rename soak remains `COMPLETE_POSITIVE`.
-- Direct old/new drawdown checks match for global account and user 1.
 
-## Soak Shape
+## Implementation Shape
 
-1. Set `CHILI_PHASE5K_PORTFOLIO_RISK_USE_ENVELOPES=true` in `.env`.
-2. Recreate the consumer workers (`autotrader-worker`, plus `chili` for API
-   risk checks).
-3. Verify the flag is visible in runtime env.
-4. Re-run:
-   - Phase 5K-A parity probe
-   - Phase 5I post-rename soak probe
-   - direct old/new drawdown helper comparison
-5. Scan logs for portfolio-risk / drawdown / relation errors.
-6. If clean, promote the soak and update CURRENT_PLAN.
+1. Locate `position_integrity.py` reads that still use `trading_trades`.
+2. Add a default-off reader switch:
+   `CHILI_PHASE5K_POSITION_INTEGRITY_USE_ENVELOPES=false`.
+3. Preserve every filter, join, state predicate, and position-integrity verdict
+   exactly.
+4. Add focused tests for OFF/ON relation selection.
+5. Run Phase 5K-A and a direct old/new function-level check.
+6. Commit/push the default-off code.
+7. If green, flip and soak the flag in the consumer worker(s).
 
 ## Guardrails
 
 - Do not touch broker/order/stop/reconcile write paths.
-- Do not change risk formulas, caps, thresholds, or drawdown logic.
+- Do not change integrity verdict semantics.
 - Do not run DB-backed pytest against live Postgres.
 - Do not absorb unrelated dirty worktree files.
 
 ## Rollback
 
-Set `CHILI_PHASE5K_PORTFOLIO_RISK_USE_ENVELOPES=false` and recreate the same
+The flag must default false. If the live soak misbehaves, set
+`CHILI_PHASE5K_POSITION_INTEGRITY_USE_ENVELOPES=false` and recreate the affected
 consumer worker(s).
