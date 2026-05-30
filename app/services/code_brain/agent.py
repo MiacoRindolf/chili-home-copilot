@@ -5,6 +5,7 @@ the real file contents in context, eliminating placeholder/hallucinated code.
 """
 from __future__ import annotations
 
+import heapq
 import json
 import logging
 import re
@@ -132,10 +133,21 @@ def _gather_context(
                         "complexity": snap.complexity_score,
                         "relevance": relevance,
                     })
-        context["relevant_files"].sort(key=lambda x: -x["relevance"])
-        context["relevant_files"] = context["relevant_files"][:20]
+        context["relevant_files"] = _top_relevant_files(context["relevant_files"], limit=20)
 
     return context
+
+
+def _top_relevant_files(files: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    if limit <= 0 or not files:
+        return []
+    return heapq.nlargest(limit, files, key=lambda item: item["relevance"])
+
+
+def _top_language_stats(language_stats: dict[str, Any], *, limit: int) -> list[tuple[str, Any]]:
+    if limit <= 0 or not language_stats:
+        return []
+    return heapq.nlargest(limit, language_stats.items(), key=lambda item: item[1])
 
 
 def _build_plan_prompt(context: Dict[str, Any]) -> str:
@@ -149,7 +161,7 @@ def _build_plan_prompt(context: Dict[str, Any]) -> str:
     if context["repos"]:
         parts.append("## Registered Repositories")
         for r in context["repos"]:
-            langs = ", ".join(f"{k}: {v}" for k, v in sorted(r["languages"].items(), key=lambda x: -x[1])[:5])
+            langs = ", ".join(f"{k}: {v}" for k, v in _top_language_stats(r["languages"], limit=5))
             fws = ", ".join(r["frameworks"]) if r["frameworks"] else "none detected"
             parts.append(f"- **{r['name']}** ({r['path']}): {r['file_count']} files, {r['total_lines']} lines | Languages: {langs} | Frameworks: {fws}")
         parts.append("")

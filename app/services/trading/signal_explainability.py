@@ -6,6 +6,7 @@ Tracks feature importance drift across retraining cycles.
 """
 from __future__ import annotations
 
+import heapq
 import json
 import logging
 import math
@@ -143,8 +144,13 @@ def _explain_ml_based(ml, indicators: dict[str, float]) -> list[dict[str, Any]]:
             "strength_label": strength_label,
         })
 
-    contribs.sort(key=lambda c: c["importance"], reverse=True)
-    return contribs[:10]
+    return _top_importance_contribs(contribs, limit=10)
+
+
+def _top_importance_contribs(contribs: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    if limit <= 0 or not contribs:
+        return []
+    return heapq.nlargest(limit, contribs, key=lambda c: c["importance"])
 
 
 def _eval_simple_condition(actual: float, op: str, threshold: float) -> bool:
