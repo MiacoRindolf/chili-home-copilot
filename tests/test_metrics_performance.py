@@ -1,7 +1,14 @@
 from __future__ import annotations
 
 from app import health, metrics, openai_client
-from app.metrics import conversation_stats, feature_usage, get_counts
+from app.metrics import (
+    _LATENCIES_MS,
+    conversation_stats,
+    feature_usage,
+    get_counts,
+    latency_history,
+    record_latency,
+)
 
 
 class _SubqueryColumns:
@@ -174,6 +181,23 @@ def test_get_counts_coerces_empty_chore_sums_to_zero() -> None:
         "chores": {"total": 0, "pending": 0, "done": 0},
         "birthdays": {"total": 0},
     }
+
+
+def test_record_latency_keeps_fixed_size_recent_window() -> None:
+    _LATENCIES_MS.clear()
+    try:
+        for ms in range(505):
+            record_latency(ms)
+
+        assert _LATENCIES_MS.maxlen == 500
+        assert len(_LATENCIES_MS) == 500
+        assert _LATENCIES_MS[0][1] == 5
+        history = latency_history()
+        assert len(history) == 100
+        assert history[0]["ms"] == 405
+        assert history[-1]["ms"] == 504
+    finally:
+        _LATENCIES_MS.clear()
 
 
 def test_feature_usage_reuses_supplied_action_stats(monkeypatch) -> None:

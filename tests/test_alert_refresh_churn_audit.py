@@ -267,13 +267,35 @@ def test_duplicate_open_refresh_work_groups_refresh_churn(monkeypatch):
     assert "event_type = ANY(:event_types)" in sql
     assert "status IN ('pending', 'retry_wait', 'processing')" in sql
     assert "status," in sql
-    assert "GROUP BY event_type, status, scan_pattern_id" in sql
+    assert "GROUP BY" in sql
+    assert "COALESCE(open_work.payload->>'asset_class', '<none>')" in sql
+    assert "COALESCE(open_work.payload->>'source', '<none>')" in sql
     assert "HAVING count(*) > 1" in sql
-    assert "count(DISTINCT dedupe_key)" in sql
+    assert "count(DISTINCT open_work.dedupe_key)" in sql
     assert captured["params"] == {
         "event_types": ["recert_rescue_refresh", "exit_variant_refresh"],
         "hours": 8,
         "limit": 11,
+    }
+
+
+def test_work_counts_groups_by_payload_expression(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def capture_rows(sql: str, params: dict):
+        captured["sql"] = sql
+        captured["params"] = params
+        return []
+
+    monkeypatch.setattr(audit, "_rows", capture_rows)
+
+    assert audit._work_counts(hours=2) == []
+
+    sql = str(captured["sql"])
+    assert "GROUP BY event_type, status, COALESCE(payload->>'source', '<none>')" in sql
+    assert captured["params"] == {
+        "event_types": ["recert_rescue_refresh", "exit_variant_refresh"],
+        "hours": 2,
     }
 
 

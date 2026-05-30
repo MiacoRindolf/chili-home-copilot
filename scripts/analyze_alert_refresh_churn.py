@@ -76,7 +76,7 @@ def _work_counts(hours: int) -> list[dict]:
         WHERE event_kind = 'work'
           AND event_type = ANY(:event_types)
           AND created_at >= now() - (:hours * interval '1 hour')
-        GROUP BY event_type, status, source
+        GROUP BY event_type, status, COALESCE(payload->>'source', '<none>')
         ORDER BY events DESC, event_type, status, source
         """,
         {"event_types": list(TARGET_WORK), "hours": int(hours)},
@@ -101,8 +101,13 @@ def _diagnostic_counts(hours: int) -> list[dict]:
           AND event_type = ANY(:event_types)
           AND created_at >= now() - (:hours * interval '1 hour')
         GROUP BY
-          event_type, source, skip_reason, recert_status, next_action,
-          fast_skipped, created_count
+          event_type,
+          COALESCE(payload->>'source', '<none>'),
+          COALESCE(payload->>'skip_reason', '<none>'),
+          COALESCE(payload->>'recert_rescue_status', '<none>'),
+          COALESCE(payload->>'recommended_next_action', '<none>'),
+          COALESCE(payload->>'fast_skipped', 'false'),
+          COALESCE(payload->>'created_count', '<none>')
         ORDER BY events DESC, event_type
         LIMIT 40
         """,
@@ -145,8 +150,12 @@ def _top_patterns(hours: int, limit: int) -> list[dict]:
         LEFT JOIN scan_patterns sp ON sp.id = t.scan_pattern_id
         WHERE t.scan_pattern_id IS NOT NULL
         GROUP BY
-          t.scan_pattern_id, pattern_name, lifecycle_stage, recert_reason,
-          asset_class, source
+          t.scan_pattern_id,
+          COALESCE(sp.name, '<missing>'),
+          COALESCE(sp.lifecycle_stage, '<null>'),
+          COALESCE(sp.recert_reason, '<none>'),
+          COALESCE(t.payload->>'asset_class', '<none>'),
+          COALESCE(t.payload->>'source', '<none>')
         ORDER BY (count(*) FILTER (WHERE t.status IN ('pending', 'retry_wait', 'processing'))) DESC,
           (count(*) FILTER (WHERE t.event_type = 'recert_rescue_refresh')
            + count(*) FILTER (WHERE t.event_type = 'exit_variant_refresh')) DESC,
@@ -352,20 +361,26 @@ def _duplicate_open_refresh_work(hours: int, limit: int) -> list[dict]:
             AND created_at >= now() - (:hours * interval '1 hour')
         )
         SELECT
-          event_type,
-          status,
-          scan_pattern_id,
+          open_work.event_type,
+          open_work.status,
+          open_work.scan_pattern_id,
           COALESCE(sp.name, '<missing>') AS pattern_name,
-          COALESCE(payload->>'asset_class', '<none>') AS asset_class,
-          COALESCE(payload->>'source', '<none>') AS source,
+          COALESCE(open_work.payload->>'asset_class', '<none>') AS asset_class,
+          COALESCE(open_work.payload->>'source', '<none>') AS source,
           count(*) AS open_work,
-          count(DISTINCT dedupe_key) AS distinct_dedupe_keys,
-          min(created_at) AS oldest_open,
-          max(created_at) AS newest_open
+          count(DISTINCT open_work.dedupe_key) AS distinct_dedupe_keys,
+          min(open_work.created_at) AS oldest_open,
+          max(open_work.created_at) AS newest_open
         FROM open_work
         LEFT JOIN scan_patterns sp ON sp.id = open_work.scan_pattern_id
-        WHERE scan_pattern_id IS NOT NULL
-        GROUP BY event_type, status, scan_pattern_id, pattern_name, asset_class, source
+        WHERE open_work.scan_pattern_id IS NOT NULL
+        GROUP BY
+          open_work.event_type,
+          open_work.status,
+          open_work.scan_pattern_id,
+          COALESCE(sp.name, '<missing>'),
+          COALESCE(open_work.payload->>'asset_class', '<none>'),
+          COALESCE(open_work.payload->>'source', '<none>')
         HAVING count(*) > 1
         ORDER BY open_work DESC, newest_open DESC
         LIMIT :limit
@@ -393,7 +408,9 @@ def _recent_duplicate_suppressions(hours: int, limit: int) -> list[dict]:
           AND event_type = ANY(:event_types)
           AND updated_at >= now() - (:hours * interval '1 hour')
           AND COALESCE(payload->>'duplicate_open_work_suppressed', 'false') = 'true'
-        GROUP BY event_type, reason
+        GROUP BY
+          event_type,
+          COALESCE(payload->>'duplicate_open_work_suppressed_reason', '<none>')
         ORDER BY suppressed DESC, last_suppressed DESC
         LIMIT :limit
         """,

@@ -1,15 +1,15 @@
+from collections import deque
 from datetime import datetime, date, timedelta
+import time
 from sqlalchemy.orm import Session
 from sqlalchemy import case, func, distinct, text
 from .models import Chore, Birthday, ChatMessage, ChatLog, Conversation, User, Device, HousemateProfile, ActivityLog
 
 # In-memory latency tracking (resets on server restart, keeps last 500)
-_LATENCIES_MS: list[tuple[float, int]] = []  # (timestamp, ms)
+_LATENCIES_MS: deque[tuple[float, int]] = deque(maxlen=500)  # (timestamp, ms)
 
 def record_latency(ms: int):
-    _LATENCIES_MS.append((datetime.utcnow().timestamp(), ms))
-    if len(_LATENCIES_MS) > 500:
-        del _LATENCIES_MS[:-500]
+    _LATENCIES_MS.append((time.time(), ms))
 
 def latency_stats() -> dict:
     if not _LATENCIES_MS:
@@ -23,7 +23,7 @@ def latency_stats() -> dict:
 
 def latency_history() -> list[dict]:
     """Return recent latencies as [{timestamp, ms}] for chart rendering."""
-    return [{"t": int(t * 1000), "ms": ms} for t, ms in _LATENCIES_MS[-100:]]
+    return [{"t": int(t * 1000), "ms": ms} for t, ms in list(_LATENCIES_MS)[-100:]]
 
 def get_counts(db: Session) -> dict:
     total_chores, pending_chores, done_chores = db.query(
@@ -214,7 +214,7 @@ def response_time_trend(db: Session, days: int = 7) -> list[dict]:
     """Average response time per day from ChatLog (approximated from trace_id timestamps)."""
     if not _LATENCIES_MS:
         return []
-    cutoff_ts = (datetime.utcnow() - timedelta(days=days)).timestamp()
+    cutoff_ts = time.time() - (days * 86400)
     day_buckets: dict[str, list[int]] = {}
     for ts, ms in _LATENCIES_MS:
         if ts >= cutoff_ts:
