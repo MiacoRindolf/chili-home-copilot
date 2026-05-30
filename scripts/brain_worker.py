@@ -78,6 +78,9 @@ DEFAULT_CYCLE_INTERVAL = 5  # minutes between cycles when queue empty (override 
 FAST_BACKTEST_BATCH_ENV = "CHILI_BRAIN_FAST_BACKTEST_BATCH"
 FAST_BACKTEST_BATCH_SOURCE_ENV = "env"
 FAST_BACKTEST_BATCH_SOURCE_MODE_DEFAULT = "mode_default"
+FAST_BACKTEST_DURABLE_DISPATCH_ROUNDS_ENV = (
+    "CHILI_BRAIN_FAST_BACKTEST_DURABLE_DISPATCH_ROUNDS"
+)
 FAST_BACKTEST_MODE_LEAN_CYCLE = "lean-cycle"
 FAST_BACKTEST_MODE_BACKTEST = "backtest"
 FAST_BACKTEST_DEFAULT_BATCH_BY_MODE = {
@@ -85,6 +88,7 @@ FAST_BACKTEST_DEFAULT_BATCH_BY_MODE = {
     FAST_BACKTEST_MODE_BACKTEST: 30,
 }
 FAST_BACKTEST_DEFAULT_BATCH = 0
+FAST_BACKTEST_DURABLE_DISPATCH_ROUNDS_DEFAULT = 2
 FAST_BACKTEST_RATE_SECONDS_PER_MINUTE = 60.0
 FAST_BACKTEST_RATE_MIN_ELAPSED_SECONDS = 0.001
 
@@ -161,6 +165,13 @@ def _fast_backtest_batch_size() -> int:
     return _parse_non_negative_int(
         os.environ.get(FAST_BACKTEST_BATCH_ENV),
         FAST_BACKTEST_DEFAULT_BATCH,
+    )
+
+
+def _durable_backtest_dispatch_round_limit() -> int:
+    return _parse_non_negative_int(
+        os.environ.get(FAST_BACKTEST_DURABLE_DISPATCH_ROUNDS_ENV),
+        FAST_BACKTEST_DURABLE_DISPATCH_ROUNDS_DEFAULT,
     )
 
 
@@ -242,6 +253,87 @@ def _due_brain_work_backtest_requests_snapshot() -> dict[str, object]:
         except Exception:
             pass
         db.close()
+
+
+def _run_due_brain_work_backtest_dispatch_round(user_id: int | None) -> dict[str, object]:
+    """Run one focused durable-work dispatch round for due backtest requests."""
+    db = SessionLocal()
+    try:
+        from app.services.trading.brain_work.dispatcher import run_brain_work_dispatch_round
+
+        summary = run_brain_work_dispatch_round(
+            db,
+            user_id=user_id,
+            max_backtest=1,
+            max_exec_feedback=0,
+            max_edge_reliability=0,
+            max_recert_rescue=0,
+            max_exit_variant=0,
+            max_provenance=0,
+            max_mine=0,
+            max_cpcv_gate=4,
+            max_promote=0,
+            max_trade_close=0,
+            run_thin_evidence_sweep=False,
+            run_market_snapshots_watchdog=False,
+        )
+        db.commit()
+        return dict(summary or {})
+    except Exception as exc:
+        logger.warning("[brain:subtask] durable backtest dispatch failed: %s", exc)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return {"ok": False, "processed": 0, "claimed": 0, "errors": [str(exc)]}
+    finally:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+
+
+def _drain_due_brain_work_backtest_requests(
+    user_id: int | None,
+    *,
+    max_rounds: int,
+    due_before: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Run bounded durable backtest work before generic queue exploration."""
+    first_snapshot = due_before or _due_brain_work_backtest_requests_snapshot()
+    summaries: list[dict[str, object]] = []
+    total_processed = 0
+    total_claimed = 0
+    errors: list[str] = []
+    current = first_snapshot
+
+    for _ in range(max(0, int(max_rounds))):
+        due = int(current.get("due") or 0)
+        if due <= 0:
+            break
+        summary = _run_due_brain_work_backtest_dispatch_round(user_id)
+        summaries.append(summary)
+        total_processed += int(summary.get("processed") or 0)
+        total_claimed += int(summary.get("claimed") or 0)
+        errors.extend(str(err) for err in (summary.get("errors") or []))
+        if summary.get("ok") is False:
+            break
+        if int(summary.get("claimed") or 0) <= 0:
+            break
+        current = _due_brain_work_backtest_requests_snapshot()
+
+    due_after = current if summaries else first_snapshot
+    return {
+        "ok": not errors,
+        "rounds": len(summaries),
+        "processed": total_processed,
+        "claimed": total_claimed,
+        "errors": errors,
+        "due_before": first_snapshot,
+        "due_after": due_after,
+        "summaries": summaries,
+    }
 
 
 def _lock_file_for_mode(mode: str | None) -> Path:
@@ -739,20 +831,39 @@ def _run_subtask_fast_backtest(status: "BrainWorkerStatus") -> dict:
     durable_backtests = _due_brain_work_backtest_requests_snapshot()
     durable_due = int(durable_backtests.get("due") or 0)
     if durable_due > 0:
+        drain = _drain_due_brain_work_backtest_requests(
+            uid,
+            max_rounds=_durable_backtest_dispatch_round_limit(),
+            due_before=durable_backtests,
+        )
+        durable_after = drain.get("due_after") if isinstance(drain, dict) else {}
         logger.info(
-            "[brain:subtask] fast_backtest skipped - durable backtest work due "
-            "count=%d by_source=%s oldest=%s",
+            "[brain:subtask] fast_backtest skipped generic queue - drained durable "
+            "backtest work due_before=%d due_after=%s rounds=%s processed=%s "
+            "claimed=%s by_source=%s oldest=%s",
             durable_due,
+            (durable_after or {}).get("due") if isinstance(durable_after, dict) else "-",
+            drain.get("rounds") if isinstance(drain, dict) else "-",
+            drain.get("processed") if isinstance(drain, dict) else "-",
+            drain.get("claimed") if isinstance(drain, dict) else "-",
             durable_backtests.get("by_source"),
             durable_backtests.get("oldest"),
         )
         return {
-            "completed": 0,
-            "errors": 0,
+            "completed": int(drain.get("processed") or 0) if isinstance(drain, dict) else 0,
+            "errors": len(drain.get("errors") or []) if isinstance(drain, dict) else 0,
             "skipped": True,
             "skip_reason": "brain_work_backtest_requests_due",
             "durable_backtest_due": durable_due,
+            "durable_backtest_due_after": (
+                int((durable_after or {}).get("due") or 0)
+                if isinstance(durable_after, dict)
+                else durable_due
+            ),
             "durable_backtest_by_source": durable_backtests.get("by_source", {}),
+            "durable_dispatch_rounds": drain.get("rounds") if isinstance(drain, dict) else 0,
+            "durable_dispatch_processed": drain.get("processed") if isinstance(drain, dict) else 0,
+            "durable_dispatch_claimed": drain.get("claimed") if isinstance(drain, dict) else 0,
             "pending_before": pending_before,
             "pending_after": pending_before,
             "promotion_path_debt_pending_before": queue_before.get(

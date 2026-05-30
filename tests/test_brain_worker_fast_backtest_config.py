@@ -255,10 +255,27 @@ def test_fast_backtest_stands_down_when_durable_backtest_work_is_due(
             return None
 
     called = []
+    dispatch_calls = []
+    due_snapshots = iter([
+        {
+            "due": 2,
+            "by_source": {"recert_rescue_refresh": 2},
+            "oldest": "2026-05-30T00:18:24",
+        },
+        {
+            "due": 1,
+            "by_source": {"recert_rescue_refresh": 1},
+            "oldest": "2026-05-30T00:48:04",
+        },
+    ])
 
     def _should_not_run(*_args, **_kwargs):
         called.append(True)
         raise AssertionError("generic queue executor should stand down")
+
+    def _dispatch(user_id):
+        dispatch_calls.append(user_id)
+        return {"ok": True, "processed": 1, "claimed": 1, "errors": []}
 
     monkeypatch.setattr(
         learning,
@@ -285,11 +302,17 @@ def test_fast_backtest_stands_down_when_durable_backtest_work_is_due(
     monkeypatch.setattr(
         brain_worker,
         "_due_brain_work_backtest_requests_snapshot",
-        lambda: {
-            "due": 2,
-            "by_source": {"recert_rescue_refresh": 2},
-            "oldest": "2026-05-30T00:18:24",
-        },
+        lambda: next(due_snapshots),
+    )
+    monkeypatch.setattr(
+        brain_worker,
+        "_run_due_brain_work_backtest_dispatch_round",
+        _dispatch,
+    )
+    monkeypatch.setattr(
+        brain_worker,
+        "_durable_backtest_dispatch_round_limit",
+        lambda: 1,
     )
     monkeypatch.setattr(
         brain_worker,
@@ -300,9 +323,15 @@ def test_fast_backtest_stands_down_when_durable_backtest_work_is_due(
     out = brain_worker._run_subtask_fast_backtest(_Status())
 
     assert called == []
+    assert dispatch_calls == [None]
     assert out["skipped"] is True
     assert out["skip_reason"] == "brain_work_backtest_requests_due"
     assert out["durable_backtest_due"] == 2
+    assert out["durable_backtest_due_after"] == 1
     assert out["durable_backtest_by_source"] == {"recert_rescue_refresh": 2}
+    assert out["durable_dispatch_rounds"] == 1
+    assert out["durable_dispatch_processed"] == 1
+    assert out["durable_dispatch_claimed"] == 1
+    assert out["completed"] == 1
     assert out["pending_before"] == QUEUE_PENDING_BEFORE
     assert out["pending_after"] == QUEUE_PENDING_BEFORE
