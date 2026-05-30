@@ -565,10 +565,9 @@ def coalesce_duplicate_open_work(
             _retire_duplicate(row, reason=reason, keep_id=keep_id)
 
     # Snapshot-triggered mining is global-universe work. When snapshot batches
-    # arrive faster than a mine can finish, queued older batches mostly replay
-    # the same expensive discovery pass. Keep the freshest queued batch unless
-    # a newer batch is already in flight, in which case older queued batches are
-    # stale by construction.
+    # arrive faster than a mine can finish, queued batches inside the handler's
+    # obsolete-event grace window mostly replay the same expensive discovery
+    # pass. Keep only queued batches beyond that coverage horizon.
     queued_mine_rows = [
         row
         for row in rows
@@ -590,9 +589,17 @@ def coalesce_duplicate_open_work(
         processing_mine_rows.sort(key=_mine_rank)
         newest_processing = processing_mine_rows[0]
         newest_processing_at = newest_processing.created_at or newest_processing.updated_at or datetime.min
+        try:
+            grace_seconds = max(
+                0,
+                int(getattr(settings, "brain_mine_handler_obsolete_event_grace_seconds", 900)),
+            )
+        except (TypeError, ValueError):
+            grace_seconds = 900
+        processing_coverage_until = newest_processing_at + timedelta(seconds=grace_seconds)
         for row in list(queued_mine_rows):
             row_created = row.created_at or row.updated_at or datetime.min
-            if row_created <= newest_processing_at:
+            if row_created <= processing_coverage_until:
                 _retire_duplicate(
                     row,
                     reason="market_snapshot_batch_superseded_by_processing",

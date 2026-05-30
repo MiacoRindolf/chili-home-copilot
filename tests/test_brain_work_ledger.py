@@ -573,22 +573,6 @@ def test_coalesce_duplicate_open_work_keeps_processing_exit_variant(db) -> None:
 def test_coalesce_duplicate_open_work_keeps_latest_queued_market_snapshot_batch(db) -> None:
     now = datetime.utcnow()
 
-    processing = BrainWorkEvent(
-        domain="trading",
-        event_type="market_snapshots_batch",
-        event_kind="outcome",
-        dedupe_key="mine:processing",
-        payload={"job_id": "processing", "snapshots_taken_daily": 120},
-        lease_scope="mine",
-        status="processing",
-        attempts=1,
-        max_attempts=5,
-        next_run_at=now - timedelta(minutes=5),
-        lease_holder="pytest:mine",
-        lease_expires_at=now + timedelta(minutes=10),
-        created_at=now - timedelta(minutes=5),
-        updated_at=now,
-    )
     older = BrainWorkEvent(
         domain="trading",
         event_type="market_snapshots_batch",
@@ -631,9 +615,9 @@ def test_coalesce_duplicate_open_work_keeps_latest_queued_market_snapshot_batch(
         created_at=now - timedelta(minutes=1),
         updated_at=now - timedelta(minutes=1),
     )
-    db.add_all([processing, older, middle, latest])
+    db.add_all([older, middle, latest])
     db.commit()
-    ids = [int(processing.id), int(older.id), int(middle.id), int(latest.id)]
+    ids = [int(older.id), int(middle.id), int(latest.id)]
 
     result = coalesce_duplicate_open_work(
         db,
@@ -649,7 +633,6 @@ def test_coalesce_duplicate_open_work_keeps_latest_queued_market_snapshot_batch(
     }
     assert result["coalesced"] == 2
     assert result["reasons"] == {"market_snapshot_batch_superseded": 2}
-    assert rows[int(processing.id)].status == "processing"
     assert rows[int(latest.id)].status == "retry_wait"
     assert rows[int(older.id)].status == "done"
     assert rows[int(middle.id)].status == "done"
@@ -657,7 +640,7 @@ def test_coalesce_duplicate_open_work_keeps_latest_queued_market_snapshot_batch(
     assert rows[int(middle.id)].payload["duplicate_open_work_kept_event_id"] == int(latest.id)
 
 
-def test_coalesce_duplicate_open_work_retires_queued_market_snapshot_older_than_processing(
+def test_coalesce_duplicate_open_work_retires_queued_market_snapshot_covered_by_processing(
     db,
 ) -> None:
     now = datetime.utcnow()
@@ -692,12 +675,12 @@ def test_coalesce_duplicate_open_work_retires_queued_market_snapshot_older_than_
         created_at=now - timedelta(minutes=2),
         updated_at=now - timedelta(minutes=2),
     )
-    future_pending = BrainWorkEvent(
+    covered_pending = BrainWorkEvent(
         domain="trading",
         event_type="market_snapshots_batch",
         event_kind="outcome",
-        dedupe_key="mine:future-pending",
-        payload={"job_id": "future-pending", "snapshots_taken_daily": 120},
+        dedupe_key="mine:covered-pending",
+        payload={"job_id": "covered-pending", "snapshots_taken_daily": 120},
         lease_scope="mine",
         status="pending",
         attempts=0,
@@ -706,9 +689,28 @@ def test_coalesce_duplicate_open_work_retires_queued_market_snapshot_older_than_
         created_at=now + timedelta(seconds=1),
         updated_at=now + timedelta(seconds=1),
     )
-    db.add_all([older_retry, processing, future_pending])
+    outside_grace_pending = BrainWorkEvent(
+        domain="trading",
+        event_type="market_snapshots_batch",
+        event_kind="outcome",
+        dedupe_key="mine:outside-grace-pending",
+        payload={"job_id": "outside-grace-pending", "snapshots_taken_daily": 120},
+        lease_scope="mine",
+        status="pending",
+        attempts=0,
+        max_attempts=5,
+        next_run_at=now,
+        created_at=now + timedelta(minutes=20),
+        updated_at=now + timedelta(minutes=20),
+    )
+    db.add_all([older_retry, processing, covered_pending, outside_grace_pending])
     db.commit()
-    ids = [int(older_retry.id), int(processing.id), int(future_pending.id)]
+    ids = [
+        int(older_retry.id),
+        int(processing.id),
+        int(covered_pending.id),
+        int(outside_grace_pending.id),
+    ]
 
     result = coalesce_duplicate_open_work(
         db,
@@ -722,8 +724,8 @@ def test_coalesce_duplicate_open_work_retires_queued_market_snapshot_older_than_
         .filter(BrainWorkEvent.id.in_(ids))
         .all()
     }
-    assert result["coalesced"] == 1
-    assert result["reasons"] == {"market_snapshot_batch_superseded_by_processing": 1}
+    assert result["coalesced"] == 2
+    assert result["reasons"] == {"market_snapshot_batch_superseded_by_processing": 2}
     assert rows[int(older_retry.id)].status == "done"
     assert (
         rows[int(older_retry.id)].payload["duplicate_open_work_suppressed_reason"]
@@ -733,7 +735,11 @@ def test_coalesce_duplicate_open_work_retires_queued_market_snapshot_older_than_
         processing.id
     )
     assert rows[int(processing.id)].status == "processing"
-    assert rows[int(future_pending.id)].status == "pending"
+    assert rows[int(covered_pending.id)].status == "done"
+    assert rows[int(covered_pending.id)].payload["duplicate_open_work_kept_event_id"] == int(
+        processing.id
+    )
+    assert rows[int(outside_grace_pending.id)].status == "pending"
 
 
 def test_enqueue_work_reuses_retryable_dead_dedupe(db, monkeypatch) -> None:
