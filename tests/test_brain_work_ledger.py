@@ -446,7 +446,7 @@ def test_coalesce_duplicate_open_work_keeps_latest_queued_market_snapshot_batch(
     processing = BrainWorkEvent(
         domain="trading",
         event_type="market_snapshots_batch",
-        event_kind="work",
+        event_kind="outcome",
         dedupe_key="mine:processing",
         payload={"job_id": "processing", "snapshots_taken_daily": 120},
         lease_scope="mine",
@@ -462,7 +462,7 @@ def test_coalesce_duplicate_open_work_keeps_latest_queued_market_snapshot_batch(
     older = BrainWorkEvent(
         domain="trading",
         event_type="market_snapshots_batch",
-        event_kind="work",
+        event_kind="outcome",
         dedupe_key="mine:older",
         payload={"job_id": "older", "snapshots_taken_daily": 120},
         lease_scope="mine",
@@ -476,7 +476,7 @@ def test_coalesce_duplicate_open_work_keeps_latest_queued_market_snapshot_batch(
     middle = BrainWorkEvent(
         domain="trading",
         event_type="market_snapshots_batch",
-        event_kind="work",
+        event_kind="outcome",
         dedupe_key="mine:middle",
         payload={"job_id": "middle", "snapshots_taken_daily": 120},
         lease_scope="mine",
@@ -490,7 +490,7 @@ def test_coalesce_duplicate_open_work_keeps_latest_queued_market_snapshot_batch(
     latest = BrainWorkEvent(
         domain="trading",
         event_type="market_snapshots_batch",
-        event_kind="work",
+        event_kind="outcome",
         dedupe_key="mine:latest",
         payload={"job_id": "latest", "snapshots_taken_daily": 120},
         lease_scope="mine",

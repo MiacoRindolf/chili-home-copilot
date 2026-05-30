@@ -389,6 +389,20 @@ def coalesce_duplicate_open_work(
     if types:
         q = q.filter(BrainWorkEvent.event_type.in_(types))
     rows = q.all()
+    if not types or "market_snapshots_batch" in types:
+        # ``market_snapshots_batch`` is born from the outcome lane, but when
+        # claimable outcomes are enabled it behaves as executable work.
+        rows.extend(
+            db.query(BrainWorkEvent)
+            .filter(
+                BrainWorkEvent.domain == "trading",
+                BrainWorkEvent.event_kind == "outcome",
+                BrainWorkEvent.event_type == "market_snapshots_batch",
+                BrainWorkEvent.status.in_(("pending", "processing", "retry_wait")),
+                BrainWorkEvent.dedupe_key.isnot(None),
+            )
+            .all()
+        )
 
     def _rank(row: BrainWorkEvent) -> tuple[int, int, datetime, datetime, int]:
         status_rank = {"processing": 0, "pending": 1, "retry_wait": 2}.get(
