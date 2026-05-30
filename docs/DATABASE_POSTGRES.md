@@ -25,6 +25,8 @@ The repo `docker-compose.yml` defines a **`postgres`** service and wires the **`
 
 - Port **5433** on the host maps to Postgres **5432** inside Compose so a separate PostgreSQL on **5432** does not conflict.
 - The `chili` service **`environment`** entry for `DATABASE_URL` overrides any `DATABASE_URL` in `.env` when using Compose, so the app always resolves the `postgres` hostname on the Docker network.
+- Every Compose service that connects to Postgres must declare `DATABASE_POOL_SIZE` and `DATABASE_MAX_OVERFLOW`. Keep those per-service budgets conservative; the full stack should stay well below Postgres `max_connections`, with backtest child-process budgets counted separately.
+- App connections set `idle_in_transaction_session_timeout` and `idle_session_timeout` at connection startup. The first kills leaked transactions; the second lets Postgres reclaim quiet pooled sessions, with SQLAlchemy `pool_pre_ping` recycling them on the next checkout.
 - Data persists under host paths **`D:/CHILI-Docker/postgres`**, **`D:/CHILI-Docker/chili-data`**, and **`D:/CHILI-Docker/ollama`** (bind mounts in `docker-compose.yml`). `docker compose down` does not remove that data; deleting those folders would.
 
 Use **`bash scripts/docker-setup.sh`** to start Postgres + Ollama, wait for health, pull models, start CHILI, and run RAG ingest.

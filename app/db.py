@@ -83,6 +83,29 @@ def _resolve_pool_config(settings_obj, *, mp_child: bool, pytest_process: bool) 
     )
 
 
+def _build_pg_connect_options(
+    *,
+    idle_xact_timeout_ms: int,
+    idle_session_timeout_ms: int,
+) -> list[str]:
+    options: list[str] = []
+    if int(idle_xact_timeout_ms) > 0:
+        options.extend(
+            [
+                "-c",
+                f"idle_in_transaction_session_timeout={int(idle_xact_timeout_ms)}",
+            ]
+        )
+    if int(idle_session_timeout_ms) > 0:
+        options.extend(
+            [
+                "-c",
+                f"idle_session_timeout={int(idle_session_timeout_ms)}",
+            ]
+        )
+    return options
+
+
 # Process-pool queue workers set CHILI_MP_BACKTEST_CHILD before first db import (see backtest_queue_worker).
 _mp_child = _is_true_env("CHILI_MP_BACKTEST_CHILD")
 if _mp_child:
@@ -93,15 +116,10 @@ _pool_size, _max_overflow, _pool_timeout = _resolve_pool_config(
     mp_child=_mp_child,
     pytest_process=_pytest_process,
 )
-_connect_options: list[str] = []
-_idle_xact_timeout_ms = int(settings.database_idle_in_transaction_timeout_ms)
-if _idle_xact_timeout_ms > 0:
-    _connect_options.extend(
-        [
-            "-c",
-            f"idle_in_transaction_session_timeout={_idle_xact_timeout_ms}",
-        ]
-    )
+_connect_options = _build_pg_connect_options(
+    idle_xact_timeout_ms=int(settings.database_idle_in_transaction_timeout_ms),
+    idle_session_timeout_ms=int(settings.database_idle_session_timeout_ms),
+)
 _connect_args = {
     "keepalives": _PG_KEEPALIVES_ENABLED,
     "keepalives_idle": _PG_KEEPALIVE_IDLE_SECONDS,
@@ -121,6 +139,7 @@ engine = create_engine(
     pool_timeout=float(_pool_timeout),
     pool_use_lifo=True,
     pool_pre_ping=True,  # detect stale connections at checkout
+    pool_reset_on_return="rollback",
     pool_recycle=3600,  # recycle at checkout if older than 1h
     # FIX 13+14 (deep audit 2026-04-28): keep-alives at the TCP level so a
     # long-running brain-worker learning cycle (~34min hold) can't have its

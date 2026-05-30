@@ -115,6 +115,8 @@ services:
       # Must use service hostname `postgres`; overrides DATABASE_URL from .env when using Compose.
       - OLLAMA_HOST=http://ollama:11434
       - DATABASE_URL=postgresql://chili:chili@postgres:5432/chili
+      - DATABASE_POOL_SIZE=8
+      - DATABASE_MAX_OVERFLOW=8
       # LOCAL DEV ONLY — overrides host .env paths that do not exist inside Linux containers.
       # Must match the read-only checkout mount target below (/workspace).
       - CODE_BRAIN_REPOS=/workspace
@@ -207,6 +209,8 @@ services:
         required: false
     environment:
       - DATABASE_URL=postgresql://chili:chili@postgres:5432/chili
+      - DATABASE_POOL_SIZE=2
+      - DATABASE_MAX_OVERFLOW=2
       - OLLAMA_HOST=http://ollama:11434
       - CHILI_BRAIN_INTERNAL_SECRET=${CHILI_BRAIN_INTERNAL_SECRET:-changeme}
     volumes:
@@ -263,8 +267,8 @@ services:
       - CHILI_USE_BRAIN_SERVICE=${CHILI_USE_BRAIN_SERVICE:-0}
       - BRAIN_SERVICE_URL=${BRAIN_SERVICE_URL:-http://brain:8090}
       - BRAIN_INTERNAL_SECRET=${CHILI_BRAIN_INTERNAL_SECRET:-changeme}
-      - DATABASE_POOL_SIZE=8
-      - DATABASE_MAX_OVERFLOW=12
+      - DATABASE_POOL_SIZE=4
+      - DATABASE_MAX_OVERFLOW=4
       - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=true
       - TRADING_BRAIN_NEURAL_MESH_ENABLED=1
       - TRADING_BRAIN_GRAPH_MODE=neural
@@ -328,8 +332,8 @@ services:
     environment:
       - DATABASE_URL=postgresql://chili:chili@postgres:5432/chili
       - OLLAMA_HOST=http://ollama:11434
-      - DATABASE_POOL_SIZE=4
-      - DATABASE_MAX_OVERFLOW=6
+      - DATABASE_POOL_SIZE=2
+      - DATABASE_MAX_OVERFLOW=2
       - CHILI_RUNNING_IN_DOCKER=1
       - CHILI_CONTAINER_CPU_LIMIT=1
     volumes:
@@ -372,8 +376,8 @@ services:
     environment:
       - DATABASE_URL=postgresql://chili:chili@postgres:5432/chili
       - OLLAMA_HOST=http://ollama:11434
-      - DATABASE_POOL_SIZE=4
-      - DATABASE_MAX_OVERFLOW=6
+      - DATABASE_POOL_SIZE=2
+      - DATABASE_MAX_OVERFLOW=2
       - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=true
       - CHILI_RUNNING_IN_DOCKER=1
       - CHILI_CONTAINER_CPU_LIMIT=3
@@ -416,8 +420,8 @@ services:
         max-file: "3"
     environment:
       - DATABASE_URL=postgresql://chili:chili@postgres:5432/chili
-      - DATABASE_POOL_SIZE=6
-      - DATABASE_MAX_OVERFLOW=10
+      - DATABASE_POOL_SIZE=4
+      - DATABASE_MAX_OVERFLOW=4
       # Normal queue owner. Mirrors brain_worker backtest-mode default while
       # keeping lean-cycle overrides separate from the dedicated worker.
       - CHILI_BRAIN_FAST_BACKTEST_BATCH=${CHILI_BACKTEST_WORKER_FAST_BACKTEST_BATCH:-30}
@@ -461,8 +465,8 @@ services:
         max-file: "3"
     environment:
       - DATABASE_URL=postgresql://chili:chili@postgres:5432/chili
-      - DATABASE_POOL_SIZE=4
-      - DATABASE_MAX_OVERFLOW=4
+      - DATABASE_POOL_SIZE=3
+      - DATABASE_MAX_OVERFLOW=3
       - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=true
       - CHILI_RUNNING_IN_DOCKER=1
       - CHILI_CONTAINER_CPU_LIMIT=2
@@ -511,8 +515,8 @@ services:
       - CHILI_SCHEDULER_EMIT_HEARTBEAT=1
       - CHILI_RUNNING_IN_DOCKER=1
       - CHILI_CONTAINER_CPU_LIMIT=2
-      - DATABASE_POOL_SIZE=4
-      - DATABASE_MAX_OVERFLOW=4
+      - DATABASE_POOL_SIZE=2
+      - DATABASE_MAX_OVERFLOW=2
       - PYTHONUNBUFFERED=1
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
@@ -579,14 +583,11 @@ services:
       - CHILI_MOMENTUM_PAPER_RUNNER_SCHEDULER_ENABLED=1
       - CHILI_MOMENTUM_LIVE_RUNNER_ENABLED=1
       - CHILI_MOMENTUM_LIVE_RUNNER_SCHEDULER_ENABLED=1
-      # Bumped from 15/25 → 25/50 because trading scheduler bursts (auto trader
-      # tick, paper runner, neural mesh, bracket reconciliation, market data
-      # integrity) intermittently exhausted the pool, blocking dispatch's LLM
-      # logger writes and code_agent_runs updates. Postgres default is 100
-      # max_connections so 75 from this service still leaves headroom for the
-      # web service + ad-hoc psql access. (Phase D.2.7+ ops note 2026-04-26.)
-      - DATABASE_POOL_SIZE=25
-      - DATABASE_MAX_OVERFLOW=50
+      # Incident cap (2026-05-30): keep cron-only scheduler from reserving
+      # most of Postgres' connection budget now that autotrader and broker
+      # sync run in dedicated workers.
+      - DATABASE_POOL_SIZE=6
+      - DATABASE_MAX_OVERFLOW=6
       - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=true
       - TRADING_BRAIN_NEURAL_MESH_ENABLED=1
       - TRADING_BRAIN_GRAPH_MODE=neural
@@ -698,8 +699,8 @@ services:
       - OLLAMA_HOST=http://ollama:11434
       - CHILI_SCHEDULER_ROLE=broker_sync_only
       - CHILI_SCHEDULER_EMIT_HEARTBEAT=0
-      - DATABASE_POOL_SIZE=12
-      - DATABASE_MAX_OVERFLOW=20
+      - DATABASE_POOL_SIZE=4
+      - DATABASE_MAX_OVERFLOW=4
       - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=true
       - CHILI_RUNNING_IN_DOCKER=1
       - CHILI_CONTAINER_CPU_LIMIT=2
@@ -801,8 +802,8 @@ services:
       - OLLAMA_HOST=http://ollama:11434
       - CHILI_SCHEDULER_ROLE=autotrader_only
       - CHILI_SCHEDULER_EMIT_HEARTBEAT=0
-      - DATABASE_POOL_SIZE=10
-      - DATABASE_MAX_OVERFLOW=15
+      - DATABASE_POOL_SIZE=4
+      - DATABASE_MAX_OVERFLOW=4
       - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=true
       - CHILI_RUNNING_IN_DOCKER=1
       - CHILI_CONTAINER_CPU_LIMIT=2
@@ -867,6 +868,8 @@ services:
         required: false
     environment:
       - DATABASE_URL=postgresql://chili:chili@postgres:5432/chili
+      - DATABASE_POOL_SIZE=2
+      - DATABASE_MAX_OVERFLOW=2
       - CHILI_RUNNING_IN_DOCKER=1
       - PYTHONUNBUFFERED=1
       # Default OFF in compose; .env or shell can flip via interpolation.
