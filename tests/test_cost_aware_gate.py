@@ -444,7 +444,7 @@ def test_gate_coinbase_nonfinite_projected_edge_blocks(projected_edge):
     assert res.threshold_bps == 150
 
 
-def test_gate_coinbase_nonfinite_tca_estimate_ignored():
+def test_gate_coinbase_nonfinite_tca_estimate_blocks_invalid_snapshot():
     s = _settings_stub(include_tca=True)
     db = _FakeCostDb({
         "sample_trades": 9,
@@ -459,15 +459,19 @@ def test_gate_coinbase_nonfinite_tca_estimate_ignored():
         ticker="AKT-USD", projected_profit_pct=1.5, settings_=s, db=db,
     )
 
-    assert res.allowed is True
+    assert res.allowed is False
+    assert res.reason == REASON_GATE_TCA_INVALID
     assert res.threshold_bps == 150
     assert res.tca_cost_bps == 0
     assert res.tca_snapshot is not None
-    assert res.tca_snapshot["used"] is True
-    assert res.tca_snapshot["p90_spread_bps"] == 0.0
-    assert res.tca_snapshot["p90_slippage_bps"] == 0.0
-    assert res.tca_snapshot["median_spread_bps"] == 0.0
-    assert res.tca_snapshot["median_slippage_bps"] == 0.0
+    assert res.tca_snapshot["used"] is False
+    assert res.tca_snapshot["reason"] == "invalid_tca_estimate"
+    assert res.tca_snapshot["invalid_fields"] == [
+        "median_slippage_bps",
+        "median_spread_bps",
+        "p90_slippage_bps",
+        "p90_spread_bps",
+    ]
 
 
 # ── Per-venue cap cases ─────────────────────────────────────────────
