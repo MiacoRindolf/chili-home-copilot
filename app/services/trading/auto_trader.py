@@ -2234,6 +2234,17 @@ def _queue_recert_for_blocked_signal(
     if not asset_class and ticker.endswith("-USD"):
         asset_class = "crypto"
     as_of_date = datetime.utcnow().date()
+    cooldown = _recert_signal_fastlane_cooldown(
+        pattern,
+        pattern_id=pattern_id,
+        reason=reason,
+    )
+    if cooldown is not None:
+        cooldown.update({
+            "signal_ticker": ticker,
+            "asset_class": asset_class,
+        })
+        return cooldown
     recert_queue_result: dict[str, Any] = {}
     try:
         from .recert_queue_service import queue_scheduler
@@ -2345,6 +2356,58 @@ def _queue_recert_for_blocked_signal(
     out = dict(recert_queue_result)
     out.update(profitability_work)
     return out
+
+
+def _recert_signal_fastlane_cooldown(
+    pattern: ScanPattern | None,
+    *,
+    pattern_id: int,
+    reason: str,
+) -> dict[str, Any] | None:
+    """Throttle futile recert fastlane retries after a fresh backtest attempt."""
+    if pattern is None:
+        return None
+    if not bool(getattr(settings, "brain_queue_recert_cooldown_enabled", True)):
+        return None
+    try:
+        cooldown_minutes = int(
+            getattr(settings, "brain_queue_recert_cooldown_minutes", 360) or 0
+        )
+    except (TypeError, ValueError):
+        cooldown_minutes = 360
+    if cooldown_minutes <= 0:
+        return None
+    last_backtest_at = getattr(pattern, "last_backtest_at", None)
+    if not isinstance(last_backtest_at, datetime):
+        return None
+    last_bt = last_backtest_at
+    if last_bt.tzinfo is not None:
+        last_bt = last_bt.astimezone(timezone.utc).replace(tzinfo=None)
+    cooldown_until = last_bt + timedelta(minutes=cooldown_minutes)
+    now_utc = datetime.utcnow()
+    if now_utc >= cooldown_until:
+        return None
+    try:
+        from .backtest_queue import get_priority_bypass_retest_floor
+
+        bypass_floor = int(get_priority_bypass_retest_floor())
+    except Exception:
+        bypass_floor = 0
+    try:
+        backtest_priority = int(getattr(pattern, "backtest_priority", 0) or 0)
+    except (TypeError, ValueError):
+        backtest_priority = 0
+    return {
+        "queued": False,
+        "reason": "recent_recert_backtest_cooldown",
+        "pattern_id": int(pattern_id),
+        "blocked_signal_reason": reason,
+        "last_backtest_at": last_bt.isoformat(),
+        "cooldown_until": cooldown_until.isoformat(),
+        "cooldown_minutes": cooldown_minutes,
+        "backtest_priority": backtest_priority,
+        "priority_bypass_floor": bypass_floor,
+    }
 
 
 def _csv_tokens(raw: Any) -> frozenset[str]:

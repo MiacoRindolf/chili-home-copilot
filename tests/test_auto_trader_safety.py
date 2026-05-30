@@ -1128,6 +1128,50 @@ def test_live_entry_blocks_recert_required_pattern_before_sizing_or_broker(db, m
     assert recert_logs[0].reason == "autotrader_signal:pattern_recert_required"
 
 
+def test_recert_signal_fastlane_respects_recent_backtest_cooldown(monkeypatch):
+    settings = _minimal_settings(1)
+    settings.brain_queue_recert_cooldown_enabled = True
+    settings.brain_queue_recert_cooldown_minutes = 360
+    monkeypatch.setattr(at_mod, "settings", settings)
+    monkeypatch.setattr(
+        "app.services.trading.recert_queue_service.queue_scheduler",
+        lambda *a, **k: pytest.fail("cooldown should skip recert queue writes"),
+    )
+    monkeypatch.setattr(
+        "app.services.trading.edge_reliability.emit_targeted_profitability_work",
+        lambda *a, **k: pytest.fail("cooldown should skip duplicate work events"),
+    )
+
+    alert = SimpleNamespace(
+        id=777001,
+        scan_pattern_id=1264,
+        ticker="AAVE-USD",
+        asset_type="crypto",
+    )
+    pattern = SimpleNamespace(
+        name="Fresh failed recert",
+        last_backtest_at=datetime.utcnow(),
+        backtest_priority=250,
+        recert_reason="missing_oos_recert",
+        lifecycle_stage="live",
+        promotion_status=None,
+    )
+
+    out = at_mod._queue_recert_for_blocked_signal(
+        None,
+        alert=alert,
+        pattern=pattern,
+        reason="pattern_recert_required",
+    )
+
+    assert out["queued"] is False
+    assert out["reason"] == "recent_recert_backtest_cooldown"
+    assert out["pattern_id"] == 1264
+    assert out["signal_ticker"] == "AAVE-USD"
+    assert out["asset_class"] == "crypto"
+    assert out["backtest_priority"] == 250
+
+
 def test_shadow_stock_fastlane_boosts_pattern_for_positive_edge(monkeypatch):
     settings = _minimal_settings(1)
     monkeypatch.setattr(at_mod, "settings", settings)

@@ -102,4 +102,10 @@ This is a **host** limitation: too many sockets in `TIME_WAIT` or ephemeral port
 
    Adjust database name (`chili` / `chili_staging` / `chili_test`) and script path as needed. The `chili` image installs from **`requirements.txt` at `docker compose build` time** — not on every `exec`. If you see `ModuleNotFoundError` (e.g. `skfolio`, `lightgbm`), rebuild and recreate: `docker compose build chili` then `docker compose up -d chili`. Dependencies on the **host** `conda` env do not apply inside the container.
 
+   For pytest, prefer the repo wrapper when Windows loopback is degraded:
+
+   ```powershell
+   .\scripts\pytest-compose.ps1 tests/test_auto_trader_safety.py -q
+   ```
+
 CLI scripts `merge_sqlite_into_postgres.py`, `dedupe_scan_patterns_by_rules.py`, and `audit_postgres_merge_redundancy.py` retry once with IPv4 automatically when this error appears on `localhost`.
