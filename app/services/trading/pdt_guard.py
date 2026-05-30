@@ -26,7 +26,7 @@ Per the operator's "no hardcoded fallback values" principle (memory
 * ``account_equity`` is fetched live from the broker on every call
   (cached 60s). If the fetch fails, we propagate ``None`` and the
   gate **refuses** to open -- we do NOT assume "probably above $25K".
-* ``day_trades_5d`` is computed from ``trading_trades`` via a real SQL
+* ``day_trades_5d`` is computed from the configured management-envelope relation via a real SQL
   count of intraday round-trips in the last 5 business days. If the
   query fails, propagate ``None`` and refuse.
 
@@ -46,6 +46,10 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
 from ...config import settings
+from .management_envelopes import (
+    LEGACY_TRADES_COMPAT_RELATION,
+    MANAGEMENT_ENVELOPES_RELATION,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,8 +58,8 @@ logger = logging.getLogger(__name__)
 PDT_EQUITY_THRESHOLD_USD = 25_000.0
 PDT_MAX_DAY_TRADES_5D = 3   # 4th would trigger PDT designation
 PHASE5K_PDT_ENV = "CHILI_PHASE5K_PDT_USE_ENVELOPES"
-_PDT_COMPAT_RELATION = "trading_trades"
-_PDT_ENVELOPE_RELATION = "trading_management_envelopes"
+_PDT_COMPAT_RELATION = LEGACY_TRADES_COMPAT_RELATION
+_PDT_ENVELOPE_RELATION = MANAGEMENT_ENVELOPES_RELATION
 
 
 # f-pdt-count-broker-confirmed-only (2026-05-08): exit reasons that mark a
@@ -197,7 +201,7 @@ def _count_day_trades_5d(
     settings_: Any | None = None,
 ) -> int | None:
     """Count round-trip day trades (opened AND closed same calendar day)
-    in the trailing 5 business days from ``trading_trades``.
+    in the trailing 5 business days from the configured management-envelope relation.
 
     R35 (2026-04-30): explicitly EXCLUDE crypto rows. SEC PDT regulation
     applies only to securities accounts; crypto is a 24/7 cash market and

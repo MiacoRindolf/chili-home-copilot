@@ -1,7 +1,7 @@
 """Broker-position truth helpers for live Trade management surfaces.
 
 These helpers protect UI/monitor readers from stale local ``Trade`` rows.
-``trading_trades`` is a management envelope; ``trading_positions`` is the
+The legacy trade row is a management envelope; ``trading_positions`` is the
 broker-authoritative inventory snapshot. When the two disagree, do not show
 or act on the stale envelope after the short post-fill grace window.
 """

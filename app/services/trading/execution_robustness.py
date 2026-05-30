@@ -150,7 +150,7 @@ def aggregate_trade_execution_for_pattern(
     user_id: int,
     window_days: int,
 ) -> dict[str, Any]:
-    """Legacy v1 rollups from ``trading_trades`` for one pattern + user."""
+    """Legacy v1 rollups from the Trade ORM compatibility surface."""
     from ...models.trading import Trade
 
     since = datetime.utcnow() - timedelta(days=max(1, int(window_days)))

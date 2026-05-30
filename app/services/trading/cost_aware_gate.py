@@ -40,7 +40,10 @@ from typing import Any, Optional
 
 from sqlalchemy import text
 
-from .management_envelopes import MANAGEMENT_ENVELOPES_RELATION
+from .management_envelopes import (
+    LEGACY_TRADES_COMPAT_RELATION,
+    MANAGEMENT_ENVELOPES_RELATION,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +60,7 @@ REASON_CAP_NOTIONAL = "venue_notional_cap_exceeded"
 REASON_CAP_POSITIONS = "venue_concurrent_positions_cap_exceeded"
 
 PHASE5K_COINBASE_CAP_ENV = "CHILI_PHASE5K_COINBASE_CAP_USE_ENVELOPES"
-_COINBASE_CAP_COMPAT_RELATION = "trading_trades"
+_COINBASE_CAP_COMPAT_RELATION = LEGACY_TRADES_COMPAT_RELATION
 _COINBASE_CAP_ENVELOPE_RELATION = MANAGEMENT_ENVELOPES_RELATION
 
 
@@ -505,7 +508,7 @@ def per_venue_cap_check(
     autotrader has its own size/heat gates upstream).
 
     Reads currently-open CHILI-managed/autotrader Trades from
-    ``trading_trades`` filtered to ``broker_source = venue``. Passive
+    the legacy management-envelope compatibility view filtered to ``broker_source = venue``. Passive
     broker-sync rows are intentionally ignored here; otherwise an old
     manually-held Coinbase position consumes the strategy's concurrency lane.
     """

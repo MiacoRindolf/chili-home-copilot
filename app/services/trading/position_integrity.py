@@ -13,9 +13,14 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from .management_envelopes import (
+    LEGACY_TRADES_COMPAT_RELATION,
+    MANAGEMENT_ENVELOPES_RELATION,
+)
+
 PHASE5K_POSITION_INTEGRITY_ENV = "CHILI_PHASE5K_POSITION_INTEGRITY_USE_ENVELOPES"
-_POSITION_INTEGRITY_COMPAT_RELATION = "trading_trades"
-_POSITION_INTEGRITY_ENVELOPE_RELATION = "trading_management_envelopes"
+_POSITION_INTEGRITY_COMPAT_RELATION = LEGACY_TRADES_COMPAT_RELATION
+_POSITION_INTEGRITY_ENVELOPE_RELATION = MANAGEMENT_ENVELOPES_RELATION
 
 
 def _envelope_account_type_sql(alias: str) -> str:

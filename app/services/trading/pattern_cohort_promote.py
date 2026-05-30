@@ -55,6 +55,10 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ...models.trading import ScanPattern
+from .management_envelopes import (
+    LEGACY_TRADES_COMPAT_RELATION,
+    MANAGEMENT_ENVELOPES_RELATION,
+)
 from .realized_pnl_sql import trade_return_fraction_sql
 
 logger = logging.getLogger(__name__)
@@ -62,8 +66,8 @@ logger = logging.getLogger(__name__)
 
 COHORT_ELIGIBLE_LIFECYCLE_STAGES = ("backtested", "candidate", "challenged")
 PHASE5K_COHORT_PROMOTE_ENV = "CHILI_PHASE5K_COHORT_PROMOTE_USE_ENVELOPES"
-_COHORT_PROMOTE_COMPAT_RELATION = "trading_trades"
-_COHORT_PROMOTE_ENVELOPE_RELATION = "trading_management_envelopes"
+_COHORT_PROMOTE_COMPAT_RELATION = LEGACY_TRADES_COMPAT_RELATION
+_COHORT_PROMOTE_ENVELOPE_RELATION = MANAGEMENT_ENVELOPES_RELATION
 
 
 def _truthy_flag(value: Any) -> bool:
