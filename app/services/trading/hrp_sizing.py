@@ -253,21 +253,40 @@ def _fetch_returns_matrix(
         "max_staleness_days": staleness_days,
         "freshness_cutoff_utc": _iso_dt(freshness_cutoff),
     }
+    symbols = list(dict.fromkeys(s.upper() for s in symbols if s))
+    if len(symbols) < 2:
+        meta["hrp_skip"] = "fewer_than_2_symbols"
+        return None, [], meta
 
     try:
         rows = db.execute(
             text(
                 """
-                SELECT ticker, bar_start_at, close_price AS price
-                FROM trading_snapshots
-                WHERE bar_start_at >= :cutoff
-                  AND ticker = ANY(:symbols)
-                  AND bar_interval = '1d'
-                  AND close_price IS NOT NULL AND close_price > 0
+                WITH ranked AS (
+                    SELECT ticker,
+                           bar_start_at,
+                           close_price AS price,
+                           row_number() OVER (
+                               PARTITION BY ticker
+                               ORDER BY bar_start_at DESC
+                           ) AS rn
+                    FROM trading_snapshots
+                    WHERE bar_start_at >= :cutoff
+                      AND ticker = ANY(:symbols)
+                      AND bar_interval = '1d'
+                      AND close_price IS NOT NULL AND close_price > 0
+                )
+                SELECT ticker, bar_start_at, price
+                FROM ranked
+                WHERE rn <= :return_window_days
                 ORDER BY ticker, bar_start_at
                 """
             ),
-            {"cutoff": cutoff, "symbols": [s.upper() for s in symbols]},
+            {
+                "cutoff": cutoff,
+                "symbols": symbols,
+                "return_window_days": _RETURN_WINDOW_DAYS,
+            },
         ).fetchall()
     except Exception as e:
         logger.debug("[hrp] returns fetch failed: %s", e)
@@ -300,11 +319,12 @@ def _fetch_returns_matrix(
                 }
             )
             continue
-        if len(bars) < _MIN_OBS_PER_SYMBOL:
+        min_price_bars = _MIN_OBS_PER_SYMBOL + 1
+        if len(bars) < min_price_bars:
             insufficient_symbols.append(sym_upper)
             continue
         prices = [b[1] for b in bars[-_RETURN_WINDOW_DAYS:]]
-        if len(prices) < _MIN_OBS_PER_SYMBOL:
+        if len(prices) < min_price_bars:
             insufficient_symbols.append(sym_upper)
             continue
         returns = [
@@ -346,17 +366,32 @@ def _fetch_returns_matrix(
 
 def _fetch_active_position_symbols(db: Session, user_id: Optional[int]) -> list[str]:
     """Symbols with currently-open positions for this user."""
+    if user_id is None:
+        stmt = text(
+            """
+            SELECT DISTINCT UPPER(BTRIM(ticker)) AS ticker
+            FROM trading_management_envelopes
+            WHERE status IN ('open', 'pending')
+              AND ticker IS NOT NULL
+              AND BTRIM(ticker) <> ''
+            """
+        )
+        params: dict[str, Any] = {}
+    else:
+        stmt = text(
+            """
+            SELECT DISTINCT UPPER(BTRIM(ticker)) AS ticker
+            FROM trading_management_envelopes
+            WHERE status IN ('open', 'pending')
+              AND user_id = :uid
+              AND ticker IS NOT NULL
+              AND BTRIM(ticker) <> ''
+            """
+        )
+        params = {"uid": user_id}
+
     try:
-        rows = db.execute(
-            text(
-                """
-                SELECT DISTINCT ticker FROM trading_management_envelopes
-                WHERE status IN ('open', 'pending')
-                  AND (user_id = :uid OR :uid IS NULL)
-                """
-            ),
-            {"uid": user_id},
-        ).fetchall()
+        rows = db.execute(stmt, params).fetchall()
         return [r[0] for r in rows or [] if r[0]]
     except Exception as e:
         logger.debug("[hrp] active positions fetch failed: %s", e)
@@ -398,6 +433,11 @@ def decide_position_size(
         hrp_cluster_label=None,
         meta={},
     )
+    if decision.account_equity_usd <= 0:
+        decision.meta["hrp_skip"] = "non_positive_account_equity"
+        if persist_log:
+            _persist_sizing_log(db, user_id, decision)
+        return decision
 
     # Read flag.
     try:
@@ -408,7 +448,7 @@ def decide_position_size(
 
     # Compute HRP regardless of flag (shadow mode); cost is bounded.
     active = _fetch_active_position_symbols(db, user_id)
-    universe = list({s.upper() for s in active + [symbol]})
+    universe = list(dict.fromkeys(s.upper() for s in [*active, symbol]))
     decision.n_active_positions = len(active)
 
     if len(universe) >= 2:
