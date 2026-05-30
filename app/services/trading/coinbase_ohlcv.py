@@ -179,7 +179,10 @@ def _rate_limit_backoff_s() -> int:
 
 
 def reset_missing_product_cache_for_tests() -> None:
-    """Clear Coinbase product caches for focused tests."""
+    """Clear Coinbase public-provider caches and backoffs for focused tests."""
+    global _CIRCUIT_FAILS
+    global _CIRCUIT_OPEN_UNTIL
+    global _CIRCUIT_LAST_LOG
     global _PRODUCT_CATALOG_IDS
     global _PRODUCT_CATALOG_EXPIRES_AT
     global _PRODUCT_CATALOG_RETRY_AFTER
@@ -194,6 +197,10 @@ def reset_missing_product_cache_for_tests() -> None:
     with _RATE_LIMIT_LOCK:
         _RATE_LIMIT_OPEN_UNTIL = 0.0
         _RATE_LIMIT_LAST_LOG = 0.0
+    with _CIRCUIT_LOCK:
+        _CIRCUIT_FAILS = 0
+        _CIRCUIT_OPEN_UNTIL = 0.0
+        _CIRCUIT_LAST_LOG = 0.0
 
 
 def _product_not_found(exc: requests.RequestException) -> bool:

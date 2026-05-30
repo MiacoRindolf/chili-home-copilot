@@ -200,3 +200,17 @@ def test_catalog_429_does_not_fall_through_to_product_request(monkeypatch):
 
     assert coinbase_ohlcv.get_quote("BTC-USD") is None
     assert calls == [f"{coinbase_ohlcv._COINBASE_EXCHANGE_API_BASE_URL}/products"]
+
+
+def test_reset_missing_product_cache_for_tests_clears_provider_circuit() -> None:
+    with coinbase_ohlcv._CIRCUIT_LOCK:
+        coinbase_ohlcv._CIRCUIT_FAILS = 4
+        coinbase_ohlcv._CIRCUIT_OPEN_UNTIL = coinbase_ohlcv.time.time() + 900.0
+        coinbase_ohlcv._CIRCUIT_LAST_LOG = coinbase_ohlcv.time.time()
+
+    coinbase_ohlcv.reset_missing_product_cache_for_tests()
+
+    with coinbase_ohlcv._CIRCUIT_LOCK:
+        assert coinbase_ohlcv._CIRCUIT_FAILS == 0
+        assert coinbase_ohlcv._CIRCUIT_OPEN_UNTIL == 0.0
+        assert coinbase_ohlcv._CIRCUIT_LAST_LOG == 0.0
