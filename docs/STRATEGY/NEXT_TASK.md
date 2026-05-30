@@ -1,16 +1,16 @@
-# NEXT_TASK: f-position-identity-phase-5l-contract-hardening
+# NEXT_TASK: f-position-identity-phase-5l-b-reader-allowlist-canary
 
 STATUS: PENDING
 
 ## Goal
 
-Make the post-rename contracts explicit before any attempt to retire the
-`trading_trades` compatibility view.
+Add a guardrail that prevents new raw live-reader SQL from being introduced
+against the `trading_trades` compatibility view.
 
-Phase 5K closed successfully: every safe aggregate live reader was moved behind
-an envelope flag and promoted, and the final closeout audit found no remaining
-blind single-reader cutover worth doing. The next risk is contract confusion,
-not data parity.
+Phase 5L-A moved the two low-risk reader candidates (`attribution_service.py`
+closed-pattern stats and `cost_aware_gate.py` TCA usable-sample counts) to the
+semantic management-envelope relation. The next risk is drift: future code
+adding another direct `FROM trading_trades` live reader.
 
 ## Current State
 
@@ -31,7 +31,7 @@ Live flags currently promoted:
 - `CHILI_PHASE5K_POSITION_INTEGRITY_USE_ENVELOPES=true`
 - `CHILI_PHASE5K_ALPHA_PORTFOLIO_GATE_USE_ENVELOPES=true`
 
-Fresh evidence from the Phase 5K-I closeout:
+Fresh evidence after Phase 5L-A:
 
 ```text
 Phase 5K-A: COMPLETE_POSITIVE, 6/6 checks, 0 mismatches
@@ -41,17 +41,19 @@ Phase 5I:   COMPLETE_POSITIVE, 20 fresh decisions, 20 fresh envelopes,
 
 ## Work Shape
 
-1. Add a small management-envelope reader contract module or extend the existing
-   helper module so common reads do not hand-write relation names.
-2. Convert low-risk reporting/analytics readers that still directly read
-   `trading_trades`, starting with:
-   - `attribution_service.py` closed-pattern live stats
-   - `cost_aware_gate.py` TCA usable-sample backing count
-3. Add canaries that block new raw live-reader SQL against `trading_trades`
-   outside allow-listed compatibility/migration/test/history files.
+1. Add a focused test/canary that scans runtime Python files for raw live-reader
+   SQL using `FROM trading_trades` or `JOIN trading_trades`.
+2. Build an explicit allow-list for:
+   - migrations
+   - tests
+   - docs/scripts/history
+   - compatibility contracts
+   - writer/order/broker/reconcile paths
+   - trade-id semantic readers that still need a separate API migration
+3. Ensure the canary fails for any new non-allow-listed live reader.
 4. Leave broker/order/reconcile writer paths alone unless they are migrated
    behind explicit envelope/position APIs.
-5. Re-run Phase 5K-A and Phase 5I after each small slice.
+5. Re-run Phase 5K-A and Phase 5I.
 
 ## Guardrails
 
@@ -59,6 +61,7 @@ Phase 5I:   COMPLETE_POSITIVE, 20 fresh decisions, 20 fresh envelopes,
 - Do not rename the `Trade` ORM class in this phase.
 - Do not search-replace writer/order/broker/reconcile code.
 - Do not absorb unrelated dirty worktree files.
+- Do not make the allow-list broad enough to hide new live-reader drift.
 - Preserve the three-layer model:
   - `trading_decisions`: immutable entry intent
   - `trading_management_envelopes`: mutable management envelope
