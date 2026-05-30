@@ -29,6 +29,10 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ...models.trading import ScanPattern
+from .management_envelopes import (
+    LEGACY_TRADES_COMPAT_RELATION,
+    MANAGEMENT_ENVELOPES_RELATION,
+)
 from .realized_pnl_sql import trade_return_fraction_sql
 
 logger = logging.getLogger(__name__)
@@ -59,8 +63,8 @@ BROKER_RISK_PROBATION_DEFAULT_MIN_CPCV_SHARPE = 1.0
 BROKER_RISK_PROBATION_DEFAULT_MIN_REALIZED_TRADES = 5
 PRIORITY_RECERT_PATTERN_IDS_SETTING = "brain_recert_queue_priority_pattern_ids"
 PHASE5K_ALPHA_PORTFOLIO_GATE_ENV = "CHILI_PHASE5K_ALPHA_PORTFOLIO_GATE_USE_ENVELOPES"
-_ALPHA_PORTFOLIO_GATE_COMPAT_RELATION = "trading_trades"
-_ALPHA_PORTFOLIO_GATE_ENVELOPE_RELATION = "trading_management_envelopes"
+_ALPHA_PORTFOLIO_GATE_COMPAT_RELATION = LEGACY_TRADES_COMPAT_RELATION
+_ALPHA_PORTFOLIO_GATE_ENVELOPE_RELATION = MANAGEMENT_ENVELOPES_RELATION
 
 
 def _truthy_flag(value: Any) -> bool:
