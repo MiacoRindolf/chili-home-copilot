@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from sqlalchemy import text
@@ -12,20 +12,102 @@ from sqlalchemy.orm import Session
 from .ledger import enqueue_outcome_event, enqueue_work_event
 
 
+def _safe_evidence_value(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _refresh_open_backtest_request_payload(
+    db: Session,
+    *,
+    dedupe_key: str,
+    source: str,
+    payload: dict[str, Any],
+) -> int | None:
+    """Refresh queued duplicate backtest work with newer evidence context."""
+    from ....models.trading import BrainWorkEvent
+
+    row = (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.dedupe_key == dedupe_key)
+        .filter(BrainWorkEvent.status.in_(("pending", "retry_wait")))
+        .order_by(BrainWorkEvent.created_at.asc())
+        .first()
+    )
+    if row is None:
+        return None
+
+    base = dict(row.payload or {}) if isinstance(row.payload, dict) else {}
+    original_source = str(base.get("source") or source)
+    merged = {**base, **payload}
+
+    old_evidence = _safe_evidence_value(base.get("expected_evidence_value"))
+    new_evidence = _safe_evidence_value(payload.get("expected_evidence_value"))
+    if old_evidence is not None or new_evidence is not None:
+        merged["expected_evidence_value"] = round(
+            max(old_evidence or 0.0, new_evidence or 0.0),
+            6,
+        )
+
+    merged["source"] = original_source
+    if original_source != source:
+        sources = {
+            original_source,
+            source,
+            *[
+                str(item)
+                for item in (base.get("sources") or [])
+                if str(item or "").strip()
+            ],
+        }
+        merged["sources"] = sorted(sources)
+        merged["latest_source"] = source
+
+    row.payload = merged
+    row.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    db.flush()
+    return int(row.id)
+
+
 def emit_backtest_requested_for_pattern(
     db: Session,
     scan_pattern_id: int,
     *,
     source: str,
+    asset_class: str | None = None,
+    expected_evidence_value: float | None = None,
+    payload: dict[str, Any] | None = None,
 ) -> int | None:
     """Emit ``backtest_requested`` — authoritative when newly mined or operator-boosted."""
     dedupe_key = f"bt_req:pattern:{int(scan_pattern_id)}"
-    return enqueue_work_event(
+    payload_dict = dict(payload or {})
+    payload_dict["scan_pattern_id"] = int(scan_pattern_id)
+    payload_dict["source"] = source
+    if asset_class:
+        payload_dict["asset_class"] = str(asset_class)
+    evidence_value = _safe_evidence_value(expected_evidence_value)
+    if evidence_value is not None:
+        payload_dict["expected_evidence_value"] = round(evidence_value, 6)
+    event_id = enqueue_work_event(
         db,
         event_type="backtest_requested",
         dedupe_key=dedupe_key,
-        payload={"scan_pattern_id": int(scan_pattern_id), "source": source},
+        payload=payload_dict,
         lease_scope="backtest",
+    )
+    if event_id is not None:
+        return event_id
+    if len(payload_dict) <= 2:
+        return None
+    return _refresh_open_backtest_request_payload(
+        db,
+        dedupe_key=dedupe_key,
+        source=source,
+        payload=payload_dict,
     )
 
 

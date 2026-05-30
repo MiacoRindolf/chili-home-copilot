@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 # ``_INPUT_GATE_TTL`` seconds. Safety rails still run on every return.
 _INPUT_GATE_MAX = 512
 _INPUT_GATE_TTL = 300
+_PROMPT_VERSION = "pattern-adjustment-v2"
 
 _input_gate_lock = threading.Lock()
 _input_gate_cache: "OrderedDict[str, tuple[float, 'AdjustmentRecommendation']]" = OrderedDict()
@@ -58,19 +59,29 @@ def _gate_key(
     trade_id: Any,
     ticker: str,
     pattern_name: str,
+    pattern_description: str,
+    health_summary: str,
+    health_delta: float | None,
     current_price: float,
+    entry_price: float,
     health_score: float,
     pnl_pct: float | None,
     current_stop: float | None,
     current_target: float | None,
+    pattern_stop: float | None,
+    pattern_target: float | None,
     trade_plan_health: Any,
 ) -> str:
     step = _price_step(current_price)
     price_b = _round_bucket(current_price, step)
     health_b = _round_bucket(health_score, 0.05)
+    health_delta_b = _round_bucket(health_delta, 0.05) if health_delta is not None else None
     pnl_b = _round_bucket(pnl_pct, 0.5) if pnl_pct is not None else None
+    entry_b = _round_bucket(entry_price, step)
     stop_b = _round_bucket(current_stop, step) if current_stop else None
     target_b = _round_bucket(current_target, step) if current_target else None
+    pattern_stop_b = _round_bucket(pattern_stop, step) if pattern_stop else None
+    pattern_target_b = _round_bucket(pattern_target, step) if pattern_target else None
 
     plan_sig = None
     if trade_plan_health is not None:
@@ -86,16 +97,35 @@ def _gate_key(
             plan_sig = None
 
     return repr((
+        _PROMPT_VERSION,
         str(trade_id or ""),
         (ticker or "").upper(),
         pattern_name or "",
+        _material_text_sig(pattern_description),
+        _material_text_sig(health_summary),
         price_b,
+        entry_b,
         health_b,
+        health_delta_b,
         pnl_b,
         stop_b,
         target_b,
+        pattern_stop_b,
+        pattern_target_b,
         plan_sig,
     ))
+
+
+def _material_text_sig(value: Any) -> str:
+    text = " ".join(str(value or "").split())
+    if not text:
+        return ""
+    try:
+        import hashlib
+
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+    except Exception:
+        return text[:120]
 
 
 def _gate_get(key: str) -> "AdjustmentRecommendation | None":
@@ -336,11 +366,17 @@ def get_adjustment(
         trade_id=trade_id,
         ticker=ticker,
         pattern_name=pattern_name,
+        pattern_description=pattern_description,
+        health_summary=health_summary,
+        health_delta=health_delta,
         current_price=current_price,
+        entry_price=entry_price,
         health_score=health_score,
         pnl_pct=pnl_pct,
         current_stop=current_stop,
         current_target=current_target,
+        pattern_stop=pattern_stop,
+        pattern_target=pattern_target,
         trade_plan_health=trade_plan_health,
     )
     cached = _gate_get(gate_key)

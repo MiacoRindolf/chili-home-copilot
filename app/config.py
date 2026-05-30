@@ -4121,8 +4121,11 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_ALLOW_PILOT_PROMOTED_LIVE"),
     )
+    # Recert debt means the pilot has not proven the evidence surface the
+    # broker-risk lane needs. Keep it observation-only unless an operator
+    # deliberately reopens this older bootstrap escape hatch.
     chili_pilot_promoted_allow_bootstrap_recert_live: bool = Field(
-        default=True,
+        default=False,
         validation_alias=AliasChoices("CHILI_PILOT_PROMOTED_ALLOW_BOOTSTRAP_RECERT_LIVE"),
     )
     chili_autotrader_block_live_on_capital_fallback: bool = Field(

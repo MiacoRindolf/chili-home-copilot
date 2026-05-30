@@ -86,3 +86,28 @@ def test_mechanical_trade_plan_normalizes_parser_indicator_aliases():
     } in invalidations
     assert any(item["indicator"] == "vwap" for item in invalidations)
     assert any(item["indicator"] == "volume_ratio" for item in monitoring)
+
+
+def test_mechanical_trade_plan_accepts_common_indicator_aliases():
+    plan = extract_trade_plan_mechanical(
+        pattern_conditions=[
+            {"indicator": "close", "op": ">", "ref": "ema20"},
+            {"indicator": "rsi", "op": ">", "value": 55},
+            {"indicator": "ema21", "op": ">", "ref": "sma200"},
+            {"indicator": "relative_volume", "op": ">=", "value": 1.4},
+        ],
+        entry_price=100.0,
+        stop_loss=94.0,
+        target_price=115.0,
+        current_price=101.0,
+        indicators={"price": 101.0, "ema_20": 99.0, "rsi_14": 61.0, "volume_ratio": 1.6},
+    )
+
+    invalidations = plan["invalidation_conditions"]
+    monitoring = plan["monitoring_signals"]
+    indicators = {item["indicator"] for item in invalidations}
+
+    assert {"price", "rsi_14", "ema_21"}.issubset(indicators)
+    assert any(item.get("ref") == "ema_20" for item in invalidations)
+    assert any(item.get("ref") == "sma_200" for item in invalidations)
+    assert any(item["indicator"] == "volume_ratio" for item in monitoring)

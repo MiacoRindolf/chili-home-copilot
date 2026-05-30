@@ -220,7 +220,8 @@ def extract_trade_plan_mechanical(
         "price", "sma_20", "sma_50", "ema_20", "ema_50", "ema_100", "ema_200",
         "rsi_14", "macd_hist", "macd", "macd_signal", "adx", "atr", "obv",
         "mfi", "vwap", "bb_pct", "bb_pct_b", "volume_ratio", "stochastic_k",
-        "dist_to_resistance_pct", "high_watermark",
+        "dist_to_resistance_pct", "high_watermark", "ema_9", "ema_21",
+        "sma_100", "sma_200",
     }
 
     n_cond = len(pattern_conditions or [])
@@ -450,6 +451,22 @@ def _normalize_trade_plan_indicator(indicator: Any) -> str:
     """Map parser/scanner aliases onto trade-plan evaluator indicator keys."""
     key = str(indicator or "").strip()
     aliases = {
+        "close": "price",
+        "close_price": "price",
+        "last": "price",
+        "last_price": "price",
+        "rsi": "rsi_14",
+        "rsi14": "rsi_14",
+        "ema9": "ema_9",
+        "ema21": "ema_21",
+        "ema20": "ema_20",
+        "ema50": "ema_50",
+        "ema100": "ema_100",
+        "ema200": "ema_200",
+        "sma20": "sma_20",
+        "sma50": "sma_50",
+        "sma100": "sma_100",
+        "sma200": "sma_200",
         "rel_vol": "volume_ratio",
         "relative_volume": "volume_ratio",
         "rvol": "volume_ratio",

@@ -558,6 +558,16 @@ def _order_filled_size(order_normalized: Any) -> float:
     return 0.0
 
 
+def _remaining_after_fill(t: Trade, filled_size: float) -> float | None:
+    requested = _as_float(getattr(t, "quantity", None))
+    if requested is not None and requested > 0.0:
+        return max(0.0, requested - max(0.0, filled_size))
+    current_remaining = _as_float(getattr(t, "remaining_quantity", None))
+    if current_remaining is not None:
+        return max(0.0, current_remaining)
+    return None
+
+
 def _latest_rule_snapshot(db: Session, t: Trade) -> dict[str, Any]:
     try:
         row = (
@@ -654,18 +664,38 @@ def _try_maker_first_fallback(
     filled_size = _order_filled_size(order_normalized)
     if filled_size > 0.0:
         t.filled_quantity = max(float(t.filled_quantity or 0.0), filled_size)
-        qty = _as_float(t.quantity) or 0.0
-        t.remaining_quantity = max(0.0, qty - filled_size) if qty > 0.0 else None
+        t.remaining_quantity = _remaining_after_fill(t, filled_size)
         t.broker_status = (getattr(order_normalized, "status", None) or "partially_filled").lower()
         t.last_broker_sync = datetime.utcnow()
+        if t.remaining_quantity is not None and t.remaining_quantity <= 0.0:
+            t.status = "open"
+            t.broker_status = "filled"
+            _update_entry_execution(
+                t,
+                maker_first_fallback_decision="partial_fill_complete",
+                maker_first_partial_fill_size=filled_size,
+                maker_first_remaining_after_partial=0.0,
+                maker_first_fallback_checked_at=now.isoformat(),
+            )
+            db.commit()
+            return "maker_first_partial_fill_complete"
+        elapsed = _elapsed_since_submit(t, now)
         _update_entry_execution(
             t,
             maker_first_fallback_decision="partial_fill_deferred",
             maker_first_partial_fill_size=filled_size,
+            maker_first_remaining_after_partial=t.remaining_quantity,
             maker_first_fallback_checked_at=now.isoformat(),
         )
+        if elapsed is None or elapsed < _maker_first_fallback_timeout():
+            db.commit()
+            return "maker_first_partial_fill_deferred"
+        _update_entry_execution(
+            t,
+            maker_first_fallback_decision="partial_fill_timeout_reprice",
+            maker_first_partial_fill_timeout_seconds=int(elapsed.total_seconds()),
+        )
         db.commit()
-        return "maker_first_partial_fill_deferred"
 
     try:
         bbo, _fresh = adapter.get_best_bid_ask(t.ticker)

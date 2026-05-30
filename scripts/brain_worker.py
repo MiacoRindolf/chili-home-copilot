@@ -78,6 +78,9 @@ DEFAULT_CYCLE_INTERVAL = 5  # minutes between cycles when queue empty (override 
 FAST_BACKTEST_BATCH_ENV = "CHILI_BRAIN_FAST_BACKTEST_BATCH"
 FAST_BACKTEST_BATCH_SOURCE_ENV = "env"
 FAST_BACKTEST_BATCH_SOURCE_MODE_DEFAULT = "mode_default"
+FAST_BACKTEST_DURABLE_DISPATCH_ROUNDS_ENV = (
+    "CHILI_BRAIN_FAST_BACKTEST_DURABLE_DISPATCH_ROUNDS"
+)
 FAST_BACKTEST_MODE_LEAN_CYCLE = "lean-cycle"
 FAST_BACKTEST_MODE_BACKTEST = "backtest"
 FAST_BACKTEST_DEFAULT_BATCH_BY_MODE = {
@@ -85,6 +88,7 @@ FAST_BACKTEST_DEFAULT_BATCH_BY_MODE = {
     FAST_BACKTEST_MODE_BACKTEST: 30,
 }
 FAST_BACKTEST_DEFAULT_BATCH = 0
+FAST_BACKTEST_DURABLE_DISPATCH_ROUNDS_DEFAULT = 2
 FAST_BACKTEST_RATE_SECONDS_PER_MINUTE = 60.0
 FAST_BACKTEST_RATE_MIN_ELAPSED_SECONDS = 0.001
 
@@ -164,6 +168,13 @@ def _fast_backtest_batch_size() -> int:
     )
 
 
+def _durable_backtest_dispatch_round_limit() -> int:
+    return _parse_non_negative_int(
+        os.environ.get(FAST_BACKTEST_DURABLE_DISPATCH_ROUNDS_ENV),
+        FAST_BACKTEST_DURABLE_DISPATCH_ROUNDS_DEFAULT,
+    )
+
+
 def _should_start_independent_fast_backtest_loop(mode: str, independent_loop: bool) -> bool:
     return (
         bool(independent_loop)
@@ -196,6 +207,133 @@ def _fast_backtest_queue_status_snapshot() -> dict[str, object]:
         except Exception:
             pass
         db.close()
+
+
+def _due_brain_work_backtest_requests_snapshot() -> dict[str, object]:
+    """Return due durable backtest work that should outrank generic queue drain."""
+    db = SessionLocal()
+    try:
+        from sqlalchemy import text
+
+        rows = db.execute(
+            text(
+                """
+                SELECT
+                    COALESCE(payload->>'source', '') AS source,
+                    COUNT(*) AS n,
+                    MIN(created_at) AS oldest
+                  FROM brain_work_events
+                 WHERE domain = 'trading'
+                   AND event_kind = 'work'
+                   AND event_type = 'backtest_requested'
+                   AND status IN ('pending', 'retry_wait')
+                   AND next_run_at <= CURRENT_TIMESTAMP
+                 GROUP BY COALESCE(payload->>'source', '')
+                 ORDER BY n DESC, source ASC
+                """
+            )
+        ).fetchall()
+        by_source = {str(row.source or "unknown"): int(row.n or 0) for row in rows}
+        total = sum(by_source.values())
+        oldest = min(
+            (row.oldest for row in rows if getattr(row, "oldest", None) is not None),
+            default=None,
+        )
+        return {
+            "due": total,
+            "by_source": by_source,
+            "oldest": oldest.isoformat() if oldest is not None else None,
+        }
+    except Exception as exc:
+        logger.debug("[brain:subtask] brain_work backtest status unavailable: %s", exc)
+        return {"due": 0, "by_source": {}, "oldest": None, "error": str(exc)[:240]}
+    finally:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+
+
+def _run_due_brain_work_backtest_dispatch_round(user_id: int | None) -> dict[str, object]:
+    """Run one focused durable-work dispatch round for due backtest requests."""
+    db = SessionLocal()
+    try:
+        from app.services.trading.brain_work.dispatcher import run_brain_work_dispatch_round
+
+        summary = run_brain_work_dispatch_round(
+            db,
+            user_id=user_id,
+            max_backtest=1,
+            max_exec_feedback=0,
+            max_edge_reliability=0,
+            max_recert_rescue=0,
+            max_exit_variant=0,
+            max_provenance=0,
+            max_mine=0,
+            max_cpcv_gate=4,
+            max_promote=0,
+            max_trade_close=0,
+            run_thin_evidence_sweep=False,
+            run_market_snapshots_watchdog=False,
+        )
+        db.commit()
+        return dict(summary or {})
+    except Exception as exc:
+        logger.warning("[brain:subtask] durable backtest dispatch failed: %s", exc)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return {"ok": False, "processed": 0, "claimed": 0, "errors": [str(exc)]}
+    finally:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+
+
+def _drain_due_brain_work_backtest_requests(
+    user_id: int | None,
+    *,
+    max_rounds: int,
+    due_before: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Run bounded durable backtest work before generic queue exploration."""
+    first_snapshot = due_before or _due_brain_work_backtest_requests_snapshot()
+    summaries: list[dict[str, object]] = []
+    total_processed = 0
+    total_claimed = 0
+    errors: list[str] = []
+    current = first_snapshot
+
+    for _ in range(max(0, int(max_rounds))):
+        due = int(current.get("due") or 0)
+        if due <= 0:
+            break
+        summary = _run_due_brain_work_backtest_dispatch_round(user_id)
+        summaries.append(summary)
+        total_processed += int(summary.get("processed") or 0)
+        total_claimed += int(summary.get("claimed") or 0)
+        errors.extend(str(err) for err in (summary.get("errors") or []))
+        if summary.get("ok") is False:
+            break
+        if int(summary.get("claimed") or 0) <= 0:
+            break
+        current = _due_brain_work_backtest_requests_snapshot()
+
+    due_after = current if summaries else first_snapshot
+    return {
+        "ok": not errors,
+        "rounds": len(summaries),
+        "processed": total_processed,
+        "claimed": total_claimed,
+        "errors": errors,
+        "due_before": first_snapshot,
+        "due_after": due_after,
+        "summaries": summaries,
+    }
 
 
 def _lock_file_for_mode(mode: str | None) -> Path:
@@ -690,6 +828,52 @@ def _run_subtask_fast_backtest(status: "BrainWorkerStatus") -> dict:
     uid = getattr(_s, "brain_default_user_id", None)
     queue_before = _fast_backtest_queue_status_snapshot()
     pending_before = int(queue_before.get("pending") or 0)
+    durable_backtests = _due_brain_work_backtest_requests_snapshot()
+    durable_due = int(durable_backtests.get("due") or 0)
+    if durable_due > 0:
+        drain = _drain_due_brain_work_backtest_requests(
+            uid,
+            max_rounds=_durable_backtest_dispatch_round_limit(),
+            due_before=durable_backtests,
+        )
+        durable_after = drain.get("due_after") if isinstance(drain, dict) else {}
+        logger.info(
+            "[brain:subtask] fast_backtest skipped generic queue - drained durable "
+            "backtest work due_before=%d due_after=%s rounds=%s processed=%s "
+            "claimed=%s by_source=%s oldest=%s",
+            durable_due,
+            (durable_after or {}).get("due") if isinstance(durable_after, dict) else "-",
+            drain.get("rounds") if isinstance(drain, dict) else "-",
+            drain.get("processed") if isinstance(drain, dict) else "-",
+            drain.get("claimed") if isinstance(drain, dict) else "-",
+            durable_backtests.get("by_source"),
+            durable_backtests.get("oldest"),
+        )
+        return {
+            "completed": int(drain.get("processed") or 0) if isinstance(drain, dict) else 0,
+            "errors": len(drain.get("errors") or []) if isinstance(drain, dict) else 0,
+            "skipped": True,
+            "skip_reason": "brain_work_backtest_requests_due",
+            "durable_backtest_due": durable_due,
+            "durable_backtest_due_after": (
+                int((durable_after or {}).get("due") or 0)
+                if isinstance(durable_after, dict)
+                else durable_due
+            ),
+            "durable_backtest_by_source": durable_backtests.get("by_source", {}),
+            "durable_dispatch_rounds": drain.get("rounds") if isinstance(drain, dict) else 0,
+            "durable_dispatch_processed": drain.get("processed") if isinstance(drain, dict) else 0,
+            "durable_dispatch_claimed": drain.get("claimed") if isinstance(drain, dict) else 0,
+            "pending_before": pending_before,
+            "pending_after": pending_before,
+            "promotion_path_debt_pending_before": queue_before.get(
+                "promotion_path_debt_pending"
+            ),
+            "promotion_path_debt_pending_after": queue_before.get(
+                "promotion_path_debt_pending"
+            ),
+            "drain_rate_per_min": 0.0,
+        }
     batch_size = _fast_backtest_batch_size()
     if batch_size <= 0:
         log_fn = logger.warning if pending_before > 0 else logger.info
@@ -1349,15 +1533,26 @@ def _maybe_run_neural_activation_batch() -> None:
         db.close()
 
 
-def _maybe_run_brain_work_batch() -> None:
+def _brain_work_dispatch_kwargs_for_mode(mode: str | None) -> dict:
+    """Mode-specific guardrails for durable work dispatch."""
+    mode_key = (mode or "").strip().lower()
+    if mode_key == "backtest":
+        return {
+            "max_mine": 0,
+            "run_market_snapshots_watchdog": False,
+        }
+    return {}
+
+
+def _maybe_run_brain_work_batch(**dispatch_kwargs) -> None:
     """Durable work ledger: dispatch round (execution_feedback_digest + backtest_requested)."""
     db = SessionLocal()
     try:
         from app.config import settings as _settings
-        from app.services.trading.brain_work.dispatcher import run_brain_work_batch
+        from app.services.trading.brain_work.dispatcher import run_brain_work_dispatch_round
 
         _uid = getattr(_settings, "brain_default_user_id", None)
-        summary = run_brain_work_batch(db, user_id=_uid)
+        summary = run_brain_work_dispatch_round(db, user_id=_uid, **dispatch_kwargs)
         # Always log once per call so production logs prove dispatch ran before cycle (even when idle).
         logger.info(
             "[brain] work ledger dispatch round processed=%s claimed=%s per_type=%s errors=%s",
@@ -1959,7 +2154,7 @@ def _run_backtest_loop(args: argparse.Namespace, status: BrainWorkerStatus) -> N
             break
         status.status = "running"
         try:
-            _maybe_run_brain_work_batch()
+            _maybe_run_brain_work_batch(**_brain_work_dispatch_kwargs_for_mode("backtest"))
         except Exception as _we:
             logger.warning("[brain] work ledger in backtest mode skipped: %s", _we)
         try:

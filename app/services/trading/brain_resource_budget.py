@@ -22,6 +22,7 @@ class BrainResourceBudget:
     miner_error_trip: int = 5
     ohlcv_used: int = 0
     miner_rows_used: int = 0
+    miner_rows_rejected: int = 0
     pattern_inject_used: int = 0
     miner_errors: dict[str, int] = field(default_factory=dict)
     circuit_open: set[str] = field(default_factory=set)
@@ -79,16 +80,25 @@ class BrainResourceBudget:
             take = min(n, room)
             self.miner_rows_used += take
             if take < n:
-                self.exhausted_log.setdefault(
-                    "miner_rows",
-                    f"cap={self.miner_rows_cap}",
-                )
-                logger.warning(
-                    "[brain.budget] miner_rows cap: accepted %s of %s rows",
-                    take,
-                    n,
-                )
+                rejected = n - take
+                self.miner_rows_rejected += rejected
+                if "miner_rows" not in self.exhausted_log:
+                    self.exhausted_log["miner_rows"] = (
+                        f"cap={self.miner_rows_cap}"
+                    )
+                    logger.warning(
+                        "[brain.budget] miner_rows cap: accepted %s of %s rows",
+                        take,
+                        n,
+                    )
             return take
+
+    def remaining_miner_rows(self) -> int | None:
+        """Return remaining mined-row slots, or None when the cap is unlimited."""
+        with self._lock:
+            if self.miner_rows_cap <= 0:
+                return None
+            return max(0, self.miner_rows_cap - self.miner_rows_used)
 
     def try_pattern_inject(self) -> bool:
         with self._lock:
@@ -124,6 +134,12 @@ class BrainResourceBudget:
                 "ohlcv_used": self.ohlcv_used,
                 "miner_rows_cap": self.miner_rows_cap,
                 "miner_rows_used": self.miner_rows_used,
+                "miner_rows_rejected": self.miner_rows_rejected,
+                "miner_rows_remaining": (
+                    None
+                    if self.miner_rows_cap <= 0
+                    else max(0, self.miner_rows_cap - self.miner_rows_used)
+                ),
                 "pattern_inject_cap": self.pattern_inject_cap,
                 "pattern_inject_used": self.pattern_inject_used,
                 "miner_errors": dict(self.miner_errors),

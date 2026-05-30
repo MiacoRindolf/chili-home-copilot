@@ -80,8 +80,8 @@ _GATEWAY_EXACT_CACHEABLE_PURPOSES = frozenset({
     "smart_pick_stream",
     "pattern_research_extract",
 })
-_GATEWAY_EXACT_CACHE_TTL_SEC = 600
-_GATEWAY_EXACT_CACHE_MAX_ENTRIES = 128
+_GATEWAY_EXACT_CACHE_DEFAULT_TTL_SEC = 600
+_GATEWAY_EXACT_CACHE_DEFAULT_MAX_ENTRIES = 128
 
 
 class _GatewayInflight:
@@ -102,9 +102,37 @@ def reset_gateway_cache() -> None:
         _gateway_exact_inflight.clear()
 
 
+def _gateway_exact_cache_config() -> tuple[int, int]:
+    """Use the shared deterministic LLM cache knobs for gateway replay too."""
+    try:
+        max_entries = int(
+            getattr(
+                settings,
+                "llm_cache_max_entries",
+                _GATEWAY_EXACT_CACHE_DEFAULT_MAX_ENTRIES,
+            )
+            or 0
+        )
+        ttl_seconds = int(
+            getattr(
+                settings,
+                "llm_cache_ttl_seconds",
+                _GATEWAY_EXACT_CACHE_DEFAULT_TTL_SEC,
+            )
+            or 0
+        )
+    except Exception:
+        max_entries = _GATEWAY_EXACT_CACHE_DEFAULT_MAX_ENTRIES
+        ttl_seconds = _GATEWAY_EXACT_CACHE_DEFAULT_TTL_SEC
+    return max(0, max_entries), max(0, ttl_seconds)
+
+
 def _gateway_cache_allowed(policy: PurposePolicy) -> bool:
+    max_entries, ttl_seconds = _gateway_exact_cache_config()
     return (
-        bool(policy.enabled)
+        max_entries > 0
+        and ttl_seconds > 0
+        and bool(policy.enabled)
         and not bool(policy.high_stakes)
         and policy.routing_strategy == "passthrough"
         and policy.purpose in _GATEWAY_EXACT_CACHEABLE_PURPOSES
@@ -165,12 +193,15 @@ def _gateway_cache_snapshot(result: dict[str, Any] | None) -> dict[str, Any] | N
 
 def _gateway_cache_get(key: str) -> dict[str, Any] | None:
     now = time.monotonic()
+    _, ttl_seconds = _gateway_exact_cache_config()
+    if ttl_seconds <= 0:
+        return None
     with _gateway_exact_cache_lock:
         entry = _gateway_exact_cache.get(key)
         if not entry:
             return None
         stored_at, result = entry
-        if now - stored_at > _GATEWAY_EXACT_CACHE_TTL_SEC:
+        if now - stored_at > ttl_seconds:
             _gateway_exact_cache.pop(key, None)
             return None
         _gateway_exact_cache.move_to_end(key)
@@ -181,10 +212,13 @@ def _gateway_cache_put(key: str, result: dict[str, Any] | None) -> dict[str, Any
     snapshot = _gateway_cache_snapshot(result)
     if snapshot is None:
         return None
+    max_entries, ttl_seconds = _gateway_exact_cache_config()
+    if max_entries <= 0 or ttl_seconds <= 0:
+        return None
     with _gateway_exact_cache_lock:
         _gateway_exact_cache[key] = (time.monotonic(), snapshot)
         _gateway_exact_cache.move_to_end(key)
-        while len(_gateway_exact_cache) > _GATEWAY_EXACT_CACHE_MAX_ENTRIES:
+        while len(_gateway_exact_cache) > max_entries:
             _gateway_exact_cache.popitem(last=False)
     return dict(snapshot)
 
@@ -209,7 +243,8 @@ def _gateway_inflight_finish(key: str, result: dict[str, Any] | None) -> None:
 
 
 def _gateway_inflight_wait(inflight: _GatewayInflight) -> dict[str, Any] | None:
-    inflight.event.wait(_GATEWAY_EXACT_CACHE_TTL_SEC)
+    _, ttl_seconds = _gateway_exact_cache_config()
+    inflight.event.wait(max(1, ttl_seconds or _GATEWAY_EXACT_CACHE_DEFAULT_TTL_SEC))
     return dict(inflight.result) if inflight.result is not None else None
 
 

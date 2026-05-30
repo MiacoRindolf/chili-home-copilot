@@ -37,7 +37,7 @@ _MECHANICAL_INDICATORS: tuple[tuple[str, str], ...] = (
         "dist_to_resistance_pct",
     ),
     (r"\bvcp(?:\s+count)?\b", "vcp_count"),
-    (r"\bprice\b", "price"),
+    (r"\b(?:price|close|last|last\s+price|closing\s+price)\b", "price"),
     (r"\bvwap\b", "vwap_reclaim"),
 )
 
@@ -142,7 +142,8 @@ def _mechanical_condition_from_segment(segment: str) -> dict[str, Any] | None:
         return {"indicator": "macd_hist", "op": "<", "value": 0.0}
     if re.search(
         r"\b(?:volume\s+spike|volume\s+breakout|high\s+volume|"
-        r"surging\s+volume|rvol\s+spike)\b",
+        r"surging\s+volume|rising\s+volume|increasing\s+volume|"
+        r"volume\s+expansion|expanding\s+volume|rvol\s+spike)\b",
         segment,
     ):
         return {"indicator": "rel_vol", "op": ">=", "value": 1.5}

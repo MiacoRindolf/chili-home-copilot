@@ -30,6 +30,10 @@ _DEAD_RECOVERY_DEFAULT_LIMIT = 8
 _DEAD_RECOVERY_DEFAULT_MAX_PER_EVENT = 3
 _DEAD_RECOVERY_DEFAULT_DELAY_SECONDS = 10
 _DEAD_DEDUPE_SUPPRESSED = object()
+_DEAD_RECOVERY_CAP_RESET_PAYLOAD_KEY = "transient_dead_recovery_cap_reset_count"
+_DEAD_RECOVERY_TOTAL_PAYLOAD_KEY = "transient_dead_recovery_total_count"
+_DEAD_RECOVERY_DEFAULT_CAP_RESET_DELAY_SECONDS = 3600
+_DEAD_RECOVERY_DEFAULT_MAX_CAP_RESETS = 2
 
 
 def brain_work_ledger_enabled() -> bool:
@@ -42,6 +46,17 @@ def _expected_evidence_value(ev: BrainWorkEvent) -> float:
         return float(payload.get("expected_evidence_value") or 0.0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _transient_recovery_claim_rank(ev: BrainWorkEvent) -> int:
+    payload = ev.payload if isinstance(ev.payload, dict) else {}
+    if (
+        str(ev.event_type or "") == "backtest_requested"
+        and str(ev.status or "") == "processing"
+        and _DEAD_RECOVERY_PAYLOAD_KEY in payload
+    ):
+        return 0
+    return 1
 
 
 def enqueue_work_event(
@@ -236,6 +251,13 @@ _CLAIM_SQL_WORK_ONLY = text(
             THEN (payload->>'expected_evidence_value')::double precision
             ELSE 0.0
           END DESC,
+          CASE
+            WHEN event_type = 'backtest_requested'
+             AND status = 'retry_wait'
+             AND payload::jsonb ? 'transient_dead_recovery_count'
+            THEN 0
+            ELSE 1
+          END ASC,
           next_run_at ASC,
           created_at ASC
         LIMIT :lim
@@ -269,6 +291,13 @@ _CLAIM_SQL_ANY_KIND = text(
             THEN (payload->>'expected_evidence_value')::double precision
             ELSE 0.0
           END DESC,
+          CASE
+            WHEN event_type = 'backtest_requested'
+             AND status = 'retry_wait'
+             AND payload::jsonb ? 'transient_dead_recovery_count'
+            THEN 0
+            ELSE 1
+          END ASC,
           next_run_at ASC,
           created_at ASC
         LIMIT :lim
@@ -313,6 +342,7 @@ def claim_work_batch(
     rows.sort(
         key=lambda ev: (
             -_expected_evidence_value(ev),
+            _transient_recovery_claim_rank(ev),
             ev.next_run_at,
             ev.created_at,
             int(ev.id),
@@ -501,20 +531,150 @@ def coalesce_duplicate_open_work(
                 keep_id=keep_id,
             )
 
+    # Generic operator boosts are exploration work; recert rescue is a targeted
+    # graduation unblocker. If both are open for the same pattern, keep the
+    # recert row and retire any non-running generic boost so the backtest queue
+    # spends its next slot on the blocker that can actually move live eligibility.
+    recert_by_pattern: dict[int, BrainWorkEvent] = {}
+    for group_rows in recert_groups.values():
+        group_rows.sort(key=_recert_rank)
+        keep = group_rows[0]
+        payload = keep.payload if isinstance(keep.payload, dict) else {}
+        try:
+            pid = int(payload.get("scan_pattern_id") or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        if pid > 0:
+            existing = recert_by_pattern.get(pid)
+            if existing is None or _recert_rank(keep) < _recert_rank(existing):
+                recert_by_pattern[pid] = keep
+
+    for row in rows:
+        if row.status not in ("pending", "retry_wait"):
+            continue
+        if str(row.event_type or "") != "backtest_requested":
+            continue
+        payload = row.payload if isinstance(row.payload, dict) else {}
+        if str(payload.get("source") or "") != "operator_boost":
+            continue
+        try:
+            pid = int(payload.get("scan_pattern_id") or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        recert_keep = recert_by_pattern.get(pid)
+        if recert_keep is None:
+            continue
+        _retire_duplicate(
+            row,
+            reason="operator_boost_backtest_superseded_by_recert_rescue",
+            keep_id=int(recert_keep.id),
+        )
+
+    # Exit-variant refreshes may be born from asset-sliced reliability, cash
+    # deployment, or execution-block evidence. The current ScanPattern evolution
+    # handler still forks children at the parent-pattern level, so running more
+    # than one open exit refresh for the same parent just repeats the same
+    # lineage mutation pressure and burns scarce queue slots. Keep one open row
+    # per pattern, preferring any in-flight work and otherwise the row with the
+    # highest expected evidence value / best calibrated edge.
+    exit_variant_groups: dict[int, list[BrainWorkEvent]] = {}
+    for row in rows:
+        if row.status not in ("pending", "processing", "retry_wait"):
+            continue
+        if str(row.event_type or "") != "exit_variant_refresh":
+            continue
+        payload = row.payload if isinstance(row.payload, dict) else {}
+        try:
+            pid = int(payload.get("scan_pattern_id") or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        if pid <= 0:
+            continue
+        exit_variant_groups.setdefault(pid, []).append(row)
+
+    def _exit_variant_edge_value(row: BrainWorkEvent) -> float:
+        payload = row.payload if isinstance(row.payload, dict) else {}
+        for key in (
+            "calibrated_ev_after_cost_pct",
+            "calibrated_ev_pct",
+            "expected_net_pct",
+        ):
+            try:
+                return float(payload.get(key))
+            except (TypeError, ValueError):
+                continue
+        return 0.0
+
+    def _exit_variant_rank(row: BrainWorkEvent) -> tuple[int, float, float, int, float, int]:
+        status_rank = 0 if row.status == "processing" else 1
+        updated = row.updated_at or row.created_at or now
+        return (
+            status_rank,
+            -_expected_evidence_value(row),
+            -_exit_variant_edge_value(row),
+            int(row.attempts or 0),
+            -updated.timestamp(),
+            -int(row.id),
+        )
+
+    for group_rows in exit_variant_groups.values():
+        if len(group_rows) <= 1:
+            continue
+        group_rows.sort(key=_exit_variant_rank)
+        keep = group_rows[0]
+        keep_id = int(keep.id)
+        reason = (
+            "exit_variant_pattern_superseded_by_processing"
+            if keep.status == "processing"
+            else "exit_variant_pattern_superseded"
+        )
+        for row in group_rows[1:]:
+            if row.status == "processing":
+                continue
+            _retire_duplicate(row, reason=reason, keep_id=keep_id)
+
     # Snapshot-triggered mining is global-universe work. When snapshot batches
-    # arrive faster than a mine can finish, queued older batches mostly replay
-    # the same expensive discovery pass. Keep the freshest queued batch and
-    # leave any in-flight mine alone.
+    # arrive faster than a mine can finish, queued batches inside the handler's
+    # obsolete-event grace window mostly replay the same expensive discovery
+    # pass. Keep only queued batches beyond that coverage horizon.
     queued_mine_rows = [
         row
         for row in rows
         if str(row.event_type or "") == "market_snapshots_batch"
         and row.status in ("pending", "retry_wait")
     ]
+    processing_mine_rows = [
+        row
+        for row in rows
+        if str(row.event_type or "") == "market_snapshots_batch"
+        and row.status == "processing"
+    ]
 
     def _mine_rank(row: BrainWorkEvent) -> tuple[float, int, int]:
         created = row.created_at or row.updated_at or datetime.min
         return (-created.timestamp(), int(row.attempts or 0), -int(row.id))
+
+    if processing_mine_rows and queued_mine_rows:
+        processing_mine_rows.sort(key=_mine_rank)
+        newest_processing = processing_mine_rows[0]
+        newest_processing_at = newest_processing.created_at or newest_processing.updated_at or datetime.min
+        try:
+            grace_seconds = max(
+                0,
+                int(getattr(settings, "brain_mine_handler_obsolete_event_grace_seconds", 900)),
+            )
+        except (TypeError, ValueError):
+            grace_seconds = 900
+        processing_coverage_until = newest_processing_at + timedelta(seconds=grace_seconds)
+        for row in list(queued_mine_rows):
+            row_created = row.created_at or row.updated_at or datetime.min
+            if row_created <= processing_coverage_until:
+                _retire_duplicate(
+                    row,
+                    reason="market_snapshot_batch_superseded_by_processing",
+                    keep_id=int(newest_processing.id),
+                )
+                queued_mine_rows.remove(row)
 
     if len(queued_mine_rows) > 1:
         queued_mine_rows.sort(key=_mine_rank)
@@ -566,6 +726,60 @@ def _dead_recovery_delay_seconds(value: int | None = None) -> int:
             _DEAD_RECOVERY_DEFAULT_DELAY_SECONDS,
         )
     )
+
+
+def _dead_recovery_cap_reset_delay_seconds(value: int | None = None) -> int:
+    return int(
+        value
+        if value is not None
+        else getattr(
+            settings,
+            "brain_work_dead_letter_recovery_cap_reset_delay_seconds",
+            _DEAD_RECOVERY_DEFAULT_CAP_RESET_DELAY_SECONDS,
+        )
+    )
+
+
+def _dead_recovery_max_cap_resets(value: int | None = None) -> int:
+    return int(
+        value
+        if value is not None
+        else getattr(
+            settings,
+            "brain_work_dead_letter_recovery_max_cap_resets",
+            _DEAD_RECOVERY_DEFAULT_MAX_CAP_RESETS,
+        )
+    )
+
+
+def _dead_recovery_cap_reset_updates(
+    row: BrainWorkEvent,
+    *,
+    now: datetime,
+    payload: dict[str, Any],
+    recovery_count: int,
+    delay_seconds: int,
+    max_resets: int,
+) -> dict[str, Any] | None:
+    if max_resets <= 0:
+        return None
+    reset_count = _payload_int(payload, _DEAD_RECOVERY_CAP_RESET_PAYLOAD_KEY)
+    if reset_count >= max_resets:
+        return None
+    last_dead_at = row.updated_at or row.processed_at or row.created_at
+    if last_dead_at is None:
+        return None
+    if last_dead_at.tzinfo is not None:
+        last_dead_at = last_dead_at.replace(tzinfo=None)
+    if (now - last_dead_at).total_seconds() < max(0, delay_seconds):
+        return None
+    total_count = _payload_int(payload, _DEAD_RECOVERY_TOTAL_PAYLOAD_KEY)
+    return {
+        _DEAD_RECOVERY_CAP_RESET_PAYLOAD_KEY: reset_count + 1,
+        _DEAD_RECOVERY_TOTAL_PAYLOAD_KEY: total_count + max(0, recovery_count),
+        "transient_dead_recovery_cap_reset_at": now.isoformat(),
+        "transient_dead_recovery_prior_count": recovery_count,
+    }
 
 
 def _recover_retryable_dead_row(
@@ -639,15 +853,39 @@ def _reuse_retryable_dead_dedupe(
 
     row_payload = dict(row.payload or {}) if isinstance(row.payload, dict) else {}
     recovery_count = _payload_int(row_payload, _DEAD_RECOVERY_PAYLOAD_KEY)
+    max_recoveries = _dead_recovery_max_per_event()
+    payload_updates = dict(payload)
     now = datetime.utcnow()
+    if recovery_count >= max(0, max_recoveries):
+        reset_updates = _dead_recovery_cap_reset_updates(
+            row,
+            now=now,
+            payload=row_payload,
+            recovery_count=recovery_count,
+            delay_seconds=_dead_recovery_cap_reset_delay_seconds(),
+            max_resets=_dead_recovery_max_cap_resets(),
+        )
+        if reset_updates is None:
+            logger.info(
+                "%s suppressed duplicate retryable-dead dedupe type=%s id=%s dedupe=%s "
+                "recovery_count=%s",
+                LOG_PREFIX,
+                event_type,
+                row.id,
+                dedupe_key,
+                recovery_count,
+            )
+            return _DEAD_DEDUPE_SUPPRESSED
+        recovery_count = 0
+        payload_updates.update(reset_updates)
     recovered = _recover_retryable_dead_row(
         row,
         now=now,
         marker=marker,
         recovery_count=recovery_count,
-        max_recoveries=_dead_recovery_max_per_event(),
+        max_recoveries=max_recoveries,
         delay_seconds=_dead_recovery_delay_seconds(),
-        payload_updates=payload,
+        payload_updates=payload_updates,
         lease_scope=lease_scope,
         max_attempts=max_attempts,
     )
@@ -663,15 +901,6 @@ def _reuse_retryable_dead_dedupe(
         db.flush()
         return int(row.id)
 
-    logger.info(
-        "%s suppressed duplicate retryable-dead dedupe type=%s id=%s dedupe=%s "
-        "recovery_count=%s",
-        LOG_PREFIX,
-        event_type,
-        row.id,
-        dedupe_key,
-        recovery_count,
-    )
     return _DEAD_DEDUPE_SUPPRESSED
 
 
@@ -747,6 +976,7 @@ def recover_retryable_dead_work(
     recovered_by_marker: dict[str, int] = {}
     skipped_non_retryable = 0
     skipped_max_recoveries = 0
+    recovered_after_cap_reset = 0
     skipped_duplicate_dedupe = 0
     open_dedupe_keys = {
         (str(event_type), str(dedupe_key))
@@ -782,27 +1012,36 @@ def recover_retryable_dead_work(
             continue
         payload = dict(row.payload or {}) if isinstance(row.payload, dict) else {}
         recovery_count = _payload_int(payload, _DEAD_RECOVERY_PAYLOAD_KEY)
+        payload_updates: dict[str, Any] | None = None
         if recovery_count >= max(0, max_recoveries):
-            skipped_max_recoveries += 1
-            continue
+            payload_updates = _dead_recovery_cap_reset_updates(
+                row,
+                now=now,
+                payload=payload,
+                recovery_count=recovery_count,
+                delay_seconds=_dead_recovery_cap_reset_delay_seconds(),
+                max_resets=_dead_recovery_max_cap_resets(),
+            )
+            if payload_updates is None:
+                skipped_max_recoveries += 1
+                continue
+            recovery_count = 0
+            recovered_after_cap_reset += 1
 
-        max_attempts = max(1, int(row.max_attempts or 1))
-        payload[_DEAD_RECOVERY_PAYLOAD_KEY] = recovery_count + 1
-        payload["transient_dead_recovered_at"] = now.isoformat()
-        payload["transient_dead_recovery_marker"] = marker
-        row.payload = payload
-        row.status = "retry_wait"
-        row.attempts = min(int(row.attempts or 0), max_attempts - 1)
-        row.max_attempts = max_attempts
-        row.lease_holder = None
-        row.lease_expires_at = None
-        row.processed_at = None
-        row.next_run_at = now + timedelta(seconds=max(0, delay))
-        row.updated_at = now
-        recovered_ids.append(int(row.id))
-        if dedupe_key is not None:
-            recovered_dedupe_keys.add(dedupe_key)
-        recovered_by_marker[marker] = recovered_by_marker.get(marker, 0) + 1
+        recovered = _recover_retryable_dead_row(
+            row,
+            now=now,
+            marker=marker,
+            recovery_count=recovery_count,
+            max_recoveries=max_recoveries,
+            delay_seconds=delay,
+            payload_updates=payload_updates,
+        )
+        if recovered:
+            recovered_ids.append(int(row.id))
+            if dedupe_key is not None:
+                recovered_dedupe_keys.add(dedupe_key)
+            recovered_by_marker[marker] = recovered_by_marker.get(marker, 0) + 1
 
     db.flush()
     return {
@@ -814,6 +1053,7 @@ def recover_retryable_dead_work(
         "recovered_by_marker": recovered_by_marker,
         "skipped_non_retryable": skipped_non_retryable,
         "skipped_max_recoveries": skipped_max_recoveries,
+        "recovered_after_cap_reset": recovered_after_cap_reset,
         "skipped_duplicate_dedupe": skipped_duplicate_dedupe,
     }
 

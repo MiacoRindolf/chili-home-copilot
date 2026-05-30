@@ -36,6 +36,38 @@ def test_extract_patterns_uses_mechanical_parser_without_llm(monkeypatch):
     assert {"indicator": "rel_vol", "op": ">=", "value": 1.5} in result[0]["conditions"]
 
 
+def test_extract_patterns_uses_close_alias_mechanically_without_llm(monkeypatch):
+    def fail_call_llm(*_args, **_kwargs):
+        raise AssertionError("close alias pattern should not spend LLM tokens")
+
+    monkeypatch.setattr(researcher, "call_llm", fail_call_llm)
+
+    result = researcher._extract_patterns_from_content(
+        "A clean breakout is close above EMA20 with RSI > 55 and relative volume >= 1.5.",
+        existing_names=set(),
+    )
+
+    assert len(result) == 1
+    assert result[0]["source"] == "mechanical"
+    assert {"indicator": "price", "op": ">", "ref": "ema_20"} in result[0]["conditions"]
+
+
+def test_extract_patterns_uses_rising_volume_mechanically_without_llm(monkeypatch):
+    def fail_call_llm(*_args, **_kwargs):
+        raise AssertionError("rising volume pattern should not spend LLM tokens")
+
+    monkeypatch.setattr(researcher, "call_llm", fail_call_llm)
+
+    result = researcher._extract_patterns_from_content(
+        "A trend breakout is close above EMA20 with RSI > 55 and rising volume.",
+        existing_names=set(),
+    )
+
+    assert len(result) == 1
+    assert result[0]["source"] == "mechanical"
+    assert {"indicator": "rel_vol", "op": ">=", "value": 1.5} in result[0]["conditions"]
+
+
 def test_extract_patterns_uses_reversed_ma_notation_without_llm(monkeypatch):
     def fail_call_llm(*_args, **_kwargs):
         raise AssertionError("reversed MA notation should be mechanical")
@@ -79,7 +111,7 @@ def test_extract_patterns_uses_cache_friendly_prompt_and_system(monkeypatch):
     monkeypatch.setattr(researcher, "call_llm", fake_call_llm)
 
     result = researcher._extract_patterns_from_content(
-        "The setup is an RSI breakout with price above EMA 20 and rising volume.",
+        "The setup is an RSI breakout with improving breadth and catalyst confirmation.",
         existing_names=set(),
     )
 
