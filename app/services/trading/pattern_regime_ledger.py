@@ -11,7 +11,7 @@ ledger writer is missing.
 
 This module:
 
-* Joins closed `trading_trades` with `trading_ticker_regime_snapshots` on
+* Joins closed live management envelopes with `trading_ticker_regime_snapshots` on
   ``(ticker, as_of_date)`` so each trade gets the regime label that was
   live when the trade ran.
 * Aggregates per ``(pattern_id, regime_dimension="ticker_regime",
@@ -382,7 +382,7 @@ def build_ledger(
 
 # Backtest-history sourced regime queries. Joins trading_pattern_trades (which
 # has years of backtested per-trade outcomes with regime context) instead of
-# trading_trades (live only). Each row uses as_of_ts as the time anchor and
+# live management envelopes. Each row uses as_of_ts as the time anchor and
 # outcome_return_pct directly as ret_pct.
 BACKTEST_REGIME_DIMENSIONS: dict[str, str] = {
     "ticker_regime": (

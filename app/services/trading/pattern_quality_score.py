@@ -11,7 +11,7 @@ two real-OOS signals (directional WR and realized PnL).
 Composite quality scoring for scan patterns. Reads CPCV / DSR / PBO
 evidence from ``scan_patterns``, the rolling-30 directional WR from
 ``pattern_directional_quality_v`` (Phase 2), realized PnL stats from
-``trading_trades`` (window settings-driven; default trailing 90d),
+live management envelopes (window settings-driven; default trailing 90d),
 and computes a decay factor on-the-fly from
 ``pattern_alert_directional_outcome``. Persists the result to
 ``scan_patterns.quality_composite_score`` (mig 237).

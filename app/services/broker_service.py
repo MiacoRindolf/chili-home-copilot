@@ -1541,7 +1541,7 @@ def _resolve_close_exit_price(ticker: str) -> float | None:
 #
 # Per docs/DESIGN/POSITION_IDENTITY.md § 8.1: the position layer ships
 # in shadow mode -- broker_sync writes to trading_positions /
-# trading_position_events alongside today's trading_trades writes; NO
+# trading_position_events alongside today's live-envelope writes; NO
 # READERS depend on the new tables for decisions in Phase 1. Failures
 # in this code path log + continue; they NEVER raise to the surrounding
 # sync_positions_to_db loop (the additive-shadow contract).

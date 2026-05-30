@@ -9,7 +9,7 @@ calibrated probability with a cost-aware payoff in fraction-of-notional space:
 
 All costs are in fraction-of-notional. ``p`` is the calibrated win probability
 for this (asset_class, regime) bucket, produced by isotonic regression over
-realized outcomes sourced from ``trading_trades`` and ``trading_paper_trades``.
+realized outcomes sourced from live management envelopes and paper trades.
 
 Rollout discipline (identical ladder to the prediction mirror):
     off -> shadow -> compare -> authoritative
