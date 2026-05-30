@@ -48,6 +48,28 @@ def _expected_evidence_value(ev: BrainWorkEvent) -> float:
         return 0.0
 
 
+def _payload_float(ev: BrainWorkEvent, key: str) -> float:
+    payload = ev.payload if isinstance(ev.payload, dict) else {}
+    try:
+        return float(payload.get(key) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _recert_rescue_refresh_rank(ev: BrainWorkEvent) -> tuple[int, float, float, int, float, int]:
+    """Sort key for choosing one open recert refresh per pattern/asset."""
+    status_rank = 0 if ev.status == "processing" else 1
+    updated = ev.updated_at or ev.created_at or datetime.min
+    return (
+        status_rank,
+        -_expected_evidence_value(ev),
+        -_payload_float(ev, "calibrated_ev_after_cost_pct"),
+        int(ev.attempts or 0),
+        -updated.timestamp(),
+        -int(ev.id or 0),
+    )
+
+
 def _transient_recovery_claim_rank(ev: BrainWorkEvent) -> int:
     payload = ev.payload if isinstance(ev.payload, dict) else {}
     if (
@@ -563,20 +585,10 @@ def coalesce_duplicate_open_work(
         asset = str(payload.get("asset_class") or "all").strip().lower() or "all"
         recert_refresh_groups.setdefault((pid, asset), []).append(row)
 
-    def _recert_refresh_rank(row: BrainWorkEvent) -> tuple[int, int, float, int]:
-        status_rank = 0 if row.status == "processing" else 1
-        updated = row.updated_at or row.created_at or datetime.min
-        return (
-            status_rank,
-            int(row.attempts or 0),
-            -updated.timestamp(),
-            -int(row.id),
-        )
-
     for group_rows in recert_refresh_groups.values():
         if len(group_rows) <= 1:
             continue
-        group_rows.sort(key=_recert_refresh_rank)
+        group_rows.sort(key=_recert_rescue_refresh_rank)
         keep_id = int(group_rows[0].id)
         for row in group_rows[1:]:
             if row.status == "processing":

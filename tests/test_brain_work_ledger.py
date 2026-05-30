@@ -8,6 +8,7 @@ from app.models.trading import BrainWorkEvent
 from app.services.trading.brain_work import ledger as ledger_mod
 from app.services.trading.brain_work.emitters import emit_backtest_requested_for_pattern
 from app.services.trading.brain_work.ledger import (
+    _recert_rescue_refresh_rank,
     claim_work_batch,
     coalesce_duplicate_open_work,
     enqueue_or_refresh_debounced_work,
@@ -763,6 +764,47 @@ def test_coalesce_duplicate_open_work_thins_recert_rescue_refresh_pattern_asset(
     assert rows[older].payload["duplicate_open_work_kept_event_id"] == newer
     assert rows[newer].status == "pending"
     assert rows[other_asset].status == "pending"
+
+
+def test_recert_rescue_refresh_rank_prefers_high_value_before_freshness() -> None:
+    now = datetime.utcnow()
+    low_fresh = BrainWorkEvent(
+        domain="trading",
+        event_type="recert_rescue_refresh",
+        event_kind="work",
+        dedupe_key="recert_rescue_refresh:p537:astock:fresh-low",
+        payload={
+            "scan_pattern_id": 537,
+            "asset_class": "stock",
+            "expected_evidence_value": 1.0,
+            "calibrated_ev_after_cost_pct": 0.1,
+        },
+        status="pending",
+        attempts=0,
+        created_at=now,
+        updated_at=now,
+    )
+    high_stale = BrainWorkEvent(
+        domain="trading",
+        event_type="recert_rescue_refresh",
+        event_kind="work",
+        dedupe_key="recert_rescue_refresh:p537:astock:stale-high",
+        payload={
+            "scan_pattern_id": 537,
+            "asset_class": "stock",
+            "expected_evidence_value": 5.0,
+            "calibrated_ev_after_cost_pct": 0.5,
+        },
+        status="pending",
+        attempts=0,
+        created_at=now - timedelta(minutes=5),
+        updated_at=now - timedelta(minutes=5),
+    )
+
+    assert sorted(
+        [low_fresh, high_stale],
+        key=_recert_rescue_refresh_rank,
+    ) == [high_stale, low_fresh]
 
 
 def test_coalesce_duplicate_open_work_prefers_recert_rescue_over_operator_boost(
