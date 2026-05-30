@@ -61,7 +61,14 @@ from ...config import (
     AUTOTRADER_SYNERGY_RETRY_MIN_LOOKBACK_MINUTES,
     settings,
 )
-from ...models.trading import AutoTraderRun, BreakoutAlert, PaperTrade, ScanPattern, Trade
+from ...models.trading import (
+    AutoTraderRun,
+    BrainWorkEvent,
+    BreakoutAlert,
+    PaperTrade,
+    ScanPattern,
+    Trade,
+)
 from .auto_trader_llm import run_revalidation_llm
 from .auto_trader_rules import (
     MANAGED_EDGE_GEOMETRY_SOURCE,
@@ -189,6 +196,20 @@ SHADOW_OBSERVATION_SIZING_MODE_BASE_RISK = "base_risk_notional"
 SHADOW_OBSERVATION_SIZING_MODE_FULL_DIAGNOSTICS = "full_diagnostics"
 SHADOW_OBSERVATION_DIAGNOSTIC_SIZING_SETTING = (
     "chili_autotrader_shadow_observation_diagnostic_sizing_enabled"
+)
+_RECENT_RECERT_FASTLANE_BLOCKER_ACTIONS = frozenset(
+    {
+        "inspect_recert_backtest_no_oos_evidence_keep_live_blocked",
+        "wait_for_recert_backtest_cooldown_keep_live_blocked",
+        "live_blocked_recert_debt_no_refresh",
+    }
+)
+_RECENT_RECERT_FASTLANE_BLOCKER_REASONS = frozenset(
+    {
+        "recent_recert_backtest_cooldown",
+        "recert_backtest_refresh_already_open",
+        "no_recert_refresh_needed",
+    }
 )
 SHADOW_OBSERVATION_EVIDENCE_NOTIONAL_SETTING = (
     "chili_autotrader_shadow_observation_evidence_notional_usd"
@@ -2204,6 +2225,13 @@ def _queue_recert_for_blocked_signal(
             "asset_class": asset_class,
         })
         return cooldown
+    blocker = _recent_recert_rescue_fastlane_blocker(db, pattern_id=pattern_id)
+    if blocker is not None:
+        blocker.update({
+            "signal_ticker": ticker,
+            "asset_class": asset_class,
+        })
+        return blocker
     recert_queue_result: dict[str, Any] = {}
     try:
         from .recert_queue_service import queue_scheduler
@@ -2367,6 +2395,66 @@ def _recert_signal_fastlane_cooldown(
         "backtest_priority": backtest_priority,
         "priority_bypass_floor": bypass_floor,
     }
+
+
+def _recent_recert_rescue_fastlane_blocker(
+    db: Session | None,
+    *,
+    pattern_id: int,
+) -> dict[str, Any] | None:
+    """Return the most recent diagnostic proving another fastlane write would churn."""
+    if db is None:
+        return None
+    try:
+        minutes = int(
+            getattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360)
+            or 0
+        )
+    except (TypeError, ValueError):
+        minutes = 360
+    if minutes <= 0:
+        return None
+    cutoff = datetime.utcnow() - timedelta(minutes=minutes)
+    try:
+        rows = (
+            db.query(BrainWorkEvent)
+            .filter(BrainWorkEvent.event_kind == "outcome")
+            .filter(BrainWorkEvent.event_type == "recert_rescue_diagnostic")
+            .filter(BrainWorkEvent.created_at >= cutoff)
+            .filter(BrainWorkEvent.payload["scan_pattern_id"].astext == str(int(pattern_id)))
+            .order_by(BrainWorkEvent.created_at.desc(), BrainWorkEvent.id.desc())
+            .limit(50)
+            .all()
+        )
+    except Exception:
+        logger.debug(
+            "[autotrader] recert fastlane blocker lookup failed pattern_id=%s",
+            pattern_id,
+            exc_info=True,
+        )
+        return None
+
+    for row in rows:
+        payload = row.payload if isinstance(row.payload, dict) else {}
+        refresh = payload.get("recert_backtest_refresh")
+        refresh_payload = refresh if isinstance(refresh, dict) else {}
+        action = str(payload.get("recommended_next_action") or "").strip().lower()
+        refresh_reason = str(refresh_payload.get("reason") or "").strip().lower()
+        if (
+            action in _RECENT_RECERT_FASTLANE_BLOCKER_ACTIONS
+            or refresh_reason in _RECENT_RECERT_FASTLANE_BLOCKER_REASONS
+        ):
+            return {
+                "queued": False,
+                "reason": "recent_recert_rescue_blocker_diagnostic",
+                "pattern_id": int(pattern_id),
+                "blocker_event_id": int(getattr(row, "id", 0) or 0),
+                "blocker_source": payload.get("source"),
+                "blocker_status": payload.get("recert_rescue_status"),
+                "blocker_next_action": payload.get("recommended_next_action"),
+                "blocker_refresh_reason": refresh_payload.get("reason"),
+            }
+    return None
 
 
 def _csv_tokens(raw: Any) -> frozenset[str]:

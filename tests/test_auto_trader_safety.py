@@ -1216,6 +1216,84 @@ def test_recert_signal_fastlane_respects_recent_backtest_cooldown(monkeypatch):
     assert out["backtest_priority"] == 250
 
 
+def test_recert_signal_fastlane_respects_recent_recert_blocker_diagnostic(monkeypatch):
+    settings = _minimal_settings(1)
+    settings.brain_queue_recert_cooldown_enabled = True
+    settings.brain_queue_recert_cooldown_minutes = 360
+    settings.brain_work_cash_deployment_noop_cooldown_minutes = 360
+    monkeypatch.setattr(at_mod, "settings", settings)
+    monkeypatch.setattr(
+        "app.services.trading.recert_queue_service.queue_scheduler",
+        lambda *a, **k: pytest.fail("blocker diagnostic should skip recert queue writes"),
+    )
+    monkeypatch.setattr(
+        "app.services.trading.edge_reliability.emit_targeted_profitability_work",
+        lambda *a, **k: pytest.fail("blocker diagnostic should skip work events"),
+    )
+
+    class _Query:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def order_by(self, *args, **kwargs):
+            return self
+
+        def limit(self, value):
+            assert value == 50
+            return self
+
+        def all(self):
+            return [
+                SimpleNamespace(
+                    id=18820,
+                    payload={
+                        "source": "recert_rescue_refresh",
+                        "scan_pattern_id": 1256,
+                        "recert_rescue_status": "soft_blocked",
+                        "recommended_next_action": (
+                            "wait_for_recert_backtest_cooldown_keep_live_blocked"
+                        ),
+                        "recert_backtest_refresh": {
+                            "reason": "recent_recert_backtest_cooldown",
+                            "requested": False,
+                        },
+                    },
+                )
+            ]
+
+    db = SimpleNamespace(query=lambda model: _Query())
+    alert = SimpleNamespace(
+        id=777002,
+        scan_pattern_id=1256,
+        ticker="BTC-USD",
+        asset_type="crypto",
+    )
+    pattern = SimpleNamespace(
+        name="Blocked recert diagnostic",
+        last_backtest_at=datetime.utcnow() - timedelta(days=2),
+        backtest_priority=250,
+        recert_reason="missing_oos_recert",
+        lifecycle_stage="pilot_promoted",
+        promotion_status=None,
+    )
+
+    out = at_mod._queue_recert_for_blocked_signal(
+        db,
+        alert=alert,
+        pattern=pattern,
+        reason="pattern_recert_required",
+    )
+
+    assert out["queued"] is False
+    assert out["reason"] == "recent_recert_rescue_blocker_diagnostic"
+    assert out["pattern_id"] == 1256
+    assert out["signal_ticker"] == "BTC-USD"
+    assert out["asset_class"] == "crypto"
+    assert out["blocker_event_id"] == 18820
+    assert out["blocker_source"] == "recert_rescue_refresh"
+    assert out["blocker_refresh_reason"] == "recent_recert_backtest_cooldown"
+
+
 def test_shadow_stock_fastlane_boosts_pattern_for_positive_edge(monkeypatch):
     settings = _minimal_settings(1)
     monkeypatch.setattr(at_mod, "settings", settings)
