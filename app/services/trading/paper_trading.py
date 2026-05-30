@@ -32,6 +32,7 @@ from sqlalchemy.orm import Session
 
 from ...config import settings
 from ...models.trading import BreakoutAlert, PaperTrade, ScanPattern
+from .options.contracts import OPTION_CONTRACT_MULTIPLIER, parse_contract_quantity
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ DEFAULT_SLIPPAGE_PCT = 0.05
 DEFAULT_ATR_STOP_MULT = 2.0
 DEFAULT_ATR_TARGET_MULT = 3.0
 TRAILING_STOP_ACTIVATION_R = 1.0  # activate trailing after 1R move
-OPTION_CONTRACT_MULTIPLIER = 100.0
+MAX_PAPER_SLIPPAGE_FRACTION = 0.95
 PAPER_TRADE_CAPACITY_SCOPE_ALL = "all"
 PAPER_TRADE_CAPACITY_SCOPE_AUTOTRADER_SHADOW = "autotrader_shadow"
 PAPER_TRADE_STATUS_CANCELLED = "cancelled"
@@ -78,7 +79,7 @@ PAPER_SHADOW_STAGE_PRIORITY = {
 }
 
 
-def _positive_float(value: Any) -> float | None:
+def _finite_float(value: Any) -> float | None:
     if isinstance(value, bool):
         return None
     try:
@@ -87,7 +88,26 @@ def _positive_float(value: Any) -> float | None:
         out = float(value)
     except (TypeError, ValueError):
         return None
-    return out if math.isfinite(out) and out > 0 else None
+    return out if math.isfinite(out) else None
+
+
+def _positive_float(value: Any) -> float | None:
+    out = _finite_float(value)
+    return out if out is not None and out > 0 else None
+
+
+def _paper_positive_int(value: Any, *, default: int = 1) -> int:
+    out = _finite_float(value)
+    if out is None:
+        return default
+    return max(1, int(out))
+
+
+def _paper_nonnegative_int(value: Any, *, default: int = 0) -> int:
+    out = _finite_float(value)
+    if out is None:
+        return default
+    return max(0, int(out))
 
 
 def _paper_side(direction: Any) -> str:
@@ -149,16 +169,22 @@ def _paper_contract_multiplier(pt: PaperTrade) -> float:
 
 
 def _option_paper_levels(entry_price: float) -> tuple[float, float]:
-    stop_pct = float(getattr(settings, "chili_autotrader_options_exit_stop_pct", 50.0) or 50.0)
-    target_pct = float(getattr(settings, "chili_autotrader_options_exit_tp_pct", 100.0) or 100.0)
+    stop_pct = _finite_float(
+        getattr(settings, "chili_autotrader_options_exit_stop_pct", 50.0)
+    )
+    target_pct = _finite_float(
+        getattr(settings, "chili_autotrader_options_exit_tp_pct", 100.0)
+    )
+    if stop_pct is None or stop_pct < 0.0:
+        stop_pct = 50.0
+    if target_pct is None or target_pct < 0.0:
+        target_pct = 100.0
     stop_price = max(float(entry_price) * max(0.0, 1.0 - stop_pct / 100.0), 0.01)
     target_price = float(entry_price) * (1.0 + max(0.0, target_pct) / 100.0)
     return round(stop_price, 4), round(target_price, 4)
 
 
 def _option_signal_quantity(signal_json: Any) -> int | None:
-    from .options.contracts import parse_contract_quantity
-
     meta = _paper_option_meta_from_signal(signal_json)
     return parse_contract_quantity(meta.get("quantity"))
 
@@ -259,6 +285,66 @@ def _paper_directional_reward_amount(
     else:
         reward = target - entry
     return reward if reward > 0 else None
+
+
+def _paper_mark_pnl_pct(pt: PaperTrade, price: Any) -> float | None:
+    entry = _positive_float(getattr(pt, "entry_price", None))
+    mark = _positive_float(price)
+    if entry is None or mark is None:
+        return None
+    if _paper_side(getattr(pt, "direction", None)) == "short":
+        return (entry - mark) / entry * 100.0
+    return (mark - entry) / entry * 100.0
+
+
+def _paper_tightened_stop_level(
+    *,
+    current_stop: Any,
+    new_stop: Any,
+    price: Any,
+    direction: Any,
+) -> float | None:
+    stop = _positive_float(new_stop)
+    mark = _positive_float(price)
+    if stop is None or mark is None:
+        return None
+    current = _positive_float(current_stop)
+    if _paper_side(direction) == "short":
+        if stop <= mark:
+            return None
+        if current is None or stop < current:
+            return stop
+        return None
+    if stop >= mark:
+        return None
+    if current is None or stop > current:
+        return stop
+    return None
+
+
+def _paper_loosened_target_level(
+    *,
+    current_target: Any,
+    new_target: Any,
+    price: Any,
+    direction: Any,
+) -> float | None:
+    target = _positive_float(new_target)
+    mark = _positive_float(price)
+    if target is None or mark is None:
+        return None
+    current = _positive_float(current_target)
+    if _paper_side(direction) == "short":
+        if target >= mark:
+            return None
+        if current is None or target < current:
+            return target
+        return None
+    if target <= mark:
+        return None
+    if current is None or target > current:
+        return target
+    return None
 
 
 PAPER_SHADOW_DECISION_PRIORITY = {
@@ -387,15 +473,28 @@ def _compute_atr_levels(
         return None, None, None
 
 
+def _paper_slippage_fraction() -> float:
+    raw = getattr(settings, "backtest_spread", DEFAULT_SLIPPAGE_PCT / 100)
+    frac = _finite_float(raw)
+    if frac is None or frac < 0.0:
+        frac = DEFAULT_SLIPPAGE_PCT / 100
+    return min(frac, MAX_PAPER_SLIPPAGE_FRACTION)
+
+
 def _apply_slippage(price: float, direction: str, is_entry: bool) -> float:
     """Apply simulated slippage to a fill price."""
-    spread_pct = float(getattr(settings, "backtest_spread", DEFAULT_SLIPPAGE_PCT / 100) or 0.0) * 100
-    slip = price * spread_pct / 100
+    price_f = _positive_float(price)
+    if price_f is None:
+        raise ValueError(f"invalid slippage price:{price!r}")
+    slip = price_f * _paper_slippage_fraction()
     side = _paper_side(direction)
     if is_entry:
-        return price + slip if side == "long" else price - slip
+        out = price_f + slip if side == "long" else price_f - slip
     else:
-        return price - slip if side == "long" else price + slip
+        out = price_f - slip if side == "long" else price_f + slip
+    if out <= 0.0 or not math.isfinite(out):
+        raise ValueError(f"invalid slippage result:{out!r}")
+    return out
 
 
 def _paper_stop_exit_reference_price(
@@ -473,9 +572,38 @@ def open_paper_trade(
     side = _paper_side(direction)
     atr_val = None
     is_option_paper = _is_option_signal(signal_json)
+    normalized_entry = _positive_float(entry_price)
+    normalized_qty: float | int | None
+    if is_option_paper:
+        normalized_qty = parse_contract_quantity(quantity)
+    else:
+        normalized_qty = _positive_float(quantity)
+    if normalized_entry is None or normalized_qty is None:
+        logger.info(
+            "[paper] Trade blocked for %s: invalid entry or quantity",
+            ticker,
+        )
+        return None
+    entry_price = normalized_entry
+    quantity = normalized_qty
+
+    if is_option_paper:
+        stop_price = (
+            _option_premium_level(stop_price, entry_price)
+            if stop_price is not None
+            else None
+        )
+        target_price = (
+            _option_premium_level(target_price, entry_price)
+            if target_price is not None
+            else None
+        )
+    else:
+        stop_price = _positive_float(stop_price)
+        target_price = _positive_float(target_price)
 
     if is_option_paper and (stop_price is None or target_price is None):
-        option_stop, option_target = _option_paper_levels(float(entry_price))
+        option_stop, option_target = _option_paper_levels(entry_price)
         if stop_price is None:
             stop_price = option_stop
         if target_price is None:
@@ -508,6 +636,20 @@ def open_paper_trade(
                     target_price = candidate if _positive_float(candidate) is not None else None
                 if target_price is None:
                     target_price = entry_price * (0.94 if side == "short" else 1.06)
+
+    if is_option_paper:
+        if _paper_directional_risk_amount(entry_price, stop_price, side) is None:
+            logger.info(
+                "[paper] Option trade blocked for %s: invalid premium stop",
+                ticker,
+            )
+            return None
+        if _paper_directional_reward_amount(entry_price, target_price, side) is None:
+            logger.info(
+                "[paper] Option trade blocked for %s: invalid premium target",
+                ticker,
+            )
+            return None
 
     fill_price = _apply_slippage(entry_price, side, is_entry=True)
 
@@ -791,9 +933,13 @@ def prune_autotrader_paper_shadow_capacity(
     This janitor is intentionally scoped to rows tagged as autotrader/shadow
     observations. It never touches the user's ordinary paper-trading positions.
     """
-    open_limit = max(1, int(max_open or 1))
-    target_open = max(0, open_limit - max(0, int(buffer or 0)))
-    age_limit_h = max(1.0, float(max_age_hours or 1))
+    open_limit = _paper_positive_int(max_open, default=1)
+    target_open = max(
+        0,
+        open_limit - _paper_nonnegative_int(buffer, default=0),
+    )
+    age_limit_raw = _finite_float(max_age_hours)
+    age_limit_h = max(1.0, age_limit_raw if age_limit_raw is not None else 1.0)
     now = datetime.utcnow()
 
     q = db.query(PaperTrade).filter(PaperTrade.status == "open")
@@ -935,20 +1081,29 @@ def _paper_dynamic_monitor_candidate(pt: PaperTrade) -> bool:
     )
 
 
+def _paper_dynamic_monitor_cooldown_minutes() -> int:
+    raw = getattr(settings, "chili_autotrader_paper_dynamic_monitor_cooldown_minutes", 5)
+    minutes = _finite_float(raw)
+    if minutes is None:
+        return 5
+    return max(0, int(minutes))
+
+
 def _paper_dynamic_near_stop_exit(pt: PaperTrade, price: float) -> dict[str, Any] | None:
     """Mirror the live plan-level monitor's near-stop risk trigger."""
-    stop = float(pt.stop_price or 0.0)
-    if stop <= 0 or price <= 0:
+    stop = _positive_float(getattr(pt, "stop_price", None))
+    price_f = _positive_float(price)
+    if stop is None or price_f is None:
         return None
-    side = (pt.direction or "long").lower()
+    side = _paper_side(getattr(pt, "direction", None))
     if side == "short":
-        if price < stop:
-            dist_pct = (stop - price) / stop * 100.0
+        if price_f < stop:
+            dist_pct = (stop - price_f) / stop * 100.0
         else:
             return None
     else:
-        if price > stop:
-            dist_pct = (price - stop) / stop * 100.0
+        if price_f > stop:
+            dist_pct = (price_f - stop) / stop * 100.0
         else:
             return None
     if 0 < dist_pct <= 2.0:
@@ -1030,10 +1185,7 @@ def _paper_dynamic_monitor_decision(
     monitor_meta = _as_dict(paper_meta.get("dynamic_monitor"))
 
     near_stop = _paper_dynamic_near_stop_exit(pt, price)
-    cooldown_min = int(
-        getattr(settings, "chili_autotrader_paper_dynamic_monitor_cooldown_minutes", 5)
-        or 0
-    )
+    cooldown_min = _paper_dynamic_monitor_cooldown_minutes()
     last_checked = _parse_utc_iso(monitor_meta.get("last_checked_at"))
     if cooldown_min > 0 and last_checked is not None and near_stop is None:
         age_s = (datetime.utcnow() - last_checked).total_seconds()
@@ -1156,11 +1308,7 @@ def _paper_dynamic_monitor_decision(
             sig_snap = build_signal_snapshot(
                 plan_health=plan_health,
                 condition_health=health,
-                pnl_pct=(
-                    ((price - float(pt.entry_price)) / float(pt.entry_price) * 100.0)
-                    if pt.entry_price
-                    else None
-                ),
+                pnl_pct=_paper_mark_pnl_pct(pt, price),
                 current_price=price,
                 stop_price=pt.stop_price or (alert.stop_loss if alert else None),
                 target_price=pt.target_price or (alert.target_price if alert else None),
@@ -1195,11 +1343,7 @@ def _paper_dynamic_monitor_decision(
                     primary = heuristic_adjustment(
                         plan_health=plan_health,
                         condition_health=health,
-                        pnl_pct=(
-                            ((price - float(pt.entry_price)) / float(pt.entry_price) * 100.0)
-                            if pt.entry_price
-                            else None
-                        ),
+                        pnl_pct=_paper_mark_pnl_pct(pt, price),
                         current_price=price,
                         current_stop=pt.stop_price,
                         current_target=pt.target_price,
@@ -1266,33 +1410,23 @@ def _paper_dynamic_monitor_decision(
 
     action = str(decision.get("action") or "hold")
     if action == "tighten_stop" and decision.get("new_stop") is not None:
-        try:
-            new_stop = float(decision["new_stop"])
-            side = (pt.direction or "long").lower()
-            current_stop = float(pt.stop_price or 0.0)
-            tightens = (
-                current_stop <= 0
-                or (side != "short" and current_stop < new_stop < price)
-                or (side == "short" and price < new_stop < current_stop)
-            )
-            if tightens:
-                pt.stop_price = round(new_stop, 4)
-        except (TypeError, ValueError):
-            pass
+        new_stop = _paper_tightened_stop_level(
+            current_stop=pt.stop_price,
+            new_stop=decision.get("new_stop"),
+            price=price,
+            direction=pt.direction,
+        )
+        if new_stop is not None:
+            pt.stop_price = round(new_stop, 4)
     elif action == "loosen_target" and decision.get("new_target") is not None:
-        try:
-            new_target = float(decision["new_target"])
-            side = (pt.direction or "long").lower()
-            current_target = float(pt.target_price or 0.0)
-            loosens = (
-                current_target <= 0
-                or (side != "short" and new_target > current_target)
-                or (side == "short" and 0 < new_target < current_target)
-            )
-            if loosens:
-                pt.target_price = round(new_target, 4)
-        except (TypeError, ValueError):
-            pass
+        new_target = _paper_loosened_target_level(
+            current_target=pt.target_price,
+            new_target=decision.get("new_target"),
+            price=price,
+            direction=pt.direction,
+        )
+        if new_target is not None:
+            pt.target_price = round(new_target, 4)
 
     _update_paper_dynamic_monitor_meta(
         pt,
@@ -1550,22 +1684,61 @@ def place_partial_close(
         return {"ok": False, "error": "live_partial_not_yet_supported"}
     if getattr(trade, "partial_taken", False):
         return {"ok": False, "error": "already_partialed"}
-    if not (0.0 < fraction < 1.0):
+    fraction_f = _finite_float(fraction)
+    if fraction_f is None or not (0.0 < fraction_f < 1.0):
         return {"ok": False, "error": f"invalid_fraction:{fraction}"}
 
-    qty_to_close = float(trade.quantity) * float(fraction)
+    current_qty = _positive_float(getattr(trade, "quantity", None))
+    if current_qty is None:
+        return {
+            "ok": False,
+            "error": f"computed_qty_non_positive:{getattr(trade, 'quantity', None)}",
+        }
+    if _is_option_paper_trade(trade):
+        option_qty = parse_contract_quantity(current_qty)
+        if option_qty is None:
+            return {
+                "ok": False,
+                "error": f"invalid_option_contract_quantity:{getattr(trade, 'quantity', None)}",
+            }
+        close_contracts = parse_contract_quantity(float(option_qty) * fraction_f)
+        remaining_contracts = (
+            option_qty - close_contracts
+            if close_contracts is not None
+            else None
+        )
+        if (
+            close_contracts is None
+            or remaining_contracts is None
+            or remaining_contracts <= 0
+            or parse_contract_quantity(remaining_contracts) is None
+        ):
+            return {
+                "ok": False,
+                "error": f"invalid_option_contract_partial:{fraction}",
+            }
+        qty_to_close = float(close_contracts)
+        remaining_qty = float(remaining_contracts)
+    else:
+        qty_to_close = current_qty * fraction_f
+        remaining_qty = current_qty - qty_to_close
     if qty_to_close <= 0:
         return {"ok": False, "error": f"computed_qty_non_positive:{qty_to_close}"}
+    if remaining_qty <= 0:
+        return {"ok": False, "error": f"computed_remaining_qty_non_positive:{remaining_qty}"}
 
     if current_price is None:
         mark_price = _paper_current_mark_price(trade, purpose="exit")
         if mark_price is None:
             return {"ok": False, "error": "no_quote"}
-        current_price = float(mark_price)
+        current_price = mark_price
+    current_price_f = _positive_float(current_price)
+    if current_price_f is None:
+        return {"ok": False, "error": f"invalid_current_price:{current_price}"}
 
-    fill_price = _apply_slippage(float(current_price), trade.direction, is_entry=False)
+    fill_price = _apply_slippage(current_price_f, trade.direction, is_entry=False)
 
-    trade.quantity = float(trade.quantity) - qty_to_close
+    trade.quantity = remaining_qty
     trade.partial_taken = True
     trade.partial_taken_at = datetime.utcnow()
     trade.partial_taken_qty = qty_to_close
@@ -1576,7 +1749,7 @@ def place_partial_close(
     logger.info(
         "[paper] Partial close %s %s qty=%.4f @ %.4f (frac=%.2f, remaining=%.4f)",
         trade.direction, trade.ticker,
-        qty_to_close, fill_price, fraction, trade.quantity,
+        qty_to_close, fill_price, fraction_f, trade.quantity,
     )
     return {"ok": True, "quantity": qty_to_close, "price": fill_price}
 
@@ -1585,7 +1758,12 @@ def _close_paper_trade(pt: PaperTrade, exit_price: float, reason: str) -> None:
     """Close a paper trade with P&L calculation."""
     entry_price = _positive_float(getattr(pt, "entry_price", None))
     close_price = _positive_float(exit_price)
-    quantity = _positive_float(getattr(pt, "quantity", None))
+    raw_quantity = getattr(pt, "quantity", None)
+    if _is_option_paper_trade(pt):
+        option_quantity = parse_contract_quantity(raw_quantity)
+        quantity = float(option_quantity) if option_quantity is not None else None
+    else:
+        quantity = _positive_float(raw_quantity)
     multiplier = _positive_float(_paper_contract_multiplier(pt))
     if (
         entry_price is None
@@ -1597,7 +1775,7 @@ def _close_paper_trade(pt: PaperTrade, exit_price: float, reason: str) -> None:
             "invalid paper close inputs: "
             f"entry={getattr(pt, 'entry_price', None)!r} "
             f"exit={exit_price!r} "
-            f"quantity={getattr(pt, 'quantity', None)!r}"
+            f"quantity={raw_quantity!r}"
         )
 
     pt.status = "closed"
@@ -1765,15 +1943,17 @@ def auto_enter_from_signals(
     entered = 0
     blocked = 0
     for sig in signals:
-        conf = sig.get("confidence", 0)
-        if conf < 0.6:
+        conf = _finite_float(sig.get("confidence", 0))
+        if conf is None or conf < 0.6:
             continue
 
         ticker = sig.get("ticker", "")
-        entry = sig.get("entry_price") or sig.get("price")
-        stop = sig.get("stop_price") or sig.get("stop")
-        target = sig.get("target_price") or sig.get("target")
-        if not entry or entry <= 0:
+        entry = _positive_float(sig.get("entry_price"))
+        if entry is None:
+            entry = _positive_float(sig.get("price"))
+        stop_raw = sig.get("stop_price") or sig.get("stop")
+        target_raw = sig.get("target_price") or sig.get("target")
+        if entry is None:
             continue
 
         is_option_sig = _is_option_signal(sig)
@@ -1795,22 +1975,22 @@ def auto_enter_from_signals(
             continue
 
         if is_option_sig:
-            stop = _option_premium_level(stop, float(entry))
-            target = _option_premium_level(target, float(entry))
+            stop = _option_premium_level(stop_raw, entry)
+            target = _option_premium_level(target_raw, entry)
             sizing_stop = stop
             if sizing_stop is None:
-                sizing_stop, _default_target = _option_paper_levels(float(entry))
+                sizing_stop, _default_target = _option_paper_levels(entry)
                 stop = sizing_stop
                 if target is None:
                     target = _default_target
-            if sizing_stop is None or float(sizing_stop) >= float(entry):
+            if sizing_stop is None or float(sizing_stop) >= entry:
                 logger.info(
                     "[paper] Option trade blocked for %s: invalid premium stop",
                     ticker,
                 )
                 blocked += 1
                 continue
-            if target is not None and float(target) <= float(entry):
+            if target is not None and float(target) <= entry:
                 logger.info(
                     "[paper] Option trade blocked for %s: invalid premium target",
                     ticker,
@@ -1829,7 +2009,7 @@ def auto_enter_from_signals(
             if qty is None:
                 qty = _size_option_contracts(
                     capital,
-                    float(entry),
+                    entry,
                     float(sizing_stop),
                     risk_pct=0.5,
                 )
@@ -1841,6 +2021,8 @@ def auto_enter_from_signals(
                 blocked += 1
                 continue
         else:
+            stop = _positive_float(stop_raw)
+            target = _positive_float(target_raw)
             if not stop:
                 stop = entry * 0.97
 

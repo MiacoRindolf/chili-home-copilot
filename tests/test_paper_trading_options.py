@@ -317,6 +317,130 @@ def test_open_paper_trade_option_defaults_to_premium_levels(monkeypatch) -> None
     assert trade.signal_json["_paper_meta"]["contract_multiplier"] == 100.0
 
 
+def test_open_paper_trade_option_sanitizes_underlying_shaped_levels(
+    monkeypatch,
+) -> None:
+    from app.services.trading import paper_trading
+
+    monkeypatch.setattr(paper_trading.settings, "backtest_spread", 0.0, raising=False)
+    monkeypatch.setattr(
+        paper_trading.settings,
+        "chili_autotrader_options_exit_stop_pct",
+        50.0,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        paper_trading.settings,
+        "chili_autotrader_options_exit_tp_pct",
+        100.0,
+        raising=False,
+    )
+
+    with patch(
+        "app.services.trading.paper_trading._compute_atr_levels",
+        side_effect=AssertionError("option paper rows should not use underlying ATR levels"),
+    ):
+        trade = paper_trading.open_paper_trade(
+            _FakeDb(),
+            user_id=1,
+            ticker="SPY",
+            entry_price=1.25,
+            stop_price=700.0,
+            target_price=750.0,
+            quantity=2.0,
+            signal_json=_option_signal(),
+        )
+
+    assert trade is not None
+    assert trade.entry_price == pytest.approx(1.25)
+    assert trade.stop_price == pytest.approx(0.625)
+    assert trade.target_price == pytest.approx(2.50)
+    assert trade.signal_json["_paper_meta"]["premium_stop_price"] == pytest.approx(0.625)
+    assert trade.signal_json["_paper_meta"]["premium_target_price"] == pytest.approx(2.50)
+
+
+def test_open_paper_trade_option_rejects_wrong_side_premium_stop(
+    monkeypatch,
+) -> None:
+    from app.services.trading import paper_trading
+
+    monkeypatch.setattr(paper_trading.settings, "backtest_spread", 0.0, raising=False)
+
+    trade = paper_trading.open_paper_trade(
+        _FakeDb(),
+        user_id=1,
+        ticker="SPY",
+        entry_price=1.25,
+        stop_price=1.50,
+        target_price=2.50,
+        quantity=2.0,
+        signal_json=_option_signal(),
+    )
+
+    assert trade is None
+
+
+@pytest.mark.parametrize("bad_quantity", [True, 1.5, "1.5", 0, -1])
+def test_open_paper_trade_option_rejects_non_whole_contract_quantity(
+    bad_quantity,
+    monkeypatch,
+) -> None:
+    from app.services.trading import paper_trading
+
+    monkeypatch.setattr(paper_trading.settings, "backtest_spread", 0.0, raising=False)
+
+    trade = paper_trading.open_paper_trade(
+        _FakeDb(),
+        user_id=1,
+        ticker="SPY",
+        entry_price=1.25,
+        quantity=bad_quantity,
+        signal_json=_option_signal(),
+    )
+
+    assert trade is None
+
+
+@pytest.mark.parametrize("bad_spread", [True, float("nan"), "bad", -0.01])
+def test_apply_slippage_defaults_malformed_spread_to_finite_cost(
+    bad_spread,
+    monkeypatch,
+) -> None:
+    from app.services.trading import paper_trading
+
+    monkeypatch.setattr(paper_trading.settings, "backtest_spread", bad_spread, raising=False)
+
+    assert paper_trading._apply_slippage(1.25, "long", is_entry=True) == pytest.approx(
+        1.250625,
+    )
+    assert paper_trading._apply_slippage(1.25, "long", is_entry=False) == pytest.approx(
+        1.249375,
+    )
+
+
+def test_apply_slippage_caps_extreme_spread_to_positive_fill(
+    monkeypatch,
+) -> None:
+    from app.services.trading import paper_trading
+
+    monkeypatch.setattr(paper_trading.settings, "backtest_spread", 2.0, raising=False)
+
+    assert paper_trading._apply_slippage(1.25, "long", is_entry=False) == pytest.approx(
+        0.0625,
+    )
+    assert paper_trading._apply_slippage(1.25, "short", is_entry=True) == pytest.approx(
+        0.0625,
+    )
+
+
+@pytest.mark.parametrize("bad_price", [True, float("nan"), float("inf"), 0, -1])
+def test_apply_slippage_rejects_bad_price(bad_price) -> None:
+    from app.services.trading import paper_trading
+
+    with pytest.raises(ValueError, match="invalid slippage price"):
+        paper_trading._apply_slippage(bad_price, "long", is_entry=True)
+
+
 def test_open_paper_trade_short_without_atr_uses_short_side_fallbacks(
     monkeypatch,
 ) -> None:
@@ -499,6 +623,33 @@ def test_close_paper_trade_option_uses_contract_multiplier(monkeypatch) -> None:
 
     assert trade.pnl == pytest.approx(40.0)
     assert trade.pnl_pct == pytest.approx(16.0)
+
+
+@pytest.mark.parametrize("bad_quantity", [True, 1.5, "1.5", 0, -1])
+def test_close_paper_trade_option_rejects_non_whole_contract_quantity(
+    bad_quantity,
+    monkeypatch,
+) -> None:
+    from app.services.trading import paper_trading
+
+    monkeypatch.setattr(paper_trading.settings, "backtest_commission", 0.0, raising=False)
+    trade = PaperTrade(
+        ticker="SPY",
+        direction="long",
+        entry_price=1.25,
+        quantity=bad_quantity,
+        status="open",
+        signal_json=_option_signal(),
+    )
+
+    with pytest.raises(ValueError, match="invalid paper close inputs"):
+        paper_trading._close_paper_trade(trade, 1.45, "target")
+
+    assert trade.status == "open"
+    assert trade.exit_price is None
+    assert trade.exit_date is None
+    assert trade.pnl is None
+    assert trade.pnl_pct is None
 
 
 def test_close_paper_trade_rejects_nonfinite_exit_without_outcome(monkeypatch) -> None:
@@ -1065,6 +1216,239 @@ def test_shadow_capacity_janitor_counts_serialized_shadow_signal() -> None:
         "pnl_recorded"
     ] is False
     assert db.commits == 1
+
+
+@pytest.mark.parametrize("bad_age_limit", ["bad", float("nan"), float("inf"), True])
+def test_shadow_capacity_janitor_sanitizes_bad_capacity_inputs(
+    bad_age_limit,
+) -> None:
+    from app.services.trading import paper_trading
+
+    trade = PaperTrade(
+        id=203,
+        user_id=1,
+        ticker="SPY",
+        direction="long",
+        entry_price=1.25,
+        stop_price=0.60,
+        target_price=2.50,
+        quantity=2.0,
+        status="open",
+        entry_date=datetime.utcnow(),
+        signal_json={"auto_trader_v1": True, "paper_shadow": True},
+    )
+    db = _FakeDb(rows=[trade])
+
+    result = paper_trading.prune_autotrader_paper_shadow_capacity(
+        db,
+        user_id=1,
+        max_open="not-a-number",
+        max_age_hours=bad_age_limit,
+        buffer=True,
+    )
+
+    assert result["checked"] == 1
+    assert result["max_open"] == 1
+    assert result["target_open"] == 1
+    assert result["capacity_cancelled"] == 1
+    assert result["cancelled"] == 1
+    assert trade.status == paper_trading.PAPER_TRADE_STATUS_CANCELLED
+    assert trade.exit_reason == paper_trading.PAPER_SHADOW_CAPACITY_EVICTED_REASON
+    assert db.commits == 1
+
+
+def test_place_partial_close_option_requires_whole_contract_fill(
+    monkeypatch,
+) -> None:
+    from app.services.trading import paper_trading
+
+    monkeypatch.setattr(paper_trading.settings, "backtest_spread", 0.0, raising=False)
+    trade = PaperTrade(
+        id=301,
+        user_id=1,
+        ticker="SPY",
+        direction="long",
+        entry_price=1.25,
+        quantity=2.0,
+        status="open",
+        signal_json=_option_signal(),
+    )
+    db = _FakeDb(rows=[trade])
+
+    result = paper_trading.place_partial_close(
+        db,
+        trade,
+        fraction=0.5,
+        current_price=1.45,
+    )
+
+    assert result["ok"] is True
+    assert result["quantity"] == pytest.approx(1.0)
+    assert trade.quantity == pytest.approx(1.0)
+    assert trade.partial_taken is True
+    assert trade.partial_taken_qty == pytest.approx(1.0)
+    assert trade.partial_taken_price == pytest.approx(1.45)
+    assert db.commits == 1
+
+
+def test_place_partial_close_option_rejects_fractional_contract_fill(
+    monkeypatch,
+) -> None:
+    from app.services.trading import paper_trading
+
+    monkeypatch.setattr(paper_trading.settings, "backtest_spread", 0.0, raising=False)
+    trade = PaperTrade(
+        id=302,
+        user_id=1,
+        ticker="SPY",
+        direction="long",
+        entry_price=1.25,
+        quantity=1.0,
+        status="open",
+        signal_json=_option_signal(),
+    )
+    db = _FakeDb(rows=[trade])
+
+    result = paper_trading.place_partial_close(
+        db,
+        trade,
+        fraction=0.5,
+        current_price=1.45,
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "invalid_option_contract_partial:0.5"
+    assert trade.quantity == pytest.approx(1.0)
+    assert trade.partial_taken is None
+    assert db.commits == 0
+
+
+@pytest.mark.parametrize("bad_fraction", [True, float("nan"), "bad"])
+def test_place_partial_close_rejects_bad_fraction_without_raising(
+    bad_fraction,
+    monkeypatch,
+) -> None:
+    from app.services.trading import paper_trading
+
+    monkeypatch.setattr(paper_trading.settings, "backtest_spread", 0.0, raising=False)
+    trade = PaperTrade(
+        id=303,
+        user_id=1,
+        ticker="SPY",
+        direction="long",
+        entry_price=1.25,
+        quantity=2.0,
+        status="open",
+        signal_json=_option_signal(),
+    )
+    db = _FakeDb(rows=[trade])
+
+    result = paper_trading.place_partial_close(
+        db,
+        trade,
+        fraction=bad_fraction,
+        current_price=1.45,
+    )
+
+    assert result["ok"] is False
+    assert result["error"].startswith("invalid_fraction:")
+    assert trade.quantity == pytest.approx(2.0)
+    assert db.commits == 0
+
+
+def test_place_partial_close_rejects_bad_current_price_without_raising(
+    monkeypatch,
+) -> None:
+    from app.services.trading import paper_trading
+
+    monkeypatch.setattr(paper_trading.settings, "backtest_spread", 0.0, raising=False)
+    trade = PaperTrade(
+        id=304,
+        user_id=1,
+        ticker="SPY",
+        direction="long",
+        entry_price=1.25,
+        quantity=2.0,
+        status="open",
+        signal_json=_option_signal(),
+    )
+    db = _FakeDb(rows=[trade])
+
+    result = paper_trading.place_partial_close(
+        db,
+        trade,
+        fraction=0.5,
+        current_price=float("inf"),
+    )
+
+    assert result["ok"] is False
+    assert result["error"].startswith("invalid_current_price:")
+    assert trade.quantity == pytest.approx(2.0)
+    assert db.commits == 0
+
+
+@pytest.mark.parametrize("bad_confidence", [True, float("nan"), "high"])
+def test_auto_enter_option_signal_rejects_bad_confidence_before_risk_gate(
+    bad_confidence,
+    monkeypatch,
+) -> None:
+    from app.services.trading import paper_trading
+
+    monkeypatch.setattr(paper_trading.settings, "backtest_spread", 0.0, raising=False)
+    signal = {
+        **_option_signal(),
+        "ticker": "SPY",
+        "entry_price": 1.25,
+        "confidence": bad_confidence,
+        "option_meta": {**OPTION_META, "quantity": 2},
+    }
+    db = _FakeDb()
+
+    with patch(
+        "app.services.trading.portfolio_risk.check_new_trade_allowed",
+        side_effect=AssertionError("bad confidence must not reach risk gate"),
+    ):
+        entered = paper_trading.auto_enter_from_signals(
+            db,
+            user_id=1,
+            signals=[signal],
+            capital=10_000.0,
+        )
+
+    assert entered == 0
+    assert _paper_rows(db) == []
+
+
+@pytest.mark.parametrize("bad_entry", [True, float("inf"), "not-a-price"])
+def test_auto_enter_option_signal_rejects_bad_entry_before_risk_gate(
+    bad_entry,
+    monkeypatch,
+) -> None:
+    from app.services.trading import paper_trading
+
+    monkeypatch.setattr(paper_trading.settings, "backtest_spread", 0.0, raising=False)
+    signal = {
+        **_option_signal(),
+        "ticker": "SPY",
+        "entry_price": bad_entry,
+        "confidence": 0.9,
+        "option_meta": {**OPTION_META, "quantity": 2},
+    }
+    db = _FakeDb()
+
+    with patch(
+        "app.services.trading.portfolio_risk.check_new_trade_allowed",
+        side_effect=AssertionError("bad entry must not reach risk gate"),
+    ):
+        entered = paper_trading.auto_enter_from_signals(
+            db,
+            user_id=1,
+            signals=[signal],
+            capital=10_000.0,
+        )
+
+    assert entered == 0
+    assert _paper_rows(db) == []
 
 
 def test_auto_enter_option_signal_uses_asset_gate_and_meta_contract_quantity(
