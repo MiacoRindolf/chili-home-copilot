@@ -1216,6 +1216,81 @@ def test_recert_signal_fastlane_respects_recent_backtest_cooldown(monkeypatch):
     assert out["backtest_priority"] == 250
 
 
+def test_recert_signal_fastlane_respects_recent_recert_blocker_diagnostic(monkeypatch):
+    settings = _minimal_settings(1)
+    settings.brain_queue_recert_cooldown_enabled = True
+    settings.brain_queue_recert_cooldown_minutes = 360
+    settings.brain_work_cash_deployment_noop_cooldown_minutes = 360
+    monkeypatch.setattr(at_mod, "settings", settings)
+    monkeypatch.setattr(
+        "app.services.trading.recert_queue_service.queue_scheduler",
+        lambda *a, **k: pytest.fail("blocker diagnostic should skip recert queue writes"),
+    )
+    monkeypatch.setattr(
+        "app.services.trading.edge_reliability.emit_targeted_profitability_work",
+        lambda *a, **k: pytest.fail("blocker diagnostic should skip work events"),
+    )
+
+    class QueryStub:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def order_by(self, *args, **kwargs):
+            return self
+
+        def limit(self, *args, **kwargs):
+            return self
+
+        def all(self):
+            return [
+                SimpleNamespace(
+                    payload={
+                        "scan_pattern_id": 1260,
+                        "source": "recert_rescue_refresh",
+                        "recert_rescue_status": "soft_blocked",
+                        "recommended_next_action": (
+                            "wait_for_recert_backtest_cooldown_keep_live_blocked"
+                        ),
+                    }
+                )
+            ]
+
+    class DbStub:
+        def query(self, *args, **kwargs):
+            return QueryStub()
+
+    alert = SimpleNamespace(
+        id=777002,
+        scan_pattern_id=1260,
+        ticker="AAVE-USD",
+        asset_type="crypto",
+    )
+    pattern = SimpleNamespace(
+        name="Blocked recert",
+        last_backtest_at=None,
+        backtest_priority=250,
+        recert_reason="missing_oos_recert",
+        lifecycle_stage="pilot_promoted",
+        promotion_status=None,
+    )
+
+    out = at_mod._queue_recert_for_blocked_signal(
+        DbStub(),
+        alert=alert,
+        pattern=pattern,
+        reason="pattern_recert_required",
+    )
+
+    assert out["queued"] is False
+    assert out["reason"] == "recent_recert_rescue_blocker_diagnostic"
+    assert out["blocker_action"] == "wait_for_recert_backtest_cooldown_keep_live_blocked"
+    assert out["blocker_status"] == "soft_blocked"
+    assert out["blocker_source"] == "recert_rescue_refresh"
+    assert out["pattern_id"] == 1260
+    assert out["signal_ticker"] == "AAVE-USD"
+    assert out["asset_class"] == "crypto"
+
+
 def test_shadow_stock_fastlane_boosts_pattern_for_positive_edge(monkeypatch):
     settings = _minimal_settings(1)
     monkeypatch.setattr(at_mod, "settings", settings)

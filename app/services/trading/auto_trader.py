@@ -61,7 +61,14 @@ from ...config import (
     AUTOTRADER_SYNERGY_RETRY_MIN_LOOKBACK_MINUTES,
     settings,
 )
-from ...models.trading import AutoTraderRun, BreakoutAlert, PaperTrade, ScanPattern, Trade
+from ...models.trading import (
+    AutoTraderRun,
+    BrainWorkEvent,
+    BreakoutAlert,
+    PaperTrade,
+    ScanPattern,
+    Trade,
+)
 from .auto_trader_llm import run_revalidation_llm
 from .auto_trader_rules import (
     MANAGED_EDGE_GEOMETRY_SOURCE,
@@ -2204,6 +2211,18 @@ def _queue_recert_for_blocked_signal(
             "asset_class": asset_class,
         })
         return cooldown
+    blocker = _recent_recert_rescue_fastlane_blocker(db, pattern_id=pattern_id)
+    if blocker is not None:
+        blocker.update(
+            {
+                "queued": False,
+                "pattern_id": pattern_id,
+                "blocked_signal_reason": reason,
+                "signal_ticker": ticker,
+                "asset_class": asset_class,
+            }
+        )
+        return blocker
     recert_queue_result: dict[str, Any] = {}
     try:
         from .recert_queue_service import queue_scheduler
@@ -2367,6 +2386,74 @@ def _recert_signal_fastlane_cooldown(
         "backtest_priority": backtest_priority,
         "priority_bypass_floor": bypass_floor,
     }
+
+
+_RECERT_FASTLANE_BLOCKER_ACTIONS = frozenset(
+    {
+        "inspect_recert_backtest_no_oos_evidence_keep_live_blocked",
+        "wait_for_recert_backtest_cooldown_keep_live_blocked",
+        "live_blocked_recert_debt_no_refresh",
+    }
+)
+_RECERT_FASTLANE_BLOCKER_REASONS = frozenset(
+    {
+        "recent_recert_backtest_cooldown",
+        "recert_backtest_refresh_already_open",
+        "no_recert_refresh_needed",
+    }
+)
+
+
+def _recent_recert_rescue_fastlane_blocker(
+    db: Session | None,
+    *,
+    pattern_id: int,
+) -> dict[str, Any] | None:
+    if db is None or not hasattr(db, "query"):
+        return None
+    try:
+        minutes = int(
+            getattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360)
+            or 0
+        )
+    except (TypeError, ValueError):
+        minutes = 360
+    if minutes <= 0:
+        return None
+    cutoff = datetime.utcnow() - timedelta(minutes=minutes)
+    rows = (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_kind == "outcome")
+        .filter(BrainWorkEvent.event_type == "recert_rescue_diagnostic")
+        .filter(BrainWorkEvent.created_at >= cutoff)
+        .filter(BrainWorkEvent.payload["scan_pattern_id"].astext == str(int(pattern_id)))
+        .order_by(BrainWorkEvent.created_at.desc(), BrainWorkEvent.id.desc())
+        .limit(20)
+        .all()
+    )
+    for row in rows:
+        payload = row.payload if isinstance(row.payload, dict) else {}
+        action = str(payload.get("recommended_next_action") or "").strip().lower()
+        if action in _RECERT_FASTLANE_BLOCKER_ACTIONS:
+            return {
+                "reason": "recent_recert_rescue_blocker_diagnostic",
+                "blocker_action": action,
+                "blocker_status": payload.get("recert_rescue_status"),
+                "blocker_source": payload.get("source"),
+                "cooldown_minutes": minutes,
+            }
+        refresh = payload.get("recert_backtest_refresh")
+        if isinstance(refresh, dict):
+            refresh_reason = str(refresh.get("reason") or "").strip().lower()
+            if refresh_reason in _RECERT_FASTLANE_BLOCKER_REASONS:
+                return {
+                    "reason": "recent_recert_rescue_blocker_diagnostic",
+                    "blocker_action": refresh_reason,
+                    "blocker_status": payload.get("recert_rescue_status"),
+                    "blocker_source": payload.get("source"),
+                    "cooldown_minutes": minutes,
+                }
+    return None
 
 
 def _csv_tokens(raw: Any) -> frozenset[str]:
