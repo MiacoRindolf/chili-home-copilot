@@ -3701,6 +3701,7 @@ def test_agent_os_readiness_visual_qa_flags_ui_runs_without_evidence(
                 ],
             }
         )
+        command_run = orchestrator.create_run(db, prompt="hello", repo_id=repo.id)
         db.commit()
 
         readiness = orchestrator.agent_os_readiness(db, repo_id=repo.id)
@@ -3721,7 +3722,28 @@ def test_agent_os_readiness_visual_qa_flags_ui_runs_without_evidence(
         )
         assert visual_dimension["status"] == orchestrator.AGENT_OS_READINESS_CHECK_WARNING
         assert quality_monitor["next_action"] == orchestrator.AGENT_QUALITY_MONITOR_ACTION_ATTACH_VISUAL_QA
+        assert quality_monitor["next_action_run_id"] == run.run_id
         assert "screenshot or video QA evidence" in quality_monitor["next_action_detail"]
+        quality_bar = readiness[orchestrator.AGENT_CODING_QUALITY_BAR_KEY]
+        quality_bar_dimension = next(
+            dimension
+            for dimension in quality_bar["dimensions"]
+            if dimension["key"] == orchestrator.AGENT_CODING_QUALITY_BAR_DIMENSION_QUALITY
+        )
+        assert quality_bar_dimension["score"] < orchestrator.AGENT_CODING_QUALITY_BAR_TARGET_SCORE
+        assert quality_bar_dimension["next_action_run_id"] == run.run_id
+        assert quality_bar["next_action"] == orchestrator.AGENT_QUALITY_MONITOR_ACTION_ATTACH_VISUAL_QA
+        assert quality_bar["next_action_run_id"] == run.run_id
+
+        quality_payload = orchestrator.append_user_message(
+            db,
+            command_run.run_id,
+            content="/quality",
+        )
+        quality_reply = quality_payload["messages"][-1]["content"]
+        assert "Quality next action: Attach visual QA" in quality_reply
+        assert f"Quality target run: {run.run_id}" in quality_reply
+        assert f"Quality bar target run: {run.run_id}" in quality_reply
 
         orchestrator.record_visual_validation(
             db,
@@ -4082,6 +4104,22 @@ def test_agent_os_readiness_operator_inbox_guides_blocker_recovery(
         blocker_item = inbox["items"][0]
         assert blocker_item["run_id"] == blocked.run_id
         assert blocker_item["recovery_detail"] == "Prefill a fresh approval-first draft from this run."
+        quality_bar = readiness[orchestrator.AGENT_CODING_QUALITY_BAR_KEY]
+        operator_dimension = next(
+            dimension
+            for dimension in quality_bar["dimensions"]
+            if dimension["key"] == orchestrator.AGENT_CODING_QUALITY_BAR_DIMENSION_OPERATOR
+        )
+        assert operator_dimension["next_action"] == orchestrator.AGENT_OPERATOR_INBOX_ACTION_RECOVER_BLOCKER
+        assert operator_dimension["next_action_label"] == "Recover blocker"
+        assert operator_dimension["next_action_run_id"] == blocked.run_id
+        assert operator_dimension["next_action_kind"] == orchestrator.AGENT_OPERATOR_INBOX_ITEM_BLOCKER
+        assert operator_dimension["next_action_recovery_action"] == orchestrator.AGENT_OPERATOR_INBOX_RECOVERY_RERUN_SAFE
+        assert operator_dimension["next_action_button_label"] == "Rerun"
+        assert quality_bar["next_action"] == orchestrator.AGENT_OPERATOR_INBOX_ACTION_RECOVER_BLOCKER
+        assert quality_bar["next_action_run_id"] == blocked.run_id
+        assert quality_bar["next_action_recovery_action"] == orchestrator.AGENT_OPERATOR_INBOX_RECOVERY_RERUN_SAFE
+        assert quality_bar["next_action_button_label"] == "Rerun"
 
         doctor_payload = orchestrator.append_user_message(
             db,
@@ -4097,8 +4135,10 @@ def test_agent_os_readiness_operator_inbox_guides_blocker_recovery(
         for payload in (doctor_payload, quality_payload):
             reply = payload["messages"][-1]["content"]
             assert "Operator inbox next action: Recover blocker" in reply
+            assert "Quality bar next action: Recover blocker" in reply
             assert "Validation failed after repair" in reply
             assert f"Operator inbox target run: {blocked.run_id}" in reply
+            assert f"Quality bar target run: {blocked.run_id}" in reply
     finally:
         db.close()
 
@@ -4152,6 +4192,60 @@ def test_agent_os_readiness_warns_when_only_general_local_model_exists(
         db.close()
 
 
+def test_coding_quality_bar_preserves_runtime_recovery_target():
+    payload = orchestrator._agent_coding_quality_bar_payload(
+        local_model={
+            "coding_ready": True,
+            "available": True,
+            "detail": "Coder model is ready.",
+        },
+        quality_monitor={
+            "status": orchestrator.AGENT_OS_READINESS_CHECK_PASSED,
+            "score": 100,
+            "detail": "Quality monitor is healthy.",
+        },
+        capability_audit={
+            "status": orchestrator.AGENT_OS_READINESS_CHECK_PASSED,
+            "score": 100,
+            "detail": "Capability audit is healthy.",
+        },
+        codex_alignment={
+            "status": orchestrator.AGENT_OS_READINESS_CHECK_PASSED,
+            "score": 100,
+            "detail": "Codex parity is healthy.",
+        },
+        runtime_queue={
+            "status": orchestrator.AGENT_OS_READINESS_CHECK_WARNING,
+            "detail": "A queued run is waiting for a worker.",
+            "next_action": orchestrator.AGENT_RUNTIME_QUEUE_ACTION_DRAIN_QUEUED,
+            "next_action_label": "Start queued worker",
+            "next_action_detail": "Use Start in the recovery queue.",
+            "next_action_run_id": "pa_queued",
+        },
+        operator_inbox={
+            "total_action_count": 0,
+            "detail": "No operator action is waiting.",
+        },
+    )
+
+    runtime_dimension = next(
+        dimension
+        for dimension in payload["dimensions"]
+        if dimension["key"] == orchestrator.AGENT_CODING_QUALITY_BAR_DIMENSION_RUNTIME
+    )
+    assert payload["competitive"] is False
+    assert payload["next_action"] == orchestrator.AGENT_RUNTIME_QUEUE_ACTION_DRAIN_QUEUED
+    assert payload["next_action_label"] == "Start queued worker"
+    assert payload["next_action_run_id"] == "pa_queued"
+    assert runtime_dimension["next_action"] == orchestrator.AGENT_RUNTIME_QUEUE_ACTION_DRAIN_QUEUED
+    assert runtime_dimension["next_action_run_id"] == "pa_queued"
+    lines = orchestrator._autopilot_coding_quality_bar_lines(
+        {orchestrator.AGENT_CODING_QUALITY_BAR_KEY: payload}
+    )
+    assert any("Quality bar next action: Start queued worker" in line for line in lines)
+    assert "Quality bar target run: pa_queued" in lines
+
+
 def test_autopilot_slash_commands_answer_in_chat_and_start_plan(tmp_path):
     db = _sqlite_autonomy_session()
     try:
@@ -4197,10 +4291,26 @@ def test_autopilot_slash_commands_answer_in_chat_and_start_plan(tmp_path):
     ("content", "expected"),
     [
         ("what's the status?", "Run status is"),
+        ("what's happening with this run?", "Run status is"),
+        ("is it running right now?", "Run status is"),
+        ("what's blocking this?", "Run status is"),
+        ("why are we waiting?", "Run status is"),
+        ("what's the schedule?", "schedule is"),
+        ("when is the next run scheduled?", "next not scheduled"),
         ("which agents are configured?", "Repo agents:"),
         ("which model are you using?", "model policy"),
         ("what quality guardrails are active?", "Local model quality guardrails"),
         ("any pending questions?", "No pending operator questions"),
+        ("what repo is this run using?", "repo"),
+        ("what branch is this on?", "Branch:"),
+        ("what was my prompt?", "Original request: hello"),
+        ("what is the run id?", "Run "),
+        ("what is the merge status?", "merge status"),
+        ("what is the plan status?", "Plan status:"),
+        ("what's next?", "Next action:"),
+        ("what are the next steps?", "Next action:"),
+        ("can I approve this?", "Next action:"),
+        ("is this ready to merge?", "Next action:"),
         ("how do I attach a screenshot?", "attachment control"),
         ("where do I start the plan?", orchestrator.PLAN_START_CHAT_ACTION_LABEL),
         ("how do I approve and merge this?", "approval-ready plan"),
@@ -4237,8 +4347,12 @@ def test_autopilot_chat_read_only_questions_use_mechanics_without_model(
     ("content", "expected"),
     [
         ("what files did you change?", "app/example.py"),
+        ("what changed?", "app/example.py"),
+        ("show changes", "app/example.py"),
         ("what tests ran?", "pytest tests/test_example.py -q"),
+        ("what checks passed?", "pytest tests/test_example.py -q"),
         ("show me the evidence", "validation: validation_results"),
+        ("show receipts", "validation: validation_results"),
     ],
 )
 def test_autopilot_chat_audit_questions_use_recorded_artifacts_without_model(
@@ -4453,6 +4567,102 @@ def test_autopilot_quality_command_explains_local_model_guardrails(
         assert "Codex/Claude quality bar" in reply
         assert "Quality bar next action: Install coder model" in reply
         assert "Quality next action: Install coder model" in reply
+    finally:
+        db.close()
+
+
+def test_autopilot_task_board_surfaces_active_approval_item(tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        repo = CodeRepo(path=str(tmp_path), host_path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        run = orchestrator.create_run(db, prompt="Improve the Autopilot task board.", repo_id=repo.id)
+        run.status = orchestrator.RUN_STATUS_AWAITING_APPROVAL
+        run.current_stage = orchestrator.STAGE_PLAN
+        run.plan_status = orchestrator.PLAN_STATUS_AWAITING_APPROVAL
+        run.plan_json = json.dumps(
+            {
+                "analysis": "Add a visible task board to the run cockpit.",
+                "files": [{"path": "chili_mobile/lib/src/brain/brain_dispatch_screen.dart"}],
+            }
+        )
+        db.commit()
+
+        payload = orchestrator.run_payload(db, run, include_events=True)
+
+        task_board = payload["task_board"]
+        assert task_board["schema"] == "chili.autopilot.task_board.v1"
+        assert task_board["active_item"]["key"] == "approve_plan"
+        assert task_board["active_item"]["status"] == orchestrator.AUTOPILOT_TASK_STATUS_IN_PROGRESS
+        assert task_board["active_item"]["next_action"] == orchestrator.AUTOPILOT_TASK_ACTION_APPROVE_PLAN
+        assert task_board["active_item"]["next_action_label"] == "Approve"
+        assert task_board["active_item"]["next_action_run_id"] == run.run_id
+        assert any(
+            item["key"] == "plan_quality_gate"
+            and item["status"] == orchestrator.AUTOPILOT_TASK_STATUS_COMPLETED
+            for item in task_board["items"]
+        )
+
+        task_payload = orchestrator.append_user_message(db, run.run_id, content="/tasks")
+        task_reply = task_payload["messages"][-1]["content"]
+        assert "Task board:" in task_reply
+        assert "Active item: Approve plan" in task_reply
+        assert "Next task action: Approve." in task_reply
+        assert "Review the plan" in task_reply
+
+        chat_payload = orchestrator.append_user_message(db, run.run_id, content="what's left?")
+        assert "Task board:" in chat_payload["messages"][-1]["content"]
+        assert chat_payload["status"] == orchestrator.RUN_STATUS_AWAITING_APPROVAL
+        assert chat_payload["plan_status"] == orchestrator.PLAN_STATUS_AWAITING_APPROVAL
+    finally:
+        db.close()
+
+
+def test_autopilot_task_board_routes_recovery_actions(tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        repo = CodeRepo(path=str(tmp_path), host_path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+
+        chatting = orchestrator.create_run(db, prompt="Brainstorm task board actions.", repo_id=repo.id)
+        chatting_payload = orchestrator.run_payload(db, chatting, include_events=True)
+        chatting_task = chatting_payload["task_board"]["active_item"]
+        assert chatting_task["key"] == "plan_quality_gate"
+        assert chatting_task["next_action"] == orchestrator.AUTOPILOT_TASK_ACTION_START_PLAN
+        assert chatting_task["next_action_label"] == orchestrator.PLAN_START_CHAT_ACTION_LABEL
+
+        queued = orchestrator.create_run(
+            db,
+            prompt="Queued approved run.",
+            repo_id=repo.id,
+            start_planning=True,
+        )
+        queued.status = orchestrator.RUN_STATUS_QUEUED
+        queued.current_stage = orchestrator.STAGE_QUEUED
+        queued.plan_status = orchestrator.PLAN_STATUS_APPROVED
+        queued_payload = orchestrator.run_payload(db, queued, include_events=True)
+        queued_task = queued_payload["task_board"]["active_item"]
+        assert queued_task["key"] == "implement"
+        assert queued_task["next_action"] == orchestrator.AUTOPILOT_TASK_ACTION_START_WORKER
+        assert queued_task["next_action_run_id"] == queued.run_id
+
+        blocked = orchestrator.create_run(
+            db,
+            prompt="Blocked implementation.",
+            repo_id=repo.id,
+            start_planning=True,
+        )
+        blocked.status = orchestrator.RUN_STATUS_BLOCKED
+        blocked.current_stage = orchestrator.STAGE_IMPLEMENT
+        blocked.plan_status = orchestrator.PLAN_STATUS_APPROVED
+        blocked.error_message = "Validation failed after repair."
+        blocked_payload = orchestrator.run_payload(db, blocked, include_events=True)
+        blocked_task = blocked_payload["task_board"]["active_item"]
+        assert blocked_task["next_action"] == orchestrator.AUTOPILOT_TASK_ACTION_RECOVER_BLOCKER
+        assert blocked_task["next_action_kind"] == orchestrator.AGENT_OPERATOR_INBOX_ITEM_BLOCKER
+        assert blocked_task["next_action_recovery_action"] == orchestrator.AGENT_OPERATOR_INBOX_RECOVERY_RERUN_SAFE
     finally:
         db.close()
 
@@ -4934,6 +5144,10 @@ def test_plan_only_scheduled_agent_cycle_reports_without_architect_plan(tmp_path
         )
         assert len(messages) == 1
         assert "No files were changed" in messages[0].content
+        assert "Verdict:" in messages[0].content
+        assert "Evidence reviewed:" in messages[0].content
+        assert "Checks:" in messages[0].content
+        assert "Safety boundary:" in messages[0].content
         assert "Quality guard: passed" in messages[0].content
         quality = (
             db.query(ProjectAutonomyArtifact)
@@ -4953,6 +5167,16 @@ def test_plan_only_scheduled_agent_cycle_reports_without_architect_plan(tmp_path
             .one()
         )
         assert artifact.artifact_type == "agent_cycle_report"
+        report_payload = json.loads(artifact.content_json)
+        assert report_payload["report_schema"] == orchestrator.SCHEDULED_AGENT_REPORT_SCHEMA
+        assert report_payload["run_id"] == queued["run_id"]
+        assert report_payload["status"] == "READ_ONLY_CLEAR"
+        assert report_payload["verdict"]
+        assert report_payload["evidence_reviewed"]
+        assert report_payload["checks_run"]
+        assert report_payload["risk_or_blockers"]
+        assert report_payload["safety_boundary"]
+        assert report_payload["request_binding"]["mode"] == "plan_only"
     finally:
         db.close()
 
@@ -5024,6 +5248,77 @@ def test_plan_only_scheduled_agent_quality_guard_repairs_false_action_claims(
         )
         report_payload = json.loads(report.content_json)
         assert report_payload["quality"]["status"] == orchestrator.SCHEDULED_AGENT_REPORT_QUALITY_REPAIRED
+    finally:
+        db.close()
+
+
+def test_plan_only_scheduled_agent_quality_guard_repairs_missing_receipts(
+    tmp_path,
+    monkeypatch,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        agents = orchestrator.bootstrap_agent_profiles(db, repo_id=repo.id)
+        architect_id = next(agent["id"] for agent in agents if agent["profile_key"] == "architect")
+        orchestrator.resume_agent_profile(db, architect_id)
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {"available": True, "model": "local-report-model"},
+        )
+
+        def fake_chat(messages, model, **kwargs):
+            return SimpleNamespace(
+                ok=True,
+                text=json.dumps(
+                    {
+                        "summary": "I observed the scheduled repo context without taking actions.",
+                        "findings": [
+                            "No files were changed.",
+                            "Plan-only observation remained read-only.",
+                        ],
+                        "recommended_next_steps": ["Keep the agent in observe mode."],
+                        "operator_question": "",
+                    }
+                ),
+                model=model,
+                latency_ms=12,
+                error=None,
+            )
+
+        monkeypatch.setattr(orchestrator.ollama_client, "chat", fake_chat)
+
+        queued = orchestrator.start_agent_cycle(db, architect_id)
+        result = orchestrator.run_autonomy_sync(db, queued["run_id"])
+
+        assert result["status"] == orchestrator.RUN_STATUS_COMPLETED
+        quality = (
+            db.query(ProjectAutonomyArtifact)
+            .filter_by(
+                run_id=queued["run_id"],
+                name=orchestrator.SCHEDULED_AGENT_REPORT_QUALITY_ARTIFACT_NAME,
+            )
+            .one()
+        )
+        payload = json.loads(quality.content_json)
+        assert payload["status"] == orchestrator.SCHEDULED_AGENT_REPORT_QUALITY_REPAIRED
+        assert "missing_status_or_verdict" in payload["initial_issues"]
+        assert "missing_evidence_reviewed" in payload["initial_issues"]
+        assert "missing_checks_run" in payload["initial_issues"]
+        assert "missing_safety_boundary" in payload["initial_issues"]
+        report = (
+            db.query(ProjectAutonomyArtifact)
+            .filter_by(run_id=queued["run_id"], name=orchestrator.SCHEDULED_AGENT_REPORT_ARTIFACT_NAME)
+            .one()
+        )
+        report_payload = json.loads(report.content_json)
+        assert report_payload["status"] == "READ_ONLY_REPAIRED"
+        assert report_payload["evidence_reviewed"]
+        assert report_payload["checks_run"]
+        assert report_payload["safety_boundary"]
     finally:
         db.close()
 

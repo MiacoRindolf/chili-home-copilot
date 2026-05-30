@@ -106,6 +106,16 @@ PLAN_STATUS_DRAFTING = "drafting"
 PLAN_STATUS_IMPLEMENTED = "implemented"
 PLAN_STATUS_REVISING = "revising"
 MERGE_STATUS_PENDING = "pending"
+AUTOPILOT_TASK_STATUS_PENDING = "pending"
+AUTOPILOT_TASK_STATUS_IN_PROGRESS = "in_progress"
+AUTOPILOT_TASK_STATUS_COMPLETED = "completed"
+AUTOPILOT_TASK_STATUS_BLOCKED = "blocked"
+AUTOPILOT_TASK_ACTION_START_PLAN = "start_plan"
+AUTOPILOT_TASK_ACTION_ANSWER_QUESTION = "answer_question"
+AUTOPILOT_TASK_ACTION_APPROVE_PLAN = "approve_plan"
+AUTOPILOT_TASK_ACTION_START_WORKER = "start_worker"
+AUTOPILOT_TASK_ACTION_RECOVER_BLOCKER = "recover_blocker"
+AUTOPILOT_TASK_ACTION_MERGE = "merge"
 STAGE_CHAT = "chat"
 STAGE_CLASSIFY = "classify"
 STAGE_IMPLEMENT = "implement"
@@ -287,6 +297,7 @@ AGENT_RUNTIME_DEFAULT_WORK_WINDOW_MINUTES = 4 * 60
 AGENT_RUNTIME_DEFAULT_REST_MINUTES = 5
 SCHEDULED_AGENT_REPORT_ARTIFACT_TYPE = "agent_cycle_report"
 SCHEDULED_AGENT_REPORT_ARTIFACT_NAME = "scheduled_agent_report"
+SCHEDULED_AGENT_REPORT_SCHEMA = "chili.autopilot.scheduled_agent_report.v2"
 SCHEDULED_AGENT_REPORT_QUALITY_ARTIFACT_TYPE = "quality_gate"
 SCHEDULED_AGENT_REPORT_QUALITY_ARTIFACT_NAME = "scheduled_agent_report_quality"
 SCHEDULED_AGENT_REPORT_QUALITY_PASSING_SCORE = 75
@@ -323,6 +334,7 @@ AUTOPILOT_COMMAND_CLEAR = "clear"
 AUTOPILOT_COMMAND_MODEL = "model"
 AUTOPILOT_COMMAND_SCHEDULE = "schedule"
 AUTOPILOT_COMMAND_QUESTIONS = "questions"
+AUTOPILOT_COMMAND_TASKS = "tasks"
 AUTOPILOT_COMMAND_DOCTOR = "doctor"
 AUTOPILOT_COMMAND_QUALITY = "quality"
 AUTOPILOT_COMMAND_REFERENCE = "reference"
@@ -349,6 +361,7 @@ AUTOPILOT_SLASH_COMMANDS = frozenset({
     AUTOPILOT_COMMAND_MODEL,
     AUTOPILOT_COMMAND_SCHEDULE,
     AUTOPILOT_COMMAND_QUESTIONS,
+    AUTOPILOT_COMMAND_TASKS,
     AUTOPILOT_COMMAND_DOCTOR,
     AUTOPILOT_COMMAND_QUALITY,
     AUTOPILOT_COMMAND_REFERENCE,
@@ -364,6 +377,7 @@ AUTOPILOT_SLASH_HELP_LINES = (
     "/model - show this agent's model policy and prompt source.",
     "/schedule [on|off|resume|pause|codex|codex-active|codex-always-on|codex-adopt|codex-pause] - inspect or change schedule state.",
     "/questions - show pending operator questions.",
+    "/tasks - show the run task board and next active item.",
     "/doctor - audit Agent OS readiness, local model quality, schedules, and safety gates.",
     "/quality - explain the guardrails compensating for weaker local models.",
     "/reference <path> - clean-room scan a local reference folder before using any ideas.",
@@ -1693,8 +1707,282 @@ def _operator_safe_plan_payload(plan: dict[str, Any]) -> dict[str, Any]:
     return safe
 
 
+def _autopilot_task_item(
+    key: str,
+    title: str,
+    status: str,
+    detail: str,
+    *,
+    run_id: str | None = None,
+    next_action: str | None = None,
+    next_action_label: str | None = None,
+    next_action_detail: str | None = None,
+    next_action_kind: str | None = None,
+    next_action_recovery_action: str | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "key": key,
+        "title": title,
+        "status": status,
+        "detail": _clip(detail, 260),
+    }
+    if run_id and next_action:
+        payload["next_action_run_id"] = str(run_id)
+    if next_action:
+        payload["next_action"] = str(next_action)
+        payload["next_action_label"] = str(next_action_label or title)
+        payload["next_action_detail"] = _clip(next_action_detail or detail, 260)
+    if next_action_kind:
+        payload["next_action_kind"] = str(next_action_kind)
+    if next_action_recovery_action:
+        payload["next_action_recovery_action"] = str(next_action_recovery_action)
+    return payload
+
+
+def _autopilot_run_task_board(row: ProjectAutonomyRun, plan: Mapping[str, Any]) -> dict[str, Any]:
+    status = str(row.status or "")
+    plan_status = str(row.plan_status or "")
+    stage = str(row.current_stage or "")
+    merge_status = str(row.merge_status or MERGE_STATUS_PENDING)
+    files = _json_load(row.files_json, [])
+    commands = _json_load(row.commands_json, [])
+    validation = _json_load(row.validation_json, [])
+    files_count = len(files) if isinstance(files, list) else 0
+    commands_count = len(commands) if isinstance(commands, list) else 0
+    has_plan = bool(plan.get("analysis") or plan.get("files") or plan.get("notes"))
+    validation_items = validation if isinstance(validation, list) else []
+    has_validation = bool(validation_items)
+    validation_ok = has_validation and validation_passed(validation_items)
+    terminal_success = status in {RUN_STATUS_COMPLETED, RUN_STATUS_MERGED}
+    terminal_bad = status in {RUN_STATUS_BLOCKED, RUN_STATUS_FAILED, RUN_STATUS_CANCELLED}
+
+    if status == RUN_STATUS_CHATTING:
+        plan_task_status = AUTOPILOT_TASK_STATUS_PENDING
+        plan_detail = f"Use {PLAN_START_CHAT_ACTION_LABEL} when the request is ready for repo analysis."
+        plan_action = AUTOPILOT_TASK_ACTION_START_PLAN
+        plan_action_label = PLAN_START_CHAT_ACTION_LABEL
+        plan_action_kind = None
+    elif status == RUN_STATUS_AWAITING_CLARIFICATION or plan_status == PLAN_STATUS_AWAITING_CLARIFICATION:
+        plan_task_status = AUTOPILOT_TASK_STATUS_BLOCKED
+        plan_detail = "Operator clarification is needed before the plan can proceed."
+        plan_action = AUTOPILOT_TASK_ACTION_ANSWER_QUESTION
+        plan_action_label = "Answer"
+        plan_action_kind = AGENT_OPERATOR_INBOX_ITEM_CLARIFICATION
+    elif plan_status in {PLAN_STATUS_AWAITING_APPROVAL, PLAN_STATUS_APPROVED, PLAN_STATUS_IMPLEMENTED} or terminal_success:
+        plan_task_status = AUTOPILOT_TASK_STATUS_COMPLETED
+        plan_detail = "A scoped plan cleared the approval-quality path."
+        plan_action = None
+        plan_action_label = None
+        plan_action_kind = None
+    elif has_plan or plan_status in {PLAN_STATUS_DRAFTING, PLAN_STATUS_REVISING}:
+        plan_task_status = AUTOPILOT_TASK_STATUS_IN_PROGRESS
+        plan_detail = "Plan drafting or architect review is active."
+        plan_action = None
+        plan_action_label = None
+        plan_action_kind = None
+    else:
+        plan_task_status = AUTOPILOT_TASK_STATUS_PENDING
+        plan_detail = "Plan drafting has not started yet."
+        plan_action = AUTOPILOT_TASK_ACTION_START_PLAN
+        plan_action_label = PLAN_START_CHAT_ACTION_LABEL
+        plan_action_kind = None
+
+    if plan_status in {PLAN_STATUS_APPROVED, PLAN_STATUS_IMPLEMENTED} or status in {
+        RUN_STATUS_RUNNING,
+        RUN_STATUS_VALIDATING,
+        RUN_STATUS_MERGING,
+        RUN_STATUS_COMPLETED,
+        RUN_STATUS_MERGED,
+    }:
+        approval_status = AUTOPILOT_TASK_STATUS_COMPLETED
+        approval_detail = "Implementation is unlocked only after explicit approval and a passing architect gate."
+    elif status == RUN_STATUS_AWAITING_APPROVAL or plan_status == PLAN_STATUS_AWAITING_APPROVAL:
+        approval_status = AUTOPILOT_TASK_STATUS_IN_PROGRESS
+        approval_detail = "Review the plan, architect score, files, and safety gates before approving."
+        approval_action = AUTOPILOT_TASK_ACTION_APPROVE_PLAN
+        approval_action_label = "Approve"
+    elif status == RUN_STATUS_AWAITING_CLARIFICATION or plan_status == PLAN_STATUS_AWAITING_CLARIFICATION:
+        approval_status = AUTOPILOT_TASK_STATUS_BLOCKED
+        approval_detail = "Approval is unavailable until the clarification is answered."
+        approval_action = AUTOPILOT_TASK_ACTION_ANSWER_QUESTION
+        approval_action_label = "Answer"
+    else:
+        approval_status = AUTOPILOT_TASK_STATUS_PENDING
+        approval_detail = "Approval waits for a reviewed plan."
+        approval_action = None
+        approval_action_label = None
+    if approval_status == AUTOPILOT_TASK_STATUS_COMPLETED:
+        approval_action = None
+        approval_action_label = None
+
+    if terminal_success:
+        implementation_status = AUTOPILOT_TASK_STATUS_COMPLETED
+        implementation_detail = f"{files_count} changed file(s) recorded."
+        implementation_action = None
+        implementation_action_label = None
+    elif terminal_bad and (stage == STAGE_IMPLEMENT or files_count or commands_count):
+        implementation_status = AUTOPILOT_TASK_STATUS_BLOCKED
+        implementation_detail = row.error_message or "Implementation stopped before a clean completion."
+        implementation_action = AUTOPILOT_TASK_ACTION_RECOVER_BLOCKER
+        implementation_action_label = "Rerun"
+    elif status in {RUN_STATUS_RUNNING, RUN_STATUS_VALIDATING, RUN_STATUS_MERGING} or (
+        status == RUN_STATUS_QUEUED and plan_status == PLAN_STATUS_APPROVED
+    ):
+        implementation_status = AUTOPILOT_TASK_STATUS_IN_PROGRESS
+        implementation_detail = "The approved work is queued or running under Autopilot worker control."
+        implementation_action = AUTOPILOT_TASK_ACTION_START_WORKER if status == RUN_STATUS_QUEUED else None
+        implementation_action_label = "Start" if status == RUN_STATUS_QUEUED else None
+    else:
+        implementation_status = AUTOPILOT_TASK_STATUS_PENDING
+        implementation_detail = "No implementation work is allowed until approval gates clear."
+        implementation_action = None
+        implementation_action_label = None
+
+    if validation_ok:
+        validation_status = AUTOPILOT_TASK_STATUS_COMPLETED
+        validation_detail = f"{len(validation_items)} validation check(s) passed."
+    elif has_validation:
+        validation_status = AUTOPILOT_TASK_STATUS_BLOCKED
+        validation_detail = "Validation evidence exists but one or more checks failed."
+    elif status == RUN_STATUS_VALIDATING:
+        validation_status = AUTOPILOT_TASK_STATUS_IN_PROGRESS
+        validation_detail = "Validation is currently running."
+    elif terminal_success:
+        validation_status = AUTOPILOT_TASK_STATUS_PENDING
+        validation_detail = "Run completed, but no replayable validation evidence is recorded."
+    else:
+        validation_status = AUTOPILOT_TASK_STATUS_PENDING
+        validation_detail = "Replayable validation evidence has not been recorded yet."
+
+    if status == RUN_STATUS_MERGED or merge_status == RUN_STATUS_MERGED:
+        closeout_status = AUTOPILOT_TASK_STATUS_COMPLETED
+        closeout_detail = "Merge completed after gates passed."
+    elif merge_status == "not_applicable":
+        closeout_status = AUTOPILOT_TASK_STATUS_COMPLETED
+        closeout_detail = "Merge is not applicable for this plan-only or report-only cycle."
+    elif status == RUN_STATUS_MERGING:
+        closeout_status = AUTOPILOT_TASK_STATUS_IN_PROGRESS
+        closeout_detail = "Merge finalization is active."
+        closeout_action = None
+        closeout_action_label = None
+    elif status in {RUN_STATUS_BLOCKED, RUN_STATUS_FAILED}:
+        closeout_status = AUTOPILOT_TASK_STATUS_BLOCKED
+        closeout_detail = row.error_message or row.merge_message or "Resolve the run blocker before closeout."
+        closeout_action = AUTOPILOT_TASK_ACTION_RECOVER_BLOCKER
+        closeout_action_label = "Rerun"
+    elif terminal_success:
+        closeout_status = AUTOPILOT_TASK_STATUS_IN_PROGRESS
+        closeout_detail = "Review artifacts and decide whether merge is appropriate."
+        closeout_action = AUTOPILOT_TASK_ACTION_MERGE if row.integration_branch else None
+        closeout_action_label = "Merge" if row.integration_branch else None
+    else:
+        closeout_status = AUTOPILOT_TASK_STATUS_PENDING
+        closeout_detail = "Closeout waits for implementation and validation evidence."
+        closeout_action = None
+        closeout_action_label = None
+    if closeout_status == AUTOPILOT_TASK_STATUS_COMPLETED:
+        closeout_action = None
+        closeout_action_label = None
+
+    items = [
+        _autopilot_task_item(
+            "capture_request",
+            "Capture request",
+            AUTOPILOT_TASK_STATUS_COMPLETED if str(row.prompt or "").strip() else AUTOPILOT_TASK_STATUS_PENDING,
+            "Original operator request is attached to this run.",
+        ),
+        _autopilot_task_item(
+            "plan_quality_gate",
+            "Draft and gate plan",
+            plan_task_status,
+            plan_detail,
+            run_id=row.run_id,
+            next_action=plan_action,
+            next_action_label=plan_action_label,
+            next_action_kind=plan_action_kind,
+        ),
+        _autopilot_task_item(
+            "approve_plan",
+            "Approve plan",
+            approval_status,
+            approval_detail,
+            run_id=row.run_id,
+            next_action=approval_action,
+            next_action_label=approval_action_label,
+            next_action_kind=(
+                AGENT_OPERATOR_INBOX_ITEM_CLARIFICATION
+                if approval_action == AUTOPILOT_TASK_ACTION_ANSWER_QUESTION
+                else None
+            ),
+        ),
+        _autopilot_task_item(
+            "implement",
+            "Implement safely",
+            implementation_status,
+            implementation_detail,
+            run_id=row.run_id,
+            next_action=implementation_action,
+            next_action_label=implementation_action_label,
+            next_action_kind=(
+                AGENT_OPERATOR_INBOX_ITEM_BLOCKER
+                if implementation_action == AUTOPILOT_TASK_ACTION_RECOVER_BLOCKER
+                else None
+            ),
+            next_action_recovery_action=(
+                AGENT_OPERATOR_INBOX_RECOVERY_RERUN_SAFE
+                if implementation_action == AUTOPILOT_TASK_ACTION_RECOVER_BLOCKER
+                else None
+            ),
+        ),
+        _autopilot_task_item("validate", "Validate evidence", validation_status, validation_detail),
+        _autopilot_task_item(
+            "closeout",
+            "Close out or merge",
+            closeout_status,
+            closeout_detail,
+            run_id=row.run_id,
+            next_action=closeout_action,
+            next_action_label=closeout_action_label,
+            next_action_kind=(
+                AGENT_OPERATOR_INBOX_ITEM_BLOCKER
+                if closeout_action == AUTOPILOT_TASK_ACTION_RECOVER_BLOCKER
+                else None
+            ),
+            next_action_recovery_action=(
+                AGENT_OPERATOR_INBOX_RECOVERY_RERUN_SAFE
+                if closeout_action == AUTOPILOT_TASK_ACTION_RECOVER_BLOCKER
+                else None
+            ),
+        ),
+    ]
+    completed_count = sum(1 for item in items if item["status"] == AUTOPILOT_TASK_STATUS_COMPLETED)
+    blocked_count = sum(1 for item in items if item["status"] == AUTOPILOT_TASK_STATUS_BLOCKED)
+    active_item = next(
+        (
+            item
+            for desired in (
+                AUTOPILOT_TASK_STATUS_BLOCKED,
+                AUTOPILOT_TASK_STATUS_IN_PROGRESS,
+                AUTOPILOT_TASK_STATUS_PENDING,
+            )
+            for item in items
+            if item["status"] == desired
+        ),
+        items[-1],
+    )
+    return {
+        "schema": "chili.autopilot.task_board.v1",
+        "total": len(items),
+        "completed": completed_count,
+        "blocked": blocked_count,
+        "active_item": active_item,
+        "items": items,
+    }
+
+
 def _run_payload(row: ProjectAutonomyRun) -> dict[str, Any]:
     plan = _json_load(row.plan_json, {})
+    task_board = _autopilot_run_task_board(row, plan if isinstance(plan, Mapping) else {})
     return {
         "id": row.id,
         "run_id": row.run_id,
@@ -1720,6 +2008,7 @@ def _run_payload(row: ProjectAutonomyRun) -> dict[str, Any]:
         "merge_status": row.merge_status,
         "merge_message": row.merge_message,
         "plan": _operator_safe_plan_payload(plan),
+        "task_board": task_board,
         "architect_review": {},
         "agents": _json_load(row.agents_json, []),
         "files": _json_load(row.files_json, []),
@@ -5228,6 +5517,11 @@ def _agent_quality_monitor_payload(
     visual_evidenced = int(visual_qa.get("evidenced_ui_run_count") or 0)
     visual_missing = int(visual_qa.get("missing_ui_evidence_count") or 0)
     visual_available = int(visual_qa.get("available_count") or 0)
+    visual_missing_run_ids = _string_items(
+        visual_qa.get("missing_run_ids"),
+        limit=AGENT_OS_QUALITY_PROBLEM_PREVIEW_LIMIT,
+    )
+    visual_next_run_id = visual_missing_run_ids[0] if visual_missing_run_ids else None
     if visual_missing:
         visual_status = AGENT_OS_READINESS_CHECK_WARNING
         visual_detail = (
@@ -5349,6 +5643,7 @@ def _agent_quality_monitor_payload(
         if dimension.get("status") != AGENT_OS_READINESS_CHECK_PASSED
     ]
 
+    next_action_run_id: str | None = None
     if model_status == AGENT_OS_READINESS_CHECK_FAILED or not bool(local_model.get("coding_ready")):
         next_action = AGENT_QUALITY_MONITOR_ACTION_INSTALL_MODEL
         next_action_label = "Install coder model"
@@ -5369,6 +5664,7 @@ def _agent_quality_monitor_payload(
         next_action = AGENT_QUALITY_MONITOR_ACTION_ATTACH_VISUAL_QA
         next_action_label = "Attach visual QA"
         next_action_detail = visual_detail
+        next_action_run_id = visual_next_run_id
     elif codex_status != AGENT_OS_READINESS_CHECK_PASSED:
         next_action = AGENT_QUALITY_MONITOR_ACTION_SYNC_CODEX
         next_action_label = "Sync Codex profiles"
@@ -5408,6 +5704,7 @@ def _agent_quality_monitor_payload(
         "next_action": next_action,
         "next_action_label": next_action_label,
         "next_action_detail": next_action_detail,
+        "next_action_run_id": next_action_run_id,
     }
 
 
@@ -5436,9 +5733,13 @@ def _agent_coding_quality_bar_dimension(
     next_action: str,
     next_action_label: str,
     next_action_detail: str = "",
+    next_action_run_id: str | None = None,
+    next_action_kind: str | None = None,
+    next_action_recovery_action: str | None = None,
+    next_action_button_label: str | None = None,
 ) -> dict[str, Any]:
     bounded = _bounded_quality_score(score)
-    return {
+    payload = {
         "key": key,
         "label": label,
         "score": bounded,
@@ -5452,6 +5753,15 @@ def _agent_coding_quality_bar_dimension(
         "next_action_label": next_action_label,
         "next_action_detail": next_action_detail,
     }
+    if next_action_run_id:
+        payload["next_action_run_id"] = str(next_action_run_id)
+    if next_action_kind:
+        payload["next_action_kind"] = str(next_action_kind)
+    if next_action_recovery_action:
+        payload["next_action_recovery_action"] = str(next_action_recovery_action)
+    if next_action_button_label:
+        payload["next_action_button_label"] = str(next_action_button_label)
+    return payload
 
 
 def _agent_coding_quality_bar_payload(
@@ -5465,6 +5775,12 @@ def _agent_coding_quality_bar_payload(
 ) -> dict[str, Any]:
     local_model_ready = bool(local_model.get("coding_ready"))
     local_model_score = 100 if local_model_ready else 60 if bool(local_model.get("available")) else 25
+    quality_status = str(quality_monitor.get("status") or AGENT_OS_READINESS_CHECK_WARNING)
+    quality_score = _bounded_quality_score(quality_monitor.get("score"))
+    if quality_status == AGENT_OS_READINESS_CHECK_WARNING:
+        quality_score = min(quality_score, AGENT_CODING_QUALITY_BAR_TARGET_SCORE - 5)
+    elif quality_status == AGENT_OS_READINESS_CHECK_FAILED:
+        quality_score = min(quality_score, 25)
     runtime_status = str(runtime_queue.get("status") or AGENT_OS_READINESS_CHECK_WARNING)
     inbox_total = int(operator_inbox.get("total_action_count") or 0)
     inbox_next_action = str(operator_inbox.get("next_action") or "").strip()
@@ -5493,7 +5809,7 @@ def _agent_coding_quality_bar_payload(
         _agent_coding_quality_bar_dimension(
             AGENT_CODING_QUALITY_BAR_DIMENSION_QUALITY,
             "Quality governance",
-            _bounded_quality_score(quality_monitor.get("score")),
+            quality_score,
             str(quality_monitor.get("detail") or "Quality monitor has not reported yet."),
             next_action=str(
                 quality_monitor.get("next_action")
@@ -5501,6 +5817,7 @@ def _agent_coding_quality_bar_payload(
             ),
             next_action_label=str(quality_monitor.get("next_action_label") or "Review quality"),
             next_action_detail=str(quality_monitor.get("next_action_detail") or ""),
+            next_action_run_id=str(quality_monitor.get("next_action_run_id") or "").strip() or None,
         ),
         _agent_coding_quality_bar_dimension(
             AGENT_CODING_QUALITY_BAR_DIMENSION_CAPABILITY,
@@ -5539,10 +5856,15 @@ def _agent_coding_quality_bar_payload(
             next_action=(
                 AGENT_CODING_QUALITY_BAR_ACTION_KEEP_MONITORING
                 if runtime_status == AGENT_OS_READINESS_CHECK_PASSED
-                else AGENT_CODING_QUALITY_BAR_ACTION_DRAIN_QUEUE
+                else str(runtime_queue.get("next_action") or AGENT_CODING_QUALITY_BAR_ACTION_DRAIN_QUEUE)
             ),
-            next_action_label="Keep monitoring" if runtime_status == AGENT_OS_READINESS_CHECK_PASSED else "Drain queue",
-            next_action_detail=str(runtime_queue.get("detail") or ""),
+            next_action_label=(
+                "Keep monitoring"
+                if runtime_status == AGENT_OS_READINESS_CHECK_PASSED
+                else str(runtime_queue.get("next_action_label") or "Drain queue")
+            ),
+            next_action_detail=str(runtime_queue.get("next_action_detail") or runtime_queue.get("detail") or ""),
+            next_action_run_id=str(runtime_queue.get("next_action_run_id") or "").strip() or None,
         ),
         _agent_coding_quality_bar_dimension(
             AGENT_CODING_QUALITY_BAR_DIMENSION_OPERATOR,
@@ -5552,10 +5874,18 @@ def _agent_coding_quality_bar_payload(
             next_action=(
                 AGENT_CODING_QUALITY_BAR_ACTION_KEEP_MONITORING
                 if inbox_total == 0
-                else AGENT_CODING_QUALITY_BAR_ACTION_ANSWER_INBOX
+                else str(operator_inbox.get("next_action") or AGENT_CODING_QUALITY_BAR_ACTION_ANSWER_INBOX)
             ),
-            next_action_label="Keep monitoring" if inbox_total == 0 else "Answer operator inbox",
+            next_action_label=(
+                "Keep monitoring"
+                if inbox_total == 0
+                else str(operator_inbox.get("next_action_label") or "Answer operator inbox")
+            ),
             next_action_detail=str(operator_inbox.get("next_action_detail") or operator_inbox.get("detail") or ""),
+            next_action_run_id=str(operator_inbox.get("next_action_run_id") or "").strip() or None,
+            next_action_kind=str(operator_inbox.get("next_action_kind") or "").strip() or None,
+            next_action_recovery_action=str(operator_inbox.get("next_action_recovery_action") or "").strip() or None,
+            next_action_button_label=str(operator_inbox.get("next_action_button_label") or "").strip() or None,
         ),
     ]
     score = round(sum(int(dimension["score"]) for dimension in dimensions) / max(len(dimensions), 1))
@@ -5570,6 +5900,10 @@ def _agent_coding_quality_bar_payload(
         next_action = str(weakest.get("next_action") or AGENT_CODING_QUALITY_BAR_ACTION_REVIEW_QUALITY)
         next_action_label = str(weakest.get("next_action_label") or "Review quality bar")
         next_action_detail = str(weakest.get("detail") or "")
+        next_action_run_id = str(weakest.get("next_action_run_id") or "").strip() or None
+        next_action_kind = str(weakest.get("next_action_kind") or "").strip() or None
+        next_action_recovery_action = str(weakest.get("next_action_recovery_action") or "").strip() or None
+        next_action_button_label = str(weakest.get("next_action_button_label") or "").strip() or None
         detail = (
             f"Local coding cockpit is {score}/100 against the "
             f"{AGENT_CODING_QUALITY_BAR_TARGET_SCORE}/100 Codex/Claude-class target; "
@@ -5579,6 +5913,10 @@ def _agent_coding_quality_bar_payload(
         next_action = AGENT_CODING_QUALITY_BAR_ACTION_KEEP_MONITORING
         next_action_label = "Keep monitoring"
         next_action_detail = "The local coding cockpit is at or above the current Codex/Claude-class operating bar."
+        next_action_run_id = None
+        next_action_kind = None
+        next_action_recovery_action = None
+        next_action_button_label = None
         detail = (
             f"Local coding cockpit is {score}/100 against the "
             f"{AGENT_CODING_QUALITY_BAR_TARGET_SCORE}/100 Codex/Claude-class target."
@@ -5598,6 +5936,10 @@ def _agent_coding_quality_bar_payload(
         "next_action": next_action,
         "next_action_label": next_action_label,
         "next_action_detail": next_action_detail,
+        "next_action_run_id": next_action_run_id,
+        "next_action_kind": next_action_kind,
+        "next_action_recovery_action": next_action_recovery_action,
+        "next_action_button_label": next_action_button_label,
     }
 
 
@@ -7279,11 +7621,55 @@ def _autopilot_command_status(
     plan_state = row.plan_status or "unknown"
     merge_state = row.merge_status or "pending"
     stage = row.current_stage or row.status or "unknown"
+    raw_plan = _json_load(row.plan_json, {})
+    task_board = _autopilot_run_task_board(row, raw_plan if isinstance(raw_plan, Mapping) else {})
+    active_task = task_board.get("active_item") if isinstance(task_board.get("active_item"), Mapping) else {}
+    active_task_title = str(active_task.get("title") or "No active task").strip()
+    active_task_status = str(active_task.get("status") or "unknown").replace("_", " ")
     return (
         f"{profile_name} is {profile_status}. Run status is {row.status}; "
         f"stage {stage}; plan {plan_state}; merge {merge_state}. "
-        f"Pending operator questions: {pending_questions}."
+        f"Pending operator questions: {pending_questions}. "
+        f"Active task: {active_task_title} ({active_task_status})."
     )
+
+
+def _autopilot_task_board_lines(task_board: Mapping[str, Any]) -> list[str]:
+    total = int(task_board.get("total") or 0)
+    completed = int(task_board.get("completed") or 0)
+    blocked = int(task_board.get("blocked") or 0)
+    lines = [f"Task board: {completed}/{total} complete; {blocked} blocked."]
+    active = task_board.get("active_item") if isinstance(task_board.get("active_item"), Mapping) else {}
+    if active:
+        title = str(active.get("title") or "Active item").strip()
+        status = str(active.get("status") or "unknown").replace("_", " ")
+        detail = str(active.get("detail") or "").strip()
+        next_action_label = str(active.get("next_action_label") or "").strip()
+        active_line = f"Active item: {title} ({status})"
+        if detail:
+            active_line += f" - {detail}"
+        lines.append(active_line)
+        if next_action_label:
+            lines.append(f"Next task action: {next_action_label}.")
+    items = task_board.get("items")
+    if isinstance(items, list) and items:
+        for item in items[:8]:
+            if not isinstance(item, Mapping):
+                continue
+            title = str(item.get("title") or item.get("key") or "Task").strip()
+            status = str(item.get("status") or "unknown").replace("_", " ")
+            detail = str(item.get("detail") or "").strip()
+            line = f"- {title}: {status}"
+            if detail:
+                line += f" - {detail}"
+            lines.append(line)
+    return lines
+
+
+def _autopilot_command_tasks(row: ProjectAutonomyRun) -> str:
+    plan = _json_load(row.plan_json, {})
+    task_board = _autopilot_run_task_board(row, plan if isinstance(plan, Mapping) else {})
+    return "\n".join(_autopilot_task_board_lines(task_board))
 
 
 def _autopilot_changed_files_reply(
@@ -7370,6 +7756,75 @@ def _autopilot_evidence_reply(
         size = f" ({artifact.byte_length} bytes)" if int(artifact.byte_length or 0) else ""
         lines.append(f"- {artifact.artifact_type}: {artifact.name}{size}")
     return "\n".join(lines)
+
+
+def _autopilot_run_context_reply(
+    db: Session,
+    row: ProjectAutonomyRun,
+) -> str:
+    repo_label = "unknown repo"
+    if row.repo_id is not None:
+        repo = db.get(CodeRepo, int(row.repo_id))
+        if repo is not None:
+            repo_label = str(repo.name or repo.path or f"repo {row.repo_id}")
+        else:
+            repo_label = f"repo {row.repo_id}"
+    branch = str(row.integration_branch or "no integration branch recorded")
+    prompt = _clip(str(row.prompt or "").strip(), 220) or "No original request recorded."
+    return (
+        f"Run {row.run_id} is attached to {repo_label}. "
+        f"Branch: {branch}. "
+        f"Plan status: {row.plan_status or 'unknown'}; merge status: {row.merge_status or 'pending'}. "
+        f"Original request: {prompt}"
+    )
+
+
+def _autopilot_next_action_reply(
+    db: Session,
+    row: ProjectAutonomyRun,
+) -> str:
+    status = str(row.status or "")
+    plan_status = str(row.plan_status or "")
+    merge_status = str(row.merge_status or MERGE_STATUS_PENDING)
+    pending_questions = (
+        db.query(ProjectAutonomyOperatorQuestion)
+        .filter(
+            ProjectAutonomyOperatorQuestion.run_id == row.run_id,
+            ProjectAutonomyOperatorQuestion.status == OPERATOR_QUESTION_STATUS_PENDING,
+        )
+        .count()
+    )
+    if status == RUN_STATUS_CHATTING:
+        return (
+            f"Next action: keep brainstorming here, or use {PLAN_START_CHAT_ACTION_LABEL} "
+            "when you want me to scan the repo and draft a reviewed plan."
+        )
+    if status == RUN_STATUS_AWAITING_CLARIFICATION or plan_status == PLAN_STATUS_AWAITING_CLARIFICATION:
+        detail = f" There are {pending_questions} pending operator question(s)." if pending_questions else ""
+        return "Next action: answer the clarification request before I draft or approve a plan." + detail
+    if status == RUN_STATUS_AWAITING_APPROVAL or plan_status == PLAN_STATUS_AWAITING_APPROVAL:
+        return (
+            "Next action: review the approval-ready plan, validation notes, and architect gate. "
+            "Approve only if the plan matches your intent; implementation stays gated until then."
+        )
+    if plan_status == PLAN_STATUS_APPROVED or status in {RUN_STATUS_QUEUED, RUN_STATUS_RUNNING, RUN_STATUS_VALIDATING}:
+        return (
+            f"Next action: wait for the active run to finish its current stage "
+            f"({row.current_stage or status or 'unknown'}). I will keep evidence and validation attached to the run."
+        )
+    if status == RUN_STATUS_MERGING:
+        return "Next action: wait for merge finalization. Merge remains gated by validation and recorded status."
+    if status in {RUN_STATUS_COMPLETED, RUN_STATUS_MERGED}:
+        return (
+            f"Next action: review the recorded files, validation, and artifacts. "
+            f"Merge status is {merge_status}."
+        )
+    if status in {RUN_STATUS_BLOCKED, RUN_STATUS_FAILED}:
+        reason = _clip(str(row.error_message or row.merge_message or "Review the run evidence for the blocker."), 220)
+        return f"Next action: resolve the blocker before continuing. {reason}"
+    if status == RUN_STATUS_CANCELLED:
+        return "Next action: this run is cancelled. Start a new plan when you want to continue."
+    return _autopilot_command_status(db, row)
 
 
 def _autopilot_command_agents(
@@ -7465,6 +7920,7 @@ def _autopilot_coding_quality_bar_lines(readiness: Mapping[str, Any]) -> list[st
     detail = str(bar.get("detail") or "").strip()
     next_action_label = str(bar.get("next_action_label") or "").strip()
     next_action_detail = str(bar.get("next_action_detail") or "").strip()
+    next_action_run_id = str(bar.get("next_action_run_id") or "").strip()
     lines = [f"Codex/Claude quality bar: {score}/{target} ({status})."]
     if detail:
         lines.append(f"Quality bar verdict: {detail}")
@@ -7473,6 +7929,8 @@ def _autopilot_coding_quality_bar_lines(readiness: Mapping[str, Any]) -> list[st
         if next_action_detail:
             action_line += f" - {next_action_detail}"
         lines.append(action_line)
+    if next_action_run_id:
+        lines.append(f"Quality bar target run: {next_action_run_id}")
     gaps = bar.get("gaps")
     if isinstance(gaps, list) and gaps:
         lines.append("Quality bar gaps:")
@@ -7611,6 +8069,7 @@ def _autopilot_quality_monitor_lines(readiness: Mapping[str, Any]) -> list[str]:
     detail = str(monitor.get("detail") or "").strip()
     next_action_label = str(monitor.get("next_action_label") or "").strip()
     next_action_detail = str(monitor.get("next_action_detail") or "").strip()
+    next_action_run_id = str(monitor.get("next_action_run_id") or "").strip()
     lines = [f"Local quality monitor: {status} ({score}/100)."]
     if detail:
         lines.append(f"Quality verdict: {detail}")
@@ -7619,6 +8078,8 @@ def _autopilot_quality_monitor_lines(readiness: Mapping[str, Any]) -> list[str]:
         if next_action_detail:
             action_line += f" - {next_action_detail}"
         lines.append(action_line)
+    if next_action_run_id:
+        lines.append(f"Quality target run: {next_action_run_id}")
 
     dimensions = monitor.get("dimensions")
     problem_dimensions: list[str] = []
@@ -7851,7 +8312,9 @@ def _autopilot_command_quality(
         ),
         (
             "- Scheduled-agent guard: plan-only cycle reports must score "
-            f"{SCHEDULED_AGENT_REPORT_QUALITY_PASSING_SCORE}/100 and are repaired if they claim edits, tests, commits, or merges they did not perform."
+            f"{SCHEDULED_AGENT_REPORT_QUALITY_PASSING_SCORE}/100, include Codex-style receipts "
+            "for verdict/evidence/checks/gates/safety, and are repaired if they claim edits, "
+            "tests, commits, or merges they did not perform."
         ),
         "- Safety posture: generated agents default to observe, research, and plan; worktree patches and merge are off unless explicitly enabled.",
         "- Execution posture: Plan Mode is approval-first; merge still requires clean validation and merge gates.",
@@ -8238,6 +8701,8 @@ def _handle_autopilot_slash_command(
         reply = _autopilot_command_reference(args)
     elif command == AUTOPILOT_COMMAND_QUESTIONS:
         reply = _autopilot_command_questions(db, row)
+    elif command == AUTOPILOT_COMMAND_TASKS:
+        reply = _autopilot_command_tasks(row)
     elif command == AUTOPILOT_COMMAND_SCHEDULE:
         reply = _autopilot_command_schedule(db, row, args)
     elif command == AUTOPILOT_COMMAND_PLAN:
@@ -8320,6 +8785,18 @@ def append_user_message(
         db.commit()
         db.refresh(row)
         return run_payload(db, row, include_events=True)
+    if (
+        not clean_attachments
+        and row.status == RUN_STATUS_AWAITING_APPROVAL
+        and row.plan_status == PLAN_STATUS_AWAITING_APPROVAL
+        and not _looks_like_plan_approval_message(clean)
+    ):
+        mechanical_reply = _mechanical_autopilot_chat_reply(db, row, display_content)
+        if mechanical_reply:
+            _record_message(db, row, "assistant", mechanical_reply, message_type="chat", commit=False)
+            db.commit()
+            db.refresh(row)
+            return run_payload(db, row, include_events=True)
     if row.status == RUN_STATUS_AWAITING_CLARIFICATION or row.plan_status == PLAN_STATUS_AWAITING_CLARIFICATION:
         _answer_pending_operator_questions(db, row, display_content, commit=False)
     if row.status == RUN_STATUS_CHATTING:
@@ -9706,6 +10183,28 @@ def _mechanical_autopilot_chat_reply(
         return None
     normalized = lower.strip(" .!?,")
 
+    if any(
+        marker in lower
+        for marker in (
+            "what next",
+            "what's next",
+            "whats next",
+            "next steps",
+            "next action",
+            "what should happen next",
+            "what happens next",
+            "ready to approve",
+            "can i approve",
+            "should i approve",
+            "can i merge",
+            "should i merge",
+            "ready to merge",
+            "approval ready",
+            "merge ready",
+        )
+    ):
+        return _autopilot_next_action_reply(db, run)
+
     is_how_to = any(
         marker in lower
         for marker in (
@@ -9744,7 +10243,20 @@ def _mechanical_autopilot_chat_reply(
             "use the approve action there; merge stays gated until validation passes."
         )
 
-    if any(marker in lower for marker in ("what files", "which files", "files changed", "changed files")):
+    if any(
+        marker in lower
+        for marker in (
+            "what files",
+            "which files",
+            "files changed",
+            "changed files",
+            "what changed",
+            "what did you change",
+            "show changes",
+            "change summary",
+            "diff summary",
+        )
+    ):
         return _autopilot_changed_files_reply(db, run)
     if any(
         marker in lower
@@ -9752,14 +10264,67 @@ def _mechanical_autopilot_chat_reply(
             "what tests",
             "which tests",
             "tests ran",
+            "tests did you run",
             "test results",
             "validation",
             "validated",
+            "checks ran",
+            "checks passed",
         )
     ):
         return _autopilot_validation_reply(db, run)
-    if any(marker in lower for marker in ("artifact", "artifacts", "evidence", "audit trail", "proof")):
+    if any(
+        marker in lower
+        for marker in (
+            "artifact",
+            "artifacts",
+            "evidence",
+            "audit trail",
+            "proof",
+            "receipts",
+            "show work",
+        )
+    ):
         return _autopilot_evidence_reply(db, run)
+
+    if any(
+        marker in lower
+        for marker in (
+            "run id",
+            "run identifier",
+            "which run",
+            "what run",
+            "what repo",
+            "which repo",
+            "repository",
+            "what branch",
+            "which branch",
+            "branch name",
+            "original request",
+            "what did i ask",
+            "what was my prompt",
+            "approval status",
+            "merge status",
+            "plan status",
+        )
+    ):
+        return _autopilot_run_context_reply(db, run)
+
+    if any(
+        marker in lower
+        for marker in (
+            "task board",
+            "tasks",
+            "todo",
+            "todos",
+            "checklist",
+            "what's left",
+            "whats left",
+            "remaining work",
+            "remaining tasks",
+        )
+    ):
+        return _autopilot_command_tasks(run)
 
     if any(
         marker in lower
@@ -9778,8 +10343,40 @@ def _mechanical_autopilot_chat_reply(
 
     if normalized in {"help", "commands", "what can you do", "what can i ask"}:
         return _autopilot_command_help()
-    if any(marker in lower for marker in ("status", "state", "where are we", "what stage", "progress")):
+    if any(
+        marker in lower
+        for marker in (
+            "status",
+            "state",
+            "where are we",
+            "what stage",
+            "progress",
+            "what is happening",
+            "what's happening",
+            "whats happening",
+            "is it running",
+            "are you running",
+        )
+    ):
         return _autopilot_command_status(db, run)
+    if any(
+        marker in lower
+        for marker in (
+            "blocked",
+            "blocking",
+            "stuck",
+            "waiting on",
+            "waiting for",
+            "why waiting",
+            "why are we waiting",
+            "what is needed",
+            "what's needed",
+            "whats needed",
+        )
+    ):
+        return _autopilot_command_status(db, run)
+    if any(marker in lower for marker in ("schedule", "scheduled", "cadence", "next run", "run cadence")):
+        return _autopilot_command_schedule(db, run, "")
     if any(marker in lower for marker in ("which agents", "list agents", "show agents", "agent status")):
         return _autopilot_command_agents(db, run, user_id=run.user_id)
     if any(marker in lower for marker in ("model policy", "which model", "local model", "model are you")):
@@ -11446,7 +12043,19 @@ def _scheduled_agent_report_prompt(
         [
             "",
             "JSON shape:",
-            '{"summary":"<=30 words","findings":["<=18 words"],"recommended_next_steps":["<=18 words"],"operator_question":""}',
+            (
+                '{"status":"READ_ONLY_CLEAR|NEEDS_OPERATOR|BLOCKED",'
+                '"verdict":"<=24 words",'
+                '"summary":"<=30 words",'
+                '"findings":["<=18 words"],'
+                '"evidence_reviewed":["specific context, file, request, or artifact inspected"],'
+                '"checks_run":["command/test/check result, or say no command checks were run"],'
+                '"risk_or_blockers":["remaining risk or blocker"],'
+                '"recommended_next_steps":["<=18 words"],'
+                '"safety_boundary":["actions not taken and authorizations not granted"],'
+                '"operator_question":""}'
+            ),
+            "Use Codex-style receipts: exact evidence, checks, next gates, and safety boundaries.",
             "If operator input is not needed, operator_question must be empty.",
         ]
     )
@@ -11462,16 +12071,37 @@ def _fallback_scheduled_agent_report(
     name = str(snapshot.get("name") or "Scheduled agent")
     prompt_setting = snapshot.get("prompt_setting") if isinstance(snapshot.get("prompt_setting"), dict) else {}
     source = str(prompt_setting.get("source") or "generated_profile")
+    repo_label = str(repo.name or repo.path or "repository")
+    fallback_reason = _clip(_friendly_model_issue(reason), 120)
     return {
+        "report_schema": SCHEDULED_AGENT_REPORT_SCHEMA,
+        "status": "READ_ONLY_CLEAR",
+        "verdict": f"{name} completed a plan-only observation pass; no source or runtime action was taken.",
         "summary": f"{name} completed a plan-only scheduled pass for {repo.name or repo.path}.",
         "findings": [
             "No files were changed.",
             "This agent is still limited to observation, research, summaries, and operator questions.",
-            f"Local report generation used deterministic fallback: {_clip(_friendly_model_issue(reason), 120)}",
+            f"Local report generation used deterministic fallback: {fallback_reason}",
+        ],
+        "evidence_reviewed": [
+            f"Scheduled request: {_clip(str(run.prompt or ''), 160)}",
+            f"Repository target: {repo_label}",
+            f"Agent prompt source: {source}",
+        ],
+        "checks_run": [
+            "No command or test checks were run; this scheduled cycle inspected stored repo context only.",
+        ],
+        "risk_or_blockers": [
+            f"Deterministic fallback was used because {fallback_reason}",
+            "Patch permissions remain disabled until the operator explicitly enables them.",
         ],
         "recommended_next_steps": [
             "Review this agent's role prompt and schedule before enabling patch permissions.",
             "Use the inspector to grant worktree permission only for agents you trust to draft patches.",
+        ],
+        "safety_boundary": [
+            "No source files, worktrees, commits, pushes, merges, Docker, DB, or broker actions were performed.",
+            "This report is planning evidence only; it does not authorize release, runtime, or live behavior.",
         ],
         "operator_question": "",
         "source": source,
@@ -11479,29 +12109,113 @@ def _fallback_scheduled_agent_report(
 
 
 def _normalise_scheduled_agent_report(raw: dict[str, Any]) -> dict[str, Any]:
+    defaults_applied: list[str] = []
+    status = str(raw.get("status") or "").strip()
+    verdict = str(raw.get("verdict") or raw.get("decision") or "").strip()
     summary = str(raw.get("summary") or "").strip()
     findings = _string_items(raw.get("findings"), limit=5)
+    evidence = _string_items(raw.get("evidence_reviewed"), limit=6) or _string_items(raw.get("evidence"), limit=6)
+    checks = (
+        _string_items(raw.get("checks_run"), limit=6)
+        or _string_items(raw.get("checks"), limit=6)
+        or _string_items(raw.get("validation"), limit=6)
+    )
+    risks = (
+        _string_items(raw.get("risk_or_blockers"), limit=6)
+        or _string_items(raw.get("risks"), limit=6)
+        or _string_items(raw.get("blockers"), limit=6)
+    )
     next_steps = _string_items(raw.get("recommended_next_steps"), limit=5)
+    safety = (
+        _string_items(raw.get("safety_boundary"), limit=6)
+        or _string_items(raw.get("actions_not_taken"), limit=6)
+    )
     question = str(raw.get("operator_question") or "").strip()
+    if not status:
+        status = "READ_ONLY_CLEAR"
+        defaults_applied.append("status")
+    if not verdict:
+        verdict = "Plan-only observation cycle completed; no source or runtime action was taken."
+        defaults_applied.append("verdict")
     if not summary:
         summary = "Scheduled agent completed a plan-only observation cycle."
+        defaults_applied.append("summary")
     if not findings:
         findings = ["No files were changed."]
+        defaults_applied.append("findings")
+    if not evidence:
+        evidence = ["Scheduled run prompt and stored repository context were reviewed."]
+        defaults_applied.append("evidence_reviewed")
+    if not checks:
+        checks = ["No command or test checks were run in this plan-only report cycle."]
+        defaults_applied.append("checks_run")
+    if not risks:
+        risks = ["Patch permissions remain disabled unless the operator enables them."]
+        defaults_applied.append("risk_or_blockers")
     if not next_steps:
         next_steps = ["Keep this agent plan-only until the operator enables patch permissions."]
-    return {
+        defaults_applied.append("recommended_next_steps")
+    if not safety:
+        safety = ["No files were changed in this plan-only cycle."]
+        defaults_applied.append("safety_boundary")
+    payload: dict[str, Any] = {
+        "report_schema": str(raw.get("report_schema") or SCHEDULED_AGENT_REPORT_SCHEMA),
+        "status": _clip(status, 100),
+        "verdict": _clip(verdict, 320),
         "summary": _clip(summary, 500),
         "findings": [_clip(item, 260) for item in findings],
+        "evidence_reviewed": [_clip(item, 260) for item in evidence],
+        "checks_run": [_clip(item, 260) for item in checks],
+        "risk_or_blockers": [_clip(item, 260) for item in risks],
         "recommended_next_steps": [_clip(item, 260) for item in next_steps],
+        "safety_boundary": [_clip(item, 260) for item in safety],
         "operator_question": _clip(question, 500),
     }
+    if defaults_applied:
+        payload["_receipt_defaults_applied"] = defaults_applied
+    for key in ("source", "repair_reason"):
+        value = str(raw.get(key) or "").strip()
+        if value:
+            payload[key] = _clip(value, 500)
+    return payload
+
+
+def _enrich_scheduled_agent_report_receipts(
+    run: ProjectAutonomyRun,
+    repo: CodeRepo,
+    report: dict[str, Any],
+) -> dict[str, Any]:
+    snapshot = _scheduled_agent_profile_snapshot(run)
+    agent_label = str(snapshot.get("profile_key") or snapshot.get("name") or "scheduled_agent")
+    enriched = dict(report)
+    enriched.setdefault("report_schema", SCHEDULED_AGENT_REPORT_SCHEMA)
+    enriched.setdefault("run_id", run.run_id)
+    enriched.setdefault("generated_at_utc", f"{_utcnow().replace(microsecond=0).isoformat()}Z")
+    enriched.setdefault(
+        "request_binding",
+        {
+            "run_id": run.run_id,
+            "agent": agent_label,
+            "repo": str(repo.name or repo.path or ""),
+            "repo_path": str(repo.path or ""),
+            "prompt": _clip(str(run.prompt or ""), 500),
+            "mode": "plan_only",
+        },
+    )
+    return enriched
 
 
 def _scheduled_agent_report_text(report: dict[str, Any]) -> str:
     parts = [
+        str(report.get("status") or ""),
+        str(report.get("verdict") or ""),
         str(report.get("summary") or ""),
         *[str(item) for item in _string_items(report.get("findings"), limit=8)],
+        *[str(item) for item in _string_items(report.get("evidence_reviewed"), limit=8)],
+        *[str(item) for item in _string_items(report.get("checks_run"), limit=8)],
+        *[str(item) for item in _string_items(report.get("risk_or_blockers"), limit=8)],
         *[str(item) for item in _string_items(report.get("recommended_next_steps"), limit=8)],
+        *[str(item) for item in _string_items(report.get("safety_boundary"), limit=8)],
         str(report.get("operator_question") or ""),
     ]
     return "\n".join(parts).lower()
@@ -11532,17 +12246,37 @@ def _scheduled_agent_report_quality(
     score = 100
     summary = str(report.get("summary") or "").strip()
     findings = _string_items(report.get("findings"), limit=8)
+    evidence = _string_items(report.get("evidence_reviewed"), limit=8)
+    checks = _string_items(report.get("checks_run"), limit=8)
+    risks = _string_items(report.get("risk_or_blockers"), limit=8)
     next_steps = _string_items(report.get("recommended_next_steps"), limit=8)
+    safety = _string_items(report.get("safety_boundary"), limit=8)
     question = str(report.get("operator_question") or "").strip()
+    receipt_defaults = set(_string_items(report.get("_receipt_defaults_applied"), limit=12))
+    if "status" in receipt_defaults or "verdict" in receipt_defaults:
+        score -= 10
+        issues.append("missing_status_or_verdict")
     if len(summary.split()) < 5:
         score -= 25
         issues.append("summary_too_thin")
     if len([item for item in findings if len(item.split()) >= 3]) < 2:
         score -= 15
         issues.append("findings_too_thin")
+    if len(evidence) < 2 or "evidence_reviewed" in receipt_defaults:
+        score -= 15
+        issues.append("missing_evidence_reviewed")
+    if not checks or "checks_run" in receipt_defaults:
+        score -= 10
+        issues.append("missing_checks_run")
+    if not risks or "risk_or_blockers" in receipt_defaults:
+        score -= 5
+        issues.append("missing_risk_or_blocker")
     if not next_steps:
         score -= 20
         issues.append("missing_next_steps")
+    if not safety or "safety_boundary" in receipt_defaults:
+        score -= 15
+        issues.append("missing_safety_boundary")
     if not _scheduled_agent_report_mentions_plan_only(report):
         score -= 15
         issues.append("missing_plan_only_disclaimer")
@@ -11590,14 +12324,33 @@ def _repair_scheduled_agent_report(
     question = str(report.get("operator_question") or "").strip()
     if question:
         repaired["operator_question"] = question
+    repaired["status"] = "READ_ONLY_REPAIRED"
+    repaired["verdict"] = "Initial local report failed the receipt quality gate and was replaced with a safe plan-only report."
     repaired["findings"] = [
         "No files were changed.",
         "The first local report was repaired by the scheduled-agent quality guard.",
         "This cycle stayed inside observe, research, summarize, and question permissions.",
     ]
+    repaired["evidence_reviewed"] = [
+        "Initial local model report was inspected by the scheduled-agent quality gate.",
+        f"Quality issues: {', '.join(str(item) for item in quality.get('issues') or []) or 'unknown'}",
+        "Scheduled run prompt and stored repository context were retained.",
+    ]
+    repaired["checks_run"] = [
+        "Scheduled-agent report quality gate checked the report for unsupported action claims and missing receipts.",
+        "No command or test checks were run in this plan-only cycle.",
+    ]
+    repaired["risk_or_blockers"] = [
+        "The local model output needed repair before it could be shown as an agent report.",
+        "Patch permissions remain disabled until the operator explicitly enables them.",
+    ]
     repaired["recommended_next_steps"] = [
         "Review the repaired report before enabling patch permissions for this agent.",
         "Tune the agent operating prompt if repeated reports need repair.",
+    ]
+    repaired["safety_boundary"] = [
+        "No source files, worktrees, commits, pushes, merges, Docker, DB, or broker actions were performed.",
+        "This repaired report does not authorize implementation, release, runtime, or live behavior.",
     ]
     repaired["repair_reason"] = ", ".join(str(item) for item in quality.get("issues") or [])
     return repaired
@@ -11608,13 +12361,21 @@ def _quality_checked_scheduled_agent_report(
     repo: CodeRepo,
     report: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    normalised = _normalise_scheduled_agent_report(report)
+    normalised = _enrich_scheduled_agent_report_receipts(
+        run,
+        repo,
+        _normalise_scheduled_agent_report(report),
+    )
     initial_quality = _scheduled_agent_report_quality(normalised)
     if initial_quality["status"] == SCHEDULED_AGENT_REPORT_QUALITY_PASSED:
         normalised["quality"] = initial_quality
         return normalised, initial_quality
     repaired = _repair_scheduled_agent_report(run, repo, normalised, initial_quality)
-    repaired = _normalise_scheduled_agent_report(repaired)
+    repaired = _enrich_scheduled_agent_report_receipts(
+        run,
+        repo,
+        _normalise_scheduled_agent_report(repaired),
+    )
     final_quality = _scheduled_agent_report_quality(
         repaired,
         repaired=True,
@@ -11663,14 +12424,34 @@ def _scheduled_agent_report_message(report: dict[str, Any], run: ProjectAutonomy
     snapshot = _scheduled_agent_profile_snapshot(run)
     name = str(snapshot.get("name") or "Scheduled agent")
     parts = [f"{name} scheduled cycle report", "", str(report.get("summary") or "")]
+    status = str(report.get("status") or "").strip()
+    verdict = str(report.get("verdict") or "").strip()
+    if status or verdict:
+        parts.extend(["", f"Verdict: {status or 'checked'} - {verdict or 'No verdict detail reported.'}"])
     findings = _string_items(report.get("findings"), limit=5)
     if findings:
         parts.extend(["", "Findings:"])
         parts.extend(f"- {item}" for item in findings)
+    evidence = _string_items(report.get("evidence_reviewed"), limit=3)
+    if evidence:
+        parts.extend(["", "Evidence reviewed:"])
+        parts.extend(f"- {item}" for item in evidence)
+    checks = _string_items(report.get("checks_run"), limit=3)
+    if checks:
+        parts.extend(["", "Checks:"])
+        parts.extend(f"- {item}" for item in checks)
+    risks = _string_items(report.get("risk_or_blockers"), limit=3)
+    if risks:
+        parts.extend(["", "Risks / blockers:"])
+        parts.extend(f"- {item}" for item in risks)
     next_steps = _string_items(report.get("recommended_next_steps"), limit=5)
     if next_steps:
         parts.extend(["", "Recommended next steps:"])
         parts.extend(f"- {item}" for item in next_steps)
+    safety = _string_items(report.get("safety_boundary"), limit=3)
+    if safety:
+        parts.extend(["", "Safety boundary:"])
+        parts.extend(f"- {item}" for item in safety)
     question = str(report.get("operator_question") or "").strip()
     if question:
         parts.extend(["", f"Needs operator input: {question}"])
@@ -11738,7 +12519,7 @@ def _build_scheduled_agent_report(
         str(model_info["model"]),
         temperature=0.2,
         timeout_sec=min(_PLAN_TIMEOUT_SEC, 45),
-        options={"num_predict": 220, "num_ctx": _PLAN_NUM_CTX, "keep_alive": _OLLAMA_KEEP_ALIVE},
+        options={"num_predict": 520, "num_ctx": _PLAN_NUM_CTX, "keep_alive": _OLLAMA_KEEP_ALIVE},
     )
     _note_model_call_result(str(model_info["model"]), result)
     _add_artifact(

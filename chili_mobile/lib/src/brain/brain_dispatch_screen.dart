@@ -12,6 +12,7 @@ import '../network/chili_api_client.dart';
 import '../network/network_error_message.dart';
 import '../screen/focus_controller.dart';
 import '../screen/focus_target.dart';
+import 'autopilot_quality_action_presenter.dart';
 import 'autonomy_run_presenter.dart';
 import 'device_auth_store.dart';
 
@@ -257,8 +258,15 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   static const _autopilotCodingQualityCompetitive = 'competitive';
   static const _autopilotCodingQualityDimensions = 'dimensions';
   static const _autopilotCodingQualityGaps = 'gaps';
+  static const _autopilotCodingQualityNextAction = 'next_action';
   static const _autopilotCodingQualityNextActionLabel = 'next_action_label';
   static const _autopilotCodingQualityNextActionDetail = 'next_action_detail';
+  static const _autopilotCodingQualityNextActionRunId = 'next_action_run_id';
+  static const _autopilotCodingQualityNextActionKind = 'next_action_kind';
+  static const _autopilotCodingQualityNextActionRecoveryAction =
+      'next_action_recovery_action';
+  static const _autopilotCodingQualityNextActionButtonLabel =
+      'next_action_button_label';
   static const _autopilotAgentQualityMonitor = 'agent_quality_monitor';
   static const _autopilotAgentCapabilityAudit = 'agent_os_capability_audit';
   static const _autopilotAgentCapabilityItems = 'capabilities';
@@ -269,12 +277,20 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   static const _autopilotAgentCapabilityActionEnableAlwaysOn =
       'enable_always_on';
   static const _autopilotAgentQualityDimensions = 'dimensions';
+  static const _autopilotAgentQualityNextAction = 'next_action';
   static const _autopilotAgentQualityNextActionLabel = 'next_action_label';
   static const _autopilotAgentQualityNextActionDetail = 'next_action_detail';
+  static const _autopilotAgentQualityNextActionRunId = 'next_action_run_id';
   static const _autopilotCodexAlignment = 'codex_alignment';
   static const _autopilotCodexAlignmentDimensions = 'dimensions';
   static const _autopilotCodexAlignmentGaps = 'gaps';
   static const _autopilotCodexAlignmentPassingScore = 85;
+  static const _autopilotTaskActionStartPlan = 'start_plan';
+  static const _autopilotTaskActionAnswerQuestion = 'answer_question';
+  static const _autopilotTaskActionApprovePlan = 'approve_plan';
+  static const _autopilotTaskActionStartWorker = 'start_worker';
+  static const _autopilotTaskActionRecoverBlocker = 'recover_blocker';
+  static const _autopilotTaskActionMerge = 'merge';
   static const _autopilotDefaultRepoPath = r'D:\dev\chili-home-copilot';
   static const _autopilotSlashHelp = '/help';
   static const _autopilotSlashStatus = '/status';
@@ -2050,16 +2066,34 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   Future<void> _attachAutopilotScreenshot() async {
     final runId = _activeAutonomyRun?['run_id']?.toString();
     if (runId == null || runId.isEmpty) return;
+    await _attachAutopilotScreenshotForRunId(runId);
+  }
+
+  Future<void> _attachAutopilotScreenshotForRunId(String runId) async {
+    final id = runId.trim();
+    if (id.isEmpty || _autonomyBusy) return;
     setState(() {
       _autonomyBusy = true;
       _autonomyError = null;
     });
     try {
+      if ((_activeAutonomyRun?['run_id']?.toString() ?? '') != id) {
+        final targetRun = await _api.getProjectAutonomyRun(id);
+        if (!mounted) return;
+        final signature = _autopilotChatSignature(targetRun);
+        setState(() {
+          _activeAutonomyRun = targetRun;
+          _autonomyDraftOpen = false;
+          _syncAutonomyRunListState(targetRun);
+        });
+        _scheduleAutopilotChatFollow(signature: signature, force: true);
+        _syncAutonomyEventStream();
+      }
       _autopilotFocus.start(const FocusTarget.fullScreen());
       final path = await _autopilotFocus.captureNow();
       _autopilotFocus.stop(deleteLastFile: path == null);
       final run = await _api.recordProjectAutonomyVisualValidation(
-        runId: runId,
+        runId: id,
         kind: 'screenshot',
         path: path,
         note: 'Desktop screenshot captured from the Autopilot cockpit.',
@@ -2071,6 +2105,16 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
           _syncAutonomyRunListState(run);
         });
         _syncAutonomyEventStream();
+      }
+      await _loadAutonomyAgentReadiness();
+      await _loadAutonomyRuns(silent: true);
+      if ((_activeAutonomyRun?['run_id']?.toString() ?? '') == id) {
+        await _refreshActiveAutonomyRun(silent: true, force: true);
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Screenshot attached for visual QA.')),
+        );
       }
     } catch (e) {
       _autopilotFocus.stop();
@@ -2197,6 +2241,51 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
       if (mounted) setState(() => _autonomyError = userVisibleNetworkError(e));
     } finally {
       if (mounted) setState(() => _autonomyBusy = false);
+    }
+  }
+
+  Future<void> _runAutopilotQualityTargetAction(
+    AutopilotQualityTargetAction targetAction,
+    String runId, {
+    String kind = '',
+    String recoveryAction = '',
+    String actionLabel = '',
+  }) async {
+    switch (targetAction.route) {
+      case AutopilotQualityTargetRoute.startQueued:
+        await _wakeAutopilotRunById(runId);
+        return;
+      case AutopilotQualityTargetRoute.attachScreenshot:
+        await _attachAutopilotScreenshotForRunId(runId);
+        return;
+      case AutopilotQualityTargetRoute.inboxItem:
+        await _openAutonomyInboxItem({
+          'kind': kind,
+          'run_id': runId,
+          if (recoveryAction.isNotEmpty) 'recovery_action': recoveryAction,
+          if (actionLabel.isNotEmpty) 'action_label': actionLabel,
+        });
+        return;
+      case AutopilotQualityTargetRoute.openRun:
+        await _openAutonomyRunById(runId);
+        return;
+    }
+  }
+
+  IconData _autopilotQualityTargetActionIcon(
+    AutopilotQualityTargetAction targetAction,
+  ) {
+    switch (targetAction.route) {
+      case AutopilotQualityTargetRoute.attachScreenshot:
+        return Icons.screenshot_monitor;
+      case AutopilotQualityTargetRoute.startQueued:
+        return Icons.play_arrow;
+      case AutopilotQualityTargetRoute.inboxItem:
+        return targetAction.buttonLabel == 'Rerun'
+            ? Icons.replay
+            : Icons.open_in_new;
+      case AutopilotQualityTargetRoute.openRun:
+        return Icons.open_in_new;
     }
   }
 
@@ -6376,10 +6465,24 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
             ? _autonomyStatusColor('failed')
             : Colors.orange;
     final detail = bar['detail']?.toString().trim() ?? '';
+    final nextActionKey =
+        bar[_autopilotCodingQualityNextAction]?.toString().trim() ?? '';
     final nextAction =
         bar[_autopilotCodingQualityNextActionLabel]?.toString().trim() ?? '';
     final nextActionDetail =
         bar[_autopilotCodingQualityNextActionDetail]?.toString().trim() ?? '';
+    final nextActionRunId =
+        bar[_autopilotCodingQualityNextActionRunId]?.toString().trim() ?? '';
+    final nextActionKind =
+        bar[_autopilotCodingQualityNextActionKind]?.toString().trim() ?? '';
+    final nextActionRecoveryAction =
+        bar[_autopilotCodingQualityNextActionRecoveryAction]
+                ?.toString()
+                .trim() ??
+            '';
+    final nextActionExplicitButtonLabel =
+        bar[_autopilotCodingQualityNextActionButtonLabel]?.toString().trim() ??
+            '';
     final gaps = _asMapList(bar[_autopilotCodingQualityGaps]);
     final dimensions = _asMapList(bar[_autopilotCodingQualityDimensions]);
     final visibleDimensions =
@@ -6387,6 +6490,11 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final progress =
         target > 0 ? (score / target).clamp(0.0, 1.0).toDouble() : 0.0;
     final canRunCommand = !_autonomyBusy && _codeRepos.isNotEmpty;
+    final nextTargetAction = AutopilotQualityActionPresenter.targetAction(
+      action: nextActionKey,
+      actionLabel: nextActionExplicitButtonLabel,
+      kind: nextActionKind,
+    );
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(9),
@@ -6474,6 +6582,30 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                       ],
                     ),
                   ),
+                  if (nextActionRunId.isNotEmpty) ...[
+                    const SizedBox(width: 8),
+                    OutlinedButton.icon(
+                      style: OutlinedButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                      ),
+                      onPressed: _autonomyBusy
+                          ? null
+                          : () => unawaited(
+                                _runAutopilotQualityTargetAction(
+                                  nextTargetAction,
+                                  nextActionRunId,
+                                  kind: nextActionKind,
+                                  recoveryAction: nextActionRecoveryAction,
+                                  actionLabel: nextActionExplicitButtonLabel,
+                                ),
+                              ),
+                      icon: Icon(
+                        _autopilotQualityTargetActionIcon(nextTargetAction),
+                        size: 15,
+                      ),
+                      label: Text(nextTargetAction.buttonLabel),
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -6518,13 +6650,20 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
             ? _autonomyStatusColor('failed')
             : Colors.orange;
     final detail = monitor['detail']?.toString().trim() ?? '';
+    final nextActionKey =
+        monitor[_autopilotAgentQualityNextAction]?.toString().trim() ?? '';
     final nextAction =
         monitor[_autopilotAgentQualityNextActionLabel]?.toString().trim() ?? '';
     final nextActionDetail =
         monitor[_autopilotAgentQualityNextActionDetail]?.toString().trim() ??
             '';
+    final nextActionRunId =
+        monitor[_autopilotAgentQualityNextActionRunId]?.toString().trim() ?? '';
     final dimensions = _asMapList(monitor[_autopilotAgentQualityDimensions]);
     final problems = _asStringList(monitor[_autopilotQualityProblems]);
+    final nextTargetAction = AutopilotQualityActionPresenter.targetAction(
+      action: nextActionKey,
+    );
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(9),
@@ -6602,6 +6741,27 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                       ],
                     ),
                   ),
+                  if (nextActionRunId.isNotEmpty) ...[
+                    const SizedBox(width: 8),
+                    OutlinedButton.icon(
+                      style: OutlinedButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                      ),
+                      onPressed: _autonomyBusy
+                          ? null
+                          : () => unawaited(
+                                _runAutopilotQualityTargetAction(
+                                  nextTargetAction,
+                                  nextActionRunId,
+                                ),
+                              ),
+                      icon: Icon(
+                        _autopilotQualityTargetActionIcon(nextTargetAction),
+                        size: 15,
+                      ),
+                      label: Text(nextTargetAction.buttonLabel),
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -9473,6 +9633,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final learning = _asMap(run['learning']);
     final artifacts = _asMapList(run['artifacts']);
     final steps = _asMapList(run['steps']);
+    final taskBoard = _asMap(run['task_board']);
     final delegations = _asMapList(run['delegations']);
     final expertThreads = _asMapList(run['expert_threads']);
     final pmSynthesis = _asMap(run['pm_synthesis']);
@@ -9533,6 +9694,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
           if (errorMessage.isNotEmpty)
             _kvSelectable(
                 'Blocked', AutonomyRunPresenter.blockedRunMessage(run)),
+          const Divider(height: 28),
+          _buildAutonomyTaskBoard(taskBoard, run),
           const Divider(height: 28),
           _buildAutonomyArchitectQuality(architectReview),
           const Divider(height: 28),
@@ -9637,6 +9800,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final files = _asStringList(run['files']);
     final validation = _asMapList(run['validation']);
     final steps = _asMapList(run['steps']);
+    final taskBoard = _asMap(run['task_board']);
     final learning = _asMap(run['learning']);
     final delegations = _asMapList(run['delegations']);
     final expertThreads = _asMapList(run['expert_threads']);
@@ -9715,6 +9879,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
               _kvSelectable(
                   'Blocked', AutonomyRunPresenter.blockedRunMessage(run)),
             const Divider(height: 28),
+            _buildAutonomyTaskBoard(taskBoard, run),
+            const Divider(height: 28),
             _buildAutonomyArchitectQuality(architectReview),
             const Divider(height: 28),
             _buildAutonomyPlan(plan, files),
@@ -9736,6 +9902,215 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
           ],
         ),
       ),
+    );
+  }
+
+  Color _autopilotTaskStatusColor(String status) {
+    switch (status) {
+      case 'completed':
+        return _autonomyStatusColor('completed');
+      case 'blocked':
+        return _autonomyStatusColor('blocked');
+      case 'in_progress':
+        return Colors.indigo;
+      case 'pending':
+        return Colors.blueGrey;
+      default:
+        return Colors.blueGrey;
+    }
+  }
+
+  IconData _autopilotTaskStatusIcon(String status) {
+    switch (status) {
+      case 'completed':
+        return Icons.check_circle_outline;
+      case 'blocked':
+        return Icons.error_outline;
+      case 'in_progress':
+        return Icons.autorenew;
+      default:
+        return Icons.radio_button_unchecked;
+    }
+  }
+
+  IconData _autopilotTaskActionIcon(String action) {
+    switch (action) {
+      case _autopilotTaskActionStartPlan:
+        return Icons.account_tree_outlined;
+      case _autopilotTaskActionAnswerQuestion:
+        return Icons.reply_outlined;
+      case _autopilotTaskActionApprovePlan:
+        return Icons.play_arrow;
+      case _autopilotTaskActionStartWorker:
+        return Icons.play_arrow;
+      case _autopilotTaskActionRecoverBlocker:
+        return Icons.replay;
+      case _autopilotTaskActionMerge:
+        return Icons.merge_type;
+      default:
+        return Icons.open_in_new;
+    }
+  }
+
+  Future<void> _runAutopilotTaskBoardAction(
+    Map<String, dynamic> item,
+    Map<String, dynamic> run,
+  ) async {
+    final action = item['next_action']?.toString().trim() ?? '';
+    final itemRunId = item['next_action_run_id']?.toString().trim() ?? '';
+    final currentRunId = run['run_id']?.toString().trim() ?? '';
+    final runId = itemRunId.isNotEmpty ? itemRunId : currentRunId;
+    if (action.isEmpty) return;
+    switch (action) {
+      case _autopilotTaskActionStartPlan:
+        await _startAutopilotPlan();
+        return;
+      case _autopilotTaskActionAnswerQuestion:
+        await _openAutonomyInboxItem({
+          'kind': item['next_action_kind']?.toString().trim().isNotEmpty == true
+              ? item['next_action_kind'].toString().trim()
+              : _autopilotOperatorInboxKindClarification,
+          'run_id': runId,
+        });
+        return;
+      case _autopilotTaskActionApprovePlan:
+        await _approveAutopilotPlan();
+        return;
+      case _autopilotTaskActionStartWorker:
+        await _wakeAutopilotRunById(runId);
+        return;
+      case _autopilotTaskActionRecoverBlocker:
+        await _openAutonomyInboxItem({
+          'kind': _autopilotOperatorInboxKindBlocker,
+          'run_id': runId,
+          'recovery_action': _autopilotOperatorInboxRecoveryRerun,
+          'action_label': item['next_action_label']?.toString() ?? 'Rerun',
+        });
+        return;
+      case _autopilotTaskActionMerge:
+        await _mergeAutopilot();
+        return;
+      default:
+        await _openAutonomyRunById(runId);
+        return;
+    }
+  }
+
+  Widget _buildAutonomyTaskBoard(
+    Map<String, dynamic> taskBoard,
+    Map<String, dynamic> run,
+  ) {
+    final items = _asMapList(taskBoard['items']);
+    final activeItem = _asMap(taskBoard['active_item']);
+    final total = _asInt(taskBoard['total']) ?? items.length;
+    final completed = _asInt(taskBoard['completed']) ??
+        items.where((item) => item['status']?.toString() == 'completed').length;
+    final blocked = _asInt(taskBoard['blocked']) ??
+        items.where((item) => item['status']?.toString() == 'blocked').length;
+    final activeTitle = activeItem['title']?.toString().trim() ?? '';
+    final activeStatus = activeItem['status']?.toString().trim() ?? '';
+    final activeDetail = activeItem['detail']?.toString().trim() ?? '';
+    final activeAction = activeItem['next_action']?.toString().trim() ?? '';
+    final activeActionLabel =
+        activeItem['next_action_label']?.toString().trim() ?? '';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('Task board', style: Theme.of(context).textTheme.titleSmall),
+        const SizedBox(height: 8),
+        if (items.isEmpty)
+          Text('Waiting for task state',
+              style: TextStyle(color: _mutedTextColor()))
+        else ...[
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              _miniChip(
+                '$completed/$total complete',
+                _autonomyBubbleBackground(
+                  completed >= total ? Colors.green : Colors.indigo,
+                ),
+                completed >= total
+                    ? Colors.green.shade800
+                    : Colors.indigo.shade800,
+              ),
+              if (blocked > 0)
+                _miniChip(
+                  '$blocked blocked',
+                  _autonomyBubbleBackground(_autonomyStatusColor('blocked')),
+                  _autonomyStatusColor('blocked'),
+                ),
+              if (activeTitle.isNotEmpty)
+                _miniChip(
+                  activeTitle,
+                  _autonomyBubbleBackground(
+                    _autopilotTaskStatusColor(activeStatus),
+                  ),
+                  _autopilotTaskStatusColor(activeStatus),
+                ),
+              if (activeAction.isNotEmpty)
+                OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  onPressed: _autonomyBusy
+                      ? null
+                      : () => unawaited(
+                            _runAutopilotTaskBoardAction(activeItem, run),
+                          ),
+                  icon: Icon(
+                    _autopilotTaskActionIcon(activeAction),
+                    size: 15,
+                  ),
+                  label: Text(
+                    activeActionLabel.isEmpty ? 'Continue' : activeActionLabel,
+                  ),
+                ),
+            ],
+          ),
+          if (activeDetail.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Text(
+              activeDetail,
+              style: TextStyle(color: _mutedTextColor(), fontSize: 12),
+            ),
+          ],
+          const SizedBox(height: 8),
+          ...items.map((item) {
+            final status = item['status']?.toString().trim() ?? '';
+            final color = _autopilotTaskStatusColor(status);
+            final title = item['title']?.toString().trim() ?? '';
+            final detail = item['detail']?.toString().trim() ?? '';
+            return ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(
+                _autopilotTaskStatusIcon(status),
+                color: color,
+                size: 18,
+              ),
+              title: Text(
+                title.isEmpty ? 'Task' : title,
+                overflow: TextOverflow.ellipsis,
+              ),
+              subtitle: detail.isEmpty
+                  ? null
+                  : Text(
+                      detail,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(color: _mutedTextColor()),
+                    ),
+              trailing: _miniChip(
+                _autonomyStatusLabel(status),
+                _autonomyBubbleBackground(color),
+                color,
+              ),
+            );
+          }),
+        ],
+      ],
     );
   }
 
