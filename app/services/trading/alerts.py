@@ -84,12 +84,19 @@ def _record_alert_sent(alert_type: str, ticker: str | None) -> None:
         _recent_alerts.clear()
 
 
-def _positive_finite_float(value: Any) -> float | None:
+def _finite_float_or_none(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
     try:
         out = float(value)
     except (TypeError, ValueError):
         return None
-    if not math.isfinite(out) or out <= 0:
+    return out if math.isfinite(out) else None
+
+
+def _positive_finite_float(value: Any) -> float | None:
+    out = _finite_float_or_none(value)
+    if out is None or out <= 0:
         return None
     return out
 
@@ -215,7 +222,14 @@ _PROPOSAL_EXPIRE_HOURS = 24  # operational, not scoring
 def _get_brain_weight(key: str) -> float:
     """Read a scoring weight from the brain's adaptive weight system."""
     from .scanner import get_adaptive_weight
-    return get_adaptive_weight(key)
+    try:
+        raw = get_adaptive_weight(key)
+    except Exception:
+        raw = None
+    value = _finite_float_or_none(raw)
+    if value is None or value < 0:
+        return _POS_WEIGHT_DEFAULTS.get(key, 0.0)
+    return value
 
 _SPECULATIVE_KEYWORDS = [
     "float_micro", "float_low", "micro", "microcap", "penny",
@@ -228,6 +242,29 @@ _MAX_RISK_PCT = 2.0
 _POS_PCT_HARD_CAP = 10.0
 _POS_PCT_RISK_OFF_CAP = 7.0
 _POS_PCT_SPECULATIVE_CAP = 5.0
+_POS_WEIGHT_DEFAULTS: dict[str, float] = {
+    "pos_max_risk_pct": _MAX_RISK_PCT,
+    "pos_pct_hard_cap": _POS_PCT_HARD_CAP,
+    "pos_pct_risk_off_cap": _POS_PCT_RISK_OFF_CAP,
+    "pos_pct_speculative_cap": _POS_PCT_SPECULATIVE_CAP,
+    "pos_regime_risk_off_mult": 0.50,
+    "pos_regime_cautious_mult": 0.75,
+    "pos_vix_elevated_mult": 0.85,
+    "pos_vix_extreme_mult": 0.70,
+    "pos_vol_stop_10_mult": 0.70,
+    "pos_vol_stop_8_mult": 0.80,
+    "pos_vol_stop_5_mult": 0.90,
+    "pos_speculative_mult": 0.60,
+    "pos_scanner_cap_mult": 1.25,
+}
+
+
+def _truthy_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return False
 
 
 def _compute_position_size(
@@ -242,21 +279,10 @@ def _compute_position_size(
     is zero, inputs are invalid, or the risk-approved allocation cannot buy
     one whole share without exceeding the sizing budget.
     """
-    try:
-        price_f = float(price)
-        stop_f = float(stop)
-        buying_power_f = float(buying_power)
-    except (TypeError, ValueError):
-        return None, None
-
-    if (
-        not math.isfinite(price_f)
-        or not math.isfinite(stop_f)
-        or not math.isfinite(buying_power_f)
-        or buying_power_f <= 0
-        or price_f <= 0
-        or stop_f <= 0
-    ):
+    price_f = _positive_finite_float(price)
+    stop_f = _positive_finite_float(stop)
+    buying_power_f = _positive_finite_float(buying_power)
+    if price_f is None or stop_f is None or buying_power_f is None:
         return None, None
 
     risk_per_share = price_f - stop_f
@@ -300,10 +326,16 @@ def _compute_position_size(
         vol_mult = _get_brain_weight("pos_vol_stop_5_mult")
 
     # ── 3. Instrument-quality / speculative overlay ───────────────────
-    signals_text = " ".join(s.lower() for s in pick.get("signals", []))
-    risk_level = (pick.get("risk_level") or "").lower()
+    safe_pick = pick if isinstance(pick, dict) else {}
+    raw_signals = safe_pick.get("signals", [])
+    if isinstance(raw_signals, str):
+        raw_signals = [raw_signals]
+    if not isinstance(raw_signals, (list, tuple)):
+        raw_signals = []
+    signals_text = " ".join(str(s).lower() for s in raw_signals if s is not None)
+    risk_level = str(safe_pick.get("risk_level") or "").lower()
 
-    is_speculative = risk_level in ("high", "very_high") or pick.get("is_crypto", False)
+    is_speculative = risk_level in ("high", "very_high") or _truthy_flag(safe_pick.get("is_crypto"))
     if not is_speculative:
         for kw in _SPECULATIVE_KEYWORDS:
             if kw in signals_text:
@@ -316,8 +348,8 @@ def _compute_position_size(
     adjusted_pct = raw_pct * regime_mult * vol_mult * spec_mult
 
     # ── 5. Scanner/brain soft cap -- stay near their suggestion ───────
-    pick_pct = pick.get("position_size_pct")
-    if pick_pct and pick_pct > 0:
+    pick_pct = _positive_finite_float(safe_pick.get("position_size_pct"))
+    if pick_pct is not None:
         adjusted_pct = min(adjusted_pct, pick_pct * _get_brain_weight("pos_scanner_cap_mult"))
 
     # ── 6. Hard caps (regime-aware) ───────────────────────────────────
@@ -328,7 +360,7 @@ def _compute_position_size(
         cap = min(cap, _get_brain_weight("pos_pct_speculative_cap"))
 
     final_pct = round(min(adjusted_pct, cap), 2)
-    if final_pct <= 0:
+    if not math.isfinite(final_pct) or final_pct <= 0:
         return None, None
 
     position_dollars = buying_power_f * (final_pct / 100)
@@ -1936,7 +1968,9 @@ def _execute_proposal(
     _prop_spid = _scan_pattern_id_from_proposal(proposal)
 
     ticker = proposal.ticker
-    quantity = proposal.quantity
+    quantity = _positive_finite_float(getattr(proposal, "quantity", None))
+    if quantity is not None:
+        proposal.quantity = quantity
     buying_power = _get_buying_power()
     if buying_power is None or buying_power <= 0:
         msg = format_order_blocked(ticker, "buying_power_unavailable")
@@ -1967,7 +2001,7 @@ def _execute_proposal(
         logger.error("[alerts] risk gate check failed; blocking proposal execution as safety", exc_info=True)
         return {"status": "blocked", "error": "risk gate check failed"}
 
-    if not quantity or quantity <= 0:
+    if quantity is None:
         pick = {}
         if proposal.signals_json:
             try:
@@ -1976,9 +2010,10 @@ def _execute_proposal(
             except Exception:
                 pass
         pick["is_crypto"] = proposal.ticker.endswith("-USD")
-        quantity, position_size_pct = _compute_position_size(
+        computed_quantity, position_size_pct = _compute_position_size(
             entry, stop, buying_power, pick,
         )
+        quantity = _positive_finite_float(computed_quantity)
         if quantity is not None and quantity > 0:
             proposal.quantity = quantity
             if position_size_pct is not None:
@@ -2073,7 +2108,7 @@ def _execute_proposal(
                     "order_type": "manual_record",
                     "side": "buy",
                     "ticker": ticker,
-                    "quantity": float(quantity or 0),
+                    "quantity": float(quantity),
                     "limit_price": float(proposal.entry_price),
                     "trade_id": int(trade.id),
                 },
@@ -2096,9 +2131,9 @@ def _execute_proposal(
             order_id=f"manual-proposal-{proposal.id}",
             event_type="fill",
             status="filled",
-            requested_quantity=float(quantity or 0),
-            cumulative_filled_quantity=float(quantity or 0),
-            last_fill_quantity=float(quantity or 0),
+            requested_quantity=float(quantity),
+            cumulative_filled_quantity=float(quantity),
+            last_fill_quantity=float(quantity),
             average_fill_price=float(proposal.entry_price),
             submitted_at=now,
             acknowledged_at=now,
@@ -2128,7 +2163,7 @@ def _execute_proposal(
                     "order_type": "limit",
                     "side": "buy",
                     "ticker": ticker,
-                    "quantity": float(quantity or 0),
+                    "quantity": float(quantity),
                     "limit_price": float(proposal.entry_price),
                 },
             )
@@ -2156,9 +2191,11 @@ def _execute_proposal(
             )
 
         if result.get("ok"):
-            raw_state = (result.get("raw") or {}).get("state") or (result.get("raw") or {}).get("status") or "queued"
+            raw_state = _safe_order_state(
+                (result.get("raw") or {}).get("state") or (result.get("raw") or {}).get("status")
+            )
             chili_status = map_status(used_broker, raw_state)
-            is_already_filled = raw_state.lower() == "filled"
+            is_already_filled = raw_state == "filled"
 
             proposal.broker_order_id = result.get("order_id")
             if is_already_filled:
@@ -2180,13 +2217,14 @@ def _execute_proposal(
                 (result.get("raw") or {}).get("average_price")
                 or (result.get("raw") or {}).get("average_filled_price")
             )
+            avg_fill_price = avg_price if is_already_filled and avg_price > 0 else None
 
             trade = Trade(
                 user_id=user_id,
                 ticker=ticker,
                 sector=sector_label,
                 direction="long",
-                entry_price=avg_price if is_already_filled and avg_price else proposal.entry_price,
+                entry_price=avg_fill_price or proposal.entry_price,
                 quantity=quantity,
                 status="open" if is_already_filled else "working",
                 broker_source=used_broker,
@@ -2194,9 +2232,9 @@ def _execute_proposal(
                 broker_status=raw_state,
                 last_broker_sync=now,
                 filled_at=now if is_already_filled else None,
-                avg_fill_price=avg_price if is_already_filled else None,
-                filled_quantity=float(quantity or 0) if is_already_filled else 0.0,
-                remaining_quantity=0.0 if is_already_filled else float(quantity or 0),
+                avg_fill_price=avg_fill_price,
+                filled_quantity=float(quantity) if is_already_filled else 0.0,
+                remaining_quantity=0.0 if is_already_filled else float(quantity),
                 submitted_at=now,
                 acknowledged_at=now,
                 first_fill_at=now if is_already_filled else None,
@@ -2232,11 +2270,11 @@ def _execute_proposal(
                     proposal=proposal,
                     event_type="fill" if is_already_filled else "submitted",
                 )
-            normalized.setdefault("requested_quantity", float(quantity or 0))
+            normalized.setdefault("requested_quantity", float(quantity))
             normalized.setdefault("submitted_at", now)
             normalized.setdefault("acknowledged_at", now)
             if is_already_filled:
-                normalized.setdefault("cumulative_filled_quantity", float(quantity or 0))
+                normalized.setdefault("cumulative_filled_quantity", float(quantity))
                 normalized.setdefault("first_fill_at", now)
                 normalized.setdefault("last_fill_at", now)
                 normalized.setdefault("average_fill_price", avg_price or proposal.entry_price)
@@ -2316,12 +2354,20 @@ def _execute_proposal(
 
 
 def _safe_float(val) -> float:
-    if val is None:
+    if val is None or isinstance(val, bool):
         return 0.0
     try:
-        return float(val)
+        out = float(val)
     except (ValueError, TypeError):
         return 0.0
+    return out if math.isfinite(out) else 0.0
+
+
+def _safe_order_state(val) -> str:
+    if val is None or not isinstance(val, str):
+        return "queued"
+    state = str(val).strip().lower()
+    return state or "queued"
 
 
 def _get_buying_power() -> float | None:

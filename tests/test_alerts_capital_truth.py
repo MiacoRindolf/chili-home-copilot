@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -106,6 +107,29 @@ def test_get_buying_power_returns_none_when_portfolio_value_is_unparseable():
         return_value={"buying_power": "not-a-number"},
     ):
         assert alerts._get_buying_power() is None
+
+
+def test_safe_float_rejects_nonfinite_and_boolean_values():
+    assert alerts._safe_float("150.25") == 150.25
+    assert alerts._safe_float("NaN") == 0.0
+    assert alerts._safe_float("Infinity") == 0.0
+    assert alerts._safe_float("-Infinity") == 0.0
+    assert alerts._safe_float(True) == 0.0
+
+
+def test_safe_order_state_normalizes_malformed_broker_values():
+    assert alerts._safe_order_state(" Filled ") == "filled"
+    assert alerts._safe_order_state("") == "queued"
+    assert alerts._safe_order_state(None) == "queued"
+    assert alerts._safe_order_state(True) == "queued"
+    assert alerts._safe_order_state(1) == "queued"
+
+
+def test_execute_proposal_does_not_zero_fill_proven_quantity_fields():
+    source = Path(alerts.__file__).read_text()
+    start = source.index("def _execute_proposal(")
+    end = source.index("\ndef _safe_float", start)
+    assert "float(quantity or 0)" not in source[start:end]
 
 
 def test_generate_strategy_proposals_skips_unknown_buying_power_without_superseding():
@@ -295,6 +319,67 @@ def test_execute_proposal_blocks_when_stale_quantity_cannot_be_resized():
     risk_gate.assert_called_once()
     place_buy_order.assert_not_called()
     assert proposal.quantity is None
+
+
+def test_execute_proposal_blocks_when_nonfinite_quantity_cannot_be_resized():
+    proposal = _proposal(quantity=float("nan"))
+    db = _FakeDb()
+
+    with patch("app.services.trading.alerts._get_buying_power", return_value=10_000.0), patch(
+        "app.services.trading.portfolio_risk.check_new_trade_allowed",
+        return_value=(True, None),
+    ) as risk_gate, patch(
+        "app.services.trading.alerts._compute_position_size",
+        return_value=(None, None),
+    ), patch(
+        "app.services.trading.alerts.dispatch_alert"
+    ), patch(
+        "app.services.broker_manager.place_buy_order"
+    ) as place_buy_order:
+        result = alerts._execute_proposal(db, proposal, user_id=None)
+
+    assert result == {"status": "blocked", "error": "sizing_unavailable"}
+    risk_gate.assert_called_once()
+    place_buy_order.assert_not_called()
+    assert proposal.quantity != proposal.quantity
+
+
+def test_execute_proposal_resizes_nonfinite_quantity_before_broker(monkeypatch):
+    proposal = _proposal(quantity=float("nan"))
+    db = _FakeDb()
+
+    monkeypatch.setattr(
+        alerts.settings,
+        "brain_decision_packet_required_for_proposals",
+        False,
+        raising=False,
+    )
+
+    with patch("app.services.trading.alerts._get_buying_power", return_value=10_000.0), patch(
+        "app.services.trading.portfolio_risk.check_new_trade_allowed",
+        return_value=(True, None),
+    ), patch(
+        "app.services.trading.alerts._compute_position_size",
+        return_value=(3, 3.0),
+    ), patch(
+        "app.services.broker_manager.get_best_broker_for",
+        return_value="robinhood",
+    ), patch(
+        "app.services.trading.alerts.dispatch_alert"
+    ), patch(
+        "app.services.broker_manager.place_buy_order",
+        return_value={"ok": False, "broker": "robinhood", "error": "unit reject"},
+    ) as place_buy_order:
+        result = alerts._execute_proposal(db, proposal, user_id=None)
+
+    assert result == {
+        "status": "failed",
+        "error": "unit reject",
+        "decision_packet_id": None,
+    }
+    place_buy_order.assert_called_once()
+    assert place_buy_order.call_args.kwargs["quantity"] == 3.0
+    assert proposal.quantity == 3.0
 
 
 def test_execute_proposal_blocks_auto_manual_fallback_before_local_record():

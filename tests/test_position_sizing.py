@@ -7,6 +7,7 @@ import pytest
 
 from app.services.trading.alerts import (
     _compute_position_size,
+    _get_brain_weight,
     _POS_PCT_HARD_CAP,
     _POS_PCT_RISK_OFF_CAP,
     _POS_PCT_SPECULATIVE_CAP,
@@ -74,6 +75,24 @@ def test_returns_none_for_non_finite_sizing_inputs(_mock):
         (float("nan"), 9.0, 10_000),
         (10.0, float("inf"), 10_000),
         (10.0, 9.0, float("-inf")),
+    ):
+        qty, pct = _compute_position_size(
+            price=price,
+            stop=stop,
+            buying_power=buying_power,
+            pick=pick,
+        )
+        assert qty is None
+        assert pct is None
+
+
+@patch(_REGIME_PATCH, return_value=_regime("risk_on", "normal"))
+def test_returns_none_for_boolean_sizing_inputs(_mock):
+    pick = {"signals": []}
+    for price, stop, buying_power in (
+        (True, 9.0, 10_000),
+        (10.0, True, 10_000),
+        (10.0, 9.0, True),
     ):
         qty, pct = _compute_position_size(
             price=price,
@@ -248,6 +267,33 @@ class TestScannerSoftCap:
         assert pct <= 4.0 * 1.25  # soft ceiling is 125% of scanner suggestion
 
     @patch(_REGIME_PATCH, return_value=_regime("risk_on", "normal"))
+    def test_soft_cap_from_numeric_string_scanner_value(self, _mock):
+        pick = {
+            "signals": [],
+            "risk_level": "medium",
+            "position_size_pct": "4.0",
+        }
+        _, pct = _compute_position_size(
+            price=50.0, stop=47.0, buying_power=10_000, pick=pick,
+        )
+        assert pct is not None
+        assert pct <= 4.0 * 1.25
+
+    @patch(_REGIME_PATCH, return_value=_regime("risk_on", "normal"))
+    def test_malformed_soft_cap_is_ignored_without_crashing(self, _mock):
+        pick = {
+            "signals": [],
+            "risk_level": "medium",
+            "position_size_pct": "not-a-number",
+        }
+        qty, pct = _compute_position_size(
+            price=50.0, stop=47.0, buying_power=10_000, pick=pick,
+        )
+        assert qty is not None
+        assert pct is not None
+        assert pct <= _POS_PCT_HARD_CAP
+
+    @patch(_REGIME_PATCH, return_value=_regime("risk_on", "normal"))
     def test_no_soft_cap_when_absent(self, _mock):
         pick = {"signals": [], "risk_level": "medium"}
         _, pct = _compute_position_size(
@@ -258,6 +304,38 @@ class TestScannerSoftCap:
 
 
 # ── Hard cap enforcement ───────────────────────────────────────────────
+
+
+class TestAdaptiveWeightGuards:
+
+    def test_nonfinite_adaptive_weight_falls_back_to_default(self):
+        with patch("app.services.trading.scanner.get_adaptive_weight", return_value=float("nan")):
+            assert _get_brain_weight("pos_pct_hard_cap") == pytest.approx(_POS_PCT_HARD_CAP)
+
+    def test_negative_adaptive_weight_falls_back_to_default(self):
+        with patch("app.services.trading.scanner.get_adaptive_weight", return_value=-1.0):
+            assert _get_brain_weight("pos_max_risk_pct") == pytest.approx(_MAX_RISK_PCT)
+
+    def test_adaptive_weight_reader_failure_falls_back_to_default(self):
+        with patch("app.services.trading.scanner.get_adaptive_weight", side_effect=RuntimeError("offline")):
+            assert _get_brain_weight("pos_pct_hard_cap") == pytest.approx(_POS_PCT_HARD_CAP)
+
+    def test_explicit_zero_adaptive_weight_is_preserved(self):
+        with patch("app.services.trading.scanner.get_adaptive_weight", return_value=0.0):
+            assert _get_brain_weight("pos_max_risk_pct") == pytest.approx(0.0)
+
+    @patch(_REGIME_PATCH, return_value=_regime("risk_on", "normal"))
+    def test_nonfinite_adaptive_weights_do_not_break_sizing(self, _mock):
+        with patch("app.services.trading.scanner.get_adaptive_weight", return_value=float("inf")):
+            qty, pct = _compute_position_size(
+                price=50.0,
+                stop=47.0,
+                buying_power=10_000,
+                pick={"signals": [], "risk_level": "medium"},
+            )
+        assert qty is not None
+        assert pct is not None
+        assert pct <= _POS_PCT_HARD_CAP
 
 
 class TestHardCaps:
@@ -300,6 +378,16 @@ class TestHardCaps:
 
 
 # ── Quantity sanity ────────────────────────────────────────────────────
+
+
+    @patch(_REGIME_PATCH, return_value=_regime("risk_on", "normal"))
+    def test_string_false_crypto_flag_does_not_force_speculative_cap(self, _mock):
+        pick = {"signals": [], "risk_level": "medium", "is_crypto": "False"}
+        _, pct = _compute_position_size(
+            price=50.0, stop=45.0, buying_power=10_000, pick=pick,
+        )
+        assert pct is not None
+        assert pct > _POS_PCT_SPECULATIVE_CAP
 
 
 class TestQuantity:
