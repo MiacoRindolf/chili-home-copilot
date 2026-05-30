@@ -52,6 +52,10 @@ REASON_CAP_OK = "within_cap"
 REASON_CAP_NOTIONAL = "venue_notional_cap_exceeded"
 REASON_CAP_POSITIONS = "venue_concurrent_positions_cap_exceeded"
 
+PHASE5K_COINBASE_CAP_ENV = "CHILI_PHASE5K_COINBASE_CAP_USE_ENVELOPES"
+_COINBASE_CAP_COMPAT_RELATION = "trading_trades"
+_COINBASE_CAP_ENVELOPE_RELATION = "trading_management_envelopes"
+
 
 @dataclass(frozen=True)
 class CostGateDecision:
@@ -94,6 +98,21 @@ def _nonnegative_int(value: Any, *, default: int = 0) -> int:
     if out is None:
         return int(default)
     return max(0, int(out))
+
+
+def _truthy_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _coinbase_cap_source_relation(settings_: Any | None) -> str:
+    raw = getattr(settings_, "chili_phase5k_coinbase_cap_use_envelopes", False)
+    if _truthy_flag(raw):
+        return _COINBASE_CAP_ENVELOPE_RELATION
+    return _COINBASE_CAP_COMPAT_RELATION
 
 
 # ── Buying-power resolver ────────────────────────────────────────────
@@ -401,10 +420,11 @@ def per_venue_cap_check(
 
     try:
         from sqlalchemy import text
-        rows = db.execute(text("""
+        relation = _coinbase_cap_source_relation(s)
+        rows = db.execute(text(f"""
             SELECT id,
                    COALESCE(quantity * entry_price, 0.0) AS notional
-              FROM trading_trades
+              FROM {relation}
              WHERE status = 'open'
                AND LOWER(COALESCE(broker_source, '')) = 'coinbase'
                AND (
