@@ -48,6 +48,17 @@ def _expected_evidence_value(ev: BrainWorkEvent) -> float:
         return 0.0
 
 
+def _transient_recovery_claim_rank(ev: BrainWorkEvent) -> int:
+    payload = ev.payload if isinstance(ev.payload, dict) else {}
+    if (
+        str(ev.event_type or "") == "backtest_requested"
+        and str(ev.status or "") == "processing"
+        and _DEAD_RECOVERY_PAYLOAD_KEY in payload
+    ):
+        return 0
+    return 1
+
+
 def enqueue_work_event(
     db: Session,
     *,
@@ -240,6 +251,13 @@ _CLAIM_SQL_WORK_ONLY = text(
             THEN (payload->>'expected_evidence_value')::double precision
             ELSE 0.0
           END DESC,
+          CASE
+            WHEN event_type = 'backtest_requested'
+             AND status = 'retry_wait'
+             AND payload::jsonb ? 'transient_dead_recovery_count'
+            THEN 0
+            ELSE 1
+          END ASC,
           next_run_at ASC,
           created_at ASC
         LIMIT :lim
@@ -273,6 +291,13 @@ _CLAIM_SQL_ANY_KIND = text(
             THEN (payload->>'expected_evidence_value')::double precision
             ELSE 0.0
           END DESC,
+          CASE
+            WHEN event_type = 'backtest_requested'
+             AND status = 'retry_wait'
+             AND payload::jsonb ? 'transient_dead_recovery_count'
+            THEN 0
+            ELSE 1
+          END ASC,
           next_run_at ASC,
           created_at ASC
         LIMIT :lim
@@ -317,6 +342,7 @@ def claim_work_batch(
     rows.sort(
         key=lambda ev: (
             -_expected_evidence_value(ev),
+            _transient_recovery_claim_rank(ev),
             ev.next_run_at,
             ev.created_at,
             int(ev.id),

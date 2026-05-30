@@ -173,6 +173,63 @@ def test_claim_prioritizes_expected_evidence_value_within_type(db) -> None:
     assert [int(row.id) for row in rows] == [high, low]
 
 
+def test_claim_prioritizes_recovered_backtest_after_equal_evidence(db) -> None:
+    now = datetime.utcnow()
+    plain = enqueue_work_event(
+        db,
+        event_type="backtest_requested",
+        dedupe_key="bt_req:plain-due-first",
+        payload={"scan_pattern_id": 1001, "source": "operator_boost"},
+        lease_scope="backtest",
+    )
+    recovered = enqueue_work_event(
+        db,
+        event_type="backtest_requested",
+        dedupe_key="bt_req:recovered-transient",
+        payload={
+            "scan_pattern_id": 1002,
+            "source": "recert_rescue_refresh",
+            "transient_dead_recovery_count": 1,
+        },
+        lease_scope="backtest",
+    )
+    high_evidence = enqueue_work_event(
+        db,
+        event_type="backtest_requested",
+        dedupe_key="bt_req:high-evidence",
+        payload={
+            "scan_pattern_id": 1003,
+            "source": "recert_rescue_refresh",
+            "expected_evidence_value": 5.0,
+        },
+        lease_scope="backtest",
+    )
+    db.commit()
+    assert plain is not None
+    assert recovered is not None
+    assert high_evidence is not None
+
+    plain_row = db.get(BrainWorkEvent, plain)
+    recovered_row = db.get(BrainWorkEvent, recovered)
+    high_row = db.get(BrainWorkEvent, high_evidence)
+    plain_row.next_run_at = now - timedelta(minutes=10)
+    recovered_row.status = "retry_wait"
+    recovered_row.next_run_at = now - timedelta(minutes=1)
+    high_row.next_run_at = now - timedelta(minutes=5)
+    db.commit()
+
+    rows = claim_work_batch(
+        db,
+        limit=3,
+        lease_seconds=60,
+        holder_id="pytest:recovered-priority",
+        event_type="backtest_requested",
+    )
+    db.commit()
+
+    assert [int(row.id) for row in rows] == [high_evidence, recovered, plain]
+
+
 def test_release_stale_lease_marks_retry(db) -> None:
     from sqlalchemy import text
 
