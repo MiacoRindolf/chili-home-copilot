@@ -3659,6 +3659,93 @@ def test_agent_os_readiness_quality_scorecard_flags_risky_recent_runs(
         db.close()
 
 
+def test_agent_os_readiness_visual_qa_flags_ui_runs_without_evidence(
+    tmp_path,
+    monkeypatch,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        monkeypatch.setattr(orchestrator, "_codex_automation_roots", lambda: [])
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {
+                "model": "qwen2.5-coder:7b",
+                "available": True,
+                "installed_models": ["qwen2.5-coder:7b"],
+                "skipped_models": {},
+                "recommendation": None,
+            },
+        )
+        repo = CodeRepo(path=str(tmp_path), host_path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        orchestrator.bootstrap_agent_profiles(db, repo_id=repo.id)
+        run = orchestrator.create_run(
+            db,
+            prompt="Polish the Flutter Autopilot cockpit layout.",
+            repo_id=repo.id,
+            start_planning=True,
+        )
+        run.status = orchestrator.RUN_STATUS_COMPLETED
+        run.current_stage = orchestrator.STAGE_IMPLEMENT
+        run.plan_json = json.dumps(
+            {
+                "analysis": "UI cockpit polish needs a screenshot pass.",
+                "files": [
+                    {
+                        "path": "chili_mobile/lib/src/brain/brain_dispatch_screen.dart",
+                        "action": "modify",
+                        "description": "Polish the Autopilot cockpit layout.",
+                    }
+                ],
+            }
+        )
+        db.commit()
+
+        readiness = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+
+        scorecard = readiness["quality_scorecard"]
+        visual = scorecard["visual_qa"]
+        assert scorecard["status"] == orchestrator.AGENT_OS_READINESS_CHECK_WARNING
+        assert visual["ui_run_count"] == 1
+        assert visual["evidenced_ui_run_count"] == 0
+        assert visual["missing_ui_evidence_count"] == 1
+        assert visual["missing_run_ids"] == [run.run_id]
+        assert "screenshot or video evidence" in scorecard["detail"]
+        quality_monitor = readiness[orchestrator.AGENT_QUALITY_MONITOR_KEY]
+        visual_dimension = next(
+            dimension
+            for dimension in quality_monitor["dimensions"]
+            if dimension["key"] == orchestrator.AGENT_QUALITY_MONITOR_DIMENSION_VISUAL_QA
+        )
+        assert visual_dimension["status"] == orchestrator.AGENT_OS_READINESS_CHECK_WARNING
+        assert quality_monitor["next_action"] == orchestrator.AGENT_QUALITY_MONITOR_ACTION_ATTACH_VISUAL_QA
+        assert "screenshot or video QA evidence" in quality_monitor["next_action_detail"]
+
+        orchestrator.record_visual_validation(
+            db,
+            run.run_id,
+            kind="screenshot",
+            path=r"D:\captures\autopilot_visual.png",
+        )
+        readiness_after = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+
+        visual_after = readiness_after["quality_scorecard"]["visual_qa"]
+        assert visual_after["missing_ui_evidence_count"] == 0
+        assert visual_after["evidenced_ui_run_count"] == 1
+        assert visual_after["screenshot_count"] == 1
+        quality_monitor_after = readiness_after[orchestrator.AGENT_QUALITY_MONITOR_KEY]
+        visual_dimension_after = next(
+            dimension
+            for dimension in quality_monitor_after["dimensions"]
+            if dimension["key"] == orchestrator.AGENT_QUALITY_MONITOR_DIMENSION_VISUAL_QA
+        )
+        assert visual_dimension_after["status"] == orchestrator.AGENT_OS_READINESS_CHECK_PASSED
+    finally:
+        db.close()
+
+
 def test_agent_os_readiness_runtime_queue_flags_backlog(
     tmp_path,
     monkeypatch,
@@ -3697,14 +3784,75 @@ def test_agent_os_readiness_runtime_queue_flags_backlog(
         runtime_queue = readiness["runtime_queue"]
         assert runtime_queue["status"] == orchestrator.AGENT_OS_READINESS_CHECK_WARNING
         assert runtime_queue["queued_count"] == orchestrator.AGENT_RUNTIME_QUEUE_WARNING_DEPTH + 1
+        assert runtime_queue["fresh_queued_count"] == orchestrator.AGENT_RUNTIME_QUEUE_WARNING_DEPTH + 1
+        assert runtime_queue["stale_queued_count"] == 0
         assert runtime_queue["active_count"] == 0
         assert runtime_queue["fresh_active_count"] == 0
         assert runtime_queue["active_runs"] == []
         assert len(runtime_queue["queued_runs"]) == orchestrator.AGENT_RUNTIME_QUEUE_PREVIEW_LIMIT
         assert runtime_queue["next_action"] == orchestrator.AGENT_RUNTIME_QUEUE_ACTION_DRAIN_QUEUED
-        assert runtime_queue["next_action_label"] == "Drain queued run"
+        assert runtime_queue["next_action_label"] == "Start queued worker"
         assert runtime_queue["next_action_run_id"] == runtime_queue["queued_runs"][0]["run_id"]
         assert "queued run" in runtime_queue["detail"]
+        runtime_check = next(
+            check
+            for check in readiness["checks"]
+            if check["key"] == orchestrator.AGENT_OS_READINESS_CHECK_RUNTIME_QUEUE
+        )
+        assert runtime_check["status"] == orchestrator.AGENT_OS_READINESS_CHECK_WARNING
+    finally:
+        db.close()
+
+
+def test_agent_os_readiness_runtime_queue_flags_single_stale_queued_run(
+    tmp_path,
+    monkeypatch,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        monkeypatch.setattr(orchestrator, "_codex_automation_roots", lambda: [])
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {
+                "model": "qwen2.5-coder:7b",
+                "available": True,
+                "installed_models": ["qwen2.5-coder:7b"],
+                "skipped_models": {},
+                "recommendation": None,
+            },
+        )
+        repo = CodeRepo(path=str(tmp_path), host_path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        orchestrator.bootstrap_agent_profiles(db, repo_id=repo.id)
+        queued = orchestrator.create_run(
+            db,
+            prompt="Queued run with no worker.",
+            repo_id=repo.id,
+            start_planning=True,
+        )
+        queued.status = orchestrator.RUN_STATUS_QUEUED
+        queued.current_stage = orchestrator.STAGE_QUEUED
+        queued.updated_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+            minutes=orchestrator.AGENT_RUNTIME_QUEUE_STALE_QUEUED_MINUTES + 2
+        )
+        db.commit()
+
+        readiness = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+
+        runtime_queue = readiness["runtime_queue"]
+        assert runtime_queue["status"] == orchestrator.AGENT_OS_READINESS_CHECK_WARNING
+        assert runtime_queue["queued_count"] == 1
+        assert runtime_queue["stale_queued_count"] == 1
+        assert runtime_queue["fresh_queued_count"] == 0
+        assert runtime_queue["stale_queued_after_minutes"] == orchestrator.AGENT_RUNTIME_QUEUE_STALE_QUEUED_MINUTES
+        assert runtime_queue["next_action"] == orchestrator.AGENT_RUNTIME_QUEUE_ACTION_DRAIN_QUEUED
+        assert runtime_queue["next_action_label"] == "Start queued worker"
+        assert runtime_queue["next_action_run_id"] == queued.run_id
+        assert runtime_queue["next_action_last_seen_age_minutes"] >= orchestrator.AGENT_RUNTIME_QUEUE_STALE_QUEUED_MINUTES
+        assert runtime_queue["stale_queued_runs"][0]["run_id"] == queued.run_id
+        assert "waited" in runtime_queue["detail"]
         runtime_check = next(
             check
             for check in readiness["checks"]
@@ -3867,12 +4015,90 @@ def test_agent_os_readiness_operator_inbox_summarizes_pending_actions(
             orchestrator.AGENT_OPERATOR_INBOX_ITEM_QUESTION,
             orchestrator.AGENT_OPERATOR_INBOX_ITEM_BLOCKER,
         }
+        blocker_item = next(
+            item
+            for item in inbox["items"]
+            if item["kind"] == orchestrator.AGENT_OPERATOR_INBOX_ITEM_BLOCKER
+        )
+        assert blocker_item["recovery_action"] == orchestrator.AGENT_OPERATOR_INBOX_RECOVERY_RERUN_SAFE
+        assert blocker_item["action_label"] == "Rerun"
+        assert "Rerun safely" in blocker_item["reason"]
         inbox_check = next(
             check
             for check in readiness["checks"]
             if check["key"] == orchestrator.AGENT_OS_READINESS_CHECK_OPERATOR_INBOX
         )
         assert inbox_check["status"] == orchestrator.AGENT_OS_READINESS_CHECK_WARNING
+    finally:
+        db.close()
+
+
+def test_agent_os_readiness_operator_inbox_guides_blocker_recovery(
+    tmp_path,
+    monkeypatch,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        monkeypatch.setattr(orchestrator, "_codex_automation_roots", lambda: [])
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {
+                "model": "qwen2.5-coder:7b",
+                "available": True,
+                "installed_models": ["qwen2.5-coder:7b"],
+                "skipped_models": {},
+                "recommendation": None,
+            },
+        )
+        repo = CodeRepo(path=str(tmp_path), host_path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        orchestrator.bootstrap_agent_profiles(db, repo_id=repo.id)
+        blocked = orchestrator.create_run(
+            db,
+            prompt="Repair the cockpit blocker flow.",
+            repo_id=repo.id,
+            start_planning=True,
+        )
+        blocked.status = orchestrator.RUN_STATUS_BLOCKED
+        blocked.current_stage = orchestrator.STAGE_IMPLEMENT
+        blocked.merge_status = "blocked"
+        blocked.merge_message = "Validation failed after repair."
+        command_run = orchestrator.create_run(db, prompt="hello", repo_id=repo.id)
+        db.commit()
+
+        readiness = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+        inbox = readiness["operator_inbox"]
+
+        assert inbox["blocked_count"] == 1
+        assert inbox["next_action"] == orchestrator.AGENT_OPERATOR_INBOX_ACTION_RECOVER_BLOCKER
+        assert inbox["next_action_label"] == "Recover blocker"
+        assert inbox["next_action_kind"] == orchestrator.AGENT_OPERATOR_INBOX_ITEM_BLOCKER
+        assert inbox["next_action_run_id"] == blocked.run_id
+        assert inbox["next_action_recovery_action"] == orchestrator.AGENT_OPERATOR_INBOX_RECOVERY_RERUN_SAFE
+        assert inbox["next_action_button_label"] == "Rerun"
+        assert "validation evidence before merge" in inbox["next_action_detail"]
+        blocker_item = inbox["items"][0]
+        assert blocker_item["run_id"] == blocked.run_id
+        assert blocker_item["recovery_detail"] == "Prefill a fresh approval-first draft from this run."
+
+        doctor_payload = orchestrator.append_user_message(
+            db,
+            command_run.run_id,
+            content="/doctor",
+        )
+        quality_payload = orchestrator.append_user_message(
+            db,
+            command_run.run_id,
+            content="/quality",
+        )
+
+        for payload in (doctor_payload, quality_payload):
+            reply = payload["messages"][-1]["content"]
+            assert "Operator inbox next action: Recover blocker" in reply
+            assert "Validation failed after repair" in reply
+            assert f"Operator inbox target run: {blocked.run_id}" in reply
     finally:
         db.close()
 

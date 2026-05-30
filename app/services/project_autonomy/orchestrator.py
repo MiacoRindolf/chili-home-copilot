@@ -147,6 +147,30 @@ VISUAL_PATH_TOO_LONG_REASON = "Visual evidence path was rejected because it is t
 VISUAL_URL_TOO_LONG_REASON = "Visual evidence URL was rejected because it is too long."
 VISUAL_SCREENSHOT_EXT_REASON = "Screenshot evidence path was rejected because it is not a supported image file."
 VISUAL_VIDEO_EXT_REASON = "Video evidence path was rejected because it is not a supported video file."
+VISUAL_QA_UI_FILE_EXTENSIONS = frozenset({
+    ".css",
+    ".dart",
+    ".html",
+    ".jsx",
+    ".svelte",
+    ".tsx",
+    ".vue",
+})
+VISUAL_QA_UI_PROMPT_MARKERS = frozenset({
+    "button",
+    "cockpit",
+    "desktop",
+    "flutter",
+    "frontend",
+    "layout",
+    "mobile",
+    "screen",
+    "screenshot",
+    "ui",
+    "ux",
+    "visual",
+    "widget",
+})
 OPERATOR_SAFE_PLAN_TEXT_LIMIT = 900
 ERROR_SNIPPET_LIMIT = 900
 CHAT_REPLY_LIMIT = 1800
@@ -431,6 +455,7 @@ AGENT_OS_QUALITY_PROBLEM_PREVIEW_LIMIT = 3
 AGENT_RUNTIME_QUEUE_RECENT_LIMIT = 80
 AGENT_RUNTIME_QUEUE_WARNING_DEPTH = 5
 AGENT_RUNTIME_QUEUE_PREVIEW_LIMIT = 5
+AGENT_RUNTIME_QUEUE_STALE_QUEUED_MINUTES = 10
 AGENT_RUNTIME_QUEUE_STALE_ACTIVE_MINUTES = 30
 AGENT_RUNTIME_QUEUE_ACTION_KEEP_MONITORING = "keep_monitoring"
 AGENT_RUNTIME_QUEUE_ACTION_INSPECT_STALE = "inspect_stale_run"
@@ -451,6 +476,8 @@ AGENT_OPERATOR_INBOX_ACTION_ANSWER_CLARIFICATION = "answer_clarification"
 AGENT_OPERATOR_INBOX_ACTION_REVIEW_APPROVAL = "review_approval"
 AGENT_OPERATOR_INBOX_ACTION_CONTINUE_REPLY = "continue_reply"
 AGENT_OPERATOR_INBOX_ACTION_REVIEW_BLOCKER = "review_blocker"
+AGENT_OPERATOR_INBOX_ACTION_RECOVER_BLOCKER = "recover_blocker"
+AGENT_OPERATOR_INBOX_RECOVERY_RERUN_SAFE = "rerun_safe"
 AGENT_OPERATING_STATE_NEEDS_INPUT = "needs_input"
 AGENT_OPERATING_STATE_NEEDS_SYNC = "needs_sync"
 AGENT_OPERATING_STATE_CUSTOM_PROMPT = "custom_prompt"
@@ -501,6 +528,7 @@ AGENT_QUALITY_MONITOR_KEY = "agent_quality_monitor"
 AGENT_QUALITY_MONITOR_DIMENSION_ARCHITECT = "architect_reviews"
 AGENT_QUALITY_MONITOR_DIMENSION_SCHEDULED = "scheduled_reports"
 AGENT_QUALITY_MONITOR_DIMENSION_VALIDATION = "validation"
+AGENT_QUALITY_MONITOR_DIMENSION_VISUAL_QA = "visual_qa"
 AGENT_QUALITY_MONITOR_DIMENSION_MODEL = "local_model"
 AGENT_QUALITY_MONITOR_DIMENSION_CODEX = "codex_alignment"
 AGENT_QUALITY_MONITOR_DIMENSION_RUNTIME = "runtime_queue"
@@ -511,6 +539,7 @@ AGENT_QUALITY_MONITOR_ACTION_ANSWER_INBOX = "answer_operator_inbox"
 AGENT_QUALITY_MONITOR_ACTION_REVIEW_PLANS = "review_plan_gate"
 AGENT_QUALITY_MONITOR_ACTION_REVIEW_REPORTS = "review_scheduled_reports"
 AGENT_QUALITY_MONITOR_ACTION_RUN_VALIDATION = "run_validation"
+AGENT_QUALITY_MONITOR_ACTION_ATTACH_VISUAL_QA = "attach_visual_qa"
 AGENT_QUALITY_MONITOR_ACTION_SYNC_CODEX = "sync_codex_profiles"
 AGENT_QUALITY_MONITOR_ACTION_DRAIN_QUEUE = "drain_runtime_queue"
 AGENT_CODING_QUALITY_BAR_KEY = "agent_coding_quality_bar"
@@ -4807,6 +4836,61 @@ def _average_score(values: Iterable[int]) -> int | None:
     return round(sum(scores) / len(scores))
 
 
+def _plan_file_paths(plan: Mapping[str, Any]) -> list[str]:
+    raw_files = plan.get("files")
+    if not isinstance(raw_files, list):
+        return []
+    paths: list[str] = []
+    for item in raw_files:
+        if not isinstance(item, Mapping):
+            continue
+        path = str(item.get("path") or item.get("file") or "").strip()
+        if path:
+            paths.append(path)
+    return paths
+
+
+def _run_needs_visual_qa(row: ProjectAutonomyRun, plan: Mapping[str, Any]) -> bool:
+    if str(row.status or "") not in {RUN_STATUS_COMPLETED, RUN_STATUS_MERGED}:
+        return False
+    paths = _plan_file_paths(plan)
+    if any(Path(path).suffix.lower() in VISUAL_QA_UI_FILE_EXTENSIONS for path in paths):
+        return True
+    raw_files = plan.get("files")
+    descriptions = ""
+    if isinstance(raw_files, list):
+        descriptions = " ".join(
+            str(item.get("description") or "")
+            for item in raw_files
+            if isinstance(item, Mapping)
+        )
+    haystack = " ".join(
+        str(part or "")
+        for part in (
+            row.prompt,
+            plan.get("analysis"),
+            plan.get("notes"),
+            " ".join(paths),
+            descriptions,
+        )
+    ).lower()
+    return _has_any_token(haystack, VISUAL_QA_UI_PROMPT_MARKERS)
+
+
+def _visual_artifact_has_evidence(artifact: ProjectAutonomyArtifact) -> bool:
+    if artifact.artifact_type not in {
+        VISUAL_ARTIFACT_TYPE_SCREENSHOT,
+        VISUAL_ARTIFACT_TYPE_VIDEO,
+    }:
+        return False
+    payload = _json_load(artifact.content_json, {})
+    if not isinstance(payload, Mapping):
+        return False
+    if payload.get("skipped") is True:
+        return False
+    return bool(payload.get("path") or payload.get("url"))
+
+
 def _agent_os_quality_scorecard(
     db: Session,
     *,
@@ -4833,6 +4917,7 @@ def _agent_os_quality_scorecard(
     approval_gate_risk_count = 0
     validation_total = 0
     validation_passed_count = 0
+    ui_visual_run_ids: list[str] = []
     review_examples: list[dict[str, Any]] = []
 
     for row in rows:
@@ -4874,11 +4959,20 @@ def _agent_os_quality_scorecard(
             validation_total += 1
             if validation_passed(validation):
                 validation_passed_count += 1
+        if _run_needs_visual_qa(row, plan):
+            ui_visual_run_ids.append(row.run_id)
 
     run_ids = [row.run_id for row in rows]
     quality_status_counts: dict[str, int] = {}
     quality_scores: list[int] = []
     quality_examples: list[dict[str, Any]] = []
+    visual_evidence_run_ids: set[str] = set()
+    visual_artifact_count = 0
+    visual_available_count = 0
+    visual_skipped_count = 0
+    visual_screenshot_count = 0
+    visual_video_count = 0
+    visual_examples: list[dict[str, Any]] = []
     if run_ids:
         artifact_rows = (
             db.query(ProjectAutonomyArtifact)
@@ -4891,6 +4985,43 @@ def _agent_os_quality_scorecard(
             .limit(AGENT_OS_QUALITY_RECENT_ARTIFACT_LIMIT)
             .all()
         )
+        visual_rows = (
+            db.query(ProjectAutonomyArtifact)
+            .filter(
+                ProjectAutonomyArtifact.run_id.in_(run_ids),
+                ProjectAutonomyArtifact.artifact_type.in_(
+                    [VISUAL_ARTIFACT_TYPE_SCREENSHOT, VISUAL_ARTIFACT_TYPE_VIDEO]
+                ),
+                ProjectAutonomyArtifact.created_at >= since,
+            )
+            .order_by(ProjectAutonomyArtifact.created_at.desc(), ProjectAutonomyArtifact.id.desc())
+            .limit(AGENT_OS_QUALITY_RECENT_ARTIFACT_LIMIT)
+            .all()
+        )
+        for artifact in visual_rows:
+            visual_artifact_count += 1
+            payload = _json_load(artifact.content_json, {})
+            payload = payload if isinstance(payload, dict) else {}
+            has_evidence = _visual_artifact_has_evidence(artifact)
+            if has_evidence:
+                visual_available_count += 1
+                visual_evidence_run_ids.add(artifact.run_id)
+                if artifact.artifact_type == VISUAL_ARTIFACT_TYPE_SCREENSHOT:
+                    visual_screenshot_count += 1
+                elif artifact.artifact_type == VISUAL_ARTIFACT_TYPE_VIDEO:
+                    visual_video_count += 1
+            else:
+                visual_skipped_count += 1
+            if len(visual_examples) < AGENT_OS_QUALITY_RECENT_REVIEW_PREVIEW_LIMIT:
+                visual_examples.append(
+                    {
+                        "run_id": artifact.run_id,
+                        "artifact_type": artifact.artifact_type,
+                        "available": has_evidence,
+                        "source": payload.get("source"),
+                        "skipped": bool(payload.get("skipped")),
+                    }
+                )
         for artifact in artifact_rows:
             payload = _json_load(artifact.content_json, {})
             payload = payload if isinstance(payload, dict) else {}
@@ -4913,6 +5044,10 @@ def _agent_os_quality_scorecard(
     blocked_failed_count = status_counts.get(RUN_STATUS_BLOCKED, 0) + status_counts.get(RUN_STATUS_FAILED, 0)
     blocked_ratio = (blocked_failed_count / terminal_count) if terminal_count else 0.0
     validation_failed_count = validation_total - validation_passed_count
+    missing_visual_run_ids = [
+        run_id for run_id in ui_visual_run_ids if run_id not in visual_evidence_run_ids
+    ]
+    missing_visual_count = len(missing_visual_run_ids)
     low_quality_count = quality_status_counts.get(SCHEDULED_AGENT_REPORT_QUALITY_LOW, 0)
     repaired_count = quality_status_counts.get(SCHEDULED_AGENT_REPORT_QUALITY_REPAIRED, 0)
     review_passed_count = review_status_counts.get(ARCHITECT_REVIEW_STATUS_PASSED, 0)
@@ -4936,6 +5071,8 @@ def _agent_os_quality_scorecard(
         problems.append("Recent terminal Autopilot runs are mostly blocked or failed.")
     if validation_total >= AGENT_OS_QUALITY_TERMINAL_MIN_SAMPLE and validation_failed_count > validation_passed_count:
         problems.append("Recent validation results fail more often than they pass.")
+    if missing_visual_count:
+        problems.append(f"{missing_visual_count} UI-facing run(s) lack screenshot or video evidence.")
 
     if not rows:
         detail = (
@@ -4947,7 +5084,8 @@ def _agent_os_quality_scorecard(
         detail = (
             f"Recent guardrails are healthy: {review_passed_count} passing plan review(s), "
             f"{review_failed_count} blocked weak plan(s), {repaired_count} repaired schedule report(s), "
-            f"and {validation_passed_count}/{validation_total} validation set(s) passed."
+            f"{validation_passed_count}/{validation_total} validation set(s) passed, "
+            f"and {len(ui_visual_run_ids) - missing_visual_count}/{len(ui_visual_run_ids)} UI visual QA run(s) have evidence."
         )
 
     return {
@@ -4982,6 +5120,18 @@ def _agent_os_quality_scorecard(
             "total": validation_total,
             "passed": validation_passed_count,
             "failed": validation_failed_count,
+        },
+        "visual_qa": {
+            "ui_run_count": len(ui_visual_run_ids),
+            "evidenced_ui_run_count": len(ui_visual_run_ids) - missing_visual_count,
+            "missing_ui_evidence_count": missing_visual_count,
+            "missing_run_ids": missing_visual_run_ids[:AGENT_OS_QUALITY_PROBLEM_PREVIEW_LIMIT],
+            "artifact_count": visual_artifact_count,
+            "available_count": visual_available_count,
+            "skipped_count": visual_skipped_count,
+            "screenshot_count": visual_screenshot_count,
+            "video_count": visual_video_count,
+            "recent": visual_examples,
         },
         "approval_gate_risk_count": approval_gate_risk_count,
         "problems": problems[:AGENT_OS_QUALITY_PROBLEM_PREVIEW_LIMIT],
@@ -5021,6 +5171,7 @@ def _agent_quality_monitor_payload(
     reviews = _mapping_payload(quality_scorecard.get("architect_reviews"))
     scheduled = _mapping_payload(quality_scorecard.get("scheduled_quality"))
     validation = _mapping_payload(quality_scorecard.get("validation"))
+    visual_qa = _mapping_payload(quality_scorecard.get("visual_qa"))
 
     review_total = int(reviews.get("total") or 0)
     review_passed = int(reviews.get("passed") or 0)
@@ -5073,6 +5224,25 @@ def _agent_quality_monitor_payload(
         validation_status = AGENT_OS_READINESS_CHECK_PASSED
         validation_detail = "No validation history yet; implementation runs will populate this quality signal."
 
+    visual_ui_count = int(visual_qa.get("ui_run_count") or 0)
+    visual_evidenced = int(visual_qa.get("evidenced_ui_run_count") or 0)
+    visual_missing = int(visual_qa.get("missing_ui_evidence_count") or 0)
+    visual_available = int(visual_qa.get("available_count") or 0)
+    if visual_missing:
+        visual_status = AGENT_OS_READINESS_CHECK_WARNING
+        visual_detail = (
+            f"{visual_missing} UI-facing run(s) need screenshot or video QA evidence before they look done."
+        )
+    elif visual_ui_count:
+        visual_status = AGENT_OS_READINESS_CHECK_PASSED
+        visual_detail = f"{visual_evidenced}/{visual_ui_count} UI-facing run(s) have visual QA evidence."
+    elif visual_available:
+        visual_status = AGENT_OS_READINESS_CHECK_PASSED
+        visual_detail = f"{visual_available} visual QA artifact(s) are attached to recent runs."
+    else:
+        visual_status = AGENT_OS_READINESS_CHECK_PASSED
+        visual_detail = "No UI-facing runs need screenshot or video QA evidence yet."
+
     model_status = str(local_model.get("status") or AGENT_OS_READINESS_CHECK_FAILED)
     model_detail = str(local_model.get("detail") or "Local model readiness is unknown.")
     codex_status = str(codex_alignment.get("status") or AGENT_OS_READINESS_CHECK_PASSED)
@@ -5114,6 +5284,13 @@ def _agent_quality_monitor_payload(
             validation_status,
             validation_detail,
             count=validation_total,
+        ),
+        _agent_quality_monitor_dimension(
+            AGENT_QUALITY_MONITOR_DIMENSION_VISUAL_QA,
+            "Visual QA evidence",
+            visual_status,
+            visual_detail,
+            count=visual_ui_count,
         ),
         _agent_quality_monitor_dimension(
             AGENT_QUALITY_MONITOR_DIMENSION_MODEL,
@@ -5188,6 +5365,10 @@ def _agent_quality_monitor_payload(
         next_action = AGENT_QUALITY_MONITOR_ACTION_RUN_VALIDATION
         next_action_label = "Run validation"
         next_action_detail = validation_detail
+    elif visual_status != AGENT_OS_READINESS_CHECK_PASSED:
+        next_action = AGENT_QUALITY_MONITOR_ACTION_ATTACH_VISUAL_QA
+        next_action_label = "Attach visual QA"
+        next_action_detail = visual_detail
     elif codex_status != AGENT_OS_READINESS_CHECK_PASSED:
         next_action = AGENT_QUALITY_MONITOR_ACTION_SYNC_CODEX
         next_action_label = "Sync Codex profiles"
@@ -5212,7 +5393,7 @@ def _agent_quality_monitor_payload(
             "Local quality monitor needs attention: "
             + " ".join(problems[:AGENT_OS_QUALITY_PROBLEM_PREVIEW_LIMIT])
             if problems
-            else "Local quality monitor is healthy across architect review, scheduled output, validation, model, runtime, and operator signals."
+            else "Local quality monitor is healthy across architect review, scheduled output, validation, visual QA, model, runtime, and operator signals."
         )
     )
     return {
@@ -5458,6 +5639,7 @@ def _agent_runtime_queue_state(
     always_on_open_runs: list[ProjectAutonomyRun] = []
     queue_active_statuses = ACTIVE_STATUSES - {RUN_STATUS_QUEUED}
     now = _utcnow()
+    stale_queued_cutoff = now - timedelta(minutes=AGENT_RUNTIME_QUEUE_STALE_QUEUED_MINUTES)
     stale_cutoff = now - timedelta(minutes=AGENT_RUNTIME_QUEUE_STALE_ACTIVE_MINUTES)
     for row in rows:
         status = str(row.status or "")
@@ -5484,6 +5666,16 @@ def _agent_runtime_queue_state(
     fresh_active_runs = [
         row for row in active_runs if row.run_id not in stale_active_run_ids
     ]
+    stale_queued_runs = [
+        row
+        for row in queued_runs
+        if (row.updated_at or row.started_at or row.created_at)
+        and (row.updated_at or row.started_at or row.created_at) < stale_queued_cutoff
+    ]
+    stale_queued_run_ids = {row.run_id for row in stale_queued_runs}
+    fresh_queued_runs = [
+        row for row in queued_runs if row.run_id not in stale_queued_run_ids
+    ]
 
     pending_questions = (
         db.query(ProjectAutonomyOperatorQuestion)
@@ -5498,6 +5690,8 @@ def _agent_runtime_queue_state(
 
     queued_count = len(queued_runs)
     active_count = len(active_runs)
+    stale_queued_count = len(stale_queued_runs)
+    fresh_queued_count = max(0, queued_count - stale_queued_count)
     stale_active_count = len(stale_active_runs)
     fresh_active_count = max(0, active_count - stale_active_count)
     waiting_count = len(waiting_runs)
@@ -5505,6 +5699,11 @@ def _agent_runtime_queue_state(
     problems: list[str] = []
     if queued_count > AGENT_RUNTIME_QUEUE_WARNING_DEPTH:
         problems.append(f"{queued_count} queued run(s) are waiting for workers.")
+    if stale_queued_runs:
+        problems.append(
+            f"{len(stale_queued_runs)} queued run(s) have waited "
+            f"{AGENT_RUNTIME_QUEUE_STALE_QUEUED_MINUTES}+ minute(s) for a worker."
+        )
     if stale_active_runs:
         problems.append(
             f"{len(stale_active_runs)} active run(s) have not reported progress for "
@@ -5554,6 +5753,13 @@ def _agent_runtime_queue_state(
             "Open the stale active run and recover or restart it if the worker is no longer progressing."
         )
         next_action_run = _run_preview(stale_active_runs[0])
+    elif stale_queued_runs:
+        next_action = AGENT_RUNTIME_QUEUE_ACTION_DRAIN_QUEUED
+        next_action_label = "Start queued worker"
+        next_action_detail = (
+            "Use Start in the recovery queue to wake the queued run's worker."
+        )
+        next_action_run = _run_preview(stale_queued_runs[0])
     elif active_runs:
         next_action = AGENT_RUNTIME_QUEUE_ACTION_INSPECT_ACTIVE
         next_action_label = "Inspect active run"
@@ -5561,8 +5767,8 @@ def _agent_runtime_queue_state(
         next_action_run = _run_preview(active_runs[0])
     elif queued_runs:
         next_action = AGENT_RUNTIME_QUEUE_ACTION_DRAIN_QUEUED
-        next_action_label = "Drain queued run"
-        next_action_detail = "Open the queued run, then start or inspect the runtime worker if it is not moving."
+        next_action_label = "Start queued worker"
+        next_action_detail = "Use Start in the recovery queue to wake the next queued run's worker."
         next_action_run = _run_preview(queued_runs[0])
     elif waiting_runs:
         next_action = AGENT_RUNTIME_QUEUE_ACTION_REVIEW_WAITING
@@ -5583,9 +5789,12 @@ def _agent_runtime_queue_state(
         "always_on_profile_count": len(always_on_profile_ids),
         "open_count": open_count,
         "queued_count": queued_count,
+        "fresh_queued_count": fresh_queued_count,
+        "stale_queued_count": stale_queued_count,
         "active_count": active_count,
         "fresh_active_count": fresh_active_count,
         "waiting_count": waiting_count,
+        "stale_queued_after_minutes": AGENT_RUNTIME_QUEUE_STALE_QUEUED_MINUTES,
         "stale_active_count": stale_active_count,
         "stale_after_minutes": AGENT_RUNTIME_QUEUE_STALE_ACTIVE_MINUTES,
         "pending_question_count": pending_question_count,
@@ -5604,6 +5813,12 @@ def _agent_runtime_queue_state(
         "next_action_last_seen_age_minutes": next_action_run.get("last_seen_age_minutes"),
         "stale_active_runs": [
             _run_preview(row) for row in stale_active_runs[:AGENT_RUNTIME_QUEUE_PREVIEW_LIMIT]
+        ],
+        "stale_queued_runs": [
+            _run_preview(row) for row in stale_queued_runs[:AGENT_RUNTIME_QUEUE_PREVIEW_LIMIT]
+        ],
+        "fresh_queued_runs": [
+            _run_preview(row) for row in fresh_queued_runs[:AGENT_RUNTIME_QUEUE_PREVIEW_LIMIT]
         ],
         "fresh_active_runs": [
             _run_preview(row) for row in fresh_active_runs[:AGENT_RUNTIME_QUEUE_PREVIEW_LIMIT]
@@ -5659,8 +5874,17 @@ def _agent_operator_inbox_state(
             return "Autopilot"
         return profile_names.get(int(agent_profile_id), "Autopilot agent")
 
-    def _run_item(row: ProjectAutonomyRun, *, kind: str, label: str, reason: str) -> dict[str, Any]:
-        return {
+    def _run_item(
+        row: ProjectAutonomyRun,
+        *,
+        kind: str,
+        label: str,
+        reason: str,
+        recovery_action: str | None = None,
+        action_label: str | None = None,
+        recovery_detail: str | None = None,
+    ) -> dict[str, Any]:
+        payload = {
             "kind": kind,
             "label": label,
             "run_id": row.run_id,
@@ -5671,6 +5895,40 @@ def _agent_operator_inbox_state(
             "reason": truncate_text(reason, 240)[0],
             "created_at": row.created_at.isoformat() if row.created_at else None,
             "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        }
+        if recovery_action:
+            payload["recovery_action"] = recovery_action
+        if action_label:
+            payload["action_label"] = action_label
+        if recovery_detail:
+            payload["recovery_detail"] = truncate_text(recovery_detail, 240)[0]
+        return payload
+
+    def _blocked_recovery(row: ProjectAutonomyRun) -> dict[str, str]:
+        raw_reason = str(row.merge_message or row.error_message or "").strip()
+        if not raw_reason:
+            raw_reason = "This agent stopped before completion."
+        status = str(row.status or "").strip().replace("_", " ")
+        lower = raw_reason.lower()
+        if "validation" in lower or "merge" in lower:
+            detail = (
+                f"{raw_reason} Rerun safely with the failure context preserved, "
+                "keep Plan Mode approval-first, and require validation evidence before merge."
+            )
+        elif "quality gate" in lower or "architect" in lower:
+            detail = (
+                f"{raw_reason} Rerun safely only after revising the plan prompt so the architect gate can pass."
+            )
+        else:
+            detail = (
+                f"{raw_reason} Rerun safely from the original prompt after narrowing scope or adding the missing context."
+            )
+        return {
+            "label": "Blocked handoff" if not status else f"{status.title()} handoff",
+            "reason": detail,
+            "recovery_action": AGENT_OPERATOR_INBOX_RECOVERY_RERUN_SAFE,
+            "action_label": "Rerun",
+            "recovery_detail": "Prefill a fresh approval-first draft from this run.",
         }
 
     approval_runs: list[ProjectAutonomyRun] = []
@@ -5719,14 +5977,16 @@ def _agent_operator_inbox_state(
             )
         elif status in {RUN_STATUS_BLOCKED, RUN_STATUS_FAILED}:
             blocked_runs.append(row)
+            recovery = _blocked_recovery(row)
             items.append(
                 _run_item(
                     row,
                     kind=AGENT_OPERATOR_INBOX_ITEM_BLOCKER,
-                    label="Blocked handoff",
-                    reason=row.error_message
-                    or row.merge_message
-                    or "This agent stopped before completion and needs operator review or a rerun.",
+                    label=recovery["label"],
+                    reason=recovery["reason"],
+                    recovery_action=recovery["recovery_action"],
+                    action_label=recovery["action_label"],
+                    recovery_detail=recovery["recovery_detail"],
                 )
             )
         if status == RUN_STATUS_CHATTING:
@@ -5736,7 +5996,13 @@ def _agent_operator_inbox_state(
                 .order_by(ProjectAutonomyMessage.id.desc())
                 .first()
             )
-            if latest_message is not None and latest_message.role == AGENT_OPERATOR_INBOX_USER_ROLE:
+            latest_content = str(latest_message.content or "") if latest_message is not None else ""
+            latest_is_command = _parse_autopilot_slash_command(latest_content) is not None
+            if (
+                latest_message is not None
+                and latest_message.role == AGENT_OPERATOR_INBOX_USER_ROLE
+                and not latest_is_command
+            ):
                 user_reply_runs.append(row)
                 items.append(
                     _run_item(
@@ -5772,8 +6038,8 @@ def _agent_operator_inbox_state(
             "Continue reply",
         ),
         AGENT_OPERATOR_INBOX_ITEM_BLOCKER: (
-            AGENT_OPERATOR_INBOX_ACTION_REVIEW_BLOCKER,
-            "Review blocker",
+            AGENT_OPERATOR_INBOX_ACTION_RECOVER_BLOCKER,
+            "Recover blocker",
         ),
     }
     priority_order = (
@@ -5801,6 +6067,8 @@ def _agent_operator_inbox_state(
         next_action_detail = str(next_action_item.get("reason") or "").strip()
         next_action_run_id = next_action_item.get("run_id")
         next_action_agent = str(next_action_item.get("agent") or "").strip()
+        next_action_recovery_action = str(next_action_item.get("recovery_action") or "").strip()
+        next_action_button_label = str(next_action_item.get("action_label") or "").strip()
     else:
         next_action = AGENT_OPERATOR_INBOX_ACTION_KEEP_MONITORING
         next_action_label = "Keep monitoring"
@@ -5808,6 +6076,8 @@ def _agent_operator_inbox_state(
         next_action_detail = "No operator approvals, answers, replies, or blocked handoffs are waiting."
         next_action_run_id = None
         next_action_agent = ""
+        next_action_recovery_action = ""
+        next_action_button_label = ""
     if total_action_count:
         parts = [
             (len(approval_runs), "approval"),
@@ -5841,6 +6111,8 @@ def _agent_operator_inbox_state(
         "next_action_kind": next_action_kind,
         "next_action_run_id": next_action_run_id,
         "next_action_agent": next_action_agent,
+        "next_action_recovery_action": next_action_recovery_action,
+        "next_action_button_label": next_action_button_label,
         "items": items[:AGENT_OPERATOR_INBOX_PREVIEW_LIMIT],
     }
 
@@ -7252,7 +7524,8 @@ def _autopilot_runtime_queue_lines(readiness: Mapping[str, Any]) -> list[str]:
             f"{int(queue.get('queued_count') or 0)} queued, "
             f"{fresh_active_count} active, "
             f"{int(queue.get('waiting_count') or 0)} waiting, "
-            f"{int(queue.get('stale_active_count') or 0)} stale ({status})."
+            f"{int(queue.get('stale_active_count') or 0)} stale active, "
+            f"{int(queue.get('stale_queued_count') or 0)} stale queued ({status})."
         )
     ]
     if detail:
@@ -7278,6 +7551,7 @@ def _autopilot_runtime_queue_lines(readiness: Mapping[str, Any]) -> list[str]:
     preview_run_ids: set[str] = set()
     for label, key in (
         ("stale", "stale_active_runs"),
+        ("stale queued", "stale_queued_runs"),
         ("active", "fresh_active_runs"),
         ("queued", "queued_runs"),
         ("waiting", "waiting_runs"),
@@ -7310,7 +7584,7 @@ def _autopilot_runtime_queue_lines(readiness: Mapping[str, Any]) -> list[str]:
                     f"plan {plan_label}" if plan_label else "",
                     (
                         f"last seen {int(last_seen_age)}m ago"
-                        if label == "stale" and last_seen_age is not None
+                        if label in {"stale", "stale queued"} and last_seen_age is not None
                         else ""
                     ),
                 )
@@ -7599,6 +7873,7 @@ def _autopilot_command_quality(
             reviews = _mapping_payload(scorecard.get("architect_reviews"))
             scheduled_quality = _mapping_payload(scorecard.get("scheduled_quality"))
             validation = _mapping_payload(scorecard.get("validation"))
+            visual_qa = _mapping_payload(scorecard.get("visual_qa"))
             runtime_queue = _mapping_payload(readiness.get("runtime_queue"))
             operator_inbox = _mapping_payload(readiness.get("operator_inbox"))
             codex_alignment = _mapping_payload(readiness.get("codex_alignment"))
@@ -7629,7 +7904,9 @@ def _autopilot_command_quality(
                         f"{int(reviews.get('passed') or 0)} passing plan review(s), "
                         f"{int(reviews.get('blocked') or 0)} blocked weak plan(s), "
                         f"{int(scheduled_quality.get('repaired') or 0)} repaired schedule report(s), "
-                        f"{int(validation.get('passed') or 0)}/{int(validation.get('total') or 0)} validation set(s) passed."
+                        f"{int(validation.get('passed') or 0)}/{int(validation.get('total') or 0)} validation set(s) passed, "
+                        f"{int(visual_qa.get('evidenced_ui_run_count') or 0)}/"
+                        f"{int(visual_qa.get('ui_run_count') or 0)} UI visual QA run(s) evidenced."
                     ),
                     (
                         "- Runtime queue: "
