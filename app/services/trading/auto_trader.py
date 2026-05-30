@@ -2451,23 +2451,12 @@ def _queue_shadow_stock_fastlane_for_observation(
         ),
     )
     previous_priority = int(getattr(pattern, "backtest_priority", 0) or 0)
-    if previous_priority >= priority:
-        return {
-            "queued": False,
-            "reason": "already_boosted",
-            "pattern_id": pattern_id,
-            "priority": previous_priority,
-            "target_priority": priority,
-            "expected_net_pct": expected_net_pct,
-            "lifecycle_stage": lifecycle,
-        }
 
-    pattern.backtest_priority = priority
-    try:
+    def _emit_fastlane_work() -> int | None:
         from .backtest_queue import invalidate_queue_status_cache
         from .brain_work.emitters import emit_backtest_requested_for_pattern
 
-        emit_backtest_requested_for_pattern(
+        event_id = emit_backtest_requested_for_pattern(
             db,
             pattern_id,
             source="autotrader_shadow_stock_fastlane",
@@ -2486,6 +2475,39 @@ def _queue_shadow_stock_fastlane_for_observation(
             },
         )
         invalidate_queue_status_cache()
+        return event_id
+
+    if previous_priority >= priority:
+        try:
+            event_id = _emit_fastlane_work()
+        except Exception:
+            logger.debug(
+                "[autotrader] shadow stock fastlane refresh failed alert_id=%s "
+                "pattern_id=%s",
+                getattr(alert, "id", None),
+                pattern_id,
+                exc_info=True,
+            )
+            event_id = None
+        return {
+            "queued": event_id is not None,
+            "reason": (
+                "already_boosted_evidence_refreshed"
+                if event_id is not None
+                else "already_boosted"
+            ),
+            "pattern_id": pattern_id,
+            "priority": previous_priority,
+            "target_priority": priority,
+            "expected_net_pct": expected_net_pct,
+            "lifecycle_stage": lifecycle,
+            "work_event_id": event_id,
+        }
+
+    pattern.backtest_priority = priority
+    event_id: int | None = None
+    try:
+        event_id = _emit_fastlane_work()
     except Exception:
         logger.debug(
             "[autotrader] shadow stock fastlane emit failed alert_id=%s pattern_id=%s",
@@ -2496,6 +2518,7 @@ def _queue_shadow_stock_fastlane_for_observation(
     db.flush()
     return {
         "queued": True,
+        "work_event_id": event_id,
         "pattern_id": pattern_id,
         "priority": priority,
         "previous_priority": previous_priority,

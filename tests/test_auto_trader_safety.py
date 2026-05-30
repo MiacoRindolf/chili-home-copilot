@@ -1202,6 +1202,87 @@ def test_shadow_stock_fastlane_boosts_pattern_for_positive_edge(monkeypatch):
     db.flush.assert_called_once()
 
 
+def test_shadow_stock_fastlane_refreshes_evidence_when_already_boosted(monkeypatch):
+    settings = _minimal_settings(1)
+    monkeypatch.setattr(at_mod, "settings", settings)
+    emitted: list[dict] = []
+    invalidated: list[bool] = []
+
+    def _emit_backtest_requested(db, scan_pattern_id, *, source, **kwargs):
+        emitted.append({
+            "scan_pattern_id": scan_pattern_id,
+            "source": source,
+            **kwargs,
+        })
+        return 44
+
+    monkeypatch.setattr(
+        "app.services.trading.brain_work.emitters.emit_backtest_requested_for_pattern",
+        _emit_backtest_requested,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.backtest_queue.invalidate_queue_status_cache",
+        lambda: invalidated.append(True),
+    )
+    db = MagicMock()
+    pat = ScanPattern(
+        id=223,
+        name="Shadow stock already boosted",
+        rules_json={},
+        lifecycle_stage="shadow_promoted",
+        active=True,
+        backtest_priority=AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_BACKTEST_PRIORITY,
+    )
+    alert = BreakoutAlert(
+        id=556,
+        ticker="BOOST",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.9,
+        price_at_alert=TEST_ENTRY_PRICE,
+        entry_price=TEST_ENTRY_PRICE,
+        stop_loss=TEST_STOP_PRICE,
+        target_price=TEST_TARGET_PRICE,
+        user_id=1,
+        scan_pattern_id=pat.id,
+    )
+    snap = {"entry_edge": {"expected_net_pct": TEST_POSITIVE_EXPECTED_NET_PCT}}
+
+    fastlane = at_mod._queue_shadow_stock_fastlane_for_observation(
+        db,
+        alert=alert,
+        pattern=pat,
+        reason=at_mod.SHADOW_OBSERVATION_REASON_STAGE,
+        snap=snap,
+    )
+
+    assert fastlane is not None
+    assert fastlane["queued"] is True
+    assert fastlane["reason"] == "already_boosted_evidence_refreshed"
+    assert fastlane["work_event_id"] == 44
+    assert fastlane["priority"] == AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_BACKTEST_PRIORITY
+    assert pat.backtest_priority == AUTOTRADER_SHADOW_STOCK_FASTLANE_DEFAULT_BACKTEST_PRIORITY
+    assert emitted == [{
+        "scan_pattern_id": pat.id,
+        "source": "autotrader_shadow_stock_fastlane",
+        "asset_class": "stock",
+        "expected_evidence_value": TEST_POSITIVE_EXPECTED_NET_PCT,
+        "payload": {
+            "alert_id": alert.id,
+            "ticker": "BOOST",
+            "reason": at_mod.SHADOW_OBSERVATION_REASON_STAGE,
+            "lifecycle_stage": "shadow_promoted",
+            "promotion_status": None,
+            "expected_net_pct": TEST_POSITIVE_EXPECTED_NET_PCT,
+            "cash_deployment_category": "positive_ev_shadow",
+            "graduation_blocker": "shadow_observation_signal_lane",
+            "recommended_work_event": "backtest_requested",
+        },
+    }]
+    assert invalidated == [True]
+    db.flush.assert_not_called()
+
+
 def test_shadow_stock_fastlane_respects_recent_backtest_cooldown(monkeypatch):
     settings = _minimal_settings(1)
     monkeypatch.setattr(at_mod, "settings", settings)
