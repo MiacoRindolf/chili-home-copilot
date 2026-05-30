@@ -782,27 +782,6 @@ def _payload_priority_tickers(payload: dict[str, Any]) -> set[str]:
     return out
 
 
-def _recent_completed_work_covers_requested_priority(
-    db: Session,
-    *,
-    event_type: str,
-    dedupe_key: str,
-    payload: dict[str, Any],
-) -> bool:
-    completed_payload = _recent_completed_work_payload(
-        db,
-        event_type=event_type,
-        dedupe_key=dedupe_key,
-    )
-    if completed_payload is None:
-        return False
-    requested = _payload_priority_tickers(payload)
-    if event_type != RECERT_RESCUE_REFRESH or not requested:
-        return True
-    completed = _payload_priority_tickers(completed_payload)
-    return bool(completed) and requested.issubset(completed)
-
-
 def emit_edge_reliability_refresh_requested(
     db: Session,
     scan_pattern_id: int,
@@ -860,13 +839,21 @@ def emit_targeted_profitability_work(
     slice_key = _canonical_asset_class(asset_class) or "all"
     dedupe_key = f"{event_type}:{pid_key}:a{slice_key}:{fp}"
     body = dict(payload or {})
-    if _recent_completed_work_covers_requested_priority(
+    completed_payload = _recent_completed_work_payload(
         db,
         event_type=event_type,
         dedupe_key=dedupe_key,
-        payload=body,
-    ):
-        return None
+    )
+    if completed_payload is not None:
+        requested_priority = _payload_priority_tickers(body)
+        if event_type != RECERT_RESCUE_REFRESH or not requested_priority:
+            return None
+        completed_priority = _payload_priority_tickers(completed_payload)
+        if completed_priority and requested_priority.issubset(completed_priority):
+            return None
+        priority_basis = ",".join(sorted(requested_priority))
+        priority_hash = hashlib.sha1(priority_basis.encode("utf-8")).hexdigest()[:12]
+        dedupe_key = f"{dedupe_key}:priority:{priority_hash}"
     if scan_pattern_id is not None:
         body["scan_pattern_id"] = int(scan_pattern_id)
     body["asset_class"] = _canonical_asset_class(asset_class)

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -230,6 +230,50 @@ def _recert_rescue_diagnostic_status(
     return "needs_review", "inspect_recert_diagnostic"
 
 
+def _recert_rescue_recent_backtest_cooldown(
+    db: "Session",
+    *,
+    scan_pattern_id: int,
+) -> dict[str, Any] | None:
+    try:
+        from app.config import settings
+        from app.models.trading import ScanPattern
+
+        if not bool(getattr(settings, "brain_queue_recert_cooldown_enabled", True)):
+            return None
+        cooldown_minutes = int(
+            getattr(settings, "brain_queue_recert_cooldown_minutes", 360) or 0
+        )
+        if cooldown_minutes <= 0:
+            return None
+        pattern = db.get(ScanPattern, int(scan_pattern_id))
+    except Exception:
+        logger.debug(
+            "%s recert cooldown lookup skipped pattern_id=%s",
+            LOG_PREFIX,
+            scan_pattern_id,
+            exc_info=True,
+        )
+        return None
+    last_backtest_at = getattr(pattern, "last_backtest_at", None) if pattern else None
+    if not isinstance(last_backtest_at, datetime):
+        return None
+    last_bt = last_backtest_at
+    if last_bt.tzinfo is not None:
+        last_bt = last_bt.astimezone(timezone.utc).replace(tzinfo=None)
+    cooldown_until = last_bt + timedelta(minutes=cooldown_minutes)
+    now_utc = datetime.utcnow()
+    if now_utc >= cooldown_until:
+        return None
+    return {
+        "reason": "recent_recert_backtest_cooldown",
+        "cooldown_active": True,
+        "last_backtest_at": last_bt.isoformat(),
+        "cooldown_until": cooldown_until.isoformat(),
+        "cooldown_minutes": cooldown_minutes,
+    }
+
+
 def _recert_rescue_backtest_refresh(
     db: "Session",
     *,
@@ -322,6 +366,14 @@ def _recert_rescue_backtest_refresh(
         out["priority_tickers"] = merged_priority or priority_tickers
         return out
 
+    cooldown = _recert_rescue_recent_backtest_cooldown(
+        db,
+        scan_pattern_id=scan_pattern_id,
+    )
+    if cooldown is not None:
+        out.update(cooldown)
+        return out
+
     event_id = enqueue_work_event(
         db,
         event_type="backtest_requested",
@@ -351,13 +403,13 @@ def _recert_rescue_backtest_refresh(
 def _recert_rescue_parent_payload(
     db: "Session",
     ev: Any,
-) -> tuple[dict[str, Any], int | None]:
+) -> tuple[dict[str, Any], int | None, datetime | None]:
     parent_id = (
         _safe_int(_payload(ev).get("parent_work_event_id"))
         or _safe_int(getattr(ev, "parent_event_id", None))
     )
     if parent_id is None:
-        return {}, None
+        return {}, None, None
     try:
         from app.models.trading import BrainWorkEvent
 
@@ -369,9 +421,14 @@ def _recert_rescue_parent_payload(
             parent_id,
             exc_info=True,
         )
-        return {}, parent_id
+        return {}, parent_id, None
     parent_payload = getattr(parent, "payload", None) if parent is not None else None
-    return parent_payload if isinstance(parent_payload, dict) else {}, parent_id
+    parent_created_at = getattr(parent, "created_at", None) if parent is not None else None
+    return (
+        parent_payload if isinstance(parent_payload, dict) else {},
+        parent_id,
+        parent_created_at if isinstance(parent_created_at, datetime) else None,
+    )
 
 
 def handle_recert_rescue_post_backtest(
@@ -395,7 +452,7 @@ def handle_recert_rescue_post_backtest(
     )
 
     payload = _payload(ev)
-    parent_payload, parent_id = _recert_rescue_parent_payload(db, ev)
+    parent_payload, parent_id, parent_created_at = _recert_rescue_parent_payload(db, ev)
     source = str(payload.get("source") or parent_payload.get("source") or "").strip()
     refresh_reason = str(
         payload.get("recert_refresh_reason")
@@ -412,6 +469,16 @@ def handle_recert_rescue_post_backtest(
     if pattern is None:
         raise ValueError(f"scan_pattern_id={pid} not found")
 
+    from app.services.trading.recert_queue_service import (
+        stamp_oos_recert_from_backtests,
+    )
+
+    oos_recert_stamp = stamp_oos_recert_from_backtests(
+        db,
+        scan_pattern_id=pid,
+        since=parent_created_at,
+        certifier="recert_rescue_post_backtest",
+    )
     recert_reconcile = _refresh_pattern_recert_state(pattern, set(HARD_RECERT_REASONS))
     db.flush()
 
@@ -434,6 +501,12 @@ def handle_recert_rescue_post_backtest(
         graduation_blocker=reliability.get("graduation_blocker"),
         hard_recert_reasons=set(HARD_RECERT_REASONS),
     )
+    if (
+        not bool(oos_recert_stamp.get("ok"))
+        and oos_recert_stamp.get("reason") == "cert_failed_no_oos_evidence"
+        and rescue_status != "not_recert_required"
+    ):
+        next_action = "inspect_recert_backtest_no_oos_evidence_keep_live_blocked"
     payload_out = {
         "scan_pattern_id": pid,
         "source": "recert_rescue_post_backtest",
@@ -444,6 +517,7 @@ def handle_recert_rescue_post_backtest(
         "soft_recert_reasons": soft_reasons,
         "recommended_next_action": next_action,
         "graduation_blocker": reliability.get("graduation_blocker"),
+        "oos_recert_stamp": oos_recert_stamp,
         "recert_reconcile": recert_reconcile,
         "recert_backtest_refresh": {
             "requested": False,
@@ -600,6 +674,8 @@ def handle_recert_rescue_refresh(
     )
     if backtest_refresh.get("requested"):
         next_action = "run_recert_backtest_refresh_keep_live_blocked"
+    elif backtest_refresh.get("reason") == "recent_recert_backtest_cooldown":
+        next_action = "wait_for_recert_backtest_cooldown_keep_live_blocked"
     payload = {
         "scan_pattern_id": pid,
         "source": "recert_rescue_refresh",

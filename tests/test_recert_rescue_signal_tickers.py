@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 
 def test_recert_rescue_priority_tickers_prefer_blocked_signal():
     from app.services.trading.brain_work.handlers import profitability
@@ -92,6 +94,78 @@ def test_autotrader_recert_fastlane_emits_signal_ticker_rescue_work(monkeypatch)
     assert work["asset_class"] == "crypto"
     assert work["payload"]["signal_ticker"] == "AAVE-USD"
     assert work["payload"]["priority_tickers"] == ["AAVE-USD"]
+
+
+def test_recert_rescue_priority_upgrade_uses_distinct_dedupe_key(monkeypatch):
+    from app.services.trading import edge_reliability
+
+    captured: dict = {}
+
+    monkeypatch.setattr(
+        edge_reliability,
+        "_recent_completed_work_payload",
+        lambda *_args, **_kwargs: {"source": "edge_reliability_snapshot"},
+    )
+
+    def _enqueue(_db, **kwargs):
+        captured.update(kwargs)
+        return 123
+
+    monkeypatch.setattr(edge_reliability, "enqueue_work_event", _enqueue)
+
+    event_id = edge_reliability.emit_targeted_profitability_work(
+        object(),
+        event_type=edge_reliability.RECERT_RESCUE_REFRESH,
+        scan_pattern_id=1260,
+        source="autotrader_signal_fastlane",
+        asset_class="crypto",
+        evidence_fingerprint="same-fp",
+        payload={
+            "signal_ticker": "AAVE-USD",
+            "priority_tickers": ["AAVE-USD"],
+        },
+    )
+
+    assert event_id == 123
+    assert captured["dedupe_key"].startswith(
+        "recert_rescue_refresh:p1260:acrypto:same-fp:priority:"
+    )
+    assert captured["payload"]["signal_ticker"] == "AAVE-USD"
+    assert captured["payload"]["priority_tickers"] == ["AAVE-USD"]
+
+
+def test_recert_rescue_priority_completed_work_suppresses_repeat(monkeypatch):
+    from app.services.trading import edge_reliability
+
+    monkeypatch.setattr(
+        edge_reliability,
+        "_recent_completed_work_payload",
+        lambda *_args, **_kwargs: {
+            "source": "autotrader_signal_fastlane",
+            "signal_ticker": "AAVE-USD",
+            "priority_tickers": ["AAVE-USD"],
+        },
+    )
+    monkeypatch.setattr(
+        edge_reliability,
+        "enqueue_work_event",
+        lambda *_args, **_kwargs: pytest.fail("covered priority should suppress"),
+    )
+
+    event_id = edge_reliability.emit_targeted_profitability_work(
+        object(),
+        event_type=edge_reliability.RECERT_RESCUE_REFRESH,
+        scan_pattern_id=1260,
+        source="autotrader_signal_fastlane",
+        asset_class="crypto",
+        evidence_fingerprint="same-fp",
+        payload={
+            "signal_ticker": "AAVE-USD",
+            "priority_tickers": ["AAVE-USD"],
+        },
+    )
+
+    assert event_id is None
 
 
 def test_recert_rescue_updates_open_backtest_request_with_signal_priority(db):

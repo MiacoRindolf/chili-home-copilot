@@ -144,30 +144,44 @@ def _aggregate_oos_backtest_evidence(
     since: datetime | None = None,
 ) -> dict[str, Any]:
     """Aggregate stored walk-forward/OOS rows for a pattern recert stamp."""
-    where = [
-        "scan_pattern_id = :pid",
-        "oos_trade_count IS NOT NULL",
-        "oos_trade_count > 0",
-        "oos_win_rate IS NOT NULL",
-    ]
+    where = ["scan_pattern_id = :pid"]
     params: dict[str, Any] = {"pid": int(scan_pattern_id)}
     if since is not None:
         where.append("ran_at >= :since")
         params["since"] = since
     row = db.execute(text(f"""
         SELECT
-            COUNT(*) AS backtests_run,
-            COALESCE(SUM(oos_trade_count), 0) AS total,
+            COUNT(*) AS backtests_seen,
+            COUNT(*) FILTER (
+                WHERE oos_trade_count IS NOT NULL
+            ) AS backtests_with_oos_observed,
+            COUNT(*) FILTER (
+                WHERE oos_trade_count IS NOT NULL
+                  AND oos_trade_count > 0
+                  AND oos_win_rate IS NOT NULL
+            ) AS backtests_run,
+            COALESCE(SUM(oos_trade_count) FILTER (
+                WHERE oos_trade_count > 0
+                  AND oos_win_rate IS NOT NULL
+            ), 0) AS total,
             COALESCE(SUM(
                 CASE
+                    WHEN oos_trade_count IS NULL
+                      OR oos_trade_count <= 0
+                      OR oos_win_rate IS NULL THEN 0.0
                     WHEN oos_win_rate > 1.0 THEN oos_win_rate / 100.0
                     ELSE oos_win_rate
                 END * oos_trade_count
             ), 0.0) AS wins_float,
-            SUM(
-                oos_return_pct * oos_trade_count
+            SUM(oos_return_pct * oos_trade_count) FILTER (
+                WHERE oos_trade_count > 0
+                  AND oos_win_rate IS NOT NULL
+                  AND oos_return_pct IS NOT NULL
             ) / NULLIF(
-                SUM(oos_trade_count) FILTER (WHERE oos_return_pct IS NOT NULL),
+                SUM(oos_trade_count) FILTER (WHERE oos_return_pct IS NOT NULL
+                    AND oos_trade_count > 0
+                    AND oos_win_rate IS NOT NULL
+                ),
                 0
             ) AS avg_return
         FROM trading_backtests
@@ -180,6 +194,8 @@ def _aggregate_oos_backtest_evidence(
             "win_rate": None,
             "avg_return": None,
             "backtests_run": 0,
+            "backtests_seen": 0,
+            "backtests_with_oos_observed": 0,
         }
     total = int(row.get("total") or 0)
     wins_float = float(row.get("wins_float") or 0.0)
@@ -194,7 +210,143 @@ def _aggregate_oos_backtest_evidence(
             else None
         ),
         "backtests_run": int(row.get("backtests_run") or 0),
+        "backtests_seen": int(row.get("backtests_seen") or 0),
+        "backtests_with_oos_observed": int(
+            row.get("backtests_with_oos_observed") or 0
+        ),
     }
+
+
+def _stamp_pattern_oos_recert(
+    db: Session,
+    *,
+    scan_pattern_id: int,
+    total: int | None,
+    wins: int | None,
+    win_rate: float | None,
+    avg_return: float | None,
+    backtests_run: int | None,
+    now: datetime,
+    certifier: str,
+    evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    pid = int(scan_pattern_id)
+    evidence_payload = dict(evidence or {})
+    evidence_payload.update({
+        "total": int(total or 0),
+        "wins": int(wins or 0),
+        "win_rate": win_rate,
+        "avg_return": avg_return,
+        "backtests_run": int(backtests_run or 0),
+    })
+    if int(total or 0) <= 0:
+        return {
+            "ok": False,
+            "stamped": False,
+            "scan_pattern_id": pid,
+            "reason": "cert_failed_no_oos_evidence",
+            "certifier": certifier,
+            "evidence": evidence_payload,
+        }
+
+    remaining_reasons: list[str] = []
+    try:
+        from ...models.trading import ScanPattern
+        from .alpha_portfolio_gate import (
+            config_from_settings,
+            recert_reasons_for_pattern,
+        )
+
+        pattern = db.get(ScanPattern, pid)
+        if pattern is None:
+            return {
+                "ok": False,
+                "stamped": False,
+                "scan_pattern_id": pid,
+                "reason": "scan_pattern_not_found",
+                "certifier": certifier,
+                "evidence": evidence_payload,
+            }
+
+        normalized_wr = None
+        if win_rate is not None:
+            try:
+                from .backtest_metrics import normalize_win_rate_for_db
+
+                normalized_wr = normalize_win_rate_for_db(float(win_rate))
+            except Exception:
+                normalized_wr = None
+
+        pattern.oos_evaluated_at = now
+        pattern.oos_trade_count = int(total)
+        if normalized_wr is not None:
+            pattern.oos_win_rate = float(normalized_wr)
+        if avg_return is not None:
+            pattern.oos_avg_return_pct = float(avg_return)
+        remaining_reasons = recert_reasons_for_pattern(
+            pattern,
+            now=now,
+            config=config_from_settings(settings),
+        )
+        pattern.recert_required = bool(remaining_reasons)
+        pattern.recert_reason = (
+            ",".join(remaining_reasons) if remaining_reasons else None
+        )
+        db.add(pattern)
+        db.flush()
+    except Exception as exc:
+        logger.debug(
+            "[recert_queue] pattern certification stamp failed",
+            exc_info=True,
+        )
+        return {
+            "ok": False,
+            "stamped": False,
+            "scan_pattern_id": pid,
+            "reason": "pattern_stamp_failed",
+            "error": str(exc)[:240],
+            "certifier": certifier,
+            "evidence": evidence_payload,
+        }
+
+    return {
+        "ok": True,
+        "stamped": True,
+        "scan_pattern_id": pid,
+        "remaining_recert_reasons": remaining_reasons,
+        "certifier": certifier,
+        "evidence": evidence_payload,
+    }
+
+
+def stamp_oos_recert_from_backtests(
+    db: Session,
+    *,
+    scan_pattern_id: int,
+    since: datetime | None = None,
+    now: datetime | None = None,
+    certifier: str = "recert_queue_service",
+) -> dict[str, Any]:
+    """Stamp pattern OOS recert fields from stored backtests without requiring an open log row."""
+    pid = int(scan_pattern_id)
+    now = now or datetime.utcnow()
+    evidence = _aggregate_oos_backtest_evidence(
+        db,
+        scan_pattern_id=pid,
+        since=since,
+    )
+    return _stamp_pattern_oos_recert(
+        db,
+        scan_pattern_id=pid,
+        total=int(evidence.get("total") or 0),
+        wins=int(evidence.get("wins") or 0),
+        win_rate=evidence.get("win_rate"),
+        avg_return=evidence.get("avg_return"),
+        backtests_run=int(evidence.get("backtests_run") or 0),
+        now=now,
+        certifier=certifier,
+        evidence=evidence,
+    )
 
 
 def _already_queued(
@@ -569,17 +721,24 @@ def complete_open_recerts_from_backtest(
         avg_return = oos_evidence.get("avg_return")
         backtests_run = int(oos_evidence.get("backtests_run") or 0)
     evidence_total = int(total or 0)
+    evidence_payload = {
+        "total": total,
+        "wins": wins,
+        "win_rate": win_rate,
+        "avg_return": avg_return,
+        "backtests_run": backtests_run,
+        "backtests_seen": oos_evidence.get("backtests_seen"),
+        "backtests_with_oos_observed": oos_evidence.get(
+            "backtests_with_oos_observed"
+        ),
+    }
     if evidence_total <= 0:
         no_evidence_payload = {
             "completion": {
                 "attempted_at": now.isoformat(),
                 "certifier": "backtest_queue_worker",
                 "status": "cert_failed_no_oos_evidence",
-                "total": total,
-                "wins": wins,
-                "win_rate": win_rate,
-                "avg_return": avg_return,
-                "backtests_run": backtests_run,
+                **evidence_payload,
             }
         }
         failed = int(db.execute(text("""
@@ -602,55 +761,27 @@ def complete_open_recerts_from_backtest(
             "reason": "cert_failed_no_oos_evidence",
         }
 
-    remaining_reasons: list[str] = []
-    try:
-        from ...models.trading import ScanPattern
-        from .alpha_portfolio_gate import (
-            config_from_settings,
-            recert_reasons_for_pattern,
-        )
-
-        pattern = db.get(ScanPattern, pid)
-        if pattern is not None:
-            normalized_wr = None
-            if win_rate is not None:
-                try:
-                    from .backtest_metrics import normalize_win_rate_for_db
-
-                    normalized_wr = normalize_win_rate_for_db(float(win_rate))
-                except Exception:
-                    normalized_wr = None
-            pattern.oos_evaluated_at = now
-            if total is not None:
-                pattern.oos_trade_count = int(total)
-            if normalized_wr is not None:
-                pattern.oos_win_rate = float(normalized_wr)
-            if avg_return is not None:
-                pattern.oos_avg_return_pct = float(avg_return)
-            remaining_reasons = recert_reasons_for_pattern(
-                pattern,
-                now=now,
-                config=config_from_settings(settings),
-            )
-            pattern.recert_required = bool(remaining_reasons)
-            pattern.recert_reason = (
-                ",".join(remaining_reasons) if remaining_reasons else None
-            )
-    except Exception:
-        logger.debug(
-            "[recert_queue] pattern certification stamp failed",
-            exc_info=True,
-        )
+    stamp_result = _stamp_pattern_oos_recert(
+        db,
+        scan_pattern_id=pid,
+        total=total,
+        wins=wins,
+        win_rate=win_rate,
+        avg_return=avg_return,
+        backtests_run=backtests_run,
+        now=now,
+        certifier="backtest_queue_worker",
+        evidence=oos_evidence,
+    )
+    remaining_reasons = list(stamp_result.get("remaining_recert_reasons") or [])
 
     completion_payload = {
         "completion": {
             "completed_at": now.isoformat(),
             "certifier": "backtest_queue_worker",
-            "total": total,
-            "wins": wins,
-            "win_rate": win_rate,
-            "avg_return": avg_return,
-            "backtests_run": backtests_run,
+            **evidence_payload,
+            "stamp_ok": bool(stamp_result.get("ok")),
+            "stamp_reason": stamp_result.get("reason"),
             "remaining_recert_reasons": remaining_reasons,
         }
     }
@@ -842,6 +973,7 @@ __all__ = [
     "queue_manual",
     "queue_scheduler",
     "complete_open_recerts_from_backtest",
+    "stamp_oos_recert_from_backtests",
     "reconcile_dispatched_recerts_from_backtests",
     "recert_summary",
 ]

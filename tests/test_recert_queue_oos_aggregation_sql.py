@@ -46,5 +46,6 @@ def test_oos_recert_average_return_ignores_missing_return_rows() -> None:
     assert out["win_rate"] == pytest.approx(0.6)
     assert out["avg_return"] == pytest.approx(2.5)
     assert "COALESCE(oos_return_pct, 0.0)" not in db.sql
-    assert "FILTER (WHERE oos_return_pct IS NOT NULL)" in db.sql
+    assert "FILTER" in db.sql
+    assert "oos_return_pct IS NOT NULL" in db.sql
     assert db.params == {"pid": 77}
