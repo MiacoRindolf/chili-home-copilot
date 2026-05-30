@@ -34,6 +34,21 @@ _DEAD_RECOVERY_CAP_RESET_PAYLOAD_KEY = "transient_dead_recovery_cap_reset_count"
 _DEAD_RECOVERY_TOTAL_PAYLOAD_KEY = "transient_dead_recovery_total_count"
 _DEAD_RECOVERY_DEFAULT_CAP_RESET_DELAY_SECONDS = 3600
 _DEAD_RECOVERY_DEFAULT_MAX_CAP_RESETS = 2
+_EXIT_VARIANT_REFRESH = "exit_variant_refresh"
+_EXIT_VARIANT_DIAGNOSTIC = "exit_variant_diagnostic"
+_STRUCTURAL_EXIT_NOOP_REASONS = frozenset(
+    {
+        "duplicate_learned_exit_label",
+        "missing_parent_payoff_geometry",
+        "no_loss_report",
+        "no_parent_returns",
+    }
+)
+_STRUCTURAL_EXIT_NOOP_PREFIXES = (
+    "edge_debt_too_negative_for_exit_child:",
+    "insufficient_parent_payoff_samples:",
+    "reward_risk_below_floor:",
+)
 
 
 def brain_work_ledger_enabled() -> bool:
@@ -54,6 +69,69 @@ def _payload_float(ev: BrainWorkEvent, key: str) -> float:
         return float(payload.get(key) or 0.0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _safe_payload_float(payload: dict[str, Any], key: str) -> float | None:
+    try:
+        return float(payload.get(key))
+    except (TypeError, ValueError):
+        return None
+
+
+def _payload_pattern_id(payload: dict[str, Any]) -> int:
+    try:
+        return int(payload.get("scan_pattern_id") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _structural_exit_noop_reason(reason: Any) -> bool:
+    value = str(reason or "").strip().lower()
+    return value in _STRUCTURAL_EXIT_NOOP_REASONS or any(
+        value.startswith(prefix) for prefix in _STRUCTURAL_EXIT_NOOP_PREFIXES
+    )
+
+
+def _exit_diagnostic_blocks_open_refresh(
+    payload: dict[str, Any],
+    *,
+    evidence_fingerprint: str | None,
+) -> bool:
+    try:
+        created_count = int(payload.get("created_count"))
+    except (TypeError, ValueError):
+        return False
+    if created_count != 0:
+        return False
+    fingerprint = str(evidence_fingerprint or "")
+    if fingerprint and str(payload.get("evidence_fingerprint") or "") == fingerprint:
+        return True
+    return _structural_exit_noop_reason(payload.get("skip_reason"))
+
+
+def _exit_refresh_payload_has_no_positive_evidence(payload: dict[str, Any]) -> bool:
+    expected_value = _safe_payload_float(payload, "expected_evidence_value")
+    if expected_value is not None and expected_value > 0.0:
+        return False
+
+    category = str(payload.get("cash_deployment_category") or "").strip().lower()
+    if category == "negative_ev":
+        return True
+
+    edge_values = [
+        _safe_payload_float(payload, "calibrated_ev_after_cost_pct"),
+        _safe_payload_float(payload, "calibrated_ev_pct"),
+        _safe_payload_float(payload, "expected_net_pct"),
+    ]
+    if not any(value is not None and value <= 0.0 for value in edge_values):
+        return False
+
+    blocker = str(payload.get("graduation_blocker") or "").strip().lower()
+    return blocker in {
+        "quality_blocked",
+        "negative_ev",
+        "non_positive_expected_edge",
+    }
 
 
 def _recert_rescue_refresh_rank(ev: BrainWorkEvent) -> tuple[int, float, float, int, float, int]:
@@ -699,13 +777,10 @@ def coalesce_duplicate_open_work(
     for row in rows:
         if row.status not in ("pending", "processing", "retry_wait"):
             continue
-        if str(row.event_type or "") != "exit_variant_refresh":
+        if str(row.event_type or "") != _EXIT_VARIANT_REFRESH:
             continue
         payload = row.payload if isinstance(row.payload, dict) else {}
-        try:
-            pid = int(payload.get("scan_pattern_id") or 0)
-        except (TypeError, ValueError):
-            pid = 0
+        pid = _payload_pattern_id(payload)
         if pid <= 0:
             continue
         exit_variant_groups.setdefault(pid, []).append(row)
@@ -750,6 +825,86 @@ def coalesce_duplicate_open_work(
             if row.status == "processing":
                 continue
             _retire_duplicate(row, reason=reason, keep_id=keep_id)
+
+    # A completed exit-variant diagnostic with zero children means the current
+    # evidence slice already proved there is no useful exit child to birth. Do
+    # not let a still-queued duplicate keep re-alerting as actionable work.
+    open_exit_rows: list[tuple[BrainWorkEvent, int, str]] = []
+    pattern_ids: set[int] = set()
+    for row in rows:
+        if row.status not in ("pending", "retry_wait"):
+            continue
+        if str(row.event_type or "") != _EXIT_VARIANT_REFRESH:
+            continue
+        payload = row.payload if isinstance(row.payload, dict) else {}
+        pid = _payload_pattern_id(payload)
+        if pid <= 0:
+            continue
+        open_exit_rows.append(
+            (row, pid, str(payload.get("evidence_fingerprint") or ""))
+        )
+        pattern_ids.add(pid)
+
+    if open_exit_rows:
+        remaining_open_exit_rows: list[tuple[BrainWorkEvent, int, str]] = []
+        for row, pid, evidence_fingerprint in open_exit_rows:
+            payload = row.payload if isinstance(row.payload, dict) else {}
+            if _exit_refresh_payload_has_no_positive_evidence(payload):
+                _retire_duplicate(
+                    row,
+                    reason="exit_variant_nonpositive_evidence_suppressed",
+                )
+                continue
+            remaining_open_exit_rows.append((row, pid, evidence_fingerprint))
+
+        try:
+            cooldown_minutes = int(
+                getattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360)
+            )
+        except (TypeError, ValueError):
+            cooldown_minutes = 360
+        diagnostics_by_pattern: dict[int, list[BrainWorkEvent]] = {}
+        if remaining_open_exit_rows and cooldown_minutes > 0:
+            cutoff = now - timedelta(minutes=cooldown_minutes)
+            diagnostics = (
+                db.query(BrainWorkEvent)
+                .filter(BrainWorkEvent.event_kind == "outcome")
+                .filter(BrainWorkEvent.event_type == _EXIT_VARIANT_DIAGNOSTIC)
+                .filter(BrainWorkEvent.created_at >= cutoff)
+                .filter(
+                    BrainWorkEvent.payload["scan_pattern_id"].astext.in_(
+                        [str(pid) for pid in sorted(pattern_ids)]
+                    )
+                )
+                .order_by(BrainWorkEvent.created_at.desc(), BrainWorkEvent.id.desc())
+                .limit(max(20, len(pattern_ids) * 20))
+                .all()
+            )
+            for diag in diagnostics:
+                payload = diag.payload if isinstance(diag.payload, dict) else {}
+                pid = _payload_pattern_id(payload)
+                if pid > 0:
+                    diagnostics_by_pattern.setdefault(pid, []).append(diag)
+
+        for row, pid, evidence_fingerprint in remaining_open_exit_rows:
+            for diag in diagnostics_by_pattern.get(pid, []):
+                payload = diag.payload if isinstance(diag.payload, dict) else {}
+                if _exit_diagnostic_blocks_open_refresh(
+                    payload,
+                    evidence_fingerprint=evidence_fingerprint,
+                ):
+                    _retire_duplicate(
+                        row,
+                        reason="exit_variant_recent_noop_diagnostic",
+                    )
+                    updated_payload = (
+                        dict(row.payload or {}) if isinstance(row.payload, dict) else {}
+                    )
+                    updated_payload[
+                        "duplicate_open_work_noop_diagnostic_event_id"
+                    ] = int(diag.id)
+                    row.payload = updated_payload
+                    break
 
     # Snapshot-triggered mining is global-universe work. When snapshot batches
     # arrive faster than a mine can finish, queued batches inside the handler's

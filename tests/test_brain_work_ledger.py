@@ -1012,6 +1012,175 @@ def test_coalesce_duplicate_open_work_keeps_processing_exit_variant(db) -> None:
     )
 
 
+def test_coalesce_duplicate_open_work_retires_exit_variant_with_recent_noop_diagnostic(
+    db,
+) -> None:
+    work_id = enqueue_work_event(
+        db,
+        event_type="exit_variant_refresh",
+        dedupe_key="exit_variant_refresh:p537:astock:same-fp",
+        payload={
+            "scan_pattern_id": 537,
+            "asset_class": "stock",
+            "evidence_fingerprint": "same-fp",
+            "cash_deployment_category": "positive_ev_shadow",
+        },
+        lease_scope="evolution",
+    )
+    other_id = enqueue_work_event(
+        db,
+        event_type="exit_variant_refresh",
+        dedupe_key="exit_variant_refresh:p538:astock:fresh-fp",
+        payload={
+            "scan_pattern_id": 538,
+            "asset_class": "stock",
+            "evidence_fingerprint": "fresh-fp",
+        },
+        lease_scope="evolution",
+    )
+    diagnostic_id = enqueue_outcome_event(
+        db,
+        event_type="exit_variant_diagnostic",
+        dedupe_key="exit_variant_diagnostic:p537:fast_skip:negative_ev:same-fp",
+        payload={
+            "scan_pattern_id": 537,
+            "evidence_fingerprint": "same-fp",
+            "skip_reason": "negative_ev_no_exit_variant_birth",
+            "created_count": 0,
+        },
+        claimable=False,
+    )
+    db.commit()
+    assert work_id is not None
+    assert other_id is not None
+    assert diagnostic_id is not None
+
+    result = coalesce_duplicate_open_work(
+        db,
+        event_types=("exit_variant_refresh",),
+    )
+    db.commit()
+
+    rows = {
+        int(row.id): row
+        for row in db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.id.in_([work_id, other_id]))
+        .all()
+    }
+    assert result["coalesced"] == 1
+    assert result["reasons"] == {"exit_variant_recent_noop_diagnostic": 1}
+    assert rows[work_id].status == "done"
+    assert (
+        rows[work_id].payload["duplicate_open_work_suppressed_reason"]
+        == "exit_variant_recent_noop_diagnostic"
+    )
+    assert (
+        rows[work_id].payload["duplicate_open_work_noop_diagnostic_event_id"]
+        == diagnostic_id
+    )
+    assert rows[other_id].status == "pending"
+
+
+def test_coalesce_duplicate_open_work_retires_exit_variant_with_nonpositive_payload(
+    db,
+) -> None:
+    work_id = enqueue_work_event(
+        db,
+        event_type="exit_variant_refresh",
+        dedupe_key="exit_variant_refresh:p537:astock:negative-fp",
+        payload={
+            "scan_pattern_id": 537,
+            "asset_class": "stock",
+            "evidence_fingerprint": "negative-fp",
+            "expected_evidence_value": 0.0,
+            "cash_deployment_category": "negative_ev",
+            "calibrated_ev_after_cost_pct": -0.25,
+            "graduation_blocker": "quality_blocked",
+        },
+        lease_scope="evolution",
+    )
+    positive_id = enqueue_work_event(
+        db,
+        event_type="exit_variant_refresh",
+        dedupe_key="exit_variant_refresh:p538:astock:positive-fp",
+        payload={
+            "scan_pattern_id": 538,
+            "asset_class": "stock",
+            "evidence_fingerprint": "positive-fp",
+            "expected_evidence_value": 1.0,
+            "cash_deployment_category": "negative_ev",
+            "calibrated_ev_after_cost_pct": -0.25,
+        },
+        lease_scope="evolution",
+    )
+    db.commit()
+    assert work_id is not None
+    assert positive_id is not None
+
+    result = coalesce_duplicate_open_work(
+        db,
+        event_types=("exit_variant_refresh",),
+    )
+    db.commit()
+
+    rows = {
+        int(row.id): row
+        for row in db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.id.in_([work_id, positive_id]))
+        .all()
+    }
+    assert result["coalesced"] == 1
+    assert result["reasons"] == {
+        "exit_variant_nonpositive_evidence_suppressed": 1,
+    }
+    assert rows[work_id].status == "done"
+    assert (
+        rows[work_id].payload["duplicate_open_work_suppressed_reason"]
+        == "exit_variant_nonpositive_evidence_suppressed"
+    )
+    assert rows[positive_id].status == "pending"
+
+
+def test_coalesce_duplicate_open_work_keeps_exit_variant_when_noop_fingerprint_changes(
+    db,
+) -> None:
+    work_id = enqueue_work_event(
+        db,
+        event_type="exit_variant_refresh",
+        dedupe_key="exit_variant_refresh:p537:astock:new-fp",
+        payload={
+            "scan_pattern_id": 537,
+            "asset_class": "stock",
+            "evidence_fingerprint": "new-fp",
+        },
+        lease_scope="evolution",
+    )
+    enqueue_outcome_event(
+        db,
+        event_type="exit_variant_diagnostic",
+        dedupe_key="exit_variant_diagnostic:p537:fast_skip:negative_ev:old-fp",
+        payload={
+            "scan_pattern_id": 537,
+            "evidence_fingerprint": "old-fp",
+            "skip_reason": "negative_ev_no_exit_variant_birth",
+            "created_count": 0,
+        },
+        claimable=False,
+    )
+    db.commit()
+    assert work_id is not None
+
+    result = coalesce_duplicate_open_work(
+        db,
+        event_types=("exit_variant_refresh",),
+    )
+    db.commit()
+
+    row = db.get(BrainWorkEvent, work_id)
+    assert result["coalesced"] == 0
+    assert row.status == "pending"
+
+
 def test_coalesce_duplicate_open_work_keeps_latest_queued_market_snapshot_batch(db) -> None:
     now = datetime.utcnow()
 
