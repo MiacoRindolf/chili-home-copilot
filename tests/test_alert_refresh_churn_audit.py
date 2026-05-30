@@ -25,6 +25,14 @@ def test_churn_audit_prints_all_sections_without_db(monkeypatch, capsys):
         calls.append(("noop", hours, limit))
         return [{"scan_pattern_id": 123, "noop_diagnostics": 1}]
 
+    def top_noop_exit_pattern_rollups(hours: int, limit: int):
+        calls.append(("noop_rollups", hours, limit))
+        return [{"scan_pattern_id": 123, "distinct_fingerprints": 2}]
+
+    def top_recert_rescue_blocker_rollups(hours: int, limit: int):
+        calls.append(("recert_rollups", hours, limit))
+        return [{"scan_pattern_id": 456, "blocker_diagnostics": 3}]
+
     def open_exit_work_with_recent_noop(hours: int, limit: int):
         calls.append(("open_noop", hours, limit))
         return [{"work_id": 77, "skip_reason": "no_loss_report"}]
@@ -45,6 +53,16 @@ def test_churn_audit_prints_all_sections_without_db(monkeypatch, capsys):
     monkeypatch.setattr(audit, "_diagnostic_counts", diagnostic_counts)
     monkeypatch.setattr(audit, "_top_patterns", top_patterns)
     monkeypatch.setattr(audit, "_top_noop_exit_patterns", top_noop_exit_patterns)
+    monkeypatch.setattr(
+        audit,
+        "_top_noop_exit_pattern_rollups",
+        top_noop_exit_pattern_rollups,
+    )
+    monkeypatch.setattr(
+        audit,
+        "_top_recert_rescue_blocker_rollups",
+        top_recert_rescue_blocker_rollups,
+    )
     monkeypatch.setattr(
         audit,
         "_open_exit_work_with_recent_noop",
@@ -71,6 +89,8 @@ def test_churn_audit_prints_all_sections_without_db(monkeypatch, capsys):
     assert "## Diagnostic Outcomes" in out
     assert "## Top Work-Producing Patterns" in out
     assert "## Top No-Op Exit Variant Diagnostics" in out
+    assert "## Top No-Op Exit Variant Pattern Rollups" in out
+    assert "## Top Recert Rescue Blocker Rollups" in out
     assert "## Open Exit Variant Work With Recent No-Op Evidence" in out
     assert "## Open Recert Work With Recent Blocker Diagnostic" in out
     assert "## Duplicate Open Refresh Work" in out
@@ -80,6 +100,8 @@ def test_churn_audit_prints_all_sections_without_db(monkeypatch, capsys):
         ("diagnostics", 6, None),
         ("patterns", 6, 4),
         ("noop", 6, 4),
+        ("noop_rollups", 6, 4),
+        ("recert_rollups", 6, 4),
         ("open_noop", 6, 4),
         ("open_recert", 6, 4),
         ("duplicates", 6, 4),
@@ -117,6 +139,8 @@ def test_churn_audit_json_output_without_db(monkeypatch, capsys):
             "diagnostic_outcomes": [],
             "top_work_producing_patterns": [],
             "top_noop_exit_variant_diagnostics": [],
+            "top_noop_exit_variant_pattern_rollups": [],
+            "top_recert_rescue_blocker_rollups": [],
             "open_exit_variant_work_with_recent_noop": [],
             "open_recert_work_with_recent_blocker_diagnostic": [],
             "duplicate_open_refresh_work": [],
@@ -178,6 +202,8 @@ def test_churn_audit_waits_for_database(monkeypatch, capsys):
             "diagnostic_outcomes": [],
             "top_work_producing_patterns": [],
             "top_noop_exit_variant_diagnostics": [],
+            "top_noop_exit_variant_pattern_rollups": [],
+            "top_recert_rescue_blocker_rollups": [],
             "open_exit_variant_work_with_recent_noop": [],
             "open_recert_work_with_recent_blocker_diagnostic": [],
             "duplicate_open_refresh_work": [],
@@ -229,6 +255,54 @@ def test_open_exit_noop_query_keeps_non_positive_skip_evidence_specific(monkeypa
     assert "d.evidence_fingerprint = w.evidence_fingerprint" in sql
     assert "non_positive_quality_evidence_no_exit_variant_birth" not in structural_clause
     assert captured["params"] == {"hours": 3, "limit": 7}
+
+
+def test_top_noop_exit_pattern_rollups_fold_fingerprints(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def capture_rows(sql: str, params: dict):
+        captured["sql"] = sql
+        captured["params"] = params
+        return []
+
+    monkeypatch.setattr(audit, "_rows", capture_rows)
+
+    assert audit._top_noop_exit_pattern_rollups(hours=5, limit=8) == []
+
+    sql = str(captured["sql"])
+    assert "event_type = 'exit_variant_diagnostic'" in sql
+    assert "GROUP BY" in sql
+    assert "n.scan_pattern_id" in sql
+    assert "n.skip_reason" in sql
+    assert "count(DISTINCT n.evidence_fingerprint)" in sql
+    assert "distinct_fingerprints" in sql
+    assert "created_count" in sql
+    assert captured["params"] == {"hours": 5, "limit": 8}
+
+
+def test_top_recert_rescue_blocker_rollups_fold_repeated_actions(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def capture_rows(sql: str, params: dict):
+        captured["sql"] = sql
+        captured["params"] = params
+        return []
+
+    monkeypatch.setattr(audit, "_rows", capture_rows)
+
+    assert audit._top_recert_rescue_blocker_rollups(hours=5, limit=8) == []
+
+    sql = str(captured["sql"])
+    assert "event_type = 'recert_rescue_diagnostic'" in sql
+    assert "GROUP BY" in sql
+    assert "r.scan_pattern_id" in sql
+    assert "r.recert_status" in sql
+    assert "r.next_action" in sql
+    assert "r.source" in sql
+    assert "complete_oos_recert_and_quality_refresh" in sql
+    assert "wait_for_recert_backtest_cooldown_keep_live_blocked" in sql
+    assert "blocker_diagnostics" in sql
+    assert captured["params"] == {"hours": 5, "limit": 8}
 
 
 def test_open_recert_query_reports_wait_or_inspect_actions(monkeypatch):
