@@ -1704,8 +1704,7 @@ def screen_high_relative_volume(limit: int = 200, min_ratio: float = 2.0,
         ratio = day_v / prev_v if prev_v > 0 else 0
         if ratio >= min_ratio:
             scored.append((s.get("ticker", ""), ratio))
-    scored.sort(key=lambda x: x[1], reverse=True)
-    return [t for t, _ in scored[:limit]]
+    return [t for t, _ in _top_ranked(scored, limit, lambda x: x[1])]
 
 
 def screen_new_high(limit: int = 100) -> list[str]:
@@ -1720,8 +1719,7 @@ def screen_new_high(limit: int = 100) -> list[str]:
         pct = s.get("todaysChangePerc", 0)
         if day.get("h", 0) > prev.get("h", 0) and pct > 0 and day.get("v", 0) >= 50_000:
             hits.append((s.get("ticker", ""), pct))
-    hits.sort(key=lambda x: x[1], reverse=True)
-    return [t for t, _ in hits[:limit]]
+    return [t for t, _ in _top_ranked(hits, limit, lambda x: x[1])]
 
 
 def screen_momentum_gappers(limit: int = 100) -> list[str]:
@@ -1742,5 +1740,4 @@ def screen_momentum_gappers(limit: int = 100) -> list[str]:
         rel_vol = day_v / prev_v if prev_v > 0 else 0
         if rel_vol >= 2:
             scored.append((s.get("ticker", ""), pct))
-    scored.sort(key=lambda x: x[1], reverse=True)
-    return [t for t, _ in scored[:limit]]
+    return [t for t, _ in _top_ranked(scored, limit, lambda x: x[1])]

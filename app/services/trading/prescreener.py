@@ -8,6 +8,7 @@ FinViz is retained ONLY as a silent fallback for chart-pattern screens that have
 """
 from __future__ import annotations
 
+import heapq
 import logging
 import requests
 import threading
@@ -67,6 +68,18 @@ _prescreen_status: dict[str, Any] = {
     "last_run": None,
     "last_duration_s": None,
 }
+
+
+def _lowest_scored_tickers(scored: list[tuple[str, float]], limit: int) -> list[str]:
+    if limit <= 0:
+        return []
+    return [ticker for ticker, _ in heapq.nsmallest(limit, scored, key=lambda x: x[1])]
+
+
+def _highest_scored_tickers(scored: list[tuple[str, float]], limit: int) -> list[str]:
+    if limit <= 0:
+        return []
+    return [ticker for ticker, _ in heapq.nlargest(limit, scored, key=lambda x: x[1])]
 
 
 def get_prescreen_status() -> dict[str, Any]:
@@ -661,8 +674,7 @@ def _massive_low_volatility() -> list[str]:
         volatility = (h - l) / c
         if volatility < 0.03:
             scored.append((s.get("ticker", ""), volatility))
-    scored.sort(key=lambda x: x[1])
-    return [t for t, _ in scored[:150]]
+    return _lowest_scored_tickers(scored, 150)
 
 
 def _finviz_channel_up() -> list[str]:
@@ -693,8 +705,7 @@ def _massive_near_52w_high() -> list[str]:
         recent_max = max(h, prev.get("h", 0))
         if recent_max > 0 and c >= recent_max * 0.95:
             hits.append((s.get("ticker", ""), c / recent_max))
-    hits.sort(key=lambda x: x[1], reverse=True)
-    return [t for t, _ in hits[:150]]
+    return _highest_scored_tickers(hits, 150)
 
 
 def get_breakout_candidates() -> tuple[list[str], int]:

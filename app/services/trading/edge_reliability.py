@@ -7,6 +7,7 @@ live-trading gates.
 """
 from __future__ import annotations
 
+import heapq
 import hashlib
 import json
 import math
@@ -62,6 +63,25 @@ _STRUCTURAL_EXIT_NOOP_PREFIXES = (
     "insufficient_parent_payoff_samples:",
     "reward_risk_below_floor:",
 )
+
+
+def _top_profitability_buckets(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    n = max(1, int(limit))
+    return [
+        row
+        for _pnl, _closed_count, _idx, row in heapq.nsmallest(
+            n,
+            (
+                (
+                    -float(row.get("total_pnl") or 0.0),
+                    -int(row.get("closed_count") or 0),
+                    idx,
+                    row,
+                )
+                for idx, row in enumerate(rows)
+            ),
+        )
+    ]
 
 HARD_RECERT_REASONS = frozenset({
     "negative_oos_recert",
@@ -1362,5 +1382,4 @@ def null_lineage_short_paper_candidates(
         fp_blob = json.dumps(bucket, sort_keys=True, default=str)
         bucket["evidence_fingerprint"] = hashlib.sha256(fp_blob.encode("utf-8")).hexdigest()[:20]
         out.append(bucket)
-    out.sort(key=lambda x: (float(x.get("total_pnl") or 0.0), int(x.get("closed_count") or 0)), reverse=True)
-    return out[: max(1, int(limit))]
+    return _top_profitability_buckets(out, limit)

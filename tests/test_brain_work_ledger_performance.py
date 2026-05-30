@@ -3,7 +3,10 @@ from __future__ import annotations
 from datetime import datetime
 
 from app.models.trading import BrainWorkEvent
-from app.services.trading.brain_work.ledger import _last_done_timestamps_by_type
+from app.services.trading.brain_work.ledger import (
+    _best_ranked_item,
+    _last_done_timestamps_by_type,
+)
 
 
 class _FakeQuery:
@@ -64,3 +67,14 @@ def test_last_done_timestamps_by_type_skips_empty_lookup() -> None:
 
     assert _last_done_timestamps_by_type(db, []) == {}  # type: ignore[arg-type]
     assert db.query_calls == 0
+
+
+def test_best_ranked_item_matches_stable_sorted_first() -> None:
+    rows = [
+        {"id": 1, "score": 10},
+        {"id": 2, "score": 5},
+        {"id": 3, "score": 5},
+        {"id": 4, "score": 20},
+    ]
+
+    assert _best_ranked_item(rows, key=lambda row: row["score"]) is rows[1]

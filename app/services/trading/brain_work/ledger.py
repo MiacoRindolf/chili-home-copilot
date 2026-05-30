@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime, timedelta
-from typing import Any, Optional
+from typing import Any, Callable, Optional, TypeVar
 
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
@@ -15,6 +15,7 @@ from ....models.trading import BrainWorkEvent
 
 logger = logging.getLogger(__name__)
 LOG_PREFIX = "[brain_work_ledger]"
+_T = TypeVar("_T")
 
 _DEAD_RECOVERY_PAYLOAD_KEY = "transient_dead_recovery_count"
 _DEAD_RECOVERY_EVENT_TYPES = ("backtest_requested",)
@@ -49,6 +50,10 @@ _STRUCTURAL_EXIT_NOOP_PREFIXES = (
     "insufficient_parent_payoff_samples:",
     "reward_risk_below_floor:",
 )
+
+
+def _best_ranked_item(rows: list[_T], key: Callable[[_T], Any]) -> _T:
+    return min(rows, key=key)
 
 
 def brain_work_ledger_enabled() -> bool:
@@ -635,9 +640,11 @@ def coalesce_duplicate_open_work(
     for group_rows in groups.values():
         if len(group_rows) <= 1:
             continue
-        group_rows.sort(key=_rank)
-        keep_id = int(group_rows[0].id)
-        for row in group_rows[1:]:
+        keep = _best_ranked_item(group_rows, _rank)
+        keep_id = int(keep.id)
+        for row in group_rows:
+            if row is keep:
+                continue
             if row.status == "processing":
                 continue
             _retire_duplicate(row, reason="same_dedupe_key", keep_id=keep_id)
@@ -666,9 +673,11 @@ def coalesce_duplicate_open_work(
     for group_rows in recert_refresh_groups.values():
         if len(group_rows) <= 1:
             continue
-        group_rows.sort(key=_recert_rescue_refresh_rank)
-        keep_id = int(group_rows[0].id)
-        for row in group_rows[1:]:
+        keep = _best_ranked_item(group_rows, _recert_rescue_refresh_rank)
+        keep_id = int(keep.id)
+        for row in group_rows:
+            if row is keep:
+                continue
             if row.status == "processing":
                 continue
             _retire_duplicate(
@@ -716,9 +725,11 @@ def coalesce_duplicate_open_work(
     for group_rows in recert_groups.values():
         if len(group_rows) <= 1:
             continue
-        group_rows.sort(key=_recert_rank)
-        keep_id = int(group_rows[0].id)
-        for row in group_rows[1:]:
+        keep = _best_ranked_item(group_rows, _recert_rank)
+        keep_id = int(keep.id)
+        for row in group_rows:
+            if row is keep:
+                continue
             if row.status == "processing":
                 continue
             _retire_duplicate(
@@ -733,8 +744,7 @@ def coalesce_duplicate_open_work(
     # spends its next slot on the blocker that can actually move live eligibility.
     recert_by_pattern: dict[int, BrainWorkEvent] = {}
     for group_rows in recert_groups.values():
-        group_rows.sort(key=_recert_rank)
-        keep = group_rows[0]
+        keep = _best_ranked_item(group_rows, _recert_rank)
         payload = keep.payload if isinstance(keep.payload, dict) else {}
         try:
             pid = int(payload.get("scan_pattern_id") or 0)
@@ -813,15 +823,16 @@ def coalesce_duplicate_open_work(
     for group_rows in exit_variant_groups.values():
         if len(group_rows) <= 1:
             continue
-        group_rows.sort(key=_exit_variant_rank)
-        keep = group_rows[0]
+        keep = _best_ranked_item(group_rows, _exit_variant_rank)
         keep_id = int(keep.id)
         reason = (
             "exit_variant_pattern_superseded_by_processing"
             if keep.status == "processing"
             else "exit_variant_pattern_superseded"
         )
-        for row in group_rows[1:]:
+        for row in group_rows:
+            if row is keep:
+                continue
             if row.status == "processing":
                 continue
             _retire_duplicate(row, reason=reason, keep_id=keep_id)
@@ -928,8 +939,7 @@ def coalesce_duplicate_open_work(
         return (-created.timestamp(), int(row.attempts or 0), -int(row.id))
 
     if processing_mine_rows and queued_mine_rows:
-        processing_mine_rows.sort(key=_mine_rank)
-        newest_processing = processing_mine_rows[0]
+        newest_processing = _best_ranked_item(processing_mine_rows, _mine_rank)
         newest_processing_at = newest_processing.created_at or newest_processing.updated_at or datetime.min
         try:
             grace_seconds = max(
@@ -950,9 +960,11 @@ def coalesce_duplicate_open_work(
                 queued_mine_rows.remove(row)
 
     if len(queued_mine_rows) > 1:
-        queued_mine_rows.sort(key=_mine_rank)
-        keep_id = int(queued_mine_rows[0].id)
-        for row in queued_mine_rows[1:]:
+        keep = _best_ranked_item(queued_mine_rows, _mine_rank)
+        keep_id = int(keep.id)
+        for row in queued_mine_rows:
+            if row is keep:
+                continue
             _retire_duplicate(
                 row,
                 reason="market_snapshot_batch_superseded",
