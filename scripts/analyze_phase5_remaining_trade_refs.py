@@ -16,9 +16,13 @@ from typing import Iterable
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-RAW_READER_SQL_RE = re.compile(r"\b(?:FROM|JOIN)\s+trading_trades\b", re.IGNORECASE)
+TRADE_RELATION_SQL_TARGET_RE = r"(?:ONLY\s+)?(?:public\.)?trading_trades"
+RAW_READER_SQL_RE = re.compile(
+    rf"(?<!/)\b(?:FROM|JOIN)\s+{TRADE_RELATION_SQL_TARGET_RE}\b",
+    re.IGNORECASE,
+)
 RAW_MUTATION_SQL_RE = re.compile(
-    r"\b(?:UPDATE|INSERT\s+INTO|DELETE\s+FROM)\s+trading_trades\b",
+    rf"\b(?:UPDATE|INSERT\s+INTO|DELETE\s+FROM)\s+{TRADE_RELATION_SQL_TARGET_RE}\b",
     re.IGNORECASE,
 )
 TABLE_SYMBOL_RE = re.compile(r"\btrading_trades\b", re.IGNORECASE)

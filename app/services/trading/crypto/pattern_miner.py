@@ -27,7 +27,7 @@ The miner runs as a brain-worker subtask (registered in
 1. Read recent crypto-class trades that closed profitable
    (``status='closed' AND pnl > 0 AND asset_kind='crypto'``)
 2. For each winner, extract the indicator snapshot at entry from
-   ``trading_trades.indicator_snapshot`` (or the linked breakout_alert)
+   the live management-envelope snapshot (or the linked breakout_alert)
 3. Group winners by similar signature (using a fingerprint hash)
 4. For each winning signature with N+ trades:
    * Spawn 2-3 variant candidate patterns with small condition tweaks

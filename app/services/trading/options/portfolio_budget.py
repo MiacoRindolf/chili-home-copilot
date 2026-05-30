@@ -333,7 +333,7 @@ def _sum_open_trade_greeks(db: Session, user_id: Optional[int]) -> dict:
     """Fallback Greek aggregation from open Trade snapshots.
 
     The original budget path only read ``options_position``. Live AutoTrader
-    entries currently create ``trading_trades`` first, so this fallback keeps
+    entries currently create live management envelopes first, so this fallback keeps
     the budget aware of option trades even before a separate option-position
     projection is populated.
     """

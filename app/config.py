@@ -1321,7 +1321,7 @@ class Settings(BaseSettings):
     chili_ticker_autotune_lookback_days: int = 90
     chili_ticker_autotune_dry_run: bool = False
     # 2026-04-28: realized stats sync. Recomputes ScanPattern columns from
-    # trading_trades plus qualified autotrader paper/shadow outcomes. Closes
+    # live management envelopes plus qualified autotrader paper/shadow outcomes. Closes
     # the gap exposed by the audit (8 patterns had actual trades but stored
     # trade_count=0), and lets paper/pilot evidence clear thin-EV debt without
     # manual certification work.

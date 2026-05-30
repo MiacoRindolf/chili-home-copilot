@@ -9,6 +9,18 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "analyze_phase5_remaining_trade_refs.py"
 
 
+EXPECTED_RUNTIME_COMPAT_WRITER_PATHS = [
+    "app/services/coinbase_service.py",
+    "app/services/trading/auto_trader.py",
+    "app/services/trading/bracket_reconciliation_service.py",
+    "app/services/trading/options/exit_monitor.py",
+]
+
+EXPECTED_RUNTIME_COMPAT_RELATION_SYMBOL_PATHS = [
+    "app/models/trading.py",
+    "app/services/trading/management_envelopes.py",
+]
+
 def _load_module():
     spec = importlib.util.spec_from_file_location("phase5_trade_refs", SCRIPT_PATH)
     assert spec is not None
@@ -63,6 +75,48 @@ def test_classifies_known_reference_owners() -> None:
     assert module.classify_path("app/services/trading/new_reader.py").bucket == (
         "unclassified_trade_surface_reference"
     )
+
+
+def test_sql_reference_matching_ignores_slash_shorthand_and_detects_schema_targets() -> None:
+    module = _load_module()
+
+    assert module._reference_matches(
+        "Runtime app code must not add raw FROM/JOIN trading_trades readers"
+    )["raw_readers"] == []
+    assert module._reference_matches(
+        "SELECT * FROM public.trading_trades WHERE id = :id"
+    )["raw_readers"] == ["FROM public.trading_trades"]
+    assert module._reference_matches(
+        "UPDATE ONLY trading_trades SET status = 'closed'"
+    )["raw_mutations"] == ["UPDATE ONLY trading_trades"]
+
+
+def test_runtime_app_compatibility_contract_surface_is_pinned() -> None:
+    module = _load_module()
+
+    report = module.build_inventory(REPO_ROOT, include_dirs=("app",))
+    writer_paths = sorted(
+        entry["path"]
+        for entry in report["entries"]
+        if entry["bucket"] == "allowed_compatibility_writer_update"
+    )
+    relation_symbol_paths = sorted(
+        entry["path"]
+        for entry in report["entries"]
+        if entry["bucket"] == "compatibility_relation_symbol"
+    )
+    raw_reader_history_paths = sorted(
+        entry["path"]
+        for entry in report["entries"]
+        if entry["raw_sql_references"]
+    )
+
+    assert report["ok"] is True
+    assert report["unexpected_runtime_readers"] == []
+    assert report["unexpected_runtime_mutations"] == []
+    assert writer_paths == EXPECTED_RUNTIME_COMPAT_WRITER_PATHS
+    assert relation_symbol_paths == EXPECTED_RUNTIME_COMPAT_RELATION_SYMBOL_PATHS
+    assert raw_reader_history_paths == ["app/migrations.py"]
 
 
 def test_build_inventory_scans_sources_and_skips_workspace_noise(tmp_path: Path) -> None:
