@@ -63,6 +63,8 @@ _STRUCTURAL_EXIT_NOOP_PREFIXES = (
     "insufficient_parent_payoff_samples:",
     "reward_risk_below_floor:",
 )
+_NON_POSITIVE_EXIT_NOOP_REASON = "non_positive_quality_evidence_no_exit_variant_birth"
+_REPEATED_NON_POSITIVE_EXIT_NOOP_MIN_FINGERPRINTS = 3
 
 
 def _top_profitability_buckets(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
@@ -844,11 +846,55 @@ def _exit_noop_blocks_refresh(
     return _structural_exit_noop_reason(payload.get("skip_reason"))
 
 
+def _payload_has_positive_exit_evidence(payload: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    for key in (
+        "expected_evidence_value",
+        "calibrated_ev_after_cost_pct",
+        "calibrated_ev_pct",
+        "expected_net_pct",
+    ):
+        try:
+            value = float(payload.get(key))
+        except (TypeError, ValueError):
+            continue
+        if value > 0.0:
+            return True
+    return False
+
+
+def _repeated_non_positive_exit_noop_blocks_refresh(
+    diagnostic_payloads: list[dict[str, Any]],
+    *,
+    request_payload: dict[str, Any] | None,
+) -> bool:
+    non_positive_fingerprints: set[str] = set()
+    for idx, row_payload in enumerate(diagnostic_payloads):
+        try:
+            created_count = int(row_payload.get("created_count"))
+        except (TypeError, ValueError):
+            created_count = -1
+        if (
+            created_count == 0
+            and str(row_payload.get("skip_reason") or "").strip().lower()
+            == _NON_POSITIVE_EXIT_NOOP_REASON
+        ):
+            fingerprint = str(row_payload.get("evidence_fingerprint") or "").strip()
+            non_positive_fingerprints.add(fingerprint or f"row:{idx}")
+    return (
+        len(non_positive_fingerprints)
+        >= _REPEATED_NON_POSITIVE_EXIT_NOOP_MIN_FINGERPRINTS
+        and not _payload_has_positive_exit_evidence(request_payload)
+    )
+
+
 def _recent_noop_exit_variant_exists(
     db: Session,
     *,
     scan_pattern_id: int | None,
     evidence_fingerprint: str | None,
+    payload: dict[str, Any] | None = None,
 ) -> bool:
     """Return True when a recent exit variant diagnostic already proved no-op."""
     if scan_pattern_id is None:
@@ -874,13 +920,20 @@ def _recent_noop_exit_variant_exists(
         .limit(20)
         .all()
     )
+    diagnostic_payloads: list[dict[str, Any]] = []
     for row in rows:
-        payload = row.payload if isinstance(row.payload, dict) else {}
+        row_payload = row.payload if isinstance(row.payload, dict) else {}
+        diagnostic_payloads.append(row_payload)
         if _exit_noop_blocks_refresh(
-            payload,
+            row_payload,
             evidence_fingerprint=evidence_fingerprint,
         ):
             return True
+    if _repeated_non_positive_exit_noop_blocks_refresh(
+        diagnostic_payloads,
+        request_payload=payload,
+    ):
+        return True
     return False
 
 
@@ -945,6 +998,7 @@ def emit_targeted_profitability_work(
         db,
         scan_pattern_id=scan_pattern_id,
         evidence_fingerprint=evidence_fingerprint,
+        payload=body,
     ):
         return None
     completed_payload = _recent_completed_work_payload(
