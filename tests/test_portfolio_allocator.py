@@ -5,6 +5,8 @@ from types import SimpleNamespace
 
 from app.config import Settings
 from app.models import MomentumStrategyVariant, StrategyProposal, Trade, TradingAutomationSession, User
+from app.models.trading import ScanPattern
+from app.services.trading import portfolio_allocator as allocator_mod
 from app.services.trading.portfolio_allocator import (
     allocation_block_reason,
     build_proposal_allocation_decision,
@@ -86,6 +88,49 @@ def test_allocator_uses_sector_cap(db, monkeypatch):
 def test_allocator_defaults_keep_live_hard_blocks_shadowed():
     assert Settings.model_fields["brain_allocator_shadow_mode"].default is True
     assert Settings.model_fields["brain_allocator_live_hard_block_enabled"].default is False
+    assert (
+        Settings.model_fields["chili_pilot_promoted_allow_bootstrap_recert_live"].default
+        is False
+    )
+
+
+def test_pattern_capital_gate_blocks_pilot_recert_debt_even_if_legacy_flag_enabled(
+    db,
+    monkeypatch,
+):
+    pattern = ScanPattern(
+        name="pilot recert stays observation only",
+        rules_json={},
+        active=True,
+        lifecycle_stage="pilot_promoted",
+        promotion_status="pilot_collecting_ev",
+        recert_required=True,
+        recert_reason="missing_oos_recert,missing_quality_composite_score,thin_realized_ev",
+    )
+    db.add(pattern)
+    db.commit()
+
+    monkeypatch.setattr(
+        allocator_mod.settings,
+        "chili_autotrader_block_live_on_recert_required",
+        True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        allocator_mod.settings,
+        "chili_pilot_promoted_allow_bootstrap_recert_live",
+        True,
+        raising=False,
+    )
+
+    decision = allocator_mod._pattern_capital_gate(
+        db,
+        scan_pattern_id=int(pattern.id),
+        execution_mode="live",
+    )
+
+    assert decision["status"] == "block"
+    assert decision["hard_block_reason"] == "pattern_recert_required"
 
 
 def test_allocator_block_reason_requires_authoritative_flag(monkeypatch):

@@ -3987,13 +3987,11 @@ def _live_recert_allowance(pat: ScanPattern) -> str | None:
     if not bool(getattr(settings, "chili_autotrader_block_live_on_recert_required", True)):
         return PILOT_BOOTSTRAP_RECERT_ALLOWANCE
     try:
-        from .alpha_portfolio_gate import (
-            broker_risk_probation_allows_live,
-            pilot_bootstrap_recert_allows_live,
-        )
+        from .alpha_portfolio_gate import broker_risk_probation_allows_live
 
-        if pilot_bootstrap_recert_allows_live(pat, settings_=settings):
-            return PILOT_BOOTSTRAP_RECERT_ALLOWANCE
+        # Pilot-promoted patterns are already a broker-risk ramp. If they also
+        # carry recert debt, they stay in the observation/recert lane; pilot
+        # live fills cannot be the mechanism that certifies missing evidence.
         if broker_risk_probation_allows_live(pat, settings_=settings):
             return PROBATION_RECERT_ALLOWANCE
     except Exception:

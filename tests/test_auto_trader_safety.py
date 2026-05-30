@@ -1528,7 +1528,7 @@ def test_shadow_observation_uses_lightweight_sizing_path(monkeypatch):
     assert paper_calls[0]["qty"] == TEST_RISK_NOTIONAL / TEST_ENTRY_PRICE
 
 
-def test_live_recert_block_waives_pilot_bootstrap_cert_debt(monkeypatch):
+def test_live_recert_block_does_not_waive_pilot_bootstrap_cert_debt(monkeypatch):
     settings = _minimal_settings(123)
     settings.chili_autotrader_block_live_on_recert_required = True
     settings.chili_pilot_promoted_allow_bootstrap_recert_live = True
@@ -1560,7 +1560,8 @@ def test_live_recert_block_waives_pilot_bootstrap_cert_debt(monkeypatch):
         raw_realized_avg_return_pct=TEST_REALIZED_AVG_RETURN_PCT,
     )
 
-    assert at_mod._live_recert_block_applies(soft_pilot) is False
+    assert at_mod._live_recert_block_applies(soft_pilot) is True
+    assert at_mod._live_recert_allowance(soft_pilot) is None
     assert at_mod._live_recert_block_applies(hard_pilot) is True
     assert at_mod._live_recert_block_applies(full_risk) is True
     assert at_mod._live_recert_block_applies(probation_full_risk) is False
