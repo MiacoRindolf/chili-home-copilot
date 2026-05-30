@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import threading
 import time as _time
+from collections import OrderedDict
 from datetime import datetime
 from typing import Any
 
@@ -29,7 +30,8 @@ logger = logging.getLogger(__name__)
 _MIN_PROVIDER_WORKERS = 1
 _OHLCV_QUALITY_REJECT_LOG_TTL = 300.0
 _OHLCV_QUALITY_REJECT_CACHE_ATTR = "quality_rejected"
-_ohlcv_quality_reject_log_cache: dict[str, float] = {}
+_OHLCV_QUALITY_REJECT_LOG_MAX = 2_048
+_ohlcv_quality_reject_log_cache: "OrderedDict[str, float]" = OrderedDict()
 _ohlcv_quality_reject_log_lock = threading.Lock()
 
 
@@ -95,8 +97,11 @@ def _log_ohlcv_integrity_failure(
     with _ohlcv_quality_reject_log_lock:
         last = _ohlcv_quality_reject_log_cache.get(key)
         if last is not None and now - last < _OHLCV_QUALITY_REJECT_LOG_TTL:
+            _ohlcv_quality_reject_log_cache.move_to_end(key)
             return
+        _ohlcv_quality_reject_log_cache.pop(key, None)
         _ohlcv_quality_reject_log_cache[key] = now
+        _prune_ohlcv_quality_reject_log_cache(now)
     logger.warning(
         "[market_data] OHLCV integrity failed ticker=%s interval=%s provider=%s: %s",
         ticker,
@@ -104,6 +109,17 @@ def _log_ohlcv_integrity_failure(
         provider,
         integrity,
     )
+
+
+def _prune_ohlcv_quality_reject_log_cache(now: float) -> None:
+    while _ohlcv_quality_reject_log_cache:
+        oldest_key = next(iter(_ohlcv_quality_reject_log_cache))
+        last = _ohlcv_quality_reject_log_cache[oldest_key]
+        if now - last < _OHLCV_QUALITY_REJECT_LOG_TTL:
+            break
+        _ohlcv_quality_reject_log_cache.pop(oldest_key, None)
+    while len(_ohlcv_quality_reject_log_cache) > _OHLCV_QUALITY_REJECT_LOG_MAX:
+        _ohlcv_quality_reject_log_cache.popitem(last=False)
 
 
 def _finalize_ohlcv_df(df: pd.DataFrame, *, ticker: str, interval: str, provider: str) -> pd.DataFrame:
@@ -441,7 +457,7 @@ def fetch_ohlcv(
     return records
 
 
-_ohlcv_df_cache: dict[str, tuple[float, "pd.DataFrame"]] = {}
+_ohlcv_df_cache: "OrderedDict[str, tuple[float, pd.DataFrame]]" = OrderedDict()
 _ohlcv_df_lock = threading.Lock()
 _OHLCV_DF_TTL = 600  # 10 min
 _OHLCV_DF_MAX = 300
@@ -463,6 +479,35 @@ def invalidate_ohlcv_cache_for_ticker(ticker: str) -> int:
         for k in keys:
             del _ohlcv_df_cache[k]
         return len(keys)
+
+
+def _get_ohlcv_df_cache(cache_key: str, now: float) -> pd.DataFrame | None:
+    hit = _ohlcv_df_cache.get(cache_key)
+    if not hit:
+        return None
+    cached_at, df = hit
+    if now - cached_at < _OHLCV_DF_TTL:
+        _ohlcv_df_cache.move_to_end(cache_key)
+        return df.copy()
+    _ohlcv_df_cache.pop(cache_key, None)
+    return None
+
+
+def _store_ohlcv_df_cache(cache_key: str, result: pd.DataFrame, now: float) -> None:
+    _ohlcv_df_cache.pop(cache_key, None)
+    _ohlcv_df_cache[cache_key] = (now, result)
+    _prune_ohlcv_df_cache(now)
+
+
+def _prune_ohlcv_df_cache(now: float) -> None:
+    while _ohlcv_df_cache:
+        oldest_key = next(iter(_ohlcv_df_cache))
+        cached_at, _df = _ohlcv_df_cache[oldest_key]
+        if now - cached_at < _OHLCV_DF_TTL:
+            break
+        _ohlcv_df_cache.pop(oldest_key, None)
+    while len(_ohlcv_df_cache) > _OHLCV_DF_MAX:
+        _ohlcv_df_cache.popitem(last=False)
 
 
 def fetch_ohlcv_df(
@@ -495,9 +540,9 @@ def fetch_ohlcv_df(
     _cache_key = f"{ticker}|{interval}|{period}|{start}|{end}"
     _now = _time.time()
     with _ohlcv_df_lock:
-        _hit = _ohlcv_df_cache.get(_cache_key)
-        if _hit and _now - _hit[0] < _OHLCV_DF_TTL:
-            return _hit[1].copy()
+        _cached = _get_ohlcv_df_cache(_cache_key, _now)
+        if _cached is not None:
+            return _cached
 
     _start_str = str(start)[:10] if start else None
     _end_str = str(end)[:10] if end else None
@@ -505,9 +550,7 @@ def fetch_ohlcv_df(
     def _store_and_return(result: pd.DataFrame) -> pd.DataFrame:
         if not result.empty or _is_quality_rejected_df(result):
             with _ohlcv_df_lock:
-                if len(_ohlcv_df_cache) >= _OHLCV_DF_MAX:
-                    _ohlcv_df_cache.clear()
-                _ohlcv_df_cache[_cache_key] = (_time.time(), result)
+                _store_ohlcv_df_cache(_cache_key, result, _time.time())
         return result
 
     # --- Massive path (primary) ---
@@ -891,12 +934,14 @@ def fetch_ohlcv_batch(
 from collections import deque as _deque
 from threading import Lock as _Lock
 
-_KNOWN_GOOD_CACHE: dict[str, float] = {}
+_KNOWN_GOOD_CACHE: "OrderedDict[str, float]" = OrderedDict()
+_KNOWN_GOOD_CACHE_MAX = 10_000
 _KNOWN_GOOD_LOCK = _Lock()
 
 _REJECTION_WINDOW_S: float = 600.0  # 10 minutes
 _REJECTION_THRESHOLD: int = 5
-_REJECTIONS: dict[tuple[str, str], "_deque[float]"] = {}
+_REJECTIONS: "OrderedDict[tuple[str, str], _deque[float]]" = OrderedDict()
+_REJECTIONS_MAX = 10_000
 _REJECTIONS_LOCK = _Lock()
 
 
@@ -907,6 +952,8 @@ def _resolve_implausibility_anchor(ticker: str) -> float | None:
         return None
     with _KNOWN_GOOD_LOCK:
         cached = _KNOWN_GOOD_CACHE.get(tk)
+        if cached is not None:
+            _KNOWN_GOOD_CACHE.move_to_end(tk)
     if cached is not None and cached > 0:
         return cached
     try:
@@ -948,10 +995,14 @@ def _record_implausible_rejection(
     key = ((ticker or "").upper(), source or "unknown")
     now = _time.time()
     with _REJECTIONS_LOCK:
-        dq = _REJECTIONS.setdefault(key, _deque(maxlen=64))
+        dq = _REJECTIONS.pop(key, None)
+        if dq is None:
+            dq = _deque(maxlen=64)
         dq.append(now)
         while dq and dq[0] < now - _REJECTION_WINDOW_S:
             dq.popleft()
+        _REJECTIONS[key] = dq
+        _prune_rejection_windows(now)
         count = len(dq)
 
     if count >= _REJECTION_THRESHOLD:
@@ -977,13 +1028,29 @@ def _record_implausible_rejection(
             pass
 
 
+def _prune_rejection_windows(now: float) -> None:
+    while _REJECTIONS:
+        oldest_key = next(iter(_REJECTIONS))
+        dq = _REJECTIONS[oldest_key]
+        while dq and dq[0] < now - _REJECTION_WINDOW_S:
+            dq.popleft()
+        if dq:
+            break
+        _REJECTIONS.pop(oldest_key, None)
+    while len(_REJECTIONS) > _REJECTIONS_MAX:
+        _REJECTIONS.popitem(last=False)
+
+
 def _accept_known_good_price(ticker: str, price: float) -> None:
     """Update the per-ticker last-known-good cache after a clean fetch."""
     tk = (ticker or "").upper()
     if not tk or not price or price <= 0:
         return
     with _KNOWN_GOOD_LOCK:
+        _KNOWN_GOOD_CACHE.pop(tk, None)
         _KNOWN_GOOD_CACHE[tk] = float(price)
+        while len(_KNOWN_GOOD_CACHE) > _KNOWN_GOOD_CACHE_MAX:
+            _KNOWN_GOOD_CACHE.popitem(last=False)
 
 
 def _apply_boundary_guard(
@@ -1376,10 +1443,39 @@ def search_tickers(query: str, limit: int = 10) -> list[dict[str, str]]:
 
 # ── Technical indicators ──────────────────────────────────────────────
 
-_ind_cache: dict[tuple, tuple[float, dict]] = {}
+_ind_cache: "OrderedDict[tuple, tuple[float, dict]]" = OrderedDict()
 _ind_cache_lock = threading.Lock()
 _IND_CACHE_TTL = 1800  # 30 min — learning cycles reuse; 64 GB RAM keeps longer
 _IND_CACHE_MAX = 5000  # 64 GB RAM — cache indicators for full universe without thrashing
+
+
+def _get_ind_cache(cache_key: tuple, now: float) -> dict | None:
+    entry = _ind_cache.get(cache_key)
+    if not entry:
+        return None
+    cached_at, value = entry
+    if now - cached_at < _IND_CACHE_TTL:
+        _ind_cache.move_to_end(cache_key)
+        return value
+    _ind_cache.pop(cache_key, None)
+    return None
+
+
+def _store_ind_cache(cache_key: tuple, result: dict, now: float) -> None:
+    _ind_cache.pop(cache_key, None)
+    _ind_cache[cache_key] = (now, result)
+    _prune_ind_cache(now)
+
+
+def _prune_ind_cache(now: float) -> None:
+    while _ind_cache:
+        oldest_key = next(iter(_ind_cache))
+        cached_at, _value = _ind_cache[oldest_key]
+        if now - cached_at < _IND_CACHE_TTL:
+            break
+        _ind_cache.pop(oldest_key, None)
+    while len(_ind_cache) > _IND_CACHE_MAX:
+        _ind_cache.popitem(last=False)
 
 
 def compute_indicators(
@@ -1409,9 +1505,9 @@ def compute_indicators(
     now = _time.time()
     if preloaded_df is None:
         with _ind_cache_lock:
-            entry = _ind_cache.get(cache_key)
-            if entry and now - entry[0] < _IND_CACHE_TTL:
-                return entry[1]
+            cached = _get_ind_cache(cache_key, now)
+            if cached is not None:
+                return cached
 
     result = _compute_indicators_fresh(
         ticker,
@@ -1424,25 +1520,7 @@ def compute_indicators(
 
     if preloaded_df is None:
         with _ind_cache_lock:
-            if len(_ind_cache) >= _IND_CACHE_MAX:
-                # FIX 50 (2026-05-01) — eviction had a hot-path bug: when ALL
-                # entries are within TTL (e.g. learning cycle is currently
-                # iterating through 10k+ tickers in <30 min), `stale` is empty,
-                # zero entries are deleted, and the next line still adds a new
-                # one. The dict grows unbounded beyond _IND_CACHE_MAX. Over
-                # 9 hours this was the primary scheduler-worker leak source —
-                # mem_watcher snapshots showed dict / list / function counts
-                # growing monotonically with the indicator-cache fingerprint.
-                # Falling back to `clear()` when no stale entries exist
-                # guarantees the size cap. (The same fallback already exists
-                # in scanner.py:_cache_put for the same reason.)
-                cutoff = now - _IND_CACHE_TTL
-                stale = [k for k, v in _ind_cache.items() if v[0] < cutoff]
-                for k in stale:
-                    del _ind_cache[k]
-                if len(_ind_cache) >= _IND_CACHE_MAX:
-                    _ind_cache.clear()
-            _ind_cache[cache_key] = (now, result)
+            _store_ind_cache(cache_key, result, now)
     return result
 
 
