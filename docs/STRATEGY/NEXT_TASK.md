@@ -1,73 +1,57 @@
-# NEXT_TASK: f-position-identity-phase-5k-a-live-path-parity-probe
+# NEXT_TASK: f-position-identity-phase-5k-b-coinbase-cap-reader-flag
 
 STATUS: PENDING
 
 ## Goal
 
-Add a read-only Phase 5K-A probe that compares the remaining live decision
-surfaces through both names:
+Cut over exactly one low-risk live reader behind a default-OFF feature flag:
+the Coinbase venue-cap open-position aggregate in
+`app/services/trading/cost_aware_gate.py`.
 
-- old compatibility view: `trading_trades`
-- semantic physical base table: `trading_management_envelopes`
-
-The probe should prove that live capital/promotion/risk readers would receive
-identical inputs before any live path is cut over.
-
-## Current Gate State
-
-- Phase 5I post-rename soak: `COMPLETE_POSITIVE`
-- Phase 5J reader cleanup: closed
-- Phase 5K live-path brief: shipped
-- Recommendation: evidence-first parity probe before any live behavior change
+This is the first Phase 5K live-path cutover because Phase 5K-A proved the
+`trading_trades` compatibility view and `trading_management_envelopes` base
+table produce identical Coinbase-cap aggregate inputs.
 
 ## Scope
 
-1. Create a read-only probe script, for example:
+1. Add a setting, default `False`, for example:
 
    ```text
-   scripts/d-phase5k-live-path-parity-probe.py
+   CHILI_PHASE5K_COINBASE_CAP_USE_ENVELOPES=false
    ```
 
-2. Compare old-vs-new aggregates for:
+2. In `per_venue_cap_check`, choose the source relation:
 
-   - Coinbase venue cap: open auto-trader Coinbase count and notional
-   - PDT guard: true 5-business-day equity day-trade count
-   - promotion/cohort realized aggregates by `scan_pattern_id`
-   - pattern-quality realized aggregates by `scan_pattern_id`
-   - portfolio-risk open exposure by broker/asset kind
-   - position-integrity linkage counts for open envelopes
+   - flag OFF: `trading_trades` compatibility view
+   - flag ON: `trading_management_envelopes` base table
 
-3. Emit a verdict:
+3. Keep all filters and behavior identical.
 
-   - `COMPLETE_POSITIVE` when all aggregates match
-   - `REGRESSION_PARITY` when any mismatch appears
-   - `ALERT` when the probe cannot run
+4. Add tests for:
 
-4. Add a focused test that pins:
-
-   - the script is read-only
-   - both relation names are intentionally present
-   - no DDL/DML keywords are present outside comments/strings needed for select
+   - default flag uses `trading_trades`
+   - flag ON uses `trading_management_envelopes`
+   - failure behavior remains conservative
 
 5. Run:
 
    ```powershell
-   python -m pytest tests\test_phase5j_reader_cleanup.py tests\test_phase5i_post_rename_probe.py
-   python scripts\d-phase5i-post-rename-soak-probe.py
-   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\dispatch-phase5i-post-rename-soak-probe.ps1
+   python -m pytest tests\test_phase5k_live_path_parity_probe.py tests\test_phase5j_reader_cleanup.py tests\test_phase5i_post_rename_probe.py
    python scripts\d-phase5k-live-path-parity-probe.py
+   python scripts\d-phase5i-post-rename-soak-probe.py
    ```
 
 ## Guardrails
 
-- Do not edit live broker/order/stop/reconcile paths.
+- Do not flip the flag in `.env`.
+- Do not restart services.
+- Do not edit broker/order/stop/reconcile paths.
 - Do not edit dirty local files.
-- Do not drop or replace the `trading_trades` compatibility view.
-- Do not rename the Python `Trade` ORM class.
-- No database writes, service restarts, migrations, or broker/API calls.
+- No live behavior change in this slice.
 
 ## Acceptance
 
-- Probe emits `COMPLETE_POSITIVE` or a precise mismatch report.
+- Tests pass.
+- Phase 5K-A parity probe remains `COMPLETE_POSITIVE`.
 - Phase 5I remains `COMPLETE_POSITIVE`.
-- No live trading behavior changes.
+- Feature flag default keeps current behavior.
