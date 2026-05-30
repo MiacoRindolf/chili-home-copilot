@@ -71,13 +71,43 @@ as the default source and introduces a single, reversible switch for the PDT
 reader. If the live flag soak is clean, the next reader can follow the same
 pattern.
 
+## Live Soak Result
+
+Phase 5K-D was promoted after the default-off source commit.
+
+The live flag is now enabled in `.env` and visible inside `autotrader-worker`:
+
+```text
+CHILI_PHASE5K_PDT_USE_ENVELOPES=true
+```
+
+Post-flip validation:
+
+```text
+Phase 5K-A parity probe: COMPLETE_POSITIVE
+PARITY_CHECKS=6
+PARITY_MISMATCHES=0
+CHECK_PDT_DAY_TRADES=OK old_rows=2 new_rows=2
+
+Phase 5I post-rename probe: COMPLETE_POSITIVE
+FRESH_DECISIONS=20
+FRESH_ENVELOPES=20
+FRESH_CLOSES=10
+HARD_LINKAGE_ISSUES=0
+MISMATCHED_ROWS=0
+
+Direct PDT function:
+PDT_COMPAT_COUNT 3
+PDT_ENVELOPE_COUNT 3
+```
+
+Fresh autotrader logs showed normal ticks and monitor cycles. No PDT query
+errors, relation errors, or new rollback signals appeared. Observed warnings
+were pre-existing provider/auth or tick-budget noise, not PDT-reader defects.
+
 ## Next Step
 
-Run a narrow live flag soak:
+Continue the single-reader cutover sequence:
 
-1. Confirm Phase 5K-A and Phase 5I are green.
-2. Set `CHILI_PHASE5K_PDT_USE_ENVELOPES=true`.
-3. Recreate only `autotrader-worker`.
-4. Verify the container sees the flag.
-5. Confirm direct PDT counts still match and no new autotrader/PDT errors
-   appear during a short soak.
+1. promotion/pattern-quality realized aggregate readers
+2. portfolio-risk open-exposure reader

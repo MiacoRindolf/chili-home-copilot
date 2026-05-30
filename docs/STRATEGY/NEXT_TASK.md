@@ -1,80 +1,51 @@
-# NEXT_TASK: f-position-identity-phase-5k-d-pdt-reader-flag-soak
+# NEXT_TASK: f-position-identity-phase-5k-e-promotion-pattern-quality-reader-flags
 
 STATUS: PENDING
 
 ## Goal
 
-Run the narrow live soak for the PDT day-trade reader flag.
+Continue Phase 5K with the next narrow live readers: promotion realized
+statistics and pattern-quality realized aggregates.
 
-Phase 5K-D source is already default-off safe:
-
-```text
-CHILI_PHASE5K_PDT_USE_ENVELOPES=false
-```
-
-When enabled, only the PDT day-trade count source changes:
+These readers already matched in the Phase 5K parity probe:
 
 ```text
-trading_trades compatibility view
-  -> trading_management_envelopes physical base table
+CHECK_PROMOTION_REALIZED=OK old_rows=30 new_rows=30
+CHECK_PATTERN_QUALITY=OK old_rows=30 new_rows=30
 ```
 
-The PDT filters themselves do not change.
+Do not bulk-cut all remaining references. Add default-off reader switches for
+the specific realized-aggregate functions only, run focused tests, then do the
+same short live soak pattern used for Coinbase cap and PDT.
 
-## Pre-Soak Evidence
+## Current State
 
-- Phase 5K-A live-path parity: `COMPLETE_POSITIVE`.
-- PDT parity group: `CHECK_PDT_DAY_TRADES=OK`.
-- Direct production function check:
+- Phase 5K-C Coinbase cap reader is live on
+  `trading_management_envelopes`.
+- Phase 5K-D PDT reader is live on `trading_management_envelopes`.
+- Phase 5K-A parity remains `COMPLETE_POSITIVE`.
+- Phase 5I post-rename soak remains `COMPLETE_POSITIVE`.
 
-  ```text
-  PDT_COMPAT_COUNT 3
-  PDT_ENVELOPE_COUNT 3
-  ```
+## Implementation Shape
 
-- Focused tests:
+1. Locate promotion and pattern-quality live readers still using
+   `trading_trades`.
+2. Add default-off source-selection flags.
+3. Preserve filters and formulas exactly.
+4. Add focused tests pinning OFF/ON relation selection.
+5. Run Phase 5K-A parity and direct function-level old/new checks.
+6. Commit/push the default-off code.
+7. Only then run a narrow flag soak.
 
-  ```text
-  python -m pytest tests\test_pdt_guard_phase5k_reader_flag.py tests\test_phase5k_live_path_parity_probe.py -q
-  13 passed
-  ```
+## Guardrails
 
-## Soak Steps
-
-1. Confirm Postgres is healthy and autotrader is running.
-2. Confirm Phase 5K-A and Phase 5I probes are still green.
-3. Set:
-
-   ```text
-   CHILI_PHASE5K_PDT_USE_ENVELOPES=true
-   ```
-
-4. Recreate only `autotrader-worker`.
-5. Verify the autotrader container sees the flag.
-6. Re-run:
-
-   ```powershell
-   python scripts\d-phase5k-live-path-parity-probe.py
-   python scripts\d-phase5i-post-rename-soak-probe.py
-   ```
-
-7. Compare direct PDT counts through both relations again.
-8. Watch fresh autotrader logs for PDT query errors or unexpected entry blocks.
+- Do not touch broker/order/stop/reconcile write paths.
+- Do not change formulas, lookback windows, or eligibility filters.
+- Do not change lifecycle promotion/demotion thresholds.
+- Do not run DB-backed pytest against live Postgres.
+- Stage only the files intentionally touched by this brief.
 
 ## Rollback
 
-Set:
-
-```text
-CHILI_PHASE5K_PDT_USE_ENVELOPES=false
-```
-
-Then recreate only `autotrader-worker`.
-
-## Acceptance
-
-- Autotrader sees `CHILI_PHASE5K_PDT_USE_ENVELOPES=true`.
-- Phase 5K-A remains `COMPLETE_POSITIVE`.
-- Phase 5I remains `COMPLETE_POSITIVE`.
-- Direct PDT counts match through compatibility view and envelope table.
-- No fresh PDT query errors in autotrader logs.
+Each reader flag must default to false. If a live soak misbehaves, set the new
+flag(s) false and recreate only the consuming worker.
