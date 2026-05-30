@@ -45,10 +45,39 @@ def set_user_status(user_id: int, status: str, dnd_minutes: int | None, db: Sess
 def get_all_statuses(db: Session) -> list[dict]:
     """Return status for all registered housemates."""
     users = db.query(User).all()
+    if not users:
+        return []
+
+    user_ids = [u.id for u in users]
+    status_rows = db.query(UserStatus).filter(UserStatus.user_id.in_(user_ids)).all()
+    statuses_by_user_id = {row.user_id: row for row in status_rows}
+    changed = False
+    now = datetime.utcnow()
+
+    for u in users:
+        row = statuses_by_user_id.get(u.id)
+        if not row:
+            row = UserStatus(user_id=u.id, status="available")
+            db.add(row)
+            statuses_by_user_id[u.id] = row
+            changed = True
+        elif row.status == "dnd" and row.dnd_until and now > row.dnd_until:
+            row.status = "available"
+            row.dnd_until = None
+            changed = True
+
+    if changed:
+        db.commit()
+
     results = []
     for u in users:
-        st = get_user_status(u.id, db)
-        results.append({"user_id": u.id, "name": u.name, "status": st["status"], "dnd_until": st["dnd_until"]})
+        st = statuses_by_user_id[u.id]
+        results.append({
+            "user_id": u.id,
+            "name": u.name,
+            "status": st.status,
+            "dnd_until": str(st.dnd_until) if st.dnd_until else None,
+        })
     return results
 
 

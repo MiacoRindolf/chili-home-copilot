@@ -1,4 +1,5 @@
 """Tests for the intercom feature: consent, status, voice messages, WebSocket auth."""
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -27,11 +28,19 @@ class _SequenceQuery:
 class _SequenceSession:
     def __init__(self, rows_by_query):
         self._rows_by_query = list(rows_by_query)
+        self.added = []
+        self.commit_calls = 0
         self.query_calls = 0
 
     def query(self, *_args, **_kwargs):
         self.query_calls += 1
         return _SequenceQuery(self._rows_by_query.pop(0))
+
+    def add(self, row):
+        self.added.append(row)
+
+    def commit(self):
+        self.commit_calls += 1
 
 
 class TestIntercomConsent:
@@ -227,6 +236,32 @@ class TestIntercomService:
         statuses = svc.get_all_statuses(db)
         assert len(statuses) >= 1
         assert any(s["user_id"] == user.id for s in statuses)
+
+    def test_all_statuses_batches_status_lookup_and_defaults(self):
+        now = datetime.utcnow()
+        users = [
+            SimpleNamespace(id=1, name="Alice"),
+            SimpleNamespace(id=2, name="Bob"),
+            SimpleNamespace(id=3, name="Carol"),
+        ]
+        status_rows = [
+            SimpleNamespace(user_id=1, status="dnd", dnd_until=now - timedelta(minutes=1)),
+            SimpleNamespace(user_id=2, status="dnd", dnd_until=now + timedelta(minutes=10)),
+        ]
+        db = _SequenceSession([users, status_rows])
+
+        result = svc.get_all_statuses(db)
+
+        assert result == [
+            {"user_id": 1, "name": "Alice", "status": "available", "dnd_until": None},
+            {"user_id": 2, "name": "Bob", "status": "dnd", "dnd_until": str(status_rows[1].dnd_until)},
+            {"user_id": 3, "name": "Carol", "status": "available", "dnd_until": None},
+        ]
+        assert status_rows[0].status == "available"
+        assert status_rows[0].dnd_until is None
+        assert [row.user_id for row in db.added] == [3]
+        assert db.query_calls == 2
+        assert db.commit_calls == 1
 
 
 class TestWebSocketAuth:
