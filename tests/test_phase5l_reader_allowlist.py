@@ -30,18 +30,9 @@ ALLOWED_LINE_COUNTS: dict[tuple[str, str], int] = {
         "app/services/trading/bracket_reconciliation_service.py",
         "FROM trading_trades AS t",
     ): 2,
-    (
-        "app/services/trading/pattern_regime_ledger.py",
-        "FROM trading_trades t",
-    ): 4,
-    (
-        "app/services/trading/pattern_survival/features.py",
-        "FROM trading_trades",
-    ): 2,
-    (
-        "app/services/trading/pattern_survival/features.py",
-        "FROM trading_trades t",
-    ): 1,
+
+
+
     (
         "app/services/trading/venue/coinbase_orphan_adopt.py",
         "JOIN trading_trades t ON t.id = bi.trade_id",

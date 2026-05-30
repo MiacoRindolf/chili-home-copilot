@@ -48,6 +48,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from .management_envelopes import MANAGEMENT_ENVELOPES_RELATION
 from .realized_pnl_sql import trade_return_fraction_sql
 
 logger = logging.getLogger(__name__)
@@ -67,7 +68,7 @@ REGIME_DIMENSIONS: dict[str, str] = {
                t.pnl AS pnl,
                {_TRADE_RETURN_PCT_SQL} AS ret_pct,
                EXTRACT(EPOCH FROM (t.exit_date - t.entry_date))/86400.0 AS hold_days
-        FROM trading_trades t
+        FROM {MANAGEMENT_ENVELOPES_RELATION} t
         LEFT JOIN LATERAL (
             SELECT ticker_regime_label
             FROM trading_ticker_regime_snapshots r
@@ -93,7 +94,7 @@ REGIME_DIMENSIONS: dict[str, str] = {
                t.pnl AS pnl,
                {_TRADE_RETURN_PCT_SQL} AS ret_pct,
                EXTRACT(EPOCH FROM (t.exit_date - t.entry_date))/86400.0 AS hold_days
-        FROM trading_trades t
+        FROM {MANAGEMENT_ENVELOPES_RELATION} t
         LEFT JOIN LATERAL (
             SELECT breadth_label
             FROM trading_breadth_relstr_snapshots b
@@ -117,7 +118,7 @@ REGIME_DIMENSIONS: dict[str, str] = {
                t.pnl AS pnl,
                {_TRADE_RETURN_PCT_SQL} AS ret_pct,
                EXTRACT(EPOCH FROM (t.exit_date - t.entry_date))/86400.0 AS hold_days
-        FROM trading_trades t
+        FROM {MANAGEMENT_ENVELOPES_RELATION} t
         LEFT JOIN LATERAL (
             SELECT cross_asset_label
             FROM trading_cross_asset_snapshots c
@@ -141,7 +142,7 @@ REGIME_DIMENSIONS: dict[str, str] = {
                t.pnl AS pnl,
                {_TRADE_RETURN_PCT_SQL} AS ret_pct,
                EXTRACT(EPOCH FROM (t.exit_date - t.entry_date))/86400.0 AS hold_days
-        FROM trading_trades t
+        FROM {MANAGEMENT_ENVELOPES_RELATION} t
         LEFT JOIN LATERAL (
             SELECT vol_regime_label
             FROM trading_vol_dispersion_snapshots v

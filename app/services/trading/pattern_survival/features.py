@@ -33,6 +33,7 @@ from typing import Any, Optional
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.services.trading.management_envelopes import MANAGEMENT_ENVELOPES_RELATION
 from app.services.trading.realized_pnl_sql import trade_return_fraction_sql
 
 logger = logging.getLogger(__name__)
@@ -143,7 +144,7 @@ def _collect_realized_30d(db: Session, pattern_id: int) -> dict[str, Optional[fl
                                  AND entry_price * quantity > 0
                             THEN {trade_return_fraction_sql()} * 100.0
                        END AS pnl_pct
-                FROM trading_trades
+                FROM {MANAGEMENT_ENVELOPES_RELATION}
                 WHERE scan_pattern_id = :p
                   AND status = 'closed'
                   AND exit_date >= NOW() - INTERVAL '30 days'
@@ -187,10 +188,9 @@ def _collect_pnl_slope_14d(db: Session, pattern_id: int) -> Optional[float]:
     Positive = pattern improving recently, negative = degrading.
     """
     rows = db.execute(
-        text(
-            """
+        text(f"""
             SELECT exit_date::date AS day, SUM(pnl) AS pnl_usd
-            FROM trading_trades
+            FROM {MANAGEMENT_ENVELOPES_RELATION}
             WHERE scan_pattern_id = :p
               AND exit_date >= NOW() - INTERVAL '14 days'
               AND pnl IS NOT NULL
@@ -295,11 +295,10 @@ def _collect_regime_and_diversity(db: Session) -> tuple[Optional[str], Optional[
     fam_h, fam_n = None, None
     try:
         rows = db.execute(
-            text(
-                """
+            text(f"""
                 SELECT COALESCE(sp.hypothesis_family, 'unknown') AS fam,
                        SUM(t.pnl) AS pnl_30d
-                FROM trading_trades t
+                FROM {MANAGEMENT_ENVELOPES_RELATION} t
                 LEFT JOIN scan_patterns sp ON sp.id = t.scan_pattern_id
                 WHERE t.exit_date >= NOW() - INTERVAL '30 days'
                   AND t.pnl IS NOT NULL
