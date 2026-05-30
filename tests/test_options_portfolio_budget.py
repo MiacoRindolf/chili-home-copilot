@@ -8,6 +8,7 @@ from app.services.trading.options import portfolio_budget as mod
 from app.services.trading.options.portfolio_budget import (
     check_proposal_against_budget,
     single_leg_proposal_from_option_meta,
+    upsert_budget,
 )
 from app.services.trading.options.strategies import Leg, StrategyProposal
 
@@ -88,6 +89,147 @@ class _MalformedTradeQuantityDb:
         raise AssertionError(f"unexpected SQL: {sql}")
 
 
+class _MalformedPositionQuantityDb:
+    def execute(self, stmt, params=None):
+        sql = str(stmt)
+        if "FROM options_position" in sql:
+            return _Result(
+                rows=[
+                    (
+                        [
+                            {
+                                "qty": "1.5",
+                                "delta": 0.20,
+                                "gamma": 0.02,
+                                "theta": -0.03,
+                                "vega": 0.04,
+                            },
+                            {
+                                "qty": None,
+                                "delta": 0.10,
+                                "gamma": 0.01,
+                                "theta": -0.02,
+                                "vega": 0.03,
+                            },
+                        ],
+                    )
+                ]
+            )
+        if "FROM trading_trades" in sql:
+            return _Result(rows=[])
+        if "FROM options_greeks_budget" in sql:
+            return _Result(row=None)
+        raise AssertionError(f"unexpected SQL: {sql}")
+
+
+class _MalformedPositionLegsJsonDb:
+    def execute(self, stmt, params=None):
+        sql = str(stmt)
+        if "FROM options_position" in sql:
+            return _Result(rows=[("{bad-json",)])
+        if "FROM trading_trades" in sql:
+            return _Result(rows=[])
+        if "FROM options_greeks_budget" in sql:
+            return _Result(row=None)
+        raise AssertionError(f"unexpected SQL: {sql}")
+
+
+class _SignedPositionQuantityDb:
+    def execute(self, stmt, params=None):
+        sql = str(stmt)
+        if "FROM options_position" in sql:
+            return _Result(
+                rows=[
+                    (
+                        [
+                            {
+                                "qty": -2,
+                                "delta": 0.20,
+                                "gamma": 0.02,
+                                "theta": -0.03,
+                                "vega": 0.04,
+                            }
+                        ],
+                    )
+                ]
+            )
+        if "FROM trading_trades" in sql:
+            return _Result(rows=[])
+        if "FROM options_greeks_budget" in sql:
+            return _Result(row=None)
+        raise AssertionError(f"unexpected SQL: {sql}")
+
+
+class _ZeroTradeQuantityWithMetaFallbackDb:
+    def execute(self, stmt, params=None):
+        sql = str(stmt)
+        if "FROM options_position" in sql:
+            return _Result(rows=[])
+        if "FROM trading_trades" in sql:
+            return _Result(
+                rows=[
+                    (
+                        0,
+                        {
+                            "option_meta": {
+                                "quantity": 2,
+                                "delta": 0.20,
+                                "gamma": 0.02,
+                                "theta": -0.03,
+                                "vega": 0.04,
+                            }
+                        },
+                    )
+                ]
+            )
+        if "FROM options_greeks_budget" in sql:
+            return _Result(row=None)
+        raise AssertionError(f"unexpected SQL: {sql}")
+
+
+class _OpenTradeMissingOptionMetaDb:
+    def execute(self, stmt, params=None):
+        sql = str(stmt)
+        if "FROM options_position" in sql:
+            return _Result(rows=[])
+        if "FROM trading_trades" in sql:
+            return _Result(rows=[(1, {"options_path": {"selected": True}})])
+        if "FROM options_greeks_budget" in sql:
+            return _Result(row=None)
+        raise AssertionError(f"unexpected SQL: {sql}")
+
+
+class _OpenTradeGreeksUnavailableDb:
+    def execute(self, stmt, params=None):
+        sql = str(stmt)
+        if "FROM options_position" in sql:
+            return _Result(rows=[])
+        if "FROM trading_trades" in sql:
+            raise RuntimeError("trade projection unavailable")
+        if "FROM options_greeks_budget" in sql:
+            return _Result(row=None)
+        raise AssertionError(f"unexpected SQL: {sql}")
+
+
+class _RecordingBudgetDb:
+    def __init__(self):
+        self.executed = False
+        self.committed = False
+        self.rolled_back = False
+        self.params = None
+
+    def execute(self, stmt, params=None):
+        self.executed = True
+        self.params = params
+        return _Result()
+
+    def commit(self):
+        self.committed = True
+
+    def rollback(self):
+        self.rolled_back = True
+
+
 def _proposal(**overrides) -> StrategyProposal:
     base = dict(
         underlying="SPY",
@@ -129,11 +271,69 @@ def test_sum_open_position_greeks_adds_positions_and_open_trade_snapshots():
     assert totals["missing_greeks_count"] == 0
 
 
+def test_sum_open_position_greeks_marks_malformed_position_quantity_as_unproven():
+    totals = mod._sum_open_position_greeks(_MalformedPositionQuantityDb(), user_id=1)
+
+    assert totals["net_delta"] == 0.0
+    assert totals["missing_greeks_count"] == 2
+
+
+def test_sum_open_position_greeks_marks_malformed_legs_json_as_unproven():
+    totals = mod._sum_open_position_greeks(_MalformedPositionLegsJsonDb(), user_id=1)
+
+    assert totals["net_delta"] == 0.0
+    assert totals["missing_greeks_count"] == 1
+
+
+def test_sum_open_position_greeks_preserves_signed_whole_contract_quantity():
+    totals = mod._sum_open_position_greeks(_SignedPositionQuantityDb(), user_id=1)
+
+    assert totals["net_delta"] == pytest.approx(-0.40)
+    assert totals["net_gamma"] == pytest.approx(-0.04)
+    assert totals["net_theta"] == pytest.approx(0.06)
+    assert totals["net_vega"] == pytest.approx(-0.08)
+    assert totals["missing_greeks_count"] == 0
+
+
 def test_sum_open_trade_greeks_marks_malformed_open_quantity_as_unproven():
     totals = mod._sum_open_position_greeks(_MalformedTradeQuantityDb(), user_id=1)
 
     assert totals["net_delta"] == 0.0
     assert totals["missing_greeks_count"] == 1
+
+
+def test_sum_open_trade_greeks_does_not_fallback_from_explicit_zero_quantity():
+    totals = mod._sum_open_position_greeks(_ZeroTradeQuantityWithMetaFallbackDb(), user_id=1)
+
+    assert totals["net_delta"] == 0.0
+    assert totals["missing_greeks_count"] == 1
+
+
+def test_sum_open_trade_greeks_marks_missing_option_meta_as_unproven():
+    totals = mod._sum_open_position_greeks(_OpenTradeMissingOptionMetaDb(), user_id=1)
+
+    assert totals["net_delta"] == 0.0
+    assert totals["missing_greeks_count"] == 1
+
+
+def test_sum_open_trade_greeks_marks_fetch_failure_as_unproven():
+    totals = mod._sum_open_position_greeks(_OpenTradeGreeksUnavailableDb(), user_id=1)
+
+    assert totals["net_delta"] == 0.0
+    assert totals["missing_greeks_count"] == 1
+
+
+def test_check_proposal_blocks_when_open_trade_greeks_are_unavailable(monkeypatch):
+    monkeypatch.delenv("CHILI_OPTIONS_BUDGET_BYPASS", raising=False)
+
+    result = check_proposal_against_budget(
+        _OpenTradeGreeksUnavailableDb(),
+        1,
+        _proposal(),
+    )
+
+    assert result.accepted is False
+    assert result.reasons == ["missing_complete_greeks:open_positions:1"]
 
 
 def test_single_leg_proposal_requires_complete_finite_greeks():
@@ -201,6 +401,142 @@ def test_check_proposal_against_budget_blocks_missing_complete_greeks(monkeypatc
     assert result.reasons == ["missing_complete_greeks:gamma"]
 
 
+def test_check_proposal_against_budget_rejects_boolean_proposal_greeks(monkeypatch):
+    monkeypatch.delenv("CHILI_OPTIONS_BUDGET_BYPASS", raising=False)
+    monkeypatch.setattr(
+        mod,
+        "_get_budget",
+        lambda *_args, **_kwargs: {
+            "max_abs_delta": 100.0,
+            "max_abs_gamma": 100.0,
+            "max_total_vega": 100.0,
+            "max_theta_burn_per_day": 100.0,
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "_sum_open_position_greeks",
+        lambda *_args, **_kwargs: {
+            "net_delta": 0.0,
+            "net_gamma": 0.0,
+            "net_theta": 0.0,
+            "net_vega": 0.0,
+            "missing_greeks_count": 0,
+        },
+    )
+
+    result = check_proposal_against_budget(
+        None,
+        1,
+        _proposal(
+            net_delta=True,
+            net_gamma=True,
+            net_theta=True,
+            net_vega=True,
+        ),
+    )
+
+    assert result.accepted is False
+    assert result.reasons == ["missing_complete_greeks:delta,gamma,theta,vega"]
+    assert result.after_proposal == {
+        "net_delta": 0.0,
+        "net_gamma": 0.0,
+        "net_theta": 0.0,
+        "net_vega": 0.0,
+    }
+
+
+def test_check_proposal_against_budget_blocks_nonfinite_budget_cap(monkeypatch):
+    monkeypatch.delenv("CHILI_OPTIONS_BUDGET_BYPASS", raising=False)
+    monkeypatch.setattr(
+        mod,
+        "_get_budget",
+        lambda *_args, **_kwargs: {
+            "max_abs_delta": float("nan"),
+            "max_abs_gamma": 100.0,
+            "max_total_vega": 100.0,
+            "max_theta_burn_per_day": 100.0,
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "_sum_open_position_greeks",
+        lambda *_args, **_kwargs: {
+            "net_delta": 0.0,
+            "net_gamma": 0.0,
+            "net_theta": 0.0,
+            "net_vega": 0.0,
+            "missing_greeks_count": 0,
+        },
+    )
+
+    result = check_proposal_against_budget(None, 1, _proposal())
+
+    assert result.accepted is False
+    assert result.reasons == ["budget_invalid:max_abs_delta"]
+
+
+def test_check_proposal_against_budget_preserves_explicit_zero_budget_cap(monkeypatch):
+    monkeypatch.delenv("CHILI_OPTIONS_BUDGET_BYPASS", raising=False)
+    monkeypatch.setattr(
+        mod,
+        "_get_budget",
+        lambda *_args, **_kwargs: {
+            "max_abs_delta": 0.0,
+            "max_abs_gamma": 100.0,
+            "max_total_vega": 100.0,
+            "max_theta_burn_per_day": 100.0,
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "_sum_open_position_greeks",
+        lambda *_args, **_kwargs: {
+            "net_delta": 0.0,
+            "net_gamma": 0.0,
+            "net_theta": 0.0,
+            "net_vega": 0.0,
+            "missing_greeks_count": 0,
+        },
+    )
+
+    result = check_proposal_against_budget(None, 1, _proposal())
+
+    assert result.accepted is False
+    assert result.reasons == ["abs_delta_breach: |0.1000| > 0.0"]
+
+
+def test_upsert_budget_rejects_nonfinite_caps_before_db_call():
+    db = _RecordingBudgetDb()
+
+    ok = upsert_budget(db, user_id=1, max_abs_delta=float("nan"))
+
+    assert ok is False
+    assert db.executed is False
+    assert db.committed is False
+    assert db.rolled_back is False
+
+
+def test_upsert_budget_preserves_explicit_zero_caps():
+    db = _RecordingBudgetDb()
+
+    ok = upsert_budget(
+        db,
+        user_id=1,
+        max_abs_delta=0.0,
+        max_abs_gamma=0.0,
+        max_total_vega=0.0,
+        max_theta_burn_per_day=0.0,
+    )
+
+    assert ok is True
+    assert db.params["d"] == 0.0
+    assert db.params["g"] == 0.0
+    assert db.params["tv"] == 0.0
+    assert db.params["tb"] == 0.0
+    assert db.committed is True
+
+
 def test_check_proposal_against_budget_blocks_unproven_open_book(monkeypatch):
     monkeypatch.delenv("CHILI_OPTIONS_BUDGET_BYPASS", raising=False)
     monkeypatch.setattr(
@@ -229,6 +565,49 @@ def test_check_proposal_against_budget_blocks_unproven_open_book(monkeypatch):
 
     assert result.accepted is False
     assert result.reasons == ["missing_complete_greeks:open_positions:2"]
+
+
+def test_check_proposal_against_budget_fails_closed_on_book_error(monkeypatch):
+    monkeypatch.delenv("CHILI_OPTIONS_BUDGET_BYPASS", raising=False)
+
+    def _raise(*_args, **_kwargs):
+        raise RuntimeError("open book unavailable")
+
+    monkeypatch.setattr(
+        mod,
+        "_get_budget",
+        lambda *_args, **_kwargs: {
+            "max_abs_delta": 100.0,
+            "max_abs_gamma": 100.0,
+            "max_total_vega": 100.0,
+            "max_theta_burn_per_day": 100.0,
+        },
+    )
+    monkeypatch.setattr(mod, "_sum_open_position_greeks", _raise)
+
+    result = check_proposal_against_budget(None, 1, _proposal())
+
+    assert result.accepted is False
+    assert result.reasons == ["budget_error:RuntimeError"]
+    assert result.current_portfolio["missing_greeks_count"] == 0
+    assert result.after_proposal["net_delta"] == 0.0
+
+
+def test_check_proposal_against_budget_bypass_audits_book_error(monkeypatch):
+    monkeypatch.setenv("CHILI_OPTIONS_BUDGET_BYPASS", "true")
+
+    def _raise(*_args, **_kwargs):
+        raise RuntimeError("open book unavailable")
+
+    monkeypatch.setattr(mod, "_sum_open_position_greeks", _raise)
+
+    result = check_proposal_against_budget(None, 1, _proposal())
+
+    assert result.accepted is True
+    assert result.reasons == [
+        "BYPASS_VIA_CHILI_OPTIONS_BUDGET_BYPASS",
+        "budget_error:RuntimeError",
+    ]
 
 
 def test_explicit_options_budget_bypass_is_auditable(monkeypatch):
