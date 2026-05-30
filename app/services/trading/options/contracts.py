@@ -18,6 +18,8 @@ PRICE_DOMAIN_UNDERLYING_SPOT = "underlying_spot"
 
 
 def _float_or_none(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
     try:
         out = float(value)
     except (TypeError, ValueError):
