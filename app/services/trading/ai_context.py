@@ -1170,6 +1170,7 @@ def generate_market_thesis(db: Session, user_id: int | None) -> dict[str, Any]:
 
     _thesis_cache: dict = getattr(generate_market_thesis, "_cache", {})
     _THESIS_TTL = 3600
+    _THESIS_CACHE_MAX = 500
     cache_key = f"thesis:{user_id}"
     cached = _thesis_cache.get(cache_key)
     if cached and (_time.time() - cached[0]) < _THESIS_TTL:
@@ -1284,6 +1285,14 @@ def generate_market_thesis(db: Session, user_id: int | None) -> dict[str, Any]:
         "last_scan": stats.get("last_scan"),
     }
 
-    _thesis_cache[cache_key] = (_time.time(), thesis_data)
+    _now = _time.time()
+    _thesis_cache[cache_key] = (_now, thesis_data)
+    if len(_thesis_cache) > _THESIS_CACHE_MAX:
+        _cutoff = _now - _THESIS_TTL
+        for _k in [k for k, v in _thesis_cache.items() if v[0] < _cutoff]:
+            del _thesis_cache[_k]
+        if len(_thesis_cache) > _THESIS_CACHE_MAX:
+            _thesis_cache.clear()
+            _thesis_cache[cache_key] = (_now, thesis_data)
     generate_market_thesis._cache = _thesis_cache
     return thesis_data

@@ -2964,9 +2964,23 @@ def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
         .all()
     )
 
+    # Only the patterns referenced by these (<=200) insights are needed, plus
+    # their parent rows for variant cards — not the whole ScanPattern table.
     scan_patterns_by_id: dict[int, ScanPattern] = {}
-    for sp in db.query(ScanPattern).all():
-        scan_patterns_by_id[sp.id] = sp
+    _referenced_sp_ids = {
+        int(i.scan_pattern_id) for i in all_insights
+        if getattr(i, "scan_pattern_id", None) is not None
+    }
+    if _referenced_sp_ids:
+        for sp in db.query(ScanPattern).filter(ScanPattern.id.in_(_referenced_sp_ids)).all():
+            scan_patterns_by_id[sp.id] = sp
+        _parent_sp_ids = {
+            int(sp.parent_id) for sp in scan_patterns_by_id.values()
+            if sp.parent_id is not None and int(sp.parent_id) not in scan_patterns_by_id
+        }
+        if _parent_sp_ids:
+            for sp in db.query(ScanPattern).filter(ScanPattern.id.in_(_parent_sp_ids)).all():
+                scan_patterns_by_id[sp.id] = sp
 
     _SECTOR_TICKERS: dict[str, set[str]] = {
         "tech": {"AAPL","MSFT","GOOGL","AMZN","NVDA","META","TSLA","AVGO","ORCL","CRM","ADBE","AMD","INTC","QCOM","TXN","NFLX","DDOG","NET","SNOW","PLTR","SHOP"},
