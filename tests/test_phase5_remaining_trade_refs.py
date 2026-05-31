@@ -17,8 +17,7 @@ EXPECTED_RUNTIME_COMPAT_WRITER_PATHS = [
 ]
 
 EXPECTED_RUNTIME_COMPAT_RELATION_SYMBOL_PATHS = [
-    "app/models/trading.py",
-    "app/services/trading/management_envelopes.py",
+    "app/models/trade_relation_symbols.py",
 ]
 
 def _load_module():

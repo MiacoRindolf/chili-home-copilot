@@ -23,6 +23,7 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship, validates
 
 from ..db import Base
+from .trade_relation_symbols import LEGACY_TRADE_ID_FK, LEGACY_TRADES_COMPAT_RELATION
 
 
 _BREAKOUT_ALERT_ASSET_TYPE_ALIASES = {
@@ -91,7 +92,7 @@ _NO_PATTERN_SENTINEL = -1
 
 
 class Trade(Base):
-    __tablename__ = "trading_trades"
+    __tablename__ = LEGACY_TRADES_COMPAT_RELATION
 
     id: int = Column(Integer, primary_key=True, index=True)
     user_id: Optional[int] = Column(
@@ -258,7 +259,7 @@ class Trade(Base):
     # without false-firing on legitimate proposal-via-broker inserts.
     #
     # NOTE on the sentinel: an earlier draft of D6 substituted -1 at the
-    # producer site, but ``trading_trades.scan_pattern_id`` has a FK to
+    # producer site, but the legacy trade relation scan_pattern_id has a FK to
     # ``scan_patterns.id`` and there is no id=-1 row in production.
     # The ``_NO_PATTERN_SENTINEL`` constant is retained for callers that
     # want to set it explicitly AND that have arranged for an id=-1
@@ -416,7 +417,7 @@ class AutoTraderRun(Base):
     llm_snapshot: Optional[dict] = Column(JSONB, nullable=True)
     management_scope: Optional[str] = Column(String(40), nullable=True, index=True)
     trade_id: Optional[int] = Column(
-        Integer, ForeignKey("trading_trades.id", ondelete="SET NULL"), nullable=True, index=True
+        Integer, ForeignKey(LEGACY_TRADE_ID_FK, ondelete="SET NULL"), nullable=True, index=True
     )
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
@@ -426,7 +427,7 @@ class PatternMonitorDecision(Base):
     __tablename__ = "trading_pattern_monitor_decisions"
 
     id: int = Column(Integer, primary_key=True, index=True)
-    trade_id: int = Column(Integer, ForeignKey("trading_trades.id", ondelete="CASCADE"), nullable=False)
+    trade_id: int = Column(Integer, ForeignKey(LEGACY_TRADE_ID_FK, ondelete="CASCADE"), nullable=False)
     breakout_alert_id: Optional[int] = Column(
         Integer, ForeignKey("trading_breakout_alerts.id", ondelete="SET NULL"), nullable=True
     )
@@ -483,7 +484,7 @@ class SetupVitalsHistory(Base):
     )
 
     id: int = Column(Integer, primary_key=True, autoincrement=True)
-    trade_id: Optional[int] = Column(Integer, ForeignKey("trading_trades.id", ondelete="CASCADE"), nullable=True, index=True)
+    trade_id: Optional[int] = Column(Integer, ForeignKey(LEGACY_TRADE_ID_FK, ondelete="CASCADE"), nullable=True, index=True)
     breakout_alert_id: Optional[int] = Column(
         Integer, ForeignKey("trading_breakout_alerts.id", ondelete="SET NULL"), nullable=True
     )
@@ -511,7 +512,7 @@ class TradingExecutionEvent(Base):
     id: int = Column(BigInteger, primary_key=True, autoincrement=True)
     user_id: Optional[int] = Column(Integer, nullable=True, index=True)
     trade_id: Optional[int] = Column(
-        Integer, ForeignKey("trading_trades.id", ondelete="CASCADE"), nullable=True, index=True
+        Integer, ForeignKey(LEGACY_TRADE_ID_FK, ondelete="CASCADE"), nullable=True, index=True
     )
     proposal_id: Optional[int] = Column(
         Integer, ForeignKey("trading_proposals.id", ondelete="SET NULL"), nullable=True, index=True
@@ -568,7 +569,7 @@ class JournalEntry(Base):
 
     id: int = Column(Integer, primary_key=True, index=True)
     trade_id: Optional[int] = Column(
-        Integer, ForeignKey("trading_trades.id", ondelete="CASCADE"), nullable=True, index=True
+        Integer, ForeignKey(LEGACY_TRADE_ID_FK, ondelete="CASCADE"), nullable=True, index=True
     )
     user_id: Optional[int] = Column(
         Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
@@ -798,7 +799,7 @@ class StopDecision(Base):
     )
 
     id: int = Column(BigInteger, primary_key=True, autoincrement=True)
-    trade_id: int = Column(Integer, ForeignKey("trading_trades.id", ondelete="CASCADE"), nullable=False, index=True)
+    trade_id: int = Column(Integer, ForeignKey(LEGACY_TRADE_ID_FK, ondelete="CASCADE"), nullable=False, index=True)
     as_of_ts: datetime = Column(DateTime, nullable=False, default=datetime.utcnow)
     state: str = Column(String(24), nullable=False)
     old_stop: Optional[float] = Column(Float, nullable=True)
@@ -973,7 +974,7 @@ class StrategyProposal(Base):
 
     broker_order_id: Optional[str] = Column(String(100), nullable=True)
     trade_id: Optional[int] = Column(
-        Integer, ForeignKey("trading_trades.id", ondelete="SET NULL"), nullable=True
+        Integer, ForeignKey(LEGACY_TRADE_ID_FK, ondelete="SET NULL"), nullable=True
     )
     scan_pattern_id: Optional[int] = Column(
         Integer, ForeignKey("scan_patterns.id", ondelete="SET NULL"), nullable=True, index=True
@@ -1767,7 +1768,7 @@ class TradingAutomationSimulatedFill(Base):
     marker_json: dict = Column(JSONB, nullable=False, default=lambda: {})
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
     # Links the first durable execution artifact for momentum autopilot (paper) to the decision ledger.
-    # For rows in trading_trades, use TradingDecisionPacket.linked_trade_id instead.
+    # For legacy trade rows, use TradingDecisionPacket.linked_trade_id instead.
     decision_packet_id: Optional[int] = Column(
         BigInteger, ForeignKey("trading_decision_packets.id", ondelete="SET NULL"), nullable=True, index=True
     )
@@ -1776,7 +1777,7 @@ class TradingAutomationSimulatedFill(Base):
 class TradingDecisionPacket(Base):
     """Canonical persisted decision at entry/execution boundary (autopilot + brain).
 
-    linked_trade_id references trading_trades only. Momentum paper/live entry fills link via
+    linked_trade_id references the legacy trade relation only. Momentum paper/live entry fills link via
     trading_automation_simulated_fills.decision_packet_id (and live venue path may have no Trade row).
     """
 
@@ -1830,7 +1831,7 @@ class TradingDecisionPacket(Base):
     source_surface: str = Column(String(32), nullable=False, default="autopilot")
     research_vs_live_context_json: dict = Column(JSONB, nullable=False, default=lambda: {})
     linked_trade_id: Optional[int] = Column(
-        Integer, ForeignKey("trading_trades.id", ondelete="SET NULL"), nullable=True, index=True
+        Integer, ForeignKey(LEGACY_TRADE_ID_FK, ondelete="SET NULL"), nullable=True, index=True
     )
     outcome_status: str = Column(String(24), nullable=False, default="pending")
     shadow_advisory_only: bool = Column(Boolean, nullable=False, default=True)
@@ -2430,7 +2431,7 @@ class BracketIntent(Base):
     id: int = Column(BigInteger, primary_key=True, autoincrement=True)
     trade_id: int = Column(
         Integer,
-        ForeignKey("trading_trades.id", ondelete="CASCADE"),
+        ForeignKey(LEGACY_TRADE_ID_FK, ondelete="CASCADE"),
         nullable=False,
     )
     user_id: Optional[int] = Column(Integer, nullable=True)
@@ -2463,7 +2464,7 @@ class BracketIntent(Base):
     # alongside trade_id. NO READER consults this column in Phase 3 — readers
     # stay on trade_id until Phase 4's authority flip. Backfill populated the
     # historical rows via the (user, broker, ticker, direction) natural key
-    # through trade_id -> trading_trades. Mirrors Phase 2's pattern on
+    # through trade_id -> the legacy trade relation. Mirrors Phase 2's pattern on
     # trading_execution_events.
     position_id: Optional[int] = Column(
         BigInteger,
@@ -2494,7 +2495,7 @@ class BracketReconciliationLog(Base):
     sweep_id: str = Column(String(64), nullable=False)
     trade_id: Optional[int] = Column(
         Integer,
-        ForeignKey("trading_trades.id", ondelete="SET NULL"),
+        ForeignKey(LEGACY_TRADE_ID_FK, ondelete="SET NULL"),
         nullable=True,
     )
     bracket_intent_id: Optional[int] = Column(
@@ -3664,7 +3665,7 @@ class TradingDecision(Base):
     """Immutable entry-decision layer for position-identity Phase 5A.
 
     One row captures the signal/proposal context that caused a management
-    envelope (today's ``trading_trades`` row) to exist. It is additive for
+    envelope (today's legacy Trade row) to exist. It is additive for
     now: legacy Trade reads remain authoritative while the decision layer
     soaks and parity checks run.
     """
@@ -3681,7 +3682,7 @@ class TradingDecision(Base):
     id: int = Column(BigInteger, primary_key=True, autoincrement=True)
     source_trade_id: Optional[int] = Column(
         BigInteger,
-        ForeignKey("trading_trades.id", ondelete="SET NULL"),
+        ForeignKey(LEGACY_TRADE_ID_FK, ondelete="SET NULL"),
         nullable=True,
     )
     user_id: Optional[int] = Column(
@@ -3774,7 +3775,7 @@ class TradingPosition(Base):
     )
     current_envelope_id: Optional[int] = Column(
         BigInteger,
-        ForeignKey("trading_trades.id", ondelete="SET NULL"),
+        ForeignKey(LEGACY_TRADE_ID_FK, ondelete="SET NULL"),
         nullable=True,
     )
     last_observed_at: Optional[datetime] = Column(DateTime, nullable=True)
@@ -3814,7 +3815,7 @@ class TradingPositionEvent(Base):
     broker_payload: Optional[dict] = Column(JSONB, nullable=True)
     envelope_id: Optional[int] = Column(
         BigInteger,
-        ForeignKey("trading_trades.id", ondelete="SET NULL"),
+        ForeignKey(LEGACY_TRADE_ID_FK, ondelete="SET NULL"),
         nullable=True,
     )
     observed_at: datetime = Column(

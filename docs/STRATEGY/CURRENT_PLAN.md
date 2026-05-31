@@ -663,3 +663,28 @@ the dirty-root caveat visible until the live source tree is reconciled.
 
 Report:
 `docs/STRATEGY/CC_REPORTS/2026-05-31_f-position-identity-phase-5ak-trades-api-flag-posture.md`.
+
+## Position Identity Phase 5L-H - Relation Symbol Contracts (2026-05-31)
+
+Phase 5L-H centralized the remaining runtime-app `trading_trades` relation
+symbol contract into `app.models.trade_relation_symbols`.
+
+The classifier's `compatibility_relation_symbol` bucket dropped from two app
+owners (`app/models/trading.py` and
+`app/services/trading/management_envelopes.py`) to one explicit owner
+(`app/models/trade_relation_symbols.py`). Model `ForeignKey(...)` declarations
+and `Trade.__tablename__` now use the shared compatibility constants, and
+management-envelope helpers import the same symbols.
+
+Verification: py_compile passed; the remaining-reference classifier stays
+`ok=true` with zero unexpected runtime readers/mutations; focused tests passed
+(`28 passed` for remaining refs + management envelopes, `10 passed` for
+reader allowlist + remaining refs).
+
+Architect verdict: relation-symbol ambiguity is now centralized without
+renaming the legacy `Trade` ORM class or changing live broker/order/close
+semantics. The next slice should audit the larger `Trade` ORM symbol surface by
+contract group rather than trying to rename it mechanically.
+
+Report:
+`docs/STRATEGY/CC_REPORTS/2026-05-31_f-position-identity-phase-5l-h-relation-symbol-contracts.md`.

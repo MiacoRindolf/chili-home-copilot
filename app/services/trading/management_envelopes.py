@@ -15,13 +15,10 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-
-MANAGEMENT_ENVELOPES_RELATION = "trading_management_envelopes"
-# Phase 5AD: the physical table is the envelope relation above, while the
-# legacy Trade ORM class remains mapped to this compatibility relation until
-# public routes, trade_id semantics, and live writer paths are renamed by a
-# deliberate compatibility plan.
-LEGACY_TRADES_COMPAT_RELATION = "trading_trades"
+from ...models.trade_relation_symbols import (
+    LEGACY_TRADES_COMPAT_RELATION,
+    MANAGEMENT_ENVELOPES_RELATION,
+)
 
 
 @dataclass(frozen=True)
