@@ -351,6 +351,7 @@ def compute_proposal(
     crypto_bucket_cap_pct = _finite_float(inp.crypto_bucket_cap_pct)
     single_ticker_cap_pct = _finite_float(inp.single_ticker_cap_pct)
     direction = _normalize_direction(inp.direction)
+    qty_rounding = str(inp.qty_rounding or "").strip().lower()
     target_price = _finite_float(inp.target_price) if inp.target_price is not None else None
     expected_net_pnl_override = (
         _finite_float(inp.expected_net_pnl)
@@ -378,6 +379,8 @@ def compute_proposal(
         reject_reason = "invalid_directional_stop"
     elif direction == "short" and stop <= entry:
         reject_reason = "invalid_directional_stop"
+    elif qty_rounding not in {"int", "decimal"}:
+        reject_reason = "invalid_qty_rounding"
     elif not math.isfinite(loss_per_unit) or loss_per_unit <= 0:
         reject_reason = "invalid_loss_per_unit"
     elif inp.target_price is not None and (target_price is None or target_price <= 0):
@@ -571,7 +574,7 @@ def compute_proposal(
     proposed_quantity = _round_qty(
         proposed_notional,
         entry,
-        inp.qty_rounding,
+        qty_rounding,
         unit_multiplier,
     )
     # If rounding to whole shares pushed notional below the proposal,
