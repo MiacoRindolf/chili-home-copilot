@@ -1,44 +1,45 @@
-# NEXT_TASK: f-phase5z-learning-reporting-adapter-slice-11
+# NEXT_TASK: f-phase5aa-market-data-anchor-parity-probe
 
 STATUS: QUEUED
 
 ## Goal
 
-Convert one more passive learning/reporting `Trade` ORM reader to a semantic
-management-envelope helper, or close it as intentionally deferred after audit.
+Build a read-only old-vs-new parity probe for
+`market_data._resolve_implausibility_anchor(...)` before any conversion away
+from direct `Trade` ORM access.
 
-## Current State
+## Why This Is Next
 
-Phase 5Y converted `regime_classifier.build_regime_scanner_sharpe_heatmap(...)`
-to read closed live rows from `trading_management_envelopes`.
+Phase 5Z audited the remaining candidate readers and found that
+`market_data._resolve_implausibility_anchor(...)` is not passive reporting. It
+uses the most recent open trade entry price as a quote-plausibility anchor, and
+that can influence `fetch_quote(...)` behavior. Treat it as live market-data
+safety behavior.
 
-Remaining compatibility surface:
+The right next step is therefore a probe, not a swap.
 
-```text
-orm_trade_symbol_compat     | 72
-adapter_candidate           | 23
-learning_research_reporting | 18
-future_rename_blocker       | 33
-leave_alone                 | 16
-```
+## Scope
 
-## Candidate Guidance
-
-Inspect in this order:
-
-1. `app/services/trading/scanner.py`
-2. `app/services/trading/market_data.py`
-3. `app/services/trading_scheduler.py`
-
-Only convert a reader if it is passive and row-shape parity is obvious or
-testable. Close the task as an audit if the surface feeds live broker/order,
-risk, capital, lifecycle, or broad learning behavior.
+- Add a read-only probe that compares the current `Trade` ORM anchor result to
+  a candidate management-envelope anchor result.
+- Cover tickers with open envelopes, missing anchors, and stale/closed rows.
+- Report old anchor, new anchor, match status, relation kinds, and drift count.
+- Do not flip flags or change runtime behavior.
 
 ## Guardrails
 
 - No broker/order/close/reconcile changes.
-- No pattern lifecycle promotion/demotion changes.
-- No capital/risk/PDT/portfolio gate changes.
+- No stop execution/evaluation changes.
+- No risk/capital/PDT/portfolio gate changes.
+- No quote-routing behavior change.
 - No public `/trades`, `trade_id`, schema, or UI label rename.
-- Avoid broad `learning.py`, `alpha_decay.py`, lifecycle decay, and stale-sweep
-  surfaces until separately scoped.
+- If parity is not exact, document the drift and stop.
+
+## Exit Criteria
+
+- Probe emits `COMPLETE_POSITIVE` only when old and new anchors match exactly
+  for the sampled live universe.
+- Focused tests cover old/new parity and mismatch reporting.
+- Phase 5K live-path parity and Phase 5I post-rename soak remain
+  `COMPLETE_POSITIVE`.
+
