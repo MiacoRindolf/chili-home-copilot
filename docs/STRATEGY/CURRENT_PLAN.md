@@ -1,7 +1,7 @@
 # Current Plan: Position Identity Refactor
 
 **Initiative owner:** Cowork (strategy) + Claude Code (execution).
-**Last update:** 2026-05-31, after Phase 5AC removed the backtest_service.py false-positive ORM compatibility surface.
+**Last update:** 2026-05-31, after Phase 5AD reclassified alerts.py as a live alert/order surface and added read-only parity evidence.
 
 > **Why this initiative supersedes the prior fast-path crypto-scalping plan.** Today (2026-05-04) two automated close paths fired, marking 11 equity Trade rows wrongly closed in DB while the broker still held the positions. The shipped patch (inverse-reconcile, broker-truth-self-heal task) auto-healed 18 of them but its cross-check (`event_count == 0` on `trading_execution_events`) is conservative because **Trade row IDs are ephemeral** — every time a row gets wrongly closed and recreated, fills associated with the prior trade_id orphan. The fast-path scalping initiative depends on a stable position model; building more on this foundation makes things worse, not better. Position-identity refactor goes first. Fast-path resumes after.
 
@@ -56,6 +56,25 @@ Phase 5 soak duration was also tightened from one quarter to **2 weeks** at oper
 
 ## Status of the initiative
 
+- **Phase 5AD alerts envelope audit CLOSED 2026-05-31.**
+  Audited `app/services/trading/alerts.py` and found it is not a passive
+  learning/reporting file. Its remaining legacy `Trade` ORM surface includes
+  the legacy open-position fallback monitor, proposal execution / management
+  envelope creation, execution-event writing, decision-packet linking, and a
+  sector concentration gate. No live behavior was converted. Added
+  `scripts/d-phase5ad-alerts-envelope-parity-probe.py` to compare the safe
+  read scopes against `trading_management_envelopes`; live result:
+  `COMPLETE_POSITIVE`, 3 checks matched, 0 mismatches, relation kinds healthy.
+  Reclassified `alerts.py` in the Phase 5O map from
+  `learning_research_reporting / adapter_candidate` to
+  `live_action_broker_reconcile / future_rename_blocker`. Verification:
+  focused tests passed (`13 passed`), analyzer stayed clean with raw reader
+  bucket 0, Phase 5K remained `COMPLETE_POSITIVE`, Phase 5I remained
+  `COMPLETE_POSITIVE`, and source posture remained `COMPLETE_POSITIVE`. Counts:
+  `orm_trade_symbol_compat=69`, `learning_research_reporting=14`,
+  `live_action_broker_reconcile=16`, `adapter_candidate=19`,
+  `future_rename_blocker=34`. CC report:
+  `docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5ad-alerts-envelope-audit.md`.
 - **Phase 5AC backtest-service envelope audit CLOSED 2026-05-31.**
   Audited `app/services/backtest_service.py` and found no legacy `Trade` ORM
   import or query. The Phase 5 analyzer was classifying the file because of one

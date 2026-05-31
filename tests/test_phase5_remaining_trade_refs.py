@@ -21,8 +21,8 @@ EXPECTED_RUNTIME_COMPAT_RELATION_SYMBOL_PATHS = [
 ]
 
 EXPECTED_ORM_CONTRACT_GROUP_COUNTS = {
-    "learning_research_reporting": 15,
-    "live_action_broker_reconcile": 15,
+    "learning_research_reporting": 14,
+    "live_action_broker_reconcile": 16,
     "private_helper_type_only": 7,
     "public_ui_schema_contract": 14,
     "risk_capital_gate": 18,
@@ -35,6 +35,7 @@ EXPECTED_ORM_CONTRACT_GROUP_REPRESENTATIVES = {
     ],
     "live_action_broker_reconcile": [
         "app/services/broker_service.py",
+        "app/services/trading/alerts.py",
         "app/services/trading/bracket_intent_writer.py",
         "app/services/trading/crypto/exit_monitor.py",
         "app/services/trading/position_integrity.py",
