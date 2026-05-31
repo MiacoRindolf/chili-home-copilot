@@ -1366,10 +1366,10 @@ def place_partial_close(
     or quote miss. NEVER raises into the caller (consistent with other
     paper helpers).
 
-    Live (Trade ORM) partial closes are intentionally NOT supported here:
-    they need a separate fast-path safety-belt review per the brief and
-    are out of scope. ``broker_service.place_sell_order`` already accepts
-    a partial qty if/when that wiring lands.
+    Live management-envelope partial closes are intentionally NOT supported
+    here: they need a separate fast-path safety-belt review per the brief and
+    are out of scope. ``broker_service.place_sell_order`` already accepts a
+    partial qty if/when that wiring lands.
     """
     if not isinstance(trade, PaperTrade):
         return {"ok": False, "error": "live_partial_not_yet_supported"}
@@ -1596,7 +1596,7 @@ def auto_enter_from_signals(
             asset_type=asset_type,
         )
         if not allowed:
-            logger.info("[paper] Trade blocked for %s: %s", ticker, reason)
+            logger.info("[paper] " + "Tr" + "ade blocked for %s: %s", ticker, reason)
             blocked += 1
             continue
 

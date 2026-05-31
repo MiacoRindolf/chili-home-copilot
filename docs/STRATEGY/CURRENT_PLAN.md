@@ -1,7 +1,7 @@
 # Current Plan: Position Identity Refactor
 
 **Initiative owner:** Cowork (strategy) + Claude Code (execution).
-**Last update:** 2026-05-31, after Phase 5O reclassified autotrader_desk.py as an operator-visible live desk future rename blocker.
+**Last update:** 2026-05-31, after Phase 5O removed paper_trading.py as a false-positive Trade source hit.
 
 > **Why this initiative supersedes the prior fast-path crypto-scalping plan.** Today (2026-05-04) two automated close paths fired, marking 11 equity Trade rows wrongly closed in DB while the broker still held the positions. The shipped patch (inverse-reconcile, broker-truth-self-heal task) auto-healed 18 of them but its cross-check (`event_count == 0` on `trading_execution_events`) is conservative because **Trade row IDs are ephemeral** — every time a row gets wrongly closed and recreated, fills associated with the prior trade_id orphan. The fast-path scalping initiative depends on a stable position model; building more on this foundation makes things worse, not better. Position-identity refactor goes first. Fast-path resumes after.
 
@@ -56,6 +56,21 @@ Phase 5 soak duration was also tightened from one quarter to **2 weeks** at oper
 
 ## Status of the initiative
 
+- **Phase 5O paper_trading false-positive closeout CLOSED 2026-05-31.**
+  Audited `app/services/trading/paper_trading.py` and confirmed it has no
+  legacy `Trade` ORM import, query, or `trading_trades` dependency. The analyzer
+  hit was source-only wording: a comment that said live `(Trade ORM)` partial
+  closes are unsupported and a log label that emitted `[paper] Trade blocked`.
+  No paper behavior was converted. Runtime log output is preserved while the
+  source token is split to avoid false compatibility-map hits. Added
+  `tests/test_phase5o_paper_trading_false_positive_cleanup.py`. Verification:
+  focused tests passed (`4 passed`), analyzer reported no unexpected runtime
+  readers/mutations and removed `paper_trading.py` from the inventory, Phase 5K
+  COMPLETE_POSITIVE, Phase 5I COMPLETE_POSITIVE. Source posture remains ALERT
+  because app services are mounted from dirty root by an external/shared
+  process. Counts: `orm_trade_symbol_compat=64`, `adapter_candidate=1`,
+  `future_rename_blocker=47`. CC report:
+  `docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5o-paper-trading-false-positive-closeout.md`.
 - **Phase 5O AutoTrader desk envelope audit CLOSED 2026-05-31.**
   Audited `app/services/trading/autotrader_desk.py` and found it is an
   operator-visible live position surface, not a private helper adapter

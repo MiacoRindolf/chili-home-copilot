@@ -11,7 +11,7 @@ ANALYZER_PATH = REPO_ROOT / "scripts" / "analyze_phase5_remaining_trade_refs.py"
 MAP_PATH = REPO_ROOT / "docs" / "STRATEGY" / "phase5o_remaining_runtime_compat_map.json"
 
 EXPECTED_PHASE5O_BUCKET_COUNTS = {
-    "adapter_candidate": 2,
+    "adapter_candidate": 1,
     "future_rename_blocker": 47,
     "leave_alone": 16,
 }
@@ -39,7 +39,7 @@ def test_phase5o_map_covers_current_orm_compat_inventory() -> None:
     payload = json.loads(MAP_PATH.read_text(encoding="utf-8"))
     mapped_paths = {item["path"] for item in payload["items"]}
 
-    assert payload["orm_trade_symbol_compat_count"] == 65
+    assert payload["orm_trade_symbol_compat_count"] == 64
     assert payload["phase5o_bucket_counts"] == EXPECTED_PHASE5O_BUCKET_COUNTS
     assert mapped_paths == current_paths
 
