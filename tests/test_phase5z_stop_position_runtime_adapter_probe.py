@@ -123,3 +123,38 @@ def test_public_position_fields_include_stop_ui_contract() -> None:
         "entry_date",
         "brain",
     )
+
+
+def test_probe_rejects_non_test_database_without_live_opt_in(monkeypatch) -> None:
+    module = _load_module()
+
+    monkeypatch.delenv(module.LIVE_PROBE_OPT_IN, raising=False)
+
+    try:
+        module._assert_probe_database_allowed(
+            "postgresql://chili:chili@localhost:5433/chili"
+        )
+    except RuntimeError as exc:
+        assert module.LIVE_PROBE_OPT_IN in str(exc)
+    else:
+        raise AssertionError("expected non-test database to require live opt-in")
+
+
+def test_probe_allows_test_database_without_live_opt_in(monkeypatch) -> None:
+    module = _load_module()
+
+    monkeypatch.delenv(module.LIVE_PROBE_OPT_IN, raising=False)
+
+    module._assert_probe_database_allowed(
+        "postgresql://chili:chili@localhost:5433/chili_test"
+    )
+
+
+def test_probe_live_opt_in_allows_non_test_database(monkeypatch) -> None:
+    module = _load_module()
+
+    monkeypatch.setenv(module.LIVE_PROBE_OPT_IN, "true")
+
+    module._assert_probe_database_allowed(
+        "postgresql://chili:chili@localhost:5433/chili"
+    )

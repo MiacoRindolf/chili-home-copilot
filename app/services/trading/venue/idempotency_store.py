@@ -28,7 +28,7 @@ import threading
 import time
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from sqlalchemy import text
 
@@ -41,6 +41,19 @@ _MEM_TTL_SEC = 300.0  # matches the legacy guard; DB is the durable layer
 
 _mem_cache: "OrderedDict[str, float]" = OrderedDict()
 _mem_lock = threading.Lock()
+_settings_obj: Any | None = None
+
+
+def _settings() -> Any | None:
+    global _settings_obj
+    if _settings_obj is not None:
+        return _settings_obj
+    try:
+        from ....config import settings
+    except Exception:
+        return None
+    _settings_obj = settings
+    return settings
 
 
 def _mem_remember(key: str) -> None:
@@ -70,6 +83,7 @@ def _mem_is_duplicate(key: str) -> bool:
         if ts < cutoff:
             _mem_cache.pop(key, None)
             return False
+        _mem_cache.move_to_end(key)
         return True
 
 
@@ -90,9 +104,10 @@ def reset_for_tests() -> None:
 
 def _venue_ttl_hours(venue: str) -> float:
     v = (venue or "").strip().lower()
+    settings = _settings()
+    if settings is None:
+        return 168.0 if v not in ("coinbase", "coinbase_spot", "crypto") else 48.0
     try:
-        from ....config import settings
-
         if v in ("coinbase", "coinbase_spot", "crypto"):
             return float(getattr(settings, "chili_venue_idempotency_ttl_hours_crypto", 48.0))
         return float(getattr(settings, "chili_venue_idempotency_ttl_hours_equities", 168.0))
