@@ -480,6 +480,39 @@ def load_edge_reliability_live_envelope_rows(
     ]
 
 
+def load_net_edge_training_envelope_rows(
+    db: Session,
+    *,
+    since: datetime,
+    limit: int = 2000,
+) -> list[SimpleNamespace]:
+    """Load live management-envelope outcomes used by NetEdge calibration."""
+    rows = _rows(
+        db,
+        f"""
+        SELECT
+            scan_pattern_id,
+            pnl
+          FROM {MANAGEMENT_ENVELOPES_RELATION}
+         WHERE exit_date IS NOT NULL
+           AND entry_date >= :since
+         ORDER BY exit_date DESC NULLS LAST
+         LIMIT :limit
+        """,
+        {
+            "since": since,
+            "limit": max(1, int(limit or 2000)),
+        },
+    )
+    return [
+        SimpleNamespace(
+            scan_pattern_id=row.get("scan_pattern_id"),
+            pnl=row.get("pnl"),
+        )
+        for row in rows
+    ]
+
+
 def fetch_synergy_retry_envelope_candidates(
     db: Session,
     *,

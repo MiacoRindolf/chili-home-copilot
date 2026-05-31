@@ -16,6 +16,7 @@ from app.services.trading.management_envelopes import (
     load_execution_cost_estimate_envelope_rows,
     load_imminent_alert_actioned_envelope_ids,
     load_monitor_decision_envelope_rows,
+    load_net_edge_training_envelope_rows,
     load_open_active_setup_envelope_objects,
     load_open_stop_position_envelope_objects,
     load_pattern_tagged_envelope_rows,
@@ -168,6 +169,32 @@ def test_edge_reliability_recent_rows_can_include_open_envelopes_with_limit():
     assert "AND status = 'closed'" not in db.sql
     assert "LIMIT :limit" in db.sql
     assert db.params == {"pattern_id": 586, "since": since, "limit": 250}
+
+
+def test_net_edge_training_rows_read_management_envelopes():
+    since = datetime(2026, 5, 1, 12, 0)
+    db = _FakeDb(
+        _RowsResult(
+            [
+                {
+                    "scan_pattern_id": 585,
+                    "pnl": 12.5,
+                }
+            ]
+        )
+    )
+
+    rows = load_net_edge_training_envelope_rows(db, since=since, limit=2000)
+
+    assert len(rows) == 1
+    assert rows[0].scan_pattern_id == 585
+    assert rows[0].pnl == 12.5
+    assert "FROM trading_management_envelopes" in db.sql
+    assert "trading_trades" not in db.sql
+    assert "exit_date IS NOT NULL" in db.sql
+    assert "entry_date >= :since" in db.sql
+    assert "ORDER BY exit_date DESC NULLS LAST" in db.sql
+    assert db.params == {"since": since, "limit": 2000}
 
 
 def test_execution_cost_ticker_discovery_reads_management_envelopes():

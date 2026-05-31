@@ -44,7 +44,6 @@ from ...models.trading import (
     NetEdgeScoreLog,
     PaperTrade,
     ScanPattern,
-    Trade,
 )
 from ...trading_brain.infrastructure.net_edge_ops_log import (
     MODE_AUTHORITATIVE,
@@ -65,6 +64,7 @@ from .asset_class import (
     normalize_pattern_asset_class,
     pattern_asset_class_matches,
 )
+from .management_envelopes import load_net_edge_training_envelope_rows
 
 logger = logging.getLogger(__name__)
 
@@ -312,9 +312,9 @@ def _load_training_pairs(
 ) -> list[tuple[float, int]]:
     """Return ``(raw_prob, realized_win)`` pairs for calibrator fitting.
 
-    We source realized outcomes from closed :class:`Trade` and exited
-    :class:`PaperTrade` rows whose linked :class:`ScanPattern` carries a
-    sensible ``oos_win_rate`` or ``win_rate`` (the current raw prob proxy).
+    We source realized outcomes from closed live management envelopes and
+    exited :class:`PaperTrade` rows whose linked :class:`ScanPattern` carries
+    a sensible ``oos_win_rate`` or ``win_rate`` (the current raw prob proxy).
 
     This is deliberately simple in v1. Phase D (triple-barrier labels) will
     supply a more honest ``realized_win`` signal; the calibrator interface
@@ -323,12 +323,10 @@ def _load_training_pairs(
     cutoff = datetime.utcnow() - timedelta(days=lookback_days)
     pairs: list[tuple[float, int]] = []
 
-    trades: list[Trade] = (
-        db.query(Trade)
-        .filter(Trade.exit_date.isnot(None), Trade.entry_date >= cutoff)
-        .order_by(desc(Trade.exit_date))
-        .limit(2000)
-        .all()
+    trades = load_net_edge_training_envelope_rows(
+        db,
+        since=cutoff,
+        limit=2000,
     )
     papers: list[PaperTrade] = (
         db.query(PaperTrade)

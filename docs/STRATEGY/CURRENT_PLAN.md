@@ -932,3 +932,23 @@ broker/reconcile/risk/capital surfaces without dedicated parity probes.
 
 Report:
 `docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5v-learning-reporting-false-positive-cleanup.md`.
+
+## Phase 5W - NetEdge Training Envelope Adapter (2026-05-31)
+
+Phase 5W converted the NetEdge calibrator's live outcome training rows from the
+legacy `Trade` ORM surface to a semantic management-envelope helper.
+
+`net_edge_ranker._load_training_pairs(...)` now loads the live half through
+`load_net_edge_training_envelope_rows(...)`, preserving the old selection
+semantics (`exit_date IS NOT NULL`, `entry_date >= cutoff`, latest exits first,
+limit 2000). The paper-trade half remains unchanged.
+
+The remaining compatibility surface dropped from 75 to 74 files:
+`learning_research_reporting=20`, `adapter_candidate=25`.
+
+Architect verdict: safe narrow adapter slice. NetEdge remains fail-open and
+non-authoritative unless explicitly configured; this change only moves the live
+calibrator row source behind the management-envelope semantic surface.
+
+Report:
+`docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5w-net-edge-envelope-adapter.md`.
