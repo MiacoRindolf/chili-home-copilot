@@ -10,18 +10,23 @@ The orchestrator is intentionally local-first and safety-first:
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import hashlib
+import math
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import tomllib
 import uuid
 import difflib
-from datetime import datetime, timedelta
+from collections import OrderedDict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 from urllib.parse import urlparse
@@ -116,6 +121,24 @@ AUTOPILOT_TASK_ACTION_APPROVE_PLAN = "approve_plan"
 AUTOPILOT_TASK_ACTION_START_WORKER = "start_worker"
 AUTOPILOT_TASK_ACTION_RECOVER_BLOCKER = "recover_blocker"
 AUTOPILOT_TASK_ACTION_MERGE = "merge"
+AUTOPILOT_BLOCKER_SCHEMA = "chili.autopilot.blocker.v1"
+AUTOPILOT_BLOCKER_KIND_PERMISSION_BOUNDARY = "permission_boundary"
+AUTOPILOT_BLOCKER_BOUNDARY_COMMAND_POLICY = "command_policy"
+AUTOPILOT_BLOCKER_BOUNDARY_RUNTIME_CONTROL = "runtime_control"
+RUNTIME_CONTROL_BLOCKED_MESSAGE = (
+    "This asks for a runtime, deploy, migration, env, broker, or live-control action. "
+    "Project Autopilot only starts isolated worktrees for repo code changes; keep this in "
+    "operator chat for explicit authorization, or ask Autopilot to build a code guard instead."
+)
+RUNTIME_CONTROL_OPERATOR_GUIDANCE = (
+    "Permission boundary: this is not a coding-run failure. Review the run, keep runtime/deploy/"
+    "migration/env/broker/live-control work in operator chat with explicit authorization, or start "
+    "a new Autopilot prompt for a code guard or test."
+)
+COMMAND_POLICY_OPERATOR_GUIDANCE = (
+    "Permission boundary: this validation command is outside Project Autopilot's safe command policy. "
+    "Review the run instead of rerunning the same command, or ask Autopilot for a code-only guard or test."
+)
 STAGE_CHAT = "chat"
 STAGE_CLASSIFY = "classify"
 STAGE_IMPLEMENT = "implement"
@@ -146,9 +169,12 @@ VISUAL_KIND_SCREENSHOT = "screenshot"
 VISUAL_KIND_VIDEO = "video"
 VISUAL_ARTIFACT_TYPE_SCREENSHOT = "visual_screenshot"
 VISUAL_ARTIFACT_TYPE_VIDEO = "visual_video"
+VISUAL_ARTIFACT_TYPE_APPLICABILITY = "visual_qa_applicability"
+VISUAL_QA_APPLICABILITY_SCHEMA = "chili.autopilot.visual_qa_applicability.v1"
 VISUAL_EVIDENCE_SOURCE_DESKTOP = "desktop"
 VISUAL_EVIDENCE_SOURCE_URL = "url"
 VISUAL_EVIDENCE_SOURCE_NONE = "none"
+VISUAL_EVIDENCE_SOURCE_OPERATOR = "operator"
 VISUAL_SCREENSHOT_UNAVAILABLE_REASON = "Screenshot evidence was requested, but no image capture was provided."
 VISUAL_VIDEO_UNAVAILABLE_REASON = "Desktop video capture is not available yet for this run."
 VISUAL_UNSAFE_PATH_REASON = "Visual evidence path was rejected because it is not a safe absolute local file path."
@@ -157,6 +183,10 @@ VISUAL_PATH_TOO_LONG_REASON = "Visual evidence path was rejected because it is t
 VISUAL_URL_TOO_LONG_REASON = "Visual evidence URL was rejected because it is too long."
 VISUAL_SCREENSHOT_EXT_REASON = "Screenshot evidence path was rejected because it is not a supported image file."
 VISUAL_VIDEO_EXT_REASON = "Video evidence path was rejected because it is not a supported video file."
+VISUAL_QA_NOT_APPLICABLE_DEFAULT_REASON = (
+    "This run did not change user-facing UI or operator workflow visuals."
+)
+VISUAL_QA_APPLICABILITY_RATIONALE_LIMIT = 500
 VISUAL_QA_UI_FILE_EXTENSIONS = frozenset({
     ".css",
     ".dart",
@@ -286,6 +316,12 @@ AGENT_SCHEDULE_DUE_CYCLE_LIMIT = 3
 AGENT_SCHEDULE_SKIP_OPEN_CYCLE = "open_scheduled_cycle"
 AGENT_SCHEDULE_SKIP_REPO_ALIAS = "non_preferred_repo_alias"
 AGENT_SCHEDULE_SKIP_RUNTIME_REST = "runtime_rest"
+AGENT_SCHEDULE_SKIP_NO_MATERIAL_CHANGE = "scheduled_agent_no_material_change"
+AGENT_SCHEDULE_NO_CHANGE_COOLDOWN_SECONDS = 15 * 60
+AGENT_SCHEDULE_NO_CHANGE_MAX_COOLDOWN_SECONDS = 60 * 60
+AGENT_SCHEDULE_NO_CHANGE_SKIP_STREAK_KEY = "no_change_skip_streak"
+AGENT_SCHEDULE_NO_CHANGE_FINGERPRINT_KEY = "no_change_material_fingerprint"
+AGENT_SCHEDULE_NO_CHANGE_LAST_SKIP_AT_KEY = "no_change_last_skip_at"
 AGENT_RUNTIME_MODE_KEY = "runtime_mode"
 AGENT_RUNTIME_MODE_SCHEDULED = "scheduled"
 AGENT_RUNTIME_MODE_ALWAYS_ON = "always_on"
@@ -298,12 +334,14 @@ AGENT_RUNTIME_DEFAULT_REST_MINUTES = 5
 SCHEDULED_AGENT_REPORT_ARTIFACT_TYPE = "agent_cycle_report"
 SCHEDULED_AGENT_REPORT_ARTIFACT_NAME = "scheduled_agent_report"
 SCHEDULED_AGENT_REPORT_SCHEMA = "chili.autopilot.scheduled_agent_report.v2"
+SCHEDULED_AGENT_SOURCE_RECEIPT_SCHEMA = "chili.autopilot.source_receipt.v1"
 SCHEDULED_AGENT_REPORT_QUALITY_ARTIFACT_TYPE = "quality_gate"
 SCHEDULED_AGENT_REPORT_QUALITY_ARTIFACT_NAME = "scheduled_agent_report_quality"
 SCHEDULED_AGENT_REPORT_QUALITY_PASSING_SCORE = 75
 SCHEDULED_AGENT_REPORT_QUALITY_PASSED = "passed"
 SCHEDULED_AGENT_REPORT_QUALITY_REPAIRED = "repaired"
 SCHEDULED_AGENT_REPORT_QUALITY_LOW = "low_quality"
+SCHEDULED_AGENT_MATERIAL_FINGERPRINT_SCHEMA = "chili.autopilot.scheduled_agent_material.v1"
 SCHEDULED_AGENT_REPORT_NO_CHANGE_MARKERS = (
     "no files were changed",
     "no files changed",
@@ -312,6 +350,233 @@ SCHEDULED_AGENT_REPORT_NO_CHANGE_MARKERS = (
     "research",
     "summar",
 )
+_PROJECT_AUTONOMY_LLM_COST_LOCK = threading.Lock()
+_PROJECT_AUTONOMY_LLM_COST_STATS: dict[str, Any] = {
+    "autopilot_chat_local_model_calls": 0,
+    "autopilot_chat_mechanical_replies": 0,
+    "autopilot_chat_material_cache_hits": 0,
+    "autopilot_chat_material_cache_stores": 0,
+    "autopilot_chat_material_inflight_waits": 0,
+    "scheduled_agent_local_model_calls": 0,
+    "scheduled_agent_no_change_skips": 0,
+    "saved_responses": 0,
+    "total_requests_observed": 0,
+    "by_purpose": {},
+}
+
+
+def reset_project_autonomy_llm_cost_stats() -> None:
+    with _PROJECT_AUTONOMY_LLM_COST_LOCK:
+        _PROJECT_AUTONOMY_LLM_COST_STATS["autopilot_chat_local_model_calls"] = 0
+        _PROJECT_AUTONOMY_LLM_COST_STATS["autopilot_chat_mechanical_replies"] = 0
+        _PROJECT_AUTONOMY_LLM_COST_STATS["autopilot_chat_material_cache_hits"] = 0
+        _PROJECT_AUTONOMY_LLM_COST_STATS["autopilot_chat_material_cache_stores"] = 0
+        _PROJECT_AUTONOMY_LLM_COST_STATS["autopilot_chat_material_inflight_waits"] = 0
+        _PROJECT_AUTONOMY_LLM_COST_STATS["scheduled_agent_local_model_calls"] = 0
+        _PROJECT_AUTONOMY_LLM_COST_STATS["scheduled_agent_no_change_skips"] = 0
+        _PROJECT_AUTONOMY_LLM_COST_STATS["saved_responses"] = 0
+        _PROJECT_AUTONOMY_LLM_COST_STATS["total_requests_observed"] = 0
+        _PROJECT_AUTONOMY_LLM_COST_STATS["by_purpose"] = {}
+        _AUTOPILOT_CHAT_MATERIAL_CACHE.clear()
+        _AUTOPILOT_CHAT_MATERIAL_INFLIGHT.clear()
+
+
+def _increment_project_autonomy_llm_stat(purpose: str, key: str, amount: int = 1) -> None:
+    clean_purpose = purpose or "project_autonomy_unknown"
+    with _PROJECT_AUTONOMY_LLM_COST_LOCK:
+        _PROJECT_AUTONOMY_LLM_COST_STATS[key] = int(_PROJECT_AUTONOMY_LLM_COST_STATS.get(key, 0)) + int(amount)
+        by_purpose = _PROJECT_AUTONOMY_LLM_COST_STATS.setdefault("by_purpose", {})
+        if not isinstance(by_purpose, dict):
+            by_purpose = {}
+            _PROJECT_AUTONOMY_LLM_COST_STATS["by_purpose"] = by_purpose
+        row = by_purpose.setdefault(
+            clean_purpose,
+            {
+                "local_model_calls": 0,
+                "mechanical_replies": 0,
+                "material_cache_hits": 0,
+                "material_cache_stores": 0,
+                "material_inflight_waits": 0,
+                "no_change_skips": 0,
+                "saved_responses": 0,
+                "total_requests_observed": 0,
+            },
+        )
+        purpose_key = {
+            "autopilot_chat_local_model_calls": "local_model_calls",
+            "autopilot_chat_mechanical_replies": "mechanical_replies",
+            "autopilot_chat_material_cache_hits": "material_cache_hits",
+            "autopilot_chat_material_cache_stores": "material_cache_stores",
+            "autopilot_chat_material_inflight_waits": "material_inflight_waits",
+            "scheduled_agent_local_model_calls": "local_model_calls",
+            "scheduled_agent_no_change_skips": "no_change_skips",
+        }.get(key, key)
+        row[purpose_key] = int(row.get(purpose_key, 0)) + int(amount)
+
+
+def _record_project_autonomy_chat_model_call() -> None:
+    _increment_project_autonomy_llm_stat("autopilot_chat", "autopilot_chat_local_model_calls")
+    _increment_project_autonomy_llm_stat("autopilot_chat", "total_requests_observed")
+
+
+def _record_project_autonomy_chat_mechanical_reply() -> None:
+    _increment_project_autonomy_llm_stat("autopilot_chat", "autopilot_chat_mechanical_replies")
+    _increment_project_autonomy_llm_stat("autopilot_chat", "saved_responses")
+    _increment_project_autonomy_llm_stat("autopilot_chat", "total_requests_observed")
+
+
+def _record_project_autonomy_chat_material_hit(*, inflight: bool = False) -> None:
+    key = "autopilot_chat_material_inflight_waits" if inflight else "autopilot_chat_material_cache_hits"
+    _increment_project_autonomy_llm_stat("autopilot_chat", key)
+    _increment_project_autonomy_llm_stat("autopilot_chat", "saved_responses")
+    _increment_project_autonomy_llm_stat("autopilot_chat", "total_requests_observed")
+
+
+def _record_project_autonomy_chat_material_store() -> None:
+    _increment_project_autonomy_llm_stat("autopilot_chat", "autopilot_chat_material_cache_stores")
+
+
+def _record_project_autonomy_local_model_call(purpose: str) -> None:
+    _increment_project_autonomy_llm_stat(purpose, "scheduled_agent_local_model_calls")
+    _increment_project_autonomy_llm_stat(purpose, "total_requests_observed")
+
+
+def _record_project_autonomy_no_change_skip(purpose: str) -> None:
+    _increment_project_autonomy_llm_stat(purpose, "scheduled_agent_no_change_skips")
+    _increment_project_autonomy_llm_stat(purpose, "saved_responses")
+    _increment_project_autonomy_llm_stat(purpose, "total_requests_observed")
+
+
+def get_project_autonomy_llm_cost_stats() -> dict[str, Any]:
+    with _PROJECT_AUTONOMY_LLM_COST_LOCK:
+        saved = int(_PROJECT_AUTONOMY_LLM_COST_STATS.get("saved_responses") or 0)
+        observed = int(_PROJECT_AUTONOMY_LLM_COST_STATS.get("total_requests_observed") or 0)
+        by_purpose = {
+            str(purpose): {
+                key: int(value or 0)
+                for key, value in dict(row).items()
+            }
+            for purpose, row in dict(_PROJECT_AUTONOMY_LLM_COST_STATS.get("by_purpose") or {}).items()
+            if isinstance(row, dict)
+        }
+        return {
+            "autopilot_chat_local_model_calls": int(_PROJECT_AUTONOMY_LLM_COST_STATS["autopilot_chat_local_model_calls"]),
+            "autopilot_chat_mechanical_replies": int(_PROJECT_AUTONOMY_LLM_COST_STATS["autopilot_chat_mechanical_replies"]),
+            "autopilot_chat_material_cache_hits": int(_PROJECT_AUTONOMY_LLM_COST_STATS["autopilot_chat_material_cache_hits"]),
+            "autopilot_chat_material_cache_stores": int(_PROJECT_AUTONOMY_LLM_COST_STATS["autopilot_chat_material_cache_stores"]),
+            "autopilot_chat_material_inflight_waits": int(_PROJECT_AUTONOMY_LLM_COST_STATS["autopilot_chat_material_inflight_waits"]),
+            "autopilot_chat_material_cache_size": len(_AUTOPILOT_CHAT_MATERIAL_CACHE),
+            "autopilot_chat_material_inflight": len(_AUTOPILOT_CHAT_MATERIAL_INFLIGHT),
+            "scheduled_agent_local_model_calls": int(_PROJECT_AUTONOMY_LLM_COST_STATS["scheduled_agent_local_model_calls"]),
+            "scheduled_agent_no_change_skips": int(_PROJECT_AUTONOMY_LLM_COST_STATS["scheduled_agent_no_change_skips"]),
+            "saved_responses": saved,
+            "total_requests_observed": observed,
+            "avoidance_rate": round((saved / observed) if observed else 0.0, 4),
+            "by_purpose": by_purpose,
+        }
+
+
+_AUTOPILOT_CHAT_MATERIAL_CACHE_VERSION = "autopilot-chat-v2"
+_AUTOPILOT_CHAT_MATERIAL_CACHE_MAX = 128
+_AUTOPILOT_CHAT_MATERIAL_INFLIGHT_WAIT_SECONDS = 45.0
+_AUTOPILOT_CHAT_MATERIAL_CACHE: OrderedDict[str, str] = OrderedDict()
+_AUTOPILOT_CHAT_MATERIAL_INFLIGHT: dict[str, threading.Event] = {}
+
+
+def _normalized_autopilot_chat_message(value: str) -> str:
+    clean = re.sub(r"\s+", " ", (value or "").strip().lower())
+    return clean.strip(" \t\r\n.!?,")
+
+
+def _material_text_hash(value: Any) -> str:
+    clean = str(value or "")
+    if not clean:
+        return ""
+    return hashlib.sha256(clean.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _material_json_hash(value: Any) -> str:
+    clean = str(value or "")
+    if not clean:
+        return ""
+    try:
+        parsed = json.loads(clean)
+    except (TypeError, ValueError):
+        return _material_text_hash(value)
+    canonical = json.dumps(parsed, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _autopilot_chat_material_key(run: ProjectAutonomyRun, latest_user_message: str) -> str:
+    payload = {
+        "version": _AUTOPILOT_CHAT_MATERIAL_CACHE_VERSION,
+        "run_id": str(run.run_id or ""),
+        "repo_id": getattr(run, "repo_id", None),
+        "user_id": getattr(run, "user_id", None),
+        "status": str(run.status or ""),
+        "plan_status": str(run.plan_status or ""),
+        "merge_status": str(run.merge_status or ""),
+        "current_stage": str(run.current_stage or ""),
+        "prompt_hash": _material_text_hash(run.prompt),
+        "plan_hash": _material_json_hash(run.plan_json),
+        "files_hash": _material_json_hash(run.files_json),
+        "validation_hash": _material_json_hash(run.validation_json),
+        "message": _normalized_autopilot_chat_message(latest_user_message),
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _autopilot_chat_cache_get(key: str) -> str | None:
+    with _PROJECT_AUTONOMY_LLM_COST_LOCK:
+        cached = _AUTOPILOT_CHAT_MATERIAL_CACHE.get(key)
+        if cached is None:
+            return None
+        _AUTOPILOT_CHAT_MATERIAL_CACHE.move_to_end(key)
+    _record_project_autonomy_chat_material_hit()
+    return cached
+
+
+def _autopilot_chat_cache_set(key: str, reply: str) -> None:
+    clean = (reply or "").strip()
+    if not clean:
+        return
+    with _PROJECT_AUTONOMY_LLM_COST_LOCK:
+        _AUTOPILOT_CHAT_MATERIAL_CACHE[key] = clean
+        _AUTOPILOT_CHAT_MATERIAL_CACHE.move_to_end(key)
+        while len(_AUTOPILOT_CHAT_MATERIAL_CACHE) > _AUTOPILOT_CHAT_MATERIAL_CACHE_MAX:
+            _AUTOPILOT_CHAT_MATERIAL_CACHE.popitem(last=False)
+    _record_project_autonomy_chat_material_store()
+
+
+def _autopilot_chat_inflight_begin(key: str) -> tuple[threading.Event, bool]:
+    with _PROJECT_AUTONOMY_LLM_COST_LOCK:
+        existing = _AUTOPILOT_CHAT_MATERIAL_INFLIGHT.get(key)
+        if existing is not None:
+            return existing, False
+        event = threading.Event()
+        _AUTOPILOT_CHAT_MATERIAL_INFLIGHT[key] = event
+        return event, True
+
+
+def _autopilot_chat_inflight_finish(key: str, event: threading.Event) -> None:
+    with _PROJECT_AUTONOMY_LLM_COST_LOCK:
+        current = _AUTOPILOT_CHAT_MATERIAL_INFLIGHT.get(key)
+        if current is event:
+            _AUTOPILOT_CHAT_MATERIAL_INFLIGHT.pop(key, None)
+            event.set()
+
+
+def _autopilot_chat_inflight_wait(key: str, event: threading.Event) -> str | None:
+    if not event.wait(timeout=_AUTOPILOT_CHAT_MATERIAL_INFLIGHT_WAIT_SECONDS):
+        return None
+    with _PROJECT_AUTONOMY_LLM_COST_LOCK:
+        cached = _AUTOPILOT_CHAT_MATERIAL_CACHE.get(key)
+        if cached is None:
+            return None
+        _AUTOPILOT_CHAT_MATERIAL_CACHE.move_to_end(key)
+    _record_project_autonomy_chat_material_hit(inflight=True)
+    return cached
 SCHEDULED_AGENT_REPORT_FALSE_ACTION_MARKERS = (
     "i changed",
     "changed files",
@@ -434,6 +699,8 @@ AGENT_OS_READINESS_CHECK_QUALITY_GOVERNANCE = "quality_governance"
 AGENT_OS_READINESS_CHECK_RUNTIME_QUEUE = "runtime_queue"
 AGENT_OS_READINESS_CHECK_OPERATOR_INBOX = "operator_inbox"
 AGENT_OS_READINESS_CHECK_CODEX_ALIGNMENT = "codex_alignment"
+AGENT_OS_READINESS_CHECK_AGENT_FLOW = "agent_flow"
+AGENT_OS_AGENT_FLOW_KEY = "agent_flow"
 AGENT_OS_CAPABILITY_AUDIT_KEY = "agent_os_capability_audit"
 AGENT_OS_CAPABILITY_REPO_RUNTIME = "repo_runtime"
 AGENT_OS_CAPABILITY_AGENT_HIERARCHY = "agent_hierarchy"
@@ -483,6 +750,8 @@ AGENT_OPERATOR_INBOX_ITEM_CLARIFICATION = "clarification"
 AGENT_OPERATOR_INBOX_ITEM_QUESTION = "question"
 AGENT_OPERATOR_INBOX_ITEM_BLOCKER = "blocker"
 AGENT_OPERATOR_INBOX_ITEM_USER_REPLY = "user_reply"
+AGENT_OPERATOR_INBOX_ITEM_EXTERNAL_REPORT = "external_agent_report"
+AGENT_OPERATOR_INBOX_ITEM_AGENT_FLOW = "agent_flow"
 AGENT_OPERATOR_INBOX_USER_ROLE = "user"
 AGENT_OPERATOR_INBOX_ACTION_KEEP_MONITORING = "keep_monitoring"
 AGENT_OPERATOR_INBOX_ACTION_ANSWER_QUESTION = "answer_operator_question"
@@ -491,7 +760,53 @@ AGENT_OPERATOR_INBOX_ACTION_REVIEW_APPROVAL = "review_approval"
 AGENT_OPERATOR_INBOX_ACTION_CONTINUE_REPLY = "continue_reply"
 AGENT_OPERATOR_INBOX_ACTION_REVIEW_BLOCKER = "review_blocker"
 AGENT_OPERATOR_INBOX_ACTION_RECOVER_BLOCKER = "recover_blocker"
+AGENT_OPERATOR_INBOX_ACTION_REVIEW_EXTERNAL_REPORT = "review_external_agent_report"
+AGENT_OPERATOR_INBOX_ACTION_REVIEW_AGENT_FLOW = "review_agent_flow"
 AGENT_OPERATOR_INBOX_RECOVERY_RERUN_SAFE = "rerun_safe"
+AGENT_OPERATOR_EXTERNAL_REPORT_SCAN_LIMIT = 32
+AGENT_OPERATOR_EXTERNAL_REPORT_PREVIEW_LIMIT = 4
+AGENT_OPERATOR_EXTERNAL_REPORT_READ_CHARS = 9000
+AGENT_FLOW_STABLE_PENDING_SECONDS = 30
+AGENT_FLOW_PENDING_STALE_MINUTES = 10
+AGENT_FLOW_QUARANTINE_PROOF_MINUTES = 5
+AGENT_FLOW_STALE_LOCK_MINUTES = 10
+AGENT_FLOW_AGENT_SCAN_LIMIT = 40
+AGENT_FLOW_PREVIEW_LIMIT = 8
+AGENT_FLOW_WORKTREE_SCAN_LIMIT = 50
+AGENT_FLOW_WORKTREE_SCAN_WORKERS = 8
+AGENT_FLOW_WORKTREE_CHANGE_PREVIEW_LIMIT = 8
+AGENT_FLOW_MAILBOX_SHAPE_READ_BYTES = 256 * 1024
+AGENT_FLOW_STATUS_SHAPE_INVALID = "shape_invalid"
+AGENT_FLOW_STATUS_QUARANTINED_TARGET_ACTIVE = "quarantined_target_active"
+AGENT_FLOW_STATUS_PAUSED_AUTOMATION_ACTIVE = "paused_automation_active"
+AGENT_FLOW_STATUS_DETACHED_UNCONTAINED_WORKTREE = "detached_uncontained_worktree"
+AGENT_FLOW_STATUS_DIRTY_WORKTREE = "dirty_worktree"
+AGENT_FLOW_STATUS_REVIEW_HEAD_MISMATCH = "review_head_mismatch"
+AGENT_FLOW_STATUS_PROCESSED_DELIVERABLE_ANOMALY = "processed_deliverable_anomaly"
+AGENT_FLOW_STATUS_TEMP_PUBLISH_STALE = "temp_publish_stale"
+AGENT_FLOW_STATUS_ACTIVE_LOCK_STARVATION = "active_lock_starvation"
+AGENT_FLOW_STATUS_STALE_LOCK_CANDIDATE = "stale_lock_candidate"
+AGENT_FLOW_STATUS_STABLE_PENDING = "stable_pending"
+AGENT_FLOW_OWNER_OUT_EXCLUDE_TOKENS = (
+    "agentflow",
+    "agent-flow-stabilizer",
+)
+AGENT_FLOW_MAILBOX_REQUIRED_FIELDS = (
+    "From",
+    "To",
+    "Created",
+    "Reply-To",
+    "Priority",
+    "Backlog-ID",
+    "Push Intent",
+    "Request",
+    "Expected Deliverable",
+    "Success Criteria",
+    "Context / Links",
+    "Safety Constraints",
+    "Dependencies",
+    "Peer Review / Push",
+)
 AGENT_OPERATING_STATE_NEEDS_INPUT = "needs_input"
 AGENT_OPERATING_STATE_NEEDS_SYNC = "needs_sync"
 AGENT_OPERATING_STATE_CUSTOM_PROMPT = "custom_prompt"
@@ -547,6 +862,7 @@ AGENT_QUALITY_MONITOR_DIMENSION_MODEL = "local_model"
 AGENT_QUALITY_MONITOR_DIMENSION_CODEX = "codex_alignment"
 AGENT_QUALITY_MONITOR_DIMENSION_RUNTIME = "runtime_queue"
 AGENT_QUALITY_MONITOR_DIMENSION_INBOX = "operator_inbox"
+AGENT_QUALITY_MONITOR_DIMENSION_AGENT_FLOW = "agent_flow"
 AGENT_QUALITY_MONITOR_ACTION_KEEP_MONITORING = "keep_monitoring"
 AGENT_QUALITY_MONITOR_ACTION_INSTALL_MODEL = "install_coder_model"
 AGENT_QUALITY_MONITOR_ACTION_ANSWER_INBOX = "answer_operator_inbox"
@@ -1115,6 +1431,10 @@ _STAGE_ORDER = (
 class AutonomyBlocked(RuntimeError):
     """Expected stop condition that leaves the branch/worktree for review."""
 
+    def __init__(self, message: str, *, blocker: Mapping[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.blocker = dict(blocker or {})
+
 
 class AutonomyCancelled(RuntimeError):
     """Raised when the operator cancels an active run."""
@@ -1363,6 +1683,13 @@ def _visual_skip_reason(kind: str, path_reason: str | None, url_reason: str | No
     return VISUAL_VIDEO_UNAVAILABLE_REASON if kind == VISUAL_KIND_VIDEO else VISUAL_SCREENSHOT_UNAVAILABLE_REASON
 
 
+def _clean_visual_applicability_rationale(raw: str | None, fallback: str | None = None) -> str:
+    clean = str(raw or fallback or "").strip()
+    if not clean:
+        clean = VISUAL_QA_NOT_APPLICABLE_DEFAULT_REASON
+    return _clip(clean, VISUAL_QA_APPLICABILITY_RATIONALE_LIMIT)
+
+
 def _safe_rel_path(path: str | None) -> str | None:
     raw = (path or "").replace("\\", "/").strip()
     raw = raw.lstrip("/")
@@ -1409,6 +1736,294 @@ def _looks_like_live_monitoring_prompt(prompt: str) -> bool:
         "tests/",
     )
     return not any(marker in lower for marker in implementation_markers)
+
+
+def _looks_like_runtime_control_prompt(prompt: str) -> bool:
+    lower = " ".join((prompt or "").lower().split())
+    if not lower:
+        return False
+    runtime_markers = (
+        "docker compose restart",
+        "docker compose up",
+        "docker compose down",
+        "docker restart",
+        "compose restart",
+        "compose up",
+        "compose down",
+        "restart chili",
+        "restart service",
+        "restart services",
+        "restart worker",
+        "restart workers",
+        "recreate service",
+        "recreate services",
+        "runtime refresh",
+        "refresh runtime",
+        "deploy ",
+        "deploy the",
+        "deployment rollout",
+        "release to prod",
+        "release to production",
+        "release the latest",
+        "production rollout",
+        "roll out to prod",
+        "run migration",
+        "run migrations",
+        "apply migration",
+        "apply migrations",
+        "alembic upgrade",
+        "edit .env",
+        "update .env",
+        "set .env",
+        "flip flag",
+        "turn on flag",
+        "enable live",
+        "live trading",
+        "broker api",
+        "broker action",
+        "place order",
+        "cancel order",
+        "call broker",
+        "breaker reset",
+        "capital allocation",
+    )
+    if not any(marker in lower for marker in runtime_markers):
+        return False
+    guard_build_markers = (
+        "add guard",
+        "add a guard",
+        "block ",
+        "detect ",
+        "document ",
+        "prevent ",
+        "add test",
+        "write test",
+        "warn ",
+        "write code",
+        "code change",
+        "ui ",
+        "button",
+        "panel",
+        ".py",
+        ".dart",
+        ".js",
+        ".ts",
+        ".tsx",
+        "app/",
+        "chili_mobile/",
+        "tests/",
+    )
+    return not any(marker in lower for marker in guard_build_markers)
+
+
+def _is_runtime_control_blocker_text(text: str | None) -> bool:
+    lower = " ".join((text or "").lower().split())
+    if not lower:
+        return False
+    return (
+        "runtime, deploy, migration, env, broker, or live-control action" in lower
+        or "project autopilot only starts isolated worktrees for repo code changes" in lower
+    )
+
+
+_COMMAND_PREVIEW_SECRET_MARKERS = (
+    "api_key",
+    "apikey",
+    "authorization",
+    "bearer",
+    "password",
+    "passwd",
+    "secret",
+    "token",
+)
+
+
+def _redacted_command_preview(argv: Iterable[Any], *, limit: int = 6) -> str:
+    tokens = [str(part).strip() for part in argv if str(part).strip()]
+    preview: list[str] = []
+    for token in tokens[:limit]:
+        lower = token.lower()
+        key = lower.split("=", 1)[0]
+        if any(marker in lower for marker in _COMMAND_PREVIEW_SECRET_MARKERS) or any(
+            marker in key for marker in _COMMAND_PREVIEW_SECRET_MARKERS
+        ):
+            preview.append("[redacted]")
+        else:
+            preview.append(token)
+    if len(tokens) > limit:
+        preview.append("...")
+    return " ".join(preview)
+
+
+def _permission_boundary_blocker_payload(
+    *,
+    boundary: str,
+    reason: str,
+    raw_reason: str | None = None,
+    safe_alternative: str,
+    recovery_detail: str,
+    command_preview: str | None = None,
+    policy: str | None = None,
+) -> dict[str, Any]:
+    raw_reason_text = str(raw_reason or reason or "").strip()
+    decision_reason: dict[str, Any] = {
+        "type": AUTOPILOT_BLOCKER_KIND_PERMISSION_BOUNDARY,
+        "boundary": boundary,
+    }
+    if policy:
+        decision_reason["policy"] = policy
+    payload: dict[str, Any] = {
+        "schema": AUTOPILOT_BLOCKER_SCHEMA,
+        "kind": AUTOPILOT_BLOCKER_KIND_PERMISSION_BOUNDARY,
+        "boundary": boundary,
+        "can_rerun": False,
+        "action": "review",
+        "action_label": "Review",
+        "decision": {
+            "behavior": "deny",
+            "decision_reason": decision_reason,
+        },
+        "reason": reason,
+        "recovery_detail": recovery_detail,
+        "safe_alternative": safe_alternative,
+        "operator_route": "operator_chat",
+        "raw_reason": truncate_text(raw_reason_text, 240)[0],
+    }
+    if command_preview:
+        payload["command_preview"] = truncate_text(command_preview, 240)[0]
+    if policy:
+        payload["policy"] = policy
+    return payload
+
+
+def _runtime_control_blocker_payload(reason: str | None = None) -> dict[str, Any]:
+    return _permission_boundary_blocker_payload(
+        boundary=AUTOPILOT_BLOCKER_BOUNDARY_RUNTIME_CONTROL,
+        reason=RUNTIME_CONTROL_OPERATOR_GUIDANCE,
+        raw_reason=reason or RUNTIME_CONTROL_BLOCKED_MESSAGE,
+        safe_alternative="Start a new Autopilot prompt for a code guard or test.",
+        recovery_detail="Open the run for context; do not rerun the same runtime-control prompt.",
+        policy="runtime_control_boundary",
+    )
+
+
+def _command_policy_blocker_payload(
+    reason: str,
+    *,
+    argv: Iterable[Any] | None = None,
+    boundary: str = AUTOPILOT_BLOCKER_BOUNDARY_COMMAND_POLICY,
+) -> dict[str, Any]:
+    if boundary == AUTOPILOT_BLOCKER_BOUNDARY_RUNTIME_CONTROL:
+        payload = _runtime_control_blocker_payload(reason)
+        payload["raw_reason"] = truncate_text(reason, 240)[0]
+    else:
+        payload = _permission_boundary_blocker_payload(
+            boundary=boundary,
+            reason=COMMAND_POLICY_OPERATOR_GUIDANCE,
+            raw_reason=reason,
+            safe_alternative="Use the built-in repo validation checks or ask Autopilot to add a safe code-only test.",
+            recovery_detail="Open the validation evidence; do not rerun the same blocked command without operator review.",
+            policy="project_autopilot_command_allowlist",
+        )
+    if argv is not None:
+        preview = _redacted_command_preview(argv)
+        if preview:
+            payload["command_preview"] = truncate_text(preview, 240)[0]
+    return payload
+
+
+def _autopilot_run_blocker_payload(row: ProjectAutonomyRun) -> dict[str, Any]:
+    raw_reason = str(row.merge_message or row.error_message or "").strip()
+    if _is_runtime_control_blocker_text(raw_reason):
+        return _runtime_control_blocker_payload(raw_reason)
+    validation_blocker = _validation_permission_blocker_payload(
+        _json_load(row.validation_json, [])
+    )
+    if validation_blocker:
+        return validation_blocker
+    return {}
+
+
+def _normalized_blocker_payload(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, Mapping):
+        return {}
+    schema = str(raw.get("schema") or "").strip()
+    kind = str(raw.get("kind") or "").strip()
+    boundary = str(raw.get("boundary") or "").strip()
+    if schema != AUTOPILOT_BLOCKER_SCHEMA:
+        return {}
+    if kind != AUTOPILOT_BLOCKER_KIND_PERMISSION_BOUNDARY:
+        return {}
+    if boundary not in {
+        AUTOPILOT_BLOCKER_BOUNDARY_RUNTIME_CONTROL,
+        AUTOPILOT_BLOCKER_BOUNDARY_COMMAND_POLICY,
+    }:
+        return {}
+    return dict(raw)
+
+
+def _latest_run_blocker_payload(db: Session, run_id: str) -> dict[str, Any]:
+    step = (
+        db.query(ProjectAutonomyStep)
+        .filter(ProjectAutonomyStep.run_id == run_id)
+        .order_by(ProjectAutonomyStep.step_index.desc(), ProjectAutonomyStep.id.desc())
+        .first()
+    )
+    if step is not None:
+        detail = _json_load(step.detail_json, {})
+        if isinstance(detail, Mapping):
+            blocker = _normalized_blocker_payload(detail.get("blocker"))
+            if blocker:
+                return blocker
+    message = (
+        db.query(ProjectAutonomyMessage)
+        .filter(ProjectAutonomyMessage.run_id == run_id)
+        .order_by(ProjectAutonomyMessage.id.desc())
+        .first()
+    )
+    if message is not None:
+        metadata = _json_load(message.metadata_json, {})
+        if isinstance(metadata, Mapping):
+            blocker = _normalized_blocker_payload(metadata.get("blocker"))
+            if blocker:
+                return blocker
+    return {}
+
+
+def _validation_permission_blocker_payload(validation: Any) -> dict[str, Any]:
+    if not isinstance(validation, list):
+        return {}
+    for item in validation:
+        if not isinstance(item, Mapping):
+            continue
+        blocker = _normalized_blocker_payload(item.get("blocker"))
+        if blocker and blocker.get("can_rerun") is False:
+            return blocker
+    return {}
+
+
+def _permission_blocker_task_detail(blocker: Mapping[str, Any]) -> str:
+    boundary = str(blocker.get("boundary") or "").strip()
+    boundary_label = (
+        "runtime-control policy"
+        if boundary == AUTOPILOT_BLOCKER_BOUNDARY_RUNTIME_CONTROL
+        else "command policy"
+    )
+    parts = [f"Permission boundary: validation is blocked by {boundary_label}."]
+    script_name = str(blocker.get("script_name") or "").strip()
+    blocked_command = str(blocker.get("blocked_command") or "").strip()
+    command_preview = str(blocker.get("command_preview") or "").strip()
+    raw_reason = str(blocker.get("raw_reason") or "").strip()
+    if script_name and blocked_command:
+        parts.append(f"Script {script_name} attempted {blocked_command}.")
+    elif blocked_command:
+        parts.append(f"Blocked command: {blocked_command}.")
+    elif command_preview:
+        parts.append(f"Blocked command: {command_preview}.")
+    if raw_reason:
+        parts.append(raw_reason)
+    parts.append("Review the run; do not rerun the same command automatically.")
+    return truncate_text(" ".join(parts), 260)[0]
 
 
 def _looks_like_greeting_or_chat(prompt: str) -> bool:
@@ -1719,6 +2334,7 @@ def _autopilot_task_item(
     next_action_detail: str | None = None,
     next_action_kind: str | None = None,
     next_action_recovery_action: str | None = None,
+    blocker: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload = {
         "key": key,
@@ -1736,10 +2352,25 @@ def _autopilot_task_item(
         payload["next_action_kind"] = str(next_action_kind)
     if next_action_recovery_action:
         payload["next_action_recovery_action"] = str(next_action_recovery_action)
+    if blocker:
+        payload["blocker"] = dict(blocker)
     return payload
 
 
 def _autopilot_run_task_board(row: ProjectAutonomyRun, plan: Mapping[str, Any]) -> dict[str, Any]:
+    return _autopilot_run_task_board_from_blocker(
+        row,
+        plan,
+        blocker=_autopilot_run_blocker_payload(row),
+    )
+
+
+def _autopilot_run_task_board_from_blocker(
+    row: ProjectAutonomyRun,
+    plan: Mapping[str, Any],
+    *,
+    blocker: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     status = str(row.status or "")
     plan_status = str(row.plan_status or "")
     stage = str(row.current_stage or "")
@@ -1753,8 +2384,24 @@ def _autopilot_run_task_board(row: ProjectAutonomyRun, plan: Mapping[str, Any]) 
     validation_items = validation if isinstance(validation, list) else []
     has_validation = bool(validation_items)
     validation_ok = has_validation and validation_passed(validation_items)
+    validation_blocker = _validation_permission_blocker_payload(validation_items)
     terminal_success = status in {RUN_STATUS_COMPLETED, RUN_STATUS_MERGED}
     terminal_bad = status in {RUN_STATUS_BLOCKED, RUN_STATUS_FAILED, RUN_STATUS_CANCELLED}
+    blocker = dict(blocker or {})
+    blocker_can_rerun = blocker.get("can_rerun") is not False
+    runtime_control_blocker = (
+        str(blocker.get("boundary") or "") == AUTOPILOT_BLOCKER_BOUNDARY_RUNTIME_CONTROL
+    )
+    blocker_action_label = str(blocker.get("action_label") or ("Rerun" if blocker_can_rerun else "Review"))
+    blocker_action_detail = (
+        str(blocker.get("reason") or "")
+        or (
+            RUNTIME_CONTROL_OPERATOR_GUIDANCE
+            if runtime_control_blocker
+            else "Prefill a fresh approval-first draft from this run."
+        )
+    )
+    blocker_recovery_action = AGENT_OPERATOR_INBOX_RECOVERY_RERUN_SAFE if blocker_can_rerun else None
 
     if status == RUN_STATUS_CHATTING:
         plan_task_status = AUTOPILOT_TASK_STATUS_PENDING
@@ -1820,11 +2467,16 @@ def _autopilot_run_task_board(row: ProjectAutonomyRun, plan: Mapping[str, Any]) 
         implementation_detail = f"{files_count} changed file(s) recorded."
         implementation_action = None
         implementation_action_label = None
+    elif terminal_bad and stage == "validate" and has_validation:
+        implementation_status = AUTOPILOT_TASK_STATUS_COMPLETED
+        implementation_detail = f"{files_count} changed file(s) reached validation."
+        implementation_action = None
+        implementation_action_label = None
     elif terminal_bad and (stage == STAGE_IMPLEMENT or files_count or commands_count):
         implementation_status = AUTOPILOT_TASK_STATUS_BLOCKED
         implementation_detail = row.error_message or "Implementation stopped before a clean completion."
         implementation_action = AUTOPILOT_TASK_ACTION_RECOVER_BLOCKER
-        implementation_action_label = "Rerun"
+        implementation_action_label = blocker_action_label
     elif status in {RUN_STATUS_RUNNING, RUN_STATUS_VALIDATING, RUN_STATUS_MERGING} or (
         status == RUN_STATUS_QUEUED and plan_status == PLAN_STATUS_APPROVED
     ):
@@ -1841,18 +2493,55 @@ def _autopilot_run_task_board(row: ProjectAutonomyRun, plan: Mapping[str, Any]) 
     if validation_ok:
         validation_status = AUTOPILOT_TASK_STATUS_COMPLETED
         validation_detail = f"{len(validation_items)} validation check(s) passed."
+        validation_action = None
+        validation_action_label = None
+        validation_action_detail = None
+        validation_action_kind = None
+        validation_recovery_action = None
+    elif validation_blocker:
+        validation_status = AUTOPILOT_TASK_STATUS_BLOCKED
+        validation_detail = _permission_blocker_task_detail(validation_blocker)
+        validation_action = AUTOPILOT_TASK_ACTION_RECOVER_BLOCKER
+        validation_action_label = str(validation_blocker.get("action_label") or "Review")
+        validation_action_detail = validation_detail
+        validation_action_kind = AGENT_OPERATOR_INBOX_ITEM_BLOCKER
+        validation_recovery_action = (
+            AGENT_OPERATOR_INBOX_RECOVERY_RERUN_SAFE
+            if validation_blocker.get("can_rerun") is not False
+            else None
+        )
     elif has_validation:
         validation_status = AUTOPILOT_TASK_STATUS_BLOCKED
         validation_detail = "Validation evidence exists but one or more checks failed."
+        validation_action = None
+        validation_action_label = None
+        validation_action_detail = None
+        validation_action_kind = None
+        validation_recovery_action = None
     elif status == RUN_STATUS_VALIDATING:
         validation_status = AUTOPILOT_TASK_STATUS_IN_PROGRESS
         validation_detail = "Validation is currently running."
+        validation_action = None
+        validation_action_label = None
+        validation_action_detail = None
+        validation_action_kind = None
+        validation_recovery_action = None
     elif terminal_success:
         validation_status = AUTOPILOT_TASK_STATUS_PENDING
         validation_detail = "Run completed, but no replayable validation evidence is recorded."
+        validation_action = None
+        validation_action_label = None
+        validation_action_detail = None
+        validation_action_kind = None
+        validation_recovery_action = None
     else:
         validation_status = AUTOPILOT_TASK_STATUS_PENDING
         validation_detail = "Replayable validation evidence has not been recorded yet."
+        validation_action = None
+        validation_action_label = None
+        validation_action_detail = None
+        validation_action_kind = None
+        validation_recovery_action = None
 
     if status == RUN_STATUS_MERGED or merge_status == RUN_STATUS_MERGED:
         closeout_status = AUTOPILOT_TASK_STATUS_COMPLETED
@@ -1869,7 +2558,7 @@ def _autopilot_run_task_board(row: ProjectAutonomyRun, plan: Mapping[str, Any]) 
         closeout_status = AUTOPILOT_TASK_STATUS_BLOCKED
         closeout_detail = row.error_message or row.merge_message or "Resolve the run blocker before closeout."
         closeout_action = AUTOPILOT_TASK_ACTION_RECOVER_BLOCKER
-        closeout_action_label = "Rerun"
+        closeout_action_label = blocker_action_label
     elif terminal_success:
         closeout_status = AUTOPILOT_TASK_STATUS_IN_PROGRESS
         closeout_detail = "Review artifacts and decide whether merge is appropriate."
@@ -1923,18 +2612,36 @@ def _autopilot_run_task_board(row: ProjectAutonomyRun, plan: Mapping[str, Any]) 
             run_id=row.run_id,
             next_action=implementation_action,
             next_action_label=implementation_action_label,
+            next_action_detail=(
+                blocker_action_detail
+                if implementation_action == AUTOPILOT_TASK_ACTION_RECOVER_BLOCKER
+                else None
+            ),
             next_action_kind=(
                 AGENT_OPERATOR_INBOX_ITEM_BLOCKER
                 if implementation_action == AUTOPILOT_TASK_ACTION_RECOVER_BLOCKER
                 else None
             ),
             next_action_recovery_action=(
-                AGENT_OPERATOR_INBOX_RECOVERY_RERUN_SAFE
+                blocker_recovery_action
                 if implementation_action == AUTOPILOT_TASK_ACTION_RECOVER_BLOCKER
                 else None
             ),
+            blocker=blocker if implementation_action == AUTOPILOT_TASK_ACTION_RECOVER_BLOCKER else None,
         ),
-        _autopilot_task_item("validate", "Validate evidence", validation_status, validation_detail),
+        _autopilot_task_item(
+            "validate",
+            "Validate evidence",
+            validation_status,
+            validation_detail,
+            run_id=row.run_id,
+            next_action=validation_action,
+            next_action_label=validation_action_label,
+            next_action_detail=validation_action_detail,
+            next_action_kind=validation_action_kind,
+            next_action_recovery_action=validation_recovery_action,
+            blocker=validation_blocker,
+        ),
         _autopilot_task_item(
             "closeout",
             "Close out or merge",
@@ -1943,16 +2650,22 @@ def _autopilot_run_task_board(row: ProjectAutonomyRun, plan: Mapping[str, Any]) 
             run_id=row.run_id,
             next_action=closeout_action,
             next_action_label=closeout_action_label,
+            next_action_detail=(
+                blocker_action_detail
+                if closeout_action == AUTOPILOT_TASK_ACTION_RECOVER_BLOCKER
+                else None
+            ),
             next_action_kind=(
                 AGENT_OPERATOR_INBOX_ITEM_BLOCKER
                 if closeout_action == AUTOPILOT_TASK_ACTION_RECOVER_BLOCKER
                 else None
             ),
             next_action_recovery_action=(
-                AGENT_OPERATOR_INBOX_RECOVERY_RERUN_SAFE
+                blocker_recovery_action
                 if closeout_action == AUTOPILOT_TASK_ACTION_RECOVER_BLOCKER
                 else None
             ),
+            blocker=blocker if closeout_action == AUTOPILOT_TASK_ACTION_RECOVER_BLOCKER else None,
         ),
     ]
     completed_count = sum(1 for item in items if item["status"] == AUTOPILOT_TASK_STATUS_COMPLETED)
@@ -1980,9 +2693,14 @@ def _autopilot_run_task_board(row: ProjectAutonomyRun, plan: Mapping[str, Any]) 
     }
 
 
-def _run_payload(row: ProjectAutonomyRun) -> dict[str, Any]:
+def _run_payload(row: ProjectAutonomyRun, *, blocker: Mapping[str, Any] | None = None) -> dict[str, Any]:
     plan = _json_load(row.plan_json, {})
-    task_board = _autopilot_run_task_board(row, plan if isinstance(plan, Mapping) else {})
+    blocker = dict(blocker or _autopilot_run_blocker_payload(row))
+    task_board = _autopilot_run_task_board_from_blocker(
+        row,
+        plan if isinstance(plan, Mapping) else {},
+        blocker=blocker,
+    )
     return {
         "id": row.id,
         "run_id": row.run_id,
@@ -2007,6 +2725,7 @@ def _run_payload(row: ProjectAutonomyRun) -> dict[str, Any]:
         "worktree_path": row.worktree_path,
         "merge_status": row.merge_status,
         "merge_message": row.merge_message,
+        "blocker": blocker,
         "plan": _operator_safe_plan_payload(plan),
         "task_board": task_board,
         "architect_review": {},
@@ -2257,7 +2976,8 @@ def _fallback_pm_synthesis(row: ProjectAutonomyRun, expert_threads: list[dict[st
 
 
 def run_payload(db: Session, row: ProjectAutonomyRun, *, include_events: bool = False) -> dict[str, Any]:
-    payload = _run_payload(row)
+    stored_blocker = _latest_run_blocker_payload(db, row.run_id)
+    payload = _run_payload(row, blocker=stored_blocker or None)
     raw_agents = payload.get("agents") if isinstance(payload.get("agents"), list) else []
     expert_threads = _expert_threads_payload(db, row, raw_agents)
     payload["expert_threads"] = expert_threads
@@ -2484,10 +3204,7 @@ def start_agent_cycle(
     permissions = _json_load(profile.permissions_json, {})
     if not isinstance(permissions, dict):
         permissions = dict(DEFAULT_AGENT_PERMISSIONS)
-    prompt = (
-        f"{profile.name} scheduled cycle: inspect the repo, summarize current risks, "
-        "draft safe next steps, and ask the operator before implementation."
-    )
+    prompt = _scheduled_agent_cycle_prompt(profile)
     run = create_run(
         db,
         prompt=prompt,
@@ -2502,6 +3219,13 @@ def start_agent_cycle(
     _mark_agent_schedule_cycle_started(db, profile, now=now)
     db.commit()
     return run_payload(db, run, include_events=True)
+
+
+def _scheduled_agent_cycle_prompt(profile: ProjectAutonomyAgentProfile) -> str:
+    return (
+        f"{profile.name} scheduled cycle: inspect the repo, summarize current risks, "
+        "draft safe next steps, and ask the operator before implementation."
+    )
 
 
 def run_due_agent_cycles(
@@ -2578,6 +3302,25 @@ def run_due_agent_cycles(
                     "next_run_at": schedule.next_run_at.isoformat() if schedule.next_run_at else None,
                 }
             )
+            db.commit()
+            continue
+        no_change_skip = _scheduled_agent_no_change_skip(db, profile, repo, now=due_at)
+        if no_change_skip is not None:
+            backoff = _agent_schedule_record_no_change_backoff(
+                schedule,
+                material_fingerprint=str(no_change_skip.get("material_fingerprint") or ""),
+                now=due_at,
+            )
+            if always_on:
+                schedule.next_run_at = due_at + timedelta(
+                    seconds=int(backoff["no_change_cooldown_seconds"])
+                )
+            else:
+                schedule.next_run_at = _next_agent_schedule_run_at(schedule.rrule, from_time=due_at)
+            schedule.updated_at = due_at
+            no_change_skip.update(backoff)
+            no_change_skip["next_run_at"] = schedule.next_run_at.isoformat() if schedule.next_run_at else None
+            skipped.append(no_change_skip)
             db.commit()
             continue
         payload = start_agent_cycle(db, int(profile.id), user_id=profile.user_id, now=due_at)
@@ -5255,12 +5998,17 @@ def _agent_os_quality_scorecard(
     quality_status_counts: dict[str, int] = {}
     quality_scores: list[int] = []
     quality_examples: list[dict[str, Any]] = []
+    report_examples: list[dict[str, Any]] = []
+    report_dirty_source_count = 0
+    report_head_moved_count = 0
     visual_evidence_run_ids: set[str] = set()
     visual_artifact_count = 0
     visual_available_count = 0
     visual_skipped_count = 0
     visual_screenshot_count = 0
     visual_video_count = 0
+    visual_not_applicable_count = 0
+    visual_not_applicable_run_ids: list[str] = []
     visual_examples: list[dict[str, Any]] = []
     if run_ids:
         artifact_rows = (
@@ -5274,12 +6022,27 @@ def _agent_os_quality_scorecard(
             .limit(AGENT_OS_QUALITY_RECENT_ARTIFACT_LIMIT)
             .all()
         )
+        report_rows = (
+            db.query(ProjectAutonomyArtifact)
+            .filter(
+                ProjectAutonomyArtifact.run_id.in_(run_ids),
+                ProjectAutonomyArtifact.artifact_type == SCHEDULED_AGENT_REPORT_ARTIFACT_TYPE,
+                ProjectAutonomyArtifact.created_at >= since,
+            )
+            .order_by(ProjectAutonomyArtifact.created_at.desc(), ProjectAutonomyArtifact.id.desc())
+            .limit(AGENT_OS_QUALITY_RECENT_ARTIFACT_LIMIT)
+            .all()
+        )
         visual_rows = (
             db.query(ProjectAutonomyArtifact)
             .filter(
                 ProjectAutonomyArtifact.run_id.in_(run_ids),
                 ProjectAutonomyArtifact.artifact_type.in_(
-                    [VISUAL_ARTIFACT_TYPE_SCREENSHOT, VISUAL_ARTIFACT_TYPE_VIDEO]
+                    [
+                        VISUAL_ARTIFACT_TYPE_SCREENSHOT,
+                        VISUAL_ARTIFACT_TYPE_VIDEO,
+                        VISUAL_ARTIFACT_TYPE_APPLICABILITY,
+                    ]
                 ),
                 ProjectAutonomyArtifact.created_at >= since,
             )
@@ -5291,16 +6054,27 @@ def _agent_os_quality_scorecard(
             visual_artifact_count += 1
             payload = _json_load(artifact.content_json, {})
             payload = payload if isinstance(payload, dict) else {}
-            has_evidence = _visual_artifact_has_evidence(artifact)
-            if has_evidence:
-                visual_available_count += 1
-                visual_evidence_run_ids.add(artifact.run_id)
-                if artifact.artifact_type == VISUAL_ARTIFACT_TYPE_SCREENSHOT:
-                    visual_screenshot_count += 1
-                elif artifact.artifact_type == VISUAL_ARTIFACT_TYPE_VIDEO:
-                    visual_video_count += 1
+            is_not_applicable = (
+                artifact.artifact_type == VISUAL_ARTIFACT_TYPE_APPLICABILITY
+                and payload.get("not_applicable") is True
+                and bool(str(payload.get("rationale") or "").strip())
+            )
+            if is_not_applicable:
+                visual_not_applicable_count += 1
+                if artifact.run_id not in visual_not_applicable_run_ids:
+                    visual_not_applicable_run_ids.append(artifact.run_id)
+                has_evidence = False
             else:
-                visual_skipped_count += 1
+                has_evidence = _visual_artifact_has_evidence(artifact)
+                if has_evidence:
+                    visual_available_count += 1
+                    visual_evidence_run_ids.add(artifact.run_id)
+                    if artifact.artifact_type == VISUAL_ARTIFACT_TYPE_SCREENSHOT:
+                        visual_screenshot_count += 1
+                    elif artifact.artifact_type == VISUAL_ARTIFACT_TYPE_VIDEO:
+                        visual_video_count += 1
+                else:
+                    visual_skipped_count += 1
             if len(visual_examples) < AGENT_OS_QUALITY_RECENT_REVIEW_PREVIEW_LIMIT:
                 visual_examples.append(
                     {
@@ -5309,6 +6083,41 @@ def _agent_os_quality_scorecard(
                         "available": has_evidence,
                         "source": payload.get("source"),
                         "skipped": bool(payload.get("skipped")),
+                        "not_applicable": is_not_applicable,
+                        "rationale": _clip(str(payload.get("rationale") or ""), 180)
+                        if is_not_applicable
+                        else None,
+                    }
+                )
+        for artifact in report_rows:
+            payload = _json_load(artifact.content_json, {})
+            payload = payload if isinstance(payload, dict) else {}
+            receipt = _mapping_payload(payload.get("source_receipt"))
+            source_state = str(receipt.get("source_state") or "").strip()
+            drift_state = str(receipt.get("drift_state") or "").strip()
+            if source_state == "dirty":
+                report_dirty_source_count += 1
+            if drift_state == "head_moved":
+                report_head_moved_count += 1
+            if len(report_examples) < AGENT_OS_QUALITY_RECENT_REVIEW_PREVIEW_LIMIT:
+                quality = _mapping_payload(payload.get("quality"))
+                report_examples.append(
+                    {
+                        "run_id": artifact.run_id,
+                        "name": artifact.name,
+                        "status": payload.get("status"),
+                        "quality_status": quality.get("status"),
+                        "summary": _clip(str(payload.get("summary") or ""), 180),
+                        "generated_at_utc": payload.get("generated_at_utc"),
+                        "source_receipt": {
+                            "schema": receipt.get("schema"),
+                            "source_state": source_state,
+                            "drift_state": drift_state,
+                            "branch": receipt.get("branch"),
+                            "head_short": receipt.get("head_short"),
+                            "run_base_short": receipt.get("run_base_short"),
+                            "dirty_status_count": receipt.get("dirty_status_count"),
+                        },
                     }
                 )
         for artifact in artifact_rows:
@@ -5337,6 +6146,11 @@ def _agent_os_quality_scorecard(
         run_id for run_id in ui_visual_run_ids if run_id not in visual_evidence_run_ids
     ]
     missing_visual_count = len(missing_visual_run_ids)
+    not_applicable_ui_run_ids = [
+        run_id
+        for run_id in ui_visual_run_ids
+        if run_id in visual_not_applicable_run_ids and run_id not in visual_evidence_run_ids
+    ]
     low_quality_count = quality_status_counts.get(SCHEDULED_AGENT_REPORT_QUALITY_LOW, 0)
     repaired_count = quality_status_counts.get(SCHEDULED_AGENT_REPORT_QUALITY_REPAIRED, 0)
     review_passed_count = review_status_counts.get(ARCHITECT_REVIEW_STATUS_PASSED, 0)
@@ -5370,11 +6184,21 @@ def _agent_os_quality_scorecard(
     elif problems:
         detail = " ".join(problems[:AGENT_OS_QUALITY_PROBLEM_PREVIEW_LIMIT])
     else:
+        visual_summary = (
+            f"{len(ui_visual_run_ids) - missing_visual_count}/{len(ui_visual_run_ids)} UI visual QA run(s) have evidence"
+            if ui_visual_run_ids
+            else "no UI-facing runs needed visual evidence"
+        )
         detail = (
             f"Recent guardrails are healthy: {review_passed_count} passing plan review(s), "
             f"{review_failed_count} blocked weak plan(s), {repaired_count} repaired schedule report(s), "
             f"{validation_passed_count}/{validation_total} validation set(s) passed, "
-            f"and {len(ui_visual_run_ids) - missing_visual_count}/{len(ui_visual_run_ids)} UI visual QA run(s) have evidence."
+            f"and {visual_summary}."
+            + (
+                f" {visual_not_applicable_count} non-visual rationale(s) are recorded."
+                if visual_not_applicable_count
+                else ""
+            )
         )
 
     return {
@@ -5404,6 +6228,9 @@ def _agent_os_quality_scorecard(
             "average_score": _average_score(quality_scores),
             "statuses": quality_status_counts,
             "recent": quality_examples,
+            "recent_reports": report_examples,
+            "dirty_source_count": report_dirty_source_count,
+            "head_moved_count": report_head_moved_count,
         },
         "validation": {
             "total": validation_total,
@@ -5420,6 +6247,14 @@ def _agent_os_quality_scorecard(
             "skipped_count": visual_skipped_count,
             "screenshot_count": visual_screenshot_count,
             "video_count": visual_video_count,
+            "not_applicable_count": visual_not_applicable_count,
+            "not_applicable_run_ids": visual_not_applicable_run_ids[
+                :AGENT_OS_QUALITY_PROBLEM_PREVIEW_LIMIT
+            ],
+            "not_applicable_ui_run_count": len(not_applicable_ui_run_ids),
+            "not_applicable_ui_run_ids": not_applicable_ui_run_ids[
+                :AGENT_OS_QUALITY_PROBLEM_PREVIEW_LIMIT
+            ],
             "recent": visual_examples,
         },
         "approval_gate_risk_count": approval_gate_risk_count,
@@ -5456,6 +6291,7 @@ def _agent_quality_monitor_payload(
     operator_inbox: Mapping[str, Any],
     local_model: Mapping[str, Any],
     codex_alignment: Mapping[str, Any],
+    agent_flow: Mapping[str, Any],
 ) -> dict[str, Any]:
     reviews = _mapping_payload(quality_scorecard.get("architect_reviews"))
     scheduled = _mapping_payload(quality_scorecard.get("scheduled_quality"))
@@ -5517,6 +6353,8 @@ def _agent_quality_monitor_payload(
     visual_evidenced = int(visual_qa.get("evidenced_ui_run_count") or 0)
     visual_missing = int(visual_qa.get("missing_ui_evidence_count") or 0)
     visual_available = int(visual_qa.get("available_count") or 0)
+    visual_not_applicable = int(visual_qa.get("not_applicable_count") or 0)
+    visual_not_applicable_ui = int(visual_qa.get("not_applicable_ui_run_count") or 0)
     visual_missing_run_ids = _string_items(
         visual_qa.get("missing_run_ids"),
         limit=AGENT_OS_QUALITY_PROBLEM_PREVIEW_LIMIT,
@@ -5524,15 +6362,24 @@ def _agent_quality_monitor_payload(
     visual_next_run_id = visual_missing_run_ids[0] if visual_missing_run_ids else None
     if visual_missing:
         visual_status = AGENT_OS_READINESS_CHECK_WARNING
-        visual_detail = (
-            f"{visual_missing} UI-facing run(s) need screenshot or video QA evidence before they look done."
-        )
+        if visual_not_applicable_ui:
+            visual_detail = (
+                f"{visual_missing} UI-facing run(s) still need screenshot or video QA evidence; "
+                f"{visual_not_applicable_ui} were marked not visual but touched UI/operator surfaces."
+            )
+        else:
+            visual_detail = (
+                f"{visual_missing} UI-facing run(s) need screenshot or video QA evidence before they look done."
+            )
     elif visual_ui_count:
         visual_status = AGENT_OS_READINESS_CHECK_PASSED
         visual_detail = f"{visual_evidenced}/{visual_ui_count} UI-facing run(s) have visual QA evidence."
     elif visual_available:
         visual_status = AGENT_OS_READINESS_CHECK_PASSED
         visual_detail = f"{visual_available} visual QA artifact(s) are attached to recent runs."
+    elif visual_not_applicable:
+        visual_status = AGENT_OS_READINESS_CHECK_PASSED
+        visual_detail = f"{visual_not_applicable} non-visual run(s) include not-applicable rationale."
     else:
         visual_status = AGENT_OS_READINESS_CHECK_PASSED
         visual_detail = "No UI-facing runs need screenshot or video QA evidence yet."
@@ -5543,14 +6390,21 @@ def _agent_quality_monitor_payload(
     codex_detail = str(codex_alignment.get("detail") or "No Codex automation comparison is required for this repo.")
     runtime_status = str(runtime_queue.get("status") or AGENT_OS_READINESS_CHECK_PASSED)
     runtime_detail = str(runtime_queue.get("detail") or "Runtime queue has not reported yet.")
+    agent_flow_status = str(agent_flow.get("status") or AGENT_OS_READINESS_CHECK_PASSED)
+    agent_flow_detail = str(agent_flow.get("detail") or "Agent flow mailboxes have not reported yet.")
+    agent_flow_attention = int(agent_flow.get("attention_count") or 0)
     inbox_total = int(operator_inbox.get("total_action_count") or 0)
+    release_trust_summary = _mapping_payload(operator_inbox.get("release_trust_summary"))
+    release_trust_blockers = int(release_trust_summary.get("blocker_count") or 0)
     inbox_status = (
         AGENT_OS_READINESS_CHECK_WARNING
         if inbox_total
         else AGENT_OS_READINESS_CHECK_PASSED
     )
     inbox_detail = (
-        f"{inbox_total} operator action(s) are waiting."
+        str(release_trust_summary.get("detail") or "")
+        if release_trust_blockers
+        else f"{inbox_total} operator action(s) are waiting."
         if inbox_total
         else "No operator questions, approvals, or blockers are waiting."
     )
@@ -5609,6 +6463,13 @@ def _agent_quality_monitor_payload(
             count=int(runtime_queue.get("open_count") or 0),
         ),
         _agent_quality_monitor_dimension(
+            AGENT_QUALITY_MONITOR_DIMENSION_AGENT_FLOW,
+            "Agent flow mailboxes",
+            agent_flow_status,
+            agent_flow_detail,
+            count=agent_flow_attention,
+        ),
+        _agent_quality_monitor_dimension(
             AGENT_QUALITY_MONITOR_DIMENSION_INBOX,
             "Operator inbox",
             inbox_status,
@@ -5644,6 +6505,9 @@ def _agent_quality_monitor_payload(
     ]
 
     next_action_run_id: str | None = None
+    next_action_kind: str | None = None
+    next_action_recovery_action: str | None = None
+    next_action_button_label: str | None = None
     if model_status == AGENT_OS_READINESS_CHECK_FAILED or not bool(local_model.get("coding_ready")):
         next_action = AGENT_QUALITY_MONITOR_ACTION_INSTALL_MODEL
         next_action_label = "Install coder model"
@@ -5673,10 +6537,31 @@ def _agent_quality_monitor_payload(
         next_action = AGENT_QUALITY_MONITOR_ACTION_DRAIN_QUEUE
         next_action_label = "Drain runtime queue"
         next_action_detail = runtime_detail
+    elif agent_flow_status != AGENT_OS_READINESS_CHECK_PASSED:
+        next_action = str(agent_flow.get("next_action") or AGENT_OPERATOR_INBOX_ACTION_REVIEW_AGENT_FLOW)
+        next_action_label = str(agent_flow.get("next_action_label") or "Review agent flow")
+        next_action_detail = agent_flow_detail
     elif inbox_total:
-        next_action = AGENT_QUALITY_MONITOR_ACTION_ANSWER_INBOX
-        next_action_label = "Answer operator inbox"
-        next_action_detail = inbox_detail
+        next_action = str(
+            operator_inbox.get("next_action")
+            or AGENT_QUALITY_MONITOR_ACTION_ANSWER_INBOX
+        )
+        next_action_label = str(
+            operator_inbox.get("next_action_label")
+            or "Answer operator inbox"
+        )
+        next_action_detail = str(
+            operator_inbox.get("next_action_detail")
+            or inbox_detail
+        )
+        next_action_run_id = str(operator_inbox.get("next_action_run_id") or "").strip() or None
+        next_action_kind = str(operator_inbox.get("next_action_kind") or "").strip() or None
+        next_action_recovery_action = (
+            str(operator_inbox.get("next_action_recovery_action") or "").strip() or None
+        )
+        next_action_button_label = (
+            str(operator_inbox.get("next_action_button_label") or "").strip() or None
+        )
     else:
         next_action = AGENT_QUALITY_MONITOR_ACTION_KEEP_MONITORING
         next_action_label = "Keep monitoring"
@@ -5705,6 +6590,9 @@ def _agent_quality_monitor_payload(
         "next_action_label": next_action_label,
         "next_action_detail": next_action_detail,
         "next_action_run_id": next_action_run_id,
+        "next_action_kind": next_action_kind,
+        "next_action_recovery_action": next_action_recovery_action,
+        "next_action_button_label": next_action_button_label,
     }
 
 
@@ -6171,13 +7059,3932 @@ def _agent_runtime_queue_state(
     }
 
 
+def _external_agent_report_title(content: str, fallback: str) -> str:
+    for line in content.splitlines()[:20]:
+        clean = line.strip()
+        if clean.startswith("#"):
+            return clean.lstrip("#").strip() or fallback
+    return fallback
+
+
+def _external_agent_report_status(content: str, fallback: str) -> str:
+    match = re.search(
+        r"(?im)^\s*(?:status|review status|review result|disposition)\s*:\s*(.+?)\s*$",
+        content,
+    )
+    if match:
+        raw_status = match.group(1).strip()
+        normalized = re.sub(r"[\s-]+", "_", raw_status.upper())
+        for known in (
+            "APPROVED_FOR_REVIEW_EVIDENCE",
+            "APPROVED_AGENT_REVIEW",
+            "APPROVED_TO_PUSH",
+            "CHANGES_REQUESTED",
+            "CI_BLOCKED",
+            "BLOCKED",
+        ):
+            if normalized == known or normalized.startswith(known + "_"):
+                return known
+        return _clip(raw_status, 80)
+    lowered = fallback.lower()
+    if "changes-requested" in lowered or "changes_requested" in lowered:
+        return "CHANGES_REQUESTED"
+    if "blocked" in lowered:
+        return "BLOCKED"
+    return "attention"
+
+
+def _external_agent_report_attention_reason(path: Path, title: str, status: str) -> str | None:
+    haystack = " ".join([path.stem, title, status]).lower()
+    patterns = (
+        ("changes requested", "changes requested"),
+        ("changes_requested", "changes requested"),
+        ("ci blocked", "CI blocked"),
+        ("ci_blocked", "CI blocked"),
+        ("review blocked", "review blocked"),
+        ("release blocked", "release blocked"),
+        ("blocked", "blocked"),
+        ("source mismatch", "source mismatch"),
+        ("source-mismatch", "source mismatch"),
+        ("source trust", "source trust"),
+        ("source-trust", "source trust"),
+        ("missing checks", "missing checks"),
+        ("missing-checks", "missing checks"),
+        ("moving branch", "moving branch"),
+        ("moving-branch", "moving branch"),
+        ("dirty", "dirty source"),
+    )
+    for marker, label in patterns:
+        if marker in haystack:
+            return label
+    return None
+
+
+def _external_agent_report_triage(
+    content: str,
+    title: str,
+    status: str,
+    attention_reason: str | None,
+    quality_issues: Iterable[str],
+) -> dict[str, Any]:
+    lowered = " ".join([content[:AGENT_OPERATOR_EXTERNAL_REPORT_READ_CHARS], title, status]).lower()
+    normalized_status = re.sub(r"[\s-]+", "_", str(status or "").strip().upper())
+    issue_list = [str(issue) for issue in quality_issues if str(issue).strip()]
+    reason = str(attention_reason or "").strip().lower()
+    if normalized_status == "MIXED_REVIEW_OUTCOMES":
+        category = "review_conflict"
+        label = "Resolve review conflict"
+        severity = "high"
+        detail = (
+            "Treat the commit as blocked until change-request findings are fixed and fresh exact-head "
+            "reviews replace the mixed approval/change-request outcome."
+        )
+    elif issue_list:
+        category = "report_quality"
+        label = "Repair report evidence"
+        severity = "high"
+        detail = (
+            "Report evidence has publish-quality defects; require a corrected addendum with exact paths, "
+            "hashes, branch/head binding, safety boundary, and adversarial probe evidence before trusting it."
+        )
+    elif reason == "source trust" or any(
+        marker in lowered
+        for marker in (
+            "source-trust",
+            "source trust",
+            "dirty bind-mounted source",
+            "dirty/non-main",
+            "dirty checkout",
+            "source-trust degradation",
+        )
+    ):
+        category = "source_trust"
+        label = "Review source trust"
+        severity = "high"
+        detail = (
+            "Keep release/runtime trust blocked; route the owner through a clean branch or worktree with "
+            "exact-head evidence before accepting review, CI, or readiness claims."
+        )
+    elif reason in {"missing checks", "moving branch", "dirty source"} or any(
+        marker in lowered
+        for marker in (
+            "missing checks",
+            "no checks",
+            "empty statuscheckrollup",
+            "moving-head",
+            "moving branch",
+            "mergeable conflicting",
+            "merge state dirty",
+            "pr #",
+        )
+    ):
+        category = "pr_health"
+        label = "Review PR blockers"
+        severity = "high"
+        detail = (
+            "Treat the PR as not ready; verify current head, checks, reviews, mergeability, and PM blocker "
+            "state before any ready, push, merge, or release interpretation."
+        )
+    elif reason == "ci blocked" or normalized_status == "CI_BLOCKED" or any(
+        marker in lowered
+        for marker in (
+            "ci blocked",
+            "ci pending",
+            "ci run",
+            "checks failing",
+            "statuscheckrollup",
+        )
+    ):
+        category = "ci_blocked"
+        label = "Review CI"
+        severity = "warning"
+        detail = (
+            "Use the current CI run and DevOps evidence as the source of truth before treating the branch as green."
+        )
+    elif normalized_status == "CHANGES_REQUESTED" or reason == "changes requested":
+        category = "review_changes"
+        label = "Review changes requested"
+        severity = "warning"
+        detail = (
+            "Do not treat this as approval; route the author to address findings and request a fresh exact-head review."
+        )
+    elif "blocked" in normalized_status or reason.endswith("blocked") or reason == "blocked":
+        category = "blocked"
+        label = "Review blocker"
+        severity = "warning"
+        detail = "Open the report, identify the owner, and keep gated actions blocked until the report is dispositioned."
+    else:
+        category = "attention"
+        label = "Review report"
+        severity = "info"
+        detail = "Open the agent report and decide whether it changes current plan, review, or safety posture."
+    return {
+        "report_blocker_category": category,
+        "report_blocker_label": label,
+        "report_blocker_severity": severity,
+        "report_next_action_label": label,
+        "report_next_action_detail": detail,
+    }
+
+
+def _external_agent_report_has_reviewed_branch(content: str) -> bool:
+    if re.search(
+        r"(?im)^\s*(?:[-*]\s*)?(?:branch|exact branch|target branch|review branch|branch reviewed)\s*:",
+        content,
+    ):
+        return True
+    if re.search(
+        (
+            r"(?i)\b(?:exact|reviewed|target|current)?\s*branch\s+`?"
+            r"(?:origin/)?[A-Za-z0-9._-]+/[A-Za-z0-9._/-]+`?"
+            r"\s+(?:at|head|commit)\b"
+        ),
+        content,
+    ):
+        return True
+    if re.search(
+        (
+            r"(?i)\bhead\s+`?(?:origin/)?[A-Za-z0-9._-]+/[A-Za-z0-9._/-]+`?"
+            r"\s+at\s+[0-9a-f]{40}\b"
+        ),
+        content,
+    ):
+        return True
+    return False
+
+
+def _external_agent_report_has_adversarial_probe(content: str) -> bool:
+    sample = content[:AGENT_OPERATOR_EXTERNAL_REPORT_READ_CHARS]
+    patterns = (
+        r"(?im)^\s*#{1,6}\s*(?:adversarial|negative|boundary|edge[- ]case|failure|break|direct)\b.*\b(?:probe|test|check|case|repro)",
+        r"(?i)\badversarial\s+(?:probe|test|check|case)\b",
+        r"(?i)\b(?:negative|boundary|edge[- ]case|malformed|orphan|idempotenc|concurren)\s+(?:probe|test|check|case)\b",
+        r"(?i)\b(?:direct|manual)\s+(?:review\s+)?probe\b",
+        r"(?i)\btry(?:ing)?\s+to\s+break\b",
+        r"(?i)\breproduce(?:d)?\s+the\s+(?:original\s+)?(?:bug|failure)\b",
+    )
+    return any(re.search(pattern, sample) for pattern in patterns)
+
+
+def _external_agent_report_quality_issues(content: str, title: str, status: str) -> list[str]:
+    lowered = " ".join([content[:AGENT_OPERATOR_EXTERNAL_REPORT_READ_CHARS], title, status]).lower()
+    normalized_status = re.sub(r"[\s-]+", "_", str(status or "").strip().upper())
+    issues: list[str] = []
+
+    def add(issue: str) -> None:
+        if issue not in issues:
+            issues.append(issue)
+
+    placeholder_patterns = (
+        r"\$(?:requestRel|requestSha|authorRel|authorSha|badReport|devOpsPost|pmReq\d*|pmHash\d*)\b",
+        r"\$\(",
+        r"System\.Collections\.Hashtable",
+        r"<(?:path-or-artifact|sha[^>]*|TODO)>",
+    )
+    if any(re.search(pattern, content, re.IGNORECASE) for pattern in placeholder_patterns):
+        add("unresolved path/hash placeholder")
+
+    explicit_review_status = normalized_status in {
+        "APPROVED_FOR_REVIEW_EVIDENCE",
+        "APPROVED_AGENT_REVIEW",
+        "APPROVED_TO_PUSH",
+        "CHANGES_REQUESTED",
+    }
+    review_like = (
+        re.search(r"(?im)^#\s*.*Peer[- ]Review Report\b", content) is not None
+        or re.search(r"(?im)^\s*Review Result\s*:", content) is not None
+        or re.search(
+            r"(?im)^\s*Disposition\s*:\s*(?:APPROVED_FOR_REVIEW_EVIDENCE|APPROVED_TO_PUSH|CHANGES_REQUESTED|BLOCKED)\b",
+            content,
+        )
+        is not None
+        or (
+            explicit_review_status
+            and re.search(r"(?im)^\s*(?:[-*]\s*)?(?:Request|Commit|Branch)\s*:", content) is not None
+        )
+    )
+    if review_like:
+        if not re.search(r"\b[0-9a-f]{40}\b", content, re.IGNORECASE):
+            add("missing exact commit")
+        if not _external_agent_report_has_reviewed_branch(content):
+            add("missing reviewed branch")
+        if not any(
+            marker in lowered
+            for marker in (
+                "safety boundary",
+                "approval boundary",
+                "safety constraints",
+                "no push, draft pr, release",
+                "no push, pr, release",
+            )
+        ):
+            add("missing explicit boundary")
+        if (
+            normalized_status
+            in {
+                "APPROVED_FOR_REVIEW_EVIDENCE",
+                "APPROVED_AGENT_REVIEW",
+                "APPROVED_TO_PUSH",
+            }
+            and not _external_agent_report_has_adversarial_probe(content)
+        ):
+            add("missing adversarial probe")
+
+    has_request_field = re.search(r"(?im)^\s*(?:[-*]\s*)?Request\s*:", content) is not None
+    has_request_sha = re.search(
+        r"(?im)^\s*(?:[-*]\s*)?Request SHA(?:256)?\s*:\s*[0-9a-f]{64}\b",
+        content,
+    ) is not None
+    if review_like and has_request_field and not has_request_sha:
+        add("missing request SHA")
+
+    return issues[:AGENT_OS_QUALITY_PROBLEM_PREVIEW_LIMIT + 3]
+
+
+def _external_agent_report_field(content: str, *names: str) -> str:
+    escaped = "|".join(re.escape(name) for name in names if name)
+    if not escaped:
+        return ""
+    match = re.search(
+        rf"(?im)^\s*(?:[-*]\s*)?(?:{escaped})\s*:\s*(.+?)\s*$",
+        content,
+    )
+    return match.group(1).strip().strip("`\"'") if match else ""
+
+
+def _external_agent_report_commit(content: str) -> str:
+    raw = _external_agent_report_field(
+        content,
+        "Commit",
+        "Commit reviewed",
+        "Reviewed commit",
+        "Exact commit",
+        "HEAD",
+    )
+    match = re.search(r"\b([0-9a-f]{40})\b", raw, re.IGNORECASE)
+    if match:
+        return match.group(1).lower()
+    match = re.search(r"(?i)\b(?:commit|head)\s+([0-9a-f]{40})\b", content)
+    return match.group(1).lower() if match else ""
+
+
+def _external_agent_report_backlog_id(content: str) -> str:
+    raw = _external_agent_report_field(content, "Backlog-ID", "Backlog ID")
+    if raw:
+        return raw
+    sample = content[:AGENT_OPERATOR_EXTERNAL_REPORT_READ_CHARS]
+    match = re.search(r"(?i)\bPM-\d{8}-\d+\b", sample)
+    if match:
+        return match.group(0).upper()
+    match = re.search(r"(?i)\bPM-\d+\b", sample)
+    return match.group(0).upper() if match else ""
+
+
+def _external_agent_report_branch(content: str) -> str:
+    raw = _external_agent_report_field(
+        content,
+        "Branch",
+        "Exact branch",
+        "Target branch",
+        "Review branch",
+        "Branch reviewed",
+    )
+    if raw:
+        return raw.split()[0].strip("`\"'")
+    match = re.search(
+        r"(?i)\bhead\s+`?((?:origin/)?[A-Za-z0-9._-]+/[A-Za-z0-9._/-]+)`?\s+at\s+[0-9a-f]{40}\b",
+        content,
+    )
+    return match.group(1) if match else ""
+
+
+def _external_agent_report_review_record(
+    *,
+    content: str,
+    path: Path,
+    runtime_path: Path,
+    title: str,
+    status: str,
+    stat_mtime: float,
+) -> dict[str, Any]:
+    normalized_status = re.sub(r"[\s-]+", "_", str(status or "").strip().upper())
+    review_statuses = {
+        "APPROVED_FOR_REVIEW_EVIDENCE",
+        "APPROVED_AGENT_REVIEW",
+        "APPROVED_TO_PUSH",
+        "CHANGES_REQUESTED",
+        "BLOCKED",
+        "CI_BLOCKED",
+    }
+    if normalized_status not in review_statuses:
+        return {}
+    commit = _external_agent_report_commit(content)
+    if not commit:
+        return {}
+    try:
+        rel_path = path.relative_to(runtime_path)
+    except ValueError:
+        rel_path = path
+    return {
+        "agent": path.parent.parent.name if path.parent.name == "OUT" else path.parent.name,
+        "status": normalized_status,
+        "commit": commit,
+        "branch": _external_agent_report_branch(content),
+        "backlog_id": _external_agent_report_backlog_id(content),
+        "title": title,
+        "path": str(rel_path).replace("\\", "/"),
+        "open_path": str(path),
+        "created_at": datetime.fromtimestamp(stat_mtime, timezone.utc).isoformat(),
+        "_sort_mtime": stat_mtime,
+    }
+
+
+def _external_agent_review_consensus_alerts(
+    records: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    groups: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+    for record in records:
+        commit = str(record.get("commit") or "").strip()
+        if not commit:
+            continue
+        backlog_id = str(record.get("backlog_id") or "").strip()
+        groups.setdefault((commit, backlog_id), []).append(record)
+
+    alerts: list[dict[str, Any]] = []
+    approval_statuses = {
+        "APPROVED_FOR_REVIEW_EVIDENCE",
+        "APPROVED_AGENT_REVIEW",
+        "APPROVED_TO_PUSH",
+    }
+    blocking_statuses = {"CHANGES_REQUESTED", "BLOCKED", "CI_BLOCKED"}
+    for (commit, backlog_id), group in groups.items():
+        approvals = [record for record in group if str(record.get("status") or "") in approval_statuses]
+        blockers = [record for record in group if str(record.get("status") or "") in blocking_statuses]
+        if not approvals or not blockers:
+            continue
+        approval_agents = sorted({str(record.get("agent") or "agent") for record in approvals})
+        blocker_agents = sorted({str(record.get("agent") or "agent") for record in blockers})
+        sample = blockers[0]
+        backlog_detail = f" for {backlog_id}" if backlog_id else ""
+        detail = (
+            f"Commit {commit[:12]}{backlog_detail} has approval from {', '.join(approval_agents)} "
+            f"but changes/blockers from {', '.join(blocker_agents)}. Treat the packet as blocked until "
+            "the author publishes a new exact commit and all required reviewers agree."
+        )
+        alerts.append(
+            {
+                "kind": AGENT_OPERATOR_INBOX_ITEM_EXTERNAL_REPORT,
+                "label": "Review outcomes conflict",
+                "agent": "Review consensus",
+                "status": "MIXED_REVIEW_OUTCOMES",
+                "reason": truncate_text(detail, 240)[0],
+                "path": str(sample.get("path") or ""),
+                "open_path": str(sample.get("open_path") or ""),
+                "created_at": str(sample.get("created_at") or ""),
+                "action_label": "Resolve review conflict",
+                "report_quality_issue_count": 0,
+                "report_quality_issues": [],
+                "report_has_unresolved_placeholders": False,
+                "report_blocker_category": "review_conflict",
+                "report_blocker_label": "Resolve review conflict",
+                "report_blocker_severity": "high",
+                "report_next_action_label": "Resolve review conflict",
+                "report_next_action_detail": detail,
+                "report_review_commit": commit,
+                "report_review_backlog_id": backlog_id,
+                "report_approval_agents": approval_agents,
+                "report_blocking_agents": blocker_agents,
+                "_sort_mtime": max(float(record.get("_sort_mtime") or 0.0) for record in group),
+            }
+        )
+    alerts.sort(key=lambda item: float(item.get("_sort_mtime") or 0.0), reverse=True)
+    return alerts
+
+
+def _external_agent_report_alerts(repo: CodeRepo | None) -> list[dict[str, Any]]:
+    if repo is None:
+        return []
+    runtime_path = resolve_repo_runtime_path(repo)
+    if runtime_path is None:
+        return []
+    project_ws = runtime_path / "project_ws"
+    if not project_ws.is_dir():
+        return []
+    report_paths: list[Path] = []
+    try:
+        out_dirs = [path for path in project_ws.iterdir() if path.is_dir()]
+    except OSError:
+        return []
+    for lane_dir in out_dirs:
+        out_dir = lane_dir / "OUT"
+        if not out_dir.is_dir():
+            continue
+        try:
+            report_paths.extend(path for path in out_dir.glob("*.md") if path.is_file())
+        except OSError:
+            continue
+    report_paths.sort(key=lambda path: path.stat().st_mtime if path.exists() else 0.0, reverse=True)
+
+    alerts: list[dict[str, Any]] = []
+    review_records: list[dict[str, Any]] = []
+    for path in report_paths[:AGENT_OPERATOR_EXTERNAL_REPORT_SCAN_LIMIT]:
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")[
+                :AGENT_OPERATOR_EXTERNAL_REPORT_READ_CHARS
+            ]
+            stat = path.stat()
+        except OSError:
+            continue
+        title = _external_agent_report_title(content, path.stem)
+        status = _external_agent_report_status(content, path.stem)
+        review_record = _external_agent_report_review_record(
+            content=content,
+            path=path,
+            runtime_path=runtime_path,
+            title=title,
+            status=status,
+            stat_mtime=stat.st_mtime,
+        )
+        if review_record:
+            review_records.append(review_record)
+        attention_reason = _external_agent_report_attention_reason(path, title, status)
+        quality_issues = _external_agent_report_quality_issues(content, title, status)
+        if attention_reason is None and not quality_issues:
+            continue
+        reasons: list[str] = []
+        if attention_reason:
+            reasons.append(attention_reason)
+        if quality_issues:
+            reasons.append("report quality: " + ", ".join(quality_issues[:2]))
+        triage = _external_agent_report_triage(
+            content,
+            title,
+            status,
+            attention_reason,
+            quality_issues,
+        )
+        try:
+            rel_path = path.relative_to(runtime_path)
+        except ValueError:
+            rel_path = path
+        lane = path.parent.parent.name if path.parent.name == "OUT" else path.parent.name
+        alerts.append(
+            {
+                "kind": AGENT_OPERATOR_INBOX_ITEM_EXTERNAL_REPORT,
+                "label": "Agent report needs review",
+                "agent": lane,
+                "status": status,
+                "reason": truncate_text(f"{status}: {title} ({'; '.join(reasons)}).", 240)[0],
+                "path": str(rel_path).replace("\\", "/"),
+                "open_path": str(path),
+                "created_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+                "action_label": str(triage.get("report_next_action_label") or "Open report"),
+                "report_quality_issue_count": len(quality_issues),
+                "report_quality_issues": quality_issues,
+                "report_has_unresolved_placeholders": any("placeholder" in issue for issue in quality_issues),
+                "_sort_mtime": stat.st_mtime,
+                **triage,
+            }
+        )
+    alerts.extend(_external_agent_review_consensus_alerts(review_records))
+    priority = {
+        "review_conflict": 0,
+        "source_trust": 1,
+        "pr_health": 2,
+        "ci_blocked": 3,
+        "report_quality": 4,
+        "review_changes": 5,
+        "blocked": 6,
+        "attention": 7,
+    }
+    alerts.sort(
+        key=lambda item: (
+            priority.get(str(item.get("report_blocker_category") or ""), 9),
+            -float(item.get("_sort_mtime") or 0.0),
+        )
+    )
+    for item in alerts:
+        item.pop("_sort_mtime", None)
+    return alerts[:AGENT_OPERATOR_EXTERNAL_REPORT_PREVIEW_LIMIT]
+
+
+def _agent_flow_normalized_path_token(value: str) -> str:
+    token = value.strip().replace("\\", "/")
+    while token.startswith("./"):
+        token = token[2:]
+    return token.lower()
+
+
+def _agent_flow_relative_path(path: Path, runtime_path: Path) -> str:
+    try:
+        rel_path = path.relative_to(runtime_path)
+    except ValueError:
+        rel_path = path
+    return str(rel_path).replace("\\", "/")
+
+
+def _agent_flow_path_tokens(path: Path, runtime_path: Path) -> set[str]:
+    tokens = {
+        _agent_flow_normalized_path_token(str(path)),
+        _agent_flow_normalized_path_token(str(path.resolve())),
+        _agent_flow_normalized_path_token(_agent_flow_relative_path(path, runtime_path)),
+    }
+    return {token for token in tokens if token}
+
+
+def _agent_flow_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _agent_flow_process_running(pid: Any) -> bool:
+    try:
+        pid_int = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid_int <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+        except ImportError:
+            return False
+        process_query_limited_information = 0x1000
+        handle = ctypes.windll.kernel32.OpenProcess(
+            process_query_limited_information,
+            False,
+            pid_int,
+        )
+        if not handle:
+            return False
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return True
+    try:
+        os.kill(pid_int, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _agent_flow_sleep_helper_detected(
+    *,
+    purpose: str = "",
+    process_name: str = "",
+    command_line: str = "",
+) -> bool:
+    clean = " ".join((purpose, process_name, command_line)).lower()
+    if not clean:
+        return False
+    if "start-sleep" in clean:
+        return True
+    if re.search(r"(?<!\w)sleep(?:\.exe)?\s+-(?:seconds|s)\b", clean):
+        return True
+    if (
+        re.search(r"(?<!\w)sleep(?:\.exe)?\s+\d{3,}\b", clean)
+        and any(token in clean for token in ("heartbeat", "idle", "helper", "audit"))
+    ):
+        return True
+    return False
+
+
+def _agent_flow_process_snapshot(pid: Any) -> dict[str, Any]:
+    try:
+        pid_int = int(pid)
+    except (TypeError, ValueError):
+        return {"running": False}
+    if pid_int <= 0:
+        return {"running": False}
+    running = _agent_flow_process_running(pid_int)
+    payload: dict[str, Any] = {"running": running}
+    if not running:
+        return payload
+
+    process_name = ""
+    command_line = ""
+    if os.name == "nt":
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+        if powershell:
+            command = (
+                f"$p=Get-CimInstance Win32_Process -Filter \"ProcessId = {pid_int}\" "
+                "-ErrorAction SilentlyContinue; "
+                "if ($p) { [pscustomobject]@{Name=$p.Name;CommandLine=$p.CommandLine} "
+                "| ConvertTo-Json -Compress }"
+            )
+            try:
+                proc = subprocess.run(
+                    [powershell, "-NoProfile", "-Command", command],
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                )
+                if proc.returncode == 0 and proc.stdout.strip():
+                    parsed = json.loads(proc.stdout.strip())
+                    if isinstance(parsed, Mapping):
+                        process_name = str(parsed.get("Name") or "").strip()
+                        command_line = str(parsed.get("CommandLine") or "").strip()
+            except (OSError, subprocess.TimeoutExpired, ValueError):
+                pass
+    else:
+        proc_dir = Path("/proc") / str(pid_int)
+        try:
+            process_name = (proc_dir / "comm").read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            process_name = ""
+        try:
+            raw_cmd = (proc_dir / "cmdline").read_bytes()
+            command_line = raw_cmd.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+        except OSError:
+            command_line = ""
+
+    if process_name:
+        payload["name"] = process_name[:120]
+    if command_line:
+        payload["command_line"] = command_line[:500]
+    payload["is_sleep_helper"] = _agent_flow_sleep_helper_detected(
+        process_name=process_name,
+        command_line=command_line,
+    )
+    return payload
+
+
+def _agent_flow_file_sha256(path: Path) -> str | None:
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
+def _agent_flow_processed_receipts(state_dir: Path) -> tuple[set[str], set[str], int]:
+    processed_path = state_dir / "processed.jsonl"
+    hashes: set[str] = set()
+    paths: set[str] = set()
+    parsed_count = 0
+    if not processed_path.is_file():
+        return hashes, paths, parsed_count
+    try:
+        with processed_path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                clean = line.strip()
+                if not clean:
+                    continue
+                try:
+                    payload = json.loads(clean)
+                except ValueError:
+                    continue
+                if not isinstance(payload, Mapping):
+                    continue
+                parsed_count += 1
+                request_hash = str(payload.get("request_sha256") or payload.get("sha256") or "").strip().lower()
+                if request_hash:
+                    hashes.add(request_hash)
+                request_path = str(payload.get("request_path") or payload.get("path") or "").strip()
+                if request_path:
+                    paths.add(_agent_flow_normalized_path_token(request_path))
+    except OSError:
+        return hashes, paths, parsed_count
+    return hashes, paths, parsed_count
+
+
+def _agent_flow_mailbox_shape(path: Path) -> dict[str, Any]:
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        return {
+            "valid": False,
+            "missing": ["readable"],
+            "control_byte_count": 0,
+            "control_byte_values": [],
+            "control_byte_offsets": [],
+            "read_error": str(exc),
+        }
+    control_offsets: list[int] = []
+    control_values: set[int] = set()
+    control_byte_count = 0
+    for index, value in enumerate(raw):
+        if value < 32 and value not in {9, 10, 13}:
+            control_byte_count += 1
+            if len(control_offsets) < 10:
+                control_offsets.append(index)
+            control_values.add(value)
+    text = raw[:AGENT_FLOW_MAILBOX_SHAPE_READ_BYTES].decode("utf-8", errors="replace")
+    missing: list[str] = []
+    positions: dict[str, int] = {}
+    for field in AGENT_FLOW_MAILBOX_REQUIRED_FIELDS:
+        escaped = re.escape(field)
+        if field in {"From", "To", "Created", "Reply-To", "Priority", "Backlog-ID", "Push Intent"}:
+            pattern = rf"(?im)^\s*(?:[-*]\s*)?{escaped}\s*:"
+        else:
+            pattern = rf"(?im)^\s*##\s*{escaped}\s*:?\s*$"
+        match = re.search(pattern, text)
+        if match is None:
+            missing.append(field)
+        else:
+            positions[field] = int(match.start())
+
+    order_issues: list[str] = []
+    last_field = ""
+    last_index = -1
+    for field in AGENT_FLOW_MAILBOX_REQUIRED_FIELDS:
+        if field not in positions:
+            continue
+        index = positions[field]
+        if index < last_index:
+            order_issues.append(f"order:{field}-before-{last_field}")
+            continue
+        last_field = field
+        last_index = index
+    missing.extend(order_issues)
+    return {
+        "valid": not missing and not control_offsets,
+        "missing": missing,
+        "control_byte_count": control_byte_count,
+        "control_byte_values": sorted(control_values),
+        "control_byte_offsets": control_offsets[:10],
+        "read_error": "",
+    }
+
+
+def _agent_flow_mailbox_request_context(path: Path) -> dict[str, str]:
+    try:
+        text = path.read_bytes()[:AGENT_FLOW_MAILBOX_SHAPE_READ_BYTES].decode(
+            "utf-8",
+            errors="replace",
+        )
+    except OSError:
+        text = ""
+
+    def field(name: str) -> str:
+        match = re.search(
+            rf"(?im)^\s*(?:[-*]\s*)?{re.escape(name)}\s*:\s*(.+?)\s*$",
+            text,
+        )
+        return _clip(match.group(1).strip(), 400) if match else ""
+
+    def section(name: str) -> str:
+        match = re.search(
+            rf"(?ims)^\s*##\s*{re.escape(name)}\s*:?\s*$\s*(.*?)(?=^\s*##\s+|\Z)",
+            text,
+        )
+        if match is None:
+            return ""
+        clean = re.sub(r"\s+", " ", match.group(1).strip())
+        return _clip(clean, 500)
+
+    return {
+        "from": field("From"),
+        "to": field("To"),
+        "created": field("Created"),
+        "reply_to": field("Reply-To"),
+        "priority": field("Priority"),
+        "backlog_id": field("Backlog-ID"),
+        "push_intent": field("Push Intent"),
+        "request": section("Request"),
+        "expected_deliverable": section("Expected Deliverable"),
+        "safety_constraints": section("Safety Constraints"),
+    }
+
+
+def _agent_flow_mailbox_request_handoff(
+    *,
+    lane: str,
+    request_path: str,
+    open_path: str,
+    request_hash: str,
+    age_minutes: int,
+    context: Mapping[str, str],
+) -> dict[str, Any]:
+    stale = int(age_minutes or 0) >= AGENT_FLOW_PENDING_STALE_MINUTES
+    label = "Copy stale-request handoff" if stale else "Copy request handoff"
+    receiver = str(context.get("to") or lane or "receiver").strip()
+    sender = str(context.get("from") or "unknown").strip()
+    backlog_id = str(context.get("backlog_id") or "").strip()
+    instruction = (
+        f"Ask {receiver} to process this mailbox request or publish an exact OUT/processed-ledger "
+        "disposition. Do not duplicate or rewrite the request unless the receiver confirms it was "
+        "superseded, malformed, or lost."
+    )
+    required_proof = (
+        "The receiver's processed.jsonl records this request by exact SHA256, or a timestamped OUT "
+        "report cites the request path and SHA256 with the disposition and safety boundary."
+    )
+    lines = [
+        "Project Autopilot mailbox request handoff",
+        f"Receiver lane: {receiver}",
+        f"Sender: {sender}",
+        f"Request: {request_path or 'unknown'}",
+        f"Open path: {open_path or 'unknown'}",
+        f"Request SHA256: {request_hash or 'unknown'}",
+        f"Age: {max(0, int(age_minutes or 0))} minute(s)",
+        f"Priority: {str(context.get('priority') or 'unknown').strip() or 'unknown'}",
+        f"Backlog-ID: {backlog_id or 'unknown'}",
+        f"Reply-To: {str(context.get('reply_to') or 'unknown').strip() or 'unknown'}",
+        f"Push Intent: {str(context.get('push_intent') or 'unknown').strip() or 'unknown'}",
+        "Autopilot action: read-only handoff; no mailbox edit, processed-ledger write, branch, commit, push, runtime, DB, broker, or release action performed.",
+        f"Instruction: {instruction}",
+        f"Required proof: {required_proof}",
+    ]
+    created = str(context.get("created") or "").strip()
+    if created:
+        lines.insert(6, f"Created: {created}")
+    request_summary = str(context.get("request") or "").strip()
+    expected_deliverable = str(context.get("expected_deliverable") or "").strip()
+    safety_constraints = str(context.get("safety_constraints") or "").strip()
+    if request_summary:
+        lines.append(f"Request summary: {request_summary}")
+    if expected_deliverable:
+        lines.append(f"Expected deliverable: {expected_deliverable}")
+    if safety_constraints:
+        lines.append(f"Safety constraints: {safety_constraints}")
+    return {
+        "operator_handoff_label": label,
+        "operator_handoff_instruction": _clip(instruction, 700),
+        "operator_handoff_copy": _clip("\n".join(lines), 2400),
+        "operator_handoff_mutates_control_plane": False,
+        "stale": stale,
+    }
+
+
+def _agent_flow_superseded_request_refs(
+    request_paths: Iterable[Path],
+    *,
+    runtime_path: Path,
+) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, str]]]:
+    by_path: dict[str, dict[str, str]] = {}
+    by_hash: dict[str, dict[str, str]] = {}
+    for superseder_path in request_paths:
+        name = superseder_path.name.lower()
+        if not any(token in name for token in ("correct", "supersed", "replacement")):
+            continue
+        shape = _agent_flow_mailbox_shape(superseder_path)
+        if not bool(shape.get("valid")):
+            continue
+        try:
+            raw = superseder_path.read_bytes()[:AGENT_FLOW_MAILBOX_SHAPE_READ_BYTES]
+        except OSError:
+            continue
+        text = raw.decode("utf-8", errors="replace")
+        lowered = text.lower()
+        if "supersed" not in lowered or not any(
+            token in lowered
+            for token in ("malformed", "predecessor", "prior file", "prior request", "replacement")
+        ):
+            continue
+        rel_superseder = _agent_flow_relative_path(superseder_path, runtime_path)
+        record = {
+            "superseded_by_path": rel_superseder,
+            "superseded_by_open_path": str(superseder_path),
+        }
+        for match in re.finditer(r"(?i)\b(project_ws/[^\s`'\"<>)]+?\.md)\b", text):
+            token = _agent_flow_normalized_path_token(match.group(1))
+            if token and token != _agent_flow_normalized_path_token(rel_superseder):
+                by_path[token] = record
+        for match in re.finditer(r"(?i)\b[0-9a-f]{64}\b", text):
+            by_hash[match.group(0).lower()] = record
+    return by_path, by_hash
+
+
+def _agent_flow_review_head_binding(path: Path, *, runtime_path: Path) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "checked": False,
+        "worktree": "",
+        "requested_branch": "",
+        "worktree_branch": "",
+        "cited_commit": "",
+        "cited_commit_exists": False,
+        "worktree_head": "",
+        "containing_branches": [],
+        "branch_contains_cited": None,
+        "mismatch_reasons": [],
+        "mismatch": False,
+        "error": "",
+    }
+    if path.suffix.lower() not in {".md", ".txt"}:
+        return result
+    try:
+        raw = path.read_bytes()[:AGENT_FLOW_MAILBOX_SHAPE_READ_BYTES]
+    except OSError as exc:
+        result["error"] = str(exc)
+        return result
+    text = raw.decode("utf-8", errors="replace")
+    if not (
+        re.search(r"(?im)^\s*Push Intent:\s*push branch\b", text)
+        or re.search(r"(?i)peer[- ]review request", text)
+    ):
+        return result
+
+    worktree_match = re.search(r"(?im)^\s*(?:[-*]\s*)?Worktree:\s*(.+?)\s*$", text)
+    if worktree_match is None:
+        return result
+    worktree_value = worktree_match.group(1).strip().strip("`\"'")
+    if not worktree_value:
+        return result
+    result["worktree"] = worktree_value.replace("\\", "/")
+    branch_match = re.search(
+        r"(?im)^\s*(?:[-*]\s*)?(?:Branch|Target branch|Review branch):\s*(.+?)\s*$",
+        text,
+    )
+    if branch_match is not None:
+        requested_branch = branch_match.group(1).strip().strip("`\"'")
+        if requested_branch:
+            result["requested_branch"] = requested_branch
+
+    commit_match = re.search(
+        (
+            r"(?im)^\s*(?:[-*]\s*)?"
+            r"(?:Replacement commit|Commit|Exact commit|Reviewed commit):\s*([0-9a-f]{40})\b"
+        ),
+        text,
+    )
+    if commit_match is None:
+        commit_match = re.search(r"(?i)\b(?:at|exact)\s+commit\s+([0-9a-f]{40})\b", text)
+    if commit_match is None:
+        return result
+    result["cited_commit"] = commit_match.group(1).lower()
+
+    worktree_path = Path(worktree_value)
+    if not worktree_path.is_absolute():
+        worktree_path = runtime_path / worktree_value.replace("\\", "/")
+    try:
+        worktree_path = worktree_path.resolve(strict=False)
+    except OSError as exc:
+        result["error"] = str(exc)
+        return result
+    if not worktree_path.exists():
+        result["error"] = "worktree path not found"
+        return result
+    try:
+        proc = _git(worktree_path, ["rev-parse", "--verify", "HEAD"], timeout=10)
+    except Exception as exc:
+        result["error"] = str(exc)
+        return result
+    if proc.returncode != 0:
+        result["error"] = (proc.stderr or proc.stdout or "git rev-parse failed").strip()[:300]
+        return result
+    head = (proc.stdout or "").strip().splitlines()[0].strip().lower() if proc.stdout else ""
+    if not re.fullmatch(r"[0-9a-f]{40}", head):
+        result["error"] = "worktree HEAD was not a full commit SHA"
+        return result
+    result["checked"] = True
+    result["worktree_head"] = head
+    try:
+        branch_proc = _git(worktree_path, ["rev-parse", "--abbrev-ref", "HEAD"], timeout=10)
+    except Exception:
+        branch_proc = None
+    if branch_proc is not None and branch_proc.returncode == 0:
+        branch = (branch_proc.stdout or "").strip().splitlines()[0].strip()
+        if branch and branch != "HEAD":
+            result["worktree_branch"] = branch
+
+    cited_commit = str(result["cited_commit"] or "")
+    try:
+        exists_proc = _git(worktree_path, ["cat-file", "-e", f"{cited_commit}^{{commit}}"], timeout=10)
+    except Exception:
+        exists_proc = None
+    cited_exists = exists_proc is not None and exists_proc.returncode == 0
+    result["cited_commit_exists"] = cited_exists
+    if cited_exists:
+        try:
+            contains_proc = _git(
+                worktree_path,
+                ["branch", "--contains", cited_commit, "--format", "%(refname:short)"],
+                timeout=10,
+            )
+        except Exception:
+            contains_proc = None
+        if contains_proc is not None and contains_proc.returncode == 0:
+            branches = [
+                line.strip().lstrip("*").strip()
+                for line in (contains_proc.stdout or "").splitlines()
+                if line.strip()
+            ]
+            result["containing_branches"] = branches[:12]
+    requested_branch = str(result.get("requested_branch") or "")
+    worktree_branch = str(result.get("worktree_branch") or "")
+    if requested_branch and cited_exists:
+        result["branch_contains_cited"] = requested_branch in set(result["containing_branches"])
+
+    mismatch_reasons: list[str] = []
+    if head != cited_commit:
+        mismatch_reasons.append("head_mismatch")
+    if not cited_exists:
+        mismatch_reasons.append("cited_commit_missing")
+    if requested_branch and worktree_branch and requested_branch != worktree_branch:
+        mismatch_reasons.append("branch_mismatch")
+    if requested_branch and result.get("branch_contains_cited") is False:
+        mismatch_reasons.append("branch_not_contains_cited")
+    result["mismatch_reasons"] = mismatch_reasons
+    result["mismatch"] = bool(mismatch_reasons)
+    return result
+
+
+def _agent_flow_lock_state(
+    lock_path: Path,
+    *,
+    now: datetime,
+    runtime_path: Path,
+) -> dict[str, Any]:
+    if not lock_path.is_file():
+        return {}
+    try:
+        stat = lock_path.stat()
+        content = lock_path.read_text(encoding="utf-8", errors="replace")[:2048]
+    except OSError:
+        return {}
+
+    age_minutes = max(0, int((now.timestamp() - stat.st_mtime) // 60))
+    payload: dict[str, Any] = {
+        "exists": True,
+        "path": _agent_flow_relative_path(lock_path, runtime_path),
+        "open_path": str(lock_path),
+        "age_minutes": age_minutes,
+        "updated_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+    }
+    clean = content.strip()
+    if clean:
+        try:
+            parsed = json.loads(clean)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, Mapping):
+            owner = str(parsed.get("owner") or parsed.get("agent") or "").strip()
+            pid = None
+            pid_source = ""
+            for key in ("helper_pid", "helperPid", "pid", "owner_pid", "holder_pid", "process_id"):
+                if parsed.get(key) is not None:
+                    pid = parsed.get(key)
+                    pid_source = key
+                    break
+            started = str(
+                parsed.get("started_utc")
+                or parsed.get("started_at")
+                or parsed.get("created_utc")
+                or parsed.get("acquired_utc")
+                or parsed.get("acquiredUtc")
+                or ""
+            ).strip()
+            cwd = str(parsed.get("cwd") or "").strip()
+            purpose = str(
+                parsed.get("purpose")
+                or parsed.get("lock_purpose")
+                or parsed.get("reason")
+                or ""
+            ).strip()
+            if owner:
+                payload["owner"] = owner
+            if pid is not None:
+                payload["pid"] = str(pid)
+                payload["pid_source"] = pid_source
+            if started:
+                payload["started_at"] = started
+            if cwd:
+                payload["cwd"] = cwd
+            if purpose:
+                payload["purpose"] = purpose
+        else:
+            pid_match = re.search(r"(?im)^\s*(helper_pid|helperPid|pid|owner_pid|holder_pid|process_id)\D+(\d+)\b", clean)
+            if pid_match:
+                payload["pid_source"] = pid_match.group(1)
+                payload["pid"] = pid_match.group(2)
+    pid_value = payload.get("pid")
+    process_snapshot = _agent_flow_process_snapshot(pid_value)
+    payload["pid_running"] = bool(process_snapshot.get("running"))
+    process_name = str(process_snapshot.get("name") or "").strip()
+    process_command_line = str(process_snapshot.get("command_line") or "").strip()
+    purpose = str(payload.get("purpose") or "").strip()
+    if process_name:
+        payload["pid_process_name"] = process_name
+    if process_command_line:
+        payload["pid_command_line"] = process_command_line
+    payload["pid_is_sleep_helper"] = bool(process_snapshot.get("is_sleep_helper")) or _agent_flow_sleep_helper_detected(
+        purpose=purpose,
+        process_name=process_name,
+        command_line=process_command_line,
+    )
+    payload["stale"] = (
+        age_minutes >= AGENT_FLOW_STALE_LOCK_MINUTES
+        and (pid_value is None or not bool(payload["pid_running"]))
+    )
+    return payload
+
+
+def _agent_flow_lock_handoff_copy(
+    *,
+    lane: str,
+    lock_path: str,
+    lock_owner: str,
+    lock_pid: str,
+    lock_pid_source: str,
+    lock_pid_running: bool,
+    lock_age_minutes: int,
+    lock_started_at: str,
+    lock_cwd: str,
+    lock_purpose: str,
+    lock_recovery_posture: str,
+    lock_guidance: str,
+    owner_last_out_path: str = "",
+) -> str:
+    pid_line = lock_pid or "not recorded"
+    if lock_pid and lock_pid_source:
+        pid_line = f"{lock_pid} ({lock_pid_source})"
+    proof = (
+        "Fresh owner OUT/progress evidence or an exact processed-ledger record must show the lane "
+        "recovered before routing more work behind this lock."
+        if lock_pid_running
+        else "The owner must be confirmed stopped and the latest OUT/processed-ledger state reviewed before rerun or cleanup."
+    )
+    lines = [
+        "Project Autopilot lock handoff",
+        f"Agent lane: {lane or lock_owner or 'unknown'}",
+        f"Lock: {lock_path or 'unknown'}",
+        f"Owner: {lock_owner or 'unknown'}",
+        f"PID: {pid_line}",
+        f"PID running: {'yes' if lock_pid_running else 'no'}",
+        f"Lock age: {max(0, int(lock_age_minutes or 0))} minute(s)",
+        f"Recovery posture: {lock_recovery_posture or 'inspect_owner_progress'}",
+        "Autopilot action: read-only handoff; no lock, process, runtime, DB, broker, git, commit, or push mutation performed.",
+        f"Instruction: {lock_guidance}",
+        f"Required proof: {proof}",
+    ]
+    if lock_started_at:
+        lines.insert(7, f"Started: {lock_started_at}")
+    if lock_cwd:
+        lines.insert(8, f"CWD: {lock_cwd}")
+    if lock_purpose:
+        lines.insert(9, f"Purpose: {lock_purpose}")
+    if owner_last_out_path:
+        lines.append(f"Latest owner OUT: {owner_last_out_path}")
+    return "\n".join(lines)
+
+
+def _agent_flow_latest_output(
+    out_dir: Path,
+    *,
+    now: datetime,
+    runtime_path: Path,
+    owner_only: bool = False,
+) -> dict[str, Any]:
+    if not out_dir.is_dir():
+        return {}
+    try:
+        paths = [path for path in out_dir.iterdir() if path.is_file()]
+    except OSError:
+        return {}
+    if owner_only:
+        paths = [
+            path
+            for path in paths
+            if not any(token in path.name.lower() for token in AGENT_FLOW_OWNER_OUT_EXCLUDE_TOKENS)
+        ]
+    paths.sort(key=_agent_flow_mtime, reverse=True)
+    if not paths:
+        return {}
+    path = paths[0]
+    try:
+        stat = path.stat()
+    except OSError:
+        return {}
+    age_minutes = max(0, int((now.timestamp() - stat.st_mtime) // 60))
+    return {
+        "name": path.name,
+        "path": _agent_flow_relative_path(path, runtime_path),
+        "open_path": str(path),
+        "age_minutes": age_minutes,
+        "updated_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+        "looks_skipped_run_report": "skipped-run-report" in path.name.lower(),
+    }
+
+
+def _agent_flow_temp_publish_artifacts(
+    *,
+    in_dir: Path,
+    out_dir: Path,
+    now: datetime,
+    runtime_path: Path,
+) -> list[dict[str, Any]]:
+    artifacts: list[dict[str, Any]] = []
+    for label, directory in (("IN", in_dir), ("OUT", out_dir)):
+        if not directory.is_dir():
+            continue
+        try:
+            paths = [
+                path
+                for path in directory.iterdir()
+                if path.is_file() and path.suffix.lower() in {".tmp", ".partial"}
+            ]
+        except OSError:
+            continue
+        for path in sorted(paths, key=_agent_flow_mtime):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            age_minutes = max(0, int((now.timestamp() - stat.st_mtime) // 60))
+            artifacts.append(
+                {
+                    "location": label,
+                    "name": path.name,
+                    "path": _agent_flow_relative_path(path, runtime_path),
+                    "open_path": str(path),
+                    "age_minutes": age_minutes,
+                    "byte_length": int(stat.st_size),
+                    "updated_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+                    "stale": age_minutes >= AGENT_FLOW_STALE_LOCK_MINUTES,
+                }
+            )
+    return artifacts
+
+
+def _agent_flow_resolve_project_path(runtime_path: Path, raw_path: str) -> Path | None:
+    clean = str(raw_path or "").strip()
+    if not clean:
+        return None
+    candidate = Path(clean)
+    if not candidate.is_absolute():
+        candidate = runtime_path / clean.replace("\\", "/")
+    try:
+        resolved = candidate.resolve(strict=False)
+        root = runtime_path.resolve(strict=False)
+        common = os.path.commonpath([
+            os.path.normcase(str(root)),
+            os.path.normcase(str(resolved)),
+        ])
+    except (OSError, ValueError):
+        return None
+    if common != os.path.normcase(str(root)):
+        return None
+    return resolved
+
+
+def _agent_flow_processed_deliverable_anomalies(
+    state_dir: Path,
+    *,
+    now: datetime,
+    runtime_path: Path,
+) -> list[dict[str, Any]]:
+    processed_path = state_dir / "processed.jsonl"
+    anomalies: list[dict[str, Any]] = []
+    if not processed_path.is_file():
+        return anomalies
+    try:
+        lines = processed_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return anomalies
+    for line in lines:
+        clean = line.strip()
+        if not clean:
+            continue
+        try:
+            payload = json.loads(clean)
+        except ValueError:
+            continue
+        if not isinstance(payload, Mapping):
+            continue
+        deliverable_path = str(
+            payload.get("deliverable_path") or payload.get("deliverablePath") or ""
+        ).strip()
+        if not deliverable_path:
+            continue
+        request_path = str(
+            payload.get("request_path") or payload.get("requestPath") or payload.get("path") or ""
+        ).strip()
+        request_sha = str(
+            payload.get("request_sha256")
+            or payload.get("requestSha256")
+            or payload.get("sha256")
+            or ""
+        ).strip()
+        deliverable = _agent_flow_resolve_project_path(runtime_path, deliverable_path)
+        if deliverable is None:
+            continue
+        candidates: list[tuple[str, Path]]
+        if deliverable.is_file():
+            if deliverable.suffix.lower() not in {".tmp", ".partial"}:
+                continue
+            candidates = [("processed_deliverable_is_temp", deliverable)]
+        else:
+            candidates = [
+                (
+                    "processed_deliverable_missing_final_temp_exists",
+                    Path(f"{deliverable}{suffix}"),
+                )
+                for suffix in (".tmp", ".partial")
+            ]
+        for anomaly_kind, temp_path in candidates:
+            if not temp_path.is_file():
+                continue
+            try:
+                stat = temp_path.stat()
+            except OSError:
+                continue
+            temp_age_minutes = max(0, int((now.timestamp() - stat.st_mtime) // 60))
+            anomalies.append(
+                {
+                    "anomaly_kind": anomaly_kind,
+                    "request_path": request_path,
+                    "request_sha256": request_sha,
+                    "deliverable_path": deliverable_path.replace("\\", "/"),
+                    "temp_path": _agent_flow_relative_path(temp_path, runtime_path),
+                    "temp_open_path": str(temp_path),
+                    "temp_age_minutes": temp_age_minutes,
+                    "temp_byte_length": int(stat.st_size),
+                    "updated_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+                }
+            )
+    return anomalies
+
+
+def _agent_flow_tail_text(path: Path, byte_limit: int = 2 * 1024 * 1024) -> str:
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            if size > byte_limit:
+                handle.seek(size - byte_limit)
+            raw = handle.read(byte_limit)
+    except OSError:
+        return ""
+    return raw.decode("utf-8", errors="replace")
+
+
+def _agent_flow_target_goal_info(path: Path) -> dict[str, Any]:
+    if path.suffix.lower() != ".jsonl":
+        return {}
+    text = _agent_flow_tail_text(path)
+    if not text:
+        return {}
+    for line in reversed(text.splitlines()):
+        if "thread_goal_updated" not in line:
+            continue
+        try:
+            payload = json.loads(line.strip())
+        except ValueError:
+            continue
+        if not isinstance(payload, Mapping):
+            continue
+        event_payload = _mapping_payload(payload.get("payload"))
+        goal = _mapping_payload(event_payload.get("goal"))
+        updated_at = goal.get("updatedAt")
+        updated_utc = ""
+        try:
+            if updated_at is not None:
+                updated_utc = datetime.fromtimestamp(int(updated_at), timezone.utc).isoformat()
+        except (TypeError, ValueError, OSError):
+            updated_utc = ""
+        return {
+            "status": str(goal.get("status") or "").strip(),
+            "updated_at": updated_at,
+            "updated_at_utc": updated_utc,
+            "line_timestamp_utc": str(payload.get("timestamp") or "").strip(),
+        }
+    return {}
+
+
+def _agent_flow_session_paths_for_threads(thread_ids: Iterable[str]) -> dict[str, Path]:
+    wanted = [thread_id for thread_id in {str(item or "").strip() for item in thread_ids} if thread_id]
+    if not wanted:
+        return {}
+    matches: dict[str, Path] = {}
+    match_mtimes: dict[str, float] = {}
+    for root in _codex_automation_roots():
+        for session_root in (root / "sessions", root / "browser" / "sessions"):
+            if not session_root.is_dir():
+                continue
+            try:
+                walker = os.walk(session_root)
+                for dirpath, _dirnames, filenames in walker:
+                    for filename in filenames:
+                        if not filename.lower().endswith((".jsonl", ".toml")):
+                            continue
+                        thread_id = next((item for item in wanted if item in filename), "")
+                        if not thread_id:
+                            continue
+                        path = Path(dirpath) / filename
+                        mtime = _agent_flow_mtime(path)
+                        if thread_id not in matches or mtime > match_mtimes.get(thread_id, 0.0):
+                            matches[thread_id] = path
+                            match_mtimes[thread_id] = mtime
+            except OSError:
+                continue
+    return matches
+
+
+def _agent_flow_session_infos_for_threads(
+    thread_ids: Iterable[str],
+    *,
+    now: datetime,
+) -> dict[str, dict[str, Any]]:
+    paths = _agent_flow_session_paths_for_threads(thread_ids)
+    infos: dict[str, dict[str, Any]] = {}
+    for thread_id in {str(item or "").strip() for item in thread_ids}:
+        if not thread_id:
+            continue
+        path = paths.get(thread_id)
+        if path is None:
+            infos[thread_id] = {"exists": False}
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            infos[thread_id] = {"exists": False}
+            continue
+        goal = _agent_flow_target_goal_info(path)
+        infos[thread_id] = {
+            "exists": True,
+            "path": str(path),
+            "last_write_utc": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+            "age_minutes": round(max(0, (now.timestamp() - stat.st_mtime) / 60), 2),
+            "bytes": int(stat.st_size),
+            "last_goal_status": str(goal.get("status") or "").strip(),
+            "last_goal_updated_utc": str(goal.get("updated_at_utc") or "").strip(),
+            "last_goal_line_timestamp_utc": str(goal.get("line_timestamp_utc") or "").strip(),
+        }
+    return infos
+
+
+def _agent_flow_latest_utc_timestamp(values: Iterable[Any]) -> str:
+    latest: datetime | None = None
+    for value in values:
+        clean = str(value or "").strip()
+        if not clean:
+            continue
+        try:
+            parsed = datetime.fromisoformat(clean.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.astimezone(timezone.utc)
+        if latest is None or parsed > latest:
+            latest = parsed
+    return latest.strftime("%Y-%m-%dT%H:%M:%SZ") if latest is not None else ""
+
+
+def _agent_flow_quarantine_operator_handoff(
+    *,
+    thread_id: str,
+    status_text: str,
+    operator_group: str,
+    operator_label: str,
+    operator_guidance: str,
+    required_proof: str,
+    registry_path: Path,
+    runtime_path: Path,
+    session_path: str,
+    proof_window_minutes: int,
+) -> dict[str, Any]:
+    short_thread = thread_id[:8] if thread_id else "target"
+    registry_rel = _agent_flow_relative_path(registry_path, runtime_path)
+    if operator_group == "needs_operator_stop":
+        label = "Copy stop handoff"
+        instruction = (
+            f"Use the Codex control plane to stop or disable quarantined target thread {thread_id}. "
+            "Confirm the target is still active before stopping it; do not use Autopilot, shell, Docker, "
+            "runtime, DB, broker, commit, or push commands to force containment. After the control-plane "
+            f"stop, wait for {proof_window_minutes} minutes with no target activity, then review the "
+            "quarantine registry before clearing trust."
+        )
+    elif operator_group == "containment_active":
+        label = "Copy containment handoff"
+        instruction = (
+            f"Keep quarantined target thread {thread_id} contained and do not trust its downstream evidence. "
+            f"Wait for {proof_window_minutes} minutes of quiet target-session proof, then review the "
+            "quarantine registry before downgrading or clearing the target."
+        )
+    elif operator_group == "proof_window_met":
+        label = "Copy proof-review handoff"
+        instruction = (
+            f"Review the quarantine registry evidence for target thread {thread_id}. The quiet proof window "
+            "appears satisfied, but an operator still needs to decide whether to resolve, downgrade, or keep "
+            "the target quarantined."
+        )
+    else:
+        label = "Copy quarantine handoff"
+        instruction = (
+            f"Review quarantine evidence for target thread {thread_id or short_thread}. Do not change trust "
+            "state until the registry, target-session activity, and required proof agree."
+        )
+    copy_lines = [
+        "Project Autopilot quarantine handoff",
+        f"Target thread: {thread_id}",
+        f"Status: {status_text or 'unknown'}",
+        f"Next action: {operator_label or operator_group or 'Review'}",
+        f"Registry: {registry_rel}",
+        f"Session evidence: {session_path or 'not found'}",
+        "Autopilot action: read-only handoff; no control-plane mutation performed.",
+        f"Instruction: {instruction}",
+    ]
+    if operator_guidance:
+        copy_lines.append(f"Guidance: {operator_guidance}")
+    if required_proof:
+        copy_lines.append(f"Required proof: {required_proof}")
+    return {
+        "operator_handoff_label": label,
+        "operator_handoff_instruction": _clip(instruction, 700),
+        "operator_handoff_copy": _clip("\n".join(copy_lines), 2200),
+        "operator_handoff_mutates_control_plane": False,
+    }
+
+
+def _agent_flow_paused_automation_operator_handoff(
+    *,
+    automation_id: str,
+    automation_name: str,
+    automation_status: str,
+    automation_rrule: str,
+    target_thread_id: str,
+    config_path: str,
+    session_path: str,
+    threshold_minutes: float,
+) -> dict[str, Any]:
+    label = "Copy pause handoff"
+    display_name = automation_name or automation_id or "paused automation"
+    threshold_text = f"{threshold_minutes:g}"
+    instruction = (
+        f"Use the Codex automation/control-plane UI to verify paused automation {display_name} "
+        f"({automation_id or 'unknown id'}) is still paused or disable/delete it if it is unexpectedly "
+        "continuing. Do not use Autopilot, shell, Docker, runtime, DB, broker, commit, or push commands "
+        f"to force containment. Require at least {threshold_text} minutes without target-session writes "
+        "before trusting output from this automation target."
+    )
+    copy_lines = [
+        "Project Autopilot paused-automation handoff",
+        f"Automation: {display_name}",
+        f"Automation id: {automation_id}",
+        f"Status: {automation_status or 'unknown'}",
+        f"Schedule: {automation_rrule or 'unknown'}",
+        f"Target thread: {target_thread_id}",
+        f"Config: {config_path}",
+        f"Session evidence: {session_path or 'not found'}",
+        f"Quiet threshold: {threshold_text} minutes",
+        "Autopilot action: read-only handoff; no automation or control-plane mutation performed.",
+        f"Instruction: {instruction}",
+    ]
+    return {
+        "operator_handoff_label": label,
+        "operator_handoff_instruction": _clip(instruction, 700),
+        "operator_handoff_copy": _clip("\n".join(copy_lines), 2200),
+        "operator_handoff_mutates_control_plane": False,
+    }
+
+
+def _agent_flow_quarantined_target_activity(
+    runtime_path: Path,
+    *,
+    now: datetime,
+) -> list[dict[str, Any]]:
+    registry_path = runtime_path / "project_ws" / "AgentOps" / "TARGET_THREAD_QUARANTINE.json"
+    if not registry_path.is_file():
+        return []
+    try:
+        raw = json.loads(registry_path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError) as exc:
+        return [
+            {
+                "thread_id": "",
+                "status": "QUARANTINE_REGISTRY_INVALID",
+                "reason": str(exc),
+                "source": _agent_flow_relative_path(registry_path, runtime_path),
+                "registry_path": _agent_flow_relative_path(registry_path, runtime_path),
+                "registry_open_path": str(registry_path),
+                "session_exists": False,
+                "active": False,
+                "required_proof": "",
+                "activity_state": "registry_invalid",
+                "proof_window_minutes": AGENT_FLOW_QUARANTINE_PROOF_MINUTES,
+                "proof_window_remaining_minutes": None,
+                "proof_window_next_check_utc": "",
+                "proof_satisfied": False,
+            }
+        ]
+    if isinstance(raw, Mapping):
+        targets = raw.get("targets")
+    else:
+        targets = raw
+    if not isinstance(targets, list):
+        return []
+    clean_targets = [target for target in targets if isinstance(target, Mapping)]
+    session_infos = _agent_flow_session_infos_for_threads(
+        [str(target.get("thread_id") or "") for target in clean_targets],
+        now=now,
+    )
+    items: list[dict[str, Any]] = []
+    for target in clean_targets:
+        thread_id = str(target.get("thread_id") or "").strip()
+        if not thread_id:
+            continue
+        session = session_infos.get(thread_id, {"exists": False})
+        age_minutes = session.get("age_minutes")
+        goal_status = str(session.get("last_goal_status") or "").strip()
+        proof_window_minutes = AGENT_FLOW_QUARANTINE_PROOF_MINUTES
+        proof_window_remaining_minutes: int | None = None
+        proof_window_next_check_utc = ""
+        proof_satisfied = False
+        activity_state = "session_missing"
+        if bool(session.get("exists")):
+            activity_state = "activity_unknown"
+        if isinstance(age_minutes, (int, float)):
+            remaining_float = max(0.0, float(proof_window_minutes) - float(age_minutes))
+            proof_window_remaining_minutes = int(math.ceil(remaining_float))
+            proof_satisfied = remaining_float <= 0
+            if remaining_float > 0:
+                proof_window_next_check_utc = (
+                    now + timedelta(minutes=remaining_float)
+                ).astimezone(timezone.utc).isoformat()
+            if goal_status != "active":
+                activity_state = "goal_not_active"
+            elif proof_satisfied:
+                activity_state = "proof_window_satisfied"
+            else:
+                activity_state = "active"
+        active = (
+            bool(session.get("exists"))
+            and isinstance(age_minutes, (int, float))
+            and float(age_minutes) < proof_window_minutes
+            and goal_status == "active"
+        )
+        required_proof = str(target.get("required_proof") or "").strip()
+        if active:
+            proof_anchor = _agent_flow_latest_utc_timestamp(
+                [
+                    session.get("last_write_utc"),
+                    session.get("last_goal_updated_utc"),
+                    session.get("last_goal_line_timestamp_utc"),
+                ]
+            )
+            if proof_anchor:
+                required_proof = (
+                    "No thread_goal_updated, function/tool call, shell, apply_patch, Docker, "
+                    "DB/migration, broker-adjacent, commit, push, or shared-worktree write activity "
+                    f"for at least {proof_window_minutes} minutes after a named containment timestamp "
+                    f"later than {proof_anchor}."
+                )
+        operator_group = "waiting_evidence"
+        operator_label = "Waiting evidence"
+        operator_priority = 30
+        operator_guidance = "Review the target evidence before changing quarantine state."
+        status_text = str(target.get("status") or "").strip()
+        if active and status_text == "CONTROL_PLANE_TERMINATION_REQUIRED":
+            operator_group = "needs_operator_stop"
+            operator_label = "Needs operator stop"
+            operator_priority = 0
+            operator_guidance = (
+                "Use the Codex control plane to stop or disable this target before trusting downstream evidence."
+            )
+        elif active:
+            operator_group = "containment_active"
+            operator_label = "Still active"
+            operator_priority = 10
+            operator_guidance = (
+                "Keep this target contained and wait for a quiet proof window before clearing quarantine."
+            )
+        elif proof_satisfied:
+            operator_group = "proof_window_met"
+            operator_label = "Proof window met"
+            operator_priority = 20
+            operator_guidance = (
+                "Review the registry evidence and decide whether this target can be resolved or downgraded."
+            )
+        elif activity_state == "goal_not_active":
+            operator_group = "goal_inactive_review"
+            operator_label = "Goal inactive"
+            operator_priority = 25
+            operator_guidance = (
+                "Confirm the target stayed quiet before accepting containment evidence."
+            )
+        handoff = _agent_flow_quarantine_operator_handoff(
+            thread_id=thread_id,
+            status_text=status_text,
+            operator_group=operator_group,
+            operator_label=operator_label,
+            operator_guidance=operator_guidance,
+            required_proof=required_proof,
+            registry_path=registry_path,
+            runtime_path=runtime_path,
+            session_path=str(session.get("path") or "").strip(),
+            proof_window_minutes=proof_window_minutes,
+        )
+        items.append(
+            {
+                "thread_id": thread_id,
+                "turn_id": str(target.get("turn_id") or "").strip(),
+                "status": status_text,
+                "reason": str(target.get("reason") or "").strip(),
+                "source": str(target.get("source") or "").strip(),
+                "registry_path": _agent_flow_relative_path(registry_path, runtime_path),
+                "registry_open_path": str(registry_path),
+                "session_exists": bool(session.get("exists")),
+                "target_session_age_minutes": age_minutes,
+                "target_session_goal_status": goal_status,
+                "target_session_last_write_utc": str(session.get("last_write_utc") or "").strip(),
+                "target_session_goal_updated_utc": str(session.get("last_goal_updated_utc") or "").strip(),
+                "target_session_path": str(session.get("path") or "").strip(),
+                "active": active,
+                "activity_state": activity_state,
+                "proof_window_minutes": proof_window_minutes,
+                "proof_window_remaining_minutes": proof_window_remaining_minutes,
+                "proof_window_next_check_utc": proof_window_next_check_utc,
+                "proof_satisfied": proof_satisfied,
+                "operator_group": operator_group,
+                "operator_label": operator_label,
+                "operator_priority": operator_priority,
+                "operator_guidance": operator_guidance,
+                **handoff,
+                "required_proof": required_proof,
+            }
+        )
+    def target_sort_priority(item: Mapping[str, Any]) -> int:
+        try:
+            return int(item.get("operator_priority"))
+        except (TypeError, ValueError):
+            return 99
+
+    items.sort(
+        key=lambda item: (
+            target_sort_priority(item),
+            int(item.get("proof_window_remaining_minutes") or 0),
+            str(item.get("thread_id") or ""),
+        )
+    )
+    return items
+
+
+def _agent_flow_quarantine_summary(
+    targets: Iterable[Mapping[str, Any]],
+    *,
+    now: datetime,
+) -> dict[str, Any]:
+    items = [target for target in targets if isinstance(target, Mapping)]
+    active = [target for target in items if target.get("active")]
+    proof_satisfied = [target for target in items if target.get("proof_satisfied")]
+    termination_required = [
+        target
+        for target in items
+        if str(target.get("status") or "").strip() == "CONTROL_PLANE_TERMINATION_REQUIRED"
+    ]
+    containment_required = [
+        target
+        for target in items
+        if str(target.get("status") or "").strip() == "CONTROL_PLANE_CONTAINMENT_REQUIRED"
+    ]
+    operator_group_counts: dict[str, int] = {}
+    for target in items:
+        group = str(target.get("operator_group") or "waiting_evidence").strip()
+        if not group:
+            group = "waiting_evidence"
+        operator_group_counts[group] = operator_group_counts.get(group, 0) + 1
+    waiting = [
+        target
+        for target in items
+        if not target.get("active") and not target.get("proof_satisfied")
+    ]
+    next_remaining = [
+        int(target.get("proof_window_remaining_minutes") or 0)
+        for target in active
+        if target.get("proof_window_remaining_minutes") is not None
+    ]
+    next_check_remaining = min(next_remaining) if next_remaining else None
+    next_check_utc = ""
+    if next_check_remaining is not None:
+        next_check_utc = (
+            now + timedelta(minutes=max(0, int(next_check_remaining)))
+        ).astimezone(timezone.utc).isoformat()
+    return {
+        "target_count": len(items),
+        "active_count": len(active),
+        "proof_satisfied_count": len(proof_satisfied),
+        "waiting_count": len(waiting),
+        "termination_required_count": len(termination_required),
+        "containment_required_count": len(containment_required),
+        "needs_operator_stop_count": operator_group_counts.get("needs_operator_stop", 0),
+        "containment_active_count": operator_group_counts.get("containment_active", 0),
+        "proof_window_met_count": operator_group_counts.get("proof_window_met", 0),
+        "goal_inactive_review_count": operator_group_counts.get("goal_inactive_review", 0),
+        "operator_group_counts": operator_group_counts,
+        "next_operator_group": str(items[0].get("operator_group") or "") if items else "",
+        "next_operator_label": str(items[0].get("operator_label") or "") if items else "",
+        "next_operator_handoff_label": str(items[0].get("operator_handoff_label") or "") if items else "",
+        "next_operator_handoff_copy": str(items[0].get("operator_handoff_copy") or "") if items else "",
+        "next_check_remaining_minutes": next_check_remaining,
+        "next_check_utc": next_check_utc,
+        "active_thread_ids": [
+            str(target.get("thread_id") or "").strip()
+            for target in active[:AGENT_FLOW_PREVIEW_LIMIT]
+            if str(target.get("thread_id") or "").strip()
+        ],
+        "proof_satisfied_thread_ids": [
+            str(target.get("thread_id") or "").strip()
+            for target in proof_satisfied[:AGENT_FLOW_PREVIEW_LIMIT]
+            if str(target.get("thread_id") or "").strip()
+        ],
+    }
+
+
+def _agent_flow_rrule_cadence_minutes(rrule: str) -> float | None:
+    parts = _agent_schedule_rrule_parts(rrule)
+    freq = parts.get(AGENT_SCHEDULE_RRULE_FREQ_KEY)
+    try:
+        interval = int(parts.get(AGENT_SCHEDULE_RRULE_INTERVAL_KEY) or AGENT_SCHEDULE_DEFAULT_INTERVAL)
+    except (TypeError, ValueError):
+        interval = AGENT_SCHEDULE_DEFAULT_INTERVAL
+    interval = max(AGENT_SCHEDULE_MIN_INTERVAL, interval)
+    if freq == AGENT_SCHEDULE_RRULE_FREQ_MINUTELY:
+        return float(interval)
+    if freq == AGENT_SCHEDULE_RRULE_FREQ_HOURLY:
+        return float(interval * 60)
+    if freq == "DAILY":
+        return float(interval * 1440)
+    if freq == "WEEKLY":
+        return float(interval * 10080)
+    return None
+
+
+def _agent_flow_automation_updated_at_utc(value: Any) -> str:
+    try:
+        millis = int(value)
+    except (TypeError, ValueError):
+        return ""
+    try:
+        return datetime.fromtimestamp(millis / 1000, timezone.utc).isoformat()
+    except (OSError, OverflowError, ValueError):
+        return ""
+
+
+def _agent_flow_paused_automation_activity(
+    repo: CodeRepo,
+    *,
+    now: datetime,
+) -> list[dict[str, Any]]:
+    automations: list[dict[str, Any]] = []
+    for path in _codex_automation_config_paths():
+        try:
+            data = tomllib.loads(path.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        try:
+            matches_repo = _codex_automation_matches_repo(data, repo)
+        except Exception:
+            matches_repo = False
+        if not matches_repo:
+            continue
+        status = str(data.get("status") or "").strip().upper()
+        if status == "ACTIVE":
+            continue
+        thread_id = str(data.get("target_thread_id") or "").strip()
+        if not thread_id:
+            continue
+        automations.append(
+            {
+                "automation_id": str(data.get("id") or path.parent.name).strip(),
+                "automation_name": str(data.get("name") or data.get("id") or path.parent.name).strip(),
+                "automation_kind": str(data.get("kind") or "").strip(),
+                "automation_status": status or str(data.get("status") or "").strip(),
+                "automation_rrule": str(data.get("rrule") or "").strip(),
+                "automation_updated_at_utc": _agent_flow_automation_updated_at_utc(data.get("updated_at")),
+                "target_thread_id": thread_id,
+                "config_path": str(path),
+            }
+        )
+    if not automations:
+        return []
+    session_infos = _agent_flow_session_infos_for_threads(
+        [str(item.get("target_thread_id") or "") for item in automations],
+        now=now,
+    )
+    items: list[dict[str, Any]] = []
+    for automation in automations:
+        rrule = str(automation.get("automation_rrule") or "")
+        cadence_minutes = _agent_flow_rrule_cadence_minutes(rrule)
+        threshold_minutes = round(
+            cadence_minutes * 2 if cadence_minutes is not None else 2.0,
+            2,
+        )
+        thread_id = str(automation.get("target_thread_id") or "")
+        session = session_infos.get(thread_id, {"exists": False})
+        age_minutes = session.get("age_minutes")
+        if not isinstance(age_minutes, (int, float)) or float(age_minutes) >= threshold_minutes:
+            continue
+        path = Path(str(automation.get("config_path") or ""))
+        handoff = _agent_flow_paused_automation_operator_handoff(
+            automation_id=str(automation.get("automation_id") or "").strip(),
+            automation_name=str(automation.get("automation_name") or "").strip(),
+            automation_status=str(automation.get("automation_status") or "").strip(),
+            automation_rrule=rrule,
+            target_thread_id=thread_id,
+            config_path=str(path),
+            session_path=str(session.get("path") or "").strip(),
+            threshold_minutes=threshold_minutes,
+        )
+        items.append(
+            {
+                **automation,
+                "cadence_minutes": cadence_minutes,
+                "threshold_minutes": threshold_minutes,
+                "target_session_exists": bool(session.get("exists")),
+                "target_session_age_minutes": age_minutes,
+                "target_session_last_write_utc": str(session.get("last_write_utc") or "").strip(),
+                "target_session_goal_status": str(session.get("last_goal_status") or "").strip(),
+                "target_session_goal_updated_utc": str(session.get("last_goal_updated_utc") or "").strip(),
+                "target_session_path": str(session.get("path") or "").strip(),
+                "config_open_path": str(path),
+                "config_display_path": str(path).replace("\\", "/"),
+                "reason": "paused automation has fresh target-session activity",
+                **handoff,
+            }
+        )
+    items.sort(key=lambda item: (float(item.get("target_session_age_minutes") or 0), str(item.get("automation_id") or "")))
+    return items
+
+
+def _agent_flow_worktree_scope(worktree_path: Path, runtime_path: Path) -> str:
+    try:
+        worktree_resolved = worktree_path.resolve(strict=False)
+        runtime_resolved = runtime_path.resolve(strict=False)
+    except OSError:
+        return "external"
+    project_ws_worktrees = runtime_resolved / "project_ws" / "_worktrees"
+    try:
+        worktree_key = os.path.normcase(str(worktree_resolved)).rstrip("\\/")
+        runtime_key = os.path.normcase(str(runtime_resolved)).rstrip("\\/")
+        project_ws_key = os.path.normcase(str(project_ws_worktrees.resolve(strict=False))).rstrip("\\/")
+    except OSError:
+        return "external"
+    if worktree_key == runtime_key:
+        return "repository_root"
+    if worktree_key == project_ws_key or worktree_key.startswith(project_ws_key + os.sep):
+        return "project_ws_worktree"
+    if worktree_key.startswith(runtime_key + os.sep):
+        return "project_local"
+    return "external"
+
+
+def _agent_flow_parse_worktree_porcelain(output: str) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    current: dict[str, Any] = {}
+    for raw_line in (output or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            if current.get("worktree"):
+                candidates.append(current)
+            current = {}
+            continue
+        if line.startswith("worktree "):
+            current["worktree"] = line[len("worktree ") :].strip()
+        elif line.startswith("HEAD "):
+            current["declared_head"] = line[len("HEAD ") :].strip()
+        elif line.startswith("branch "):
+            current["declared_branch_ref"] = line[len("branch ") :].strip()
+        elif line == "detached":
+            current["declared_detached"] = True
+    if current.get("worktree"):
+        candidates.append(current)
+    return candidates
+
+
+def _agent_flow_worktree_candidates(runtime_path: Path) -> tuple[list[dict[str, Any]], int, bool]:
+    candidates: list[dict[str, Any]] = []
+    try:
+        proc = _git(runtime_path, ["worktree", "list", "--porcelain"], timeout=8)
+    except Exception:
+        proc = None
+    if proc is not None and proc.returncode == 0:
+        candidates = _agent_flow_parse_worktree_porcelain(proc.stdout or "")
+    if not candidates:
+        project_worktrees = runtime_path / "project_ws" / "_worktrees"
+        if project_worktrees.is_dir():
+            try:
+                candidates = [
+                    {
+                        "worktree": str(path),
+                        "declared_head": "",
+                        "declared_branch_ref": "",
+                        "declared_detached": False,
+                    }
+                    for path in project_worktrees.iterdir()
+                    if path.is_dir()
+                ]
+            except OSError:
+                candidates = []
+    total = len(candidates)
+    truncated = total > AGENT_FLOW_WORKTREE_SCAN_LIMIT
+    return candidates[:AGENT_FLOW_WORKTREE_SCAN_LIMIT], total, truncated
+
+
+def _agent_flow_worktree_change_path(change: str) -> str:
+    clean = str(change or "").strip()
+    if len(clean) > 3:
+        clean = clean[3:].strip()
+    if " -> " in clean:
+        clean = clean.split(" -> ", 1)[1].strip()
+    return _agent_flow_normalized_path_token(clean)
+
+
+def _agent_flow_worktree_operator_handoff(
+    *,
+    worktree_name: str,
+    worktree_path: str,
+    open_path: str,
+    scope: str,
+    branch: str,
+    head_short: str,
+    change_count: int,
+    changes: Iterable[str],
+    detached_uncontained: bool,
+    dirty: bool,
+    status_exit: int,
+    guidance: str,
+) -> dict[str, Any]:
+    if detached_uncontained:
+        label = "Copy branch-bind handoff"
+        instruction = (
+            "Create or identify the owner branch for this detached worktree, bind it to the exact HEAD, "
+            "and publish an owner OUT note before accepting its deliverable evidence."
+        )
+        required_proof = (
+            "A named owner branch or remote ref contains the worktree HEAD, and the owner report cites "
+            "that branch plus exact commit."
+        )
+    elif dirty:
+        label = "Copy dirty-worktree handoff"
+        instruction = (
+            "Route the owning agent to publish, park, or explicitly discard the local changes before "
+            "trusting downstream review, push, merge, or release evidence."
+        )
+        required_proof = (
+            "The worktree is clean, or an owner report names the parked/published change set with exact "
+            "paths, branch, commit or patch location, and safety boundary."
+        )
+    else:
+        label = "Copy worktree-status handoff"
+        instruction = (
+            "Inspect the worktree status failure and publish exact readback before accepting related evidence."
+        )
+        required_proof = (
+            "A fresh status readback succeeds or the owner report explains the failure with exact command output."
+        )
+    change_preview = _string_items(changes, limit=AGENT_FLOW_WORKTREE_CHANGE_PREVIEW_LIMIT)
+    copy_lines = [
+        "Project Autopilot worktree handoff",
+        f"Worktree: {worktree_name or 'worktree'}",
+        f"Path: {worktree_path or open_path or 'unknown'}",
+        f"Open path: {open_path or 'unknown'}",
+        f"Scope: {scope or 'unknown'}",
+        f"Branch/status: {branch or 'unknown'}",
+        f"HEAD: {head_short or 'unknown'}",
+        f"Changes: {max(0, int(change_count or 0))}",
+        f"Detached without containing ref: {'yes' if detached_uncontained else 'no'}",
+        f"Git status exit: {int(status_exit or 0)}",
+        "Autopilot action: read-only handoff; no worktree cleanup, branch creation, checkout, commit, push, or discard performed.",
+        f"Instruction: {instruction}",
+        f"Required proof: {required_proof}",
+    ]
+    if guidance:
+        copy_lines.append(f"Guidance: {guidance}")
+    if change_preview:
+        copy_lines.append("Change preview:")
+        copy_lines.extend(f"- {change}" for change in change_preview)
+    return {
+        "operator_handoff_label": label,
+        "operator_handoff_instruction": _clip(instruction, 700),
+        "operator_handoff_copy": _clip("\n".join(copy_lines), 2200),
+        "operator_handoff_mutates_control_plane": False,
+    }
+
+
+def _agent_flow_repository_root_change_is_mailbox_artifact(change: str) -> bool:
+    token = _agent_flow_worktree_change_path(change)
+    return token == "project_ws" or token.startswith("project_ws/")
+
+
+def _agent_flow_normalized_worktree_candidates(
+    candidates: Iterable[Mapping[str, Any]],
+    runtime_path: Path,
+) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        raw_path = str(candidate.get("worktree") or "").strip()
+        if not raw_path:
+            continue
+        worktree_path = Path(raw_path)
+        if not worktree_path.is_absolute():
+            worktree_path = runtime_path / raw_path.replace("\\", "/")
+        try:
+            resolved = worktree_path.resolve(strict=False)
+        except OSError:
+            resolved = worktree_path
+        key = os.path.normcase(str(resolved)).rstrip("\\/")
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(
+            {
+                **dict(candidate),
+                "worktree": str(resolved),
+                "_resolved_path": str(resolved),
+            }
+        )
+    return normalized
+
+
+def _agent_flow_worktree_health_item(
+    candidate: Mapping[str, Any],
+    runtime_path: Path,
+) -> dict[str, Any] | None:
+    raw_path = str(candidate.get("_resolved_path") or candidate.get("worktree") or "").strip()
+    if not raw_path:
+        return None
+    resolved = Path(raw_path)
+    path_exists = resolved.exists()
+    scope = _agent_flow_worktree_scope(resolved, runtime_path)
+    name = "." if scope == "repository_root" else resolved.name
+    status_exit = 1
+    status_text = ""
+    changes: list[str] = []
+    branch = ""
+    if path_exists:
+        try:
+            status_proc = _git(resolved, ["status", "--porcelain=v1", "-b"], timeout=8)
+        except Exception as exc:
+            status_proc = None
+            status_exit = 1
+            status_text = str(exc)[:400]
+            status_lines = []
+        if status_proc is not None:
+            status_exit = int(status_proc.returncode)
+            status_text = (status_proc.stderr or status_proc.stdout or "").strip()[:400]
+            status_lines = (status_proc.stdout or "").splitlines()
+        if status_lines:
+            branch_line = status_lines[0].strip()
+            branch = branch_line[3:].strip() if branch_line.startswith("## ") else branch_line
+            changes = [line for line in status_lines[1:] if line.strip()]
+    else:
+        branch = "missing"
+        changes = ["worktree path not found"]
+        status_text = "worktree path not found"
+
+    if scope == "repository_root":
+        changes = [
+            change
+            for change in changes
+            if not _agent_flow_repository_root_change_is_mailbox_artifact(change)
+        ]
+
+    declared_head = str(candidate.get("declared_head") or "").strip()
+    head_sha = declared_head
+    if path_exists and not re.fullmatch(r"[0-9a-fA-F]{40}", head_sha):
+        try:
+            head_proc = _git(resolved, ["rev-parse", "--verify", "HEAD"], timeout=8)
+        except Exception:
+            head_proc = None
+        if head_proc is not None and head_proc.returncode == 0:
+            head_sha = (head_proc.stdout or "").strip().splitlines()[0].strip()
+    head_sha = head_sha.lower() if re.fullmatch(r"[0-9a-fA-F]{40}", head_sha) else ""
+    head_short = head_sha[:12] if head_sha else ""
+
+    declared_branch_ref = str(candidate.get("declared_branch_ref") or "").strip()
+    symbolic_branch = ""
+    if declared_branch_ref.startswith("refs/heads/"):
+        symbolic_branch = declared_branch_ref[len("refs/heads/") :]
+    detached = bool(candidate.get("declared_detached"))
+    if not detached and head_sha and not symbolic_branch and branch.startswith("HEAD "):
+        detached = True
+    containing_refs: list[str] = []
+    if path_exists and detached and head_sha:
+        try:
+            refs_proc = _git(
+                resolved,
+                [
+                    "for-each-ref",
+                    "--format=%(refname:short)",
+                    "--contains",
+                    "HEAD",
+                    "refs/heads",
+                    "refs/remotes",
+                ],
+                timeout=10,
+            )
+        except Exception:
+            refs_proc = None
+        if refs_proc is not None and refs_proc.returncode == 0:
+            containing_refs = sorted(
+                {
+                    line.strip()
+                    for line in (refs_proc.stdout or "").splitlines()
+                    if line.strip()
+                }
+            )
+
+    dirty = bool(changes)
+    detached_uncontained = detached and head_sha and not containing_refs
+    guidance = ""
+    if detached_uncontained:
+        guidance = "Create or identify the owner branch before treating this worktree as deliverable evidence."
+    elif dirty:
+        guidance = "Route the owning agent to publish, park, or discard the work before accepting downstream evidence."
+    elif status_exit != 0:
+        guidance = "Inspect the worktree before accepting related review, push, or merge evidence."
+    handoff = _agent_flow_worktree_operator_handoff(
+        worktree_name=name,
+        worktree_path=_agent_flow_relative_path(resolved, runtime_path),
+        open_path=str(resolved),
+        scope=scope,
+        branch=branch,
+        head_short=head_short,
+        change_count=len(changes),
+        changes=changes[:AGENT_FLOW_WORKTREE_CHANGE_PREVIEW_LIMIT],
+        detached_uncontained=bool(detached_uncontained),
+        dirty=dirty,
+        status_exit=status_exit,
+        guidance=guidance,
+    )
+    return {
+        "name": name,
+        "path": _agent_flow_relative_path(resolved, runtime_path),
+        "open_path": str(resolved),
+        "scope": scope,
+        "git_status_exit_code": status_exit,
+        "git_status_error": status_text if status_exit != 0 else "",
+        "branch": branch,
+        "symbolic_branch": symbolic_branch,
+        "declared_branch_ref": declared_branch_ref,
+        "head_sha": head_sha,
+        "head_short": head_short,
+        "detached": detached,
+        "containing_ref_count": len(containing_refs),
+        "containing_ref_sample": containing_refs[:5],
+        "detached_uncontained": bool(detached_uncontained),
+        "change_count": len(changes),
+        "dirty": dirty,
+        "changes": changes[:AGENT_FLOW_WORKTREE_CHANGE_PREVIEW_LIMIT],
+        "guidance": guidance,
+        **handoff,
+    }
+
+
+def _agent_flow_worktree_health(runtime_path: Path) -> dict[str, Any]:
+    candidates, candidate_count, truncated = _agent_flow_worktree_candidates(runtime_path)
+    normalized_candidates = _agent_flow_normalized_worktree_candidates(candidates, runtime_path)
+    worker_count = min(
+        AGENT_FLOW_WORKTREE_SCAN_WORKERS,
+        max(1, len(normalized_candidates)),
+    )
+    if not normalized_candidates:
+        items = []
+    elif worker_count == 1:
+        items = [
+            item
+            for item in (
+                _agent_flow_worktree_health_item(candidate, runtime_path)
+                for candidate in normalized_candidates
+            )
+            if item is not None
+        ]
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+            items = [
+                item
+                for item in executor.map(
+                    lambda candidate: _agent_flow_worktree_health_item(candidate, runtime_path),
+                    normalized_candidates,
+                )
+                if item is not None
+            ]
+
+    def sort_key(item: Mapping[str, Any]) -> tuple[int, str]:
+        if item.get("detached_uncontained"):
+            severity = 0
+        elif item.get("git_status_exit_code"):
+            severity = 1
+        elif item.get("dirty"):
+            severity = 2
+        elif item.get("detached"):
+            severity = 3
+        else:
+            severity = 4
+        return severity, str(item.get("path") or "")
+
+    items.sort(key=sort_key)
+    dirty = [item for item in items if item.get("dirty")]
+    detached = [item for item in items if item.get("detached")]
+    detached_uncontained = [item for item in items if item.get("detached_uncontained")]
+    problems = [
+        item
+        for item in items
+        if item.get("dirty")
+        or item.get("detached_uncontained")
+        or int(item.get("git_status_exit_code") or 0) != 0
+    ]
+    return {
+        "candidate_count": candidate_count,
+        "scan_truncated": truncated,
+        "scan_worker_count": worker_count if normalized_candidates else 0,
+        "items": items,
+        "dirty_count": len(dirty),
+        "detached_count": len(detached),
+        "detached_uncontained_count": len(detached_uncontained),
+        "problem_count": len(problems),
+        "problems": problems,
+    }
+
+
+def _agent_flow_control_plane_trust_summary(
+    *,
+    quarantined_targets: Iterable[Mapping[str, Any]],
+    paused_automation_activity: Iterable[Mapping[str, Any]],
+    worktree_problem_items: Iterable[Mapping[str, Any]],
+    lock_problem_items: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    category_counts = {
+        "quarantine": 0,
+        "paused_automation": 0,
+        "detached_worktree": 0,
+        "dirty_worktree": 0,
+        "agent_lock": 0,
+    }
+
+    for target in quarantined_targets:
+        if not isinstance(target, Mapping) or not target.get("active"):
+            continue
+        thread_id = str(target.get("thread_id") or "").strip()
+        operator_group = str(target.get("operator_group") or "").strip()
+        operator_label = str(target.get("operator_label") or "Review target").strip()
+        priority = 0 if operator_group == "needs_operator_stop" else 10
+        category_counts["quarantine"] += 1
+        rows.append(
+            {
+                "kind": "quarantined_target",
+                "category": "quarantine",
+                "priority": priority,
+                "label": operator_label,
+                "detail": truncate_text(
+                    str(target.get("operator_guidance") or target.get("reason") or ""),
+                    220,
+                )[0],
+                "thread_id": thread_id,
+                "status": str(target.get("status") or "").strip(),
+                "proof_remaining_minutes": target.get("proof_window_remaining_minutes"),
+                "source_path": str(target.get("registry_path") or ""),
+                "open_path": str(target.get("registry_open_path") or ""),
+                "handoff_label": str(target.get("operator_handoff_label") or ""),
+                "handoff_copy": str(target.get("operator_handoff_copy") or ""),
+                "mutates_control_plane": False,
+            }
+        )
+
+    for automation in paused_automation_activity:
+        if not isinstance(automation, Mapping):
+            continue
+        automation_id = str(automation.get("automation_id") or "").strip()
+        automation_name = str(automation.get("automation_name") or automation_id).strip()
+        covered = bool(automation.get("covered_by_active_quarantine"))
+        category_counts["paused_automation"] += 1
+        rows.append(
+            {
+                "kind": "paused_automation",
+                "category": "paused_automation",
+                "priority": 20 if covered else 5,
+                "label": "Verify paused automation",
+                "detail": truncate_text(
+                    f"{automation_name or automation_id} has fresh target-session activity"
+                    + (" and is covered by active quarantine." if covered else " without active quarantine coverage."),
+                    220,
+                )[0],
+                "automation_id": automation_id,
+                "automation_name": automation_name,
+                "thread_id": str(automation.get("target_thread_id") or "").strip(),
+                "covered_by_active_quarantine": covered,
+                "source_path": str(automation.get("config_display_path") or ""),
+                "open_path": str(automation.get("config_open_path") or ""),
+                "handoff_label": str(automation.get("operator_handoff_label") or ""),
+                "handoff_copy": str(automation.get("operator_handoff_copy") or ""),
+                "mutates_control_plane": False,
+            }
+        )
+
+    for worktree in worktree_problem_items:
+        if not isinstance(worktree, Mapping):
+            continue
+        detached_uncontained = bool(worktree.get("detached_uncontained"))
+        dirty = bool(worktree.get("dirty"))
+        status_exit = int(worktree.get("git_status_exit_code") or 0)
+        if detached_uncontained:
+            category = "detached_worktree"
+            priority = 30
+            label = "Bind worktree to branch"
+            detail = "Detached worktree has no containing branch or remote ref."
+        elif dirty:
+            category = "dirty_worktree"
+            priority = 40
+            label = "Resolve dirty worktree"
+            detail = f"Worktree has {int(worktree.get('change_count') or 0)} local change(s)."
+        elif status_exit != 0:
+            category = "dirty_worktree"
+            priority = 35
+            label = "Inspect worktree status"
+            detail = "Worktree status could not be read."
+        else:
+            continue
+        category_counts[category] += 1
+        rows.append(
+            {
+                "kind": category,
+                "category": category,
+                "priority": priority,
+                "label": label,
+                "detail": truncate_text(detail, 220)[0],
+                "worktree_name": str(worktree.get("name") or "worktree").strip(),
+                "worktree_path": str(worktree.get("path") or "").strip(),
+                "open_path": str(worktree.get("open_path") or ""),
+                "head_short": str(worktree.get("head_short") or ""),
+                "change_count": int(worktree.get("change_count") or 0),
+                "handoff_label": str(worktree.get("operator_handoff_label") or ""),
+                "handoff_copy": str(worktree.get("operator_handoff_copy") or ""),
+                "mutates_control_plane": False,
+            }
+        )
+
+    for lock_item in lock_problem_items:
+        if not isinstance(lock_item, Mapping):
+            continue
+        status = str(lock_item.get("status") or "").strip()
+        if status not in {
+            AGENT_FLOW_STATUS_ACTIVE_LOCK_STARVATION,
+            AGENT_FLOW_STATUS_STALE_LOCK_CANDIDATE,
+        }:
+            continue
+        active_starvation = status == AGENT_FLOW_STATUS_ACTIVE_LOCK_STARVATION
+        category_counts["agent_lock"] += 1
+        lock_owner = str(lock_item.get("lock_owner") or lock_item.get("agent") or "").strip()
+        lock_pid = str(lock_item.get("lock_pid") or "").strip()
+        rows.append(
+            {
+                "kind": "agent_lock",
+                "category": "agent_lock",
+                "priority": 12 if active_starvation else 25,
+                "label": "Resolve active lock" if active_starvation else "Review stale lock",
+                "detail": truncate_text(
+                    str(lock_item.get("reason") or lock_item.get("lock_guidance") or ""),
+                    220,
+                )[0],
+                "agent": str(lock_item.get("agent") or lock_owner or "").strip(),
+                "lock_owner": lock_owner,
+                "lock_pid": lock_pid,
+                "lock_pid_running": bool(lock_item.get("lock_pid_running")),
+                "lock_age_minutes": int(lock_item.get("lock_age_minutes") or 0),
+                "source_path": str(lock_item.get("path") or ""),
+                "open_path": str(lock_item.get("open_path") or ""),
+                "handoff_label": str(lock_item.get("lock_operator_handoff_label") or ""),
+                "handoff_copy": str(lock_item.get("lock_operator_handoff_copy") or ""),
+                "mutates_control_plane": False,
+            }
+        )
+
+    def row_priority(row: Mapping[str, Any]) -> int:
+        try:
+            return int(row.get("priority"))
+        except (TypeError, ValueError):
+            return 99
+
+    rows.sort(
+        key=lambda row: (
+            row_priority(row),
+            str(row.get("category") or ""),
+            str(row.get("thread_id") or row.get("automation_id") or row.get("worktree_name") or ""),
+        )
+    )
+    blocker_count = len(rows)
+    next_row = rows[0] if rows else {}
+    return {
+        "status": (
+            AGENT_OS_READINESS_CHECK_WARNING
+            if blocker_count
+            else AGENT_OS_READINESS_CHECK_PASSED
+        ),
+        "blocker_count": blocker_count,
+        "high_risk_count": len([row for row in rows if row_priority(row) < 20]),
+        "category_counts": category_counts,
+        "next_action_label": str(next_row.get("label") or "Keep monitoring") if rows else "Keep monitoring",
+        "next_action_detail": str(next_row.get("detail") or "") if rows else "No control-plane trust blockers were detected.",
+        "next_action_kind": str(next_row.get("kind") or "") if rows else "",
+        "next_action_handoff_label": str(next_row.get("handoff_label") or "") if rows else "",
+        "next_action_handoff_copy": str(next_row.get("handoff_copy") or "") if rows else "",
+        "items": rows[:AGENT_FLOW_PREVIEW_LIMIT],
+    }
+
+
+def _agent_flow_item_priority(item: Mapping[str, Any]) -> tuple[int, str, str]:
+    status = str(item.get("status") or "")
+    if status == AGENT_FLOW_STATUS_QUARANTINED_TARGET_ACTIVE:
+        operator_group = str(item.get("quarantine_operator_group") or "").strip()
+        priority = 0 if operator_group == "needs_operator_stop" else 2
+    elif status == AGENT_FLOW_STATUS_PAUSED_AUTOMATION_ACTIVE:
+        priority = 1
+    else:
+        priority = {
+            AGENT_FLOW_STATUS_DETACHED_UNCONTAINED_WORKTREE: 3,
+            AGENT_FLOW_STATUS_DIRTY_WORKTREE: 4,
+            AGENT_FLOW_STATUS_REVIEW_HEAD_MISMATCH: 5,
+            AGENT_FLOW_STATUS_PROCESSED_DELIVERABLE_ANOMALY: 6,
+            AGENT_FLOW_STATUS_SHAPE_INVALID: 7,
+            AGENT_FLOW_STATUS_TEMP_PUBLISH_STALE: 8,
+            AGENT_FLOW_STATUS_ACTIVE_LOCK_STARVATION: 9,
+            AGENT_FLOW_STATUS_STALE_LOCK_CANDIDATE: 10,
+            AGENT_FLOW_STATUS_STABLE_PENDING: 11,
+        }.get(status, 12)
+    created_at = str(item.get("created_at") or "")
+    path = str(item.get("path") or "")
+    return priority, created_at, path
+
+
+def _agent_flow_item_handoff_label(item: Mapping[str, Any]) -> str:
+    return str(
+        item.get("quarantine_operator_handoff_label")
+        or item.get("paused_automation_operator_handoff_label")
+        or item.get("mailbox_request_operator_handoff_label")
+        or item.get("worktree_operator_handoff_label")
+        or item.get("lock_operator_handoff_label")
+        or ""
+    )
+
+
+def _agent_flow_item_handoff_copy(item: Mapping[str, Any]) -> str:
+    return str(
+        item.get("quarantine_operator_handoff_copy")
+        or item.get("paused_automation_operator_handoff_copy")
+        or item.get("mailbox_request_operator_handoff_copy")
+        or item.get("worktree_operator_handoff_copy")
+        or item.get("lock_operator_handoff_copy")
+        or ""
+    )
+
+
+def _agent_flow_preview_backlog_summary(
+    *,
+    items: list[dict[str, Any]],
+    preview_items: list[dict[str, Any]],
+    agent_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    def bump(counts: dict[str, int], key: str) -> None:
+        clean = key or "unknown"
+        counts[clean] = int(counts.get(clean) or 0) + 1
+
+    status_counts: dict[str, int] = {}
+    for item in items:
+        bump(status_counts, str(item.get("status") or "unknown"))
+
+    hidden_items = items[len(preview_items) :]
+    hidden_status_counts: dict[str, int] = {}
+    for item in hidden_items:
+        bump(hidden_status_counts, str(item.get("status") or "unknown"))
+
+    def parse_age_minutes(value: Any) -> int | None:
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return None
+
+    lane_next_items: dict[str, dict[str, Any]] = {}
+    pending_statuses = {
+        AGENT_FLOW_STATUS_SHAPE_INVALID,
+        AGENT_FLOW_STATUS_REVIEW_HEAD_MISMATCH,
+        AGENT_FLOW_STATUS_STABLE_PENDING,
+    }
+    for item in items:
+        status = str(item.get("status") or "")
+        if status not in pending_statuses:
+            continue
+        agent = str(item.get("agent") or "").strip()
+        if not agent or agent in lane_next_items:
+            continue
+        lane_next_items[agent] = item
+    lane_pending_items: dict[str, list[dict[str, Any]]] = {}
+    lane_stale_pending_counts: dict[str, int] = {}
+    lane_fresh_pending_counts: dict[str, int] = {}
+    for item in items:
+        status = str(item.get("status") or "")
+        if status not in pending_statuses:
+            continue
+        agent = str(item.get("agent") or "").strip()
+        if not agent:
+            continue
+        age_minutes = parse_age_minutes(item.get("age_minutes"))
+        is_stale = (
+            age_minutes is not None
+            and age_minutes >= AGENT_FLOW_PENDING_STALE_MINUTES
+        )
+        if is_stale:
+            lane_stale_pending_counts[agent] = (
+                int(lane_stale_pending_counts.get(agent) or 0) + 1
+            )
+        elif age_minutes is not None:
+            lane_fresh_pending_counts[agent] = (
+                int(lane_fresh_pending_counts.get(agent) or 0) + 1
+            )
+        rows = lane_pending_items.setdefault(agent, [])
+        if len(rows) >= AGENT_FLOW_PREVIEW_LIMIT:
+            continue
+        rows.append(
+            {
+                "status": status,
+                "path": str(item.get("path") or ""),
+                "open_path": str(item.get("open_path") or ""),
+                "reason": str(item.get("reason") or ""),
+                "action_label": str(item.get("action_label") or "Open request"),
+                "age_minutes": age_minutes,
+                "stale": is_stale,
+            }
+        )
+
+    pending_lanes: list[dict[str, Any]] = []
+    for row in agent_rows:
+        agent = str(row.get("agent") or "Agent")
+        pending_count = int(row.get("pending_count") or 0)
+        stable_pending_count = int(row.get("stable_pending_count") or 0)
+        shape_invalid_count = int(row.get("shape_invalid_count") or 0)
+        review_head_mismatch_count = int(row.get("review_head_mismatch_count") or 0)
+        stale_pending_count = int(lane_stale_pending_counts.get(agent) or 0)
+        fresh_pending_count = int(lane_fresh_pending_counts.get(agent) or 0)
+        if not any(
+            (
+                pending_count,
+                stable_pending_count,
+                shape_invalid_count,
+                review_head_mismatch_count,
+            )
+        ):
+            continue
+        next_item = lane_next_items.get(agent, {})
+        pending_lanes.append(
+            {
+                "agent": agent,
+                "pending_count": pending_count,
+                "stable_pending_count": stable_pending_count,
+                "stale_pending_count": stale_pending_count,
+                "fresh_pending_count": fresh_pending_count,
+                "shape_invalid_count": shape_invalid_count,
+                "review_head_mismatch_count": review_head_mismatch_count,
+                "oldest_pending_age_minutes": row.get("oldest_pending_age_minutes"),
+                "superseded_pending_count": int(row.get("superseded_pending_count") or 0),
+                "next_pending_status": str(next_item.get("status") or ""),
+                "next_pending_path": str(next_item.get("path") or ""),
+                "next_pending_open_path": str(next_item.get("open_path") or ""),
+                "next_pending_reason": str(next_item.get("reason") or ""),
+                "next_pending_action_label": str(next_item.get("action_label") or "Open request"),
+                "pending_items": lane_pending_items.get(agent, []),
+            }
+        )
+
+    def lane_priority(row: Mapping[str, Any]) -> tuple[int, int, int, int, int, str]:
+        oldest = row.get("oldest_pending_age_minutes")
+        try:
+            oldest_minutes = int(oldest)
+        except (TypeError, ValueError):
+            oldest_minutes = -1
+        return (
+            -int(row.get("shape_invalid_count") or 0),
+            -int(row.get("review_head_mismatch_count") or 0),
+            -int(row.get("stale_pending_count") or 0),
+            -int(row.get("stable_pending_count") or 0),
+            -oldest_minutes,
+            str(row.get("agent") or ""),
+        )
+
+    pending_lanes.sort(key=lane_priority)
+    next_hidden = hidden_items[0] if hidden_items else {}
+    stale_pending_lane_count = sum(
+        1 for row in pending_lanes if int(row.get("stale_pending_count") or 0) > 0
+    )
+    fresh_pending_lane_count = sum(
+        1 for row in pending_lanes if int(row.get("fresh_pending_count") or 0) > 0
+    )
+    return {
+        "total_item_count": len(items),
+        "preview_count": len(preview_items),
+        "preview_limit": AGENT_FLOW_PREVIEW_LIMIT,
+        "hidden_count": len(hidden_items),
+        "status_counts": status_counts,
+        "hidden_status_counts": hidden_status_counts,
+        "hidden_stable_pending_count": int(
+            hidden_status_counts.get(AGENT_FLOW_STATUS_STABLE_PENDING) or 0
+        ),
+        "hidden_worktree_count": int(
+            hidden_status_counts.get(AGENT_FLOW_STATUS_DIRTY_WORKTREE) or 0
+        )
+        + int(hidden_status_counts.get(AGENT_FLOW_STATUS_DETACHED_UNCONTAINED_WORKTREE) or 0),
+        "hidden_lock_count": int(hidden_status_counts.get(AGENT_FLOW_STATUS_STALE_LOCK_CANDIDATE) or 0)
+        + int(hidden_status_counts.get(AGENT_FLOW_STATUS_ACTIVE_LOCK_STARVATION) or 0),
+        "pending_lane_count": len(pending_lanes),
+        "stale_pending_lane_count": stale_pending_lane_count,
+        "fresh_pending_lane_count": fresh_pending_lane_count,
+        "stale_pending_item_count": sum(
+            int(count or 0) for count in lane_stale_pending_counts.values()
+        ),
+        "fresh_pending_item_count": sum(
+            int(count or 0) for count in lane_fresh_pending_counts.values()
+        ),
+        "pending_lanes": pending_lanes[:AGENT_FLOW_PREVIEW_LIMIT],
+        "hidden_pending_lane_count": max(0, len(pending_lanes) - AGENT_FLOW_PREVIEW_LIMIT),
+        "next_hidden_status": str(next_hidden.get("status") or ""),
+        "next_hidden_agent": str(next_hidden.get("agent") or ""),
+        "next_hidden_path": str(next_hidden.get("path") or ""),
+    }
+
+
+def _agent_flow_review_packet_summary(
+    *,
+    items: list[dict[str, Any]],
+    review_head_mismatch_count: int,
+) -> dict[str, Any]:
+    review_items = [
+        item
+        for item in items
+        if str(item.get("status") or "") == AGENT_FLOW_STATUS_REVIEW_HEAD_MISMATCH
+    ]
+    mismatch_count = max(int(review_head_mismatch_count or 0), len(review_items))
+    reason_counts = {
+        "head_mismatch": 0,
+        "cited_commit_missing": 0,
+        "branch_mismatch": 0,
+        "branch_not_contains_cited": 0,
+    }
+    for item in review_items:
+        reasons = set(_string_items(item.get("review_request_mismatch_reasons"), limit=12))
+        for reason in reason_counts:
+            if reason in reasons:
+                reason_counts[reason] += 1
+
+    branch_drift_count = int(reason_counts["branch_mismatch"] or 0) + int(
+        reason_counts["branch_not_contains_cited"] or 0
+    )
+    next_item = review_items[0] if review_items else {}
+    if mismatch_count:
+        detail_bits: list[str] = []
+        if reason_counts["head_mismatch"]:
+            detail_bits.append(f"{reason_counts['head_mismatch']} head drift")
+        if branch_drift_count:
+            detail_bits.append(f"{branch_drift_count} branch drift")
+        if reason_counts["cited_commit_missing"]:
+            detail_bits.append(f"{reason_counts['cited_commit_missing']} missing commit")
+        detail = (
+            f"{mismatch_count} review packet(s) cite stale or untrusted evidence"
+            + (": " + ", ".join(detail_bits) if detail_bits else "")
+            + "."
+        )
+    else:
+        detail = "No stale peer-review packets were found in stable mailbox requests."
+
+    samples: list[dict[str, Any]] = []
+    for item in review_items[:AGENT_FLOW_PREVIEW_LIMIT]:
+        samples.append(
+            {
+                "agent": str(item.get("agent") or ""),
+                "path": str(item.get("path") or ""),
+                "open_path": str(item.get("open_path") or ""),
+                "reason": str(item.get("reason") or ""),
+                "cited_commit": str(item.get("review_request_cited_commit") or ""),
+                "worktree_head": str(item.get("review_request_worktree_head") or ""),
+                "requested_branch": str(item.get("review_request_branch") or ""),
+                "worktree_branch": str(item.get("review_request_worktree_branch") or ""),
+                "mismatch_reasons": _string_items(item.get("review_request_mismatch_reasons"), limit=8),
+            }
+        )
+
+    return {
+        "status": (
+            AGENT_OS_READINESS_CHECK_WARNING
+            if mismatch_count
+            else AGENT_OS_READINESS_CHECK_PASSED
+        ),
+        "detail": detail,
+        "mismatch_count": mismatch_count,
+        "head_mismatch_count": int(reason_counts["head_mismatch"] or 0),
+        "missing_commit_count": int(reason_counts["cited_commit_missing"] or 0),
+        "branch_mismatch_count": int(reason_counts["branch_mismatch"] or 0),
+        "branch_not_contains_cited_count": int(reason_counts["branch_not_contains_cited"] or 0),
+        "branch_drift_count": branch_drift_count,
+        "same_run_evidence_required": bool(
+            branch_drift_count or reason_counts["cited_commit_missing"]
+        ),
+        "next_action_label": "Refresh review packet" if mismatch_count else "Keep monitoring",
+        "next_action_detail": str(next_item.get("reason") or detail) if mismatch_count else detail,
+        "next_action_path": str(next_item.get("path") or "") if mismatch_count else "",
+        "items": samples,
+    }
+
+
+def _agent_flow_health_snapshot(repo: CodeRepo | None) -> dict[str, Any]:
+    base = {
+        "status": AGENT_OS_READINESS_CHECK_PASSED,
+        "detail": "No project_ws agent mailbox was found for this repo.",
+        "agent_count": 0,
+        "raw_pending_count": 0,
+        "pending_count": 0,
+        "stable_pending_count": 0,
+        "shape_invalid_count": 0,
+        "shape_invalid_pending_count": 0,
+        "superseded_pending_count": 0,
+        "superseded_shape_invalid_count": 0,
+        "processed_count": 0,
+        "lock_count": 0,
+        "quarantined_target_count": 0,
+        "quarantined_target_active_count": 0,
+        "paused_automation_activity_count": 0,
+        "paused_automation_uncovered_count": 0,
+        "worktree_candidate_count": 0,
+        "worktree_scan_truncated": False,
+        "worktree_scan_worker_count": 0,
+        "dirty_worktree_count": 0,
+        "detached_worktree_count": 0,
+        "detached_uncontained_worktree_count": 0,
+        "worktree_problem_count": 0,
+        "worktrees": [],
+        "review_head_mismatch_count": 0,
+        "processed_deliverable_anomaly_count": 0,
+        "temp_publish_artifact_count": 0,
+        "stale_temp_publish_artifact_count": 0,
+        "active_lock_starvation_count": 0,
+        "stale_lock_candidate_count": 0,
+        "attention_count": 0,
+        "stable_after_seconds": AGENT_FLOW_STABLE_PENDING_SECONDS,
+        "stale_lock_after_minutes": AGENT_FLOW_STALE_LOCK_MINUTES,
+        "active_lock_starvation_after_minutes": AGENT_FLOW_STALE_LOCK_MINUTES,
+        "next_action": AGENT_OPERATOR_INBOX_ACTION_KEEP_MONITORING,
+        "next_action_label": "Keep monitoring",
+        "next_action_detail": "No external agent mailbox handoff needs operator review.",
+        "next_action_path": "",
+        "next_action_open_path": "",
+        "next_action_agent": "",
+        "agents": [],
+        "preview_backlog": {},
+        "review_packet_summary": {},
+        "quarantine_summary": {},
+        "quarantined_targets": [],
+        "items": [],
+    }
+    if repo is None:
+        return base
+    runtime_path = resolve_repo_runtime_path(repo)
+    if runtime_path is None:
+        return base
+    project_ws = runtime_path / "project_ws"
+    if not project_ws.is_dir():
+        return base
+    try:
+        lane_dirs = [
+            path
+            for path in project_ws.iterdir()
+            if path.is_dir() and not path.name.startswith("_")
+        ]
+    except OSError:
+        return {
+            **base,
+            "status": AGENT_OS_READINESS_CHECK_WARNING,
+            "detail": "Autopilot could not read project_ws mailbox lanes.",
+            "attention_count": 1,
+            "next_action": AGENT_OPERATOR_INBOX_ACTION_REVIEW_AGENT_FLOW,
+            "next_action_label": "Review agent flow",
+            "next_action_detail": "Open project_ws and verify agent mailbox state manually.",
+        }
+    lane_dirs.sort(key=lambda path: path.name.lower())
+    lane_dirs = lane_dirs[:AGENT_FLOW_AGENT_SCAN_LIMIT]
+
+    now = datetime.now(timezone.utc)
+    raw_pending_count = 0
+    pending_count = 0
+    stable_pending_count = 0
+    shape_invalid_count = 0
+    shape_invalid_pending_count = 0
+    superseded_pending_count = 0
+    superseded_shape_invalid_count = 0
+    processed_count = 0
+    lock_count = 0
+    quarantined_target_count = 0
+    quarantined_target_active_count = 0
+    paused_automation_activity_count = 0
+    paused_automation_uncovered_count = 0
+    worktree_candidate_count = 0
+    worktree_scan_truncated = False
+    worktree_scan_worker_count = 0
+    dirty_worktree_count = 0
+    detached_worktree_count = 0
+    detached_uncontained_worktree_count = 0
+    worktree_problem_count = 0
+    review_head_mismatch_count = 0
+    processed_deliverable_anomaly_count = 0
+    temp_publish_artifact_count = 0
+    stale_temp_publish_artifact_count = 0
+    active_lock_starvation_count = 0
+    stale_lock_candidate_count = 0
+    agent_rows: list[dict[str, Any]] = []
+    inbox_items: list[dict[str, Any]] = []
+
+    quarantined_targets = _agent_flow_quarantined_target_activity(runtime_path, now=now)
+    quarantine_summary = _agent_flow_quarantine_summary(quarantined_targets, now=now)
+    quarantined_target_count = len(quarantined_targets)
+    active_quarantined_targets = [target for target in quarantined_targets if target.get("active")]
+    quarantined_target_active_count = len(active_quarantined_targets)
+    active_quarantine_thread_ids = {
+        str(target.get("thread_id") or "").strip()
+        for target in active_quarantined_targets
+        if str(target.get("thread_id") or "").strip()
+    }
+    for target in active_quarantined_targets[:AGENT_FLOW_PREVIEW_LIMIT]:
+        thread_id = str(target.get("thread_id") or "").strip()
+        quarantine_status = str(target.get("status") or "").strip()
+        target_reason = str(target.get("reason") or "").strip()
+        session_age = target.get("target_session_age_minutes")
+        proof_window_minutes = target.get("proof_window_minutes")
+        proof_remaining_minutes = target.get("proof_window_remaining_minutes")
+        guidance = (
+            "Keep this target contained until the required proof window is satisfied; do not "
+            "trust related push, runtime, or mailbox evidence while it is still active."
+        )
+        age_detail = (
+            f"session wrote {float(session_age):.2f} minute(s) ago"
+            if isinstance(session_age, (int, float))
+            else "fresh target-session activity was detected"
+        )
+        proof_detail = (
+            f"; proof window has {int(proof_remaining_minutes)} minute(s) remaining"
+            if isinstance(proof_remaining_minutes, int) and proof_remaining_minutes > 0
+            else ""
+        )
+        inbox_items.append(
+            {
+                "kind": AGENT_OPERATOR_INBOX_ITEM_AGENT_FLOW,
+                "label": "Agent flow quarantined target active",
+                "agent": "AgentOps",
+                "status": AGENT_FLOW_STATUS_QUARANTINED_TARGET_ACTIVE,
+                "reason": truncate_text(
+                    f"Quarantined target {thread_id[:8]} is still active ({age_detail}{proof_detail}); "
+                    f"{quarantine_status}. {target_reason or guidance}",
+                    240,
+                )[0],
+                "path": str(target.get("registry_path") or ""),
+                "open_path": str(target.get("registry_open_path") or ""),
+                "created_at": str(target.get("target_session_last_write_utc") or ""),
+                "action_label": "Review target",
+                "quarantine_thread_id": thread_id,
+                "quarantine_status": quarantine_status,
+                "quarantine_reason": target_reason,
+                "quarantine_source": str(target.get("source") or ""),
+                "quarantine_session_age_minutes": session_age,
+                "quarantine_session_goal_status": str(target.get("target_session_goal_status") or ""),
+                "quarantine_session_path": str(target.get("target_session_path") or ""),
+                "quarantine_required_proof": str(target.get("required_proof") or ""),
+                "quarantine_activity_state": str(target.get("activity_state") or ""),
+                "quarantine_proof_window_minutes": proof_window_minutes,
+                "quarantine_proof_remaining_minutes": proof_remaining_minutes,
+                "quarantine_proof_next_check_utc": str(target.get("proof_window_next_check_utc") or ""),
+                "quarantine_proof_satisfied": bool(target.get("proof_satisfied")),
+                "quarantine_operator_group": str(target.get("operator_group") or ""),
+                "quarantine_operator_label": str(target.get("operator_label") or ""),
+                "quarantine_operator_guidance": str(target.get("operator_guidance") or ""),
+                "quarantine_operator_priority": int(target.get("operator_priority") or 0),
+                "quarantine_operator_handoff_label": str(target.get("operator_handoff_label") or ""),
+                "quarantine_operator_handoff_instruction": str(target.get("operator_handoff_instruction") or ""),
+                "quarantine_operator_handoff_copy": str(target.get("operator_handoff_copy") or ""),
+                "quarantine_operator_handoff_mutates_control_plane": bool(
+                    target.get("operator_handoff_mutates_control_plane")
+                ),
+                "quarantine_guidance": guidance,
+            }
+        )
+    paused_automation_activity = _agent_flow_paused_automation_activity(repo, now=now)
+    for automation in paused_automation_activity:
+        thread_id = str(automation.get("target_thread_id") or "").strip()
+        automation["covered_by_active_quarantine"] = bool(
+            thread_id and thread_id in active_quarantine_thread_ids
+        )
+    paused_automation_activity_count = len(paused_automation_activity)
+    uncovered_paused_automation = [
+        item
+        for item in paused_automation_activity
+        if not item.get("covered_by_active_quarantine")
+    ]
+    paused_automation_uncovered_count = len(uncovered_paused_automation)
+    for automation in uncovered_paused_automation[:AGENT_FLOW_PREVIEW_LIMIT]:
+        automation_id = str(automation.get("automation_id") or "").strip()
+        automation_name = str(automation.get("automation_name") or automation_id).strip()
+        automation_status = str(automation.get("automation_status") or "").strip()
+        thread_id = str(automation.get("target_thread_id") or "").strip()
+        session_age = automation.get("target_session_age_minutes")
+        threshold_minutes = automation.get("threshold_minutes")
+        guidance = (
+            "Review the paused automation target before trusting its output; a paused schedule should "
+            "not keep writing unless the operator intentionally resumed it."
+        )
+        age_detail = (
+            f"target session wrote {float(session_age):.2f} minute(s) ago"
+            if isinstance(session_age, (int, float))
+            else "fresh target-session activity was detected"
+        )
+        inbox_items.append(
+            {
+                "kind": AGENT_OPERATOR_INBOX_ITEM_AGENT_FLOW,
+                "label": "Agent flow paused automation active",
+                "agent": automation_name or "Codex automation",
+                "status": AGENT_FLOW_STATUS_PAUSED_AUTOMATION_ACTIVE,
+                "reason": truncate_text(
+                    f"Paused automation {automation_name or automation_id} is still active: "
+                    f"{age_detail}. {guidance}",
+                    240,
+                )[0],
+                "path": str(automation.get("config_display_path") or ""),
+                "open_path": str(automation.get("config_open_path") or ""),
+                "created_at": str(automation.get("target_session_last_write_utc") or ""),
+                "action_label": "Review automation",
+                "paused_automation_id": automation_id,
+                "paused_automation_name": automation_name,
+                "paused_automation_status": automation_status,
+                "paused_automation_rrule": str(automation.get("automation_rrule") or ""),
+                "paused_automation_thread_id": thread_id,
+                "paused_automation_session_age_minutes": session_age,
+                "paused_automation_threshold_minutes": threshold_minutes,
+                "paused_automation_goal_status": str(automation.get("target_session_goal_status") or ""),
+                "paused_automation_session_path": str(automation.get("target_session_path") or ""),
+                "paused_automation_guidance": guidance,
+                "paused_automation_covered_by_quarantine": bool(
+                    automation.get("covered_by_active_quarantine")
+                ),
+                "paused_automation_operator_handoff_label": str(automation.get("operator_handoff_label") or ""),
+                "paused_automation_operator_handoff_instruction": str(
+                    automation.get("operator_handoff_instruction") or ""
+                ),
+                "paused_automation_operator_handoff_copy": str(automation.get("operator_handoff_copy") or ""),
+                "paused_automation_operator_handoff_mutates_control_plane": bool(
+                    automation.get("operator_handoff_mutates_control_plane")
+                ),
+            }
+        )
+
+    worktree_health = _agent_flow_worktree_health(runtime_path)
+    worktree_candidate_count = int(worktree_health.get("candidate_count") or 0)
+    worktree_scan_truncated = bool(worktree_health.get("scan_truncated"))
+    worktree_scan_worker_count = int(worktree_health.get("scan_worker_count") or 0)
+    dirty_worktree_count = int(worktree_health.get("dirty_count") or 0)
+    detached_worktree_count = int(worktree_health.get("detached_count") or 0)
+    detached_uncontained_worktree_count = int(worktree_health.get("detached_uncontained_count") or 0)
+    worktree_problem_items = [
+        item for item in worktree_health.get("problems", []) if isinstance(item, Mapping)
+    ]
+    worktree_problem_count = len(worktree_problem_items)
+    for worktree in worktree_problem_items[:AGENT_FLOW_PREVIEW_LIMIT]:
+        worktree_name = str(worktree.get("name") or "worktree").strip()
+        worktree_path = str(worktree.get("path") or "").strip()
+        scope = str(worktree.get("scope") or "").strip()
+        branch = str(worktree.get("branch") or "").strip()
+        head_short = str(worktree.get("head_short") or "").strip()
+        change_count = int(worktree.get("change_count") or 0)
+        detached_uncontained = bool(worktree.get("detached_uncontained"))
+        dirty = bool(worktree.get("dirty"))
+        status_exit = int(worktree.get("git_status_exit_code") or 0)
+        status = (
+            AGENT_FLOW_STATUS_DETACHED_UNCONTAINED_WORKTREE
+            if detached_uncontained
+            else AGENT_FLOW_STATUS_DIRTY_WORKTREE
+        )
+        if detached_uncontained:
+            label = "Agent flow detached worktree needs branch"
+            action_label = "Review worktree"
+            issue_detail = "has no containing branch or remote ref"
+            guidance = str(
+                worktree.get("guidance")
+                or "Create or identify the owner branch before treating this worktree as deliverable evidence."
+            )
+        elif status_exit != 0:
+            label = "Agent flow worktree status failed"
+            action_label = "Review worktree"
+            issue_detail = "could not report git status"
+            guidance = str(
+                worktree.get("guidance")
+                or "Inspect the worktree before accepting related review, push, or merge evidence."
+            )
+        else:
+            label = "Agent flow dirty worktree needs review"
+            action_label = "Review worktree"
+            issue_detail = f"has {change_count} local change(s)"
+            guidance = str(
+                worktree.get("guidance")
+                or "Route the owning agent to publish, park, or discard the work before accepting downstream evidence."
+            )
+        branch_detail = f" on {branch}" if branch else ""
+        head_detail = f" at {head_short}" if head_short else ""
+        reason = (
+            f"Worktree {worktree_name}{branch_detail}{head_detail} {issue_detail}; "
+            f"scope {scope or 'unknown'}. {guidance}"
+        )
+        inbox_items.append(
+            {
+                "kind": AGENT_OPERATOR_INBOX_ITEM_AGENT_FLOW,
+                "label": label,
+                "agent": "Worktrees",
+                "status": status,
+                "reason": truncate_text(reason, 240)[0],
+                "path": worktree_path,
+                "open_path": str(worktree.get("open_path") or ""),
+                "created_at": "",
+                "action_label": action_label,
+                "worktree_name": worktree_name,
+                "worktree_path": worktree_path,
+                "worktree_open_path": str(worktree.get("open_path") or ""),
+                "worktree_scope": scope,
+                "worktree_branch": branch,
+                "worktree_head": str(worktree.get("head_sha") or ""),
+                "worktree_head_short": head_short,
+                "worktree_detached": bool(worktree.get("detached")),
+                "worktree_detached_uncontained": detached_uncontained,
+                "worktree_dirty": dirty,
+                "worktree_change_count": change_count,
+                "worktree_changes": _string_items(worktree.get("changes"), limit=AGENT_FLOW_WORKTREE_CHANGE_PREVIEW_LIMIT),
+                "worktree_containing_ref_count": int(worktree.get("containing_ref_count") or 0),
+                "worktree_containing_ref_sample": _string_items(worktree.get("containing_ref_sample"), limit=5),
+                "worktree_git_status_exit_code": status_exit,
+                "worktree_git_status_error": str(worktree.get("git_status_error") or ""),
+                "worktree_guidance": guidance,
+                "worktree_operator_handoff_label": str(worktree.get("operator_handoff_label") or ""),
+                "worktree_operator_handoff_instruction": str(
+                    worktree.get("operator_handoff_instruction") or ""
+                ),
+                "worktree_operator_handoff_copy": str(worktree.get("operator_handoff_copy") or ""),
+                "worktree_operator_handoff_mutates_control_plane": bool(
+                    worktree.get("operator_handoff_mutates_control_plane")
+                ),
+            }
+        )
+
+    for lane_dir in lane_dirs:
+        in_dir = lane_dir / "IN"
+        out_dir = lane_dir / "OUT"
+        state_dir = lane_dir / "OUT" / "_state"
+        if not in_dir.is_dir() and not out_dir.is_dir() and not state_dir.is_dir():
+            continue
+
+        processed_hashes, processed_paths, lane_processed_count = _agent_flow_processed_receipts(state_dir)
+        processed_count += lane_processed_count
+        processed_deliverable_anomalies = _agent_flow_processed_deliverable_anomalies(
+            state_dir,
+            now=now,
+            runtime_path=runtime_path,
+        )
+        processed_deliverable_anomaly_count += len(processed_deliverable_anomalies)
+        for anomaly in processed_deliverable_anomalies:
+            anomaly_kind = str(anomaly.get("anomaly_kind") or "").strip()
+            temp_path = str(anomaly.get("temp_path") or "").strip()
+            deliverable_path = str(anomaly.get("deliverable_path") or "").strip()
+            temp_age_minutes = int(anomaly.get("temp_age_minutes") or 0)
+            if anomaly_kind == "processed_deliverable_is_temp":
+                anomaly_detail = "the processed ledger points directly at a temp deliverable"
+            else:
+                anomaly_detail = "the processed ledger points at a missing final deliverable while a temp file exists"
+            guidance = (
+                "Review the processed receipt and publish the final deliverable before treating this handoff as closed."
+            )
+            inbox_items.append(
+                {
+                    "kind": AGENT_OPERATOR_INBOX_ITEM_AGENT_FLOW,
+                    "label": "Agent flow processed deliverable needs review",
+                    "agent": lane_dir.name,
+                    "status": AGENT_FLOW_STATUS_PROCESSED_DELIVERABLE_ANOMALY,
+                    "reason": truncate_text(
+                        f"{lane_dir.name} has a processed-deliverable anomaly: "
+                        f"{anomaly_detail}; temp file age {temp_age_minutes} minute(s). {guidance}",
+                        240,
+                    )[0],
+                    "path": temp_path or deliverable_path,
+                    "open_path": str(anomaly.get("temp_open_path") or ""),
+                    "created_at": str(anomaly.get("updated_at") or ""),
+                    "action_label": "Review deliverable",
+                    "processed_deliverable_anomaly_kind": anomaly_kind,
+                    "processed_deliverable_path": deliverable_path,
+                    "processed_deliverable_temp_path": temp_path,
+                    "processed_deliverable_temp_age_minutes": temp_age_minutes,
+                    "processed_deliverable_temp_byte_length": int(anomaly.get("temp_byte_length") or 0),
+                    "processed_deliverable_request_path": str(anomaly.get("request_path") or ""),
+                    "processed_deliverable_request_sha256": str(anomaly.get("request_sha256") or ""),
+                    "processed_deliverable_guidance": guidance,
+                }
+            )
+        try:
+            request_paths = [path for path in in_dir.glob("*.md") if path.is_file()] if in_dir.is_dir() else []
+        except OSError:
+            request_paths = []
+        request_paths.sort(key=_agent_flow_mtime)
+        superseded_paths, superseded_hashes = _agent_flow_superseded_request_refs(
+            request_paths,
+            runtime_path=runtime_path,
+        )
+        raw_pending_count += len(request_paths)
+
+        lane_pending = 0
+        lane_stable = 0
+        lane_shape_invalid = 0
+        lane_superseded = 0
+        lane_review_head_mismatch = 0
+        oldest_age_seconds: int | None = None
+        for request_path in request_paths:
+            try:
+                request_stat = request_path.stat()
+            except OSError:
+                continue
+            request_hash = _agent_flow_file_sha256(request_path)
+            if request_hash and request_hash in processed_hashes:
+                continue
+            if request_hash is None and _agent_flow_path_tokens(request_path, runtime_path) & processed_paths:
+                continue
+            age_seconds = max(0, int(now.timestamp() - request_stat.st_mtime))
+            rel_path = _agent_flow_relative_path(request_path, runtime_path)
+            mailbox_shape = _agent_flow_mailbox_shape(request_path)
+            shape_valid = bool(mailbox_shape.get("valid"))
+            superseded_ref = superseded_hashes.get(str(request_hash or "").lower())
+            if superseded_ref is None:
+                for token in _agent_flow_path_tokens(request_path, runtime_path):
+                    superseded_ref = superseded_paths.get(token)
+                    if superseded_ref is not None:
+                        break
+            if superseded_ref is not None:
+                superseded_pending_count += 1
+                lane_superseded += 1
+                if not shape_valid:
+                    superseded_shape_invalid_count += 1
+                continue
+            if not shape_valid:
+                shape_invalid_pending_count += 1
+            lane_pending += 1
+            pending_count += 1
+            oldest_age_seconds = (
+                age_seconds
+                if oldest_age_seconds is None
+                else max(oldest_age_seconds, age_seconds)
+            )
+            if age_seconds < AGENT_FLOW_STABLE_PENDING_SECONDS:
+                continue
+            lane_stable += 1
+            stable_pending_count += 1
+            age_minutes = max(0, int(age_seconds // 60))
+            mailbox_context = _agent_flow_mailbox_request_context(request_path)
+            mailbox_handoff = _agent_flow_mailbox_request_handoff(
+                lane=lane_dir.name,
+                request_path=rel_path,
+                open_path=str(request_path),
+                request_hash=str(request_hash or ""),
+                age_minutes=age_minutes,
+                context=mailbox_context,
+            )
+            if not shape_valid:
+                lane_shape_invalid += 1
+                shape_invalid_count += 1
+                missing = _string_items(mailbox_shape.get("missing"), limit=8)
+                missing_detail = ", ".join(missing[:4]) if missing else "unknown shape issue"
+                guidance = (
+                    "Publish a corrected superseding request with the full mailbox skeleton before routing."
+                )
+                inbox_items.append(
+                    {
+                        "kind": AGENT_OPERATOR_INBOX_ITEM_AGENT_FLOW,
+                        "label": "Agent flow request malformed",
+                        "agent": lane_dir.name,
+                        "status": AGENT_FLOW_STATUS_SHAPE_INVALID,
+                        "reason": truncate_text(
+                            f"{lane_dir.name} has a stable mailbox request with missing or invalid "
+                            f"fields: {missing_detail}. {guidance}",
+                            240,
+                        )[0],
+                        "path": rel_path,
+                        "open_path": str(request_path),
+                        "created_at": datetime.fromtimestamp(request_stat.st_mtime, timezone.utc).isoformat(),
+                        "age_minutes": age_minutes,
+                        "action_label": "Open request",
+                        "mailbox_shape_valid": False,
+                        "mailbox_shape_missing": missing,
+                        "mailbox_shape_guidance": guidance,
+                        "mailbox_shape_required": list(AGENT_FLOW_MAILBOX_REQUIRED_FIELDS),
+                        "control_byte_count": int(mailbox_shape.get("control_byte_count") or 0),
+                        "mailbox_request_hash": str(request_hash or ""),
+                        "mailbox_request_from": str(mailbox_context.get("from") or ""),
+                        "mailbox_request_to": str(mailbox_context.get("to") or ""),
+                        "mailbox_request_backlog_id": str(mailbox_context.get("backlog_id") or ""),
+                        "mailbox_request_push_intent": str(mailbox_context.get("push_intent") or ""),
+                        "mailbox_request_operator_handoff_label": str(
+                            mailbox_handoff.get("operator_handoff_label") or ""
+                        ),
+                        "mailbox_request_operator_handoff_instruction": str(
+                            mailbox_handoff.get("operator_handoff_instruction") or ""
+                        ),
+                        "mailbox_request_operator_handoff_copy": str(
+                            mailbox_handoff.get("operator_handoff_copy") or ""
+                        ),
+                        "mailbox_request_operator_handoff_mutates_control_plane": bool(
+                            mailbox_handoff.get("operator_handoff_mutates_control_plane")
+                        ),
+                        "mailbox_request_stale": bool(mailbox_handoff.get("stale")),
+                    }
+                )
+                continue
+            review_binding = _agent_flow_review_head_binding(request_path, runtime_path=runtime_path)
+            if review_binding.get("mismatch"):
+                lane_review_head_mismatch += 1
+                review_head_mismatch_count += 1
+                cited_commit = str(review_binding.get("cited_commit") or "").strip()
+                worktree_head = str(review_binding.get("worktree_head") or "").strip()
+                worktree = str(review_binding.get("worktree") or "").strip()
+                requested_branch = str(review_binding.get("requested_branch") or "").strip()
+                worktree_branch = str(review_binding.get("worktree_branch") or "").strip()
+                containing_branches = _string_items(
+                    review_binding.get("containing_branches"),
+                    limit=4,
+                )
+                cited_exists = bool(review_binding.get("cited_commit_exists"))
+                branch_contains_cited = review_binding.get("branch_contains_cited")
+                mismatch_reasons = _string_items(review_binding.get("mismatch_reasons"), limit=6)
+                if "branch_not_contains_cited" in mismatch_reasons:
+                    guidance = (
+                        "Publish a corrected author packet and review request from the observed "
+                        "branch HEAD with same-run branch-containment evidence before accepting "
+                        "approval or push evidence."
+                    )
+                else:
+                    guidance = (
+                        "Regenerate the peer-review request from current branch HEAD before accepting "
+                        "approval or push evidence."
+                    )
+                branch_detail = ""
+                if requested_branch:
+                    observed_branch = worktree_branch or "detached"
+                    if branch_contains_cited is False:
+                        branch_detail = (
+                            f" Requested branch {requested_branch} is at {observed_branch}, "
+                            "and the cited commit is not contained by that local branch."
+                        )
+                    elif observed_branch != requested_branch:
+                        branch_detail = (
+                            f" Requested branch {requested_branch}; observed branch {observed_branch}."
+                        )
+                if not cited_exists:
+                    branch_detail += " The cited commit object is not present in the worktree."
+                inbox_items.append(
+                    {
+                        "kind": AGENT_OPERATOR_INBOX_ITEM_AGENT_FLOW,
+                        "label": "Agent flow review head mismatch",
+                        "agent": lane_dir.name,
+                        "status": AGENT_FLOW_STATUS_REVIEW_HEAD_MISMATCH,
+                        "reason": truncate_text(
+                            f"{lane_dir.name} has a peer-review request citing {cited_commit[:10]} "
+                            f"while its current branch HEAD is {worktree_head[:10]}.{branch_detail} "
+                            f"{guidance}",
+                            240,
+                        )[0],
+                        "path": rel_path,
+                        "open_path": str(request_path),
+                        "created_at": datetime.fromtimestamp(request_stat.st_mtime, timezone.utc).isoformat(),
+                        "age_minutes": age_minutes,
+                        "action_label": "Review request",
+                        "mailbox_shape_valid": True,
+                        "mailbox_request_hash": str(request_hash or ""),
+                        "mailbox_request_from": str(mailbox_context.get("from") or ""),
+                        "mailbox_request_to": str(mailbox_context.get("to") or ""),
+                        "mailbox_request_backlog_id": str(mailbox_context.get("backlog_id") or ""),
+                        "mailbox_request_push_intent": str(mailbox_context.get("push_intent") or ""),
+                        "mailbox_request_operator_handoff_label": str(
+                            mailbox_handoff.get("operator_handoff_label") or ""
+                        ),
+                        "mailbox_request_operator_handoff_instruction": str(
+                            mailbox_handoff.get("operator_handoff_instruction") or ""
+                        ),
+                        "mailbox_request_operator_handoff_copy": str(
+                            mailbox_handoff.get("operator_handoff_copy") or ""
+                        ),
+                        "mailbox_request_operator_handoff_mutates_control_plane": bool(
+                            mailbox_handoff.get("operator_handoff_mutates_control_plane")
+                        ),
+                        "mailbox_request_stale": bool(mailbox_handoff.get("stale")),
+                        "review_request_worktree": worktree,
+                        "review_request_branch": requested_branch,
+                        "review_request_cited_commit": cited_commit,
+                        "review_request_cited_commit_exists": cited_exists,
+                        "review_request_worktree_head": worktree_head,
+                        "review_request_worktree_branch": worktree_branch,
+                        "review_request_containing_branches": containing_branches,
+                        "review_request_branch_contains_cited": branch_contains_cited,
+                        "review_request_mismatch_reasons": mismatch_reasons,
+                        "review_head_guidance": guidance,
+                    }
+                )
+                continue
+            inbox_items.append(
+                {
+                    "kind": AGENT_OPERATOR_INBOX_ITEM_AGENT_FLOW,
+                    "label": "Agent flow request waiting",
+                    "agent": lane_dir.name,
+                    "status": AGENT_FLOW_STATUS_STABLE_PENDING,
+                    "reason": truncate_text(
+                        f"{lane_dir.name} has an unprocessed mailbox request waiting "
+                        f"{max(1, age_seconds // 60)} minute(s).",
+                        240,
+                    )[0],
+                    "path": rel_path,
+                    "open_path": str(request_path),
+                    "created_at": datetime.fromtimestamp(request_stat.st_mtime, timezone.utc).isoformat(),
+                    "age_minutes": age_minutes,
+                    "action_label": "Open request",
+                    "mailbox_shape_valid": True,
+                    "mailbox_request_hash": str(request_hash or ""),
+                    "mailbox_request_from": str(mailbox_context.get("from") or ""),
+                    "mailbox_request_to": str(mailbox_context.get("to") or ""),
+                    "mailbox_request_created": str(mailbox_context.get("created") or ""),
+                    "mailbox_request_reply_to": str(mailbox_context.get("reply_to") or ""),
+                    "mailbox_request_priority": str(mailbox_context.get("priority") or ""),
+                    "mailbox_request_backlog_id": str(mailbox_context.get("backlog_id") or ""),
+                    "mailbox_request_push_intent": str(mailbox_context.get("push_intent") or ""),
+                    "mailbox_request_operator_handoff_label": str(
+                        mailbox_handoff.get("operator_handoff_label") or ""
+                    ),
+                    "mailbox_request_operator_handoff_instruction": str(
+                        mailbox_handoff.get("operator_handoff_instruction") or ""
+                    ),
+                    "mailbox_request_operator_handoff_copy": str(
+                        mailbox_handoff.get("operator_handoff_copy") or ""
+                    ),
+                    "mailbox_request_operator_handoff_mutates_control_plane": bool(
+                        mailbox_handoff.get("operator_handoff_mutates_control_plane")
+                    ),
+                    "mailbox_request_stale": bool(mailbox_handoff.get("stale")),
+                }
+            )
+
+        temp_publish_artifacts = _agent_flow_temp_publish_artifacts(
+            in_dir=in_dir,
+            out_dir=out_dir,
+            now=now,
+            runtime_path=runtime_path,
+        )
+        stale_temp_publish_artifacts = [
+            artifact for artifact in temp_publish_artifacts if artifact.get("stale")
+        ]
+        temp_publish_artifact_count += len(temp_publish_artifacts)
+        stale_temp_publish_artifact_count += len(stale_temp_publish_artifacts)
+        for artifact in stale_temp_publish_artifacts:
+            artifact_age_minutes = int(artifact.get("age_minutes") or 0)
+            artifact_location = str(artifact.get("location") or "").strip()
+            artifact_path = str(artifact.get("path") or "").strip()
+            guidance = (
+                "Review whether the publishing agent crashed mid-write; publish a clean final "
+                "replacement before marking the mailbox work processed."
+            )
+            inbox_items.append(
+                {
+                    "kind": AGENT_OPERATOR_INBOX_ITEM_AGENT_FLOW,
+                    "label": "Agent flow temp publish needs review",
+                    "agent": lane_dir.name,
+                    "status": AGENT_FLOW_STATUS_TEMP_PUBLISH_STALE,
+                    "reason": truncate_text(
+                        f"{lane_dir.name} has a stale {artifact_location} temp publish artifact "
+                        f"waiting {artifact_age_minutes} minute(s): {artifact_path}. {guidance}",
+                        240,
+                    )[0],
+                    "path": artifact_path,
+                    "open_path": str(artifact.get("open_path") or ""),
+                    "created_at": str(artifact.get("updated_at") or ""),
+                    "action_label": "Review temp",
+                    "temp_publish_location": artifact_location,
+                    "temp_publish_age_minutes": artifact_age_minutes,
+                    "temp_publish_byte_length": int(artifact.get("byte_length") or 0),
+                    "temp_publish_guidance": guidance,
+                }
+            )
+
+        latest_out = _agent_flow_latest_output(
+            out_dir,
+            now=now,
+            runtime_path=runtime_path,
+        )
+        owner_last_out = _agent_flow_latest_output(
+            out_dir,
+            now=now,
+            runtime_path=runtime_path,
+            owner_only=True,
+        )
+        lock_state = _agent_flow_lock_state(
+            state_dir / "run.lock",
+            now=now,
+            runtime_path=runtime_path,
+        )
+        stale_lock = False
+        active_lock_starvation = False
+        if lock_state:
+            lock_count += 1
+            stale_lock = bool(lock_state.get("stale"))
+            if stale_lock:
+                stale_lock_candidate_count += 1
+                lock_owner = str(lock_state.get("owner") or "").strip()
+                lock_pid = str(lock_state.get("pid") or "").strip()
+                lock_pid_source = str(lock_state.get("pid_source") or "").strip()
+                lock_pid_running = bool(lock_state.get("pid_running"))
+                lock_age_minutes = int(lock_state.get("age_minutes") or 0)
+                lock_purpose = str(lock_state.get("purpose") or "").strip()
+                lock_pid_process_name = str(lock_state.get("pid_process_name") or "").strip()
+                lock_pid_command_line = str(lock_state.get("pid_command_line") or "").strip()
+                lock_pid_is_sleep_helper = bool(lock_state.get("pid_is_sleep_helper"))
+                owner_detail = f"owner {lock_owner}; " if lock_owner else ""
+                if lock_pid:
+                    source_detail = f" ({lock_pid_source})" if lock_pid_source else ""
+                    pid_detail = f"PID {lock_pid}{source_detail} is not running"
+                else:
+                    pid_detail = "no PID was recorded"
+                lock_guidance = (
+                    "Review the lock file and latest OUT report before rerun; do not delete "
+                    "or rerun from Autopilot until the owner is confirmed stopped."
+                )
+                lock_recovery_posture = "owner_stopped_review_required"
+                lock_operator_handoff_copy = _agent_flow_lock_handoff_copy(
+                    lane=lane_dir.name,
+                    lock_path=str(lock_state.get("path") or ""),
+                    lock_owner=lock_owner,
+                    lock_pid=lock_pid,
+                    lock_pid_source=lock_pid_source,
+                    lock_pid_running=lock_pid_running,
+                    lock_age_minutes=lock_age_minutes,
+                    lock_started_at=str(lock_state.get("started_at") or ""),
+                    lock_cwd=str(lock_state.get("cwd") or ""),
+                    lock_purpose=lock_purpose,
+                    lock_recovery_posture=lock_recovery_posture,
+                    lock_guidance=lock_guidance,
+                )
+                inbox_items.append(
+                    {
+                        "kind": AGENT_OPERATOR_INBOX_ITEM_AGENT_FLOW,
+                        "label": "Agent flow lock needs review",
+                        "agent": lane_dir.name,
+                        "status": AGENT_FLOW_STATUS_STALE_LOCK_CANDIDATE,
+                        "reason": truncate_text(
+                            f"{lane_dir.name} run.lock is {lock_age_minutes} minute(s) old; "
+                            f"{owner_detail}{pid_detail}. {lock_guidance}",
+                            240,
+                        )[0],
+                        "path": str(lock_state.get("path") or ""),
+                        "open_path": str(lock_state.get("open_path") or ""),
+                        "created_at": str(lock_state.get("updated_at") or ""),
+                        "action_label": "Review lock",
+                        "lock_owner": lock_owner,
+                        "lock_pid": lock_pid,
+                        "lock_pid_source": lock_pid_source,
+                        "lock_pid_running": lock_pid_running,
+                        "lock_age_minutes": lock_age_minutes,
+                        "lock_started_at": str(lock_state.get("started_at") or ""),
+                        "lock_cwd": str(lock_state.get("cwd") or ""),
+                        "lock_purpose": lock_purpose,
+                        "lock_pid_process_name": lock_pid_process_name,
+                        "lock_pid_command_line": lock_pid_command_line,
+                        "lock_pid_is_sleep_helper": lock_pid_is_sleep_helper,
+                        "lock_recovery_posture": lock_recovery_posture,
+                        "lock_guidance": lock_guidance,
+                        "lock_operator_handoff_label": "Copy lock handoff",
+                        "lock_operator_handoff_copy": lock_operator_handoff_copy,
+                    }
+                )
+            elif (
+                lane_stable > 0
+                and bool(lock_state.get("pid_running"))
+                and int(lock_state.get("age_minutes") or 0) >= AGENT_FLOW_STALE_LOCK_MINUTES
+            ):
+                owner_last_out_age = (
+                    int(owner_last_out.get("age_minutes"))
+                    if owner_last_out.get("age_minutes") is not None
+                    else None
+                )
+                latest_out_skipped = bool(latest_out.get("looks_skipped_run_report"))
+                owner_out_skipped = bool(owner_last_out.get("looks_skipped_run_report"))
+                owner_output_stale = not owner_last_out or (
+                    owner_last_out_age is not None
+                    and owner_last_out_age >= AGENT_FLOW_STALE_LOCK_MINUTES
+                )
+                lock_owner = str(lock_state.get("owner") or lane_dir.name).strip()
+                lock_pid = str(lock_state.get("pid") or "").strip()
+                lock_pid_source = str(lock_state.get("pid_source") or "").strip()
+                lock_age_minutes = int(lock_state.get("age_minutes") or 0)
+                lock_purpose = str(lock_state.get("purpose") or "").strip()
+                lock_pid_process_name = str(lock_state.get("pid_process_name") or "").strip()
+                lock_pid_command_line = str(lock_state.get("pid_command_line") or "").strip()
+                lock_pid_is_sleep_helper = bool(lock_state.get("pid_is_sleep_helper"))
+                owner_out_name = str(owner_last_out.get("name") or "").strip()
+                if lock_pid_is_sleep_helper:
+                    owner_output_detail = "running lock PID is a sleep helper, not owner progress"
+                elif owner_out_skipped or latest_out_skipped:
+                    owner_output_detail = "latest owner output is a skipped-run report"
+                elif owner_out_name and owner_last_out_age is not None:
+                    owner_output_detail = f"latest owner OUT is {owner_last_out_age} minute(s) old"
+                else:
+                    owner_output_detail = "no owner OUT report was found"
+                if latest_out_skipped or owner_out_skipped or owner_output_stale or lock_pid_is_sleep_helper:
+                    active_lock_starvation = True
+                    active_lock_starvation_count += 1
+                    if lock_pid_is_sleep_helper:
+                        lock_guidance = (
+                            "Ask the owner lane to clear or reacquire the helper-only lock; "
+                            "do not route more review work behind it or delete the lock from "
+                            "Autopilot while the PID is running."
+                        )
+                        lock_recovery_posture = "owner_reacquire_required"
+                    else:
+                        lock_guidance = (
+                            "Review the target agent thread or latest OUT report before routing more work; "
+                            "do not delete the lock while the PID is running."
+                        )
+                        lock_recovery_posture = "inspect_owner_progress"
+                    lock_operator_handoff_copy = _agent_flow_lock_handoff_copy(
+                        lane=lane_dir.name,
+                        lock_path=str(lock_state.get("path") or ""),
+                        lock_owner=lock_owner,
+                        lock_pid=lock_pid,
+                        lock_pid_source=lock_pid_source,
+                        lock_pid_running=True,
+                        lock_age_minutes=lock_age_minutes,
+                        lock_started_at=str(lock_state.get("started_at") or ""),
+                        lock_cwd=str(lock_state.get("cwd") or ""),
+                        lock_purpose=lock_purpose,
+                        lock_recovery_posture=lock_recovery_posture,
+                        lock_guidance=lock_guidance,
+                        owner_last_out_path=str(owner_last_out.get("path") or ""),
+                    )
+                    inbox_items.append(
+                        {
+                            "kind": AGENT_OPERATOR_INBOX_ITEM_AGENT_FLOW,
+                            "label": "Agent flow active lock stalled",
+                            "agent": lane_dir.name,
+                            "status": AGENT_FLOW_STATUS_ACTIVE_LOCK_STARVATION,
+                            "reason": truncate_text(
+                                f"{lane_dir.name} has {lane_stable} stable mailbox request(s) behind "
+                                f"a running run.lock for {lock_age_minutes} minute(s); "
+                                f"{owner_output_detail}. {lock_guidance}",
+                                240,
+                            )[0],
+                            "path": str(lock_state.get("path") or ""),
+                            "open_path": str(lock_state.get("open_path") or ""),
+                            "created_at": str(lock_state.get("updated_at") or ""),
+                            "action_label": "Review lock",
+                            "lock_owner": lock_owner,
+                            "lock_pid": lock_pid,
+                            "lock_pid_source": lock_pid_source,
+                            "lock_pid_running": True,
+                            "lock_age_minutes": lock_age_minutes,
+                            "lock_started_at": str(lock_state.get("started_at") or ""),
+                            "lock_cwd": str(lock_state.get("cwd") or ""),
+                            "lock_purpose": lock_purpose,
+                            "lock_pid_process_name": lock_pid_process_name,
+                            "lock_pid_command_line": lock_pid_command_line,
+                            "lock_pid_is_sleep_helper": lock_pid_is_sleep_helper,
+                            "lock_recovery_posture": lock_recovery_posture,
+                            "lock_guidance": lock_guidance,
+                            "lock_operator_handoff_label": "Copy lock handoff",
+                            "lock_operator_handoff_copy": lock_operator_handoff_copy,
+                            "owner_last_out": owner_out_name,
+                            "owner_last_out_path": str(owner_last_out.get("path") or ""),
+                            "owner_last_out_open_path": str(owner_last_out.get("open_path") or ""),
+                            "owner_last_out_age_minutes": owner_last_out_age,
+                        }
+                    )
+
+        if lane_pending or lock_state or temp_publish_artifacts or processed_deliverable_anomalies:
+            agent_rows.append(
+                {
+                    "agent": lane_dir.name,
+                    "pending_count": lane_pending,
+                    "stable_pending_count": lane_stable,
+                    "shape_invalid_count": lane_shape_invalid,
+                    "review_head_mismatch_count": lane_review_head_mismatch,
+                    "processed_deliverable_anomaly_count": len(processed_deliverable_anomalies),
+                    "processed_deliverable_anomalies": processed_deliverable_anomalies[:AGENT_FLOW_PREVIEW_LIMIT],
+                    "temp_publish_artifact_count": len(temp_publish_artifacts),
+                    "stale_temp_publish_artifact_count": len(stale_temp_publish_artifacts),
+                    "superseded_pending_count": lane_superseded,
+                    "temp_publish_artifacts": temp_publish_artifacts[:AGENT_FLOW_PREVIEW_LIMIT],
+                    "oldest_pending_age_minutes": (
+                        max(0, int(oldest_age_seconds // 60))
+                        if oldest_age_seconds is not None
+                        else None
+                    ),
+                    "processed_count": lane_processed_count,
+                    "lock": lock_state,
+                    "latest_out": latest_out,
+                    "owner_last_out": owner_last_out,
+                    "stale_lock_candidate": stale_lock,
+                    "active_lock_starvation": active_lock_starvation,
+                }
+            )
+
+    stable_shape_valid_count = max(0, stable_pending_count - shape_invalid_count - review_head_mismatch_count)
+    attention_count = (
+        stable_pending_count
+        + quarantined_target_active_count
+        + paused_automation_uncovered_count
+        + worktree_problem_count
+        + stale_lock_candidate_count
+        + active_lock_starvation_count
+        + stale_temp_publish_artifact_count
+        + processed_deliverable_anomaly_count
+    )
+    if attention_count:
+        detail_parts: list[str] = []
+        if shape_invalid_count:
+            detail_parts.append(f"{shape_invalid_count} malformed stable mailbox request(s)")
+        if stable_shape_valid_count:
+            detail_parts.append(f"{stable_shape_valid_count} stable mailbox request(s)")
+        if quarantined_target_active_count:
+            detail_parts.append(f"{quarantined_target_active_count} active quarantined target(s)")
+        if paused_automation_activity_count:
+            if paused_automation_uncovered_count:
+                detail_parts.append(
+                    f"{paused_automation_uncovered_count}/{paused_automation_activity_count} paused automation target(s) active"
+                )
+            else:
+                detail_parts.append(
+                    f"{paused_automation_activity_count} paused automation target(s) active but already quarantined"
+                )
+        if detached_uncontained_worktree_count:
+            detail_parts.append(f"{detached_uncontained_worktree_count} detached uncontained worktree(s)")
+        if dirty_worktree_count:
+            detail_parts.append(f"{dirty_worktree_count} dirty worktree(s)")
+        if review_head_mismatch_count:
+            detail_parts.append(f"{review_head_mismatch_count} review head mismatch(es)")
+        if processed_deliverable_anomaly_count:
+            detail_parts.append(f"{processed_deliverable_anomaly_count} processed deliverable anomaly(s)")
+        if stale_temp_publish_artifact_count:
+            detail_parts.append(f"{stale_temp_publish_artifact_count} stale temp publish artifact(s)")
+        if active_lock_starvation_count:
+            detail_parts.append(f"{active_lock_starvation_count} active lock starvation warning(s)")
+        if stale_lock_candidate_count:
+            detail_parts.append(f"{stale_lock_candidate_count} stale lock candidate(s)")
+        detail = "Agent flow has " + ", ".join(detail_parts) + "."
+    elif pending_count:
+        detail = (
+            f"Agent flow has {pending_count} fresh mailbox request(s) inside the "
+            f"{AGENT_FLOW_STABLE_PENDING_SECONDS}-second grace window."
+        )
+    else:
+        detail = (
+            f"Agent flow mailboxes are clear across {len(lane_dirs)} lane(s); "
+            f"{processed_count} processed receipt(s) were recognized."
+        )
+    if superseded_shape_invalid_count:
+        detail += (
+            f" {superseded_shape_invalid_count} malformed superseded request(s) "
+            "were recognized as non-actionable."
+        )
+
+    lock_problem_items = [
+        item
+        for item in inbox_items
+        if str(item.get("status") or "")
+        in {
+            AGENT_FLOW_STATUS_ACTIVE_LOCK_STARVATION,
+            AGENT_FLOW_STATUS_STALE_LOCK_CANDIDATE,
+        }
+    ]
+    control_plane_trust = _agent_flow_control_plane_trust_summary(
+        quarantined_targets=quarantined_targets,
+        paused_automation_activity=paused_automation_activity,
+        worktree_problem_items=worktree_problem_items,
+        lock_problem_items=lock_problem_items,
+    )
+    inbox_items.sort(key=_agent_flow_item_priority)
+    preview_items = inbox_items[:AGENT_FLOW_PREVIEW_LIMIT]
+    preview_backlog = _agent_flow_preview_backlog_summary(
+        items=inbox_items,
+        preview_items=preview_items,
+        agent_rows=agent_rows,
+    )
+    review_packet_summary = _agent_flow_review_packet_summary(
+        items=inbox_items,
+        review_head_mismatch_count=review_head_mismatch_count,
+    )
+    next_item = preview_items[0] if preview_items else None
+    return {
+        "status": (
+            AGENT_OS_READINESS_CHECK_WARNING
+            if attention_count
+            else AGENT_OS_READINESS_CHECK_PASSED
+        ),
+        "detail": detail,
+        "agent_count": len(lane_dirs),
+        "raw_pending_count": raw_pending_count,
+        "pending_count": pending_count,
+        "stable_pending_count": stable_pending_count,
+        "shape_invalid_count": shape_invalid_count,
+        "shape_invalid_pending_count": shape_invalid_pending_count,
+        "superseded_pending_count": superseded_pending_count,
+        "superseded_shape_invalid_count": superseded_shape_invalid_count,
+        "processed_count": processed_count,
+        "lock_count": lock_count,
+        "quarantined_target_count": quarantined_target_count,
+        "quarantined_target_active_count": quarantined_target_active_count,
+        "quarantine_summary": quarantine_summary,
+        "quarantined_targets": quarantined_targets[:AGENT_FLOW_PREVIEW_LIMIT],
+        "paused_automation_activity_count": paused_automation_activity_count,
+        "paused_automation_uncovered_count": paused_automation_uncovered_count,
+        "paused_automation_activity": paused_automation_activity[:AGENT_FLOW_PREVIEW_LIMIT],
+        "control_plane_trust": control_plane_trust,
+        "worktree_candidate_count": worktree_candidate_count,
+        "worktree_scan_truncated": worktree_scan_truncated,
+        "worktree_scan_worker_count": worktree_scan_worker_count,
+        "dirty_worktree_count": dirty_worktree_count,
+        "detached_worktree_count": detached_worktree_count,
+        "detached_uncontained_worktree_count": detached_uncontained_worktree_count,
+        "worktree_problem_count": worktree_problem_count,
+        "worktrees": worktree_health.get("items", [])[:AGENT_FLOW_PREVIEW_LIMIT],
+        "review_head_mismatch_count": review_head_mismatch_count,
+        "processed_deliverable_anomaly_count": processed_deliverable_anomaly_count,
+        "temp_publish_artifact_count": temp_publish_artifact_count,
+        "stale_temp_publish_artifact_count": stale_temp_publish_artifact_count,
+        "active_lock_starvation_count": active_lock_starvation_count,
+        "stale_lock_candidate_count": stale_lock_candidate_count,
+        "attention_count": attention_count,
+        "stable_after_seconds": AGENT_FLOW_STABLE_PENDING_SECONDS,
+        "stale_lock_after_minutes": AGENT_FLOW_STALE_LOCK_MINUTES,
+        "active_lock_starvation_after_minutes": AGENT_FLOW_STALE_LOCK_MINUTES,
+        "next_action": (
+            AGENT_OPERATOR_INBOX_ACTION_REVIEW_AGENT_FLOW
+            if attention_count
+            else AGENT_OPERATOR_INBOX_ACTION_KEEP_MONITORING
+        ),
+        "next_action_label": "Review agent flow" if attention_count else "Keep monitoring",
+        "next_action_detail": (
+            str(next_item.get("reason") or detail)
+            if next_item is not None
+            else "No external agent mailbox handoff needs operator review."
+        ),
+        "next_action_path": str(next_item.get("path") or "") if next_item is not None else "",
+        "next_action_open_path": str(next_item.get("open_path") or "") if next_item is not None else "",
+        "next_action_agent": str(next_item.get("agent") or "") if next_item is not None else "",
+        "next_action_handoff_label": _agent_flow_item_handoff_label(next_item)
+        if next_item is not None
+        else "",
+        "next_action_handoff_copy": _agent_flow_item_handoff_copy(next_item)
+        if next_item is not None
+        else "",
+        "agents": agent_rows[:AGENT_FLOW_PREVIEW_LIMIT],
+        "preview_backlog": preview_backlog,
+        "review_packet_summary": review_packet_summary,
+        "items": preview_items,
+    }
+
+
 def _agent_operator_inbox_state(
     db: Session,
     *,
     repo_id: int,
     user_id: int | None,
     profiles: list[dict[str, Any]],
+    agent_flow: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    repo = db.get(CodeRepo, int(repo_id))
     profile_names = {
         int(profile["id"]): str(profile.get("name") or profile.get("profile_key") or "Agent")
         for profile in profiles
@@ -6225,6 +11032,8 @@ def _agent_operator_inbox_state(
         recovery_action: str | None = None,
         action_label: str | None = None,
         recovery_detail: str | None = None,
+        blocker: Mapping[str, Any] | None = None,
+        recovery_evidence: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload = {
             "kind": kind,
@@ -6234,6 +11043,8 @@ def _agent_operator_inbox_state(
             "agent": _agent_name(row.agent_profile_id),
             "status": row.status,
             "plan_status": row.plan_status,
+            "run_stage": row.current_stage,
+            "merge_status": row.merge_status,
             "reason": truncate_text(reason, 240)[0],
             "created_at": row.created_at.isoformat() if row.created_at else None,
             "updated_at": row.updated_at.isoformat() if row.updated_at else None,
@@ -6244,17 +11055,136 @@ def _agent_operator_inbox_state(
             payload["action_label"] = action_label
         if recovery_detail:
             payload["recovery_detail"] = truncate_text(recovery_detail, 240)[0]
+        if blocker:
+            payload["blocker"] = dict(blocker)
+        if recovery_evidence:
+            payload.update(dict(recovery_evidence))
         return payload
 
-    def _blocked_recovery(row: ProjectAutonomyRun) -> dict[str, str]:
+    def _blocked_validation_failures(row: ProjectAutonomyRun) -> list[dict[str, Any]]:
+        validation = _json_load(row.validation_json, [])
+        if not isinstance(validation, list):
+            return []
+        failures: list[dict[str, Any]] = []
+        for item in validation:
+            if not isinstance(item, Mapping):
+                continue
+            try:
+                exit_code = int(item.get("exit_code") or 0)
+            except (TypeError, ValueError):
+                exit_code = 0
+            blocker = _normalized_blocker_payload(item.get("blocker"))
+            policy_blocked = bool(blocker and blocker.get("can_rerun") is False)
+            if exit_code == 0 and not policy_blocked:
+                continue
+            summary_parts = [
+                str(item.get("stderr") or "").strip(),
+                str(item.get("stdout") or "").strip(),
+                str(item.get("skip_reason") or "").strip(),
+                str(blocker.get("raw_reason") or blocker.get("reason") or "").strip() if blocker else "",
+            ]
+            summary = " ".join(part for part in summary_parts if part)
+            failures.append(
+                {
+                    "step_key": str(
+                        item.get("step_key")
+                        or item.get("command")
+                        or item.get("name")
+                        or "validation"
+                    ),
+                    "exit_code": exit_code,
+                    "timed_out": bool(item.get("timed_out")),
+                    "policy_blocked": policy_blocked,
+                    "summary": truncate_text(summary, 180)[0] if summary else "",
+                }
+            )
+        return failures[:AGENT_OS_QUALITY_PROBLEM_PREVIEW_LIMIT + 1]
+
+    def _blocked_recovery_evidence(
+        row: ProjectAutonomyRun,
+        *,
+        raw_reason: str,
+        blocker: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        validation_failures = _blocked_validation_failures(row)
+        lower = raw_reason.lower()
+        if blocker:
+            category = "permission_boundary"
+            safety_posture = "review_only_no_rerun"
+        elif validation_failures or "validation" in lower:
+            category = "validation_failed"
+            safety_posture = "approval_first_rerun"
+        elif "quality gate" in lower or "architect" in lower:
+            category = "plan_quality_gate"
+            safety_posture = "revise_plan_before_rerun"
+        elif "merge" in lower:
+            category = "merge_blocked"
+            safety_posture = "approval_first_rerun"
+        else:
+            category = "blocked_run"
+            safety_posture = "approval_first_rerun"
+        first_failure = validation_failures[0] if validation_failures else {}
+        return {
+            "recovery_category": category,
+            "recovery_stage": str(row.current_stage or ""),
+            "recovery_plan_status": str(row.plan_status or ""),
+            "recovery_merge_status": str(row.merge_status or ""),
+            "recovery_safety_posture": safety_posture,
+            "recovery_failed_validation_count": len(validation_failures),
+            "recovery_failed_validation_steps": validation_failures,
+            "recovery_last_failed_step": str(first_failure.get("step_key") or ""),
+            "recovery_last_failed_exit_code": first_failure.get("exit_code"),
+            "recovery_last_failed_summary": str(first_failure.get("summary") or ""),
+        }
+
+    def _blocked_recovery(row: ProjectAutonomyRun) -> dict[str, Any]:
         raw_reason = str(row.merge_message or row.error_message or "").strip()
         if not raw_reason:
             raw_reason = "This agent stopped before completion."
         status = str(row.status or "").strip().replace("_", " ")
         lower = raw_reason.lower()
+        blocker = _autopilot_run_blocker_payload(row)
+        recovery_evidence = _blocked_recovery_evidence(
+            row,
+            raw_reason=raw_reason,
+            blocker=blocker,
+        )
+        if blocker:
+            has_command_receipt = any(
+                str(blocker.get(key) or "").strip()
+                for key in ("blocked_command", "command_preview", "script_name")
+            )
+            detail = (
+                _permission_blocker_task_detail(blocker)
+                if has_command_receipt
+                else str(blocker.get("reason") or RUNTIME_CONTROL_OPERATOR_GUIDANCE)
+            )
+            return {
+                "label": "Permission boundary" if not status else f"{status.title()} permission boundary",
+                "reason": detail,
+                "recovery_action": "",
+                "action_label": str(blocker.get("action_label") or "Review"),
+                "recovery_detail": str(
+                    blocker.get("recovery_detail")
+                    or "Open the run for context; do not rerun the same policy-blocked command."
+                ),
+                "blocker": blocker,
+                "recovery_evidence": recovery_evidence,
+            }
+        failed_step = str(recovery_evidence.get("recovery_last_failed_step") or "").strip()
+        failed_exit = recovery_evidence.get("recovery_last_failed_exit_code")
+        failed_summary = str(recovery_evidence.get("recovery_last_failed_summary") or "").strip()
+        failure_context = ""
+        if failed_step:
+            failure_context = f" Last failed check: {failed_step}"
+            if failed_exit is not None:
+                failure_context += f" exit {failed_exit}"
+            if failed_summary:
+                failure_context += f" ({failed_summary})"
+            failure_context += "."
         if "validation" in lower or "merge" in lower:
             detail = (
-                f"{raw_reason} Rerun safely with the failure context preserved, "
+                f"{raw_reason}{failure_context} Rerun safely with the failure context preserved, "
                 "keep Plan Mode approval-first, and require validation evidence before merge."
             )
         elif "quality gate" in lower or "architect" in lower:
@@ -6271,6 +11201,7 @@ def _agent_operator_inbox_state(
             "recovery_action": AGENT_OPERATOR_INBOX_RECOVERY_RERUN_SAFE,
             "action_label": "Rerun",
             "recovery_detail": "Prefill a fresh approval-first draft from this run.",
+            "recovery_evidence": recovery_evidence,
         }
 
     approval_runs: list[ProjectAutonomyRun] = []
@@ -6278,6 +11209,37 @@ def _agent_operator_inbox_state(
     blocked_runs: list[ProjectAutonomyRun] = []
     user_reply_runs: list[ProjectAutonomyRun] = []
     items: list[dict[str, Any]] = []
+    external_reports = _external_agent_report_alerts(repo)
+    agent_flow_payload = _mapping_payload(agent_flow)
+    control_plane_trust_summary = _mapping_payload(agent_flow_payload.get("control_plane_trust"))
+    agent_flow_items = [
+        dict(item)
+        for item in agent_flow_payload.get("items", [])
+        if isinstance(item, Mapping)
+    ][:AGENT_FLOW_PREVIEW_LIMIT]
+    agent_flow_attention_count = int(agent_flow_payload.get("attention_count") or len(agent_flow_items))
+    if agent_flow_attention_count and not agent_flow_items:
+        agent_flow_items = [
+            {
+                "kind": AGENT_OPERATOR_INBOX_ITEM_AGENT_FLOW,
+                "label": "Agent flow needs review",
+                "agent": str(agent_flow_payload.get("next_action_agent") or "Agent flow"),
+                "status": str(agent_flow_payload.get("status") or "warning"),
+                "reason": truncate_text(
+                    str(agent_flow_payload.get("next_action_detail") or agent_flow_payload.get("detail") or ""),
+                    240,
+                )[0],
+                "path": str(agent_flow_payload.get("next_action_path") or ""),
+                "open_path": str(agent_flow_payload.get("next_action_open_path") or ""),
+                "action_label": "Review",
+                "quarantine_operator_handoff_label": str(
+                    agent_flow_payload.get("next_action_handoff_label") or ""
+                ),
+                "quarantine_operator_handoff_copy": str(
+                    agent_flow_payload.get("next_action_handoff_copy") or ""
+                ),
+            }
+        ]
 
     for question in pending_questions:
         items.append(
@@ -6329,6 +11291,8 @@ def _agent_operator_inbox_state(
                     recovery_action=recovery["recovery_action"],
                     action_label=recovery["action_label"],
                     recovery_detail=recovery["recovery_detail"],
+                    blocker=recovery.get("blocker"),
+                    recovery_evidence=recovery.get("recovery_evidence"),
                 )
             )
         if status == RUN_STATUS_CHATTING:
@@ -6355,12 +11319,114 @@ def _agent_operator_inbox_state(
                     )
                 )
 
+    items.extend(external_reports)
+    external_report_count = len(external_reports)
+    external_report_blocker_counts: dict[str, int] = {}
+    for report in external_reports:
+        category = str(report.get("report_blocker_category") or "attention").strip() or "attention"
+        external_report_blocker_counts[category] = int(external_report_blocker_counts.get(category) or 0) + 1
+    release_trust_categories = {
+        "review_conflict",
+        "source_trust",
+        "pr_health",
+        "ci_blocked",
+        "report_quality",
+        "review_changes",
+        "blocked",
+    }
+    release_trust_count = sum(
+        int(external_report_blocker_counts.get(category) or 0)
+        for category in release_trust_categories
+    )
+    release_trust_group_counts = {
+        "release_trust": int(external_report_blocker_counts.get("source_trust") or 0)
+        + int(external_report_blocker_counts.get("blocked") or 0),
+        "pr_health": int(external_report_blocker_counts.get("pr_health") or 0)
+        + int(external_report_blocker_counts.get("ci_blocked") or 0),
+        "evidence_quality": int(external_report_blocker_counts.get("review_conflict") or 0)
+        + int(external_report_blocker_counts.get("report_quality") or 0)
+        + int(external_report_blocker_counts.get("review_changes") or 0),
+    }
+    release_trust_items = [
+        report
+        for report in external_reports
+        if str(report.get("report_blocker_category") or "") in release_trust_categories
+    ]
+    release_trust_items.sort(
+        key=lambda item: (
+            {
+                "review_conflict": 0,
+                "source_trust": 1,
+                "pr_health": 2,
+                "ci_blocked": 3,
+                "report_quality": 4,
+                "review_changes": 5,
+                "blocked": 6,
+            }.get(str(item.get("report_blocker_category") or ""), 9),
+            str(item.get("created_at") or ""),
+        )
+    )
+    release_trust_next = release_trust_items[0] if release_trust_items else {}
+    release_trust_summary = {
+        "status": (
+            AGENT_OS_READINESS_CHECK_WARNING
+            if release_trust_count
+            else AGENT_OS_READINESS_CHECK_PASSED
+        ),
+        "blocker_count": release_trust_count,
+        "category_counts": external_report_blocker_counts,
+        "group_counts": release_trust_group_counts,
+        "next_action_label": str(release_trust_next.get("report_next_action_label") or "Keep monitoring")
+        if release_trust_count
+        else "Keep monitoring",
+        "next_action_detail": str(
+            release_trust_next.get("report_next_action_detail")
+            or "No release-trust, PR-health, or evidence-quality report blockers are active."
+        )
+        if release_trust_count
+        else "No release-trust, PR-health, or evidence-quality report blockers are active.",
+        "next_action_agent": str(release_trust_next.get("agent") or "") if release_trust_count else "",
+        "next_action_category": str(release_trust_next.get("report_blocker_category") or "")
+        if release_trust_count
+        else "",
+        "detail": (
+            "Release trust has "
+            + f"{release_trust_count} report blocker(s): "
+            + ", ".join(
+                f"{count} {label}"
+                for label, count in (
+                    ("release trust", release_trust_group_counts["release_trust"]),
+                    ("PR health", release_trust_group_counts["pr_health"]),
+                    ("evidence quality", release_trust_group_counts["evidence_quality"]),
+                )
+                if count
+            )
+            + "."
+            if release_trust_count
+            else "Release trust has no active external report blockers."
+        ),
+        "items": [
+            {
+                "agent": str(item.get("agent") or ""),
+                "path": str(item.get("path") or ""),
+                "category": str(item.get("report_blocker_category") or ""),
+                "label": str(item.get("report_blocker_label") or ""),
+                "severity": str(item.get("report_blocker_severity") or ""),
+                "detail": str(item.get("report_next_action_detail") or ""),
+            }
+            for item in release_trust_items[:AGENT_OPERATOR_INBOX_PREVIEW_LIMIT]
+        ],
+    }
+    items.extend(agent_flow_items)
+    agent_flow_count = agent_flow_attention_count
     total_action_count = (
         pending_question_count
         + len(approval_runs)
         + len(clarification_runs)
         + len(blocked_runs)
         + len(user_reply_runs)
+        + external_report_count
+        + agent_flow_count
     )
     action_by_kind = {
         AGENT_OPERATOR_INBOX_ITEM_QUESTION: (
@@ -6383,6 +11449,14 @@ def _agent_operator_inbox_state(
             AGENT_OPERATOR_INBOX_ACTION_RECOVER_BLOCKER,
             "Recover blocker",
         ),
+        AGENT_OPERATOR_INBOX_ITEM_EXTERNAL_REPORT: (
+            AGENT_OPERATOR_INBOX_ACTION_REVIEW_EXTERNAL_REPORT,
+            "Review agent report",
+        ),
+        AGENT_OPERATOR_INBOX_ITEM_AGENT_FLOW: (
+            AGENT_OPERATOR_INBOX_ACTION_REVIEW_AGENT_FLOW,
+            "Review agent flow",
+        ),
     }
     priority_order = (
         AGENT_OPERATOR_INBOX_ITEM_QUESTION,
@@ -6390,6 +11464,8 @@ def _agent_operator_inbox_state(
         AGENT_OPERATOR_INBOX_ITEM_APPROVAL,
         AGENT_OPERATOR_INBOX_ITEM_USER_REPLY,
         AGENT_OPERATOR_INBOX_ITEM_BLOCKER,
+        AGENT_OPERATOR_INBOX_ITEM_AGENT_FLOW,
+        AGENT_OPERATOR_INBOX_ITEM_EXTERNAL_REPORT,
     )
     next_action_item = next(
         (
@@ -6408,18 +11484,33 @@ def _agent_operator_inbox_state(
         )
         next_action_detail = str(next_action_item.get("reason") or "").strip()
         next_action_run_id = next_action_item.get("run_id")
+        next_action_path = str(next_action_item.get("path") or "").strip()
+        next_action_open_path = str(next_action_item.get("open_path") or "").strip()
         next_action_agent = str(next_action_item.get("agent") or "").strip()
         next_action_recovery_action = str(next_action_item.get("recovery_action") or "").strip()
         next_action_button_label = str(next_action_item.get("action_label") or "").strip()
+        next_action_handoff_label = _agent_flow_item_handoff_label(next_action_item).strip()
+        next_action_handoff_copy = _agent_flow_item_handoff_copy(next_action_item).strip()
+        if (
+            next_action_kind == AGENT_OPERATOR_INBOX_ITEM_BLOCKER
+            and not next_action_recovery_action
+            and next_action_button_label
+        ):
+            next_action = AGENT_OPERATOR_INBOX_ACTION_REVIEW_BLOCKER
+            next_action_label = "Review blocker"
     else:
         next_action = AGENT_OPERATOR_INBOX_ACTION_KEEP_MONITORING
         next_action_label = "Keep monitoring"
         next_action_kind = ""
         next_action_detail = "No operator approvals, answers, replies, or blocked handoffs are waiting."
         next_action_run_id = None
+        next_action_path = ""
+        next_action_open_path = ""
         next_action_agent = ""
         next_action_recovery_action = ""
         next_action_button_label = ""
+        next_action_handoff_label = ""
+        next_action_handoff_copy = ""
     if total_action_count:
         parts = [
             (len(approval_runs), "approval"),
@@ -6427,11 +11518,13 @@ def _agent_operator_inbox_state(
             (pending_question_count, "question"),
             (len(user_reply_runs), "reply"),
             (len(blocked_runs), "blocked handoff"),
+            (agent_flow_count, "agent-flow handoff"),
+            (external_report_count, "agent report"),
         ]
         detail_bits = [f"{count} {label}(s)" for count, label in parts if count]
         detail = "Operator inbox has " + ", ".join(detail_bits) + "."
     else:
-        detail = "Operator inbox is clear: no approvals, clarifications, questions, replies, or blocked handoffs need attention."
+        detail = "Operator inbox is clear: no approvals, clarifications, questions, replies, blocked handoffs, agent-flow handoffs, or external agent report alerts need attention."
 
     return {
         "status": (
@@ -6447,14 +11540,23 @@ def _agent_operator_inbox_state(
         "pending_question_count": pending_question_count,
         "reply_waiting_count": len(user_reply_runs),
         "blocked_count": len(blocked_runs),
+        "external_report_count": external_report_count,
+        "external_report_blocker_counts": external_report_blocker_counts,
+        "release_trust_summary": release_trust_summary,
+        "control_plane_trust_summary": control_plane_trust_summary,
+        "agent_flow_count": agent_flow_count,
         "next_action": next_action,
         "next_action_label": next_action_label,
         "next_action_detail": truncate_text(next_action_detail, 240)[0],
         "next_action_kind": next_action_kind,
         "next_action_run_id": next_action_run_id,
+        "next_action_path": next_action_path,
+        "next_action_open_path": next_action_open_path,
         "next_action_agent": next_action_agent,
         "next_action_recovery_action": next_action_recovery_action,
         "next_action_button_label": next_action_button_label,
+        "next_action_handoff_label": next_action_handoff_label,
+        "next_action_handoff_copy": next_action_handoff_copy,
         "items": items[:AGENT_OPERATOR_INBOX_PREVIEW_LIMIT],
     }
 
@@ -6531,6 +11633,7 @@ def agent_os_readiness(
     repo_ready = runtime_path is not None and runtime_path.exists()
     local_model = _local_model_readiness_payload(select_local_model())
     quality_scorecard = _agent_os_quality_scorecard(db, repo_id=int(repo.id), user_id=user_id)
+    agent_flow = _agent_flow_health_snapshot(repo)
     runtime_queue = _agent_runtime_queue_state(
         db,
         repo_id=int(repo.id),
@@ -6542,6 +11645,7 @@ def agent_os_readiness(
         repo_id=int(repo.id),
         user_id=user_id,
         profiles=profiles,
+        agent_flow=agent_flow,
     )
     missing_profile_keys = sorted(codex_keys - profile_keys)
     codex_alignment = _agent_codex_alignment_scorecard(
@@ -6561,6 +11665,7 @@ def agent_os_readiness(
         operator_inbox=operator_inbox,
         local_model=local_model,
         codex_alignment=codex_alignment,
+        agent_flow=agent_flow,
     )
     codex_bench = _agent_codex_bench_payload(
         matching_count=len(codex_definitions),
@@ -6642,6 +11747,13 @@ def agent_os_readiness(
             "Operator inbox",
             str(operator_inbox["detail"]),
             count=int(operator_inbox.get("total_action_count") or 0),
+        ),
+        _readiness_check(
+            AGENT_OS_READINESS_CHECK_AGENT_FLOW,
+            str(agent_flow["status"]),
+            "Agent flow mailboxes",
+            str(agent_flow["detail"]),
+            count=int(agent_flow.get("attention_count") or 0),
         ),
         _readiness_check(
             AGENT_OS_READINESS_CHECK_CODEX_ALIGNMENT,
@@ -6810,6 +11922,7 @@ def agent_os_readiness(
         "teams": agent_teams,
         "local_model": local_model,
         "quality_scorecard": quality_scorecard,
+        AGENT_OS_AGENT_FLOW_KEY: agent_flow,
         "runtime_queue": runtime_queue,
         "operator_inbox": operator_inbox,
         "codex_alignment": codex_alignment,
@@ -7071,8 +12184,61 @@ def _mark_agent_schedule_cycle_started(
         if _agent_runtime_is_always_on(schedule_config)
         else _next_agent_schedule_run_at(schedule.rrule, from_time=started_at)
     )
+    _reset_agent_schedule_no_change_backoff(schedule)
     schedule.updated_at = started_at
     return schedule
+
+
+def _agent_schedule_budget_payload(schedule: ProjectAutonomyAgentSchedule) -> dict[str, Any]:
+    budget = _json_load(schedule.budget_json, {})
+    return dict(budget) if isinstance(budget, dict) else {}
+
+
+def _reset_agent_schedule_no_change_backoff(schedule: ProjectAutonomyAgentSchedule) -> None:
+    budget = _agent_schedule_budget_payload(schedule)
+    changed = False
+    for key in (
+        AGENT_SCHEDULE_NO_CHANGE_SKIP_STREAK_KEY,
+        AGENT_SCHEDULE_NO_CHANGE_FINGERPRINT_KEY,
+        AGENT_SCHEDULE_NO_CHANGE_LAST_SKIP_AT_KEY,
+    ):
+        if key in budget:
+            budget.pop(key, None)
+            changed = True
+    if changed:
+        schedule.budget_json = _json_text(budget)
+
+
+def _agent_schedule_record_no_change_backoff(
+    schedule: ProjectAutonomyAgentSchedule,
+    *,
+    material_fingerprint: str,
+    now: datetime,
+) -> dict[str, int | str]:
+    budget = _agent_schedule_budget_payload(schedule)
+    previous_fingerprint = str(
+        budget.get(AGENT_SCHEDULE_NO_CHANGE_FINGERPRINT_KEY) or ""
+    )
+    try:
+        previous_streak = int(
+            budget.get(AGENT_SCHEDULE_NO_CHANGE_SKIP_STREAK_KEY) or 0
+        )
+    except (TypeError, ValueError):
+        previous_streak = 0
+    streak = previous_streak + 1 if previous_fingerprint == material_fingerprint else 1
+    cooldown_seconds = min(
+        AGENT_SCHEDULE_NO_CHANGE_MAX_COOLDOWN_SECONDS,
+        AGENT_SCHEDULE_NO_CHANGE_COOLDOWN_SECONDS * (2 ** max(0, streak - 1)),
+    )
+    budget[AGENT_SCHEDULE_NO_CHANGE_SKIP_STREAK_KEY] = streak
+    budget[AGENT_SCHEDULE_NO_CHANGE_FINGERPRINT_KEY] = material_fingerprint
+    budget[AGENT_SCHEDULE_NO_CHANGE_LAST_SKIP_AT_KEY] = now.isoformat()
+    schedule.budget_json = _json_text(budget)
+    return {
+        "no_change_skip_streak": streak,
+        "no_change_cooldown_seconds": cooldown_seconds,
+        "no_change_cooldown_minutes": int(cooldown_seconds / 60),
+    }
 
 
 def _profile_has_open_scheduled_cycle(db: Session, profile_id: int) -> bool:
@@ -7758,6 +12924,80 @@ def _autopilot_evidence_reply(
     return "\n".join(lines)
 
 
+def _autopilot_model_usage_reply(
+    db: Session,
+    row: ProjectAutonomyRun,
+) -> str:
+    artifacts = (
+        db.query(ProjectAutonomyArtifact)
+        .filter(
+            ProjectAutonomyArtifact.run_id == row.run_id,
+            ProjectAutonomyArtifact.artifact_type == "model_call",
+        )
+        .order_by(ProjectAutonomyArtifact.id.asc())
+        .limit(50)
+        .all()
+    )
+    if not artifacts:
+        return (
+            "No model-call artifacts are recorded for this Autopilot run yet. "
+            "The chat answer you are reading was generated mechanically from run state."
+        )
+
+    calls = 0
+    ok = 0
+    failed = 0
+    total_latency = 0
+    latency_count = 0
+    estimated_cost = 0.0
+    models: set[str] = set()
+    purposes: set[str] = set()
+    for artifact in artifacts:
+        payload = _json_load(artifact.content_json, {})
+        if not isinstance(payload, Mapping):
+            continue
+        calls += 1
+        if payload.get("ok") is True:
+            ok += 1
+        elif payload.get("ok") is False:
+            failed += 1
+        model = str(payload.get("model") or "").strip()
+        if model:
+            models.add(model)
+        purpose = str(payload.get("purpose") or artifact.name or "").strip()
+        if purpose:
+            purposes.add(purpose)
+        try:
+            latency = int(float(payload.get("latency_ms") or 0))
+        except (TypeError, ValueError):
+            latency = 0
+        if latency > 0:
+            total_latency += latency
+            latency_count += 1
+        try:
+            estimated_cost += max(0.0, float(payload.get("estimated_cost_usd") or 0.0))
+        except (TypeError, ValueError):
+            pass
+
+    avg_latency = round(total_latency / latency_count) if latency_count else 0
+    lines = [
+        "Autopilot model usage recorded for this run:",
+        f"- Model calls: {calls} ({ok} succeeded, {failed} failed).",
+    ]
+    if models:
+        lines.append("- Models: " + ", ".join(sorted(models)[:6]) + ".")
+    if purposes:
+        lines.append("- Purposes: " + ", ".join(sorted(purposes)[:8]) + ".")
+    if avg_latency:
+        lines.append(f"- Average latency: {avg_latency} ms.")
+    if estimated_cost > 0:
+        lines.append(f"- Estimated paid model spend: ${estimated_cost:.6f}.")
+    else:
+        lines.append("- Estimated paid model spend recorded here: $0.000000.")
+    lines.append("This reply used the recorded artifacts and did not call a model.")
+    return "\n".join(lines)
+
+
 def _autopilot_run_context_reply(
     db: Session,
     row: ProjectAutonomyRun,
@@ -7961,6 +13201,224 @@ def _autopilot_operator_inbox_lines(readiness: Mapping[str, Any]) -> list[str]:
     lines = [line]
     if next_action_run_id:
         lines.append(f"Operator inbox target run: {next_action_run_id}")
+    release_trust = _mapping_payload(inbox.get("release_trust_summary"))
+    release_blockers = int(release_trust.get("blocker_count") or 0)
+    if release_blockers:
+        group_counts = _mapping_payload(release_trust.get("group_counts"))
+        lines.append(
+            "Operator release trust: "
+            f"{release_blockers} blocker(s), "
+            f"{int(group_counts.get('release_trust') or 0)} release-trust, "
+            f"{int(group_counts.get('pr_health') or 0)} PR-health, "
+            f"{int(group_counts.get('evidence_quality') or 0)} evidence-quality."
+        )
+        release_detail = str(release_trust.get("next_action_detail") or "").strip()
+        release_label = str(release_trust.get("next_action_label") or "").strip()
+        if release_label or release_detail:
+            release_action = "Operator release trust next action:"
+            if release_label:
+                release_action += f" {release_label}"
+            if release_detail:
+                release_action += f" - {release_detail}" if release_label else f" {release_detail}"
+            lines.append(release_action)
+    return lines
+
+
+def _autopilot_agent_flow_lines(readiness: Mapping[str, Any]) -> list[str]:
+    flow = _mapping_payload(readiness.get(AGENT_OS_AGENT_FLOW_KEY))
+    if not flow:
+        return []
+    status = str(flow.get("status") or "checking").replace("_", " ")
+    detail = str(flow.get("detail") or "").strip()
+    stable = int(flow.get("stable_pending_count") or 0)
+    pending = int(flow.get("pending_count") or 0)
+    malformed = int(flow.get("shape_invalid_count") or 0)
+    superseded_malformed = int(flow.get("superseded_shape_invalid_count") or 0)
+    active_quarantined_targets = int(flow.get("quarantined_target_active_count") or 0)
+    quarantined_targets = int(flow.get("quarantined_target_count") or 0)
+    paused_automation_activity = int(flow.get("paused_automation_activity_count") or 0)
+    paused_automation_uncovered = int(flow.get("paused_automation_uncovered_count") or 0)
+    dirty_worktrees = int(flow.get("dirty_worktree_count") or 0)
+    detached_worktrees = int(flow.get("detached_worktree_count") or 0)
+    detached_uncontained_worktrees = int(flow.get("detached_uncontained_worktree_count") or 0)
+    review_head_mismatches = int(flow.get("review_head_mismatch_count") or 0)
+    stale_locks = int(flow.get("stale_lock_candidate_count") or 0)
+    processed_deliverable_anomalies = int(flow.get("processed_deliverable_anomaly_count") or 0)
+    stale_temp_publish = int(flow.get("stale_temp_publish_artifact_count") or 0)
+    active_lock_starvation = int(flow.get("active_lock_starvation_count") or 0)
+    lock_count = int(flow.get("lock_count") or 0)
+    lines = [
+        (
+            "Agent flow: "
+            f"{stable}/{pending} stable pending, "
+            f"{malformed} malformed, "
+            f"{superseded_malformed} superseded malformed, "
+            f"{active_quarantined_targets}/{quarantined_targets} active quarantined target(s), "
+            f"{paused_automation_uncovered}/{paused_automation_activity} uncovered paused automation target(s), "
+            f"{dirty_worktrees} dirty worktree(s), "
+            f"{detached_uncontained_worktrees}/{detached_worktrees} detached uncontained worktree(s), "
+            f"{review_head_mismatches} review head mismatch(es), "
+            f"{processed_deliverable_anomalies} processed deliverable anomaly(s), "
+            f"{stale_temp_publish} stale temp publish artifact(s), "
+            f"{active_lock_starvation} active lock starvation warning(s), "
+            f"{stale_locks}/{lock_count} stale lock candidate(s) ({status})."
+        )
+    ]
+    if detail:
+        lines.append(f"Agent flow detail: {detail}")
+    review_packet = _mapping_payload(flow.get("review_packet_summary"))
+    if review_packet:
+        review_status = str(review_packet.get("status") or "checking").replace("_", " ")
+        review_detail = str(review_packet.get("detail") or "").strip()
+        review_mismatches = int(review_packet.get("mismatch_count") or 0)
+        if review_mismatches or review_detail:
+            lines.append(
+                "Review packet guard: "
+                f"{review_status}; {review_mismatches} stale packet(s)."
+                + (f" {review_detail}" if review_detail else "")
+            )
+    preview_backlog = _mapping_payload(flow.get("preview_backlog"))
+    hidden_count = int(preview_backlog.get("hidden_count") or 0)
+    if hidden_count:
+        hidden_status_counts = _mapping_payload(preview_backlog.get("hidden_status_counts"))
+        hidden_stable = int(
+            hidden_status_counts.get(AGENT_FLOW_STATUS_STABLE_PENDING) or 0
+        )
+        hidden_worktrees = int(hidden_status_counts.get(AGENT_FLOW_STATUS_DIRTY_WORKTREE) or 0) + int(
+            hidden_status_counts.get(AGENT_FLOW_STATUS_DETACHED_UNCONTAINED_WORKTREE) or 0
+        )
+        hidden_locks = int(hidden_status_counts.get(AGENT_FLOW_STATUS_STALE_LOCK_CANDIDATE) or 0) + int(
+            hidden_status_counts.get(AGENT_FLOW_STATUS_ACTIVE_LOCK_STARVATION) or 0
+        )
+        lines.append(
+            "Agent flow preview backlog: "
+            f"{hidden_count} hidden action(s), "
+            f"{hidden_stable} stable pending, "
+            f"{hidden_worktrees} worktree, "
+            f"{hidden_locks} lock."
+        )
+        pending_lanes = preview_backlog.get("pending_lanes")
+        if isinstance(pending_lanes, list) and pending_lanes:
+            lane_bits: list[str] = []
+            for lane in pending_lanes[:3]:
+                if not isinstance(lane, Mapping):
+                    continue
+                agent = str(lane.get("agent") or "Agent").strip()
+                stable_lane = int(lane.get("stable_pending_count") or 0)
+                pending_lane = int(lane.get("pending_count") or 0)
+                if agent:
+                    lane_bits.append(f"{agent} {stable_lane}/{pending_lane}")
+            if lane_bits:
+                lines.append("Agent flow pending lanes: " + ", ".join(lane_bits) + ".")
+    trust = _mapping_payload(flow.get("control_plane_trust"))
+    trust_blockers = int(trust.get("blocker_count") or 0)
+    if trust_blockers:
+        trust_counts = _mapping_payload(trust.get("category_counts"))
+        lines.append(
+            "Control-plane trust blockers: "
+            f"{trust_blockers} total, "
+            f"{int(trust_counts.get('quarantine') or 0)} quarantine, "
+            f"{int(trust_counts.get('paused_automation') or 0)} paused automation, "
+            f"{int(trust_counts.get('detached_worktree') or 0)} detached worktree, "
+            f"{int(trust_counts.get('dirty_worktree') or 0)} dirty worktree, "
+            f"{int(trust_counts.get('agent_lock') or 0)} agent lock."
+        )
+        trust_next = str(trust.get("next_action_label") or "").strip()
+        trust_detail = str(trust.get("next_action_detail") or "").strip()
+        if trust_next:
+            line = f"Control-plane trust next action: {trust_next}"
+            if trust_detail:
+                line += f" - {trust_detail}"
+            lines.append(line)
+    next_action = str(flow.get("next_action") or "").strip()
+    next_action_label = str(flow.get("next_action_label") or "").strip()
+    next_action_detail = str(flow.get("next_action_detail") or "").strip()
+    next_action_agent = str(flow.get("next_action_agent") or "").strip()
+    if next_action_label and next_action != AGENT_OPERATOR_INBOX_ACTION_KEEP_MONITORING:
+        action_line = f"Agent flow next action: {next_action_label}"
+        if next_action_agent:
+            action_line += f" - {next_action_agent}"
+        if next_action_detail:
+            action_line += f". {next_action_detail}"
+        lines.append(action_line)
+    items = flow.get("items")
+    if isinstance(items, list) and items:
+        lines.append("Agent flow targets:")
+        for item in items[:AGENT_OS_QUALITY_PROBLEM_PREVIEW_LIMIT]:
+            if not isinstance(item, Mapping):
+                continue
+            agent = str(item.get("agent") or "agent").strip()
+            item_status = str(item.get("status") or "pending").strip().replace("_", " ")
+            path = str(item.get("path") or "").strip()
+            missing = _string_items(item.get("mailbox_shape_missing"), limit=4)
+            details = []
+            if missing:
+                details.append("missing " + ", ".join(missing))
+            mailbox_hash = str(item.get("mailbox_request_hash") or "").strip()
+            mailbox_backlog = str(item.get("mailbox_request_backlog_id") or "").strip()
+            mailbox_from = str(item.get("mailbox_request_from") or "").strip()
+            mailbox_to = str(item.get("mailbox_request_to") or "").strip()
+            if bool(item.get("mailbox_request_stale")):
+                details.append("stale request")
+            if mailbox_backlog:
+                details.append(f"backlog {mailbox_backlog}")
+            if mailbox_from or mailbox_to:
+                details.append(f"{mailbox_from or '?'}->{mailbox_to or '?'}")
+            if mailbox_hash:
+                details.append(f"request sha {mailbox_hash[:10]}")
+            quarantine_thread = str(item.get("quarantine_thread_id") or "").strip()
+            quarantine_age = item.get("quarantine_session_age_minutes")
+            quarantine_operator = str(item.get("quarantine_operator_label") or "").strip()
+            if quarantine_thread:
+                details.append(f"target {quarantine_thread[:8]}")
+            if quarantine_operator:
+                details.append(quarantine_operator.lower())
+            if quarantine_age is not None:
+                details.append(f"session age {float(quarantine_age or 0):.2f}m")
+            quarantine_remaining = item.get("quarantine_proof_remaining_minutes")
+            if quarantine_remaining is not None:
+                details.append(f"proof remaining {int(quarantine_remaining or 0)}m")
+            paused_automation = str(item.get("paused_automation_id") or "").strip()
+            paused_age = item.get("paused_automation_session_age_minutes")
+            if paused_automation:
+                details.append(f"automation {paused_automation}")
+            if paused_age is not None:
+                details.append(f"session age {float(paused_age or 0):.2f}m")
+            worktree_name = str(item.get("worktree_name") or "").strip()
+            worktree_scope = str(item.get("worktree_scope") or "").strip()
+            worktree_change_count = item.get("worktree_change_count")
+            worktree_head = str(item.get("worktree_head_short") or "").strip()
+            if worktree_name:
+                details.append(f"worktree {worktree_name}")
+            if worktree_scope:
+                details.append(f"scope {worktree_scope}")
+            if worktree_head:
+                details.append(f"HEAD {worktree_head}")
+            if worktree_change_count is not None:
+                details.append(f"{int(worktree_change_count or 0)} change(s)")
+            lock_pid = str(item.get("lock_pid") or "").strip()
+            lock_age = item.get("lock_age_minutes")
+            lock_posture = str(item.get("lock_recovery_posture") or "").strip()
+            if lock_pid:
+                details.append(f"PID {lock_pid}")
+            if lock_age is not None:
+                details.append(f"lock age {int(lock_age or 0)}m")
+            if lock_posture:
+                details.append(lock_posture.replace("_", " "))
+            cited_commit = str(item.get("review_request_cited_commit") or "").strip()
+            worktree_head = str(item.get("review_request_worktree_head") or "").strip()
+            if cited_commit and worktree_head:
+                details.append(f"cited {cited_commit[:10]} != HEAD {worktree_head[:10]}")
+            temp_age = item.get("temp_publish_age_minutes")
+            if temp_age is not None:
+                details.append(f"temp age {int(temp_age or 0)}m")
+            deliverable_temp_age = item.get("processed_deliverable_temp_age_minutes")
+            if deliverable_temp_age is not None:
+                details.append(f"deliverable temp age {int(deliverable_temp_age or 0)}m")
+            if path:
+                details.append(path)
+            suffix = f" - {'; '.join(details)}" if details else ""
+            lines.append(f"- {agent}: {item_status}{suffix}")
     return lines
 
 
@@ -8236,6 +13694,7 @@ def _autopilot_command_doctor(
     coding_quality_bar_lines = _autopilot_coding_quality_bar_lines(readiness)
     runtime_queue_lines = _autopilot_runtime_queue_lines(readiness)
     operator_inbox_lines = _autopilot_operator_inbox_lines(readiness)
+    agent_flow_lines = _autopilot_agent_flow_lines(readiness)
     if not bool(local_model.get("coding_ready")):
         lines.append(f"Model next step: {local_model.get('recommendation') or AGENT_OS_LOCAL_MODEL_RECOMMENDATION}")
     lines.extend(
@@ -8267,6 +13726,7 @@ def _autopilot_command_doctor(
     lines.extend(codex_bench_lines)
     lines.extend(coding_quality_bar_lines)
     lines.extend(runtime_queue_lines)
+    lines.extend(agent_flow_lines)
     lines.extend(operator_inbox_lines)
     lines.extend(quality_monitor_lines)
     lines.extend(capability_audit_lines)
@@ -8339,6 +13799,7 @@ def _autopilot_command_quality(
             visual_qa = _mapping_payload(scorecard.get("visual_qa"))
             runtime_queue = _mapping_payload(readiness.get("runtime_queue"))
             operator_inbox = _mapping_payload(readiness.get("operator_inbox"))
+            agent_flow = _mapping_payload(readiness.get(AGENT_OS_AGENT_FLOW_KEY))
             codex_alignment = _mapping_payload(readiness.get("codex_alignment"))
             codex_bench_lines = _autopilot_codex_bench_lines(readiness)
             capability_audit_lines = _autopilot_capability_audit_lines(readiness)
@@ -8347,6 +13808,7 @@ def _autopilot_command_quality(
             coding_quality_bar_lines = _autopilot_coding_quality_bar_lines(readiness)
             runtime_queue_lines = _autopilot_runtime_queue_lines(readiness)
             operator_inbox_lines = _autopilot_operator_inbox_lines(readiness)
+            agent_flow_lines = _autopilot_agent_flow_lines(readiness)
             quality_lines.extend(
                 [
                     (
@@ -8383,7 +13845,25 @@ def _autopilot_command_quality(
                         f"{int(operator_inbox.get('total_action_count') or 0)} action(s), "
                         f"{int(operator_inbox.get('approval_count') or 0)} approval(s), "
                         f"{int(operator_inbox.get('clarification_count') or 0)} clarification(s), "
-                        f"{int(operator_inbox.get('pending_question_count') or 0)} question(s)."
+                        f"{int(operator_inbox.get('pending_question_count') or 0)} question(s), "
+                        f"{int(operator_inbox.get('agent_flow_count') or 0)} agent-flow handoff(s)."
+                    ),
+                    (
+                        "- Agent flow: "
+                        f"{int(agent_flow.get('stable_pending_count') or 0)}/"
+                        f"{int(agent_flow.get('pending_count') or 0)} stable pending, "
+                        f"{int(agent_flow.get('quarantined_target_active_count') or 0)}/"
+                        f"{int(agent_flow.get('quarantined_target_count') or 0)} active quarantined target(s), "
+                        f"{int(agent_flow.get('paused_automation_uncovered_count') or 0)}/"
+                        f"{int(agent_flow.get('paused_automation_activity_count') or 0)} uncovered paused automation target(s), "
+                        f"{int(agent_flow.get('dirty_worktree_count') or 0)} dirty worktree(s), "
+                        f"{int(agent_flow.get('detached_uncontained_worktree_count') or 0)}/"
+                        f"{int(agent_flow.get('detached_worktree_count') or 0)} detached uncontained worktree(s), "
+                        f"{int(agent_flow.get('review_head_mismatch_count') or 0)} review head mismatch(es), "
+                        f"{int(agent_flow.get('processed_deliverable_anomaly_count') or 0)} processed deliverable anomaly(s), "
+                        f"{int(agent_flow.get('stale_temp_publish_artifact_count') or 0)} stale temp publish artifact(s), "
+                        f"{int(agent_flow.get('active_lock_starvation_count') or 0)} active lock starvation warning(s), "
+                        f"{int(agent_flow.get('stale_lock_candidate_count') or 0)} stale lock candidate(s)."
                     ),
                     (
                         "- Local-vs-Codex alignment: "
@@ -8396,6 +13876,7 @@ def _autopilot_command_quality(
             quality_lines.extend(f"- {line}" for line in codex_bench_lines)
             quality_lines.extend(f"- {line}" for line in coding_quality_bar_lines)
             quality_lines.extend(f"- {line}" for line in runtime_queue_lines)
+            quality_lines.extend(f"- {line}" for line in agent_flow_lines)
             quality_lines.extend(f"- {line}" for line in operator_inbox_lines)
             quality_lines.extend(f"- {line}" for line in quality_monitor_lines)
             quality_lines.extend(f"- {line}" for line in capability_audit_lines)
@@ -8956,15 +14437,53 @@ def record_visual_validation(
     path: str | None = None,
     url: str | None = None,
     note: str | None = None,
+    not_applicable: bool = False,
+    rationale: str | None = None,
     user_id: int | None = None,
 ) -> dict[str, Any] | None:
     row = _get_run_row(db, run_id, user_id=user_id)
     if row is None:
         return None
     clean_kind = _clean_visual_kind(kind)
+    clean_note = (note or "").strip()
+    if not_applicable:
+        clean_rationale = _clean_visual_applicability_rationale(rationale, clean_note)
+        payload = {
+            "schema": VISUAL_QA_APPLICABILITY_SCHEMA,
+            "kind": clean_kind,
+            "source": VISUAL_EVIDENCE_SOURCE_OPERATOR,
+            "not_applicable": True,
+            "rationale": clean_rationale,
+            "note": clean_note or None,
+            "skipped": True,
+        }
+        review = f"Visual QA marked not applicable: {clean_rationale}"
+        _add_artifact(
+            db,
+            row.run_id,
+            VISUAL_ARTIFACT_TYPE_APPLICABILITY,
+            "visual_qa_not_applicable",
+            content_json=payload,
+            commit=False,
+        )
+        _add_artifact(
+            db,
+            row.run_id,
+            "ui_review",
+            "ui_agent_review",
+            content_json={
+                "summary": review,
+                "evidence_type": VISUAL_ARTIFACT_TYPE_APPLICABILITY,
+                "not_applicable": True,
+            },
+            commit=False,
+        )
+        _record_message(db, row, "assistant", review, message_type="validation", metadata=payload, commit=False)
+        db.commit()
+        db.refresh(row)
+        return run_payload(db, row, include_events=True)
     clean_path, path_reject_reason = _sanitize_visual_evidence_path(clean_kind, path)
     clean_url, url_reject_reason = _sanitize_visual_evidence_url(clean_kind, url)
-    clean_note = (note or "").strip()
     artifact_type = _visual_artifact_type(clean_kind)
     evidence_available = bool(clean_path or clean_url)
     skipped = not evidence_available
@@ -10242,6 +15761,12 @@ def _mechanical_autopilot_chat_reply(
             "Review the drafted plan and validation notes first. When the cockpit shows an approval-ready plan, "
             "use the approve action there; merge stays gated until validation passes."
         )
+    if is_how_to and any(marker in lower for marker in ("work", "use", "operate", "autopilot")):
+        return (
+            "Autopilot starts in chat mode, so questions here stay lightweight. Use "
+            f"{PLAN_START_CHAT_ACTION_LABEL} when you want a repo scan and approval-first plan; implementation, "
+            "validation, and merge remain gated after that."
+        )
 
     if any(
         marker in lower
@@ -10286,6 +15811,45 @@ def _mechanical_autopilot_chat_reply(
         )
     ):
         return _autopilot_evidence_reply(db, run)
+
+    if any(
+        marker in lower
+        for marker in (
+            "model call",
+            "model calls",
+            "llm call",
+            "llm calls",
+            "token usage",
+            "tokens used",
+            "usage cost",
+            "model cost",
+            "llm cost",
+            "openai cost",
+            "paid model",
+            "how much did this cost",
+            "how many tokens",
+        )
+    ):
+        return _autopilot_model_usage_reply(db, run)
+
+    if any(
+        marker in lower
+        for marker in (
+            "do you use openai",
+            "are you using openai",
+            "will this use openai",
+            "will this call openai",
+            "does this cost money",
+            "paid api",
+            "paid llm",
+            "expensive model",
+        )
+    ):
+        return (
+            "Autopilot chat answers routine cockpit questions with deterministic mechanics first. "
+            "Planning and implementation prefer local models and cached material state; paid model use, when present, "
+            "is recorded in model-call artifacts so it can be audited from this chat."
+        )
 
     if any(
         marker in lower
@@ -10341,8 +15905,31 @@ def _mechanical_autopilot_chat_reply(
     ):
         return None
 
-    if normalized in {"help", "commands", "what can you do", "what can i ask"}:
+    if normalized in {
+        "help",
+        "commands",
+        "what can you do",
+        "what can i ask",
+        "how does this work",
+        "how does autopilot work",
+        "explain autopilot",
+    }:
         return _autopilot_command_help()
+    if any(
+        marker in lower
+        for marker in (
+            "brainstorm",
+            "talk through",
+            "think through",
+            "help me decide",
+            "compare approaches",
+            "compare options",
+        )
+    ):
+        return (
+            "We can brainstorm here without starting repo work. For implementation-shaped ideas, "
+            f"use {PLAN_START_CHAT_ACTION_LABEL} when the direction is clear and I will draft a gated plan."
+        )
     if any(
         marker in lower
         for marker in (
@@ -10407,15 +15994,29 @@ def _mechanical_autopilot_chat_reply(
 
 def _chat_reply(db: Session, run: ProjectAutonomyRun, latest_user_message: str) -> str:
     if _looks_like_greeting_or_chat(latest_user_message):
+        _record_project_autonomy_chat_mechanical_reply()
         return _initial_chat_reply(latest_user_message)
     mechanical_reply = _mechanical_autopilot_chat_reply(db, run, latest_user_message)
     if mechanical_reply:
+        _record_project_autonomy_chat_mechanical_reply()
         return mechanical_reply
     if any(token in latest_user_message.lower() for token in ("implement", "change", "fix", "add", "update", "build")):
+        _record_project_autonomy_chat_mechanical_reply()
         return (
             "That sounds implementation-shaped. I can keep brainstorming here, or you can use "
             f"{PLAN_START_CHAT_ACTION_LABEL} in the sidebar when you want me to scan the repo and draft a safe plan."
         )
+    material_key = _autopilot_chat_material_key(run, latest_user_message)
+    cached_reply = _autopilot_chat_cache_get(material_key)
+    if cached_reply is not None:
+        return cached_reply
+
+    inflight_event, inflight_owner = _autopilot_chat_inflight_begin(material_key)
+    if not inflight_owner:
+        inflight_reply = _autopilot_chat_inflight_wait(material_key, inflight_event)
+        if inflight_reply is not None:
+            return inflight_reply
+
     model_info = select_local_model()
     if not model_info.get("model"):
         return (
@@ -10447,35 +16048,42 @@ def _chat_reply(db: Session, run: ProjectAutonomyRun, latest_user_message: str) 
             if attachment_context:
                 content = f"{content}\n{attachment_context}"
         messages.append({"role": role, "content": content})
-    result = ollama_client.chat(
-        messages,
-        str(model_info["model"]),
-        temperature=0.35,
-        timeout_sec=45,
-        options={"num_predict": 220, "num_ctx": 2048, "keep_alive": _OLLAMA_KEEP_ALIVE},
-    )
-    _note_model_call_result(str(model_info["model"]), result)
-    _add_artifact(
-        db,
-        run.run_id,
-        "model_call",
-        "chat_model_call",
-        content_json={
-            "model": model_info["model"],
-            "ok": result.ok,
-            "latency_ms": result.latency_ms,
-            "error": result.error,
-            "skipped_models": model_info.get("skipped_models"),
-            "purpose": "brainstorm_chat",
-        },
-        commit=False,
-    )
-    if result.ok and result.text.strip():
-        return _clip(result.text.strip(), CHAT_REPLY_LIMIT)
-    return (
-        "I'm here for the brainstorming. The local chat model didn't answer cleanly, "
-        "but we can still keep the idea moving or start a plan when you're ready."
-    )
+    try:
+        _record_project_autonomy_chat_model_call()
+        result = ollama_client.chat(
+            messages,
+            str(model_info["model"]),
+            temperature=0.35,
+            timeout_sec=45,
+            options={"num_predict": 220, "num_ctx": 2048, "keep_alive": _OLLAMA_KEEP_ALIVE},
+        )
+        _note_model_call_result(str(model_info["model"]), result)
+        _add_artifact(
+            db,
+            run.run_id,
+            "model_call",
+            "chat_model_call",
+            content_json={
+                "model": model_info["model"],
+                "ok": result.ok,
+                "latency_ms": result.latency_ms,
+                "error": result.error,
+                "skipped_models": model_info.get("skipped_models"),
+                "purpose": "brainstorm_chat",
+            },
+            commit=False,
+        )
+        if result.ok and result.text.strip():
+            reply = _clip(result.text.strip(), CHAT_REPLY_LIMIT)
+            _autopilot_chat_cache_set(material_key, reply)
+            return reply
+        return (
+            "I'm here for the brainstorming. The local chat model didn't answer cleanly, "
+            "but we can still keep the idea moving or start a plan when you're ready."
+        )
+    finally:
+        if inflight_owner:
+            _autopilot_chat_inflight_finish(material_key, inflight_event)
 
 
 def _sync_project_run(db: Session, run: ProjectAutonomyRun, *, title: str | None = None) -> None:
@@ -10508,6 +16116,7 @@ def _finish(
     error_message: str | None = None,
     merge_status: str | None = None,
     merge_message: str | None = None,
+    blocker: Mapping[str, Any] | None = None,
 ) -> ProjectAutonomyRun:
     now = _utcnow()
     run.status = status
@@ -10521,13 +16130,18 @@ def _finish(
         run.merge_message = merge_message
     run.finished_at = now
     run.updated_at = now
+    blocker_payload = _normalized_blocker_payload(blocker)
     _record_step(
         db,
         run,
         stage,
         title,
         status=status if status in {"failed", "blocked", "cancelled"} else "completed",
-        detail={"error_message": error_message, "merge_message": merge_message},
+        detail={
+            "error_message": error_message,
+            "merge_message": merge_message,
+            **({"blocker": blocker_payload} if blocker_payload else {}),
+        },
         commit=False,
     )
     _record_message(
@@ -10536,7 +16150,12 @@ def _finish(
         "assistant",
         _completion_message(run),
         message_type="result",
-        metadata={"status": status, "stage": stage, "merge_status": run.merge_status},
+        metadata={
+            "status": status,
+            "stage": stage,
+            "merge_status": run.merge_status,
+            **({"blocker": blocker_payload} if blocker_payload else {}),
+        },
         commit=False,
     )
     if run.project_run_id:
@@ -10553,6 +16172,7 @@ def _finish(
                     "merge_message": run.merge_message,
                     "branch": run.integration_branch,
                     "validation": _json_load(run.validation_json, []),
+                    **({"blocker": blocker_payload} if blocker_payload else {}),
                 },
                 error_message=error_message,
             )
@@ -11567,57 +17187,411 @@ def _commit_if_needed(worktree: Path, run: ProjectAutonomyRun) -> str | None:
 
 
 def command_allowed(argv: list[str], cwd: Path) -> tuple[bool, str | None]:
+    decision = command_policy_decision(argv, cwd)
+    return bool(decision.get("allowed")), decision.get("reason") if not decision.get("allowed") else None
+
+
+def command_policy_decision(argv: list[str], cwd: Path) -> dict[str, Any]:
+    def _allow(normalized: list[str]) -> dict[str, Any]:
+        return {
+            "allowed": True,
+            "reason": None,
+            "command_preview": _redacted_command_preview(normalized),
+            "decision": {
+                "behavior": "allow",
+                "decision_reason": {"type": "command_allowlist"},
+            },
+        }
+
+    def _deny(
+        reason: str,
+        normalized: list[str],
+        *,
+        boundary: str = AUTOPILOT_BLOCKER_BOUNDARY_COMMAND_POLICY,
+        details: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        blocker = _command_policy_blocker_payload(reason, argv=normalized, boundary=boundary)
+        if details:
+            blocker.update(dict(details))
+        return {
+            "allowed": False,
+            "reason": reason,
+            "command_preview": _redacted_command_preview(normalized),
+            "decision": blocker["decision"],
+            "blocker": blocker,
+        }
+
     if not argv:
-        return False, "empty command"
+        return _deny("empty command", [])
     normalized = [str(part).strip() for part in argv if str(part).strip()]
     lowered = [part.lower() for part in normalized]
     if not normalized:
-        return False, "empty command"
-    dangerous = {"rm", "del", "erase", "rmdir", "format", "curl", "wget", "pip", "poetry", "uv", "pnpm", "yarn"}
+        return _deny("empty command", [])
+    dangerous = {
+        "rm",
+        "del",
+        "erase",
+        "rmdir",
+        "format",
+        "curl",
+        "wget",
+        "pip",
+        "pip3",
+        "poetry",
+        "uv",
+        "pnpm",
+        "yarn",
+    }
     if lowered[0] in dangerous:
-        return False, "installs, network, and destructive commands require escalation"
-    if lowered[:3] == [sys.executable.lower(), "-m", "pytest"] or lowered[:2] == ["python", "-m"]:
-        return True, None
+        return _deny("installs, network, and destructive commands require escalation", normalized)
+    runtime_control = {
+        "alembic",
+        "compose",
+        "docker",
+        "docker-compose",
+        "flyctl",
+        "gunicorn",
+        "helm",
+        "kubectl",
+        "pm2",
+        "railway",
+        "service",
+        "systemctl",
+        "uvicorn",
+        "vercel",
+    }
+    if lowered[0] in runtime_control:
+        return _deny(
+            "runtime, deploy, migration, and service-control commands require explicit operator escalation",
+            normalized,
+            boundary=AUTOPILOT_BLOCKER_BOUNDARY_RUNTIME_CONTROL,
+        )
+    if len(lowered) >= 3 and _looks_like_python_executable(normalized[0]) and lowered[1] == "-m":
+        module = lowered[2]
+        if module in {"pytest", "py_compile", "compileall"}:
+            return _allow(normalized)
+        boundary = (
+            AUTOPILOT_BLOCKER_BOUNDARY_RUNTIME_CONTROL
+            if module in runtime_control
+            else AUTOPILOT_BLOCKER_BOUNDARY_COMMAND_POLICY
+        )
+        return _deny("python module commands are limited to pytest and compile checks", normalized, boundary=boundary)
+    if lowered[:2] == ["npm", "run"] and len(lowered) >= 3:
+        script = lowered[2]
+        script_decision = _npm_script_policy_decision(cwd, script)
+        if not script_decision["allowed"]:
+            return _deny(
+                str(script_decision["reason"]),
+                normalized,
+                boundary=str(script_decision.get("boundary") or AUTOPILOT_BLOCKER_BOUNDARY_COMMAND_POLICY),
+                details={
+                    "script_name": script,
+                    "script_preview": script_decision.get("script_preview"),
+                    "script_commands": script_decision.get("script_commands"),
+                    "blocked_command": script_decision.get("blocked_command"),
+                },
+            )
+        return _allow(normalized)
+    if lowered[:2] == ["npm", "test"]:
+        script_decision = _npm_script_policy_decision(cwd, "test")
+        if not script_decision["allowed"]:
+            return _deny(
+                str(script_decision["reason"]),
+                normalized,
+                boundary=str(script_decision.get("boundary") or AUTOPILOT_BLOCKER_BOUNDARY_COMMAND_POLICY),
+                details={
+                    "script_name": "test",
+                    "script_preview": script_decision.get("script_preview"),
+                    "script_commands": script_decision.get("script_commands"),
+                    "blocked_command": script_decision.get("blocked_command"),
+                },
+            )
+        return _allow(normalized)
     allowed_prefixes = (
         ("pytest",),
         ("ruff", "check"),
         ("mypy",),
-        ("npm", "test"),
-        ("npm", "run", "lint"),
-        ("npm", "run", "test"),
-        ("npm", "run", "build"),
         ("git", "status"),
         ("git", "diff"),
     )
     for prefix in allowed_prefixes:
         if tuple(lowered[: len(prefix)]) == prefix:
-            return True, None
-    if lowered[:2] == ["npm", "run"] and len(lowered) >= 3:
-        scripts = _package_scripts(cwd)
-        if lowered[2] in {"lint", "test", "build"} and lowered[2] in scripts:
-            return True, None
-    return False, "command is not in the Project Autopilot allowlist"
+            return _allow(normalized)
+    return _deny("command is not in the Project Autopilot allowlist", normalized)
 
 
-def _package_scripts(cwd: Path) -> set[str]:
+def _looks_like_python_executable(command: str) -> bool:
+    raw = str(command or "").strip()
+    if not raw:
+        return False
+    normalized = raw.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    known = {"python", "python.exe", "python3", "python3.exe", Path(sys.executable).name.lower()}
+    return raw.lower() == sys.executable.lower() or normalized in known
+
+
+_NPM_VALIDATION_SCRIPT_ALLOWLIST = frozenset({"lint", "test", "build"})
+_NPM_SCRIPT_RUNTIME_COMMANDS = frozenset(
+    {
+        "alembic",
+        "compose",
+        "docker",
+        "docker-compose",
+        "flyctl",
+        "gunicorn",
+        "helm",
+        "kubectl",
+        "pm2",
+        "railway",
+        "service",
+        "systemctl",
+        "uvicorn",
+        "vercel",
+    }
+)
+_NPM_SCRIPT_INSTALL_NETWORK_COMMANDS = frozenset(
+    {
+        "curl",
+        "npx",
+        "pip",
+        "pip3",
+        "pnpm",
+        "poetry",
+        "uv",
+        "wget",
+        "yarn",
+    }
+)
+_NPM_SCRIPT_DESTRUCTIVE_COMMANDS = frozenset({"del", "erase", "rm", "rmdir"})
+_NPM_SCRIPT_SHELL_COMMANDS = frozenset({"bash", "cmd", "fish", "powershell", "pwsh", "sh", "zsh"})
+_NPM_SCRIPT_ALLOWED_COMMANDS = frozenset(
+    {
+        "astro",
+        "ava",
+        "babel",
+        "biome",
+        "c8",
+        "cypress",
+        "eslint",
+        "esbuild",
+        "jest",
+        "karma",
+        "mocha",
+        "next",
+        "parcel",
+        "prettier",
+        "react-scripts",
+        "rollup",
+        "standard",
+        "stylelint",
+        "svelte-kit",
+        "tap",
+        "tape",
+        "tsc",
+        "tsup",
+        "vite",
+        "vitest",
+        "vue-cli-service",
+        "webpack",
+        "xo",
+    }
+)
+_NPM_SCRIPT_ALLOWED_CONTROL_OPERATORS = frozenset({"&&"})
+_NPM_SCRIPT_CONTROL_OPERATORS = frozenset({"&&", "||", "|", ";", "&", ">", ">>", "<", "<<", ">&", "<&"})
+_NPM_SCRIPT_WORD_RE = re.compile(r"[a-zA-Z0-9_.:@/\\=-]+")
+_NPM_SCRIPT_SENSITIVE_TERM_RE = re.compile(r"(?<![a-z0-9])(deploy|release|migration|migrations)(?![a-z0-9])")
+_NPM_SCRIPT_ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
+
+
+def _package_scripts_map(cwd: Path) -> dict[str, str]:
     pkg = cwd / "package.json"
     if not pkg.is_file():
-        return set()
+        return {}
     try:
         data = json.loads(pkg.read_text(encoding="utf-8", errors="replace"))
     except Exception:
-        return set()
+        return {}
     scripts = data.get("scripts") if isinstance(data, dict) else None
     if not isinstance(scripts, dict):
-        return set()
-    return {str(k).lower() for k in scripts.keys()}
+        return {}
+    return {str(k).lower(): str(v) for k, v in scripts.items() if isinstance(v, str)}
+
+
+def _package_scripts(cwd: Path) -> set[str]:
+    return set(_package_scripts_map(cwd).keys())
+
+
+def _redacted_script_preview(script: str) -> str:
+    tokens = _NPM_SCRIPT_WORD_RE.findall(script)
+    return _redacted_command_preview(tokens, limit=12)
+
+
+def _join_odd_shell_continuations(script: str) -> str:
+    def _replace(match: re.Match[str]) -> str:
+        raw = match.group(0)
+        newline = "\r\n" if raw.endswith("\r\n") else "\n"
+        slash_count = len(raw) - len(newline)
+        if slash_count % 2 == 1:
+            return "\\" * (slash_count - 1)
+        return raw
+
+    return re.sub(r"\\+(?:\r?\n)", _replace, script)
+
+
+def _tokenize_npm_script(script: str) -> tuple[list[str], str | None]:
+    joined = _join_odd_shell_continuations(script)
+    lexer = shlex.shlex(joined, posix=True, punctuation_chars=";&|()<>")
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    try:
+        return list(lexer), None
+    except ValueError as exc:
+        return [], f"npm script could not be parsed safely: {exc}"
+
+
+def _split_npm_script_segments(tokens: list[str]) -> tuple[list[list[str]], str | None]:
+    if not tokens:
+        return [], "npm script is empty"
+    segments: list[list[str]] = []
+    current: list[str] = []
+    for token in tokens:
+        if token in _NPM_SCRIPT_CONTROL_OPERATORS or all(char in ";&|()<>" for char in token):
+            if token not in _NPM_SCRIPT_ALLOWED_CONTROL_OPERATORS:
+                return [], "npm script uses shell control operators outside the safe validation policy"
+            if not current:
+                return [], "npm script has an empty command before a control operator"
+            segments.append(current)
+            current = []
+            continue
+        current.append(token)
+    if not current:
+        return [], "npm script has an empty command after a control operator"
+    segments.append(current)
+    return segments, None
+
+
+def _normalized_script_command_name(command: str) -> str:
+    name = str(command or "").strip().replace("\\", "/").rsplit("/", 1)[-1].lower()
+    for suffix in (".cmd", ".exe", ".bat", ".ps1"):
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
+def _script_segment_command(segment: list[str]) -> tuple[str, list[str]]:
+    remaining = list(segment)
+    while remaining and _NPM_SCRIPT_ENV_ASSIGNMENT_RE.match(remaining[0]):
+        remaining.pop(0)
+    if remaining and _normalized_script_command_name(remaining[0]) == "cross-env":
+        remaining.pop(0)
+        while remaining and _NPM_SCRIPT_ENV_ASSIGNMENT_RE.match(remaining[0]):
+            remaining.pop(0)
+    if not remaining:
+        return "", []
+    return _normalized_script_command_name(remaining[0]), remaining
+
+
+def _script_segments_preview(segments: list[list[str]]) -> list[str]:
+    return [_redacted_command_preview(segment, limit=8) for segment in segments]
+
+
+def _npm_script_segment_policy_reason(segment: list[str], script: str) -> tuple[str | None, str]:
+    if any("$" in token or "`" in token for token in segment):
+        return "npm script uses dynamic shell expansion outside the safe validation policy", AUTOPILOT_BLOCKER_BOUNDARY_COMMAND_POLICY
+    command, command_tokens = _script_segment_command(segment)
+    if not command:
+        return "npm script contains an empty command segment", AUTOPILOT_BLOCKER_BOUNDARY_COMMAND_POLICY
+    lower_tokens = [str(token).lower() for token in command_tokens]
+    token_text = " ".join(lower_tokens)
+    if command in _NPM_SCRIPT_SHELL_COMMANDS:
+        return "npm script invokes a shell wrapper outside the safe validation policy", AUTOPILOT_BLOCKER_BOUNDARY_COMMAND_POLICY
+    if command == "cross-env-shell":
+        return "npm script invokes a shell wrapper outside the safe validation policy", AUTOPILOT_BLOCKER_BOUNDARY_COMMAND_POLICY
+    if command in _NPM_SCRIPT_RUNTIME_COMMANDS:
+        return "npm script contains runtime, deploy, migration, or service-control commands", AUTOPILOT_BLOCKER_BOUNDARY_RUNTIME_CONTROL
+    if command in _NPM_SCRIPT_INSTALL_NETWORK_COMMANDS:
+        return "npm script contains install or network commands", AUTOPILOT_BLOCKER_BOUNDARY_COMMAND_POLICY
+    if command in _NPM_SCRIPT_DESTRUCTIVE_COMMANDS:
+        return "npm script contains destructive shell commands", AUTOPILOT_BLOCKER_BOUNDARY_COMMAND_POLICY
+    if _NPM_SCRIPT_SENSITIVE_TERM_RE.search(token_text) or _NPM_SCRIPT_SENSITIVE_TERM_RE.search(script.lower()):
+        return "npm script contains deploy, release, or migration terms outside the safe validation policy", AUTOPILOT_BLOCKER_BOUNDARY_RUNTIME_CONTROL
+    if command in {"python", "python3", Path(sys.executable).name.lower()}:
+        module_index = next((idx for idx, token in enumerate(lower_tokens) if token == "-m"), -1)
+        module = lower_tokens[module_index + 1] if 0 <= module_index < len(lower_tokens) - 1 else ""
+        if module in {"pytest", "py_compile", "compileall"}:
+            return None, AUTOPILOT_BLOCKER_BOUNDARY_COMMAND_POLICY
+        boundary = AUTOPILOT_BLOCKER_BOUNDARY_RUNTIME_CONTROL if module == "alembic" else AUTOPILOT_BLOCKER_BOUNDARY_COMMAND_POLICY
+        return "npm script contains a blocked python module command", boundary
+    if command in {"npm", "pnpm", "yarn"}:
+        verb = lower_tokens[1] if len(lower_tokens) > 1 else ""
+        if verb in {"add", "ci", "dlx", "exec", "install"}:
+            return "npm script contains install or network package-manager commands", AUTOPILOT_BLOCKER_BOUNDARY_COMMAND_POLICY
+        return "npm script nests package-manager commands that Project Autopilot cannot inspect safely", AUTOPILOT_BLOCKER_BOUNDARY_COMMAND_POLICY
+    if command not in _NPM_SCRIPT_ALLOWED_COMMANDS:
+        return "npm script contains a command outside the safe validation/build allowlist", AUTOPILOT_BLOCKER_BOUNDARY_COMMAND_POLICY
+    return None, AUTOPILOT_BLOCKER_BOUNDARY_COMMAND_POLICY
+
+
+def _npm_script_policy_decision(cwd: Path, script_name: str) -> dict[str, Any]:
+    clean_name = str(script_name or "").strip().lower()
+    if clean_name not in _NPM_VALIDATION_SCRIPT_ALLOWLIST:
+        return {
+            "allowed": False,
+            "reason": "npm script is not in the Project Autopilot validation allowlist",
+            "boundary": AUTOPILOT_BLOCKER_BOUNDARY_COMMAND_POLICY,
+        }
+    scripts = _package_scripts_map(cwd)
+    script = str(scripts.get(clean_name) or "").strip()
+    if not script:
+        return {
+            "allowed": False,
+            "reason": f"npm script '{clean_name}' is not defined in package.json",
+            "boundary": AUTOPILOT_BLOCKER_BOUNDARY_COMMAND_POLICY,
+        }
+    preview = _redacted_script_preview(script)
+    tokens, token_error = _tokenize_npm_script(script)
+    if token_error:
+        return {
+            "allowed": False,
+            "reason": f"npm script '{clean_name}' {token_error}",
+            "boundary": AUTOPILOT_BLOCKER_BOUNDARY_COMMAND_POLICY,
+            "script_preview": preview,
+        }
+    segments, segment_error = _split_npm_script_segments(tokens)
+    if segment_error:
+        return {
+            "allowed": False,
+            "reason": f"npm script '{clean_name}' {segment_error}",
+            "boundary": AUTOPILOT_BLOCKER_BOUNDARY_COMMAND_POLICY,
+            "script_preview": preview,
+            "script_commands": _script_segments_preview(segments),
+        }
+    for segment in segments:
+        reason, boundary = _npm_script_segment_policy_reason(segment, script)
+        if reason:
+            return {
+                "allowed": False,
+                "reason": f"npm script '{clean_name}' {reason}",
+                "boundary": boundary,
+                "script_preview": preview,
+                "script_commands": _script_segments_preview(segments),
+                "blocked_command": _redacted_command_preview(segment, limit=8),
+            }
+    return {
+        "allowed": True,
+        "reason": None,
+        "script_preview": preview,
+        "script_commands": _script_segments_preview(segments),
+    }
 
 
 def _run_allowlisted(argv: list[str], cwd: Path, *, timeout: int = 300) -> StepResult:
-    ok, reason = command_allowed(argv, cwd)
+    decision = command_policy_decision(argv, cwd)
+    ok = bool(decision.get("allowed"))
+    reason = decision.get("reason") if not ok else None
     key = "_".join(part.replace("-", "") for part in argv[:3])[:60] or "command"
     if not ok:
-        return StepResult(key, 0, False, "", "", True, reason)
+        metadata = {"permission_decision": decision, "blocker": decision.get("blocker")}
+        return StepResult(key, 0, False, "", "", True, str(reason or "command denied by policy"), metadata)
     env = subprocess_safe_env()
     try:
         proc = subprocess.Popen(
@@ -11642,7 +17616,7 @@ def _run_allowlisted(argv: list[str], cwd: Path, *, timeout: int = 300) -> StepR
 
 
 def _step_result_payload(result: StepResult) -> dict[str, Any]:
-    return {
+    payload = {
         "step_key": result.step_key,
         "exit_code": result.exit_code,
         "timed_out": result.timed_out,
@@ -11652,6 +17626,17 @@ def _step_result_payload(result: StepResult) -> dict[str, Any]:
         "skip_reason": result.skip_reason,
         "passed": result.exit_code == 0,
     }
+    metadata = getattr(result, "metadata", None)
+    if isinstance(metadata, Mapping):
+        blocker = metadata.get("blocker")
+        if isinstance(blocker, Mapping):
+            payload["blocker"] = dict(blocker)
+            if blocker.get("can_rerun") is False:
+                payload["passed"] = False
+        permission_decision = metadata.get("permission_decision")
+        if isinstance(permission_decision, Mapping):
+            payload["permission_decision"] = dict(permission_decision)
+    return payload
 
 
 def run_validation(worktree: Path, changed_files: list[str]) -> list[dict[str, Any]]:
@@ -11675,13 +17660,28 @@ def run_validation(worktree: Path, changed_files: list[str]) -> list[dict[str, A
 
 
 def validation_passed(results: list[dict[str, Any]]) -> bool:
-    return all(int(item.get("exit_code") or 0) == 0 for item in results)
+    return all(
+        int(item.get("exit_code") or 0) == 0 and not _validation_item_has_policy_blocker(item)
+        for item in results
+    )
+
+
+def _validation_item_has_policy_blocker(item: Any) -> bool:
+    if not isinstance(item, Mapping):
+        return False
+    blocker = _normalized_blocker_payload(item.get("blocker"))
+    return bool(blocker and blocker.get("can_rerun") is False)
 
 
 def _validation_failure_text(results: list[dict[str, Any]]) -> str:
-    failed = [r for r in results if int(r.get("exit_code") or 0) != 0]
+    failed = [r for r in results if int(r.get("exit_code") or 0) != 0 or _validation_item_has_policy_blocker(r)]
     return "\n\n".join(
-        f"{r.get('step_key')} exit={r.get('exit_code')}\n{r.get('stdout') or ''}\n{r.get('stderr') or ''}"
+        (
+            f"{r.get('step_key')} exit={r.get('exit_code')}\n"
+            f"{r.get('stdout') or ''}\n{r.get('stderr') or ''}\n"
+            f"{r.get('skip_reason') or ''}\n"
+            f"{_normalized_blocker_payload(r.get('blocker')).get('raw_reason') or ''}"
+        )
         for r in failed[:4]
     )[:5000]
 
@@ -11870,6 +17870,11 @@ def _run_planning_phase(db: Session, run: ProjectAutonomyRun, repo: CodeRepo, re
 
     _record_step(db, run, STAGE_CLASSIFY, "Classifying request", detail={"prompt_preview": run.prompt[:240]})
     _check_cancel(db, run)
+    if _looks_like_runtime_control_prompt(run.prompt):
+        raise AutonomyBlocked(
+            RUNTIME_CONTROL_BLOCKED_MESSAGE,
+            blocker=_runtime_control_blocker_payload(RUNTIME_CONTROL_BLOCKED_MESSAGE),
+        )
     if _looks_like_live_monitoring_prompt(run.prompt):
         raise AutonomyBlocked(
             "This looks like a live monitoring/debugging request rather than a repo-editing task. "
@@ -12180,6 +18185,288 @@ def _normalise_scheduled_agent_report(raw: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _git_text_or_none(cwd: Path, args: list[str], *, timeout: int = 20) -> str | None:
+    try:
+        proc = _git(cwd, args, timeout=timeout)
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    text = (proc.stdout or "").strip()
+    return text or None
+
+
+def _short_source_sha(value: str | None) -> str:
+    clean = str(value or "").strip()
+    return clean[:10] if len(clean) > 10 else clean
+
+
+def _scheduled_agent_source_receipt(
+    run: ProjectAutonomyRun,
+    repo: CodeRepo,
+    *,
+    repo_path: Path | None = None,
+    bind_base: bool = False,
+) -> dict[str, Any]:
+    path = repo_path if repo_path is not None else resolve_repo_runtime_path(repo)
+    payload: dict[str, Any] = {
+        "schema": SCHEDULED_AGENT_SOURCE_RECEIPT_SCHEMA,
+        "run_id": run.run_id,
+        "repo": str(repo.name or repo.path or ""),
+        "repo_path": str(path or repo.path or ""),
+        "mode": "plan_only",
+        "captured_at_utc": f"{_utcnow().replace(microsecond=0).isoformat()}Z",
+    }
+    if path is None or not path.exists():
+        payload.update(
+            {
+                "source_state": "unavailable",
+                "drift_state": "unavailable",
+                "detail": "Repository path was unavailable while building the scheduled report receipt.",
+            }
+        )
+        return payload
+    if _git_text_or_none(path, ["rev-parse", "--is-inside-work-tree"]) != "true":
+        payload.update(
+            {
+                "source_state": "not_git",
+                "drift_state": "unavailable",
+                "detail": "Repository path is not a git worktree.",
+            }
+        )
+        return payload
+
+    branch = _git_text_or_none(path, ["branch", "--show-current"]) or ""
+    head_sha = _git_text_or_none(path, ["rev-parse", "HEAD"]) or ""
+    if bind_base and head_sha and not str(run.base_sha or "").strip():
+        run.base_sha = head_sha
+    if bind_base and branch and not str(run.base_branch or "").strip():
+        run.base_branch = branch
+        run.target_branch = branch
+    base_sha = str(run.base_sha or "").strip()
+    dirty_text = _git_text_or_none(path, ["status", "--porcelain"], timeout=30) or ""
+    dirty_lines = [line.strip() for line in dirty_text.splitlines() if line.strip()]
+    source_state = "dirty" if dirty_lines else "clean"
+    if head_sha and base_sha:
+        head_matches_base = head_sha == base_sha
+        drift_state = "stable_at_base" if head_matches_base else "head_moved"
+    else:
+        head_matches_base = None
+        drift_state = "unbound"
+
+    payload.update(
+        {
+            "source_state": source_state,
+            "git_state": "git",
+            "drift_state": drift_state,
+            "branch": branch,
+            "head_sha": head_sha,
+            "head_short": _short_source_sha(head_sha),
+            "run_base_sha": base_sha,
+            "run_base_short": _short_source_sha(base_sha),
+            "head_matches_run_base": head_matches_base,
+            "dirty_status_count": len(dirty_lines),
+            "dirty_hash": _content_sha256("\n".join(dirty_lines)) if dirty_lines else "",
+            "dirty_preview": [_clip(line, 160) for line in dirty_lines[:5]],
+        }
+    )
+    return payload
+
+
+def _repo_source_material_state(repo: CodeRepo) -> dict[str, Any]:
+    path = resolve_repo_runtime_path(repo)
+    payload: dict[str, Any] = {
+        "repo_id": int(repo.id or 0),
+        "repo": str(repo.name or repo.path or ""),
+        "repo_path": str(path or repo.path or ""),
+    }
+    if path is None or not path.exists():
+        payload.update({"source_state": "unavailable", "git_state": "unavailable"})
+        return payload
+    if _git_text_or_none(path, ["rev-parse", "--is-inside-work-tree"]) != "true":
+        payload.update({"source_state": "not_git", "git_state": "unavailable"})
+        return payload
+    dirty_text = _git_text_or_none(path, ["status", "--porcelain"], timeout=30) or ""
+    dirty_lines = [line.strip() for line in dirty_text.splitlines() if line.strip()]
+    payload.update(
+        {
+            "source_state": "dirty" if dirty_lines else "clean",
+            "git_state": "git",
+            "branch": _git_text_or_none(path, ["branch", "--show-current"]) or "",
+            "head_sha": _git_text_or_none(path, ["rev-parse", "HEAD"]) or "",
+            "dirty_status_count": len(dirty_lines),
+            "dirty_hash": _content_sha256("\n".join(dirty_lines)) if dirty_lines else "",
+            "dirty_preview": [_clip(line, 160) for line in dirty_lines[:5]],
+        }
+    )
+    return payload
+
+
+def _scheduled_agent_material_payload(
+    *,
+    prompt: str,
+    profile_snapshot: Mapping[str, Any],
+    repo: CodeRepo,
+    source_state: Mapping[str, Any],
+) -> dict[str, Any]:
+    prompt_setting = profile_snapshot.get("prompt_setting") if isinstance(profile_snapshot.get("prompt_setting"), Mapping) else {}
+    permissions = profile_snapshot.get("permissions") if isinstance(profile_snapshot.get("permissions"), Mapping) else {}
+    return {
+        "schema": SCHEDULED_AGENT_MATERIAL_FINGERPRINT_SCHEMA,
+        "prompt": prompt,
+        "profile": {
+            "profile_key": profile_snapshot.get("profile_key"),
+            "name": profile_snapshot.get("name"),
+            "role": profile_snapshot.get("role"),
+            "tier": profile_snapshot.get("tier"),
+            "model_policy": profile_snapshot.get("model_policy"),
+            "permissions": permissions,
+            "prompt_setting": _scheduled_agent_material_prompt_setting(prompt_setting),
+        },
+        "repo": {
+            "id": int(repo.id or 0),
+            "name": str(repo.name or ""),
+            "path": str(repo.path or ""),
+        },
+        "source": {
+            "source_state": source_state.get("source_state"),
+            "git_state": source_state.get("git_state"),
+            "branch": source_state.get("branch"),
+            "head_sha": source_state.get("head_sha"),
+            "dirty_status_count": source_state.get("dirty_status_count"),
+            "dirty_hash": source_state.get("dirty_hash"),
+        },
+    }
+
+
+def _scheduled_agent_material_prompt_setting(prompt_setting: Mapping[str, Any]) -> dict[str, Any]:
+    automation = prompt_setting.get("codex_automation")
+    automation_payload = automation if isinstance(automation, Mapping) else {}
+    return {
+        "source": prompt_setting.get("source"),
+        "system_prompt": prompt_setting.get("system_prompt"),
+        CODEX_AUTOMATION_OPERATOR_MODIFIED_KEY: prompt_setting.get(CODEX_AUTOMATION_OPERATOR_MODIFIED_KEY),
+        "codex_automation": {
+            "id": automation_payload.get("id"),
+            "kind": automation_payload.get("kind"),
+            "status": automation_payload.get("status"),
+            "rrule": automation_payload.get("rrule"),
+            "normalized_rrule": automation_payload.get("normalized_rrule"),
+            CODEX_AUTOMATION_CWDS_KEY: automation_payload.get(CODEX_AUTOMATION_CWDS_KEY),
+            CODEX_AUTOMATION_PROMPT_HASH_KEY: automation_payload.get(CODEX_AUTOMATION_PROMPT_HASH_KEY),
+            "operating_contract": automation_payload.get("operating_contract"),
+        },
+    }
+
+
+def _scheduled_agent_material_fingerprint(payload: Mapping[str, Any]) -> str:
+    return _content_sha256(json.dumps(payload, sort_keys=True, default=str))
+
+
+def _scheduled_agent_current_material(
+    profile: ProjectAutonomyAgentProfile,
+    repo: CodeRepo,
+) -> dict[str, Any]:
+    payload = _scheduled_agent_material_payload(
+        prompt=_scheduled_agent_cycle_prompt(profile),
+        profile_snapshot=_agent_profile_snapshot(profile),
+        repo=repo,
+        source_state=_repo_source_material_state(repo),
+    )
+    return {
+        "payload": payload,
+        "fingerprint": _scheduled_agent_material_fingerprint(payload),
+    }
+
+
+def _latest_scheduled_agent_material_fingerprint(
+    db: Session,
+    profile_id: int,
+) -> str | None:
+    rows = (
+        db.query(ProjectAutonomyRun)
+        .filter(
+            ProjectAutonomyRun.agent_profile_id == int(profile_id),
+            ProjectAutonomyRun.autonomy_level == AUTONOMY_LEVEL_SCHEDULED_AGENT,
+            ProjectAutonomyRun.status.in_([RUN_STATUS_COMPLETED, RUN_STATUS_MERGED]),
+            ProjectAutonomyRun.archived_at.is_(None),
+        )
+        .order_by(ProjectAutonomyRun.id.desc())
+        .limit(5)
+        .all()
+    )
+    for row in rows:
+        artifact = (
+            db.query(ProjectAutonomyArtifact)
+            .filter(
+                ProjectAutonomyArtifact.run_id == row.run_id,
+                ProjectAutonomyArtifact.name == SCHEDULED_AGENT_REPORT_ARTIFACT_NAME,
+            )
+            .order_by(ProjectAutonomyArtifact.id.desc())
+            .first()
+        )
+        if artifact is None:
+            continue
+        payload = _json_load(artifact.content_json, {})
+        if not isinstance(payload, dict):
+            continue
+        fingerprint = str(payload.get("material_fingerprint") or "")
+        if fingerprint:
+            return fingerprint
+    return None
+
+
+def _scheduled_agent_no_change_skip(
+    db: Session,
+    profile: ProjectAutonomyAgentProfile,
+    repo: CodeRepo | None,
+    *,
+    now: datetime,
+) -> dict[str, Any] | None:
+    if repo is None:
+        return None
+    current = _scheduled_agent_current_material(profile, repo)
+    previous = _latest_scheduled_agent_material_fingerprint(db, int(profile.id))
+    if not previous or previous != current["fingerprint"]:
+        return None
+    _record_project_autonomy_no_change_skip("scheduled_agent_report")
+    return {
+        "profile_id": profile.id,
+        "profile_key": profile.profile_key,
+        "repo_id": profile.repo_id,
+        "reason": AGENT_SCHEDULE_SKIP_NO_MATERIAL_CHANGE,
+        "material_fingerprint": current["fingerprint"],
+        "skipped_at": now.isoformat(),
+    }
+
+
+def _scheduled_agent_source_receipt_lines(receipt: Mapping[str, Any]) -> list[str]:
+    if not receipt:
+        return []
+    state = str(receipt.get("source_state") or "unknown").replace("_", " ")
+    drift = str(receipt.get("drift_state") or "unknown").replace("_", " ")
+    branch = str(receipt.get("branch") or "").strip()
+    head = str(receipt.get("head_short") or _short_source_sha(str(receipt.get("head_sha") or ""))).strip()
+    base = str(receipt.get("run_base_short") or _short_source_sha(str(receipt.get("run_base_sha") or ""))).strip()
+    dirty_count = receipt.get("dirty_status_count")
+    first_line = f"Source state: {state}; drift: {drift}."
+    if branch or head:
+        ref = " ".join(part for part in (branch, head) if part)
+        first_line += f" Head: {ref}."
+    if base:
+        first_line += f" Run base: {base}."
+    lines = [first_line]
+    if dirty_count is not None:
+        lines.append(f"Dirty status entries: {int(dirty_count or 0)}.")
+    preview = _string_items(receipt.get("dirty_preview"), limit=3)
+    if preview:
+        lines.append("Dirty preview: " + "; ".join(preview) + ".")
+    detail = str(receipt.get("detail") or "").strip()
+    if detail:
+        lines.append(detail)
+    return lines
+
+
 def _enrich_scheduled_agent_report_receipts(
     run: ProjectAutonomyRun,
     repo: CodeRepo,
@@ -12202,6 +18489,15 @@ def _enrich_scheduled_agent_report_receipts(
             "mode": "plan_only",
         },
     )
+    source_receipt = enriched.setdefault("source_receipt", _scheduled_agent_source_receipt(run, repo))
+    material_payload = _scheduled_agent_material_payload(
+        prompt=str(run.prompt or ""),
+        profile_snapshot=snapshot,
+        repo=repo,
+        source_state=source_receipt if isinstance(source_receipt, Mapping) else {},
+    )
+    enriched.setdefault("material_schema", SCHEDULED_AGENT_MATERIAL_FINGERPRINT_SCHEMA)
+    enriched.setdefault("material_fingerprint", _scheduled_agent_material_fingerprint(material_payload))
     return enriched
 
 
@@ -12436,6 +18732,11 @@ def _scheduled_agent_report_message(report: dict[str, Any], run: ProjectAutonomy
     if evidence:
         parts.extend(["", "Evidence reviewed:"])
         parts.extend(f"- {item}" for item in evidence)
+    source_receipt = _mapping_payload(report.get("source_receipt"))
+    source_lines = _scheduled_agent_source_receipt_lines(source_receipt)
+    if source_lines:
+        parts.extend(["", "Source receipt:"])
+        parts.extend(f"- {item}" for item in source_lines)
     checks = _string_items(report.get("checks_run"), limit=3)
     if checks:
         parts.extend(["", "Checks:"])
@@ -12514,6 +18815,7 @@ def _build_scheduled_agent_report(
         },
         {"role": "user", "content": prompt},
     ]
+    _record_project_autonomy_local_model_call("scheduled_agent_report")
     result = ollama_client.chat(
         messages,
         str(model_info["model"]),
@@ -12572,6 +18874,12 @@ def _run_scheduled_agent_report_phase(
     run.plan_status = PLAN_STATUS_DRAFTING
     if run.started_at is None:
         run.started_at = _utcnow()
+    source_receipt = _scheduled_agent_source_receipt(
+        run,
+        repo,
+        repo_path=repo_path,
+        bind_base=True,
+    )
     db.commit()
     snapshot = _scheduled_agent_profile_snapshot(run)
     agent_name = str(snapshot.get("profile_key") or snapshot.get("name") or "scheduled_agent")
@@ -12591,7 +18899,7 @@ def _run_scheduled_agent_report_phase(
         "Scheduled agent inspected repository context",
         status="completed",
         agent_name=agent_name,
-        detail={"repo": repo.name, "path": str(repo_path)},
+        detail={"repo": repo.name, "path": str(repo_path), "source_receipt": source_receipt},
     )
     report = _build_scheduled_agent_report(db, run, repo)
     run.plan_json = _json_text({"analysis": report["summary"], "files": [], "notes": "Plan-only scheduled report."})
@@ -12722,6 +19030,7 @@ def _run_implementation_phase(db: Session, run: ProjectAutonomyRun, repo: CodeRe
     db.commit()
 
     if not validation_passed(validation):
+        validation_blocker = _validation_permission_blocker_payload(validation)
         return run_payload(
             db,
             _finish(
@@ -12733,6 +19042,7 @@ def _run_implementation_phase(db: Session, run: ProjectAutonomyRun, repo: CodeRe
                 error_message=_validation_failure_text(validation),
                 merge_status="blocked",
                 merge_message="Validation failed after repair.",
+                blocker=validation_blocker,
             ),
             include_events=True,
         )
@@ -12815,6 +19125,7 @@ def run_autonomy_sync(db: Session, run_id: str, on_event: Callable[[dict[str, An
                 error_message=str(exc),
                 merge_status="blocked",
                 merge_message=str(exc),
+                blocker=getattr(exc, "blocker", {}),
             ),
             include_events=True,
         )
