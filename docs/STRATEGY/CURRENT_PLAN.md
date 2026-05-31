@@ -429,3 +429,6 @@ between probes, confirming the Tier A unblock works end-to-end.
 restored AND protected), promotion-pipeline rebalance Phases 1–4
 infrastructure, the May 1/May 7 connection-hygiene work, Phase 3
 stop-bleed deploys, Tier A payoff-ratio gate (just shipped).
+
+- **Phase 5U /trades API parity gate SHIPPED 2026-05-30.** Added load_trades_api_envelope_rows(...) and a read-only live parity probe comparing the base /trades row shape through 	rading_trades and 	rading_management_envelopes for all/open/closed samples. Route behavior and public names remain unchanged. Probe verdict: COMPLETE_POSITIVE; Phase 5I and Phase 5K live probes stayed COMPLETE_POSITIVE. CC report: docs/STRATEGY/CC_REPORTS/2026-05-30_f-position-identity-phase-5u-trades-api-parity-gate.md.
+

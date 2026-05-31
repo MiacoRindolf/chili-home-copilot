@@ -436,6 +436,55 @@ def load_audit_export_envelope_rows(
          ORDER BY entry_date ASC
     """, {"uid": int(user_id), "start_dt": start_dt, "end_dt": end_dt})
 
+def load_trades_api_envelope_rows(
+    db: Session,
+    *,
+    user_id: int | None,
+    status: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Load base management-envelope fields used by the public /trades list."""
+    params: dict[str, Any] = {
+        "uid": user_id,
+        "limit": max(1, min(int(limit or 50), 500)),
+    }
+    status_clause = ""
+    if status:
+        status_clause = "AND status = :status"
+        params["status"] = str(status)
+    return _rows(db, f"""
+        SELECT
+            id,
+            ticker,
+            direction,
+            entry_price,
+            exit_price,
+            quantity,
+            entry_date,
+            exit_date,
+            status,
+            pnl,
+            tags,
+            notes,
+            broker_source,
+            broker_status,
+            broker_order_id,
+            filled_at,
+            avg_fill_price,
+            tca_reference_entry_price,
+            tca_entry_slippage_bps,
+            tca_reference_exit_price,
+            tca_exit_slippage_bps,
+            strategy_proposal_id,
+            scan_pattern_id,
+            position_id
+          FROM {MANAGEMENT_ENVELOPES_RELATION}
+         WHERE user_id IS NOT DISTINCT FROM :uid
+           {status_clause}
+         ORDER BY entry_date DESC NULLS LAST
+         LIMIT :limit
+    """, params)
+
 def _option_envelope_predicate_sql(alias: str = "t") -> str:
     snap = f"COALESCE({alias}.indicator_snapshot, '{{}}'::jsonb)"
     breakout = f"({snap}->'breakout_alert')"
