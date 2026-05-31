@@ -232,6 +232,7 @@ def _top_noop_exit_patterns(hours: int, limit: int) -> list[dict]:
         SELECT
           (e.payload->>'scan_pattern_id')::bigint AS scan_pattern_id,
           COALESCE(sp.name, '<missing>') AS pattern_name,
+          COALESCE(e.payload->>'asset_class', '<none>') AS asset_class,
           COALESCE(e.payload->>'skip_reason', '<none>') AS skip_reason,
           COALESCE(e.payload->>'evidence_fingerprint', '<none>') AS evidence_fingerprint,
           count(*) AS noop_diagnostics,
@@ -250,7 +251,12 @@ def _top_noop_exit_patterns(hours: int, limit: int) -> list[dict]:
               AND (e.payload->>'created_count')::int = 0
             )
           )
-        GROUP BY scan_pattern_id, pattern_name, skip_reason, evidence_fingerprint
+        GROUP BY
+          scan_pattern_id,
+          pattern_name,
+          COALESCE(e.payload->>'asset_class', '<none>'),
+          skip_reason,
+          evidence_fingerprint
         ORDER BY noop_diagnostics DESC, last_seen DESC
         LIMIT :limit
         """,
@@ -264,6 +270,7 @@ def _top_noop_exit_pattern_rollups(hours: int, limit: int) -> list[dict]:
         WITH noop AS (
           SELECT
             (e.payload->>'scan_pattern_id')::bigint AS scan_pattern_id,
+            COALESCE(e.payload->>'asset_class', '<none>') AS asset_class,
             COALESCE(e.payload->>'skip_reason', '<none>') AS skip_reason,
             NULLIF(COALESCE(e.payload->>'evidence_fingerprint', ''), '') AS evidence_fingerprint,
             e.created_at
@@ -284,6 +291,7 @@ def _top_noop_exit_pattern_rollups(hours: int, limit: int) -> list[dict]:
           n.scan_pattern_id,
           COALESCE(sp.name, '<missing>') AS pattern_name,
           COALESCE(sp.lifecycle_stage, '<null>') AS lifecycle_stage,
+          n.asset_class,
           n.skip_reason,
           count(*) AS noop_diagnostics,
           count(DISTINCT n.evidence_fingerprint) FILTER (
@@ -297,6 +305,7 @@ def _top_noop_exit_pattern_rollups(hours: int, limit: int) -> list[dict]:
           n.scan_pattern_id,
           COALESCE(sp.name, '<missing>'),
           COALESCE(sp.lifecycle_stage, '<null>'),
+          n.asset_class,
           n.skip_reason
         ORDER BY noop_diagnostics DESC, distinct_fingerprints DESC, last_seen DESC
         LIMIT :limit
