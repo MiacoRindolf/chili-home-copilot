@@ -912,6 +912,7 @@ _STRUCTURAL_EXIT_NOOP_PREFIXES = (
 )
 _RECENT_RECERT_BLOCKER_ACTIONS = frozenset(
     {
+        "complete_oos_recert_and_quality_refresh",
         "inspect_recert_backtest_no_oos_evidence_keep_live_blocked",
         "wait_for_recert_backtest_cooldown_keep_live_blocked",
         "live_blocked_recert_debt_no_refresh",
