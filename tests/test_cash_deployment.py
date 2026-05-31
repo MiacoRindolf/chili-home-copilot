@@ -17,6 +17,7 @@ from app.models.trading import (
     TradingPosition,
 )
 from app.services.trading.cash_deployment import (
+    _recent_blocked_recert_rescue_work,
     _rolling_execution_cost_pct,
     cash_deployment_rows,
     cash_deployment_summary,
@@ -795,8 +796,96 @@ def test_cash_deployment_skips_recent_blocked_recert_rescue(db, monkeypatch):
         db.query(BrainWorkEvent)
         .filter(BrainWorkEvent.event_kind == "work")
         .filter(BrainWorkEvent.event_type == "recert_rescue_refresh")
+        .filter(BrainWorkEvent.payload["scan_pattern_id"].astext == str(recert.id))
         .count()
         == 0
+    )
+
+
+def test_cash_deployment_skips_recent_recert_completion_diagnostic(db, monkeypatch):
+    monkeypatch.setattr(settings, "chili_autotrader_live_enabled", True)
+    monkeypatch.setattr(settings, "chili_cash_deployment_equity_cost_pct", 0.05)
+    monkeypatch.setattr(settings, "chili_cash_deployment_min_closed_evidence", 5)
+    monkeypatch.setattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360)
+
+    recert = _pattern(
+        db,
+        name="cash work blocked recert completion",
+        recert=True,
+        recert_reason="missing_oos_recert,missing_quality_composite_score",
+    )
+    alert = _alert(db, recert, ticker="WCRCRT")
+    _run(db, recert, alert, expected=3.0)
+    _closed_paper(db, recert, alert)
+    db.add(
+        BrainWorkEvent(
+            domain="trading",
+            event_type="recert_rescue_diagnostic",
+            event_kind="outcome",
+            dedupe_key=f"blocked-recert-completion:{recert.id}",
+            status="done",
+            payload={
+                "scan_pattern_id": recert.id,
+                "recert_rescue_status": "soft_blocked",
+                "recommended_next_action": "complete_oos_recert_and_quality_refresh",
+            },
+            created_at=datetime.utcnow(),
+        )
+    )
+    db.commit()
+
+    out = enqueue_cash_deployment_work(
+        db,
+        window_days=7,
+        limit=10,
+        include_null_lineage=False,
+        include_snapshot_coverage=False,
+    )
+    db.commit()
+
+    assert out["created"] == 0
+    assert out["skipped_noop_cooldown"] == 1
+    assert (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_kind == "work")
+        .filter(BrainWorkEvent.event_type == "recert_rescue_refresh")
+        .filter(BrainWorkEvent.payload["scan_pattern_id"].astext == str(recert.id))
+        .count()
+        == 0
+    )
+
+
+def test_recent_blocked_recert_rescue_work_blocks_completion_action(monkeypatch):
+    monkeypatch.setattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360)
+
+    class _Query:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def order_by(self, *args, **kwargs):
+            return self
+
+        def limit(self, value):
+            return self
+
+        def all(self):
+            return [
+                SimpleNamespace(
+                    id=211,
+                    payload={
+                        "scan_pattern_id": 1260,
+                        "recommended_next_action": "complete_oos_recert_and_quality_refresh",
+                        "recert_rescue_status": "soft_blocked",
+                    },
+                )
+            ]
+
+    db = SimpleNamespace(query=lambda model: _Query())
+
+    assert _recent_blocked_recert_rescue_work(
+        db,
+        scan_pattern_id=1260,
+        minutes=360,
     )
 
 
