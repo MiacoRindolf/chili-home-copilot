@@ -67,6 +67,18 @@ def test_user_session_cache_get_removes_expired_entry(monkeypatch) -> None:
     assert "stale" not in session._cache
 
 
+def test_user_session_cache_get_refreshes_hit_recency(monkeypatch) -> None:
+    session = broker_manager.UserBrokerSession(user_id=1)
+    session._cache_ttl = 100
+    monkeypatch.setattr(broker_manager.time, "time", lambda: 1_000.0)
+    session._cache["hot"] = (990.0, "a")
+    session._cache["cold"] = (991.0, "b")
+
+    assert session.cache_get("hot") == "a"
+
+    assert list(session._cache) == ["cold", "hot"]
+
+
 def test_user_session_cache_set_prunes_expired_and_caps_oldest(monkeypatch) -> None:
     session = broker_manager.UserBrokerSession(user_id=1)
     session._cache_ttl = 10
@@ -118,3 +130,54 @@ def test_user_session_cache_set_refreshes_existing_key_order(monkeypatch) -> Non
 
     assert list(session._cache) == ["refresh", "third"]
     assert session.cache_get("refresh") == "new"
+
+
+def test_get_user_session_refreshes_recency_and_caps_oldest(monkeypatch) -> None:
+    monkeypatch.setattr(broker_manager, "_USER_SESSIONS_MAX", 2)
+    monkeypatch.setattr(broker_manager.time, "time", lambda: 1_000.0)
+    broker_manager._user_sessions.clear()
+    try:
+        broker_manager._user_sessions[1] = broker_manager.UserBrokerSession(1, now=990.0)
+        broker_manager._user_sessions[2] = broker_manager.UserBrokerSession(2, now=991.0)
+
+        assert broker_manager.get_user_session(1).user_id == 1
+        assert list(broker_manager._user_sessions) == [2, 1]
+
+        assert broker_manager.get_user_session(3).user_id == 3
+
+        assert list(broker_manager._user_sessions) == [1, 3]
+    finally:
+        broker_manager._user_sessions.clear()
+
+
+def test_get_user_session_prunes_expired_oldest_without_snapshot(monkeypatch) -> None:
+    monkeypatch.setattr(broker_manager, "_SESSION_TTL", 10)
+    monkeypatch.setattr(broker_manager.time, "time", lambda: 1_000.0)
+    sessions = _NoSnapshotOrderedDict(
+        [
+            (1, broker_manager.UserBrokerSession(1, now=900.0)),
+            (2, broker_manager.UserBrokerSession(2, now=995.0)),
+        ]
+    )
+    monkeypatch.setattr(broker_manager, "_user_sessions", sessions)
+
+    assert broker_manager.get_user_session(3).user_id == 3
+
+    assert list(sessions) == [2, 3]
+
+
+def test_cleanup_expired_sessions_removes_all_expired_entries(monkeypatch) -> None:
+    monkeypatch.setattr(broker_manager, "_SESSION_TTL", 10)
+    monkeypatch.setattr(broker_manager.time, "time", lambda: 1_000.0)
+    broker_manager._user_sessions.clear()
+    try:
+        broker_manager._user_sessions[1] = broker_manager.UserBrokerSession(1, now=995.0)
+        broker_manager._user_sessions[2] = broker_manager.UserBrokerSession(2, now=900.0)
+        broker_manager._user_sessions[3] = broker_manager.UserBrokerSession(3, now=996.0)
+        broker_manager._user_sessions[4] = broker_manager.UserBrokerSession(4, now=901.0)
+
+        assert broker_manager.cleanup_expired_sessions() == 2
+
+        assert list(broker_manager._user_sessions) == [1, 3]
+    finally:
+        broker_manager._user_sessions.clear()

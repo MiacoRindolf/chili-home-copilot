@@ -372,11 +372,13 @@ def build_combined_portfolio_context() -> str:
 
 import threading
 import time
+from collections import OrderedDict
 
-_user_sessions: dict[int, dict[str, Any]] = {}
+_user_sessions: "OrderedDict[int, UserBrokerSession]" = OrderedDict()
 _session_lock = threading.Lock()
 _SESSION_TTL = 3600  # 1 hour
 _SESSION_CACHE_MAX = 256
+_USER_SESSIONS_MAX = 512
 
 
 class UserBrokerSession:
@@ -386,20 +388,22 @@ class UserBrokerSession:
     connection state, and credential references per user_id.
     """
 
-    def __init__(self, user_id: int):
+    def __init__(self, user_id: int, *, now: float | None = None):
         self.user_id = user_id
-        self.created_at = time.time()
-        self.last_active = time.time()
+        ts = time.time() if now is None else now
+        self.created_at = ts
+        self.last_active = ts
         self.connections: dict[str, bool] = {}
-        self._cache: dict[str, tuple[float, Any]] = {}
+        self._cache: OrderedDict[str, tuple[float, Any]] = OrderedDict()
         self._cache_ttl = 300
         self._cache_max = _SESSION_CACHE_MAX
 
-    def is_expired(self) -> bool:
-        return (time.time() - self.last_active) > _SESSION_TTL
+    def is_expired(self, now: float | None = None) -> bool:
+        ts = time.time() if now is None else now
+        return (ts - self.last_active) > _SESSION_TTL
 
-    def touch(self) -> None:
-        self.last_active = time.time()
+    def touch(self, now: float | None = None) -> None:
+        self.last_active = time.time() if now is None else now
 
     def cache_get(self, key: str) -> Any | None:
         now = time.time()
@@ -407,6 +411,11 @@ class UserBrokerSession:
         if entry is None:
             return None
         if (now - entry[0]) < self._cache_ttl:
+            if hasattr(self._cache, "move_to_end"):
+                self._cache.move_to_end(key)
+            else:
+                self._cache.pop(key, None)
+                self._cache[key] = entry
             return entry[1]
         self._cache.pop(key, None)
         return None
@@ -446,21 +455,42 @@ class UserBrokerSession:
 def get_user_session(user_id: int) -> UserBrokerSession:
     """Get or create an isolated broker session for a user."""
     with _session_lock:
+        now = time.time()
         session = _user_sessions.get(user_id)
-        if session and not session.is_expired():
-            session.touch()
+        if session and not session.is_expired(now):
+            session.touch(now)
+            _user_sessions.move_to_end(user_id)
             return session
-        session = UserBrokerSession(user_id)
+        if session:
+            _user_sessions.pop(user_id, None)
+        session = UserBrokerSession(user_id, now=now)
         _user_sessions[user_id] = session
+        _prune_user_sessions(now, enforce_cap=True)
         return session
+
+
+def _prune_user_sessions(now: float, *, enforce_cap: bool) -> int:
+    removed = 0
+    while _user_sessions:
+        oldest_user_id = next(iter(_user_sessions))
+        if not _user_sessions[oldest_user_id].is_expired(now):
+            break
+        _user_sessions.popitem(last=False)
+        removed += 1
+    if enforce_cap:
+        while len(_user_sessions) > _USER_SESSIONS_MAX:
+            _user_sessions.popitem(last=False)
+            removed += 1
+    return removed
 
 
 def cleanup_expired_sessions() -> int:
     """Remove expired sessions. Call periodically from scheduler."""
     with _session_lock:
-        expired = [uid for uid, s in _user_sessions.items() if s.is_expired()]
+        now = time.time()
+        expired = [uid for uid, s in _user_sessions.items() if s.is_expired(now)]
         for uid in expired:
-            del _user_sessions[uid]
+            _user_sessions.pop(uid, None)
         return len(expired)
 
 

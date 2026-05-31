@@ -28,6 +28,14 @@ from ...models.trading import (
 )
 from .autotrader_evidence import clean_autotrader_runs, partition_autotrader_runs
 from .brain_work.ledger import enqueue_outcome_event, enqueue_work_event
+from .exit_variant_policy import (
+    exit_noop_blocks_refresh as _exit_noop_blocks_refresh,
+    non_positive_exit_noop_blocks_weak_request as _non_positive_exit_noop_blocks_weak_request,
+    non_positive_exit_noop_reason as _non_positive_exit_noop_reason,
+    payload_has_positive_exit_evidence as _payload_has_positive_exit_evidence,
+    repeated_non_positive_exit_noop_blocks_refresh as _repeated_non_positive_exit_noop_blocks_refresh,
+    structural_exit_noop_reason as _structural_exit_noop_reason,
+)
 from .recert_rescue_policy import recert_rescue_diagnostic_blocks_refresh
 from .return_math import (
     OPTION_CONTRACT_MULTIPLIER,
@@ -50,28 +58,6 @@ DEFAULT_WINDOW_DAYS = 30
 DEFAULT_MIN_CLOSED_EVIDENCE = 5
 DEFAULT_TOP_LIMIT = 25
 DEFAULT_RECENT_DONE_DEDUPE_MINUTES = 120
-
-_STRUCTURAL_EXIT_NOOP_REASONS = frozenset(
-    {
-        "duplicate_learned_exit_label",
-        "missing_parent_payoff_geometry",
-        "no_loss_report",
-        "no_parent_returns",
-    }
-)
-_STRUCTURAL_EXIT_NOOP_PREFIXES = (
-    "edge_debt_too_negative_for_exit_child:",
-    "insufficient_parent_payoff_samples:",
-    "reward_risk_below_floor:",
-)
-_NON_POSITIVE_EXIT_NOOP_REASONS = frozenset(
-    {
-        "negative_ev_no_exit_variant_birth",
-        "non_positive_quality_evidence_no_exit_variant_birth",
-    }
-)
-_REPEATED_NON_POSITIVE_EXIT_NOOP_MIN_FINGERPRINTS = 3
-
 
 def _top_profitability_buckets(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
     n = max(1, int(limit))
@@ -826,92 +812,6 @@ def _payload_priority_tickers(payload: dict[str, Any]) -> set[str]:
             if ticker:
                 out.add(ticker)
     return out
-
-
-def _structural_exit_noop_reason(reason: Any) -> bool:
-    value = str(reason or "").strip().lower()
-    return value in _STRUCTURAL_EXIT_NOOP_REASONS or any(
-        value.startswith(prefix) for prefix in _STRUCTURAL_EXIT_NOOP_PREFIXES
-    )
-
-
-def _exit_noop_blocks_refresh(
-    payload: dict[str, Any],
-    *,
-    evidence_fingerprint: str | None,
-) -> bool:
-    try:
-        created_count = int(payload.get("created_count"))
-    except (TypeError, ValueError):
-        return False
-    if created_count != 0:
-        return False
-    fingerprint = str(evidence_fingerprint or "")
-    if fingerprint and str(payload.get("evidence_fingerprint") or "") == fingerprint:
-        return True
-    return _structural_exit_noop_reason(payload.get("skip_reason"))
-
-
-def _payload_has_positive_exit_evidence(payload: dict[str, Any] | None) -> bool:
-    if not isinstance(payload, dict):
-        return False
-    for key in (
-        "expected_evidence_value",
-        "calibrated_ev_after_cost_pct",
-        "calibrated_ev_pct",
-        "expected_net_pct",
-    ):
-        try:
-            value = float(payload.get(key))
-        except (TypeError, ValueError):
-            continue
-        if value > 0.0:
-            return True
-    return False
-
-
-def _non_positive_exit_noop_blocks_weak_request(
-    diagnostic_payload: dict[str, Any],
-    *,
-    request_payload: dict[str, Any] | None,
-) -> bool:
-    try:
-        created_count = int(diagnostic_payload.get("created_count"))
-    except (TypeError, ValueError):
-        return False
-    if created_count != 0:
-        return False
-    if not _non_positive_exit_noop_reason(diagnostic_payload.get("skip_reason")):
-        return False
-    return not _payload_has_positive_exit_evidence(request_payload)
-
-
-def _non_positive_exit_noop_reason(reason: Any) -> bool:
-    return str(reason or "").strip().lower() in _NON_POSITIVE_EXIT_NOOP_REASONS
-
-
-def _repeated_non_positive_exit_noop_blocks_refresh(
-    diagnostic_payloads: list[dict[str, Any]],
-    *,
-    request_payload: dict[str, Any] | None,
-) -> bool:
-    non_positive_fingerprints: set[str] = set()
-    for idx, row_payload in enumerate(diagnostic_payloads):
-        try:
-            created_count = int(row_payload.get("created_count"))
-        except (TypeError, ValueError):
-            created_count = -1
-        if (
-            created_count == 0
-            and _non_positive_exit_noop_reason(row_payload.get("skip_reason"))
-        ):
-            fingerprint = str(row_payload.get("evidence_fingerprint") or "").strip()
-            non_positive_fingerprints.add(fingerprint or f"row:{idx}")
-    return (
-        len(non_positive_fingerprints)
-        >= _REPEATED_NON_POSITIVE_EXIT_NOOP_MIN_FINGERPRINTS
-        and not _payload_has_positive_exit_evidence(request_payload)
-    )
 
 
 def _recent_noop_exit_variant_exists(

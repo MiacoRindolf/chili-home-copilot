@@ -264,10 +264,36 @@ def test_open_exit_noop_query_keeps_non_positive_skip_evidence_specific(monkeypa
     assert audit._open_exit_work_with_recent_noop(hours=3, limit=7) == []
 
     sql = str(captured["sql"])
-    structural_clause = sql.split("d.skip_reason IN", 1)[1].split(")", 1)[0]
     assert "d.evidence_fingerprint = w.evidence_fingerprint" in sql
-    assert "non_positive_quality_evidence_no_exit_variant_birth" not in structural_clause
-    assert captured["params"] == {"hours": 3, "limit": 7}
+    assert "d.skip_reason = ANY(:structural_exit_noop_reasons)" in sql
+    assert "d.skip_reason LIKE ANY(:structural_exit_noop_prefixes)" in sql
+    assert "d.skip_reason = ANY(:non_positive_exit_noop_reasons)" in sql
+    assert "expected_evidence_value" in sql
+    assert "calibrated_ev_after_cost_pct" in sql
+    assert captured["params"] == {
+        "hours": 3,
+        "limit": 7,
+        "structural_exit_noop_reasons": [
+            "duplicate_learned_exit_label",
+            "learned_stop_not_tighter_than_static",
+            "learned_target_not_tighter_than_static",
+            "max_active_variants",
+            "missing_parent_payoff_geometry",
+            "no_loss_report",
+            "no_parent_returns",
+            "non_positive_parent_realized_avg",
+            "parent_missing_or_inactive",
+        ],
+        "structural_exit_noop_prefixes": [
+            "edge_debt_too_negative_for_exit_child:%",
+            "insufficient_parent_payoff_samples:%",
+            "reward_risk_below_floor:%",
+        ],
+        "non_positive_exit_noop_reasons": [
+            "negative_ev_no_exit_variant_birth",
+            "non_positive_quality_evidence_no_exit_variant_birth",
+        ],
+    }
 
 
 def test_top_noop_exit_pattern_rollups_fold_fingerprints(monkeypatch):
