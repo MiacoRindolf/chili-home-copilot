@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from app.routers.trading_sub.trades import _stable_trades_shadow_mismatches
+from app.routers.trading_sub.trades import (
+    PHASE5AF_TRADES_API_ENV,
+    _phase5af_trades_api_can_use_envelopes,
+    _stable_trades_shadow_mismatches,
+    _trades_api_envelope_response_rows,
+)
 
 
 def _route_row(**overrides):
@@ -92,3 +97,78 @@ def test_shadow_compare_flags_stable_field_mismatch():
             "envelope": 10.0,
         }
     ]
+
+
+def test_envelope_response_rows_match_public_trade_shape():
+    rows = _trades_api_envelope_response_rows([_envelope_row(status="closed")])
+
+    assert rows == [
+        {
+            "id": 42,
+            "ticker": "ABC",
+            "direction": "long",
+            "entry_price": 10.0,
+            "exit_price": None,
+            "quantity": 4.0,
+            "local_entry_price": 10.0,
+            "local_quantity": 4.0,
+            "entry_date": "2026-05-30T09:30:00",
+            "exit_date": None,
+            "status": "closed",
+            "pnl": None,
+            "tags": "alpha",
+            "notes": None,
+            "broker_source": "robinhood",
+            "broker_status": "filled",
+            "broker_order_id": "ord-1",
+            "filled_at": "2026-05-30T09:31:00",
+            "avg_fill_price": 10.0,
+            "tca_reference_entry_price": 9.95,
+            "tca_entry_slippage_bps": 5.0,
+            "tca_reference_exit_price": None,
+            "tca_exit_slippage_bps": None,
+            "strategy_proposal_id": 7,
+            "scan_pattern_id": 585,
+            "position_id": 99,
+            "broker_truth_entry_price": None,
+            "broker_truth_quantity": None,
+            "broker_truth_position_id": None,
+            "broker_truth_current_envelope_id": None,
+            "broker_truth_metrics_source": None,
+        }
+    ]
+
+
+def test_phase5af_cutover_refuses_open_rows():
+    assert _phase5af_trades_api_can_use_envelopes(
+        status="open",
+        envelope_rows=[_envelope_row(status="open")],
+    ) is False
+    assert _phase5af_trades_api_can_use_envelopes(
+        status=None,
+        envelope_rows=[_envelope_row(status="open")],
+    ) is False
+    assert _phase5af_trades_api_can_use_envelopes(
+        status="closed",
+        envelope_rows=[_envelope_row(status="closed")],
+    ) is True
+
+
+def test_phase5af_trades_api_flag_is_typed_default_false(monkeypatch):
+    from app.config import Settings
+
+    monkeypatch.delenv(PHASE5AF_TRADES_API_ENV, raising=False)
+
+    s = Settings(_env_file=None)
+
+    assert s.chili_phase5af_trades_api_use_envelopes is False
+
+
+def test_phase5af_trades_api_env_alias_flows_through_settings(monkeypatch):
+    from app.config import Settings
+
+    monkeypatch.setenv(PHASE5AF_TRADES_API_ENV, "true")
+
+    s = Settings(_env_file=None)
+
+    assert s.chili_phase5af_trades_api_use_envelopes is True
