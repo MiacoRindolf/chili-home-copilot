@@ -61,12 +61,14 @@ class PositionSizerInput:
         Context / keys passed through to the log row.
     entry_price, stop_price, target_price
         Prices the sizer operates on. ``entry_price`` and
-        ``stop_price`` must both be positive and distinct.
+        ``stop_price`` must both be positive and directionally valid:
+        long stops sit below entry, short stops sit above entry.
     capital
         Total capital (buying power) the sizer may allocate against.
     calibrated_prob
         NetEdgeRanker ``NetEdgeScore.calibrated_prob`` (probability
-        of a winning trade after calibration).
+        of a winning trade after calibration). Must be a unit-interval
+        probability, not a percentage.
     payoff_fraction
         NetEdgeRanker ``NetEdgeScore.expected_payoff`` - fraction of
         notional realized on a winning trade (target - entry) / entry.
@@ -222,6 +224,30 @@ def _is_crypto(asset_class: str) -> bool:
     return (asset_class or "").strip().lower() == "crypto"
 
 
+def _is_option_asset(asset_class: str) -> bool:
+    normalized = (asset_class or "").strip().lower().replace("-", "_")
+    return normalized in {
+        "option",
+        "options",
+        "option_contract",
+        "option_contracts",
+        "options_contract",
+        "options_contracts",
+        "contract_option",
+        "contract_options",
+        "equity_option",
+        "equity_options",
+        "stock_option",
+        "stock_options",
+        "option_spread",
+        "options_spread",
+        "option_spreads",
+        "options_spreads",
+        "optionspread",
+        "optionspreads",
+    }
+
+
 def _round_qty(
     notional: float,
     price: float,
@@ -247,9 +273,37 @@ def _finite_float(value: Any) -> float | None:
         return None
     try:
         out = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return out if math.isfinite(out) else None
+
+
+def _non_negative_finite(value: Any, default: float = 0.0) -> float:
+    parsed = _finite_float(value)
+    if parsed is None:
+        return default
+    return max(0.0, parsed)
+
+
+def _normalize_direction(value: Any) -> str | None:
+    raw = str(value or "").strip().lower()
+    if raw in {"long", "buy"}:
+        return "long"
+    if raw in {"short", "sell"}:
+        return "short"
+    return None
+
+
+def _directional_loss_fraction(entry: float, stop: float, direction: str) -> float:
+    if direction == "short":
+        return max(0.0, (stop - entry) / entry)
+    return max(0.0, (entry - stop) / entry)
+
+
+def _directional_target_fraction(entry: float, target: float, direction: str) -> float:
+    if direction == "short":
+        return max(0.0, (entry - target) / entry)
+    return max(0.0, (target - entry) / entry)
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +374,9 @@ def compute_proposal(
     equity_bucket_cap_pct = _finite_float(inp.equity_bucket_cap_pct)
     crypto_bucket_cap_pct = _finite_float(inp.crypto_bucket_cap_pct)
     single_ticker_cap_pct = _finite_float(inp.single_ticker_cap_pct)
+    direction = _normalize_direction(inp.direction)
+    qty_rounding = str(inp.qty_rounding or "").strip().lower()
+    target_price = _finite_float(inp.target_price) if inp.target_price is not None else None
     expected_net_pnl_override = (
         _finite_float(inp.expected_net_pnl)
         if inp.expected_net_pnl is not None
@@ -340,8 +397,28 @@ def compute_proposal(
         or unit_multiplier <= 0
     ):
         reject_reason = "invalid_prices_or_capital"
+    elif direction is None:
+        reject_reason = "invalid_direction"
+    elif qty_rounding not in {"int", "decimal"}:
+        reject_reason = "invalid_qty_rounding"
+    elif unit_multiplier < 1.0:
+        reject_reason = "invalid_unit_multiplier"
+    elif _is_option_asset(inp.asset_class) and unit_multiplier < 100.0:
+        reject_reason = "invalid_option_unit_multiplier"
+    elif _is_option_asset(inp.asset_class) and qty_rounding != "int":
+        reject_reason = "invalid_option_qty_rounding"
+    elif direction == "long" and stop >= entry:
+        reject_reason = "invalid_directional_stop"
+    elif direction == "short" and stop <= entry:
+        reject_reason = "invalid_directional_stop"
     elif not math.isfinite(loss_per_unit) or loss_per_unit <= 0:
         reject_reason = "invalid_loss_per_unit"
+    elif inp.target_price is not None and (target_price is None or target_price <= 0):
+        reject_reason = "invalid_target_price"
+    elif loss_per_unit + 1e-9 < _directional_loss_fraction(entry, stop, direction):
+        reject_reason = "loss_per_unit_understates_stop_risk"
+    elif calibrated_prob is not None and not (0.0 <= calibrated_prob <= 1.0):
+        reject_reason = "invalid_probability"
     elif (
         calibrated_prob is None
         or payoff_fraction is None
@@ -357,6 +434,20 @@ def compute_proposal(
         )
     ):
         reject_reason = "invalid_edge_inputs"
+    elif not (0.0 <= max_risk_pct <= 100.0):
+        reject_reason = "invalid_risk_cap_pct"
+    elif not (0.0 <= equity_bucket_cap_pct <= 100.0):
+        reject_reason = "invalid_bucket_cap_pct"
+    elif not (0.0 <= crypto_bucket_cap_pct <= 100.0):
+        reject_reason = "invalid_bucket_cap_pct"
+    elif not (0.0 <= single_ticker_cap_pct <= 100.0):
+        reject_reason = "invalid_single_ticker_cap_pct"
+    elif target_price is not None:
+        target_fraction = _directional_target_fraction(entry, target_price, direction)
+        if target_fraction <= 0:
+            reject_reason = "invalid_directional_target"
+        elif payoff_fraction > target_fraction + 1e-9:
+            reject_reason = "payoff_fraction_exceeds_target_reward"
 
     if reject_reason:
         reasoning["reject_reason"] = reject_reason
@@ -384,7 +475,11 @@ def compute_proposal(
             expected_net_pnl=expected_net_pnl_override or 0.0,
             correlation_cap_triggered=False,
             correlation_bucket=(correlation.bucket if correlation else inp.correlation_bucket),
-            max_bucket_notional=(correlation.max_bucket_notional if correlation else None),
+            max_bucket_notional=(
+                _non_negative_finite(correlation.max_bucket_notional)
+                if correlation
+                else None
+            ),
             notional_cap_triggered=False,
             reasoning=reasoning,
         )
@@ -428,7 +523,11 @@ def compute_proposal(
             expected_net_pnl=expected_net_pnl,
             correlation_cap_triggered=False,
             correlation_bucket=(correlation.bucket if correlation else inp.correlation_bucket),
-            max_bucket_notional=(correlation.max_bucket_notional if correlation else None),
+            max_bucket_notional=(
+                _non_negative_finite(correlation.max_bucket_notional)
+                if correlation
+                else None
+            ),
             notional_cap_triggered=False,
             reasoning=reasoning,
         )
@@ -452,7 +551,7 @@ def compute_proposal(
     # --- Hard caps: single-ticker + correlation bucket ----------------
     single_ticker_cap = max(0.0, single_ticker_cap_pct) / 100.0 * capital
     # Deduct what is already open in this exact ticker.
-    ticker_open = float(portfolio.ticker_open_notional) if portfolio else 0.0
+    ticker_open = _non_negative_finite(portfolio.ticker_open_notional) if portfolio else 0.0
     ticker_headroom = max(0.0, single_ticker_cap - ticker_open)
     notional_cap_triggered = False
     if proposed_notional > ticker_headroom:
@@ -465,9 +564,10 @@ def compute_proposal(
     max_bucket_notional: float | None = None
     if correlation is not None:
         bucket_label = correlation.bucket
-        max_bucket_notional = correlation.max_bucket_notional
+        max_bucket_notional = _non_negative_finite(correlation.max_bucket_notional)
+        open_notional = _non_negative_finite(correlation.open_notional)
         bucket_headroom = max(
-            0.0, correlation.max_bucket_notional - correlation.open_notional,
+            0.0, max_bucket_notional - open_notional,
         )
         if proposed_notional > bucket_headroom:
             proposed_notional = bucket_headroom
@@ -482,11 +582,17 @@ def compute_proposal(
             else equity_bucket_cap_pct
         )
         max_bucket_notional = max(0.0, bucket_cap_pct) / 100.0 * capital
+        if proposed_notional > max_bucket_notional:
+            proposed_notional = max_bucket_notional
+            correlation_cap_triggered = True
+            reasoning["correlation_bucket_headroom"] = max_bucket_notional
 
     # --- Portfolio-level safety floor --------------------------------
     if portfolio is not None:
+        max_total_notional = _non_negative_finite(portfolio.max_total_notional)
+        deployed_notional = _non_negative_finite(portfolio.deployed_notional)
         portfolio_headroom = max(
-            0.0, portfolio.max_total_notional - portfolio.deployed_notional,
+            0.0, max_total_notional - deployed_notional,
         )
         if proposed_notional > portfolio_headroom:
             proposed_notional = portfolio_headroom
@@ -498,7 +604,7 @@ def compute_proposal(
     proposed_quantity = _round_qty(
         proposed_notional,
         entry,
-        inp.qty_rounding,
+        qty_rounding,
         unit_multiplier,
     )
     # If rounding to whole shares pushed notional below the proposal,

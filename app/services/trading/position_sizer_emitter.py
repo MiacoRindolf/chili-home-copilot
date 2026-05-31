@@ -94,10 +94,34 @@ def _infer_asset_class(ticker: str, explicit: Optional[str]) -> str:
     return "crypto" if is_crypto_symbol(ticker) else "equity"
 
 
+def _is_option_asset(asset_class: str) -> bool:
+    normalized = (asset_class or "").strip().lower().replace("-", "_")
+    return normalized in {
+        "option",
+        "options",
+        "option_contract",
+        "option_contracts",
+        "options_contract",
+        "options_contracts",
+        "contract_option",
+        "contract_options",
+        "equity_option",
+        "equity_options",
+        "stock_option",
+        "stock_options",
+        "option_spread",
+        "options_spread",
+        "option_spreads",
+        "options_spreads",
+        "optionspread",
+        "optionspreads",
+    }
+
+
 def _unit_multiplier(asset_class: str) -> float:
     return (
         OPTION_CONTRACT_MULTIPLIER
-        if (asset_class or "").strip().lower() in {"option", "options"}
+        if _is_option_asset(asset_class)
         else 1.0
     )
 
