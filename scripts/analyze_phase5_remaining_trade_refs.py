@@ -80,7 +80,8 @@ CLASSIFICATIONS = (
             r"^(?:app/services/(?:broker_service|coinbase_service)\.py|"
             r"app/services/trading/(?:auto_trader|broker_quotes|bracket_reconciliation_service|"
             r"emergency_liquidation|execution_audit|live_exit_engine|paper_trading|"
-            r"robinhood_exit_execution|scanner|venue/|crypto/exit_monitor|options/exit_monitor))",
+            r"pattern_position_monitor|robinhood_exit_execution|scanner|venue/|"
+            r"crypto/exit_monitor|options/exit_monitor))",
             re.IGNORECASE,
         ),
         Classification(

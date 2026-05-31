@@ -1,7 +1,7 @@
 # Current Plan: Position Identity Refactor
 
 **Initiative owner:** Cowork (strategy) + Claude Code (execution).
-**Last update:** 2026-05-31, after Phase 5O reclassified autopilot_scope.py as a live ownership/entry-scope gate and added read-only parity evidence.
+**Last update:** 2026-05-31, after Phase 5O reclassified pattern_position_monitor.py as a live monitor/action-adjacent path and added read-only parity evidence.
 
 > **Why this initiative supersedes the prior fast-path crypto-scalping plan.** Today (2026-05-04) two automated close paths fired, marking 11 equity Trade rows wrongly closed in DB while the broker still held the positions. The shipped patch (inverse-reconcile, broker-truth-self-heal task) auto-healed 18 of them but its cross-check (`event_count == 0` on `trading_execution_events`) is conservative because **Trade row IDs are ephemeral** — every time a row gets wrongly closed and recreated, fills associated with the prior trade_id orphan. The fast-path scalping initiative depends on a stable position model; building more on this foundation makes things worse, not better. Position-identity refactor goes first. Fast-path resumes after.
 
@@ -56,6 +56,28 @@ Phase 5 soak duration was also tightened from one quarter to **2 weeks** at oper
 
 ## Status of the initiative
 
+- **Phase 5O Pattern position monitor envelope audit CLOSED 2026-05-31.**
+  Audited `app/services/trading/pattern_position_monitor.py` and found it is a
+  live monitor/action-adjacent path, not passive learning/reporting. It selects
+  open pattern-linked and plan-level management envelopes, filters
+  broker-stale rows, can reconcile stale Robinhood rows, persists
+  `PatternMonitorDecision` rows, can tighten stored stop/target levels, and
+  emits `pattern_monitor` exit/tighten alerts. No monitor behavior was
+  converted. Added
+  `scripts/d-phase5o-pattern-position-monitor-envelope-parity-probe.py`; live
+  result: `COMPLETE_POSITIVE`, 6 checks matched, 0 mismatches, 8 selected ids
+  old = 8 new, 8 pattern-linked ids old = 8 new, 0 plan-level ids old = 0 new,
+  and 0 option ids old = 0 new. Reclassified the file from
+  `learning_research_reporting / adapter_candidate` to
+  `live_action_broker_reconcile / future_rename_blocker`. Verification:
+  focused tests passed (`6 passed`), analyzer stayed clean with raw reader
+  bucket 0, Phase 5K remained `COMPLETE_POSITIVE`, Phase 5I remained
+  `COMPLETE_POSITIVE`, and source posture returned `COMPLETE_POSITIVE` after
+  correcting app services back to the clean Phase5AB-D runtime worktree.
+  Counts: `orm_trade_symbol_compat=69`, `learning_research_reporting=11`,
+  `live_action_broker_reconcile=19`, `adapter_candidate=13`,
+  `future_rename_blocker=40`. CC report:
+  `docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5o-pattern-position-monitor-envelope-audit.md`.
 - **Phase 5O Autopilot scope envelope audit CLOSED 2026-05-31.**
   Audited `app/services/trading/autopilot_scope.py` and found it is a live
   ownership and entry-scope gate, not a harmless private helper. It classifies
