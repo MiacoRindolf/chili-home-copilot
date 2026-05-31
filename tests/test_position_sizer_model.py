@@ -83,6 +83,25 @@ def test_zero_win_probability_returns_zero():
     assert out.proposed_notional == 0.0
 
 
+@pytest.mark.parametrize("probability", [-0.01, 1.01, 70.0])
+def test_out_of_range_probability_returns_zero(probability):
+    out = compute_proposal(
+        inp=_default_input(
+            calibrated_prob=probability,
+            payoff_fraction=0.20,
+            max_risk_pct=10.0,
+            single_ticker_cap_pct=100.0,
+            equity_bucket_cap_pct=100.0,
+        ),
+        source="unit",
+    )
+
+    assert out.proposed_notional == 0.0
+    assert out.proposed_quantity == 0.0
+    assert out.proposed_risk_pct == 0.0
+    assert out.reasoning.get("reject_reason") == "invalid_probability"
+
+
 def test_invalid_prices_return_zero():
     out = compute_proposal(inp=_default_input(entry_price=0.0), source="unit")
     assert out.proposed_notional == 0.0
@@ -93,6 +112,222 @@ def test_invalid_prices_return_zero():
 
     out = compute_proposal(inp=_default_input(capital=-1.0), source="unit")
     assert out.proposed_notional == 0.0
+
+
+@pytest.mark.parametrize(
+    "direction,stop",
+    [
+        ("long", 105.0),
+        ("short", 95.0),
+    ],
+)
+def test_invalid_directional_stop_returns_zero(direction, stop):
+    out = compute_proposal(
+        inp=_default_input(direction=direction, stop_price=stop),
+        source="unit",
+    )
+
+    assert out.proposed_notional == 0.0
+    assert out.proposed_quantity == 0.0
+    assert out.proposed_risk_pct == 0.0
+    assert out.reasoning.get("reject_reason") == "invalid_directional_stop"
+
+
+def test_unknown_direction_returns_zero():
+    out = compute_proposal(inp=_default_input(direction="sideways"), source="unit")
+
+    assert out.proposed_notional == 0.0
+    assert out.proposed_quantity == 0.0
+    assert out.proposed_risk_pct == 0.0
+    assert out.reasoning.get("reject_reason") == "invalid_direction"
+
+
+def test_zero_loss_per_unit_returns_zero():
+    out = compute_proposal(inp=_default_input(loss_per_unit=0.0), source="unit")
+
+    assert out.proposed_notional == 0.0
+    assert out.proposed_quantity == 0.0
+    assert out.proposed_risk_pct == 0.0
+    assert out.reasoning.get("reject_reason") == "invalid_loss_per_unit"
+
+
+@pytest.mark.parametrize(
+    "direction,stop",
+    [
+        ("long", 90.0),
+        ("short", 110.0),
+    ],
+)
+def test_understated_loss_per_unit_returns_zero(direction, stop):
+    out = compute_proposal(
+        inp=_default_input(
+            direction=direction,
+            stop_price=stop,
+            loss_per_unit=0.01,
+            calibrated_prob=0.70,
+            payoff_fraction=0.20,
+            max_risk_pct=10.0,
+            single_ticker_cap_pct=100.0,
+        ),
+        source="unit",
+    )
+
+    assert out.proposed_notional == 0.0
+    assert out.proposed_quantity == 0.0
+    assert out.proposed_risk_pct == 0.0
+    assert out.reasoning.get("reject_reason") == "loss_per_unit_understates_stop_risk"
+
+
+def test_conservative_loss_per_unit_can_exceed_stop_distance():
+    out = compute_proposal(
+        inp=_default_input(stop_price=95.0, loss_per_unit=0.07),
+        source="unit",
+    )
+
+    assert out.reasoning.get("reject_reason") is None
+
+
+@pytest.mark.parametrize(
+    "direction,target",
+    [
+        ("long", 105.0),
+        ("short", 95.0),
+    ],
+)
+def test_payoff_fraction_cannot_exceed_directional_target_reward(direction, target):
+    out = compute_proposal(
+        inp=_default_input(
+            direction=direction,
+            stop_price=95.0 if direction == "long" else 105.0,
+            target_price=target,
+            payoff_fraction=0.20,
+            calibrated_prob=0.70,
+            max_risk_pct=10.0,
+            single_ticker_cap_pct=100.0,
+        ),
+        source="unit",
+    )
+
+    assert out.proposed_notional == 0.0
+    assert out.proposed_quantity == 0.0
+    assert out.proposed_risk_pct == 0.0
+    assert out.reasoning.get("reject_reason") == "payoff_fraction_exceeds_target_reward"
+
+
+def test_invalid_directional_target_returns_zero():
+    out = compute_proposal(
+        inp=_default_input(target_price=99.0, payoff_fraction=0.05),
+        source="unit",
+    )
+
+    assert out.proposed_notional == 0.0
+    assert out.proposed_quantity == 0.0
+    assert out.proposed_risk_pct == 0.0
+    assert out.reasoning.get("reject_reason") == "invalid_directional_target"
+
+
+def test_conservative_payoff_can_be_below_target_reward():
+    out = compute_proposal(
+        inp=_default_input(target_price=115.0, payoff_fraction=0.10),
+        source="unit",
+    )
+
+    assert out.reasoning.get("reject_reason") is None
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("calibrated_prob", float("nan")),
+        ("payoff_fraction", float("inf")),
+        ("cost_fraction", "-Infinity"),
+        ("kelly_scale", "not-a-number"),
+        ("max_risk_pct", float("nan")),
+        ("equity_bucket_cap_pct", True),
+        ("crypto_bucket_cap_pct", float("inf")),
+        ("single_ticker_cap_pct", "-Infinity"),
+        ("expected_net_pnl", float("nan")),
+    ],
+)
+def test_nonfinite_edge_or_cap_inputs_return_zero(field, value):
+    out = compute_proposal(inp=_default_input(**{field: value}), source="unit")
+
+    assert out.proposed_notional == 0.0
+    assert out.proposed_quantity == 0.0
+    assert out.proposed_risk_pct == 0.0
+    assert out.kelly_fraction == 0.0
+    assert out.kelly_scaled_fraction == 0.0
+    assert out.expected_net_pnl == 0.0
+    assert out.reasoning.get("reject_reason") == "invalid_edge_inputs"
+
+
+@pytest.mark.parametrize(
+    "field,value,reason",
+    [
+        ("max_risk_pct", -0.01, "invalid_risk_cap_pct"),
+        ("max_risk_pct", 100.01, "invalid_risk_cap_pct"),
+        ("equity_bucket_cap_pct", -0.01, "invalid_bucket_cap_pct"),
+        ("equity_bucket_cap_pct", 100.01, "invalid_bucket_cap_pct"),
+        ("crypto_bucket_cap_pct", -0.01, "invalid_bucket_cap_pct"),
+        ("crypto_bucket_cap_pct", 100.01, "invalid_bucket_cap_pct"),
+        ("single_ticker_cap_pct", -0.01, "invalid_single_ticker_cap_pct"),
+        ("single_ticker_cap_pct", 100.01, "invalid_single_ticker_cap_pct"),
+    ],
+)
+def test_cap_percentages_must_be_valid_unit_percentages(field, value, reason):
+    overrides = {
+        "calibrated_prob": 0.70,
+        "payoff_fraction": 0.20,
+        "max_risk_pct": 10.0,
+        "single_ticker_cap_pct": 100.0,
+        "equity_bucket_cap_pct": 100.0,
+        "crypto_bucket_cap_pct": 100.0,
+    }
+    overrides[field] = value
+
+    out = compute_proposal(
+        inp=_default_input(**overrides),
+        source="unit",
+    )
+
+    assert out.proposed_notional == 0.0
+    assert out.proposed_quantity == 0.0
+    assert out.proposed_risk_pct == 0.0
+    assert out.reasoning.get("reject_reason") == reason
+
+
+def test_cap_percentages_allow_zero_boundary_without_rejecting():
+    out = compute_proposal(
+        inp=_default_input(
+            calibrated_prob=0.70,
+            payoff_fraction=0.20,
+            max_risk_pct=0.0,
+            single_ticker_cap_pct=0.0,
+            equity_bucket_cap_pct=0.0,
+            crypto_bucket_cap_pct=0.0,
+        ),
+        source="unit",
+    )
+
+    assert out.proposed_notional == 0.0
+    assert out.reasoning.get("reject_reason") is None
+
+
+def test_cap_percentages_allow_full_boundary():
+    out = compute_proposal(
+        inp=_default_input(
+            calibrated_prob=0.70,
+            payoff_fraction=0.20,
+            max_risk_pct=100.0,
+            single_ticker_cap_pct=100.0,
+            equity_bucket_cap_pct=100.0,
+            crypto_bucket_cap_pct=100.0,
+        ),
+        source="unit",
+    )
+
+    assert out.proposed_notional > 0.0
+    assert out.reasoning.get("reject_reason") is None
 
 
 def test_higher_probability_increases_kelly():
@@ -176,6 +411,34 @@ def test_correlation_cap_not_triggered_when_bucket_empty():
     assert out.correlation_cap_triggered is False
 
 
+@pytest.mark.parametrize(
+    "asset_class,cap_field",
+    [
+        ("equity", "equity_bucket_cap_pct"),
+        ("crypto", "crypto_bucket_cap_pct"),
+    ],
+)
+def test_derived_bucket_cap_applies_without_correlation_snapshot(asset_class, cap_field):
+    overrides = {
+        "asset_class": asset_class,
+        "calibrated_prob": 0.70,
+        "payoff_fraction": 0.20,
+        "max_risk_pct": 10.0,
+        "single_ticker_cap_pct": 100.0,
+        "equity_bucket_cap_pct": 100.0,
+        "crypto_bucket_cap_pct": 100.0,
+        cap_field: 5.0,
+    }
+    inp = _default_input(**overrides)
+
+    out = compute_proposal(inp=inp, correlation=None, source="unit")
+
+    assert out.correlation_cap_triggered is True
+    assert out.max_bucket_notional == pytest.approx(5_000.0)
+    assert out.proposed_notional <= 5_000.0 + 1e-6
+    assert out.reasoning["correlation_bucket_headroom"] == pytest.approx(5_000.0)
+
+
 def test_single_ticker_cap_triggered_when_already_held():
     inp = _default_input(single_ticker_cap_pct=5.0)  # 5% => $5k cap on a 100k book
     portfolio = PortfolioBudget(
@@ -201,6 +464,67 @@ def test_portfolio_cap_trims_proposal():
     out = compute_proposal(inp=inp, portfolio=portfolio, source="unit")
     assert out.notional_cap_triggered is True
     assert out.proposed_notional <= 500.0 + 1e-6
+
+
+def test_negative_budget_exposure_does_not_expand_sizing_headroom():
+    inp = _default_input(
+        calibrated_prob=0.70,
+        payoff_fraction=0.20,
+        max_risk_pct=10.0,
+        single_ticker_cap_pct=5.0,
+    )
+    portfolio = PortfolioBudget(
+        total_capital=100_000.0,
+        deployed_notional=0.0,
+        max_total_notional=100_000.0,
+        ticker_open_notional=-5_000.0,
+    )
+
+    out = compute_proposal(inp=inp, portfolio=portfolio, source="unit")
+
+    assert out.proposed_notional <= 5_000.0 + 1e-6
+    assert out.reasoning["single_ticker_cap_headroom"] == pytest.approx(5_000.0)
+
+
+def test_negative_deployed_notional_does_not_expand_portfolio_headroom():
+    inp = _default_input(
+        calibrated_prob=0.70,
+        payoff_fraction=0.20,
+        max_risk_pct=10.0,
+        single_ticker_cap_pct=100.0,
+        equity_bucket_cap_pct=100.0,
+    )
+    portfolio = PortfolioBudget(
+        total_capital=100_000.0,
+        deployed_notional=-50_000.0,
+        max_total_notional=5_000.0,
+        ticker_open_notional=0.0,
+    )
+
+    out = compute_proposal(inp=inp, portfolio=portfolio, source="unit")
+
+    assert out.proposed_notional <= 5_000.0 + 1e-6
+    assert out.reasoning["portfolio_cap_headroom"] == pytest.approx(5_000.0)
+
+
+def test_negative_correlation_exposure_does_not_expand_bucket_headroom():
+    inp = _default_input(
+        calibrated_prob=0.70,
+        payoff_fraction=0.20,
+        max_risk_pct=10.0,
+        single_ticker_cap_pct=100.0,
+    )
+    correlation = CorrelationBudget(
+        bucket="equity:A",
+        open_notional=-5_000.0,
+        max_bucket_notional=5_000.0,
+    )
+
+    out = compute_proposal(inp=inp, correlation=correlation, source="unit")
+
+    assert out.correlation_cap_triggered is True
+    assert out.proposed_notional <= 5_000.0 + 1e-6
+    assert out.reasoning["correlation_bucket_headroom"] == pytest.approx(5_000.0)
 
 
 # ---------------------------------------------------------------------------
@@ -286,6 +610,29 @@ def test_notional_equals_quantity_times_entry_within_rounding():
     out = compute_proposal(inp=_default_input(), source="unit")
     assert out.proposed_notional == pytest.approx(
         out.proposed_quantity * 100.0, rel=1e-9, abs=1e-4,
+    )
+
+
+def test_option_quantity_uses_contract_multiplier_for_notional():
+    inp = _default_input(
+        ticker="SPY",
+        asset_class="options",
+        entry_price=1.25,
+        stop_price=0.75,
+        payoff_fraction=0.20,
+        loss_per_unit=0.40,
+        capital=10_000.0,
+        unit_multiplier=100.0,
+        qty_rounding="int",
+    )
+
+    out = compute_proposal(inp=inp, source="unit")
+
+    assert out.proposed_quantity == float(int(out.proposed_quantity))
+    assert out.proposed_notional == pytest.approx(
+        out.proposed_quantity * 1.25 * 100.0,
+        rel=1e-9,
+        abs=1e-4,
     )
 
 
