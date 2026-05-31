@@ -173,6 +173,12 @@ def _matches_any(file_path: str, patterns: List[str]) -> bool:
     return False
 
 
+def _filter_file_path_items(items: List[Any], patterns: List[str]) -> List[Any]:
+    if patterns == ["*"]:
+        return items
+    return [item for item in items if _matches_any(item.file_path, patterns)]
+
+
 def _repo_freshness(db: Session, repo_id: Optional[int]) -> dict[str, Any]:
     if repo_id is None:
         return {"trusted": True, "reason": None}
@@ -219,7 +225,7 @@ def get_lens_metrics(
         repo_filter = [CodeHotspot.repo_id == (repo_id if freshness.get("trusted") else -1)]
 
     all_hotspots = db.query(CodeHotspot).filter(*repo_filter).order_by(CodeHotspot.combined_score.desc()).limit(100).all()
-    filtered_hotspots = [h for h in all_hotspots if _matches_any(h.file_path, lens.file_patterns)]
+    filtered_hotspots = _filter_file_path_items(all_hotspots, lens.file_patterns)
 
     insight_q = db.query(CodeInsight).filter(CodeInsight.active.is_(True))
     if repo_id is not None and freshness.get("trusted"):
@@ -235,7 +241,7 @@ def get_lens_metrics(
     elif repo_id is not None:
         all_snapshots_q = all_snapshots_q.filter(CodeSnapshot.repo_id == -1)
     all_snapshots = all_snapshots_q.all()
-    filtered_snapshots = [s for s in all_snapshots if _matches_any(s.file_path, lens.file_patterns)]
+    filtered_snapshots = _filter_file_path_items(all_snapshots, lens.file_patterns)
 
     total_files = len(filtered_snapshots)
     total_lines = sum(s.line_count for s in filtered_snapshots)
@@ -335,7 +341,7 @@ def get_lens_hotspots(db: Session, lens_name: str, repo_id: Optional[int] = None
     if repo_id is not None:
         q = q.filter(CodeHotspot.repo_id == repo_id)
     all_hotspots = q.order_by(CodeHotspot.combined_score.desc()).limit(200).all()
-    filtered = [h for h in all_hotspots if _matches_any(h.file_path, lens.file_patterns)]
+    filtered = _filter_file_path_items(all_hotspots, lens.file_patterns)
     return [
         {
             "file": h.file_path,

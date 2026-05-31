@@ -95,6 +95,8 @@ def _abs_drift_bps(target: float, current: float) -> float:
 def _percentile(values: list[float], pct: float) -> float:
     if not values:
         return 0.0
+    if len(values) == 1:
+        return float(values[0])
     xs = sorted(values)
     k = max(0, min(len(xs) - 1, int(round((pct / 100.0) * (len(xs) - 1)))))
     return float(xs[k])

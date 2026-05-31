@@ -86,6 +86,7 @@ def _file_path_to_glob(path: str) -> str:
     return f"{parts[0]}/{ext}"
 
 
+@lru_cache(maxsize=4096)
 def _extract_verbs(brief: str) -> tuple[str, ...]:
     if not brief:
         return ()

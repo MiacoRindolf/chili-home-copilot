@@ -23,7 +23,15 @@ _TEST_PATTERNS = ("test_", "_test.", "tests/", "test/", "__tests__/", ".spec.", 
 
 def _is_test_file(path: str) -> bool:
     pl = path.lower()
-    return any(p in pl for p in _TEST_PATTERNS)
+    return (
+        "test_" in pl
+        or "_test." in pl
+        or "tests/" in pl
+        or "test/" in pl
+        or "__tests__/" in pl
+        or ".spec." in pl
+        or ".test." in pl
+    )
 
 
 def record_quality_snapshot(db: Session, repo_id: int) -> Dict[str, Any]:
