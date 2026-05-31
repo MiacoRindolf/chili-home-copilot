@@ -540,3 +540,26 @@ probe before full `/trades` route cutover.
 
 Report:
 `docs/STRATEGY/CC_REPORTS/2026-05-31_f-position-identity-phase-5af-trades-api-cutover-flag.md`.
+
+## Position Identity Phase 5AG - Trades Open-Row Runtime Adapter Probe (2026-05-31)
+
+Phase 5AG shipped the missing read-only proof for `/api/trading/trades` open
+rows.
+
+Added `scripts/d-phase5ag-trades-open-runtime-adapter-probe.py`, which compares
+the current `Trade` ORM open-row path with runtime objects loaded from the
+physical `trading_management_envelopes` table. Both sides run through the same
+broker-truth display overlay and stale-open suppression chain before comparing
+the public `/trades` row shape.
+
+Live evidence is green: `VERDICT_STATUS=COMPLETE_POSITIVE`, 5 old open rows =
+5 new open rows, 0 suppressed-stale drift, relation kinds healthy
+(`trading_management_envelopes='r'`, `trading_trades='v'`). Phase 5AE, Phase
+5K, and Phase 5I probes remain `COMPLETE_POSITIVE`.
+
+Architect verdict: the Phase 5AF flag can now be safely expanded in the next
+slice to use the management-envelope runtime-object path for open/all rows when
+explicitly enabled. Keep the flag default off; do not public-rename.
+
+Report:
+`docs/STRATEGY/CC_REPORTS/2026-05-31_f-position-identity-phase-5ag-trades-open-runtime-adapter-probe.md`.
