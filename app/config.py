@@ -4988,6 +4988,30 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_CASH_DEPLOYMENT_BROKER_REJECT_PENALTY_PCT"),
         description="Extra EV drag applied to patterns with recent broker rejects; hard execution blockers still prevent live deployability.",
     )
+    chili_cash_deployment_execution_cost_min_samples: int = Field(
+        default=5,
+        ge=1,
+        validation_alias=AliasChoices("CHILI_CASH_DEPLOYMENT_EXECUTION_COST_MIN_SAMPLES"),
+        description="Rolling execution-cost sample floor before cash deployment treats the estimate as fully reliable.",
+    )
+    chili_cash_deployment_execution_cost_low_sample_penalty_pct: float = Field(
+        default=0.25,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_CASH_DEPLOYMENT_EXECUTION_COST_LOW_SAMPLE_PENALTY_PCT"),
+        description="Maximum extra EV drag for rolling execution-cost estimates below the cash-deployment sample floor.",
+    )
+    chili_cash_deployment_execution_cost_max_age_hours: float = Field(
+        default=72.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_CASH_DEPLOYMENT_EXECUTION_COST_MAX_AGE_HOURS"),
+        description="Maximum age before rolling execution-cost estimates get a staleness penalty; 0 disables age checks.",
+    )
+    chili_cash_deployment_execution_cost_stale_penalty_pct: float = Field(
+        default=0.25,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_CASH_DEPLOYMENT_EXECUTION_COST_STALE_PENALTY_PCT"),
+        description="Extra EV drag for stale rolling execution-cost estimates in cash-deployment ranking.",
+    )
 
     # Decision ledger + net-expectancy allocator (momentum autopilot / brain). Live enforcement OFF by default.
     brain_enable_decision_ledger: bool = Field(default=True, validation_alias=AliasChoices("CHILI_BRAIN_ENABLE_DECISION_LEDGER"))

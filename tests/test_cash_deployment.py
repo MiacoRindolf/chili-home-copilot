@@ -283,6 +283,9 @@ def test_rolling_execution_cost_uses_30_day_model_without_db_fixture(monkeypatch
     monkeypatch.setattr(settings, "brain_execution_cost_default_fee_bps", 1.0)
     monkeypatch.setattr(settings, "brain_execution_cost_impact_cap_bps", 0.0)
     monkeypatch.setattr(settings, "chili_autotrader_per_trade_notional_usd", 1_000.0)
+    monkeypatch.setattr(settings, "chili_cash_deployment_execution_cost_min_samples", 5)
+    monkeypatch.setattr(settings, "chili_cash_deployment_execution_cost_low_sample_penalty_pct", 0.25)
+    monkeypatch.setattr(settings, "chili_cash_deployment_execution_cost_max_age_hours", 72.0)
 
     class _Query:
         def filter(self, *args, **kwargs):
@@ -303,6 +306,7 @@ def test_rolling_execution_cost_uses_30_day_model_without_db_fixture(monkeypatch
                 p90_slippage_bps=50.0,
                 avg_daily_volume_usd=1_000_000.0,
                 sample_trades=12,
+                last_updated_at=datetime.now(),
             )
 
     db = SimpleNamespace(query=lambda model: _Query())
@@ -318,6 +322,55 @@ def test_rolling_execution_cost_uses_30_day_model_without_db_fixture(monkeypatch
     assert meta["execution_cost_source"] == "rolling_execution_cost_estimate"
     assert meta["execution_cost_estimate_window_days"] == 30
     assert meta["execution_cost_requested_window_days"] == 7
+    assert meta["execution_cost_raw_estimate_pct"] == pytest.approx(2.01)
+    assert meta["execution_cost_reliability_penalty_pct"] == pytest.approx(0.0)
+
+
+def test_rolling_execution_cost_penalizes_thin_stale_estimates(monkeypatch):
+    monkeypatch.setattr(settings, "brain_execution_cost_default_fee_bps", 1.0)
+    monkeypatch.setattr(settings, "brain_execution_cost_impact_cap_bps", 0.0)
+    monkeypatch.setattr(settings, "chili_autotrader_per_trade_notional_usd", 1_000.0)
+    monkeypatch.setattr(settings, "chili_cash_deployment_execution_cost_min_samples", 5)
+    monkeypatch.setattr(settings, "chili_cash_deployment_execution_cost_low_sample_penalty_pct", 0.25)
+    monkeypatch.setattr(settings, "chili_cash_deployment_execution_cost_max_age_hours", 72.0)
+    monkeypatch.setattr(settings, "chili_cash_deployment_execution_cost_stale_penalty_pct", 0.25)
+
+    class _Query:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def order_by(self, *args, **kwargs):
+            return self
+
+        def first(self):
+            return SimpleNamespace(
+                id=43,
+                ticker="XCOST",
+                side="long",
+                window_days=30,
+                median_spread_bps=25.0,
+                p90_spread_bps=150.0,
+                median_slippage_bps=10.0,
+                p90_slippage_bps=50.0,
+                avg_daily_volume_usd=1_000_000.0,
+                sample_trades=1,
+                last_updated_at=datetime.now() - timedelta(hours=96),
+            )
+
+    db = SimpleNamespace(query=lambda model: _Query())
+
+    cost, meta = _rolling_execution_cost_pct(
+        db,
+        symbol="XCOST",
+        asset_class="stock",
+        window_days=7,
+    )
+
+    assert meta["execution_cost_raw_estimate_pct"] == pytest.approx(2.01)
+    assert meta["execution_cost_low_sample_penalty_pct"] == pytest.approx(0.2)
+    assert meta["execution_cost_stale_penalty_pct"] == pytest.approx(0.25)
+    assert meta["execution_cost_reliability_penalty_pct"] == pytest.approx(0.45)
+    assert cost == pytest.approx(2.46)
 
 
 def test_cash_deployment_exposure_cap_blocks_sizing(db, monkeypatch):
