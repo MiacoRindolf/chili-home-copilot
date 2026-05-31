@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timedelta, timezone
 
 from scripts import analyze_alert_refresh_churn as audit
 
@@ -122,6 +123,7 @@ def test_churn_audit_prints_all_sections_without_db(monkeypatch, capsys):
 
 
 def test_alert_pressure_summary_separates_open_conflicts_from_history():
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     report = {
         "work_counts": [
             {
@@ -133,6 +135,7 @@ def test_alert_pressure_summary_separates_open_conflicts_from_history():
                 "event_type": "exit_variant_refresh",
                 "status": "pending",
                 "events": 2,
+                "first_seen": now - timedelta(seconds=90),
             },
         ],
         "diagnostic_outcomes": [
@@ -145,13 +148,21 @@ def test_alert_pressure_summary_separates_open_conflicts_from_history():
         "top_recert_rescue_blocker_rollups": [
             {"blocker_diagnostics": 7},
         ],
-        "open_exit_variant_work_with_recent_noop": [{"work_id": 1}],
+        "open_exit_variant_work_with_recent_noop": [
+            {
+                "work_id": 1,
+                "work_created": now - timedelta(seconds=60),
+            }
+        ],
         "open_recert_work_with_recent_blocker_diagnostic": [],
         "duplicate_open_refresh_work": [{"scan_pattern_id": 123}],
         "recent_duplicate_suppressions": [{"suppressed": 4}],
     }
 
-    assert audit._alert_pressure_summary(report) == {
+    summary = audit._alert_pressure_summary(report)
+    assert 90 <= summary.pop("oldest_open_work_age_seconds") <= 120
+    assert 60 <= summary.pop("oldest_open_conflict_age_seconds") <= 120
+    assert summary == {
         "status": "attention",
         "pressure_mode": "actionable_conflict",
         "open_work_events": 2,
@@ -202,6 +213,8 @@ def test_alert_pressure_summary_labels_historical_noise_without_attention():
         "recert_blocker_diagnostics": 5,
         "duplicate_suppressions": 2,
         "historical_noise_events": 19,
+        "oldest_open_work_age_seconds": None,
+        "oldest_open_conflict_age_seconds": None,
     }
 
 

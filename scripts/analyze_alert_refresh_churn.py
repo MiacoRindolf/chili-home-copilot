@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -671,23 +672,58 @@ def _sum_rows(rows: Iterable[dict], key: str) -> int:
     return sum(_safe_count(row, key) for row in rows)
 
 
-def _alert_pressure_summary(report: dict[str, object]) -> dict[str, int | str]:
+def _coerce_datetime(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        out = value
+    elif value:
+        try:
+            out = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if out.tzinfo is not None:
+        out = out.astimezone(timezone.utc).replace(tzinfo=None)
+    return out
+
+
+def _oldest_age_seconds(
+    values: Iterable[object],
+    *,
+    now: datetime | None = None,
+) -> int | None:
+    timestamps = [_coerce_datetime(value) for value in values]
+    timestamps = [ts for ts in timestamps if ts is not None]
+    if not timestamps:
+        return None
+    ref = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    return max(0, int((ref - min(timestamps)).total_seconds()))
+
+
+def _alert_pressure_summary(report: dict[str, object]) -> dict[str, int | str | None]:
     work_counts = list(report.get("work_counts") or [])
     diagnostic_outcomes = list(report.get("diagnostic_outcomes") or [])
     noop_exit_rollups = list(report.get("top_noop_exit_variant_pattern_rollups") or [])
     recert_blocker_rollups = list(report.get("top_recert_rescue_blocker_rollups") or [])
     duplicate_suppressions = list(report.get("recent_duplicate_suppressions") or [])
+    open_conflicts = (
+        list(report.get("open_exit_variant_work_with_recent_noop") or [])
+        + list(report.get("open_recert_work_with_recent_blocker_diagnostic") or [])
+        + list(report.get("duplicate_open_refresh_work") or [])
+    )
 
     open_work_events = 0
     done_work_events = 0
     recert_open_work_events = 0
     exit_open_work_events = 0
+    open_first_seen_values: list[object] = []
     for row in work_counts:
         events = _safe_count(row, "events")
         status = str(row.get("status") or "")
         event_type = str(row.get("event_type") or "")
         if status in OPEN_WORK_STATUSES:
             open_work_events += events
+            open_first_seen_values.append(row.get("first_seen"))
             if event_type == "recert_rescue_refresh":
                 recert_open_work_events += events
             elif event_type == "exit_variant_refresh":
@@ -695,11 +731,7 @@ def _alert_pressure_summary(report: dict[str, object]) -> dict[str, int | str]:
         elif status == "done":
             done_work_events += events
 
-    open_conflict_rows = (
-        len(list(report.get("open_exit_variant_work_with_recent_noop") or []))
-        + len(list(report.get("open_recert_work_with_recent_blocker_diagnostic") or []))
-        + len(list(report.get("duplicate_open_refresh_work") or []))
-    )
+    open_conflict_rows = len(open_conflicts)
     diagnostic_events = _sum_rows(diagnostic_outcomes, "events")
     duplicate_suppressions_count = _sum_rows(duplicate_suppressions, "suppressed")
     historical_noise_events = (
@@ -732,6 +764,12 @@ def _alert_pressure_summary(report: dict[str, object]) -> dict[str, int | str]:
         ),
         "duplicate_suppressions": duplicate_suppressions_count,
         "historical_noise_events": historical_noise_events,
+        "oldest_open_work_age_seconds": _oldest_age_seconds(open_first_seen_values),
+        "oldest_open_conflict_age_seconds": _oldest_age_seconds(
+            row.get("work_created") or row.get("first_seen")
+            for row in open_conflicts
+            if isinstance(row, dict)
+        ),
     }
 
 
