@@ -652,6 +652,17 @@ def _build_report(hours: int, limit: int) -> dict[str, object]:
     }
 
 
+def _report_ok(report: dict[str, object]) -> bool:
+    return not any(
+        bool(report.get(key))
+        for key in (
+            "open_exit_variant_work_with_recent_noop",
+            "open_recert_work_with_recent_blocker_diagnostic",
+            "duplicate_open_refresh_work",
+        )
+    )
+
+
 def _print_report(report: dict[str, object]) -> None:
     hours = int(report["hours"])
     limit = int(report["limit"])
@@ -756,7 +767,7 @@ def main() -> int:
     if args.json:
         print(
             json.dumps(
-                {"ok": True, "wait_seconds": wait_seconds, **report},
+                {"ok": _report_ok(report), "wait_seconds": wait_seconds, **report},
                 default=str,
                 sort_keys=True,
             )

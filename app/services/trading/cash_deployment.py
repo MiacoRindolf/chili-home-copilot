@@ -863,6 +863,7 @@ def cash_deployment_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "stale_broker_local_open": int(categories.get("stale_broker_local_open", 0)),
         "needs_provenance": int(categories.get("needs_provenance", 0)),
         "needs_calibration": int(categories.get("needs_calibration", 0)),
+        "no_targeted_work": int(work.get(NO_TARGETED_WORK, 0)),
         "deployable_cash_notional": round(
             sum(_safe_float(row.get("max_safe_notional"), 0.0) or 0.0 for row in deployable),
             6,
