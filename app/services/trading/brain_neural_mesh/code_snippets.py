@@ -9,6 +9,7 @@ import importlib
 import inspect
 import logging
 import re
+from collections import OrderedDict
 from typing import Any
 
 _log = logging.getLogger(__name__)
@@ -38,7 +39,23 @@ _BARE_SYMBOL_MODULE: dict[str, str] = {
     "log_learning_event": "app.services.trading.learning_events",
 }
 
-_SNIPPET_CACHE: dict[tuple[int, str], str] = {}
+_SNIPPET_CACHE_MAX = 256
+_SNIPPET_CACHE: OrderedDict[tuple[int, str], str] = OrderedDict()
+
+
+def _snippet_cache_get(key: tuple[int, str]) -> str | None:
+    value = _SNIPPET_CACHE.get(key)
+    if value is not None:
+        _SNIPPET_CACHE.move_to_end(key)
+    return value
+
+
+def _snippet_cache_set(key: tuple[int, str], value: str) -> str:
+    _SNIPPET_CACHE.pop(key, None)
+    _SNIPPET_CACHE[key] = value
+    while len(_SNIPPET_CACHE) > _SNIPPET_CACHE_MAX:
+        _SNIPPET_CACHE.popitem(last=False)
+    return value
 
 
 def _strip_trailing_parens_annotation(s: str) -> str:
@@ -113,22 +130,21 @@ def build_code_snippet_from_ref(code_ref: str) -> str:
     if not ref:
         return ""
     ck = (_SNIPPET_CACHE_VERSION, ref)
-    if ck in _SNIPPET_CACHE:
-        return _SNIPPET_CACHE[ck]
+    cached = _snippet_cache_get(ck)
+    if cached is not None:
+        return cached
     if _cluster_synthetic_ref(ref):
         out = (
             "# This cluster groups several steps inside run_learning_cycle.\n"
             "# Open the root node or step nodes for callable source.\n"
             f"# Reference: {ref}\n"
         )
-        _SNIPPET_CACHE[ck] = out
-        return out
+        return _snippet_cache_set(ck, out)
 
     pieces = _split_ref_pieces(ref)
     if not pieces:
         out = "# (empty code reference)\n"
-        _SNIPPET_CACHE[ck] = out
-        return out
+        return _snippet_cache_set(ck, out)
 
     chunks: list[str] = []
     inherit: str | None = None
@@ -159,5 +175,4 @@ def build_code_snippet_from_ref(code_ref: str) -> str:
             out[: _MAX_SNIPPET_CHARS - 120]
             + f"\n\n# ... truncated: total snippet exceeded {_MAX_SNIPPET_CHARS} characters ...\n"
         )
-    _SNIPPET_CACHE[ck] = out
-    return out
+    return _snippet_cache_set(ck, out)

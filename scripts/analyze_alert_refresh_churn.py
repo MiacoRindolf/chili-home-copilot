@@ -26,6 +26,7 @@ os.environ.setdefault("CHILI_APP_NAME", "chili-alert-refresh-churn-audit")
 
 from app.db import SessionLocal  # noqa: E402
 from app.services.trading.recert_rescue_policy import (  # noqa: E402
+    CONDITIONAL_RECERT_RESCUE_BACKTEST_ACTION,
     recert_rescue_blocker_actions,
     recert_rescue_blocker_reasons,
 )
@@ -35,6 +36,7 @@ TARGET_WORK = ("recert_rescue_refresh", "exit_variant_refresh")
 TARGET_DIAGNOSTICS = ("recert_rescue_diagnostic", "exit_variant_diagnostic")
 RECERT_BLOCKER_ACTIONS = tuple(recert_rescue_blocker_actions())
 RECERT_BLOCKER_REASONS = tuple(recert_rescue_blocker_reasons())
+RECERT_CONDITIONAL_BACKTEST_ACTION = CONDITIONAL_RECERT_RESCUE_BACKTEST_ACTION
 
 
 class DatabaseUnavailable(RuntimeError):
@@ -270,6 +272,10 @@ def _top_recert_rescue_blocker_rollups(hours: int, limit: int) -> list[dict]:
               COALESCE(e.payload->>'recommended_next_action', '') = ANY(:recert_actions)
               OR COALESCE(e.payload #>> '{recert_backtest_refresh,reason}', '')
                 = ANY(:recert_reasons)
+              OR (
+                COALESCE(e.payload->>'recommended_next_action', '') = :conditional_action
+                AND COALESCE(e.payload #>> '{recert_backtest_refresh,requested}', 'false') <> 'true'
+              )
             )
         )
         SELECT
@@ -301,6 +307,7 @@ def _top_recert_rescue_blocker_rollups(hours: int, limit: int) -> list[dict]:
             "limit": int(limit),
             "recert_actions": list(RECERT_BLOCKER_ACTIONS),
             "recert_reasons": list(RECERT_BLOCKER_REASONS),
+            "conditional_action": RECERT_CONDITIONAL_BACKTEST_ACTION,
         },
     )
 
@@ -464,6 +471,10 @@ def _open_recert_work_with_recent_blocker_diagnostic(hours: int, limit: int) -> 
               COALESCE(payload->>'recommended_next_action', '') = ANY(:recert_actions)
               OR COALESCE(payload #>> '{recert_backtest_refresh,reason}', '')
                 = ANY(:recert_reasons)
+              OR (
+                COALESCE(payload->>'recommended_next_action', '') = :conditional_action
+                AND COALESCE(payload #>> '{recert_backtest_refresh,requested}', 'false') <> 'true'
+              )
             )
         )
         SELECT DISTINCT ON (w.id)
@@ -491,6 +502,7 @@ def _open_recert_work_with_recent_blocker_diagnostic(hours: int, limit: int) -> 
             "limit": int(limit),
             "recert_actions": list(RECERT_BLOCKER_ACTIONS),
             "recert_reasons": list(RECERT_BLOCKER_REASONS),
+            "conditional_action": RECERT_CONDITIONAL_BACKTEST_ACTION,
         },
     )
 

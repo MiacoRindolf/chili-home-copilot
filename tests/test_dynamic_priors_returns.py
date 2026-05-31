@@ -1,6 +1,12 @@
+from collections import OrderedDict
 from types import SimpleNamespace
 
 from app.services.trading import dynamic_priors
+
+
+class _NoSnapshotOrderedDict(OrderedDict):
+    def items(self):
+        raise AssertionError("cache pruning should evict from the oldest entry")
 
 
 class _Result:
@@ -47,3 +53,25 @@ def test_population_win_rate_excludes_unrealized_closed_rows() -> None:
     assert "entry_price > 0" in db.sql
     assert "quantity > 0" in db.sql
     assert db.params == {"ld": 7}
+
+
+def test_dynamic_prior_cache_hit_refreshes_recency(monkeypatch) -> None:
+    monkeypatch.setattr(dynamic_priors.time, "time", lambda: 100.0)
+    dynamic_priors._CACHE.clear()
+    dynamic_priors._CACHE["a"] = (100.0, 1)
+    dynamic_priors._CACHE["b"] = (100.0, 2)
+
+    assert dynamic_priors._cache_get("a") == 1
+
+    assert list(dynamic_priors._CACHE) == ["b", "a"]
+
+
+def test_dynamic_prior_cache_caps_oldest_without_snapshot(monkeypatch) -> None:
+    monkeypatch.setattr(dynamic_priors.time, "time", lambda: 100.0)
+    monkeypatch.setattr(dynamic_priors, "_CACHE_MAX", 2)
+    cache = _NoSnapshotOrderedDict([("a", (100.0, 1)), ("b", (100.0, 2))])
+    monkeypatch.setattr(dynamic_priors, "_CACHE", cache)
+
+    dynamic_priors._cache_set("c", 3)
+
+    assert list(cache) == ["b", "c"]

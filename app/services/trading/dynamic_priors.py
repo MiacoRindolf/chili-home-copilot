@@ -32,6 +32,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import OrderedDict
 from typing import Any
 
 from sqlalchemy import text
@@ -43,9 +44,10 @@ logger = logging.getLogger(__name__)
 
 
 # Process-local cache. Tiny -- only a handful of values.
-_CACHE: dict[str, tuple[float, Any]] = {}
+_CACHE: OrderedDict[str, tuple[float, Any]] = OrderedDict()
 _CACHE_LOCK = threading.Lock()
 _CACHE_TTL_S = 60.0
+_CACHE_MAX = 128
 
 
 def _cache_get(key: str) -> Any | None:
@@ -57,12 +59,16 @@ def _cache_get(key: str) -> Any | None:
         if (time.time() - ts) > _CACHE_TTL_S:
             del _CACHE[key]
             return None
+        _CACHE.move_to_end(key)
         return val
 
 
 def _cache_set(key: str, val: Any) -> None:
     with _CACHE_LOCK:
+        _CACHE.pop(key, None)
         _CACHE[key] = (time.time(), val)
+        while len(_CACHE) > _CACHE_MAX:
+            _CACHE.popitem(last=False)
 
 
 def _settings_get(name: str, default: Any) -> Any:

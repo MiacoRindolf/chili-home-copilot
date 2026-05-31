@@ -83,10 +83,7 @@ from .auto_trader_rules import (
     passes_rule_gate,
     resolve_pattern_signal_context,
 )
-from .recert_rescue_policy import (
-    RECENT_RECERT_RESCUE_BLOCKER_ACTIONS,
-    RECENT_RECERT_RESCUE_BLOCKER_REASONS,
-)
+from .recert_rescue_policy import recert_rescue_diagnostic_blocks_refresh
 from .autotrader_desk import effective_autotrader_runtime
 from .autopilot_scope import (
     AUTOPILOT_AUTO_TRADER_V1,
@@ -201,8 +198,6 @@ SHADOW_OBSERVATION_SIZING_MODE_FULL_DIAGNOSTICS = "full_diagnostics"
 SHADOW_OBSERVATION_DIAGNOSTIC_SIZING_SETTING = (
     "chili_autotrader_shadow_observation_diagnostic_sizing_enabled"
 )
-_RECENT_RECERT_FASTLANE_BLOCKER_ACTIONS = RECENT_RECERT_RESCUE_BLOCKER_ACTIONS
-_RECENT_RECERT_FASTLANE_BLOCKER_REASONS = RECENT_RECERT_RESCUE_BLOCKER_REASONS
 SHADOW_OBSERVATION_EVIDENCE_NOTIONAL_SETTING = (
     "chili_autotrader_shadow_observation_evidence_notional_usd"
 )
@@ -2430,12 +2425,7 @@ def _recent_recert_rescue_fastlane_blocker(
         payload = row.payload if isinstance(row.payload, dict) else {}
         refresh = payload.get("recert_backtest_refresh")
         refresh_payload = refresh if isinstance(refresh, dict) else {}
-        action = str(payload.get("recommended_next_action") or "").strip().lower()
-        refresh_reason = str(refresh_payload.get("reason") or "").strip().lower()
-        if (
-            action in _RECENT_RECERT_FASTLANE_BLOCKER_ACTIONS
-            or refresh_reason in _RECENT_RECERT_FASTLANE_BLOCKER_REASONS
-        ):
+        if recert_rescue_diagnostic_blocks_refresh(payload):
             return {
                 "queued": False,
                 "reason": "recent_recert_rescue_blocker_diagnostic",

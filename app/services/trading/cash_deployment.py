@@ -34,10 +34,7 @@ from .edge_reliability import (
     null_lineage_short_paper_candidates,
 )
 from .portfolio_risk import get_risk_limits, _option_premium_risk_dollars
-from .recert_rescue_policy import (
-    RECENT_RECERT_RESCUE_BLOCKER_ACTIONS,
-    RECENT_RECERT_RESCUE_BLOCKER_REASONS,
-)
+from .recert_rescue_policy import recert_rescue_diagnostic_blocks_refresh
 from .return_math import trade_return_pct as _realized_trade_return_pct
 
 LIVE_LIFECYCLES = frozenset({"live", "promoted", "pilot_promoted"})
@@ -914,10 +911,6 @@ _STRUCTURAL_EXIT_NOOP_PREFIXES = (
     "insufficient_parent_payoff_samples:",
     "reward_risk_below_floor:",
 )
-_RECENT_RECERT_BLOCKER_ACTIONS = RECENT_RECERT_RESCUE_BLOCKER_ACTIONS
-_RECENT_RECERT_BLOCKER_REASONS = RECENT_RECERT_RESCUE_BLOCKER_REASONS
-
-
 def _structural_exit_noop_reason(reason: Any) -> bool:
     value = str(reason or "").strip().lower()
     return value in _STRUCTURAL_EXIT_NOOP_REASONS or any(
@@ -988,14 +981,8 @@ def _recent_blocked_recert_rescue_work(
     )
     for row in rows:
         payload = row.payload if isinstance(row.payload, dict) else {}
-        action = str(payload.get("recommended_next_action") or "").strip().lower()
-        if action in _RECENT_RECERT_BLOCKER_ACTIONS:
+        if recert_rescue_diagnostic_blocks_refresh(payload):
             return True
-        refresh = payload.get("recert_backtest_refresh")
-        if isinstance(refresh, dict):
-            reason = str(refresh.get("reason") or "").strip().lower()
-            if reason in _RECENT_RECERT_BLOCKER_REASONS:
-                return True
     return False
 
 

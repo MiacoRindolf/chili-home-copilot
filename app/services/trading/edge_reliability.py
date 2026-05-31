@@ -28,10 +28,7 @@ from ...models.trading import (
 )
 from .autotrader_evidence import clean_autotrader_runs, partition_autotrader_runs
 from .brain_work.ledger import enqueue_outcome_event, enqueue_work_event
-from .recert_rescue_policy import (
-    RECENT_RECERT_RESCUE_BLOCKER_ACTIONS,
-    RECENT_RECERT_RESCUE_BLOCKER_REASONS,
-)
+from .recert_rescue_policy import recert_rescue_diagnostic_blocks_refresh
 from .return_math import (
     OPTION_CONTRACT_MULTIPLIER,
     paper_trade_contract_multiplier,
@@ -1000,14 +997,8 @@ def _recent_recert_rescue_blocker_exists(
     )
     for row in rows:
         payload = row.payload if isinstance(row.payload, dict) else {}
-        action = str(payload.get("recommended_next_action") or "").strip().lower()
-        if action in RECENT_RECERT_RESCUE_BLOCKER_ACTIONS:
+        if recert_rescue_diagnostic_blocks_refresh(payload):
             return True
-        refresh = payload.get("recert_backtest_refresh")
-        if isinstance(refresh, dict):
-            reason = str(refresh.get("reason") or "").strip().lower()
-            if reason in RECENT_RECERT_RESCUE_BLOCKER_REASONS:
-                return True
     return False
 
 
