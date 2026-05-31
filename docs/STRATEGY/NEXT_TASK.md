@@ -1,30 +1,30 @@
-# NEXT_TASK: f-phase5o-momentum-neural-live-runner-envelope-audit
+# NEXT_TASK: f-phase5o-stale-promoted-sweep-envelope-audit
 
 STATUS: QUEUED
 
 ## Goal
 
-Audit `app/services/trading/momentum_neural/live_runner.py`, the next Phase 5O
-adapter candidate after `pattern_condition_monitor.py` was closed as a
-false-positive source token cleanup.
+Audit `app/services/trading/cron_jobs/stale_promoted_sweep.py`, the next
+Phase 5O adapter candidate after `momentum_neural/live_runner.py` was closed as
+a false-positive source token cleanup.
 
 ## Why This Is Next
 
-The remaining Phase 5O adapter candidates are increasingly close to live
-decision surfaces. `momentum_neural/live_runner.py` is currently classified as
-`learning_research_reporting / adapter_candidate`, but its runtime role and
-name suggest possible live-selection influence. It should receive an
-evidence-first audit before any rename/conversion pressure.
+The remaining Phase 5O adapter candidates are increasingly close to lifecycle
+and live decision surfaces. `stale_promoted_sweep.py` is currently classified as
+`learning_research_reporting / adapter_candidate`, but stale/promoted lifecycle
+sweeps can affect pattern eligibility. It should receive an evidence-first audit
+before any rename/conversion pressure.
 
-Current surface after the pattern-condition monitor false-positive closeout:
+Current surface after the momentum live-runner false-positive closeout:
 
 ```text
-orm_trade_symbol_compat = 67
-learning_research_reporting = 8
+orm_trade_symbol_compat = 66
+learning_research_reporting = 7
 live_action_broker_reconcile = 19
 private_helper_type_only = 5
 risk_capital_gate = 21
-adapter_candidate = 10
+adapter_candidate = 9
 future_rename_blocker = 41
 raw reader bucket = 0
 ```
@@ -32,9 +32,10 @@ raw reader bucket = 0
 ## Scope
 
 - Classify every legacy `Trade` ORM reference in
-  `momentum_neural/live_runner.py`.
-- Determine whether the references are passive neural/reporting reads, live
-  candidate selection, entry gating, or action-adjacent runtime state.
+  `cron_jobs/stale_promoted_sweep.py`.
+- Determine whether the references are passive learning/reporting reads,
+  lifecycle demotion/promotion inputs, live candidate selection, or
+  action-adjacent runtime state.
 - If passive and covered by tests, add a small safe helper/adapter conversion.
 - If behavior-bearing, add read-only parity evidence and reclassify it as a
   future rename blocker.

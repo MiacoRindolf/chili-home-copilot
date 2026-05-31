@@ -1269,7 +1269,7 @@ def tick_live_session(
 
         # P0.4 — autopilot mutual exclusion. Our own active session counts as
         # the lease holder (owner_self → allowed), so this only blocks when
-        # an AutoTrader v1 live Trade is already open on the same symbol/user.
+        # an AutoTrader v1 live position is already open on the same symbol/user.
         gate = check_autopilot_entry_gate(
             db,
             candidate=AUTOPILOT_MOMENTUM_NEURAL,
