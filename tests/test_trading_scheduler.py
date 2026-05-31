@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from app.config import settings
 
@@ -19,16 +20,57 @@ class _FakeBatchSession:
         self.name = name
         self.rollbacks = 0
         self.commits = 0
+        self.invalidates = 0
         self.closed = False
 
     def rollback(self) -> None:
         self.rollbacks += 1
+
+    def invalidate(self) -> None:
+        self.invalidates += 1
 
     def commit(self) -> None:
         self.commits += 1
 
     def close(self) -> None:
         self.closed = True
+
+
+class _FakeIdQuery:
+    def __init__(self, ids: list[int]):
+        self.ids = ids
+
+    def filter(self, *_args, **_kwargs):
+        return self
+
+    def all(self):
+        return [(id_,) for id_ in self.ids]
+
+
+class _FakeIdSession(_FakeBatchSession):
+    def __init__(self, name: str, ids: list[int]):
+        super().__init__(name)
+        self.ids = ids
+
+    def query(self, *_args, **_kwargs):
+        return _FakeIdQuery(self.ids)
+
+
+class _FakeGetQuery:
+    def __init__(self, obj):
+        self.obj = obj
+
+    def get(self, _id):
+        return self.obj
+
+
+class _FakeGetSession(_FakeBatchSession):
+    def __init__(self, name: str, obj):
+        super().__init__(name)
+        self.obj = obj
+
+    def query(self, *_args, **_kwargs):
+        return _FakeGetQuery(self.obj)
 
 
 def test_scheduler_excludes_web_pattern_research_job(monkeypatch):
@@ -105,6 +147,7 @@ def test_scheduler_failure_recording_falls_back_after_broken_primary_session():
         ("fresh", "job-1", False, "server closed the connection unexpectedly"),
     ]
     assert primary.rollbacks >= 2
+    assert primary.invalidates == 1
     assert fresh.commits == 1
     assert fresh.closed is True
 
@@ -159,10 +202,136 @@ def test_daily_market_scan_failure_uses_fresh_session_and_surfaces_to_guard(monk
         ("fresh", "scan-job-1", False, "server closed the connection unexpectedly"),
     ]
     assert primary.rollbacks >= 2
+    assert primary.invalidates == 1
     assert primary.closed is True
     assert fresh.commits == 1
     assert fresh.closed is True
     assert cleared == [True]
+
+
+def test_check_paper_exits_isolated_closes_listing_session_before_trade_work(monkeypatch):
+    from app.services.trading import paper_trading
+
+    list_session = _FakeIdSession("list", [101, 102])
+    trade_sessions = [
+        _FakeBatchSession("trade-101"),
+        _FakeBatchSession("trade-102"),
+    ]
+    sessions = [list_session, *trade_sessions]
+    calls: list[tuple[str, set[int] | None]] = []
+
+    def _factory():
+        return sessions.pop(0)
+
+    def _fake_check(db, user_id=None, *, skip_trade_ids=None, trade_ids=None):
+        assert list_session.closed is True
+        calls.append((db.name, trade_ids))
+        return {
+            "checked": 1,
+            "closed": 1 if trade_ids == {101} else 0,
+            "trailing_updated": 0,
+        }
+
+    monkeypatch.setattr(paper_trading, "check_paper_exits", _fake_check)
+
+    result = paper_trading.check_paper_exits_isolated(_factory)
+
+    assert result == {"checked": 2, "closed": 1, "trailing_updated": 0}
+    assert calls == [("trade-101", {101}), ("trade-102", {102})]
+    assert list_session.rollbacks == 1
+    assert all(s.closed for s in [list_session, *trade_sessions])
+
+
+def test_run_exit_engine_isolated_closes_listing_session_before_position_work(monkeypatch):
+    from app.services.trading import live_exit_engine
+
+    list_session = _FakeIdSession("list", [201, 202])
+    position_sessions = [
+        _FakeBatchSession("position-201"),
+        _FakeBatchSession("position-202"),
+    ]
+    sessions = [list_session, *position_sessions]
+    calls: list[tuple[str, set[int] | None]] = []
+
+    def _factory():
+        return sessions.pop(0)
+
+    def _fake_run(db, user_id=None, *, position_ids=None):
+        assert list_session.closed is True
+        calls.append((db.name, position_ids))
+        action = {"position_id": next(iter(position_ids)), "action": "partial"}
+        return {
+            "ok": True,
+            "evaluated": 1,
+            "actions": [],
+            "partial_actions": [action],
+            "all": [action],
+            "skipped_options": 0,
+        }
+
+    monkeypatch.setattr(live_exit_engine, "run_exit_engine", _fake_run)
+
+    result = live_exit_engine.run_exit_engine_isolated(_factory)
+
+    assert result["evaluated"] == 2
+    assert [a["position_id"] for a in result["partial_actions"]] == [201, 202]
+    assert calls == [("position-201", {201}), ("position-202", {202})]
+    assert list_session.rollbacks == 1
+    assert all(s.closed for s in [list_session, *position_sessions])
+
+
+def test_paper_trade_check_job_uses_isolated_helpers_and_bounded_partial_sessions(monkeypatch):
+    import app.db as app_db
+    from app.services import trading_scheduler
+    from app.services.trading import live_exit_engine, paper_trading
+
+    partial_position = SimpleNamespace(id=303, ticker="AAOX", partial_taken=False)
+    partial_session = _FakeGetSession("partial-303", partial_position)
+    sessions = [partial_session]
+    helper_factories: list[object] = []
+    partial_calls: list[tuple[str, int, float, float]] = []
+
+    def _session_factory():
+        return sessions.pop(0)
+
+    def _paper_helper(factory, *_args, **_kwargs):
+        helper_factories.append(factory)
+        return {"checked": 2, "closed": 0, "trailing_updated": 0}
+
+    def _exit_helper(factory, *_args, **_kwargs):
+        helper_factories.append(factory)
+        return {
+            "ok": True,
+            "evaluated": 1,
+            "actions": [],
+            "partial_actions": [
+                {
+                    "position_id": 303,
+                    "partial_close_fraction": 0.25,
+                    "current_price": 12.5,
+                    "r_multiple": 1.1,
+                }
+            ],
+            "all": [],
+            "skipped_options": 0,
+        }
+
+    def _place_partial(db, pos, fraction, *, current_price=None):
+        partial_calls.append((db.name, pos.id, fraction, current_price))
+        return {"ok": True, "quantity": 1.0, "price": current_price}
+
+    monkeypatch.setattr(app_db, "SessionLocal", _session_factory)
+    monkeypatch.setattr(paper_trading, "check_paper_exits_isolated", _paper_helper)
+    monkeypatch.setattr(live_exit_engine, "run_exit_engine_isolated", _exit_helper)
+    monkeypatch.setattr(paper_trading, "place_partial_close", _place_partial)
+    monkeypatch.setattr(trading_scheduler, "run_scheduler_job_guarded", lambda _id, fn: fn())
+
+    trading_scheduler._run_paper_trade_check_job()
+
+    assert helper_factories == [_session_factory, _session_factory]
+    assert partial_calls == [("partial-303", 303, 0.25, 12.5)]
+    assert partial_session.rollbacks == 1
+    assert partial_session.closed is True
 
 
 def test_scheduler_web_role_omits_crypto_breakout(monkeypatch):

@@ -74,33 +74,31 @@ def _record_batch_job_failure_resilient(
     then requires a rollback before any reconnect attempt; if that primary
     session cannot recover, use a fresh session so ops still gets a failure row.
     """
+    from ..db import recover_session_after_db_error
+
     err_text = str(error)[:2000]
-    try:
-        db.rollback()
-    except Exception:
-        logger.debug(
-            "[scheduler] %s primary rollback before failure record failed",
-            log_label,
-            exc_info=True,
-        )
+    recover_session_after_db_error(
+        db,
+        error if isinstance(error, BaseException) else None,
+        logger=logger,
+        context=f"[scheduler] {log_label} primary",
+    )
 
     try:
         finish_fn(db, job_id, ok=False, error=err_text)
         db.commit()
         return "primary_session"
-    except Exception:
+    except Exception as primary_exc:
         logger.exception(
             "[scheduler] Failed to record %s batch job failure on primary session",
             log_label,
         )
-        try:
-            db.rollback()
-        except Exception:
-            logger.debug(
-                "[scheduler] %s primary rollback after failure-record miss failed",
-                log_label,
-                exc_info=True,
-            )
+        recover_session_after_db_error(
+            db,
+            primary_exc,
+            logger=logger,
+            context=f"[scheduler] {log_label} primary failure-record",
+        )
 
     fallback_db = None
     try:
@@ -143,25 +141,25 @@ def _finish_wrapper_batch_job_resilient(
     log_label: str,
 ) -> str:
     """Finish a scheduler-wrapper batch row even after the primary DB session breaks."""
+    from ..db import recover_session_after_db_error
+
     meta_payload = dict(meta or {})
     try:
         finish_fn(db, job_id, ok=ok, error=error, meta=meta_payload)
         db.commit()
         return "primary_session"
-    except Exception:
+    except Exception as primary_exc:
         logger.debug(
             "[scheduler_job] %s primary batch_job_finish failed; retrying fresh session",
             log_label,
             exc_info=True,
         )
-        try:
-            db.rollback()
-        except Exception:
-            logger.debug(
-                "[scheduler_job] %s primary rollback after finish miss failed",
-                log_label,
-                exc_info=True,
-            )
+        recover_session_after_db_error(
+            db,
+            primary_exc,
+            logger=logger,
+            context=f"[scheduler_job] {log_label} primary finish",
+        )
 
     fallback_db = None
     try:
@@ -483,39 +481,43 @@ def _run_paper_trade_check_job():
 
     def _work() -> None:
         from ..db import SessionLocal
-        from .trading.paper_trading import check_paper_exits
+        from .trading.paper_trading import check_paper_exits_isolated
 
-        db = SessionLocal()
+        result = check_paper_exits_isolated(SessionLocal)
+        if result.get("closed", 0) > 0:
+            logger.info("[scheduler] Paper trades: checked %d, closed %d",
+                        result["checked"], result["closed"])
+        # Also run the live exit engine for pattern-based exit recommendations.
+        # Each helper owns short-lived sessions so quote/API loops do not keep a
+        # single scheduler transaction open across the full sweep.
         try:
-            result = check_paper_exits(db)
-            if result.get("closed", 0) > 0:
-                logger.info("[scheduler] Paper trades: checked %d, closed %d",
-                            result["checked"], result["closed"])
-            # Also run the live exit engine for pattern-based exit recommendations
-            try:
-                from .trading.live_exit_engine import run_exit_engine
-                from .trading.paper_trading import place_partial_close
-                from ..models.trading import PaperTrade as _PT
-                exit_results = run_exit_engine(db)
-                exits = exit_results.get("actions", [])
-                if exits:
-                    logger.info("[scheduler] Live exit engine: %d recommendations", len(exits))
-                # Partial-profit consumer (migration 226 wiring). The
-                # canonical evaluator emits ``action="partial"`` when a
-                # position has reached 1R, hasn't already partialed, and
-                # no terminal exit would fire. ``run_exit_engine`` routes
-                # those into a separate bucket so terminal-close logic
-                # stays unchanged.
-                for partial_rec in exit_results.get("partial_actions", []):
-                    pos_id = partial_rec.get("position_id")
-                    if pos_id is None:
-                        continue
+            from .trading.live_exit_engine import run_exit_engine_isolated
+            from .trading.paper_trading import place_partial_close
+            from ..models.trading import PaperTrade as _PT
+            exit_results = run_exit_engine_isolated(SessionLocal)
+            exits = exit_results.get("actions", [])
+            if exits:
+                logger.info("[scheduler] Live exit engine: %d recommendations", len(exits))
+            # Partial-profit consumer (migration 226 wiring). The
+            # canonical evaluator emits ``action="partial"`` when a
+            # position has reached 1R, hasn't already partialed, and
+            # no terminal exit would fire. ``run_exit_engine`` routes
+            # those into a separate bucket so terminal-close logic
+            # stays unchanged.
+            for partial_rec in exit_results.get("partial_actions", []):
+                pos_id = partial_rec.get("position_id")
+                if pos_id is None:
+                    continue
+                db = SessionLocal()
+                try:
                     pos = db.query(_PT).get(pos_id)
                     if pos is None or pos.partial_taken:
                         continue
                     fraction = float(partial_rec.get("partial_close_fraction", 0.5))
                     outcome = place_partial_close(
-                        db, pos, fraction,
+                        db,
+                        pos,
+                        fraction,
                         current_price=partial_rec.get("current_price"),
                     )
                     if outcome.get("ok"):
@@ -531,15 +533,14 @@ def _run_paper_trade_check_job():
                             "[partial_profit_ops] FAILED position_id=%s ticker=%s reason=%s",
                             pos.id, pos.ticker, outcome.get("error"),
                         )
-            except Exception:
-                logger.debug("[scheduler] live_exit_engine error", exc_info=True)
-        finally:
-            # FIX 46 pattern (rollback before close).
-            try:
-                db.rollback()
-            except Exception:
-                pass
-            db.close()
+                finally:
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                    db.close()
+        except Exception:
+            logger.debug("[scheduler] live_exit_engine error", exc_info=True)
 
     run_scheduler_job_guarded("paper_trade_check", _work)
 
