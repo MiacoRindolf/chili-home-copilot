@@ -6,6 +6,8 @@ from app.services.trading.management_envelopes import (
     count_probation_envelopes_since,
     fetch_synergy_retry_envelope_candidates,
     load_closed_envelope_execution_rows,
+    load_closed_pattern_envelope_rows,
+    load_closed_review_envelope_rows,
     summarize_closed_envelope_performance,
 )
 
@@ -144,4 +146,37 @@ def test_closed_envelope_execution_rows_read_management_envelopes():
     assert "trading_trades" not in db.sql
     assert "status = 'closed'" in db.sql
     assert "entry_date >= :since" in db.sql
+    assert db.params == {"uid": 7, "since": since}
+
+
+def test_closed_pattern_envelope_rows_read_management_envelopes():
+    since = datetime(2026, 5, 30, 15, 0)
+    db = _FakeDb(_RowsResult([{"id": 9, "ticker": "ABC"}]))
+
+    rows = load_closed_pattern_envelope_rows(
+        db,
+        pattern_id=42,
+        user_id=7,
+        since=since,
+    )
+
+    assert rows == [{"id": 9, "ticker": "ABC"}]
+    assert "FROM trading_management_envelopes" in db.sql
+    assert "trading_trades" not in db.sql
+    assert "scan_pattern_id = :pattern_id" in db.sql
+    assert "ORDER BY exit_date ASC" in db.sql
+    assert db.params == {"pattern_id": 42, "since": since, "uid": 7}
+
+
+def test_closed_review_envelope_rows_read_management_envelopes():
+    since = datetime(2026, 5, 30, 15, 0)
+    db = _FakeDb(_RowsResult([{"id": 9, "ticker": "ABC"}]))
+
+    rows = load_closed_review_envelope_rows(db, user_id=7, since=since)
+
+    assert rows == [{"id": 9, "ticker": "ABC"}]
+    assert "FROM trading_management_envelopes" in db.sql
+    assert "trading_trades" not in db.sql
+    assert "status = 'closed'" in db.sql
+    assert "ORDER BY exit_date ASC" in db.sql
     assert db.params == {"uid": 7, "since": since}

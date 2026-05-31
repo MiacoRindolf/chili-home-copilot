@@ -7,12 +7,13 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
 from sqlalchemy.orm import Session
 
-from ...models.trading import Trade
+from .management_envelopes import load_closed_pattern_envelope_rows
 from .return_math import trade_return_pct
 
 logger = logging.getLogger(__name__)
@@ -121,7 +122,7 @@ def _fetch_benchmark_returns(
 
 
 def attribute_trade(
-    trade: Trade,
+    trade: Any,
     *,
     benchmark_return: float | None | object = _BENCHMARK_RETURN_UNSET,
 ) -> dict[str, Any]:
@@ -179,6 +180,10 @@ def attribute_trade(
     return result
 
 
+def _row_to_trade(row: dict[str, Any]) -> SimpleNamespace:
+    return SimpleNamespace(**row)
+
+
 def attribute_pattern_trades(
     db: Session,
     pattern_id: int,
@@ -189,14 +194,15 @@ def attribute_pattern_trades(
     """Attribute all closed trades for a pattern, aggregating alpha vs beta."""
     cutoff = datetime.utcnow() - timedelta(days=lookback_days)
 
-    q = db.query(Trade).filter(
-        Trade.scan_pattern_id == pattern_id,
-        Trade.status == "closed",
-        Trade.exit_date >= cutoff,
-    )
-    if user_id:
-        q = q.filter(Trade.user_id == user_id)
-    trades = q.order_by(Trade.exit_date.asc()).all()
+    trades = [
+        _row_to_trade(row)
+        for row in load_closed_pattern_envelope_rows(
+            db,
+            pattern_id=pattern_id,
+            user_id=user_id,
+            since=cutoff,
+        )
+    ]
 
     if not trades:
         return {"pattern_id": pattern_id, "trade_count": 0, "attributions": []}

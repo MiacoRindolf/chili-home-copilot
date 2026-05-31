@@ -9,7 +9,10 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from .management_envelopes import MANAGEMENT_ENVELOPES_RELATION
+from .management_envelopes import (
+    MANAGEMENT_ENVELOPES_RELATION,
+    load_closed_review_envelope_rows,
+)
 
 
 def _scan_patterns_by_id(db: Session, pattern_ids: set[int]) -> dict[int, Any]:
@@ -325,7 +328,6 @@ def post_trade_review(
     The returned dict is additive and does not mutate DB state.
     """
     from datetime import datetime, timedelta
-    from ...models.trading import Trade
     from .backtest_metrics import backtest_win_rate_db_to_display_pct
 
     if user_id is None:
@@ -333,15 +335,10 @@ def post_trade_review(
 
     since = datetime.utcnow() - timedelta(days=max(1, int(days)))
 
-    closed = (
-        db.query(Trade)
-        .filter(
-            Trade.user_id == user_id,
-            Trade.status == "closed",
-            Trade.exit_date >= since,
-        )
-        .order_by(Trade.exit_date.asc())
-        .all()
+    closed = load_closed_review_envelope_rows(
+        db,
+        user_id=int(user_id),
+        since=since,
     )
 
     if not closed:
@@ -352,7 +349,7 @@ def post_trade_review(
             "feedback_signals": [],
         }
 
-    pnls = [float(t.pnl or 0) for t in closed]
+    pnls = [float(t.get("pnl") or 0) for t in closed]
     wins = sum(1 for p in pnls if p > 0)
     n = len(pnls)
     total_pnl = round(sum(pnls), 2)
@@ -372,23 +369,23 @@ def post_trade_review(
     # --- Slippage outliers ---
     high_slip_trades = []
     for t in closed:
-        entry_slip = float(t.tca_entry_slippage_bps or 0)
-        exit_slip = float(t.tca_exit_slippage_bps or 0)
+        entry_slip = float(t.get("tca_entry_slippage_bps") or 0)
+        exit_slip = float(t.get("tca_exit_slippage_bps") or 0)
         total_slip = entry_slip + exit_slip
         if total_slip > 50:  # >50 bps total is notable
             high_slip_trades.append({
-                "ticker": t.ticker,
+                "ticker": t.get("ticker"),
                 "entry_slippage_bps": round(entry_slip, 1),
                 "exit_slippage_bps": round(exit_slip, 1),
                 "total_slippage_bps": round(total_slip, 1),
-                "pnl": float(t.pnl or 0),
+                "pnl": float(t.get("pnl") or 0),
             })
     # --- Pattern performance ---
     from collections import defaultdict
-    by_pid: dict[int, list[Trade]] = defaultdict(list)
+    by_pid: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for t in closed:
-        if t.scan_pattern_id:
-            by_pid[int(t.scan_pattern_id)].append(t)
+        if t.get("scan_pattern_id"):
+            by_pid[int(t["scan_pattern_id"])].append(t)
 
     outperformers: list[dict[str, Any]] = []
     underperformers: list[dict[str, Any]] = []
@@ -399,7 +396,7 @@ def post_trade_review(
         if pid <= 0:
             continue
         pat = patterns_by_id.get(pid)
-        trade_pnls = [float(t.pnl or 0) for t in trades]
+        trade_pnls = [float(t.get("pnl") or 0) for t in trades]
         t_wins = sum(1 for p in trade_pnls if p > 0)
         t_n = len(trade_pnls)
         live_wr = round(t_wins / t_n * 100, 1) if t_n else 0

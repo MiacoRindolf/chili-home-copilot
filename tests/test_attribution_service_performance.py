@@ -50,3 +50,11 @@ def test_closed_pattern_live_stats_reads_management_envelopes_contract() -> None
 
     assert "MANAGEMENT_ENVELOPES_RELATION" in source
     assert "FROM trading_trades" not in source
+
+
+def test_post_trade_review_uses_management_envelope_helper_contract() -> None:
+    source = inspect.getsource(attribution_service.post_trade_review)
+
+    assert "load_closed_review_envelope_rows" in source
+    assert "db.query(Trade)" not in source
+    assert "from ...models.trading import Trade" not in source

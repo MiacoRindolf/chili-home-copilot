@@ -1,24 +1,22 @@
-# NEXT_TASK: f-position-identity-phase-5o-attribution-review-helper-slice
+# NEXT_TASK: f-position-identity-phase-5p-context-report-helper-slice
 
 STATUS: PENDING
 
 ## Goal
 
-Continue reducing `Trade` ORM-symbol semantic debt in read/report code by moving attribution and post-trade review surfaces behind management-envelope helper APIs.
+Continue shrinking `Trade` ORM-symbol semantic debt by converting another small read/report slice to management-envelope helper APIs.
 
-Phase 5N slice 1 proved the shape: low-risk analytics/reporting callers can speak management-envelope semantics without changing live execution behavior. The ORM-symbol count dropped from 105 to 103 and the raw-reader/mutation guard stayed clean.
+Phase 5N and 5O moved daily playbook, execution-quality, pattern attribution, and post-trade review off direct `Trade` ORM reads. The count is now 101, with no unsafe raw readers or mutations.
 
 ## Recommended Work Shape
 
-1. Target attribution/reporting only:
-   - `app/services/trading/attribution_service.py`
-   - `app/services/trading/performance_attribution.py`
-2. Add narrow helper functions to `app/services/trading/management_envelopes.py` for the repeated closed-envelope row patterns.
-3. Preserve response payloads and scoring math.
-4. Add tests that prove helpers read `trading_management_envelopes`, not `trading_trades`.
+1. Start with `app/services/trading/ai_context.py`.
+2. If the helper shape is still obvious, add one small journal/report/context surface.
+3. Add narrow helper APIs to `app/services/trading/management_envelopes.py`.
+4. Preserve response payloads and text output.
 5. Re-run:
+   - focused tests for the touched readers
    - `tests/test_management_envelopes.py`
-   - attribution/performance focused tests
    - `tests/test_phase5_remaining_trade_refs.py`
    - `tests/test_phase5l_reader_allowlist.py`
    - `scripts/analyze_phase5_remaining_trade_refs.py --bucket orm_trade_symbol_compat --fail-on-unexpected-runtime`
@@ -28,8 +26,8 @@ Phase 5N slice 1 proved the shape: low-risk analytics/reporting callers can spea
 - Do not rename `Trade`.
 - Do not touch broker sync, bracket writers, stop/exit execution, order placement, PDT, or capital gates.
 - Do not drop or rewrite the `trading_trades` compatibility view.
-- Do not absorb unrelated dirty worktree files.
+- Stop before the slice becomes a live-money path.
 
 ## Architect Verdict
 
-Keep the refactor on rails: semantic helper slices for read/report code first, live-money paths only after each surface has its own parity gate. This gives the system the data-model clarity of the rename without risking a capital-path surprise.
+Keep taking the clean base hits. The data model is already renamed; the remaining work is mental-model cleanup. Read/report helper slices give us that clarity without putting capital paths in motion.

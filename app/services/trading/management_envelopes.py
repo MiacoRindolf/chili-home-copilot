@@ -273,6 +273,70 @@ def load_closed_envelope_execution_rows(
            AND entry_date >= :since
     """, {"uid": user_id, "since": since})
 
+
+def load_closed_pattern_envelope_rows(
+    db: Session,
+    *,
+    pattern_id: int,
+    user_id: int | None,
+    since: datetime,
+) -> list[dict[str, Any]]:
+    """Load closed management envelopes for pattern-performance attribution."""
+    user_clause = ""
+    params: dict[str, Any] = {
+        "pattern_id": int(pattern_id),
+        "since": since,
+    }
+    if user_id is not None:
+        user_clause = "AND user_id = :uid"
+        params["uid"] = int(user_id)
+    return _rows(db, f"""
+        SELECT
+            id,
+            ticker,
+            direction,
+            entry_price,
+            exit_price,
+            quantity,
+            pnl,
+            asset_kind,
+            tags,
+            indicator_snapshot,
+            entry_date,
+            exit_date,
+            tca_entry_slippage_bps,
+            tca_exit_slippage_bps
+          FROM {MANAGEMENT_ENVELOPES_RELATION}
+         WHERE scan_pattern_id = :pattern_id
+           AND status = 'closed'
+           AND exit_date >= :since
+           {user_clause}
+         ORDER BY exit_date ASC
+    """, params)
+
+
+def load_closed_review_envelope_rows(
+    db: Session,
+    *,
+    user_id: int,
+    since: datetime,
+) -> list[dict[str, Any]]:
+    """Load closed management envelopes needed by post-trade review reports."""
+    return _rows(db, f"""
+        SELECT
+            id,
+            ticker,
+            scan_pattern_id,
+            pnl,
+            tca_entry_slippage_bps,
+            tca_exit_slippage_bps
+          FROM {MANAGEMENT_ENVELOPES_RELATION}
+         WHERE user_id = :uid
+           AND status = 'closed'
+           AND exit_date >= :since
+         ORDER BY exit_date ASC
+    """, {"uid": int(user_id), "since": since})
+
 def _option_envelope_predicate_sql(alias: str = "t") -> str:
     snap = f"COALESCE({alias}.indicator_snapshot, '{{}}'::jsonb)"
     breakout = f"({snap}->'breakout_alert')"
