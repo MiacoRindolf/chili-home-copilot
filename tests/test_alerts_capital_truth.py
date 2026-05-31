@@ -72,6 +72,7 @@ def _proposal(**overrides):
         "stop_loss": 95.0,
         "take_profit": 115.0,
         "quantity": 2,
+        "position_size_pct": 5.0,
         "projected_profit_pct": 15.0,
         "projected_loss_pct": 5.0,
         "risk_reward_ratio": 3.0,
@@ -319,6 +320,83 @@ def test_execute_proposal_blocks_when_stale_quantity_cannot_be_resized():
     risk_gate.assert_called_once()
     place_buy_order.assert_not_called()
     assert proposal.quantity is None
+
+
+def test_execute_proposal_blocks_stale_quantity_when_capital_shrinks():
+    proposal = _proposal(stop_loss=99.0)
+    db = _FakeDb()
+
+    with patch("app.services.trading.alerts._get_buying_power", return_value=1_000.0), patch(
+        "app.services.trading.portfolio_risk.check_new_trade_allowed",
+        return_value=(True, None),
+    ) as risk_gate, patch(
+        "app.services.trading.alerts.dispatch_alert"
+    ) as dispatch_alert, patch(
+        "app.services.broker_manager.get_best_broker_for"
+    ) as get_best_broker_for, patch(
+        "app.services.broker_manager.place_buy_order"
+    ) as place_buy_order:
+        result = alerts._execute_proposal(db, proposal, user_id=None)
+
+    assert result == {
+        "status": "blocked",
+        "error": "proposal_quantity_exceeds_current_capital",
+    }
+    risk_gate.assert_called_once()
+    dispatch_alert.assert_called_once()
+    get_best_broker_for.assert_not_called()
+    place_buy_order.assert_not_called()
+    assert proposal.status == "approved"
+
+
+def test_execute_proposal_blocks_quantity_above_current_risk_budget_without_plan_pct():
+    proposal = _proposal(quantity=3, position_size_pct=None)
+    db = _FakeDb()
+
+    with patch("app.services.trading.alerts._get_buying_power", return_value=1_000.0), patch(
+        "app.services.trading.portfolio_risk.check_new_trade_allowed",
+        return_value=(True, None),
+    ) as risk_gate, patch(
+        "app.services.trading.alerts.dispatch_alert"
+    ) as dispatch_alert, patch(
+        "app.services.broker_manager.get_best_broker_for"
+    ) as get_best_broker_for, patch(
+        "app.services.broker_manager.place_buy_order"
+    ) as place_buy_order:
+        result = alerts._execute_proposal(db, proposal, user_id=None)
+
+    assert result == {
+        "status": "blocked",
+        "error": "proposal_quantity_exceeds_current_risk",
+    }
+    risk_gate.assert_called_once()
+    dispatch_alert.assert_called_once()
+    get_best_broker_for.assert_not_called()
+    place_buy_order.assert_not_called()
+    assert proposal.status == "approved"
+
+
+def test_execute_proposal_rolls_back_when_decision_packet_create_fails():
+    proposal = _proposal()
+    db = _FakeDb()
+
+    with patch("app.services.trading.alerts._get_buying_power", return_value=10_000.0), patch(
+        "app.services.trading.portfolio_risk.check_new_trade_allowed",
+        return_value=(True, None),
+    ), patch(
+        "app.services.trading.decision_ledger.record_strategy_proposal_decision",
+        side_effect=RuntimeError("ledger unavailable"),
+    ), patch(
+        "app.services.trading.alerts.dispatch_alert"
+    ), patch(
+        "app.services.broker_manager.place_buy_order"
+    ) as place_buy_order:
+        result = alerts._execute_proposal(db, proposal, user_id=None, broker="manual")
+
+    assert result == {"status": "blocked", "error": "decision_packet_create_failed"}
+    assert db.rollbacks == 1
+    place_buy_order.assert_not_called()
+    assert proposal.status == "approved"
 
 
 def test_execute_proposal_blocks_when_nonfinite_quantity_cannot_be_resized():

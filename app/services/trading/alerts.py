@@ -117,6 +117,59 @@ def _validate_long_proposal_levels(
     return entry_f, stop_f, target_f, None
 
 
+def _proposal_quantity_current_risk_reason(
+    proposal: Any,
+    *,
+    quantity: Any,
+    buying_power: Any,
+    entry: Any,
+    stop: Any,
+) -> str | None:
+    """Return a stable block reason when a stored proposal size is now stale."""
+    qty_f = _positive_finite_float(quantity)
+    capital_f = _positive_finite_float(buying_power)
+    entry_f = _positive_finite_float(entry)
+    stop_f = _positive_finite_float(stop)
+    if qty_f is None or capital_f is None or entry_f is None or stop_f is None:
+        return "sizing_unavailable"
+
+    try:
+        from .portfolio_risk import compute_trade_risk_pct, get_risk_limits
+
+        limits = get_risk_limits()
+        max_risk_pct = _positive_finite_float(
+            getattr(limits, "max_risk_per_trade_pct", None)
+        )
+        risk_pct = compute_trade_risk_pct(
+            entry_f,
+            stop_f,
+            qty_f,
+            capital_f,
+            direction=str(getattr(proposal, "direction", "long") or "long"),
+        )
+    except Exception:
+        logger.warning(
+            "[alerts] proposal quantity risk recheck unavailable; blocking",
+            exc_info=True,
+        )
+        return "proposal_quantity_risk_check_unavailable"
+
+    risk_pct_f = _positive_finite_float(risk_pct)
+    if max_risk_pct is None or risk_pct_f is None:
+        return "proposal_quantity_risk_check_unavailable"
+    if risk_pct_f > max_risk_pct + 1e-9:
+        return "proposal_quantity_exceeds_current_risk"
+
+    planned_pct = _positive_finite_float(getattr(proposal, "position_size_pct", None))
+    if planned_pct is not None:
+        current_notional_pct = (qty_f * entry_f) / capital_f * 100.0
+        tolerance = max(0.01, planned_pct * 0.001)
+        if current_notional_pct > planned_pct + tolerance:
+            return "proposal_quantity_exceeds_current_capital"
+
+    return None
+
+
 def classify_alert_tier(
     alert_type: str,
     scan_pattern_id: int | None = None,
@@ -2031,6 +2084,18 @@ def _execute_proposal(
             source="alerts.execute_proposal",
         )
 
+    quantity_risk_reason = _proposal_quantity_current_risk_reason(
+        proposal,
+        quantity=quantity,
+        buying_power=buying_power,
+        entry=entry,
+        stop=stop,
+    )
+    if quantity_risk_reason is not None:
+        msg = format_order_blocked(ticker, quantity_risk_reason)
+        dispatch_alert(db, user_id, POSITION_OPENED, ticker, msg)
+        return {"status": "blocked", "error": quantity_risk_reason}
+
     manual_requested = str(broker or "").strip().lower() == "manual"
     target_broker = broker or get_best_broker_for(ticker)
     if target_broker == "manual" and not manual_requested:
@@ -2052,7 +2117,18 @@ def _execute_proposal(
         decision_packet_id = int(pkt.id) if pkt is not None else None
     except Exception:
         logger.exception("[alerts] failed to create proposal decision packet")
-        if bool(getattr(settings, "brain_decision_packet_required_for_proposals", True)):
+        packet_required = bool(
+            getattr(settings, "brain_decision_packet_required_for_proposals", True)
+        )
+        session_inactive = getattr(db, "is_active", True) is False
+        if packet_required or session_inactive:
+            try:
+                db.rollback()
+            except Exception:
+                logger.warning(
+                    "[alerts] rollback after proposal decision packet failure failed",
+                    exc_info=True,
+                )
             return {"status": "blocked", "error": "decision_packet_create_failed"}
     if bool(getattr(settings, "brain_decision_packet_required_for_proposals", True)) and decision_packet_id is None:
         return {"status": "blocked", "error": "decision_packet_required_missing"}
