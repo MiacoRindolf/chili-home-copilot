@@ -15,7 +15,7 @@ import json
 import logging
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any, Callable, Iterable, TypeVar
@@ -38,7 +38,7 @@ def _massive_ws_allowed_in_this_process() -> bool:
 # ---------------------------------------------------------------------------
 # In-memory TTL cache
 # ---------------------------------------------------------------------------
-_cache: dict[str, tuple[float, Any]] = {}
+_cache: "OrderedDict[str, tuple[float, Any]]" = OrderedDict()
 _cache_lock = threading.Lock()
 
 _TTL_BARS = 3600       # 1 hour for OHLCV bars (64 GB RAM — keep longer)
@@ -46,14 +46,16 @@ _TTL_QUOTE = 30        # 30 sec for live quotes
 _TTL_SNAPSHOT = 60     # 1 min for snapshots
 _MAX_CACHE = 30_000    # 64 GB RAM — keep ~1000 tickers × many intervals in memory
 
-_dead_tickers: dict[str, float] = {}
+_dead_tickers: "OrderedDict[str, float]" = OrderedDict()
 _dead_lock = threading.Lock()
 _TTL_DEAD = 14400      # 4 hours — skip tickers that 404'd
+_MAX_DEAD_TICKERS = 10_000
 
-_entitlement_denied: dict[str, float] = {}
+_entitlement_denied: "OrderedDict[str, float]" = OrderedDict()
 _entitlement_log_throttle_until: dict[str, float] = {}
 _entitlement_lock = threading.Lock()
 _TTL_ENTITLEMENT_DENIED = 21600  # 6 hours: plan entitlement failures are stable
+_MAX_ENTITLEMENT_DENIED = 5_000
 
 _NOT_FOUND = object()  # sentinel returned by _get() on HTTP 404
 
@@ -70,16 +72,30 @@ def _is_dead_ticker(m_ticker: str) -> bool:
 
 
 def _mark_dead_ticker(m_ticker: str) -> None:
+    now = time.time()
     with _dead_lock:
-        _dead_tickers[m_ticker] = time.time()
+        _dead_tickers.pop(m_ticker, None)
+        _dead_tickers[m_ticker] = now
+        _prune_dead_tickers_locked(now)
 
 
 def get_dead_tickers() -> set[str]:
     """Return the set of Massive-format tickers currently in the dead cache."""
     now = time.time()
     with _dead_lock:
-        alive_cutoff = now - _TTL_DEAD
-        return {t for t, ts in _dead_tickers.items() if ts > alive_cutoff}
+        _prune_dead_tickers_locked(now)
+        return set(_dead_tickers)
+
+
+def _prune_dead_tickers_locked(now: float) -> None:
+    cutoff = now - _TTL_DEAD
+    while _dead_tickers:
+        oldest = next(iter(_dead_tickers))
+        if _dead_tickers[oldest] >= cutoff:
+            break
+        _dead_tickers.pop(oldest, None)
+    while len(_dead_tickers) > _MAX_DEAD_TICKERS:
+        _dead_tickers.popitem(last=False)
 
 _metrics_lock = threading.Lock()
 _metrics: dict[str, int] = {
@@ -146,14 +162,28 @@ def _entitlement_denied_active(key: str, url: str) -> bool:
 def _mark_entitlement_denied(key: str, url: str, body: str) -> None:
     now = time.time()
     with _entitlement_lock:
+        _entitlement_denied.pop(key, None)
         _entitlement_denied[key] = now + _TTL_ENTITLEMENT_DENIED
         _entitlement_log_throttle_until[key] = now + 300
+        _prune_entitlement_denied_locked(now)
     logger.warning(
         "[massive] 403 entitlement denied for %s; suppressing matching calls for %ds: %s",
         url,
         _TTL_ENTITLEMENT_DENIED,
         (body or "")[:200],
     )
+
+
+def _prune_entitlement_denied_locked(now: float) -> None:
+    while _entitlement_denied:
+        oldest = next(iter(_entitlement_denied))
+        if _entitlement_denied[oldest] > now:
+            break
+        _entitlement_denied.pop(oldest, None)
+        _entitlement_log_throttle_until.pop(oldest, None)
+    while len(_entitlement_denied) > _MAX_ENTITLEMENT_DENIED:
+        evicted, _expires_at = _entitlement_denied.popitem(last=False)
+        _entitlement_log_throttle_until.pop(evicted, None)
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +228,7 @@ def _cache_get(key: str) -> Any | None:
 def _cache_set(key: str, val: Any) -> None:
     with _cache_lock:
         now = time.time()
+        _cache.pop(key, None)
         _cache[key] = (now, val)
         if len(_cache) > _MAX_CACHE:
             _prune_cache_locked(now)
@@ -205,16 +236,18 @@ def _cache_set(key: str, val: Any) -> None:
 
 def _prune_cache_locked(now: float) -> None:
     cutoff = now - 60
-    expired = [k for k, (t, _) in _cache.items() if t < cutoff]
-    for k in expired:
-        del _cache[k]
+    while _cache:
+        oldest = next(iter(_cache))
+        ts, _value = _cache[oldest]
+        if ts >= cutoff:
+            break
+        _cache.pop(oldest, None)
     if len(_cache) <= _MAX_CACHE:
         return
 
     target_size = max(1, int(_MAX_CACHE * 0.9))
-    overflow = len(_cache) - target_size
-    for k, _entry in heapq.nsmallest(overflow, _cache.items(), key=lambda item: item[1][0]):
-        del _cache[k]
+    while len(_cache) > target_size:
+        _cache.popitem(last=False)
 
 
 # ---------------------------------------------------------------------------
@@ -1040,7 +1073,7 @@ class TradeSnapshot:
     timestamp: float = 0.0
 
 
-_ws_cache: dict[str, QuoteSnapshot] = {}
+_ws_cache: "OrderedDict[str, QuoteSnapshot]" = OrderedDict()
 _ws_cache_lock = threading.Lock()
 _WS_STALENESS = 5.0  # seconds before a WS quote is considered stale
 _MAX_WS_CACHE = 5_000
@@ -1084,24 +1117,23 @@ def _fire_tick_listeners(sym: str, snap: QuoteSnapshot | TradeSnapshot) -> None:
 
 
 def _prune_ws_cache_locked(now: float) -> None:
-    expired = [sym for sym, snap in _ws_cache.items() if now - snap.timestamp > _WS_STALENESS]
-    for sym in expired:
-        _ws_cache.pop(sym, None)
+    while _ws_cache:
+        oldest = next(iter(_ws_cache))
+        snap = _ws_cache[oldest]
+        if now - snap.timestamp <= _WS_STALENESS:
+            break
+        _ws_cache.pop(oldest, None)
     if len(_ws_cache) <= _MAX_WS_CACHE:
         return
 
     target_size = max(1, int(_MAX_WS_CACHE * 0.9))
-    overflow = len(_ws_cache) - target_size
-    for sym, _snap in heapq.nsmallest(
-        overflow,
-        _ws_cache.items(),
-        key=lambda item: (item[1].timestamp, item[0]),
-    ):
-        _ws_cache.pop(sym, None)
+    while len(_ws_cache) > target_size:
+        _ws_cache.popitem(last=False)
 
 
 def _set_ws_quote(sym: str, snap: QuoteSnapshot, *, now: float | None = None) -> None:
     with _ws_cache_lock:
+        _ws_cache.pop(sym, None)
         _ws_cache[sym] = snap
         if len(_ws_cache) > _MAX_WS_CACHE:
             _prune_ws_cache_locked(time.time() if now is None else now)

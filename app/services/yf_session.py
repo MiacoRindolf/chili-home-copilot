@@ -32,7 +32,6 @@ Layered design:
 from __future__ import annotations
 
 import collections
-import heapq
 import logging
 import os
 import threading
@@ -260,7 +259,7 @@ def _breaker_on_failure() -> None:
 # ---------------------------------------------------------------------------
 # In-memory TTL cache for history() and fast_info results
 # ---------------------------------------------------------------------------
-_cache: dict[str, tuple[float, Any]] = {}
+_cache: collections.OrderedDict[str, tuple[float, Any]] = collections.OrderedDict()
 _cache_lock = threading.Lock()
 
 _TTL_HISTORY = 3600    # 1 hour for OHLCV / indicator data (64 GB RAM)
@@ -291,8 +290,9 @@ _TTL_DEAD = 14400      # 4 hours for known-bad stock tickers
 _TTL_DEAD_CRYPTO = 1800  # 30 minutes for crypto (they may just be new/different format)
 _MAX_CACHE_SIZE = 10_000   # 64 GB RAM — keep much more in memory
 
-_dead_tickers: dict[str, float] = {}
+_dead_tickers: collections.OrderedDict[str, float] = collections.OrderedDict()
 _dead_lock = threading.Lock()
+_MAX_DEAD_TICKERS = 10_000
 
 # Consecutive-empty counter: only mark a ticker dead after N empty results in a
 # row from yfinance, never on the first empty. Reason: when an upstream provider
@@ -302,8 +302,9 @@ _dead_lock = threading.Lock()
 # delisted (incident 2026-04-19, see project_massive_blocked.md). Reset on any
 # non-empty result so a single recovery clears the streak.
 _EMPTY_THRESHOLD = 3
-_empty_counts: dict[str, int] = {}
+_empty_counts: collections.OrderedDict[str, int] = collections.OrderedDict()
 _empty_lock = threading.Lock()
+_MAX_EMPTY_COUNTS = 10_000
 
 _YF_NO_DATA_ERROR_MARKERS = (
     "delisted",
@@ -320,7 +321,10 @@ _CRYPTO_HISTORY_MISS_CACHE_PREFIX = "crypto_history_miss:"
 
 def _bump_empty(symbol: str) -> int:
     with _empty_lock:
-        _empty_counts[symbol] = _empty_counts.get(symbol, 0) + 1
+        streak = _empty_counts.pop(symbol, 0) + 1
+        _empty_counts[symbol] = streak
+        while len(_empty_counts) > _MAX_EMPTY_COUNTS:
+            _empty_counts.popitem(last=False)
         return _empty_counts[symbol]
 
 
@@ -428,6 +432,7 @@ def _cache_get(key: str) -> Any | None:
 def _cache_set(key: str, val: Any) -> None:
     with _cache_lock:
         now = time.time()
+        _cache.pop(key, None)
         _cache[key] = (now, val)
         if len(_cache) > _MAX_CACHE_SIZE:
             _prune_cache_locked(now)
@@ -435,16 +440,18 @@ def _cache_set(key: str, val: Any) -> None:
 
 def _prune_cache_locked(now: float) -> None:
     cutoff = now - 60
-    expired = [k for k, (t, _) in _cache.items() if t < cutoff]
-    for k in expired:
-        del _cache[k]
+    while _cache:
+        oldest = next(iter(_cache))
+        ts, _value = _cache[oldest]
+        if ts >= cutoff:
+            break
+        _cache.pop(oldest, None)
     if len(_cache) <= _MAX_CACHE_SIZE:
         return
 
     target_size = max(1, int(_MAX_CACHE_SIZE * 0.9))
-    overflow = len(_cache) - target_size
-    for k, _entry in heapq.nsmallest(overflow, _cache.items(), key=lambda item: item[1][0]):
-        del _cache[k]
+    while len(_cache) > target_size:
+        _cache.popitem(last=False)
 
 
 def _cache_pop(key: str) -> None:
@@ -513,7 +520,10 @@ def _mark_dead(symbol: str, force: bool = False) -> None:
     else:
         ttl = _TTL_DEAD
     with _dead_lock:
+        _dead_tickers.pop(symbol, None)
         _dead_tickers[symbol] = time.time()
+        while len(_dead_tickers) > _MAX_DEAD_TICKERS:
+            _dead_tickers.popitem(last=False)
     logger.info(f"[yf_session] Marked {symbol} as dead (skip for {ttl}s)")
 
 

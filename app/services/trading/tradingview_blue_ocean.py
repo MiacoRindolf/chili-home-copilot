@@ -12,6 +12,7 @@ import logging
 import random
 import string
 import time
+from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Any
 
@@ -20,7 +21,7 @@ from ...config import settings
 logger = logging.getLogger(__name__)
 
 _TV_WS_URL = "wss://data.tradingview.com/socket.io/websocket?from=chart%2F"
-_CACHE: dict[tuple[str, str, int], tuple[float, list[dict[str, Any]]]] = {}
+_CACHE: "OrderedDict[tuple[str, str, int], tuple[float, list[dict[str, Any]]]]" = OrderedDict()
 _CACHE_MAX = 1_024
 
 
@@ -74,6 +75,7 @@ def _cache_get(
         return None
     ts, bars = cached
     if (now - ts) <= ttl:
+        _CACHE.move_to_end(key)
         return list(bars)
     _CACHE.pop(key, None)
     return None
@@ -100,10 +102,7 @@ def _prune_cache(*, now: float, ttl: float) -> None:
             break
         _CACHE.pop(oldest, None)
     while len(_CACHE) > _CACHE_MAX:
-        oldest = next(iter(_CACHE), None)
-        if oldest is None:
-            break
-        _CACHE.pop(oldest, None)
+        _CACHE.popitem(last=False)
 
 
 def _parse_frames(raw: str) -> list[dict[str, Any]]:

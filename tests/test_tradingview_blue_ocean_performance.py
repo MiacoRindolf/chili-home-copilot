@@ -72,3 +72,18 @@ def test_boats_cache_hit_returns_copy() -> None:
         assert cached is not bars
     finally:
         boats._CACHE.clear()
+
+
+def test_boats_cache_hit_refreshes_recency() -> None:
+    first = ("AAPL", "5", 150)
+    second = ("MSFT", "5", 150)
+    boats._CACHE.clear()
+    try:
+        boats._CACHE[first] = (1_000.0, [{"time": 1}])
+        boats._CACHE[second] = (1_000.0, [{"time": 2}])
+
+        assert boats._cache_get(first, now=1_001.0, ttl=10.0) == [{"time": 1}]
+
+        assert list(boats._CACHE) == [second, first]
+    finally:
+        boats._CACHE.clear()

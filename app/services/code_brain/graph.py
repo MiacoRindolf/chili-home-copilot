@@ -32,6 +32,18 @@ def _top_degree_items(items, limit: int) -> list[tuple[str, int]]:
     return heapq.nlargest(limit, items, key=lambda item: item[1])
 
 
+def _top_coupling_rows(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    if limit <= 0:
+        return []
+
+    def key(row: dict[str, Any]) -> int:
+        return int(row.get("edge_count") or 0)
+
+    if len(rows) <= limit:
+        return sorted(rows, key=key, reverse=True)
+    return heapq.nlargest(limit, rows, key=key)
+
+
 def _resolve_python_import(module_name: str, repo_path: Path, source_dir: Path) -> Optional[str]:
     """Try to resolve a dotted module name to a relative file path inside the repo."""
     parts = module_name.split(".")
@@ -246,7 +258,7 @@ def get_graph_data(db: Session, repo_id: int) -> Dict[str, Any]:
     for src_dir, targets in dir_edges.items():
         for tgt_dir, count in targets.items():
             coupling.append({"source_dir": src_dir, "target_dir": tgt_dir, "edge_count": count})
-    coupling.sort(key=lambda x: x["edge_count"], reverse=True)
+    top_coupling = _top_coupling_rows(coupling, 20)
 
     most_depended = _top_degree_items(in_degree.items(), 10)
     most_dependent = _top_degree_items(out_degree.items(), 10)
@@ -262,6 +274,6 @@ def get_graph_data(db: Session, repo_id: int) -> Dict[str, Any]:
             "circular_edges": circular_count,
             "most_depended_on": [{"file": f, "count": c} for f, c in most_depended],
             "most_dependent": [{"file": f, "count": c} for f, c in most_dependent],
-            "coupling": coupling[:20],
+            "coupling": top_coupling,
         },
     }

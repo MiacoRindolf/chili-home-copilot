@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -16,9 +17,10 @@ from .runtime import resolve_repo_runtime_path
 
 logger = logging.getLogger(__name__)
 
-_PYPI_CACHE: Dict[str, Tuple[str, float]] = {}
-_NPM_CACHE: Dict[str, Tuple[str, float]] = {}
+_PYPI_CACHE: "OrderedDict[str, Tuple[str, float]]" = OrderedDict()
+_NPM_CACHE: "OrderedDict[str, Tuple[str, float]]" = OrderedDict()
 _CACHE_TTL = 3600  # 1 hour
+_LATEST_CACHE_MAX = 2_048
 
 
 def _parse_version(v: str) -> Tuple[int, ...]:
@@ -95,19 +97,63 @@ def _parse_package_json(repo_path: Path) -> List[Dict[str, str]]:
     return deps
 
 
+def _latest_cache_get(
+    cache: "OrderedDict[str, Tuple[str, float]]",
+    package_name: str,
+    *,
+    now: float,
+) -> Optional[str]:
+    cached = cache.get(package_name)
+    if cached is None:
+        return None
+    ver, ts = cached
+    if now - ts < _CACHE_TTL:
+        cache.move_to_end(package_name)
+        return ver
+    cache.pop(package_name, None)
+    return None
+
+
+def _latest_cache_set(
+    cache: "OrderedDict[str, Tuple[str, float]]",
+    package_name: str,
+    version: str,
+    *,
+    now: float,
+) -> None:
+    cache.pop(package_name, None)
+    cache[package_name] = (version, now)
+    _prune_latest_cache(cache, now=now)
+
+
+def _prune_latest_cache(
+    cache: "OrderedDict[str, Tuple[str, float]]",
+    *,
+    now: float,
+) -> None:
+    cutoff = now - _CACHE_TTL
+    while cache:
+        oldest = next(iter(cache))
+        _ver, ts = cache[oldest]
+        if ts >= cutoff:
+            break
+        cache.pop(oldest, None)
+    while len(cache) > _LATEST_CACHE_MAX:
+        cache.popitem(last=False)
+
+
 def _check_pypi_latest(package_name: str) -> Optional[str]:
     """Query PyPI for the latest version. Results are cached."""
     now = time.time()
-    if package_name in _PYPI_CACHE:
-        ver, ts = _PYPI_CACHE[package_name]
-        if now - ts < _CACHE_TTL:
-            return ver
+    cached = _latest_cache_get(_PYPI_CACHE, package_name, now=now)
+    if cached is not None:
+        return cached
 
     try:
         r = requests.get(f"https://pypi.org/pypi/{package_name}/json", timeout=5)
         if r.status_code == 200:
             ver = r.json().get("info", {}).get("version", "")
-            _PYPI_CACHE[package_name] = (ver, now)
+            _latest_cache_set(_PYPI_CACHE, package_name, ver, now=now)
             return ver
     except Exception:
         pass
@@ -117,16 +163,15 @@ def _check_pypi_latest(package_name: str) -> Optional[str]:
 def _check_npm_latest(package_name: str) -> Optional[str]:
     """Query npm registry for the latest version. Results are cached."""
     now = time.time()
-    if package_name in _NPM_CACHE:
-        ver, ts = _NPM_CACHE[package_name]
-        if now - ts < _CACHE_TTL:
-            return ver
+    cached = _latest_cache_get(_NPM_CACHE, package_name, now=now)
+    if cached is not None:
+        return cached
 
     try:
         r = requests.get(f"https://registry.npmjs.org/{package_name}/latest", timeout=5)
         if r.status_code == 200:
             ver = r.json().get("version", "")
-            _NPM_CACHE[package_name] = (ver, now)
+            _latest_cache_set(_NPM_CACHE, package_name, ver, now=now)
             return ver
     except Exception:
         pass

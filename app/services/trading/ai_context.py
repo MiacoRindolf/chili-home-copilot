@@ -5,6 +5,7 @@ import json
 import logging
 import threading
 import time as _time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -29,6 +30,53 @@ from .management_envelopes import load_recent_ticker_envelope_rows
 from .scanner import _score_ticker
 
 logger = logging.getLogger(__name__)
+_THESIS_TTL = 3600
+_THESIS_CACHE_MAX = 512
+
+
+def _thesis_cache_get(
+    cache: "OrderedDict[str, tuple[float, dict[str, Any]]]",
+    key: str,
+    *,
+    now: float,
+) -> dict[str, Any] | None:
+    cached = cache.get(key)
+    if not cached:
+        return None
+    ts, thesis = cached
+    if now - ts < _THESIS_TTL:
+        cache.move_to_end(key)
+        return thesis
+    cache.pop(key, None)
+    return None
+
+
+def _thesis_cache_set(
+    cache: "OrderedDict[str, tuple[float, dict[str, Any]]]",
+    key: str,
+    thesis: dict[str, Any],
+    *,
+    now: float,
+) -> None:
+    cache.pop(key, None)
+    cache[key] = (now, thesis)
+    _prune_thesis_cache(cache, now=now)
+
+
+def _prune_thesis_cache(
+    cache: "OrderedDict[str, tuple[float, dict[str, Any]]]",
+    *,
+    now: float,
+) -> None:
+    cutoff = now - _THESIS_TTL
+    while cache:
+        oldest = next(iter(cache))
+        ts, _thesis = cache[oldest]
+        if ts >= cutoff:
+            break
+        cache.pop(oldest, None)
+    while len(cache) > _THESIS_CACHE_MAX:
+        cache.popitem(last=False)
 
 
 def _coerce_float(value: Any) -> float | None:
@@ -1175,12 +1223,19 @@ def generate_market_thesis(db: Session, user_id: int | None) -> dict[str, Any]:
     from .portfolio import get_insights
     from ...models.trading import ScanResult
 
-    _thesis_cache: dict = getattr(generate_market_thesis, "_cache", {})
-    _THESIS_TTL = 3600
+    _thesis_cache: OrderedDict[str, tuple[float, dict[str, Any]]] = getattr(
+        generate_market_thesis,
+        "_cache",
+        OrderedDict(),
+    )
+    if not isinstance(_thesis_cache, OrderedDict):
+        _thesis_cache = OrderedDict(_thesis_cache)
+        generate_market_thesis._cache = _thesis_cache
+    now = _time.time()
     cache_key = f"thesis:{user_id}"
-    cached = _thesis_cache.get(cache_key)
-    if cached and (_time.time() - cached[0]) < _THESIS_TTL:
-        return cached[1]
+    cached = _thesis_cache_get(_thesis_cache, cache_key, now=now)
+    if cached is not None:
+        return cached
 
     stats = get_brain_stats(db, user_id)
     market_ctx = build_market_context(db, user_id) or ""
@@ -1291,6 +1346,6 @@ def generate_market_thesis(db: Session, user_id: int | None) -> dict[str, Any]:
         "last_scan": stats.get("last_scan"),
     }
 
-    _thesis_cache[cache_key] = (_time.time(), thesis_data)
+    _thesis_cache_set(_thesis_cache, cache_key, thesis_data, now=_time.time())
     generate_market_thesis._cache = _thesis_cache
     return thesis_data

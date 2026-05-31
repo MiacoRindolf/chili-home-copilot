@@ -1,6 +1,19 @@
 from __future__ import annotations
 
+from collections import OrderedDict
+
 from app.services import massive_client
+
+
+class _NoSnapshotOrderedDict(OrderedDict):
+    def items(self):  # pragma: no cover - fails the test if called
+        raise AssertionError("cache pruning should not snapshot items")
+
+    def keys(self):  # pragma: no cover - fails the test if called
+        raise AssertionError("cache pruning should not snapshot keys")
+
+    def values(self):  # pragma: no cover - fails the test if called
+        raise AssertionError("cache pruning should not snapshot values")
 
 
 def test_cache_set_prunes_fresh_overflow_in_batches(monkeypatch) -> None:
@@ -19,6 +32,61 @@ def test_cache_set_prunes_fresh_overflow_in_batches(monkeypatch) -> None:
         assert "old-1" not in massive_client._cache
     finally:
         massive_client._cache.clear()
+
+
+def test_cache_set_prunes_oldest_without_snapshot(monkeypatch) -> None:
+    monkeypatch.setattr(massive_client, "_MAX_CACHE", 10)
+    monkeypatch.setattr(massive_client.time, "time", lambda: 1_000.0)
+    cache = _NoSnapshotOrderedDict(
+        (f"old-{idx}", (990.0 + idx, idx))
+        for idx in range(12)
+    )
+    monkeypatch.setattr(massive_client, "_cache", cache)
+
+    massive_client._cache_set("new-key", "new-value")
+
+    assert len(massive_client._cache) == 9
+    assert "new-key" in massive_client._cache
+    assert "old-0" not in massive_client._cache
+    assert "old-1" not in massive_client._cache
+    assert "old-2" not in massive_client._cache
+    assert "old-3" not in massive_client._cache
+
+
+def test_dead_ticker_cache_is_capped_without_snapshot(monkeypatch) -> None:
+    monkeypatch.setattr(massive_client, "_MAX_DEAD_TICKERS", 3)
+    monkeypatch.setattr(massive_client.time, "time", lambda: 1_000.0)
+    cache = _NoSnapshotOrderedDict(
+        (f"OLD{idx}", 990.0 + idx)
+        for idx in range(4)
+    )
+    monkeypatch.setattr(massive_client, "_dead_tickers", cache)
+
+    massive_client._mark_dead_ticker("NEW")
+
+    assert list(massive_client._dead_tickers) == ["OLD2", "OLD3", "NEW"]
+
+
+def test_entitlement_denied_cache_is_capped_and_cleans_throttle(monkeypatch) -> None:
+    monkeypatch.setattr(massive_client, "_MAX_ENTITLEMENT_DENIED", 3)
+    monkeypatch.setattr(massive_client.time, "time", lambda: 1_000.0)
+    cache = _NoSnapshotOrderedDict(
+        (f"k{idx}", 2_000.0 + idx)
+        for idx in range(4)
+    )
+    monkeypatch.setattr(massive_client, "_entitlement_denied", cache)
+    monkeypatch.setattr(
+        massive_client,
+        "_entitlement_log_throttle_until",
+        {f"k{idx}": 1_500.0 for idx in range(4)},
+    )
+
+    massive_client._mark_entitlement_denied("new", "https://example.test", "not entitled")
+
+    assert list(massive_client._entitlement_denied) == ["k2", "k3", "new"]
+    assert "k0" not in massive_client._entitlement_log_throttle_until
+    assert "k1" not in massive_client._entitlement_log_throttle_until
+    assert "new" in massive_client._entitlement_log_throttle_until
 
 
 def test_set_ws_quote_prunes_stale_entries_before_capping(monkeypatch) -> None:
@@ -40,6 +108,26 @@ def test_set_ws_quote_prunes_stale_entries_before_capping(monkeypatch) -> None:
         assert list(massive_client._ws_cache) == ["NEW"]
     finally:
         massive_client._ws_cache.clear()
+
+
+def test_set_ws_quote_prunes_without_snapshot(monkeypatch) -> None:
+    monkeypatch.setattr(massive_client, "_MAX_WS_CACHE", 3)
+    cache = _NoSnapshotOrderedDict(
+        (
+            sym,
+            massive_client.QuoteSnapshot(price=float(idx), timestamp=996.0 + idx),
+        )
+        for idx, sym in enumerate(["AAA", "BBB", "CCC", "DDD"])
+    )
+    monkeypatch.setattr(massive_client, "_ws_cache", cache)
+
+    massive_client._set_ws_quote(
+        "EEE",
+        massive_client.QuoteSnapshot(price=5.0, timestamp=1_000.0),
+        now=1_000.0,
+    )
+
+    assert list(massive_client._ws_cache) == ["DDD", "EEE"]
 
 
 def test_set_ws_quote_caps_fresh_entries_by_oldest_timestamp(monkeypatch) -> None:

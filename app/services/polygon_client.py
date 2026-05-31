@@ -10,11 +10,10 @@ Symbol conventions:
 """
 from __future__ import annotations
 
-import heapq
 import logging
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -29,7 +28,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # In-memory TTL cache (same pattern as yf_session)
 # ---------------------------------------------------------------------------
-_cache: dict[str, tuple[float, Any]] = {}
+_cache: "OrderedDict[str, tuple[float, Any]]" = OrderedDict()
 _cache_lock = threading.Lock()
 
 _TTL_BARS = 3600       # 1 hour for OHLCV bars (64 GB RAM — keep longer)
@@ -121,6 +120,7 @@ def _cache_get(key: str) -> Any | None:
 def _cache_set(key: str, val: Any) -> None:
     with _cache_lock:
         now = time.time()
+        _cache.pop(key, None)
         _cache[key] = (now, val)
         if len(_cache) > _MAX_CACHE:
             _prune_cache_locked(now)
@@ -128,16 +128,18 @@ def _cache_set(key: str, val: Any) -> None:
 
 def _prune_cache_locked(now: float) -> None:
     cutoff = now - 60
-    expired = [k for k, (t, _) in _cache.items() if t < cutoff]
-    for k in expired:
-        del _cache[k]
+    while _cache:
+        oldest = next(iter(_cache))
+        ts, _value = _cache[oldest]
+        if ts >= cutoff:
+            break
+        _cache.pop(oldest, None)
     if len(_cache) <= _MAX_CACHE:
         return
 
     target_size = max(1, int(_MAX_CACHE * 0.9))
-    overflow = len(_cache) - target_size
-    for k, _entry in heapq.nsmallest(overflow, _cache.items(), key=lambda item: item[1][0]):
-        del _cache[k]
+    while len(_cache) > target_size:
+        _cache.popitem(last=False)
 
 
 # ---------------------------------------------------------------------------
