@@ -153,6 +153,7 @@ def test_alert_pressure_summary_separates_open_conflicts_from_history():
 
     assert audit._alert_pressure_summary(report) == {
         "status": "attention",
+        "pressure_mode": "actionable_conflict",
         "open_work_events": 2,
         "recert_open_work_events": 0,
         "exit_open_work_events": 2,
@@ -162,6 +163,45 @@ def test_alert_pressure_summary_separates_open_conflicts_from_history():
         "noop_exit_diagnostics": 3,
         "recert_blocker_diagnostics": 7,
         "duplicate_suppressions": 4,
+        "historical_noise_events": 39,
+    }
+
+
+def test_alert_pressure_summary_labels_historical_noise_without_attention():
+    report = {
+        "work_counts": [
+            {
+                "event_type": "recert_rescue_refresh",
+                "status": "done",
+                "events": 12,
+            },
+        ],
+        "diagnostic_outcomes": [
+            {"event_type": "recert_rescue_diagnostic", "events": 5},
+        ],
+        "top_noop_exit_variant_pattern_rollups": [],
+        "top_recert_rescue_blocker_rollups": [
+            {"blocker_diagnostics": 5},
+        ],
+        "open_exit_variant_work_with_recent_noop": [],
+        "open_recert_work_with_recent_blocker_diagnostic": [],
+        "duplicate_open_refresh_work": [],
+        "recent_duplicate_suppressions": [{"suppressed": 2}],
+    }
+
+    assert audit._alert_pressure_summary(report) == {
+        "status": "clear",
+        "pressure_mode": "historical_noise",
+        "open_work_events": 0,
+        "recert_open_work_events": 0,
+        "exit_open_work_events": 0,
+        "open_conflict_rows": 0,
+        "completed_work_events": 12,
+        "diagnostic_events": 5,
+        "noop_exit_diagnostics": 0,
+        "recert_blocker_diagnostics": 5,
+        "duplicate_suppressions": 2,
+        "historical_noise_events": 19,
     }
 
 

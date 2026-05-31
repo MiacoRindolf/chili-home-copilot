@@ -661,21 +661,38 @@ def _alert_pressure_summary(report: dict[str, object]) -> dict[str, int | str]:
         + len(list(report.get("open_recert_work_with_recent_blocker_diagnostic") or []))
         + len(list(report.get("duplicate_open_refresh_work") or []))
     )
+    diagnostic_events = _sum_rows(diagnostic_outcomes, "events")
+    duplicate_suppressions_count = _sum_rows(duplicate_suppressions, "suppressed")
+    historical_noise_events = (
+        done_work_events
+        + diagnostic_events
+        + duplicate_suppressions_count
+    )
+    if open_conflict_rows:
+        pressure_mode = "actionable_conflict"
+    elif open_work_events:
+        pressure_mode = "open_work"
+    elif historical_noise_events:
+        pressure_mode = "historical_noise"
+    else:
+        pressure_mode = "quiet"
 
     return {
         "status": "clear" if open_conflict_rows == 0 else "attention",
+        "pressure_mode": pressure_mode,
         "open_work_events": open_work_events,
         "recert_open_work_events": recert_open_work_events,
         "exit_open_work_events": exit_open_work_events,
         "open_conflict_rows": open_conflict_rows,
         "completed_work_events": done_work_events,
-        "diagnostic_events": _sum_rows(diagnostic_outcomes, "events"),
+        "diagnostic_events": diagnostic_events,
         "noop_exit_diagnostics": _sum_rows(noop_exit_rollups, "noop_diagnostics"),
         "recert_blocker_diagnostics": _sum_rows(
             recert_blocker_rollups,
             "blocker_diagnostics",
         ),
-        "duplicate_suppressions": _sum_rows(duplicate_suppressions, "suppressed"),
+        "duplicate_suppressions": duplicate_suppressions_count,
+        "historical_noise_events": historical_noise_events,
     }
 
 
