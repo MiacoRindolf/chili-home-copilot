@@ -45,7 +45,7 @@ Operator flips to `authoritative` after soak.
         |  limit=500, side='long', min_lookback_days=10
         v
         triple_barrier_labeler.label_snapshots
-        |  picks newest snapshots with snapshot_date <= utcnow - 10d
+        |  picks newest snapshots with completed-bar anchor <= utcnow - 10d
         |  fetches forward bars via market_data.fetch_ohlcv
         |  computes triple_barrier.compute_label(entry_close, bars, cfg)
         |  upserts into trading_triple_barrier_labels (idempotent)
@@ -53,8 +53,18 @@ Operator flips to `authoritative` after soak.
         log line: [triple_barrier_ops] event=run_summary ...
 ```
 
-The labeler's own logic is unchanged from when it was first written —
-this phase only added the scheduler caller and the backfill harness.
+Anchor contract: for bar-keyed snapshots, the completed-bar anchor is
+`MarketSnapshot.bar_start_at.date()` when `bar_start_at` is present.
+`snapshot_date.date()` is a legacy fallback only when `bar_start_at` is
+null. Eligibility cutoff, query ordering, `label_date`, idempotency key,
+and forward-bar lookup start must all use that same chosen anchor because
+`snapshot_date` can be ingestion time. Rows without clear anchor
+provenance remain shadow diagnostic evidence only; they are not valid for
+model training, tuning, drift evaluation, promotion evidence, sizing, or
+live gates.
+
+The labeler stays in shadow mode until separate operator approval. This
+phase does not make triple-barrier labels authoritative for live trading.
 
 ## Mode flag
 

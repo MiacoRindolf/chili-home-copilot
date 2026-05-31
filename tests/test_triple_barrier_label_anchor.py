@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
+from app.models.trading import MarketSnapshot, TripleBarrierLabelRow
 from app.services.trading.triple_barrier import TripleBarrierConfig, TripleBarrierLabel
 from app.services.trading.triple_barrier_labeler import (
     LabelWriteOutcome,
@@ -156,3 +157,62 @@ def test_label_snapshots_falls_back_to_snapshot_date_for_legacy_rows(monkeypatch
 
     assert report.written == 1
     assert fetch_dates == [snapshot_date.date()]
+
+
+def test_label_snapshots_db_fixture_uses_bar_start_at_for_cutoff_label_and_fetch(
+    db,
+    monkeypatch,
+):
+    import app.services.trading.triple_barrier_labeler as labeler
+
+    now = datetime.utcnow()
+    eligible_bar_start = now - timedelta(days=15)
+    recent_ingestion = now - timedelta(days=1)
+    decoy_old_ingestion = now - timedelta(days=15)
+    decoy_recent_bar_start = now - timedelta(days=1)
+
+    eligible = MarketSnapshot(
+        ticker="ANCHDB",
+        snapshot_date=recent_ingestion,
+        bar_start_at=eligible_bar_start,
+        bar_interval="1d",
+        snapshot_legacy=False,
+        close_price=100.0,
+    )
+    decoy = MarketSnapshot(
+        ticker="DECOYDB",
+        snapshot_date=decoy_old_ingestion,
+        bar_start_at=decoy_recent_bar_start,
+        bar_interval="1d",
+        snapshot_legacy=False,
+        close_price=100.0,
+    )
+    db.add_all([eligible, decoy])
+    db.commit()
+
+    fetch_calls: list[tuple[str, object, int]] = []
+
+    def _fake_fetch_forward_bars(ticker, from_date, max_bars):
+        fetch_calls.append((ticker, from_date, max_bars))
+        return [{"open": 100.0, "high": 103.0, "low": 100.0, "close": 102.5}]
+
+    monkeypatch.setattr(labeler, "_fetch_forward_bars", _fake_fetch_forward_bars)
+
+    report = label_snapshots(
+        db,
+        cfg=_cfg(),
+        mode_override="shadow",
+        min_lookback_days=10,
+    )
+
+    assert report.requested == 1
+    assert report.written == 1
+    assert fetch_calls == [("ANCHDB", eligible_bar_start.date(), 3)]
+
+    row = db.query(TripleBarrierLabelRow).filter_by(ticker="ANCHDB").one()
+    assert row.snapshot_id == eligible.id
+    assert row.label_date == eligible_bar_start.date()
+    assert row.label == 1
+    assert row.barrier_hit == "tp"
+    assert row.mode == "shadow"
+    assert db.query(TripleBarrierLabelRow).filter_by(ticker="DECOYDB").count() == 0

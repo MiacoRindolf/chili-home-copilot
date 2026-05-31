@@ -247,6 +247,9 @@ _TRADING_DOMAIN_TARGETED_TESTS = (
     "test_trade_assign_pattern.py",
     "test_trades_sync.py",
     "test_trading_decision_stack.py",
+    "test_triple_barrier_label_anchor.py",
+    "test_triple_barrier_labeler.py",
+    "test_triple_barrier_scheduler.py",
     "test_venue_robinhood_adapter.py",
 )
 _TRADING_DEFAULT_USER_TESTS = (
