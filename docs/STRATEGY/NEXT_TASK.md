@@ -1,34 +1,48 @@
-# NEXT_TASK: f-phase5n-source-posture-watch
+# NEXT_TASK: f-phase5o-remaining-runtime-compat-map
 
 STATUS: QUEUED
 
 ## Goal
 
-Turn the Phase 5M source-posture probe into a lightweight recurring guard so a
-future manual restart cannot silently put live workers back on the dirty root.
+Map the remaining 93 `orm_trade_symbol_compat` files into "leave alone",
+"adapter candidate", and "future rename blocker" buckets so the next Phase 5
+slice is chosen by trading risk rather than by text-search convenience.
 
 ## Current State
 
-Phase 5M added `scripts/d-phase5m-source-posture-probe.py` and repaired the live
-runtime source split. App/worker services now mount a clean worktree, and Phase
-5K/5I probes remain `COMPLETE_POSITIVE`.
+Phase 5L-I pinned the ORM contract groups. Phase 5L-J removed the low-risk
+private-helper wording hits. Phase 5M/N made live source posture observable and
+guarded.
 
-The root checkout remains very dirty and must not be used as a deployment
-source.
+The remaining ORM symbol surface is real compatibility, not obvious comment
+noise:
+
+```text
+orm_trade_symbol_compat  | 93
+learning_research_reporting | 39
+live_action_broker_reconcile | 15
+private_helper_type_only     | 7
+public_ui_schema_contract    | 14
+risk_capital_gate            | 18
+```
 
 ## Recommended Work Shape
 
-1. Add a tiny wrapper or scheduled task that runs:
-   `python scripts/d-phase5m-source-posture-probe.py`.
-2. Write output to a stable file under `scripts/` or `docs/RUNBOOKS/`.
-3. Alert only on non-`COMPLETE_POSITIVE` verdict.
-4. Include Phase 5K/5I probe instructions in the alert text, but do not run
-   heavy probes every minute.
+1. Generate the current `orm_trade_symbol_compat` inventory.
+2. For each contract group, identify which files are:
+   - public/stable contracts to leave alone
+   - read-only reporting/learning consumers
+   - live broker/capital/risk paths requiring extra probes before change
+   - plausible adapter-helper candidates
+3. Produce a CC report and, if useful, a JSON or Markdown map under
+   `docs/STRATEGY/`.
+4. Pick the next implementation slice only after the map is explicit.
 
 ## Guardrails
 
-- Do not restart Postgres.
-- Do not flip Phase 5 flags.
-- Do not mutate runtime unless the probe reports dirty-root usage.
-- Do not clean or reset the dirty root checkout.
+- No mechanical ORM rename.
+- No schema migration.
+- No public `/trades`, `trade_id`, schema, or UI label rename.
+- No broker/order/close/reconcile behavior changes in the mapping slice.
+- Keep Phase 5M/N source-posture guard green.
 
