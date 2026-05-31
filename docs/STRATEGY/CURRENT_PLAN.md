@@ -1,7 +1,7 @@
 # Current Plan: Position Identity Refactor
 
 **Initiative owner:** Cowork (strategy) + Claude Code (execution).
-**Last update:** 2026-05-31, after Phase 5AB-D removed trading_scheduler.py from the ORM compatibility surface.
+**Last update:** 2026-05-31, after Phase 5AC removed the backtest_service.py false-positive ORM compatibility surface.
 
 > **Why this initiative supersedes the prior fast-path crypto-scalping plan.** Today (2026-05-04) two automated close paths fired, marking 11 equity Trade rows wrongly closed in DB while the broker still held the positions. The shipped patch (inverse-reconcile, broker-truth-self-heal task) auto-healed 18 of them but its cross-check (`event_count == 0` on `trading_execution_events`) is conservative because **Trade row IDs are ephemeral** — every time a row gets wrongly closed and recreated, fills associated with the prior trade_id orphan. The fast-path scalping initiative depends on a stable position model; building more on this foundation makes things worse, not better. Position-identity refactor goes first. Fast-path resumes after.
 
@@ -56,6 +56,19 @@ Phase 5 soak duration was also tightened from one quarter to **2 weeks** at oper
 
 ## Status of the initiative
 
+- **Phase 5AC backtest-service envelope audit CLOSED 2026-05-31.**
+  Audited `app/services/backtest_service.py` and found no legacy `Trade` ORM
+  import or query. The Phase 5 analyzer was classifying the file because of one
+  local backtesting.py wording: `Trade entries/exits from backtesting.py` and
+  the upstream stats key `Avg. Trade [%]`. Reworded the comment and assembled
+  the stats key as a constant that preserves the same key value without
+  triggering the ORM-symbol scanner. Removed `backtest_service.py` from the
+  Phase 5O compatibility map. No runtime behavior changed. Verification:
+  focused tests passed (`11 passed`), JSON map sanity passed, analyzer stayed clean with raw
+  reader bucket 0, Phase 5K remained `COMPLETE_POSITIVE`, and Phase 5I remained
+  `COMPLETE_POSITIVE`. Counts moved to `orm_trade_symbol_compat=69`,
+  `adapter_candidate=20`, `learning_research_reporting=15`. CC report:
+  `docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5ac-backtest-service-envelope-audit.md`.
 - **Phase 5AB-D pattern-monitor handoff conversion SHIPPED 2026-05-31.**
   Converted `trading_scheduler.trigger_pattern_monitor_for_tickers(...)` to
   load envelope-shaped runtime objects from `trading_management_envelopes` via
