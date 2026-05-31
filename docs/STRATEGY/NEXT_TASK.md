@@ -1,22 +1,24 @@
-# NEXT_TASK: f-phase5w-learning-reporting-adapter-slice-8
+# NEXT_TASK: f-phase5x-learning-reporting-adapter-slice-9
 
 STATUS: QUEUED
 
 ## Goal
 
 Convert one more actual read-only learning/reporting `Trade` ORM consumer to a
-semantic management-envelope helper.
+semantic management-envelope helper, or close another small false-positive
+cluster if inspection proves no runtime dependency exists.
 
 ## Current State
 
-Phase 5V removed four false-positive/text-only learning/reporting references.
+Phase 5W converted `net_edge_ranker._load_training_pairs(...)` live training
+rows to `load_net_edge_training_envelope_rows(...)`.
 
 Remaining compatibility surface:
 
 ```text
-orm_trade_symbol_compat     | 75
-adapter_candidate           | 26
-learning_research_reporting | 21
+orm_trade_symbol_compat     | 74
+adapter_candidate           | 25
+learning_research_reporting | 20
 future_rename_blocker       | 33
 leave_alone                 | 16
 ```
@@ -35,10 +37,12 @@ leave_alone                 | 16
 
 - Avoid `alpha_decay.py` and `stale_promoted_sweep.py` until decay/lifecycle
   parity is explicitly scoped.
-- Avoid `learning.py` broad conversions; it mixes read-only stats with
+- Avoid broad `learning.py` conversions; it mixes read-only stats with
   load-bearing writer paths.
-- Treat `net_edge_ranker.py` carefully: it is read-heavy, but it can feed edge
-  ranking behavior. Convert only with parity tests for realized outcome rows.
+- `setup_vitals.py` has a small open-ticker query that may be a good next
+  candidate if it is reporting-only.
+- `regime_classifier.py` has a closed-trade performance reader; convert only
+  with parity tests if it does not feed a live gate.
 - Avoid broker/order/close/reconcile/risk/capital paths.
 
 ## Guardrails
