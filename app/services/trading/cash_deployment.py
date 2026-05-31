@@ -852,6 +852,11 @@ def cash_deployment_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     categories: Counter[str] = Counter(str(row.get("cash_deployment_category") or "unknown") for row in rows)
     assets: Counter[str] = Counter(str(row.get("asset_class") or "unknown") for row in rows)
     work: Counter[str] = Counter(str(row.get("recommended_work_event") or "unknown") for row in rows)
+    targeted_work = {
+        event_type: count
+        for event_type, count in work.items()
+        if event_type not in {"", "unknown", NO_TARGETED_WORK}
+    }
     deployable = [row for row in rows if row.get("live_deployable")]
     return {
         "total": len(rows),
@@ -864,6 +869,7 @@ def cash_deployment_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "needs_provenance": int(categories.get("needs_provenance", 0)),
         "needs_calibration": int(categories.get("needs_calibration", 0)),
         "no_targeted_work": int(work.get(NO_TARGETED_WORK, 0)),
+        "targeted_work": int(sum(targeted_work.values())),
         "deployable_cash_notional": round(
             sum(_safe_float(row.get("max_safe_notional"), 0.0) or 0.0 for row in deployable),
             6,
@@ -871,6 +877,7 @@ def cash_deployment_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "categories": dict(categories),
         "asset_classes": dict(assets),
         "recommended_work_events": dict(work),
+        "targeted_work_events": dict(targeted_work),
     }
 
 

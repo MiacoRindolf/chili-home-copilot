@@ -245,9 +245,11 @@ def test_cash_deployment_summary_counts_no_targeted_work():
 
     assert summary["total"] == 2
     assert summary["no_targeted_work"] == 1
+    assert summary["targeted_work"] == 1
     assert summary["negative_ev"] == 1
     assert summary["live_deployable"] == 1
     assert summary["deployable_cash_notional"] == 25.0
+    assert summary["targeted_work_events"] == {"edge_reliability_refresh": 1}
 
 
 def test_cash_deployment_does_not_enqueue_guaranteed_noop_negative_exit_work(
