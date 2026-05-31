@@ -111,4 +111,3 @@ python scripts\analyze_phase5_remaining_trade_refs.py --bucket orm_trade_symbol_
 ## Next
 
 Phase 5AB-A: add a read-only AutoTrader desk runtime-adapter parity probe. Compare current `Trade` ORM live desk rows with candidate runtime objects loaded from `trading_management_envelopes`, then feed both through the same enrichment path. Do not convert the endpoint until the probe is green.
-

@@ -1,7 +1,7 @@
 # Phase 5L-G: Compatibility Contract Audit
 
-**Date:** 2026-05-30  
-**Status:** SHIPPED  
+**Date:** 2026-05-30
+**Status:** SHIPPED
 **Branch:** `codex/brain-work-done-marker-recovery`
 
 ## What Changed

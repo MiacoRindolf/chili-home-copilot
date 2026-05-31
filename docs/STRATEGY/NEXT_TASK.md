@@ -60,4 +60,3 @@ python -m pytest tests\test_phase5_remaining_trade_refs.py tests\test_phase5l_re
 - Remaining work is categorized by risk.
 - No behavior changes.
 - Next slice is explicit and bounded, or Phase 5 pauses at the compatibility boundary.
-
