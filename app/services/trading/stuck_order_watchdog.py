@@ -522,6 +522,15 @@ def _apply_terminal_state(t: Trade, broker_status: str, raw: dict[str, Any] | No
                 pass
             if t.filled_at is None:
                 t.filled_at = datetime.utcnow()
+        try:
+            from .tca_service import apply_tca_on_trade_fill
+
+            apply_tca_on_trade_fill(t)
+        except Exception:
+            logger.debug(
+                "[stuck_order_watchdog] entry TCA failed trade=%s",
+                getattr(t, "id", None),
+            )
         return
     if bs in _TERMINAL_CANCELLED:
         t.status = "cancelled"

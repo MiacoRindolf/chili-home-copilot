@@ -2009,6 +2009,16 @@ def _align_coinbase_trade_to_position_truth(
     if avg > 0:
         trade.entry_price = avg
         trade.avg_fill_price = avg
+        try:
+            from .trading.tca_service import apply_tca_on_trade_fill
+
+            apply_tca_on_trade_fill(trade)
+        except Exception as exc:
+            logger.debug(
+                "[coinbase] entry TCA projection failed for trade#%s: %s",
+                getattr(trade, "id", None),
+                type(exc).__name__,
+            )
     if position_id is not None:
         try:
             trade.position_id = int(position_id)

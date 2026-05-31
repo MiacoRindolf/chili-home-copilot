@@ -164,6 +164,8 @@ def test_coinbase_position_sync_aligns_existing_trade_to_broker_truth(
         broker_status="open",
         scan_pattern_id=pattern.id,
         management_scope="auto_trader_v1",
+        tca_reference_entry_price=71.0,
+        tca_entry_slippage_bps=None,
     )
     db.add(trade)
     db.commit()
@@ -197,6 +199,7 @@ def test_coinbase_position_sync_aligns_existing_trade_to_broker_truth(
     assert trade.remaining_quantity == 0.0
     assert trade.entry_price == broker_position["average_buy_price"]
     assert trade.avg_fill_price == broker_position["average_buy_price"]
+    assert trade.tca_entry_slippage_bps == pytest.approx(74.64)
     assert trade.position_id is not None
     position_row = db.execute(
         text(

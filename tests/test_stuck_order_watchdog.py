@@ -33,6 +33,7 @@ def _make_trade(
     quantity=1.0,
     remaining_quantity=None,
     indicator_snapshot=None,
+    tca_reference_entry_price=None,
 ):
     t = Trade(
         user_id=user_id,
@@ -48,6 +49,7 @@ def _make_trade(
         remaining_quantity=remaining_quantity,
         management_scope=scope,
         indicator_snapshot=indicator_snapshot,
+        tca_reference_entry_price=tca_reference_entry_price,
     )
     db.add(t)
     db.commit()
@@ -60,7 +62,11 @@ def _fake_normalized(
     order_id: str = "abc",
     *,
     filled_size: float = 0.0,
+    average_filled_price: float | None = None,
 ) -> NormalizedOrder:
+    raw = {"state": status, "filled_size": str(filled_size)}
+    if average_filled_price is not None:
+        raw["average_filled_price"] = str(average_filled_price)
     return NormalizedOrder(
         order_id=order_id,
         client_order_id=None,
@@ -69,9 +75,9 @@ def _fake_normalized(
         status=status,
         order_type="market",
         filled_size=filled_size,
-        average_filled_price=None,
+        average_filled_price=average_filled_price,
         created_time=None,
-        raw={"state": status, "filled_size": str(filled_size)},
+        raw=raw,
     )
 
 
@@ -174,6 +180,7 @@ def test_broker_reports_terminal_mirrors_state_no_cancel(db, monkeypatch):
         broker_order_id="rh-filled",
         broker_status="queued",
         entry_date=datetime.utcnow() - timedelta(seconds=900),
+        tca_reference_entry_price=10.0,
     )
 
     cfg = SimpleNamespace(
@@ -185,7 +192,12 @@ def test_broker_reports_terminal_mirrors_state_no_cancel(db, monkeypatch):
 
     fake_adapter = MagicMock()
     fake_adapter.get_order.return_value = (
-        _fake_normalized("filled", order_id="rh-filled", filled_size=1.0),
+        _fake_normalized(
+            "filled",
+            order_id="rh-filled",
+            filled_size=1.0,
+            average_filled_price=10.25,
+        ),
         FreshnessMeta(retrieved_at_utc=datetime.utcnow(), max_age_seconds=15.0),
     )
     monkeypatch.setattr(wd, "_get_adapter", lambda _src: fake_adapter)
@@ -201,6 +213,8 @@ def test_broker_reports_terminal_mirrors_state_no_cancel(db, monkeypatch):
     assert t.status == "open"
     assert t.broker_status == "filled"
     assert t.filled_quantity == 1.0
+    assert t.avg_fill_price == 10.25
+    assert t.tca_entry_slippage_bps == 250.0
 
 
 def test_coinbase_terminal_filled_zero_quantity_waits_for_position_truth(db, monkeypatch):
