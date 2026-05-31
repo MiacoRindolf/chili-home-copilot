@@ -2,13 +2,13 @@
   "generated_from": "scripts/analyze_phase5_remaining_trade_refs.py --json",
   "orm_trade_symbol_compat_count": 66,
   "phase5o_bucket_counts": {
-    "adapter_candidate": 8,
-    "future_rename_blocker": 42,
+    "adapter_candidate": 7,
+    "future_rename_blocker": 43,
     "leave_alone": 16
   },
   "contract_group_counts": {
-    "learning_research_reporting": 7,
-    "live_action_broker_reconcile": 19,
+    "learning_research_reporting": 6,
+    "live_action_broker_reconcile": 20,
     "private_helper_type_only": 5,
     "public_ui_schema_contract": 14,
     "risk_capital_gate": 21
@@ -156,10 +156,10 @@
     },
     {
       "path": "app/services/trading/brain_neural_mesh/action_handlers.py",
-      "contract_group": "learning_research_reporting",
-      "phase5o_bucket": "adapter_candidate",
-      "phase5o_subtype": "read_only_learning_reporting",
-      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+      "contract_group": "live_action_broker_reconcile",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "mesh_critical_alert_dispatch_path",
+      "rationale": "Live action handler: critical mesh signals can be dispatched or suppressed based on local management-envelope and broker-position truth. Requires parity evidence and dedicated behavior-preserving conversion before any ORM surface change."
     },
     {
       "path": "app/services/trading/brain_neural_mesh/plasticity.py",

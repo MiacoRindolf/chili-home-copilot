@@ -1,7 +1,7 @@
 # Current Plan: Position Identity Refactor
 
 **Initiative owner:** Cowork (strategy) + Claude Code (execution).
-**Last update:** 2026-05-31, after Phase 5O reclassified stale_promoted_sweep.py as a lifecycle future rename blocker.
+**Last update:** 2026-05-31, after Phase 5O reclassified brain_neural_mesh/action_handlers.py as a live-action future rename blocker.
 
 > **Why this initiative supersedes the prior fast-path crypto-scalping plan.** Today (2026-05-04) two automated close paths fired, marking 11 equity Trade rows wrongly closed in DB while the broker still held the positions. The shipped patch (inverse-reconcile, broker-truth-self-heal task) auto-healed 18 of them but its cross-check (`event_count == 0` on `trading_execution_events`) is conservative because **Trade row IDs are ephemeral** — every time a row gets wrongly closed and recreated, fills associated with the prior trade_id orphan. The fast-path scalping initiative depends on a stable position model; building more on this foundation makes things worse, not better. Position-identity refactor goes first. Fast-path resumes after.
 
@@ -56,6 +56,29 @@ Phase 5 soak duration was also tightened from one quarter to **2 weeks** at oper
 
 ## Status of the initiative
 
+- **Phase 5O Brain action-handlers envelope audit CLOSED 2026-05-31.**
+  Audited `app/services/trading/brain_neural_mesh/action_handlers.py` and found
+  it is live-action-adjacent, not passive learning/reporting. The
+  `nm_action_signals` handler is the Telegram dispatch authority for critical
+  mesh signals. `_critical_trade_broker_live(...)` reads the child
+  `trade_id`, loads the local management envelope, suppresses dispatch for
+  missing/non-open rows, and calls `broker_stale_open_trade_snapshot(...)`
+  before allowing critical alert dispatch. No action-handler behavior was
+  converted. Added
+  `scripts/d-phase5o-brain-action-handlers-envelope-parity-probe.py`; live
+  result `COMPLETE_POSITIVE`: 6 checks matched, 0 mismatches, 2 mesh child
+  state rows, 2 local validation rows old = 2 new, 1 open child trade id old =
+  1 new, 1 non-open child trade id old = 1 new, and 0 critical child trade ids
+  old = 0 new. Reclassified the file from
+  `learning_research_reporting / adapter_candidate` to
+  `live_action_broker_reconcile / future_rename_blocker` with subtype
+  `mesh_critical_alert_dispatch_path`. Verification: focused tests passed
+  (`12 passed`), analyzer raw reader bucket 0, Phase 5K COMPLETE_POSITIVE,
+  Phase 5I COMPLETE_POSITIVE. Source posture remains ALERT because app
+  services are mounted from dirty root by an external/shared process. Counts:
+  `orm_trade_symbol_compat=66`, `adapter_candidate=7`,
+  `future_rename_blocker=43`. CC report:
+  `docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5o-brain-action-handlers-envelope-audit.md`.
 - **Phase 5O Stale-promoted sweep envelope audit CLOSED 2026-05-31.**
   Audited `app/services/trading/cron_jobs/stale_promoted_sweep.py` and found it
   is lifecycle-sensitive, not passive learning/reporting. It reads latest
