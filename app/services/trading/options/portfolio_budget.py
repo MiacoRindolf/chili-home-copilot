@@ -464,9 +464,11 @@ def _sum_open_trade_greeks(
                     OR indicator_snapshot::jsonb ? 'options_path'
                     OR {_option_asset_marker_sql("indicator_snapshot::jsonb ->> 'asset_kind'")}
                     OR {_option_asset_marker_sql("indicator_snapshot::jsonb ->> 'asset_type'")}
+                    OR {_option_asset_marker_sql("indicator_snapshot::jsonb ->> 'asset_class'")}
                     OR (indicator_snapshot::jsonb -> 'breakout_alert') ? 'option_meta'
                     OR {_option_asset_marker_sql("(indicator_snapshot::jsonb -> 'breakout_alert') ->> 'asset_kind'")}
                     OR {_option_asset_marker_sql("(indicator_snapshot::jsonb -> 'breakout_alert') ->> 'asset_type'")}
+                    OR {_option_asset_marker_sql("(indicator_snapshot::jsonb -> 'breakout_alert') ->> 'asset_class'")}
                   )
                 """
             ),

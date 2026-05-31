@@ -322,7 +322,9 @@ def test_sum_open_trade_greeks_filters_option_contract_aliases():
     sql = " ".join(db.sql.split())
     assert "REPLACE(LOWER(COALESCE(asset_kind, '')), '-', '_')" in sql
     assert "indicator_snapshot::jsonb ->> 'asset_kind'" in sql
+    assert "indicator_snapshot::jsonb ->> 'asset_class'" in sql
     assert "(indicator_snapshot::jsonb -> 'breakout_alert') ->> 'asset_type'" in sql
+    assert "(indicator_snapshot::jsonb -> 'breakout_alert') ->> 'asset_class'" in sql
     assert "'option_contracts'" in sql
     assert "'contract_options'" in sql
 
