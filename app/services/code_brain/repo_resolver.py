@@ -85,6 +85,12 @@ _WINDOWS_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
 _GITHUB_SHORTHAND_RE = re.compile(r"^[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+$")
 _GITHUB_HTTPS_RE = re.compile(r"^https?://(?:www\.)?github\.com/([^/]+)/([^/?#]+?)(?:\.git)?/?$", re.IGNORECASE)
 _GITHUB_SSH_RE = re.compile(r"^git@github\.com:([^/]+)/([^/]+?)(?:\.git)?/?$")
+_HOST_DEV_ROOTS_SPLIT_RE = re.compile(r"[;,]")
+_WINDOWS_DRIVE_ROOT_RE = re.compile(r"^[A-Za-z]:/")
+_WINDOWS_FULL_PATH_RE = re.compile(r"^([A-Za-z]:)/(.*)$")
+_REPO_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
+_HTTPS_PREFIX_RE = re.compile(r"^https://")
+_TOKEN_REDACT_RE = re.compile(r"x-access-token:[^@]+@")
 
 
 def _configured_host_dev_roots() -> list[str]:
@@ -94,9 +100,9 @@ def _configured_host_dev_roots() -> list[str]:
         or _DEFAULT_HOST_DEV_ROOTS
     )
     roots: list[str] = []
-    for item in re.split(r"[;,]", raw):
+    for item in _HOST_DEV_ROOTS_SPLIT_RE.split(raw):
         cleaned = item.strip().replace("\\", "/").rstrip("/")
-        if re.match(r"^[A-Za-z]:/", cleaned):
+        if _WINDOWS_DRIVE_ROOT_RE.match(cleaned):
             roots.append(cleaned.lower())
     return roots
 
@@ -104,7 +110,7 @@ def _configured_host_dev_roots() -> list[str]:
 def _windows_to_container_path(host_path: str) -> Optional[str]:
     """Map a configured Windows dev root to ``/host_dev``."""
     p = host_path.strip().replace("\\", "/").rstrip("/")
-    m = re.match(r"^([A-Za-z]:)/(.*)$", p)
+    m = _WINDOWS_FULL_PATH_RE.match(p)
     if not m:
         return None
     normalized = p.lower()
@@ -183,7 +189,7 @@ def parse_input(raw: str) -> ParsedInput:
         )
 
     # 6. Bare name → look up existing
-    if re.match(r"^[A-Za-z0-9_.\-]+$", s):
+    if _REPO_NAME_RE.match(s):
         return ParsedInput(kind=InputKind.REPO_NAME, raw=raw, repo_name=s)
 
     return ParsedInput(kind=InputKind.UNKNOWN, raw=raw)
@@ -236,7 +242,7 @@ def _clone_with_pat(https_url: str, target: str) -> Tuple[bool, str]:
         return False, "CHILI_DISPATCH_GITHUB_TOKEN not set in scheduler-worker env"
 
     # Rewrite https_url to inject the token for this clone only.
-    pat_url = re.sub(r"^https://", f"https://x-access-token:{token}@", https_url)
+    pat_url = _HTTPS_PREFIX_RE.sub(f"https://x-access-token:{token}@", https_url)
 
     target_p = Path(target)
     if target_p.exists():
@@ -251,7 +257,7 @@ def _clone_with_pat(https_url: str, target: str) -> Tuple[bool, str]:
     if proc.returncode != 0:
         # Strip token before returning the error so it doesn't end up in
         # logs or the audit row.
-        err = re.sub(r"x-access-token:[^@]+@", "x-access-token:***@", (proc.stderr or "")).strip()[:600]
+        err = _TOKEN_REDACT_RE.sub("x-access-token:***@", (proc.stderr or "")).strip()[:600]
         return False, f"clone failed: {err}"
 
     # Strip token from the persisted remote so the .git/config doesn't store it.

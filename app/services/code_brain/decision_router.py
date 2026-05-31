@@ -33,6 +33,7 @@ import re
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
+from functools import lru_cache
 from typing import Any, Optional
 
 from sqlalchemy import text
@@ -41,6 +42,7 @@ from sqlalchemy.orm import Session
 from . import runtime_state
 
 logger = logging.getLogger(__name__)
+_NOVELTY_TOKEN_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]{2,}")
 
 
 class Decision(str, Enum):
@@ -98,11 +100,31 @@ class PatternMatch:
     archetype: str
 
 
+@lru_cache(maxsize=1024)
 def _glob_to_regex(glob: str) -> re.Pattern:
     """Tiny glob → regex helper. Supports ``*`` and ``**``. No brace expansion."""
     pat = re.escape(glob)
     pat = pat.replace(r"\*\*", ".*").replace(r"\*", "[^/]*")
     return re.compile("^" + pat + "$")
+
+
+@lru_cache(maxsize=2048)
+def _keyword_tuple_from_json(raw: str) -> tuple[str, ...]:
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return ()
+    if not isinstance(parsed, list):
+        return ()
+    return tuple(str(k).lower() for k in parsed)
+
+
+def _keywords_from_raw(raw: Any) -> tuple[str, ...]:
+    if isinstance(raw, list):
+        return tuple(str(k).lower() for k in raw)
+    if isinstance(raw, str):
+        return _keyword_tuple_from_json(raw)
+    return ()
 
 
 def _match_pattern(db: Session, ctx: TaskContext) -> Optional[PatternMatch]:
@@ -138,18 +160,7 @@ def _match_pattern(db: Session, ctx: TaskContext) -> Optional[PatternMatch]:
     targets = list(ctx.intended_files) or ([ctx.sub_path] if ctx.sub_path else [])
 
     for row in rows:
-        keywords_raw = row[2]
-        keywords: list[str]
-        if isinstance(keywords_raw, list):
-            keywords = [str(k).lower() for k in keywords_raw]
-        elif isinstance(keywords_raw, str):
-            try:
-                parsed = json.loads(keywords_raw)
-                keywords = [str(k).lower() for k in parsed] if isinstance(parsed, list) else []
-            except json.JSONDecodeError:
-                keywords = []
-        else:
-            keywords = []
+        keywords = _keywords_from_raw(row[2])
 
         if keywords and not all(k in brief_lc for k in keywords):
             continue
@@ -182,7 +193,7 @@ def _novelty_score(db: Session, ctx: TaskContext) -> Decimal:
     coding_agent_suggestion responses. Cheap, deterministic, no LLM.
     Refined later when pattern_miner has more signal.
     """
-    tokens = set(re.findall(r"[a-zA-Z_][a-zA-Z0-9_]{2,}", ctx.brief_body or ""))
+    tokens = set(_NOVELTY_TOKEN_RE.findall(ctx.brief_body or ""))
     if not tokens:
         return Decimal("0.5")
 

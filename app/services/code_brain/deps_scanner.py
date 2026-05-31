@@ -21,11 +21,16 @@ _PYPI_CACHE: "OrderedDict[str, Tuple[str, float]]" = OrderedDict()
 _NPM_CACHE: "OrderedDict[str, Tuple[str, float]]" = OrderedDict()
 _CACHE_TTL = 3600  # 1 hour
 _LATEST_CACHE_MAX = 2_048
+_VERSION_PART_RE = re.compile(r"\d+")
+_REQ_DEP_RE = re.compile(r"([a-zA-Z0-9_.-]+)\s*([><=!~]+\s*[\d.]+)?")
+_PYPROJECT_DEPS_SECTION_RE = re.compile(r"\[project\.dependencies\]|\[tool\.poetry\.dependencies\]")
+_PYPROJECT_DEP_RE = re.compile(r'"?([a-zA-Z0-9_.-]+)"?\s*[>=<~!]*\s*"?([\d.]*)"?')
+_NPM_VERSION_CLEAN_RE = re.compile(r"[^0-9.]")
 
 
 def _parse_version(v: str) -> Tuple[int, ...]:
     """Parse a version string into a comparable tuple."""
-    parts = re.findall(r"\d+", v)
+    parts = _VERSION_PART_RE.findall(v)
     return tuple(int(p) for p in parts[:3]) if parts else (0,)
 
 
@@ -41,7 +46,7 @@ def _parse_requirements(repo_path: Path) -> List[Dict[str, str]]:
                 line = line.strip()
                 if not line or line.startswith("#") or line.startswith("-"):
                     continue
-                m = re.match(r"([a-zA-Z0-9_.-]+)\s*([><=!~]+\s*[\d.]+)?", line)
+                m = _REQ_DEP_RE.match(line)
                 if m:
                     name = m.group(1).lower().replace("-", "_")
                     version = m.group(2).strip().lstrip(">=<~!=") if m.group(2) else None
@@ -57,13 +62,13 @@ def _parse_requirements(repo_path: Path) -> List[Dict[str, str]]:
             content = pyproject.read_text(encoding="utf-8", errors="replace")
             in_deps = False
             for line in content.splitlines():
-                if re.match(r"\[project\.dependencies\]|\[tool\.poetry\.dependencies\]", line.strip()):
+                if _PYPROJECT_DEPS_SECTION_RE.match(line.strip()):
                     in_deps = True
                     continue
                 if in_deps and line.strip().startswith("["):
                     break
                 if in_deps:
-                    m = re.match(r'"?([a-zA-Z0-9_.-]+)"?\s*[>=<~!]*\s*"?([\d.]*)"?', line.strip())
+                    m = _PYPROJECT_DEP_RE.match(line.strip())
                     if m:
                         name = m.group(1).lower().replace("-", "_")
                         version = m.group(2) or None
@@ -90,7 +95,7 @@ def _parse_package_json(repo_path: Path) -> List[Dict[str, str]]:
             for name, version_spec in (data.get(section) or {}).items():
                 if name not in seen:
                     seen.add(name)
-                    version = re.sub(r"[^0-9.]", "", version_spec) if version_spec else None
+                    version = _NPM_VERSION_CLEAN_RE.sub("", version_spec) if version_spec else None
                     deps.append({"name": name, "current_version": version or None, "ecosystem": "npm"})
     except Exception:
         pass
