@@ -621,3 +621,28 @@ Next slice should remove the remaining mixed/all tie-order caveat so the Phase
 
 Report:
 `docs/STRATEGY/CC_REPORTS/2026-05-31_f-position-identity-phase-5ai-trades-api-flag-route-trial.md`.
+
+## Position Identity Phase 5AJ - Trades API Tie-Order Hardening (2026-05-31)
+
+Phase 5AJ removed the final soft parity caveat from the flagged
+`/api/trading/trades` envelope runtime path.
+
+The legacy `Trade` ORM reader now uses a deterministic secondary `id DESC`
+tie-breaker after `entry_date DESC`, matching the management-envelope
+runtime-object reader for rows with identical timestamps. The Phase 5AH cutover
+probe no longer accepts `tie_order_only=true`; all status modes must match
+exactly.
+
+Verification is green. Focused route/helper/probe tests passed (`19 passed`).
+Live probes are all `COMPLETE_POSITIVE`: Phase 5AH reports exact parity for
+all, open, and closed responses; Phase 5AG, Phase 5AE, Phase 5K, and Phase 5I
+remain green.
+
+Architect verdict: the `/trades` route cutover evidence is now exact under the
+flag. The next practical risk is operational source-of-truth drift: the live
+web container is running from a clean worktree because the live root remains
+dirty. Resolve that deployment posture before treating the route flag as a
+boring permanent default.
+
+Report:
+`docs/STRATEGY/CC_REPORTS/2026-05-31_f-position-identity-phase-5aj-trades-api-tie-order-hardening.md`.

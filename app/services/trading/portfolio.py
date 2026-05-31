@@ -237,7 +237,7 @@ def get_trades(
     q = db.query(Trade).filter(Trade.user_id == user_id)
     if status:
         q = q.filter(Trade.status == status)
-    return q.order_by(Trade.entry_date.desc()).limit(limit).all()
+    return q.order_by(Trade.entry_date.desc(), Trade.id.desc()).limit(limit).all()
 
 
 def delete_trade(db: Session, trade_id: int, user_id: int | None) -> str | None:

@@ -98,26 +98,6 @@ def _payload(db, rows: list[Any], status: str | None) -> dict[str, Any]:
     }
 
 
-def _order_diff_is_only_within_equal_entry_dates(
-    old_rows: list[dict[str, Any]],
-    new_rows: list[dict[str, Any]],
-) -> bool:
-    old_ids = [row.get("id") for row in old_rows]
-    new_ids = [row.get("id") for row in new_rows]
-    if sorted(old_ids) != sorted(new_ids):
-        return False
-    old_by_id = {row.get("id"): row for row in old_rows}
-    new_by_id = {row.get("id"): row for row in new_rows}
-    if old_by_id != new_by_id:
-        return False
-    for old_row, new_row in zip(old_rows, new_rows):
-        if old_row.get("id") == new_row.get("id"):
-            continue
-        if old_row.get("entry_date") != new_row.get("entry_date"):
-            return False
-    return True
-
-
 def _compare_status(db, user_id: int | None, status: str | None) -> dict[str, Any]:
     old_payload = _payload(db, ts.get_trades(db, user_id, status=status), status)
     new_payload = _payload(
@@ -126,21 +106,10 @@ def _compare_status(db, user_id: int | None, status: str | None) -> dict[str, An
         status,
     )
     exact = old_payload == new_payload
-    tie_order_only = False
-    if not exact and status is None:
-        tie_order_only = (
-            old_payload["suppressed_stale_trades"] == new_payload["suppressed_stale_trades"]
-            and old_payload["suppressed_stale_count"] == new_payload["suppressed_stale_count"]
-            and _order_diff_is_only_within_equal_entry_dates(
-                old_payload["trades"],
-                new_payload["trades"],
-            )
-        )
     return {
         "status_filter": status,
         "exact_match": exact,
-        "tie_order_only": tie_order_only,
-        "accepted": exact or tie_order_only,
+        "accepted": exact,
         "old_rows": len(old_payload["trades"]),
         "new_rows": len(new_payload["trades"]),
         "old_suppressed": old_payload["suppressed_stale_count"],

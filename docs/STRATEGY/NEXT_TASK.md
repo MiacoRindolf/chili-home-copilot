@@ -1,70 +1,58 @@
-# NEXT_TASK: f-position-identity-phase-5aj-trades-api-tie-order-hardening
+# NEXT_TASK: f-position-identity-phase-5ak-trades-api-flag-posture
 
 STATUS: QUEUED
 
 ## Goal
 
-Remove the last Phase 5AH `/api/trading/trades` mixed/all-route caveat by
-making equal-`entry_date` ordering deterministic across the legacy Trade ORM
-path and the management-envelope runtime-object path.
+Decide and implement the durable runtime posture for
+`CHILI_PHASE5AF_TRADES_API_USE_ENVELOPES` after Phase 5AJ made `/trades`
+cutover parity exact.
 
 ## Current State
 
-Phase 5AI turned on the route flag for the web container:
-
-```text
-CHILI_PHASE5AF_TRADES_API_USE_ENVELOPES=true
-```
-
-Live route trial is healthy:
-
-```text
-/api/trading/trades?status=open   ok=True rows=5 suppressed=0
-/api/trading/trades?status=closed ok=True rows=50 suppressed=0
-```
-
-Post-trial probes:
+Phase 5AJ evidence:
 
 ```text
 Phase 5AH cutover probe: COMPLETE_POSITIVE
+  all exact_match=true
   open exact_match=true
   closed exact_match=true
-  all accepted=true, tie_order_only=true
 
 Phase 5AG: COMPLETE_POSITIVE
+Phase 5AE: COMPLETE_POSITIVE
 Phase 5K:  COMPLETE_POSITIVE
 Phase 5I:  COMPLETE_POSITIVE
 ```
 
-The only remaining `/trades` parity softness is the mixed/all response order
-when two rows share the exact same `entry_date`. Row contents and row sets
-match.
+The route flag is healthy under live data, but the current web runtime posture
+is still special:
+
+```text
+CHILI_PHASE5AF_TRADES_API_USE_ENVELOPES=true
+chili web container is mounted from a clean Phase 5AH/5AJ worktree
+live root D:\dev\chili-home-copilot remains dirty and behind
+```
 
 ## Recommended Work Shape
 
-1. Audit the current `ts.get_trades(...)` ordering and the
-   `load_trades_api_envelope_objects(...)` / row helper ordering.
-2. Add an explicit, shared secondary tie-breaker for equal `entry_date` rows.
-   Prefer a stable `id` tie-breaker unless live evidence shows another
-   existing semantic order is expected.
-3. Update the Phase 5AH probe so mixed/all requires exact parity, not
-   `tie_order_only=true`.
-4. Re-run:
-   - focused route/helper tests
-   - `scripts/d-phase5ah-trades-api-cutover-probe.py`
-   - `scripts/d-phase5ag-trades-open-runtime-adapter-probe.py`
-   - `scripts/d-phase5ae-trades-api-parity-probe.py`
-   - `scripts/d-phase5k-live-path-parity-probe.py`
-   - `scripts/d-phase5i-post-rename-soak-probe.py`
-5. Recreate only the `chili` web container from the clean merged worktree and
-   re-test the live HTTP routes.
+1. Confirm the merged Phase 5AJ branch is the code mounted by the live `chili`
+   web container.
+2. Re-run live authenticated `/api/trading/trades` requests for all/open/closed
+   with the flag on.
+3. Re-run Phase 5AH, Phase 5AG, Phase 5AE, Phase 5K, and Phase 5I probes.
+4. Choose one posture:
+   - keep the flag on and document it as the current permanent route posture,
+     or
+   - turn it off and document why more soak is needed.
+5. Resolve or explicitly document the source-of-truth risk: recreating `chili`
+   from the dirty live root would roll back the route code.
 
 ## Guardrails
 
-- Do not drop or rename the `trading_trades` compatibility view.
-- Do not rename `Trade`, `/trades`, `trade_id`, schema classes, UI labels, or
-  public response field names.
-- Do not touch sell/close, monitor-run, stop execution, broker/order/reconcile,
-  PDT, cash, capital, portfolio, or promotion gates.
+- Do not pull into, reset, or overwrite the dirty live root.
 - Do not restart Postgres.
-- Do not pull into or overwrite the dirty live root.
+- Do not change broker/order/close/reconcile behavior.
+- Do not public-rename `Trade`, `/trades`, `trade_id`, schema fields, or UI
+  labels.
+- Keep any runtime container recreate to `chili` only unless a separate health
+  check proves a worker needs attention.
