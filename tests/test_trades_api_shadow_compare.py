@@ -213,21 +213,21 @@ def test_phase5ah_trade_like_response_applies_broker_truth_and_stale_filter(
     assert rows[1]["broker_truth_metrics_source"] is None
 
 
-def test_phase5af_trades_api_flag_is_typed_default_false(monkeypatch):
+def test_phase5af_trades_api_flag_is_typed_default_true(monkeypatch):
     from app.config import Settings
 
     monkeypatch.delenv(PHASE5AF_TRADES_API_ENV, raising=False)
 
     s = Settings(_env_file=None)
 
-    assert s.chili_phase5af_trades_api_use_envelopes is False
+    assert s.chili_phase5af_trades_api_use_envelopes is True
 
 
 def test_phase5af_trades_api_env_alias_flows_through_settings(monkeypatch):
     from app.config import Settings
 
-    monkeypatch.setenv(PHASE5AF_TRADES_API_ENV, "true")
+    monkeypatch.setenv(PHASE5AF_TRADES_API_ENV, "false")
 
     s = Settings(_env_file=None)
 
-    assert s.chili_phase5af_trades_api_use_envelopes is True
+    assert s.chili_phase5af_trades_api_use_envelopes is False

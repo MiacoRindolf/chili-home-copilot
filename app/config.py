@@ -3655,11 +3655,11 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_PHASE5K_POSITION_INTEGRITY_USE_ENVELOPES"),
     )
-    # Phase 5AF: default-OFF public /api/trading/trades read-route cutover.
-    # The route still falls back to the compatibility path for open rows so
-    # broker-truth display overlays and stale-open suppression remain intact.
+    # Phase 5AK: public /api/trading/trades read-route cutover is default-on
+    # after exact all/open/closed parity evidence. Keep the env alias as a
+    # rollback switch for operators.
     chili_phase5af_trades_api_use_envelopes: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_PHASE5AF_TRADES_API_USE_ENVELOPES"),
     )
     # f-promotion-pipeline-rebalance Phase 1 (2026-05-09): sample-size
