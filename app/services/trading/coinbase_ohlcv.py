@@ -297,6 +297,18 @@ def _public_product_support(product_id: str) -> bool | None:
         return product_id in products
 
 
+def public_product_support(product_id: str) -> bool | None:
+    """Return Coinbase public-catalog support without hitting product endpoints.
+
+    ``None`` means the catalog could not be trusted right now, so callers
+    should fall back to their normal venue-specific lookup.
+    """
+    pid = _to_product_id(product_id)
+    if not pid:
+        return False
+    return _public_product_support(pid)
+
+
 def _circuit_is_open(product_id: str, interval: str) -> bool:
     """Return True while provider/network failures are in backoff."""
     global _CIRCUIT_LAST_LOG
@@ -357,15 +369,23 @@ def _record_rate_limit_backoff(exc: requests.RequestException) -> None:
     if status != 429:
         return
     backoff_s = _retry_after_seconds(exc)
-    until = time.time() + backoff_s
+    now = time.time()
+    until = now + backoff_s
     with _RATE_LIMIT_LOCK:
+        was_open = _RATE_LIMIT_OPEN_UNTIL > now
         _RATE_LIMIT_OPEN_UNTIL = max(_RATE_LIMIT_OPEN_UNTIL, until)
-        _RATE_LIMIT_LAST_LOG = time.time()
+        if was_open:
+            return
+        _RATE_LIMIT_LAST_LOG = now
     logger.warning(
         "[coinbase_ohlcv] rate-limit backoff OPEN - 429 from Coinbase, "
         "skipping calls for %ss",
         backoff_s,
     )
+
+
+def _is_rate_limit_error(exc: requests.RequestException) -> bool:
+    return getattr(getattr(exc, "response", None), "status_code", None) == 429
 
 
 def _request_failure_counts(exc: requests.RequestException) -> bool:
@@ -526,10 +546,11 @@ def get_ohlcv(
             if _product_not_found(e):
                 _mark_product_missing(product_id)
             _record_request_failure(e)
-            logger.warning(
-                "[coinbase_ohlcv] %s %s [%s..%s] request failed: %s",
-                product_id, interval, cursor.date(), chunk_end.date(), e,
-            )
+            if not _is_rate_limit_error(e):
+                logger.warning(
+                    "[coinbase_ohlcv] %s %s [%s..%s] request failed: %s",
+                    product_id, interval, cursor.date(), chunk_end.date(), e,
+                )
             return []
         except Exception as e:
             logger.warning(
@@ -609,7 +630,8 @@ def get_quote(ticker: str) -> dict[str, Any] | None:
         if _product_not_found(e):
             _mark_product_missing(product_id)
         _record_request_failure(e)
-        logger.warning("[coinbase_ohlcv] %s quote request failed: %s", product_id, e)
+        if not _is_rate_limit_error(e):
+            logger.warning("[coinbase_ohlcv] %s quote request failed: %s", product_id, e)
         return None
     except Exception as e:
         logger.warning("[coinbase_ohlcv] %s quote parse failed: %s", product_id, e)

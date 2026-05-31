@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import requests
 
 from app.services.trading import coinbase_ohlcv
@@ -135,6 +137,22 @@ def test_public_product_catalog_blocks_known_missing_product(monkeypatch):
     assert calls == [f"{coinbase_ohlcv._COINBASE_EXCHANGE_API_BASE_URL}/products"]
 
 
+def test_public_product_support_wrapper_uses_catalog(monkeypatch):
+    calls: list[str] = []
+
+    def _get(url, **_kwargs):
+        calls.append(str(url))
+        if str(url).endswith("/products"):
+            return _CatalogResponse([{"id": "BTC-USD", "quote_currency": "USD"}])
+        raise AssertionError(f"unexpected product-specific request: {url}")
+
+    monkeypatch.setattr(coinbase_ohlcv._SESSION, "get", _get)
+
+    assert coinbase_ohlcv.public_product_support("BTC-USD") is True
+    assert coinbase_ohlcv.public_product_support(MISSING_PRODUCT) is False
+    assert calls == [f"{coinbase_ohlcv._COINBASE_EXCHANGE_API_BASE_URL}/products"]
+
+
 def test_public_product_catalog_allows_known_product_quote(monkeypatch):
     calls: list[str] = []
 
@@ -157,7 +175,7 @@ def test_public_product_catalog_allows_known_product_quote(monkeypatch):
     ]
 
 
-def test_quote_429_opens_provider_backoff(monkeypatch):
+def test_quote_429_opens_provider_backoff(monkeypatch, caplog):
     calls: list[str] = []
     now = [100.0]
 
@@ -171,11 +189,16 @@ def test_quote_429_opens_provider_backoff(monkeypatch):
     monkeypatch.setattr(coinbase_ohlcv.time, "time", lambda: now[0])
     monkeypatch.setattr(coinbase_ohlcv._SESSION, "get", _get)
 
-    assert coinbase_ohlcv.get_quote("BTC-USD") is None
-    assert coinbase_ohlcv.get_quote("ETH-USD") is None
+    with caplog.at_level(logging.WARNING, logger=coinbase_ohlcv.logger.name):
+        assert coinbase_ohlcv.get_quote("BTC-USD") is None
+        assert coinbase_ohlcv.get_quote("ETH-USD") is None
     assert calls == [
         f"{coinbase_ohlcv._COINBASE_EXCHANGE_API_BASE_URL}/products/BTC-USD/ticker",
     ]
+    assert caplog.messages.count(
+        "[coinbase_ohlcv] rate-limit backoff OPEN - 429 from Coinbase, skipping calls for 2s"
+    ) == 1
+    assert not any("quote request failed" in message for message in caplog.messages)
 
     now[0] += 2.1
 
