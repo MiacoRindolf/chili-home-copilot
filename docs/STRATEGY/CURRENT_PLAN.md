@@ -464,3 +464,28 @@ alias/facade plan proves safe. The next safe slice is audit-only:
 
 Report:
 `docs/STRATEGY/CC_REPORTS/2026-05-30_f-position-identity-phase-5ac-live-action-boundary-audit.md`.
+
+## Position Identity Phase 5AD - ORM Alias Plan (2026-05-30)
+
+Phase 5AD shipped as a plan/canary slice. No live trading behavior changed.
+
+Decision: keep `Trade` as the legacy compatibility ORM mapper for now. Do not
+introduce a separate live `ManagementEnvelope` ORM class and do not broadly
+rename `Trade` imports. The semantic helper layer in
+`management_envelopes.py` remains the correct boundary for new envelope reads.
+
+Rationale:
+
+- `Trade` is still public route/schema/UI vocabulary.
+- `trade_id` remains a stable external/business key.
+- live writer, broker, reconciliation, risk, and capital paths still depend on
+  the compatibility mapper contract.
+- a broad rename would not improve alpha, execution, slippage, or risk today.
+
+Added `tests/test_phase5ad_orm_alias_plan.py` to pin the current relation
+contract: physical table `trading_management_envelopes`, compatibility relation
+`trading_trades`, and `Trade` mapped to the compatibility relation until a
+future compatibility migration says otherwise.
+
+Report:
+`docs/STRATEGY/CC_REPORTS/2026-05-30_f-position-identity-phase-5ad-orm-alias-plan.md`.

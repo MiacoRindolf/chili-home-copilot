@@ -1,61 +1,51 @@
-# NEXT_TASK: f-position-identity-phase-5ad-orm-alias-plan
+# NEXT_TASK: position-identity-phase-5-runtime-observation
 
 STATUS: PENDING
 
 ## Goal
 
-Design the eventual `Trade` ORM-symbol rename/alias strategy without changing live behavior.
+Let the Phase 5 compatibility boundary soak under normal runtime before any new rename work.
 
-Phase 5AC proved the system is at an intentional compatibility boundary:
+## Current Verdict
+
+The Phase 5 rename/refactor pressure should stop here for now:
 
 - runtime raw `trading_trades` readers are gone
-- unexpected runtime mutations are gone
-- high-value display loaders are already on `trading_management_envelopes`
-- 94 remaining `Trade` ORM symbols are public/live/risk/research contracts
+- high-value display loaders are on management-envelope helpers
+- `Trade` remains the deliberate compatibility ORM mapper
+- `trading_trades` remains the deliberate compatibility relation
+- broad rename now would add risk without improving alpha, execution, slippage, or capital control
 
-The next move is a plan and canary slice, not a broad rename.
+## Observation Checklist
 
-## Recommended Work Shape
-
-1. Audit `app/models/trading.py::Trade` and decide whether a future `ManagementEnvelope` ORM class can be introduced as:
-   - a new class mapped to `trading_management_envelopes`
-   - an alias/facade around the existing `Trade` class
-   - or a no-op because public vocabulary must remain `Trade`
-2. Define which names are external contracts and must stay stable:
-   - `/trades`
+1. Watch the existing live probes/canaries:
+   - Phase 5K-A parity
+   - Phase 5I post-rename probe
+   - Phase 5L reader allowlist
+2. Watch runtime logs for relation/query errors involving:
+   - `trading_trades`
+   - `trading_management_envelopes`
+   - `Trade`
    - `trade_id`
-   - schema class names
-   - UI labels
-   - compatibility view `trading_trades`
-3. Define which internal paths could eventually migrate first:
-   - private helper/type-only group
-   - research/reporting group
-4. Add tests/canaries only if they reduce future rename risk.
-5. Do not change live broker/order/reconcile/risk behavior.
+3. Keep the compatibility view intact.
+4. Do not start another rename slice unless a concrete reader or production issue gives a reason.
+
+## Safe Future Work, If Needed
+
+Only these are acceptable without a fresh operator decision:
+
+- add semantic helper APIs for a concrete reader still carrying decision risk
+- add canaries that prevent drift back to raw `trading_trades` reads
+- document public compatibility boundaries
 
 ## Hard Guardrails
 
 - Do not drop or rename the `trading_trades` compatibility view.
+- Do not broadly rename `Trade`.
 - Do not rename public `/trades`, `trade_id`, schema classes, or UI labels.
-- Do not touch monitor-run, close/sell, broker/order/reconcile, PDT, cash, capital, or portfolio gates.
-- Do not mechanically replace `Trade` imports in live-action files.
-- No migrations unless the plan proves a concrete no-risk need.
-
-## Verification
-
-Run:
-
-```powershell
-python scripts\analyze_phase5_remaining_trade_refs.py --bucket orm_trade_symbol_compat --fail-on-unexpected-runtime
-$env:TEST_DATABASE_URL='postgresql://chili:chili@localhost:5433/chili_test'
-$env:DATABASE_URL=$env:TEST_DATABASE_URL
-python -m pytest tests\test_phase5_remaining_trade_refs.py tests\test_phase5l_reader_allowlist.py -q
-```
+- Do not touch monitor-run, close/sell, broker/order/reconcile, PDT, cash, capital, or portfolio gates as a rename cleanup.
 
 ## Exit Criteria
 
-- Future ORM rename strategy is explicit.
-- Public compatibility names are listed and protected.
-- First safe internal migration group, if any, is identified.
-- No live behavior changes.
+Observation is complete when production canaries remain green across a normal trading window and no relation/query errors appear. At that point, either leave Phase 5 parked or open a fresh, concrete brief for a non-rename trading improvement.
 
