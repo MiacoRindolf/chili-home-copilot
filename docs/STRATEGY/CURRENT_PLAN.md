@@ -754,3 +754,20 @@ worker restarts cannot silently fall back to the dirty root.
 
 Report:
 `docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5m-deployment-source-posture.md`.
+
+## Phase 5N - Source Posture Watch (2026-05-31)
+
+Phase 5N wrapped the Phase 5M source-posture probe in a lightweight recurring
+watch script.
+
+The wrapper writes stable output to
+`scripts/dispatch-phase5n-source-posture-watch-out.txt`, returns success only
+for `COMPLETE_POSITIVE`, and embeds the Phase 5M runbook plus Phase 5K/5I
+follow-up commands in non-green output.
+
+Architect verdict: the dirty-root deployment split is now monitored, not just
+documented. This is the right posture before continuing deeper Phase 5 runtime
+cutovers.
+
+Report:
+`docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5n-source-posture-watch.md`.
