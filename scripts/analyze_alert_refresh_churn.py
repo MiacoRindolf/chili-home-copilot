@@ -48,17 +48,45 @@ EXIT_STRUCTURAL_NOOP_PREFIX_PATTERNS = tuple(
     f"{prefix}%" for prefix in STRUCTURAL_EXIT_NOOP_PREFIXES
 )
 EXIT_NON_POSITIVE_NOOP_REASONS = tuple(sorted(NON_POSITIVE_EXIT_NOOP_REASONS))
+DEFAULT_STATEMENT_TIMEOUT_MS = 5000
+DEFAULT_LOCK_TIMEOUT_MS = 1000
 
 
 class DatabaseUnavailable(RuntimeError):
     pass
 
 
+def _positive_int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return int(default)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return int(default)
+    return value if value > 0 else int(default)
+
+
+def _configure_read_only_session(db) -> None:
+    statement_timeout_ms = _positive_int_env(
+        "CHILI_ALERT_REFRESH_CHURN_STATEMENT_TIMEOUT_MS",
+        DEFAULT_STATEMENT_TIMEOUT_MS,
+    )
+    lock_timeout_ms = _positive_int_env(
+        "CHILI_ALERT_REFRESH_CHURN_LOCK_TIMEOUT_MS",
+        DEFAULT_LOCK_TIMEOUT_MS,
+    )
+    db.execute(text("SET TRANSACTION READ ONLY"))
+    db.execute(text(f"SET LOCAL statement_timeout = {statement_timeout_ms}"))
+    db.execute(text(f"SET LOCAL lock_timeout = {lock_timeout_ms}"))
+    db.execute(text("SET LOCAL application_name = 'chili-alert-refresh-churn-audit'"))
+
+
 def _rows(sql: str, params: dict) -> list[dict]:
     try:
         with SessionLocal() as db:
             try:
-                db.execute(text("SET TRANSACTION READ ONLY"))
+                _configure_read_only_session(db)
                 rows = db.execute(text(sql), params).fetchall()
                 return [dict(row._mapping) for row in rows]
             finally:

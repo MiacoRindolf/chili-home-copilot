@@ -371,6 +371,43 @@ def test_churn_audit_waits_for_database(monkeypatch, capsys):
     assert sleeps == [4.0]
 
 
+def test_rows_configures_bounded_read_only_session(monkeypatch):
+    executed: list[str] = []
+
+    class FakeResult:
+        def fetchall(self):
+            return []
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, statement, params=None):
+            executed.append(str(statement))
+            return FakeResult()
+
+        def rollback(self):
+            executed.append("ROLLBACK")
+
+    monkeypatch.setenv("CHILI_ALERT_REFRESH_CHURN_STATEMENT_TIMEOUT_MS", "3210")
+    monkeypatch.setenv("CHILI_ALERT_REFRESH_CHURN_LOCK_TIMEOUT_MS", "210")
+    monkeypatch.setattr(audit, "SessionLocal", lambda: FakeSession())
+
+    assert audit._rows("SELECT 1", {}) == []
+
+    assert executed == [
+        "SET TRANSACTION READ ONLY",
+        "SET LOCAL statement_timeout = 3210",
+        "SET LOCAL lock_timeout = 210",
+        "SET LOCAL application_name = 'chili-alert-refresh-churn-audit'",
+        "SELECT 1",
+        "ROLLBACK",
+    ]
+
+
 def test_open_exit_noop_query_keeps_non_positive_skip_evidence_specific(monkeypatch):
     captured: dict[str, object] = {}
 
