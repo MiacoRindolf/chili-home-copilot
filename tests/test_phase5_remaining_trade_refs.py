@@ -118,6 +118,21 @@ def test_runtime_app_compatibility_contract_surface_is_pinned() -> None:
     assert relation_symbol_paths == EXPECTED_RUNTIME_COMPAT_RELATION_SYMBOL_PATHS
     assert raw_reader_history_paths == ["app/migrations.py"]
 
+def test_legacy_trade_relation_symbols_are_centralized() -> None:
+    model_source = (REPO_ROOT / "app" / "models" / "trading.py").read_text(
+        encoding="utf-8"
+    )
+    helper_source = (
+        REPO_ROOT / "app" / "services" / "trading" / "management_envelopes.py"
+    ).read_text(encoding="utf-8")
+
+    assert model_source.count('"trading_trades"') == 1
+    assert 'LEGACY_TRADES_COMPAT_RELATION = "trading_trades"' in model_source
+    assert helper_source.count('"trading_trades"') == 1
+    assert 'LEGACY_TRADES_COMPAT_RELATION = "trading_trades"' in helper_source
+    assert helper_source.count('"trading_management_envelopes"') == 1
+    assert 'MANAGEMENT_ENVELOPES_RELATION = "trading_management_envelopes"' in helper_source
+
 
 def test_build_inventory_scans_sources_and_skips_workspace_noise(tmp_path: Path) -> None:
     module = _load_module()

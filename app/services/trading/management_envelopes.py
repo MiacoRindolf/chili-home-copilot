@@ -553,7 +553,7 @@ def phase5b_parity_summary(db: Session) -> Phase5BParitySummary:
     links. Corrupt legacy dust rows are excluded by the first counter's
     ``entry_price > 0 AND quantity > 0`` predicate.
     """
-    row = _rows(db, """
+    row = _rows(db, f"""
         WITH phase5a AS (
             SELECT
                 COUNT(*) FILTER (
@@ -567,7 +567,7 @@ def phase5b_parity_summary(db: Session) -> Phase5BParitySummary:
                       AND btrim(broker_source) <> ''
                       AND position_id IS NULL
                 )::bigint AS open_broker_trades_missing_position
-            FROM trading_management_envelopes
+            FROM {MANAGEMENT_ENVELOPES_RELATION}
         ),
         phase5a_view AS (
             SELECT COALESCE(orphan_decisions, 0)::bigint AS orphan_decisions
