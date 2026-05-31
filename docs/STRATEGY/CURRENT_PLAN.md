@@ -1,7 +1,7 @@
 # Current Plan: Position Identity Refactor
 
 **Initiative owner:** Cowork (strategy) + Claude Code (execution).
-**Last update:** 2026-05-31, after Phase 5AB-B converted proven scheduler selection scopes.
+**Last update:** 2026-05-31, after Phase 5AB-C proved pattern-monitor runtime-object parity.
 
 > **Why this initiative supersedes the prior fast-path crypto-scalping plan.** Today (2026-05-04) two automated close paths fired, marking 11 equity Trade rows wrongly closed in DB while the broker still held the positions. The shipped patch (inverse-reconcile, broker-truth-self-heal task) auto-healed 18 of them but its cross-check (`event_count == 0` on `trading_execution_events`) is conservative because **Trade row IDs are ephemeral** — every time a row gets wrongly closed and recreated, fills associated with the prior trade_id orphan. The fast-path scalping initiative depends on a stable position model; building more on this foundation makes things worse, not better. Position-identity refactor goes first. Fast-path resumes after.
 
@@ -56,6 +56,17 @@ Phase 5 soak duration was also tightened from one quarter to **2 weeks** at oper
 
 ## Status of the initiative
 
+- **Phase 5AB-C pattern-monitor runtime-object probe SHIPPED 2026-05-31.**
+  Added `scripts/d-phase5ab-c-pattern-monitor-runtime-object-probe.py`, a
+  read-only parity probe for the remaining scheduler event-driven
+  `Trade` object handoff:
+  `trigger_pattern_monitor_for_tickers(...) -> run_pattern_position_monitor_for_trades(...)`.
+  The probe compares old `Trade` ORM objects with candidate
+  `trading_management_envelopes` runtime objects across monitor-visible fields
+  and broker-stale filtering. Live result: `COMPLETE_POSITIVE`, 8 old runtime
+  objects matched 8 new runtime objects, 0 field mismatches, and broker truth
+  projection matched. No runtime behavior changed. CC report:
+  `docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5ab-c-pattern-monitor-runtime-object-probe.md`.
 - **Phase 5AB-B trading-scheduler scope conversion SHIPPED 2026-05-31.**
   Converted only the Phase 5AB-proven scheduler selection queries in
   `app/services/trading_scheduler.py` from direct `Trade` ORM reads to

@@ -1,51 +1,53 @@
-# NEXT_TASK: f-phase5ab-c-pattern-monitor-runtime-object-probe
+# NEXT_TASK: f-phase5ab-d-pattern-monitor-handoff-conversion
 
 STATUS: QUEUED
 
 ## Goal
 
-Build a read-only runtime-object parity probe for
-`trading_scheduler.trigger_pattern_monitor_for_tickers(...)` before converting
-its remaining `Trade` ORM object handoff.
+Convert only `trading_scheduler.trigger_pattern_monitor_for_tickers(...)` from
+loading SQLAlchemy `Trade` ORM rows to loading envelope-shaped runtime objects
+from `trading_management_envelopes`.
 
-## Why This Is Next
+## Evidence
 
-Phase 5AB-B converted the scheduler's proven user/ticker/count selection
-queries to management-envelope helpers. The only intentional scheduler
-`Trade` ORM surface left is the event-driven pattern monitor handoff:
+Phase 5AB-C live probe:
 
-`trigger_pattern_monitor_for_tickers(...) -> run_pattern_position_monitor_for_trades(...)`
+```text
+VERDICT_STATUS=COMPLETE_POSITIVE
+RUNTIME_OBJECTS_OLD=8
+RUNTIME_OBJECTS_NEW=8
+FIELD_MISMATCHES=0
+BROKER_TRUTH_MATCH=True
+```
 
-That path passes actual SQLAlchemy `Trade` objects into live pattern-position
-monitor logic. The Phase 5AB scope probe proves selected ids match, but it
-does not prove that envelope-shaped runtime objects are behaviorally equivalent
-inside the downstream monitor.
+The downstream pattern monitor's observed runtime-object fields and
+broker-stale projection matched between current `Trade` objects and candidate
+management-envelope objects.
 
 ## Scope
 
-- Add a read-only probe that loads the current `Trade` ORM objects and
-  candidate runtime objects from `trading_management_envelopes` for the same
-  ticker set.
-- Compare object-visible fields used by `pattern_position_monitor`.
-- Include broker-stale suppression and position-identity behavior only if the
-  downstream monitor observes those fields directly.
-- Do not execute monitor side effects, emit alerts, close positions, place
-  orders, or write monitor decisions.
+- Add or reuse a management-envelope helper that loads open pattern/plan
+  runtime objects for a ticker set.
+- Convert only the loader inside
+  `trigger_pattern_monitor_for_tickers(...)`.
+- Keep `run_pattern_position_monitor_for_trades(...)` and
+  `pattern_position_monitor.py` behavior unchanged.
+- Keep the public function name and call sites unchanged.
 
 ## Guardrails
 
 - No scheduler cadence changes.
-- No stop evaluation or dispatch behavior changes.
-- No broker/order/close/reconcile changes.
+- No stop evaluation or dispatch rule changes.
+- No broker/order/close/reconcile behavior changes.
 - No risk/capital/PDT/portfolio gate changes.
 - No public `/trades`, `trade_id`, schema, or UI label rename.
-- No conversion of `trigger_pattern_monitor_for_tickers(...)` in this slice
-  unless the probe proves runtime-object parity first.
+- If the live Phase 5AB-C probe regresses, stop and do not convert.
 
 ## Exit Criteria
 
-- New probe emits `COMPLETE_POSITIVE` against live data.
-- Focused tests pin the probe and make sure it is read-only/live-opt-in.
+- Focused tests pin that the scheduler handoff loader reads
+  `trading_management_envelopes`.
+- Phase 5AB-C runtime-object probe remains `COMPLETE_POSITIVE`.
 - Phase 5AB scheduler scope probe remains `COMPLETE_POSITIVE`.
 - Phase 5K live-path parity and Phase 5I post-rename soak remain
   `COMPLETE_POSITIVE`.
