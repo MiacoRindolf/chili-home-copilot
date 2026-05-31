@@ -675,7 +675,6 @@ def _api_stats_calendar_impl(
     month: int,
 ):
     from datetime import datetime
-from typing import Any
     ctx = get_identity_ctx(request, db)
     start = datetime(year, month, 1, 0, 0, 0)
     if month == 12:
