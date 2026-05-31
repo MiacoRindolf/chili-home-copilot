@@ -119,6 +119,26 @@ def test_runtime_app_compatibility_contract_surface_is_pinned() -> None:
     assert raw_reader_history_paths == ["app/migrations.py"]
 
 
+def test_groups_legacy_trade_orm_symbols_by_contract() -> None:
+    module = _load_module()
+
+    assert module.classify_orm_contract_group("app/routers/trading_sub/trades.py") == (
+        "public_ui_schema_contract"
+    )
+    assert module.classify_orm_contract_group("app/services/broker_service.py") == (
+        "live_action_broker_reconcile"
+    )
+    assert module.classify_orm_contract_group("app/services/trading/compliance.py") == (
+        "risk_capital_gate"
+    )
+    assert module.classify_orm_contract_group("app/services/trading/learning.py") == (
+        "learning_research_reporting"
+    )
+    assert module.classify_orm_contract_group("app/services/trading/autopilot_scope.py") == (
+        "private_helper_type_only"
+    )
+
+
 def test_build_inventory_scans_sources_and_skips_workspace_noise(tmp_path: Path) -> None:
     module = _load_module()
     app_dir = tmp_path / "app" / "services" / "trading"

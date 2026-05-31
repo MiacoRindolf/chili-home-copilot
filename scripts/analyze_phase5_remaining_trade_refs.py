@@ -98,6 +98,51 @@ DEFAULT_CLASSIFICATION = Classification(
 )
 
 
+ORM_CONTRACT_GROUPS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(
+            r"^(?:app/(?:config\.py|models/__init__\.py|routers/|schemas/|static/|templates/))",
+            re.IGNORECASE,
+        ),
+        "public_ui_schema_contract",
+    ),
+    (
+        re.compile(
+            r"^(?:app/services/(?:broker_service\.py|trading/(?:bracket_|broker_|crypto/exit_monitor\.py|"
+            r"live_exit_engine\.py|position_integrity\.py|position_resolver\.py|"
+            r"robinhood_exit_execution\.py|stop_engine\.py|stuck_order_watchdog\.py|"
+            r"venue/coinbase_spot\.py|broker_account_repair\.py)))",
+            re.IGNORECASE,
+        ),
+        "live_action_broker_reconcile",
+    ),
+    (
+        re.compile(
+            r"^(?:app/services/trading/(?:auto_trader_rules\.py|cash_deployment\.py|"
+            r"compliance\.py|correlation_budget\.py|emergency_liquidation\.py|fast_path/|"
+            r"governance\.py|options/portfolio_budget\.py|portfolio(?:_allocator|_risk)?\.py))",
+            re.IGNORECASE,
+        ),
+        "risk_capital_gate",
+    ),
+    (
+        re.compile(
+            r"^(?:app/services/(?:backtest_service\.py|context_brain/|reasoning_brain/|"
+            r"trading_scheduler\.py|yf_session\.py|trading/(?:alerts\.py|alpha_decay\.py|"
+            r"auto_trader_monitor\.py|auto_trader_synergy\.py|brain_neural_mesh/|cron_jobs/|"
+            r"divergence_service\.py|economic_ledger\.py|edge_reliability\.py|"
+            r"evidence_correction\.py|execution_cost_builder\.py|execution_event_lag\.py|"
+            r"execution_robustness\.py|exit_evaluator\.py|learning|market_data\.py|"
+            r"momentum_neural/|net_edge_ranker\.py|paper_trading\.py|pattern_|"
+            r"prescreener\.py|realized_pnl_sql\.py|regime_classifier\.py|scanner\.py|"
+            r"setup_vitals\.py|tca_service\.py|trade_plan_extractor\.py)))",
+            re.IGNORECASE,
+        ),
+        "learning_research_reporting",
+    ),
+)
+
+
 def _is_skipped(path: Path) -> bool:
     return any(part in SKIP_DIRS for part in path.parts)
 
@@ -148,6 +193,15 @@ def classify_path(relative_path: str) -> Classification:
         if pattern.search(normalized):
             return classification
     return DEFAULT_CLASSIFICATION
+
+
+def classify_orm_contract_group(relative_path: str) -> str:
+    """Group legacy ``Trade`` ORM symbols by the contract they currently serve."""
+    normalized = relative_path.replace("\\", "/")
+    for pattern, group in ORM_CONTRACT_GROUPS:
+        if pattern.search(normalized):
+            return group
+    return "private_helper_type_only"
 
 
 def classify_reference_contract(
@@ -211,6 +265,7 @@ def build_inventory(
 ) -> dict:
     entries: list[dict] = []
     buckets: dict[str, int] = {}
+    orm_contract_groups: dict[str, int] = {}
     raw_reader_buckets: dict[str, int] = {}
     unexpected_runtime_readers: list[str] = []
     unexpected_runtime_mutations: list[str] = []
@@ -239,10 +294,20 @@ def build_inventory(
             unexpected_runtime_mutations.append(relative_path)
         if classification.bucket == DEFAULT_CLASSIFICATION.bucket:
             unclassified.append(relative_path)
+        orm_contract_group = (
+            classify_orm_contract_group(relative_path)
+            if classification.bucket == "orm_trade_symbol_compat"
+            else None
+        )
+        if orm_contract_group:
+            orm_contract_groups[orm_contract_group] = (
+                orm_contract_groups.get(orm_contract_group, 0) + 1
+            )
         entries.append(
             {
                 "path": relative_path,
                 "bucket": classification.bucket,
+                "contract_group": orm_contract_group,
                 "owner": classification.owner,
                 "decision": classification.decision,
                 "reference_kind": (
@@ -278,6 +343,7 @@ def build_inventory(
         "file_count": len(entries),
         "raw_sql_file_count": sum(1 for entry in entries if entry["raw_sql_references"]),
         "buckets": dict(sorted(buckets.items())),
+        "orm_contract_groups": dict(sorted(orm_contract_groups.items())),
         "raw_reader_buckets": dict(sorted(raw_reader_buckets.items())),
         "unexpected_runtime_readers": unexpected_runtime_readers,
         "unexpected_runtime_mutations": unexpected_runtime_mutations,
@@ -292,16 +358,21 @@ def filter_inventory_by_bucket(report: dict, bucket: str | None) -> dict:
         return report
     entries = [entry for entry in report["entries"] if entry["bucket"] == bucket]
     raw_reader_buckets: dict[str, int] = {}
+    orm_contract_groups: dict[str, int] = {}
     for entry in entries:
         if entry["raw_sql_references"]:
             raw_reader_buckets[entry["bucket"]] = (
                 raw_reader_buckets.get(entry["bucket"], 0) + 1
             )
+        if entry.get("contract_group"):
+            group = entry["contract_group"]
+            orm_contract_groups[group] = orm_contract_groups.get(group, 0) + 1
     return {
         **report,
         "file_count": len(entries),
         "raw_sql_file_count": sum(1 for entry in entries if entry["raw_sql_references"]),
         "buckets": {bucket: len(entries)} if entries else {},
+        "orm_contract_groups": dict(sorted(orm_contract_groups.items())),
         "raw_reader_buckets": dict(sorted(raw_reader_buckets.items())),
         "entries": entries,
     }
@@ -312,6 +383,12 @@ def _print_table(report: dict) -> None:
     print("-------+------")
     for bucket, count in report["buckets"].items():
         print(f"{bucket} | {count}")
+    if report.get("orm_contract_groups"):
+        print()
+        print("orm contract group | files")
+        print("-------------------+------")
+        for group, count in report["orm_contract_groups"].items():
+            print(f"{group} | {count}")
     print()
     print("raw reader bucket | files")
     print("------------------+------")

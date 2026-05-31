@@ -441,3 +441,26 @@ between probes, confirming the Tier A unblock works end-to-end.
 restored AND protected), promotion-pipeline rebalance Phases 1–4
 infrastructure, the May 1/May 7 connection-hygiene work, Phase 3
 stop-bleed deploys, Tier A payoff-ratio gate (just shipped).
+## Position Identity Phase 5AC - Compatibility Boundary Audit (2026-05-30)
+
+Phase 5AC shipped as an audit/tooling slice. No live trading behavior changed.
+
+The remaining trade surface is now explicitly classified rather than treated as
+generic cleanup debt. The analyzer still reports zero unexpected runtime raw
+readers and zero unexpected runtime mutations. The remaining 94 `Trade` ORM
+symbol references are compatibility contracts grouped as:
+
+- learning/research/reporting: 39
+- live-action/broker/reconcile: 15
+- risk/capital gates: 18
+- public UI/schema contracts: 14
+- private helper/type-only: 8
+
+Architect verdict: **do not do the full ORM/view rename now**. The useful Phase
+5 reader conversion work is done; `trading_trades` remains a deliberate
+compatibility view and `Trade` remains a legacy ORM symbol until a separate
+alias/facade plan proves safe. The next safe slice is audit-only:
+`f-position-identity-phase-5ad-orm-alias-plan`.
+
+Report:
+`docs/STRATEGY/CC_REPORTS/2026-05-30_f-position-identity-phase-5ac-live-action-boundary-audit.md`.
