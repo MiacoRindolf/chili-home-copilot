@@ -1,42 +1,34 @@
-# NEXT_TASK: f-phase5m-deployment-source-posture
+# NEXT_TASK: f-phase5n-source-posture-watch
 
 STATUS: QUEUED
 
 ## Goal
 
-Make the live service source-of-truth posture explicit and boring before any
-more Phase 5 runtime cutovers.
+Turn the Phase 5M source-posture probe into a lightweight recurring guard so a
+future manual restart cannot silently put live workers back on the dirty root.
 
 ## Current State
 
-Runtime is healthy, and Phase 5K/5I probes are green. Production services are
-intentionally running from clean worktrees because the root checkout remains
-very dirty and should not be used for edits, tests, deployment, commits, or
-pushes.
+Phase 5M added `scripts/d-phase5m-source-posture-probe.py` and repaired the live
+runtime source split. App/worker services now mount a clean worktree, and Phase
+5K/5I probes remain `COMPLETE_POSITIVE`.
 
-The live web container currently mounts a clean Phase 5L worktree while the
-root repository contains many unrelated modifications. That posture is safe
-only if it is documented and verified before each deploy/restart.
+The root checkout remains very dirty and must not be used as a deployment
+source.
 
 ## Recommended Work Shape
 
-1. Identify the worktree currently mounted into each live app/worker container.
-2. Verify it is based on the merged recovery branch and not the dirty root.
-3. Add a small runbook or probe that reports:
-   - mounted source path
-   - git branch / commit
-   - dirty/clean status
-   - relevant Phase 5 flags
-4. Keep the check read-only unless the runtime is clearly pointing at the wrong
-   source.
-5. Re-run Phase 5K and Phase 5I probes after any source-mount correction.
+1. Add a tiny wrapper or scheduled task that runs:
+   `python scripts/d-phase5m-source-posture-probe.py`.
+2. Write output to a stable file under `scripts/` or `docs/RUNBOOKS/`.
+3. Alert only on non-`COMPLETE_POSITIVE` verdict.
+4. Include Phase 5K/5I probe instructions in the alert text, but do not run
+   heavy probes every minute.
 
 ## Guardrails
 
-- Do not reset, clean, or overwrite the dirty root checkout.
 - Do not restart Postgres.
 - Do not flip Phase 5 flags.
-- Do not perform schema migrations.
-- Prefer a clean worktree and a documentation/probe change over manual runtime
-  surgery.
+- Do not mutate runtime unless the probe reports dirty-root usage.
+- Do not clean or reset the dirty root checkout.
 
