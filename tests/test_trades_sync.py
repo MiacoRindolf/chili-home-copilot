@@ -294,6 +294,37 @@ class TestPartialSellEndpoint:
         assert trade.exit_price == 6.0
         assert trade.pnl == 10.0
 
+    def test_coinbase_close_requires_coinbase_connection(self):
+        trade = self._mock_trade(ticker="BTC-USD", broker_source="coinbase", quantity=1.0)
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = trade
+
+        from app.routers.trading_sub.trades import api_sell_trade
+        from app.schemas.trading import TradeSell
+
+        body = TradeSell(quantity=1.0)
+        request = MagicMock()
+
+        with patch(
+            "app.routers.trading_sub.trades.get_identity_ctx",
+            return_value={"user_id": None},
+        ), patch(
+            "app.routers.trading_sub.trades.broker_manager.is_connected_for",
+            return_value=False,
+        ) as connected, patch(
+            "app.routers.trading_sub.trades.broker_manager.place_sell_order",
+            side_effect=AssertionError("disconnected coinbase close must not submit"),
+        ):
+            resp = api_sell_trade(trade_id=1, body=body, request=request, db=db)
+
+        import json
+        data = json.loads(resp.body)
+        assert resp.status_code == 503
+        assert data == {"ok": False, "error": "broker_not_connected", "broker": "coinbase"}
+        connected.assert_called_once_with("coinbase")
+        assert trade.status == "open"
+        db.commit.assert_not_called()
+
     def test_option_partial_sell_rejected_before_stock_sell(self):
         trade = self._mock_trade(
             ticker="SPY",

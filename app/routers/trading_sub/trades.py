@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from ...deps import get_db, get_identity_ctx
-from ...services import broker_manager, broker_service
+from ...services import broker_manager
 from ...services import trading_service as ts
 from ...schemas.trading import (
     JournalCreate,
@@ -341,78 +341,83 @@ def api_sell_trade(
         })
 
     if trade.broker_source in ("robinhood", "coinbase"):
-        broker_connected = (
-            (trade.broker_source == "robinhood" and broker_service.is_connected()) or
-            (trade.broker_source == "coinbase" and broker_manager.is_any_connected())
-        )
-        if broker_connected:
-            order_type = "limit" if body.limit_price else "market"
-            result = broker_manager.place_sell_order(
-                ticker=trade.ticker,
-                quantity=body.quantity,
-                order_type=order_type,
-                limit_price=body.limit_price,
-                broker=trade.broker_source,
+        if not broker_manager.is_connected_for(trade.broker_source):
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "broker_not_connected",
+                    "broker": trade.broker_source,
+                },
+                status_code=503,
             )
-            if not result.get("ok"):
-                return JSONResponse({"ok": False, "error": result.get("error", "Sell failed")}, status_code=500)
 
-            broker_state = (result.get("state") or "queued").lower()
-            order_id = result.get("order_id", "")
-            src = result.get("broker", trade.broker_source)
+        order_type = "limit" if body.limit_price else "market"
+        result = broker_manager.place_sell_order(
+            ticker=trade.ticker,
+            quantity=body.quantity,
+            order_type=order_type,
+            limit_price=body.limit_price,
+            broker=trade.broker_source,
+        )
+        if not result.get("ok"):
+            return JSONResponse({"ok": False, "error": result.get("error", "Sell failed")}, status_code=500)
 
-            if is_full_exit:
-                if broker_state == "filled":
-                    trade.status = "closed"
-                    trade.exit_price = body.limit_price or trade.entry_price
-                    trade.exit_date = datetime.utcnow()
-                    trade.pnl = round((trade.exit_price - trade.entry_price) * trade.quantity, 2)
-                    try:
-                        from ...services.trading.public_api import (
-                            apply_tca_on_trade_close,
-                            resolve_exit_reference_price,
-                        )
-                        trade.tca_reference_exit_price = resolve_exit_reference_price(
-                            trade.ticker,
-                            explicit=body.limit_price,
-                            fill_fallback=float(trade.exit_price),
-                        )
-                        apply_tca_on_trade_close(trade)
-                    except Exception:
-                        pass
-                    try:
-                        from ...services.trading.brain_work.execution_hooks import (
-                            on_live_trade_closed,
-                        )
+        broker_state = (result.get("state") or "queued").lower()
+        order_id = result.get("order_id", "")
+        src = result.get("broker", trade.broker_source)
 
-                        on_live_trade_closed(db, trade, source="broker_sell_filled")
-                    except Exception:
-                        pass
-                else:
-                    trade.notes = (trade.notes or "") + f"\nSell order placed (full exit), {src} order {order_id} ({broker_state})"
+        if is_full_exit:
+            if broker_state == "filled":
+                trade.status = "closed"
+                trade.exit_price = body.limit_price or trade.entry_price
+                trade.exit_date = datetime.utcnow()
+                trade.pnl = round((trade.exit_price - trade.entry_price) * trade.quantity, 2)
+                try:
+                    from ...services.trading.public_api import (
+                        apply_tca_on_trade_close,
+                        resolve_exit_reference_price,
+                    )
+                    trade.tca_reference_exit_price = resolve_exit_reference_price(
+                        trade.ticker,
+                        explicit=body.limit_price,
+                        fill_fallback=float(trade.exit_price),
+                    )
+                    apply_tca_on_trade_close(trade)
+                except Exception:
+                    pass
+                try:
+                    from ...services.trading.brain_work.execution_hooks import (
+                        on_live_trade_closed,
+                    )
+
+                    on_live_trade_closed(db, trade, source="broker_sell_filled")
+                except Exception:
+                    pass
             else:
-                remaining = round(trade.quantity - body.quantity, 6)
-                exit_price = body.limit_price or trade.entry_price
-                realized_pnl = round((exit_price - trade.entry_price) * body.quantity, 2)
-                trade.quantity = remaining
-                trade.notes = (
-                    (trade.notes or "")
-                    + f"\nPartial sell: {body.quantity} shares"
-                    + (f" @ ${body.limit_price}" if body.limit_price else " (market)")
-                    + f", {src} order {order_id} ({broker_state}), realized ~${realized_pnl}"
-                )
+                trade.notes = (trade.notes or "") + f"\nSell order placed (full exit), {src} order {order_id} ({broker_state})"
+        else:
+            remaining = round(trade.quantity - body.quantity, 6)
+            exit_price = body.limit_price or trade.entry_price
+            realized_pnl = round((exit_price - trade.entry_price) * body.quantity, 2)
+            trade.quantity = remaining
+            trade.notes = (
+                (trade.notes or "")
+                + f"\nPartial sell: {body.quantity} shares"
+                + (f" @ ${body.limit_price}" if body.limit_price else " (market)")
+                + f", {src} order {order_id} ({broker_state}), realized ~${realized_pnl}"
+            )
 
-            db.commit()
-            return JSONResponse({
-                "ok": True,
-                "trade_id": trade.id,
-                "sold_qty": body.quantity,
-                "remaining_qty": round(trade.quantity, 6),
-                "broker_state": broker_state,
-                "order_id": order_id,
-                "broker": src,
-                "status": trade.status,
-            })
+        db.commit()
+        return JSONResponse({
+            "ok": True,
+            "trade_id": trade.id,
+            "sold_qty": body.quantity,
+            "remaining_qty": round(trade.quantity, 6),
+            "broker_state": broker_state,
+            "order_id": order_id,
+            "broker": src,
+            "status": trade.status,
+        })
 
     # Manual / paper trade — immediate simulated close
     exit_price = body.limit_price or trade.entry_price

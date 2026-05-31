@@ -169,6 +169,17 @@ def is_any_connected() -> bool:
     return broker_service.is_connected() or coinbase_service.is_connected()
 
 
+def is_connected_for(broker: str | None) -> bool:
+    """Return connection state for one broker, without cross-broker fallback."""
+    if broker == BROKER_ROBINHOOD:
+        return broker_service.is_connected()
+    if broker == BROKER_COINBASE:
+        return coinbase_service.is_connected()
+    if broker == BROKER_MANUAL:
+        return True
+    return False
+
+
 def map_status(broker: str, raw_state: str) -> str:
     if broker == BROKER_COINBASE:
         return coinbase_service.map_cb_status(raw_state)
