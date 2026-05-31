@@ -43,8 +43,9 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -79,9 +80,23 @@ class _Bucket:
 # ── Module-level registry ──────────────────────────────────────────────
 
 _VENUES = ("robinhood", "coinbase")
+_BUCKETS_MAX = 64
 
-_buckets: dict[str, _Bucket] = {}
+_buckets: "OrderedDict[str, _Bucket]" = OrderedDict()
 _lock = threading.Lock()
+_settings_obj: Any | None = None
+
+
+def _settings() -> Any | None:
+    global _settings_obj
+    if _settings_obj is not None:
+        return _settings_obj
+    try:
+        from ....config import settings
+    except Exception:
+        return None
+    _settings_obj = settings
+    return settings
 
 
 def _resolve_config(venue: str) -> tuple[float, float]:
@@ -91,13 +106,10 @@ def _resolve_config(venue: str) -> tuple[float, float]:
     needing to reset the registry. Returns sensible defaults on any error.
     """
     v = (venue or "").strip().lower()
+    settings = _settings()
+    if settings is None:
+        return (5.0, 1.0) if v not in ("coinbase", "coinbase_spot", "crypto") else (5.0, 3.0)
     try:
-        from ...trading.venue import _settings_proxy  # type: ignore  # noqa
-    except Exception:
-        pass
-    try:
-        from ....config import settings
-
         if v in ("coinbase", "coinbase_spot", "crypto"):
             rate = float(getattr(settings, "chili_venue_rate_limit_cb_orders_per_sec", 3.0))
             burst = int(getattr(settings, "chili_venue_rate_limit_cb_burst", 5))
@@ -113,9 +125,10 @@ def _resolve_config(venue: str) -> tuple[float, float]:
 
 
 def _is_enabled() -> bool:
+    settings = _settings()
+    if settings is None:
+        return True
     try:
-        from ....config import settings
-
         return bool(getattr(settings, "chili_venue_rate_limit_enabled", True))
     except Exception:
         return True
@@ -131,7 +144,9 @@ def _get_or_create_bucket(venue: str) -> _Bucket:
     if b is None:
         b = _Bucket(capacity=capacity, rate_per_sec=rate, tokens=capacity, last_refill=now)
         _buckets[v] = b
+        _prune_buckets()
         return b
+    _buckets.move_to_end(v)
     # Reconcile live-config changes (e.g. test monkeypatches) cheaply.
     if b.capacity != capacity or b.rate_per_sec != rate:
         # Don't award free tokens on a rate bump; keep current tokens but clamp.
@@ -140,6 +155,11 @@ def _get_or_create_bucket(venue: str) -> _Bucket:
         b.tokens = min(b.tokens, capacity)
     b.refill(now)
     return b
+
+
+def _prune_buckets() -> None:
+    while len(_buckets) > _BUCKETS_MAX:
+        _buckets.popitem(last=False)
 
 
 # ── Public API ─────────────────────────────────────────────────────────
