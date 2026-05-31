@@ -864,6 +864,25 @@ def _payload_has_positive_exit_evidence(payload: dict[str, Any] | None) -> bool:
     return False
 
 
+def _non_positive_exit_noop_blocks_weak_request(
+    diagnostic_payload: dict[str, Any],
+    *,
+    request_payload: dict[str, Any] | None,
+) -> bool:
+    try:
+        created_count = int(diagnostic_payload.get("created_count"))
+    except (TypeError, ValueError):
+        return False
+    if created_count != 0:
+        return False
+    if (
+        str(diagnostic_payload.get("skip_reason") or "").strip().lower()
+        != _NON_POSITIVE_EXIT_NOOP_REASON
+    ):
+        return False
+    return not _payload_has_positive_exit_evidence(request_payload)
+
+
 def _repeated_non_positive_exit_noop_blocks_refresh(
     diagnostic_payloads: list[dict[str, Any]],
     *,
@@ -927,6 +946,11 @@ def _recent_noop_exit_variant_exists(
         if _exit_noop_blocks_refresh(
             row_payload,
             evidence_fingerprint=evidence_fingerprint,
+        ):
+            return True
+        if _non_positive_exit_noop_blocks_weak_request(
+            row_payload,
+            request_payload=payload,
         ):
             return True
     if _repeated_non_positive_exit_noop_blocks_refresh(
