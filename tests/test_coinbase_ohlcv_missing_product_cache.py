@@ -190,11 +190,16 @@ def test_quote_429_opens_provider_backoff(monkeypatch, caplog):
     monkeypatch.setattr(coinbase_ohlcv._SESSION, "get", _get)
     caplog.set_level(logging.WARNING, logger="app.services.trading.coinbase_ohlcv")
 
-    assert coinbase_ohlcv.get_quote("BTC-USD") is None
-    assert coinbase_ohlcv.get_quote("ETH-USD") is None
+    with caplog.at_level(logging.WARNING, logger=coinbase_ohlcv.logger.name):
+        assert coinbase_ohlcv.get_quote("BTC-USD") is None
+        assert coinbase_ohlcv.get_quote("ETH-USD") is None
     assert calls == [
         f"{coinbase_ohlcv._COINBASE_EXCHANGE_API_BASE_URL}/products/BTC-USD/ticker",
     ]
+    assert caplog.messages.count(
+        "[coinbase_ohlcv] rate-limit backoff OPEN - 429 from Coinbase, skipping calls for 2s"
+    ) == 1
+    assert not any("quote request failed" in message for message in caplog.messages)
 
     now[0] += 2.1
 

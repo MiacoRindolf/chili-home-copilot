@@ -376,10 +376,14 @@ def _record_rate_limit_backoff(exc: requests.RequestException) -> None:
     if status != 429:
         return
     backoff_s = _retry_after_seconds(exc)
-    until = time.time() + backoff_s
+    now = time.time()
+    until = now + backoff_s
     with _RATE_LIMIT_LOCK:
+        was_open = _RATE_LIMIT_OPEN_UNTIL > now
         _RATE_LIMIT_OPEN_UNTIL = max(_RATE_LIMIT_OPEN_UNTIL, until)
-        _RATE_LIMIT_LAST_LOG = time.time()
+        if was_open:
+            return
+        _RATE_LIMIT_LAST_LOG = now
     logger.warning(
         "[coinbase_ohlcv] rate-limit backoff OPEN - 429 from Coinbase, "
         "skipping calls for %ss",
