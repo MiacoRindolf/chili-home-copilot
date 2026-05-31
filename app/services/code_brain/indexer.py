@@ -7,7 +7,7 @@ import os
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
@@ -15,13 +15,14 @@ from sqlalchemy.orm import Session
 from ...config import settings
 from ...models.code_brain import CodeRepo, CodeSnapshot
 from .runtime import (
-    current_runtime_reachable,
     infer_repo_runtime_fields,
     mark_runtime_reachability,
     resolve_repo_runtime_path,
 )
 
 logger = logging.getLogger(__name__)
+
+CURRENT_WORKSPACE_REPO_NAME = "chili-home-copilot"
 
 LANG_EXTENSIONS: Dict[str, str] = {
     ".py": "python", ".pyx": "python", ".pyi": "python",
@@ -116,6 +117,96 @@ def _count_lines(path: Path) -> int:
             return sum(1 for _ in f)
     except Exception:
         return 0
+
+
+def _current_workspace_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def _same_resolved_path(left: Path | None, right: Path | None) -> bool:
+    if left is None or right is None:
+        return False
+    try:
+        return left.resolve() == right.resolve()
+    except OSError:
+        return str(left) == str(right)
+
+
+def is_current_workspace_repo(repo: CodeRepo) -> bool:
+    """Return true when a repo entry resolves to this CHILI checkout."""
+    return _same_resolved_path(resolve_repo_runtime_path(repo), _current_workspace_root())
+
+
+def is_preferred_autopilot_repo(repo: CodeRepo) -> bool:
+    """Return true for the canonical current-workspace repo row."""
+    if not is_current_workspace_repo(repo):
+        return False
+    root = str(_current_workspace_root())
+    return (repo.path == root or repo.host_path == root) and repo.name == CURRENT_WORKSPACE_REPO_NAME
+
+
+def sort_repos_for_runtime_preference(repos: Iterable[CodeRepo]) -> list[CodeRepo]:
+    """Prefer the canonical current-workspace row over runtime aliases."""
+    return sorted(
+        [repo for repo in repos if repo is not None],
+        key=lambda repo: (
+            not is_preferred_autopilot_repo(repo),
+            not is_current_workspace_repo(repo),
+            repo.user_id is not None,
+            int(repo.id or 0),
+        ),
+    )
+
+
+def ensure_current_workspace_repo(
+    db: Session,
+    *,
+    user_id: Optional[int] = None,
+) -> CodeRepo:
+    """Ensure there is one shared canonical row for this checkout.
+
+    `/app` and `/workspace` rows remain useful compatibility aliases, but
+    project-autopilot should bind schedules and agent profiles to the durable
+    host-path row so one physical checkout does not create duplicate agents.
+    """
+    root = _current_workspace_root()
+    root_text = str(root)
+    runtime_fields = infer_repo_runtime_fields(root)
+    container_path = runtime_fields.get("container_path")
+
+    rows = db.query(CodeRepo).filter(CodeRepo.active.is_(True)).all()
+    current_rows = [row for row in rows if is_current_workspace_repo(row)]
+    preferred = next(
+        (
+            row
+            for row in current_rows
+            if row.path == root_text or row.host_path == root_text
+        ),
+        None,
+    )
+
+    if preferred is None:
+        preferred = CodeRepo(
+            path=root_text,
+            host_path=root_text,
+            container_path=container_path,
+            name=CURRENT_WORKSPACE_REPO_NAME,
+            user_id=None,
+            active=True,
+        )
+        db.add(preferred)
+    else:
+        preferred.path = root_text
+        preferred.host_path = root_text
+        preferred.container_path = container_path
+        preferred.name = CURRENT_WORKSPACE_REPO_NAME
+        preferred.user_id = None
+        preferred.active = True
+
+    mark_runtime_reachability(preferred, True)
+    db.commit()
+    db.refresh(preferred)
+    return preferred
 
 
 def scan_repo(db: Session, repo_id: int, max_files: int = 0) -> Dict:
@@ -265,9 +356,13 @@ def get_registered_repos(
     *,
     include_shared: bool = False,
 ) -> List[Dict]:
-    repos = get_accessible_repos(db, user_id=user_id, include_shared=include_shared)
+    ensure_current_workspace_repo(db, user_id=user_id)
+    repos = sort_repos_for_runtime_preference(
+        get_accessible_repos(db, user_id=user_id, include_shared=include_shared)
+    )
     result = []
     for r in repos:
+        resolved_path = resolve_repo_runtime_path(r)
         result.append({
             "id": r.id,
             "path": r.path,
@@ -286,7 +381,9 @@ def get_registered_repos(
             "last_successful_file_count": r.last_successful_file_count,
             "reachable_in_web": bool(r.reachable_in_web),
             "reachable_in_scheduler": bool(r.reachable_in_scheduler),
-            "reachable_in_current_runtime": current_runtime_reachable(r),
+            "reachable_in_current_runtime": resolved_path is not None,
+            "resolved_path": str(resolved_path) if resolved_path is not None else None,
+            "preferred_for_autopilot": is_preferred_autopilot_repo(r),
         })
     return result
 
