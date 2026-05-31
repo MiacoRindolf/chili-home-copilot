@@ -3,6 +3,7 @@ from __future__ import annotations
 from app.services.trading.edge_reliability import (
     _exit_noop_blocks_refresh,
     _non_positive_exit_noop_blocks_weak_request,
+    _non_positive_exit_noop_reason,
     _repeated_non_positive_exit_noop_blocks_refresh,
 )
 
@@ -49,6 +50,23 @@ def test_recent_non_positive_exit_noop_blocks_weak_request():
         _non_positive_exit_noop_blocks_weak_request(
             diagnostic,
             request_payload={"expected_evidence_value": 0.0, "calibrated_ev_pct": -1.2},
+        )
+        is True
+    )
+
+
+def test_legacy_negative_ev_exit_noop_blocks_weak_request():
+    diagnostic = {
+        "evidence_fingerprint": "old-fp",
+        "created_count": 0,
+        "skip_reason": "negative_ev_no_exit_variant_birth",
+    }
+
+    assert _non_positive_exit_noop_reason(diagnostic["skip_reason"]) is True
+    assert (
+        _non_positive_exit_noop_blocks_weak_request(
+            diagnostic,
+            request_payload={"expected_evidence_value": 0.0, "calibrated_ev_pct": 0.0},
         )
         is True
     )

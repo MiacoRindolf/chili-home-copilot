@@ -63,7 +63,12 @@ _STRUCTURAL_EXIT_NOOP_PREFIXES = (
     "insufficient_parent_payoff_samples:",
     "reward_risk_below_floor:",
 )
-_NON_POSITIVE_EXIT_NOOP_REASON = "non_positive_quality_evidence_no_exit_variant_birth"
+_NON_POSITIVE_EXIT_NOOP_REASONS = frozenset(
+    {
+        "negative_ev_no_exit_variant_birth",
+        "non_positive_quality_evidence_no_exit_variant_birth",
+    }
+)
 _REPEATED_NON_POSITIVE_EXIT_NOOP_MIN_FINGERPRINTS = 3
 
 
@@ -875,12 +880,13 @@ def _non_positive_exit_noop_blocks_weak_request(
         return False
     if created_count != 0:
         return False
-    if (
-        str(diagnostic_payload.get("skip_reason") or "").strip().lower()
-        != _NON_POSITIVE_EXIT_NOOP_REASON
-    ):
+    if not _non_positive_exit_noop_reason(diagnostic_payload.get("skip_reason")):
         return False
     return not _payload_has_positive_exit_evidence(request_payload)
+
+
+def _non_positive_exit_noop_reason(reason: Any) -> bool:
+    return str(reason or "").strip().lower() in _NON_POSITIVE_EXIT_NOOP_REASONS
 
 
 def _repeated_non_positive_exit_noop_blocks_refresh(
@@ -896,8 +902,7 @@ def _repeated_non_positive_exit_noop_blocks_refresh(
             created_count = -1
         if (
             created_count == 0
-            and str(row_payload.get("skip_reason") or "").strip().lower()
-            == _NON_POSITIVE_EXIT_NOOP_REASON
+            and _non_positive_exit_noop_reason(row_payload.get("skip_reason"))
         ):
             fingerprint = str(row_payload.get("evidence_fingerprint") or "").strip()
             non_positive_fingerprints.add(fingerprint or f"row:{idx}")
