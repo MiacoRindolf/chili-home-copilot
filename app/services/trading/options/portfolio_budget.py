@@ -163,6 +163,18 @@ def _add_vega_by_tenor(left: Any, right: Any) -> dict[str, float]:
     return totals
 
 
+def _budget_tenor_label_set(budget: dict[str, Any]) -> set[str]:
+    return {tenor for tenor, _days, _limit in _budget_tenor_limits(budget)}
+
+
+def _budget_known_vega_by_tenor(source: Any, budget: dict[str, Any]) -> dict[str, float]:
+    totals = _add_vega_by_tenor(source, {})
+    labels = _budget_tenor_label_set(budget)
+    if not labels:
+        return totals
+    return {tenor: value for tenor, value in totals.items() if tenor in labels}
+
+
 def _finite_number_or_none(value: Any) -> float | None:
     if value is None or isinstance(value, bool):
         return None
@@ -183,6 +195,28 @@ def _nonnegative_int_or_zero(value: Any) -> int:
     if out is None or out < 0:
         return 0
     return int(out)
+
+
+def _signed_contract_quantity_or_none(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    out = _finite_number_or_none(value)
+    if out is None or out == 0.0 or not float(out).is_integer():
+        return None
+    return int(out)
+
+
+def _quantity_value_missing(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _open_trade_contract_quantity_or_none(
+    qty_raw: Any,
+    meta: dict[str, Any],
+) -> int | None:
+    if not _quantity_value_missing(qty_raw):
+        return parse_contract_quantity(qty_raw)
+    return parse_contract_quantity(meta.get("quantity"))
 
 
 def _positive_limit_or_default(value: Any, default: float) -> float:
@@ -265,13 +299,18 @@ def _add_vega_to_tenor(
     vega: Any,
     quantity: Any = 1,
     budget: dict[str, Any],
-) -> None:
-    bucket = _tenor_bucket_for_expiration(expiration, budget)
+) -> bool:
     vega_f = _finite_number_or_none(vega)
     qty = _finite_number_or_none(quantity)
-    if bucket is None or vega_f is None or qty is None:
-        return
+    if vega_f is None or qty is None or vega_f == 0.0 or qty == 0.0:
+        return True
+    if not _budget_tenor_limits(budget):
+        return True
+    bucket = _tenor_bucket_for_expiration(expiration, budget)
+    if bucket is None:
+        return False
     target[bucket] = target.get(bucket, 0.0) + vega_f * qty
+    return True
 
 
 def _sanitize_budget(raw: dict[str, Any]) -> dict:
@@ -371,8 +410,14 @@ def _sum_open_position_greeks(
             legs = r[0]
             if isinstance(legs, str):
                 legs = json.loads(legs)
+            if not isinstance(legs, list) or not legs:
+                missing_count += 1
+                continue
             for leg in legs or []:
-                qty = _finite_number_or_none(leg.get("qty"))
+                if not isinstance(leg, dict):
+                    missing_count += 1
+                    continue
+                qty = _signed_contract_quantity_or_none(leg.get("qty"))
                 if qty is None:
                     missing_count += 1
                     continue
@@ -392,14 +437,16 @@ def _sum_open_position_greeks(
                     net_t += vals["theta"] * qty
                 if vals["vega"] is not None:
                     net_v += vals["vega"] * qty
-                    _add_vega_to_tenor(
+                    if not _add_vega_to_tenor(
                         vega_by_tenor,
                         expiration=leg.get("expiration"),
                         vega=vals["vega"],
                         quantity=qty,
                         budget=budget,
-                    )
+                    ):
+                        missing_count += 1
         except Exception:
+            missing_count += 1
             continue
     position_totals = {
         "net_delta": net_d,
@@ -485,8 +532,9 @@ def _sum_open_trade_greeks(
     for qty_raw, snapshot in rows or []:
         meta = _extract_option_meta(snapshot)
         if not meta:
+            missing_count += 1
             continue
-        qty = parse_contract_quantity(qty_raw or meta.get("quantity"))
+        qty = _open_trade_contract_quantity_or_none(qty_raw, meta)
         if qty is None:
             missing_count += 1
             continue
@@ -509,13 +557,14 @@ def _sum_open_trade_greeks(
                 net_t += f * qty
             elif acc == "net_v":
                 net_v += f * qty
-                _add_vega_to_tenor(
+                if not _add_vega_to_tenor(
                     vega_by_tenor,
                     expiration=meta.get("expiration"),
                     vega=f,
                     quantity=qty,
                     budget=budget,
-                )
+                ):
+                    missing_count += 1
     return {
         "net_delta": net_d,
         "net_gamma": net_g,
@@ -580,7 +629,7 @@ def _proposal_vega_by_tenor(
 ) -> dict[str, float]:
     raw = proposal.meta.get("vega_by_tenor") if isinstance(proposal.meta, dict) else None
     if isinstance(raw, dict):
-        return _add_vega_by_tenor(raw, {})
+        return _budget_known_vega_by_tenor(raw, budget)
 
     net_vega = _proposal_greek(proposal, "vega")
     if net_vega is None:
@@ -627,6 +676,7 @@ def check_proposal_against_budget(
     try:
         budget = _get_budget(db, user_id)
         current = _sum_open_position_greeks(db, user_id, budget=budget)
+        proposal_vega_by_tenor = _proposal_vega_by_tenor(proposal, budget)
 
         after_totals = _add_greek_totals(
             current,
@@ -635,7 +685,7 @@ def check_proposal_against_budget(
                 "net_gamma": _proposal_greek(proposal, "gamma"),
                 "net_theta": _proposal_greek(proposal, "theta"),
                 "net_vega": _proposal_greek(proposal, "vega"),
-                "vega_by_tenor": _proposal_vega_by_tenor(proposal, budget),
+                "vega_by_tenor": proposal_vega_by_tenor,
                 "missing_greeks_count": 0,
             },
         )
@@ -653,6 +703,21 @@ def check_proposal_against_budget(
         missing = _proposal_missing_greeks(proposal)
         if missing:
             reasons.append("missing_complete_greeks:" + ",".join(missing))
+        proposal_net_vega = _proposal_greek(proposal, "vega")
+        if (
+            _budget_tenor_limits(budget)
+            and proposal_net_vega is not None
+            and abs(proposal_net_vega) > 0.0
+            and not proposal_vega_by_tenor
+        ):
+            reasons.append("missing_proposal_vega_tenor")
+        elif (
+            _budget_tenor_limits(budget)
+            and proposal_net_vega is not None
+            and abs(proposal_net_vega) > 0.0
+            and abs(sum(proposal_vega_by_tenor.values()) - proposal_net_vega) > 1e-9
+        ):
+            reasons.append("incomplete_proposal_vega_tenor")
         if abs(after["net_delta"]) > budget["max_abs_delta"]:
             reasons.append(
                 f"abs_delta_breach: |{after['net_delta']:.4f}| > {budget['max_abs_delta']}"

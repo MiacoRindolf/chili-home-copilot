@@ -383,17 +383,17 @@ def evaluate_long_option_entry(
         allow_zero=True,
     )
     quote_ask = _quote_snapshot_price(option_meta, "ask", "ask_price")
-    liquidity_cost_per_share = ZERO_PAYOFF
-    if quote_bid is not None and quote_ask is not None:
-        snapshot.update(
-            {
-                "entry_bid": _round_optional(quote_bid),
-                "entry_ask": _round_optional(quote_ask),
-            }
-        )
-        if quote_bid > quote_ask:
-            return OptionEntryDecision(False, "crossed_option_quote_snapshot", snapshot)
-        liquidity_cost_per_share = max(quote_ask - quote_bid, ZERO_PAYOFF)
+    snapshot.update(
+        {
+            "entry_bid": _round_optional(quote_bid),
+            "entry_ask": _round_optional(quote_ask),
+        }
+    )
+    if quote_bid is None or quote_ask is None:
+        return OptionEntryDecision(False, "missing_option_quote_spread", snapshot)
+    if quote_bid > quote_ask:
+        return OptionEntryDecision(False, "crossed_option_quote_snapshot", snapshot)
+    liquidity_cost_per_share = max(quote_ask - quote_bid, ZERO_PAYOFF)
 
     option_profit_after_cost = option_profit_at_target - liquidity_cost_per_share
     option_loss_after_cost = min(premium, option_loss_at_stop + liquidity_cost_per_share)

@@ -74,6 +74,54 @@ def test_option_entry_quality_penalizes_zero_bid_liquidity() -> None:
     assert decision.snapshot["option_reward_risk_after_cost"] < 1.0
 
 
+def test_option_entry_quality_rejects_missing_quote_snapshot_spread() -> None:
+    decision = evaluate_long_option_entry(
+        None,
+        alert=SimpleNamespace(entry_price=3.40, target_price=112.0, stop_loss=99.0),
+        option_meta={
+            "underlying": "XYZ",
+            "strike": 105.0,
+            "expiration": "2026-06-19",
+            "option_type": "call",
+            "limit_price": 3.40,
+            "quantity": 1,
+        },
+        current_underlying_price=100.0,
+        confidence=0.9,
+        settings=_settings(),
+    )
+
+    assert decision.accepted is False
+    assert decision.reason == "missing_option_quote_spread"
+    assert decision.snapshot["entry_bid"] is None
+    assert decision.snapshot["entry_ask"] is None
+    assert "execution_cost_model" not in decision.snapshot
+
+
+def test_option_entry_quality_rejects_mark_only_quote_snapshot_spread() -> None:
+    decision = evaluate_long_option_entry(
+        None,
+        alert=SimpleNamespace(entry_price=3.40, target_price=112.0, stop_loss=99.0),
+        option_meta={
+            "underlying": "XYZ",
+            "strike": 105.0,
+            "expiration": "2026-06-19",
+            "option_type": "call",
+            "limit_price": 3.40,
+            "quantity": 1,
+            "quote_snapshot": {"mark": 3.20, "last": 3.30},
+        },
+        current_underlying_price=100.0,
+        confidence=0.9,
+        settings=_settings(),
+    )
+
+    assert decision.accepted is False
+    assert decision.reason == "missing_option_quote_spread"
+    assert decision.snapshot["entry_bid"] is None
+    assert decision.snapshot["entry_ask"] is None
+
+
 def test_option_entry_quality_rejects_crossed_quote_snapshot() -> None:
     decision = evaluate_long_option_entry(
         None,
