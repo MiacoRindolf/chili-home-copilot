@@ -25,6 +25,8 @@ class DesktopActions {
         return _closeApp(action['app_name'] as String? ?? '');
       case 'open_url':
         return _openUrl(action['url'] as String? ?? '');
+      case 'open_file':
+        return openFile(action['path'] as String? ?? '');
       default:
         debugPrint('[DesktopActions] Unknown action type: $type');
         return null;
@@ -61,6 +63,12 @@ class DesktopActions {
     'slack': 'slack',
     'teams': 'msteams',
     'microsoft teams': 'msteams',
+    'cursor': 'Cursor',
+    'cursor ai': 'Cursor',
+    'claude': 'Claude',
+    'claude desktop': 'Claude',
+    'chatgpt': 'ChatGPT',
+    'chat gpt': 'ChatGPT',
     'code': 'code',
     'vs code': 'code',
     'vscode': 'code',
@@ -98,6 +106,12 @@ class DesktopActions {
     'slack': 'slack.exe',
     'teams': 'ms-teams.exe',
     'microsoft teams': 'ms-teams.exe',
+    'cursor': 'Cursor.exe',
+    'cursor ai': 'Cursor.exe',
+    'claude': 'Claude.exe',
+    'claude desktop': 'Claude.exe',
+    'chatgpt': 'ChatGPT.exe',
+    'chat gpt': 'ChatGPT.exe',
     'code': 'Code.exe',
     'vs code': 'Code.exe',
     'vscode': 'Code.exe',
@@ -212,6 +226,27 @@ class DesktopActions {
     } catch (e) {
       debugPrint('[DesktopActions] Failed to open URL: $e');
       return 'Could not open link';
+    }
+  }
+
+  static Future<String?> openFile(String path) async {
+    if (!_isDesktop) return null;
+    final clean = path.trim();
+    if (clean.isEmpty) return null;
+    debugPrint('[DesktopActions] Opening file or folder: $clean');
+    try {
+      final isFile = File(clean).existsSync();
+      final isDirectory = !isFile && Directory(clean).existsSync();
+      if (!isFile && !isDirectory) return 'Report path was not found';
+      final ok = await launchUrl(
+        Uri.file(clean),
+        mode: LaunchMode.externalApplication,
+      );
+      if (!ok) return 'Could not open path';
+      return isDirectory ? 'Opened folder' : 'Opened report';
+    } catch (e) {
+      debugPrint('[DesktopActions] Failed to open file or folder: $e');
+      return 'Could not open path';
     }
   }
 }

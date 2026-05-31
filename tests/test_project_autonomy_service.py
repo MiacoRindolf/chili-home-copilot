@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import copy
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
+import sys
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
+from unittest.mock import MagicMock
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
@@ -918,9 +924,288 @@ def test_command_policy_allows_repo_scripts_and_blocks_installs(tmp_path):
     )
 
     assert orchestrator.command_allowed(["npm", "run", "lint"], tmp_path) == (True, None)
+    assert orchestrator.command_allowed(["python", "-m", "pytest", "tests"], tmp_path) == (True, None)
+    assert orchestrator.command_allowed([sys.executable, "-m", "py_compile", "app/example.py"], tmp_path) == (True, None)
     ok, reason = orchestrator.command_allowed(["pip", "install", "pytest"], tmp_path)
     assert ok is False
     assert "require escalation" in reason
+    ok, reason = orchestrator.command_allowed(["python", "-m", "pip", "install", "pytest"], tmp_path)
+    assert ok is False
+    assert "limited to pytest and compile checks" in reason
+    ok, reason = orchestrator.command_allowed(["python", "-m", "alembic", "upgrade", "head"], tmp_path)
+    assert ok is False
+    assert "limited to pytest and compile checks" in reason
+    ok, reason = orchestrator.command_allowed(["docker", "compose", "restart", "chili"], tmp_path)
+    assert ok is False
+    assert "service-control" in reason
+
+
+def test_command_policy_denials_emit_structured_blockers(tmp_path):
+    pip_decision = orchestrator.command_policy_decision(["python", "-m", "pip", "install", "pytest"], tmp_path)
+    assert pip_decision["allowed"] is False
+    assert pip_decision["decision"]["behavior"] == "deny"
+    assert pip_decision["blocker"]["schema"] == orchestrator.AUTOPILOT_BLOCKER_SCHEMA
+    assert pip_decision["blocker"]["kind"] == orchestrator.AUTOPILOT_BLOCKER_KIND_PERMISSION_BOUNDARY
+    assert pip_decision["blocker"]["boundary"] == orchestrator.AUTOPILOT_BLOCKER_BOUNDARY_COMMAND_POLICY
+    assert (
+        pip_decision["blocker"]["decision"]["decision_reason"]["policy"]
+        == "project_autopilot_command_allowlist"
+    )
+
+    alembic_decision = orchestrator.command_policy_decision(
+        ["python", "-m", "alembic", "upgrade", "head"],
+        tmp_path,
+    )
+    assert alembic_decision["allowed"] is False
+    assert alembic_decision["blocker"]["boundary"] == orchestrator.AUTOPILOT_BLOCKER_BOUNDARY_RUNTIME_CONTROL
+    assert alembic_decision["blocker"]["can_rerun"] is False
+
+    docker_decision = orchestrator.command_policy_decision(["docker", "compose", "restart", "chili"], tmp_path)
+    assert docker_decision["allowed"] is False
+    assert docker_decision["blocker"]["boundary"] == orchestrator.AUTOPILOT_BLOCKER_BOUNDARY_RUNTIME_CONTROL
+
+    redacted = orchestrator.command_policy_decision(
+        ["curl", "https://example.invalid", "--token=super-secret"],
+        tmp_path,
+    )
+    assert "[redacted]" in redacted["command_preview"]
+    assert "super-secret" not in json.dumps(redacted)
+
+
+def test_npm_script_policy_inspects_package_script_body(tmp_path):
+    (tmp_path / "package.json").write_text(
+        json.dumps(
+            {
+                "scripts": {
+                    "lint": "eslint . --format stylish && prettier -c .",
+                    "test": "vitest",
+                    "build": "vite build",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert orchestrator.command_allowed(["npm", "run", "lint"], tmp_path) == (True, None)
+    assert orchestrator.command_allowed(["npm", "test"], tmp_path) == (True, None)
+
+    (tmp_path / "package.json").write_text(
+        (
+            '{"scripts":{'
+            '"lint":"eslint . && docker compose restart chili",'
+            '"test":"vitest",'
+            '"build":"vite build && npm install"'
+            "}}"
+        ),
+        encoding="utf-8",
+    )
+    docker_decision = orchestrator.command_policy_decision(["npm", "run", "lint"], tmp_path)
+    assert docker_decision["allowed"] is False
+    assert docker_decision["blocker"]["boundary"] == orchestrator.AUTOPILOT_BLOCKER_BOUNDARY_RUNTIME_CONTROL
+    assert docker_decision["blocker"]["script_name"] == "lint"
+    assert "docker" in docker_decision["blocker"]["script_preview"]
+    assert docker_decision["blocker"]["blocked_command"] == "docker compose restart chili"
+    ok, reason = orchestrator.command_allowed(["npm", "run", "lint"], tmp_path)
+    assert ok is False
+    assert "runtime" in reason
+
+    install_decision = orchestrator.command_policy_decision(["npm", "run", "build"], tmp_path)
+    assert install_decision["allowed"] is False
+    assert install_decision["blocker"]["boundary"] == orchestrator.AUTOPILOT_BLOCKER_BOUNDARY_COMMAND_POLICY
+    assert "install" in install_decision["reason"]
+
+
+def test_npm_script_policy_rejects_parser_bypass_shapes(tmp_path):
+    (tmp_path / "package.json").write_text(
+        json.dumps(
+            {
+                "scripts": {
+                    "lint": "eslint . || true",
+                    "test": "NODE_ENV=$CHILI_TEST_ENV vitest",
+                    "build": "do\\\ncker compose restart chili",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    fallback_decision = orchestrator.command_policy_decision(["npm", "run", "lint"], tmp_path)
+    assert fallback_decision["allowed"] is False
+    assert "control operators" in fallback_decision["reason"]
+
+    dynamic_decision = orchestrator.command_policy_decision(["npm", "test"], tmp_path)
+    assert dynamic_decision["allowed"] is False
+    assert "dynamic shell expansion" in dynamic_decision["reason"]
+
+    continuation_decision = orchestrator.command_policy_decision(["npm", "run", "build"], tmp_path)
+    assert continuation_decision["allowed"] is False
+    assert continuation_decision["blocker"]["boundary"] == orchestrator.AUTOPILOT_BLOCKER_BOUNDARY_RUNTIME_CONTROL
+    assert continuation_decision["blocker"]["blocked_command"] == "docker compose restart chili"
+
+
+def test_npm_script_policy_blocks_uninspectable_node_deploy_script(tmp_path):
+    (tmp_path / "package.json").write_text(
+        json.dumps({"scripts": {"build": "node scripts/deploy.js"}}),
+        encoding="utf-8",
+    )
+
+    decision = orchestrator.command_policy_decision(["npm", "run", "build"], tmp_path)
+
+    assert decision["allowed"] is False
+    assert decision["blocker"]["boundary"] == orchestrator.AUTOPILOT_BLOCKER_BOUNDARY_RUNTIME_CONTROL
+    assert "deploy" in decision["reason"]
+
+
+def test_run_allowlisted_preserves_command_policy_blocker_evidence(tmp_path):
+    result = orchestrator._run_allowlisted(["python", "-m", "pip", "install", "pytest"], tmp_path)
+    payload = orchestrator._step_result_payload(result)
+
+    assert payload["skipped"] is True
+    assert payload["exit_code"] == 0
+    assert payload["blocker"]["schema"] == orchestrator.AUTOPILOT_BLOCKER_SCHEMA
+    assert payload["blocker"]["boundary"] == orchestrator.AUTOPILOT_BLOCKER_BOUNDARY_COMMAND_POLICY
+    assert payload["permission_decision"]["allowed"] is False
+    assert payload["permission_decision"]["decision"]["behavior"] == "deny"
+
+
+def test_policy_blocked_npm_script_blocks_validation_passed(tmp_path):
+    (tmp_path / "package.json").write_text(
+        '{"scripts":{"lint":"eslint . && docker compose restart chili"}}',
+        encoding="utf-8",
+    )
+    result = orchestrator._run_allowlisted(["npm", "run", "lint"], tmp_path)
+    payload = orchestrator._step_result_payload(result)
+
+    assert payload["skipped"] is True
+    assert payload["blocker"]["schema"] == orchestrator.AUTOPILOT_BLOCKER_SCHEMA
+    assert payload["blocker"]["boundary"] == orchestrator.AUTOPILOT_BLOCKER_BOUNDARY_RUNTIME_CONTROL
+    assert payload["blocker"]["script_name"] == "lint"
+    assert payload["passed"] is False
+    assert orchestrator.validation_passed([payload]) is False
+    assert "runtime" in orchestrator._validation_failure_text([payload])
+
+
+def test_validation_policy_blocker_is_active_task_board_review(tmp_path):
+    (tmp_path / "package.json").write_text(
+        json.dumps({"scripts": {"lint": "eslint . && docker compose restart chili"}}),
+        encoding="utf-8",
+    )
+    result = orchestrator._run_allowlisted(["npm", "run", "lint"], tmp_path)
+    validation_payload = orchestrator._step_result_payload(result)
+    run = ProjectAutonomyRun(
+        run_id="pa_validation_policy",
+        prompt="Update the app shell.",
+        status=orchestrator.RUN_STATUS_BLOCKED,
+        plan_status=orchestrator.PLAN_STATUS_APPROVED,
+        current_stage="validate",
+        files_json=json.dumps(["web/package.json"]),
+        commands_json=json.dumps([{"step_key": "npm_run_lint", "exit_code": 0}]),
+        validation_json=json.dumps([validation_payload]),
+        error_message="Validation failed after repair.",
+        merge_status="blocked",
+        merge_message="Validation failed after repair.",
+    )
+
+    blocker = orchestrator._autopilot_run_blocker_payload(run)
+    task_board = orchestrator._autopilot_run_task_board(run, {"analysis": "Scoped plan"})
+    active = task_board["active_item"]
+
+    assert blocker["boundary"] == orchestrator.AUTOPILOT_BLOCKER_BOUNDARY_RUNTIME_CONTROL
+    assert active["key"] == "validate"
+    assert active["next_action"] == orchestrator.AUTOPILOT_TASK_ACTION_RECOVER_BLOCKER
+    assert active["next_action_label"] == "Review"
+    assert "next_action_recovery_action" not in active
+    assert active["blocker"]["script_name"] == "lint"
+    assert "docker compose restart chili" in active["detail"]
+    assert "Permission boundary" in "\n".join(orchestrator._autopilot_task_board_lines(task_board))
+
+
+def test_validation_policy_blocker_reaches_global_readiness_actions(tmp_path, monkeypatch):
+    db = _sqlite_autonomy_session()
+    try:
+        monkeypatch.setattr(orchestrator, "_codex_automation_roots", lambda: [])
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {
+                "model": "qwen2.5-coder:7b",
+                "available": True,
+                "installed_models": ["qwen2.5-coder:7b"],
+                "skipped_models": {},
+                "recommendation": None,
+            },
+        )
+        monkeypatch.setattr(orchestrator, "_agent_flow_process_running", lambda pid: False)
+        repo = CodeRepo(path=str(tmp_path), host_path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        orchestrator.bootstrap_agent_profiles(db, repo_id=repo.id)
+        (tmp_path / "package.json").write_text(
+            json.dumps({"scripts": {"lint": "eslint . && docker compose restart chili"}}),
+            encoding="utf-8",
+        )
+        result = orchestrator._run_allowlisted(["npm", "run", "lint"], tmp_path)
+        validation_payload = orchestrator._step_result_payload(result)
+        blocked = orchestrator.create_run(
+            db,
+            prompt="Update the app shell.",
+            repo_id=repo.id,
+            start_planning=False,
+        )
+        blocked.status = orchestrator.RUN_STATUS_BLOCKED
+        blocked.plan_status = orchestrator.PLAN_STATUS_APPROVED
+        blocked.current_stage = "validate"
+        blocked.files_json = json.dumps(["web/package.json"])
+        blocked.commands_json = json.dumps([{"step_key": "npm_run_lint", "exit_code": 0}])
+        blocked.validation_json = json.dumps([validation_payload])
+        blocked.merge_status = "blocked"
+        blocked.merge_message = "Validation failed after repair."
+        command_run = orchestrator.create_run(db, prompt="hello", repo_id=repo.id)
+        db.commit()
+
+        readiness = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+        inbox = readiness["operator_inbox"]
+
+        assert inbox["blocked_count"] == 1
+        assert inbox["next_action"] == orchestrator.AGENT_OPERATOR_INBOX_ACTION_REVIEW_BLOCKER
+        assert inbox["next_action_label"] == "Review blocker"
+        assert inbox["next_action_kind"] == orchestrator.AGENT_OPERATOR_INBOX_ITEM_BLOCKER
+        assert inbox["next_action_run_id"] == blocked.run_id
+        assert inbox["next_action_button_label"] == "Review"
+        assert not inbox["next_action_recovery_action"]
+        assert "docker compose restart chili" in inbox["next_action_detail"]
+
+        quality_monitor = readiness[orchestrator.AGENT_QUALITY_MONITOR_KEY]
+        assert quality_monitor["next_action"] == orchestrator.AGENT_OPERATOR_INBOX_ACTION_REVIEW_BLOCKER
+        assert quality_monitor["next_action_label"] == "Review blocker"
+        assert quality_monitor["next_action_run_id"] == blocked.run_id
+        assert quality_monitor["next_action_kind"] == orchestrator.AGENT_OPERATOR_INBOX_ITEM_BLOCKER
+        assert quality_monitor["next_action_button_label"] == "Review"
+
+        quality_bar = readiness[orchestrator.AGENT_CODING_QUALITY_BAR_KEY]
+        operator_dimension = next(
+            dimension
+            for dimension in quality_bar["dimensions"]
+            if dimension["key"] == orchestrator.AGENT_CODING_QUALITY_BAR_DIMENSION_OPERATOR
+        )
+        assert operator_dimension["next_action"] == orchestrator.AGENT_OPERATOR_INBOX_ACTION_REVIEW_BLOCKER
+        assert operator_dimension["next_action_label"] == "Review blocker"
+        assert operator_dimension["next_action_run_id"] == blocked.run_id
+        assert operator_dimension["next_action_button_label"] == "Review"
+        assert quality_bar["next_action"] == orchestrator.AGENT_OPERATOR_INBOX_ACTION_REVIEW_BLOCKER
+        assert quality_bar["next_action_run_id"] == blocked.run_id
+        assert quality_bar["next_action_button_label"] == "Review"
+
+        quality_payload = orchestrator.append_user_message(
+            db,
+            command_run.run_id,
+            content="/quality",
+        )
+        quality_reply = quality_payload["messages"][-1]["content"]
+        assert "Operator inbox next action: Review blocker" in quality_reply
+        assert "Quality bar next action: Review blocker" in quality_reply
+        assert "docker compose restart chili" in quality_reply
+    finally:
+        db.close()
 
 
 def test_file_leases_block_overlapping_autonomy_runs():
@@ -986,6 +1271,139 @@ def test_live_monitoring_prompt_is_not_treated_as_repo_edit():
     assert not orchestrator._looks_like_live_monitoring_prompt(
         "while I'm testing, update chili_mobile/lib/src/brain/foo.dart to fix the layout"
     )
+
+
+def test_runtime_control_prompt_is_not_treated_as_repo_edit():
+    assert orchestrator._looks_like_runtime_control_prompt("docker compose restart chili and scheduler-worker")
+    assert orchestrator._looks_like_runtime_control_prompt("run migrations and deploy the latest release")
+    assert orchestrator._looks_like_runtime_control_prompt("enable live trading and call the broker API")
+    assert not orchestrator._looks_like_runtime_control_prompt(
+        "add a guard that prevents docker compose restart requests from starting Autopilot"
+    )
+    assert not orchestrator._looks_like_runtime_control_prompt("draft release notes for the Autopilot safety guard")
+
+
+def test_planning_phase_blocks_runtime_control_prompt_before_model(monkeypatch, tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        repo = CodeRepo(path=str(tmp_path), name="autonomy-test", active=True)
+        db.add(repo)
+        db.flush()
+        run = ProjectAutonomyRun(
+            run_id="pa_runtime_control",
+            repo_id=repo.id,
+            prompt="docker compose restart chili and scheduler-worker",
+            status="queued",
+            current_stage="chatting",
+        )
+        db.add(run)
+        db.commit()
+        monkeypatch.setattr(
+            orchestrator,
+            "build_local_plan",
+            lambda *args, **kwargs: pytest.fail("runtime-control prompts must not reach the planner model"),
+        )
+
+        with pytest.raises(orchestrator.AutonomyBlocked, match="runtime"):
+            try:
+                orchestrator._run_planning_phase(db, run, repo, tmp_path)
+            except orchestrator.AutonomyBlocked as exc:
+                assert exc.blocker["schema"] == orchestrator.AUTOPILOT_BLOCKER_SCHEMA
+                assert (
+                    exc.blocker["boundary"]
+                    == orchestrator.AUTOPILOT_BLOCKER_BOUNDARY_RUNTIME_CONTROL
+                )
+                assert exc.blocker["decision"]["behavior"] == "deny"
+                raise
+    finally:
+        db.close()
+
+
+def test_runtime_control_sync_persists_structured_permission_denial(tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        repo = CodeRepo(path=str(tmp_path), name="autonomy-test", active=True)
+        db.add(repo)
+        db.flush()
+        run = ProjectAutonomyRun(
+            run_id="pa_runtime_control_sync",
+            repo_id=repo.id,
+            prompt="docker compose restart chili and scheduler-worker",
+            status="queued",
+            current_stage="chatting",
+        )
+        db.add(run)
+        db.commit()
+
+        payload = orchestrator.run_autonomy_sync(db, run.run_id)
+
+        assert payload["status"] == orchestrator.RUN_STATUS_BLOCKED
+        assert payload["blocker"]["schema"] == orchestrator.AUTOPILOT_BLOCKER_SCHEMA
+        assert payload["blocker"]["decision"]["behavior"] == "deny"
+        assert (
+            payload["blocker"]["decision"]["decision_reason"]["boundary"]
+            == orchestrator.AUTOPILOT_BLOCKER_BOUNDARY_RUNTIME_CONTROL
+        )
+        finish_step = (
+            db.query(ProjectAutonomyStep)
+            .filter(ProjectAutonomyStep.run_id == run.run_id)
+            .order_by(ProjectAutonomyStep.step_index.desc(), ProjectAutonomyStep.id.desc())
+            .first()
+        )
+        assert finish_step is not None
+        detail = json.loads(finish_step.detail_json or "{}")
+        assert detail["blocker"]["can_rerun"] is False
+        assert payload["task_board"]["active_item"]["blocker"]["operator_route"] == "operator_chat"
+    finally:
+        db.close()
+
+
+def test_runtime_control_blocked_run_guides_review_instead_of_rerun(tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        repo = CodeRepo(path=str(tmp_path), name="autonomy-test", active=True)
+        db.add(repo)
+        db.flush()
+        run = ProjectAutonomyRun(
+            run_id="pa_runtime_boundary",
+            repo_id=repo.id,
+            prompt="docker compose restart chili",
+            status=orchestrator.RUN_STATUS_BLOCKED,
+            plan_status=orchestrator.PLAN_STATUS_DRAFTING,
+            current_stage=orchestrator.STAGE_CLASSIFY,
+            error_message=orchestrator.RUNTIME_CONTROL_BLOCKED_MESSAGE,
+            merge_status="blocked",
+            merge_message=orchestrator.RUNTIME_CONTROL_BLOCKED_MESSAGE,
+        )
+        db.add(run)
+        db.commit()
+
+        payload = orchestrator.run_payload(db, run)
+        assert payload["blocker"]["schema"] == orchestrator.AUTOPILOT_BLOCKER_SCHEMA
+        assert payload["blocker"]["kind"] == orchestrator.AUTOPILOT_BLOCKER_KIND_PERMISSION_BOUNDARY
+        assert payload["blocker"]["boundary"] == orchestrator.AUTOPILOT_BLOCKER_BOUNDARY_RUNTIME_CONTROL
+        assert payload["blocker"]["can_rerun"] is False
+        assert payload["blocker"]["action_label"] == "Review"
+        active_task = payload["task_board"]["active_item"]
+        assert active_task["next_action"] == orchestrator.AUTOPILOT_TASK_ACTION_RECOVER_BLOCKER
+        assert active_task["next_action_label"] == "Review"
+        assert "next_action_recovery_action" not in active_task
+        assert "Permission boundary" in active_task["next_action_detail"]
+        assert active_task["blocker"]["boundary"] == orchestrator.AUTOPILOT_BLOCKER_BOUNDARY_RUNTIME_CONTROL
+
+        readiness = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+        inbox = readiness["operator_inbox"]
+        blocker_item = next(
+            item for item in inbox["items"] if item["run_id"] == "pa_runtime_boundary"
+        )
+        assert blocker_item["label"] == "Blocked permission boundary"
+        assert blocker_item["action_label"] == "Review"
+        assert "recovery_action" not in blocker_item
+        assert "do not rerun" in blocker_item["recovery_detail"]
+        assert blocker_item["blocker"]["can_rerun"] is False
+        assert blocker_item["blocker"]["operator_route"] == "operator_chat"
+    finally:
+        db.close()
 
 
 def test_plan_approval_run_stops_before_worktree(monkeypatch, tmp_path):
@@ -1535,6 +1953,44 @@ def test_visual_validation_accepts_safe_absolute_desktop_screenshot_path():
         assert screenshot["content_json"]["path"] == screenshot_path
         assert screenshot["content_json"]["source"] == "desktop"
         assert screenshot["content_json"]["skipped"] is False
+    finally:
+        db.close()
+
+
+def test_visual_validation_records_not_applicable_rationale():
+    db = _sqlite_autonomy_session()
+    try:
+        run = ProjectAutonomyRun(
+            run_id="pa_visual_not_applicable",
+            prompt="review backend validation evidence",
+            status="completed",
+            current_stage="learn",
+            execution_mode="plan_approval",
+            plan_status="approved",
+        )
+        db.add(run)
+        db.commit()
+
+        payload = orchestrator.record_visual_validation(
+            db,
+            run.run_id,
+            kind="screenshot",
+            not_applicable=True,
+            rationale="Backend-only validation guard; no operator pixels changed.",
+        )
+
+        assert payload is not None
+        receipt = next(
+            a
+            for a in payload["artifacts"]
+            if a["artifact_type"] == orchestrator.VISUAL_ARTIFACT_TYPE_APPLICABILITY
+        )
+        assert receipt["content_json"]["schema"] == orchestrator.VISUAL_QA_APPLICABILITY_SCHEMA
+        assert receipt["content_json"]["not_applicable"] is True
+        assert receipt["content_json"]["source"] == orchestrator.VISUAL_EVIDENCE_SOURCE_OPERATOR
+        assert "Backend-only validation guard" in receipt["content_json"]["rationale"]
+        assert any(a["artifact_type"] == "ui_review" for a in payload["artifacts"])
+        assert "not applicable" in payload["messages"][-1]["content"].lower()
     finally:
         db.close()
 
@@ -3625,6 +4081,33 @@ def test_agent_os_readiness_quality_scorecard_flags_risky_recent_runs(
                 ),
             )
         )
+        db.add(
+            ProjectAutonomyArtifact(
+                run_id=run.run_id,
+                artifact_type=orchestrator.SCHEDULED_AGENT_REPORT_ARTIFACT_TYPE,
+                name=orchestrator.SCHEDULED_AGENT_REPORT_ARTIFACT_NAME,
+                content_json=json.dumps(
+                    {
+                        "status": "READ_ONLY_CLEAR",
+                        "summary": "Scheduled report captured exact-head evidence.",
+                        "quality": {
+                            "status": orchestrator.SCHEDULED_AGENT_REPORT_QUALITY_LOW,
+                            "score": 40,
+                        },
+                        "source_receipt": {
+                            "schema": orchestrator.SCHEDULED_AGENT_SOURCE_RECEIPT_SCHEMA,
+                            "source_state": "dirty",
+                            "drift_state": "head_moved",
+                            "branch": "codex/example",
+                            "head_short": "abcdef1234",
+                            "run_base_short": "1111111111",
+                            "dirty_status_count": 3,
+                            "dirty_preview": ["M app/example.py"],
+                        },
+                    }
+                ),
+            )
+        )
         db.commit()
 
         readiness = orchestrator.agent_os_readiness(db, repo_id=repo.id)
@@ -3636,6 +4119,12 @@ def test_agent_os_readiness_quality_scorecard_flags_risky_recent_runs(
         assert scorecard["approval_gate_risk_count"] == 1
         assert scorecard["architect_reviews"]["missing_for_approval"] == 1
         assert scorecard["scheduled_quality"]["low_quality"] == 1
+        assert scorecard["scheduled_quality"]["dirty_source_count"] == 1
+        assert scorecard["scheduled_quality"]["head_moved_count"] == 1
+        latest_report = scorecard["scheduled_quality"]["recent_reports"][0]
+        assert latest_report["source_receipt"]["source_state"] == "dirty"
+        assert latest_report["source_receipt"]["drift_state"] == "head_moved"
+        assert latest_report["source_receipt"]["head_short"] == "abcdef1234"
         assert "quality gate" in scorecard["detail"]
         quality_monitor = readiness[orchestrator.AGENT_QUALITY_MONITOR_KEY]
         assert quality_monitor["status"] == orchestrator.AGENT_OS_READINESS_CHECK_WARNING
@@ -3750,6 +4239,28 @@ def test_agent_os_readiness_visual_qa_flags_ui_runs_without_evidence(
             db,
             run.run_id,
             kind="screenshot",
+            not_applicable=True,
+            rationale="Operator says no pixels changed, but the run still touched Flutter UI.",
+        )
+        readiness_not_applicable = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+        visual_not_applicable = readiness_not_applicable["quality_scorecard"]["visual_qa"]
+        assert visual_not_applicable["missing_ui_evidence_count"] == 1
+        assert visual_not_applicable["not_applicable_count"] == 1
+        assert visual_not_applicable["not_applicable_ui_run_count"] == 1
+        quality_monitor_not_applicable = readiness_not_applicable[
+            orchestrator.AGENT_QUALITY_MONITOR_KEY
+        ]
+        visual_dimension_not_applicable = next(
+            dimension
+            for dimension in quality_monitor_not_applicable["dimensions"]
+            if dimension["key"] == orchestrator.AGENT_QUALITY_MONITOR_DIMENSION_VISUAL_QA
+        )
+        assert "still need screenshot or video" in visual_dimension_not_applicable["detail"]
+
+        orchestrator.record_visual_validation(
+            db,
+            run.run_id,
+            kind="screenshot",
             path=r"D:\captures\autopilot_visual.png",
         )
         readiness_after = orchestrator.agent_os_readiness(db, repo_id=repo.id)
@@ -3765,6 +4276,77 @@ def test_agent_os_readiness_visual_qa_flags_ui_runs_without_evidence(
             if dimension["key"] == orchestrator.AGENT_QUALITY_MONITOR_DIMENSION_VISUAL_QA
         )
         assert visual_dimension_after["status"] == orchestrator.AGENT_OS_READINESS_CHECK_PASSED
+    finally:
+        db.close()
+
+
+def test_agent_os_readiness_visual_qa_accepts_non_visual_rationale(
+    tmp_path,
+    monkeypatch,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        monkeypatch.setattr(orchestrator, "_codex_automation_roots", lambda: [])
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {
+                "model": "qwen2.5-coder:7b",
+                "available": True,
+                "installed_models": ["qwen2.5-coder:7b"],
+                "skipped_models": {},
+                "recommendation": None,
+            },
+        )
+        repo = CodeRepo(path=str(tmp_path), host_path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        orchestrator.bootstrap_agent_profiles(db, repo_id=repo.id)
+        run = orchestrator.create_run(
+            db,
+            prompt="Harden backend command-policy validation.",
+            repo_id=repo.id,
+            start_planning=True,
+        )
+        run.status = orchestrator.RUN_STATUS_COMPLETED
+        run.current_stage = orchestrator.STAGE_IMPLEMENT
+        run.plan_json = json.dumps(
+            {
+                "analysis": "Backend-only policy guard.",
+                "files": [
+                    {
+                        "path": "app/services/coding_task/validator_runner.py",
+                        "action": "modify",
+                        "description": "Reject unsafe validation commands.",
+                    }
+                ],
+            }
+        )
+        db.commit()
+
+        orchestrator.record_visual_validation(
+            db,
+            run.run_id,
+            kind="screenshot",
+            not_applicable=True,
+            rationale="Backend-only policy guard; no user-facing UI changed.",
+        )
+
+        readiness = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+
+        visual = readiness["quality_scorecard"]["visual_qa"]
+        assert visual["ui_run_count"] == 0
+        assert visual["missing_ui_evidence_count"] == 0
+        assert visual["not_applicable_count"] == 1
+        assert visual["not_applicable_ui_run_count"] == 0
+        quality_monitor = readiness[orchestrator.AGENT_QUALITY_MONITOR_KEY]
+        visual_dimension = next(
+            dimension
+            for dimension in quality_monitor["dimensions"]
+            if dimension["key"] == orchestrator.AGENT_QUALITY_MONITOR_DIMENSION_VISUAL_QA
+        )
+        assert visual_dimension["status"] == orchestrator.AGENT_OS_READINESS_CHECK_PASSED
+        assert "not-applicable rationale" in visual_dimension["detail"]
     finally:
         db.close()
 
@@ -4056,6 +4638,2640 @@ def test_agent_os_readiness_operator_inbox_summarizes_pending_actions(
         db.close()
 
 
+def test_agent_os_readiness_operator_inbox_surfaces_external_agent_reports(
+    tmp_path,
+    monkeypatch,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        monkeypatch.setattr(orchestrator, "_codex_automation_roots", lambda: [])
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {
+                "model": "qwen2.5-coder:7b",
+                "available": True,
+                "installed_models": ["qwen2.5-coder:7b"],
+                "skipped_models": {},
+                "recommendation": None,
+            },
+        )
+        repo = CodeRepo(path=str(tmp_path), host_path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        orchestrator.bootstrap_agent_profiles(db, repo_id=repo.id)
+        report_dir = tmp_path / "project_ws" / "QA" / "OUT"
+        report_dir.mkdir(parents=True)
+        report_path = report_dir / "20260530-225151Z-from-QA-peer-review-BLOCKED.md"
+        report_path.write_text(
+            "\n".join(
+                [
+                    "# QA peer review",
+                    "",
+                    "Status: BLOCKED",
+                    "",
+                    "Missing current-head checks and visual evidence.",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        command_run = orchestrator.create_run(db, prompt="hello", repo_id=repo.id)
+        db.commit()
+
+        readiness = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+
+        inbox = readiness["operator_inbox"]
+        assert inbox["status"] == orchestrator.AGENT_OS_READINESS_CHECK_WARNING
+        assert inbox["external_report_count"] == 1
+        assert inbox["total_action_count"] == 1
+        assert inbox["next_action"] == orchestrator.AGENT_OPERATOR_INBOX_ACTION_REVIEW_EXTERNAL_REPORT
+        assert inbox["next_action_label"] == "Review agent report"
+        assert inbox["next_action_kind"] == orchestrator.AGENT_OPERATOR_INBOX_ITEM_EXTERNAL_REPORT
+        assert inbox["next_action_agent"] == "QA"
+        assert "BLOCKED" in inbox["next_action_detail"]
+        assert inbox["external_report_blocker_counts"] == {"blocked": 1}
+        assert inbox["release_trust_summary"]["blocker_count"] == 1
+        assert inbox["release_trust_summary"]["group_counts"]["release_trust"] == 1
+        assert inbox["next_action_path"] == "project_ws/QA/OUT/20260530-225151Z-from-QA-peer-review-BLOCKED.md"
+        assert inbox["next_action_open_path"] == str(report_path)
+        assert inbox["next_action_button_label"] == "Review blocker"
+        report_item = inbox["items"][0]
+        assert report_item["path"] == "project_ws/QA/OUT/20260530-225151Z-from-QA-peer-review-BLOCKED.md"
+        assert report_item["open_path"] == str(report_path)
+        assert report_item["action_label"] == "Review blocker"
+        assert report_item["report_blocker_category"] == "blocked"
+        assert report_item["report_next_action_label"] == "Review blocker"
+
+        payload = orchestrator.append_user_message(
+            db,
+            command_run.run_id,
+            content="/doctor",
+        )
+        reply = payload["messages"][-1]["content"]
+        assert "Operator inbox next action: Review agent report" in reply
+        assert "QA" in reply
+    finally:
+        db.close()
+
+
+def test_agent_os_readiness_operator_inbox_flags_external_report_quality_placeholders(
+    tmp_path,
+    monkeypatch,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        monkeypatch.setattr(orchestrator, "_codex_automation_roots", lambda: [])
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {
+                "model": "qwen2.5-coder:7b",
+                "available": True,
+                "installed_models": ["qwen2.5-coder:7b"],
+                "skipped_models": {},
+                "recommendation": None,
+            },
+        )
+        repo = CodeRepo(path=str(tmp_path), host_path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        orchestrator.bootstrap_agent_profiles(db, repo_id=repo.id)
+        report_dir = tmp_path / "project_ws" / "MLOps" / "OUT"
+        report_dir.mkdir(parents=True)
+        report_path = report_dir / "20260531-033435Z-mlops-review-changes-requested.md"
+        report_path.write_text(
+            "\n".join(
+                [
+                    "# Peer Review Report",
+                    "",
+                    "Review Result: CHANGES_REQUESTED",
+                    "",
+                    "## Reviewed Scope",
+                    "",
+                    "- Request: $requestRel",
+                    "- Request SHA256: $requestSha",
+                    "- Branch: codex/review-branch",
+                    "- Commit: 90346ba9a8ef30701c522176c13771ce7f65afc5",
+                    "- Author Report: $authorRel",
+                    "- Author Report SHA256: $authorSha",
+                    "",
+                    "## Approval Boundary",
+                    "",
+                    "No push, merge, release, deploy, or live behavior is authorized.",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        command_run = orchestrator.create_run(db, prompt="hello", repo_id=repo.id)
+        db.commit()
+
+        readiness = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+        inbox = readiness["operator_inbox"]
+        item = inbox["items"][0]
+
+        assert inbox["external_report_count"] == 1
+        assert inbox["next_action_agent"] == "MLOps"
+        assert "report quality" in inbox["next_action_detail"]
+        assert item["status"] == "CHANGES_REQUESTED"
+        assert item["report_quality_issue_count"] == 2
+        assert item["report_has_unresolved_placeholders"] is True
+        assert item["report_blocker_category"] == "report_quality"
+        assert item["action_label"] == "Repair report evidence"
+        assert inbox["release_trust_summary"]["blocker_count"] == 1
+        assert inbox["release_trust_summary"]["group_counts"]["evidence_quality"] == 1
+        assert item["report_quality_issues"] == [
+            "unresolved path/hash placeholder",
+            "missing request SHA",
+        ]
+        assert item["open_path"] == str(report_path)
+
+        payload = orchestrator.append_user_message(
+            db,
+            command_run.run_id,
+            content="/quality",
+        )
+        reply = payload["messages"][-1]["content"]
+        assert "Operator inbox next action: Review agent report" in reply
+        assert "unresolved path/hash placeholder" in reply
+    finally:
+        db.close()
+
+
+def test_agent_os_readiness_operator_inbox_accepts_prose_review_branch_binding(
+    tmp_path,
+    monkeypatch,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        monkeypatch.setattr(orchestrator, "_codex_automation_roots", lambda: [])
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {
+                "model": "qwen2.5-coder:7b",
+                "available": True,
+                "installed_models": ["qwen2.5-coder:7b"],
+                "skipped_models": {},
+                "recommendation": None,
+            },
+        )
+        repo = CodeRepo(path=str(tmp_path), host_path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        orchestrator.bootstrap_agent_profiles(db, repo_id=repo.id)
+        report_dir = tmp_path / "project_ws" / "AlgoTraderArchitect" / "OUT"
+        report_dir.mkdir(parents=True)
+        report_path = report_dir / "20260531-034729Z-algotraderarchitect-run-report.md"
+        head_sha = "11230cab6fd2292ea5d7bbcfad2b7372e4e25234"
+        report_path.write_text(
+            "\n".join(
+                [
+                    "# AlgoTraderArchitect Run Report",
+                    "",
+                    "## PR 134 Sampled Architecture Review",
+                    "",
+                    f"Review result: CHANGES_REQUESTED for sampled head {head_sha}.",
+                    (
+                        "Final PR readback: PR 134 open, non-draft, head "
+                        f"codex/brain-work-done-marker-recovery at {head_sha}, "
+                        "mergeable CONFLICTING, empty statusCheckRollup."
+                    ),
+                    "",
+                    "## Safety Boundary",
+                    "",
+                    "Read-only review only. No push, merge, release, deploy, or live behavior is authorized.",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        command_run = orchestrator.create_run(db, prompt="hello", repo_id=repo.id)
+        db.commit()
+
+        readiness = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+        inbox = readiness["operator_inbox"]
+        item = inbox["items"][0]
+
+        assert inbox["external_report_count"] == 1
+        assert inbox["next_action_agent"] == "AlgoTraderArchitect"
+        assert item["status"] == "CHANGES_REQUESTED"
+        assert item["path"] == "project_ws/AlgoTraderArchitect/OUT/20260531-034729Z-algotraderarchitect-run-report.md"
+        assert item["report_quality_issue_count"] == 0
+        assert item["report_quality_issues"] == []
+        assert item["report_blocker_category"] == "pr_health"
+        assert item["action_label"] == "Review PR blockers"
+        assert inbox["release_trust_summary"]["blocker_count"] == 1
+        assert inbox["release_trust_summary"]["group_counts"]["pr_health"] == 1
+        assert "report quality" not in item["reason"]
+
+        payload = orchestrator.append_user_message(
+            db,
+            command_run.run_id,
+            content="/quality",
+        )
+        reply = payload["messages"][-1]["content"]
+        assert "Operator inbox next action: Review agent report" in reply
+        assert "AlgoTraderArchitect" in reply
+    finally:
+        db.close()
+
+
+def test_agent_os_readiness_operator_inbox_classifies_external_source_trust_report(
+    tmp_path,
+    monkeypatch,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        monkeypatch.setattr(orchestrator, "_codex_automation_roots", lambda: [])
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {
+                "model": "qwen2.5-coder:7b",
+                "available": True,
+                "installed_models": ["qwen2.5-coder:7b"],
+                "skipped_models": {},
+                "recommendation": None,
+            },
+        )
+        repo = CodeRepo(path=str(tmp_path), host_path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        orchestrator.bootstrap_agent_profiles(db, repo_id=repo.id)
+        report_dir = tmp_path / "project_ws" / "Risk" / "OUT"
+        report_dir.mkdir(parents=True)
+        report_path = report_dir / "20260531-0402Z-risk-patrol-source-trust.md"
+        report_path.write_text(
+            "\n".join(
+                [
+                    "# Risk patrol - source-trust blockers",
+                    "",
+                    "Status: attention",
+                    "",
+                    "Dirty bind-mounted source, PR #134 dirty/no-check state, and latest-main CI pending keep release/runtime trust blocked.",
+                    "",
+                    "Recommended next action: route owner through a clean branch with exact-head evidence.",
+                    "",
+                    "## Safety Boundary",
+                    "",
+                    "Read-only report only. No release, runtime refresh, broker, DB, migration, or live action is authorized.",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        command_run = orchestrator.create_run(db, prompt="hello", repo_id=repo.id)
+        db.commit()
+
+        readiness = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+        inbox = readiness["operator_inbox"]
+        item = inbox["items"][0]
+
+        assert inbox["external_report_count"] == 1
+        assert inbox["external_report_blocker_counts"] == {"source_trust": 1}
+        assert inbox["release_trust_summary"]["status"] == orchestrator.AGENT_OS_READINESS_CHECK_WARNING
+        assert inbox["release_trust_summary"]["blocker_count"] == 1
+        assert inbox["release_trust_summary"]["group_counts"] == {
+            "release_trust": 1,
+            "pr_health": 0,
+            "evidence_quality": 0,
+        }
+        assert inbox["release_trust_summary"]["next_action_label"] == "Review source trust"
+        assert inbox["next_action_agent"] == "Risk"
+        assert inbox["next_action_button_label"] == "Review source trust"
+        assert item["report_blocker_category"] == "source_trust"
+        assert item["report_blocker_severity"] == "high"
+        assert item["action_label"] == "Review source trust"
+        assert "clean branch or worktree" in item["report_next_action_detail"]
+        assert item["open_path"] == str(report_path)
+
+        payload = orchestrator.append_user_message(
+            db,
+            command_run.run_id,
+            content="/quality",
+        )
+        reply = payload["messages"][-1]["content"]
+        assert "Operator inbox next action: Review agent report" in reply
+        assert "Operator release trust: 1 blocker(s), 1 release-trust" in reply
+        assert "source trust" in reply.lower()
+    finally:
+        db.close()
+
+
+def test_agent_os_readiness_operator_inbox_accepts_safety_constraints_boundary(
+    tmp_path,
+    monkeypatch,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        monkeypatch.setattr(orchestrator, "_codex_automation_roots", lambda: [])
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {
+                "model": "qwen2.5-coder:7b",
+                "available": True,
+                "installed_models": ["qwen2.5-coder:7b"],
+                "skipped_models": {},
+                "recommendation": None,
+            },
+        )
+        repo = CodeRepo(path=str(tmp_path), host_path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        orchestrator.bootstrap_agent_profiles(db, repo_id=repo.id)
+        report_dir = tmp_path / "project_ws" / "QA" / "OUT"
+        report_dir.mkdir(parents=True)
+        report_path = report_dir / "20260531-041904Z-qa-approved-review.md"
+        report_path.write_text(
+            "\n".join(
+                [
+                    "From: QA",
+                    "To: SSWE",
+                    "Created: 2026-05-31T04:24:00Z",
+                    "Reply-To: project_ws/QA/OUT",
+                    "Priority: High",
+                    "Backlog-ID: PM-20260529-081",
+                    "Push Intent: none",
+                    "",
+                    "## Request",
+                    "Review the local no-push implementation.",
+                    "",
+                    "## Expected Deliverable",
+                    "QA review response for branch codex/sswe/pm081 at commit 1619938961eb3ee907acb0a9aeb30e03959db3bd.",
+                    "",
+                    "## Success Criteria",
+                    "- Evidence is exact.",
+                    "",
+                    "## Context / Links",
+                    "- QA request: project_ws/QA/IN/request.md",
+                    "- QA request SHA256: 3977f6a0b66d116d22b818f5fc311bc6cc3e39b12a5249e1266d266a9ad60a1c",
+                    "- Branch: codex/sswe/pm081",
+                    "- Commit: 1619938961eb3ee907acb0a9aeb30e03959db3bd",
+                    "",
+                    "## Safety Constraints",
+                    "No production DB mutation, migration execution, broker/API call, runtime refresh, push, PR, release, or live-trading behavior was authorized or performed.",
+                    "",
+                    "## Dependencies",
+                    "None.",
+                    "",
+                    "## Peer Review / Push",
+                    "Status: APPROVED_FOR_REVIEW_EVIDENCE",
+                    "",
+                    "## Adversarial Probe",
+                    "Boundary probe: malformed timestamp evidence was checked as an explicit negative case.",
+                    "",
+                    "## Result",
+                    "APPROVED_FOR_REVIEW_EVIDENCE for QA scope at exact commit 1619938961eb3ee907acb0a9aeb30e03959db3bd.",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        readiness = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+        inbox = readiness["operator_inbox"]
+
+        assert report_path.exists()
+        assert inbox["external_report_count"] == 0
+        assert inbox["release_trust_summary"]["blocker_count"] == 0
+    finally:
+        db.close()
+
+
+def test_agent_os_readiness_operator_inbox_flags_approval_missing_adversarial_probe(
+    tmp_path,
+    monkeypatch,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        monkeypatch.setattr(orchestrator, "_codex_automation_roots", lambda: [])
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {
+                "model": "qwen2.5-coder:7b",
+                "available": True,
+                "installed_models": ["qwen2.5-coder:7b"],
+                "skipped_models": {},
+                "recommendation": None,
+            },
+        )
+        repo = CodeRepo(path=str(tmp_path), host_path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        orchestrator.bootstrap_agent_profiles(db, repo_id=repo.id)
+        report_dir = tmp_path / "project_ws" / "QA" / "OUT"
+        report_dir.mkdir(parents=True)
+        report_path = report_dir / "20260531-051700Z-qa-approved-no-probe.md"
+        report_path.write_text(
+            "\n".join(
+                [
+                    "# QA approval report",
+                    "",
+                    "Status: APPROVED_FOR_REVIEW_EVIDENCE",
+                    "",
+                    "## Reviewed Scope",
+                    "",
+                    "- Request: project_ws/QA/IN/request.md",
+                    "- Request SHA256: 3977f6a0b66d116d22b818f5fc311bc6cc3e39b12a5249e1266d266a9ad60a1c",
+                    "- Branch: codex/review-branch",
+                    "- Commit: 90346ba9a8ef30701c522176c13771ce7f65afc5",
+                    "",
+                    "## Safety Boundary",
+                    "",
+                    "No push, merge, release, deploy, runtime refresh, broker/API call, or live behavior is authorized.",
+                    "",
+                    "## Checks",
+                    "",
+                    "- PASS: pytest tests/test_example.py -q",
+                    "",
+                    "## Result",
+                    "",
+                    "Approved for review evidence.",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        command_run = orchestrator.create_run(db, prompt="hello", repo_id=repo.id)
+        db.commit()
+
+        readiness = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+        inbox = readiness["operator_inbox"]
+        item = inbox["items"][0]
+
+        assert inbox["external_report_count"] == 1
+        assert inbox["next_action_agent"] == "QA"
+        assert "report quality" in inbox["next_action_detail"]
+        assert item["status"] == "APPROVED_FOR_REVIEW_EVIDENCE"
+        assert item["report_blocker_category"] == "report_quality"
+        assert item["action_label"] == "Repair report evidence"
+        assert item["report_quality_issues"] == ["missing adversarial probe"]
+        assert item["open_path"] == str(report_path)
+        assert inbox["release_trust_summary"]["blocker_count"] == 1
+        assert inbox["release_trust_summary"]["group_counts"]["evidence_quality"] == 1
+
+        payload = orchestrator.append_user_message(
+            db,
+            command_run.run_id,
+            content="/quality",
+        )
+        reply = payload["messages"][-1]["content"]
+        assert "missing adversarial probe" in reply
+        assert "adversarial probe evidence" in reply
+    finally:
+        db.close()
+
+
+def test_agent_os_readiness_operator_inbox_flags_mixed_review_outcomes(
+    tmp_path,
+    monkeypatch,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        monkeypatch.setattr(orchestrator, "_codex_automation_roots", lambda: [])
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {
+                "model": "qwen2.5-coder:7b",
+                "available": True,
+                "installed_models": ["qwen2.5-coder:7b"],
+                "skipped_models": {},
+                "recommendation": None,
+            },
+        )
+        repo = CodeRepo(path=str(tmp_path), host_path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        orchestrator.bootstrap_agent_profiles(db, repo_id=repo.id)
+        commit = "1619938961eb3ee907acb0a9aeb30e03959db3bd"
+        branch = "codex/sswe/pm-20260529-081-options-entry-quote-freshness-gate"
+
+        qa_dir = tmp_path / "project_ws" / "QA" / "OUT"
+        risk_dir = tmp_path / "project_ws" / "Risk" / "OUT"
+        architect_dir = tmp_path / "project_ws" / "AlgoTraderArchitect" / "OUT"
+        qa_dir.mkdir(parents=True)
+        risk_dir.mkdir(parents=True)
+        architect_dir.mkdir(parents=True)
+        qa_path = qa_dir / "20260531-041904Z-from-SSWE-to-QA-pm081-review-APPROVED_FOR_REVIEW_EVIDENCE.md"
+        risk_path = risk_dir / "20260531-041904Z-from-SSWE-to-Risk-pm081-review-CHANGES_REQUESTED.md"
+        architect_path = architect_dir / "20260531-041904Z-from-SSWE-to-AlgoTraderArchitect-pm081-review-response.md"
+        qa_path.write_text(
+            "\n".join(
+                [
+                    "From: QA",
+                    "To: SSWE",
+                    "Created: 2026-05-31T04:19:04Z",
+                    "Backlog-ID: PM-20260529-081",
+                    "",
+                    "## Request",
+                    "Review the local no-push implementation.",
+                    "",
+                    "## Context / Links",
+                    f"- Branch: {branch}",
+                    f"- Commit: {commit}",
+                    "- Request SHA256: 3977f6a0b66d116d22b818f5fc311bc6cc3e39b12a5249e1266d266a9ad60a1c",
+                    "",
+                    "## Safety Constraints",
+                    "No push, PR, release, deploy, runtime refresh, broker/API call, or live-trading behavior is authorized.",
+                    "",
+                    "## Peer Review / Push",
+                    "Status: APPROVED_FOR_REVIEW_EVIDENCE",
+                    "",
+                    "## Adversarial Probe",
+                    "Boundary probe: attempted future-dated quote evidence was checked as a negative case.",
+                    "",
+                    "## Result",
+                    f"APPROVED_FOR_REVIEW_EVIDENCE for QA scope at exact commit {commit}.",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        risk_path.write_text(
+            "\n".join(
+                [
+                    "# Risk peer review",
+                    "",
+                    "Review Result: CHANGES_REQUESTED",
+                    "",
+                    "Backlog-ID: PM-20260529-081",
+                    "",
+                    "## Reviewed Scope",
+                    f"- Branch: {branch}",
+                    f"- Commit: {commit}",
+                    "- Request SHA256: 3977f6a0b66d116d22b818f5fc311bc6cc3e39b12a5249e1266d266a9ad60a1c",
+                    "",
+                    "## Safety Constraints",
+                    "No push, PR, release, deploy, runtime refresh, broker/API call, or live-trading behavior is authorized.",
+                    "",
+                    "## Findings",
+                    "- Future-dated option quotes can still be accepted as fresh.",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        architect_path.write_text(
+            "\n".join(
+                [
+                    "# PM-20260529-081 Algo Review Response",
+                    "",
+                    "Status: CHANGES_REQUESTED",
+                    "Reviewer: AlgoTraderArchitect",
+                    f"Branch: {branch}",
+                    f"Commit reviewed: {commit}",
+                    "Request SHA256: 17455d096128075077eb2af7bfcbc55d6ce087fde06386da67d748fb18f21589",
+                    "",
+                    "## Decision",
+                    "CHANGES_REQUESTED. Future-dated option quote timestamps still pass as fresh.",
+                    "",
+                    "## Safety Boundary",
+                    "No push, PR, release, deploy, runtime refresh, broker/API call, or live-trading behavior is authorized.",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        command_run = orchestrator.create_run(db, prompt="hello", repo_id=repo.id)
+        db.commit()
+
+        readiness = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+        inbox = readiness["operator_inbox"]
+        conflict_item = inbox["items"][0]
+
+        assert inbox["external_report_count"] == 3
+        assert inbox["next_action"] == orchestrator.AGENT_OPERATOR_INBOX_ACTION_REVIEW_EXTERNAL_REPORT
+        assert inbox["next_action_agent"] == "Review consensus"
+        assert inbox["next_action_button_label"] == "Resolve review conflict"
+        assert inbox["external_report_blocker_counts"]["review_conflict"] == 1
+        assert inbox["external_report_blocker_counts"]["review_changes"] == 2
+        assert inbox["release_trust_summary"]["blocker_count"] == 3
+        assert inbox["release_trust_summary"]["group_counts"] == {
+            "release_trust": 0,
+            "pr_health": 0,
+            "evidence_quality": 3,
+        }
+        assert inbox["release_trust_summary"]["next_action_label"] == "Resolve review conflict"
+        assert conflict_item["status"] == "MIXED_REVIEW_OUTCOMES"
+        assert conflict_item["report_blocker_category"] == "review_conflict"
+        assert conflict_item["report_review_commit"] == commit
+        assert conflict_item["report_review_backlog_id"] == "PM-20260529-081"
+        assert conflict_item["report_approval_agents"] == ["QA"]
+        assert conflict_item["report_blocking_agents"] == ["AlgoTraderArchitect", "Risk"]
+        assert "approval from QA" in conflict_item["reason"]
+        assert "AlgoTraderArchitect" in conflict_item["report_next_action_detail"]
+        assert "Risk" in conflict_item["report_next_action_detail"]
+
+        payload = orchestrator.append_user_message(
+            db,
+            command_run.run_id,
+            content="/quality",
+        )
+        reply = payload["messages"][-1]["content"]
+        assert "Resolve review conflict" in reply
+        assert "evidence quality" in reply
+    finally:
+        db.close()
+
+
+def test_agent_os_readiness_agent_flow_tracks_mailbox_health(
+    tmp_path,
+    monkeypatch,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        monkeypatch.setattr(orchestrator, "_codex_automation_roots", lambda: [])
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {
+                "model": "qwen2.5-coder:7b",
+                "available": True,
+                "installed_models": ["qwen2.5-coder:7b"],
+                "skipped_models": {},
+                "recommendation": None,
+            },
+        )
+        repo = CodeRepo(path=str(tmp_path), host_path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        orchestrator.bootstrap_agent_profiles(db, repo_id=repo.id)
+
+        in_dir = tmp_path / "project_ws" / "QA" / "IN"
+        state_dir = tmp_path / "project_ws" / "QA" / "OUT" / "_state"
+        in_dir.mkdir(parents=True)
+        state_dir.mkdir(parents=True)
+        request_path = in_dir / "20260530-225900Z-from-PM-to-QA-visual-proof.md"
+        request_path.write_text(
+            "\n".join(
+                [
+                    "From: PM",
+                    "To: QA",
+                    "Created: 2026-05-30T22:59:00Z",
+                    "Reply-To: project_ws/PM/OUT/20260530-225900Z-run-report.md",
+                    "Priority: normal",
+                    "Backlog-ID: PM-TEST",
+                    "Push Intent: not authorized",
+                    "",
+                    "## Request",
+                    "Please review the current-head visual QA proof before release.",
+                    "",
+                    "## Expected Deliverable",
+                    "A QA report.",
+                    "",
+                    "## Success Criteria",
+                    "- Current-head evidence is named.",
+                    "",
+                    "## Context / Links",
+                    "- Test fixture.",
+                    "",
+                    "## Safety Constraints",
+                    "- Read-only.",
+                    "",
+                    "## Dependencies",
+                    "- None.",
+                    "",
+                    "## Peer Review / Push",
+                    "- No push.",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        old_request = datetime.now(timezone.utc).timestamp() - 120
+        os.utime(request_path, (old_request, old_request))
+
+        lock_path = state_dir / "run.lock"
+        lock_path.write_text(
+            json.dumps(
+                {
+                    "owner": "QA",
+                    "pid": 12345,
+                    "cwd": str(tmp_path),
+                    "started_utc": "2026-05-30T22:40:00Z",
+                }
+            ),
+            encoding="utf-8",
+        )
+        old_lock = datetime.now(timezone.utc).timestamp() - 15 * 60
+        os.utime(lock_path, (old_lock, old_lock))
+        command_run = orchestrator.create_run(db, prompt="hello", repo_id=repo.id)
+        db.commit()
+
+        readiness = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+
+        flow = readiness[orchestrator.AGENT_OS_AGENT_FLOW_KEY]
+        assert flow["status"] == orchestrator.AGENT_OS_READINESS_CHECK_WARNING
+        assert flow["pending_count"] == 1
+        assert flow["stable_pending_count"] == 1
+        assert flow["shape_invalid_count"] == 0
+        assert flow["lock_count"] == 1
+        assert flow["stale_lock_candidate_count"] == 1
+        assert flow["attention_count"] == 2
+        assert flow["next_action"] == orchestrator.AGENT_OPERATOR_INBOX_ACTION_REVIEW_AGENT_FLOW
+        assert flow["next_action_path"] in {
+            "project_ws/QA/IN/20260530-225900Z-from-PM-to-QA-visual-proof.md",
+            "project_ws/QA/OUT/_state/run.lock",
+        }
+        stale_flow_item = next(
+            item for item in flow["items"] if item["status"] == "stale_lock_candidate"
+        )
+        assert stale_flow_item["action_label"] == "Review lock"
+        assert stale_flow_item["lock_owner"] == "QA"
+        assert stale_flow_item["lock_pid"] == "12345"
+        assert stale_flow_item["lock_pid_source"] == "pid"
+        assert stale_flow_item["lock_pid_running"] is False
+        assert stale_flow_item["lock_age_minutes"] >= 14
+        assert stale_flow_item["lock_started_at"] == "2026-05-30T22:40:00Z"
+        assert stale_flow_item["lock_cwd"] == str(tmp_path)
+        assert stale_flow_item["lock_recovery_posture"] == "owner_stopped_review_required"
+        assert "Review the lock file" in stale_flow_item["lock_guidance"]
+        assert stale_flow_item["lock_operator_handoff_label"] == "Copy lock handoff"
+        assert "Project Autopilot lock handoff" in stale_flow_item["lock_operator_handoff_copy"]
+        assert "PID running: no" in stale_flow_item["lock_operator_handoff_copy"]
+        assert "PID 12345" in stale_flow_item["reason"]
+        trust = flow["control_plane_trust"]
+        assert trust["blocker_count"] == 1
+        assert trust["high_risk_count"] == 0
+        assert trust["category_counts"]["agent_lock"] == 1
+        assert trust["next_action_label"] == "Review stale lock"
+        assert trust["next_action_kind"] == "agent_lock"
+        assert trust["items"][0]["handoff_label"] == "Copy lock handoff"
+
+        inbox = readiness["operator_inbox"]
+        assert inbox["agent_flow_count"] == 2
+        assert inbox["total_action_count"] == 2
+        assert inbox["next_action"] == orchestrator.AGENT_OPERATOR_INBOX_ACTION_REVIEW_AGENT_FLOW
+        assert inbox["next_action_kind"] == orchestrator.AGENT_OPERATOR_INBOX_ITEM_AGENT_FLOW
+        assert inbox["next_action_agent"] == "QA"
+        assert any(
+            marker in inbox["next_action_detail"]
+            for marker in ("unprocessed mailbox request", "PID 12345")
+        )
+        stale_inbox_item = next(
+            item for item in inbox["items"] if item.get("status") == "stale_lock_candidate"
+        )
+        assert stale_inbox_item["action_label"] == "Review lock"
+        assert stale_inbox_item["lock_guidance"] == stale_flow_item["lock_guidance"]
+        assert stale_inbox_item["lock_operator_handoff_copy"] == stale_flow_item["lock_operator_handoff_copy"]
+        flow_check = next(
+            check
+            for check in readiness["checks"]
+            if check["key"] == orchestrator.AGENT_OS_READINESS_CHECK_AGENT_FLOW
+        )
+        assert flow_check["status"] == orchestrator.AGENT_OS_READINESS_CHECK_WARNING
+
+        payload = orchestrator.append_user_message(
+            db,
+            command_run.run_id,
+            content="/doctor",
+        )
+        reply = payload["messages"][-1]["content"]
+        assert "Agent flow next action: Review agent flow" in reply
+        assert "Agent flow targets:" in reply
+
+        digest = hashlib.sha256(request_path.read_bytes()).hexdigest()
+        (state_dir / "processed.jsonl").write_text(
+            json.dumps(
+                {
+                    "request_path": "project_ws/QA/IN/20260530-225900Z-from-PM-to-QA-visual-proof.md",
+                    "request_sha256": digest,
+                    "status": "done",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        lock_path.unlink()
+
+        readiness_after = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+        flow_after = readiness_after[orchestrator.AGENT_OS_AGENT_FLOW_KEY]
+        assert flow_after["status"] == orchestrator.AGENT_OS_READINESS_CHECK_PASSED
+        assert flow_after["pending_count"] == 0
+        assert flow_after["stale_lock_candidate_count"] == 0
+        assert readiness_after["operator_inbox"]["agent_flow_count"] == 0
+    finally:
+        db.close()
+
+
+def test_agent_os_readiness_agent_flow_flags_active_lock_starvation(
+    tmp_path,
+    monkeypatch,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        monkeypatch.setattr(orchestrator, "_codex_automation_roots", lambda: [])
+        monkeypatch.setattr(orchestrator, "_agent_flow_process_running", lambda pid: True)
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {
+                "model": "qwen2.5-coder:7b",
+                "available": True,
+                "installed_models": ["qwen2.5-coder:7b"],
+                "skipped_models": {},
+                "recommendation": None,
+            },
+        )
+        repo = CodeRepo(path=str(tmp_path), host_path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        orchestrator.bootstrap_agent_profiles(db, repo_id=repo.id)
+
+        in_dir = tmp_path / "project_ws" / "PM" / "IN"
+        out_dir = tmp_path / "project_ws" / "PM" / "OUT"
+        state_dir = out_dir / "_state"
+        in_dir.mkdir(parents=True)
+        state_dir.mkdir(parents=True)
+        request_path = in_dir / "20260530-233700Z-from-SDBA-to-PM-testdb-deadlock.md"
+        request_path.write_text(
+            "\n".join(
+                [
+                    "From: SDBA",
+                    "To: PM",
+                    "Created: 2026-05-30T23:37:00Z",
+                    "Reply-To: project_ws/SDBA/OUT/20260530-233700Z-report.md",
+                    "Priority: High",
+                    "Backlog-ID: PM-TEST",
+                    "Push Intent: not authorized",
+                    "",
+                    "## Request",
+                    "Please coordinate the blocked test DB lane.",
+                    "",
+                    "## Expected Deliverable",
+                    "A PM decision note.",
+                    "",
+                    "## Success Criteria",
+                    "- PM names the owner lane.",
+                    "",
+                    "## Context / Links",
+                    "- Test fixture.",
+                    "",
+                    "## Safety Constraints",
+                    "- Read-only.",
+                    "",
+                    "## Dependencies",
+                    "- None.",
+                    "",
+                    "## Peer Review / Push",
+                    "- No push.",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        old_request = datetime.now(timezone.utc).timestamp() - 120
+        os.utime(request_path, (old_request, old_request))
+
+        lock_path = state_dir / "run.lock"
+        lock_path.write_text(
+            json.dumps(
+                {
+                    "agent": "PM",
+                    "pid": 12345,
+                    "cwd": str(tmp_path),
+                    "created_utc": "2026-05-30T23:20:00Z",
+                }
+            ),
+            encoding="utf-8",
+        )
+        old_lock = datetime.now(timezone.utc).timestamp() - 15 * 60
+        os.utime(lock_path, (old_lock, old_lock))
+
+        readiness = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+
+        flow = readiness[orchestrator.AGENT_OS_AGENT_FLOW_KEY]
+        assert flow["active_lock_starvation_count"] == 1
+        assert flow["stale_lock_candidate_count"] == 0
+        assert flow["attention_count"] == 2
+        assert flow["items"][0]["status"] == orchestrator.AGENT_FLOW_STATUS_ACTIVE_LOCK_STARVATION
+        assert flow["items"][0]["action_label"] == "Review lock"
+        assert flow["items"][0]["lock_owner"] == "PM"
+        assert flow["items"][0]["lock_pid"] == "12345"
+        assert flow["items"][0]["lock_pid_running"] is True
+        assert flow["items"][0]["lock_age_minutes"] >= 14
+        assert flow["items"][0]["lock_started_at"] == "2026-05-30T23:20:00Z"
+        assert "no owner OUT report was found" in flow["items"][0]["reason"]
+        assert "do not delete the lock while the PID is running" in flow["items"][0]["lock_guidance"]
+        assert flow["items"][0]["lock_operator_handoff_label"] == "Copy lock handoff"
+        assert "Project Autopilot lock handoff" in flow["items"][0]["lock_operator_handoff_copy"]
+        assert "PID running: yes" in flow["items"][0]["lock_operator_handoff_copy"]
+        assert "Fresh owner OUT/progress evidence" in flow["items"][0]["lock_operator_handoff_copy"]
+        trust = flow["control_plane_trust"]
+        assert trust["blocker_count"] == 1
+        assert trust["high_risk_count"] == 1
+        assert trust["category_counts"]["agent_lock"] == 1
+        assert trust["next_action_label"] == "Resolve active lock"
+        assert trust["next_action_kind"] == "agent_lock"
+        assert trust["next_action_handoff_label"] == "Copy lock handoff"
+        assert trust["items"][0]["lock_pid"] == "12345"
+        assert readiness["operator_inbox"]["next_action_path"] == "project_ws/PM/OUT/_state/run.lock"
+        assert readiness["operator_inbox"]["control_plane_trust_summary"]["next_action_kind"] == "agent_lock"
+
+        owner_report = out_dir / "20260530-234200Z-pm-active-lock-progress.md"
+        owner_report.write_text("# PM progress\n", encoding="utf-8")
+        fresh_report_time = datetime.now(timezone.utc).timestamp()
+        os.utime(owner_report, (fresh_report_time, fresh_report_time))
+
+        readiness_after = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+        flow_after = readiness_after[orchestrator.AGENT_OS_AGENT_FLOW_KEY]
+        assert flow_after["active_lock_starvation_count"] == 0
+        assert flow_after["stale_lock_candidate_count"] == 0
+        assert flow_after["attention_count"] == 1
+        assert flow_after["items"][0]["status"] == orchestrator.AGENT_FLOW_STATUS_STABLE_PENDING
+    finally:
+        db.close()
+
+
+def test_agent_os_readiness_agent_flow_flags_sleep_helper_lock_starvation(
+    tmp_path,
+    monkeypatch,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        monkeypatch.setattr(orchestrator, "_codex_automation_roots", lambda: [])
+        monkeypatch.setattr(
+            orchestrator,
+            "_agent_flow_process_snapshot",
+            lambda pid: {
+                "running": True,
+                "name": "powershell.exe",
+                "command_line": "powershell.exe -NoProfile -Command Start-Sleep -Seconds 7200",
+                "is_sleep_helper": True,
+            },
+        )
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {
+                "model": "qwen2.5-coder:7b",
+                "available": True,
+                "installed_models": ["qwen2.5-coder:7b"],
+                "skipped_models": {},
+                "recommendation": None,
+            },
+        )
+        repo = CodeRepo(path=str(tmp_path), host_path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        orchestrator.bootstrap_agent_profiles(db, repo_id=repo.id)
+
+        in_dir = tmp_path / "project_ws" / "QA" / "IN"
+        out_dir = tmp_path / "project_ws" / "QA" / "OUT"
+        state_dir = out_dir / "_state"
+        in_dir.mkdir(parents=True)
+        out_dir.mkdir(parents=True)
+        state_dir.mkdir(parents=True)
+        request_path = in_dir / "20260531-032141Z-from-SSWE-to-QA-clean-evidence.md"
+        request_path.write_text(
+            "\n".join(
+                [
+                    "From: SSWE",
+                    "To: QA",
+                    "Created: 2026-05-31T03:21:41Z",
+                    "Reply-To: project_ws/SSWE/OUT/20260531-032130Z-report.md",
+                    "Priority: High",
+                    "Backlog-ID: PM-080",
+                    "Push Intent: none",
+                    "",
+                    "## Request",
+                    "Please review the clean evidence packet.",
+                    "",
+                    "## Expected Deliverable",
+                    "A QA disposition.",
+                    "",
+                    "## Success Criteria",
+                    "- QA binds approval to the exact head.",
+                    "",
+                    "## Context / Links",
+                    "- Test fixture.",
+                    "",
+                    "## Safety Constraints",
+                    "- Read-only.",
+                    "",
+                    "## Dependencies",
+                    "- None.",
+                    "",
+                    "## Peer Review / Push",
+                    "- No push.",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        old_request = datetime.now(timezone.utc).timestamp() - 20 * 60
+        os.utime(request_path, (old_request, old_request))
+
+        owner_report = out_dir / "20260531-032500Z-qa-heartbeat-blocked-queue-addendum.md"
+        owner_report.write_text("# QA heartbeat\n", encoding="utf-8")
+        fresh_report_time = datetime.now(timezone.utc).timestamp()
+        os.utime(owner_report, (fresh_report_time, fresh_report_time))
+
+        lock_path = state_dir / "run.lock"
+        lock_path.write_text(
+            json.dumps(
+                {
+                    "agent": "QA",
+                    "helper_pid": 46532,
+                    "purpose": "heartbeat idle audit",
+                    "cwd": str(tmp_path),
+                    "created_utc": "2026-05-31T02:40:00Z",
+                }
+            ),
+            encoding="utf-8",
+        )
+        old_lock = datetime.now(timezone.utc).timestamp() - 49 * 60
+        os.utime(lock_path, (old_lock, old_lock))
+
+        readiness = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+
+        flow = readiness[orchestrator.AGENT_OS_AGENT_FLOW_KEY]
+        assert flow["active_lock_starvation_count"] == 1
+        assert flow["stale_lock_candidate_count"] == 0
+        lock_item = flow["items"][0]
+        assert lock_item["status"] == orchestrator.AGENT_FLOW_STATUS_ACTIVE_LOCK_STARVATION
+        assert lock_item["lock_owner"] == "QA"
+        assert lock_item["lock_pid"] == "46532"
+        assert lock_item["lock_pid_source"] == "helper_pid"
+        assert lock_item["lock_pid_running"] is True
+        assert lock_item["lock_pid_is_sleep_helper"] is True
+        assert lock_item["lock_purpose"] == "heartbeat idle audit"
+        assert lock_item["lock_pid_process_name"] == "powershell.exe"
+        assert "Start-Sleep -Seconds 7200" in lock_item["lock_pid_command_line"]
+        assert lock_item["lock_recovery_posture"] == "owner_reacquire_required"
+        assert "sleep helper, not owner progress" in lock_item["reason"]
+        assert "clear or reacquire the helper-only lock" in lock_item["lock_guidance"]
+        assert "owner_reacquire_required" in lock_item["lock_operator_handoff_copy"]
+    finally:
+        db.close()
+
+
+def test_agent_os_readiness_agent_flow_flags_stale_temp_publish_artifacts(
+    tmp_path,
+    monkeypatch,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        monkeypatch.setattr(orchestrator, "_codex_automation_roots", lambda: [])
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {
+                "model": "qwen2.5-coder:7b",
+                "available": True,
+                "installed_models": ["qwen2.5-coder:7b"],
+                "skipped_models": {},
+                "recommendation": None,
+            },
+        )
+        repo = CodeRepo(path=str(tmp_path), host_path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        orchestrator.bootstrap_agent_profiles(db, repo_id=repo.id)
+
+        out_dir = tmp_path / "project_ws" / "SRE" / "OUT"
+        out_dir.mkdir(parents=True)
+        temp_path = out_dir / "20260531-001500Z-sre-report.md.tmp"
+        temp_path.write_text("# incomplete publish\n", encoding="utf-8")
+        old_temp = datetime.now(timezone.utc).timestamp() - 15 * 60
+        os.utime(temp_path, (old_temp, old_temp))
+        fresh_temp = out_dir / "20260531-001900Z-sre-report.md.partial"
+        fresh_temp.write_text("# fresh publish\n", encoding="utf-8")
+
+        command_run = orchestrator.create_run(db, prompt="hello", repo_id=repo.id)
+        db.commit()
+
+        readiness = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+
+        flow = readiness[orchestrator.AGENT_OS_AGENT_FLOW_KEY]
+        assert flow["temp_publish_artifact_count"] == 2
+        assert flow["stale_temp_publish_artifact_count"] == 1
+        assert flow["attention_count"] == 1
+        assert flow["items"][0]["status"] == orchestrator.AGENT_FLOW_STATUS_TEMP_PUBLISH_STALE
+        assert flow["items"][0]["action_label"] == "Review temp"
+        assert flow["items"][0]["path"] == "project_ws/SRE/OUT/20260531-001500Z-sre-report.md.tmp"
+        assert flow["items"][0]["temp_publish_location"] == "OUT"
+        assert flow["items"][0]["temp_publish_age_minutes"] >= 14
+        assert flow["items"][0]["temp_publish_byte_length"] == temp_path.stat().st_size
+        assert "publish a clean final replacement" in flow["items"][0]["temp_publish_guidance"]
+        assert flow["agents"][0]["stale_temp_publish_artifact_count"] == 1
+
+        inbox = readiness["operator_inbox"]
+        assert inbox["agent_flow_count"] == 1
+        assert inbox["next_action"] == orchestrator.AGENT_OPERATOR_INBOX_ACTION_REVIEW_AGENT_FLOW
+        assert inbox["next_action_kind"] == orchestrator.AGENT_OPERATOR_INBOX_ITEM_AGENT_FLOW
+        assert inbox["next_action_path"] == "project_ws/SRE/OUT/20260531-001500Z-sre-report.md.tmp"
+
+        payload = orchestrator.append_user_message(
+            db,
+            command_run.run_id,
+            content="/doctor",
+        )
+        reply = payload["messages"][-1]["content"]
+        assert "stale temp publish artifact" in reply
+        assert "temp age" in reply
+    finally:
+        db.close()
+
+
+def test_agent_os_readiness_agent_flow_flags_processed_deliverable_anomalies(
+    tmp_path,
+    monkeypatch,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        monkeypatch.setattr(orchestrator, "_codex_automation_roots", lambda: [])
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {
+                "model": "qwen2.5-coder:7b",
+                "available": True,
+                "installed_models": ["qwen2.5-coder:7b"],
+                "skipped_models": {},
+                "recommendation": None,
+            },
+        )
+        repo = CodeRepo(path=str(tmp_path), host_path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        orchestrator.bootstrap_agent_profiles(db, repo_id=repo.id)
+
+        state_dir = tmp_path / "project_ws" / "QA" / "OUT" / "_state"
+        deliverable_dir = tmp_path / "project_ws" / "QA" / "OUT" / "deliverables"
+        state_dir.mkdir(parents=True)
+        deliverable_dir.mkdir(parents=True)
+        missing_final_temp = deliverable_dir / "review-report.md.tmp"
+        missing_final_temp.write_text("# unfinished final\n", encoding="utf-8")
+        direct_temp = deliverable_dir / "direct-temp-report.md.tmp"
+        direct_temp.write_text("# processed temp\n", encoding="utf-8")
+        old_temp = datetime.now(timezone.utc).timestamp() - 15 * 60
+        os.utime(missing_final_temp, (old_temp, old_temp))
+        os.utime(direct_temp, (old_temp, old_temp))
+        processed_path = state_dir / "processed.jsonl"
+        processed_path.write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "request_path": "project_ws/QA/IN/req-one.md",
+                            "request_sha256": "abc123",
+                            "deliverable_path": "project_ws/QA/OUT/deliverables/review-report.md",
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "requestPath": "project_ws/QA/IN/req-two.md",
+                            "requestSha256": "def456",
+                            "deliverablePath": "project_ws/QA/OUT/deliverables/direct-temp-report.md.tmp",
+                        }
+                    ),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        command_run = orchestrator.create_run(db, prompt="hello", repo_id=repo.id)
+        db.commit()
+
+        readiness = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+
+        flow = readiness[orchestrator.AGENT_OS_AGENT_FLOW_KEY]
+        assert flow["processed_count"] == 2
+        assert flow["processed_deliverable_anomaly_count"] == 2
+        assert flow["stale_temp_publish_artifact_count"] == 0
+        assert flow["attention_count"] == 2
+        assert flow["items"][0]["status"] == orchestrator.AGENT_FLOW_STATUS_PROCESSED_DELIVERABLE_ANOMALY
+        assert flow["items"][0]["action_label"] == "Review deliverable"
+        assert flow["items"][0]["processed_deliverable_anomaly_kind"] in {
+            "processed_deliverable_missing_final_temp_exists",
+            "processed_deliverable_is_temp",
+        }
+        assert flow["items"][0]["processed_deliverable_temp_age_minutes"] >= 14
+        assert flow["items"][0]["processed_deliverable_temp_byte_length"] > 0
+        assert "publish the final deliverable" in flow["items"][0]["processed_deliverable_guidance"]
+        assert flow["agents"][0]["processed_deliverable_anomaly_count"] == 2
+
+        inbox = readiness["operator_inbox"]
+        assert inbox["agent_flow_count"] == 2
+        assert inbox["next_action"] == orchestrator.AGENT_OPERATOR_INBOX_ACTION_REVIEW_AGENT_FLOW
+        assert inbox["next_action_kind"] == orchestrator.AGENT_OPERATOR_INBOX_ITEM_AGENT_FLOW
+        assert inbox["next_action_path"].endswith(".tmp")
+
+        payload = orchestrator.append_user_message(
+            db,
+            command_run.run_id,
+            content="/doctor",
+        )
+        reply = payload["messages"][-1]["content"]
+        assert "processed deliverable anomaly" in reply
+        assert "deliverable temp age" in reply
+    finally:
+        db.close()
+
+
+def test_agent_os_readiness_agent_flow_flags_review_head_mismatch(
+    tmp_path,
+    monkeypatch,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        monkeypatch.setattr(orchestrator, "_codex_automation_roots", lambda: [])
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {
+                "model": "qwen2.5-coder:7b",
+                "available": True,
+                "installed_models": ["qwen2.5-coder:7b"],
+                "skipped_models": {},
+                "recommendation": None,
+            },
+        )
+        readme = tmp_path / "README.md"
+        readme.write_text("# Repo\n", encoding="utf-8")
+        orchestrator._git(tmp_path, ["init"], timeout=60)
+        orchestrator._git(tmp_path, ["add", "README.md"], timeout=60)
+        orchestrator._git(
+            tmp_path,
+            ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
+            timeout=60,
+        )
+        head_sha = orchestrator._git_text(tmp_path, ["rev-parse", "HEAD"], timeout=60)
+        cited_sha = "0" * 40 if head_sha != "0" * 40 else "1" * 40
+        repo = CodeRepo(path=str(tmp_path), host_path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        orchestrator.bootstrap_agent_profiles(db, repo_id=repo.id)
+
+        in_dir = tmp_path / "project_ws" / "QA" / "IN"
+        in_dir.mkdir(parents=True)
+        request_path = in_dir / "20260531-004200Z-from-PM-to-QA-peer-review.md"
+
+        def write_request(commit_sha: str) -> None:
+            request_path.write_text(
+                "\n".join(
+                    [
+                        "From: PM",
+                        "To: QA",
+                        "Created: 2026-05-31T00:42:00Z",
+                        "Reply-To: project_ws/PM/OUT/20260531-004200Z-report.md",
+                        "Priority: high",
+                        "Backlog-ID: PM-REVIEW-HEAD",
+                        "Push Intent: push branch",
+                        "",
+                        "## Request",
+                        "Peer-review request for the current branch before push approval.",
+                        "",
+                        "## Expected Deliverable",
+                        "A grounded peer-review report.",
+                        "",
+                        "## Success Criteria",
+                        "- Approval names the exact commit under review.",
+                        "",
+                        "## Context / Links",
+                        f"- Worktree: {tmp_path}",
+                        f"- Reviewed commit: {commit_sha}",
+                        "",
+                        "## Safety Constraints",
+                        "- Read-only review.",
+                        "",
+                        "## Dependencies",
+                        "- None.",
+                        "",
+                        "## Peer Review / Push",
+                        "- Peer-review request for push readiness.",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            old_request = datetime.now(timezone.utc).timestamp() - 120
+            os.utime(request_path, (old_request, old_request))
+
+        write_request(cited_sha)
+        command_run = orchestrator.create_run(db, prompt="hello", repo_id=repo.id)
+        db.commit()
+
+        readiness = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+
+        flow = readiness[orchestrator.AGENT_OS_AGENT_FLOW_KEY]
+        assert flow["review_head_mismatch_count"] == 1
+        assert flow["stable_pending_count"] == 1
+        assert flow["attention_count"] == 1
+        review_packet = flow["review_packet_summary"]
+        assert review_packet["status"] == orchestrator.AGENT_OS_READINESS_CHECK_WARNING
+        assert review_packet["mismatch_count"] == 1
+        assert review_packet["head_mismatch_count"] == 1
+        assert review_packet["missing_commit_count"] == 1
+        assert review_packet["next_action_label"] == "Refresh review packet"
+        assert flow["next_action_path"] == "project_ws/QA/IN/20260531-004200Z-from-PM-to-QA-peer-review.md"
+        assert flow["items"][0]["status"] == orchestrator.AGENT_FLOW_STATUS_REVIEW_HEAD_MISMATCH
+        assert flow["items"][0]["action_label"] == "Review request"
+        assert flow["items"][0]["review_request_cited_commit"] == cited_sha
+        assert flow["items"][0]["review_request_worktree_head"] == head_sha
+        assert flow["items"][0]["review_request_worktree"] == str(tmp_path).replace("\\", "/")
+        assert "current branch HEAD" in flow["items"][0]["review_head_guidance"]
+        assert flow["agents"][0]["review_head_mismatch_count"] == 1
+
+        inbox = readiness["operator_inbox"]
+        assert inbox["agent_flow_count"] == 1
+        assert inbox["next_action"] == orchestrator.AGENT_OPERATOR_INBOX_ACTION_REVIEW_AGENT_FLOW
+        assert inbox["next_action_kind"] == orchestrator.AGENT_OPERATOR_INBOX_ITEM_AGENT_FLOW
+        assert "peer-review request citing" in inbox["next_action_detail"]
+
+        payload = orchestrator.append_user_message(
+            db,
+            command_run.run_id,
+            content="/doctor",
+        )
+        reply = payload["messages"][-1]["content"]
+        assert "review head mismatch" in reply
+        assert "Review packet guard" in reply
+        assert f"cited {cited_sha[:10]} != HEAD {head_sha[:10]}" in reply
+
+        write_request(head_sha)
+        readiness_after = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+        flow_after = readiness_after[orchestrator.AGENT_OS_AGENT_FLOW_KEY]
+        assert flow_after["review_head_mismatch_count"] == 0
+        assert flow_after["review_packet_summary"]["status"] == orchestrator.AGENT_OS_READINESS_CHECK_PASSED
+        assert flow_after["review_packet_summary"]["mismatch_count"] == 0
+        assert flow_after["attention_count"] == 1
+        assert flow_after["items"][0]["status"] == orchestrator.AGENT_FLOW_STATUS_STABLE_PENDING
+    finally:
+        db.close()
+
+
+def test_agent_os_readiness_agent_flow_flags_review_commit_branch_drift(
+    tmp_path,
+    monkeypatch,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        monkeypatch.setattr(orchestrator, "_codex_automation_roots", lambda: [])
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {
+                "model": "qwen2.5-coder:7b",
+                "available": True,
+                "installed_models": ["qwen2.5-coder:7b"],
+                "skipped_models": {},
+                "recommendation": None,
+            },
+        )
+        readme = tmp_path / "README.md"
+        readme.write_text("# Repo\n", encoding="utf-8")
+        orchestrator._git(tmp_path, ["init"], timeout=60)
+        orchestrator._git(tmp_path, ["add", "README.md"], timeout=60)
+        orchestrator._git(
+            tmp_path,
+            ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
+            timeout=60,
+        )
+        base_sha = orchestrator._git_text(tmp_path, ["rev-parse", "HEAD"], timeout=60)
+        orchestrator._git(tmp_path, ["checkout", "-b", "codex/review-drift"], timeout=60)
+        readme.write_text("# Repo\n\nreview commit\n", encoding="utf-8")
+        orchestrator._git(tmp_path, ["add", "README.md"], timeout=60)
+        orchestrator._git(
+            tmp_path,
+            ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "review commit"],
+            timeout=60,
+        )
+        cited_sha = orchestrator._git_text(tmp_path, ["rev-parse", "HEAD"], timeout=60)
+        orchestrator._git(tmp_path, ["reset", "--hard", base_sha], timeout=60)
+        readme.write_text("# Repo\n\nreplacement commit\n", encoding="utf-8")
+        orchestrator._git(tmp_path, ["add", "README.md"], timeout=60)
+        orchestrator._git(
+            tmp_path,
+            ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "replacement commit"],
+            timeout=60,
+        )
+        head_sha = orchestrator._git_text(tmp_path, ["rev-parse", "HEAD"], timeout=60)
+
+        repo = CodeRepo(path=str(tmp_path), host_path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        orchestrator.bootstrap_agent_profiles(db, repo_id=repo.id)
+
+        in_dir = tmp_path / "project_ws" / "QA" / "IN"
+        in_dir.mkdir(parents=True)
+        request_path = in_dir / "20260531-033000Z-from-SSWE-to-QA-peer-review.md"
+        request_path.write_text(
+            "\n".join(
+                [
+                    "From: SSWE",
+                    "To: QA",
+                    "Created: 2026-05-31T03:30:00Z",
+                    "Reply-To: project_ws/SSWE/OUT/20260531-033000Z-report.md",
+                    "Priority: high",
+                    "Backlog-ID: PM-REVIEW-DRIFT",
+                    "Push Intent: push branch",
+                    "",
+                    "## Request",
+                    "Peer-review request for exact branch evidence.",
+                    "",
+                    "## Expected Deliverable",
+                    "A grounded peer-review report.",
+                    "",
+                    "## Success Criteria",
+                    "- Approval names the exact commit under review.",
+                    "",
+                    "## Context / Links",
+                    "- Branch: codex/review-drift",
+                    f"- Worktree: {tmp_path}",
+                    f"- Reviewed commit: {cited_sha}",
+                    "",
+                    "## Safety Constraints",
+                    "- Read-only review.",
+                    "",
+                    "## Dependencies",
+                    "- None.",
+                    "",
+                    "## Peer Review / Push",
+                    "- Peer-review request for push readiness.",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        old_request = datetime.now(timezone.utc).timestamp() - 120
+        os.utime(request_path, (old_request, old_request))
+
+        readiness = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+        flow = readiness[orchestrator.AGENT_OS_AGENT_FLOW_KEY]
+        item = flow["items"][0]
+
+        assert flow["review_head_mismatch_count"] == 1
+        assert flow["review_packet_summary"]["mismatch_count"] == 1
+        assert flow["review_packet_summary"]["branch_drift_count"] == 1
+        assert flow["review_packet_summary"]["branch_not_contains_cited_count"] == 1
+        assert flow["review_packet_summary"]["same_run_evidence_required"] is True
+        assert item["status"] == orchestrator.AGENT_FLOW_STATUS_REVIEW_HEAD_MISMATCH
+        assert item["review_request_branch"] == "codex/review-drift"
+        assert item["review_request_worktree_branch"] == "codex/review-drift"
+        assert item["review_request_cited_commit"] == cited_sha
+        assert item["review_request_cited_commit_exists"] is True
+        assert item["review_request_worktree_head"] == head_sha
+        assert item["review_request_branch_contains_cited"] is False
+        assert item["review_request_containing_branches"] == []
+        assert "head_mismatch" in item["review_request_mismatch_reasons"]
+        assert "branch_not_contains_cited" in item["review_request_mismatch_reasons"]
+        assert "not contained by that local branch" in item["reason"]
+        assert "same-run branch-containment evidence" in item["review_head_guidance"]
+    finally:
+        db.close()
+
+
+def test_agent_os_readiness_agent_flow_flags_active_quarantined_targets(
+    tmp_path,
+    monkeypatch,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        codex_home = tmp_path / "codex_home"
+        monkeypatch.setattr(orchestrator, "_codex_automation_roots", lambda: [codex_home])
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {
+                "model": "qwen2.5-coder:7b",
+                "available": True,
+                "installed_models": ["qwen2.5-coder:7b"],
+                "skipped_models": {},
+                "recommendation": None,
+            },
+        )
+        repo = CodeRepo(path=str(tmp_path), host_path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        orchestrator.bootstrap_agent_profiles(db, repo_id=repo.id)
+
+        quarantine_path = tmp_path / "project_ws" / "AgentOps" / "TARGET_THREAD_QUARANTINE.json"
+        quarantine_path.parent.mkdir(parents=True)
+        thread_id = "019e6f30-1648-7921-b6ba-c49c58d0445a"
+        quarantine_path.write_text(
+            json.dumps(
+                {
+                    "targets": [
+                        {
+                            "thread_id": thread_id,
+                            "turn_id": "turn-1",
+                            "status": "CONTROL_PLANE_CONTAINMENT_REQUIRED",
+                            "reason": "Paused automation target continued shared-worktree writes after schedule pause.",
+                            "source": "project_ws/AgentOps/OUT/containment.md",
+                            "required_proof": "Old proof text.",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        session_dir = codex_home / "sessions" / "2026" / "05" / "28"
+        session_dir.mkdir(parents=True)
+        session_path = session_dir / f"rollout-2026-05-28T08-24-42-{thread_id}.jsonl"
+        goal_updated_at = int(datetime.now(timezone.utc).timestamp())
+        session_path.write_text(
+            json.dumps(
+                {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "type": "thread_goal_updated",
+                    "payload": {
+                        "goal": {
+                            "status": "active",
+                            "updatedAt": goal_updated_at,
+                        }
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        fresh_session = datetime.now(timezone.utc).timestamp()
+        os.utime(session_path, (fresh_session, fresh_session))
+        command_run = orchestrator.create_run(db, prompt="hello", repo_id=repo.id)
+        db.commit()
+
+        readiness = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+
+        flow = readiness[orchestrator.AGENT_OS_AGENT_FLOW_KEY]
+        assert flow["quarantined_target_count"] == 1
+        assert flow["quarantined_target_active_count"] == 1
+        assert flow["quarantine_summary"]["target_count"] == 1
+        assert flow["quarantine_summary"]["active_count"] == 1
+        assert flow["quarantine_summary"]["proof_satisfied_count"] == 0
+        assert flow["quarantine_summary"]["termination_required_count"] == 0
+        assert flow["quarantine_summary"]["containment_required_count"] == 1
+        assert flow["quarantine_summary"]["needs_operator_stop_count"] == 0
+        assert flow["quarantine_summary"]["containment_active_count"] == 1
+        assert flow["quarantine_summary"]["proof_window_met_count"] == 0
+        assert flow["quarantine_summary"]["operator_group_counts"]["containment_active"] == 1
+        assert flow["quarantine_summary"]["next_operator_label"] == "Still active"
+        assert flow["quarantine_summary"]["next_operator_handoff_label"] == "Copy containment handoff"
+        assert "Project Autopilot quarantine handoff" in flow["quarantine_summary"]["next_operator_handoff_copy"]
+        trust = flow["control_plane_trust"]
+        assert trust["blocker_count"] == 1
+        assert trust["high_risk_count"] == 1
+        assert trust["category_counts"]["quarantine"] == 1
+        assert trust["next_action_label"] == "Still active"
+        assert trust["next_action_handoff_label"] == "Copy containment handoff"
+        assert trust["items"][0]["kind"] == "quarantined_target"
+        assert flow["quarantine_summary"]["next_check_remaining_minutes"] is not None
+        assert flow["quarantine_summary"]["active_thread_ids"] == [thread_id]
+        assert flow["attention_count"] == 1
+        assert flow["next_action_path"] == "project_ws/AgentOps/TARGET_THREAD_QUARANTINE.json"
+        assert flow["next_action_handoff_label"] == "Copy containment handoff"
+        assert flow["items"][0]["status"] == orchestrator.AGENT_FLOW_STATUS_QUARANTINED_TARGET_ACTIVE
+        assert flow["items"][0]["action_label"] == "Review target"
+        assert flow["items"][0]["quarantine_thread_id"] == thread_id
+        assert flow["items"][0]["quarantine_status"] == "CONTROL_PLANE_CONTAINMENT_REQUIRED"
+        assert flow["items"][0]["quarantine_session_goal_status"] == "active"
+        assert flow["items"][0]["quarantine_session_age_minutes"] < orchestrator.AGENT_FLOW_QUARANTINE_PROOF_MINUTES
+        assert flow["items"][0]["quarantine_activity_state"] == "active"
+        assert flow["items"][0]["quarantine_proof_window_minutes"] == orchestrator.AGENT_FLOW_QUARANTINE_PROOF_MINUTES
+        assert 0 < flow["items"][0]["quarantine_proof_remaining_minutes"] <= orchestrator.AGENT_FLOW_QUARANTINE_PROOF_MINUTES
+        assert flow["items"][0]["quarantine_proof_satisfied"] is False
+        assert flow["items"][0]["quarantine_operator_group"] == "containment_active"
+        assert flow["items"][0]["quarantine_operator_label"] == "Still active"
+        assert flow["items"][0]["quarantine_operator_handoff_label"] == "Copy containment handoff"
+        assert flow["items"][0]["quarantine_operator_handoff_mutates_control_plane"] is False
+        assert "Target thread: " + thread_id in flow["items"][0]["quarantine_operator_handoff_copy"]
+        assert "Autopilot action: read-only handoff" in flow["items"][0]["quarantine_operator_handoff_copy"]
+        assert flow["quarantined_targets"][0]["operator_group"] == "containment_active"
+        assert flow["quarantined_targets"][0]["operator_handoff_mutates_control_plane"] is False
+        assert "do not trust its downstream evidence" in flow["quarantined_targets"][0]["operator_handoff_instruction"]
+        assert "later than" in flow["items"][0]["quarantine_required_proof"]
+        assert "do not trust related push" in flow["items"][0]["quarantine_guidance"]
+
+        inbox = readiness["operator_inbox"]
+        assert inbox["agent_flow_count"] == 1
+        assert inbox["next_action_kind"] == orchestrator.AGENT_OPERATOR_INBOX_ITEM_AGENT_FLOW
+        assert inbox["next_action_agent"] == "AgentOps"
+        assert "Quarantined target" in inbox["next_action_detail"]
+        assert inbox["next_action_handoff_label"] == "Copy containment handoff"
+        assert "Target thread: " + thread_id in inbox["next_action_handoff_copy"]
+
+        payload = orchestrator.append_user_message(
+            db,
+            command_run.run_id,
+            content="/doctor",
+        )
+        reply = payload["messages"][-1]["content"]
+        assert "active quarantined target" in reply
+        assert f"target {thread_id[:8]}" in reply
+        assert "proof remaining" in reply
+
+        stop_thread_id = "019e6808-d64b-7303-a4cb-b15267151190"
+        stop_session_path = session_dir / f"rollout-2026-05-28T08-24-43-{stop_thread_id}.jsonl"
+        stop_session_path.write_text(
+            json.dumps(
+                {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "type": "thread_goal_updated",
+                    "payload": {
+                        "goal": {
+                            "status": "active",
+                            "updatedAt": goal_updated_at,
+                        }
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        os.utime(stop_session_path, (fresh_session, fresh_session))
+        data = json.loads(quarantine_path.read_text(encoding="utf-8"))
+        data["targets"].append(
+            {
+                "thread_id": stop_thread_id,
+                "turn_id": "turn-2",
+                "status": "CONTROL_PLANE_TERMINATION_REQUIRED",
+                "reason": "Control-plane target kept writing after a stop instruction.",
+                "source": "project_ws/AgentOps/OUT/termination.md",
+                "required_proof": "Stop target proof text.",
+            }
+        )
+        quarantine_path.write_text(json.dumps(data), encoding="utf-8")
+        readiness_stop = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+        flow_stop = readiness_stop[orchestrator.AGENT_OS_AGENT_FLOW_KEY]
+        assert flow_stop["quarantine_summary"]["needs_operator_stop_count"] == 1
+        assert flow_stop["quarantine_summary"]["containment_active_count"] == 1
+        assert flow_stop["quarantine_summary"]["next_operator_group"] == "needs_operator_stop"
+        assert flow_stop["quarantine_summary"]["next_operator_handoff_label"] == "Copy stop handoff"
+        assert flow_stop["control_plane_trust"]["blocker_count"] == 2
+        assert flow_stop["control_plane_trust"]["high_risk_count"] == 2
+        assert flow_stop["control_plane_trust"]["next_action_label"] == "Needs operator stop"
+        assert flow_stop["control_plane_trust"]["next_action_kind"] == "quarantined_target"
+        assert flow_stop["quarantined_targets"][0]["thread_id"] == stop_thread_id
+        assert flow_stop["quarantined_targets"][0]["operator_priority"] == 0
+        assert "Use the Codex control plane to stop" in flow_stop["quarantined_targets"][0]["operator_handoff_instruction"]
+        assert flow_stop["quarantined_targets"][1]["operator_group"] == "containment_active"
+        assert flow_stop["items"][0]["quarantine_thread_id"] == stop_thread_id
+        assert flow_stop["items"][0]["quarantine_operator_group"] == "needs_operator_stop"
+        assert flow_stop["items"][0]["quarantine_operator_label"] == "Needs operator stop"
+        assert flow_stop["items"][0]["quarantine_operator_handoff_label"] == "Copy stop handoff"
+        assert "do not use Autopilot, shell, Docker" in flow_stop["items"][0]["quarantine_operator_handoff_copy"]
+
+        data["targets"] = [
+            {
+                **data["targets"][0],
+                "status": "CONTROL_PLANE_TERMINATION_REQUIRED",
+            }
+        ]
+        quarantine_path.write_text(json.dumps(data), encoding="utf-8")
+        old_session = datetime.now(timezone.utc).timestamp() - (
+            orchestrator.AGENT_FLOW_QUARANTINE_PROOF_MINUTES + 1
+        ) * 60
+        os.utime(session_path, (old_session, old_session))
+        readiness_after = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+        flow_after = readiness_after[orchestrator.AGENT_OS_AGENT_FLOW_KEY]
+        assert flow_after["quarantined_target_count"] == 1
+        assert flow_after["quarantined_target_active_count"] == 0
+        assert flow_after["quarantine_summary"]["active_count"] == 0
+        assert flow_after["quarantine_summary"]["proof_satisfied_count"] == 1
+        assert flow_after["quarantine_summary"]["proof_window_met_count"] == 1
+        assert flow_after["quarantine_summary"]["proof_satisfied_thread_ids"] == [thread_id]
+        assert flow_after["quarantine_summary"]["next_check_remaining_minutes"] is None
+        assert flow_after["attention_count"] == 0
+        assert flow_after["quarantined_targets"][0]["activity_state"] == "proof_window_satisfied"
+        assert flow_after["quarantined_targets"][0]["proof_satisfied"] is True
+        assert flow_after["quarantined_targets"][0]["proof_window_remaining_minutes"] == 0
+        assert flow_after["quarantined_targets"][0]["operator_group"] == "proof_window_met"
+        assert flow_after["quarantined_targets"][0]["operator_handoff_label"] == "Copy proof-review handoff"
+    finally:
+        db.close()
+
+
+def test_agent_os_readiness_agent_flow_prioritizes_control_plane_over_malformed_requests(
+    tmp_path,
+    monkeypatch,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        codex_home = tmp_path / "codex_home"
+        monkeypatch.setattr(orchestrator, "_codex_automation_roots", lambda: [codex_home])
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {
+                "model": "qwen2.5-coder:7b",
+                "available": True,
+                "installed_models": ["qwen2.5-coder:7b"],
+                "skipped_models": {},
+                "recommendation": None,
+            },
+        )
+        repo = CodeRepo(path=str(tmp_path), host_path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        orchestrator.bootstrap_agent_profiles(db, repo_id=repo.id)
+
+        quarantine_path = tmp_path / "project_ws" / "AgentOps" / "TARGET_THREAD_QUARANTINE.json"
+        quarantine_path.parent.mkdir(parents=True)
+        thread_id = "019e6808-d64b-7303-a4cb-b15267151190"
+        quarantine_path.write_text(
+            json.dumps(
+                {
+                    "targets": [
+                        {
+                            "thread_id": thread_id,
+                            "turn_id": "turn-1",
+                            "status": "CONTROL_PLANE_TERMINATION_REQUIRED",
+                            "reason": "Control-plane target kept writing after a stop instruction.",
+                            "source": "project_ws/AgentOps/OUT/termination.md",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        session_dir = codex_home / "sessions" / "2026" / "05" / "28"
+        session_dir.mkdir(parents=True)
+        session_path = session_dir / f"rollout-2026-05-28T08-24-43-{thread_id}.jsonl"
+        session_path.write_text(
+            json.dumps(
+                {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "type": "thread_goal_updated",
+                    "payload": {
+                        "goal": {
+                            "status": "active",
+                            "updatedAt": int(datetime.now(timezone.utc).timestamp()),
+                        }
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        fresh_session = datetime.now(timezone.utc).timestamp()
+        os.utime(session_path, (fresh_session, fresh_session))
+
+        malformed_dir = tmp_path / "project_ws" / "PM" / "IN"
+        malformed_dir.mkdir(parents=True)
+        malformed_path = malformed_dir / "20260531-044203Z-from-SDBA-to-PM-refresh-needed.md"
+        malformed_path.write_text(
+            "\n".join(
+                [
+                    "From: SDBA",
+                    "To: PM",
+                    "Created: 2026-05-31T04:42:03Z",
+                    "Reply-To: project_ws/SDBA/OUT/report.md",
+                    "Priority: High",
+                    "Backlog-ID: PM-071",
+                    "Push Intent: none",
+                    "",
+                    "## Request",
+                    "Please refresh the stale owner packet.",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        old_request = datetime.now(timezone.utc).timestamp() - 120
+        os.utime(malformed_path, (old_request, old_request))
+
+        readiness = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+
+        flow = readiness[orchestrator.AGENT_OS_AGENT_FLOW_KEY]
+        assert flow["quarantined_target_active_count"] == 1
+        assert flow["shape_invalid_count"] == 1
+        assert flow["attention_count"] == 2
+        assert flow["control_plane_trust"]["next_action_label"] == "Needs operator stop"
+        assert flow["items"][0]["status"] == orchestrator.AGENT_FLOW_STATUS_QUARANTINED_TARGET_ACTIVE
+        assert flow["items"][0]["quarantine_thread_id"] == thread_id
+        assert flow["items"][0]["quarantine_operator_group"] == "needs_operator_stop"
+        assert flow["items"][0]["quarantine_operator_handoff_label"] == "Copy stop handoff"
+        assert flow["next_action_path"] == "project_ws/AgentOps/TARGET_THREAD_QUARANTINE.json"
+        assert flow["next_action_handoff_label"] == "Copy stop handoff"
+        assert "do not use Autopilot" in flow["next_action_handoff_copy"]
+        assert flow["items"][1]["status"] == orchestrator.AGENT_FLOW_STATUS_SHAPE_INVALID
+
+        inbox = readiness["operator_inbox"]
+        assert inbox["agent_flow_count"] == 2
+        assert inbox["control_plane_trust_summary"]["blocker_count"] == 1
+        assert inbox["control_plane_trust_summary"]["high_risk_count"] == 1
+        assert inbox["control_plane_trust_summary"]["next_action_label"] == "Needs operator stop"
+        assert inbox["control_plane_trust_summary"]["next_action_handoff_label"] == "Copy stop handoff"
+        assert inbox["next_action_kind"] == orchestrator.AGENT_OPERATOR_INBOX_ITEM_AGENT_FLOW
+        assert inbox["next_action_agent"] == "AgentOps"
+        assert "Quarantined target" in inbox["next_action_detail"]
+        assert inbox["next_action_handoff_label"] == "Copy stop handoff"
+    finally:
+        db.close()
+
+
+def test_agent_os_readiness_agent_flow_flags_paused_automation_activity(
+    tmp_path,
+    monkeypatch,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        codex_home = tmp_path / "codex_home"
+        monkeypatch.setattr(orchestrator, "_codex_automation_roots", lambda: [codex_home])
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {
+                "model": "qwen2.5-coder:7b",
+                "available": True,
+                "installed_models": ["qwen2.5-coder:7b"],
+                "skipped_models": {},
+                "recommendation": None,
+            },
+        )
+        automation_dir = codex_home / "automations" / "paused-safety-loop"
+        automation_dir.mkdir(parents=True)
+        thread_id = "019e6efe-1066-7000-a6fb-606dddbee4fe"
+        (automation_dir / "automation.toml").write_text(
+            "\n".join(
+                [
+                    'id = "paused-safety-loop"',
+                    'kind = "heartbeat"',
+                    'name = "Paused Safety Loop"',
+                    f'prompt = "Workspace invariant: use {tmp_path.as_posix()} directly as the repository."',
+                    'status = "PAUSED"',
+                    'rrule = "FREQ=MINUTELY;INTERVAL=15"',
+                    f'target_thread_id = "{thread_id}"',
+                    "updated_at = 1780157039346",
+                    f'cwds = ["{tmp_path.as_posix()}"]',
+                ]
+            ),
+            encoding="utf-8",
+        )
+        session_dir = codex_home / "sessions" / "2026" / "05" / "28"
+        session_dir.mkdir(parents=True)
+        session_path = session_dir / f"rollout-2026-05-28T07-30-04-{thread_id}.jsonl"
+        session_path.write_text(
+            json.dumps(
+                {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "type": "thread_goal_updated",
+                    "payload": {
+                        "goal": {
+                            "status": "active",
+                            "updatedAt": int(datetime.now(timezone.utc).timestamp()),
+                        }
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        fresh_session = datetime.now(timezone.utc).timestamp()
+        os.utime(session_path, (fresh_session, fresh_session))
+
+        (tmp_path / "project_ws" / "AgentOps").mkdir(parents=True)
+        repo = CodeRepo(path=str(tmp_path), host_path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        orchestrator.bootstrap_agent_profiles(db, repo_id=repo.id)
+        command_run = orchestrator.create_run(db, prompt="hello", repo_id=repo.id)
+        db.commit()
+
+        readiness = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+
+        flow = readiness[orchestrator.AGENT_OS_AGENT_FLOW_KEY]
+        assert flow["paused_automation_activity_count"] == 1
+        assert flow["paused_automation_uncovered_count"] == 1
+        assert flow["control_plane_trust"]["blocker_count"] == 1
+        assert flow["control_plane_trust"]["category_counts"]["paused_automation"] == 1
+        assert flow["control_plane_trust"]["next_action_label"] == "Verify paused automation"
+        assert flow["control_plane_trust"]["next_action_kind"] == "paused_automation"
+        assert flow["paused_automation_activity"][0]["operator_handoff_label"] == "Copy pause handoff"
+        assert flow["paused_automation_activity"][0]["operator_handoff_mutates_control_plane"] is False
+        assert "Project Autopilot paused-automation handoff" in flow["paused_automation_activity"][0]["operator_handoff_copy"]
+        assert "Automation id: paused-safety-loop" in flow["paused_automation_activity"][0]["operator_handoff_copy"]
+        assert flow["paused_automation_activity"][0]["covered_by_active_quarantine"] is False
+        assert flow["attention_count"] == 1
+        assert flow["items"][0]["status"] == orchestrator.AGENT_FLOW_STATUS_PAUSED_AUTOMATION_ACTIVE
+        assert flow["items"][0]["action_label"] == "Review automation"
+        assert flow["items"][0]["paused_automation_id"] == "paused-safety-loop"
+        assert flow["items"][0]["paused_automation_status"] == "PAUSED"
+        assert flow["items"][0]["paused_automation_thread_id"] == thread_id
+        assert flow["items"][0]["paused_automation_session_age_minutes"] < 1
+        assert flow["items"][0]["paused_automation_threshold_minutes"] == 30.0
+        assert "paused schedule should not keep writing" in flow["items"][0]["paused_automation_guidance"]
+        assert flow["items"][0]["paused_automation_operator_handoff_label"] == "Copy pause handoff"
+        assert flow["items"][0]["paused_automation_operator_handoff_mutates_control_plane"] is False
+        assert "no automation or control-plane mutation" in flow["items"][0]["paused_automation_operator_handoff_copy"]
+        assert readiness["operator_inbox"]["next_action_path"].endswith("automation.toml")
+
+        payload = orchestrator.append_user_message(
+            db,
+            command_run.run_id,
+            content="/doctor",
+        )
+        reply = payload["messages"][-1]["content"]
+        assert "uncovered paused automation target" in reply
+        assert "automation paused-safety-loop" in reply
+
+        quarantine_path = tmp_path / "project_ws" / "AgentOps" / "TARGET_THREAD_QUARANTINE.json"
+        quarantine_path.write_text(
+            json.dumps(
+                {
+                    "targets": [
+                        {
+                            "thread_id": thread_id,
+                            "turn_id": "turn-1",
+                            "status": "CONTROL_PLANE_CONTAINMENT_REQUIRED",
+                            "reason": "Paused automation already routed to quarantine.",
+                            "source": "project_ws/AgentOps/OUT/containment.md",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        readiness_covered = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+        flow_covered = readiness_covered[orchestrator.AGENT_OS_AGENT_FLOW_KEY]
+        assert flow_covered["paused_automation_activity_count"] == 1
+        assert flow_covered["paused_automation_uncovered_count"] == 0
+        assert flow_covered["control_plane_trust"]["blocker_count"] == 2
+        assert flow_covered["control_plane_trust"]["category_counts"]["quarantine"] == 1
+        assert flow_covered["control_plane_trust"]["category_counts"]["paused_automation"] == 1
+        assert flow_covered["paused_automation_activity"][0]["covered_by_active_quarantine"] is True
+        assert flow_covered["paused_automation_activity"][0]["operator_handoff_label"] == "Copy pause handoff"
+
+        old_session = datetime.now(timezone.utc).timestamp() - 31 * 60
+        os.utime(session_path, (old_session, old_session))
+        readiness_after = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+        flow_after = readiness_after[orchestrator.AGENT_OS_AGENT_FLOW_KEY]
+        assert flow_after["paused_automation_activity_count"] == 0
+        assert flow_after["paused_automation_uncovered_count"] == 0
+        assert flow_after["attention_count"] == 0
+    finally:
+        db.close()
+
+
+def test_agent_os_readiness_agent_flow_flags_worktree_hygiene(
+    tmp_path,
+    monkeypatch,
+):
+    db = _sqlite_autonomy_session()
+    worktree_paths: list[Path] = []
+    try:
+        monkeypatch.setattr(orchestrator, "_codex_automation_roots", lambda: [])
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {
+                "model": "qwen2.5-coder:7b",
+                "available": True,
+                "installed_models": ["qwen2.5-coder:7b"],
+                "skipped_models": {},
+                "recommendation": None,
+            },
+        )
+
+        def git(args: list[str], cwd: Path = tmp_path) -> str:
+            proc = orchestrator._git(cwd, args, timeout=60)
+            assert proc.returncode == 0, proc.stderr or proc.stdout
+            return (proc.stdout or "").strip()
+
+        git(["init"])
+        git(["config", "user.email", "test@example.com"])
+        git(["config", "user.name", "Test User"])
+        (tmp_path / "project_ws" / "PM").mkdir(parents=True)
+        (tmp_path / "project_ws" / "PM" / ".gitkeep").write_text("", encoding="utf-8")
+        (tmp_path / "README.md").write_text("base\n", encoding="utf-8")
+        git(["add", "README.md", "project_ws/PM/.gitkeep"])
+        git(["commit", "-m", "initial"])
+        git(["branch", "-M", "main"])
+
+        dirty_worktree = tmp_path.parent / f"{tmp_path.name}-dirty-worktree"
+        detached_worktree = tmp_path.parent / f"{tmp_path.name}-detached-worktree"
+        worktree_paths.extend([dirty_worktree, detached_worktree])
+        git(["worktree", "add", "-b", "dirty-agent", str(dirty_worktree), "main"])
+        (dirty_worktree / "README.md").write_text("dirty\n", encoding="utf-8")
+
+        git(["checkout", "-b", "detached-source"])
+        (tmp_path / "detached.txt").write_text("detached\n", encoding="utf-8")
+        git(["add", "detached.txt"])
+        git(["commit", "-m", "detached source"])
+        detached_sha = git(["rev-parse", "HEAD"])
+        git(["checkout", "main"])
+        git(["worktree", "add", "--detach", str(detached_worktree), detached_sha])
+        git(["branch", "-D", "detached-source"])
+
+        repo = CodeRepo(path=str(tmp_path), host_path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        orchestrator.bootstrap_agent_profiles(db, repo_id=repo.id)
+        command_run = orchestrator.create_run(db, prompt="hello", repo_id=repo.id)
+        db.commit()
+
+        readiness = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+
+        flow = readiness[orchestrator.AGENT_OS_AGENT_FLOW_KEY]
+        assert flow["dirty_worktree_count"] == 1
+        assert flow["detached_worktree_count"] == 1
+        assert flow["detached_uncontained_worktree_count"] == 1
+        assert flow["worktree_problem_count"] == 2
+        assert flow["attention_count"] == 2
+        assert flow["control_plane_trust"]["blocker_count"] == 2
+        assert flow["control_plane_trust"]["category_counts"]["detached_worktree"] == 1
+        assert flow["control_plane_trust"]["category_counts"]["dirty_worktree"] == 1
+        assert flow["control_plane_trust"]["next_action_label"] == "Bind worktree to branch"
+        assert flow["control_plane_trust"]["items"][0]["kind"] == "detached_worktree"
+        assert flow["control_plane_trust"]["items"][0]["handoff_label"] == "Copy branch-bind handoff"
+        assert "Project Autopilot worktree handoff" in flow["control_plane_trust"]["items"][0]["handoff_copy"]
+        dirty_trust_item = next(
+            item
+            for item in flow["control_plane_trust"]["items"]
+            if item["kind"] == "dirty_worktree"
+        )
+        assert dirty_trust_item["handoff_label"] == "Copy dirty-worktree handoff"
+        assert "publish, park, or explicitly discard" in dirty_trust_item["handoff_copy"]
+        statuses = [item["status"] for item in flow["items"]]
+        assert orchestrator.AGENT_FLOW_STATUS_DETACHED_UNCONTAINED_WORKTREE in statuses
+        assert orchestrator.AGENT_FLOW_STATUS_DIRTY_WORKTREE in statuses
+        detached_item = next(
+            item
+            for item in flow["items"]
+            if item["status"] == orchestrator.AGENT_FLOW_STATUS_DETACHED_UNCONTAINED_WORKTREE
+        )
+        assert detached_item["action_label"] == "Review worktree"
+        assert detached_item["worktree_name"] == detached_worktree.name
+        assert detached_item["worktree_detached_uncontained"] is True
+        assert detached_item["worktree_containing_ref_count"] == 0
+        assert detached_item["worktree_operator_handoff_label"] == "Copy branch-bind handoff"
+        assert "Detached without containing ref: yes" in detached_item["worktree_operator_handoff_copy"]
+        assert "no worktree cleanup" in detached_item["worktree_operator_handoff_copy"]
+        dirty_item = next(
+            item
+            for item in flow["items"]
+            if item["status"] == orchestrator.AGENT_FLOW_STATUS_DIRTY_WORKTREE
+        )
+        assert dirty_item["worktree_name"] == dirty_worktree.name
+        assert dirty_item["worktree_dirty"] is True
+        assert dirty_item["worktree_change_count"] == 1
+        assert any("README.md" in change for change in dirty_item["worktree_changes"])
+        assert dirty_item["worktree_operator_handoff_label"] == "Copy dirty-worktree handoff"
+        assert "Changes: 1" in dirty_item["worktree_operator_handoff_copy"]
+        assert "README.md" in dirty_item["worktree_operator_handoff_copy"]
+
+        inbox = readiness["operator_inbox"]
+        assert inbox["agent_flow_count"] == 2
+        assert inbox["next_action_kind"] == orchestrator.AGENT_OPERATOR_INBOX_ITEM_AGENT_FLOW
+        assert inbox["next_action_agent"] == "Worktrees"
+        assert inbox["next_action_handoff_label"] == "Copy branch-bind handoff"
+        assert "Project Autopilot worktree handoff" in inbox["next_action_handoff_copy"]
+
+        payload = orchestrator.append_user_message(
+            db,
+            command_run.run_id,
+            content="/doctor",
+        )
+        reply = payload["messages"][-1]["content"]
+        assert "dirty worktree" in reply
+        assert "detached uncontained worktree" in reply
+        assert "Control-plane trust blockers: 2 total" in reply
+        assert f"worktree {detached_worktree.name}" in reply
+    finally:
+        for path in worktree_paths:
+            if path.exists():
+                orchestrator._git(tmp_path, ["worktree", "remove", "--force", str(path)], timeout=30)
+        db.close()
+
+
+def test_agent_flow_worktree_health_uses_bounded_parallel_fanout(
+    tmp_path,
+    monkeypatch,
+):
+    candidates = [
+        {
+            "worktree": str(tmp_path / f"missing-worktree-{index}"),
+            "declared_head": "",
+            "declared_branch_ref": "",
+            "declared_detached": False,
+        }
+        for index in range(orchestrator.AGENT_FLOW_WORKTREE_SCAN_WORKERS + 3)
+    ]
+    monkeypatch.setattr(
+        orchestrator,
+        "_agent_flow_worktree_candidates",
+        lambda runtime_path: (candidates, len(candidates), False),
+    )
+    executor_calls: list[tuple[str, int]] = []
+
+    class RecordingExecutor:
+        def __init__(self, *, max_workers: int):
+            executor_calls.append(("workers", max_workers))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def map(self, func, items):
+            materialized = list(items)
+            executor_calls.append(("items", len(materialized)))
+            return [func(item) for item in materialized]
+
+    monkeypatch.setattr(
+        orchestrator.concurrent.futures,
+        "ThreadPoolExecutor",
+        RecordingExecutor,
+    )
+
+    health = orchestrator._agent_flow_worktree_health(tmp_path)
+
+    assert executor_calls == [
+        ("workers", orchestrator.AGENT_FLOW_WORKTREE_SCAN_WORKERS),
+        ("items", len(candidates)),
+    ]
+    assert health["scan_worker_count"] == orchestrator.AGENT_FLOW_WORKTREE_SCAN_WORKERS
+    assert health["candidate_count"] == len(candidates)
+    assert health["problem_count"] == len(candidates)
+
+
+def test_agent_os_readiness_agent_flow_flags_malformed_mailbox_requests(
+    tmp_path,
+    monkeypatch,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        monkeypatch.setattr(orchestrator, "_codex_automation_roots", lambda: [])
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {
+                "model": "qwen2.5-coder:7b",
+                "available": True,
+                "installed_models": ["qwen2.5-coder:7b"],
+                "skipped_models": {},
+                "recommendation": None,
+            },
+        )
+        repo = CodeRepo(path=str(tmp_path), host_path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        orchestrator.bootstrap_agent_profiles(db, repo_id=repo.id)
+
+        in_dir = tmp_path / "project_ws" / "SDBA" / "IN"
+        in_dir.mkdir(parents=True)
+        request_path = in_dir / "20260530-231954Z-from-SDBA-to-PM-deadlock-addendum.md"
+        request_path.write_text(
+            "\n".join(
+                [
+                    "From: SDBA",
+                    "To: PM",
+                    "Created: 2026-05-30T23:19:54Z",
+                    "Reply-To: project_ws/SDBA/OUT/20260530-231954Z-report.md",
+                    "Priority: normal",
+                    "Backlog-ID: PM-071",
+                    "Push Intent: not authorized",
+                    "",
+                    "## Request",
+                    "Please choose the durable owner lane for test DB deadlock prevention.",
+                    "",
+                    "## Expected Deliverable",
+                    "Owner decision.",
+                    "",
+                    "## Success Criteria",
+                    "- PM chooses one owner path.",
+                    "",
+                    "## Context / Links",
+                    "- project_ws/SDBA/OUT/20260530-231954Z-report.md",
+                    "",
+                    "## Safety Constraints",
+                    "- Read-only.",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        old_request = datetime.now(timezone.utc).timestamp() - 120
+        os.utime(request_path, (old_request, old_request))
+        command_run = orchestrator.create_run(db, prompt="hello", repo_id=repo.id)
+        db.commit()
+
+        readiness = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+
+        flow = readiness[orchestrator.AGENT_OS_AGENT_FLOW_KEY]
+        assert flow["status"] == orchestrator.AGENT_OS_READINESS_CHECK_WARNING
+        assert flow["pending_count"] == 1
+        assert flow["stable_pending_count"] == 1
+        assert flow["shape_invalid_count"] == 1
+        assert flow["shape_invalid_pending_count"] == 1
+        assert flow["items"][0]["status"] == "shape_invalid"
+        assert flow["items"][0]["mailbox_shape_missing"] == ["Dependencies", "Peer Review / Push"]
+        assert flow["items"][0]["mailbox_shape_guidance"].startswith("Publish a corrected")
+        assert "From" in flow["items"][0]["mailbox_shape_required"]
+        assert "corrected superseding request" in flow["items"][0]["reason"]
+
+        inbox = readiness["operator_inbox"]
+        assert inbox["agent_flow_count"] == 1
+        assert inbox["next_action"] == orchestrator.AGENT_OPERATOR_INBOX_ACTION_REVIEW_AGENT_FLOW
+        assert inbox["next_action_kind"] == orchestrator.AGENT_OPERATOR_INBOX_ITEM_AGENT_FLOW
+        assert "missing or invalid fields" in inbox["next_action_detail"]
+
+        payload = orchestrator.append_user_message(
+            db,
+            command_run.run_id,
+            content="/doctor",
+        )
+        reply = payload["messages"][-1]["content"]
+        assert "Agent flow:" in reply
+        assert "1 malformed" in reply
+        assert "shape invalid" in reply
+    finally:
+        db.close()
+
+
+def test_agent_os_readiness_agent_flow_suppresses_superseded_malformed_requests(
+    tmp_path,
+    monkeypatch,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        monkeypatch.setattr(orchestrator, "_codex_automation_roots", lambda: [])
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {
+                "model": "qwen2.5-coder:7b",
+                "available": True,
+                "installed_models": ["qwen2.5-coder:7b"],
+                "skipped_models": {},
+                "recommendation": None,
+            },
+        )
+        repo = CodeRepo(path=str(tmp_path), host_path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        orchestrator.bootstrap_agent_profiles(db, repo_id=repo.id)
+
+        in_dir = tmp_path / "project_ws" / "PM" / "IN"
+        in_dir.mkdir(parents=True)
+        malformed = in_dir / "20260531-023154Z-from-MLOps-to-PM-anchor-fix.md"
+        malformed.write_text(
+            "\n".join(
+                [
+                    "From: MLOps",
+                    "To: PM",
+                    "Created: 2026-05-31T02:31:54Z",
+                    "Reply-To: project_ws/MLOps/OUT/report.md",
+                    "Priority: High",
+                    "Backlog-ID: PROPOSED",
+                    "Push Intent: none",
+                    "",
+                    "## Request",
+                    "Malformed on purpose.",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        malformed_hash = orchestrator._agent_flow_file_sha256(malformed)
+        corrected = in_dir / "20260531-023412Z-from-MLOps-to-PM-anchor-fix-correction.md"
+        corrected.write_text(
+            "\n".join(
+                [
+                    "From: MLOps",
+                    "To: PM",
+                    "Created: 2026-05-31T02:34:12Z",
+                    "Reply-To: project_ws/MLOps/OUT/report-correction.md",
+                    "Priority: High",
+                    "Backlog-ID: PROPOSED",
+                    "Push Intent: none",
+                    "",
+                    "## Request",
+                    (
+                        "This corrected request supersedes malformed same-run request "
+                        f"`project_ws/PM/IN/{malformed.name}` with SHA256 `{malformed_hash}`."
+                    ),
+                    "",
+                    "## Expected Deliverable",
+                    "Route the corrected bounded task.",
+                    "",
+                    "## Success Criteria",
+                    "- PM processes the corrected request only.",
+                    "",
+                    "## Context / Links",
+                    "- project_ws/MLOps/OUT/report-correction.md",
+                    "",
+                    "## Safety Constraints",
+                    "- Read-only mailbox routing.",
+                    "",
+                    "## Dependencies",
+                    "- None.",
+                    "",
+                    "## Peer Review / Push",
+                    "None requested.",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        old_request = datetime.now(timezone.utc).timestamp() - 120
+        os.utime(malformed, (old_request, old_request))
+        os.utime(corrected, (old_request + 30, old_request + 30))
+
+        readiness = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+
+        flow = readiness[orchestrator.AGENT_OS_AGENT_FLOW_KEY]
+        assert flow["pending_count"] == 1
+        assert flow["stable_pending_count"] == 1
+        assert flow["shape_invalid_count"] == 0
+        assert flow["shape_invalid_pending_count"] == 0
+        assert flow["superseded_pending_count"] == 1
+        assert flow["superseded_shape_invalid_count"] == 1
+        assert "superseded request(s) were recognized" in flow["detail"]
+        assert flow["items"][0]["status"] == orchestrator.AGENT_FLOW_STATUS_STABLE_PENDING
+        assert flow["items"][0]["path"] == f"project_ws/PM/IN/{corrected.name}"
+        assert readiness["operator_inbox"]["next_action_path"] == flow["items"][0]["path"]
+    finally:
+        db.close()
+
+
+def test_agent_os_readiness_agent_flow_adds_stale_pending_request_handoff(
+    tmp_path,
+    monkeypatch,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        monkeypatch.setattr(orchestrator, "_codex_automation_roots", lambda: [])
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {
+                "model": "qwen2.5-coder:7b",
+                "available": True,
+                "installed_models": ["qwen2.5-coder:7b"],
+                "skipped_models": {},
+                "recommendation": None,
+            },
+        )
+        repo = CodeRepo(path=str(tmp_path), host_path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        orchestrator.bootstrap_agent_profiles(db, repo_id=repo.id)
+
+        in_dir = tmp_path / "project_ws" / "Risk" / "IN"
+        in_dir.mkdir(parents=True)
+        request_path = in_dir / "20260531-041500Z-from-PM-to-Risk-stale-runtime-review.md"
+        request_path.write_text(
+            "\n".join(
+                [
+                    "From: PM",
+                    "To: Risk",
+                    "Created: 2026-05-31T04:15:00Z",
+                    "Reply-To: project_ws/PM/OUT/20260531-041500Z-report.md",
+                    "Priority: High",
+                    "Backlog-ID: PM-STALE",
+                    "Push Intent: none",
+                    "",
+                    "## Request",
+                    "Review the stale runtime-source trust blocker without taking runtime action.",
+                    "",
+                    "## Expected Deliverable",
+                    "Risk OUT disposition with exact request SHA.",
+                    "",
+                    "## Success Criteria",
+                    "- Risk names whether the blocker still applies.",
+                    "",
+                    "## Context / Links",
+                    "- project_ws/PM/OUT/20260531-041500Z-report.md",
+                    "",
+                    "## Safety Constraints",
+                    "Read-only review. No runtime, broker, DB, git, push, merge, release, or deploy action.",
+                    "",
+                    "## Dependencies",
+                    "None.",
+                    "",
+                    "## Peer Review / Push",
+                    "No push requested.",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        old_request = datetime.now(timezone.utc).timestamp() - 22 * 60
+        os.utime(request_path, (old_request, old_request))
+        request_hash = orchestrator._agent_flow_file_sha256(request_path)
+        command_run = orchestrator.create_run(db, prompt="hello", repo_id=repo.id)
+        db.commit()
+
+        readiness = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+        flow = readiness[orchestrator.AGENT_OS_AGENT_FLOW_KEY]
+        item = flow["items"][0]
+
+        assert flow["stable_pending_count"] == 1
+        assert item["status"] == orchestrator.AGENT_FLOW_STATUS_STABLE_PENDING
+        assert item["mailbox_request_hash"] == request_hash
+        assert item["mailbox_request_from"] == "PM"
+        assert item["mailbox_request_to"] == "Risk"
+        assert item["mailbox_request_backlog_id"] == "PM-STALE"
+        assert item["mailbox_request_push_intent"] == "none"
+        assert item["mailbox_request_stale"] is True
+        assert item["mailbox_request_operator_handoff_label"] == "Copy stale-request handoff"
+        assert item["mailbox_request_operator_handoff_mutates_control_plane"] is False
+        assert "Project Autopilot mailbox request handoff" in item["mailbox_request_operator_handoff_copy"]
+        assert f"Request SHA256: {request_hash}" in item["mailbox_request_operator_handoff_copy"]
+        assert "processed.jsonl records this request by exact SHA256" in item["mailbox_request_operator_handoff_copy"]
+        assert "no mailbox edit" in item["mailbox_request_operator_handoff_copy"]
+
+        inbox = readiness["operator_inbox"]
+        assert inbox["next_action_handoff_label"] == "Copy stale-request handoff"
+        assert f"Request SHA256: {request_hash}" in inbox["next_action_handoff_copy"]
+
+        payload = orchestrator.append_user_message(
+            db,
+            command_run.run_id,
+            content="/doctor",
+        )
+        reply = payload["messages"][-1]["content"]
+        assert "stale request" in reply
+        assert f"request sha {request_hash[:10]}" in reply
+    finally:
+        db.close()
+
+
+def test_agent_flow_preview_backlog_summarizes_hidden_pending_lanes():
+    items = [
+        {
+            "status": orchestrator.AGENT_FLOW_STATUS_QUARANTINED_TARGET_ACTIVE,
+            "agent": "AgentOps",
+            "path": "project_ws/AgentOps/TARGET_THREAD_QUARANTINE.json",
+        },
+        {
+            "status": orchestrator.AGENT_FLOW_STATUS_DIRTY_WORKTREE,
+            "agent": "Worktrees",
+            "path": ".",
+        },
+        {
+            "status": orchestrator.AGENT_FLOW_STATUS_STALE_LOCK_CANDIDATE,
+            "agent": "Risk",
+            "path": "project_ws/Risk/OUT/_state/run.lock",
+        },
+        {
+            "status": orchestrator.AGENT_FLOW_STATUS_STABLE_PENDING,
+            "agent": "Risk",
+            "path": "project_ws/Risk/IN/request.md",
+            "open_path": str(Path("project_ws/Risk/IN/request.md")),
+            "reason": "Risk has an old request waiting.",
+            "action_label": "Open request",
+            "age_minutes": 951,
+        },
+        {
+            "status": orchestrator.AGENT_FLOW_STATUS_STABLE_PENDING,
+            "agent": "PM",
+            "path": "project_ws/PM/IN/request.md",
+            "open_path": str(Path("project_ws/PM/IN/request.md")),
+            "age_minutes": 8,
+        },
+    ]
+    preview = items[:2]
+    lanes = [
+        {
+            "agent": "PM",
+            "pending_count": 1,
+            "stable_pending_count": 1,
+            "shape_invalid_count": 0,
+            "review_head_mismatch_count": 0,
+            "oldest_pending_age_minutes": 8,
+            "superseded_pending_count": 1,
+        },
+        {
+            "agent": "Risk",
+            "pending_count": 3,
+            "stable_pending_count": 3,
+            "shape_invalid_count": 0,
+            "review_head_mismatch_count": 0,
+            "oldest_pending_age_minutes": 951,
+            "superseded_pending_count": 0,
+        },
+    ]
+
+    summary = orchestrator._agent_flow_preview_backlog_summary(
+        items=items,
+        preview_items=preview,
+        agent_rows=lanes,
+    )
+
+    assert summary["hidden_count"] == 3
+    assert summary["hidden_status_counts"][orchestrator.AGENT_FLOW_STATUS_STABLE_PENDING] == 2
+    assert summary["hidden_stable_pending_count"] == 2
+    assert summary["hidden_lock_count"] == 1
+    assert summary["pending_lane_count"] == 2
+    assert summary["stale_pending_item_count"] == 1
+    assert summary["fresh_pending_item_count"] == 1
+    assert summary["stale_pending_lane_count"] == 1
+    assert summary["fresh_pending_lane_count"] == 1
+    assert summary["pending_lanes"][0]["agent"] == "Risk"
+    assert summary["pending_lanes"][0]["oldest_pending_age_minutes"] == 951
+    assert summary["pending_lanes"][0]["stale_pending_count"] == 1
+    assert summary["pending_lanes"][0]["fresh_pending_count"] == 0
+    assert summary["pending_lanes"][0]["next_pending_path"] == "project_ws/Risk/IN/request.md"
+    assert summary["pending_lanes"][0]["next_pending_status"] == orchestrator.AGENT_FLOW_STATUS_STABLE_PENDING
+    assert summary["pending_lanes"][0]["next_pending_action_label"] == "Open request"
+    assert summary["pending_lanes"][0]["pending_items"] == [
+        {
+            "status": orchestrator.AGENT_FLOW_STATUS_STABLE_PENDING,
+            "path": "project_ws/Risk/IN/request.md",
+            "open_path": str(Path("project_ws/Risk/IN/request.md")),
+            "reason": "Risk has an old request waiting.",
+            "action_label": "Open request",
+            "age_minutes": 951,
+            "stale": True,
+        }
+    ]
+    assert summary["pending_lanes"][1]["superseded_pending_count"] == 1
+    assert summary["pending_lanes"][1]["stale_pending_count"] == 0
+    assert summary["pending_lanes"][1]["fresh_pending_count"] == 1
+    assert summary["pending_lanes"][1]["next_pending_path"] == "project_ws/PM/IN/request.md"
+    assert summary["pending_lanes"][1]["pending_items"][0]["path"] == "project_ws/PM/IN/request.md"
+    assert summary["pending_lanes"][1]["pending_items"][0]["stale"] is False
+    assert summary["next_hidden_status"] == orchestrator.AGENT_FLOW_STATUS_STALE_LOCK_CANDIDATE
+
+
+def test_agent_os_readiness_agent_flow_prioritizes_malformed_requests(
+    tmp_path,
+    monkeypatch,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        monkeypatch.setattr(orchestrator, "_codex_automation_roots", lambda: [])
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {
+                "model": "qwen2.5-coder:7b",
+                "available": True,
+                "installed_models": ["qwen2.5-coder:7b"],
+                "skipped_models": {},
+                "recommendation": None,
+            },
+        )
+        repo = CodeRepo(path=str(tmp_path), host_path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        orchestrator.bootstrap_agent_profiles(db, repo_id=repo.id)
+        old_request = datetime.now(timezone.utc).timestamp() - 120
+
+        for index, lane in enumerate(["AgentOps", "DevOps", "MLOps", "PM", "QA"]):
+            in_dir = tmp_path / "project_ws" / lane / "IN"
+            in_dir.mkdir(parents=True)
+            request = in_dir / f"20260530-23000{index}Z-from-PM-to-{lane}-valid.md"
+            request.write_text(
+                "\n".join(
+                    [
+                        "From: PM",
+                        f"To: {lane}",
+                        "Created: 2026-05-30T23:00:00Z",
+                        "Reply-To: project_ws/PM/OUT/report.md",
+                        "Priority: normal",
+                        "Backlog-ID: PM-TEST",
+                        "Push Intent: not authorized",
+                        "",
+                        "## Request",
+                        "Please inspect.",
+                        "",
+                        "## Expected Deliverable",
+                        "Report.",
+                        "",
+                        "## Success Criteria",
+                        "- Evidence.",
+                        "",
+                        "## Context / Links",
+                        "- Fixture.",
+                        "",
+                        "## Safety Constraints",
+                        "- Read-only.",
+                        "",
+                        "## Dependencies",
+                        "- None.",
+                        "",
+                        "## Peer Review / Push",
+                        "- No push.",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            os.utime(request, (old_request, old_request))
+
+        malformed_dir = tmp_path / "project_ws" / "SDBA" / "IN"
+        malformed_dir.mkdir(parents=True)
+        malformed = malformed_dir / "20260530-230006Z-from-SDBA-to-PM-malformed.md"
+        malformed.write_text(
+            "\n".join(
+                [
+                    "From: SDBA",
+                    "To: PM",
+                    "Created: 2026-05-30T23:00:06Z",
+                    "Reply-To: project_ws/SDBA/OUT/report.md",
+                    "Priority: normal",
+                    "Backlog-ID: PM-TEST",
+                    "Push Intent: not authorized",
+                    "",
+                    "## Request",
+                    "Malformed on purpose.",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        os.utime(malformed, (old_request, old_request))
+
+        readiness = orchestrator.agent_os_readiness(db, repo_id=repo.id)
+        flow = readiness[orchestrator.AGENT_OS_AGENT_FLOW_KEY]
+
+        assert flow["shape_invalid_count"] == 1
+        assert flow["items"][0]["status"] == "shape_invalid"
+        assert flow["next_action_path"] == "project_ws/SDBA/IN/20260530-230006Z-from-SDBA-to-PM-malformed.md"
+        assert readiness["operator_inbox"]["next_action_path"] == flow["next_action_path"]
+    finally:
+        db.close()
+
+
 def test_agent_os_readiness_operator_inbox_guides_blocker_recovery(
     tmp_path,
     monkeypatch,
@@ -4088,6 +7304,15 @@ def test_agent_os_readiness_operator_inbox_guides_blocker_recovery(
         blocked.current_stage = orchestrator.STAGE_IMPLEMENT
         blocked.merge_status = "blocked"
         blocked.merge_message = "Validation failed after repair."
+        blocked.validation_json = json.dumps(
+            [
+                {
+                    "step_key": "pytest_targeted",
+                    "exit_code": 1,
+                    "stderr": "AssertionError: recovery chip missing",
+                }
+            ]
+        )
         command_run = orchestrator.create_run(db, prompt="hello", repo_id=repo.id)
         db.commit()
 
@@ -4101,10 +7326,29 @@ def test_agent_os_readiness_operator_inbox_guides_blocker_recovery(
         assert inbox["next_action_run_id"] == blocked.run_id
         assert inbox["next_action_recovery_action"] == orchestrator.AGENT_OPERATOR_INBOX_RECOVERY_RERUN_SAFE
         assert inbox["next_action_button_label"] == "Rerun"
+        assert "pytest_targeted exit 1" in inbox["next_action_detail"]
         assert "validation evidence before merge" in inbox["next_action_detail"]
         blocker_item = inbox["items"][0]
         assert blocker_item["run_id"] == blocked.run_id
         assert blocker_item["recovery_detail"] == "Prefill a fresh approval-first draft from this run."
+        assert blocker_item["recovery_category"] == "validation_failed"
+        assert blocker_item["recovery_stage"] == orchestrator.STAGE_IMPLEMENT
+        assert blocker_item["recovery_merge_status"] == "blocked"
+        assert blocker_item["recovery_plan_status"] == blocked.plan_status
+        assert blocker_item["recovery_safety_posture"] == "approval_first_rerun"
+        assert blocker_item["recovery_failed_validation_count"] == 1
+        assert blocker_item["recovery_last_failed_step"] == "pytest_targeted"
+        assert blocker_item["recovery_last_failed_exit_code"] == 1
+        assert "recovery chip missing" in blocker_item["recovery_last_failed_summary"]
+        assert blocker_item["recovery_failed_validation_steps"] == [
+            {
+                "step_key": "pytest_targeted",
+                "exit_code": 1,
+                "timed_out": False,
+                "policy_blocked": False,
+                "summary": "AssertionError: recovery chip missing",
+            }
+        ]
         quality_bar = readiness[orchestrator.AGENT_CODING_QUALITY_BAR_KEY]
         operator_dimension = next(
             dimension
@@ -4138,6 +7382,7 @@ def test_agent_os_readiness_operator_inbox_guides_blocker_recovery(
             assert "Operator inbox next action: Recover blocker" in reply
             assert "Quality bar next action: Recover blocker" in reply
             assert "Validation failed after repair" in reply
+            assert "pytest_targeted exit 1" in reply
             assert f"Operator inbox target run: {blocked.run_id}" in reply
             assert f"Quality bar target run: {blocked.run_id}" in reply
     finally:
@@ -4291,6 +7536,50 @@ def test_autopilot_slash_commands_answer_in_chat_and_start_plan(tmp_path):
 @pytest.mark.parametrize(
     ("content", "expected"),
     [
+        ("how does autopilot work?", "Autopilot commands:"),
+        ("will this use OpenAI?", "deterministic mechanics first"),
+        ("can we brainstorm approaches?", "I won't scan or edit the repo"),
+        ("I want to add a small cockpit improvement", "implementation-shaped"),
+    ],
+)
+def test_autopilot_chat_common_meta_questions_are_mechanical_and_counted(
+    tmp_path,
+    monkeypatch,
+    content,
+    expected,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        orchestrator.reset_project_autonomy_llm_cost_stats()
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        run = orchestrator.create_run(db, prompt="hello", repo_id=repo.id)
+
+        def fail_model_selection():
+            raise AssertionError("common Autopilot meta questions should not call a model")
+
+        monkeypatch.setattr(orchestrator, "select_local_model", fail_model_selection)
+
+        payload = orchestrator.append_user_message(db, run.run_id, content=content)
+        reply = payload["messages"][-1]["content"]
+
+        assert payload["status"] == orchestrator.RUN_STATUS_CHATTING
+        assert expected in reply
+        stats = orchestrator.get_project_autonomy_llm_cost_stats()
+        assert stats["autopilot_chat_mechanical_replies"] == 1
+        assert stats["autopilot_chat_local_model_calls"] == 0
+        assert stats["saved_responses"] == 1
+        assert stats["total_requests_observed"] == 1
+        assert stats["avoidance_rate"] == 1.0
+        assert stats["by_purpose"]["autopilot_chat"]["mechanical_replies"] == 1
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
         ("what's the status?", "Run status is"),
         ("what's happening with this run?", "Run status is"),
         ("is it running right now?", "Run status is"),
@@ -4302,6 +7591,9 @@ def test_autopilot_slash_commands_answer_in_chat_and_start_plan(tmp_path):
         ("which model are you using?", "model policy"),
         ("what quality guardrails are active?", "Local model quality guardrails"),
         ("any pending questions?", "No pending operator questions"),
+        ("how many model calls did this use?", "No model-call artifacts"),
+        ("what was the OpenAI cost?", "No model-call artifacts"),
+        ("how many tokens were used?", "No model-call artifacts"),
         ("what repo is this run using?", "repo"),
         ("what branch is this on?", "Branch:"),
         ("what was my prompt?", "Original request: hello"),
@@ -4390,6 +7682,352 @@ def test_autopilot_chat_audit_questions_use_recorded_artifacts_without_model(
 
         assert payload["status"] == orchestrator.RUN_STATUS_CHATTING
         assert expected in payload["messages"][-1]["content"]
+    finally:
+        db.close()
+
+
+def test_autopilot_chat_model_usage_questions_use_artifacts_without_model(tmp_path, monkeypatch):
+    db = _sqlite_autonomy_session()
+    try:
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        run = orchestrator.create_run(db, prompt="hello", repo_id=repo.id)
+        db.add(
+            ProjectAutonomyArtifact(
+                run_id=run.run_id,
+                artifact_type="model_call",
+                name="plan_model_call",
+                content_json=json.dumps({
+                    "model": "qwen2.5-coder:7b",
+                    "purpose": "plan",
+                    "ok": True,
+                    "latency_ms": 1200,
+                    "estimated_cost_usd": 0.0,
+                }),
+                byte_length=20,
+            )
+        )
+        db.add(
+            ProjectAutonomyArtifact(
+                run_id=run.run_id,
+                artifact_type="model_call",
+                name="chat_model_call",
+                content_json=json.dumps({
+                    "model": "qwen2.5-coder:7b",
+                    "purpose": "brainstorm_chat",
+                    "ok": False,
+                    "latency_ms": 800,
+                }),
+                byte_length=20,
+            )
+        )
+        db.commit()
+
+        def fail_model_selection():
+            raise AssertionError("Autopilot model usage questions should not call a model")
+
+        monkeypatch.setattr(orchestrator, "select_local_model", fail_model_selection)
+
+        payload = orchestrator.append_user_message(db, run.run_id, content="how many model calls did this use?")
+        reply = payload["messages"][-1]["content"]
+
+        assert payload["status"] == orchestrator.RUN_STATUS_CHATTING
+        assert "Model calls: 2 (1 succeeded, 1 failed)." in reply
+        assert "qwen2.5-coder:7b" in reply
+        assert "brainstorm_chat" in reply
+        assert "Estimated paid model spend recorded here: $0.000000." in reply
+        assert "did not call a model" in reply
+    finally:
+        db.close()
+
+
+def test_autopilot_chat_reuses_materially_identical_brainstorm_reply(tmp_path, monkeypatch):
+    db = _sqlite_autonomy_session()
+    try:
+        orchestrator.reset_project_autonomy_llm_cost_stats()
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        run = orchestrator.create_run(db, prompt="hello", repo_id=repo.id)
+
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {"model": "qwen2.5-coder:7b", "skipped_models": {}},
+        )
+        model = MagicMock(
+            return_value=orchestrator.ollama_client.OllamaResult(
+                ok=True,
+                text="Compare the two options by speed, safety, and cockpit clarity.",
+                model="qwen2.5-coder:7b",
+                latency_ms=12,
+            )
+        )
+        monkeypatch.setattr(orchestrator.ollama_client, "chat", model)
+
+        first = orchestrator.append_user_message(
+            db,
+            run.run_id,
+            content="compare two possible approaches for the cockpit copy",
+        )
+        second = orchestrator.append_user_message(
+            db,
+            run.run_id,
+            content=" Compare   two possible approaches for the cockpit copy ",
+        )
+
+        assert first["messages"][-1]["content"] == "Compare the two options by speed, safety, and cockpit clarity."
+        assert second["messages"][-1]["content"] == first["messages"][-1]["content"]
+        assert model.call_count == 1
+        stats = orchestrator.get_project_autonomy_llm_cost_stats()
+        assert stats["autopilot_chat_local_model_calls"] == 1
+        assert stats["autopilot_chat_material_cache_hits"] == 1
+        assert stats["autopilot_chat_material_cache_stores"] == 1
+        assert stats["autopilot_chat_material_cache_size"] == 1
+        assert stats["saved_responses"] == 1
+        assert stats["total_requests_observed"] == 2
+        assert stats["avoidance_rate"] == 0.5
+        assert stats["by_purpose"]["autopilot_chat"]["local_model_calls"] == 1
+        assert stats["by_purpose"]["autopilot_chat"]["material_cache_hits"] == 1
+    finally:
+        db.close()
+
+
+def test_autopilot_chat_cache_ignores_json_serialization_noise(tmp_path, monkeypatch):
+    db = _sqlite_autonomy_session()
+    try:
+        orchestrator.reset_project_autonomy_llm_cost_stats()
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        run = orchestrator.create_run(db, prompt="hello", repo_id=repo.id)
+        run.plan_json = '{"files":[{"action":"modify","path":"app/example.py"}],"analysis":"same"}'
+        run.files_json = '["app/example.py","tests/test_example.py"]'
+        run.validation_json = '[{"exit_code":0,"command":"pytest tests/test_example.py -q"}]'
+        db.commit()
+
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {"model": "qwen2.5-coder:7b", "skipped_models": {}},
+        )
+        model = MagicMock(
+            return_value=orchestrator.ollama_client.OllamaResult(
+                ok=True,
+                text="Keep the copy short and compare only the decision tradeoffs.",
+                model="qwen2.5-coder:7b",
+                latency_ms=12,
+            )
+        )
+        monkeypatch.setattr(orchestrator.ollama_client, "chat", model)
+
+        first = orchestrator.append_user_message(
+            db,
+            run.run_id,
+            content="compare two possible approaches for the cockpit copy",
+        )
+
+        run = db.query(ProjectAutonomyRun).filter(ProjectAutonomyRun.run_id == run.run_id).one()
+        run.plan_json = json.dumps(
+            {
+                "analysis": "same",
+                "files": [
+                    {
+                        "path": "app/example.py",
+                        "action": "modify",
+                    }
+                ],
+            },
+            indent=2,
+        )
+        run.files_json = json.dumps(["app/example.py", "tests/test_example.py"], indent=2)
+        run.validation_json = json.dumps(
+            [
+                {
+                    "command": "pytest tests/test_example.py -q",
+                    "exit_code": 0,
+                }
+            ],
+            indent=2,
+        )
+        db.commit()
+
+        second = orchestrator.append_user_message(
+            db,
+            run.run_id,
+            content=" Compare   two possible approaches for the cockpit copy ",
+        )
+
+        assert second["messages"][-1]["content"] == first["messages"][-1]["content"]
+        assert model.call_count == 1
+        stats = orchestrator.get_project_autonomy_llm_cost_stats()
+        assert stats["autopilot_chat_material_cache_hits"] == 1
+        assert stats["autopilot_chat_material_cache_stores"] == 1
+    finally:
+        db.close()
+
+
+def test_autopilot_chat_cache_still_misses_on_material_plan_change(tmp_path, monkeypatch):
+    db = _sqlite_autonomy_session()
+    try:
+        orchestrator.reset_project_autonomy_llm_cost_stats()
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        run = orchestrator.create_run(db, prompt="hello", repo_id=repo.id)
+        run.plan_json = json.dumps({"analysis": "same", "files": [{"path": "app/example.py", "action": "modify"}]})
+        run.files_json = json.dumps(["app/example.py"])
+        run.validation_json = json.dumps([])
+        db.commit()
+
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {"model": "qwen2.5-coder:7b", "skipped_models": {}},
+        )
+        model = MagicMock(
+            side_effect=[
+                orchestrator.ollama_client.OllamaResult(
+                    ok=True,
+                    text="First reply.",
+                    model="qwen2.5-coder:7b",
+                    latency_ms=12,
+                ),
+                orchestrator.ollama_client.OllamaResult(
+                    ok=True,
+                    text="Second reply.",
+                    model="qwen2.5-coder:7b",
+                    latency_ms=12,
+                ),
+            ]
+        )
+        monkeypatch.setattr(orchestrator.ollama_client, "chat", model)
+
+        first = orchestrator.append_user_message(
+            db,
+            run.run_id,
+            content="compare two possible approaches for the cockpit copy",
+        )
+
+        run = db.query(ProjectAutonomyRun).filter(ProjectAutonomyRun.run_id == run.run_id).one()
+        run.plan_json = json.dumps({"analysis": "different", "files": [{"path": "app/example.py", "action": "modify"}]})
+        db.commit()
+
+        second = orchestrator.append_user_message(
+            db,
+            run.run_id,
+            content="compare two possible approaches for the cockpit copy",
+        )
+
+        assert first["messages"][-1]["content"] == "First reply."
+        assert second["messages"][-1]["content"] == "Second reply."
+        assert model.call_count == 2
+        stats = orchestrator.get_project_autonomy_llm_cost_stats()
+        assert stats["autopilot_chat_material_cache_hits"] == 0
+        assert stats["autopilot_chat_material_cache_stores"] == 2
+    finally:
+        db.close()
+
+
+def test_autopilot_chat_coalesces_concurrent_materially_identical_brainstorm_reply(tmp_path, monkeypatch):
+    db = _sqlite_autonomy_session()
+    try:
+        orchestrator.reset_project_autonomy_llm_cost_stats()
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        run = orchestrator.create_run(db, prompt="hello", repo_id=repo.id)
+
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {"model": "qwen2.5-coder:7b", "skipped_models": {}},
+        )
+        started = threading.Event()
+        release = threading.Event()
+        calls = 0
+        calls_lock = threading.Lock()
+
+        def fake_chat(*_args, **_kwargs):
+            nonlocal calls
+            with calls_lock:
+                calls += 1
+            started.set()
+            release.wait(timeout=2)
+            return orchestrator.ollama_client.OllamaResult(
+                ok=True,
+                text="Use a compact chooser, then add details after selection.",
+                model="qwen2.5-coder:7b",
+                latency_ms=20,
+            )
+
+        monkeypatch.setattr(orchestrator.ollama_client, "chat", fake_chat)
+        results: list[str] = []
+        errors: list[Exception] = []
+        result_lock = threading.Lock()
+
+        class Query:
+            def filter(self, *_args, **_kwargs):
+                return self
+
+            def order_by(self, *_args, **_kwargs):
+                return self
+
+            def limit(self, *_args, **_kwargs):
+                return self
+
+            def all(self):
+                return []
+
+        class FakeDb:
+            def query(self, *_args, **_kwargs):
+                return Query()
+
+            def add(self, *_args, **_kwargs):
+                return None
+
+            def flush(self):
+                return None
+
+            def commit(self):
+                return None
+
+        fake_db = FakeDb()
+
+        def worker():
+            try:
+                reply = orchestrator._chat_reply(
+                    fake_db,
+                    run,
+                    "compare two possible approaches for the cockpit copy",
+                )
+            except Exception as exc:  # pragma: no cover - surfaced below
+                with result_lock:
+                    errors.append(exc)
+                return
+            with result_lock:
+                results.append(reply)
+
+        threads = [threading.Thread(target=worker) for _ in range(5)]
+        for thread in threads:
+            thread.start()
+        assert started.wait(timeout=2)
+        time.sleep(0.05)
+        release.set()
+        for thread in threads:
+            thread.join(timeout=2)
+
+        assert errors == []
+        assert results == ["Use a compact chooser, then add details after selection."] * 5
+        assert calls == 1
+        stats = orchestrator.get_project_autonomy_llm_cost_stats()
+        assert stats["autopilot_chat_local_model_calls"] == 1
+        assert stats["autopilot_chat_material_inflight_waits"] == 4
+        assert stats["autopilot_chat_material_inflight"] == 0
+        assert stats["saved_responses"] == 4
+        assert stats["total_requests_observed"] == 5
+        assert stats["avoidance_rate"] == 0.8
     finally:
         db.close()
 
@@ -5030,6 +8668,7 @@ def test_agent_profile_prompt_and_model_setting_snapshot_into_runs(tmp_path):
 def test_standalone_agent_scheduler_runs_when_backend_scheduler_role_is_none(tmp_path, monkeypatch):
     db = _sqlite_autonomy_session()
     try:
+        monkeypatch.setattr(agent_scheduler.settings, "project_autonomy_agent_scheduler_enabled", True)
         repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
         db.add(repo)
         db.commit()
@@ -5179,6 +8818,349 @@ def test_plan_only_scheduled_agent_cycle_reports_without_architect_plan(tmp_path
         assert report_payload["risk_or_blockers"]
         assert report_payload["safety_boundary"]
         assert report_payload["request_binding"]["mode"] == "plan_only"
+    finally:
+        db.close()
+
+
+def test_due_scheduled_agent_skips_materially_unchanged_report(tmp_path, monkeypatch):
+    db = _sqlite_autonomy_session()
+    try:
+        readme = tmp_path / "README.md"
+        readme.write_text("# Repo\n", encoding="utf-8")
+        orchestrator._git(tmp_path, ["init"], timeout=60)
+        orchestrator._git(tmp_path, ["add", "README.md"], timeout=60)
+        orchestrator._git(
+            tmp_path,
+            ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
+            timeout=60,
+        )
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        agents = orchestrator.bootstrap_agent_profiles(db, repo_id=repo.id)
+        architect_id = next(agent["id"] for agent in agents if agent["profile_key"] == "architect")
+        orchestrator.update_agent_profile(
+            db,
+            architect_id,
+            status="active",
+            schedule_enabled=True,
+            schedule={
+                "cadence": "five_minutes",
+                "rrule": "FREQ=MINUTELY;INTERVAL=5",
+                "budget": {"max_minutes": 20, "max_child_runs": 0},
+            },
+        )
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {"available": True, "model": "local-report-model"},
+        )
+        calls = {"count": 0}
+
+        def fake_chat(messages, model, **kwargs):
+            calls["count"] += 1
+            return SimpleNamespace(
+                ok=True,
+                text=json.dumps(
+                    {
+                        "status": "READ_ONLY_CLEAR",
+                        "verdict": "Plan-only scheduled review completed without source changes.",
+                        "summary": "The scheduled agent reviewed stable repository context without taking action.",
+                        "findings": [
+                            "No files were changed.",
+                            "Repository head and prompt context were reviewed.",
+                        ],
+                        "evidence_reviewed": [
+                            "Scheduled request and agent prompt were reviewed.",
+                            "Repository source receipt was reviewed.",
+                        ],
+                        "checks_run": [
+                            "No command or test checks were run in this plan-only cycle.",
+                        ],
+                        "risk_or_blockers": [
+                            "Patch permissions remain disabled until operator approval.",
+                        ],
+                        "recommended_next_steps": [
+                            "Keep observing until the repo or prompt materially changes.",
+                        ],
+                        "safety_boundary": [
+                            "No files, worktrees, commits, pushes, merges, DB, Docker, or broker actions were performed.",
+                        ],
+                        "operator_question": "",
+                    }
+                ),
+                model=model,
+                latency_ms=12,
+                error=None,
+            )
+
+        monkeypatch.setattr(orchestrator.ollama_client, "chat", fake_chat)
+        orchestrator.reset_project_autonomy_llm_cost_stats()
+
+        first = orchestrator.start_agent_cycle(db, architect_id, now=datetime.utcnow())
+        first_result = orchestrator.run_autonomy_sync(db, first["run_id"])
+        assert first_result["status"] == orchestrator.RUN_STATUS_COMPLETED
+        assert calls["count"] == 1
+
+        schedule = (
+            db.query(ProjectAutonomyAgentSchedule)
+            .filter(ProjectAutonomyAgentSchedule.profile_id == architect_id)
+            .one()
+        )
+        due_at = datetime.utcnow() + timedelta(minutes=10)
+        schedule.next_run_at = due_at - timedelta(minutes=1)
+        db.commit()
+
+        result = orchestrator.run_due_agent_cycles(db, now=due_at, limit=1)
+
+        assert result["started"] == 0
+        assert result["skipped"][0]["reason"] == orchestrator.AGENT_SCHEDULE_SKIP_NO_MATERIAL_CHANGE
+        assert result["skipped"][0]["material_fingerprint"]
+        assert result["skipped"][0]["no_change_skip_streak"] == 1
+        assert result["skipped"][0]["no_change_cooldown_seconds"] == (
+            orchestrator.AGENT_SCHEDULE_NO_CHANGE_COOLDOWN_SECONDS
+        )
+        assert calls["count"] == 1
+        stats = orchestrator.get_project_autonomy_llm_cost_stats()
+        assert stats["scheduled_agent_local_model_calls"] == 1
+        assert stats["scheduled_agent_no_change_skips"] == 1
+        assert stats["saved_responses"] == 1
+        assert stats["total_requests_observed"] == 2
+        assert stats["avoidance_rate"] == 0.5
+    finally:
+        db.close()
+
+
+def test_scheduled_agent_no_change_backoff_escalates_and_resets() -> None:
+    schedule = ProjectAutonomyAgentSchedule(
+        budget_json=json.dumps({"max_minutes": 20, "max_child_runs": 0})
+    )
+    now = datetime(2026, 5, 30, 12, 0, 0)
+
+    first = orchestrator._agent_schedule_record_no_change_backoff(
+        schedule,
+        material_fingerprint="same-material",
+        now=now,
+    )
+    second = orchestrator._agent_schedule_record_no_change_backoff(
+        schedule,
+        material_fingerprint="same-material",
+        now=now + timedelta(minutes=15),
+    )
+    third = orchestrator._agent_schedule_record_no_change_backoff(
+        schedule,
+        material_fingerprint="same-material",
+        now=now + timedelta(minutes=45),
+    )
+    fourth = orchestrator._agent_schedule_record_no_change_backoff(
+        schedule,
+        material_fingerprint="same-material",
+        now=now + timedelta(minutes=105),
+    )
+
+    assert first["no_change_skip_streak"] == 1
+    assert first["no_change_cooldown_minutes"] == 15
+    assert second["no_change_skip_streak"] == 2
+    assert second["no_change_cooldown_minutes"] == 30
+    assert third["no_change_skip_streak"] == 3
+    assert third["no_change_cooldown_minutes"] == 60
+    assert fourth["no_change_skip_streak"] == 4
+    assert fourth["no_change_cooldown_minutes"] == 60
+    budget = json.loads(schedule.budget_json)
+    assert budget["max_minutes"] == 20
+    assert budget[orchestrator.AGENT_SCHEDULE_NO_CHANGE_SKIP_STREAK_KEY] == 4
+
+    changed = orchestrator._agent_schedule_record_no_change_backoff(
+        schedule,
+        material_fingerprint="changed-material",
+        now=now + timedelta(hours=3),
+    )
+
+    assert changed["no_change_skip_streak"] == 1
+    assert changed["no_change_cooldown_minutes"] == 15
+    orchestrator._reset_agent_schedule_no_change_backoff(schedule)
+    reset_budget = json.loads(schedule.budget_json)
+    assert reset_budget["max_child_runs"] == 0
+    assert orchestrator.AGENT_SCHEDULE_NO_CHANGE_SKIP_STREAK_KEY not in reset_budget
+    assert orchestrator.AGENT_SCHEDULE_NO_CHANGE_FINGERPRINT_KEY not in reset_budget
+
+
+def test_scheduled_agent_material_fingerprint_ignores_config_path_metadata(tmp_path):
+    repo = CodeRepo(id=1, path=str(tmp_path), name="repo", active=True)
+    base_snapshot = {
+        "profile_key": "codex_cost_reducer",
+        "name": "Cost Reducer",
+        "role": "automation",
+        "tier": "micro",
+        "model_policy": "local_first",
+        "permissions": {"plan": True, "worktree": False},
+        "prompt_setting": {
+            "source": orchestrator.CODEX_AUTOMATION_SOURCE,
+            "system_prompt": "Review unchanged material and report only.",
+            "codex_automation": {
+                "id": "cost-reducer",
+                "kind": "heartbeat",
+                "status": "ACTIVE",
+                "rrule": "FREQ=MINUTELY;INTERVAL=15",
+                "normalized_rrule": "FREQ=MINUTELY;INTERVAL=15",
+                "path": r"C:\Users\rindo\.codex\automations\old\automation.toml",
+                "prompt_length": 42,
+                orchestrator.CODEX_AUTOMATION_CWDS_KEY: [str(tmp_path)],
+                orchestrator.CODEX_AUTOMATION_PROMPT_HASH_KEY: "abc123",
+                "hash_algorithm": "sha256",
+                "operating_contract": {"workspace": str(tmp_path)},
+            },
+        },
+    }
+    moved_snapshot = copy.deepcopy(base_snapshot)
+    moved_snapshot["prompt_setting"]["codex_automation"]["path"] = (
+        r"D:\dev\chili-home-copilot\.codex\automations\new\automation.toml"
+    )
+    moved_snapshot["prompt_setting"]["codex_automation"]["prompt_length"] = 999
+    moved_snapshot["prompt_setting"]["codex_automation"]["hash_algorithm"] = "sha256"
+
+    source_state = {
+        "source_state": "clean",
+        "git_state": "git",
+        "branch": "main",
+        "head_sha": "a" * 40,
+        "dirty_status_count": 0,
+        "dirty_hash": "",
+    }
+    first = orchestrator._scheduled_agent_material_payload(
+        prompt="scheduled prompt",
+        profile_snapshot=base_snapshot,
+        repo=repo,
+        source_state=source_state,
+    )
+    second = orchestrator._scheduled_agent_material_payload(
+        prompt="scheduled prompt",
+        profile_snapshot=moved_snapshot,
+        repo=repo,
+        source_state=source_state,
+    )
+
+    assert orchestrator._scheduled_agent_material_fingerprint(first) == (
+        orchestrator._scheduled_agent_material_fingerprint(second)
+    )
+
+
+def test_scheduled_agent_material_fingerprint_keeps_prompt_hash_material(tmp_path):
+    repo = CodeRepo(id=1, path=str(tmp_path), name="repo", active=True)
+    base_snapshot = {
+        "profile_key": "codex_cost_reducer",
+        "name": "Cost Reducer",
+        "role": "automation",
+        "tier": "micro",
+        "model_policy": "local_first",
+        "permissions": {"plan": True, "worktree": False},
+        "prompt_setting": {
+            "source": orchestrator.CODEX_AUTOMATION_SOURCE,
+            "system_prompt": "Review unchanged material and report only.",
+            "codex_automation": {
+                "id": "cost-reducer",
+                "kind": "heartbeat",
+                "status": "ACTIVE",
+                "rrule": "FREQ=MINUTELY;INTERVAL=15",
+                "normalized_rrule": "FREQ=MINUTELY;INTERVAL=15",
+                orchestrator.CODEX_AUTOMATION_CWDS_KEY: [str(tmp_path)],
+                orchestrator.CODEX_AUTOMATION_PROMPT_HASH_KEY: "abc123",
+                "operating_contract": {"workspace": str(tmp_path)},
+            },
+        },
+    }
+    changed_snapshot = copy.deepcopy(base_snapshot)
+    changed_snapshot["prompt_setting"]["codex_automation"][
+        orchestrator.CODEX_AUTOMATION_PROMPT_HASH_KEY
+    ] = "def456"
+    source_state = {
+        "source_state": "clean",
+        "git_state": "git",
+        "branch": "main",
+        "head_sha": "a" * 40,
+        "dirty_status_count": 0,
+        "dirty_hash": "",
+    }
+    first = orchestrator._scheduled_agent_material_payload(
+        prompt="scheduled prompt",
+        profile_snapshot=base_snapshot,
+        repo=repo,
+        source_state=source_state,
+    )
+    second = orchestrator._scheduled_agent_material_payload(
+        prompt="scheduled prompt",
+        profile_snapshot=changed_snapshot,
+        repo=repo,
+        source_state=source_state,
+    )
+
+    assert orchestrator._scheduled_agent_material_fingerprint(first) != (
+        orchestrator._scheduled_agent_material_fingerprint(second)
+    )
+
+
+def test_plan_only_scheduled_agent_source_receipt_records_head_and_dirty_state(
+    tmp_path,
+    monkeypatch,
+):
+    db = _sqlite_autonomy_session()
+    try:
+        readme = tmp_path / "README.md"
+        readme.write_text("# Repo\n", encoding="utf-8")
+        orchestrator._git(tmp_path, ["init"], timeout=60)
+        orchestrator._git(tmp_path, ["add", "README.md"], timeout=60)
+        orchestrator._git(
+            tmp_path,
+            ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
+            timeout=60,
+        )
+        head_sha = orchestrator._git_text(tmp_path, ["rev-parse", "HEAD"], timeout=60)
+        readme.write_text("# Repo\n\nUncommitted note.\n", encoding="utf-8")
+        repo = CodeRepo(path=str(tmp_path), name="repo", active=True)
+        db.add(repo)
+        db.commit()
+        agents = orchestrator.bootstrap_agent_profiles(db, repo_id=repo.id)
+        architect_id = next(agent["id"] for agent in agents if agent["profile_key"] == "architect")
+        orchestrator.resume_agent_profile(db, architect_id)
+        monkeypatch.setattr(
+            orchestrator,
+            "select_local_model",
+            lambda: {
+                "available": False,
+                "model": None,
+                "recommendation": "No local report model available in test.",
+            },
+        )
+
+        queued = orchestrator.start_agent_cycle(db, architect_id)
+        result = orchestrator.run_autonomy_sync(db, queued["run_id"])
+
+        assert result["status"] == orchestrator.RUN_STATUS_COMPLETED
+        report = (
+            db.query(ProjectAutonomyArtifact)
+            .filter_by(
+                run_id=queued["run_id"],
+                name=orchestrator.SCHEDULED_AGENT_REPORT_ARTIFACT_NAME,
+            )
+            .one()
+        )
+        report_payload = json.loads(report.content_json)
+        receipt = report_payload["source_receipt"]
+        assert receipt["schema"] == orchestrator.SCHEDULED_AGENT_SOURCE_RECEIPT_SCHEMA
+        assert receipt["head_sha"] == head_sha
+        assert receipt["run_base_sha"] == head_sha
+        assert receipt["head_matches_run_base"] is True
+        assert receipt["drift_state"] == "stable_at_base"
+        assert receipt["source_state"] == "dirty"
+        assert receipt["dirty_status_count"] >= 1
+        assert any("README.md" in item for item in receipt["dirty_preview"])
+        message = (
+            db.query(ProjectAutonomyMessage)
+            .filter_by(run_id=queued["run_id"], message_type="agent_cycle_report")
+            .one()
+        )
+        assert "Source receipt:" in message.content
+        assert head_sha[:10] in message.content
     finally:
         db.close()
 

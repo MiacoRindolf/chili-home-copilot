@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:pasteboard/pasteboard.dart';
 
+import '../desktop/desktop_actions.dart';
 import '../network/chili_api_client.dart';
 import '../network/network_error_message.dart';
 import '../screen/focus_controller.dart';
@@ -113,9 +114,9 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     _autopilotAgentBenchFilterActive,
     _autopilotAgentBenchFilterNeedsInput,
   ];
-  static const _autopilotAgentBenchListMinHeight = 420.0;
-  static const _autopilotAgentBenchListMaxHeight = 780.0;
-  static const _autopilotAgentBenchViewportRatio = 0.64;
+  static const _autopilotAgentBenchListMinHeight = 460.0;
+  static const _autopilotAgentBenchListMaxHeight = 860.0;
+  static const _autopilotAgentBenchViewportRatio = 0.72;
   static const _autopilotCodexSourceStatusActive = 'ACTIVE';
   static const _autopilotPermissionObserve = 'observe';
   static const _autopilotPermissionResearch = 'research';
@@ -194,6 +195,31 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   static const _autopilotQualityVisualQa = 'visual_qa';
   static const _autopilotQualityProblems = 'problems';
   static const _autopilotQualityDefaultWindowDays = 7;
+  static const _autopilotAgentFlow = 'agent_flow';
+  static const _autopilotAgentFlowItems = 'items';
+  static const _autopilotAgentFlowAgents = 'agents';
+  static const _autopilotAgentFlowQuarantinedTargets = 'quarantined_targets';
+  static const _autopilotAgentFlowQuarantineSummary = 'quarantine_summary';
+  static const _autopilotAgentFlowPausedAutomationActivity =
+      'paused_automation_activity';
+  static const _autopilotAgentFlowControlPlaneTrust = 'control_plane_trust';
+  static const _autopilotAgentFlowPreviewBacklog = 'preview_backlog';
+  static const _autopilotAgentFlowReviewPacketSummary = 'review_packet_summary';
+  static const _autopilotAgentFlowStatusMalformed = 'shape_invalid';
+  static const _autopilotAgentFlowStatusQuarantined =
+      'quarantined_target_active';
+  static const _autopilotAgentFlowStatusPausedAutomation =
+      'paused_automation_active';
+  static const _autopilotAgentFlowStatusDetachedWorktree =
+      'detached_uncontained_worktree';
+  static const _autopilotAgentFlowStatusDirtyWorktree = 'dirty_worktree';
+  static const _autopilotAgentFlowStatusReviewHead = 'review_head_mismatch';
+  static const _autopilotAgentFlowStatusProcessedDeliverable =
+      'processed_deliverable_anomaly';
+  static const _autopilotAgentFlowStatusTempPublish = 'temp_publish_stale';
+  static const _autopilotAgentFlowStatusActiveLock = 'active_lock_starvation';
+  static const _autopilotAgentFlowStatusStaleLock = 'stale_lock_candidate';
+  static const _autopilotAgentFlowStatusPending = 'stable_pending';
   static const _autopilotRuntimeQueue = 'runtime_queue';
   static const _autopilotRuntimeQueueProblems = 'problems';
   static const _autopilotRuntimeQueueQueuedRuns = 'queued_runs';
@@ -214,21 +240,35 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   static const _autopilotRuntimeQueueActionDrainQueued = 'drain_queued_run';
   static const _autopilotOperatorInbox = 'operator_inbox';
   static const _autopilotOperatorInboxItems = 'items';
+  static const _autopilotOperatorInboxReleaseTrustSummary =
+      'release_trust_summary';
+  static const _autopilotOperatorInboxControlPlaneTrustSummary =
+      'control_plane_trust_summary';
   static const _autopilotOperatorInboxNextAction = 'next_action';
   static const _autopilotOperatorInboxNextActionLabel = 'next_action_label';
   static const _autopilotOperatorInboxNextActionDetail = 'next_action_detail';
   static const _autopilotOperatorInboxNextActionKind = 'next_action_kind';
   static const _autopilotOperatorInboxNextActionRunId = 'next_action_run_id';
+  static const _autopilotOperatorInboxNextActionPath = 'next_action_path';
+  static const _autopilotOperatorInboxNextActionOpenPath =
+      'next_action_open_path';
   static const _autopilotOperatorInboxNextActionAgent = 'next_action_agent';
   static const _autopilotOperatorInboxNextActionRecoveryAction =
       'next_action_recovery_action';
   static const _autopilotOperatorInboxNextActionButtonLabel =
       'next_action_button_label';
+  static const _autopilotOperatorInboxNextActionHandoffLabel =
+      'next_action_handoff_label';
+  static const _autopilotOperatorInboxNextActionHandoffCopy =
+      'next_action_handoff_copy';
   static const _autopilotOperatorInboxKindApproval = 'approval';
   static const _autopilotOperatorInboxKindClarification = 'clarification';
   static const _autopilotOperatorInboxKindQuestion = 'question';
   static const _autopilotOperatorInboxKindBlocker = 'blocker';
   static const _autopilotOperatorInboxKindReply = 'user_reply';
+  static const _autopilotOperatorInboxKindExternalReport =
+      'external_agent_report';
+  static const _autopilotOperatorInboxKindAgentFlow = 'agent_flow';
   static const _autopilotOperatorInboxActionKeepMonitoring = 'keep_monitoring';
   static const _autopilotOperatorInboxActionAnswer = 'Answer';
   static const _autopilotOperatorInboxActionOpen = 'Open';
@@ -281,6 +321,11 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   static const _autopilotAgentQualityNextActionLabel = 'next_action_label';
   static const _autopilotAgentQualityNextActionDetail = 'next_action_detail';
   static const _autopilotAgentQualityNextActionRunId = 'next_action_run_id';
+  static const _autopilotAgentQualityNextActionKind = 'next_action_kind';
+  static const _autopilotAgentQualityNextActionRecoveryAction =
+      'next_action_recovery_action';
+  static const _autopilotAgentQualityNextActionButtonLabel =
+      'next_action_button_label';
   static const _autopilotCodexAlignment = 'codex_alignment';
   static const _autopilotCodexAlignmentDimensions = 'dimensions';
   static const _autopilotCodexAlignmentGaps = 'gaps';
@@ -438,6 +483,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final query = _autonomyAgentBenchSearchCtrl.text.trim();
     if (query == _autonomyAgentBenchQuery || !mounted) return;
     setState(() => _autonomyAgentBenchQuery = query);
+    _scrollAutonomyAgentBenchTo(_autonomyAgentBenchScroll, afterLayout: true);
   }
 
   void _onTabChanged() {
@@ -1877,13 +1923,24 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
 
   Future<void> _openAutonomyInboxItem(Map<String, dynamic> item) async {
     final runId = item['run_id']?.toString().trim() ?? '';
-    if (runId.isEmpty) return;
     final kind = item['kind']?.toString() ?? '';
+    if (runId.isEmpty &&
+        (kind == _autopilotOperatorInboxKindExternalReport ||
+            (item['open_path']?.toString().trim() ?? '').isNotEmpty ||
+            (item['path']?.toString().trim() ?? '').isNotEmpty)) {
+      await _openAutonomyExternalReport(item);
+      return;
+    }
+    if (runId.isEmpty) return;
     final recoveryAction = item['recovery_action']?.toString().trim() ?? '';
+    final blocker = _asMap(item['blocker']);
+    final canRerun = blocker['can_rerun'];
     await _openAutonomyRunById(runId);
     if (!mounted) return;
     if ((_activeAutonomyRun?['run_id']?.toString() ?? '') != runId) return;
     if (recoveryAction == _autopilotOperatorInboxRecoveryRerun &&
+        canRerun != false &&
+        canRerun?.toString().toLowerCase() != 'false' &&
         _activeAutonomyRun != null) {
       _prefillAutopilotRerun(Map<String, dynamic>.from(_activeAutonomyRun!));
       return;
@@ -1899,6 +1956,28 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         ),
       );
     }
+  }
+
+  Future<void> _openAutonomyExternalReport(Map<String, dynamic> item) async {
+    final path = (item['open_path']?.toString().trim() ?? '').isNotEmpty
+        ? item['open_path'].toString().trim()
+        : item['path']?.toString().trim() ?? '';
+    if (path.isEmpty) return;
+    final result = await DesktopActions.openFile(path);
+    if (!mounted || result == null || result.isEmpty) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(result)),
+    );
+  }
+
+  Future<void> _copyAutonomyText(String text, String message) async {
+    final clean = text.trim();
+    if (clean.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: clean));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
   }
 
   void _focusAutopilotComposer() {
@@ -2144,6 +2223,46 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
           _syncAutonomyRunListState(run);
         });
         _syncAutonomyEventStream();
+      }
+    } catch (e) {
+      if (mounted) setState(() => _autonomyError = userVisibleNetworkError(e));
+    } finally {
+      if (mounted) setState(() => _autonomyBusy = false);
+    }
+  }
+
+  Future<void> _markAutopilotVisualQaNotApplicable() async {
+    final runId = _activeAutonomyRun?['run_id']?.toString();
+    if (runId == null || runId.isEmpty) return;
+    setState(() {
+      _autonomyBusy = true;
+      _autonomyError = null;
+    });
+    try {
+      final run = await _api.recordProjectAutonomyVisualValidation(
+        runId: runId,
+        kind: 'screenshot',
+        notApplicable: true,
+        rationale:
+            'Operator marked this run as non-visual from the Autopilot cockpit; no user-facing UI or operator workflow pixels changed.',
+      );
+      if (mounted) {
+        setState(() {
+          _activeAutonomyRun = run;
+          _autonomyDraftOpen = false;
+          _syncAutonomyRunListState(run);
+        });
+        _syncAutonomyEventStream();
+      }
+      await _loadAutonomyAgentReadiness();
+      await _loadAutonomyRuns(silent: true);
+      if ((_activeAutonomyRun?['run_id']?.toString() ?? '') == runId) {
+        await _refreshActiveAutonomyRun(silent: true, force: true);
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Visual QA marked not applicable.')),
+        );
       }
     } catch (e) {
       if (mounted) setState(() => _autonomyError = userVisibleNetworkError(e));
@@ -2999,6 +3118,11 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
           return _buildAutonomyStackedCockpit();
         }
         final rightWidth = constraints.maxWidth >= 1320 ? 380.0 : 330.0;
+        final leftWidth = constraints.maxWidth >= 1320
+            ? 340.0
+            : constraints.maxWidth >= 1120
+                ? 320.0
+                : 300.0;
         return Column(
           children: [
             if (_autonomyError != null) _buildAutonomyErrorBanner(),
@@ -3007,7 +3131,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  SizedBox(width: 280, child: _buildAutonomyThreadSidebar()),
+                  SizedBox(
+                      width: leftWidth, child: _buildAutonomyThreadSidebar()),
                   VerticalDivider(width: 1, color: _autonomyDividerColor()),
                   Expanded(child: _buildAutonomyConversationPane()),
                   VerticalDivider(width: 1, color: _autonomyDividerColor()),
@@ -3025,6 +3150,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   }
 
   Widget _buildAutonomyStackedCockpit() {
+    final stackedSidebarHeight =
+        (MediaQuery.sizeOf(context).height * 0.72).clamp(460.0, 760.0);
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
@@ -3033,7 +3160,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
           _buildAutonomyLiveSyncNotice(compact: true),
         SizedBox(height: 360, child: _buildAutonomyConversationPane()),
         const SizedBox(height: 12),
-        SizedBox(height: 260, child: _buildAutonomyThreadSidebar()),
+        SizedBox(
+          height: stackedSidebarHeight.toDouble(),
+          child: _buildAutonomyThreadSidebar(),
+        ),
         const SizedBox(height: 12),
         if (_activeAutonomyRun != null)
           _buildAutonomyActiveRun(_activeAutonomyRun!)
@@ -3306,6 +3436,11 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                     ),
                   ),
                 const SizedBox(width: 4),
+                _buildAutonomyAgentBenchScrollControls(
+                  controller: _autonomyAgentBenchScroll,
+                  enabled: filteredAgents.isNotEmpty,
+                ),
+                const SizedBox(width: 2),
                 IconButton(
                   tooltip: 'Open full bench',
                   visualDensity: VisualDensity.compact,
@@ -3348,7 +3483,14 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                 child: Scrollbar(
                   controller: _autonomyAgentBenchScroll,
                   thumbVisibility: true,
+                  trackVisibility: true,
+                  interactive: true,
+                  thickness: 8,
+                  radius: const Radius.circular(999),
                   child: ListView.builder(
+                    key: const PageStorageKey<String>(
+                      'autonomy-agent-bench-list',
+                    ),
                     controller: _autonomyAgentBenchScroll,
                     physics: const AlwaysScrollableScrollPhysics(),
                     keyboardDismissBehavior:
@@ -3421,6 +3563,63 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     );
   }
 
+  void _scrollAutonomyAgentBenchTo(
+    ScrollController controller, {
+    bool toEnd = false,
+    bool afterLayout = false,
+  }) {
+    void scroll() {
+      if (!mounted || !controller.hasClients) return;
+      final position = controller.position;
+      final target =
+          toEnd ? position.maxScrollExtent : position.minScrollExtent;
+      if ((position.pixels - target).abs() < 1) return;
+      unawaited(
+        controller.animateTo(
+          target,
+          duration: const Duration(milliseconds: 220),
+          curve: Curves.easeOutCubic,
+        ),
+      );
+    }
+
+    if (afterLayout) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => scroll());
+    } else {
+      scroll();
+    }
+  }
+
+  Widget _buildAutonomyAgentBenchScrollControls({
+    required ScrollController controller,
+    required bool enabled,
+  }) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        IconButton(
+          tooltip: 'Jump to top',
+          visualDensity: VisualDensity.compact,
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
+          onPressed:
+              enabled ? () => _scrollAutonomyAgentBenchTo(controller) : null,
+          icon: const Icon(Icons.vertical_align_top, size: 17),
+        ),
+        IconButton(
+          tooltip: 'Jump to bottom',
+          visualDensity: VisualDensity.compact,
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
+          onPressed: enabled
+              ? () => _scrollAutonomyAgentBenchTo(controller, toEnd: true)
+              : null,
+          icon: const Icon(Icons.vertical_align_bottom, size: 17),
+        ),
+      ],
+    );
+  }
+
   Future<void> _showAutonomyAgentBenchDialog() async {
     final repoId = _autonomyAgentRepoId;
     if (repoId == null) return;
@@ -3456,6 +3655,11 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                         style: Theme.of(context).textTheme.titleMedium,
                       ),
                     ),
+                    _buildAutonomyAgentBenchScrollControls(
+                      controller: scrollController,
+                      enabled: visibleAgents.isNotEmpty,
+                    ),
+                    const SizedBox(width: 4),
                     IconButton(
                       tooltip: 'Close',
                       visualDensity: VisualDensity.compact,
@@ -3481,10 +3685,18 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                         controller: searchController,
                         onChanged: (value) {
                           setDialogState(() => query = value.trim());
+                          _scrollAutonomyAgentBenchTo(
+                            scrollController,
+                            afterLayout: true,
+                          );
                         },
                         onClear: () {
                           searchController.clear();
                           setDialogState(() => query = '');
+                          _scrollAutonomyAgentBenchTo(
+                            scrollController,
+                            afterLayout: true,
+                          );
                         },
                       ),
                       const SizedBox(height: 10),
@@ -3498,6 +3710,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                               selectedFilter: selectedFilter,
                               onSelected: (value) {
                                 setDialogState(() => selectedFilter = value);
+                                _scrollAutonomyAgentBenchTo(
+                                  scrollController,
+                                  afterLayout: true,
+                                );
                                 setState(
                                     () => _autonomyAgentBenchFilter = value);
                               },
@@ -3522,7 +3738,14 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                         child: Scrollbar(
                           controller: scrollController,
                           thumbVisibility: true,
+                          trackVisibility: true,
+                          interactive: true,
+                          thickness: 8,
+                          radius: const Radius.circular(999),
                           child: ListView.builder(
+                            key: const PageStorageKey<String>(
+                              'autonomy-agent-bench-dialog-list',
+                            ),
                             controller: scrollController,
                             physics: const AlwaysScrollableScrollPhysics(),
                             keyboardDismissBehavior:
@@ -3584,6 +3807,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                 onSelected(filter);
               } else {
                 setState(() => _autonomyAgentBenchFilter = filter);
+                _scrollAutonomyAgentBenchTo(
+                  _autonomyAgentBenchScroll,
+                  afterLayout: true,
+                );
               }
             },
       labelStyle: TextStyle(
@@ -5947,8 +6174,13 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final codingQualityBar = _asMap(readiness[_autopilotCodingQualityBar]);
     final qualityMonitor = _asMap(readiness[_autopilotAgentQualityMonitor]);
     final capabilityAudit = _asMap(readiness[_autopilotAgentCapabilityAudit]);
+    final agentFlow = _asMap(readiness[_autopilotAgentFlow]);
+    final agentFlowReviewPacket =
+        _asMap(agentFlow[_autopilotAgentFlowReviewPacketSummary]);
     final runtimeQueue = _asMap(readiness[_autopilotRuntimeQueue]);
     final operatorInbox = _asMap(readiness[_autopilotOperatorInbox]);
+    final operatorReleaseTrust =
+        _asMap(operatorInbox[_autopilotOperatorInboxReleaseTrustSummary]);
     final codexAlignment = _asMap(readiness[_autopilotCodexAlignment]);
     final qualityReviews =
         _asMap(qualityScorecard[_autopilotQualityArchitectReviews]);
@@ -5957,6 +6189,11 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final qualityValidation =
         _asMap(qualityScorecard[_autopilotQualityValidation]);
     final qualityVisualQa = _asMap(qualityScorecard[_autopilotQualityVisualQa]);
+    final readinessVisualUiRuns = _asInt(qualityVisualQa['ui_run_count']) ?? 0;
+    final readinessVisualMissing =
+        _asInt(qualityVisualQa['missing_ui_evidence_count']) ?? 0;
+    final readinessVisualNotApplicable =
+        _asInt(qualityVisualQa['not_applicable_count']) ?? 0;
     final staleCodex = _asStringList(codex['stale_profile_keys']);
     final color =
         status == 'ready' ? _autonomyStatusColor('completed') : Colors.orange;
@@ -6084,6 +6321,42 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                       ? Colors.teal.shade900
                       : Colors.orange.shade900,
                 ),
+              if (agentFlow.isNotEmpty)
+                _miniChip(
+                  (_asInt(agentFlow['shape_invalid_count']) ?? 0) > 0
+                      ? '${_asInt(agentFlow['shape_invalid_count'])} malformed flow'
+                      : (_asInt(agentFlow['quarantined_target_active_count']) ??
+                                  0) >
+                              0
+                          ? '${_asInt(agentFlow['quarantined_target_active_count'])} quarantined'
+                           : (_asInt(agentFlowReviewPacket['mismatch_count']) ??
+                                       _asInt(agentFlow[
+                                           'review_head_mismatch_count']) ??
+                                       0) >
+                                   0
+                               ? '${_asInt(agentFlowReviewPacket['mismatch_count']) ?? _asInt(agentFlow['review_head_mismatch_count'])} review packets'
+                               : (_asInt(agentFlow[
+                                               'active_lock_starvation_count']) ??
+                                           0) >
+                                       0
+                                   ? '${_asInt(agentFlow['active_lock_starvation_count'])} stalled lock'
+                                   : (_asInt(agentFlow[
+                                                   'stale_lock_candidate_count']) ??
+                                               0) >
+                                           0
+                                       ? '${_asInt(agentFlow['stale_lock_candidate_count'])} flow locks'
+                                       : '${_asInt(agentFlow['stable_pending_count']) ?? 0}/${_asInt(agentFlow['pending_count']) ?? 0} flow pending',
+                  _autonomyBubbleBackground(
+                    (agentFlow['status']?.toString() ?? '') ==
+                            _autopilotReadinessPassed
+                        ? Colors.teal
+                        : Colors.orange,
+                  ),
+                  (agentFlow['status']?.toString() ?? '') ==
+                          _autopilotReadinessPassed
+                      ? Colors.teal.shade900
+                      : Colors.orange.shade900,
+                ),
               if (capabilityAudit.isNotEmpty)
                 _miniChip(
                   '${_asInt(capabilityAudit['score']) ?? 0}% capability audit',
@@ -6097,6 +6370,12 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                           _autopilotReadinessPassed
                       ? Colors.teal.shade900
                       : Colors.orange.shade900,
+                ),
+              if ((_asInt(operatorReleaseTrust['blocker_count']) ?? 0) > 0)
+                _miniChip(
+                  '${_asInt(operatorReleaseTrust['blocker_count'])} release trust',
+                  _autonomyBubbleBackground(Colors.deepOrange),
+                  Colors.deepOrange.shade800,
                 ),
               if ((_asInt(qualityReviews['total']) ?? 0) > 0)
                 _miniChip(
@@ -6129,26 +6408,30 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                   Colors.teal.shade900,
                 ),
               if (qualityVisualQa.isNotEmpty &&
-                  ((_asInt(qualityVisualQa['ui_run_count']) ?? 0) > 0 ||
+                  (readinessVisualUiRuns > 0 ||
                       (_asInt(qualityVisualQa['artifact_count']) ?? 0) > 0))
                 _miniChip(
-                  '${_asInt(qualityVisualQa['evidenced_ui_run_count']) ?? 0}/${_asInt(qualityVisualQa['ui_run_count']) ?? 0} visual QA',
+                  readinessVisualUiRuns > 0
+                      ? '${_asInt(qualityVisualQa['evidenced_ui_run_count']) ?? 0}/$readinessVisualUiRuns visual QA'
+                      : readinessVisualNotApplicable > 0
+                          ? '$readinessVisualNotApplicable not visual'
+                          : '${_asInt(qualityVisualQa['available_count']) ?? 0} visual QA',
                   _autonomyBubbleBackground(
-                    (_asInt(qualityVisualQa['missing_ui_evidence_count']) ??
-                                0) ==
-                            0
-                        ? Colors.teal
-                        : Colors.orange,
+                    readinessVisualMissing == 0 ? Colors.teal : Colors.orange,
                   ),
-                  (_asInt(qualityVisualQa['missing_ui_evidence_count']) ?? 0) ==
-                          0
+                  readinessVisualMissing == 0
                       ? Colors.teal.shade900
                       : Colors.orange.shade900,
                 ),
-              if ((_asInt(qualityVisualQa['missing_ui_evidence_count']) ?? 0) >
-                  0)
+              if (readinessVisualNotApplicable > 0 && readinessVisualUiRuns > 0)
                 _miniChip(
-                  '${_asInt(qualityVisualQa['missing_ui_evidence_count'])} missing visual',
+                  '$readinessVisualNotApplicable not visual',
+                  _autonomyBubbleBackground(Colors.blueGrey),
+                  Colors.blueGrey.shade800,
+                ),
+              if (readinessVisualMissing > 0)
+                _miniChip(
+                  '$readinessVisualMissing missing visual',
                   _autonomyBubbleBackground(_autonomyStatusColor('failed')),
                   _autonomyStatusColor('failed'),
                 ),
@@ -6256,6 +6539,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
           if (qualityMonitor.isNotEmpty) ...[
             const SizedBox(height: 10),
             _buildAutonomyAgentQualityMonitor(qualityMonitor),
+          ],
+          if (agentFlow.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            _buildAutonomyAgentFlow(agentFlow),
           ],
           if (runtimeQueue.isNotEmpty) ...[
             const SizedBox(height: 10),
@@ -6659,10 +6946,24 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
             '';
     final nextActionRunId =
         monitor[_autopilotAgentQualityNextActionRunId]?.toString().trim() ?? '';
+    final nextActionKind =
+        monitor[_autopilotAgentQualityNextActionKind]?.toString().trim() ?? '';
+    final nextActionRecoveryAction =
+        monitor[_autopilotAgentQualityNextActionRecoveryAction]
+                ?.toString()
+                .trim() ??
+            '';
+    final nextActionExplicitButtonLabel =
+        monitor[_autopilotAgentQualityNextActionButtonLabel]
+                ?.toString()
+                .trim() ??
+            '';
     final dimensions = _asMapList(monitor[_autopilotAgentQualityDimensions]);
     final problems = _asStringList(monitor[_autopilotQualityProblems]);
     final nextTargetAction = AutopilotQualityActionPresenter.targetAction(
       action: nextActionKey,
+      actionLabel: nextActionExplicitButtonLabel,
+      kind: nextActionKind,
     );
     return Container(
       width: double.infinity,
@@ -6753,6 +7054,9 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                                 _runAutopilotQualityTargetAction(
                                   nextTargetAction,
                                   nextActionRunId,
+                                  kind: nextActionKind,
+                                  recoveryAction: nextActionRecoveryAction,
+                                  actionLabel: nextActionExplicitButtonLabel,
                                 ),
                               ),
                       icon: Icon(
@@ -6883,10 +7187,19 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final validation = _asMap(scorecard[_autopilotQualityValidation]);
     final visualQa = _asMap(scorecard[_autopilotQualityVisualQa]);
     final problems = _asStringList(scorecard[_autopilotQualityProblems]);
+    final scheduledReports = _asMapList(scheduled['recent_reports']);
+    final latestScheduledReport = scheduledReports.isNotEmpty
+        ? scheduledReports.first
+        : <String, dynamic>{};
+    final latestReportReceiptFields =
+        AutonomyRunPresenter.scheduledReportReceiptFields(
+      latestScheduledReport,
+    );
     final reviewAverage = _asInt(reviews['average_score']);
     final scheduledAverage = _asInt(scheduled['average_score']);
     final visualUiRuns = _asInt(visualQa['ui_run_count']) ?? 0;
     final visualMissing = _asInt(visualQa['missing_ui_evidence_count']) ?? 0;
+    final visualNotApplicable = _asInt(visualQa['not_applicable_count']) ?? 0;
     final visualEvidenceColor =
         visualMissing == 0 ? Colors.teal : Colors.orange;
     return Container(
@@ -6968,6 +7281,18 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                   _autonomyBubbleBackground(_autonomyStatusColor('failed')),
                   _autonomyStatusColor('failed'),
                 ),
+              if ((_asInt(scheduled['dirty_source_count']) ?? 0) > 0)
+                _miniChip(
+                  '${_asInt(scheduled['dirty_source_count'])} dirty source',
+                  _autonomyBubbleBackground(Colors.orange),
+                  Colors.orange.shade900,
+                ),
+              if ((_asInt(scheduled['head_moved_count']) ?? 0) > 0)
+                _miniChip(
+                  '${_asInt(scheduled['head_moved_count'])} moved head',
+                  _autonomyBubbleBackground(_autonomyStatusColor('failed')),
+                  _autonomyStatusColor('failed'),
+                ),
               _miniChip(
                 '${_asInt(validation['passed']) ?? 0}/${_asInt(validation['total']) ?? 0} validation',
                 _autonomyBubbleBackground(Colors.teal),
@@ -6977,11 +7302,21 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                   (visualUiRuns > 0 ||
                       (_asInt(visualQa['artifact_count']) ?? 0) > 0))
                 _miniChip(
-                  '${_asInt(visualQa['evidenced_ui_run_count']) ?? 0}/$visualUiRuns visual QA',
+                  visualUiRuns > 0
+                      ? '${_asInt(visualQa['evidenced_ui_run_count']) ?? 0}/$visualUiRuns visual QA'
+                      : visualNotApplicable > 0
+                          ? '$visualNotApplicable not visual'
+                          : '${_asInt(visualQa['available_count']) ?? 0} visual QA',
                   _autonomyBubbleBackground(visualEvidenceColor),
                   visualMissing == 0
                       ? Colors.teal.shade900
                       : Colors.orange.shade900,
+                ),
+              if (visualNotApplicable > 0 && visualUiRuns > 0)
+                _miniChip(
+                  '$visualNotApplicable not visual',
+                  _autonomyBubbleBackground(Colors.blueGrey),
+                  Colors.blueGrey.shade800,
                 ),
               if (visualMissing > 0)
                 _miniChip(
@@ -6997,6 +7332,13 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                 ),
             ],
           ),
+          if (latestReportReceiptFields.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            _buildAutonomyScheduledReportReceipt(
+              latestScheduledReport,
+              latestReportReceiptFields,
+            ),
+          ],
           if (problems.isNotEmpty) ...[
             const SizedBox(height: 8),
             for (final problem in problems.take(3))
@@ -7018,6 +7360,93 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                   ],
                 ),
               ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAutonomyScheduledReportReceipt(
+    Map<String, dynamic> report,
+    List<Map<String, String>> fields,
+  ) {
+    final source = _policyReceiptValue(fields, 'Source');
+    final drift = _policyReceiptValue(fields, 'Drift');
+    final head = _policyReceiptValue(fields, 'Head');
+    final dirty = _policyReceiptValue(fields, 'Dirty entries');
+    final summary = report['summary']?.toString().trim() ?? '';
+    final status = report['status']?.toString().replaceAll('_', ' ') ?? '';
+    final isMoved = drift.toLowerCase().contains('head moved');
+    final isDirty =
+        source.toLowerCase() == 'dirty' || (int.tryParse(dirty) ?? 0) > 0;
+    final color = isMoved
+        ? _autonomyStatusColor('failed')
+        : isDirty
+            ? Colors.orange
+            : Colors.teal;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: _autonomyBubbleBackground(color, alpha: 0.07),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: color.withValues(alpha: 0.20)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.receipt_long_outlined, color: color, size: 15),
+              const SizedBox(width: 6),
+              const Expanded(
+                child: Text(
+                  'Latest report receipt',
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800),
+                ),
+              ),
+              if (status.isNotEmpty)
+                _miniChip(status, _autonomyBubbleBackground(color), color),
+            ],
+          ),
+          const SizedBox(height: 7),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              if (source.isNotEmpty)
+                _miniChip(source, _autonomyBubbleBackground(color), color),
+              if (drift.isNotEmpty)
+                _miniChip(
+                  drift,
+                  _autonomyBubbleBackground(isMoved ? color : Colors.blueGrey),
+                  isMoved ? color : Colors.blueGrey.shade800,
+                ),
+              if (head.isNotEmpty)
+                _miniChip(
+                  head,
+                  _autonomyBubbleBackground(Colors.indigo),
+                  Colors.indigo.shade800,
+                ),
+              if (dirty.isNotEmpty)
+                _miniChip(
+                  '$dirty dirty',
+                  _autonomyBubbleBackground(
+                    isDirty ? Colors.orange : Colors.blueGrey,
+                  ),
+                  isDirty ? Colors.orange.shade900 : Colors.blueGrey.shade800,
+                ),
+            ],
+          ),
+          if (summary.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text(
+              summary.length > 180
+                  ? '${summary.substring(0, 180)}...'
+                  : summary,
+              style: TextStyle(color: _mutedTextColor(), fontSize: 12),
+            ),
           ],
         ],
       ),
@@ -7706,6 +8135,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         return _autonomyStatusColor('failed');
       case _autopilotOperatorInboxKindReply:
         return Colors.indigo.shade700;
+      case _autopilotOperatorInboxKindAgentFlow:
+        return Colors.orange.shade800;
+      case _autopilotOperatorInboxKindExternalReport:
+        return Colors.deepPurple.shade700;
       default:
         return Colors.blueGrey.shade700;
     }
@@ -7723,6 +8156,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         return Icons.report_problem_outlined;
       case _autopilotOperatorInboxKindReply:
         return Icons.mark_chat_unread_outlined;
+      case _autopilotOperatorInboxKindAgentFlow:
+        return Icons.account_tree_outlined;
+      case _autopilotOperatorInboxKindExternalReport:
+        return Icons.article_outlined;
       default:
         return Icons.inbox_outlined;
     }
@@ -7768,13 +8205,2150 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     return _operatorInboxItemActionIcon(item['kind']?.toString() ?? '');
   }
 
+  IconData _agentFlowStatusIcon(String status) {
+    switch (status) {
+      case _autopilotAgentFlowStatusMalformed:
+        return Icons.rule_folder_outlined;
+      case _autopilotAgentFlowStatusQuarantined:
+        return Icons.policy_outlined;
+      case _autopilotAgentFlowStatusPausedAutomation:
+        return Icons.pause_circle_outline;
+      case _autopilotAgentFlowStatusDetachedWorktree:
+        return Icons.call_split_outlined;
+      case _autopilotAgentFlowStatusDirtyWorktree:
+        return Icons.folder_copy_outlined;
+      case _autopilotAgentFlowStatusReviewHead:
+        return Icons.compare_arrows_outlined;
+      case _autopilotAgentFlowStatusProcessedDeliverable:
+      case _autopilotAgentFlowStatusTempPublish:
+        return Icons.description_outlined;
+      case _autopilotAgentFlowStatusActiveLock:
+      case _autopilotAgentFlowStatusStaleLock:
+        return Icons.lock_clock_outlined;
+      case _autopilotAgentFlowStatusPending:
+        return Icons.pending_actions_outlined;
+      default:
+        return Icons.account_tree_outlined;
+    }
+  }
+
+  Widget _buildAutonomyAgentFlow(Map<String, dynamic> flow) {
+    final status = flow['status']?.toString() ?? '';
+    final items = _asMapList(flow[_autopilotAgentFlowItems]);
+    final attention = _asInt(flow['attention_count']) ?? items.length;
+    final malformed = _asInt(flow['shape_invalid_count']) ?? 0;
+    final activeQuarantinedTargets =
+        _asInt(flow['quarantined_target_active_count']) ?? 0;
+    final pausedAutomationActivity =
+        _asInt(flow['paused_automation_activity_count']) ?? 0;
+    final pausedAutomationUncovered =
+        _asInt(flow['paused_automation_uncovered_count']) ?? 0;
+    final dirtyWorktrees = _asInt(flow['dirty_worktree_count']) ?? 0;
+    final detachedWorktrees = _asInt(flow['detached_worktree_count']) ?? 0;
+    final detachedUncontainedWorktrees =
+        _asInt(flow['detached_uncontained_worktree_count']) ?? 0;
+    final reviewPacket = _asMap(flow[_autopilotAgentFlowReviewPacketSummary]);
+    final reviewPacketMismatches = _asInt(reviewPacket['mismatch_count']) ??
+        _asInt(flow['review_head_mismatch_count']) ??
+        0;
+    final reviewPacketBranchDrift =
+        _asInt(reviewPacket['branch_drift_count']) ?? 0;
+    final reviewPacketMissingCommits =
+        _asInt(reviewPacket['missing_commit_count']) ?? 0;
+    final processedDeliverables =
+        _asInt(flow['processed_deliverable_anomaly_count']) ?? 0;
+    final staleTempPublish =
+        _asInt(flow['stale_temp_publish_artifact_count']) ?? 0;
+    final activeLockStarvation =
+        _asInt(flow['active_lock_starvation_count']) ?? 0;
+    final staleLocks = _asInt(flow['stale_lock_candidate_count']) ?? 0;
+    final stable = _asInt(flow['stable_pending_count']) ?? 0;
+    final pending = _asInt(flow['pending_count']) ?? 0;
+    final color = status == _autopilotReadinessPassed
+        ? _autonomyStatusColor('completed')
+        : malformed > 0
+            ? _autonomyStatusColor('failed')
+            : activeQuarantinedTargets > 0 ||
+                    pausedAutomationUncovered > 0 ||
+                    dirtyWorktrees > 0 ||
+                    detachedUncontainedWorktrees > 0 ||
+                    reviewPacketMismatches > 0 ||
+                    processedDeliverables > 0 ||
+                    staleTempPublish > 0 ||
+                    activeLockStarvation > 0
+                ? Colors.deepOrange.shade700
+                : Colors.orange.shade700;
+    final detail = flow['detail']?.toString().trim() ?? '';
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(9),
+      decoration: BoxDecoration(
+        color: _autonomyBubbleBackground(color, alpha: 0.06),
+        border: Border.all(color: color.withValues(alpha: 0.22)),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.account_tree_outlined, color: color, size: 16),
+              const SizedBox(width: 7),
+              Expanded(
+                child: Text(
+                  'Agent flow',
+                  style: Theme.of(context).textTheme.labelLarge,
+                ),
+              ),
+              _miniChip(
+                '$attention action${attention == 1 ? '' : 's'}',
+                _autonomyBubbleBackground(color),
+                color,
+              ),
+              if (items.isNotEmpty) ...[
+                const SizedBox(width: 4),
+                IconButton(
+                  tooltip: 'Open agent flow',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () => _showAutonomyAgentFlowDialog(flow),
+                  icon: const Icon(Icons.open_in_full, size: 17),
+                ),
+              ],
+            ],
+          ),
+          if (detail.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text(
+              detail,
+              style: TextStyle(color: _mutedTextColor(), fontSize: 12),
+            ),
+          ],
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              if (malformed > 0)
+                _miniChip(
+                  '$malformed malformed',
+                  _autonomyBubbleBackground(_autonomyStatusColor('failed')),
+                  _autonomyStatusColor('failed'),
+                ),
+              if (staleLocks > 0)
+                _miniChip(
+                  '$staleLocks stale locks',
+                  _autonomyBubbleBackground(Colors.orange),
+                  Colors.orange.shade900,
+                ),
+              if (activeQuarantinedTargets > 0)
+                _miniChip(
+                  '$activeQuarantinedTargets quarantined',
+                  _autonomyBubbleBackground(Colors.deepOrange),
+                  Colors.deepOrange.shade800,
+                ),
+              if (pausedAutomationActivity > 0)
+                _miniChip(
+                  pausedAutomationUncovered > 0
+                      ? '$pausedAutomationUncovered/$pausedAutomationActivity paused active'
+                      : '$pausedAutomationActivity paused covered',
+                  _autonomyBubbleBackground(Colors.deepOrange),
+                  Colors.deepOrange.shade800,
+                ),
+              if (dirtyWorktrees > 0)
+                _miniChip(
+                  '$dirtyWorktrees dirty worktrees',
+                  _autonomyBubbleBackground(Colors.deepOrange),
+                  Colors.deepOrange.shade800,
+                ),
+              if (detachedWorktrees > 0)
+                _miniChip(
+                  detachedUncontainedWorktrees > 0
+                      ? '$detachedUncontainedWorktrees/$detachedWorktrees detached'
+                      : '$detachedWorktrees detached ok',
+                  _autonomyBubbleBackground(detachedUncontainedWorktrees > 0
+                      ? Colors.deepOrange
+                      : Colors.blueGrey),
+                  detachedUncontainedWorktrees > 0
+                      ? Colors.deepOrange.shade800
+                      : Colors.blueGrey.shade800,
+                ),
+              if (reviewPacketMismatches > 0)
+                _miniChip(
+                  '$reviewPacketMismatches review packets',
+                  _autonomyBubbleBackground(Colors.deepOrange),
+                  Colors.deepOrange.shade800,
+                ),
+              if (reviewPacketBranchDrift > 0)
+                _miniChip(
+                  '$reviewPacketBranchDrift branch drift',
+                  _autonomyBubbleBackground(Colors.deepOrange),
+                  Colors.deepOrange.shade800,
+                ),
+              if (reviewPacketMissingCommits > 0)
+                _miniChip(
+                  '$reviewPacketMissingCommits missing commits',
+                  _autonomyBubbleBackground(Colors.deepOrange),
+                  Colors.deepOrange.shade800,
+                ),
+              if (processedDeliverables > 0)
+                _miniChip(
+                  '$processedDeliverables deliverables',
+                  _autonomyBubbleBackground(Colors.deepOrange),
+                  Colors.deepOrange.shade800,
+                ),
+              if (staleTempPublish > 0)
+                _miniChip(
+                  '$staleTempPublish temp files',
+                  _autonomyBubbleBackground(Colors.deepOrange),
+                  Colors.deepOrange.shade800,
+                ),
+              if (activeLockStarvation > 0)
+                _miniChip(
+                  '$activeLockStarvation stalled locks',
+                  _autonomyBubbleBackground(Colors.deepOrange),
+                  Colors.deepOrange.shade800,
+                ),
+              _miniChip(
+                '$stable/$pending stable',
+                _autonomyBubbleBackground(
+                  stable == 0 ? Colors.blueGrey : Colors.indigo,
+                ),
+                stable == 0 ? Colors.blueGrey.shade800 : Colors.indigo.shade800,
+              ),
+            ],
+          ),
+          _buildAutonomyAgentFlowReviewPacketSummary(flow),
+          _buildAutonomyAgentFlowTrustSummary(flow, limit: 3),
+          _buildAutonomyAgentFlowPreviewBacklog(flow, limit: 3),
+          if (items.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            for (final item in items.take(3))
+              _buildAutonomyOperatorInboxItem(item),
+            if (items.length > 3 || attention > items.length) ...[
+              const SizedBox(height: 6),
+              OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                ),
+                onPressed: () => _showAutonomyAgentFlowDialog(flow),
+                icon: const Icon(Icons.open_in_full, size: 15),
+                label: Text('Open agent flow (${items.length}/$attention)'),
+              ),
+            ],
+          ],
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showAutonomyAgentFlowDialog(
+    Map<String, dynamic> flow,
+  ) async {
+    final items = _asMapList(flow[_autopilotAgentFlowItems]);
+    final lanes = _asMapList(flow[_autopilotAgentFlowAgents]);
+    final attention = _asInt(flow['attention_count']) ?? items.length;
+    final scrollController = ScrollController();
+    var selectedFilter = 'all';
+
+    List<Map<String, dynamic>> itemsFor(String filter) {
+      if (filter == 'malformed') {
+        return items
+            .where((item) =>
+                item['status']?.toString() ==
+                _autopilotAgentFlowStatusMalformed)
+            .toList();
+      }
+      if (filter == 'locks') {
+        return items
+            .where((item) =>
+                item['status']?.toString() ==
+                    _autopilotAgentFlowStatusStaleLock ||
+                item['status']?.toString() ==
+                    _autopilotAgentFlowStatusActiveLock)
+            .toList();
+      }
+      if (filter == 'safety') {
+        return items
+            .where((item) =>
+                item['status']?.toString() ==
+                    _autopilotAgentFlowStatusQuarantined ||
+                item['status']?.toString() ==
+                    _autopilotAgentFlowStatusPausedAutomation)
+            .toList();
+      }
+      if (filter == 'worktrees') {
+        return items
+            .where((item) =>
+                item['status']?.toString() ==
+                    _autopilotAgentFlowStatusDetachedWorktree ||
+                item['status']?.toString() ==
+                    _autopilotAgentFlowStatusDirtyWorktree)
+            .toList();
+      }
+      if (filter == 'review') {
+        return items
+            .where((item) =>
+                item['status']?.toString() ==
+                _autopilotAgentFlowStatusReviewHead)
+            .toList();
+      }
+      if (filter == 'temp') {
+        return items
+            .where((item) =>
+                item['status']?.toString() ==
+                _autopilotAgentFlowStatusTempPublish)
+            .toList();
+      }
+      if (filter == 'deliverables') {
+        return items
+            .where((item) =>
+                item['status']?.toString() ==
+                _autopilotAgentFlowStatusProcessedDeliverable)
+            .toList();
+      }
+      if (filter == 'pending') {
+        return items
+            .where((item) =>
+                item['status']?.toString() == _autopilotAgentFlowStatusPending)
+            .toList();
+      }
+      return items;
+    }
+
+    List<Map<String, dynamic>> filteredItems() => itemsFor(selectedFilter);
+
+    int countFor(String filter) {
+      return itemsFor(filter).length;
+    }
+
+    Widget filterChip(
+      StateSetter setDialogState,
+      String filter,
+      String label,
+      IconData icon,
+    ) {
+      final selected = selectedFilter == filter;
+      final chipColor = filter == 'malformed'
+          ? _autonomyStatusColor('failed')
+          : filter == 'locks'
+              ? Colors.orange.shade800
+              : filter == 'safety'
+                  ? Colors.deepOrange.shade700
+                  : filter == 'worktrees'
+                      ? Colors.deepOrange.shade700
+                      : filter == 'review'
+                          ? Colors.deepOrange.shade700
+                          : filter == 'temp'
+                              ? Colors.deepOrange.shade700
+                              : filter == 'deliverables'
+                                  ? Colors.deepOrange.shade700
+                                  : filter == 'pending'
+                                      ? Colors.indigo.shade700
+                                      : Colors.blueGrey.shade700;
+      return ChoiceChip(
+        avatar: Icon(
+          icon,
+          size: 15,
+          color: selected ? Theme.of(context).colorScheme.onPrimary : chipColor,
+        ),
+        label: Text('$label ${countFor(filter)}'),
+        selected: selected,
+        onSelected: (_) => setDialogState(() => selectedFilter = filter),
+        selectedColor: chipColor,
+        labelStyle: TextStyle(
+          color: selected
+              ? Theme.of(context).colorScheme.onPrimary
+              : Theme.of(context).colorScheme.onSurfaceVariant,
+          fontWeight: FontWeight.w700,
+        ),
+        visualDensity: VisualDensity.compact,
+      );
+    }
+
+    try {
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) {
+          return StatefulBuilder(
+            builder: (dialogContext, setDialogState) {
+              final visibleItems = filteredItems();
+              final showQuarantineBoard =
+                  (selectedFilter == 'all' || selectedFilter == 'safety') &&
+                      _asMapList(flow[_autopilotAgentFlowQuarantinedTargets])
+                          .isNotEmpty;
+              final showPausedAutomationBoard = (selectedFilter == 'all' ||
+                      selectedFilter == 'safety') &&
+                  _asMapList(flow[_autopilotAgentFlowPausedAutomationActivity])
+                      .isNotEmpty;
+              final showTrustSummary = (selectedFilter == 'all' ||
+                      selectedFilter == 'safety') &&
+                  ((_asInt(_asMap(flow[_autopilotAgentFlowControlPlaneTrust])[
+                              'blocker_count']) ??
+                          0) >
+                      0);
+              final previewBacklog =
+                  _asMap(flow[_autopilotAgentFlowPreviewBacklog]);
+              final showPreviewBacklog = (selectedFilter == 'all' ||
+                      selectedFilter == 'pending') &&
+                  (((_asInt(previewBacklog['hidden_count']) ?? 0) > 0) ||
+                      _asMapList(previewBacklog['pending_lanes']).isNotEmpty);
+              final reviewPacket =
+                  _asMap(flow[_autopilotAgentFlowReviewPacketSummary]);
+              final showReviewPacketSummary =
+                  (selectedFilter == 'all' || selectedFilter == 'review') &&
+                      ((_asInt(reviewPacket['mismatch_count']) ?? 0) > 0);
+              return AlertDialog(
+                insetPadding:
+                    const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
+                title: Row(
+                  children: [
+                    const Icon(Icons.account_tree_outlined, size: 19),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Agent flow',
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: 'Close',
+                      visualDensity: VisualDensity.compact,
+                      onPressed: () => Navigator.of(dialogContext).pop(),
+                      icon: const Icon(Icons.close, size: 18),
+                    ),
+                  ],
+                ),
+                content: SizedBox(
+                  width: (MediaQuery.sizeOf(context).width - 40)
+                      .clamp(320.0, 980.0)
+                      .toDouble(),
+                  height: (MediaQuery.sizeOf(context).height - 120)
+                      .clamp(360.0, 760.0)
+                      .toDouble(),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 6,
+                        children: [
+                          filterChip(
+                            setDialogState,
+                            'all',
+                            'All',
+                            Icons.account_tree_outlined,
+                          ),
+                          filterChip(
+                            setDialogState,
+                            'malformed',
+                            'Malformed',
+                            _agentFlowStatusIcon(
+                                _autopilotAgentFlowStatusMalformed),
+                          ),
+                          filterChip(
+                            setDialogState,
+                            'locks',
+                            'Locks',
+                            _agentFlowStatusIcon(
+                                _autopilotAgentFlowStatusStaleLock),
+                          ),
+                          filterChip(
+                            setDialogState,
+                            'safety',
+                            'Safety',
+                            _agentFlowStatusIcon(
+                                _autopilotAgentFlowStatusQuarantined),
+                          ),
+                          filterChip(
+                            setDialogState,
+                            'worktrees',
+                            'Worktrees',
+                            _agentFlowStatusIcon(
+                                _autopilotAgentFlowStatusDirtyWorktree),
+                          ),
+                          filterChip(
+                            setDialogState,
+                            'review',
+                            'Review',
+                            _agentFlowStatusIcon(
+                                _autopilotAgentFlowStatusReviewHead),
+                          ),
+                          filterChip(
+                            setDialogState,
+                            'temp',
+                            'Temp',
+                            _agentFlowStatusIcon(
+                                _autopilotAgentFlowStatusTempPublish),
+                          ),
+                          filterChip(
+                            setDialogState,
+                            'deliverables',
+                            'Deliverables',
+                            _agentFlowStatusIcon(
+                                _autopilotAgentFlowStatusProcessedDeliverable),
+                          ),
+                          filterChip(
+                            setDialogState,
+                            'pending',
+                            'Pending',
+                            _agentFlowStatusIcon(
+                                _autopilotAgentFlowStatusPending),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      Text(
+                        '${visibleItems.length}/$attention action(s) shown',
+                        style: TextStyle(
+                          color: _mutedTextColor(),
+                          fontSize: 12,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      Expanded(
+                        child: Scrollbar(
+                          controller: scrollController,
+                          thumbVisibility: true,
+                          child: ListView(
+                            controller: scrollController,
+                            padding: const EdgeInsets.only(right: 8),
+                            children: [
+                              if (showTrustSummary)
+                                _buildAutonomyAgentFlowTrustSummary(
+                                  flow,
+                                  limit: 8,
+                                ),
+                              if (showPreviewBacklog)
+                                _buildAutonomyAgentFlowPreviewBacklog(
+                                  flow,
+                                  limit: 8,
+                                  showRequestList: true,
+                                  afterOpen: () =>
+                                      Navigator.of(dialogContext).pop(),
+                                ),
+                              if (showReviewPacketSummary)
+                                _buildAutonomyAgentFlowReviewPacketSummary(
+                                  flow,
+                                ),
+                              if (showQuarantineBoard)
+                                _buildAutonomyAgentFlowQuarantineBoard(
+                                  flow,
+                                  afterOpen: () =>
+                                      Navigator.of(dialogContext).pop(),
+                                ),
+                              if (showPausedAutomationBoard)
+                                _buildAutonomyAgentFlowPausedAutomationBoard(
+                                  flow,
+                                  afterOpen: () =>
+                                      Navigator.of(dialogContext).pop(),
+                                ),
+                              if (visibleItems.isEmpty &&
+                                  !showTrustSummary &&
+                                  !showPreviewBacklog &&
+                                  !showReviewPacketSummary &&
+                                  !showQuarantineBoard &&
+                                  !showPausedAutomationBoard)
+                                Text(
+                                  'No agent-flow actions match this filter.',
+                                  style: TextStyle(
+                                    color: _mutedTextColor(),
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              for (final item in visibleItems)
+                                _buildAutonomyOperatorInboxItem(
+                                  item,
+                                  afterOpen: () =>
+                                      Navigator.of(dialogContext).pop(),
+                                ),
+                              if (lanes.isNotEmpty) ...[
+                                const SizedBox(height: 12),
+                                Text(
+                                  'Lanes',
+                                  style:
+                                      Theme.of(context).textTheme.labelMedium,
+                                ),
+                                const SizedBox(height: 4),
+                                for (final lane in lanes)
+                                  _buildAutonomyAgentFlowLane(lane),
+                              ],
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          );
+        },
+      );
+    } finally {
+      scrollController.dispose();
+    }
+  }
+
+  Widget _buildAutonomyAgentFlowPreviewBacklog(
+    Map<String, dynamic> flow, {
+    int limit = 3,
+    bool showRequestList = false,
+    VoidCallback? afterOpen,
+  }) {
+    final backlog = _asMap(flow[_autopilotAgentFlowPreviewBacklog]);
+    final hidden = _asInt(backlog['hidden_count']) ?? 0;
+    final lanes = _asMapList(backlog['pending_lanes']);
+    if (hidden <= 0 && lanes.isEmpty) return const SizedBox.shrink();
+    final hiddenCounts = _asMap(backlog['hidden_status_counts']);
+    final hiddenStable =
+        _asInt(hiddenCounts[_autopilotAgentFlowStatusPending]) ?? 0;
+    final hiddenDirty =
+        _asInt(hiddenCounts[_autopilotAgentFlowStatusDirtyWorktree]) ?? 0;
+    final hiddenDetached =
+        _asInt(hiddenCounts[_autopilotAgentFlowStatusDetachedWorktree]) ?? 0;
+    final hiddenStaleLocks =
+        _asInt(hiddenCounts[_autopilotAgentFlowStatusStaleLock]) ?? 0;
+    final hiddenActiveLocks =
+        _asInt(hiddenCounts[_autopilotAgentFlowStatusActiveLock]) ?? 0;
+    final hiddenWorktrees = hiddenDirty + hiddenDetached;
+    final hiddenLocks = hiddenStaleLocks + hiddenActiveLocks;
+    final stalePending = _asInt(backlog['stale_pending_item_count']) ?? 0;
+    final freshPending = _asInt(backlog['fresh_pending_item_count']) ?? 0;
+    final hiddenLaneCount = _asInt(backlog['hidden_pending_lane_count']) ?? 0;
+    final visibleLanes = lanes.take(limit).toList();
+    final color = stalePending > 0
+        ? Colors.deepOrange.shade800
+        : hiddenStable > 0 || freshPending > 0
+            ? Colors.indigo.shade700
+            : Colors.blueGrey.shade700;
+    return Padding(
+      padding: const EdgeInsets.only(top: 8, bottom: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.layers_outlined, color: color, size: 16),
+              const SizedBox(width: 7),
+              Expanded(
+                child: Text(
+                  'Preview backlog',
+                  style: Theme.of(context).textTheme.labelLarge,
+                ),
+              ),
+              if (hidden > 0)
+                _miniChip(
+                  '$hidden hidden',
+                  _autonomyBubbleBackground(color),
+                  color,
+                ),
+            ],
+          ),
+          const SizedBox(height: 7),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              if (stalePending > 0)
+                _miniChip(
+                  '$stalePending stale pending',
+                  _autonomyBubbleBackground(Colors.deepOrange),
+                  Colors.deepOrange.shade800,
+                ),
+              if (freshPending > 0)
+                _miniChip(
+                  '$freshPending fresh pending',
+                  _autonomyBubbleBackground(Colors.indigo),
+                  Colors.indigo.shade800,
+                ),
+              if (stalePending == 0 && freshPending == 0 && hiddenStable > 0)
+                _miniChip(
+                  '$hiddenStable pending behind blockers',
+                  _autonomyBubbleBackground(Colors.indigo),
+                  Colors.indigo.shade800,
+                ),
+              if (hiddenWorktrees > 0)
+                _miniChip(
+                  '$hiddenWorktrees worktree',
+                  _autonomyBubbleBackground(Colors.deepOrange),
+                  Colors.deepOrange.shade800,
+                ),
+              if (hiddenLocks > 0)
+                _miniChip(
+                  '$hiddenLocks lock',
+                  _autonomyBubbleBackground(Colors.orange),
+                  Colors.orange.shade900,
+                ),
+            ],
+          ),
+          for (final lane in visibleLanes)
+            _buildAutonomyAgentFlowPreviewBacklogLane(
+              lane,
+              showRequestList: showRequestList,
+              afterOpen: afterOpen,
+            ),
+          if (hiddenLaneCount > 0)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                '+$hiddenLaneCount more pending lane(s)',
+                style: TextStyle(color: _mutedTextColor(), fontSize: 11),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAutonomyAgentFlowPreviewBacklogLane(
+    Map<String, dynamic> lane, {
+    bool showRequestList = false,
+    VoidCallback? afterOpen,
+  }) {
+    final agent = lane['agent']?.toString().trim() ?? 'Agent';
+    final pending = _asInt(lane['pending_count']) ?? 0;
+    final stable = _asInt(lane['stable_pending_count']) ?? 0;
+    final stale = _asInt(lane['stale_pending_count']) ?? 0;
+    final fresh = _asInt(lane['fresh_pending_count']) ?? 0;
+    final malformed = _asInt(lane['shape_invalid_count']) ?? 0;
+    final reviewHeads = _asInt(lane['review_head_mismatch_count']) ?? 0;
+    final superseded = _asInt(lane['superseded_pending_count']) ?? 0;
+    final oldest = _asInt(lane['oldest_pending_age_minutes']);
+    final nextPath = lane['next_pending_path']?.toString().trim() ?? '';
+    final nextOpenPath =
+        lane['next_pending_open_path']?.toString().trim() ?? '';
+    final nextActionLabel =
+        lane['next_pending_action_label']?.toString().trim() ?? 'Open request';
+    final pendingItems = _asMapList(lane['pending_items']);
+    final color = malformed > 0 || reviewHeads > 0 || stale > 0
+        ? Colors.deepOrange.shade800
+        : stable > 0
+            ? Colors.indigo.shade700
+            : Colors.blueGrey.shade700;
+    return Padding(
+      padding: const EdgeInsets.only(top: 7),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.pending_actions_outlined, color: color, size: 14),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  agent,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Wrap(
+                  spacing: 5,
+                  runSpacing: 5,
+                  children: [
+                    _miniChip(
+                      '$stable/$pending stable',
+                      _autonomyBubbleBackground(color),
+                      color,
+                    ),
+                    if (stale > 0)
+                      _miniChip(
+                        '$stale stale',
+                        _autonomyBubbleBackground(Colors.deepOrange),
+                        Colors.deepOrange.shade800,
+                      ),
+                    if (fresh > 0)
+                      _miniChip(
+                        '$fresh fresh',
+                        _autonomyBubbleBackground(Colors.blueGrey),
+                        Colors.blueGrey.shade800,
+                      ),
+                    if (oldest != null)
+                      _miniChip(
+                        '${oldest}m oldest',
+                        _autonomyBubbleBackground(
+                          stale > 0 ? Colors.deepOrange : Colors.indigo,
+                        ),
+                        stale > 0
+                            ? Colors.deepOrange.shade800
+                            : Colors.indigo.shade800,
+                      ),
+                    if (malformed > 0)
+                      _miniChip(
+                        '$malformed malformed',
+                        _autonomyBubbleBackground(Colors.deepOrange),
+                        Colors.deepOrange.shade800,
+                      ),
+                    if (reviewHeads > 0)
+                      _miniChip(
+                        '$reviewHeads review heads',
+                        _autonomyBubbleBackground(Colors.deepOrange),
+                        Colors.deepOrange.shade800,
+                      ),
+                    if (superseded > 0)
+                      _miniChip(
+                        '$superseded superseded',
+                        _autonomyBubbleBackground(Colors.blueGrey),
+                        Colors.blueGrey.shade800,
+                      ),
+                  ],
+                ),
+                if (nextPath.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 3),
+                    child: Text(
+                      nextPath,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                if (showRequestList && pendingItems.isNotEmpty) ...[
+                  const SizedBox(height: 5),
+                  for (final item in pendingItems.take(3))
+                    _buildAutonomyAgentFlowPreviewRequestRow(
+                      item,
+                      afterOpen: afterOpen,
+                    ),
+                  if (pendingItems.length > 3)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 3),
+                      child: Text(
+                        '+${pendingItems.length - 3} more request(s)',
+                        style: TextStyle(
+                          color: _mutedTextColor(),
+                          fontSize: 11,
+                        ),
+                      ),
+                    ),
+                ],
+              ],
+            ),
+          ),
+          if (!showRequestList &&
+              (nextPath.isNotEmpty || nextOpenPath.isNotEmpty))
+            IconButton(
+              tooltip:
+                  nextActionLabel.isEmpty ? 'Open request' : nextActionLabel,
+              visualDensity: VisualDensity.compact,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+              onPressed: _autonomyBusy
+                  ? null
+                  : () async {
+                      await _openAutonomyInboxItem({
+                        'open_path': nextOpenPath,
+                        'path': nextPath,
+                      });
+                      afterOpen?.call();
+                    },
+              icon: const Icon(Icons.open_in_new, size: 14),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAutonomyAgentFlowPreviewRequestRow(
+    Map<String, dynamic> item, {
+    VoidCallback? afterOpen,
+  }) {
+    final path = item['path']?.toString().trim() ?? '';
+    final openPath = item['open_path']?.toString().trim() ?? '';
+    final status = item['status']?.toString().trim() ?? '';
+    final actionLabel =
+        item['action_label']?.toString().trim() ?? 'Open request';
+    final age = _asInt(item['age_minutes']);
+    final stale =
+        item['stale'] == true || item['stale']?.toString().trim() == 'true';
+    final color = status == _autopilotAgentFlowStatusMalformed ||
+            status == _autopilotAgentFlowStatusReviewHead ||
+            stale
+        ? Colors.deepOrange.shade800
+        : Colors.indigo.shade700;
+    if (path.isEmpty && openPath.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(top: 3),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(_agentFlowStatusIcon(status), color: color, size: 13),
+          const SizedBox(width: 5),
+          Expanded(
+            child: Text(
+              path.isNotEmpty ? path : openPath,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: _mutedTextColor(),
+                fontSize: 11,
+              ),
+            ),
+          ),
+          if (age != null)
+            Padding(
+              padding: const EdgeInsets.only(left: 5, top: 1),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 78),
+                child: Text(
+                  stale ? '${age}m stale' : '${age}m',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: stale
+                        ? Colors.deepOrange.shade800
+                        : Colors.blueGrey.shade700,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ),
+          IconButton(
+            tooltip: actionLabel.isEmpty ? 'Open request' : actionLabel,
+            visualDensity: VisualDensity.compact,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 26, minHeight: 26),
+            onPressed: _autonomyBusy
+                ? null
+                : () async {
+                    await _openAutonomyInboxItem({
+                      'open_path': openPath,
+                      'path': path,
+                    });
+                    afterOpen?.call();
+                  },
+            icon: const Icon(Icons.open_in_new, size: 13),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAutonomyAgentFlowReviewPacketSummary(
+    Map<String, dynamic> flow,
+  ) {
+    final summary = _asMap(flow[_autopilotAgentFlowReviewPacketSummary]);
+    if (summary.isEmpty) return const SizedBox.shrink();
+    final mismatchCount = _asInt(summary['mismatch_count']) ?? 0;
+    if (mismatchCount <= 0) return const SizedBox.shrink();
+    final branchDrift = _asInt(summary['branch_drift_count']) ?? 0;
+    final missingCommits = _asInt(summary['missing_commit_count']) ?? 0;
+    final headDrift = _asInt(summary['head_mismatch_count']) ?? 0;
+    final detail = summary['detail']?.toString().trim() ?? '';
+    final actionDetail = summary['next_action_detail']?.toString().trim() ?? '';
+    final color = Colors.deepOrange.shade800;
+    return Padding(
+      padding: const EdgeInsets.only(top: 8, bottom: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.verified_outlined, color: color, size: 16),
+              const SizedBox(width: 7),
+              Expanded(
+                child: Text(
+                  'Review packet guard',
+                  style: Theme.of(context).textTheme.labelLarge,
+                ),
+              ),
+              _miniChip(
+                '$mismatchCount stale',
+                _autonomyBubbleBackground(color),
+                color,
+              ),
+            ],
+          ),
+          const SizedBox(height: 7),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              if (headDrift > 0)
+                _miniChip(
+                  '$headDrift head drift',
+                  _autonomyBubbleBackground(Colors.deepOrange),
+                  Colors.deepOrange.shade800,
+                ),
+              if (branchDrift > 0)
+                _miniChip(
+                  '$branchDrift branch drift',
+                  _autonomyBubbleBackground(Colors.deepOrange),
+                  Colors.deepOrange.shade800,
+                ),
+              if (missingCommits > 0)
+                _miniChip(
+                  '$missingCommits missing commit',
+                  _autonomyBubbleBackground(Colors.deepOrange),
+                  Colors.deepOrange.shade800,
+                ),
+            ],
+          ),
+          if (detail.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                detail,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: _mutedTextColor(), fontSize: 11),
+              ),
+            ),
+          if (actionDetail.isNotEmpty && actionDetail != detail)
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(
+                actionDetail,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: color,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAutonomyAgentFlowTrustSummary(
+    Map<String, dynamic> flow, {
+    int limit = 3,
+  }) {
+    final trust = _asMap(flow[_autopilotAgentFlowControlPlaneTrust]);
+    return _buildAutonomyControlPlaneTrustSummary(trust, limit: limit);
+  }
+
+  Widget _buildAutonomyControlPlaneTrustSummary(
+    Map<String, dynamic> trust, {
+    int limit = 3,
+  }) {
+    final items = _asMapList(trust['items']);
+    final blockerCount = _asInt(trust['blocker_count']) ?? items.length;
+    if (blockerCount <= 0 || items.isEmpty) return const SizedBox.shrink();
+    final counts = _asMap(trust['category_counts']);
+    final highRisk = _asInt(trust['high_risk_count']) ?? 0;
+    final color =
+        highRisk > 0 ? Colors.deepOrange.shade800 : Colors.orange.shade800;
+    final visible = items.take(limit).toList();
+    return Padding(
+      padding: const EdgeInsets.only(top: 8, bottom: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.security_outlined, color: color, size: 16),
+              const SizedBox(width: 7),
+              Expanded(
+                child: Text(
+                  'Control-plane trust blockers',
+                  style: Theme.of(context).textTheme.labelLarge,
+                ),
+              ),
+              _miniChip(
+                '$blockerCount blocker${blockerCount == 1 ? '' : 's'}',
+                _autonomyBubbleBackground(color),
+                color,
+              ),
+            ],
+          ),
+          const SizedBox(height: 7),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              if (highRisk > 0)
+                _miniChip(
+                  '$highRisk high risk',
+                  _autonomyBubbleBackground(Colors.deepOrange),
+                  Colors.deepOrange.shade800,
+                ),
+              _trustCountChip(counts, 'quarantine', 'quarantine'),
+              _trustCountChip(counts, 'paused_automation', 'paused'),
+              _trustCountChip(counts, 'detached_worktree', 'detached'),
+              _trustCountChip(counts, 'dirty_worktree', 'dirty'),
+              _trustCountChip(counts, 'agent_lock', 'locks'),
+            ].whereType<Widget>().toList(),
+          ),
+          for (final item in visible) _buildAutonomyTrustBlockerRow(item),
+          if (items.length > visible.length)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                '+${items.length - visible.length} more trust blocker(s)',
+                style: TextStyle(color: _mutedTextColor(), fontSize: 11),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget? _trustCountChip(
+    Map<String, dynamic> counts,
+    String key,
+    String label,
+  ) {
+    final count = _asInt(counts[key]) ?? 0;
+    if (count <= 0) return null;
+    final color = key == 'quarantine'
+        ? Colors.deepOrange.shade800
+        : key == 'paused_automation'
+            ? Colors.orange.shade900
+            : key == 'agent_lock'
+                ? Colors.red.shade800
+                : Colors.blueGrey.shade800;
+    return _miniChip(
+      '$count $label',
+      _autonomyBubbleBackground(color),
+      color,
+    );
+  }
+
+  Widget _buildAutonomyTrustBlockerRow(Map<String, dynamic> item) {
+    final kind = item['kind']?.toString().trim() ?? '';
+    final label = item['label']?.toString().trim() ?? 'Review blocker';
+    final detail = item['detail']?.toString().trim() ?? '';
+    final threadId = item['thread_id']?.toString().trim() ?? '';
+    final automationId = item['automation_id']?.toString().trim() ?? '';
+    final worktreeName = item['worktree_name']?.toString().trim() ?? '';
+    final worktreePath = item['worktree_path']?.toString().trim() ?? '';
+    final agent = item['agent']?.toString().trim() ?? '';
+    final lockOwner = item['lock_owner']?.toString().trim() ?? '';
+    final lockPid = item['lock_pid']?.toString().trim() ?? '';
+    final sourcePath = item['source_path']?.toString().trim() ?? '';
+    final openPath = item['open_path']?.toString().trim() ?? '';
+    final handoffLabel = item['handoff_label']?.toString().trim() ?? '';
+    final handoffCopy = item['handoff_copy']?.toString().trim() ?? '';
+    final color = kind == 'quarantined_target'
+        ? Colors.deepOrange.shade800
+        : kind == 'paused_automation'
+            ? Colors.orange.shade900
+            : kind == 'agent_lock'
+                ? Colors.red.shade800
+                : Colors.blueGrey.shade800;
+    final icon = kind == 'quarantined_target'
+        ? Icons.policy_outlined
+        : kind == 'paused_automation'
+            ? Icons.pause_circle_outline
+            : kind == 'agent_lock'
+                ? Icons.lock_clock_outlined
+                : Icons.folder_copy_outlined;
+    final target = threadId.isNotEmpty
+        ? 'target ${threadId.length > 8 ? threadId.substring(0, 8) : threadId}'
+        : automationId.isNotEmpty
+            ? automationId
+            : worktreeName.isNotEmpty
+                ? worktreeName
+                : lockOwner.isNotEmpty
+                    ? lockOwner
+                    : agent;
+    return Padding(
+      padding: const EdgeInsets.only(top: 7),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, color: color, size: 14),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  target.isEmpty ? label : '$label - $target',
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                if (detail.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      detail,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                if (sourcePath.isNotEmpty || worktreePath.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      sourcePath.isNotEmpty ? sourcePath : worktreePath,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                if (lockPid.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      'PID $lockPid',
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          if (openPath.isNotEmpty ||
+              sourcePath.isNotEmpty ||
+              worktreePath.isNotEmpty)
+            IconButton(
+              tooltip: 'Open evidence',
+              visualDensity: VisualDensity.compact,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+              onPressed: _autonomyBusy
+                  ? null
+                  : () => _openAutonomyInboxItem({
+                        'open_path': openPath,
+                        'path':
+                            sourcePath.isNotEmpty ? sourcePath : worktreePath,
+                      }),
+              icon: const Icon(Icons.open_in_new, size: 14),
+            ),
+          if (handoffCopy.isNotEmpty)
+            IconButton(
+              tooltip: handoffLabel.isEmpty ? 'Copy handoff' : handoffLabel,
+              visualDensity: VisualDensity.compact,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+              onPressed: () => _copyAutonomyText(
+                handoffCopy,
+                'Trust handoff copied.',
+              ),
+              icon: const Icon(Icons.copy_all_outlined, size: 14),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAutonomyAgentFlowPausedAutomationBoard(
+    Map<String, dynamic> flow, {
+    VoidCallback? afterOpen,
+  }) {
+    final automations =
+        _asMapList(flow[_autopilotAgentFlowPausedAutomationActivity]);
+    if (automations.isEmpty) return const SizedBox.shrink();
+    final total =
+        _asInt(flow['paused_automation_activity_count']) ?? automations.length;
+    final uncovered = _asInt(flow['paused_automation_uncovered_count']) ??
+        automations
+            .where((item) => item['covered_by_active_quarantine'] != true)
+            .length;
+    final covered = (total - uncovered).clamp(0, total);
+    final color =
+        uncovered > 0 ? Colors.deepOrange.shade700 : Colors.orange.shade800;
+    final rendered = automations.take(6).toList();
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(9),
+      decoration: BoxDecoration(
+        color: _autonomyBubbleBackground(color, alpha: 0.06),
+        border: Border.all(color: color.withValues(alpha: 0.22)),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.pause_circle_outline, color: color, size: 16),
+              const SizedBox(width: 7),
+              Expanded(
+                child: Text(
+                  'Paused automations',
+                  style: Theme.of(context).textTheme.labelLarge,
+                ),
+              ),
+              _miniChip(
+                '$total active',
+                _autonomyBubbleBackground(color),
+                color,
+              ),
+            ],
+          ),
+          const SizedBox(height: 7),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              if (uncovered > 0)
+                _miniChip(
+                  '$uncovered uncovered',
+                  _autonomyBubbleBackground(Colors.deepOrange),
+                  Colors.deepOrange.shade800,
+                ),
+              if (covered > 0)
+                _miniChip(
+                  '$covered covered',
+                  _autonomyBubbleBackground(Colors.orange),
+                  Colors.orange.shade900,
+                ),
+            ],
+          ),
+          for (final automation in rendered)
+            _buildAutonomyPausedAutomationRow(
+              automation,
+              afterOpen: afterOpen,
+            ),
+          if (automations.length > rendered.length)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                '+${automations.length - rendered.length} more automation(s)',
+                style: TextStyle(color: _mutedTextColor(), fontSize: 11),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAutonomyPausedAutomationRow(
+    Map<String, dynamic> automation, {
+    VoidCallback? afterOpen,
+  }) {
+    final automationId = automation['automation_id']?.toString().trim() ?? '';
+    final automationName =
+        automation['automation_name']?.toString().trim() ?? '';
+    final status = automation['automation_status']?.toString().trim() ?? '';
+    final rrule = automation['automation_rrule']?.toString().trim() ?? '';
+    final threadId = automation['target_thread_id']?.toString().trim() ?? '';
+    final age = _asInt(automation['target_session_age_minutes']);
+    final threshold = _asInt(automation['threshold_minutes']);
+    final goalStatus =
+        automation['target_session_goal_status']?.toString().trim() ?? '';
+    final configDisplay =
+        automation['config_display_path']?.toString().trim() ?? '';
+    final configOpen = automation['config_open_path']?.toString().trim() ?? '';
+    final sessionPath =
+        automation['target_session_path']?.toString().trim() ?? '';
+    final covered = automation['covered_by_active_quarantine'] == true;
+    final handoffLabel =
+        automation['operator_handoff_label']?.toString().trim() ?? '';
+    final handoffInstruction =
+        automation['operator_handoff_instruction']?.toString().trim() ?? '';
+    final handoffCopy =
+        automation['operator_handoff_copy']?.toString().trim() ?? '';
+    final title = automationName.isNotEmpty
+        ? automationName
+        : automationId.isNotEmpty
+            ? automationId
+            : 'paused automation';
+    final color = covered ? Colors.orange.shade800 : Colors.deepOrange.shade700;
+    final shortThread =
+        threadId.length > 8 ? threadId.substring(0, 8) : threadId;
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.pause_circle_outline, color: color, size: 14),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        title,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    if (configOpen.isNotEmpty || configDisplay.isNotEmpty)
+                      IconButton(
+                        tooltip: 'Open automation config',
+                        visualDensity: VisualDensity.compact,
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(
+                          minWidth: 28,
+                          minHeight: 28,
+                        ),
+                        onPressed: _autonomyBusy
+                            ? null
+                            : () async {
+                                await _openAutonomyInboxItem({
+                                  'open_path': configOpen,
+                                  'path': configDisplay,
+                                });
+                                afterOpen?.call();
+                              },
+                        icon: const Icon(Icons.open_in_new, size: 14),
+                      ),
+                    if (handoffCopy.isNotEmpty)
+                      IconButton(
+                        tooltip: handoffLabel.isEmpty
+                            ? 'Copy handoff'
+                            : handoffLabel,
+                        visualDensity: VisualDensity.compact,
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(
+                          minWidth: 28,
+                          minHeight: 28,
+                        ),
+                        onPressed: () => _copyAutonomyText(
+                          handoffCopy,
+                          'Paused automation handoff copied.',
+                        ),
+                        icon: const Icon(Icons.copy_all_outlined, size: 14),
+                      ),
+                  ],
+                ),
+                Wrap(
+                  spacing: 5,
+                  runSpacing: 5,
+                  children: [
+                    if (status.isNotEmpty)
+                      _miniChip(
+                        status.toLowerCase(),
+                        _autonomyBubbleBackground(color),
+                        color,
+                      ),
+                    _miniChip(
+                      covered ? 'covered by quarantine' : 'uncovered',
+                      _autonomyBubbleBackground(
+                          covered ? Colors.orange : Colors.deepOrange),
+                      covered
+                          ? Colors.orange.shade900
+                          : Colors.deepOrange.shade800,
+                    ),
+                    if (shortThread.isNotEmpty)
+                      _miniChip(
+                        'target $shortThread',
+                        _autonomyBubbleBackground(Colors.blueGrey),
+                        Colors.blueGrey.shade800,
+                      ),
+                    if (age != null)
+                      _miniChip(
+                        '${age}m session',
+                        _autonomyBubbleBackground(color),
+                        color,
+                      ),
+                    if (threshold != null)
+                      _miniChip(
+                        '${threshold}m threshold',
+                        _autonomyBubbleBackground(Colors.blueGrey),
+                        Colors.blueGrey.shade800,
+                      ),
+                    if (goalStatus.isNotEmpty)
+                      _miniChip(
+                        goalStatus,
+                        _autonomyBubbleBackground(Colors.blueGrey),
+                        Colors.blueGrey.shade800,
+                      ),
+                  ],
+                ),
+                if (automationId.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      automationId,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                if (rrule.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      'Schedule: $rrule',
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                if (configDisplay.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      'Config: $configDisplay',
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                if (sessionPath.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      'Session: $sessionPath',
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                if (handoffInstruction.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      handoffInstruction,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: color,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAutonomyAgentFlowQuarantineBoard(
+    Map<String, dynamic> flow, {
+    VoidCallback? afterOpen,
+  }) {
+    final targets = _asMapList(flow[_autopilotAgentFlowQuarantinedTargets]);
+    if (targets.isEmpty) return const SizedBox.shrink();
+    final summary = _asMap(flow[_autopilotAgentFlowQuarantineSummary]);
+    final active = _asInt(summary['active_count']) ??
+        targets.where((target) => target['active'] == true).length;
+    final total = _asInt(summary['target_count']) ?? targets.length;
+    final proofMet = _asInt(summary['proof_satisfied_count']) ??
+        targets.where((target) => target['proof_satisfied'] == true).length;
+    final termination = _asInt(summary['termination_required_count']) ?? 0;
+    final containment = _asInt(summary['containment_required_count']) ?? 0;
+    final needsStop = _asInt(summary['needs_operator_stop_count']) ??
+        targets
+            .where((target) =>
+                target['operator_group']?.toString() == 'needs_operator_stop')
+            .length;
+    final containmentActive = _asInt(summary['containment_active_count']) ??
+        targets
+            .where((target) =>
+                target['operator_group']?.toString() == 'containment_active')
+            .length;
+    final nextCheck = summary['next_check_utc']?.toString().trim() ?? '';
+    final nextRemaining = _asInt(summary['next_check_remaining_minutes']);
+    final color =
+        active > 0 ? Colors.deepOrange.shade700 : Colors.teal.shade700;
+    final groupedTargets = <String, List<Map<String, dynamic>>>{};
+    for (final target in targets) {
+      final group = target['operator_group']?.toString().trim() ??
+          (target['active'] == true
+              ? 'containment_active'
+              : target['proof_satisfied'] == true
+                  ? 'proof_window_met'
+                  : 'waiting_evidence');
+      groupedTargets
+          .putIfAbsent(group, () => <Map<String, dynamic>>[])
+          .add(target);
+    }
+    final groupWidgets = <Widget>[];
+    var renderedTargets = 0;
+
+    void addGroup(String key, String label, IconData icon, Color groupColor) {
+      final groupTargets =
+          groupedTargets[key] ?? const <Map<String, dynamic>>[];
+      if (groupTargets.isEmpty || renderedTargets >= 6) return;
+      groupWidgets.add(
+        Padding(
+          padding: const EdgeInsets.only(top: 8, bottom: 2),
+          child: Row(
+            children: [
+              Icon(icon, size: 14, color: groupColor),
+              const SizedBox(width: 5),
+              Expanded(
+                child: Text(
+                  '$label ${groupTargets.length}',
+                  style: TextStyle(
+                    color: groupColor,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+      for (final target in groupTargets) {
+        if (renderedTargets >= 6) break;
+        groupWidgets.add(
+          _buildAutonomyQuarantineTargetRow(
+            target,
+            afterOpen: afterOpen,
+          ),
+        );
+        renderedTargets += 1;
+      }
+    }
+
+    addGroup(
+      'needs_operator_stop',
+      'Needs operator stop',
+      Icons.stop_circle_outlined,
+      Colors.deepOrange.shade800,
+    );
+    addGroup(
+      'containment_active',
+      'Still active',
+      Icons.warning_amber_outlined,
+      Colors.deepOrange.shade700,
+    );
+    addGroup(
+      'proof_window_met',
+      'Proof window met',
+      Icons.verified_outlined,
+      Colors.teal.shade700,
+    );
+    addGroup(
+      'goal_inactive_review',
+      'Goal inactive',
+      Icons.pause_circle_outline,
+      Colors.orange.shade800,
+    );
+    addGroup(
+      'waiting_evidence',
+      'Waiting evidence',
+      Icons.hourglass_empty_outlined,
+      Colors.blueGrey.shade700,
+    );
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(9),
+      decoration: BoxDecoration(
+        color: _autonomyBubbleBackground(color, alpha: 0.06),
+        border: Border.all(color: color.withValues(alpha: 0.22)),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.policy_outlined, color: color, size: 16),
+              const SizedBox(width: 7),
+              Expanded(
+                child: Text(
+                  'Quarantine targets',
+                  style: Theme.of(context).textTheme.labelLarge,
+                ),
+              ),
+              _miniChip(
+                '$active/$total active',
+                _autonomyBubbleBackground(color),
+                color,
+              ),
+            ],
+          ),
+          const SizedBox(height: 7),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              if (termination > 0)
+                _miniChip(
+                  '$termination terminate',
+                  _autonomyBubbleBackground(Colors.deepOrange),
+                  Colors.deepOrange.shade800,
+                ),
+              if (needsStop > 0)
+                _miniChip(
+                  '$needsStop stop',
+                  _autonomyBubbleBackground(Colors.deepOrange),
+                  Colors.deepOrange.shade800,
+                ),
+              if (containment > 0)
+                _miniChip(
+                  '$containment contain',
+                  _autonomyBubbleBackground(Colors.orange),
+                  Colors.orange.shade900,
+                ),
+              if (containmentActive > 0)
+                _miniChip(
+                  '$containmentActive active',
+                  _autonomyBubbleBackground(Colors.deepOrange),
+                  Colors.deepOrange.shade800,
+                ),
+              if (proofMet > 0)
+                _miniChip(
+                  '$proofMet proof met',
+                  _autonomyBubbleBackground(Colors.teal),
+                  Colors.teal.shade800,
+                ),
+              if (nextRemaining != null)
+                _miniChip(
+                  '${nextRemaining}m next proof',
+                  _autonomyBubbleBackground(
+                      nextRemaining > 0 ? Colors.deepOrange : Colors.teal),
+                  nextRemaining > 0
+                      ? Colors.deepOrange.shade800
+                      : Colors.teal.shade800,
+                ),
+            ],
+          ),
+          if (nextCheck.isNotEmpty) ...[
+            const SizedBox(height: 5),
+            Text(
+              'Next proof check: ${_shortStamp(nextCheck)}',
+              style: TextStyle(color: _mutedTextColor(), fontSize: 11),
+            ),
+          ],
+          ...groupWidgets,
+          if (targets.length > renderedTargets)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                '+${targets.length - renderedTargets} more target(s)',
+                style: TextStyle(color: _mutedTextColor(), fontSize: 11),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAutonomyQuarantineTargetRow(
+    Map<String, dynamic> target, {
+    VoidCallback? afterOpen,
+  }) {
+    final threadId = target['thread_id']?.toString().trim() ?? '';
+    final status = target['status']?.toString().trim() ?? '';
+    final statusLabel = status == 'CONTROL_PLANE_TERMINATION_REQUIRED'
+        ? 'termination'
+        : status == 'CONTROL_PLANE_CONTAINMENT_REQUIRED'
+            ? 'containment'
+            : status.replaceAll('_', ' ').toLowerCase();
+    final active = target['active'] == true;
+    final proofSatisfied = target['proof_satisfied'] == true;
+    final operatorLabel = target['operator_label']?.toString().trim() ?? '';
+    final operatorGuidance =
+        target['operator_guidance']?.toString().trim() ?? '';
+    final handoffLabel =
+        target['operator_handoff_label']?.toString().trim() ?? '';
+    final handoffInstruction =
+        target['operator_handoff_instruction']?.toString().trim() ?? '';
+    final handoffCopy =
+        target['operator_handoff_copy']?.toString().trim() ?? '';
+    final activityState = target['activity_state']?.toString().trim() ?? '';
+    final stateLabel = activityState == 'proof_window_satisfied'
+        ? 'proof met'
+        : activityState == 'active'
+            ? 'active'
+            : activityState == 'goal_not_active'
+                ? 'goal inactive'
+                : activityState.replaceAll('_', ' ');
+    final remaining = _asInt(target['proof_window_remaining_minutes']);
+    final age = _asInt(target['target_session_age_minutes']);
+    final source = target['source']?.toString().trim() ?? '';
+    final registryPath = target['registry_path']?.toString().trim() ?? '';
+    final registryOpenPath =
+        target['registry_open_path']?.toString().trim() ?? '';
+    final sessionPath = target['target_session_path']?.toString().trim() ?? '';
+    final reason = target['reason']?.toString().trim() ??
+        target['latest_reason']?.toString().trim() ??
+        '';
+    final color = active
+        ? Colors.deepOrange.shade700
+        : proofSatisfied
+            ? Colors.teal.shade700
+            : Colors.blueGrey.shade700;
+    final shortThread =
+        threadId.length > 8 ? threadId.substring(0, 8) : threadId;
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(
+            active ? Icons.warning_amber_outlined : Icons.verified_outlined,
+            color: color,
+            size: 14,
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        operatorLabel.isEmpty
+                            ? (shortThread.isEmpty ? 'target' : shortThread)
+                            : '${shortThread.isEmpty ? 'target' : shortThread} - $operatorLabel',
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    if (registryOpenPath.isNotEmpty || registryPath.isNotEmpty)
+                      IconButton(
+                        tooltip: 'Open quarantine registry',
+                        visualDensity: VisualDensity.compact,
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(
+                          minWidth: 28,
+                          minHeight: 28,
+                        ),
+                        onPressed: _autonomyBusy
+                            ? null
+                            : () async {
+                                await _openAutonomyInboxItem({
+                                  'open_path': registryOpenPath,
+                                  'path': registryPath,
+                                });
+                                afterOpen?.call();
+                              },
+                        icon: const Icon(Icons.open_in_new, size: 14),
+                      ),
+                    if (handoffCopy.isNotEmpty)
+                      IconButton(
+                        tooltip: handoffLabel.isEmpty
+                            ? 'Copy handoff'
+                            : handoffLabel,
+                        visualDensity: VisualDensity.compact,
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(
+                          minWidth: 28,
+                          minHeight: 28,
+                        ),
+                        onPressed: () => _copyAutonomyText(
+                          handoffCopy,
+                          'Quarantine handoff copied.',
+                        ),
+                        icon: const Icon(Icons.copy_all_outlined, size: 14),
+                      ),
+                  ],
+                ),
+                Wrap(
+                  spacing: 5,
+                  runSpacing: 5,
+                  children: [
+                    if (statusLabel.isNotEmpty)
+                      _miniChip(
+                        statusLabel,
+                        _autonomyBubbleBackground(color),
+                        color,
+                      ),
+                    if (operatorLabel.isNotEmpty)
+                      _miniChip(
+                        operatorLabel.toLowerCase(),
+                        _autonomyBubbleBackground(color),
+                        color,
+                      ),
+                    if (stateLabel.isNotEmpty)
+                      _miniChip(
+                        stateLabel,
+                        _autonomyBubbleBackground(
+                            proofSatisfied ? Colors.teal : color),
+                        proofSatisfied ? Colors.teal.shade800 : color,
+                      ),
+                    if (remaining != null)
+                      _miniChip(
+                        remaining > 0 ? '${remaining}m left' : 'proof met',
+                        _autonomyBubbleBackground(
+                            remaining > 0 ? Colors.deepOrange : Colors.teal),
+                        remaining > 0
+                            ? Colors.deepOrange.shade800
+                            : Colors.teal.shade800,
+                      ),
+                    if (age != null)
+                      _miniChip(
+                        '${age}m session',
+                        _autonomyBubbleBackground(Colors.blueGrey),
+                        Colors.blueGrey.shade800,
+                      ),
+                  ],
+                ),
+                if (source.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      source,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                if (sessionPath.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      'Session: $sessionPath',
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                if (reason.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      reason,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                if (handoffInstruction.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      handoffInstruction,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: color,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                if (operatorGuidance.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      operatorGuidance,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: color,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAutonomyAgentFlowLane(Map<String, dynamic> lane) {
+    final agent = lane['agent']?.toString().trim() ?? 'Agent';
+    final pending = _asInt(lane['pending_count']) ?? 0;
+    final stable = _asInt(lane['stable_pending_count']) ?? 0;
+    final malformed = _asInt(lane['shape_invalid_count']) ?? 0;
+    final activeQuarantinedTargets =
+        _asInt(lane['quarantined_target_active_count']) ?? 0;
+    final reviewHeadMismatches =
+        _asInt(lane['review_head_mismatch_count']) ?? 0;
+    final processedDeliverables =
+        _asInt(lane['processed_deliverable_anomaly_count']) ?? 0;
+    final staleTempPublish =
+        _asInt(lane['stale_temp_publish_artifact_count']) ?? 0;
+    final oldest = _asInt(lane['oldest_pending_age_minutes']);
+    final lock = _asMap(lane['lock']);
+    final staleLock = lane['stale_lock_candidate'] == true;
+    final lockOwner = lock['owner']?.toString().trim() ?? '';
+    final lockPid = lock['pid']?.toString().trim() ?? '';
+    final lockAgeMinutes = _asInt(lock['age_minutes']);
+    final lockStatus = lock.isEmpty
+        ? ''
+        : lane['active_lock_starvation'] == true
+            ? 'stalled active lock'
+            : staleLock
+                ? 'stale lock'
+                : lock['pid_running'] == true
+                    ? 'active lock'
+                    : 'fresh lock';
+    final color = malformed > 0
+        ? _autonomyStatusColor('failed')
+        : activeQuarantinedTargets > 0 ||
+                reviewHeadMismatches > 0 ||
+                processedDeliverables > 0 ||
+                staleTempPublish > 0 ||
+                lane['active_lock_starvation'] == true
+            ? Colors.deepOrange.shade700
+            : staleLock
+                ? Colors.orange.shade800
+                : pending > 0
+                    ? Colors.indigo.shade700
+                    : Colors.blueGrey.shade700;
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.folder_copy_outlined, color: color, size: 14),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  agent,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Wrap(
+                  spacing: 5,
+                  runSpacing: 5,
+                  children: [
+                    _miniChip(
+                      '$stable/$pending stable',
+                      _autonomyBubbleBackground(color),
+                      color,
+                    ),
+                    if (malformed > 0)
+                      _miniChip(
+                        '$malformed malformed',
+                        _autonomyBubbleBackground(
+                            _autonomyStatusColor('failed')),
+                        _autonomyStatusColor('failed'),
+                      ),
+                    if (processedDeliverables > 0)
+                      _miniChip(
+                        '$processedDeliverables deliverables',
+                        _autonomyBubbleBackground(Colors.deepOrange),
+                        Colors.deepOrange.shade800,
+                      ),
+                    if (activeQuarantinedTargets > 0)
+                      _miniChip(
+                        '$activeQuarantinedTargets quarantined',
+                        _autonomyBubbleBackground(Colors.deepOrange),
+                        Colors.deepOrange.shade800,
+                      ),
+                    if (reviewHeadMismatches > 0)
+                      _miniChip(
+                        '$reviewHeadMismatches review heads',
+                        _autonomyBubbleBackground(Colors.deepOrange),
+                        Colors.deepOrange.shade800,
+                      ),
+                    if (staleTempPublish > 0)
+                      _miniChip(
+                        '$staleTempPublish temp files',
+                        _autonomyBubbleBackground(Colors.deepOrange),
+                        Colors.deepOrange.shade800,
+                      ),
+                    if (oldest != null)
+                      _miniChip(
+                        '${oldest}m oldest',
+                        _autonomyBubbleBackground(Colors.indigo),
+                        Colors.indigo.shade800,
+                      ),
+                    if (lockStatus.isNotEmpty)
+                      _miniChip(
+                        lockStatus,
+                        _autonomyBubbleBackground(
+                          lane['active_lock_starvation'] == true
+                              ? Colors.deepOrange
+                              : staleLock
+                                  ? Colors.orange
+                                  : Colors.blueGrey,
+                        ),
+                        lane['active_lock_starvation'] == true
+                            ? Colors.deepOrange.shade800
+                            : staleLock
+                                ? Colors.orange.shade900
+                                : Colors.blueGrey.shade800,
+                      ),
+                    if (lockOwner.isNotEmpty)
+                      _miniChip(
+                        'owner $lockOwner',
+                        _autonomyBubbleBackground(Colors.orange),
+                        Colors.orange.shade900,
+                      ),
+                    if (lockPid.isNotEmpty)
+                      _miniChip(
+                        'pid $lockPid',
+                        _autonomyBubbleBackground(Colors.blueGrey),
+                        Colors.blueGrey.shade800,
+                      ),
+                    if (lockAgeMinutes != null)
+                      _miniChip(
+                        '${lockAgeMinutes}m lock',
+                        _autonomyBubbleBackground(Colors.orange),
+                        Colors.orange.shade900,
+                      ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildAutonomyOperatorInbox(Map<String, dynamic> inbox) {
     final status = inbox['status']?.toString() ?? '';
     final total = _asInt(inbox['total_action_count']) ?? 0;
-    final color =
-        total == 0 ? _autonomyStatusColor('completed') : Colors.orange.shade700;
     final detail = inbox['detail']?.toString().trim() ?? '';
     final items = _asMapList(inbox[_autopilotOperatorInboxItems]);
+    final controlPlaneTrust =
+        _asMap(inbox[_autopilotOperatorInboxControlPlaneTrustSummary]);
+    final controlPlaneTrustBlockers =
+        _asInt(controlPlaneTrust['blocker_count']) ?? 0;
+    final controlPlaneTrustHighRisk =
+        _asInt(controlPlaneTrust['high_risk_count']) ?? 0;
+    final color = total == 0
+        ? _autonomyStatusColor('completed')
+        : controlPlaneTrustHighRisk > 0
+            ? Colors.deepOrange.shade800
+            : Colors.orange.shade700;
+    final releaseTrust =
+        _asMap(inbox[_autopilotOperatorInboxReleaseTrustSummary]);
+    final releaseTrustBlockers = _asInt(releaseTrust['blocker_count']) ?? 0;
+    final releaseTrustDetail = releaseTrust['detail']?.toString().trim() ?? '';
+    final releaseTrustNextDetail =
+        releaseTrust['next_action_detail']?.toString().trim() ?? '';
+    final releaseTrustGroups = _asMap(releaseTrust['group_counts']);
+    final releaseTrustCount = _asInt(releaseTrustGroups['release_trust']) ?? 0;
+    final releaseTrustPrHealth = _asInt(releaseTrustGroups['pr_health']) ?? 0;
+    final releaseTrustEvidence =
+        _asInt(releaseTrustGroups['evidence_quality']) ?? 0;
     final nextAction =
         inbox[_autopilotOperatorInboxNextAction]?.toString().trim() ?? '';
     final nextActionLabel =
@@ -7785,6 +10359,11 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         inbox[_autopilotOperatorInboxNextActionKind]?.toString().trim() ?? '';
     final nextActionRunId =
         inbox[_autopilotOperatorInboxNextActionRunId]?.toString().trim() ?? '';
+    final nextActionPath =
+        inbox[_autopilotOperatorInboxNextActionPath]?.toString().trim() ?? '';
+    final nextActionOpenPath =
+        inbox[_autopilotOperatorInboxNextActionOpenPath]?.toString().trim() ??
+            '';
     final nextActionAgent =
         inbox[_autopilotOperatorInboxNextActionAgent]?.toString().trim() ?? '';
     final nextActionRecoveryAction =
@@ -7797,6 +10376,16 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                 ?.toString()
                 .trim() ??
             '';
+    final nextActionHandoffLabel =
+        inbox[_autopilotOperatorInboxNextActionHandoffLabel]
+                ?.toString()
+                .trim() ??
+            '';
+    final nextActionHandoffCopy =
+        inbox[_autopilotOperatorInboxNextActionHandoffCopy]
+                ?.toString()
+                .trim() ??
+            '';
     final showNextAction = nextActionLabel.isNotEmpty &&
         nextAction != _autopilotOperatorInboxActionKeepMonitoring;
     final nextActionColor = showNextAction
@@ -7805,10 +10394,16 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final nextActionItem = <String, dynamic>{
       'kind': nextActionKind,
       'run_id': nextActionRunId,
+      if (nextActionPath.isNotEmpty) 'path': nextActionPath,
+      if (nextActionOpenPath.isNotEmpty) 'open_path': nextActionOpenPath,
       if (nextActionRecoveryAction.isNotEmpty)
         'recovery_action': nextActionRecoveryAction,
       if (nextActionButtonLabel.isNotEmpty)
         'action_label': nextActionButtonLabel,
+      if (nextActionHandoffLabel.isNotEmpty)
+        'quarantine_operator_handoff_label': nextActionHandoffLabel,
+      if (nextActionHandoffCopy.isNotEmpty)
+        'quarantine_operator_handoff_copy': nextActionHandoffCopy,
     };
     return Container(
       width: double.infinity,
@@ -7854,6 +10449,54 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
               style: TextStyle(color: _mutedTextColor(), fontSize: 12),
             ),
           ],
+          _buildAutonomyControlPlaneTrustSummary(
+            controlPlaneTrust,
+            limit: 2,
+          ),
+          if (releaseTrustBlockers > 0) ...[
+            const SizedBox(height: 8),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(
+                  Icons.verified_user_outlined,
+                  color: Colors.deepOrange.shade800,
+                  size: 16,
+                ),
+                const SizedBox(width: 7),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        releaseTrustDetail.isEmpty
+                            ? 'Release trust has active blockers.'
+                            : releaseTrustDetail,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      if (releaseTrustNextDetail.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 2),
+                          child: Text(
+                            releaseTrustNextDetail,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: Colors.deepOrange.shade800,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ],
           if (showNextAction) ...[
             const SizedBox(height: 8),
             Row(
@@ -7892,7 +10535,9 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                     ],
                   ),
                 ),
-                if (nextActionRunId.isNotEmpty) ...[
+                if (nextActionRunId.isNotEmpty ||
+                    nextActionOpenPath.isNotEmpty ||
+                    nextActionPath.isNotEmpty) ...[
                   const SizedBox(width: 6),
                   OutlinedButton.icon(
                     style: OutlinedButton.styleFrom(
@@ -7909,6 +10554,22 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                     label: Text(_operatorInboxActionLabelForItem(
                       nextActionItem,
                     )),
+                  ),
+                ],
+                if (nextActionHandoffCopy.isNotEmpty) ...[
+                  const SizedBox(width: 4),
+                  IconButton(
+                    tooltip: nextActionHandoffLabel.isEmpty
+                        ? 'Copy handoff'
+                        : nextActionHandoffLabel,
+                    visualDensity: VisualDensity.compact,
+                    onPressed: () => _copyAutonomyText(
+                      nextActionHandoffCopy,
+                      nextActionHandoffLabel.toLowerCase().contains('pause')
+                          ? 'Paused automation handoff copied.'
+                          : 'Control-plane handoff copied.',
+                    ),
+                    icon: const Icon(Icons.copy_all_outlined, size: 15),
                   ),
                 ],
               ],
@@ -7950,6 +10611,48 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                   '${_asInt(inbox['blocked_count'])} blocked',
                   _autonomyBubbleBackground(_autonomyStatusColor('failed')),
                   _autonomyStatusColor('failed'),
+                ),
+              if ((_asInt(inbox['agent_flow_count']) ?? 0) > 0)
+                _miniChip(
+                  '${_asInt(inbox['agent_flow_count'])} flow',
+                  _autonomyBubbleBackground(Colors.orange),
+                  Colors.orange.shade900,
+                ),
+              if (controlPlaneTrustBlockers > 0)
+                _miniChip(
+                  '$controlPlaneTrustBlockers control-plane',
+                  _autonomyBubbleBackground(Colors.deepOrange),
+                  Colors.deepOrange.shade800,
+                ),
+              if (controlPlaneTrustHighRisk > 0)
+                _miniChip(
+                  '$controlPlaneTrustHighRisk high risk',
+                  _autonomyBubbleBackground(Colors.deepOrange),
+                  Colors.deepOrange.shade800,
+                ),
+              if ((_asInt(inbox['external_report_count']) ?? 0) > 0)
+                _miniChip(
+                  '${_asInt(inbox['external_report_count'])} reports',
+                  _autonomyBubbleBackground(Colors.deepPurple),
+                  Colors.deepPurple.shade700,
+                ),
+              if (releaseTrustCount > 0)
+                _miniChip(
+                  '$releaseTrustCount trust',
+                  _autonomyBubbleBackground(Colors.deepOrange),
+                  Colors.deepOrange.shade800,
+                ),
+              if (releaseTrustPrHealth > 0)
+                _miniChip(
+                  '$releaseTrustPrHealth PR health',
+                  _autonomyBubbleBackground(Colors.deepOrange),
+                  Colors.deepOrange.shade800,
+                ),
+              if (releaseTrustEvidence > 0)
+                _miniChip(
+                  '$releaseTrustEvidence evidence',
+                  _autonomyBubbleBackground(Colors.orange),
+                  Colors.orange.shade900,
                 ),
             ],
           ),
@@ -8066,12 +10769,300 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   }) {
     final kind = item['kind']?.toString() ?? '';
     final color = _operatorInboxItemColor(kind);
+    final itemIcon = kind == _autopilotOperatorInboxKindAgentFlow
+        ? _agentFlowStatusIcon(item['status']?.toString() ?? '')
+        : _operatorInboxItemIcon(kind);
     final label = item['label']?.toString().trim() ?? 'Inbox item';
     final agent = item['agent']?.toString().trim() ?? '';
     final reason = item['reason']?.toString().trim() ?? '';
     final runId = item['run_id']?.toString().trim() ?? '';
+    final reportPath = item['path']?.toString().trim() ?? '';
     final createdAt = item['created_at']?.toString().trim() ?? '';
+    final reportQualityIssues = _asStringList(item['report_quality_issues']);
+    final reportQualityIssueCount =
+        _asInt(item['report_quality_issue_count']) ??
+            reportQualityIssues.length;
+    final reportHasUnresolvedPlaceholders =
+        item['report_has_unresolved_placeholders'] == true;
+    final reportBlockerCategory =
+        item['report_blocker_category']?.toString().trim() ?? '';
+    final reportBlockerLabel =
+        item['report_blocker_label']?.toString().trim() ?? '';
+    final reportBlockerSeverity =
+        item['report_blocker_severity']?.toString().trim() ?? '';
+    final reportNextActionDetail =
+        item['report_next_action_detail']?.toString().trim() ?? '';
     final recoveryDetail = item['recovery_detail']?.toString().trim() ?? '';
+    final recoveryCategory = item['recovery_category']?.toString().trim() ?? '';
+    final recoveryCategoryLabel = recoveryCategory == 'validation_failed'
+        ? 'validation failed'
+        : recoveryCategory == 'permission_boundary'
+            ? 'permission boundary'
+            : recoveryCategory == 'plan_quality_gate'
+                ? 'plan quality gate'
+                : recoveryCategory == 'merge_blocked'
+                    ? 'merge blocked'
+                    : recoveryCategory.replaceAll('_', ' ');
+    final recoveryStage = item['recovery_stage']?.toString().trim() ?? '';
+    final recoveryPlanStatus =
+        item['recovery_plan_status']?.toString().trim() ?? '';
+    final recoveryMergeStatus =
+        item['recovery_merge_status']?.toString().trim() ?? '';
+    final recoverySafetyPosture =
+        item['recovery_safety_posture']?.toString().trim() ?? '';
+    final recoveryFailedValidationCount =
+        _asInt(item['recovery_failed_validation_count']) ?? 0;
+    final recoveryFailedValidationSteps =
+        _asMapList(item['recovery_failed_validation_steps']);
+    final recoveryLastFailedStep =
+        item['recovery_last_failed_step']?.toString().trim() ?? '';
+    final recoveryLastFailedExit =
+        item.containsKey('recovery_last_failed_exit_code')
+            ? _asInt(item['recovery_last_failed_exit_code'])
+            : null;
+    final recoveryLastFailedSummary =
+        item['recovery_last_failed_summary']?.toString().trim() ?? '';
+    final hasRecoveryEvidence = recoveryCategory.isNotEmpty ||
+        recoveryStage.isNotEmpty ||
+        recoveryPlanStatus.isNotEmpty ||
+        recoveryMergeStatus.isNotEmpty ||
+        recoveryFailedValidationCount > 0 ||
+        recoveryLastFailedStep.isNotEmpty;
+    final mailboxMissing = _asStringList(item['mailbox_shape_missing']);
+    final mailboxGuidance =
+        item['mailbox_shape_guidance']?.toString().trim() ?? '';
+    final mailboxRequestHash =
+        item['mailbox_request_hash']?.toString().trim() ?? '';
+    final mailboxRequestFrom =
+        item['mailbox_request_from']?.toString().trim() ?? '';
+    final mailboxRequestTo =
+        item['mailbox_request_to']?.toString().trim() ?? '';
+    final mailboxRequestBacklog =
+        item['mailbox_request_backlog_id']?.toString().trim() ?? '';
+    final mailboxRequestPushIntent =
+        item['mailbox_request_push_intent']?.toString().trim() ?? '';
+    final mailboxRequestStale = item['mailbox_request_stale'] == true;
+    final mailboxRequestHandoffLabel =
+        item['mailbox_request_operator_handoff_label']?.toString().trim() ??
+            '';
+    final mailboxRequestHandoffInstruction =
+        item['mailbox_request_operator_handoff_instruction']
+                ?.toString()
+                .trim() ??
+            '';
+    final mailboxRequestHandoffCopy =
+        item['mailbox_request_operator_handoff_copy']?.toString().trim() ??
+            '';
+    final controlByteCount = _asInt(item['control_byte_count']) ?? 0;
+    final lockOwner = item['lock_owner']?.toString().trim() ?? '';
+    final lockPid = item['lock_pid']?.toString().trim() ?? '';
+    final lockPidSource = item['lock_pid_source']?.toString().trim() ?? '';
+    final lockPidRunning = item.containsKey('lock_pid_running')
+        ? item['lock_pid_running'] == true
+        : null;
+    final lockPurpose = item['lock_purpose']?.toString().trim() ?? '';
+    final lockPidProcessName =
+        item['lock_pid_process_name']?.toString().trim() ?? '';
+    final lockPidCommandLine =
+        item['lock_pid_command_line']?.toString().trim() ?? '';
+    final lockPidIsSleepHelper = item['lock_pid_is_sleep_helper'] == true;
+    final lockRecoveryPosture =
+        item['lock_recovery_posture']?.toString().trim() ?? '';
+    final lockAgeMinutes = _asInt(item['lock_age_minutes']);
+    final lockGuidance = item['lock_guidance']?.toString().trim() ?? '';
+    final ownerLastOut = item['owner_last_out']?.toString().trim() ?? '';
+    final ownerLastOutAge = _asInt(item['owner_last_out_age_minutes']);
+    final tempPublishLocation =
+        item['temp_publish_location']?.toString().trim() ?? '';
+    final tempPublishAge = _asInt(item['temp_publish_age_minutes']);
+    final tempPublishBytes = _asInt(item['temp_publish_byte_length']);
+    final tempPublishGuidance =
+        item['temp_publish_guidance']?.toString().trim() ?? '';
+    final hasTempPublishEvidence = tempPublishLocation.isNotEmpty ||
+        tempPublishAge != null ||
+        tempPublishBytes != null;
+    final processedDeliverableKind =
+        item['processed_deliverable_anomaly_kind']?.toString().trim() ?? '';
+    final processedDeliverableKindLabel = processedDeliverableKind ==
+            'processed_deliverable_missing_final_temp_exists'
+        ? 'missing final'
+        : processedDeliverableKind == 'processed_deliverable_is_temp'
+            ? 'temp deliverable'
+            : processedDeliverableKind.replaceAll('_', ' ');
+    final processedDeliverablePath =
+        item['processed_deliverable_path']?.toString().trim() ?? '';
+    final processedDeliverableTempPath =
+        item['processed_deliverable_temp_path']?.toString().trim() ?? '';
+    final processedDeliverableTempAge =
+        _asInt(item['processed_deliverable_temp_age_minutes']);
+    final processedDeliverableTempBytes =
+        _asInt(item['processed_deliverable_temp_byte_length']);
+    final processedDeliverableGuidance =
+        item['processed_deliverable_guidance']?.toString().trim() ?? '';
+    final hasProcessedDeliverableEvidence =
+        processedDeliverableKind.isNotEmpty ||
+            processedDeliverablePath.isNotEmpty ||
+            processedDeliverableTempPath.isNotEmpty ||
+            processedDeliverableTempAge != null ||
+            processedDeliverableTempBytes != null;
+    final quarantineThreadId =
+        item['quarantine_thread_id']?.toString().trim() ?? '';
+    final quarantineStatus = item['quarantine_status']?.toString().trim() ?? '';
+    final quarantineStatusLabel =
+        quarantineStatus == 'CONTROL_PLANE_TERMINATION_REQUIRED'
+            ? 'termination required'
+            : quarantineStatus == 'CONTROL_PLANE_CONTAINMENT_REQUIRED'
+                ? 'containment required'
+                : quarantineStatus.replaceAll('_', ' ');
+    final quarantineReason = item['quarantine_reason']?.toString().trim() ?? '';
+    final quarantineSource = item['quarantine_source']?.toString().trim() ?? '';
+    final quarantineAge = _asInt(item['quarantine_session_age_minutes']);
+    final quarantineGoalStatus =
+        item['quarantine_session_goal_status']?.toString().trim() ?? '';
+    final quarantineSessionPath =
+        item['quarantine_session_path']?.toString().trim() ?? '';
+    final quarantineProof =
+        item['quarantine_required_proof']?.toString().trim() ?? '';
+    final quarantineActivityState =
+        item['quarantine_activity_state']?.toString().trim() ?? '';
+    final quarantineProofWindow =
+        _asInt(item['quarantine_proof_window_minutes']);
+    final quarantineProofRemaining =
+        _asInt(item['quarantine_proof_remaining_minutes']);
+    final quarantineProofNextCheck =
+        item['quarantine_proof_next_check_utc']?.toString().trim() ?? '';
+    final quarantineProofSatisfied = item['quarantine_proof_satisfied'] == true;
+    final quarantineOperatorLabel =
+        item['quarantine_operator_label']?.toString().trim() ?? '';
+    final quarantineOperatorGuidance =
+        item['quarantine_operator_guidance']?.toString().trim() ?? '';
+    final quarantineOperatorHandoffLabel =
+        item['quarantine_operator_handoff_label']?.toString().trim() ?? '';
+    final quarantineOperatorHandoffInstruction =
+        item['quarantine_operator_handoff_instruction']?.toString().trim() ??
+            '';
+    final quarantineOperatorHandoffCopy =
+        item['quarantine_operator_handoff_copy']?.toString().trim() ?? '';
+    final quarantineGuidance =
+        item['quarantine_guidance']?.toString().trim() ?? '';
+    final hasQuarantineEvidence = quarantineThreadId.isNotEmpty ||
+        quarantineStatus.isNotEmpty ||
+        quarantineAge != null ||
+        quarantineProof.isNotEmpty ||
+        quarantineProofRemaining != null;
+    final quarantineActivityLabel =
+        quarantineActivityState == 'proof_window_satisfied'
+            ? 'proof satisfied'
+            : quarantineActivityState == 'active'
+                ? 'active'
+                : quarantineActivityState == 'goal_not_active'
+                    ? 'goal inactive'
+                    : quarantineActivityState.replaceAll('_', ' ');
+    final pausedAutomationId =
+        item['paused_automation_id']?.toString().trim() ?? '';
+    final pausedAutomationName =
+        item['paused_automation_name']?.toString().trim() ?? '';
+    final pausedAutomationStatus =
+        item['paused_automation_status']?.toString().trim() ?? '';
+    final pausedAutomationRrule =
+        item['paused_automation_rrule']?.toString().trim() ?? '';
+    final pausedAutomationThreadId =
+        item['paused_automation_thread_id']?.toString().trim() ?? '';
+    final pausedAutomationAge =
+        _asInt(item['paused_automation_session_age_minutes']);
+    final pausedAutomationThreshold =
+        _asInt(item['paused_automation_threshold_minutes']);
+    final pausedAutomationGoalStatus =
+        item['paused_automation_goal_status']?.toString().trim() ?? '';
+    final pausedAutomationGuidance =
+        item['paused_automation_guidance']?.toString().trim() ?? '';
+    final pausedAutomationSessionPath =
+        item['paused_automation_session_path']?.toString().trim() ?? '';
+    final pausedAutomationCovered =
+        item['paused_automation_covered_by_quarantine'] == true;
+    final pausedAutomationHandoffLabel =
+        item['paused_automation_operator_handoff_label']?.toString().trim() ??
+            '';
+    final pausedAutomationHandoffInstruction =
+        item['paused_automation_operator_handoff_instruction']
+                ?.toString()
+                .trim() ??
+            '';
+    final pausedAutomationHandoffCopy =
+        item['paused_automation_operator_handoff_copy']?.toString().trim() ??
+            '';
+    final hasPausedAutomationEvidence = pausedAutomationId.isNotEmpty ||
+        pausedAutomationName.isNotEmpty ||
+        pausedAutomationAge != null ||
+        pausedAutomationThreadId.isNotEmpty;
+    final worktreeName = item['worktree_name']?.toString().trim() ?? '';
+    final worktreePath = item['worktree_path']?.toString().trim() ?? '';
+    final worktreeScope = item['worktree_scope']?.toString().trim() ?? '';
+    final worktreeBranch = item['worktree_branch']?.toString().trim() ?? '';
+    final worktreeHead = item['worktree_head_short']?.toString().trim() ??
+        item['worktree_head']?.toString().trim() ??
+        '';
+    final worktreeDetached = item['worktree_detached'] == true;
+    final worktreeDetachedUncontained =
+        item['worktree_detached_uncontained'] == true;
+    final worktreeDirty = item['worktree_dirty'] == true;
+    final worktreeChangeCount = _asInt(item['worktree_change_count']);
+    final worktreeChanges = _asStringList(item['worktree_changes']);
+    final worktreeRefCount = _asInt(item['worktree_containing_ref_count']);
+    final worktreeRefSample =
+        _asStringList(item['worktree_containing_ref_sample']);
+    final worktreeGuidance = item['worktree_guidance']?.toString().trim() ?? '';
+    final worktreeHandoffLabel =
+        item['worktree_operator_handoff_label']?.toString().trim() ?? '';
+    final worktreeHandoffInstruction =
+        item['worktree_operator_handoff_instruction']?.toString().trim() ??
+            '';
+    final worktreeHandoffCopy =
+        item['worktree_operator_handoff_copy']?.toString().trim() ?? '';
+    final hasWorktreeEvidence = worktreeName.isNotEmpty ||
+        worktreePath.isNotEmpty ||
+        worktreeBranch.isNotEmpty ||
+        worktreeHead.isNotEmpty ||
+        worktreeChangeCount != null;
+    final reviewRequestWorktree =
+        item['review_request_worktree']?.toString().trim() ?? '';
+    final reviewRequestBranch =
+        item['review_request_branch']?.toString().trim() ?? '';
+    final reviewRequestCitedCommit =
+        item['review_request_cited_commit']?.toString().trim() ?? '';
+    final reviewRequestCitedCommitExists =
+        item.containsKey('review_request_cited_commit_exists')
+            ? item['review_request_cited_commit_exists'] == true
+            : null;
+    final reviewRequestWorktreeHead =
+        item['review_request_worktree_head']?.toString().trim() ?? '';
+    final reviewRequestWorktreeBranch =
+        item['review_request_worktree_branch']?.toString().trim() ?? '';
+    final reviewRequestBranchContainsCited =
+        item.containsKey('review_request_branch_contains_cited')
+            ? item['review_request_branch_contains_cited'] == true
+            : null;
+    final reviewRequestContainingBranches =
+        _asStringList(item['review_request_containing_branches']);
+    final reviewHeadGuidance =
+        item['review_head_guidance']?.toString().trim() ?? '';
+    final hasReviewHeadEvidence = reviewRequestWorktree.isNotEmpty ||
+        reviewRequestBranch.isNotEmpty ||
+        reviewRequestCitedCommit.isNotEmpty ||
+        reviewRequestWorktreeHead.isNotEmpty ||
+        reviewRequestWorktreeBranch.isNotEmpty ||
+        reviewRequestBranchContainsCited != null;
+    String shortSha(String value) =>
+        value.length > 12 ? value.substring(0, 12) : value;
+    final hasLockEvidence = lockOwner.isNotEmpty ||
+        lockPid.isNotEmpty ||
+        lockPidRunning != null ||
+        lockPurpose.isNotEmpty ||
+        lockPidProcessName.isNotEmpty ||
+        lockPidIsSleepHelper ||
+        lockAgeMinutes != null ||
+        ownerLastOut.isNotEmpty ||
+        ownerLastOutAge != null;
     final actionLabel = _operatorInboxActionLabelForItem(item);
     final actionIcon = _operatorInboxActionIconForItem(item);
     return Padding(
@@ -8079,7 +11070,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(_operatorInboxItemIcon(kind), color: color, size: 14),
+          Icon(itemIcon, color: color, size: 14),
           const SizedBox(width: 6),
           Expanded(
             child: Column(
@@ -8114,6 +11105,1085 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                       ),
                     ),
                   ),
+                if (runId.isEmpty && reportPath.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      reportPath,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                if (reportBlockerCategory.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Wrap(
+                    spacing: 5,
+                    runSpacing: 5,
+                    children: [
+                      _miniChip(
+                        reportBlockerLabel.isEmpty
+                            ? reportBlockerCategory.replaceAll('_', ' ')
+                            : reportBlockerLabel,
+                        _autonomyBubbleBackground(
+                          reportBlockerSeverity == 'high'
+                              ? Colors.deepOrange
+                              : Colors.blueGrey,
+                        ),
+                        reportBlockerSeverity == 'high'
+                            ? Colors.deepOrange.shade800
+                            : Colors.blueGrey.shade800,
+                      ),
+                    ],
+                  ),
+                  if (reportNextActionDetail.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Text(
+                        reportNextActionDetail,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: reportBlockerSeverity == 'high'
+                              ? Colors.deepOrange.shade800
+                              : _mutedTextColor(),
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                ],
+                if (reportQualityIssueCount > 0) ...[
+                  const SizedBox(height: 4),
+                  Wrap(
+                    spacing: 5,
+                    runSpacing: 5,
+                    children: [
+                      _miniChip(
+                        '$reportQualityIssueCount report issue${reportQualityIssueCount == 1 ? '' : 's'}',
+                        _autonomyBubbleBackground(Colors.deepOrange),
+                        Colors.deepOrange.shade800,
+                      ),
+                      if (reportHasUnresolvedPlaceholders)
+                        _miniChip(
+                          'placeholder fields',
+                          _autonomyBubbleBackground(
+                              _autonomyStatusColor('failed')),
+                          _autonomyStatusColor('failed'),
+                        ),
+                    ],
+                  ),
+                  if (reportQualityIssues.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Text(
+                        'Report quality: ${reportQualityIssues.take(3).join('; ')}',
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: Colors.deepOrange.shade800,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                ],
+                if (mailboxMissing.isNotEmpty || controlByteCount > 0) ...[
+                  const SizedBox(height: 4),
+                  Wrap(
+                    spacing: 5,
+                    runSpacing: 5,
+                    children: [
+                      for (final field in mailboxMissing.take(4))
+                        _miniChip(
+                          'Missing $field',
+                          _autonomyBubbleBackground(Colors.orange),
+                          Colors.orange.shade900,
+                        ),
+                      if (mailboxMissing.length > 4)
+                        _miniChip(
+                          '+${mailboxMissing.length - 4} more',
+                          _autonomyBubbleBackground(Colors.orange),
+                          Colors.orange.shade900,
+                        ),
+                      if (controlByteCount > 0)
+                        _miniChip(
+                          '$controlByteCount control bytes',
+                          _autonomyBubbleBackground(
+                              _autonomyStatusColor('failed')),
+                          _autonomyStatusColor('failed'),
+                        ),
+                    ],
+                  ),
+                ],
+                if (mailboxRequestHash.isNotEmpty ||
+                    mailboxRequestFrom.isNotEmpty ||
+                    mailboxRequestTo.isNotEmpty ||
+                    mailboxRequestBacklog.isNotEmpty ||
+                    mailboxRequestPushIntent.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Wrap(
+                    spacing: 5,
+                    runSpacing: 5,
+                    children: [
+                      if (mailboxRequestStale)
+                        _miniChip(
+                          'stale request',
+                          _autonomyBubbleBackground(Colors.deepOrange),
+                          Colors.deepOrange.shade800,
+                        ),
+                      if (mailboxRequestBacklog.isNotEmpty)
+                        _miniChip(
+                          mailboxRequestBacklog,
+                          _autonomyBubbleBackground(Colors.blueGrey),
+                          Colors.blueGrey.shade800,
+                        ),
+                      if (mailboxRequestFrom.isNotEmpty ||
+                          mailboxRequestTo.isNotEmpty)
+                        _miniChip(
+                          '${mailboxRequestFrom.isEmpty ? '?' : mailboxRequestFrom}->${mailboxRequestTo.isEmpty ? '?' : mailboxRequestTo}',
+                          _autonomyBubbleBackground(Colors.blueGrey),
+                          Colors.blueGrey.shade800,
+                        ),
+                      if (mailboxRequestPushIntent.isNotEmpty)
+                        _miniChip(
+                          mailboxRequestPushIntent,
+                          _autonomyBubbleBackground(Colors.blueGrey),
+                          Colors.blueGrey.shade800,
+                        ),
+                      if (mailboxRequestHash.isNotEmpty)
+                        _miniChip(
+                          'sha ${shortSha(mailboxRequestHash)}',
+                          _autonomyBubbleBackground(Colors.blueGrey),
+                          Colors.blueGrey.shade800,
+                        ),
+                    ],
+                  ),
+                ],
+                if (mailboxGuidance.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 3),
+                    child: Text(
+                      mailboxGuidance,
+                      style: TextStyle(
+                        color: color,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                if (mailboxRequestHandoffInstruction.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 3),
+                    child: Text(
+                      mailboxRequestHandoffInstruction,
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: Colors.deepOrange.shade800,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                if (mailboxRequestHandoffCopy.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: OutlinedButton.icon(
+                        style: OutlinedButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                        ),
+                        onPressed: () => _copyAutonomyText(
+                          mailboxRequestHandoffCopy,
+                          'Mailbox request handoff copied.',
+                        ),
+                        icon: const Icon(Icons.copy_all_outlined, size: 14),
+                        label: Text(
+                          mailboxRequestHandoffLabel.isEmpty
+                              ? 'Copy handoff'
+                              : mailboxRequestHandoffLabel,
+                        ),
+                      ),
+                    ),
+                  ),
+                if (hasQuarantineEvidence) ...[
+                  const SizedBox(height: 4),
+                  Wrap(
+                    spacing: 5,
+                    runSpacing: 5,
+                    children: [
+                      if (quarantineStatus.isNotEmpty)
+                        _miniChip(
+                          quarantineStatusLabel,
+                          _autonomyBubbleBackground(Colors.deepOrange),
+                          Colors.deepOrange.shade800,
+                        ),
+                      if (quarantineOperatorLabel.isNotEmpty)
+                        _miniChip(
+                          quarantineOperatorLabel.toLowerCase(),
+                          _autonomyBubbleBackground(Colors.deepOrange),
+                          Colors.deepOrange.shade800,
+                        ),
+                      if (quarantineActivityLabel.isNotEmpty)
+                        _miniChip(
+                          quarantineActivityLabel,
+                          _autonomyBubbleBackground(quarantineProofSatisfied
+                              ? Colors.teal
+                              : Colors.deepOrange),
+                          quarantineProofSatisfied
+                              ? Colors.teal.shade800
+                              : Colors.deepOrange.shade800,
+                        ),
+                      if (quarantineThreadId.isNotEmpty)
+                        _miniChip(
+                          'target ${quarantineThreadId.length > 8 ? quarantineThreadId.substring(0, 8) : quarantineThreadId}',
+                          _autonomyBubbleBackground(Colors.blueGrey),
+                          Colors.blueGrey.shade800,
+                        ),
+                      if (quarantineAge != null)
+                        _miniChip(
+                          '${quarantineAge}m session',
+                          _autonomyBubbleBackground(Colors.deepOrange),
+                          Colors.deepOrange.shade800,
+                        ),
+                      if (quarantineProofRemaining != null)
+                        _miniChip(
+                          quarantineProofRemaining > 0
+                              ? '${quarantineProofRemaining}m proof left'
+                              : 'proof window met',
+                          _autonomyBubbleBackground(quarantineProofRemaining > 0
+                              ? Colors.deepOrange
+                              : Colors.teal),
+                          quarantineProofRemaining > 0
+                              ? Colors.deepOrange.shade800
+                              : Colors.teal.shade800,
+                        ),
+                      if (quarantineProofWindow != null)
+                        _miniChip(
+                          '${quarantineProofWindow}m proof',
+                          _autonomyBubbleBackground(Colors.blueGrey),
+                          Colors.blueGrey.shade800,
+                        ),
+                      if (quarantineGoalStatus.isNotEmpty)
+                        _miniChip(
+                          quarantineGoalStatus,
+                          _autonomyBubbleBackground(Colors.blueGrey),
+                          Colors.blueGrey.shade800,
+                        ),
+                    ],
+                  ),
+                ],
+                if (quarantineSource.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      'Source: $quarantineSource',
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                if (quarantineSessionPath.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      'Session: $quarantineSessionPath',
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                if (quarantineProofNextCheck.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      'Proof check: ${_shortStamp(quarantineProofNextCheck)}',
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                if (quarantineReason.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      quarantineReason,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                if (quarantineOperatorHandoffInstruction.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 3),
+                    child: Text(
+                      quarantineOperatorHandoffInstruction,
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: Colors.deepOrange.shade800,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                if (quarantineOperatorGuidance.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 3),
+                    child: Text(
+                      quarantineOperatorGuidance,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: Colors.deepOrange.shade800,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                if (quarantineOperatorHandoffCopy.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: OutlinedButton.icon(
+                        style: OutlinedButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                        ),
+                        onPressed: () => _copyAutonomyText(
+                          quarantineOperatorHandoffCopy,
+                          'Quarantine handoff copied.',
+                        ),
+                        icon: const Icon(Icons.copy_all_outlined, size: 14),
+                        label: Text(
+                          quarantineOperatorHandoffLabel.isEmpty
+                              ? 'Copy handoff'
+                              : quarantineOperatorHandoffLabel,
+                        ),
+                      ),
+                    ),
+                  ),
+                if (quarantineProof.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 3),
+                    child: Text(
+                      quarantineProof,
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: Colors.deepOrange.shade800,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                if (quarantineGuidance.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 3),
+                    child: Text(
+                      quarantineGuidance,
+                      style: TextStyle(
+                        color: Colors.deepOrange.shade800,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                if (hasPausedAutomationEvidence) ...[
+                  const SizedBox(height: 4),
+                  Wrap(
+                    spacing: 5,
+                    runSpacing: 5,
+                    children: [
+                      if (pausedAutomationStatus.isNotEmpty)
+                        _miniChip(
+                          pausedAutomationStatus.toLowerCase(),
+                          _autonomyBubbleBackground(Colors.deepOrange),
+                          Colors.deepOrange.shade800,
+                        ),
+                      if (pausedAutomationId.isNotEmpty)
+                        _miniChip(
+                          pausedAutomationId,
+                          _autonomyBubbleBackground(Colors.blueGrey),
+                          Colors.blueGrey.shade800,
+                        ),
+                      _miniChip(
+                        pausedAutomationCovered
+                            ? 'covered by quarantine'
+                            : 'uncovered',
+                        _autonomyBubbleBackground(pausedAutomationCovered
+                            ? Colors.orange
+                            : Colors.deepOrange),
+                        pausedAutomationCovered
+                            ? Colors.orange.shade900
+                            : Colors.deepOrange.shade800,
+                      ),
+                      if (pausedAutomationAge != null)
+                        _miniChip(
+                          '${pausedAutomationAge}m session',
+                          _autonomyBubbleBackground(Colors.deepOrange),
+                          Colors.deepOrange.shade800,
+                        ),
+                      if (pausedAutomationThreshold != null)
+                        _miniChip(
+                          '${pausedAutomationThreshold}m threshold',
+                          _autonomyBubbleBackground(Colors.blueGrey),
+                          Colors.blueGrey.shade800,
+                        ),
+                      if (pausedAutomationGoalStatus.isNotEmpty)
+                        _miniChip(
+                          pausedAutomationGoalStatus,
+                          _autonomyBubbleBackground(Colors.blueGrey),
+                          Colors.blueGrey.shade800,
+                        ),
+                    ],
+                  ),
+                ],
+                if (pausedAutomationThreadId.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      'Target: $pausedAutomationThreadId',
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                if (pausedAutomationRrule.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      'Schedule: $pausedAutomationRrule',
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                if (pausedAutomationSessionPath.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      'Session: $pausedAutomationSessionPath',
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                if (pausedAutomationHandoffInstruction.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 3),
+                    child: Text(
+                      pausedAutomationHandoffInstruction,
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: Colors.deepOrange.shade800,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                if (pausedAutomationHandoffCopy.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: OutlinedButton.icon(
+                        style: OutlinedButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                        ),
+                        onPressed: () => _copyAutonomyText(
+                          pausedAutomationHandoffCopy,
+                          'Paused automation handoff copied.',
+                        ),
+                        icon: const Icon(Icons.copy_all_outlined, size: 14),
+                        label: Text(
+                          pausedAutomationHandoffLabel.isEmpty
+                              ? 'Copy handoff'
+                              : pausedAutomationHandoffLabel,
+                        ),
+                      ),
+                    ),
+                  ),
+                if (pausedAutomationGuidance.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 3),
+                    child: Text(
+                      pausedAutomationGuidance,
+                      style: TextStyle(
+                        color: Colors.deepOrange.shade800,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                if (hasWorktreeEvidence) ...[
+                  const SizedBox(height: 4),
+                  Wrap(
+                    spacing: 5,
+                    runSpacing: 5,
+                    children: [
+                      if (worktreeDirty)
+                        _miniChip(
+                          '${worktreeChangeCount ?? 0} change${(worktreeChangeCount ?? 0) == 1 ? '' : 's'}',
+                          _autonomyBubbleBackground(Colors.deepOrange),
+                          Colors.deepOrange.shade800,
+                        ),
+                      if (worktreeDetached)
+                        _miniChip(
+                          worktreeDetachedUncontained
+                              ? 'detached no ref'
+                              : 'detached',
+                          _autonomyBubbleBackground(worktreeDetachedUncontained
+                              ? Colors.deepOrange
+                              : Colors.blueGrey),
+                          worktreeDetachedUncontained
+                              ? Colors.deepOrange.shade800
+                              : Colors.blueGrey.shade800,
+                        ),
+                      if (worktreeScope.isNotEmpty)
+                        _miniChip(
+                          worktreeScope.replaceAll('_', ' '),
+                          _autonomyBubbleBackground(Colors.blueGrey),
+                          Colors.blueGrey.shade800,
+                        ),
+                      if (worktreeHead.isNotEmpty)
+                        _miniChip(
+                          'HEAD ${shortSha(worktreeHead)}',
+                          _autonomyBubbleBackground(Colors.blueGrey),
+                          Colors.blueGrey.shade800,
+                        ),
+                      if (worktreeRefCount != null)
+                        _miniChip(
+                          '$worktreeRefCount ref${worktreeRefCount == 1 ? '' : 's'}',
+                          _autonomyBubbleBackground(worktreeRefCount == 0
+                              ? Colors.deepOrange
+                              : Colors.blueGrey),
+                          worktreeRefCount == 0
+                              ? Colors.deepOrange.shade800
+                              : Colors.blueGrey.shade800,
+                        ),
+                    ],
+                  ),
+                ],
+                if (worktreePath.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      'Worktree: $worktreePath',
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                if (worktreeBranch.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      'Branch: $worktreeBranch',
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                if (worktreeChanges.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      'Changes: ${worktreeChanges.take(3).join('; ')}',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                if (worktreeRefSample.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      'Refs: ${worktreeRefSample.take(3).join(', ')}',
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                if (worktreeGuidance.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 3),
+                    child: Text(
+                      worktreeGuidance,
+                      style: TextStyle(
+                        color: Colors.deepOrange.shade800,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                if (worktreeHandoffInstruction.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 3),
+                    child: Text(
+                      worktreeHandoffInstruction,
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: Colors.deepOrange.shade800,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                if (worktreeHandoffCopy.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: OutlinedButton.icon(
+                        style: OutlinedButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                        ),
+                        onPressed: () => _copyAutonomyText(
+                          worktreeHandoffCopy,
+                          'Worktree handoff copied.',
+                        ),
+                        icon: const Icon(Icons.copy_all_outlined, size: 14),
+                        label: Text(
+                          worktreeHandoffLabel.isEmpty
+                              ? 'Copy handoff'
+                              : worktreeHandoffLabel,
+                        ),
+                      ),
+                    ),
+                  ),
+                if (hasReviewHeadEvidence) ...[
+                  const SizedBox(height: 4),
+                  Wrap(
+                    spacing: 5,
+                    runSpacing: 5,
+                    children: [
+                      if (reviewRequestCitedCommit.isNotEmpty)
+                        _miniChip(
+                          'cited ${shortSha(reviewRequestCitedCommit)}',
+                          _autonomyBubbleBackground(Colors.deepOrange),
+                          Colors.deepOrange.shade800,
+                        ),
+                      if (reviewRequestCitedCommit.isNotEmpty &&
+                          reviewRequestCitedCommitExists == false)
+                        _miniChip(
+                          'commit missing',
+                          _autonomyBubbleBackground(Colors.deepOrange),
+                          Colors.deepOrange.shade800,
+                        ),
+                      if (reviewRequestWorktreeHead.isNotEmpty)
+                        _miniChip(
+                          'HEAD ${shortSha(reviewRequestWorktreeHead)}',
+                          _autonomyBubbleBackground(Colors.deepOrange),
+                          Colors.deepOrange.shade800,
+                        ),
+                      if (reviewRequestBranch.isNotEmpty)
+                        _miniChip(
+                          'request $reviewRequestBranch',
+                          _autonomyBubbleBackground(Colors.blueGrey),
+                          Colors.blueGrey.shade800,
+                        ),
+                      if (reviewRequestWorktreeBranch.isNotEmpty)
+                        _miniChip(
+                          'branch $reviewRequestWorktreeBranch',
+                          _autonomyBubbleBackground(Colors.blueGrey),
+                          Colors.blueGrey.shade800,
+                        ),
+                      if (reviewRequestBranchContainsCited != null)
+                        _miniChip(
+                          reviewRequestBranchContainsCited
+                              ? 'commit on branch'
+                              : 'not on branch',
+                          _autonomyBubbleBackground(
+                            reviewRequestBranchContainsCited
+                                ? Colors.blueGrey
+                                : Colors.deepOrange,
+                          ),
+                          reviewRequestBranchContainsCited
+                              ? Colors.blueGrey.shade800
+                              : Colors.deepOrange.shade800,
+                        ),
+                    ],
+                  ),
+                ],
+                if (reviewRequestContainingBranches.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      'Contains: ${reviewRequestContainingBranches.take(3).join(', ')}',
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                if (reviewRequestWorktree.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      'Worktree: $reviewRequestWorktree',
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                if (reviewHeadGuidance.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 3),
+                    child: Text(
+                      reviewHeadGuidance,
+                      style: TextStyle(
+                        color: Colors.deepOrange.shade800,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                if (hasTempPublishEvidence) ...[
+                  const SizedBox(height: 4),
+                  Wrap(
+                    spacing: 5,
+                    runSpacing: 5,
+                    children: [
+                      if (tempPublishLocation.isNotEmpty)
+                        _miniChip(
+                          tempPublishLocation,
+                          _autonomyBubbleBackground(Colors.deepOrange),
+                          Colors.deepOrange.shade800,
+                        ),
+                      if (tempPublishAge != null)
+                        _miniChip(
+                          '${tempPublishAge}m temp',
+                          _autonomyBubbleBackground(Colors.deepOrange),
+                          Colors.deepOrange.shade800,
+                        ),
+                      if (tempPublishBytes != null)
+                        _miniChip(
+                          '$tempPublishBytes bytes',
+                          _autonomyBubbleBackground(Colors.blueGrey),
+                          Colors.blueGrey.shade800,
+                        ),
+                    ],
+                  ),
+                ],
+                if (tempPublishGuidance.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 3),
+                    child: Text(
+                      tempPublishGuidance,
+                      style: TextStyle(
+                        color: Colors.deepOrange.shade800,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                if (hasProcessedDeliverableEvidence) ...[
+                  const SizedBox(height: 4),
+                  Wrap(
+                    spacing: 5,
+                    runSpacing: 5,
+                    children: [
+                      if (processedDeliverableKind.isNotEmpty)
+                        _miniChip(
+                          processedDeliverableKindLabel,
+                          _autonomyBubbleBackground(Colors.deepOrange),
+                          Colors.deepOrange.shade800,
+                        ),
+                      if (processedDeliverableTempAge != null)
+                        _miniChip(
+                          '${processedDeliverableTempAge}m temp',
+                          _autonomyBubbleBackground(Colors.deepOrange),
+                          Colors.deepOrange.shade800,
+                        ),
+                      if (processedDeliverableTempBytes != null)
+                        _miniChip(
+                          '$processedDeliverableTempBytes bytes',
+                          _autonomyBubbleBackground(Colors.blueGrey),
+                          Colors.blueGrey.shade800,
+                        ),
+                    ],
+                  ),
+                ],
+                if (processedDeliverablePath.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      'Deliverable: $processedDeliverablePath',
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                if (processedDeliverableTempPath.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      'Temp: $processedDeliverableTempPath',
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                if (processedDeliverableGuidance.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 3),
+                    child: Text(
+                      processedDeliverableGuidance,
+                      style: TextStyle(
+                        color: Colors.deepOrange.shade800,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                if (hasLockEvidence) ...[
+                  const SizedBox(height: 4),
+                  Wrap(
+                    spacing: 5,
+                    runSpacing: 5,
+                    children: [
+                      if (lockOwner.isNotEmpty)
+                        _miniChip(
+                          'owner $lockOwner',
+                          _autonomyBubbleBackground(Colors.orange),
+                          Colors.orange.shade900,
+                        ),
+                      if (lockPid.isNotEmpty)
+                        _miniChip(
+                          'pid $lockPid',
+                          _autonomyBubbleBackground(Colors.blueGrey),
+                          Colors.blueGrey.shade800,
+                        ),
+                      if (lockPidSource.isNotEmpty)
+                        _miniChip(
+                          lockPidSource.replaceAll('_', ' '),
+                          _autonomyBubbleBackground(Colors.blueGrey),
+                          Colors.blueGrey.shade800,
+                        ),
+                      if (lockPurpose.isNotEmpty)
+                        _miniChip(
+                          lockPurpose,
+                          _autonomyBubbleBackground(Colors.blueGrey),
+                          Colors.blueGrey.shade800,
+                        ),
+                      if (lockPidProcessName.isNotEmpty)
+                        _miniChip(
+                          lockPidProcessName,
+                          _autonomyBubbleBackground(Colors.blueGrey),
+                          Colors.blueGrey.shade800,
+                        ),
+                      if (lockPidRunning != null)
+                        _miniChip(
+                          lockPidRunning ? 'running' : 'not running',
+                          _autonomyBubbleBackground(
+                            lockPidRunning ? Colors.blueGrey : Colors.orange,
+                          ),
+                          lockPidRunning
+                              ? Colors.blueGrey.shade800
+                              : Colors.orange.shade900,
+                        ),
+                      if (lockPidIsSleepHelper)
+                        _miniChip(
+                          'sleep helper',
+                          _autonomyBubbleBackground(Colors.deepOrange),
+                          Colors.deepOrange.shade800,
+                        ),
+                      if (lockRecoveryPosture == 'owner_reacquire_required')
+                        _miniChip(
+                          'owner reacquire',
+                          _autonomyBubbleBackground(Colors.deepOrange),
+                          Colors.deepOrange.shade800,
+                        ),
+                      if (lockAgeMinutes != null)
+                        _miniChip(
+                          '${lockAgeMinutes}m lock',
+                          _autonomyBubbleBackground(Colors.orange),
+                          Colors.orange.shade900,
+                        ),
+                      if (ownerLastOutAge != null)
+                        _miniChip(
+                          '${ownerLastOutAge}m owner OUT',
+                          _autonomyBubbleBackground(Colors.deepOrange),
+                          Colors.deepOrange.shade800,
+                        ),
+                    ],
+                  ),
+                ],
+                if (lockPidCommandLine.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      'Process: $lockPidCommandLine',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                if (ownerLastOut.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      'Owner OUT: $ownerLastOut',
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                if (lockGuidance.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 3),
+                    child: Text(
+                      lockGuidance,
+                      style: TextStyle(
+                        color: Colors.orange.shade900,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                if (hasRecoveryEvidence) ...[
+                  const SizedBox(height: 4),
+                  Wrap(
+                    spacing: 5,
+                    runSpacing: 5,
+                    children: [
+                      if (recoveryCategoryLabel.isNotEmpty)
+                        _miniChip(
+                          recoveryCategoryLabel,
+                          _autonomyBubbleBackground(
+                            recoveryCategory == 'permission_boundary'
+                                ? Colors.deepOrange
+                                : Colors.orange,
+                          ),
+                          recoveryCategory == 'permission_boundary'
+                              ? Colors.deepOrange.shade800
+                              : Colors.orange.shade900,
+                        ),
+                      if (recoveryStage.isNotEmpty)
+                        _miniChip(
+                          recoveryStage.replaceAll('_', ' '),
+                          _autonomyBubbleBackground(Colors.blueGrey),
+                          Colors.blueGrey.shade800,
+                        ),
+                      if (recoveryMergeStatus.isNotEmpty)
+                        _miniChip(
+                          'merge ${recoveryMergeStatus.replaceAll('_', ' ')}',
+                          _autonomyBubbleBackground(
+                            recoveryMergeStatus == 'blocked'
+                                ? Colors.deepOrange
+                                : Colors.blueGrey,
+                          ),
+                          recoveryMergeStatus == 'blocked'
+                              ? Colors.deepOrange.shade800
+                              : Colors.blueGrey.shade800,
+                        ),
+                      if (recoveryPlanStatus.isNotEmpty)
+                        _miniChip(
+                          'plan ${recoveryPlanStatus.replaceAll('_', ' ')}',
+                          _autonomyBubbleBackground(Colors.blueGrey),
+                          Colors.blueGrey.shade800,
+                        ),
+                      if (recoveryFailedValidationCount > 0)
+                        _miniChip(
+                          '$recoveryFailedValidationCount failed check${recoveryFailedValidationCount == 1 ? '' : 's'}',
+                          _autonomyBubbleBackground(Colors.deepOrange),
+                          Colors.deepOrange.shade800,
+                        ),
+                      if (recoveryLastFailedStep.isNotEmpty)
+                        _miniChip(
+                          recoveryLastFailedExit == null
+                              ? recoveryLastFailedStep
+                              : '$recoveryLastFailedStep exit $recoveryLastFailedExit',
+                          _autonomyBubbleBackground(Colors.deepOrange),
+                          Colors.deepOrange.shade800,
+                        ),
+                    ],
+                  ),
+                  if (recoveryLastFailedSummary.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 3),
+                      child: Text(
+                        recoveryLastFailedSummary,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: Colors.deepOrange.shade800,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  for (final step in recoveryFailedValidationSteps.take(2))
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Text(
+                        '${step['step_key'] ?? 'validation'} exit ${step['exit_code'] ?? '?'}',
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: _mutedTextColor(),
+                          fontSize: 11,
+                        ),
+                      ),
+                    ),
+                  if (recoverySafetyPosture.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Text(
+                        recoverySafetyPosture.replaceAll('_', ' '),
+                        style: TextStyle(
+                          color: _mutedTextColor(),
+                          fontSize: 11,
+                        ),
+                      ),
+                    ),
+                ],
                 if (createdAt.isNotEmpty)
                   Padding(
                     padding: const EdgeInsets.only(top: 2),
@@ -8139,7 +12209,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
               ],
             ),
           ),
-          if (runId.isNotEmpty) ...[
+          if (runId.isNotEmpty || reportPath.isNotEmpty) ...[
             const SizedBox(width: 6),
             OutlinedButton.icon(
               style: OutlinedButton.styleFrom(
@@ -9562,6 +13632,12 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
               icon: const Icon(Icons.videocam_outlined, size: 18),
               label: const Text('Video QA'),
             ),
+            OutlinedButton.icon(
+              onPressed:
+                  _autonomyBusy ? null : _markAutopilotVisualQaNotApplicable,
+              icon: const Icon(Icons.visibility_off_outlined, size: 18),
+              label: const Text('Not visual'),
+            ),
           ],
         ),
         if (status == _autopilotStatusAwaitingApproval) ...[
@@ -9639,6 +13715,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final pmSynthesis = _asMap(run['pm_synthesis']);
     final childRuns = _asStringList(run['child_runs']);
     final parentRun = _asMap(run['parent_run']);
+    final policyReceipt = AutonomyRunPresenter.policyReceiptFields(run);
     final branch = run['integration_branch']?.toString() ?? '';
     final worktree = run['worktree_path']?.toString() ?? '';
     final mergeMessage = run['merge_message']?.toString() ?? '';
@@ -9694,6 +13771,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
           if (errorMessage.isNotEmpty)
             _kvSelectable(
                 'Blocked', AutonomyRunPresenter.blockedRunMessage(run)),
+          if (policyReceipt.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            _buildAutonomyPolicyReceipt(policyReceipt),
+          ],
           const Divider(height: 28),
           _buildAutonomyTaskBoard(taskBoard, run),
           const Divider(height: 28),
@@ -9774,12 +13855,16 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         return Icons.verified_outlined;
       case 'quality_gate':
         return Icons.verified_user_outlined;
+      case 'agent_cycle_report':
+        return Icons.assignment_turned_in_outlined;
       case _autopilotArtifactPromptImage:
         return Icons.image_outlined;
       case 'visual_screenshot':
         return Icons.screenshot_monitor;
       case 'visual_video':
         return Icons.videocam_outlined;
+      case 'visual_qa_applicability':
+        return Icons.visibility_off_outlined;
       case 'ui_review':
       case 'ux_review':
         return Icons.image_search_outlined;
@@ -9807,6 +13892,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final pmSynthesis = _asMap(run['pm_synthesis']);
     final childRuns = _asStringList(run['child_runs']);
     final parentRun = _asMap(run['parent_run']);
+    final policyReceipt = AutonomyRunPresenter.policyReceiptFields(run);
     final branch = run['integration_branch']?.toString() ?? '';
     final worktree = run['worktree_path']?.toString() ?? '';
     final mergeMessage = run['merge_message']?.toString() ?? '';
@@ -9878,6 +13964,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
             if (errorMessage.isNotEmpty)
               _kvSelectable(
                   'Blocked', AutonomyRunPresenter.blockedRunMessage(run)),
+            if (policyReceipt.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              _buildAutonomyPolicyReceipt(policyReceipt),
+            ],
             const Divider(height: 28),
             _buildAutonomyTaskBoard(taskBoard, run),
             const Divider(height: 28),
@@ -9933,7 +14023,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     }
   }
 
-  IconData _autopilotTaskActionIcon(String action) {
+  IconData _autopilotTaskActionIcon(
+    String action, {
+    Map<String, dynamic>? item,
+  }) {
     switch (action) {
       case _autopilotTaskActionStartPlan:
         return Icons.account_tree_outlined;
@@ -9944,7 +14037,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
       case _autopilotTaskActionStartWorker:
         return Icons.play_arrow;
       case _autopilotTaskActionRecoverBlocker:
-        return Icons.replay;
+        return item?['next_action_recovery_action']?.toString().trim() ==
+                _autopilotOperatorInboxRecoveryRerun
+            ? Icons.replay
+            : Icons.open_in_new;
       case _autopilotTaskActionMerge:
         return Icons.merge_type;
       default:
@@ -9980,10 +14076,13 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         await _wakeAutopilotRunById(runId);
         return;
       case _autopilotTaskActionRecoverBlocker:
+        final recoveryAction =
+            item['next_action_recovery_action']?.toString().trim() ?? '';
         await _openAutonomyInboxItem({
           'kind': _autopilotOperatorInboxKindBlocker,
           'run_id': runId,
-          'recovery_action': _autopilotOperatorInboxRecoveryRerun,
+          if (_asMap(item['blocker']).isNotEmpty) 'blocker': item['blocker'],
+          if (recoveryAction.isNotEmpty) 'recovery_action': recoveryAction,
           'action_label': item['next_action_label']?.toString() ?? 'Rerun',
         });
         return;
@@ -10060,7 +14159,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                             _runAutopilotTaskBoardAction(activeItem, run),
                           ),
                   icon: Icon(
-                    _autopilotTaskActionIcon(activeAction),
+                    _autopilotTaskActionIcon(activeAction, item: activeItem),
                     size: 15,
                   ),
                   label: Text(
@@ -10112,6 +14211,107 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         ],
       ],
     );
+  }
+
+  Widget _buildAutonomyPolicyReceipt(List<Map<String, String>> fields) {
+    if (fields.isEmpty) return const SizedBox.shrink();
+    final boundary = _policyReceiptValue(fields, 'Boundary');
+    final decision = _policyReceiptValue(fields, 'Decision');
+    final bodyFields = fields
+        .where((field) =>
+            field['label'] != 'Boundary' && field['label'] != 'Decision')
+        .toList();
+    final color = _autonomyStatusColor('blocked');
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        border: Border.all(color: color.withValues(alpha: 0.32)),
+        borderRadius: BorderRadius.circular(8),
+        color: _autonomyBubbleBackground(color, alpha: 0.06),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.policy_outlined, color: color, size: 18),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: Text(
+                  'Policy receipt',
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontWeight: FontWeight.w700),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              if (boundary.isNotEmpty)
+                _miniChip(boundary, _autonomyBubbleBackground(color), color),
+              if (decision.isNotEmpty)
+                _miniChip(
+                  decision,
+                  _autonomyBubbleBackground(Colors.blueGrey),
+                  Colors.blueGrey.shade800,
+                ),
+            ],
+          ),
+          if (bodyFields.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            ...bodyFields.map(_buildAutonomyPolicyReceiptField),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAutonomyPolicyReceiptField(Map<String, String> field) {
+    final label = field['label'] ?? '';
+    final value = field['value'] ?? '';
+    final lowerLabel = label.toLowerCase();
+    final isCommand =
+        lowerLabel.contains('command') || lowerLabel.contains('script body');
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: TextStyle(
+              color: _mutedTextColor(),
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 2),
+          SelectableText(
+            value,
+            style: TextStyle(
+              color: Theme.of(context).colorScheme.onSurface,
+              fontFamily: isCommand ? 'monospace' : null,
+              fontSize: 12,
+              height: 1.25,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _policyReceiptValue(
+    List<Map<String, String>> fields,
+    String label,
+  ) {
+    for (final field in fields) {
+      if (field['label'] == label) return field['value'] ?? '';
+    }
+    return '';
   }
 
   Widget _buildAutonomyArchitectQuality(Map<String, dynamic> review) {
@@ -10738,6 +14938,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         .where((artifact) => {
               'model_call',
               'quality_gate',
+              'agent_cycle_report',
               'architect_review',
               'worktree',
               'diff',
@@ -10746,6 +14947,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
               _autopilotArtifactPromptImage,
               'visual_screenshot',
               'visual_video',
+              'visual_qa_applicability',
               'ui_review',
               'ux_review',
             }.contains(artifact['artifact_type']?.toString()))
