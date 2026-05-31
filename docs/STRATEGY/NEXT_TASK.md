@@ -1,36 +1,34 @@
-# NEXT_TASK: f-position-identity-phase-5u-router-monitor-contract-audit
+# NEXT_TASK: f-position-identity-phase-5v-monitor-read-parity-probe
 
 STATUS: PENDING
 
 ## Goal
 
-Audit the remaining router/schema/UI `Trade` ORM-symbol compatibility surface after Phase 5T, and classify what can still move behind management-envelope helpers versus what must remain public compatibility contract.
+Build a read-only old-vs-new parity probe for the remaining monitor/router read candidates before converting any code away from `Trade` ORM symbols.
 
-Phase 5T closed the last clearly safe router helper conversion from the Phase 5R audit: audit export now reads trade rows through `load_audit_export_envelope_rows(...)` while preserving the public `trades` payload and CSV contract.
+Phase 5U found that the remaining router/schema/UI surface is mostly public compatibility or live behavior. The only plausible narrow candidates are monitor read surfaces that can be compared safely first.
 
 ## Recommended Work Shape
 
-1. Run the focused analyzer:
-   - `python scripts/analyze_phase5_remaining_trade_refs.py --bucket orm_trade_symbol_compat --fail-on-unexpected-runtime`
-2. Inspect remaining router/schema/UI owners:
-   - `app/routers/trading_sub/trades.py`
-   - `app/routers/trading_sub/monitor.py`
-   - `app/schemas/trading.py`
-   - trading templates/static JS surfaces
-3. Classify each remaining symbol use into:
-   - public compatibility contract (`/trades`, `trade_id`, schema class names, UI labels)
-   - live-path contract (broker/order/close/reconcile/PDT/capital gates)
-   - private helper/reporting candidate
-4. If a private helper candidate is obvious and low-risk, queue it as a narrow Phase 5V implementation slice. Otherwise stop at the audit.
+1. Add a read-only probe script, likely `scripts/d-phase5v-monitor-read-parity-probe.py`.
+2. Compare old `Trade`-based logic vs envelope-based SQL for:
+   - `api_monitor_decisions(...)`: decision count and returned decision ids for representative users/actions.
+   - `api_monitor_imminent_alerts(...)`: actioned-alert exclusion set.
+   - Optional: `api_stop_decisions(...)`: stop-decision ids for current user and optional `trade_id`.
+3. Emit a compact verdict:
+   - `COMPLETE_POSITIVE` when all compared result sets match.
+   - `MISMATCH` with counts/examples when not.
+4. Add focused tests for the probe's comparison logic.
+5. If parity is green, queue Phase 5W as the actual narrow conversion. Do not convert in this probe slice unless the evidence is trivial and fully pinned.
 
 ## Guardrails
 
-- Do not rename `/trades`, `trade_id`, schema classes, UI labels, or response field names.
+- Read-only only.
+- Do not rename `/trades`, `trade_id`, schema classes, UI labels, or response fields.
 - Do not touch broker/order/close/reconcile/PDT/capital-gate behavior.
-- Do not convert public API payloads to envelope terminology yet.
-- Do not one-shot rename the SQLAlchemy `Trade` class.
+- Do not touch `api_monitor_run(...)`, `api_sell_trade(...)`, or stop execution.
 - Do not drop or rewrite the `trading_trades` compatibility view.
 
 ## Architect Verdict
 
-We are no longer doing mechanical reader cleanup. The remaining work is semantic contract separation. Phase 5U should be an audit first, implementation second only if the audit finds one small private helper with clean parity.
+This is the correct next move because it turns the last plausible router helper candidate into measurable evidence. If the probe is green, conversion can be surgical. If it is not, the public/live contracts stay untouched.
