@@ -46,9 +46,10 @@ python -m py_compile app\routers\trading_sub\monitor.py app\services\trading\man
 TEST_DATABASE_URL=postgresql://chili:chili@localhost:5433/chili_test
 DATABASE_URL=$TEST_DATABASE_URL
 python -m pytest tests\test_phase5aa_active_setup_endpoint_conversion.py tests\test_phase5aa_active_setup_runtime_adapter_probe.py tests\test_management_envelopes.py tests\test_monitor_api_execution_state.py tests\test_phase5_remaining_trade_refs.py tests\test_phase5l_reader_allowlist.py -q
-# 50 passed
+# 54 passed
 
 DATABASE_URL=postgresql://chili:chili@localhost:5433/chili
+PHASE5AA_ALLOW_LIVE_PROBE=true
 python scripts\d-phase5aa-active-setup-runtime-adapter-probe.py
 # VERDICT_STATUS=COMPLETE_POSITIVE
 # old_setups=5, new_setups=5, matched=true
@@ -60,4 +61,3 @@ python scripts\analyze_phase5_remaining_trade_refs.py --bucket orm_trade_symbol_
 ## Architect Verdict
 
 This is the right depth of Phase 5 conversion: move proven display reads to the semantic envelope table while preserving live action paths. The next remaining user-facing surface is the AutoTrader desk position list. That surface needs an audit/probe first because it mixes display fields with override/close controls and broker truth.
-
