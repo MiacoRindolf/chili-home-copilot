@@ -1,6 +1,6 @@
 """Rolling execution-cost estimator (Phase F, shadow-safe DB writer).
 
-Reads closed ``Trade`` rows and their TCA slippage columns, computes
+Reads closed management-envelope rows and their TCA slippage columns, computes
 median / p90 spread + slippage in bps, pulls average daily volume from a
 caller-provided callable (so tests can stay pure), and upserts the
 result into ``trading_execution_cost_estimates`` keyed by
@@ -28,6 +28,10 @@ from sqlalchemy.orm import Session
 from ...config import settings
 from ...trading_brain.infrastructure.execution_cost_ops_log import (
     format_execution_cost_ops_line,
+)
+from .management_envelopes import (
+    load_closed_management_envelope_tickers_since,
+    load_execution_cost_estimate_envelope_rows,
 )
 
 logger = logging.getLogger(__name__)
@@ -203,24 +207,18 @@ def compute_rolling_estimate(
 
     Returns
     -------
-    EstimateRow when at least one closed trade has a usable TCA slippage,
+    EstimateRow when at least one closed envelope has a usable TCA slippage,
     None otherwise (caller should treat as "no estimate yet").
     """
-    from ...models.trading import Trade  # late import to avoid cycles
-
     _now = now or datetime.utcnow()
     cutoff = _now - timedelta(days=max(1, int(window_days)))
     side_norm = _ensure_side(side)
 
-    rows = (
-        db.query(Trade)
-        .filter(
-            Trade.ticker == ticker,
-            Trade.status == "closed",
-            Trade.entry_date >= cutoff,
-            Trade.direction == side_norm,
-        )
-        .all()
+    rows = load_execution_cost_estimate_envelope_rows(
+        db,
+        ticker=ticker,
+        sides=[side_norm],
+        since=cutoff,
     )
 
     return _estimate_from_rows(
@@ -243,23 +241,17 @@ def _compute_rolling_estimates_for_ticker(
     adv_lookup_fn: Callable[[str, int], float] | None = None,
     now: datetime | None = None,
 ) -> dict[str, EstimateRow | None]:
-    """Compute requested side estimates for one ticker with a single trade read."""
+    """Compute requested side estimates for one ticker with one envelope read."""
     if not sides:
         return {}
 
-    from ...models.trading import Trade  # late import to avoid cycles
-
     _now = now or datetime.utcnow()
     cutoff = _now - timedelta(days=max(1, int(window_days)))
-    rows = (
-        db.query(Trade)
-        .filter(
-            Trade.ticker == ticker,
-            Trade.status == "closed",
-            Trade.entry_date >= cutoff,
-            Trade.direction.in_(sides),
-        )
-        .all()
+    rows = load_execution_cost_estimate_envelope_rows(
+        db,
+        ticker=ticker,
+        sides=list(sides),
+        since=cutoff,
     )
 
     rows_by_side: dict[str, list[Any]] = {side: [] for side in sides}
@@ -364,7 +356,7 @@ def rebuild_all(
     """Batch-compute + upsert estimates for ``tickers × sides``.
 
     When ``tickers`` is None we pull the distinct set of tickers from
-    closed Trade rows in the last ``window_days * 2`` days — enough to
+    closed management envelopes in the last ``window_days * 2`` days — enough to
     cover the rolling window plus some breathing room.
     """
     mode = _effective_mode(mode_override)
@@ -374,15 +366,11 @@ def rebuild_all(
         return report
 
     if tickers is None:
-        from ...models.trading import Trade
         lookback = datetime.utcnow() - timedelta(days=max(1, int(window_days) * 2))
-        discovered = (
-            db.query(Trade.ticker)
-            .filter(Trade.status == "closed", Trade.entry_date >= lookback)
-            .distinct()
-            .all()
-        )
-        ticker_list = list(dict.fromkeys(str(t[0]).strip() for t in discovered if t[0]))
+        ticker_list = list(dict.fromkeys(load_closed_management_envelope_tickers_since(
+            db,
+            since=lookback,
+        )))
     else:
         ticker_list = list(dict.fromkeys(str(t).strip() for t in tickers if str(t).strip()))
     side_list = list(dict.fromkeys(_ensure_side(str(side)) for side in sides))

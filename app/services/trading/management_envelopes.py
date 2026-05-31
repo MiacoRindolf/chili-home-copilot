@@ -339,6 +339,74 @@ def aggregate_management_envelope_execution_for_pattern(
     }
 
 
+def load_execution_cost_estimate_envelope_rows(
+    db: Session,
+    *,
+    ticker: str,
+    sides: list[str],
+    since: datetime,
+) -> list[SimpleNamespace]:
+    """Load closed management envelopes used by the execution-cost estimator."""
+    side_list = [str(side).strip().lower() for side in sides if str(side).strip()]
+    if not side_list:
+        return []
+    side_params = {f"side_{idx}": side for idx, side in enumerate(side_list)}
+    side_placeholders = ", ".join(f":side_{idx}" for idx in range(len(side_list)))
+    rows = _rows(
+        db,
+        f"""
+        SELECT
+            direction,
+            entry_price,
+            quantity,
+            tca_entry_slippage_bps,
+            tca_exit_slippage_bps
+          FROM {MANAGEMENT_ENVELOPES_RELATION}
+         WHERE ticker = :ticker
+           AND status = 'closed'
+           AND entry_date >= :since
+           AND LOWER(COALESCE(direction, 'long')) IN ({side_placeholders})
+        """,
+        {
+            "ticker": str(ticker),
+            "since": since,
+            **side_params,
+        },
+    )
+    return [
+        SimpleNamespace(
+            direction=row.get("direction"),
+            entry_price=row.get("entry_price"),
+            quantity=row.get("quantity"),
+            tca_entry_slippage_bps=row.get("tca_entry_slippage_bps"),
+            tca_exit_slippage_bps=row.get("tca_exit_slippage_bps"),
+        )
+        for row in rows
+    ]
+
+
+def load_closed_management_envelope_tickers_since(
+    db: Session,
+    *,
+    since: datetime,
+) -> list[str]:
+    """Return distinct tickers from recently closed management envelopes."""
+    rows = _rows(
+        db,
+        f"""
+        SELECT DISTINCT ticker
+          FROM {MANAGEMENT_ENVELOPES_RELATION}
+         WHERE status = 'closed'
+           AND entry_date >= :since
+           AND ticker IS NOT NULL
+           AND ticker <> ''
+         ORDER BY ticker
+        """,
+        {"since": since},
+    )
+    return [str(row["ticker"]).strip() for row in rows if row.get("ticker")]
+
+
 def fetch_synergy_retry_envelope_candidates(
     db: Session,
     *,
