@@ -20,9 +20,13 @@ from app.services.trading.brain_work.ledger import enqueue_work_event
 from app.services.trading.edge_reliability import (
     EDGE_RELIABILITY_REFRESH,
     EDGE_RELIABILITY_SNAPSHOT,
+    EXIT_VARIANT_REFRESH,
+    NO_TARGETED_WORK,
     RECERT_RESCUE_REFRESH,
     RECERT_RESCUE_DIAGNOSTIC,
+    _recommended_work_event,
     compute_pattern_edge_reliability,
+    edge_supply_summary,
     edge_supply_rows,
     emit_edge_reliability_refresh_requested,
     emit_targeted_profitability_work,
@@ -89,6 +93,36 @@ def _run(db, pat: ScanPattern, alert: BreakoutAlert, *, expected: float = 2.0):
     db.add(row)
     db.flush()
     return row
+
+
+def test_quality_blocked_negative_edge_maps_to_no_targeted_work() -> None:
+    assert (
+        _recommended_work_event(
+            "quality_blocked",
+            scan_pattern_id=123,
+            evidence={
+                "expected_ev_pct": -1.0,
+                "calibrated_ev_pct": -0.4,
+                "realized_ev_pct": -2.0,
+            },
+        )
+        == NO_TARGETED_WORK
+    )
+
+
+def test_quality_blocked_positive_evidence_keeps_exit_variant_work() -> None:
+    assert (
+        _recommended_work_event(
+            "quality_blocked",
+            scan_pattern_id=123,
+            evidence={
+                "expected_ev_pct": 1.0,
+                "calibrated_ev_pct": -0.4,
+                "realized_ev_pct": -2.0,
+            },
+        )
+        == EXIT_VARIANT_REFRESH
+    )
 
 
 def test_edge_reliability_attribution_from_runs_paper_and_live(db):
@@ -198,6 +232,8 @@ def test_edge_reliability_slices_all_asset_patterns_by_asset(db):
     assert stock["expected_ev_pct"] == pytest.approx(-1.0)
     assert stock["realized_ev_pct"] == pytest.approx(-2.0)
     assert stock["primary_symbol"] == "STKA"
+    assert stock["graduation_blocker"] == "quality_blocked"
+    assert stock["recommended_work_event"] == NO_TARGETED_WORK
 
     assert crypto["asset_class"] == "crypto"
     assert crypto["edge_eval_count"] == 1
@@ -214,6 +250,35 @@ def test_edge_reliability_slices_all_asset_patterns_by_asset(db):
     assert set(by_asset) == {"stock", "crypto"}
     assert by_asset["stock"]["primary_symbol"] == "STKA"
     assert by_asset["crypto"]["primary_symbol"] == "BTC-USD"
+
+
+def test_edge_supply_summary_separates_targeted_work_from_noop() -> None:
+    summary = edge_supply_summary(
+        [
+            {
+                "graduation_blocker": "quality_blocked",
+                "recommended_work_event": NO_TARGETED_WORK,
+            },
+            {
+                "graduation_blocker": "quality_blocked",
+                "recommended_work_event": EXIT_VARIANT_REFRESH,
+            },
+            {
+                "graduation_blocker": "recert_blocked",
+                "recommended_work_event": RECERT_RESCUE_REFRESH,
+            },
+        ]
+    )
+
+    assert summary["total"] == 3
+    assert summary["quality_blocked"] == 2
+    assert summary["recert_blocked"] == 1
+    assert summary["no_targeted_work"] == 1
+    assert summary["targeted_work"] == 2
+    assert summary["targeted_work_events"] == {
+        EXIT_VARIANT_REFRESH: 1,
+        RECERT_RESCUE_REFRESH: 1,
+    }
 
 
 def test_edge_reliability_excludes_ambiguous_option_paper_pct(db):
