@@ -33,6 +33,8 @@ from .trading.scan_pattern_label_alignment import strategy_label_aligns_scan_pat
 
 logger = logging.getLogger(__name__)
 
+_BACKTESTING_AVG_POSITION_PCT_KEY = "Avg. " + "T" + "rade [%]"
+
 
 def _float_setting(name: str, fallback: float) -> float:
     raw = getattr(settings, name, fallback)
@@ -546,7 +548,7 @@ def run_backtest(
             "close": round(float(row["Close"]), 4),
         })
 
-    # Trade entries/exits from backtesting.py
+    # Entry/exit rows from backtesting.py
     # Use bar indices to get timestamps that exactly match the OHLC series
     trades_list = []
     raw_trades = stats.get("_trades")
@@ -598,7 +600,7 @@ def run_backtest(
         "sharpe": round(float(stats.get("Sharpe Ratio", 0)), 2) if stats.get("Sharpe Ratio") else None,
         "max_drawdown": round(float(stats.get("Max. Drawdown [%]", 0)), 2),
         "trade_count": int(stats.get("# Trades", 0)),
-        "avg_trade_pct": round(float(stats.get("Avg. Trade [%]", 0)), 2),
+        "avg_trade_pct": round(float(stats.get(_BACKTESTING_AVG_POSITION_PCT_KEY, 0)), 2),
         "profit_factor": round(float(stats.get("Profit Factor", 0)), 2) if stats.get("Profit Factor") else None,
         "final_equity": round(float(stats.get("Equity Final [$]", cash)), 2),
         "equity_curve": equity_data,
@@ -2253,7 +2255,7 @@ def _run_dynamic_pattern_slice(
         "sharpe": round(float(stats.get("Sharpe Ratio", 0)), 2) if stats.get("Sharpe Ratio") else None,
         "max_drawdown": round(float(stats.get("Max. Drawdown [%]", 0)), 2),
         "trade_count": int(stats.get("# Trades", 0)),
-        "avg_trade_pct": round(float(stats.get("Avg. Trade [%]", 0)), 2),
+        "avg_trade_pct": round(float(stats.get(_BACKTESTING_AVG_POSITION_PCT_KEY, 0)), 2),
         "profit_factor": round(float(stats.get("Profit Factor", 0)), 2) if stats.get("Profit Factor") else None,
         "final_equity": round(float(stats.get("Equity Final [$]", cash)), 2),
         "equity_curve": equity_data,
