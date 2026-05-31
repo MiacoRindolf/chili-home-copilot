@@ -18,6 +18,7 @@ from app.models.trading import (
 )
 from app.services.trading.cash_deployment import (
     _recent_blocked_recert_rescue_work,
+    _recent_noop_profitability_work,
     _rolling_execution_cost_pct,
     cash_deployment_rows,
     cash_deployment_summary,
@@ -886,6 +887,78 @@ def test_recent_blocked_recert_rescue_work_blocks_completion_action(monkeypatch)
         db,
         scan_pattern_id=1260,
         minutes=360,
+    )
+
+
+def test_recent_nonpositive_exit_noop_blocks_weak_cash_refresh(monkeypatch):
+    monkeypatch.setattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360)
+
+    class _Query:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def order_by(self, *args, **kwargs):
+            return self
+
+        def limit(self, value):
+            return self
+
+        def all(self):
+            return [
+                SimpleNamespace(
+                    payload={
+                        "scan_pattern_id": 1248,
+                        "evidence_fingerprint": "old-fp",
+                        "created_count": 0,
+                        "skip_reason": "non_positive_quality_evidence_no_exit_variant_birth",
+                    },
+                )
+            ]
+
+    db = SimpleNamespace(query=lambda model: _Query())
+
+    assert _recent_noop_profitability_work(
+        db,
+        event_type="exit_variant_refresh",
+        scan_pattern_id=1248,
+        evidence_fingerprint="new-fp",
+        payload={"expected_evidence_value": 0.0, "calibrated_ev_pct": 0.0},
+    )
+
+
+def test_recent_nonpositive_exit_noop_allows_positive_cash_refresh(monkeypatch):
+    monkeypatch.setattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360)
+
+    class _Query:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def order_by(self, *args, **kwargs):
+            return self
+
+        def limit(self, value):
+            return self
+
+        def all(self):
+            return [
+                SimpleNamespace(
+                    payload={
+                        "scan_pattern_id": 1248,
+                        "evidence_fingerprint": "old-fp",
+                        "created_count": 0,
+                        "skip_reason": "non_positive_quality_evidence_no_exit_variant_birth",
+                    },
+                )
+            ]
+
+    db = SimpleNamespace(query=lambda model: _Query())
+
+    assert not _recent_noop_profitability_work(
+        db,
+        event_type="exit_variant_refresh",
+        scan_pattern_id=1248,
+        evidence_fingerprint="new-fp",
+        payload={"expected_evidence_value": 1.2, "calibrated_ev_pct": 0.3},
     )
 
 

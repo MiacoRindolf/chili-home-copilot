@@ -12,6 +12,9 @@ from sqlalchemy.orm import Session
 
 from ....config import settings
 from ....models.trading import BrainWorkEvent
+from ..exit_variant_policy import (
+    exit_noop_blocks_refresh as _exit_diagnostic_blocks_open_refresh,
+)
 
 logger = logging.getLogger(__name__)
 LOG_PREFIX = "[brain_work_ledger]"
@@ -37,19 +40,6 @@ _DEAD_RECOVERY_DEFAULT_CAP_RESET_DELAY_SECONDS = 3600
 _DEAD_RECOVERY_DEFAULT_MAX_CAP_RESETS = 2
 _EXIT_VARIANT_REFRESH = "exit_variant_refresh"
 _EXIT_VARIANT_DIAGNOSTIC = "exit_variant_diagnostic"
-_STRUCTURAL_EXIT_NOOP_REASONS = frozenset(
-    {
-        "duplicate_learned_exit_label",
-        "missing_parent_payoff_geometry",
-        "no_loss_report",
-        "no_parent_returns",
-    }
-)
-_STRUCTURAL_EXIT_NOOP_PREFIXES = (
-    "edge_debt_too_negative_for_exit_child:",
-    "insufficient_parent_payoff_samples:",
-    "reward_risk_below_floor:",
-)
 
 
 def _best_ranked_item(rows: list[_T], key: Callable[[_T], Any]) -> _T:
@@ -88,30 +78,6 @@ def _payload_pattern_id(payload: dict[str, Any]) -> int:
         return int(payload.get("scan_pattern_id") or 0)
     except (TypeError, ValueError):
         return 0
-
-
-def _structural_exit_noop_reason(reason: Any) -> bool:
-    value = str(reason or "").strip().lower()
-    return value in _STRUCTURAL_EXIT_NOOP_REASONS or any(
-        value.startswith(prefix) for prefix in _STRUCTURAL_EXIT_NOOP_PREFIXES
-    )
-
-
-def _exit_diagnostic_blocks_open_refresh(
-    payload: dict[str, Any],
-    *,
-    evidence_fingerprint: str | None,
-) -> bool:
-    try:
-        created_count = int(payload.get("created_count"))
-    except (TypeError, ValueError):
-        return False
-    if created_count != 0:
-        return False
-    fingerprint = str(evidence_fingerprint or "")
-    if fingerprint and str(payload.get("evidence_fingerprint") or "") == fingerprint:
-        return True
-    return _structural_exit_noop_reason(payload.get("skip_reason"))
 
 
 def _exit_refresh_payload_has_no_positive_evidence(payload: dict[str, Any]) -> bool:

@@ -33,6 +33,11 @@ from .edge_reliability import (
     latest_edge_reliability_snapshot_slices,
     null_lineage_short_paper_candidates,
 )
+from .exit_variant_policy import (
+    exit_noop_blocks_refresh,
+    non_positive_exit_noop_blocks_weak_request,
+    repeated_non_positive_exit_noop_blocks_refresh,
+)
 from .portfolio_risk import get_risk_limits, _option_premium_risk_dollars
 from .recert_rescue_policy import recert_rescue_diagnostic_blocks_refresh
 from .return_math import trade_return_pct as _realized_trade_return_pct
@@ -895,35 +900,13 @@ def cash_deployment_null_lineage_candidates(
     return out
 
 
-_STRUCTURAL_EXIT_NOOP_REASONS = frozenset(
-    {
-        "parent_missing_or_inactive",
-        "max_active_variants",
-        "duplicate_learned_exit_label",
-        "non_positive_parent_realized_avg",
-        "missing_parent_payoff_geometry",
-        "learned_target_not_tighter_than_static",
-        "learned_stop_not_tighter_than_static",
-    }
-)
-_STRUCTURAL_EXIT_NOOP_PREFIXES = (
-    "edge_debt_too_negative_for_exit_child:",
-    "insufficient_parent_payoff_samples:",
-    "reward_risk_below_floor:",
-)
-def _structural_exit_noop_reason(reason: Any) -> bool:
-    value = str(reason or "").strip().lower()
-    return value in _STRUCTURAL_EXIT_NOOP_REASONS or any(
-        value.startswith(prefix) for prefix in _STRUCTURAL_EXIT_NOOP_PREFIXES
-    )
-
-
 def _recent_noop_profitability_work(
     db: Session,
     *,
     event_type: str,
     scan_pattern_id: int,
     evidence_fingerprint: str,
+    payload: dict[str, Any] | None = None,
 ) -> bool:
     minutes = _safe_int(
         getattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360),
@@ -937,7 +920,7 @@ def _recent_noop_profitability_work(
             scan_pattern_id=scan_pattern_id,
             minutes=minutes,
         )
-    if event_type != EXIT_VARIANT_REFRESH or not evidence_fingerprint:
+    if event_type != EXIT_VARIANT_REFRESH:
         return False
 
     cutoff = datetime.utcnow() - timedelta(minutes=minutes)
@@ -951,14 +934,25 @@ def _recent_noop_profitability_work(
         .limit(20)
         .all()
     )
+    diagnostic_payloads: list[dict[str, Any]] = []
     for row in rows:
-        payload = row.payload if isinstance(row.payload, dict) else {}
-        if _safe_int(payload.get("created_count"), -1) != 0:
-            continue
-        if str(payload.get("evidence_fingerprint") or "") == evidence_fingerprint:
+        row_payload = row.payload if isinstance(row.payload, dict) else {}
+        diagnostic_payloads.append(row_payload)
+        if exit_noop_blocks_refresh(
+            row_payload,
+            evidence_fingerprint=evidence_fingerprint,
+        ):
             return True
-        if _structural_exit_noop_reason(payload.get("skip_reason")):
+        if non_positive_exit_noop_blocks_weak_request(
+            row_payload,
+            request_payload=payload,
+        ):
             return True
+    if repeated_non_positive_exit_noop_blocks_refresh(
+        diagnostic_payloads,
+        request_payload=payload,
+    ):
+        return True
     return False
 
 
@@ -1203,6 +1197,7 @@ def enqueue_cash_deployment_work(
             event_type=event_type,
             scan_pattern_id=int(pid),
             evidence_fingerprint=evidence_fingerprint,
+            payload=payload,
         ):
             skipped += 1
             skipped_noop_cooldown += 1
