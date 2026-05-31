@@ -135,6 +135,22 @@ def test_public_product_catalog_blocks_known_missing_product(monkeypatch):
     assert calls == [f"{coinbase_ohlcv._COINBASE_EXCHANGE_API_BASE_URL}/products"]
 
 
+def test_public_product_support_wrapper_uses_catalog(monkeypatch):
+    calls: list[str] = []
+
+    def _get(url, **_kwargs):
+        calls.append(str(url))
+        if str(url).endswith("/products"):
+            return _CatalogResponse([{"id": "BTC-USD", "quote_currency": "USD"}])
+        raise AssertionError(f"unexpected product-specific request: {url}")
+
+    monkeypatch.setattr(coinbase_ohlcv._SESSION, "get", _get)
+
+    assert coinbase_ohlcv.public_product_support("BTC-USD") is True
+    assert coinbase_ohlcv.public_product_support(MISSING_PRODUCT) is False
+    assert calls == [f"{coinbase_ohlcv._COINBASE_EXCHANGE_API_BASE_URL}/products"]
+
+
 def test_public_product_catalog_allows_known_product_quote(monkeypatch):
     calls: list[str] = []
 
