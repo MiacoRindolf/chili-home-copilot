@@ -1,4 +1,4 @@
-"""Trade plan extraction: rich mechanical planner + optional LLM fallback.
+"""Position plan extraction: rich mechanical planner + optional LLM fallback.
 
 Mechanical path derives invalidations and monitoring from pattern conditions.
 ``extract_trade_plan`` is used only when the mechanical plan is too sparse (complex patterns).

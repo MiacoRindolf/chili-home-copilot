@@ -388,7 +388,7 @@ def build_config_live(exit_cfg_dict: dict[str, Any] | None) -> ExitConfig:
         bos_buffer_pct=0.5 (PERCENT — divided by 100 here),
         partial_at_1r=False
 
-    Live has hard stop and hard target because ``PaperTrade`` / ``Trade``
+    Live has hard stop and hard target because paper/live position rows
     rows carry explicit stop_price and target_price.
     """
     cfg = dict(exit_cfg_dict or {})

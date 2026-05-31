@@ -1,59 +1,47 @@
-# NEXT_TASK: f-phase5s-learning-reporting-adapter-slice-4
+# NEXT_TASK: f-phase5t-learning-reporting-adapter-slice-5
 
 STATUS: QUEUED
 
 ## Goal
 
-Convert one more small read-only learning/reporting `Trade` ORM consumer to an
-envelope-shaped adapter/helper with direct parity tests.
+Convert one actual read-only learning/reporting `Trade` ORM consumer to a
+management-envelope helper with focused parity tests.
 
 ## Current State
 
-Phase 5R converted the legacy v1 execution-robustness aggregate to a
-management-envelope helper and
-reduced the remaining ORM compatibility surface:
+Phase 5S cleaned comment/docstring-only false positives from the Phase 5O map.
+The remaining compatibility surface is now:
 
 ```text
-orm_trade_symbol_compat     | 90
-adapter_candidate           | 41
-learning_research_reporting | 36
+orm_trade_symbol_compat     | 81
+adapter_candidate           | 32
+learning_research_reporting | 27
 future_rename_blocker       | 33
 leave_alone                 | 16
 ```
 
-The successful pattern was:
-
-1. choose a read-only consumer
-2. move the ticker/trade read behind a management-envelope helper
-3. prove behavior with a focused test
-4. update the Phase 5O map and canaries
-
 ## Recommended Work Shape
 
-1. Pick another small `learning_research_reporting` file from the updated
-   Phase 5O map.
-2. Avoid anything that mutates pattern lifecycle or trading state, even if the
-   current classifier places it in `learning_research_reporting`.
-3. Add or reuse a management-envelope helper only for read-only fields.
-4. Prove parity with direct tests.
+1. Pick a small actual `learning_research_reporting` consumer that reads closed
+   live rows and does not mutate pattern lifecycle or trading state.
+2. Move the row source behind a semantic `management_envelopes` helper.
+3. Prove the helper preserves the old output shape with direct tests.
+4. Update the Phase 5O map and canaries.
 
-Good candidate families:
+Good candidates:
 
-- Read-only performance/diagnostic aggregates that summarize closed envelopes.
-- Reporting helpers that do not write pattern state.
-- False-positive cleanup only when the symbol is plainly type/comment text and
-  tests pin that no runtime behavior changed.
-- Small closed-envelope research/reporting summaries with no pattern-state
-  mutation.
+- Small closed-envelope cost/diagnostic summaries when mode is shadow/off and
+  behavior is pinned with tests.
+- Reporting-only helpers that produce dashboards or diagnostics.
+- Research aggregates with no writer side effects.
 
-Avoid for this slice:
+Avoid:
 
 - `stale_promoted_sweep.py` and other lifecycle mutators.
 - `auto_trader_*`, `pattern_imminent_alerts.py`, `market_data.py`, and open
   live monitor paths.
 - Broker/order/close/reconcile, PDT, capital, and risk gate surfaces.
-- Execution/readiness surfaces without an explicit parity test; Phase 5R only
-  touched the legacy v1 row source and left scoring intact.
+- Anything that writes ScanPattern fields without an explicit parity test.
 
 ## Guardrails
 

@@ -21,7 +21,7 @@ EXPECTED_RUNTIME_COMPAT_RELATION_SYMBOL_PATHS = [
 ]
 
 EXPECTED_ORM_CONTRACT_GROUP_COUNTS = {
-    "learning_research_reporting": 36,
+    "learning_research_reporting": 27,
     "live_action_broker_reconcile": 15,
     "private_helper_type_only": 7,
     "public_ui_schema_contract": 14,
@@ -198,7 +198,7 @@ def test_runtime_orm_symbol_contract_groups_are_pinned() -> None:
         grouped_paths.setdefault(group, []).append(entry["path"])
 
     assert report["orm_contract_groups"] == EXPECTED_ORM_CONTRACT_GROUP_COUNTS
-    assert sum(report["orm_contract_groups"].values()) == 90
+    assert sum(report["orm_contract_groups"].values()) == 81
     for group, representative_paths in EXPECTED_ORM_CONTRACT_GROUP_REPRESENTATIVES.items():
         assert set(representative_paths).issubset(set(grouped_paths[group]))
 
