@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 LOG_PREFIX = "[brain_work:regime_ledger]"
 
-# Throttle: rebuild at most every N seconds. Trade-close events can burst
+# Throttle: rebuild at most every N seconds. trade-close outcome events can burst
 # (the autotrader closes several positions at once during a regime shift)
 # and we don't want to rebuild the ledger N times for the same window.
 _REBUILD_THROTTLE_S = 60.0

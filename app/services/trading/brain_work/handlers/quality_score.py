@@ -73,7 +73,7 @@ def _recompute_for_event(ev: Any, *, source: str) -> None:
     """Open a fresh SessionLocal and recompute composite for the
     single pattern referenced in the event payload.
 
-    Trade-close events sometimes omit ``scan_pattern_id`` (digest-style
+    trade-close outcome events sometimes omit ``scan_pattern_id`` (digest-style
     events). When absent, this handler short-circuits: composite
     recomputes happen per-pattern on the backtest_completed leg, and
     the per-user batch (run nightly) covers any patterns the per-event

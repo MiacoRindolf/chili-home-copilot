@@ -8,7 +8,7 @@ from typing import Any, Optional
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from ....models.trading import PaperTrade, Trade
+from ....models.trading import PaperTrade
 from ....config import settings
 from .emitters import (
     emit_broker_fill_closed_outcome,
@@ -245,12 +245,12 @@ def on_paper_trade_closed(db: Session, pt: PaperTrade) -> None:
 
 
 def _phase_a_economic_ledger_live_shadow(
-    db: Session, trade: Trade, *, ledger_source: str
+    db: Session, trade: Any, *, ledger_source: str
 ) -> None:
     """Phase A shadow hook: record entry + exit fills against the canonical
     economic ledger and reconcile against ``trade.pnl``.
 
-    Shadow-only — does not modify the legacy Trade row. Swallows all errors
+    Shadow-only — does not modify the legacy management envelope. Swallows all errors
     so the execution feedback path never breaks on ledger bugs.
     """
     try:
@@ -347,12 +347,12 @@ def _phase_a_economic_ledger_live_shadow(
 
 def on_live_trade_closed(
     db: Session,
-    trade: Trade,
+    trade: Any,
     *,
     source: str,
     extra: Optional[dict[str, Any]] = None,
 ) -> None:
-    """Portfolio or operator-initiated close of a live ``Trade`` row (before commit)."""
+    """Portfolio or operator-initiated close of a live management envelope (before commit)."""
     try:
         merged = {**trade_close_attribution_dict(trade), **(extra or {})}
         emit_live_trade_closed_outcome(
@@ -384,7 +384,7 @@ def on_live_trade_closed(
 
 def on_broker_reconciled_close(
     db: Session,
-    trade: Trade,
+    trade: Any,
     *,
     source: str,
 ) -> None:
