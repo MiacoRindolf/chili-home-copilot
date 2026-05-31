@@ -1,7 +1,7 @@
 # Current Plan: Position Identity Refactor
 
 **Initiative owner:** Cowork (strategy) + Claude Code (execution).
-**Last update:** 2026-05-31, after Phase 5O closed learning_cycle_architecture.py as a false-positive source-token hit.
+**Last update:** 2026-05-31, after Phase 5O reclassified live_drift.py as a live-drift auto-challenge future rename blocker.
 
 > **Why this initiative supersedes the prior fast-path crypto-scalping plan.** Today (2026-05-04) two automated close paths fired, marking 11 equity Trade rows wrongly closed in DB while the broker still held the positions. The shipped patch (inverse-reconcile, broker-truth-self-heal task) auto-healed 18 of them but its cross-check (`event_count == 0` on `trading_execution_events`) is conservative because **Trade row IDs are ephemeral** — every time a row gets wrongly closed and recreated, fills associated with the prior trade_id orphan. The fast-path scalping initiative depends on a stable position model; building more on this foundation makes things worse, not better. Position-identity refactor goes first. Fast-path resumes after.
 
@@ -56,6 +56,26 @@ Phase 5 soak duration was also tightened from one quarter to **2 weeks** at oper
 
 ## Status of the initiative
 
+- **Phase 5O live_drift envelope audit CLOSED 2026-05-31.**
+  Audited `app/services/trading/live_drift.py` and found it is a live-drift
+  validation and lifecycle path, not a private helper adapter candidate. It
+  reads closed live management-envelope outcomes, pairs them with paper outcome
+  scorecards, writes validation contracts, nudges confidence, and can
+  auto-challenge promoted/live patterns on critical drift. No live-drift
+  behavior was converted. Added
+  `scripts/d-phase5o-live-drift-envelope-parity-probe.py`; live result with
+  probe user `1` was `COMPLETE_POSITIVE`: 3 checks matched, 0 mismatches, 1
+  active repeatable pattern, 13 live runtime rows old = 13 new, 13 live
+  slippage rows old = 13 new, and 1 live win-count aggregate old = 1 new.
+  Reclassified the file from `private_helper_type_only / adapter_candidate` to
+  `learning_research_reporting / future_rename_blocker` with subtype
+  `live_drift_auto_challenge_path`. Verification: focused tests passed
+  (`7 passed`), analyzer reported no unexpected runtime readers/mutations,
+  Phase 5K COMPLETE_POSITIVE, Phase 5I COMPLETE_POSITIVE. Source posture
+  remains ALERT because app services are mounted from dirty root by an
+  external/shared process. Counts: `orm_trade_symbol_compat=65`,
+  `adapter_candidate=3`, `future_rename_blocker=46`. CC report:
+  `docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5o-live-drift-envelope-audit.md`.
 - **Phase 5O learning-cycle architecture false-positive closeout CLOSED 2026-05-31.**
   Audited `app/services/trading/learning_cycle_architecture.py` and confirmed it
   has no legacy `Trade` ORM import, query, or `trading_trades` dependency. The

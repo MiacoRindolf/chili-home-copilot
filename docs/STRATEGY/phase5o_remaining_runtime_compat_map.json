@@ -2,14 +2,14 @@
   "generated_from": "scripts/analyze_phase5_remaining_trade_refs.py --json",
   "orm_trade_symbol_compat_count": 65,
   "phase5o_bucket_counts": {
-    "adapter_candidate": 4,
-    "future_rename_blocker": 45,
+    "adapter_candidate": 3,
+    "future_rename_blocker": 46,
     "leave_alone": 16
   },
   "contract_group_counts": {
-    "learning_research_reporting": 5,
+    "learning_research_reporting": 6,
     "live_action_broker_reconcile": 20,
-    "private_helper_type_only": 5,
+    "private_helper_type_only": 4,
     "public_ui_schema_contract": 14,
     "risk_capital_gate": 21
   },
@@ -310,10 +310,10 @@
     },
     {
       "path": "app/services/trading/live_drift.py",
-      "contract_group": "private_helper_type_only",
-      "phase5o_bucket": "adapter_candidate",
-      "phase5o_subtype": "private_helper_adapter_candidate",
-      "rationale": "Private helper surface; candidate for protocol/adapter extraction if direct tests exist."
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "live_drift_auto_challenge_path",
+      "rationale": "Closed live-envelope evidence feeds live/paper drift scorecards and can auto-challenge promoted patterns; rename needs behavior parity."
     },
     {
       "path": "app/services/trading/live_exit_engine.py",

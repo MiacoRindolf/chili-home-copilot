@@ -1,38 +1,39 @@
-# NEXT_TASK: f-phase5o-live-drift-envelope-audit
+# NEXT_TASK: f-phase5o-autotrader-desk-envelope-audit
 
 STATUS: QUEUED
 
 ## Goal
 
-Audit `app/services/trading/live_drift.py`, one of the remaining Phase 5O
-adapter candidates after `learning_cycle_architecture.py` was closed as a
-source-token false positive.
+Audit `app/services/trading/autotrader_desk.py`, one of the final Phase 5O
+adapter candidates after `live_drift.py` was reclassified as a live-drift
+auto-challenge future rename blocker.
 
 ## Why This Is Next
 
-The adapter-candidate pool is now small. `live_drift.py` is classified as a
-private-helper surface, which makes it a good next candidate for either a
-low-risk false-positive cleanup or a narrow parity probe.
+The remaining adapter-candidate pool is down to three files. `autotrader_desk.py`
+is classified as private helper/type-only, but it likely backs operator-visible
+desk state. It should receive source-proof or parity-proof before removal or
+reclassification.
 
-Current surface after the learning-cycle architecture closeout:
+Current surface after the `live_drift.py` audit:
 
 ```text
 orm_trade_symbol_compat = 65
-learning_research_reporting = 5
+learning_research_reporting = 6
 live_action_broker_reconcile = 20
-private_helper_type_only = 5
+private_helper_type_only = 4
 risk_capital_gate = 21
-adapter_candidate = 4
-future_rename_blocker = 45
+adapter_candidate = 3
+future_rename_blocker = 46
 unexpected runtime readers = 0
 unexpected runtime mutations = 0
 ```
 
 ## Scope
 
-- Classify every legacy `Trade` ORM reference in `live_drift.py`.
+- Classify every legacy `Trade` ORM reference in `autotrader_desk.py`.
 - Determine whether the references are private type hints/source wording,
-  passive drift reporting, or behavior-bearing live-state reads.
+  passive desk reporting, or behavior-bearing live-state reads.
 - If false-positive or type-only, remove it from the compatibility inventory
   with a source-preservation test.
 - If behavior-bearing, add read-only parity evidence and reclassify it as a
