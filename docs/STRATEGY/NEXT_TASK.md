@@ -1,38 +1,53 @@
-# NEXT_TASK: f-phase5ab-trading-scheduler-contract-audit
+# NEXT_TASK: f-phase5ab-b-trading-scheduler-scope-conversion
 
 STATUS: QUEUED
 
 ## Goal
 
-Audit `app/services/trading_scheduler.py` and decide whether any remaining
-`Trade` ORM surface is safe for a narrow management-envelope helper conversion.
+Convert only the scheduler selection queries proven by the Phase 5AB parity
+probe from direct `Trade` ORM reads to management-envelope helper reads.
 
-## Why This Is Next
+## Evidence
 
-Phase 5Z/5AA cleared the scanner false positive and converted the market-data
-quote anchor after a parity probe. The next named candidate is
-`trading_scheduler.py`, but it coordinates live monitor timing around price,
-stop, and broker-position work. It should not be mechanically converted.
+Phase 5AB live probe:
+
+```text
+VERDICT_STATUS=COMPLETE_POSITIVE
+SCHEDULER_SCOPE_CHECKS=9
+SCHEDULER_SCOPE_MISMATCHES=0
+```
+
+The current `trading_trades` compatibility-view scopes and the candidate
+`trading_management_envelopes` scopes matched exactly.
 
 ## Scope
 
-- Classify each remaining `Trade` reference in `trading_scheduler.py`.
-- Identify whether any reference is pure reporting/diagnostic read-only work.
-- If all references feed live monitor behavior, close the task as an audit and
-  queue a dedicated parity probe instead of converting.
+Create small helpers for the exact scheduler selections:
+
+- price-monitor user ids
+- price-monitor pattern tickers
+- broker-backed monitor user ids
+- broker-backed pattern tickers
+- daytrade fast-monitor user ids
+- crypto stop-monitor user ids / counts
+- pattern-position monitor user ids
+- event-driven pattern trigger trade ids/objects if the downstream API can
+  accept envelope-shaped runtime objects without changing behavior
 
 ## Guardrails
 
-- No broker/order/close/reconcile changes.
-- No stop execution/evaluation changes.
 - No scheduler cadence changes.
+- No stop evaluation or dispatch behavior changes.
+- No broker/order/close/reconcile changes.
 - No risk/capital/PDT/portfolio gate changes.
 - No public `/trades`, `trade_id`, schema, or UI label rename.
+- If any downstream function requires actual SQLAlchemy `Trade` identity
+  semantics, stop and narrow the conversion to user/ticker selections only.
 
 ## Exit Criteria
 
-- Either one tiny passive conversion ships with tests, or the task closes with
-  a documented deferral and next parity-probe brief.
+- Focused tests pin old/new scheduler scope parity.
+- Phase 5AB probe remains `COMPLETE_POSITIVE` after conversion.
 - Phase 5K live-path parity and Phase 5I post-rename soak remain
   `COMPLETE_POSITIVE`.
 
