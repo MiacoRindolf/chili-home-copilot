@@ -13,6 +13,11 @@ import math
 from datetime import datetime, timedelta, timezone
 from typing import Any, TYPE_CHECKING
 
+from app.services.trading.recert_rescue_policy import (
+    RECENT_RECERT_RESCUE_BLOCKER_ACTIONS as _RECERT_RESCUE_BLOCKER_ACTIONS,
+    RECENT_RECERT_RESCUE_BLOCKER_REASONS as _RECERT_RESCUE_BLOCKER_REASONS,
+)
+
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
@@ -21,20 +26,6 @@ LOG_PREFIX = "[brain_work:profitability]"
 
 _RECERT_RESCUE_MIN_EDGE_EVALS = 5
 _RECERT_RESCUE_MIN_POSITIVE_EV_PCT = 0.0
-_RECERT_RESCUE_BLOCKER_ACTIONS = frozenset(
-    {
-        "inspect_recert_backtest_no_oos_evidence_keep_live_blocked",
-        "wait_for_recert_backtest_cooldown_keep_live_blocked",
-        "live_blocked_recert_debt_no_refresh",
-    }
-)
-_RECERT_RESCUE_BLOCKER_REASONS = frozenset(
-    {
-        "recent_recert_backtest_cooldown",
-        "recert_backtest_refresh_already_open",
-        "no_recert_refresh_needed",
-    }
-)
 
 
 def _payload(ev: Any) -> dict[str, Any]:

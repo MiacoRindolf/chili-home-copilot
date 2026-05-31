@@ -34,6 +34,10 @@ from .edge_reliability import (
     null_lineage_short_paper_candidates,
 )
 from .portfolio_risk import get_risk_limits, _option_premium_risk_dollars
+from .recert_rescue_policy import (
+    RECENT_RECERT_RESCUE_BLOCKER_ACTIONS,
+    RECENT_RECERT_RESCUE_BLOCKER_REASONS,
+)
 from .return_math import trade_return_pct as _realized_trade_return_pct
 
 LIVE_LIFECYCLES = frozenset({"live", "promoted", "pilot_promoted"})
@@ -910,21 +914,8 @@ _STRUCTURAL_EXIT_NOOP_PREFIXES = (
     "insufficient_parent_payoff_samples:",
     "reward_risk_below_floor:",
 )
-_RECENT_RECERT_BLOCKER_ACTIONS = frozenset(
-    {
-        "complete_oos_recert_and_quality_refresh",
-        "inspect_recert_backtest_no_oos_evidence_keep_live_blocked",
-        "wait_for_recert_backtest_cooldown_keep_live_blocked",
-        "live_blocked_recert_debt_no_refresh",
-    }
-)
-_RECENT_RECERT_BLOCKER_REASONS = frozenset(
-    {
-        "recent_recert_backtest_cooldown",
-        "recert_backtest_refresh_already_open",
-        "no_recert_refresh_needed",
-    }
-)
+_RECENT_RECERT_BLOCKER_ACTIONS = RECENT_RECERT_RESCUE_BLOCKER_ACTIONS
+_RECENT_RECERT_BLOCKER_REASONS = RECENT_RECERT_RESCUE_BLOCKER_REASONS
 
 
 def _structural_exit_noop_reason(reason: Any) -> bool:

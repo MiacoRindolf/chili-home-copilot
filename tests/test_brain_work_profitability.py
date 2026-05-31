@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from app.services.trading.brain_work.handlers.profitability import (
+    _recent_blocked_recert_rescue_diagnostic,
     handle_edge_reliability_refresh,
     handle_exit_variant_refresh,
 )
@@ -154,6 +155,42 @@ def test_edge_reliability_refresh_skips_recent_blocked_recert_rescue(monkeypatch
     handle_edge_reliability_refresh(object(), ev, user_id=None)
 
     assert calls == []
+
+
+def test_recent_blocked_recert_rescue_diagnostic_blocks_completion_action(
+    monkeypatch,
+) -> None:
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360)
+
+    class _Query:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def order_by(self, *args, **kwargs):
+            return self
+
+        def limit(self, value):
+            assert value == 20
+            return self
+
+        def all(self):
+            return [
+                SimpleNamespace(
+                    payload={
+                        "scan_pattern_id": 1260,
+                        "recommended_next_action": (
+                            "complete_oos_recert_and_quality_refresh"
+                        ),
+                        "recert_rescue_status": "soft_blocked",
+                    },
+                )
+            ]
+
+    db = SimpleNamespace(query=lambda model: _Query())
+
+    assert _recent_blocked_recert_rescue_diagnostic(db, scan_pattern_id=1260) is True
 
 
 def test_edge_reliability_refresh_emits_recert_rescue_without_blocker(monkeypatch) -> None:
