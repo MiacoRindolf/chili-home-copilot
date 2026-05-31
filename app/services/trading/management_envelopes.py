@@ -376,6 +376,34 @@ def load_recent_ticker_envelope_rows(
          LIMIT :limit
     """, {"uid": user_id, "ticker": symbol, "limit": max(1, int(limit))})
 
+
+def load_pattern_tagged_envelope_rows(
+    db: Session,
+    *,
+    user_id: int | None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    """Load recent pattern-tagged management envelopes for evidence reports."""
+    return _rows(db, f"""
+        SELECT
+            id,
+            ticker,
+            direction,
+            entry_price,
+            exit_price,
+            pnl,
+            status,
+            entry_date,
+            exit_date,
+            pattern_tags
+          FROM {MANAGEMENT_ENVELOPES_RELATION}
+         WHERE user_id IS NOT DISTINCT FROM :uid
+           AND pattern_tags IS NOT NULL
+         ORDER BY entry_date DESC NULLS LAST, id DESC
+         LIMIT :limit
+    """, {"uid": user_id, "limit": max(1, int(limit))})
+
+
 def _option_envelope_predicate_sql(alias: str = "t") -> str:
     snap = f"COALESCE({alias}.indicator_snapshot, '{{}}'::jsonb)"
     breakout = f"({snap}->'breakout_alert')"

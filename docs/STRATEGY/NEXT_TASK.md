@@ -1,26 +1,28 @@
-# NEXT_TASK: f-position-identity-phase-5s-private-router-helper-slice
+# NEXT_TASK: f-position-identity-phase-5t-audit-export-envelope-helper-slice
 
 STATUS: PENDING
 
 ## Goal
 
-Convert one private router read helper off the legacy `Trade` ORM while preserving public response field names.
+Move the read-only audit export trade-row source to a management-envelope helper while preserving the public export contract.
 
-Phase 5R classified router/schema/UI terminology and concluded that public `trade` names stay for now. The safe next move is an internal helper conversion, not a wire-contract rename.
+Phase 5S converted the private AI evidence reader and kept the public `trades` response key stable. The next safe router target is `api_audit_export(...)`, which is read-only and already framed as an export surface.
 
 ## Recommended Work Shape
 
 1. Add a narrow helper to `app/services/trading/management_envelopes.py`:
-   - likely `load_pattern_tagged_envelope_rows(...)`
+   - likely `load_audit_export_envelope_rows(...)`
    - read from `trading_management_envelopes`
-   - return mapping rows shaped like the current `ai.py` evidence payload needs
-2. Convert `app/routers/trading_sub/ai.py::_api_pattern_evidence_response(...)`:
-   - remove direct `Trade` import/query for matching `pattern_tags`
-   - keep response key `trades`
-   - keep row fields byte-compatible
-3. Add a focused source/behavior test for the helper conversion.
-4. Re-run:
-   - relevant `ai.py` tests
+   - return exactly the fields currently emitted in the audit export `trades` section
+2. Convert only `app/routers/trading_sub/trades.py::api_audit_export(...)` trade-row source.
+3. Keep:
+   - response section name `trades`
+   - JSON field names
+   - CSV section label `# TRADES`
+   - CSV headers/order
+4. Add parity tests for JSON and CSV export shape.
+5. Re-run:
+   - focused audit export tests
    - `tests/test_management_envelopes.py`
    - `tests/test_phase5_remaining_trade_refs.py`
    - `tests/test_phase5l_reader_allowlist.py`
@@ -29,10 +31,10 @@ Phase 5R classified router/schema/UI terminology and concluded that public `trad
 ## Guardrails
 
 - Do not rename `/trades`, `trade_id`, schema classes, UI labels, or response field names.
-- Do not touch `api_sell_trade`, monitor active setup responses, broker sync, bracket writers, stop/exit execution, order placement, PDT, promotion, or capital gates.
+- Do not touch `api_sell_trade`, `/trades` CRUD, monitor active setup responses, broker sync, bracket writers, stop/exit execution, order placement, PDT, promotion, or capital gates.
 - Do not drop or rewrite the `trading_trades` compatibility view.
-- Stop if the slice requires frontend/API coordination.
+- Stop if CSV/JSON parity cannot be pinned cleanly.
 
 ## Architect Verdict
 
-The public vocabulary can lag the internal architecture. Move private reads to semantic helpers now; rename public contracts only after aliases and caller tests exist.
+This is the last clearly safe router cleanup identified by Phase 5R. After this, the remaining router/schema surface likely needs either public compatibility aliases or live-path parity gates.

@@ -3241,7 +3241,10 @@ def _api_pattern_evidence_response(
     pattern_id: int,
     insight,
 ) -> JSONResponse:
-    from ...models.trading import LearningEvent, TradingHypothesis, Trade
+    from ...models.trading import LearningEvent, TradingHypothesis
+    from ...services.trading.management_envelopes import (
+        load_pattern_tagged_envelope_rows,
+    )
 
     desc = insight.pattern_description or ""
     sp_resolved_id = _resolve_scan_pattern_id_for_insight(db, insight)
@@ -3300,31 +3303,30 @@ def _api_pattern_evidence_response(
                 "last_tested_at": h.last_tested_at.isoformat() if h.last_tested_at else None,
             })
 
-    # 3. Matching trades by pattern_tags
+    # 3. Matching management envelopes by pattern_tags. Keep the public
+    # response key `trades` for frontend/API compatibility.
     trades_out = []
     try:
         trade_keywords = _extract_keywords_for_matching(desc, min_len=3)
-        all_trades = (
-            db.query(Trade)
-            .filter(Trade.user_id == ctx["user_id"], Trade.pattern_tags.isnot(None))
-            .order_by(Trade.entry_date.desc())
-            .limit(200)
-            .all()
+        all_trades = load_pattern_tagged_envelope_rows(
+            db,
+            user_id=ctx["user_id"],
+            limit=200,
         )
         for t in all_trades:
-            tags_lower = (t.pattern_tags or "").lower()
+            tags_lower = (t.get("pattern_tags") or "").lower()
             if any(kw in tags_lower for kw in trade_keywords):
                 trades_out.append({
-                    "id": t.id,
-                    "ticker": t.ticker,
-                    "direction": t.direction,
-                    "entry_price": t.entry_price,
-                    "exit_price": t.exit_price,
-                    "pnl": t.pnl,
-                    "status": t.status,
-                    "entry_date": t.entry_date.isoformat() if t.entry_date else None,
-                    "exit_date": t.exit_date.isoformat() if t.exit_date else None,
-                    "pattern_tags": t.pattern_tags,
+                    "id": t.get("id"),
+                    "ticker": t.get("ticker"),
+                    "direction": t.get("direction"),
+                    "entry_price": t.get("entry_price"),
+                    "exit_price": t.get("exit_price"),
+                    "pnl": t.get("pnl"),
+                    "status": t.get("status"),
+                    "entry_date": t["entry_date"].isoformat() if t.get("entry_date") else None,
+                    "exit_date": t["exit_date"].isoformat() if t.get("exit_date") else None,
+                    "pattern_tags": t.get("pattern_tags"),
                 })
                 if len(trades_out) >= 20:
                     break
