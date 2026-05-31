@@ -23,7 +23,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-os.environ.setdefault("DATABASE_URL", "postgresql://chili:chili@localhost:5433/chili")
+os.environ.setdefault(
+    "DATABASE_URL",
+    os.getenv("TEST_DATABASE_URL", "postgresql://chili:chili@localhost:5433/chili_test"),
+)
 
 from app.db import SessionLocal  # noqa: E402
 from app.models.trading import Trade  # noqa: E402
@@ -56,6 +59,32 @@ PUBLIC_POSITION_FIELDS = (
     "entry_date",
     "brain",
 )
+
+LIVE_PROBE_OPT_IN = "PHASE5Z_ALLOW_LIVE_PROBE"
+
+
+def _live_probe_enabled() -> bool:
+    return str(os.getenv(LIVE_PROBE_OPT_IN, "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+
+
+def _is_test_database_url(url: str | None) -> bool:
+    return "_test" in str(url or "").split("?", 1)[0].lower()
+
+
+def _assert_probe_database_allowed(database_url: str | None) -> None:
+    if _is_test_database_url(database_url) or _live_probe_enabled():
+        return
+    raise RuntimeError(
+        "Phase 5Z stop-position probe defaults to test-only validation. "
+        f"Set {LIVE_PROBE_OPT_IN}=true to run manually authorized read-only "
+        "live/non-test DB evidence."
+    )
 
 
 def _positive_float(value: Any) -> float | None:
@@ -113,6 +142,7 @@ def serialize_stop_positions(
     trades: list[Any],
     *,
     quote_cache: dict[tuple[str, str, str, str], dict[str, Any] | None],
+    allow_external_quotes: bool = False,
 ) -> dict[str, Any]:
     from app.services.trading.autopilot_scope import is_option_trade
     from app.services.trading.broker_position_truth import (
@@ -150,7 +180,7 @@ def serialize_stop_positions(
 
         try:
             q = None
-            if (broker_source or "").strip() or trade_is_option:
+            if allow_external_quotes and ((broker_source or "").strip() or trade_is_option):
                 from app.services.trading.broker_quotes import broker_quote_for_trade
 
                 key = (
@@ -162,7 +192,11 @@ def serialize_stop_positions(
                 if key not in quote_cache:
                     quote_cache[key] = broker_quote_for_trade(t, purpose="display")
                 q = quote_cache[key]
-            if (not q or q.get("price") is None) and not trade_is_option:
+            if (
+                allow_external_quotes
+                and (not q or q.get("price") is None)
+                and not trade_is_option
+            ):
                 from app.services.trading.market_data import fetch_quote
 
                 key = ("market_quote", "", str(ticker or "").upper(), "standard")
@@ -255,6 +289,9 @@ def serialize_stop_positions(
 
 
 def run_probe(user_id: int | None = 1) -> dict[str, Any]:
+    database_url = os.getenv("DATABASE_URL")
+    _assert_probe_database_allowed(database_url)
+    allow_live_probe = _live_probe_enabled()
     db = SessionLocal()
     try:
         relation_kinds = {
@@ -266,16 +303,20 @@ def run_probe(user_id: int | None = 1) -> dict[str, Any]:
             db,
             load_trade_objects(db, user_id),
             quote_cache=quote_cache,
+            allow_external_quotes=allow_live_probe,
         )
         new_payload = serialize_stop_positions(
             db,
             load_envelope_objects(db, user_id),
             quote_cache=quote_cache,
+            allow_external_quotes=allow_live_probe,
         )
         matched = old_payload == new_payload
         return {
             "status": "COMPLETE_POSITIVE" if matched else "MISMATCH",
             "matched": matched,
+            "database_scope": "test" if _is_test_database_url(database_url) else "live_or_non_test",
+            "external_quotes_enabled": allow_live_probe,
             "user_id": user_id,
             "old_positions": len(old_payload["positions"]),
             "new_positions": len(new_payload["positions"]),

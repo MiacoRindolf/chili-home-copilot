@@ -17,9 +17,15 @@ The probe compares the current `Trade` ORM runtime object path with a candidate 
 
 No endpoint behavior changed in this slice.
 
-## Live Result
+## Manually Authorized Read-Only Live Result
 
-`scripts/d-phase5z-stop-position-runtime-adapter-probe.py` returned:
+The live-data sample below is manually authorized read-only evidence, not the
+default or CI-safe validation path. The probe now defaults `DATABASE_URL` to
+`TEST_DATABASE_URL` or local `chili_test`, rejects non-test database URLs unless
+`PHASE5Z_ALLOW_LIVE_PROBE=true` is set, and keeps broker/market quote reads
+disabled unless that same explicit opt-in is present.
+
+With the explicit live-probe opt-in, `scripts/d-phase5z-stop-position-runtime-adapter-probe.py` returned:
 
 - `VERDICT_STATUS=COMPLETE_POSITIVE`
 - `matched=true`
@@ -37,8 +43,8 @@ This means the candidate runtime-envelope object can preserve the stop-position 
 
 - `python -m py_compile scripts/d-phase5z-stop-position-runtime-adapter-probe.py`
 - `pytest tests/test_phase5z_stop_position_runtime_adapter_probe.py tests/test_phase5_remaining_trade_refs.py tests/test_phase5l_reader_allowlist.py -q`
-  - Result: 13 passed, 1 existing SQLAlchemy warning
-- Live probe:
+  - Result: 16 passed, 1 existing SQLAlchemy warning
+- Manually authorized read-only live probe:
   - `COMPLETE_POSITIVE`
 
 ## Architect Verdict
