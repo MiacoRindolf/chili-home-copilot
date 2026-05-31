@@ -73,4 +73,3 @@ python scripts\analyze_phase5_remaining_trade_refs.py --bucket orm_trade_symbol_
 ## Architect Verdict
 
 The live desk `trades` list is ready for a narrow conversion to load runtime objects from `trading_management_envelopes`. Keep the paper-trade path and all mutation/action endpoints unchanged. Preserve public row keys and the `("trade", id)` override/close compatibility contract.
-

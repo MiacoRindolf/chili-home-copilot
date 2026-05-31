@@ -162,4 +162,3 @@ def test_probe_live_opt_in_allows_non_test_database(monkeypatch) -> None:
         )
         == "live_or_non_test"
     )
-
