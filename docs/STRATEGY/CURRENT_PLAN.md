@@ -912,3 +912,23 @@ mutation path changed.
 
 Report:
 `docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5u-edge-reliability-envelope-adapter.md`.
+
+## Phase 5V - Learning/Reporting False-Positive Cleanup (2026-05-31)
+
+Phase 5V removed four text-only `Trade` references from learning/reporting
+files that do not import or query the legacy ORM class:
+`economic_ledger.py`, `evidence_correction.py`, `pattern_trade_analysis.py`,
+and `realized_pnl_sql.py`.
+
+Runtime behavior did not change. This was map hygiene so the remaining Phase 5
+compatibility surface reflects actual code dependencies rather than prose.
+
+The remaining compatibility surface dropped from 79 to 75 files:
+`learning_research_reporting=21`, `adapter_candidate=26`.
+
+Architect verdict: useful false-positive cleanup. The next slice should return
+to a true read-only adapter conversion and continue avoiding lifecycle,
+broker/reconcile/risk/capital surfaces without dedicated parity probes.
+
+Report:
+`docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5v-learning-reporting-false-positive-cleanup.md`.

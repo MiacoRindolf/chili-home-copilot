@@ -1,5 +1,5 @@
 """Canonical-aware evidence correction for ScanPattern win_rate /
-avg_return_pct / trade_count, computed from closed Trade rows using
+avg_return_pct / trade_count, computed from closed live rows using
 canonical time-decay semantics.
 
 Used by ``learning.update_pattern_stats_from_closed_trades`` (the
@@ -9,7 +9,7 @@ The caller is responsible for persisting outputs and writing audit rows.
 
 Pre-fix (legacy aggregation in learning.py:4798-4892) wrote
 ``pattern.win_rate`` and ``pattern.avg_return_pct`` directly from
-realized ``Trade.exit_price``. No counterfactual correction; positions
+realized exit prices. No counterfactual correction; positions
 held past their pattern's intended ``max_bars`` (= 81% of patterns per
 the f-time-decay-unit-fix survey) leaked their too-late exit prices
 into evidence. Post-fix (this module), the writer computes a
