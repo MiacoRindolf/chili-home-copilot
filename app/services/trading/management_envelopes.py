@@ -145,6 +145,130 @@ def load_recent_management_envelope_tickers_for_user(
     return [str(row["ticker"]).upper() for row in rows if row.get("ticker")]
 
 
+def tca_summary_by_ticker_from_management_envelopes(
+    db: Session,
+    user_id: int | None,
+    *,
+    days: int = 90,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Aggregate TCA slippage from the semantic management-envelope surface."""
+    if user_id is None:
+        return {
+            "ok": True,
+            "window_days": days,
+            "overall_fills": 0,
+            "overall_avg_entry_slippage_bps": None,
+            "by_ticker": [],
+            "exit_overall_closes": 0,
+            "exit_overall_avg_slippage_bps": None,
+            "exit_by_ticker": [],
+        }
+
+    window_days = max(1, int(days or 90))
+    lim = max(1, min(int(limit or 50), 500))
+    params = {"uid": int(user_id), "days": window_days, "limit": lim}
+
+    entry_rows = _rows(db, f"""
+        SELECT
+            ticker,
+            COUNT(id)::bigint AS fills,
+            AVG(tca_entry_slippage_bps)::double precision AS avg_entry_slippage_bps
+          FROM {MANAGEMENT_ENVELOPES_RELATION}
+         WHERE tca_entry_slippage_bps IS NOT NULL
+           AND filled_at IS NOT NULL
+           AND filled_at >= NOW() - (:days * INTERVAL '1 day')
+           AND user_id = :uid
+         GROUP BY ticker
+         ORDER BY COUNT(id) DESC
+         LIMIT :limit
+    """, params)
+    by_ticker = [
+        {
+            "ticker": row.get("ticker"),
+            "fills": int(row.get("fills") or 0),
+            "avg_entry_slippage_bps": (
+                round(float(row["avg_entry_slippage_bps"]), 2)
+                if row.get("avg_entry_slippage_bps") is not None
+                else None
+            ),
+        }
+        for row in entry_rows
+    ]
+
+    entry_overall = _rows(db, f"""
+        SELECT
+            COUNT(id)::bigint AS fills,
+            AVG(tca_entry_slippage_bps)::double precision AS avg_entry_slippage_bps
+          FROM {MANAGEMENT_ENVELOPES_RELATION}
+         WHERE tca_entry_slippage_bps IS NOT NULL
+           AND filled_at IS NOT NULL
+           AND filled_at >= NOW() - (:days * INTERVAL '1 day')
+           AND user_id = :uid
+    """, params)
+    entry_total = entry_overall[0] if entry_overall else {}
+
+    exit_rows = _rows(db, f"""
+        SELECT
+            ticker,
+            COUNT(id)::bigint AS closes,
+            AVG(tca_exit_slippage_bps)::double precision AS avg_exit_slippage_bps
+          FROM {MANAGEMENT_ENVELOPES_RELATION}
+         WHERE tca_exit_slippage_bps IS NOT NULL
+           AND status = 'closed'
+           AND exit_date IS NOT NULL
+           AND exit_date >= NOW() - (:days * INTERVAL '1 day')
+           AND user_id = :uid
+         GROUP BY ticker
+         ORDER BY COUNT(id) DESC
+         LIMIT :limit
+    """, params)
+    exit_by_ticker = [
+        {
+            "ticker": row.get("ticker"),
+            "closes": int(row.get("closes") or 0),
+            "avg_exit_slippage_bps": (
+                round(float(row["avg_exit_slippage_bps"]), 2)
+                if row.get("avg_exit_slippage_bps") is not None
+                else None
+            ),
+        }
+        for row in exit_rows
+    ]
+
+    exit_overall = _rows(db, f"""
+        SELECT
+            COUNT(id)::bigint AS closes,
+            AVG(tca_exit_slippage_bps)::double precision AS avg_exit_slippage_bps
+          FROM {MANAGEMENT_ENVELOPES_RELATION}
+         WHERE tca_exit_slippage_bps IS NOT NULL
+           AND status = 'closed'
+           AND exit_date IS NOT NULL
+           AND exit_date >= NOW() - (:days * INTERVAL '1 day')
+           AND user_id = :uid
+    """, params)
+    exit_total = exit_overall[0] if exit_overall else {}
+
+    return {
+        "ok": True,
+        "window_days": window_days,
+        "overall_fills": int(entry_total.get("fills") or 0),
+        "overall_avg_entry_slippage_bps": (
+            round(float(entry_total["avg_entry_slippage_bps"]), 2)
+            if entry_total.get("avg_entry_slippage_bps") is not None
+            else None
+        ),
+        "by_ticker": by_ticker,
+        "exit_overall_closes": int(exit_total.get("closes") or 0),
+        "exit_overall_avg_slippage_bps": (
+            round(float(exit_total["avg_exit_slippage_bps"]), 2)
+            if exit_total.get("avg_exit_slippage_bps") is not None
+            else None
+        ),
+        "exit_by_ticker": exit_by_ticker,
+    }
+
+
 def fetch_synergy_retry_envelope_candidates(
     db: Session,
     *,

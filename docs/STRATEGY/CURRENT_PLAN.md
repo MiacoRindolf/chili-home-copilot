@@ -811,3 +811,24 @@ future rename blockers.
 
 Report:
 `docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5p-learning-reporting-adapter-slice.md`.
+
+## Phase 5Q - Learning/Reporting Adapter Slice 2 (2026-05-31)
+
+Phase 5Q converted TCA summary reporting away from the legacy `Trade` ORM
+aggregate.
+
+`tca_summary_by_ticker(...)` now delegates to
+`tca_summary_by_ticker_from_management_envelopes(...)`, a read-only
+management-envelope helper that preserves the public TCA summary payload while
+querying the semantic `trading_management_envelopes` relation.
+
+The remaining compatibility surface dropped from 92 to 91 files:
+`learning_research_reporting=37`, `adapter_candidate=42`.
+
+Architect verdict: this is another safe adapter reduction because TCA summary is
+observability/reporting, not a broker/order/reconcile/risk/capital path. Keep
+manually filtering the remaining learning/reporting candidates; some are
+lifecycle mutators or live monitors despite their classifier bucket.
+
+Report:
+`docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5q-learning-reporting-adapter-slice-2.md`.

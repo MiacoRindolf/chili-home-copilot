@@ -19,6 +19,7 @@ from app.services.trading.management_envelopes import (
     load_stop_decision_envelope_rows,
     load_trades_api_envelope_rows,
     summarize_closed_envelope_performance,
+    tca_summary_by_ticker_from_management_envelopes,
 )
 
 
@@ -218,6 +219,39 @@ def test_recent_ticker_envelope_rows_read_management_envelopes():
     assert "UPPER(ticker) = :ticker" in db.sql
     assert "ORDER BY entry_date DESC NULLS LAST, id DESC" in db.sql
     assert db.params == {"uid": 7, "ticker": "AAPL", "limit": 3}
+
+
+def test_tca_summary_by_ticker_reads_management_envelopes():
+    db = _FakeDbSequence(
+        _RowsResult([{"ticker": "AAPL", "fills": 2, "avg_entry_slippage_bps": 19.995}]),
+        _RowsResult([{"fills": 3, "avg_entry_slippage_bps": 10.004}]),
+        _RowsResult([{"ticker": "MSFT", "closes": 1, "avg_exit_slippage_bps": -2.345}]),
+        _RowsResult([{"closes": 4, "avg_exit_slippage_bps": 6.789}]),
+    )
+
+    summary = tca_summary_by_ticker_from_management_envelopes(
+        db,
+        user_id=7,
+        days=14,
+        limit=2,
+    )
+
+    assert summary["overall_fills"] == 3
+    assert summary["overall_avg_entry_slippage_bps"] == 10.0
+    assert summary["by_ticker"] == [
+        {"ticker": "AAPL", "fills": 2, "avg_entry_slippage_bps": 20.0}
+    ]
+    assert summary["exit_overall_closes"] == 4
+    assert summary["exit_overall_avg_slippage_bps"] == 6.79
+    assert summary["exit_by_ticker"] == [
+        {"ticker": "MSFT", "closes": 1, "avg_exit_slippage_bps": -2.35}
+    ]
+    assert len(db.calls) == 4
+    for sql, params in db.calls:
+        assert "FROM trading_management_envelopes" in sql
+        assert "trading_trades" not in sql
+        assert "NOW() - (:days * INTERVAL '1 day')" in sql
+        assert params == {"uid": 7, "days": 14, "limit": 2}
 
 
 def test_pattern_tagged_envelope_rows_read_management_envelopes():
