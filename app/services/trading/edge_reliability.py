@@ -24,7 +24,6 @@ from ...models.trading import (
     BreakoutAlert,
     PaperTrade,
     ScanPattern,
-    Trade,
 )
 from .autotrader_evidence import clean_autotrader_runs, partition_autotrader_runs
 from .brain_work.ledger import enqueue_outcome_event, enqueue_work_event
@@ -38,6 +37,7 @@ from .exit_variant_policy import (
     structural_exit_noop_reason as _structural_exit_noop_reason,
 )
 from .recert_rescue_policy import recert_rescue_diagnostic_blocks_refresh
+from .management_envelopes import load_edge_reliability_live_envelope_rows
 from .return_math import (
     OPTION_CONTRACT_MULTIPLIER,
     paper_trade_contract_multiplier,
@@ -206,7 +206,7 @@ def _asset_class_for_paper(
     )
 
 
-def _asset_class_for_trade(row: Trade, pattern: ScanPattern | None) -> str | None:
+def _asset_class_for_trade(row: Any, pattern: ScanPattern | None) -> str | None:
     explicit = _canonical_asset_class(getattr(row, "asset_kind", None))
     if explicit:
         return explicit
@@ -302,7 +302,7 @@ def _paper_return_pct(row: PaperTrade) -> float | None:
     return (pnl / notional) * 100.0
 
 
-def _live_return_pct(row: Trade) -> float | None:
+def _live_return_pct(row: Any) -> float | None:
     if trade_contract_multiplier(row) == OPTION_CONTRACT_MULTIPLIER:
         realized = _realized_trade_return_pct(row)
         if realized is not None:
@@ -564,18 +564,11 @@ def compute_pattern_edge_reliability(
         )
     ]
 
-    live_rows_all = (
-        db.query(Trade)
-        .filter(Trade.scan_pattern_id == pid)
-        .filter(Trade.status == "closed")
-        .filter(
-            or_(
-                Trade.entry_date.is_(None),
-                Trade.entry_date >= cutoff,
-                Trade.exit_date >= cutoff,
-            )
-        )
-        .all()
+    live_rows_all = load_edge_reliability_live_envelope_rows(
+        db,
+        pattern_id=pid,
+        since=cutoff,
+        closed_only=True,
     )
     live_rows = [
         row
@@ -1304,19 +1297,12 @@ def _observed_asset_slices_for_pattern(
         if cls:
             slices.add(cls)
 
-    recent_trades = (
-        db.query(Trade)
-        .filter(Trade.scan_pattern_id == int(scan_pattern_id))
-        .filter(
-            or_(
-                Trade.entry_date.is_(None),
-                Trade.entry_date >= cutoff,
-                Trade.exit_date >= cutoff,
-            )
-        )
-        .order_by(Trade.id.desc())
-        .limit(250)
-        .all()
+    recent_trades = load_edge_reliability_live_envelope_rows(
+        db,
+        pattern_id=int(scan_pattern_id),
+        since=cutoff,
+        closed_only=False,
+        limit=250,
     )
     for trade in recent_trades:
         cls = _asset_class_for_trade(trade, pattern)

@@ -892,3 +892,23 @@ live-path parity probe.
 
 Report:
 `docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5t-execution-cost-envelope-adapter.md`.
+
+## Phase 5U - Edge Reliability Envelope Adapter (2026-05-31)
+
+Phase 5U converted edge-reliability live evidence reads from the legacy `Trade`
+ORM surface to semantic management-envelope helpers.
+
+`compute_pattern_edge_reliability(...)` and
+`_observed_asset_slices_for_pattern(...)` now load live envelope evidence via
+`load_edge_reliability_live_envelope_rows(...)`. The snapshot math, durable
+brain-work event payloads, and paper-trade evidence path remain unchanged.
+
+The remaining compatibility surface dropped from 80 to 79 files:
+`learning_research_reporting=25`, `adapter_candidate=30`.
+
+Architect verdict: safe read-only learning/reporting adapter slice. No
+broker/order/close/reconcile/PDT/capital/risk path and no pattern lifecycle
+mutation path changed.
+
+Report:
+`docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5u-edge-reliability-envelope-adapter.md`.

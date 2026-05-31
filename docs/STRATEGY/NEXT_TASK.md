@@ -1,47 +1,48 @@
-# NEXT_TASK: f-phase5u-learning-reporting-adapter-slice-6
+# NEXT_TASK: f-phase5v-learning-reporting-adapter-slice-7
 
 STATUS: QUEUED
 
 ## Goal
 
-Convert one more actual read-only learning/reporting `Trade` ORM consumer to a
-management-envelope helper with focused parity tests.
+Convert one more low-risk learning/reporting `Trade` ORM consumer to a semantic
+management-envelope helper, or deliberately close it as a false-positive cleanup
+if inspection proves it has no real runtime `Trade` dependency.
 
 ## Current State
 
-Phase 5T converted the execution-cost estimator's closed-row source to
-management-envelope helpers. The remaining compatibility surface is now:
+Phase 5U converted `edge_reliability.py` live evidence reads to
+`load_edge_reliability_live_envelope_rows(...)`.
+
+Remaining compatibility surface:
 
 ```text
-orm_trade_symbol_compat     | 80
-adapter_candidate           | 31
-learning_research_reporting | 26
+orm_trade_symbol_compat     | 79
+adapter_candidate           | 30
+learning_research_reporting | 25
 future_rename_blocker       | 33
 leave_alone                 | 16
 ```
 
 ## Recommended Work Shape
 
-1. Pick a small actual `learning_research_reporting` consumer that reads closed
-   live rows and does not mutate pattern lifecycle or trading state.
-2. Move the row source behind a semantic `management_envelopes` helper.
-3. Prove the helper preserves the old output shape with direct tests.
-4. Update the Phase 5O map and canaries.
+1. Inspect the next learning/reporting candidates manually.
+2. Prefer a true read-only aggregate/reporting consumer with simple row-shape
+   parity.
+3. Add or extend a helper in `management_envelopes.py`.
+4. Keep focused tests on fake DB rows where possible; use `chili_test` only for
+   behavioral parity that genuinely needs ORM fixtures.
 
-Good candidates:
+## Candidate Notes
 
-- Closed-envelope reporting summaries.
-- Diagnostics that do not feed live entry/exit/risk gates.
-- Research aggregates where the old and new row shape can be parity-tested
-  with a small fake DB.
-
-Avoid:
-
-- `stale_promoted_sweep.py` and other lifecycle mutators.
-- `auto_trader_*`, `pattern_imminent_alerts.py`, `market_data.py`, and open
-  live monitor paths.
-- Broker/order/close/reconcile, PDT, capital, and risk gate surfaces.
-- Anything that writes ScanPattern fields without an explicit parity test.
+- Avoid `alpha_decay.py` and `stale_promoted_sweep.py` for now; they touch
+  lifecycle/decay behavior.
+- Avoid `economic_ledger.py` unless the slice has explicit ledger parity; it
+  carries public-ish `trade_id` accounting semantics.
+- `pattern_trade_analysis.py`, `realized_pnl_sql.py`, and
+  `evidence_correction.py` may be false-positive/text-heavy surfaces. If so,
+  close them as map hygiene rather than forcing a behavior change.
+- `learning.py`, `net_edge_ranker.py`, and `pattern_imminent_alerts.py` need
+  extra care because they can feed scoring or signal-generation behavior.
 
 ## Guardrails
 
