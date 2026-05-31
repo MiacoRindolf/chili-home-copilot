@@ -13,6 +13,7 @@ from app.services.trading.management_envelopes import (
     load_monitor_decision_envelope_rows,
     load_pattern_tagged_envelope_rows,
     load_recent_ticker_envelope_rows,
+    load_stop_decision_envelope_rows,
     summarize_closed_envelope_performance,
 )
 
@@ -293,3 +294,41 @@ def test_imminent_alert_actioned_envelope_ids_read_management_envelopes():
     assert "status IN ('open', 'closed')" in db.sql
     assert "user_id IS NOT DISTINCT FROM :uid" in db.sql
     assert db.params == {"uid": None}
+
+
+def test_stop_decision_envelope_rows_use_lateral_envelope_scope():
+    db = _FakeDb(_RowsResult([{"id": 1, "trade_id": 20}]))
+
+    rows = load_stop_decision_envelope_rows(
+        db,
+        user_id=7,
+        trade_id=None,
+        limit=50,
+    )
+
+    assert rows == [{"id": 1, "trade_id": 20}]
+    assert "WITH scoped AS MATERIALIZED" in db.sql
+    assert "FROM trading_management_envelopes" in db.sql
+    assert "CROSS JOIN LATERAL" in db.sql
+    assert "FROM trading_stop_decisions" in db.sql
+    assert "trading_trades" not in db.sql
+    assert "ORDER BY as_of_ts DESC, id DESC" in db.sql
+    assert db.params == {"uid": 7, "limit": 50}
+
+
+def test_stop_decision_envelope_rows_with_trade_id_use_bounded_join():
+    db = _FakeDb(_RowsResult([{"id": 2, "trade_id": 123}]))
+
+    rows = load_stop_decision_envelope_rows(
+        db,
+        user_id=None,
+        trade_id=123,
+        limit=10,
+    )
+
+    assert rows == [{"id": 2, "trade_id": 123}]
+    assert "JOIN trading_management_envelopes t ON t.id = d.trade_id" in db.sql
+    assert "d.trade_id = :trade_id" in db.sql
+    assert "t.user_id IS NOT DISTINCT FROM :uid" in db.sql
+    assert "trading_trades" not in db.sql
+    assert db.params == {"uid": None, "limit": 10, "trade_id": 123}
