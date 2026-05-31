@@ -228,7 +228,7 @@ class RobinhoodOptionsAdapter:
 
     def get_open_positions(self) -> list[dict[str, Any]]:
         """List currently-held option legs. Used by the reconciler to
-        match Trade rows against broker truth.
+        match local position envelopes against broker truth.
         """
         from ...broker_service import get_open_option_positions
         return get_open_option_positions()

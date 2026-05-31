@@ -497,7 +497,7 @@ def load_trades_api_envelope_objects(
     status: str | None = None,
     limit: int = 50,
 ) -> list[Any]:
-    """Load /trades rows as read-only Trade-like runtime objects."""
+    """Load /trades rows as read-only envelope-shaped runtime objects."""
     params: dict[str, Any] = {
         "uid": user_id,
         "limit": max(1, min(int(limit or 50), 500)),
@@ -623,7 +623,7 @@ def load_open_stop_position_envelope_objects(
     *,
     user_id: int | None,
 ) -> list[Any]:
-    """Load open management envelopes as read-only Trade-like runtime objects."""
+    """Load open management envelopes as read-only envelope-shaped runtime objects."""
     rows = _rows(db, f"""
         SELECT *
           FROM {MANAGEMENT_ENVELOPES_RELATION}
@@ -639,7 +639,7 @@ def load_open_active_setup_envelope_objects(
     *,
     user_id: int | None,
 ) -> list[Any]:
-    """Load active setup card candidates as read-only Trade-like objects."""
+    """Load active setup card candidates as read-only envelope-shaped objects."""
     rows = _rows(db, f"""
         SELECT *
           FROM {MANAGEMENT_ENVELOPES_RELATION}
@@ -656,7 +656,7 @@ def load_autotrader_desk_live_envelope_objects(
     *,
     user_id: int,
 ) -> list[Any]:
-    """Load live AutoTrader desk rows as read-only Trade-like objects."""
+    """Load live AutoTrader desk rows as read-only envelope-shaped objects."""
     rows = _rows(db, f"""
         SELECT *
           FROM {MANAGEMENT_ENVELOPES_RELATION}
@@ -894,7 +894,7 @@ def load_coinbase_orphan_adoption_candidates(
 def phase5b_parity_summary(db: Session) -> Phase5BParitySummary:
     """Return the Phase 5B read-model health counters.
 
-    Green state means every valid Trade row has a decision, every open broker
+    Green state means every valid management envelope has a decision, every open broker
     envelope has a position, and the joined read model has no broken semantic
     links. Corrupt legacy dust rows are excluded by the first counter's
     ``entry_price > 0 AND quantity > 0`` predicate.

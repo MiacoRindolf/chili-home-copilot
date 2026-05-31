@@ -709,3 +709,26 @@ risk/capital, and learning/reporting contracts alone.
 
 Report:
 `docs/STRATEGY/CC_REPORTS/2026-05-31_f-position-identity-phase-5l-i-orm-symbol-contract-audit.md`.
+
+## Position Identity Phase 5L-J - Private Helper ORM Surface (2026-05-31)
+
+Phase 5L-J reduced the low-risk private-helper legacy `Trade` symbol surface
+without touching broker/order/close/reconcile behavior, schema, public API
+fields, UI labels, or relation names.
+
+The `private_helper_type_only` contract group dropped from 10 files to 7, and
+the overall `orm_trade_symbol_compat` surface dropped from 96 files to 93.
+
+The removed entries were comment/docstring-only hits:
+`management_envelopes.py` used `Trade-like` wording for envelope-shaped reader
+objects, `rate_limiter.py` contained Coinbase's `Advanced Trade` product phrase,
+and `robinhood_options.py` described local position envelopes as `Trade rows`.
+
+Architect verdict: the remaining 7 private-helper entries are real
+compatibility exports or helper modules that accept/query/close live legacy ORM
+objects. Do not mechanically rename them. The next higher-leverage task is to
+reconcile live deployment source posture, because production is intentionally
+running from clean worktrees while the root checkout remains very dirty.
+
+Report:
+`docs/STRATEGY/CC_REPORTS/2026-05-31_f-position-identity-phase-5l-j-private-helper-orm-surface.md`.
