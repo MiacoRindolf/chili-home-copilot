@@ -620,7 +620,8 @@ def api_audit_export(
     import csv
     import io
 
-    from ...models.trading import ScanPattern, Trade, TradingExecutionEvent
+    from ...models.trading import ScanPattern, TradingExecutionEvent
+    from ...services.trading.management_envelopes import load_audit_export_envelope_rows
     from fastapi.responses import StreamingResponse
 
     ctx = get_identity_ctx(request, db)
@@ -629,30 +630,38 @@ def api_audit_export(
     start_dt = datetime.strptime(start, "%Y-%m-%d") if start else datetime(2020, 1, 1)
     end_dt = datetime.strptime(end, "%Y-%m-%d") if end else datetime.utcnow()
 
+    def _iso_or_none(value):
+        if value is None:
+            return None
+        if hasattr(value, "isoformat"):
+            return value.isoformat()
+        return value
+
     # Trades
-    trades = db.query(Trade).filter(
-        Trade.user_id == user_id,
-        Trade.entry_date >= start_dt,
-        Trade.entry_date <= end_dt,
-    ).order_by(Trade.entry_date).all()
+    trades = load_audit_export_envelope_rows(
+        db,
+        user_id=int(user_id),
+        start_dt=start_dt,
+        end_dt=end_dt,
+    )
 
     trade_rows = [
         {
-            "id": t.id,
-            "ticker": t.ticker,
-            "direction": t.direction,
-            "quantity": t.quantity,
-            "entry_price": t.entry_price,
-            "exit_price": t.exit_price,
-            "entry_date": t.entry_date.isoformat() if t.entry_date else None,
-            "exit_date": t.exit_date.isoformat() if t.exit_date else None,
-            "pnl": t.pnl,
-            "status": t.status,
-            "broker_source": getattr(t, "broker_source", None),
-            "tca_entry_slippage_bps": getattr(t, "tca_entry_slippage_bps", None),
-            "tca_exit_slippage_bps": getattr(t, "tca_exit_slippage_bps", None),
-            "scan_pattern_id": t.scan_pattern_id,
-            "pattern_tags": getattr(t, "pattern_tags", None),
+            "id": t.get("id"),
+            "ticker": t.get("ticker"),
+            "direction": t.get("direction"),
+            "quantity": t.get("quantity"),
+            "entry_price": t.get("entry_price"),
+            "exit_price": t.get("exit_price"),
+            "entry_date": _iso_or_none(t.get("entry_date")),
+            "exit_date": _iso_or_none(t.get("exit_date")),
+            "pnl": t.get("pnl"),
+            "status": t.get("status"),
+            "broker_source": t.get("broker_source"),
+            "tca_entry_slippage_bps": t.get("tca_entry_slippage_bps"),
+            "tca_exit_slippage_bps": t.get("tca_exit_slippage_bps"),
+            "scan_pattern_id": t.get("scan_pattern_id"),
+            "pattern_tags": t.get("pattern_tags"),
         }
         for t in trades
     ]

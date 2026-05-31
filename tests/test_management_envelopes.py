@@ -8,6 +8,7 @@ from app.services.trading.management_envelopes import (
     load_closed_envelope_execution_rows,
     load_closed_pattern_envelope_rows,
     load_closed_review_envelope_rows,
+    load_audit_export_envelope_rows,
     load_pattern_tagged_envelope_rows,
     load_recent_ticker_envelope_rows,
     summarize_closed_envelope_performance,
@@ -217,3 +218,24 @@ def test_pattern_tagged_envelope_rows_read_management_envelopes():
     assert "pattern_tags IS NOT NULL" in db.sql
     assert "ORDER BY entry_date DESC NULLS LAST, id DESC" in db.sql
     assert db.params == {"uid": 7, "limit": 5}
+
+def test_audit_export_envelope_rows_read_management_envelopes_with_export_fields():
+    start_dt = datetime(2026, 5, 1)
+    end_dt = datetime(2026, 6, 1)
+    db = _FakeDb(_RowsResult([{"id": 9, "ticker": "ABC"}]))
+
+    rows = load_audit_export_envelope_rows(
+        db,
+        user_id=7,
+        start_dt=start_dt,
+        end_dt=end_dt,
+    )
+
+    assert rows == [{"id": 9, "ticker": "ABC"}]
+    assert "FROM trading_management_envelopes" in db.sql
+    assert "trading_trades" not in db.sql
+    assert "tca_entry_slippage_bps" in db.sql
+    assert "tca_exit_slippage_bps" in db.sql
+    assert "pattern_tags" in db.sql
+    assert "ORDER BY entry_date ASC" in db.sql
+    assert db.params == {"uid": 7, "start_dt": start_dt, "end_dt": end_dt}
