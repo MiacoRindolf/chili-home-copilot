@@ -533,6 +533,41 @@ def load_net_edge_training_envelope_rows(
     ]
 
 
+def load_regime_scanner_heatmap_envelope_rows(
+    db: Session,
+    *,
+    since: datetime,
+) -> list[SimpleNamespace]:
+    """Load closed live envelope rows used by regime/scanner heatmaps."""
+    rows = _rows(
+        db,
+        f"""
+        SELECT
+            scan_pattern_id,
+            entry_date,
+            entry_price,
+            exit_price,
+            direction
+          FROM {MANAGEMENT_ENVELOPES_RELATION}
+         WHERE status = 'closed'
+           AND exit_date IS NOT NULL
+           AND exit_date >= :since
+           AND scan_pattern_id IS NOT NULL
+        """,
+        {"since": since},
+    )
+    return [
+        SimpleNamespace(
+            scan_pattern_id=row.get("scan_pattern_id"),
+            entry_date=row.get("entry_date"),
+            entry_price=row.get("entry_price"),
+            exit_price=row.get("exit_price"),
+            direction=row.get("direction"),
+        )
+        for row in rows
+    ]
+
+
 def fetch_synergy_retry_envelope_candidates(
     db: Session,
     *,

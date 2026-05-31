@@ -25,6 +25,7 @@ from sqlalchemy import Date, cast, func
 from sqlalchemy.orm import Session
 
 from ...config import settings
+from .management_envelopes import load_regime_scanner_heatmap_envelope_rows
 
 logger = logging.getLogger(__name__)
 
@@ -555,21 +556,12 @@ def build_regime_scanner_sharpe_heatmap(db: Session) -> dict[str, Any]:
     """30d realized Sharpe by regime × scanner (closed trades)."""
     from datetime import datetime as dt_module
 
-    from ...models.trading import RegimeSnapshot, Trade
+    from ...models.trading import RegimeSnapshot
     from .promotion_gate import SCANNER_BUCKETS, infer_scanner_bucket
 
     now = dt_module.utcnow()
     cutoff = now - timedelta(days=30)
-    trades = (
-        db.query(Trade)
-        .filter(
-            Trade.status == "closed",
-            Trade.exit_date.isnot(None),
-            Trade.exit_date >= cutoff,
-            Trade.scan_pattern_id.isnot(None),
-        )
-        .all()
-    )
+    trades = load_regime_scanner_heatmap_envelope_rows(db, since=cutoff)
     pattern_ids = {int(tr.scan_pattern_id) for tr in trades if tr.scan_pattern_id}
     patterns_by_id = _scan_patterns_by_id(db, pattern_ids)
     entry_dates = {
