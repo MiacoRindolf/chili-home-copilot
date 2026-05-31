@@ -678,6 +678,11 @@ def _get_cost_basis_from_fills(product_id: str, current_qty: float | None = None
     cached = _cache_get(f"cost_basis_{product_key}{qty_key}")
     if cached is not None:
         return cached
+    support = _coinbase_public_product_support(product_key)
+    if support is False:
+        _mark_coinbase_product_unavailable(product_key)
+        _cache_set(f"cost_basis_{product_key}{qty_key}", 0.0)
+        return 0.0
     client = _get_client()
     if not client:
         return 0.0
