@@ -2,7 +2,7 @@
 
 Why
 ---
-Robinhood REST caps us at ~60 req/min, Coinbase Advanced Trade private REST
+Robinhood REST caps us at ~60 req/min, Coinbase Advanced private REST
 is ~30 req/s. A reconciler retry storm (or a bug-induced tight loop around
 ``place_market_order``) could burn that budget and 429-lock the account for
 the rest of the session. We need a cheap in-process guard that fires BEFORE
