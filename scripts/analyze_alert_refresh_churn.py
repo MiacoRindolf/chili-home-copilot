@@ -29,6 +29,17 @@ from app.db import SessionLocal  # noqa: E402
 
 TARGET_WORK = ("recert_rescue_refresh", "exit_variant_refresh")
 TARGET_DIAGNOSTICS = ("recert_rescue_diagnostic", "exit_variant_diagnostic")
+RECERT_BLOCKER_ACTIONS = (
+    "complete_oos_recert_and_quality_refresh",
+    "inspect_recert_backtest_no_oos_evidence_keep_live_blocked",
+    "wait_for_recert_backtest_cooldown_keep_live_blocked",
+    "live_blocked_recert_debt_no_refresh",
+)
+RECERT_BLOCKER_REASONS = (
+    "recent_recert_backtest_cooldown",
+    "recert_backtest_refresh_already_open",
+    "no_recert_refresh_needed",
+)
 
 
 class DatabaseUnavailable(RuntimeError):
@@ -260,11 +271,10 @@ def _top_recert_rescue_blocker_rollups(hours: int, limit: int) -> list[dict]:
             AND e.event_type = 'recert_rescue_diagnostic'
             AND e.created_at >= now() - (:hours * interval '1 hour')
             AND COALESCE(e.payload->>'scan_pattern_id', '') ~ '^[0-9]+$'
-            AND COALESCE(e.payload->>'recommended_next_action', '') IN (
-              'complete_oos_recert_and_quality_refresh',
-              'inspect_recert_backtest_no_oos_evidence_keep_live_blocked',
-              'wait_for_recert_backtest_cooldown_keep_live_blocked',
-              'live_blocked_recert_debt_no_refresh'
+            AND (
+              COALESCE(e.payload->>'recommended_next_action', '') = ANY(:recert_actions)
+              OR COALESCE(e.payload #>> '{recert_backtest_refresh,reason}', '')
+                = ANY(:recert_reasons)
             )
         )
         SELECT
@@ -291,7 +301,12 @@ def _top_recert_rescue_blocker_rollups(hours: int, limit: int) -> list[dict]:
         ORDER BY blocker_diagnostics DESC, last_seen DESC
         LIMIT :limit
         """,
-        {"hours": int(hours), "limit": int(limit)},
+        {
+            "hours": int(hours),
+            "limit": int(limit),
+            "recert_actions": list(RECERT_BLOCKER_ACTIONS),
+            "recert_reasons": list(RECERT_BLOCKER_REASONS),
+        },
     )
 
 
@@ -450,10 +465,10 @@ def _open_recert_work_with_recent_blocker_diagnostic(hours: int, limit: int) -> 
             AND event_type = 'recert_rescue_diagnostic'
             AND created_at >= now() - (:hours * interval '1 hour')
             AND COALESCE(payload->>'scan_pattern_id', '') ~ '^[0-9]+$'
-            AND COALESCE(payload->>'recommended_next_action', '') IN (
-              'inspect_recert_backtest_no_oos_evidence_keep_live_blocked',
-              'wait_for_recert_backtest_cooldown_keep_live_blocked',
-              'live_blocked_recert_debt_no_refresh'
+            AND (
+              COALESCE(payload->>'recommended_next_action', '') = ANY(:recert_actions)
+              OR COALESCE(payload #>> '{recert_backtest_refresh,reason}', '')
+                = ANY(:recert_reasons)
             )
         )
         SELECT DISTINCT ON (w.id)
@@ -476,7 +491,12 @@ def _open_recert_work_with_recent_blocker_diagnostic(hours: int, limit: int) -> 
         ORDER BY w.id, d.created_at DESC, d.id DESC
         LIMIT :limit
         """,
-        {"hours": int(hours), "limit": int(limit)},
+        {
+            "hours": int(hours),
+            "limit": int(limit),
+            "recert_actions": list(RECERT_BLOCKER_ACTIONS),
+            "recert_reasons": list(RECERT_BLOCKER_REASONS),
+        },
     )
 
 

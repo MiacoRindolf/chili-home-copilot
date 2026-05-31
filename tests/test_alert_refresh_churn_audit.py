@@ -312,10 +312,24 @@ def test_top_recert_rescue_blocker_rollups_fold_repeated_actions(monkeypatch):
     assert "r.recert_status" in sql
     assert "r.next_action" in sql
     assert "r.source" in sql
-    assert "complete_oos_recert_and_quality_refresh" in sql
-    assert "wait_for_recert_backtest_cooldown_keep_live_blocked" in sql
+    assert "recommended_next_action" in sql
+    assert "recert_backtest_refresh,reason" in sql
     assert "blocker_diagnostics" in sql
-    assert captured["params"] == {"hours": 5, "limit": 8}
+    assert captured["params"] == {
+        "hours": 5,
+        "limit": 8,
+        "recert_actions": [
+            "complete_oos_recert_and_quality_refresh",
+            "inspect_recert_backtest_no_oos_evidence_keep_live_blocked",
+            "wait_for_recert_backtest_cooldown_keep_live_blocked",
+            "live_blocked_recert_debt_no_refresh",
+        ],
+        "recert_reasons": [
+            "recent_recert_backtest_cooldown",
+            "recert_backtest_refresh_already_open",
+            "no_recert_refresh_needed",
+        ],
+    }
 
 
 def test_top_recert_rescue_action_rollups_include_run_refresh_actions(monkeypatch):
@@ -358,9 +372,23 @@ def test_open_recert_query_reports_wait_or_inspect_actions(monkeypatch):
     sql = str(captured["sql"])
     assert "event_type = 'recert_rescue_refresh'" in sql
     assert "event_type = 'recert_rescue_diagnostic'" in sql
-    assert "inspect_recert_backtest_no_oos_evidence_keep_live_blocked" in sql
-    assert "wait_for_recert_backtest_cooldown_keep_live_blocked" in sql
-    assert captured["params"] == {"hours": 4, "limit": 9}
+    assert "recommended_next_action" in sql
+    assert "recert_backtest_refresh,reason" in sql
+    assert captured["params"] == {
+        "hours": 4,
+        "limit": 9,
+        "recert_actions": [
+            "complete_oos_recert_and_quality_refresh",
+            "inspect_recert_backtest_no_oos_evidence_keep_live_blocked",
+            "wait_for_recert_backtest_cooldown_keep_live_blocked",
+            "live_blocked_recert_debt_no_refresh",
+        ],
+        "recert_reasons": [
+            "recent_recert_backtest_cooldown",
+            "recert_backtest_refresh_already_open",
+            "no_recert_refresh_needed",
+        ],
+    }
 
 
 def test_duplicate_open_refresh_work_groups_refresh_churn(monkeypatch):
