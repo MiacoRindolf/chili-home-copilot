@@ -169,7 +169,12 @@ def load_stop_decision_envelope_rows(
     trade_id: int | None,
     limit: int,
 ) -> list[dict[str, Any]]:
-    """Load recent stop-decision rows through management envelopes."""
+    """Load recent stop-decision rows through management envelopes.
+
+    The trade-specific path keeps the existing trade-led index useful. The
+    all-trades path scopes envelopes by authenticated user first, then probes
+    recent decisions per envelope before applying the final global ordering.
+    """
     limit_n = max(1, min(int(limit or 50), 200))
     params: dict[str, Any] = {"uid": user_id, "limit": limit_n}
     if trade_id is not None:
