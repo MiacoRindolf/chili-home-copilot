@@ -1,22 +1,22 @@
-# NEXT_TASK: f-phase5o-stale-promoted-sweep-envelope-audit
+# NEXT_TASK: f-phase5o-brain-action-handlers-envelope-audit
 
 STATUS: QUEUED
 
 ## Goal
 
-Audit `app/services/trading/cron_jobs/stale_promoted_sweep.py`, the next
-Phase 5O adapter candidate after `momentum_neural/live_runner.py` was closed as
-a false-positive source token cleanup.
+Audit `app/services/trading/brain_neural_mesh/action_handlers.py`, the next
+Phase 5O adapter candidate after `stale_promoted_sweep.py` was reclassified as
+a lifecycle-sensitive future rename blocker.
 
 ## Why This Is Next
 
 The remaining Phase 5O adapter candidates are increasingly close to lifecycle
-and live decision surfaces. `stale_promoted_sweep.py` is currently classified as
-`learning_research_reporting / adapter_candidate`, but stale/promoted lifecycle
-sweeps can affect pattern eligibility. It should receive an evidence-first audit
-before any rename/conversion pressure.
+and live decision surfaces. `brain_neural_mesh/action_handlers.py` is currently
+classified as `learning_research_reporting / adapter_candidate`, but action
+handler code can easily sit near live signal or decision-state propagation. It
+should receive an evidence-first audit before any rename/conversion pressure.
 
-Current surface after the momentum live-runner false-positive closeout:
+Current surface after the stale-promoted sweep audit:
 
 ```text
 orm_trade_symbol_compat = 66
@@ -24,17 +24,17 @@ learning_research_reporting = 7
 live_action_broker_reconcile = 19
 private_helper_type_only = 5
 risk_capital_gate = 21
-adapter_candidate = 9
-future_rename_blocker = 41
+adapter_candidate = 8
+future_rename_blocker = 42
 raw reader bucket = 0
 ```
 
 ## Scope
 
 - Classify every legacy `Trade` ORM reference in
-  `cron_jobs/stale_promoted_sweep.py`.
-- Determine whether the references are passive learning/reporting reads,
-  lifecycle demotion/promotion inputs, live candidate selection, or
+  `brain_neural_mesh/action_handlers.py`.
+- Determine whether the references are passive learning/reporting reads, neural
+  mesh state inspection, live signal/action propagation, lifecycle inputs, or
   action-adjacent runtime state.
 - If passive and covered by tests, add a small safe helper/adapter conversion.
 - If behavior-bearing, add read-only parity evidence and reclassify it as a

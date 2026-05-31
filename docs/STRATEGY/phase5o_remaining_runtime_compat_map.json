@@ -2,8 +2,8 @@
   "generated_from": "scripts/analyze_phase5_remaining_trade_refs.py --json",
   "orm_trade_symbol_compat_count": 66,
   "phase5o_bucket_counts": {
-    "adapter_candidate": 9,
-    "future_rename_blocker": 41,
+    "adapter_candidate": 8,
+    "future_rename_blocker": 42,
     "leave_alone": 16
   },
   "contract_group_counts": {
@@ -220,9 +220,9 @@
     {
       "path": "app/services/trading/cron_jobs/stale_promoted_sweep.py",
       "contract_group": "learning_research_reporting",
-      "phase5o_bucket": "adapter_candidate",
-      "phase5o_subtype": "read_only_learning_reporting",
-      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "lifecycle_decay_path",
+      "rationale": "Lifecycle-sensitive stale-promotion sweep: reads latest closed live management envelopes and may demote promoted patterns through the realized-EV gate. Requires parity evidence and a dedicated behavior-preserving conversion before any ORM surface change."
     },
     {
       "path": "app/services/trading/crypto/exit_monitor.py",
