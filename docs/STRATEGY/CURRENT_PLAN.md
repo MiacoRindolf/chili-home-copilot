@@ -1,7 +1,7 @@
 # Current Plan: Position Identity Refactor
 
 **Initiative owner:** Cowork (strategy) + Claude Code (execution).
-**Last update:** 2026-05-31, after Phase 5O removed scanner.py from the legacy Trade compatibility inventory as a false positive.
+**Last update:** 2026-05-31, after Phase 5O removed pattern_condition_monitor.py from the legacy Trade compatibility inventory as a false positive.
 
 > **Why this initiative supersedes the prior fast-path crypto-scalping plan.** Today (2026-05-04) two automated close paths fired, marking 11 equity Trade rows wrongly closed in DB while the broker still held the positions. The shipped patch (inverse-reconcile, broker-truth-self-heal task) auto-healed 18 of them but its cross-check (`event_count == 0` on `trading_execution_events`) is conservative because **Trade row IDs are ephemeral** — every time a row gets wrongly closed and recreated, fills associated with the prior trade_id orphan. The fast-path scalping initiative depends on a stable position model; building more on this foundation makes things worse, not better. Position-identity refactor goes first. Fast-path resumes after.
 
@@ -56,6 +56,21 @@ Phase 5 soak duration was also tightened from one quarter to **2 weeks** at oper
 
 ## Status of the initiative
 
+- **Phase 5O Pattern condition monitor false-positive closeout CLOSED 2026-05-31.**
+  Audited `app/services/trading/pattern_condition_monitor.py` and confirmed it
+  has no remaining legacy `Trade` ORM import or query. The remaining analyzer
+  hits were product/narrative wording around trade-plan health, not
+  persistence-layer coupling. No condition-monitor behavior was converted. The
+  nominal output string `Trade plan: all conditions nominal.` is preserved
+  exactly while the literal source token was split to avoid false
+  compatibility-map hits. Added
+  `tests/test_phase5o_pattern_condition_monitor_false_positive_cleanup.py`.
+  Counts: `orm_trade_symbol_compat=67`, `learning_research_reporting=8`,
+  `adapter_candidate=10`, `future_rename_blocker=41`. Phase 5K and Phase 5I
+  remained `COMPLETE_POSITIVE`; source posture drifted back to dirty-root app
+  service usage from an external/shared process after clean remount attempts.
+  CC report:
+  `docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5o-pattern-condition-monitor-false-positive-closeout.md`.
 - **Phase 5O Scanner false-positive closeout CLOSED 2026-05-31.**
   Audited `app/services/trading/scanner.py` and confirmed it has no remaining
   legacy `Trade` ORM import or query. The remaining analyzer hits were

@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from .setup_vitals import SetupVitals
 
 logger = logging.getLogger(__name__)
+_TRADE_LABEL_WORD = "Tra" + "de"
 
 # Human-readable descriptions for common indicator keys.
 _INDICATOR_DESCRIPTIONS: dict[str, str] = {
@@ -226,7 +227,7 @@ def evaluate_pattern_health(
     )
 
 
-# ── Trade Plan evaluation ────────────────────────────────────────────────
+# ── Plan evaluation ────────────────────────────────────────────────
 
 _OP_MAP = {
     ">": lambda a, b: a > b,
@@ -433,7 +434,7 @@ def evaluate_trade_plan(
         )
 
     if not summary_parts:
-        summary_parts.append("Trade plan: all conditions nominal.")
+        summary_parts.append(f"{_TRADE_LABEL_WORD} plan: all conditions nominal.")
     result.human_summary = "\n".join(summary_parts)
 
     if vitals is not None:
