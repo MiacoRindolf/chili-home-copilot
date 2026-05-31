@@ -554,6 +554,23 @@ def load_open_stop_position_envelope_objects(
     return [_envelope_runtime_object(row) for row in rows]
 
 
+def load_open_active_setup_envelope_objects(
+    db: Session,
+    *,
+    user_id: int | None,
+) -> list[Any]:
+    """Load active setup card candidates as read-only Trade-like objects."""
+    rows = _rows(db, f"""
+        SELECT *
+          FROM {MANAGEMENT_ENVELOPES_RELATION}
+         WHERE user_id IS NOT DISTINCT FROM :uid
+           AND status = 'open'
+           AND entry_price > 0
+         ORDER BY entry_date DESC, id DESC
+    """, {"uid": user_id})
+    return [_envelope_runtime_object(row) for row in rows]
+
+
 def load_stop_decision_envelope_rows(
     db: Session,
     *,

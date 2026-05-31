@@ -1,62 +1,52 @@
-# NEXT_TASK: f-position-identity-phase-5aa-b-active-setup-endpoint-conversion
+# NEXT_TASK: f-position-identity-phase-5ab-autotrader-desk-contract-audit
 
 STATUS: PENDING
 
 ## Goal
 
-Convert the active setup card endpoint's loader to use runtime management-envelope objects from `trading_management_envelopes`, using the Phase 5AA-A parity probe as the gate.
+Audit the AutoTrader desk position-list runtime object contract before any conversion away from direct `Trade` ORM objects.
 
-## Why This Is Safe Now
+## Why This Comes Next
 
-Phase 5AA-A compared current `Trade` ORM runtime objects with candidate envelope runtime objects through the same active setup serializer chain. Live result was `COMPLETE_POSITIVE`:
+The active setup display path is now converted and verified. The remaining user-facing desk surface in `app/services/trading/autotrader_desk.py` is riskier than a passive read: it combines open position display with broker-truth overlays, option/crypto quote routing, position overrides, controls metadata, and close capability flags.
 
-- 5 old setups = 5 new setups
-- 0 suppressed-stale drift
-- matched=true
-- `trading_management_envelopes` is the physical table (`relkind='r'`)
-- `trading_trades` remains the compatibility view (`relkind='v'`)
+Do not convert it blindly.
 
-## Required Work Shape
+## Recommended Work Shape
 
-1. Add or reuse a helper that loads open active-setup runtime objects from `trading_management_envelopes`.
-2. Convert only `api_monitor_active` / `_monitored_live_trades_with_suppressed` loader plumbing to use the proven helper.
-3. Keep the serializer and helper chain intact:
-   - broker-stale filtering
-   - broker-position truth overlays
-   - option detection
-   - broker/market quote routing
-   - breakout-alert and pattern enrichment
-   - monitor decision enrichment
-   - execution-state metadata
-4. Re-run the Phase 5AA-A parity probe after conversion.
+1. Inspect `list_pattern_linked_open_positions(...)` in `app/services/trading/autotrader_desk.py`.
+2. Classify each field in its returned payload:
+   - passive display field
+   - broker-truth/risk display field
+   - override-control field
+   - close/sell-control field
+   - public API/UI compatibility field
+3. Write a read-only old-vs-new runtime-adapter probe only if the display contract can be isolated from the action/control contract.
+4. If parity is green, queue a later narrow conversion. If not, document blockers.
 
 ## Hard Guardrails
 
-- Do not touch `api_monitor_run`.
-- Do not touch sell/close behavior.
-- Do not touch stop execution/evaluation/dispatch.
+- Do not touch close/sell behavior.
 - Do not touch broker/order/reconcile/PDT/capital-gate behavior.
+- Do not touch override mutation behavior.
 - Do not rename `/trades`, `trade_id`, schema classes, UI labels, or response fields.
 - Do not drop or rewrite the `trading_trades` compatibility view.
 
 ## Verification
 
-Run:
+At minimum:
 
 ```powershell
-python -m py_compile app\routers\trading_sub\monitor.py app\services\trading\management_envelopes.py
+python -m py_compile app\services\trading\autotrader_desk.py
 $env:TEST_DATABASE_URL='postgresql://chili:chili@localhost:5433/chili_test'
 $env:DATABASE_URL=$env:TEST_DATABASE_URL
-python -m pytest tests\test_monitor_api_execution_state.py tests\test_phase5aa_active_setup_runtime_adapter_probe.py tests\test_phase5_remaining_trade_refs.py tests\test_phase5l_reader_allowlist.py -q
-$env:DATABASE_URL='postgresql://chili:chili@localhost:5433/chili'
-python scripts\d-phase5aa-active-setup-runtime-adapter-probe.py
+python -m pytest tests\test_autotrader_desk_api.py tests\test_phase5_remaining_trade_refs.py tests\test_phase5l_reader_allowlist.py -q
 python scripts\analyze_phase5_remaining_trade_refs.py --bucket orm_trade_symbol_compat --fail-on-unexpected-runtime
 ```
 
 ## Exit Criteria
 
-- Active setup endpoint behavior is unchanged.
-- Phase 5AA-A live probe remains `COMPLETE_POSITIVE`.
-- Focused tests pass.
+- Audit report identifies exactly which desk fields are safe display reads versus control/action contracts.
+- No behavior changes unless a dedicated parity probe proves safety.
 - Analyzer raw reader bucket remains 0.
 

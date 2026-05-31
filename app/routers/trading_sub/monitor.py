@@ -46,6 +46,7 @@ from ...services.trading.edge_reliability import (
 from ...services.trading.management_envelopes import (
     load_imminent_alert_actioned_envelope_ids,
     load_monitor_decision_envelope_rows,
+    load_open_active_setup_envelope_objects,
 )
 from ...services.trading.pattern_position_monitor import run_pattern_position_monitor_for_trades
 from ...services.trading.robinhood_exit_execution import describe_trade_execution_state
@@ -114,6 +115,15 @@ def _monitored_live_trades_with_suppressed(
         .order_by(Trade.entry_date.desc())
         .all()
     )
+    return filter_broker_stale_open_trades(db, rows)
+
+
+def _monitored_active_setup_envelopes_with_suppressed(
+    db: Session,
+    user_id: int | None,
+) -> tuple[list[Any], list[dict[str, Any]]]:
+    """Return active setup card candidates from the management-envelope table."""
+    rows = load_open_active_setup_envelope_objects(db, user_id=user_id)
     return filter_broker_stale_open_trades(db, rows)
 
 
@@ -660,7 +670,7 @@ def api_monitor_active(
     ctx = get_identity_ctx(request, db)
     user_id = ctx["user_id"]
 
-    trades, suppressed_stale_trades = _monitored_live_trades_with_suppressed(
+    trades, suppressed_stale_trades = _monitored_active_setup_envelopes_with_suppressed(
         db, user_id,
     )
     if not trades:
