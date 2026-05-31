@@ -34,6 +34,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+from functools import lru_cache
 from typing import Any, Optional
 
 from sqlalchemy import text
@@ -50,6 +51,8 @@ _VERB_KEYWORDS = (
     "refactor", "introduce", "support", "expose", "log", "audit",
     "migrate", "deprecate", "guard", "validate", "test",
 )
+_DIFF_NEW_FILE_RE = re.compile(r"^\+\+\+\s+b/([^\s\n]+)", re.MULTILINE)
+_DIFF_OLD_FILE_RE = re.compile(r"^---\s+a/([^\s\n]+)", re.MULTILINE)
 
 
 @dataclass
@@ -62,6 +65,7 @@ class _Bucket:
     sample_llm_call_ids: list[int]
 
 
+@lru_cache(maxsize=4096)
 def _file_path_to_glob(path: str) -> str:
     """Generalize a concrete path into a coarse glob.
 
@@ -104,11 +108,11 @@ def _diff_files(diffs_json: Optional[str]) -> list[str]:
     for d in diffs:
         if not isinstance(d, str):
             continue
-        m = re.search(r"^\+\+\+\s+b/([^\s\n]+)", d, re.MULTILINE)
+        m = _DIFF_NEW_FILE_RE.search(d)
         if m:
             out.append(m.group(1))
             continue
-        m = re.search(r"^---\s+a/([^\s\n]+)", d, re.MULTILINE)
+        m = _DIFF_OLD_FILE_RE.search(d)
         if m:
             out.append(m.group(1))
     return out
