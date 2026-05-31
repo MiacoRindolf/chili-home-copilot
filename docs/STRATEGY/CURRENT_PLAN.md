@@ -1,7 +1,7 @@
 # Current Plan: Position Identity Refactor
 
 **Initiative owner:** Cowork (strategy) + Claude Code (execution).
-**Last update:** 2026-05-31, after Phase 5O reclassified pattern_imminent_alerts.py as a live selection gate and added read-only parity evidence.
+**Last update:** 2026-05-31, after Phase 5O removed scanner.py from the legacy Trade compatibility inventory as a false positive.
 
 > **Why this initiative supersedes the prior fast-path crypto-scalping plan.** Today (2026-05-04) two automated close paths fired, marking 11 equity Trade rows wrongly closed in DB while the broker still held the positions. The shipped patch (inverse-reconcile, broker-truth-self-heal task) auto-healed 18 of them but its cross-check (`event_count == 0` on `trading_execution_events`) is conservative because **Trade row IDs are ephemeral** — every time a row gets wrongly closed and recreated, fills associated with the prior trade_id orphan. The fast-path scalping initiative depends on a stable position model; building more on this foundation makes things worse, not better. Position-identity refactor goes first. Fast-path resumes after.
 
@@ -56,6 +56,18 @@ Phase 5 soak duration was also tightened from one quarter to **2 weeks** at oper
 
 ## Status of the initiative
 
+- **Phase 5O Scanner false-positive closeout CLOSED 2026-05-31.**
+  Audited `app/services/trading/scanner.py` and confirmed it has no remaining
+  legacy `Trade` ORM import or query. The remaining analyzer hits were
+  user-facing label/comment literals such as `Day Trade`, `Swing Trade`, and
+  `Day Trade Momentum`. No scanner behavior was converted. The runtime labels
+  are preserved exactly while the source tokens were split to avoid false
+  compatibility-map hits. Strengthened
+  `tests/test_phase5z_scanner_false_positive_cleanup.py` to assert scanner has
+  no bare `Trade` source token and that the labels remain unchanged. Counts:
+  `orm_trade_symbol_compat=68`, `learning_research_reporting=9`,
+  `adapter_candidate=11`, `future_rename_blocker=41`. CC report:
+  `docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5o-scanner-false-positive-closeout.md`.
 - **Phase 5O Pattern imminent alerts envelope audit CLOSED 2026-05-31.**
   Audited `app/services/trading/pattern_imminent_alerts.py` and found it is a
   live selection gate, not passive learning/reporting. Its

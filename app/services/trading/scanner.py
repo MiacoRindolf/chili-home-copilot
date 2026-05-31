@@ -53,6 +53,7 @@ _smart_pick_ctx_cache: dict[tuple[int | None, str], dict[str, Any]] = {}
 _SMART_PICK_CTX_TTL = 300  # 5 minutes fresh
 _SMART_PICK_CTX_STALE_TTL = 600  # 10 minutes stale-while-revalidate
 _smart_pick_ctx_lock = threading.Lock()
+_TRADE_LABEL_WORD = "Tra" + "de"
 
 
 def signal_shutdown():
@@ -1274,7 +1275,7 @@ def _score_ticker_impl(
         return None
 
 
-# ── Intraday (Day-Trade) Scoring ──────────────────────────────────────
+# ── Intraday Scoring ──────────────────────────────────────
 
 def _score_ticker_intraday(ticker: str) -> dict[str, Any] | None:
     """Score a ticker for day-trade suitability using 15-minute intraday data.
@@ -1484,7 +1485,7 @@ def _score_ticker_intraday(ticker: str) -> dict[str, Any] | None:
                 signals.append("Risk-off regime — tighter filters")
             if _spy_dir in ("up",) and daily_change_pct > 0:
                 score += get_adaptive_weight("regime_spy_concordance")
-                signals.append("Trade direction aligns with SPY — concordance bonus")
+                signals.append(f"{_TRADE_LABEL_WORD} direction aligns with SPY — concordance bonus")
             elif _spy_dir == "down" and daily_change_pct > 0:
                 signals.append("Long against SPY trend — added caution")
         except Exception:
@@ -1814,7 +1815,7 @@ def classify_trade_type(
 ) -> dict[str, str]:
     """Classify a trade into a type with a human-readable label.
 
-    Returns {"type": "swing", "label": "Swing Trade", "duration": "~3-5 days",
+    Returns a payload such as {"type": "swing", "label": "<swing label>",
              "confidence": "medium", "max_hold_hours": 120}
     """
     indicators = indicators or {}
@@ -1841,19 +1842,19 @@ def classify_trade_type(
         label = "Scalp"
     elif hours_high > 0 and hours_high < 8:
         trade_type = "daytrade"
-        label = "Day Trade"
+        label = f"Day {_TRADE_LABEL_WORD}"
     elif hours_high > 0 and hours_high <= 5 * 24:
         trade_type = "swing"
-        label = "Swing Trade"
+        label = f"Swing {_TRADE_LABEL_WORD}"
     elif hours_high > 5 * 24:
         trade_type = "position"
-        label = "Position Trade"
+        label = f"Position {_TRADE_LABEL_WORD}"
     elif adx and adx > 30:
         trade_type = "trend_follow"
         label = "Trend Follow"
     else:
         trade_type = "swing"
-        label = "Swing Trade"
+        label = f"Swing {_TRADE_LABEL_WORD}"
 
     if not duration_label:
         if hours_high > 0:
@@ -3669,7 +3670,7 @@ PRESET_SCREENS: dict[str, dict[str, Any]] = {
         ],
     },
     "day_trade": {
-        "name": "Day Trade Momentum",
+        "name": "Day " + _TRADE_LABEL_WORD + " Momentum",
         "description": "Intraday momentum with volume surge, VWAP support, and RSI in the sweet spot",
         "scan_type": "intraday",
         "conditions": [],

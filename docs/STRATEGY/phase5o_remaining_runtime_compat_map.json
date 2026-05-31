@@ -1,13 +1,13 @@
 {
   "generated_from": "scripts/analyze_phase5_remaining_trade_refs.py --json",
-  "orm_trade_symbol_compat_count": 69,
+  "orm_trade_symbol_compat_count": 68,
   "phase5o_bucket_counts": {
-    "adapter_candidate": 12,
+    "adapter_candidate": 11,
     "future_rename_blocker": 41,
     "leave_alone": 16
   },
   "contract_group_counts": {
-    "learning_research_reporting": 10,
+    "learning_research_reporting": 9,
     "live_action_broker_reconcile": 19,
     "private_helper_type_only": 5,
     "public_ui_schema_contract": 14,
@@ -419,13 +419,6 @@
       "phase5o_bucket": "future_rename_blocker",
       "phase5o_subtype": "live_broker_reconcile_path",
       "rationale": "Touches broker, close, stop, reconcile, or position-truth behavior; requires runtime probes before change."
-    },
-    {
-      "path": "app/services/trading/scanner.py",
-      "contract_group": "learning_research_reporting",
-      "phase5o_bucket": "adapter_candidate",
-      "phase5o_subtype": "read_only_learning_reporting",
-      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
     },
     {
       "path": "app/services/trading/stop_engine.py",
