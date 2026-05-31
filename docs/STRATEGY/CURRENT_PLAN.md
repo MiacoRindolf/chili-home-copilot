@@ -1,7 +1,7 @@
 # Current Plan: Position Identity Refactor
 
 **Initiative owner:** Cowork (strategy) + Claude Code (execution).
-**Last update:** 2026-05-30, after Phase 5Z-B converted stop-position reads.
+**Last update:** 2026-05-31, after Phase 5X converted setup-vitals ticker discovery.
 
 > **Why this initiative supersedes the prior fast-path crypto-scalping plan.** Today (2026-05-04) two automated close paths fired, marking 11 equity Trade rows wrongly closed in DB while the broker still held the positions. The shipped patch (inverse-reconcile, broker-truth-self-heal task) auto-healed 18 of them but its cross-check (`event_count == 0` on `trading_execution_events`) is conservative because **Trade row IDs are ephemeral** — every time a row gets wrongly closed and recreated, fills associated with the prior trade_id orphan. The fast-path scalping initiative depends on a stable position model; building more on this foundation makes things worse, not better. Position-identity refactor goes first. Fast-path resumes after.
 
@@ -56,6 +56,17 @@ Phase 5 soak duration was also tightened from one quarter to **2 weeks** at oper
 
 ## Status of the initiative
 
+- **Phase 5X setup-vitals ticker reader conversion SHIPPED 2026-05-31.** Added
+  `load_open_setup_vitals_envelope_tickers(...)` and converted
+  `setup_vitals.monitored_tickers_for_vitals(...)` off direct `Trade` ORM reads
+  for its open-position ticker half. The pending breakout-alert half remains
+  unchanged. This is a passive market-data refresh selector only; no
+  broker/order/close/reconcile/risk/capital or lifecycle behavior changed.
+  Verification: py_compile passed, JSON sanity passed, focused analyzer stayed
+  green, and focused tests passed (`41 passed`). Compatibility counts moved to
+  `orm_trade_symbol_compat=73`, `adapter_candidate=24`,
+  `learning_research_reporting=19`. CC report:
+  `docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5x-setup-vitals-envelope-tickers.md`.
 - **Design doc shipped 2026-05-04.** Locked at `docs/DESIGN/POSITION_IDENTITY.md`. Six phases enumerated with per-phase exit criteria.
 - **Phase 1 shipped 2026-05-04.** Migration 224 created `trading_positions` + `trading_position_events`; `sync_positions_to_db` writes shadow-mode (try/except wrapped, never raises, zero readers depend on it); backfill walked both `trading_trades` and `trading_paper_trades`. Audit query post-deploy: 19/19 parity, 0 discrepancies.
 - **Phase 1 1-week soak passed.** Closed 2026-05-11. GRT-USD's 13-cycle close/reopen pattern surfaced as the marquee evidence for why position-identity is needed.

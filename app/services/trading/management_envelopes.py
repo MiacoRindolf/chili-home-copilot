@@ -145,6 +145,26 @@ def load_recent_management_envelope_tickers_for_user(
     return [str(row["ticker"]).upper() for row in rows if row.get("ticker")]
 
 
+def load_open_setup_vitals_envelope_tickers(db: Session) -> list[str]:
+    """Return open envelope tickers that need setup-vitals refreshes."""
+    rows = _rows(
+        db,
+        f"""
+        SELECT DISTINCT UPPER(ticker) AS ticker
+          FROM {MANAGEMENT_ENVELOPES_RELATION}
+         WHERE status = 'open'
+           AND ticker IS NOT NULL
+           AND ticker <> ''
+         ORDER BY UPPER(ticker)
+        """,
+    )
+    return [
+        str(row["ticker"]).strip().upper()
+        for row in rows
+        if row.get("ticker")
+    ]
+
+
 def tca_summary_by_ticker_from_management_envelopes(
     db: Session,
     user_id: int | None,

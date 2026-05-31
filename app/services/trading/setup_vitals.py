@@ -16,6 +16,8 @@ import numpy as np
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
+from .management_envelopes import load_open_setup_vitals_envelope_tickers
+
 logger = logging.getLogger(__name__)
 
 SNAPSHOT_LOOKBACK = 10  # marker-q2j
@@ -476,11 +478,11 @@ def refresh_ticker_vitals_batch(
 
 def monitored_tickers_for_vitals(db: Session) -> list[str]:
     """Tickers with open trades or pending breakout alerts worth refreshing."""
-    from ...models.trading import BreakoutAlert, Trade
+    from ...models.trading import BreakoutAlert
 
     tickers: set[str] = set()
     try:
-        for (t,) in db.query(Trade.ticker).filter(Trade.status == "open").distinct():
+        for t in load_open_setup_vitals_envelope_tickers(db):
             if t:
                 tickers.add(str(t).strip().upper())
     except Exception:
