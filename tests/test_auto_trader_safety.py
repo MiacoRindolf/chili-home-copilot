@@ -1361,6 +1361,55 @@ def test_recert_signal_fastlane_respects_recent_recert_completion_diagnostic(mon
     assert out["blocker_next_action"] == "complete_oos_recert_and_quality_refresh"
 
 
+def test_recert_signal_fastlane_blocker_is_asset_sliced(monkeypatch):
+    settings = _minimal_settings(1)
+    settings.brain_work_cash_deployment_noop_cooldown_minutes = 360
+    monkeypatch.setattr(at_mod, "settings", settings)
+
+    class _Query:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def order_by(self, *args, **kwargs):
+            return self
+
+        def limit(self, value):
+            assert value == 50
+            return self
+
+        def all(self):
+            return [
+                SimpleNamespace(
+                    id=18822,
+                    payload={
+                        "source": "recert_rescue_refresh",
+                        "scan_pattern_id": 1260,
+                        "asset_class": "crypto",
+                        "recert_rescue_status": "soft_blocked",
+                        "recommended_next_action": (
+                            "complete_oos_recert_and_quality_refresh"
+                        ),
+                    },
+                )
+            ]
+
+    db = SimpleNamespace(query=lambda model: _Query())
+
+    assert at_mod._recent_recert_rescue_fastlane_blocker(
+        db,
+        pattern_id=1260,
+        asset_class="crypto",
+    )
+    assert (
+        at_mod._recent_recert_rescue_fastlane_blocker(
+            db,
+            pattern_id=1260,
+            asset_class="stock",
+        )
+        is None
+    )
+
+
 def test_shadow_stock_fastlane_boosts_pattern_for_positive_edge(monkeypatch):
     settings = _minimal_settings(1)
     monkeypatch.setattr(at_mod, "settings", settings)

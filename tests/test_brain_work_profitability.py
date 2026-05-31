@@ -15,6 +15,9 @@ from app.services.trading.edge_reliability import (
     RECERT_RESCUE_DIAGNOSTIC,
     RECERT_RESCUE_REFRESH,
 )
+from app.services.trading.recert_rescue_policy import (
+    recert_rescue_diagnostic_matches_asset,
+)
 
 
 def test_exit_variant_refresh_fast_skips_negative_ev_without_learning(monkeypatch) -> None:
@@ -149,7 +152,8 @@ def test_edge_reliability_refresh_skips_recent_blocked_recert_rescue(monkeypatch
     monkeypatch.setattr(
         prof_mod,
         "_recent_blocked_recert_rescue_diagnostic",
-        lambda _db, *, scan_pattern_id: scan_pattern_id == 537,
+        lambda _db, *, scan_pattern_id, asset_class=None: scan_pattern_id == 537
+        and asset_class == "crypto",
     )
 
     ev = SimpleNamespace(id=903, payload={"scan_pattern_id": 537, "window_days": 30})
@@ -195,6 +199,73 @@ def test_recent_blocked_recert_rescue_diagnostic_blocks_completion_action(
     assert _recent_blocked_recert_rescue_diagnostic(db, scan_pattern_id=1260) is True
 
 
+def test_recent_blocked_recert_rescue_diagnostic_respects_asset_slice(
+    monkeypatch,
+) -> None:
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360)
+
+    class _Query:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def order_by(self, *args, **kwargs):
+            return self
+
+        def limit(self, value):
+            assert value == 20
+            return self
+
+        def all(self):
+            return [
+                SimpleNamespace(
+                    payload={
+                        "scan_pattern_id": 1260,
+                        "asset_class": "crypto",
+                        "recommended_next_action": (
+                            "complete_oos_recert_and_quality_refresh"
+                        ),
+                        "recert_rescue_status": "soft_blocked",
+                    },
+                )
+            ]
+
+    db = SimpleNamespace(query=lambda model: _Query())
+
+    assert (
+        _recent_blocked_recert_rescue_diagnostic(
+            db,
+            scan_pattern_id=1260,
+            asset_class="crypto",
+        )
+        is True
+    )
+    assert (
+        _recent_blocked_recert_rescue_diagnostic(
+            db,
+            scan_pattern_id=1260,
+            asset_class="stock",
+        )
+        is False
+    )
+
+
+def test_recert_rescue_diagnostic_asset_match_preserves_legacy_blockers() -> None:
+    assert recert_rescue_diagnostic_matches_asset(
+        {"recommended_next_action": "complete_oos_recert_and_quality_refresh"},
+        asset_class="stock",
+    )
+    assert recert_rescue_diagnostic_matches_asset(
+        {"recert_backtest_refresh": {"asset_class": "stock"}},
+        asset_class="stock",
+    )
+    assert not recert_rescue_diagnostic_matches_asset(
+        {"recert_backtest_refresh": {"asset_class": "crypto"}},
+        asset_class="stock",
+    )
+
+
 def test_edge_reliability_refresh_emits_recert_rescue_without_blocker(monkeypatch) -> None:
     import app.services.trading.brain_work.handlers.profitability as prof_mod
     import app.services.trading.edge_reliability as edge_mod
@@ -223,7 +294,7 @@ def test_edge_reliability_refresh_emits_recert_rescue_without_blocker(monkeypatc
     monkeypatch.setattr(
         prof_mod,
         "_recent_blocked_recert_rescue_diagnostic",
-        lambda _db, *, scan_pattern_id: False,
+        lambda _db, *, scan_pattern_id, asset_class=None: False,
     )
 
     ev = SimpleNamespace(id=904, payload={"scan_pattern_id": 537, "window_days": 30})
