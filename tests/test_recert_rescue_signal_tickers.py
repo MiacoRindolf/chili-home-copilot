@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -254,6 +255,60 @@ def test_completed_recert_rescue_without_signal_priority_does_not_suppress_upgra
     upgraded_row = db.get(BrainWorkEvent, upgraded)
     assert upgraded_row.payload["signal_ticker"] == "AAVE-USD"
     assert upgraded_row.payload["priority_tickers"] == ["AAVE-USD"]
+
+
+def test_recert_rescue_blocker_stays_global_for_cross_asset_work_until_live_gate_is_sliced(db):
+    from app.models.trading import BrainWorkEvent
+    from app.services.trading.edge_reliability import (
+        RECERT_RESCUE_DIAGNOSTIC,
+        RECERT_RESCUE_REFRESH,
+        emit_targeted_profitability_work,
+    )
+
+    db.add(
+        BrainWorkEvent(
+            event_type=RECERT_RESCUE_DIAGNOSTIC,
+            event_kind="outcome",
+            dedupe_key="test:crypto-recert-blocks-cross-asset-rescue",
+            status="done",
+            payload={
+                "scan_pattern_id": 1260,
+                "asset_class": "crypto",
+                "recert_rescue_status": "soft_blocked",
+                "recommended_next_action": "complete_oos_recert_and_quality_refresh",
+                "recert_backtest_refresh": {
+                    "asset_class": "crypto",
+                    "requested": False,
+                },
+            },
+            created_at=datetime.utcnow(),
+        )
+    )
+    db.commit()
+
+    stock_rescue = emit_targeted_profitability_work(
+        db,
+        event_type=RECERT_RESCUE_REFRESH,
+        scan_pattern_id=1260,
+        source="autotrader_signal_fastlane",
+        asset_class="stock",
+        evidence_fingerprint="stock-priority-fp",
+        payload={
+            "signal_ticker": "MSFT",
+            "priority_tickers": ["MSFT"],
+        },
+    )
+    db.commit()
+
+    assert stock_rescue is None
+    assert (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_type == RECERT_RESCUE_REFRESH)
+        .filter(BrainWorkEvent.payload["scan_pattern_id"].astext == "1260")
+        .filter(BrainWorkEvent.payload["asset_class"].astext == "stock")
+        .count()
+        == 0
+    )
 
 
 def test_completed_recert_rescue_with_signal_priority_suppresses_repeat(db):
