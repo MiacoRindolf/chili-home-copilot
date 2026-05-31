@@ -24,4 +24,3 @@ def test_autotrader_desk_paper_path_stays_unchanged() -> None:
     assert "PaperTrade.user_id == user_id" in source
     assert '"kind": "paper"' in source
     assert 'overrides_map.get(("paper", int(pt.id)))' in source
-

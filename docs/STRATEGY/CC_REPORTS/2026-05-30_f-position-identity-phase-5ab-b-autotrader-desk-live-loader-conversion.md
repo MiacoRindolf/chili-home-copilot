@@ -64,4 +64,3 @@ The first focused pytest run hit a transient DB connection abort during teardown
 ## Architect Verdict
 
 The remaining `Trade` ORM-symbol surface is now heavily concentrated in public compatibility contracts and live-action/broker/order paths. The next move should be a live-action boundary audit, not another conversion. Monitor-run, close/sell, broker reconcile, PDT, and capital gates need explicit ownership before any further semantic-loader work.
-
