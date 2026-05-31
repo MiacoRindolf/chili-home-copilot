@@ -71,7 +71,11 @@ def _similarity(a: str, b: str) -> float:
     disagreements (ratio < 0.4) for the disagreement resolver."""
     if not a or not b:
         return 0.0
-    return SequenceMatcher(None, a.strip(), b.strip()).ratio()
+    left = a.strip()
+    right = b.strip()
+    if left == right:
+        return 1.0
+    return SequenceMatcher(None, left, right).ratio()
 
 
 def _resolve_models(policy: PurposePolicy) -> tuple[str, Optional[str]]:

@@ -7,12 +7,15 @@ completion for logging.
 from __future__ import annotations
 
 import os
+import time
 from typing import Optional
 
 import requests
 
 
 _DEFAULT_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
+_MODEL_LIST_CACHE_TTL_SEC = 5.0
+_model_list_cache: tuple[float, list[str]] | None = None
 
 
 def chat(
@@ -41,12 +44,27 @@ def chat(
 
 
 def list_models() -> list[str]:
+    global _model_list_cache
+    now = time.monotonic()
+    if _model_list_cache is not None:
+        stored_at, models = _model_list_cache
+        if now - stored_at <= _MODEL_LIST_CACHE_TTL_SEC:
+            return list(models)
+        _model_list_cache = None
     try:
         resp = requests.get(f"{_DEFAULT_HOST}/api/tags", timeout=10.0)
         resp.raise_for_status()
-        return [m.get("name", "") for m in resp.json().get("models", [])]
+        models = [m.get("name", "") for m in resp.json().get("models", [])]
+        if models:
+            _model_list_cache = (time.monotonic(), list(models))
+        return models
     except Exception:
         return []
+
+
+def reset_model_list_cache_for_tests() -> None:
+    global _model_list_cache
+    _model_list_cache = None
 
 
 def has_model(name: str) -> bool:

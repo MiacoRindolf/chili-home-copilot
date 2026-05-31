@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -36,6 +37,9 @@ _FALLBACK_OLLAMA_HOSTS = (
     "http://localhost:11434",
     "http://ollama:11434",
 )
+_MODEL_LIST_CACHE_TTL_SEC = 5.0
+_MODEL_LIST_CACHE_MAX = 8
+_model_list_cache: "OrderedDict[tuple[str, float], tuple[float, list[str]]]" = OrderedDict()
 
 
 @dataclass
@@ -60,6 +64,10 @@ def _post_json(url: str, payload: dict, timeout: float) -> dict:
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         body = resp.read()
         return json.loads(body.decode("utf-8", errors="replace"))
+
+
+def reset_model_list_cache_for_tests() -> None:
+    _model_list_cache.clear()
 
 
 def chat(
@@ -144,7 +152,18 @@ def chat(
 
 def list_models(base_url: Optional[str] = None, timeout_sec: float = 5.0) -> list[str]:
     """Return list of locally-available model tags. Empty list on failure."""
-    bases = [base_url or _DEFAULT_OLLAMA_HOST]
+    primary_base = base_url or _DEFAULT_OLLAMA_HOST
+    cache_key = (primary_base, float(timeout_sec))
+    now = time.monotonic()
+    cached = _model_list_cache.get(cache_key)
+    if cached is not None:
+        stored_at, models = cached
+        if now - stored_at <= _MODEL_LIST_CACHE_TTL_SEC:
+            _model_list_cache.move_to_end(cache_key)
+            return list(models)
+        _model_list_cache.pop(cache_key, None)
+
+    bases = [primary_base]
     bases.extend(host for host in _FALLBACK_OLLAMA_HOSTS if host not in bases)
     for raw_base in bases:
         base = raw_base.rstrip("/")
@@ -154,6 +173,10 @@ def list_models(base_url: Optional[str] = None, timeout_sec: float = 5.0) -> lis
                 body = json.loads(resp.read().decode("utf-8", errors="replace"))
             models = [str(m.get("name") or "") for m in (body.get("models") or []) if m.get("name")]
             if models:
+                _model_list_cache[cache_key] = (time.monotonic(), list(models))
+                _model_list_cache.move_to_end(cache_key)
+                while len(_model_list_cache) > _MODEL_LIST_CACHE_MAX:
+                    _model_list_cache.popitem(last=False)
                 return models
         except Exception:
             continue

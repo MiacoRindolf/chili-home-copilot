@@ -85,6 +85,19 @@ _BROKER_TO_VENUE = {
     "equities": "robinhood",
     "manual": "manual",
 }
+_settings_obj: Any | None = None
+
+
+def _settings() -> Any | None:
+    global _settings_obj
+    if _settings_obj is not None:
+        return _settings_obj
+    try:
+        from ....config import settings
+    except Exception:
+        return None
+    _settings_obj = settings
+    return settings
 
 
 def canonicalize_venue(raw: str | None) -> str:
@@ -100,17 +113,28 @@ def canonicalize_venue(raw: str | None) -> str:
 
 def _is_enabled() -> bool:
     """Feature flag read live so tests' monkeypatch takes effect immediately."""
+    settings = _settings()
+    if settings is None:
+        return False
     try:
-        from ....config import settings
         return bool(getattr(settings, "chili_venue_health_enabled", False))
     except Exception:
         return False
 
 
 def _resolve_thresholds() -> dict[str, Any]:
-    """Return the active threshold config — read live per call."""
+    """Return the active threshold config and read setting attributes live."""
+    settings = _settings()
+    if settings is None:
+        return {
+            "window_sec": 300,
+            "min_samples": 5,
+            "ack_to_fill_p95_ms": 5000,
+            "submit_to_ack_p95_ms": 3000,
+            "error_rate": 0.10,
+            "auto_switch_to_paper": False,
+        }
     try:
-        from ....config import settings
         return {
             "window_sec": int(getattr(settings, "chili_venue_health_window_sec", 300)),
             "min_samples": int(getattr(settings, "chili_venue_health_min_samples", 5)),
@@ -175,6 +199,7 @@ def summarize_venue(
     cfg = _resolve_thresholds()
     win = int(window_sec) if window_sec is not None else int(cfg["window_sec"])
     venue_key = canonicalize_venue(venue)
+    enabled = _is_enabled()
 
     base = {
         "venue": venue_key,
@@ -193,7 +218,7 @@ def summarize_venue(
         "n_rate_limits": 0,
         "n_acks": 0,
         "n_fills": 0,
-        "status": "disabled" if not _is_enabled() else "insufficient_data",
+        "status": "disabled" if not enabled else "insufficient_data",
         "reason": None,
         "thresholds": {
             "ack_to_fill_p95_ms": cfg["ack_to_fill_p95_ms"],
@@ -202,7 +227,7 @@ def summarize_venue(
             "min_samples": cfg["min_samples"],
         },
     }
-    if not _is_enabled():
+    if not enabled:
         return base
 
     since = datetime.now(timezone.utc) - timedelta(seconds=max(1, win))
