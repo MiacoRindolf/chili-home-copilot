@@ -70,6 +70,21 @@ _NON_POSITIVE_EXIT_NOOP_REASONS = frozenset(
     }
 )
 _REPEATED_NON_POSITIVE_EXIT_NOOP_MIN_FINGERPRINTS = 3
+_RECENT_RECERT_RESCUE_BLOCKER_ACTIONS = frozenset(
+    {
+        "complete_oos_recert_and_quality_refresh",
+        "inspect_recert_backtest_no_oos_evidence_keep_live_blocked",
+        "wait_for_recert_backtest_cooldown_keep_live_blocked",
+        "live_blocked_recert_debt_no_refresh",
+    }
+)
+_RECENT_RECERT_RESCUE_BLOCKER_REASONS = frozenset(
+    {
+        "recent_recert_backtest_cooldown",
+        "recert_backtest_refresh_already_open",
+        "no_recert_refresh_needed",
+    }
+)
 
 
 def _top_profitability_buckets(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
@@ -966,6 +981,47 @@ def _recent_noop_exit_variant_exists(
     return False
 
 
+def _recent_recert_rescue_blocker_exists(
+    db: Session,
+    *,
+    scan_pattern_id: int | None,
+) -> bool:
+    if scan_pattern_id is None:
+        return False
+    try:
+        from ...config import settings
+
+        minutes = int(
+            getattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360)
+        )
+    except Exception:
+        minutes = 360
+    if minutes <= 0:
+        return False
+    cutoff = datetime.utcnow() - timedelta(minutes=minutes)
+    rows = (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_kind == "outcome")
+        .filter(BrainWorkEvent.event_type == RECERT_RESCUE_DIAGNOSTIC)
+        .filter(BrainWorkEvent.created_at >= cutoff)
+        .filter(BrainWorkEvent.payload["scan_pattern_id"].astext == str(int(scan_pattern_id)))
+        .order_by(BrainWorkEvent.created_at.desc(), BrainWorkEvent.id.desc())
+        .limit(20)
+        .all()
+    )
+    for row in rows:
+        payload = row.payload if isinstance(row.payload, dict) else {}
+        action = str(payload.get("recommended_next_action") or "").strip().lower()
+        if action in _RECENT_RECERT_RESCUE_BLOCKER_ACTIONS:
+            return True
+        refresh = payload.get("recert_backtest_refresh")
+        if isinstance(refresh, dict):
+            reason = str(refresh.get("reason") or "").strip().lower()
+            if reason in _RECENT_RECERT_RESCUE_BLOCKER_REASONS:
+                return True
+    return False
+
+
 def emit_edge_reliability_refresh_requested(
     db: Session,
     scan_pattern_id: int,
@@ -1028,6 +1084,11 @@ def emit_targeted_profitability_work(
         scan_pattern_id=scan_pattern_id,
         evidence_fingerprint=evidence_fingerprint,
         payload=body,
+    ):
+        return None
+    if event_type == RECERT_RESCUE_REFRESH and _recent_recert_rescue_blocker_exists(
+        db,
+        scan_pattern_id=scan_pattern_id,
     ):
         return None
     completed_payload = _recent_completed_work_payload(
