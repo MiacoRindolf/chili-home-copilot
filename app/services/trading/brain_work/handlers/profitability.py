@@ -560,6 +560,18 @@ def _recent_blocked_recert_rescue_diagnostic(
     scan_pattern_id: int,
 ) -> bool:
     """True when a recent diagnostic says another rescue refresh would churn."""
+    return _recent_blocked_recert_rescue_diagnostic_payload(
+        db,
+        scan_pattern_id=scan_pattern_id,
+    ) is not None
+
+
+def _recent_blocked_recert_rescue_diagnostic_payload(
+    db: "Session",
+    *,
+    scan_pattern_id: int,
+) -> dict[str, Any] | None:
+    """Return the latest recent diagnostic that makes a rescue refresh redundant."""
     from app.config import settings
     from app.models.trading import BrainWorkEvent
     from app.services.trading.edge_reliability import RECERT_RESCUE_DIAGNOSTIC
@@ -568,23 +580,38 @@ def _recent_blocked_recert_rescue_diagnostic(
         getattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360)
     )
     if minutes is None or minutes <= 0:
-        return False
+        return None
     cutoff = datetime.utcnow() - timedelta(minutes=minutes)
-    rows = (
-        db.query(BrainWorkEvent)
-        .filter(BrainWorkEvent.event_kind == "outcome")
-        .filter(BrainWorkEvent.event_type == RECERT_RESCUE_DIAGNOSTIC)
-        .filter(BrainWorkEvent.created_at >= cutoff)
-        .filter(BrainWorkEvent.payload["scan_pattern_id"].astext == str(int(scan_pattern_id)))
-        .order_by(BrainWorkEvent.created_at.desc(), BrainWorkEvent.id.desc())
-        .limit(20)
-        .all()
-    )
+    try:
+        rows = (
+            db.query(BrainWorkEvent)
+            .filter(BrainWorkEvent.event_kind == "outcome")
+            .filter(BrainWorkEvent.event_type == RECERT_RESCUE_DIAGNOSTIC)
+            .filter(BrainWorkEvent.created_at >= cutoff)
+            .filter(
+                BrainWorkEvent.payload["scan_pattern_id"].astext
+                == str(int(scan_pattern_id))
+            )
+            .order_by(BrainWorkEvent.created_at.desc(), BrainWorkEvent.id.desc())
+            .limit(20)
+            .all()
+        )
+    except Exception:
+        logger.debug(
+            "%s recert blocker lookup failed pattern_id=%s",
+            LOG_PREFIX,
+            scan_pattern_id,
+            exc_info=True,
+        )
+        return None
     for row in rows:
         payload = row.payload if isinstance(row.payload, dict) else {}
         if recert_rescue_diagnostic_blocks_refresh(payload):
-            return True
-    return False
+            return {
+                "event_id": int(getattr(row, "id", 0) or 0),
+                "payload": payload,
+            }
+    return None
 
 
 def handle_edge_reliability_refresh(
@@ -677,6 +704,55 @@ def handle_recert_rescue_refresh(
     pid = _pattern_id(ev)
     if pid is None:
         raise ValueError("recert_rescue_refresh missing scan_pattern_id")
+    recent_blocker = _recent_blocked_recert_rescue_diagnostic_payload(
+        db,
+        scan_pattern_id=pid,
+    )
+    if recent_blocker is not None:
+        blocker_payload = recent_blocker["payload"]
+        refresh = blocker_payload.get("recert_backtest_refresh")
+        refresh_payload = refresh if isinstance(refresh, dict) else {}
+        enqueue_outcome_event(
+            db,
+            event_type=RECERT_RESCUE_DIAGNOSTIC,
+            dedupe_key=(
+                f"{RECERT_RESCUE_DIAGNOSTIC}:p{pid}:fast_skip:"
+                f"recent_blocker:{int(getattr(ev, 'id', 0) or 0)}"
+            ),
+            payload={
+                "scan_pattern_id": pid,
+                "source": "recert_rescue_refresh",
+                "recert_rescue_status": blocker_payload.get("recert_rescue_status"),
+                "recommended_next_action": "live_blocked_recert_debt_no_refresh",
+                "skip_reason": "recent_recert_rescue_blocker_diagnostic",
+                "blocker_event_id": recent_blocker["event_id"],
+                "blocker_source": blocker_payload.get("source"),
+                "blocker_next_action": blocker_payload.get("recommended_next_action"),
+                "blocker_refresh_reason": refresh_payload.get("reason"),
+                "quality_recomputed": False,
+                "recert_backtest_refresh": {
+                    "requested": False,
+                    "event_id": None,
+                    "reason": "recent_recert_rescue_blocker_diagnostic",
+                    "asset_class": _payload(ev).get("asset_class"),
+                    "evidence_fingerprint": _payload(ev).get("evidence_fingerprint"),
+                },
+                "fast_skipped": True,
+                "safe_to_bypass_live": False,
+                "uses_existing_probation_only": True,
+                "observed_at": datetime.utcnow().isoformat(),
+            },
+            parent_event_id=int(getattr(ev, "id", 0) or 0),
+            claimable=False,
+        )
+        logger.info(
+            "%s recert_rescue_refresh ev_id=%s pattern_id=%s fast_skip=%s",
+            LOG_PREFIX,
+            getattr(ev, "id", None),
+            pid,
+            "recent_recert_rescue_blocker_diagnostic",
+        )
+        return
     pattern = db.get(ScanPattern, pid)
     if pattern is None:
         raise ValueError(f"scan_pattern_id={pid} not found")
