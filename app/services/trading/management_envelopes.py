@@ -493,6 +493,34 @@ def load_trades_api_envelope_rows(
     """, params)
 
 
+def load_trades_api_envelope_objects(
+    db: Session,
+    *,
+    user_id: int | None,
+    status: str | None = None,
+    limit: int = 50,
+) -> list[Any]:
+    """Load /trades rows as read-only Trade-like runtime objects."""
+    params: dict[str, Any] = {
+        "uid": user_id,
+        "limit": max(1, min(int(limit or 50), 500)),
+    }
+    status_clause = ""
+    if status:
+        status_clause = "AND status = :status"
+        params["status"] = str(status)
+
+    rows = _rows(db, f"""
+        SELECT *
+          FROM {MANAGEMENT_ENVELOPES_RELATION}
+         WHERE user_id IS NOT DISTINCT FROM :uid
+           {status_clause}
+         ORDER BY entry_date DESC NULLS LAST, id DESC
+         LIMIT :limit
+    """, params)
+    return [_envelope_runtime_object(row) for row in rows]
+
+
 def load_monitor_decision_envelope_rows(
     db: Session,
     *,

@@ -101,3 +101,34 @@ def test_trades_api_open_rows_use_broker_truth_and_filter_duplicate_owner(
     assert row["local_entry_price"] == 0.04466266
     assert row["local_quantity"] == 3822.0
     assert row["broker_truth_current_envelope_id"] == owner.id
+
+
+def test_trades_api_envelope_flag_open_rows_preserve_broker_truth(
+    paired_client,
+    db: Session,
+    monkeypatch,
+) -> None:
+    client, user = paired_client
+    owner, duplicate = _coinbase_position_with_owner(db, user_id=user.id)
+    monkeypatch.setattr(
+        "app.routers.trading_sub.trades._phase5af_trades_api_use_envelopes_enabled",
+        lambda: True,
+    )
+
+    response = client.get("/api/trading/trades?status=open")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    ids = {row["id"] for row in payload["trades"]}
+    assert owner.id in ids
+    assert duplicate.id not in ids
+    assert payload["suppressed_stale_count"] == 1
+
+    row = next(row for row in payload["trades"] if row["id"] == owner.id)
+    assert row["entry_price"] == 0.04282061
+    assert row["quantity"] == 7641.8
+    assert row["local_entry_price"] == 0.04466266
+    assert row["local_quantity"] == 3822.0
+    assert row["broker_truth_current_envelope_id"] == owner.id
+    assert row["broker_truth_metrics_source"] == "broker_position_identity"
