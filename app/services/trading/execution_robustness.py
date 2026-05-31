@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -20,9 +20,9 @@ ROBUSTNESS_V2_VERSION = 2
 REPEATABLE_EDGE_ORIGINS = frozenset({"web_discovered", "brain_discovered"})
 
 APPROXIMATION_NOTE = (
-    "CHILI v4 execution robustness v1: derived from linked Trade rows only (entry_date window); "
+    "CHILI v4 execution robustness v1: derived from linked management-envelope rows only (entry_date window); "
     "partial fills inferred from broker_status text; no order-book microstructure; latency not "
-    "stored on Trade — left null. Provider truth is config-inferred, not exchange order audit."
+    "stored on management envelopes -- left null. Provider truth is config-inferred, not exchange order audit."
 )
 
 V2_APPROXIMATION_NOTE = (
@@ -150,46 +150,15 @@ def aggregate_trade_execution_for_pattern(
     user_id: int,
     window_days: int,
 ) -> dict[str, Any]:
-    """Legacy v1 rollups from the Trade ORM compatibility surface."""
-    from ...models.trading import Trade
+    """Legacy v1 rollups from the semantic management-envelope surface."""
+    from .management_envelopes import aggregate_management_envelope_execution_for_pattern
 
-    since = datetime.utcnow() - timedelta(days=max(1, int(window_days)))
-    rows = (
-        db.query(Trade)
-        .filter(
-            Trade.scan_pattern_id == int(scan_pattern_id),
-            Trade.user_id == int(user_id),
-            Trade.entry_date >= since,
-        )
-        .all()
+    return aggregate_management_envelope_execution_for_pattern(
+        db,
+        scan_pattern_id=scan_pattern_id,
+        user_id=user_id,
+        window_days=window_days,
     )
-    n_orders = len(rows)
-    n_filled = sum(1 for t in rows if t.filled_at is not None or t.avg_fill_price is not None)
-    n_partial = sum(1 for t in rows if t.broker_status and "partial" in (t.broker_status or "").lower())
-    n_miss = sum(
-        1
-        for t in rows
-        if (t.status or "").lower() in ("cancelled", "rejected") and t.filled_at is None and t.avg_fill_price is None
-    )
-    slips: list[float] = []
-    for t in rows:
-        for col in (t.tca_entry_slippage_bps, t.tca_exit_slippage_bps):
-            if col is not None:
-                try:
-                    slips.append(abs(float(col)))
-                except (TypeError, ValueError):
-                    pass
-    brokers = [((t.broker_source or "manual") or "manual").strip().lower() for t in rows]
-    broker_mode = max(set(brokers), key=brokers.count) if brokers else None
-
-    return {
-        "n_orders": n_orders,
-        "n_filled": n_filled,
-        "n_partial": n_partial,
-        "n_miss": n_miss,
-        "slippages_abs_bps": slips,
-        "dominant_broker_source": broker_mode,
-    }
 
 
 def compute_execution_robustness_contract(

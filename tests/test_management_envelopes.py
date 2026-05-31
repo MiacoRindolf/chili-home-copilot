@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from app.services.trading.management_envelopes import (
+    aggregate_management_envelope_execution_for_pattern,
     count_probation_envelopes_since,
     fetch_synergy_retry_envelope_candidates,
     load_autotrader_desk_live_envelope_objects,
@@ -252,6 +253,64 @@ def test_tca_summary_by_ticker_reads_management_envelopes():
         assert "trading_trades" not in sql
         assert "NOW() - (:days * INTERVAL '1 day')" in sql
         assert params == {"uid": 7, "days": 14, "limit": 2}
+
+
+def test_execution_robustness_aggregate_reads_management_envelopes():
+    db = _FakeDb(
+        _RowsResult(
+            [
+                {
+                    "filled_at": datetime(2026, 5, 31, 10, 0),
+                    "avg_fill_price": None,
+                    "broker_status": "filled",
+                    "status": "closed",
+                    "tca_entry_slippage_bps": 12,
+                    "tca_exit_slippage_bps": "-3",
+                    "broker_source": "Coinbase",
+                },
+                {
+                    "filled_at": None,
+                    "avg_fill_price": 15.0,
+                    "broker_status": "partially_filled",
+                    "status": "open",
+                    "tca_entry_slippage_bps": None,
+                    "tca_exit_slippage_bps": "bad",
+                    "broker_source": "coinbase",
+                },
+                {
+                    "filled_at": None,
+                    "avg_fill_price": None,
+                    "broker_status": None,
+                    "status": "cancelled",
+                    "tca_entry_slippage_bps": 4.5,
+                    "tca_exit_slippage_bps": None,
+                    "broker_source": None,
+                },
+            ]
+        )
+    )
+
+    stats = aggregate_management_envelope_execution_for_pattern(
+        db,
+        scan_pattern_id=42,
+        user_id=7,
+        window_days=30,
+    )
+
+    assert stats == {
+        "n_orders": 3,
+        "n_filled": 2,
+        "n_partial": 1,
+        "n_miss": 1,
+        "slippages_abs_bps": [12.0, 3.0, 4.5],
+        "dominant_broker_source": "coinbase",
+    }
+    assert "FROM trading_management_envelopes" in db.sql
+    assert "trading_trades" not in db.sql
+    assert "scan_pattern_id = :scan_pattern_id" in db.sql
+    assert "entry_date >= :since" in db.sql
+    assert db.params["scan_pattern_id"] == 42
+    assert db.params["user_id"] == 7
 
 
 def test_pattern_tagged_envelope_rows_read_management_envelopes():

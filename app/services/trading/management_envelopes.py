@@ -8,7 +8,7 @@ do not mutate live trading state.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
@@ -266,6 +266,76 @@ def tca_summary_by_ticker_from_management_envelopes(
             else None
         ),
         "exit_by_ticker": exit_by_ticker,
+    }
+
+
+def aggregate_management_envelope_execution_for_pattern(
+    db: Session,
+    *,
+    scan_pattern_id: int,
+    user_id: int,
+    window_days: int,
+) -> dict[str, Any]:
+    """Legacy v1 execution-robustness rollups from management envelopes."""
+    since = datetime.now(timezone.utc) - timedelta(days=max(1, int(window_days)))
+    rows = _rows(db, f"""
+        SELECT
+            filled_at,
+            avg_fill_price,
+            broker_status,
+            status,
+            tca_entry_slippage_bps,
+            tca_exit_slippage_bps,
+            broker_source
+          FROM {MANAGEMENT_ENVELOPES_RELATION}
+         WHERE scan_pattern_id = :scan_pattern_id
+           AND user_id = :user_id
+           AND entry_date >= :since
+    """, {
+        "scan_pattern_id": int(scan_pattern_id),
+        "user_id": int(user_id),
+        "since": since,
+    })
+    n_orders = len(rows)
+    n_filled = sum(
+        1
+        for row in rows
+        if row.get("filled_at") is not None or row.get("avg_fill_price") is not None
+    )
+    n_partial = sum(
+        1
+        for row in rows
+        if row.get("broker_status")
+        and "partial" in str(row.get("broker_status") or "").lower()
+    )
+    n_miss = sum(
+        1
+        for row in rows
+        if str(row.get("status") or "").lower() in ("cancelled", "rejected")
+        and row.get("filled_at") is None
+        and row.get("avg_fill_price") is None
+    )
+    slips: list[float] = []
+    for row in rows:
+        for col in (row.get("tca_entry_slippage_bps"), row.get("tca_exit_slippage_bps")):
+            if col is not None:
+                try:
+                    slips.append(abs(float(col)))
+                except (TypeError, ValueError):
+                    pass
+    brokers = [
+        ((str(row.get("broker_source") or "manual") or "manual").strip().lower())
+        for row in rows
+    ]
+    broker_mode = max(set(brokers), key=brokers.count) if brokers else None
+
+    return {
+        "n_orders": n_orders,
+        "n_filled": n_filled,
+        "n_partial": n_partial,
+        "n_miss": n_miss,
+        "slippages_abs_bps": slips,
+        "dominant_broker_source": broker_mode,
     }
 
 
