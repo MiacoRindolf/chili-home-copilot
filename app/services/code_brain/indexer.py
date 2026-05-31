@@ -137,12 +137,17 @@ def is_current_workspace_repo(repo: CodeRepo) -> bool:
     return _same_resolved_path(resolve_repo_runtime_path(repo), _current_workspace_root())
 
 
-def is_preferred_autopilot_repo(repo: CodeRepo) -> bool:
-    """Return true for the canonical current-workspace repo row."""
+def is_current_workspace_host_repo(repo: CodeRepo) -> bool:
+    """Return true for the durable host-path row for this checkout."""
     if not is_current_workspace_repo(repo):
         return False
     root = str(_current_workspace_root())
-    return (repo.path == root or repo.host_path == root) and repo.name == CURRENT_WORKSPACE_REPO_NAME
+    return repo.path == root or repo.host_path == root
+
+
+def is_preferred_autopilot_repo(repo: CodeRepo) -> bool:
+    """Return true for the canonical current-workspace repo row."""
+    return is_current_workspace_host_repo(repo) and repo.name == CURRENT_WORKSPACE_REPO_NAME
 
 
 def sort_repos_for_runtime_preference(repos: Iterable[CodeRepo]) -> list[CodeRepo]:
@@ -150,6 +155,7 @@ def sort_repos_for_runtime_preference(repos: Iterable[CodeRepo]) -> list[CodeRep
     return sorted(
         [repo for repo in repos if repo is not None],
         key=lambda repo: (
+            not is_current_workspace_host_repo(repo),
             not is_preferred_autopilot_repo(repo),
             not is_current_workspace_repo(repo),
             repo.user_id is not None,
@@ -174,16 +180,35 @@ def ensure_current_workspace_repo(
     runtime_fields = infer_repo_runtime_fields(root)
     container_path = runtime_fields.get("container_path")
 
-    rows = db.query(CodeRepo).filter(CodeRepo.active.is_(True)).all()
-    current_rows = [row for row in rows if is_current_workspace_repo(row)]
+    rows = db.query(CodeRepo).all()
+    current_rows = [
+        row
+        for row in rows
+        if is_current_workspace_repo(row) or row.path == root_text or row.host_path == root_text
+    ]
     preferred = next(
-        (
-            row
-            for row in current_rows
-            if row.path == root_text or row.host_path == root_text
-        ),
+        (row for row in current_rows if is_preferred_autopilot_repo(row)),
         None,
     )
+    if preferred is None:
+        preferred = next(
+            (row for row in current_rows if is_current_workspace_host_repo(row)),
+            None,
+        )
+    if preferred is None:
+        preferred = next(
+            (row for row in current_rows if row.path == root_text or row.host_path == root_text),
+            None,
+        )
+    if preferred is None:
+        preferred = next(
+            (
+                row
+                for row in current_rows
+                if container_path and row.container_path == container_path
+            ),
+            None,
+        )
 
     if preferred is None:
         preferred = CodeRepo(
@@ -356,7 +381,6 @@ def get_registered_repos(
     *,
     include_shared: bool = False,
 ) -> List[Dict]:
-    ensure_current_workspace_repo(db, user_id=user_id)
     repos = sort_repos_for_runtime_preference(
         get_accessible_repos(db, user_id=user_id, include_shared=include_shared)
     )

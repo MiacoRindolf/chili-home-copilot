@@ -2613,6 +2613,7 @@ def test_current_workspace_repo_canonicalization_reuses_existing_d_path():
         db.add_all([d_path_row, alias_row])
         db.commit()
 
+        code_indexer.ensure_current_workspace_repo(db)
         repos = code_indexer.get_registered_repos(db, include_shared=True)
 
         preferred = repos[0]
