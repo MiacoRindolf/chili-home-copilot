@@ -489,3 +489,29 @@ future compatibility migration says otherwise.
 
 Report:
 `docs/STRATEGY/CC_REPORTS/2026-05-30_f-position-identity-phase-5ad-orm-alias-plan.md`.
+
+## Position Identity Phase 5AE - Trades API Shadow Canary (2026-05-30)
+
+Phase 5AE shipped as a passive canary slice. No public `/trades` behavior
+changed.
+
+Added `load_trades_api_envelope_rows(...)` and a passive shadow compare inside
+`api_get_trades(...)`. The route still returns the current `Trade` ORM response;
+the canary separately loads stable database-backed fields from the physical
+`trading_management_envelopes` table and logs
+`[phase5v] /trades envelope shadow mismatch` only if the two shapes drift.
+Broker-truth display overlays are intentionally excluded from the comparison by
+checking `local_entry_price` and `local_quantity`.
+
+Live/read-only validation is green: the Phase 5AE `/trades` parity probe
+reported `COMPLETE_POSITIVE` across all/open/closed rows with 0 mismatches;
+Phase 5K-A and Phase 5I remain `COMPLETE_POSITIVE`; classifier output still has
+0 unexpected runtime readers, 0 unexpected runtime mutations, and 0
+unclassified entries.
+
+Architect verdict: keep observing the shadow canary. Do not cut over `/trades`
+or rename public trade vocabulary without a fresh feature-flagged plan and clean
+shadow evidence.
+
+Report:
+`docs/STRATEGY/CC_REPORTS/2026-05-30_f-position-identity-phase-5ae-trades-api-shadow-canary.md`.
