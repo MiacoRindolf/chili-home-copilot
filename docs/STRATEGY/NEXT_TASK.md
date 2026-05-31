@@ -1,34 +1,62 @@
-# NEXT_TASK: f-position-identity-phase-5aa-active-setup-contract-audit
+# NEXT_TASK: f-position-identity-phase-5aa-b-active-setup-endpoint-conversion
 
 STATUS: PENDING
 
 ## Goal
 
-Audit the remaining active setup / monitor-card runtime object contracts before any further router conversion.
+Convert the active setup card endpoint's loader to use runtime management-envelope objects from `trading_management_envelopes`, using the Phase 5AA-A parity probe as the gate.
 
-Phase 5Z-B converted the stop-position read after a dedicated parity probe. The next risk-facing surfaces are active setup cards and monitor-run/sell/close actions. Do not mechanically convert them. First classify their live object expectations and decide which pieces can use management-envelope runtime objects safely.
+## Why This Is Safe Now
 
-## Recommended Work Shape
+Phase 5AA-A compared current `Trade` ORM runtime objects with candidate envelope runtime objects through the same active setup serializer chain. Live result was `COMPLETE_POSITIVE`:
 
-1. Inspect active setup card and monitor-run surfaces:
-   - `app/routers/trading_sub/monitor.py`
-   - `app/services/trading/autotrader_desk.py`
-   - related tests in `tests/test_monitor_api_execution_state.py` and `tests/test_autotrader_desk_api.py`
-2. Classify each remaining `Trade` use:
-   - passive display read
-   - broker-truth/risk display
-   - live action input
-   - public API/UI compatibility contract
-3. Only write probes for passive display reads.
-4. Leave monitor-run, sell/close, broker/order/reconcile/PDT/capital-gate paths alone unless a later parity gate specifically proves safety.
+- 5 old setups = 5 new setups
+- 0 suppressed-stale drift
+- matched=true
+- `trading_management_envelopes` is the physical table (`relkind='r'`)
+- `trading_trades` remains the compatibility view (`relkind='v'`)
 
-## Guardrails
+## Required Work Shape
 
-- Do not touch sell/close or monitor-run behavior.
+1. Add or reuse a helper that loads open active-setup runtime objects from `trading_management_envelopes`.
+2. Convert only `api_monitor_active` / `_monitored_live_trades_with_suppressed` loader plumbing to use the proven helper.
+3. Keep the serializer and helper chain intact:
+   - broker-stale filtering
+   - broker-position truth overlays
+   - option detection
+   - broker/market quote routing
+   - breakout-alert and pattern enrichment
+   - monitor decision enrichment
+   - execution-state metadata
+4. Re-run the Phase 5AA-A parity probe after conversion.
+
+## Hard Guardrails
+
+- Do not touch `api_monitor_run`.
+- Do not touch sell/close behavior.
+- Do not touch stop execution/evaluation/dispatch.
 - Do not touch broker/order/reconcile/PDT/capital-gate behavior.
 - Do not rename `/trades`, `trade_id`, schema classes, UI labels, or response fields.
 - Do not drop or rewrite the `trading_trades` compatibility view.
 
-## Architect Verdict
+## Verification
 
-Phase 5 is now deep into user-facing and live-action territory. Continue with audits and probes, not broad rename sweeps.
+Run:
+
+```powershell
+python -m py_compile app\routers\trading_sub\monitor.py app\services\trading\management_envelopes.py
+$env:TEST_DATABASE_URL='postgresql://chili:chili@localhost:5433/chili_test'
+$env:DATABASE_URL=$env:TEST_DATABASE_URL
+python -m pytest tests\test_monitor_api_execution_state.py tests\test_phase5aa_active_setup_runtime_adapter_probe.py tests\test_phase5_remaining_trade_refs.py tests\test_phase5l_reader_allowlist.py -q
+$env:DATABASE_URL='postgresql://chili:chili@localhost:5433/chili'
+python scripts\d-phase5aa-active-setup-runtime-adapter-probe.py
+python scripts\analyze_phase5_remaining_trade_refs.py --bucket orm_trade_symbol_compat --fail-on-unexpected-runtime
+```
+
+## Exit Criteria
+
+- Active setup endpoint behavior is unchanged.
+- Phase 5AA-A live probe remains `COMPLETE_POSITIVE`.
+- Focused tests pass.
+- Analyzer raw reader bucket remains 0.
+
