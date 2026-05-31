@@ -1,45 +1,47 @@
-# NEXT_TASK: f-phase5aa-market-data-anchor-parity-probe
+# NEXT_TASK: f-phase5aa-b-market-data-anchor-reader-conversion
 
 STATUS: QUEUED
 
 ## Goal
 
-Build a read-only old-vs-new parity probe for
-`market_data._resolve_implausibility_anchor(...)` before any conversion away
-from direct `Trade` ORM access.
+Convert `market_data._resolve_implausibility_anchor(...)`'s database fallback
+from the `trading_trades` compatibility view / `Trade` ORM path to the physical
+`trading_management_envelopes` semantic source.
 
-## Why This Is Next
+## Evidence
 
-Phase 5Z audited the remaining candidate readers and found that
-`market_data._resolve_implausibility_anchor(...)` is not passive reporting. It
-uses the most recent open trade entry price as a quote-plausibility anchor, and
-that can influence `fetch_quote(...)` behavior. Treat it as live market-data
-safety behavior.
+Phase 5AA parity probe:
 
-The right next step is therefore a probe, not a swap.
+```text
+VERDICT_STATUS=COMPLETE_POSITIVE
+ANCHOR_TICKERS=8
+ANCHOR_MISMATCHES=0
+```
+
+The current old source and candidate new source matched exactly for the live
+open ticker universe.
 
 ## Scope
 
-- Add a read-only probe that compares the current `Trade` ORM anchor result to
-  a candidate management-envelope anchor result.
-- Cover tickers with open envelopes, missing anchors, and stale/closed rows.
-- Report old anchor, new anchor, match status, relation kinds, and drift count.
-- Do not flip flags or change runtime behavior.
+- Change only the database fallback used after the in-memory known-good cache
+  misses.
+- Preserve cache-first behavior.
+- Preserve failure-open behavior: on DB errors, return `None` and allow quote
+  acceptance/seed behavior as today.
+- Preserve explicit rollback/close handling to avoid idle-in-transaction leaks.
 
 ## Guardrails
 
+- No provider routing changes.
+- No quote threshold/math changes.
 - No broker/order/close/reconcile changes.
-- No stop execution/evaluation changes.
 - No risk/capital/PDT/portfolio gate changes.
-- No quote-routing behavior change.
 - No public `/trades`, `trade_id`, schema, or UI label rename.
-- If parity is not exact, document the drift and stop.
 
 ## Exit Criteria
 
-- Probe emits `COMPLETE_POSITIVE` only when old and new anchors match exactly
-  for the sampled live universe.
-- Focused tests cover old/new parity and mismatch reporting.
+- Focused market-data tests pass.
+- Phase 5AA parity probe remains `COMPLETE_POSITIVE` after the swap.
 - Phase 5K live-path parity and Phase 5I post-rename soak remain
   `COMPLETE_POSITIVE`.
 
