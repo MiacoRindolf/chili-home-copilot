@@ -1,13 +1,13 @@
 {
   "generated_from": "scripts/analyze_phase5_remaining_trade_refs.py --json",
-  "orm_trade_symbol_compat_count": 93,
+  "orm_trade_symbol_compat_count": 92,
   "phase5o_bucket_counts": {
-    "adapter_candidate": 44,
+    "adapter_candidate": 43,
     "future_rename_blocker": 33,
     "leave_alone": 16
   },
   "contract_group_counts": {
-    "learning_research_reporting": 39,
+    "learning_research_reporting": 38,
     "live_action_broker_reconcile": 15,
     "private_helper_type_only": 7,
     "public_ui_schema_contract": 14,
@@ -86,13 +86,6 @@
     },
     {
       "path": "app/services/context_brain/outcome_tracker.py",
-      "contract_group": "learning_research_reporting",
-      "phase5o_bucket": "adapter_candidate",
-      "phase5o_subtype": "read_only_learning_reporting",
-      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
-    },
-    {
-      "path": "app/services/reasoning_brain/interest_graph.py",
       "contract_group": "learning_research_reporting",
       "phase5o_bucket": "adapter_candidate",
       "phase5o_subtype": "read_only_learning_reporting",

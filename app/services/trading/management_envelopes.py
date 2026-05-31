@@ -122,6 +122,29 @@ def count_open_autotrader_envelopes_by_lane(
     return out
 
 
+def load_recent_management_envelope_tickers_for_user(
+    db: Session,
+    *,
+    user_id: int,
+    limit: int = 200,
+) -> list[str]:
+    """Return recent envelope tickers for read-only learning/reporting consumers."""
+    rows = _rows(
+        db,
+        f"""
+        SELECT ticker
+          FROM {MANAGEMENT_ENVELOPES_RELATION}
+         WHERE user_id = :uid
+           AND ticker IS NOT NULL
+           AND ticker <> ''
+         ORDER BY entry_date DESC NULLS LAST, id DESC
+         LIMIT :limit
+        """,
+        {"uid": int(user_id), "limit": max(1, min(int(limit or 200), 1000))},
+    )
+    return [str(row["ticker"]).upper() for row in rows if row.get("ticker")]
+
+
 def fetch_synergy_retry_envelope_candidates(
     db: Session,
     *,

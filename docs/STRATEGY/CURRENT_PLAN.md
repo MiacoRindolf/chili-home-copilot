@@ -791,3 +791,23 @@ rename blockers.
 
 Report:
 `docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5o-remaining-runtime-compat-map.md`.
+
+## Phase 5P - Learning/Reporting Adapter Slice (2026-05-31)
+
+Phase 5P converted `app/services/reasoning_brain/interest_graph.py` away from
+the legacy `Trade` ORM symbol.
+
+The reasoning interest graph now loads recent trading tickers through
+`load_recent_management_envelope_tickers_for_user(...)`, a read-only
+management-envelope helper. This preserves the intended ticker-interest signal
+without binding the reasoning brain to the legacy ORM class.
+
+The remaining compatibility surface dropped from 93 to 92 files:
+`learning_research_reporting=38`, `adapter_candidate=43`.
+
+Architect verdict: repeat this pattern only in read-only reporting/learning
+consumers with direct tests. Broker/reconcile and risk/capital groups remain
+future rename blockers.
+
+Report:
+`docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5p-learning-reporting-adapter-slice.md`.

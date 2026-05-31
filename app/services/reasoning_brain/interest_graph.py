@@ -10,8 +10,8 @@ from sqlalchemy.orm import Session
 from ...models import (
     ChatMessage,
     ReasoningInterest,
-    Trade,
 )
+from ..trading.management_envelopes import load_recent_management_envelope_tickers_for_user
 
 
 def _bump_interest(
@@ -81,7 +81,7 @@ def rebuild_interest_graph(db: Session, user_id: int) -> None:
 
     Simple heuristic:
     - Chat: count top nouns/keywords from recent messages (cheap tokenization)
-    - Trades: tickers and sectors from Trade table
+    - Trading envelopes: recent tickers from the management-envelope read model
     """
     # Soft decay existing interests
     for row in db.query(ReasoningInterest).filter(ReasoningInterest.user_id == user_id):
@@ -110,18 +110,13 @@ def rebuild_interest_graph(db: Session, user_id: int) -> None:
         for word, count in words.most_common(40)
     ]
 
-    # Trading-derived topics (tickers)
-    trades: Iterable[Trade] = (
-        db.query(Trade)
-        .filter(Trade.user_id == user_id)
-        .order_by(Trade.opened_at.desc().nullslast())
-        .limit(200)
-        .all()
-    )
     ticker_counts: Counter[str] = Counter()
-    for t in trades:
-        if t.ticker:
-            ticker_counts[t.ticker.upper()] += 1
+    for ticker in load_recent_management_envelope_tickers_for_user(
+        db,
+        user_id=user_id,
+        limit=200,
+    ):
+        ticker_counts[str(ticker).upper()] += 1
     updates.extend(
         (ticker, "inferred_trading", 1.0 + 0.3 * count, "trading", None)
         for ticker, count in ticker_counts.most_common(50)
