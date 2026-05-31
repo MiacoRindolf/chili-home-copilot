@@ -1,54 +1,50 @@
-# NEXT_TASK: f-position-identity-phase-5ah-trades-api-open-cutover-flag-path
+# NEXT_TASK: f-position-identity-phase-5ai-trades-api-flag-route-trial
 
-STATUS: IN_FLIGHT
+STATUS: QUEUED
 
 ## Goal
 
-Expand the existing default-off `CHILI_PHASE5AF_TRADES_API_USE_ENVELOPES`
-route flag so `/api/trading/trades` can use management-envelope runtime objects
-for open/all responses when explicitly enabled.
+Run a short, controlled `/api/trading/trades` route trial with
+`CHILI_PHASE5AF_TRADES_API_USE_ENVELOPES=true`, then decide whether to leave the
+flag on, roll it back, or add one more tie-order hardening slice.
 
 ## Current State
 
-Phase 5AF added the default-off flag but intentionally fell back whenever open
-rows were requested or present. Phase 5AG has now proven the open-row runtime
-adapter:
+Phase 5AH added the default-off route path:
+
+- `status=closed` uses the existing simple envelope renderer.
+- `status=open` uses management-envelope runtime objects and preserves
+  broker-truth overlays plus stale-open suppression.
+- no status filter uses the same runtime-object serializer; the Phase 5AH probe
+  shows identical row content with only tie-order drift among rows sharing the
+  same `entry_date`.
+
+Live probes are green:
 
 ```text
-Phase 5AG live probe: COMPLETE_POSITIVE
-old_trades=5
-new_trades=5
-old_suppressed=0
-new_suppressed=0
-matched=true
+Phase 5AH cutover probe: COMPLETE_POSITIVE
+Phase 5AG open runtime adapter probe: COMPLETE_POSITIVE
+Phase 5AE /trades base parity probe: COMPLETE_POSITIVE
+Phase 5K live-path parity probe: COMPLETE_POSITIVE
+Phase 5I post-rename soak probe: COMPLETE_POSITIVE
 ```
-
-The probe path uses `trading_management_envelopes` runtime objects and runs the
-same helper chain as the current route:
-
-- `filter_broker_stale_open_trades(...)`
-- `broker_position_display_metrics(...)`
-- public `/trades` field rendering
 
 ## Recommended Work Shape
 
-1. Add or reuse a helper that loads open management envelopes as read-only
-   runtime objects.
-2. Refactor the `/api/trading/trades` route serializer so the compatibility
-   path and envelope path share the same open-row rendering logic.
-3. When `CHILI_PHASE5AF_TRADES_API_USE_ENVELOPES=true`:
-   - `status=closed` can keep using the simple envelope row renderer
-   - `status=open` should use the proven runtime-object path
-   - no status filter should use envelope runtime objects for open rows plus
-     envelope row rendering for closed rows, preserving sort/limit semantics
-     carefully
-4. Keep the flag default off.
-5. Run:
-   - focused route/helper tests
-   - Phase 5AG live probe
-   - Phase 5AE parity probe
-   - Phase 5K live-path parity probe
-   - Phase 5I post-rename soak probe
+1. Before flipping, re-run:
+   - `scripts/d-phase5ah-trades-api-cutover-probe.py`
+   - `scripts/d-phase5ag-trades-open-runtime-adapter-probe.py`
+   - `scripts/d-phase5ae-trades-api-parity-probe.py`
+   - `scripts/d-phase5k-live-path-parity-probe.py`
+   - `scripts/d-phase5i-post-rename-soak-probe.py`
+2. If all gates are still green, set
+   `CHILI_PHASE5AF_TRADES_API_USE_ENVELOPES=true` in `.env`.
+3. Restart only the `chili` web container with `--no-deps`.
+4. Probe `/api/trading/trades`, `/api/trading/trades?status=open`, and
+   `/api/trading/trades?status=closed` via the live web route.
+5. Watch logs for `[phase5af]` / `[phase5ah]` fallback or exception lines.
+6. If clean, leave the flag on for a short soak. If any route/UI regression
+   appears, flip the flag back to `false` and restart only `chili`.
 
 ## Guardrails
 
@@ -57,5 +53,4 @@ same helper chain as the current route:
   public response field names.
 - Do not touch sell/close, monitor-run, stop execution, broker/order/reconcile,
   PDT, cash, capital, portfolio, or promotion gates.
-- Leave `CHILI_PHASE5AF_TRADES_API_USE_ENVELOPES=false` in live runtime unless
-  running an explicit short operator-approved route trial.
+- Do not restart Postgres for this trial.

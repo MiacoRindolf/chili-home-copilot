@@ -199,6 +199,84 @@ def _phase5af_trades_api_can_use_envelopes(
     return True
 
 
+def _trade_like_public_response_row(
+    db: Session,
+    t: Any,
+) -> dict[str, Any]:
+    """Render a Trade or Trade-like envelope object in /trades shape."""
+    broker_metrics = (
+        broker_position_display_metrics(db, t)
+        if getattr(t, "status", None) == "open"
+        else None
+    ) or {}
+    entry_price = getattr(t, "entry_price", None)
+    quantity = getattr(t, "quantity", None)
+    display_entry = broker_metrics.get("entry_price") or entry_price
+    display_quantity = broker_metrics.get("quantity") or quantity
+    entry_date = getattr(t, "entry_date", None)
+    exit_date = getattr(t, "exit_date", None)
+    filled_at = getattr(t, "filled_at", None)
+    return {
+        "id": getattr(t, "id", None),
+        "ticker": getattr(t, "ticker", None),
+        "direction": getattr(t, "direction", None),
+        "entry_price": display_entry,
+        "exit_price": getattr(t, "exit_price", None),
+        "quantity": display_quantity,
+        "local_entry_price": entry_price,
+        "local_quantity": quantity,
+        "entry_date": entry_date.isoformat() if entry_date else None,
+        "exit_date": exit_date.isoformat() if exit_date else None,
+        "status": getattr(t, "status", None),
+        "pnl": getattr(t, "pnl", None),
+        "tags": getattr(t, "tags", None),
+        "notes": getattr(t, "notes", None),
+        "broker_source": getattr(t, "broker_source", None),
+        "broker_status": getattr(t, "broker_status", None),
+        "broker_order_id": getattr(t, "broker_order_id", None),
+        "filled_at": filled_at.isoformat() if filled_at else None,
+        "avg_fill_price": getattr(t, "avg_fill_price", None),
+        "tca_reference_entry_price": getattr(t, "tca_reference_entry_price", None),
+        "tca_entry_slippage_bps": getattr(t, "tca_entry_slippage_bps", None),
+        "tca_reference_exit_price": getattr(t, "tca_reference_exit_price", None),
+        "tca_exit_slippage_bps": getattr(t, "tca_exit_slippage_bps", None),
+        "strategy_proposal_id": getattr(t, "strategy_proposal_id", None),
+        "scan_pattern_id": getattr(t, "scan_pattern_id", None),
+        "position_id": getattr(t, "position_id", None),
+        "broker_truth_entry_price": broker_metrics.get("entry_price"),
+        "broker_truth_quantity": broker_metrics.get("quantity"),
+        "broker_truth_position_id": broker_metrics.get("position_id"),
+        "broker_truth_current_envelope_id": broker_metrics.get("current_envelope_id"),
+        "broker_truth_metrics_source": broker_metrics.get("source"),
+    }
+
+
+def _trade_like_public_response(
+    db: Session,
+    trades: list[Any],
+    *,
+    apply_open_stale_filter: bool,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Apply open-trade broker truth filters and render public /trades rows."""
+    suppressed_stale_trades: list[dict[str, Any]] = []
+    if apply_open_stale_filter:
+        open_trades = [t for t in trades if getattr(t, "status", None) == "open"]
+        live_open_trades, suppressed_stale_trades = filter_broker_stale_open_trades(
+            db,
+            open_trades,
+        )
+        live_open_ids = {int(t.id) for t in live_open_trades if getattr(t, "id", None)}
+        trades = [
+            t for t in trades
+            if getattr(t, "status", None) != "open"
+            or (
+                getattr(t, "id", None) is not None
+                and int(getattr(t, "id")) in live_open_ids
+            )
+        ]
+    return [_trade_like_public_response_row(db, t) for t in trades], suppressed_stale_trades
+
+
 def _phase5af_trades_api_use_envelopes_enabled() -> bool:
     try:
         from ...config import settings
@@ -242,9 +320,11 @@ def api_get_trades(
     status: str | None = Query(None),
 ):
     ctx = get_identity_ctx(request, db)
+    apply_open_stale_filter = status is None or str(status).strip().lower() == "open"
     if _phase5af_trades_api_use_envelopes_enabled():
         try:
             from ...services.trading.management_envelopes import (
+                load_trades_api_envelope_objects,
                 load_trades_api_envelope_rows,
             )
 
@@ -270,12 +350,30 @@ def api_get_trades(
                     "suppressed_stale_trades": [],
                     "suppressed_stale_count": 0,
                 })
-            logger.warning(
-                "[phase5af] /trades envelope cutover fallback status=%s "
-                "rows=%s reason=open_rows_need_broker_truth_overlay",
-                status,
-                len(envelope_rows),
+            envelope_objects = load_trades_api_envelope_objects(
+                db,
+                user_id=ctx["user_id"],
+                status=status,
+                limit=50,
             )
+            rows, suppressed_stale_trades = _trade_like_public_response(
+                db,
+                envelope_objects,
+                apply_open_stale_filter=apply_open_stale_filter,
+            )
+            logger.info(
+                "[phase5ah] /trades envelope runtime cutover active rows=%s "
+                "status=%s suppressed_stale=%s",
+                len(rows),
+                status,
+                len(suppressed_stale_trades),
+            )
+            return JSONResponse({
+                "ok": True,
+                "trades": rows,
+                "suppressed_stale_trades": json_safe(suppressed_stale_trades),
+                "suppressed_stale_count": len(suppressed_stale_trades),
+            })
         except Exception as exc:
             logger.warning(
                 "[phase5af] /trades envelope cutover fallback status=%s "
@@ -284,59 +382,11 @@ def api_get_trades(
                 exc,
             )
     trades = ts.get_trades(db, ctx["user_id"], status=status)
-    suppressed_stale_trades = []
-    if status is None or str(status).strip().lower() == "open":
-        open_trades = [t for t in trades if t.status == "open"]
-        live_open_trades, suppressed_stale_trades = filter_broker_stale_open_trades(
-            db,
-            open_trades,
-        )
-        live_open_ids = {int(t.id) for t in live_open_trades}
-        trades = [
-            t for t in trades
-            if t.status != "open" or int(t.id) in live_open_ids
-        ]
-
-    rows = []
-    for t in trades:
-        broker_metrics = (
-            broker_position_display_metrics(db, t)
-            if t.status == "open"
-            else None
-        ) or {}
-        display_entry = broker_metrics.get("entry_price") or t.entry_price
-        display_quantity = broker_metrics.get("quantity") or t.quantity
-        rows.append(
-            {
-                "id": t.id, "ticker": t.ticker, "direction": t.direction,
-                "entry_price": display_entry, "exit_price": t.exit_price,
-                "quantity": display_quantity,
-                "local_entry_price": t.entry_price,
-                "local_quantity": t.quantity,
-                "entry_date": t.entry_date.isoformat() if t.entry_date else None,
-                "exit_date": t.exit_date.isoformat() if t.exit_date else None,
-                "status": t.status, "pnl": t.pnl, "tags": t.tags, "notes": t.notes,
-                "broker_source": t.broker_source,
-                "broker_status": t.broker_status,
-                "broker_order_id": t.broker_order_id,
-                "filled_at": t.filled_at.isoformat() if t.filled_at else None,
-                "avg_fill_price": t.avg_fill_price,
-                "tca_reference_entry_price": t.tca_reference_entry_price,
-                "tca_entry_slippage_bps": t.tca_entry_slippage_bps,
-                "tca_reference_exit_price": t.tca_reference_exit_price,
-                "tca_exit_slippage_bps": t.tca_exit_slippage_bps,
-                "strategy_proposal_id": t.strategy_proposal_id,
-                "scan_pattern_id": t.scan_pattern_id,
-                "position_id": t.position_id,
-                "broker_truth_entry_price": broker_metrics.get("entry_price"),
-                "broker_truth_quantity": broker_metrics.get("quantity"),
-                "broker_truth_position_id": broker_metrics.get("position_id"),
-                "broker_truth_current_envelope_id": broker_metrics.get(
-                    "current_envelope_id"
-                ),
-                "broker_truth_metrics_source": broker_metrics.get("source"),
-            }
-        )
+    rows, suppressed_stale_trades = _trade_like_public_response(
+        db,
+        trades,
+        apply_open_stale_filter=apply_open_stale_filter,
+    )
     _shadow_compare_trades_api_rows(
         db,
         user_id=ctx["user_id"],

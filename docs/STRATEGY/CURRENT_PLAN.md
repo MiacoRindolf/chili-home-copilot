@@ -563,3 +563,29 @@ explicitly enabled. Keep the flag default off; do not public-rename.
 
 Report:
 `docs/STRATEGY/CC_REPORTS/2026-05-31_f-position-identity-phase-5ag-trades-open-runtime-adapter-probe.md`.
+
+## Position Identity Phase 5AH - Trades API Open Cutover Flag Path (2026-05-31)
+
+Phase 5AH expanded the existing default-off
+`CHILI_PHASE5AF_TRADES_API_USE_ENVELOPES` flag path so
+`/api/trading/trades` can render open and mixed responses from
+`trading_management_envelopes` runtime objects when explicitly enabled.
+
+Default behavior is unchanged. The route now shares one Trade-like public
+serializer across the legacy compatibility path and the envelope runtime-object
+path, so both use the same broker-truth display overlay and stale-open
+suppression chain. `status=closed` keeps the simple envelope renderer;
+`status=open` and mixed responses can use runtime objects behind the flag.
+
+Live/read-only evidence is green. The Phase 5AH cutover probe reports
+`COMPLETE_POSITIVE`: open rows match exactly (5 old = 5 new), closed rows match
+exactly (50 old = 50 new), and the mixed/all response has identical row content
+with only tie-order drift among rows sharing the same `entry_date`. Phase 5AG,
+Phase 5AE, Phase 5K, and Phase 5I probes remain `COMPLETE_POSITIVE`.
+
+Architect verdict: safe to merge as a default-off route path. Next step is a
+short Phase 5AI route trial with the flag enabled, watching the live API/UI and
+then reverting or promoting based on observed behavior. Do not public-rename.
+
+Report:
+`docs/STRATEGY/CC_REPORTS/2026-05-31_f-position-identity-phase-5ah-trades-api-open-cutover-flag-path.md`.
