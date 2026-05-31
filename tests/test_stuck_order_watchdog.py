@@ -217,6 +217,53 @@ def test_broker_reports_terminal_mirrors_state_no_cancel(db, monkeypatch):
     assert t.tca_entry_slippage_bps == 250.0
 
 
+def test_terminal_filled_without_average_price_does_not_project_entry_tca(
+    db,
+    monkeypatch,
+):
+    u = models.User(name="stuck_wd_no_avg_tca")
+    db.add(u)
+    db.flush()
+
+    t = _make_trade(
+        db,
+        user_id=u.id,
+        broker_order_id="rh-filled-no-avg",
+        broker_status="queued",
+        entry_date=datetime.utcnow() - timedelta(seconds=900),
+        tca_reference_entry_price=10.0,
+    )
+
+    cfg = SimpleNamespace(
+        chili_stuck_order_watchdog_enabled=True,
+        chili_stuck_order_market_timeout_seconds=300,
+        chili_stuck_order_limit_timeout_seconds=1800,
+    )
+    monkeypatch.setattr(wd, "settings", cfg)
+
+    fake_adapter = MagicMock()
+    fake_adapter.get_order.return_value = (
+        _fake_normalized(
+            "filled",
+            order_id="rh-filled-no-avg",
+            filled_size=1.0,
+        ),
+        FreshnessMeta(retrieved_at_utc=datetime.utcnow(), max_age_seconds=15.0),
+    )
+    monkeypatch.setattr(wd, "_get_adapter", lambda _src: fake_adapter)
+
+    out = wd.tick_stuck_order_watchdog(db)
+
+    assert out["outcomes"].get("mirrored:filled") == 1
+
+    db.refresh(t)
+    assert t.status == "open"
+    assert t.broker_status == "filled"
+    assert t.filled_quantity == 1.0
+    assert t.avg_fill_price is None
+    assert t.tca_entry_slippage_bps is None
+
+
 def test_coinbase_terminal_filled_zero_quantity_waits_for_position_truth(db, monkeypatch):
     u = models.User(name="stuck_wd_zero_fill")
     db.add(u)

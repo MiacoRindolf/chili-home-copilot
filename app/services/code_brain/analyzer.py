@@ -24,18 +24,29 @@ _JS_FUNC = re.compile(
 _JS_CLASS = re.compile(r"^\s*(?:export\s+)?class\s+(\w+)", re.MULTILINE)
 
 _INDENT_RE = re.compile(r"^(\s+)\S", re.MULTILINE)
+_BRANCH_KEYWORDS = (
+    "if",
+    "elif",
+    "else",
+    "for",
+    "while",
+    "except",
+    "catch",
+    "case",
+    "switch",
+    "&&",
+    "||",
+    "?",
+)
 
 
 def _estimate_complexity(lines: List[str], language: Optional[str]) -> float:
     """Rough cyclomatic complexity estimate using branching keywords."""
-    branch_kw = {"if", "elif", "else", "for", "while", "except", "catch",
-                 "case", "switch", "&&", "||", "?"}
     score = 1
     for line in lines:
         stripped = line.strip()
-        tokens = stripped.split()
-        for kw in branch_kw:
-            if kw in tokens or kw in stripped:
+        for kw in _BRANCH_KEYWORDS:
+            if kw in stripped:
                 score += 1
                 break
     return min(score / max(len(lines), 1) * 100, 100.0)

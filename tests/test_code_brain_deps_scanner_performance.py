@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections import OrderedDict
 
 from app.models.code_brain import CodeDepAlert
@@ -97,3 +98,48 @@ def test_latest_cache_set_prunes_without_snapshot(monkeypatch) -> None:
     deps_scanner._latest_cache_set(cache, "new", "5.0.0", now=1_000.0)
 
     assert list(cache) == ["pkg-2", "pkg-3", "new"]
+
+
+def test_parse_version_uses_precompiled_pattern(monkeypatch) -> None:
+    def fail_findall(*_args, **_kwargs):
+        raise AssertionError("_parse_version should not call module-level re.findall")
+
+    monkeypatch.setattr(deps_scanner.re, "findall", fail_findall)
+
+    assert deps_scanner._parse_version("2.13.4-rc1") == (2, 13, 4)
+
+
+def test_parse_requirements_uses_precompiled_patterns(tmp_path, monkeypatch) -> None:
+    (tmp_path / "requirements.txt").write_text(
+        "fastapi>=0.110.0\npytest ~= 8.2\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.poetry.dependencies]\nhttpx = \"0.27.0\"\n",
+        encoding="utf-8",
+    )
+
+    def fail_match(*_args, **_kwargs):
+        raise AssertionError("_parse_requirements should not call module-level re.match")
+
+    monkeypatch.setattr(deps_scanner.re, "match", fail_match)
+
+    deps = deps_scanner._parse_requirements(tmp_path)
+
+    assert [dep["name"] for dep in deps] == ["fastapi", "pytest", "httpx"]
+
+
+def test_parse_package_json_uses_precompiled_version_cleaner(tmp_path, monkeypatch) -> None:
+    (tmp_path / "package.json").write_text(
+        json.dumps({"dependencies": {"vite": "^5.2.0"}}),
+        encoding="utf-8",
+    )
+
+    def fail_sub(*_args, **_kwargs):
+        raise AssertionError("_parse_package_json should not call module-level re.sub")
+
+    monkeypatch.setattr(deps_scanner.re, "sub", fail_sub)
+
+    assert deps_scanner._parse_package_json(tmp_path) == [
+        {"name": "vite", "current_version": "5.2.0", "ecosystem": "npm"}
+    ]

@@ -8,6 +8,7 @@ import os
 import re
 from collections import defaultdict
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -44,6 +45,7 @@ def _top_coupling_rows(rows: list[dict[str, Any]], limit: int) -> list[dict[str,
     return heapq.nlargest(limit, rows, key=key)
 
 
+@lru_cache(maxsize=8192)
 def _resolve_python_import(module_name: str, repo_path: Path, source_dir: Path) -> Optional[str]:
     """Try to resolve a dotted module name to a relative file path inside the repo."""
     parts = module_name.split(".")
@@ -52,13 +54,13 @@ def _resolve_python_import(module_name: str, repo_path: Path, source_dir: Path) 
         candidate = repo_path / "/".join(parts)
         test = str(candidate) + ext
         if os.path.isfile(test):
-            return str(Path(test).relative_to(repo_path)).replace("\\", "/")
+            return os.path.relpath(test, repo_path).replace("\\", "/")
     # Relative to source directory
     for ext in (".py", "/__init__.py"):
         candidate = source_dir / "/".join(parts)
         test = str(candidate) + ext
         if os.path.isfile(test):
-            return str(Path(test).relative_to(repo_path)).replace("\\", "/")
+            return os.path.relpath(test, repo_path).replace("\\", "/")
     return None
 
 
@@ -101,6 +103,7 @@ def _parse_python_imports(file_path: str, repo_path: Path) -> List[Dict[str, str
     return edges
 
 
+@lru_cache(maxsize=8192)
 def _resolve_js_import(specifier: str, repo_path: Path, source_dir: Path) -> Optional[str]:
     """Resolve a JS/TS import specifier to a relative file path."""
     if not specifier.startswith("."):
@@ -110,7 +113,7 @@ def _resolve_js_import(specifier: str, repo_path: Path, source_dir: Path) -> Opt
         test = str(candidate) + ext
         if os.path.isfile(test):
             try:
-                return str(Path(test).relative_to(repo_path)).replace("\\", "/")
+                return os.path.relpath(test, repo_path).replace("\\", "/")
             except ValueError:
                 return None
     return None
@@ -176,6 +179,8 @@ def build_dependency_graph(db: Session, repo_id: int) -> Dict[str, Any]:
     if repo_path is None or not repo_path.is_dir():
         return {"error": "Registered workspace is not reachable from the current runtime."}
 
+    _resolve_python_import.cache_clear()
+    _resolve_js_import.cache_clear()
     snapshots = db.query(CodeSnapshot).filter(CodeSnapshot.repo_id == repo_id).all()
     db.query(CodeDependency).filter(CodeDependency.repo_id == repo_id).delete()
 
