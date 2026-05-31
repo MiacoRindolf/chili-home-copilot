@@ -33,10 +33,14 @@ APP_SERVICES = (
     "broker-sync-worker",
 )
 
-PHASE5_SCHEMA_ERROR_RE = re.compile(
+SCHEMA_ERROR_RE = re.compile(
     r"NoReferencedTableError|UndefinedTable|UndefinedColumn|"
     r"relation .* does not exist|column .* does not exist|"
-    r"(?:ERROR|CRITICAL|Traceback).*(?:trading_trades|trading_management_envelopes|phase5)",
+    r"ERROR|CRITICAL|Traceback",
+    re.IGNORECASE,
+)
+PHASE5_SUBJECT_RE = re.compile(
+    r"trading_trades|trading_management_envelopes|phase5|trade_id|Trade",
     re.IGNORECASE,
 )
 POSTGRES_VERSION_NOISE_RE = re.compile(
@@ -95,6 +99,16 @@ def _json_from_output(output: str) -> dict[str, Any] | None:
 
 def _count_matches(text: str, pattern: re.Pattern[str]) -> int:
     return sum(1 for line in text.splitlines() if pattern.search(line))
+
+
+def _count_phase5_schema_errors(text: str) -> int:
+    count = 0
+    for line in text.splitlines():
+        if POSTGRES_VERSION_NOISE_RE.search(line):
+            continue
+        if SCHEMA_ERROR_RE.search(line) and PHASE5_SUBJECT_RE.search(line):
+            count += 1
+    return count
 
 
 def _run_phase5k() -> CommandResult:
@@ -171,10 +185,9 @@ def _main() -> int:
         canary_json.get("unexpected_runtime_mutations", []) if canary_json else None
     )
 
-    app_phase5_schema_errors = _count_matches(app_logs.stdout + app_logs.stderr, PHASE5_SCHEMA_ERROR_RE)
-    postgres_phase5_schema_errors = _count_matches(
-        postgres_logs.stdout + postgres_logs.stderr,
-        PHASE5_SCHEMA_ERROR_RE,
+    app_phase5_schema_errors = _count_phase5_schema_errors(app_logs.stdout + app_logs.stderr)
+    postgres_phase5_schema_errors = _count_phase5_schema_errors(
+        postgres_logs.stdout + postgres_logs.stderr
     )
     postgres_version_noise = _count_matches(
         postgres_logs.stdout + postgres_logs.stderr,
