@@ -471,8 +471,11 @@ def check_new_trade_allowed(
         if not allowed:
             return False, reason
     except Exception:
-        logger.warning("[risk] sector concentration check failed — flagging trade", exc_info=True)
-        return True, "ok (sector check unavailable — proceed with caution)"
+        logger.warning(
+            "[risk] sector concentration check failed; blocking as precaution",
+            exc_info=True,
+        )
+        return False, "sector_check_unavailable"
 
     # Correlation risk check
     try:
@@ -480,8 +483,11 @@ def check_new_trade_allowed(
         if not allowed:
             return False, reason
     except Exception:
-        logger.warning("[risk] correlation check failed — flagging trade", exc_info=True)
-        return True, "ok (correlation check unavailable — proceed with caution)"
+        logger.warning(
+            "[risk] correlation check failed; blocking as precaution",
+            exc_info=True,
+        )
+        return False, "correlation_check_unavailable"
 
     # Portfolio optimizer drawdown requires complete open-position valuation.
     try:
@@ -871,7 +877,11 @@ def check_correlation_risk(
                 f"exceeds limit {limits.max_avg_correlation}"
             )
     except Exception:
-        logger.debug("[risk] correlation check failed; allowing trade", exc_info=True)
+        logger.warning(
+            "[risk] correlation check failed; blocking as precaution",
+            exc_info=True,
+        )
+        return False, "correlation_check_unavailable"
 
     return True, "ok"
 
@@ -2094,7 +2104,8 @@ def unified_risk_check(
         if not allowed:
             return False, reason, detail
     except Exception:
-        pass
+        detail["sector_check_reason"] = "check_failed"
+        return False, "sector_check_unavailable", detail
 
     # 7. Correlation
     try:
@@ -2102,7 +2113,8 @@ def unified_risk_check(
         if not allowed:
             return False, reason, detail
     except Exception:
-        pass
+        detail["correlation_check_reason"] = "check_failed"
+        return False, "correlation_check_unavailable", detail
 
     # 8. Portfolio-level drawdown check (optimizer)
     try:

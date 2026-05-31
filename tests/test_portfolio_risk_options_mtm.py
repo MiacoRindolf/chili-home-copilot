@@ -482,6 +482,223 @@ def test_check_new_trade_allowed_blocks_invalid_capital_before_drawdown_or_sizin
     correlation_check.assert_not_called()
 
 
+def test_check_new_trade_allowed_blocks_when_sector_check_errors() -> None:
+    from app.services.trading.portfolio_risk import RiskLimits, check_new_trade_allowed
+
+    limits = RiskLimits(
+        max_open_positions=10,
+        max_crypto_positions=10,
+        max_stock_positions=10,
+        max_portfolio_heat_pct=100.0,
+        max_same_ticker=10,
+        max_sector_pct=100.0,
+        max_avg_correlation=1.0,
+    )
+
+    with patch(
+        "app.services.trading.governance.is_kill_switch_active",
+        return_value=False,
+    ), patch(
+        "app.services.trading.portfolio_risk.is_breaker_tripped",
+        return_value=False,
+    ), patch(
+        "app.services.trading.portfolio_risk.check_drawdown_breaker",
+        return_value=(False, None),
+    ), patch(
+        "app.services.trading.portfolio_risk.check_sector_concentration",
+        side_effect=RuntimeError("sector probe failed"),
+    ), patch(
+        "app.services.trading.portfolio_risk.check_correlation_risk",
+        side_effect=AssertionError("correlation must not run after sector failure"),
+    ):
+        ok, reason = check_new_trade_allowed(
+            _FakeDb([]),
+            None,
+            "SPY",
+            capital=10_000.0,
+            limits=limits,
+        )
+
+    assert ok is False
+    assert reason == "sector_check_unavailable"
+
+
+def test_check_new_trade_allowed_blocks_when_correlation_check_errors() -> None:
+    from app.services.trading.portfolio_risk import RiskLimits, check_new_trade_allowed
+
+    limits = RiskLimits(
+        max_open_positions=10,
+        max_crypto_positions=10,
+        max_stock_positions=10,
+        max_portfolio_heat_pct=100.0,
+        max_same_ticker=10,
+        max_sector_pct=100.0,
+        max_avg_correlation=1.0,
+    )
+
+    with patch(
+        "app.services.trading.governance.is_kill_switch_active",
+        return_value=False,
+    ), patch(
+        "app.services.trading.portfolio_risk.is_breaker_tripped",
+        return_value=False,
+    ), patch(
+        "app.services.trading.portfolio_risk.check_drawdown_breaker",
+        return_value=(False, None),
+    ), patch(
+        "app.services.trading.portfolio_risk.check_sector_concentration",
+        return_value=(True, "ok"),
+    ), patch(
+        "app.services.trading.portfolio_risk.check_correlation_risk",
+        side_effect=RuntimeError("correlation probe failed"),
+    ), patch(
+        "app.services.trading.portfolio_optimizer.check_portfolio_drawdown",
+        side_effect=AssertionError("drawdown must not run after correlation failure"),
+    ):
+        ok, reason = check_new_trade_allowed(
+            _FakeDb([]),
+            None,
+            "SPY",
+            capital=10_000.0,
+            limits=limits,
+        )
+
+    assert ok is False
+    assert reason == "correlation_check_unavailable"
+
+
+def test_unified_risk_check_blocks_when_sector_check_errors() -> None:
+    from app.services.trading.portfolio_risk import RiskLimits, unified_risk_check
+
+    limits = RiskLimits(
+        max_open_positions=10,
+        max_crypto_positions=10,
+        max_stock_positions=10,
+        max_portfolio_heat_pct=100.0,
+        max_same_ticker=10,
+        max_sector_pct=100.0,
+        max_avg_correlation=1.0,
+    )
+    budget = SimpleNamespace(
+        can_open_new=True,
+        total_heat_pct=0.0,
+        open_positions=0,
+        crypto_positions=0,
+        stock_positions=0,
+    )
+
+    with patch(
+        "app.services.trading.governance.is_kill_switch_active",
+        return_value=False,
+    ), patch(
+        "app.services.trading.portfolio_risk.check_drawdown_breaker",
+        return_value=(False, None),
+    ), patch(
+        "app.services.trading.portfolio_risk.get_risk_limits",
+        return_value=limits,
+    ), patch(
+        "app.services.trading.portfolio_risk.get_portfolio_risk_snapshot",
+        return_value=budget,
+    ), patch(
+        "app.services.trading.portfolio_risk._broker_live_open_trades",
+        return_value=[],
+    ), patch(
+        "app.services.trading.portfolio_risk.check_sector_concentration",
+        side_effect=RuntimeError("sector probe failed"),
+    ):
+        ok, reason, detail = unified_risk_check(
+            _FakeDb([]),
+            None,
+            "SPY",
+            capital=10_000.0,
+        )
+
+    assert ok is False
+    assert reason == "sector_check_unavailable"
+    assert detail["sector_check_reason"] == "check_failed"
+
+
+def test_unified_risk_check_blocks_when_correlation_check_errors() -> None:
+    from app.services.trading.portfolio_risk import RiskLimits, unified_risk_check
+
+    limits = RiskLimits(
+        max_open_positions=10,
+        max_crypto_positions=10,
+        max_stock_positions=10,
+        max_portfolio_heat_pct=100.0,
+        max_same_ticker=10,
+        max_sector_pct=100.0,
+        max_avg_correlation=1.0,
+    )
+    budget = SimpleNamespace(
+        can_open_new=True,
+        total_heat_pct=0.0,
+        open_positions=0,
+        crypto_positions=0,
+        stock_positions=0,
+    )
+
+    with patch(
+        "app.services.trading.governance.is_kill_switch_active",
+        return_value=False,
+    ), patch(
+        "app.services.trading.portfolio_risk.check_drawdown_breaker",
+        return_value=(False, None),
+    ), patch(
+        "app.services.trading.portfolio_risk.get_risk_limits",
+        return_value=limits,
+    ), patch(
+        "app.services.trading.portfolio_risk.get_portfolio_risk_snapshot",
+        return_value=budget,
+    ), patch(
+        "app.services.trading.portfolio_risk._broker_live_open_trades",
+        return_value=[],
+    ), patch(
+        "app.services.trading.portfolio_risk.check_sector_concentration",
+        return_value=(True, "ok"),
+    ), patch(
+        "app.services.trading.portfolio_risk.check_correlation_risk",
+        side_effect=RuntimeError("correlation probe failed"),
+    ), patch(
+        "app.services.trading.portfolio_optimizer.check_portfolio_drawdown",
+        side_effect=AssertionError("drawdown must not run after correlation failure"),
+    ):
+        ok, reason, detail = unified_risk_check(
+            _FakeDb([]),
+            None,
+            "SPY",
+            capital=10_000.0,
+        )
+
+    assert ok is False
+    assert reason == "correlation_check_unavailable"
+    assert detail["correlation_check_reason"] == "check_failed"
+
+
+def test_correlation_risk_blocks_when_correlation_matrix_errors() -> None:
+    from app.services.trading.portfolio_risk import RiskLimits, check_correlation_risk
+
+    rows = [_stock_trade_stub(ticker="MSFT"), _stock_trade_stub(ticker="AAPL")]
+    limits = RiskLimits(max_avg_correlation=0.8)
+
+    with patch(
+        "app.services.trading.broker_position_truth.filter_broker_stale_open_trades",
+        return_value=(rows, []),
+    ), patch(
+        "app.services.trading.portfolio_risk.compute_pairwise_correlation",
+        side_effect=RuntimeError("market data unavailable"),
+    ):
+        ok, reason = check_correlation_risk(
+            _FakeDb(rows),
+            None,
+            "SPY",
+            limits,
+        )
+
+    assert ok is False
+    assert reason == "correlation_check_unavailable"
+
+
 def test_check_new_trade_allowed_blocks_when_drawdown_valuation_unavailable() -> None:
     from app.services.trading.portfolio_risk import RiskLimits, check_new_trade_allowed
 
