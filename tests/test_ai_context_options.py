@@ -59,4 +59,3 @@ def test_open_trade_context_stock_preserves_existing_shape() -> None:
     line = _format_open_trade_context_line(trade)
 
     assert line == "  - LONG 3x @ $195.0 (entered 2026-05-26)"
-

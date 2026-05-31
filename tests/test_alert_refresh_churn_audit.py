@@ -153,6 +153,7 @@ def test_alert_pressure_summary_separates_open_conflicts_from_history():
 
     assert audit._alert_pressure_summary(report) == {
         "status": "attention",
+        "pressure_mode": "actionable_conflict",
         "open_work_events": 2,
         "recert_open_work_events": 0,
         "exit_open_work_events": 2,
@@ -162,6 +163,45 @@ def test_alert_pressure_summary_separates_open_conflicts_from_history():
         "noop_exit_diagnostics": 3,
         "recert_blocker_diagnostics": 7,
         "duplicate_suppressions": 4,
+        "historical_noise_events": 39,
+    }
+
+
+def test_alert_pressure_summary_labels_historical_noise_without_attention():
+    report = {
+        "work_counts": [
+            {
+                "event_type": "recert_rescue_refresh",
+                "status": "done",
+                "events": 12,
+            },
+        ],
+        "diagnostic_outcomes": [
+            {"event_type": "recert_rescue_diagnostic", "events": 5},
+        ],
+        "top_noop_exit_variant_pattern_rollups": [],
+        "top_recert_rescue_blocker_rollups": [
+            {"blocker_diagnostics": 5},
+        ],
+        "open_exit_variant_work_with_recent_noop": [],
+        "open_recert_work_with_recent_blocker_diagnostic": [],
+        "duplicate_open_refresh_work": [],
+        "recent_duplicate_suppressions": [{"suppressed": 2}],
+    }
+
+    assert audit._alert_pressure_summary(report) == {
+        "status": "clear",
+        "pressure_mode": "historical_noise",
+        "open_work_events": 0,
+        "recert_open_work_events": 0,
+        "exit_open_work_events": 0,
+        "open_conflict_rows": 0,
+        "completed_work_events": 12,
+        "diagnostic_events": 5,
+        "noop_exit_diagnostics": 0,
+        "recert_blocker_diagnostics": 5,
+        "duplicate_suppressions": 2,
+        "historical_noise_events": 19,
     }
 
 
@@ -329,6 +369,43 @@ def test_churn_audit_waits_for_database(monkeypatch, capsys):
     assert payload["wait_seconds"] == 5
     assert calls == 2
     assert sleeps == [4.0]
+
+
+def test_rows_configures_bounded_read_only_session(monkeypatch):
+    executed: list[str] = []
+
+    class FakeResult:
+        def fetchall(self):
+            return []
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, statement, params=None):
+            executed.append(str(statement))
+            return FakeResult()
+
+        def rollback(self):
+            executed.append("ROLLBACK")
+
+    monkeypatch.setenv("CHILI_ALERT_REFRESH_CHURN_STATEMENT_TIMEOUT_MS", "3210")
+    monkeypatch.setenv("CHILI_ALERT_REFRESH_CHURN_LOCK_TIMEOUT_MS", "210")
+    monkeypatch.setattr(audit, "SessionLocal", lambda: FakeSession())
+
+    assert audit._rows("SELECT 1", {}) == []
+
+    assert executed == [
+        "SET TRANSACTION READ ONLY",
+        "SET LOCAL statement_timeout = 3210",
+        "SET LOCAL lock_timeout = 210",
+        "SET LOCAL application_name = 'chili-alert-refresh-churn-audit'",
+        "SELECT 1",
+        "ROLLBACK",
+    ]
 
 
 def test_open_exit_noop_query_keeps_non_positive_skip_evidence_specific(monkeypatch):

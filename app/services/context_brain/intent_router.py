@@ -70,19 +70,22 @@ _KEYWORDS: dict[str, list[tuple[str, float]]] = {
         (r"\b(history|previous|earlier|last (week|month|year)|recent)\b", 0.7),
     ],
 }
+_COMPILED_KEYWORDS: dict[str, list[tuple[re.Pattern[str], str, float]]] = {
+    intent: [(re.compile(pattern, re.IGNORECASE), pattern, weight) for pattern, weight in patterns]
+    for intent, patterns in _KEYWORDS.items()
+}
 
 
 def _score_keywords(message: str) -> dict[str, tuple[float, list[str]]]:
     """For each intent, return (score, list_of_matched_patterns)."""
     out: dict[str, tuple[float, list[str]]] = {}
-    msg_lc = message.lower()
-    for intent, patterns in _KEYWORDS.items():
+    for intent, patterns in _COMPILED_KEYWORDS.items():
         score = 0.0
         signals: list[str] = []
-        for pat, w in patterns:
-            if re.search(pat, msg_lc, re.IGNORECASE):
-                score += w
-                signals.append(f"kw:{pat}")
+        for compiled, pattern, weight in patterns:
+            if compiled.search(message):
+                score += weight
+                signals.append(f"kw:{pattern}")
         if score > 0:
             out[intent] = (score, signals)
     return out
