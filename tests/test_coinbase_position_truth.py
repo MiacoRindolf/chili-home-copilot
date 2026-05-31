@@ -136,6 +136,38 @@ def test_coinbase_unavailable_product_suppresses_repeated_position_mark_queries(
     assert client.fills_calls == 1
 
 
+def test_coinbase_public_catalog_prefilter_blocks_unknown_price_queries(monkeypatch):
+    from app.services import coinbase_service
+
+    coinbase_service.clear_cache()
+
+    class Client:
+        market_trade_calls = 0
+        bbo_calls = 0
+
+        def get_market_trades(self, product_id: str, limit: int = 1):
+            self.market_trade_calls += 1
+            raise AssertionError("catalog-known missing product should not fetch trades")
+
+        def get_best_bid_ask(self, product_ids):
+            self.bbo_calls += 1
+            raise AssertionError("catalog-known missing product should not fetch BBO")
+
+    client = Client()
+    monkeypatch.setattr(coinbase_service, "_get_client", lambda: client)
+    monkeypatch.setattr(
+        coinbase_service,
+        "_coinbase_public_product_support",
+        lambda product_id: False,
+    )
+
+    price_cache: dict[str, float] = {}
+    assert coinbase_service._coinbase_current_price("GAL-USD", price_cache) == 0.0
+    assert price_cache["GAL-USD"] == 0.0
+    assert client.market_trade_calls == 0
+    assert client.bbo_calls == 0
+
+
 def test_coinbase_position_sync_aligns_existing_trade_to_broker_truth(
     db,
     monkeypatch,

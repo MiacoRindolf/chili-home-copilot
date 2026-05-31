@@ -434,6 +434,15 @@ def _mark_coinbase_product_unavailable(product_id: str | None) -> None:
     _cache_set(f"product_price:{product_key}", 0.0)
 
 
+def _coinbase_public_product_support(product_id: str) -> bool | None:
+    try:
+        from .trading.coinbase_ohlcv import public_product_support
+
+        return public_product_support(product_id)
+    except Exception:
+        return None
+
+
 def _coinbase_current_price(
     product_id: str,
     price_cache: dict[str, float] | None = None,
@@ -462,6 +471,13 @@ def _coinbase_current_price(
         if price_cache is not None:
             price_cache[product_key] = price
         return price
+
+    support = _coinbase_public_product_support(product_key)
+    if support is False:
+        _mark_coinbase_product_unavailable(product_key)
+        if price_cache is not None:
+            price_cache[product_key] = 0.0
+        return 0.0
 
     client = _get_client()
     if not client:

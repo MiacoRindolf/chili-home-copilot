@@ -297,6 +297,18 @@ def _public_product_support(product_id: str) -> bool | None:
         return product_id in products
 
 
+def public_product_support(product_id: str) -> bool | None:
+    """Return Coinbase public-catalog support without hitting product endpoints.
+
+    ``None`` means the catalog could not be trusted right now, so callers
+    should fall back to their normal venue-specific lookup.
+    """
+    pid = _coinbase_product_id(product_id)
+    if not pid:
+        return False
+    return _public_product_support(pid)
+
+
 def _circuit_is_open(product_id: str, interval: str) -> bool:
     """Return True while provider/network failures are in backoff."""
     global _CIRCUIT_LAST_LOG
