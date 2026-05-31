@@ -1,7 +1,7 @@
 # Current Plan: Position Identity Refactor
 
 **Initiative owner:** Cowork (strategy) + Claude Code (execution).
-**Last update:** 2026-05-31, after Phase 5AG reclassified auto_trader_position_overrides.py as a live control path and added read-only control-scope parity evidence.
+**Last update:** 2026-05-31, after Phase 5O reclassified auto_trader_synergy.py as a live scale-in capital gate and added read-only parity evidence.
 
 > **Why this initiative supersedes the prior fast-path crypto-scalping plan.** Today (2026-05-04) two automated close paths fired, marking 11 equity Trade rows wrongly closed in DB while the broker still held the positions. The shipped patch (inverse-reconcile, broker-truth-self-heal task) auto-healed 18 of them but its cross-check (`event_count == 0` on `trading_execution_events`) is conservative because **Trade row IDs are ephemeral** — every time a row gets wrongly closed and recreated, fills associated with the prior trade_id orphan. The fast-path scalping initiative depends on a stable position model; building more on this foundation makes things worse, not better. Position-identity refactor goes first. Fast-path resumes after.
 
@@ -56,6 +56,26 @@ Phase 5 soak duration was also tightened from one quarter to **2 weeks** at oper
 
 ## Status of the initiative
 
+- **Phase 5O AutoTrader synergy envelope audit CLOSED 2026-05-31.**
+  Audited `app/services/trading/auto_trader_synergy.py` and found it is a live
+  scale-in capital gate, not passive learning/reporting. It selects open
+  AutoTrader v1 management envelopes, excludes options, honors per-position
+  `synergy_excluded` overrides, tracks already-used confirming patterns, and
+  returns additional notional plus merged stop/target/average-entry values.
+  No live behavior was converted. Added
+  `scripts/d-phase5o-auto-trader-synergy-envelope-parity-probe.py`; live
+  result: `COMPLETE_POSITIVE`, 8 checks matched, 0 mismatches, 7 selected v1
+  pairs old = 7 new, 7 selected spot ids old = 7 new, 0 option ids old = 0
+  new, and used scale-in pattern ids matched. Reclassified the file from
+  `learning_research_reporting / adapter_candidate` to
+  `risk_capital_gate / future_rename_blocker`. Verification: focused tests
+  passed (`7 passed`), analyzer stayed clean with raw reader bucket 0, Phase
+  5K remained `COMPLETE_POSITIVE`, Phase 5I remained `COMPLETE_POSITIVE`, and
+  source posture remained `COMPLETE_POSITIVE`. Counts:
+  `orm_trade_symbol_compat=69`, `learning_research_reporting=12`,
+  `risk_capital_gate=19`, `adapter_candidate=15`,
+  `future_rename_blocker=38`. CC report:
+  `docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5o-auto-trader-synergy-envelope-audit.md`.
 - **Phase 5AG AutoTrader position-overrides envelope audit CLOSED 2026-05-31.**
   Audited `app/services/trading/auto_trader_position_overrides.py` and found
   it is a live control helper, not a passive private/type-only helper.

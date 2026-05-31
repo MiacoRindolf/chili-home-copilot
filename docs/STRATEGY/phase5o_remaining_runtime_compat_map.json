@@ -2,16 +2,16 @@
   "generated_from": "scripts/analyze_phase5_remaining_trade_refs.py --json",
   "orm_trade_symbol_compat_count": 69,
   "phase5o_bucket_counts": {
-    "adapter_candidate": 16,
-    "future_rename_blocker": 37,
+    "adapter_candidate": 15,
+    "future_rename_blocker": 38,
     "leave_alone": 16
   },
   "contract_group_counts": {
-    "learning_research_reporting": 13,
+    "learning_research_reporting": 12,
     "live_action_broker_reconcile": 18,
     "private_helper_type_only": 6,
     "public_ui_schema_contract": 14,
-    "risk_capital_gate": 18
+    "risk_capital_gate": 19
   },
   "items": [
     {
@@ -121,10 +121,10 @@
     },
     {
       "path": "app/services/trading/auto_trader_synergy.py",
-      "contract_group": "learning_research_reporting",
-      "phase5o_bucket": "adapter_candidate",
-      "phase5o_subtype": "read_only_learning_reporting",
-      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+      "contract_group": "risk_capital_gate",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "live_scale_in_capital_gate",
+      "rationale": "Live AutoTrader scale-in planner: selects open v1 management envelopes, excludes options and per-position override rows, tracks used confirming patterns, and returns additional capital/stop/target plans. Requires scale-in scope parity evidence before any conversion."
     },
     {
       "path": "app/services/trading/autopilot_scope.py",

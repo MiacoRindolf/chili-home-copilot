@@ -120,7 +120,8 @@ ORM_CONTRACT_GROUPS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(
             r"^(?:app/services/trading/(?:auto_trader_rules\.py|cash_deployment\.py|"
-            r"compliance\.py|correlation_budget\.py|emergency_liquidation\.py|fast_path/|"
+            r"auto_trader_synergy\.py|compliance\.py|correlation_budget\.py|"
+            r"emergency_liquidation\.py|fast_path/|"
             r"governance\.py|options/portfolio_budget\.py|portfolio(?:_allocator|_risk)?\.py))",
             re.IGNORECASE,
         ),
@@ -130,7 +131,7 @@ ORM_CONTRACT_GROUPS: tuple[tuple[re.Pattern[str], str], ...] = (
         re.compile(
             r"^(?:app/services/(?:backtest_service\.py|context_brain/|reasoning_brain/|"
             r"trading_scheduler\.py|yf_session\.py|trading/(?:alpha_decay\.py|"
-            r"auto_trader_synergy\.py|brain_neural_mesh/|cron_jobs/|"
+            r"brain_neural_mesh/|cron_jobs/|"
             r"divergence_service\.py|economic_ledger\.py|edge_reliability\.py|"
             r"evidence_correction\.py|execution_cost_builder\.py|execution_event_lag\.py|"
             r"execution_robustness\.py|exit_evaluator\.py|learning|market_data\.py|"

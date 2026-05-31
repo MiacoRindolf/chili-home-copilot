@@ -1,50 +1,52 @@
-# NEXT_TASK: f-phase5o-auto-trader-synergy-envelope-audit
+# NEXT_TASK: f-phase5o-autopilot-scope-envelope-audit
 
 STATUS: QUEUED
 
 ## Goal
 
-Audit `app/services/trading/auto_trader_synergy.py`, the next Phase 5O
-adapter-candidate after `auto_trader_position_overrides.py` was reclassified
-as a live control path.
+Audit `app/services/trading/autopilot_scope.py`, the next Phase 5O adapter
+candidate after `auto_trader_synergy.py` was reclassified as a live scale-in
+capital gate.
 
 ## Why This Is Next
 
-The last four candidates were not safe direct conversions:
+Recent candidates have repeatedly turned out to be live behavior surfaces, not
+simple passive readers:
 
 - `alerts.py` owns live alert/order/proposal behavior.
 - `alpha_decay.py` can demote promoted alpha.
 - `auto_trader_monitor.py` can submit live exits.
 - `auto_trader_position_overrides.py` can submit close-now exits and mutate
   adoption/unadoption scope.
+- `auto_trader_synergy.py` can return scale-in capital plans.
 
-`auto_trader_synergy.py` is still classified as
-`learning_research_reporting / adapter_candidate`, but it reads per-position
-overrides and may affect scale-in/synergy behavior. It needs a contract audit
-before any conversion.
+`autopilot_scope.py` is currently classified as
+`private_helper_type_only / adapter_candidate`, but its helpers are used by
+live monitor, close, option/crypto partitioning, and public risk surfaces.
+Before any helper conversion, prove whether it is a harmless private type
+adapter or a behavior-bearing classification gate.
 
-Current surface:
+Current surface after Phase 5O synergy audit:
 
 ```text
 orm_trade_symbol_compat = 69
-learning_research_reporting = 13
+learning_research_reporting = 12
 live_action_broker_reconcile = 18
 private_helper_type_only = 6
-adapter_candidate = 16
-future_rename_blocker = 37
+risk_capital_gate = 19
+adapter_candidate = 15
+future_rename_blocker = 38
 raw reader bucket = 0
 ```
 
 ## Scope
 
-- Classify every legacy `Trade` ORM reference in `auto_trader_synergy.py`.
-- Determine whether it is truly read-only learning/reporting or whether it
-  affects live entry/scale-in gates.
-- If passive, add/ship a focused envelope parity probe or safe helper
-  conversion.
-- If it affects live placement/scale-in behavior, close as an audit,
-  reclassify as a future rename blocker, and queue the parity evidence needed
-  before conversion.
+- Classify every legacy `Trade` ORM reference in `autopilot_scope.py`.
+- Identify which helpers are pure type/shape checks and which influence live
+  option/crypto/equity routing or close/monitor behavior.
+- If passive and covered by tests, add a small safe helper/adapter conversion.
+- If behavior-bearing, add read-only envelope parity evidence and reclassify
+  it as a future rename blocker.
 
 ## Guardrails
 
@@ -52,8 +54,8 @@ raw reader bucket = 0
   portfolio behavior change without parity evidence.
 - No public `/trades`, `trade_id`, schema, or UI label rename.
 - Do not touch the dirty root checkout.
-- Respect `project_ws` coordination reports; if PM/control-plane governance is
-  frozen, push a branch/PR for evidence but do not force a merge.
+- Respect `project_ws` coordination reports; while PM/control-plane governance
+  remains frozen, push evidence branches only and do not force a merge/deploy.
 
 ## Exit Criteria
 
