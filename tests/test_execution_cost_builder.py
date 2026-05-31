@@ -11,6 +11,7 @@ from app.services.trading.execution_cost_builder import (
     BuilderReport,
     EstimateRow,
     _estimate_from_rows,
+    _notional,
     compute_rolling_estimate,
     estimates_summary,
     mode_is_active,
@@ -232,6 +233,46 @@ class TestComputeRollingEstimate:
         assert est is not None
         assert est.avg_daily_volume_usd == pytest.approx(20_000 / 30)
         _cleanup(db, ["ADVNF_PHF"])
+
+    def test_option_notional_uses_contract_multiplier_for_adv_fallback(self):
+        row = SimpleNamespace(
+            tca_entry_slippage_bps=4.0,
+            tca_exit_slippage_bps=2.0,
+            entry_price=1.25,
+            quantity=2.0,
+            asset_kind="robinhood_options",
+            indicator_snapshot={"asset_class": "option_contract"},
+        )
+
+        est = _estimate_from_rows(
+            ticker="OPT_PHF",
+            side_norm="long",
+            window_days=10,
+            rows=[row],
+            adv_lookup_fn=lambda _ticker, _window: 0.0,
+        )
+
+        assert _notional(row) == pytest.approx(250.0)
+        assert est is not None
+        assert est.avg_daily_volume_usd == pytest.approx(25.0)
+
+    def test_notional_rejects_boolean_price_or_quantity(self):
+        assert _notional(
+            SimpleNamespace(
+                entry_price=True,
+                quantity=2.0,
+                asset_kind="option",
+                indicator_snapshot={"option_meta": {"strike": 500.0}},
+            )
+        ) == 0.0
+        assert _notional(
+            SimpleNamespace(
+                entry_price=1.25,
+                quantity=True,
+                asset_kind="option",
+                indicator_snapshot={"option_meta": {"strike": 500.0}},
+            )
+        ) == 0.0
 
 
 class TestUpsertEstimate:

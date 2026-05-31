@@ -9,6 +9,7 @@ Provides regulatory-aware guardrails for multi-user deployment:
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -32,13 +33,22 @@ def _is_option_trade_safe(trade: Any) -> bool:
         return False
 
 
-def _trade_notional_usd(trade: Any) -> float:
+def _positive_finite_float(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
     try:
-        entry = float(getattr(trade, "entry_price", None) or 0.0)
-        qty = float(getattr(trade, "quantity", None) or 0.0)
+        out = float(value)
     except (TypeError, ValueError):
-        return 0.0
-    if entry <= 0.0 or qty <= 0.0:
+        return None
+    if not math.isfinite(out) or out <= 0.0:
+        return None
+    return out
+
+
+def _trade_notional_usd(trade: Any) -> float:
+    entry = _positive_finite_float(getattr(trade, "entry_price", None))
+    qty = _positive_finite_float(getattr(trade, "quantity", None))
+    if entry is None or qty is None:
         return 0.0
     multiplier = 100.0 if _is_option_trade_safe(trade) else 1.0
     return abs(entry * qty * multiplier)

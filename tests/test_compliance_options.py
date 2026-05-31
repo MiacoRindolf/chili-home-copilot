@@ -59,3 +59,38 @@ def test_compliance_trade_notional_keeps_equity_share_math() -> None:
     )
 
     assert _trade_notional_usd(stock_trade) == pytest.approx(200.0)
+
+
+def test_compliance_trade_notional_rejects_bool_and_nonfinite_values() -> None:
+    from app.services.trading.compliance import _trade_notional_usd
+
+    assert _trade_notional_usd(
+        SimpleNamespace(entry_price=True, quantity=2, indicator_snapshot={})
+    ) == 0.0
+    assert _trade_notional_usd(
+        SimpleNamespace(entry_price=1.25, quantity="Infinity", asset_kind="option")
+    ) == 0.0
+
+
+def test_compliance_concentration_counts_option_alias_contract_notional() -> None:
+    from app.services.trading.compliance import check_concentration_limits
+
+    option_trade = SimpleNamespace(
+        ticker="SPY",
+        entry_price=1.25,
+        quantity=3,
+        asset_kind="robinhood_options",
+        indicator_snapshot={},
+    )
+
+    ok, reason = check_concentration_limits(
+        _FakeDb([option_trade]),
+        user_id=None,
+        ticker="SPY",
+        proposed_notional=1_000.0,
+        total_equity=5_000.0,
+    )
+
+    assert not ok
+    assert reason is not None
+    assert "27.5% of equity" in reason

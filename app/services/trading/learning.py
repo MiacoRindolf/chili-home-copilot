@@ -5593,7 +5593,7 @@ def update_pattern_stats_from_closed_trades(db: Session, user_id: int | None) ->
     from collections import defaultdict
     from ...models.trading import ScanPattern, Trade
     from .evidence_correction import (
-        compute_trade_correction, aggregate_pattern_stats,
+        aggregate_pattern_stats,
     )
 
     cycle_run_id = uuid.uuid4()
@@ -5623,6 +5623,10 @@ def update_pattern_stats_from_closed_trades(db: Session, user_id: int | None) ->
                 Trade.direction,
                 Trade.ticker,
                 Trade.pnl,
+                Trade.quantity,
+                Trade.tags,
+                Trade.indicator_snapshot,
+                Trade.asset_kind,
             )
             .filter(
                 Trade.status == "closed",
@@ -5671,13 +5675,8 @@ def update_pattern_stats_from_closed_trades(db: Session, user_id: int | None) ->
                 ):
                     continue
                 try:
-                    corr = compute_trade_correction(
-                        entry_price=float(trade_row.entry_price),
-                        exit_price=float(trade_row.exit_price),
-                        entry_date=trade_row.entry_date,
-                        close_date=trade_row.exit_date,
-                        direction=trade_row.direction or "long",
-                        ticker=trade_row.ticker,
+                    corr = _evidence_correction_compute_trade_row(
+                        trade_row,
                         pattern_timeframe=tf,
                         max_bars=max_bars,
                     )
@@ -5736,6 +5735,32 @@ def _evidence_correction_resolve_max_bars(pattern: Any) -> int:
     except Exception:
         pass
     return 20
+
+
+def _evidence_correction_compute_trade_row(
+    trade_row: Any,
+    *,
+    pattern_timeframe: str,
+    max_bars: int,
+) -> Any:
+    """Build one canonical evidence correction from a closed Trade row."""
+    from .autopilot_scope import is_option_trade
+    from .evidence_correction import compute_trade_correction
+    from .return_math import trade_return_pct
+
+    trade_is_option = is_option_trade(trade_row)
+    return compute_trade_correction(
+        entry_price=float(trade_row.entry_price),
+        exit_price=float(trade_row.exit_price),
+        entry_date=trade_row.entry_date,
+        close_date=trade_row.exit_date,
+        direction=trade_row.direction or "long",
+        ticker=trade_row.ticker,
+        pattern_timeframe=pattern_timeframe,
+        max_bars=max_bars,
+        is_option_trade=trade_is_option,
+        realized_return_pct=trade_return_pct(trade_row),
+    )
 
 
 def _evidence_correction_persist(

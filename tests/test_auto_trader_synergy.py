@@ -162,6 +162,43 @@ def test_maybe_scale_in_skips_existing_option_trade(mock_find):
 
 
 @patch("app.services.trading.auto_trader_synergy.find_open_autotrader_trade")
+def test_maybe_scale_in_skips_existing_option_alias_trade(mock_find):
+    db = MagicMock()
+    t = Trade(
+        user_id=1,
+        ticker="SPY",
+        direction="long",
+        entry_price=1.25,
+        quantity=1,
+        status="open",
+        stop_loss=1.0,
+        take_profit=2.0,
+        scan_pattern_id=1,
+        auto_trader_version="v1",
+        scale_in_count=0,
+        asset_kind="robinhood_options",
+    )
+    mock_find.return_value = t
+
+    settings = MagicMock()
+    settings.chili_autotrader_synergy_enabled = True
+    settings.chili_autotrader_synergy_scale_notional_usd = EXPLICIT_SCALE_IN_NOTIONAL
+
+    plan = maybe_scale_in(
+        db,
+        user_id=1,
+        ticker="SPY",
+        new_scan_pattern_id=2,
+        new_stop=1.1,
+        new_target=2.2,
+        current_price=715.0,
+        settings=settings,
+    )
+
+    assert plan is None
+
+
+@patch("app.services.trading.auto_trader_synergy.find_open_autotrader_trade")
 def test_maybe_scale_in_fractional_default_is_capped(mock_find):
     db = MagicMock()
     t = Trade(

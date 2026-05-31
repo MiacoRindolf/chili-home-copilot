@@ -23,6 +23,7 @@ from app.services.trading.edge_reliability import (
     EDGE_RELIABILITY_SNAPSHOT,
     RECERT_RESCUE_REFRESH,
     RECERT_RESCUE_DIAGNOSTIC,
+    _canonical_asset_class,
     _asset_class_for_paper,
     _asset_class_for_trade,
     compute_pattern_edge_reliability,
@@ -112,6 +113,19 @@ def test_edge_reliability_asset_class_for_trade_uses_contract_identity() -> None
     )
 
     assert _asset_class_for_trade(row, pattern=None) == "options"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("robinhood_options", "options"),
+        ("option_contract", "options"),
+        ("digital_asset", "crypto"),
+        ("equities", "stock"),
+    ],
+)
+def test_edge_reliability_canonical_asset_class_uses_shared_aliases(raw, expected) -> None:
+    assert _canonical_asset_class(raw) == expected
 
 
 def test_edge_reliability_attribution_from_runs_paper_and_live(db):
@@ -303,6 +317,53 @@ def test_edge_reliability_counts_option_paper_with_realized_pnl(db):
     assert row["paper_closed_count"] == 1
     assert row["realized_ev_pct"] == pytest.approx(16.0)
     assert row["paper_realized_ev_pct"] == pytest.approx(16.0)
+
+
+def test_edge_reliability_option_slice_keeps_alias_runs_and_realized_paper(db):
+    pat = _pattern(db, asset_class="all")
+    alert = _alert(db, pat, "SPY")
+    run = _run(db, pat, alert, expected=2.0)
+    run.rule_snapshot = {**run.rule_snapshot, "asset_class": "robinhood_options"}
+    db.add(
+        PaperTrade(
+            scan_pattern_id=pat.id,
+            paper_shadow_of_alert_id=alert.id,
+            ticker="SPY",
+            direction="long",
+            entry_price=1.25,
+            stop_price=0.75,
+            target_price=2.0,
+            quantity=2.0,
+            status="closed",
+            entry_date=datetime.utcnow(),
+            exit_date=datetime.utcnow(),
+            exit_price=1.45,
+            pnl=40.0,
+            pnl_pct=1600.0,
+            signal_json={
+                "asset_class": "robinhood_options",
+                "option_meta": {"strike": 500.0},
+            },
+        )
+    )
+    db.commit()
+
+    row = compute_pattern_edge_reliability(
+        db,
+        pat.id,
+        asset_class="options",
+        window_days=7,
+    )
+
+    assert row["asset_class"] == "options"
+    assert row["slice_asset_class"] == "options"
+    assert row["edge_eval_count"] == 1
+    assert row["asset_types"] == {"options": 1}
+    assert row["closed_evidence_count"] == 1
+    assert row["paper_closed_count"] == 1
+    assert row["realized_ev_pct"] == pytest.approx(16.0)
+    assert row["paper_realized_ev_pct"] == pytest.approx(16.0)
+    assert row["expected_ev_pct"] == pytest.approx(2.0)
 
 
 def test_edge_supply_prefers_recent_positive_edge_over_arbitrary_distinct_order(db):

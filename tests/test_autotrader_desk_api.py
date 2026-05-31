@@ -344,6 +344,64 @@ def test_autotrader_desk_paper_option_accepts_serialized_signal_json(
     assert row["unrealized_pnl_pct"] == pytest.approx(16.0)
 
 
+def test_autotrader_desk_paper_option_alias_uses_premium_mark(
+    paired_client,
+    db: Session,
+) -> None:
+    c, user = paired_client
+    pat = ScanPattern(
+        user_id=user.id,
+        name="desk_alias_paper_option_pattern",
+        rules_json={"test": True},
+        origin="unit",
+        asset_class="stock",
+        timeframe="1d",
+        active=True,
+        trade_count=0,
+    )
+    db.add(pat)
+    db.flush()
+    pt = PaperTrade(
+        user_id=user.id,
+        scan_pattern_id=pat.id,
+        ticker="SPY",
+        direction="long",
+        entry_price=1.25,
+        quantity=2.0,
+        status="open",
+        signal_json={
+            "auto_trader_v1": True,
+            "asset_class": "robinhood_options",
+            "option_meta": {
+                "underlying": "SPY",
+                "expiration": "2026-06-19",
+                "strike": 729.0,
+                "option_type": "call",
+            },
+        },
+    )
+    db.add(pt)
+    db.commit()
+
+    with patch(
+        "app.services.trading.market_data.fetch_quote",
+        side_effect=AssertionError("alias paper option rows must not fetch spot"),
+    ), patch(
+        "app.services.trading.broker_quotes.broker_quote_for_trade",
+        return_value={"price": 1.45, "source": "robinhood_options"},
+    ):
+        r = c.get("/api/trading/autotrader/desk")
+
+    assert r.status_code == 200
+    payload = r.json()
+    row = next(x for x in payload["paper_trades"] if x["ticker"] == "SPY")
+    assert row["asset_type"] == "options"
+    assert row["contract_multiplier"] == 100.0
+    assert row["current_price"] == pytest.approx(1.45)
+    assert row["unrealized_pnl_usd"] == pytest.approx(40.0)
+    assert row["unrealized_pnl_pct"] == pytest.approx(16.0)
+
+
 def test_autotrader_desk_suppresses_closed_broker_position(
     paired_client,
     db: Session,

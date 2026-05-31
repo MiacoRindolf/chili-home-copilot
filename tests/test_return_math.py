@@ -59,6 +59,21 @@ def test_trade_return_pct_snapshot_asset_class_uses_contract_multiplier() -> Non
     assert trade_return_pct(trade) == pytest.approx(16.0)
 
 
+def test_trade_return_pct_snapshot_option_alias_uses_contract_multiplier() -> None:
+    trade = SimpleNamespace(
+        entry_price=1.25,
+        exit_price=1.45,
+        quantity=2.0,
+        pnl=40.0,
+        direction="long",
+        asset_kind=None,
+        tags=None,
+        indicator_snapshot={"asset_class": "robinhood_options"},
+    )
+
+    assert trade_return_pct(trade) == pytest.approx(16.0)
+
+
 def test_trade_return_pct_snapshot_multiplier_uses_contract_multiplier() -> None:
     trade = SimpleNamespace(
         entry_price=1.25,
@@ -203,6 +218,20 @@ def test_paper_trade_return_pct_asset_class_uses_contract_multiplier() -> None:
     assert paper_trade_return_pct(trade) == pytest.approx(16.0)
 
 
+def test_paper_trade_return_pct_option_alias_uses_contract_multiplier() -> None:
+    trade = SimpleNamespace(
+        entry_price=1.25,
+        exit_price=1.45,
+        quantity=2.0,
+        pnl=40.0,
+        pnl_pct=1600.0,
+        direction="long",
+        signal_json={"asset_class": "option_contract"},
+    )
+
+    assert paper_trade_return_pct(trade) == pytest.approx(16.0)
+
+
 def test_paper_trade_return_pct_nested_asset_kind_uses_contract_multiplier() -> None:
     trade = SimpleNamespace(
         entry_price=1.25,
@@ -268,6 +297,20 @@ def test_paper_trade_return_pct_paper_meta_asset_class_uses_contract_multiplier(
         pnl_pct=1600.0,
         direction="long",
         signal_json={"_paper_meta": {"asset_class": "option"}},
+    )
+
+    assert paper_trade_return_pct(trade) == pytest.approx(16.0)
+
+
+def test_paper_trade_return_pct_paper_meta_option_alias_uses_contract_multiplier() -> None:
+    trade = SimpleNamespace(
+        entry_price=1.25,
+        exit_price=1.45,
+        quantity=2.0,
+        pnl=40.0,
+        pnl_pct=1600.0,
+        direction="long",
+        signal_json={"_paper_meta": {"asset_class": "robinhood_options"}},
     )
 
     assert paper_trade_return_pct(trade) == pytest.approx(16.0)

@@ -8,6 +8,10 @@ or option returns are overstated by 100x.
 from __future__ import annotations
 
 OPTION_CONTRACT_MULTIPLIER_SQL = "100.0"
+OPTION_ASSET_CLASS_ALIASES_SQL = (
+    "('option', 'options', 'option_contract', "
+    "'robinhood_option', 'robinhood_options')"
+)
 
 
 def _col(alias: str | None, name: str) -> str:
@@ -29,6 +33,14 @@ def _json_numeric_equals_sql(json_expr: str, key: str, expected: str) -> str:
     )
 
 
+def _asset_alias_sql(expr: str) -> str:
+    return f"LOWER(COALESCE({expr}, '')) IN {OPTION_ASSET_CLASS_ALIASES_SQL}"
+
+
+def _json_asset_alias_sql(json_expr: str, key: str) -> str:
+    return _asset_alias_sql(f"{json_expr} ->> '{key}'")
+
+
 def trade_contract_multiplier_sql(alias: str | None = None) -> str:
     """Return a PostgreSQL expression for a live trade contract multiplier."""
     asset_kind = _col(alias, "asset_kind")
@@ -37,22 +49,19 @@ def trade_contract_multiplier_sql(alias: str | None = None) -> str:
     breakout = f"({snap} -> 'breakout_alert')"
     return f"""
         CASE
-          WHEN LOWER(COALESCE({asset_kind}, '')) IN ('option', 'options')
+          WHEN {_asset_alias_sql(asset_kind)}
             OR LOWER(COALESCE({tags}, '')) LIKE '%option%'
             OR {snap} ? 'option_meta'
-            OR LOWER(COALESCE({snap} ->> 'asset_kind', '')) IN ('option', 'options')
-            OR LOWER(COALESCE({snap} ->> 'asset_type', '')) IN ('option', 'options')
-            OR LOWER(COALESCE({snap} ->> 'asset_class', '')) IN ('option', 'options')
+            OR {_json_asset_alias_sql(snap, 'asset_kind')}
+            OR {_json_asset_alias_sql(snap, 'asset_type')}
+            OR {_json_asset_alias_sql(snap, 'asset_class')}
             OR {_json_truthy_sql(snap, 'options_path')}
             OR {_json_numeric_equals_sql(snap, 'option_contract_multiplier', OPTION_CONTRACT_MULTIPLIER_SQL)}
             OR {_json_numeric_equals_sql(snap, 'contract_multiplier', OPTION_CONTRACT_MULTIPLIER_SQL)}
             OR {breakout} ? 'option_meta'
-            OR LOWER(COALESCE({breakout} ->> 'asset_kind', ''))
-               IN ('option', 'options')
-            OR LOWER(COALESCE({breakout} ->> 'asset_type', ''))
-               IN ('option', 'options')
-            OR LOWER(COALESCE({breakout} ->> 'asset_class', ''))
-               IN ('option', 'options')
+            OR {_json_asset_alias_sql(breakout, 'asset_kind')}
+            OR {_json_asset_alias_sql(breakout, 'asset_type')}
+            OR {_json_asset_alias_sql(breakout, 'asset_class')}
             OR {_json_truthy_sql(breakout, 'options_path')}
             OR {_json_numeric_equals_sql(breakout, 'option_contract_multiplier', OPTION_CONTRACT_MULTIPLIER_SQL)}
             OR {_json_numeric_equals_sql(breakout, 'contract_multiplier', OPTION_CONTRACT_MULTIPLIER_SQL)}
@@ -70,26 +79,23 @@ def paper_trade_contract_multiplier_sql(alias: str | None = None) -> str:
     return f"""
         CASE
           WHEN {signal} ? 'option_meta'
-            OR LOWER(COALESCE({signal} ->> 'asset_kind', '')) IN ('option', 'options')
-            OR LOWER(COALESCE({signal} ->> 'asset_type', '')) IN ('option', 'options')
-            OR LOWER(COALESCE({signal} ->> 'asset_class', '')) IN ('option', 'options')
+            OR {_json_asset_alias_sql(signal, 'asset_kind')}
+            OR {_json_asset_alias_sql(signal, 'asset_type')}
+            OR {_json_asset_alias_sql(signal, 'asset_class')}
             OR {_json_truthy_sql(signal, 'options_path')}
             OR {_json_numeric_equals_sql(signal, 'option_contract_multiplier', OPTION_CONTRACT_MULTIPLIER_SQL)}
             OR {_json_numeric_equals_sql(signal, 'contract_multiplier', OPTION_CONTRACT_MULTIPLIER_SQL)}
             OR {paper_meta} ? 'option_meta'
             OR {_json_truthy_sql(paper_meta, 'options_path')}
-            OR LOWER(COALESCE({paper_meta} ->> 'asset_kind', '')) IN ('option', 'options')
-            OR LOWER(COALESCE({paper_meta} ->> 'asset_type', '')) IN ('option', 'options')
-            OR LOWER(COALESCE({paper_meta} ->> 'asset_class', '')) IN ('option', 'options')
+            OR {_json_asset_alias_sql(paper_meta, 'asset_kind')}
+            OR {_json_asset_alias_sql(paper_meta, 'asset_type')}
+            OR {_json_asset_alias_sql(paper_meta, 'asset_class')}
             OR {_json_numeric_equals_sql(paper_meta, 'option_contract_multiplier', OPTION_CONTRACT_MULTIPLIER_SQL)}
             OR {_json_numeric_equals_sql(paper_meta, 'contract_multiplier', OPTION_CONTRACT_MULTIPLIER_SQL)}
             OR {breakout} ? 'option_meta'
-            OR LOWER(COALESCE({breakout} ->> 'asset_kind', ''))
-               IN ('option', 'options')
-            OR LOWER(COALESCE({breakout} ->> 'asset_type', ''))
-               IN ('option', 'options')
-            OR LOWER(COALESCE({breakout} ->> 'asset_class', ''))
-               IN ('option', 'options')
+            OR {_json_asset_alias_sql(breakout, 'asset_kind')}
+            OR {_json_asset_alias_sql(breakout, 'asset_type')}
+            OR {_json_asset_alias_sql(breakout, 'asset_class')}
             OR {_json_truthy_sql(breakout, 'options_path')}
             OR {_json_numeric_equals_sql(breakout, 'option_contract_multiplier', OPTION_CONTRACT_MULTIPLIER_SQL)}
             OR {_json_numeric_equals_sql(breakout, 'contract_multiplier', OPTION_CONTRACT_MULTIPLIER_SQL)}

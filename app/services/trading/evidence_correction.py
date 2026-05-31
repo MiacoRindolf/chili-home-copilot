@@ -19,6 +19,7 @@ maps to and uses that for overheld trades.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -59,6 +60,8 @@ def compute_trade_correction(
     ticker: str,
     pattern_timeframe: str,
     max_bars: int,
+    is_option_trade: bool = False,
+    realized_return_pct: float | None = None,
 ) -> TradeCorrection:
     """Per-trade canonical-aware correction. Pure; no DB.
 
@@ -71,14 +74,22 @@ def compute_trade_correction(
     these trades; the caller increments
     ``counterfactual_unavailable_count`` so the coverage gap is
     measurable.
+
+    Option trades are premium-domain positions. This function must not
+    counterfactually reprice an option entry/exit against underlying
+    ticker OHLCV, so overheld option rows keep their realized premium
+    return and are marked counterfactual-unavailable for audit/coverage.
     """
     from .timeframe_utils import timeframe_to_seconds
 
     sign = 1.0 if direction == "long" else -1.0
-    realized_pct = (
+    price_realized_pct = (
         sign * (float(exit_price) - float(entry_price))
         / float(entry_price) * 100.0
     )
+    realized_pct = _finite_float_or_none(realized_return_pct)
+    if realized_pct is None:
+        realized_pct = price_realized_pct
     realized_won = realized_pct > 0
 
     tf_seconds = timeframe_to_seconds(pattern_timeframe)
@@ -91,6 +102,16 @@ def compute_trade_correction(
             corrected_return_pct=realized_pct,
             overheld=False,
             counterfactual_available=True,
+            realized_won=realized_won,
+            corrected_won=realized_won,
+        )
+
+    if is_option_trade:
+        return TradeCorrection(
+            realized_return_pct=realized_pct,
+            corrected_return_pct=realized_pct,
+            overheld=True,
+            counterfactual_available=False,
             realized_won=realized_won,
             corrected_won=realized_won,
         )
@@ -117,6 +138,14 @@ def compute_trade_correction(
         realized_won=realized_won,
         corrected_won=cf_pct > 0,
     )
+
+
+def _finite_float_or_none(value: object) -> float | None:
+    try:
+        out = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
 
 
 def aggregate_pattern_stats(corrections: list[TradeCorrection]) -> PatternStats:

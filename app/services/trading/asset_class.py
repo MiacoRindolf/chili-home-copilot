@@ -4,10 +4,14 @@ from __future__ import annotations
 PATTERN_ASSET_CLASS_ALL = "all"
 PATTERN_ASSET_CLASS_STOCKS = "stocks"
 PATTERN_ASSET_CLASS_CRYPTO = "crypto"
+PATTERN_ASSET_CLASS_OPTIONS = "options"
 
 _ALL_ASSET_CLASS_ALIASES = frozenset({"", "all", "any", "universal"})
 _STOCK_ASSET_CLASS_ALIASES = frozenset({"stock", "stocks", "equity", "equities"})
 _CRYPTO_ASSET_CLASS_ALIASES = frozenset({"crypto", "cryptocurrency", "digital_asset"})
+_OPTION_ASSET_CLASS_ALIASES = frozenset(
+    {"option", "options", "option_contract", "robinhood_option", "robinhood_options"}
+)
 
 
 def normalize_pattern_asset_class(value: object) -> str:
@@ -17,6 +21,8 @@ def normalize_pattern_asset_class(value: object) -> str:
         return PATTERN_ASSET_CLASS_STOCKS
     if raw in _CRYPTO_ASSET_CLASS_ALIASES:
         return PATTERN_ASSET_CLASS_CRYPTO
+    if raw in _OPTION_ASSET_CLASS_ALIASES:
+        return PATTERN_ASSET_CLASS_OPTIONS
     if raw in _ALL_ASSET_CLASS_ALIASES:
         return PATTERN_ASSET_CLASS_ALL
     return PATTERN_ASSET_CLASS_ALL

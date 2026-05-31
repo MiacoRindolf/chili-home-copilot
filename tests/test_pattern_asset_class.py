@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from app.services.trading.asset_class import (
     PATTERN_ASSET_CLASS_ALL,
     PATTERN_ASSET_CLASS_CRYPTO,
+    PATTERN_ASSET_CLASS_OPTIONS,
     PATTERN_ASSET_CLASS_STOCKS,
     normalize_pattern_asset_class,
 )
@@ -17,6 +18,8 @@ def test_pattern_asset_class_normalizes_stock_aliases() -> None:
     assert normalize_pattern_asset_class("equity") == PATTERN_ASSET_CLASS_STOCKS
     assert normalize_pattern_asset_class("equities") == PATTERN_ASSET_CLASS_STOCKS
     assert normalize_pattern_asset_class("crypto") == PATTERN_ASSET_CLASS_CRYPTO
+    assert normalize_pattern_asset_class("option") == PATTERN_ASSET_CLASS_OPTIONS
+    assert normalize_pattern_asset_class("robinhood_options") == PATTERN_ASSET_CLASS_OPTIONS
     assert normalize_pattern_asset_class("") == PATTERN_ASSET_CLASS_ALL
 
 
@@ -64,3 +67,20 @@ def test_get_active_patterns_treats_stock_aliases_as_same_asset() -> None:
     assert stock_alias_ids == stock_ids
     assert crypto_pat.id not in stock_ids
     assert all_ids == {all_pat.id}
+
+
+def test_get_active_patterns_keeps_options_separate_from_stocks() -> None:
+    all_pat = SimpleNamespace(id=1, asset_class="all", active=True)
+    stock_pat = SimpleNamespace(id=2, asset_class="stock", active=True)
+    option_pat = SimpleNamespace(id=3, asset_class="option", active=True)
+    options_pat = SimpleNamespace(id=4, asset_class="robinhood_options", active=True)
+    crypto_pat = SimpleNamespace(id=5, asset_class="crypto", active=True)
+    db = _PatternDb([all_pat, stock_pat, option_pat, options_pat, crypto_pat])
+
+    option_ids = {p.id for p in get_active_patterns(db, asset_class="options")}
+    stock_ids = {p.id for p in get_active_patterns(db, asset_class="stock")}
+
+    assert option_ids == {all_pat.id, option_pat.id, options_pat.id}
+    assert stock_pat.id not in option_ids
+    assert crypto_pat.id not in option_ids
+    assert option_pat.id not in stock_ids

@@ -9,6 +9,27 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from .return_math import trade_return_pct
+
+
+def _finite_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out == out and out not in (float("inf"), float("-inf")) else None
+
+
+def _trade_tca_cost_pct(trade: Any) -> float | None:
+    """Return entry+exit TCA cost in percent points, or None if incomplete."""
+    entry_bps = _finite_float(getattr(trade, "tca_entry_slippage_bps", None))
+    exit_bps = _finite_float(getattr(trade, "tca_exit_slippage_bps", None))
+    if entry_bps is None or exit_bps is None:
+        return None
+    return (entry_bps + exit_bps) / 100.0
+
 
 def _scan_patterns_by_id(db: Session, pattern_ids: set[int]) -> dict[int, Any]:
     ids = sorted({int(pid) for pid in pattern_ids if int(pid) > 0})
@@ -70,6 +91,18 @@ def live_vs_research_by_pattern(
         pnls = [float(t.pnl or 0) for t in tlist]
         wins = sum(1 for p in pnls if p > 0)
         n = len(tlist)
+        live_returns = [
+            ret for ret in (trade_return_pct(t) for t in tlist) if ret is not None
+        ]
+        live_net_returns: list[float] = []
+        tca_costs_pct: list[float] = []
+        for t in tlist:
+            ret = trade_return_pct(t)
+            cost_pct = _trade_tca_cost_pct(t)
+            if cost_pct is not None:
+                tca_costs_pct.append(cost_pct)
+            if ret is not None and cost_pct is not None:
+                live_net_returns.append(ret - cost_pct)
         entry_slips = [
             float(t.tca_entry_slippage_bps)
             for t in tlist
@@ -102,6 +135,22 @@ def live_vs_research_by_pattern(
                 "live_win_rate_pct": round(wins / n * 100.0, 1) if n else 0.0,
                 "live_total_pnl": round(sum(pnls), 2),
                 "live_avg_pnl": round(sum(pnls) / n, 2) if n else 0.0,
+                "live_return_sample_n": len(live_returns),
+                "live_avg_return_pct": (
+                    round(sum(live_returns) / len(live_returns), 3)
+                    if live_returns
+                    else None
+                ),
+                "live_avg_tca_cost_pct": (
+                    round(sum(tca_costs_pct) / len(tca_costs_pct), 4)
+                    if tca_costs_pct
+                    else None
+                ),
+                "live_avg_net_return_pct": (
+                    round(sum(live_net_returns) / len(live_net_returns), 3)
+                    if live_net_returns
+                    else None
+                ),
                 "live_avg_entry_slippage_bps": round(sum(entry_slips) / len(entry_slips), 2)
                 if entry_slips
                 else None,

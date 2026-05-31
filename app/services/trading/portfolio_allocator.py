@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime
 from typing import Any
 
@@ -25,12 +26,36 @@ def _utc_iso() -> str:
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
+    if isinstance(value, bool):
+        return default
     try:
         if value is None:
             return default
-        return float(value)
+        out = float(value)
     except (TypeError, ValueError):
         return default
+    return out if math.isfinite(out) else default
+
+
+def _optionish(value: Any) -> bool:
+    raw = str(value or "").strip().lower()
+    return raw in {
+        "option",
+        "options",
+        "option_contract",
+        "robinhood_options",
+        "robinhood_option",
+    }
+
+
+def _option_multiplier(value: Any) -> bool:
+    return _safe_float(value, 0.0) == 100.0
+
+
+def _truthy_marker(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _normalize_confidence(value: Any) -> float:
@@ -74,9 +99,18 @@ def _symbol_asset_family(symbol: str | None) -> str:
 def _correlation_bucket(symbol: str | None, *, asset_class: str | None = None) -> str:
     sym = (symbol or "").strip().upper()
     family = (asset_class or "").strip().lower() or _symbol_asset_family(sym)
+    if family in {"option", "options"}:
+        family = _symbol_asset_family(sym)
     if sym.endswith("-USD"):
         return f"crypto:{sym.split('-')[0]}"
     return f"{family}:{sym[:1] or 'x'}"
+
+
+def _candidate_asset_family(symbol: str | None, asset_class: str | None) -> str:
+    family = (asset_class or "").strip().lower()
+    if family in {"option", "options"}:
+        return _symbol_asset_family(symbol)
+    return family or _symbol_asset_family(symbol)
 
 
 def _venue_readiness_score(symbol: str | None) -> float:
@@ -205,6 +239,32 @@ def _trade_notional_usd(trade: Any) -> float:
     return max(0.0, abs(px * qty * multiplier))
 
 
+def _session_contract_multiplier(
+    session: Any,
+    snap: dict[str, Any],
+    lane: dict[str, Any],
+    pos: dict[str, Any],
+) -> float:
+    if _optionish(getattr(session, "execution_family", None)) or _optionish(
+        getattr(session, "venue", None)
+    ):
+        return 100.0
+    for source in (pos, lane, snap):
+        if not isinstance(source, dict):
+            continue
+        if (
+            _optionish(source.get("asset_class"))
+            or _optionish(source.get("asset_type"))
+            or _optionish(source.get("asset_kind"))
+            or _truthy_marker(source.get("options_path"))
+            or isinstance(source.get("option_meta"), dict)
+            or _option_multiplier(source.get("option_contract_multiplier"))
+            or _option_multiplier(source.get("contract_multiplier"))
+        ):
+            return 100.0
+    return 1.0
+
+
 def _session_position_notional_usd(session: Any) -> float:
     snap = getattr(session, "risk_snapshot_json", None)
     if not isinstance(snap, dict):
@@ -226,7 +286,7 @@ def _session_position_notional_usd(session: Any) -> float:
             or _safe_float(lane.get("last_price"), 0.0)
         )
         if qty > 0 and px > 0:
-            return abs(qty * px)
+            return abs(qty * px * _session_contract_multiplier(session, snap, lane, pos))
     return 0.0
 
 
@@ -411,7 +471,7 @@ def evaluate_allocation_candidate(
             "portfolio_exposure": {},
         }
 
-    sector = (asset_class or "").strip().lower() or _symbol_asset_family(symbol)
+    sector = _candidate_asset_family(symbol, asset_class)
     corr_bucket = _correlation_bucket(symbol, asset_class=sector)
     live_drift_score = _tier_score(live_drift_contract or {})
     execution_score = _tier_score(execution_contract or {})

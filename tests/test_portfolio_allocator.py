@@ -272,3 +272,164 @@ def test_allocator_open_trade_notional_uses_option_contract_multiplier():
     )
 
     assert notional == 250.0
+
+
+def test_allocator_session_notional_uses_option_contract_multiplier():
+    session = SimpleNamespace(
+        execution_family="robinhood_options",
+        venue="robinhood",
+        risk_snapshot_json={
+            "momentum_live_execution": {
+                "position": {"quantity": 2.0, "entry_price": 1.25},
+            },
+        },
+    )
+
+    assert allocator_mod._session_position_notional_usd(session) == 250.0
+
+
+def test_allocator_session_option_notional_keeps_direct_usd_value():
+    session = SimpleNamespace(
+        execution_family="robinhood_options",
+        venue="robinhood",
+        risk_snapshot_json={
+            "momentum_live_execution": {
+                "position": {
+                    "quantity": 2.0,
+                    "entry_price": 1.25,
+                    "notional_usd": 260.0,
+                },
+            },
+        },
+    )
+
+    assert allocator_mod._session_position_notional_usd(session) == 260.0
+
+
+def test_allocator_session_notional_uses_snapshot_option_multiplier():
+    session = SimpleNamespace(
+        execution_family="robinhood_equity",
+        venue="robinhood",
+        risk_snapshot_json={
+            "momentum_live_execution": {
+                "asset_class": "options",
+                "position": {
+                    "quantity": 3.0,
+                    "avg_fill_price": 0.75,
+                    "contract_multiplier": 100.0,
+                },
+            },
+        },
+    )
+
+    assert allocator_mod._session_position_notional_usd(session) == 225.0
+
+
+def test_allocator_safe_float_rejects_bool_and_nonfinite_values():
+    assert allocator_mod._safe_float(True, 7.0) == 7.0
+    assert allocator_mod._safe_float("NaN", 7.0) == 7.0
+
+
+def test_allocator_session_notional_ignores_false_option_path_marker():
+    session = SimpleNamespace(
+        execution_family="robinhood_equity",
+        venue="robinhood",
+        risk_snapshot_json={
+            "momentum_live_execution": {
+                "options_path": "false",
+                "position": {"quantity": 2.0, "entry_price": 1.25},
+            },
+        },
+    )
+
+    assert allocator_mod._session_position_notional_usd(session) == 2.5
+
+
+def test_allocator_option_bucket_helpers_use_underlying_family():
+    family = allocator_mod._candidate_asset_family("PHHOPT_NEW", "options")
+
+    assert family == "equity"
+    assert (
+        allocator_mod._correlation_bucket("PHHOPT_NEW", asset_class="options")
+        == "equity:P"
+    )
+    assert (
+        allocator_mod._correlation_bucket("PHHOPT_NEW", asset_class=family)
+        == "equity:P"
+    )
+
+
+class _FakeAllocatorQuery:
+    def __init__(self, rows):
+        self._rows = list(rows)
+
+    def filter(self, *_args, **_kwargs):
+        return self
+
+    def all(self):
+        return list(self._rows)
+
+    def count(self):
+        return len(self._rows)
+
+
+class _FakeAllocatorDb:
+    def __init__(self, *, trades=None, sessions=None, variants=None):
+        self._trades = list(trades or [])
+        self._sessions = list(sessions or [])
+        self._variants = list(variants or [])
+
+    def query(self, model):
+        name = getattr(model, "__name__", "")
+        if name == "Trade":
+            return _FakeAllocatorQuery(self._trades)
+        if name == "TradingAutomationSession":
+            return _FakeAllocatorQuery(self._sessions)
+        if name == "MomentumStrategyVariant":
+            return _FakeAllocatorQuery(self._variants)
+        return _FakeAllocatorQuery([])
+
+
+def test_allocator_option_candidate_uses_underlying_correlation_bucket(monkeypatch):
+    db = _FakeAllocatorDb(
+        trades=[
+            SimpleNamespace(
+                id=1,
+                user_id=1,
+                scan_pattern_id=None,
+                ticker="PHHOPT_INC",
+                direction="long",
+                entry_price=100.0,
+                quantity=1.0,
+                status="open",
+                broker_source="robinhood",
+            )
+        ]
+    )
+
+    monkeypatch.setattr(
+        "app.services.trading.portfolio_allocator.settings.brain_max_correlated_positions",
+        1,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.portfolio_allocator.settings.brain_max_open_per_sector",
+        0,
+    )
+    decision = evaluate_allocation_candidate(
+        db,
+        user_id=1,
+        symbol="PHHOPT_NEW",
+        timeframe="swing",
+        asset_class="options",
+        hypothesis_family="option_breakout",
+        research_quality=0.75,
+        live_drift_contract={"composite_tier": "healthy"},
+        execution_contract={"robustness_tier": "healthy"},
+        context="option_entry",
+    )
+
+    assert decision["allowed_if_enforced"] is False
+    assert decision["blocked_reason"] == "correlation_bucket_cap"
+    assert decision["asset_class"] == "equity"
+    assert decision["correlation_bucket"] == "equity:P"
+    assert "same_correlation_bucket" in decision["conflict_buckets"]

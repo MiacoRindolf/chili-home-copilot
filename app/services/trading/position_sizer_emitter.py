@@ -90,7 +90,16 @@ class EmitterSignal:
 
 def _infer_asset_class(ticker: str, explicit: Optional[str]) -> str:
     if explicit:
-        return explicit.strip().lower()
+        asset = explicit.strip().lower()
+        if asset in {
+            "option",
+            "options",
+            "option_contract",
+            "robinhood_option",
+            "robinhood_options",
+        }:
+            return "options"
+        return asset
     return "crypto" if is_crypto_symbol(ticker) else "equity"
 
 
@@ -127,6 +136,8 @@ def _unit_multiplier(asset_class: str) -> float:
 
 
 def _clamp01(value: float, lo: float = 0.01, hi: float = 0.99) -> float:
+    if isinstance(value, bool):
+        return 0.55
     try:
         v = float(value)
     except Exception:
@@ -147,11 +158,20 @@ def _direction(value: Any) -> str:
 
 
 def _finite_float(value: Any) -> Optional[float]:
+    if isinstance(value, bool):
+        return None
     try:
         v = float(value)
     except Exception:
         return None
     return v if math.isfinite(v) else None
+
+
+def _settings_float(name: str, default: float, *, min_value: float = 0.0) -> float:
+    value = _finite_float(getattr(settings, name, None))
+    if value is None or value < min_value:
+        return float(default)
+    return value
 
 
 def _loss_per_unit(entry: float, stop: float, direction: str = "long") -> float:
@@ -197,11 +217,12 @@ def _try_netedge_score(db: Session, signal: EmitterSignal) -> Optional[Any]:
         if not _net.mode_is_active():
             return None
         target_price = _finite_float(signal.target_price)
+        raw_prob = _clamp01(signal.confidence if signal.confidence is not None else 0.55)
         ctx = _net.NetEdgeSignalContext(
             ticker=signal.ticker,
             asset_class=_infer_asset_class(signal.ticker, signal.asset_class),
             scan_pattern_id=signal.pattern_id,
-            raw_prob=float(signal.confidence or 0.55),
+            raw_prob=raw_prob,
             entry_price=float(signal.entry_price),
             stop_price=float(signal.stop_price),
             target_price=target_price if target_price and target_price > 0 else None,
@@ -223,9 +244,15 @@ def _build_input(
     """Translate the emitter-facing signal + optional ranker score into the pure sizer input."""
     asset_class = _infer_asset_class(signal.ticker, signal.asset_class)
     unit_multiplier = _unit_multiplier(asset_class)
+    entry_price = _finite_float(signal.entry_price) or 0.0
+    stop_price = _finite_float(signal.stop_price) or 0.0
+    capital = _finite_float(signal.capital) or 0.0
     target_price = _finite_float(signal.target_price)
     if net_edge_score is not None:
-        calibrated_prob = _clamp01(getattr(net_edge_score, "calibrated_prob", signal.confidence or 0.55))
+        fallback_prob = signal.confidence if signal.confidence is not None else 0.55
+        calibrated_prob = _clamp01(
+            getattr(net_edge_score, "calibrated_prob", fallback_prob)
+        )
         payoff_fraction = max(0.0, _finite_float(getattr(net_edge_score, "expected_payoff", 0.0)) or 0.0)
         loss_per_unit = max(0.0, _finite_float(getattr(net_edge_score, "loss_per_unit", 0.0)) or 0.0)
         costs = getattr(net_edge_score, "costs", None)
@@ -239,13 +266,13 @@ def _build_input(
             expected_net_pnl = calibrated_prob * payoff_fraction - (1.0 - calibrated_prob) * loss_per_unit
     else:
         loss = _loss_per_unit(
-            signal.entry_price,
-            signal.stop_price,
+            entry_price,
+            stop_price,
             signal.direction,
         )
         calibrated_prob = _clamp01(signal.confidence if signal.confidence is not None else 0.55)
         payoff_fraction = _payoff_fraction(
-            signal.entry_price,
+            entry_price,
             signal.target_price,
             loss,
             signal.direction,
@@ -259,9 +286,9 @@ def _build_input(
         ticker=signal.ticker,
         direction=(signal.direction or "long").strip().lower() or "long",
         asset_class=asset_class,
-        entry_price=float(signal.entry_price),
-        stop_price=float(signal.stop_price),
-        capital=float(signal.capital),
+        entry_price=entry_price,
+        stop_price=stop_price,
+        capital=capital,
         calibrated_prob=calibrated_prob,
         payoff_fraction=payoff_fraction,
         loss_per_unit=loss_per_unit,
@@ -271,16 +298,19 @@ def _build_input(
         regime=signal.regime,
         pattern_id=signal.pattern_id,
         user_id=signal.user_id,
-        kelly_scale=float(getattr(settings, "brain_position_sizer_kelly_scale", 0.25)),
-        max_risk_pct=float(getattr(settings, "brain_position_sizer_max_risk_pct", 2.0)),
-        equity_bucket_cap_pct=float(
-            getattr(settings, "brain_position_sizer_equity_bucket_cap_pct", 15.0),
+        kelly_scale=_settings_float("brain_position_sizer_kelly_scale", 0.25),
+        max_risk_pct=_settings_float("brain_position_sizer_max_risk_pct", 2.0),
+        equity_bucket_cap_pct=_settings_float(
+            "brain_position_sizer_equity_bucket_cap_pct",
+            15.0,
         ),
-        crypto_bucket_cap_pct=float(
-            getattr(settings, "brain_position_sizer_crypto_bucket_cap_pct", 10.0),
+        crypto_bucket_cap_pct=_settings_float(
+            "brain_position_sizer_crypto_bucket_cap_pct",
+            10.0,
         ),
-        single_ticker_cap_pct=float(
-            getattr(settings, "brain_position_sizer_single_ticker_cap_pct", 7.5),
+        single_ticker_cap_pct=_settings_float(
+            "brain_position_sizer_single_ticker_cap_pct",
+            7.5,
         ),
         qty_rounding=qty_rounding,
         unit_multiplier=unit_multiplier,

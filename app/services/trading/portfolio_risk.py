@@ -16,6 +16,12 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from ...models.trading import Trade
+from .asset_class import (
+    PATTERN_ASSET_CLASS_CRYPTO,
+    PATTERN_ASSET_CLASS_OPTIONS,
+    PATTERN_ASSET_CLASS_STOCKS,
+    normalize_pattern_asset_class,
+)
 
 logger = logging.getLogger(__name__)
 OPTION_HEAT_STOP_PCT_DEFAULT = 50.0
@@ -193,12 +199,17 @@ def _is_option_trade_safe(trade: Any) -> bool:
 
 
 def _canonical_asset_kind(value: Any) -> str | None:
-    raw = str(value or "").strip().lower()
-    if raw in {"option", "options"}:
+    normalized = normalize_pattern_asset_class(value)
+    if normalized == PATTERN_ASSET_CLASS_OPTIONS:
         return "option"
-    if raw in {"stock", "stocks", "equity", "equities"}:
+    if normalized == PATTERN_ASSET_CLASS_STOCKS:
         return "equity"
-    if raw in {"crypto", "cryptocurrency", "coin"}:
+    if normalized == PATTERN_ASSET_CLASS_CRYPTO:
+        return "crypto"
+    raw = str(value or "").strip().lower()
+    if raw in {"equity", "equities"}:
+        return "equity"
+    if raw in {"cryptocurrency", "coin"}:
         return "crypto"
     return None
 

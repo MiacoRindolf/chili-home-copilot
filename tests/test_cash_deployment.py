@@ -340,6 +340,33 @@ def test_cash_deployment_nested_asset_class_option_uses_contract_return() -> Non
     assert _trade_return_pct(trade) == pytest.approx(16.0)
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("robinhood_options", "options"),
+        ("option_contract", "options"),
+        ("digital_asset", "crypto"),
+        ("equities", "stock"),
+    ],
+)
+def test_cash_deployment_canonical_asset_class_uses_shared_aliases(raw, expected) -> None:
+    from app.services.trading.cash_deployment import _canonical_asset_class
+
+    assert _canonical_asset_class(raw) == expected
+
+
+def test_cash_deployment_row_asset_class_uses_alias_counters() -> None:
+    from app.services.trading.cash_deployment import _asset_class_for_row
+
+    row = {
+        "asset_class": None,
+        "asset_types": {"robinhood_options": 3, "stock": 1},
+        "primary_symbol": "SPY",
+    }
+
+    assert _asset_class_for_row(row) == "options"
+
+
 def test_cash_deployment_zero_ranks_stale_broker_local_open(db, monkeypatch):
     monkeypatch.setattr(settings, "chili_autotrader_live_enabled", True)
     monkeypatch.setattr(settings, "chili_cash_deployment_equity_cost_pct", 0.05)

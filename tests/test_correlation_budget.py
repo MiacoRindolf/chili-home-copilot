@@ -109,6 +109,11 @@ class TestBucketFor:
         assert bucket_for("PHHCB_XYZ", asset_class="equity") == "equity:P"
         assert bucket_for("BTC-USD", asset_class="crypto") == "crypto:BTC"
 
+    def test_option_candidate_uses_underlying_correlation_bucket(self):
+        assert bucket_for("PHHCB_XYZ", asset_class="options") == "equity:P"
+        assert bucket_for("AAPL", asset_class="option") == bucket_for("AAPL")
+        assert bucket_for("PHHCB_XYZ", asset_class="robinhood_options") == "equity:P"
+
     def test_empty_symbol_falls_back_gracefully(self):
         assert bucket_for(None) == "equity:x"
         assert bucket_for("") == "equity:x"
@@ -165,8 +170,8 @@ class TestComputeCorrelationBudget:
             ticker="PHHCB_OPT",
             quantity=2,
             entry_price=1.25,
-            asset_kind="option",
-            indicator_snapshot={"option_meta": {"strike": 100.0}},
+            asset_kind="robinhood_options",
+            indicator_snapshot={},
         )
 
         budget = compute_correlation_budget(
@@ -175,6 +180,62 @@ class TestComputeCorrelationBudget:
         )
 
         assert budget.open_notional == pytest.approx(250.0)
+
+    def test_option_candidate_counts_option_exposure_in_underlying_bucket(self):
+        row = SimpleNamespace(
+            ticker="PHHCB_OPT",
+            quantity=2,
+            entry_price=1.25,
+            asset_kind=None,
+            indicator_snapshot={"asset_class": "option_contract"},
+        )
+
+        budget = compute_correlation_budget(
+            _FakeDbRows([row]), user_id=None, ticker="PHHCB_NEW", capital=100_000.0,
+            asset_class="robinhood_options",
+        )
+
+        assert budget.bucket == "equity:P"
+        assert budget.open_notional == pytest.approx(250.0)
+
+    def test_rejects_boolean_and_nonfinite_trade_notional_fields(self):
+        rows = [
+            SimpleNamespace(
+                ticker="PHHCB_BOOL",
+                quantity=True,
+                entry_price=1.25,
+                asset_kind="option",
+                indicator_snapshot={"option_meta": {"strike": 100.0}},
+            ),
+            SimpleNamespace(
+                ticker="PHHCB_NAN",
+                quantity=2,
+                entry_price="NaN",
+                asset_kind="option",
+                indicator_snapshot={"option_meta": {"strike": 100.0}},
+            ),
+        ]
+
+        budget = compute_correlation_budget(
+            _FakeDbRows(rows), user_id=None, ticker="PHHCB_NEW", capital=100_000.0,
+            asset_class="options",
+        )
+
+        assert budget.open_notional == 0.0
+
+    def test_malformed_bucket_cap_uses_default(self, monkeypatch):
+        monkeypatch.setattr(
+            "app.services.trading.correlation_budget.settings.brain_position_sizer_equity_bucket_cap_pct",
+            True,
+            raising=False,
+        )
+
+        budget = compute_correlation_budget(
+            _FakeDbRows([]), user_id=None, ticker="PHHCB_NEW", capital=100_000.0,
+            asset_class="equity",
+        )
+
+        assert budget.max_bucket_notional == pytest.approx(15_000.0)
 
     def test_crypto_cap_uses_crypto_bucket_pct(self, db, monkeypatch):
         _cleanup_trades(db)
@@ -257,6 +318,25 @@ class TestComputePortfolioBudget:
 
         assert pb.deployed_notional == pytest.approx(250.0)
         assert pb.ticker_open_notional == pytest.approx(250.0)
+
+    def test_portfolio_budget_rejects_boolean_and_nonfinite_inputs(self):
+        row = SimpleNamespace(
+            ticker="PHHCB_OPT",
+            quantity=2,
+            entry_price="Infinity",
+            asset_kind="option",
+            indicator_snapshot={"option_meta": {"strike": 100.0}},
+        )
+
+        pb = compute_portfolio_budget(
+            _FakeDbRows([row]), user_id=None, ticker="PHHCB_OPT", capital=True,
+            max_total_notional_pct=True,
+        )
+
+        assert pb.total_capital == 0.0
+        assert pb.deployed_notional == 0.0
+        assert pb.ticker_open_notional == 0.0
+        assert pb.max_total_notional == 0.0
 
     def test_max_total_notional_pct_scales_cap(self, db):
         _cleanup_trades(db)

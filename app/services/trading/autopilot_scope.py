@@ -24,6 +24,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from ...models.trading import Trade
+from .asset_class import PATTERN_ASSET_CLASS_OPTIONS, normalize_pattern_asset_class
 
 
 # ---------------------------------------------------------------------------
@@ -61,7 +62,16 @@ def is_option_trade(trade: Trade) -> bool:
     import math as _math
 
     def _optionish(value: object) -> bool:
-        return str(value or "").strip().lower() in {"option", "options"}
+        try:
+            return normalize_pattern_asset_class(value) == PATTERN_ASSET_CLASS_OPTIONS
+        except Exception:
+            return str(value or "").strip().lower() in {
+                "option",
+                "options",
+                "option_contract",
+                "robinhood_option",
+                "robinhood_options",
+            }
 
     def _option_multiplier(value: object) -> bool:
         if isinstance(value, bool):

@@ -58,6 +58,7 @@ from .alerts import PATTERN_BREAKOUT_IMMINENT, dispatch_alert
 from .asset_class import (
     PATTERN_ASSET_CLASS_ALL,
     PATTERN_ASSET_CLASS_CRYPTO,
+    PATTERN_ASSET_CLASS_OPTIONS,
     PATTERN_ASSET_CLASS_STOCKS,
     normalize_pattern_asset_class,
 )
@@ -930,6 +931,14 @@ def _tickers_for_pattern(
     for t in tickers:
         cr = is_crypto(t)
         if ac == PATTERN_ASSET_CLASS_CRYPTO and not cr:
+            continue
+        if ac == PATTERN_ASSET_CLASS_OPTIONS and cr:
+            continue
+        if (
+            ac == PATTERN_ASSET_CLASS_OPTIONS
+            and not equity_open
+            and not allow_offsession_stock_shadow
+        ):
             continue
         if ac == PATTERN_ASSET_CLASS_STOCKS and cr:
             continue

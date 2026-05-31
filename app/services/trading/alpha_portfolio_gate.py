@@ -440,15 +440,21 @@ def broker_risk_probation_allows_live(
 
 def _realized_edge_fraction(row: Mapping[str, Any]) -> tuple[float | None, int]:
     realized_n = _safe_int(row.get("realized_n_trades")) or 0
-    avg = _safe_float(row.get("realized_avg_pnl_pct"))
-    if avg is not None:
-        return avg, realized_n
-
     raw_n = _safe_int(row.get("raw_realized_trade_count")) or 0
     raw_avg_pct = _safe_float(row.get("raw_realized_avg_return_pct"))
-    if raw_avg_pct is None:
-        return None, raw_n
-    return raw_avg_pct / 100.0, raw_n
+    avg = _safe_float(row.get("realized_avg_pnl_pct"))
+
+    # ``realized_*`` is loaded from live broker trades only, while
+    # ``raw_realized_*`` is synced from live plus qualified AutoTrader
+    # paper/shadow outcomes. Do not let a tiny live sample mask the broader
+    # paper-dynamic evidence used for shadow vetting.
+    if raw_avg_pct is not None and raw_n > realized_n:
+        return raw_avg_pct / 100.0, raw_n
+    if avg is not None:
+        return avg, realized_n
+    if raw_avg_pct is not None:
+        return raw_avg_pct / 100.0, raw_n
+    return None, max(realized_n, raw_n)
 
 
 def candidate_base_score(
@@ -550,8 +556,19 @@ def _candidate_floor_blocks(row: Mapping[str, Any], cfg: AlphaPortfolioConfig) -
         if _safe_float(row.get(key)) is None:
             reasons.append(f"missing_{key}")
 
+    live_realized_n = _safe_int(row.get("realized_n_trades")) or 0
+    live_realized_avg = _safe_float(row.get("realized_avg_pnl_pct"))
+    live_floor_block = (
+        live_realized_n >= cfg.min_realized_trades
+        and live_realized_avg is not None
+        and live_realized_avg <= 0.0
+    )
     realized_avg, realized_n = _realized_edge_fraction(row)
-    if realized_n >= cfg.min_realized_trades and realized_avg is not None and realized_avg <= 0.0:
+    if live_floor_block or (
+        realized_n >= cfg.min_realized_trades
+        and realized_avg is not None
+        and realized_avg <= 0.0
+    ):
         reasons.append("negative_realized_floor")
     oos_at = row.get("oos_evaluated_at")
     if oos_at is not None:

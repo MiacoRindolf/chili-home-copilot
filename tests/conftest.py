@@ -227,6 +227,7 @@ _TRADING_DOMAIN_TARGETED_TESTS = (
     "test_cost_aware_gate.py",
     "test_cpcv_promotion_gate.py",
     "test_crypto_exit_monitor_pattern_exit_now.py",
+    "test_evidence_canonical_writer.py",
     "test_governance_daily_loss.py",
     "test_edge_aware_evolution.py",
     "test_edge_reliability.py",

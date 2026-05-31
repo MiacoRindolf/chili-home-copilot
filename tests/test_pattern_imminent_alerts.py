@@ -2136,6 +2136,34 @@ def test_tickers_for_pattern_treats_stock_aliases_as_session_gated() -> None:
     ) == ["AAPL"]
 
 
+def test_tickers_for_pattern_treats_options_as_equity_session_gated() -> None:
+    pattern = ScanPattern(
+        name="Options route",
+        rules_json={"conditions": []},
+        origin="test",
+        asset_class="options",
+        ticker_scope="universal",
+    )
+    universe = ["AAPL", TEST_EXECUTABLE_CRYPTO_TICKER]
+
+    assert imminent_mod._tickers_for_pattern(
+        pattern,
+        universe,
+        equity_open=True,
+    ) == ["AAPL"]
+    assert imminent_mod._tickers_for_pattern(
+        pattern,
+        universe,
+        equity_open=False,
+    ) == []
+    assert imminent_mod._tickers_for_pattern(
+        pattern,
+        universe,
+        equity_open=False,
+        allow_offsession_stock_shadow=True,
+    ) == ["AAPL"]
+
+
 def test_gather_imminent_routes_offsession_stock_to_shadow_lane(
     db,
     monkeypatch,

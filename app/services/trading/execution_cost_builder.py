@@ -121,12 +121,22 @@ def _positive_finite_float(value: Any) -> float | None:
     return out
 
 
+def _is_option_trade_safe(trade: Any) -> bool:
+    try:
+        from .autopilot_scope import is_option_trade
+
+        return bool(is_option_trade(trade))
+    except Exception:
+        return False
+
+
 def _notional(trade: Any) -> float:
     px = _positive_finite_float(getattr(trade, "entry_price", None))
     qty = _positive_finite_float(getattr(trade, "quantity", None))
     if px is None or qty is None:
         return 0.0
-    return abs(px * qty)
+    multiplier = 100.0 if _is_option_trade_safe(trade) else 1.0
+    return abs(px * qty * multiplier)
 
 
 def _estimate_from_rows(

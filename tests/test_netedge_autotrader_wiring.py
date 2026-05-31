@@ -14,6 +14,7 @@ we focus on the wiring contract: write-only side effect, never raise.
 from __future__ import annotations
 
 from datetime import datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -139,6 +140,54 @@ def test_shadow_score_routes_crypto_asset_class(db, shadow_mode):
     assert row.asset_class == "crypto"
     assert row.regime == "risk_off"
     assert row.scan_pattern_id == pat.id
+
+
+def test_shadow_score_routes_option_asset_alias_to_options_bucket(monkeypatch):
+    pat = SimpleNamespace(
+        id=123,
+        corrected_win_rate=0.57,
+        corrected_trade_count=50,
+        win_rate=None,
+        trade_count=None,
+    )
+
+    class _FakeQuery:
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def one_or_none(self):
+            return pat
+
+    class _FakeDb:
+        def query(self, *_args, **_kwargs):
+            return _FakeQuery()
+
+    alert = SimpleNamespace(
+        ticker="SPY",
+        asset_type="robinhood_options",
+        stop_loss=1.0,
+        target_price=2.0,
+        scan_pattern_id=pat.id,
+        regime_at_alert="risk_on",
+        timeframe="1h",
+        direction="long",
+    )
+    captured = {}
+
+    monkeypatch.setattr(ner, "mode_is_active", lambda: True)
+    monkeypatch.setattr(
+        ner,
+        "score",
+        lambda _db, ctx: captured.setdefault("ctx", ctx),
+    )
+
+    auto_trader._emit_netedge_shadow_score(_FakeDb(), alert, entry_price=1.25)
+
+    ctx = captured["ctx"]
+    assert ctx.asset_class == "options"
+    assert ctx.scan_pattern_id == 123
+    assert ctx.regime == "risk_on"
+    assert ctx.raw_prob == pytest.approx(0.57)
 
 
 def test_shadow_score_never_raises_when_scorer_blows_up(db, shadow_mode, monkeypatch):

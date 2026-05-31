@@ -32,6 +32,7 @@ from sqlalchemy.orm import Session
 
 from ...config import settings
 from ...models.trading import BreakoutAlert, PaperTrade, ScanPattern
+from .asset_class import PATTERN_ASSET_CLASS_OPTIONS, normalize_pattern_asset_class
 from .options.contracts import OPTION_CONTRACT_MULTIPLIER, parse_contract_quantity
 
 logger = logging.getLogger(__name__)
@@ -138,6 +139,19 @@ def _option_multiplier_marker(value: Any) -> bool:
     )
 
 
+def _option_asset_marker(value: Any) -> bool:
+    try:
+        return normalize_pattern_asset_class(value) == PATTERN_ASSET_CLASS_OPTIONS
+    except Exception:
+        return str(value or "").strip().lower() in {
+            "option",
+            "options",
+            "option_contract",
+            "robinhood_option",
+            "robinhood_options",
+        }
+
+
 def _paper_option_meta_from_signal(signal_json: Any) -> dict[str, Any]:
     sig = _as_dict(signal_json)
     meta = sig.get("option_meta")
@@ -156,11 +170,11 @@ def _is_option_signal(signal_json: Any) -> bool:
         return True
     if _truthy_option_marker(sig.get("options_path")):
         return True
-    if str(sig.get("asset_kind") or "").strip().lower() in {"option", "options"}:
+    if _option_asset_marker(sig.get("asset_kind")):
         return True
-    if str(sig.get("asset_type") or "").strip().lower() in {"option", "options"}:
+    if _option_asset_marker(sig.get("asset_type")):
         return True
-    if str(sig.get("asset_class") or "").strip().lower() in {"option", "options"}:
+    if _option_asset_marker(sig.get("asset_class")):
         return True
     if _option_multiplier_marker(sig.get("option_contract_multiplier")):
         return True
@@ -171,31 +185,22 @@ def _is_option_signal(signal_json: Any) -> bool:
         return True
     if _truthy_option_marker(paper_meta.get("options_path")):
         return True
-    if str(paper_meta.get("asset_kind") or "").strip().lower() in {
-        "option",
-        "options",
-    }:
+    if _option_asset_marker(paper_meta.get("asset_kind")):
         return True
-    if str(paper_meta.get("asset_type") or "").strip().lower() in {
-        "option",
-        "options",
-    }:
+    if _option_asset_marker(paper_meta.get("asset_type")):
         return True
-    if str(paper_meta.get("asset_class") or "").strip().lower() in {
-        "option",
-        "options",
-    }:
+    if _option_asset_marker(paper_meta.get("asset_class")):
         return True
     if _option_multiplier_marker(paper_meta.get("option_contract_multiplier")):
         return True
     if _option_multiplier_marker(paper_meta.get("contract_multiplier")):
         return True
     breakout = _as_dict(sig.get("breakout_alert"))
-    if str(breakout.get("asset_kind") or "").strip().lower() in {"option", "options"}:
+    if _option_asset_marker(breakout.get("asset_kind")):
         return True
-    if str(breakout.get("asset_type") or "").strip().lower() in {"option", "options"}:
+    if _option_asset_marker(breakout.get("asset_type")):
         return True
-    if str(breakout.get("asset_class") or "").strip().lower() in {"option", "options"}:
+    if _option_asset_marker(breakout.get("asset_class")):
         return True
     if _option_multiplier_marker(breakout.get("option_contract_multiplier")):
         return True

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from math import comb
+from math import comb, isfinite
 from typing import Any
 
 from sqlalchemy import or_
@@ -45,11 +45,14 @@ def _utc_iso() -> str:
 
 def _safe_float(value: Any) -> float | None:
     try:
+        if isinstance(value, bool):
+            return None
         if value is None:
             return None
-        return float(value)
+        out = float(value)
     except (TypeError, ValueError):
         return None
+    return out if isfinite(out) else None
 
 
 def _outcome_pct_from_trade(
@@ -174,17 +177,16 @@ def _baseline_research_win_rate_pct(pattern: Any, oos_val: dict[str, Any]) -> tu
     from .backtest_metrics import backtest_win_rate_db_to_display_pct
 
     flags: list[str] = []
-    if pattern is not None and getattr(pattern, "oos_win_rate", None) is not None:
-        p = backtest_win_rate_db_to_display_pct(pattern.oos_win_rate)
-        if p is not None:
-            return float(p), flags
+    if pattern is not None:
+        raw_wr = _safe_float(getattr(pattern, "oos_win_rate", None))
+        if raw_wr is not None:
+            p = _safe_float(backtest_win_rate_db_to_display_pct(raw_wr))
+            if p is not None:
+                return p, flags
     ee = oos_val.get("edge_evidence") if isinstance(oos_val.get("edge_evidence"), dict) else {}
-    oos_m = ee.get("oos_mean_wr_pct")
+    oos_m = _safe_float(ee.get("oos_mean_wr_pct"))
     if oos_m is not None:
-        try:
-            return float(oos_m), flags
-        except (TypeError, ValueError):
-            pass
+        return oos_m, flags
     flags.append("no_baseline_wr")
     return None, flags
 

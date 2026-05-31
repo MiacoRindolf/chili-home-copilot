@@ -10,6 +10,7 @@ from app.models.trading import ScanPattern
 from app.services.trading.alpha_portfolio_gate import (
     AlphaPortfolioConfig,
     _candidate_floor_blocks,
+    _realized_edge_fraction,
     broker_risk_probation_allows_live,
     candidate_base_score,
     infer_alpha_sleeve,
@@ -430,6 +431,41 @@ def test_candidate_floor_blocks_negative_raw_realized_ev():
         "pbo": 0.0,
         "realized_n_trades": 0,
         "realized_avg_pnl_pct": None,
+        "raw_realized_trade_count": 12,
+        "raw_realized_avg_return_pct": -1.2,
+    }
+
+    reasons = _candidate_floor_blocks(
+        row,
+        AlphaPortfolioConfig(min_realized_trades=5),
+    )
+
+    assert "negative_realized_floor" in reasons
+
+
+def test_realized_edge_prefers_broader_raw_paper_dynamic_sample():
+    row = {
+        "realized_n_trades": 1,
+        "realized_avg_pnl_pct": 0.05,
+        "raw_realized_trade_count": 12,
+        "raw_realized_avg_return_pct": -1.2,
+    }
+
+    edge, n = _realized_edge_fraction(row)
+
+    assert edge is not None
+    assert abs(edge - (-0.012)) < 1e-12
+    assert n == 12
+
+
+def test_candidate_floor_uses_negative_broader_paper_dynamic_ev():
+    row = {
+        "promotion_gate_passed": True,
+        "cpcv_median_sharpe": 2.0,
+        "deflated_sharpe": 1.0,
+        "pbo": 0.0,
+        "realized_n_trades": 1,
+        "realized_avg_pnl_pct": 0.05,
         "raw_realized_trade_count": 12,
         "raw_realized_avg_return_pct": -1.2,
     }

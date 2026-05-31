@@ -14,6 +14,7 @@ agree on what "correlated" means. Refining the bucket granularity
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from typing import Optional
 
@@ -21,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from ...config import settings
 from ...models.trading import Trade
+from .asset_class import PATTERN_ASSET_CLASS_OPTIONS, normalize_pattern_asset_class
 from .position_sizer_model import CorrelationBudget, PortfolioBudget
 
 logger = logging.getLogger(__name__)
@@ -60,16 +62,47 @@ def bucket_for(symbol: Optional[str], *, asset_class: Optional[str] = None) -> s
     """
     sym = (symbol or "").strip().upper()
     family = (asset_class or "").strip().lower() or _asset_family(sym)
+    if normalize_pattern_asset_class(family) == PATTERN_ASSET_CLASS_OPTIONS:
+        family = _asset_family(sym)
     if sym.endswith("-USD"):
         return f"crypto:{sym.split('-')[0]}"
     return f"{family}:{sym[:1] or 'x'}"
 
 
+def _finite_float(value: object, default: float = 0.0) -> float:
+    if isinstance(value, bool):
+        return default
+    try:
+        if value is None or value == "":
+            return default
+        out = float(value)
+    except (TypeError, ValueError):
+        return default
+    return out if math.isfinite(out) else default
+
+
+def _positive_float(value: object) -> float | None:
+    out = _finite_float(value, 0.0)
+    return out if out > 0.0 else None
+
+
 def _bucket_cap_pct(asset_class: Optional[str]) -> float:
     family = (asset_class or "").strip().lower()
     if family == "crypto":
-        return float(getattr(settings, "brain_position_sizer_crypto_bucket_cap_pct", 10.0))
-    return float(getattr(settings, "brain_position_sizer_equity_bucket_cap_pct", 15.0))
+        return max(
+            0.0,
+            _finite_float(
+                getattr(settings, "brain_position_sizer_crypto_bucket_cap_pct", 10.0),
+                10.0,
+            ),
+        )
+    return max(
+        0.0,
+        _finite_float(
+            getattr(settings, "brain_position_sizer_equity_bucket_cap_pct", 15.0),
+            15.0,
+        ),
+    )
 
 
 def _is_option_trade_safe(trade: Trade) -> bool:
@@ -82,12 +115,9 @@ def _is_option_trade_safe(trade: Trade) -> bool:
 
 
 def _trade_notional_usd(trade: Trade) -> float:
-    try:
-        qty = float(trade.quantity or 0.0)
-        entry = float(trade.entry_price or 0.0)
-    except Exception:
-        return 0.0
-    if qty <= 0 or entry <= 0:
+    qty = _positive_float(getattr(trade, "quantity", None))
+    entry = _positive_float(getattr(trade, "entry_price", None))
+    if qty is None or entry is None:
         return 0.0
     multiplier = 100.0 if _is_option_trade_safe(trade) else 1.0
     return abs(qty * entry * multiplier)
@@ -111,7 +141,8 @@ def compute_correlation_budget(
     """
     bucket = bucket_for(ticker, asset_class=asset_class)
     cap_pct = _bucket_cap_pct(asset_class or _asset_family(ticker))
-    max_bucket_notional = max(0.0, float(capital or 0.0)) * cap_pct / 100.0
+    capital_f = max(0.0, _finite_float(capital, 0.0))
+    max_bucket_notional = capital_f * cap_pct / 100.0
 
     try:
         q = (
@@ -176,9 +207,11 @@ def compute_portfolio_budget(
         if str(row.ticker or "").strip().upper() == wanted_ticker
     )
 
-    cap_total = max(0.0, float(capital or 0.0)) * max(0.0, float(max_total_notional_pct)) / 100.0
+    capital_f = max(0.0, _finite_float(capital, 0.0))
+    cap_pct = max(0.0, _finite_float(max_total_notional_pct, 0.0))
+    cap_total = capital_f * cap_pct / 100.0
     return PortfolioBudget(
-        total_capital=float(capital or 0.0),
+        total_capital=capital_f,
         deployed_notional=round(total_deployed, 6),
         max_total_notional=round(cap_total, 6),
         ticker_open_notional=round(ticker_open, 6),

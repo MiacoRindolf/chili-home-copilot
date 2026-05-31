@@ -235,6 +235,21 @@ def test_fees_cost_is_higher_for_crypto_than_equity():
     assert ner._fees_cost_fraction(ctx_cr) > ner._fees_cost_fraction(ctx_eq)
 
 
+def test_options_use_options_score_bucket_and_cost_defaults():
+    ctx_op = ner.NetEdgeSignalContext(
+        ticker="SPY", asset_class="robinhood_options", scan_pattern_id=None,
+        raw_prob=0.5, entry_price=1.25, stop_price=0.75,
+    )
+    ctx_eq = ner.NetEdgeSignalContext(
+        ticker="SPY", asset_class="stock", scan_pattern_id=None,
+        raw_prob=0.5, entry_price=1.25, stop_price=0.75,
+    )
+
+    assert ner._score_asset_class(ctx_op.asset_class) == "options"
+    assert ner._miss_prob_cost_fraction(ctx_op) > ner._miss_prob_cost_fraction(ctx_eq)
+    assert ner._partial_fill_cost_fraction(ctx_op) > ner._partial_fill_cost_fraction(ctx_eq)
+
+
 def test_miss_prob_and_partial_fill_are_nonnegative():
     ctx = ner.NetEdgeSignalContext(
         ticker="BTC-USD", asset_class="crypto", scan_pattern_id=None,
@@ -492,6 +507,39 @@ def test_training_pairs_match_stock_asset_aliases():
     pairs = ner._load_training_pairs(
         db,
         asset_class="stock",
+        regime_bucket="risk_on",
+        lookback_days=1,
+    )
+
+    assert any(raw == pytest.approx(0.62) and win == 1 for raw, win in pairs)
+
+
+def test_training_pairs_match_option_asset_aliases():
+    pat = SimpleNamespace(
+        id=1,
+        asset_class="option",
+        win_rate=0.62,
+        oos_win_rate=None,
+    )
+    db = _NetEdgeDb(
+        pattern=pat,
+        papers=[
+            SimpleNamespace(
+                scan_pattern_id=pat.id,
+                ticker="SPY",
+                entry_price=1.25,
+                exit_price=1.45,
+                quantity=1.0,
+                status="closed",
+                entry_date=datetime.utcnow() - timedelta(minutes=5),
+                exit_date=datetime.utcnow(),
+            )
+        ],
+    )
+
+    pairs = ner._load_training_pairs(
+        db,
+        asset_class="options",
         regime_bucket="risk_on",
         lookback_days=1,
     )

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -68,6 +69,16 @@ def _ops_log_enabled() -> bool:
     return bool(getattr(settings, "brain_position_sizer_ops_log_enabled", True))
 
 
+def _finite_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
 # ---------------------------------------------------------------------------
 # Dataclasses
 # ---------------------------------------------------------------------------
@@ -108,9 +119,8 @@ def _divergence_bps(proposed: float, legacy: float | None) -> float | None:
     """
     if legacy is None:
         return None
-    try:
-        lv = float(legacy)
-    except Exception:
+    lv = _finite_float(legacy)
+    if lv is None:
         return None
     if lv <= 0:
         return 1_000_000.0 if proposed > 0 else 0.0
@@ -152,8 +162,8 @@ def write_proposal(
             source=source,
         )
 
-    legacy_notional = legacy.notional if legacy else None
-    legacy_quantity = legacy.quantity if legacy else None
+    legacy_notional = _finite_float(legacy.notional) if legacy else None
+    legacy_quantity = _finite_float(legacy.quantity) if legacy else None
     legacy_source = legacy.source if legacy else None
     divergence = _divergence_bps(output.proposed_notional, legacy_notional)
 

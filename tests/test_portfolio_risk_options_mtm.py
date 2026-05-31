@@ -561,8 +561,18 @@ def test_option_entry_is_not_blocked_by_full_stock_cap() -> None:
             limits=limits,
             asset_type="options",
         )
+        alias_option_ok, alias_option_reason = check_new_trade_allowed(
+            db,
+            None,
+            "SPY",
+            capital=10_000.0,
+            limits=limits,
+            asset_type="robinhood_options",
+        )
 
     assert not stock_ok
     assert stock_reason == "Stock cap (1) reached"
     assert option_ok
     assert option_reason == "ok"
+    assert alias_option_ok
+    assert alias_option_reason == "ok"

@@ -31,6 +31,7 @@ Covers the 14 cases from the brief:
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import math
@@ -83,23 +84,37 @@ def _seed_closed_trade(
     exit_price: float = 105.0,
     direction: str = "long",
     ticker: str = "TEST",
+    quantity: float = 1.0,
+    pnl: float | None = None,
+    tags: str | None = None,
+    indicator_snapshot: dict | None = None,
+    asset_kind: str | None = None,
     entry_offset: timedelta = timedelta(days=2),
     held_for: timedelta = timedelta(days=1),
 ) -> Trade:
     """Closed trade with explicit timestamps + scan_pattern linkage."""
     entry_dt = datetime.utcnow() - entry_offset
     exit_dt = entry_dt + held_for
-    pnl = (exit_price - entry_price) if direction == "long" else (entry_price - exit_price)
+    realized_pnl = (
+        pnl
+        if pnl is not None
+        else (exit_price - entry_price)
+        if direction == "long"
+        else (entry_price - exit_price)
+    )
     t = Trade(
         ticker=ticker,
         direction=direction,
         entry_price=entry_price,
         exit_price=exit_price,
-        quantity=1.0,
+        quantity=quantity,
         status="closed",
         entry_date=entry_dt,
         exit_date=exit_dt,
-        pnl=pnl,
+        pnl=realized_pnl,
+        tags=tags,
+        indicator_snapshot=indicator_snapshot,
+        asset_kind=asset_kind,
         scan_pattern_id=pattern_id,
     )
     db.add(t)
@@ -201,6 +216,67 @@ def test_compute_trade_correction_counterfactual_unavailable():
     assert corr.counterfactual_available is False
     # Falls back to realized so the trade isn't dropped.
     assert corr.corrected_return_pct == pytest.approx(20.0)
+
+
+def test_compute_option_overhold_does_not_fetch_underlying_counterfactual():
+    entry_dt = datetime(2026, 1, 1, 9, 30)
+    close_dt = entry_dt + timedelta(minutes=60)
+    with patch(
+        "app.services.trading.evidence_correction._fetch_counterfactual_close",
+        side_effect=AssertionError("option evidence must not use underlying OHLCV"),
+    ) as fetch_cf:
+        corr = compute_trade_correction(
+            entry_price=4.0,
+            exit_price=4.64,
+            entry_date=entry_dt,
+            close_date=close_dt,
+            direction="long",
+            ticker="SPY",
+            pattern_timeframe="1m",
+            max_bars=20,
+            is_option_trade=True,
+            realized_return_pct=16.0,
+        )
+
+    fetch_cf.assert_not_called()
+    assert corr.overheld is True
+    assert corr.counterfactual_available is False
+    assert corr.realized_return_pct == pytest.approx(16.0)
+    assert corr.corrected_return_pct == pytest.approx(16.0)
+
+
+def test_learning_trade_row_mapping_uses_option_contract_return_without_underlying_fetch():
+    entry_dt = datetime(2026, 1, 1, 9, 30)
+    trade_row = SimpleNamespace(
+        id=1001,
+        entry_price=4.0,
+        exit_price=8.0,  # legacy price return would be +100%
+        quantity=1.0,
+        pnl=64.0,  # contract-aware return is +16%
+        entry_date=entry_dt,
+        exit_date=entry_dt + timedelta(minutes=60),
+        direction="long",
+        ticker="SPY",
+        asset_kind="option",
+        tags=None,
+        indicator_snapshot={"asset_class": "robinhood_options"},
+    )
+
+    with patch(
+        "app.services.trading.evidence_correction._fetch_counterfactual_close",
+        side_effect=AssertionError("option evidence must not use underlying OHLCV"),
+    ) as fetch_cf:
+        corr = learning_mod._evidence_correction_compute_trade_row(
+            trade_row,
+            pattern_timeframe="1m",
+            max_bars=20,
+        )
+
+    fetch_cf.assert_not_called()
+    assert corr.overheld is True
+    assert corr.counterfactual_available is False
+    assert corr.realized_return_pct == pytest.approx(16.0)
+    assert corr.corrected_return_pct == pytest.approx(16.0)
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +382,85 @@ def test_update_counts_only_closed_trades_in_corrected_sample(db):
     ).one()
     assert row.closed_trades_considered == 1
     assert row.after_trade_count == 1
+
+
+def test_update_option_trade_uses_contract_aware_realized_return(db):
+    pat = _seed_pattern(
+        db,
+        timeframe="1m",
+        win_rate=0.0,
+        avg_return_pct=0.0,
+        exit_config={"max_bars": 20},
+    )
+    _seed_closed_trade(
+        db,
+        pattern_id=pat.id,
+        ticker="SPY",
+        entry_price=4.0,
+        exit_price=8.0,  # legacy price return would be +100%
+        quantity=1.0,
+        pnl=64.0,  # contract-aware return is 64 / (4 * 1 * 100) = +16%
+        asset_kind="option",
+        indicator_snapshot={"asset_class": "robinhood_options"},
+        entry_offset=timedelta(hours=2),
+        held_for=timedelta(minutes=5),
+    )
+
+    learning_mod.update_pattern_stats_from_closed_trades(db, user_id=None)
+
+    db.refresh(pat)
+    assert pat.win_rate == pytest.approx(1.0)
+    assert pat.avg_return_pct == pytest.approx(16.0)
+    row = db.query(PatternEvidenceCorrection).filter_by(
+        scan_pattern_id=pat.id,
+    ).one()
+    assert row.counterfactual_applied_count == 0
+    assert row.counterfactual_unavailable_count == 0
+
+
+def test_update_overheld_option_marks_premium_counterfactual_unavailable(db):
+    pat = _seed_pattern(
+        db,
+        timeframe="1m",
+        win_rate=0.7,
+        avg_return_pct=3.0,
+        trade_count=9,
+        exit_config={"max_bars": 20},
+    )
+    _seed_closed_trade(
+        db,
+        pattern_id=pat.id,
+        ticker="SPY",
+        entry_price=4.0,
+        exit_price=4.64,
+        quantity=1.0,
+        pnl=64.0,
+        asset_kind="option",
+        indicator_snapshot={"asset_class": "options"},
+        entry_offset=timedelta(hours=2),
+        held_for=timedelta(minutes=60),
+    )
+
+    with patch(
+        "app.services.trading.evidence_correction._fetch_counterfactual_close",
+        side_effect=AssertionError("option evidence must not use underlying OHLCV"),
+    ) as fetch_cf:
+        out = learning_mod.update_pattern_stats_from_closed_trades(db, user_id=None)
+
+    fetch_cf.assert_not_called()
+    assert out["patterns_updated"] == 1
+    db.refresh(pat)
+    assert pat.win_rate == pytest.approx(0.7)
+    assert pat.avg_return_pct == pytest.approx(3.0)
+    assert pat.trade_count == 9
+    row = db.query(PatternEvidenceCorrection).filter_by(
+        scan_pattern_id=pat.id,
+    ).one()
+    assert row.closed_trades_considered == 1
+    assert row.overheld_trade_count == 1
+    assert row.counterfactual_applied_count == 0
+    assert row.counterfactual_unavailable_count == 1
+    assert row.correction_reason == "coverage_too_thin"
 
 
 # ---------------------------------------------------------------------------

@@ -39,6 +39,8 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from .realized_pnl_sql import trade_return_fraction_sql
+
 logger = logging.getLogger(__name__)
 
 
@@ -73,19 +75,30 @@ def _settings_get(name: str, default: Any) -> Any:
 def _query_per_ticker_stats(
     sess: Session, *, pattern_ids: list[int] | None, lookback_days: int, min_trades_per_ticker: int
 ) -> list[dict[str, Any]]:
-    """Return per-(pattern, ticker) realized stats for closed trades."""
-    sql = """
+    """Return per-(pattern, ticker) realized stats for closed trades.
+
+    Return fields are derived from realized P&L over contract-aware notional
+    so ticker scoping learns expectancy, not position size.
+    """
+    sql = f"""
         SELECT scan_pattern_id, ticker,
                count(*) AS n,
                sum(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
                sum(coalesce(pnl, 0)) AS total_pnl,
-               avg(coalesce(pnl, 0)) AS avg_pnl
+               avg(coalesce(pnl, 0)) AS avg_pnl,
+               sum(({trade_return_fraction_sql()} * 100.0)) AS total_return_pct,
+               avg(({trade_return_fraction_sql()} * 100.0)) AS avg_return_pct
         FROM trading_trades
         WHERE status = 'closed'
           AND scan_pattern_id IS NOT NULL
           AND ticker IS NOT NULL
+          AND pnl IS NOT NULL
+          AND entry_price IS NOT NULL
+          AND entry_price > 0
+          AND quantity IS NOT NULL
+          AND quantity > 0
           AND exit_date > NOW() - make_interval(days => :lookback_days)
-        {pattern_filter}
+        __PATTERN_FILTER__
         GROUP BY scan_pattern_id, ticker
         HAVING count(*) >= :min_per_ticker
     """
@@ -94,10 +107,10 @@ def _query_per_ticker_stats(
         "min_per_ticker": int(min_trades_per_ticker),
     }
     if pattern_ids:
-        sql = sql.format(pattern_filter="AND scan_pattern_id = ANY(:ids)")
+        sql = sql.replace("__PATTERN_FILTER__", "AND scan_pattern_id = ANY(:ids)")
         params["ids"] = pattern_ids
     else:
-        sql = sql.format(pattern_filter="")
+        sql = sql.replace("__PATTERN_FILTER__", "")
     rows = sess.execute(text(sql), params).fetchall()
     return [
         {
@@ -107,9 +120,20 @@ def _query_per_ticker_stats(
             "wins": int(r.wins or 0),
             "total_pnl": float(r.total_pnl or 0),
             "avg_pnl": float(r.avg_pnl or 0),
+            "total_return_pct": float(r.total_return_pct or 0),
+            "avg_return_pct": float(r.avg_return_pct or 0),
         }
         for r in rows
     ]
+
+
+def _ticker_edge_score(row: dict[str, Any]) -> float:
+    for key in ("avg_return_pct", "total_return_pct", "total_pnl"):
+        try:
+            return float(row[key])
+        except (KeyError, TypeError, ValueError):
+            continue
+    return 0.0
 
 
 def _decide_action(
@@ -120,10 +144,11 @@ def _decide_action(
     net_pnl = 0.0
     for r in ticker_rows:
         net_pnl += r["total_pnl"]
-        if r["total_pnl"] > 0:
-            edge.append((r["ticker"], r["total_pnl"]))
+        score = _ticker_edge_score(r)
+        if score > 0:
+            edge.append((r["ticker"], score))
         else:
-            bleed.append((r["ticker"], r["total_pnl"]))
+            bleed.append((r["ticker"], score))
     edge.sort(key=lambda x: -x[1])
     bleed.sort(key=lambda x: x[1])
 

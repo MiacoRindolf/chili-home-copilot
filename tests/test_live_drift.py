@@ -289,3 +289,48 @@ def test_live_drift_scorecard_excludes_unpriced_option_outcomes() -> None:
     assert scorecard is not None
     assert scorecard["sample_count"] == 1
     assert scorecard["expectancy_per_trade_pct"] == pytest.approx(2.0)
+
+
+@pytest.mark.parametrize("bad_pct", [True, float("nan"), float("inf"), float("-inf")])
+def test_live_drift_rejects_bad_legacy_pct_values(bad_pct) -> None:
+    row = SimpleNamespace(
+        entry_price=None,
+        exit_price=None,
+        quantity=1.0,
+        pnl=None,
+        pnl_pct=bad_pct,
+        direction="long",
+        signal_json={"asset_type": "stock"},
+    )
+
+    assert _outcome_pct_from_trade(row, source="paper") is None
+
+
+def test_live_drift_v2_skips_bad_research_baselines() -> None:
+    pattern = SimpleNamespace(oos_win_rate=True, oos_avg_return_pct=float("nan"))
+    scorecards = {
+        "live": {
+            "source": "live",
+            "sample_count": 12,
+            "win_rate_pct": 55.0,
+            "expectancy_per_trade_pct": 0.2,
+            "avg_winner_pct": 1.1,
+            "avg_loser_pct": -1.4,
+            "profit_factor": 0.72,
+            "p25_trade_outcome_pct": -1.4,
+            "slippage_burden_bps": 52.0,
+            "freshness_at": "2026-04-10T12:00:00",
+        },
+        "paper": None,
+        "n_live": 12,
+        "n_paper": 0,
+    }
+
+    contract = compute_live_drift_v2_contract(
+        pattern=pattern,
+        oos_val={},
+        scorecards=scorecards,
+        settings=_settings(),
+    )
+
+    assert contract["skip_reason"] == "no_research_baseline"

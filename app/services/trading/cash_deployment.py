@@ -17,6 +17,12 @@ from sqlalchemy.orm import Session
 
 from ...config import settings
 from ...models.trading import BrainWorkEvent, BreakoutAlert
+from .asset_class import (
+    PATTERN_ASSET_CLASS_CRYPTO,
+    PATTERN_ASSET_CLASS_OPTIONS,
+    PATTERN_ASSET_CLASS_STOCKS,
+    normalize_pattern_asset_class,
+)
 from .edge_reliability import (
     DEFAULT_TOP_LIMIT,
     DEFAULT_WINDOW_DAYS,
@@ -68,14 +74,17 @@ def _round(value: float | None, digits: int = 6) -> float | None:
 
 def _canonical_asset_class(value: Any) -> str | None:
     raw = str(value or "").strip().lower()
-    if raw in {"stock", "stocks", "equity", "equities"}:
-        return "stock"
-    if raw in {"crypto", "cryptocurrency", "coin", "coinbase_spot"}:
-        return "crypto"
-    if raw in {"option", "options"}:
-        return "options"
     if raw in {"all", "unknown", ""}:
         return None
+    if raw in {"coin", "coinbase_spot"}:
+        return "crypto"
+    normalized = normalize_pattern_asset_class(raw)
+    if normalized == PATTERN_ASSET_CLASS_STOCKS:
+        return "stock"
+    if normalized == PATTERN_ASSET_CLASS_CRYPTO:
+        return "crypto"
+    if normalized == PATTERN_ASSET_CLASS_OPTIONS:
+        return "options"
     return raw
 
 

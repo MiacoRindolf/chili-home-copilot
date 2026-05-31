@@ -20,8 +20,25 @@ except Exception:  # pragma: no cover - import guard for partial bootstrap paths
     OPTION_CONTRACT_MULTIPLIER = 100.0
     PRICE_DOMAIN_OPTION_PREMIUM = "option_premium"
 
+try:
+    from .asset_class import (
+        PATTERN_ASSET_CLASS_OPTIONS,
+        normalize_pattern_asset_class,
+    )
+except Exception:  # pragma: no cover - import guard for partial bootstrap paths
+    PATTERN_ASSET_CLASS_OPTIONS = "options"
+
+    def normalize_pattern_asset_class(value: object) -> str:
+        raw = str(value or "").strip().lower()
+        if raw in {"option", "options", "option_contract", "robinhood_option", "robinhood_options"}:
+            return PATTERN_ASSET_CLASS_OPTIONS
+        return raw
+
 
 _OPTION_PRICE_FALLBACK_MAX_RATIO = 50.0
+_OPTION_ASSET_CLASS_ALIASES = frozenset(
+    {"option", "options", "option_contract", "robinhood_option", "robinhood_options"}
+)
 
 
 def _float_or_none(value: Any) -> float | None:
@@ -72,6 +89,16 @@ def _contract_multiplier_is_option(value: Any) -> bool:
         multiplier is not None
         and abs(multiplier - OPTION_CONTRACT_MULTIPLIER) < 1e-9
     )
+
+
+def _asset_value_is_option(value: Any) -> bool:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return False
+    try:
+        return normalize_pattern_asset_class(raw) == PATTERN_ASSET_CLASS_OPTIONS
+    except Exception:
+        return raw in _OPTION_ASSET_CLASS_ALIASES
 
 
 def _option_price_domain_confirmed(source: Any, price_field: str) -> bool:
@@ -190,11 +217,11 @@ def _signal_json_is_option(signal: Any) -> bool:
         return False
     if signal.get("option_meta"):
         return True
-    if str(signal.get("asset_kind") or "").strip().lower() in {"option", "options"}:
+    if _asset_value_is_option(signal.get("asset_kind")):
         return True
-    if str(signal.get("asset_type") or "").strip().lower() in {"option", "options"}:
+    if _asset_value_is_option(signal.get("asset_type")):
         return True
-    if str(signal.get("asset_class") or "").strip().lower() in {"option", "options"}:
+    if _asset_value_is_option(signal.get("asset_class")):
         return True
     if _truthy(signal.get("options_path")):
         return True
@@ -208,20 +235,11 @@ def _signal_json_is_option(signal: Any) -> bool:
             return True
         if _truthy(paper_meta.get("options_path")):
             return True
-        if str(paper_meta.get("asset_kind") or "").strip().lower() in {
-            "option",
-            "options",
-        }:
+        if _asset_value_is_option(paper_meta.get("asset_kind")):
             return True
-        if str(paper_meta.get("asset_type") or "").strip().lower() in {
-            "option",
-            "options",
-        }:
+        if _asset_value_is_option(paper_meta.get("asset_type")):
             return True
-        if str(paper_meta.get("asset_class") or "").strip().lower() in {
-            "option",
-            "options",
-        }:
+        if _asset_value_is_option(paper_meta.get("asset_class")):
             return True
         if _contract_multiplier_is_option(paper_meta.get("option_contract_multiplier")):
             return True
@@ -231,14 +249,11 @@ def _signal_json_is_option(signal: Any) -> bool:
     if isinstance(breakout, Mapping):
         if breakout.get("option_meta"):
             return True
-        if str(breakout.get("asset_kind") or "").strip().lower() in {"option", "options"}:
+        if _asset_value_is_option(breakout.get("asset_kind")):
             return True
-        if str(breakout.get("asset_type") or "").strip().lower() in {"option", "options"}:
+        if _asset_value_is_option(breakout.get("asset_type")):
             return True
-        if str(breakout.get("asset_class") or "").strip().lower() in {
-            "option",
-            "options",
-        }:
+        if _asset_value_is_option(breakout.get("asset_class")):
             return True
         if _truthy(breakout.get("options_path")):
             return True

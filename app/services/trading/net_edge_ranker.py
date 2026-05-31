@@ -63,6 +63,7 @@ from ...trading_brain.infrastructure.net_edge_ops_log import (
 )
 from .asset_class import (
     PATTERN_ASSET_CLASS_CRYPTO,
+    PATTERN_ASSET_CLASS_OPTIONS,
     normalize_pattern_asset_class,
     pattern_asset_class_matches,
 )
@@ -75,10 +76,13 @@ _VALID_MODES = {MODE_OFF, MODE_SHADOW, MODE_COMPARE, MODE_AUTHORITATIVE}
 # These are pre-Phase-F inputs; Phase F replaces them with data-driven values.
 _DEFAULT_FEES_BPS_EQUITY = 0.0  # commission-free retail US equities
 _DEFAULT_FEES_BPS_CRYPTO = 30.0  # ~0.3% taker on Coinbase spot
+_DEFAULT_FEES_BPS_OPTIONS = 0.0
 _DEFAULT_MISS_PROB_EQUITY = 0.02  # 2% miss rate on market entries (conservative placeholder)
 _DEFAULT_MISS_PROB_CRYPTO = 0.05
+_DEFAULT_MISS_PROB_OPTIONS = 0.08
 _DEFAULT_PARTIAL_FILL_BPS_EQUITY = 1.0
 _DEFAULT_PARTIAL_FILL_BPS_CRYPTO = 3.0
+_DEFAULT_PARTIAL_FILL_BPS_OPTIONS = 5.0
 
 
 def _finite_float(value: Any) -> float | None:
@@ -271,6 +275,19 @@ def _is_crypto_ctx(asset_class: str) -> bool:
     return normalize_pattern_asset_class(asset_class) == PATTERN_ASSET_CLASS_CRYPTO
 
 
+def _is_option_ctx(asset_class: str) -> bool:
+    return normalize_pattern_asset_class(asset_class) == PATTERN_ASSET_CLASS_OPTIONS
+
+
+def _score_asset_class(asset_class: str) -> str:
+    normalized = normalize_pattern_asset_class(asset_class)
+    if normalized == PATTERN_ASSET_CLASS_CRYPTO:
+        return "crypto"
+    if normalized == PATTERN_ASSET_CLASS_OPTIONS:
+        return "options"
+    return "stock"
+
+
 def _spread_cost_fraction(db: Session, ctx: NetEdgeSignalContext) -> float:
     """Return spread cost in fraction-of-notional (one-way)."""
     fallback = _settings_spread_fraction()
@@ -294,6 +311,8 @@ def _slippage_cost_fraction(db: Session, ctx: NetEdgeSignalContext) -> float:
 def _fees_cost_fraction(ctx: NetEdgeSignalContext) -> float:
     if _is_crypto_ctx(ctx.asset_class):
         return _DEFAULT_FEES_BPS_CRYPTO / 10_000.0
+    if _is_option_ctx(ctx.asset_class):
+        return _DEFAULT_FEES_BPS_OPTIONS / 10_000.0
     return _DEFAULT_FEES_BPS_EQUITY / 10_000.0
 
 
@@ -305,20 +324,24 @@ def _miss_prob_cost_fraction(ctx: NetEdgeSignalContext) -> float:
     one spread - i.e. if you miss, you retry on the next bar and eat another
     spread. Phase F replaces this with data-driven partial/queue probabilities.
     """
-    miss_prob = (
-        _DEFAULT_MISS_PROB_CRYPTO if _is_crypto_ctx(ctx.asset_class) else _DEFAULT_MISS_PROB_EQUITY
-    )
+    if _is_crypto_ctx(ctx.asset_class):
+        miss_prob = _DEFAULT_MISS_PROB_CRYPTO
+    elif _is_option_ctx(ctx.asset_class):
+        miss_prob = _DEFAULT_MISS_PROB_OPTIONS
+    else:
+        miss_prob = _DEFAULT_MISS_PROB_EQUITY
     # Use a static spread estimate here to keep this function cheap and DB-free.
     spread_fraction = _settings_spread_fraction()
     return max(0.0, miss_prob * spread_fraction)
 
 
 def _partial_fill_cost_fraction(ctx: NetEdgeSignalContext) -> float:
-    bps = (
-        _DEFAULT_PARTIAL_FILL_BPS_CRYPTO
-        if _is_crypto_ctx(ctx.asset_class)
-        else _DEFAULT_PARTIAL_FILL_BPS_EQUITY
-    )
+    if _is_crypto_ctx(ctx.asset_class):
+        bps = _DEFAULT_PARTIAL_FILL_BPS_CRYPTO
+    elif _is_option_ctx(ctx.asset_class):
+        bps = _DEFAULT_PARTIAL_FILL_BPS_OPTIONS
+    else:
+        bps = _DEFAULT_PARTIAL_FILL_BPS_EQUITY
     return max(0.0, bps / 10_000.0)
 
 
@@ -587,7 +610,7 @@ def _fit_calibrator(
 
 
 def _calibrator_for(db: Session, ctx: NetEdgeSignalContext) -> _Calibrator:
-    asset = "crypto" if _is_crypto_ctx(ctx.asset_class) else "stock"
+    asset = _score_asset_class(ctx.asset_class)
     bucket = _regime_bucket(ctx.regime)
     cached = _cached_calibrator(asset, bucket)
     if cached is not None:
@@ -744,7 +767,7 @@ def score(db: Session, ctx: NetEdgeSignalContext) -> NetEdgeScore | None:
         result = NetEdgeScore(
             decision_id=ctx.decision_id,
             ticker=ctx.ticker,
-            asset_class="crypto" if _is_crypto_ctx(ctx.asset_class) else "stock",
+            asset_class=_score_asset_class(ctx.asset_class),
             scan_pattern_id=ctx.scan_pattern_id,
             calibrated_prob=calibrated_prob,
             expected_payoff=payoff,

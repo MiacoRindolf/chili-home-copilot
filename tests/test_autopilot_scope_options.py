@@ -14,6 +14,18 @@ def test_is_option_trade_honors_asset_kind_without_snapshot() -> None:
     assert is_option_trade(trade) is True
 
 
+def test_is_option_trade_honors_asset_kind_alias_without_snapshot() -> None:
+    from app.services.trading.autopilot_scope import is_option_trade
+
+    trade = SimpleNamespace(
+        asset_kind="robinhood_options",
+        tags=None,
+        indicator_snapshot=None,
+    )
+
+    assert is_option_trade(trade) is True
+
+
 def test_is_option_trade_honors_top_level_option_markers() -> None:
     from app.services.trading.autopilot_scope import is_option_trade
 
@@ -36,6 +48,13 @@ def test_is_option_trade_honors_top_level_option_markers() -> None:
             asset_kind=None,
             tags=None,
             indicator_snapshot={"asset_class": "options"},
+        )
+    ) is True
+    assert is_option_trade(
+        SimpleNamespace(
+            asset_kind=None,
+            tags=None,
+            indicator_snapshot={"asset_class": "option_contract"},
         )
     ) is True
     assert is_option_trade(
@@ -92,7 +111,7 @@ def test_is_option_trade_honors_nested_asset_class_snapshot() -> None:
     trade = SimpleNamespace(
         asset_kind=None,
         tags=None,
-        indicator_snapshot='{"breakout_alert":{"asset_class":"options"}}',
+        indicator_snapshot='{"breakout_alert":{"asset_class":"robinhood_options"}}',
     )
 
     assert is_option_trade(trade) is True

@@ -3847,9 +3847,19 @@ def _emit_netedge_shadow_score(
             return
         target = float(alert.target_price) if alert.target_price is not None else None
 
-        asset_class = (
-            "crypto" if (alert.asset_type or "").strip().lower() == "crypto" else "stock"
+        from .asset_class import (
+            PATTERN_ASSET_CLASS_CRYPTO,
+            PATTERN_ASSET_CLASS_OPTIONS,
+            normalize_pattern_asset_class,
         )
+
+        normalized_asset = normalize_pattern_asset_class(getattr(alert, "asset_type", None))
+        if normalized_asset == PATTERN_ASSET_CLASS_CRYPTO:
+            asset_class = "crypto"
+        elif normalized_asset == PATTERN_ASSET_CLASS_OPTIONS:
+            asset_class = "options"
+        else:
+            asset_class = "stock"
 
         raw_prob: float | None = None
         if alert.scan_pattern_id:
