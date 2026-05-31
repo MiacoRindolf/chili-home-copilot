@@ -123,7 +123,8 @@ ORM_CONTRACT_GROUPS: tuple[tuple[re.Pattern[str], str], ...] = (
             r"^(?:app/services/trading/(?:auto_trader_rules\.py|autopilot_scope\.py|"
             r"cash_deployment\.py|auto_trader_synergy\.py|compliance\.py|"
             r"correlation_budget\.py|emergency_liquidation\.py|fast_path/|"
-            r"governance\.py|options/portfolio_budget\.py|portfolio(?:_allocator|_risk)?\.py))",
+            r"governance\.py|options/portfolio_budget\.py|pattern_imminent_alerts\.py|"
+            r"portfolio(?:_allocator|_risk)?\.py))",
             re.IGNORECASE,
         ),
         "risk_capital_gate",

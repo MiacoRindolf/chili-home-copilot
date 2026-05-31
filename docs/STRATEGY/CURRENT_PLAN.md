@@ -1,7 +1,7 @@
 # Current Plan: Position Identity Refactor
 
 **Initiative owner:** Cowork (strategy) + Claude Code (execution).
-**Last update:** 2026-05-31, after Phase 5O reclassified pattern_position_monitor.py as a live monitor/action-adjacent path and added read-only parity evidence.
+**Last update:** 2026-05-31, after Phase 5O reclassified pattern_imminent_alerts.py as a live selection gate and added read-only parity evidence.
 
 > **Why this initiative supersedes the prior fast-path crypto-scalping plan.** Today (2026-05-04) two automated close paths fired, marking 11 equity Trade rows wrongly closed in DB while the broker still held the positions. The shipped patch (inverse-reconcile, broker-truth-self-heal task) auto-healed 18 of them but its cross-check (`event_count == 0` on `trading_execution_events`) is conservative because **Trade row IDs are ephemeral** — every time a row gets wrongly closed and recreated, fills associated with the prior trade_id orphan. The fast-path scalping initiative depends on a stable position model; building more on this foundation makes things worse, not better. Position-identity refactor goes first. Fast-path resumes after.
 
@@ -56,6 +56,27 @@ Phase 5 soak duration was also tightened from one quarter to **2 weeks** at oper
 
 ## Status of the initiative
 
+- **Phase 5O Pattern imminent alerts envelope audit CLOSED 2026-05-31.**
+  Audited `app/services/trading/pattern_imminent_alerts.py` and found it is a
+  live selection gate, not passive learning/reporting. Its
+  `_open_autotrader_position_keys(...)` helper reads open AutoTrader v1
+  management envelopes and feeds same-pattern/same-ticker deflection inside
+  `gather_imminent_candidate_rows(...)`, which can suppress imminent
+  candidates before alert generation. No alert behavior was converted. Added
+  `scripts/d-phase5o-pattern-imminent-alerts-envelope-parity-probe.py`; live
+  result: `COMPLETE_POSITIVE`, 5 checks matched, 0 mismatches, 7 deflection
+  trade ids old = 7 new, 7 pattern/ticker keys old = 7 new, and 7
+  user-pattern/ticker keys old = 7 new. Reclassified the file from
+  `learning_research_reporting / adapter_candidate` to
+  `risk_capital_gate / future_rename_blocker`. Verification: focused tests
+  passed (`6 passed`), analyzer stayed clean with raw reader bucket 0, Phase
+  5K remained `COMPLETE_POSITIVE`, Phase 5I remained `COMPLETE_POSITIVE`, and
+  source posture returned `COMPLETE_POSITIVE` after correcting app services
+  back to the clean Phase5AB-D runtime worktree. Counts:
+  `orm_trade_symbol_compat=69`, `learning_research_reporting=10`,
+  `risk_capital_gate=21`, `adapter_candidate=12`,
+  `future_rename_blocker=41`. CC report:
+  `docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5o-pattern-imminent-alerts-envelope-audit.md`.
 - **Phase 5O Pattern position monitor envelope audit CLOSED 2026-05-31.**
   Audited `app/services/trading/pattern_position_monitor.py` and found it is a
   live monitor/action-adjacent path, not passive learning/reporting. It selects

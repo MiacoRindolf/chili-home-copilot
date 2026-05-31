@@ -2,16 +2,16 @@
   "generated_from": "scripts/analyze_phase5_remaining_trade_refs.py --json",
   "orm_trade_symbol_compat_count": 69,
   "phase5o_bucket_counts": {
-    "adapter_candidate": 13,
-    "future_rename_blocker": 40,
+    "adapter_candidate": 12,
+    "future_rename_blocker": 41,
     "leave_alone": 16
   },
   "contract_group_counts": {
-    "learning_research_reporting": 11,
+    "learning_research_reporting": 10,
     "live_action_broker_reconcile": 19,
     "private_helper_type_only": 5,
     "public_ui_schema_contract": 14,
-    "risk_capital_gate": 20
+    "risk_capital_gate": 21
   },
   "items": [
     {
@@ -359,10 +359,10 @@
     },
     {
       "path": "app/services/trading/pattern_imminent_alerts.py",
-      "contract_group": "learning_research_reporting",
-      "phase5o_bucket": "adapter_candidate",
-      "phase5o_subtype": "read_only_learning_reporting",
-      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+      "contract_group": "risk_capital_gate",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "imminent_candidate_deflection_gate",
+      "rationale": "Reads open AutoTrader v1 management envelopes to deflect same pattern/ticker imminent candidates before alert generation. This is candidate-selection behavior, so conversion requires explicit deflection-scope parity before any runtime row-source change."
     },
     {
       "path": "app/services/trading/pattern_position_monitor.py",

@@ -11,8 +11,8 @@ ANALYZER_PATH = REPO_ROOT / "scripts" / "analyze_phase5_remaining_trade_refs.py"
 MAP_PATH = REPO_ROOT / "docs" / "STRATEGY" / "phase5o_remaining_runtime_compat_map.json"
 
 EXPECTED_PHASE5O_BUCKET_COUNTS = {
-    "adapter_candidate": 13,
-    "future_rename_blocker": 40,
+    "adapter_candidate": 12,
+    "future_rename_blocker": 41,
     "leave_alone": 16,
 }
 
