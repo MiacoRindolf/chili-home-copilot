@@ -32,19 +32,25 @@ def _trade_tca_cost_pct(trade: Any) -> float | None:
 
 
 def _paper_directional_outcome(pt: Any) -> float | None:
-    """Win/loss source for paper attribution, preferring realized dollars."""
+    """Win/loss source for paper attribution, preferring complete realized return."""
+    ret = paper_trade_return_pct(pt)
+    if ret is not None:
+        return ret
     pnl = _finite_float(getattr(pt, "pnl", None))
     if pnl is not None:
         return pnl
-    return paper_trade_return_pct(pt)
+    return None
 
 
 def _trade_directional_outcome(trade: Any) -> float | None:
-    """Win/loss source for live attribution, preferring realized dollars."""
+    """Win/loss source for live attribution, preferring complete realized return."""
+    ret = trade_return_pct(trade)
+    if ret is not None:
+        return ret
     pnl = _finite_float(getattr(trade, "pnl", None))
     if pnl is not None:
         return pnl
-    return trade_return_pct(trade)
+    return None
 
 
 def _scan_patterns_by_id(db: Session, pattern_ids: set[int]) -> dict[int, Any]:

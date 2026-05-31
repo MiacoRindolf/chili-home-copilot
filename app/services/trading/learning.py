@@ -1287,14 +1287,16 @@ def _closed_trade_outcome_fraction(trade: Any) -> float | None:
 
 
 def _closed_trade_directional_win(trade: Any) -> bool:
+    ret_pct = _closed_trade_realized_return_pct(trade)
+    if ret_pct is not None:
+        return ret_pct > 0.0
     pnl = getattr(trade, "pnl", None)
     try:
         if pnl is not None and not isinstance(pnl, bool):
             return float(pnl) > 0.0
     except (TypeError, ValueError):
         pass
-    ret_pct = _closed_trade_realized_return_pct(trade)
-    return bool(ret_pct is not None and ret_pct > 0.0)
+    return False
 
 
 def _reinforce_patterns_at_trade_close(

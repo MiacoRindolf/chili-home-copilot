@@ -7,7 +7,9 @@ import pytest
 
 from app.models.trading import PaperTrade, ScanPattern, Trade
 from app.services.trading.attribution_service import (
+    _paper_directional_outcome,
     _scan_patterns_by_id,
+    _trade_directional_outcome,
     live_vs_research_by_pattern,
     post_trade_review,
 )
@@ -61,6 +63,41 @@ def test_scan_patterns_by_id_skips_empty_lookup() -> None:
 
     assert _scan_patterns_by_id(db, {0}) == {}
     assert db.query_calls == 0
+
+
+def test_attribution_live_directional_outcome_prefers_partial_aware_return() -> None:
+    trade = SimpleNamespace(
+        entry_price=1.25,
+        exit_price=1.15,
+        quantity=1.0,
+        pnl=-10.0,
+        direction="long",
+        asset_kind="option",
+        tags=None,
+        indicator_snapshot=None,
+        partial_taken=True,
+        partial_taken_qty=1.0,
+        partial_taken_price=1.45,
+    )
+
+    assert _trade_directional_outcome(trade) == pytest.approx(4.0)
+
+
+def test_attribution_paper_directional_outcome_prefers_partial_aware_return() -> None:
+    trade = SimpleNamespace(
+        entry_price=1.25,
+        exit_price=1.15,
+        quantity=1.0,
+        pnl=-10.0,
+        pnl_pct=-8.0,
+        direction="long",
+        signal_json={"asset_type": "options", "option_meta": {"strike": 500.0}},
+        partial_taken=True,
+        partial_taken_qty=1.0,
+        partial_taken_price=1.45,
+    )
+
+    assert _paper_directional_outcome(trade) == pytest.approx(4.0)
 
 
 class _FakeAttributionSession:

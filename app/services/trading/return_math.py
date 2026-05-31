@@ -240,6 +240,71 @@ def notional_return_pct(
     return (pnl_f / (entry * qty * mult)) * 100.0
 
 
+def _quantity_for_notional(row: Any) -> float | None:
+    filled = _float_or_none(getattr(row, "filled_quantity", None))
+    if filled is not None and filled > 0:
+        return filled
+    qty = _float_or_none(getattr(row, "quantity", None))
+    return qty if qty is not None and qty > 0 else None
+
+
+def _partial_leg_declared(row: Any) -> bool:
+    if _truthy(getattr(row, "partial_taken", None)):
+        return True
+    return (
+        getattr(row, "partial_taken_qty", None) is not None
+        or getattr(row, "partial_taken_price", None) is not None
+    )
+
+
+def _partial_leg_pnl(row: Any, *, entry_price: float, contract_multiplier: float) -> tuple[float, float] | None:
+    """Return (partial_pnl, partial_qty), or None when partial evidence is incomplete."""
+    partial_qty = _float_or_none(getattr(row, "partial_taken_qty", None))
+    partial_price = _float_or_none(getattr(row, "partial_taken_price", None))
+    if partial_qty is None or partial_qty <= 0 or partial_price is None or partial_price <= 0:
+        return None
+    if _is_short(getattr(row, "direction", None)):
+        partial_pnl = (entry_price - partial_price) * partial_qty * contract_multiplier
+    else:
+        partial_pnl = (partial_price - entry_price) * partial_qty * contract_multiplier
+    return partial_pnl, partial_qty
+
+
+def realized_return_pct(row: Any, *, contract_multiplier: float = 1.0) -> float | None:
+    """Signed realized return, including a recorded partial leg when present.
+
+    Local partial-close paths reduce ``quantity`` before the final close and store
+    the earlier realized leg in ``partial_taken_*``. If that leg is declared but
+    incomplete, the safe learning answer is no return sample.
+    """
+    pnl_f = _float_or_none(getattr(row, "pnl", None))
+    entry = _float_or_none(getattr(row, "entry_price", None))
+    mult = _float_or_none(contract_multiplier)
+    if pnl_f is None or entry is None or entry <= 0 or mult is None or mult <= 0:
+        return None
+
+    if _partial_leg_declared(row):
+        current_qty = _float_or_none(getattr(row, "quantity", None))
+        partial = _partial_leg_pnl(row, entry_price=entry, contract_multiplier=mult)
+        if current_qty is None or current_qty <= 0 or partial is None:
+            return None
+        partial_pnl, partial_qty = partial
+        opening_qty = current_qty + partial_qty
+        if opening_qty <= 0:
+            return None
+        return ((pnl_f + partial_pnl) / (entry * opening_qty * mult)) * 100.0
+
+    qty = _quantity_for_notional(row)
+    if qty is None:
+        return None
+    return notional_return_pct(
+        pnl_f,
+        entry,
+        qty,
+        contract_multiplier=mult,
+    )
+
+
 def trade_contract_multiplier(trade: Any) -> float:
     try:
         from .autopilot_scope import is_option_trade
@@ -315,18 +380,19 @@ def paper_trade_contract_multiplier(paper_trade: Any) -> float:
 def trade_return_pct(trade: Any) -> float | None:
     """Realized signed return for a live trade.
 
-    Prefer recorded P&L because it already carries short-side sign, partials,
-    fill corrections, and option contract multiplier dollars. Fall back to
+    Prefer recorded P&L because it already carries short-side sign, fill
+    corrections, and option contract multiplier dollars. Local partial-close
+    evidence is folded back in before the return is normalized. Fall back to
     price return only for older rows without P&L.
     """
-    pnl_ret = notional_return_pct(
-        getattr(trade, "pnl", None),
-        getattr(trade, "entry_price", None),
-        getattr(trade, "quantity", None),
+    pnl_ret = realized_return_pct(
+        trade,
         contract_multiplier=trade_contract_multiplier(trade),
     )
     if pnl_ret is not None:
         return pnl_ret
+    if _partial_leg_declared(trade):
+        return None
     try:
         if trade_contract_multiplier(trade) == OPTION_CONTRACT_MULTIPLIER:
             return _option_price_return_pct(
@@ -350,16 +416,16 @@ def paper_trade_return_pct(paper_trade: Any) -> float | None:
         paper_trade_contract_multiplier(paper_trade)
         == OPTION_CONTRACT_MULTIPLIER
     )
-    pnl_ret = notional_return_pct(
-        getattr(paper_trade, "pnl", None),
-        getattr(paper_trade, "entry_price", None),
-        getattr(paper_trade, "quantity", None),
+    pnl_ret = realized_return_pct(
+        paper_trade,
         contract_multiplier=(
             OPTION_CONTRACT_MULTIPLIER if is_option else 1.0
         ),
     )
     if pnl_ret is not None:
         return pnl_ret
+    if _partial_leg_declared(paper_trade):
+        return None
     signal_json = getattr(paper_trade, "signal_json", None)
     if is_option:
         return _option_price_return_pct(

@@ -309,13 +309,10 @@ def _outcome_label(pnl: Any) -> int | None:
 
 
 def _outcome_label_from_return(pnl: Any, realized_return_pct: Any) -> int | None:
-    label = _outcome_label(pnl)
-    if label is not None:
-        return label
     ret = _safe_float(realized_return_pct)
-    if ret is None:
-        return None
-    return 1 if ret > 0.0 else 0
+    if ret is not None:
+        return 1 if ret > 0.0 else 0
+    return _outcome_label(pnl)
 
 
 def _calibrated_ev(

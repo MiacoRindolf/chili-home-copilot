@@ -26,6 +26,7 @@ from app.services.trading.edge_reliability import (
     _canonical_asset_class,
     _asset_class_for_paper,
     _asset_class_for_trade,
+    _outcome_label_from_return,
     compute_pattern_edge_reliability,
     edge_supply_rows,
     emit_edge_reliability_refresh_requested,
@@ -114,6 +115,10 @@ def test_edge_reliability_asset_class_for_trade_uses_contract_identity() -> None
     )
 
     assert _asset_class_for_trade(row, pattern=None) == "options"
+
+
+def test_edge_reliability_label_prefers_partial_aware_return_over_pnl() -> None:
+    assert _outcome_label_from_return(-10.0, 4.0) == 1
 
 
 @pytest.mark.parametrize(

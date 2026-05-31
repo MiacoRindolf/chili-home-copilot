@@ -57,6 +57,19 @@ def test_closed_trade_directional_win_uses_confirmed_return_when_pnl_missing() -
     assert learning._closed_trade_directional_win(trade) is True
 
 
+def test_closed_trade_directional_win_prefers_partial_aware_return_over_pnl() -> None:
+    trade = _option_trade(
+        exit_price=1.15,
+        quantity=1.0,
+        pnl=-10.0,
+        partial_taken=True,
+        partial_taken_qty=1.0,
+        partial_taken_price=1.45,
+    )
+
+    assert learning._closed_trade_directional_win(trade) is True
+
+
 def test_closed_trade_directional_win_ignores_boolean_pnl() -> None:
     trade = _option_trade(pnl=True, exit_price=1.05)
 
