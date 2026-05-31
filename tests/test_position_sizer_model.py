@@ -557,6 +557,19 @@ def test_decimal_rounding_allows_fractional_crypto_qty():
     assert out.proposed_quantity < 1.0
 
 
+@pytest.mark.parametrize("qty_rounding", ["fractional", "", None])
+def test_unknown_qty_rounding_rejects_instead_of_decimal_fallback(qty_rounding):
+    out = compute_proposal(
+        inp=_default_input(qty_rounding=qty_rounding),
+        source="unit",
+    )
+
+    assert out.proposed_notional == 0.0
+    assert out.proposed_quantity == 0.0
+    assert out.proposed_risk_pct == 0.0
+    assert out.reasoning.get("reject_reason") == "invalid_qty_rounding"
+
+
 # ---------------------------------------------------------------------------
 # Determinism
 # ---------------------------------------------------------------------------
