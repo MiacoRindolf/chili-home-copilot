@@ -589,6 +589,26 @@ def test_open_exit_noop_query_keeps_non_positive_skip_evidence_specific(monkeypa
     }
 
 
+def test_top_noop_exit_patterns_include_asset_slice(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def capture_rows(sql: str, params: dict):
+        captured["sql"] = sql
+        captured["params"] = params
+        return []
+
+    monkeypatch.setattr(audit, "_rows", capture_rows)
+
+    assert audit._top_noop_exit_patterns(hours=5, limit=8) == []
+
+    sql = str(captured["sql"])
+    assert "event_type = 'exit_variant_diagnostic'" in sql
+    assert "COALESCE(e.payload->>'asset_class', '<none>') AS asset_class" in sql
+    assert "GROUP BY" in sql
+    assert "COALESCE(e.payload->>'asset_class', '<none>')" in sql
+    assert captured["params"] == {"hours": 5, "limit": 8}
+
+
 def test_top_noop_exit_pattern_rollups_fold_fingerprints(monkeypatch):
     captured: dict[str, object] = {}
 
@@ -605,6 +625,7 @@ def test_top_noop_exit_pattern_rollups_fold_fingerprints(monkeypatch):
     assert "event_type = 'exit_variant_diagnostic'" in sql
     assert "GROUP BY" in sql
     assert "n.scan_pattern_id" in sql
+    assert "n.asset_class" in sql
     assert "n.skip_reason" in sql
     assert "count(DISTINCT n.evidence_fingerprint)" in sql
     assert "distinct_fingerprints" in sql
