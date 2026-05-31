@@ -22,6 +22,7 @@ from app.services.trading.management_envelopes import (
     load_open_stop_position_envelope_objects,
     load_pattern_tagged_envelope_rows,
     load_recent_ticker_envelope_rows,
+    load_regime_scanner_heatmap_envelope_rows,
     load_stop_decision_envelope_rows,
     load_trades_api_envelope_rows,
     summarize_closed_envelope_performance,
@@ -207,6 +208,34 @@ def test_setup_vitals_ticker_discovery_reads_open_management_envelopes():
     assert "FROM trading_management_envelopes" in db.sql
     assert "trading_trades" not in db.sql
     assert "status = 'open'" in db.sql
+
+
+def test_regime_scanner_heatmap_rows_read_management_envelopes():
+    since = datetime(2026, 5, 1, 12, 0)
+    db = _FakeDb(
+        _RowsResult(
+            [
+                {
+                    "scan_pattern_id": 3,
+                    "entry_date": since,
+                    "entry_price": 100.0,
+                    "exit_price": 110.0,
+                    "direction": "long",
+                }
+            ]
+        )
+    )
+
+    rows = load_regime_scanner_heatmap_envelope_rows(db, since=since)
+
+    assert len(rows) == 1
+    assert rows[0].scan_pattern_id == 3
+    assert rows[0].entry_price == 100.0
+    assert "FROM trading_management_envelopes" in db.sql
+    assert "trading_trades" not in db.sql
+    assert "status = 'closed'" in db.sql
+    assert "exit_date >= :since" in db.sql
+    assert db.params == {"since": since}
 
 
 def test_execution_cost_ticker_discovery_reads_management_envelopes():

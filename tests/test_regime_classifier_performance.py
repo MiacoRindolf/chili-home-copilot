@@ -4,7 +4,8 @@ import sys
 from datetime import date, datetime
 from types import SimpleNamespace
 
-from app.models.trading import RegimeSnapshot, ScanPattern, Trade
+from app.models.trading import RegimeSnapshot, ScanPattern
+from app.services.trading import regime_classifier
 from app.services.trading.regime_classifier import (
     _latest_regime_snapshots_by_date,
     _scan_patterns_by_id,
@@ -51,9 +52,7 @@ class _FakeSession:
         self.regime_query_count = 0
 
     def query(self, model: object) -> _FakeQuery:
-        if model is Trade:
-            query = _FakeQuery(self.trades)
-        elif model is ScanPattern:
+        if model is ScanPattern:
             query = _FakeQuery(self.patterns)
         elif model is RegimeSnapshot:
             self.regime_query_count += 1
@@ -137,10 +136,24 @@ def test_regime_scanner_heatmap_batches_trade_inputs(monkeypatch) -> None:
             infer_scanner_bucket=lambda _pattern: "breakout",
         ),
     )
+    monkeypatch.setattr(
+        regime_classifier,
+        "load_regime_scanner_heatmap_envelope_rows",
+        lambda _db, *, since: [trade_a, trade_b],
+    )
 
     result = build_regime_scanner_sharpe_heatmap(db)  # type: ignore[arg-type]
 
     queried_models = [model for model, _query in db.queries]
-    assert queried_models == [Trade, ScanPattern, RegimeSnapshot, RegimeSnapshot]
+    assert queried_models == [ScanPattern, RegimeSnapshot, RegimeSnapshot]
     assert result["ok"] is True
     assert result["n_trades_matrix"][0][2] == 2
+
+
+def test_regime_scanner_heatmap_has_no_trade_orm_reader() -> None:
+    import inspect
+
+    source = inspect.getsource(build_regime_scanner_sharpe_heatmap)
+
+    assert "db.query(Trade)" not in source
+    assert "from ...models.trading import RegimeSnapshot, Trade" not in source

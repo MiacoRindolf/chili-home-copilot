@@ -1,7 +1,7 @@
 # Current Plan: Position Identity Refactor
 
 **Initiative owner:** Cowork (strategy) + Claude Code (execution).
-**Last update:** 2026-05-31, after Phase 5X converted setup-vitals ticker discovery.
+**Last update:** 2026-05-31, after Phase 5Y converted the regime/scanner heatmap reader.
 
 > **Why this initiative supersedes the prior fast-path crypto-scalping plan.** Today (2026-05-04) two automated close paths fired, marking 11 equity Trade rows wrongly closed in DB while the broker still held the positions. The shipped patch (inverse-reconcile, broker-truth-self-heal task) auto-healed 18 of them but its cross-check (`event_count == 0` on `trading_execution_events`) is conservative because **Trade row IDs are ephemeral** — every time a row gets wrongly closed and recreated, fills associated with the prior trade_id orphan. The fast-path scalping initiative depends on a stable position model; building more on this foundation makes things worse, not better. Position-identity refactor goes first. Fast-path resumes after.
 
@@ -56,6 +56,17 @@ Phase 5 soak duration was also tightened from one quarter to **2 weeks** at oper
 
 ## Status of the initiative
 
+- **Phase 5Y regime/scanner heatmap reader conversion SHIPPED 2026-05-31.**
+  Added `load_regime_scanner_heatmap_envelope_rows(...)` and converted
+  `regime_classifier.build_regime_scanner_sharpe_heatmap(...)` off direct
+  `Trade` ORM reads for its closed-live row input. Pattern lookup and
+  regime-snapshot lookup remain unchanged. This is reporting/analysis only; no
+  broker/order/close/reconcile/risk/capital or lifecycle behavior changed.
+  Verification: py_compile passed, JSON sanity passed, focused analyzer stayed
+  green, and focused tests passed (`42 passed`). Compatibility counts moved to
+  `orm_trade_symbol_compat=72`, `adapter_candidate=23`,
+  `learning_research_reporting=18`. CC report:
+  `docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5y-regime-classifier-envelope-heatmap.md`.
 - **Phase 5X setup-vitals ticker reader conversion SHIPPED 2026-05-31.** Added
   `load_open_setup_vitals_envelope_tickers(...)` and converted
   `setup_vitals.monitored_tickers_for_vitals(...)` off direct `Trade` ORM reads
