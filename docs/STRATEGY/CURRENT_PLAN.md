@@ -1,7 +1,7 @@
 # Current Plan: Position Identity Refactor
 
 **Initiative owner:** Cowork (strategy) + Claude Code (execution).
-**Last update:** 2026-05-31, after Phase 5O reclassified brain_neural_mesh/plasticity.py as a mesh-weight mutation future rename blocker.
+**Last update:** 2026-05-31, after Phase 5O reclassified learning.py as a realized-evidence writer future rename blocker.
 
 > **Why this initiative supersedes the prior fast-path crypto-scalping plan.** Today (2026-05-04) two automated close paths fired, marking 11 equity Trade rows wrongly closed in DB while the broker still held the positions. The shipped patch (inverse-reconcile, broker-truth-self-heal task) auto-healed 18 of them but its cross-check (`event_count == 0` on `trading_execution_events`) is conservative because **Trade row IDs are ephemeral** — every time a row gets wrongly closed and recreated, fills associated with the prior trade_id orphan. The fast-path scalping initiative depends on a stable position model; building more on this foundation makes things worse, not better. Position-identity refactor goes first. Fast-path resumes after.
 
@@ -56,6 +56,27 @@ Phase 5 soak duration was also tightened from one quarter to **2 weeks** at oper
 
 ## Status of the initiative
 
+- **Phase 5O learning.py envelope audit CLOSED 2026-05-31.**
+  Audited `app/services/trading/learning.py` and found it is a
+  realized-evidence writer, not a passive reporting adapter. It consumes closed
+  management-envelope evidence for attribution coverage, post-close pattern
+  reinforcement, close-journal learning, corrected ScanPattern evidence writes,
+  and setup-vitals degradation summaries. No learning behavior was converted.
+  Added `scripts/d-phase5o-learning-envelope-parity-probe.py`; live result
+  `COMPLETE_POSITIVE`: 6 checks matched, 0 mismatches, 39
+  actual-trade-count pattern rows old = 39 new, 3 attribution coverage rows old
+  = 3 new, 526 closed-trade analysis rows old = 526 new, 314 corrected-evidence
+  closed rows old = 314 new, 30 evidence pattern buckets old = 30 new, and 5000
+  setup-vitals closed-join rows old = 5000 new. Reclassified the file from
+  `learning_research_reporting / adapter_candidate` to
+  `learning_research_reporting / future_rename_blocker` with subtype
+  `learning_realized_evidence_writer`. Verification: focused tests passed
+  (`6 passed`), analyzer reported no unexpected runtime readers/mutations,
+  Phase 5K COMPLETE_POSITIVE, Phase 5I COMPLETE_POSITIVE. Source posture
+  remains ALERT because app services are mounted from dirty root by an
+  external/shared process. Counts: `orm_trade_symbol_compat=66`,
+  `adapter_candidate=5`, `future_rename_blocker=45`. CC report:
+  `docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5o-learning-envelope-audit.md`.
 - **Phase 5O Brain plasticity envelope audit CLOSED 2026-05-31.**
   Audited `app/services/trading/brain_neural_mesh/plasticity.py` and found it
   is a learning-mutation path, not passive learning/reporting. On trade close,

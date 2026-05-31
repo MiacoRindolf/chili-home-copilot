@@ -2,8 +2,8 @@
   "generated_from": "scripts/analyze_phase5_remaining_trade_refs.py --json",
   "orm_trade_symbol_compat_count": 66,
   "phase5o_bucket_counts": {
-    "adapter_candidate": 6,
-    "future_rename_blocker": 44,
+    "adapter_candidate": 5,
+    "future_rename_blocker": 45,
     "leave_alone": 16
   },
   "contract_group_counts": {
@@ -304,9 +304,9 @@
     {
       "path": "app/services/trading/learning.py",
       "contract_group": "learning_research_reporting",
-      "phase5o_bucket": "adapter_candidate",
-      "phase5o_subtype": "read_only_learning_reporting",
-      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "learning_realized_evidence_writer",
+      "rationale": "Closed-envelope evidence feeds pattern reinforcement, corrected realized stats, journals, and setup-vitals learning; rename needs focused behavior parity."
     },
     {
       "path": "app/services/trading/learning_cycle_architecture.py",
