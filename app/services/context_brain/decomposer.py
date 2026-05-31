@@ -53,6 +53,9 @@ _COMPLEXITY_INDICATORS = [
     r"^.{300,}$",
 ]
 _COMPLEXITY_RE = re.compile("|".join(f"({p})" for p in _COMPLEXITY_INDICATORS), re.IGNORECASE | re.DOTALL)
+_SENTENCE_SPLIT_RE = re.compile(r"[.!?]+")
+_JSON_FENCE_PREFIX_RE = re.compile(r"^```(?:json)?\s*")
+_JSON_FENCE_SUFFIX_RE = re.compile(r"\s*```$")
 
 
 def _heuristic_should_decompose(query: str) -> bool:
@@ -63,7 +66,7 @@ def _heuristic_should_decompose(query: str) -> bool:
         return True
     # Multi-sentence queries are candidates if at least one sentence is
     # itself substantive (>40 chars). Avoids splitting "Hi! How are you?"
-    sentences = [s.strip() for s in re.split(r"[.!?]+", q) if s.strip()]
+    sentences = [s.strip() for s in _SENTENCE_SPLIT_RE.split(q) if s.strip()]
     if len(sentences) >= 3 and any(len(s) > 40 for s in sentences):
         return True
     return False
@@ -120,8 +123,15 @@ def _parse_decomposer_json(text: str) -> Optional[dict]:
         return None
     s = text.strip()
     # Strip ```json fences if present
-    s = re.sub(r"^```(?:json)?\s*", "", s)
-    s = re.sub(r"\s*```$", "", s)
+    if s.startswith("```"):
+        s = _JSON_FENCE_PREFIX_RE.sub("", s)
+    if s.endswith("```"):
+        s = _JSON_FENCE_SUFFIX_RE.sub("", s)
+    if s.startswith("{") and s.endswith("}"):
+        try:
+            return json.loads(s)
+        except json.JSONDecodeError:
+            pass
     # Find the first balanced top-level JSON object
     start = s.find("{")
     if start < 0:
