@@ -21,7 +21,7 @@ import psycopg2
 import os
 conn = psycopg2.connect(os.environ['DATABASE_URL'])
 cur = conn.cursor()
-cur.execute(""""""
+cur.execute("""
 SELECT application_name, state, query_start, wait_event_type, wait_event,
        LEFT(query, 80) AS q
 FROM pg_stat_activity
@@ -29,7 +29,7 @@ WHERE application_name LIKE '%%autotrader%%' OR application_name LIKE '%%worker%
    OR query LIKE '%%autotrader%%' OR query LIKE '%%alert%%'
 ORDER BY query_start DESC
 LIMIT 20
-"""""")
+""")
 for r in cur.fetchall():
     print(' '.join(str(x) for x in r))
 conn.close()
@@ -48,8 +48,24 @@ try:
     ''')).fetchall()
     print('alerts last 24h:', rows[0][0])
     db.rollback()
-    rows = db.execute(text('''
-        SELECT id, ticker, alert_type, created_at, processed_at, status
+
+    columns = {
+        str(r[0])
+        for r in db.execute(text('''
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'trading_alerts'
+        ''')).fetchall()
+    }
+    processed_at_expr = (
+        'processed_at'
+        if 'processed_at' in columns
+        else 'NULL::timestamp AS processed_at'
+    )
+    status_expr = 'status' if 'status' in columns else 'NULL::text AS status'
+    rows = db.execute(text(f'''
+        SELECT id, ticker, alert_type, created_at, {processed_at_expr}, {status_expr}
         FROM trading_alerts
         WHERE created_at >= now() - interval '6 hours'
         ORDER BY created_at DESC
