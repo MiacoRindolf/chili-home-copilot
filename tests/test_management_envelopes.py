@@ -52,6 +52,16 @@ class _FakeDb:
         return self.result
 
 
+class _FakeDbSequence:
+    def __init__(self, *results):
+        self.results = list(results)
+        self.calls = []
+
+    def execute(self, sql, params=None):
+        self.calls.append((str(sql), params))
+        return self.results.pop(0)
+
+
 def test_synergy_retry_candidates_read_management_envelopes_not_trade_view():
     db = _FakeDb(
         _RowsResult(
@@ -273,6 +283,43 @@ def test_monitor_decision_envelope_rows_read_management_envelopes():
     assert "trading_trades" not in db.sql
     assert "d.action = :action" in db.sql
     assert db.params == {"uid": 7, "action": "hold", "limit": 50, "offset": 5}
+
+
+def test_monitor_decision_empty_late_page_keeps_total_count():
+    db = _FakeDbSequence(_RowsResult([]), _ScalarResult(37))
+
+    total, rows = load_monitor_decision_envelope_rows(
+        db,
+        user_id=7,
+        action=None,
+        limit=50,
+        offset=100,
+    )
+
+    assert total == 37
+    assert rows == []
+    assert len(db.calls) == 2
+    assert "COUNT(*) OVER()::int AS total_count" in db.calls[0][0]
+    assert "SELECT COUNT(*)::int AS total_count FROM scoped" in db.calls[1][0]
+    assert "JOIN trading_management_envelopes t ON t.id = d.trade_id" in db.calls[1][0]
+    assert "trading_trades" not in db.calls[1][0]
+    assert db.calls[1][1] == {"uid": 7, "action": None, "limit": 50, "offset": 100}
+
+
+def test_monitor_decision_empty_first_page_does_not_count_again():
+    db = _FakeDbSequence(_RowsResult([]))
+
+    total, rows = load_monitor_decision_envelope_rows(
+        db,
+        user_id=7,
+        action=None,
+        limit=50,
+        offset=0,
+    )
+
+    assert total == 0
+    assert rows == []
+    assert len(db.calls) == 1
 
 
 def test_imminent_alert_actioned_envelope_ids_read_management_envelopes():
