@@ -2,14 +2,14 @@
   "generated_from": "scripts/analyze_phase5_remaining_trade_refs.py --json",
   "orm_trade_symbol_compat_count": 69,
   "phase5o_bucket_counts": {
-    "adapter_candidate": 17,
-    "future_rename_blocker": 36,
+    "adapter_candidate": 16,
+    "future_rename_blocker": 37,
     "leave_alone": 16
   },
   "contract_group_counts": {
     "learning_research_reporting": 13,
-    "live_action_broker_reconcile": 17,
-    "private_helper_type_only": 7,
+    "live_action_broker_reconcile": 18,
+    "private_helper_type_only": 6,
     "public_ui_schema_contract": 14,
     "risk_capital_gate": 18
   },
@@ -107,10 +107,10 @@
     },
     {
       "path": "app/services/trading/auto_trader_position_overrides.py",
-      "contract_group": "private_helper_type_only",
-      "phase5o_bucket": "adapter_candidate",
-      "phase5o_subtype": "private_helper_adapter_candidate",
-      "rationale": "Private helper surface; candidate for protocol/adapter extraction if direct tests exist."
+      "contract_group": "live_action_broker_reconcile",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "live_position_override_control_path",
+      "rationale": "Live AutoTrader control helper: close-now can submit broker exits, adoption/unadoption mutates management scope, and override rows feed monitor pause/synergy exclusion. Requires read-only control-scope parity evidence before any conversion."
     },
     {
       "path": "app/services/trading/auto_trader_rules.py",

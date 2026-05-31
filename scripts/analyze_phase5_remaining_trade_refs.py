@@ -109,7 +109,7 @@ ORM_CONTRACT_GROUPS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(
             r"^(?:app/services/(?:broker_service\.py|trading/(?:bracket_|broker_|crypto/exit_monitor\.py|"
-            r"alerts\.py|auto_trader_monitor\.py|"
+            r"alerts\.py|auto_trader_monitor\.py|auto_trader_position_overrides\.py|"
             r"live_exit_engine\.py|position_integrity\.py|position_resolver\.py|"
             r"robinhood_exit_execution\.py|stop_engine\.py|stuck_order_watchdog\.py|"
             r"venue/coinbase_spot\.py|broker_account_repair\.py)))",
