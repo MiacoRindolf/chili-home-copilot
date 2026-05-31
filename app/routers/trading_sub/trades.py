@@ -186,7 +186,12 @@ def api_get_trades(
                 "broker_truth_metrics_source": broker_metrics.get("source"),
             }
         )
-    return JSONResponse({
+    _shadow_compare_trades_api_rows(
+        db,
+        user_id=ctx["user_id"],
+        status=status,
+        rows=rows,
+    )    return JSONResponse({
         "ok": True,
         "trades": rows,
         "suppressed_stale_trades": json_safe(suppressed_stale_trades),
