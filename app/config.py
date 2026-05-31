@@ -3655,6 +3655,13 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_PHASE5K_POSITION_INTEGRITY_USE_ENVELOPES"),
     )
+    # Phase 5AF: default-OFF public /api/trading/trades read-route cutover.
+    # The route still falls back to the compatibility path for open rows so
+    # broker-truth display overlays and stale-open suppression remain intact.
+    chili_phase5af_trades_api_use_envelopes: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_PHASE5AF_TRADES_API_USE_ENVELOPES"),
+    )
     # f-promotion-pipeline-rebalance Phase 1 (2026-05-09): sample-size
     # floor for the thin-evidence demote sweep. The original Phase D
     # threshold (10 trades) was wrong-sense: a pattern with 8 realized

@@ -515,3 +515,28 @@ shadow evidence.
 
 Report:
 `docs/STRATEGY/CC_REPORTS/2026-05-30_f-position-identity-phase-5ae-trades-api-shadow-canary.md`.
+
+## Position Identity Phase 5AF - Trades API Cutover Flag (2026-05-31)
+
+Phase 5AF shipped the reversible `/api/trading/trades` cutover flag without
+changing default behavior.
+
+Added typed setting `CHILI_PHASE5AF_TRADES_API_USE_ENVELOPES`, default `false`,
+plus a management-envelope response renderer for the public `/trades` shape.
+When enabled, the route can serve management-envelope rows, but it deliberately
+falls back to the compatibility path for `status=open` or any mixed response
+containing open rows. That preserves broker-truth overlays and stale-open
+suppression until a dedicated open-row runtime adapter probe proves parity.
+
+Verification: py_compile passed; focused route/helper/config/canary tests
+passed (`38 passed`); Phase 5AE `/trades` parity remains
+`COMPLETE_POSITIVE`; Phase 5K live-path parity remains `COMPLETE_POSITIVE`;
+Phase 5I post-rename soak remains `COMPLETE_POSITIVE`; the classifier still
+reports raw reader bucket 0.
+
+Architect verdict: safe to merge as a default-off switch. Do not flip broadly
+yet. The next useful slice is Phase 5AF soak plus an open-row runtime adapter
+probe before full `/trades` route cutover.
+
+Report:
+`docs/STRATEGY/CC_REPORTS/2026-05-31_f-position-identity-phase-5af-trades-api-cutover-flag.md`.

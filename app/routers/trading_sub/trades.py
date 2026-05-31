@@ -34,6 +34,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/trading", tags=["trading-trades"])
 
+PHASE5AF_TRADES_API_ENV = "CHILI_PHASE5AF_TRADES_API_USE_ENVELOPES"
+
 _TRADES_API_SHADOW_FIELDS = (
     "ticker",
     "direction",
@@ -134,6 +136,78 @@ def _shadow_compare_trades_api_rows(
         logger.debug("[phase5v] /trades envelope shadow compare skipped: %s", exc)
 
 
+def _trades_api_envelope_response_rows(
+    envelope_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Render management-envelope rows in the public /trades response shape."""
+    rows: list[dict[str, Any]] = []
+    for t in envelope_rows:
+        entry_price = t.get("entry_price")
+        quantity = t.get("quantity")
+        entry_date = t.get("entry_date")
+        exit_date = t.get("exit_date")
+        filled_at = t.get("filled_at")
+        rows.append(
+            {
+                "id": t.get("id"),
+                "ticker": t.get("ticker"),
+                "direction": t.get("direction"),
+                "entry_price": entry_price,
+                "exit_price": t.get("exit_price"),
+                "quantity": quantity,
+                "local_entry_price": entry_price,
+                "local_quantity": quantity,
+                "entry_date": entry_date.isoformat() if entry_date else None,
+                "exit_date": exit_date.isoformat() if exit_date else None,
+                "status": t.get("status"),
+                "pnl": t.get("pnl"),
+                "tags": t.get("tags"),
+                "notes": t.get("notes"),
+                "broker_source": t.get("broker_source"),
+                "broker_status": t.get("broker_status"),
+                "broker_order_id": t.get("broker_order_id"),
+                "filled_at": filled_at.isoformat() if filled_at else None,
+                "avg_fill_price": t.get("avg_fill_price"),
+                "tca_reference_entry_price": t.get("tca_reference_entry_price"),
+                "tca_entry_slippage_bps": t.get("tca_entry_slippage_bps"),
+                "tca_reference_exit_price": t.get("tca_reference_exit_price"),
+                "tca_exit_slippage_bps": t.get("tca_exit_slippage_bps"),
+                "strategy_proposal_id": t.get("strategy_proposal_id"),
+                "scan_pattern_id": t.get("scan_pattern_id"),
+                "position_id": t.get("position_id"),
+                "broker_truth_entry_price": None,
+                "broker_truth_quantity": None,
+                "broker_truth_position_id": None,
+                "broker_truth_current_envelope_id": None,
+                "broker_truth_metrics_source": None,
+            }
+        )
+    return rows
+
+
+def _phase5af_trades_api_can_use_envelopes(
+    *,
+    status: str | None,
+    envelope_rows: list[dict[str, Any]],
+) -> bool:
+    """Gate envelope cutover to rows that do not need broker-truth overlays."""
+    status_value = (status or "").strip().lower()
+    if status_value == "open":
+        return False
+    if any(str(row.get("status") or "").strip().lower() == "open" for row in envelope_rows):
+        return False
+    return True
+
+
+def _phase5af_trades_api_use_envelopes_enabled() -> bool:
+    try:
+        from ...config import settings
+
+        return bool(getattr(settings, "chili_phase5af_trades_api_use_envelopes", False))
+    except Exception:
+        return False
+
+
 def _audit_export_trade_rows(
     envelopes: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -168,6 +242,47 @@ def api_get_trades(
     status: str | None = Query(None),
 ):
     ctx = get_identity_ctx(request, db)
+    if _phase5af_trades_api_use_envelopes_enabled():
+        try:
+            from ...services.trading.management_envelopes import (
+                load_trades_api_envelope_rows,
+            )
+
+            envelope_rows = load_trades_api_envelope_rows(
+                db,
+                user_id=ctx["user_id"],
+                status=status,
+                limit=50,
+            )
+            if _phase5af_trades_api_can_use_envelopes(
+                status=status,
+                envelope_rows=envelope_rows,
+            ):
+                rows = _trades_api_envelope_response_rows(envelope_rows)
+                logger.info(
+                    "[phase5af] /trades envelope cutover active rows=%s status=%s",
+                    len(rows),
+                    status,
+                )
+                return JSONResponse({
+                    "ok": True,
+                    "trades": rows,
+                    "suppressed_stale_trades": [],
+                    "suppressed_stale_count": 0,
+                })
+            logger.warning(
+                "[phase5af] /trades envelope cutover fallback status=%s "
+                "rows=%s reason=open_rows_need_broker_truth_overlay",
+                status,
+                len(envelope_rows),
+            )
+        except Exception as exc:
+            logger.warning(
+                "[phase5af] /trades envelope cutover fallback status=%s "
+                "reason=%s",
+                status,
+                exc,
+            )
     trades = ts.get_trades(db, ctx["user_id"], status=status)
     suppressed_stale_trades = []
     if status is None or str(status).strip().lower() == "open":
