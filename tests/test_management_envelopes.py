@@ -18,6 +18,7 @@ from app.services.trading.management_envelopes import (
     load_monitor_decision_envelope_rows,
     load_net_edge_training_envelope_rows,
     load_open_active_setup_envelope_objects,
+    load_open_setup_vitals_envelope_tickers,
     load_open_stop_position_envelope_objects,
     load_pattern_tagged_envelope_rows,
     load_recent_ticker_envelope_rows,
@@ -195,6 +196,17 @@ def test_net_edge_training_rows_read_management_envelopes():
     assert "entry_date >= :since" in db.sql
     assert "ORDER BY exit_date DESC NULLS LAST" in db.sql
     assert db.params == {"since": since, "limit": 2000}
+
+
+def test_setup_vitals_ticker_discovery_reads_open_management_envelopes():
+    db = _FakeDb(_RowsResult([{"ticker": "ABC"}, {"ticker": "XYZ"}]))
+
+    tickers = load_open_setup_vitals_envelope_tickers(db)
+
+    assert tickers == ["ABC", "XYZ"]
+    assert "FROM trading_management_envelopes" in db.sql
+    assert "trading_trades" not in db.sql
+    assert "status = 'open'" in db.sql
 
 
 def test_execution_cost_ticker_discovery_reads_management_envelopes():
