@@ -314,6 +314,11 @@ def _top_recert_rescue_blocker_rollups(hours: int, limit: int) -> list[dict]:
             COALESCE(e.payload->>'recert_rescue_status', '<none>') AS recert_status,
             COALESCE(e.payload->>'recommended_next_action', '<none>') AS next_action,
             COALESCE(e.payload->>'source', '<none>') AS source,
+            COALESCE(
+              e.payload->>'asset_class',
+              e.payload #>> '{recert_backtest_refresh,asset_class}',
+              '<none>'
+            ) AS asset_class,
             e.created_at
           FROM brain_work_events e
           WHERE e.event_kind = 'outcome'
@@ -338,6 +343,7 @@ def _top_recert_rescue_blocker_rollups(hours: int, limit: int) -> list[dict]:
           r.recert_status,
           r.next_action,
           r.source,
+          r.asset_class,
           count(*) AS blocker_diagnostics,
           min(r.created_at) AS first_seen,
           max(r.created_at) AS last_seen
@@ -350,7 +356,8 @@ def _top_recert_rescue_blocker_rollups(hours: int, limit: int) -> list[dict]:
           COALESCE(sp.recert_reason, '<none>'),
           r.recert_status,
           r.next_action,
-          r.source
+          r.source,
+          r.asset_class
         ORDER BY blocker_diagnostics DESC, last_seen DESC
         LIMIT :limit
         """,
@@ -373,6 +380,11 @@ def _top_recert_rescue_action_rollups(hours: int, limit: int) -> list[dict]:
             COALESCE(e.payload->>'recert_rescue_status', '<none>') AS recert_status,
             COALESCE(e.payload->>'recommended_next_action', '<none>') AS next_action,
             COALESCE(e.payload->>'source', '<none>') AS source,
+            COALESCE(
+              e.payload->>'asset_class',
+              e.payload #>> '{recert_backtest_refresh,asset_class}',
+              '<none>'
+            ) AS asset_class,
             e.created_at
           FROM brain_work_events e
           WHERE e.event_kind = 'outcome'
@@ -388,6 +400,7 @@ def _top_recert_rescue_action_rollups(hours: int, limit: int) -> list[dict]:
           r.recert_status,
           r.next_action,
           r.source,
+          r.asset_class,
           count(*) AS action_diagnostics,
           min(r.created_at) AS first_seen,
           max(r.created_at) AS last_seen
@@ -400,7 +413,8 @@ def _top_recert_rescue_action_rollups(hours: int, limit: int) -> list[dict]:
           COALESCE(sp.recert_reason, '<none>'),
           r.recert_status,
           r.next_action,
-          r.source
+          r.source,
+          r.asset_class
         ORDER BY action_diagnostics DESC, last_seen DESC
         LIMIT :limit
         """,

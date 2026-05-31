@@ -631,6 +631,8 @@ def test_top_recert_rescue_blocker_rollups_fold_repeated_actions(monkeypatch):
     assert "r.recert_status" in sql
     assert "r.next_action" in sql
     assert "r.source" in sql
+    assert "r.asset_class" in sql
+    assert "recert_backtest_refresh,asset_class" in sql
     assert "recommended_next_action" in sql
     assert "recert_backtest_refresh,reason" in sql
     assert "recert_backtest_refresh,requested" in sql
@@ -674,6 +676,8 @@ def test_top_recert_rescue_action_rollups_include_run_refresh_actions(monkeypatc
     assert "r.recert_status" in sql
     assert "r.next_action" in sql
     assert "r.source" in sql
+    assert "r.asset_class" in sql
+    assert "recert_backtest_refresh,asset_class" in sql
     assert "action_diagnostics" in sql
     assert "recommended_next_action" in sql
     assert "run_recert_backtest_refresh_keep_live_blocked" not in sql
