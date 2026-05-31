@@ -646,3 +646,20 @@ boring permanent default.
 
 Report:
 `docs/STRATEGY/CC_REPORTS/2026-05-31_f-position-identity-phase-5aj-trades-api-tie-order-hardening.md`.
+
+## Position Identity Phase 5AK - Trades API Flag Posture (2026-05-31)
+
+Phase 5AK promotes `CHILI_PHASE5AF_TRADES_API_USE_ENVELOPES` to the default
+route posture for `/api/trading/trades`.
+
+The route cutover now has exact all/open/closed parity, live route evidence,
+and green Phase 5AE/5AG/5AH/5I/5K probes. The flag remains as an explicit
+rollback switch: setting `CHILI_PHASE5AF_TRADES_API_USE_ENVELOPES=false`
+restores the compatibility path.
+
+Architect verdict: this removes the hidden production dependency on a special
+`.env` opt-in and makes the code default match the proven live behavior. Keep
+the dirty-root caveat visible until the live source tree is reconciled.
+
+Report:
+`docs/STRATEGY/CC_REPORTS/2026-05-31_f-position-identity-phase-5ak-trades-api-flag-posture.md`.
