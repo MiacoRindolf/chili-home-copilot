@@ -31,8 +31,8 @@ def set_wake_requested(db: Session) -> None:
     from ..models.core import BrainWorkerControl
 
     row = db.get(BrainWorkerControl, _CONTROL_ID)
-    now = datetime.utcnow()
     if row is None:
+        now = datetime.utcnow()
         db.add(
             BrainWorkerControl(
                 id=_CONTROL_ID,
@@ -42,6 +42,9 @@ def set_wake_requested(db: Session) -> None:
             )
         )
     else:
+        if row.wake_requested:
+            return
+        now = datetime.utcnow()
         row.wake_requested = True
         row.updated_at = now
 
@@ -51,8 +54,8 @@ def set_stop_requested(db: Session) -> None:
     from ..models.core import BrainWorkerControl
 
     row = db.get(BrainWorkerControl, _CONTROL_ID)
-    now = datetime.utcnow()
     if row is None:
+        now = datetime.utcnow()
         db.add(
             BrainWorkerControl(
                 id=_CONTROL_ID,
@@ -62,6 +65,9 @@ def set_stop_requested(db: Session) -> None:
             )
         )
     else:
+        if row.stop_requested:
+            return
+        now = datetime.utcnow()
         row.stop_requested = True
         row.updated_at = now
 
@@ -72,6 +78,8 @@ def clear_stop_requested(db: Session) -> None:
 
     row = db.get(BrainWorkerControl, _CONTROL_ID)
     if row is None:
+        return
+    if not row.stop_requested:
         return
     row.stop_requested = False
     row.updated_at = datetime.utcnow()
@@ -142,94 +150,71 @@ def get_worker_control_snapshot(db: Session) -> "BrainWorkerControlRow | None":
     return db.get(BrainWorkerControl, _CONTROL_ID)
 
 
-def persist_last_cycle_digest_json(db: Session, payload: dict[str, Any]) -> None:
-    """Store compact last learning-cycle digest for Brain UI. Commits on success."""
+def _persist_control_json_field(
+    db: Session,
+    payload: dict[str, Any],
+    *,
+    field_name: str,
+    log_label: str,
+) -> None:
     from ..models.core import BrainWorkerControl
 
     try:
         row = db.get(BrainWorkerControl, _CONTROL_ID)
-        now = datetime.utcnow()
         blob = json.dumps(payload, default=str)
         if row is None:
-            db.add(
-                BrainWorkerControl(
-                    id=_CONTROL_ID,
-                    wake_requested=False,
-                    stop_requested=False,
-                    updated_at=now,
-                    last_cycle_digest_json=blob,
-                )
-            )
+            now = datetime.utcnow()
+            values = {
+                "id": _CONTROL_ID,
+                "wake_requested": False,
+                "stop_requested": False,
+                "updated_at": now,
+                field_name: blob,
+            }
+            db.add(BrainWorkerControl(**values))
+        elif getattr(row, field_name, None) == blob:
+            return
         else:
-            row.last_cycle_digest_json = blob
+            now = datetime.utcnow()
+            setattr(row, field_name, blob)
             row.updated_at = now
         db.commit()
     except Exception as e:
-        logger.warning("[brain_worker_signals] persist_last_cycle_digest_json: %s", e)
+        logger.warning("[brain_worker_signals] %s: %s", log_label, e)
         try:
             db.rollback()
         except Exception:
             pass
+
+
+def persist_last_cycle_digest_json(db: Session, payload: dict[str, Any]) -> None:
+    """Store compact last learning-cycle digest for Brain UI. Commits on success."""
+    _persist_control_json_field(
+        db,
+        payload,
+        field_name="last_cycle_digest_json",
+        log_label="persist_last_cycle_digest_json",
+    )
 
 
 def persist_last_proposal_skips_json(db: Session, payload: dict[str, Any]) -> None:
     """Store aggregated proposal skip counts for Brain UI. Commits on success."""
-    from ..models.core import BrainWorkerControl
-
-    try:
-        row = db.get(BrainWorkerControl, _CONTROL_ID)
-        now = datetime.utcnow()
-        blob = json.dumps(payload, default=str)
-        if row is None:
-            db.add(
-                BrainWorkerControl(
-                    id=_CONTROL_ID,
-                    wake_requested=False,
-                    stop_requested=False,
-                    updated_at=now,
-                    last_proposal_skips_json=blob,
-                )
-            )
-        else:
-            row.last_proposal_skips_json = blob
-            row.updated_at = now
-        db.commit()
-    except Exception as e:
-        logger.warning("[brain_worker_signals] persist_last_proposal_skips_json: %s", e)
-        try:
-            db.rollback()
-        except Exception:
-            pass
+    _persist_control_json_field(
+        db,
+        payload,
+        field_name="last_proposal_skips_json",
+        log_label="persist_last_proposal_skips_json",
+    )
 
 
 def persist_learning_live_json(db: Session, payload: dict[str, Any]) -> None:
     """Store live learning-cycle fields for cross-process Brain UI (Network graph). Commits on success."""
-    from ..models.core import BrainWorkerControl
-
-    try:
-        row = db.get(BrainWorkerControl, _CONTROL_ID)
-        now = datetime.utcnow()
-        blob = json.dumps(payload, default=str)
-        if row is None:
-            db.add(
-                BrainWorkerControl(
-                    id=_CONTROL_ID,
-                    wake_requested=False,
-                    stop_requested=False,
-                    updated_at=now,
-                    learning_live_json=blob,
-                )
-            )
-        else:
-            row.learning_live_json = blob
-            row.updated_at = now
-        db.commit()
-    except Exception as e:
-        logger.warning("[brain_worker_signals] persist_learning_live_json: %s", e)
-        try:
-            db.rollback()
-        except Exception:
-            pass
+    _persist_control_json_field(
+        db,
+        payload,
+        field_name="learning_live_json",
+        log_label="persist_learning_live_json",
+    )
 
 
 def heartbeat_is_stale(last_heartbeat_at: datetime | None) -> bool:
@@ -246,6 +231,8 @@ def clear_worker_heartbeat(db: Session) -> None:
 
     row = db.get(BrainWorkerControl, _CONTROL_ID)
     if row is None:
+        return
+    if row.last_heartbeat_at is None:
         return
     row.last_heartbeat_at = None
     row.updated_at = datetime.utcnow()
