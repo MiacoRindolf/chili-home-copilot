@@ -174,6 +174,41 @@ def test_churn_audit_json_output_without_db(monkeypatch, capsys):
     assert payload["work_counts"][0]["event_type"] == "recert_rescue_refresh"
 
 
+def test_churn_audit_json_flags_open_recert_blocker_work(monkeypatch, capsys):
+    monkeypatch.setattr(
+        audit,
+        "_build_report",
+        lambda hours, limit: {
+            "hours": hours,
+            "limit": limit,
+            "work_counts": [],
+            "diagnostic_outcomes": [],
+            "top_work_producing_patterns": [],
+            "top_noop_exit_variant_diagnostics": [],
+            "top_noop_exit_variant_pattern_rollups": [],
+            "top_recert_rescue_blocker_rollups": [],
+            "top_recert_rescue_action_rollups": [],
+            "open_exit_variant_work_with_recent_noop": [],
+            "open_recert_work_with_recent_blocker_diagnostic": [{"work_id": 19144}],
+            "duplicate_open_refresh_work": [],
+            "recent_duplicate_suppressions": [],
+        },
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["analyze_alert_refresh_churn.py", "--hours", "12", "--limit", "5", "--json"],
+    )
+
+    assert audit.main() == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["open_recert_work_with_recent_blocker_diagnostic"] == [
+        {"work_id": 19144}
+    ]
+
+
 def test_churn_audit_json_unavailable_database(monkeypatch, capsys):
     def unavailable(_hours: int):
         raise audit.DatabaseUnavailable("database system is starting up")
