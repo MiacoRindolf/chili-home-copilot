@@ -296,6 +296,7 @@ def _handle_execution_feedback_digest(db: Session, ev, user_id: int | None) -> N
                 {
                     "scan_pattern_id": p.get("scan_pattern_id"),
                     "live_n": p.get("live_closed_trades"),
+                    "live_win_sample_n": p.get("live_win_sample_n"),
                     "live_wr_pct": p.get("live_win_rate_pct"),
                     "live_avg_net_return_pct": p.get("live_avg_net_return_pct"),
                     "oos_wr_pct": p.get("research_oos_win_rate_pct"),
@@ -307,6 +308,7 @@ def _handle_execution_feedback_digest(db: Session, ev, user_id: int | None) -> N
                 {
                     "scan_pattern_id": p.get("scan_pattern_id"),
                     "paper_n": p.get("paper_closed_trades"),
+                    "paper_win_sample_n": p.get("paper_win_sample_n"),
                     "paper_wr_pct": p.get("paper_win_rate_pct"),
                     "paper_avg_net_return_pct": p.get("paper_avg_net_return_pct"),
                     "oos_wr_pct": p.get("research_oos_win_rate_pct"),

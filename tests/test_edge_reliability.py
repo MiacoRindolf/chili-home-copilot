@@ -319,6 +319,89 @@ def test_edge_reliability_counts_option_paper_with_realized_pnl(db):
     assert row["paper_realized_ev_pct"] == pytest.approx(16.0)
 
 
+def test_edge_reliability_labels_option_paper_with_confirmed_return_fallback(db):
+    pat = _pattern(db, asset_class="option")
+    alert = _alert(db, pat, "OPT")
+    alert.asset_type = "option"
+    _run(db, pat, alert, expected=2.0)
+    db.add(
+        PaperTrade(
+            scan_pattern_id=pat.id,
+            paper_shadow_of_alert_id=alert.id,
+            ticker="OPT",
+            direction="long",
+            entry_price=1.25,
+            stop_price=0.75,
+            target_price=2.0,
+            quantity=2.0,
+            status="closed",
+            entry_date=datetime.utcnow(),
+            exit_date=datetime.utcnow(),
+            exit_price=1.45,
+            pnl=None,
+            pnl_pct=9999.0,
+            signal_json={
+                "asset_type": "options",
+                "option_meta": {"price_domain": "option_premium"},
+                "price_domains": {
+                    "entry_price": "option_premium",
+                    "exit_price": "option_premium",
+                },
+            },
+        )
+    )
+    db.commit()
+
+    row = compute_pattern_edge_reliability(db, pat.id, window_days=7)
+
+    assert row["closed_evidence_count"] == 1
+    assert row["paper_closed_count"] == 1
+    assert row["realized_ev_pct"] == pytest.approx(16.0)
+    assert row["observed_win_rate"] == pytest.approx(1.0)
+    assert row["brier_score"] == pytest.approx(0.16)
+
+
+def test_edge_reliability_labels_option_live_with_confirmed_return_fallback(db):
+    pat = _pattern(db, asset_class="option")
+    alert = _alert(db, pat, "OPT")
+    alert.asset_type = "option"
+    _run(db, pat, alert, expected=2.0)
+    db.add(
+        Trade(
+            scan_pattern_id=pat.id,
+            related_alert_id=alert.id,
+            ticker="OPT",
+            direction="long",
+            entry_price=1.25,
+            quantity=2.0,
+            status="closed",
+            entry_date=datetime.utcnow(),
+            exit_date=datetime.utcnow(),
+            exit_price=1.45,
+            pnl=None,
+            asset_kind="option",
+            indicator_snapshot={
+                "asset_type": "options",
+                "option_meta": {"price_domain": "option_premium"},
+                "price_domains": {
+                    "entry_price": "option_premium",
+                    "exit_price": "option_premium",
+                },
+            },
+        )
+    )
+    db.commit()
+
+    row = compute_pattern_edge_reliability(db, pat.id, window_days=7)
+
+    assert row["closed_evidence_count"] == 1
+    assert row["live_closed_count"] == 1
+    assert row["realized_ev_pct"] == pytest.approx(16.0)
+    assert row["live_realized_ev_pct"] == pytest.approx(16.0)
+    assert row["observed_win_rate"] == pytest.approx(1.0)
+    assert row["brier_score"] == pytest.approx(0.16)
+
+
 def test_edge_reliability_option_slice_keeps_alias_runs_and_realized_paper(db):
     pat = _pattern(db, asset_class="all")
     alert = _alert(db, pat, "SPY")

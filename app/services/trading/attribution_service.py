@@ -465,17 +465,25 @@ def post_trade_review(
         }
 
     pnls = [float(t.pnl or 0) for t in closed]
-    wins = sum(1 for p in pnls if p > 0)
+    directional_outcomes = [
+        outcome
+        for outcome in (_trade_directional_outcome(t) for t in closed)
+        if outcome is not None
+    ]
+    wins = sum(1 for outcome in directional_outcomes if outcome > 0)
     n = len(pnls)
+    directional_n = len(directional_outcomes)
     total_pnl = round(sum(pnls), 2)
     avg_pnl = round(sum(pnls) / n, 2)
-    live_win_rate = round(wins / n * 100, 1)
+    live_win_rate = round(wins / directional_n * 100, 1) if directional_n else None
 
     # --- Consecutive losses ---
     max_consec_losses = 0
     cur_streak = 0
-    for p in pnls:
-        if p < 0:
+    for outcome in (_trade_directional_outcome(t) for t in closed):
+        if outcome is None:
+            cur_streak = 0
+        elif outcome < 0:
             cur_streak += 1
             max_consec_losses = max(max_consec_losses, cur_streak)
         else:
@@ -514,9 +522,15 @@ def post_trade_review(
             continue
         pat = patterns_by_id.get(pid)
         trade_pnls = [float(t.pnl or 0) for t in trades]
-        t_wins = sum(1 for p in trade_pnls if p > 0)
+        trade_directional_outcomes = [
+            outcome
+            for outcome in (_trade_directional_outcome(t) for t in trades)
+            if outcome is not None
+        ]
+        t_wins = sum(1 for outcome in trade_directional_outcomes if outcome > 0)
         t_n = len(trade_pnls)
-        live_wr = round(t_wins / t_n * 100, 1) if t_n else 0
+        t_directional_n = len(trade_directional_outcomes)
+        live_wr = round(t_wins / t_directional_n * 100, 1) if t_directional_n else None
 
         research_wr = None
         if pat and pat.oos_win_rate is not None:
@@ -524,26 +538,34 @@ def post_trade_review(
         elif pat and pat.win_rate is not None:
             research_wr = round(float(backtest_win_rate_db_to_display_pct(pat.win_rate) or 0), 1)
 
-        delta = round(live_wr - research_wr, 1) if research_wr is not None else None
+        delta = (
+            round(live_wr - research_wr, 1)
+            if live_wr is not None and research_wr is not None
+            else None
+        )
 
         row = {
             "scan_pattern_id": pid,
             "pattern_name": pat.name if pat else None,
             "live_trades": t_n,
+            "live_win_sample_n": t_directional_n,
             "live_win_rate_pct": live_wr,
             "research_win_rate_pct": research_wr,
             "delta_pct": delta,
             "live_total_pnl": round(sum(trade_pnls), 2),
         }
 
-        if delta is not None and t_n >= 3:
+        if delta is not None and t_directional_n >= 3:
             if delta >= 5:
                 outperformers.append(row)
                 feedback_signals.append({
                     "pattern_id": pid,
                     "pattern_name": pat.name if pat else None,
                     "signal": "upweight",
-                    "reason": f"Live win rate {live_wr}% exceeded research {research_wr}% by {delta}pp over {t_n} trades",
+                    "reason": (
+                        f"Live win rate {live_wr}% exceeded research {research_wr}% "
+                        f"by {delta}pp over {t_directional_n} directional outcomes"
+                    ),
                 })
             elif delta <= -10:
                 underperformers.append(row)
@@ -551,7 +573,10 @@ def post_trade_review(
                     "pattern_id": pid,
                     "pattern_name": pat.name if pat else None,
                     "signal": "downweight",
-                    "reason": f"Live win rate {live_wr}% lagged research {research_wr}% by {abs(delta)}pp over {t_n} trades",
+                    "reason": (
+                        f"Live win rate {live_wr}% lagged research {research_wr}% "
+                        f"by {abs(delta)}pp over {t_directional_n} directional outcomes"
+                    ),
                 })
 
     outperformers.sort(key=lambda r: r["delta_pct"] or 0, reverse=True)
@@ -559,9 +584,12 @@ def post_trade_review(
 
     # --- Takeaways ---
     takeaways: list[str] = []
-    if live_win_rate >= 60:
-        takeaways.append(f"Strong period: {live_win_rate}% win rate across {n} trades.")
-    elif live_win_rate < 40:
+    if live_win_rate is not None and live_win_rate >= 60:
+        takeaways.append(
+            f"Strong period: {live_win_rate}% win rate across "
+            f"{directional_n} directional outcomes."
+        )
+    elif live_win_rate is not None and live_win_rate < 40:
         takeaways.append(f"Challenging period: {live_win_rate}% win rate — review entry criteria.")
     if max_consec_losses >= 4:
         takeaways.append(
@@ -588,8 +616,9 @@ def post_trade_review(
         "window_days": days,
         "review": {
             "total_trades": n,
+            "win_sample_n": directional_n,
             "wins": wins,
-            "losses": n - wins,
+            "losses": directional_n - wins,
             "live_win_rate_pct": live_win_rate,
             "total_pnl": total_pnl,
             "avg_pnl": avg_pnl,

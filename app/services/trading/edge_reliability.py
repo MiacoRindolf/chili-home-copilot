@@ -308,6 +308,16 @@ def _outcome_label(pnl: Any) -> int | None:
     return 1 if val > 0.0 else 0
 
 
+def _outcome_label_from_return(pnl: Any, realized_return_pct: Any) -> int | None:
+    label = _outcome_label(pnl)
+    if label is not None:
+        return label
+    ret = _safe_float(realized_return_pct)
+    if ret is None:
+        return None
+    return 1 if ret > 0.0 else 0
+
+
 def _calibrated_ev(
     expected_ev_pct: float | None,
     realized_ev_pct: float | None,
@@ -546,8 +556,11 @@ def compute_pattern_edge_reliability(
     labels: list[int] = []
     brier_terms: list[float] = []
     fallback_p = _mean(probabilities)
-    for row in paper_rows:
-        label = _outcome_label(getattr(row, "pnl", None))
+    for row, realized_return_pct in zip(paper_rows, paper_returns):
+        label = _outcome_label_from_return(
+            getattr(row, "pnl", None),
+            realized_return_pct,
+        )
         if label is None:
             continue
         labels.append(label)
@@ -555,8 +568,11 @@ def compute_pattern_edge_reliability(
         pred = prob_by_alert.get(int(alert_id)) if alert_id is not None else fallback_p
         if pred is not None:
             brier_terms.append((float(pred) - float(label)) ** 2)
-    for row in live_rows:
-        label = _outcome_label(getattr(row, "pnl", None))
+    for row, realized_return_pct in zip(live_rows, live_returns):
+        label = _outcome_label_from_return(
+            getattr(row, "pnl", None),
+            realized_return_pct,
+        )
         if label is None:
             continue
         labels.append(label)

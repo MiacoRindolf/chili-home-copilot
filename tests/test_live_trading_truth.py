@@ -262,3 +262,68 @@ def test_run_live_pattern_depromotion_demotes_pattern_failing_repaired_gate(db, 
     assert out["demoted"] >= 1
     assert pattern.lifecycle_stage == "decayed"
     assert pattern.promotion_status == "degraded_live"
+
+
+def test_run_live_pattern_depromotion_uses_directional_sample_floor(
+    db,
+    monkeypatch,
+) -> None:
+    user = User(name="BrainUser2", email="brain2@example.com")
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    pattern = ScanPattern(
+        name="Thin Directional Evidence",
+        rules_json={"conditions": []},
+        origin="brain_discovered",
+        active=True,
+        promotion_status="promoted",
+        lifecycle_stage="promoted",
+        oos_trade_count=30,
+        oos_win_rate=0.8,
+        oos_avg_return_pct=1.5,
+        oos_evaluated_at=datetime.utcnow(),
+        last_backtest_at=datetime.utcnow(),
+    )
+    db.add(pattern)
+    db.commit()
+    db.refresh(pattern)
+
+    monkeypatch.setattr(settings, "brain_live_depromotion_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "brain_default_user_id", user.id, raising=False)
+    monkeypatch.setattr(settings, "brain_min_trades_for_promotion", 30, raising=False)
+    monkeypatch.setattr(settings, "brain_live_depromotion_min_closed_trades", 5, raising=False)
+    monkeypatch.setattr(settings, "brain_live_depromotion_max_gap_pct", 10.0, raising=False)
+
+    def _thin_directional_sample(*_args, **_kwargs):
+        return {
+            "ok": True,
+            "window_days": 120,
+            "patterns": [
+                {
+                    "scan_pattern_id": pattern.id,
+                    "live_closed_trades": 8,
+                    "live_win_sample_n": 2,
+                    "live_win_rate_pct": 0.0,
+                    "research_oos_win_rate_pct": 80.0,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        "app.services.trading.attribution_service.live_vs_research_by_pattern",
+        _thin_directional_sample,
+    )
+
+    out = run_live_pattern_depromotion(db)
+    db.refresh(pattern)
+
+    assert out["demoted"] == 0
+    assert out["decay_monitor_updated"] == 1
+    assert pattern.lifecycle_stage == "promoted"
+    assert pattern.promotion_status == "promoted"
+    dm = pattern.oos_validation_json["decay_monitor"]
+    assert dm["live_n_closed"] == 8
+    assert dm["live_win_sample_n"] == 2
+    assert dm["live_wr_pct"] == 0.0

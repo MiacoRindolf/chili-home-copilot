@@ -9,6 +9,7 @@ from app.models.trading import PaperTrade, ScanPattern, Trade
 from app.services.trading.attribution_service import (
     _scan_patterns_by_id,
     live_vs_research_by_pattern,
+    post_trade_review,
 )
 
 
@@ -19,6 +20,9 @@ class _FakeQuery:
 
     def filter(self, *args: object) -> "_FakeQuery":
         self.filter_calls += 1
+        return self
+
+    def order_by(self, *args: object) -> "_FakeQuery":
         return self
 
     def all(self) -> list[SimpleNamespace]:
@@ -172,6 +176,104 @@ def test_live_vs_research_live_win_rate_uses_confirmed_return_when_pnl_missing()
     assert row["live_avg_net_return_pct"] == pytest.approx(15.70)
     assert row["live_total_pnl"] == pytest.approx(0.0)
     assert row["live_avg_pnl"] == pytest.approx(0.0)
+
+
+def test_post_trade_review_uses_contract_aware_outcomes_when_pnl_missing() -> None:
+    pattern = SimpleNamespace(
+        id=42,
+        name="option-alpha",
+        promotion_status="pilot",
+        win_rate=0.5,
+        oos_win_rate=0.55,
+        oos_avg_return_pct=3.2,
+    )
+    snapshot = {
+        "asset_type": "options",
+        "option_meta": {"price_domain": "option_premium"},
+        "price_domains": {
+            "entry_price": "option_premium",
+            "exit_price": "option_premium",
+        },
+    }
+    trades = [
+        SimpleNamespace(
+            id=1101,
+            user_id=7,
+            status="closed",
+            scan_pattern_id=42,
+            ticker="SPY",
+            direction="long",
+            entry_price=1.25,
+            exit_price=1.45,
+            quantity=2.0,
+            pnl=None,
+            asset_kind="option",
+            tags=None,
+            indicator_snapshot=snapshot,
+            exit_date=datetime(2026, 5, 30, 15, 30),
+            tca_entry_slippage_bps=5.0,
+            tca_exit_slippage_bps=5.0,
+        ),
+        SimpleNamespace(
+            id=1102,
+            user_id=7,
+            status="closed",
+            scan_pattern_id=42,
+            ticker="SPY",
+            direction="long",
+            entry_price=1.00,
+            exit_price=0.90,
+            quantity=2.0,
+            pnl=None,
+            asset_kind="option",
+            tags=None,
+            indicator_snapshot=snapshot,
+            exit_date=datetime(2026, 5, 30, 15, 31),
+            tca_entry_slippage_bps=5.0,
+            tca_exit_slippage_bps=5.0,
+        ),
+        SimpleNamespace(
+            id=1103,
+            user_id=7,
+            status="closed",
+            scan_pattern_id=42,
+            ticker="SPY",
+            direction="long",
+            entry_price=2.00,
+            exit_price=2.40,
+            quantity=1.0,
+            pnl=None,
+            asset_kind="option",
+            tags=None,
+            indicator_snapshot=snapshot,
+            exit_date=datetime(2026, 5, 30, 15, 32),
+            tca_entry_slippage_bps=5.0,
+            tca_exit_slippage_bps=5.0,
+        ),
+    ]
+    db = _FakeAttributionSession(trades=trades, patterns=[pattern])
+
+    out = post_trade_review(db, 7, days=30)
+
+    review = out["review"]
+    assert review["total_trades"] == 3
+    assert review["win_sample_n"] == 3
+    assert review["wins"] == 2
+    assert review["losses"] == 1
+    assert review["live_win_rate_pct"] == pytest.approx(66.7)
+    assert review["max_consecutive_losses"] == 1
+    assert review["total_pnl"] == pytest.approx(0.0)
+    assert review["avg_pnl"] == pytest.approx(0.0)
+
+    outperformer = review["outperforming_patterns"][0]
+    assert outperformer["scan_pattern_id"] == 42
+    assert outperformer["live_trades"] == 3
+    assert outperformer["live_win_sample_n"] == 3
+    assert outperformer["live_win_rate_pct"] == pytest.approx(66.7)
+    assert outperformer["research_win_rate_pct"] == pytest.approx(55.0)
+    assert outperformer["delta_pct"] == pytest.approx(11.7)
+    assert review["underperforming_patterns"] == []
+    assert out["feedback_signals"][0]["signal"] == "upweight"
 
 
 def test_live_vs_research_reports_contract_aware_paper_option_return_after_tca() -> None:

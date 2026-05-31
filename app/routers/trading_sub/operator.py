@@ -28,6 +28,41 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/trading", tags=["trading-operator"])
 
 
+def _pattern_live_win_sample_n(pattern: dict) -> int:
+    sample = pattern.get("live_win_sample_n")
+    if sample is None:
+        sample = pattern.get("live_closed_trades")
+    try:
+        return int(sample or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _pattern_float(value: object) -> float | None:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out == out and out not in (float("inf"), float("-inf")) else None
+
+
+def _annotate_pattern_integrity_signals(patterns: list[dict]) -> None:
+    for p in patterns:
+        live_wr = _pattern_float(p.get("live_win_rate_pct"))
+        research_wr = _pattern_float(p.get("research_oos_win_rate_pct"))
+        if research_wr is None:
+            research_wr = _pattern_float(p.get("research_win_rate_pct"))
+        n = _pattern_live_win_sample_n(p)
+        if n < 3 or research_wr in (None, 0) or live_wr is None:
+            p["integrity_signal"] = "insufficient_data"
+        elif live_wr >= research_wr - 5:
+            p["integrity_signal"] = "aligned"
+        elif live_wr >= research_wr - 15:
+            p["integrity_signal"] = "lagging"
+        else:
+            p["integrity_signal"] = "degraded"
+
+
 # ── Status / health ─────────────────────────────────────────────────────────
 
 @router.get("/status/overview")
@@ -182,19 +217,7 @@ def operator_research_integrity(
         data = live_vs_research_by_pattern(db, ctx.get("user_id"), days=90, limit=limit)
         patterns = data.get("patterns", [])
 
-        # Annotate with integrity signal
-        for p in patterns:
-            live_wr = p.get("live_win_rate_pct") or 0
-            research_wr = p.get("research_oos_win_rate_pct") or p.get("research_win_rate_pct") or 0
-            n = p.get("live_closed_trades", 0)
-            if n < 3 or research_wr == 0:
-                p["integrity_signal"] = "insufficient_data"
-            elif live_wr >= research_wr - 5:
-                p["integrity_signal"] = "aligned"
-            elif live_wr >= research_wr - 15:
-                p["integrity_signal"] = "lagging"
-            else:
-                p["integrity_signal"] = "degraded"
+        _annotate_pattern_integrity_signals(patterns)
 
         return JSONResponse({
             "ok": True,

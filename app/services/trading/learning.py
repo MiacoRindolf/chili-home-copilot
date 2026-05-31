@@ -776,6 +776,12 @@ def run_live_pattern_depromotion(db: Session) -> dict[str, Any]:
     from ...models.trading import ScanPattern
     from .attribution_service import live_vs_research_by_pattern
 
+    def _live_win_sample_n(row: dict[str, Any]) -> int:
+        sample = row.get("live_win_sample_n")
+        if sample is None:
+            sample = row.get("live_closed_trades")
+        return int(sample or 0)
+
     rep = live_vs_research_by_pattern(db, int(uid), days=120, limit=200)
     patterns = rep.get("patterns") or []
     min_n = int(getattr(settings, "brain_live_depromotion_min_closed_trades", 8))
@@ -827,7 +833,8 @@ def run_live_pattern_depromotion(db: Session) -> dict[str, Any]:
         demoted += 1
     for row in patterns:
         n_live = int(row.get("live_closed_trades") or 0)
-        if n_live < min_n:
+        n_live_win = _live_win_sample_n(row)
+        if n_live_win < min_n:
             continue
         oos_wr = row.get("research_oos_win_rate_pct")
         live_wr = row.get("live_win_rate_pct")
@@ -873,7 +880,10 @@ def run_live_pattern_depromotion(db: Session) -> dict[str, Any]:
                 try:
                     transition_on_decay(
                         db, p,
-                        reason=f"live WR {live_wr:.1f}% vs OOS {oos_wr:.1f}% (gap>{max_gap}pp)",
+                        reason=(
+                            f"live WR {live_wr:.1f}% vs OOS {oos_wr:.1f}% "
+                            f"(gap>{max_gap}pp, n={n_live_win})"
+                        ),
                     )
                 except Exception:
                     p.active = False
@@ -907,6 +917,7 @@ def run_live_pattern_depromotion(db: Session) -> dict[str, Any]:
         oos_wr = row.get("research_oos_win_rate_pct")
         live_wr = row.get("live_win_rate_pct")
         n_live = int(row.get("live_closed_trades") or 0)
+        n_live_win = _live_win_sample_n(row)
         if pid is None or oos_wr is None or live_wr is None:
             continue
         p = db.query(ScanPattern).filter(ScanPattern.id == int(pid)).first()
@@ -918,6 +929,7 @@ def run_live_pattern_depromotion(db: Session) -> dict[str, Any]:
         dm["live_wr_pct"] = float(live_wr)
         dm["oos_wr_pct_ref"] = float(oos_wr)
         dm["live_n_closed"] = n_live
+        dm["live_win_sample_n"] = n_live_win
         dm["updated_at"] = datetime.utcnow().isoformat() + "Z"
         ov["decay_monitor"] = dm
         p.oos_validation_json = ov
