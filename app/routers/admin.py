@@ -6,7 +6,7 @@ import csv
 import io
 import json
 
-from ..deps import get_db, require_paired
+from ..deps import require_paired
 from ..models import Chore, Birthday, ChatLog, User, Device, HousemateProfile, UserMemory
 from ..health import check_db, check_ollama
 from ..metrics import (
@@ -419,7 +419,8 @@ def admin_rag_status(ctx=Depends(require_paired)):
 # ---------------------------------------------------------------------------
 
 @router.get("/export/chores.csv")
-def export_chores_csv(db: Session = Depends(get_db)):
+def export_chores_csv(ctx=Depends(require_paired)):
+    db: Session = ctx["db"]
     chores = db.query(Chore).order_by(Chore.id.asc()).all()
     output = io.StringIO()
     writer = csv.writer(output)
@@ -440,7 +441,8 @@ def export_chores_csv(db: Session = Depends(get_db)):
 
 
 @router.get("/export/birthdays.csv")
-def export_birthdays_csv(db: Session = Depends(get_db)):
+def export_birthdays_csv(ctx=Depends(require_paired)):
+    db: Session = ctx["db"]
     birthdays = db.query(Birthday).order_by(Birthday.date.asc()).all()
     output = io.StringIO()
     writer = csv.writer(output)

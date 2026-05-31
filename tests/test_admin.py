@@ -1,12 +1,14 @@
 """Tests for admin dashboard overhaul: analytics endpoints, metrics, alerts."""
 import pytest
 from datetime import datetime, date, timedelta
+from uuid import uuid4
 from unittest.mock import patch, MagicMock
 
 from app.models import (
     User, Chore, Birthday, ChatMessage, Conversation,
     ChatLog, UserMemory, ActivityLog, Device, HousemateProfile,
 )
+from app.pairing import DEVICE_COOKIE_NAME
 from app.metrics import (
     per_user_chore_stats, system_alerts, admin_dashboard_json,
     latency_stats, record_latency, get_counts, model_stats,
@@ -14,6 +16,25 @@ from app.metrics import (
     response_time_trend, conversation_stats, top_users, user_stats,
     _LATENCIES_MS,
 )
+
+
+def _pair_client_for_export(db, client):
+    suffix = uuid4().hex
+    user = User(name=f"ExportTestUser-{suffix}")
+    db.add(user)
+    db.flush()
+    token = f"export-test-token-{suffix}"
+    db.add(
+        Device(
+            token=token,
+            user_id=user.id,
+            label="Export Test Device",
+            client_ip_last="127.0.0.1",
+        )
+    )
+    db.commit()
+    client.cookies.set(DEVICE_COOKIE_NAME, token)
+    return user
 
 
 class _FakeQuery:
@@ -312,6 +333,7 @@ class TestAdminUsersPage:
 
 class TestExportsEnhanced:
     def test_chores_csv_includes_new_fields(self, db, client):
+        _pair_client_for_export(db, client)
         db.add(Chore(title="Test", done=False, priority="high", recurrence="weekly"))
         db.commit()
         resp = client.get("/export/chores.csv")
@@ -320,6 +342,7 @@ class TestExportsEnhanced:
         assert "high" in resp.text
 
     def test_birthdays_csv(self, db, client):
+        _pair_client_for_export(db, client)
         db.add(Birthday(name="Alice", date=date(2000, 3, 15)))
         db.commit()
         resp = client.get("/export/birthdays.csv")
