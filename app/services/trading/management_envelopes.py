@@ -373,6 +373,37 @@ def load_scheduler_pattern_position_user_ids(db: Session) -> list[int]:
     )
 
 
+def load_scheduler_pattern_monitor_envelope_objects_for_tickers(
+    db: Session,
+    *,
+    tickers: list[str],
+) -> list[Any]:
+    """Load event-driven pattern-monitor envelope runtime objects for tickers."""
+    normalized = sorted(
+        {
+            str(ticker).strip().upper()
+            for ticker in tickers
+            if str(ticker).strip()
+        }
+    )
+    if not normalized:
+        return []
+    binds, params = _bind_text_list("ticker", normalized)
+    rows = _rows(
+        db,
+        f"""
+        SELECT *
+          FROM {MANAGEMENT_ENVELOPES_RELATION}
+         WHERE status = 'open'
+           AND UPPER(ticker) IN ({binds})
+           AND ({_pattern_position_filter_sql()})
+         ORDER BY id
+        """,
+        params,
+    )
+    return [_envelope_runtime_object(row) for row in rows]
+
+
 def tca_summary_by_ticker_from_management_envelopes(
     db: Session,
     user_id: int | None,
