@@ -732,3 +732,25 @@ running from clean worktrees while the root checkout remains very dirty.
 
 Report:
 `docs/STRATEGY/CC_REPORTS/2026-05-31_f-position-identity-phase-5l-j-private-helper-orm-surface.md`.
+
+## Phase 5M - Deployment Source Posture (2026-05-31)
+
+Phase 5M added a read-only runtime source-posture probe and used it to repair a
+real source split.
+
+Initial probe showed the web container mounted from a clean Phase 5 worktree,
+but autotrader, scheduler, and broker-sync were still mounted from the dirty
+root checkout. The app/worker containers were recreated from the clean Phase 5M
+worktree with `--no-deps`, leaving Postgres untouched. A local ignored `.env`
+copy was added to the clean worktree before final recreate so runtime secrets
+and explicit Phase 5 flags stayed present.
+
+Verification stayed green: Phase 5K live-path parity and Phase 5I post-rename
+soak both returned `COMPLETE_POSITIVE`.
+
+Architect verdict: source posture is now observable and repairable. The next
+small hardening slice is to schedule or wire the Phase 5M probe so future manual
+worker restarts cannot silently fall back to the dirty root.
+
+Report:
+`docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5m-deployment-source-posture.md`.
