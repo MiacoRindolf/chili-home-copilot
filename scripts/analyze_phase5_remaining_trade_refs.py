@@ -109,6 +109,7 @@ ORM_CONTRACT_GROUPS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(
             r"^(?:app/services/(?:broker_service\.py|trading/(?:bracket_|broker_|crypto/exit_monitor\.py|"
+            r"alerts\.py|"
             r"live_exit_engine\.py|position_integrity\.py|position_resolver\.py|"
             r"robinhood_exit_execution\.py|stop_engine\.py|stuck_order_watchdog\.py|"
             r"venue/coinbase_spot\.py|broker_account_repair\.py)))",
@@ -128,7 +129,7 @@ ORM_CONTRACT_GROUPS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(
             r"^(?:app/services/(?:backtest_service\.py|context_brain/|reasoning_brain/|"
-            r"trading_scheduler\.py|yf_session\.py|trading/(?:alerts\.py|alpha_decay\.py|"
+            r"trading_scheduler\.py|yf_session\.py|trading/(?:alpha_decay\.py|"
             r"auto_trader_monitor\.py|auto_trader_synergy\.py|brain_neural_mesh/|cron_jobs/|"
             r"divergence_service\.py|economic_ledger\.py|edge_reliability\.py|"
             r"evidence_correction\.py|execution_cost_builder\.py|execution_event_lag\.py|"
