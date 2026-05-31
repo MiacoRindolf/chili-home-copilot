@@ -75,14 +75,30 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   static const _autopilotMaxPendingImages = 10;
   static const _autopilotImagePreviewSize = 82.0;
   static const _autopilotBubbleMaxWidth = 720.0;
+  // Breakpoints align with PM-20260529-015 QA targets: desktop, wide desktop,
+  // and ultra-wide cockpit review widths.
+  static const _autopilotDesktopBreakpoint = 980.0;
+  static const _autopilotReviewDesktopBreakpoint = 1200.0;
+  static const _autopilotWideDesktopBreakpoint = 1320.0;
+  static const _autopilotUltraDesktopBreakpoint = 1600.0;
+  static const _autopilotDesktopThreadWidth = 300.0;
+  static const _autopilotReviewThreadWidth = 292.0;
+  static const _autopilotWideThreadWidth = 316.0;
+  static const _autopilotUltraThreadWidth = 348.0;
+  static const _autopilotDesktopRightRailWidth = 390.0;
+  static const _autopilotReviewRightRailWidth = 460.0;
+  static const _autopilotWideRightRailWidth = 520.0;
+  static const _autopilotUltraRightRailWidth = 620.0;
+  static const _autopilotAgentBenchTwoColumnWidth = 420.0;
+  static const _autopilotAgentBenchGap = 10.0;
+  static const _autopilotAgentCardMinHeight = 112.0;
   static const _autopilotMessagePreviewLimit = 1400;
   static const _autopilotChatFollowThreshold = 96.0;
   static const _autopilotPastedImagePrefix = 'chili_autopilot_paste';
   static const _autopilotExecutionModePlanApproval =
       ChiliApiClient.projectAutonomyPlanApprovalMode;
   static const _autopilotStatusAwaitingApproval = 'awaiting_approval';
-  static const _autopilotStatusAwaitingClarification =
-      'awaiting_clarification';
+  static const _autopilotStatusAwaitingClarification = 'awaiting_clarification';
   static const _autopilotStatusChatting = 'chatting';
   static const _autopilotAttachmentKindImage = 'image';
   static const _autopilotArtifactPromptImage = 'prompt_image';
@@ -195,16 +211,20 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     await _loadAutonomyRuns(silent: true);
     _statusTimer?.cancel();
     _statusTimer = Timer.periodic(
-        const Duration(seconds: _statusPollIntervalSeconds), (_) {
-      if (mounted && _paired) unawaited(_refreshStatus());
-    });
+      const Duration(seconds: _statusPollIntervalSeconds),
+      (_) {
+        if (mounted && _paired) unawaited(_refreshStatus());
+      },
+    );
     _autonomyTimer?.cancel();
     _autonomyTimer = Timer.periodic(
-        const Duration(seconds: _autopilotPollIntervalSeconds), (_) {
-      if (mounted && _paired && _tabs.index == 1) {
-        unawaited(_refreshActiveAutonomyRun());
-      }
-    });
+      const Duration(seconds: _autopilotPollIntervalSeconds),
+      (_) {
+        if (mounted && _paired && _tabs.index == 1) {
+          unawaited(_refreshActiveAutonomyRun());
+        }
+      },
+    );
   }
 
   Future<void> _requestPairCode() async {
@@ -359,8 +379,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
       }
     } catch (e) {
       if (mounted) {
-        setState(() => _autonomyError =
-            'Could not load local repos: ${userVisibleNetworkError(e)}');
+        setState(
+          () => _autonomyError =
+              'Could not load local repos: ${userVisibleNetworkError(e)}',
+        );
       }
     }
   }
@@ -410,8 +432,13 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
 
   bool _autonomyTerminal(Map<String, dynamic>? run) {
     final status = run?['status']?.toString() ?? '';
-    return const {'merged', 'completed', 'blocked', 'failed', 'cancelled'}
-        .contains(status);
+    return const {
+      'merged',
+      'completed',
+      'blocked',
+      'failed',
+      'cancelled',
+    }.contains(status);
   }
 
   bool _isAutopilotImageFile(String path) {
@@ -428,13 +455,16 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   void _addAutopilotPendingImage(String path) {
     if (path.trim().isEmpty || !_isAutopilotImageFile(path)) {
       setState(
-          () => _autonomyError = 'Attach a PNG, JPG, GIF, WebP, or BMP image.');
+        () => _autonomyError = 'Attach a PNG, JPG, GIF, WebP, or BMP image.',
+      );
       return;
     }
     if (_autopilotPendingImages.contains(path)) return;
     if (_autopilotPendingImages.length >= _autopilotMaxPendingImages) {
-      setState(() => _autonomyError =
-          'Autopilot supports up to $_autopilotMaxPendingImages images per message.');
+      setState(
+        () => _autonomyError =
+            'Autopilot supports up to $_autopilotMaxPendingImages images per message.',
+      );
       return;
     }
     setState(() {
@@ -469,7 +499,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
       }
       final ts = DateTime.now().millisecondsSinceEpoch;
       final tempFile = File(
-          '${Directory.systemTemp.path}/${_autopilotPastedImagePrefix}_$ts.png');
+        '${Directory.systemTemp.path}/${_autopilotPastedImagePrefix}_$ts.png',
+      );
       await tempFile.writeAsBytes(imageBytes);
       _addAutopilotPendingImage(tempFile.path);
     } catch (e) {
@@ -576,8 +607,9 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     if (run == null) return;
     final runId = run['run_id']?.toString() ?? '';
     if (runId.isEmpty) return;
-    final index =
-        _autonomyRuns.indexWhere((item) => item['run_id']?.toString() == runId);
+    final index = _autonomyRuns.indexWhere(
+      (item) => item['run_id']?.toString() == runId,
+    );
     if (index < 0) {
       _autonomyRuns = [run, ..._autonomyRuns];
       return;
@@ -681,8 +713,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final prompt = _autopilotPromptCtrl.text.trim();
     final attachments = _autopilotAttachmentPayloads();
     if (prompt.isEmpty && attachments.isEmpty) {
-      setState(() => _autonomyError =
-          'Enter a message or attach an image for Project Autopilot.');
+      setState(
+        () => _autonomyError =
+            'Enter a message or attach an image for Project Autopilot.',
+      );
       return;
     }
     final runId = _activeAutonomyRun?['run_id']?.toString() ?? '';
@@ -719,9 +753,11 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(canContinueChat
-                ? 'Message sent to ${run['run_id']}'
-                : 'Autopilot chat started: ${run['run_id']}'),
+            content: Text(
+              canContinueChat
+                  ? 'Message sent to ${run['run_id']}'
+                  : 'Autopilot chat started: ${run['run_id']}',
+            ),
           ),
         );
       }
@@ -747,10 +783,12 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   ) {
     final oldBreaks = '\n'.allMatches(oldValue.text).length;
     final newBreaks = '\n'.allMatches(newValue.text).length;
-    final enterPressed = HardwareKeyboard.instance
-            .isLogicalKeyPressed(LogicalKeyboardKey.enter) ||
-        HardwareKeyboard.instance
-            .isLogicalKeyPressed(LogicalKeyboardKey.numpadEnter);
+    final enterPressed = HardwareKeyboard.instance.isLogicalKeyPressed(
+          LogicalKeyboardKey.enter,
+        ) ||
+        HardwareKeyboard.instance.isLogicalKeyPressed(
+          LogicalKeyboardKey.numpadEnter,
+        );
     if (newBreaks > oldBreaks &&
         enterPressed &&
         !HardwareKeyboard.instance.isShiftPressed) {
@@ -936,21 +974,23 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final summary = _autopilotRunSummary(run);
     await Clipboard.setData(ClipboardData(text: summary));
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Autopilot summary copied.')),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Autopilot summary copied.')));
   }
 
   String _autopilotRunSummary(Map<String, dynamic> run) {
     final runId = run['run_id']?.toString() ?? 'Autopilot run';
     final status = _autonomyStatusLabel(run['status']?.toString() ?? '');
     final stage = _autonomyStageLabel(run['current_stage']?.toString() ?? '');
-    final merge =
-        _autonomyMergeStatusLabel(run['merge_status']?.toString() ?? '');
+    final merge = _autonomyMergeStatusLabel(
+      run['merge_status']?.toString() ?? '',
+    );
     final prompt = run['prompt']?.toString().trim() ?? '';
     final planBody = AutonomyRunPresenter.planBody(_asMap(run['plan']));
-    final reviewBody =
-        AutonomyRunPresenter.architectReviewBody(_asMap(run['architect_review']));
+    final reviewBody = AutonomyRunPresenter.architectReviewBody(
+      _asMap(run['architect_review']),
+    );
     final validation = AutonomyRunPresenter.validationBody(
       _asMapList(run['validation']),
     );
@@ -958,8 +998,11 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final branch = run['integration_branch']?.toString() ?? '';
     final worktree = run['worktree_path']?.toString() ?? '';
     final issue = AutonomyRunPresenter.blockedRunMessage(run);
-    final blocked = {'blocked', 'failed', 'cancelled'}
-        .contains(run['status']?.toString() ?? '');
+    final blocked = {
+      'blocked',
+      'failed',
+      'cancelled',
+    }.contains(run['status']?.toString() ?? '');
     final lines = <String>[
       runId,
       'Status: $status',
@@ -980,9 +1023,9 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   Future<void> _submitQueue() async {
     final pid = _projectId;
     if (pid == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Select a project')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Select a project')));
       return;
     }
     setState(() {
@@ -1028,8 +1071,9 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title:
-            Text(targetActive ? 'Enable kill switch?' : 'Disable kill switch?'),
+        title: Text(
+          targetActive ? 'Enable kill switch?' : 'Disable kill switch?',
+        ),
         content: Text(
           targetActive
               ? 'Code dispatch will stop until you turn this off.'
@@ -1037,11 +1081,13 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('Cancel')),
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
           FilledButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('Confirm')),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Confirm'),
+          ),
         ],
       ),
     );
@@ -1053,15 +1099,15 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
       );
       await _refreshStatus();
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Kill switch updated')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Kill switch updated')));
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Kill switch failed: $e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Kill switch failed: $e')));
       }
     }
   }
@@ -1137,14 +1183,19 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                           padding: const EdgeInsets.all(12),
                           child: Row(
                             children: [
-                              Icon(Icons.error_outline,
-                                  color: Colors.red.shade800, size: 20),
+                              Icon(
+                                Icons.error_outline,
+                                color: Colors.red.shade800,
+                                size: 20,
+                              ),
                               const SizedBox(width: 8),
                               Expanded(
                                 child: Text(
                                   _pairError!,
                                   style: TextStyle(
-                                      color: Colors.red.shade900, fontSize: 13),
+                                    color: Colors.red.shade900,
+                                    fontSize: 13,
+                                  ),
                                 ),
                               ),
                             ],
@@ -1157,8 +1208,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                       'Enter the email your admin registered for you. '
                       "We'll send a 6-digit verification code.",
                       textAlign: TextAlign.center,
-                      style:
-                          TextStyle(color: Colors.grey.shade700, fontSize: 13),
+                      style: TextStyle(
+                        color: Colors.grey.shade700,
+                        fontSize: 13,
+                      ),
                     ),
                     const SizedBox(height: 20),
                     TextField(
@@ -1187,7 +1240,9 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                         _pairCodeMessage!,
                         textAlign: TextAlign.center,
                         style: TextStyle(
-                            color: Colors.grey.shade700, fontSize: 13),
+                          color: Colors.grey.shade700,
+                          fontSize: 13,
+                        ),
                       ),
                     const SizedBox(height: 16),
                     TextField(
@@ -1241,8 +1296,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
       children: [
         Padding(
           padding: const EdgeInsets.fromLTRB(24, 16, 24, 0),
-          child:
-              Text('Brain', style: Theme.of(context).textTheme.headlineMedium),
+          child: Text(
+            'Brain',
+            style: Theme.of(context).textTheme.headlineMedium,
+          ),
         ),
         TabBar(
           controller: _tabs,
@@ -1279,8 +1336,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
             color: Colors.red.shade50,
             child: Padding(
               padding: const EdgeInsets.all(16),
-              child: Text(_statusError!,
-                  style: TextStyle(color: Colors.red.shade900)),
+              child: Text(
+                _statusError!,
+                style: TextStyle(color: Colors.red.shade900),
+              ),
             ),
           ),
           const SizedBox(height: 12),
@@ -1311,8 +1370,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('Kill switch',
-                    style: Theme.of(context).textTheme.titleMedium),
+                Text(
+                  'Kill switch',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
                 const SizedBox(height: 8),
                 Text(
                   active ? 'ON${reason.isNotEmpty ? ': $reason' : ''}' : 'Off',
@@ -1341,11 +1402,15 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
           ),
         ),
         const SizedBox(height: 12),
-        Text('Last activity: ${_agoLabel(lastIso)}',
-            style: TextStyle(color: Colors.grey.shade700)),
+        Text(
+          'Last activity: ${_agoLabel(lastIso)}',
+          style: TextStyle(color: Colors.grey.shade700),
+        ),
         const SizedBox(height: 16),
-        Text('Counters (5 min)',
-            style: Theme.of(context).textTheme.titleMedium),
+        Text(
+          'Counters (5 min)',
+          style: Theme.of(context).textTheme.titleMedium,
+        ),
         const SizedBox(height: 8),
         Wrap(
           spacing: 8,
@@ -1357,15 +1422,19 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         if (counters.isEmpty)
           Padding(
             padding: const EdgeInsets.only(top: 8),
-            child: Text('No runs in the last 5 minutes',
-                style: TextStyle(color: Colors.grey.shade600)),
+            child: Text(
+              'No runs in the last 5 minutes',
+              style: TextStyle(color: Colors.grey.shade600),
+            ),
           ),
         const SizedBox(height: 20),
         Text('Spend today', style: Theme.of(context).textTheme.titleMedium),
         const SizedBox(height: 8),
         if (spendToday.isEmpty)
-          Text('No LLM spend recorded today',
-              style: TextStyle(color: Colors.grey.shade600))
+          Text(
+            'No LLM spend recorded today',
+            style: TextStyle(color: Colors.grey.shade600),
+          )
         else
           ...spendToday.map((row) {
             final m = Map<String, dynamic>.from(row as Map<dynamic, dynamic>);
@@ -1386,13 +1455,16 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
             builder: (context) {
               double total = 0;
               for (final row in spendToday) {
-                final m =
-                    Map<String, dynamic>.from(row as Map<dynamic, dynamic>);
+                final m = Map<String, dynamic>.from(
+                  row as Map<dynamic, dynamic>,
+                );
                 final u = m['spend_usd'];
                 if (u is num) total += u.toDouble();
               }
-              return Text('Total today: \$${total.toStringAsFixed(4)}',
-                  style: const TextStyle(fontWeight: FontWeight.bold));
+              return Text(
+                'Total today: \$${total.toStringAsFixed(4)}',
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              );
             },
           ),
         ],
@@ -1595,10 +1667,25 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   Widget _buildAutopilotTab() {
     return LayoutBuilder(
       builder: (context, constraints) {
-        if (constraints.maxWidth < 980) {
+        if (constraints.maxWidth < _autopilotDesktopBreakpoint) {
           return _buildAutonomyStackedCockpit();
         }
-        final rightWidth = constraints.maxWidth >= 1320 ? 380.0 : 330.0;
+        final threadWidth =
+            constraints.maxWidth >= _autopilotUltraDesktopBreakpoint
+                ? _autopilotUltraThreadWidth
+                : constraints.maxWidth >= _autopilotWideDesktopBreakpoint
+                    ? _autopilotWideThreadWidth
+                    : constraints.maxWidth >= _autopilotReviewDesktopBreakpoint
+                        ? _autopilotReviewThreadWidth
+                        : _autopilotDesktopThreadWidth;
+        final rightWidth =
+            constraints.maxWidth >= _autopilotUltraDesktopBreakpoint
+                ? _autopilotUltraRightRailWidth
+                : constraints.maxWidth >= _autopilotWideDesktopBreakpoint
+                    ? _autopilotWideRightRailWidth
+                    : constraints.maxWidth >= _autopilotReviewDesktopBreakpoint
+                        ? _autopilotReviewRightRailWidth
+                        : _autopilotDesktopRightRailWidth;
         return Column(
           children: [
             if (_autonomyError != null) _buildAutonomyErrorBanner(),
@@ -1606,7 +1693,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  SizedBox(width: 280, child: _buildAutonomyThreadSidebar()),
+                  SizedBox(
+                    width: threadWidth,
+                    child: _buildAutonomyThreadSidebar(),
+                  ),
                   VerticalDivider(width: 1, color: _autonomyDividerColor()),
                   Expanded(child: _buildAutonomyConversationPane()),
                   VerticalDivider(width: 1, color: _autonomyDividerColor()),
@@ -1672,12 +1762,17 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
             padding: const EdgeInsets.fromLTRB(14, 14, 10, 10),
             child: Row(
               children: [
-                Icon(Icons.forum_outlined,
-                    color: Theme.of(context).colorScheme.primary, size: 20),
+                Icon(
+                  Icons.forum_outlined,
+                  color: Theme.of(context).colorScheme.primary,
+                  size: 20,
+                ),
                 const SizedBox(width: 8),
                 Expanded(
-                  child: Text('Autopilot',
-                      style: Theme.of(context).textTheme.titleMedium),
+                  child: Text(
+                    'Autopilot',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
                 ),
                 IconButton(
                   tooltip: 'Refresh runs',
@@ -1781,8 +1876,11 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                   spacing: 6,
                   runSpacing: 4,
                   children: [
-                    _miniChip(_autonomyStatusLabel(status),
-                        color.withValues(alpha: 0.12), color),
+                    _miniChip(
+                      _autonomyStatusLabel(status),
+                      color.withValues(alpha: 0.12),
+                      color,
+                    ),
                     if (stage.isNotEmpty)
                       _miniChip(
                         _autonomyStageLabel(stage),
@@ -1853,8 +1951,11 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                   spacing: 6,
                   runSpacing: 4,
                   children: [
-                    _miniChip(_autonomyStatusLabel(status),
-                        color.withValues(alpha: 0.12), color),
+                    _miniChip(
+                      _autonomyStatusLabel(status),
+                      color.withValues(alpha: 0.12),
+                      color,
+                    ),
                     if (stage.isNotEmpty)
                       _miniChip(
                         _autonomyStageLabel(stage),
@@ -1882,10 +1983,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
             tooltip: 'Refresh',
             onPressed: _autonomyBusy || run == null
                 ? null
-                : () => _refreshActiveAutonomyRun(
-                      silent: false,
-                      force: true,
-                    ),
+                : () => _refreshActiveAutonomyRun(silent: false, force: true),
             icon: const Icon(Icons.refresh),
           ),
         ],
@@ -1912,9 +2010,9 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   Widget? _buildAutonomyProgressBubble(Map<String, dynamic> run) {
     final status = run['status']?.toString() ?? '';
     final planStatus = run['plan_status']?.toString() ?? '';
-    final active = const {'queued', 'running', 'validating', 'merging'}
-            .contains(status) ||
-        const {'drafting', 'revising'}.contains(planStatus);
+    final active =
+        const {'queued', 'running', 'validating', 'merging'}.contains(status) ||
+            const {'drafting', 'revising'}.contains(planStatus);
     if (!active || _autonomyTerminal(run)) return null;
 
     final steps = _asMapList(run['steps']);
@@ -1929,9 +2027,12 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final body = stepBody.isNotEmpty
         ? 'Current progress: $stepBody'
         : switch (stage) {
-            'queued' => 'Current progress: waiting for the local Autopilot worker.',
-            'plan' => 'Current progress: drafting and reviewing the architect plan.',
-            'implement' => 'Current progress: implementing in an isolated worktree.',
+            'queued' =>
+              'Current progress: waiting for the local Autopilot worker.',
+            'plan' =>
+              'Current progress: drafting and reviewing the architect plan.',
+            'implement' =>
+              'Current progress: implementing in an isolated worktree.',
             'validate' => 'Current progress: running validation gates.',
             'merge' => 'Current progress: checking merge safety.',
             _ => 'Current progress: CHILI is working on this run.',
@@ -2082,13 +2183,17 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                 Icon(icon, color: color, size: 18),
                 const SizedBox(width: 8),
                 Expanded(
-                  child: Text(title,
-                      style: const TextStyle(fontWeight: FontWeight.w700),
-                      overflow: TextOverflow.ellipsis),
+                  child: Text(
+                    title,
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ),
                 if (meta.isNotEmpty)
-                  Text(meta,
-                      style: TextStyle(color: _mutedTextColor(), fontSize: 11)),
+                  Text(
+                    meta,
+                    style: TextStyle(color: _mutedTextColor(), fontSize: 11),
+                  ),
               ],
             ),
             if (body.trim().isNotEmpty) ...[
@@ -2192,56 +2297,62 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                   _autopilotStatusAwaitingApproval &&
               _activeAutonomyRun?['plan_status']?.toString() ==
                   _autopilotStatusAwaitingApproval) ...[
-            Builder(builder: (context) {
-              final review = _asMap(_activeAutonomyRun?['architect_review']);
-              final reviewPassed =
-                  AutonomyRunPresenter.architectReviewPassed(review);
-              return Container(
-                width: double.infinity,
-                margin: const EdgeInsets.only(bottom: 10),
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: _autonomyBubbleBackground(
-                    reviewPassed ? Colors.teal : Colors.orange,
-                    alpha: 0.10,
-                  ),
-                  border: Border.all(
-                    color: (reviewPassed ? Colors.teal : Colors.orange)
-                        .withValues(alpha: 0.22),
-                  ),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Wrap(
-                  spacing: 10,
-                  runSpacing: 8,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    Text(
-                      reviewPassed
-                          ? 'Plan Mode is waiting for approval.'
-                          : 'Architect quality gate has not passed.',
-                      style: TextStyle(
-                        color: Theme.of(context).colorScheme.onSurface,
-                        fontWeight: FontWeight.w600,
-                      ),
+            Builder(
+              builder: (context) {
+                final review = _asMap(_activeAutonomyRun?['architect_review']);
+                final reviewPassed = AutonomyRunPresenter.architectReviewPassed(
+                  review,
+                );
+                return Container(
+                  width: double.infinity,
+                  margin: const EdgeInsets.only(bottom: 10),
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: _autonomyBubbleBackground(
+                      reviewPassed ? Colors.teal : Colors.orange,
+                      alpha: 0.10,
                     ),
-                    if (reviewPassed)
-                      FilledButton.icon(
-                        onPressed:
-                            _autonomyBusy ? null : _approveAutopilotPlan,
-                        icon: const Icon(Icons.play_arrow, size: 18),
-                        label: const Text('Approve and implement'),
-                      ),
-                    Text(
-                      reviewPassed
-                          ? 'Or send feedback below to revise it.'
-                          : 'Send feedback below so CHILI can revise it.',
-                      style: TextStyle(color: _mutedTextColor(), fontSize: 12),
+                    border: Border.all(
+                      color: (reviewPassed ? Colors.teal : Colors.orange)
+                          .withValues(alpha: 0.22),
                     ),
-                  ],
-                ),
-              );
-            }),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Wrap(
+                    spacing: 10,
+                    runSpacing: 8,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      Text(
+                        reviewPassed
+                            ? 'Plan Mode is waiting for approval.'
+                            : 'Architect quality gate has not passed.',
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.onSurface,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      if (reviewPassed)
+                        FilledButton.icon(
+                          onPressed:
+                              _autonomyBusy ? null : _approveAutopilotPlan,
+                          icon: const Icon(Icons.play_arrow, size: 18),
+                          label: const Text('Approve and implement'),
+                        ),
+                      Text(
+                        reviewPassed
+                            ? 'Or send feedback below to revise it.'
+                            : 'Send feedback below so CHILI can revise it.',
+                        style: TextStyle(
+                          color: _mutedTextColor(),
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
           ],
           if (_autopilotPendingImages.isNotEmpty) ...[
             _buildAutopilotImagePreviewStrip(
@@ -2256,9 +2367,11 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
               IconButton.outlined(
                 tooltip: 'Attach images',
                 onPressed: _autonomyBusy ? null : _pickAutopilotImages,
-                icon: Icon(_autopilotPendingImages.isEmpty
-                    ? Icons.attach_file
-                    : Icons.collections_outlined),
+                icon: Icon(
+                  _autopilotPendingImages.isEmpty
+                      ? Icons.attach_file
+                      : Icons.collections_outlined,
+                ),
               ),
               const SizedBox(width: 8),
               IconButton.outlined(
@@ -2312,10 +2425,12 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                           child: CircularProgressIndicator(strokeWidth: 2),
                         )
                       : const Icon(Icons.send),
-                  label: Text(_activeAutonomyRun == null ||
-                          _autonomyTerminal(_activeAutonomyRun)
-                      ? 'Start'
-                      : 'Send'),
+                  label: Text(
+                    _activeAutonomyRun == null ||
+                            _autonomyTerminal(_activeAutonomyRun)
+                        ? 'Start'
+                        : 'Send',
+                  ),
                 ),
               ),
             ],
@@ -2325,7 +2440,9 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
             Text(
               'No registered local repos are visible to this desktop backend.',
               style: TextStyle(
-                  color: _autonomyStatusColor('blocked'), fontSize: 13),
+                color: _autonomyStatusColor('blocked'),
+                fontSize: 13,
+              ),
             ),
           ],
         ],
@@ -2360,8 +2477,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                     ),
                   ),
                   child: Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 9,
+                    ),
                     decoration: BoxDecoration(
                       color: _autonomySidebarColor(),
                       border: Border.all(color: _autonomyDividerColor()),
@@ -2370,8 +2489,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Icon(Icons.add_photo_alternate_outlined,
-                            color: dropColor),
+                        Icon(
+                          Icons.add_photo_alternate_outlined,
+                          color: dropColor,
+                        ),
                         const SizedBox(width: 8),
                         Text(
                           'Drop images to attach',
@@ -2541,8 +2662,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         child: ListView(
           padding: const EdgeInsets.all(16),
           children: [
-            Text('Autopilot actions',
-                style: Theme.of(context).textTheme.titleMedium),
+            Text(
+              'Autopilot actions',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
             const SizedBox(height: 12),
             _buildAutonomyRepoPicker(),
             const SizedBox(height: 12),
@@ -2570,6 +2693,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final learning = _asMap(run['learning']);
     final artifacts = _asMapList(run['artifacts']);
     final steps = _asMapList(run['steps']);
+    final repoContext = _autonomyRepoLabel(run);
+    final activeAgentName = _latestAutonomyAgentName(steps);
     final branch = run['integration_branch']?.toString() ?? '';
     final worktree = run['worktree_path']?.toString() ?? '';
     final mergeMessage = run['merge_message']?.toString() ?? '';
@@ -2579,10 +2704,18 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
       child: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          Text('Autopilot actions',
-              style: Theme.of(context).textTheme.titleMedium),
+          Text(
+            'Autopilot actions',
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
           const SizedBox(height: 12),
           _buildAutonomyActionPanel(run),
+          const Divider(height: 28),
+          _buildAutonomyAgents(
+            agents,
+            repoContext: repoContext,
+            activeAgentName: activeAgentName,
+          ),
           const Divider(height: 28),
           Text('Tracking', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 10),
@@ -2591,10 +2724,12 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
             runSpacing: 6,
             children: [
               _miniChip(
-                  _autonomyStatusLabel(run['status']?.toString() ?? 'unknown'),
-                  _autonomyStatusColor(run['status']?.toString() ?? '')
-                      .withValues(alpha: 0.12),
-                  _autonomyStatusColor(run['status']?.toString() ?? '')),
+                _autonomyStatusLabel(run['status']?.toString() ?? 'unknown'),
+                _autonomyStatusColor(
+                  run['status']?.toString() ?? '',
+                ).withValues(alpha: 0.12),
+                _autonomyStatusColor(run['status']?.toString() ?? ''),
+              ),
               if (run['current_stage'] != null)
                 _miniChip(
                   _autonomyStageLabel('${run['current_stage']}'),
@@ -2615,13 +2750,13 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
           if (mergeMessage.isNotEmpty) _kvSelectable('Merge', mergeMessage),
           if (errorMessage.isNotEmpty)
             _kvSelectable(
-                'Blocked', AutonomyRunPresenter.blockedRunMessage(run)),
+              'Blocked',
+              AutonomyRunPresenter.blockedRunMessage(run),
+            ),
           const Divider(height: 28),
           _buildAutonomyArchitectQuality(architectReview),
           const Divider(height: 28),
           _buildAutonomyPlan(plan, files),
-          const Divider(height: 28),
-          _buildAutonomyAgents(agents),
           const Divider(height: 28),
           _buildAutonomyValidation(validation),
           const Divider(height: 28),
@@ -2712,6 +2847,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final validation = _asMapList(run['validation']);
     final steps = _asMapList(run['steps']);
     final learning = _asMap(run['learning']);
+    final repoContext = _autonomyRepoLabel(run);
+    final activeAgentName = _latestAutonomyAgentName(steps);
     final branch = run['integration_branch']?.toString() ?? '';
     final worktree = run['worktree_path']?.toString() ?? '';
     final mergeMessage = run['merge_message']?.toString() ?? '';
@@ -2735,9 +2872,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                   ),
                 ),
                 _miniChip(
-                    _autonomyStatusLabel(status),
-                    statusColor.withValues(alpha: 0.12),
-                    statusColor),
+                  _autonomyStatusLabel(status),
+                  statusColor.withValues(alpha: 0.12),
+                  statusColor,
+                ),
                 const SizedBox(width: 6),
                 _miniChip(
                   _autonomyMergeStatusLabel(merge),
@@ -2780,13 +2918,19 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
             if (mergeMessage.isNotEmpty) _kvSelectable('Merge', mergeMessage),
             if (errorMessage.isNotEmpty)
               _kvSelectable(
-                  'Blocked', AutonomyRunPresenter.blockedRunMessage(run)),
+                'Blocked',
+                AutonomyRunPresenter.blockedRunMessage(run),
+              ),
+            const Divider(height: 28),
+            _buildAutonomyAgents(
+              agents,
+              repoContext: repoContext,
+              activeAgentName: activeAgentName,
+            ),
             const Divider(height: 28),
             _buildAutonomyArchitectQuality(architectReview),
             const Divider(height: 28),
             _buildAutonomyPlan(plan, files),
-            const Divider(height: 28),
-            _buildAutonomyAgents(agents),
             const Divider(height: 28),
             _buildAutonomyValidation(validation),
             const Divider(height: 28),
@@ -2809,12 +2953,16 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('Architect quality',
-            style: Theme.of(context).textTheme.titleSmall),
+        Text(
+          'Architect quality',
+          style: Theme.of(context).textTheme.titleSmall,
+        ),
         const SizedBox(height: 8),
         if (body.isEmpty)
-          Text('Waiting for architect review',
-              style: TextStyle(color: _mutedTextColor()))
+          Text(
+            'Waiting for architect review',
+            style: TextStyle(color: _mutedTextColor()),
+          )
         else ...[
           Wrap(
             spacing: 6,
@@ -2858,11 +3006,13 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
               spacing: 6,
               runSpacing: 6,
               children: files
-                  .map((file) => _miniChip(
-                        file,
-                        _autonomyBubbleBackground(Colors.teal),
-                        Colors.teal.shade900,
-                      ))
+                  .map(
+                    (file) => _miniChip(
+                      file,
+                      _autonomyBubbleBackground(Colors.teal),
+                      Colors.teal.shade900,
+                    ),
+                  )
                   .toList(),
             ),
           ],
@@ -2871,64 +3021,266 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     );
   }
 
-  Widget _buildAutonomyAgents(List<Map<String, dynamic>> agents) {
+  Widget _buildAutonomyAgents(
+    List<Map<String, dynamic>> agents, {
+    String repoContext = '',
+    String activeAgentName = '',
+  }) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('Agent lanes', style: Theme.of(context).textTheme.titleSmall),
-        const SizedBox(height: 8),
-        if (agents.isEmpty)
-          Text('Waiting for lane assignment',
-              style: TextStyle(color: _mutedTextColor()))
-        else
-          ...agents.map((agent) {
-            final name = agent['name']?.toString() ??
-                agent['role']?.toString() ??
-                'agent';
-            final role = agent['role']?.toString() ?? '';
-            final status = agent['status']?.toString() ?? '';
-            final files = _asStringList(agent['files']);
-            return Padding(
-              padding: const EdgeInsets.only(bottom: 10),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Wrap(
-                    spacing: 6,
-                    runSpacing: 4,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    children: [
-                      _miniChip(
-                        name,
-                        _autonomyBubbleBackground(Colors.indigo),
-                        Colors.indigo.shade800,
-                      ),
-                      if (role.isNotEmpty && role != name)
-                        _miniChip(
-                          role,
-                          _autonomyBubbleBackground(Colors.blueGrey),
-                          Colors.blueGrey.shade800,
-                        ),
-                      if (status.isNotEmpty)
-                        _miniChip(
-                          status,
-                          _autonomyBubbleBackground(Colors.green),
-                          Colors.green.shade800,
-                        ),
-                    ],
-                  ),
-                  if (files.isNotEmpty) ...[
-                    const SizedBox(height: 4),
-                    Text(files.join(', '),
-                        style:
-                            TextStyle(color: _mutedTextColor(), fontSize: 12)),
-                  ],
-                ],
+        Row(
+          children: [
+            Icon(
+              Icons.groups_2_outlined,
+              size: 18,
+              color: Theme.of(context).colorScheme.primary,
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'Agent bench',
+                style: Theme.of(context).textTheme.titleSmall,
               ),
-            );
-          }),
+            ),
+            if (agents.isNotEmpty)
+              _miniChip(
+                '${agents.length} lanes',
+                _autonomyBubbleBackground(Colors.blueGrey),
+                Colors.blueGrey.shade800,
+              ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        if (agents.isEmpty)
+          Text(
+            'Waiting for lane assignment',
+            style: TextStyle(color: _mutedTextColor()),
+          )
+        else
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final bounded =
+                  constraints.maxWidth.isFinite ? constraints.maxWidth : 360.0;
+              final columns =
+                  bounded >= _autopilotAgentBenchTwoColumnWidth ? 2 : 1;
+              final tileWidth = columns == 2
+                  ? (bounded - _autopilotAgentBenchGap) / 2
+                  : bounded;
+              return Wrap(
+                spacing: _autopilotAgentBenchGap,
+                runSpacing: _autopilotAgentBenchGap,
+                children: [
+                  for (final agent in agents)
+                    SizedBox(
+                      width: tileWidth,
+                      child: _buildAutonomyAgentCard(
+                        agent,
+                        repoContext: repoContext,
+                        activeAgentName: activeAgentName,
+                      ),
+                    ),
+                ],
+              );
+            },
+          ),
       ],
     );
+  }
+
+  Widget _buildAutonomyAgentCard(
+    Map<String, dynamic> agent, {
+    required String repoContext,
+    required String activeAgentName,
+  }) {
+    final name =
+        agent['name']?.toString() ?? agent['role']?.toString() ?? 'agent';
+    final role = agent['role']?.toString() ?? '';
+    final status = agent['status']?.toString() ?? '';
+    final files = _asStringList(agent['files']);
+    final tier = _firstAgentText(agent, const [
+      'tier',
+      'model_tier',
+      'model',
+      'permission_tier',
+    ]);
+    final permission = _firstAgentText(agent, const [
+      'permission',
+      'permissions',
+      'permission_level',
+      'write_scope',
+      'scope',
+    ]);
+    final active = activeAgentName.trim().isNotEmpty &&
+        {
+          name.toLowerCase(),
+          role.toLowerCase(),
+        }.contains(activeAgentName.trim().toLowerCase());
+    final color = active
+        ? Theme.of(context).colorScheme.primary
+        : status.isNotEmpty
+            ? _autonomyStatusColor(status)
+            : Colors.indigo.shade700;
+    final visibleFiles = files.take(2).toList();
+    final hiddenFiles = files.length - visibleFiles.length;
+    return Container(
+      constraints:
+          const BoxConstraints(minHeight: _autopilotAgentCardMinHeight),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: _autonomyBubbleBackground(color, alpha: active ? 0.11 : 0.055),
+        border: Border.all(
+          color: color.withValues(alpha: active ? 0.38 : 0.18),
+        ),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 30,
+                height: 30,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.14),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Icon(
+                  active ? Icons.bolt : Icons.smart_toy_outlined,
+                  size: 17,
+                  color: color,
+                ),
+              ),
+              const SizedBox(width: 9),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w800,
+                        fontSize: 13,
+                      ),
+                    ),
+                    if (role.isNotEmpty && role != name)
+                      Text(
+                        role,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: _mutedTextColor(),
+                          fontSize: 11,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              if (status.isNotEmpty)
+                _miniChip(
+                  _autonomyStatusLabel(status),
+                  _autonomyBubbleBackground(color),
+                  color,
+                ),
+              if (tier.isNotEmpty)
+                _miniChip(
+                  tier,
+                  _autonomyBubbleBackground(Colors.deepPurple),
+                  Colors.deepPurple.shade800,
+                ),
+              if (permission.isNotEmpty)
+                _miniChip(
+                  permission,
+                  _autonomyBubbleBackground(Colors.teal),
+                  Colors.teal.shade900,
+                ),
+              if (repoContext.isNotEmpty)
+                _miniChip(
+                  repoContext,
+                  _autonomyBubbleBackground(Colors.blueGrey),
+                  Colors.blueGrey.shade800,
+                ),
+            ],
+          ),
+          if (visibleFiles.isNotEmpty) ...[
+            const SizedBox(height: 9),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: [
+                for (final file in visibleFiles)
+                  _miniChip(
+                    _shortFileLabel(file),
+                    _autonomyBubbleBackground(Colors.grey),
+                    Colors.grey.shade800,
+                  ),
+                if (hiddenFiles > 0)
+                  _miniChip(
+                    '+$hiddenFiles files',
+                    _autonomyBubbleBackground(Colors.grey),
+                    Colors.grey.shade800,
+                  ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  String _firstAgentText(Map<String, dynamic> agent, List<String> keys) {
+    for (final key in keys) {
+      final value = agent[key]?.toString().trim() ?? '';
+      if (value.isNotEmpty && value != 'null') return value;
+    }
+    return '';
+  }
+
+  String _shortFileLabel(String file) {
+    final normalized = file.replaceAll('\\', '/');
+    final parts =
+        normalized.split('/').where((part) => part.isNotEmpty).toList();
+    if (parts.length >= 2) {
+      return '${parts[parts.length - 2]}/${parts.last}';
+    }
+    return parts.isEmpty ? file : parts.last;
+  }
+
+  String _autonomyRepoLabel(Map<String, dynamic> run) {
+    final repoId = _asInt(run['repo_id']);
+    var repoName = run['repo_name']?.toString().trim() ??
+        run['repository_name']?.toString().trim() ??
+        run['repo']?.toString().trim() ??
+        '';
+    if (repoName.isEmpty && repoId != null) {
+      for (final repo in _codeRepos) {
+        if (_asInt(repo['id']) == repoId) {
+          repoName = repo['name']?.toString().trim() ?? '';
+          break;
+        }
+      }
+    }
+    if (repoName.isNotEmpty) return repoName;
+    return repoId == null ? '' : 'repo #$repoId';
+  }
+
+  String _latestAutonomyAgentName(List<Map<String, dynamic>> steps) {
+    for (final step in steps.reversed) {
+      final agent = step['agent_name']?.toString().trim() ?? '';
+      if (agent.isNotEmpty) return agent;
+    }
+    return '';
   }
 
   Widget _buildAutonomyValidation(List<Map<String, dynamic>> validation) {
@@ -2938,8 +3290,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         Text('Validation', style: Theme.of(context).textTheme.titleSmall),
         const SizedBox(height: 8),
         if (validation.isEmpty)
-          Text('No validation results yet',
-              style: TextStyle(color: _mutedTextColor()))
+          Text(
+            'No validation results yet',
+            style: TextStyle(color: _mutedTextColor()),
+          )
         else
           ...validation.map((item) {
             final key = item['step_key']?.toString() ??
@@ -2959,22 +3313,25 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                     spacing: 6,
                     crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
-                      Icon(ok ? Icons.check_circle : Icons.warning_amber,
-                          color: ok
-                              ? _autonomyStatusColor('completed')
-                              : _autonomyStatusColor('blocked'),
-                          size: 18),
-                      Text(key,
-                          style: const TextStyle(fontWeight: FontWeight.w600)),
+                      Icon(
+                        ok ? Icons.check_circle : Icons.warning_amber,
+                        color: ok
+                            ? _autonomyStatusColor('completed')
+                            : _autonomyStatusColor('blocked'),
+                        size: 18,
+                      ),
+                      Text(
+                        key,
+                        style: const TextStyle(fontWeight: FontWeight.w600),
+                      ),
                       if (code != null)
                         _miniChip(
-                            'exit $code',
-                            ok
-                                ? _autonomyBubbleBackground(Colors.green)
-                                : _autonomyBubbleBackground(Colors.orange),
-                            ok
-                                ? Colors.green.shade800
-                                : Colors.orange.shade900),
+                          'exit $code',
+                          ok
+                              ? _autonomyBubbleBackground(Colors.green)
+                              : _autonomyBubbleBackground(Colors.orange),
+                          ok ? Colors.green.shade800 : Colors.orange.shade900,
+                        ),
                     ],
                   ),
                   if (output.trim().isNotEmpty) ...[
@@ -2999,19 +3356,21 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
 
   Widget _buildAutonomyArtifacts(List<Map<String, dynamic>> artifacts) {
     final visible = artifacts
-        .where((artifact) => {
-              'model_call',
-              'architect_review',
-              'worktree',
-              'diff',
-              'diff_rejected',
-              'commit',
-              _autopilotArtifactPromptImage,
-              'visual_screenshot',
-              'visual_video',
-              'ui_review',
-              'ux_review',
-            }.contains(artifact['artifact_type']?.toString()))
+        .where(
+          (artifact) => {
+            'model_call',
+            'architect_review',
+            'worktree',
+            'diff',
+            'diff_rejected',
+            'commit',
+            _autopilotArtifactPromptImage,
+            'visual_screenshot',
+            'visual_video',
+            'ui_review',
+            'ux_review',
+          }.contains(artifact['artifact_type']?.toString()),
+        )
         .toList();
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -3033,16 +3392,21 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                 decoration: BoxDecoration(
                   border: Border.all(color: _autonomyDividerColor()),
                   borderRadius: BorderRadius.circular(8),
-                  color:
-                      _autonomyBubbleBackground(Colors.blueGrey, alpha: 0.04),
+                  color: _autonomyBubbleBackground(
+                    Colors.blueGrey,
+                    alpha: 0.04,
+                  ),
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Row(
                       children: [
-                        Icon(_autonomyArtifactIcon(type),
-                            size: 18, color: _mutedTextColor()),
+                        Icon(
+                          _autonomyArtifactIcon(type),
+                          size: 18,
+                          color: _mutedTextColor(),
+                        ),
                         const SizedBox(width: 8),
                         Expanded(
                           child: Text(
@@ -3108,17 +3472,22 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         Text('Learning signals', style: Theme.of(context).textTheme.titleSmall),
         const SizedBox(height: 8),
         if (learning.isEmpty)
-          Text('No learning sample recorded yet',
-              style: TextStyle(color: _mutedTextColor()))
+          Text(
+            'No learning sample recorded yet',
+            style: TextStyle(color: _mutedTextColor()),
+          )
         else
           Wrap(
             spacing: 8,
             runSpacing: 8,
             children: learning.entries
-                .map((entry) => _miniChip(
+                .map(
+                  (entry) => _miniChip(
                     '${entry.key}: ${entry.value}',
                     _autonomyBubbleBackground(Colors.cyan),
-                    Colors.cyan.shade900))
+                    Colors.cyan.shade900,
+                  ),
+                )
                 .toList(),
           ),
       ],
@@ -3171,8 +3540,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
               ),
               trailing: time.isEmpty
                   ? null
-                  : Text(time,
-                      style: TextStyle(color: _mutedTextColor(), fontSize: 11)),
+                  : Text(
+                      time,
+                      style: TextStyle(color: _mutedTextColor(), fontSize: 11),
+                    ),
             );
           }),
       ],
@@ -3190,8 +3561,9 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
           ),
           const SizedBox(height: 12),
           FilledButton(
-              onPressed: _loadProjectsPicker,
-              child: const Text('Reload projects')),
+            onPressed: _loadProjectsPicker,
+            child: const Text('Reload projects'),
+          ),
         ],
       );
     }
@@ -3201,8 +3573,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         if (_queueError != null)
           Padding(
             padding: const EdgeInsets.only(bottom: 12),
-            child: Text(_queueError!,
-                style: TextStyle(color: Colors.red.shade800)),
+            child: Text(
+              _queueError!,
+              style: TextStyle(color: Colors.red.shade800),
+            ),
           ),
         TextField(
           controller: _titleCtrl,
@@ -3278,13 +3652,17 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text('Failed to load Context Brain status',
-                style: TextStyle(color: Colors.red.shade800)),
+            Text(
+              'Failed to load Context Brain status',
+              style: TextStyle(color: Colors.red.shade800),
+            ),
             const SizedBox(height: 8),
             Text(_ctxError!, style: TextStyle(color: Colors.grey.shade700)),
             const SizedBox(height: 16),
             FilledButton(
-                onPressed: _loadContextBrain, child: const Text('Retry')),
+              onPressed: _loadContextBrain,
+              child: const Text('Retry'),
+            ),
           ],
         ),
       );
@@ -3306,11 +3684,15 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                 children: [
                   Row(
                     children: [
-                      Icon(Icons.psychology_outlined,
-                          color: Theme.of(context).colorScheme.primary),
+                      Icon(
+                        Icons.psychology_outlined,
+                        color: Theme.of(context).colorScheme.primary,
+                      ),
                       const SizedBox(width: 8),
-                      Text('Runtime',
-                          style: Theme.of(context).textTheme.titleMedium),
+                      Text(
+                        'Runtime',
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
                       const Spacer(),
                       Chip(
                         label: Text(state['mode']?.toString() ?? 'unknown'),
@@ -3319,20 +3701,30 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                     ],
                   ),
                   const Divider(),
-                  _kv('Token budget / request',
-                      '${state['token_budget_per_request'] ?? '-'}'),
-                  _kv('Distillation threshold',
-                      '${state['distillation_threshold_tokens'] ?? '-'} tokens'),
+                  _kv(
+                    'Token budget / request',
+                    '${state['token_budget_per_request'] ?? '-'}',
+                  ),
+                  _kv(
+                    'Distillation threshold',
+                    '${state['distillation_threshold_tokens'] ?? '-'} tokens',
+                  ),
                   _kv(
                     'Distillation spend today',
                     '\$${state['spent_today_distillation_usd'] ?? '0'} / \$${state['daily_distillation_usd_cap'] ?? '0'}',
                   ),
-                  _kv('Strategy version',
-                      '${state['learned_strategy_version'] ?? '-'}'),
-                  _kv('Learning enabled',
-                      '${state['learning_enabled'] ?? '-'}'),
-                  _kv('Last learning cycle',
-                      '${state['last_learning_cycle_at'] ?? 'never'}'),
+                  _kv(
+                    'Strategy version',
+                    '${state['learned_strategy_version'] ?? '-'}',
+                  ),
+                  _kv(
+                    'Learning enabled',
+                    '${state['learning_enabled'] ?? '-'}',
+                  ),
+                  _kv(
+                    'Last learning cycle',
+                    '${state['last_learning_cycle_at'] ?? 'never'}',
+                  ),
                 ],
               ),
             ),
@@ -3345,11 +3737,14 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('Intents (last 24h)',
-                        style: Theme.of(context).textTheme.titleMedium),
+                    Text(
+                      'Intents (last 24h)',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
                     const Divider(),
-                    ...intentDist.entries
-                        .map((e) => _kv('${e.key}', '${e.value}')),
+                    ...intentDist.entries.map(
+                      (e) => _kv('${e.key}', '${e.value}'),
+                    ),
                   ],
                 ),
               ),
@@ -3363,13 +3758,19 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('Last assembly',
-                        style: Theme.of(context).textTheme.titleMedium),
+                    Text(
+                      'Last assembly',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
                     const Divider(),
-                    _kv('Intent',
-                        '${lastAssembly['intent']} (${lastAssembly['intent_confidence']})'),
-                    _kv('Tokens used',
-                        '${lastAssembly['total_tokens_input']} / ${lastAssembly['budget_token_cap']} (${lastAssembly['budget_used_pct']}%)'),
+                    _kv(
+                      'Intent',
+                      '${lastAssembly['intent']} (${lastAssembly['intent_confidence']})',
+                    ),
+                    _kv(
+                      'Tokens used',
+                      '${lastAssembly['total_tokens_input']} / ${lastAssembly['budget_token_cap']} (${lastAssembly['budget_used_pct']}%)',
+                    ),
                     _kv('Elapsed', '${lastAssembly['elapsed_ms']} ms'),
                     _kv('Distilled', '${lastAssembly['distilled']}'),
                     _kv('Sources used', '${lastAssembly['sources_used']}'),
@@ -3386,8 +3787,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('Source contribution (24h)',
-                        style: Theme.of(context).textTheme.titleMedium),
+                    Text(
+                      'Source contribution (24h)',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
                     const Divider(),
                     ..._ctxSources.map((s) {
                       final id = s['source_id']?.toString() ?? '?';
@@ -3395,8 +3798,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                       final tot = s['total_returned'] ?? 0;
                       final rate =
                           ((s['selection_rate'] ?? 0.0) as num).toDouble();
-                      return _kv(id,
-                          '$sel/$tot (${(rate * 100).toStringAsFixed(0)}% selected)');
+                      return _kv(
+                        id,
+                        '$sel/$tot (${(rate * 100).toStringAsFixed(0)}% selected)',
+                      );
                     }),
                   ],
                 ),
@@ -3405,22 +3810,28 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
           ],
           if (_ctxAssemblies.isNotEmpty) ...[
             const SizedBox(height: 12),
-            Text('Recent assemblies',
-                style: Theme.of(context).textTheme.titleMedium),
+            Text(
+              'Recent assemblies',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
             const SizedBox(height: 8),
-            ..._ctxAssemblies.take(15).map((a) => Card(
-                  child: ListTile(
-                    dense: true,
-                    title: Text('${a['intent']} (${a['intent_confidence']})'),
-                    subtitle: Text(
-                      '${a['total_tokens_input']}/${a['budget_token_cap']} tok · '
-                      '${a['elapsed_ms']}ms · '
-                      '${(a['sources_used'] is Map) ? (a['sources_used'] as Map).keys.join(',') : '-'}',
+            ..._ctxAssemblies.take(15).map(
+                  (a) => Card(
+                    child: ListTile(
+                      dense: true,
+                      title: Text('${a['intent']} (${a['intent_confidence']})'),
+                      subtitle: Text(
+                        '${a['total_tokens_input']}/${a['budget_token_cap']} tok · '
+                        '${a['elapsed_ms']}ms · '
+                        '${(a['sources_used'] is Map) ? (a['sources_used'] as Map).keys.join(',') : '-'}',
+                      ),
+                      trailing: Text(
+                        '#${a['id']}',
+                        style: TextStyle(color: Colors.grey.shade600),
+                      ),
                     ),
-                    trailing: Text('#${a['id']}',
-                        style: TextStyle(color: Colors.grey.shade600)),
                   ),
-                )),
+                ),
           ],
         ],
       ),
@@ -3487,10 +3898,9 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         // Filter / summary bar
         Container(
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-          color: Theme.of(context)
-              .colorScheme
-              .surfaceContainerHighest
-              .withValues(alpha: 0.4),
+          color: Theme.of(
+            context,
+          ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.4),
           child: Row(
             children: [
               if (_watchTaskId != null) ...[
@@ -3539,8 +3949,11 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Icon(Icons.check_circle_outline,
-                      size: 48, color: Colors.green.shade300),
+                  Icon(
+                    Icons.check_circle_outline,
+                    size: 48,
+                    color: Colors.green.shade300,
+                  ),
                   const SizedBox(height: 8),
                   Text(
                     'No runs match the current filter',
@@ -3602,7 +4015,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
       'validation_failed' => (
           Colors.orange.shade700,
           Icons.warning_amber,
-          'validation failed'
+          'validation failed',
         ),
       'failed' => (Colors.red.shade700, Icons.cancel, 'failed'),
       'escalated' => (Colors.purple.shade600, Icons.outlined_flag, 'escalated'),
@@ -3638,7 +4051,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
             Text(
               decLabel,
               style: TextStyle(
-                  color: color, fontWeight: FontWeight.w500, fontSize: 13),
+                color: color,
+                fontWeight: FontWeight.w500,
+                fontSize: 13,
+              ),
             ),
             if (notify) ...[
               const SizedBox(width: 8),
@@ -3659,19 +4075,34 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
             children: [
               if (step.isNotEmpty)
                 _miniChip(
-                    step, Colors.blueGrey.shade50, Colors.blueGrey.shade800),
+                  step,
+                  Colors.blueGrey.shade50,
+                  Colors.blueGrey.shade800,
+                ),
               if (filesCount > 0)
-                _miniChip('$filesCount files', Colors.indigo.shade50,
-                    Colors.indigo.shade800),
+                _miniChip(
+                  '$filesCount files',
+                  Colors.indigo.shade50,
+                  Colors.indigo.shade800,
+                ),
               if (loc != null)
                 _miniChip(
-                    '$loc loc', Colors.indigo.shade50, Colors.indigo.shade800),
+                  '$loc loc',
+                  Colors.indigo.shade50,
+                  Colors.indigo.shade800,
+                ),
               if (pushed)
                 _miniChip(
-                    'pushed', Colors.green.shade50, Colors.green.shade800),
+                  'pushed',
+                  Colors.green.shade50,
+                  Colors.green.shade800,
+                ),
               if (branchName != null && branchName.isNotEmpty)
                 _miniChip(
-                    branchName, Colors.purple.shade50, Colors.purple.shade800),
+                  branchName,
+                  Colors.purple.shade50,
+                  Colors.purple.shade800,
+                ),
             ],
           ),
         ),
@@ -3698,8 +4129,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                   _kvSelectable('Push URL', pushUrl),
                 if (snap != null) ...[
                   const SizedBox(height: 8),
-                  Text('llm_snapshot',
-                      style: Theme.of(context).textTheme.labelLarge),
+                  Text(
+                    'llm_snapshot',
+                    style: Theme.of(context).textTheme.labelLarge,
+                  ),
                   const SizedBox(height: 4),
                   SelectableText(
                     _snapshotPreview(snap),
@@ -3762,16 +4195,20 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         children: [
           SizedBox(
             width: 130,
-            child: Text(k,
-                style: TextStyle(color: _mutedTextColor(), fontSize: 12)),
+            child: Text(
+              k,
+              style: TextStyle(color: _mutedTextColor(), fontSize: 12),
+            ),
           ),
           Expanded(
-            child: SelectableText(v,
-                style: TextStyle(
-                  color: Theme.of(context).colorScheme.onSurface,
-                  fontFamily: 'monospace',
-                  fontSize: 12,
-                )),
+            child: SelectableText(
+              v,
+              style: TextStyle(
+                color: Theme.of(context).colorScheme.onSurface,
+                fontFamily: 'monospace',
+                fontSize: 12,
+              ),
+            ),
           ),
         ],
       ),
@@ -3786,8 +4223,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         children: [
           SizedBox(
             width: 130,
-            child: Text(k,
-                style: TextStyle(color: Colors.grey.shade700, fontSize: 12)),
+            child: Text(
+              k,
+              style: TextStyle(color: Colors.grey.shade700, fontSize: 12),
+            ),
           ),
           Expanded(
             child: SelectableText.rich(
