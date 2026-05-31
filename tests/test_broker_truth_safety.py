@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -125,6 +125,51 @@ def test_mesh_critical_dispatch_suppresses_stale_robinhood_trade(db):
     assert decision["action"] == "suppressed_stale_broker_position"
     assert decision["dispatched"] is False
     assert decision["broker_truth"]["reason"] == "position_identity_closed"
+
+
+def test_mesh_action_signals_ignore_stale_child_local_state(db):
+    from app.services.trading.brain_neural_mesh.action_handlers import (
+        handle_action_signals,
+    )
+
+    state = SimpleNamespace(local_state={}, updated_at=None)
+    old_ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    fresh_ts = datetime.now(timezone.utc).isoformat()
+
+    with patch(
+        "app.services.trading.alerts.dispatch_alert",
+        side_effect=AssertionError("stale critical mesh state must not dispatch"),
+    ):
+        decision = handle_action_signals(
+            db,
+            "nm_action_signals",
+            state,
+            {
+                "children_state": {
+                    "nm_stop_eval": {
+                        "trade_id": 2128,
+                        "ticker": "RLS-USD",
+                        "action": "STOP_HIT",
+                        "urgency": "critical",
+                        "price": 0.0036,
+                        "stop_level": 0.00365,
+                        "updated_at": old_ts,
+                    },
+                    "nm_imminent_eval": {
+                        "ticker": "DEXT-USD",
+                        "action": "imminent_breakout",
+                        "urgency": "info",
+                        "price": 0.12,
+                        "updated_at": fresh_ts,
+                    },
+                }
+            },
+        )
+
+    assert decision["urgency"] == "info"
+    assert decision["action"] == "imminent_breakout"
+    assert decision["ticker"] == "DEXT-USD"
+    assert "broker_truth" not in decision
 
 
 def test_sync_orders_does_not_refresh_already_filled_entry_clock(db, monkeypatch):

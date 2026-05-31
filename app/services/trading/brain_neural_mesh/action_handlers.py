@@ -28,7 +28,44 @@ _INFO_ACTIONS = frozenset({
     "loosen_target",
 })
 DEFAULT_MESH_CRITICAL_DISPATCH_COOLDOWN_SECONDS = 15 * 60
+DEFAULT_MESH_CHILD_STATE_MAX_AGE_SECONDS = 15 * 60
 _LAST_CRITICAL_DISPATCH_AT: dict[str, datetime] = {}
+
+
+def _child_state_updated_at(state: dict[str, Any]) -> datetime | None:
+    raw = state.get("updated_at")
+    if not raw:
+        return None
+    try:
+        if isinstance(raw, datetime):
+            parsed = raw
+        else:
+            parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _child_state_stale_for_action(state: dict[str, Any], *, now: datetime) -> bool:
+    updated_at = _child_state_updated_at(state)
+    if updated_at is None:
+        return False
+    try:
+        from ....config import settings
+
+        max_age = int(
+            getattr(
+                settings,
+                "chili_mesh_child_state_max_age_seconds",
+                DEFAULT_MESH_CHILD_STATE_MAX_AGE_SECONDS,
+            )
+            or DEFAULT_MESH_CHILD_STATE_MAX_AGE_SECONDS
+        )
+    except Exception:
+        max_age = DEFAULT_MESH_CHILD_STATE_MAX_AGE_SECONDS
+    return (now - updated_at).total_seconds() > max(0, max_age)
 
 
 def _critical_trade_broker_live(
@@ -109,9 +146,12 @@ def _classify_urgency(children: dict[str, dict[str, Any]]) -> tuple[str, str, di
     best_action = "hold"
     best_child: dict[str, Any] = {}
     urgency_rank = {"critical": 3, "warning": 2, "info": 1, "none": 0}
+    now = datetime.now(timezone.utc)
 
     for child_id, state in children.items():
         if not state:
+            continue
+        if _child_state_stale_for_action(state, now=now):
             continue
 
         child_urgency = str(state.get("urgency", "none")).lower()
