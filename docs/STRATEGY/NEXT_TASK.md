@@ -1,21 +1,22 @@
-# NEXT_TASK: f-phase5o-brain-plasticity-envelope-audit
+# NEXT_TASK: f-phase5o-learning-envelope-audit
 
 STATUS: QUEUED
 
 ## Goal
 
-Audit `app/services/trading/brain_neural_mesh/plasticity.py`, the next Phase 5O
-adapter candidate after `brain_neural_mesh/action_handlers.py` was reclassified
-as a live-action future rename blocker.
+Audit `app/services/trading/learning.py`, the next Phase 5O adapter candidate
+after `brain_neural_mesh/plasticity.py` was reclassified as a mesh-weight
+mutation future rename blocker.
 
 ## Why This Is Next
 
 The remaining Phase 5O adapter candidates are increasingly close to lifecycle
-and live decision surfaces. `brain_neural_mesh/plasticity.py` is adjacent to
-action handling and may consume realized outcomes or mutate mesh weights. It
-should receive an evidence-first audit before any rename/conversion pressure.
+and live decision surfaces. `learning.py` is the largest remaining candidate and
+almost certainly owns realized-stat, promotion, demotion, decay, and lifecycle
+behavior. It should receive an evidence-first audit before any rename/conversion
+pressure.
 
-Current surface after the brain action-handlers audit:
+Current surface after the brain plasticity audit:
 
 ```text
 orm_trade_symbol_compat = 66
@@ -23,18 +24,18 @@ learning_research_reporting = 6
 live_action_broker_reconcile = 20
 private_helper_type_only = 5
 risk_capital_gate = 21
-adapter_candidate = 7
-future_rename_blocker = 43
+adapter_candidate = 6
+future_rename_blocker = 44
 raw reader bucket = 0
 ```
 
 ## Scope
 
 - Classify every legacy `Trade` ORM reference in
-  `brain_neural_mesh/plasticity.py`.
+  `learning.py`.
 - Determine whether the references are passive learning/reporting reads,
-  realized-outcome evidence, mesh weight mutation inputs, lifecycle inputs, or
-  action-adjacent runtime state.
+  realized-stat writers, lifecycle demotion/promotion inputs, pattern decay
+  inputs, or action-adjacent runtime state.
 - If passive and covered by tests, add a small safe helper/adapter conversion.
 - If behavior-bearing, add read-only parity evidence and reclassify it as a
   future rename blocker.

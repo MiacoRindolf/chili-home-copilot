@@ -2,8 +2,8 @@
   "generated_from": "scripts/analyze_phase5_remaining_trade_refs.py --json",
   "orm_trade_symbol_compat_count": 66,
   "phase5o_bucket_counts": {
-    "adapter_candidate": 7,
-    "future_rename_blocker": 43,
+    "adapter_candidate": 6,
+    "future_rename_blocker": 44,
     "leave_alone": 16
   },
   "contract_group_counts": {
@@ -164,9 +164,9 @@
     {
       "path": "app/services/trading/brain_neural_mesh/plasticity.py",
       "contract_group": "learning_research_reporting",
-      "phase5o_bucket": "adapter_candidate",
-      "phase5o_subtype": "read_only_learning_reporting",
-      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "mesh_weight_mutation_path",
+      "rationale": "Learning-mutation path: closed management-envelope outcomes can write mesh mutation audit rows and, when not dry-run, mutate graph edge weights. Requires parity evidence and dedicated behavior-preserving conversion before any ORM surface change."
     },
     {
       "path": "app/services/trading/broker_account_repair.py",
