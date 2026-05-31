@@ -13,7 +13,10 @@ import '../network/chili_api_client.dart';
 import '../network/network_error_message.dart';
 import '../screen/focus_controller.dart';
 import '../screen/focus_target.dart';
+import 'autopilot_inbox_item_presenter.dart';
 import 'autopilot_quality_action_presenter.dart';
+import 'autopilot_safety_state_presenter.dart';
+import 'autopilot_safety_state_strip.dart';
 import 'autonomy_run_presenter.dart';
 import 'device_auth_store.dart';
 
@@ -213,6 +216,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   static const _autopilotAgentFlowStatusDetachedWorktree =
       'detached_uncontained_worktree';
   static const _autopilotAgentFlowStatusDirtyWorktree = 'dirty_worktree';
+  static const _autopilotAgentFlowStatusWorktreeHygiene = 'worktree_hygiene';
   static const _autopilotAgentFlowStatusReviewHead = 'review_head_mismatch';
   static const _autopilotAgentFlowStatusProcessedDeliverable =
       'processed_deliverable_anomaly';
@@ -269,6 +273,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   static const _autopilotOperatorInboxKindExternalReport =
       'external_agent_report';
   static const _autopilotOperatorInboxKindAgentFlow = 'agent_flow';
+  static const _autopilotOperatorInboxKindRuntimePressure = 'runtime_pressure';
   static const _autopilotOperatorInboxActionKeepMonitoring = 'keep_monitoring';
   static const _autopilotOperatorInboxActionAnswer = 'Answer';
   static const _autopilotOperatorInboxActionOpen = 'Open';
@@ -6179,6 +6184,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         _asMap(agentFlow[_autopilotAgentFlowReviewPacketSummary]);
     final runtimeQueue = _asMap(readiness[_autopilotRuntimeQueue]);
     final operatorInbox = _asMap(readiness[_autopilotOperatorInbox]);
+    final safetyState = AutopilotSafetyStatePresenter.fromReadiness(readiness);
     final operatorReleaseTrust =
         _asMap(operatorInbox[_autopilotOperatorInboxReleaseTrustSummary]);
     final codexAlignment = _asMap(readiness[_autopilotCodexAlignment]);
@@ -6329,23 +6335,23 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                                   0) >
                               0
                           ? '${_asInt(agentFlow['quarantined_target_active_count'])} quarantined'
-                           : (_asInt(agentFlowReviewPacket['mismatch_count']) ??
-                                       _asInt(agentFlow[
-                                           'review_head_mismatch_count']) ??
-                                       0) >
-                                   0
-                               ? '${_asInt(agentFlowReviewPacket['mismatch_count']) ?? _asInt(agentFlow['review_head_mismatch_count'])} review packets'
-                               : (_asInt(agentFlow[
-                                               'active_lock_starvation_count']) ??
-                                           0) >
-                                       0
-                                   ? '${_asInt(agentFlow['active_lock_starvation_count'])} stalled lock'
-                                   : (_asInt(agentFlow[
-                                                   'stale_lock_candidate_count']) ??
-                                               0) >
-                                           0
-                                       ? '${_asInt(agentFlow['stale_lock_candidate_count'])} flow locks'
-                                       : '${_asInt(agentFlow['stable_pending_count']) ?? 0}/${_asInt(agentFlow['pending_count']) ?? 0} flow pending',
+                          : (_asInt(agentFlowReviewPacket['mismatch_count']) ??
+                                      _asInt(agentFlow[
+                                          'review_head_mismatch_count']) ??
+                                      0) >
+                                  0
+                              ? '${_asInt(agentFlowReviewPacket['mismatch_count']) ?? _asInt(agentFlow['review_head_mismatch_count'])} review packets'
+                              : (_asInt(agentFlow[
+                                              'active_lock_starvation_count']) ??
+                                          0) >
+                                      0
+                                  ? '${_asInt(agentFlow['active_lock_starvation_count'])} stalled lock'
+                                  : (_asInt(agentFlow[
+                                                  'stale_lock_candidate_count']) ??
+                                              0) >
+                                          0
+                                      ? '${_asInt(agentFlow['stale_lock_candidate_count'])} flow locks'
+                                      : '${_asInt(agentFlow['stable_pending_count']) ?? 0}/${_asInt(agentFlow['pending_count']) ?? 0} flow pending',
                   _autonomyBubbleBackground(
                     (agentFlow['status']?.toString() ?? '') ==
                             _autopilotReadinessPassed
@@ -6516,6 +6522,37 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                 ),
             ],
           ),
+          const SizedBox(height: 10),
+          AutopilotSafetyStateStrip(
+            state: safetyState,
+            busy: _autonomyBusy,
+            onOpenTarget: safetyState.hasOpenTarget
+                ? () => _openAutonomyInboxItem(
+                      _autonomySafetyStateActionItem(safetyState),
+                    )
+                : null,
+            onCopyHandoff: safetyState.hasHandoff
+                ? () => _copyAutonomyText(
+                      safetyState.nextActionHandoffCopy,
+                      safetyState.nextActionHandoffLabel.isEmpty
+                          ? 'Safety handoff copied.'
+                          : '${safetyState.nextActionHandoffLabel} copied.',
+                    )
+                : null,
+            onOpenControlTarget: safetyState.hasControlTargetOpen
+                ? () => _openAutonomyInboxItem(
+                      _autonomySafetyStateControlTargetItem(safetyState),
+                    )
+                : null,
+            onCopyControlTarget: safetyState.hasControlTargetHandoff
+                ? () => _copyAutonomyText(
+                      safetyState.controlTargetHandoffCopy,
+                      safetyState.controlTargetHandoffLabel.isEmpty
+                          ? 'Control target handoff copied.'
+                          : '${safetyState.controlTargetHandoffLabel} copied.',
+                    )
+                : null,
+          ),
           if ((_asInt(codexSchedule['total']) ?? 0) > 0) ...[
             const SizedBox(height: 10),
             _buildAutonomyCodexScheduleMirror(codexSchedule),
@@ -6601,6 +6638,47 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         ],
       ),
     );
+  }
+
+  Map<String, dynamic> _autonomySafetyStateActionItem(
+    AutopilotSafetyState state,
+  ) {
+    final actionPath = state.nextActionPath.isNotEmpty
+        ? state.nextActionPath
+        : state.runtimePath.isNotEmpty
+            ? state.runtimePath
+            : state.controlTargetPath.isNotEmpty
+                ? state.controlTargetPath
+                : state.evidencePath;
+    final actionOpenPath = state.nextActionOpenPath.isNotEmpty
+        ? state.nextActionOpenPath
+        : state.runtimeOpenPath.isNotEmpty
+            ? state.runtimeOpenPath
+            : state.controlTargetOpenPath.isNotEmpty
+                ? state.controlTargetOpenPath
+                : state.evidenceOpenPath;
+    return <String, dynamic>{
+      'kind': state.nextActionKind,
+      if (state.nextActionRunId.isNotEmpty) 'run_id': state.nextActionRunId,
+      if (actionPath.isNotEmpty) 'path': actionPath,
+      if (actionOpenPath.isNotEmpty) 'open_path': actionOpenPath,
+      if (state.nextActionRecoveryAction.isNotEmpty)
+        'recovery_action': state.nextActionRecoveryAction,
+      if (state.safeActionButtonLabel.isNotEmpty)
+        'action_label': state.safeActionButtonLabel,
+    };
+  }
+
+  Map<String, dynamic> _autonomySafetyStateControlTargetItem(
+    AutopilotSafetyState state,
+  ) {
+    return <String, dynamic>{
+      'kind': _autopilotOperatorInboxKindAgentFlow,
+      if (state.controlTargetPath.isNotEmpty) 'path': state.controlTargetPath,
+      if (state.controlTargetOpenPath.isNotEmpty)
+        'open_path': state.controlTargetOpenPath,
+      'action_label': 'Open target',
+    };
   }
 
   Widget _buildAutonomyAgentCapabilityAudit(Map<String, dynamic> audit) {
@@ -8135,6 +8213,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         return _autonomyStatusColor('failed');
       case _autopilotOperatorInboxKindReply:
         return Colors.indigo.shade700;
+      case _autopilotOperatorInboxKindRuntimePressure:
+        return Colors.deepOrange.shade800;
       case _autopilotOperatorInboxKindAgentFlow:
         return Colors.orange.shade800;
       case _autopilotOperatorInboxKindExternalReport:
@@ -8156,6 +8236,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         return Icons.report_problem_outlined;
       case _autopilotOperatorInboxKindReply:
         return Icons.mark_chat_unread_outlined;
+      case _autopilotOperatorInboxKindRuntimePressure:
+        return Icons.speed_outlined;
       case _autopilotOperatorInboxKindAgentFlow:
         return Icons.account_tree_outlined;
       case _autopilotOperatorInboxKindExternalReport:
@@ -8173,15 +8255,23 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         return _autopilotOperatorInboxActionAnswer;
       case _autopilotOperatorInboxKindApproval:
         return _autopilotOperatorInboxActionReview;
+      case _autopilotOperatorInboxKindRuntimePressure:
+        return 'Review runtime';
       default:
         return _autopilotOperatorInboxActionOpen;
     }
   }
 
   String _operatorInboxActionLabelForItem(Map<String, dynamic> item) {
+    final kind = item['kind']?.toString() ?? '';
+    if (kind == _autopilotOperatorInboxKindExternalReport) {
+      final reportActionLabel =
+          AutopilotInboxItemPresenter.openActionLabel(item);
+      if (reportActionLabel.isNotEmpty) return reportActionLabel;
+    }
     final explicit = item['action_label']?.toString().trim() ?? '';
     if (explicit.isNotEmpty) return explicit;
-    return _operatorInboxItemActionLabel(item['kind']?.toString() ?? '');
+    return _operatorInboxItemActionLabel(kind);
   }
 
   IconData _operatorInboxItemActionIcon(String kind) {
@@ -8216,6 +8306,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
       case _autopilotAgentFlowStatusDetachedWorktree:
         return Icons.call_split_outlined;
       case _autopilotAgentFlowStatusDirtyWorktree:
+      case _autopilotAgentFlowStatusWorktreeHygiene:
         return Icons.folder_copy_outlined;
       case _autopilotAgentFlowStatusReviewHead:
         return Icons.compare_arrows_outlined;
@@ -8482,7 +8573,9 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                 item['status']?.toString() ==
                     _autopilotAgentFlowStatusDetachedWorktree ||
                 item['status']?.toString() ==
-                    _autopilotAgentFlowStatusDirtyWorktree)
+                    _autopilotAgentFlowStatusDirtyWorktree ||
+                item['status']?.toString() ==
+                    _autopilotAgentFlowStatusWorktreeHygiene)
             .toList();
       }
       if (filter == 'review') {
@@ -8807,11 +8900,13 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         _asInt(hiddenCounts[_autopilotAgentFlowStatusDirtyWorktree]) ?? 0;
     final hiddenDetached =
         _asInt(hiddenCounts[_autopilotAgentFlowStatusDetachedWorktree]) ?? 0;
+    final hiddenHygiene =
+        _asInt(hiddenCounts[_autopilotAgentFlowStatusWorktreeHygiene]) ?? 0;
     final hiddenStaleLocks =
         _asInt(hiddenCounts[_autopilotAgentFlowStatusStaleLock]) ?? 0;
     final hiddenActiveLocks =
         _asInt(hiddenCounts[_autopilotAgentFlowStatusActiveLock]) ?? 0;
-    final hiddenWorktrees = hiddenDirty + hiddenDetached;
+    final hiddenWorktrees = hiddenDirty + hiddenDetached + hiddenHygiene;
     final hiddenLocks = hiddenStaleLocks + hiddenActiveLocks;
     final stalePending = _asInt(backlog['stale_pending_item_count']) ?? 0;
     final freshPending = _asInt(backlog['fresh_pending_item_count']) ?? 0;
@@ -9069,6 +9164,9 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         item['stale'] == true || item['stale']?.toString().trim() == 'true';
     final color = status == _autopilotAgentFlowStatusMalformed ||
             status == _autopilotAgentFlowStatusReviewHead ||
+            status == _autopilotAgentFlowStatusDetachedWorktree ||
+            status == _autopilotAgentFlowStatusDirtyWorktree ||
+            status == _autopilotAgentFlowStatusWorktreeHygiene ||
             stale
         ? Colors.deepOrange.shade800
         : Colors.indigo.shade700;
@@ -10565,9 +10663,17 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                     visualDensity: VisualDensity.compact,
                     onPressed: () => _copyAutonomyText(
                       nextActionHandoffCopy,
-                      nextActionHandoffLabel.toLowerCase().contains('pause')
-                          ? 'Paused automation handoff copied.'
-                          : 'Control-plane handoff copied.',
+                      nextActionHandoffLabel.toLowerCase().contains('runtime')
+                          ? 'Runtime handoff copied.'
+                          : nextActionHandoffLabel
+                                  .toLowerCase()
+                                  .contains('report')
+                              ? 'Report repair handoff copied.'
+                              : nextActionHandoffLabel
+                                      .toLowerCase()
+                                      .contains('pause')
+                                  ? 'Paused automation handoff copied.'
+                                  : 'Control-plane handoff copied.',
                     ),
                     icon: const Icon(Icons.copy_all_outlined, size: 15),
                   ),
@@ -10778,10 +10884,21 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final runId = item['run_id']?.toString().trim() ?? '';
     final reportPath = item['path']?.toString().trim() ?? '';
     final createdAt = item['created_at']?.toString().trim() ?? '';
+    final questionAgeMinutes = _asInt(item['question_age_minutes']);
+    final questionStale = item['question_stale'] == true;
     final reportQualityIssues = _asStringList(item['report_quality_issues']);
     final reportQualityIssueCount =
         _asInt(item['report_quality_issue_count']) ??
             reportQualityIssues.length;
+    final reportRepairHandoffLabel =
+        item['report_repair_handoff_label']?.toString().trim() ?? '';
+    final reportRepairHandoffInstruction =
+        item['report_repair_handoff_instruction']?.toString().trim() ?? '';
+    final reportRepairHandoffCopy =
+        item['report_repair_handoff_copy']?.toString().trim() ?? '';
+    final reportGroupCount = _asInt(item['report_group_count']) ?? 0;
+    final reportGroupAgents = _asStringList(item['report_group_agents']);
+    final reportPrNumber = item['report_pr_number']?.toString().trim() ?? '';
     final reportHasUnresolvedPlaceholders =
         item['report_has_unresolved_placeholders'] == true;
     final reportBlockerCategory =
@@ -10792,6 +10909,13 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         item['report_blocker_severity']?.toString().trim() ?? '';
     final reportNextActionDetail =
         item['report_next_action_detail']?.toString().trim() ?? '';
+    final reportEvidence = AutopilotInboxItemPresenter.reportEvidence(item);
+    final reportEvidenceColor =
+        reportEvidence.isStateSnapshot ? Colors.deepOrange : Colors.teal;
+    final runtimePressure = AutopilotInboxItemPresenter.runtimePressure(item);
+    final hasRuntimePressureEvidence =
+        kind == _autopilotOperatorInboxKindRuntimePressure ||
+            runtimePressure.hasEvidence;
     final recoveryDetail = item['recovery_detail']?.toString().trim() ?? '';
     final recoveryCategory = item['recovery_category']?.toString().trim() ?? '';
     final recoveryCategoryLabel = recoveryCategory == 'validation_failed'
@@ -10833,26 +10957,65 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         item['mailbox_shape_guidance']?.toString().trim() ?? '';
     final mailboxRequestHash =
         item['mailbox_request_hash']?.toString().trim() ?? '';
+    final mailboxCoordinationNote = item['mailbox_coordination_note'] == true;
+    final mailboxCoordinationSubject =
+        item['mailbox_coordination_subject']?.toString().trim() ?? '';
+    final mailboxCoordinationSummary =
+        item['mailbox_coordination_summary']?.toString().trim() ?? '';
     final mailboxRequestFrom =
         item['mailbox_request_from']?.toString().trim() ?? '';
     final mailboxRequestTo =
         item['mailbox_request_to']?.toString().trim() ?? '';
     final mailboxRequestBacklog =
         item['mailbox_request_backlog_id']?.toString().trim() ?? '';
+    final mailboxRequestPriority =
+        item['mailbox_request_priority']?.toString().trim() ?? '';
+    final mailboxRequestTriageLabel =
+        item['mailbox_request_triage_label']?.toString().trim() ?? '';
+    final mailboxRequestFocusTags =
+        _asStringList(item['mailbox_request_focus_tags']);
+    final mailboxRequestUrgent = item['mailbox_request_urgent'] == true;
+    final mailboxRequestFastlane = item['mailbox_request_fastlane'] == true;
     final mailboxRequestPushIntent =
         item['mailbox_request_push_intent']?.toString().trim() ?? '';
     final mailboxRequestStale = item['mailbox_request_stale'] == true;
+    final mailboxRequestReportDrift =
+        item['mailbox_request_report_drift'] == true;
+    final mailboxRequestReportDriftGroupCount =
+        _asInt(item['mailbox_request_report_drift_group_count']) ?? 0;
+    final mailboxRequestReportDriftRequestHashes =
+        _asStringList(item['mailbox_request_report_drift_request_hashes']);
+    final mailboxRequestReportDriftPath =
+        item['mailbox_request_report_drift_path']?.toString().trim() ?? '';
+    final mailboxRequestReportDriftSha =
+        item['mailbox_request_report_drift_sha256']?.toString().trim() ?? '';
+    final mailboxRequestGroupCount =
+        _asInt(item['mailbox_request_group_count']) ?? 0;
+    final mailboxRequestGroupStaleCount =
+        _asInt(item['mailbox_request_group_stale_count']) ?? 0;
+    final mailboxRequestGroupFreshCount =
+        _asInt(item['mailbox_request_group_fresh_count']) ?? 0;
+    final mailboxRequestGroupUrgentCount =
+        _asInt(item['mailbox_request_group_urgent_count']) ?? 0;
+    final mailboxRequestGroupFastlaneCount =
+        _asInt(item['mailbox_request_group_fastlane_count']) ?? 0;
+    final mailboxRequestGroupPaths =
+        _asStringList(item['mailbox_request_group_paths']);
+    final mailboxRequestGroupHashes =
+        _asStringList(item['mailbox_request_group_hashes']);
+    final mailboxRequestGroupSenders =
+        _asStringList(item['mailbox_request_group_senders']);
+    final mailboxRequestGroupFocusTags =
+        _asStringList(item['mailbox_request_group_focus_tags']);
     final mailboxRequestHandoffLabel =
-        item['mailbox_request_operator_handoff_label']?.toString().trim() ??
-            '';
+        item['mailbox_request_operator_handoff_label']?.toString().trim() ?? '';
     final mailboxRequestHandoffInstruction =
         item['mailbox_request_operator_handoff_instruction']
                 ?.toString()
                 .trim() ??
             '';
     final mailboxRequestHandoffCopy =
-        item['mailbox_request_operator_handoff_copy']?.toString().trim() ??
-            '';
+        item['mailbox_request_operator_handoff_copy']?.toString().trim() ?? '';
     final controlByteCount = _asInt(item['control_byte_count']) ?? 0;
     final lockOwner = item['lock_owner']?.toString().trim() ?? '';
     final lockPid = item['lock_pid']?.toString().trim() ?? '';
@@ -10866,6 +11029,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final lockPidCommandLine =
         item['lock_pid_command_line']?.toString().trim() ?? '';
     final lockPidIsSleepHelper = item['lock_pid_is_sleep_helper'] == true;
+    final lockPostCloseout = item['lock_post_closeout'] == true;
     final lockRecoveryPosture =
         item['lock_recovery_posture']?.toString().trim() ?? '';
     final lockAgeMinutes = _asInt(item['lock_age_minutes']);
@@ -10907,6 +11071,15 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
             processedDeliverableTempBytes != null;
     final quarantineThreadId =
         item['quarantine_thread_id']?.toString().trim() ?? '';
+    final quarantineGroupCount = _asInt(item['quarantine_group_count']) ?? 0;
+    final quarantineGroupThreadIds =
+        _asStringList(item['quarantine_group_thread_ids']);
+    final quarantineGroupStopCount =
+        _asInt(item['quarantine_group_needs_operator_stop_count']) ?? 0;
+    final quarantineGroupContainmentCount =
+        _asInt(item['quarantine_group_containment_active_count']) ?? 0;
+    final quarantineGroupProofRemaining =
+        _asInt(item['quarantine_group_proof_remaining_minutes']);
     final quarantineStatus = item['quarantine_status']?.toString().trim() ?? '';
     final quarantineStatusLabel =
         quarantineStatus == 'CONTROL_PLANE_TERMINATION_REQUIRED'
@@ -10945,7 +11118,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         item['quarantine_operator_handoff_copy']?.toString().trim() ?? '';
     final quarantineGuidance =
         item['quarantine_guidance']?.toString().trim() ?? '';
-    final hasQuarantineEvidence = quarantineThreadId.isNotEmpty ||
+    final hasQuarantineEvidence = quarantineGroupCount > 1 ||
+        quarantineThreadId.isNotEmpty ||
         quarantineStatus.isNotEmpty ||
         quarantineAge != null ||
         quarantineProof.isNotEmpty ||
@@ -11007,6 +11181,14 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         item['worktree_detached_uncontained'] == true;
     final worktreeDirty = item['worktree_dirty'] == true;
     final worktreeChangeCount = _asInt(item['worktree_change_count']);
+    final worktreeGroupCount = _asInt(item['worktree_group_count']);
+    final worktreeGroupDirtyCount = _asInt(item['worktree_group_dirty_count']);
+    final worktreeGroupDetachedCount =
+        _asInt(item['worktree_group_detached_uncontained_count']);
+    final worktreeGroupChangeCount =
+        _asInt(item['worktree_group_change_count']);
+    final worktreeGroupPaths = _asStringList(item['worktree_group_paths']);
+    final worktreeGroupNames = _asStringList(item['worktree_group_names']);
     final worktreeChanges = _asStringList(item['worktree_changes']);
     final worktreeRefCount = _asInt(item['worktree_containing_ref_count']);
     final worktreeRefSample =
@@ -11015,15 +11197,18 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final worktreeHandoffLabel =
         item['worktree_operator_handoff_label']?.toString().trim() ?? '';
     final worktreeHandoffInstruction =
-        item['worktree_operator_handoff_instruction']?.toString().trim() ??
-            '';
+        item['worktree_operator_handoff_instruction']?.toString().trim() ?? '';
     final worktreeHandoffCopy =
         item['worktree_operator_handoff_copy']?.toString().trim() ?? '';
     final hasWorktreeEvidence = worktreeName.isNotEmpty ||
         worktreePath.isNotEmpty ||
         worktreeBranch.isNotEmpty ||
         worktreeHead.isNotEmpty ||
-        worktreeChangeCount != null;
+        worktreeChangeCount != null ||
+        worktreeGroupCount != null ||
+        worktreeGroupPaths.isNotEmpty ||
+        worktreeGroupNames.isNotEmpty;
+    final hasWorktreeGroup = (worktreeGroupCount ?? 0) > 1;
     final reviewRequestWorktree =
         item['review_request_worktree']?.toString().trim() ?? '';
     final reviewRequestBranch =
@@ -11060,6 +11245,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         lockPurpose.isNotEmpty ||
         lockPidProcessName.isNotEmpty ||
         lockPidIsSleepHelper ||
+        lockPostCloseout ||
         lockAgeMinutes != null ||
         ownerLastOut.isNotEmpty ||
         ownerLastOutAge != null;
@@ -11105,6 +11291,29 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                       ),
                     ),
                   ),
+                if (kind == _autopilotOperatorInboxKindQuestion &&
+                    questionAgeMinutes != null) ...[
+                  const SizedBox(height: 4),
+                  Wrap(
+                    spacing: 5,
+                    runSpacing: 5,
+                    children: [
+                      _miniChip(
+                        questionStale ? 'stale question' : 'question',
+                        _autonomyBubbleBackground(
+                            questionStale ? Colors.deepOrange : Colors.indigo),
+                        questionStale
+                            ? Colors.deepOrange.shade800
+                            : Colors.indigo.shade800,
+                      ),
+                      _miniChip(
+                        '$questionAgeMinutes min old',
+                        _autonomyBubbleBackground(Colors.blueGrey),
+                        Colors.blueGrey.shade800,
+                      ),
+                    ],
+                  ),
+                ],
                 if (runId.isEmpty && reportPath.isNotEmpty)
                   Padding(
                     padding: const EdgeInsets.only(top: 2),
@@ -11136,6 +11345,38 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                             ? Colors.deepOrange.shade800
                             : Colors.blueGrey.shade800,
                       ),
+                      if (reportGroupCount > 1)
+                        _miniChip(
+                          '$reportGroupCount reports',
+                          _autonomyBubbleBackground(Colors.deepOrange),
+                          Colors.deepOrange.shade800,
+                        ),
+                      if (reportPrNumber.isNotEmpty)
+                        _miniChip(
+                          'PR #$reportPrNumber',
+                          _autonomyBubbleBackground(Colors.indigo),
+                          Colors.indigo.shade800,
+                        ),
+                      if (reportEvidence.hasSource)
+                        _miniChip(
+                          reportEvidence.sourceLabel,
+                          _autonomyBubbleBackground(reportEvidenceColor),
+                          reportEvidenceColor.shade800,
+                        ),
+                      if (reportEvidence.hasSupersession)
+                        _miniChip(
+                          reportEvidence.supersessionLabel,
+                          _autonomyBubbleBackground(Colors.deepOrange),
+                          Colors.deepOrange.shade800,
+                        ),
+                      if (reportGroupAgents.length > 1)
+                        _miniChip(
+                          reportGroupAgents.length > 3
+                              ? '${reportGroupAgents.take(3).join(' + ')} +${reportGroupAgents.length - 3}'
+                              : reportGroupAgents.join(' + '),
+                          _autonomyBubbleBackground(Colors.blueGrey),
+                          Colors.blueGrey.shade800,
+                        ),
                     ],
                   ),
                   if (reportNextActionDetail.isNotEmpty)
@@ -11151,6 +11392,81 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                               : _mutedTextColor(),
                           fontSize: 11,
                           fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  if (reportEvidence.hasDetail)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Text(
+                        reportEvidence.detail,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: reportEvidenceColor.shade800,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                ],
+                if (hasRuntimePressureEvidence) ...[
+                  const SizedBox(height: 4),
+                  Wrap(
+                    spacing: 5,
+                    runSpacing: 5,
+                    children: [
+                      if (runtimePressure.hasBlockers)
+                        _miniChip(
+                          runtimePressure.blockerLabel,
+                          _autonomyBubbleBackground(Colors.deepOrange),
+                          Colors.deepOrange.shade800,
+                        ),
+                      if (runtimePressure.hasWarnings)
+                        _miniChip(
+                          runtimePressure.warningLabel,
+                          _autonomyBubbleBackground(Colors.orange),
+                          Colors.orange.shade900,
+                        ),
+                      if (runtimePressure.hasEvidenceCount)
+                        _miniChip(
+                          runtimePressure.evidenceCountLabel,
+                          _autonomyBubbleBackground(Colors.blueGrey),
+                          Colors.blueGrey.shade800,
+                        ),
+                    ],
+                  ),
+                  for (final runtimeItem
+                      in runtimePressure.evidenceDetails.take(2))
+                    Padding(
+                      padding: const EdgeInsets.only(top: 2),
+                      child: Text(
+                        runtimeItem.detail,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: Colors.deepOrange.shade800,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  if (runtimePressure.hasHandoff)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: OutlinedButton.icon(
+                          style: OutlinedButton.styleFrom(
+                            visualDensity: VisualDensity.compact,
+                            padding: const EdgeInsets.symmetric(horizontal: 8),
+                          ),
+                          onPressed: () => _copyAutonomyText(
+                            runtimePressure.handoffCopy,
+                            'Runtime handoff copied.',
+                          ),
+                          icon: const Icon(Icons.copy_all_outlined, size: 14),
+                          label: Text(runtimePressure.handoffLabel),
                         ),
                       ),
                     ),
@@ -11189,6 +11505,43 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                         ),
                       ),
                     ),
+                  if (reportRepairHandoffInstruction.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 3),
+                      child: Text(
+                        reportRepairHandoffInstruction,
+                        maxLines: 3,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: Colors.deepOrange.shade800,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  if (reportRepairHandoffCopy.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: OutlinedButton.icon(
+                          style: OutlinedButton.styleFrom(
+                            visualDensity: VisualDensity.compact,
+                            padding: const EdgeInsets.symmetric(horizontal: 8),
+                          ),
+                          onPressed: () => _copyAutonomyText(
+                            reportRepairHandoffCopy,
+                            'Report repair handoff copied.',
+                          ),
+                          icon: const Icon(Icons.copy_all_outlined, size: 14),
+                          label: Text(
+                            reportRepairHandoffLabel.isEmpty
+                                ? 'Copy report repair'
+                                : reportRepairHandoffLabel,
+                          ),
+                        ),
+                      ),
+                    ),
                 ],
                 if (mailboxMissing.isNotEmpty || controlByteCount > 0) ...[
                   const SizedBox(height: 4),
@@ -11222,13 +11575,93 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                     mailboxRequestFrom.isNotEmpty ||
                     mailboxRequestTo.isNotEmpty ||
                     mailboxRequestBacklog.isNotEmpty ||
-                    mailboxRequestPushIntent.isNotEmpty) ...[
+                    mailboxRequestPriority.isNotEmpty ||
+                    mailboxRequestTriageLabel.isNotEmpty ||
+                    mailboxRequestFocusTags.isNotEmpty ||
+                    mailboxRequestGroupUrgentCount > 0 ||
+                    mailboxRequestGroupFastlaneCount > 0 ||
+                    mailboxRequestGroupFocusTags.isNotEmpty ||
+                    mailboxRequestPushIntent.isNotEmpty ||
+                    mailboxCoordinationNote ||
+                    mailboxRequestGroupCount > 1 ||
+                    mailboxRequestReportDrift) ...[
                   const SizedBox(height: 4),
                   Wrap(
                     spacing: 5,
                     runSpacing: 5,
                     children: [
-                      if (mailboxRequestStale)
+                      if (mailboxCoordinationNote)
+                        _miniChip(
+                          'coordination note',
+                          _autonomyBubbleBackground(Colors.teal),
+                          Colors.teal.shade800,
+                        ),
+                      if (mailboxRequestTriageLabel.isNotEmpty)
+                        _miniChip(
+                          mailboxRequestTriageLabel,
+                          _autonomyBubbleBackground(
+                              mailboxRequestUrgent || mailboxRequestFastlane
+                                  ? Colors.deepOrange
+                                  : Colors.blueGrey),
+                          mailboxRequestUrgent || mailboxRequestFastlane
+                              ? Colors.deepOrange.shade800
+                              : Colors.blueGrey.shade800,
+                        ),
+                      if (mailboxRequestPriority.isNotEmpty &&
+                          mailboxRequestTriageLabel.isEmpty)
+                        _miniChip(
+                          mailboxRequestPriority,
+                          _autonomyBubbleBackground(Colors.blueGrey),
+                          Colors.blueGrey.shade800,
+                        ),
+                      if (mailboxRequestReportDrift)
+                        _miniChip(
+                          'report says 0 pending',
+                          _autonomyBubbleBackground(Colors.deepOrange),
+                          Colors.deepOrange.shade800,
+                        ),
+                      if (mailboxRequestReportDriftGroupCount > 1)
+                        _miniChip(
+                          '$mailboxRequestReportDriftGroupCount requests',
+                          _autonomyBubbleBackground(Colors.deepOrange),
+                          Colors.deepOrange.shade800,
+                        ),
+                      if (!mailboxRequestReportDrift &&
+                          mailboxRequestGroupCount > 1)
+                        _miniChip(
+                          '$mailboxRequestGroupCount requests',
+                          _autonomyBubbleBackground(Colors.indigo),
+                          Colors.indigo.shade800,
+                        ),
+                      if (!mailboxRequestReportDrift &&
+                          mailboxRequestGroupUrgentCount > 0)
+                        _miniChip(
+                          '$mailboxRequestGroupUrgentCount urgent/high',
+                          _autonomyBubbleBackground(Colors.deepOrange),
+                          Colors.deepOrange.shade800,
+                        ),
+                      if (!mailboxRequestReportDrift &&
+                          mailboxRequestGroupFastlaneCount > 0)
+                        _miniChip(
+                          '$mailboxRequestGroupFastlaneCount fastlane',
+                          _autonomyBubbleBackground(Colors.deepOrange),
+                          Colors.deepOrange.shade800,
+                        ),
+                      if (!mailboxRequestReportDrift &&
+                          mailboxRequestGroupStaleCount > 0)
+                        _miniChip(
+                          '$mailboxRequestGroupStaleCount stale',
+                          _autonomyBubbleBackground(Colors.deepOrange),
+                          Colors.deepOrange.shade800,
+                        ),
+                      if (!mailboxRequestReportDrift &&
+                          mailboxRequestGroupFreshCount > 0)
+                        _miniChip(
+                          '$mailboxRequestGroupFreshCount fresh',
+                          _autonomyBubbleBackground(Colors.indigo),
+                          Colors.indigo.shade800,
+                        ),
+                      if (mailboxRequestStale && mailboxRequestGroupCount <= 1)
                         _miniChip(
                           'stale request',
                           _autonomyBubbleBackground(Colors.deepOrange),
@@ -11259,9 +11692,103 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                           _autonomyBubbleBackground(Colors.blueGrey),
                           Colors.blueGrey.shade800,
                         ),
+                      if (mailboxRequestReportDriftSha.isNotEmpty)
+                        _miniChip(
+                          'report ${shortSha(mailboxRequestReportDriftSha)}',
+                          _autonomyBubbleBackground(Colors.deepOrange),
+                          Colors.deepOrange.shade800,
+                        ),
+                      if (mailboxRequestReportDriftRequestHashes.length > 1)
+                        _miniChip(
+                          '${mailboxRequestReportDriftRequestHashes.length} shas',
+                          _autonomyBubbleBackground(Colors.deepOrange),
+                          Colors.deepOrange.shade800,
+                        ),
+                      if (!mailboxRequestReportDrift &&
+                          mailboxRequestGroupHashes.length > 1)
+                        _miniChip(
+                          '${mailboxRequestGroupHashes.length} shas',
+                          _autonomyBubbleBackground(Colors.indigo),
+                          Colors.indigo.shade800,
+                        ),
+                      if (!mailboxRequestReportDrift &&
+                          mailboxRequestGroupSenders.length > 1)
+                        _miniChip(
+                          mailboxRequestGroupSenders.length > 3
+                              ? '${mailboxRequestGroupSenders.take(3).join(' + ')} +${mailboxRequestGroupSenders.length - 3}'
+                              : mailboxRequestGroupSenders.join(' + '),
+                          _autonomyBubbleBackground(Colors.blueGrey),
+                          Colors.blueGrey.shade800,
+                        ),
+                      for (final tag in mailboxRequestFocusTags.take(3))
+                        _miniChip(
+                          tag,
+                          _autonomyBubbleBackground(Colors.teal),
+                          Colors.teal.shade800,
+                        ),
+                      for (final tag in mailboxRequestGroupFocusTags.take(3))
+                        _miniChip(
+                          tag,
+                          _autonomyBubbleBackground(Colors.teal),
+                          Colors.teal.shade800,
+                        ),
                     ],
                   ),
                 ],
+                if (mailboxCoordinationSubject.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 3),
+                    child: Text(
+                      mailboxCoordinationSubject,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: Colors.teal.shade800,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                if (mailboxCoordinationSummary.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 3),
+                    child: Text(
+                      mailboxCoordinationSummary,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                if (mailboxRequestGroupPaths.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 3),
+                    child: Text(
+                      'Requests: ${mailboxRequestGroupPaths.take(3).join(' | ')}',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                if (mailboxRequestReportDriftPath.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 3),
+                    child: Text(
+                      mailboxRequestReportDriftPath,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: Colors.deepOrange.shade800,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
                 if (mailboxGuidance.isNotEmpty)
                   Padding(
                     padding: const EdgeInsets.only(top: 3),
@@ -11317,6 +11844,24 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                     spacing: 5,
                     runSpacing: 5,
                     children: [
+                      if (quarantineGroupCount > 1)
+                        _miniChip(
+                          '$quarantineGroupCount targets',
+                          _autonomyBubbleBackground(Colors.deepOrange),
+                          Colors.deepOrange.shade800,
+                        ),
+                      if (quarantineGroupStopCount > 0)
+                        _miniChip(
+                          '$quarantineGroupStopCount stop',
+                          _autonomyBubbleBackground(Colors.deepOrange),
+                          Colors.deepOrange.shade800,
+                        ),
+                      if (quarantineGroupContainmentCount > 0)
+                        _miniChip(
+                          '$quarantineGroupContainmentCount contained',
+                          _autonomyBubbleBackground(Colors.orange),
+                          Colors.orange.shade900,
+                        ),
                       if (quarantineStatus.isNotEmpty)
                         _miniChip(
                           quarantineStatusLabel,
@@ -11363,6 +11908,20 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                               ? Colors.deepOrange.shade800
                               : Colors.teal.shade800,
                         ),
+                      if (quarantineGroupProofRemaining != null &&
+                          quarantineGroupCount > 1)
+                        _miniChip(
+                          quarantineGroupProofRemaining > 0
+                              ? '${quarantineGroupProofRemaining}m batch proof'
+                              : 'batch proof met',
+                          _autonomyBubbleBackground(
+                              quarantineGroupProofRemaining > 0
+                                  ? Colors.deepOrange
+                                  : Colors.teal),
+                          quarantineGroupProofRemaining > 0
+                              ? Colors.deepOrange.shade800
+                              : Colors.teal.shade800,
+                        ),
                       if (quarantineProofWindow != null)
                         _miniChip(
                           '${quarantineProofWindow}m proof',
@@ -11378,6 +11937,18 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                     ],
                   ),
                 ],
+                if (quarantineGroupThreadIds.length > 1)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      'Targets: ${quarantineGroupThreadIds.map((id) => id.length > 8 ? id.substring(0, 8) : id).take(4).join(' | ')}',
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
                 if (quarantineSource.isNotEmpty)
                   Padding(
                     padding: const EdgeInsets.only(top: 2),
@@ -11645,24 +12216,51 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                     spacing: 5,
                     runSpacing: 5,
                     children: [
-                      if (worktreeDirty)
+                      if (hasWorktreeGroup) ...[
                         _miniChip(
-                          '${worktreeChangeCount ?? 0} change${(worktreeChangeCount ?? 0) == 1 ? '' : 's'}',
+                          '$worktreeGroupCount worktrees',
                           _autonomyBubbleBackground(Colors.deepOrange),
                           Colors.deepOrange.shade800,
                         ),
-                      if (worktreeDetached)
-                        _miniChip(
-                          worktreeDetachedUncontained
-                              ? 'detached no ref'
-                              : 'detached',
-                          _autonomyBubbleBackground(worktreeDetachedUncontained
-                              ? Colors.deepOrange
-                              : Colors.blueGrey),
-                          worktreeDetachedUncontained
-                              ? Colors.deepOrange.shade800
-                              : Colors.blueGrey.shade800,
-                        ),
+                        if ((worktreeGroupDetachedCount ?? 0) > 0)
+                          _miniChip(
+                            '$worktreeGroupDetachedCount detached',
+                            _autonomyBubbleBackground(Colors.deepOrange),
+                            Colors.deepOrange.shade800,
+                          ),
+                        if ((worktreeGroupDirtyCount ?? 0) > 0)
+                          _miniChip(
+                            '$worktreeGroupDirtyCount dirty',
+                            _autonomyBubbleBackground(Colors.deepOrange),
+                            Colors.deepOrange.shade800,
+                          ),
+                        if ((worktreeGroupChangeCount ?? 0) > 0)
+                          _miniChip(
+                            '$worktreeGroupChangeCount changes',
+                            _autonomyBubbleBackground(Colors.deepOrange),
+                            Colors.deepOrange.shade800,
+                          ),
+                      ] else ...[
+                        if (worktreeDirty)
+                          _miniChip(
+                            '${worktreeChangeCount ?? 0} change${(worktreeChangeCount ?? 0) == 1 ? '' : 's'}',
+                            _autonomyBubbleBackground(Colors.deepOrange),
+                            Colors.deepOrange.shade800,
+                          ),
+                        if (worktreeDetached)
+                          _miniChip(
+                            worktreeDetachedUncontained
+                                ? 'detached no ref'
+                                : 'detached',
+                            _autonomyBubbleBackground(
+                                worktreeDetachedUncontained
+                                    ? Colors.deepOrange
+                                    : Colors.blueGrey),
+                            worktreeDetachedUncontained
+                                ? Colors.deepOrange.shade800
+                                : Colors.blueGrey.shade800,
+                          ),
+                      ],
                       if (worktreeScope.isNotEmpty)
                         _miniChip(
                           worktreeScope.replaceAll('_', ' '),
@@ -11688,7 +12286,32 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                     ],
                   ),
                 ],
-                if (worktreePath.isNotEmpty)
+                if (worktreeGroupPaths.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      'Worktrees: ${worktreeGroupPaths.take(3).join(' | ')}',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  )
+                else if (worktreeGroupNames.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      'Worktrees: ${worktreeGroupNames.take(4).join(', ')}',
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: _mutedTextColor(),
+                        fontSize: 11,
+                      ),
+                    ),
+                  )
+                else if (worktreePath.isNotEmpty)
                   Padding(
                     padding: const EdgeInsets.only(top: 2),
                     child: Text(
@@ -12030,9 +12653,22 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                           _autonomyBubbleBackground(Colors.deepOrange),
                           Colors.deepOrange.shade800,
                         ),
+                      if (lockPostCloseout)
+                        _miniChip(
+                          'post-closeout lock',
+                          _autonomyBubbleBackground(Colors.deepOrange),
+                          Colors.deepOrange.shade800,
+                        ),
                       if (lockRecoveryPosture == 'owner_reacquire_required')
                         _miniChip(
                           'owner reacquire',
+                          _autonomyBubbleBackground(Colors.deepOrange),
+                          Colors.deepOrange.shade800,
+                        ),
+                      if (lockRecoveryPosture ==
+                          'post_closeout_release_required')
+                        _miniChip(
+                          'release after closeout',
                           _autonomyBubbleBackground(Colors.deepOrange),
                           Colors.deepOrange.shade800,
                         ),
