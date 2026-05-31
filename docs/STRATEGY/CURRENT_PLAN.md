@@ -1,7 +1,7 @@
 # Current Plan: Position Identity Refactor
 
 **Initiative owner:** Cowork (strategy) + Claude Code (execution).
-**Last update:** 2026-05-31, after Phase 5AB audited scheduler scopes and added a live parity probe.
+**Last update:** 2026-05-31, after Phase 5AB-B converted proven scheduler selection scopes.
 
 > **Why this initiative supersedes the prior fast-path crypto-scalping plan.** Today (2026-05-04) two automated close paths fired, marking 11 equity Trade rows wrongly closed in DB while the broker still held the positions. The shipped patch (inverse-reconcile, broker-truth-self-heal task) auto-healed 18 of them but its cross-check (`event_count == 0` on `trading_execution_events`) is conservative because **Trade row IDs are ephemeral** — every time a row gets wrongly closed and recreated, fills associated with the prior trade_id orphan. The fast-path scalping initiative depends on a stable position model; building more on this foundation makes things worse, not better. Position-identity refactor goes first. Fast-path resumes after.
 
@@ -56,6 +56,23 @@ Phase 5 soak duration was also tightened from one quarter to **2 weeks** at oper
 
 ## Status of the initiative
 
+- **Phase 5AB-B trading-scheduler scope conversion SHIPPED 2026-05-31.**
+  Converted only the Phase 5AB-proven scheduler selection queries in
+  `app/services/trading_scheduler.py` from direct `Trade` ORM reads to
+  management-envelope helpers: price-monitor users/tickers, broker-backed
+  users/tickers, daytrade-fast users, crypto-stop users/counts, and
+  pattern-position users. Scheduler cadence, stop evaluation/dispatch,
+  broker/reconcile, risk/capital/PDT/portfolio, public `/trades` vocabulary,
+  and close/order paths are unchanged. `trigger_pattern_monitor_for_tickers`
+  still intentionally passes `Trade` ORM objects to
+  `run_pattern_position_monitor_for_trades`; a runtime-object probe is queued
+  before touching that object contract. Verification: focused tests passed
+  (`50 passed`), analyzer remains clean with raw reader bucket 0, Phase 5AB
+  probe remains `COMPLETE_POSITIVE`, Phase 5K remains `COMPLETE_POSITIVE`, and
+  Phase 5I remains `COMPLETE_POSITIVE`. File-level
+  `orm_trade_symbol_compat` remains 71 because of the intentionally retained
+  object handoff. CC report:
+  `docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5ab-b-trading-scheduler-scope-conversion.md`.
 - **Phase 5AB trading-scheduler contract audit + scope probe SHIPPED 2026-05-31.**
   Audited `app/services/trading_scheduler.py` and found its remaining
   `Trade` ORM references are live scheduler-selection surfaces, not passive
