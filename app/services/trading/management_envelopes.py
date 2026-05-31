@@ -437,6 +437,87 @@ def load_audit_export_envelope_rows(
     """, {"uid": user_id, "start": start, "end": end})
 
 
+def load_monitor_decision_envelope_rows(
+    db: Session,
+    *,
+    user_id: int | None,
+    action: str | None,
+    limit: int,
+    offset: int = 0,
+) -> tuple[int, list[dict[str, Any]]]:
+    """Load monitor-decision rows joined to management-envelope display fields."""
+    action_value = (action or "").strip() or None
+    rows = _rows(db, f"""
+        WITH scoped AS (
+            SELECT
+                d.id,
+                d.trade_id,
+                t.ticker,
+                t.direction,
+                d.breakout_alert_id,
+                d.scan_pattern_id,
+                d.health_score,
+                d.health_delta,
+                d.conditions_snapshot,
+                d.action,
+                d.old_stop,
+                d.new_stop,
+                d.old_target,
+                d.new_target,
+                d.llm_confidence,
+                d.llm_reasoning,
+                d.mechanical_action,
+                d.mechanical_stop,
+                d.mechanical_target,
+                d.decision_source,
+                d.price_at_decision,
+                d.price_after_1h,
+                d.price_after_4h,
+                d.was_beneficial,
+                d.created_at
+              FROM trading_pattern_monitor_decisions d
+              JOIN {MANAGEMENT_ENVELOPES_RELATION} t ON t.id = d.trade_id
+             WHERE t.user_id IS NOT DISTINCT FROM :uid
+               AND (:action IS NULL OR d.action = :action)
+        )
+        SELECT
+            COUNT(*) OVER()::int AS total_count,
+            *
+          FROM scoped
+         ORDER BY created_at DESC NULLS LAST, id DESC
+         LIMIT :limit OFFSET :offset
+    """, {
+        "uid": user_id,
+        "action": action_value,
+        "limit": max(1, int(limit)),
+        "offset": max(0, int(offset)),
+    })
+    total = int(rows[0].get("total_count") or 0) if rows else 0
+    return total, rows
+
+
+def load_imminent_alert_actioned_envelope_ids(
+    db: Session,
+    *,
+    user_id: int | None,
+) -> set[int]:
+    """Return alert ids already acted on by open/closed management envelopes."""
+    rows = _rows(db, f"""
+        SELECT DISTINCT related_alert_id
+          FROM {MANAGEMENT_ENVELOPES_RELATION}
+         WHERE related_alert_id IS NOT NULL
+           AND status IN ('open', 'closed')
+           AND user_id IS NOT DISTINCT FROM :uid
+    """, {"uid": user_id})
+    out: set[int] = set()
+    for row in rows:
+        try:
+            out.add(int(row["related_alert_id"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
 def _option_envelope_predicate_sql(alias: str = "t") -> str:
     snap = f"COALESCE({alias}.indicator_snapshot, '{{}}'::jsonb)"
     breakout = f"({snap}->'breakout_alert')"

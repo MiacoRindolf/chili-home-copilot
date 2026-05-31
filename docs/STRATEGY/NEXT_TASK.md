@@ -1,45 +1,32 @@
-# NEXT_TASK: f-position-identity-phase-5w-monitor-read-helper-conversion
+# NEXT_TASK: f-position-identity-phase-5x-stop-decision-read-design
 
 STATUS: PENDING
 
 ## Goal
 
-Convert the two Phase 5V parity-proven monitor read surfaces from `Trade` ORM joins to management-envelope helper/SQL reads while preserving public response contracts.
+Investigate the remaining stop-decision read surface before converting it away from `Trade` ORM joins.
 
-Phase 5V proved old-vs-new parity for:
-
-- `api_monitor_decisions(...)`
-- `api_monitor_imminent_alerts(...)`
-
-Live probe result: `COMPLETE_POSITIVE`, 20 checks matched, `PARITY_MISMATCHES=0`.
+Phase 5W converted the two parity-proven monitor read surfaces. The next plausible router read is `api_stop_decisions(...)`, but Phase 5V showed the old compatibility-view stop-decision join exceeds the live read-only probe timeout. That makes it a performance/design task, not a blind conversion.
 
 ## Recommended Work Shape
 
-1. Add narrow helper functions in `app/services/trading/management_envelopes.py` or a monitor-specific helper module:
-   - monitor decision user/action scope
-   - actioned imminent-alert exclusion scope
-2. Convert only:
-   - `app/routers/trading_sub/monitor.py::api_monitor_decisions(...)`
-   - `app/routers/trading_sub/monitor.py::api_monitor_imminent_alerts(...)`
-3. Preserve public response keys:
-   - `decisions`
-   - `trade_id`
-   - `ticker`
-   - `direction`
-   - imminent alert payload shape
-4. Re-run Phase 5V probe after conversion.
-5. Keep `api_monitor_run(...)`, active setup cards, stop surfaces, and all live broker/order/close paths unchanged.
+1. Profile the current `api_stop_decisions(...)` query shape:
+   - old ORM join through `Trade`
+   - equivalent envelope-table join
+   - bounded recent-stop-decision sample
+2. Determine why the old compatibility-view join is slow.
+3. If the envelope-table query is strictly faster and response-equivalent, implement a narrow helper conversion with tests.
+4. If old-vs-new parity cannot be proven cheaply, leave the endpoint on the compatibility contract and write the decision down.
 
 ## Guardrails
 
+- Do not touch stop execution.
+- Do not touch stop-position rendering.
+- Do not touch `api_monitor_run(...)`, active setup cards, `api_sell_trade(...)`, broker/order/close/reconcile/PDT/capital-gate behavior.
+- Preserve public response fields: `id`, `trade_id`, `as_of_ts`, `state`, `old_stop`, `new_stop`, `trigger`, `reason`, `executed`.
 - Do not rename `/trades`, `trade_id`, schema classes, UI labels, or response fields.
-- Do not touch `api_monitor_run(...)`.
-- Do not touch `api_sell_trade(...)`.
-- Do not touch stop execution or stop-position rendering.
-- Do not touch broker/order/close/reconcile/PDT/capital-gate behavior.
 - Do not drop or rewrite the `trading_trades` compatibility view.
-- Do not include `api_stop_decisions(...)` in this conversion; its old compatibility-view join exceeded the Phase 5V timeout and needs a separate design.
 
 ## Architect Verdict
 
-This is a small, evidence-backed conversion. It reduces router `Trade` coupling without changing public contracts or live trading behavior.
+This is worth investigating because the old stop-decision join timing out may be a real endpoint performance issue. But it must stay isolated from stop execution and active stop rendering.

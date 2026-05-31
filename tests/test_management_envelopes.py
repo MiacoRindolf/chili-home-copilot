@@ -9,6 +9,8 @@ from app.services.trading.management_envelopes import (
     load_closed_envelope_execution_rows,
     load_closed_pattern_envelope_rows,
     load_closed_review_envelope_rows,
+    load_imminent_alert_actioned_envelope_ids,
+    load_monitor_decision_envelope_rows,
     load_pattern_tagged_envelope_rows,
     load_recent_ticker_envelope_rows,
     summarize_closed_envelope_performance,
@@ -239,3 +241,55 @@ def test_audit_export_envelope_rows_read_management_envelopes():
     assert "entry_date <= :end" in db.sql
     assert "ORDER BY entry_date ASC NULLS LAST" in db.sql
     assert db.params == {"uid": 7, "start": start, "end": end}
+
+
+def test_monitor_decision_envelope_rows_read_management_envelopes():
+    db = _FakeDb(
+        _RowsResult(
+            [
+                {
+                    "total_count": 2,
+                    "id": 10,
+                    "trade_id": 20,
+                    "ticker": "ABC",
+                    "direction": "long",
+                }
+            ]
+        )
+    )
+
+    total, rows = load_monitor_decision_envelope_rows(
+        db,
+        user_id=7,
+        action=" hold ",
+        limit=50,
+        offset=5,
+    )
+
+    assert total == 2
+    assert rows[0]["ticker"] == "ABC"
+    assert "JOIN trading_management_envelopes t ON t.id = d.trade_id" in db.sql
+    assert "trading_trades" not in db.sql
+    assert "d.action = :action" in db.sql
+    assert db.params == {"uid": 7, "action": "hold", "limit": 50, "offset": 5}
+
+
+def test_imminent_alert_actioned_envelope_ids_read_management_envelopes():
+    db = _FakeDb(
+        _RowsResult(
+            [
+                {"related_alert_id": 11},
+                {"related_alert_id": "12"},
+                {"related_alert_id": None},
+            ]
+        )
+    )
+
+    ids = load_imminent_alert_actioned_envelope_ids(db, user_id=None)
+
+    assert ids == {11, 12}
+    assert "FROM trading_management_envelopes" in db.sql
+    assert "trading_trades" not in db.sql
+    assert "status IN ('open', 'closed')" in db.sql
+    assert "user_id IS NOT DISTINCT FROM :uid" in db.sql
+    assert db.params == {"uid": None}

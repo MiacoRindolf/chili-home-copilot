@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
-from sqlalchemy import and_, exists, or_
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from ...config import settings
@@ -41,6 +42,10 @@ from ...services.trading.edge_reliability import (
     edge_supply_snapshot_rows,
     edge_supply_summary,
     latest_edge_reliability_snapshot_slices,
+)
+from ...services.trading.management_envelopes import (
+    load_imminent_alert_actioned_envelope_ids,
+    load_monitor_decision_envelope_rows,
 )
 from ...services.trading.pattern_position_monitor import run_pattern_position_monitor_for_trades
 from ...services.trading.robinhood_exit_execution import describe_trade_execution_state
@@ -890,35 +895,22 @@ def api_monitor_decisions(
     ctx = get_identity_ctx(request, db)
     user_id = ctx["user_id"]
 
-    q = db.query(PatternMonitorDecision).join(
-        Trade, Trade.id == PatternMonitorDecision.trade_id,
+    total, rows = load_monitor_decision_envelope_rows(
+        db,
+        user_id=user_id,
+        action=action,
+        limit=limit,
+        offset=offset,
     )
-    q = _user_trade_filter(q, user_id)
-    if action:
-        q = q.filter(PatternMonitorDecision.action == action.strip())
-
-    total = q.count()
-    rows = (
-        q.order_by(PatternMonitorDecision.created_at.desc())
-        .offset(offset)
-        .limit(limit)
-        .all()
-    )
-
-    t_ids = list({d.trade_id for d in rows})
-    trade_map: dict[int, Trade] = {}
-    if t_ids:
-        tq = db.query(Trade).filter(Trade.id.in_(t_ids))
-        trade_map = {t.id: t for t in tq.all()}
 
     out = []
-    for d in rows:
-        tr = trade_map.get(d.trade_id)
+    for row in rows:
+        d = SimpleNamespace(**row)
         out.append(
             {
                 **_serialize_decision(d),
-                "ticker": tr.ticker if tr else None,
-                "direction": tr.direction if tr else None,
+                "ticker": row.get("ticker"),
+                "direction": row.get("direction"),
             }
         )
 
@@ -972,13 +964,9 @@ def api_monitor_imminent_alerts(
 
     cutoff = datetime.utcnow() - timedelta(hours=hours)
 
-    user_filter = Trade.user_id == user_id if user_id is not None else Trade.user_id.is_(None)
-    actioned_subq = exists().where(
-        and_(
-            Trade.related_alert_id == BreakoutAlert.id,
-            Trade.status.in_(["open", "closed"]),
-            user_filter,
-        )
+    actioned_alert_ids = load_imminent_alert_actioned_envelope_ids(
+        db,
+        user_id=user_id,
     )
 
     q = (
@@ -988,8 +976,9 @@ def api_monitor_imminent_alerts(
             BreakoutAlert.outcome == "pending",
             BreakoutAlert.alerted_at >= cutoff,
         )
-        .filter(~actioned_subq)
     )
+    if actioned_alert_ids:
+        q = q.filter(~BreakoutAlert.id.in_(actioned_alert_ids))
     if user_id is not None:
         # Imminent scan rows often have user_id NULL when brain_default_user_id is unset
         # (Telegram still dispatches). Surface those global brain alerts in Monitor too.
