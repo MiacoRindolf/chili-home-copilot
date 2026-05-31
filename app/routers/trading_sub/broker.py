@@ -15,6 +15,7 @@ from ...config import settings
 from ...deps import get_db, get_identity_ctx
 from ...models.core import User, Device
 from ...pairing import DEVICE_COOKIE_NAME, register_device
+from ...web_security import set_device_cookie
 from ...services import broker_service, coinbase_service, broker_manager
 from ...services.credential_vault import (
     delete_broker_credentials,
@@ -155,11 +156,7 @@ async def api_broker_save_credentials(
         "brokers": statuses,
     })
     if new_token:
-        resp.set_cookie(
-            DEVICE_COOKIE_NAME, new_token,
-            max_age=60 * 60 * 24 * 365 * 2, httponly=True, samesite="lax",
-            secure=request.url.scheme == "https",
-        )
+        set_device_cookie(resp, new_token, request=request, max_age=60 * 60 * 24 * 365 * 2)
     return resp
 
 
@@ -233,14 +230,7 @@ async def api_broker_connect(
                 "brokers": broker_manager.get_all_broker_statuses(),
             })
             if new_token:
-                resp.set_cookie(
-                    DEVICE_COOKIE_NAME,
-                    new_token,
-                    max_age=60 * 60 * 24 * 365 * 2,
-                    httponly=True,
-                    samesite="lax",
-                    secure=request.url.scheme == "https",
-                )
+                set_device_cookie(resp, new_token, request=request, max_age=60 * 60 * 24 * 365 * 2)
             return resp
 
     result = broker_manager.connect_broker(broker, credentials=credentials)
@@ -282,14 +272,7 @@ async def api_broker_connect(
         payload["sync"] = sync_result
     resp = JSONResponse(payload)
     if new_token:
-        resp.set_cookie(
-            DEVICE_COOKIE_NAME,
-            new_token,
-            max_age=60 * 60 * 24 * 365 * 2,
-            httponly=True,
-            samesite="lax",
-            secure=request.url.scheme == "https",
-        )
+        set_device_cookie(resp, new_token, request=request, max_age=60 * 60 * 24 * 365 * 2)
     return resp
 
 
@@ -407,11 +390,7 @@ async def api_save_deposit_address(
     save_broker_credentials(db, user_id, key, {"address": address, "network": network})
     resp = JSONResponse({"ok": True, "saved": True, "address": address})
     if new_token:
-        resp.set_cookie(
-            DEVICE_COOKIE_NAME, new_token,
-            max_age=60 * 60 * 24 * 365 * 2, httponly=True, samesite="lax",
-            secure=request.url.scheme == "https",
-        )
+        set_device_cookie(resp, new_token, request=request, max_age=60 * 60 * 24 * 365 * 2)
     return resp
 
 
