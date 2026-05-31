@@ -119,9 +119,9 @@ ORM_CONTRACT_GROUPS: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
     (
         re.compile(
-            r"^(?:app/services/trading/(?:auto_trader_rules\.py|cash_deployment\.py|"
-            r"auto_trader_synergy\.py|compliance\.py|correlation_budget\.py|"
-            r"emergency_liquidation\.py|fast_path/|"
+            r"^(?:app/services/trading/(?:auto_trader_rules\.py|autopilot_scope\.py|"
+            r"cash_deployment\.py|auto_trader_synergy\.py|compliance\.py|"
+            r"correlation_budget\.py|emergency_liquidation\.py|fast_path/|"
             r"governance\.py|options/portfolio_budget\.py|portfolio(?:_allocator|_risk)?\.py))",
             re.IGNORECASE,
         ),

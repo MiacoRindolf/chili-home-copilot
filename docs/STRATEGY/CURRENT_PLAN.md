@@ -1,7 +1,7 @@
 # Current Plan: Position Identity Refactor
 
 **Initiative owner:** Cowork (strategy) + Claude Code (execution).
-**Last update:** 2026-05-31, after Phase 5O reclassified auto_trader_synergy.py as a live scale-in capital gate and added read-only parity evidence.
+**Last update:** 2026-05-31, after Phase 5O reclassified autopilot_scope.py as a live ownership/entry-scope gate and added read-only parity evidence.
 
 > **Why this initiative supersedes the prior fast-path crypto-scalping plan.** Today (2026-05-04) two automated close paths fired, marking 11 equity Trade rows wrongly closed in DB while the broker still held the positions. The shipped patch (inverse-reconcile, broker-truth-self-heal task) auto-healed 18 of them but its cross-check (`event_count == 0` on `trading_execution_events`) is conservative because **Trade row IDs are ephemeral** — every time a row gets wrongly closed and recreated, fills associated with the prior trade_id orphan. The fast-path scalping initiative depends on a stable position model; building more on this foundation makes things worse, not better. Position-identity refactor goes first. Fast-path resumes after.
 
@@ -56,6 +56,26 @@ Phase 5 soak duration was also tightened from one quarter to **2 weeks** at oper
 
 ## Status of the initiative
 
+- **Phase 5O Autopilot scope envelope audit CLOSED 2026-05-31.**
+  Audited `app/services/trading/autopilot_scope.py` and found it is a live
+  ownership and entry-scope gate, not a harmless private helper. It classifies
+  open management envelopes for desk/monitor surfaces, detects option rows,
+  counts AutoTrader v1 symbol ownership, and feeds
+  `check_autopilot_entry_gate(...)`, the mutual-exclusion guard between
+  AutoTrader v1 and momentum_neural. No live behavior was converted. Added
+  `scripts/d-phase5o-autopilot-scope-envelope-parity-probe.py`; live result:
+  `COMPLETE_POSITIVE`, 6 checks matched, 0 mismatches, 8 live autopilot ids
+  old = 8 new, 7 v1-owned symbols old = 7 new, 0 option ids old = 0 new, and
+  scope fingerprints matched. Reclassified the file from
+  `private_helper_type_only / adapter_candidate` to
+  `risk_capital_gate / future_rename_blocker`. Verification: focused tests
+  passed (`7 passed`), analyzer stayed clean with raw reader bucket 0, Phase
+  5K remained `COMPLETE_POSITIVE`, Phase 5I remained `COMPLETE_POSITIVE`, and
+  source posture remained `COMPLETE_POSITIVE`. Counts:
+  `orm_trade_symbol_compat=69`, `private_helper_type_only=5`,
+  `risk_capital_gate=20`, `adapter_candidate=14`,
+  `future_rename_blocker=39`. CC report:
+  `docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5o-autopilot-scope-envelope-audit.md`.
 - **Phase 5O AutoTrader synergy envelope audit CLOSED 2026-05-31.**
   Audited `app/services/trading/auto_trader_synergy.py` and found it is a live
   scale-in capital gate, not passive learning/reporting. It selects open

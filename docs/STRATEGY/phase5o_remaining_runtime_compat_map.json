@@ -2,16 +2,16 @@
   "generated_from": "scripts/analyze_phase5_remaining_trade_refs.py --json",
   "orm_trade_symbol_compat_count": 69,
   "phase5o_bucket_counts": {
-    "adapter_candidate": 15,
-    "future_rename_blocker": 38,
+    "adapter_candidate": 14,
+    "future_rename_blocker": 39,
     "leave_alone": 16
   },
   "contract_group_counts": {
     "learning_research_reporting": 12,
     "live_action_broker_reconcile": 18,
-    "private_helper_type_only": 6,
+    "private_helper_type_only": 5,
     "public_ui_schema_contract": 14,
-    "risk_capital_gate": 19
+    "risk_capital_gate": 20
   },
   "items": [
     {
@@ -128,10 +128,10 @@
     },
     {
       "path": "app/services/trading/autopilot_scope.py",
-      "contract_group": "private_helper_type_only",
-      "phase5o_bucket": "adapter_candidate",
-      "phase5o_subtype": "private_helper_adapter_candidate",
-      "rationale": "Private helper surface; candidate for protocol/adapter extraction if direct tests exist."
+      "contract_group": "risk_capital_gate",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "autopilot_entry_scope_gate",
+      "rationale": "Live Autopilot ownership/scope helper: classifies open management envelopes, detects options, counts AutoTrader v1 symbol ownership, and gates new entries against momentum_neural. Requires scope/ownership parity evidence before any conversion."
     },
     {
       "path": "app/services/trading/autotrader_desk.py",

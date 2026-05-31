@@ -1,56 +1,47 @@
-# NEXT_TASK: f-phase5o-autopilot-scope-envelope-audit
+# NEXT_TASK: f-phase5o-pattern-position-monitor-envelope-audit
 
 STATUS: QUEUED
 
 ## Goal
 
-Audit `app/services/trading/autopilot_scope.py`, the next Phase 5O adapter
-candidate after `auto_trader_synergy.py` was reclassified as a live scale-in
-capital gate.
+Audit `app/services/trading/pattern_position_monitor.py`, the next Phase 5O
+adapter candidate after `autopilot_scope.py` was reclassified as a live
+ownership/entry-scope gate.
 
 ## Why This Is Next
 
-Recent candidates have repeatedly turned out to be live behavior surfaces, not
-simple passive readers:
+The scheduler handoff was already converted to pass envelope-shaped runtime
+objects into the pattern monitor, but the monitor module itself still carries
+legacy `Trade` ORM symbols and is classified as a learning/reporting adapter
+candidate. That deserves a direct contract audit because anything named
+`monitor` in this system can quietly influence stop/exit decisions.
 
-- `alerts.py` owns live alert/order/proposal behavior.
-- `alpha_decay.py` can demote promoted alpha.
-- `auto_trader_monitor.py` can submit live exits.
-- `auto_trader_position_overrides.py` can submit close-now exits and mutate
-  adoption/unadoption scope.
-- `auto_trader_synergy.py` can return scale-in capital plans.
-
-`autopilot_scope.py` is currently classified as
-`private_helper_type_only / adapter_candidate`, but its helpers are used by
-live monitor, close, option/crypto partitioning, and public risk surfaces.
-Before any helper conversion, prove whether it is a harmless private type
-adapter or a behavior-bearing classification gate.
-
-Current surface after Phase 5O synergy audit:
+Current surface after the autopilot-scope audit:
 
 ```text
 orm_trade_symbol_compat = 69
 learning_research_reporting = 12
 live_action_broker_reconcile = 18
-private_helper_type_only = 6
-risk_capital_gate = 19
-adapter_candidate = 15
-future_rename_blocker = 38
+private_helper_type_only = 5
+risk_capital_gate = 20
+adapter_candidate = 14
+future_rename_blocker = 39
 raw reader bucket = 0
 ```
 
 ## Scope
 
-- Classify every legacy `Trade` ORM reference in `autopilot_scope.py`.
-- Identify which helpers are pure type/shape checks and which influence live
-  option/crypto/equity routing or close/monitor behavior.
+- Classify every legacy `Trade` ORM reference in
+  `pattern_position_monitor.py`.
+- Determine whether each reference is passive reporting, stop/exit
+  decision-support, or a live action path.
 - If passive and covered by tests, add a small safe helper/adapter conversion.
-- If behavior-bearing, add read-only envelope parity evidence and reclassify
-  it as a future rename blocker.
+- If behavior-bearing, add read-only parity evidence and reclassify it as a
+  future rename blocker.
 
 ## Guardrails
 
-- No live entry, scale-in, close, broker, reconcile, risk/capital/PDT, or
+- No live stop, target, close, broker, reconcile, risk/capital/PDT, or
   portfolio behavior change without parity evidence.
 - No public `/trades`, `trade_id`, schema, or UI label rename.
 - Do not touch the dirty root checkout.
