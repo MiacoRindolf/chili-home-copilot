@@ -83,7 +83,10 @@ from .auto_trader_rules import (
     passes_rule_gate,
     resolve_pattern_signal_context,
 )
-from .recert_rescue_policy import recert_rescue_diagnostic_blocks_refresh
+from .recert_rescue_policy import (
+    recert_rescue_diagnostic_matches_asset,
+    recert_rescue_diagnostic_blocks_refresh,
+)
 from .autotrader_desk import effective_autotrader_runtime
 from .autopilot_scope import (
     AUTOPILOT_AUTO_TRADER_V1,
@@ -2212,7 +2215,11 @@ def _queue_recert_for_blocked_signal(
             "asset_class": asset_class,
         })
         return cooldown
-    blocker = _recent_recert_rescue_fastlane_blocker(db, pattern_id=pattern_id)
+    blocker = _recent_recert_rescue_fastlane_blocker(
+        db,
+        pattern_id=pattern_id,
+        asset_class=asset_class,
+    )
     if blocker is not None:
         blocker.update({
             "signal_ticker": ticker,
@@ -2388,6 +2395,7 @@ def _recent_recert_rescue_fastlane_blocker(
     db: Session | None,
     *,
     pattern_id: int,
+    asset_class: str | None = None,
 ) -> dict[str, Any] | None:
     """Return the most recent diagnostic proving another fastlane write would churn."""
     if db is None:
@@ -2425,7 +2433,12 @@ def _recent_recert_rescue_fastlane_blocker(
         payload = row.payload if isinstance(row.payload, dict) else {}
         refresh = payload.get("recert_backtest_refresh")
         refresh_payload = refresh if isinstance(refresh, dict) else {}
-        if recert_rescue_diagnostic_blocks_refresh(payload):
+        if recert_rescue_diagnostic_blocks_refresh(
+            payload
+        ) and recert_rescue_diagnostic_matches_asset(
+            payload,
+            asset_class=asset_class,
+        ):
             return {
                 "queued": False,
                 "reason": "recent_recert_rescue_blocker_diagnostic",

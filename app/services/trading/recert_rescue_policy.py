@@ -40,6 +40,27 @@ def _token(value: object) -> str:
     return str(value or "").strip().lower()
 
 
+def recert_rescue_diagnostic_matches_asset(
+    payload: object,
+    *,
+    asset_class: object | None,
+) -> bool:
+    """True when a blocker diagnostic applies to the requested asset slice."""
+    requested = _token(asset_class)
+    if not requested or requested == "all":
+        return True
+    if not isinstance(payload, dict):
+        return True
+    refresh = payload.get("recert_backtest_refresh")
+    refresh_payload = refresh if isinstance(refresh, dict) else {}
+    observed = (
+        _token(payload.get("asset_class"))
+        or _token(refresh_payload.get("asset_class"))
+        or _token(payload.get("slice_asset_class"))
+    )
+    return not observed or observed == "all" or observed == requested
+
+
 def recert_rescue_diagnostic_blocks_refresh(payload: object) -> bool:
     """True when a recent diagnostic proves another rescue refresh would churn."""
     if not isinstance(payload, dict):

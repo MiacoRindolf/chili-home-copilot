@@ -39,7 +39,10 @@ from .exit_variant_policy import (
     repeated_non_positive_exit_noop_blocks_refresh,
 )
 from .portfolio_risk import get_risk_limits, _option_premium_risk_dollars
-from .recert_rescue_policy import recert_rescue_diagnostic_blocks_refresh
+from .recert_rescue_policy import (
+    recert_rescue_diagnostic_matches_asset,
+    recert_rescue_diagnostic_blocks_refresh,
+)
 from .return_math import trade_return_pct as _realized_trade_return_pct
 
 LIVE_LIFECYCLES = frozenset({"live", "promoted", "pilot_promoted"})
@@ -928,6 +931,7 @@ def _recent_noop_profitability_work(
             db,
             scan_pattern_id=scan_pattern_id,
             minutes=minutes,
+            asset_class=(payload or {}).get("asset_class"),
         )
     if event_type != EXIT_VARIANT_REFRESH:
         return False
@@ -970,6 +974,7 @@ def _recent_blocked_recert_rescue_work(
     *,
     scan_pattern_id: int,
     minutes: int,
+    asset_class: str | None = None,
 ) -> bool:
     cutoff = datetime.utcnow() - timedelta(minutes=max(1, int(minutes)))
     rows = (
@@ -984,7 +989,12 @@ def _recent_blocked_recert_rescue_work(
     )
     for row in rows:
         payload = row.payload if isinstance(row.payload, dict) else {}
-        if recert_rescue_diagnostic_blocks_refresh(payload):
+        if recert_rescue_diagnostic_blocks_refresh(
+            payload
+        ) and recert_rescue_diagnostic_matches_asset(
+            payload,
+            asset_class=asset_class,
+        ):
             return True
     return False
 

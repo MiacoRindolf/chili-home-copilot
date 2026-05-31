@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, TYPE_CHECKING
 
 from app.services.trading.recert_rescue_policy import (
+    recert_rescue_diagnostic_matches_asset,
     recert_rescue_diagnostic_blocks_refresh,
 )
 
@@ -558,11 +559,13 @@ def _recent_blocked_recert_rescue_diagnostic(
     db: "Session",
     *,
     scan_pattern_id: int,
+    asset_class: str | None = None,
 ) -> bool:
     """True when a recent diagnostic says another rescue refresh would churn."""
     return _recent_blocked_recert_rescue_diagnostic_payload(
         db,
         scan_pattern_id=scan_pattern_id,
+        asset_class=asset_class,
     ) is not None
 
 
@@ -570,6 +573,7 @@ def _recent_blocked_recert_rescue_diagnostic_payload(
     db: "Session",
     *,
     scan_pattern_id: int,
+    asset_class: str | None = None,
 ) -> dict[str, Any] | None:
     """Return the latest recent diagnostic that makes a rescue refresh redundant."""
     from app.config import settings
@@ -606,7 +610,12 @@ def _recent_blocked_recert_rescue_diagnostic_payload(
         return None
     for row in rows:
         payload = row.payload if isinstance(row.payload, dict) else {}
-        if recert_rescue_diagnostic_blocks_refresh(payload):
+        if recert_rescue_diagnostic_blocks_refresh(
+            payload
+        ) and recert_rescue_diagnostic_matches_asset(
+            payload,
+            asset_class=asset_class,
+        ):
             return {
                 "event_id": int(getattr(row, "id", 0) or 0),
                 "payload": payload,
@@ -645,6 +654,7 @@ def handle_edge_reliability_refresh(
             and _recent_blocked_recert_rescue_diagnostic(
                 db,
                 scan_pattern_id=pid,
+                asset_class=row.get("slice_asset_class"),
             )
         ):
             logger.info(
@@ -707,6 +717,7 @@ def handle_recert_rescue_refresh(
     recent_blocker = _recent_blocked_recert_rescue_diagnostic_payload(
         db,
         scan_pattern_id=pid,
+        asset_class=_payload(ev).get("asset_class"),
     )
     if recent_blocker is not None:
         blocker_payload = recent_blocker["payload"]

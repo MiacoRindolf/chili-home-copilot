@@ -36,7 +36,10 @@ from .exit_variant_policy import (
     repeated_non_positive_exit_noop_blocks_refresh as _repeated_non_positive_exit_noop_blocks_refresh,
     structural_exit_noop_reason as _structural_exit_noop_reason,
 )
-from .recert_rescue_policy import recert_rescue_diagnostic_blocks_refresh
+from .recert_rescue_policy import (
+    recert_rescue_diagnostic_matches_asset,
+    recert_rescue_diagnostic_blocks_refresh,
+)
 from .return_math import (
     OPTION_CONTRACT_MULTIPLIER,
     paper_trade_contract_multiplier,
@@ -898,8 +901,11 @@ def _recent_recert_rescue_blocker_exists(
     db: Session,
     *,
     scan_pattern_id: int | None,
+    asset_class: str | None = None,
 ) -> bool:
     if scan_pattern_id is None:
+        return False
+    if not hasattr(db, "query"):
         return False
     try:
         from ...config import settings
@@ -924,7 +930,12 @@ def _recent_recert_rescue_blocker_exists(
     )
     for row in rows:
         payload = row.payload if isinstance(row.payload, dict) else {}
-        if recert_rescue_diagnostic_blocks_refresh(payload):
+        if recert_rescue_diagnostic_blocks_refresh(
+            payload
+        ) and recert_rescue_diagnostic_matches_asset(
+            payload,
+            asset_class=asset_class,
+        ):
             return True
     return False
 
@@ -996,6 +1007,7 @@ def emit_targeted_profitability_work(
     if event_type == RECERT_RESCUE_REFRESH and _recent_recert_rescue_blocker_exists(
         db,
         scan_pattern_id=scan_pattern_id,
+        asset_class=asset_class,
     ):
         return None
     completed_payload = _recent_completed_work_payload(

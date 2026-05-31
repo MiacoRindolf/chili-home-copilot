@@ -965,6 +965,50 @@ def test_recent_blocked_recert_rescue_work_blocks_completion_action(monkeypatch)
     )
 
 
+def test_recent_blocked_recert_rescue_work_is_asset_sliced(monkeypatch):
+    monkeypatch.setattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360)
+
+    class _Query:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def order_by(self, *args, **kwargs):
+            return self
+
+        def limit(self, value):
+            return self
+
+        def all(self):
+            return [
+                SimpleNamespace(
+                    id=212,
+                    payload={
+                        "scan_pattern_id": 1260,
+                        "asset_class": "crypto",
+                        "recommended_next_action": (
+                            "complete_oos_recert_and_quality_refresh"
+                        ),
+                        "recert_rescue_status": "soft_blocked",
+                    },
+                )
+            ]
+
+    db = SimpleNamespace(query=lambda model: _Query())
+
+    assert _recent_blocked_recert_rescue_work(
+        db,
+        scan_pattern_id=1260,
+        minutes=360,
+        asset_class="crypto",
+    )
+    assert not _recent_blocked_recert_rescue_work(
+        db,
+        scan_pattern_id=1260,
+        minutes=360,
+        asset_class="stock",
+    )
+
+
 def test_recent_nonpositive_exit_noop_blocks_weak_cash_refresh(monkeypatch):
     monkeypatch.setattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360)
 
