@@ -380,6 +380,10 @@ def _record_rate_limit_backoff(exc: requests.RequestException) -> None:
     )
 
 
+def _is_rate_limit_error(exc: requests.RequestException) -> bool:
+    return getattr(getattr(exc, "response", None), "status_code", None) == 429
+
+
 def _request_failure_counts(exc: requests.RequestException) -> bool:
     if _product_not_found(exc):
         return False
@@ -538,10 +542,11 @@ def get_ohlcv(
             if _product_not_found(e):
                 _mark_product_missing(product_id)
             _record_request_failure(e)
-            logger.warning(
-                "[coinbase_ohlcv] %s %s [%s..%s] request failed: %s",
-                product_id, interval, cursor.date(), chunk_end.date(), e,
-            )
+            if not _is_rate_limit_error(e):
+                logger.warning(
+                    "[coinbase_ohlcv] %s %s [%s..%s] request failed: %s",
+                    product_id, interval, cursor.date(), chunk_end.date(), e,
+                )
             return []
         except Exception as e:
             logger.warning(
@@ -621,7 +626,8 @@ def get_quote(ticker: str) -> dict[str, Any] | None:
         if _product_not_found(e):
             _mark_product_missing(product_id)
         _record_request_failure(e)
-        logger.warning("[coinbase_ohlcv] %s quote request failed: %s", product_id, e)
+        if not _is_rate_limit_error(e):
+            logger.warning("[coinbase_ohlcv] %s quote request failed: %s", product_id, e)
         return None
     except Exception as e:
         logger.warning("[coinbase_ohlcv] %s quote parse failed: %s", product_id, e)

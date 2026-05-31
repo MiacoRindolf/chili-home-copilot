@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import requests
 
 from app.services.trading import coinbase_ohlcv
@@ -173,7 +175,7 @@ def test_public_product_catalog_allows_known_product_quote(monkeypatch):
     ]
 
 
-def test_quote_429_opens_provider_backoff(monkeypatch):
+def test_quote_429_opens_provider_backoff(monkeypatch, caplog):
     calls: list[str] = []
     now = [100.0]
 
@@ -186,6 +188,7 @@ def test_quote_429_opens_provider_backoff(monkeypatch):
     monkeypatch.setenv("CHILI_COINBASE_OHLCV_PRODUCT_PREFILTER_ENABLED", "0")
     monkeypatch.setattr(coinbase_ohlcv.time, "time", lambda: now[0])
     monkeypatch.setattr(coinbase_ohlcv._SESSION, "get", _get)
+    caplog.set_level(logging.WARNING, logger="app.services.trading.coinbase_ohlcv")
 
     assert coinbase_ohlcv.get_quote("BTC-USD") is None
     assert coinbase_ohlcv.get_quote("ETH-USD") is None
@@ -201,6 +204,9 @@ def test_quote_429_opens_provider_backoff(monkeypatch):
     assert calls[-1] == (
         f"{coinbase_ohlcv._COINBASE_EXCHANGE_API_BASE_URL}/products/ETH-USD/ticker"
     )
+    messages = [rec.getMessage() for rec in caplog.records]
+    assert any("rate-limit backoff OPEN - 429 from Coinbase" in msg for msg in messages)
+    assert not any("BTC-USD quote request failed" in msg for msg in messages)
 
 
 def test_catalog_429_does_not_fall_through_to_product_request(monkeypatch):
