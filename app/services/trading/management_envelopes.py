@@ -447,7 +447,13 @@ def load_monitor_decision_envelope_rows(
 ) -> tuple[int, list[dict[str, Any]]]:
     """Load monitor-decision rows joined to management-envelope display fields."""
     action_value = (action or "").strip() or None
-    rows = _rows(db, f"""
+    params = {
+        "uid": user_id,
+        "action": action_value,
+        "limit": max(1, int(limit)),
+        "offset": max(0, int(offset)),
+    }
+    scoped_sql = f"""
         WITH scoped AS (
             SELECT
                 d.id,
@@ -480,19 +486,27 @@ def load_monitor_decision_envelope_rows(
              WHERE t.user_id IS NOT DISTINCT FROM :uid
                AND (:action IS NULL OR d.action = :action)
         )
+    """
+    rows = _rows(db, scoped_sql + """
         SELECT
             COUNT(*) OVER()::int AS total_count,
             *
           FROM scoped
          ORDER BY created_at DESC NULLS LAST, id DESC
          LIMIT :limit OFFSET :offset
-    """, {
-        "uid": user_id,
-        "action": action_value,
-        "limit": max(1, int(limit)),
-        "offset": max(0, int(offset)),
-    })
-    total = int(rows[0].get("total_count") or 0) if rows else 0
+    """, params)
+    if rows:
+        total = int(rows[0].get("total_count") or 0)
+    elif params["offset"] > 0:
+        total = int(
+            db.execute(
+                text(scoped_sql + " SELECT COUNT(*)::int AS total_count FROM scoped"),
+                params,
+            ).scalar()
+            or 0
+        )
+    else:
+        total = 0
     return total, rows
 
 
