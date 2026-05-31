@@ -20,6 +20,53 @@ EXPECTED_RUNTIME_COMPAT_RELATION_SYMBOL_PATHS = [
     "app/models/trade_relation_symbols.py",
 ]
 
+EXPECTED_ORM_CONTRACT_GROUP_COUNTS = {
+    "learning_research_reporting": 39,
+    "live_action_broker_reconcile": 15,
+    "private_helper_type_only": 10,
+    "public_ui_schema_contract": 14,
+    "risk_capital_gate": 18,
+}
+
+EXPECTED_ORM_CONTRACT_GROUP_REPRESENTATIVES = {
+    "learning_research_reporting": [
+        "app/services/backtest_service.py",
+        "app/services/trading/edge_reliability.py",
+        "app/services/trading/learning.py",
+        "app/services/trading/net_edge_ranker.py",
+        "app/services/trading/pattern_imminent_alerts.py",
+    ],
+    "live_action_broker_reconcile": [
+        "app/services/broker_service.py",
+        "app/services/trading/bracket_intent_writer.py",
+        "app/services/trading/crypto/exit_monitor.py",
+        "app/services/trading/position_integrity.py",
+        "app/services/trading/robinhood_exit_execution.py",
+    ],
+    "private_helper_type_only": [
+        "app/models/trading.py",
+        "app/services/trading/__init__.py",
+        "app/services/trading/auto_trader_position_overrides.py",
+        "app/services/trading/autopilot_scope.py",
+        "app/services/trading/management_envelopes.py",
+    ],
+    "public_ui_schema_contract": [
+        "app/routers/trading.py",
+        "app/routers/trading_sub/trades.py",
+        "app/schemas/trading.py",
+        "app/static/js/brain-trading-desk.js",
+        "app/templates/trading/_tab_trades.html",
+    ],
+    "risk_capital_gate": [
+        "app/services/trading/auto_trader_rules.py",
+        "app/services/trading/cash_deployment.py",
+        "app/services/trading/emergency_liquidation.py",
+        "app/services/trading/options/portfolio_budget.py",
+        "app/services/trading/portfolio_risk.py",
+    ],
+}
+
+
 def _load_module():
     spec = importlib.util.spec_from_file_location("phase5_trade_refs", SCRIPT_PATH)
     assert spec is not None
@@ -136,6 +183,24 @@ def test_groups_legacy_trade_orm_symbols_by_contract() -> None:
     assert module.classify_orm_contract_group("app/services/trading/autopilot_scope.py") == (
         "private_helper_type_only"
     )
+
+
+def test_runtime_orm_symbol_contract_groups_are_pinned() -> None:
+    module = _load_module()
+
+    report = module.build_inventory(REPO_ROOT, include_dirs=("app",))
+    grouped_paths: dict[str, list[str]] = {}
+    for entry in report["entries"]:
+        if entry["bucket"] != "orm_trade_symbol_compat":
+            continue
+        group = entry["contract_group"]
+        assert group is not None
+        grouped_paths.setdefault(group, []).append(entry["path"])
+
+    assert report["orm_contract_groups"] == EXPECTED_ORM_CONTRACT_GROUP_COUNTS
+    assert sum(report["orm_contract_groups"].values()) == 96
+    for group, representative_paths in EXPECTED_ORM_CONTRACT_GROUP_REPRESENTATIVES.items():
+        assert set(representative_paths).issubset(set(grouped_paths[group]))
 
 
 def test_build_inventory_scans_sources_and_skips_workspace_noise(tmp_path: Path) -> None:

@@ -688,3 +688,24 @@ contract group rather than trying to rename it mechanically.
 
 Report:
 `docs/STRATEGY/CC_REPORTS/2026-05-31_f-position-identity-phase-5l-h-relation-symbol-contracts.md`.
+
+## Position Identity Phase 5L-I - ORM Symbol Contract Audit (2026-05-31)
+
+Phase 5L-I audits and pins the remaining legacy `Trade` ORM symbol surface by
+contract group.
+
+The classifier reports no unexpected runtime raw readers or mutations. The
+remaining `orm_trade_symbol_compat` surface is 96 app files, grouped as:
+`learning_research_reporting=39`, `live_action_broker_reconcile=15`,
+`private_helper_type_only=10`, `public_ui_schema_contract=14`, and
+`risk_capital_gate=18`.
+
+Tests now pin those group counts and representative paths. This makes future
+legacy-ORM expansion visible without forcing a risky mechanical rename.
+
+Architect verdict: do not rename `Trade` yet. The next useful slice is a small
+private-helper/type-only reduction, leaving public UI/API, broker/reconcile,
+risk/capital, and learning/reporting contracts alone.
+
+Report:
+`docs/STRATEGY/CC_REPORTS/2026-05-31_f-position-identity-phase-5l-i-orm-symbol-contract-audit.md`.
