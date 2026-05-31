@@ -26,7 +26,7 @@ def test_unique_index_exists(db):
     row = db.execute(text(
         "SELECT 1 FROM pg_indexes "
         "WHERE schemaname = 'public' "
-        "  AND tablename = 'trading_trades' "
+        "  AND tablename = 'trading_management_envelopes' "
         "  AND indexname = 'ix_trading_trades_broker_order_id_unique'"
     )).fetchone()
     assert row is not None, "migration 161 did not create the unique index"

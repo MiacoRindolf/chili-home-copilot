@@ -40,7 +40,7 @@ def test_realized_stats_sync_live_source_uses_realized_notional_only() -> None:
     assert sess.committed is False
     realized_sql = sess.sqls[0]
     live_source_sql = realized_sql.split("UNION ALL", 1)[0]
-    assert "FROM trading_trades" in live_source_sql
+    assert "FROM trading_management_envelopes" in live_source_sql
     assert "scan_pattern_id != -1" in live_source_sql
     assert "pnl IS NOT NULL" in live_source_sql
     assert "entry_price > 0" in live_source_sql

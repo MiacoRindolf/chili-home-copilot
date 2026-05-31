@@ -1793,7 +1793,7 @@ def _coinbase_order_fill_truth(
     return {
         "ticker": product,
         "quantity": qty,
-        "average_buy_price": round(cost / qty, 8),
+        "average_buy_price": cost / qty,
         "average_buy_price_source": "coinbase_order_fills_with_fees",
         "broker_source": "coinbase",
         "order_id": oid,

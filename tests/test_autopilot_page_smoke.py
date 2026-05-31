@@ -132,6 +132,9 @@ def test_orchestrator_paper_tags_scan_pattern_and_alert(
     with patch(
         "app.services.trading.auto_trader._current_price", return_value=10.05
     ), patch(
+        "app.services.trading.auto_trader._resolve_entry_risk_notional",
+        return_value=(250.0, {"notional_source": "test"}),
+    ), patch(
         "app.services.trading.auto_trader._try_claim_alert", return_value=True
     ), patch(
         "app.services.trading.auto_trader._release_alert_claim", return_value=None

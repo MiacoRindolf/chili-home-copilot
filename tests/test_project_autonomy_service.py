@@ -2613,6 +2613,7 @@ def test_current_workspace_repo_canonicalization_reuses_existing_d_path():
         db.add_all([d_path_row, alias_row])
         db.commit()
 
+        code_indexer.ensure_current_workspace_repo(db)
         repos = code_indexer.get_registered_repos(db, include_shared=True)
 
         preferred = repos[0]
@@ -4930,6 +4931,7 @@ def test_autopilot_schedule_codex_mirror_command_controls_plan_only_schedules(
             ),
             encoding="utf-8",
         )
+        escaped_repo_path = str(repo_path).replace("\\", "\\\\")
         (paused_dir / "automation.toml").write_text(
             "\n".join(
                 [
@@ -4939,7 +4941,7 @@ def test_autopilot_schedule_codex_mirror_command_controls_plan_only_schedules(
                     'status = "PAUSED"',
                     'rrule = "FREQ=HOURLY;INTERVAL=6"',
                     'prompt = "Research this repository for low-risk performance work."',
-                    f'cwds = ["{str(repo_path).replace("\\", "\\\\")}"]',
+                    f'cwds = ["{escaped_repo_path}"]',
                 ]
             ),
             encoding="utf-8",

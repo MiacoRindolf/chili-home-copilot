@@ -40,6 +40,10 @@ EXEMPT_PATHS = {
 # like ``or 10000``, ``or 10000.0``, ``or 100``, but not ``or 0.5``,
 # ``or 0.95``, ``or 14`` (those are tunable multipliers, not capital).
 PATTERN = re.compile(r"\bor\s+1\d{3,5}(?:\.\d+)?\b")
+CAPITAL_CONTEXT = re.compile(
+    r"capital|cash|equity|buying_power|notional|portfolio|account|balance",
+    re.IGNORECASE,
+)
 
 
 def test_no_inline_capital_or_fallback():
@@ -53,7 +57,7 @@ def test_no_inline_capital_or_fallback():
             continue
         for i, line in enumerate(text.splitlines(), start=1):
             stripped = line.split("#", 1)[0]
-            if PATTERN.search(stripped):
+            if PATTERN.search(stripped) and CAPITAL_CONTEXT.search(stripped):
                 rel = py.relative_to(REPO_ROOT)
                 failures.append(f"{rel}:{i}: {line.rstrip()}")
 

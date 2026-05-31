@@ -955,7 +955,8 @@ def _recent_noop_profitability_work(
     diagnostic_payloads: list[dict[str, Any]] = []
     for row in rows:
         row_payload = row.payload if isinstance(row.payload, dict) else {}
-        if row.created_at and row.created_at < general_cutoff:
+        row_created_at = getattr(row, "created_at", None)
+        if row_created_at and row_created_at < general_cutoff:
             if same_evidence_exit_noop_blocks_refresh(
                 row_payload,
                 evidence_fingerprint=evidence_fingerprint,

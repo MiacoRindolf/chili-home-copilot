@@ -1,6 +1,6 @@
 # NEXT_TASK: position-identity-phase-5-runtime-observation
 
-STATUS: PENDING
+STATUS: IN_FLIGHT
 
 ## Goal
 
@@ -16,12 +16,26 @@ The Phase 5 rename/refactor pressure should stop here for now:
 - `trading_trades` remains the deliberate compatibility relation
 - broad rename now would add risk without improving alpha, execution, slippage, or capital control
 
+Latest observation update, 2026-05-30 PT:
+
+- Phase 5K live-path parity probe: `COMPLETE_POSITIVE`
+- Phase 5I post-rename soak probe: `COMPLETE_POSITIVE`
+- Phase 5 reader canary: clean, no unexpected runtime readers or mutations
+- focused Phase 5 reader tests: passing
+- app runtime logs: no Phase 5 relation/query errors observed
+- Postgres `schema_version.version` errors were classified as one-shot probe/dashboard noise, not live trading code
+- Added `scripts/d-phase5-runtime-observation-probe.py` so the next market-window closeout runs the full gate mechanically.
+
+This is healthy weekend/crypto-window evidence, but not yet a full normal market-session closeout. Keep observing; do not begin a broad rename.
+
 ## Observation Checklist
 
 1. Watch the existing live probes/canaries:
    - Phase 5K-A parity
    - Phase 5I post-rename probe
    - Phase 5L reader allowlist
+   - Or run the rollup:
+     `python scripts\d-phase5-runtime-observation-probe.py --since-minutes 390 --market-window-complete`
 2. Watch runtime logs for relation/query errors involving:
    - `trading_trades`
    - `trading_management_envelopes`
