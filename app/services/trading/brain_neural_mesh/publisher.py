@@ -518,14 +518,14 @@ def publish_trade_lifecycle(
     pnl: Optional[float] = None,
     correlation_id: Optional[str] = None,
 ) -> Optional[str]:
-    """Enqueue mesh activation when a Trade transitions (entry, scale_in, scale_out, close).
+    """Enqueue mesh activation when a position transitions (entry, scale_in, scale_out, close).
 
     Fires ``nm_trade_lifecycle_hub`` which cascades to ``nm_portfolio_state`` and
     ``nm_exit_policy``. ``transition`` is one of: ``"entry"``, ``"scale_in"``,
     ``"scale_out"``, ``"close"``, ``"cancel"``.
 
     Returns the correlation_id used (useful for callers that want to persist
-    the id on a Trade row for later plasticity lookup). Returns None if mesh
+    the id on a management row for later plasticity lookup). Returns None if mesh
     is disabled or on error.
     """
     if not mesh_enabled():

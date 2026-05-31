@@ -8,7 +8,7 @@ The signal sources we capture, in order of confidence:
 
   1. Explicit user thumbs (chat UI ``POST /api/brain/context/gateway/thumbs``).
   2. Code dispatch outcome — did the patch apply, did pytest pass.
-  3. Trade outcome — did the closed trade win (linked via gateway_log_id on
+  3. Position outcome — did the closed position win (linked via gateway_log_id on
      the trade row when the gateway produced the entry rationale).
   4. Chat followup heuristic — short positive followup (~"thanks", "perfect")
      vs. clarification request (~"no I meant", "you misunderstood that").

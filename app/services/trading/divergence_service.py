@@ -251,7 +251,7 @@ def gather_signals_for_pattern(
             source_row_id=int(row[1]) if row[1] is not None else None,
         ))
 
-    # Phase F - venue truth (join via trade -> scan_pattern_id on Trade table)
+    # Phase F - venue truth (join via position envelope -> scan_pattern_id)
     row = db.execute(text("""
         SELECT vt.realized_slippage_bps, vt.expected_slippage_bps, vt.id
         FROM trading_venue_truth_log vt

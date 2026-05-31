@@ -854,3 +854,20 @@ without dedicated parity probes.
 
 Report:
 `docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5r-learning-reporting-adapter-slice-3.md`.
+
+## Phase 5S - Learning/Reporting False-Positive Cleanup (2026-05-31)
+
+Phase 5S removed comment/docstring-only `Trade` symbol references from nine
+read-only learning/reporting files. Runtime behavior did not change; the goal
+was to keep the Phase 5 remaining-compatibility map focused on actual legacy
+ORM/table dependencies.
+
+The remaining compatibility surface dropped from 90 to 81 files:
+`learning_research_reporting=27`, `adapter_candidate=32`.
+
+Architect verdict: useful map hygiene before the next real adapter conversion.
+The next slice should target an actual read-only helper conversion, not a live
+broker/reconcile/risk/capital path.
+
+Report:
+`docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5s-learning-reporting-false-positive-cleanup.md`.

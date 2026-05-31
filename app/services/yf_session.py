@@ -100,7 +100,7 @@ def _env_bool(name: str, default: bool) -> bool:
 # is older than ``_RATE_WINDOW_S`` seconds. On exhaustion we sleep just long
 # enough for that oldest timestamp to age out, then retry.
 #
-# Trade-offs vs the previous pyrate_limiter-based implementation:
+# Design tradeoffs vs the previous pyrate_limiter-based implementation:
 # * No background threads, no asyncio event loops, no kernel handle churn.
 # * Slightly coarser semantics (sliding window vs leaky bucket) — fine for
 #   our ~12 req/5s target; the yfinance backend has its own throttles anyway.

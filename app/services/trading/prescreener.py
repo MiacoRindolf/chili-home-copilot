@@ -493,7 +493,7 @@ def invalidate_cache() -> None:
         _cache.pop("breakout_candidates", None)
 
 
-# ── Day-Trade Candidates ──────────────────────────────────────────────
+# ── Intraday Candidates ───────────────────────────────────────────────
 
 def _crypto_top_movers() -> list[str]:
     """Fetch top crypto movers by 24h volume via CoinGecko (free, cached)."""

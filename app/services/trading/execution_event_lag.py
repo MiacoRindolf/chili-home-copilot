@@ -4,7 +4,7 @@ Measures the gap between ``event_at`` (broker-side timestamp on the
 venue payload) and ``recorded_at`` (DB-side insert time). A sustained
 lag means audit data is stale by the time the reconciler reads it —
 which is exactly when the reconciler would miss a partial fill or a
-cancelled stop, because the ``broker_status`` on the Trade row hasn't
+cancelled stop, because the ``broker_status`` on the management row hasn't
 caught up yet.
 
 This module is read-only: it queries ``trading_execution_events`` and
