@@ -1269,6 +1269,34 @@ def _closed_trade_price_move_pct(trade: Trade) -> float:
     return abs((ep - xp) / xp * 100.0)
 
 
+def _closed_trade_realized_return_pct(trade: Any) -> float | None:
+    """Contract-aware realized return for post-close learning signals."""
+    try:
+        from .return_math import trade_return_pct
+
+        return trade_return_pct(trade)
+    except Exception:
+        return None
+
+
+def _closed_trade_outcome_fraction(trade: Any) -> float | None:
+    ret_pct = _closed_trade_realized_return_pct(trade)
+    if ret_pct is None:
+        return None
+    return ret_pct / 100.0
+
+
+def _closed_trade_directional_win(trade: Any) -> bool:
+    pnl = getattr(trade, "pnl", None)
+    try:
+        if pnl is not None and not isinstance(pnl, bool):
+            return float(pnl) > 0.0
+    except (TypeError, ValueError):
+        pass
+    ret_pct = _closed_trade_realized_return_pct(trade)
+    return bool(ret_pct is not None and ret_pct > 0.0)
+
+
 def _reinforce_patterns_at_trade_close(
     db: Session,
     trade: Trade,
@@ -1392,7 +1420,7 @@ def analyze_closed_trade(db: Session, trade: Trade) -> str | None:
     from .journal import add_journal_entry
 
     trace_id = new_trace_id()
-    trade_won = trade.pnl is not None and trade.pnl > 0
+    trade_won = _closed_trade_directional_win(trade)
     pnl_label = "PROFIT" if trade_won else "LOSS"
 
     flat = _trade_exit_snapshot_flat(trade)
@@ -1463,28 +1491,22 @@ def analyze_closed_trade(db: Session, trade: Trade) -> str | None:
                 _gw_id = result.get("gateway_log_id") if isinstance(result, dict) else None
                 if _gw_id:
                     from ..context_brain.outcome_tracker import record_trade_outcome
-                    # Convert raw PnL to a fractional return for the bucketer.
-                    pnl_frac = 0.0
-                    try:
-                        if trade.entry_price and float(trade.entry_price) > 0 and trade.pnl is not None:
-                            pnl_frac = float(trade.pnl) / max(
-                                1.0, float(trade.entry_price) * float(trade.qty or 1)
-                            )
-                    except Exception:
-                        pnl_frac = 0.0
-                    record_trade_outcome(
-                        db,
-                        gateway_log_id=int(_gw_id),
-                        pnl=pnl_frac,
-                        purpose="trading_pattern_mine",
-                        detail={
-                            "trade_id": trade.id,
-                            "ticker": trade.ticker,
-                            "won": bool(trade_won),
-                            "pnl_usd": float(trade.pnl or 0),
-                            "move_pct": float(move_pct),
-                        },
-                    )
+                    pnl_frac = _closed_trade_outcome_fraction(trade)
+                    if pnl_frac is not None:
+                        record_trade_outcome(
+                            db,
+                            gateway_log_id=int(_gw_id),
+                            pnl=pnl_frac,
+                            purpose="trading_pattern_mine",
+                            detail={
+                                "trade_id": trade.id,
+                                "ticker": trade.ticker,
+                                "won": bool(trade_won),
+                                "pnl_usd": float(trade.pnl or 0),
+                                "realized_return_pct": pnl_frac * 100.0,
+                                "move_pct": float(move_pct),
+                            },
+                        )
             except Exception as _oe:
                 log_info(trace_id, f"[trading] trade outcome record failed: {_oe}")
         except Exception as e:

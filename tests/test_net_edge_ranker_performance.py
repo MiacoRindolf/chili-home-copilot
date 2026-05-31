@@ -78,6 +78,46 @@ def test_load_training_pairs_batches_scan_pattern_lookup() -> None:
     assert db.last_query_by_model[ScanPattern].filter_calls == 1
 
 
+def test_load_training_pairs_uses_contract_aware_option_paper_outcomes() -> None:
+    db = _FakeSession(
+        trades=[],
+        paper_trades=[
+            SimpleNamespace(
+                scan_pattern_id=10,
+                entry_price=1.25,
+                exit_price=0.01,
+                quantity=2.0,
+                pnl=40.0,
+                pnl_pct=-9999.0,
+                direction="long",
+                signal_json={"asset_type": "options"},
+            ),
+            SimpleNamespace(
+                scan_pattern_id=10,
+                entry_price=1.25,
+                exit_price=10.0,
+                quantity=2.0,
+                pnl=-40.0,
+                pnl_pct=9999.0,
+                direction="long",
+                signal_json={"asset_type": "options"},
+            ),
+        ],
+        patterns=[
+            SimpleNamespace(id=10, oos_win_rate=0.6, win_rate=None, asset_class="options"),
+        ],
+    )
+
+    pairs = _load_training_pairs(
+        db,
+        asset_class="options",
+        regime_bucket="risk_on",
+        lookback_days=1,
+    )
+
+    assert pairs == [(0.6, 1), (0.6, 0)]
+
+
 def test_load_training_pairs_skips_pattern_lookup_when_no_pattern_ids() -> None:
     db = _FakeSession(
         trades=[SimpleNamespace(scan_pattern_id=None, pnl=25.0)],

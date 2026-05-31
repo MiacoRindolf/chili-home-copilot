@@ -495,6 +495,84 @@ def test_cash_deployment_options_returns_use_contract_multiplier(db, monkeypatch
     assert row["live_realized_asset_avg_return_pct"] < 100.0
 
 
+def test_cash_deployment_live_asset_perf_uses_confirmed_option_return_without_pnl(
+    db,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "chili_autotrader_live_enabled", True)
+    monkeypatch.setattr(settings, "chili_autotrader_options_enabled", True)
+    monkeypatch.setattr(settings, "chili_options_venue_robinhood_enabled", True)
+    monkeypatch.setattr(settings, "chili_cash_deployment_options_cost_pct", 1.0)
+    monkeypatch.setattr(settings, "chili_cash_deployment_min_closed_evidence", 5)
+    monkeypatch.setattr(settings, "chili_cash_deployment_max_brier_score", 0.28)
+    monkeypatch.setattr(
+        settings,
+        "chili_cash_deployment_max_abs_paper_live_gap_pct",
+        50.0,
+    )
+
+    pat = _pattern(db, name="cash option price fallback", asset_class="options")
+    alert = _alert(db, pat, ticker="SPY", asset_type="options")
+    _run(db, pat, alert, expected=3.0)
+    _closed_paper(db, pat, alert)
+    confirmed_snapshot = {
+        "asset_type": "options",
+        "option_meta": {
+            "price_domain": "option_premium",
+            "underlying": "SPY",
+            "expiration": "2026-06-19",
+            "strike": 729.0,
+            "option_type": "call",
+        },
+        "price_domains": {
+            "entry_price": "option_premium",
+            "exit_price": "option_premium",
+        },
+    }
+    db.add_all(
+        [
+            Trade(
+                scan_pattern_id=pat.id,
+                ticker="SPY",
+                direction="long",
+                entry_price=1.25,
+                quantity=2.0,
+                status="closed",
+                entry_date=datetime.utcnow() - timedelta(hours=3),
+                exit_date=datetime.utcnow() - timedelta(hours=2),
+                exit_price=1.45,
+                pnl=None,
+                asset_kind="option",
+                indicator_snapshot=confirmed_snapshot,
+            ),
+            Trade(
+                scan_pattern_id=pat.id,
+                ticker="SPY",
+                direction="long",
+                entry_price=4.01,
+                quantity=1.0,
+                status="closed",
+                entry_date=datetime.utcnow() - timedelta(hours=2),
+                exit_date=datetime.utcnow() - timedelta(hours=1),
+                exit_price=716.0,
+                pnl=None,
+                asset_kind="option",
+                indicator_snapshot={"asset_type": "options"},
+            ),
+        ]
+    )
+    db.commit()
+
+    rows = cash_deployment_rows(db, pattern_ids=[pat.id], window_days=7, limit=10)
+    row = next(x for x in rows if x["scan_pattern_id"] == pat.id)
+
+    assert row["asset_class"] == "options"
+    assert row["live_realized_asset_closed_count"] == 1
+    assert row["live_realized_asset_avg_return_pct"] == pytest.approx(16.0)
+    assert row["live_realized_asset_win_rate"] == pytest.approx(1.0)
+    assert row["live_realized_asset_pnl_usd"] == pytest.approx(0.0)
+
+
 def test_cash_deployment_blocks_live_deployable_on_negative_live_asset_perf(db, monkeypatch):
     monkeypatch.setattr(settings, "chili_autotrader_live_enabled", True)
     monkeypatch.setattr(settings, "chili_cash_deployment_equity_cost_pct", 0.05)

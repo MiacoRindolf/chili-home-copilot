@@ -1198,6 +1198,9 @@ def null_lineage_short_paper_candidates(
         ticker = str(getattr(row, "ticker", "") or "").upper()
         family = str(signal.get("strategy") or signal.get("source") or "null_lineage_short").strip()
         key = (ticker, family)
+        pct = _paper_return_pct(row)
+        if pct is None:
+            continue
         bucket = buckets.setdefault(
             key,
             {
@@ -1210,14 +1213,12 @@ def null_lineage_short_paper_candidates(
             },
         )
         pnl = _safe_float(getattr(row, "pnl", None)) or 0.0
-        pct = _paper_return_pct(row)
         bucket["closed_count"] += 1
         bucket["total_pnl"] += pnl
         bucket["paper_trade_ids"].append(int(row.id))
-        if pct is not None:
-            vals = list(bucket.get("_pct_values", []))
-            vals.append(pct)
-            bucket["_pct_values"] = vals
+        vals = list(bucket.get("_pct_values", []))
+        vals.append(pct)
+        bucket["_pct_values"] = vals
     out = []
     for bucket in buckets.values():
         if float(bucket["total_pnl"]) < float(min_total_pnl):

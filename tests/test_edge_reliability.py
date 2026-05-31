@@ -30,6 +30,7 @@ from app.services.trading.edge_reliability import (
     edge_supply_rows,
     emit_edge_reliability_refresh_requested,
     emit_targeted_profitability_work,
+    null_lineage_short_paper_candidates,
 )
 
 
@@ -447,6 +448,65 @@ def test_edge_reliability_option_slice_keeps_alias_runs_and_realized_paper(db):
     assert row["realized_ev_pct"] == pytest.approx(16.0)
     assert row["paper_realized_ev_pct"] == pytest.approx(16.0)
     assert row["expected_ev_pct"] == pytest.approx(2.0)
+
+
+def test_null_lineage_short_candidates_skip_unpriced_option_legacy_pct(db):
+    good = PaperTrade(
+        scan_pattern_id=None,
+        ticker="SPY",
+        direction="short",
+        entry_price=1.25,
+        stop_price=2.0,
+        target_price=0.75,
+        quantity=1.0,
+        status="closed",
+        entry_date=datetime.utcnow(),
+        exit_date=datetime.utcnow(),
+        exit_price=1.05,
+        pnl=None,
+        pnl_pct=-9999.0,
+        signal_json={
+            "asset_type": "options",
+            "strategy": "short_call_reject",
+            "price_domains": {
+                "entry_price": "option_premium",
+                "exit_price": "option_premium",
+            },
+        },
+    )
+    ambiguous = PaperTrade(
+        scan_pattern_id=None,
+        ticker="SPY",
+        direction="short",
+        entry_price=4.01,
+        stop_price=8.0,
+        target_price=2.0,
+        quantity=1.0,
+        status="closed",
+        entry_date=datetime.utcnow(),
+        exit_date=datetime.utcnow(),
+        exit_price=716.0,
+        pnl=None,
+        pnl_pct=17755.61,
+        signal_json={
+            "asset_type": "options",
+            "strategy": "short_call_reject",
+        },
+    )
+    db.add_all([good, ambiguous])
+    db.commit()
+
+    rows = null_lineage_short_paper_candidates(
+        db,
+        window_days=7,
+        min_total_pnl=0.0,
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["closed_count"] == 1
+    assert row["avg_pnl_pct"] == pytest.approx(16.0)
+    assert row["paper_trade_ids"] == [good.id]
 
 
 def test_edge_supply_prefers_recent_positive_edge_over_arbitrary_distinct_order(db):

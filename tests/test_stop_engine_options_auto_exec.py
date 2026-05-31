@@ -213,3 +213,53 @@ def test_stop_positions_option_uses_premium_quote_not_underlying(paired_client, 
     assert row["asset_type"] == "options"
     assert row["current_price"] == pytest.approx(1.45)
     assert row["pnl_pct"] == pytest.approx(16.0)
+
+
+def test_stop_positions_option_unavailable_premium_stays_unknown(paired_client, db) -> None:
+    from app.models.trading import Trade
+
+    client, user = paired_client
+    trade = Trade(
+        user_id=user.id,
+        ticker="SPY",
+        direction="long",
+        entry_price=1.25,
+        quantity=2.0,
+        entry_date=datetime.utcnow(),
+        status="open",
+        stop_loss=0.80,
+        take_profit=2.50,
+        indicator_snapshot={
+            "breakout_alert": {
+                "asset_type": "options",
+                "option_meta": {
+                    "underlying": "SPY",
+                    "expiration": "2026-06-19",
+                    "strike": 729.0,
+                    "option_type": "call",
+                },
+            }
+        },
+    )
+    db.add(trade)
+    db.commit()
+
+    with patch(
+        "app.services.trading.market_data.fetch_quote",
+        side_effect=AssertionError("stop positions must not fetch underlying spot for options"),
+    ), patch(
+        "app.services.trading.stop_engine._build_brain_context",
+        return_value=SimpleNamespace(summary_dict=lambda: {}),
+    ), patch(
+        "app.services.trading.broker_quotes.broker_quote_for_trade",
+        return_value={"price": None, "source": "robinhood_options_unavailable"},
+    ):
+        resp = client.get("/api/trading/stops/positions")
+
+    assert resp.status_code == 200
+    row = next(x for x in resp.json()["positions"] if x["id"] == trade.id)
+    assert row["asset_type"] == "options"
+    assert row["current_price"] is None
+    assert row["pnl_pct"] is None
+    assert row["current_r"] is None
+    assert row["stop_distance_pct"] is None

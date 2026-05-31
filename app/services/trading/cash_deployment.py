@@ -284,19 +284,27 @@ def _live_asset_performance(
         q = q.filter(Trade.user_id == user_id)
     rows = [row for row in q.all() if _trade_asset_class(row) == asset_class]
 
-    returns = [ret for ret in (_trade_return_pct(row) for row in rows) if ret is not None]
-    pnl_values = [_safe_float(getattr(row, "pnl", None), 0.0) or 0.0 for row in rows]
-    wins = [1.0 if (_safe_float(getattr(row, "pnl", None), 0.0) or 0.0) > 0.0 else 0.0 for row in rows]
+    outcome_rows: list[tuple[Any, float]] = []
+    for row in rows:
+        ret = _trade_return_pct(row)
+        if ret is not None:
+            outcome_rows.append((row, ret))
+    returns = [ret for _, ret in outcome_rows]
+    pnl_values = [
+        _safe_float(getattr(row, "pnl", None), 0.0) or 0.0
+        for row, _ in outcome_rows
+    ]
+    wins = [1.0 if ret > 0.0 else 0.0 for _, ret in outcome_rows]
     latest = max(
         (
             getattr(row, "exit_date", None) or getattr(row, "entry_date", None)
-            for row in rows
+            for row, _ in outcome_rows
         ),
         default=None,
     )
     return {
         "live_realized_asset_window_days": int(window_days),
-        "live_realized_asset_closed_count": len(rows),
+        "live_realized_asset_closed_count": len(outcome_rows),
         "live_realized_asset_pnl_usd": _round(sum(pnl_values), 6),
         "live_realized_asset_avg_return_pct": (
             _round(sum(returns) / len(returns), 6) if returns else None

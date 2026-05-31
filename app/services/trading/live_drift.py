@@ -88,6 +88,23 @@ def _outcome_pct_from_trade(
     return (pnl / (entry * qty)) * 100.0
 
 
+def _runtime_outcome_counts(rows: list[Any], *, source: str) -> tuple[int, int]:
+    samples = 0
+    wins = 0
+    for row in rows:
+        outcome = _outcome_pct_from_trade(row, source=source)
+        if outcome is None:
+            continue
+        samples += 1
+        if outcome > 0.0:
+            wins += 1
+    return samples, wins
+
+
+def _runtime_win_count(rows: list[Any], *, source: str) -> int:
+    return _runtime_outcome_counts(rows, source=source)[1]
+
+
 def binomial_two_sided_p_value(n: int, k: int, p0: float) -> float | None:
     """Two-sided binomial p-value; None if inputs invalid."""
     if n <= 0 or p0 <= 0.0 or p0 >= 1.0:
@@ -233,7 +250,10 @@ def aggregate_runtime_samples(
         )
         .all()
     )
-    live_wins = sum(1 for t in live_rows if float(t.pnl or 0) > 0)
+    live_sample_count, live_wins = _runtime_outcome_counts(
+        live_rows,
+        source="live",
+    )
 
     paper_rows = (
         db.query(PaperTrade)
@@ -246,12 +266,15 @@ def aggregate_runtime_samples(
         .filter(or_(PaperTrade.user_id == int(user_id), PaperTrade.user_id.is_(None)))
         .all()
     )
-    paper_wins = sum(1 for t in paper_rows if float(t.pnl or 0) > 0)
+    paper_sample_count, paper_wins = _runtime_outcome_counts(
+        paper_rows,
+        source="paper",
+    )
 
     return {
-        "n_live": len(live_rows),
+        "n_live": int(live_sample_count),
         "wins_live": int(live_wins),
-        "n_paper": len(paper_rows),
+        "n_paper": int(paper_sample_count),
         "wins_paper": int(paper_wins),
     }
 

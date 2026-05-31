@@ -9,6 +9,8 @@ import pytest
 
 from app.services.trading.live_drift import (
     _outcome_pct_from_trade,
+    _runtime_outcome_counts,
+    _runtime_win_count,
     _scorecard,
     apply_live_drift_to_pattern,
     baseline_degenerate,
@@ -289,6 +291,53 @@ def test_live_drift_scorecard_excludes_unpriced_option_outcomes() -> None:
     assert scorecard is not None
     assert scorecard["sample_count"] == 1
     assert scorecard["expectancy_per_trade_pct"] == pytest.approx(2.0)
+
+
+def test_live_drift_runtime_wins_use_confirmed_option_premium_returns() -> None:
+    rows = [
+        SimpleNamespace(
+            entry_price=1.25,
+            exit_price=1.45,
+            quantity=2.0,
+            pnl=None,
+            pnl_pct=-9999.0,
+            direction="long",
+            signal_json={
+                "asset_type": "options",
+                "price_domains": {
+                    "entry_price": "option_premium",
+                    "exit_price": "option_premium",
+                },
+            },
+        ),
+        SimpleNamespace(
+            entry_price=1.25,
+            exit_price=1.05,
+            quantity=2.0,
+            pnl=None,
+            pnl_pct=9999.0,
+            direction="long",
+            signal_json={
+                "asset_type": "options",
+                "price_domains": {
+                    "entry_price": "option_premium",
+                    "exit_price": "option_premium",
+                },
+            },
+        ),
+        SimpleNamespace(
+            entry_price=4.01,
+            exit_price=716.0,
+            quantity=1.0,
+            pnl=None,
+            pnl_pct=17755.61,
+            direction="long",
+            signal_json={"asset_type": "options"},
+        ),
+    ]
+
+    assert _runtime_win_count(rows, source="paper") == 1
+    assert _runtime_outcome_counts(rows, source="paper") == (2, 1)
 
 
 @pytest.mark.parametrize("bad_pct", [True, float("nan"), float("inf"), float("-inf")])

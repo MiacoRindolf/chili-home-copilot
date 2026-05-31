@@ -1543,6 +1543,15 @@ def api_stop_positions(
         def is_option_trade(_trade: Trade) -> bool:  # type: ignore[no-redef]
             return False
 
+    def _positive_quote_price(value: Any) -> float | None:
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            price = float(value)
+        except (TypeError, ValueError):
+            return None
+        return price if price > 0 else None
+
     result = []
     for t in trades:
         trade_is_option = is_option_trade(t)
@@ -1560,22 +1569,25 @@ def api_stop_positions(
             if (not q or q.get("price") is None) and not trade_is_option:
                 from ..services.trading.market_data import fetch_quote
                 q = fetch_quote(t.ticker)
-            price = q.get("price", 0) if q else 0
+            price = _positive_quote_price(q.get("price")) if q else None
+            if price is None and not trade_is_option:
+                price = 0
         except Exception:
-            price = 0
+            price = None if trade_is_option else 0
 
-        current_r = 0
+        missing_option_mark = trade_is_option and price is None
+        current_r = None if missing_option_mark else 0
         if R > 0 and price and entry:
             if t.direction == "long":
                 current_r = round((price - entry) / R, 2)
             else:
                 current_r = round((entry - price) / R, 2)
 
-        stop_distance_pct = 0
+        stop_distance_pct = None if missing_option_mark else 0
         if stop and price and price > 0:
             stop_distance_pct = round(abs(price - stop) / price * 100, 2)
 
-        pnl_pct = 0
+        pnl_pct = None if missing_option_mark else 0
         if entry and price and entry > 0:
             if t.direction == "long":
                 pnl_pct = round((price - entry) / entry * 100, 2)
@@ -1583,10 +1595,11 @@ def api_stop_positions(
                 pnl_pct = round((entry - price) / entry * 100, 2)
 
         state = "initial"
-        if current_r >= 2.0:
-            state = "trailing"
-        elif current_r >= 1.0:
-            state = "breakeven"
+        if current_r is not None:
+            if current_r >= 2.0:
+                state = "trailing"
+            elif current_r >= 1.0:
+                state = "breakeven"
         if stop and price:
             if (t.direction == "long" and price <= stop) or (t.direction != "long" and price >= stop):
                 state = "triggered"

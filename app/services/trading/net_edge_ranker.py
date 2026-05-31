@@ -67,6 +67,7 @@ from .asset_class import (
     normalize_pattern_asset_class,
     pattern_asset_class_matches,
 )
+from .return_math import paper_trade_return_pct, trade_return_pct
 
 logger = logging.getLogger(__name__)
 
@@ -407,20 +408,22 @@ def _load_training_pairs(
         .limit(4000)
         .all()
     )
+    trade_labels = [(t, _realized_win_label(t, paper=False)) for t in trades]
+    paper_labels = [(pt, _realized_win_label(pt, paper=True)) for pt in papers]
     pattern_ids = {
         int(t.scan_pattern_id)
-        for t in trades
-        if t.scan_pattern_id and t.pnl is not None
+        for t, win in trade_labels
+        if t.scan_pattern_id and win is not None
     }
     pattern_ids.update(
         int(pt.scan_pattern_id)
-        for pt in papers
-        if pt.scan_pattern_id and pt.exit_price is not None and pt.entry_price is not None
+        for pt, win in paper_labels
+        if pt.scan_pattern_id and win is not None
     )
     patterns_by_id = _scan_patterns_by_id(db, pattern_ids)
 
-    for t in trades:
-        if not t.scan_pattern_id or t.pnl is None:
+    for t, win in trade_labels:
+        if not t.scan_pattern_id or win is None:
             continue
         pat = patterns_by_id.get(int(t.scan_pattern_id))
         if pat is None:
@@ -430,10 +433,10 @@ def _load_training_pairs(
             continue
         if asset_class and not pattern_asset_class_matches(pat.asset_class, asset_class):
             continue
-        pairs.append((raw, 1 if float(t.pnl) > 0 else 0))
+        pairs.append((raw, win))
 
-    for pt in papers:
-        if not pt.scan_pattern_id or pt.exit_price is None or pt.entry_price is None:
+    for pt, win in paper_labels:
+        if not pt.scan_pattern_id or win is None:
             continue
         pat = patterns_by_id.get(int(pt.scan_pattern_id))
         if pat is None:
@@ -443,7 +446,6 @@ def _load_training_pairs(
             continue
         if asset_class and not pattern_asset_class_matches(pat.asset_class, asset_class):
             continue
-        win = 1 if float(pt.exit_price) > float(pt.entry_price) else 0
         pairs.append((raw, win))
 
     return pairs
@@ -481,6 +483,21 @@ def _try_isotonic() -> Any | None:
         return IsotonicRegression(out_of_bounds="clip")
     except Exception:  # pragma: no cover - sklearn optional fail-open
         return None
+
+
+def _realized_win_label(row: Any, *, paper: bool) -> int | None:
+    try:
+        ret = paper_trade_return_pct(row) if paper else trade_return_pct(row)
+    except Exception:
+        ret = None
+    ret_f = _finite_float(ret)
+    if ret_f is not None:
+        return 1 if ret_f > 0.0 else 0
+
+    pnl = _finite_float(getattr(row, "pnl", None))
+    if pnl is not None:
+        return 1 if pnl > 0.0 else 0
+    return None
 
 
 class _Calibrator:
