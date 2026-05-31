@@ -62,6 +62,78 @@ def test_emergency_close_all_writes_null_exit_price_when_no_quote(db):
     assert row[3] is None, "pnl must be NULL when exit_price is NULL"
 
 
+@pytest.mark.parametrize("quantity", [None, 0.0, True])
+def test_emergency_close_all_live_bad_quantity_does_not_fake_one_share_pnl(quantity):
+    from app.services.trading import emergency_liquidation as elq
+
+    trade = SimpleNamespace(
+        id=6002,
+        user_id=None,
+        ticker="BADQ",
+        direction="long",
+        entry_price=10.0,
+        quantity=quantity,
+        status="open",
+        broker_source="robinhood",
+        pnl=None,
+    )
+    fake_db = _FakeEmergencyDb(live_rows=[trade])
+
+    with (
+        patch(
+            "app.services.trading.market_data.fetch_quote",
+            return_value={"price": 12.0},
+        ),
+        patch(
+            "app.services.trading.governance.activate_kill_switch",
+            return_value=None,
+        ),
+    ):
+        result = elq.emergency_close_all(fake_db, user_id=None, reason="bad_qty")
+
+    assert result["ok"] is True
+    assert result["closed_live"] == 1
+    assert trade.status == "closed"
+    assert trade.exit_price == pytest.approx(12.0)
+    assert trade.exit_reason == "emergency_bad_qty:invalid_pnl_basis"
+    assert trade.pnl is None
+
+
+def test_emergency_close_all_live_short_pnl_is_directional():
+    from app.services.trading import emergency_liquidation as elq
+
+    trade = SimpleNamespace(
+        id=6003,
+        user_id=None,
+        ticker="SHRT",
+        direction="short",
+        entry_price=10.0,
+        quantity=3.0,
+        status="open",
+        broker_source="robinhood",
+        pnl=None,
+    )
+    fake_db = _FakeEmergencyDb(live_rows=[trade])
+
+    with (
+        patch(
+            "app.services.trading.market_data.fetch_quote",
+            return_value={"price": 8.0},
+        ),
+        patch(
+            "app.services.trading.governance.activate_kill_switch",
+            return_value=None,
+        ),
+    ):
+        result = elq.emergency_close_all(fake_db, user_id=None, reason="short_pnl")
+
+    assert result["ok"] is True
+    assert result["closed_live"] == 1
+    assert trade.status == "closed"
+    assert trade.exit_reason == "emergency_short_pnl"
+    assert trade.pnl == pytest.approx(6.0)
+
+
 class _FakeQuery:
     def __init__(self, rows):
         self._rows = rows

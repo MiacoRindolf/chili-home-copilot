@@ -62,6 +62,20 @@ def _paper_exit_pnl(
     )
 
 
+def _live_exit_pnl(trade: Any, *, exit_price: Any) -> float | None:
+    entry = _positive_float_or_none(getattr(trade, "entry_price", None))
+    price = _positive_float_or_none(exit_price)
+    qty = _positive_float_or_none(getattr(trade, "quantity", None))
+    if entry is None or price is None or qty is None:
+        return None
+
+    if str(getattr(trade, "direction", "") or "").strip().lower() == "short":
+        price_diff = entry - price
+    else:
+        price_diff = price - entry
+    return round(price_diff * qty, 2)
+
+
 def record_price_heartbeat() -> None:
     """Call this whenever a successful price fetch occurs to track connectivity."""
     global _last_price_update
@@ -164,7 +178,7 @@ def emergency_close_all(
             # (the lying-PnL pattern observed on 6 trades during the
             # 2026-05-04 12:00 UTC mass-exit).
             q = fetch_quote(t.ticker)
-            price = float(q["price"]) if q and q.get("price") else None
+            price = _positive_float_or_none(q.get("price") if q else None)
             t.status = "closed"
             t.exit_date = datetime.utcnow()
             t.exit_price = price
@@ -174,8 +188,11 @@ def emergency_close_all(
                     t.pnl = None
             else:
                 t.exit_reason = f"emergency_{reason}"
+                pnl = _live_exit_pnl(t, exit_price=price)
+                if pnl is None:
+                    t.exit_reason = f"emergency_{reason}:invalid_pnl_basis"
                 if hasattr(t, "pnl"):
-                    t.pnl = round((price - t.entry_price) * (t.quantity or 1), 2)
+                    t.pnl = pnl
             closed_live += 1
         except Exception as e:
             errors.append(f"Live {t.ticker}: {e}")
