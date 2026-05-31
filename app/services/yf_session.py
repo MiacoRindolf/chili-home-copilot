@@ -32,6 +32,7 @@ Layered design:
 from __future__ import annotations
 
 import collections
+import contextlib
 import logging
 import os
 import threading
@@ -44,6 +45,30 @@ import yfinance as yf
 from .socket_budget import mount_bounded_http_adapters
 
 logger = logging.getLogger(__name__)
+_YFINANCE_PROVIDER_LOGGER_NAMES = (
+    "yfinance",
+    "yfinance.base",
+    "yfinance.data",
+    "yfinance.scrapers.history",
+)
+
+
+@contextlib.contextmanager
+def _quiet_yfinance_provider_logs():
+    """Suppress noisy third-party yfinance ERROR lines during wrapped calls."""
+    if not _env_bool("CHILI_YFINANCE_SUPPRESS_PROVIDER_ERRORS", True):
+        yield
+        return
+    loggers = [logging.getLogger(name) for name in _YFINANCE_PROVIDER_LOGGER_NAMES]
+    prior_levels = [log.level for log in loggers]
+    try:
+        for log in loggers:
+            if log.level < logging.CRITICAL:
+                log.setLevel(logging.CRITICAL)
+        yield
+    finally:
+        for log, level in zip(loggers, prior_levels, strict=False):
+            log.setLevel(level)
 
 
 def _env_float(name: str, default: float, *, minimum: float | None = None) -> float:
@@ -598,8 +623,9 @@ def get_history(symbol: str, **kwargs) -> Any:
     acquire()
     failed = False
     try:
-        t = yf.Ticker(symbol, session=_SHARED_SESSION)
-        df = t.history(**kwargs)
+        with _quiet_yfinance_provider_logs():
+            t = yf.Ticker(symbol, session=_SHARED_SESSION)
+            df = t.history(**kwargs)
     except Exception as e:
         logger.warning(f"[yf_session] history({symbol}) failed: {e}")
         df = pd.DataFrame()
@@ -701,18 +727,32 @@ def get_fast_info(symbol: str) -> dict[str, Any] | None:
 
     acquire()
     try:
-        t = yf.Ticker(symbol, session=_SHARED_SESSION)
-        info = t.fast_info
+        with _quiet_yfinance_provider_logs():
+            t = yf.Ticker(symbol, session=_SHARED_SESSION)
+            info = t.fast_info
+            last_price = info.last_price
+            previous_close = info.previous_close
+            day_high = info.day_high if hasattr(info, "day_high") else None
+            day_low = info.day_low if hasattr(info, "day_low") else None
+            last_volume = info.last_volume if hasattr(info, "last_volume") else None
+            market_cap = info.market_cap if hasattr(info, "market_cap") else None
+            year_high = info.year_high if hasattr(info, "year_high") else None
+            year_low = info.year_low if hasattr(info, "year_low") else None
+            avg_volume = (
+                info.three_month_average_volume
+                if hasattr(info, "three_month_average_volume")
+                else None
+            )
         result = {
-            "last_price": float(info.last_price) if info.last_price else None,
-            "previous_close": float(info.previous_close) if info.previous_close else None,
-            "day_high": float(info.day_high) if hasattr(info, "day_high") and info.day_high else None,
-            "day_low": float(info.day_low) if hasattr(info, "day_low") and info.day_low else None,
-            "volume": int(info.last_volume) if hasattr(info, "last_volume") and info.last_volume else None,
-            "market_cap": float(info.market_cap) if hasattr(info, "market_cap") and info.market_cap else None,
-            "year_high": float(info.year_high) if hasattr(info, "year_high") and info.year_high else None,
-            "year_low": float(info.year_low) if hasattr(info, "year_low") and info.year_low else None,
-            "avg_volume": int(info.three_month_average_volume) if hasattr(info, "three_month_average_volume") and info.three_month_average_volume else None,
+            "last_price": float(last_price) if last_price else None,
+            "previous_close": float(previous_close) if previous_close else None,
+            "day_high": float(day_high) if day_high else None,
+            "day_low": float(day_low) if day_low else None,
+            "volume": int(last_volume) if last_volume else None,
+            "market_cap": float(market_cap) if market_cap else None,
+            "year_high": float(year_high) if year_high else None,
+            "year_low": float(year_low) if year_low else None,
+            "avg_volume": int(avg_volume) if avg_volume else None,
         }
         _cache_pop(miss_key)
         _breaker_on_success()
@@ -904,18 +944,19 @@ def batch_download(
         # outage that's N leaked Thread closures per call. The shared
         # session pools connections; threads=False keeps the call
         # synchronous on the caller thread.
-        df = yf.download(
-            uncached,
-            period=period,
-            interval=interval,
-            group_by="ticker",
-            threads=False,
-            session=_SHARED_SESSION,
-            progress=False,
-            prepost=prepost,
-            auto_adjust=auto_adjust,
-            actions=actions,
-        )
+        with _quiet_yfinance_provider_logs():
+            df = yf.download(
+                uncached,
+                period=period,
+                interval=interval,
+                group_by="ticker",
+                threads=False,
+                session=_SHARED_SESSION,
+                progress=False,
+                prepost=prepost,
+                auto_adjust=auto_adjust,
+                actions=actions,
+            )
     except Exception as e:
         logger.warning(f"[yf_session] batch_download failed: {e}")
         _breaker_on_failure()
