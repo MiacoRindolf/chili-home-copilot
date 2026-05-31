@@ -2,16 +2,16 @@
   "generated_from": "scripts/analyze_phase5_remaining_trade_refs.py --json",
   "orm_trade_symbol_compat_count": 64,
   "phase5o_bucket_counts": {
-    "adapter_candidate": 1,
-    "future_rename_blocker": 47,
+    "adapter_candidate": 0,
+    "future_rename_blocker": 48,
     "leave_alone": 16
   },
   "contract_group_counts": {
     "learning_research_reporting": 5,
     "live_action_broker_reconcile": 21,
-    "private_helper_type_only": 3,
+    "private_helper_type_only": 2,
     "public_ui_schema_contract": 14,
-    "risk_capital_gate": 21
+    "risk_capital_gate": 22
   },
   "items": [
     {
@@ -373,10 +373,10 @@
     },
     {
       "path": "app/services/trading/position_plan_generator.py",
-      "contract_group": "private_helper_type_only",
-      "phase5o_bucket": "adapter_candidate",
-      "phase5o_subtype": "private_helper_adapter_candidate",
-      "rationale": "Private helper surface; candidate for protocol/adapter extraction if direct tests exist."
+      "contract_group": "risk_capital_gate",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "live_position_plan_advisory",
+      "rationale": "Live position-plan advisory: reads open management envelopes, latest monitor decisions, alert plans, pattern metadata, option price domains, and cached trade-id sets before producing LLM plan/risk guidance. Requires plan-input parity and a dedicated behavior-preserving conversion before any ORM surface change."
     },
     {
       "path": "app/services/trading/position_resolver.py",
