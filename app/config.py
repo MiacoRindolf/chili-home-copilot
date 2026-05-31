@@ -35,10 +35,11 @@ RECERT_QUEUE_IMMEDIATE_DISPATCH_DEFAULT_ORIGINS = "autotrader_signal_fastlane"
 RECERT_QUEUE_IMMEDIATE_DISPATCH_DEFAULT_PRIORITY = (
     RECERT_QUEUE_DEFAULT_BACKTEST_PRIORITY
 )
-DATABASE_DEFAULT_POOL_SIZE = 25
-DATABASE_DEFAULT_MAX_OVERFLOW = 55
+DATABASE_DEFAULT_POOL_SIZE = 8
+DATABASE_DEFAULT_MAX_OVERFLOW = 8
 DATABASE_DEFAULT_POOL_TIMEOUT_SECONDS = 30.0
 DATABASE_DEFAULT_IDLE_IN_TRANSACTION_TIMEOUT_MS = 120_000
+DATABASE_DEFAULT_IDLE_SESSION_TIMEOUT_MS = 600_000
 DATABASE_PYTEST_DEFAULT_POOL_SIZE = 1
 DATABASE_PYTEST_DEFAULT_MAX_OVERFLOW = 1
 DATABASE_PYTEST_DEFAULT_POOL_TIMEOUT_SECONDS = 5.0
@@ -1650,6 +1651,14 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices(
             "DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS",
             "database_idle_in_transaction_timeout_ms",
+        ),
+    )
+    database_idle_session_timeout_ms: int = Field(
+        default=DATABASE_DEFAULT_IDLE_SESSION_TIMEOUT_MS,
+        ge=0,
+        validation_alias=AliasChoices(
+            "DATABASE_IDLE_SESSION_TIMEOUT_MS",
+            "database_idle_session_timeout_ms",
         ),
     )
     database_pytest_pool_size: int = Field(
