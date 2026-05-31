@@ -223,38 +223,36 @@ class TestComputeRollingEstimate:
         assert est.sample_trades == 2
         assert est.avg_daily_volume_usd == 0.0
 
-    def test_compute_rolling_estimate_uses_helper_side_norm_contract(self):
-        class _FakeQuery:
-            def __init__(self, rows):
-                self.rows = rows
+    def test_compute_rolling_estimate_uses_helper_side_norm_contract(self, monkeypatch):
+        calls: list[dict[str, object]] = []
 
-            def filter(self, *args):
-                return self
+        def fake_load_rows(db, *, ticker, sides, since):
+            calls.append({"ticker": ticker, "sides": tuple(sides), "since": since})
+            return [
+                SimpleNamespace(
+                    direction="long",
+                    tca_entry_slippage_bps=2.0,
+                    tca_exit_slippage_bps=1.0,
+                    entry_price=10.0,
+                    quantity=2.0,
+                )
+            ]
 
-            def all(self):
-                return self.rows
-
-        class _FakeSession:
-            def query(self, model):
-                assert model is Trade
-                return _FakeQuery([
-                    SimpleNamespace(
-                        direction="long",
-                        tca_entry_slippage_bps=2.0,
-                        tca_exit_slippage_bps=1.0,
-                        entry_price=10.0,
-                        quantity=2.0,
-                    )
-                ])
+        monkeypatch.setattr(
+            "app.services.trading.execution_cost_builder.load_execution_cost_estimate_envelope_rows",
+            fake_load_rows,
+        )
 
         est = compute_rolling_estimate(
-            _FakeSession(),  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
             ticker="CONTRACT_PHF",
             side="long",
             window_days=30,
             adv_lookup_fn=lambda _ticker, _window: 1_000_000.0,
         )
 
+        assert calls and calls[0]["ticker"] == "CONTRACT_PHF"
+        assert calls[0]["sides"] == ("long",)
         assert est is not None
         assert est.side == "long"
         assert est.sample_trades == 1
@@ -301,33 +299,12 @@ class TestComputeRollingEstimate:
         assert est.avg_daily_volume_usd == pytest.approx(20_000 / 30)
         _cleanup(db, ["AMD_PHF"])
 
-    def test_batch_ticker_estimates_reads_requested_sides_once(self):
-        class _FakeQuery:
-            def __init__(self, rows):
-                self.rows = rows
-                self.filter_calls = 0
+    def test_batch_ticker_estimates_reads_requested_sides_once(self, monkeypatch):
+        calls: list[dict[str, object]] = []
 
-            def filter(self, *args):
-                self.filter_calls += 1
-                return self
-
-            def all(self):
-                return self.rows
-
-        class _FakeSession:
-            def __init__(self, rows):
-                self.rows = rows
-                self.query_calls = 0
-                self.last_query = None
-
-            def query(self, model):
-                assert model is Trade
-                self.query_calls += 1
-                self.last_query = _FakeQuery(self.rows)
-                return self.last_query
-
-        db = _FakeSession(
-            [
+        def fake_load_rows(db, *, ticker, sides, since):
+            calls.append({"ticker": ticker, "sides": tuple(sides), "since": since})
+            return [
                 SimpleNamespace(
                     direction="long",
                     tca_entry_slippage_bps=3.0,
@@ -343,19 +320,23 @@ class TestComputeRollingEstimate:
                     quantity=3.0,
                 ),
             ]
+
+        monkeypatch.setattr(
+            "app.services.trading.execution_cost_builder.load_execution_cost_estimate_envelope_rows",
+            fake_load_rows,
         )
 
         result = _compute_rolling_estimates_for_ticker(
-            db,  # type: ignore[arg-type]
+            object(),  # type: ignore[arg-type]
             ticker="BATCH_PHF",
             sides=["long", "short"],
             window_days=30,
             adv_lookup_fn=lambda _ticker, _window: 1_000_000.0,
         )
 
-        assert db.query_calls == 1
-        assert db.last_query is not None
-        assert db.last_query.filter_calls == 1
+        assert len(calls) == 1
+        assert calls[0]["ticker"] == "BATCH_PHF"
+        assert calls[0]["sides"] == ("long", "short")
         assert result["long"] is not None
         assert result["short"] is not None
         assert result["long"].sample_trades == 1

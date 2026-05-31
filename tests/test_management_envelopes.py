@@ -7,10 +7,12 @@ from app.services.trading.management_envelopes import (
     count_probation_envelopes_since,
     fetch_synergy_retry_envelope_candidates,
     load_autotrader_desk_live_envelope_objects,
+    load_closed_management_envelope_tickers_since,
     load_audit_export_envelope_rows,
     load_closed_envelope_execution_rows,
     load_closed_pattern_envelope_rows,
     load_closed_review_envelope_rows,
+    load_execution_cost_estimate_envelope_rows,
     load_imminent_alert_actioned_envelope_ids,
     load_monitor_decision_envelope_rows,
     load_open_active_setup_envelope_objects,
@@ -66,6 +68,55 @@ class _FakeDbSequence:
     def execute(self, sql, params=None):
         self.calls.append((str(sql), params))
         return self.results.pop(0)
+
+
+def test_execution_cost_rows_read_management_envelopes_not_trade_view():
+    since = datetime(2026, 5, 1, 12, 0)
+    db = _FakeDb(
+        _RowsResult(
+            [
+                {
+                    "direction": "long",
+                    "entry_price": 10,
+                    "quantity": 2,
+                    "tca_entry_slippage_bps": 3,
+                    "tca_exit_slippage_bps": 1,
+                }
+            ]
+        )
+    )
+
+    rows = load_execution_cost_estimate_envelope_rows(
+        db,
+        ticker="ABC",
+        sides=["long", "short"],
+        since=since,
+    )
+
+    assert len(rows) == 1
+    assert rows[0].direction == "long"
+    assert rows[0].tca_entry_slippage_bps == 3
+    assert "FROM trading_management_envelopes" in db.sql
+    assert "trading_trades" not in db.sql
+    assert "LOWER(COALESCE(direction, 'long')) IN (:side_0, :side_1)" in db.sql
+    assert db.params == {
+        "ticker": "ABC",
+        "since": since,
+        "side_0": "long",
+        "side_1": "short",
+    }
+
+
+def test_execution_cost_ticker_discovery_reads_management_envelopes():
+    since = datetime(2026, 5, 1, 12, 0)
+    db = _FakeDb(_RowsResult([{"ticker": "ABC"}, {"ticker": "XYZ"}]))
+
+    tickers = load_closed_management_envelope_tickers_since(db, since=since)
+
+    assert tickers == ["ABC", "XYZ"]
+    assert "FROM trading_management_envelopes" in db.sql
+    assert "trading_trades" not in db.sql
+    assert db.params == {"since": since}
 
 
 def test_synergy_retry_candidates_read_management_envelopes_not_trade_view():

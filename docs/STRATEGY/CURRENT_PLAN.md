@@ -871,3 +871,24 @@ broker/reconcile/risk/capital path.
 
 Report:
 `docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5s-learning-reporting-false-positive-cleanup.md`.
+
+## Phase 5T - Execution Cost Envelope Adapter (2026-05-31)
+
+Phase 5T converted the execution-cost estimator's closed-row reads from the
+legacy `Trade` ORM surface to semantic management-envelope helpers.
+
+`compute_rolling_estimate(...)`, `_compute_rolling_estimates_for_ticker(...)`,
+and `rebuild_all(...)` ticker discovery now read from
+`trading_management_envelopes` through helpers in `management_envelopes.py`.
+The estimator math and `trading_execution_cost_estimates` persistence contract
+are unchanged.
+
+The remaining compatibility surface dropped from 81 to 80 files:
+`learning_research_reporting=26`, `adapter_candidate=31`.
+
+Architect verdict: safe as a narrow learning/reporting row-source conversion.
+Continue avoiding live trading gates unless the slice includes an explicit
+live-path parity probe.
+
+Report:
+`docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5t-execution-cost-envelope-adapter.md`.

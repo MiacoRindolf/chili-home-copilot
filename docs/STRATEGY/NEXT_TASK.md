@@ -1,21 +1,21 @@
-# NEXT_TASK: f-phase5t-learning-reporting-adapter-slice-5
+# NEXT_TASK: f-phase5u-learning-reporting-adapter-slice-6
 
 STATUS: QUEUED
 
 ## Goal
 
-Convert one actual read-only learning/reporting `Trade` ORM consumer to a
+Convert one more actual read-only learning/reporting `Trade` ORM consumer to a
 management-envelope helper with focused parity tests.
 
 ## Current State
 
-Phase 5S cleaned comment/docstring-only false positives from the Phase 5O map.
-The remaining compatibility surface is now:
+Phase 5T converted the execution-cost estimator's closed-row source to
+management-envelope helpers. The remaining compatibility surface is now:
 
 ```text
-orm_trade_symbol_compat     | 81
-adapter_candidate           | 32
-learning_research_reporting | 27
+orm_trade_symbol_compat     | 80
+adapter_candidate           | 31
+learning_research_reporting | 26
 future_rename_blocker       | 33
 leave_alone                 | 16
 ```
@@ -30,10 +30,10 @@ leave_alone                 | 16
 
 Good candidates:
 
-- Small closed-envelope cost/diagnostic summaries when mode is shadow/off and
-  behavior is pinned with tests.
-- Reporting-only helpers that produce dashboards or diagnostics.
-- Research aggregates with no writer side effects.
+- Closed-envelope reporting summaries.
+- Diagnostics that do not feed live entry/exit/risk gates.
+- Research aggregates where the old and new row shape can be parity-tested
+  with a small fake DB.
 
 Avoid:
 
