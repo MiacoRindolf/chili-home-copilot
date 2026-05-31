@@ -5,6 +5,7 @@ from app.services.trading.edge_reliability import (
     _non_positive_exit_noop_blocks_weak_request,
     _non_positive_exit_noop_reason,
     _repeated_non_positive_exit_noop_blocks_refresh,
+    _same_evidence_exit_noop_blocks_refresh,
 )
 
 
@@ -27,6 +28,23 @@ def test_structural_exit_noop_blocks_new_evidence():
     }
 
     assert _exit_noop_blocks_refresh(payload, evidence_fingerprint="new-fp") is True
+
+
+def test_same_evidence_exit_noop_blocks_only_matching_fingerprint():
+    payload = {
+        "evidence_fingerprint": "same-fp",
+        "created_count": 0,
+        "skip_reason": "duplicate_learned_exit_label",
+    }
+
+    assert _same_evidence_exit_noop_blocks_refresh(
+        payload,
+        evidence_fingerprint="same-fp",
+    ) is True
+    assert _same_evidence_exit_noop_blocks_refresh(
+        payload,
+        evidence_fingerprint="new-fp",
+    ) is False
 
 
 def test_successful_exit_variant_diagnostic_never_blocks_refresh():

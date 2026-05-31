@@ -34,6 +34,7 @@ from .exit_variant_policy import (
     non_positive_exit_noop_reason as _non_positive_exit_noop_reason,
     payload_has_positive_exit_evidence as _payload_has_positive_exit_evidence,
     repeated_non_positive_exit_noop_blocks_refresh as _repeated_non_positive_exit_noop_blocks_refresh,
+    same_evidence_exit_noop_blocks_refresh as _same_evidence_exit_noop_blocks_refresh,
     structural_exit_noop_reason as _structural_exit_noop_reason,
 )
 from .recert_rescue_policy import recert_rescue_diagnostic_blocks_refresh
@@ -861,7 +862,16 @@ def _recent_noop_exit_variant_exists(
         minutes = 360
     if minutes <= 0:
         return False
-    cutoff = datetime.utcnow() - timedelta(minutes=minutes)
+    try:
+        same_evidence_minutes = int(
+            getattr(settings, "brain_work_exit_same_evidence_noop_cooldown_minutes", 1440)
+        )
+    except Exception:
+        same_evidence_minutes = 1440
+    same_evidence_minutes = max(minutes, same_evidence_minutes)
+    now = datetime.utcnow()
+    cutoff = now - timedelta(minutes=same_evidence_minutes)
+    general_cutoff = now - timedelta(minutes=minutes)
     rows = (
         db.query(BrainWorkEvent)
         .filter(BrainWorkEvent.event_kind == "outcome")
@@ -875,6 +885,13 @@ def _recent_noop_exit_variant_exists(
     diagnostic_payloads: list[dict[str, Any]] = []
     for row in rows:
         row_payload = row.payload if isinstance(row.payload, dict) else {}
+        if row.created_at and row.created_at < general_cutoff:
+            if _same_evidence_exit_noop_blocks_refresh(
+                row_payload,
+                evidence_fingerprint=evidence_fingerprint,
+            ):
+                return True
+            continue
         diagnostic_payloads.append(row_payload)
         if _exit_noop_blocks_refresh(
             row_payload,

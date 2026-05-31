@@ -37,6 +37,7 @@ from .exit_variant_policy import (
     exit_noop_blocks_refresh,
     non_positive_exit_noop_blocks_weak_request,
     repeated_non_positive_exit_noop_blocks_refresh,
+    same_evidence_exit_noop_blocks_refresh,
 )
 from .portfolio_risk import get_risk_limits, _option_premium_risk_dollars
 from .recert_rescue_policy import recert_rescue_diagnostic_blocks_refresh
@@ -933,7 +934,14 @@ def _recent_noop_profitability_work(
     if event_type != EXIT_VARIANT_REFRESH:
         return False
 
-    cutoff = datetime.utcnow() - timedelta(minutes=minutes)
+    same_evidence_minutes = _safe_int(
+        getattr(settings, "brain_work_exit_same_evidence_noop_cooldown_minutes", 1440),
+        1440,
+    )
+    same_evidence_minutes = max(minutes, same_evidence_minutes)
+    now = datetime.utcnow()
+    cutoff = now - timedelta(minutes=same_evidence_minutes)
+    general_cutoff = now - timedelta(minutes=minutes)
     rows = (
         db.query(BrainWorkEvent)
         .filter(BrainWorkEvent.event_kind == "outcome")
@@ -947,6 +955,13 @@ def _recent_noop_profitability_work(
     diagnostic_payloads: list[dict[str, Any]] = []
     for row in rows:
         row_payload = row.payload if isinstance(row.payload, dict) else {}
+        if row.created_at and row.created_at < general_cutoff:
+            if same_evidence_exit_noop_blocks_refresh(
+                row_payload,
+                evidence_fingerprint=evidence_fingerprint,
+            ):
+                return True
+            continue
         diagnostic_payloads.append(row_payload)
         if exit_noop_blocks_refresh(
             row_payload,

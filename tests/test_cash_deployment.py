@@ -295,6 +295,52 @@ def test_cash_deployment_does_not_enqueue_guaranteed_noop_negative_exit_work(
     )
 
 
+def test_cash_deployment_same_evidence_noop_uses_extended_cooldown(
+    db,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 60)
+    monkeypatch.setattr(
+        settings,
+        "brain_work_exit_same_evidence_noop_cooldown_minutes",
+        1440,
+    )
+
+    shadow = _pattern(db, name="cash work stale same evidence noop", lifecycle="shadow_promoted")
+    db.add(
+        BrainWorkEvent(
+            domain="trading",
+            event_type="exit_variant_diagnostic",
+            event_kind="outcome",
+            dedupe_key=f"stale-same-exit-noop:{shadow.id}",
+            status="done",
+            payload={
+                "scan_pattern_id": shadow.id,
+                "evidence_fingerprint": "same-fingerprint",
+                "created_count": 0,
+                "skip_reason": "duplicate_learned_exit_label",
+            },
+            created_at=datetime.utcnow() - timedelta(minutes=61),
+        )
+    )
+    db.commit()
+
+    assert _recent_noop_profitability_work(
+        db,
+        event_type="exit_variant_refresh",
+        scan_pattern_id=shadow.id,
+        evidence_fingerprint="same-fingerprint",
+        payload={"asset_class": "stock"},
+    ) is True
+    assert _recent_noop_profitability_work(
+        db,
+        event_type="exit_variant_refresh",
+        scan_pattern_id=shadow.id,
+        evidence_fingerprint="new-fingerprint",
+        payload={"asset_class": "stock"},
+    ) is False
+
+
 def test_cash_deployment_blocks_positive_slippage_miss_as_execution_debt(db, monkeypatch):
     monkeypatch.setattr(settings, "chili_autotrader_live_enabled", True)
     monkeypatch.setattr(settings, "chili_cash_deployment_equity_cost_pct", 0.05)

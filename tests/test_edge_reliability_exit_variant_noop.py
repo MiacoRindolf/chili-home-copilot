@@ -148,6 +148,56 @@ def test_targeted_exit_variant_allows_after_noop_cooldown(db, monkeypatch):
     assert event_id is not None
 
 
+def test_targeted_exit_variant_skips_same_evidence_after_general_noop_cooldown(
+    db,
+    monkeypatch,
+):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 60)
+    monkeypatch.setattr(
+        settings,
+        "brain_work_exit_same_evidence_noop_cooldown_minutes",
+        1440,
+    )
+    pat = _pattern(db, name="edge targeted stale same evidence noop exit")
+    db.add(
+        BrainWorkEvent(
+            domain="trading",
+            event_type="exit_variant_diagnostic",
+            event_kind="outcome",
+            dedupe_key=f"exit-stale-same-noop:{pat.id}",
+            status="done",
+            payload={
+                "scan_pattern_id": pat.id,
+                "evidence_fingerprint": "same-fp",
+                "created_count": 0,
+                "skip_reason": "duplicate_learned_exit_label",
+            },
+            created_at=datetime.utcnow() - timedelta(minutes=61),
+        )
+    )
+    db.commit()
+
+    event_id = emit_targeted_profitability_work(
+        db,
+        event_type=EXIT_VARIANT_REFRESH,
+        scan_pattern_id=pat.id,
+        source="edge_reliability_snapshot",
+        asset_class="stock",
+        evidence_fingerprint="same-fp",
+    )
+
+    assert event_id is None
+    assert (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_kind == "work")
+        .filter(BrainWorkEvent.event_type == EXIT_VARIANT_REFRESH)
+        .count()
+        == 0
+    )
+
+
 def test_targeted_exit_variant_skips_repeated_nonpositive_noops(db, monkeypatch):
     from app.config import settings
 

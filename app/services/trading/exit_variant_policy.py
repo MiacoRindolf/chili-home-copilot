@@ -62,6 +62,21 @@ def exit_noop_blocks_refresh(
     return structural_exit_noop_reason(payload.get("skip_reason"))
 
 
+def same_evidence_exit_noop_blocks_refresh(
+    payload: dict[str, Any],
+    *,
+    evidence_fingerprint: str | None,
+) -> bool:
+    try:
+        created_count = int(payload.get("created_count"))
+    except (TypeError, ValueError):
+        return False
+    if created_count != 0:
+        return False
+    fingerprint = str(evidence_fingerprint or "")
+    return bool(fingerprint) and str(payload.get("evidence_fingerprint") or "") == fingerprint
+
+
 def payload_has_positive_exit_evidence(payload: dict[str, Any] | None) -> bool:
     if not isinstance(payload, dict):
         return False

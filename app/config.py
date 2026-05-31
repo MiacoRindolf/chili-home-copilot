@@ -544,6 +544,7 @@ class Settings(BaseSettings):
     brain_work_cash_deployment_producer_window_days: int = 30
     brain_work_cash_deployment_producer_limit: int = 25
     brain_work_cash_deployment_noop_cooldown_minutes: int = 360
+    brain_work_exit_same_evidence_noop_cooldown_minutes: int = 1440
     brain_work_recent_done_dedupe_minutes: int = 120
     # Emit ``market_snapshots_batch`` outcome when scheduler snapshot job finishes.
     brain_work_snapshots_outcome_enabled: bool = True
