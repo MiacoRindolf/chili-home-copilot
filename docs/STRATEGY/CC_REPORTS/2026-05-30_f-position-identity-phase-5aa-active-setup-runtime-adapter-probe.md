@@ -8,7 +8,13 @@
 
 Added `scripts/d-phase5aa-active-setup-runtime-adapter-probe.py`, a read-only parity probe for the active-setup monitor-card runtime object contract. The probe compares the current `Trade` ORM object path with candidate runtime objects loaded from the physical `trading_management_envelopes` table, then feeds both through the same serializer logic used by the active setup card.
 
-Live result:
+Manually authorized read-only live result:
+
+The live-data sample below is not the default or CI-safe validation path. The
+probe now defaults `DATABASE_URL` to `TEST_DATABASE_URL` or local `chili_test`,
+rejects non-test database URLs unless `PHASE5AA_ALLOW_LIVE_PROBE=true` is set,
+and keeps broker-position, broker-quote, and market-quote reads disabled unless
+that same explicit opt-in is present.
 
 ```text
 VERDICT_STATUS=COMPLETE_POSITIVE
@@ -27,8 +33,10 @@ trading_trades=v
 
 - Active setup public card fields, including `trade_id`, `ticker`, plan fields, stop/target, current quote, broker-truth overlays, latest/recent monitor decisions, and execution-state metadata.
 - Broker-stale suppression via `filter_broker_stale_open_trades`.
-- Broker-position truth metrics via `broker_position_display_metrics`.
-- Option/standard quote routing via `broker_quote_for_trade` and batch quote fallback.
+- Broker-position truth metrics via `broker_position_display_metrics` only when
+  the explicit live-probe opt-in is set.
+- Option/standard quote routing via `broker_quote_for_trade` and batch quote
+  fallback only when the explicit live-probe opt-in is set.
 - Pattern and breakout-alert enrichment.
 - Suppressed-stale row parity.
 
@@ -50,9 +58,10 @@ python -m py_compile scripts\d-phase5aa-active-setup-runtime-adapter-probe.py
 TEST_DATABASE_URL=postgresql://chili:chili@localhost:5433/chili_test
 DATABASE_URL=$TEST_DATABASE_URL
 python -m pytest tests\test_phase5aa_active_setup_runtime_adapter_probe.py tests\test_phase5_remaining_trade_refs.py tests\test_phase5l_reader_allowlist.py -q
-# 13 passed
+# 17 passed
 
 DATABASE_URL=postgresql://chili:chili@localhost:5433/chili
+PHASE5AA_ALLOW_LIVE_PROBE=true
 python scripts\d-phase5aa-active-setup-runtime-adapter-probe.py
 # VERDICT_STATUS=COMPLETE_POSITIVE
 
@@ -63,4 +72,3 @@ python scripts\analyze_phase5_remaining_trade_refs.py --bucket orm_trade_symbol_
 ## Architect Verdict
 
 The active setup card is ready for a narrow Phase 5AA-B conversion using the proven runtime-envelope object. Keep the serializer/helper chain intact and change only the object loader for `api_monitor_active`. Do not touch monitor-run, sell/close, stop execution, broker/order/reconcile, PDT, capital gates, public `/trades`, or UI/schema labels.
-
