@@ -1,7 +1,7 @@
 # Current Plan: Position Identity Refactor
 
 **Initiative owner:** Cowork (strategy) + Claude Code (execution).
-**Last update:** 2026-05-31, after Phase 5Y converted the regime/scanner heatmap reader.
+**Last update:** 2026-05-31, after Phase 5Z cleaned a scanner false-positive import and deferred live market-data/scheduler readers.
 
 > **Why this initiative supersedes the prior fast-path crypto-scalping plan.** Today (2026-05-04) two automated close paths fired, marking 11 equity Trade rows wrongly closed in DB while the broker still held the positions. The shipped patch (inverse-reconcile, broker-truth-self-heal task) auto-healed 18 of them but its cross-check (`event_count == 0` on `trading_execution_events`) is conservative because **Trade row IDs are ephemeral** — every time a row gets wrongly closed and recreated, fills associated with the prior trade_id orphan. The fast-path scalping initiative depends on a stable position model; building more on this foundation makes things worse, not better. Position-identity refactor goes first. Fast-path resumes after.
 
@@ -56,6 +56,17 @@ Phase 5 soak duration was also tightened from one quarter to **2 weeks** at oper
 
 ## Status of the initiative
 
+- **Phase 5Z scanner false-positive cleanup SHIPPED 2026-05-31.**
+  Audited the next learning/reporting candidates (`scanner.py`,
+  `market_data.py`, and `trading_scheduler.py`). Removed an unused
+  `Trade as _Trade` import from `scanner.evolve_strategy_weights(...)` and
+  pinned it with a regression test. No runtime behavior changed. Counts remain
+  `orm_trade_symbol_compat=72`, `adapter_candidate=23`,
+  `learning_research_reporting=18` because scanner still has broad public text
+  that the analyzer classifies conservatively. `market_data` and
+  `trading_scheduler` were intentionally deferred: quote-plausibility anchors
+  and live monitor scheduling need parity probes before conversion. CC report:
+  `docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5z-scanner-false-positive-cleanup.md`.
 - **Phase 5Y regime/scanner heatmap reader conversion SHIPPED 2026-05-31.**
   Added `load_regime_scanner_heatmap_envelope_rows(...)` and converted
   `regime_classifier.build_regime_scanner_sharpe_heatmap(...)` off direct

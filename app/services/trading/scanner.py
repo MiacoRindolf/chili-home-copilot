@@ -643,7 +643,7 @@ def evolve_strategy_weights(db: Session) -> dict[str, Any]:
     # conditions to map factors to their measured performance.
     try:
         import json as _wj
-        from ...models.trading import ScanPattern as _SP, Trade as _Trade
+        from ...models.trading import ScanPattern as _SP
         _live_patterns = db.query(_SP).filter(
             _SP.active.is_(True),
             _SP.lifecycle_stage.in_(("live", "promoted", "backtested")),
