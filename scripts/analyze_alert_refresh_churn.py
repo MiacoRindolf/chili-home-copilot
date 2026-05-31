@@ -700,6 +700,19 @@ def _oldest_age_seconds(
     return max(0, int((ref - min(timestamps)).total_seconds()))
 
 
+def _newest_age_seconds(
+    values: Iterable[object],
+    *,
+    now: datetime | None = None,
+) -> int | None:
+    timestamps = [_coerce_datetime(value) for value in values]
+    timestamps = [ts for ts in timestamps if ts is not None]
+    if not timestamps:
+        return None
+    ref = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    return max(0, int((ref - max(timestamps)).total_seconds()))
+
+
 def _alert_pressure_summary(report: dict[str, object]) -> dict[str, int | str | None]:
     work_counts = list(report.get("work_counts") or [])
     diagnostic_outcomes = list(report.get("diagnostic_outcomes") or [])
@@ -768,6 +781,28 @@ def _alert_pressure_summary(report: dict[str, object]) -> dict[str, int | str | 
         "oldest_open_conflict_age_seconds": _oldest_age_seconds(
             row.get("work_created") or row.get("first_seen")
             for row in open_conflicts
+            if isinstance(row, dict)
+        ),
+        "latest_historical_noise_age_seconds": _newest_age_seconds(
+            row.get("last_seen") or row.get("last_suppressed") or row.get("first_seen")
+            for rows in (
+                work_counts,
+                diagnostic_outcomes,
+                noop_exit_rollups,
+                recert_blocker_rollups,
+                duplicate_suppressions,
+            )
+            for row in rows
+            if isinstance(row, dict)
+        ),
+        "latest_noop_exit_age_seconds": _newest_age_seconds(
+            row.get("last_seen") or row.get("first_seen")
+            for row in noop_exit_rollups
+            if isinstance(row, dict)
+        ),
+        "latest_recert_blocker_age_seconds": _newest_age_seconds(
+            row.get("last_seen") or row.get("first_seen")
+            for row in recert_blocker_rollups
             if isinstance(row, dict)
         ),
     }

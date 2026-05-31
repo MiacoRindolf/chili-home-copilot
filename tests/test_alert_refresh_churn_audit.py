@@ -130,6 +130,7 @@ def test_alert_pressure_summary_separates_open_conflicts_from_history():
                 "event_type": "recert_rescue_refresh",
                 "status": "done",
                 "events": 25,
+                "last_seen": now - timedelta(seconds=45),
             },
             {
                 "event_type": "exit_variant_refresh",
@@ -139,14 +140,28 @@ def test_alert_pressure_summary_separates_open_conflicts_from_history():
             },
         ],
         "diagnostic_outcomes": [
-            {"event_type": "recert_rescue_diagnostic", "events": 7},
-            {"event_type": "exit_variant_diagnostic", "events": 3},
+            {
+                "event_type": "recert_rescue_diagnostic",
+                "events": 7,
+                "last_seen": now - timedelta(seconds=30),
+            },
+            {
+                "event_type": "exit_variant_diagnostic",
+                "events": 3,
+                "last_seen": now - timedelta(seconds=20),
+            },
         ],
         "top_noop_exit_variant_pattern_rollups": [
-            {"noop_diagnostics": 3},
+            {
+                "noop_diagnostics": 3,
+                "last_seen": now - timedelta(seconds=25),
+            },
         ],
         "top_recert_rescue_blocker_rollups": [
-            {"blocker_diagnostics": 7},
+            {
+                "blocker_diagnostics": 7,
+                "last_seen": now - timedelta(seconds=35),
+            },
         ],
         "open_exit_variant_work_with_recent_noop": [
             {
@@ -156,12 +171,20 @@ def test_alert_pressure_summary_separates_open_conflicts_from_history():
         ],
         "open_recert_work_with_recent_blocker_diagnostic": [],
         "duplicate_open_refresh_work": [{"scan_pattern_id": 123}],
-        "recent_duplicate_suppressions": [{"suppressed": 4}],
+        "recent_duplicate_suppressions": [
+            {
+                "suppressed": 4,
+                "last_suppressed": now - timedelta(seconds=15),
+            }
+        ],
     }
 
     summary = audit._alert_pressure_summary(report)
     assert 90 <= summary.pop("oldest_open_work_age_seconds") <= 120
     assert 60 <= summary.pop("oldest_open_conflict_age_seconds") <= 120
+    assert 15 <= summary.pop("latest_historical_noise_age_seconds") <= 45
+    assert 25 <= summary.pop("latest_noop_exit_age_seconds") <= 55
+    assert 35 <= summary.pop("latest_recert_blocker_age_seconds") <= 65
     assert summary == {
         "status": "attention",
         "pressure_mode": "actionable_conflict",
@@ -185,14 +208,22 @@ def test_alert_pressure_summary_labels_historical_noise_without_attention():
                 "event_type": "recert_rescue_refresh",
                 "status": "done",
                 "events": 12,
+                "last_seen": "2026-05-30T10:00:00",
             },
         ],
         "diagnostic_outcomes": [
-            {"event_type": "recert_rescue_diagnostic", "events": 5},
+            {
+                "event_type": "recert_rescue_diagnostic",
+                "events": 5,
+                "last_seen": "2026-05-30T10:02:00",
+            },
         ],
         "top_noop_exit_variant_pattern_rollups": [],
         "top_recert_rescue_blocker_rollups": [
-            {"blocker_diagnostics": 5},
+            {
+                "blocker_diagnostics": 5,
+                "last_seen": "2026-05-30T10:01:00",
+            },
         ],
         "open_exit_variant_work_with_recent_noop": [],
         "open_recert_work_with_recent_blocker_diagnostic": [],
@@ -200,7 +231,10 @@ def test_alert_pressure_summary_labels_historical_noise_without_attention():
         "recent_duplicate_suppressions": [{"suppressed": 2}],
     }
 
-    assert audit._alert_pressure_summary(report) == {
+    summary = audit._alert_pressure_summary(report)
+    assert summary.pop("latest_historical_noise_age_seconds") is not None
+    assert summary.pop("latest_recert_blocker_age_seconds") is not None
+    assert summary == {
         "status": "clear",
         "pressure_mode": "historical_noise",
         "open_work_events": 0,
@@ -215,6 +249,7 @@ def test_alert_pressure_summary_labels_historical_noise_without_attention():
         "historical_noise_events": 19,
         "oldest_open_work_age_seconds": None,
         "oldest_open_conflict_age_seconds": None,
+        "latest_noop_exit_age_seconds": None,
     }
 
 
