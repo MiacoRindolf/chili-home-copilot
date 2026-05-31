@@ -191,7 +191,8 @@ def api_get_trades(
         user_id=ctx["user_id"],
         status=status,
         rows=rows,
-    )    return JSONResponse({
+    )
+    return JSONResponse({
         "ok": True,
         "trades": rows,
         "suppressed_stale_trades": json_safe(suppressed_stale_trades),
