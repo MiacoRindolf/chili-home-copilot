@@ -9,6 +9,7 @@ from app.services.trading.management_envelopes import (
     load_scheduler_broker_position_user_ids,
     load_scheduler_crypto_stop_user_ids,
     load_scheduler_daytrade_fast_user_ids,
+    load_scheduler_pattern_monitor_envelope_objects_for_tickers,
     load_scheduler_pattern_position_user_ids,
     load_scheduler_price_monitor_pattern_tickers,
     load_scheduler_price_monitor_user_ids,
@@ -127,6 +128,33 @@ def test_scheduler_daytrade_crypto_and_pattern_scopes_read_envelopes() -> None:
     assert "stop_loss IS NOT NULL OR take_profit IS NOT NULL" in db.sql
 
 
+def test_scheduler_pattern_monitor_handoff_loads_envelope_objects_for_tickers() -> None:
+    db = _FakeDb(
+        [
+            {
+                "id": 10,
+                "ticker": "abc",
+                "status": "open",
+                "related_alert_id": 99,
+            }
+        ]
+    )
+
+    rows = load_scheduler_pattern_monitor_envelope_objects_for_tickers(
+        db,
+        tickers=["abc", "ABC", "", "xyz-usd"],
+    )
+
+    assert len(rows) == 1
+    assert rows[0].id == 10
+    assert rows[0].ticker == "abc"
+    _assert_management_envelope_sql(db)
+    assert "UPPER(ticker) IN (:ticker_0, :ticker_1)" in db.sql
+    assert "related_alert_id IS NOT NULL" in db.sql
+    assert "stop_loss IS NOT NULL OR take_profit IS NOT NULL" in db.sql
+    assert db.params == {"ticker_0": "ABC", "ticker_1": "XYZ-USD"}
+
+
 def test_trading_scheduler_selection_jobs_use_envelope_helpers() -> None:
     source = (REPO_ROOT / "app" / "services" / "trading_scheduler.py").read_text()
     converted_functions = {
@@ -151,4 +179,6 @@ def test_trading_scheduler_selection_jobs_use_envelope_helpers() -> None:
         flags=re.S,
     )
     assert trigger_match is not None
-    assert "db.query(Trade)" in trigger_match.group(0)
+    trigger_body = trigger_match.group(0)
+    assert "load_scheduler_pattern_monitor_envelope_objects_for_tickers" in trigger_body
+    assert "db.query(Trade)" not in trigger_body

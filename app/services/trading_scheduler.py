@@ -2032,7 +2032,7 @@ def _run_triple_barrier_label_job():
 def _run_broker_sync_job():
     """Sync Robinhood + Coinbase orders and positions for the session owner.
 
-    Previously this job iterated over ``distinct(Trade.user_id)`` of open
+    Previously this job iterated over distinct user ids from open management
     trades, which self-perpetuates duplicate rows when the scheduler writes
     position copies under every user that ever had an open trade. The RH
     session is tied to a single account (``broker_sessions.username``), so
@@ -2350,28 +2350,17 @@ def trigger_pattern_monitor_for_tickers(tickers: list[str], reason: str = "event
     Called by the price monitor and broker sync when a material change is detected.
     """
     from ..db import SessionLocal
-    from ..models.trading import Trade
 
     db = SessionLocal()
     try:
-        from sqlalchemy import and_, or_
-
+        from .trading.management_envelopes import (
+            load_scheduler_pattern_monitor_envelope_objects_for_tickers,
+        )
         from .trading.pattern_position_monitor import run_pattern_position_monitor_for_trades
 
-        trades = (
-            db.query(Trade)
-            .filter(
-                Trade.status == "open",
-                Trade.ticker.in_(tickers),
-                or_(
-                    Trade.related_alert_id.isnot(None),
-                    and_(
-                        Trade.related_alert_id.is_(None),
-                        or_(Trade.stop_loss.isnot(None), Trade.take_profit.isnot(None)),
-                    ),
-                ),
-            )
-            .all()
+        trades = load_scheduler_pattern_monitor_envelope_objects_for_tickers(
+            db,
+            tickers=tickers,
         )
         if not trades:
             return
@@ -2558,7 +2547,7 @@ def _run_auto_trader_monitor_job():
         # Task PP Phase 5 — option-aware exit pass. Runs at the same
         # cadence as the equity exit monitor; flag-gated internally so
         # this is a no-op when chili_autotrader_options_exit_monitor_enabled
-        # is OFF. Independent of the equity monitor — option Trade rows
+        # is OFF. Independent of the equity monitor — option management rows
         # carry option_meta in indicator_snapshot and need different
         # exit logic (DTE / premium-based, not stop_loss / take_profit
         # on the underlying).
@@ -2571,7 +2560,7 @@ def _run_auto_trader_monitor_job():
             logger.exception("[scheduler] options_exit_pass failed (non-fatal)")
         # HHH -- crypto-aware exit monitor, parallel to options. Equity
         # monitor skips robinhood -USD tickers; without this pass the
-        # stop/target on crypto Trade rows never fires.
+        # stop/target on crypto management rows never fires.
         try:
             from .trading.crypto.exit_monitor import run_crypto_exit_pass
             crypto_summary = run_crypto_exit_pass(db)
