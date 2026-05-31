@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy import text
@@ -530,6 +531,27 @@ def load_imminent_alert_actioned_envelope_ids(
         except (KeyError, TypeError, ValueError):
             continue
     return out
+
+
+def _envelope_runtime_object(row: dict[str, Any]) -> SimpleNamespace:
+    """Expose a management-envelope row through the legacy attribute contract."""
+    return SimpleNamespace(**row)
+
+
+def load_open_stop_position_envelope_objects(
+    db: Session,
+    *,
+    user_id: int | None,
+) -> list[Any]:
+    """Load open management envelopes as read-only Trade-like runtime objects."""
+    rows = _rows(db, f"""
+        SELECT *
+          FROM {MANAGEMENT_ENVELOPES_RELATION}
+         WHERE user_id IS NOT DISTINCT FROM :uid
+           AND status = 'open'
+         ORDER BY entry_date DESC, id DESC
+    """, {"uid": user_id})
+    return [_envelope_runtime_object(row) for row in rows]
 
 
 def load_stop_decision_envelope_rows(

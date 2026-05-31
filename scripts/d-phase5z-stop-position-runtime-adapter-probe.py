@@ -15,7 +15,6 @@ import sys
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy import text
@@ -92,11 +91,6 @@ def _relation_kind(db, relation_name: str) -> str | None:
     ).scalar()
 
 
-def _envelope_runtime(row: dict[str, Any]) -> SimpleNamespace:
-    """Build a non-mutating, Trade-like runtime object from an envelope row."""
-    return SimpleNamespace(**row)
-
-
 def load_trade_objects(db, user_id: int | None) -> list[Any]:
     q = db.query(Trade).filter(Trade.status == "open")
     if user_id is None:
@@ -107,19 +101,11 @@ def load_trade_objects(db, user_id: int | None) -> list[Any]:
 
 
 def load_envelope_objects(db, user_id: int | None) -> list[Any]:
-    rows = db.execute(
-        text(
-            """
-            SELECT *
-              FROM trading_management_envelopes
-             WHERE user_id IS NOT DISTINCT FROM :uid
-               AND status = 'open'
-             ORDER BY entry_date DESC, id DESC
-            """
-        ),
-        {"uid": user_id},
-    ).mappings().all()
-    return [_envelope_runtime(dict(row)) for row in rows]
+    from app.services.trading.management_envelopes import (
+        load_open_stop_position_envelope_objects,
+    )
+
+    return load_open_stop_position_envelope_objects(db, user_id=user_id)
 
 
 def serialize_stop_positions(

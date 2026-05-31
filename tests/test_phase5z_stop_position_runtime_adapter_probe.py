@@ -21,17 +21,28 @@ def _load_module():
     return module
 
 
-def test_envelope_runtime_exposes_trade_like_attributes() -> None:
+def test_load_envelope_objects_exposes_trade_like_attributes() -> None:
     module = _load_module()
 
-    runtime = module._envelope_runtime(
-        {
-            "id": 12,
-            "ticker": "ABC",
-            "entry_date": datetime(2026, 5, 30, 20, 45),
-            "indicator_snapshot": {"asset_type": "stock"},
-        }
-    )
+    class _Rows:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [
+                {
+                    "id": 12,
+                    "ticker": "ABC",
+                    "entry_date": datetime(2026, 5, 30, 20, 45),
+                    "indicator_snapshot": {"asset_type": "stock"},
+                }
+            ]
+
+    class _Db:
+        def execute(self, _sql, _params=None):
+            return _Rows()
+
+    runtime = module.load_envelope_objects(_Db(), user_id=7)[0]
 
     assert runtime.id == 12
     assert runtime.ticker == "ABC"

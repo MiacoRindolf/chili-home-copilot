@@ -11,6 +11,7 @@ from app.services.trading.management_envelopes import (
     load_closed_review_envelope_rows,
     load_imminent_alert_actioned_envelope_ids,
     load_monitor_decision_envelope_rows,
+    load_open_stop_position_envelope_objects,
     load_pattern_tagged_envelope_rows,
     load_recent_ticker_envelope_rows,
     load_stop_decision_envelope_rows,
@@ -361,6 +362,32 @@ def test_stop_decision_envelope_rows_use_lateral_envelope_scope():
     assert "trading_trades" not in db.sql
     assert "ORDER BY as_of_ts DESC, id DESC" in db.sql
     assert db.params == {"uid": 7, "limit": 50}
+
+
+def test_open_stop_position_envelope_objects_return_trade_like_runtime_objects():
+    db = _FakeDb(
+        _RowsResult(
+            [
+                {
+                    "id": 9,
+                    "ticker": "ABC",
+                    "entry_price": 10.0,
+                    "indicator_snapshot": {"asset_type": "stock"},
+                }
+            ]
+        )
+    )
+
+    rows = load_open_stop_position_envelope_objects(db, user_id=7)
+
+    assert rows[0].id == 9
+    assert rows[0].ticker == "ABC"
+    assert rows[0].indicator_snapshot == {"asset_type": "stock"}
+    assert "FROM trading_management_envelopes" in db.sql
+    assert "trading_trades" not in db.sql
+    assert "status = 'open'" in db.sql
+    assert "ORDER BY entry_date DESC, id DESC" in db.sql
+    assert db.params == {"uid": 7}
 
 
 def test_stop_decision_envelope_rows_with_trade_id_use_bounded_join():

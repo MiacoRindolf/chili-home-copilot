@@ -1530,11 +1530,14 @@ def api_stop_positions(
 ):
     """Return all open positions with stop-engine state for the UI."""
     ctx = get_identity_ctx(request, db)
-    from ..models.trading import Trade
-    trades = db.query(Trade).filter(
-        Trade.user_id == ctx["user_id"],
-        Trade.status == "open",
-    ).order_by(Trade.entry_date.desc()).all()
+    from ..services.trading.management_envelopes import (
+        load_open_stop_position_envelope_objects,
+    )
+
+    trades = load_open_stop_position_envelope_objects(
+        db,
+        user_id=ctx["user_id"],
+    )
     from ..services.trading.broker_position_truth import (
         broker_position_display_metrics,
         filter_broker_stale_open_trades,
@@ -1546,7 +1549,7 @@ def api_stop_positions(
     try:
         from ..services.trading.autopilot_scope import is_option_trade
     except Exception:
-        def is_option_trade(_trade: Trade) -> bool:  # type: ignore[no-redef]
+        def is_option_trade(_trade: Any) -> bool:  # type: ignore[no-redef]
             return False
 
     def _positive_float(value):
