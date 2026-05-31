@@ -571,6 +571,29 @@ def load_open_active_setup_envelope_objects(
     return [_envelope_runtime_object(row) for row in rows]
 
 
+def load_autotrader_desk_live_envelope_objects(
+    db: Session,
+    *,
+    user_id: int,
+) -> list[Any]:
+    """Load live AutoTrader desk rows as read-only Trade-like objects."""
+    rows = _rows(db, f"""
+        SELECT *
+          FROM {MANAGEMENT_ENVELOPES_RELATION}
+         WHERE user_id = :uid
+           AND status = 'open'
+           AND (
+                auto_trader_version = 'v1'
+             OR scan_pattern_id IS NOT NULL
+             OR related_alert_id IS NOT NULL
+             OR stop_loss IS NOT NULL
+             OR take_profit IS NOT NULL
+           )
+         ORDER BY id DESC
+    """, {"uid": int(user_id)})
+    return [_envelope_runtime_object(row) for row in rows]
+
+
 def load_stop_decision_envelope_rows(
     db: Session,
     *,

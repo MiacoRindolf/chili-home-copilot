@@ -5,6 +5,7 @@ from datetime import datetime
 from app.services.trading.management_envelopes import (
     count_probation_envelopes_since,
     fetch_synergy_retry_envelope_candidates,
+    load_autotrader_desk_live_envelope_objects,
     load_audit_export_envelope_rows,
     load_closed_envelope_execution_rows,
     load_closed_pattern_envelope_rows,
@@ -415,6 +416,36 @@ def test_open_active_setup_envelope_objects_filter_to_displayable_open_rows():
     assert "status = 'open'" in db.sql
     assert "entry_price > 0" in db.sql
     assert "ORDER BY entry_date DESC, id DESC" in db.sql
+    assert db.params == {"uid": 7}
+
+
+def test_autotrader_desk_live_envelope_objects_use_live_scope_filter():
+    db = _FakeDb(
+        _RowsResult(
+            [
+                {
+                    "id": 22,
+                    "ticker": "DESK",
+                    "entry_price": 10.0,
+                    "auto_trader_version": "v1",
+                }
+            ]
+        )
+    )
+
+    rows = load_autotrader_desk_live_envelope_objects(db, user_id=7)
+
+    assert rows[0].id == 22
+    assert rows[0].ticker == "DESK"
+    assert "FROM trading_management_envelopes" in db.sql
+    assert "trading_trades" not in db.sql
+    assert "status = 'open'" in db.sql
+    assert "auto_trader_version = 'v1'" in db.sql
+    assert "scan_pattern_id IS NOT NULL" in db.sql
+    assert "related_alert_id IS NOT NULL" in db.sql
+    assert "stop_loss IS NOT NULL" in db.sql
+    assert "take_profit IS NOT NULL" in db.sql
+    assert "ORDER BY id DESC" in db.sql
     assert db.params == {"uid": 7}
 
 

@@ -21,13 +21,13 @@ from ...models.trading import BrainRuntimeMode, PaperTrade, ScanPattern, Trade
 from .autopilot_scope import (
     classify_live_autopilot_trade_scope,
     is_option_trade,
-    live_autopilot_trade_filter,
 )
 from .broker_position_truth import (
     broker_position_display_metrics,
     broker_stale_open_trade_snapshot,
     filter_broker_stale_open_trades,
 )
+from .management_envelopes import load_autotrader_desk_live_envelope_objects
 
 logger = logging.getLogger(__name__)
 
@@ -225,16 +225,7 @@ def list_pattern_linked_open_positions(db: Session, user_id: int) -> dict[str, A
         list_position_overrides,
     )
 
-    trades = (
-        db.query(Trade)
-        .filter(
-            Trade.user_id == user_id,
-            Trade.status == "open",
-            live_autopilot_trade_filter(),
-        )
-        .order_by(Trade.id.desc())
-        .all()
-    )
+    trades = load_autotrader_desk_live_envelope_objects(db, user_id=user_id)
     trades, suppressed_stale_trades = filter_broker_stale_open_trades(db, trades)
     desk_live_trades: list[Trade] = []
     for t in trades:
