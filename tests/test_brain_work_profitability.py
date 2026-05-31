@@ -15,9 +15,6 @@ from app.services.trading.edge_reliability import (
     RECERT_RESCUE_DIAGNOSTIC,
     RECERT_RESCUE_REFRESH,
 )
-from app.services.trading.recert_rescue_policy import (
-    recert_rescue_diagnostic_matches_asset,
-)
 
 
 def test_exit_variant_refresh_fast_skips_negative_ev_without_learning(monkeypatch) -> None:
@@ -199,7 +196,7 @@ def test_recent_blocked_recert_rescue_diagnostic_blocks_completion_action(
     assert _recent_blocked_recert_rescue_diagnostic(db, scan_pattern_id=1260) is True
 
 
-def test_recent_blocked_recert_rescue_diagnostic_respects_asset_slice(
+def test_recent_blocked_recert_rescue_diagnostic_stays_global_until_gate_is_sliced(
     monkeypatch,
 ) -> None:
     from app.config import settings
@@ -247,22 +244,7 @@ def test_recent_blocked_recert_rescue_diagnostic_respects_asset_slice(
             scan_pattern_id=1260,
             asset_class="stock",
         )
-        is False
-    )
-
-
-def test_recert_rescue_diagnostic_asset_match_preserves_legacy_blockers() -> None:
-    assert recert_rescue_diagnostic_matches_asset(
-        {"recommended_next_action": "complete_oos_recert_and_quality_refresh"},
-        asset_class="stock",
-    )
-    assert recert_rescue_diagnostic_matches_asset(
-        {"recert_backtest_refresh": {"asset_class": "stock"}},
-        asset_class="stock",
-    )
-    assert not recert_rescue_diagnostic_matches_asset(
-        {"recert_backtest_refresh": {"asset_class": "crypto"}},
-        asset_class="stock",
+        is True
     )
 
 

@@ -1361,7 +1361,9 @@ def test_recert_signal_fastlane_respects_recent_recert_completion_diagnostic(mon
     assert out["blocker_next_action"] == "complete_oos_recert_and_quality_refresh"
 
 
-def test_recert_signal_fastlane_blocker_is_asset_sliced(monkeypatch):
+def test_recert_signal_fastlane_blocker_stays_global_until_gate_is_sliced(
+    monkeypatch,
+):
     settings = _minimal_settings(1)
     settings.brain_work_cash_deployment_noop_cooldown_minutes = 360
     monkeypatch.setattr(at_mod, "settings", settings)
@@ -1400,13 +1402,10 @@ def test_recert_signal_fastlane_blocker_is_asset_sliced(monkeypatch):
         pattern_id=1260,
         asset_class="crypto",
     )
-    assert (
-        at_mod._recent_recert_rescue_fastlane_blocker(
-            db,
-            pattern_id=1260,
-            asset_class="stock",
-        )
-        is None
+    assert at_mod._recent_recert_rescue_fastlane_blocker(
+        db,
+        pattern_id=1260,
+        asset_class="stock",
     )
 
 

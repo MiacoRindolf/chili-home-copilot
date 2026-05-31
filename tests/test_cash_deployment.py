@@ -965,7 +965,9 @@ def test_recent_blocked_recert_rescue_work_blocks_completion_action(monkeypatch)
     )
 
 
-def test_recent_blocked_recert_rescue_work_is_asset_sliced(monkeypatch):
+def test_recent_blocked_recert_rescue_work_stays_global_until_gate_is_sliced(
+    monkeypatch,
+):
     monkeypatch.setattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360)
 
     class _Query:
@@ -1001,7 +1003,7 @@ def test_recent_blocked_recert_rescue_work_is_asset_sliced(monkeypatch):
         minutes=360,
         asset_class="crypto",
     )
-    assert not _recent_blocked_recert_rescue_work(
+    assert _recent_blocked_recert_rescue_work(
         db,
         scan_pattern_id=1260,
         minutes=360,

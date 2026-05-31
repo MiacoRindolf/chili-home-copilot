@@ -14,7 +14,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, TYPE_CHECKING
 
 from app.services.trading.recert_rescue_policy import (
-    recert_rescue_diagnostic_matches_asset,
     recert_rescue_diagnostic_blocks_refresh,
 )
 
@@ -610,12 +609,7 @@ def _recent_blocked_recert_rescue_diagnostic_payload(
         return None
     for row in rows:
         payload = row.payload if isinstance(row.payload, dict) else {}
-        if recert_rescue_diagnostic_blocks_refresh(
-            payload
-        ) and recert_rescue_diagnostic_matches_asset(
-            payload,
-            asset_class=asset_class,
-        ):
+        if recert_rescue_diagnostic_blocks_refresh(payload):
             return {
                 "event_id": int(getattr(row, "id", 0) or 0),
                 "payload": payload,

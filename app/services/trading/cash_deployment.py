@@ -39,10 +39,7 @@ from .exit_variant_policy import (
     repeated_non_positive_exit_noop_blocks_refresh,
 )
 from .portfolio_risk import get_risk_limits, _option_premium_risk_dollars
-from .recert_rescue_policy import (
-    recert_rescue_diagnostic_matches_asset,
-    recert_rescue_diagnostic_blocks_refresh,
-)
+from .recert_rescue_policy import recert_rescue_diagnostic_blocks_refresh
 from .return_math import trade_return_pct as _realized_trade_return_pct
 
 LIVE_LIFECYCLES = frozenset({"live", "promoted", "pilot_promoted"})
@@ -989,12 +986,7 @@ def _recent_blocked_recert_rescue_work(
     )
     for row in rows:
         payload = row.payload if isinstance(row.payload, dict) else {}
-        if recert_rescue_diagnostic_blocks_refresh(
-            payload
-        ) and recert_rescue_diagnostic_matches_asset(
-            payload,
-            asset_class=asset_class,
-        ):
+        if recert_rescue_diagnostic_blocks_refresh(payload):
             return True
     return False
 
