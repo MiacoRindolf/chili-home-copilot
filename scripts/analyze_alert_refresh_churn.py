@@ -829,7 +829,7 @@ def _alert_pressure_summary(report: dict[str, object]) -> dict[str, int | str | 
         ),
         "oldest_open_work_age_seconds": _oldest_age_seconds(open_first_seen_values),
         "oldest_open_conflict_age_seconds": _oldest_age_seconds(
-            row.get("work_created") or row.get("first_seen")
+            row.get("work_created") or row.get("oldest_open") or row.get("first_seen")
             for row in open_conflicts
             if isinstance(row, dict)
         ),

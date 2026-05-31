@@ -269,6 +269,33 @@ def test_alert_pressure_summary_labels_historical_noise_without_attention():
     }
 
 
+def test_alert_pressure_summary_ages_duplicate_only_conflicts():
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    report = {
+        "work_counts": [],
+        "diagnostic_outcomes": [],
+        "top_noop_exit_variant_pattern_rollups": [],
+        "top_recert_rescue_blocker_rollups": [],
+        "open_exit_variant_work_with_recent_noop": [],
+        "open_recert_work_with_recent_blocker_diagnostic": [],
+        "duplicate_open_refresh_work": [
+            {
+                "event_type": "recert_rescue_refresh",
+                "open_work": 2,
+                "oldest_open": now - timedelta(seconds=75),
+            }
+        ],
+        "recent_duplicate_suppressions": [],
+    }
+
+    summary = audit._alert_pressure_summary(report)
+    assert 75 <= summary.pop("oldest_open_conflict_age_seconds") <= 105
+    assert summary["status"] == "attention"
+    assert summary["pressure_mode"] == "actionable_conflict"
+    assert summary["open_conflict_rows"] == 1
+    assert summary["oldest_open_work_age_seconds"] is None
+
+
 def test_churn_audit_handles_unavailable_database(monkeypatch, capsys):
     def unavailable(_hours: int):
         raise audit.DatabaseUnavailable("database system is starting up")
