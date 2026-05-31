@@ -69,8 +69,36 @@ def test_stop_decision_rows_trade_filter_uses_single_trade_path():
     assert db.params == {"uid": 7, "limit": 25, "trade_id": 42}
     assert "JOIN trading_management_envelopes t ON t.id = d.trade_id" in sql
     assert "CROSS JOIN LATERAL" not in sql
+    assert "t.user_id IS NOT DISTINCT FROM :uid" in sql
     assert "d.trade_id = :trade_id" in sql
+    assert "ORDER BY d.as_of_ts DESC NULLS LAST, d.id DESC" in sql
     assert "trading_trades" not in sql
+
+
+def test_stop_decision_rows_default_limit_is_fifty():
+    db = _CaptureDb()
+
+    load_stop_decision_envelope_rows(
+        db,
+        user_id=7,
+        trade_id=None,
+        limit=0,
+    )
+
+    assert db.params == {"uid": 7, "limit": 50}
+
+
+def test_stop_decision_rows_invalid_helper_limit_clamps_to_one():
+    db = _CaptureDb()
+
+    load_stop_decision_envelope_rows(
+        db,
+        user_id=7,
+        trade_id=42,
+        limit=-5,
+    )
+
+    assert db.params == {"uid": 7, "limit": 1, "trade_id": 42}
 
 
 def test_stop_decisions_route_uses_envelope_helper_not_trade_join():
