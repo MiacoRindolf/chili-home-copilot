@@ -2127,13 +2127,11 @@ def _run_price_monitor_job():
         db = SessionLocal()
         alerted_tickers: list[str] = []
         try:
-            from ..models.trading import Trade
-            from sqlalchemy import distinct
-            user_ids = [
-                r[0] for r in db.query(distinct(Trade.user_id))
-                .filter(Trade.status == "open", Trade.user_id.isnot(None))
-                .all()
-            ]
+            from .trading.management_envelopes import (
+                load_scheduler_price_monitor_pattern_tickers,
+                load_scheduler_price_monitor_user_ids,
+            )
+            user_ids = load_scheduler_price_monitor_user_ids(db)
             if not user_ids:
                 user_ids = [None]
             for uid in user_ids:
@@ -2146,14 +2144,7 @@ def _run_price_monitor_job():
                     logger.warning(f"[scheduler] Price monitor failed for user_id={uid}", exc_info=True)
 
             # Trigger event-driven pattern monitor for all open pattern-linked tickers
-            pattern_tickers = [
-                r[0] for r in db.query(distinct(Trade.ticker))
-                .filter(
-                    Trade.status == "open",
-                    Trade.related_alert_id.isnot(None),
-                )
-                .all()
-            ]
+            pattern_tickers = load_scheduler_price_monitor_pattern_tickers(db)
             if pattern_tickers:
                 trigger_pattern_monitor_for_tickers(pattern_tickers, reason="price_monitor")
         finally:
@@ -2177,26 +2168,21 @@ def _run_broker_position_price_monitor_job():
     without pulling paper/manual watchlists through broker APIs all night.
     """
     from ..db import SessionLocal
-    from ..models.trading import Trade
     from .trading.broker_position_truth import BROKER_POSITION_TRUTH_SOURCES
+    from .trading.management_envelopes import (
+        load_scheduler_broker_position_pattern_tickers,
+        load_scheduler_broker_position_user_ids,
+    )
     from .trading.stop_engine import evaluate_all, dispatch_stop_alerts
-    from sqlalchemy import distinct, func
 
     def _work() -> None:
         db = SessionLocal()
         pattern_tickers: list[str] = []
         try:
-            user_ids = [
-                r[0] for r in db.query(distinct(Trade.user_id))
-                .filter(
-                    Trade.status == "open",
-                    Trade.user_id.isnot(None),
-                    func.lower(Trade.broker_source).in_(
-                        list(BROKER_POSITION_TRUTH_SOURCES)
-                    ),
-                )
-                .all()
-            ]
+            user_ids = load_scheduler_broker_position_user_ids(
+                db,
+                broker_sources=BROKER_POSITION_TRUTH_SOURCES,
+            )
             if not user_ids:
                 return
             for uid in user_ids:
@@ -2223,17 +2209,10 @@ def _run_broker_position_price_monitor_job():
                         exc_info=True,
                     )
 
-            pattern_tickers = [
-                r[0] for r in db.query(distinct(Trade.ticker))
-                .filter(
-                    Trade.status == "open",
-                    Trade.related_alert_id.isnot(None),
-                    func.lower(Trade.broker_source).in_(
-                        list(BROKER_POSITION_TRUTH_SOURCES)
-                    ),
-                )
-                .all()
-            ]
+            pattern_tickers = load_scheduler_broker_position_pattern_tickers(
+                db,
+                broker_sources=BROKER_POSITION_TRUTH_SOURCES,
+            )
         finally:
             try:
                 db.rollback()
@@ -2253,22 +2232,16 @@ def _run_daytrade_fast_monitor_job():
     """1-minute fast check for day-trade and scalp positions (tighter exit timing)."""
     from ..db import SessionLocal
     from .trading.stop_engine import evaluate_all, dispatch_stop_alerts
-    from ..models.trading import Trade
-    from sqlalchemy import distinct
+    from .trading.management_envelopes import load_scheduler_daytrade_fast_user_ids
 
     def _work() -> None:
         db = SessionLocal()
         try:
             daytrade_types = ("scalp", "daytrade", "breakout", "momentum")
-            user_ids = [
-                r[0] for r in db.query(distinct(Trade.user_id))
-                .filter(
-                    Trade.status == "open",
-                    Trade.user_id.isnot(None),
-                    Trade.trade_type.in_(daytrade_types),
-                )
-                .all()
-            ]
+            user_ids = load_scheduler_daytrade_fast_user_ids(
+                db,
+                trade_types=daytrade_types,
+            )
             if not user_ids:
                 return
             for uid in user_ids:
@@ -2309,31 +2282,20 @@ def _run_stop_alert_dispatch_job():
     """
     from ..db import SessionLocal
     from .trading.stop_engine import evaluate_all, dispatch_stop_alerts
-    from ..models.trading import Trade
-    from sqlalchemy import distinct
+    from .trading.management_envelopes import (
+        count_scheduler_crypto_stop_envelopes,
+        load_scheduler_crypto_stop_user_ids,
+    )
 
     def _work() -> None:
         db = SessionLocal()
         try:
-            user_ids = [
-                r[0] for r in db.query(distinct(Trade.user_id))
-                .filter(
-                    Trade.status == "open",
-                    Trade.user_id.isnot(None),
-                    Trade.ticker.like("%-USD"),
-                )
-                .all()
-            ]
+            user_ids = load_scheduler_crypto_stop_user_ids(db)
             if not user_ids:
                 return
             for uid in user_ids:
                 try:
-                    crypto_trades = db.query(Trade).filter(
-                        Trade.status == "open",
-                        Trade.user_id == uid,
-                        Trade.ticker.like("%-USD"),
-                    ).all()
-                    if not crypto_trades:
+                    if count_scheduler_crypto_stop_envelopes(db, user_id=uid) <= 0:
                         continue
                     summary = evaluate_all(db, uid)
                     dispatched = dispatch_stop_alerts(db, uid, summary)
@@ -2359,28 +2321,13 @@ def _run_pattern_position_monitor_job():
     is now event-driven via the price monitor and broker sync callbacks.
     """
     from ..db import SessionLocal
-    from ..models.trading import Trade
-    from sqlalchemy import and_, distinct, or_
+    from .trading.management_envelopes import load_scheduler_pattern_position_user_ids
 
     def _work() -> None:
         db = SessionLocal()
         try:
             from .trading.pattern_position_monitor import run_pattern_position_monitor
-            user_ids = [
-                r[0] for r in db.query(distinct(Trade.user_id))
-                .filter(
-                    Trade.status == "open",
-                    Trade.user_id.isnot(None),
-                    or_(
-                        Trade.related_alert_id.isnot(None),
-                        and_(
-                            Trade.related_alert_id.is_(None),
-                            or_(Trade.stop_loss.isnot(None), Trade.take_profit.isnot(None)),
-                        ),
-                    ),
-                )
-                .all()
-            ]
+            user_ids = load_scheduler_pattern_position_user_ids(db)
             for uid in user_ids:
                 try:
                     run_pattern_position_monitor(db, uid, event_driven=True)

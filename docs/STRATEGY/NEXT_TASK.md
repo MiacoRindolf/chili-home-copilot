@@ -1,38 +1,36 @@
-# NEXT_TASK: f-phase5ab-b-trading-scheduler-scope-conversion
+# NEXT_TASK: f-phase5ab-c-pattern-monitor-runtime-object-probe
 
 STATUS: QUEUED
 
 ## Goal
 
-Convert only the scheduler selection queries proven by the Phase 5AB parity
-probe from direct `Trade` ORM reads to management-envelope helper reads.
+Build a read-only runtime-object parity probe for
+`trading_scheduler.trigger_pattern_monitor_for_tickers(...)` before converting
+its remaining `Trade` ORM object handoff.
 
-## Evidence
+## Why This Is Next
 
-Phase 5AB live probe:
+Phase 5AB-B converted the scheduler's proven user/ticker/count selection
+queries to management-envelope helpers. The only intentional scheduler
+`Trade` ORM surface left is the event-driven pattern monitor handoff:
 
-```text
-VERDICT_STATUS=COMPLETE_POSITIVE
-SCHEDULER_SCOPE_CHECKS=9
-SCHEDULER_SCOPE_MISMATCHES=0
-```
+`trigger_pattern_monitor_for_tickers(...) -> run_pattern_position_monitor_for_trades(...)`
 
-The current `trading_trades` compatibility-view scopes and the candidate
-`trading_management_envelopes` scopes matched exactly.
+That path passes actual SQLAlchemy `Trade` objects into live pattern-position
+monitor logic. The Phase 5AB scope probe proves selected ids match, but it
+does not prove that envelope-shaped runtime objects are behaviorally equivalent
+inside the downstream monitor.
 
 ## Scope
 
-Create small helpers for the exact scheduler selections:
-
-- price-monitor user ids
-- price-monitor pattern tickers
-- broker-backed monitor user ids
-- broker-backed pattern tickers
-- daytrade fast-monitor user ids
-- crypto stop-monitor user ids / counts
-- pattern-position monitor user ids
-- event-driven pattern trigger trade ids/objects if the downstream API can
-  accept envelope-shaped runtime objects without changing behavior
+- Add a read-only probe that loads the current `Trade` ORM objects and
+  candidate runtime objects from `trading_management_envelopes` for the same
+  ticker set.
+- Compare object-visible fields used by `pattern_position_monitor`.
+- Include broker-stale suppression and position-identity behavior only if the
+  downstream monitor observes those fields directly.
+- Do not execute monitor side effects, emit alerts, close positions, place
+  orders, or write monitor decisions.
 
 ## Guardrails
 
@@ -41,13 +39,13 @@ Create small helpers for the exact scheduler selections:
 - No broker/order/close/reconcile changes.
 - No risk/capital/PDT/portfolio gate changes.
 - No public `/trades`, `trade_id`, schema, or UI label rename.
-- If any downstream function requires actual SQLAlchemy `Trade` identity
-  semantics, stop and narrow the conversion to user/ticker selections only.
+- No conversion of `trigger_pattern_monitor_for_tickers(...)` in this slice
+  unless the probe proves runtime-object parity first.
 
 ## Exit Criteria
 
-- Focused tests pin old/new scheduler scope parity.
-- Phase 5AB probe remains `COMPLETE_POSITIVE` after conversion.
+- New probe emits `COMPLETE_POSITIVE` against live data.
+- Focused tests pin the probe and make sure it is read-only/live-opt-in.
+- Phase 5AB scheduler scope probe remains `COMPLETE_POSITIVE`.
 - Phase 5K live-path parity and Phase 5I post-rename soak remain
   `COMPLETE_POSITIVE`.
-

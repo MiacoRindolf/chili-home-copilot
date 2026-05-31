@@ -194,6 +194,185 @@ def load_market_data_implausibility_anchor(db: Session, *, ticker: str) -> float
     return anchor if anchor > 0 else None
 
 
+def _bind_text_list(prefix: str, values: list[str]) -> tuple[str, dict[str, str]]:
+    binds: list[str] = []
+    params: dict[str, str] = {}
+    for idx, value in enumerate(values):
+        key = f"{prefix}_{idx}"
+        binds.append(f":{key}")
+        params[key] = value
+    if not binds:
+        return "NULL", {}
+    return ", ".join(binds), params
+
+
+def _open_scheduler_user_ids(
+    db: Session,
+    *,
+    where_sql: str,
+    params: dict[str, Any] | None = None,
+) -> list[int]:
+    rows = _rows(
+        db,
+        f"""
+        SELECT DISTINCT user_id
+          FROM {MANAGEMENT_ENVELOPES_RELATION}
+         WHERE status = 'open'
+           AND user_id IS NOT NULL
+           AND ({where_sql})
+         ORDER BY user_id
+        """,
+        params,
+    )
+    return [int(row["user_id"]) for row in rows if row.get("user_id") is not None]
+
+
+def _open_scheduler_tickers(
+    db: Session,
+    *,
+    where_sql: str,
+    params: dict[str, Any] | None = None,
+) -> list[str]:
+    rows = _rows(
+        db,
+        f"""
+        SELECT DISTINCT UPPER(ticker) AS ticker
+          FROM {MANAGEMENT_ENVELOPES_RELATION}
+         WHERE status = 'open'
+           AND ticker IS NOT NULL
+           AND ticker <> ''
+           AND ({where_sql})
+         ORDER BY UPPER(ticker)
+        """,
+        params,
+    )
+    return [
+        str(row["ticker"]).strip().upper()
+        for row in rows
+        if row.get("ticker")
+    ]
+
+
+def _broker_source_filter(
+    broker_sources: list[str] | tuple[str, ...] | set[str] | frozenset[str],
+) -> tuple[str, dict[str, str]]:
+    sources = sorted(
+        str(src).strip().lower()
+        for src in broker_sources
+        if str(src).strip()
+    )
+    binds, params = _bind_text_list("src", sources)
+    return f"LOWER(COALESCE(broker_source, '')) IN ({binds})", params
+
+
+def _daytrade_type_filter(
+    trade_types: list[str] | tuple[str, ...] | set[str] | frozenset[str],
+) -> tuple[str, dict[str, str]]:
+    values = [
+        str(value).strip()
+        for value in trade_types
+        if str(value).strip()
+    ]
+    binds, params = _bind_text_list("trade_type", values)
+    return f"trade_type IN ({binds})", params
+
+
+def _pattern_position_filter_sql() -> str:
+    return """
+        related_alert_id IS NOT NULL
+        OR (
+            related_alert_id IS NULL
+            AND (stop_loss IS NOT NULL OR take_profit IS NOT NULL)
+        )
+    """
+
+
+def load_scheduler_price_monitor_user_ids(db: Session) -> list[int]:
+    """Return users whose open envelopes should run through price monitoring."""
+    return _open_scheduler_user_ids(db, where_sql="TRUE")
+
+
+def load_scheduler_price_monitor_pattern_tickers(db: Session) -> list[str]:
+    """Return open pattern-linked tickers for event-driven pattern monitoring."""
+    return _open_scheduler_tickers(
+        db,
+        where_sql="related_alert_id IS NOT NULL",
+    )
+
+
+def load_scheduler_broker_position_user_ids(
+    db: Session,
+    *,
+    broker_sources: list[str] | tuple[str, ...] | set[str] | frozenset[str],
+) -> list[int]:
+    """Return users with broker-backed open envelopes for broker-price checks."""
+    source_filter, params = _broker_source_filter(broker_sources)
+    return _open_scheduler_user_ids(
+        db,
+        where_sql=source_filter,
+        params=params,
+    )
+
+
+def load_scheduler_broker_position_pattern_tickers(
+    db: Session,
+    *,
+    broker_sources: list[str] | tuple[str, ...] | set[str] | frozenset[str],
+) -> list[str]:
+    """Return open broker-backed pattern tickers for event-driven monitoring."""
+    source_filter, params = _broker_source_filter(broker_sources)
+    return _open_scheduler_tickers(
+        db,
+        where_sql=f"related_alert_id IS NOT NULL AND {source_filter}",
+        params=params,
+    )
+
+
+def load_scheduler_daytrade_fast_user_ids(
+    db: Session,
+    *,
+    trade_types: list[str] | tuple[str, ...] | set[str] | frozenset[str],
+) -> list[int]:
+    """Return users whose open day-trade envelopes need fast stop checks."""
+    trade_type_filter, params = _daytrade_type_filter(trade_types)
+    return _open_scheduler_user_ids(
+        db,
+        where_sql=trade_type_filter,
+        params=params,
+    )
+
+
+def load_scheduler_crypto_stop_user_ids(db: Session) -> list[int]:
+    """Return users whose open crypto envelopes need stop-alert dispatch."""
+    return _open_scheduler_user_ids(db, where_sql="ticker LIKE '%-USD'")
+
+
+def count_scheduler_crypto_stop_envelopes(db: Session, *, user_id: int) -> int:
+    """Count a user's open crypto envelopes for scheduler stop dispatch."""
+    rows = _rows(
+        db,
+        f"""
+        SELECT COUNT(*)::bigint AS n
+          FROM {MANAGEMENT_ENVELOPES_RELATION}
+         WHERE status = 'open'
+           AND user_id = :uid
+           AND ticker LIKE '%-USD'
+        """,
+        {"uid": int(user_id)},
+    )
+    if not rows:
+        return 0
+    return int(rows[0].get("n") or 0)
+
+
+def load_scheduler_pattern_position_user_ids(db: Session) -> list[int]:
+    """Return users with open pattern/stop-managed envelopes to monitor."""
+    return _open_scheduler_user_ids(
+        db,
+        where_sql=_pattern_position_filter_sql(),
+    )
+
+
 def tca_summary_by_ticker_from_management_envelopes(
     db: Session,
     user_id: int | None,
