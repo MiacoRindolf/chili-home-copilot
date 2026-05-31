@@ -39,6 +39,7 @@ from app.services.trading.recert_rescue_policy import (  # noqa: E402
 
 TARGET_WORK = ("recert_rescue_refresh", "exit_variant_refresh")
 TARGET_DIAGNOSTICS = ("recert_rescue_diagnostic", "exit_variant_diagnostic")
+OPEN_WORK_STATUSES = frozenset({"pending", "retry_wait", "processing"})
 RECERT_BLOCKER_ACTIONS = tuple(recert_rescue_blocker_actions())
 RECERT_BLOCKER_REASONS = tuple(recert_rescue_blocker_reasons())
 RECERT_CONDITIONAL_BACKTEST_ACTION = CONDITIONAL_RECERT_RESCUE_BACKTEST_ACTION
@@ -620,8 +621,66 @@ def _recent_duplicate_suppressions(hours: int, limit: int) -> list[dict]:
     )
 
 
-def _build_report(hours: int, limit: int) -> dict[str, object]:
+def _safe_count(row: dict, key: str) -> int:
+    try:
+        return int(row.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _sum_rows(rows: Iterable[dict], key: str) -> int:
+    return sum(_safe_count(row, key) for row in rows)
+
+
+def _alert_pressure_summary(report: dict[str, object]) -> dict[str, int | str]:
+    work_counts = list(report.get("work_counts") or [])
+    diagnostic_outcomes = list(report.get("diagnostic_outcomes") or [])
+    noop_exit_rollups = list(report.get("top_noop_exit_variant_pattern_rollups") or [])
+    recert_blocker_rollups = list(report.get("top_recert_rescue_blocker_rollups") or [])
+    duplicate_suppressions = list(report.get("recent_duplicate_suppressions") or [])
+
+    open_work_events = 0
+    done_work_events = 0
+    recert_open_work_events = 0
+    exit_open_work_events = 0
+    for row in work_counts:
+        events = _safe_count(row, "events")
+        status = str(row.get("status") or "")
+        event_type = str(row.get("event_type") or "")
+        if status in OPEN_WORK_STATUSES:
+            open_work_events += events
+            if event_type == "recert_rescue_refresh":
+                recert_open_work_events += events
+            elif event_type == "exit_variant_refresh":
+                exit_open_work_events += events
+        elif status == "done":
+            done_work_events += events
+
+    open_conflict_rows = (
+        len(list(report.get("open_exit_variant_work_with_recent_noop") or []))
+        + len(list(report.get("open_recert_work_with_recent_blocker_diagnostic") or []))
+        + len(list(report.get("duplicate_open_refresh_work") or []))
+    )
+
     return {
+        "status": "clear" if open_conflict_rows == 0 else "attention",
+        "open_work_events": open_work_events,
+        "recert_open_work_events": recert_open_work_events,
+        "exit_open_work_events": exit_open_work_events,
+        "open_conflict_rows": open_conflict_rows,
+        "completed_work_events": done_work_events,
+        "diagnostic_events": _sum_rows(diagnostic_outcomes, "events"),
+        "noop_exit_diagnostics": _sum_rows(noop_exit_rollups, "noop_diagnostics"),
+        "recert_blocker_diagnostics": _sum_rows(
+            recert_blocker_rollups,
+            "blocker_diagnostics",
+        ),
+        "duplicate_suppressions": _sum_rows(duplicate_suppressions, "suppressed"),
+    }
+
+
+def _build_report(hours: int, limit: int) -> dict[str, object]:
+    report: dict[str, object] = {
         "hours": int(hours),
         "limit": int(limit),
         "work_counts": _work_counts(hours),
@@ -650,6 +709,8 @@ def _build_report(hours: int, limit: int) -> dict[str, object]:
         "duplicate_open_refresh_work": _duplicate_open_refresh_work(hours, limit),
         "recent_duplicate_suppressions": _recent_duplicate_suppressions(hours, limit),
     }
+    report["alert_pressure_summary"] = _alert_pressure_summary(report)
+    return report
 
 
 def _report_ok(report: dict[str, object]) -> bool:
@@ -667,6 +728,7 @@ def _print_report(report: dict[str, object]) -> None:
     hours = int(report["hours"])
     limit = int(report["limit"])
     print(f"# alert-refresh-churn hours={hours} limit={limit}")
+    _print_table("Alert Pressure Summary", [report["alert_pressure_summary"]])
     _print_table("Work Counts", report["work_counts"])
     _print_table("Diagnostic Outcomes", report["diagnostic_outcomes"])
     _print_table("Top Work-Producing Patterns", report["top_work_producing_patterns"])

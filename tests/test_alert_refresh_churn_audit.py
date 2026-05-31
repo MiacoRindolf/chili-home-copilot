@@ -94,6 +94,7 @@ def test_churn_audit_prints_all_sections_without_db(monkeypatch, capsys):
 
     out = capsys.readouterr().out
     assert "# alert-refresh-churn hours=6 limit=4" in out
+    assert "## Alert Pressure Summary" in out
     assert "## Work Counts" in out
     assert "## Diagnostic Outcomes" in out
     assert "## Top Work-Producing Patterns" in out
@@ -118,6 +119,50 @@ def test_churn_audit_prints_all_sections_without_db(monkeypatch, capsys):
         ("duplicates", 6, 4),
         ("suppressions", 6, 4),
     ]
+
+
+def test_alert_pressure_summary_separates_open_conflicts_from_history():
+    report = {
+        "work_counts": [
+            {
+                "event_type": "recert_rescue_refresh",
+                "status": "done",
+                "events": 25,
+            },
+            {
+                "event_type": "exit_variant_refresh",
+                "status": "pending",
+                "events": 2,
+            },
+        ],
+        "diagnostic_outcomes": [
+            {"event_type": "recert_rescue_diagnostic", "events": 7},
+            {"event_type": "exit_variant_diagnostic", "events": 3},
+        ],
+        "top_noop_exit_variant_pattern_rollups": [
+            {"noop_diagnostics": 3},
+        ],
+        "top_recert_rescue_blocker_rollups": [
+            {"blocker_diagnostics": 7},
+        ],
+        "open_exit_variant_work_with_recent_noop": [{"work_id": 1}],
+        "open_recert_work_with_recent_blocker_diagnostic": [],
+        "duplicate_open_refresh_work": [{"scan_pattern_id": 123}],
+        "recent_duplicate_suppressions": [{"suppressed": 4}],
+    }
+
+    assert audit._alert_pressure_summary(report) == {
+        "status": "attention",
+        "open_work_events": 2,
+        "recert_open_work_events": 0,
+        "exit_open_work_events": 2,
+        "open_conflict_rows": 2,
+        "completed_work_events": 25,
+        "diagnostic_events": 10,
+        "noop_exit_diagnostics": 3,
+        "recert_blocker_diagnostics": 7,
+        "duplicate_suppressions": 4,
+    }
 
 
 def test_churn_audit_handles_unavailable_database(monkeypatch, capsys):
