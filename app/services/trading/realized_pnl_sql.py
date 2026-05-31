@@ -9,8 +9,13 @@ from __future__ import annotations
 
 OPTION_CONTRACT_MULTIPLIER_SQL = "100.0"
 OPTION_ASSET_CLASS_ALIASES_SQL = (
-    "('option', 'options', 'option_contract', "
-    "'robinhood_option', 'robinhood_options')"
+    "('option', 'options', 'option_contract', 'option_contracts', "
+    "'options_contract', 'options_contracts', 'contract_option', "
+    "'contract_options', 'equity_option', 'equity_options', "
+    "'stock_option', 'stock_options', 'option_spread', "
+    "'options_spread', 'option_spreads', 'options_spreads', "
+    "'optionspread', 'optionspreads', 'robinhood_option', "
+    "'robinhood_options')"
 )
 
 
@@ -34,7 +39,10 @@ def _json_numeric_equals_sql(json_expr: str, key: str, expected: str) -> str:
 
 
 def _asset_alias_sql(expr: str) -> str:
-    return f"LOWER(COALESCE({expr}, '')) IN {OPTION_ASSET_CLASS_ALIASES_SQL}"
+    return (
+        f"REPLACE(LOWER(COALESCE({expr}, '')), '-', '_') "
+        f"IN {OPTION_ASSET_CLASS_ALIASES_SQL}"
+    )
 
 
 def _json_asset_alias_sql(json_expr: str, key: str) -> str:

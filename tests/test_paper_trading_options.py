@@ -557,6 +557,7 @@ def test_option_signal_honors_nested_options_path() -> None:
     assert paper_trading._is_option_signal({"asset_class": "options"})
     assert paper_trading._is_option_signal({"asset_class": "robinhood_options"})
     assert paper_trading._is_option_signal({"asset_type": "option_contract"})
+    assert paper_trading._is_option_signal({"asset_type": "contract-options"})
     assert paper_trading._is_option_signal(
         {"breakout_alert": {"asset_kind": "options"}},
     )
@@ -592,6 +593,9 @@ def test_option_signal_honors_nested_options_path() -> None:
     )
     assert paper_trading._is_option_signal(
         {"_paper_meta": {"asset_class": "option_contract"}},
+    )
+    assert paper_trading._is_option_signal(
+        {"_paper_meta": {"asset_class": "equity-options"}},
     )
     assert paper_trading._is_option_signal(
         {"_paper_meta": {"option_contract_multiplier": 100.0}},

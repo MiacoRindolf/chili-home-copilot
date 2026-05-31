@@ -18,7 +18,7 @@ def test_is_option_trade_honors_asset_kind_alias_without_snapshot() -> None:
     from app.services.trading.autopilot_scope import is_option_trade
 
     trade = SimpleNamespace(
-        asset_kind="robinhood_options",
+        asset_kind="option-contracts",
         tags=None,
         indicator_snapshot=None,
     )

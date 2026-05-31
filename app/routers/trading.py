@@ -1633,31 +1633,37 @@ def api_stop_decisions(
     request: Request,
     db: Session = Depends(get_db),
     trade_id: int | None = Query(None),
-    limit: int = Query(50),
+    limit: int = Query(50, ge=1, le=200),
 ):
     """Return recent stop decisions (audit trail)."""
     ctx = get_identity_ctx(request, db)
-    from ..models.trading import StopDecision, Trade
-    q = db.query(StopDecision).join(Trade, StopDecision.trade_id == Trade.id)
-    if trade_id:
-        q = q.filter(StopDecision.trade_id == trade_id)
-    q = q.filter(Trade.user_id == ctx["user_id"])
-    decisions = q.order_by(StopDecision.as_of_ts.desc()).limit(limit).all()
+    from ..services.trading.management_envelopes import load_stop_decision_envelope_rows
 
+    decisions = load_stop_decision_envelope_rows(
+        db,
+        user_id=ctx["user_id"],
+        trade_id=trade_id,
+        limit=limit,
+    )
+    return JSONResponse({"ok": True, "decisions": _stop_decision_rows(decisions)})
+
+
+def _stop_decision_rows(decisions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     result = []
     for d in decisions:
+        as_of_ts = d.get("as_of_ts")
         result.append({
-            "id": d.id,
-            "trade_id": d.trade_id,
-            "as_of_ts": d.as_of_ts.isoformat() if d.as_of_ts else None,
-            "state": d.state,
-            "old_stop": d.old_stop,
-            "new_stop": d.new_stop,
-            "trigger": d.trigger,
-            "reason": d.reason,
-            "executed": d.executed,
+            "id": d.get("id"),
+            "trade_id": d.get("trade_id"),
+            "as_of_ts": as_of_ts.isoformat() if as_of_ts else None,
+            "state": d.get("state"),
+            "old_stop": d.get("old_stop"),
+            "new_stop": d.get("new_stop"),
+            "trigger": d.get("trigger"),
+            "reason": d.get("reason"),
+            "executed": d.get("executed"),
         })
-    return JSONResponse({"ok": True, "decisions": result})
+    return result
 
 
 @router.post("/api/trading/stops/evaluate")

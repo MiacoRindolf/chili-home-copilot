@@ -29,15 +29,57 @@ except Exception:  # pragma: no cover - import guard for partial bootstrap paths
     PATTERN_ASSET_CLASS_OPTIONS = "options"
 
     def normalize_pattern_asset_class(value: object) -> str:
-        raw = str(value or "").strip().lower()
-        if raw in {"option", "options", "option_contract", "robinhood_option", "robinhood_options"}:
+        raw = str(value or "").strip().lower().replace("-", "_")
+        if raw in {
+            "option",
+            "options",
+            "option_contract",
+            "option_contracts",
+            "options_contract",
+            "options_contracts",
+            "contract_option",
+            "contract_options",
+            "equity_option",
+            "equity_options",
+            "stock_option",
+            "stock_options",
+            "option_spread",
+            "options_spread",
+            "option_spreads",
+            "options_spreads",
+            "optionspread",
+            "optionspreads",
+            "robinhood_option",
+            "robinhood_options",
+        }:
             return PATTERN_ASSET_CLASS_OPTIONS
         return raw
 
 
 _OPTION_PRICE_FALLBACK_MAX_RATIO = 50.0
 _OPTION_ASSET_CLASS_ALIASES = frozenset(
-    {"option", "options", "option_contract", "robinhood_option", "robinhood_options"}
+    {
+        "option",
+        "options",
+        "option_contract",
+        "option_contracts",
+        "options_contract",
+        "options_contracts",
+        "contract_option",
+        "contract_options",
+        "equity_option",
+        "equity_options",
+        "stock_option",
+        "stock_options",
+        "option_spread",
+        "options_spread",
+        "option_spreads",
+        "options_spreads",
+        "optionspread",
+        "optionspreads",
+        "robinhood_option",
+        "robinhood_options",
+    }
 )
 
 
@@ -92,7 +134,7 @@ def _contract_multiplier_is_option(value: Any) -> bool:
 
 
 def _asset_value_is_option(value: Any) -> bool:
-    raw = str(value or "").strip().lower()
+    raw = str(value or "").strip().lower().replace("-", "_")
     if not raw:
         return False
     try:

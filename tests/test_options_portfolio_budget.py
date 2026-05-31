@@ -231,6 +231,17 @@ class _OpenGreeksSnapshotFallbackDb:
         raise AssertionError(f"unexpected SQL: {sql}")
 
 
+class _CaptureTradeGreeksSqlDb:
+    def __init__(self):
+        self.sql = ""
+        self.params = None
+
+    def execute(self, stmt, params=None):
+        self.sql = str(stmt)
+        self.params = dict(params or {})
+        return _Result(rows=[])
+
+
 class _CaptureBudgetUpsertDb:
     def __init__(self):
         self.params = None
@@ -299,6 +310,21 @@ def test_sum_open_trade_greeks_marks_fetch_failure_as_unproven():
 
     assert totals["net_delta"] == 0.0
     assert totals["missing_greeks_count"] == 1
+
+
+def test_sum_open_trade_greeks_filters_option_contract_aliases():
+    db = _CaptureTradeGreeksSqlDb()
+
+    totals = mod._sum_open_trade_greeks(db, user_id=7)
+
+    assert totals["missing_greeks_count"] == 0
+    assert db.params == {"uid": 7}
+    sql = " ".join(db.sql.split())
+    assert "REPLACE(LOWER(COALESCE(asset_kind, '')), '-', '_')" in sql
+    assert "indicator_snapshot::jsonb ->> 'asset_kind'" in sql
+    assert "(indicator_snapshot::jsonb -> 'breakout_alert') ->> 'asset_type'" in sql
+    assert "'option_contracts'" in sql
+    assert "'contract_options'" in sql
 
 
 def test_get_budget_sanitizes_bad_persisted_limits():

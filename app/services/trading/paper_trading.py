@@ -143,10 +143,25 @@ def _option_asset_marker(value: Any) -> bool:
     try:
         return normalize_pattern_asset_class(value) == PATTERN_ASSET_CLASS_OPTIONS
     except Exception:
-        return str(value or "").strip().lower() in {
+        return str(value or "").strip().lower().replace("-", "_") in {
             "option",
             "options",
             "option_contract",
+            "option_contracts",
+            "options_contract",
+            "options_contracts",
+            "contract_option",
+            "contract_options",
+            "equity_option",
+            "equity_options",
+            "stock_option",
+            "stock_options",
+            "option_spread",
+            "options_spread",
+            "option_spreads",
+            "options_spreads",
+            "optionspread",
+            "optionspreads",
             "robinhood_option",
             "robinhood_options",
         }

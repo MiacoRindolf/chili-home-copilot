@@ -226,7 +226,7 @@ def test_paper_trade_return_pct_option_alias_uses_contract_multiplier() -> None:
         pnl=40.0,
         pnl_pct=1600.0,
         direction="long",
-        signal_json={"asset_class": "option_contract"},
+        signal_json={"asset_class": "contract-options"},
     )
 
     assert paper_trade_return_pct(trade) == pytest.approx(16.0)

@@ -17,7 +17,10 @@ def test_live_contract_multiplier_sql_honors_snapshot_asset_kind() -> None:
     assert sql.count("->> 'asset_kind'") == 2
     assert sql.count("->> 'asset_class'") == 2
     assert "'option_contract'" in sql
+    assert "'option_contracts'" in sql
+    assert "'contract_options'" in sql
     assert "'robinhood_options'" in sql
+    assert "REPLACE(LOWER(COALESCE(" in sql
 
 
 def test_live_contract_multiplier_sql_honors_snapshot_multiplier() -> None:
@@ -37,7 +40,9 @@ def test_paper_contract_multiplier_sql_honors_signal_asset_kind() -> None:
     assert sql.count("->> 'asset_kind'") == 3
     assert sql.count("->> 'asset_class'") == 3
     assert "'option_contract'" in sql
+    assert "'equity_options'" in sql
     assert "'robinhood_options'" in sql
+    assert "REPLACE(LOWER(COALESCE(" in sql
 
 
 def test_paper_contract_multiplier_sql_honors_paper_meta_multiplier() -> None:

@@ -10,13 +10,34 @@ _ALL_ASSET_CLASS_ALIASES = frozenset({"", "all", "any", "universal"})
 _STOCK_ASSET_CLASS_ALIASES = frozenset({"stock", "stocks", "equity", "equities"})
 _CRYPTO_ASSET_CLASS_ALIASES = frozenset({"crypto", "cryptocurrency", "digital_asset"})
 _OPTION_ASSET_CLASS_ALIASES = frozenset(
-    {"option", "options", "option_contract", "robinhood_option", "robinhood_options"}
+    {
+        "option",
+        "options",
+        "option_contract",
+        "option_contracts",
+        "options_contract",
+        "options_contracts",
+        "contract_option",
+        "contract_options",
+        "equity_option",
+        "equity_options",
+        "stock_option",
+        "stock_options",
+        "option_spread",
+        "options_spread",
+        "option_spreads",
+        "options_spreads",
+        "optionspread",
+        "optionspreads",
+        "robinhood_option",
+        "robinhood_options",
+    }
 )
 
 
 def normalize_pattern_asset_class(value: object) -> str:
     """Return the canonical pattern asset class used by scanners."""
-    raw = str(value or "").strip().lower()
+    raw = str(value or "").strip().lower().replace("-", "_")
     if raw in _STOCK_ASSET_CLASS_ALIASES:
         return PATTERN_ASSET_CLASS_STOCKS
     if raw in _CRYPTO_ASSET_CLASS_ALIASES:

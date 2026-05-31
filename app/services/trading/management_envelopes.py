@@ -14,6 +14,9 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 
+MANAGEMENT_ENVELOPES_RELATION = "trading_management_envelopes"
+
+
 @dataclass(frozen=True)
 class Phase5BParitySummary:
     valid_trades_missing_decision: int
@@ -156,6 +159,79 @@ def fetch_decision_envelopes(
         ORDER BY COALESCE(envelope_entry_date, decision_entry_date) DESC,
                  decision_id DESC
         LIMIT :limit
+    """, params)
+
+
+def load_stop_decision_envelope_rows(
+    db: Session,
+    *,
+    user_id: int | None,
+    trade_id: int | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Load recent stop-decision rows through management envelopes."""
+    limit_n = max(1, min(int(limit or 50), 200))
+    params: dict[str, Any] = {"uid": user_id, "limit": limit_n}
+    if trade_id is not None:
+        params["trade_id"] = int(trade_id)
+        return _rows(db, f"""
+            SELECT
+                d.id,
+                d.trade_id,
+                d.as_of_ts,
+                d.state,
+                d.old_stop,
+                d.new_stop,
+                d.trigger,
+                d.reason,
+                d.executed
+              FROM trading_stop_decisions d
+              JOIN {MANAGEMENT_ENVELOPES_RELATION} t ON t.id = d.trade_id
+             WHERE t.user_id IS NOT DISTINCT FROM :uid
+               AND d.trade_id = :trade_id
+             ORDER BY d.as_of_ts DESC NULLS LAST, d.id DESC
+             LIMIT :limit
+        """, params)
+
+    return _rows(db, f"""
+        WITH scoped AS MATERIALIZED (
+            SELECT id
+              FROM {MANAGEMENT_ENVELOPES_RELATION}
+             WHERE user_id IS NOT DISTINCT FROM :uid
+        ),
+        per_trade AS (
+            SELECT
+                d.id,
+                d.trade_id,
+                d.as_of_ts,
+                d.state,
+                d.old_stop,
+                d.new_stop,
+                d.trigger,
+                d.reason,
+                d.executed
+              FROM scoped s
+              CROSS JOIN LATERAL (
+                    SELECT
+                        id,
+                        trade_id,
+                        as_of_ts,
+                        state,
+                        old_stop,
+                        new_stop,
+                        trigger,
+                        reason,
+                        executed
+                      FROM trading_stop_decisions
+                     WHERE trade_id = s.id
+                     ORDER BY as_of_ts DESC NULLS LAST, id DESC
+                     LIMIT :limit
+              ) d
+        )
+        SELECT *
+          FROM per_trade
+         ORDER BY as_of_ts DESC NULLS LAST, id DESC
+         LIMIT :limit
     """, params)
 
 

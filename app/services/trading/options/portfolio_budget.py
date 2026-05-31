@@ -35,6 +35,22 @@ from .strategies import StrategyProposal
 
 logger = logging.getLogger(__name__)
 GREEK_KEYS = ("delta", "gamma", "theta", "vega")
+OPTION_ASSET_ALIASES_SQL = (
+    "'option', 'options', 'option_contract', 'option_contracts', "
+    "'options_contract', 'options_contracts', 'contract_option', "
+    "'contract_options', 'equity_option', 'equity_options', "
+    "'stock_option', 'stock_options', 'option_spread', "
+    "'options_spread', 'option_spreads', 'options_spreads', "
+    "'optionspread', 'optionspreads', 'robinhood_option', "
+    "'robinhood_options'"
+)
+
+
+def _option_asset_marker_sql(expr: str) -> str:
+    return (
+        f"REPLACE(LOWER(COALESCE({expr}, '')), '-', '_') "
+        f"IN ({OPTION_ASSET_ALIASES_SQL})"
+    )
 
 
 @dataclass
@@ -437,16 +453,20 @@ def _sum_open_trade_greeks(
     try:
         rows = db.execute(
             text(
-                """
+                f"""
                 SELECT quantity, indicator_snapshot
                 FROM trading_trades
                 WHERE (user_id = :uid OR :uid IS NULL)
                   AND status IN ('open', 'working')
                   AND (
-                    LOWER(COALESCE(asset_kind, '')) IN ('option', 'options')
+                    {_option_asset_marker_sql('asset_kind')}
                     OR indicator_snapshot::jsonb ? 'option_meta'
                     OR indicator_snapshot::jsonb ? 'options_path'
+                    OR {_option_asset_marker_sql("indicator_snapshot::jsonb ->> 'asset_kind'")}
+                    OR {_option_asset_marker_sql("indicator_snapshot::jsonb ->> 'asset_type'")}
                     OR (indicator_snapshot::jsonb -> 'breakout_alert') ? 'option_meta'
+                    OR {_option_asset_marker_sql("(indicator_snapshot::jsonb -> 'breakout_alert') ->> 'asset_kind'")}
+                    OR {_option_asset_marker_sql("(indicator_snapshot::jsonb -> 'breakout_alert') ->> 'asset_type'")}
                   )
                 """
             ),

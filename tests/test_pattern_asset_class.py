@@ -20,6 +20,9 @@ def test_pattern_asset_class_normalizes_stock_aliases() -> None:
     assert normalize_pattern_asset_class("crypto") == PATTERN_ASSET_CLASS_CRYPTO
     assert normalize_pattern_asset_class("option") == PATTERN_ASSET_CLASS_OPTIONS
     assert normalize_pattern_asset_class("robinhood_options") == PATTERN_ASSET_CLASS_OPTIONS
+    assert normalize_pattern_asset_class("option-contracts") == PATTERN_ASSET_CLASS_OPTIONS
+    assert normalize_pattern_asset_class("contract_options") == PATTERN_ASSET_CLASS_OPTIONS
+    assert normalize_pattern_asset_class("equity_option") == PATTERN_ASSET_CLASS_OPTIONS
     assert normalize_pattern_asset_class("") == PATTERN_ASSET_CLASS_ALL
 
 
@@ -74,13 +77,14 @@ def test_get_active_patterns_keeps_options_separate_from_stocks() -> None:
     stock_pat = SimpleNamespace(id=2, asset_class="stock", active=True)
     option_pat = SimpleNamespace(id=3, asset_class="option", active=True)
     options_pat = SimpleNamespace(id=4, asset_class="robinhood_options", active=True)
-    crypto_pat = SimpleNamespace(id=5, asset_class="crypto", active=True)
-    db = _PatternDb([all_pat, stock_pat, option_pat, options_pat, crypto_pat])
+    contract_pat = SimpleNamespace(id=5, asset_class="option-contracts", active=True)
+    crypto_pat = SimpleNamespace(id=6, asset_class="crypto", active=True)
+    db = _PatternDb([all_pat, stock_pat, option_pat, options_pat, contract_pat, crypto_pat])
 
     option_ids = {p.id for p in get_active_patterns(db, asset_class="options")}
     stock_ids = {p.id for p in get_active_patterns(db, asset_class="stock")}
 
-    assert option_ids == {all_pat.id, option_pat.id, options_pat.id}
+    assert option_ids == {all_pat.id, option_pat.id, options_pat.id, contract_pat.id}
     assert stock_pat.id not in option_ids
     assert crypto_pat.id not in option_ids
     assert option_pat.id not in stock_ids
