@@ -7,10 +7,12 @@ from types import SimpleNamespace
 from app.services.trading.brain_work.handlers.profitability import (
     _recent_blocked_recert_rescue_diagnostic,
     handle_edge_reliability_refresh,
+    handle_recert_rescue_refresh,
     handle_exit_variant_refresh,
 )
 from app.services.trading.edge_reliability import (
     EXIT_VARIANT_DIAGNOSTIC,
+    RECERT_RESCUE_DIAGNOSTIC,
     RECERT_RESCUE_REFRESH,
 )
 
@@ -232,3 +234,80 @@ def test_edge_reliability_refresh_emits_recert_rescue_without_blocker(monkeypatc
     assert calls[0]["event_type"] == RECERT_RESCUE_REFRESH
     assert calls[0]["scan_pattern_id"] == 537
     assert calls[0]["source"] == "edge_reliability_snapshot"
+
+
+def test_recert_rescue_refresh_fast_skips_recent_blocker(monkeypatch) -> None:
+    from app.config import settings
+    from app.services.trading.brain_work import ledger
+
+    monkeypatch.setattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360)
+    outcomes: list[dict[str, object]] = []
+
+    def _enqueue_outcome_event(_db, **kwargs):
+        outcomes.append(kwargs)
+        return 9003
+
+    monkeypatch.setattr(ledger, "enqueue_outcome_event", _enqueue_outcome_event)
+
+    class _Query:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def order_by(self, *args, **kwargs):
+            return self
+
+        def limit(self, value):
+            assert value == 20
+            return self
+
+        def all(self):
+            return [
+                SimpleNamespace(
+                    id=19159,
+                    payload={
+                        "scan_pattern_id": 1260,
+                        "source": "recert_rescue_refresh",
+                        "recert_rescue_status": "soft_blocked",
+                        "recommended_next_action": (
+                            "complete_oos_recert_and_quality_refresh"
+                        ),
+                    },
+                )
+            ]
+
+    class _DB:
+        def query(self, _model):
+            return _Query()
+
+        def get(self, *_args, **_kwargs):
+            raise AssertionError("fast skip should not load or recompute the pattern")
+
+    ev = SimpleNamespace(
+        id=19163,
+        payload={
+            "scan_pattern_id": 1260,
+            "asset_class": "crypto",
+            "evidence_fingerprint": "blocked-fp",
+        },
+    )
+
+    handle_recert_rescue_refresh(_DB(), ev, user_id=None)
+
+    assert len(outcomes) == 1
+    assert outcomes[0]["event_type"] == RECERT_RESCUE_DIAGNOSTIC
+    assert outcomes[0]["parent_event_id"] == 19163
+    payload = outcomes[0]["payload"]
+    assert payload["scan_pattern_id"] == 1260
+    assert payload["fast_skipped"] is True
+    assert payload["quality_recomputed"] is False
+    assert payload["skip_reason"] == "recent_recert_rescue_blocker_diagnostic"
+    assert payload["recommended_next_action"] == "live_blocked_recert_debt_no_refresh"
+    assert payload["blocker_event_id"] == 19159
+    assert payload["blocker_next_action"] == "complete_oos_recert_and_quality_refresh"
+    assert payload["recert_backtest_refresh"] == {
+        "requested": False,
+        "event_id": None,
+        "reason": "recent_recert_rescue_blocker_diagnostic",
+        "asset_class": "crypto",
+        "evidence_fingerprint": "blocked-fp",
+    }
