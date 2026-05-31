@@ -1,7 +1,7 @@
 # Current Plan: Position Identity Refactor
 
 **Initiative owner:** Cowork (strategy) + Claude Code (execution).
-**Last update:** 2026-05-31, after Phase 5AA proved market-data anchor old-vs-new parity.
+**Last update:** 2026-05-31, after Phase 5AA-B converted the market-data anchor fallback to management envelopes.
 
 > **Why this initiative supersedes the prior fast-path crypto-scalping plan.** Today (2026-05-04) two automated close paths fired, marking 11 equity Trade rows wrongly closed in DB while the broker still held the positions. The shipped patch (inverse-reconcile, broker-truth-self-heal task) auto-healed 18 of them but its cross-check (`event_count == 0` on `trading_execution_events`) is conservative because **Trade row IDs are ephemeral** — every time a row gets wrongly closed and recreated, fills associated with the prior trade_id orphan. The fast-path scalping initiative depends on a stable position model; building more on this foundation makes things worse, not better. Position-identity refactor goes first. Fast-path resumes after.
 
@@ -56,6 +56,17 @@ Phase 5 soak duration was also tightened from one quarter to **2 weeks** at oper
 
 ## Status of the initiative
 
+- **Phase 5AA-B market-data anchor reader conversion SHIPPED 2026-05-31.**
+  Converted `market_data._resolve_implausibility_anchor(...)`'s DB fallback
+  from the legacy `Trade` ORM / `trading_trades` compatibility view path to
+  `load_market_data_implausibility_anchor(...)` on the physical
+  `trading_management_envelopes` surface. Cache-first behavior, quote
+  thresholds, provider routing, failure-open behavior, and explicit
+  rollback/close handling are unchanged. Live Phase 5AA probe remained
+  `COMPLETE_POSITIVE` with 8/8 anchors matched and 0 mismatches. Counts moved
+  to `orm_trade_symbol_compat=71`, `adapter_candidate=22`,
+  `learning_research_reporting=17`. CC report:
+  `docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5aa-b-market-data-anchor-reader-conversion.md`.
 - **Phase 5AA market-data anchor parity probe SHIPPED 2026-05-31.**
   Added `scripts/d-phase5aa-market-data-anchor-parity-probe.py`, a read-only
   old-vs-new probe for `market_data._resolve_implausibility_anchor(...)`'s DB

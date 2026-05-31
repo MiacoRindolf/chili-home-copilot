@@ -919,7 +919,7 @@ def fetch_ohlcv_batch(
 # exit-monitor lanes share (``_exit_monitor_common.is_implausible_quote``).
 # Anchor priority for the ratio comparison:
 #   1. Per-ticker last-known-good cache (in-memory, this module).
-#   2. Most-recent open Trade's ``entry_price`` for the same ticker.
+#   2. Most-recent open management envelope's ``entry_price`` for the same ticker.
 #   3. None -- with no anchor we can't judge plausibility, so we
 #      ACCEPT the quote and seed the cache with it.
 #
@@ -946,7 +946,7 @@ _REJECTIONS_LOCK = _Lock()
 
 
 def _resolve_implausibility_anchor(ticker: str) -> float | None:
-    """Anchor for the implausibility ratio: cache → open Trade → None."""
+    """Anchor for the implausibility ratio: cache -> open envelope -> None."""
     tk = (ticker or "").upper()
     if not tk:
         return None
@@ -958,18 +958,11 @@ def _resolve_implausibility_anchor(ticker: str) -> float | None:
         return cached
     try:
         from ...db import SessionLocal
-        from ...models.trading import Trade
+        from .management_envelopes import load_market_data_implausibility_anchor
 
         db = SessionLocal()
         try:
-            row = (
-                db.query(Trade)
-                .filter(Trade.ticker == tk, Trade.status == "open")
-                .order_by(Trade.entry_date.desc())
-                .first()
-            )
-            if row and row.entry_price and float(row.entry_price) > 0:
-                return float(row.entry_price)
+            return load_market_data_implausibility_anchor(db, ticker=tk)
         finally:
             # FIX 46 pattern (canonical: scanner.py:1064-1074): explicit rollback
             # to end the implicit read-only transaction. SQLAlchemy's

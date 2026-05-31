@@ -1,47 +1,38 @@
-# NEXT_TASK: f-phase5aa-b-market-data-anchor-reader-conversion
+# NEXT_TASK: f-phase5ab-trading-scheduler-contract-audit
 
 STATUS: QUEUED
 
 ## Goal
 
-Convert `market_data._resolve_implausibility_anchor(...)`'s database fallback
-from the `trading_trades` compatibility view / `Trade` ORM path to the physical
-`trading_management_envelopes` semantic source.
+Audit `app/services/trading_scheduler.py` and decide whether any remaining
+`Trade` ORM surface is safe for a narrow management-envelope helper conversion.
 
-## Evidence
+## Why This Is Next
 
-Phase 5AA parity probe:
-
-```text
-VERDICT_STATUS=COMPLETE_POSITIVE
-ANCHOR_TICKERS=8
-ANCHOR_MISMATCHES=0
-```
-
-The current old source and candidate new source matched exactly for the live
-open ticker universe.
+Phase 5Z/5AA cleared the scanner false positive and converted the market-data
+quote anchor after a parity probe. The next named candidate is
+`trading_scheduler.py`, but it coordinates live monitor timing around price,
+stop, and broker-position work. It should not be mechanically converted.
 
 ## Scope
 
-- Change only the database fallback used after the in-memory known-good cache
-  misses.
-- Preserve cache-first behavior.
-- Preserve failure-open behavior: on DB errors, return `None` and allow quote
-  acceptance/seed behavior as today.
-- Preserve explicit rollback/close handling to avoid idle-in-transaction leaks.
+- Classify each remaining `Trade` reference in `trading_scheduler.py`.
+- Identify whether any reference is pure reporting/diagnostic read-only work.
+- If all references feed live monitor behavior, close the task as an audit and
+  queue a dedicated parity probe instead of converting.
 
 ## Guardrails
 
-- No provider routing changes.
-- No quote threshold/math changes.
 - No broker/order/close/reconcile changes.
+- No stop execution/evaluation changes.
+- No scheduler cadence changes.
 - No risk/capital/PDT/portfolio gate changes.
 - No public `/trades`, `trade_id`, schema, or UI label rename.
 
 ## Exit Criteria
 
-- Focused market-data tests pass.
-- Phase 5AA parity probe remains `COMPLETE_POSITIVE` after the swap.
+- Either one tiny passive conversion ships with tests, or the task closes with
+  a documented deferral and next parity-probe brief.
 - Phase 5K live-path parity and Phase 5I post-rename soak remain
   `COMPLETE_POSITIVE`.
 

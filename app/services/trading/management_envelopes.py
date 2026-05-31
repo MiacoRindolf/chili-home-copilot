@@ -165,6 +165,35 @@ def load_open_setup_vitals_envelope_tickers(db: Session) -> list[str]:
     ]
 
 
+def load_market_data_implausibility_anchor(db: Session, *, ticker: str) -> float | None:
+    """Return the latest open envelope entry price for quote plausibility."""
+    tk = (ticker or "").upper()
+    if not tk:
+        return None
+    rows = _rows(
+        db,
+        f"""
+        SELECT entry_price
+          FROM {MANAGEMENT_ENVELOPES_RELATION}
+         WHERE UPPER(ticker) = :ticker
+           AND status = 'open'
+         ORDER BY entry_date DESC NULLS LAST, id DESC
+         LIMIT 1
+        """,
+        {"ticker": tk},
+    )
+    if not rows:
+        return None
+    value = rows[0].get("entry_price")
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    try:
+        anchor = float(value)
+    except (TypeError, ValueError):
+        return None
+    return anchor if anchor > 0 else None
+
+
 def tca_summary_by_ticker_from_management_envelopes(
     db: Session,
     user_id: int | None,
