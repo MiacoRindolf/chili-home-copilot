@@ -44,6 +44,15 @@ _COINBASE_UNAVAILABLE_PRODUCT_TTL_SECONDS = int(
     getattr(settings, "chili_coinbase_unavailable_product_ttl_seconds", 6 * 60 * 60)
 )
 _unavailable_products: dict[str, float] = {}
+_COINBASE_ADVANCED_UNSUPPORTED_ACCOUNT_PRODUCTS = {
+    # Legacy wallet balances visible in /accounts but rejected by Coinbase
+    # Advanced Trade product endpoints on this account. Keep them out of
+    # cost-basis/mark lookups so every worker restart does not emit SDK 404s.
+    "BOND-USD",
+    "CLV-USD",
+    "GAL-USD",
+    "NU-USD",
+}
 
 # f-coinbase-dust-auto-create-skip (2026-05-19): minimum dollar notional
 # below which ``sync_positions_to_db`` will refuse to auto-create a Trade
@@ -414,6 +423,8 @@ def _coinbase_product_marked_unavailable(product_id: str | None) -> bool:
     product_key = _coinbase_product_key(product_id)
     if not product_key:
         return False
+    if product_key in _COINBASE_ADVANCED_UNSUPPORTED_ACCOUNT_PRODUCTS:
+        return True
     marked_at = _unavailable_products.get(product_key)
     if marked_at is None:
         return False

@@ -109,8 +109,8 @@ def test_coinbase_unavailable_product_suppresses_repeated_position_mark_queries(
 
         def get_fills(self, product_id: str, limit: int = 250):
             self.fills_calls += 1
-            assert product_id == "GAL-USD"
-            raise RuntimeError('ProductID "GAL-USD" could not be found.')
+            assert product_id == "ZZZ-USD"
+            raise RuntimeError('ProductID "ZZZ-USD" could not be found.')
 
         def get_market_trades(self, product_id: str, limit: int = 1):
             self.market_trade_calls += 1
@@ -128,17 +128,45 @@ def test_coinbase_unavailable_product_suppresses_repeated_position_mark_queries(
         lambda product_id: None,
     )
 
-    assert coinbase_service._get_cost_basis_from_fills("GAL-USD", current_qty=1.0) == 0.0
+    assert coinbase_service._get_cost_basis_from_fills("ZZZ-USD", current_qty=1.0) == 0.0
     assert client.fills_calls == 1
 
     price_cache: dict[str, float] = {}
-    assert coinbase_service._coinbase_current_price("GAL-USD", price_cache) == 0.0
-    assert price_cache["GAL-USD"] == 0.0
+    assert coinbase_service._coinbase_current_price("ZZZ-USD", price_cache) == 0.0
+    assert price_cache["ZZZ-USD"] == 0.0
     assert client.market_trade_calls == 0
     assert client.bbo_calls == 0
 
-    assert coinbase_service._get_cost_basis_from_fills("GAL-USD", current_qty=1.0) == 0.0
+    assert coinbase_service._get_cost_basis_from_fills("ZZZ-USD", current_qty=1.0) == 0.0
     assert client.fills_calls == 1
+
+
+def test_coinbase_advanced_unsupported_account_product_skips_sdk_calls(monkeypatch):
+    from app.services import coinbase_service
+
+    coinbase_service.clear_cache()
+
+    class Client:
+        def get_fills(self, product_id: str, limit: int = 250):
+            raise AssertionError("stale account product should not fetch fills")
+
+        def get_market_trades(self, product_id: str, limit: int = 1):
+            raise AssertionError("stale account product should not fetch trades")
+
+        def get_best_bid_ask(self, product_ids):
+            raise AssertionError("stale account product should not fetch BBO")
+
+    monkeypatch.setattr(coinbase_service, "_get_client", lambda: Client())
+    monkeypatch.setattr(
+        coinbase_service,
+        "_coinbase_public_product_support",
+        lambda product_id: True,
+    )
+
+    price_cache: dict[str, float] = {}
+    assert coinbase_service._get_cost_basis_from_fills("GAL-USD", current_qty=1.0) == 0.0
+    assert coinbase_service._coinbase_current_price("GAL-USD", price_cache) == 0.0
+    assert price_cache["GAL-USD"] == 0.0
 
 
 def test_coinbase_public_catalog_prefilter_blocks_unknown_price_queries(monkeypatch):
