@@ -17,6 +17,7 @@ from app.services.trading.management_envelopes import (
     load_pattern_tagged_envelope_rows,
     load_recent_ticker_envelope_rows,
     load_stop_decision_envelope_rows,
+    load_trades_api_envelope_rows,
     summarize_closed_envelope_performance,
 )
 
@@ -255,6 +256,23 @@ def test_audit_export_envelope_rows_read_management_envelopes():
     assert "entry_date <= :end" in db.sql
     assert "ORDER BY entry_date ASC NULLS LAST" in db.sql
     assert db.params == {"uid": 7, "start": start, "end": end}
+
+
+def test_trades_api_envelope_rows_read_management_envelopes_with_public_fields():
+    db = _FakeDb(_RowsResult([{"id": 9, "ticker": "ABC"}]))
+
+    rows = load_trades_api_envelope_rows(db, user_id=7, status="open", limit=800)
+
+    assert rows == [{"id": 9, "ticker": "ABC"}]
+    assert "FROM trading_management_envelopes" in db.sql
+    assert "trading_trades" not in db.sql
+    assert "broker_order_id" in db.sql
+    assert "tca_reference_entry_price" in db.sql
+    assert "strategy_proposal_id" in db.sql
+    assert "position_id" in db.sql
+    assert "AND status = :status" in db.sql
+    assert "LIMIT :limit" in db.sql
+    assert db.params == {"uid": 7, "limit": 500, "status": "open"}
 
 
 def test_monitor_decision_envelope_rows_read_management_envelopes():

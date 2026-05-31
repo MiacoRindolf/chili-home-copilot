@@ -34,6 +34,105 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/trading", tags=["trading-trades"])
 
+_TRADES_API_SHADOW_FIELDS = (
+    "ticker",
+    "direction",
+    "exit_price",
+    "entry_date",
+    "exit_date",
+    "status",
+    "pnl",
+    "tags",
+    "notes",
+    "broker_source",
+    "broker_status",
+    "broker_order_id",
+    "filled_at",
+    "avg_fill_price",
+    "tca_reference_entry_price",
+    "tca_entry_slippage_bps",
+    "tca_reference_exit_price",
+    "tca_exit_slippage_bps",
+    "strategy_proposal_id",
+    "scan_pattern_id",
+    "position_id",
+)
+
+
+def _stable_trades_shadow_mismatches(
+    current_rows: list[dict[str, Any]],
+    envelope_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Compare stable /trades fields without broker-truth display overlays."""
+    envelope_by_id = {
+        int(row["id"]): row
+        for row in envelope_rows
+        if row.get("id") is not None
+    }
+    mismatches: list[dict[str, Any]] = []
+    for row in current_rows:
+        trade_id = row.get("id")
+        if trade_id is None:
+            continue
+        envelope = envelope_by_id.get(int(trade_id))
+        if envelope is None:
+            mismatches.append({
+                "id": trade_id,
+                "field": "id",
+                "current": "present",
+                "envelope": None,
+            })
+            continue
+        comparisons = {
+            "entry_price": row.get("local_entry_price"),
+            "quantity": row.get("local_quantity"),
+        }
+        comparisons.update({field: row.get(field) for field in _TRADES_API_SHADOW_FIELDS})
+        for field, current_value in comparisons.items():
+            envelope_value = envelope.get(field)
+            if hasattr(envelope_value, "isoformat"):
+                envelope_value = envelope_value.isoformat()
+            if current_value != envelope_value:
+                mismatches.append({
+                    "id": trade_id,
+                    "field": field,
+                    "current": current_value,
+                    "envelope": envelope_value,
+                })
+                break
+    return mismatches
+
+
+def _shadow_compare_trades_api_rows(
+    db: Session,
+    *,
+    user_id: int | None,
+    status: str | None,
+    rows: list[dict[str, Any]],
+) -> None:
+    if not rows:
+        return
+    try:
+        from ...services.trading.management_envelopes import (
+            load_trades_api_envelope_rows,
+        )
+
+        envelope_rows = load_trades_api_envelope_rows(
+            db,
+            user_id=user_id,
+            status=status,
+            limit=max(len(rows), 50),
+        )
+        mismatches = _stable_trades_shadow_mismatches(rows, envelope_rows)
+        if mismatches:
+            logger.warning(
+                "[phase5v] /trades envelope shadow mismatch count=%s sample=%s",
+                len(mismatches),
+                mismatches[:5],
+            )
+    except Exception as exc:
+        logger.debug("[phase5v] /trades envelope shadow compare skipped: %s", exc)
+
 
 def _audit_export_trade_rows(
     envelopes: list[dict[str, Any]],
@@ -123,6 +222,12 @@ def api_get_trades(
                 "broker_truth_metrics_source": broker_metrics.get("source"),
             }
         )
+    _shadow_compare_trades_api_rows(
+        db,
+        user_id=ctx["user_id"],
+        status=status,
+        rows=rows,
+    )
     return JSONResponse({
         "ok": True,
         "trades": rows,

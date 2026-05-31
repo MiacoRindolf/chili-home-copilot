@@ -442,6 +442,57 @@ def load_audit_export_envelope_rows(
     """, {"uid": user_id, "start": start, "end": end})
 
 
+def load_trades_api_envelope_rows(
+    db: Session,
+    *,
+    user_id: int | None,
+    status: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Load base management-envelope fields used by the public /trades list."""
+    params: dict[str, Any] = {
+        "uid": user_id,
+        "limit": max(1, min(int(limit or 50), 500)),
+    }
+    status_clause = ""
+    if status:
+        status_clause = "AND status = :status"
+        params["status"] = str(status)
+
+    return _rows(db, f"""
+        SELECT
+            id,
+            ticker,
+            direction,
+            entry_price,
+            exit_price,
+            quantity,
+            entry_date,
+            exit_date,
+            status,
+            pnl,
+            tags,
+            notes,
+            broker_source,
+            broker_status,
+            broker_order_id,
+            filled_at,
+            avg_fill_price,
+            tca_reference_entry_price,
+            tca_entry_slippage_bps,
+            tca_reference_exit_price,
+            tca_exit_slippage_bps,
+            strategy_proposal_id,
+            scan_pattern_id,
+            position_id
+          FROM {MANAGEMENT_ENVELOPES_RELATION}
+         WHERE user_id IS NOT DISTINCT FROM :uid
+           {status_clause}
+         ORDER BY entry_date DESC NULLS LAST, id DESC
+         LIMIT :limit
+    """, params)
+
+
 def load_monitor_decision_envelope_rows(
     db: Session,
     *,

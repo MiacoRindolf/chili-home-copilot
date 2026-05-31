@@ -1,64 +1,66 @@
-# NEXT_TASK: position-identity-phase-5-runtime-observation
+# NEXT_TASK: f-position-identity-phase-5ae-trades-api-shadow-soak-review
 
 STATUS: IN_FLIGHT
 
 ## Goal
 
-Let the Phase 5 compatibility boundary soak under normal runtime before any new rename work.
+Review the passive `/api/trading/trades` management-envelope shadow canary
+before any feature-flagged read-route cutover.
 
-## Current Verdict
+## Current State
 
-The Phase 5 rename/refactor pressure should stop here for now:
+Phase 5AE added a canary, not a behavior change:
 
-- runtime raw `trading_trades` readers are gone
-- high-value display loaders are on management-envelope helpers
-- `Trade` remains the deliberate compatibility ORM mapper
-- `trading_trades` remains the deliberate compatibility relation
-- broad rename now would add risk without improving alpha, execution, slippage, or capital control
+- public `/trades` response still comes from the legacy `Trade` compatibility
+  mapper
+- `load_trades_api_envelope_rows(...)` reads the stable database-backed fields
+  from `trading_management_envelopes`
+- the route logs `[phase5v] /trades envelope shadow mismatch` only if current
+  response rows drift from management-envelope rows
+- broker-truth display overlays are excluded by comparing `local_entry_price`
+  and `local_quantity`
 
-Latest observation update, 2026-05-30 PT:
+Latest verification:
 
-- Phase 5K live-path parity probe: `COMPLETE_POSITIVE`
-- Phase 5I post-rename soak probe: `COMPLETE_POSITIVE`
-- Phase 5 reader canary: clean, no unexpected runtime readers or mutations
-- focused Phase 5 reader tests: passing
-- app runtime logs: no Phase 5 relation/query errors observed
-- Postgres `schema_version.version` errors were classified as one-shot probe/dashboard noise, not live trading code
-- Added `scripts/d-phase5-runtime-observation-probe.py` so the next market-window closeout runs the full gate mechanically.
+```text
+Phase 5AE /trades parity probe: COMPLETE_POSITIVE, 3 checks, 0 mismatches
+Phase 5K-A live-path parity:    COMPLETE_POSITIVE
+Phase 5I post-rename soak:      COMPLETE_POSITIVE
+Runtime observation rollup:     available via d-phase5-runtime-observation-probe.py
+Focused tests:                  34 passed
+Classifier:                     0 unexpected readers, 0 unexpected mutations
+```
 
-This is healthy weekend/crypto-window evidence, but not yet a full normal market-session closeout. Keep observing; do not begin a broad rename.
+## Recommended Work Shape
 
-## Observation Checklist
+1. Inspect runtime logs after normal UI/API use for:
+   - `[phase5v] /trades envelope shadow mismatch`
+   - relation/query errors involving `trading_trades`
+   - relation/query errors involving `trading_management_envelopes`
+2. Exercise:
+   - `/api/trading/trades`
+   - `/api/trading/trades?status=open`
+   - `/api/trading/trades?status=closed`
+3. Re-run:
+   - `python scripts\d-phase5ae-trades-api-parity-probe.py`
+   - `python scripts\d-phase5k-live-path-parity-probe.py`
+   - `python scripts\d-phase5i-post-rename-soak-probe.py`
+4. If all evidence stays clean, draft a feature-flagged `/trades` read-route
+   cutover plan. Do not public-rename.
+5. If mismatches appear, classify them as broker-truth overlay, stale-open
+   suppression, null/date formatting, or true envelope divergence.
 
-1. Watch the existing live probes/canaries:
-   - Phase 5K-A parity
-   - Phase 5I post-rename probe
-   - Phase 5L reader allowlist
-   - Or run the rollup:
-     `python scripts\d-phase5-runtime-observation-probe.py --since-minutes 390 --market-window-complete`
-2. Watch runtime logs for relation/query errors involving:
-   - `trading_trades`
-   - `trading_management_envelopes`
-   - `Trade`
-   - `trade_id`
-3. Keep the compatibility view intact.
-4. Do not start another rename slice unless a concrete reader or production issue gives a reason.
-
-## Safe Future Work, If Needed
-
-Only these are acceptable without a fresh operator decision:
-
-- add semantic helper APIs for a concrete reader still carrying decision risk
-- add canaries that prevent drift back to raw `trading_trades` reads
-- document public compatibility boundaries
-
-## Hard Guardrails
+## Guardrails
 
 - Do not drop or rename the `trading_trades` compatibility view.
-- Do not broadly rename `Trade`.
-- Do not rename public `/trades`, `trade_id`, schema classes, or UI labels.
-- Do not touch monitor-run, close/sell, broker/order/reconcile, PDT, cash, capital, or portfolio gates as a rename cleanup.
+- Do not rename `Trade`, `/trades`, `trade_id`, schema classes, UI labels, or
+  public response field names.
+- Do not touch sell/close, monitor-run, stop execution, broker/order/reconcile,
+  PDT, cash, capital, portfolio, or promotion gates.
+- No route cutover without clean shadow evidence and a reversible flag.
 
-## Exit Criteria
+## Architect Verdict
 
-Observation is complete when production canaries remain green across a normal trading window and no relation/query errors appear. At that point, either leave Phase 5 parked or open a fresh, concrete brief for a non-rename trading improvement.
+The useful move now is observation. Phase 5AE gives us a cheap warning system
+for `/trades` divergence while preserving the compatibility boundary that keeps
+live trading safe.
