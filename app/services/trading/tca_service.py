@@ -41,11 +41,14 @@ def entry_slippage_bps(
     return round((fil - ref) / ref * 10000.0, 2)
 
 
-def apply_tca_on_trade_fill(trade) -> None:
-    """Set ``tca_entry_slippage_bps`` when reference and fill prices exist."""
-    ref = getattr(trade, "tca_reference_entry_price", None)
-    avg_fill = getattr(trade, "avg_fill_price", None)
-    fill = avg_fill if avg_fill is not None else getattr(trade, "entry_price", None)
+def apply_tca_on_trade_fill(trade, *, fill_price: Any | None = None) -> None:
+    """Set entry slippage only from broker fill truth, never planned entry."""
+    ref = _positive_finite_float(getattr(trade, "tca_reference_entry_price", None))
+    fill = (
+        _positive_finite_float(fill_price)
+        if fill_price is not None
+        else _positive_finite_float(getattr(trade, "avg_fill_price", None))
+    )
     if ref is None or fill is None:
         return
     bps = entry_slippage_bps(ref, fill, getattr(trade, "direction", None) or "long")

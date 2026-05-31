@@ -37,6 +37,34 @@ def test_apply_tca_fill_ignores_invalid_average_fill_without_entry_fallback():
     assert trade.tca_entry_slippage_bps is None
 
 
+def test_apply_tca_fill_requires_broker_fill_without_entry_fallback():
+    trade = SimpleNamespace(
+        tca_reference_entry_price=100.0,
+        avg_fill_price=None,
+        entry_price=105.0,
+        direction="long",
+        tca_entry_slippage_bps=None,
+    )
+
+    apply_tca_on_trade_fill(trade)
+
+    assert trade.tca_entry_slippage_bps is None
+
+
+def test_apply_tca_fill_accepts_explicit_trusted_fill_price():
+    trade = SimpleNamespace(
+        tca_reference_entry_price=100.0,
+        avg_fill_price=None,
+        entry_price=105.0,
+        direction="long",
+        tca_entry_slippage_bps=None,
+    )
+
+    apply_tca_on_trade_fill(trade, fill_price=100.25)
+
+    assert trade.tca_entry_slippage_bps == 25.0
+
+
 def test_apply_tca_close_ignores_invalid_reference_or_fill():
     trade = SimpleNamespace(
         tca_reference_exit_price=True,

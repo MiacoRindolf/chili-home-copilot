@@ -205,6 +205,32 @@ def test_option_entry_fill_price_never_falls_back_to_underlying_spot():
     assert fill == 4.01
 
 
+def test_entry_broker_fill_price_ignores_option_limit_fallback_for_tca():
+    fill = at_mod._entry_broker_fill_price_from_response(
+        {
+            "ok": True,
+            "order_id": "oid",
+            "_chili_options_path": True,
+            "limit_price": 4.01,
+            "raw": {"state": "queued"},
+        }
+    )
+
+    assert fill is None
+
+
+def test_entry_broker_fill_price_reads_average_fill_for_tca():
+    fill = at_mod._entry_broker_fill_price_from_response(
+        {
+            "ok": True,
+            "order_id": "oid",
+            "raw": {"state": "filled", "average_price": "4.05"},
+        }
+    )
+
+    assert fill == 4.05
+
+
 def test_option_tca_reference_uses_option_limit_not_underlying_or_fill():
     alert = _stock_alert()
     alert.asset_type = "options"

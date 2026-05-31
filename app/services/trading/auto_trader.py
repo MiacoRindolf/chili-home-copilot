@@ -486,6 +486,24 @@ def _entry_fill_price_from_response(
     return float(px)
 
 
+def _entry_broker_fill_price_from_response(res: dict[str, Any]) -> float | None:
+    raw = res.get("raw") if isinstance(res.get("raw"), dict) else {}
+    for candidate in (
+        raw.get("average_price"),
+        raw.get("average_filled_price"),
+        raw.get("avg_fill_price"),
+        raw.get("avg_price"),
+        res.get("average_price"),
+        res.get("average_filled_price"),
+        res.get("avg_fill_price"),
+        res.get("avg_price"),
+    ):
+        parsed = _float_or_none(candidate)
+        if parsed is not None:
+            return parsed
+    return None
+
+
 def _entry_tca_reference_price(
     res: dict[str, Any],
     alert: BreakoutAlert,
@@ -6450,8 +6468,8 @@ def _execute_new_entry(
                 snap=snap, decision="blocked_no_order_id",
             )
             return
-        raw = res.get("raw") if isinstance(res.get("raw"), dict) else {}
         fill = _entry_fill_price_from_response(res, alert, px=px, snap=snap)
+        _broker_fill_price = _entry_broker_fill_price_from_response(res)
 
         # f-coinbase-autotrader-enablement-phase-4-bracket-writer-path
         # (2026-05-09): broker_source from the response side-channel.
@@ -6492,6 +6510,11 @@ def _execute_new_entry(
             requested_qty=float(_requested_broker_qty),
             entry_broker_status=_entry_broker_status,
             entry_filled_qty=_entry_filled_qty,
+        )
+        _entry_avg_fill_price = (
+            _broker_fill_price
+            if _entry_status == "open" or float(_entry_filled_qty or 0.0) > 0.0
+            else None
         )
         if (
             _is_option_entry
@@ -6650,6 +6673,7 @@ def _execute_new_entry(
             broker_status=_entry_broker_status,
             filled_quantity=_entry_filled_qty,
             remaining_quantity=_entry_remaining_qty,
+            avg_fill_price=_entry_avg_fill_price,
             submitted_at=_entry_now if _entry_is_async else None,
             acknowledged_at=_entry_now if _entry_is_async else None,
             stop_loss=_trade_stop,
@@ -6679,8 +6703,8 @@ def _execute_new_entry(
         # Wrap in try/except per the existing tca pattern in this file.
         try:
             from .tca_service import apply_tca_on_trade_fill
-            if tr.status == "open":
-                apply_tca_on_trade_fill(tr)
+            if tr.status == "open" and _entry_avg_fill_price is not None:
+                apply_tca_on_trade_fill(tr, fill_price=_entry_avg_fill_price)
                 db.commit()
         except Exception:
             logger.debug(
