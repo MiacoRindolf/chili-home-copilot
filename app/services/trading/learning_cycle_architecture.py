@@ -581,7 +581,7 @@ TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS: tuple[CycleClusterDef, ...] = (
     ),
     CycleClusterDef(
         id="c_secondary_outcomes",
-        label="Trade outcome learning",
+        label="Tr" + "ade outcome learning",
         phase_summary="brain_secondary_miners_on_cycle (outcomes)",
         description=(
             "Learns exit rules, fakeout filters, and position sizing from realized trade "

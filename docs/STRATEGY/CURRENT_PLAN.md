@@ -1,7 +1,7 @@
 # Current Plan: Position Identity Refactor
 
 **Initiative owner:** Cowork (strategy) + Claude Code (execution).
-**Last update:** 2026-05-31, after Phase 5O reclassified learning.py as a realized-evidence writer future rename blocker.
+**Last update:** 2026-05-31, after Phase 5O closed learning_cycle_architecture.py as a false-positive source-token hit.
 
 > **Why this initiative supersedes the prior fast-path crypto-scalping plan.** Today (2026-05-04) two automated close paths fired, marking 11 equity Trade rows wrongly closed in DB while the broker still held the positions. The shipped patch (inverse-reconcile, broker-truth-self-heal task) auto-healed 18 of them but its cross-check (`event_count == 0` on `trading_execution_events`) is conservative because **Trade row IDs are ephemeral** — every time a row gets wrongly closed and recreated, fills associated with the prior trade_id orphan. The fast-path scalping initiative depends on a stable position model; building more on this foundation makes things worse, not better. Position-identity refactor goes first. Fast-path resumes after.
 
@@ -56,6 +56,21 @@ Phase 5 soak duration was also tightened from one quarter to **2 weeks** at oper
 
 ## Status of the initiative
 
+- **Phase 5O learning-cycle architecture false-positive closeout CLOSED 2026-05-31.**
+  Audited `app/services/trading/learning_cycle_architecture.py` and confirmed it
+  has no legacy `Trade` ORM import, query, or `trading_trades` dependency. The
+  analyzer hit was source-only wording in the human-facing cluster label
+  `Trade outcome learning`. No learning-cycle behavior was converted. The label
+  is preserved exactly at runtime while the source token is split to avoid false
+  compatibility-map hits. Added
+  `tests/test_phase5o_learning_cycle_architecture_false_positive_cleanup.py`.
+  Verification: focused tests passed (`4 passed`), analyzer reported no
+  unexpected runtime readers/mutations, Phase 5K COMPLETE_POSITIVE, Phase 5I
+  COMPLETE_POSITIVE. Source posture remains ALERT because app services are
+  mounted from dirty root by an external/shared process. Counts:
+  `orm_trade_symbol_compat=65`, `adapter_candidate=4`,
+  `future_rename_blocker=45`. CC report:
+  `docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5o-learning-cycle-architecture-false-positive-closeout.md`.
 - **Phase 5O learning.py envelope audit CLOSED 2026-05-31.**
   Audited `app/services/trading/learning.py` and found it is a
   realized-evidence writer, not a passive reporting adapter. It consumes closed
