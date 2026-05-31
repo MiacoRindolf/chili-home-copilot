@@ -70,6 +70,20 @@ def teardown_function() -> None:
     coinbase_ohlcv.reset_missing_product_cache_for_tests()
 
 
+def test_reset_clears_provider_circuit_state() -> None:
+    with coinbase_ohlcv._CIRCUIT_LOCK:
+        coinbase_ohlcv._CIRCUIT_FAILS = 4
+        coinbase_ohlcv._CIRCUIT_OPEN_UNTIL = coinbase_ohlcv.time.time() + 900
+        coinbase_ohlcv._CIRCUIT_LAST_LOG = coinbase_ohlcv.time.time()
+
+    coinbase_ohlcv.reset_missing_product_cache_for_tests()
+
+    with coinbase_ohlcv._CIRCUIT_LOCK:
+        assert coinbase_ohlcv._CIRCUIT_FAILS == 0
+        assert coinbase_ohlcv._CIRCUIT_OPEN_UNTIL == 0.0
+        assert coinbase_ohlcv._CIRCUIT_LAST_LOG == 0.0
+
+
 def test_get_ohlcv_caches_coinbase_product_404(monkeypatch):
     calls: list[object] = []
 
