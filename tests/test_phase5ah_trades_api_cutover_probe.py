@@ -19,30 +19,34 @@ def _load_module():
     return module
 
 
-def test_tie_order_acceptance_requires_same_rows_and_same_entry_date() -> None:
+def test_compare_status_requires_exact_payloads(monkeypatch) -> None:
     module = _load_module()
 
-    assert module._order_diff_is_only_within_equal_entry_dates(
-        [
-            {"id": 1, "entry_date": "2026-05-31T01:00:00", "ticker": "A"},
-            {"id": 2, "entry_date": "2026-05-31T01:00:00", "ticker": "B"},
-        ],
-        [
-            {"id": 2, "entry_date": "2026-05-31T01:00:00", "ticker": "B"},
-            {"id": 1, "entry_date": "2026-05-31T01:00:00", "ticker": "A"},
-        ],
-    ) is True
+    class _Ts:
+        @staticmethod
+        def get_trades(_db, _user_id, status=None):
+            return [{"id": 1}, {"id": 2}]
 
-    assert module._order_diff_is_only_within_equal_entry_dates(
-        [
-            {"id": 1, "entry_date": "2026-05-31T01:00:00", "ticker": "A"},
-            {"id": 2, "entry_date": "2026-05-31T02:00:00", "ticker": "B"},
-        ],
-        [
-            {"id": 2, "entry_date": "2026-05-31T02:00:00", "ticker": "B"},
-            {"id": 1, "entry_date": "2026-05-31T01:00:00", "ticker": "A"},
-        ],
-    ) is False
+    monkeypatch.setattr(module, "ts", _Ts)
+    monkeypatch.setattr(
+        module,
+        "load_trades_api_envelope_objects",
+        lambda _db, user_id, status=None, limit=50: [{"id": 2}, {"id": 1}],
+    )
+    monkeypatch.setattr(
+        module,
+        "_payload",
+        lambda _db, rows, _status: {
+            "trades": rows,
+            "suppressed_stale_trades": [],
+            "suppressed_stale_count": 0,
+        },
+    )
+
+    check = module._compare_status(object(), user_id=1, status=None)
+
+    assert check["exact_match"] is False
+    assert check["accepted"] is False
 
 
 def test_probe_rejects_non_test_database_without_live_opt_in(monkeypatch) -> None:
