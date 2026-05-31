@@ -337,6 +337,45 @@ def load_closed_review_envelope_rows(
          ORDER BY exit_date ASC
     """, {"uid": int(user_id), "since": since})
 
+
+def load_recent_ticker_envelope_rows(
+    db: Session,
+    *,
+    user_id: int | None,
+    ticker: str,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    """Load recent management envelopes for ticker-specific context reports."""
+    symbol = (ticker or "").strip().upper()
+    if not symbol:
+        return []
+    return _rows(db, f"""
+        SELECT
+            id,
+            user_id,
+            ticker,
+            direction,
+            quantity,
+            entry_price,
+            exit_price,
+            entry_date,
+            exit_date,
+            pnl,
+            status,
+            related_alert_id,
+            stop_loss,
+            take_profit,
+            broker_source,
+            asset_kind,
+            tags,
+            indicator_snapshot
+          FROM {MANAGEMENT_ENVELOPES_RELATION}
+         WHERE user_id IS NOT DISTINCT FROM :uid
+           AND UPPER(ticker) = :ticker
+         ORDER BY entry_date DESC NULLS LAST, id DESC
+         LIMIT :limit
+    """, {"uid": user_id, "ticker": symbol, "limit": max(1, int(limit))})
+
 def _option_envelope_predicate_sql(alias: str = "t") -> str:
     snap = f"COALESCE({alias}.indicator_snapshot, '{{}}'::jsonb)"
     breakout = f"({snap}->'breakout_alert')"

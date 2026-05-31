@@ -4,10 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ....models.trading import Trade
-
-
-def trade_close_attribution_dict(trade: Trade) -> dict[str, Any]:
+def trade_close_attribution_dict(trade: Any) -> dict[str, Any]:
     """Fields for execution feedback and operator visibility (bounded strings)."""
     oid = getattr(trade, "broker_order_id", None) or ""
     return {

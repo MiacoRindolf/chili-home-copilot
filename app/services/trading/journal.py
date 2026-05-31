@@ -8,7 +8,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from ...models.trading import JournalEntry, Trade
+from ...models.trading import JournalEntry
 from .market_data import (
     fetch_quote, get_indicator_snapshot, ticker_display_name,
     DEFAULT_SCAN_TICKERS, DEFAULT_CRYPTO_TICKERS,
@@ -40,7 +40,7 @@ def get_journal(db: Session, user_id: int | None, limit: int = 50) -> list[Journ
     ).order_by(JournalEntry.created_at.desc()).limit(limit).all()
 
 
-def auto_journal_trade_open(db: Session, trade: Trade) -> None:
+def auto_journal_trade_open(db: Session, trade: Any) -> None:
     """AI auto-journals why a trade was opened."""
     from .learning_events import log_learning_event
     try:

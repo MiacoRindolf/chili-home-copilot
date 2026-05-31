@@ -8,6 +8,7 @@ from app.services.trading.management_envelopes import (
     load_closed_envelope_execution_rows,
     load_closed_pattern_envelope_rows,
     load_closed_review_envelope_rows,
+    load_recent_ticker_envelope_rows,
     summarize_closed_envelope_performance,
 )
 
@@ -180,3 +181,21 @@ def test_closed_review_envelope_rows_read_management_envelopes():
     assert "status = 'closed'" in db.sql
     assert "ORDER BY exit_date ASC" in db.sql
     assert db.params == {"uid": 7, "since": since}
+
+
+def test_recent_ticker_envelope_rows_read_management_envelopes():
+    db = _FakeDb(_RowsResult([{"id": 1, "ticker": "AAPL"}]))
+
+    rows = load_recent_ticker_envelope_rows(
+        db,
+        user_id=7,
+        ticker="aapl",
+        limit=3,
+    )
+
+    assert rows == [{"id": 1, "ticker": "AAPL"}]
+    assert "FROM trading_management_envelopes" in db.sql
+    assert "trading_trades" not in db.sql
+    assert "UPPER(ticker) = :ticker" in db.sql
+    assert "ORDER BY entry_date DESC NULLS LAST, id DESC" in db.sql
+    assert db.params == {"uid": 7, "ticker": "AAPL", "limit": 3}
