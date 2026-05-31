@@ -1,11 +1,11 @@
-"""Compact attribution payload for live/broker trade-close ledger outcomes."""
+"""Compact attribution payloads for trade-close ledger outcomes."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from ....models.trading import Trade
-from ..return_math import trade_return_pct
+from ....models.trading import PaperTrade, Trade
+from ..return_math import paper_trade_return_pct, trade_return_pct
 
 
 def _finite_float(value: Any) -> float | None:
@@ -54,4 +54,47 @@ def trade_close_attribution_dict(trade: Trade) -> dict[str, Any]:
         "broker_order_id": (str(oid)[:96] if oid else None),
         "tca_entry_slippage_bps": getattr(trade, "tca_entry_slippage_bps", None),
         "tca_exit_slippage_bps": getattr(trade, "tca_exit_slippage_bps", None),
+    }
+
+
+def paper_trade_close_attribution_dict(paper_trade: PaperTrade) -> dict[str, Any]:
+    """Contract-aware paper/shadow close fields for promotion feedback."""
+    realized_return_pct = paper_trade_return_pct(paper_trade)
+    tca_cost_pct = _tca_cost_pct(paper_trade)
+    return {
+        "scan_pattern_id": getattr(paper_trade, "scan_pattern_id", None),
+        "paper_shadow_of_alert_id": getattr(
+            paper_trade,
+            "paper_shadow_of_alert_id",
+            None,
+        ),
+        "pnl": getattr(paper_trade, "pnl", None),
+        "realized_return_pct": (
+            round(realized_return_pct, 6)
+            if realized_return_pct is not None
+            else None
+        ),
+        "tca_cost_pct": tca_cost_pct,
+        "net_return_pct": (
+            round(realized_return_pct - tca_cost_pct, 6)
+            if realized_return_pct is not None and tca_cost_pct is not None
+            else None
+        ),
+        "exit_price": getattr(paper_trade, "exit_price", None),
+        "entry_price": getattr(paper_trade, "entry_price", None),
+        "quantity": getattr(paper_trade, "quantity", None),
+        "direction": (getattr(paper_trade, "direction", "") or "").strip() or None,
+        "exit_reason": (
+            getattr(paper_trade, "exit_reason", "") or ""
+        ).strip() or None,
+        "tca_entry_slippage_bps": getattr(
+            paper_trade,
+            "tca_entry_slippage_bps",
+            None,
+        ),
+        "tca_exit_slippage_bps": getattr(
+            paper_trade,
+            "tca_exit_slippage_bps",
+            None,
+        ),
     }

@@ -299,6 +299,40 @@ def test_summary_includes_dead_letter_diagnostics(db) -> None:
     assert row["processed_at"] is not None
 
 
+def test_summary_execution_pulse_includes_paper_contract_return(db) -> None:
+    eid = enqueue_outcome_event(
+        db,
+        event_type="paper_trade_closed",
+        dedupe_key="paper_closed:pulse-contract-return",
+        payload={
+            "paper_trade_id": 501,
+            "user_id": 7,
+            "scan_pattern_id": 42,
+            "ticker": "SPY",
+            "pnl": 40.0,
+            "realized_return_pct": 16.0,
+            "tca_cost_pct": 0.3,
+            "net_return_pct": 15.7,
+            "exit_reason": "target",
+        },
+    )
+    db.commit()
+    assert eid is not None
+
+    summary = get_work_ledger_summary(db, recent_limit=5)
+
+    pulse = summary["execution_pulse"]
+    assert pulse is not None
+    assert pulse["event_type"] == "paper_trade_closed"
+    assert pulse["paper_trade_id"] == 501
+    assert pulse["trade_id"] is None
+    assert pulse["scan_pattern_id"] == 42
+    assert pulse["pnl"] == 40.0
+    assert pulse["realized_return_pct"] == 16.0
+    assert pulse["tca_cost_pct"] == 0.3
+    assert pulse["net_return_pct"] == 15.7
+
+
 def test_retryable_dead_work_recovery_requeues_once(db) -> None:
     eid = enqueue_work_event(
         db,

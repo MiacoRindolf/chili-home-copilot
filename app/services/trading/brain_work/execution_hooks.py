@@ -15,7 +15,10 @@ from .emitters import (
     emit_live_trade_closed_outcome,
     emit_paper_trade_closed_outcome,
 )
-from .execution_attribution import trade_close_attribution_dict
+from .execution_attribution import (
+    paper_trade_close_attribution_dict,
+    trade_close_attribution_dict,
+)
 from .ledger import enqueue_or_refresh_debounced_work
 
 logger = logging.getLogger(__name__)
@@ -226,6 +229,7 @@ def on_paper_trade_closed(db: Session, pt: PaperTrade) -> None:
             ticker=(pt.ticker or "").strip(),
             pnl=pt.pnl,
             exit_reason=(pt.exit_reason or "").strip(),
+            extra=paper_trade_close_attribution_dict(pt),
         )
         uid = pt.user_id
         if uid is not None:

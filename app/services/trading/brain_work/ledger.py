@@ -1227,7 +1227,7 @@ def get_work_ledger_summary(db: Session, *, recent_limit: int = 20) -> dict[str,
     )
     execution_outcomes_24h = {str(et): int(c) for et, c in exec_24_rows}
 
-    pulse_types = ("live_trade_closed", "broker_fill_closed")
+    pulse_types = ("live_trade_closed", "broker_fill_closed", "paper_trade_closed")
     pulse_row = (
         db.query(BrainWorkEvent)
         .filter(
@@ -1247,9 +1247,13 @@ def get_work_ledger_summary(db: Session, *, recent_limit: int = 20) -> dict[str,
             "ticker": plp.get("ticker"),
             "scan_pattern_id": plp.get("scan_pattern_id"),
             "pnl": plp.get("pnl"),
+            "realized_return_pct": plp.get("realized_return_pct"),
+            "tca_cost_pct": plp.get("tca_cost_pct"),
+            "net_return_pct": plp.get("net_return_pct"),
             "broker_source": plp.get("broker_source"),
             "source": plp.get("source"),
             "trade_id": plp.get("trade_id"),
+            "paper_trade_id": plp.get("paper_trade_id"),
             "processed_at": pulse_row.processed_at.isoformat() if pulse_row.processed_at else None,
         }
 

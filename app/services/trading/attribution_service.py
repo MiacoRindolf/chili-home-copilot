@@ -6,10 +6,10 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import or_, text
 from sqlalchemy.orm import Session
 
-from .return_math import trade_return_pct
+from .return_math import paper_trade_return_pct, trade_return_pct
 
 
 def _finite_float(value: Any) -> float | None:
@@ -29,6 +29,22 @@ def _trade_tca_cost_pct(trade: Any) -> float | None:
     if entry_bps is None or exit_bps is None:
         return None
     return (entry_bps + exit_bps) / 100.0
+
+
+def _paper_directional_outcome(pt: Any) -> float | None:
+    """Win/loss source for paper attribution, preferring realized dollars."""
+    pnl = _finite_float(getattr(pt, "pnl", None))
+    if pnl is not None:
+        return pnl
+    return paper_trade_return_pct(pt)
+
+
+def _trade_directional_outcome(trade: Any) -> float | None:
+    """Win/loss source for live attribution, preferring realized dollars."""
+    pnl = _finite_float(getattr(trade, "pnl", None))
+    if pnl is not None:
+        return pnl
+    return trade_return_pct(trade)
 
 
 def _scan_patterns_by_id(db: Session, pattern_ids: set[int]) -> dict[int, Any]:
@@ -51,7 +67,7 @@ def live_vs_research_by_pattern(
     include_phase5b_compare: bool = False,
 ) -> dict[str, Any]:
     """Aggregate closed trades with ``scan_pattern_id`` vs ``ScanPattern`` research fields."""
-    from ...models.trading import Trade
+    from ...models.trading import PaperTrade, Trade
 
     from .backtest_metrics import backtest_win_rate_db_to_display_pct
 
@@ -81,15 +97,42 @@ def live_vs_research_by_pattern(
     by_pid: dict[int, list[Trade]] = defaultdict(list)
     for t in trades:
         by_pid[int(t.scan_pattern_id or 0)].append(t)
+    paper_trades = (
+        db.query(PaperTrade)
+        .filter(
+            PaperTrade.user_id == user_id,
+            PaperTrade.status == "closed",
+            PaperTrade.scan_pattern_id.isnot(None),
+            PaperTrade.exit_date.isnot(None),
+            PaperTrade.exit_date >= since,
+            or_(
+                PaperTrade.paper_shadow_of_alert_id.isnot(None),
+                PaperTrade.signal_json.contains({"auto_trader_v1": True}),
+                PaperTrade.signal_json.contains({"paper_shadow": True}),
+            ),
+        )
+        .all()
+    )
+    paper_by_pid: dict[int, list[PaperTrade]] = defaultdict(list)
+    for pt in paper_trades:
+        paper_by_pid[int(pt.scan_pattern_id or 0)].append(pt)
 
     rows: list[dict[str, Any]] = []
-    patterns_by_id = _scan_patterns_by_id(db, set(by_pid))
-    for pid, tlist in by_pid.items():
+    pattern_ids = set(by_pid) | set(paper_by_pid)
+    patterns_by_id = _scan_patterns_by_id(db, pattern_ids)
+    for pid in sorted(pattern_ids):
         if pid <= 0:
             continue
+        tlist = by_pid.get(pid, [])
+        ptlist = paper_by_pid.get(pid, [])
         pat = patterns_by_id.get(pid)
         pnls = [float(t.pnl or 0) for t in tlist]
-        wins = sum(1 for p in pnls if p > 0)
+        live_directional_outcomes = [
+            outcome
+            for outcome in (_trade_directional_outcome(t) for t in tlist)
+            if outcome is not None
+        ]
+        wins = sum(1 for outcome in live_directional_outcomes if outcome > 0)
         n = len(tlist)
         live_returns = [
             ret for ret in (trade_return_pct(t) for t in tlist) if ret is not None
@@ -113,6 +156,31 @@ def live_vs_research_by_pattern(
             for t in tlist
             if t.tca_exit_slippage_bps is not None
         ]
+        paper_pnls = [
+            p
+            for p in (_finite_float(getattr(pt, "pnl", None)) for pt in ptlist)
+            if p is not None
+        ]
+        paper_directional_outcomes = [
+            outcome
+            for outcome in (_paper_directional_outcome(pt) for pt in ptlist)
+            if outcome is not None
+        ]
+        paper_wins = sum(1 for outcome in paper_directional_outcomes if outcome > 0)
+        paper_returns = [
+            ret
+            for ret in (paper_trade_return_pct(pt) for pt in ptlist)
+            if ret is not None
+        ]
+        paper_tca_costs_pct: list[float] = []
+        paper_net_returns: list[float] = []
+        for pt in ptlist:
+            ret = paper_trade_return_pct(pt)
+            cost_pct = _trade_tca_cost_pct(pt)
+            if cost_pct is not None:
+                paper_tca_costs_pct.append(cost_pct)
+            if ret is not None and cost_pct is not None:
+                paper_net_returns.append(ret - cost_pct)
         rows.append(
             {
                 "scan_pattern_id": pid,
@@ -132,7 +200,12 @@ def live_vs_research_by_pattern(
                 if pat and pat.oos_avg_return_pct is not None
                 else None,
                 "live_closed_trades": n,
-                "live_win_rate_pct": round(wins / n * 100.0, 1) if n else 0.0,
+                "live_win_sample_n": len(live_directional_outcomes),
+                "live_win_rate_pct": (
+                    round(wins / len(live_directional_outcomes) * 100.0, 1)
+                    if live_directional_outcomes
+                    else None
+                ),
                 "live_total_pnl": round(sum(pnls), 2),
                 "live_avg_pnl": round(sum(pnls) / n, 2) if n else 0.0,
                 "live_return_sample_n": len(live_returns),
@@ -157,10 +230,45 @@ def live_vs_research_by_pattern(
                 "live_avg_exit_slippage_bps": round(sum(exit_slips) / len(exit_slips), 2)
                 if exit_slips
                 else None,
+                "paper_closed_trades": len(ptlist),
+                "paper_win_sample_n": len(paper_directional_outcomes),
+                "paper_win_rate_pct": (
+                    round(paper_wins / len(paper_directional_outcomes) * 100.0, 1)
+                    if paper_directional_outcomes
+                    else None
+                ),
+                "paper_total_pnl": round(sum(paper_pnls), 2)
+                if paper_pnls
+                else None,
+                "paper_avg_pnl": round(sum(paper_pnls) / len(paper_pnls), 2)
+                if paper_pnls
+                else None,
+                "paper_return_sample_n": len(paper_returns),
+                "paper_avg_return_pct": (
+                    round(sum(paper_returns) / len(paper_returns), 3)
+                    if paper_returns
+                    else None
+                ),
+                "paper_avg_tca_cost_pct": (
+                    round(sum(paper_tca_costs_pct) / len(paper_tca_costs_pct), 4)
+                    if paper_tca_costs_pct
+                    else None
+                ),
+                "paper_avg_net_return_pct": (
+                    round(sum(paper_net_returns) / len(paper_net_returns), 3)
+                    if paper_net_returns
+                    else None
+                ),
             }
         )
 
-    rows.sort(key=lambda r: r["live_closed_trades"], reverse=True)
+    rows.sort(
+        key=lambda r: (
+            r["live_closed_trades"],
+            r["paper_closed_trades"],
+        ),
+        reverse=True,
+    )
     rows = rows[:safe_limit]
 
     out = {"ok": True, "window_days": days, "patterns": rows}

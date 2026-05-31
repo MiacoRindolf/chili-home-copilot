@@ -288,20 +288,26 @@ def emit_paper_trade_closed_outcome(
     ticker: str,
     pnl: float | None,
     exit_reason: str,
+    extra: Optional[dict[str, Any]] = None,
 ) -> int | None:
     dedupe_key = f"paper_closed:{int(paper_trade_id)}:{exit_reason[:32]}"
+    payload = {
+        "paper_trade_id": int(paper_trade_id),
+        "user_id": user_id,
+        "scan_pattern_id": scan_pattern_id,
+        "ticker": ticker,
+        "pnl": pnl,
+        "exit_reason": exit_reason,
+    }
+    if extra:
+        for key, value in extra.items():
+            if key not in payload:
+                payload[key] = value
     return enqueue_outcome_event(
         db,
         event_type="paper_trade_closed",
         dedupe_key=dedupe_key,
-        payload={
-            "paper_trade_id": int(paper_trade_id),
-            "user_id": user_id,
-            "scan_pattern_id": scan_pattern_id,
-            "ticker": ticker,
-            "pnl": pnl,
-            "exit_reason": exit_reason,
-        },
+        payload=payload,
     )
 
 
