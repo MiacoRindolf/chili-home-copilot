@@ -589,3 +589,35 @@ then reverting or promoting based on observed behavior. Do not public-rename.
 
 Report:
 `docs/STRATEGY/CC_REPORTS/2026-05-31_f-position-identity-phase-5ah-trades-api-open-cutover-flag-path.md`.
+
+## Position Identity Phase 5AI - Trades API Flag Route Trial (2026-05-31)
+
+Phase 5AI started the controlled live route trial for
+`CHILI_PHASE5AF_TRADES_API_USE_ENVELOPES=true`.
+
+Because the live root is heavily dirty and behind the merged branch, the `chili`
+web container was recreated from the clean Phase 5AH worktree rather than
+pulling or overwriting `D:\dev\chili-home-copilot`. Postgres and trading
+workers were not restarted. The running web container mounts the clean Phase
+5AH worktree's `app` and `docs` directories, and its container environment
+shows `CHILI_PHASE5AF_TRADES_API_USE_ENVELOPES=true`.
+
+Live route evidence is clean for both unauthenticated and user-1 requests.
+`/api/trading/trades?status=open` used the Phase 5AH runtime-object path and
+returned 5 rows for user 1 with zero stale suppressions. Closed rows used the
+simple Phase 5AF envelope renderer. No fallback, traceback, or route exception
+lines were observed during the short soak.
+
+After the web startup broker sync created one fresh Coinbase envelope, Phase
+5AH, Phase 5AG, Phase 5K, and Phase 5I probes all remained
+`COMPLETE_POSITIVE`; Phase 5I now reports 21 fresh decisions, 21 fresh
+envelopes, 10 fresh closes, 0 hard linkage issues, and 0 mismatched rows.
+
+Architect verdict: healthy enough to leave the route flag on for a short soak.
+Next slice should remove the remaining mixed/all tie-order caveat so the Phase
+5AH probe can require exact all-route parity instead of accepting
+`tie_order_only=true`. Also keep the operational caveat visible: recreating
+`chili` from the dirty live root would roll this route code back.
+
+Report:
+`docs/STRATEGY/CC_REPORTS/2026-05-31_f-position-identity-phase-5ai-trades-api-flag-route-trial.md`.
