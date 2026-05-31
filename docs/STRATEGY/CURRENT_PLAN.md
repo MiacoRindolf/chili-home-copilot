@@ -1,7 +1,7 @@
 # Current Plan: Position Identity Refactor
 
 **Initiative owner:** Cowork (strategy) + Claude Code (execution).
-**Last update:** 2026-05-31, after Phase 5AD reclassified alerts.py as a live alert/order surface and added read-only parity evidence.
+**Last update:** 2026-05-31, after Phase 5AE reclassified alpha_decay.py as lifecycle-sensitive and added read-only parity evidence.
 
 > **Why this initiative supersedes the prior fast-path crypto-scalping plan.** Today (2026-05-04) two automated close paths fired, marking 11 equity Trade rows wrongly closed in DB while the broker still held the positions. The shipped patch (inverse-reconcile, broker-truth-self-heal task) auto-healed 18 of them but its cross-check (`event_count == 0` on `trading_execution_events`) is conservative because **Trade row IDs are ephemeral** — every time a row gets wrongly closed and recreated, fills associated with the prior trade_id orphan. The fast-path scalping initiative depends on a stable position model; building more on this foundation makes things worse, not better. Position-identity refactor goes first. Fast-path resumes after.
 
@@ -56,6 +56,22 @@ Phase 5 soak duration was also tightened from one quarter to **2 weeks** at oper
 
 ## Status of the initiative
 
+- **Phase 5AE alpha-decay envelope audit CLOSED 2026-05-31.**
+  Audited `app/services/trading/alpha_decay.py` and found it is
+  lifecycle-sensitive, not a casual passive report. It reads live closed
+  management-envelope evidence plus paper-trade evidence, then may demote
+  promoted patterns through `transition_on_decay(...)`. No decay behavior was
+  changed. Added `scripts/d-phase5ae-alpha-decay-envelope-parity-probe.py` to
+  compare the live evidence scopes against `trading_management_envelopes`; live
+  result: `COMPLETE_POSITIVE`, 5 checks matched, 0 mismatches, relation kinds
+  healthy. Reclassified `alpha_decay.py` in the Phase 5O map from
+  `adapter_candidate` to `future_rename_blocker` with subtype
+  `lifecycle_decay_path`. Verification: focused tests passed (`18 passed`),
+  analyzer stayed clean with raw reader bucket 0, Phase 5K remained
+  `COMPLETE_POSITIVE`, and Phase 5I remained `COMPLETE_POSITIVE`. Counts:
+  `orm_trade_symbol_compat=69`, `learning_research_reporting=14`,
+  `adapter_candidate=18`, `future_rename_blocker=35`. CC report:
+  `docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5ae-alpha-decay-envelope-audit.md`.
 - **Phase 5AD alerts envelope audit CLOSED 2026-05-31.**
   Audited `app/services/trading/alerts.py` and found it is not a passive
   learning/reporting file. Its remaining legacy `Trade` ORM surface includes

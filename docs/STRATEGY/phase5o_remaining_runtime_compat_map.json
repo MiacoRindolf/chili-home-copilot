@@ -2,8 +2,8 @@
   "generated_from": "scripts/analyze_phase5_remaining_trade_refs.py --json",
   "orm_trade_symbol_compat_count": 69,
   "phase5o_bucket_counts": {
-    "adapter_candidate": 19,
-    "future_rename_blocker": 34,
+    "adapter_candidate": 18,
+    "future_rename_blocker": 35,
     "leave_alone": 16
   },
   "contract_group_counts": {
@@ -94,9 +94,9 @@
     {
       "path": "app/services/trading/alpha_decay.py",
       "contract_group": "learning_research_reporting",
-      "phase5o_bucket": "adapter_candidate",
-      "phase5o_subtype": "read_only_learning_reporting",
-      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "lifecycle_decay_path",
+      "rationale": "Lifecycle-sensitive alpha decay path: reads live and paper evidence and may demote promoted patterns. Requires parity evidence and a dedicated behavior-preserving conversion before any ORM surface change."
     },
     {
       "path": "app/services/trading/auto_trader_monitor.py",
