@@ -91,4 +91,3 @@ python scripts\analyze_phase5_remaining_trade_refs.py --bucket orm_trade_symbol_
 Phase 5 rename pressure should stop here.
 
 From an algo-trader perspective, this rename no longer changes decision quality, execution quality, cost quality, or risk. From a senior engineering perspective, the remaining rename is mostly compatibility churn around live paths. The correct architecture is to keep the compatibility mapper and continue adding semantic helper APIs only when a concrete reader needs one.
-

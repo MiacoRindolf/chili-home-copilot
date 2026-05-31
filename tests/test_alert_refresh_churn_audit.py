@@ -408,6 +408,51 @@ def test_rows_configures_bounded_read_only_session(monkeypatch):
     ]
 
 
+def test_read_only_guardrails_are_reported(monkeypatch):
+    monkeypatch.setenv("CHILI_ALERT_REFRESH_CHURN_STATEMENT_TIMEOUT_MS", "4321")
+    monkeypatch.setenv("CHILI_ALERT_REFRESH_CHURN_LOCK_TIMEOUT_MS", "654")
+    monkeypatch.setattr(audit, "_work_counts", lambda hours: [])
+    monkeypatch.setattr(audit, "_diagnostic_counts", lambda hours: [])
+    monkeypatch.setattr(audit, "_top_patterns", lambda hours, limit: [])
+    monkeypatch.setattr(audit, "_top_noop_exit_patterns", lambda hours, limit: [])
+    monkeypatch.setattr(
+        audit,
+        "_top_noop_exit_pattern_rollups",
+        lambda hours, limit: [],
+    )
+    monkeypatch.setattr(
+        audit,
+        "_top_recert_rescue_blocker_rollups",
+        lambda hours, limit: [],
+    )
+    monkeypatch.setattr(
+        audit,
+        "_top_recert_rescue_action_rollups",
+        lambda hours, limit: [],
+    )
+    monkeypatch.setattr(
+        audit,
+        "_open_exit_work_with_recent_noop",
+        lambda hours, limit: [],
+    )
+    monkeypatch.setattr(
+        audit,
+        "_open_recert_work_with_recent_blocker_diagnostic",
+        lambda hours, limit: [],
+    )
+    monkeypatch.setattr(audit, "_duplicate_open_refresh_work", lambda hours, limit: [])
+    monkeypatch.setattr(audit, "_recent_duplicate_suppressions", lambda hours, limit: [])
+
+    report = audit._build_report(hours=2, limit=3)
+
+    assert report["read_only_guardrails"] == {
+        "read_only": True,
+        "statement_timeout_ms": 4321,
+        "lock_timeout_ms": 654,
+        "application_name": "chili-alert-refresh-churn-audit",
+    }
+
+
 def test_open_exit_noop_query_keeps_non_positive_skip_evidence_specific(monkeypatch):
     captured: dict[str, object] = {}
 

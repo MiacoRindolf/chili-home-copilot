@@ -18,4 +18,3 @@ def test_trade_id_public_identity_remains_envelope_id() -> None:
     assert Trade.id.property.columns[0].name == "id"
     assert Trade.position_id.property.columns[0].name == "position_id"
     assert Trade.decision_id.property.columns[0].name == "decision_id"
-

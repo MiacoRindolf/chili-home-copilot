@@ -48,4 +48,3 @@ Only these are acceptable without a fresh operator decision:
 ## Exit Criteria
 
 Observation is complete when production canaries remain green across a normal trading window and no relation/query errors appear. At that point, either leave Phase 5 parked or open a fresh, concrete brief for a non-rename trading improvement.
-

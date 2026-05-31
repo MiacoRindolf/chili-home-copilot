@@ -48,6 +48,7 @@ EXIT_STRUCTURAL_NOOP_PREFIX_PATTERNS = tuple(
     f"{prefix}%" for prefix in STRUCTURAL_EXIT_NOOP_PREFIXES
 )
 EXIT_NON_POSITIVE_NOOP_REASONS = tuple(sorted(NON_POSITIVE_EXIT_NOOP_REASONS))
+APPLICATION_NAME = "chili-alert-refresh-churn-audit"
 DEFAULT_STATEMENT_TIMEOUT_MS = 5000
 DEFAULT_LOCK_TIMEOUT_MS = 1000
 
@@ -67,19 +68,29 @@ def _positive_int_env(name: str, default: int) -> int:
     return value if value > 0 else int(default)
 
 
+def _read_only_guardrails() -> dict[str, int | str | bool]:
+    return {
+        "read_only": True,
+        "statement_timeout_ms": _positive_int_env(
+            "CHILI_ALERT_REFRESH_CHURN_STATEMENT_TIMEOUT_MS",
+            DEFAULT_STATEMENT_TIMEOUT_MS,
+        ),
+        "lock_timeout_ms": _positive_int_env(
+            "CHILI_ALERT_REFRESH_CHURN_LOCK_TIMEOUT_MS",
+            DEFAULT_LOCK_TIMEOUT_MS,
+        ),
+        "application_name": APPLICATION_NAME,
+    }
+
+
 def _configure_read_only_session(db) -> None:
-    statement_timeout_ms = _positive_int_env(
-        "CHILI_ALERT_REFRESH_CHURN_STATEMENT_TIMEOUT_MS",
-        DEFAULT_STATEMENT_TIMEOUT_MS,
-    )
-    lock_timeout_ms = _positive_int_env(
-        "CHILI_ALERT_REFRESH_CHURN_LOCK_TIMEOUT_MS",
-        DEFAULT_LOCK_TIMEOUT_MS,
-    )
+    guardrails = _read_only_guardrails()
     db.execute(text("SET TRANSACTION READ ONLY"))
-    db.execute(text(f"SET LOCAL statement_timeout = {statement_timeout_ms}"))
-    db.execute(text(f"SET LOCAL lock_timeout = {lock_timeout_ms}"))
-    db.execute(text("SET LOCAL application_name = 'chili-alert-refresh-churn-audit'"))
+    db.execute(
+        text(f"SET LOCAL statement_timeout = {guardrails['statement_timeout_ms']}")
+    )
+    db.execute(text(f"SET LOCAL lock_timeout = {guardrails['lock_timeout_ms']}"))
+    db.execute(text(f"SET LOCAL application_name = '{APPLICATION_NAME}'"))
 
 
 def _rows(sql: str, params: dict) -> list[dict]:
@@ -728,6 +739,7 @@ def _build_report(hours: int, limit: int) -> dict[str, object]:
     report: dict[str, object] = {
         "hours": int(hours),
         "limit": int(limit),
+        "read_only_guardrails": _read_only_guardrails(),
         "work_counts": _work_counts(hours),
         "diagnostic_outcomes": _diagnostic_counts(hours),
         "top_work_producing_patterns": _top_patterns(hours, limit),
