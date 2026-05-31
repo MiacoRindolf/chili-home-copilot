@@ -83,6 +83,10 @@ from .auto_trader_rules import (
     passes_rule_gate,
     resolve_pattern_signal_context,
 )
+from .recert_rescue_policy import (
+    RECENT_RECERT_RESCUE_BLOCKER_ACTIONS,
+    RECENT_RECERT_RESCUE_BLOCKER_REASONS,
+)
 from .autotrader_desk import effective_autotrader_runtime
 from .autopilot_scope import (
     AUTOPILOT_AUTO_TRADER_V1,
@@ -197,21 +201,8 @@ SHADOW_OBSERVATION_SIZING_MODE_FULL_DIAGNOSTICS = "full_diagnostics"
 SHADOW_OBSERVATION_DIAGNOSTIC_SIZING_SETTING = (
     "chili_autotrader_shadow_observation_diagnostic_sizing_enabled"
 )
-_RECENT_RECERT_FASTLANE_BLOCKER_ACTIONS = frozenset(
-    {
-        "complete_oos_recert_and_quality_refresh",
-        "inspect_recert_backtest_no_oos_evidence_keep_live_blocked",
-        "wait_for_recert_backtest_cooldown_keep_live_blocked",
-        "live_blocked_recert_debt_no_refresh",
-    }
-)
-_RECENT_RECERT_FASTLANE_BLOCKER_REASONS = frozenset(
-    {
-        "recent_recert_backtest_cooldown",
-        "recert_backtest_refresh_already_open",
-        "no_recert_refresh_needed",
-    }
-)
+_RECENT_RECERT_FASTLANE_BLOCKER_ACTIONS = RECENT_RECERT_RESCUE_BLOCKER_ACTIONS
+_RECENT_RECERT_FASTLANE_BLOCKER_REASONS = RECENT_RECERT_RESCUE_BLOCKER_REASONS
 SHADOW_OBSERVATION_EVIDENCE_NOTIONAL_SETTING = (
     "chili_autotrader_shadow_observation_evidence_notional_usd"
 )

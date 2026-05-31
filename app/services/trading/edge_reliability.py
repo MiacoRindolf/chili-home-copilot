@@ -28,6 +28,10 @@ from ...models.trading import (
 )
 from .autotrader_evidence import clean_autotrader_runs, partition_autotrader_runs
 from .brain_work.ledger import enqueue_outcome_event, enqueue_work_event
+from .recert_rescue_policy import (
+    RECENT_RECERT_RESCUE_BLOCKER_ACTIONS,
+    RECENT_RECERT_RESCUE_BLOCKER_REASONS,
+)
 from .return_math import (
     OPTION_CONTRACT_MULTIPLIER,
     paper_trade_contract_multiplier,
@@ -70,21 +74,6 @@ _NON_POSITIVE_EXIT_NOOP_REASONS = frozenset(
     }
 )
 _REPEATED_NON_POSITIVE_EXIT_NOOP_MIN_FINGERPRINTS = 3
-_RECENT_RECERT_RESCUE_BLOCKER_ACTIONS = frozenset(
-    {
-        "complete_oos_recert_and_quality_refresh",
-        "inspect_recert_backtest_no_oos_evidence_keep_live_blocked",
-        "wait_for_recert_backtest_cooldown_keep_live_blocked",
-        "live_blocked_recert_debt_no_refresh",
-    }
-)
-_RECENT_RECERT_RESCUE_BLOCKER_REASONS = frozenset(
-    {
-        "recent_recert_backtest_cooldown",
-        "recert_backtest_refresh_already_open",
-        "no_recert_refresh_needed",
-    }
-)
 
 
 def _top_profitability_buckets(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
@@ -1012,12 +1001,12 @@ def _recent_recert_rescue_blocker_exists(
     for row in rows:
         payload = row.payload if isinstance(row.payload, dict) else {}
         action = str(payload.get("recommended_next_action") or "").strip().lower()
-        if action in _RECENT_RECERT_RESCUE_BLOCKER_ACTIONS:
+        if action in RECENT_RECERT_RESCUE_BLOCKER_ACTIONS:
             return True
         refresh = payload.get("recert_backtest_refresh")
         if isinstance(refresh, dict):
             reason = str(refresh.get("reason") or "").strip().lower()
-            if reason in _RECENT_RECERT_RESCUE_BLOCKER_REASONS:
+            if reason in RECENT_RECERT_RESCUE_BLOCKER_REASONS:
                 return True
     return False
 
