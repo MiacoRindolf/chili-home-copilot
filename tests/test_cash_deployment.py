@@ -211,6 +211,7 @@ def test_cash_deployment_categorizes_positive_blocks_without_live_shortcuts(db, 
 
     assert by_pattern[negative.id]["cash_deployment_category"] == "negative_ev"
     assert by_pattern[negative.id]["cash_deployment_rank"] is None
+    assert by_pattern[negative.id]["recommended_work_event"] == "no_targeted_work"
 
     summary = cash_deployment_summary(rows)
     assert summary["live_deployable"] == 1
@@ -218,6 +219,49 @@ def test_cash_deployment_categorizes_positive_blocks_without_live_shortcuts(db, 
     assert summary["positive_ev_shadow"] >= 1
     assert summary["positive_ev_execution_blocked"] >= 1
     assert summary["negative_ev"] >= 1
+
+
+def test_cash_deployment_does_not_enqueue_guaranteed_noop_negative_exit_work(
+    db,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "chili_autotrader_live_enabled", True)
+    monkeypatch.setattr(settings, "chili_cash_deployment_equity_cost_pct", 0.05)
+    monkeypatch.setattr(settings, "chili_cash_deployment_min_closed_evidence", 5)
+
+    negative = _pattern(db, name="cash negative no work")
+    negative_alert = _alert(db, negative, ticker="NEGNOOP")
+    _run(
+        db,
+        negative,
+        negative_alert,
+        expected=-0.3,
+        reason="non_positive_expected_edge",
+    )
+    db.commit()
+
+    rows = cash_deployment_rows(db, pattern_ids=[negative.id], window_days=7, limit=10)
+    assert rows[0]["cash_deployment_category"] == "negative_ev"
+    assert rows[0]["recommended_work_event"] == "no_targeted_work"
+
+    out = enqueue_cash_deployment_work(
+        db,
+        window_days=7,
+        limit=10,
+        include_null_lineage=False,
+        include_snapshot_coverage=False,
+    )
+    db.commit()
+
+    assert out["created"] == 0
+    assert out["skipped_no_targeted_work"] == 1
+    assert (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_kind == "work")
+        .filter(BrainWorkEvent.event_type == "exit_variant_refresh")
+        .count()
+        == 0
+    )
 
 
 def test_cash_deployment_blocks_positive_slippage_miss_as_execution_debt(db, monkeypatch):
