@@ -96,7 +96,7 @@ def analyze_pattern_trades(
     min_n: int = DEFAULT_MIN_N,
     top_k_drop: int = 5,
 ) -> AnalysisReport:
-    """Trade-level median split on numeric feature keys + ticker rollup + concentration."""
+    """Pattern-row median split on numeric feature keys + ticker rollup + concentration."""
     since = datetime.utcnow() - timedelta(days=window_days)
     q = (
         db.query(PatternTradeRow)

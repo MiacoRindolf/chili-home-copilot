@@ -2,7 +2,7 @@
 
 Append-only, idempotent recording of economic events (entry fills, exit
 fills, fees, adjustments) with explicit ``cash_delta`` and
-``realized_pnl_delta``. Parallel to legacy ``Trade`` / ``PaperTrade`` rows;
+``realized_pnl_delta``. Parallel to legacy live/paper management rows;
 legacy ``pnl`` columns remain authoritative until a later cutover phase.
 
 Rollout ladder (matches Phase B/E):
@@ -87,7 +87,7 @@ def _trade_ref(source: str, trade_id: int | None, paper_trade_id: int | None) ->
 
 
 def _automation_trade_id(session_id: int) -> int:
-    """Use negative ids so automation-session ledger rows never collide with Trade ids."""
+    """Use negative ids so automation-session ledger rows never collide with live row ids."""
     return -abs(int(session_id))
 
 

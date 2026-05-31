@@ -1,6 +1,6 @@
 """SQL snippets for realized P&L return normalization.
 
-Live option ``Trade.pnl`` is recorded in dollars per contract
+Live option P&L is recorded in dollars per contract
 (``premium_delta * quantity * 100``). Any learner that divides by
 ``entry_price * quantity`` must therefore include the contract multiplier,
 or option returns are overstated by 100x.
@@ -22,7 +22,7 @@ def _json_truthy_sql(json_expr: str, key: str) -> str:
 
 
 def trade_contract_multiplier_sql(alias: str | None = None) -> str:
-    """Return a PostgreSQL expression for a live trade contract multiplier."""
+    """Return a PostgreSQL expression for a live-row contract multiplier."""
     asset_kind = _col(alias, "asset_kind")
     tags = _col(alias, "tags")
     snap = f"COALESCE({_col(alias, 'indicator_snapshot')}, '{{}}'::jsonb)"
@@ -64,7 +64,7 @@ def paper_trade_contract_multiplier_sql(alias: str | None = None) -> str:
 
 
 def trade_return_fraction_sql(alias: str | None = None) -> str:
-    """Return ``pnl / notional`` for live trades, option-contract aware."""
+    """Return ``pnl / notional`` for live rows, option-contract aware."""
     return (
         f"{_col(alias, 'pnl')} / "
         f"({_col(alias, 'entry_price')} * {_col(alias, 'quantity')} * "
