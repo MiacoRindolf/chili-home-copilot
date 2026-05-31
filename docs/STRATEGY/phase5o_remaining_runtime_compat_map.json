@@ -2,14 +2,14 @@
   "generated_from": "scripts/analyze_phase5_remaining_trade_refs.py --json",
   "orm_trade_symbol_compat_count": 65,
   "phase5o_bucket_counts": {
-    "adapter_candidate": 3,
-    "future_rename_blocker": 46,
+    "adapter_candidate": 2,
+    "future_rename_blocker": 47,
     "leave_alone": 16
   },
   "contract_group_counts": {
     "learning_research_reporting": 6,
-    "live_action_broker_reconcile": 20,
-    "private_helper_type_only": 4,
+    "live_action_broker_reconcile": 21,
+    "private_helper_type_only": 3,
     "public_ui_schema_contract": 14,
     "risk_capital_gate": 21
   },
@@ -135,10 +135,10 @@
     },
     {
       "path": "app/services/trading/autotrader_desk.py",
-      "contract_group": "private_helper_type_only",
-      "phase5o_bucket": "adapter_candidate",
-      "phase5o_subtype": "private_helper_adapter_candidate",
-      "rationale": "Private helper surface; candidate for protocol/adapter extraction if direct tests exist."
+      "contract_group": "live_action_broker_reconcile",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "autotrader_desk_live_position_surface",
+      "rationale": "Operator-visible live desk surface: loads open management envelopes, suppresses broker-stale rows, overlays broker truth and quotes, fetches overrides, and exposes close/control affordances. Requires live desk input parity and a dedicated behavior-preserving conversion before any remaining ORM surface change."
     },
     {
       "path": "app/services/trading/bracket_intent_writer.py",
