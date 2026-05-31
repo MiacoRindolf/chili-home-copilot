@@ -2770,6 +2770,12 @@ def passes_rule_gate(
         cap, cap_source = resolve_effective_capital(db, settings)
         snap["capital_usd"] = round(cap, 2)
         snap["capital_source"] = cap_source
+        capital_source_is_fallback = str(cap_source or "").startswith("fallback:")
+        snap["capital_proven"] = not capital_source_is_fallback
+        if capital_source_is_fallback:
+            reason = f"capital_unavailable:{cap_source}"
+            snap["portfolio_check"] = {"ok": False, "reason": reason}
+            return False, reason, snap
         portfolio_asset_type = (
             "options" if options_path else ("crypto" if crypto_path else "stock")
         )
