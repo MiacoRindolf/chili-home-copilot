@@ -225,6 +225,7 @@ def check_portfolio_drawdown(
     positions = open_trades.all()
 
     total_unrealized = 0.0
+    valuation_missing_count = 0
     for pos in positions:
         try:
             multiplier = 1.0
@@ -241,11 +242,15 @@ def check_portfolio_drawdown(
                 if q and q.get("price"):
                     price = _positive_float_or_none(q["price"])
             if price is None:
+                valuation_missing_count += 1
                 continue
             pnl = _paper_unrealized_pnl(pos, current_price=price, multiplier=multiplier)
             if pnl is not None:
                 total_unrealized += pnl
+            else:
+                valuation_missing_count += 1
         except Exception:
+            valuation_missing_count += 1
             continue
 
     cutoff = datetime.utcnow() - timedelta(days=30)
@@ -263,24 +268,50 @@ def check_portfolio_drawdown(
 
     total_pnl = total_unrealized + closed_pnl
     capital_f = _positive_float_or_none(capital)
-    dd_pct = (total_pnl / capital_f * 100) if capital_f is not None else 0
+    if capital_f is None:
+        return {
+            "ok": False,
+            "reason": "invalid_capital",
+            "unrealized_pnl": round(total_unrealized, 2),
+            "closed_30d_pnl": round(closed_pnl, 2),
+            "total_pnl": round(total_pnl, 2),
+            "dd_pct": 0.0,
+            "max_dd_pct": max_dd_pct,
+            "breached": True,
+            "valuation_missing_count": valuation_missing_count,
+            "valuation_complete": valuation_missing_count == 0,
+            "open_positions": len(positions),
+        }
+
+    dd_pct = total_pnl / capital_f * 100
 
     breached = dd_pct < -max_dd_pct
+    reason = "drawdown_breached" if breached else None
+    if valuation_missing_count > 0:
+        breached = True
+        reason = "valuation_unavailable"
 
     if breached:
         logger.warning(
-            "[portfolio_opt] Portfolio DD breached: %.1f%% (limit -%.1f%%)",
-            dd_pct, max_dd_pct,
+            "[portfolio_opt] Portfolio DD blocked: reason=%s dd=%.1f%% "
+            "(limit -%.1f%%) valuation_missing=%d",
+            reason,
+            dd_pct,
+            max_dd_pct,
+            valuation_missing_count,
         )
 
     return {
-        "ok": True,
+        "ok": not breached,
+        "reason": reason,
         "unrealized_pnl": round(total_unrealized, 2),
         "closed_30d_pnl": round(closed_pnl, 2),
         "total_pnl": round(total_pnl, 2),
         "dd_pct": round(dd_pct, 2),
         "max_dd_pct": max_dd_pct,
         "breached": breached,
+        "valuation_missing_count": valuation_missing_count,
+        "valuation_complete": valuation_missing_count == 0,
         "open_positions": len(positions),
     }
 

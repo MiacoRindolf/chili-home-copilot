@@ -483,6 +483,18 @@ def check_new_trade_allowed(
         logger.warning("[risk] correlation check failed — flagging trade", exc_info=True)
         return True, "ok (correlation check unavailable — proceed with caution)"
 
+    # Portfolio optimizer drawdown requires complete open-position valuation.
+    try:
+        from .portfolio_optimizer import check_portfolio_drawdown
+        dd = check_portfolio_drawdown(db, user_id, capital_f)
+        if dd.get("reason") in {"valuation_unavailable", "invalid_capital"}:
+            return False, "portfolio_drawdown_unavailable"
+        if dd.get("breached"):
+            return False, f"Portfolio drawdown {dd.get('dd_pct', 0.0):.1f}% breached limit"
+    except Exception as exc:
+        logger.warning("[risk] Portfolio drawdown unavailable; blocking as precaution: %s", exc)
+        return False, "portfolio_drawdown_unavailable"
+
     return True, "ok"
 
 
@@ -2095,12 +2107,18 @@ def unified_risk_check(
     # 8. Portfolio-level drawdown check (optimizer)
     try:
         from .portfolio_optimizer import check_portfolio_drawdown
-        dd = check_portfolio_drawdown(db, user_id, capital)
+        dd = check_portfolio_drawdown(db, user_id, capital_f)
         detail["portfolio_dd_pct"] = dd.get("dd_pct")
+        detail["portfolio_drawdown_reason"] = dd.get("reason")
+        detail["portfolio_valuation_missing_count"] = dd.get("valuation_missing_count")
+        if dd.get("reason") in {"valuation_unavailable", "invalid_capital"}:
+            return False, "portfolio_drawdown_unavailable", detail
         if dd.get("breached"):
-            return False, f"Portfolio drawdown {dd['dd_pct']:.1f}% breached limit", detail
-    except Exception:
-        pass
+            return False, f"Portfolio drawdown {dd.get('dd_pct', 0.0):.1f}% breached limit", detail
+    except Exception as exc:
+        logger.warning("[risk] Portfolio drawdown unavailable; blocking as precaution: %s", exc)
+        detail["portfolio_drawdown_reason"] = "check_failed"
+        return False, "portfolio_drawdown_unavailable", detail
 
     # 9. Compute recommended size if entry/stop provided
     if entry_price and stop_price and entry_price > 0 and stop_price > 0:

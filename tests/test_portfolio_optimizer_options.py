@@ -106,9 +106,86 @@ def test_portfolio_drawdown_option_skips_invalid_pnl_basis(entry_price, quantity
         )
 
     assert out["open_positions"] == 1
+    assert out["ok"] is False
+    assert out["breached"] is True
+    assert out["reason"] == "valuation_unavailable"
+    assert out["valuation_missing_count"] == 1
+    assert out["valuation_complete"] is False
     assert out["unrealized_pnl"] == pytest.approx(0.0)
     assert out["total_pnl"] == pytest.approx(0.0)
     assert out["dd_pct"] == pytest.approx(0.0)
+
+
+def test_portfolio_drawdown_blocks_when_open_position_mark_is_unavailable() -> None:
+    from app.services.trading.portfolio_optimizer import check_portfolio_drawdown
+
+    with patch(
+        "app.services.trading.market_data.fetch_quote",
+        return_value=None,
+    ):
+        out = check_portfolio_drawdown(
+            _FakeDb([PaperTrade(
+                ticker="NOQUOTE",
+                direction="long",
+                entry_price=10.0,
+                quantity=2.0,
+                status="open",
+                entry_date=datetime.utcnow(),
+            )], []),
+            user_id=None,
+            capital=10_000.0,
+            max_dd_pct=15.0,
+        )
+
+    assert out["ok"] is False
+    assert out["breached"] is True
+    assert out["reason"] == "valuation_unavailable"
+    assert out["valuation_missing_count"] == 1
+    assert out["valuation_complete"] is False
+
+
+def test_portfolio_drawdown_blocks_invalid_capital() -> None:
+    from app.services.trading.portfolio_optimizer import check_portfolio_drawdown
+
+    out = check_portfolio_drawdown(
+        _FakeDb([], []),
+        user_id=None,
+        capital=None,
+        max_dd_pct=15.0,
+    )
+
+    assert out["ok"] is False
+    assert out["breached"] is True
+    assert out["reason"] == "invalid_capital"
+    assert out["valuation_complete"] is True
+
+
+def test_portfolio_drawdown_marks_real_breach_not_ok() -> None:
+    from app.services.trading.portfolio_optimizer import check_portfolio_drawdown
+
+    closed = PaperTrade(
+        ticker="SPY",
+        direction="long",
+        entry_price=100.0,
+        quantity=1.0,
+        status="closed",
+        entry_date=datetime.utcnow(),
+        exit_date=datetime.utcnow(),
+        pnl=-2_000.0,
+    )
+
+    out = check_portfolio_drawdown(
+        _FakeDb([], [closed]),
+        user_id=None,
+        capital=10_000.0,
+        max_dd_pct=15.0,
+    )
+
+    assert out["ok"] is False
+    assert out["breached"] is True
+    assert out["reason"] == "drawdown_breached"
+    assert out["valuation_complete"] is True
+    assert out["dd_pct"] == pytest.approx(-20.0)
 
 
 def test_portfolio_drawdown_ignores_nonfinite_closed_pnl() -> None:

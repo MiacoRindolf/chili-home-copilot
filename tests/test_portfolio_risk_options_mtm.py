@@ -482,6 +482,111 @@ def test_check_new_trade_allowed_blocks_invalid_capital_before_drawdown_or_sizin
     correlation_check.assert_not_called()
 
 
+def test_check_new_trade_allowed_blocks_when_drawdown_valuation_unavailable() -> None:
+    from app.services.trading.portfolio_risk import RiskLimits, check_new_trade_allowed
+
+    limits = RiskLimits(
+        max_open_positions=10,
+        max_crypto_positions=10,
+        max_stock_positions=10,
+        max_portfolio_heat_pct=100.0,
+        max_same_ticker=10,
+        max_sector_pct=100.0,
+        max_avg_correlation=1.0,
+    )
+
+    with patch(
+        "app.services.trading.governance.is_kill_switch_active",
+        return_value=False,
+    ), patch(
+        "app.services.trading.portfolio_risk.is_breaker_tripped",
+        return_value=False,
+    ), patch(
+        "app.services.trading.portfolio_risk.check_drawdown_breaker",
+        return_value=(False, None),
+    ), patch(
+        "app.services.trading.portfolio_risk.check_sector_concentration",
+        return_value=(True, "ok"),
+    ), patch(
+        "app.services.trading.portfolio_risk.check_correlation_risk",
+        return_value=(True, "ok"),
+    ), patch(
+        "app.services.trading.portfolio_risk.estimate_portfolio_var",
+        return_value=None,
+    ), patch(
+        "app.services.trading.portfolio_risk.estimate_portfolio_cvar",
+        return_value=None,
+    ), patch(
+        "app.services.trading.portfolio_optimizer.check_portfolio_drawdown",
+        return_value={
+            "breached": True,
+            "dd_pct": 0.0,
+            "reason": "valuation_unavailable",
+            "valuation_missing_count": 1,
+        },
+    ):
+        ok, reason = check_new_trade_allowed(
+            _FakeDb([]),
+            None,
+            "SPY",
+            capital=10_000.0,
+            limits=limits,
+        )
+
+    assert ok is False
+    assert reason == "portfolio_drawdown_unavailable"
+
+
+def test_check_new_trade_allowed_blocks_when_drawdown_check_errors() -> None:
+    from app.services.trading.portfolio_risk import RiskLimits, check_new_trade_allowed
+
+    limits = RiskLimits(
+        max_open_positions=10,
+        max_crypto_positions=10,
+        max_stock_positions=10,
+        max_portfolio_heat_pct=100.0,
+        max_same_ticker=10,
+        max_sector_pct=100.0,
+        max_avg_correlation=1.0,
+    )
+
+    with patch(
+        "app.services.trading.governance.is_kill_switch_active",
+        return_value=False,
+    ), patch(
+        "app.services.trading.portfolio_risk.is_breaker_tripped",
+        return_value=False,
+    ), patch(
+        "app.services.trading.portfolio_risk.check_drawdown_breaker",
+        return_value=(False, None),
+    ), patch(
+        "app.services.trading.portfolio_risk.check_sector_concentration",
+        return_value=(True, "ok"),
+    ), patch(
+        "app.services.trading.portfolio_risk.check_correlation_risk",
+        return_value=(True, "ok"),
+    ), patch(
+        "app.services.trading.portfolio_risk.estimate_portfolio_var",
+        return_value=None,
+    ), patch(
+        "app.services.trading.portfolio_risk.estimate_portfolio_cvar",
+        return_value=None,
+    ), patch(
+        "app.services.trading.portfolio_optimizer.check_portfolio_drawdown",
+        side_effect=RuntimeError("drawdown probe failed"),
+    ):
+        ok, reason = check_new_trade_allowed(
+            _FakeDb([]),
+            None,
+            "SPY",
+            capital=10_000.0,
+            limits=limits,
+        )
+
+    assert ok is False
+    assert reason == "portfolio_drawdown_unavailable"
+
+
 def test_portfolio_budget_counts_options_outside_stock_cap() -> None:
     from app.services.trading.portfolio_risk import get_portfolio_risk_snapshot
 
@@ -544,6 +649,9 @@ def test_option_entry_is_not_blocked_by_full_stock_cap() -> None:
     ), patch(
         "app.services.trading.portfolio_risk.estimate_portfolio_cvar",
         return_value=None,
+    ), patch(
+        "app.services.trading.portfolio_optimizer.check_portfolio_drawdown",
+        return_value={"breached": False, "dd_pct": 0.0, "reason": None},
     ):
         stock_ok, stock_reason = check_new_trade_allowed(
             db,
