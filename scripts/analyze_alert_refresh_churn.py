@@ -52,6 +52,7 @@ EXIT_NON_POSITIVE_NOOP_REASONS = tuple(sorted(NON_POSITIVE_EXIT_NOOP_REASONS))
 APPLICATION_NAME = "chili-alert-refresh-churn-audit"
 DEFAULT_STATEMENT_TIMEOUT_MS = 5000
 DEFAULT_LOCK_TIMEOUT_MS = 1000
+FRESH_SIGNAL_WINDOW_SECONDS = 30 * 60
 
 
 class DatabaseUnavailable(RuntimeError):
@@ -713,6 +714,38 @@ def _newest_age_seconds(
     return max(0, int((ref - max(timestamps)).total_seconds()))
 
 
+def _row_age_seconds(
+    row: dict,
+    *keys: str,
+    now: datetime | None = None,
+) -> int | None:
+    timestamp = None
+    for key in keys:
+        timestamp = _coerce_datetime(row.get(key))
+        if timestamp is not None:
+            break
+    if timestamp is None:
+        return None
+    ref = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    return max(0, int((ref - timestamp).total_seconds()))
+
+
+def _fresh_row_count(
+    rows: Iterable[object],
+    *keys: str,
+    window_seconds: int = FRESH_SIGNAL_WINDOW_SECONDS,
+) -> int:
+    count = 0
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        age_seconds = _row_age_seconds(row, *keys, now=now)
+        if age_seconds is not None and age_seconds <= window_seconds:
+            count += 1
+    return count
+
+
 def _alert_pressure_summary(report: dict[str, object]) -> dict[str, int | str | None]:
     work_counts = list(report.get("work_counts") or [])
     diagnostic_outcomes = list(report.get("diagnostic_outcomes") or [])
@@ -777,6 +810,23 @@ def _alert_pressure_summary(report: dict[str, object]) -> dict[str, int | str | 
         ),
         "duplicate_suppressions": duplicate_suppressions_count,
         "historical_noise_events": historical_noise_events,
+        "fresh_signal_window_seconds": FRESH_SIGNAL_WINDOW_SECONDS,
+        "fresh_noop_exit_rollups": _fresh_row_count(
+            noop_exit_rollups,
+            "last_seen",
+            "first_seen",
+        ),
+        "fresh_recert_blocker_rollups": _fresh_row_count(
+            recert_blocker_rollups,
+            "last_seen",
+            "first_seen",
+        ),
+        "fresh_duplicate_suppression_groups": _fresh_row_count(
+            duplicate_suppressions,
+            "last_suppressed",
+            "last_seen",
+            "first_seen",
+        ),
         "oldest_open_work_age_seconds": _oldest_age_seconds(open_first_seen_values),
         "oldest_open_conflict_age_seconds": _oldest_age_seconds(
             row.get("work_created") or row.get("first_seen")

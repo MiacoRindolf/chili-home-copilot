@@ -156,11 +156,19 @@ def test_alert_pressure_summary_separates_open_conflicts_from_history():
                 "noop_diagnostics": 3,
                 "last_seen": now - timedelta(seconds=25),
             },
+            {
+                "noop_diagnostics": 2,
+                "last_seen": now - timedelta(minutes=45),
+            },
         ],
         "top_recert_rescue_blocker_rollups": [
             {
                 "blocker_diagnostics": 7,
                 "last_seen": now - timedelta(seconds=35),
+            },
+            {
+                "blocker_diagnostics": 4,
+                "last_seen": now - timedelta(minutes=45),
             },
         ],
         "open_exit_variant_work_with_recent_noop": [
@@ -194,10 +202,14 @@ def test_alert_pressure_summary_separates_open_conflicts_from_history():
         "open_conflict_rows": 2,
         "completed_work_events": 25,
         "diagnostic_events": 10,
-        "noop_exit_diagnostics": 3,
-        "recert_blocker_diagnostics": 7,
+        "noop_exit_diagnostics": 5,
+        "recert_blocker_diagnostics": 11,
         "duplicate_suppressions": 4,
         "historical_noise_events": 39,
+        "fresh_signal_window_seconds": 1800,
+        "fresh_noop_exit_rollups": 1,
+        "fresh_recert_blocker_rollups": 1,
+        "fresh_duplicate_suppression_groups": 1,
     }
 
 
@@ -247,6 +259,10 @@ def test_alert_pressure_summary_labels_historical_noise_without_attention():
         "recert_blocker_diagnostics": 5,
         "duplicate_suppressions": 2,
         "historical_noise_events": 19,
+        "fresh_signal_window_seconds": 1800,
+        "fresh_noop_exit_rollups": 0,
+        "fresh_recert_blocker_rollups": 0,
+        "fresh_duplicate_suppression_groups": 0,
         "oldest_open_work_age_seconds": None,
         "oldest_open_conflict_age_seconds": None,
         "latest_noop_exit_age_seconds": None,
