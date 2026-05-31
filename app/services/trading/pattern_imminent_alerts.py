@@ -9,7 +9,7 @@ import heapq
 import json
 import logging
 import time as _time
-from collections import Counter
+from collections import Counter, OrderedDict
 from datetime import datetime, time, timedelta, timezone
 from typing import Any
 
@@ -150,7 +150,8 @@ _COINBASE_SPOT_TICKER_CACHE: dict[str, Any] = {
     "expires_at": 0.0,
     "tickers": frozenset(),
 }
-_SCORE_FAILURE_CACHE: dict[str, dict[str, float | int]] = {}
+_SCORE_FAILURE_CACHE: OrderedDict[str, dict[str, float | int]] = OrderedDict()
+_SCORE_FAILURE_CACHE_MAX = 4096
 
 
 def _non_negative_int_setting(name: str, default: int) -> int:
@@ -825,7 +826,8 @@ def _score_time_budget_seconds() -> float:
 def _score_failure_cooldown_active(ticker: str) -> bool:
     if not _score_failure_cooldown_enabled():
         return False
-    entry = _SCORE_FAILURE_CACHE.get(str(ticker or "").strip().upper())
+    ticker_u = str(ticker or "").strip().upper()
+    entry = _SCORE_FAILURE_CACHE.get(ticker_u)
     if not entry:
         return False
     now = _time.monotonic()
@@ -833,9 +835,22 @@ def _score_failure_cooldown_active(ticker: str) -> bool:
     if cooldown_until <= 0.0:
         return False
     if now < cooldown_until:
+        _SCORE_FAILURE_CACHE.move_to_end(ticker_u)
         return True
-    _SCORE_FAILURE_CACHE.pop(str(ticker or "").strip().upper(), None)
+    _SCORE_FAILURE_CACHE.pop(ticker_u, None)
     return False
+
+
+def _prune_score_failure_cache(now: float) -> None:
+    while _SCORE_FAILURE_CACHE:
+        _ticker = next(iter(_SCORE_FAILURE_CACHE))
+        entry = _SCORE_FAILURE_CACHE[_ticker]
+        cooldown_until = float(entry.get("cooldown_until") or 0.0)
+        if cooldown_until <= 0.0 or cooldown_until > now:
+            break
+        _SCORE_FAILURE_CACHE.popitem(last=False)
+    while len(_SCORE_FAILURE_CACHE) > _SCORE_FAILURE_CACHE_MAX:
+        _SCORE_FAILURE_CACHE.popitem(last=False)
 
 
 def _record_score_failure(ticker: str) -> None:
@@ -854,10 +869,12 @@ def _record_score_failure(ticker: str) -> None:
     cooldown_until = float(entry.get("cooldown_until") or 0.0)
     if failures >= _score_failure_min_failures():
         cooldown_until = now + (cooldown_minutes * SECONDS_PER_MINUTE)
+    _SCORE_FAILURE_CACHE.pop(ticker_u, None)
     _SCORE_FAILURE_CACHE[ticker_u] = {
         "failures": failures,
         "cooldown_until": cooldown_until,
     }
+    _prune_score_failure_cache(now)
 
 
 def _record_score_success(ticker: str) -> None:
