@@ -162,6 +162,8 @@ def test_no_reader_consults_position_id_on_bracket_intents_in_app_services():
         str(repo_root / "app" / "services" / "trading" / "execution_audit.py"),
         str(repo_root / "app" / "services" / "trading" / "position_resolver.py"),
         str(repo_root / "app" / "services" / "broker_service.py"),
+        str(repo_root / "app" / "services" / "coinbase_service.py"),
+        str(repo_root / "app" / "services" / "trading" / "auto_trader.py"),
     }
 
     offenders = []

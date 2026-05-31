@@ -77,7 +77,7 @@ class _FakeDb:
             return _Result(self.rows.get("alerts", {}))
         if "FROM pattern_alert_directional_outcome p" in sql:
             return _Result(self.rows.get("directional_outcomes", {}))
-        if "FROM trading_trades t" in sql:
+        if "FROM trading_management_envelopes t" in sql:
             return _Result(self.rows.get("trade_packets", {}))
         if "FROM trading_automation_simulated_fills" in sql:
             return _Result(self.rows.get("automation_entry_fills", {}))

@@ -281,7 +281,7 @@ class TestQuantity:
     def test_quantity_at_least_one(self, _mock):
         pick = {"signals": [], "risk_level": "medium"}
         qty, pct = _compute_position_size(
-            price=1000.0, stop=950.0, buying_power=500, pick=pick,
+            price=1000.0, stop=950.0, buying_power=20_000, pick=pick,
         )
         assert qty is not None
         assert qty >= 1

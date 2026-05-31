@@ -35,6 +35,7 @@ ALLOWED_WRITE_CONTEXTS = {
     "app/services/broker_service.py": ("inverse_reconcile_reopen",),
     "app/services/coinbase_service.py": (
         "position_id = :pid",
+        "coinbase_position_truth_quantity",
         "coinbase_inverse_reconcile_reopen",
     ),
     "app/services/trading/bracket_reconciliation_service.py": (
