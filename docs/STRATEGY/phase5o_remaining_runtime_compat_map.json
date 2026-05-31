@@ -1,0 +1,669 @@
+{
+  "generated_from": "scripts/analyze_phase5_remaining_trade_refs.py --json",
+  "orm_trade_symbol_compat_count": 93,
+  "phase5o_bucket_counts": {
+    "adapter_candidate": 44,
+    "future_rename_blocker": 33,
+    "leave_alone": 16
+  },
+  "contract_group_counts": {
+    "learning_research_reporting": 39,
+    "live_action_broker_reconcile": 15,
+    "private_helper_type_only": 7,
+    "public_ui_schema_contract": 14,
+    "risk_capital_gate": 18
+  },
+  "items": [
+    {
+      "path": "app/config.py",
+      "contract_group": "public_ui_schema_contract",
+      "phase5o_bucket": "leave_alone",
+      "phase5o_subtype": "public_stable_contract",
+      "rationale": "Public route/schema/static-template surface intentionally preserves /trades and trade_id vocabulary."
+    },
+    {
+      "path": "app/models/__init__.py",
+      "contract_group": "public_ui_schema_contract",
+      "phase5o_bucket": "leave_alone",
+      "phase5o_subtype": "public_stable_contract",
+      "rationale": "Public route/schema/static-template surface intentionally preserves /trades and trade_id vocabulary."
+    },
+    {
+      "path": "app/models/trading.py",
+      "contract_group": "private_helper_type_only",
+      "phase5o_bucket": "leave_alone",
+      "phase5o_subtype": "model_export_compatibility",
+      "rationale": "Legacy ORM class/export is the compatibility symbol itself; mechanical rename would be broad and risky."
+    },
+    {
+      "path": "app/routers/trading.py",
+      "contract_group": "public_ui_schema_contract",
+      "phase5o_bucket": "leave_alone",
+      "phase5o_subtype": "public_stable_contract",
+      "rationale": "Public route/schema/static-template surface intentionally preserves /trades and trade_id vocabulary."
+    },
+    {
+      "path": "app/routers/trading_sub/monitor.py",
+      "contract_group": "public_ui_schema_contract",
+      "phase5o_bucket": "leave_alone",
+      "phase5o_subtype": "public_stable_contract",
+      "rationale": "Public route/schema/static-template surface intentionally preserves /trades and trade_id vocabulary."
+    },
+    {
+      "path": "app/routers/trading_sub/scanning.py",
+      "contract_group": "public_ui_schema_contract",
+      "phase5o_bucket": "leave_alone",
+      "phase5o_subtype": "public_stable_contract",
+      "rationale": "Public route/schema/static-template surface intentionally preserves /trades and trade_id vocabulary."
+    },
+    {
+      "path": "app/routers/trading_sub/trades.py",
+      "contract_group": "public_ui_schema_contract",
+      "phase5o_bucket": "leave_alone",
+      "phase5o_subtype": "public_stable_contract",
+      "rationale": "Public route/schema/static-template surface intentionally preserves /trades and trade_id vocabulary."
+    },
+    {
+      "path": "app/schemas/trading.py",
+      "contract_group": "public_ui_schema_contract",
+      "phase5o_bucket": "leave_alone",
+      "phase5o_subtype": "public_stable_contract",
+      "rationale": "Public route/schema/static-template surface intentionally preserves /trades and trade_id vocabulary."
+    },
+    {
+      "path": "app/services/backtest_service.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/broker_service.py",
+      "contract_group": "live_action_broker_reconcile",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "live_broker_reconcile_path",
+      "rationale": "Touches broker, close, stop, reconcile, or position-truth behavior; requires runtime probes before change."
+    },
+    {
+      "path": "app/services/context_brain/outcome_tracker.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/reasoning_brain/interest_graph.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/__init__.py",
+      "contract_group": "private_helper_type_only",
+      "phase5o_bucket": "leave_alone",
+      "phase5o_subtype": "model_export_compatibility",
+      "rationale": "Legacy ORM class/export is the compatibility symbol itself; mechanical rename would be broad and risky."
+    },
+    {
+      "path": "app/services/trading/alerts.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/alpha_decay.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/auto_trader_monitor.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/auto_trader_position_overrides.py",
+      "contract_group": "private_helper_type_only",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "private_helper_adapter_candidate",
+      "rationale": "Private helper surface; candidate for protocol/adapter extraction if direct tests exist."
+    },
+    {
+      "path": "app/services/trading/auto_trader_rules.py",
+      "contract_group": "risk_capital_gate",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "risk_capital_gate",
+      "rationale": "Capital, PDT, portfolio, or fast-path risk gate; rename must wait for wider safety parity."
+    },
+    {
+      "path": "app/services/trading/auto_trader_synergy.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/autopilot_scope.py",
+      "contract_group": "private_helper_type_only",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "private_helper_adapter_candidate",
+      "rationale": "Private helper surface; candidate for protocol/adapter extraction if direct tests exist."
+    },
+    {
+      "path": "app/services/trading/autotrader_desk.py",
+      "contract_group": "private_helper_type_only",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "private_helper_adapter_candidate",
+      "rationale": "Private helper surface; candidate for protocol/adapter extraction if direct tests exist."
+    },
+    {
+      "path": "app/services/trading/bracket_intent_writer.py",
+      "contract_group": "live_action_broker_reconcile",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "live_broker_reconcile_path",
+      "rationale": "Touches broker, close, stop, reconcile, or position-truth behavior; requires runtime probes before change."
+    },
+    {
+      "path": "app/services/trading/bracket_writer_g2.py",
+      "contract_group": "live_action_broker_reconcile",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "live_broker_reconcile_path",
+      "rationale": "Touches broker, close, stop, reconcile, or position-truth behavior; requires runtime probes before change."
+    },
+    {
+      "path": "app/services/trading/brain_neural_mesh/action_handlers.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/brain_neural_mesh/plasticity.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/brain_neural_mesh/publisher.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/broker_account_repair.py",
+      "contract_group": "live_action_broker_reconcile",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "live_broker_reconcile_path",
+      "rationale": "Touches broker, close, stop, reconcile, or position-truth behavior; requires runtime probes before change."
+    },
+    {
+      "path": "app/services/trading/broker_position_sync.py",
+      "contract_group": "live_action_broker_reconcile",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "live_broker_reconcile_path",
+      "rationale": "Touches broker, close, stop, reconcile, or position-truth behavior; requires runtime probes before change."
+    },
+    {
+      "path": "app/services/trading/broker_position_truth.py",
+      "contract_group": "live_action_broker_reconcile",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "live_broker_reconcile_path",
+      "rationale": "Touches broker, close, stop, reconcile, or position-truth behavior; requires runtime probes before change."
+    },
+    {
+      "path": "app/services/trading/broker_quotes.py",
+      "contract_group": "live_action_broker_reconcile",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "live_broker_reconcile_path",
+      "rationale": "Touches broker, close, stop, reconcile, or position-truth behavior; requires runtime probes before change."
+    },
+    {
+      "path": "app/services/trading/cash_deployment.py",
+      "contract_group": "risk_capital_gate",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "risk_capital_gate",
+      "rationale": "Capital, PDT, portfolio, or fast-path risk gate; rename must wait for wider safety parity."
+    },
+    {
+      "path": "app/services/trading/compliance.py",
+      "contract_group": "risk_capital_gate",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "risk_capital_gate",
+      "rationale": "Capital, PDT, portfolio, or fast-path risk gate; rename must wait for wider safety parity."
+    },
+    {
+      "path": "app/services/trading/correlation_budget.py",
+      "contract_group": "risk_capital_gate",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "risk_capital_gate",
+      "rationale": "Capital, PDT, portfolio, or fast-path risk gate; rename must wait for wider safety parity."
+    },
+    {
+      "path": "app/services/trading/cron_jobs/stale_promoted_sweep.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/crypto/exit_monitor.py",
+      "contract_group": "live_action_broker_reconcile",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "live_broker_reconcile_path",
+      "rationale": "Touches broker, close, stop, reconcile, or position-truth behavior; requires runtime probes before change."
+    },
+    {
+      "path": "app/services/trading/divergence_service.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/economic_ledger.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/edge_reliability.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/emergency_liquidation.py",
+      "contract_group": "risk_capital_gate",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "risk_capital_gate",
+      "rationale": "Capital, PDT, portfolio, or fast-path risk gate; rename must wait for wider safety parity."
+    },
+    {
+      "path": "app/services/trading/evidence_correction.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/execution_cost_builder.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/execution_event_lag.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/execution_robustness.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/exit_evaluator.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/fast_path/__init__.py",
+      "contract_group": "risk_capital_gate",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "risk_capital_gate",
+      "rationale": "Capital, PDT, portfolio, or fast-path risk gate; rename must wait for wider safety parity."
+    },
+    {
+      "path": "app/services/trading/fast_path/calibration.py",
+      "contract_group": "risk_capital_gate",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "risk_capital_gate",
+      "rationale": "Capital, PDT, portfolio, or fast-path risk gate; rename must wait for wider safety parity."
+    },
+    {
+      "path": "app/services/trading/fast_path/executor.py",
+      "contract_group": "risk_capital_gate",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "risk_capital_gate",
+      "rationale": "Capital, PDT, portfolio, or fast-path risk gate; rename must wait for wider safety parity."
+    },
+    {
+      "path": "app/services/trading/fast_path/gates.py",
+      "contract_group": "risk_capital_gate",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "risk_capital_gate",
+      "rationale": "Capital, PDT, portfolio, or fast-path risk gate; rename must wait for wider safety parity."
+    },
+    {
+      "path": "app/services/trading/fast_path/order_book.py",
+      "contract_group": "risk_capital_gate",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "risk_capital_gate",
+      "rationale": "Capital, PDT, portfolio, or fast-path risk gate; rename must wait for wider safety parity."
+    },
+    {
+      "path": "app/services/trading/fast_path/settings.py",
+      "contract_group": "risk_capital_gate",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "risk_capital_gate",
+      "rationale": "Capital, PDT, portfolio, or fast-path risk gate; rename must wait for wider safety parity."
+    },
+    {
+      "path": "app/services/trading/fast_path/universe_rotator.py",
+      "contract_group": "risk_capital_gate",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "risk_capital_gate",
+      "rationale": "Capital, PDT, portfolio, or fast-path risk gate; rename must wait for wider safety parity."
+    },
+    {
+      "path": "app/services/trading/fast_path/ws_client.py",
+      "contract_group": "risk_capital_gate",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "risk_capital_gate",
+      "rationale": "Capital, PDT, portfolio, or fast-path risk gate; rename must wait for wider safety parity."
+    },
+    {
+      "path": "app/services/trading/governance.py",
+      "contract_group": "risk_capital_gate",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "risk_capital_gate",
+      "rationale": "Capital, PDT, portfolio, or fast-path risk gate; rename must wait for wider safety parity."
+    },
+    {
+      "path": "app/services/trading/learning.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/learning_cycle_architecture.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/live_drift.py",
+      "contract_group": "private_helper_type_only",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "private_helper_adapter_candidate",
+      "rationale": "Private helper surface; candidate for protocol/adapter extraction if direct tests exist."
+    },
+    {
+      "path": "app/services/trading/live_exit_engine.py",
+      "contract_group": "live_action_broker_reconcile",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "live_broker_reconcile_path",
+      "rationale": "Touches broker, close, stop, reconcile, or position-truth behavior; requires runtime probes before change."
+    },
+    {
+      "path": "app/services/trading/market_data.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/momentum_neural/live_runner.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/net_edge_ranker.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/options/portfolio_budget.py",
+      "contract_group": "risk_capital_gate",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "risk_capital_gate",
+      "rationale": "Capital, PDT, portfolio, or fast-path risk gate; rename must wait for wider safety parity."
+    },
+    {
+      "path": "app/services/trading/paper_trading.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/pattern_condition_monitor.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/pattern_imminent_alerts.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/pattern_position_monitor.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/pattern_regime_performance_service.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/pattern_trade_analysis.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/portfolio.py",
+      "contract_group": "risk_capital_gate",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "risk_capital_gate",
+      "rationale": "Capital, PDT, portfolio, or fast-path risk gate; rename must wait for wider safety parity."
+    },
+    {
+      "path": "app/services/trading/portfolio_allocator.py",
+      "contract_group": "risk_capital_gate",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "risk_capital_gate",
+      "rationale": "Capital, PDT, portfolio, or fast-path risk gate; rename must wait for wider safety parity."
+    },
+    {
+      "path": "app/services/trading/portfolio_risk.py",
+      "contract_group": "risk_capital_gate",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "risk_capital_gate",
+      "rationale": "Capital, PDT, portfolio, or fast-path risk gate; rename must wait for wider safety parity."
+    },
+    {
+      "path": "app/services/trading/position_integrity.py",
+      "contract_group": "live_action_broker_reconcile",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "live_broker_reconcile_path",
+      "rationale": "Touches broker, close, stop, reconcile, or position-truth behavior; requires runtime probes before change."
+    },
+    {
+      "path": "app/services/trading/position_plan_generator.py",
+      "contract_group": "private_helper_type_only",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "private_helper_adapter_candidate",
+      "rationale": "Private helper surface; candidate for protocol/adapter extraction if direct tests exist."
+    },
+    {
+      "path": "app/services/trading/position_resolver.py",
+      "contract_group": "live_action_broker_reconcile",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "live_broker_reconcile_path",
+      "rationale": "Touches broker, close, stop, reconcile, or position-truth behavior; requires runtime probes before change."
+    },
+    {
+      "path": "app/services/trading/prescreener.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/realized_pnl_sql.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/regime_classifier.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/robinhood_exit_execution.py",
+      "contract_group": "live_action_broker_reconcile",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "live_broker_reconcile_path",
+      "rationale": "Touches broker, close, stop, reconcile, or position-truth behavior; requires runtime probes before change."
+    },
+    {
+      "path": "app/services/trading/scanner.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/setup_vitals.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/stop_engine.py",
+      "contract_group": "live_action_broker_reconcile",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "live_broker_reconcile_path",
+      "rationale": "Touches broker, close, stop, reconcile, or position-truth behavior; requires runtime probes before change."
+    },
+    {
+      "path": "app/services/trading/stuck_order_watchdog.py",
+      "contract_group": "live_action_broker_reconcile",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "live_broker_reconcile_path",
+      "rationale": "Touches broker, close, stop, reconcile, or position-truth behavior; requires runtime probes before change."
+    },
+    {
+      "path": "app/services/trading/tca_service.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/trade_plan_extractor.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/trading/venue/coinbase_spot.py",
+      "contract_group": "live_action_broker_reconcile",
+      "phase5o_bucket": "future_rename_blocker",
+      "phase5o_subtype": "live_broker_reconcile_path",
+      "rationale": "Touches broker, close, stop, reconcile, or position-truth behavior; requires runtime probes before change."
+    },
+    {
+      "path": "app/services/trading_scheduler.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/services/yf_session.py",
+      "contract_group": "learning_research_reporting",
+      "phase5o_bucket": "adapter_candidate",
+      "phase5o_subtype": "read_only_learning_reporting",
+      "rationale": "Read-only research/reporting consumer; plausible future adapter target after focused parity tests."
+    },
+    {
+      "path": "app/static/js/brain-core.js",
+      "contract_group": "public_ui_schema_contract",
+      "phase5o_bucket": "leave_alone",
+      "phase5o_subtype": "public_stable_contract",
+      "rationale": "Public route/schema/static-template surface intentionally preserves /trades and trade_id vocabulary."
+    },
+    {
+      "path": "app/static/js/brain-trading-desk.js",
+      "contract_group": "public_ui_schema_contract",
+      "phase5o_bucket": "leave_alone",
+      "phase5o_subtype": "public_stable_contract",
+      "rationale": "Public route/schema/static-template surface intentionally preserves /trades and trade_id vocabulary."
+    },
+    {
+      "path": "app/templates/brain/_runtime_help_modal.html",
+      "contract_group": "public_ui_schema_contract",
+      "phase5o_bucket": "leave_alone",
+      "phase5o_subtype": "public_stable_contract",
+      "rationale": "Public route/schema/static-template surface intentionally preserves /trades and trade_id vocabulary."
+    },
+    {
+      "path": "app/templates/trading.html",
+      "contract_group": "public_ui_schema_contract",
+      "phase5o_bucket": "leave_alone",
+      "phase5o_subtype": "public_stable_contract",
+      "rationale": "Public route/schema/static-template surface intentionally preserves /trades and trade_id vocabulary."
+    },
+    {
+      "path": "app/templates/trading/_tab_screener.html",
+      "contract_group": "public_ui_schema_contract",
+      "phase5o_bucket": "leave_alone",
+      "phase5o_subtype": "public_stable_contract",
+      "rationale": "Public route/schema/static-template surface intentionally preserves /trades and trade_id vocabulary."
+    },
+    {
+      "path": "app/templates/trading/_tab_trades.html",
+      "contract_group": "public_ui_schema_contract",
+      "phase5o_bucket": "leave_alone",
+      "phase5o_subtype": "public_stable_contract",
+      "rationale": "Public route/schema/static-template surface intentionally preserves /trades and trade_id vocabulary."
+    },
+    {
+      "path": "app/templates/trading_backup.html",
+      "contract_group": "public_ui_schema_contract",
+      "phase5o_bucket": "leave_alone",
+      "phase5o_subtype": "public_stable_contract",
+      "rationale": "Public route/schema/static-template surface intentionally preserves /trades and trade_id vocabulary."
+    }
+  ]
+}

@@ -771,3 +771,23 @@ cutovers.
 
 Report:
 `docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5n-source-posture-watch.md`.
+
+## Phase 5O - Remaining Runtime Compatibility Map (2026-05-31)
+
+Phase 5O mapped the remaining 93 `orm_trade_symbol_compat` files into
+risk-action buckets.
+
+The machine-checkable map lives at
+`docs/STRATEGY/phase5o_remaining_runtime_compat_map.json` and is pinned by
+`tests/test_phase5o_remaining_runtime_compat_map.py`.
+
+Bucket counts:
+`adapter_candidate=44`, `future_rename_blocker=33`, `leave_alone=16`.
+
+Architect verdict: do not do a global ORM rename. The next useful
+implementation slice is a small read-only learning/reporting adapter candidate
+with direct parity tests. Broker/reconcile and risk/capital gates remain future
+rename blockers.
+
+Report:
+`docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5o-remaining-runtime-compat-map.md`.
