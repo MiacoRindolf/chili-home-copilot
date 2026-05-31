@@ -56,6 +56,20 @@ Phase 5 soak duration was also tightened from one quarter to **2 weeks** at oper
 
 ## Status of the initiative
 
+- **Phase 5O zero-adapter-candidates closeout CLOSED 2026-05-31.**
+  Phase 5O adapter triage is complete. The compatibility map now has
+  `adapter_candidate=0`, `future_rename_blocker=48`, `leave_alone=16`, and
+  `orm_trade_symbol_compat=64`. Added
+  `scripts/d-phase5o-zero-adapter-closeout-summary.py` as a read-only closeout
+  checker; result: `COMPLETE_POSITIVE`. Remaining future blockers are grouped
+  as `learning_research_reporting=5`, `live_action_broker_reconcile=21`, and
+  `risk_capital_gate=22`; public/schema/model-export surfaces are explicitly
+  left alone. Architect verdict: do not start a broad rename. Next narrow lane
+  is `f-phase5p-learning-reporting-lifecycle-decay-adapter-plan`, focused on
+  the smallest remaining behavior-bearing learning/lifecycle family while
+  dirty shared-root runtime posture and PM/AgentOps fail-closed governance
+  remain active. CC report:
+  `docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5o-zero-adapter-candidates-closeout.md`.
 - **Phase 5O position-plan generator envelope audit CLOSED 2026-05-31.**
   Audited `app/services/trading/position_plan_generator.py` and found it is a
   live/risk-adjacent position-plan advisory surface, not a private helper
