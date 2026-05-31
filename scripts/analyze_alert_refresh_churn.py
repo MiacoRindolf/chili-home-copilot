@@ -25,6 +25,11 @@ if str(REPO_ROOT) not in sys.path:
 os.environ.setdefault("CHILI_APP_NAME", "chili-alert-refresh-churn-audit")
 
 from app.db import SessionLocal  # noqa: E402
+from app.services.trading.exit_variant_policy import (  # noqa: E402
+    NON_POSITIVE_EXIT_NOOP_REASONS,
+    STRUCTURAL_EXIT_NOOP_PREFIXES,
+    STRUCTURAL_EXIT_NOOP_REASONS,
+)
 from app.services.trading.recert_rescue_policy import (  # noqa: E402
     CONDITIONAL_RECERT_RESCUE_BACKTEST_ACTION,
     recert_rescue_blocker_actions,
@@ -37,6 +42,11 @@ TARGET_DIAGNOSTICS = ("recert_rescue_diagnostic", "exit_variant_diagnostic")
 RECERT_BLOCKER_ACTIONS = tuple(recert_rescue_blocker_actions())
 RECERT_BLOCKER_REASONS = tuple(recert_rescue_blocker_reasons())
 RECERT_CONDITIONAL_BACKTEST_ACTION = CONDITIONAL_RECERT_RESCUE_BACKTEST_ACTION
+EXIT_STRUCTURAL_NOOP_REASONS = tuple(sorted(STRUCTURAL_EXIT_NOOP_REASONS))
+EXIT_STRUCTURAL_NOOP_PREFIX_PATTERNS = tuple(
+    f"{prefix}%" for prefix in STRUCTURAL_EXIT_NOOP_PREFIXES
+)
+EXIT_NON_POSITIVE_NOOP_REASONS = tuple(sorted(NON_POSITIVE_EXIT_NOOP_REASONS))
 
 
 class DatabaseUnavailable(RuntimeError):
@@ -415,22 +425,42 @@ def _open_exit_work_with_recent_noop(hours: int, limit: int) -> list[dict]:
           ON d.scan_pattern_id = w.scan_pattern_id
          AND (
            d.evidence_fingerprint = w.evidence_fingerprint
-           OR d.skip_reason IN (
-             'duplicate_learned_exit_label',
-             'missing_parent_payoff_geometry',
-             'no_loss_report',
-             'no_parent_returns'
+           OR d.skip_reason = ANY(:structural_exit_noop_reasons)
+           OR d.skip_reason LIKE ANY(:structural_exit_noop_prefixes)
+           OR (
+             d.skip_reason = ANY(:non_positive_exit_noop_reasons)
+             AND NOT (
+               (
+                 COALESCE(w.payload->>'expected_evidence_value', '') ~ '^-?[0-9]+(\\.[0-9]+)?$'
+                 AND (w.payload->>'expected_evidence_value')::double precision > 0.0
+               )
+               OR (
+                 COALESCE(w.payload->>'calibrated_ev_after_cost_pct', '') ~ '^-?[0-9]+(\\.[0-9]+)?$'
+                 AND (w.payload->>'calibrated_ev_after_cost_pct')::double precision > 0.0
+               )
+               OR (
+                 COALESCE(w.payload->>'calibrated_ev_pct', '') ~ '^-?[0-9]+(\\.[0-9]+)?$'
+                 AND (w.payload->>'calibrated_ev_pct')::double precision > 0.0
+               )
+               OR (
+                 COALESCE(w.payload->>'expected_net_pct', '') ~ '^-?[0-9]+(\\.[0-9]+)?$'
+                 AND (w.payload->>'expected_net_pct')::double precision > 0.0
+               )
+             )
            )
-           OR d.skip_reason LIKE 'edge_debt_too_negative_for_exit_child:%%'
-           OR d.skip_reason LIKE 'insufficient_parent_payoff_samples:%%'
-           OR d.skip_reason LIKE 'reward_risk_below_floor:%%'
          )
         LEFT JOIN scan_patterns sp ON sp.id = w.scan_pattern_id
         WHERE w.scan_pattern_id IS NOT NULL
         ORDER BY w.id, d.created_at DESC, d.id DESC
         LIMIT :limit
         """,
-        {"hours": int(hours), "limit": int(limit)},
+        {
+            "hours": int(hours),
+            "limit": int(limit),
+            "structural_exit_noop_reasons": list(EXIT_STRUCTURAL_NOOP_REASONS),
+            "structural_exit_noop_prefixes": list(EXIT_STRUCTURAL_NOOP_PREFIX_PATTERNS),
+            "non_positive_exit_noop_reasons": list(EXIT_NON_POSITIVE_NOOP_REASONS),
+        },
     )
 
 
