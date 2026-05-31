@@ -207,7 +207,10 @@ def _broker_quote_price_for_trade_cached(
     *,
     trade_is_option: bool,
     quote_cache: dict[tuple[str, str, str, str], tuple[float | None, str]],
+    allow_external_reads: bool = False,
 ) -> tuple[float | None, str]:
+    if not allow_external_reads:
+        return None, "unavailable"
     broker_source = str(getattr(trade, "broker_source", "") or "").strip().lower()
     if not broker_source and not trade_is_option:
         return None, "unavailable"
@@ -229,7 +232,10 @@ def _fallback_quote_cached(
     ticker: str,
     *,
     fallback_cache: dict[str, float | None],
+    allow_external_reads: bool = False,
 ) -> float | None:
+    if not allow_external_reads:
+        return None
     key = str(ticker or "").strip().upper()
     if key not in fallback_cache:
         fallback_cache[key] = desk._fallback_quote(key)
@@ -243,6 +249,7 @@ def serialize_desk_trades(
     *,
     quote_cache: dict[tuple[str, str, str, str], tuple[float | None, str]],
     fallback_cache: dict[str, float | None],
+    allow_external_reads: bool = False,
 ) -> dict[str, Any]:
     override_pairs = [("trade", int(t.id)) for t in trades]
     overrides_map = list_position_overrides(db, override_pairs)
@@ -263,17 +270,22 @@ def serialize_desk_trades(
             t,
             trade_is_option=trade_is_option,
             quote_cache=quote_cache,
+            allow_external_reads=allow_external_reads,
         )
         if (
             current_price is None
             and not trade_is_option
             and not (getattr(t, "broker_source", None) or "").strip()
         ):
-            current_price = _fallback_quote_cached(t.ticker, fallback_cache=fallback_cache)
+            current_price = _fallback_quote_cached(
+                t.ticker,
+                fallback_cache=fallback_cache,
+                allow_external_reads=allow_external_reads,
+            )
             quote_source = "market_data" if current_price is not None else "unavailable"
         broker_metrics = (
             broker_position_display_metrics(db, t)
-            if not trade_is_option
+            if allow_external_reads and not trade_is_option
             else None
         ) or {}
         display_entry = broker_metrics.get("entry_price") or t.entry_price
@@ -333,6 +345,7 @@ def serialize_desk_trades(
 def run_probe(user_id: int = 1) -> dict[str, Any]:
     database_url = os.getenv("DATABASE_URL", "")
     database_scope = _assert_probe_database_allowed(database_url)
+    allow_external_reads = _live_probe_allowed()
     db = SessionLocal()
     try:
         relation_kinds = {
@@ -349,6 +362,7 @@ def run_probe(user_id: int = 1) -> dict[str, Any]:
             old_suppressed,
             quote_cache=quote_cache,
             fallback_cache=fallback_cache,
+            allow_external_reads=allow_external_reads,
         )
         new_payload = serialize_desk_trades(
             db,
@@ -356,12 +370,14 @@ def run_probe(user_id: int = 1) -> dict[str, Any]:
             new_suppressed,
             quote_cache=quote_cache,
             fallback_cache=fallback_cache,
+            allow_external_reads=allow_external_reads,
         )
         matched = old_payload == new_payload
         return {
             "status": "COMPLETE_POSITIVE" if matched else "MISMATCH",
             "matched": matched,
             "database_scope": database_scope,
+            "external_reads_enabled": allow_external_reads,
             "user_id": user_id,
             "old_trades": len(old_payload["trades"]),
             "new_trades": len(new_payload["trades"]),

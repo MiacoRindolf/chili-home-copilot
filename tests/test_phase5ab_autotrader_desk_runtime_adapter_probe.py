@@ -5,6 +5,7 @@ import sys
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -162,3 +163,95 @@ def test_probe_live_opt_in_allows_non_test_database(monkeypatch) -> None:
         )
         == "live_or_non_test"
     )
+
+
+def test_serialize_desk_trades_default_is_db_only(monkeypatch) -> None:
+    module = _load_module()
+
+    monkeypatch.setattr(
+        module,
+        "list_position_overrides",
+        lambda _db, _pairs: {},
+    )
+    monkeypatch.setattr(
+        module,
+        "broker_position_display_metrics",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("broker-truth metrics require live probe opt-in")
+        ),
+    )
+    monkeypatch.setattr(
+        module.desk,
+        "_fallback_quote",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("market fallback quote requires live probe opt-in")
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "_broker_quote_price_for_trade_cached",
+        lambda *args, **kwargs: (
+            (_ for _ in ()).throw(
+                AssertionError("broker quote requires live probe opt-in")
+            )
+            if kwargs.get("allow_external_reads")
+            else (None, "unavailable")
+        ),
+    )
+
+    trade = SimpleNamespace(
+        id=77,
+        ticker="MSFT",
+        direction="long",
+        entry_price=100.0,
+        entry_date=datetime(2026, 5, 30, 12, 0),
+        quantity=2.0,
+        stop_loss=None,
+        take_profit=None,
+        scan_pattern_id=None,
+        related_alert_id=None,
+        broker_source="",
+        auto_trader_version="v1",
+        scale_in_count=0,
+        tags=[],
+    )
+
+    payload = module.serialize_desk_trades(
+        SimpleNamespace(),
+        [trade],
+        [],
+        quote_cache={},
+        fallback_cache={},
+    )
+
+    row = payload["trades"][0]
+    assert row["quote_source"] == "unavailable"
+    assert row["current_price"] is None
+    assert row["unrealized_pnl_usd"] is None
+    assert row["broker_truth_entry_price"] is None
+    assert row["broker_truth_quantity"] is None
+    assert row["broker_truth_metrics_source"] is None
+
+
+def test_run_probe_reports_external_read_flag(monkeypatch) -> None:
+    module = _load_module()
+
+    class _Db:
+        def execute(self, *_args, **_kwargs):
+            return SimpleNamespace(scalar=lambda: "r")
+
+        def close(self):
+            pass
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://chili:chili@localhost:5433/chili_test")
+    monkeypatch.delenv(module.LIVE_PROBE_OPT_IN, raising=False)
+    monkeypatch.setattr(module, "SessionLocal", lambda: _Db())
+    monkeypatch.setattr(module, "load_trade_objects", lambda _db, _uid: ([], []))
+    monkeypatch.setattr(module, "load_envelope_objects", lambda _db, _uid: ([], []))
+
+    payload = module.run_probe(user_id=1)
+
+    assert payload["status"] == "COMPLETE_POSITIVE"
+    assert payload["external_reads_enabled"] is False
+    assert payload["quote_cache_entries"] == 0
+    assert payload["fallback_cache_entries"] == 0
