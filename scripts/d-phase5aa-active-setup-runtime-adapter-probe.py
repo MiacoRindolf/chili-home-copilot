@@ -22,7 +22,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-os.environ.setdefault("DATABASE_URL", "postgresql://chili:chili@localhost:5433/chili")
+os.environ.setdefault(
+    "DATABASE_URL",
+    os.getenv("TEST_DATABASE_URL", "postgresql://chili:chili@localhost:5433/chili_test"),
+)
 
 from app.db import SessionLocal  # noqa: E402
 from app.models.trading import BreakoutAlert, PatternMonitorDecision, ScanPattern, Trade  # noqa: E402
@@ -61,6 +64,32 @@ ACTIVE_SETUP_FIELDS = (
     "pending_exit_limit_price",
     "next_eligible_session_at",
 )
+
+LIVE_PROBE_OPT_IN = "PHASE5AA_ALLOW_LIVE_PROBE"
+
+
+def _live_probe_enabled() -> bool:
+    return str(os.getenv(LIVE_PROBE_OPT_IN, "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+
+
+def _is_test_database_url(url: str | None) -> bool:
+    return "_test" in str(url or "").split("?", 1)[0].lower()
+
+
+def _assert_probe_database_allowed(database_url: str | None) -> None:
+    if _is_test_database_url(database_url) or _live_probe_enabled():
+        return
+    raise RuntimeError(
+        "Phase 5AA active-setup probe defaults to test-only validation. "
+        f"Set {LIVE_PROBE_OPT_IN}=true to run manually authorized read-only "
+        "live/non-test DB evidence."
+    )
 
 
 def _normalize(value: Any) -> Any:
@@ -117,7 +146,10 @@ def _fetch_quotes_for_tickers(
     tickers: list[str],
     *,
     batch_cache: dict[tuple[str, ...], dict[str, dict[str, Any]]],
+    allow_external_quotes: bool = False,
 ) -> dict[str, dict[str, Any]]:
+    if not allow_external_quotes:
+        return {}
     key = tuple(sorted({str(t or "").upper() for t in tickers if str(t or "").strip()}))
     if not key:
         return {}
@@ -137,7 +169,10 @@ def _broker_quote_for_trade(
     *,
     trade_is_option: bool,
     quote_cache: dict[tuple[str, str, str], dict[str, Any] | None],
+    allow_external_quotes: bool = False,
 ) -> dict[str, Any] | None:
+    if not allow_external_quotes:
+        return None
     broker_source = str(getattr(trade, "broker_source", None) or "")
     ticker = str(getattr(trade, "ticker", "") or "").upper()
     key = (broker_source, ticker, "option" if trade_is_option else "standard")
@@ -158,6 +193,7 @@ def serialize_active_setups(
     *,
     quote_cache: dict[tuple[str, str, str], dict[str, Any] | None],
     batch_cache: dict[tuple[str, ...], dict[str, dict[str, Any]]],
+    allow_external_reads: bool = False,
 ) -> dict[str, Any]:
     from app.services.trading.autopilot_scope import is_option_trade
     from app.services.trading.broker_position_truth import broker_position_display_metrics
@@ -220,7 +256,11 @@ def serialize_active_setups(
         for t in trades
         if getattr(t, "ticker", None) and not is_option_trade(t)
     ]
-    quotes_map = _fetch_quotes_for_tickers(tickers, batch_cache=batch_cache)
+    quotes_map = _fetch_quotes_for_tickers(
+        tickers,
+        batch_cache=batch_cache,
+        allow_external_quotes=allow_external_reads,
+    )
 
     setups: list[dict[str, Any]] = []
     health_scores: list[float] = []
@@ -249,6 +289,7 @@ def serialize_active_setups(
                 trade,
                 trade_is_option=trade_is_option,
                 quote_cache=quote_cache,
+                allow_external_quotes=allow_external_reads,
             )
         ticker = str(getattr(trade, "ticker", "") or "")
         if (not q or q.get("price") is None) and not trade_is_option:
@@ -256,7 +297,7 @@ def serialize_active_setups(
         cur = monitor._quote_price(q)
         broker_metrics = (
             broker_position_display_metrics(db, trade)
-            if not trade_is_option
+            if allow_external_reads and not trade_is_option
             else None
         ) or {}
         display_entry = broker_metrics.get("entry_price") or trade.entry_price
@@ -343,6 +384,9 @@ def serialize_active_setups(
 
 
 def run_probe(user_id: int | None = 1) -> dict[str, Any]:
+    database_url = os.getenv("DATABASE_URL")
+    _assert_probe_database_allowed(database_url)
+    allow_live_probe = _live_probe_enabled()
     db = SessionLocal()
     try:
         relation_kinds = {
@@ -359,6 +403,7 @@ def run_probe(user_id: int | None = 1) -> dict[str, Any]:
             old_suppressed,
             quote_cache=quote_cache,
             batch_cache=batch_cache,
+            allow_external_reads=allow_live_probe,
         )
         new_payload = serialize_active_setups(
             db,
@@ -366,11 +411,14 @@ def run_probe(user_id: int | None = 1) -> dict[str, Any]:
             new_suppressed,
             quote_cache=quote_cache,
             batch_cache=batch_cache,
+            allow_external_reads=allow_live_probe,
         )
         matched = old_payload == new_payload
         return {
             "status": "COMPLETE_POSITIVE" if matched else "MISMATCH",
             "matched": matched,
+            "database_scope": "test" if _is_test_database_url(database_url) else "live_or_non_test",
+            "external_reads_enabled": allow_live_probe,
             "user_id": user_id,
             "old_setups": len(old_payload["setups"]),
             "new_setups": len(new_payload["setups"]),

@@ -49,6 +49,7 @@ EDGE_RELIABILITY_REFRESH = "edge_reliability_refresh"
 RECERT_RESCUE_REFRESH = "recert_rescue_refresh"
 EXIT_VARIANT_REFRESH = "exit_variant_refresh"
 PROVENANCE_BACKFILL = "provenance_backfill"
+NO_TARGETED_WORK = "no_targeted_work"
 EDGE_RELIABILITY_SNAPSHOT = "edge_reliability_snapshot"
 RECERT_RESCUE_DIAGNOSTIC = "recert_rescue_diagnostic"
 EXIT_VARIANT_DIAGNOSTIC = "exit_variant_diagnostic"
@@ -381,12 +382,34 @@ def _graduation_blocker(
     return "needs_review"
 
 
-def _recommended_work_event(blocker: str, *, scan_pattern_id: int | None) -> str:
+def _positive_exit_variant_evidence(payload: dict[str, Any] | None) -> bool:
+    if _payload_has_positive_exit_evidence(payload):
+        return True
+    if not isinstance(payload, dict):
+        return False
+    for key in ("expected_ev_pct", "calibrated_ev_pct", "realized_ev_pct"):
+        try:
+            value = float(payload.get(key))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value) and value > 0.0:
+            return True
+    return False
+
+
+def _recommended_work_event(
+    blocker: str,
+    *,
+    scan_pattern_id: int | None,
+    evidence: dict[str, Any] | None = None,
+) -> str:
     if scan_pattern_id is None:
         return PROVENANCE_BACKFILL
     if blocker in {"hard_recert_blocked", "recert_blocked"}:
         return RECERT_RESCUE_REFRESH
-    if blocker in {"quality_blocked", "lifecycle_challenged"}:
+    if blocker == "quality_blocked":
+        return EXIT_VARIANT_REFRESH if _positive_exit_variant_evidence(evidence) else NO_TARGETED_WORK
+    if blocker == "lifecycle_challenged":
         return EXIT_VARIANT_REFRESH
     return EDGE_RELIABILITY_REFRESH
 
@@ -681,9 +704,13 @@ def compute_pattern_edge_reliability(
         "decision_counts": dict(decision_counts),
         "autotrader_evidence": evidence_partition.to_summary(),
         "graduation_blocker": blocker,
-        "recommended_work_event": _recommended_work_event(blocker, scan_pattern_id=pid),
         "latest_observed_at": latest_seen.isoformat() if latest_seen else None,
     }
+    row["recommended_work_event"] = _recommended_work_event(
+        blocker,
+        scan_pattern_id=pid,
+        evidence=row,
+    )
     row["evidence_fingerprint"] = _row_fingerprint(row)
     return row
 
@@ -1336,6 +1363,11 @@ def edge_supply_rows(
 def edge_supply_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     blockers: Counter[str] = Counter(str(row.get("graduation_blocker") or "unknown") for row in rows)
     recommended: Counter[str] = Counter(str(row.get("recommended_work_event") or "unknown") for row in rows)
+    targeted = {
+        event_type: count
+        for event_type, count in recommended.items()
+        if event_type not in {"", "unknown", NO_TARGETED_WORK}
+    }
     return {
         "total": len(rows),
         "graduation_ready": int(blockers.get("graduation_ready", 0)),
@@ -1344,8 +1376,11 @@ def edge_supply_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "execution_blocked": int(blockers.get("execution_blocked", 0)),
         "needs_more_closed_evidence": int(blockers.get("needs_more_closed_evidence", 0)),
         "shadow_evidence_collection": int(blockers.get("shadow_evidence_collection", 0)),
+        "no_targeted_work": int(recommended.get(NO_TARGETED_WORK, 0)),
+        "targeted_work": int(sum(targeted.values())),
         "blockers": dict(blockers),
         "recommended_work_events": dict(recommended),
+        "targeted_work_events": dict(targeted),
     }
 
 

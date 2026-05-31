@@ -122,8 +122,65 @@ def test_fetch_quotes_for_tickers_uses_one_sorted_batch(monkeypatch) -> None:
     monkeypatch.setattr(module.monitor.ts, "fetch_quotes_batch", fake_fetch)
     cache: dict[tuple[str, ...], dict] = {}
 
-    first = module._fetch_quotes_for_tickers(["b", "A", "a"], batch_cache=cache)
-    second = module._fetch_quotes_for_tickers(["A", "B"], batch_cache=cache)
+    first = module._fetch_quotes_for_tickers(
+        ["b", "A", "a"],
+        batch_cache=cache,
+        allow_external_quotes=True,
+    )
+    second = module._fetch_quotes_for_tickers(
+        ["A", "B"],
+        batch_cache=cache,
+        allow_external_quotes=True,
+    )
 
     assert first == second
     assert calls == [("A", "B")]
+
+
+def test_fetch_quotes_for_tickers_is_stubbed_without_live_opt_in(monkeypatch) -> None:
+    module = _load_module()
+    calls: list[tuple[str, ...]] = []
+
+    def fake_fetch(tickers, allow_provider_fallback=None):
+        calls.append(tuple(tickers))
+        return {ticker: {"price": 1.0, "source": "test"} for ticker in tickers}
+
+    monkeypatch.setattr(module.monitor.ts, "fetch_quotes_batch", fake_fetch)
+
+    assert module._fetch_quotes_for_tickers(["A"], batch_cache={}) == {}
+    assert calls == []
+
+
+def test_probe_rejects_non_test_database_without_live_opt_in(monkeypatch) -> None:
+    module = _load_module()
+
+    monkeypatch.delenv(module.LIVE_PROBE_OPT_IN, raising=False)
+
+    try:
+        module._assert_probe_database_allowed(
+            "postgresql://chili:chili@localhost:5433/chili"
+        )
+    except RuntimeError as exc:
+        assert module.LIVE_PROBE_OPT_IN in str(exc)
+    else:
+        raise AssertionError("expected non-test database to require live opt-in")
+
+
+def test_probe_allows_test_database_without_live_opt_in(monkeypatch) -> None:
+    module = _load_module()
+
+    monkeypatch.delenv(module.LIVE_PROBE_OPT_IN, raising=False)
+
+    module._assert_probe_database_allowed(
+        "postgresql://chili:chili@localhost:5433/chili_test"
+    )
+
+
+def test_probe_live_opt_in_allows_non_test_database(monkeypatch) -> None:
+    module = _load_module()
+
+    monkeypatch.setenv(module.LIVE_PROBE_OPT_IN, "true")
+
+    module._assert_probe_database_allowed(
+        "postgresql://chili:chili@localhost:5433/chili"
+    )
