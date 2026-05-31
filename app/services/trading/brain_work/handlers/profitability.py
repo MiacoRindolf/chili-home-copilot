@@ -14,8 +14,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, TYPE_CHECKING
 
 from app.services.trading.recert_rescue_policy import (
-    RECENT_RECERT_RESCUE_BLOCKER_ACTIONS as _RECERT_RESCUE_BLOCKER_ACTIONS,
-    RECENT_RECERT_RESCUE_BLOCKER_REASONS as _RECERT_RESCUE_BLOCKER_REASONS,
+    recert_rescue_diagnostic_blocks_refresh,
 )
 
 if TYPE_CHECKING:
@@ -583,14 +582,8 @@ def _recent_blocked_recert_rescue_diagnostic(
     )
     for row in rows:
         payload = row.payload if isinstance(row.payload, dict) else {}
-        action = str(payload.get("recommended_next_action") or "").strip().lower()
-        if action in _RECERT_RESCUE_BLOCKER_ACTIONS:
+        if recert_rescue_diagnostic_blocks_refresh(payload):
             return True
-        refresh = payload.get("recert_backtest_refresh")
-        if isinstance(refresh, dict):
-            reason = str(refresh.get("reason") or "").strip().lower()
-            if reason in _RECERT_RESCUE_BLOCKER_REASONS:
-                return True
     return False
 
 

@@ -63,6 +63,41 @@ def test_recent_recert_rescue_blocker_blocks_open_backtest_reason(monkeypatch):
     assert _recent_recert_rescue_blocker_exists(db, scan_pattern_id=1256) is True
 
 
+def test_recent_recert_rescue_blocker_blocks_terminal_actions(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360)
+    db = _db_with_payloads(
+        {
+            "scan_pattern_id": 585,
+            "recommended_next_action": "keep_live_blocked_until_hard_recert_clears",
+            "recert_rescue_status": "hard_blocked",
+        },
+        {
+            "scan_pattern_id": 585,
+            "recommended_next_action": "no_recert_action_needed",
+            "recert_rescue_status": "not_recert_required",
+        },
+    )
+
+    assert _recent_recert_rescue_blocker_exists(db, scan_pattern_id=585) is True
+
+
+def test_recent_recert_rescue_blocker_blocks_unproven_backtest_request(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "brain_work_cash_deployment_noop_cooldown_minutes", 360)
+    db = _db_with_payloads(
+        {
+            "scan_pattern_id": 1256,
+            "recommended_next_action": "run_recert_backtest_refresh_keep_live_blocked",
+            "recert_backtest_refresh": {"requested": False},
+        }
+    )
+
+    assert _recent_recert_rescue_blocker_exists(db, scan_pattern_id=1256) is True
+
+
 def test_recent_recert_rescue_blocker_allows_useful_refresh(monkeypatch):
     from app.config import settings
 
