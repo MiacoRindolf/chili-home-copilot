@@ -15,6 +15,7 @@ from app.services.trading.management_envelopes import (
     load_edge_reliability_live_envelope_rows,
     load_execution_cost_estimate_envelope_rows,
     load_imminent_alert_actioned_envelope_ids,
+    load_market_data_implausibility_anchor,
     load_monitor_decision_envelope_rows,
     load_net_edge_training_envelope_rows,
     load_open_active_setup_envelope_objects,
@@ -109,6 +110,25 @@ def test_execution_cost_rows_read_management_envelopes_not_trade_view():
         "side_0": "long",
         "side_1": "short",
     }
+
+
+def test_market_data_implausibility_anchor_reads_management_envelopes():
+    db = _FakeDb(_RowsResult([{"entry_price": 42.5}]))
+
+    anchor = load_market_data_implausibility_anchor(db, ticker="abc")
+
+    assert anchor == 42.5
+    assert "FROM trading_management_envelopes" in db.sql
+    assert "trading_trades" not in db.sql
+    assert "status = 'open'" in db.sql
+    assert "ORDER BY entry_date DESC NULLS LAST, id DESC" in db.sql
+    assert db.params == {"ticker": "ABC"}
+
+
+def test_market_data_implausibility_anchor_ignores_invalid_values():
+    for value in (None, "", 0, -1, True, "not-a-number"):
+        db = _FakeDb(_RowsResult([{"entry_price": value}]))
+        assert load_market_data_implausibility_anchor(db, ticker="ABC") is None
 
 
 def test_edge_reliability_live_rows_read_management_envelopes():
