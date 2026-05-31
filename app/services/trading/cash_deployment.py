@@ -46,6 +46,7 @@ LIVE_LIFECYCLES = frozenset({"live", "promoted", "pilot_promoted"})
 RECERT_BLOCKERS = frozenset({"recert_blocked", "hard_recert_blocked"})
 EXECUTION_BLOCKERS = frozenset({"execution_blocked"})
 SHADOW_BLOCKERS = frozenset({"shadow_evidence_collection"})
+NO_TARGETED_WORK = "no_targeted_work"
 
 
 def _safe_float(value: Any, default: float | None = None) -> float | None:
@@ -600,7 +601,7 @@ def _recommended_work_event(row: dict[str, Any], category: str) -> str:
         min_closed = int(getattr(settings, "chili_cash_deployment_min_closed_evidence", 5) or 0)
         return EXIT_VARIANT_REFRESH if closed_n >= min_closed else EDGE_RELIABILITY_REFRESH
     if category == "negative_ev":
-        return EXIT_VARIANT_REFRESH
+        return NO_TARGETED_WORK
     if category == "needs_calibration":
         return EDGE_RELIABILITY_REFRESH
     return str(row.get("recommended_work_event") or EDGE_RELIABILITY_REFRESH)
@@ -1171,14 +1172,17 @@ def enqueue_cash_deployment_work(
     considered = 0
     skipped = 0
     skipped_noop_cooldown = 0
+    skipped_no_targeted_work = 0
     by_event: Counter[str] = Counter()
     if int(snapshot_coverage.get("created") or 0) > 0:
         by_event[EDGE_RELIABILITY_REFRESH] += int(snapshot_coverage.get("created") or 0)
     for row in rows:
         event_type = str(row.get("recommended_work_event") or "").strip()
         pid = row.get("scan_pattern_id")
-        if not event_type or pid is None:
+        if not event_type or event_type == NO_TARGETED_WORK or pid is None:
             skipped += 1
+            if event_type == NO_TARGETED_WORK:
+                skipped_no_targeted_work += 1
             continue
         considered += 1
         payload = {
@@ -1265,6 +1269,7 @@ def enqueue_cash_deployment_work(
         "created": len(created) + len(null_created) + int(snapshot_coverage.get("created") or 0),
         "skipped": skipped,
         "skipped_noop_cooldown": skipped_noop_cooldown,
+        "skipped_no_targeted_work": skipped_no_targeted_work,
         "event_ids": created + null_created + list(snapshot_coverage.get("event_ids") or []),
         "event_types": dict(by_event),
         "snapshot_coverage": snapshot_coverage,
