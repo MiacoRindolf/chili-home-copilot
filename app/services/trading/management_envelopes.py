@@ -407,6 +407,79 @@ def load_closed_management_envelope_tickers_since(
     return [str(row["ticker"]).strip() for row in rows if row.get("ticker")]
 
 
+def load_edge_reliability_live_envelope_rows(
+    db: Session,
+    *,
+    pattern_id: int,
+    since: datetime,
+    closed_only: bool = True,
+    limit: int | None = None,
+) -> list[SimpleNamespace]:
+    """Load management-envelope rows used by edge-reliability diagnostics."""
+    params: dict[str, Any] = {
+        "pattern_id": int(pattern_id),
+        "since": since,
+    }
+    status_clause = "AND status = 'closed'" if closed_only else ""
+    limit_clause = ""
+    if limit is not None:
+        params["limit"] = max(1, int(limit))
+        limit_clause = "LIMIT :limit"
+
+    rows = _rows(
+        db,
+        f"""
+        SELECT
+            id,
+            ticker,
+            direction,
+            entry_price,
+            avg_fill_price,
+            exit_price,
+            quantity,
+            filled_quantity,
+            pnl,
+            asset_kind,
+            tags,
+            indicator_snapshot,
+            related_alert_id,
+            entry_date,
+            exit_date
+          FROM {MANAGEMENT_ENVELOPES_RELATION}
+         WHERE scan_pattern_id = :pattern_id
+           {status_clause}
+           AND (
+                entry_date IS NULL
+             OR entry_date >= :since
+             OR exit_date >= :since
+           )
+         ORDER BY id DESC
+         {limit_clause}
+        """,
+        params,
+    )
+    return [
+        SimpleNamespace(
+            id=row.get("id"),
+            ticker=row.get("ticker"),
+            direction=row.get("direction"),
+            entry_price=row.get("entry_price"),
+            avg_fill_price=row.get("avg_fill_price"),
+            exit_price=row.get("exit_price"),
+            quantity=row.get("quantity"),
+            filled_quantity=row.get("filled_quantity"),
+            pnl=row.get("pnl"),
+            asset_kind=row.get("asset_kind"),
+            tags=row.get("tags"),
+            indicator_snapshot=row.get("indicator_snapshot"),
+            related_alert_id=row.get("related_alert_id"),
+            entry_date=row.get("entry_date"),
+            exit_date=row.get("exit_date"),
+        )
+        for row in rows
+    ]
+
+
 def fetch_synergy_retry_envelope_candidates(
     db: Session,
     *,

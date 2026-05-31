@@ -12,6 +12,7 @@ from app.services.trading.management_envelopes import (
     load_closed_envelope_execution_rows,
     load_closed_pattern_envelope_rows,
     load_closed_review_envelope_rows,
+    load_edge_reliability_live_envelope_rows,
     load_execution_cost_estimate_envelope_rows,
     load_imminent_alert_actioned_envelope_ids,
     load_monitor_decision_envelope_rows,
@@ -105,6 +106,68 @@ def test_execution_cost_rows_read_management_envelopes_not_trade_view():
         "side_0": "long",
         "side_1": "short",
     }
+
+
+def test_edge_reliability_live_rows_read_management_envelopes():
+    since = datetime(2026, 5, 1, 12, 0)
+    db = _FakeDb(
+        _RowsResult(
+            [
+                {
+                    "id": 42,
+                    "ticker": "EDGE",
+                    "direction": "long",
+                    "entry_price": 100,
+                    "avg_fill_price": 101,
+                    "exit_price": 104,
+                    "quantity": 2,
+                    "filled_quantity": 2,
+                    "pnl": 6,
+                    "asset_kind": "stock",
+                    "tags": "",
+                    "indicator_snapshot": {"asset_class": "stock"},
+                    "related_alert_id": 12,
+                    "entry_date": since,
+                    "exit_date": since,
+                }
+            ]
+        )
+    )
+
+    rows = load_edge_reliability_live_envelope_rows(
+        db,
+        pattern_id=585,
+        since=since,
+        closed_only=True,
+    )
+
+    assert len(rows) == 1
+    assert rows[0].ticker == "EDGE"
+    assert rows[0].avg_fill_price == 101
+    assert rows[0].related_alert_id == 12
+    assert "FROM trading_management_envelopes" in db.sql
+    assert "trading_trades" not in db.sql
+    assert "AND status = 'closed'" in db.sql
+    assert db.params == {"pattern_id": 585, "since": since}
+
+
+def test_edge_reliability_recent_rows_can_include_open_envelopes_with_limit():
+    since = datetime(2026, 5, 1, 12, 0)
+    db = _FakeDb(_RowsResult([]))
+
+    rows = load_edge_reliability_live_envelope_rows(
+        db,
+        pattern_id=586,
+        since=since,
+        closed_only=False,
+        limit=250,
+    )
+
+    assert rows == []
+    assert "FROM trading_management_envelopes" in db.sql
+    assert "AND status = 'closed'" not in db.sql
+    assert "LIMIT :limit" in db.sql
+    assert db.params == {"pattern_id": 586, "since": since, "limit": 250}
 
 
 def test_execution_cost_ticker_discovery_reads_management_envelopes():
