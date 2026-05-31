@@ -24,6 +24,7 @@ Latest observation update, 2026-05-30 PT:
 - focused Phase 5 reader tests: passing
 - app runtime logs: no Phase 5 relation/query errors observed
 - Postgres `schema_version.version` errors were classified as one-shot probe/dashboard noise, not live trading code
+- Added `scripts/d-phase5-runtime-observation-probe.py` so the next market-window closeout runs the full gate mechanically.
 
 This is healthy weekend/crypto-window evidence, but not yet a full normal market-session closeout. Keep observing; do not begin a broad rename.
 
@@ -33,6 +34,8 @@ This is healthy weekend/crypto-window evidence, but not yet a full normal market
    - Phase 5K-A parity
    - Phase 5I post-rename probe
    - Phase 5L reader allowlist
+   - Or run the rollup:
+     `python scripts\d-phase5-runtime-observation-probe.py --since-minutes 390 --market-window-complete`
 2. Watch runtime logs for relation/query errors involving:
    - `trading_trades`
    - `trading_management_envelopes`

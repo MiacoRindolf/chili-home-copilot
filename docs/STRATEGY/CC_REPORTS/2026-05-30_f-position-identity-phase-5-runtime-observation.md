@@ -20,6 +20,23 @@ The system should continue soaking through the next normal market window before 
 
 ## Checks Run
 
+### Rollup probe
+
+`scripts/d-phase5-runtime-observation-probe.py --since-minutes 10`
+
+Result:
+
+- `VERDICT_STATUS=IN_FLIGHT`
+- `VERDICT_REASON=mechanical checks green; wait for a normal market-window soak before closeout`
+- Phase 5K: `COMPLETE_POSITIVE`
+- Phase 5I: `COMPLETE_POSITIVE`
+- reader canary: clean
+- app Phase 5 schema errors: 0
+- Postgres Phase 5 schema errors: 0
+- Postgres `schema_version.version` noise in final 10-minute check: 0
+
+This script was added so the next market-window closeout can be repeated mechanically instead of reconstructed from notes.
+
 ### Phase 5K live-path parity
 
 `scripts/d-phase5k-live-path-parity-probe.py`
@@ -143,5 +160,11 @@ Close this task only after one normal market window stays clean with:
 - Phase 5I positive
 - reader canary clean
 - no app-side relation/query errors
+
+Recommended closeout command after the next normal U.S. equity market window:
+
+```powershell
+python scripts\d-phase5-runtime-observation-probe.py --since-minutes 390 --market-window-complete
+```
 
 Until then, the next best work is concrete trading improvement, not more rename pressure.
