@@ -508,6 +508,7 @@ def _apply_terminal_state(t: Trade, broker_status: str, raw: dict[str, Any] | No
             t.remaining_quantity = 0.0
         # Don't flip status=closed — a FILLED entry is an *opened* position.
         # The exit evaluator closes when the exit fills. Leave status='open'.
+        trusted_avg_fill_price = None
         if raw:
             avg = (
                 raw.get("average_filled_price")
@@ -515,22 +516,22 @@ def _apply_terminal_state(t: Trade, broker_status: str, raw: dict[str, Any] | No
                 or raw.get("average_price")
                 or raw.get("price")
             )
-            try:
-                if avg is not None:
-                    t.avg_fill_price = float(avg)
-            except (TypeError, ValueError):
-                pass
+            parsed_avg = _safe_float(avg)
+            if parsed_avg is not None and parsed_avg > 0.0:
+                t.avg_fill_price = parsed_avg
+                trusted_avg_fill_price = parsed_avg
             if t.filled_at is None:
                 t.filled_at = datetime.utcnow()
-        try:
-            from .tca_service import apply_tca_on_trade_fill
+        if trusted_avg_fill_price is not None:
+            try:
+                from .tca_service import apply_tca_on_trade_fill
 
-            apply_tca_on_trade_fill(t)
-        except Exception:
-            logger.debug(
-                "[stuck_order_watchdog] entry TCA failed trade=%s",
-                getattr(t, "id", None),
-            )
+                apply_tca_on_trade_fill(t)
+            except Exception:
+                logger.debug(
+                    "[stuck_order_watchdog] entry TCA failed trade=%s",
+                    getattr(t, "id", None),
+                )
         return
     if bs in _TERMINAL_CANCELLED:
         t.status = "cancelled"
