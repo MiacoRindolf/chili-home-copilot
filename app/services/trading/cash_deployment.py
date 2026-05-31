@@ -158,6 +158,58 @@ def _cost_model_notional_usd(asset_class: str) -> float:
     return max(1.0, notional)
 
 
+def _age_hours(value: Any) -> float | None:
+    if not isinstance(value, datetime):
+        return None
+    dt = value
+    if dt.tzinfo is not None:
+        now = datetime.now(dt.tzinfo)
+    else:
+        now = datetime.now()
+    age = (now - dt).total_seconds() / 3600.0
+    return max(0.0, age)
+
+
+def _execution_cost_reliability_penalty(row: Any) -> tuple[float, dict[str, Any]]:
+    sample_trades = max(0, _safe_int(getattr(row, "sample_trades", 0), 0))
+    min_samples = max(
+        1,
+        _safe_int(
+            getattr(settings, "chili_cash_deployment_execution_cost_min_samples", 5),
+            5,
+        ),
+    )
+    low_sample_penalty_max = _safe_float(
+        getattr(settings, "chili_cash_deployment_execution_cost_low_sample_penalty_pct", 0.25),
+        0.25,
+    ) or 0.0
+    low_sample_penalty = 0.0
+    if sample_trades < min_samples:
+        low_sample_penalty = low_sample_penalty_max * ((min_samples - sample_trades) / min_samples)
+
+    max_age_hours = _safe_float(
+        getattr(settings, "chili_cash_deployment_execution_cost_max_age_hours", 72.0),
+        72.0,
+    ) or 0.0
+    stale_penalty = 0.0
+    age_hours = _age_hours(getattr(row, "last_updated_at", None))
+    if max_age_hours > 0.0 and age_hours is not None and age_hours > max_age_hours:
+        stale_penalty = _safe_float(
+            getattr(settings, "chili_cash_deployment_execution_cost_stale_penalty_pct", 0.25),
+            0.25,
+        ) or 0.0
+
+    penalty = max(0.0, low_sample_penalty + stale_penalty)
+    return penalty, {
+        "execution_cost_reliability_penalty_pct": _round(penalty, 6),
+        "execution_cost_low_sample_penalty_pct": _round(low_sample_penalty, 6),
+        "execution_cost_stale_penalty_pct": _round(stale_penalty, 6),
+        "execution_cost_estimate_min_samples": min_samples,
+        "execution_cost_estimate_age_hours": _round(age_hours, 6),
+        "execution_cost_estimate_max_age_hours": _round(max_age_hours, 6),
+    }
+
+
 def _rolling_execution_cost_pct(
     db: Session,
     *,
@@ -200,7 +252,9 @@ def _rolling_execution_cost_pct(
             impact_cap_bps=impact_cap_bps,
             use_p90=True,
         )
-        cost_pct = max(0.0, float(breakdown.total) * 100.0)
+        raw_cost_pct = max(0.0, float(breakdown.total) * 100.0)
+        reliability_penalty, reliability_meta = _execution_cost_reliability_penalty(row)
+        cost_pct = max(0.0, raw_cost_pct + reliability_penalty)
         return cost_pct, {
             "execution_cost_source": "rolling_execution_cost_estimate",
             "execution_cost_estimate_id": int(row.id),
@@ -209,6 +263,8 @@ def _rolling_execution_cost_pct(
             "execution_cost_estimate_sample_trades": int(row.sample_trades),
             "execution_cost_model_notional_usd": round(notional, 6),
             "execution_cost_requested_window_days": max(1, int(window_days)),
+            "execution_cost_raw_estimate_pct": _round(raw_cost_pct, 6),
+            **reliability_meta,
         }
     except Exception:
         return None, {}
