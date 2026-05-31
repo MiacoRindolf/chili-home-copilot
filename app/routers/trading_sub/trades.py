@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 from fastapi.responses import JSONResponse
@@ -32,6 +33,31 @@ from ._utils import json_safe
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/trading", tags=["trading-trades"])
+
+
+def _audit_export_trade_rows(
+    envelopes: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": t.get("id"),
+            "ticker": t.get("ticker"),
+            "direction": t.get("direction"),
+            "quantity": t.get("quantity"),
+            "entry_price": t.get("entry_price"),
+            "exit_price": t.get("exit_price"),
+            "entry_date": t["entry_date"].isoformat() if t.get("entry_date") else None,
+            "exit_date": t["exit_date"].isoformat() if t.get("exit_date") else None,
+            "pnl": t.get("pnl"),
+            "status": t.get("status"),
+            "broker_source": t.get("broker_source"),
+            "tca_entry_slippage_bps": t.get("tca_entry_slippage_bps"),
+            "tca_exit_slippage_bps": t.get("tca_exit_slippage_bps"),
+            "scan_pattern_id": t.get("scan_pattern_id"),
+            "pattern_tags": t.get("pattern_tags"),
+        }
+        for t in envelopes
+    ]
 
 
 # ── Trades CRUD ──────────────────────────────────────────────────────────────
@@ -620,7 +646,10 @@ def api_audit_export(
     import csv
     import io
 
-    from ...models.trading import ScanPattern, Trade, TradingExecutionEvent
+    from ...models.trading import ScanPattern, TradingExecutionEvent
+    from ...services.trading.management_envelopes import (
+        load_audit_export_envelope_rows,
+    )
     from fastapi.responses import StreamingResponse
 
     ctx = get_identity_ctx(request, db)
@@ -630,32 +659,13 @@ def api_audit_export(
     end_dt = datetime.strptime(end, "%Y-%m-%d") if end else datetime.utcnow()
 
     # Trades
-    trades = db.query(Trade).filter(
-        Trade.user_id == user_id,
-        Trade.entry_date >= start_dt,
-        Trade.entry_date <= end_dt,
-    ).order_by(Trade.entry_date).all()
-
-    trade_rows = [
-        {
-            "id": t.id,
-            "ticker": t.ticker,
-            "direction": t.direction,
-            "quantity": t.quantity,
-            "entry_price": t.entry_price,
-            "exit_price": t.exit_price,
-            "entry_date": t.entry_date.isoformat() if t.entry_date else None,
-            "exit_date": t.exit_date.isoformat() if t.exit_date else None,
-            "pnl": t.pnl,
-            "status": t.status,
-            "broker_source": getattr(t, "broker_source", None),
-            "tca_entry_slippage_bps": getattr(t, "tca_entry_slippage_bps", None),
-            "tca_exit_slippage_bps": getattr(t, "tca_exit_slippage_bps", None),
-            "scan_pattern_id": t.scan_pattern_id,
-            "pattern_tags": getattr(t, "pattern_tags", None),
-        }
-        for t in trades
-    ]
+    trades = load_audit_export_envelope_rows(
+        db,
+        user_id=user_id,
+        start=start_dt,
+        end=end_dt,
+    )
+    trade_rows = _audit_export_trade_rows(trades)
 
     # Execution events
     events = db.query(TradingExecutionEvent).filter(

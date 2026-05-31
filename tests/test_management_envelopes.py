@@ -5,6 +5,7 @@ from datetime import datetime
 from app.services.trading.management_envelopes import (
     count_probation_envelopes_since,
     fetch_synergy_retry_envelope_candidates,
+    load_audit_export_envelope_rows,
     load_closed_envelope_execution_rows,
     load_closed_pattern_envelope_rows,
     load_closed_review_envelope_rows,
@@ -217,3 +218,24 @@ def test_pattern_tagged_envelope_rows_read_management_envelopes():
     assert "pattern_tags IS NOT NULL" in db.sql
     assert "ORDER BY entry_date DESC NULLS LAST, id DESC" in db.sql
     assert db.params == {"uid": 7, "limit": 5}
+
+
+def test_audit_export_envelope_rows_read_management_envelopes():
+    start = datetime(2026, 5, 1, 0, 0)
+    end = datetime(2026, 5, 30, 23, 59)
+    db = _FakeDb(_RowsResult([{"id": 1, "ticker": "ABC"}]))
+
+    rows = load_audit_export_envelope_rows(
+        db,
+        user_id=7,
+        start=start,
+        end=end,
+    )
+
+    assert rows == [{"id": 1, "ticker": "ABC"}]
+    assert "FROM trading_management_envelopes" in db.sql
+    assert "trading_trades" not in db.sql
+    assert "entry_date >= :start" in db.sql
+    assert "entry_date <= :end" in db.sql
+    assert "ORDER BY entry_date ASC NULLS LAST" in db.sql
+    assert db.params == {"uid": 7, "start": start, "end": end}

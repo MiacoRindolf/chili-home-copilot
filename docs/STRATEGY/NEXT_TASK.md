@@ -1,40 +1,36 @@
-# NEXT_TASK: f-position-identity-phase-5t-audit-export-envelope-helper-slice
+# NEXT_TASK: f-position-identity-phase-5u-router-monitor-contract-audit
 
 STATUS: PENDING
 
 ## Goal
 
-Move the read-only audit export trade-row source to a management-envelope helper while preserving the public export contract.
+Audit the remaining router/schema/UI `Trade` ORM-symbol compatibility surface after Phase 5T, and classify what can still move behind management-envelope helpers versus what must remain public compatibility contract.
 
-Phase 5S converted the private AI evidence reader and kept the public `trades` response key stable. The next safe router target is `api_audit_export(...)`, which is read-only and already framed as an export surface.
+Phase 5T closed the last clearly safe router helper conversion from the Phase 5R audit: audit export now reads trade rows through `load_audit_export_envelope_rows(...)` while preserving the public `trades` payload and CSV contract.
 
 ## Recommended Work Shape
 
-1. Add a narrow helper to `app/services/trading/management_envelopes.py`:
-   - likely `load_audit_export_envelope_rows(...)`
-   - read from `trading_management_envelopes`
-   - return exactly the fields currently emitted in the audit export `trades` section
-2. Convert only `app/routers/trading_sub/trades.py::api_audit_export(...)` trade-row source.
-3. Keep:
-   - response section name `trades`
-   - JSON field names
-   - CSV section label `# TRADES`
-   - CSV headers/order
-4. Add parity tests for JSON and CSV export shape.
-5. Re-run:
-   - focused audit export tests
-   - `tests/test_management_envelopes.py`
-   - `tests/test_phase5_remaining_trade_refs.py`
-   - `tests/test_phase5l_reader_allowlist.py`
-   - `scripts/analyze_phase5_remaining_trade_refs.py --bucket orm_trade_symbol_compat --fail-on-unexpected-runtime`
+1. Run the focused analyzer:
+   - `python scripts/analyze_phase5_remaining_trade_refs.py --bucket orm_trade_symbol_compat --fail-on-unexpected-runtime`
+2. Inspect remaining router/schema/UI owners:
+   - `app/routers/trading_sub/trades.py`
+   - `app/routers/trading_sub/monitor.py`
+   - `app/schemas/trading.py`
+   - trading templates/static JS surfaces
+3. Classify each remaining symbol use into:
+   - public compatibility contract (`/trades`, `trade_id`, schema class names, UI labels)
+   - live-path contract (broker/order/close/reconcile/PDT/capital gates)
+   - private helper/reporting candidate
+4. If a private helper candidate is obvious and low-risk, queue it as a narrow Phase 5V implementation slice. Otherwise stop at the audit.
 
 ## Guardrails
 
 - Do not rename `/trades`, `trade_id`, schema classes, UI labels, or response field names.
-- Do not touch `api_sell_trade`, `/trades` CRUD, monitor active setup responses, broker sync, bracket writers, stop/exit execution, order placement, PDT, promotion, or capital gates.
+- Do not touch broker/order/close/reconcile/PDT/capital-gate behavior.
+- Do not convert public API payloads to envelope terminology yet.
+- Do not one-shot rename the SQLAlchemy `Trade` class.
 - Do not drop or rewrite the `trading_trades` compatibility view.
-- Stop if CSV/JSON parity cannot be pinned cleanly.
 
 ## Architect Verdict
 
-This is the last clearly safe router cleanup identified by Phase 5R. After this, the remaining router/schema surface likely needs either public compatibility aliases or live-path parity gates.
+We are no longer doing mechanical reader cleanup. The remaining work is semantic contract separation. Phase 5U should be an audit first, implementation second only if the audit finds one small private helper with clean parity.

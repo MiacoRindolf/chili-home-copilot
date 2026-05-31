@@ -404,6 +404,39 @@ def load_pattern_tagged_envelope_rows(
     """, {"uid": user_id, "limit": max(1, int(limit))})
 
 
+def load_audit_export_envelope_rows(
+    db: Session,
+    *,
+    user_id: int | None,
+    start: datetime,
+    end: datetime,
+) -> list[dict[str, Any]]:
+    """Load management-envelope rows for the public audit export trade section."""
+    return _rows(db, f"""
+        SELECT
+            id,
+            ticker,
+            direction,
+            quantity,
+            entry_price,
+            exit_price,
+            entry_date,
+            exit_date,
+            pnl,
+            status,
+            broker_source,
+            tca_entry_slippage_bps,
+            tca_exit_slippage_bps,
+            scan_pattern_id,
+            pattern_tags
+          FROM {MANAGEMENT_ENVELOPES_RELATION}
+         WHERE user_id IS NOT DISTINCT FROM :uid
+           AND entry_date >= :start
+           AND entry_date <= :end
+         ORDER BY entry_date ASC NULLS LAST
+    """, {"uid": user_id, "start": start, "end": end})
+
+
 def _option_envelope_predicate_sql(alias: str = "t") -> str:
     snap = f"COALESCE({alias}.indicator_snapshot, '{{}}'::jsonb)"
     breakout = f"({snap}->'breakout_alert')"
