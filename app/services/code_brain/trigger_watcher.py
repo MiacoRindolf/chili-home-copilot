@@ -38,6 +38,29 @@ from . import runtime_state
 logger = logging.getLogger(__name__)
 
 
+def _unclaimed_event_subject_ids(
+    db: Session,
+    *,
+    event_type: str,
+    subject_kind: str,
+    subject_ids: list[int],
+) -> set[int]:
+    ids = sorted({int(subject_id) for subject_id in subject_ids})
+    if not ids:
+        return set()
+    rows = db.execute(
+        text(
+            "SELECT subject_id FROM code_brain_events "
+            "WHERE event_type = :t "
+            "  AND subject_kind = :k "
+            "  AND subject_id = ANY(:ids) "
+            "  AND claimed_at IS NULL"
+        ),
+        {"t": event_type, "k": subject_kind, "ids": ids},
+    ).fetchall()
+    return {int(row[0]) for row in rows or [] if row[0] is not None}
+
+
 def watch_plan_tasks(db: Session) -> int:
     """Enqueue ``plan_task_ready`` events for newly-ready tasks.
 
@@ -57,24 +80,21 @@ def watch_plan_tasks(db: Session) -> int:
     ).fetchall()
 
     new_count = 0
+    queued_task_ids = _unclaimed_event_subject_ids(
+        db,
+        event_type=event_bus.EVENT_PLAN_TASK_READY,
+        subject_kind="plan_task",
+        subject_ids=[int(row[0]) for row in rows or []],
+    )
     for row in rows or []:
-        before = db.execute(
-            text(
-                "SELECT id FROM code_brain_events "
-                "WHERE event_type = :t "
-                "  AND subject_kind = 'plan_task' "
-                "  AND subject_id = :s "
-                "  AND claimed_at IS NULL"
-            ),
-            {"t": event_bus.EVENT_PLAN_TASK_READY, "s": int(row[0])},
-        ).fetchone()
-        if before:
+        task_id = int(row[0])
+        if task_id in queued_task_ids:
             continue
         event_bus.enqueue(
             db,
             event_type=event_bus.EVENT_PLAN_TASK_READY,
             subject_kind="plan_task",
-            subject_id=int(row[0]),
+            subject_id=task_id,
             payload={"title": str(row[1])[:500]},
             priority=5,
             dedupe=True,
@@ -129,19 +149,15 @@ def watch_validation_failures(db: Session) -> int:
     ).fetchall()
 
     new_count = 0
+    queued_task_ids = _unclaimed_event_subject_ids(
+        db,
+        event_type=event_bus.EVENT_VALIDATION_FAILED,
+        subject_kind="plan_task",
+        subject_ids=[int(row[0]) for row in rows or []],
+    )
     for row in rows or []:
         task_id = int(row[0])
-        existing = db.execute(
-            text(
-                "SELECT id FROM code_brain_events "
-                "WHERE event_type = :t "
-                "  AND subject_kind = 'plan_task' "
-                "  AND subject_id = :s "
-                "  AND claimed_at IS NULL"
-            ),
-            {"t": event_bus.EVENT_VALIDATION_FAILED, "s": task_id},
-        ).fetchone()
-        if existing:
+        if task_id in queued_task_ids:
             continue
         event_bus.enqueue(
             db,

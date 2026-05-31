@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import logging
 import math
+from functools import lru_cache
 from typing import Any, Iterable, Mapping, Sequence
 
 from ...config import settings
@@ -80,6 +81,7 @@ def _bayesian_shrinkage(
     return w * float(raw_value) + (1.0 - w) * float(pool_mean)
 
 
+@lru_cache(maxsize=32)
 def _z_from_ci(ci_level: float) -> float:
     """One-sided z-score for ``ci_level`` (e.g. 0.90 → ~1.2816)."""
     try:

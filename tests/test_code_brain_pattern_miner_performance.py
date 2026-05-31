@@ -36,3 +36,26 @@ def test_file_path_to_glob_caches_repeated_paths() -> None:
     info = pattern_miner._file_path_to_glob.cache_info()
     assert info.hits == 1
     assert info.maxsize == 4096
+
+
+def test_extract_verbs_caches_repeated_briefs() -> None:
+    pattern_miner._extract_verbs.cache_clear()
+
+    brief = "Add audit logging and validate migration guard support."
+    assert pattern_miner._extract_verbs(brief) == ("add", "audit", "guard", "log")
+    assert pattern_miner._extract_verbs(brief) == ("add", "audit", "guard", "log")
+
+    info = pattern_miner._extract_verbs.cache_info()
+    assert info.hits == 1
+    assert info.maxsize == 4096
+
+
+def test_extract_verbs_cache_is_bounded() -> None:
+    pattern_miner._extract_verbs.cache_clear()
+
+    for i in range(4100):
+        pattern_miner._extract_verbs(f"fix issue {i}")
+
+    info = pattern_miner._extract_verbs.cache_info()
+    assert info.maxsize == 4096
+    assert info.currsize == 4096

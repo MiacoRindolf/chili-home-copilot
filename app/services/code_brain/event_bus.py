@@ -66,7 +66,7 @@ class CodeBrainEvent:
 
 
 def _coerce_payload(payload: Optional[dict]) -> str:
-    if payload is None:
+    if payload is None or payload == {}:
         return "{}"
     return json.dumps(payload, ensure_ascii=False, default=str)
 
