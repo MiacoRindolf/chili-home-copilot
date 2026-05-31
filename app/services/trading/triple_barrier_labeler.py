@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any, Iterable, Sequence
 
-from sqlalchemy import text
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from ...config import settings
@@ -270,6 +270,18 @@ def _fetch_forward_bars(
     return out
 
 
+def _snapshot_label_anchor_date(snapshot: Any) -> date:
+    """Return the completed-bar date used for triple-barrier labeling."""
+    anchor = getattr(snapshot, "bar_start_at", None) or getattr(snapshot, "snapshot_date", None)
+    if isinstance(anchor, datetime):
+        return anchor.date()
+    if isinstance(anchor, date):
+        return anchor
+    if hasattr(anchor, "date"):
+        return anchor.date()
+    return datetime.fromisoformat(str(anchor)[:10]).date()
+
+
 def label_snapshots(
     db: Session,
     *,
@@ -281,9 +293,10 @@ def label_snapshots(
 ) -> LabelerReport:
     """Label recent MarketSnapshots with sufficient forward-bar availability.
 
-    Selects the most recent ``limit`` snapshots whose ``snapshot_date`` is
+    Selects the most recent ``limit`` snapshots whose completed bar anchor is
     at least ``min_lookback_days`` old (to ensure we have forward bars to
-    evaluate barriers against).
+    evaluate barriers against). ``bar_start_at`` is preferred over
+    ``snapshot_date`` because snapshot_date can be ingestion time.
     """
     mode = _effective_mode(mode_override)
     rep = LabelerReport(mode=mode)
@@ -302,10 +315,11 @@ def label_snapshots(
     from ...models.trading import MarketSnapshot  # local to avoid eager import
 
     cutoff = datetime.utcnow() - timedelta(days=min_lookback_days)
+    label_anchor = func.coalesce(MarketSnapshot.bar_start_at, MarketSnapshot.snapshot_date)
     rows = (
         db.query(MarketSnapshot)
-        .filter(MarketSnapshot.snapshot_date <= cutoff)
-        .order_by(MarketSnapshot.snapshot_date.desc())
+        .filter(label_anchor <= cutoff)
+        .order_by(label_anchor.desc())
         .limit(limit)
         .all()
     )
@@ -313,7 +327,7 @@ def label_snapshots(
 
     for snap in rows:
         try:
-            snap_date = snap.snapshot_date.date() if hasattr(snap.snapshot_date, "date") else snap.snapshot_date
+            snap_date = _snapshot_label_anchor_date(snap)
             bars = _fetch_forward_bars(
                 ticker=snap.ticker,
                 from_date=snap_date,
