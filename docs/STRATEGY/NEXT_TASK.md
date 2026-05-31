@@ -1,4 +1,4 @@
-# NEXT_TASK: f-phase5r-learning-reporting-adapter-slice-3
+# NEXT_TASK: f-phase5s-learning-reporting-adapter-slice-4
 
 STATUS: QUEUED
 
@@ -9,13 +9,14 @@ envelope-shaped adapter/helper with direct parity tests.
 
 ## Current State
 
-Phase 5Q converted TCA summary reporting to a management-envelope helper and
+Phase 5R converted the legacy v1 execution-robustness aggregate to a
+management-envelope helper and
 reduced the remaining ORM compatibility surface:
 
 ```text
-orm_trade_symbol_compat     | 91
-adapter_candidate           | 42
-learning_research_reporting | 37
+orm_trade_symbol_compat     | 90
+adapter_candidate           | 41
+learning_research_reporting | 36
 future_rename_blocker       | 33
 leave_alone                 | 16
 ```
@@ -42,6 +43,8 @@ Good candidate families:
 - Reporting helpers that do not write pattern state.
 - False-positive cleanup only when the symbol is plainly type/comment text and
   tests pin that no runtime behavior changed.
+- Small closed-envelope research/reporting summaries with no pattern-state
+  mutation.
 
 Avoid for this slice:
 
@@ -49,6 +52,8 @@ Avoid for this slice:
 - `auto_trader_*`, `pattern_imminent_alerts.py`, `market_data.py`, and open
   live monitor paths.
 - Broker/order/close/reconcile, PDT, capital, and risk gate surfaces.
+- Execution/readiness surfaces without an explicit parity test; Phase 5R only
+  touched the legacy v1 row source and left scoring intact.
 
 ## Guardrails
 

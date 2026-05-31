@@ -832,3 +832,25 @@ lifecycle mutators or live monitors despite their classifier bucket.
 
 Report:
 `docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5q-learning-reporting-adapter-slice-2.md`.
+
+## Phase 5R - Learning/Reporting Adapter Slice 3 (2026-05-31)
+
+Phase 5R converted the legacy v1 execution-robustness aggregate away from the
+legacy `Trade` ORM query surface.
+
+`aggregate_trade_execution_for_pattern(...)` now delegates to
+`aggregate_management_envelope_execution_for_pattern(...)`, a read-only
+management-envelope helper that preserves the aggregate output contract while
+querying the semantic `trading_management_envelopes` relation.
+
+The remaining compatibility surface dropped from 91 to 90 files:
+`learning_research_reporting=36`, `adapter_candidate=41`.
+
+Architect verdict: safe as a narrow row-source conversion because the
+execution-robustness scoring contract remains unchanged and V2 normalized
+execution-event telemetry is untouched. Continue avoiding lifecycle mutators,
+live monitor/open-position readers, and broker/reconcile/risk/capital paths
+without dedicated parity probes.
+
+Report:
+`docs/STRATEGY/CC_REPORTS/2026-05-31_f-phase5r-learning-reporting-adapter-slice-3.md`.
