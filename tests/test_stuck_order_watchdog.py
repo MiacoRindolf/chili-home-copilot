@@ -75,6 +75,17 @@ def _fake_normalized(
     )
 
 
+def _allow_replacement_buy_entry_gate(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.services.trading.governance.is_kill_switch_active",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.portfolio_risk.circuit_breaker_entry_block_reason",
+        lambda *_args, **_kwargs: None,
+    )
+
+
 def test_watchdog_disabled_returns_skipped(db, monkeypatch):
     cfg = SimpleNamespace(chili_stuck_order_watchdog_enabled=False)
     monkeypatch.setattr(wd, "settings", cfg)
@@ -602,6 +613,7 @@ def test_coinbase_maker_first_waits_for_fallback_timeout(db, monkeypatch):
 
 
 def test_coinbase_maker_first_falls_back_to_takerable_limit_when_edge_survives(db, monkeypatch):
+    _allow_replacement_buy_entry_gate(monkeypatch)
     u = models.User(name="stuck_wd_cb_fallback")
     db.add(u)
     db.flush()
@@ -686,7 +698,86 @@ def test_coinbase_maker_first_falls_back_to_takerable_limit_when_edge_survives(d
     assert entry["maker_first_original_order_id"] == "cb-maker-old"
 
 
+def test_coinbase_maker_first_blocks_replacement_buy_when_breaker_active(db, monkeypatch):
+    u = models.User(name="stuck_wd_cb_breaker_block")
+    db.add(u)
+    db.flush()
+
+    t = _make_trade(
+        db,
+        user_id=u.id,
+        broker_order_id="cb-maker-breaker",
+        broker_status="accepted",
+        entry_date=datetime.utcnow() - timedelta(seconds=180),
+        broker_source="coinbase",
+        status="working",
+        quantity=2.0,
+        remaining_quantity=2.0,
+        indicator_snapshot={
+            "entry_execution": {
+                "active_order_type": "limit_post_only",
+                "coinbase_maker_only": True,
+                "entry_edge_expected_net_pct": 5.0,
+                "cost_gate_fee_bps": 120,
+            }
+        },
+    )
+
+    cfg = SimpleNamespace(
+        chili_stuck_order_watchdog_enabled=True,
+        chili_stuck_order_market_timeout_seconds=300,
+        chili_stuck_order_limit_timeout_seconds=1800,
+        chili_coinbase_maker_first_fallback_enabled=True,
+        chili_coinbase_maker_first_fallback_after_seconds=120,
+    )
+    monkeypatch.setattr(wd, "settings", cfg)
+    monkeypatch.setattr(
+        "app.services.trading.governance.is_kill_switch_active",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.portfolio_risk.circuit_breaker_entry_block_reason",
+        lambda *_args, **_kwargs: "Circuit breaker active: test_breaker",
+    )
+
+    fake_adapter = MagicMock()
+    fake_adapter.get_order.return_value = (
+        _fake_normalized("open", order_id="cb-maker-breaker"),
+        FreshnessMeta(retrieved_at_utc=datetime.utcnow(), max_age_seconds=15.0),
+    )
+    monkeypatch.setattr(wd, "_get_adapter", lambda _src: fake_adapter)
+
+    out = wd.tick_stuck_order_watchdog(db)
+
+    assert out["outcomes"].get("maker_first_fallback_blocked_entry_gate") == 1
+    fake_adapter.get_best_bid_ask.assert_not_called()
+    fake_adapter.cancel_order.assert_not_called()
+    fake_adapter.place_limit_order_gtc.assert_not_called()
+
+    db.refresh(t)
+    assert t.status == "working"
+    assert t.broker_status == "accepted"
+    assert t.broker_order_id == "cb-maker-breaker"
+    entry = t.indicator_snapshot["entry_execution"]
+    assert entry["maker_first_fallback_decision"] == "blocked_entry_gate"
+    assert entry["maker_first_fallback_blocked_reason"] == (
+        "Circuit breaker active: test_breaker"
+    )
+    audit = (
+        db.query(AutoTraderRun)
+        .filter(AutoTraderRun.trade_id == t.id)
+        .order_by(AutoTraderRun.id.desc())
+        .first()
+    )
+    assert audit is not None
+    assert audit.decision == "blocked"
+    assert audit.reason == (
+        "maker_first_fallback_blocked:Circuit breaker active: test_breaker"
+    )
+
+
 def test_coinbase_maker_first_partial_fill_reprices_remaining_after_timeout(db, monkeypatch):
+    _allow_replacement_buy_entry_gate(monkeypatch)
     u = models.User(name="stuck_wd_cb_partial_reprice")
     db.add(u)
     db.flush()
@@ -773,6 +864,7 @@ def test_coinbase_maker_first_partial_fill_reprices_remaining_after_timeout(db, 
 
 
 def test_coinbase_maker_first_cancels_when_fallback_edge_is_too_thin(db, monkeypatch):
+    _allow_replacement_buy_entry_gate(monkeypatch)
     u = models.User(name="stuck_wd_cb_thin")
     db.add(u)
     db.flush()
@@ -834,6 +926,7 @@ def test_coinbase_maker_first_cancels_when_fallback_edge_is_too_thin(db, monkeyp
 
 
 def test_coinbase_maker_first_holds_thin_edge_maker_until_hold_timeout(db, monkeypatch):
+    _allow_replacement_buy_entry_gate(monkeypatch)
     u = models.User(name="stuck_wd_cb_thin_hold")
     db.add(u)
     db.flush()

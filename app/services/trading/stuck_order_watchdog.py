@@ -651,6 +651,65 @@ def _record_fallback_audit(
         )
 
 
+def _fallback_entry_gate_block_reason(db: Session, t: Trade) -> str | None:
+    try:
+        from .governance import is_kill_switch_active
+
+        if is_kill_switch_active():
+            return "kill_switch_active"
+    except Exception as exc:
+        logger.warning(
+            "[stuck_order_watchdog] kill-switch gate failed for fallback trade=%s",
+            t.id,
+            exc_info=True,
+        )
+        return f"kill_switch_check_failed:{type(exc).__name__}"
+
+    try:
+        from .portfolio_risk import circuit_breaker_entry_block_reason
+
+        return circuit_breaker_entry_block_reason(db, user_id=t.user_id)
+    except Exception as exc:
+        logger.warning(
+            "[stuck_order_watchdog] circuit-breaker gate failed for fallback trade=%s",
+            t.id,
+            exc_info=True,
+        )
+        return f"circuit_breaker_check_failed:{type(exc).__name__}"
+
+
+def _block_maker_first_fallback(
+    db: Session,
+    t: Trade,
+    *,
+    now: datetime,
+    reason: str,
+) -> str:
+    snapshot = {
+        "maker_first_fallback": {
+            "entry_gate_block_reason": reason,
+            "blocked_before_replacement_order": True,
+        }
+    }
+    t.last_broker_sync = datetime.utcnow()
+    _update_entry_execution(
+        t,
+        maker_first_fallback_attempted=True,
+        maker_first_fallback_decision="blocked_entry_gate",
+        maker_first_fallback_checked_at=now.isoformat(),
+        maker_first_fallback_blocked_reason=reason,
+    )
+    _record_fallback_audit(
+        db,
+        t,
+        decision="blocked",
+        reason=f"maker_first_fallback_blocked:{reason}"[:500],
+        snapshot=snapshot,
+    )
+    db.commit()
+    return "maker_first_fallback_blocked_entry_gate"
+
+
 def _try_maker_first_fallback(
     db: Session,
     adapter: Any,
@@ -696,6 +755,15 @@ def _try_maker_first_fallback(
             maker_first_partial_fill_timeout_seconds=int(elapsed.total_seconds()),
         )
         db.commit()
+
+    block_reason = _fallback_entry_gate_block_reason(db, t)
+    if block_reason is not None:
+        return _block_maker_first_fallback(
+            db,
+            t,
+            now=now,
+            reason=block_reason,
+        )
 
     try:
         bbo, _fresh = adapter.get_best_bid_ask(t.ticker)
