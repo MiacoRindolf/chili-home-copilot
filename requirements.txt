@@ -99,3 +99,9 @@ pytest-timeout>=2.1.0
 # (not via FastAPI — fast-data-worker is its own asyncio process).
 websockets>=12,<14
 aiohttp>=3.9,<4
+
+# Web/news search backend (app/search_providers.py, salvaged from odysseus, MIT).
+# beautifulsoup4 extracts readable page content on the fetch_source path; already
+# present in chili-env, declared here so the dependency is explicit. pdfminer.six
+# stays OPTIONAL (PDF text extraction degrades to "unavailable" when absent).
+beautifulsoup4>=4.12

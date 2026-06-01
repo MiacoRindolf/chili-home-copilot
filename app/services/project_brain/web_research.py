@@ -66,7 +66,7 @@ def research_topics(
     results: List[AgentResearch] = []
     for topic in topics[:max_searches]:
         query = topic
-        raw_results = web_search_module.search(query, max_results=5, trace_id=trace_id)
+        raw_results = web_search_module.research_search(query, max_results=5, trace_id=trace_id)
         if not raw_results:
             continue
         raw_text = json.dumps(raw_results, ensure_ascii=False)

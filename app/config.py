@@ -1592,6 +1592,27 @@ class Settings(BaseSettings):
     code_brain_interval_hours: int = 4  # how often to run code learning cycle
     code_brain_max_files: int = 5000    # safety cap per repo
 
+    # Web/news search providers (app/search_providers.py).
+    # Cascade tried left-to-right; each keyed provider self-skips when its key
+    # (or searxng_url) is empty, so with no config below the effective provider
+    # is DuckDuckGo — identical to the original single-backend behavior. Set any
+    # key/URL to light that provider up ahead of DDG and spare the DDG rate limit.
+    search_provider_order: str = "searxng,brave,tavily,serper,google_pse,duckduckgo"
+    searxng_url: str = ""          # self-hosted SearXNG base URL, e.g. http://localhost:8888
+    brave_api_key: str = ""        # Brave Search API
+    tavily_api_key: str = ""       # Tavily API
+    serper_api_key: str = ""       # Serper.dev API
+    google_pse_key: str = ""       # Google Programmable Search API key
+    google_pse_cx: str = ""        # Google Programmable Search engine id (cx)
+    search_request_timeout: int = 20          # per-provider HTTP timeout (s)
+    search_content_cache_ttl_sec: int = 1800  # page-content fetch cache TTL (s)
+    # When True, background research (reasoning_brain / project_brain) enriches
+    # its top results with fetched full-page article text before LLM
+    # summarization, instead of summarizing from search snippets alone. Default
+    # OFF — opt-in so the live research cadence is unchanged until enabled.
+    search_fetch_sources: bool = False
+    search_max_fetch: int = 3                  # max pages fetched per research query
+
     # Reasoning Brain
     reasoning_interval_hours: int = 6     # how often to run reasoning cycle
     reasoning_max_web_searches: int = 10  # cap per cycle to avoid abuse
