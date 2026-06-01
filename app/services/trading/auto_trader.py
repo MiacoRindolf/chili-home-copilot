@@ -137,6 +137,26 @@ MULTIPLIER_ROUND_DIGITS = 6
 QUANTITY_ROUND_DIGITS = 8
 PERCENT_SCALE = 100.0
 DEFAULT_PER_TRADE_RISK_PCT = 1.0
+SCALE_IN_PROTECTION_UNPROVEN_REASON = "scale_in_protection_unproven"
+SCALE_IN_PROTECTION_BLOCKING_RECONCILIATION_KINDS = frozenset({
+    "broker_down",
+    "missing_stop",
+    "orphan_stop",
+    "price_drift",
+    "qty_drift",
+    "state_drift",
+    "unreconciled",
+})
+SCALE_IN_PROTECTION_PROVEN_STATES = frozenset({
+    "authoritative",
+    "authoritative_submitted",
+    "authoritative_reconciled",
+    "confirmed_at_broker",
+    "reconciled",
+})
+SCALE_IN_PROTECTION_BLOCKING_REASON_PREFIXES = tuple(
+    f"{kind}:" for kind in SCALE_IN_PROTECTION_BLOCKING_RECONCILIATION_KINDS
+)
 PROBATION_QUOTA_REASON_PATTERN = "probation_quota_exceeded:pattern"
 PROBATION_QUOTA_REASON_PORTFOLIO = "probation_quota_exceeded:portfolio"
 PROBATION_OPTIONS_PATH_BLOCKED_REASON = "probation_options_path_blocked"
@@ -5587,6 +5607,131 @@ def _execute_broker_buy(
     return res
 
 
+def _row_field(row: Any, key: str, index: int) -> Any:
+    if row is None:
+        return None
+    if isinstance(row, dict):
+        return row.get(key)
+    mapping = getattr(row, "_mapping", None)
+    if mapping is not None:
+        return mapping.get(key)
+    if hasattr(row, "get"):
+        try:
+            return row.get(key)
+        except Exception:
+            pass
+    try:
+        return row[index]
+    except Exception:
+        return getattr(row, key, None)
+
+
+def _json_time(value: Any) -> str | None:
+    if value is None:
+        return None
+    iso = getattr(value, "isoformat", None)
+    if callable(iso):
+        try:
+            return str(iso())
+        except Exception:
+            return str(value)
+    return str(value)
+
+
+def _live_scale_in_protection_status(
+    db: Session,
+    trade: Any,
+) -> tuple[bool, str, dict[str, Any]]:
+    """Return whether an existing live trade has proven protective coverage.
+
+    Scale-ins add risk to a position that should already be protected. The
+    broker-facing reconciler is the authority for that proof; the advisory
+    broker order-id mirror is intentionally not consulted here.
+    """
+    snap: dict[str, Any] = {
+        "trade_id": getattr(trade, "id", None),
+        "ticker": (getattr(trade, "ticker", None) or "").upper() or None,
+        "broker_source": getattr(trade, "broker_source", None),
+        "trade_status": getattr(trade, "status", None),
+    }
+    if db is None:
+        return False, "db_unavailable", snap
+    try:
+        trade_id = int(getattr(trade, "id", 0) or 0)
+    except (TypeError, ValueError):
+        return False, "trade_id_invalid", snap
+    if trade_id <= 0:
+        return False, "trade_id_invalid", snap
+    if not str(getattr(trade, "broker_source", "") or "").strip():
+        return False, "broker_source_missing", snap
+
+    try:
+        intent_row = db.execute(
+            text(
+                """
+                SELECT id, intent_state, last_observed_at, last_diff_reason
+                FROM trading_bracket_intents
+                WHERE trade_id = :trade_id
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ),
+            {"trade_id": trade_id},
+        ).fetchone()
+        if intent_row is None:
+            return False, "no_bracket_intent", snap
+
+        intent_state = str(_row_field(intent_row, "intent_state", 1) or "").strip().lower()
+        last_diff_reason = str(
+            _row_field(intent_row, "last_diff_reason", 3) or ""
+        ).strip().lower()
+        snap.update(
+            bracket_intent_id=_row_field(intent_row, "id", 0),
+            bracket_intent_state=intent_state or None,
+            bracket_intent_last_observed_at=_json_time(
+                _row_field(intent_row, "last_observed_at", 2)
+            ),
+            bracket_intent_last_diff_reason=last_diff_reason or None,
+        )
+
+        reconciliation_row = db.execute(
+            text(
+                """
+                SELECT kind, severity, observed_at
+                FROM trading_bracket_reconciliation_log
+                WHERE trade_id = :trade_id
+                ORDER BY observed_at DESC, id DESC
+                LIMIT 1
+                """
+            ),
+            {"trade_id": trade_id},
+        ).fetchone()
+    except Exception as exc:
+        snap["lookup_error"] = type(exc).__name__
+        return False, f"lookup_failed:{type(exc).__name__}", snap
+
+    if reconciliation_row is not None:
+        latest_kind = str(_row_field(reconciliation_row, "kind", 0) or "").strip().lower()
+        snap.update(
+            latest_reconciliation_kind=latest_kind or None,
+            latest_reconciliation_severity=_row_field(reconciliation_row, "severity", 1),
+            latest_reconciliation_observed_at=_json_time(
+                _row_field(reconciliation_row, "observed_at", 2)
+            ),
+        )
+        if latest_kind == "agree":
+            return True, "latest_reconciliation:agree", snap
+        if latest_kind in SCALE_IN_PROTECTION_BLOCKING_RECONCILIATION_KINDS:
+            return False, f"latest_reconciliation:{latest_kind}", snap
+        return False, f"latest_reconciliation:{latest_kind or 'unknown'}", snap
+
+    if last_diff_reason.startswith(SCALE_IN_PROTECTION_BLOCKING_REASON_PREFIXES):
+        return False, f"last_diff_reason:{last_diff_reason.split(':', 1)[0]}", snap
+    if intent_state in SCALE_IN_PROTECTION_PROVEN_STATES:
+        return True, f"intent_state:{intent_state}", snap
+    return False, f"intent_state:{intent_state or 'unknown'}", snap
+
+
 def _execute_scale_in(
     db: Session,
     uid: int,
@@ -5618,6 +5763,22 @@ def _execute_scale_in(
         )
         return
     if live:
+        protection_ok, protection_reason, protection_snap = (
+            _live_scale_in_protection_status(db, t)
+        )
+        snap["scale_in_protection"] = protection_snap
+        snap["scale_in_protection_reason"] = protection_reason
+        if not protection_ok:
+            _block_live_order(
+                db,
+                uid=uid,
+                alert=alert,
+                reason=f"{SCALE_IN_PROTECTION_UNPROVEN_REASON}:{protection_reason}",
+                snap=snap,
+                llm_snap=llm_snap,
+                out=out,
+            )
+            return
         if bool(getattr(settings, "chili_autotrader_block_live_on_capital_fallback", True)):
             try:
                 from .auto_trader_rules import resolve_effective_capital

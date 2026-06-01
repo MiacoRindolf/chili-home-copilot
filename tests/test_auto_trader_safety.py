@@ -1824,6 +1824,11 @@ def test_scale_in_blocks_live_capital_fallback(monkeypatch):
         "settings",
         SimpleNamespace(chili_autotrader_block_live_on_capital_fallback=True),
     )
+    monkeypatch.setattr(
+        at_mod,
+        "_live_scale_in_protection_status",
+        lambda *a, **k: (True, "latest_reconciliation:agree", {}),
+    )
     from app.services.trading import auto_trader_rules as rules_mod
 
     monkeypatch.setattr(
@@ -1856,6 +1861,102 @@ def test_scale_in_blocks_live_capital_fallback(monkeypatch):
 
     assert blocked
     assert blocked[0]["reason"] == "capital_unavailable:fallback:get_portfolio_timeout"
+
+
+def test_scale_in_blocks_when_protection_is_unproven(monkeypatch):
+    class _NoBracketRowsDb:
+        def execute(self, *args, **kwargs):
+            return self
+
+        def fetchone(self):
+            return None
+
+    alert = SimpleNamespace(id=80, ticker="SCAP", scan_pattern_id=12)
+    trade = SimpleNamespace(
+        id=8,
+        ticker="SCAP",
+        status="open",
+        broker_source="coinbase",
+        quantity=1.0,
+        indicator_snapshot={},
+    )
+    plan = SimpleNamespace(
+        trade=trade,
+        added_quantity=1.0,
+        new_avg_entry=51.0,
+        new_stop=TEST_STOP_PRICE,
+        new_target=TEST_TARGET_PRICE,
+        confirming_pattern_id=12,
+    )
+    blocked: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        at_mod,
+        "settings",
+        SimpleNamespace(chili_autotrader_block_live_on_capital_fallback=False),
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_execute_broker_buy",
+        lambda *a, **k: pytest.fail("unprotected scale-in should not reach broker"),
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_block_live_order",
+        lambda *a, **k: blocked.append(k),
+    )
+
+    out = {"scaled_in": 0, "skipped": 0}
+    snap: dict[str, object] = {}
+
+    at_mod._execute_scale_in(
+        _NoBracketRowsDb(), 1, alert, plan, TEST_ENTRY_PRICE, snap, None, True, out
+    )
+
+    assert blocked
+    assert blocked[0]["reason"] == "scale_in_protection_unproven:no_bracket_intent"
+    assert snap["scale_in_protection_reason"] == "no_bracket_intent"
+
+
+def test_live_scale_in_protection_status_blocks_latest_broker_down():
+    class _Result:
+        def __init__(self, row):
+            self._row = row
+
+        def fetchone(self):
+            return self._row
+
+    class _Db:
+        def __init__(self):
+            self._rows = iter([
+                {
+                    "id": 42,
+                    "intent_state": "reconciled",
+                    "last_observed_at": datetime(2026, 6, 1, 12, 0),
+                    "last_diff_reason": "agree",
+                },
+                {
+                    "kind": "broker_down",
+                    "severity": "warn",
+                    "observed_at": datetime(2026, 6, 1, 12, 1),
+                },
+            ])
+
+        def execute(self, *args, **kwargs):
+            return _Result(next(self._rows))
+
+    trade = SimpleNamespace(
+        id=9,
+        ticker="SCAP",
+        status="open",
+        broker_source="coinbase",
+    )
+
+    ok, reason, snap = at_mod._live_scale_in_protection_status(_Db(), trade)
+
+    assert ok is False
+    assert reason == "latest_reconciliation:broker_down"
+    assert snap["latest_reconciliation_kind"] == "broker_down"
 
 
 def test_scale_in_records_confirming_pattern_history(monkeypatch):
@@ -1919,6 +2020,11 @@ def test_scale_in_normalizes_quantity_before_live_broker(monkeypatch):
         at_mod,
         "settings",
         SimpleNamespace(chili_autotrader_block_live_on_capital_fallback=False),
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_live_scale_in_protection_status",
+        lambda *a, **k: (True, "latest_reconciliation:agree", {}),
     )
     monkeypatch.setattr(at_mod, "_audit", lambda *a, **k: None)
     monkeypatch.setattr(at_mod, "_autotrader_tick_note", lambda *a, **k: None)
