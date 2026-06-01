@@ -1547,6 +1547,7 @@ def reasoning_research_report(
         label="CHILI — Research Digest",
         stats={"Topics": len(rows), "Sources": len(sources)},
         sources=sources,
+        category="research",
     )
     headers = {}
     if download:
@@ -1590,5 +1591,38 @@ def mcp_status():
         "note": "Read-only. Live connections are owned by the supervisor task, "
                 "not established by this endpoint.",
     })
+
+
+@router.get("/api/brain/trading/brief", response_class=HTMLResponse)
+def trading_brief_report(
+    request: Request,
+    download: int = Query(0, description="1 = force download as attachment"),
+    window_hours: int = Query(24, ge=1, le=720, description="lookback window in hours"),
+    db: Session = Depends(get_db),
+):
+    """Render the user's daily trading brief as a self-contained HTML report.
+
+    Read-only: aggregates closed/open trades + pattern attribution over the
+    window into a brief via app/services/trading_summary + trading_brief, themed
+    by app/visual_report. Guests (no user_id) get an empty brief. ?download=1
+    returns it as a file attachment.
+    """
+    from .. import visual_report
+    from ..services.trading_brief import build_brief
+    from ..services.trading_summary import build_trading_summary
+
+    ctx = get_identity_ctx(request, db)
+    summary = build_trading_summary(db, ctx.get("user_id"), window_hours=window_hours)
+    brief = build_brief(summary)
+    html = visual_report.generate_report(
+        brief["title"], brief["markdown"],
+        subtitle=brief["subtitle"], label=brief["label"],
+        stats=brief["stats"], sources=brief["sources"],
+        category="brief",
+    )
+    headers = {}
+    if download:
+        headers["Content-Disposition"] = 'attachment; filename="chili-trading-brief.html"'
+    return HTMLResponse(content=html, headers=headers)
 
 
