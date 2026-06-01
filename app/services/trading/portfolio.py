@@ -120,19 +120,38 @@ def remove_from_watchlist(db: Session, user_id: int | None, ticker: str) -> bool
 # ── Trade CRUD ────────────────────────────────────────────────────────
 
 def create_trade(db: Session, user_id: int | None, **kwargs) -> Trade:
-    # Risk gate: check portfolio limits before creating any trade
+    enforce_entry_risk = bool(kwargs.pop("enforce_entry_risk", False))
+    risk_capital = kwargs.pop("risk_capital", None)
+
+    # Manual trade CRUD is a journal/envelope write, not broker placement.
+    # Only executable callers should opt into the entry gate, and they must
+    # supply proven capital so this helper cannot size against the gate's
+    # default capital placeholder.
     _ticker = kwargs.get("ticker", "")
-    try:
-        from .portfolio_risk import check_new_trade_allowed
-        _allowed, _reason = check_new_trade_allowed(db, user_id, _ticker)
-        if not _allowed:
-            raise ValueError(f"Trade blocked by risk management: {_reason}")
-    except ImportError:
-        pass
-    except ValueError:
-        raise
-    except Exception as e:
-        logger.warning("[portfolio] risk check error (allowing trade): %s", e)
+    if enforce_entry_risk:
+        capital_f = _positive_float_or_none(risk_capital)
+        if capital_f is None:
+            raise ValueError(
+                "Trade blocked by risk management: risk_capital_unavailable"
+            )
+        try:
+            from .portfolio_risk import check_new_trade_allowed
+            _allowed, _reason = check_new_trade_allowed(
+                db, user_id, _ticker, capital=capital_f,
+            )
+            if not _allowed:
+                raise ValueError(f"Trade blocked by risk management: {_reason}")
+        except ImportError:
+            raise ValueError(
+                "Trade blocked by risk management: risk_gate_unavailable"
+            )
+        except ValueError:
+            raise
+        except Exception as e:
+            logger.warning("[portfolio] risk check error (blocking trade): %s", e)
+            raise ValueError(
+                "Trade blocked by risk management: risk_gate_unavailable"
+            ) from e
 
     kwargs.setdefault("management_scope", MANAGEMENT_SCOPE_MANUAL)
     trade = Trade(user_id=user_id, **kwargs)
