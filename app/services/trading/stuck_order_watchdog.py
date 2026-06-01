@@ -23,6 +23,10 @@ Flow per candidate:
 2. If terminal → update the local Trade row to match (filled/cancelled/rejected).
 3. If still non-terminal and elapsed > timeout → issue a cancel, log CRITICAL.
 
+Cancel calls are request acknowledgements, not terminal broker truth. The
+watchdog records ``cancel_requested`` evidence and waits for a later broker
+poll before marking a trade cancelled locally.
+
 Runs on a scheduler interval; never raises.
 """
 from __future__ import annotations
@@ -48,6 +52,7 @@ _NON_TERMINAL = {
     "acknowledged", "ack", "working", "open", "active",
     "partially_filled", "partial", "partial_filled",
     "unconfirmed",
+    "cancel_requested", "cancel_pending",
 }
 _TERMINAL_FILLED = {"filled", "done", "completed", "complete"}
 _TERMINAL_CANCELLED = {"cancelled", "canceled", "revoked"}
@@ -119,6 +124,105 @@ def _update_entry_execution(t: Trade, **updates: Any) -> None:
     entry.update(updates)
     snap["entry_execution"] = entry
     t.indicator_snapshot = snap
+
+
+def _entry_client_order_id(t: Trade) -> str | None:
+    entry = _entry_execution_snapshot(t)
+    active_order_id = str(getattr(t, "broker_order_id", None) or "").strip()
+    fallback_order_id = str(entry.get("maker_first_fallback_order_id") or "").strip()
+    candidates: list[Any] = []
+    if active_order_id and fallback_order_id == active_order_id:
+        candidates.append(entry.get("maker_first_fallback_client_order_id"))
+    candidates.append(entry.get("client_order_id"))
+    candidates.append(entry.get("maker_first_fallback_client_order_id"))
+    for raw in candidates:
+        if raw is None:
+            continue
+        value = str(raw).strip()
+        if value:
+            return value
+    return None
+
+
+def _record_cancel_request_evidence(
+    db: Session,
+    t: Trade,
+    *,
+    now: datetime,
+    reason: str,
+    cancel_result: dict[str, Any],
+    prior_broker_status: str | None,
+) -> None:
+    order_id = str(getattr(t, "broker_order_id", None) or "").strip() or None
+    client_order_id = _entry_client_order_id(t)
+    payload = {
+        "cancel_requested": True,
+        "cancel_request_reason": reason,
+        "broker_truth": "unknown",
+        "prior_broker_status": prior_broker_status,
+        "order_id": order_id,
+        "client_order_id": client_order_id,
+        "cancel_result": cancel_result,
+    }
+    _update_entry_execution(
+        t,
+        cancel_requested=True,
+        cancel_requested_at=now.isoformat(),
+        cancel_request_reason=reason,
+        cancel_request_broker_truth="unknown",
+        cancel_request_order_id=order_id,
+        cancel_request_client_order_id=client_order_id,
+        cancel_request_adapter_ok=bool(cancel_result.get("ok")),
+        cancel_request_error=(
+            str(cancel_result.get("error"))[:500]
+            if cancel_result.get("error") is not None
+            else None
+        ),
+    )
+    try:
+        from .execution_audit import record_execution_event
+
+        record_execution_event(
+            db,
+            user_id=getattr(t, "user_id", None),
+            ticker=getattr(t, "ticker", None),
+            trade=t,
+            venue=(getattr(t, "broker_source", None) or None),
+            broker_source=getattr(t, "broker_source", None),
+            order_id=order_id,
+            client_order_id=client_order_id,
+            product_id=getattr(t, "ticker", None),
+            event_type="cancel_request",
+            status="cancel_requested",
+            requested_quantity=_safe_float(getattr(t, "quantity", None)),
+            cumulative_filled_quantity=_safe_float(
+                getattr(t, "filled_quantity", None)
+            ) or 0.0,
+            event_at=now,
+            payload_json=payload,
+            apply_to_trade=False,
+        )
+    except Exception:
+        logger.debug(
+            "[stuck_order_watchdog] cancel-request event write failed trade=%s",
+            getattr(t, "id", None),
+            exc_info=True,
+        )
+    try:
+        from .venue import idempotency_store
+
+        if client_order_id and order_id:
+            idempotency_store.mark_broker_id(
+                client_order_id,
+                order_id,
+                status="cancel_requested",
+            )
+    except Exception:
+        logger.debug(
+            "[stuck_order_watchdog] cancel-request idempotency update failed trade=%s",
+            getattr(t, "id", None),
+            exc_info=True,
+        )
 
 
 def _safe_float(value: Any) -> float | None:
@@ -852,9 +956,13 @@ def _try_maker_first_fallback(
 
         cancel_result = _try_cancel(adapter, t)
         if cancel_result.get("ok"):
-            t.status = "cancelled"
-            t.broker_status = "cancelled"
-            t.exit_reason = "maker_first_edge_too_thin"
+            prior_status = (
+                getattr(order_normalized, "status", None)
+                or t.broker_status
+                or "open"
+            )
+            t.status = "working"
+            t.broker_status = "cancel_requested"
             t.last_broker_sync = datetime.utcnow()
             _update_entry_execution(
                 t,
@@ -863,15 +971,23 @@ def _try_maker_first_fallback(
                 maker_first_fallback_checked_at=now.isoformat(),
                 maker_first_fallback_costs=fallback_snapshot["maker_first_fallback"],
             )
+            _record_cancel_request_evidence(
+                db,
+                t,
+                now=now,
+                reason="maker_first_edge_too_thin",
+                cancel_result=cancel_result,
+                prior_broker_status=str(prior_status).lower(),
+            )
             _record_fallback_audit(
                 db,
                 t,
                 decision="blocked",
-                reason="maker_first_fallback_edge_too_thin",
+                reason="maker_first_fallback_edge_too_thin_cancel_requested",
                 snapshot=fallback_snapshot,
             )
             db.commit()
-            return "maker_first_fallback_edge_too_thin_cancelled"
+            return "maker_first_fallback_edge_too_thin_cancel_requested"
         return "maker_first_fallback_edge_cancel_failed"
 
     cancel_result = _try_cancel(adapter, t)
@@ -1058,6 +1174,13 @@ def _process_one(db: Session, t: Trade, now: datetime) -> str:
         db.commit()
         return f"mirrored:{broker_status}"
 
+    if bool(_entry_execution_snapshot(t).get("cancel_requested")):
+        t.status = "working"
+        t.broker_status = "cancel_requested"
+        t.last_broker_sync = datetime.utcnow()
+        db.commit()
+        return "cancel_request_pending"
+
     if _is_coinbase_maker_first_trade(t):
         return _try_maker_first_fallback(db, adapter, t, order_normalized, now)
 
@@ -1069,13 +1192,19 @@ def _process_one(db: Session, t: Trade, now: datetime) -> str:
     )
     cancel_result = _try_cancel(adapter, t)
     if cancel_result.get("ok"):
-        t.status = "cancelled"
-        t.broker_status = "cancelled"
-        if not t.exit_reason:
-            t.exit_reason = "stuck_order_watchdog_timeout"
+        t.status = "working"
+        t.broker_status = "cancel_requested"
         t.last_broker_sync = datetime.utcnow()
+        _record_cancel_request_evidence(
+            db,
+            t,
+            now=now,
+            reason="stuck_order_watchdog_timeout",
+            cancel_result=cancel_result,
+            prior_broker_status=broker_status or None,
+        )
         db.commit()
-        return "cancelled"
+        return "cancel_requested"
 
     # Cancel itself failed — leave the row for the next tick. Don't mark the
     # trade cancelled locally because the broker may still fill it.

@@ -14,8 +14,10 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from sqlalchemy import text
+
 from app import models
-from app.models.trading import AutoTraderRun, Trade
+from app.models.trading import AutoTraderRun, Trade, TradingExecutionEvent
 from app.services.trading import stuck_order_watchdog as wd
 from app.services.trading.venue.protocol import FreshnessMeta, NormalizedOrder, NormalizedTicker
 
@@ -162,13 +164,30 @@ def test_past_timeout_still_pending_triggers_cancel(db, monkeypatch):
 
     out = wd.tick_stuck_order_watchdog(db)
 
-    assert out["outcomes"].get("cancelled") == 1
+    assert out["outcomes"].get("cancel_requested") == 1
     fake_adapter.cancel_order.assert_called_once_with("rh-stuck")
 
     db.refresh(t)
-    assert t.status == "cancelled"
-    assert t.broker_status == "cancelled"
+    assert t.status == "working"
+    assert t.broker_status == "cancel_requested"
     assert t.last_broker_sync is not None
+    entry = t.indicator_snapshot["entry_execution"]
+    assert entry["cancel_requested"] is True
+    assert entry["cancel_request_reason"] == "stuck_order_watchdog_timeout"
+    assert entry["cancel_request_broker_truth"] == "unknown"
+    event = (
+        db.query(TradingExecutionEvent)
+        .filter(TradingExecutionEvent.trade_id == t.id)
+        .one()
+    )
+    assert event.event_type == "cancel_request"
+    assert event.status == "cancel_requested"
+    assert event.payload_json["broker_truth"] == "unknown"
+
+    second = wd.tick_stuck_order_watchdog(db)
+
+    assert second["outcomes"].get("cancel_request_pending") == 1
+    fake_adapter.cancel_order.assert_called_once_with("rh-stuck")
 
 
 def test_broker_reports_terminal_mirrors_state_no_cancel(db, monkeypatch):
@@ -868,6 +887,10 @@ def test_coinbase_maker_first_cancels_when_fallback_edge_is_too_thin(db, monkeyp
     u = models.User(name="stuck_wd_cb_thin")
     db.add(u)
     db.flush()
+    db.execute(
+        text("DELETE FROM venue_order_idempotency WHERE client_order_id = :cid"),
+        {"cid": "atv1-thin-buy"},
+    )
 
     t = _make_trade(
         db,
@@ -882,11 +905,22 @@ def test_coinbase_maker_first_cancels_when_fallback_edge_is_too_thin(db, monkeyp
             "entry_execution": {
                 "active_order_type": "limit_post_only",
                 "coinbase_maker_only": True,
+                "client_order_id": "atv1-thin-buy",
                 "entry_edge_expected_net_pct": 1.0,
                 "cost_gate_fee_bps": 120,
             }
         },
     )
+    db.execute(
+        text(
+            "INSERT INTO venue_order_idempotency "
+            "(client_order_id, venue, symbol, side, qty, broker_order_id, status, ttl_expires_at) "
+            "VALUES (:cid, 'coinbase', 'ZZTEST', 'buy', 1.0, :oid, 'submitted', "
+            "NOW() + INTERVAL '1 day')"
+        ),
+        {"cid": "atv1-thin-buy", "oid": "cb-maker-thin"},
+    )
+    db.commit()
 
     cfg = SimpleNamespace(
         chili_stuck_order_watchdog_enabled=True,
@@ -916,13 +950,41 @@ def test_coinbase_maker_first_cancels_when_fallback_edge_is_too_thin(db, monkeyp
 
     out = wd.tick_stuck_order_watchdog(db)
 
-    assert out["outcomes"].get("maker_first_fallback_edge_too_thin_cancelled") == 1
+    assert out["outcomes"].get("maker_first_fallback_edge_too_thin_cancel_requested") == 1
     fake_adapter.cancel_order.assert_called_once_with("cb-maker-thin")
     fake_adapter.place_limit_order_gtc.assert_not_called()
 
     db.refresh(t)
-    assert t.status == "cancelled"
-    assert t.exit_reason == "maker_first_edge_too_thin"
+    assert t.status == "working"
+    assert t.broker_status == "cancel_requested"
+    assert t.exit_reason is None
+    entry = t.indicator_snapshot["entry_execution"]
+    assert entry["maker_first_fallback_decision"] == "edge_too_thin"
+    assert entry["cancel_requested"] is True
+    assert entry["cancel_request_reason"] == "maker_first_edge_too_thin"
+    assert entry["cancel_request_broker_truth"] == "unknown"
+    assert entry["cancel_request_client_order_id"] == "atv1-thin-buy"
+    event = (
+        db.query(TradingExecutionEvent)
+        .filter(TradingExecutionEvent.trade_id == t.id)
+        .one()
+    )
+    assert event.event_type == "cancel_request"
+    assert event.status == "cancel_requested"
+    assert event.client_order_id == "atv1-thin-buy"
+    idem_status = db.execute(
+        text(
+            "SELECT status FROM venue_order_idempotency "
+            "WHERE client_order_id = :cid"
+        ),
+        {"cid": "atv1-thin-buy"},
+    ).scalar_one()
+    assert idem_status == "cancel_requested"
+    db.execute(
+        text("DELETE FROM venue_order_idempotency WHERE client_order_id = :cid"),
+        {"cid": "atv1-thin-buy"},
+    )
+    db.commit()
 
 
 def test_coinbase_maker_first_holds_thin_edge_maker_until_hold_timeout(db, monkeypatch):
