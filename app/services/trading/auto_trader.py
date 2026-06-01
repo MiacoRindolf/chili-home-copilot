@@ -5638,6 +5638,51 @@ def _json_time(value: Any) -> str | None:
     return str(value)
 
 
+def _utc_naive_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        if raw.endswith("Z"):
+            raw = f"{raw[:-1]}+00:00"
+        try:
+            dt = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+    else:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def _scale_in_protection_max_age_sec() -> int:
+    raw = getattr(settings, "chili_bracket_watchdog_stale_after_sec", 300) or 300
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return 300
+
+
+def _freshness_age_seconds(
+    observed_at: Any,
+    *,
+    max_age_sec: int,
+    now: datetime | None = None,
+) -> tuple[bool, float | None]:
+    observed = _utc_naive_datetime(observed_at)
+    if observed is None:
+        return False, None
+    now_utc = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    age = now_utc - observed
+    age_sec = max(0.0, age.total_seconds())
+    return age_sec <= float(max_age_sec), age_sec
+
+
 def _live_scale_in_protection_status(
     db: Session,
     trade: Any,
@@ -5654,6 +5699,8 @@ def _live_scale_in_protection_status(
         "broker_source": getattr(trade, "broker_source", None),
         "trade_status": getattr(trade, "status", None),
     }
+    max_age_sec = _scale_in_protection_max_age_sec()
+    snap["max_age_sec"] = max_age_sec
     if db is None:
         return False, "db_unavailable", snap
     try:
@@ -5685,11 +5732,12 @@ def _live_scale_in_protection_status(
         last_diff_reason = str(
             _row_field(intent_row, "last_diff_reason", 3) or ""
         ).strip().lower()
+        intent_observed_at = _row_field(intent_row, "last_observed_at", 2)
         snap.update(
             bracket_intent_id=_row_field(intent_row, "id", 0),
             bracket_intent_state=intent_state or None,
             bracket_intent_last_observed_at=_json_time(
-                _row_field(intent_row, "last_observed_at", 2)
+                intent_observed_at
             ),
             bracket_intent_last_diff_reason=last_diff_reason or None,
         )
@@ -5712,14 +5760,32 @@ def _live_scale_in_protection_status(
 
     if reconciliation_row is not None:
         latest_kind = str(_row_field(reconciliation_row, "kind", 0) or "").strip().lower()
+        reconciliation_observed_at = _row_field(reconciliation_row, "observed_at", 2)
+        reconciliation_fresh, reconciliation_age_sec = _freshness_age_seconds(
+            reconciliation_observed_at,
+            max_age_sec=max_age_sec,
+        )
         snap.update(
             latest_reconciliation_kind=latest_kind or None,
             latest_reconciliation_severity=_row_field(reconciliation_row, "severity", 1),
             latest_reconciliation_observed_at=_json_time(
-                _row_field(reconciliation_row, "observed_at", 2)
+                reconciliation_observed_at
             ),
+            latest_reconciliation_age_sec=(
+                round(reconciliation_age_sec, 3)
+                if reconciliation_age_sec is not None
+                else None
+            ),
+            latest_reconciliation_fresh=reconciliation_fresh,
         )
         if latest_kind == "agree":
+            if not reconciliation_fresh:
+                stale_reason = (
+                    "latest_reconciliation_unobserved"
+                    if reconciliation_age_sec is None
+                    else "latest_reconciliation_stale:agree"
+                )
+                return False, stale_reason, snap
             return True, "latest_reconciliation:agree", snap
         if latest_kind in SCALE_IN_PROTECTION_BLOCKING_RECONCILIATION_KINDS:
             return False, f"latest_reconciliation:{latest_kind}", snap
@@ -5728,6 +5794,23 @@ def _live_scale_in_protection_status(
     if last_diff_reason.startswith(SCALE_IN_PROTECTION_BLOCKING_REASON_PREFIXES):
         return False, f"last_diff_reason:{last_diff_reason.split(':', 1)[0]}", snap
     if intent_state in SCALE_IN_PROTECTION_PROVEN_STATES:
+        intent_fresh, intent_age_sec = _freshness_age_seconds(
+            intent_observed_at,
+            max_age_sec=max_age_sec,
+        )
+        snap.update(
+            bracket_intent_age_sec=(
+                round(intent_age_sec, 3) if intent_age_sec is not None else None
+            ),
+            bracket_intent_fresh=intent_fresh,
+        )
+        if not intent_fresh:
+            stale_reason = (
+                "intent_state_unobserved"
+                if intent_age_sec is None
+                else f"intent_state_stale:{intent_state}"
+            )
+            return False, stale_reason, snap
         return True, f"intent_state:{intent_state}", snap
     return False, f"intent_state:{intent_state or 'unknown'}", snap
 

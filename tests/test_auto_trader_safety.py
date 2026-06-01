@@ -10,7 +10,7 @@ Covers:
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -1957,6 +1957,92 @@ def test_live_scale_in_protection_status_blocks_latest_broker_down():
     assert ok is False
     assert reason == "latest_reconciliation:broker_down"
     assert snap["latest_reconciliation_kind"] == "broker_down"
+
+
+def test_live_scale_in_protection_status_blocks_stale_agree():
+    class _Result:
+        def __init__(self, row):
+            self._row = row
+
+        def fetchone(self):
+            return self._row
+
+    class _Db:
+        def __init__(self):
+            stale_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+                seconds=600
+            )
+            self._rows = iter([
+                {
+                    "id": 43,
+                    "intent_state": "reconciled",
+                    "last_observed_at": stale_at,
+                    "last_diff_reason": "agree",
+                },
+                {
+                    "kind": "agree",
+                    "severity": "info",
+                    "observed_at": stale_at,
+                },
+            ])
+
+        def execute(self, *args, **kwargs):
+            return _Result(next(self._rows))
+
+    trade = SimpleNamespace(
+        id=10,
+        ticker="SCAP",
+        status="open",
+        broker_source="coinbase",
+    )
+
+    ok, reason, snap = at_mod._live_scale_in_protection_status(_Db(), trade)
+
+    assert ok is False
+    assert reason == "latest_reconciliation_stale:agree"
+    assert snap["latest_reconciliation_fresh"] is False
+
+
+def test_live_scale_in_protection_status_allows_fresh_agree():
+    class _Result:
+        def __init__(self, row):
+            self._row = row
+
+        def fetchone(self):
+            return self._row
+
+    class _Db:
+        def __init__(self):
+            fresh_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            self._rows = iter([
+                {
+                    "id": 44,
+                    "intent_state": "reconciled",
+                    "last_observed_at": fresh_at,
+                    "last_diff_reason": "agree",
+                },
+                {
+                    "kind": "agree",
+                    "severity": "info",
+                    "observed_at": fresh_at,
+                },
+            ])
+
+        def execute(self, *args, **kwargs):
+            return _Result(next(self._rows))
+
+    trade = SimpleNamespace(
+        id=11,
+        ticker="SCAP",
+        status="open",
+        broker_source="coinbase",
+    )
+
+    ok, reason, snap = at_mod._live_scale_in_protection_status(_Db(), trade)
+
+    assert ok is True
+    assert reason == "latest_reconciliation:agree"
+    assert snap["latest_reconciliation_fresh"] is True
 
 
 def test_scale_in_records_confirming_pattern_history(monkeypatch):
