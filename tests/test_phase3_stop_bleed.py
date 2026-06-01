@@ -548,6 +548,127 @@ class TestPortfolioBreakerSeparation:
         assert tripped_a is True
         assert reason_a is not None and "monthly_dd_breaker" in reason_a
 
+    def test_portfolio_breaker_live_blocks_when_threshold_unavailable(
+        self, monkeypatch,
+    ):
+        from app import config as app_config
+
+        monkeypatch.setattr(
+            app_config.settings, "chili_portfolio_dd_breaker_enabled", True,
+        )
+        monkeypatch.setattr(
+            app_config.settings, "chili_portfolio_dd_breaker_live", True,
+        )
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("threshold unavailable")
+
+        persisted = []
+        monkeypatch.setattr(portfolio_risk, "_portfolio_dd_threshold", _boom)
+        monkeypatch.setattr(
+            portfolio_risk,
+            "_persist_portfolio_breaker_state",
+            lambda **kwargs: persisted.append(kwargs),
+        )
+
+        tripped, reason = check_portfolio_drawdown_breaker(
+            object(), user_id=955,
+        )
+
+        assert tripped is True
+        assert reason == "portfolio_dd_breaker_unavailable:threshold"
+        assert persisted == [{
+            "tripped": True,
+            "reason": "portfolio_dd_breaker_unavailable:threshold",
+            "regime": "portfolio_breaker",
+        }]
+
+    def test_portfolio_breaker_live_blocks_when_monthly_pnl_unavailable(
+        self, monkeypatch,
+    ):
+        from app import config as app_config
+
+        monkeypatch.setattr(
+            app_config.settings, "chili_portfolio_dd_breaker_enabled", True,
+        )
+        monkeypatch.setattr(
+            app_config.settings, "chili_portfolio_dd_breaker_live", True,
+        )
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("monthly pnl unavailable")
+
+        persisted = []
+        monkeypatch.setattr(
+            portfolio_risk,
+            "_portfolio_dd_threshold",
+            lambda *_args, **_kwargs: (0.0, 30),
+        )
+        monkeypatch.setattr(portfolio_risk, "_monthly_total_pnl", _boom)
+        monkeypatch.setattr(
+            portfolio_risk,
+            "_persist_portfolio_breaker_state",
+            lambda **kwargs: persisted.append(kwargs),
+        )
+
+        tripped, reason = check_portfolio_drawdown_breaker(
+            object(), user_id=956,
+        )
+
+        assert tripped is True
+        assert reason == "portfolio_dd_breaker_unavailable:monthly_total_pnl"
+        assert persisted == [{
+            "tripped": True,
+            "reason": "portfolio_dd_breaker_unavailable:monthly_total_pnl",
+            "regime": "portfolio_breaker",
+        }]
+
+    def test_portfolio_breaker_live_gate_fails_closed_when_session_unavailable(
+        self, monkeypatch,
+    ):
+        from app import config as app_config
+        from app import db as app_db
+
+        monkeypatch.setattr(
+            app_config.settings, "chili_portfolio_dd_breaker_enabled", True,
+        )
+        monkeypatch.setattr(
+            app_config.settings, "chili_portfolio_dd_breaker_live", True,
+        )
+
+        def _boom():
+            raise RuntimeError("session unavailable")
+
+        monkeypatch.setattr(app_db, "SessionLocal", _boom, raising=False)
+
+        ok, reason = _assert_portfolio_breaker_ok()
+
+        assert ok is False
+        assert reason == "portfolio_dd_breaker_unavailable:gate_exception"
+
+    def test_portfolio_breaker_shadow_gate_still_passes_when_session_unavailable(
+        self, monkeypatch,
+    ):
+        from app import config as app_config
+        from app import db as app_db
+
+        monkeypatch.setattr(
+            app_config.settings, "chili_portfolio_dd_breaker_enabled", True,
+        )
+        monkeypatch.setattr(
+            app_config.settings, "chili_portfolio_dd_breaker_live", False,
+        )
+
+        def _boom():
+            raise RuntimeError("session unavailable")
+
+        monkeypatch.setattr(app_db, "SessionLocal", _boom, raising=False)
+
+        ok, reason = _assert_portfolio_breaker_ok()
+
+        assert ok is True
+        assert reason is None
+
     def test_pattern_breaker_still_works_post_rename(self, db, monkeypatch):
         """The pattern tier still trips under its own distribution after
         the chili_monthly_dd_breaker_enabled → chili_pattern_dd_breaker_enabled

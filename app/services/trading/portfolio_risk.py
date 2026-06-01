@@ -1582,14 +1582,24 @@ def check_portfolio_drawdown_breaker(
     from ...config import settings as _s
     if not bool(getattr(_s, "chili_portfolio_dd_breaker_enabled", False)):
         return False, None
+    live = bool(getattr(_s, "chili_portfolio_dd_breaker_live", False))
 
     try:
         threshold, n_obs = _portfolio_dd_threshold(db, user_id, settings_obj=_s)
     except Exception:
+        reason = "portfolio_dd_breaker_unavailable:threshold"
         logger.warning(
-            "[portfolio_breaker] _portfolio_dd_threshold failed; skipping check",
+            "[portfolio_breaker] _portfolio_dd_threshold failed; %s",
+            "blocking live entries" if live else "skipping check",
             exc_info=True,
         )
+        if live:
+            _persist_portfolio_breaker_state(
+                tripped=True,
+                reason=reason,
+                regime="portfolio_breaker",
+            )
+            return True, reason
         return False, None
 
     if threshold is None:
@@ -1603,10 +1613,19 @@ def check_portfolio_drawdown_breaker(
     try:
         monthly_pnl = _monthly_total_pnl(db, user_id)
     except Exception:
+        reason = "portfolio_dd_breaker_unavailable:monthly_total_pnl"
         logger.warning(
-            "[portfolio_breaker] _monthly_total_pnl failed; skipping check",
+            "[portfolio_breaker] _monthly_total_pnl failed; %s",
+            "blocking live entries" if live else "skipping check",
             exc_info=True,
         )
+        if live:
+            _persist_portfolio_breaker_state(
+                tripped=True,
+                reason=reason,
+                regime="portfolio_breaker",
+            )
+            return True, reason
         return False, None
 
     if float(monthly_pnl) > float(threshold):
@@ -1622,7 +1641,6 @@ def check_portfolio_drawdown_breaker(
         f"(K={k_val}σ, computed from {n_obs}d ALL-closed history)"
     )
 
-    live = bool(getattr(_s, "chili_portfolio_dd_breaker_live", False))
     if not live:
         if bool(getattr(_s, "chili_portfolio_dd_breaker_shadow_log_enabled", True)):
             _persist_portfolio_breaker_state(
@@ -1667,14 +1685,18 @@ def _assert_portfolio_breaker_ok(
     ``chili_portfolio_dd_breaker_live`` are True AND the breaker's trip
     condition is met.
 
-    Fails OPEN on DB / exception (matches the pattern tier's defensive
-    behavior): a safety belt that goes blind must not halt the system.
-    Logs a warning and returns ``(True, None)``. Fail-closed would be a
-    denial-of-service surface for any DB hiccup.
+    In live mode, DB/session/check failures block with an auditable
+    ``portfolio_dd_breaker_unavailable`` reason. In disabled/shadow mode,
+    failures remain pass-through so a shadow-soak outage does not halt
+    entries.
     """
+    enabled = False
+    live = False
     try:
         from ...config import settings as _s
-        if not bool(getattr(_s, "chili_portfolio_dd_breaker_enabled", False)):
+        enabled = bool(getattr(_s, "chili_portfolio_dd_breaker_enabled", False))
+        live = bool(getattr(_s, "chili_portfolio_dd_breaker_live", False))
+        if not enabled:
             return True, None
         from ...db import SessionLocal
         sess = SessionLocal()
@@ -1690,10 +1712,14 @@ def _assert_portfolio_breaker_ok(
                 pass
             sess.close()
     except Exception:
+        action = "failing CLOSED" if enabled and live else "failing OPEN"
         logger.warning(
-            "[portfolio_breaker] gate check raised; failing OPEN",
+            "[portfolio_breaker] gate check raised; %s",
+            action,
             exc_info=True,
         )
+        if enabled and live:
+            return False, "portfolio_dd_breaker_unavailable:gate_exception"
         return True, None
 
 

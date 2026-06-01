@@ -776,8 +776,8 @@ class CoinbaseSpotAdapter(VenueAdapter):
         if side_l not in ("buy", "sell"):
             return {"ok": False, "error": f"invalid side: {side}", "client_order_id": client_order_id}
         # f-portfolio-vs-pattern-breaker-separation — BUY-only gate. Portfolio
-        # tier blocks every entry path when live + tripped; pass-through when
-        # disabled, in shadow mode, or insufficient history (fail-OPEN).
+        # tier blocks every entry path when live + tripped/unavailable; passes
+        # through when disabled, in shadow mode, or insufficient history.
         if side_l == "buy":
             _ok, _br_reason = _assert_portfolio_breaker_ok()
             if not _ok:

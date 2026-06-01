@@ -658,8 +658,8 @@ class RobinhoodSpotAdapter(VenueAdapter):
             qty = normalized_qty
 
         # f-portfolio-vs-pattern-breaker-separation — BUY-only gate. Portfolio
-        # tier blocks every entry path when live + tripped; pass-through when
-        # disabled, in shadow mode, or insufficient history (fail-OPEN).
+        # tier blocks every entry path when live + tripped/unavailable; passes
+        # through when disabled, in shadow mode, or insufficient history.
         if side.lower() == "buy":
             _ok, _br_reason = _assert_portfolio_breaker_ok()
             if not _ok:
