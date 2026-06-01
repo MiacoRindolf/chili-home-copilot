@@ -79,25 +79,24 @@ an operator both flips `mcp_enabled` and adds servers.
 
 ---
 
-## P4 — Teacher → skill-learning escalation (niche)
+## P4 — Teacher → skill-learning escalation — ✅ SHIPPED 2026-06-01
 
-**Gap:** CHILI's `llm_router` escalates weak→strong on a confidence heuristic but
-does **not** persist a reusable procedure when a strong model rescues a failure.
+**Shipped:** new `app/teacher_escalation.py`. On a detected failure, a strong
+"teacher" model is called with the failed trace and emits a portable reusable
+skill; the skill is saved ONLY if the teacher's own response passes the same
+failure check. The LLM caller and skill saver are **injectable** (decoupled,
+unit-testable); a bounded JSONL `FileSkillStore` is the default (no migration).
+The teacher prompt wraps the trace in `<<<UNTRUSTED_TRACE>>>` markers with a
+data-not-instructions guard to prevent second-order prompt injection into
+persisted skills. DORMANT by default (`teacher_escalation_enabled=False`).
+29 tests in `tests/test_teacher_escalation.py`. See
+`docs/STRATEGY/CC_REPORTS/2026-06-01_f-odysseus-salvage-teacher-escalation.md`.
 
-**Task:** salvage odysseus `src/teacher_escalation.py` (75% self-contained). When
-the local model fails a task and a stronger model succeeds, have the teacher emit
-a portable SKILL.md-style procedure (paths/hosts/model-names stripped) stored for
-later reuse. Inject CHILI's LLM caller + a skill-saver.
-
-**Why it matters:** compounding improvement of the local-first agent over time.
-Niche — only pays off where weak+strong model pairs run regularly.
-
-**Blast radius:** low-medium — touches the LLM layer, not trading. Needs a place
-to persist skills (CHILI has `code_brain` / planner stores to evaluate).
-
-**Salvage ref:** odysseus `src/teacher_escalation.py` — read in full; the
-escalation gate + untrusted-trace guard + portable-skill generation are the
-valuable parts.
+**Not yet wired into the live LLM path** — `escalate_and_learn(...)` /
+`should_escalate(...)` are a ready utility. Dropped odysseus's inline-SSE
+teacher-takeover + agent-loop recursion (deeply coupled). A future task would
+inject CHILI's strong-model gateway as the `llm_caller` and hook
+`should_escalate` at the end of a failed reasoning/agent turn.
 
 ---
 
