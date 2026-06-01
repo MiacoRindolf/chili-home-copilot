@@ -390,26 +390,6 @@ def _position_qty_for_trade(trade: Trade) -> tuple[float | None, str]:
     return None, broker_source
 
 
-def _missing_qty_local_qty_fallback_ready(
-    trade: Trade,
-    *,
-    local_qty: float,
-    include_current_miss: bool = False,
-) -> bool:
-    """Allow Coinbase to validate the local quantity after persistent misses."""
-    if _broker_source_for_trade(trade) != "coinbase":
-        return False
-    try:
-        if float(local_qty or 0.0) <= 0:
-            return False
-    except (TypeError, ValueError):
-        return False
-    streak = int(getattr(trade, "crypto_broker_zero_qty_streak", 0) or 0)
-    if include_current_miss:
-        streak += 1
-    return streak >= int(CRYPTO_EXIT_MISSING_QTY_BACKOFF_MAX_START_STREAK)
-
-
 def _coinbase_exit_limit_buffer_pct() -> float:
     try:
         value = float(
@@ -807,59 +787,31 @@ def run_crypto_exit_pass(db: Session) -> dict[str, Any]:
             # trades used to hit Robinhood's crypto position API here,
             # which left valid Coinbase stop hits deferred forever.
             _broker_qty, _broker_source = _position_qty_for_trade(t)
-            used_local_qty_fallback = False
 
             if _broker_qty is None:
-                if _missing_qty_local_qty_fallback_ready(
+                meta = _mark_missing_qty_deferred(
+                    db,
                     t,
+                    broker_source=_broker_source,
                     local_qty=qty,
-                    include_current_miss=True,
-                ):
-                    _broker_qty = qty
-                    used_local_qty_fallback = True
-                    prior_missing_qty_streak = int(
-                        getattr(t, "crypto_broker_zero_qty_streak", 0) or 0
-                    )
-                    if _clear_missing_qty_backoff(t):
-                        db.add(t)
-                    out["missing_qty_local_qty_fallback"] = int(
-                        out.get("missing_qty_local_qty_fallback") or 0
-                    ) + 1
-                    logger.warning(
-                        "[crypto_exit] cannot resolve %s broker qty for "
-                        "trade#%s %s after streak=%s; attempting Coinbase "
-                        "exit with local_qty=%s and relying on venue balance "
-                        "validation.",
-                        _broker_source,
-                        t.id,
-                        t.ticker,
-                        prior_missing_qty_streak,
-                        qty,
-                    )
-                else:
-                    meta = _mark_missing_qty_deferred(
-                        db,
-                        t,
-                        broker_source=_broker_source,
-                        local_qty=qty,
-                        now=now,
-                    )
-                    logger.warning(
-                        "[crypto_exit] cannot resolve %s broker qty for "
-                        "trade#%s %s (local_qty=%s); deferring sell "
-                        "streak=%s backoff_until=%s.",
-                        _broker_source,
-                        t.id,
-                        t.ticker,
-                        qty,
-                        meta.get("streak"),
-                        meta.get("backoff_until") or "next_pass",
-                    )
-                    out["deferred"] += 1
-                    out["missing_qty_deferred"] = int(
-                        out.get("missing_qty_deferred") or 0
-                    ) + 1
-                    continue
+                    now=now,
+                )
+                logger.warning(
+                    "[crypto_exit] cannot resolve %s broker qty for "
+                    "trade#%s %s (local_qty=%s); deferring sell "
+                    "streak=%s backoff_until=%s.",
+                    _broker_source,
+                    t.id,
+                    t.ticker,
+                    qty,
+                    meta.get("streak"),
+                    meta.get("backoff_until") or "next_pass",
+                )
+                out["deferred"] += 1
+                out["missing_qty_deferred"] = int(
+                    out.get("missing_qty_deferred") or 0
+                ) + 1
+                continue
             if _broker_qty <= 0:
                 logger.warning(
                     "[crypto_exit] %s broker holds 0 of %s "
@@ -936,26 +888,6 @@ def run_crypto_exit_pass(db: Session) -> dict[str, Any]:
                         "reason=%s err=%s",
                         t.id, t.ticker, _broker_source, reason, err,
                     )
-                    if used_local_qty_fallback:
-                        meta = _mark_missing_qty_deferred(
-                            db,
-                            t,
-                            broker_source=_broker_source,
-                            local_qty=qty,
-                            now=_utcnow_naive(),
-                        )
-                        out["missing_qty_local_qty_fallback_failed"] = int(
-                            out.get("missing_qty_local_qty_fallback_failed") or 0
-                        ) + 1
-                        logger.warning(
-                            "[crypto_exit] local-qty Coinbase exit fallback "
-                            "failed for trade#%s %s; restored missing-qty "
-                            "backoff streak=%s until=%s.",
-                            t.id,
-                            t.ticker,
-                            meta.get("streak"),
-                            meta.get("backoff_until") or "next_pass",
-                        )
                     out["errors"].append(f"sell_failed:{t.ticker}:{err}")
                     continue
             order_id = (res.get("raw") or {}).get("id") or res.get("order_id") or ""

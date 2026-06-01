@@ -48,6 +48,18 @@ def test_crypto_local_alias_resolves_to_shared_callable():
     assert crypto_exit._fresh_monitor_exit_meta is common.fresh_monitor_exit_meta
 
 
+def test_coinbase_exit_monitor_never_promotes_local_qty_to_broker_order():
+    """Missing broker quantity must remain risk-not-proven, not an order."""
+    src = (
+        REPO / "app/services/trading/crypto/exit_monitor.py"
+    ).read_text(encoding="utf-8")
+
+    assert "_missing_qty_local_qty_fallback_ready" not in src
+    assert "missing_qty_local_qty_fallback" not in src
+    assert "used_local_qty_fallback" not in src
+    assert "relying on venue balance validation" not in src
+
+
 def test_current_crypto_price_prefers_trade_broker_quote(monkeypatch):
     from app.services.trading.crypto import exit_monitor as crypto_exit
     from app.services.trading import market_data
@@ -381,8 +393,8 @@ def test_coinbase_missing_qty_uses_configured_backoff(db, monkeypatch):
     positions_during_backoff.assert_not_called()
 
 
-def test_coinbase_missing_qty_long_streak_attempts_local_qty_exit(db):
-    """Persistent Coinbase account-snapshot misses should not defer forever."""
+def test_coinbase_missing_qty_long_streak_still_defers_without_local_qty_order(db):
+    """Persistent Coinbase account-snapshot misses still need broker truth."""
     from app.services.trading.crypto import exit_monitor as crypto_exit
 
     t = _seed_open_crypto_trade(
@@ -407,11 +419,6 @@ def test_coinbase_missing_qty_long_streak_attempts_local_qty_exit(db):
 
     cb_positions = MagicMock(return_value=[])
     cb_adapter = MagicMock()
-    cb_adapter.place_market_order.return_value = {
-        "ok": True,
-        "order_id": "cb-local-fallback",
-        "raw": {},
-    }
 
     with patch(
         "app.services.trading.crypto.exit_monitor._current_crypto_price",
@@ -428,25 +435,25 @@ def test_coinbase_missing_qty_long_streak_attempts_local_qty_exit(db):
     ):
         out = crypto_exit.run_crypto_exit_pass(db)
 
-    assert out.get("closed") == 1
-    assert out.get("missing_qty_local_qty_fallback") == 1
+    assert out.get("closed") in (None, 0)
+    assert out.get("deferred") == 1
+    assert out.get("missing_qty_deferred") == 1
     cb_positions.assert_called_once()
-    cb_adapter.place_market_order.assert_called_once_with(
-        product_id="DIEM-USD",
-        side="sell",
-        base_size="5.0",
-    )
+    cb_adapter.place_market_order.assert_not_called()
+    cb_adapter.place_limit_order_gtc.assert_not_called()
     db.refresh(t)
-    assert t.pending_exit_order_id == "cb-local-fallback"
-    assert t.pending_exit_status == "submitted"
-    assert t.pending_exit_reason is not None
-    assert t.pending_exit_reason.startswith("stop_loss_hit")
-    assert t.crypto_broker_zero_qty_streak == 0
-    assert crypto_exit.CRYPTO_EXIT_MISSING_QTY_SNAPSHOT_KEY not in t.indicator_snapshot
+    assert t.pending_exit_order_id is None
+    assert t.pending_exit_status == "deferred"
+    assert t.pending_exit_reason == crypto_exit.CRYPTO_EXIT_MISSING_QTY_PENDING_REASON
+    assert (
+        t.crypto_broker_zero_qty_streak
+        == crypto_exit.CRYPTO_EXIT_MISSING_QTY_BACKOFF_MAX_START_STREAK + 1
+    )
+    assert crypto_exit.CRYPTO_EXIT_MISSING_QTY_SNAPSHOT_KEY in t.indicator_snapshot
 
 
 def test_coinbase_missing_qty_threshold_counts_current_miss(db):
-    """The miss that reaches the persistent threshold should attempt the exit."""
+    """The miss that reaches the old threshold still defers without broker qty."""
     from app.services.trading.crypto import exit_monitor as crypto_exit
 
     t = _seed_open_crypto_trade(
@@ -463,11 +470,6 @@ def test_coinbase_missing_qty_threshold_counts_current_miss(db):
 
     cb_positions = MagicMock(return_value=[])
     cb_adapter = MagicMock()
-    cb_adapter.place_market_order.return_value = {
-        "ok": True,
-        "order_id": "cb-threshold-fallback",
-        "raw": {},
-    }
 
     with patch(
         "app.services.trading.crypto.exit_monitor._current_crypto_price",
@@ -484,19 +486,19 @@ def test_coinbase_missing_qty_threshold_counts_current_miss(db):
     ):
         out = crypto_exit.run_crypto_exit_pass(db)
 
-    assert out.get("closed") == 1
-    assert out.get("missing_qty_local_qty_fallback") == 1
-    assert out.get("missing_qty_deferred") in (None, 0)
-    cb_adapter.place_market_order.assert_called_once_with(
-        product_id="00-USD",
-        side="sell",
-        base_size="5.0",
-    )
+    assert out.get("closed") in (None, 0)
+    assert out.get("deferred") == 1
+    assert out.get("missing_qty_deferred") == 1
+    cb_adapter.place_market_order.assert_not_called()
+    cb_adapter.place_limit_order_gtc.assert_not_called()
     db.refresh(t)
-    assert t.pending_exit_order_id == "cb-threshold-fallback"
-    assert t.pending_exit_status == "submitted"
-    assert t.crypto_broker_zero_qty_streak == 0
-    assert crypto_exit.CRYPTO_EXIT_MISSING_QTY_SNAPSHOT_KEY not in (
+    assert t.pending_exit_order_id is None
+    assert t.pending_exit_status == "deferred"
+    assert (
+        t.crypto_broker_zero_qty_streak
+        == crypto_exit.CRYPTO_EXIT_MISSING_QTY_BACKOFF_MAX_START_STREAK
+    )
+    assert crypto_exit.CRYPTO_EXIT_MISSING_QTY_SNAPSHOT_KEY in (
         t.indicator_snapshot or {}
     )
 
