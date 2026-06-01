@@ -1606,6 +1606,12 @@ class Settings(BaseSettings):
     google_pse_cx: str = ""        # Google Programmable Search engine id (cx)
     search_request_timeout: int = 20          # per-provider HTTP timeout (s)
     search_content_cache_ttl_sec: int = 1800  # page-content fetch cache TTL (s)
+    # When True, background research (reasoning_brain / project_brain) enriches
+    # its top results with fetched full-page article text before LLM
+    # summarization, instead of summarizing from search snippets alone. Default
+    # OFF — opt-in so the live research cadence is unchanged until enabled.
+    search_fetch_sources: bool = False
+    search_max_fetch: int = 3                  # max pages fetched per research query
 
     # Reasoning Brain
     reasoning_interval_hours: int = 6     # how often to run reasoning cycle

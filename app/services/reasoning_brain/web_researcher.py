@@ -14,8 +14,12 @@ from ... import openai_client
 
 
 def _search_topic(topic: str, trace_id: str) -> str:
-    """Run a DuckDuckGo search via existing web_search module and return text."""
-    result = web_search_module.search(topic)
+    """Search via the web_search module and return JSON text.
+
+    Uses research_search so that, when settings.search_fetch_sources is enabled,
+    top results carry fetched full-page content for richer summarization.
+    """
+    result = web_search_module.research_search(topic, trace_id=trace_id)
     if isinstance(result, dict):
         return json.dumps(result, ensure_ascii=False)
     return str(result)
@@ -44,7 +48,16 @@ def _source_from_result(item: dict[str, Any]) -> dict[str, str] | None:
     return {"title": title or url, "url": url}
 
 
-def _snippet_from_result(item: dict[str, Any]) -> str:
+def _snippet_from_result(item: dict[str, Any], *, content_chars: int = 600) -> str:
+    """Best available text for a result, preferring fetched page content.
+
+    When research_search enriched the item with full-page "content" (opt-in via
+    settings.search_fetch_sources), use a leading slice of it so the mechanical
+    (non-LLM) summary also benefits; otherwise fall back to the search snippet.
+    """
+    content = str(item.get("content") or "").strip()
+    if content:
+        return content[:content_chars]
     return str(
         item.get("body")
         or item.get("snippet")

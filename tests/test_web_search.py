@@ -114,6 +114,54 @@ class TestSearch:
         assert search("test query") == []
 
 
+class TestResearchSearch:
+    """research_search() is search() unless settings.search_fetch_sources is on."""
+
+    @staticmethod
+    def _fresh_results(n=4):
+        # Fresh dicts per call so research_search's in-place enrichment of the
+        # mock's return value can't leak across tests.
+        return [{"title": chr(65 + i), "href": f"https://{chr(97 + i)}.com",
+                 "body": f"snippet {chr(97 + i)}"} for i in range(n)]
+
+    @patch("app.web_search.fetch_source")
+    @patch("app.web_search.search")
+    def test_flag_off_no_fetch(self, mock_search, mock_fetch):
+        from app import web_search as ws
+        expected = self._fresh_results()
+        mock_search.return_value = self._fresh_results()
+        with patch.object(ws.settings, "search_fetch_sources", False, create=True):
+            out = ws.research_search("topic")
+        assert out == expected
+        mock_fetch.assert_not_called()
+
+    @patch("app.web_search.fetch_source")
+    @patch("app.web_search.search")
+    def test_flag_on_enriches_up_to_cap(self, mock_search, mock_fetch):
+        from app import web_search as ws
+        mock_search.return_value = self._fresh_results()
+        mock_fetch.return_value = {"success": True, "content": "FULL ARTICLE TEXT"}
+        with patch.object(ws.settings, "search_fetch_sources", True, create=True), \
+             patch.object(ws.settings, "search_max_fetch", 2, create=True):
+            out = ws.research_search("topic")
+        # Only the first 2 (the cap) get fetched + a content field.
+        assert mock_fetch.call_count == 2
+        assert out[0]["content"] == "FULL ARTICLE TEXT"
+        assert out[1]["content"] == "FULL ARTICLE TEXT"
+        assert "content" not in out[2]
+
+    @patch("app.web_search.fetch_source")
+    @patch("app.web_search.search")
+    def test_failed_fetch_leaves_result_unenriched(self, mock_search, mock_fetch):
+        from app import web_search as ws
+        mock_search.return_value = self._fresh_results(1)
+        mock_fetch.return_value = {"success": False, "content": "", "error": "blocked"}
+        with patch.object(ws.settings, "search_fetch_sources", True, create=True), \
+             patch.object(ws.settings, "search_max_fetch", 3, create=True):
+            out = ws.research_search("topic")
+        assert "content" not in out[0]
+
+
 class TestFormatResults:
     def test_formats_results(self):
         results = [

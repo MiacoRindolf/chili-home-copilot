@@ -16,6 +16,7 @@ import re
 from ddgs import DDGS
 
 from .logger import log_info
+from .config import settings
 from . import search_providers
 
 _MAX_RESULTS = 5
@@ -157,6 +158,33 @@ def search_with_sources(query: str, max_results: int = _MAX_RESULTS,
             continue
         fetched = fetch_source(href, trace_id=trace_id)
         r["content"] = fetched.get("content", "") if fetched.get("success") else ""
+    return results
+
+
+def research_search(query: str, max_results: int = _MAX_RESULTS,
+                    trace_id: str = "web", content_chars: int = 2000) -> list[dict]:
+    """Search for background research, optionally enriched with page content.
+
+    Behaves like search() ({title, href, body}), but when
+    settings.search_fetch_sources is True it adds a "content" key holding fetched
+    article text (truncated to content_chars) for up to settings.search_max_fetch
+    results. With the flag off this is exactly search() — no extra latency.
+    Intended for the reasoning_brain / project_brain research paths.
+    """
+    results = search(query, max_results=max_results, trace_id=trace_id)
+    if not getattr(settings, "search_fetch_sources", False):
+        return results
+    try:
+        max_fetch = max(0, int(getattr(settings, "search_max_fetch", 3)))
+    except (TypeError, ValueError):
+        max_fetch = 3
+    for r in results[:max_fetch]:
+        href = r.get("href", "")
+        if not href:
+            continue
+        fetched = fetch_source(href, max_chars=content_chars, trace_id=trace_id)
+        if fetched.get("success") and fetched.get("content"):
+            r["content"] = fetched["content"]
     return results
 
 

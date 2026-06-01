@@ -23,23 +23,20 @@ a trading brain. Each is sized for a single Cowork → Claude Code NEXT_TASK.
 
 ---
 
-## P1 — Wire source-content into the research consumers (small, high-leverage)
+## P1 — Wire source-content into the research consumers — ✅ SHIPPED 2026-06-01
 
-**Gap:** Win #1 added `web_search.search_with_sources()` and `fetch_source()`
-but no consumer uses them yet — research still summarizes from snippets alone.
+**Shipped:** new flag-gated `web_search.research_search()` centralizes the opt-in.
+`reasoning_brain/web_researcher.py` and `project_brain/web_research.py` now call
+it; `reasoning`'s mechanical (non-LLM) summary also prefers fetched content.
+Config: `search_fetch_sources: bool = False` (default off) + `search_max_fetch:
+int = 3`. With the flag off, behavior is identical to before. Tests:
+`TestResearchSearch` (flag off = no fetch; on = enrich up to cap; failed fetch
+leaves result unenriched). 72 search tests + 21 research-consumer tests pass.
+See `docs/STRATEGY/CC_REPORTS/2026-06-01_f-odysseus-salvage-research-content.md`.
 
-**Task:** behind a default-off flag (`search_fetch_sources: bool = False`), let
-`reasoning_brain/web_researcher.py` and `project_brain/web_research.py` enrich
-their top N results with fetched article text before LLM summarization. Cap with
-a new `search_max_fetch` (default 3) and reuse the existing per-cycle search
-caps. Measure summary quality lift on a held-out set of ticker-catalyst topics.
-
-**Why it matters for trading:** catalyst research (earnings, FDA, M&A, guidance)
-is far better from full article text than from a 1-line SERP snippet.
-
-**Blast radius:** low — flag-gated, off by default, off the live-trading path.
-
-**Salvage ref:** already in-repo (`app/search_providers.fetch_webpage_content`).
+**To activate:** set `CHILI_SEARCH_FETCH_SOURCES=1` (and optionally tune
+`CHILI_SEARCH_MAX_FETCH`). Recommended to measure summary-quality lift on a
+held-out set of ticker-catalyst topics before leaving it on.
 
 ---
 
