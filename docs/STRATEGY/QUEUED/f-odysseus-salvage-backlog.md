@@ -40,24 +40,23 @@ held-out set of ticker-catalyst topics before leaving it on.
 
 ---
 
-## P2 — Standalone visual report generator (one self-contained file)
+## P2 — Standalone visual report generator — ✅ SHIPPED 2026-06-01
 
-**Gap:** CHILI renders Telegram alert HTML (`trading/alert_formatter.py`) but has
-no generic markdown → shareable styled HTML report.
+**Shipped:** new `app/visual_report.py` — `generate_report(title, body_markdown,
+*, subtitle, label, sources, stats)` → complete self-contained HTML (no external
+assets, no backend calls). Editorial CSS (dark/light via prefers-color-scheme,
+aurora bg, reduced-motion aware), auto TOC sidebar with scroll-spy, optional
+stats bar, collapsible sources, Print / Download-HTML toolbar. Trimmed from
+odysseus `src/visual_report.py` (~1.87k LOC → ~480) — dropped the backend-coupled
+machinery (OG-image reroll/hide → /api/research, chat-spinoff CTA, session ids,
+per-category palettes). `markdown` declared as a dep (degrades to a regex
+renderer if absent); `bs4` reused. 15 tests in `tests/test_visual_report.py`.
+See `docs/STRATEGY/CC_REPORTS/2026-06-01_f-odysseus-salvage-visual-report.md`.
 
-**Task:** salvage odysseus `src/visual_report.py` (90% self-contained, zero
-odysseus coupling — only dep is a `strip_thinking` helper that is trivial to
-inline). Adapt to a `app/visual_report.py` util: markdown report → self-contained
-HTML (auto TOC, dark/light, collapsible sources). Wire as an optional export for
-research reports and the daily trading brief / CC-style summaries.
-
-**Why it matters:** turns CHILI research + daily P/L briefs into artifacts the
-operator can open/share without the app running.
-
-**Blast radius:** very low — pure rendering util, no trading or DB coupling.
-
-**Salvage ref:** odysseus `src/visual_report.py` (~1.8k LOC; the CSS template is
-the bulk — keep or trim to taste).
+**Not yet wired into a route/consumer** — it's a ready util. Natural next hooks:
+a "download brief as HTML" button on a research report, and an export for the
+daily trading brief / CC-style summaries. Left as a small follow-up so this
+commit stays a pure, side-effect-free addition.
 
 ---
 

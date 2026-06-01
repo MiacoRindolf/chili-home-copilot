@@ -105,3 +105,7 @@ aiohttp>=3.9,<4
 # present in chili-env, declared here so the dependency is explicit. pdfminer.six
 # stays OPTIONAL (PDF text extraction degrades to "unavailable" when absent).
 beautifulsoup4>=4.12
+# Markdown -> HTML rendering for the visual report generator (app/visual_report.py,
+# salvaged from odysseus, MIT). Small pure-Python dep; the module degrades to a
+# minimal regex renderer if it is ever absent.
+markdown>=3.5
