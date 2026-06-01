@@ -1623,6 +1623,13 @@ class Settings(BaseSettings):
     #   "allowed_tools":["search","get_filing"]}]
     mcp_servers_json: str = ""
 
+    # Teacher-escalation skill learning (app/teacher_escalation.py). When a
+    # weak/local model fails, a strong "teacher" model rescues it and distills a
+    # reusable skill. DORMANT by default; ready utility, not yet wired into the
+    # live LLM path.
+    teacher_escalation_enabled: bool = False
+    teacher_skill_dir: str = "data/skills"   # where FileSkillStore persists skills
+
     # Reasoning Brain
     reasoning_interval_hours: int = 6     # how often to run reasoning cycle
     reasoning_max_web_searches: int = 10  # cap per cycle to avoid abuse
