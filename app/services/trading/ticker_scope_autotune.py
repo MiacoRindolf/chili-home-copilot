@@ -11,8 +11,8 @@ tickers manually. Once a pattern has enough realized history per
 ticker, the autotuner:
 
 * groups closed trades by (scan_pattern_id, ticker)
-* keeps only tickers with n >= ``min_trades_per_ticker``
-* classifies each as **edge** (total_pnl > 0) or **bleed** (<= 0)
+* keeps only tickers with n >= ``min_trades_per_ticker`` valid return samples
+* classifies each as **edge** or **bleed** by realized expectancy first
 * if the pattern has BOTH edge AND bleed tickers, it sets
   ``ticker_scope = 'explicit_list'`` and ``scope_tickers`` to the
   edge tickers only
@@ -81,26 +81,35 @@ def _query_per_ticker_stats(
     so ticker scoping learns expectancy, not position size.
     """
     sql = f"""
+        WITH realized_samples AS (
+            SELECT
+                t.scan_pattern_id,
+                t.ticker,
+                t.pnl,
+                {trade_return_fraction_sql("t")} AS realized_return_frac
+            FROM trading_trades t
+            WHERE t.status = 'closed'
+              AND t.scan_pattern_id IS NOT NULL
+              AND t.ticker IS NOT NULL
+              AND t.pnl IS NOT NULL
+              AND t.entry_price IS NOT NULL
+              AND t.entry_price > 0
+              AND t.quantity IS NOT NULL
+              AND t.quantity > 0
+              AND t.exit_date > NOW() - make_interval(days => :lookback_days)
+        )
         SELECT scan_pattern_id, ticker,
-               count(*) AS n,
-               sum(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
+               count(realized_return_frac) AS n,
+               sum(CASE WHEN realized_return_frac > 0 THEN 1 ELSE 0 END) AS wins,
                sum(coalesce(pnl, 0)) AS total_pnl,
                avg(coalesce(pnl, 0)) AS avg_pnl,
-               sum(({trade_return_fraction_sql()} * 100.0)) AS total_return_pct,
-               avg(({trade_return_fraction_sql()} * 100.0)) AS avg_return_pct
-        FROM trading_trades
-        WHERE status = 'closed'
-          AND scan_pattern_id IS NOT NULL
-          AND ticker IS NOT NULL
-          AND pnl IS NOT NULL
-          AND entry_price IS NOT NULL
-          AND entry_price > 0
-          AND quantity IS NOT NULL
-          AND quantity > 0
-          AND exit_date > NOW() - make_interval(days => :lookback_days)
+               sum(realized_return_frac * 100.0) AS total_return_pct,
+               avg(realized_return_frac * 100.0) AS avg_return_pct
+        FROM realized_samples
+        WHERE realized_return_frac IS NOT NULL
         __PATTERN_FILTER__
         GROUP BY scan_pattern_id, ticker
-        HAVING count(*) >= :min_per_ticker
+        HAVING count(realized_return_frac) >= :min_per_ticker
     """
     params: dict[str, Any] = {
         "lookback_days": int(lookback_days),

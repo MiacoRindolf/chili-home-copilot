@@ -589,19 +589,27 @@ def _load_pattern_rows(
 ) -> list[dict[str, Any]]:
     rows = db.execute(
         text(f"""
-            WITH realized AS (
+            WITH realized_samples AS (
+                SELECT
+                    t.scan_pattern_id,
+                    t.pnl,
+                    {trade_return_fraction_sql("t")} AS realized_return_frac
+                FROM trading_trades t
+                WHERE t.scan_pattern_id IS NOT NULL
+                  AND t.scan_pattern_id != -1
+                  AND t.status = 'closed'
+                  AND t.pnl IS NOT NULL
+                  AND t.entry_price > 0
+                  AND t.quantity > 0
+                  AND t.exit_date > NOW() - make_interval(days => :window_days)
+            ),
+            realized AS (
                 SELECT scan_pattern_id,
-                       COUNT(*) AS n_trades,
-                       AVG({trade_return_fraction_sql()}) AS avg_pnl_pct,
+                       COUNT(realized_return_frac) AS n_trades,
+                       AVG(realized_return_frac) AS avg_pnl_pct,
                        SUM(pnl) AS total_pnl
-                FROM trading_trades
-                WHERE scan_pattern_id IS NOT NULL
-                  AND scan_pattern_id != -1
-                  AND status = 'closed'
-                  AND pnl IS NOT NULL
-                  AND entry_price > 0
-                  AND quantity > 0
-                  AND exit_date > NOW() - make_interval(days => :window_days)
+                FROM realized_samples
+                WHERE realized_return_frac IS NOT NULL
                 GROUP BY scan_pattern_id
             )
             SELECT

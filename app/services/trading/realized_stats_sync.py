@@ -271,34 +271,45 @@ def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, in
     if not dry_run:
         sess.commit()
 
-    no_trades = sess.execute(text("""
-        SELECT count(*) FROM scan_patterns
-        WHERE NOT EXISTS (
-            SELECT 1 FROM trading_trades
-            WHERE scan_pattern_id = scan_patterns.id
-              AND scan_pattern_id != -1
-              AND status = 'closed'
-              AND pnl IS NOT NULL
-              AND entry_price > 0
-              AND quantity > 0
+    no_trades = sess.execute(text(f"""
+        WITH valid_return_source AS (
+            SELECT
+                t.scan_pattern_id,
+                {trade_return_fraction_sql("t")} AS realized_return_frac
+            FROM trading_trades t
+            WHERE t.scan_pattern_id IS NOT NULL
+              AND t.scan_pattern_id != -1
+              AND t.status = 'closed'
+              AND t.pnl IS NOT NULL
+              AND t.entry_price > 0
+              AND t.quantity > 0
+            UNION ALL
+            SELECT
+                pt.scan_pattern_id,
+                {paper_trade_return_fraction_sql("pt")} AS realized_return_frac
+            FROM trading_paper_trades pt
+            WHERE :include_paper_dynamic
+              AND pt.scan_pattern_id IS NOT NULL
+              AND pt.status = 'closed'
+              AND pt.scan_pattern_id != -1
+              AND pt.pnl IS NOT NULL
+              AND pt.entry_price > 0
+              AND pt.quantity > 0
+              AND (
+                pt.paper_shadow_of_alert_id IS NOT NULL
+                OR COALESCE(pt.signal_json, '{{}}'::jsonb) @> '{{"auto_trader_v1": true}}'::jsonb
+                OR COALESCE(pt.signal_json, '{{}}'::jsonb) @> '{{"paper_shadow": true}}'::jsonb
+              )
+        ),
+        valid_return_patterns AS (
+            SELECT DISTINCT scan_pattern_id
+            FROM valid_return_source
+            WHERE realized_return_frac IS NOT NULL
         )
-        AND (
-            NOT :include_paper_dynamic
-            OR NOT EXISTS (
-                SELECT 1 FROM trading_paper_trades
-                WHERE scan_pattern_id = scan_patterns.id
-                  AND status = 'closed'
-                  AND scan_pattern_id != -1
-                  AND pnl IS NOT NULL
-                  AND entry_price > 0
-                  AND quantity > 0
-                  AND (
-                    paper_shadow_of_alert_id IS NOT NULL
-                    OR COALESCE(signal_json, '{}'::jsonb) @> '{"auto_trader_v1": true}'::jsonb
-                    OR COALESCE(signal_json, '{}'::jsonb) @> '{"paper_shadow": true}'::jsonb
-                  )
-            )
-        )
+        SELECT count(*)
+        FROM scan_patterns sp
+        LEFT JOIN valid_return_patterns v ON v.scan_pattern_id = sp.id
+        WHERE v.scan_pattern_id IS NULL
     """), {"include_paper_dynamic": include_paper_dynamic}).scalar() or 0
 
     logger.info(

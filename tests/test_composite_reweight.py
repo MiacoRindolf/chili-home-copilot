@@ -28,6 +28,28 @@ from app.services.trading.pattern_quality_score import (
 )
 
 
+class _Rows:
+    def __init__(self, rows):
+        self._rows = list(rows)
+
+    def fetchall(self):
+        return list(self._rows)
+
+
+class _SequenceSession:
+    def __init__(self, results):
+        self.results = [_Rows(rows) for rows in results]
+        self.sqls: list[str] = []
+        self.params: list[dict] = []
+
+    def execute(self, stmt, params=None):
+        self.sqls.append(str(stmt))
+        self.params.append(dict(params or {}))
+        if self.results:
+            return self.results.pop(0)
+        return _Rows([])
+
+
 # ---------------------------------------------------------------------------
 # realized_pnl_score: shape tests
 # ---------------------------------------------------------------------------
@@ -157,6 +179,46 @@ def test_composite_weight_sum_ignores_non_weight_settings():
 
     assert sum(weights.values()) == pytest.approx(121.01)
     assert _composite_weight_sum(weights) == pytest.approx(1.0)
+
+
+def test_load_realized_pnl_map_counts_only_computable_return_samples() -> None:
+    db = _SequenceSession([
+        [(101, 3, 0.01, 30.0)],
+        [(101, 2, 0.02, 20.0)],
+    ])
+
+    realized = _load_realized_pnl_map(
+        db,
+        45,
+        include_autotrader_paper_dynamic=True,
+    )
+
+    assert realized[101]["n"] == 5
+    assert realized[101]["live_n"] == 3
+    assert realized[101]["paper_dynamic_n"] == 2
+    assert realized[101]["avg_pnl_pct"] == pytest.approx(0.014)
+    assert realized[101]["total_pnl"] == pytest.approx(50.0)
+    assert db.params == [{"window_days": 45}, {"window_days": 45}]
+
+    live_sql = " ".join(db.sqls[0].split())
+    assert "WITH realized_samples AS" in live_sql
+    assert "FROM trading_trades t" in live_sql
+    assert "COUNT(realized_return_frac) AS n" in live_sql
+    assert "AVG(realized_return_frac) AS avg_pnl_pct" in live_sql
+    assert "WHERE realized_return_frac IS NOT NULL" in live_sql
+    assert "t.filled_quantity" in live_sql
+    assert "t.partial_taken_qty" in live_sql
+    assert "COUNT(*)" not in live_sql
+
+    paper_sql = " ".join(db.sqls[1].split())
+    assert "WITH realized_samples AS" in paper_sql
+    assert "FROM trading_paper_trades pt" in paper_sql
+    assert "COUNT(realized_return_frac) AS n" in paper_sql
+    assert "AVG(realized_return_frac) AS avg_pnl_pct" in paper_sql
+    assert "WHERE realized_return_frac IS NOT NULL" in paper_sql
+    assert "pt.partial_taken_qty" in paper_sql
+    assert "COALESCE(pt.signal_json" in paper_sql
+    assert "COUNT(*)" not in paper_sql
 
 
 def _build_anti_corr_dataset():

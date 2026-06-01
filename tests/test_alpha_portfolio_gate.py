@@ -10,6 +10,7 @@ from app.models.trading import ScanPattern
 from app.services.trading.alpha_portfolio_gate import (
     AlphaPortfolioConfig,
     _candidate_floor_blocks,
+    _load_pattern_rows,
     _realized_edge_fraction,
     broker_risk_probation_allows_live,
     candidate_base_score,
@@ -31,6 +32,25 @@ PROBATION_MIN_CPCV_SHARPE = 1.0
 PROBATION_MIN_REALIZED_TRADES = 5
 WEAK_CPCV_DIVISOR = 2.0
 PRIORITY_RECERT_PATTERN_IDS = "585"
+
+
+class _SqlCaptureResult:
+    def mappings(self):
+        return self
+
+    def all(self):
+        return []
+
+
+class _SqlCaptureDb:
+    def __init__(self):
+        self.sql = ""
+        self.params = {}
+
+    def execute(self, stmt, params=None):
+        self.sql = str(stmt)
+        self.params = dict(params or {})
+        return _SqlCaptureResult()
 
 
 def _settings(**overrides):
@@ -496,6 +516,24 @@ def test_candidate_floor_preserves_valid_zero_as_nonpositive_ev():
     )
 
     assert "negative_realized_floor" in reasons
+
+
+def test_load_pattern_rows_counts_only_computable_realized_return_samples():
+    db = _SqlCaptureDb()
+
+    rows = _load_pattern_rows(db, pattern_id=123, realized_window_days=45)
+
+    assert rows == []
+    sql = db.sql
+    assert "WITH realized_samples AS" in sql
+    assert "FROM trading_trades t" in sql
+    assert "COUNT(realized_return_frac) AS n_trades" in sql
+    assert "AVG(realized_return_frac) AS avg_pnl_pct" in sql
+    assert "WHERE realized_return_frac IS NOT NULL" in sql
+    assert "COUNT(*)" not in sql
+    assert "t.filled_quantity" in sql
+    assert "t.partial_taken_qty" in sql
+    assert db.params == {"pattern_id": 123, "window_days": 45}
 
 
 def test_scan_alpha_portfolio_marks_recert_and_selects_sleeve_candidates(db):

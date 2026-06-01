@@ -45,6 +45,26 @@ def _patch_pattern_quality_score(monkeypatch, *, weights):
     return pqs
 
 
+class _OneRowResult:
+    def __init__(self, row):
+        self.row = row
+
+    def fetchone(self):
+        return self.row
+
+
+class _SqlCaptureSession:
+    def __init__(self, row):
+        self.row = row
+        self.sql = ""
+        self.params = {}
+
+    def execute(self, stmt, params=None):
+        self.sql = str(stmt)
+        self.params = dict(params or {})
+        return _OneRowResult(self.row)
+
+
 def _new_session(pattern, *, dq_row=None, decay_row=None):
     """Build a MagicMock session whose execute(...).fetchone() returns
     canned rows in order: directional-WR row first, then decay row.
@@ -69,6 +89,29 @@ def _new_session(pattern, *, dq_row=None, decay_row=None):
 
     s.execute.side_effect = _execute
     return s
+
+
+def test_quality_realized_loader_counts_only_computable_return_samples() -> None:
+    from app.services.trading.brain_work.handlers.quality_score import (
+        _load_realized_pnl_for_pattern,
+    )
+
+    sess = _SqlCaptureSession((3, 0.0125))
+
+    out = _load_realized_pnl_for_pattern(sess, 123, 45)
+
+    assert out == (3, 0.0125)
+    sql = " ".join(sess.sql.split())
+    assert "WITH realized_samples AS" in sql
+    assert "FROM trading_trades t" in sql
+    assert "COUNT(realized_return_frac) AS n" in sql
+    assert "AVG(realized_return_frac) AS avg_pnl_pct" in sql
+    assert "WHERE realized_return_frac IS NOT NULL" in sql
+    assert "t.scan_pattern_id = :pid" in sql
+    assert "t.filled_quantity" in sql
+    assert "t.partial_taken_qty" in sql
+    assert "COUNT(*)" not in sql
+    assert sess.params == {"pid": 123, "window_days": 45}
 
 
 # ---------------------------------------------------------------------------

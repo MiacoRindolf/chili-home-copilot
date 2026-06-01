@@ -66,3 +66,11 @@ def test_realized_stats_sync_live_source_uses_realized_notional_only() -> None:
     assert "pnl IS NOT NULL" in no_trades_sql
     assert "entry_price > 0" in no_trades_sql
     assert "quantity > 0" in no_trades_sql
+    assert "FROM scan_patterns sp" in no_trades_sql
+    assert "FROM trading_trades t" in no_trades_sql
+    assert "FROM trading_paper_trades pt" in no_trades_sql
+    assert "t.filled_quantity" in no_trades_sql
+    assert "t.partial_taken_qty" in no_trades_sql
+    assert "pt.partial_taken_qty" in no_trades_sql
+    assert "COALESCE(pt.signal_json" in no_trades_sql
+    assert ") IS NOT NULL" in no_trades_sql

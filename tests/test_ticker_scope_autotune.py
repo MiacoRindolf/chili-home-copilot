@@ -64,12 +64,21 @@ def test_ticker_autotune_query_uses_contract_aware_returns() -> None:
         }
     ]
     sql = " ".join(sess.sql.split())
+    assert "WITH realized_samples AS" in sql
+    assert "FROM trading_trades t" in sql
     assert "total_return_pct" in sql
     assert "avg_return_pct" in sql
-    assert "pnl / (entry_price * quantity" in sql
+    assert "count(realized_return_frac) AS n" in sql
+    assert "CASE WHEN realized_return_frac > 0 THEN 1 ELSE 0 END" in sql
+    assert "WHERE realized_return_frac IS NOT NULL" in sql
+    assert "HAVING count(realized_return_frac) >= :min_per_ticker" in sql
+    assert "t.filled_quantity" in sql
+    assert "t.partial_taken_qty" in sql
     assert "asset_kind" in sql
-    assert "entry_price > 0" in sql
-    assert "quantity > 0" in sql
+    assert "t.entry_price > 0" in sql
+    assert "t.quantity > 0" in sql
+    assert "count(*)" not in sql
+    assert "WHEN pnl > 0" not in sql
     assert "__PATTERN_FILTER__" not in sql
     assert "scan_pattern_id = ANY(:ids)" in sql
     assert sess.params == {

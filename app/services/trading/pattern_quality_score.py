@@ -433,9 +433,10 @@ def _load_realized_pnl_map(
     """Per-pattern realized PnL stats over the trailing window.
 
     Returns ``{scan_pattern_id: {"n": int, "avg_pnl_pct": float,
-    "total_pnl": float}}`` for every pattern with at least one closed
-    trade in the window. The caller decides the n-floor (default 5)
-    before treating ``avg_pnl_pct`` as a realized-component input.
+    "total_pnl": float}}`` for every pattern with at least one
+    computable realized-return sample in the window. The caller decides
+    the n-floor (default 5) before treating ``avg_pnl_pct`` as a
+    realized-component input.
 
     ``avg_pnl_pct`` is equal-weighted across trades:
     ``avg(pnl / notional)``. For options, notional includes the 100x
@@ -447,18 +448,26 @@ def _load_realized_pnl_map(
     """
     rows = db.execute(
         text(f"""
+            WITH realized_samples AS (
+                SELECT
+                    t.scan_pattern_id,
+                    t.pnl,
+                    {trade_return_fraction_sql("t")} AS realized_return_frac
+                FROM trading_trades t
+                WHERE t.scan_pattern_id IS NOT NULL
+                  AND t.scan_pattern_id != -1
+                  AND t.status = 'closed'
+                  AND t.pnl IS NOT NULL
+                  AND t.entry_price > 0
+                  AND t.quantity > 0
+                  AND t.exit_date > NOW() - make_interval(days => :window_days)
+            )
             SELECT scan_pattern_id,
-                   COUNT(*) AS n,
-                   AVG({trade_return_fraction_sql()}) AS avg_pnl_pct,
+                   COUNT(realized_return_frac) AS n,
+                   AVG(realized_return_frac) AS avg_pnl_pct,
                    SUM(pnl) AS total_pnl
-            FROM trading_trades
-            WHERE scan_pattern_id IS NOT NULL
-              AND scan_pattern_id != -1
-              AND status = 'closed'
-              AND pnl IS NOT NULL
-              AND entry_price > 0
-              AND quantity > 0
-              AND exit_date > NOW() - make_interval(days => :window_days)
+            FROM realized_samples
+            WHERE realized_return_frac IS NOT NULL
             GROUP BY scan_pattern_id
             """
         ),
@@ -477,23 +486,31 @@ def _load_realized_pnl_map(
     if include_autotrader_paper_dynamic:
         paper_rows = db.execute(
             text(f"""
+                WITH realized_samples AS (
+                    SELECT
+                        pt.scan_pattern_id,
+                        pt.pnl,
+                        {paper_trade_return_fraction_sql("pt")} AS realized_return_frac
+                    FROM trading_paper_trades pt
+                    WHERE pt.scan_pattern_id IS NOT NULL
+                      AND pt.scan_pattern_id != -1
+                      AND pt.status = 'closed'
+                      AND pt.pnl IS NOT NULL
+                      AND pt.entry_price > 0
+                      AND pt.quantity > 0
+                      AND pt.exit_date > NOW() - make_interval(days => :window_days)
+                      AND (
+                        pt.paper_shadow_of_alert_id IS NOT NULL
+                        OR COALESCE(pt.signal_json, '{{}}'::jsonb) @> '{{"auto_trader_v1": true}}'::jsonb
+                        OR COALESCE(pt.signal_json, '{{}}'::jsonb) @> '{{"paper_shadow": true}}'::jsonb
+                      )
+                )
                 SELECT scan_pattern_id,
-                       COUNT(*) AS n,
-                       AVG({paper_trade_return_fraction_sql()}) AS avg_pnl_pct,
+                       COUNT(realized_return_frac) AS n,
+                       AVG(realized_return_frac) AS avg_pnl_pct,
                        SUM(pnl) AS total_pnl
-                FROM trading_paper_trades
-                WHERE scan_pattern_id IS NOT NULL
-                  AND scan_pattern_id != -1
-                  AND status = 'closed'
-                  AND pnl IS NOT NULL
-                  AND entry_price > 0
-                  AND quantity > 0
-                  AND exit_date > NOW() - make_interval(days => :window_days)
-                  AND (
-                    paper_shadow_of_alert_id IS NOT NULL
-                    OR COALESCE(signal_json, '{{}}'::jsonb) @> '{{"auto_trader_v1": true}}'::jsonb
-                    OR COALESCE(signal_json, '{{}}'::jsonb) @> '{{"paper_shadow": true}}'::jsonb
-                  )
+                FROM realized_samples
+                WHERE realized_return_frac IS NOT NULL
                 GROUP BY scan_pattern_id
                 """
             ),
@@ -516,7 +533,7 @@ def _load_realized_pnl_map(
                     "paper_dynamic_n": paper_n,
                 }
                 continue
-            live_n = int(cur.get("n") or 0)
+            live_n = int(cur.get("live_n") or 0)
             live_avg = cur.get("avg_pnl_pct")
             total_n = live_n + paper_n
             if total_n <= 0:

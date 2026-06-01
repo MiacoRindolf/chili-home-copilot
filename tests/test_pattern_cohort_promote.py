@@ -68,7 +68,59 @@ def _settings_stub(**overrides):
     return SimpleNamespace(**base)
 
 
+class _MappingRows:
+    def __init__(self, rows):
+        self._rows = list(rows)
+
+    def mappings(self):
+        return self
+
+    def all(self):
+        return list(self._rows)
+
+
+class _CohortSqlCaptureDb:
+    def __init__(self):
+        self.sql = ""
+        self.params = {}
+
+    def execute(self, stmt, params=None):
+        self.sql = str(stmt)
+        self.params = dict(params or {})
+        return _MappingRows([])
+
+    def query(self, model):
+        raise AssertionError("no ORM query expected when no rows are eligible")
+
+
 # ── Pure unit tests ──────────────────────────────────────────────────
+
+
+def test_select_cohort_candidates_counts_only_computable_realized_returns():
+    db = _CohortSqlCaptureDb()
+
+    candidates = select_cohort_candidates(
+        db,
+        settings_=_settings_stub(
+            chili_cohort_score_realized_window_days=45,
+            chili_cohort_promote_min_realized_trades_for_floor=5,
+            chili_cohort_promote_max_realized_avg_pnl_pct_negative=-0.01,
+        ),
+    )
+
+    assert candidates == []
+    sql = " ".join(db.sql.split())
+    assert "WITH realized_samples AS" in sql
+    assert "FROM trading_trades t" in sql
+    assert "COUNT(realized_return_frac) AS n_realized" in sql
+    assert "AVG(realized_return_frac) AS avg_pnl_pct" in sql
+    assert "WHERE realized_return_frac IS NOT NULL" in sql
+    assert "t.filled_quantity" in sql
+    assert "t.partial_taken_qty" in sql
+    assert "COUNT(*)" not in sql
+    assert db.params["window_days"] == 45
+    assert db.params["min_n_floor"] == 5
+    assert db.params["max_negative_pct"] == -0.01
 
 
 def test_compute_with_full_evidence_uses_all_5_weights():

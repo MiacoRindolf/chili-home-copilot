@@ -253,11 +253,11 @@ def _load_realized_pnl_for_pattern(
 ) -> tuple[int, Optional[float]]:
     """Per-pattern realized PnL stats over the trailing window.
 
-    Returns ``(n_closed_trades, avg_pnl_pct)``. ``avg_pnl_pct`` is
+    Returns ``(n_valid_return_samples, avg_pnl_pct)``. ``avg_pnl_pct`` is
     equal-weighted as ``avg(pnl / notional)`` across all
     ``status='closed'`` trades with non-NULL pnl in the window. Options
     include the 100x contract multiplier in notional. Returns
-    ``(0, None)`` when the pattern has no closed trades or on read
+    ``(0, None)`` when the pattern has no valid return samples or on read
     failure (NULL propagation per advisor brief §2.6 — no magic
     fallback).
     """
@@ -266,16 +266,22 @@ def _load_realized_pnl_for_pattern(
     try:
         row = sess.execute(
             _text(f"""
-                SELECT COUNT(*) AS n,
-                       AVG({trade_return_fraction_sql()}) AS avg_pnl_pct
-                FROM trading_trades
-                WHERE scan_pattern_id = :pid
-                  AND scan_pattern_id != -1
-                  AND status = 'closed'
-                  AND pnl IS NOT NULL
-                  AND entry_price > 0
-                  AND quantity > 0
-                  AND exit_date > NOW() - make_interval(days => :window_days)
+                WITH realized_samples AS (
+                    SELECT
+                        {trade_return_fraction_sql("t")} AS realized_return_frac
+                    FROM trading_trades t
+                    WHERE t.scan_pattern_id = :pid
+                      AND t.scan_pattern_id != -1
+                      AND t.status = 'closed'
+                      AND t.pnl IS NOT NULL
+                      AND t.entry_price > 0
+                      AND t.quantity > 0
+                      AND t.exit_date > NOW() - make_interval(days => :window_days)
+                )
+                SELECT COUNT(realized_return_frac) AS n,
+                       AVG(realized_return_frac) AS avg_pnl_pct
+                FROM realized_samples
+                WHERE realized_return_frac IS NOT NULL
                 """
             ),
             {"pid": int(pid), "window_days": int(window_days)},

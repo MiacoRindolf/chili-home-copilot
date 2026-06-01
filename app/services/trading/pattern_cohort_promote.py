@@ -212,7 +212,7 @@ def select_cohort_candidates(
         settings_ = _settings
 
     # f-composite-quality-reweight-realized-evidence (2026-05-16): realized-PnL
-    # eligibility floor. A pattern with >= N realized closed trades whose
+    # eligibility floor. A pattern with >= N valid realized return samples whose
     # equal-weighted avg_pnl_pct is <= 0 is REFUSED cohort promotion. Below
     # the n_floor (sample too small) or with positive realized avg, the
     # pattern is allowed through. Reads window, n_floor, and the
@@ -235,18 +235,25 @@ def select_cohort_candidates(
     # CPCV bootstrap policy can also admit near-misses for shadow-only
     # observation when the stored gate is stale or path-count constrained.
     sql = text(f"""
-        WITH realized AS (
+        WITH realized_samples AS (
+            SELECT
+                t.scan_pattern_id,
+                {trade_return_fraction_sql("t")} AS realized_return_frac
+            FROM trading_trades t
+            WHERE t.scan_pattern_id IS NOT NULL
+              AND t.scan_pattern_id != -1
+              AND t.status = 'closed'
+              AND t.pnl IS NOT NULL
+              AND t.entry_price > 0
+              AND t.quantity > 0
+              AND t.exit_date > NOW() - make_interval(days => :window_days)
+        ),
+        realized AS (
             SELECT scan_pattern_id,
-                   COUNT(*) AS n_realized,
-                   AVG({trade_return_fraction_sql()}) AS avg_pnl_pct
-            FROM trading_trades
-            WHERE scan_pattern_id IS NOT NULL
-              AND scan_pattern_id != -1
-              AND status = 'closed'
-              AND pnl IS NOT NULL
-              AND entry_price > 0
-              AND quantity > 0
-              AND exit_date > NOW() - make_interval(days => :window_days)
+                   COUNT(realized_return_frac) AS n_realized,
+                   AVG(realized_return_frac) AS avg_pnl_pct
+            FROM realized_samples
+            WHERE realized_return_frac IS NOT NULL
             GROUP BY scan_pattern_id
         )
         SELECT
