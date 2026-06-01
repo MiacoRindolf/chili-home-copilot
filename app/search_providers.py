@@ -31,6 +31,7 @@ import re
 import socket
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional
 from urllib.parse import urljoin, urlparse
 
@@ -299,6 +300,58 @@ _PROVIDER_FUNCS = {
 }
 
 
+def _normalize_url(url: str) -> str:
+    """Normalize a URL for de-duplication.
+
+    Strips scheme, a leading "www." on the host, a trailing slash on the path,
+    and lowercases the host. Path/query/fragment casing is preserved (only the
+    host is case-insensitive per RFC 3986). Returns the raw input lowercased if
+    it cannot be parsed, so dedupe degrades gracefully rather than raising.
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urlparse(raw)
+        host = (parsed.hostname or "").lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if not host:
+            # No recognizable host (e.g. a bare path) — fall back to a lowered,
+            # de-slashed form of the whole string.
+            return raw.lower().rstrip("/")
+        netloc = host
+        if parsed.port:
+            netloc = f"{host}:{parsed.port}"
+        path = parsed.path.rstrip("/")
+        rest = path
+        if parsed.query:
+            rest += f"?{parsed.query}"
+        if parsed.fragment:
+            rest += f"#{parsed.fragment}"
+        return f"{netloc}{rest}"
+    except Exception:  # pragma: no cover - defensive
+        return raw.lower().rstrip("/")
+
+
+def _dedupe_results(results: List[dict]) -> List[dict]:
+    """Remove duplicate results by normalized URL, keeping first occurrence.
+
+    Preserves input order. Results without a usable URL are passed through
+    unchanged (they cannot be deduped against).
+    """
+    seen: set = set()
+    out: List[dict] = []
+    for r in results:
+        key = _normalize_url(r.get("url", "") if isinstance(r, dict) else "")
+        if key:
+            if key in seen:
+                continue
+            seen.add(key)
+        out.append(r)
+    return out
+
+
 def resilient_search(query: str, count: int = 5, time_filter: Optional[str] = None,
                      categories: str = "general") -> List[dict]:
     """Try configured providers in order; return the first non-empty result set.
@@ -319,7 +372,9 @@ def resilient_search(query: str, count: int = 5, time_filter: Optional[str] = No
             logger.warning("[search_providers] provider %s raised: %s", name, e)
             results = []
         if results:
-            return results[:count]
+            # Dedupe by normalized URL BEFORE capping so duplicates don't eat
+            # into the count budget.
+            return _dedupe_results(results)[:count]
     return []
 
 
@@ -524,3 +579,43 @@ def fetch_webpage_content(url: str, timeout: int = 6, max_chars: int = 8000) -> 
               "meta_description": meta_desc, "success": bool(content), "error": ""}
     _cache_put(url, result)
     return result
+
+
+def fetch_many(urls: List[str], max_workers: int = 4, max_chars: int = 8000) -> List[dict]:
+    """Fetch multiple URLs concurrently, reusing the SSRF-safe single fetcher.
+
+    De-duplicates the input URLs (same normalization as `_dedupe_results`),
+    fetches each remaining URL via `fetch_webpage_content` in a bounded thread
+    pool, and returns one result dict per de-duped URL in first-seen order.
+    Never raises — a failed fetch yields the standard failure dict.
+    """
+    # De-dupe while preserving first-seen order.
+    seen: set = set()
+    unique: List[str] = []
+    for u in urls or []:
+        key = _normalize_url(u)
+        if key:
+            if key in seen:
+                continue
+            seen.add(key)
+        unique.append(u)
+
+    if not unique:
+        return []
+
+    workers = min(max_workers, len(unique))
+    workers = max(1, min(workers, 8))  # never exceed 8, never below 1
+
+    def _one(u: str) -> dict:
+        try:
+            return fetch_webpage_content(u, max_chars=max_chars)
+        except Exception as e:  # pragma: no cover - fetch_webpage_content already guards
+            logger.warning("[search_providers] fetch_many failed %s: %s", u, e)
+            return _empty_content(u, f"{type(e).__name__}: {e}")
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        # executor.map preserves input order in its output.
+        results = list(pool.map(_one, unique))
+    logger.info("[search_providers] fetch_many fetched %d urls (%d ok)",
+                len(results), sum(1 for r in results if r.get("success")))
+    return results

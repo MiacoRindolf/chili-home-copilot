@@ -141,6 +141,20 @@ def fetch_source(url: str, max_chars: int = 8000, trace_id: str = "web") -> dict
     return result
 
 
+def fetch_sources(urls: list[dict], max_chars: int = 8000, trace_id: str = "web") -> list[dict]:
+    """Fetch readable content for multiple URLs concurrently (SSRF-hardened).
+
+    Thin wrapper over search_providers.fetch_many: de-dupes the input URLs and
+    fetches them in a bounded thread pool, returning one result dict per de-duped
+    URL in first-seen order. Never raises — failed fetches yield the standard
+    failure dict.
+    """
+    results = search_providers.fetch_many(urls, max_chars=max_chars)
+    succeeded = sum(1 for r in results if r.get("success"))
+    log_info(trace_id, f"fetch_sources fetched={len(results)} ok={succeeded}")
+    return results
+
+
 def search_with_sources(query: str, max_results: int = _MAX_RESULTS,
                         max_fetch: int = 3, trace_id: str = "web") -> list[dict]:
     """Search, then enrich the top results with fetched page content.

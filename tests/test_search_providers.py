@@ -237,3 +237,148 @@ class TestFetchWebpageContent:
         with patch.object(sp, "_get_public_url", return_value=self._resp(html)):
             out = sp.fetch_webpage_content("https://example.com/big", max_chars=1000)
         assert len(out["content"]) <= 1000
+
+
+# ---------------------------------------------------------------------------
+# Cross-result de-duplication
+# ---------------------------------------------------------------------------
+
+class TestDedupeResults:
+    def test_strips_scheme_www_and_trailing_slash(self):
+        results = [
+            {"title": "A", "url": "https://example.com/page", "snippet": "1"},
+            {"title": "B", "url": "http://www.example.com/page/", "snippet": "2"},
+            {"title": "C", "url": "https://other.com/x", "snippet": "3"},
+        ]
+        out = sp._dedupe_results(results)
+        # First two collapse to one (scheme/www/trailing-slash differences only).
+        assert len(out) == 2
+        assert out[0]["title"] == "A"  # first occurrence preserved
+        assert out[1]["title"] == "C"
+
+    def test_host_case_insensitive(self):
+        results = [
+            {"title": "A", "url": "https://Example.COM/Page"},
+            {"title": "B", "url": "https://example.com/Page"},
+        ]
+        out = sp._dedupe_results(results)
+        assert len(out) == 1
+        assert out[0]["title"] == "A"
+
+    def test_preserves_order_and_first(self):
+        results = [
+            {"title": "1", "url": "https://a.com/x"},
+            {"title": "2", "url": "https://b.com/y"},
+            {"title": "3", "url": "https://www.a.com/x/"},  # dup of 1
+            {"title": "4", "url": "https://c.com/z"},
+        ]
+        out = sp._dedupe_results(results)
+        assert [r["title"] for r in out] == ["1", "2", "4"]
+
+    def test_no_duplicates_unchanged(self):
+        results = [
+            {"title": "1", "url": "https://a.com/x"},
+            {"title": "2", "url": "https://b.com/y"},
+        ]
+        out = sp._dedupe_results(results)
+        assert out == results
+
+    def test_results_without_url_pass_through(self):
+        results = [
+            {"title": "1", "url": ""},
+            {"title": "2", "url": ""},
+        ]
+        out = sp._dedupe_results(results)
+        assert len(out) == 2
+
+
+class TestResilientSearchDedup:
+    def test_dedupes_then_caps_to_count(self):
+        # Provider returns 5 items, 2 of which are URL-duplicates -> 3 unique.
+        dupy = [
+            {"title": "1", "url": "https://e.com/a", "snippet": ""},
+            {"title": "2", "url": "https://www.e.com/a/", "snippet": ""},  # dup of 1
+            {"title": "3", "url": "https://e.com/b", "snippet": ""},
+            {"title": "4", "url": "http://e.com/b", "snippet": ""},        # dup of 3
+            {"title": "5", "url": "https://e.com/c", "snippet": ""},
+        ]
+        with patch.object(sp, "provider_order", return_value=["duckduckgo"]), \
+             patch.object(sp, "_duckduckgo_search", return_value=dupy):
+            out = sp.resilient_search("q", count=5)
+        assert [r["title"] for r in out] == ["1", "3", "5"]
+
+    def test_dedupe_before_count_cap(self):
+        # 4 unique URLs but with dups interleaved; count=2 should yield the first
+        # 2 UNIQUE results, not be eaten by duplicates.
+        dupy = [
+            {"title": "1", "url": "https://e.com/a"},
+            {"title": "2", "url": "https://www.e.com/a/"},  # dup of 1
+            {"title": "3", "url": "https://e.com/b"},
+            {"title": "4", "url": "https://e.com/c"},
+        ]
+        with patch.object(sp, "provider_order", return_value=["duckduckgo"]), \
+             patch.object(sp, "_duckduckgo_search", return_value=dupy):
+            out = sp.resilient_search("q", count=2)
+        assert [r["title"] for r in out] == ["1", "3"]
+
+
+# ---------------------------------------------------------------------------
+# Concurrent multi-URL fetch
+# ---------------------------------------------------------------------------
+
+class TestFetchMany:
+    def test_one_entry_per_deduped_url_in_order(self):
+        urls = ["https://a.com/1", "https://b.com/2", "https://www.a.com/1/"]  # 3rd dups 1st
+
+        def fake_fetch(url, max_chars=8000):
+            return {"url": url, "title": url, "content": "x", "meta_description": "",
+                    "success": True, "error": ""}
+
+        with patch.object(sp, "fetch_webpage_content", side_effect=fake_fetch) as mock_fetch:
+            out = sp.fetch_many(urls)
+        assert len(out) == 2  # deduped
+        assert out[0]["url"] == "https://a.com/1"
+        assert out[1]["url"] == "https://b.com/2"
+        assert mock_fetch.call_count == 2  # one fetch per unique URL
+
+    def test_calls_fetch_webpage_content_per_url(self):
+        urls = ["https://a.com", "https://b.com", "https://c.com"]
+        with patch.object(sp, "fetch_webpage_content",
+                          side_effect=lambda url, max_chars=8000: {"url": url, "success": True}) as mf:
+            out = sp.fetch_many(urls, max_workers=2)
+        assert mf.call_count == 3
+        assert [r["url"] for r in out] == urls
+
+    def test_failing_fetch_yields_failure_dict_without_raising(self):
+        urls = ["https://ok.com", "https://boom.com"]
+
+        def fake_fetch(url, max_chars=8000):
+            if "boom" in url:
+                raise RuntimeError("kaboom")
+            return {"url": url, "success": True, "content": "ok"}
+
+        with patch.object(sp, "fetch_webpage_content", side_effect=fake_fetch):
+            out = sp.fetch_many(urls)
+        assert len(out) == 2
+        assert out[0]["success"] is True
+        assert out[1]["success"] is False
+        assert out[1]["url"] == "https://boom.com"
+        assert out[1]["content"] == ""
+
+    def test_empty_input_returns_empty(self):
+        assert sp.fetch_many([]) == []
+
+    def test_caps_workers_at_eight(self):
+        urls = [f"https://e.com/{i}" for i in range(20)]
+        captured = {}
+        real_pool = sp.ThreadPoolExecutor
+
+        def spy_pool(max_workers=None):
+            captured["workers"] = max_workers
+            return real_pool(max_workers=max_workers)
+
+        with patch.object(sp, "fetch_webpage_content",
+                          side_effect=lambda url, max_chars=8000: {"url": url, "success": True}), \
+             patch.object(sp, "ThreadPoolExecutor", side_effect=spy_pool):
+            sp.fetch_many(urls, max_workers=100)
+        assert captured["workers"] == 8
