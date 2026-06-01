@@ -171,14 +171,16 @@ def _top_patterns_section(summary: Dict[str, Any]) -> Optional[str]:
     for pat in patterns:
         if not isinstance(pat, dict):
             continue
+        payoff = _format_payoff(pat.get("payoff"))
         rows.append([
             _cell(pat.get("id")),
             _money_cell(pat.get("pnl")),
             _cell(pat.get("trades")),
+            payoff if payoff is not None else "",
         ])
     if not rows:
         return None
-    table = _table(["Pattern", "P/L", "Trades"], rows)
+    table = _table(["Pattern", "P/L", "Trades", "Payoff"], rows)
     return "## Top Patterns\n\n" + table
 
 
