@@ -20,7 +20,22 @@ def test_permutation_mean_deterministic():
     p1, _ = permutation_mean_one_sided_p(vals, n_perm=200, rng=rng_a)
     p2, _ = permutation_mean_one_sided_p(vals, n_perm=200, rng=rng_b)
     assert p1 == p2
-    assert 0.0 <= p1 <= 1.0
+    assert p1 == 1.0
+
+
+def test_permutation_mean_skips_invariant_shuffle():
+    class _NoShuffle:
+        def shuffle(self, _values):
+            raise AssertionError("sample mean permutation should not shuffle invariant values")
+
+    p, skip = permutation_mean_one_sided_p(
+        [52.0, 48.0, 55.0, 51.0],
+        n_perm=1000,
+        rng=_NoShuffle(),
+    )
+
+    assert p == 1.0
+    assert skip is None
 
 
 def test_permutation_insufficient_units():

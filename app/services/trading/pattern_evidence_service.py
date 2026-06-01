@@ -108,15 +108,30 @@ def walk_forward_validate(
     is_end = now - timedelta(days=oos_days)
     oos_start = is_end
 
-    def _mean_for_window(start: datetime, end: datetime, above: bool) -> tuple[float, int]:
-        q = (
-            db.query(PatternTradeRow)
-            .filter(PatternTradeRow.scan_pattern_id == hyp.scan_pattern_id)
-            .filter(PatternTradeRow.as_of_ts >= start, PatternTradeRow.as_of_ts < end)
-        )
-        rows = q.all()
-        vals: list[float] = []
+    try:
+        med_f = float(med)
+    except (TypeError, ValueError):
+        med_f = None
+
+    q = (
+        db.query(PatternTradeRow)
+        .filter(PatternTradeRow.scan_pattern_id == hyp.scan_pattern_id)
+        .filter(PatternTradeRow.as_of_ts >= is_start, PatternTradeRow.as_of_ts < now)
+    )
+    rows = q.all()
+    sums = {"is_above": 0.0, "is_below": 0.0, "oos_above": 0.0, "oos_below": 0.0}
+    counts = {"is_above": 0, "is_below": 0, "oos_above": 0, "oos_below": 0}
+    if med_f is not None and med_f == med_f:
         for r in rows:
+            ts = getattr(r, "as_of_ts", None)
+            if ts is None:
+                continue
+            if is_start <= ts < is_end:
+                prefix = "is"
+            elif oos_start <= ts < now:
+                prefix = "oos"
+            else:
+                continue
             fj = r.features_json or {}
             if not isinstance(fj, dict):
                 continue
@@ -124,22 +139,26 @@ def walk_forward_validate(
             if v is None or r.outcome_return_pct is None:
                 continue
             try:
-                fv = float(v)
-                if above and fv > float(med):
-                    vals.append(float(r.outcome_return_pct))
-                if not above and fv <= float(med):
-                    vals.append(float(r.outcome_return_pct))
+                bucket = "above" if float(v) > med_f else "below"
+                ret = float(r.outcome_return_pct)
             except (TypeError, ValueError):
                 continue
-        if not vals:
+            key = f"{prefix}_{bucket}"
+            sums[key] += ret
+            counts[key] += 1
+
+    def _mean_for_bucket(prefix: str, above: bool) -> tuple[float, int]:
+        key = f"{prefix}_{'above' if above else 'below'}"
+        n = counts[key]
+        if not n:
             return 0.0, 0
-        return sum(vals) / len(vals), len(vals)
+        return sums[key] / n, n
 
     favor_above = pred.get("favor") == "above_median"
-    is_mean, is_n = _mean_for_window(is_start, is_end, favor_above)
-    oos_mean, oos_n = _mean_for_window(oos_start, now, favor_above)
-    bench_is, _ = _mean_for_window(is_start, is_end, not favor_above)
-    bench_oos, _ = _mean_for_window(oos_start, now, not favor_above)
+    is_mean, is_n = _mean_for_bucket("is", favor_above)
+    oos_mean, oos_n = _mean_for_bucket("oos", favor_above)
+    bench_is, _ = _mean_for_bucket("is", not favor_above)
+    bench_oos, _ = _mean_for_bucket("oos", not favor_above)
 
     if favor_above:
         validated = is_n >= 15 and oos_n >= 15 and oos_mean > bench_oos

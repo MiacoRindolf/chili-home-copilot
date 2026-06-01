@@ -244,11 +244,14 @@ def compute_parameter_stability(
 ) -> dict[str, Any]:
     """Run neighbor backtests; return full ``parameter_stability`` contract."""
     conditions: list[dict[str, Any]] = []
+    base_rules_dict: dict[str, Any] | None = None
     if isinstance(rules_json, dict):
+        base_rules_dict = rules_json
         conditions = list(rules_json.get("conditions") or [])
     else:
         try:
-            conditions = list(json.loads(rules_json or "{}").get("conditions") or [])
+            base_rules_dict = json.loads(rules_json or "{}")
+            conditions = list(base_rules_dict.get("conditions") or [])
         except (json.JSONDecodeError, TypeError, ValueError):
             conditions = []
     if not conditions:
@@ -279,17 +282,11 @@ def compute_parameter_stability(
             fragility_flags=["no_tunable_axes"],
         )
 
-    base_rules_dict: dict[str, Any]
-    if isinstance(rules_json, dict):
-        base_rules_dict = rules_json
-    else:
-        try:
-            base_rules_dict = json.loads(rules_json or "{}")
-        except (json.JSONDecodeError, TypeError, ValueError):
-            return _empty_contract(
-                skip_reason="invalid_rules_json",
-                fragility_flags=["invalid_rules"],
-            )
+    if base_rules_dict is None:
+        return _empty_contract(
+            skip_reason="invalid_rules_json",
+            fragility_flags=["invalid_rules"],
+        )
 
     variants = generate_neighbor_variants(base_rules_dict, axes, max_variants=max_variant_evals)
     attempted = len(variants)

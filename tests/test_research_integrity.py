@@ -12,6 +12,7 @@ from app.services.trading.research_integrity import (
     aggregate_promotion_integrity,
     build_data_provenance,
     check_signal_bar_alignment,
+    check_recursive_indicator_sanity,
     promotion_blocked_by_integrity,
     rules_json_fingerprint,
 )
@@ -120,6 +121,21 @@ def test_cross_timeframe_prefixed_indicator_is_causal():
     assert len(arrays["1d:rsi_14"]) == len(df)
     assert any(value is not None for value in arrays["1d:rsi_14"])
     assert out["lookahead_ok"] is True
+
+
+def test_recursive_indicator_sanity_does_not_cast_close(monkeypatch):
+    df = _sample_ohlcv(80)
+    arrays = {"rsi_14": list(np.linspace(40.0, 60.0, len(df)))}
+
+    def fail_astype(*_args, **_kwargs):
+        raise AssertionError("recursive sanity should not cast unused Close values")
+
+    monkeypatch.setattr(pd.Series, "astype", fail_astype)
+
+    out = check_recursive_indicator_sanity(df, arrays)
+
+    assert out["recursive_ok"] is True
+    assert out["warnings"] == []
 
 
 def test_aggregate_promotion_integrity():

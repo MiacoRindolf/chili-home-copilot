@@ -63,8 +63,13 @@ def _numeric_from_features(row: PatternTradeRow) -> dict[str, float]:
 
 
 def _profit_factor(returns: list[float]) -> float | None:
-    gains = sum(r for r in returns if r > 0)
-    losses = -sum(r for r in returns if r < 0)
+    gains = 0.0
+    losses = 0.0
+    for r in returns:
+        if r > 0:
+            gains += r
+        elif r < 0:
+            losses -= r
     if losses <= 0:
         return None if gains <= 0 else gains
     return gains / losses
@@ -88,6 +93,20 @@ def _top_score_items(
     return heapq.nlargest(limit, scores, key=lambda item: item[1])
 
 
+def _row_time_bounds(rows: list[PatternTradeRow]) -> tuple[str | None, str | None]:
+    if not rows:
+        return None, None
+    lo = rows[0].as_of_ts
+    hi = rows[0].as_of_ts
+    for row in rows[1:]:
+        ts = row.as_of_ts
+        if ts < lo:
+            lo = ts
+        if ts > hi:
+            hi = ts
+    return lo.isoformat(), hi.isoformat()
+
+
 def analyze_pattern_trades(
     db: Session,
     scan_pattern_id: int,
@@ -104,12 +123,13 @@ def analyze_pattern_trades(
         .filter(PatternTradeRow.as_of_ts >= since)
     )
     rows = q.all()
+    as_of_min, as_of_max = _row_time_bounds(rows)
     report = AnalysisReport(
         scan_pattern_id=scan_pattern_id,
         window_days=window_days,
         total_rows=len(rows),
-        as_of_min=min((r.as_of_ts.isoformat() for r in rows), default=None),
-        as_of_max=max((r.as_of_ts.isoformat() for r in rows), default=None),
+        as_of_min=as_of_min,
+        as_of_max=as_of_max,
     )
     if len(rows) < WARN_MIN_N:
         report.warnings.append(f"Low sample size n={len(rows)} (warn below {WARN_MIN_N})")

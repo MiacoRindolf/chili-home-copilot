@@ -167,8 +167,7 @@ def check_recursive_indicator_sanity(
     """Cheap sanity: rolling-type series at *i* should not equal the same series shifted by -1
     everywhere (a weak signal of accidental forward shift). Best-effort; skipped if keys absent.
     """
-    close = df["Close"].astype(float)
-    n = len(close)
+    n = len(df)
     warnings: list[str] = []
     if n < 50:
         return {"recursive_ok": True, "warnings": [], "detail": "skipped_short"}

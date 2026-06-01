@@ -60,20 +60,6 @@ def audit_promoted_pattern_evidence(db: Session) -> dict[str, Any]:
     """
     audited_at = datetime.utcnow().isoformat()
 
-    # Both column conventions (canonical + legacy) so we can show drift.
-    promoted_lifecycle = db.execute(
-        text(
-            "SELECT count(*) FROM scan_patterns "
-            "WHERE lifecycle_stage IN ('promoted', 'live')"
-        )
-    ).scalar() or 0
-    promoted_legacy = db.execute(
-        text(
-            "SELECT count(*) FROM scan_patterns "
-            "WHERE promotion_status = 'promoted'"
-        )
-    ).scalar() or 0
-
     # The audit set is the UNION of both — anything currently treated as
     # "promoted" by either convention should have evidence on file.
     rows = db.execute(
@@ -106,8 +92,14 @@ def audit_promoted_pattern_evidence(db: Session) -> dict[str, Any]:
     incomplete_ids: list[int] = []
     incomplete_details: list[dict[str, Any]] = []
     complete = 0
+    promoted_lifecycle = 0
+    promoted_legacy = 0
 
     for r in rows:
+        if r.lifecycle_stage in ("promoted", "live"):
+            promoted_lifecycle += 1
+        if r.promotion_status == "promoted":
+            promoted_legacy += 1
         missing: list[str] = []
         if r.oos_win_rate is None:
             by_missing["oos_win_rate_null"] += 1

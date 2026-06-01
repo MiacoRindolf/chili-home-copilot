@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -39,7 +39,12 @@ class PatternValidationProjection:
         return cls(**{key: _clone_dict(raw.get(key)) for key in _CONTRACT_KEYS})
 
     def to_payload(self) -> dict[str, Any]:
-        return {key: _clone_dict(value) for key, value in asdict(self).items() if isinstance(value, dict) and value}
+        return {
+            key: _clone_dict(value)
+            for key in _CONTRACT_KEYS
+            for value in (getattr(self, key),)
+            if isinstance(value, dict) and value
+        }
 
 
 def read_pattern_validation_projection(pattern_or_payload: Any) -> PatternValidationProjection:
@@ -51,7 +56,11 @@ def read_pattern_validation_projection(pattern_or_payload: Any) -> PatternValida
 def read_validation_contract(pattern_or_payload: Any, key: str) -> dict[str, Any]:
     if key not in _CONTRACT_KEYS:
         return {}
-    return _clone_dict(getattr(read_pattern_validation_projection(pattern_or_payload), key, {}))
+    if hasattr(pattern_or_payload, "oos_validation_json"):
+        payload = _clone_dict(getattr(pattern_or_payload, "oos_validation_json", None))
+    else:
+        payload = _clone_dict(pattern_or_payload)
+    return _clone_dict(payload.get(key))
 
 
 def write_validation_contract(pattern: Any, key: str, contract: dict[str, Any] | None) -> dict[str, Any]:

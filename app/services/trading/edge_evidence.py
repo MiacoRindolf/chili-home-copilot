@@ -43,14 +43,9 @@ def permutation_mean_one_sided_p(
     obs = _mean(values)
     if math.isnan(obs):
         return None, "nan_stat"
-    count_ge = 0
-    work = list(values)
-    for _ in range(max(1, int(n_perm))):
-        rng.shuffle(work)
-        if _mean(work) >= obs - 1e-12:
-            count_ge += 1
-    p = (1 + count_ge) / (max(1, int(n_perm)) + 1)
-    return float(min(1.0, max(0.0, p))), None
+    # Shuffling a finite sample does not change its mean, so every permutation
+    # is at least as large as the observed mean under this weak-null statistic.
+    return 1.0, None
 
 
 def apply_fdr_correction(p_values: list[float | None], q: float = 0.10) -> list[bool]:

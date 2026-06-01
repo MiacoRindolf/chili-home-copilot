@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from app.services.trading.edge_evidence import apply_phase2_hygiene_nudges
-from app.services.trading.parameter_stability import pick_stability_tickers
+from app.services.trading import parameter_stability
+from app.services.trading.parameter_stability import (
+    compute_parameter_stability,
+    pick_stability_tickers,
+)
 from app.services.trading.selection_bias import (
     build_outcome_fingerprint,
     build_research_run_key,
@@ -121,3 +125,44 @@ def test_apply_phase2_hygiene_nudges_soft_tier_downgrade():
     assert ee["evidence_tier"] == "C"
     assert "phase2_fragile_parameter_neighborhood" in ov["research_hygiene_flags"]
     assert "phase2_high_validation_slice_burn" in ov["research_hygiene_flags"]
+
+
+def test_parameter_stability_parses_string_rules_once(monkeypatch):
+    rules_json = """
+    {
+      "conditions": [
+        {"indicator": "rsi_14", "op": ">", "value": 55},
+        {"indicator": "macd_hist", "op": ">", "value": 0}
+      ]
+    }
+    """
+    real_loads = parameter_stability.json.loads
+    calls = 0
+
+    def counting_loads(value, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_loads(value, *args, **kwargs)
+
+    def fake_backtest_pattern_fn(**_kwargs):
+        return {"ok": True, "oos_ok": True, "oos_win_rate": 54.0}
+
+    monkeypatch.setattr(parameter_stability.json, "loads", counting_loads)
+
+    result = compute_parameter_stability(
+        pattern_name="Unit",
+        rules_json=rules_json,
+        stability_tickers=["SPY"],
+        baseline_score=55.0,
+        backtest_pattern_fn=fake_backtest_pattern_fn,
+        bt_params={"interval": "1d", "period": "1y"},
+        bt_kw={},
+        exit_config=None,
+        scan_pattern_id=1,
+        max_variant_evals=4,
+        rel_pass_tol=0.12,
+        abs_floor=40.0,
+    )
+
+    assert calls == 1
+    assert result["attempted_neighbor_count"] > 0
