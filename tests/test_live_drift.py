@@ -7,7 +7,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from app.models.trading import PaperTrade, Trade
 from app.services.trading.live_drift import (
+    aggregate_runtime_scorecards,
     _outcome_pct_from_trade,
     _runtime_outcome_counts,
     _runtime_win_count,
@@ -22,6 +24,30 @@ from app.services.trading.live_drift import (
     live_drift_v2_summary,
     select_primary_runtime,
 )
+
+
+class _FakeQuery:
+    def __init__(self, rows):
+        self._rows = list(rows)
+
+    def filter(self, *args):
+        return self
+
+    def all(self):
+        return list(self._rows)
+
+
+class _FakeRuntimeDb:
+    def __init__(self, *, live_rows=None, paper_rows=None):
+        self.live_rows = list(live_rows or [])
+        self.paper_rows = list(paper_rows or [])
+
+    def query(self, model):
+        if model is Trade:
+            return _FakeQuery(self.live_rows)
+        if model is PaperTrade:
+            return _FakeQuery(self.paper_rows)
+        raise AssertionError(f"unexpected model query: {model!r}")
 
 
 def _settings(**kwargs):
@@ -291,6 +317,42 @@ def test_live_drift_scorecard_excludes_unpriced_option_outcomes() -> None:
     assert scorecard is not None
     assert scorecard["sample_count"] == 1
     assert scorecard["expectancy_per_trade_pct"] == pytest.approx(2.0)
+
+
+def test_live_drift_v2_runtime_counts_use_valid_outcome_samples() -> None:
+    invalid_option = SimpleNamespace(
+        entry_price=4.01,
+        exit_price=716.0,
+        quantity=1.0,
+        pnl=None,
+        pnl_pct=17755.61,
+        direction="long",
+        signal_json={"asset_type": "options"},
+        exit_date=None,
+    )
+    valid_stock = SimpleNamespace(
+        entry_price=100.0,
+        exit_price=None,
+        quantity=1.0,
+        pnl=None,
+        pnl_pct=2.0,
+        direction="long",
+        signal_json={"asset_type": "stock"},
+        exit_date=None,
+    )
+    db = _FakeRuntimeDb(paper_rows=[invalid_option, valid_stock])
+
+    out = aggregate_runtime_scorecards(
+        db,
+        scan_pattern_id=42,
+        user_id=7,
+        window_days=30,
+    )
+
+    assert out["raw_n_paper"] == 2
+    assert out["n_paper"] == 1
+    assert out["paper"]["sample_count"] == 1
+    assert out["paper"]["expectancy_per_trade_pct"] == pytest.approx(2.0)
 
 
 def test_live_drift_runtime_wins_use_confirmed_option_premium_returns() -> None:

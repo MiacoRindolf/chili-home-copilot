@@ -354,11 +354,15 @@ def aggregate_runtime_scorecards(
         .filter(or_(PaperTrade.user_id == int(user_id), PaperTrade.user_id.is_(None)))
         .all()
     )
+    live_scorecard = _scorecard(live_rows, source="live")
+    paper_scorecard = _scorecard(paper_rows, source="paper")
     return {
-        "live": _scorecard(live_rows, source="live"),
-        "paper": _scorecard(paper_rows, source="paper"),
-        "n_live": len(live_rows),
-        "n_paper": len(paper_rows),
+        "live": live_scorecard,
+        "paper": paper_scorecard,
+        "n_live": int((live_scorecard or {}).get("sample_count") or 0),
+        "n_paper": int((paper_scorecard or {}).get("sample_count") or 0),
+        "raw_n_live": len(live_rows),
+        "raw_n_paper": len(paper_rows),
     }
 
 

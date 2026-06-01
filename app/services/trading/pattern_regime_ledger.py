@@ -53,7 +53,9 @@ from .realized_pnl_sql import trade_return_fraction_sql
 logger = logging.getLogger(__name__)
 
 
-_TRADE_RETURN_PCT_SQL = f"({trade_return_fraction_sql('t')}) * 100.0"
+_TRADE_RETURN_FRACTION_SQL = trade_return_fraction_sql("t")
+_TRADE_RETURN_PCT_SQL = f"({_TRADE_RETURN_FRACTION_SQL}) * 100.0"
+_VALID_TRADE_RETURN_SQL = f"({_TRADE_RETURN_FRACTION_SQL}) IS NOT NULL"
 
 
 # Each dimension is a (regime_dimension_name, sql_for_(pid, regime_label, pnl,
@@ -83,6 +85,7 @@ REGIME_DIMENSIONS: dict[str, str] = {
           AND t.entry_price > 0
           AND t.quantity IS NOT NULL
           AND t.quantity > 0
+          AND {_VALID_TRADE_RETURN_SQL}
           AND t.exit_date > NOW() - make_interval(days => :wd)
         """
     ),
@@ -107,6 +110,7 @@ REGIME_DIMENSIONS: dict[str, str] = {
           AND t.entry_price > 0
           AND t.quantity IS NOT NULL
           AND t.quantity > 0
+          AND {_VALID_TRADE_RETURN_SQL}
           AND t.exit_date > NOW() - make_interval(days => :wd)
         """
     ),
@@ -131,6 +135,7 @@ REGIME_DIMENSIONS: dict[str, str] = {
           AND t.entry_price > 0
           AND t.quantity IS NOT NULL
           AND t.quantity > 0
+          AND {_VALID_TRADE_RETURN_SQL}
           AND t.exit_date > NOW() - make_interval(days => :wd)
         """
     ),
@@ -155,6 +160,7 @@ REGIME_DIMENSIONS: dict[str, str] = {
           AND t.entry_price > 0
           AND t.quantity IS NOT NULL
           AND t.quantity > 0
+          AND {_VALID_TRADE_RETURN_SQL}
           AND t.exit_date > NOW() - make_interval(days => :wd)
         """
     ),
@@ -188,6 +194,16 @@ def _safe_div(a: float, b: float) -> float | None:
         return a / b
     except Exception:
         return None
+
+
+def _finite_number(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except Exception:
+        return None
+    return out if math.isfinite(out) else None
 
 
 def _stats_for_group(grp: _GroupAcc) -> dict[str, Any]:
@@ -236,6 +252,47 @@ def _stats_for_group(grp: _GroupAcc) -> dict[str, Any]:
     }
 
 
+def _add_regime_return_row(
+    groups: dict[tuple[str, int, str], _GroupAcc],
+    dim_name: str,
+    row: Any,
+) -> bool:
+    ret = _finite_number(getattr(row, "ret_pct", None))
+    if ret is None:
+        return False
+
+    key = (dim_name, int(row.pid), str(row.regime_label))
+    group = groups.get(key)
+    if group is None:
+        group = _GroupAcc(pattern_id=int(row.pid), regime_label=str(row.regime_label))
+        groups[key] = group
+    group.rets_pct.append(ret)
+
+    pnl = _finite_number(getattr(row, "pnl", None))
+    if pnl is not None:
+        group.pnls.append(pnl)
+    hold_days = _finite_number(getattr(row, "hold_days", None))
+    if hold_days is not None and hold_days >= 0:
+        group.holds_days.append(hold_days)
+    return True
+
+
+def _add_live_regime_row(
+    groups: dict[tuple[str, int, str], _GroupAcc],
+    dim_name: str,
+    row: Any,
+) -> bool:
+    return _add_regime_return_row(groups, dim_name, row)
+
+
+def _add_backtest_regime_row(
+    groups: dict[tuple[str, int, str], _GroupAcc],
+    dim_name: str,
+    row: Any,
+) -> bool:
+    return _add_regime_return_row(groups, dim_name, row)
+
+
 def build_ledger(
     sess: Session,
     *,
@@ -281,34 +338,9 @@ def build_ledger(
     trades_seen = 0
     for dim_name, dim_sql in REGIME_DIMENSIONS.items():
         rows = sess.execute(text(dim_sql), {"wd": int(window_days)}).fetchall()
-        if dim_name == "ticker_regime":
-            trades_seen = len(rows)  # all dims hit the same trade set
         for r in rows:
-            key = (dim_name, int(r.pid), str(r.regime_label))
-            g = groups.get(key)
-            if g is None:
-                g = _GroupAcc(pattern_id=int(r.pid), regime_label=str(r.regime_label))
-                groups[key] = g
-            try:
-                ret = float(r.ret_pct) if r.ret_pct is not None else 0.0
-            except Exception:
-                ret = 0.0
-            if math.isfinite(ret):
-                g.rets_pct.append(ret)
-            if r.pnl is not None:
-                try:
-                    pnl = float(r.pnl)
-                    if math.isfinite(pnl):
-                        g.pnls.append(pnl)
-                except Exception:
-                    pass
-            if r.hold_days is not None:
-                try:
-                    hd = float(r.hold_days)
-                    if math.isfinite(hd) and hd >= 0:
-                        g.holds_days.append(hd)
-                except Exception:
-                    pass
+            if _add_live_regime_row(groups, dim_name, r) and dim_name == "ticker_regime":
+                trades_seen += 1  # all dims hit the same valid trade set
 
     written = 0
     for (dim_name, pid, regime_label), grp in groups.items():
@@ -388,8 +420,8 @@ BACKTEST_REGIME_DIMENSIONS: dict[str, str] = {
         """
         SELECT pt.scan_pattern_id AS pid,
                COALESCE(r.ticker_regime_label, 'unknown') AS regime_label,
-               COALESCE(pt.outcome_return_pct, 0.0) AS pnl,
-               COALESCE(pt.outcome_return_pct, 0.0) AS ret_pct,
+               pt.outcome_return_pct AS pnl,
+               pt.outcome_return_pct AS ret_pct,
                COALESCE(pt.hold_bars, 0)::float AS hold_days
         FROM trading_pattern_trades pt
         LEFT JOIN LATERAL (
@@ -408,8 +440,8 @@ BACKTEST_REGIME_DIMENSIONS: dict[str, str] = {
         """
         SELECT pt.scan_pattern_id AS pid,
                COALESCE(b.breadth_label, 'unknown') AS regime_label,
-               COALESCE(pt.outcome_return_pct, 0.0) AS pnl,
-               COALESCE(pt.outcome_return_pct, 0.0) AS ret_pct,
+               pt.outcome_return_pct AS pnl,
+               pt.outcome_return_pct AS ret_pct,
                COALESCE(pt.hold_bars, 0)::float AS hold_days
         FROM trading_pattern_trades pt
         LEFT JOIN LATERAL (
@@ -427,8 +459,8 @@ BACKTEST_REGIME_DIMENSIONS: dict[str, str] = {
         """
         SELECT pt.scan_pattern_id AS pid,
                COALESCE(c.cross_asset_label, 'unknown') AS regime_label,
-               COALESCE(pt.outcome_return_pct, 0.0) AS pnl,
-               COALESCE(pt.outcome_return_pct, 0.0) AS ret_pct,
+               pt.outcome_return_pct AS pnl,
+               pt.outcome_return_pct AS ret_pct,
                COALESCE(pt.hold_bars, 0)::float AS hold_days
         FROM trading_pattern_trades pt
         LEFT JOIN LATERAL (
@@ -446,8 +478,8 @@ BACKTEST_REGIME_DIMENSIONS: dict[str, str] = {
         """
         SELECT pt.scan_pattern_id AS pid,
                COALESCE(v.vol_regime_label, 'unknown') AS regime_label,
-               COALESCE(pt.outcome_return_pct, 0.0) AS pnl,
-               COALESCE(pt.outcome_return_pct, 0.0) AS ret_pct,
+               pt.outcome_return_pct AS pnl,
+               pt.outcome_return_pct AS ret_pct,
                COALESCE(pt.hold_bars, 0)::float AS hold_days
         FROM trading_pattern_trades pt
         LEFT JOIN LATERAL (
@@ -485,26 +517,9 @@ def build_ledger_from_backtests(
     trades_seen = 0
     for dim_name, dim_sql in BACKTEST_REGIME_DIMENSIONS.items():
         rows = sess.execute(text(dim_sql), {"wd": int(window_days)}).fetchall()
-        if dim_name == "ticker_regime":
-            trades_seen = len(rows)
         for r in rows:
-            key = (dim_name, int(r.pid), str(r.regime_label))
-            g = groups.get(key)
-            if g is None:
-                g = _GroupAcc(pattern_id=int(r.pid), regime_label=str(r.regime_label))
-                groups[key] = g
-            try:
-                ret = float(r.ret_pct) if r.ret_pct is not None else 0.0
-            except Exception:
-                ret = 0.0
-            if math.isfinite(ret):
-                g.rets_pct.append(ret)
-            try:
-                pnl = float(r.pnl) if r.pnl is not None else 0.0
-            except Exception:
-                pnl = 0.0
-            if math.isfinite(pnl):
-                g.pnls.append(pnl)
+            if _add_backtest_regime_row(groups, dim_name, r) and dim_name == "ticker_regime":
+                trades_seen += 1
 
     written = 0
     for (dim_name, pid, regime_label), grp in groups.items():

@@ -161,6 +161,7 @@ def test_live_vs_research_reports_contract_aware_option_return_after_tca() -> No
     assert row["live_avg_return_pct"] == pytest.approx(16.0)
     assert row["live_avg_tca_cost_pct"] == pytest.approx(0.30)
     assert row["live_avg_net_return_pct"] == pytest.approx(15.70)
+    assert row["live_pnl_sample_n"] == 1
     assert row["live_avg_pnl"] == pytest.approx(40.0)
 
 
@@ -211,8 +212,9 @@ def test_live_vs_research_live_win_rate_uses_confirmed_return_when_pnl_missing()
     assert row["live_avg_return_pct"] == pytest.approx(16.0)
     assert row["live_avg_tca_cost_pct"] == pytest.approx(0.30)
     assert row["live_avg_net_return_pct"] == pytest.approx(15.70)
-    assert row["live_total_pnl"] == pytest.approx(0.0)
-    assert row["live_avg_pnl"] == pytest.approx(0.0)
+    assert row["live_pnl_sample_n"] == 0
+    assert row["live_total_pnl"] is None
+    assert row["live_avg_pnl"] is None
 
 
 def test_post_trade_review_uses_contract_aware_outcomes_when_pnl_missing() -> None:
@@ -299,14 +301,17 @@ def test_post_trade_review_uses_contract_aware_outcomes_when_pnl_missing() -> No
     assert review["losses"] == 1
     assert review["live_win_rate_pct"] == pytest.approx(66.7)
     assert review["max_consecutive_losses"] == 1
-    assert review["total_pnl"] == pytest.approx(0.0)
-    assert review["avg_pnl"] == pytest.approx(0.0)
+    assert review["pnl_sample_n"] == 0
+    assert review["total_pnl"] is None
+    assert review["avg_pnl"] is None
 
     outperformer = review["outperforming_patterns"][0]
     assert outperformer["scan_pattern_id"] == 42
     assert outperformer["live_trades"] == 3
     assert outperformer["live_win_sample_n"] == 3
     assert outperformer["live_win_rate_pct"] == pytest.approx(66.7)
+    assert outperformer["live_pnl_sample_n"] == 0
+    assert outperformer["live_total_pnl"] is None
     assert outperformer["research_win_rate_pct"] == pytest.approx(55.0)
     assert outperformer["delta_pct"] == pytest.approx(11.7)
     assert review["underperforming_patterns"] == []

@@ -132,7 +132,11 @@ def live_vs_research_by_pattern(
         tlist = by_pid.get(pid, [])
         ptlist = paper_by_pid.get(pid, [])
         pat = patterns_by_id.get(pid)
-        pnls = [float(t.pnl or 0) for t in tlist]
+        pnls = [
+            pnl
+            for pnl in (_finite_float(getattr(t, "pnl", None)) for t in tlist)
+            if pnl is not None
+        ]
         live_directional_outcomes = [
             outcome
             for outcome in (_trade_directional_outcome(t) for t in tlist)
@@ -212,8 +216,11 @@ def live_vs_research_by_pattern(
                     if live_directional_outcomes
                     else None
                 ),
-                "live_total_pnl": round(sum(pnls), 2),
-                "live_avg_pnl": round(sum(pnls) / n, 2) if n else 0.0,
+                "live_pnl_sample_n": len(pnls),
+                "live_total_pnl": round(sum(pnls), 2) if pnls else None,
+                "live_avg_pnl": round(sum(pnls) / len(pnls), 2)
+                if pnls
+                else None,
                 "live_return_sample_n": len(live_returns),
                 "live_avg_return_pct": (
                     round(sum(live_returns) / len(live_returns), 3)
@@ -470,17 +477,22 @@ def post_trade_review(
             "feedback_signals": [],
         }
 
-    pnls = [float(t.pnl or 0) for t in closed]
+    pnls = [
+        pnl
+        for pnl in (_finite_float(getattr(t, "pnl", None)) for t in closed)
+        if pnl is not None
+    ]
     directional_outcomes = [
         outcome
         for outcome in (_trade_directional_outcome(t) for t in closed)
         if outcome is not None
     ]
     wins = sum(1 for outcome in directional_outcomes if outcome > 0)
-    n = len(pnls)
+    n = len(closed)
     directional_n = len(directional_outcomes)
-    total_pnl = round(sum(pnls), 2)
-    avg_pnl = round(sum(pnls) / n, 2)
+    pnl_n = len(pnls)
+    total_pnl = round(sum(pnls), 2) if pnls else None
+    avg_pnl = round(sum(pnls) / pnl_n, 2) if pnls else None
     live_win_rate = round(wins / directional_n * 100, 1) if directional_n else None
 
     # --- Consecutive losses ---
@@ -507,7 +519,7 @@ def post_trade_review(
                 "entry_slippage_bps": round(entry_slip, 1),
                 "exit_slippage_bps": round(exit_slip, 1),
                 "total_slippage_bps": round(total_slip, 1),
-                "pnl": float(t.pnl or 0),
+                "pnl": _finite_float(getattr(t, "pnl", None)),
             })
     high_slip_trades.sort(key=lambda x: x["total_slippage_bps"], reverse=True)
 
@@ -527,14 +539,18 @@ def post_trade_review(
         if pid <= 0:
             continue
         pat = patterns_by_id.get(pid)
-        trade_pnls = [float(t.pnl or 0) for t in trades]
+        trade_pnls = [
+            pnl
+            for pnl in (_finite_float(getattr(t, "pnl", None)) for t in trades)
+            if pnl is not None
+        ]
         trade_directional_outcomes = [
             outcome
             for outcome in (_trade_directional_outcome(t) for t in trades)
             if outcome is not None
         ]
         t_wins = sum(1 for outcome in trade_directional_outcomes if outcome > 0)
-        t_n = len(trade_pnls)
+        t_n = len(trades)
         t_directional_n = len(trade_directional_outcomes)
         live_wr = round(t_wins / t_directional_n * 100, 1) if t_directional_n else None
 
@@ -558,7 +574,8 @@ def post_trade_review(
             "live_win_rate_pct": live_wr,
             "research_win_rate_pct": research_wr,
             "delta_pct": delta,
-            "live_total_pnl": round(sum(trade_pnls), 2),
+            "live_pnl_sample_n": len(trade_pnls),
+            "live_total_pnl": round(sum(trade_pnls), 2) if trade_pnls else None,
         }
 
         if delta is not None and t_directional_n >= 3:
@@ -626,6 +643,7 @@ def post_trade_review(
             "wins": wins,
             "losses": directional_n - wins,
             "live_win_rate_pct": live_win_rate,
+            "pnl_sample_n": pnl_n,
             "total_pnl": total_pnl,
             "avg_pnl": avg_pnl,
             "max_consecutive_losses": max_consec_losses,
