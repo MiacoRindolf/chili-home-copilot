@@ -60,22 +60,22 @@ commit stays a pure, side-effect-free addition.
 
 ---
 
-## P3 — MCP client (extensibility)
+## P3 — MCP client — ✅ SHIPPED 2026-06-01
 
-**Gap:** CHILI is not an MCP client (confirmed absent). It cannot consume
-external MCP servers (e.g. a broker-docs server, an SEC-filings server).
+**Shipped:** new `app/mcp_client.py` — config-driven, CHILI-native external MCP
+client (stdio + sse transports). **Read-only by policy with two independent
+gates:** a per-server allowlist AND a hard in-code denylist of dangerous
+tool-name patterns (order/trade/buy/sell/withdraw/transfer/...) that blocks a
+tool even if allowlisted — applied at discovery AND re-applied at call time.
+DORMANT by default (`mcp_enabled=False`, `mcp_servers_json=""`); guarded SDK
+import. `mcp>=1.0` declared + installed. 50 tests in `tests/test_mcp_client.py`,
+heavy on the safety gate. See
+`docs/STRATEGY/CC_REPORTS/2026-06-01_f-odysseus-salvage-mcp-client.md`.
 
-**Task:** salvage odysseus `src/mcp_manager.py` patterns to add a minimal MCP
-client: connect to configured stdio/HTTP MCP servers, list tools, dispatch
-calls. Keep it read-only/allowlisted initially; do **not** expose any tool that
-can place orders.
-
-**Why it matters:** clean extension point for future data sources without
-bloating the core. Strategic, not urgent.
-
-**Blast radius:** medium — new surface area; must be allowlisted and kept off any
-order-placement authority. Coupled in odysseus (≈40% extractable per assessment)
-— treat as reference, build CHILI-native.
+**Not yet wired into the agent/LLM path** — `mcp_client.list_tools()` /
+`call_tool()` are ready for a future consumer. Lifecycle (connect_all on startup,
+disconnect_all on shutdown) intentionally not auto-wired so it stays inert until
+an operator both flips `mcp_enabled` and adds servers.
 
 ---
 

@@ -1613,6 +1613,16 @@ class Settings(BaseSettings):
     search_fetch_sources: bool = False
     search_max_fetch: int = 3                  # max pages fetched per research query
 
+    # External MCP (Model Context Protocol) client (app/mcp_client.py). Lets the
+    # brain consume EXTERNAL MCP servers (e.g. SEC filings, news). DORMANT by
+    # default. Read-only by policy: a hard in-code denylist blocks any
+    # order/trade/withdraw-style tool even if allowlisted (see mcp_client.py).
+    mcp_enabled: bool = False
+    # JSON array of server configs, e.g.:
+    # [{"id":"sec","name":"SEC EDGAR","transport":"sse","url":"https://...",
+    #   "allowed_tools":["search","get_filing"]}]
+    mcp_servers_json: str = ""
+
     # Reasoning Brain
     reasoning_interval_hours: int = 6     # how often to run reasoning cycle
     reasoning_max_web_searches: int = 10  # cap per cycle to avoid abuse
