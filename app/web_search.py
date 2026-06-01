@@ -192,13 +192,21 @@ def research_search(query: str, max_results: int = _MAX_RESULTS,
         max_fetch = max(0, int(getattr(settings, "search_max_fetch", 3)))
     except (TypeError, ValueError):
         max_fetch = 3
-    for r in results[:max_fetch]:
-        href = r.get("href", "")
-        if not href:
-            continue
-        fetched = fetch_source(href, max_chars=content_chars, trace_id=trace_id)
-        if fetched.get("success") and fetched.get("content"):
-            r["content"] = fetched["content"]
+
+    targets = [r for r in results[:max_fetch] if r.get("href")]
+    if not targets:
+        return results
+
+    # Fetch the top pages concurrently (one bounded thread pool) rather than
+    # sequentially — same SSRF-safe fetcher, lower wall-clock for the research
+    # cycle. Map the fetched content back onto each result by URL.
+    fetched = fetch_sources([r["href"] for r in targets],
+                            max_chars=content_chars, trace_id=trace_id)
+    by_url = {f.get("url"): f for f in fetched}
+    for r in targets:
+        f = by_url.get(r["href"])
+        if f and f.get("success") and f.get("content"):
+            r["content"] = f["content"]
     return results
 
 

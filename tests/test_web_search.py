@@ -124,38 +124,45 @@ class TestResearchSearch:
         return [{"title": chr(65 + i), "href": f"https://{chr(97 + i)}.com",
                  "body": f"snippet {chr(97 + i)}"} for i in range(n)]
 
-    @patch("app.web_search.fetch_source")
+    @patch("app.web_search.fetch_sources")
     @patch("app.web_search.search")
-    def test_flag_off_no_fetch(self, mock_search, mock_fetch):
+    def test_flag_off_no_fetch(self, mock_search, mock_fetch_sources):
         from app import web_search as ws
         expected = self._fresh_results()
         mock_search.return_value = self._fresh_results()
         with patch.object(ws.settings, "search_fetch_sources", False, create=True):
             out = ws.research_search("topic")
         assert out == expected
-        mock_fetch.assert_not_called()
+        mock_fetch_sources.assert_not_called()
 
-    @patch("app.web_search.fetch_source")
+    @patch("app.web_search.fetch_sources")
     @patch("app.web_search.search")
-    def test_flag_on_enriches_up_to_cap(self, mock_search, mock_fetch):
+    def test_flag_on_enriches_up_to_cap_concurrently(self, mock_search, mock_fetch_sources):
         from app import web_search as ws
         mock_search.return_value = self._fresh_results()
-        mock_fetch.return_value = {"success": True, "content": "FULL ARTICLE TEXT"}
+        # research_search now fetches the top results in ONE concurrent call.
+        mock_fetch_sources.return_value = [
+            {"url": "https://a.com", "success": True, "content": "FULL ARTICLE TEXT"},
+            {"url": "https://b.com", "success": True, "content": "FULL ARTICLE TEXT"},
+        ]
         with patch.object(ws.settings, "search_fetch_sources", True, create=True), \
              patch.object(ws.settings, "search_max_fetch", 2, create=True):
             out = ws.research_search("topic")
-        # Only the first 2 (the cap) get fetched + a content field.
-        assert mock_fetch.call_count == 2
+        # One concurrent fetch call, with exactly the capped URLs.
+        mock_fetch_sources.assert_called_once()
+        assert mock_fetch_sources.call_args[0][0] == ["https://a.com", "https://b.com"]
         assert out[0]["content"] == "FULL ARTICLE TEXT"
         assert out[1]["content"] == "FULL ARTICLE TEXT"
         assert "content" not in out[2]
 
-    @patch("app.web_search.fetch_source")
+    @patch("app.web_search.fetch_sources")
     @patch("app.web_search.search")
-    def test_failed_fetch_leaves_result_unenriched(self, mock_search, mock_fetch):
+    def test_failed_fetch_leaves_result_unenriched(self, mock_search, mock_fetch_sources):
         from app import web_search as ws
         mock_search.return_value = self._fresh_results(1)
-        mock_fetch.return_value = {"success": False, "content": "", "error": "blocked"}
+        mock_fetch_sources.return_value = [
+            {"url": "https://a.com", "success": False, "content": "", "error": "blocked"},
+        ]
         with patch.object(ws.settings, "search_fetch_sources", True, create=True), \
              patch.object(ws.settings, "search_max_fetch", 3, create=True):
             out = ws.research_search("topic")
