@@ -39,13 +39,41 @@ def _settings_get(name: str, default: Any) -> Any:
 
 
 def _finite_float(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
     try:
-        if value is None:
-            return None
         out = float(value)
     except (TypeError, ValueError):
         return None
     return out if math.isfinite(out) else None
+
+
+def _win_rate_or_none(value: Any) -> float | None:
+    out = _finite_float(value)
+    if out is None or out < 0.0 or out > 1.0:
+        return None
+    return out
+
+
+def _positive_int_or_default(value: Any, default: int) -> int:
+    default_int = int(default)
+    if default_int <= 0:
+        default_int = 1
+    out = _finite_float(value)
+    if out is None or out <= 0:
+        return default_int
+    out_int = int(out)
+    return out_int if out_int > 0 else default_int
+
+
+def _probability_or_default(value: Any, default: float) -> float:
+    out = _win_rate_or_none(value)
+    return float(default) if out is None else out
+
+
+def _finite_float_or_default(value: Any, default: float) -> float:
+    out = _finite_float(value)
+    return float(default) if out is None else out
 
 
 def _return_evidence_record(
@@ -65,8 +93,29 @@ def _return_evidence_record(
     }
 
 
+def _half_life_evidence_record(
+    *,
+    exit_date: Any,
+    return_pct: Any,
+) -> dict[str, Any] | None:
+    ret = _finite_float(return_pct)
+    if ret is None or not isinstance(exit_date, datetime):
+        return None
+    try:
+        exit_ts = exit_date.timestamp()
+    except Exception:
+        return None
+    if not math.isfinite(exit_ts):
+        return None
+    return {"exit_ts": exit_ts, "return_pct": ret}
+
+
 def _mean_known_pnl(evidence: list[dict[str, Any]]) -> float | None:
-    values = [float(e["pnl"]) for e in evidence if e.get("pnl") is not None]
+    values = [
+        pnl
+        for pnl in (_finite_float(e.get("pnl")) for e in evidence)
+        if pnl is not None
+    ]
     if not values:
         return None
     return sum(values) / len(values)
@@ -82,16 +131,18 @@ def _payoff_ratio_protects_from_wr_decay(pattern: Any) -> bool:
     below the configured return floor, the pattern is actually losing and
     should still be allowed to decay.
     """
-    floor = float(_settings_get("chili_pattern_demote_payoff_ratio_floor", 1.5))
-    min_n = int(_settings_get("chili_pattern_demote_payoff_ratio_min_n", 5))
-    payoff_ratio = getattr(pattern, "payoff_ratio", None)
-    payoff_n = getattr(pattern, "payoff_ratio_n", None)
+    floor = _finite_float(_settings_get("chili_pattern_demote_payoff_ratio_floor", 1.5))
+    if floor is None:
+        floor = 1.5
+    min_n = _positive_int_or_default(
+        _settings_get("chili_pattern_demote_payoff_ratio_min_n", 5),
+        5,
+    )
+    payoff_ratio = _finite_float(getattr(pattern, "payoff_ratio", None))
+    payoff_n = _finite_float(getattr(pattern, "payoff_ratio_n", None))
     if payoff_ratio is None or payoff_n is None:
         return False
-    try:
-        return int(payoff_n) >= min_n and float(payoff_ratio) >= floor
-    except (TypeError, ValueError):
-        return False
+    return payoff_n >= min_n and payoff_ratio >= floor
 
 
 def _should_skip_decay_for_payoff(
@@ -135,6 +186,9 @@ def check_alpha_decay(
             return_floor = adj.get("return_floor", return_floor)
         except Exception:
             pass
+    window_days = _positive_int_or_default(window_days, DEFAULT_ROLLING_WINDOW_DAYS)
+    wr_gap = _probability_or_default(wr_gap, DECAY_WR_GAP)
+    return_floor = _finite_float_or_default(return_floor, DECAY_RETURN_FLOOR_PCT)
 
     cutoff = datetime.utcnow() - timedelta(days=window_days)
 
@@ -142,7 +196,7 @@ def check_alpha_decay(
         ScanPattern.active.is_(True),
         ScanPattern.lifecycle_stage.in_(("live", "promoted")),
     )
-    if user_id:
+    if user_id is not None:
         pattern_q = pattern_q.filter(ScanPattern.user_id == user_id)
     live_patterns = pattern_q.all()
     if not live_patterns:
@@ -155,7 +209,7 @@ def check_alpha_decay(
         Trade.scan_pattern_id.in_(sp_ids),
         Trade.exit_date >= cutoff,
     )
-    if user_id:
+    if user_id is not None:
         trade_q = trade_q.filter(Trade.user_id == user_id)
     recent_trades = trade_q.all()
 
@@ -164,7 +218,7 @@ def check_alpha_decay(
         PaperTrade.scan_pattern_id.in_(sp_ids),
         PaperTrade.exit_date >= cutoff,
     )
-    if user_id:
+    if user_id is not None:
         paper_q = paper_q.filter(PaperTrade.user_id == user_id)
     recent_paper = paper_q.all()
 
@@ -210,16 +264,14 @@ def check_alpha_decay(
         # unknown, abstain from the decay check for this pattern -- never
         # synthesize a coin-flip.
         from .dynamic_priors import population_win_rate
-        if pat.oos_win_rate is not None:
-            oos_wr = float(pat.oos_win_rate)
-        elif pat.win_rate is not None:
-            oos_wr = float(pat.win_rate)
-        else:
-            _pop = population_win_rate(db)
-            if _pop is None:
-                # No data anywhere -- skip this pattern's decay check.
-                continue
-            oos_wr = _pop
+        oos_wr = _win_rate_or_none(getattr(pat, "oos_win_rate", None))
+        if oos_wr is None:
+            oos_wr = _win_rate_or_none(getattr(pat, "win_rate", None))
+        if oos_wr is None:
+            oos_wr = _win_rate_or_none(population_win_rate(db, user_id=user_id))
+        if oos_wr is None:
+            # No valid benchmark anywhere -- skip this pattern's decay check.
+            continue
 
         is_decayed = False
         reason_parts = []
@@ -327,7 +379,7 @@ def estimate_half_life(
             Trade.exit_date.isnot(None),
         )
     )
-    if user_id:
+    if user_id is not None:
         trade_q = trade_q.filter(Trade.user_id == user_id)
     live_trades = trade_q.order_by(Trade.exit_date.asc()).all()
 
@@ -339,7 +391,7 @@ def estimate_half_life(
             PaperTrade.exit_date.isnot(None),
         )
     )
-    if user_id:
+    if user_id is not None:
         paper_q = paper_q.filter(PaperTrade.user_id == user_id)
     paper_trades = paper_q.order_by(PaperTrade.exit_date.asc()).all()
 
@@ -347,15 +399,23 @@ def estimate_half_life(
     all_evidence = []
     for t in live_trades:
         pnl_pct = trade_return_pct(t)
-        if pnl_pct is None:
+        rec = _half_life_evidence_record(
+            exit_date=getattr(t, "exit_date", None),
+            return_pct=pnl_pct,
+        )
+        if rec is None:
             continue
-        all_evidence.append({"exit_date": t.exit_date, "return_pct": pnl_pct})
+        all_evidence.append(rec)
     for pt in paper_trades:
         pnl_pct = paper_trade_return_pct(pt)
-        if pnl_pct is None:
+        rec = _half_life_evidence_record(
+            exit_date=getattr(pt, "exit_date", None),
+            return_pct=pnl_pct,
+        )
+        if rec is None:
             continue
-        all_evidence.append({"exit_date": pt.exit_date, "return_pct": pnl_pct})
-    all_evidence.sort(key=lambda x: x["exit_date"])
+        all_evidence.append(rec)
+    all_evidence.sort(key=lambda x: x["exit_ts"])
     trades = all_evidence
 
     if len(trades) < 10:
@@ -363,13 +423,13 @@ def estimate_half_life(
 
     window = 5
     wr_points: list[tuple[float, float]] = []
-    first_date = trades[0]["exit_date"]
+    first_ts = trades[0]["exit_ts"]
 
     for i in range(window, len(trades)):
         chunk = trades[i - window:i]
         wins = sum(1 for t in chunk if t["return_pct"] > 0.0)
         wr = wins / window
-        days_elapsed = (chunk[-1]["exit_date"] - first_date).total_seconds() / 86400
+        days_elapsed = (chunk[-1]["exit_ts"] - first_ts) / 86400
         if wr > 0:
             wr_points.append((days_elapsed, wr))
 

@@ -30,6 +30,7 @@ on the autotrader hot path. Cache is per-process (no DB write).
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from typing import Any
@@ -73,15 +74,75 @@ def _settings_get(name: str, default: Any) -> Any:
         return default
 
 
-def population_win_rate(db: Session, *, lookback_days: int = 90) -> float | None:
+def _finite_float(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except Exception:
+        return None
+    return out if math.isfinite(out) else None
+
+
+def _nonnegative_int_or_none(value: Any) -> int | None:
+    out = _finite_float(value)
+    if out is None or out < 0:
+        return None
+    out_int = int(out)
+    if out != out_int:
+        return None
+    return out_int
+
+
+def _positive_int_or_default(value: Any, default: int) -> int:
+    default_int = int(default)
+    if default_int <= 0:
+        default_int = 1
+    out = _finite_float(value)
+    if out is None or out <= 0:
+        return default_int
+    out_int = int(out)
+    return out_int if out_int > 0 else default_int
+
+
+def _user_id_or_none(value: Any) -> int | None:
+    if value is None:
+        return None
+    out = _nonnegative_int_or_none(value)
+    return out
+
+
+def _prior_strength_or_none(value: Any) -> int | None:
+    raw = _settings_get("chili_realized_ev_min_trades", 5) if value is None else value
+    parsed = _nonnegative_int_or_none(raw)
+    if parsed is not None:
+        return parsed
+    return 5 if value is None else None
+
+
+def population_win_rate(
+    db: Session,
+    *,
+    lookback_days: int = 90,
+    user_id: int | None = None,
+) -> float | None:
     """Population realized win rate across all closed trades in the last
-    ``lookback_days``. Returns ``None`` if no data.
+    ``lookback_days``. When ``user_id`` is provided, restricts the prior
+    to that user's closed trades. Returns ``None`` if no data.
 
     Used as the *prior mean* for Bayesian shrinkage and as the neutral
     value to substitute for None win-rates at scoring sites. Never
     falls back to 0.5.
     """
-    cache_key = f"pop_wr:{lookback_days}"
+    lookback = _positive_int_or_default(lookback_days, 90)
+    scoped_user_id = _user_id_or_none(user_id)
+    if user_id is not None and scoped_user_id is None:
+        return None
+    cache_key = (
+        f"pop_wr:{lookback}:user:{scoped_user_id}"
+        if scoped_user_id is not None
+        else f"pop_wr:{lookback}"
+    )
     c = _cache_get(cache_key)
     if c is not None:
         return c
@@ -99,6 +160,7 @@ def population_win_rate(db: Session, *, lookback_days: int = 90) -> float | None
                       AND quantity > 0
                       AND exit_date IS NOT NULL
                       AND exit_date > NOW() - make_interval(days => :ld)
+                      AND (:user_id IS NULL OR user_id = :user_id)
                 )
                 SELECT
                   COUNT(realized_return_frac) AS n,
@@ -106,23 +168,41 @@ def population_win_rate(db: Session, *, lookback_days: int = 90) -> float | None
                 FROM realized
                 WHERE realized_return_frac IS NOT NULL
             """),
-            {"ld": int(lookback_days)},
+            {"ld": lookback, "user_id": scoped_user_id},
         ).fetchone()
     except Exception:
         logger.debug("[dynamic_priors] population_win_rate query failed", exc_info=True)
         return None
-    if row is None or not row.n or row.wr is None:
+    if row is None:
         return None
-    val = float(row.wr)
+    n = _nonnegative_int_or_none(getattr(row, "n", None))
+    val = _finite_float(getattr(row, "wr", None))
+    if n is None or n <= 0 or val is None or val < 0.0 or val > 1.0:
+        return None
     _cache_set(cache_key, val)
     return val
 
 
-def population_avg_return_pct(db: Session, *, lookback_days: int = 90) -> float | None:
+def population_avg_return_pct(
+    db: Session,
+    *,
+    lookback_days: int = 90,
+    user_id: int | None = None,
+) -> float | None:
     """Population realized average return (in percent) across all closed
-    trades in the last ``lookback_days``. Returns ``None`` if no data.
+    trades in the last ``lookback_days``. When ``user_id`` is provided,
+    restricts the prior to that user's closed trades. Returns ``None`` if
+    no data.
     """
-    cache_key = f"pop_ar:{lookback_days}"
+    lookback = _positive_int_or_default(lookback_days, 90)
+    scoped_user_id = _user_id_or_none(user_id)
+    if user_id is not None and scoped_user_id is None:
+        return None
+    cache_key = (
+        f"pop_ar:{lookback}:user:{scoped_user_id}"
+        if scoped_user_id is not None
+        else f"pop_ar:{lookback}"
+    )
     c = _cache_get(cache_key)
     if c is not None:
         return c
@@ -140,6 +220,7 @@ def population_avg_return_pct(db: Session, *, lookback_days: int = 90) -> float 
                       AND quantity > 0
                       AND exit_date IS NOT NULL
                       AND exit_date > NOW() - make_interval(days => :ld)
+                      AND (:user_id IS NULL OR user_id = :user_id)
                 )
                 SELECT
                   COUNT(realized_return_frac) AS n,
@@ -147,14 +228,17 @@ def population_avg_return_pct(db: Session, *, lookback_days: int = 90) -> float 
                 FROM realized
                 WHERE realized_return_frac IS NOT NULL
             """),
-            {"ld": int(lookback_days)},
+            {"ld": lookback, "user_id": scoped_user_id},
         ).fetchone()
     except Exception:
         logger.debug("[dynamic_priors] population_avg_return_pct query failed", exc_info=True)
         return None
-    if row is None or not row.n or row.ar is None:
+    if row is None:
         return None
-    val = float(row.ar)
+    n = _nonnegative_int_or_none(getattr(row, "n", None))
+    val = _finite_float(getattr(row, "ar", None))
+    if n is None or n <= 0 or val is None:
+        return None
     _cache_set(cache_key, val)
     return val
 
@@ -165,6 +249,7 @@ def bayesian_pattern_win_rate(
     pattern_wins: int | None,
     pattern_n: int | None,
     prior_strength: int | None = None,
+    user_id: int | None = None,
 ) -> float | None:
     """Beta-Bernoulli shrinkage of a pattern's realized win rate toward the
     population prior.
@@ -185,22 +270,26 @@ def bayesian_pattern_win_rate(
     population prior. NOT a magic constant -- it's the same setting the
     realized-EV gate uses.
     """
-    pop_wr = population_win_rate(db)
+    pop_wr = _finite_float(population_win_rate(db, user_id=user_id))
+    if pop_wr is not None and (pop_wr < 0.0 or pop_wr > 1.0):
+        return None
     if pop_wr is None:
         return None
-    if prior_strength is None:
-        prior_strength = int(_settings_get("chili_realized_ev_min_trades", 5))
-    try:
-        n = max(0, int(pattern_n or 0))
-        w = max(0, int(pattern_wins or 0))
-    except (TypeError, ValueError):
+    prior_n = _prior_strength_or_none(prior_strength)
+    if prior_n is None:
+        return None
+    n = 0 if pattern_n is None else _nonnegative_int_or_none(pattern_n)
+    w = 0 if pattern_wins is None else _nonnegative_int_or_none(pattern_wins)
+    if n is None or w is None:
         return None
     if w > n:
         # nonsensical input
         return None
-    alpha = float(prior_strength) * pop_wr
-    beta = float(prior_strength) * (1.0 - pop_wr)
-    return (w + alpha) / (n + alpha + beta)
+    denom = n + prior_n
+    if denom <= 0:
+        return None
+    alpha = float(prior_n) * pop_wr
+    return (w + alpha) / denom
 
 
 def bayesian_pattern_confidence(
@@ -215,12 +304,12 @@ def bayesian_pattern_confidence(
 
     Returns ``None`` for non-numeric input.
     """
-    if prior_strength is None:
-        prior_strength = int(_settings_get("chili_realized_ev_min_trades", 5))
-    try:
-        n = max(0, int(pattern_n or 0))
-    except (TypeError, ValueError):
+    prior_n = _prior_strength_or_none(prior_strength)
+    if prior_n is None:
         return None
-    if n == 0 and prior_strength == 0:
+    n = 0 if pattern_n is None else _nonnegative_int_or_none(pattern_n)
+    if n is None:
         return None
-    return float(n) / float(n + prior_strength)
+    if n == 0 and prior_n == 0:
+        return None
+    return float(n) / float(n + prior_n)

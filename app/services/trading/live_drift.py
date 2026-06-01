@@ -55,6 +55,64 @@ def _safe_float(value: Any) -> float | None:
     return out if isfinite(out) else None
 
 
+def _confidence_or_none(value: Any) -> float | None:
+    out = _safe_float(value)
+    if out is None or out < 0.0 or out > 1.0:
+        return None
+    return out
+
+
+def _positive_int_or_default(value: Any, default: int) -> int:
+    out = _safe_float(value)
+    if out is None or out <= 0.0 or out != int(out):
+        return int(default)
+    return int(out)
+
+
+def _positive_float_or_default(value: Any, default: float) -> float:
+    out = _safe_float(value)
+    if out is None or out <= 0.0:
+        return float(default)
+    return out
+
+
+def _probability_or_default(value: Any, default: float) -> float:
+    out = _safe_float(value)
+    if out is None or out <= 0.0 or out >= 1.0:
+        return float(default)
+    return out
+
+
+def _probability_pair_or_default(
+    low_value: Any,
+    high_value: Any,
+    *,
+    low_default: float,
+    high_default: float,
+) -> tuple[float, float]:
+    low = _probability_or_default(low_value, low_default)
+    high = _probability_or_default(high_value, high_default)
+    if low >= high:
+        return float(low_default), float(high_default)
+    return low, high
+
+
+def _ordered_positive_thresholds(
+    warn_value: Any,
+    crit_value: Any,
+    *,
+    warn_default: float,
+    crit_default: float,
+    critical_above_warning: bool,
+) -> tuple[float, float]:
+    warn = _positive_float_or_default(warn_value, warn_default)
+    crit = _positive_float_or_default(crit_value, crit_default)
+    invalid = crit < warn if critical_above_warning else crit > warn
+    if invalid:
+        return float(warn_default), float(crit_default)
+    return warn, crit
+
+
 def _outcome_pct_from_trade(
     trade: Any, *, source: str | None = None
 ) -> float | None:
@@ -124,13 +182,7 @@ def binomial_two_sided_p_value(n: int, k: int, p0: float) -> float | None:
 def _carry_confidence_reference(prev: dict[str, Any] | None) -> float | None:
     if not prev or not isinstance(prev, dict):
         return None
-    v = prev.get("confidence_reference")
-    if v is None:
-        return None
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return None
+    return _confidence_or_none(prev.get("confidence_reference"))
 
 
 def build_skip_contract(
@@ -393,14 +445,23 @@ def compute_live_drift_contract(
     prev_live_drift: dict[str, Any] | None,
     settings: Any,
 ) -> dict[str, Any]:
-    window_days = int(getattr(settings, "brain_live_drift_window_days", 120) or 120)
-    live_min = int(getattr(settings, "brain_live_drift_live_min_primary", 8) or 8)
-    min_trades = int(getattr(settings, "brain_live_drift_min_trades", 8) or 8)
-    eps_lo = float(getattr(settings, "brain_live_drift_baseline_p0_low", 0.05) or 0.05)
-    eps_hi = float(getattr(settings, "brain_live_drift_baseline_p0_high", 0.95) or 0.95)
-    warn_pp = float(getattr(settings, "brain_live_drift_warning_delta_pp", 8.0) or 8.0)
-    crit_pp = float(getattr(settings, "brain_live_drift_critical_delta_pp", 18.0) or 18.0)
-    strong_p = float(getattr(settings, "brain_live_drift_strong_p_like", 0.02) or 0.02)
+    window_days = _positive_int_or_default(getattr(settings, "brain_live_drift_window_days", 120), 120)
+    live_min = _positive_int_or_default(getattr(settings, "brain_live_drift_live_min_primary", 8), 8)
+    min_trades = _positive_int_or_default(getattr(settings, "brain_live_drift_min_trades", 8), 8)
+    eps_lo, eps_hi = _probability_pair_or_default(
+        getattr(settings, "brain_live_drift_baseline_p0_low", 0.05),
+        getattr(settings, "brain_live_drift_baseline_p0_high", 0.95),
+        low_default=0.05,
+        high_default=0.95,
+    )
+    warn_pp, crit_pp = _ordered_positive_thresholds(
+        getattr(settings, "brain_live_drift_warning_delta_pp", 8.0),
+        getattr(settings, "brain_live_drift_critical_delta_pp", 18.0),
+        warn_default=8.0,
+        crit_default=18.0,
+        critical_above_warning=True,
+    )
+    strong_p = _probability_or_default(getattr(settings, "brain_live_drift_strong_p_like", 0.02), 0.02)
 
     n_live = int(runtime.get("n_live") or 0)
     n_paper = int(runtime.get("n_paper") or 0)
@@ -462,11 +523,7 @@ def compute_live_drift_contract(
     # column is missing/None. Falls back to the dynamic prior, never to
     # a magic constant. If even that is unavailable, the drift check is
     # skipped (return early) so we do not inject a synthesized value.
-    _conf_raw = getattr(pattern, "confidence", None)
-    try:
-        pat_conf = float(_conf_raw) if _conf_raw is not None else None
-    except (TypeError, ValueError):
-        pat_conf = None
+    pat_conf = _confidence_or_none(getattr(pattern, "confidence", None))
     if pat_conf is None:
         from .dynamic_priors import bayesian_pattern_confidence
         pat_conf = bayesian_pattern_confidence(getattr(pattern, "trade_count", None))
@@ -508,15 +565,30 @@ def compute_live_drift_v2_contract(
     scorecards: dict[str, Any],
     settings: Any,
 ) -> dict[str, Any]:
-    window_days = int(getattr(settings, "brain_live_drift_window_days", 120) or 120)
-    live_min = int(getattr(settings, "brain_live_drift_live_min_primary", 8) or 8)
-    min_trades = int(getattr(settings, "brain_live_drift_min_trades", 8) or 8)
-    warn_expectancy_ratio = float(getattr(settings, "brain_live_drift_v2_warn_expectancy_ratio", 0.7) or 0.7)
-    crit_expectancy_ratio = float(getattr(settings, "brain_live_drift_v2_critical_expectancy_ratio", 0.4) or 0.4)
-    warn_pf = float(getattr(settings, "brain_live_drift_v2_warn_profit_factor", 1.0) or 1.0)
-    crit_pf = float(getattr(settings, "brain_live_drift_v2_critical_profit_factor", 0.8) or 0.8)
-    warn_slip = float(getattr(settings, "brain_live_drift_v2_warn_slippage_bps", 25.0) or 25.0)
-    crit_slip = float(getattr(settings, "brain_live_drift_v2_critical_slippage_bps", 45.0) or 45.0)
+    window_days = _positive_int_or_default(getattr(settings, "brain_live_drift_window_days", 120), 120)
+    live_min = _positive_int_or_default(getattr(settings, "brain_live_drift_live_min_primary", 8), 8)
+    min_trades = _positive_int_or_default(getattr(settings, "brain_live_drift_min_trades", 8), 8)
+    warn_expectancy_ratio, crit_expectancy_ratio = _ordered_positive_thresholds(
+        getattr(settings, "brain_live_drift_v2_warn_expectancy_ratio", 0.7),
+        getattr(settings, "brain_live_drift_v2_critical_expectancy_ratio", 0.4),
+        warn_default=0.7,
+        crit_default=0.4,
+        critical_above_warning=False,
+    )
+    warn_pf, crit_pf = _ordered_positive_thresholds(
+        getattr(settings, "brain_live_drift_v2_warn_profit_factor", 1.0),
+        getattr(settings, "brain_live_drift_v2_critical_profit_factor", 0.8),
+        warn_default=1.0,
+        crit_default=0.8,
+        critical_above_warning=False,
+    )
+    warn_slip, crit_slip = _ordered_positive_thresholds(
+        getattr(settings, "brain_live_drift_v2_warn_slippage_bps", 25.0),
+        getattr(settings, "brain_live_drift_v2_critical_slippage_bps", 45.0),
+        warn_default=25.0,
+        crit_default=45.0,
+        critical_above_warning=True,
+    )
 
     live = scorecards.get("live")
     paper = scorecards.get("paper")
@@ -554,8 +626,13 @@ def compute_live_drift_v2_contract(
     if baseline_wr is not None and runtime_wr is not None:
         wr_delta = round(runtime_wr - baseline_wr, 4)
         comparisons["win_rate_delta_pp"] = wr_delta
-        warn_pp = float(getattr(settings, "brain_live_drift_warning_delta_pp", 8.0) or 8.0)
-        crit_pp = float(getattr(settings, "brain_live_drift_critical_delta_pp", 18.0) or 18.0)
+        warn_pp, crit_pp = _ordered_positive_thresholds(
+            getattr(settings, "brain_live_drift_warning_delta_pp", 8.0),
+            getattr(settings, "brain_live_drift_critical_delta_pp", 18.0),
+            warn_default=8.0,
+            crit_default=18.0,
+            critical_above_warning=True,
+        )
         if wr_delta <= -crit_pp:
             flags.append("win_rate_critical")
         elif wr_delta <= -warn_pp:
@@ -623,10 +700,10 @@ def compute_live_drift_v2_contract(
 
 def _tier_confidence_multiplier(tier: str, settings: Any) -> float:
     if tier == "critical":
-        return float(getattr(settings, "brain_live_drift_confidence_mult_critical", 0.88) or 0.88)
+        return _positive_float_or_default(getattr(settings, "brain_live_drift_confidence_mult_critical", 0.88), 0.88)
     if tier == "warning":
-        return float(getattr(settings, "brain_live_drift_confidence_mult_warning", 0.94) or 0.94)
-    return float(getattr(settings, "brain_live_drift_confidence_mult_healthy", 1.0) or 1.0)
+        return _positive_float_or_default(getattr(settings, "brain_live_drift_confidence_mult_warning", 0.94), 0.94)
+    return _positive_float_or_default(getattr(settings, "brain_live_drift_confidence_mult_healthy", 1.0), 1.0)
 
 
 def apply_live_drift_to_pattern(
@@ -657,39 +734,42 @@ def apply_live_drift_to_pattern(
         and bool(getattr(settings, "brain_live_drift_confidence_nudge_enabled", True))
     )
     if _do_nudge:
-        anchor_f = None
-        try:
-            anchor_f = float(contract.get("confidence_reference"))
-        except (TypeError, ValueError):
+        anchor_f = _confidence_or_none(contract.get("confidence_reference"))
+        if anchor_f is None:
             # FIX E-1: no hardcoded 0.5 fallback. Use the pattern real
             # confidence if non-None; otherwise compute the Bayesian
             # prior from realized n; if even that is unavailable, abstain
             # (skip the nudge entirely rather than synthesize).
-            _pc = getattr(pattern, "confidence", None)
-            try:
-                anchor_f = float(_pc) if _pc is not None else None
-            except (TypeError, ValueError):
-                anchor_f = None
+            anchor_f = _confidence_or_none(getattr(pattern, "confidence", None))
             if anchor_f is None:
                 from .dynamic_priors import bayesian_pattern_confidence as _bpc
                 anchor_f = _bpc(getattr(pattern, "trade_count", None))
         if anchor_f is not None:
             contract["confidence_reference"] = anchor_f
             mult = _tier_confidence_multiplier(tier, settings)
-            lo = float(getattr(settings, "brain_live_drift_confidence_floor", 0.1) or 0.1)
-            hi = float(getattr(settings, "brain_live_drift_confidence_cap", 0.95) or 0.95)
+            lo, hi = _probability_pair_or_default(
+                getattr(settings, "brain_live_drift_confidence_floor", 0.1),
+                getattr(settings, "brain_live_drift_confidence_cap", 0.95),
+                low_default=0.1,
+                high_default=0.95,
+            )
             new_c = max(lo, min(hi, anchor_f * mult))
             pattern.confidence = round(new_c, 4)
 
     auto = bool(getattr(settings, "brain_live_drift_auto_challenged_enabled", False))
     n_s = int(contract.get("sample_count") or 0)
-    min_tr = int(getattr(settings, "brain_live_drift_min_trades", 8) or 8)
+    min_tr = _positive_int_or_default(getattr(settings, "brain_live_drift_min_trades", 8), 8)
     p_like = contract.get("drift_p_like")
+    p_like_f = _safe_float(p_like)
+    max_p_like = _probability_or_default(
+        getattr(settings, "brain_live_drift_auto_challenged_max_p_like", 0.02),
+        0.02,
+    )
     p_ok = (
-        p_like is not None
+        p_like_f is not None
         and not contract.get("p_like_suppressed")
         and not contract.get("degenerate_baseline")
-        and float(p_like) <= float(getattr(settings, "brain_live_drift_auto_challenged_max_p_like", 0.02) or 0.02)
+        and p_like_f <= max_p_like
     )
     if auto and not skip and tier == "critical" and n_s >= min_tr and p_ok:
         from .lifecycle import LifecycleError, transition
@@ -742,7 +822,7 @@ def run_live_drift_refresh(db: Session) -> dict[str, Any]:
     if uid is None:
         return {"ok": True, "skipped": True, "reason": "no_brain_default_user_id", "updated": 0}
 
-    window_days = int(getattr(settings, "brain_live_drift_window_days", 120) or 120)
+    window_days = _positive_int_or_default(getattr(settings, "brain_live_drift_window_days", 120), 120)
 
     rows = (
         db.query(ScanPattern)

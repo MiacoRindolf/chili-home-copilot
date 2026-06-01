@@ -127,6 +127,29 @@ def test_insufficient_sample_skip_contract_fresh():
     assert sk["confidence_reference"] == 0.75
 
 
+def test_skip_contract_rejects_boolean_confidence_reference():
+    sk = build_skip_contract(
+        skip_reason="insufficient_runtime_sample",
+        prev_live_drift={"confidence_reference": True},
+        evaluation_window_days=120,
+    )
+
+    assert sk["confidence_reference"] is None
+
+
+def test_skip_contract_rejects_out_of_range_confidence_reference():
+    assert build_skip_contract(
+        skip_reason="insufficient_runtime_sample",
+        prev_live_drift={"confidence_reference": 1.01},
+        evaluation_window_days=120,
+    )["confidence_reference"] is None
+    assert build_skip_contract(
+        skip_reason="insufficient_runtime_sample",
+        prev_live_drift={"confidence_reference": -0.01},
+        evaluation_window_days=120,
+    )["confidence_reference"] is None
+
+
 def test_mixed_runtime_suppresses_p_like():
     pattern = SimpleNamespace(oos_win_rate=0.55, confidence=0.72)
     rt = {"n_live": 3, "wins_live": 1, "n_paper": 12, "wins_paper": 5}
@@ -186,6 +209,174 @@ def test_confidence_nudge_idempotent():
     twice = float(pattern.confidence)
     assert once == pytest.approx(twice, rel=0, abs=1e-6)
     assert once == pytest.approx(0.8 * 0.88, rel=0, abs=1e-6)
+
+
+def test_live_drift_contract_rejects_boolean_pattern_confidence():
+    pattern = SimpleNamespace(oos_win_rate=0.55, confidence=True, trade_count=10)
+    rt = {"n_live": 10, "wins_live": 4, "n_paper": 0, "wins_paper": 0}
+
+    c = compute_live_drift_contract(
+        pattern=pattern,
+        oos_val={},
+        runtime=rt,
+        prev_live_drift=None,
+        settings=_settings(),
+    )
+
+    assert c is not None
+    assert c["confidence_reference"] == pytest.approx(10.0 / 15.0)
+
+
+def test_live_drift_contract_rejects_out_of_range_pattern_confidence():
+    pattern = SimpleNamespace(oos_win_rate=0.55, confidence=2.0, trade_count=10)
+    rt = {"n_live": 10, "wins_live": 4, "n_paper": 0, "wins_paper": 0}
+
+    c = compute_live_drift_contract(
+        pattern=pattern,
+        oos_val={},
+        runtime=rt,
+        prev_live_drift=None,
+        settings=_settings(),
+    )
+
+    assert c is not None
+    assert c["confidence_reference"] == pytest.approx(10.0 / 15.0)
+
+
+def test_live_drift_nudge_rejects_boolean_confidence_anchors():
+    pattern = SimpleNamespace(
+        confidence=True,
+        trade_count=10,
+        oos_validation_json={},
+        lifecycle_stage="promoted",
+        id=1,
+        name="t",
+        active=True,
+        promotion_status="promoted",
+    )
+    contract = {
+        "drift_version": 1,
+        "drift_tier": "critical",
+        "skip_reason": None,
+        "confidence_reference": True,
+        "sample_count": 10,
+        "primary_runtime_source": "live",
+        "p_like_suppressed": False,
+        "degenerate_baseline": False,
+    }
+
+    apply_live_drift_to_pattern(MagicMock(), pattern, contract, _settings())
+
+    assert contract["confidence_reference"] == pytest.approx(10.0 / 15.0)
+    assert pattern.confidence == pytest.approx(round((10.0 / 15.0) * 0.88, 4))
+
+
+def test_live_drift_nudge_rejects_out_of_range_confidence_anchors():
+    pattern = SimpleNamespace(
+        confidence=-0.1,
+        trade_count=10,
+        oos_validation_json={},
+        lifecycle_stage="promoted",
+        id=1,
+        name="t",
+        active=True,
+        promotion_status="promoted",
+    )
+    contract = {
+        "drift_version": 1,
+        "drift_tier": "critical",
+        "skip_reason": None,
+        "confidence_reference": 1.5,
+        "sample_count": 10,
+        "primary_runtime_source": "live",
+        "p_like_suppressed": False,
+        "degenerate_baseline": False,
+    }
+
+    apply_live_drift_to_pattern(MagicMock(), pattern, contract, _settings())
+
+    assert contract["confidence_reference"] == pytest.approx(10.0 / 15.0)
+    assert pattern.confidence == pytest.approx(round((10.0 / 15.0) * 0.88, 4))
+
+
+def test_live_drift_min_sample_settings_reject_boolean_shortcuts():
+    pattern = SimpleNamespace(oos_win_rate=0.55, confidence=0.72)
+    rt = {"n_live": 1, "wins_live": 0, "n_paper": 0, "wins_paper": 0}
+
+    c = compute_live_drift_contract(
+        pattern=pattern,
+        oos_val={},
+        runtime=rt,
+        prev_live_drift=None,
+        settings=_settings(
+            brain_live_drift_window_days=True,
+            brain_live_drift_live_min_primary=True,
+            brain_live_drift_min_trades=0.5,
+        ),
+    )
+
+    assert c["skip_reason"] == "insufficient_runtime_sample"
+    assert c["evaluation_window"]["days"] == 120
+    assert c["sample_count"] == 0
+
+
+def test_live_drift_threshold_settings_reject_boolean_shortcuts():
+    pattern = SimpleNamespace(oos_win_rate=0.55, confidence=0.72)
+    rt = {"n_live": 10, "wins_live": 5, "n_paper": 0, "wins_paper": 0}
+
+    c = compute_live_drift_contract(
+        pattern=pattern,
+        oos_val={},
+        runtime=rt,
+        prev_live_drift=None,
+        settings=_settings(
+            brain_live_drift_baseline_p0_low=True,
+            brain_live_drift_baseline_p0_high=float("nan"),
+            brain_live_drift_warning_delta_pp=True,
+            brain_live_drift_critical_delta_pp=True,
+            brain_live_drift_strong_p_like=True,
+        ),
+    )
+
+    assert c["skip_reason"] is None
+    assert c["drift_delta"] == pytest.approx(-5.0)
+    assert c["drift_tier"] == "healthy"
+    assert c["degenerate_baseline"] is False
+
+
+def test_live_drift_nudge_rejects_boolean_multiplier_and_bad_bounds():
+    pattern = SimpleNamespace(
+        confidence=0.8,
+        oos_validation_json={},
+        lifecycle_stage="promoted",
+        id=1,
+        name="t",
+        active=True,
+        promotion_status="promoted",
+    )
+    contract = {
+        "drift_version": 1,
+        "drift_tier": "critical",
+        "skip_reason": None,
+        "confidence_reference": 0.8,
+        "sample_count": 10,
+        "primary_runtime_source": "live",
+        "p_like_suppressed": False,
+        "degenerate_baseline": False,
+    }
+
+    apply_live_drift_to_pattern(
+        MagicMock(),
+        pattern,
+        contract,
+        _settings(
+            brain_live_drift_confidence_mult_critical=True,
+            brain_live_drift_confidence_floor=True,
+            brain_live_drift_confidence_cap=0.05,
+        ),
+    )
+
+    assert pattern.confidence == pytest.approx(round(0.8 * 0.88, 4))
 
 
 def test_live_drift_summary_shape():
@@ -256,6 +447,77 @@ def test_v2_falls_back_to_paper_when_live_is_sparse():
     c = compute_live_drift_v2_contract(pattern=pattern, oos_val={}, scorecards=scorecards, settings=_settings())
     assert c["primary_runtime_source"] == "paper"
     assert c["fallback_used"] is True
+
+
+def test_live_drift_v2_min_sample_settings_reject_boolean_shortcuts():
+    pattern = SimpleNamespace(oos_win_rate=0.55, oos_avg_return_pct=2.0)
+    scorecards = {
+        "live": {
+            "source": "live",
+            "sample_count": 1,
+            "win_rate_pct": 0.0,
+            "expectancy_per_trade_pct": -2.0,
+            "profit_factor": 0.1,
+            "p25_trade_outcome_pct": -2.0,
+            "slippage_burden_bps": 80.0,
+            "freshness_at": "2026-04-10T12:00:00",
+        },
+        "paper": None,
+        "n_live": 1,
+        "n_paper": 0,
+    }
+
+    c = compute_live_drift_v2_contract(
+        pattern=pattern,
+        oos_val={},
+        scorecards=scorecards,
+        settings=_settings(
+            brain_live_drift_window_days=True,
+            brain_live_drift_live_min_primary=True,
+            brain_live_drift_min_trades=0.5,
+        ),
+    )
+
+    assert c["skip_reason"] == "insufficient_runtime_sample"
+    assert c["evaluation_window"]["days"] == 120
+    assert c["sample_count"] == 0
+
+
+def test_live_drift_v2_threshold_settings_reject_boolean_shortcuts():
+    pattern = SimpleNamespace(oos_win_rate=0.55, oos_avg_return_pct=2.0)
+    scorecards = {
+        "live": {
+            "source": "live",
+            "sample_count": 12,
+            "win_rate_pct": 50.0,
+            "expectancy_per_trade_pct": 1.5,
+            "profit_factor": 1.2,
+            "p25_trade_outcome_pct": -0.2,
+            "slippage_burden_bps": 10.0,
+            "freshness_at": "2026-04-10T12:00:00",
+        },
+        "paper": None,
+        "n_live": 12,
+        "n_paper": 0,
+    }
+
+    c = compute_live_drift_v2_contract(
+        pattern=pattern,
+        oos_val={},
+        scorecards=scorecards,
+        settings=_settings(
+            brain_live_drift_warning_delta_pp=True,
+            brain_live_drift_critical_delta_pp=True,
+            brain_live_drift_v2_warn_expectancy_ratio=True,
+            brain_live_drift_v2_critical_expectancy_ratio=True,
+            brain_live_drift_v2_warn_slippage_bps=True,
+            brain_live_drift_v2_critical_slippage_bps=True,
+        ),
+    )
+
+    assert c["skip_reason"] is None
+    assert c["composite_tier"] == "healthy"
+    assert c["composite_flags"] == []
 
 
 def test_live_drift_live_option_outcome_uses_contract_notional() -> None:
