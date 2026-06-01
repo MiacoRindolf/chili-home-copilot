@@ -1079,9 +1079,25 @@ def _quote_price_from_snapshot(snapshot: Any) -> float | None:
     return None
 
 
+def _quote_source_from_snapshot(snapshot: Any, default: str) -> str:
+    if not isinstance(snapshot, dict):
+        return default
+    for key in ("source", "provider", "quote_source"):
+        raw = snapshot.get(key)
+        if raw is None:
+            continue
+        source = str(raw).strip()
+        if source:
+            return source
+    return default
+
+
+_LAST_CURRENT_PRICE_SOURCE_BY_TICKER: dict[str, str] = {}
+
+
 def _prefetch_candidate_prices(
     candidates: list[BreakoutAlert],
-) -> tuple[dict[str, float], dict[str, Any]]:
+) -> tuple[dict[str, float], dict[str, str], dict[str, Any]]:
     meta: dict[str, Any] = {
         "enabled": _candidate_price_prefetch_enabled(),
         "requested": 0,
@@ -1093,7 +1109,7 @@ def _prefetch_candidate_prices(
         "error": None,
     }
     if not meta["enabled"] or not candidates:
-        return {}, meta
+        return {}, {}, meta
     tickers = sorted({
         str(getattr(alert, "ticker", "") or "").strip().upper()
         for alert in candidates
@@ -1101,9 +1117,10 @@ def _prefetch_candidate_prices(
     })
     meta["requested"] = len(tickers)
     if not tickers:
-        return {}, meta
+        return {}, {}, meta
     started = time.monotonic()
     prices: dict[str, float] = {}
+    sources: dict[str, str] = {}
     try:
         try:
             from .price_bus import get_live_quote
@@ -1115,11 +1132,12 @@ def _prefetch_candidate_prices(
                 price = _quote_price_from_snapshot(quote)
                 if price is not None:
                     prices[ticker] = price
+                    sources[ticker] = _quote_source_from_snapshot(quote, "price_bus")
         meta["price_bus_hits"] = len(prices)
         missing = [ticker for ticker in tickers if ticker not in prices]
         if not missing:
             meta["hits"] = len(prices)
-            return prices, meta
+            return prices, sources, meta
         from .market_data import fetch_quotes_batch
 
         meta["batch_requested"] = len(missing)
@@ -1130,6 +1148,7 @@ def _prefetch_candidate_prices(
             price = _quote_price_from_snapshot(quote)
             if price is not None:
                 prices[ticker] = price
+                sources[ticker] = _quote_source_from_snapshot(quote, "batch_prefetch")
                 batch_hits += 1
         meta["batch_hits"] = batch_hits
     except Exception as exc:
@@ -1138,21 +1157,28 @@ def _prefetch_candidate_prices(
     finally:
         meta["elapsed_seconds"] = round(time.monotonic() - started, 3)
     meta["hits"] = len(prices)
-    return prices, meta
+    return prices, sources, meta
 
 
 def _attach_prefetched_prices(
     candidates: list[BreakoutAlert],
     prices: dict[str, float],
+    sources: dict[str, str] | None = None,
 ) -> None:
     if not prices:
         return
+    sources = sources or {}
     for alert in candidates:
         key = str(getattr(alert, "ticker", "") or "").strip().upper()
         price = prices.get(key)
         if price is None:
             continue
         setattr(alert, "_chili_prefetched_current_price", float(price))
+        setattr(
+            alert,
+            "_chili_prefetched_current_price_source",
+            str(sources.get(key) or "batch_prefetch").strip() or "batch_prefetch",
+        )
 
 
 def _current_price_for_alert(alert: BreakoutAlert) -> float | None:
@@ -1162,10 +1188,21 @@ def _current_price_for_alert(alert: BreakoutAlert) -> float | None:
     except (TypeError, ValueError):
         prefetched_price = None
     if prefetched_price is not None and prefetched_price > 0:
-        setattr(alert, "_chili_current_price_source", "batch_prefetch")
+        source = str(
+            getattr(alert, "_chili_prefetched_current_price_source", None)
+            or "batch_prefetch"
+        ).strip()
+        setattr(alert, "_chili_current_price_source", source or "batch_prefetch")
+        setattr(alert, "_chili_current_price_prefetch_used", True)
         return prefetched_price
-    setattr(alert, "_chili_current_price_source", "single_fetch")
-    return _current_price(alert.ticker)
+    price = _current_price(alert.ticker)
+    source = _LAST_CURRENT_PRICE_SOURCE_BY_TICKER.get(
+        str(getattr(alert, "ticker", "") or "").strip().upper(),
+        "single_fetch",
+    )
+    setattr(alert, "_chili_current_price_source", source or "single_fetch")
+    setattr(alert, "_chili_current_price_prefetch_used", False)
+    return price
 
 
 def _stock_session_defer_state(now: datetime | None = None) -> dict[str, Any]:
@@ -3175,8 +3212,8 @@ def _ohlcv_summary(ticker: str) -> str | None:
     return None
 
 
-def _current_price(ticker: str) -> float | None:
-    """Fetch the current price for gate sizing; retry + structured log."""
+def _current_price_with_source(ticker: str) -> tuple[float | None, str]:
+    """Fetch the current price plus provider source for entry auditability."""
     from .market_data import fetch_quote
 
     last_kind = "unknown"
@@ -3209,7 +3246,7 @@ def _current_price(ticker: str) -> float | None:
                         f"{CHILI_MARKET_DATA} source=quote kind=ok ticker=%s attempt=%d price=%s",
                         ticker, attempt, price,
                     )
-                    return price
+                    return price, _quote_source_from_snapshot(q, "market_data")
         except Exception as e:  # noqa: BLE001 — classified below, re-logged
             last_kind = _classify_market_data_exc(e)
             last_err = repr(e)
@@ -3224,7 +3261,16 @@ def _current_price(ticker: str) -> float | None:
         f"{CHILI_MARKET_DATA} source=quote kind=exhausted ticker=%s attempts=%d last_kind=%s last_err=%s",
         ticker, _MARKET_DATA_MAX_ATTEMPTS, last_kind, last_err,
     )
-    return None
+    return None, "single_fetch"
+
+
+def _current_price(ticker: str) -> float | None:
+    """Fetch the current price for gate sizing; retry + structured log."""
+    price, _source = _current_price_with_source(ticker)
+    key = str(ticker or "").strip().upper()
+    if key:
+        _LAST_CURRENT_PRICE_SOURCE_BY_TICKER[key] = _source or "single_fetch"
+    return price
 
 
 def run_auto_trader_tick(db: Session) -> dict[str, Any]:
@@ -3438,8 +3484,10 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         candidates.extend(retry_candidates)
     candidate_pool = candidate_pool_base + retry_pool
     candidate_select_elapsed_s = round(time.monotonic() - candidate_select_started, 3)
-    prefetched_prices, price_prefetch_meta = _prefetch_candidate_prices(candidates)
-    _attach_prefetched_prices(candidates, prefetched_prices)
+    prefetched_prices, prefetched_sources, price_prefetch_meta = (
+        _prefetch_candidate_prices(candidates)
+    )
+    _attach_prefetched_prices(candidates, prefetched_prices, prefetched_sources)
 
     out: dict[str, Any] = {
         "processed": 0,
@@ -4570,7 +4618,12 @@ def _process_one_alert(
         "_chili_current_price_source",
         "single_fetch",
     )
-    snap["entry_quote_prefetch_used"] = snap["entry_quote_source"] == "batch_prefetch"
+    snap["entry_quote_prefetch_used"] = bool(
+        getattr(alert, "_chili_current_price_prefetch_used", False)
+    )
+    snap["entry_quote_fetch_path"] = (
+        "batch_prefetch" if snap["entry_quote_prefetch_used"] else "single_fetch"
+    )
     if not ok:
         if (
             bool(getattr(alert, "_chili_shadow_observation_only", False))
@@ -6827,6 +6880,10 @@ def _execute_new_entry(
             "asset_kind": "option" if _is_option_entry else None,
             "client_order_id": res.get("client_order_id"),
             "order_id": str(order_id_raw).strip(),
+            "entry_quote_source": snap.get("entry_quote_source"),
+            "entry_quote_prefetch_used": bool(snap.get("entry_quote_prefetch_used")),
+            "entry_quote_fetch_path": snap.get("entry_quote_fetch_path"),
+            "entry_quote_price": px,
             "order_type": (
                 "limit_post_only"
                 if _is_coinbase_entry and bool(res.get("_chili_maker_only"))

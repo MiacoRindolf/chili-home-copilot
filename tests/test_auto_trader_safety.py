@@ -56,6 +56,48 @@ TEST_POSITIVE_EXPECTED_NET_PCT = 1.25
 STALE_ALERT_MARGIN = timedelta(minutes=1)
 
 
+def test_current_price_for_alert_preserves_market_data_quote_source(monkeypatch):
+    from app.services.trading import market_data
+
+    at_mod._LAST_CURRENT_PRICE_SOURCE_BY_TICKER.clear()
+    monkeypatch.setattr(
+        market_data,
+        "fetch_quote",
+        lambda _ticker: {"price": 0.12345, "source": "coinbase_public"},
+    )
+
+    alert = SimpleNamespace(ticker="DRIFT-USD")
+
+    assert at_mod._current_price_for_alert(alert) == pytest.approx(0.12345)
+    assert getattr(alert, "_chili_current_price_source") == "coinbase_public"
+    assert getattr(alert, "_chili_current_price_prefetch_used") is False
+
+
+def test_prefetched_price_for_alert_preserves_provider_source(monkeypatch):
+    monkeypatch.setattr(
+        at_mod,
+        "settings",
+        SimpleNamespace(chili_autotrader_candidate_price_prefetch_enabled=True),
+    )
+    from app.services.trading import price_bus
+
+    monkeypatch.setattr(
+        price_bus,
+        "get_live_quote",
+        lambda _ticker: {"price": 42.5, "source": "massive_ws"},
+    )
+    alert = SimpleNamespace(ticker="SRC")
+
+    prices, sources, meta = at_mod._prefetch_candidate_prices([alert])
+    at_mod._attach_prefetched_prices([alert], prices, sources)
+
+    assert meta["hits"] == 1
+    assert sources == {"SRC": "massive_ws"}
+    assert at_mod._current_price_for_alert(alert) == pytest.approx(42.5)
+    assert getattr(alert, "_chili_current_price_source") == "massive_ws"
+    assert getattr(alert, "_chili_current_price_prefetch_used") is True
+
+
 def _minimal_settings(user_id: int) -> SimpleNamespace:
     return SimpleNamespace(
         chili_autotrader_enabled=True,
@@ -1120,6 +1162,87 @@ def test_live_entry_blocks_recert_required_pattern_after_sizing_before_broker(db
     assert len(recert_logs) == 1
     assert recert_logs[0].source == "scheduler"
     assert recert_logs[0].reason == "autotrader_signal:pattern_recert_required"
+
+
+def test_live_entry_persists_entry_quote_source_in_execution_snapshot(db, monkeypatch):
+    u = models.User(name="quote_src_entry_u")
+    db.add(u)
+    db.flush()
+    alert = BreakoutAlert(
+        ticker="QSRC",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.9,
+        price_at_alert=TEST_ENTRY_PRICE,
+        entry_price=TEST_ENTRY_PRICE,
+        stop_loss=TEST_STOP_PRICE,
+        target_price=TEST_TARGET_PRICE,
+        user_id=u.id,
+        scan_pattern_id=None,
+    )
+    db.add(alert)
+    db.commit()
+    db.refresh(alert)
+
+    monkeypatch.setattr(at_mod, "settings", _minimal_settings(u.id))
+    monkeypatch.setattr(
+        at_mod,
+        "_resolve_entry_risk_notional",
+        lambda *a, **k: (TEST_RISK_NOTIONAL, {
+            "notional_capital_usd": TEST_ACCOUNT_EQUITY,
+            "notional_explicit_fallback_usd": 0.0,
+            "notional_risk_pct": 1.0,
+            "notional_source": "test",
+            "notional_capital_source": "test",
+        }),
+    )
+    monkeypatch.setattr(
+        "app.services.trading.tick_normalizer.normalize_quantity",
+        lambda qty, _ticker: qty,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.pdt_guard.can_open_intraday_round_trip",
+        lambda *a, **k: SimpleNamespace(allowed=True, reason="ok", snapshot={}),
+    )
+    monkeypatch.setattr(
+        "app.services.trading.governance.is_kill_switch_active",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_execute_broker_buy",
+        lambda *a, **k: {
+            "ok": True,
+            "order_id": "quote-src-order-1",
+            "raw": {"average_price": TEST_ENTRY_PRICE},
+        },
+    )
+
+    snap = {
+        "entry_quote_source": "coinbase_public",
+        "entry_quote_prefetch_used": False,
+        "entry_quote_fetch_path": "single_fetch",
+    }
+    out = {"skipped": 0, "placed": 0, "blocked": 0}
+
+    at_mod._execute_new_entry(
+        db,
+        u.id,
+        alert,
+        TEST_ENTRY_PRICE,
+        snap,
+        None,
+        True,
+        out,
+    )
+
+    assert out["placed"] == 1
+    trade = db.query(Trade).filter(Trade.related_alert_id == alert.id).one()
+    entry = trade.indicator_snapshot["entry_execution"]
+    assert entry["entry_quote_source"] == "coinbase_public"
+    assert entry["entry_quote_prefetch_used"] is False
+    assert entry["entry_quote_fetch_path"] == "single_fetch"
+    assert entry["entry_quote_price"] == pytest.approx(TEST_ENTRY_PRICE)
 
 
 def test_shadow_stock_fastlane_boosts_pattern_for_positive_edge(monkeypatch):
