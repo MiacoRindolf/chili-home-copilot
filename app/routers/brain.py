@@ -1484,3 +1484,73 @@ def api_brain_trading_assistant_chat(
     return JSONResponse(result, status_code=status)
 
 
+@router.get("/api/brain/reasoning/research/report", response_class=HTMLResponse)
+def reasoning_research_report(
+    request: Request,
+    download: int = Query(0, description="1 = force download as attachment"),
+    db: Session = Depends(get_db),
+):
+    """Render the user's stored reasoning research as a self-contained HTML report.
+
+    Read-only. Aggregates non-stale ReasoningResearch rows into one digest using
+    app/visual_report.py. Guests (no user_id) get an empty digest rather than an
+    error. Add ?download=1 to receive it as a file attachment.
+    """
+    import json as _json
+    from .. import visual_report
+
+    ctx = get_identity_ctx(request, db)
+    user_id = ctx.get("user_id")
+
+    rows = []
+    if user_id:
+        rows = (
+            db.query(ReasoningResearch)
+            .filter(
+                ReasoningResearch.user_id == user_id,
+                ReasoningResearch.stale.is_(False),
+            )
+            .order_by(
+                ReasoningResearch.relevance_score.desc(),
+                ReasoningResearch.searched_at.desc(),
+            )
+            .limit(50)
+            .all()
+        )
+
+    parts = ["# Research Digest\n"]
+    sources: list[dict] = []
+    seen: set[str] = set()
+    for r in rows:
+        parts.append(f"## {r.topic}\n\n{r.summary}\n")
+        try:
+            for s in _json.loads(r.sources or "[]"):
+                if not isinstance(s, dict):
+                    continue
+                url = (s.get("url") or "").strip()
+                if url and url not in seen:
+                    seen.add(url)
+                    sources.append({"title": s.get("title") or url, "url": url})
+        except Exception:
+            pass
+    if not rows:
+        parts.append(
+            "## No research yet\n\nThe reasoning brain hasn't stored any research "
+            "for you yet. Topics you show interest in get researched in the "
+            "background and will appear here.\n"
+        )
+
+    html = visual_report.generate_report(
+        "Research Digest",
+        "\n".join(parts),
+        subtitle=f"{ctx.get('user_name', '')} — {len(rows)} topic(s)".strip(" —"),
+        label="CHILI — Research Digest",
+        stats={"Topics": len(rows), "Sources": len(sources)},
+        sources=sources,
+    )
+    headers = {}
+    if download:
+        headers["Content-Disposition"] = 'attachment; filename="chili-research-digest.html"'
+    return HTMLResponse(content=html, headers=headers)
+
+

@@ -53,10 +53,13 @@ per-category palettes). `markdown` declared as a dep (degrades to a regex
 renderer if absent); `bs4` reused. 15 tests in `tests/test_visual_report.py`.
 See `docs/STRATEGY/CC_REPORTS/2026-06-01_f-odysseus-salvage-visual-report.md`.
 
-**Not yet wired into a route/consumer** — it's a ready util. Natural next hooks:
-a "download brief as HTML" button on a research report, and an export for the
-daily trading brief / CC-style summaries. Left as a small follow-up so this
-commit stays a pure, side-effect-free addition.
+**Wiring (W1) SHIPPED 2026-06-01:** `GET /api/brain/reasoning/research/report`
+(in `app/routers/brain.py`) renders the user's non-stale `ReasoningResearch` rows
+into one self-contained HTML digest via `generate_report` (guests get an empty
+digest; `?download=1` forces attachment). 5 integration tests in
+`tests/test_reasoning_research_report.py`. See
+`docs/STRATEGY/CC_REPORTS/2026-06-01_f-odysseus-salvage-wiring-w1-research-report.md`.
+A daily-trading-brief export remains a future hook.
 
 ---
 
