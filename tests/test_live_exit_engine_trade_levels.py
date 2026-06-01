@@ -127,6 +127,56 @@ def _stub_atr_market_data(monkeypatch, atr_value) -> None:
     return fetch_calls
 
 
+@pytest.mark.parametrize("zero_value", [0, 0.0, "0"])
+def test_exit_parity_sample_pct_preserves_explicit_zero(zero_value):
+    assert lee._exit_parity_sample_pct(zero_value) == 0.0
+
+
+@pytest.mark.parametrize("bad_value", [None, "", "NaN", math.nan, math.inf, True, False])
+def test_exit_parity_sample_pct_defaults_unproven_values(bad_value):
+    assert lee._exit_parity_sample_pct(bad_value) == 1.0
+
+
+def test_phase_b_shadow_parity_preserves_zero_sample_setting(monkeypatch):
+    from app import config as app_config
+    from app.services.trading import exit_parity_metric
+
+    captured: dict[str, float] = {}
+
+    def _capture_sample_pct(**kwargs):
+        captured["sample_pct"] = kwargs["sample_pct"]
+        return False
+
+    monkeypatch.setattr(app_config.settings, "brain_exit_engine_mode", "shadow")
+    monkeypatch.setattr(app_config.settings, "brain_exit_engine_parity_sample_pct", 0.0)
+    monkeypatch.setattr(app_config.settings, "brain_exit_engine_ops_log_enabled", False)
+    monkeypatch.setattr(
+        exit_parity_metric,
+        "should_persist_parity_row",
+        _capture_sample_pct,
+    )
+
+    trade = _live_trade(stop_loss=95.0, take_profit=110.0)
+
+    lee._phase_b_shadow_parity(
+        db=object(),
+        trade=trade,
+        exit_cfg={
+            "trailing_enabled": False,
+            "max_bars": None,
+            "use_bos": False,
+            "partial_at_1r": False,
+        },
+        current_price=100.0,
+        atr=None,
+        swing_low_val=None,
+        swing_high_val=None,
+        legacy_result={"action": "hold"},
+    )
+
+    assert captured["sample_pct"] == 0.0
+
+
 @pytest.mark.parametrize("bad_price", [0.0, -1.0, math.nan, math.inf, "not-a-price"])
 def test_invalid_current_price_is_non_actionable(monkeypatch, bad_price):
     monkeypatch.setattr(

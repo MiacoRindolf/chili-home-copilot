@@ -52,6 +52,19 @@ def _nonnegative_float(value: Any, *, default: float | None = None) -> float | N
         return default
 
 
+def _exit_parity_sample_pct(value: Any, *, default: float = 1.0) -> float:
+    """Parse a live parity sampling rate while preserving explicit zero."""
+    if value is None or isinstance(value, bool):
+        return float(default)
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if math.isnan(out) or math.isinf(out):
+        return float(default)
+    return out
+
+
 def _positive_int(value: Any) -> int | None:
     try:
         if value is None:
@@ -576,7 +589,9 @@ def _phase_b_shadow_parity(
             )
             mode = "shadow"
 
-        sample_pct = float(getattr(settings, "brain_exit_engine_parity_sample_pct", 1.0) or 1.0)
+        sample_pct = _exit_parity_sample_pct(
+            getattr(settings, "brain_exit_engine_parity_sample_pct", 1.0)
+        )
         ops_log_enabled = bool(getattr(settings, "brain_exit_engine_ops_log_enabled", True))
 
         from . import exit_evaluator as ev
