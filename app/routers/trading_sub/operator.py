@@ -46,6 +46,13 @@ def _pattern_float(value: object) -> float | None:
     return out if out == out and out not in (float("inf"), float("-inf")) else None
 
 
+def _positive_float(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    out = _pattern_float(value)
+    return out if out is not None and out > 0.0 else None
+
+
 def _annotate_pattern_integrity_signals(patterns: list[dict]) -> None:
     for p in patterns:
         live_wr = _pattern_float(p.get("live_win_rate_pct"))
@@ -112,7 +119,7 @@ def operator_risk_budget(request: Request, db: Session = Depends(get_db)):
         )
         ctx = get_identity_ctx(request, db)
         user_id = ctx.get("user_id")
-        capital = float(ctx.get("capital") or 100_000.0)
+        capital = _positive_float(ctx.get("capital"))
 
         limits = get_risk_limits()
         budget = get_portfolio_risk_snapshot(db, user_id, capital, limits)
@@ -129,6 +136,8 @@ def operator_risk_budget(request: Request, db: Session = Depends(get_db)):
             "total_heat_pct": budget.total_heat_pct,
             "available_heat_pct": budget.available_heat_pct,
             "capital": capital,
+            "capital_available": capital is not None,
+            "capital_source": "identity_ctx" if capital is not None else "unavailable",
             "circuit_breaker": {
                 "tripped": breaker["tripped"],
                 "reason": breaker.get("reason"),

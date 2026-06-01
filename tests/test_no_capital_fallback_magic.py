@@ -16,8 +16,8 @@ Each was a silent fallback. The Phase 4 fix routes all of them through
 the resolver, which logs CRITICAL on every firing so the upstream broker
 fetch can be fixed.
 
-This guard catches new inline capital placeholders in the executable
-proposal path (``alerts.py``): ``or 10000.0``, ``return 10000.0``,
+This guard catches new inline capital placeholders in executable proposal
+and operator risk-reporting paths: ``or 10000.0``, ``return 10000.0``,
 ``risk_capital = 100000.0``, etc.
 """
 from __future__ import annotations
@@ -29,7 +29,10 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 APP_ROOT = REPO_ROOT / "app"
-TARGET_PATHS = [APP_ROOT / "services" / "trading" / "alerts.py"]
+TARGET_PATHS = [
+    APP_ROOT / "services" / "trading" / "alerts.py",
+    APP_ROOT / "routers" / "trading_sub" / "operator.py",
+]
 
 # Match likely executable capital placeholders. Captures things like
 # ``or 10000``, ``return 10000.0``, ``cap = 100000``, and underscored
