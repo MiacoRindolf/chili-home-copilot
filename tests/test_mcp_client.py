@@ -202,6 +202,108 @@ class TestCallTool:
         assert "boom" in res["error"]
 
 
+class _FakeClient:
+    """Stand-in for MCPClient so the supervisor can be tested without a server."""
+
+    def __init__(self, call_result=None, connect_n=1, connect_raises=False, call_delay=0.0):
+        self.connected = False
+        self.disconnected = False
+        self.calls = []
+        self._result = call_result or {"ok": True, "output": "r", "error": ""}
+        self._connect_n = connect_n
+        self._connect_raises = connect_raises
+        self._call_delay = call_delay
+
+    async def connect_all(self):
+        if self._connect_raises:
+            raise RuntimeError("connect boom")
+        self.connected = True
+        return self._connect_n
+
+    async def call_tool(self, name, args):
+        if self._call_delay:
+            await asyncio.sleep(self._call_delay)
+        self.calls.append((name, args))
+        return self._result
+
+    async def disconnect_all(self):
+        self.disconnected = True
+
+    def get_status(self):
+        return {"s": {"status": "connected" if self.connected else "disconnected"}}
+
+
+class TestSupervisor:
+    def test_start_call_stop_lifecycle(self):
+        async def scenario():
+            fake = _FakeClient()
+            sup = mc.MCPSupervisor(client=fake)
+            sup.start()
+            assert await sup.wait_ready(timeout=2) is True
+            res = await sup.call("mcp__s__search", {"q": "x"}, timeout=2)
+            assert res["ok"] is True
+            assert fake.calls == [("mcp__s__search", {"q": "x"})]
+            await sup.stop(timeout=2)
+            # connect + disconnect both happened inside the supervisor task.
+            assert fake.connected is True
+            assert fake.disconnected is True
+        asyncio.run(scenario())
+
+    def test_start_is_idempotent(self):
+        async def scenario():
+            fake = _FakeClient()
+            sup = mc.MCPSupervisor(client=fake)
+            sup.start()
+            t1 = sup._task
+            sup.start()  # second start must not spawn a new task
+            assert sup._task is t1
+            await sup.stop(timeout=2)
+        asyncio.run(scenario())
+
+    def test_call_before_start_returns_not_running(self):
+        sup = mc.MCPSupervisor(client=_FakeClient())
+        res = asyncio.run(sup.call("mcp__s__x"))
+        assert res["ok"] is False and "not running" in res["error"]
+
+    def test_call_after_stop_returns_not_running(self):
+        async def scenario():
+            sup = mc.MCPSupervisor(client=_FakeClient())
+            sup.start()
+            await sup.wait_ready(timeout=2)
+            await sup.stop(timeout=2)
+            return await sup.call("mcp__s__x")
+        res = asyncio.run(scenario())
+        assert res["ok"] is False and "not running" in res["error"]
+
+    def test_survives_connect_failure(self):
+        async def scenario():
+            fake = _FakeClient(connect_raises=True)
+            sup = mc.MCPSupervisor(client=fake)
+            sup.start()
+            assert await sup.wait_ready(timeout=2) is True  # ready set even on failure
+            res = await sup.call("mcp__s__x", timeout=2)    # loop still serves calls
+            await sup.stop(timeout=2)
+            return res
+        res = asyncio.run(scenario())
+        assert res["ok"] is True
+
+    def test_call_timeout(self):
+        async def scenario():
+            fake = _FakeClient(call_delay=1.0)
+            sup = mc.MCPSupervisor(client=fake)
+            sup.start()
+            await sup.wait_ready(timeout=2)
+            res = await sup.call("mcp__s__slow", timeout=0.2)
+            await sup.stop(timeout=2)
+            return res
+        res = asyncio.run(scenario())
+        assert res["ok"] is False and "timeout" in res["error"]
+
+    def test_stop_without_start_is_safe(self):
+        sup = mc.MCPSupervisor(client=_FakeClient())
+        asyncio.run(sup.stop())  # must not raise
+
+
 class TestDormantByDefault:
     def test_connect_all_noop_when_disabled(self):
         client = MCPClient()

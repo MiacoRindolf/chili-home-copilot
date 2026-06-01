@@ -316,3 +316,131 @@ mcp_client = MCPClient()
 
 def get_mcp_client() -> MCPClient:
     return mcp_client
+
+
+# ---------------------------------------------------------------------------
+# Supervisor — owns all live connections inside ONE task (anyio-safe)
+# ---------------------------------------------------------------------------
+
+class MCPSupervisor:
+    """Runs MCP connections inside a single long-lived task.
+
+    The MCP SDK is built on anyio task groups: a session/transport must be
+    entered AND closed within the same task/cancel-scope. So all of connect →
+    serve-calls → disconnect happen inside `run()`. Request handlers anywhere
+    submit calls via a queue; the supervisor services them in-scope. This avoids
+    the "exit cancel scope in a different task" error that naive
+    startup/shutdown wiring would hit.
+    """
+
+    def __init__(self, client: Optional[MCPClient] = None) -> None:
+        self._client = client or MCPClient()
+        self._queue: "Any" = None  # asyncio.Queue, created in run()'s loop
+        self._stop = None          # asyncio.Event, created in run()
+        self._task = None          # asyncio.Task
+        self._ready = None         # asyncio.Event
+        self._started = False
+
+    async def run(self) -> None:
+        import asyncio
+        try:
+            try:
+                n = await self._client.connect_all()
+                logger.info("[mcp_client] supervisor connected %d server(s)", n)
+            except Exception as e:
+                logger.error("[mcp_client] supervisor connect_all failed: %s", e)
+            finally:
+                self._ready.set()
+
+            while not self._stop.is_set():
+                try:
+                    item = await asyncio.wait_for(self._queue.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    continue
+                if item is None:  # shutdown sentinel
+                    break
+                qualified_name, arguments, fut = item
+                try:
+                    result = await self._client.call_tool(qualified_name, arguments)
+                    if not fut.done():
+                        fut.set_result(result)
+                except Exception as e:  # pragma: no cover - call_tool already guards
+                    if not fut.done():
+                        fut.set_exception(e)
+        finally:
+            try:
+                await self._client.disconnect_all()
+            except Exception as e:  # pragma: no cover - cleanup best-effort
+                logger.warning("[mcp_client] supervisor disconnect failed: %s", e)
+
+    def start(self) -> None:
+        """Spawn the supervisor task on the running event loop. Idempotent.
+
+        The sync primitives are created here (not in run()) so a caller that
+        awaits wait_ready()/call() right after start() never races a not-yet-
+        scheduled run() and sees them as None.
+        """
+        import asyncio
+        if self._started:
+            return
+        self._queue = asyncio.Queue()
+        self._stop = asyncio.Event()
+        self._ready = asyncio.Event()
+        self._started = True
+        self._task = asyncio.create_task(self.run(), name="mcp-supervisor")
+
+    async def wait_ready(self, timeout: float = 10.0) -> bool:
+        import asyncio
+        if self._ready is None:
+            return False
+        try:
+            await asyncio.wait_for(self._ready.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
+    async def call(self, qualified_name: str, arguments: Optional[Dict] = None,
+                   timeout: float = 30.0) -> Dict:
+        """Submit a tool call to the supervisor and await its result."""
+        import asyncio
+        if not self._started or self._stop is None or self._stop.is_set():
+            return {"ok": False, "output": "", "error": "mcp supervisor not running"}
+        loop = asyncio.get_event_loop()
+        fut = loop.create_future()
+        await self._queue.put((qualified_name, arguments or {}, fut))
+        try:
+            return await asyncio.wait_for(fut, timeout=timeout)
+        except asyncio.TimeoutError:
+            if not fut.done():
+                fut.cancel()
+            return {"ok": False, "output": "", "error": f"mcp call timeout: {qualified_name}"}
+
+    async def stop(self, timeout: float = 10.0) -> None:
+        """Signal shutdown and wait for the task to close connections in-scope."""
+        import asyncio
+        if not self._started or self._task is None:
+            return
+        if self._stop is not None:
+            self._stop.set()
+        try:
+            if self._queue is not None:
+                self._queue.put_nowait(None)  # unblock the get()
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(self._task, timeout=timeout)
+        except asyncio.TimeoutError:
+            self._task.cancel()
+        finally:
+            self._started = False
+
+    def status(self) -> Dict[str, Dict]:
+        return self._client.get_status()
+
+
+# Live supervisor singleton (started by the app lifespan when mcp_enabled).
+mcp_supervisor = MCPSupervisor(client=mcp_client)
+
+
+def get_mcp_supervisor() -> MCPSupervisor:
+    return mcp_supervisor
