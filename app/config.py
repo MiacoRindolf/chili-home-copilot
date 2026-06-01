@@ -1632,6 +1632,15 @@ class Settings(BaseSettings):
     teacher_escalation_enabled: bool = False
     teacher_skill_dir: str = "data/skills"   # where FileSkillStore persists skills
 
+    # Daily trading brief scheduled job (app/services/trading/daily_trading_brief.py).
+    # Generates a per-user HTML brief once daily (read-only; reuses the on-demand
+    # /api/brain/trading/brief stack). DORMANT by default — opt-in since it adds a
+    # scheduler job. Writes HTML files under the dir below; no broker/DB writes.
+    chili_daily_trading_brief_enabled: bool = False
+    chili_daily_trading_brief_hour_pt: int = 17        # local America/Los_Angeles hour
+    chili_daily_trading_brief_window_hours: int = 24   # lookback for the brief
+    chili_daily_trading_brief_dir: str = "data/briefs"
+
     # Reasoning Brain
     reasoning_interval_hours: int = 6     # how often to run reasoning cycle
     reasoning_max_web_searches: int = 10  # cap per cycle to avoid abuse

@@ -322,6 +322,42 @@ def _run_daily_prescreen_job():
     run_scheduler_job_guarded("daily_prescreen", _work)
 
 
+def _run_daily_trading_brief_job():
+    """Generate + persist per-user daily trading brief (~17:00 America/Los_Angeles).
+
+    Read-only/report job: reuses the on-demand brief stack
+    (trading_summary -> trading_brief -> visual_report) to write one HTML file
+    per user. Dormant unless chili_daily_trading_brief_enabled. Touches no broker
+    or live trading state; per-user fault isolation lives in the brief module.
+    """
+    from ..config import settings as _settings
+
+    if not getattr(_settings, "chili_daily_trading_brief_enabled", False):
+        return
+
+    def _work() -> None:
+        from ..db import SessionLocal
+        from .trading.daily_trading_brief import run_daily_brief_for_all_users
+
+        out_dir = getattr(_settings, "chili_daily_trading_brief_dir", "data/briefs")
+        try:
+            window = max(1, int(getattr(_settings, "chili_daily_trading_brief_window_hours", 24)))
+        except (TypeError, ValueError):
+            window = 24
+        db = SessionLocal()
+        try:
+            result = run_daily_brief_for_all_users(db, out_dir, window_hours=window)
+            logger.info("[scheduler] Daily trading brief result: %s", result)
+        finally:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("daily_trading_brief", _work)
+
+
 def _run_daily_market_scan_job():
     """Full market scan over prescreen DB rows (~2:30 AM America/Los_Angeles)."""
     from ..config import settings as _settings
@@ -4373,6 +4409,20 @@ def start_scheduler():
                 replace_existing=True,
                 max_instances=1,
                 next_run_time=datetime.now() + timedelta(seconds=35),
+            )
+
+        if include_web_light and getattr(settings, "chili_daily_trading_brief_enabled", False):
+            _scheduler.add_job(
+                _run_daily_trading_brief_job,
+                trigger=CronTrigger(
+                    hour=int(getattr(settings, "chili_daily_trading_brief_hour_pt", 17)),
+                    minute=0,
+                    timezone="America/Los_Angeles",
+                ),
+                id="daily_trading_brief",
+                name="Daily trading brief (17:00 America/Los_Angeles)",
+                replace_existing=True,
+                max_instances=1,
             )
 
         if (
