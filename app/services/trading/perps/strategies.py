@@ -1,9 +1,9 @@
 """Q2.T3 — two seed perp strategies.
 
-  - funding_carry         : When funding_annualized > 15% AND basis_z_score
+  - funding_carry         : When funding APY decimal > 0.15 (15%) AND basis_z_score
                             > 1.5 (perp clearly rich vs spot), short the
                             perp + buy spot. Collect funding, neutral price.
-                            Closes when funding_annualized normalizes < 5%.
+                            Closes when funding APY normalizes < 0.05 (5%).
 
   - oi_divergence         : When OI rises 20%+ in 24h AND price flat-to-down
                             within ±2%, longs are crowded. Take a counter-
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from math import isfinite
 from typing import Optional
 
 from sqlalchemy import text
@@ -42,25 +43,63 @@ class PerpProposal:
     meta: dict = field(default_factory=dict)
 
 
+def _decimal_apy_from_value(value: float | None, *, legacy_percent: bool = False) -> float | None:
+    if value is None:
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not isfinite(out):
+        return None
+    if legacy_percent and abs(out) > 1.0:
+        return out / 100.0
+    return out
+
+
 def funding_carry(
     *,
     symbol: str,
     venue: str,
     perp_price: float,
-    funding_annualized_pct: float,
     basis_z_score_value: float,
+    funding_apy_decimal: float | None = None,
     contracts: float = 0.01,
-    entry_threshold_apy: float = 15.0,
+    entry_threshold_apy_decimal: float = 0.15,
     entry_threshold_basis_z: float = 1.5,
     confidence: float = 0.55,
+    funding_annualized_pct: float | None = None,
+    entry_threshold_apy: float | None = None,
 ) -> Optional[PerpProposal]:
     """Short the perp when carry is fat. Hedge with spot long is the
     operator's responsibility (or a follow-up Q2.T3a basket trade)."""
-    if funding_annualized_pct < entry_threshold_apy:
+    funding_apy = _decimal_apy_from_value(funding_apy_decimal)
+    funding_source = "funding_apy_decimal"
+    if funding_apy is None:
+        funding_apy = _decimal_apy_from_value(
+            funding_annualized_pct,
+            legacy_percent=True,
+        )
+        funding_source = "funding_annualized_pct_legacy"
+
+    threshold_apy = _decimal_apy_from_value(entry_threshold_apy_decimal)
+    threshold_source = "entry_threshold_apy_decimal"
+    if entry_threshold_apy is not None:
+        threshold_apy = _decimal_apy_from_value(
+            entry_threshold_apy,
+            legacy_percent=True,
+        )
+        threshold_source = "entry_threshold_apy_legacy"
+
+    if funding_apy is None or threshold_apy is None:
+        return None
+    if funding_apy < threshold_apy:
         return None
     if basis_z_score_value < entry_threshold_basis_z:
         return None
     stop = perp_price * 1.05  # 5% stop above entry
+    funding_pct = funding_apy * 100.0
+    threshold_pct = threshold_apy * 100.0
     return PerpProposal(
         symbol=symbol,
         venue=venue,
@@ -72,12 +111,18 @@ def funding_carry(
         strategy_family="funding_carry",
         confidence=confidence,
         rationale=(
-            f"Funding APY {funding_annualized_pct:.1f}% > {entry_threshold_apy}%; "
+            f"Funding APY {funding_pct:.1f}% > {threshold_pct:.1f}%; "
             f"basis z-score {basis_z_score_value:.2f} > {entry_threshold_basis_z}; "
             f"short perp, hedge with spot long. Exit when funding < 5% APY."
         ),
         meta={
-            "funding_annualized_pct": funding_annualized_pct,
+            "funding_unit": "decimal_apy",
+            "funding_apy_decimal": funding_apy,
+            "funding_annualized_pct": funding_pct,
+            "entry_threshold_apy_decimal": threshold_apy,
+            "entry_threshold_apy_pct": threshold_pct,
+            "funding_source": funding_source,
+            "threshold_source": threshold_source,
             "basis_z_score": basis_z_score_value,
             "exit_signal": "funding_apy_below_5_pct",
         },
