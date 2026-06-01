@@ -56,6 +56,7 @@ from .cross_asset_model import (
     compute_cross_asset,
     compute_snapshot_id,
 )
+from .ohlcv_freshness import daily_ohlcv_staleness_reason
 
 logger = logging.getLogger(__name__)
 _ALLOWED_MODES = ("off", "shadow", "compare", "authoritative")
@@ -148,6 +149,14 @@ def _safe_ret(prior: float | None, last: float | None) -> float | None:
     return (last_f / prior_f) - 1.0
 
 
+def _max_ohlcv_age_days() -> int:
+    raw = getattr(settings, "brain_cross_asset_max_ohlcv_age_days", 7)
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 7
+
+
 def _build_asset_leg(
     symbol: str, *, want_daily: bool = False,
 ) -> AssetLeg:
@@ -177,6 +186,23 @@ def _build_asset_leg(
         )
 
     if df is None or df.empty or "Close" not in getattr(df, "columns", []):
+        return AssetLeg(
+            symbol=symbol,
+            last_close=None,
+            ret_1d=None,
+            ret_5d=None,
+            ret_20d=None,
+            missing=True,
+        )
+
+    stale_reason = daily_ohlcv_staleness_reason(
+        df,
+        max_age_days=_max_ohlcv_age_days(),
+    )
+    if stale_reason:
+        logger.warning(
+            "[cross_asset] stale_ohlcv(%s): %s", symbol, stale_reason,
+        )
         return AssetLeg(
             symbol=symbol,
             last_close=None,

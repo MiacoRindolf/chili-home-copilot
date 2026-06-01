@@ -916,6 +916,7 @@ class Settings(BaseSettings):
     brain_breadth_relstr_tilt_threshold: float = 0.02
     brain_breadth_relstr_risk_on_ratio: float = 0.65
     brain_breadth_relstr_risk_off_ratio: float = 0.35
+    brain_breadth_relstr_max_ohlcv_age_days: int = 7
     # Diagnostics endpoint default lookback (clamped [1, 180] at the route).
     brain_breadth_relstr_lookback_days: int = 14
 
@@ -934,6 +935,7 @@ class Settings(BaseSettings):
     brain_cross_asset_vix_percentile_shock: float = 0.80
     brain_cross_asset_beta_window_days: int = 60
     brain_cross_asset_composite_min_agreement: int = 2
+    brain_cross_asset_max_ohlcv_age_days: int = 7
     # Diagnostics endpoint default lookback (clamped [1, 180] at the route).
     brain_cross_asset_lookback_days: int = 14
 

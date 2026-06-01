@@ -50,6 +50,7 @@ from .breadth_relstr_model import (
     compute_breadth_relstr,
     compute_snapshot_id,
 )
+from .ohlcv_freshness import daily_ohlcv_staleness_reason
 
 logger = logging.getLogger(__name__)
 _ALLOWED_MODES = ("off", "shadow", "compare", "authoritative")
@@ -106,6 +107,14 @@ def _config_from_settings() -> BreadthRelstrConfig:
     )
 
 
+def _max_ohlcv_age_days() -> int:
+    raw = getattr(settings, "brain_breadth_relstr_max_ohlcv_age_days", 7)
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 7
+
+
 # ---------------------------------------------------------------------------
 # Dataclasses
 # ---------------------------------------------------------------------------
@@ -154,6 +163,21 @@ def _build_universe_member(symbol: str) -> UniverseMember:
         )
 
     if df is None or df.empty or "Close" not in getattr(df, "columns", []):
+        return UniverseMember(
+            symbol=symbol,
+            missing=True,
+            trend=TREND_MISSING,
+            direction=TREND_MISSING,
+        )
+
+    stale_reason = daily_ohlcv_staleness_reason(
+        df,
+        max_age_days=_max_ohlcv_age_days(),
+    )
+    if stale_reason:
+        logger.warning(
+            "[breadth_relstr] stale_ohlcv(%s): %s", symbol, stale_reason,
+        )
         return UniverseMember(
             symbol=symbol,
             missing=True,
