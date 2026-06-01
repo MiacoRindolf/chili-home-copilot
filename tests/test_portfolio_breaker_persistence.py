@@ -17,8 +17,9 @@ class _FakeBreakerDb:
         self.row = row
         self.statements: list[str] = []
 
-    def execute(self, statement):
+    def execute(self, statement, params=None):
         self.statements.append(str(statement))
+        self.params = params or {}
         return _FakeResult(self.row)
 
     def query(self, *_args, **_kwargs):
@@ -84,6 +85,57 @@ def test_check_new_trade_allowed_blocks_latest_persisted_breaker_before_recomput
         assert any("trading_risk_state" in stmt for stmt in db.statements)
         assert portfolio_risk.is_breaker_tripped() is True
         assert portfolio_risk.get_breaker_status()["reason"] == reason
+    finally:
+        _reset_process_breaker()
+
+
+def test_check_new_trade_allowed_scopes_persisted_breaker_to_user() -> None:
+    from app.services.trading import portfolio_risk
+    from app.services.trading.portfolio_risk import check_new_trade_allowed
+
+    db = _FakeResetBreakerDb(None)
+    budget = SimpleNamespace(
+        can_open_new=True,
+        crypto_positions=0,
+        stock_positions=0,
+    )
+    _reset_process_breaker()
+
+    try:
+        with patch(
+            "app.services.trading.governance.is_kill_switch_active",
+            return_value=False,
+        ), patch(
+            "app.services.trading.portfolio_risk.check_drawdown_breaker",
+            return_value=(False, None),
+        ), patch(
+            "app.services.trading.portfolio_risk.get_portfolio_risk_snapshot",
+            return_value=budget,
+        ), patch(
+            "app.services.trading.portfolio_risk._broker_live_open_trades",
+            return_value=[],
+        ), patch(
+            "app.services.trading.portfolio_risk.check_sector_concentration",
+            return_value=(True, "ok"),
+        ), patch(
+            "app.services.trading.portfolio_risk.check_correlation_risk",
+            return_value=(True, "ok"),
+        ), patch(
+            "app.services.trading.portfolio_optimizer.check_portfolio_drawdown",
+            return_value={"breached": False, "dd_pct": 0.0, "reason": None},
+        ):
+            ok, reason = check_new_trade_allowed(
+                db,
+                42,
+                "SPY",
+                capital=10_000.0,
+            )
+
+        assert ok is True
+        assert reason == "ok"
+        assert db.params == {"uid": 42}
+        assert "user_id = :uid" in db.statements[0]
+        assert portfolio_risk.is_breaker_tripped() is False
     finally:
         _reset_process_breaker()
 

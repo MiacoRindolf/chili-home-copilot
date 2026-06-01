@@ -700,6 +700,12 @@ class TestPortfolioBreakerSeparation:
         # backward-compat — the rename is on the settings key, not the
         # log prefix (operators have parsers built on the old text).
         assert reason is not None and "monthly_dd_breaker" in reason
+        persisted_uid = db.execute(text(
+            "SELECT user_id FROM trading_risk_state "
+            "WHERE regime = 'circuit_breaker' "
+            "ORDER BY created_at DESC, id DESC LIMIT 1"
+        )).scalar()
+        assert persisted_uid == uid
 
     def test_portfolio_tripped_blocks_manual_buy_through_coinbase_adapter(
         self, db, monkeypatch,

@@ -426,7 +426,7 @@ def check_new_trade_allowed(
         logger.error("[risk] Kill-switch check failed — blocking trade as precaution", exc_info=True)
         return False, "Kill-switch check failed — trade blocked as safety precaution"
 
-    persisted_breaker = _refresh_breaker_from_db_for_gate(db)
+    persisted_breaker = _refresh_breaker_from_db_for_gate(db, user_id=user_id)
     if persisted_breaker is not None:
         persisted_tripped, persisted_reason = persisted_breaker
         if persisted_tripped:
@@ -1762,7 +1762,7 @@ def check_drawdown_breaker(
             f"Unrealized MTM drawdown {unrealized_pct:.1f}% "
             f"exceeds -{limits.max_30day_dd_pct}% limit"
         )
-        _persist_breaker_state(True, _breaker_reason)
+        _persist_breaker_state(True, _breaker_reason, user_id=user_id)
         logger.warning("[circuit_breaker] TRIPPED (MTM): %s", _breaker_reason)
         return True, _breaker_reason
 
@@ -1784,7 +1784,7 @@ def check_drawdown_breaker(
             f"5-day drawdown {pnl_5d_pct:.1f}% (realized={pnl_5d_realized:.0f}, "
             f"unrealized={unrealized_pnl:.0f}) exceeds -{limits.max_5day_dd_pct}% limit"
         )
-        _persist_breaker_state(True, _breaker_reason)
+        _persist_breaker_state(True, _breaker_reason, user_id=user_id)
         logger.warning("[circuit_breaker] TRIPPED: %s", _breaker_reason)
         return True, _breaker_reason
 
@@ -1806,7 +1806,7 @@ def check_drawdown_breaker(
             f"30-day drawdown {pnl_30d_pct:.1f}% (realized={pnl_30d_realized:.0f}, "
             f"unrealized={unrealized_pnl:.0f}) exceeds -{limits.max_30day_dd_pct}% limit"
         )
-        _persist_breaker_state(True, _breaker_reason)
+        _persist_breaker_state(True, _breaker_reason, user_id=user_id)
         logger.warning("[circuit_breaker] TRIPPED: %s", _breaker_reason)
         return True, _breaker_reason
 
@@ -1856,7 +1856,7 @@ def check_drawdown_breaker(
                     f"${float(threshold):.2f} "
                     f"(K={k_val}σ, computed from {n_obs}d CHILI history)"
                 )
-                _persist_breaker_state(True, _breaker_reason)
+                _persist_breaker_state(True, _breaker_reason, user_id=user_id)
                 logger.warning("[circuit_breaker] TRIPPED: %s", _breaker_reason)
                 return True, _breaker_reason
 
@@ -1918,7 +1918,7 @@ def check_drawdown_breaker(
                     f"(real CHILI decisions, total=${streak_loss:.2f}, "
                     f"floor=${min_loss_dollars:.2f})"
                 )
-                _persist_breaker_state(True, _breaker_reason)
+                _persist_breaker_state(True, _breaker_reason, user_id=user_id)
                 logger.warning("[circuit_breaker] TRIPPED: %s", _breaker_reason)
                 return True, _breaker_reason
             else:
@@ -1939,8 +1939,14 @@ def is_breaker_tripped() -> bool:
 
 def _refresh_breaker_from_db_for_gate(
     db: Session,
+    *,
+    user_id: int | None = None,
 ) -> tuple[bool, str | None] | None:
-    """Synchronize entry gates with durable circuit-breaker state."""
+    """Synchronize entry gates with durable circuit-breaker state.
+
+    User-scoped breaker trips block only that user. ``user_id IS NULL``
+    rows are explicit global reset/trip events and apply to every user.
+    """
     execute = getattr(db, "execute", None)
     if not callable(execute):
         return None
@@ -1953,9 +1959,13 @@ def _refresh_breaker_from_db_for_gate(
             "SELECT breaker_tripped, breaker_reason "
             "FROM trading_risk_state "
             "WHERE regime = 'circuit_breaker' "
+            "  AND ("
+            "      (:uid IS NULL AND user_id IS NULL) "
+            "      OR (:uid IS NOT NULL AND (user_id = :uid OR user_id IS NULL))"
+            "  ) "
             "ORDER BY created_at DESC, id DESC "
             "LIMIT 1"
-        )).fetchone()
+        ), {"uid": user_id}).fetchone()
     except Exception:
         logger.warning(
             "[circuit_breaker] durable state read failed; blocking entries",
@@ -1991,7 +2001,12 @@ def reset_breaker() -> None:
     logger.info("[circuit_breaker] Manually reset")
 
 
-def _persist_breaker_state(tripped: bool, reason: str | None) -> None:
+def _persist_breaker_state(
+    tripped: bool,
+    reason: str | None,
+    *,
+    user_id: int | None = None,
+) -> None:
     """Write circuit breaker state to trading_risk_state so it survives restarts."""
     try:
         from ...db import SessionLocal
@@ -2001,7 +2016,7 @@ def _persist_breaker_state(tripped: bool, reason: str | None) -> None:
             sess.execute(text(
                 "INSERT INTO trading_risk_state (user_id, snapshot_date, breaker_tripped, breaker_reason, regime, capital) "
                 "VALUES (:uid, NOW(), :tripped, :reason, 'circuit_breaker', 0) "
-            ), {"uid": None, "tripped": tripped, "reason": reason or ""})
+            ), {"uid": user_id, "tripped": tripped, "reason": reason or ""})
             sess.commit()
         finally:
             # FIX 46 pattern: rollback to end implicit read txn before close.
@@ -2125,7 +2140,7 @@ def unified_risk_check(
         detail["capital_valid"] = False
         return False, "invalid_capital", detail
 
-    persisted_breaker = _refresh_breaker_from_db_for_gate(db)
+    persisted_breaker = _refresh_breaker_from_db_for_gate(db, user_id=user_id)
     if persisted_breaker is not None:
         persisted_tripped, persisted_reason = persisted_breaker
         if persisted_tripped:
