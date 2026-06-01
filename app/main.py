@@ -770,7 +770,28 @@ async def lifespan(app: FastAPI):
                 "[startup] chili mem_watcher failed to start"
             )
 
+    # External MCP client supervisor — owns all live MCP connections inside one
+    # async task (anyio-safe). Off unless mcp_enabled; skipped under pytest.
+    _mcp_started = False
+    from .config import settings as _mcp_settings
+    if not _pytest_mode and getattr(_mcp_settings, "mcp_enabled", False):
+        try:
+            from .mcp_client import get_mcp_supervisor
+            get_mcp_supervisor().start()
+            _mcp_started = True
+            logging.getLogger("chili.startup").info("[startup] mcp supervisor started")
+        except Exception:
+            logging.getLogger("chili.startup").exception(
+                "[startup] mcp supervisor failed to start"
+            )
+
     yield
+    if _mcp_started:
+        try:
+            from .mcp_client import get_mcp_supervisor
+            await get_mcp_supervisor().stop()
+        except Exception:
+            logging.getLogger("chili.startup").exception("[shutdown] mcp supervisor stop failed")
     _stop_massive_ws()
     stop_scheduler()
 

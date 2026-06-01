@@ -1578,14 +1578,17 @@ def mcp_status():
             # Config sanity: any allowlisted tool the denylist blocks regardless.
             "allowlist_blocked_by_denylist": [t for t in allowed if mcpc.is_dangerous_tool(t)],
         })
+    sup = mcpc.get_mcp_supervisor()
     return JSONResponse({
         "ok": True,
         "enabled": bool(getattr(settings, "mcp_enabled", False)),
         "sdk_present": mcpc._HAS_MCP,
         "configured_servers": len(configs),
         "servers": servers,
-        "live_status": mcpc.get_mcp_client().get_status(),
-        "note": "Read-only. Live connections are not established by this endpoint.",
+        "supervisor_running": bool(getattr(sup, "_started", False)),
+        "live_status": sup.status(),
+        "note": "Read-only. Live connections are owned by the supervisor task, "
+                "not established by this endpoint.",
     })
 
 

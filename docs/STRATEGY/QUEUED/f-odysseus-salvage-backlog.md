@@ -81,11 +81,15 @@ allowlist — never URLs/secrets), and a config-sanity flag listing any allowlis
 tool the denylist blocks. No live connections. See
 `docs/STRATEGY/CC_REPORTS/2026-06-01_f-odysseus-salvage-wiring-w2-mcp-status.md`.
 
-**Live connection lifecycle DEFERRED** to a dedicated brief —
-`docs/STRATEGY/QUEUED/f-mcp-connection-lifecycle.md`. The MCP SDK's anyio
-task-scope rules (a session must be entered+closed in the same task) make naive
-startup/shutdown wiring unsafe; it needs a single supervisor task that owns all
-connections. Not rushed into the live app mid-soak.
+**Live connection lifecycle (W3) SHIPPED 2026-06-01:** `MCPSupervisor` in
+`app/mcp_client.py` runs connect→serve-queue→disconnect in ONE task (anyio-safe);
+wired into `app/main.py` lifespan gated on `mcp_enabled` (inert by default,
+skipped under pytest); `GET /api/brain/mcp/status` now reports
+`supervisor_running`. 9 supervisor tests (lifecycle, idempotent start,
+not-running guards, connect-failure survival, timeout). See
+`docs/STRATEGY/CC_REPORTS/2026-06-01_f-mcp-connection-lifecycle.md`. Brief at
+`docs/STRATEGY/QUEUED/f-mcp-connection-lifecycle.md` (end-to-end stub-server test
+remains a stretch goal).
 
 ---
 
