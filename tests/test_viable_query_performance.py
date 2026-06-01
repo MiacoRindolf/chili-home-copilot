@@ -3,7 +3,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from app.models.trading import MomentumStrategyVariant
-from app.services.trading.momentum_neural.viable_query import _hot_variants_by_family_version
+from app.services.trading.momentum_neural.viable_query import (
+    _hot_variants_by_family_version,
+    _session_counts,
+)
 
 
 class _FakeQuery:
@@ -100,3 +103,29 @@ def test_hot_variants_by_family_version_skips_empty_lookup() -> None:
 
     assert _hot_variants_by_family_version(db, []) == {}  # type: ignore[arg-type]
     assert db.query_calls == 0
+
+
+def test_session_counts_scans_rows_once() -> None:
+    class OneShotRows(list):
+        def __init__(self, values: list[SimpleNamespace]):
+            super().__init__(values)
+            self.iterations = 0
+
+        def __iter__(self):
+            self.iterations += 1
+            if self.iterations > 1:
+                raise AssertionError("session rows were scanned more than once")
+            return super().__iter__()
+
+    rows = OneShotRows(
+        [
+            SimpleNamespace(mode="paper", state="done"),
+            SimpleNamespace(mode="paper", state="queued_live"),
+            SimpleNamespace(mode="live", state="armed_pending_runner"),
+            SimpleNamespace(mode="live", state="live_arm_pending"),
+            SimpleNamespace(mode="shadow", state="live_arm_pending"),
+        ]
+    )
+
+    assert _session_counts(rows) == (2, 2, 4)
+    assert rows.iterations == 1

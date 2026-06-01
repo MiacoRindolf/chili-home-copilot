@@ -39,12 +39,27 @@ pattern state. Safe to run on a cron.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Iterable
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
+
+
+def _priority_bucket_counts(rows: Iterable[Any]) -> tuple[int, int, int, int]:
+    hi = md = lo = zr = 0
+    for row in rows:
+        priority = row.backtest_priority
+        if priority >= 50:
+            hi += 1
+        elif priority >= 10:
+            md += 1
+        elif priority > 0:
+            lo += 1
+        elif priority == 0:
+            zr += 1
+    return hi, md, lo, zr
 
 
 def run_priority_scoring(db: Session) -> dict[str, Any]:
@@ -163,10 +178,7 @@ def run_priority_scoring(db: Session) -> dict[str, Any]:
     db.commit()
 
     scored = len(rows)
-    hi = sum(1 for r in rows if r.backtest_priority >= 50)
-    md = sum(1 for r in rows if 10 <= r.backtest_priority < 50)
-    lo = sum(1 for r in rows if 0 < r.backtest_priority < 10)
-    zr = sum(1 for r in rows if r.backtest_priority == 0)
+    hi, md, lo, zr = _priority_bucket_counts(rows)
 
     summary = {
         "scored": scored,

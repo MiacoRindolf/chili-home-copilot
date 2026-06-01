@@ -62,11 +62,17 @@ def _symbol_family_memory_adjust(db: "Session", symbol: str, family_id: str) -> 
         .limit(10)
         .all()
     )
-    vals = [float(r[0]) for r in rows if r[0] is not None]
-    n = len(vals)
+    n = 0
+    wins = 0
+    for r in rows:
+        raw = r[0]
+        if raw is None:
+            continue
+        n += 1
+        if float(raw) > 0:
+            wins += 1
     if n < 3:
         return 0.0
-    wins = sum(1 for v in vals if v > 0)
     wr = wins / n
     if n >= 5 and wr > 0.55:
         return min(0.08, 0.05 * (wr - 0.55))

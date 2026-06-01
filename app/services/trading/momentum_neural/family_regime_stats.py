@@ -37,13 +37,34 @@ def _bucket_summary(
     if n < 1:
         return None
     wins = sum(1 for v in vals if v > 0)
+    return _bucket_summary_from_stats(
+        family_id=family_id,
+        volatility_regime=volatility_regime,
+        session_label=session_label,
+        n=n,
+        wins=wins,
+        total=sum(vals),
+    )
+
+
+def _bucket_summary_from_stats(
+    *,
+    family_id: str,
+    volatility_regime: str,
+    session_label: str,
+    n: int,
+    wins: int,
+    total: float,
+) -> dict[str, Any] | None:
+    if n < 1:
+        return None
     return {
         "family_id": family_id,
         "volatility_regime": volatility_regime,
         "session_label": session_label,
         "n": n,
         "win_rate": wins / n,
-        "mean_return_bps": sum(vals) / n,
+        "mean_return_bps": total / n,
     }
 
 
@@ -55,7 +76,9 @@ def _target_family_regime_summary(
     session_label: str,
 ) -> dict[str, Any] | None:
     fid = (family_id or "").strip().lower()
-    vals: list[float] = []
+    n = 0
+    wins = 0
+    total = 0.0
     matched_family = family_id
     for out, var in rows:
         fam, vol, sess_lbl = _family_regime_key(out, var)
@@ -64,12 +87,18 @@ def _target_family_regime_summary(
         if vol != volatility_regime or sess_lbl != session_label:
             continue
         matched_family = fam
-        vals.append(float(out.return_bps or 0.0))
-    return _bucket_summary(
+        value = float(out.return_bps or 0.0)
+        n += 1
+        total += value
+        if value > 0:
+            wins += 1
+    return _bucket_summary_from_stats(
         family_id=matched_family,
         volatility_regime=volatility_regime,
         session_label=session_label,
-        returns=vals,
+        n=n,
+        wins=wins,
+        total=total,
     )
 
 

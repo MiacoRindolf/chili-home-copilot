@@ -251,6 +251,26 @@ def _hot_variants_by_family_version(
     return variants
 
 
+_ARMED_OR_PENDING_STATES = {
+    "armed_pending_runner",
+    "live_arm_pending",
+    "queued_live",
+}
+
+
+def _session_counts(rows: list[Any]) -> tuple[int, int, int]:
+    paper_n = live_n = armed = 0
+    for row in rows:
+        mode = row.mode
+        if mode == "paper":
+            paper_n += 1
+        elif mode == "live":
+            live_n += 1
+        if row.state in _ARMED_OR_PENDING_STATES:
+            armed += 1
+    return paper_n, live_n, armed
+
+
 def _session_summary(
     db: Session,
     *,
@@ -267,18 +287,7 @@ def _session_summary(
     if user_id is not None:
         q = q.filter(TradingAutomationSession.user_id == user_id)
     rows = q.all()
-    paper_n = sum(1 for r in rows if r.mode == "paper")
-    live_n = sum(1 for r in rows if r.mode == "live")
-    armed = sum(
-        1
-        for r in rows
-        if r.state
-        in (
-            "armed_pending_runner",
-            "live_arm_pending",
-            "queued_live",
-        )
-    )
+    paper_n, live_n, armed = _session_counts(rows)
     end_read_only_transaction(db, context="viable_session_summary")
     return {
         "sessions_7d_paper": paper_n,

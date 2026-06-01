@@ -85,3 +85,18 @@ def test_alpha_decay_dollar_mean_ignores_missing_pnl():
     ]
 
     assert alpha_decay._mean_known_pnl(evidence) == 4.0
+
+
+def test_alpha_decay_rolling_evidence_stats_single_summary():
+    evidence = [
+        {"win": True, "pnl_pct": 2.0, "pnl": 8.0},
+        {"win": False, "pnl_pct": -1.0, "pnl": None},
+        {"win": True, "pnl_pct": 3.0, "pnl": 4.0},
+        {"win": False, "pnl_pct": -2.0, "pnl": 0.0},
+    ]
+
+    live_wr, avg_ret_pct, avg_pnl = alpha_decay._rolling_evidence_stats(evidence)
+
+    assert live_wr == 0.5
+    assert avg_ret_pct == 0.5
+    assert avg_pnl == 4.0

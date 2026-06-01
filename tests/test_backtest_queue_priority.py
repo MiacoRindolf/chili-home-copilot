@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 from app.config import settings
 from app.models.trading import ScanPattern
@@ -19,7 +20,10 @@ from app.services.trading.backtest_queue import (
     mark_pattern_tested,
     summarize_queue_batch,
 )
-from app.services.trading.backtest_queue_priority import run_priority_scoring
+from app.services.trading.backtest_queue_priority import (
+    _priority_bucket_counts,
+    run_priority_scoring,
+)
 
 _FIXED_LINEAGE_CAP_DISABLED = 0
 _ADAPTIVE_HALF_BATCH_LINEAGE_SHARE = 0.50
@@ -29,6 +33,70 @@ _ENV_LINEAGE_SHARE = "0.25"
 _ENV_LINEAGE_FLOOR = "2"
 _FAST_BACKTEST_BATCH_BASIS = 30
 _QUEUE_BATCH_BASIS = 80
+
+
+def test_priority_bucket_counts_scan_rows_once() -> None:
+    class OneShotRows:
+        def __init__(self, priorities: list[int]):
+            self.priorities = priorities
+            self.iterations = 0
+
+        def __iter__(self):
+            self.iterations += 1
+            if self.iterations > 1:
+                raise AssertionError("priority rows were scanned more than once")
+            for priority in self.priorities:
+                yield SimpleNamespace(backtest_priority=priority)
+
+    rows = OneShotRows([100, 50, 49, 10, 9, 1, 0, -5])
+
+    assert _priority_bucket_counts(rows) == (2, 2, 2, 1)
+    assert rows.iterations == 1
+
+
+def test_run_priority_scoring_counts_priority_buckets_from_update_rows() -> None:
+    class FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
+    class FakeDb:
+        def __init__(self):
+            self.execute_calls = 0
+            self.commits = 0
+
+        def execute(self, _statement):
+            self.execute_calls += 1
+            if self.execute_calls == 1:
+                return FakeResult(
+                    [
+                        SimpleNamespace(id=1, backtest_priority=75),
+                        SimpleNamespace(id=2, backtest_priority=50),
+                        SimpleNamespace(id=3, backtest_priority=49),
+                        SimpleNamespace(id=4, backtest_priority=10),
+                        SimpleNamespace(id=5, backtest_priority=5),
+                        SimpleNamespace(id=6, backtest_priority=0),
+                    ]
+                )
+            return FakeResult([SimpleNamespace(id=7), SimpleNamespace(id=8)])
+
+        def commit(self):
+            self.commits += 1
+
+    db = FakeDb()
+
+    assert run_priority_scoring(db) == {
+        "scored": 6,
+        "prescreened": 2,
+        "high_priority": 2,
+        "med_priority": 2,
+        "low_priority": 1,
+        "deprioritized": 1,
+    }
+    assert db.execute_calls == 2
+    assert db.commits == 1
 
 
 def _deactivate_existing_patterns(db) -> None:

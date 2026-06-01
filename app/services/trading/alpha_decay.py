@@ -72,6 +72,24 @@ def _mean_known_pnl(evidence: list[dict[str, Any]]) -> float | None:
     return sum(values) / len(values)
 
 
+def _rolling_evidence_stats(evidence: list[dict[str, Any]]) -> tuple[float, float, float | None]:
+    wins = 0
+    ret_sum = 0.0
+    pnl_sum = 0.0
+    pnl_count = 0
+    for e in evidence:
+        if e["win"]:
+            wins += 1
+        ret_sum += e["pnl_pct"]
+        pnl = e.get("pnl")
+        if pnl is not None:
+            pnl_sum += float(pnl)
+            pnl_count += 1
+    n = len(evidence)
+    avg_pnl = (pnl_sum / pnl_count) if pnl_count else None
+    return wins / n, ret_sum / n, avg_pnl
+
+
 def _payoff_ratio_protects_from_wr_decay(pattern: Any) -> bool:
     """Return True when realized payoff evidence should block WR-only decay.
 
@@ -198,11 +216,8 @@ def check_alpha_decay(
         if len(evidence) < MIN_TRADES_FOR_DECAY_CHECK:
             continue
 
-        live_wins = sum(1 for e in evidence if e["win"])
-        live_wr = live_wins / len(evidence)
         # Use percent returns for decay comparison (dollar PnL varies with position size)
-        live_avg_ret_pct = sum(e["pnl_pct"] for e in evidence) / len(evidence)
-        live_avg_ret_dollar = _mean_known_pnl(evidence)
+        live_wr, live_avg_ret_pct, live_avg_ret_dollar = _rolling_evidence_stats(evidence)
 
         # FIX E-1 (2026-04-29 audit): no hardcoded 0.50 fallback. Prefer
         # OOS WR if known, else realized WR. If both are None, fall back to
