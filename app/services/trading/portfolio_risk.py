@@ -426,7 +426,12 @@ def check_new_trade_allowed(
         logger.error("[risk] Kill-switch check failed — blocking trade as precaution", exc_info=True)
         return False, "Kill-switch check failed — trade blocked as safety precaution"
 
-    if is_breaker_tripped():
+    persisted_breaker = _refresh_breaker_from_db_for_gate(db)
+    if persisted_breaker is not None:
+        persisted_tripped, persisted_reason = persisted_breaker
+        if persisted_tripped:
+            return False, f"Circuit breaker active: {persisted_reason}"
+    elif is_breaker_tripped():
         return False, f"Circuit breaker active: {_breaker_reason}"
 
     capital_f = _float_or_none(capital)
@@ -1906,6 +1911,44 @@ def is_breaker_tripped() -> bool:
     return _breaker_tripped
 
 
+def _refresh_breaker_from_db_for_gate(
+    db: Session,
+) -> tuple[bool, str | None] | None:
+    """Synchronize entry gates with durable circuit-breaker state."""
+    execute = getattr(db, "execute", None)
+    if not callable(execute):
+        return None
+
+    global _breaker_tripped, _breaker_reason
+    try:
+        from sqlalchemy import text
+
+        row = execute(text(
+            "SELECT breaker_tripped, breaker_reason "
+            "FROM trading_risk_state "
+            "WHERE regime = 'circuit_breaker' "
+            "ORDER BY created_at DESC, id DESC "
+            "LIMIT 1"
+        )).fetchone()
+    except Exception:
+        logger.warning(
+            "[circuit_breaker] durable state read failed; blocking entries",
+            exc_info=True,
+        )
+        _breaker_tripped = True
+        _breaker_reason = "durable_breaker_state_unavailable"
+        return True, _breaker_reason
+
+    if row is None:
+        return None
+
+    tripped = bool(row[0])
+    reason = str(row[1] or "restored from DB") if tripped else None
+    _breaker_tripped = tripped
+    _breaker_reason = reason
+    return tripped, reason
+
+
 def get_breaker_status() -> dict[str, Any]:
     return {
         "tripped": _breaker_tripped,
@@ -2005,16 +2048,10 @@ def restore_breaker_from_db() -> None:
     global _breaker_tripped, _breaker_reason
     try:
         from ...db import SessionLocal
-        from sqlalchemy import text
         sess = SessionLocal()
         try:
-            row = sess.execute(text(
-                "SELECT breaker_tripped, breaker_reason FROM trading_risk_state "
-                "WHERE regime = 'circuit_breaker' ORDER BY created_at DESC LIMIT 1"
-            )).fetchone()
-            if row and row[0]:
-                _breaker_tripped = True
-                _breaker_reason = row[1] or "restored from DB"
+            restored = _refresh_breaker_from_db_for_gate(sess)
+            if restored and restored[0]:
                 logger.warning("[circuit_breaker] Breaker restored from DB: %s", _breaker_reason)
         finally:
             # FIX 46 pattern: rollback to end implicit read txn before close.
@@ -2061,6 +2098,16 @@ def unified_risk_check(
     if capital_f is None:
         detail["capital_valid"] = False
         return False, "invalid_capital", detail
+
+    persisted_breaker = _refresh_breaker_from_db_for_gate(db)
+    if persisted_breaker is not None:
+        persisted_tripped, persisted_reason = persisted_breaker
+        if persisted_tripped:
+            detail["breaker_reason"] = persisted_reason
+            return False, f"Circuit breaker: {persisted_reason}", detail
+    elif is_breaker_tripped():
+        detail["breaker_reason"] = _breaker_reason
+        return False, f"Circuit breaker: {_breaker_reason}", detail
 
     tripped, reason = check_drawdown_breaker(db, user_id, capital_f)
     if tripped:
