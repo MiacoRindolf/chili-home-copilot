@@ -71,6 +71,24 @@ def main() -> None:
     except Exception as _e:
         logger.warning("[scheduler_worker] Kill switch restore failed: %s", _e)
 
+    try:
+        from app.services.trading.portfolio_risk import (
+            get_breaker_status,
+            restore_breaker_from_db,
+        )
+
+        restore_breaker_from_db()
+        status = get_breaker_status()
+        if status.get("tripped"):
+            logger.warning(
+                "[scheduler_worker] Circuit breaker restored ACTIVE: %s - autotrader blocked until manual reset",
+                status.get("reason"),
+            )
+        else:
+            logger.info("[scheduler_worker] Circuit breaker restored: inactive")
+    except Exception as _e:
+        logger.warning("[scheduler_worker] Circuit breaker restore failed: %s", _e)
+
     # bracket-writer-cover-policy-clarify (2026-05-03): emit a WARNING
     # if the silent-exposure flag combination is set. The broker-sync-
     # worker is the process that actually exercises the writer's

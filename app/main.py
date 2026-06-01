@@ -644,6 +644,20 @@ def _run_deferred_startup() -> None:
                 )
         except Exception:
             _log.debug("[startup] Kill-switch restore failed", exc_info=True)
+        try:
+            from .services.trading.portfolio_risk import (
+                get_breaker_status,
+                restore_breaker_from_db,
+            )
+            restore_breaker_from_db()
+            _breaker = get_breaker_status()
+            if _breaker.get("tripped"):
+                _log.warning(
+                    "[startup] Circuit breaker restored ACTIVE: %s",
+                    _breaker.get("reason"),
+                )
+        except Exception:
+            _log.debug("[startup] Circuit-breaker restore failed", exc_info=True)
         if _sched_role != "none":
             _dedup_backtests()
         _repair_wrongly_deactivated()

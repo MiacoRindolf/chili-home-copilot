@@ -41,3 +41,42 @@ def test_deferred_startup_checks_side_effect_guard_before_broker_restore() -> No
     assert guard_pos > 0
     assert restore_pos > 0
     assert guard_pos < restore_pos
+
+
+def test_app_startup_restores_durable_circuit_breaker_after_kill_switch() -> None:
+    src = (REPO / "app/main.py").read_text()
+    idx = src.find("def _run_deferred_startup()")
+    assert idx > 0
+    body = src[idx : idx + 3600]
+    kill_pos = body.find("restore_kill_switch_from_db()")
+    breaker_pos = body.find("restore_breaker_from_db()")
+    assert kill_pos > 0
+    assert breaker_pos > 0
+    assert kill_pos < breaker_pos
+    assert "get_breaker_status" in body
+
+
+def test_scheduler_startup_restores_durable_circuit_breaker() -> None:
+    src = (REPO / "app/services/trading_scheduler.py").read_text()
+    idx = src.find("def start_scheduler(")
+    assert idx > 0
+    body = src[idx : idx + 6200]
+    kill_pos = body.find("restore_kill_switch_from_db()")
+    breaker_pos = body.find("restore_breaker_from_db()")
+    assert kill_pos > 0
+    assert breaker_pos > 0
+    assert kill_pos < breaker_pos
+    assert "Circuit breaker restored ACTIVE" in body
+
+
+def test_scheduler_worker_restores_durable_circuit_breaker() -> None:
+    src = (REPO / "scripts/scheduler_worker.py").read_text()
+    idx = src.find("def main()")
+    assert idx > 0
+    body = src[idx : idx + 4200]
+    kill_pos = body.find("restore_kill_switch_from_db()")
+    breaker_pos = body.find("restore_breaker_from_db()")
+    assert kill_pos > 0
+    assert breaker_pos > 0
+    assert kill_pos < breaker_pos
+    assert "Circuit breaker restored ACTIVE" in body

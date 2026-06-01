@@ -4389,6 +4389,23 @@ def start_scheduler():
         except Exception:
             logger.warning("[scheduler] Kill-switch restore failed", exc_info=True)
 
+        try:
+            from .trading.portfolio_risk import (
+                get_breaker_status,
+                restore_breaker_from_db,
+            )
+            restore_breaker_from_db()
+            _breaker = get_breaker_status()
+            if _breaker.get("tripped"):
+                logger.warning(
+                    "[scheduler] Circuit breaker restored ACTIVE: %s - autotrader blocked until manual reset",
+                    _breaker.get("reason"),
+                )
+            else:
+                logger.info("[scheduler] Circuit breaker restored: inactive")
+        except Exception:
+            logger.warning("[scheduler] Circuit-breaker restore failed", exc_info=True)
+
         if include_web_light and getattr(settings, "brain_prescreen_scheduler_enabled", True):
             _scheduler.add_job(
                 _run_daily_prescreen_job,
