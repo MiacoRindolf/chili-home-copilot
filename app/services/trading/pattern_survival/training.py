@@ -10,8 +10,8 @@ Three orchestrated stages run sequentially in
     lifecycle state and fill in the actual outcome.
 
     "Survived" definition:
-      lifecycle_stage IN ('live', 'challenged')
-      AND (active=True OR trade_count > 0 in last 30d)
+      lifecycle_stage IN ('live', 'challenged', 'promoted', 'pilot_promoted')
+      AND (active=True OR closed trade count > 0 in the label horizon)
 
     Patterns that drifted to 'demoted' / 'candidate' or went silent
     (active=False with no recent trades) count as did-not-survive.
@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import os
 import pickle
 from datetime import datetime, timezone
@@ -84,6 +85,23 @@ _FEATURE_COLUMNS: list[str] = [
     "family_active_count",
 ]
 
+SURVIVAL_LABEL_LIFECYCLES = frozenset({
+    "live",
+    "challenged",
+    "promoted",
+    "pilot_promoted",
+})
+
+
+def _feature_float_or_nan(value: Any) -> float:
+    if value is None or isinstance(value, bool):
+        return float("nan")
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return float("nan")
+    return out if math.isfinite(out) else float("nan")
+
 
 # ─────────────────────────────────────────────────────────────────────
 # Stage 1 — label backfill
@@ -98,8 +116,8 @@ def backfill_survival_labels(
     actual_survived IS NULL), look up the scan_pattern's CURRENT state
     and decide:
 
-      survived = lifecycle_stage IN ('live', 'challenged')
-                 AND (active = TRUE OR trade_count > 0 in 30d)
+      survived = lifecycle_stage IN ('live', 'challenged', 'promoted', 'pilot_promoted')
+                 AND (active = TRUE OR horizon_trade_count > 0)
 
     The "OR active=TRUE" branch catches patterns that survived but
     happened to not trade in the rolling window — they're still live,
@@ -117,7 +135,16 @@ def backfill_survival_labels(
             SELECT pp.id, pp.scan_pattern_id, pp.snapshot_date,
                    sp.lifecycle_stage,
                    COALESCE(sp.active, FALSE) AS active,
-                   COALESCE(sp.trade_count, 0) AS trade_count
+                   COALESCE((
+                       SELECT COUNT(*)
+                       FROM trading_trades t
+                       WHERE t.scan_pattern_id = sp.id
+                         AND t.status = 'closed'
+                         AND t.exit_date >= pp.snapshot_date::timestamp
+                         AND t.exit_date < (
+                             pp.snapshot_date::timestamp + make_interval(days => :h)
+                         )
+                   ), 0) AS horizon_trade_count
             FROM pattern_survival_predictions pp
             JOIN scan_patterns sp ON sp.id = pp.scan_pattern_id
             WHERE pp.actual_survived IS NULL
@@ -135,10 +162,12 @@ def backfill_survival_labels(
     for r in rows or []:
         pred_id, pid, sd, stage, active, tc = r
         ok = (
-            stage in ("live", "challenged")
+            stage in SURVIVAL_LABEL_LIFECYCLES
             and (bool(active) or int(tc or 0) > 0)
         )
-        reason = None if ok else f"lifecycle={stage} active={active} trades={tc}"
+        reason = (
+            None if ok else f"lifecycle={stage} active={active} horizon_trades={tc}"
+        )
         try:
             db.execute(text(
                 """
@@ -250,7 +279,7 @@ def train_survival_classifier(
     for i, r in enumerate(rows):
         for j in range(n_cols):
             v = r[j]
-            X[i, j] = float(v) if v is not None else float("nan")
+            X[i, j] = _feature_float_or_nan(v)
         y[i] = 1 if r[n_cols] else 0
 
     n_pos = int(y.sum())
@@ -315,10 +344,16 @@ def score_pending_features(
                   AND p.model_version = :v
             )
               AND f.snapshot_date >= (NOW() - INTERVAL '60 days')::date
+              AND f.snapshot_date <= (
+                  NOW() - make_interval(days => :min_feature_age_days)
+              )::date
             ORDER BY f.snapshot_date DESC
             LIMIT 5000
             """
-        ), {"v": version}).fetchall()
+        ), {
+            "v": version,
+            "min_feature_age_days": int(_MIN_FEATURE_AGE_DAYS),
+        }).fetchall()
     except Exception as e:
         logger.warning("[ps_train] scoring query failed: %s", e)
         return {"ok": False, "reason": "query_failed", "error": str(e)[:200]}
@@ -343,7 +378,7 @@ def score_pending_features(
         snapshot_dates.append(r[2])
         for j in range(n_cols):
             v = r[3 + j]
-            X[i, j] = float(v) if v is not None else float("nan")
+            X[i, j] = _feature_float_or_nan(v)
 
     try:
         proba = model.predict_proba(X)[:, 1]

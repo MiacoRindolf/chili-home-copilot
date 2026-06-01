@@ -37,6 +37,16 @@ from app.services.trading.realized_pnl_sql import trade_return_fraction_sql
 
 logger = logging.getLogger(__name__)
 
+SURVIVAL_SNAPSHOT_LIFECYCLES = (
+    "live",
+    "challenged",
+    "promoted",
+    "pilot_promoted",
+)
+_SURVIVAL_SNAPSHOT_LIFECYCLE_SQL = ", ".join(
+    f"'{stage}'" for stage in SURVIVAL_SNAPSHOT_LIFECYCLES
+)
+
 
 @dataclass
 class PatternSurvivalFeatures:
@@ -136,13 +146,8 @@ def _collect_realized_30d(db: Session, pattern_id: int) -> dict[str, Optional[fl
     """
     row = db.execute(
         text(f"""
-            WITH t AS (
-                SELECT pnl,
-                       CASE WHEN entry_price IS NOT NULL
-                                 AND quantity IS NOT NULL
-                                 AND entry_price * quantity > 0
-                            THEN {trade_return_fraction_sql()} * 100.0
-                       END AS pnl_pct
+            WITH realized AS (
+                SELECT {trade_return_fraction_sql()} AS realized_return_frac
                 FROM trading_trades
                 WHERE scan_pattern_id = :p
                   AND status = 'closed'
@@ -152,12 +157,13 @@ def _collect_realized_30d(db: Session, pattern_id: int) -> dict[str, Optional[fl
                   AND quantity > 0
             )
             SELECT
-                COUNT(*)::int AS trades,
-                AVG(CASE WHEN pnl > 0 THEN 1.0 ELSE 0.0 END) AS hit_rate,
-                AVG(pnl_pct) AS expectancy_pct,
-                NULLIF(STDDEV_POP(pnl_pct), 0) AS pnl_pct_std,
-                MIN(pnl_pct) AS worst_trade_pct
-            FROM t
+                COUNT(realized_return_frac)::int AS trades,
+                AVG(CASE WHEN realized_return_frac > 0 THEN 1.0 ELSE 0.0 END) AS hit_rate,
+                AVG(realized_return_frac * 100.0) AS expectancy_pct,
+                NULLIF(STDDEV_POP(realized_return_frac * 100.0), 0) AS pnl_pct_std,
+                MIN(realized_return_frac * 100.0) AS worst_trade_pct
+            FROM realized
+            WHERE realized_return_frac IS NOT NULL
             """
         ),
         {"p": pattern_id},
@@ -182,20 +188,28 @@ def _collect_realized_30d(db: Session, pattern_id: int) -> dict[str, Optional[fl
 
 
 def _collect_pnl_slope_14d(db: Session, pattern_id: int) -> Optional[float]:
-    """Linear regression slope of cumulative PnL over the last 14 days.
+    """Linear regression slope of cumulative realized return over 14 days.
 
     Positive = pattern improving recently, negative = degrading.
     """
     rows = db.execute(
-        text(
-            """
-            SELECT exit_date::date AS day, SUM(pnl) AS pnl_usd
-            FROM trading_trades
-            WHERE scan_pattern_id = :p
-              AND exit_date >= NOW() - INTERVAL '14 days'
-              AND pnl IS NOT NULL
-            GROUP BY 1
-            ORDER BY 1
+        text(f"""
+            WITH realized AS (
+                SELECT exit_date::date AS day,
+                       {trade_return_fraction_sql()} * 100.0 AS realized_return_pct
+                FROM trading_trades
+                WHERE scan_pattern_id = :p
+                  AND status = 'closed'
+                  AND exit_date >= NOW() - INTERVAL '14 days'
+                  AND pnl IS NOT NULL
+                  AND entry_price > 0
+                  AND quantity > 0
+            )
+            SELECT day, AVG(realized_return_pct) AS realized_return_pct
+            FROM realized
+            WHERE realized_return_pct IS NOT NULL
+            GROUP BY day
+            ORDER BY day
             """
         ),
         {"p": pattern_id},
@@ -295,14 +309,22 @@ def _collect_regime_and_diversity(db: Session) -> tuple[Optional[str], Optional[
     fam_h, fam_n = None, None
     try:
         rows = db.execute(
-            text(
-                """
-                SELECT COALESCE(sp.hypothesis_family, 'unknown') AS fam,
-                       SUM(t.pnl) AS pnl_30d
-                FROM trading_trades t
-                LEFT JOIN scan_patterns sp ON sp.id = t.scan_pattern_id
-                WHERE t.exit_date >= NOW() - INTERVAL '30 days'
-                  AND t.pnl IS NOT NULL
+            text(f"""
+                WITH realized AS (
+                    SELECT COALESCE(sp.hypothesis_family, 'unknown') AS fam,
+                           {trade_return_fraction_sql("t")} * 100.0 AS realized_return_pct
+                    FROM trading_trades t
+                    LEFT JOIN scan_patterns sp ON sp.id = t.scan_pattern_id
+                    WHERE t.status = 'closed'
+                      AND t.exit_date >= NOW() - INTERVAL '30 days'
+                      AND t.pnl IS NOT NULL
+                      AND t.entry_price > 0
+                      AND t.quantity > 0
+                )
+                SELECT fam,
+                       SUM(ABS(realized_return_pct)) AS realized_return_magnitude_pct
+                FROM realized
+                WHERE realized_return_pct IS NOT NULL
                 GROUP BY 1
                 """
             )
@@ -418,11 +440,11 @@ def snapshot_pattern_features(
 
 
 def run_pattern_survival_snapshot_job(db: Session) -> dict[str, Any]:
-    """Daily job: snapshot features for every live + challenged pattern.
+    """Daily job: snapshot features for every alpha-risk pattern.
 
     Flag-gated by ``chili_pattern_survival_classifier_enabled``. When OFF,
     returns immediately with ``{"skipped": "flag_off"}``. When ON, iterates
-    over patterns in lifecycle in ('live', 'challenged') and snapshots each.
+    over patterns in active alpha lifecycles and snapshots each.
     """
     from ....config import settings
 
@@ -433,7 +455,7 @@ def run_pattern_survival_snapshot_job(db: Session) -> dict[str, Any]:
         rows = db.execute(
             text(
                 "SELECT id FROM scan_patterns "
-                "WHERE lifecycle_stage IN ('live', 'challenged') "
+                f"WHERE lifecycle_stage IN ({_SURVIVAL_SNAPSHOT_LIFECYCLE_SQL}) "
                 "ORDER BY id"
             )
         ).fetchall()

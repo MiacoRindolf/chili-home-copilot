@@ -18,7 +18,8 @@ Three consumers, all flag-gated:
 
   ``demote``        — input_context: optional {"current_lifecycle"}
                       output: {"proposed_lifecycle", "streak_days"}
-                      live -> challenged when p < threshold (1 day).
+                      live/promoted/pilot_promoted -> challenged when
+                      p < threshold (1 day).
                       challenged -> decayed when p < threshold for
                       ``demote_streak_required`` consecutive days.
 
@@ -58,6 +59,16 @@ logger = logging.getLogger(__name__)
 
 
 _VALID_CONSUMERS = ("sizing", "demote", "promote_gate")
+
+DEMOTE_PASS_LIFECYCLES = (
+    "live",
+    "challenged",
+    "promoted",
+    "pilot_promoted",
+)
+_DEMOTE_PASS_LIFECYCLE_SQL = ", ".join(
+    f"'{stage}'" for stage in DEMOTE_PASS_LIFECYCLES
+)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -249,7 +260,7 @@ def demote_policy(
     new_streak: int
     if p < threshold:
         new_streak = current_streak + 1
-        if current_lifecycle == "live":
+        if current_lifecycle in {"live", "promoted", "pilot_promoted"}:
             proposed = "challenged"
         elif current_lifecycle == "challenged" and new_streak >= streak_required:
             proposed = "decayed"
@@ -420,7 +431,7 @@ def _record_decision(
 # ─────────────────────────────────────────────────────────────────────
 
 def run_pattern_survival_demote_pass(db: Session) -> dict[str, Any]:
-    """Daily pass: walk lifecycle in (live, challenged), update streak,
+    """Daily pass: walk alpha-risk lifecycles, update streak,
     apply demote if the demote flag is on.
 
     Three-flag interaction:
@@ -466,11 +477,11 @@ def run_pattern_survival_demote_pass(db: Session) -> dict[str, Any]:
 
     try:
         rows = db.execute(text(
-            """
+            f"""
             SELECT id, lifecycle_stage,
                    COALESCE(survival_at_risk_streak_days, 0)
             FROM scan_patterns
-            WHERE lifecycle_stage IN ('live', 'challenged')
+            WHERE lifecycle_stage IN ({_DEMOTE_PASS_LIFECYCLE_SQL})
             ORDER BY id
             """
         )).fetchall()
