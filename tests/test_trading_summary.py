@@ -18,10 +18,11 @@ def _trade(**kw):
     return SimpleNamespace(**base)
 
 
-def _summary(closed, opens=None, names=None, user_id=1, window_hours=24):
+def _summary(closed, opens=None, names=None, payoffs=None, user_id=1, window_hours=24):
     with patch.object(tsum, "_closed_trades", return_value=closed), \
          patch.object(tsum, "_open_trades", return_value=opens or []), \
-         patch.object(tsum, "_pattern_names", return_value=names or {}):
+         patch.object(tsum, "_pattern_names", return_value=names or {}), \
+         patch.object(tsum, "_pattern_payoffs", return_value=payoffs or {}):
         return tsum.build_trading_summary(object(), user_id, window_hours=window_hours)
 
 
@@ -89,3 +90,12 @@ class TestBuildTradingSummary:
     def test_short_window_omits_date(self):
         s = _summary([_trade(pnl=1.0)], window_hours=6)
         assert s["date"] is None
+
+    def test_top_patterns_carry_payoff_ratio(self):
+        closed = [_trade(ticker="A", pnl=10.0, scan_pattern_id=585),
+                  _trade(ticker="B", pnl=3.0, scan_pattern_id=537)]
+        s = _summary(closed, names={585: "Wedge", 537: "Reclaim"},
+                     payoffs={585: 4.97})
+        by_id = {p["id"]: p for p in s["top_patterns"]}
+        assert by_id["Wedge"]["payoff"] == 4.97
+        assert by_id["Reclaim"]["payoff"] is None   # no payoff configured -> None

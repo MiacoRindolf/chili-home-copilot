@@ -69,6 +69,23 @@ def _pattern_names(db: Session, pattern_ids: set) -> Dict[int, str]:
         return {}
 
 
+def _pattern_payoffs(db: Session, pattern_ids: set) -> Dict[int, float]:
+    """Per-pattern realized payoff ratio (avg winner / |avg loser|), nightly-refreshed."""
+    ids = {pid for pid in pattern_ids if pid}
+    if not ids:
+        return {}
+    try:
+        rows = (
+            db.query(ScanPattern.id, ScanPattern.payoff_ratio)
+            .filter(ScanPattern.id.in_(ids), ScanPattern.payoff_ratio.isnot(None))
+            .all()
+        )
+        return {pid: float(pr) for pid, pr in rows if pr is not None}
+    except Exception as e:
+        logger.warning("[trading_summary] pattern-payoff lookup failed: %s", e)
+        return {}
+
+
 def build_trading_summary(db: Session, user_id: Optional[int],
                           window_hours: int = 24) -> Dict[str, Any]:
     """Return a summary dict for build_brief; empty dict if no user.
@@ -88,6 +105,7 @@ def build_trading_summary(db: Session, user_id: Optional[int],
 
     pat_ids = {t.scan_pattern_id for t in closed if t.scan_pattern_id}
     pat_names = _pattern_names(db, pat_ids)
+    pat_payoffs = _pattern_payoffs(db, pat_ids)
 
     def _pat_label(pid) -> str:
         if not pid:
@@ -128,7 +146,8 @@ def build_trading_summary(db: Session, user_id: Optional[int],
         agg["pnl"] += float(t.pnl)
         agg["trades"] += 1
     top_patterns = [
-        {"id": _pat_label(pid), "pnl": v["pnl"], "trades": int(v["trades"])}
+        {"id": _pat_label(pid), "pnl": v["pnl"], "trades": int(v["trades"]),
+         "payoff": pat_payoffs.get(pid)}
         for pid, v in by_pat.items()
     ]
     top_patterns.sort(key=lambda p: p["pnl"], reverse=True)
