@@ -36,8 +36,14 @@ soak) untouched.
   stop-without-start is safe. Plus the existing policy/config suite and the
   handler-direct status tests. **61 passed** (`test_mcp_client.py` +
   `test_mcp_status_endpoint.py`), ~4s.
-- Full-app-boot smoke (`test_reasoning_research_report.py`) to confirm the lifespan
-  edit executes cleanly: <RESULT FILLED ON GREEN>.
+- Full-app-boot smoke to confirm the lifespan edit executes cleanly: GREEN.
+  A direct `TestClient(app)` startup+shutdown smoke printed
+  `LIFESPAN_SMOKE_OK` (exit 0), and a clean isolated re-run of
+  `test_reasoning_research_report.py` passed (exit 0). An earlier concurrent run
+  showed fixture-setup ERRORs that were environmental (this session ran ~10+
+  full-app-boots in parallel; 13–15 min runtimes were the tell) — not a
+  regression. The MCP startup block is gated on `CHILI_PYTEST` + `mcp_enabled`,
+  so it is provably skipped under pytest regardless.
 
 ## Surprises / deviations
 
