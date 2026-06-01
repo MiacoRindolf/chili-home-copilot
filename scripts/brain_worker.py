@@ -1544,14 +1544,19 @@ def _brain_work_dispatch_kwargs_for_mode(mode: str | None) -> dict:
     return {}
 
 
+def _run_brain_work_dispatch_round(db, **kwargs) -> dict:
+    from app.services.trading.brain_work.dispatcher import run_brain_work_dispatch_round
+
+    return run_brain_work_dispatch_round(db, **kwargs)
+
+
 def _maybe_run_brain_work_batch(**dispatch_kwargs) -> None:
     """Durable work ledger: dispatch round (execution_feedback_digest + backtest_requested)."""
     def _run_once(db) -> dict:
         from app.config import settings as _settings
-        from app.services.trading.brain_work.dispatcher import run_brain_work_dispatch_round
 
         _uid = getattr(_settings, "brain_default_user_id", None)
-        summary = run_brain_work_dispatch_round(db, user_id=_uid, **dispatch_kwargs)
+        summary = _run_brain_work_dispatch_round(db, user_id=_uid, **dispatch_kwargs)
         # Always log once per call so production logs prove dispatch ran before cycle (even when idle).
         logger.info(
             "[brain] work ledger dispatch round processed=%s claimed=%s per_type=%s errors=%s",

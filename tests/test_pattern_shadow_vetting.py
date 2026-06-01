@@ -112,7 +112,10 @@ def test_shadow_vetting_skips_paper_dynamic_without_realized_return():
     paper_sql = fake_db.sql_texts[1]
     assert "AS realized_return_pct" in paper_sql
     assert "pt.pnl /" in paper_sql
-    assert "pt.entry_price * pt.quantity" in paper_sql
+    assert "pt.entry_price" in paper_sql
+    assert "pt.quantity" in paper_sql
+    assert "option_contract_multiplier" in paper_sql
+    assert "contract_multiplier" in paper_sql
     assert "pnl_pct" not in paper_sql
 
     row = evidence[123]

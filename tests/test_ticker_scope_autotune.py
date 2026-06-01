@@ -74,6 +74,7 @@ def test_ticker_autotune_query_uses_contract_aware_returns() -> None:
     assert "HAVING count(realized_return_frac) >= :min_per_ticker" in sql
     assert "t.filled_quantity" in sql
     assert "t.partial_taken_qty" in sql
+    assert "option_contract_multiplier" in sql
     assert "asset_kind" in sql
     assert "t.entry_price > 0" in sql
     assert "t.quantity > 0" in sql

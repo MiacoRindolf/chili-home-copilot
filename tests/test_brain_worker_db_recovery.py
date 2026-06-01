@@ -17,7 +17,6 @@ class _FakeSession:
 
 def test_brain_work_batch_retries_once_after_disconnect(monkeypatch):
     import scripts.brain_worker as brain_worker
-    from app.services.trading.brain_work import dispatcher
 
     primary = _FakeSession("primary")
     retry = _FakeSession("retry")
@@ -26,13 +25,18 @@ def test_brain_work_batch_retries_once_after_disconnect(monkeypatch):
 
     monkeypatch.setattr(brain_worker, "SessionLocal", lambda: sessions.pop(0))
 
-    def _run_brain_work_batch(db, *, user_id=None):
+    def _run_brain_work_dispatch_round(db, *, user_id=None, **dispatch_kwargs):
         calls.append(db.name)
+        assert dispatch_kwargs == {}
         if db is primary:
             raise RuntimeError("server closed the connection unexpectedly")
         return {"processed": 0, "claimed": 0, "per_type": {}, "errors": []}
 
-    monkeypatch.setattr(dispatcher, "run_brain_work_batch", _run_brain_work_batch)
+    monkeypatch.setattr(
+        brain_worker,
+        "_run_brain_work_dispatch_round",
+        _run_brain_work_dispatch_round,
+    )
 
     brain_worker._maybe_run_brain_work_batch()
 
