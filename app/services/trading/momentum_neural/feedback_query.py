@@ -12,9 +12,7 @@ from sqlalchemy.orm import Session
 from ....models.trading import MomentumAutomationOutcome, MomentumStrategyVariant
 from .evolution import (
     aggregate_recent_outcomes_for_symbol_variant,
-    aggregate_recent_outcomes_for_variant,
     evolution_summary_for_operator,
-    outcome_needs_evolution_ingest,
     paper_vs_live_performance_slices,
 )
 
@@ -56,15 +54,11 @@ def list_recent_momentum_outcomes(
     return [_outcome_brief(r) for r in rows]
 
 
-def _outcome_brief(r: MomentumAutomationOutcome) -> dict[str, Any]:
-    summary = r.extracted_summary_json if isinstance(r.extracted_summary_json, dict) else {}
-    credit = summary.get("evolution_credit") if isinstance(summary.get("evolution_credit"), dict) else {}
-    regrade = (
-        summary.get("evolution_credit_regrade_v1")
-        if isinstance(summary.get("evolution_credit_regrade_v1"), dict)
-        else {}
+def _outcome_brief(r: MomentumAutomationOutcome, raw_summary: Any = None) -> dict[str, Any]:
+    credit, regrade, ingest = (
+        _summary_payloads_from_raw(raw_summary) if raw_summary is not None else _summary_payloads(r)
     )
-    ingest = summary.get("evolution_ingest_v1") if isinstance(summary.get("evolution_ingest_v1"), dict) else {}
+    contributes = bool(r.contributes_to_evolution)
     return {
         "id": r.id,
         "session_id": r.session_id,
@@ -79,28 +73,32 @@ def _outcome_brief(r: MomentumAutomationOutcome) -> dict[str, Any]:
         "hold_seconds": r.hold_seconds,
         "exit_reason": r.exit_reason,
         "evidence_weight": r.evidence_weight,
-        "contributes_to_evolution": bool(r.contributes_to_evolution),
+        "contributes_to_evolution": contributes,
         "evolution_credit": credit,
         "evolution_credit_reason_codes": list(credit.get("reason_codes") or []),
         "evolution_credit_regrade": regrade,
         "evolution_ingest": ingest,
-        "reingest_required": _reingest_required(r),
+        "reingest_required": _reingest_required_from_payloads(contributes, regrade, ingest),
         "terminal_at": r.terminal_at.isoformat() if r.terminal_at else None,
         "created_at": r.created_at.isoformat() if r.created_at else None,
     }
 
 
 def _credit_payload(row: MomentumAutomationOutcome) -> dict[str, Any]:
-    summary = row.extracted_summary_json if isinstance(row.extracted_summary_json, dict) else {}
-    credit = summary.get("evolution_credit") if isinstance(summary.get("evolution_credit"), dict) else {}
+    credit, _, _ = _summary_payloads(row)
     return dict(credit)
 
 
 def _credit_reason_codes(row: MomentumAutomationOutcome) -> list[str]:
     credit = _credit_payload(row)
-    reasons = [str(r) for r in (credit.get("reason_codes") or []) if str(r)]
+    reasons = _blocked_credit_reason_codes_from_payload(credit)
     if bool(row.contributes_to_evolution):
         return []
+    return reasons
+
+
+def _blocked_credit_reason_codes_from_payload(credit: dict[str, Any]) -> list[str]:
+    reasons = [str(r) for r in (credit.get("reason_codes") or []) if str(r)]
     if not reasons:
         return ["credit_reason_missing"]
     return reasons
@@ -113,18 +111,49 @@ def _credit_rate(credited: int, total: int) -> float | None:
 
 
 def _regrade_payload(row: MomentumAutomationOutcome) -> dict[str, Any]:
-    summary = row.extracted_summary_json if isinstance(row.extracted_summary_json, dict) else {}
-    marker = summary.get("evolution_credit_regrade_v1")
-    return dict(marker) if isinstance(marker, dict) else {}
+    _, marker, _ = _summary_payloads(row)
+    return dict(marker)
 
 
 def _reingest_required(row: MomentumAutomationOutcome) -> bool:
     marker = _regrade_payload(row)
+    contributes = bool(row.contributes_to_evolution)
+    ingest = _ingest_payload(row) if contributes else {}
+    return _reingest_required_from_payloads(contributes, marker, ingest)
+
+
+def _ingest_payload(row: MomentumAutomationOutcome) -> dict[str, Any]:
+    _, _, marker = _summary_payloads(row)
+    return dict(marker)
+
+
+def _summary_payloads(row: MomentumAutomationOutcome) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    raw_summary = row.extracted_summary_json
+    return _summary_payloads_from_raw(raw_summary)
+
+
+def _summary_payloads_from_raw(raw_summary: Any) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    summary = raw_summary if isinstance(raw_summary, dict) else {}
+    credit = summary.get("evolution_credit")
+    regrade = summary.get("evolution_credit_regrade_v1")
+    ingest = summary.get("evolution_ingest_v1")
     return (
-        bool(row.contributes_to_evolution)
-        and bool(marker.get("requires_reingest"))
-        and not bool(marker.get("reingested_at_utc"))
-        and outcome_needs_evolution_ingest(row)
+        credit if isinstance(credit, dict) else {},
+        regrade if isinstance(regrade, dict) else {},
+        ingest if isinstance(ingest, dict) else {},
+    )
+
+
+def _reingest_required_from_payloads(
+    contributes: bool,
+    regrade: dict[str, Any],
+    ingest: dict[str, Any],
+) -> bool:
+    return (
+        bool(contributes)
+        and bool(regrade.get("requires_reingest"))
+        and not bool(regrade.get("reingested_at_utc"))
+        and not bool(ingest.get("contribution_applied_at_utc"))
     )
 
 
@@ -267,7 +296,7 @@ def evolution_credit_diagnostics(
         rows = rows[:row_limit]
 
     total = len(rows)
-    credited = sum(1 for row in rows if bool(row.contributes_to_evolution))
+    credited = 0
     reason_counts: Counter[str] = Counter()
     by_mode: dict[str, dict[str, int]] = defaultdict(lambda: {"total": 0, "credited": 0, "blocked": 0})
     by_family: dict[str, dict[str, int]] = defaultdict(lambda: {"total": 0, "credited": 0, "blocked": 0})
@@ -276,12 +305,14 @@ def evolution_credit_diagnostics(
     reingest_required = 0
 
     for row in rows:
+        credit, regrade, ingest = _summary_payloads(row)
         is_credited = bool(row.contributes_to_evolution)
-        needs_reingest = _reingest_required(row)
+        if is_credited:
+            credited += 1
+        needs_reingest = _reingest_required_from_payloads(is_credited, regrade, ingest) if is_credited else False
         if needs_reingest:
             reingest_required += 1
             if len(reingest_examples) < 10:
-                marker = _regrade_payload(row)
                 reingest_examples.append(
                     {
                         "outcome_id": int(row.id) if row.id is not None else None,
@@ -290,8 +321,8 @@ def evolution_credit_diagnostics(
                         "mode": row.mode,
                         "execution_family": row.execution_family,
                         "outcome_class": row.outcome_class,
-                        "entry_decision_packet_id": _credit_payload(row).get("entry_decision_packet_id"),
-                        "regraded_at_utc": marker.get("regraded_at_utc"),
+                        "entry_decision_packet_id": credit.get("entry_decision_packet_id"),
+                        "regraded_at_utc": regrade.get("regraded_at_utc"),
                         "terminal_at": row.terminal_at.isoformat() if row.terminal_at else None,
                     }
                 )
@@ -306,10 +337,9 @@ def evolution_credit_diagnostics(
 
         by_mode[mode_key]["blocked"] += 1
         by_family[family_key]["blocked"] += 1
-        reasons = _credit_reason_codes(row)
+        reasons = _blocked_credit_reason_codes_from_payload(credit)
         reason_counts.update(reasons)
         if len(blocked_examples) < 10:
-            credit = _credit_payload(row)
             blocked_examples.append(
                 {
                     "outcome_id": int(row.id) if row.id is not None else None,
@@ -373,14 +403,13 @@ def get_symbol_variant_feedback_summary(
 ) -> dict[str, Any]:
     sym = symbol.strip().upper()
     agg = aggregate_recent_outcomes_for_symbol_variant(db, symbol=sym, variant_id=int(variant_id), days=days)
-    paper = aggregate_recent_outcomes_for_variant(db, variant_id=int(variant_id), days=days, mode="paper")
-    live = aggregate_recent_outcomes_for_variant(db, variant_id=int(variant_id), days=days, mode="live")
+    slices = paper_vs_live_performance_slices(db, variant_id=int(variant_id), days=days)
     return {
         "symbol": sym,
         "variant_id": int(variant_id),
         "symbol_variant_window": agg,
-        "variant_paper_slice": paper,
-        "variant_live_slice": live,
+        "variant_paper_slice": slices["paper"],
+        "variant_live_slice": slices["live"],
     }
 
 
@@ -426,7 +455,8 @@ def get_session_feedback_row(db: Session, *, session_id: int) -> Optional[dict[s
     )
     if not r:
         return None
-    d = _outcome_brief(r)
+    summary = r.extracted_summary_json
+    d = _outcome_brief(r, raw_summary=summary)
     d["governance_context_json"] = r.governance_context_json
-    d["extracted_summary_json"] = r.extracted_summary_json
+    d["extracted_summary_json"] = summary
     return d

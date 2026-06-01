@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime, timedelta
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -204,7 +204,12 @@ def aggregate_recent_outcomes_for_variant(
 ) -> dict[str, Any]:
     """Weighted aggregates for one variant (optional mode filter: paper | live)."""
     since = datetime.utcnow() - timedelta(days=max(1, min(int(days), 365)))
-    q = db.query(MomentumAutomationOutcome).filter(
+    q = db.query(
+        MomentumAutomationOutcome.evidence_weight,
+        MomentumAutomationOutcome.return_bps,
+        MomentumAutomationOutcome.realized_pnl_usd,
+        MomentumAutomationOutcome.outcome_class,
+    ).filter(
         MomentumAutomationOutcome.variant_id == int(variant_id),
         MomentumAutomationOutcome.terminal_at >= since,
         MomentumAutomationOutcome.contributes_to_evolution.is_(True),
@@ -224,7 +229,12 @@ def aggregate_recent_outcomes_for_symbol_variant(
 ) -> dict[str, Any]:
     since = datetime.utcnow() - timedelta(days=max(1, min(int(days), 365)))
     rows = (
-        db.query(MomentumAutomationOutcome)
+        db.query(
+            MomentumAutomationOutcome.evidence_weight,
+            MomentumAutomationOutcome.return_bps,
+            MomentumAutomationOutcome.realized_pnl_usd,
+            MomentumAutomationOutcome.outcome_class,
+        )
         .filter(
             MomentumAutomationOutcome.symbol == symbol.strip().upper(),
             MomentumAutomationOutcome.variant_id == int(variant_id),
@@ -242,8 +252,26 @@ def paper_vs_live_performance_slices(
     variant_id: int,
     days: int = 14,
 ) -> dict[str, Any]:
-    paper = aggregate_recent_outcomes_for_variant(db, variant_id=variant_id, days=days, mode="paper")
-    live = aggregate_recent_outcomes_for_variant(db, variant_id=variant_id, days=days, mode="live")
+    since = datetime.utcnow() - timedelta(days=max(1, min(int(days), 365)))
+    rows = (
+        db.query(
+            MomentumAutomationOutcome.mode,
+            MomentumAutomationOutcome.evidence_weight,
+            MomentumAutomationOutcome.return_bps,
+            MomentumAutomationOutcome.realized_pnl_usd,
+            MomentumAutomationOutcome.outcome_class,
+        )
+        .filter(
+            MomentumAutomationOutcome.variant_id == int(variant_id),
+            MomentumAutomationOutcome.terminal_at >= since,
+            MomentumAutomationOutcome.contributes_to_evolution.is_(True),
+            MomentumAutomationOutcome.mode.in_(("paper", "live")),
+        )
+        .all()
+    )
+    by_mode = _aggregate_rows_by_mode(rows)
+    paper = by_mode["paper"]
+    live = by_mode["live"]
     return {
         "variant_id": int(variant_id),
         "window_days": int(days),
@@ -253,39 +281,75 @@ def paper_vs_live_performance_slices(
     }
 
 
-def _aggregate_rows(rows: list[MomentumAutomationOutcome]) -> dict[str, Any]:
-    if not rows:
-        return {
-            "n": 0,
-            "weighted_return_bps_sum": 0.0,
-            "weighted_pnl_sum": 0.0,
-            "weight_sum": 0.0,
-            "mean_return_bps": None,
-            "governance_or_risk_count": 0,
-        }
+def _aggregate_rows(rows: Iterable[Any]) -> dict[str, Any]:
     w_sum = 0.0
     wrb = 0.0
     wp = 0.0
     gr = 0
+    n = 0
     for r in rows:
-        w = float(r.evidence_weight or 1.0)
+        if isinstance(r, (tuple, list)):
+            evidence_weight, return_bps, realized_pnl_usd, outcome_class = r
+        else:
+            evidence_weight = r.evidence_weight
+            return_bps = r.return_bps
+            realized_pnl_usd = r.realized_pnl_usd
+            outcome_class = r.outcome_class
+        n += 1
+        w = float(evidence_weight or 1.0)
         w_sum += w
-        rb = r.return_bps
-        if rb is not None:
-            wrb += float(rb) * w
-        if r.realized_pnl_usd is not None:
-            wp += float(r.realized_pnl_usd) * w
-        oc = r.outcome_class or ""
+        if return_bps is not None:
+            wrb += float(return_bps) * w
+        if realized_pnl_usd is not None:
+            wp += float(realized_pnl_usd) * w
+        oc = outcome_class or ""
         if oc in ("governance_exit", "risk_block", "stale_data_abort"):
             gr += 1
+    return _aggregate_from_stats(n, w_sum, wrb, wp, gr)
+
+
+def _aggregate_from_stats(n: int, w_sum: float, wrb: float, wp: float, gr: int) -> dict[str, Any]:
     mean_bps = (wrb / w_sum) if w_sum > 0 else None
     return {
-        "n": len(rows),
+        "n": int(n),
         "weighted_return_bps_sum": round(wrb, 6),
         "weighted_pnl_sum": round(wp, 6),
         "weight_sum": round(w_sum, 6),
         "mean_return_bps": round(mean_bps, 4) if mean_bps is not None else None,
         "governance_or_risk_count": gr,
+    }
+
+
+def _aggregate_rows_by_mode(rows: Iterable[Any]) -> dict[str, dict[str, Any]]:
+    stats = {
+        "paper": [0, 0.0, 0.0, 0.0, 0],
+        "live": [0, 0.0, 0.0, 0.0, 0],
+    }
+    for r in rows:
+        if isinstance(r, (tuple, list)):
+            mode, evidence_weight, return_bps, realized_pnl_usd, outcome_class = r
+        else:
+            mode = r.mode
+            evidence_weight = r.evidence_weight
+            return_bps = r.return_bps
+            realized_pnl_usd = r.realized_pnl_usd
+            outcome_class = r.outcome_class
+        if mode not in stats:
+            continue
+        bucket = stats[mode]
+        bucket[0] += 1
+        w = float(evidence_weight or 1.0)
+        bucket[1] += w
+        if return_bps is not None:
+            bucket[2] += float(return_bps) * w
+        if realized_pnl_usd is not None:
+            bucket[3] += float(realized_pnl_usd) * w
+        oc = outcome_class or ""
+        if oc in ("governance_exit", "risk_block", "stale_data_abort"):
+            bucket[4] += 1
+    return {
+        mode: _aggregate_from_stats(int(values[0]), values[1], values[2], values[3], int(values[4]))
+        for mode, values in stats.items()
     }
 
 
@@ -336,8 +400,9 @@ def apply_outcome_feedback_to_viability(db: Session, outcome_row: MomentumAutoma
     via.evidence_window_json = ev
 
     # Capped viability nudge from **separate** paper vs live means (no blind merge)
-    paper_stats = aggregate_recent_outcomes_for_variant(db, variant_id=vid, days=30, mode="paper")
-    live_stats = aggregate_recent_outcomes_for_variant(db, variant_id=vid, days=30, mode="live")
+    slices = paper_vs_live_performance_slices(db, variant_id=vid, days=30)
+    paper_stats = slices["paper"]
+    live_stats = slices["live"]
     delta = _viability_delta_from_slices(paper_stats, live_stats)
     if delta != 0.0:
         new_score = float(via.viability_score) + delta
@@ -359,7 +424,7 @@ def maybe_pause_symbol_variant_after_losses(db: Session, outcome_row: MomentumAu
     sym = outcome_row.symbol.strip().upper()
     vid = int(outcome_row.variant_id)
     rows = (
-        db.query(MomentumAutomationOutcome)
+        db.query(MomentumAutomationOutcome.return_bps)
         .filter(
             MomentumAutomationOutcome.symbol == sym,
             MomentumAutomationOutcome.variant_id == vid,
@@ -370,7 +435,7 @@ def maybe_pause_symbol_variant_after_losses(db: Session, outcome_row: MomentumAu
     )
     if len(rows) < 3:
         return
-    if not all((r.return_bps is not None and float(r.return_bps) < 0.0) for r in rows):
+    if not _all_negative_returns(rows):
         return
     until = datetime.utcnow() + timedelta(hours=4)
     uts = until.isoformat()
@@ -385,15 +450,64 @@ def maybe_pause_symbol_variant_after_losses(db: Session, outcome_row: MomentumAu
         via.updated_at = datetime.utcnow()
 
 
+def _outcome_return_stats(outcomes: Iterable[Any]) -> tuple[int, int, Optional[float]]:
+    n = 0
+    wins = 0
+    total_bps = 0.0
+    for outcome in outcomes:
+        rb = _return_bps_value(outcome)
+        if rb is None:
+            continue
+        value = float(rb or 0.0)
+        n += 1
+        total_bps += value
+        if value > 0.0:
+            wins += 1
+    return n, wins, (total_bps / n if n else None)
+
+
+def _all_negative_returns(rows: Iterable[Any]) -> bool:
+    for row in rows:
+        rb = _return_bps_value(row)
+        if rb is None or float(rb) >= 0.0:
+            return False
+    return True
+
+
+def _return_bps_value(outcome: Any) -> Any:
+    if isinstance(outcome, (tuple, list)) and outcome:
+        return outcome[0]
+    if hasattr(outcome, "return_bps"):
+        return outcome.return_bps
+    return outcome
+
+
+def _return_bps_column_stats(rows: Iterable[Any]) -> tuple[int, int, Optional[float]]:
+    n = 0
+    wins = 0
+    total_bps = 0.0
+    for row in rows:
+        try:
+            rb = row[0]
+        except (TypeError, KeyError, IndexError):
+            rb = _return_bps_value(row)
+        if rb is None:
+            continue
+        value = float(rb or 0.0)
+        n += 1
+        total_bps += value
+        if value > 0.0:
+            wins += 1
+    return n, wins, (total_bps / n if n else None)
+
+
 def maybe_kill_underperforming_variant(db: Session, *, variant_id: int) -> dict[str, Any]:
     """Deactivate variant + viability if sustained poor track record (Phase 5c)."""
-    outcomes = _recent_outcomes_for_variant(db, variant_id=int(variant_id), days=90)
-    considered = [o for o in outcomes if o.return_bps is not None]
-    if len(considered) < 5:
+    n, wins, mean_bps = _recent_return_stats_for_variant(db, variant_id=int(variant_id), days=90)
+    if n < 5:
         return {"ok": True, "skipped": "insufficient"}
-    wins = sum(1 for o in considered if float(o.return_bps or 0.0) > 0.0)
-    wr = wins / len(considered)
-    mean_bps = sum(float(o.return_bps or 0.0) for o in considered) / len(considered)
+    wr = wins / n
+    mean_bps = float(mean_bps or 0.0)
     if wr >= 0.35 or mean_bps >= -30.0:
         return {"ok": True, "skipped": "above_threshold"}
 
@@ -421,10 +535,29 @@ def maybe_kill_underperforming_variant(db: Session, *, variant_id: int) -> dict[
             "event": "variant_killed_performance",
             "win_rate": round(wr, 4),
             "mean_return_bps": round(mean_bps, 4),
-            "sample_size": len(considered),
+            "sample_size": n,
         },
     )
     return {"ok": True, "killed": True, "win_rate": wr, "mean_return_bps": mean_bps}
+
+
+def _recent_return_stats_for_variant(
+    db: Session,
+    *,
+    variant_id: int,
+    days: int = 90,
+) -> tuple[int, int, Optional[float]]:
+    since = datetime.utcnow() - timedelta(days=max(1, int(days)))
+    rows = (
+        db.query(MomentumAutomationOutcome.return_bps)
+        .filter(
+            MomentumAutomationOutcome.variant_id == int(variant_id),
+            MomentumAutomationOutcome.contributes_to_evolution.is_(True),
+            MomentumAutomationOutcome.created_at >= since,
+        )
+        .all()
+    )
+    return _return_bps_column_stats(rows)
 
 
 def _recent_outcomes_for_variant(db: Session, *, variant_id: int, days: int = _REFINEMENT_LOOKBACK_DAYS) -> list[MomentumAutomationOutcome]:
