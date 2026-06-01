@@ -90,19 +90,21 @@ def _flat_from_snap(ind_data: dict[str, Any], close_price: float) -> dict[str, A
 
 def _normalized_slope(values: list[float | None]) -> float:
     """Linear slope of last segment, normalized to roughly -1..1."""
-    ys = [v for v in values if v is not None and not math.isnan(v)]
-    if len(ys) < 2:
+    ys = [float(v) for v in values if v is not None and not math.isnan(v)]
+    n = len(ys)
+    if n < 2:
         return 0.0
-    arr = np.array(ys, dtype=float)
-    x = np.arange(len(arr), dtype=float)
-    if np.std(arr) < 1e-12:
+    mean_y = sum(ys) / n
+    variance = sum((y - mean_y) ** 2 for y in ys) / n
+    if variance < 1e-24:
         return 0.0
-    try:
-        slope, _ = np.polyfit(x, arr, 1)
-    except (np.linalg.LinAlgError, ValueError):
+    mean_x = (n - 1) / 2.0
+    denom = sum((i - mean_x) ** 2 for i in range(n))
+    if denom <= 0:
         return 0.0
-    scale = max(np.std(arr), 1e-6)
-    return float(np.clip(slope * len(arr) / (scale * max(len(arr), 1)), -1.0, 1.0))
+    slope = sum((i - mean_x) * (y - mean_y) for i, y in enumerate(ys)) / denom
+    scale = max(math.sqrt(variance), 1e-6)
+    return float(max(-1.0, min(1.0, slope / scale)))
 
 
 def _resolve_rsi_overbought(db: Optional[Session]) -> float:

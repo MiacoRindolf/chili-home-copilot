@@ -11,6 +11,7 @@ import json
 import logging
 import math
 from datetime import datetime
+from functools import lru_cache
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -65,8 +66,7 @@ def _explain_rule_based(
 ) -> list[dict[str, Any]]:
     """For each condition in a rule-based pattern, compute pass/fail + margin."""
     try:
-        rj = json.loads(pattern.rules_json) if isinstance(pattern.rules_json, str) else (pattern.rules_json or {})
-        conditions = rj.get("conditions", [])
+        conditions = _conditions_from_rules(pattern.rules_json)
     except Exception:
         return []
 
@@ -121,6 +121,24 @@ def _explain_rule_based(
         })
 
     return contribs
+
+
+def _conditions_from_rules(rules_json: Any) -> tuple[Any, ...]:
+    if isinstance(rules_json, str):
+        return _conditions_from_rules_json(rules_json)
+    rules = rules_json or {}
+    conditions = rules.get("conditions", []) if isinstance(rules, dict) else []
+    return tuple(conditions) if isinstance(conditions, list) else ()
+
+
+@lru_cache(maxsize=2048)
+def _conditions_from_rules_json(rules_json: str) -> tuple[Any, ...]:
+    try:
+        rules = json.loads(rules_json or "{}")
+        conditions = rules.get("conditions", []) if isinstance(rules, dict) else []
+    except Exception:
+        return ()
+    return tuple(conditions) if isinstance(conditions, list) else ()
 
 
 def _explain_ml_based(ml, indicators: dict[str, float]) -> list[dict[str, Any]]:

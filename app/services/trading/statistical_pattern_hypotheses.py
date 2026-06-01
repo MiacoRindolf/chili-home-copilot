@@ -5,6 +5,7 @@ data-driven (lift vs baseline on ``future_return_5d``).
 """
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -153,7 +154,7 @@ def mine_proposals_from_snapshots(
         return []
 
     baseline = sum(fr for _, fr in parsed) / len(parsed)
-    scored: list[tuple[float, int, str, str, list[dict[str, Any]]]] = []
+    scored: list[tuple[float, int, float, str, str, list[dict[str, Any]]]] = []
 
     for title, desc, conds in _STAT_CANDIDATES:
         matched = [fr for flat, fr in parsed if _flat_matches_all(flat, conds)]
@@ -163,18 +164,16 @@ def mine_proposals_from_snapshots(
         mean_ret = sum(matched) / n
         lift = mean_ret - baseline
         if mean_ret > 0 and lift >= min_lift_pct:
-            scored.append((lift, n, title, desc, conds))
+            scored.append((lift, n, mean_ret, title, desc, conds))
 
     scored.sort(key=lambda x: -x[0])
     out: list[dict[str, Any]] = []
     seen_fp: set[str] = set()
-    for lift, n, title, desc, conds in scored:
+    for lift, n, mean_ret, title, desc, conds in scored:
         fp = _conditions_fingerprint(conds)
         if fp in seen_fp:
             continue
         seen_fp.add(fp)
-        matched = [fr for flat, fr in parsed if _flat_matches_all(flat, conds)]
-        mean_ret = sum(matched) / max(n, 1)
         safe = re.sub(r"[^a-zA-Z0-9]+", "_", title)[:40].strip("_")
         name = f"Stat_{safe}_{int(lift * 100)}"
         out.append(

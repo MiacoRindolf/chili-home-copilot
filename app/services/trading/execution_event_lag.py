@@ -205,14 +205,23 @@ def measure_execution_event_lag(
             breach = "warn"
 
     per_venue: dict[str, dict[str, float | int | None]] = {}
-    for v, vals in per_venue_lags.items():
-        venue_p50, venue_p95 = _percentiles(vals, 0.50, 0.95)
+    if len(per_venue_lags) == 1:
+        v, vals = next(iter(per_venue_lags.items()))
         per_venue[v] = {
             "sample_size": len(vals),
-            "p50_ms": venue_p50,
-            "p95_ms": venue_p95,
-            "max_ms": max(vals) if vals else None,
+            "p50_ms": p50,
+            "p95_ms": p95,
+            "max_ms": mx,
         }
+    else:
+        for v, vals in per_venue_lags.items():
+            venue_p50, venue_p95 = _percentiles(vals, 0.50, 0.95)
+            per_venue[v] = {
+                "sample_size": len(vals),
+                "p50_ms": venue_p50,
+                "p95_ms": venue_p95,
+                "max_ms": max(vals) if vals else None,
+            }
 
     return EventLagSummary(
         checked_at=checked_at,
