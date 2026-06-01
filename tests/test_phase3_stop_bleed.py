@@ -1046,10 +1046,10 @@ class TestD4PreflightCashCheck:
         assert result_with_slack is not None
         assert result_with_slack.get("preflight_refused") is True
 
-    def test_stale_cache_allows_through_with_warning(self, monkeypatch, caplog):
+    def test_stale_cache_refuses_with_warning(self, monkeypatch, caplog):
         """R2: stale-cache threshold is settings-sourced. When the cache
         is older than chili_coinbase_preflight_max_stale_seconds, the
-        pre-flight allows through (broker is final check)."""
+        pre-flight refuses because buying power is not proven."""
         # Buying power is technically insufficient, but cache is stale.
         self._patch_resolver(monkeypatch, total=100.0, last_updated_age_s=60.0)
         from app import config as app_config
@@ -1063,10 +1063,14 @@ class TestD4PreflightCashCheck:
                 base_size="0.01",
                 limit_price="50000",
             )
-        assert result is None  # allowed through despite insufficient
+        assert result is not None
+        assert result.get("ok") is False
+        assert result.get("preflight_refused") is True
+        assert result["error"].startswith("buying_power_unavailable:stale_cache")
         stale_msgs = [
             r for r in caplog.records
             if "buying_power cache stale" in (r.getMessage() or "")
+            and "blocking" in (r.getMessage() or "")
         ]
         assert len(stale_msgs) >= 1
 

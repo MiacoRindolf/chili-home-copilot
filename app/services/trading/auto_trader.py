@@ -4863,6 +4863,24 @@ def _execute_broker_buy(
         )
         return None
 
+    try:
+        from .portfolio_risk import circuit_breaker_entry_block_reason
+
+        breaker_reason = circuit_breaker_entry_block_reason(db, user_id=uid)
+    except Exception as exc:
+        breaker_reason = f"Circuit breaker active: gate_exception:{type(exc).__name__}"
+    if breaker_reason is not None:
+        _block_live_order(
+            db,
+            uid=uid,
+            alert=alert,
+            reason=f"portfolio_blocked:{breaker_reason}",
+            snap=snap,
+            llm_snap=llm_snap,
+            out=out,
+        )
+        return None
+
     cap_source = str(snap.get("notional_capital_source") or snap.get("capital_source") or "")
     if cap_source.startswith("fallback:") and bool(
         getattr(settings, "chili_autotrader_block_live_on_capital_fallback", True)

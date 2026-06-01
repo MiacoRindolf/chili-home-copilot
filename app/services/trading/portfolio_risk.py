@@ -408,6 +408,23 @@ def get_portfolio_risk_snapshot(
     return budget
 
 
+def circuit_breaker_entry_block_reason(
+    db: Session,
+    *,
+    user_id: int | None,
+) -> str | None:
+    """Return an entry-block reason when the durable breaker is active."""
+    persisted_breaker = _refresh_breaker_from_db_for_gate(db, user_id=user_id)
+    if persisted_breaker is not None:
+        persisted_tripped, persisted_reason = persisted_breaker
+        if persisted_tripped:
+            return f"Circuit breaker active: {persisted_reason}"
+        return None
+    if is_breaker_tripped():
+        return f"Circuit breaker active: {_breaker_reason}"
+    return None
+
+
 def check_new_trade_allowed(
     db: Session,
     user_id: int | None,
@@ -426,13 +443,9 @@ def check_new_trade_allowed(
         logger.error("[risk] Kill-switch check failed — blocking trade as precaution", exc_info=True)
         return False, "Kill-switch check failed — trade blocked as safety precaution"
 
-    persisted_breaker = _refresh_breaker_from_db_for_gate(db, user_id=user_id)
-    if persisted_breaker is not None:
-        persisted_tripped, persisted_reason = persisted_breaker
-        if persisted_tripped:
-            return False, f"Circuit breaker active: {persisted_reason}"
-    elif is_breaker_tripped():
-        return False, f"Circuit breaker active: {_breaker_reason}"
+    breaker_reason = circuit_breaker_entry_block_reason(db, user_id=user_id)
+    if breaker_reason is not None:
+        return False, breaker_reason
 
     capital_f = _float_or_none(capital)
     if capital_f is None:

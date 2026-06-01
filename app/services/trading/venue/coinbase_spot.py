@@ -90,31 +90,32 @@ def _coinbase_preflight_cash_check(
 
     Returns ``None`` on pass-through (let the placement proceed). Returns
     an envelope ``{"ok": False, "error": "...", "preflight_refused":
-    True}`` when local buying power is strictly below the order's
-    required notional. When the cache is stale beyond
-    ``chili_coinbase_preflight_max_stale_seconds``, returns None with a
-    logged warning so the broker remains the final authority.
+    True}`` when local buying power is unavailable, stale, malformed, or
+    strictly below the order's required notional.
 
     Fee slack (``chili_coinbase_preflight_fee_slack_bps``) and stale
     threshold (``chili_coinbase_preflight_max_stale_seconds``) are both
     settings-sourced — no magic constants (COWORK_ADVISOR_BRIEF §2.6).
     """
+    def _refuse(reason: str) -> dict[str, Any]:
+        return {"ok": False, "error": reason, "preflight_refused": True}
+
     try:
         from ..cost_aware_gate import resolve_coinbase_buying_power
     except Exception:
         _log.warning(
-            "[coinbase_spot] D4 preflight: resolver import failed; allowing",
+            "[coinbase_spot] D4 preflight: resolver import failed; blocking",
             exc_info=True,
         )
-        return None
+        return _refuse("buying_power_unavailable:resolver_import_failed")
     try:
         bp = resolve_coinbase_buying_power()
     except Exception:
         _log.warning(
-            "[coinbase_spot] D4 preflight: resolver raised; allowing",
+            "[coinbase_spot] D4 preflight: resolver raised; blocking",
             exc_info=True,
         )
-        return None
+        return _refuse("buying_power_unavailable:resolver_exception")
 
     fee_slack_bps = float(getattr(
         settings, "chili_coinbase_preflight_fee_slack_bps", 50.0,
@@ -123,16 +124,26 @@ def _coinbase_preflight_cash_check(
         settings, "chili_coinbase_preflight_max_stale_seconds", 5.0,
     ))
 
-    last_updated = float(bp.get("last_updated") or 0.0)
-    if last_updated > 0:
-        stale_age_s = time.time() - last_updated
-        if stale_age_s > max_stale_s:
-            _log.warning(
-                "[coinbase_spot] D4 preflight: buying_power cache stale by "
-                "%.1fs (max %.1fs); allowing through, broker is final check",
-                stale_age_s, max_stale_s,
-            )
-            return None
+    try:
+        last_updated = float(bp.get("last_updated") or 0.0)
+    except (TypeError, ValueError):
+        last_updated = 0.0
+    if last_updated <= 0:
+        _log.warning(
+            "[coinbase_spot] D4 preflight: buying_power cache missing timestamp; blocking",
+        )
+        return _refuse("buying_power_unavailable:missing_cache_timestamp")
+    stale_age_s = time.time() - last_updated
+    if stale_age_s > max_stale_s:
+        _log.warning(
+            "[coinbase_spot] D4 preflight: buying_power cache stale by "
+            "%.1fs (max %.1fs); blocking",
+            stale_age_s, max_stale_s,
+        )
+        return _refuse(
+            "buying_power_unavailable:"
+            f"stale_cache:{stale_age_s:.1f}s>{max_stale_s:.1f}s"
+        )
 
     try:
         required_usd = (
@@ -142,12 +153,18 @@ def _coinbase_preflight_cash_check(
     except (TypeError, ValueError):
         _log.warning(
             "[coinbase_spot] D4 preflight: non-numeric base_size/limit_price "
-            "(base_size=%r limit_price=%r); allowing",
+            "(base_size=%r limit_price=%r); blocking",
             base_size, limit_price,
         )
-        return None
+        return _refuse("buying_power_unavailable:invalid_order_notional")
 
-    total_usd = float(bp.get("total") or 0.0)
+    try:
+        total_usd = float(bp.get("total") or 0.0)
+    except (TypeError, ValueError):
+        _log.warning(
+            "[coinbase_spot] D4 preflight: non-numeric buying_power total; blocking",
+        )
+        return _refuse("buying_power_unavailable:invalid_total")
     if total_usd < required_usd:
         msg = (
             f"local buying_power ${total_usd:.2f} < required "
@@ -155,7 +172,7 @@ def _coinbase_preflight_cash_check(
             f"(fee_slack={fee_slack_bps:.0f}bps)"
         )
         _log.info("[coinbase_spot] D4 preflight refused: %s", msg)
-        return {"ok": False, "error": msg, "preflight_refused": True}
+        return _refuse(msg)
 
     return None
 

@@ -1863,6 +1863,47 @@ def test_scale_in_blocks_live_capital_fallback(monkeypatch):
     assert blocked[0]["reason"] == "capital_unavailable:fallback:get_portfolio_timeout"
 
 
+def test_broker_buy_rechecks_circuit_breaker_before_adapter(monkeypatch):
+    from app.services.trading import portfolio_risk
+
+    alert = SimpleNamespace(id=88, ticker="OPN-USD")
+    monkeypatch.setattr(
+        at_mod,
+        "settings",
+        SimpleNamespace(chili_autotrader_block_live_on_capital_fallback=True),
+    )
+    monkeypatch.setattr(
+        portfolio_risk,
+        "circuit_breaker_entry_block_reason",
+        lambda *a, **k: "Circuit breaker active: test_breaker",
+    )
+    blocked: list[dict] = []
+    monkeypatch.setattr(
+        at_mod,
+        "_block_live_order",
+        lambda *a, **k: blocked.append(k),
+    )
+    out = {"skipped": 0}
+
+    res = at_mod._execute_broker_buy(
+        MagicMock(),
+        uid=42,
+        alert=alert,
+        qty=1.0,
+        client_order_id="atv1-88-buy",
+        snap={"capital_source": "broker_equity"},
+        llm_snap=None,
+        out=out,
+        px=0.135,
+    )
+
+    assert res is None
+    assert blocked
+    assert blocked[0]["reason"] == (
+        "portfolio_blocked:Circuit breaker active: test_breaker"
+    )
+
+
 def test_scale_in_blocks_when_protection_is_unproven(monkeypatch):
     class _NoBracketRowsDb:
         def execute(self, *args, **kwargs):

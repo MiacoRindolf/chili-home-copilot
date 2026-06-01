@@ -125,6 +125,28 @@ def test_check_new_trade_allowed_blocks_latest_persisted_breaker_before_recomput
         _reset_process_breaker()
 
 
+def test_circuit_breaker_entry_block_reason_uses_latest_durable_state() -> None:
+    from app.services.trading import portfolio_risk
+    from app.services.trading.portfolio_risk import (
+        circuit_breaker_entry_block_reason,
+    )
+
+    reason = "test_persisted_breaker:final_submit_gate"
+    db = _FakeBreakerDb((True, reason))
+    _reset_process_breaker()
+
+    try:
+        blocked_reason = circuit_breaker_entry_block_reason(db, user_id=7)
+
+        assert blocked_reason == f"Circuit breaker active: {reason}"
+        assert db.params == {"uid": 7}
+        assert any("trading_risk_state" in stmt for stmt in db.statements)
+        assert portfolio_risk.is_breaker_tripped() is True
+        assert portfolio_risk.get_breaker_status()["reason"] == reason
+    finally:
+        _reset_process_breaker()
+
+
 def test_check_new_trade_allowed_scopes_persisted_breaker_to_user() -> None:
     from app.services.trading import portfolio_risk
     from app.services.trading.portfolio_risk import check_new_trade_allowed
