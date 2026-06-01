@@ -1762,7 +1762,12 @@ def check_drawdown_breaker(
             f"Unrealized MTM drawdown {unrealized_pct:.1f}% "
             f"exceeds -{limits.max_30day_dd_pct}% limit"
         )
-        _persist_breaker_state(True, _breaker_reason, user_id=user_id)
+        _persist_breaker_state(
+            True,
+            _breaker_reason,
+            user_id=user_id,
+            capital=capital,
+        )
         logger.warning("[circuit_breaker] TRIPPED (MTM): %s", _breaker_reason)
         return True, _breaker_reason
 
@@ -1784,7 +1789,12 @@ def check_drawdown_breaker(
             f"5-day drawdown {pnl_5d_pct:.1f}% (realized={pnl_5d_realized:.0f}, "
             f"unrealized={unrealized_pnl:.0f}) exceeds -{limits.max_5day_dd_pct}% limit"
         )
-        _persist_breaker_state(True, _breaker_reason, user_id=user_id)
+        _persist_breaker_state(
+            True,
+            _breaker_reason,
+            user_id=user_id,
+            capital=capital,
+        )
         logger.warning("[circuit_breaker] TRIPPED: %s", _breaker_reason)
         return True, _breaker_reason
 
@@ -1806,7 +1816,12 @@ def check_drawdown_breaker(
             f"30-day drawdown {pnl_30d_pct:.1f}% (realized={pnl_30d_realized:.0f}, "
             f"unrealized={unrealized_pnl:.0f}) exceeds -{limits.max_30day_dd_pct}% limit"
         )
-        _persist_breaker_state(True, _breaker_reason, user_id=user_id)
+        _persist_breaker_state(
+            True,
+            _breaker_reason,
+            user_id=user_id,
+            capital=capital,
+        )
         logger.warning("[circuit_breaker] TRIPPED: %s", _breaker_reason)
         return True, _breaker_reason
 
@@ -1856,7 +1871,12 @@ def check_drawdown_breaker(
                     f"${float(threshold):.2f} "
                     f"(K={k_val}σ, computed from {n_obs}d CHILI history)"
                 )
-                _persist_breaker_state(True, _breaker_reason, user_id=user_id)
+                _persist_breaker_state(
+                    True,
+                    _breaker_reason,
+                    user_id=user_id,
+                    capital=capital,
+                )
                 logger.warning("[circuit_breaker] TRIPPED: %s", _breaker_reason)
                 return True, _breaker_reason
 
@@ -1918,7 +1938,12 @@ def check_drawdown_breaker(
                     f"(real CHILI decisions, total=${streak_loss:.2f}, "
                     f"floor=${min_loss_dollars:.2f})"
                 )
-                _persist_breaker_state(True, _breaker_reason, user_id=user_id)
+                _persist_breaker_state(
+                    True,
+                    _breaker_reason,
+                    user_id=user_id,
+                    capital=capital,
+                )
                 logger.warning("[circuit_breaker] TRIPPED: %s", _breaker_reason)
                 return True, _breaker_reason
             else:
@@ -2006,17 +2031,24 @@ def _persist_breaker_state(
     reason: str | None,
     *,
     user_id: int | None = None,
+    capital: float | None = None,
 ) -> None:
     """Write circuit breaker state to trading_risk_state so it survives restarts."""
     try:
         from ...db import SessionLocal
         from sqlalchemy import text
+        capital_f = _float_or_none(capital) or 0.0
         sess = SessionLocal()
         try:
             sess.execute(text(
                 "INSERT INTO trading_risk_state (user_id, snapshot_date, breaker_tripped, breaker_reason, regime, capital) "
-                "VALUES (:uid, NOW(), :tripped, :reason, 'circuit_breaker', 0) "
-            ), {"uid": user_id, "tripped": tripped, "reason": reason or ""})
+                "VALUES (:uid, NOW(), :tripped, :reason, 'circuit_breaker', :capital) "
+            ), {
+                "uid": user_id,
+                "tripped": tripped,
+                "reason": reason or "",
+                "capital": capital_f,
+            })
             sess.commit()
         finally:
             # FIX 46 pattern: rollback to end implicit read txn before close.
@@ -2049,6 +2081,8 @@ def write_daily_breaker_liveness_snapshot(db: Session) -> dict[str, Any]:
 
     Returns the computed snapshot for logging.
     """
+    from datetime import datetime
+
     from sqlalchemy import text
     snapshot: dict[str, Any] = {}
     try:
@@ -2056,17 +2090,26 @@ def write_daily_breaker_liveness_snapshot(db: Session) -> dict[str, Any]:
         # entry point the gate uses; if it trips, _persist_breaker_state
         # already wrote a 'circuit_breaker' row -- our heartbeat row is
         # ADDITIONAL.
-        tripped, reason = check_drawdown_breaker(db, user_id=None)
+        capital_basis = 100_000.0
+        tripped, reason = check_drawdown_breaker(
+            db, user_id=None, capital=capital_basis,
+        )
         snapshot = {
             "tripped": bool(tripped),
             "reason": reason,
+            "capital": capital_basis,
             "computed_at": datetime.utcnow().isoformat(timespec="seconds"),
         }
         db.execute(text(
             "INSERT INTO trading_risk_state "
             "(user_id, snapshot_date, breaker_tripped, breaker_reason, regime, capital) "
-            "VALUES (:uid, NOW(), :tripped, :reason, 'breaker_heartbeat', 0)"
-        ), {"uid": None, "tripped": bool(tripped), "reason": (reason or "alive")[:200]})
+            "VALUES (:uid, NOW(), :tripped, :reason, 'breaker_heartbeat', :capital)"
+        ), {
+            "uid": None,
+            "tripped": bool(tripped),
+            "reason": (reason or "alive")[:200],
+            "capital": capital_basis,
+        })
         db.commit()
         logger.info(
             "[circuit_breaker] heartbeat snapshot written: tripped=%s reason=%s",
