@@ -1,0 +1,134 @@
+# QUEUED: odysseus salvage backlog
+
+**Source:** operator-directed review (2026-06-01) of
+[`pewdiepie-archdaemon/odysseus`](https://github.com/pewdiepie-archdaemon/odysseus)
+— an MIT-licensed self-hosted AI workspace (~44k LOC Python). odysseus itself
+adapts opencode (MIT), Tongyi DeepResearch (Apache-2.0), and llmfit (MIT); all
+permissive. License is clean to salvage with attribution.
+
+**Method:** mapped odysseus's strongest modules against what CHILI already has,
+to salvage *gaps*, not duplicates. Modules where CHILI already has an equivalent
+(multi-step research via `context_brain`; vector RAG via `app/rag.py`; LLM tier
+escalation via `app/services/llm_router/router.py`) were explicitly rejected to
+avoid a second parallel stack.
+
+**Shipped from this review (2026-06-01):** Win #1 — resilient multi-provider
+web/news search + SSRF-safe page-content fetcher. See
+`docs/STRATEGY/CC_REPORTS/2026-06-01_f-odysseus-salvage-resilient-search.md`.
+New module `app/search_providers.py`; `app/web_search.py` rewired with DDG
+backstop; additive `fetch_source()` / `search_with_sources()` APIs.
+
+The items below are the **remaining** candidates, ranked by impact × safety for
+a trading brain. Each is sized for a single Cowork → Claude Code NEXT_TASK.
+
+---
+
+## P1 — Wire source-content into the research consumers (small, high-leverage)
+
+**Gap:** Win #1 added `web_search.search_with_sources()` and `fetch_source()`
+but no consumer uses them yet — research still summarizes from snippets alone.
+
+**Task:** behind a default-off flag (`search_fetch_sources: bool = False`), let
+`reasoning_brain/web_researcher.py` and `project_brain/web_research.py` enrich
+their top N results with fetched article text before LLM summarization. Cap with
+a new `search_max_fetch` (default 3) and reuse the existing per-cycle search
+caps. Measure summary quality lift on a held-out set of ticker-catalyst topics.
+
+**Why it matters for trading:** catalyst research (earnings, FDA, M&A, guidance)
+is far better from full article text than from a 1-line SERP snippet.
+
+**Blast radius:** low — flag-gated, off by default, off the live-trading path.
+
+**Salvage ref:** already in-repo (`app/search_providers.fetch_webpage_content`).
+
+---
+
+## P2 — Standalone visual report generator (one self-contained file)
+
+**Gap:** CHILI renders Telegram alert HTML (`trading/alert_formatter.py`) but has
+no generic markdown → shareable styled HTML report.
+
+**Task:** salvage odysseus `src/visual_report.py` (90% self-contained, zero
+odysseus coupling — only dep is a `strip_thinking` helper that is trivial to
+inline). Adapt to a `app/visual_report.py` util: markdown report → self-contained
+HTML (auto TOC, dark/light, collapsible sources). Wire as an optional export for
+research reports and the daily trading brief / CC-style summaries.
+
+**Why it matters:** turns CHILI research + daily P/L briefs into artifacts the
+operator can open/share without the app running.
+
+**Blast radius:** very low — pure rendering util, no trading or DB coupling.
+
+**Salvage ref:** odysseus `src/visual_report.py` (~1.8k LOC; the CSS template is
+the bulk — keep or trim to taste).
+
+---
+
+## P3 — MCP client (extensibility)
+
+**Gap:** CHILI is not an MCP client (confirmed absent). It cannot consume
+external MCP servers (e.g. a broker-docs server, an SEC-filings server).
+
+**Task:** salvage odysseus `src/mcp_manager.py` patterns to add a minimal MCP
+client: connect to configured stdio/HTTP MCP servers, list tools, dispatch
+calls. Keep it read-only/allowlisted initially; do **not** expose any tool that
+can place orders.
+
+**Why it matters:** clean extension point for future data sources without
+bloating the core. Strategic, not urgent.
+
+**Blast radius:** medium — new surface area; must be allowlisted and kept off any
+order-placement authority. Coupled in odysseus (≈40% extractable per assessment)
+— treat as reference, build CHILI-native.
+
+---
+
+## P4 — Teacher → skill-learning escalation (niche)
+
+**Gap:** CHILI's `llm_router` escalates weak→strong on a confidence heuristic but
+does **not** persist a reusable procedure when a strong model rescues a failure.
+
+**Task:** salvage odysseus `src/teacher_escalation.py` (75% self-contained). When
+the local model fails a task and a stronger model succeeds, have the teacher emit
+a portable SKILL.md-style procedure (paths/hosts/model-names stripped) stored for
+later reuse. Inject CHILI's LLM caller + a skill-saver.
+
+**Why it matters:** compounding improvement of the local-first agent over time.
+Niche — only pays off where weak+strong model pairs run regularly.
+
+**Blast radius:** low-medium — touches the LLM layer, not trading. Needs a place
+to persist skills (CHILI has `code_brain` / planner stores to evaluate).
+
+**Salvage ref:** odysseus `src/teacher_escalation.py` — read in full; the
+escalation gate + untrusted-trace guard + portable-skill generation are the
+valuable parts.
+
+---
+
+## Explicitly REJECTED (CHILI already has an equivalent — do not import)
+
+- **Deep research pipeline** (`src/deep_research.py`) — CHILI has the
+  `context_brain` tree pipeline (decompose → execute → compile → synthesize).
+  Importing odysseus's IterResearch loop would create a second parallel stack.
+- **Vector RAG / memory** (`src/rag_vector.py`, `services/memory/`) — CHILI has
+  `app/rag.py` (ChromaDB + Ollama embeddings). Duplicate.
+- **LLM core / multi-provider abstraction** (`src/llm_core.py`) — CHILI has the
+  `llm_router` tier cascade (Ollama → Groq → gpt-4o-mini → gpt-4o/Claude).
+  Duplicate.
+- **Agent loop + tool framework** (`src/agent_loop.py`) — only ~40% extractable;
+  deeply coupled to odysseus's 40-tool ecosystem. Use as a *design reference* if
+  CHILI ever needs a true iterative ReAct loop, but do not lift wholesale.
+- **Hardware-fit / cookbook** (`services/hwfit/`) — local-model-serving advisor;
+  not relevant to the trading brain's priorities.
+
+---
+
+## Notes for Cowork
+
+- All P-items are off the live-trading execution path and respect the frozen
+  prediction-mirror contract and live-placement safety belts.
+- Attribution: any salvaged file must carry an MIT attribution header pointing at
+  odysseus (and Apache-2.0 note for DeepResearch-derived bits), matching the
+  header already added to `app/search_providers.py`.
+- Suggested sequence: **P1 first** (it activates value already shipped in Win #1
+  for near-zero cost), then **P2** (cheap, visible), then P3/P4 as strategic.

@@ -88,32 +88,30 @@ class TestNLUWebSearch:
 
 
 class TestSearch:
-    @patch("app.web_search.DDGS")
-    def test_returns_results(self, mock_ddgs_cls):
-        mock_instance = MagicMock()
-        mock_instance.__enter__ = MagicMock(return_value=mock_instance)
-        mock_instance.__exit__ = MagicMock(return_value=False)
-        mock_instance.text.return_value = [
-            {"title": "Result 1", "href": "https://example.com/1", "body": "Description 1"},
-            {"title": "Result 2", "href": "https://example.com/2", "body": "Description 2"},
+    @patch("app.web_search.search_providers.resilient_search")
+    def test_returns_results(self, mock_resilient):
+        # Provider cascade returns normalized {title,url,snippet}; search() must
+        # map back to the historical {title,href,body} contract for callers.
+        mock_resilient.return_value = [
+            {"title": "Result 1", "url": "https://example.com/1", "snippet": "Description 1"},
+            {"title": "Result 2", "url": "https://example.com/2", "snippet": "Description 2"},
         ]
-        mock_ddgs_cls.return_value = mock_instance
-
         results = search("test query")
         assert len(results) == 2
         assert results[0]["title"] == "Result 1"
+        assert results[0]["body"] == "Description 1"
         assert results[1]["href"] == "https://example.com/2"
 
-    @patch("app.web_search.DDGS")
-    def test_handles_error(self, mock_ddgs_cls):
-        mock_instance = MagicMock()
-        mock_instance.__enter__ = MagicMock(return_value=mock_instance)
-        mock_instance.__exit__ = MagicMock(return_value=False)
-        mock_instance.text.side_effect = Exception("network error")
-        mock_ddgs_cls.return_value = mock_instance
-
+    @patch("app.web_search.search_providers.resilient_search")
+    def test_handles_error(self, mock_resilient):
+        mock_resilient.side_effect = Exception("network error")
         results = search("test query")
         assert results == []
+
+    @patch("app.web_search.search_providers.resilient_search")
+    def test_empty_cascade_returns_empty(self, mock_resilient):
+        mock_resilient.return_value = []
+        assert search("test query") == []
 
 
 class TestFormatResults:
