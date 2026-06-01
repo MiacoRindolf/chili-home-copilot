@@ -109,3 +109,7 @@ beautifulsoup4>=4.12
 # salvaged from odysseus, MIT). Small pure-Python dep; the module degrades to a
 # minimal regex renderer if it is ever absent.
 markdown>=3.5
+# MCP client (app/mcp_client.py) — lets CHILI consume external MCP servers.
+# DORMANT by default (mcp_enabled=False); the import is guarded so the client
+# degrades to disabled when the SDK is absent.
+mcp>=1.0
