@@ -45,7 +45,19 @@ def test_realized_stats_sync_live_source_uses_realized_notional_only() -> None:
     assert "pnl IS NOT NULL" in live_source_sql
     assert "entry_price > 0" in live_source_sql
     assert "quantity > 0" in live_source_sql
-    assert "avg((pnl / (entry_price * quantity * contract_multiplier)) * 100.0)" in realized_sql
+    assert "realized_return_frac" in realized_sql
+    assert "avg(realized_return_frac * 100.0)" in realized_sql
+    assert "count(realized_return_frac) AS n" in realized_sql
+    assert "CASE WHEN realized_return_frac > 0 THEN 1 ELSE 0 END" in realized_sql
+    assert "WHEN realized_return_frac > 0" in realized_sql
+    assert "WHEN realized_return_frac < 0" in realized_sql
+    assert "HAVING count(realized_return_frac) >= :min_n" in realized_sql
+    assert "partial_taken_qty" in realized_sql
+    assert "partial_taken_price" in realized_sql
+    assert "filled_quantity" in realized_sql
+    assert "entry_price * quantity * contract_multiplier" not in realized_sql
+    assert "WHEN pnl > 0" not in realized_sql
+    assert "WHEN pnl < 0" not in realized_sql
     assert "exit_price - entry_price" not in realized_sql
     assert "entry_price - exit_price" not in realized_sql
 

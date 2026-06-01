@@ -35,8 +35,8 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from .realized_pnl_sql import (
-    paper_trade_contract_multiplier_sql,
-    trade_contract_multiplier_sql,
+    paper_trade_return_fraction_sql,
+    trade_return_fraction_sql,
 )
 
 logger = logging.getLogger(__name__)
@@ -113,18 +113,13 @@ def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, in
     # f-evaluation-function-fix Tier A #2 (2026-05-18): also refresh
     # avg_winner_pct / avg_loser_pct / payoff_ratio so the
     # ``_matches_thin_evidence_criteria`` payoff-ratio protection sees
-    # current values. Uses ``pnl / notional`` with the option contract
-    # multiplier included to match mig 246's backfill convention.
+    # current values. Uses partial-aware ``pnl / opening_notional`` with
+    # the option contract multiplier included to match learning.py.
     rows = sess.execute(text(f"""
         WITH realized_source AS (
             SELECT scan_pattern_id,
                    pnl,
-                   entry_price,
-                   exit_price,
-                   quantity,
-                   direction,
-                   exit_date,
-                   {trade_contract_multiplier_sql()} AS contract_multiplier,
+                   {trade_return_fraction_sql()} AS realized_return_frac,
                    'live' AS source
             FROM trading_trades
             WHERE status = 'closed'
@@ -137,12 +132,7 @@ def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, in
             UNION ALL
             SELECT scan_pattern_id,
                    pnl,
-                   entry_price,
-                   exit_price,
-                   quantity,
-                   direction,
-                   exit_date,
-                   {paper_trade_contract_multiplier_sql()} AS contract_multiplier,
+                   {paper_trade_return_fraction_sql()} AS realized_return_frac,
                    'autotrader_paper_dynamic' AS source
             FROM trading_paper_trades
             WHERE :include_paper_dynamic
@@ -160,31 +150,30 @@ def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, in
               )
         )
         SELECT scan_pattern_id,
-               count(*) AS n,
-               sum(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
-               avg((pnl / (entry_price * quantity * contract_multiplier)) * 100.0) AS avg_ret_pct,
+               count(realized_return_frac) AS n,
+               sum(CASE WHEN realized_return_frac > 0 THEN 1 ELSE 0 END) AS wins,
+               avg(realized_return_frac * 100.0) AS avg_ret_pct,
                avg(
                  CASE
-                   WHEN pnl > 0 AND entry_price > 0 AND quantity > 0
-                   THEN pnl / (entry_price * quantity * contract_multiplier)
+                   WHEN realized_return_frac > 0
+                   THEN realized_return_frac
                  END
                ) AS avg_winner_pct,
                avg(
                  CASE
-                   WHEN pnl < 0 AND entry_price > 0 AND quantity > 0
-                   THEN pnl / (entry_price * quantity * contract_multiplier)
+                   WHEN realized_return_frac < 0
+                   THEN realized_return_frac
                  END
                ) AS avg_loser_pct,
+               count(realized_return_frac) AS payoff_n,
+               count(*) FILTER (WHERE source = 'live' AND realized_return_frac IS NOT NULL) AS live_n,
                count(*) FILTER (
-                 WHERE pnl IS NOT NULL
-                   AND entry_price > 0
-                   AND quantity > 0
-               ) AS payoff_n,
-               count(*) FILTER (WHERE source = 'live') AS live_n,
-               count(*) FILTER (WHERE source = 'autotrader_paper_dynamic') AS paper_dynamic_n
+                 WHERE source = 'autotrader_paper_dynamic'
+                   AND realized_return_frac IS NOT NULL
+               ) AS paper_dynamic_n
         FROM realized_source
         GROUP BY scan_pattern_id
-        HAVING count(*) >= :min_n
+        HAVING count(realized_return_frac) >= :min_n
     """), {
         "lookback": lookback,
         "min_n": min_n,

@@ -87,19 +87,24 @@ def population_win_rate(db: Session, *, lookback_days: int = 90) -> float | None
         return c
     try:
         row = db.execute(
-            text("""
+            text(f"""
+                WITH realized AS (
+                    SELECT {trade_return_fraction_sql()} AS realized_return_frac
+                    FROM trading_trades
+                    WHERE status = 'closed'
+                      AND pnl IS NOT NULL
+                      AND entry_price IS NOT NULL
+                      AND entry_price > 0
+                      AND quantity IS NOT NULL
+                      AND quantity > 0
+                      AND exit_date IS NOT NULL
+                      AND exit_date > NOW() - make_interval(days => :ld)
+                )
                 SELECT
-                  COUNT(*) AS n,
-                  AVG(CASE WHEN pnl > 0 THEN 1.0 ELSE 0.0 END) AS wr
-                FROM trading_trades
-                WHERE status = 'closed'
-                  AND pnl IS NOT NULL
-                  AND entry_price IS NOT NULL
-                  AND entry_price > 0
-                  AND quantity IS NOT NULL
-                  AND quantity > 0
-                  AND exit_date IS NOT NULL
-                  AND exit_date > NOW() - make_interval(days => :ld)
+                  COUNT(realized_return_frac) AS n,
+                  AVG(CASE WHEN realized_return_frac > 0 THEN 1.0 ELSE 0.0 END) AS wr
+                FROM realized
+                WHERE realized_return_frac IS NOT NULL
             """),
             {"ld": int(lookback_days)},
         ).fetchone()
@@ -124,18 +129,23 @@ def population_avg_return_pct(db: Session, *, lookback_days: int = 90) -> float 
     try:
         row = db.execute(
             text(f"""
+                WITH realized AS (
+                    SELECT {trade_return_fraction_sql()} AS realized_return_frac
+                    FROM trading_trades
+                    WHERE status = 'closed'
+                      AND pnl IS NOT NULL
+                      AND entry_price IS NOT NULL
+                      AND entry_price > 0
+                      AND quantity IS NOT NULL
+                      AND quantity > 0
+                      AND exit_date IS NOT NULL
+                      AND exit_date > NOW() - make_interval(days => :ld)
+                )
                 SELECT
-                  COUNT(*) AS n,
-                  AVG(({trade_return_fraction_sql()} * 100.0)) AS ar
-                FROM trading_trades
-                WHERE status = 'closed'
-                  AND pnl IS NOT NULL
-                  AND entry_price IS NOT NULL
-                  AND entry_price > 0
-                  AND quantity IS NOT NULL
-                  AND quantity > 0
-                  AND exit_date IS NOT NULL
-                  AND exit_date > NOW() - make_interval(days => :ld)
+                  COUNT(realized_return_frac) AS n,
+                  AVG(realized_return_frac * 100.0) AS ar
+                FROM realized
+                WHERE realized_return_frac IS NOT NULL
             """),
             {"ld": int(lookback_days)},
         ).fetchone()

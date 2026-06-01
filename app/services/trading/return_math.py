@@ -125,6 +125,36 @@ def _price_domain_is_option_premium(value: Any) -> bool:
     return str(value or "").strip().lower() == PRICE_DOMAIN_OPTION_PREMIUM
 
 
+def _mapping_has_option_price_domain(source: Any) -> bool:
+    """True when a sparse signal proves prices are option premiums."""
+    snap = _as_mapping(source)
+    if not isinstance(snap, Mapping):
+        return False
+
+    price_domains = _nested_mapping(snap, "price_domains")
+    if isinstance(price_domains, Mapping):
+        for key in ("entry_price", "exit_price", "limit_price"):
+            if _price_domain_is_option_premium(price_domains.get(key)):
+                return True
+
+    if _price_domain_is_option_premium(snap.get("option_price_domain")):
+        return True
+
+    option_meta = _nested_mapping(snap, "option_meta")
+    if isinstance(option_meta, Mapping) and _price_domain_is_option_premium(
+        option_meta.get("price_domain")
+    ):
+        return True
+
+    entry_execution = _nested_mapping(snap, "entry_execution")
+    return bool(
+        isinstance(entry_execution, Mapping)
+        and _price_domain_is_option_premium(
+            entry_execution.get("option_price_domain")
+        )
+    )
+
+
 def _contract_multiplier_is_option(value: Any) -> bool:
     multiplier = _float_or_none(value)
     return (
@@ -164,6 +194,13 @@ def _option_price_domain_confirmed(source: Any, price_field: str) -> bool:
     entry_execution = _nested_mapping(snap, "entry_execution")
     if _price_domain_is_option_premium(
         entry_execution.get("option_price_domain") if entry_execution else None
+    ):
+        return True
+
+    paper_meta = _nested_mapping(snap, "_paper_meta")
+    if isinstance(paper_meta, Mapping) and _option_price_domain_confirmed(
+        paper_meta,
+        price_field,
     ):
         return True
 
@@ -324,6 +361,8 @@ def _signal_json_is_option(signal: Any) -> bool:
         return False
     if signal.get("option_meta"):
         return True
+    if _mapping_has_option_price_domain(signal):
+        return True
     if _asset_value_is_option(signal.get("asset_kind")):
         return True
     if _asset_value_is_option(signal.get("asset_type")):
@@ -340,6 +379,8 @@ def _signal_json_is_option(signal: Any) -> bool:
     if isinstance(paper_meta, Mapping):
         if paper_meta.get("option_meta"):
             return True
+        if _mapping_has_option_price_domain(paper_meta):
+            return True
         if _truthy(paper_meta.get("options_path")):
             return True
         if _asset_value_is_option(paper_meta.get("asset_kind")):
@@ -355,6 +396,8 @@ def _signal_json_is_option(signal: Any) -> bool:
     breakout = _as_mapping(signal.get("breakout_alert"))
     if isinstance(breakout, Mapping):
         if breakout.get("option_meta"):
+            return True
+        if _mapping_has_option_price_domain(breakout):
             return True
         if _asset_value_is_option(breakout.get("asset_kind")):
             return True

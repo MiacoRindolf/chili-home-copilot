@@ -141,6 +141,26 @@ def test_trade_return_pct_snapshot_multiplier_uses_contract_multiplier() -> None
     assert trade_return_pct(trade) == pytest.approx(16.0)
 
 
+def test_trade_return_pct_snapshot_price_domain_uses_contract_multiplier() -> None:
+    trade = SimpleNamespace(
+        entry_price=1.25,
+        exit_price=1.45,
+        quantity=2.0,
+        pnl=40.0,
+        direction="long",
+        asset_kind=None,
+        tags=None,
+        indicator_snapshot={
+            "price_domains": {
+                "entry_price": "option_premium",
+                "exit_price": "option_premium",
+            },
+        },
+    )
+
+    assert trade_return_pct(trade) == pytest.approx(16.0)
+
+
 def test_trade_return_pct_nested_snapshot_multiplier_uses_contract_multiplier() -> None:
     trade = SimpleNamespace(
         entry_price=1.25,
@@ -425,6 +445,67 @@ def test_paper_trade_return_pct_signal_multiplier_uses_contract_multiplier() -> 
         pnl_pct=1600.0,
         direction="long",
         signal_json={"option_contract_multiplier": 100.0},
+    )
+
+    assert paper_trade_return_pct(trade) == pytest.approx(16.0)
+
+
+def test_paper_trade_return_pct_price_domains_uses_contract_multiplier() -> None:
+    trade = SimpleNamespace(
+        entry_price=1.25,
+        exit_price=1.45,
+        quantity=2.0,
+        pnl=40.0,
+        pnl_pct=1600.0,
+        direction="long",
+        signal_json={
+            "price_domains": {
+                "entry_price": "option_premium",
+                "exit_price": "option_premium",
+            },
+        },
+    )
+
+    assert paper_trade_return_pct(trade) == pytest.approx(16.0)
+
+
+def test_paper_trade_return_pct_paper_meta_price_domains_uses_contract_multiplier() -> None:
+    trade = SimpleNamespace(
+        entry_price=1.25,
+        exit_price=1.45,
+        quantity=2.0,
+        pnl=40.0,
+        pnl_pct=1600.0,
+        direction="long",
+        signal_json={
+            "_paper_meta": {
+                "price_domains": {
+                    "entry_price": "option_premium",
+                    "exit_price": "option_premium",
+                },
+            },
+        },
+    )
+
+    assert paper_trade_return_pct(trade) == pytest.approx(16.0)
+
+
+def test_paper_trade_return_pct_paper_meta_price_domains_confirms_price_fallback() -> None:
+    trade = SimpleNamespace(
+        entry_price=1.25,
+        exit_price=1.45,
+        quantity=2.0,
+        pnl=None,
+        pnl_pct=999.0,
+        direction="long",
+        signal_json={
+            "_paper_meta": {
+                "price_domains": {
+                    "entry_price": "option_premium",
+                    "exit_price": "option_premium",
+                },
+            },
+        },
     )
 
     assert paper_trade_return_pct(trade) == pytest.approx(16.0)

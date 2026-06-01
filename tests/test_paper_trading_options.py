@@ -577,7 +577,25 @@ def test_option_signal_honors_nested_options_path() -> None:
         {"option_contract_multiplier": 100.0},
     )
     assert paper_trading._is_option_signal(
+        {
+            "price_domains": {
+                "entry_price": "option_premium",
+                "exit_price": "option_premium",
+            },
+        },
+    )
+    assert paper_trading._is_option_signal(
+        {"entry_execution": {"option_price_domain": "option_premium"}},
+    )
+    assert paper_trading._is_option_signal(
         {"breakout_alert": {"contract_multiplier": 100.0}},
+    )
+    assert paper_trading._is_option_signal(
+        {
+            "breakout_alert": {
+                "price_domains": {"limit_price": "option_premium"},
+            },
+        },
     )
     assert paper_trading._is_option_signal(
         {"_paper_meta": {"asset_type": "options"}},
@@ -602,6 +620,9 @@ def test_option_signal_honors_nested_options_path() -> None:
     )
     assert paper_trading._is_option_signal(
         {"_paper_meta": {"contract_multiplier": 100.0}},
+    )
+    assert paper_trading._is_option_signal(
+        {"_paper_meta": {"price_domains": {"entry_price": "option_premium"}}},
     )
     assert not paper_trading._is_option_signal(
         {"options_path": "false", "breakout_alert": {"options_path": "false"}},

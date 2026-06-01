@@ -58,7 +58,10 @@ def test_fetch_closed_trades_uses_contract_aware_realized_fraction():
     assert trade.hold_days == pytest.approx(2.0)
 
     sql = " ".join(db.sql.split())
-    assert "pt.pnl / (pt.entry_price * pt.quantity" in sql
+    assert "realized_return_frac" in sql
+    assert "pt.partial_taken_qty" in sql
+    assert "pt.partial_taken_price" in sql
+    assert "pt.quantity + pt.partial_taken_qty" in sql
     assert "pt.signal_json" in sql
     assert "100.0" in sql
     assert "pt.scan_pattern_id != -1" in sql

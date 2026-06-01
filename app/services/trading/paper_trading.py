@@ -33,7 +33,11 @@ from sqlalchemy.orm import Session
 from ...config import settings
 from ...models.trading import BreakoutAlert, PaperTrade, ScanPattern
 from .asset_class import PATTERN_ASSET_CLASS_OPTIONS, normalize_pattern_asset_class
-from .options.contracts import OPTION_CONTRACT_MULTIPLIER, parse_contract_quantity
+from .options.contracts import (
+    OPTION_CONTRACT_MULTIPLIER,
+    PRICE_DOMAIN_OPTION_PREMIUM,
+    parse_contract_quantity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +143,27 @@ def _option_multiplier_marker(value: Any) -> bool:
     )
 
 
+def _option_price_domain_marker(value: Any) -> bool:
+    return str(value or "").strip().lower() == PRICE_DOMAIN_OPTION_PREMIUM
+
+
+def _option_price_domain_signal_marker(source: Any) -> bool:
+    sig = _as_dict(source)
+    price_domains = _as_dict(sig.get("price_domains"))
+    for key in ("entry_price", "exit_price", "limit_price"):
+        if _option_price_domain_marker(price_domains.get(key)):
+            return True
+    if _option_price_domain_marker(sig.get("option_price_domain")):
+        return True
+    option_meta = _as_dict(sig.get("option_meta"))
+    if _option_price_domain_marker(option_meta.get("price_domain")):
+        return True
+    entry_execution = _as_dict(sig.get("entry_execution"))
+    return _option_price_domain_marker(
+        entry_execution.get("option_price_domain")
+    )
+
+
 def _option_asset_marker(value: Any) -> bool:
     try:
         return normalize_pattern_asset_class(value) == PATTERN_ASSET_CLASS_OPTIONS
@@ -183,6 +208,8 @@ def _is_option_signal(signal_json: Any) -> bool:
     sig = _as_dict(signal_json)
     if _paper_option_meta_from_signal(sig):
         return True
+    if _option_price_domain_signal_marker(sig):
+        return True
     if _truthy_option_marker(sig.get("options_path")):
         return True
     if _option_asset_marker(sig.get("asset_kind")):
@@ -197,6 +224,8 @@ def _is_option_signal(signal_json: Any) -> bool:
         return True
     paper_meta = _as_dict(sig.get("_paper_meta"))
     if paper_meta.get("option_meta"):
+        return True
+    if _option_price_domain_signal_marker(paper_meta):
         return True
     if _truthy_option_marker(paper_meta.get("options_path")):
         return True
@@ -216,6 +245,8 @@ def _is_option_signal(signal_json: Any) -> bool:
     if _option_asset_marker(breakout.get("asset_type")):
         return True
     if _option_asset_marker(breakout.get("asset_class")):
+        return True
+    if _option_price_domain_signal_marker(breakout):
         return True
     if _option_multiplier_marker(breakout.get("option_contract_multiplier")):
         return True

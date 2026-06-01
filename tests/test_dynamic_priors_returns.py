@@ -29,6 +29,9 @@ def test_population_avg_return_pct_normalizes_from_realized_pnl() -> None:
 
     assert dynamic_priors.population_avg_return_pct(db, lookback_days=7) == 16.0
 
+    assert "realized_return_frac" in db.sql
+    assert "COUNT(realized_return_frac) AS n" in db.sql
+    assert "AVG(realized_return_frac * 100.0) AS ar" in db.sql
     assert "pnl /" in db.sql
     assert "entry_price" in db.sql
     assert "quantity" in db.sql
@@ -42,6 +45,10 @@ def test_population_win_rate_excludes_unrealized_closed_rows() -> None:
 
     assert dynamic_priors.population_win_rate(db, lookback_days=7) == 0.5
 
+    assert "realized_return_frac" in db.sql
+    assert "COUNT(realized_return_frac) AS n" in db.sql
+    assert "realized_return_frac > 0" in db.sql
+    assert "CASE WHEN pnl > 0" not in db.sql
     assert "COALESCE(pnl, 0)" not in db.sql
     assert "pnl IS NOT NULL" in db.sql
     assert "entry_price > 0" in db.sql
