@@ -9,6 +9,8 @@ import re
 
 from app.visual_report import (
     generate_report,
+    to_plaintext,
+    _category_css,
     _extract_headings,
     _extract_report_title,
     _md_to_html,
@@ -100,6 +102,91 @@ class TestGenerateReport:
         out = generate_report("T", md)
         assert 'href="#first-section"' in out
         assert 'href="#second-section"' in out
+
+
+class TestCategoryTheming:
+    def test_category_brief_sets_body_class_and_override(self):
+        out = generate_report("T", _MD, category="brief")
+        assert 'body class="category-brief"' in out
+        # The scoped override rule re-tints --accent for this category.
+        assert "body.category-brief" in out
+        assert "--accent:" in out.split("body.category-brief", 1)[1][:200]
+
+    def test_category_dark_override_present(self):
+        out = generate_report("T", _MD, category="alert")
+        # Dark-scheme override is scoped inside a prefers-color-scheme block.
+        assert "body.category-alert" in out
+        # Two occurrences: light rule + dark @media rule.
+        assert out.count("body.category-alert") >= 2
+
+    def test_default_no_category_class_and_no_leaks(self):
+        out = generate_report("T", _MD, subtitle="sub", stats={"Trades": 3})
+        # No category- body class when category is unset.
+        assert "category-" not in out
+        assert 'body class=""' in out
+        # Placeholder-leak guard, now including the new template placeholders.
+        for token in ("{title}", "{report_html}", "{toc_html}", "{sources_html}",
+                      "{stats_block}", "{timestamp}", "{question_html}",
+                      "{category_css}", "{body_class}"):
+            assert token not in out
+        # A bare unfilled "{name}" placeholder token must not survive.
+        assert not re.search(r"\{[a-z_]+\}", out)
+
+    def test_unknown_category_falls_back(self):
+        out = generate_report("T", _MD, category="not-a-real-theme")
+        # Graceful fallback: no override rule, empty body class.
+        assert "body.category-" not in out
+        assert 'body class=""' in out
+
+    def test_category_css_helper_direct(self):
+        assert _category_css("") == ""
+        assert _category_css("bogus") == ""
+        css = _category_css("research")
+        assert "body.category-research" in css
+        assert "prefers-color-scheme: dark" in css
+        assert "--accent:" in css
+
+
+class TestToPlaintext:
+    def test_headings_lose_hashes(self):
+        assert to_plaintext("# Title\n## Sub") == "Title\nSub"
+
+    def test_links_become_text_and_url(self):
+        out = to_plaintext("See [Reuters](https://reuters.com/x) now.")
+        assert "Reuters (https://reuters.com/x)" in out
+        assert "[" not in out and "]" not in out
+
+    def test_emphasis_stripped(self):
+        out = to_plaintext("**bold** and _italic_ and `code` text")
+        assert out == "bold and italic and code text"
+
+    def test_images_dropped(self):
+        out = to_plaintext("Chart: ![alt text](https://img/x.png) done")
+        assert "alt text" not in out
+        assert "x.png" not in out
+        assert "Chart:  done" in out or "Chart: done" in out
+
+    def test_no_markdown_symbols_remain(self):
+        doc = (
+            "# Daily Brief\n\n"
+            "## Earnings\n\n"
+            "**NVDA** reports on the _21st_. See [filing](https://sec.gov/a).\n\n"
+            "Logo: ![logo](https://x/l.png)\n\n"
+            "> A quote with `inline` code.\n"
+        )
+        out = to_plaintext(doc)
+        assert "#" not in out
+        assert "*" not in out
+        assert "_" not in out
+        assert "`" not in out
+        assert "![" not in out
+        # Link text + url preserved.
+        assert "filing (https://sec.gov/a)" in out
+        # No 3+ consecutive newlines.
+        assert "\n\n\n" not in out
+
+    def test_empty_input(self):
+        assert to_plaintext("") == ""
 
 
 class TestHelpers:

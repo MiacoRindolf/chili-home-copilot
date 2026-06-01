@@ -18,7 +18,8 @@ dropped; what remains is the self-contained markdown→HTML renderer + CSS.
 
 Public API:
     generate_report(title, body_markdown, *, subtitle="", sources=None,
-                    stats=None) -> str   # returns a complete HTML document
+                    stats=None, category="") -> str   # complete HTML document
+    to_plaintext(markdown_text) -> str   # strip markdown to readable plain text
 """
 from __future__ import annotations
 
@@ -173,6 +174,105 @@ def _extract_report_title(md_text: str, fallback: str):
 
 
 # ---------------------------------------------------------------------------
+# Category theming (re-tint the accent palette only)
+# ---------------------------------------------------------------------------
+
+# Per-category accent palettes. Each entry overrides only the color variables
+# (palette, not structure) for light + dark. Keys mirror trading-relevant report
+# kinds. Unknown/empty categories fall through to the default :root palette.
+#   light: (--accent, --accent-light, --accent-bg, --aurora-a/b/c)
+#   dark:  (--accent, --accent-light, --accent-bg, --aurora-a/b/c)
+_CATEGORY_PALETTES: Dict[str, Dict[str, Dict[str, str]]] = {
+    # Daily trading brief — calm slate blue.
+    "brief": {
+        "light": {
+            "accent": "#3d6a99", "accent-light": "#5e8bbd",
+            "accent-bg": "rgba(61,106,153,0.07)",
+            "aurora-a": "rgba(61,106,153,0.10)", "aurora-b": "rgba(94,139,189,0.08)",
+            "aurora-c": "rgba(64,98,128,0.07)",
+        },
+        "dark": {
+            "accent": "#73a8e8", "accent-light": "#95c0f4",
+            "accent-bg": "rgba(115,168,232,0.10)",
+            "aurora-a": "rgba(115,168,232,0.13)", "aurora-b": "rgba(149,192,244,0.09)",
+            "aurora-c": "rgba(125,180,224,0.10)",
+        },
+    },
+    # Research / deep-dive — teal-green.
+    "research": {
+        "light": {
+            "accent": "#2f8f7f", "accent-light": "#4fb3a1",
+            "accent-bg": "rgba(47,143,127,0.07)",
+            "aurora-a": "rgba(47,143,127,0.10)", "aurora-b": "rgba(79,179,161,0.08)",
+            "aurora-c": "rgba(64,128,112,0.07)",
+        },
+        "dark": {
+            "accent": "#5fd4bf", "accent-light": "#88e3d2",
+            "accent-bg": "rgba(95,212,191,0.10)",
+            "aurora-a": "rgba(95,212,191,0.13)", "aurora-b": "rgba(136,227,210,0.09)",
+            "aurora-c": "rgba(112,200,180,0.10)",
+        },
+    },
+    # Audit / reconciliation — muted gold.
+    "audit": {
+        "light": {
+            "accent": "#a8842c", "accent-light": "#c9a64f",
+            "accent-bg": "rgba(168,132,44,0.07)",
+            "aurora-a": "rgba(168,132,44,0.10)", "aurora-b": "rgba(201,166,79,0.08)",
+            "aurora-c": "rgba(140,110,40,0.07)",
+        },
+        "dark": {
+            "accent": "#e0c05a", "accent-light": "#ecd283",
+            "accent-bg": "rgba(224,192,90,0.10)",
+            "aurora-a": "rgba(224,192,90,0.13)", "aurora-b": "rgba(236,210,131,0.09)",
+            "aurora-c": "rgba(200,170,90,0.10)",
+        },
+    },
+    # Alert / risk — assertive red.
+    "alert": {
+        "light": {
+            "accent": "#c23b2e", "accent-light": "#dd6052",
+            "accent-bg": "rgba(194,59,46,0.07)",
+            "aurora-a": "rgba(194,59,46,0.10)", "aurora-b": "rgba(221,96,82,0.08)",
+            "aurora-c": "rgba(160,50,40,0.07)",
+        },
+        "dark": {
+            "accent": "#f07568", "accent-light": "#f6968b",
+            "accent-bg": "rgba(240,117,104,0.10)",
+            "aurora-a": "rgba(240,117,104,0.13)", "aurora-b": "rgba(246,150,139,0.09)",
+            "aurora-c": "rgba(220,100,90,0.10)",
+        },
+    },
+}
+
+
+def _palette_block(vars_: Dict[str, str]) -> str:
+    """Render the palette CSS variable declarations for one scheme."""
+    return " ".join(f"--{name}: {value};" for name, value in vars_.items())
+
+
+def _category_css(category: str) -> str:
+    """Return a small CSS string re-tinting the accent palette for `category`.
+
+    Overrides only the color variables (--accent, --accent-light, --accent-bg,
+    --aurora-a/b/c), scoped to `body.category-<name>` so it applies only when
+    the matching category is set, for both light and dark schemes. Unknown or
+    empty categories return an empty string (default palette unchanged).
+    """
+    palette = _CATEGORY_PALETTES.get((category or "").strip().lower())
+    if not palette:
+        return ""
+    name = category.strip().lower()
+    light = _palette_block(palette["light"])
+    dark = _palette_block(palette["dark"])
+    return (
+        f"body.category-{name} {{ {light} }}\n"
+        f"@media (prefers-color-scheme: dark) {{ "
+        f"body.category-{name} {{ {dark} }} }}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # HTML template (trimmed from odysseus — self-contained, no backend calls)
 # ---------------------------------------------------------------------------
 
@@ -324,9 +424,10 @@ body::before {{
 .sources-list .sdomain {{ color: var(--text-muted); font-size: 0.75rem; margin-left: auto; flex-shrink: 0; }}
 .report-footer {{ text-align: center; padding: 2rem; font-size: 0.75rem; color: var(--text-muted); border-top: 1px solid var(--border); margin-top: 2rem; }}
 @media print {{ .toc-sidebar, .toolbar {{ display: none !important; }} .layout {{ grid-template-columns: 1fr; }} }}
+{category_css}
 </style>
 </head>
-<body>
+<body class="{body_class}">
 <div class="toolbar">
   <div class="dropdown">
     <button id="btn-export" title="Export">
@@ -418,6 +519,7 @@ def generate_report(
     label: str = "CHILI Report",
     sources: Optional[List[Dict]] = None,
     stats: Optional[Dict] = None,
+    category: str = "",
 ) -> str:
     """Render a complete, self-contained HTML report from markdown.
 
@@ -430,6 +532,8 @@ def generate_report(
         sources: optional [{"title", "url"}] rendered as a collapsible list.
         stats: optional {label: value} rendered as a stats bar (e.g.
             {"Trades": 12, "Net P/L": "+$340"}).
+        category: optional theme key ("brief", "research", "audit", "alert")
+            that re-tints the accent palette. Unknown/empty -> default palette.
 
     Returns:
         A full HTML document string (no external assets, no backend calls).
@@ -497,6 +601,11 @@ def generate_report(
     desc_text = re.sub(r"[#*_\[\]()]", "", body_markdown)[:160].strip()
     subtitle_html = f'<p class="subtitle">{html.escape(subtitle)}</p>' if subtitle else ""
 
+    category_css = _category_css(category)
+    # Only emit a category- class when the theme actually resolved, so default
+    # reports keep an empty body class (and produce no override CSS).
+    body_class = f"category-{category.strip().lower()}" if category_css else ""
+
     return _TEMPLATE.format(
         title=html.escape(title_text),
         description=html.escape(desc_text),
@@ -508,4 +617,53 @@ def generate_report(
         report_html=report_html,
         sources_html=sources_html,
         timestamp=datetime.now().strftime("%B %d, %Y at %H:%M"),
+        category_css=category_css,
+        body_class=body_class,
     )
+
+
+# ---------------------------------------------------------------------------
+# Plaintext export
+# ---------------------------------------------------------------------------
+
+def to_plaintext(markdown_text: str) -> str:
+    """Strip markdown to readable plain text.
+
+    Removes heading hashes (keeps the text), strips emphasis markers
+    (``*``/``_``/`` ` ``), converts ``[text](url)`` links to ``text (url)``,
+    drops image syntax, and collapses runs of blank lines. Pure regex, no deps.
+    """
+    if not markdown_text:
+        return ""
+
+    text = markdown_text
+    # Drop images entirely: ![alt](url)
+    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text)
+    # Links: [text](url) -> text (url); empty-text link -> just the url.
+    text = re.sub(
+        r"\[([^\]]*)\]\(([^)]*)\)",
+        lambda m: f"{m.group(1)} ({m.group(2)})" if m.group(1).strip() else m.group(2),
+        text,
+    )
+
+    out_lines: List[str] = []
+    for line in text.splitlines():
+        # Heading hashes: leading #'s (and any trailing #'s) -> keep text only.
+        line = re.sub(r"^\s{0,3}#{1,6}\s+", "", line)
+        line = re.sub(r"\s+#+\s*$", "", line)
+        # Blockquote markers and list bullets -> plain.
+        line = re.sub(r"^\s*>\s?", "", line)
+        out_lines.append(line)
+    text = "\n".join(out_lines)
+
+    # Strip emphasis/inline-code markers, keeping the wrapped content.
+    text = re.sub(r"(\*\*|__)(.+?)\1", r"\2", text)          # bold
+    text = re.sub(r"(\*|_)(.+?)\1", r"\2", text)             # italic
+    text = re.sub(r"`+([^`]*)`+", r"\1", text)               # inline code
+    # Remove any stray leftover emphasis/code symbols.
+    text = re.sub(r"[*_`]", "", text)
+
+    # Collapse 3+ newlines into a single blank line; trim trailing whitespace.
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
