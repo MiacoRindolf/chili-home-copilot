@@ -30,30 +30,93 @@ DATABASE_URL = settings.database_url
 # contains 'brain_worker'). Other invocations (FastAPI, scheduler,
 # pytest, ad-hoc scripts) get a generic 'chili'. Override via
 # CHILI_APP_NAME env var when needed.
-_app_name = os.environ.get("CHILI_APP_NAME", "").strip()
-if not _app_name:
-    argv0 = (sys.argv[0] if sys.argv else "") or ""
-    if "brain_worker" in argv0:
-        _app_name = "chili-brain-worker"
-    elif "scheduler" in argv0 or os.environ.get("CHILI_SCHEDULER_ROLE") not in (None, "", "none"):
-        # FIX 45a follow-up (2026-04-29): derive app_name from scheduler role
-        # so per-container DB activity is distinguishable in pg_stat_activity.
-        # Without this, autotrader-worker + broker-sync-worker + scheduler-
-        # worker all show as "chili-scheduler" — defeats the whole point of
-        # the container split for diagnostic purposes.
-        _role = (os.environ.get("CHILI_SCHEDULER_ROLE") or "").strip().lower()
-        if _role == "autotrader_only":
-            _app_name = "chili-autotrader-worker"
-        elif _role == "broker_sync_only":
-            _app_name = "chili-broker-sync-worker"
-        elif _role == "cron_only":
-            _app_name = "chili-scheduler-cron"
-        else:
-            _app_name = "chili-scheduler"
-    elif "pytest" in argv0:
-        _app_name = "chili-pytest"
-    else:
-        _app_name = "chili-app"
+_DISCONNECT_ERROR_TOKENS = (
+    "server closed the connection unexpectedly",
+    "connection already closed",
+    "connection not open",
+    "could not receive data from server",
+    "terminating connection due to administrator command",
+    "ssl syscall error",
+)
+
+
+def _resolve_app_name(
+    *,
+    argv0: str | None = None,
+    environ: dict[str, str] | os._Environ[str] | None = None,
+) -> str:
+    """Return the Postgres application_name for this process."""
+    env = environ if environ is not None else os.environ
+    explicit = (env.get("CHILI_APP_NAME", "") or "").strip()
+    if explicit:
+        return explicit
+
+    argv0_s = (argv0 if argv0 is not None else ((sys.argv[0] if sys.argv else "") or ""))
+    argv0_s = argv0_s.lower()
+    scheduler_role_raw = env.get("CHILI_SCHEDULER_ROLE")
+    scheduler_role = (scheduler_role_raw or "").strip().lower()
+    if "brain_worker" in argv0_s:
+        return "chili-brain-worker"
+    if "scheduler" in argv0_s or scheduler_role not in ("", "none"):
+        if scheduler_role == "autotrader_only":
+            return "chili-autotrader-worker"
+        if scheduler_role == "broker_sync_only":
+            return "chili-broker-sync-worker"
+        if scheduler_role == "cron_only":
+            return "chili-scheduler-cron"
+        return "chili-scheduler"
+    if "pytest" in argv0_s:
+        return "chili-pytest"
+    return "chili-app"
+
+
+def is_disconnect_error(exc: BaseException | str | None) -> bool:
+    """True for DB connection-closure errors that need pool invalidation."""
+    if exc is None:
+        return False
+    if getattr(exc, "connection_invalidated", False):
+        return True
+    parts = [type(exc).__name__, str(exc)]
+    orig = getattr(exc, "orig", None)
+    if orig is not None:
+        parts.append(str(orig))
+    text = " ".join(parts).lower()
+    return any(token in text for token in _DISCONNECT_ERROR_TOKENS)
+
+
+def recover_session_after_db_error(
+    session,
+    exc: BaseException | str | None,
+    *,
+    logger=None,
+    context: str = "database session",
+) -> str:
+    """Rollback and invalidate a SQLAlchemy session after connection loss."""
+    disconnected = is_disconnect_error(exc)
+    rollback_ok = True
+    try:
+        session.rollback()
+    except Exception:
+        rollback_ok = False
+        if logger is not None:
+            logger.debug("%s rollback during DB recovery failed", context, exc_info=True)
+
+    if disconnected:
+        try:
+            session.invalidate()
+            if logger is not None:
+                logger.warning("%s invalidated SQLAlchemy session after DB disconnect", context)
+            return "invalidated"
+        except Exception:
+            if logger is not None:
+                logger.debug("%s session invalidation failed", context, exc_info=True)
+            return "invalidate_failed"
+
+    return "rolled_back" if rollback_ok else "rollback_failed"
+
+
+_app_name = _resolve_app_name()
+
 
 def _is_true_env(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in _TRUE_ENV_VALUES

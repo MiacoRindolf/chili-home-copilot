@@ -95,4 +95,13 @@ Write-Host "  Local:  https://localhost:${ListenPort}/chat" -ForegroundColor Cya
 Write-Host "  LAN:    https://${LanIP}:${ListenPort}/chat" -ForegroundColor Cyan
 Write-Host ""
 
+if (-not $env:CHILI_SCHEDULER_ROLE) {
+    $env:CHILI_SCHEDULER_ROLE = "none"
+    Write-Host "  CHILI_SCHEDULER_ROLE=none (local web is API-only; workers own schedulers)" -ForegroundColor DarkGray
+}
+if (-not $env:CHILI_APP_NAME) {
+    $env:CHILI_APP_NAME = "chili-local-web"
+    Write-Host "  CHILI_APP_NAME=chili-local-web (distinct pg_stat_activity label)" -ForegroundColor DarkGray
+}
+
 conda run -n chili-env uvicorn app.main:app --reload --host 0.0.0.0 --port $ListenPort --ssl-certfile $Cert --ssl-keyfile $Key

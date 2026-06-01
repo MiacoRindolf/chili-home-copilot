@@ -33,4 +33,13 @@ Write-Host "  Brain: http://127.0.0.1:${chosen}/brain" -ForegroundColor Cyan
 Write-Host "  (No TLS — open http:// not https:// or you get PR_END_OF_FILE_ERROR in Firefox.)" -ForegroundColor Yellow
 Write-Host ""
 
+if (-not $env:CHILI_SCHEDULER_ROLE) {
+    $env:CHILI_SCHEDULER_ROLE = "none"
+    Write-Host "  CHILI_SCHEDULER_ROLE=none (local web is API-only; workers own schedulers)" -ForegroundColor DarkGray
+}
+if (-not $env:CHILI_APP_NAME) {
+    $env:CHILI_APP_NAME = "chili-local-web"
+    Write-Host "  CHILI_APP_NAME=chili-local-web (distinct pg_stat_activity label)" -ForegroundColor DarkGray
+}
+
 python -m uvicorn app.main:app --reload --host 0.0.0.0 --port $chosen
