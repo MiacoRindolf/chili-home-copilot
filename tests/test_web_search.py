@@ -162,6 +162,39 @@ class TestResearchSearch:
         assert "content" not in out[0]
 
 
+class TestFetchSources:
+    """fetch_sources() is a thin wrapper over search_providers.fetch_many."""
+
+    @patch("app.web_search.search_providers.fetch_many")
+    def test_delegates_and_returns_result(self, mock_fetch_many):
+        from app import web_search as ws
+        expected = [
+            {"url": "https://a.com", "success": True, "content": "x"},
+            {"url": "https://b.com", "success": False, "content": ""},
+        ]
+        mock_fetch_many.return_value = expected
+        out = ws.fetch_sources(["https://a.com", "https://b.com"])
+        assert out == expected
+        mock_fetch_many.assert_called_once()
+        # URLs forwarded to fetch_many.
+        args, kwargs = mock_fetch_many.call_args
+        assert args[0] == ["https://a.com", "https://b.com"]
+
+    @patch("app.web_search.search_providers.fetch_many")
+    def test_logs_without_raising(self, mock_fetch_many):
+        from app import web_search as ws
+        mock_fetch_many.return_value = [{"url": "https://a.com", "success": True}]
+        # Should not raise even with a custom trace id.
+        out = ws.fetch_sources(["https://a.com"], max_chars=1000, trace_id="t1")
+        assert len(out) == 1
+
+    @patch("app.web_search.search_providers.fetch_many")
+    def test_empty_input(self, mock_fetch_many):
+        from app import web_search as ws
+        mock_fetch_many.return_value = []
+        assert ws.fetch_sources([]) == []
+
+
 class TestFormatResults:
     def test_formats_results(self):
         results = [
