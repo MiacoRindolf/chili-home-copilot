@@ -1554,3 +1554,38 @@ def reasoning_research_report(
     return HTMLResponse(content=html, headers=headers)
 
 
+@router.get("/api/brain/mcp/status")
+def mcp_status():
+    """Read-only MCP client status + config sanity check.
+
+    Does NOT establish live connections (that lifecycle is a separate task).
+    Returns the enabled flag, whether the SDK is present, the parsed server
+    registry (ids/names/transport/allowlist — never URLs or env secrets), and a
+    config-sanity flag listing any allowlisted tool that the hard safety denylist
+    would block anyway.
+    """
+    from .. import mcp_client as mcpc
+
+    configs = mcpc._load_server_configs()
+    servers = []
+    for c in configs:
+        allowed = c.get("allowed_tools") or []
+        servers.append({
+            "id": c.get("id"),
+            "name": c.get("name", c.get("id")),
+            "transport": c.get("transport"),
+            "allowed_tools": allowed,
+            # Config sanity: any allowlisted tool the denylist blocks regardless.
+            "allowlist_blocked_by_denylist": [t for t in allowed if mcpc.is_dangerous_tool(t)],
+        })
+    return JSONResponse({
+        "ok": True,
+        "enabled": bool(getattr(settings, "mcp_enabled", False)),
+        "sdk_present": mcpc._HAS_MCP,
+        "configured_servers": len(configs),
+        "servers": servers,
+        "live_status": mcpc.get_mcp_client().get_status(),
+        "note": "Read-only. Live connections are not established by this endpoint.",
+    })
+
+
