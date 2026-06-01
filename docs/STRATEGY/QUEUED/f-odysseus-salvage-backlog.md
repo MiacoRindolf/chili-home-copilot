@@ -75,10 +75,17 @@ import. `mcp>=1.0` declared + installed. 50 tests in `tests/test_mcp_client.py`,
 heavy on the safety gate. See
 `docs/STRATEGY/CC_REPORTS/2026-06-01_f-odysseus-salvage-mcp-client.md`.
 
-**Not yet wired into the agent/LLM path** — `mcp_client.list_tools()` /
-`call_tool()` are ready for a future consumer. Lifecycle (connect_all on startup,
-disconnect_all on shutdown) intentionally not auto-wired so it stays inert until
-an operator both flips `mcp_enabled` and adds servers.
+**Wiring (W2) SHIPPED 2026-06-01:** read-only `GET /api/brain/mcp/status` reports
+the enabled flag, SDK presence, parsed server registry (ids/names/transport/
+allowlist — never URLs/secrets), and a config-sanity flag listing any allowlisted
+tool the denylist blocks. No live connections. See
+`docs/STRATEGY/CC_REPORTS/2026-06-01_f-odysseus-salvage-wiring-w2-mcp-status.md`.
+
+**Live connection lifecycle DEFERRED** to a dedicated brief —
+`docs/STRATEGY/QUEUED/f-mcp-connection-lifecycle.md`. The MCP SDK's anyio
+task-scope rules (a session must be entered+closed in the same task) make naive
+startup/shutdown wiring unsafe; it needs a single supervisor task that owns all
+connections. Not rushed into the live app mid-soak.
 
 ---
 
@@ -95,11 +102,12 @@ persisted skills. DORMANT by default (`teacher_escalation_enabled=False`).
 29 tests in `tests/test_teacher_escalation.py`. See
 `docs/STRATEGY/CC_REPORTS/2026-06-01_f-odysseus-salvage-teacher-escalation.md`.
 
-**Not yet wired into the live LLM path** — `escalate_and_learn(...)` /
-`should_escalate(...)` are a ready utility. Dropped odysseus's inline-SSE
-teacher-takeover + agent-loop recursion (deeply coupled). A future task would
-inject CHILI's strong-model gateway as the `llm_caller` and hook
-`should_escalate` at the end of a failed reasoning/agent turn.
+**Live hook DEFERRED** to a dedicated brief —
+`docs/STRATEGY/QUEUED/f-teacher-escalation-live-hook.md`. A meaningful hook needs
+a failed *agent-with-tools* turn (user request + tool_results + agent_reply);
+CHILI's single-shot planner doesn't cleanly produce that, so forcing a hook would
+be shallow. The brief lays out the chat/planner-path option with a fire-and-forget
+teacher call. `escalate_and_learn(...)` / `should_escalate(...)` stay ready.
 
 ---
 
