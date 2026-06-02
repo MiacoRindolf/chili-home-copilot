@@ -4,8 +4,11 @@
 (function () {
   var root = document.documentElement;
 
-  // Dark-first default for the workspace (visual only — don't persist unless toggled).
+  // Dark-first: on first visit, default to dark AND persist it via the shared
+  // 'chili-theme' key so windowed apps (same-origin iframes) inherit the dark
+  // theme too — keeping the OS and its windows visually consistent.
   if (!localStorage.getItem('chili-theme')) {
+    localStorage.setItem('chili-theme', 'dark');
     root.setAttribute('data-theme', 'dark');
   }
 
