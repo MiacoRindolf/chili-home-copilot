@@ -1820,6 +1820,78 @@ def test_probation_recert_live_entry_reduces_size_and_enforces_daily_quota(db, m
     assert at_mod.PROBATION_QUOTA_REASON_PATTERN in reasons
 
 
+def test_crypto_probation_quota_uses_pattern_ticker_and_edge_gated_crypto_cap(
+    monkeypatch,
+):
+    uid = 123
+    pattern_id = 456
+    settings = _minimal_settings(uid)
+    settings.chili_autotrader_probation_max_trades_per_pattern_per_day = 1
+    settings.chili_autotrader_probation_max_trades_per_pattern_ticker_per_day = 1
+    settings.chili_autotrader_probation_max_trades_per_day = 1
+    settings.chili_autotrader_probation_crypto_max_trades_per_day = 2
+    settings.chili_autotrader_probation_crypto_min_expected_net_pct_for_extra_quota = 1.0
+    monkeypatch.setattr(at_mod, "settings", settings)
+
+    portfolio_count = 1
+
+    def fake_probation_count(_db, *, uid, pattern_id=None, ticker=None, now=None):
+        del uid, now
+        if ticker is not None:
+            return 1 if ticker == "AAA-USD" else 0
+        if pattern_id is not None:
+            return 1
+        return portfolio_count
+
+    monkeypatch.setattr(
+        at_mod,
+        "_probation_trade_count_today",
+        fake_probation_count,
+    )
+    db = object()
+
+    same_ticker_reason = at_mod._probation_quota_block_reason(
+        db,
+        uid=uid,
+        pattern_id=pattern_id,
+        ticker="AAA-USD",
+        asset_type="crypto",
+        expected_net_pct=2.0,
+    )
+    assert same_ticker_reason == at_mod.PROBATION_QUOTA_REASON_PATTERN_TICKER
+
+    diversified_crypto_reason = at_mod._probation_quota_block_reason(
+        db,
+        uid=uid,
+        pattern_id=pattern_id,
+        ticker="BBB-USD",
+        asset_type="crypto",
+        expected_net_pct=2.0,
+    )
+    assert diversified_crypto_reason is None
+
+    low_edge_reason = at_mod._probation_quota_block_reason(
+        db,
+        uid=uid,
+        pattern_id=pattern_id,
+        ticker="CCC-USD",
+        asset_type="crypto",
+        expected_net_pct=0.5,
+    )
+    assert low_edge_reason == at_mod.PROBATION_QUOTA_REASON_PORTFOLIO
+
+    portfolio_count = 2
+    portfolio_reason = at_mod._probation_quota_block_reason(
+        db,
+        uid=uid,
+        pattern_id=pattern_id,
+        ticker="CCC-USD",
+        asset_type="crypto",
+        expected_net_pct=2.0,
+    )
+    assert portfolio_reason == at_mod.PROBATION_QUOTA_REASON_PORTFOLIO
+
+
 def test_feature_parity_blocks_price_only_snapshot_when_required(monkeypatch):
     from app.services.trading import feature_parity, market_data
 

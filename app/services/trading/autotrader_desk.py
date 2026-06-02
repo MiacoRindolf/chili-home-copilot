@@ -15,6 +15,7 @@ import logging
 import math
 from typing import Any, Optional
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ...config import settings
@@ -29,6 +30,10 @@ from .broker_position_truth import filter_broker_stale_open_trades
 logger = logging.getLogger(__name__)
 
 AUTOTRADER_DESK_SLICE = "autotrader_v1_desk"
+AUTOTRADER_DESK_RUNTIME_UNAVAILABLE_REASON = "desk_runtime_unavailable"
+AUTOTRADER_DESK_RUNTIME_TIMEOUT_MIN_MS = 250
+AUTOTRADER_DESK_RUNTIME_TIMEOUT_MAX_MS = 2_000
+AUTOTRADER_DESK_RUNTIME_TIMEOUT_FRACTION = 0.10
 
 
 def _get_desk_row(db: Session) -> BrainRuntimeMode | None:
@@ -39,12 +44,90 @@ def _get_desk_row(db: Session) -> BrainRuntimeMode | None:
     )
 
 
+def _runtime_gate_statement_timeout_ms() -> int:
+    tick_interval_s = int(
+        max(1, int(getattr(settings, "chili_autotrader_tick_interval_seconds", 10) or 10))
+    )
+    tick_budget_s = int(
+        max(1, int(getattr(settings, "chili_autotrader_tick_max_seconds", tick_interval_s) or tick_interval_s))
+    )
+    cadence_budget_ms = int(min(tick_interval_s, tick_budget_s) * 1000)
+    timeout_ms = int(cadence_budget_ms * AUTOTRADER_DESK_RUNTIME_TIMEOUT_FRACTION)
+    return max(
+        AUTOTRADER_DESK_RUNTIME_TIMEOUT_MIN_MS,
+        min(AUTOTRADER_DESK_RUNTIME_TIMEOUT_MAX_MS, timeout_ms),
+    )
+
+
+def _apply_runtime_gate_statement_timeout(db: Session) -> int | None:
+    try:
+        bind = db.get_bind()
+    except Exception:
+        bind = None
+    dialect = getattr(getattr(bind, "dialect", None), "name", "")
+    if dialect != "postgresql":
+        return None
+    timeout_ms = _runtime_gate_statement_timeout_ms()
+    db.execute(text(f"SET LOCAL statement_timeout = '{timeout_ms}ms'"))
+    return timeout_ms
+
+
+def _reset_runtime_gate_statement_timeout(db: Session, timeout_ms: int | None) -> None:
+    if timeout_ms is None:
+        return
+    db.execute(text("SET LOCAL statement_timeout = DEFAULT"))
+
+
+def _fail_closed_runtime_snapshot(
+    *,
+    live_env: bool,
+    enabled: bool,
+    timeout_ms: int | None,
+    error: Exception,
+) -> dict[str, Any]:
+    return {
+        "paused": True,
+        "live_orders_effective": False,
+        "live_orders_env": live_env,
+        "desk_live_override": False,
+        "tick_allowed": False,
+        "monitor_entries_allowed": enabled,
+        "payload": {},
+        "runtime_gate_fail_closed": True,
+        "runtime_gate_reason": AUTOTRADER_DESK_RUNTIME_UNAVAILABLE_REASON,
+        "runtime_gate_timeout_ms": timeout_ms,
+        "runtime_gate_error": type(error).__name__,
+    }
+
+
 def effective_autotrader_runtime(db: Session) -> dict[str, Any]:
     """Return flags merged from env + desk row for tick / UI."""
-    row = _get_desk_row(db)
+    live_env = bool(getattr(settings, "chili_autotrader_live_enabled", False))
+    enabled = bool(getattr(settings, "chili_autotrader_enabled", False))
+    timeout_ms: int | None = None
+    try:
+        timeout_ms = _apply_runtime_gate_statement_timeout(db)
+        row = _get_desk_row(db)
+        _reset_runtime_gate_statement_timeout(db, timeout_ms)
+    except Exception as exc:
+        logger.warning(
+            "[autotrader_desk] runtime gate failed closed reason=%s error=%s timeout_ms=%s",
+            AUTOTRADER_DESK_RUNTIME_UNAVAILABLE_REASON,
+            type(exc).__name__,
+            timeout_ms,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            logger.debug("[autotrader_desk] runtime fail-closed rollback failed", exc_info=True)
+        return _fail_closed_runtime_snapshot(
+            live_env=live_env,
+            enabled=enabled,
+            timeout_ms=timeout_ms,
+            error=exc,
+        )
     pj = dict(row.payload_json or {}) if row else {}
     paused = bool(row and (row.mode or "").lower() == "paused")
-    live_env = bool(getattr(settings, "chili_autotrader_live_enabled", False))
     if "live_orders" in pj:
         live_effective = bool(pj["live_orders"])
     else:
@@ -54,9 +137,10 @@ def effective_autotrader_runtime(db: Session) -> dict[str, Any]:
         "live_orders_effective": live_effective,
         "live_orders_env": live_env,
         "desk_live_override": "live_orders" in pj,
-        "tick_allowed": bool(getattr(settings, "chili_autotrader_enabled", False)) and not paused,
-        "monitor_entries_allowed": bool(getattr(settings, "chili_autotrader_enabled", False)),
+        "tick_allowed": enabled and not paused,
+        "monitor_entries_allowed": enabled,
         "payload": pj,
+        "runtime_gate_fail_closed": False,
     }
 
 

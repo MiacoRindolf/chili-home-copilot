@@ -13,6 +13,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.services.trading import autotrader_desk
 from app.services.trading.auto_trader import run_auto_trader_tick
 from app.services.trading.auto_trader_monitor import tick_auto_trader_monitor
 from app.services.trading.autotrader_desk import (
@@ -179,6 +180,39 @@ def test_desk_live_override_reflects_in_runtime(
     rt2 = effective_autotrader_runtime(db)
     assert rt2["desk_live_override"] is False
     assert rt2["live_orders_effective"] is False
+
+
+def test_desk_runtime_read_failure_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.config import settings as _s
+
+    monkeypatch.setattr(_s, "chili_autotrader_enabled", True)
+    monkeypatch.setattr(_s, "chili_autotrader_live_enabled", True)
+    monkeypatch.setattr(
+        autotrader_desk,
+        "_apply_runtime_gate_statement_timeout",
+        lambda _db: 750,
+    )
+
+    def _fail_read(_db: Session):
+        raise TimeoutError("desk read timeout")
+
+    db = MagicMock()
+    monkeypatch.setattr(autotrader_desk, "_get_desk_row", _fail_read)
+
+    rt = autotrader_desk.effective_autotrader_runtime(db)
+
+    assert rt["tick_allowed"] is False
+    assert rt["paused"] is True
+    assert rt["live_orders_effective"] is False
+    assert rt["live_orders_env"] is True
+    assert rt["monitor_entries_allowed"] is True
+    assert rt["runtime_gate_fail_closed"] is True
+    assert rt["runtime_gate_reason"] == (
+        autotrader_desk.AUTOTRADER_DESK_RUNTIME_UNAVAILABLE_REASON
+    )
+    assert rt["runtime_gate_timeout_ms"] == 750
+    assert rt["runtime_gate_error"] == "TimeoutError"
+    db.rollback.assert_called_once()
 
 
 def test_desk_patch_end_to_end(paired_client, db: Session) -> None:

@@ -52,6 +52,9 @@ from ...config import (
     AUTOTRADER_PAPER_SHADOW_DEFAULT_MAX_OPEN,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_REJECT_ALLOW_DUPLICATE_OPEN,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_REJECT_LIGHTWEIGHT_SIZING_ENABLED,
+    AUTOTRADER_PROBATION_DEFAULT_CRYPTO_MAX_TRADES_PER_DAY,
+    AUTOTRADER_PROBATION_DEFAULT_CRYPTO_MIN_EXPECTED_NET_PCT_FOR_EXTRA_QUOTA,
+    AUTOTRADER_PROBATION_DEFAULT_MAX_TRADES_PER_PATTERN_TICKER_PER_DAY,
     AUTOTRADER_OPTIONS_SUBSTITUTE_DEFAULT_REQUIRES_UNDERLYING_POSITIVE_EDGE,
     PATTERN_IMMINENT_EQUITY_SESSION_SHADOW_SIGNAL_LANE,
     PATTERN_IMMINENT_HARD_RECERT_SHADOW_SIGNAL_LANE,
@@ -132,6 +135,7 @@ PROBATION_ENTRY_POLICY = "reduced_risk_soft_oos_recert"
 PROBATION_JSON_TRUE = "true"
 PROBATION_JSON_FALSE = "false"
 PROBATION_DEFAULT_NOTIONAL_MULTIPLIER = 0.25
+PROBATION_QUOTA_REASON_PATTERN_TICKER = "probation_quota_exceeded:pattern_ticker"
 MONEY_ROUND_DIGITS = 2
 MULTIPLIER_ROUND_DIGITS = 6
 QUANTITY_ROUND_DIGITS = 8
@@ -4134,10 +4138,12 @@ def _probation_trade_count_today(
     *,
     uid: int | None,
     pattern_id: int | None = None,
+    ticker: str | None = None,
     now: datetime | None = None,
 ) -> int:
     start_utc = _probation_day_start_utc(now)
     pattern_clause = ""
+    ticker_clause = ""
     params: dict[str, Any] = {
         "uid": uid,
         "version": AUTOTRADER_VERSION,
@@ -4147,6 +4153,9 @@ def _probation_trade_count_today(
     if pattern_id is not None:
         pattern_clause = "AND scan_pattern_id = :pattern_id"
         params["pattern_id"] = int(pattern_id)
+    if ticker:
+        ticker_clause = "AND UPPER(ticker) = :ticker"
+        params["ticker"] = str(ticker).strip().upper()
     row = db.execute(text(f"""
         SELECT COUNT(*) AS n
         FROM trading_trades
@@ -4162,6 +4171,7 @@ def _probation_trade_count_today(
               :false_flag
           ) = :flag
           {pattern_clause}
+          {ticker_clause}
     """), {
         **params,
         "entry_execution_key": ENTRY_EXECUTION_SNAPSHOT_KEY,
@@ -4171,16 +4181,70 @@ def _probation_trade_count_today(
     return int(row or 0)
 
 
+def _probation_asset_class(*, ticker: str | None, asset_type: str | None) -> str:
+    raw = str(asset_type or "").strip().lower()
+    if raw in {"crypto", "coin", "coinbase_spot"}:
+        return "crypto"
+    if raw in {"option", "options"}:
+        return "options"
+    sym = str(ticker or "").strip().upper()
+    if sym.endswith("-USD"):
+        return "crypto"
+    return "stock"
+
+
+def _probation_portfolio_limit_for_asset(
+    *,
+    asset_class: str,
+    expected_net_pct: float | None,
+    base_limit: int,
+) -> int:
+    if asset_class != "crypto":
+        return int(base_limit)
+    crypto_limit = int(
+        getattr(
+            settings,
+            "chili_autotrader_probation_crypto_max_trades_per_day",
+            AUTOTRADER_PROBATION_DEFAULT_CRYPTO_MAX_TRADES_PER_DAY,
+        )
+        or 0
+    )
+    if crypto_limit <= int(base_limit):
+        return int(base_limit)
+    min_edge = float(
+        getattr(
+            settings,
+            "chili_autotrader_probation_crypto_min_expected_net_pct_for_extra_quota",
+            AUTOTRADER_PROBATION_DEFAULT_CRYPTO_MIN_EXPECTED_NET_PCT_FOR_EXTRA_QUOTA,
+        )
+        or 0.0
+    )
+    if expected_net_pct is None or expected_net_pct < min_edge:
+        return int(base_limit)
+    return crypto_limit
+
+
 def _probation_quota_block_reason(
     db: Session,
     *,
     uid: int | None,
     pattern_id: int | None,
+    ticker: str | None = None,
+    asset_type: str | None = None,
+    expected_net_pct: float | None = None,
 ) -> str | None:
     if pattern_id is None:
         return PROBATION_QUOTA_REASON_PORTFOLIO
     per_pattern_limit = int(
         getattr(settings, "chili_autotrader_probation_max_trades_per_pattern_per_day", 0)
+        or 0
+    )
+    per_pattern_ticker_limit = int(
+        getattr(
+            settings,
+            "chili_autotrader_probation_max_trades_per_pattern_ticker_per_day",
+            AUTOTRADER_PROBATION_DEFAULT_MAX_TRADES_PER_PATTERN_TICKER_PER_DAY,
+        )
         or 0
     )
     portfolio_limit = int(
@@ -4189,13 +4253,29 @@ def _probation_quota_block_reason(
     )
     if per_pattern_limit <= 0 or portfolio_limit <= 0:
         return PROBATION_QUOTA_REASON_PORTFOLIO
-    pattern_count = _probation_trade_count_today(
-        db,
-        uid=uid,
-        pattern_id=pattern_id,
+    asset_class = _probation_asset_class(ticker=ticker, asset_type=asset_type)
+    if asset_class == "crypto" and per_pattern_ticker_limit > 0 and ticker:
+        pattern_ticker_count = _probation_trade_count_today(
+            db,
+            uid=uid,
+            pattern_id=pattern_id,
+            ticker=ticker,
+        )
+        if pattern_ticker_count >= per_pattern_ticker_limit:
+            return PROBATION_QUOTA_REASON_PATTERN_TICKER
+    else:
+        pattern_count = _probation_trade_count_today(
+            db,
+            uid=uid,
+            pattern_id=pattern_id,
+        )
+        if pattern_count >= per_pattern_limit:
+            return PROBATION_QUOTA_REASON_PATTERN
+    portfolio_limit = _probation_portfolio_limit_for_asset(
+        asset_class=asset_class,
+        expected_net_pct=expected_net_pct,
+        base_limit=portfolio_limit,
     )
-    if pattern_count >= per_pattern_limit:
-        return PROBATION_QUOTA_REASON_PATTERN
     portfolio_count = _probation_trade_count_today(db, uid=uid)
     if portfolio_count >= portfolio_limit:
         return PROBATION_QUOTA_REASON_PORTFOLIO
@@ -6494,6 +6574,9 @@ def _execute_new_entry(
             db,
             uid=uid,
             pattern_id=int(alert.scan_pattern_id) if alert.scan_pattern_id else None,
+            ticker=alert.ticker,
+            asset_type=alert.asset_type,
+            expected_net_pct=_expected_net_pct_from_snapshot(snap),
         )
         if _quota_reason is not None:
             _audit(
