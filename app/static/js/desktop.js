@@ -48,12 +48,49 @@
     if (node && node.nodeType === 3) node.nodeValue = s; else el.appendChild(document.createTextNode(s));
   }
 
+  // ── Live list widgets (open positions / recent closes) ──
+  // Tickers and patterns are data → HTML-escape before injecting.
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  function renderPositions(list) {
+    var el = document.getElementById('ws-live-positions'); if (!el) return;
+    if (!list || !list.length) { el.innerHTML = '<div class="ws-empty">No open positions.</div>'; return; }
+    var html = '';
+    for (var i = 0; i < list.length; i++) {
+      var p = list[i] || {};
+      html += '<div class="ws-stat"><span class="k tick ws-mono">' + esc(p.ticker) +
+        '</span><span class="ws-tag">' + esc(p.side) + '</span></div>';
+    }
+    el.innerHTML = html;
+  }
+
+  function renderCloses(list) {
+    var el = document.getElementById('ws-live-closes'); if (!el) return;
+    if (!list || !list.length) { el.innerHTML = '<div class="ws-empty">No closes in the last 24h.</div>'; return; }
+    var html = '';
+    for (var i = 0; i < list.length; i++) {
+      var c = list[i] || {};
+      var cls = c.pnl_up ? 'ws-up' : 'ws-down';
+      html += '<div class="ws-stat"><span class="k tick ws-mono">' + esc(c.ticker) +
+        '</span><span><span class="ws-tag">' + esc(c.pattern || '—') +
+        '</span> <span class="ws-mono ' + cls + '">' + esc(c.pnl_fmt || '—') + '</span></span></div>';
+    }
+    el.innerHTML = html;
+  }
+
   function apply(d) {
     if (!d || !d.ok) { setStatus('offline'); return; }
     setKpi('net_pnl', d.net_pnl_fmt, d.net_pnl_up ? 'ws-up' : 'ws-down');
     setKpi('win_rate', d.win_rate_fmt);
     setKpi('open', d.open_positions);
     setKpi('patterns', d.top_patterns);
+
+    renderPositions(d.positions);
+    renderCloses(d.closes);
 
     var tp = document.getElementById('ws-topbar-pnl');
     if (tp && d.net_pnl_fmt) {

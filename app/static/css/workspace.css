@@ -143,6 +143,10 @@
 .ws-stat{display:flex;align-items:center;justify-content:space-between;padding:var(--ws-s3) 0;border-top:1px solid var(--ws-border);font-size:var(--ws-fs-13)}
 .ws-stat:first-of-type{border-top:0}
 .ws-stat .k{color:var(--ws-text-2)}
+/* Live glance widgets (open positions / recent closes) — keep ticker + tag/value
+   on a single tidy row, ticker truncating before the value. */
+.ws-stat .tick{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ws-stat > span:last-child{display:inline-flex;align-items:center;gap:6px;flex-shrink:0}
 .ws-bar{height:6px;border-radius:3px;background:var(--ws-surface-3);overflow:hidden;width:120px}
 .ws-bar i{display:block;height:100%;border-radius:3px;background:linear-gradient(90deg,var(--ws-accent),var(--ws-accent-2))}
 .ws-ok{color:var(--ws-up);font-weight:var(--ws-fw-semi)}

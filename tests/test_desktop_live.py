@@ -52,3 +52,59 @@ def test_numbers_defensive_when_dashboard_fails():
     with patch("app.services.dashboard_summary.build_dashboard", side_effect=RuntimeError("boom")):
         out = dl._numbers(object(), 1)
     assert out["open_positions"] == 0 and out["net_pnl_fmt"] == "$0.00"
+
+
+def _dash_with_trading(open_positions, closes_fmt):
+    return {"trading": {"open_positions": open_positions, "closes_fmt": closes_fmt}}
+
+
+def test_lists_extracts_positions_and_closes():
+    dash = _dash_with_trading(
+        open_positions=[{"ticker": "AAPL", "side": "long"}, {"ticker": "BTC", "side": ""}],
+        closes_fmt=[{"ticker": "TSLA", "pattern": "breakout", "pnl_fmt": "+$10.00", "pnl_up": True},
+                    {"ticker": "NVDA", "pattern": None, "pnl_fmt": "-$5.00", "pnl_up": False}],
+    )
+    with patch("app.services.dashboard_summary.build_dashboard", return_value=dash):
+        out = dl._lists(object(), 1)
+    assert out["positions"] == [{"ticker": "AAPL", "side": "long"}, {"ticker": "BTC", "side": ""}]
+    assert out["closes"][0] == {"ticker": "TSLA", "pattern": "breakout", "pnl_fmt": "+$10.00", "pnl_up": True}
+    # missing pattern degrades to em dash; pnl_up coerced to bool
+    assert out["closes"][1]["pattern"] == "—" and out["closes"][1]["pnl_up"] is False
+
+
+def test_lists_caps_positions_at_six_and_closes_at_five():
+    dash = _dash_with_trading(
+        open_positions=[{"ticker": "T%d" % i, "side": "long"} for i in range(10)],
+        closes_fmt=[{"ticker": "C%d" % i, "pattern": "p", "pnl_fmt": "+$1.00", "pnl_up": True} for i in range(10)],
+    )
+    with patch("app.services.dashboard_summary.build_dashboard", return_value=dash):
+        out = dl._lists(object(), 1)
+    assert len(out["positions"]) == 6 and len(out["closes"]) == 5
+
+
+def test_lists_defensive_when_dashboard_fails():
+    with patch("app.services.dashboard_summary.build_dashboard", side_effect=RuntimeError("boom")):
+        out = dl._lists(object(), 1)
+    assert out == {"positions": [], "closes": []}
+
+
+def test_lists_skips_non_dict_rows():
+    dash = _dash_with_trading(open_positions=[{"ticker": "AAPL", "side": "long"}, "junk", None],
+                              closes_fmt=["bad", {"ticker": "TSLA", "pnl_fmt": "+$1", "pnl_up": True}])
+    with patch("app.services.dashboard_summary.build_dashboard", return_value=dash):
+        out = dl._lists(object(), 1)
+    assert out["positions"] == [{"ticker": "AAPL", "side": "long"}]
+    assert len(out["closes"]) == 1 and out["closes"][0]["ticker"] == "TSLA"
+
+
+def test_build_live_includes_lists():
+    with patch.object(dl, "_numbers", return_value={
+            "net_pnl_fmt": "$0.00", "net_pnl_up": True, "win_rate_fmt": "—",
+            "open_positions": 0, "closes_today": 0, "top_patterns": 0}), \
+         patch.object(dl, "_lists", return_value={"positions": [{"ticker": "AAPL", "side": "long"}], "closes": []}), \
+         patch.object(dl, "_kill_switch", return_value={"ok": True, "active": False, "reason": None}), \
+         patch.object(dl, "_breaker", return_value={"ok": True, "tripped": False, "reason": None}), \
+         patch.object(dl, "_market", return_value={"ok": True, "equities_open": True, "crypto_open": True}):
+        out = dl.build_live(object(), 1)
+    assert out["positions"] == [{"ticker": "AAPL", "side": "long"}]
+    assert out["closes"] == []

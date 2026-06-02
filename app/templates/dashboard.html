@@ -59,6 +59,30 @@
     {% else %}<div class="ws-empty">No open positions.</div>{% endif %}
   </div>
 
+  <!-- Live open positions (auto-refreshing via desktop.js) -->
+  <div class="ws-card ws-c4">
+    <div class="ws-card-head"><h3><span class="ic"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8 12h8M12 8v8"/></svg></span>Live open positions</h3><span class="ws-cockpit-status live" title="Auto-refreshing every 20s"><span class="dot"></span>live</span></div>
+    <div id="ws-live-positions">
+    {% if dash.trading.open_positions %}
+      {% for p in dash.trading.open_positions[:6] %}
+      <div class="ws-stat"><span class="k tick ws-mono">{{ p.ticker }}</span><span class="ws-tag">{{ p.side }}</span></div>
+      {% endfor %}
+    {% else %}<div class="ws-empty">No open positions.</div>{% endif %}
+    </div>
+  </div>
+
+  <!-- Live recent closes (auto-refreshing via desktop.js) -->
+  <div class="ws-card ws-c4">
+    <div class="ws-card-head"><h3><span class="ic"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M3 17l5-5 4 4 8-9"/></svg></span>Live recent closes</h3><span class="ws-cockpit-status live" title="Auto-refreshing every 20s"><span class="dot"></span>live</span></div>
+    <div id="ws-live-closes">
+    {% if dash.trading.closes_fmt %}
+      {% for c in dash.trading.closes_fmt[:5] %}
+      <div class="ws-stat"><span class="k tick ws-mono">{{ c.ticker }}</span><span><span class="ws-tag">{{ c.pattern }}</span> <span class="ws-mono {{ 'ws-up' if c.pnl_up else 'ws-down' }}">{{ c.pnl_fmt or '—' }}</span></span></div>
+      {% endfor %}
+    {% else %}<div class="ws-empty">No closes in the last 24h.</div>{% endif %}
+    </div>
+  </div>
+
   <!-- Top patterns -->
   <div class="ws-card ws-c4">
     <div class="ws-card-head"><h3><span class="ic"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M13 2L3 14h7v8l10-12h-7z"/></svg></span>Top patterns</h3></div>
