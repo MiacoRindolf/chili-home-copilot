@@ -153,7 +153,12 @@
     var my = ++seq;
     fetch('/api/workspace/desktop', { credentials: 'same-origin' })
       .then(function (r) { return r.json(); })
-      .then(function (d) { if (my === seq) apply(d); })
+      .then(function (d) {
+        if (my !== seq) return;
+        apply(d);
+        // Share the snapshot so other widgets (notifications) don't re-poll.
+        try { document.dispatchEvent(new CustomEvent('chili:desktop', { detail: d })); } catch (e) {}
+      })
       .catch(function () { if (my === seq) setStatus('offline'); });
   }
   poll();
