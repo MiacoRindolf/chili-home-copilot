@@ -1,0 +1,38 @@
+/* ============================================================
+   CHILI OS — desktop + window manager (layers over workspace.css)
+   ============================================================ */
+.os-desktop{position:relative;flex:1;min-height:0;overflow:hidden}
+.os-home{position:absolute;inset:0;overflow-y:auto;padding:var(--ws-s8) var(--ws-s8) var(--ws-s12)}
+.os-home.dimmed{filter:saturate(.7) brightness(.86);pointer-events:none;transition:filter .2s}
+
+/* window */
+.os-win{position:absolute;display:flex;flex-direction:column;background:var(--ws-surface);border:1px solid var(--ws-border-strong);border-radius:var(--ws-r-lg);box-shadow:var(--ws-shadow-lg);overflow:hidden;min-width:340px;min-height:220px}
+.os-win.active{border-color:color-mix(in srgb,var(--ws-accent) 55%,var(--ws-border-strong))}
+.os-win.snapping{transition:left .14s var(--ws-ease),top .14s var(--ws-ease),width .14s var(--ws-ease),height .14s var(--ws-ease)}
+.os-win.closing{transition:opacity .12s,transform .12s;opacity:0;transform:scale(.97)}
+.os-bar{height:38px;flex-shrink:0;display:flex;align-items:center;gap:var(--ws-s3);padding:0 var(--ws-s2) 0 var(--ws-s3);background:var(--ws-surface-2);border-bottom:1px solid var(--ws-border);cursor:default;user-select:none}
+.os-win.active .os-bar{background:color-mix(in srgb,var(--ws-accent) 7%,var(--ws-surface-2))}
+.os-bar .wi{width:22px;height:22px;border-radius:6px;display:grid;place-items:center;font-size:14px;flex-shrink:0;background:var(--ws-accent-bg)}
+.os-bar .wt{font-size:var(--ws-fs-13);font-weight:var(--ws-fw-semi);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1}
+.os-bar a.pop{color:var(--ws-text-3);display:grid;place-items:center;width:22px;height:22px;border-radius:6px}
+.os-bar a.pop:hover{background:var(--ws-surface-3);color:var(--ws-text)}
+.os-bar a.pop svg{width:13px;height:13px;stroke-width:2}
+.os-ctrls{display:flex;gap:4px}
+.os-ctrls button{width:22px;height:22px;border:none;border-radius:6px;background:transparent;color:var(--ws-text-3);cursor:pointer;display:grid;place-items:center;transition:all var(--ws-dur)}
+.os-ctrls button:hover{background:var(--ws-surface-3);color:var(--ws-text)}
+.os-ctrls button.close:hover{background:var(--ws-down-bg);color:var(--ws-down)}
+.os-ctrls button svg{width:13px;height:13px;stroke-width:2}
+.os-body{flex:1;overflow:auto;min-height:0;position:relative}
+.os-body iframe{width:100%;height:100%;border:0;display:block;background:var(--ws-bg)}
+.os-body .os-loading{position:absolute;inset:0;display:grid;place-items:center;color:var(--ws-text-3);font-size:var(--ws-fs-13);pointer-events:none}
+.os-rs{position:absolute;right:0;bottom:0;width:16px;height:16px;cursor:nwse-resize;z-index:2}
+.os-rs::after{content:'';position:absolute;right:3px;bottom:3px;width:7px;height:7px;border-right:2px solid var(--ws-text-3);border-bottom:2px solid var(--ws-text-3);opacity:.5}
+
+/* snap ghost preview */
+.os-ghost{position:absolute;background:var(--ws-accent-bg);border:1.5px solid var(--ws-accent);border-radius:var(--ws-r-md);z-index:9998;display:none;pointer-events:none;transition:all .1s var(--ws-ease)}
+
+/* dock open-indicator */
+.ws-rb .os-dot{position:absolute;bottom:5px;left:50%;transform:translateX(-50%);width:4px;height:4px;border-radius:50%;background:var(--ws-accent);opacity:0;transition:opacity .15s}
+.ws-rb.os-open .os-dot{opacity:1}
+
+@media(max-width:760px){.os-win{left:8px!important;top:8px!important;width:calc(100vw - 72px)!important;height:calc(100vh - 80px)!important}.os-rs{display:none}}
