@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{#
+  CHILI Workspace shell — the unified frame every workspace surface extends.
+  Provides: icon rail (one canonical nav), top command bar (Cmd-K), content slot.
+  Child templates set `ws_active` (rail highlight) + `ws_crumb` and fill ws_content.
+#}
+{% block title %}{% block ws_title %}Workspace{% endblock %} · CHILI{% endblock %}
+{% block head_extra %}
+<link rel="stylesheet" href="/static/css/workspace.css">
+{% block ws_head %}{% endblock %}
+{% endblock %}
+
+{% block content %}
+{% set _a = ws_active|default('') %}
+<div class="ws-root">
+<div class="ws-app">
+  <nav class="ws-rail" aria-label="Workspace navigation">
+    <a class="ws-logo" href="/" title="CHILI">🌶️</a>
+    <a class="ws-rb {% if _a=='dashboard' %}active{% endif %}" href="/workspace"><span class="ws-tip">Dashboard</span><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg></a>
+    <a class="ws-rb {% if _a=='chat' %}active{% endif %}" href="/chat"><span class="ws-tip">Chat</span><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></a>
+    <a class="ws-rb {% if _a=='trading' %}active{% endif %}" href="/trading"><span class="ws-tip">Trading Desk</span><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M3 17l5-5 4 4 8-9"/><path d="M14 7h6v6"/></svg></a>
+    <a class="ws-rb {% if _a=='brain' %}active{% endif %}" href="/brain"><span class="ws-tip">Brain</span><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M12 3a4 4 0 0 0-4 4 3 3 0 0 0-1 5.83A3 3 0 0 0 8 18a3 3 0 0 0 4 1 3 3 0 0 0 4-1 3 3 0 0 0 1-5.17A3 3 0 0 0 16 7a4 4 0 0 0-4-4z"/></svg></a>
+    <a class="ws-rb {% if _a=='research' %}active{% endif %}" href="/api/brain/reasoning/research/report" target="_blank" rel="noopener"><span class="ws-tip">Research</span><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg></a>
+    <a class="ws-rb {% if _a=='planner' %}active{% endif %}" href="/planner"><span class="ws-tip">Planner</span><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 2v4M16 2v4"/></svg></a>
+    <div class="ws-rail-spacer"></div>
+    <a class="ws-rb" href="/profile"><span class="ws-tip">Profile</span><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg></a>
+    <a class="ws-avatar" href="/profile" title="{{ user_name|default('You') }}">{{ (user_name|default('You'))[:2]|upper }}</a>
+  </nav>
+
+  <div class="ws-main">
+    <header class="ws-topbar">
+      <div class="ws-crumb">🌶️ Workspace <span class="sub">· {% block ws_crumb %}Dashboard{% endblock %}</span></div>
+      <button class="ws-cmdk" id="ws-cmdk-trigger" type="button">
+        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+        Search or jump to…
+        <span class="ws-kbd"><b>⌘</b><b>K</b></span>
+      </button>
+      <div class="ws-topbar-right">
+        {% block ws_topbar_extra %}{% endblock %}
+        <button class="ws-iconbtn" id="ws-theme-toggle" type="button" title="Toggle theme" aria-label="Toggle theme">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+        </button>
+      </div>
+    </header>
+    <main class="ws-content"><div class="ws-wrap">{% block ws_content %}{% endblock %}</div></main>
+  </div>
+</div>
+
+<div class="ws-scrim" id="ws-scrim">
+  <div class="ws-palette" role="dialog" aria-modal="true" aria-label="Command palette">
+    <input id="ws-palette-in" type="text" placeholder="Search chats, tickers, patterns — or jump to a workspace…" autocomplete="off">
+    <div class="grp">Jump to</div>
+    <a class="opt sel" href="/workspace"><span class="pi"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/></svg></span>Dashboard<span class="pk">↵</span></a>
+    <a class="opt" href="/trading"><span class="pi"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M3 17l5-5 4 4 8-9"/></svg></span>Trading Desk</a>
+    <a class="opt" href="/chat"><span class="pi"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>New Chat<span class="pk">⌘N</span></a>
+    <a class="opt" href="/brain"><span class="pi"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M12 3a4 4 0 0 0-4 4 3 3 0 0 0-1 5.83A3 3 0 0 0 8 18a3 3 0 0 0 4 1 3 3 0 0 0 4-1 3 3 0 0 0 1-5.17A3 3 0 0 0 16 7a4 4 0 0 0-4-4z"/></svg></span>Brain</a>
+    <div class="grp">Actions</div>
+    <a class="opt" href="/api/brain/trading/brief" target="_blank" rel="noopener"><span class="pi">🌶️</span>Open daily trading brief</a>
+    <a class="opt" href="/api/brain/reasoning/research/report" target="_blank" rel="noopener"><span class="pi">🔎</span>Open research digest</a>
+  </div>
+</div>
+</div>
+<script src="/static/js/workspace.js"></script>
+{% endblock %}

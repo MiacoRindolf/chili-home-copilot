@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 import json as json_mod
 
-from ..deps import get_db
+from ..deps import get_db, get_identity_ctx
 from ..models import Chore, Birthday, HousemateProfile, User, UserStatus, UserMemory
 from ..schemas import AddChoreBody, UpdateChoreBody, AddBirthdayBody, PairRequestBody, PairVerifyBody
 from ..pairing import (
@@ -48,6 +48,21 @@ def home(request: Request, db: Session = Depends(get_db)):
         "user_name": identity["user_name"],
         "is_guest": identity["is_guest"],
         "dashboard_json": json_mod.dumps(dashboard),
+    })
+
+
+@router.get("/workspace", response_class=HTMLResponse)
+def workspace(request: Request, db: Session = Depends(get_db)):
+    """CHILI Workspace — unified dashboard command center (read-only)."""
+    from ..services import dashboard_summary
+    ctx = get_identity_ctx(request, db)
+    dash = dashboard_summary.build_dashboard(db, ctx.get("user_id"))
+    return request.app.state.templates.TemplateResponse(request, "dashboard.html", {
+        "greeting": _greeting(),
+        "user_name": ctx.get("user_name") or "there",
+        "is_guest": ctx.get("is_guest"),
+        "ws_active": "dashboard",
+        "dash": dash,
     })
 
 
