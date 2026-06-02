@@ -11,7 +11,7 @@ from typing import Any, Literal, cast
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, func as sa_func, or_, text
+from sqlalchemy import and_, bindparam, func as sa_func, or_, text
 from sqlalchemy.orm import Session
 
 from ...db import DATA_DIR
@@ -1802,25 +1802,6 @@ def api_shadow_promoted_patterns(
     get_identity_ctx(request, db)
     lim = max(1, min(int(limit), 50))
 
-    ptr_counts = (
-        db.execute(
-            text(
-                """
-                SELECT scan_pattern_id, COUNT(*)::int AS ptr_rows
-                FROM trading_pattern_trades
-                WHERE scan_pattern_id IS NOT NULL
-                GROUP BY scan_pattern_id
-                """
-            )
-        )
-        .fetchall()
-    )
-    ptr_by_pattern = {
-        int(r._mapping["scan_pattern_id"]): int(r._mapping["ptr_rows"] or 0)
-        for r in ptr_counts
-        if r._mapping["scan_pattern_id"] is not None
-    }
-
     rows = (
         db.query(ScanPattern)
         .filter(
@@ -1838,6 +1819,28 @@ def api_shadow_promoted_patterns(
         .limit(lim)
         .all()
     )
+    pattern_ids = [int(p.id) for p in rows]
+    ptr_by_pattern: dict[int, int] = {}
+    if pattern_ids:
+        ptr_counts = (
+            db.execute(
+                text(
+                    """
+                    SELECT scan_pattern_id, COUNT(*)::int AS ptr_rows
+                    FROM trading_pattern_trades
+                    WHERE scan_pattern_id IN :pattern_ids
+                    GROUP BY scan_pattern_id
+                    """
+                ).bindparams(bindparam("pattern_ids", expanding=True)),
+                {"pattern_ids": pattern_ids},
+            )
+            .fetchall()
+        )
+        ptr_by_pattern = {
+            int(r._mapping["scan_pattern_id"]): int(r._mapping["ptr_rows"] or 0)
+            for r in ptr_counts
+            if r._mapping["scan_pattern_id"] is not None
+        }
 
     out = []
     for p in rows:
