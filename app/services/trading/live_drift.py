@@ -353,7 +353,12 @@ def _scorecard(rows: list[Any], *, source: str) -> dict[str, Any] | None:
     freshness = None
     for row in rows:
         for attr in ("tca_entry_slippage_bps", "tca_exit_slippage_bps"):
-            v = _safe_float(getattr(row, attr, None))
+            try:
+                from .execution_cost_builder import _usable_tca_bps
+
+                v = _usable_tca_bps(row, attr)
+            except Exception:
+                v = _safe_float(getattr(row, attr, None))
             if v is not None:
                 slips.append(abs(v))
         last_at = getattr(row, "exit_date", None) or getattr(row, "updated_at", None) or getattr(row, "created_at", None)

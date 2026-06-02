@@ -90,6 +90,36 @@ def test_attribute_trade_option_uses_tca_cost_when_available(monkeypatch) -> Non
     assert result["net_alpha_pct"] == pytest.approx(15.70)
 
 
+def test_attribute_trade_ignores_unverified_extreme_tca_cost(monkeypatch) -> None:
+    monkeypatch.setattr(
+        performance_attribution,
+        "_fetch_benchmark_return",
+        lambda *_args, **_kwargs: 0.0,
+    )
+    trade = SimpleNamespace(
+        id=5,
+        ticker="POND-USD",
+        direction="long",
+        entry_price=100.0,
+        exit_price=110.0,
+        quantity=1.0,
+        pnl=10.0,
+        entry_date=datetime(2026, 1, 1),
+        exit_date=datetime(2026, 1, 2),
+        tca_entry_slippage_bps=1426.0,
+        tca_exit_slippage_bps=1361.0,
+        avg_fill_price=None,
+        broker_order_id="",
+        broker_status="",
+    )
+
+    result = performance_attribution.attribute_trade(trade)
+
+    assert result["gross_return_pct"] == pytest.approx(10.0)
+    assert result["estimated_cost_pct"] == pytest.approx(0.04)
+    assert result["net_alpha_pct"] == pytest.approx(9.96)
+
+
 def test_attribute_trade_option_rejects_ambiguous_underlying_price_fallback(monkeypatch) -> None:
     monkeypatch.setattr(
         performance_attribution,

@@ -5,25 +5,20 @@ from __future__ import annotations
 from typing import Any
 
 from ....models.trading import PaperTrade, Trade
+from ..execution_cost_builder import _usable_tca_bps
 from ..return_math import paper_trade_return_pct, trade_return_pct
 
 
-def _finite_float(value: Any) -> float | None:
-    if isinstance(value, bool):
-        return None
-    try:
-        out = float(value)
-    except (TypeError, ValueError):
-        return None
-    return out if out == out and out not in (float("inf"), float("-inf")) else None
-
-
 def _tca_cost_pct(trade: Trade) -> float | None:
-    entry_bps = _finite_float(getattr(trade, "tca_entry_slippage_bps", None))
-    exit_bps = _finite_float(getattr(trade, "tca_exit_slippage_bps", None))
+    entry_bps = _usable_tca_bps(trade, "tca_entry_slippage_bps")
+    exit_bps = _usable_tca_bps(trade, "tca_exit_slippage_bps")
     if entry_bps is None or exit_bps is None:
         return None
     return round((entry_bps + exit_bps) / 100.0, 6)
+
+
+def _tca_bps(trade: Trade, attr: str) -> float | None:
+    return _usable_tca_bps(trade, attr)
 
 
 def trade_close_attribution_dict(trade: Trade) -> dict[str, Any]:
@@ -52,8 +47,8 @@ def trade_close_attribution_dict(trade: Trade) -> dict[str, Any]:
         "direction": (trade.direction or "").strip() or None,
         "broker_source": (trade.broker_source or "").strip() or None,
         "broker_order_id": (str(oid)[:96] if oid else None),
-        "tca_entry_slippage_bps": getattr(trade, "tca_entry_slippage_bps", None),
-        "tca_exit_slippage_bps": getattr(trade, "tca_exit_slippage_bps", None),
+        "tca_entry_slippage_bps": _tca_bps(trade, "tca_entry_slippage_bps"),
+        "tca_exit_slippage_bps": _tca_bps(trade, "tca_exit_slippage_bps"),
     }
 
 
@@ -87,14 +82,12 @@ def paper_trade_close_attribution_dict(paper_trade: PaperTrade) -> dict[str, Any
         "exit_reason": (
             getattr(paper_trade, "exit_reason", "") or ""
         ).strip() or None,
-        "tca_entry_slippage_bps": getattr(
+        "tca_entry_slippage_bps": _tca_bps(
             paper_trade,
             "tca_entry_slippage_bps",
-            None,
         ),
-        "tca_exit_slippage_bps": getattr(
+        "tca_exit_slippage_bps": _tca_bps(
             paper_trade,
             "tca_exit_slippage_bps",
-            None,
         ),
     }

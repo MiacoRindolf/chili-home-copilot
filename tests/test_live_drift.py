@@ -581,6 +581,47 @@ def test_live_drift_scorecard_excludes_unpriced_option_outcomes() -> None:
     assert scorecard["expectancy_per_trade_pct"] == pytest.approx(2.0)
 
 
+def test_live_drift_scorecard_ignores_unverified_extreme_tca_burden() -> None:
+    rows = [
+        SimpleNamespace(
+            entry_price=100.0,
+            exit_price=110.0,
+            quantity=1.0,
+            pnl=None,
+            pnl_pct=10.0,
+            direction="long",
+            signal_json={"asset_type": "crypto"},
+            exit_date=None,
+            tca_entry_slippage_bps=12.0,
+            tca_exit_slippage_bps=18.0,
+            avg_fill_price=None,
+            broker_order_id="",
+            broker_status="",
+        ),
+        SimpleNamespace(
+            entry_price=100.0,
+            exit_price=110.0,
+            quantity=1.0,
+            pnl=None,
+            pnl_pct=10.0,
+            direction="long",
+            signal_json={"asset_type": "crypto"},
+            exit_date=None,
+            tca_entry_slippage_bps=1426.0,
+            tca_exit_slippage_bps=1361.0,
+            avg_fill_price=None,
+            broker_order_id="",
+            broker_status="",
+        ),
+    ]
+
+    scorecard = _scorecard(rows, source="paper")
+
+    assert scorecard is not None
+    assert scorecard["sample_count"] == 2
+    assert scorecard["slippage_burden_bps"] == pytest.approx(15.0)
+
+
 def test_live_drift_v2_runtime_counts_use_valid_outcome_samples() -> None:
     invalid_option = SimpleNamespace(
         entry_price=4.01,

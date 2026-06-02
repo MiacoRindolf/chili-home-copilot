@@ -165,6 +165,67 @@ def test_live_vs_research_reports_contract_aware_option_return_after_tca() -> No
     assert row["live_avg_pnl"] == pytest.approx(40.0)
 
 
+def test_live_vs_research_ignores_unverified_extreme_tca_costs() -> None:
+    pattern = SimpleNamespace(
+        id=42,
+        name="crypto-alpha",
+        promotion_status="pilot",
+        win_rate=0.6,
+        oos_win_rate=0.55,
+        oos_avg_return_pct=3.2,
+    )
+    normal = SimpleNamespace(
+        id=1004,
+        user_id=7,
+        status="closed",
+        scan_pattern_id=42,
+        ticker="POND-USD",
+        direction="long",
+        entry_price=100.0,
+        exit_price=110.0,
+        quantity=1.0,
+        pnl=10.0,
+        exit_date=datetime(2026, 5, 30, 15, 30),
+        tca_entry_slippage_bps=12.0,
+        tca_exit_slippage_bps=18.0,
+        avg_fill_price=None,
+        broker_order_id="",
+        broker_status="",
+    )
+    unverified_outlier = SimpleNamespace(
+        id=1005,
+        user_id=7,
+        status="closed",
+        scan_pattern_id=42,
+        ticker="POND-USD",
+        direction="long",
+        entry_price=100.0,
+        exit_price=110.0,
+        quantity=1.0,
+        pnl=10.0,
+        exit_date=datetime(2026, 5, 30, 15, 31),
+        tca_entry_slippage_bps=1426.0,
+        tca_exit_slippage_bps=1361.0,
+        avg_fill_price=None,
+        broker_order_id="",
+        broker_status="",
+    )
+    db = _FakeAttributionSession(
+        trades=[normal, unverified_outlier],
+        patterns=[pattern],
+    )
+
+    out = live_vs_research_by_pattern(db, 7, days=30, limit=10)
+
+    row = out["patterns"][0]
+    assert row["live_return_sample_n"] == 2
+    assert row["live_avg_return_pct"] == pytest.approx(10.0)
+    assert row["live_avg_tca_cost_pct"] == pytest.approx(0.30)
+    assert row["live_avg_net_return_pct"] == pytest.approx(9.70)
+    assert row["live_avg_entry_slippage_bps"] == pytest.approx(12.0)
+    assert row["live_avg_exit_slippage_bps"] == pytest.approx(18.0)
+
+
 def test_live_vs_research_live_pnl_total_includes_partial_option_leg() -> None:
     pattern = SimpleNamespace(
         id=42,
@@ -402,6 +463,43 @@ def test_post_trade_review_pnl_totals_include_partial_option_leg() -> None:
     assert review["total_pnl"] == pytest.approx(10.0)
     assert review["avg_pnl"] == pytest.approx(10.0)
     assert review["high_slippage_trades"][0]["pnl"] == pytest.approx(10.0)
+
+
+def test_post_trade_review_excludes_unverified_extreme_slippage_outliers() -> None:
+    pattern = SimpleNamespace(
+        id=42,
+        name="crypto-alpha",
+        promotion_status="pilot",
+        win_rate=0.5,
+        oos_win_rate=0.55,
+        oos_avg_return_pct=3.2,
+    )
+    trades = [
+        SimpleNamespace(
+            id=1202,
+            user_id=7,
+            status="closed",
+            scan_pattern_id=42,
+            ticker="POND-USD",
+            direction="long",
+            entry_price=100.0,
+            exit_price=110.0,
+            quantity=1.0,
+            pnl=10.0,
+            exit_date=datetime(2026, 5, 30, 15, 30),
+            tca_entry_slippage_bps=1426.0,
+            tca_exit_slippage_bps=1361.0,
+            avg_fill_price=None,
+            broker_order_id="",
+            broker_status="",
+        )
+    ]
+    db = _FakeAttributionSession(trades=trades, patterns=[pattern])
+
+    out = post_trade_review(db, 7, days=30)
+
+    assert out["review"]["high_slippage_trades"] == []
+    assert not any("high slippage" in item for item in out["review"]["takeaways"])
 
 
 def test_live_vs_research_reports_contract_aware_paper_option_return_after_tca() -> None:

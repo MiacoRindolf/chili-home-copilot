@@ -13,6 +13,7 @@ import numpy as np
 from sqlalchemy.orm import Session
 
 from ...models.trading import Trade
+from .execution_cost_builder import _usable_tca_bps
 from .return_math import trade_return_pct
 
 logger = logging.getLogger(__name__)
@@ -33,8 +34,8 @@ def _is_option_trade_safe(trade: Any) -> bool:
 
 
 def _estimated_cost_pct(trade: Any) -> float | None:
-    entry_slip = float(getattr(trade, "tca_entry_slippage_bps", None) or 0) / 100
-    exit_slip = float(getattr(trade, "tca_exit_slippage_bps", None) or 0) / 100
+    entry_slip = (_usable_tca_bps(trade, "tca_entry_slippage_bps") or 0.0) / 100
+    exit_slip = (_usable_tca_bps(trade, "tca_exit_slippage_bps") or 0.0) / 100
     estimated_cost = entry_slip + exit_slip
     if estimated_cost > 0:
         return estimated_cost

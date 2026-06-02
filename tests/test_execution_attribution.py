@@ -63,6 +63,57 @@ def test_trade_close_attribution_rejects_ambiguous_option_price_return() -> None
     assert out["tca_cost_pct"] == pytest.approx(0.30)
 
 
+def test_trade_close_attribution_ignores_unverified_extreme_tca() -> None:
+    trade = SimpleNamespace(
+        scan_pattern_id=42,
+        strategy_proposal_id=99,
+        pnl=10.0,
+        entry_price=100.0,
+        exit_price=110.0,
+        quantity=1.0,
+        direction="long",
+        broker_source="coinbase",
+        broker_order_id="",
+        broker_status="",
+        avg_fill_price=None,
+        tca_entry_slippage_bps=1426.0,
+        tca_exit_slippage_bps=1361.0,
+    )
+
+    out = trade_close_attribution_dict(trade)
+
+    assert out["realized_return_pct"] == pytest.approx(10.0)
+    assert out["tca_cost_pct"] is None
+    assert out["net_return_pct"] is None
+    assert out["tca_entry_slippage_bps"] is None
+    assert out["tca_exit_slippage_bps"] is None
+
+
+def test_trade_close_attribution_keeps_broker_backed_extreme_tca() -> None:
+    trade = SimpleNamespace(
+        scan_pattern_id=42,
+        strategy_proposal_id=99,
+        pnl=10.0,
+        entry_price=100.0,
+        exit_price=110.0,
+        quantity=1.0,
+        direction="long",
+        broker_source="coinbase",
+        broker_order_id="order-verified",
+        broker_status="filled",
+        avg_fill_price=None,
+        tca_entry_slippage_bps=1426.0,
+        tca_exit_slippage_bps=1361.0,
+    )
+
+    out = trade_close_attribution_dict(trade)
+
+    assert out["tca_cost_pct"] == pytest.approx(27.87)
+    assert out["net_return_pct"] == pytest.approx(-17.87)
+    assert out["tca_entry_slippage_bps"] == pytest.approx(1426.0)
+    assert out["tca_exit_slippage_bps"] == pytest.approx(1361.0)
+
+
 def test_paper_trade_close_attribution_uses_contract_aware_option_return() -> None:
     trade = SimpleNamespace(
         scan_pattern_id=42,

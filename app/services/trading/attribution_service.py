@@ -15,6 +15,7 @@ from .return_math import (
     trade_realized_pnl,
     trade_return_pct,
 )
+from .execution_cost_builder import _usable_tca_bps
 
 
 def _finite_float(value: Any) -> float | None:
@@ -29,11 +30,15 @@ def _finite_float(value: Any) -> float | None:
 
 def _trade_tca_cost_pct(trade: Any) -> float | None:
     """Return entry+exit TCA cost in percent points, or None if incomplete."""
-    entry_bps = _finite_float(getattr(trade, "tca_entry_slippage_bps", None))
-    exit_bps = _finite_float(getattr(trade, "tca_exit_slippage_bps", None))
+    entry_bps = _usable_tca_bps(trade, "tca_entry_slippage_bps")
+    exit_bps = _usable_tca_bps(trade, "tca_exit_slippage_bps")
     if entry_bps is None or exit_bps is None:
         return None
     return (entry_bps + exit_bps) / 100.0
+
+
+def _trade_tca_bps(trade: Any, attr: str) -> float | None:
+    return _usable_tca_bps(trade, attr)
 
 
 def _paper_realized_pnl_with_raw_fallback(pt: Any) -> float | None:
@@ -176,14 +181,14 @@ def live_vs_research_by_pattern(
             if ret is not None and cost_pct is not None:
                 live_net_returns.append(ret - cost_pct)
         entry_slips = [
-            float(t.tca_entry_slippage_bps)
+            v
             for t in tlist
-            if t.tca_entry_slippage_bps is not None
+            if (v := _trade_tca_bps(t, "tca_entry_slippage_bps")) is not None
         ]
         exit_slips = [
-            float(t.tca_exit_slippage_bps)
+            v
             for t in tlist
-            if t.tca_exit_slippage_bps is not None
+            if (v := _trade_tca_bps(t, "tca_exit_slippage_bps")) is not None
         ]
         paper_pnls = [
             p
@@ -529,8 +534,8 @@ def post_trade_review(
     # --- Slippage outliers ---
     high_slip_trades = []
     for t in closed:
-        entry_slip = float(t.tca_entry_slippage_bps or 0)
-        exit_slip = float(t.tca_exit_slippage_bps or 0)
+        entry_slip = _trade_tca_bps(t, "tca_entry_slippage_bps") or 0.0
+        exit_slip = _trade_tca_bps(t, "tca_exit_slippage_bps") or 0.0
         total_slip = entry_slip + exit_slip
         if total_slip > 50:  # >50 bps total is notable
             high_slip_trades.append({
