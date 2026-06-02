@@ -71,6 +71,19 @@ def param_hash_sha256(canon: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _id_from_row(row: Any) -> int | None:
+    if row is None:
+        return None
+    if isinstance(row, (tuple, list)):
+        raw = row[0] if row else None
+    else:
+        raw = getattr(row, "id", None)
+    try:
+        return int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def get_or_create_backtest_param_set(db: Session, params_obj: dict[str, Any]) -> int | None:
     """Insert or reuse a ``BacktestParamSet`` row; return id, or None if params empty.
 
@@ -80,9 +93,10 @@ def get_or_create_backtest_param_set(db: Session, params_obj: dict[str, Any]) ->
         return None
     canon = canonical_params_dict(params_obj)
     h = param_hash_sha256(canon)
-    row = db.query(BacktestParamSet).filter(BacktestParamSet.param_hash == h).one_or_none()
-    if row is not None:
-        return int(row.id)
+    row = db.query(BacktestParamSet.id).filter(BacktestParamSet.param_hash == h).one_or_none()
+    row_id = _id_from_row(row)
+    if row_id is not None:
+        return row_id
     new_row = BacktestParamSet(param_hash=h, params_json=canon)
     try:
         with db.begin_nested():
@@ -90,11 +104,20 @@ def get_or_create_backtest_param_set(db: Session, params_obj: dict[str, Any]) ->
             db.flush()
         return int(new_row.id)
     except IntegrityError:
-        row = db.query(BacktestParamSet).filter(BacktestParamSet.param_hash == h).one_or_none()
-        if row is None:
+        row = db.query(BacktestParamSet.id).filter(BacktestParamSet.param_hash == h).one_or_none()
+        row_id = _id_from_row(row)
+        if row_id is None:
             logger.warning("[backtest_param_sets] race lost and row missing for hash=%s…", h[:12])
             return None
-        return int(row.id)
+        return row_id
+
+
+def _params_json_from_row(row: Any) -> Any:
+    if row is None:
+        return None
+    if isinstance(row, (tuple, list)):
+        return row[0] if row else None
+    return getattr(row, "params_json", None)
 
 
 def materialize_backtest_params(db: Session, bt: BacktestResult) -> dict[str, Any]:
@@ -111,8 +134,12 @@ def materialize_backtest_params(db: Session, bt: BacktestResult) -> dict[str, An
             return dict(raw)
     ps_id = getattr(bt, "param_set_id", None)
     if ps_id is not None:
-        ps = db.get(BacktestParamSet, int(ps_id))
-        if ps is not None and ps.params_json is not None:
-            pj = ps.params_json
+        row = (
+            db.query(BacktestParamSet.params_json)
+            .filter(BacktestParamSet.id == int(ps_id))
+            .first()
+        )
+        pj = _params_json_from_row(row)
+        if pj is not None:
             return dict(pj) if isinstance(pj, dict) else {}
     return {}

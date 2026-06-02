@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import math
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -90,6 +91,73 @@ def _rolling_evidence_stats(evidence: list[dict[str, Any]]) -> tuple[float, floa
     return wins / n, ret_sum / n, avg_pnl
 
 
+_TRADE_EVIDENCE_FIELDS = (
+    "scan_pattern_id",
+    "pnl",
+    "entry_price",
+    "quantity",
+    "asset_kind",
+    "tags",
+    "indicator_snapshot",
+    "exit_price",
+    "direction",
+)
+_PAPER_EVIDENCE_FIELDS = (
+    "scan_pattern_id",
+    "pnl",
+    "entry_price",
+    "quantity",
+    "signal_json",
+    "exit_price",
+    "direction",
+    "pnl_pct",
+)
+_TRADE_HALF_LIFE_FIELDS = ("exit_date",) + _TRADE_EVIDENCE_FIELDS[1:]
+_PAPER_HALF_LIFE_FIELDS = ("exit_date",) + _PAPER_EVIDENCE_FIELDS[1:]
+
+
+def _row_namespace(row: Any, field_names: tuple[str, ...]) -> SimpleNamespace:
+    if isinstance(row, (tuple, list)):
+        return SimpleNamespace(**dict(zip(field_names, row)))
+    return SimpleNamespace(**{name: getattr(row, name, None) for name in field_names})
+
+
+def _trade_evidence_from_row(row: Any) -> tuple[int | None, dict[str, Any] | None]:
+    trade = _row_namespace(row, _TRADE_EVIDENCE_FIELDS)
+    rec = _return_evidence_record(
+        pnl_pct=trade_return_pct(trade),
+        pnl=trade.pnl,
+        source="live",
+    )
+    return trade.scan_pattern_id, rec
+
+
+def _paper_evidence_from_row(row: Any) -> tuple[int | None, dict[str, Any] | None]:
+    paper_trade = _row_namespace(row, _PAPER_EVIDENCE_FIELDS)
+    rec = _return_evidence_record(
+        pnl_pct=paper_trade_return_pct(paper_trade),
+        pnl=paper_trade.pnl,
+        source="paper",
+    )
+    return paper_trade.scan_pattern_id, rec
+
+
+def _trade_half_life_point_from_row(row: Any) -> dict[str, Any] | None:
+    trade = _row_namespace(row, _TRADE_HALF_LIFE_FIELDS)
+    pnl_pct = trade_return_pct(trade)
+    if pnl_pct is None or trade.exit_date is None:
+        return None
+    return {"exit_date": trade.exit_date, "return_pct": pnl_pct}
+
+
+def _paper_half_life_point_from_row(row: Any) -> dict[str, Any] | None:
+    paper_trade = _row_namespace(row, _PAPER_HALF_LIFE_FIELDS)
+    pnl_pct = paper_trade_return_pct(paper_trade)
+    if pnl_pct is None or paper_trade.exit_date is None:
+        return None
+    return {"exit_date": paper_trade.exit_date, "return_pct": pnl_pct}
+
+
 def _payoff_ratio_protects_from_wr_decay(pattern: Any) -> bool:
     """Return True when realized payoff evidence should block WR-only decay.
 
@@ -168,7 +236,17 @@ def check_alpha_decay(
 
     sp_ids = [p.id for p in live_patterns]
 
-    trade_q = db.query(Trade).filter(
+    trade_q = db.query(
+        Trade.scan_pattern_id,
+        Trade.pnl,
+        Trade.entry_price,
+        Trade.quantity,
+        Trade.asset_kind,
+        Trade.tags,
+        Trade.indicator_snapshot,
+        Trade.exit_price,
+        Trade.direction,
+    ).filter(
         Trade.status == "closed",
         Trade.scan_pattern_id.in_(sp_ids),
         Trade.exit_date >= cutoff,
@@ -177,7 +255,16 @@ def check_alpha_decay(
         trade_q = trade_q.filter(Trade.user_id == user_id)
     recent_trades = trade_q.all()
 
-    paper_q = db.query(PaperTrade).filter(
+    paper_q = db.query(
+        PaperTrade.scan_pattern_id,
+        PaperTrade.pnl,
+        PaperTrade.entry_price,
+        PaperTrade.quantity,
+        PaperTrade.signal_json,
+        PaperTrade.exit_price,
+        PaperTrade.direction,
+        PaperTrade.pnl_pct,
+    ).filter(
         PaperTrade.status == "closed",
         PaperTrade.scan_pattern_id.in_(sp_ids),
         PaperTrade.exit_date >= cutoff,
@@ -188,25 +275,15 @@ def check_alpha_decay(
 
     evidence_by_sp: dict[int, list[dict]] = {}
     for t in recent_trades:
-        pnl_pct = trade_return_pct(t)
-        rec = _return_evidence_record(
-            pnl_pct=pnl_pct,
-            pnl=getattr(t, "pnl", None),
-            source="live",
-        )
-        if rec is None:
+        sp_id, rec = _trade_evidence_from_row(t)
+        if sp_id is None or rec is None:
             continue
-        evidence_by_sp.setdefault(t.scan_pattern_id, []).append(rec)
+        evidence_by_sp.setdefault(int(sp_id), []).append(rec)
     for pt in recent_paper:
-        pnl_pct = paper_trade_return_pct(pt)
-        rec = _return_evidence_record(
-            pnl_pct=pnl_pct,
-            pnl=getattr(pt, "pnl", None),
-            source="paper",
-        )
-        if rec is None:
+        sp_id, rec = _paper_evidence_from_row(pt)
+        if sp_id is None or rec is None:
             continue
-        evidence_by_sp.setdefault(pt.scan_pattern_id, []).append(rec)
+        evidence_by_sp.setdefault(int(sp_id), []).append(rec)
 
     decayed: list[dict[str, Any]] = []
     healthy: list[int] = []
@@ -335,7 +412,17 @@ def estimate_half_life(
     Returns None if insufficient data.
     """
     trade_q = (
-        db.query(Trade)
+        db.query(
+            Trade.exit_date,
+            Trade.pnl,
+            Trade.entry_price,
+            Trade.quantity,
+            Trade.asset_kind,
+            Trade.tags,
+            Trade.indicator_snapshot,
+            Trade.exit_price,
+            Trade.direction,
+        )
         .filter(
             Trade.scan_pattern_id == pattern_id,
             Trade.status == "closed",
@@ -347,7 +434,16 @@ def estimate_half_life(
     live_trades = trade_q.order_by(Trade.exit_date.asc()).all()
 
     paper_q = (
-        db.query(PaperTrade)
+        db.query(
+            PaperTrade.exit_date,
+            PaperTrade.pnl,
+            PaperTrade.entry_price,
+            PaperTrade.quantity,
+            PaperTrade.signal_json,
+            PaperTrade.exit_price,
+            PaperTrade.direction,
+            PaperTrade.pnl_pct,
+        )
         .filter(
             PaperTrade.scan_pattern_id == pattern_id,
             PaperTrade.status == "closed",
@@ -361,15 +457,15 @@ def estimate_half_life(
     # Merge and sort by exit date
     all_evidence = []
     for t in live_trades:
-        pnl_pct = trade_return_pct(t)
-        if pnl_pct is None:
+        point = _trade_half_life_point_from_row(t)
+        if point is None:
             continue
-        all_evidence.append({"exit_date": t.exit_date, "return_pct": pnl_pct})
+        all_evidence.append(point)
     for pt in paper_trades:
-        pnl_pct = paper_trade_return_pct(pt)
-        if pnl_pct is None:
+        point = _paper_half_life_point_from_row(pt)
+        if point is None:
             continue
-        all_evidence.append({"exit_date": pt.exit_date, "return_pct": pnl_pct})
+        all_evidence.append(point)
     all_evidence.sort(key=lambda x: x["exit_date"])
     trades = all_evidence
 

@@ -205,6 +205,48 @@ def _trade_asset_type(trade: Trade) -> str:
     return "stock"
 
 
+def _scan_pattern_names_for_positions(
+    db: Session,
+    *positions: list[Any],
+) -> dict[int, str]:
+    ids: list[int] = []
+    seen: set[int] = set()
+    for rows in positions:
+        for row in rows:
+            raw = getattr(row, "scan_pattern_id", None)
+            try:
+                pid = int(raw) if raw is not None else 0
+            except (TypeError, ValueError):
+                continue
+            if pid <= 0 or pid in seen:
+                continue
+            seen.add(pid)
+            ids.append(pid)
+    if not ids:
+        return {}
+
+    rows = (
+        db.query(ScanPattern.id, ScanPattern.name)
+        .filter(ScanPattern.id.in_(ids))
+        .all()
+    )
+    out: dict[int, str] = {}
+    for row in rows:
+        if isinstance(row, (tuple, list)):
+            raw_id = row[0] if row else None
+            name = row[1] if len(row) > 1 else None
+        else:
+            raw_id = getattr(row, "id", None)
+            name = getattr(row, "name", None)
+        try:
+            pid = int(raw_id) if raw_id is not None else 0
+        except (TypeError, ValueError):
+            continue
+        if pid > 0 and name is not None:
+            out[pid] = str(name)
+    return out
+
+
 def list_pattern_linked_open_positions(db: Session, user_id: int) -> dict[str, Any]:
     """Open trades and paper rows surfaced on the Autopilot desk.
 
@@ -259,15 +301,12 @@ def list_pattern_linked_open_positions(db: Session, user_id: int) -> dict[str, A
     override_pairs.extend(("trade", int(t.id)) for t in trades)
     override_pairs.extend(("paper", int(pt.id)) for pt in papers)
     overrides_map = list_position_overrides(db, override_pairs)
+    pattern_names = _scan_pattern_names_for_positions(db, trades, papers)
 
     out_trades: list[dict[str, Any]] = []
     for t in trades:
         monitor_scope = classify_live_autopilot_trade_scope(t)
-        pat_name = None
-        if t.scan_pattern_id:
-            p = db.get(ScanPattern, int(t.scan_pattern_id))
-            if p:
-                pat_name = p.name
+        pat_name = pattern_names.get(int(t.scan_pattern_id)) if t.scan_pattern_id else None
         is_atv1 = (t.auto_trader_version or "") == "v1"
         ov = overrides_map.get(("trade", int(t.id)))
         opened_today = bool(t.entry_date and _opened_today_et(t.entry_date))
@@ -328,11 +367,7 @@ def list_pattern_linked_open_positions(db: Session, user_id: int) -> dict[str, A
 
     out_paper: list[dict[str, Any]] = []
     for pt in papers:
-        pat_name = None
-        if pt.scan_pattern_id:
-            p = db.get(ScanPattern, int(pt.scan_pattern_id))
-            if p:
-                pat_name = p.name
+        pat_name = pattern_names.get(int(pt.scan_pattern_id)) if pt.scan_pattern_id else None
         sj = pt.signal_json or {}
         is_atv1 = bool(sj.get("auto_trader_v1"))
         ov = overrides_map.get(("paper", int(pt.id)))

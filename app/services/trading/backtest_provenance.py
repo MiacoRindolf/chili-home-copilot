@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -10,6 +11,7 @@ from ...models.trading import BacktestResult, ScanPattern
 from .scan_pattern_label_alignment import strategy_label_aligns_scan_pattern_name
 
 _WINDOW_KEYS = ("period", "interval", "ohlc_bars", "chart_time_from", "chart_time_to")
+_BACKTEST_REPAIR_FIELDS = ("strategy_name", "params", "scan_pattern_id")
 
 
 def _coerce_json_dict(value: Any) -> dict[str, Any]:
@@ -100,16 +102,95 @@ def normalize_backtest_storage_metadata(
     return canonical_name, normalized_params, status, issues, scan_pattern
 
 
+def _row_value(row: Any, fields: tuple[str, ...], name: str) -> Any:
+    if isinstance(row, (tuple, list)):
+        try:
+            return row[fields.index(name)]
+        except (ValueError, IndexError):
+            return None
+    return getattr(row, name, None)
+
+
+def _scan_pattern_id_from_backtest_row(row: Any) -> int | None:
+    raw = _row_value(row, _BACKTEST_REPAIR_FIELDS, "scan_pattern_id")
+    try:
+        return int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _scan_pattern_name_row(row: Any) -> tuple[int | None, str | None]:
+    if isinstance(row, (tuple, list)):
+        raw_id = row[0] if row else None
+        name = row[1] if len(row) > 1 else None
+    else:
+        raw_id = getattr(row, "id", None)
+        name = getattr(row, "name", None)
+    try:
+        return (int(raw_id) if raw_id is not None else None), name
+    except (TypeError, ValueError):
+        return None, name
+
+
+def _scan_patterns_by_id_for_backtests(db: Session, rows: list[Any]) -> dict[int, Any]:
+    ids: list[int] = []
+    seen: set[int] = set()
+    for row in rows:
+        sid = _scan_pattern_id_from_backtest_row(row)
+        if sid is None or sid in seen:
+            continue
+        seen.add(sid)
+        ids.append(sid)
+    if not ids:
+        return {}
+
+    out: dict[int, Any] = {}
+    for row in (
+        db.query(ScanPattern.id, ScanPattern.name)
+        .filter(ScanPattern.id.in_(ids))
+        .all()
+    ):
+        sid, name = _scan_pattern_name_row(row)
+        if sid is not None:
+            out[sid] = SimpleNamespace(id=sid, name=name)
+    return out
+
+
+def _normalize_backtest_row_with_pattern(
+    row: Any,
+    scan_patterns_by_id: dict[int, Any],
+) -> tuple[str, dict[str, Any], str, list[str], Any | None, str, dict[str, Any]]:
+    original_strategy = str(_row_value(row, _BACKTEST_REPAIR_FIELDS, "strategy_name") or "")
+    original_params = _coerce_json_dict(_row_value(row, _BACKTEST_REPAIR_FIELDS, "params"))
+    scan_pattern_id = _scan_pattern_id_from_backtest_row(row)
+    scan_pattern = scan_patterns_by_id.get(scan_pattern_id) if scan_pattern_id is not None else None
+    strategy_name = canonical_strategy_name(scan_pattern, original_strategy)
+    params_obj, status, issues = normalize_backtest_params(
+        original_params,
+        scan_pattern=scan_pattern,
+        strategy_name=strategy_name,
+    )
+    return strategy_name, params_obj, status, issues, scan_pattern, original_strategy, original_params
+
+
 def repair_backtest_provenance(
     db: Session,
     *,
     apply: bool = False,
     limit: int | None = None,
 ) -> dict[str, Any]:
-    q = db.query(BacktestResult).order_by(BacktestResult.id.asc())
+    if apply:
+        q = db.query(BacktestResult).order_by(BacktestResult.id.asc())
+    else:
+        q = db.query(
+            BacktestResult.strategy_name,
+            BacktestResult.params,
+            BacktestResult.scan_pattern_id,
+        ).order_by(BacktestResult.id.asc())
     if limit is not None:
         q = q.limit(max(1, int(limit)))
     rows = q.all()
+    scan_patterns_by_id = _scan_patterns_by_id_for_backtests(db, rows)
 
     strategy_fixed = 0
     params_fixed = 0
@@ -118,13 +199,17 @@ def repair_backtest_provenance(
     quarantined = 0
 
     for row in rows:
-        original_strategy = str(row.strategy_name or "")
-        original_params = _coerce_json_dict(row.params)
-        strategy_name, params_obj, status, _issues, _pattern = normalize_backtest_storage_metadata(
-            db,
-            resolved_scan_pattern_id=int(row.scan_pattern_id) if row.scan_pattern_id is not None else None,
-            strategy_name=original_strategy,
-            params_obj=original_params,
+        (
+            strategy_name,
+            params_obj,
+            status,
+            _issues,
+            _pattern,
+            original_strategy,
+            original_params,
+        ) = _normalize_backtest_row_with_pattern(
+            row,
+            scan_patterns_by_id,
         )
         if strategy_name != original_strategy:
             strategy_fixed += 1

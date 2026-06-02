@@ -517,6 +517,22 @@ def _lineage_key(pattern: ScanPattern) -> int:
         return int(getattr(pattern, "id", 0) or 0)
 
 
+def _lineage_key_from_id_row(row: Any) -> int:
+    if isinstance(row, (tuple, list)):
+        raw_id = row[0] if row else None
+        raw_parent_id = row[1] if len(row) > 1 else None
+    else:
+        raw_id = getattr(row, "id", None)
+        raw_parent_id = getattr(row, "parent_id", None)
+    try:
+        return int(raw_parent_id or raw_id)
+    except (TypeError, ValueError):
+        try:
+            return int(raw_id or 0)
+        except (TypeError, ValueError):
+            return 0
+
+
 def _lineage_expr():
     return func.coalesce(ScanPattern.parent_id, ScanPattern.id)
 
@@ -1120,13 +1136,13 @@ def get_exploration_pattern_ids(
     lineage_counts: dict[int, int] = {}
     if lineage_cap is not None and lineage_cap > 0 and exclude_ids:
         existing_rows = (
-            db.query(ScanPattern)
+            db.query(ScanPattern.id, ScanPattern.parent_id)
             .filter(ScanPattern.id.in_(exclude_ids))
             .all()
         )
-        lineage_counts = dict(Counter(_lineage_key(row) for row in existing_rows))
+        lineage_counts = dict(Counter(_lineage_key_from_id_row(row) for row in existing_rows))
 
-    q = db.query(ScanPattern).filter(ScanPattern.active.is_(True))
+    q = db.query(ScanPattern.id, ScanPattern.parent_id).filter(ScanPattern.active.is_(True))
     if exclude_ids:
         q = q.filter(~ScanPattern.id.in_(exclude_ids))
     # Variants first (non-null parent_id), then stalest last_backtest
@@ -1141,11 +1157,18 @@ def get_exploration_pattern_ids(
         .all()
     )
     out: list[int] = []
-    for pattern in rows:
+    for row in rows:
         if len(out) >= limit:
             break
-        pattern_id = int(pattern.id)
-        lineage = _lineage_key(pattern)
+        if isinstance(row, (tuple, list)):
+            raw_pattern_id = row[0] if row else None
+        else:
+            raw_pattern_id = getattr(row, "id", None)
+        try:
+            pattern_id = int(raw_pattern_id)
+        except (TypeError, ValueError):
+            continue
+        lineage = _lineage_key_from_id_row(row)
         if (
             lineage_cap is not None
             and lineage_cap > 0
