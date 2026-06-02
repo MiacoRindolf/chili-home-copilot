@@ -135,7 +135,19 @@
       .then(function (d) { if (my === seq) diff(d); })
       .catch(function () {});
   }
-  poll();
-  setInterval(poll, 20000);
-  document.addEventListener('visibilitychange', function () { if (!document.hidden) poll(); });
+
+  // Prefer the cockpit's single poll: desktop.js dispatches 'chili:desktop' with
+  // each fresh snapshot, so we diff off that and avoid a duplicate GET. We only
+  // start our own poll as a fallback if that event never arrives (e.g. the page
+  // has no cockpit / desktop.js).
+  var fbTimer = null;
+  var fb = setTimeout(function () { poll(); fbTimer = setInterval(poll, 20000); }, 24000);
+  document.addEventListener('chili:desktop', function (e) {
+    clearTimeout(fb);
+    if (fbTimer) { clearInterval(fbTimer); fbTimer = null; }
+    diff(e.detail);
+  });
+  // In fallback mode, re-poll when the tab regains focus (the cockpit-driven
+  // path gets this for free via desktop.js's own visibility handler).
+  document.addEventListener('visibilitychange', function () { if (!document.hidden && fbTimer) poll(); });
 })();
