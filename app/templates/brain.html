@@ -250,6 +250,61 @@ document.addEventListener('DOMContentLoaded', function() {
     brainBootstrapTradingDesk();
   }
   updateSidebarStatus();
+
+  // WS-13 deep-link: /brain?pattern=<ScanPattern.id> (from the CHILI OS ⌘K palette).
+  // Opens the trading patterns deep-dive, focuses the matching pattern card, and
+  // flashes it. Self-contained + defensive: never throws, no-ops if absent/unfound.
+  // The URL's id is ScanPattern.id (cards expose it as data-sp); showPatternDetail()
+  // expects the TradingInsight id, so we resolve via window._brainPatterns.
+  (function brainDeepLinkPattern() {
+    try {
+      var raw = new URLSearchParams(window.location.search || '').get('pattern');
+      var sp = (raw || '').trim();
+      if (!sp) return;
+      if (!document.getElementById('brain-pattern-deeplink-style')) {
+        var st = document.createElement('style');
+        st.id = 'brain-pattern-deeplink-style';
+        st.textContent = '@keyframes brainPatDeepFlash{0%,55%{box-shadow:0 0 0 2px rgba(91,140,255,.9);background:rgba(91,140,255,.18)}100%{box-shadow:0 0 0 0 transparent;background:transparent}}.pattern-card.brain-pat-deeplink{animation:brainPatDeepFlash 1.6s ease}';
+        document.head.appendChild(st);
+      }
+      // Make sure the trading domain + patterns deep-dive are live (idempotent).
+      if (_activeDomain !== 'trading' && typeof switchDomain === 'function') {
+        switchDomain('trading');
+      } else if (typeof brainBootstrapTradingDesk === 'function') {
+        brainBootstrapTradingDesk();
+      }
+      if (typeof switchDeepDiveTab === 'function') switchDeepDiveTab('patterns');
+
+      var tries = 0;
+      (function focusPattern() {
+        var card = null;
+        try {
+          var sel = (window.CSS && CSS.escape) ? CSS.escape(sp) : sp;
+          card = document.querySelector('.pattern-card[data-sp="' + sel + '"]');
+        } catch (e) { card = null; }
+        if (card) {
+          // Resolve the insight id (showPatternDetail wants TradingInsight.id, not the FK).
+          try {
+            var bp = window._brainPatterns || {};
+            var pool = (bp.active || []).concat(bp.demoted || []);
+            var spNum = parseInt(sp, 10);
+            var match = pool.find(function(x) {
+              return x && x.scan_pattern_id != null && Number(x.scan_pattern_id) === spNum;
+            });
+            if (match && typeof showPatternDetail === 'function') {
+              showPatternDetail(match.id);
+            }
+          } catch (e) {}
+          try { card.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) {}
+          card.classList.remove('brain-pat-deeplink');
+          void card.offsetWidth;
+          card.classList.add('brain-pat-deeplink');
+        } else if (++tries < 24) {
+          setTimeout(focusPattern, 180);
+        }
+      })();
+    } catch (e) {}
+  })();
 });
 </script>
 {% endblock %}
