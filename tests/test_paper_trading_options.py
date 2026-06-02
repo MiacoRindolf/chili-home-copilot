@@ -51,6 +51,9 @@ class _RowsQuery(_FakeQuery):
     def count(self):
         return len(self._rows)
 
+    def first(self):
+        return self._rows[0] if self._rows else None
+
 
 class _FakeDb:
     def __init__(self, rows=None):
@@ -77,6 +80,53 @@ class _FakeDb:
 
 def _paper_rows(db: _FakeDb) -> list[PaperTrade]:
     return [row for row in db.added if isinstance(row, PaperTrade)]
+
+
+def test_get_pattern_exit_config_infers_classifier_defaults_for_missing_config() -> None:
+    from app.models.trading import ScanPattern
+    from app.services.trading import paper_trading
+
+    pat = ScanPattern(
+        id=42,
+        name="paper mean reversion",
+        rules_json={
+            "conditions": [{"indicator": "rsi_14", "op": "<=", "value": 40}]
+        },
+        timeframe="1m",
+        active=True,
+    )
+
+    cfg = paper_trading._get_pattern_exit_config(_FakeDb([pat]), pat.id)
+
+    assert cfg["max_bars"] == 30
+    assert cfg["use_bos"] is True
+    assert cfg["timeframe"] == "1m"
+    assert cfg["exit_defaults_source"] == "backtest_classifier"
+    assert cfg["atr_stop_mult"] == paper_trading.DEFAULT_ATR_STOP_MULT
+    assert cfg["atr_target_mult"] == paper_trading.DEFAULT_ATR_TARGET_MULT
+
+
+def test_get_pattern_exit_config_explicit_config_wins_over_classifier_defaults() -> None:
+    from app.models.trading import ScanPattern
+    from app.services.trading import paper_trading
+
+    pat = ScanPattern(
+        id=43,
+        name="paper explicit exit config",
+        rules_json={
+            "conditions": [{"indicator": "rsi_14", "op": "<=", "value": 40}]
+        },
+        timeframe="1m",
+        exit_config={"max_bars": 7, "use_bos": False},
+        active=True,
+    )
+
+    cfg = paper_trading._get_pattern_exit_config(_FakeDb([pat]), pat.id)
+
+    assert cfg["max_bars"] == 7
+    assert cfg["use_bos"] is False
+    assert cfg["timeframe"] == "1m"
+    assert "exit_defaults_source" not in cfg
 
 
 def test_autotrader_paper_entry_context_uses_option_premium() -> None:
