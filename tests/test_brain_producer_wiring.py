@@ -208,7 +208,7 @@ def test_round_result_dict_has_market_snapshots_key(
 
 
 def test_fast_lane_can_disable_heavy_producers(
-    db, reset_dispatch_state, monkeypatch,
+    reset_dispatch_state, monkeypatch,
 ):
     """Fast-lane dispatcher processes lightweight queues only.
 
@@ -217,6 +217,7 @@ def test_fast_lane_can_disable_heavy_producers(
     """
     sweep_called = []
     thin_called = []
+    time_decay_called = []
 
     def _spy_snapshots(db, user_id):
         sweep_called.append(True)
@@ -235,6 +236,16 @@ def test_fast_lane_can_disable_heavy_producers(
         thin_called.append(True)
         return {"ok": True, "demoted": 0, "demoted_ids": []}
 
+    def _spy_time_decay(db):
+        time_decay_called.append(True)
+        return {"ok": True, "queued": 0, "checked": 0}
+
+    db = MagicMock()
+    monkeypatch.setattr(disp, "brain_work_ledger_enabled", lambda: True)
+    monkeypatch.setattr(disp, "release_stale_leases", lambda _db: 0)
+    monkeypatch.setattr(disp, "recover_retryable_dead_work", lambda _db: {})
+    monkeypatch.setattr(disp, "coalesce_duplicate_open_work", lambda _db: {})
+    monkeypatch.setattr(disp, "claim_work_batch", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(
         "app.services.trading.learning.run_scheduled_market_snapshots",
         _spy_snapshots,
@@ -243,17 +254,26 @@ def test_fast_lane_can_disable_heavy_producers(
         "app.services.trading.learning.run_thin_evidence_demote",
         _spy_thin,
     )
+    monkeypatch.setattr(
+        "app.services.trading.brain_work.execution_hooks.enqueue_recent_time_decay_exit_variant_work",
+        _spy_time_decay,
+    )
 
     res = run_brain_work_dispatch_round(
         db,
         user_id=None,
         max_backtest=0,
         max_exec_feedback=0,
+        max_edge_reliability=0,
+        max_recert_rescue=0,
+        max_exit_variant=0,
+        max_provenance=0,
         max_mine=0,
         max_cpcv_gate=0,
         max_promote=0,
         max_trade_close=0,
         run_thin_evidence_sweep=False,
+        run_time_decay_exit_variant_sweep=False,
         run_market_snapshots_watchdog=False,
     )
 
@@ -264,5 +284,7 @@ def test_fast_lane_can_disable_heavy_producers(
         "reason": "disabled_by_caller",
     }
     assert res["thin_evidence_sweep"]["skipped"] is True
+    assert res["time_decay_exit_variant_sweep"]["skipped"] is True
     assert sweep_called == []
     assert thin_called == []
+    assert time_decay_called == []

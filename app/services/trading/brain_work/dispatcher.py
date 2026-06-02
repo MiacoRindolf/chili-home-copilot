@@ -461,6 +461,7 @@ def run_brain_work_dispatch_round(
     max_promote: int | None = None,
     max_trade_close: int | None = None,
     run_thin_evidence_sweep: bool = True,
+    run_time_decay_exit_variant_sweep: bool = True,
     run_market_snapshots_watchdog: bool = True,
 ) -> dict[str, Any]:
     """Release stale leases, then claim+process work by handler family (bounded per type)."""
@@ -759,6 +760,52 @@ def run_brain_work_dispatch_round(
             "demoted_ids": [],
         }
 
+    time_decay_exit_variant_sweep: dict[str, Any]
+    if run_time_decay_exit_variant_sweep:
+        try:
+            from .execution_hooks import enqueue_recent_time_decay_exit_variant_work
+
+            time_decay_exit_variant_sweep = (
+                enqueue_recent_time_decay_exit_variant_work(db) or {}
+            )
+            db.commit()
+            if int(time_decay_exit_variant_sweep.get("queued") or 0) > 0:
+                logger.info(
+                    "%s time_decay_exit_variant sweep: queued=%d checked=%d",
+                    LOG_PREFIX,
+                    int(time_decay_exit_variant_sweep.get("queued") or 0),
+                    int(time_decay_exit_variant_sweep.get("checked") or 0),
+                )
+            else:
+                logger.debug(
+                    "%s time_decay_exit_variant sweep: queued=0 result=%s",
+                    LOG_PREFIX,
+                    time_decay_exit_variant_sweep,
+                )
+        except Exception as _tdx:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            logger.warning(
+                "%s time_decay_exit_variant sweep failed: %s",
+                LOG_PREFIX, _tdx, exc_info=True,
+            )
+            time_decay_exit_variant_sweep = {
+                "ok": False,
+                "queued": 0,
+                "checked": 0,
+                "error": str(_tdx)[:500],
+            }
+    else:
+        time_decay_exit_variant_sweep = {
+            "ok": True,
+            "skipped": True,
+            "reason": "disabled_by_caller",
+            "queued": 0,
+            "checked": 0,
+        }
+
     # f-brain-phase2-producer-completion (2026-05-09): watchdog-style
     # mining producer. Emits market_snapshots_batch + writes
     # trading_snapshots if no dispatch-round emit has fired in the
@@ -798,6 +845,7 @@ def run_brain_work_dispatch_round(
         "dead_letter_recovery": dead_letter_recovery,
         "duplicate_open_work": duplicate_open_work,
         "thin_evidence_sweep": thin_evidence_sweep,
+        "time_decay_exit_variant_sweep": time_decay_exit_variant_sweep,
         "market_snapshots": market_snapshots,
     }
 
