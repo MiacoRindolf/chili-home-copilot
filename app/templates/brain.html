@@ -20,7 +20,7 @@ window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
 </script>
 
 <a href="#bx-runtime-header" class="skip-nav">Skip to main content</a>
-{% include "brain/_header.html" %}
+{% if request.query_params.get('embed') != '1' %}{% include "brain/_header.html" %}{% endif %}
 
 <div class="b-body">
   <div class="b-main" data-brain-initial-domain="{{ _bd }}" data-trading-boot="{% if _bd == 'trading' %}immediate{% else %}deferred{% endif %}">

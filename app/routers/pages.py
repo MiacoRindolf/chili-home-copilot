@@ -37,8 +37,10 @@ def _greeting() -> str:
     return "Good evening"
 
 
-@router.get("/", response_class=HTMLResponse)
+@router.get("/home", response_class=HTMLResponse)
 def home(request: Request, db: Session = Depends(get_db)):
+    """Classic household home (chores/birthdays/calendar). The OS dashboard is
+    now the front door at / and /workspace; this stays reachable at /home."""
     device_token = request.cookies.get(DEVICE_COOKIE_NAME)
     identity = get_identity_record(db, device_token)
     dashboard = home_service.get_dashboard_data(db, identity)
@@ -51,9 +53,10 @@ def home(request: Request, db: Session = Depends(get_db)):
     })
 
 
+@router.get("/", response_class=HTMLResponse)
 @router.get("/workspace", response_class=HTMLResponse)
 def workspace(request: Request, db: Session = Depends(get_db)):
-    """CHILI Workspace — unified dashboard command center (read-only)."""
+    """CHILI OS — unified dashboard command center (read-only). Front door at /."""
     from ..services import dashboard_summary
     ctx = get_identity_ctx(request, db)
     dash = dashboard_summary.build_dashboard(db, ctx.get("user_id"))
@@ -70,7 +73,7 @@ def workspace(request: Request, db: Session = Depends(get_db)):
 def add_chore(title: str = Form(...), db: Session = Depends(get_db)):
     db.add(Chore(title=title, done=False))
     db.commit()
-    return RedirectResponse("/", status_code=303)
+    return RedirectResponse("/home", status_code=303)
 
 
 @router.get("/chores/{chore_id}/done")
@@ -79,7 +82,7 @@ def mark_chore_done(chore_id: int, db: Session = Depends(get_db)):
     if chore:
         chore.done = True
         db.commit()
-    return RedirectResponse("/", status_code=303)
+    return RedirectResponse("/home", status_code=303)
 
 
 @router.post("/birthdays")
@@ -90,7 +93,7 @@ def add_birthday_form(
 ):
     db.add(Birthday(name=name, date=date))
     db.commit()
-    return RedirectResponse("/", status_code=303)
+    return RedirectResponse("/home", status_code=303)
 
 
 # ---------------------------------------------------------------------------

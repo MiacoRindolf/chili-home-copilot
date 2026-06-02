@@ -627,6 +627,7 @@
 {% endblock %}
 
 {% block content %}
+{% if request.query_params.get('embed') != '1' %}
 <header class="planner-header">
   <div style="display:flex;align-items:center;gap:16px;">
     <h1>&#128203; Project Planner</h1>
@@ -643,6 +644,7 @@
     <button id="theme-toggle" title="Toggle dark mode">&#127769;</button>
   </div>
 </header>
+{% endif %}
 
 <div class="planner-layout">
   <aside class="planner-sidebar">
