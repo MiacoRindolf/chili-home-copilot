@@ -161,6 +161,9 @@ AUTOTRADER_SYNERGY_MAX_SCALE_INS_CONFIG_LIMIT = 10
 AUTOTRADER_PROBATION_DEFAULT_NOTIONAL_MULTIPLIER = 0.25
 AUTOTRADER_PROBATION_DEFAULT_MAX_TRADES_PER_PATTERN_PER_DAY = 1
 AUTOTRADER_PROBATION_DEFAULT_MAX_TRADES_PER_DAY = 3
+AUTOTRADER_PROBATION_DEFAULT_MAX_TRADES_PER_PATTERN_TICKER_PER_DAY = 1
+AUTOTRADER_PROBATION_DEFAULT_CRYPTO_MAX_TRADES_PER_DAY = 6
+AUTOTRADER_PROBATION_DEFAULT_CRYPTO_MIN_EXPECTED_NET_PCT_FOR_EXTRA_QUOTA = 1.0
 AUTOTRADER_PROBATION_DEFAULT_MIN_CPCV_SHARPE = 1.0
 AUTOTRADER_PROBATION_DEFAULT_MIN_REALIZED_TRADES = 5
 AUTOTRADER_PAPER_SHADOW_DEFAULT_MAX_OPEN = 100
@@ -4214,11 +4217,34 @@ class Settings(BaseSettings):
             "CHILI_AUTOTRADER_PROBATION_MAX_TRADES_PER_PATTERN_PER_DAY"
         ),
     )
+    chili_autotrader_probation_max_trades_per_pattern_ticker_per_day: int = Field(
+        default=AUTOTRADER_PROBATION_DEFAULT_MAX_TRADES_PER_PATTERN_TICKER_PER_DAY,
+        ge=0,
+        le=100,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_PROBATION_MAX_TRADES_PER_PATTERN_TICKER_PER_DAY"
+        ),
+    )
     chili_autotrader_probation_max_trades_per_day: int = Field(
         default=AUTOTRADER_PROBATION_DEFAULT_MAX_TRADES_PER_DAY,
         ge=0,
         le=100,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_PROBATION_MAX_TRADES_PER_DAY"),
+    )
+    chili_autotrader_probation_crypto_max_trades_per_day: int = Field(
+        default=AUTOTRADER_PROBATION_DEFAULT_CRYPTO_MAX_TRADES_PER_DAY,
+        ge=0,
+        le=100,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_PROBATION_CRYPTO_MAX_TRADES_PER_DAY"
+        ),
+    )
+    chili_autotrader_probation_crypto_min_expected_net_pct_for_extra_quota: float = Field(
+        default=AUTOTRADER_PROBATION_DEFAULT_CRYPTO_MIN_EXPECTED_NET_PCT_FOR_EXTRA_QUOTA,
+        ge=0.0,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_PROBATION_CRYPTO_MIN_EXPECTED_NET_PCT_FOR_EXTRA_QUOTA"
+        ),
     )
     chili_autotrader_probation_min_cpcv_sharpe: float = Field(
         default=AUTOTRADER_PROBATION_DEFAULT_MIN_CPCV_SHARPE,
