@@ -398,6 +398,24 @@
       saveLayout();
       return n;
     },
+    // Grid: tile every open (non-minimized) window edge-to-edge in a grid
+    // sized to the count (2→side-by-side, 3-4→2×2, …). Returns the count.
+    grid: function () {
+      var open = order.filter(function (a) { return wins[a] && wins[a].style.display !== 'none'; });
+      var n = open.length; if (!n) return 0;
+      var cols = Math.ceil(Math.sqrt(n)), rows = Math.ceil(n / cols);
+      var W = desktop.clientWidth, H = desktop.clientHeight;
+      var cw = Math.floor(W / cols), ch = Math.floor(H / rows);
+      open.forEach(function (app, i) {
+        var el = wins[app], c = i % cols, r = Math.floor(i / cols);
+        el.classList.add('snapping');
+        el.style.left = (c * cw) + 'px'; el.style.top = (r * ch) + 'px';
+        el.style.width = cw + 'px'; el.style.height = ch + 'px';
+        (function (e) { setTimeout(function () { e.classList.remove('snapping'); }, 160); })(el);
+      });
+      saveLayout();
+      return n;
+    },
     // Named Spaces — snapshot/restore window arrangements by name.
     spaces: {
       list: function () { return loadSpaces().map(function (s) { return { name: s.name, count: (s.apps || []).length }; }); },
