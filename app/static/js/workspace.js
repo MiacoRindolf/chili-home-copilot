@@ -415,4 +415,23 @@
       });
     });
   }
+
+  // ── System tray: the rail avatar opens a popover of utility surfaces
+  //    (Profile / Metrics / Admin / sign-out). The items carry data-os-win, so
+  //    os.js opens each as a window; here we just toggle the popover. The
+  //    avatar keeps href="/profile" as a no-JS fallback. ──
+  var tray = document.getElementById('ws-tray');
+  var trayBtn = document.getElementById('ws-tray-btn');
+  var trayMenu = document.getElementById('ws-tray-menu');
+  function closeTray() { if (tray) { tray.classList.remove('open'); if (trayBtn) trayBtn.setAttribute('aria-expanded', 'false'); } }
+  if (trayBtn) trayBtn.addEventListener('click', function (e) {
+    e.preventDefault(); e.stopPropagation();
+    var open = tray.classList.toggle('open');
+    trayBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+  if (trayMenu) trayMenu.addEventListener('click', function () { closeTray(); });  // close after picking
+  document.addEventListener('click', function (e) {
+    if (tray && tray.classList.contains('open') && !tray.contains(e.target)) closeTray();
+  });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeTray(); });
 })();

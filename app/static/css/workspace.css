@@ -178,6 +178,17 @@
 .ws-rb.ws-rb-dragging{opacity:.4}
 .ws-rb.ws-rb-drop{box-shadow:inset 0 3px 0 var(--ws-accent)}
 
+/* System tray (rail-bottom utility popover) */
+.ws-tray{position:relative;margin-top:var(--ws-s2)}
+.ws-tray.open .ws-avatar{box-shadow:0 0 0 2px var(--ws-accent)}
+.ws-tray-menu{position:absolute;left:calc(100% + 12px);bottom:0;min-width:208px;background:var(--ws-surface);border:1px solid var(--ws-border-strong);border-radius:var(--ws-r-md);box-shadow:var(--ws-shadow-lg);padding:6px;z-index:1000;display:none}
+.ws-tray.open .ws-tray-menu{display:block;animation:wsPop .12s var(--ws-ease,ease)}
+.ws-tray-name{padding:6px 10px 8px;font-size:var(--ws-fs-12);font-weight:var(--ws-fw-semi);color:var(--ws-text-3);border-bottom:1px solid var(--ws-border);margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ws-tray-item{display:flex;align-items:center;gap:10px;width:100%;padding:8px 10px;border:none;background:transparent;color:var(--ws-text);font-size:var(--ws-fs-13);font-weight:var(--ws-fw-med);text-align:left;cursor:pointer;border-radius:var(--ws-r-sm);font-family:var(--ws-font-ui);text-decoration:none}
+.ws-tray-item:hover{background:var(--ws-accent-bg);color:var(--ws-accent)}
+.ws-tray-item .ti-ic{font-size:15px;width:18px;text-align:center;flex-shrink:0}
+.ws-tray-sep{height:1px;background:var(--ws-border);margin:4px 0}
+
 /* ── Spaces menu (saved window layouts) ── */
 .ws-spaces{position:relative}
 .ws-spaces-menu{position:absolute;top:calc(100% + 8px);right:0;min-width:248px;background:var(--ws-surface);border:1px solid var(--ws-border-strong);border-radius:var(--ws-r-lg);box-shadow:var(--ws-shadow-lg);padding:6px;z-index:1000;display:none;flex-direction:column;gap:2px}
