@@ -96,11 +96,11 @@ def build_dashboard(db: Session, user_id: Optional[int]) -> Dict[str, Any]:
     trading = _trading(db, user_id)
     research = _research(db, user_id)
     kpis = [
-        {"label": "Net P/L · today", "val": trading["net_pnl_fmt"] or "$0.00",
+        {"key": "net_pnl", "label": "Net P/L · today", "val": trading["net_pnl_fmt"] or "$0.00",
          "cls": "ws-up" if (trading.get("net_pnl") or 0) >= 0 else "ws-down"},
-        {"label": "Win rate · 30d", "val": trading["win_rate_fmt"] or "—", "cls": ""},
-        {"label": "Open positions", "val": str(len(trading["open_positions"])), "cls": ""},
-        {"label": "Top patterns", "val": str(len(trading["top_patterns"])), "cls": ""},
+        {"key": "win_rate", "label": "Win rate · 30d", "val": trading["win_rate_fmt"] or "—", "cls": ""},
+        {"key": "open", "label": "Open positions", "val": str(len(trading["open_positions"])), "cls": ""},
+        {"key": "patterns", "label": "Top patterns", "val": str(len(trading["top_patterns"])), "cls": ""},
     ]
     return {
         "kpis": kpis,
