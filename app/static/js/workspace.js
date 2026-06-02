@@ -110,6 +110,15 @@
   // Bold the matched substring of the current query inside a label (HTML-safe:
   // each segment is escaped, only the match is wrapped).
   var lastQuery = '';
+  // Subsequence ("fuzzy") match: do q's chars appear in order in label?
+  // ("trd" matches "Trading"). Case-insensitive; empty q matches everything.
+  function fuzzy(label, q) {
+    q = (q || '').toLowerCase(); if (!q) return true;
+    label = (label == null ? '' : String(label)).toLowerCase();
+    var i = 0;
+    for (var j = 0; j < label.length && i < q.length; j++) if (label[j] === q[i]) i++;
+    return i === q.length;
+  }
   function highlight(label, q) {
     label = label == null ? '' : String(label);
     if (!q) return esc(label);
@@ -146,7 +155,7 @@
   function spaceResults(q) {
     var api = window.ChiliOS && window.ChiliOS.spaces; if (!api) return [];
     var ql = (q || '').toLowerCase();
-    return api.list().filter(function (s) { return !ql || s.name.toLowerCase().indexOf(ql) !== -1; })
+    return api.list().filter(function (s) { return fuzzy(s.name, ql); })
       .map(function (s) { return { type: 'space', space: s.name, label: s.name, icon: '🗂', sub: 'Space · ' + s.count + ' window' + (s.count === 1 ? '' : 's') }; });
   }
 
@@ -204,7 +213,7 @@
       { cmd: 'accent:amber', label: 'Accent: Amber', icon: '🟡' },
       { cmd: 'accent:cyan', label: 'Accent: Cyan', icon: '🟦' }
     ];
-    return cmds.filter(function (c) { return c.label.toLowerCase().indexOf(ql) !== -1; })
+    return cmds.filter(function (c) { return fuzzy(c.label, ql); })
       .map(function (c) { return { type: 'command', cmd: c.cmd, label: c.label, icon: c.icon, sub: 'Command' }; });
   }
   function runCommand(id) {
