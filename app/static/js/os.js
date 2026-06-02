@@ -45,9 +45,20 @@
   }
   function dock(app) { return document.querySelector('.ws-rb[data-app="' + app + '"]'); }
 
+  // Append the embed flag that strips an app's chrome inside an OS window.
+  function withEmbed(src) { return src + (src.indexOf('?') === -1 ? '?' : '&') + 'embed=1'; }
+
   function openApp(cfg, geom) {
     var app = cfg.app;
-    if (wins[app]) { wins[app].style.display = 'flex'; focusWin(app); removeChip(app); syncHome(); saveLayout(); return; }
+    if (wins[app]) {
+      var ex = wins[app];
+      // A deep-link (e.g. ⌘K "NVDA") re-points an already-open window's iframe.
+      if (cfg.deep && cfg.src) {
+        var ifr0 = ex.querySelector('iframe'), want = withEmbed(cfg.src);
+        if (ifr0 && ifr0.getAttribute('src') !== want) ifr0.setAttribute('src', want);
+      }
+      ex.style.display = 'flex'; focusWin(app); removeChip(app); syncHome(); saveLayout(); return;
+    }
     var n = order.length;
     var el = document.createElement('div');
     el.className = 'os-win active';
@@ -55,7 +66,7 @@
     el.style.left = (40 + n * 34) + 'px'; el.style.top = (24 + n * 28) + 'px';
     el.style.width = 'min(640px,72vw)'; el.style.height = 'min(520px,72vh)';
     if (geom) { if (geom.left) el.style.left = geom.left; if (geom.top) el.style.top = geom.top; if (geom.width) el.style.width = geom.width; if (geom.height) el.style.height = geom.height; }
-    var src = cfg.src + (cfg.src.indexOf('?') === -1 ? '?' : '&') + 'embed=1';
+    var src = withEmbed(cfg.src);
     el.innerHTML =
       '<div class="os-bar"><span class="wi">' + (cfg.icon || '🗔') + '</span><span class="wt">' + cfg.title + '</span>' +
       '<a class="pop" href="' + cfg.src + '" target="_blank" rel="noopener" title="Open in new tab"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M14 4h6v6M10 14L20 4M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5"/></svg></a>' +
@@ -262,7 +273,15 @@
   // open() returns true if the app opened as a window, false otherwise (caller can
   // then fall back to navigation — e.g. Dashboard, which is the desktop home).
   window.ChiliOS = {
-    open: function (app) { var b = document.querySelector('.ws-rb[data-app="' + app + '"][data-src]'); if (b) { openApp(cfgFromEl(b)); return true; } return false; },
+    // open(app) opens/focuses the app's default window; open(app, srcOverride)
+    // opens it pointed at a deep-link URL (re-navigating it if already open).
+    open: function (app, srcOverride) {
+      var b = document.querySelector('.ws-rb[data-app="' + app + '"][data-src]');
+      if (!b) return false;
+      var cfg = cfgFromEl(b);
+      if (srcOverride) { cfg.src = srcOverride; cfg.deep = true; }
+      openApp(cfg); return true;
+    },
     // Named Spaces — snapshot/restore window arrangements by name.
     spaces: {
       list: function () { return loadSpaces().map(function (s) { return { name: s.name, count: (s.apps || []).length }; }); },

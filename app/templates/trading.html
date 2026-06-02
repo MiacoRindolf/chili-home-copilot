@@ -2819,6 +2819,32 @@ document.addEventListener('DOMContentLoaded', function() {
   _initPaneDrag();
   buildIndicatorPanel();
   _syncIntervalUi(currentInterval);
+
+  // Deep-link: /trading?ticker=NVDA (from the CHILI OS ⌘K palette) — select the
+  // ticker and reveal/flash its watchlist row. Self-contained + defensive; the
+  // ?tab=backtest path below has its own handler so we skip it here.
+  (function deepLinkTicker() {
+    try {
+      var p = new URLSearchParams(window.location.search);
+      var t = (p.get('ticker') || '').toUpperCase();
+      if (!t || p.get('tab') === 'backtest') return;
+      if (!document.getElementById('wl-deeplink-style')) {
+        var st = document.createElement('style'); st.id = 'wl-deeplink-style';
+        st.textContent = '@keyframes wlDeepFlash{0%,55%{box-shadow:inset 0 0 0 2px rgba(91,140,255,.9);background:rgba(91,140,255,.18)}100%{box-shadow:inset 0 0 0 0 transparent;background:transparent}}.wl-item.wl-deeplink{animation:wlDeepFlash 1.6s ease}';
+        document.head.appendChild(st);
+      }
+      if (typeof selectTicker === 'function') selectTicker(t);  // charts it even if not in the watchlist
+      var tries = 0;
+      (function reveal() {
+        var sel = (window.CSS && CSS.escape) ? CSS.escape(t) : t;
+        var row = document.querySelector('.wl-item[data-ticker="' + sel + '"]');
+        if (row) {
+          row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+          row.classList.remove('wl-deeplink'); void row.offsetWidth; row.classList.add('wl-deeplink');
+        } else if (++tries < 24) { setTimeout(reveal, 180); }
+      })();
+    } catch (e) {}
+  })();
   loadStrategies().then(function() {
     var _urlParams = new URLSearchParams(window.location.search);
     if (_urlParams.get('tab') !== 'backtest') return;
