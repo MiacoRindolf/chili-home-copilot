@@ -10,6 +10,7 @@
 <link rel="stylesheet" href="/static/css/workspace.css">
 <link rel="stylesheet" href="/static/css/os.css">
 <link rel="stylesheet" href="/static/css/os-notify.css">
+<link rel="stylesheet" href="/static/css/os-help.css">
 {% block ws_head %}{% endblock %}
 {% endblock %}
 
@@ -56,6 +57,9 @@
         <button class="ws-iconbtn" id="ws-theme-toggle" type="button" title="Toggle theme" aria-label="Toggle theme">
           <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
         </button>
+        <button class="ws-iconbtn" id="ws-help-btn" type="button" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts" aria-haspopup="dialog" aria-expanded="false">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.8.4-1 .9-1 1.7"/><path d="M12 17h.01"/></svg>
+        </button>
       </div>
     </header>
 
@@ -74,7 +78,44 @@
 </div>
 </div>
 <div class="ws-toasts" id="ws-toasts" aria-live="polite" aria-label="Notifications"></div>
+
+<div class="ws-help-scrim" id="ws-help-scrim">
+  <div class="ws-help" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
+    <div class="ws-help-head"><h3>Keyboard shortcuts</h3><button class="ws-help-x" id="ws-help-x" type="button" aria-label="Close">×</button></div>
+    <div class="ws-help-grid">
+      <div class="ws-help-group">
+        <h4>Command palette</h4>
+        <div class="ws-help-row"><span>Open search</span><span class="keys"><kbd>⌘</kbd><kbd>K</kbd></span></div>
+        <div class="ws-help-row"><span>Navigate results</span><span class="keys"><kbd>↑</kbd><kbd>↓</kbd></span></div>
+        <div class="ws-help-row"><span>Open selected</span><span class="keys"><kbd>↵</kbd></span></div>
+        <div class="ws-help-row"><span>Close</span><span class="keys"><kbd>Esc</kbd></span></div>
+      </div>
+      <div class="ws-help-group">
+        <h4>Tile windows (drag)</h4>
+        <div class="ws-help-row"><span>Left / right half</span><span class="keys"><kbd>drag ←/→ edge</kbd></span></div>
+        <div class="ws-help-row"><span>Quarter</span><span class="keys"><kbd>drag to corner</kbd></span></div>
+        <div class="ws-help-row"><span>Maximize</span><span class="keys"><kbd>drag to top</kbd></span></div>
+      </div>
+      <div class="ws-help-group">
+        <h4>Tile windows (keyboard)</h4>
+        <div class="ws-help-row"><span>Left / right half</span><span class="keys"><kbd>⌘</kbd><kbd>⌥</kbd><kbd>←</kbd><kbd>→</kbd></span></div>
+        <div class="ws-help-row"><span>Maximize</span><span class="keys"><kbd>⌘</kbd><kbd>⌥</kbd><kbd>↑</kbd></span></div>
+        <div class="ws-help-row"><span>Quarters (TL/TR/BL/BR)</span><span class="keys"><kbd>⌘</kbd><kbd>⌥</kbd><kbd>1</kbd>–<kbd>4</kbd></span></div>
+        <div class="ws-help-row"><span>Minimize</span><span class="keys"><kbd>⌘</kbd><kbd>⌥</kbd><kbd>↓</kbd></span></div>
+        <div class="ws-help-row"><span>Close</span><span class="keys"><kbd>⌘</kbd><kbd>⌥</kbd><kbd>W</kbd></span></div>
+        <div class="ws-help-row"><span>Cycle windows</span><span class="keys"><kbd>⌘</kbd><kbd>`</kbd></span></div>
+      </div>
+      <div class="ws-help-group">
+        <h4>General</h4>
+        <div class="ws-help-row"><span>This help</span><span class="keys"><kbd>?</kbd></span></div>
+        <div class="ws-help-row"><span>Show desktop</span><span class="keys"><kbd>Dashboard rail</kbd></span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script src="/static/js/workspace.js"></script>
 <script src="/static/js/os.js"></script>
 <script src="/static/js/notifications.js"></script>
+<script src="/static/js/help.js"></script>
 {% endblock %}

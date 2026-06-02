@@ -1,0 +1,17 @@
+/* CHILI OS — keyboard shortcuts cheat-sheet overlay. Layers over workspace.css. */
+.ws-help-scrim{position:fixed;inset:0;z-index:var(--ws-z-toast,300);display:none;align-items:center;justify-content:center;background:rgba(4,7,12,.5);backdrop-filter:blur(3px);padding:24px}
+.ws-help-scrim.open{display:flex;animation:wsHelpFade .14s var(--ws-ease,ease)}
+@keyframes wsHelpFade{from{opacity:0}to{opacity:1}}
+.ws-help{width:min(640px,94vw);max-height:84vh;overflow-y:auto;background:var(--ws-surface);border:1px solid var(--ws-border-strong);border-radius:var(--ws-r-lg);box-shadow:var(--ws-shadow-lg)}
+.ws-help-head{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--ws-border);position:sticky;top:0;background:var(--ws-surface)}
+.ws-help-head h3{font-size:var(--ws-fs-16);font-weight:var(--ws-fw-semi);color:var(--ws-text)}
+.ws-help-x{border:none;background:transparent;color:var(--ws-text-3);font-size:22px;line-height:1;cursor:pointer;width:30px;height:30px;border-radius:8px}
+.ws-help-x:hover{background:var(--ws-surface-2);color:var(--ws-text)}
+.ws-help-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px 28px;padding:18px 20px 22px}
+.ws-help-group{break-inside:avoid}
+.ws-help-group h4{font-size:var(--ws-fs-11);font-weight:var(--ws-fw-semi);text-transform:uppercase;letter-spacing:.7px;color:var(--ws-text-3);margin:10px 0 8px}
+.ws-help-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:5px 0;font-size:var(--ws-fs-13);color:var(--ws-text-2)}
+.ws-help-row .keys{display:flex;gap:4px;flex-shrink:0}
+.ws-help kbd{font:var(--ws-fw-semi) var(--ws-fs-11)/1 var(--ws-font-ui);background:var(--ws-surface-3);border:1px solid var(--ws-border);border-bottom-width:2px;border-radius:6px;padding:4px 7px;color:var(--ws-text);min-width:16px;text-align:center}
+@media(max-width:620px){.ws-help-grid{grid-template-columns:1fr}}
+@media (prefers-reduced-motion:reduce){.ws-help-scrim.open{animation:none}}
