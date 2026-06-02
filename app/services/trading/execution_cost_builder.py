@@ -121,6 +121,35 @@ def _positive_finite_float(value: Any) -> float | None:
     return out
 
 
+def _unverified_tca_outlier_bps() -> float:
+    configured = _finite_float_or_none(
+        getattr(settings, "brain_execution_cost_unverified_tca_outlier_bps", 500.0)
+    )
+    if configured is None or configured <= 0:
+        return 500.0
+    return configured
+
+
+def _has_broker_fill_evidence(trade: Any) -> bool:
+    if _positive_finite_float(getattr(trade, "avg_fill_price", None)) is not None:
+        return True
+    if str(getattr(trade, "broker_order_id", "") or "").strip():
+        return True
+    status = str(getattr(trade, "broker_status", "") or "").strip().lower()
+    return status in {"filled", "partially_filled"}
+
+
+def _usable_tca_bps(trade: Any, attr: str) -> float | None:
+    value = _finite_float_or_none(getattr(trade, attr, None))
+    if value is None:
+        return None
+    if abs(value) <= _unverified_tca_outlier_bps():
+        return value
+    if _has_broker_fill_evidence(trade):
+        return value
+    return None
+
+
 def _is_option_trade_safe(trade: Any) -> bool:
     try:
         from .autopilot_scope import is_option_trade
@@ -156,8 +185,8 @@ def _estimate_from_rows(
     usable_trade_samples = 0
 
     for t in rows:
-        entry = _finite_float_or_none(getattr(t, "tca_entry_slippage_bps", None))
-        exit_ = _finite_float_or_none(getattr(t, "tca_exit_slippage_bps", None))
+        entry = _usable_tca_bps(t, "tca_entry_slippage_bps")
+        exit_ = _usable_tca_bps(t, "tca_exit_slippage_bps")
         has_usable_tca = entry is not None or exit_ is not None
 
         if entry is not None:

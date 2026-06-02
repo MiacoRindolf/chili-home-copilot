@@ -436,6 +436,16 @@ def _coinbase_tca_backing_usable_samples(
     window_days: int,
 ) -> int | None:
     try:
+        from ...config import settings as _settings
+
+        outlier_bps = _nonnegative_float(
+            getattr(_settings, "brain_execution_cost_unverified_tca_outlier_bps", 500.0)
+        )
+    except Exception:
+        outlier_bps = 500.0
+    if outlier_bps is None or outlier_bps <= 0:
+        outlier_bps = 500.0
+    try:
         result = db.execute(text("""
             SELECT CAST(COUNT(*) AS INTEGER) AS usable_samples
             FROM trading_trades
@@ -447,16 +457,29 @@ def _coinbase_tca_backing_usable_samples(
                   (
                       tca_entry_slippage_bps IS NOT NULL
                       AND CAST(tca_entry_slippage_bps AS TEXT) NOT IN ('NaN', 'Infinity', '-Infinity')
+                      AND (
+                          ABS(tca_entry_slippage_bps) <= :outlier_bps
+                          OR COALESCE(avg_fill_price, 0) > 0
+                          OR COALESCE(NULLIF(TRIM(broker_order_id), ''), '') <> ''
+                          OR LOWER(COALESCE(broker_status, '')) IN ('filled', 'partially_filled')
+                      )
                   )
                   OR (
                       tca_exit_slippage_bps IS NOT NULL
                       AND CAST(tca_exit_slippage_bps AS TEXT) NOT IN ('NaN', 'Infinity', '-Infinity')
+                      AND (
+                          ABS(tca_exit_slippage_bps) <= :outlier_bps
+                          OR COALESCE(avg_fill_price, 0) > 0
+                          OR COALESCE(NULLIF(TRIM(broker_order_id), ''), '') <> ''
+                          OR LOWER(COALESCE(broker_status, '')) IN ('filled', 'partially_filled')
+                      )
                   )
               )
         """), {
             "ticker": ticker,
             "side": side,
             "window_days": int(max(1, window_days)),
+            "outlier_bps": float(outlier_bps),
         })
         value = result.scalar()
         if isinstance(value, bool):

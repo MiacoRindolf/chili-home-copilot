@@ -12,6 +12,7 @@ from app.services.trading.execution_cost_builder import (
     EstimateRow,
     _estimate_from_rows,
     _notional,
+    _usable_tca_bps,
     compute_rolling_estimate,
     estimates_summary,
     mode_is_active,
@@ -178,6 +179,64 @@ class TestComputeRollingEstimate:
         )
 
         assert est is None
+
+    def test_unverified_extreme_tca_outlier_is_not_usable(self):
+        unverified = SimpleNamespace(
+            tca_entry_slippage_bps=1426.0,
+            avg_fill_price=None,
+            broker_order_id=None,
+            broker_status=None,
+        )
+        normal = SimpleNamespace(
+            tca_entry_slippage_bps=125.0,
+            avg_fill_price=None,
+            broker_order_id=None,
+            broker_status=None,
+        )
+        broker_backed = SimpleNamespace(
+            tca_entry_slippage_bps=1426.0,
+            avg_fill_price=None,
+            broker_order_id="cb-real-fill",
+            broker_status=None,
+        )
+
+        assert _usable_tca_bps(unverified, "tca_entry_slippage_bps") is None
+        assert _usable_tca_bps(normal, "tca_entry_slippage_bps") == pytest.approx(125.0)
+        assert _usable_tca_bps(broker_backed, "tca_entry_slippage_bps") == pytest.approx(1426.0)
+
+    def test_estimate_ignores_unverified_extreme_tca_outliers(self):
+        rows = [
+            SimpleNamespace(
+                tca_entry_slippage_bps=1426.0,
+                tca_exit_slippage_bps=None,
+                avg_fill_price=None,
+                broker_order_id=None,
+                broker_status=None,
+                entry_price=10.0,
+                quantity=1.0,
+            ),
+            SimpleNamespace(
+                tca_entry_slippage_bps=20.0,
+                tca_exit_slippage_bps=None,
+                avg_fill_price=None,
+                broker_order_id=None,
+                broker_status=None,
+                entry_price=10.0,
+                quantity=1.0,
+            ),
+        ]
+
+        est = _estimate_from_rows(
+            ticker="OUTLIER_PHF",
+            side_norm="long",
+            window_days=30,
+            rows=rows,
+        )
+
+        assert est is not None
+        assert est.sample_trades == 1
+        assert est.median_slippage_bps == pytest.approx(20.0)
+        assert est.p90_slippage_bps == pytest.approx(20.0)
 
     def test_filters_by_direction(self, db):
         _cleanup(db, ["NVDA_PHF"])

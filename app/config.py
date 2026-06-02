@@ -666,6 +666,7 @@ class Settings(BaseSettings):
     brain_execution_cost_mode: str = "authoritative"
     brain_execution_cost_default_fee_bps: float = 1.0
     brain_execution_cost_impact_cap_bps: float = 50.0
+    brain_execution_cost_unverified_tca_outlier_bps: float = 500.0
     brain_execution_capacity_max_adv_frac: float = 0.05
 
     # Venue-truth telemetry (Phase F) — compares expected vs realized

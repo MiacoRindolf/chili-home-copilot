@@ -327,6 +327,9 @@ def test_gate_coinbase_tca_estimate_raises_threshold():
     assert res.tca_snapshot["usable_samples"] == 9
     assert db.params[0]["side"] == "long"
     assert db.params[1]["side"] == "long"
+    assert db.params[1]["outlier_bps"] == pytest.approx(500.0)
+    assert "ABS(tca_entry_slippage_bps) <= :outlier_bps" in db.sqls[1]
+    assert "broker_order_id" in db.sqls[1]
 
 
 def test_gate_coinbase_tca_estimate_requires_usable_sample_count():
