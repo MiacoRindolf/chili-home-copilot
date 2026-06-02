@@ -148,19 +148,20 @@ def _open_positions_section(summary: Dict[str, Any]) -> Optional[str]:
     positions = summary.get("open_positions") or []
     if not positions:
         return None
-    rows = []
-    for pos in positions:
-        if not isinstance(pos, dict):
-            continue
-        rows.append([
-            _cell(pos.get("ticker")),
-            _cell(pos.get("side")),
-            _money_cell(pos.get("unrealized")),
-        ])
-    if not rows:
+    valid = [p for p in positions if isinstance(p, dict)]
+    if not valid:
         return None
-    table = _table(["Ticker", "Side", "Unrealized"], rows)
-    return "## Open Positions\n\n" + table
+    # Only show the Unrealized column when at least one position carries a value
+    # (the summary omits unrealized P/L when live quotes aren't fetched).
+    show_unrealized = any(p.get("unrealized") is not None for p in valid)
+    if show_unrealized:
+        headers = ["Ticker", "Side", "Unrealized"]
+        rows = [[_cell(p.get("ticker")), _cell(p.get("side")), _money_cell(p.get("unrealized"))]
+                for p in valid]
+    else:
+        headers = ["Ticker", "Side"]
+        rows = [[_cell(p.get("ticker")), _cell(p.get("side"))] for p in valid]
+    return "## Open Positions\n\n" + _table(headers, rows)
 
 
 def _top_patterns_section(summary: Dict[str, Any]) -> Optional[str]:
