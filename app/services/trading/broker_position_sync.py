@@ -9,8 +9,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from ...models.trade_relation_symbols import MANAGEMENT_ENVELOPES_RELATION
-from ...models.trading import Trade, TradingPosition
+from ...models.trading import Trade
 
 logger = logging.getLogger(__name__)
 
@@ -103,192 +102,6 @@ def _merge_duplicate_into_canonical(canonical: Trade, duplicate: Trade) -> None:
         canonical.last_broker_sync = dup_sync
 
 
-def _matches_position_key(trade: Trade, position: TradingPosition) -> bool:
-    broker = str(getattr(trade, "broker_source", "") or "").strip().lower()
-    ticker = str(getattr(trade, "ticker", "") or "").strip()
-    direction = str(getattr(trade, "direction", "") or "long").strip().lower()
-    return (
-        broker
-        and ticker
-        and broker == str(position.broker_source or "").strip().lower()
-        and ticker == str(position.ticker or "").strip()
-        and direction == str(position.direction or "long").strip().lower()
-        and getattr(trade, "user_id", None) == getattr(position, "user_id", None)
-    )
-
-
-def _position_rank(
-    position: TradingPosition,
-    *,
-    canonical_id: int,
-) -> tuple[float, ...]:
-    updated = getattr(position, "updated_at", None)
-    updated_ts = updated.timestamp() if isinstance(updated, datetime) else 0.0
-    return (
-        1.0 if getattr(position, "current_envelope_id", None) == canonical_id else 0.0,
-        1.0 if str(position.state or "").lower() == "open" else 0.0,
-        updated_ts,
-        float(getattr(position, "id", 0) or 0),
-    )
-
-
-def _resolve_duplicate_position(
-    db: Session,
-    *,
-    canonical: Trade,
-    duplicates: list[Trade],
-) -> TradingPosition | None:
-    canonical_id = int(getattr(canonical, "id", 0) or 0)
-    seen: set[int] = set()
-    position_ids: list[int] = []
-    for trade in [canonical, *duplicates]:
-        try:
-            position_id = int(getattr(trade, "position_id", 0) or 0)
-        except Exception:
-            position_id = 0
-        if position_id > 0 and position_id not in seen:
-            seen.add(position_id)
-            position_ids.append(position_id)
-
-    matches: list[TradingPosition] = []
-    for position_id in position_ids:
-        position = db.get(TradingPosition, position_id)
-        if position is not None and _matches_position_key(canonical, position):
-            matches.append(position)
-    if matches:
-        return max(matches, key=lambda pos: _position_rank(pos, canonical_id=canonical_id))
-
-    envelope_ids = [
-        int(getattr(trade, "id"))
-        for trade in [canonical, *duplicates]
-        if getattr(trade, "id", None) is not None
-    ]
-    if envelope_ids:
-        positions = (
-            db.query(TradingPosition)
-            .filter(TradingPosition.current_envelope_id.in_(envelope_ids))
-            .all()
-        )
-        matches = [
-            position
-            for position in positions
-            if _matches_position_key(canonical, position)
-        ]
-        if matches:
-            return max(matches, key=lambda pos: _position_rank(pos, canonical_id=canonical_id))
-
-    broker = str(getattr(canonical, "broker_source", "") or "").strip().lower()
-    ticker = str(getattr(canonical, "ticker", "") or "").strip()
-    direction = str(getattr(canonical, "direction", "") or "long").strip().lower()
-    if not (broker and ticker):
-        return None
-    query = db.query(TradingPosition).filter(
-        TradingPosition.broker_source == broker,
-        TradingPosition.ticker == ticker,
-        TradingPosition.direction == direction,
-        TradingPosition.state == "open",
-    )
-    if getattr(canonical, "user_id", None) is None:
-        query = query.filter(TradingPosition.user_id.is_(None))
-    else:
-        query = query.filter(TradingPosition.user_id == canonical.user_id)
-    return query.order_by(TradingPosition.updated_at.desc(), TradingPosition.id.desc()).first()
-
-
-def _move_duplicate_position_identity(
-    db: Session,
-    *,
-    canonical: Trade,
-    duplicates: list[Trade],
-    now: datetime,
-) -> bool:
-    position = _resolve_duplicate_position(
-        db, canonical=canonical, duplicates=duplicates,
-    )
-    if position is None:
-        return False
-
-    quantity = _safe_float(getattr(canonical, "quantity", None))
-    avg_price = _safe_float(getattr(canonical, "avg_fill_price", None))
-    if avg_price is None or avg_price <= 0:
-        avg_price = _safe_float(getattr(canonical, "entry_price", None))
-
-    position.current_envelope_id = canonical.id
-    position.state = "open"
-    if quantity is not None and quantity > 0:
-        position.current_quantity = quantity
-    if avg_price is not None and avg_price > 0:
-        position.current_avg_price = avg_price
-    position.last_observed_at = now
-    position.updated_at = now
-    canonical.position_id = position.id
-    db.add(position)
-    db.add(canonical)
-
-    duplicate_ids = [
-        int(getattr(trade, "id"))
-        for trade in duplicates
-        if getattr(trade, "id", None) is not None
-    ]
-    canonical_id = int(getattr(canonical, "id"))
-    db.execute(
-        text(
-            f"UPDATE {MANAGEMENT_ENVELOPES_RELATION} "
-            "SET position_id = :position_id "
-            "WHERE id = :canonical_id "
-            "  AND (position_id IS NULL OR position_id <> :position_id)"
-        ),
-        {"position_id": int(position.id), "canonical_id": canonical_id},
-    )
-    db.execute(
-        text(
-            "UPDATE trading_bracket_intents "
-            "SET position_id = :position_id, "
-            "    quantity = COALESCE(:quantity, quantity), "
-            "    entry_price = COALESCE(:avg_price, entry_price), "
-            "    broker_stop_order_id = COALESCE("
-            "        broker_stop_order_id, "
-            "        (SELECT broker_stop_order_id "
-            "           FROM trading_bracket_intents "
-            "          WHERE trade_id = ANY(:duplicate_ids) "
-            "            AND broker_stop_order_id IS NOT NULL "
-            "          ORDER BY updated_at DESC, id DESC LIMIT 1)"
-            "    ), "
-            "    broker_target_order_id = COALESCE("
-            "        broker_target_order_id, "
-            "        (SELECT broker_target_order_id "
-            "           FROM trading_bracket_intents "
-            "          WHERE trade_id = ANY(:duplicate_ids) "
-            "            AND broker_target_order_id IS NOT NULL "
-            "          ORDER BY updated_at DESC, id DESC LIMIT 1)"
-            "    ), "
-            "    updated_at = NOW() "
-            "WHERE trade_id = :canonical_id"
-        ),
-        {
-            "position_id": int(position.id),
-            "canonical_id": canonical_id,
-            "duplicate_ids": duplicate_ids or [-1],
-            "quantity": quantity if quantity is not None and quantity > 0 else None,
-            "avg_price": avg_price if avg_price is not None and avg_price > 0 else None,
-        },
-    )
-    if duplicate_ids:
-        db.execute(
-            text(
-                "UPDATE trading_bracket_intents "
-                "SET intent_state = 'closed', "
-                "    last_diff_reason = 'sync_duplicate_closed', "
-                "    position_id = :position_id, "
-                "    updated_at = NOW() "
-                "WHERE trade_id = ANY(:duplicate_ids) "
-                "  AND intent_state NOT IN ('closed', 'authoritative_closed')"
-            ),
-            {"position_id": int(position.id), "duplicate_ids": duplicate_ids},
-        )
-    return True
-
-
 def acquire_broker_position_sync_lock(
     db: Session, *, broker_source: str, user_id: int | None,
 ) -> None:
@@ -352,19 +165,11 @@ def collapse_open_broker_position_duplicates(
             )
             duplicate.notes = ((duplicate.notes or "").rstrip() + "\n" + note).strip()
             cancelled += 1
-        moved_identity = _move_duplicate_position_identity(
-            db,
-            canonical=canonical,
-            duplicates=duplicates,
-            now=now,
-        )
         if duplicate_ids:
             merge_note = (
                 f"Merged duplicate {broker_key} sync rows on "
                 f"{now.strftime('%Y-%m-%d %H:%M')}: {duplicate_ids}."
             )
-            if moved_identity:
-                merge_note += " Position identity moved to canonical envelope."
             canon_notes = canonical.notes or ""
             if merge_note not in canon_notes:
                 canonical.notes = (canon_notes.rstrip() + "\n" + merge_note).strip()
