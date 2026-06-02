@@ -196,6 +196,19 @@
     return true;
   }
   function removeSpace(name) { persistSpaces(loadSpaces().filter(function (s) { return s.name !== name; })); }
+  function renameSpace(oldName, newName) {
+    newName = (newName || '').trim(); if (!newName || newName === oldName) return false;
+    var arr = loadSpaces(), i = arr.map(function (s) { return s.name; }).indexOf(oldName);
+    if (i < 0) return false;
+    if (arr.some(function (s, j) { return j !== i && s.name === newName; })) return false;  // no duplicate names
+    arr[i].name = newName; persistSpaces(arr); return true;
+  }
+  function reorderSpaces(names) {
+    var arr = loadSpaces(), byName = {}; arr.forEach(function (s) { byName[s.name] = s; });
+    var next = names.map(function (n) { return byName[n]; }).filter(Boolean);
+    arr.forEach(function (s) { if (names.indexOf(s.name) === -1) next.push(s); });  // keep any not listed
+    persistSpaces(next); return true;
+  }
   function snap(el, zone) {
     el.classList.add('snapping');
     var W = desktop.clientWidth, H = desktop.clientHeight;
@@ -301,7 +314,9 @@
       list: function () { return loadSpaces().map(function (s) { return { name: s.name, count: (s.apps || []).length }; }); },
       save: saveSpace,
       open: openSpace,
-      remove: removeSpace
+      remove: removeSpace,
+      rename: renameSpace,
+      reorder: reorderSpaces
     }
   };
 })();
