@@ -13,6 +13,8 @@ from app.services.trading.auto_trader_rules import (
     RuleGateContext,
     _non_positive_reprice_marker,
     alert_confidence_from_score,
+    autotrader_paper_realized_pnl_today_et,
+    autotrader_realized_pnl_today_et,
     count_autotrader_v1_open,
     count_autotrader_v1_open_by_lane,
     evaluate_entry_edge,
@@ -99,6 +101,21 @@ class _FakeDb:
         return _Result()
 
 
+class _RowsQuery(_FakeQuery):
+    def __init__(self, rows):
+        super().__init__(len(rows))
+        self._rows = list(rows)
+
+    def all(self):
+        return list(self._rows)
+
+
+class _RowsDb(_FakeDb):
+    def __init__(self, rows):
+        super().__init__()
+        self.query_obj = _RowsQuery(rows)
+
+
 def test_count_autotrader_v1_open_treats_working_as_active():
     db = _FakeDb()
 
@@ -119,6 +136,52 @@ def test_count_autotrader_v1_open_by_lane_counts_working_and_asset_kind():
     assert "t.status IN ('open', 'working')" in db.executed_sql
     assert "t.asset_kind" in db.executed_sql
     assert db.executed_sql.find("t.asset_kind") < db.executed_sql.find("a.asset_type")
+
+
+def test_autotrader_paper_realized_pnl_today_includes_partial_option_leg():
+    rows = [
+        SimpleNamespace(
+            signal_json={"auto_trader_v1": True, "asset_type": "options"},
+            entry_price=1.25,
+            quantity=1.0,
+            pnl=-10.0,
+            direction="long",
+            partial_taken=True,
+            partial_taken_qty=1.0,
+            partial_taken_price=1.45,
+        ),
+        SimpleNamespace(signal_json={"auto_trader_v1": True}, pnl=3.0),
+        SimpleNamespace(signal_json={"auto_trader_v1": False}, pnl=999.0),
+    ]
+    db = _RowsDb(rows)
+
+    assert autotrader_paper_realized_pnl_today_et(db, 123) == pytest.approx(13.0)
+
+
+def test_autotrader_live_realized_pnl_today_includes_partial_option_leg():
+    rows = [
+        SimpleNamespace(
+            asset_kind="option",
+            tags=None,
+            indicator_snapshot=None,
+            entry_price=1.25,
+            quantity=1.0,
+            pnl=-10.0,
+            direction="long",
+            partial_taken=True,
+            partial_taken_qty=1.0,
+            partial_taken_price=1.45,
+        ),
+        SimpleNamespace(
+            asset_kind="stock",
+            tags=None,
+            indicator_snapshot={},
+            pnl=3.0,
+        ),
+    ]
+    db = _RowsDb(rows)
+
+    assert autotrader_realized_pnl_today_et(db, 123) == pytest.approx(13.0)
 
 
 def test_passes_rule_gate_confidence_fail():

@@ -39,6 +39,7 @@ from .options.contracts import (
     PRICE_DOMAIN_OPTION_PREMIUM,
     parse_contract_quantity,
 )
+from .return_math import paper_trade_return_pct
 
 logger = logging.getLogger(__name__)
 
@@ -2015,10 +2016,9 @@ def _close_paper_trade(pt: PaperTrade, exit_price: float, reason: str) -> None:
         commission_rate = 0.0
     commission_cost = (entry_price + close_price) * quantity * multiplier * commission_rate
     net_pnl = gross_pnl - commission_cost
-    notional = max(entry_price * quantity * multiplier, 1e-9)
-    net_pct = (net_pnl / notional) * 100
     pt.pnl = round(net_pnl, 2)
-    pt.pnl_pct = round(net_pct, 2)
+    realized_pct = paper_trade_return_pct(pt)
+    pt.pnl_pct = round(realized_pct, 2) if realized_pct is not None else None
 
     logger.info("[paper] Closed %s %s @ %.2f (%s) P&L: $%.2f (%.2f%%)",
                 pt.direction, pt.ticker, close_price, reason, pt.pnl, pt.pnl_pct)

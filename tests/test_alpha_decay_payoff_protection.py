@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
+import pytest
+
 from app.services.trading import alpha_decay
 from app.services.trading import dynamic_priors
 
@@ -398,3 +400,35 @@ def test_alpha_decay_dollar_mean_ignores_boolean_and_nonfinite_pnl():
     ]
 
     assert alpha_decay._mean_known_pnl(evidence) == 4.0
+
+
+def test_alpha_decay_live_pnl_fallback_includes_partial_option_leg():
+    trade = SimpleNamespace(
+        entry_price=1.25,
+        quantity=1.0,
+        pnl=-10.0,
+        direction="long",
+        asset_kind="option",
+        tags=None,
+        indicator_snapshot=None,
+        partial_taken=True,
+        partial_taken_qty=1.0,
+        partial_taken_price=1.45,
+    )
+
+    assert alpha_decay._trade_realized_pnl_with_raw_fallback(trade) == pytest.approx(10.0)
+
+
+def test_alpha_decay_paper_pnl_fallback_includes_partial_option_leg():
+    paper_trade = SimpleNamespace(
+        entry_price=1.25,
+        quantity=1.0,
+        pnl=-10.0,
+        direction="long",
+        signal_json={"asset_type": "options"},
+        partial_taken=True,
+        partial_taken_qty=1.0,
+        partial_taken_price=1.45,
+    )
+
+    assert alpha_decay._paper_realized_pnl_with_raw_fallback(paper_trade) == pytest.approx(10.0)

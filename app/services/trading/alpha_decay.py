@@ -14,7 +14,12 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from ...models.trading import BacktestResult, PaperTrade, ScanPattern, Trade
-from .return_math import paper_trade_return_pct, trade_return_pct
+from .return_math import (
+    paper_trade_realized_pnl,
+    paper_trade_return_pct,
+    trade_realized_pnl,
+    trade_return_pct,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +96,20 @@ def _return_evidence_record(
         "win": ret > 0.0,
         "source": source,
     }
+
+
+def _trade_realized_pnl_with_raw_fallback(trade: Any) -> float | None:
+    pnl = trade_realized_pnl(trade)
+    if pnl is not None:
+        return pnl
+    return _finite_float(getattr(trade, "pnl", None))
+
+
+def _paper_realized_pnl_with_raw_fallback(paper_trade: Any) -> float | None:
+    pnl = paper_trade_realized_pnl(paper_trade)
+    if pnl is not None:
+        return pnl
+    return _finite_float(getattr(paper_trade, "pnl", None))
 
 
 def _half_life_evidence_record(
@@ -227,7 +246,7 @@ def check_alpha_decay(
         pnl_pct = trade_return_pct(t)
         rec = _return_evidence_record(
             pnl_pct=pnl_pct,
-            pnl=getattr(t, "pnl", None),
+            pnl=_trade_realized_pnl_with_raw_fallback(t),
             source="live",
         )
         if rec is None:
@@ -237,7 +256,7 @@ def check_alpha_decay(
         pnl_pct = paper_trade_return_pct(pt)
         rec = _return_evidence_record(
             pnl_pct=pnl_pct,
-            pnl=getattr(pt, "pnl", None),
+            pnl=_paper_realized_pnl_with_raw_fallback(pt),
             source="paper",
         )
         if rec is None:

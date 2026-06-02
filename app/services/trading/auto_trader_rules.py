@@ -44,6 +44,7 @@ from ...config import (
 )
 from ...models.trading import AutoTraderRun, BreakoutAlert, PaperTrade, ScanPattern, Trade
 from .ops_log_prefixes import CHILI_RISK_CACHE
+from .return_math import paper_trade_realized_pnl, trade_realized_pnl
 
 logger = logging.getLogger(__name__)
 
@@ -513,7 +514,11 @@ def resolve_brain_risk_context(
                 .all()
             ):
                 try:
-                    real_5d += float(t.pnl or 0.0)
+                    pnl = trade_realized_pnl(t)
+                    if pnl is None:
+                        pnl = _finite_float(getattr(t, "pnl", None))
+                    if pnl is not None:
+                        real_5d += pnl
                 except (TypeError, ValueError):
                     continue
             pnl_5d = float(unreal) + real_5d
@@ -2882,7 +2887,7 @@ def count_autotrader_v1_open_by_lane(
 
 
 def autotrader_paper_realized_pnl_today_et(db: Session, user_id: Optional[int]) -> float:
-    """Sum PaperTrade.pnl for autotrader-tagged rows closed today (US/Eastern)."""
+    """Sum paper autotrader realized P&L closed today (US/Eastern)."""
     from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
 
@@ -2906,13 +2911,16 @@ def autotrader_paper_realized_pnl_today_et(db: Session, user_id: Optional[int]) 
         sj = row.signal_json or {}
         if not sj.get("auto_trader_v1"):
             continue
-        if row.pnl is not None:
-            total += float(row.pnl)
+        pnl = paper_trade_realized_pnl(row)
+        if pnl is None:
+            pnl = _finite_float(getattr(row, "pnl", None))
+        if pnl is not None:
+            total += pnl
     return total
 
 
 def autotrader_realized_pnl_today_et(db: Session, user_id: Optional[int]) -> float:
-    """Sum Trade.pnl for autotrader v1 positions closed on current US/Eastern calendar day."""
+    """Sum live autotrader realized P&L closed today (US/Eastern)."""
     from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
 
@@ -2938,8 +2946,11 @@ def autotrader_realized_pnl_today_et(db: Session, user_id: Optional[int]) -> flo
     rows = q.all()
     total = 0.0
     for t in rows:
-        if t.pnl is not None:
-            total += float(t.pnl)
+        pnl = trade_realized_pnl(t)
+        if pnl is None:
+            pnl = _finite_float(getattr(t, "pnl", None))
+        if pnl is not None:
+            total += pnl
     return total
 
 

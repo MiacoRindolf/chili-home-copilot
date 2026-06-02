@@ -105,3 +105,31 @@ def test_paper_return_fraction_sql_is_partial_aware_without_filled_quantity() ->
     assert "pt.filled_quantity" not in sql
     assert "LOWER(COALESCE(pt.direction, 'long')) = 'short'" in sql
     assert "ELSE NULL" in sql
+
+
+def test_return_fraction_sql_rejects_nonfinite_numeric_inputs() -> None:
+    live_sql = _compact(trade_return_fraction_sql("t"))
+    paper_sql = _compact(paper_trade_return_fraction_sql("pt"))
+    nonfinite_guard = "::text NOT IN ('NaN', 'Infinity', '-Infinity')"
+
+    for column in (
+        "t.pnl",
+        "t.entry_price",
+        "t.quantity",
+        "t.partial_taken_qty",
+        "t.partial_taken_price",
+    ):
+        assert f"({column}){nonfinite_guard}" in live_sql
+    assert f"t.quantity + t.partial_taken_qty)){nonfinite_guard}" in live_sql
+    assert live_sql.count(nonfinite_guard) >= 7
+
+    for column in (
+        "pt.pnl",
+        "pt.entry_price",
+        "pt.quantity",
+        "pt.partial_taken_qty",
+        "pt.partial_taken_price",
+    ):
+        assert f"({column}){nonfinite_guard}" in paper_sql
+    assert f"pt.quantity + pt.partial_taken_qty)){nonfinite_guard}" in paper_sql
+    assert paper_sql.count(nonfinite_guard) >= 7

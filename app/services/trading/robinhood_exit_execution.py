@@ -632,6 +632,11 @@ def _apply_partial_pending_exit_fill(
     trade.status = "open" if remaining_qty > 1e-9 else "closed"
     trade.last_broker_sync = filled_at.replace(tzinfo=None)
     trade.broker_status = "partially_filled_cancelled"
+    if remaining_qty > 1e-9:
+        trade.partial_taken = True
+        trade.partial_taken_at = filled_at.replace(tzinfo=None)
+        trade.partial_taken_qty = float(applied_qty)
+        trade.partial_taken_price = float(exit_px)
     if remaining_qty <= 1e-9:
         trade.exit_price = float(exit_px)
         trade.exit_date = filled_at.replace(tzinfo=None)

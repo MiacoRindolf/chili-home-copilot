@@ -22,11 +22,31 @@ from .asset_class import (
     PATTERN_ASSET_CLASS_STOCKS,
     normalize_pattern_asset_class,
 )
+from .return_math import trade_realized_pnl
 
 logger = logging.getLogger(__name__)
 OPTION_HEAT_STOP_PCT_DEFAULT = 50.0
 OPTION_HEAT_STOP_PCT_MIN = 10.0
 OPTION_HEAT_STOP_PCT_MAX = 80.0
+
+
+def _trade_realized_pnl_with_raw_fallback(trade: Any) -> float | None:
+    pnl = trade_realized_pnl(trade)
+    if pnl is not None:
+        return pnl
+    try:
+        raw = getattr(trade, "pnl", None)
+        return float(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _sum_trade_realized_pnl(trades: list[Any]) -> float:
+    return sum(
+        pnl
+        for pnl in (_trade_realized_pnl_with_raw_fallback(t) for t in trades)
+        if pnl is not None
+    )
 
 
 @dataclass
@@ -715,7 +735,7 @@ def size_with_drawdown_scaling(
         Trade.exit_date >= thirty_days_ago,
     ).all()
 
-    pnl_30d = sum(t.pnl or 0 for t in recent)
+    pnl_30d = _sum_trade_realized_pnl(recent)
     dd_pct = abs(pnl_30d / capital * 100) if capital > 0 and pnl_30d < 0 else 0
 
     # Scale factor: 1.0 at no DD, 0.5 at 4% DD, 0.25 at 8% DD
@@ -1792,7 +1812,7 @@ def check_drawdown_breaker(
         Trade.exit_date >= five_days_ago,
     )
     recent_5d = _breaker_trade_filter(q5).all()
-    pnl_5d_realized = sum(t.pnl or 0 for t in recent_5d)
+    pnl_5d_realized = _sum_trade_realized_pnl(recent_5d)
     pnl_5d_total = pnl_5d_realized + unrealized_pnl
     pnl_5d_pct = (pnl_5d_total / capital * 100) if capital > 0 else 0
 
@@ -1819,7 +1839,7 @@ def check_drawdown_breaker(
         Trade.exit_date >= thirty_days_ago,
     )
     recent_30d = _breaker_trade_filter(q30).all()
-    pnl_30d_realized = sum(t.pnl or 0 for t in recent_30d)
+    pnl_30d_realized = _sum_trade_realized_pnl(recent_30d)
     pnl_30d_total = pnl_30d_realized + unrealized_pnl
     pnl_30d_pct = (pnl_30d_total / capital * 100) if capital > 0 else 0
 
@@ -1936,8 +1956,9 @@ def check_drawdown_breaker(
         .all()
     )
     if len(last_n) >= limits.max_consecutive_losses:
-        if all((t.pnl or 0) < 0 for t in last_n):
-            streak_loss = sum(float(t.pnl or 0.0) for t in last_n)
+        last_pnls = [_trade_realized_pnl_with_raw_fallback(t) for t in last_n]
+        if all(pnl is not None and pnl < 0 for pnl in last_pnls):
+            streak_loss = sum(float(pnl) for pnl in last_pnls if pnl is not None)
             try:
                 from ...config import settings as _s
                 min_pct = float(getattr(_s, "brain_risk_min_streak_loss_pct", 1.0))

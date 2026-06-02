@@ -340,6 +340,82 @@ def test_cash_deployment_nested_asset_class_option_uses_contract_return() -> Non
     assert _trade_return_pct(trade) == pytest.approx(16.0)
 
 
+def test_cash_deployment_live_return_uses_partial_aware_realized_pnl() -> None:
+    from app.services.trading.cash_deployment import _trade_return_pct
+
+    trade = SimpleNamespace(
+        ticker="SPY",
+        direction="long",
+        entry_price=100.0,
+        exit_price=105.0,
+        quantity=1.0,
+        filled_quantity=None,
+        pnl=5.0,
+        asset_kind="stock",
+        indicator_snapshot={},
+        partial_taken=True,
+        partial_taken_qty=1.0,
+        partial_taken_price=110.0,
+    )
+
+    assert _trade_return_pct(trade) == pytest.approx(7.5)
+
+
+def test_cash_deployment_live_asset_pnl_uses_partial_aware_option_dollars() -> None:
+    from app.services.trading.cash_deployment import _live_asset_performance
+
+    class _Query:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def all(self):
+            return [
+                SimpleNamespace(
+                    scan_pattern_id=42,
+                    ticker="SPY",
+                    direction="long",
+                    entry_price=1.25,
+                    exit_price=1.20,
+                    quantity=1.0,
+                    filled_quantity=None,
+                    pnl=-5.0,
+                    status="closed",
+                    entry_date=datetime.utcnow() - timedelta(hours=3),
+                    exit_date=datetime.utcnow() - timedelta(hours=1),
+                    asset_kind="option",
+                    tags=None,
+                    indicator_snapshot={
+                        "asset_type": "options",
+                        "option_meta": {
+                            "underlying": "SPY",
+                            "expiration": "2026-06-19",
+                            "strike": 729.0,
+                            "option_type": "call",
+                            "price_domain": "option_premium",
+                        },
+                    },
+                    partial_taken=True,
+                    partial_taken_qty=1.0,
+                    partial_taken_price=1.45,
+                )
+            ]
+
+    db = SimpleNamespace(query=lambda _model: _Query())
+
+    perf = _live_asset_performance(
+        db,
+        scan_pattern_id=42,
+        asset_class="options",
+        user_id=None,
+        window_days=7,
+    )
+
+    assert perf["live_realized_asset_closed_count"] == 1
+    assert perf["live_realized_asset_pnl_usd"] == pytest.approx(15.0)
+    assert perf["live_realized_asset_avg_return_pct"] == pytest.approx(6.0)
+    assert perf["live_realized_asset_win_rate"] == pytest.approx(1.0)
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [

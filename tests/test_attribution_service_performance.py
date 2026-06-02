@@ -165,6 +165,48 @@ def test_live_vs_research_reports_contract_aware_option_return_after_tca() -> No
     assert row["live_avg_pnl"] == pytest.approx(40.0)
 
 
+def test_live_vs_research_live_pnl_total_includes_partial_option_leg() -> None:
+    pattern = SimpleNamespace(
+        id=42,
+        name="option-alpha",
+        promotion_status="pilot",
+        win_rate=0.6,
+        oos_win_rate=0.55,
+        oos_avg_return_pct=3.2,
+    )
+    trade = SimpleNamespace(
+        id=1003,
+        user_id=7,
+        status="closed",
+        scan_pattern_id=42,
+        ticker="SPY",
+        direction="long",
+        entry_price=1.25,
+        exit_price=1.15,
+        quantity=1.0,
+        pnl=-10.0,
+        asset_kind="option",
+        tags=None,
+        indicator_snapshot=None,
+        partial_taken=True,
+        partial_taken_qty=1.0,
+        partial_taken_price=1.45,
+        exit_date=datetime(2026, 5, 30, 15, 30),
+        tca_entry_slippage_bps=12.0,
+        tca_exit_slippage_bps=18.0,
+    )
+    db = _FakeAttributionSession(trades=[trade], patterns=[pattern])
+
+    out = live_vs_research_by_pattern(db, 7, days=30, limit=10)
+
+    row = out["patterns"][0]
+    assert row["live_win_rate_pct"] == pytest.approx(100.0)
+    assert row["live_avg_return_pct"] == pytest.approx(4.0)
+    assert row["live_pnl_sample_n"] == 1
+    assert row["live_total_pnl"] == pytest.approx(10.0)
+    assert row["live_avg_pnl"] == pytest.approx(10.0)
+
+
 def test_live_vs_research_live_win_rate_uses_confirmed_return_when_pnl_missing() -> None:
     pattern = SimpleNamespace(
         id=42,
@@ -318,6 +360,50 @@ def test_post_trade_review_uses_contract_aware_outcomes_when_pnl_missing() -> No
     assert out["feedback_signals"][0]["signal"] == "upweight"
 
 
+def test_post_trade_review_pnl_totals_include_partial_option_leg() -> None:
+    pattern = SimpleNamespace(
+        id=42,
+        name="option-alpha",
+        promotion_status="pilot",
+        win_rate=0.5,
+        oos_win_rate=0.55,
+        oos_avg_return_pct=3.2,
+    )
+    trades = [
+        SimpleNamespace(
+            id=1201,
+            user_id=7,
+            status="closed",
+            scan_pattern_id=42,
+            ticker="SPY",
+            direction="long",
+            entry_price=1.25,
+            exit_price=1.15,
+            quantity=1.0,
+            pnl=-10.0,
+            asset_kind="option",
+            tags=None,
+            indicator_snapshot=None,
+            partial_taken=True,
+            partial_taken_qty=1.0,
+            partial_taken_price=1.45,
+            exit_date=datetime(2026, 5, 30, 15, 30),
+            tca_entry_slippage_bps=40.0,
+            tca_exit_slippage_bps=20.0,
+        )
+    ]
+    db = _FakeAttributionSession(trades=trades, patterns=[pattern])
+
+    out = post_trade_review(db, 7, days=30)
+
+    review = out["review"]
+    assert review["wins"] == 1
+    assert review["pnl_sample_n"] == 1
+    assert review["total_pnl"] == pytest.approx(10.0)
+    assert review["avg_pnl"] == pytest.approx(10.0)
+    assert review["high_slippage_trades"][0]["pnl"] == pytest.approx(10.0)
+
+
 def test_live_vs_research_reports_contract_aware_paper_option_return_after_tca() -> None:
     pattern = SimpleNamespace(
         id=42,
@@ -364,6 +450,51 @@ def test_live_vs_research_reports_contract_aware_paper_option_return_after_tca()
     assert row["paper_avg_tca_cost_pct"] == pytest.approx(0.30)
     assert row["paper_avg_net_return_pct"] == pytest.approx(15.70)
     assert row["paper_avg_pnl"] == pytest.approx(40.0)
+
+
+def test_live_vs_research_paper_pnl_total_includes_partial_option_leg() -> None:
+    pattern = SimpleNamespace(
+        id=42,
+        name="option-alpha",
+        promotion_status="shadow",
+        win_rate=0.6,
+        oos_win_rate=0.55,
+        oos_avg_return_pct=3.2,
+    )
+    paper_trade = SimpleNamespace(
+        id=2003,
+        user_id=7,
+        status="closed",
+        scan_pattern_id=42,
+        paper_shadow_of_alert_id=77,
+        ticker="SPY",
+        direction="long",
+        entry_price=1.25,
+        exit_price=1.15,
+        quantity=1.0,
+        pnl=-10.0,
+        pnl_pct=-8.0,
+        signal_json={"asset_type": "options"},
+        partial_taken=True,
+        partial_taken_qty=1.0,
+        partial_taken_price=1.45,
+        exit_date=datetime(2026, 5, 30, 15, 30),
+        tca_entry_slippage_bps=12.0,
+        tca_exit_slippage_bps=18.0,
+    )
+    db = _FakeAttributionSession(
+        trades=[],
+        paper_trades=[paper_trade],
+        patterns=[pattern],
+    )
+
+    out = live_vs_research_by_pattern(db, 7, days=30, limit=10)
+
+    row = out["patterns"][0]
+    assert row["paper_win_rate_pct"] == pytest.approx(100.0)
+    assert row["paper_avg_return_pct"] == pytest.approx(4.0)
+    assert row["paper_total_pnl"] == pytest.approx(10.0)
+    assert row["paper_avg_pnl"] == pytest.approx(10.0)
 
 
 def test_live_vs_research_paper_win_rate_uses_confirmed_return_when_pnl_missing() -> None:

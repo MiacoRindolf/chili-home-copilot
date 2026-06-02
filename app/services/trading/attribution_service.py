@@ -9,7 +9,12 @@ from typing import Any
 from sqlalchemy import or_, text
 from sqlalchemy.orm import Session
 
-from .return_math import paper_trade_return_pct, trade_return_pct
+from .return_math import (
+    paper_trade_realized_pnl,
+    paper_trade_return_pct,
+    trade_realized_pnl,
+    trade_return_pct,
+)
 
 
 def _finite_float(value: Any) -> float | None:
@@ -31,12 +36,26 @@ def _trade_tca_cost_pct(trade: Any) -> float | None:
     return (entry_bps + exit_bps) / 100.0
 
 
+def _paper_realized_pnl_with_raw_fallback(pt: Any) -> float | None:
+    pnl = paper_trade_realized_pnl(pt)
+    if pnl is not None:
+        return pnl
+    return _finite_float(getattr(pt, "pnl", None))
+
+
+def _trade_realized_pnl_with_raw_fallback(trade: Any) -> float | None:
+    pnl = trade_realized_pnl(trade)
+    if pnl is not None:
+        return pnl
+    return _finite_float(getattr(trade, "pnl", None))
+
+
 def _paper_directional_outcome(pt: Any) -> float | None:
     """Win/loss source for paper attribution, preferring complete realized return."""
     ret = paper_trade_return_pct(pt)
     if ret is not None:
         return ret
-    pnl = _finite_float(getattr(pt, "pnl", None))
+    pnl = _paper_realized_pnl_with_raw_fallback(pt)
     if pnl is not None:
         return pnl
     return None
@@ -47,7 +66,7 @@ def _trade_directional_outcome(trade: Any) -> float | None:
     ret = trade_return_pct(trade)
     if ret is not None:
         return ret
-    pnl = _finite_float(getattr(trade, "pnl", None))
+    pnl = _trade_realized_pnl_with_raw_fallback(trade)
     if pnl is not None:
         return pnl
     return None
@@ -134,7 +153,7 @@ def live_vs_research_by_pattern(
         pat = patterns_by_id.get(pid)
         pnls = [
             pnl
-            for pnl in (_finite_float(getattr(t, "pnl", None)) for t in tlist)
+            for pnl in (_trade_realized_pnl_with_raw_fallback(t) for t in tlist)
             if pnl is not None
         ]
         live_directional_outcomes = [
@@ -168,7 +187,7 @@ def live_vs_research_by_pattern(
         ]
         paper_pnls = [
             p
-            for p in (_finite_float(getattr(pt, "pnl", None)) for pt in ptlist)
+            for p in (_paper_realized_pnl_with_raw_fallback(pt) for pt in ptlist)
             if p is not None
         ]
         paper_directional_outcomes = [
@@ -479,7 +498,7 @@ def post_trade_review(
 
     pnls = [
         pnl
-        for pnl in (_finite_float(getattr(t, "pnl", None)) for t in closed)
+        for pnl in (_trade_realized_pnl_with_raw_fallback(t) for t in closed)
         if pnl is not None
     ]
     directional_outcomes = [
@@ -519,7 +538,7 @@ def post_trade_review(
                 "entry_slippage_bps": round(entry_slip, 1),
                 "exit_slippage_bps": round(exit_slip, 1),
                 "total_slippage_bps": round(total_slip, 1),
-                "pnl": _finite_float(getattr(t, "pnl", None)),
+                "pnl": _trade_realized_pnl_with_raw_fallback(t),
             })
     high_slip_trades.sort(key=lambda x: x["total_slippage_bps"], reverse=True)
 
@@ -541,7 +560,7 @@ def post_trade_review(
         pat = patterns_by_id.get(pid)
         trade_pnls = [
             pnl
-            for pnl in (_finite_float(getattr(t, "pnl", None)) for t in trades)
+            for pnl in (_trade_realized_pnl_with_raw_fallback(t) for t in trades)
             if pnl is not None
         ]
         trade_directional_outcomes = [

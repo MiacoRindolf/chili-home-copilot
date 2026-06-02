@@ -27,8 +27,10 @@ from app.services.trading.edge_reliability import (
     _asset_class_for_paper,
     _asset_class_for_trade,
     _expected_net_pct_from_run,
+    _live_return_pct,
     _mean,
     _outcome_label_from_return,
+    _paper_return_pct,
     _probability_or_none,
     compute_pattern_edge_reliability,
     edge_supply_rows,
@@ -122,6 +124,39 @@ def test_edge_reliability_asset_class_for_trade_uses_contract_identity() -> None
 
 def test_edge_reliability_label_prefers_partial_aware_return_over_pnl() -> None:
     assert _outcome_label_from_return(-10.0, 4.0) == 1
+
+
+def test_edge_reliability_paper_return_prefers_realized_pnl_over_legacy_pct() -> None:
+    row = SimpleNamespace(
+        entry_price=100.0,
+        exit_price=116.0,
+        quantity=2.0,
+        pnl=32.0,
+        pnl_pct=-9999.0,
+        direction="long",
+        signal_json={"asset_type": "stock"},
+    )
+
+    assert _paper_return_pct(row) == pytest.approx(16.0)
+
+
+def test_edge_reliability_live_return_uses_partial_aware_realized_pnl() -> None:
+    row = SimpleNamespace(
+        entry_price=100.0,
+        exit_price=105.0,
+        quantity=1.0,
+        filled_quantity=None,
+        pnl=5.0,
+        direction="long",
+        asset_kind="stock",
+        tags=None,
+        indicator_snapshot={},
+        partial_taken=True,
+        partial_taken_qty=1.0,
+        partial_taken_price=110.0,
+    )
+
+    assert _live_return_pct(row) == pytest.approx(7.5)
 
 
 def test_edge_reliability_numeric_helpers_reject_malformed_evidence() -> None:

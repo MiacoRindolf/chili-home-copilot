@@ -3,8 +3,10 @@ from types import SimpleNamespace
 import pytest
 
 from app.services.trading.return_math import (
+    paper_trade_realized_pnl,
     paper_trade_return_pct,
     price_return_pct,
+    trade_realized_pnl,
     trade_return_pct,
 )
 
@@ -45,6 +47,24 @@ def test_trade_return_pct_option_includes_partial_leg_in_opening_notional() -> N
     )
 
     assert trade_return_pct(trade) == pytest.approx(4.0)
+
+
+def test_trade_realized_pnl_option_includes_partial_leg() -> None:
+    trade = SimpleNamespace(
+        entry_price=1.25,
+        exit_price=1.15,
+        quantity=1.0,
+        pnl=-10.0,
+        direction="long",
+        asset_kind="option",
+        tags=None,
+        indicator_snapshot=None,
+        partial_taken=True,
+        partial_taken_qty=1.0,
+        partial_taken_price=1.45,
+    )
+
+    assert trade_realized_pnl(trade) == pytest.approx(10.0)
 
 
 def test_trade_return_pct_uses_filled_quantity_for_realized_notional() -> None:
@@ -294,6 +314,23 @@ def test_paper_trade_return_pct_option_partial_leg_can_flip_directional_label() 
     )
 
     assert paper_trade_return_pct(trade) == pytest.approx(4.0)
+
+
+def test_paper_trade_realized_pnl_option_includes_partial_leg() -> None:
+    trade = SimpleNamespace(
+        entry_price=1.25,
+        exit_price=1.15,
+        quantity=1.0,
+        pnl=-10.0,
+        pnl_pct=-8.0,
+        direction="long",
+        signal_json={"asset_type": "options", "option_meta": {"strike": 500.0}},
+        partial_taken=True,
+        partial_taken_qty=1.0,
+        partial_taken_price=1.45,
+    )
+
+    assert paper_trade_realized_pnl(trade) == pytest.approx(10.0)
 
 
 def test_paper_trade_return_pct_asset_kind_uses_contract_multiplier() -> None:

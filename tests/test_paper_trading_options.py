@@ -707,6 +707,30 @@ def test_close_paper_trade_option_uses_contract_multiplier(monkeypatch) -> None:
     assert trade.pnl_pct == pytest.approx(16.0)
 
 
+def test_close_paper_trade_option_partial_close_stores_partial_aware_pct(
+    monkeypatch,
+) -> None:
+    from app.services.trading import paper_trading
+
+    monkeypatch.setattr(paper_trading.settings, "backtest_commission", 0.0, raising=False)
+    trade = PaperTrade(
+        ticker="SPY",
+        direction="long",
+        entry_price=1.25,
+        quantity=1.0,
+        status="open",
+        signal_json=_option_signal(),
+        partial_taken=True,
+        partial_taken_qty=1.0,
+        partial_taken_price=1.45,
+    )
+
+    paper_trading._close_paper_trade(trade, 1.15, "stop")
+
+    assert trade.pnl == pytest.approx(-10.0)
+    assert trade.pnl_pct == pytest.approx(4.0)
+
+
 @pytest.mark.parametrize("bad_quantity", [True, 1.5, "1.5", 0, -1])
 def test_close_paper_trade_option_rejects_non_whole_contract_quantity(
     bad_quantity,

@@ -19,6 +19,11 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ...config import settings
+from .return_math import (
+    paper_trade_realized_pnl,
+    paper_trade_return_pct,
+    trade_realized_pnl,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +37,36 @@ _kill_switch_db_persisted: bool | None = None
 _kill_switch_db_fail_closed_active: bool = False
 _kill_switch_last_db_check_monotonic: float = 0.0
 _kill_switch_lock = threading.Lock()
+
+
+def _trade_realized_pnl_with_raw_fallback(trade: Any) -> float | None:
+    pnl = trade_realized_pnl(trade)
+    if pnl is not None:
+        return pnl
+    try:
+        raw = getattr(trade, "pnl", None)
+        return float(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _paper_realized_pnl_with_raw_fallback(paper_trade: Any) -> float | None:
+    pnl = paper_trade_realized_pnl(paper_trade)
+    if pnl is not None:
+        return pnl
+    try:
+        raw = getattr(paper_trade, "pnl", None)
+        return float(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _paper_directional_win(paper_trade: Any) -> bool | None:
+    ret = paper_trade_return_pct(paper_trade)
+    if ret is not None:
+        return ret > 0.0
+    pnl = _paper_realized_pnl_with_raw_fallback(paper_trade)
+    return (pnl > 0.0) if pnl is not None else None
 
 
 def _kill_switch_db_poll_enabled() -> bool:
@@ -571,8 +606,9 @@ def global_realized_pnl_today_et(
         tq = tq.filter(Trade.user_id == user_id)
     trade_total = 0.0
     for t in tq.all():
-        if t.pnl is not None:
-            trade_total += float(t.pnl)
+        pnl = _trade_realized_pnl_with_raw_fallback(t)
+        if pnl is not None:
+            trade_total += pnl
 
     # Momentum automation outcomes
     mq = db.query(
@@ -767,9 +803,19 @@ def request_pattern_to_live(
             PaperTrade.status == "closed",
         ).all()
         if len(paper_trades) >= 3:
-            wins = sum(1 for t in paper_trades if (t.pnl or 0) > 0)
-            wr = wins / len(paper_trades) * 100
-            total_pnl = sum(t.pnl or 0 for t in paper_trades)
+            win_flags = [
+                win
+                for win in (_paper_directional_win(t) for t in paper_trades)
+                if win is not None
+            ]
+            wins = sum(1 for win in win_flags if win)
+            wr = wins / len(win_flags) * 100 if win_flags else 0.0
+            paper_pnls = [
+                pnl
+                for pnl in (_paper_realized_pnl_with_raw_fallback(t) for t in paper_trades)
+                if pnl is not None
+            ]
+            total_pnl = sum(paper_pnls)
             if wr >= 50 and total_pnl > 0:
                 baseline_allow = True
                 auto_reason = f"Paper profitable: {wr:.0f}% WR, ${total_pnl:.2f} P&L ({len(paper_trades)} trades)"

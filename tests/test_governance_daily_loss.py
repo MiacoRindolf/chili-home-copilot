@@ -16,6 +16,7 @@ These tests verify the new governance helpers:
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -92,6 +93,73 @@ def _add_momentum_outcome(db, *, user_id: int | None, pnl: float) -> None:
     )
     db.add(row)
     db.commit()
+
+
+class _FakeQuery:
+    def __init__(self, *, rows=None, scalar_value=0.0):
+        self._rows = list(rows or [])
+        self._scalar_value = scalar_value
+
+    def filter(self, *_args, **_kwargs):
+        return self
+
+    def all(self):
+        return list(self._rows)
+
+    def scalar(self):
+        return self._scalar_value
+
+
+class _FakeGovernanceDb:
+    def __init__(self, trades, *, momentum_total=0.0):
+        self.trades = list(trades)
+        self.momentum_total = momentum_total
+
+    def query(self, model):
+        if model is Trade:
+            return _FakeQuery(rows=self.trades)
+        return _FakeQuery(scalar_value=self.momentum_total)
+
+
+def test_global_pnl_helper_includes_live_partial_option_leg_without_db():
+    trade = SimpleNamespace(
+        asset_kind="option",
+        tags=None,
+        indicator_snapshot=None,
+        entry_price=1.25,
+        quantity=1.0,
+        pnl=-10.0,
+        direction="long",
+        partial_taken=True,
+        partial_taken_qty=1.0,
+        partial_taken_price=1.45,
+    )
+
+    result = governance.global_realized_pnl_today_et(
+        _FakeGovernanceDb([trade], momentum_total=-2.0),
+        user_id=None,
+    )
+
+    assert result["autotrader_usd"] == pytest.approx(10.0)
+    assert result["momentum_usd"] == pytest.approx(-2.0)
+    assert result["total_usd"] == pytest.approx(8.0)
+
+
+def test_paper_profit_helpers_use_partial_aware_option_outcome():
+    paper_trade = SimpleNamespace(
+        signal_json={"asset_type": "options"},
+        entry_price=1.25,
+        quantity=1.0,
+        pnl=-10.0,
+        pnl_pct=-8.0,
+        direction="long",
+        partial_taken=True,
+        partial_taken_qty=1.0,
+        partial_taken_price=1.45,
+    )
+
+    assert governance._paper_directional_win(paper_trade) is True
+    assert governance._paper_realized_pnl_with_raw_fallback(paper_trade) == pytest.approx(10.0)
 
 
 def test_global_pnl_helper_aggregates_trades_and_momentum(db):

@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from app.services.trading.portfolio_risk import (
     RiskLimits,
+    _sum_trade_realized_pnl,
     compute_trade_risk_pct,
     get_risk_limits,
     size_position,
@@ -40,6 +43,24 @@ def test_compute_trade_risk_pct_is_direction_aware_not_absolute():
         10_000.0,
         direction="short",
     ) == 0.5
+
+
+def test_sum_trade_realized_pnl_includes_partial_option_leg():
+    partial_option = SimpleNamespace(
+        entry_price=1.25,
+        quantity=1.0,
+        pnl=-10.0,
+        direction="long",
+        asset_kind="option",
+        tags=None,
+        indicator_snapshot=None,
+        partial_taken=True,
+        partial_taken_qty=1.0,
+        partial_taken_price=1.45,
+    )
+    raw_fallback = SimpleNamespace(pnl=-3.0)
+
+    assert _sum_trade_realized_pnl([partial_option, raw_fallback]) == pytest.approx(7.0)
 
 
 def test_compute_trade_risk_pct_rejects_nonfinite_inputs():

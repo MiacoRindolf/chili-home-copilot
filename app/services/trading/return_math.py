@@ -342,6 +342,25 @@ def realized_return_pct(row: Any, *, contract_multiplier: float = 1.0) -> float 
     )
 
 
+def realized_pnl(row: Any, *, contract_multiplier: float = 1.0) -> float | None:
+    """Signed realized dollar P&L, including a recorded partial leg when present."""
+    pnl_f = _float_or_none(getattr(row, "pnl", None))
+    if pnl_f is None:
+        return None
+    if not _partial_leg_declared(row):
+        return pnl_f
+
+    entry = _float_or_none(getattr(row, "entry_price", None))
+    mult = _float_or_none(contract_multiplier)
+    if entry is None or entry <= 0 or mult is None or mult <= 0:
+        return None
+    partial = _partial_leg_pnl(row, entry_price=entry, contract_multiplier=mult)
+    if partial is None:
+        return None
+    partial_pnl, _partial_qty = partial
+    return pnl_f + partial_pnl
+
+
 def trade_contract_multiplier(trade: Any) -> float:
     try:
         from .autopilot_scope import is_option_trade
@@ -418,6 +437,20 @@ def paper_trade_contract_multiplier(paper_trade: Any) -> float:
     if _signal_json_is_option(getattr(paper_trade, "signal_json", None)):
         return OPTION_CONTRACT_MULTIPLIER
     return 1.0
+
+
+def paper_trade_realized_pnl(paper_trade: Any) -> float | None:
+    return realized_pnl(
+        paper_trade,
+        contract_multiplier=paper_trade_contract_multiplier(paper_trade),
+    )
+
+
+def trade_realized_pnl(trade: Any) -> float | None:
+    return realized_pnl(
+        trade,
+        contract_multiplier=trade_contract_multiplier(trade),
+    )
 
 
 def trade_return_pct(trade: Any) -> float | None:

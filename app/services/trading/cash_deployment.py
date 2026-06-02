@@ -39,7 +39,10 @@ from .edge_reliability import (
     null_lineage_short_paper_candidates,
 )
 from .portfolio_risk import get_risk_limits, _option_premium_risk_dollars
-from .return_math import trade_return_pct as _realized_trade_return_pct
+from .return_math import (
+    trade_realized_pnl as _realized_trade_pnl,
+    trade_return_pct as _realized_trade_return_pct,
+)
 
 LIVE_LIFECYCLES = frozenset({"live", "promoted", "pilot_promoted"})
 RECERT_BLOCKERS = frozenset({"recert_blocked", "hard_recert_blocked"})
@@ -231,8 +234,11 @@ def _trade_heat_pct(trade: Any, *, capital: float) -> float:
 
 
 def _trade_return_pct(trade: Any) -> float | None:
+    realized = _realized_trade_return_pct(trade)
+    if realized is not None:
+        return realized
     if _trade_asset_class(trade) == "options":
-        return _realized_trade_return_pct(trade)
+        return None
     pnl = _safe_float(getattr(trade, "pnl", None))
     entry = (
         _safe_float(getattr(trade, "avg_fill_price", None))
@@ -246,6 +252,13 @@ def _trade_return_pct(trade: Any) -> float | None:
     if pnl is None or notional <= 0.0:
         return None
     return (pnl / notional) * 100.0
+
+
+def _trade_realized_pnl_usd(trade: Any) -> float | None:
+    realized = _realized_trade_pnl(trade)
+    if realized is not None:
+        return realized
+    return _safe_float(getattr(trade, "pnl", None))
 
 
 def _live_asset_performance(
@@ -291,7 +304,7 @@ def _live_asset_performance(
             outcome_rows.append((row, ret))
     returns = [ret for _, ret in outcome_rows]
     pnl_values = [
-        _safe_float(getattr(row, "pnl", None), 0.0) or 0.0
+        _trade_realized_pnl_usd(row) or 0.0
         for row, _ in outcome_rows
     ]
     wins = [1.0 if ret > 0.0 else 0.0 for _, ret in outcome_rows]

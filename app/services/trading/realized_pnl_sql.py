@@ -78,6 +78,13 @@ def _direction_is_short_sql(alias: str | None) -> str:
     return f"LOWER(COALESCE({_col(alias, 'direction')}, 'long')) = 'short'"
 
 
+def _finite_number_sql(expr: str) -> str:
+    return (
+        f"(({expr}) IS NOT NULL "
+        f"AND ({expr})::text NOT IN ('NaN', 'Infinity', '-Infinity'))"
+    )
+
+
 def _realized_return_fraction_sql(
     alias: str | None,
     *,
@@ -91,6 +98,8 @@ def _realized_return_fraction_sql(
     partial_qty = _col(alias, "partial_taken_qty")
     partial_price = _col(alias, "partial_taken_price")
     multiplier = f"({contract_multiplier_sql})"
+    non_partial_qty = f"({non_partial_quantity_sql})"
+    opening_qty = f"({qty} + {partial_qty})"
     partial_pnl = (
         "CASE "
         f"WHEN {_direction_is_short_sql(alias)} "
@@ -100,28 +109,29 @@ def _realized_return_fraction_sql(
     )
     return f"""
         CASE
-          WHEN {pnl} IS NULL
-            OR {entry} IS NULL
+          WHEN NOT {_finite_number_sql(pnl)}
+            OR NOT {_finite_number_sql(entry)}
             OR {entry} <= 0
-            OR {multiplier} IS NULL
+            OR NOT {_finite_number_sql(multiplier)}
             OR {multiplier} <= 0
           THEN NULL
           WHEN {_partial_declared_sql(alias)}
           THEN
             CASE
-              WHEN {qty} IS NOT NULL
+              WHEN {_finite_number_sql(qty)}
                 AND {qty} > 0
-                AND {partial_qty} IS NOT NULL
+                AND {_finite_number_sql(partial_qty)}
                 AND {partial_qty} > 0
-                AND {partial_price} IS NOT NULL
+                AND {_finite_number_sql(partial_price)}
                 AND {partial_price} > 0
-                AND ({qty} + {partial_qty}) > 0
-              THEN ({pnl} + ({partial_pnl})) / ({entry} * ({qty} + {partial_qty}) * {multiplier})
+                AND {_finite_number_sql(opening_qty)}
+                AND {opening_qty} > 0
+              THEN ({pnl} + ({partial_pnl})) / ({entry} * {opening_qty} * {multiplier})
               ELSE NULL
             END
-          WHEN ({non_partial_quantity_sql}) IS NOT NULL
-            AND ({non_partial_quantity_sql}) > 0
-          THEN {pnl} / ({entry} * ({non_partial_quantity_sql}) * {multiplier})
+          WHEN {_finite_number_sql(non_partial_qty)}
+            AND {non_partial_qty} > 0
+          THEN {pnl} / ({entry} * {non_partial_qty} * {multiplier})
           ELSE NULL
         END
     """

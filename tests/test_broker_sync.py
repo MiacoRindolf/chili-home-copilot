@@ -21,6 +21,8 @@ from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from app.services.broker_service import (
     map_rh_status,
     is_rh_terminal,
@@ -506,6 +508,70 @@ class TestRobinhoodExitFinalizer:
         assert trade.exit_price == 1.45
         assert trade.pnl == 20.0
         assert trade.pending_exit_order_id is None
+
+    def test_partial_option_exit_populates_canonical_partial_fields(self):
+        from app.services.trading.robinhood_exit_execution import (
+            _apply_partial_pending_exit_fill,
+        )
+
+        class _Db:
+            def add(self, *_args, **_kwargs):
+                return None
+
+            def commit(self):
+                return None
+
+        now = datetime.utcnow()
+        trade = SimpleNamespace(
+            id=4322,
+            user_id=None,
+            ticker="SPY",
+            direction="long",
+            entry_price=1.25,
+            quantity=2.0,
+            filled_quantity=2.0,
+            remaining_quantity=0.0,
+            status="open",
+            broker_source="robinhood",
+            broker_status="submitted",
+            pending_exit_order_id="opt-exit-partial",
+            pending_exit_status="submitted",
+            pending_exit_requested_at=now,
+            pending_exit_reason="options_premium_take_profit",
+            pending_exit_limit_price=1.45,
+            partial_taken=False,
+            partial_taken_at=None,
+            partial_taken_qty=None,
+            partial_taken_price=None,
+            indicator_snapshot={"breakout_alert": {"asset_type": "options"}},
+        )
+
+        pnl, exit_px, remaining_qty = _apply_partial_pending_exit_fill(
+            _Db(),
+            trade,
+            raw_order={
+                "id": "opt-exit-partial",
+                "state": "cancelled",
+                "quantity": "2",
+                "processed_quantity": "1",
+                "average_price": "1.45",
+            },
+            exit_reason="options_premium_take_profit",
+            filled_qty=1.0,
+            requested_qty=2.0,
+            fallback_price=None,
+            filled_at=now,
+        )
+
+        assert pnl == pytest.approx(20.0)
+        assert exit_px == pytest.approx(1.45)
+        assert remaining_qty == pytest.approx(1.0)
+        assert trade.status == "open"
+        assert trade.quantity == pytest.approx(1.0)
+        assert trade.partial_taken is True
+        assert trade.partial_taken_at == now.replace(tzinfo=None)
+        assert trade.partial_taken_qty == pytest.approx(1.0)
+        assert trade.partial_taken_price == pytest.approx(1.45)
 
 
 class TestSyncOrdersToDb:
