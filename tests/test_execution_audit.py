@@ -5,6 +5,8 @@ from types import SimpleNamespace
 
 from app.models import ScanPattern, Trade, User
 from app.services.trading.execution_audit import (
+    _execution_event_has_real_fill,
+    _execution_event_realized_slippage_bps,
     aggregate_execution_events_for_pattern,
     apply_execution_event_to_trade,
     normalize_coinbase_order_event,
@@ -211,6 +213,34 @@ def test_record_execution_event_sanitizes_zero_average_fill_price(monkeypatch):
 
     assert captured == [event]
     assert event.average_fill_price is None
+
+
+def test_execution_event_reader_ignores_zero_fill_slippage_noise():
+    event = SimpleNamespace(
+        event_type="status",
+        status="open",
+        cumulative_filled_quantity=0.0,
+        last_fill_quantity=None,
+        average_fill_price=0.0,
+        realized_slippage_bps=-10000.0,
+    )
+
+    assert _execution_event_has_real_fill(event) is False
+    assert _execution_event_realized_slippage_bps(event) is None
+
+
+def test_execution_event_reader_keeps_real_partial_fill_slippage():
+    event = SimpleNamespace(
+        event_type="partial_fill",
+        status="partially_filled",
+        cumulative_filled_quantity=0.25,
+        last_fill_quantity=0.25,
+        average_fill_price=50100.0,
+        realized_slippage_bps=20.0,
+    )
+
+    assert _execution_event_has_real_fill(event) is True
+    assert _execution_event_realized_slippage_bps(event) == 20.0
 
 
 def test_apply_execution_event_to_trade_partial_fill_updates_fill_state():

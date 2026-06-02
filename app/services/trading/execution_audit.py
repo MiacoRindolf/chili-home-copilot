@@ -77,6 +77,28 @@ def _buy_side_slippage_bps(reference_price: float | None, fill_price: float | No
     return ((fill_price - reference_price) / reference_price) * 10000.0
 
 
+def _execution_event_has_real_fill(event: Any) -> bool:
+    cumulative = _safe_float(getattr(event, "cumulative_filled_quantity", None)) or 0.0
+    last_fill = _safe_float(getattr(event, "last_fill_quantity", None)) or 0.0
+    if cumulative > 0 or last_fill > 0:
+        return True
+    average_fill = _positive_price(getattr(event, "average_fill_price", None))
+    if average_fill is None:
+        return False
+    status = str(getattr(event, "status", "") or "").strip().lower()
+    event_type = str(getattr(event, "event_type", "") or "").strip().lower()
+    return status in {"filled", "partially_filled"} or event_type in {
+        "fill",
+        "partial_fill",
+    }
+
+
+def _execution_event_realized_slippage_bps(event: Any) -> float | None:
+    if not _execution_event_has_real_fill(event):
+        return None
+    return _safe_float(getattr(event, "realized_slippage_bps", None))
+
+
 def _duration_ms(start: datetime | None, end: datetime | None) -> float | None:
     if start is None or end is None:
         return None
@@ -555,8 +577,12 @@ def aggregate_execution_events_for_pattern(
         last = evs[-1]
         requested = max((_safe_float(e.requested_quantity) or 0.0) for e in evs) or None
         cumulative = max((_safe_float(e.cumulative_filled_quantity) or 0.0) for e in evs) or None
-        had_fill = bool((cumulative or 0.0) > 0 or any((e.event_type or "").endswith("fill") for e in evs))
-        realizeds = [abs(v) for e in evs if (v := _safe_float(e.realized_slippage_bps)) is not None]
+        had_fill = any(_execution_event_has_real_fill(e) for e in evs)
+        realizeds = [
+            abs(v)
+            for e in evs
+            if (v := _execution_event_realized_slippage_bps(e)) is not None
+        ]
         expecteds = [abs(v) for e in evs if (v := _safe_float(e.expected_slippage_bps)) is not None]
         spreads = [abs(v) for e in evs if (v := _safe_float(e.spread_bps)) is not None]
         submit_ack = [v for e in evs if (v := _safe_float(e.submit_to_ack_ms)) is not None]
