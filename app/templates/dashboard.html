@@ -2,7 +2,7 @@
 {% block ws_title %}Dashboard{% endblock %}
 {% block ws_crumb %}Dashboard{% endblock %}
 {% block ws_topbar_extra %}
-{% if dash.trading.net_pnl_fmt %}<span class="ws-pill {{ 'ws-up' if (dash.trading.net_pnl or 0) >= 0 else 'ws-down' }}">{{ '▲' if (dash.trading.net_pnl or 0) >= 0 else '▼' }} {{ dash.trading.net_pnl_fmt }} today</span>{% endif %}
+{% if dash.trading.net_pnl_fmt %}<span class="ws-pill {{ 'ws-up' if (dash.trading.net_pnl or 0) >= 0 else 'ws-down' }}" id="ws-topbar-pnl">{{ '▲' if (dash.trading.net_pnl or 0) >= 0 else '▼' }} {{ dash.trading.net_pnl_fmt }} today</span>{% endif %}
 {% endblock %}
 
 {% block ws_content %}
@@ -17,9 +17,19 @@
   </div>
 </div>
 
+<!-- Live cockpit: market clock + auto-refreshing safety status (see desktop.js) -->
+<div class="ws-cockpit" id="ws-cockpit" aria-live="polite">
+  <div class="ws-cockpit-clock"><span class="ck-time" id="ws-clock">--:--:--</span><span class="ck-zone">ET</span></div>
+  <span class="ws-cockpit-pill unknown" id="ws-mkt"><span class="dot"></span><span class="lbl">Market · —</span></span>
+  <span class="ws-cockpit-pill unknown" id="ws-killswitch"><span class="dot"></span><span class="lbl">Kill switch · —</span></span>
+  <span class="ws-cockpit-pill unknown" id="ws-breaker"><span class="dot"></span><span class="lbl">Breaker · —</span></span>
+  <span class="ws-cockpit-spacer"></span>
+  <span class="ws-cockpit-status" id="ws-cockpit-status" title="Auto-refreshing every 20s"><span class="dot"></span>live</span>
+</div>
+
 <div class="ws-kpis">
   {% for k in dash.kpis %}
-  <div class="ws-kpi"><div class="label">{{ k.label }}</div><div class="val {{ k.cls }}">{{ k.val }}</div></div>
+  <div class="ws-kpi"{% if k.key %} data-kpi="{{ k.key }}"{% endif %}><div class="label">{{ k.label }}</div><div class="val {{ k.cls }}">{{ k.val }}</div></div>
   {% endfor %}
 </div>
 
@@ -80,4 +90,5 @@
     </div>
   </div>
 </div>
+<script src="/static/js/desktop.js"></script>
 {% endblock %}

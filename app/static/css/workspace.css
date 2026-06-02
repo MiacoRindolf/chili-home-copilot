@@ -186,6 +186,30 @@
 .ws-space-save button{background:var(--ws-accent);color:#fff;border:none;border-radius:var(--ws-r-md);padding:7px 13px;font-size:var(--ws-fs-12);font-weight:var(--ws-fw-semi);cursor:pointer;transition:filter var(--ws-dur,.12s)}
 .ws-space-save button:hover{filter:brightness(1.08)}
 
+/* ── Live desktop cockpit (market clock + safety status) ── */
+.ws-cockpit{display:flex;align-items:center;gap:var(--ws-s2);flex-wrap:wrap;margin-bottom:var(--ws-s4);padding:8px 12px;background:var(--ws-surface);border:1px solid var(--ws-border);border-radius:var(--ws-r-md);box-shadow:var(--ws-shadow-sm,none)}
+.ws-cockpit-clock{display:flex;align-items:baseline;gap:5px;padding-right:var(--ws-s3);margin-right:2px;border-right:1px solid var(--ws-border)}
+.ws-cockpit-clock .ck-time{font-family:var(--ws-font-mono,ui-monospace,monospace);font-size:var(--ws-fs-16);font-weight:var(--ws-fw-semi);color:var(--ws-text);font-variant-numeric:tabular-nums;letter-spacing:.5px}
+.ws-cockpit-clock .ck-zone{font-size:var(--ws-fs-11);color:var(--ws-text-3);font-weight:var(--ws-fw-med)}
+.ws-cockpit-pill{display:inline-flex;align-items:center;gap:7px;padding:5px 11px;border-radius:var(--ws-r-pill);font-size:var(--ws-fs-12);font-weight:var(--ws-fw-med);background:var(--ws-surface-2);border:1px solid var(--ws-border);color:var(--ws-text-2);transition:all var(--ws-dur,.18s)}
+.ws-cockpit-pill .dot{width:7px;height:7px;border-radius:50%;background:var(--ws-text-3);flex-shrink:0}
+.ws-cockpit-pill.ok{color:var(--ws-up);border-color:color-mix(in srgb,var(--ws-up) 35%,transparent);background:var(--ws-up-bg)}
+.ws-cockpit-pill.ok .dot{background:var(--ws-up);box-shadow:0 0 0 3px var(--ws-up-bg)}
+.ws-cockpit-pill.warn{color:var(--ws-gold);border-color:color-mix(in srgb,var(--ws-gold) 35%,transparent);background:color-mix(in srgb,var(--ws-gold) 12%,transparent)}
+.ws-cockpit-pill.warn .dot{background:var(--ws-gold)}
+.ws-cockpit-pill.bad{color:var(--ws-down);border-color:color-mix(in srgb,var(--ws-down) 45%,transparent);background:var(--ws-down-bg);animation:wsPulse 1.6s ease-in-out infinite}
+.ws-cockpit-pill.bad .dot{background:var(--ws-down);box-shadow:0 0 0 3px var(--ws-down-bg)}
+.ws-cockpit-pill.unknown{opacity:.7}
+@keyframes wsPulse{0%,100%{box-shadow:0 0 0 0 color-mix(in srgb,var(--ws-down) 40%,transparent)}50%{box-shadow:0 0 0 4px transparent}}
+.ws-cockpit-spacer{flex:1 1 auto}
+.ws-cockpit-status{display:inline-flex;align-items:center;gap:6px;font-size:var(--ws-fs-11);font-weight:var(--ws-fw-med);color:var(--ws-text-3);text-transform:uppercase;letter-spacing:.6px}
+.ws-cockpit-status .dot{width:6px;height:6px;border-radius:50%;background:var(--ws-text-3)}
+.ws-cockpit-status.live .dot{background:var(--ws-up);animation:wsBlink 2s ease-in-out infinite}
+.ws-cockpit-status.offline{color:var(--ws-down)}.ws-cockpit-status.offline .dot{background:var(--ws-down)}
+@keyframes wsBlink{0%,100%{opacity:1}50%{opacity:.3}}
+.ws-kpi .val.ws-flash{animation:wsKpiFlash .9s var(--ws-ease,ease)}
+@keyframes wsKpiFlash{0%{background:var(--ws-accent-bg);box-shadow:0 0 0 6px var(--ws-accent-bg)}100%{background:transparent;box-shadow:0 0 0 0 transparent}}
+
 @media(max-width:1100px){.ws-kpis{grid-template-columns:repeat(2,1fr)}.ws-c8,.ws-c6,.ws-c4{grid-column:span 12}}
 @media(max-width:760px){.ws-app{grid-template-columns:56px 1fr}.ws-cmdk{display:none}.ws-content{padding:var(--ws-s5)}}
 @media (prefers-reduced-motion:reduce){.ws-kpi,.ws-qa a,.ws-palette{transition:none;animation:none}}

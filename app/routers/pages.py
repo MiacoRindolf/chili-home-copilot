@@ -77,6 +77,14 @@ def workspace_search(request: Request, q: str = Query("", max_length=80), db: Se
     return {"ok": True, "results": wss.search(db, ctx.get("user_id"), q)}
 
 
+@router.get("/api/workspace/desktop", response_class=JSONResponse)
+def workspace_desktop(request: Request, db: Session = Depends(get_db)):
+    """CHILI OS live desktop cockpit — P/L, counts, safety status, market state."""
+    from ..services import desktop_live
+    ctx = get_identity_ctx(request, db)
+    return desktop_live.build_live(db, ctx.get("user_id"))
+
+
 @router.post("/chores")
 def add_chore(title: str = Form(...), db: Session = Depends(get_db)):
     db.add(Chore(title=title, done=False))
