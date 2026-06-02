@@ -45,14 +45,15 @@
   }
   function dock(app) { return document.querySelector('.ws-rb[data-app="' + app + '"]'); }
 
-  function openApp(cfg) {
+  function openApp(cfg, geom) {
     var app = cfg.app;
-    if (wins[app]) { wins[app].style.display = 'flex'; focusWin(app); removeChip(app); syncHome(); return; }
+    if (wins[app]) { wins[app].style.display = 'flex'; focusWin(app); removeChip(app); syncHome(); saveLayout(); return; }
     var n = order.length;
     var el = document.createElement('div');
     el.className = 'os-win active';
     el.style.left = (40 + n * 34) + 'px'; el.style.top = (24 + n * 28) + 'px';
     el.style.width = 'min(640px,72vw)'; el.style.height = 'min(520px,72vh)';
+    if (geom) { if (geom.left) el.style.left = geom.left; if (geom.top) el.style.top = geom.top; if (geom.width) el.style.width = geom.width; if (geom.height) el.style.height = geom.height; }
     var src = cfg.src + (cfg.src.indexOf('?') === -1 ? '?' : '&') + 'embed=1';
     el.innerHTML =
       '<div class="os-bar"><span class="wi">' + (cfg.icon || '🗔') + '</span><span class="wt">' + cfg.title + '</span>' +
@@ -69,16 +70,20 @@
     var d = dock(app); if (d) d.classList.add('os-open');
     var ifr = el.querySelector('iframe');
     ifr.addEventListener('load', function () { var l = el.querySelector('.os-loading'); if (l) l.remove(); });
+    function minimize() { el.style.display = 'none'; order = order.filter(function (a) { return a !== app; }); addChip(app, cfg.title, cfg.icon); syncHome(); setHash(); saveLayout(); }
     el.querySelector('.close').addEventListener('click', function () { closeApp(app); });
-    el.querySelector('.min').addEventListener('click', function () { el.style.display = 'none'; order = order.filter(function (a) { return a !== app; }); addChip(app, cfg.title, cfg.icon); syncHome(); setHash(); });
+    el.querySelector('.min').addEventListener('click', minimize);
     var restore = null;
     el.querySelector('.max').addEventListener('click', function () {
       if (restore) { el.style.left = restore.l; el.style.top = restore.t; el.style.width = restore.w; el.style.height = restore.h; restore = null; }
       else { restore = { l: el.style.left, t: el.style.top, w: el.style.width, h: el.style.height }; snap(el, 'max'); }
+      saveLayout();
     });
     el.addEventListener('mousedown', function () { focusWin(app); });
     dragify(el, app); resizify(el);
     focusWin(app); syncHome();
+    if (geom && geom.min) minimize();
+    saveLayout();
   }
   function closeApp(app) {
     var el = wins[app]; if (!el) return;
@@ -86,7 +91,39 @@
     setTimeout(function () { el.remove(); }, 120);
     delete wins[app]; order = order.filter(function (a) { return a !== app; });
     var d = dock(app); if (d) d.classList.remove('os-open');
-    removeChip(app); syncHome(); setHash();
+    removeChip(app); syncHome(); setHash(); saveLayout();
+  }
+
+  // ── Session restore: remember which windows are open, where, and how big,
+  //    so reopening the workspace brings the desktop back as you left it. ──
+  var LAYOUT_KEY = 'chili-os-layout', restoring = false;
+  function saveLayout() {
+    if (restoring) return;  // don't thrash storage while replaying a layout
+    try {
+      var apps = Object.keys(wins).map(function (app) {
+        var el = wins[app]; if (!el) return null;
+        return { app: app, left: el.style.left, top: el.style.top, width: el.style.width, height: el.style.height, min: el.style.display === 'none' };
+      }).filter(Boolean);
+      localStorage.setItem(LAYOUT_KEY, JSON.stringify({ apps: apps, order: order.slice() }));
+    } catch (e) {}
+  }
+  function restoreLayout() {
+    var raw; try { raw = localStorage.getItem(LAYOUT_KEY); } catch (e) { return false; }
+    if (!raw) return false;
+    var data; try { data = JSON.parse(raw); } catch (e) { return false; }
+    if (!data || !data.apps || !data.apps.length) return false;
+    restoring = true;
+    // Open in saved focus order so the last-focused window ends up on top.
+    var byApp = {}; data.apps.forEach(function (s) { byApp[s.app] = s; });
+    var seq = (data.order && data.order.length ? data.order : data.apps.map(function (s) { return s.app; }));
+    data.apps.forEach(function (s) { if (seq.indexOf(s.app) === -1) seq.push(s.app); });
+    seq.forEach(function (app) {
+      var s = byApp[app]; if (!s) return;
+      var b = document.querySelector('.ws-rb[data-app="' + app + '"][data-src]');
+      if (b) openApp(cfgFromEl(b), { left: s.left, top: s.top, width: s.width, height: s.height, min: s.min });
+    });
+    restoring = false; saveLayout();
+    return Object.keys(wins).length > 0;
   }
   function snap(el, zone) {
     el.classList.add('snapping');
@@ -113,13 +150,13 @@
       else if (gx > W - 22) { zone = 'right'; showGhost(W / 2, 0, W / 2, H); }
       else hideGhost();
     });
-    window.addEventListener('mouseup', function () { if (drag && zone) snap(el, zone); drag = false; hideGhost(); });
+    window.addEventListener('mouseup', function () { if (drag) { if (zone) snap(el, zone); saveLayout(); } drag = false; hideGhost(); });
   }
   function resizify(el) {
     var h = el.querySelector('.os-rs'), sx, sy, ow, oh, rz = false;
     h.addEventListener('mousedown', function (e) { rz = true; sx = e.clientX; sy = e.clientY; ow = el.offsetWidth; oh = el.offsetHeight; e.preventDefault(); e.stopPropagation(); });
     window.addEventListener('mousemove', function (e) { if (!rz) return; el.style.width = Math.max(340, ow + e.clientX - sx) + 'px'; el.style.height = Math.max(220, oh + e.clientY - sy) + 'px'; });
-    window.addEventListener('mouseup', function () { rz = false; });
+    window.addEventListener('mouseup', function () { if (rz) { rz = false; saveLayout(); } });
   }
   function showGhost(x, y, w, h) { if (!ghost) return; ghost.style.display = 'block'; ghost.style.left = x + 'px'; ghost.style.top = y + 'px'; ghost.style.width = w + 'px'; ghost.style.height = h + 'px'; }
   function hideGhost() { if (ghost) ghost.style.display = 'none'; }
@@ -134,7 +171,7 @@
   if (dashBtn) dashBtn.addEventListener('click', function (e) {
     e.preventDefault();
     Object.keys(wins).forEach(function (a) { if (wins[a]) wins[a].style.display = 'none'; });
-    order = []; syncHome(); setHash();
+    order = []; syncHome(); setHash(); saveLayout();
   });
   // (Command-palette result clicks are handled in workspace.js, which renders
   //  results dynamically and calls window.ChiliOS.open for app results.)
@@ -148,7 +185,9 @@
     });
   });
 
-  // Restore deep-linked app from the hash on load (#app=chat).
+  // On load: restore the saved window layout, then honor a deep-link hash
+  // (#app=chat) by opening/focusing that app on top.
+  restoreLayout();
   var m = (location.hash || '').match(/app=([a-z0-9_-]+)/i);
   if (m) { var b = document.querySelector('.ws-rb[data-app="' + m[1] + '"][data-src]'); if (b) openApp(cfgFromEl(b)); }
 
