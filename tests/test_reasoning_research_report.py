@@ -72,3 +72,31 @@ class TestResearchReport:
         resp = c.get(_URL)
         assert resp.status_code == 200
         assert "Bad sources" in resp.text
+
+    def test_json_format_returns_structured_payload(self, paired_client, db):
+        c, user = paired_client
+        db.add(ReasoningResearch(
+            user_id=user.id, topic="NVDA earnings", summary="guidance is key",
+            sources='[{"title": "Reuters", "url": "https://reuters.com/n"}]',
+            relevance_score=0.9, stale=False,
+        ))
+        db.commit()
+        resp = c.get(_URL, params={"format": "json"})
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("application/json")
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["topic_count"] == 1
+        assert data["topics"][0]["topic"] == "NVDA earnings"
+        assert data["sources"][0]["url"] == "https://reuters.com/n"
+
+    def test_text_format_returns_plaintext(self, client):
+        resp = client.get(_URL, params={"format": "text"})
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/plain")
+        assert "<!DOCTYPE html>" not in resp.text
+        assert "Research Digest" in resp.text
+
+    def test_default_format_is_html(self, client):
+        resp = client.get(_URL)
+        assert resp.headers["content-type"].startswith("text/html")
