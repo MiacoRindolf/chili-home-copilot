@@ -62,17 +62,53 @@
       .map(function (s) { return { type: 'space', space: s.name, label: s.name, icon: '🗂', sub: 'Space · ' + s.count + ' window' + (s.count === 1 ? '' : 's') }; });
   }
 
+  // Recently-opened palette items (localStorage) — a "jump back in" list shown
+  // first on the empty query so re-opening a ticker/pattern/space is one keystroke.
+  var RECENTS_KEY = 'chili-os-recents';
+  function loadRecents() { try { var a = JSON.parse(localStorage.getItem(RECENTS_KEY) || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; } }
+  function recentResults() {
+    return loadRecents().map(function (r) {
+      return { type: 'recent', label: r.label, icon: r.icon || '↩', sub: r.sub || 'Recent', app: r.app, space: r.space, url: r.url, blank: r.blank };
+    });
+  }
+  function rkey(x) { return (x.space || '') + '|' + (x.app || '') + '|' + (x.url || '') + '|' + (x.label || ''); }
+  function recordRecent(d) {
+    if (!d || !d.label) return;
+    var k = rkey(d), list = loadRecents().filter(function (r) { return rkey(r) !== k; });
+    list.unshift({ label: d.label, icon: d.icon, sub: d.sub, app: d.app, space: d.space, url: d.url, blank: d.blank });
+    if (list.length > 8) list.length = 8;
+    try { localStorage.setItem(RECENTS_KEY, JSON.stringify(list)); } catch (e) {}
+  }
+  function optData(opt) {
+    return {
+      label: (opt.children[1] && opt.children[1].textContent) || '',
+      icon: (opt.querySelector('.pi') && opt.querySelector('.pi').textContent) || '',
+      sub: (opt.querySelector('.pk') && opt.querySelector('.pk').textContent) || '',
+      app: opt.getAttribute('data-app') || undefined,
+      space: opt.getAttribute('data-space') || undefined,
+      url: opt.getAttribute('data-url') || undefined,
+      blank: opt.getAttribute('data-blank') ? true : undefined
+    };
+  }
+  function dedup(list) {
+    var seen = {}, out = [];
+    list.forEach(function (r) { var k = rkey(r); if (!seen[k]) { seen[k] = 1; out.push(r); } });
+    return out;
+  }
+
   function runSearch(q) {
     var seq = ++reqSeq;
-    var spaces = spaceResults(q);
+    // recents only on the empty query; spaces always (filtered by q)
+    var pre = (q ? [] : recentResults()).concat(spaceResults(q));
     fetch('/api/workspace/search?q=' + encodeURIComponent(q), { credentials: 'same-origin' })
       .then(function (r) { return r.json(); })
-      .then(function (d) { if (seq === reqSeq) render(spaces.concat((d && d.results) || [])); })
-      .catch(function () { if (seq === reqSeq) render(spaces); });
+      .then(function (d) { if (seq === reqSeq) render(dedup(pre.concat((d && d.results) || []))); })
+      .catch(function () { if (seq === reqSeq) render(dedup(pre)); });
   }
 
   function openResult(opt) {
     if (!opt) return;
+    recordRecent(optData(opt));  // remember what was opened (for the recents list)
     var space = opt.getAttribute('data-space');
     if (space && window.ChiliOS && window.ChiliOS.spaces) { closePalette(); window.ChiliOS.spaces.open(space); return; }
     var app = opt.getAttribute('data-app'), url = opt.getAttribute('data-url'), blank = opt.getAttribute('data-blank');
