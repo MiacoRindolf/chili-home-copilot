@@ -69,6 +69,14 @@ def workspace(request: Request, db: Session = Depends(get_db)):
     })
 
 
+@router.get("/api/workspace/search", response_class=JSONResponse)
+def workspace_search(request: Request, q: str = Query("", max_length=80), db: Session = Depends(get_db)):
+    """CHILI OS command-palette (⌘K) search — destinations, patterns, tickers."""
+    from ..services import workspace_search as wss
+    ctx = get_identity_ctx(request, db)
+    return {"ok": True, "results": wss.search(db, ctx.get("user_id"), q)}
+
+
 @router.post("/chores")
 def add_chore(title: str = Form(...), db: Session = Depends(get_db)):
     db.add(Chore(title=title, done=False))

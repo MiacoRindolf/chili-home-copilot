@@ -136,13 +136,8 @@
     Object.keys(wins).forEach(function (a) { if (wins[a]) wins[a].style.display = 'none'; });
     order = []; syncHome(); setHash();
   });
-  // Command-palette items with data-app open windows too.
-  document.querySelectorAll('#ws-scrim .opt[data-app][data-src]').forEach(function (o) {
-    o.addEventListener('click', function (e) {
-      e.preventDefault(); openApp(cfgFromEl(o));
-      var scrim = document.getElementById('ws-scrim'); if (scrim) scrim.classList.remove('open');
-    });
-  });
+  // (Command-palette result clicks are handled in workspace.js, which renders
+  //  results dynamically and calls window.ChiliOS.open for app results.)
 
   // Any [data-os-open="app"] element (e.g. dashboard buttons/quick-actions)
   // opens that app as a window instead of navigating. href stays as a fallback.
@@ -157,6 +152,8 @@
   var m = (location.hash || '').match(/app=([a-z0-9_-]+)/i);
   if (m) { var b = document.querySelector('.ws-rb[data-app="' + m[1] + '"][data-src]'); if (b) openApp(cfgFromEl(b)); }
 
-  // expose for other UI (e.g. quick actions) to open windows
-  window.ChiliOS = { open: function (app) { var b = document.querySelector('.ws-rb[data-app="' + app + '"][data-src]'); if (b) openApp(cfgFromEl(b)); } };
+  // expose for other UI (e.g. quick actions, palette) to open windows.
+  // Returns true if the app was opened as a window, false otherwise (caller can
+  // then fall back to navigation — e.g. Dashboard, which is the desktop home).
+  window.ChiliOS = { open: function (app) { var b = document.querySelector('.ws-rb[data-app="' + app + '"][data-src]'); if (b) { openApp(cfgFromEl(b)); return true; } return false; } };
 })();
