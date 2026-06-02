@@ -19854,6 +19854,137 @@ def _migration_283_position_identity_phase5h_physical_rename(conn) -> None:
     )
 
 
+def _migration_284_phase5b_tca_quality_filter(conn) -> None:
+    """Expose fill evidence and filter unverified extreme TCA in Phase 5B aggregates."""
+    conn.execute(text("""
+        CREATE OR REPLACE VIEW trading_phase5b_decision_envelope_position AS
+        SELECT
+            d.id AS decision_id,
+            d.source_trade_id,
+            d.user_id AS decision_user_id,
+            d.ticker AS decision_ticker,
+            d.direction AS decision_direction,
+            d.entry_date AS decision_entry_date,
+            d.scan_pattern_id,
+            d.related_alert_id,
+            d.strategy_proposal_id,
+            d.pattern_tags AS decision_pattern_tags,
+            d.mesh_entry_correlation_id,
+            d.auto_trader_version,
+            d.asset_kind AS decision_asset_kind,
+            e.id AS envelope_id,
+            e.user_id AS envelope_user_id,
+            e.ticker AS envelope_ticker,
+            e.direction AS envelope_direction,
+            e.broker_source,
+            e.asset_kind AS envelope_asset_kind,
+            e.status AS envelope_status,
+            e.entry_price AS envelope_entry_price,
+            e.exit_price AS envelope_exit_price,
+            e.quantity AS envelope_quantity,
+            e.entry_date AS envelope_entry_date,
+            e.exit_date AS envelope_exit_date,
+            e.pnl AS envelope_pnl,
+            e.exit_reason,
+            e.management_scope,
+            e.decision_id AS envelope_decision_id,
+            e.position_id AS envelope_position_id,
+            e.tca_entry_slippage_bps,
+            e.tca_exit_slippage_bps,
+            p.id AS position_id,
+            p.user_id AS position_user_id,
+            p.broker_source AS position_broker_source,
+            p.account_type AS position_account_type,
+            p.ticker AS position_ticker,
+            p.direction AS position_direction,
+            p.state AS position_state,
+            p.current_quantity AS position_current_quantity,
+            p.current_avg_price AS position_current_avg_price,
+            p.current_envelope_id,
+            p.last_observed_at AS position_last_observed_at,
+            CASE
+                WHEN e.id IS NULL THEN 'decision_without_envelope'
+                WHEN e.decision_id IS DISTINCT FROM d.id THEN 'envelope_decision_mismatch'
+                WHEN e.broker_source IS NOT NULL
+                     AND btrim(e.broker_source) <> ''
+                     AND e.position_id IS NULL
+                     AND e.status = 'open' THEN 'broker_envelope_missing_position'
+                WHEN e.broker_source IS NOT NULL
+                     AND btrim(e.broker_source) <> ''
+                     AND e.position_id IS NULL THEN 'historical_broker_envelope_missing_position'
+                WHEN e.position_id IS NOT NULL
+                     AND p.id IS NULL THEN 'position_fk_missing'
+                WHEN p.id IS NOT NULL
+                     AND p.current_envelope_id IS NOT NULL
+                     AND p.current_envelope_id <> e.id
+                     AND e.status = 'open'
+                     AND p.state = 'open' THEN 'open_position_envelope_mismatch'
+                ELSE 'linked'
+            END AS linkage_status,
+            d.scan_pattern_id AS decision_scan_pattern_id,
+            e.scan_pattern_id AS envelope_scan_pattern_id,
+            e.broker_order_id AS envelope_broker_order_id,
+            e.broker_status AS envelope_broker_status,
+            e.avg_fill_price AS envelope_avg_fill_price
+        FROM trading_decisions d
+        LEFT JOIN trading_trades e ON e.id = d.source_trade_id
+        LEFT JOIN trading_positions p ON p.id = e.position_id
+    """))
+
+    conn.execute(text("""
+        CREATE OR REPLACE VIEW trading_phase5b_pattern_decision_performance AS
+        SELECT
+            scan_pattern_id,
+            COUNT(*)::bigint AS decisions,
+            COUNT(*) FILTER (WHERE envelope_id IS NOT NULL)::bigint AS envelopes,
+            COUNT(*) FILTER (WHERE envelope_status = 'closed')::bigint AS closed_envelopes,
+            COUNT(*) FILTER (WHERE envelope_status = 'open')::bigint AS open_envelopes,
+            ROUND(SUM(COALESCE(envelope_pnl, 0))::numeric, 4) AS total_pnl,
+            ROUND(AVG(envelope_pnl)::numeric, 4) AS avg_pnl_closed_or_marked,
+            ROUND(AVG(
+                CASE
+                    WHEN tca_entry_slippage_bps IS NULL THEN NULL
+                    WHEN CAST(tca_entry_slippage_bps AS TEXT) IN ('NaN', 'Infinity', '-Infinity') THEN NULL
+                    WHEN ABS(tca_entry_slippage_bps) <= 500.0 THEN tca_entry_slippage_bps
+                    WHEN COALESCE(envelope_avg_fill_price, 0) > 0
+                      OR COALESCE(NULLIF(BTRIM(envelope_broker_order_id), ''), '') <> ''
+                      OR LOWER(COALESCE(envelope_broker_status, '')) IN ('filled', 'partially_filled')
+                    THEN tca_entry_slippage_bps
+                    ELSE NULL
+                END
+            )::numeric, 2) AS avg_entry_slippage_bps,
+            ROUND(AVG(
+                CASE
+                    WHEN tca_exit_slippage_bps IS NULL THEN NULL
+                    WHEN CAST(tca_exit_slippage_bps AS TEXT) IN ('NaN', 'Infinity', '-Infinity') THEN NULL
+                    WHEN ABS(tca_exit_slippage_bps) <= 500.0 THEN tca_exit_slippage_bps
+                    WHEN COALESCE(envelope_avg_fill_price, 0) > 0
+                      OR COALESCE(NULLIF(BTRIM(envelope_broker_order_id), ''), '') <> ''
+                      OR LOWER(COALESCE(envelope_broker_status, '')) IN ('filled', 'partially_filled')
+                    THEN tca_exit_slippage_bps
+                    ELSE NULL
+                END
+            )::numeric, 2) AS avg_exit_slippage_bps,
+            COUNT(*) FILTER (
+                WHERE linkage_status NOT IN (
+                    'linked',
+                    'historical_broker_envelope_missing_position'
+                )
+            )::bigint AS linkage_issues,
+            COUNT(*) FILTER (
+                WHERE linkage_status = 'historical_broker_envelope_missing_position'
+            )::bigint AS historical_linkage_debt,
+            COUNT(*) FILTER (
+                WHERE decision_scan_pattern_id IS DISTINCT FROM envelope_scan_pattern_id
+            )::bigint AS pattern_attribution_mismatches
+        FROM trading_phase5b_decision_envelope_position
+        GROUP BY scan_pattern_id
+    """))
+
+    conn.commit()
+    logger.info("[mig284] Phase 5B TCA aggregate quality filter installed")
+
+
 
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -20203,6 +20334,8 @@ MIGRATIONS = [
      _migration_282_autotrader_imminent_selector_indexes),
     ("283_position_identity_phase5h_physical_rename",
      _migration_283_position_identity_phase5h_physical_rename),
+    ("284_phase5b_tca_quality_filter",
+     _migration_284_phase5b_tca_quality_filter),
 ]
 
 

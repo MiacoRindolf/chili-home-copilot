@@ -47,6 +47,15 @@ def test_phase5b_migration_registered_after_263():
     )
 
 
+def test_phase5b_tca_quality_migration_registered_after_physical_rename():
+    ids = [version_id for version_id, _fn in migrations.MIGRATIONS]
+    assert "283_position_identity_phase5h_physical_rename" in ids
+    assert "284_phase5b_tca_quality_filter" in ids
+    assert ids.index("284_phase5b_tca_quality_filter") == (
+        ids.index("283_position_identity_phase5h_physical_rename") + 1
+    )
+
+
 def test_phase5b_migration_is_views_not_physical_rename():
     src = inspect.getsource(migrations._migration_264_position_identity_phase5b_read_models)
     assert "CREATE VIEW trading_management_envelopes AS" in src
@@ -55,6 +64,18 @@ def test_phase5b_migration_is_views_not_physical_rename():
     assert "CREATE OR REPLACE VIEW trading_phase5b_pattern_decision_performance" in src
     assert "ALTER TABLE trading_trades RENAME" not in src
     assert "RENAME TO trading_management_envelopes" not in src
+
+
+def test_phase5b_tca_quality_migration_filters_unverified_extreme_costs():
+    src = inspect.getsource(migrations._migration_284_phase5b_tca_quality_filter)
+    assert "CREATE OR REPLACE VIEW trading_phase5b_decision_envelope_position" in src
+    assert "envelope_broker_order_id" in src
+    assert "envelope_broker_status" in src
+    assert "envelope_avg_fill_price" in src
+    assert "CREATE OR REPLACE VIEW trading_phase5b_pattern_decision_performance" in src
+    assert "ABS(tca_entry_slippage_bps) <= 500.0" in src
+    assert "ABS(tca_exit_slippage_bps) <= 500.0" in src
+    assert "LOWER(COALESCE(envelope_broker_status, '')) IN ('filled', 'partially_filled')" in src
 
 
 def test_phase5b_parity_summary_payload_and_ok():
@@ -108,4 +129,10 @@ def test_pattern_decision_performance_uses_phase5b_view():
     assert "GROUP BY scan_pattern_id" in sql
     assert "HAVING COUNT(*) FILTER" in sql
     assert "historical_broker_envelope_missing_position" in sql
-    assert params == {"days": 14, "min_closed": 2, "limit": 9}
+    assert "ABS(tca_entry_slippage_bps) <= :outlier_bps" in sql
+    assert "ABS(tca_exit_slippage_bps) <= :outlier_bps" in sql
+    assert "envelope_avg_fill_price" in sql
+    assert "envelope_broker_order_id" in sql
+    assert "envelope_broker_status" in sql
+    assert "AVG(tca_entry_slippage_bps)" not in sql
+    assert params == {"days": 14, "min_closed": 2, "limit": 9, "outlier_bps": 500.0}

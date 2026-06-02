@@ -13,8 +13,35 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from .execution_cost_builder import _unverified_tca_outlier_bps
+
 
 MANAGEMENT_ENVELOPES_RELATION = "trading_management_envelopes"
+
+_PHASE5B_USABLE_TCA_ENTRY_SQL = """
+            CASE
+                WHEN tca_entry_slippage_bps IS NULL THEN NULL
+                WHEN CAST(tca_entry_slippage_bps AS TEXT) IN ('NaN', 'Infinity', '-Infinity') THEN NULL
+                WHEN ABS(tca_entry_slippage_bps) <= :outlier_bps THEN tca_entry_slippage_bps
+                WHEN COALESCE(envelope_avg_fill_price, 0) > 0
+                  OR COALESCE(NULLIF(BTRIM(envelope_broker_order_id), ''), '') <> ''
+                  OR LOWER(COALESCE(envelope_broker_status, '')) IN ('filled', 'partially_filled')
+                THEN tca_entry_slippage_bps
+                ELSE NULL
+            END
+"""
+_PHASE5B_USABLE_TCA_EXIT_SQL = """
+            CASE
+                WHEN tca_exit_slippage_bps IS NULL THEN NULL
+                WHEN CAST(tca_exit_slippage_bps AS TEXT) IN ('NaN', 'Infinity', '-Infinity') THEN NULL
+                WHEN ABS(tca_exit_slippage_bps) <= :outlier_bps THEN tca_exit_slippage_bps
+                WHEN COALESCE(envelope_avg_fill_price, 0) > 0
+                  OR COALESCE(NULLIF(BTRIM(envelope_broker_order_id), ''), '') <> ''
+                  OR LOWER(COALESCE(envelope_broker_status, '')) IN ('filled', 'partially_filled')
+                THEN tca_exit_slippage_bps
+                ELSE NULL
+            END
+"""
 
 
 @dataclass(frozen=True)
@@ -256,7 +283,8 @@ def pattern_decision_performance(
     window_days = max(1, int(days or 30))
     min_closed_n = max(0, int(min_closed or 0))
     lim = max(1, min(int(limit or 50), 500))
-    return _rows(db, """
+    outlier_bps = _unverified_tca_outlier_bps()
+    return _rows(db, f"""
         SELECT
             scan_pattern_id,
             COUNT(*)::bigint AS decisions,
@@ -264,8 +292,8 @@ def pattern_decision_performance(
             COUNT(*) FILTER (WHERE envelope_status = 'open')::bigint AS open_envelopes,
             ROUND(SUM(COALESCE(envelope_pnl, 0))::numeric, 4) AS total_pnl,
             ROUND(AVG(envelope_pnl)::numeric, 4) AS avg_pnl,
-            ROUND(AVG(tca_entry_slippage_bps)::numeric, 2) AS avg_entry_slippage_bps,
-            ROUND(AVG(tca_exit_slippage_bps)::numeric, 2) AS avg_exit_slippage_bps,
+            ROUND(AVG({_PHASE5B_USABLE_TCA_ENTRY_SQL})::numeric, 2) AS avg_entry_slippage_bps,
+            ROUND(AVG({_PHASE5B_USABLE_TCA_EXIT_SQL})::numeric, 2) AS avg_exit_slippage_bps,
             COUNT(*) FILTER (
                 WHERE linkage_status NOT IN (
                     'linked',
@@ -281,4 +309,9 @@ def pattern_decision_performance(
         HAVING COUNT(*) FILTER (WHERE envelope_status = 'closed') >= :min_closed
         ORDER BY total_pnl DESC NULLS LAST, decisions DESC
         LIMIT :limit
-    """, {"days": window_days, "min_closed": min_closed_n, "limit": lim})
+    """, {
+        "days": window_days,
+        "min_closed": min_closed_n,
+        "limit": lim,
+        "outlier_bps": outlier_bps,
+    })
