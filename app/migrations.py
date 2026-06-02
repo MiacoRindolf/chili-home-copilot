@@ -19854,7 +19854,7 @@ def _migration_283_position_identity_phase5h_physical_rename(conn) -> None:
     )
 
 
-def _migration_284_phase5b_tca_quality_filter(conn) -> None:
+def _migration_287_phase5b_tca_quality_filter(conn) -> None:
     """Expose fill evidence and filter unverified extreme TCA in Phase 5B aggregates."""
     conn.execute(text("""
         CREATE OR REPLACE VIEW trading_phase5b_decision_envelope_position AS
@@ -19982,7 +19982,7 @@ def _migration_284_phase5b_tca_quality_filter(conn) -> None:
     """))
 
     conn.commit()
-    logger.info("[mig284] Phase 5B TCA aggregate quality filter installed")
+    logger.info("[mig287] Phase 5B TCA aggregate quality filter installed")
 
 
 def _migration_293_execution_slippage_unfilled_hygiene(conn) -> None:
@@ -20359,8 +20359,8 @@ MIGRATIONS = [
      _migration_282_autotrader_imminent_selector_indexes),
     ("283_position_identity_phase5h_physical_rename",
      _migration_283_position_identity_phase5h_physical_rename),
-    ("284_phase5b_tca_quality_filter",
-     _migration_284_phase5b_tca_quality_filter),
+    ("287_phase5b_tca_quality_filter",
+     _migration_287_phase5b_tca_quality_filter),
     ("293_execution_slippage_unfilled_hygiene",
      _migration_293_execution_slippage_unfilled_hygiene),
 ]

@@ -8,7 +8,8 @@ from app import migrations
 def test_migration_293_registered_without_reusing_live_285_id() -> None:
     ids = [version_id for version_id, _fn in migrations.MIGRATIONS]
 
-    assert "284_phase5b_tca_quality_filter" in ids
+    assert "284_phase5b_tca_quality_filter" not in ids
+    assert "287_phase5b_tca_quality_filter" in ids
     assert "285_execution_slippage_unfilled_hygiene" not in ids
     assert "293_execution_slippage_unfilled_hygiene" in ids
 

@@ -50,10 +50,8 @@ def test_phase5b_migration_registered_after_263():
 def test_phase5b_tca_quality_migration_registered_after_physical_rename():
     ids = [version_id for version_id, _fn in migrations.MIGRATIONS]
     assert "283_position_identity_phase5h_physical_rename" in ids
-    assert "284_phase5b_tca_quality_filter" in ids
-    assert ids.index("284_phase5b_tca_quality_filter") == (
-        ids.index("283_position_identity_phase5h_physical_rename") + 1
-    )
+    assert "284_phase5b_tca_quality_filter" not in ids
+    assert "287_phase5b_tca_quality_filter" in ids
 
 
 def test_phase5b_migration_is_views_not_physical_rename():
@@ -67,7 +65,7 @@ def test_phase5b_migration_is_views_not_physical_rename():
 
 
 def test_phase5b_tca_quality_migration_filters_unverified_extreme_costs():
-    src = inspect.getsource(migrations._migration_284_phase5b_tca_quality_filter)
+    src = inspect.getsource(migrations._migration_287_phase5b_tca_quality_filter)
     assert "CREATE OR REPLACE VIEW trading_phase5b_decision_envelope_position" in src
     assert "envelope_broker_order_id" in src
     assert "envelope_broker_status" in src
