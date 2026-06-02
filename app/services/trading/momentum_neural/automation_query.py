@@ -165,18 +165,17 @@ LIMITATIONS_NOTE = (
 
 
 def _tables_present(db: Session) -> bool:
-    try:
-        bind = db.get_bind()
-        names = set(sa_inspect(bind).get_table_names())
-    except Exception:
-        return False
-    return "trading_automation_sessions" in names
+    return _table_exists(db, "trading_automation_sessions")
 
 
 def _table_exists(db: Session, name: str) -> bool:
     try:
         bind = db.get_bind()
-        return name in set(sa_inspect(bind).get_table_names())
+        inspector = sa_inspect(bind)
+        has_table = getattr(inspector, "has_table", None)
+        if callable(has_table):
+            return bool(has_table(name))
+        return name in set(inspector.get_table_names())
     except Exception:
         return False
 
@@ -1204,6 +1203,48 @@ def list_automation_events(
     }
 
 
+def _session_summary_counts_from_grouped_rows(rows: Any) -> dict[str, int]:
+    counts = {
+        "total_sessions": 0,
+        "pending_paper_drafts": 0,
+        "paper_runner_queued": 0,
+        "paper_runner_active": 0,
+        "live_runner_queued": 0,
+        "live_runner_active": 0,
+        "pending_live_arms": 0,
+        "armed_awaiting_runner": 0,
+        "cancelled": 0,
+        "archived": 0,
+        "expired": 0,
+    }
+    for mode, state, n in rows:
+        mode_key = str(mode or "")
+        state_key = str(state or "")
+        count = int(n or 0)
+        counts["total_sessions"] += count
+        if state_key == STATE_DRAFT:
+            counts["pending_paper_drafts"] += count
+        if mode_key == "paper" and state_key == STATE_QUEUED:
+            counts["paper_runner_queued"] += count
+        if state_key in PAPER_RUNNER_ACTIVE_STATES:
+            counts["paper_runner_active"] += count
+        if state_key == STATE_LIVE_ARM_PENDING:
+            counts["pending_live_arms"] += count
+        if state_key == STATE_ARMED_PENDING_RUNNER:
+            counts["armed_awaiting_runner"] += count
+        if mode_key == "live" and state_key == STATE_QUEUED_LIVE:
+            counts["live_runner_queued"] += count
+        if state_key in LIVE_RUNNER_ACTIVE_SUMMARY_STATES:
+            counts["live_runner_active"] += count
+        if state_key in (STATE_CANCELLED, STATE_LIVE_CANCELLED):
+            counts["cancelled"] += count
+        if state_key == STATE_ARCHIVED:
+            counts["archived"] += count
+        if state_key == STATE_EXPIRED:
+            counts["expired"] += count
+    return counts
+
+
 def automation_summary(db: Session, *, user_id: int) -> dict[str, Any]:
     pipeline_health = get_viability_pipeline_health(db)
     if not _tables_present(db):
@@ -1235,26 +1276,16 @@ def automation_summary(db: Session, *, user_id: int) -> dict[str, Any]:
 
     expire_stale_live_arm_sessions(db, user_id=user_id)
 
-    base = db.query(TradingAutomationSession).filter(TradingAutomationSession.user_id == user_id)
-    total = base.count()
-    pending_draft = base.filter(TradingAutomationSession.state == STATE_DRAFT).count()
-    paper_queued = base.filter(
-        TradingAutomationSession.mode == "paper",
-        TradingAutomationSession.state == STATE_QUEUED,
-    ).count()
-    paper_active = base.filter(TradingAutomationSession.state.in_(PAPER_RUNNER_ACTIVE_STATES)).count()
-    pending_arm = base.filter(TradingAutomationSession.state == STATE_LIVE_ARM_PENDING).count()
-    armed = base.filter(TradingAutomationSession.state == STATE_ARMED_PENDING_RUNNER).count()
-    live_queued = base.filter(
-        TradingAutomationSession.mode == "live",
-        TradingAutomationSession.state == STATE_QUEUED_LIVE,
-    ).count()
-    live_active = base.filter(TradingAutomationSession.state.in_(LIVE_RUNNER_ACTIVE_SUMMARY_STATES)).count()
-    cancelled = base.filter(
-        TradingAutomationSession.state.in_((STATE_CANCELLED, STATE_LIVE_CANCELLED))
-    ).count()
-    archived = base.filter(TradingAutomationSession.state == STATE_ARCHIVED).count()
-    expired = base.filter(TradingAutomationSession.state == STATE_EXPIRED).count()
+    session_counts = _session_summary_counts_from_grouped_rows(
+        db.query(
+            TradingAutomationSession.mode,
+            TradingAutomationSession.state,
+            func.count(TradingAutomationSession.id),
+        )
+        .filter(TradingAutomationSession.user_id == user_id)
+        .group_by(TradingAutomationSession.mode, TradingAutomationSession.state)
+        .all()
+    )
 
     last_ev = (
         db.query(TradingAutomationEvent.ts)
@@ -1268,17 +1299,7 @@ def automation_summary(db: Session, *, user_id: int) -> dict[str, Any]:
     summary = neural_config_strip()
     summary.update(
         {
-            "total_sessions": total,
-            "pending_paper_drafts": pending_draft,
-            "paper_runner_queued": paper_queued,
-            "paper_runner_active": paper_active,
-            "pending_live_arms": pending_arm,
-            "armed_awaiting_runner": armed,
-            "live_runner_queued": live_queued,
-            "live_runner_active": live_active,
-            "cancelled": cancelled,
-            "archived": archived,
-            "expired": expired,
+            **session_counts,
             "last_event_ts": last_ev.isoformat() if last_ev else None,
             "limitations_note": LIMITATIONS_NOTE,
             "governance": governance_strip(),
@@ -1288,9 +1309,11 @@ def automation_summary(db: Session, *, user_id: int) -> dict[str, Any]:
             "live_runner_health": _runner_health_for_mode(db, mode="live"),
             "viability_pipeline": pipeline_health,
             "lanes": {
-                "simulation": pending_draft + paper_queued + paper_active,
-                "live-armed": pending_arm + armed,
-                "live": live_queued + live_active,
+                "simulation": session_counts["pending_paper_drafts"]
+                + session_counts["paper_runner_queued"]
+                + session_counts["paper_runner_active"],
+                "live-armed": session_counts["pending_live_arms"] + session_counts["armed_awaiting_runner"],
+                "live": session_counts["live_runner_queued"] + session_counts["live_runner_active"],
             },
         }
     )

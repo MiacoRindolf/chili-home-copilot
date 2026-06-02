@@ -3,8 +3,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from app.models.trading import MomentumStrategyVariant
+from app.services.trading.momentum_neural import viable_query
 from app.services.trading.momentum_neural.viable_query import (
     _hot_variants_by_family_version,
+    _momentum_tables_present,
     _session_counts,
 )
 
@@ -40,6 +42,9 @@ class _FakeSession:
         query = _FakeQuery(rows)
         self.queries.append(query)
         return query
+
+    def get_bind(self) -> object:
+        return object()
 
 
 def _variant(
@@ -129,3 +134,32 @@ def test_session_counts_scans_rows_once() -> None:
 
     assert _session_counts(rows) == (2, 2, 4)
     assert rows.iterations == 1
+
+
+def test_momentum_tables_present_uses_targeted_has_table(monkeypatch) -> None:
+    class _Inspector:
+        def __init__(self) -> None:
+            self.has_table_calls: list[str] = []
+
+        def has_table(self, name: str) -> bool:
+            self.has_table_calls.append(name)
+            return name in {"momentum_symbol_viability", "momentum_strategy_variants"}
+
+        def get_table_names(self) -> list[str]:
+            raise AssertionError("full table-name scan should not be used")
+
+    inspector = _Inspector()
+    monkeypatch.setattr(viable_query, "sa_inspect", lambda _bind: inspector)
+
+    assert _momentum_tables_present(_FakeSession([])) is True  # type: ignore[arg-type]
+    assert inspector.has_table_calls == ["momentum_symbol_viability", "momentum_strategy_variants"]
+
+
+def test_momentum_tables_present_keeps_table_list_fallback(monkeypatch) -> None:
+    class _Inspector:
+        def get_table_names(self) -> list[str]:
+            return ["momentum_symbol_viability", "momentum_strategy_variants"]
+
+    monkeypatch.setattr(viable_query, "sa_inspect", lambda _bind: _Inspector())
+
+    assert _momentum_tables_present(_FakeSession([])) is True  # type: ignore[arg-type]

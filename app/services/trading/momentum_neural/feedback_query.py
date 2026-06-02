@@ -19,7 +19,11 @@ from .evolution import (
 
 def momentum_outcomes_table_present(db: Session) -> bool:
     try:
-        return "momentum_automation_outcomes" in set(sa_inspect(db.bind).get_table_names())
+        inspector = sa_inspect(db.bind)
+        has_table = getattr(inspector, "has_table", None)
+        if callable(has_table):
+            return bool(has_table("momentum_automation_outcomes"))
+        return "momentum_automation_outcomes" in set(inspector.get_table_names())
     except Exception:
         return False
 
@@ -37,7 +41,25 @@ def list_recent_momentum_outcomes(
     if not momentum_outcomes_table_present(db):
         return []
     lim = max(1, min(int(limit), 200))
-    q = db.query(MomentumAutomationOutcome).order_by(MomentumAutomationOutcome.created_at.desc())
+    q = db.query(
+        MomentumAutomationOutcome.id,
+        MomentumAutomationOutcome.session_id,
+        MomentumAutomationOutcome.symbol,
+        MomentumAutomationOutcome.variant_id,
+        MomentumAutomationOutcome.execution_family,
+        MomentumAutomationOutcome.mode,
+        MomentumAutomationOutcome.terminal_state,
+        MomentumAutomationOutcome.outcome_class,
+        MomentumAutomationOutcome.realized_pnl_usd,
+        MomentumAutomationOutcome.return_bps,
+        MomentumAutomationOutcome.hold_seconds,
+        MomentumAutomationOutcome.exit_reason,
+        MomentumAutomationOutcome.evidence_weight,
+        MomentumAutomationOutcome.contributes_to_evolution,
+        MomentumAutomationOutcome.extracted_summary_json,
+        MomentumAutomationOutcome.terminal_at,
+        MomentumAutomationOutcome.created_at,
+    ).order_by(MomentumAutomationOutcome.created_at.desc())
     if user_id is not None:
         q = q.filter(MomentumAutomationOutcome.user_id == int(user_id))
     if variant_id is not None:
@@ -51,42 +73,218 @@ def list_recent_momentum_outcomes(
             MomentumAutomationOutcome.execution_family == execution_family.strip().lower()
         )
     rows = q.limit(lim).all()
-    return [_outcome_brief(r) for r in rows]
+    return [_outcome_brief_from_columns(r) for r in rows]
 
 
 def _outcome_brief(r: MomentumAutomationOutcome, raw_summary: Any = None) -> dict[str, Any]:
-    credit, regrade, ingest = (
-        _summary_payloads_from_raw(raw_summary) if raw_summary is not None else _summary_payloads(r)
+    summary = raw_summary if raw_summary is not None else r.extracted_summary_json
+    return _outcome_brief_from_values(
+        row_id=r.id,
+        session_id=r.session_id,
+        symbol=r.symbol,
+        variant_id=r.variant_id,
+        execution_family=r.execution_family,
+        mode=r.mode,
+        terminal_state=r.terminal_state,
+        outcome_class=r.outcome_class,
+        realized_pnl_usd=r.realized_pnl_usd,
+        return_bps=r.return_bps,
+        hold_seconds=r.hold_seconds,
+        exit_reason=r.exit_reason,
+        evidence_weight=r.evidence_weight,
+        contributes_to_evolution=bool(r.contributes_to_evolution),
+        extracted_summary_json=summary,
+        terminal_at=r.terminal_at,
+        created_at=r.created_at,
     )
-    contributes = bool(r.contributes_to_evolution)
+
+
+def _outcome_brief_from_columns(row: Any) -> dict[str, Any]:
+    try:
+        (
+            row_id,
+            session_id,
+            symbol,
+            variant_id,
+            execution_family,
+            mode,
+            terminal_state,
+            outcome_class,
+            realized_pnl_usd,
+            return_bps,
+            hold_seconds,
+            exit_reason,
+            evidence_weight,
+            contributes_to_evolution,
+            extracted_summary_json,
+            terminal_at,
+            created_at,
+        ) = row
+    except (TypeError, ValueError):
+        return _outcome_brief(row)
+    return _outcome_brief_from_values(
+        row_id=row_id,
+        session_id=session_id,
+        symbol=symbol,
+        variant_id=variant_id,
+        execution_family=execution_family,
+        mode=mode,
+        terminal_state=terminal_state,
+        outcome_class=outcome_class,
+        realized_pnl_usd=realized_pnl_usd,
+        return_bps=return_bps,
+        hold_seconds=hold_seconds,
+        exit_reason=exit_reason,
+        evidence_weight=evidence_weight,
+        contributes_to_evolution=bool(contributes_to_evolution),
+        extracted_summary_json=extracted_summary_json,
+        terminal_at=terminal_at,
+        created_at=created_at,
+    )
+
+
+def _outcome_brief_from_values(
+    *,
+    row_id: Any,
+    session_id: Any,
+    symbol: Any,
+    variant_id: Any,
+    execution_family: Any,
+    mode: Any,
+    terminal_state: Any,
+    outcome_class: Any,
+    realized_pnl_usd: Any,
+    return_bps: Any,
+    hold_seconds: Any,
+    exit_reason: Any,
+    evidence_weight: Any,
+    contributes_to_evolution: bool,
+    extracted_summary_json: Any,
+    terminal_at: Any,
+    created_at: Any,
+) -> dict[str, Any]:
+    credit, regrade, ingest = _summary_payloads_from_raw(extracted_summary_json)
     return {
-        "id": r.id,
-        "session_id": r.session_id,
-        "symbol": r.symbol,
-        "variant_id": r.variant_id,
-        "execution_family": r.execution_family,
-        "mode": r.mode,
-        "terminal_state": r.terminal_state,
-        "outcome_class": r.outcome_class,
-        "realized_pnl_usd": r.realized_pnl_usd,
-        "return_bps": r.return_bps,
-        "hold_seconds": r.hold_seconds,
-        "exit_reason": r.exit_reason,
-        "evidence_weight": r.evidence_weight,
-        "contributes_to_evolution": contributes,
+        "id": row_id,
+        "session_id": session_id,
+        "symbol": symbol,
+        "variant_id": variant_id,
+        "execution_family": execution_family,
+        "mode": mode,
+        "terminal_state": terminal_state,
+        "outcome_class": outcome_class,
+        "realized_pnl_usd": realized_pnl_usd,
+        "return_bps": return_bps,
+        "hold_seconds": hold_seconds,
+        "exit_reason": exit_reason,
+        "evidence_weight": evidence_weight,
+        "contributes_to_evolution": contributes_to_evolution,
         "evolution_credit": credit,
         "evolution_credit_reason_codes": list(credit.get("reason_codes") or []),
         "evolution_credit_regrade": regrade,
         "evolution_ingest": ingest,
-        "reingest_required": _reingest_required_from_payloads(contributes, regrade, ingest),
-        "terminal_at": r.terminal_at.isoformat() if r.terminal_at else None,
-        "created_at": r.created_at.isoformat() if r.created_at else None,
+        "reingest_required": _reingest_required_from_payloads(contributes_to_evolution, regrade, ingest),
+        "terminal_at": terminal_at.isoformat() if terminal_at else None,
+        "created_at": created_at.isoformat() if created_at else None,
     }
+
+
+def _session_feedback_from_columns(row: Any) -> dict[str, Any]:
+    try:
+        (
+            row_id,
+            session_id,
+            symbol,
+            variant_id,
+            execution_family,
+            mode,
+            terminal_state,
+            outcome_class,
+            realized_pnl_usd,
+            return_bps,
+            hold_seconds,
+            exit_reason,
+            evidence_weight,
+            contributes_to_evolution,
+            extracted_summary_json,
+            terminal_at,
+            created_at,
+            governance_context_json,
+        ) = row
+    except (TypeError, ValueError):
+        summary = row.extracted_summary_json
+        d = _outcome_brief(row, raw_summary=summary)
+        d["governance_context_json"] = row.governance_context_json
+        d["extracted_summary_json"] = summary
+        return d
+    d = _outcome_brief_from_values(
+        row_id=row_id,
+        session_id=session_id,
+        symbol=symbol,
+        variant_id=variant_id,
+        execution_family=execution_family,
+        mode=mode,
+        terminal_state=terminal_state,
+        outcome_class=outcome_class,
+        realized_pnl_usd=realized_pnl_usd,
+        return_bps=return_bps,
+        hold_seconds=hold_seconds,
+        exit_reason=exit_reason,
+        evidence_weight=evidence_weight,
+        contributes_to_evolution=bool(contributes_to_evolution),
+        extracted_summary_json=extracted_summary_json,
+        terminal_at=terminal_at,
+        created_at=created_at,
+    )
+    d["governance_context_json"] = governance_context_json
+    d["extracted_summary_json"] = extracted_summary_json
+    return d
 
 
 def _credit_payload(row: MomentumAutomationOutcome) -> dict[str, Any]:
     credit, _, _ = _summary_payloads(row)
     return dict(credit)
+
+
+def _diagnostic_row_values(
+    row: Any,
+) -> tuple[Any, Any, Any, Any, Any, Any, bool, dict[str, Any], dict[str, Any], dict[str, Any], Any]:
+    try:
+        (
+            row_id,
+            session_id,
+            symbol,
+            mode,
+            execution_family,
+            outcome_class,
+            contributes_to_evolution,
+            extracted_summary_json,
+            terminal_at,
+        ) = row
+    except (TypeError, ValueError):
+        row_id = row.id
+        session_id = row.session_id
+        symbol = row.symbol
+        mode = row.mode
+        execution_family = row.execution_family
+        outcome_class = row.outcome_class
+        contributes_to_evolution = row.contributes_to_evolution
+        extracted_summary_json = row.extracted_summary_json
+        terminal_at = row.terminal_at
+    credit, regrade, ingest = _summary_payloads_from_raw(extracted_summary_json)
+    return (
+        row_id,
+        session_id,
+        symbol,
+        mode,
+        execution_family,
+        outcome_class,
+        bool(contributes_to_evolution),
+        credit,
+        regrade,
+        ingest,
+        terminal_at,
+    )
 
 
 def _credit_reason_codes(row: MomentumAutomationOutcome) -> list[str]:
@@ -279,7 +477,17 @@ def evolution_credit_diagnostics(
 
     since = datetime.utcnow() - timedelta(days=window_days)
     q = (
-        db.query(MomentumAutomationOutcome)
+        db.query(
+            MomentumAutomationOutcome.id,
+            MomentumAutomationOutcome.session_id,
+            MomentumAutomationOutcome.symbol,
+            MomentumAutomationOutcome.mode,
+            MomentumAutomationOutcome.execution_family,
+            MomentumAutomationOutcome.outcome_class,
+            MomentumAutomationOutcome.contributes_to_evolution,
+            MomentumAutomationOutcome.extracted_summary_json,
+            MomentumAutomationOutcome.terminal_at,
+        )
         .filter(MomentumAutomationOutcome.terminal_at >= since)
         .order_by(MomentumAutomationOutcome.created_at.desc())
     )
@@ -305,8 +513,19 @@ def evolution_credit_diagnostics(
     reingest_required = 0
 
     for row in rows:
-        credit, regrade, ingest = _summary_payloads(row)
-        is_credited = bool(row.contributes_to_evolution)
+        (
+            row_id,
+            session_id,
+            symbol_value,
+            mode_value,
+            family_value,
+            outcome_class_value,
+            is_credited,
+            credit,
+            regrade,
+            ingest,
+            terminal_at,
+        ) = _diagnostic_row_values(row)
         if is_credited:
             credited += 1
         needs_reingest = _reingest_required_from_payloads(is_credited, regrade, ingest) if is_credited else False
@@ -315,19 +534,19 @@ def evolution_credit_diagnostics(
             if len(reingest_examples) < 10:
                 reingest_examples.append(
                     {
-                        "outcome_id": int(row.id) if row.id is not None else None,
-                        "session_id": int(row.session_id),
-                        "symbol": row.symbol,
-                        "mode": row.mode,
-                        "execution_family": row.execution_family,
-                        "outcome_class": row.outcome_class,
+                        "outcome_id": int(row_id) if row_id is not None else None,
+                        "session_id": int(session_id),
+                        "symbol": symbol_value,
+                        "mode": mode_value,
+                        "execution_family": family_value,
+                        "outcome_class": outcome_class_value,
                         "entry_decision_packet_id": credit.get("entry_decision_packet_id"),
                         "regraded_at_utc": regrade.get("regraded_at_utc"),
-                        "terminal_at": row.terminal_at.isoformat() if row.terminal_at else None,
+                        "terminal_at": terminal_at.isoformat() if terminal_at else None,
                     }
                 )
-        mode_key = str(row.mode or "unknown")
-        family_key = str(row.execution_family or "unknown")
+        mode_key = str(mode_value or "unknown")
+        family_key = str(family_value or "unknown")
         by_mode[mode_key]["total"] += 1
         by_family[family_key]["total"] += 1
         if is_credited:
@@ -342,15 +561,15 @@ def evolution_credit_diagnostics(
         if len(blocked_examples) < 10:
             blocked_examples.append(
                 {
-                    "outcome_id": int(row.id) if row.id is not None else None,
-                    "session_id": int(row.session_id),
-                    "symbol": row.symbol,
-                    "mode": row.mode,
-                    "execution_family": row.execution_family,
-                    "outcome_class": row.outcome_class,
+                    "outcome_id": int(row_id) if row_id is not None else None,
+                    "session_id": int(session_id),
+                    "symbol": symbol_value,
+                    "mode": mode_value,
+                    "execution_family": family_value,
+                    "outcome_class": outcome_class_value,
                     "reason_codes": reasons,
                     "entry_decision_packet_id": credit.get("entry_decision_packet_id"),
-                    "terminal_at": row.terminal_at.isoformat() if row.terminal_at else None,
+                    "terminal_at": terminal_at.isoformat() if terminal_at else None,
                 }
             )
 
@@ -389,7 +608,18 @@ def evolution_credit_diagnostics(
 
 
 def get_variant_feedback_summary(db: Session, *, variant_id: int, days: int = 14) -> dict[str, Any]:
-    v = db.query(MomentumStrategyVariant).filter(MomentumStrategyVariant.id == int(variant_id)).one_or_none()
+    v = (
+        db.query(
+            MomentumStrategyVariant.id,
+            MomentumStrategyVariant.family,
+            MomentumStrategyVariant.variant_key,
+            MomentumStrategyVariant.version,
+            MomentumStrategyVariant.label,
+            MomentumStrategyVariant.execution_family,
+        )
+        .filter(MomentumStrategyVariant.id == int(variant_id))
+        .one_or_none()
+    )
     brief = _variant_brief(v) if v else None
     return {
         "variant": brief,
@@ -413,17 +643,26 @@ def get_symbol_variant_feedback_summary(
     }
 
 
-def _variant_brief(v: Optional[MomentumStrategyVariant]) -> Optional[dict[str, Any]]:
+def _variant_brief(v: Any) -> Optional[dict[str, Any]]:
     if not v:
         return None
+    try:
+        row_id, family, variant_key, version, label, execution_family = v
+    except (TypeError, ValueError):
+        row_id = v.id
+        family = v.family
+        variant_key = v.variant_key
+        version = v.version
+        label = v.label
+        execution_family = v.execution_family
     return {
-        "id": v.id,
-        "family": v.family,
-        "strategy_family": v.family,
-        "variant_key": v.variant_key,
-        "version": v.version,
-        "label": v.label,
-        "execution_family": v.execution_family,
+        "id": row_id,
+        "family": family,
+        "strategy_family": family,
+        "variant_key": variant_key,
+        "version": version,
+        "label": label,
+        "execution_family": execution_family,
     }
 
 
@@ -449,14 +688,29 @@ def get_session_feedback_row(db: Session, *, session_id: int) -> Optional[dict[s
     if not momentum_outcomes_table_present(db):
         return None
     r = (
-        db.query(MomentumAutomationOutcome)
+        db.query(
+            MomentumAutomationOutcome.id,
+            MomentumAutomationOutcome.session_id,
+            MomentumAutomationOutcome.symbol,
+            MomentumAutomationOutcome.variant_id,
+            MomentumAutomationOutcome.execution_family,
+            MomentumAutomationOutcome.mode,
+            MomentumAutomationOutcome.terminal_state,
+            MomentumAutomationOutcome.outcome_class,
+            MomentumAutomationOutcome.realized_pnl_usd,
+            MomentumAutomationOutcome.return_bps,
+            MomentumAutomationOutcome.hold_seconds,
+            MomentumAutomationOutcome.exit_reason,
+            MomentumAutomationOutcome.evidence_weight,
+            MomentumAutomationOutcome.contributes_to_evolution,
+            MomentumAutomationOutcome.extracted_summary_json,
+            MomentumAutomationOutcome.terminal_at,
+            MomentumAutomationOutcome.created_at,
+            MomentumAutomationOutcome.governance_context_json,
+        )
         .filter(MomentumAutomationOutcome.session_id == int(session_id))
         .one_or_none()
     )
     if not r:
         return None
-    summary = r.extracted_summary_json
-    d = _outcome_brief(r, raw_summary=summary)
-    d["governance_context_json"] = r.governance_context_json
-    d["extracted_summary_json"] = summary
-    return d
+    return _session_feedback_from_columns(r)

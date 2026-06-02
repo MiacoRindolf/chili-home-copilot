@@ -12,7 +12,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from ....config import settings
@@ -58,59 +58,109 @@ def _brain_ls(db: Session, node_id: str) -> dict[str, Any]:
     return dict(st.local_state)
 
 
-def _viability_durable_stats(db: Session) -> dict[str, Any]:
-    try:
-        total = int(db.query(func.count(MomentumSymbolViability.id)).scalar() or 0)
-    except Exception as ex:
-        _log.debug("viability count: %s", ex)
-        return {"row_count": 0, "error": "query_failed"}
-    if total == 0:
+def _viability_count_stats_from_aggregate(row: Any) -> dict[str, int]:
+    if row is None:
         return {
             "row_count": 0,
             "live_eligible_count": 0,
             "paper_only_count": 0,
             "fresh_last_24h_count": 0,
-            "top_lines": [],
         }
-    live_eligible = int(
-        db.query(func.count(MomentumSymbolViability.id))
-        .filter(MomentumSymbolViability.live_eligible.is_(True))
-        .scalar()
-        or 0
-    )
-    paper_only = int(
-        db.query(func.count(MomentumSymbolViability.id))
-        .filter(
-            MomentumSymbolViability.paper_eligible.is_(True),
-            MomentumSymbolViability.live_eligible.is_(False),
+    if isinstance(row, (tuple, list)):
+        total, live_eligible, paper_only, fresh_24h = row
+    else:
+        total = getattr(row, "total", 0)
+        live_eligible = getattr(row, "live_eligible", 0)
+        paper_only = getattr(row, "paper_only", 0)
+        fresh_24h = getattr(row, "fresh_24h", 0)
+    return {
+        "row_count": int(total or 0),
+        "live_eligible_count": int(live_eligible or 0),
+        "paper_only_count": int(paper_only or 0),
+        "fresh_last_24h_count": int(fresh_24h or 0),
+    }
+
+
+def _viability_top_lines(rows: Any) -> list[str]:
+    lines: list[str] = []
+    for row in rows:
+        if isinstance(row, (tuple, list)):
+            symbol, viability_score, live_eligible = row
+        else:
+            symbol = row.symbol
+            viability_score = row.viability_score
+            live_eligible = row.live_eligible
+        le = "live" if live_eligible else "paper-only"
+        lines.append(f"{symbol} · {float(viability_score):.2f} · {le}")
+    return lines
+
+
+def _viability_durable_stats(db: Session) -> dict[str, Any]:
+    try:
+        since = datetime.utcnow() - timedelta(hours=24)
+        stats = _viability_count_stats_from_aggregate(
+            db.query(
+                func.count(MomentumSymbolViability.id).label("total"),
+                func.sum(case((MomentumSymbolViability.live_eligible.is_(True), 1), else_=0)).label(
+                    "live_eligible"
+                ),
+                func.sum(
+                    case(
+                        (
+                            MomentumSymbolViability.paper_eligible.is_(True)
+                            & MomentumSymbolViability.live_eligible.is_(False),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ).label("paper_only"),
+                func.sum(case((MomentumSymbolViability.freshness_ts >= since, 1), else_=0)).label("fresh_24h"),
+            ).one_or_none()
         )
-        .scalar()
-        or 0
-    )
-    since = datetime.utcnow() - timedelta(hours=24)
-    fresh_24h = int(
-        db.query(func.count(MomentumSymbolViability.id))
-        .filter(MomentumSymbolViability.freshness_ts >= since)
-        .scalar()
-        or 0
-    )
+    except Exception as ex:
+        _log.debug("viability count: %s", ex)
+        return {"row_count": 0, "error": "query_failed"}
+    if stats["row_count"] == 0:
+        return {**stats, "top_lines": []}
     top = (
-        db.query(MomentumSymbolViability)
+        db.query(
+            MomentumSymbolViability.symbol,
+            MomentumSymbolViability.viability_score,
+            MomentumSymbolViability.live_eligible,
+        )
         .order_by(MomentumSymbolViability.viability_score.desc())
         .limit(5)
         .all()
     )
-    top_lines: list[str] = []
-    for r in top:
-        le = "live" if r.live_eligible else "paper-only"
-        top_lines.append(f"{r.symbol} · {float(r.viability_score):.2f} · {le}")
-    return {
-        "row_count": total,
-        "live_eligible_count": live_eligible,
-        "paper_only_count": paper_only,
-        "fresh_last_24h_count": fresh_24h,
-        "top_lines": top_lines,
+    return {**stats, "top_lines": _viability_top_lines(top)}
+
+
+def _paper_live_weighted_return_summaries(rows: Any) -> dict[str, dict[str, Any]]:
+    stats = {
+        "paper": [0, 0.0, 0.0],
+        "live": [0, 0.0, 0.0],
     }
+    for row in rows:
+        if isinstance(row, (tuple, list)):
+            mode, evidence_weight, return_bps = row
+        else:
+            mode = row.mode
+            evidence_weight = row.evidence_weight
+            return_bps = row.return_bps
+        mode_key = str(mode or "")
+        if mode_key not in stats:
+            continue
+        bucket = stats[mode_key]
+        bucket[0] += 1
+        w = float(evidence_weight or 1.0)
+        bucket[1] += w
+        if return_bps is not None:
+            bucket[2] += float(return_bps) * w
+    out: dict[str, dict[str, Any]] = {}
+    for mode, (n, wsum, wrb) in stats.items():
+        mean_bps = (wrb / wsum) if wsum > 0 else None
+        out[mode] = {"n": int(n), "mean_return_bps": round(mean_bps, 2) if mean_bps is not None else None}
+    return out
 
 
 def _outcome_windows(db: Session, days: int = 30) -> dict[str, Any]:
@@ -128,25 +178,21 @@ def _outcome_windows(db: Session, days: int = 30) -> dict[str, Any]:
         return out
     since = datetime.utcnow() - timedelta(days=max(1, min(days, 120)))
     try:
-        for mode in ("paper", "live"):
-            rows = (
-                db.query(MomentumAutomationOutcome)
+        out.update(
+            _paper_live_weighted_return_summaries(
+                db.query(
+                    MomentumAutomationOutcome.mode,
+                    MomentumAutomationOutcome.evidence_weight,
+                    MomentumAutomationOutcome.return_bps,
+                )
                 .filter(
-                    MomentumAutomationOutcome.mode == mode,
+                    MomentumAutomationOutcome.mode.in_(("paper", "live")),
                     MomentumAutomationOutcome.terminal_at >= since,
                     MomentumAutomationOutcome.contributes_to_evolution.is_(True),
                 )
                 .all()
             )
-            n = len(rows)
-            wsum = sum(float(r.evidence_weight or 1.0) for r in rows)
-            wrb = sum(
-                float(r.return_bps) * float(r.evidence_weight or 1.0)
-                for r in rows
-                if r.return_bps is not None
-            )
-            mean_bps = (wrb / wsum) if wsum > 0 else None
-            out[mode] = {"n": n, "mean_return_bps": round(mean_bps, 2) if mean_bps is not None else None}
+        )
 
         mix_rows = (
             db.query(MomentumAutomationOutcome.outcome_class, func.count(MomentumAutomationOutcome.id))

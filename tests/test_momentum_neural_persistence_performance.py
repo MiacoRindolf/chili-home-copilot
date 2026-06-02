@@ -1,5 +1,6 @@
 from app.models.trading import MomentumStrategyVariant
-from app.services.trading.momentum_neural.persistence import _variant_ids_for_tick_rows
+from app.services.trading.momentum_neural import persistence
+from app.services.trading.momentum_neural.persistence import _momentum_tables_present, _variant_ids_for_tick_rows
 
 
 class _FakeQuery:
@@ -26,6 +27,9 @@ class _FakeSession:
         self.query_calls += 1
         self.last_query = _FakeQuery(self.rows)
         return self.last_query
+
+    def get_bind(self) -> object:
+        return object()
 
 
 def _variant(
@@ -74,3 +78,32 @@ def test_variant_ids_for_tick_rows_skips_empty_family_lookup() -> None:
 
     assert _variant_ids_for_tick_rows(db, []) == ({}, {})  # type: ignore[arg-type]
     assert db.query_calls == 0
+
+
+def test_momentum_tables_present_uses_targeted_has_table(monkeypatch) -> None:
+    class _Inspector:
+        def __init__(self) -> None:
+            self.has_table_calls: list[str] = []
+
+        def has_table(self, name: str) -> bool:
+            self.has_table_calls.append(name)
+            return name in {"momentum_strategy_variants", "momentum_symbol_viability"}
+
+        def get_table_names(self) -> list[str]:
+            raise AssertionError("full table-name scan should not be used")
+
+    inspector = _Inspector()
+    monkeypatch.setattr(persistence, "sa_inspect", lambda _bind: inspector)
+
+    assert _momentum_tables_present(_FakeSession([])) is True  # type: ignore[arg-type]
+    assert inspector.has_table_calls == ["momentum_strategy_variants", "momentum_symbol_viability"]
+
+
+def test_momentum_tables_present_keeps_table_list_fallback(monkeypatch) -> None:
+    class _Inspector:
+        def get_table_names(self) -> list[str]:
+            return ["momentum_strategy_variants", "momentum_symbol_viability"]
+
+    monkeypatch.setattr(persistence, "sa_inspect", lambda _bind: _Inspector())
+
+    assert _momentum_tables_present(_FakeSession([])) is True  # type: ignore[arg-type]

@@ -26,7 +26,11 @@ _log = logging.getLogger(__name__)
 def _momentum_tables_present(db: Session) -> bool:
     try:
         bind = db.get_bind()
-        names = set(sa_inspect(bind).get_table_names())
+        inspector = sa_inspect(bind)
+        has_table = getattr(inspector, "has_table", None)
+        if callable(has_table):
+            return bool(has_table("momentum_symbol_viability")) and bool(has_table("momentum_strategy_variants"))
+        names = set(inspector.get_table_names())
     except Exception:
         return False
     return "momentum_symbol_viability" in names and "momentum_strategy_variants" in names

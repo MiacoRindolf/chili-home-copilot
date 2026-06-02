@@ -28,7 +28,11 @@ _log = logging.getLogger(__name__)
 
 def _outcomes_table_present(db: Session) -> bool:
     try:
-        names = set(sa_inspect(db.bind).get_table_names())
+        inspector = sa_inspect(db.bind)
+        has_table = getattr(inspector, "has_table", None)
+        if callable(has_table):
+            return bool(has_table("momentum_automation_outcomes"))
+        names = set(inspector.get_table_names())
     except Exception:
         return False
     return "momentum_automation_outcomes" in names
