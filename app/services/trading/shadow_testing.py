@@ -8,8 +8,8 @@ from __future__ import annotations
 import logging
 import math
 import random
-from datetime import datetime
-from typing import Any
+from datetime import datetime, timezone
+from typing import Any, Mapping
 
 from sqlalchemy.orm import Session
 
@@ -23,33 +23,262 @@ MIN_DAYS_FOR_COMPARISON = 30
 SIGNIFICANCE_LEVEL = 0.05
 
 
-def create_shadow_test(
+def _utcnow() -> datetime:
+    return datetime.utcnow()
+
+
+def _finite_float(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return out if math.isfinite(out) else None
+
+
+def _positive_int_or_default(value: Any, default: int) -> int:
+    default_int = int(default)
+    if default_int <= 0:
+        default_int = 1
+    out = _finite_float(value)
+    if out is None or out < 1:
+        return default_int
+    rounded = round(out)
+    if abs(out - rounded) > 1e-9:
+        rounded = math.ceil(out)
+    out_int = int(rounded)
+    return out_int if out_int > 0 else default_int
+
+
+def _positive_integral_int_or_none(value: Any) -> int | None:
+    out = _finite_float(value)
+    if out is None or out <= 0:
+        return None
+    rounded = round(out)
+    if abs(out - rounded) > 1e-9:
+        return None
+    out_int = int(rounded)
+    return out_int if out_int > 0 else None
+
+
+def _parse_utc_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        if raw.endswith("Z"):
+            raw = f"{raw[:-1]}+00:00"
+        try:
+            dt = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+    else:
+        return None
+
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def _shadow_test_meta(db: Session, variant_pattern_id: int) -> Mapping[str, Any]:
+    try:
+        variant = db.query(ScanPattern).filter(ScanPattern.id == variant_pattern_id).first()
+    except Exception:
+        return {}
+    paper_book = getattr(variant, "paper_book_json", None) if variant else None
+    if not isinstance(paper_book, Mapping):
+        return {}
+    shadow_test = paper_book.get("shadow_test")
+    return shadow_test if isinstance(shadow_test, Mapping) else {}
+
+
+def _shadow_test_requirements(
     db: Session,
+    variant_pattern_id: int,
+) -> dict[str, Any]:
+    meta = _shadow_test_meta(db, variant_pattern_id)
+    registered = bool(meta)
+    min_trades = _positive_int_or_default(
+        meta.get("min_trades") if registered else None,
+        MIN_TRADES_FOR_COMPARISON,
+    )
+    min_days = (
+        _positive_int_or_default(meta.get("min_days"), MIN_DAYS_FOR_COMPARISON)
+        if registered
+        else 0
+    )
+    return {
+        "registered": registered,
+        "control_id": (
+            _positive_integral_int_or_none(meta.get("control_id"))
+            if registered
+            else None
+        ),
+        "variant_id": (
+            _positive_integral_int_or_none(meta.get("variant_id"))
+            if registered
+            else None
+        ),
+        "min_trades": min_trades,
+        "min_days": min_days,
+        "started_at": _parse_utc_datetime(meta.get("started_at")) if registered else None,
+    }
+
+
+def _shadow_test_identity_gate(
+    requirements: Mapping[str, Any],
+    *,
     control_pattern_id: int,
     variant_pattern_id: int,
+) -> dict[str, Any] | None:
+    if not requirements.get("registered"):
+        return None
+    expected_control_id = _positive_integral_int_or_none(control_pattern_id)
+    expected_variant_id = _positive_integral_int_or_none(variant_pattern_id)
+    registered_control_id = _positive_integral_int_or_none(
+        requirements.get("control_id")
+    )
+    registered_variant_id = _positive_integral_int_or_none(
+        requirements.get("variant_id")
+    )
+    if (
+        expected_control_id is None
+        or expected_variant_id is None
+        or registered_control_id != expected_control_id
+        or registered_variant_id != expected_variant_id
+    ):
+        return {
+            "ok": False,
+            "reason": "shadow_test_identity_mismatch",
+            "control_id": expected_control_id,
+            "variant_id": expected_variant_id,
+            "registered_control_id": registered_control_id,
+            "registered_variant_id": registered_variant_id,
+        }
+    return None
+
+
+def _shadow_test_day_gate(requirements: Mapping[str, Any]) -> dict[str, Any] | None:
+    min_days_raw = _finite_float(requirements.get("min_days"))
+    if min_days_raw is None or min_days_raw <= 0:
+        return None
+    min_days = int(min_days_raw)
+    if min_days <= 0:
+        return None
+    started_at = _parse_utc_datetime(requirements.get("started_at"))
+    if started_at is None:
+        return {
+            "ok": False,
+            "reason": "shadow_test_missing_started_at",
+            "min_days": min_days,
+        }
+    elapsed_days = max((_utcnow() - started_at).total_seconds() / 86400.0, 0.0)
+    if elapsed_days < min_days:
+        return {
+            "ok": False,
+            "reason": "insufficient_shadow_test_days",
+            "days": round(elapsed_days, 2),
+            "min_days": min_days,
+        }
+    return None
+
+
+def _filter_registered_shadow_window(
+    trades: list[PaperTrade],
+    requirements: Mapping[str, Any],
+) -> list[PaperTrade]:
+    if not requirements.get("registered"):
+        return list(trades)
+    started_at = _parse_utc_datetime(requirements.get("started_at"))
+    if started_at is None:
+        return []
+    out: list[PaperTrade] = []
+    for trade in trades:
+        entry_date = _parse_utc_datetime(getattr(trade, "entry_date", None))
+        if entry_date is not None and entry_date >= started_at:
+            out.append(trade)
+    return out
+
+
+def _p_value_or_one(value: Any) -> float:
+    out = _finite_float(value)
+    if out is None or out < 0.0 or out > 1.0:
+        return 1.0
+    return out
+
+
+def _literal_true(value: Any) -> bool:
+    return value is True
+
+
+def _valid_return_hold_samples(
+    returns: list[float],
+    hold_days: list[float],
+) -> tuple[list[float], list[float]]:
+    valid_returns: list[float] = []
+    valid_hold_days: list[float] = []
+    for idx, raw_return in enumerate(returns):
+        value = _finite_float(raw_return)
+        hold_day = _finite_float(hold_days[idx] if idx < len(hold_days) else None)
+        if value is None or hold_day is None or hold_day <= 0.0:
+            continue
+        valid_returns.append(value)
+        valid_hold_days.append(hold_day)
+    return valid_returns, valid_hold_days
+
+
+def create_shadow_test(
+    db: Session,
+    control_pattern_id: Any,
+    variant_pattern_id: Any,
     *,
     min_trades: int = MIN_TRADES_FOR_COMPARISON,
     min_days: int = MIN_DAYS_FOR_COMPARISON,
 ) -> dict[str, Any]:
     """Register a shadow test between a control (live) pattern and a variant."""
-    control = db.query(ScanPattern).filter(ScanPattern.id == control_pattern_id).first()
-    variant = db.query(ScanPattern).filter(ScanPattern.id == variant_pattern_id).first()
+    control_id = _positive_integral_int_or_none(control_pattern_id)
+    variant_id = _positive_integral_int_or_none(variant_pattern_id)
+    if control_id is None or variant_id is None:
+        return {
+            "ok": False,
+            "error": "invalid_pattern_id",
+            "control_id": control_id,
+            "variant_id": variant_id,
+        }
+    if control_id == variant_id:
+        return {
+            "ok": False,
+            "error": "shadow_test_same_pattern",
+            "pattern_id": control_id,
+        }
+
+    control = db.query(ScanPattern).filter(ScanPattern.id == control_id).first()
+    variant = db.query(ScanPattern).filter(ScanPattern.id == variant_id).first()
 
     if not control or not variant:
         return {"ok": False, "error": "Pattern not found"}
 
+    min_trades = _positive_int_or_default(min_trades, MIN_TRADES_FOR_COMPARISON)
+    min_days = _positive_int_or_default(min_days, MIN_DAYS_FOR_COMPARISON)
     test_meta = {
         "shadow_test": {
-            "control_id": control_pattern_id,
-            "variant_id": variant_pattern_id,
-            "started_at": datetime.utcnow().isoformat() + "Z",
+            "control_id": control_id,
+            "variant_id": variant_id,
+            "started_at": _utcnow().isoformat() + "Z",
             "min_trades": min_trades,
             "min_days": min_days,
             "status": "running",
         }
     }
 
-    existing_meta = variant.paper_book_json or {}
+    existing_meta = (
+        dict(variant.paper_book_json)
+        if isinstance(variant.paper_book_json, Mapping)
+        else {}
+    )
     existing_meta.update(test_meta)
     variant.paper_book_json = existing_meta
     db.commit()
@@ -70,8 +299,8 @@ def create_shadow_test(
 
 def evaluate_shadow_test(
     db: Session,
-    control_pattern_id: int,
-    variant_pattern_id: int,
+    control_pattern_id: Any,
+    variant_pattern_id: Any,
 ) -> dict[str, Any]:
     """Compare control vs variant using statistical tests.
 
@@ -80,29 +309,92 @@ def evaluate_shadow_test(
     2. Bootstrap on Sharpe ratio difference
     3. Z-test on Sharpe ratios
     """
-    control_trades = _get_closed_trades(db, control_pattern_id)
-    variant_trades = _get_closed_trades(db, variant_pattern_id)
+    control_id = _positive_integral_int_or_none(control_pattern_id)
+    variant_id = _positive_integral_int_or_none(variant_pattern_id)
+    if control_id is None or variant_id is None:
+        return {
+            "ok": False,
+            "reason": "invalid_pattern_id",
+            "control_id": control_id,
+            "variant_id": variant_id,
+        }
+    if control_id == variant_id:
+        return {
+            "ok": False,
+            "reason": "shadow_test_same_pattern",
+            "pattern_id": control_id,
+        }
 
-    if len(control_trades) < MIN_TRADES_FOR_COMPARISON:
-        return {"ok": False, "reason": "insufficient_control_trades", "n": len(control_trades)}
-    if len(variant_trades) < MIN_TRADES_FOR_COMPARISON:
-        return {"ok": False, "reason": "insufficient_variant_trades", "n": len(variant_trades)}
+    requirements = _shadow_test_requirements(db, variant_id)
+    min_trades = int(requirements["min_trades"])
+    identity_gate = _shadow_test_identity_gate(
+        requirements,
+        control_pattern_id=control_id,
+        variant_pattern_id=variant_id,
+    )
+    if identity_gate is not None:
+        return identity_gate
+    day_gate = _shadow_test_day_gate(requirements)
+    if day_gate is not None:
+        return day_gate
+
+    control_trades_raw = _get_closed_trades(db, control_id)
+    variant_trades_raw = _get_closed_trades(db, variant_id)
+    control_trades = _filter_registered_shadow_window(
+        control_trades_raw,
+        requirements,
+    )
+    variant_trades = _filter_registered_shadow_window(
+        variant_trades_raw,
+        requirements,
+    )
+
+    if len(control_trades) < min_trades:
+        out = {
+            "ok": False,
+            "reason": "insufficient_control_trades",
+            "n": len(control_trades),
+            "min_trades": min_trades,
+        }
+        if requirements.get("registered"):
+            out["raw_n"] = len(control_trades_raw)
+        return out
+    if len(variant_trades) < min_trades:
+        out = {
+            "ok": False,
+            "reason": "insufficient_variant_trades",
+            "n": len(variant_trades),
+            "min_trades": min_trades,
+        }
+        if requirements.get("registered"):
+            out["raw_n"] = len(variant_trades_raw)
+        return out
 
     control_returns, control_hold_days = _extract_trade_returns(control_trades)
     variant_returns, variant_hold_days = _extract_trade_returns(variant_trades)
-    if len(control_returns) < MIN_TRADES_FOR_COMPARISON:
+    control_returns, control_hold_days = _valid_return_hold_samples(
+        control_returns,
+        control_hold_days,
+    )
+    variant_returns, variant_hold_days = _valid_return_hold_samples(
+        variant_returns,
+        variant_hold_days,
+    )
+    if len(control_returns) < min_trades:
         return {
             "ok": False,
             "reason": "insufficient_control_trades",
             "n": len(control_returns),
             "raw_n": len(control_trades),
+            "min_trades": min_trades,
         }
-    if len(variant_returns) < MIN_TRADES_FOR_COMPARISON:
+    if len(variant_returns) < min_trades:
         return {
             "ok": False,
             "reason": "insufficient_variant_trades",
             "n": len(variant_returns),
             "raw_n": len(variant_trades),
+            "min_trades": min_trades,
         }
     control_daily = _dailyize_returns(control_returns, control_hold_days)
     variant_daily = _dailyize_returns(variant_returns, variant_hold_days)
@@ -118,31 +410,44 @@ def evaluate_shadow_test(
 
     result["sharpe_ztest"] = _sharpe_ratio_ztest(control_daily, variant_daily)
 
+    tests = ["paired_ttest", "bootstrap_sharpe", "sharpe_ztest"]
     pvals = {
-        "paired_ttest": float(result["paired_ttest"].get("p_value", 1.0)),
-        "bootstrap_sharpe": float(result["bootstrap_sharpe"].get("p_value", 1.0)),
-        "sharpe_ztest": float(result["sharpe_ztest"].get("p_value", 1.0)),
+        name: _p_value_or_one(result[name].get("p_value", 1.0))
+        for name in tests
     }
     adjusted = _holm_bonferroni(pvals, alpha=SIGNIFICANCE_LEVEL)
     for k, v in adjusted.items():
-        result[k]["significant"] = bool(v["significant"])
+        result[k]["significant"] = _literal_true(v["significant"])
         result[k]["p_value_adjusted"] = round(v["p_value_adjusted"], 6)
     result["multiple_testing"] = {"method": "holm_bonferroni", "alpha": SIGNIFICANCE_LEVEL}
 
+    variant_mean_return = sum(variant_returns) / len(variant_returns)
+    variant_positive_expectancy = variant_mean_return > 0.0
+    significant_tests = sum(
+        1 for t in tests
+        if _literal_true(result[t].get("significant", False))
+    )
     tests_passed = sum(
-        1 for t in ["paired_ttest", "bootstrap_sharpe", "sharpe_ztest"]
-        if result[t].get("significant", False)
+        1 for t in tests
+        if _literal_true(result[t].get("significant", False))
+        and _literal_true(result[t].get("variant_better", False))
     )
+    result["significant_tests"] = significant_tests
     result["tests_passed"] = tests_passed
-    result["promote_variant"] = tests_passed >= 2
-    result["recommendation"] = (
-        "PROMOTE variant" if result["promote_variant"]
-        else "KEEP control (insufficient evidence)"
-    )
+    result["variant_positive_expectancy"] = variant_positive_expectancy
+    result["promote_variant"] = tests_passed >= 2 and variant_positive_expectancy
+    if result["promote_variant"]:
+        result["recommendation"] = "PROMOTE variant"
+    elif tests_passed >= 2:
+        result["recommendation"] = (
+            "KEEP control (variant lacks positive realized expectancy)"
+        )
+    else:
+        result["recommendation"] = "KEEP control (variant not significantly better)"
 
     logger.info(
         "[shadow_test] Control=%d vs Variant=%d: %d/3 tests passed -> %s",
-        control_pattern_id, variant_pattern_id, tests_passed, result["recommendation"],
+        control_id, variant_id, tests_passed, result["recommendation"],
     )
 
     return result
@@ -167,13 +472,17 @@ def _extract_trade_returns(trades: list[PaperTrade]) -> tuple[list[float], list[
         realized_return = paper_trade_return_pct(t)
         if realized_return is None:
             continue
-        returns.append(float(realized_return))
-        entry = getattr(t, "entry_date", None)
-        exit_ = getattr(t, "exit_date", None)
-        if entry and exit_:
+        entry_raw = getattr(t, "entry_date", None)
+        exit_raw = getattr(t, "exit_date", None)
+        if entry_raw and exit_raw:
+            entry = _parse_utc_datetime(entry_raw)
+            exit_ = _parse_utc_datetime(exit_raw)
+            if entry is None or exit_ is None or exit_ < entry:
+                continue
             days = max((exit_ - entry).total_seconds() / 86400.0, 1.0)
         else:
             days = 1.0
+        returns.append(float(realized_return))
         hold_days.append(days)
     return returns, hold_days
 
@@ -278,6 +587,17 @@ def _bootstrap_sharpe_difference(
     n_resamples: int = 1000,
 ) -> dict[str, Any]:
     """Bootstrap CI on Sharpe ratio difference (variant - control)."""
+    if _sample_std_or_none(control) is None or _sample_std_or_none(variant) is None:
+        return {
+            "mean_sharpe_diff": 0.0,
+            "ci_lower": 0.0,
+            "ci_upper": 0.0,
+            "p_value": 1.0,
+            "significant": False,
+            "variant_better": False,
+            "reason": "insufficient_sharpe_variance",
+        }
+
     rng = random.Random(42)
     diffs = []
 
@@ -313,6 +633,17 @@ def _sharpe_ratio_ztest(
     variant: list[float],
 ) -> dict[str, Any]:
     """Z-test comparing two Sharpe ratios (Jobson-Korkie test)."""
+    if _sample_std_or_none(control) is None or _sample_std_or_none(variant) is None:
+        return {
+            "control_sharpe": 0.0,
+            "variant_sharpe": 0.0,
+            "z_statistic": 0.0,
+            "p_value": 1.0,
+            "significant": False,
+            "variant_better": False,
+            "reason": "insufficient_sharpe_variance",
+        }
+
     c_sharpe = _sharpe(control)
     v_sharpe = _sharpe(variant)
     n_c = len(control)
@@ -339,9 +670,19 @@ def _sharpe(returns: list[float]) -> float:
     if not returns:
         return 0.0
     mean_r = sum(returns) / len(returns)
-    var_r = sum((r - mean_r) ** 2 for r in returns) / max(len(returns) - 1, 1)
-    std_r = math.sqrt(var_r)
-    return (mean_r / std_r * math.sqrt(252)) if std_r > 0 else 0.0
+    std_r = _sample_std_or_none(returns)
+    return (mean_r / std_r * math.sqrt(252)) if std_r else 0.0
+
+
+def _sample_std_or_none(values: list[float]) -> float | None:
+    if len(values) < 2:
+        return None
+    mean = sum(values) / len(values)
+    var = sum((x - mean) ** 2 for x in values) / max(len(values) - 1, 1)
+    if var <= 1e-12:
+        return None
+    std = math.sqrt(var)
+    return std if math.isfinite(std) and std > 0 else None
 
 
 def _holm_bonferroni(pvals: dict[str, float], alpha: float = 0.05) -> dict[str, dict[str, float | bool]]:
