@@ -2383,7 +2383,7 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
 
 
 {% block content %}
-{% include "trading/_header.html" %}
+{% if request.query_params.get('embed') != '1' %}{% include "trading/_header.html" %}{% endif %}
 
 <div class="t-body">
   <!-- Watchlist sidebar -->

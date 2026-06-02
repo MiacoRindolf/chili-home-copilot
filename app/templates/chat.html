@@ -479,6 +479,7 @@
 {% endblock %}
 
 {% block content %}
+  {% if request.query_params.get('embed') != '1' %}
   <header>
     <div style="display:flex;align-items:center;gap:10px;">
       <button id="sidebar-toggle-btn" title="Toggle sidebar" style="background:none;border:1px solid var(--border);border-radius:6px;padding:4px 10px;cursor:pointer;font-size:16px;color:var(--text-secondary);">☰</button>
@@ -492,6 +493,7 @@
       <button id="theme-toggle" title="Toggle dark mode">🌙</button>
     </div>
   </header>
+  {% endif %}
 
   <!-- Guest pairing banner (shown/hidden by JS based on isGuest) -->
   <div id="pair-banner" style="display:none;background:var(--accent);color:#fff;padding:8px 16px;text-align:center;font-size:.85rem;cursor:pointer;" onclick="openPairModal()">
