@@ -211,10 +211,14 @@
   }
   function snap(el, zone) {
     el.classList.add('snapping');
-    var W = desktop.clientWidth, H = desktop.clientHeight;
-    var r = { left: '0px', top: '0px', width: W + 'px', height: H + 'px' };
-    if (zone === 'left') r = { left: '0px', top: '0px', width: (W / 2) + 'px', height: H + 'px' };
-    if (zone === 'right') r = { left: (W / 2) + 'px', top: '0px', width: (W / 2) + 'px', height: H + 'px' };
+    var W = desktop.clientWidth, H = desktop.clientHeight, hw = (W / 2) + 'px', hh = (H / 2) + 'px';
+    var r = { left: '0px', top: '0px', width: W + 'px', height: H + 'px' };  // max
+    if (zone === 'left') r = { left: '0px', top: '0px', width: hw, height: H + 'px' };
+    else if (zone === 'right') r = { left: hw, top: '0px', width: hw, height: H + 'px' };
+    else if (zone === 'tl') r = { left: '0px', top: '0px', width: hw, height: hh };
+    else if (zone === 'tr') r = { left: hw, top: '0px', width: hw, height: hh };
+    else if (zone === 'bl') r = { left: '0px', top: hh, width: hw, height: hh };
+    else if (zone === 'br') r = { left: hw, top: hh, width: hw, height: hh };
     el.style.left = r.left; el.style.top = r.top; el.style.width = r.width; el.style.height = r.height;
     setTimeout(function () { el.classList.remove('snapping'); }, 160);
   }
@@ -229,7 +233,14 @@
       el.style.left = (ol + e.clientX - sx) + 'px'; el.style.top = (ot + e.clientY - sy) + 'px';
       var rect = desktop.getBoundingClientRect(), W = desktop.clientWidth, H = desktop.clientHeight;
       var gx = e.clientX - rect.left, gy = e.clientY - rect.top; zone = null;
-      if (gy < 16) { zone = 'max'; showGhost(0, 0, W, H); }
+      // Corners (quarter tiles) take priority over the edge halves; then the
+      // top strip maximizes. CX/CY are the corner hot-zone sizes.
+      var CX = 130, CY = 110;
+      if (gx < CX && gy < CY) { zone = 'tl'; showGhost(0, 0, W / 2, H / 2); }
+      else if (gx > W - CX && gy < CY) { zone = 'tr'; showGhost(W / 2, 0, W / 2, H / 2); }
+      else if (gx < CX && gy > H - CY) { zone = 'bl'; showGhost(0, H / 2, W / 2, H / 2); }
+      else if (gx > W - CX && gy > H - CY) { zone = 'br'; showGhost(W / 2, H / 2, W / 2, H / 2); }
+      else if (gy < 16) { zone = 'max'; showGhost(0, 0, W, H); }
       else if (gx < 22) { zone = 'left'; showGhost(0, 0, W / 2, H); }
       else if (gx > W - 22) { zone = 'right'; showGhost(W / 2, 0, W / 2, H); }
       else hideGhost();
