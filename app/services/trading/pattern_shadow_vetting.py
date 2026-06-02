@@ -28,8 +28,12 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from ...models.trading import ScanPattern
-from .realized_pnl_sql import paper_trade_return_fraction_sql
+from ...models.trade_relation_symbols import MANAGEMENT_ENVELOPES_RELATION
+from ...models.trading import PatternTradeRow, ScanPattern
+from .realized_pnl_sql import (
+    paper_trade_return_fraction_sql,
+    trade_return_fraction_sql,
+)
 
 logger = logging.getLogger(__name__)
 LOG_PREFIX = "[pattern_shadow_vetting]"
@@ -552,6 +556,106 @@ def _score_threshold_from_pool(db: Session, *, settings_: Any) -> float | None:
     return _empirical_percentile([float(r[0]) for r in rows], q)
 
 
+def _apply_min_pilot_roster(
+    rows: list[dict[str, Any]],
+    *,
+    settings_: Any,
+) -> None:
+    """Keep the pilot rung from being empty without weakening full promotion.
+
+    The adaptive percentile remains authoritative. This fallback only applies
+    when there are fewer current/eligible pilot rows than the configured
+    minimum, and candidates must clear hard evidence floors before getting
+    reversible micro-risk exposure.
+    """
+    if not bool(getattr(settings_, "chili_pilot_promoted_enabled", True)):
+        return
+    target = int(getattr(settings_, "chili_shadow_vetting_min_pilot_roster", 1) or 0)
+    if target <= 0:
+        return
+    current_or_ready = sum(
+        1
+        for row in rows
+        if (
+            row.get("lifecycle_stage") == "pilot_promoted"
+            and not bool(row.get("recert_required"))
+        )
+        or row.get("pilot_eligible")
+    )
+    slots = max(0, target - current_or_ready)
+    if slots <= 0:
+        return
+
+    min_score = float(getattr(settings_, "chili_shadow_vetting_min_pilot_score", 0.70))
+    threshold_ratio = float(
+        getattr(settings_, "chili_shadow_vetting_min_pilot_score_threshold_ratio", 0.90)
+    )
+    min_effective_n = float(
+        getattr(settings_, "chili_shadow_vetting_min_pilot_effective_n", 10.0)
+    )
+    min_weighted_wr = float(
+        getattr(settings_, "chili_shadow_vetting_min_pilot_weighted_wr", 0.55)
+    )
+    min_recent_wr = float(
+        getattr(settings_, "chili_shadow_vetting_min_pilot_recent_wr", 0.55)
+    )
+    min_freshness = float(
+        getattr(settings_, "chili_shadow_vetting_min_pilot_freshness", 0.25)
+    )
+    max_decay = float(
+        getattr(settings_, "chili_shadow_vetting_max_pilot_directional_decay", 0.40)
+    )
+
+    def _passes(row: dict[str, Any]) -> bool:
+        if row.get("pilot_eligible") or row.get("eligible"):
+            return False
+        if row.get("lifecycle_stage") != "shadow_promoted":
+            return False
+        if bool(row.get("recert_required")):
+            return False
+        if not bool(row.get("promotion_gate_passed")) or not bool(row.get("cpcv_ready")):
+            return False
+        pilot_score = _safe_float(row.get("pilot_score"))
+        if pilot_score is None:
+            return False
+        threshold = _safe_float(row.get("pilot_score_threshold"))
+        effective_floor = min_score
+        if threshold is not None:
+            effective_floor = max(effective_floor, threshold * threshold_ratio)
+        if pilot_score < effective_floor:
+            return False
+        if float(row.get("effective_sample_n") or 0.0) < min_effective_n:
+            return False
+        if float(row.get("weighted_directional_wr") or 0.0) < min_weighted_wr:
+            return False
+        if float(row.get("recent_directional_wr") or 0.0) < min_recent_wr:
+            return False
+        if float(row.get("freshness") or 0.0) < min_freshness:
+            return False
+        if float(row.get("directional_decay") or 0.0) > max_decay:
+            return False
+        return True
+
+    candidates = sorted(
+        [row for row in rows if _passes(row)],
+        key=lambda row: (
+            float(row.get("pilot_score") or 0.0),
+            float(row.get("effective_sample_n") or 0.0),
+            float(row.get("recent_directional_wr") or 0.0),
+        ),
+        reverse=True,
+    )
+    for row in candidates[:slots]:
+        threshold = _safe_float(row.get("pilot_score_threshold"))
+        effective_floor = min_score
+        if threshold is not None:
+            effective_floor = max(effective_floor, threshold * threshold_ratio)
+        row["pilot_eligible"] = True
+        row["pilot_min_roster_eligible"] = True
+        row["pilot_min_roster_reason"] = "top_clean_shadow_when_pilot_roster_empty"
+        row["pilot_min_roster_effective_floor"] = effective_floor
+
+
 def select_shadow_vetting_candidates(
     db: Session,
     *,
@@ -576,7 +680,10 @@ def select_shadow_vetting_candidates(
                 sp.promotion_gate_passed,
                 sp.cpcv_median_sharpe,
                 sp.deflated_sharpe,
-                sp.pbo
+                sp.pbo,
+                sp.promotion_gate_reasons
+                , sp.recert_required
+                , sp.recert_reason
             FROM scan_patterns sp
             WHERE sp.active IS TRUE
               AND sp.lifecycle_stage IN ('shadow_promoted', 'pilot_promoted')
@@ -621,6 +728,7 @@ def select_shadow_vetting_candidates(
             and pilot_score is not None
             and pilot_threshold is not None
             and pilot_score >= float(pilot_threshold)
+            and not bool(row[7])
             and bool(row[2])
             and all(row[i] is not None for i in (3, 4, 5))
         )
@@ -631,7 +739,18 @@ def select_shadow_vetting_candidates(
                 "lifecycle_stage": (pilot_row or {}).get("lifecycle_stage"),
                 "quality_composite_score": score,
                 "promotion_gate_passed": bool(row[2]),
+                "promotion_gate_reasons": list(row[6] or []),
+                "recert_required": bool(row[7]),
+                "recert_reason": row[8],
                 "cpcv_ready": all(row[i] is not None for i in (3, 4, 5)),
+                "cpcv_n_paths": int((pilot_row or {}).get("cpcv_n_paths") or 0),
+                "cpcv_median_sharpe": (
+                    float(row[3]) if row[3] is not None else None
+                ),
+                "deflated_sharpe": (
+                    float(row[4]) if row[4] is not None else None
+                ),
+                "pbo": float(row[5]) if row[5] is not None else None,
                 "raw_sample_n": int(evidence.get("raw_sample_n") or 0),
                 "paper_dynamic_sample_n": int(evidence.get("paper_dynamic_sample_n") or 0),
                 "paper_dynamic_exit_sample_n": int(
@@ -661,9 +780,422 @@ def select_shadow_vetting_candidates(
                 "adaptive_full_eligible": adaptive_full_eligible,
                 "eligible": full_eligible,
                 "pilot_eligible": pilot_eligible,
+                "pilot_min_roster_eligible": False,
+                "pilot_min_roster_reason": None,
+                "pilot_min_roster_effective_floor": None,
             }
         )
+    _apply_min_pilot_roster(out, settings_=settings_)
     return out
+
+
+def _shadow_gate_refresh_effective_floor(
+    row: dict[str, Any],
+    *,
+    settings_: Any,
+) -> float | None:
+    pilot_score = _safe_float(row.get("pilot_score"))
+    if pilot_score is None:
+        return None
+    min_score = float(
+        getattr(
+            settings_,
+            "chili_shadow_vetting_refresh_blocked_gate_min_score",
+            getattr(settings_, "chili_shadow_vetting_min_pilot_score", 0.70),
+        )
+    )
+    threshold_ratio = float(
+        getattr(
+            settings_,
+            "chili_shadow_vetting_refresh_blocked_gate_threshold_ratio",
+            0.85,
+        )
+    )
+    threshold = _safe_float(row.get("pilot_score_threshold"))
+    if threshold is not None:
+        min_score = max(min_score, threshold * threshold_ratio)
+    return min_score
+
+
+def _shadow_gate_refresh_candidates(
+    rows: list[dict[str, Any]],
+    *,
+    settings_: Any,
+) -> list[dict[str, Any]]:
+    """Return stale-gate shadows worth spending a fresh CPCV evaluation on."""
+    min_effective_n = float(
+        getattr(settings_, "chili_shadow_vetting_min_pilot_effective_n", 10.0)
+    )
+    min_weighted_wr = float(
+        getattr(settings_, "chili_shadow_vetting_min_pilot_weighted_wr", 0.55)
+    )
+    min_recent_wr = float(
+        getattr(settings_, "chili_shadow_vetting_min_pilot_recent_wr", 0.55)
+    )
+    min_freshness = float(
+        getattr(settings_, "chili_shadow_vetting_min_pilot_freshness", 0.25)
+    )
+    max_decay = float(
+        getattr(settings_, "chili_shadow_vetting_max_pilot_directional_decay", 0.40)
+    )
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if row.get("lifecycle_stage") != "shadow_promoted":
+            continue
+        if bool(row.get("promotion_gate_passed")):
+            continue
+        if not bool(row.get("cpcv_ready")):
+            continue
+        pilot_score = _safe_float(row.get("pilot_score"))
+        effective_floor = _shadow_gate_refresh_effective_floor(
+            row, settings_=settings_,
+        )
+        if pilot_score is None or effective_floor is None or pilot_score < effective_floor:
+            continue
+        if float(row.get("effective_sample_n") or 0.0) < min_effective_n:
+            continue
+        if float(row.get("weighted_directional_wr") or 0.0) < min_weighted_wr:
+            continue
+        if float(row.get("recent_directional_wr") or 0.0) < min_recent_wr:
+            continue
+        if float(row.get("freshness") or 0.0) < min_freshness:
+            continue
+        if float(row.get("directional_decay") or 0.0) > max_decay:
+            continue
+        out.append({
+            **row,
+            "promotion_gate_refresh_effective_floor": effective_floor,
+        })
+
+    return sorted(
+        out,
+        key=lambda row: (
+            float(row.get("pilot_score") or 0.0),
+            float(row.get("effective_sample_n") or 0.0),
+            float(row.get("recent_directional_wr") or 0.0),
+        ),
+        reverse=True,
+    )
+
+
+def _gate_rows_from_pattern_trades(
+    db: Session,
+    pattern: ScanPattern,
+) -> list[dict[str, Any]]:
+    ptr_rows = (
+        db.query(PatternTradeRow)
+        .filter(
+            PatternTradeRow.scan_pattern_id == int(pattern.id),
+            PatternTradeRow.outcome_return_pct.isnot(None),
+        )
+        .order_by(PatternTradeRow.as_of_ts.asc())
+        .all()
+    )
+    if not ptr_rows:
+        kind = str(
+            getattr(pattern, "pattern_evidence_kind", None) or "realized_pnl"
+        ).strip().lower()
+        if kind == "ml_signal":
+            return []
+        return _gate_rows_from_realized_trade_outcomes(db, pattern)
+
+    from .promotion_gate import normalize_ptr_row_features
+
+    out: list[dict[str, Any]] = []
+    for row in ptr_rows:
+        features = row.features_json if isinstance(row.features_json, dict) else {}
+        out.append(
+            normalize_ptr_row_features(
+                outcome_return_pct=row.outcome_return_pct,
+                as_of_ts=row.as_of_ts,
+                ticker=row.ticker,
+                timeframe=row.timeframe,
+                features_json=features,
+            )
+        )
+    return out
+
+
+def _gate_rows_from_realized_trade_outcomes(
+    db: Session,
+    pattern: ScanPattern,
+) -> list[dict[str, Any]]:
+    """Use qualified live/paper realized returns when PTR evidence is absent."""
+    pid = int(getattr(pattern, "id", 0) or 0)
+    if pid <= 0:
+        return []
+    timeframe = (getattr(pattern, "timeframe", None) or "1d").strip() or "1d"
+    rows = db.execute(
+        text(
+            f"""
+            WITH live_rows AS (
+                SELECT
+                    'live_trade' AS source,
+                    t.ticker,
+                    t.entry_date AS bar_start_utc,
+                    ({trade_return_fraction_sql("t")}) AS realized_return
+                FROM {MANAGEMENT_ENVELOPES_RELATION} t
+                WHERE t.scan_pattern_id = :pid
+                  AND t.status = 'closed'
+                  AND t.entry_date IS NOT NULL
+                  AND t.pnl IS NOT NULL
+                  AND t.entry_price > 0
+                  AND t.quantity > 0
+            ),
+            paper_rows AS (
+                SELECT
+                    'autotrader_paper_dynamic' AS source,
+                    pt.ticker,
+                    pt.entry_date AS bar_start_utc,
+                    ({paper_trade_return_fraction_sql("pt")}) AS realized_return
+                FROM trading_paper_trades pt
+                WHERE pt.scan_pattern_id = :pid
+                  AND pt.status = 'closed'
+                  AND pt.entry_date IS NOT NULL
+                  AND pt.exit_date IS NOT NULL
+                  AND pt.pnl IS NOT NULL
+                  AND pt.entry_price > 0
+                  AND pt.quantity > 0
+                  AND (
+                    pt.paper_shadow_of_alert_id IS NOT NULL
+                    OR COALESCE(pt.signal_json, '{{}}'::jsonb) @> '{{"auto_trader_v1": true}}'::jsonb
+                    OR COALESCE(pt.signal_json, '{{}}'::jsonb) @> '{{"paper_shadow": true}}'::jsonb
+                  )
+            )
+            SELECT source, ticker, bar_start_utc, realized_return
+            FROM (
+                SELECT * FROM live_rows
+                UNION ALL
+                SELECT * FROM paper_rows
+            ) evidence
+            WHERE realized_return IS NOT NULL
+            ORDER BY bar_start_utc ASC
+            """
+        ),
+        {"pid": pid},
+    ).mappings().all()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        ret = _safe_float(row.get("realized_return"))
+        ts = row.get("bar_start_utc")
+        if ret is None or ts is None:
+            continue
+        out.append({
+            "ret_5d": ret,
+            "bar_start_utc": ts,
+            "ticker": row.get("ticker") or "UNKNOWN",
+            "bar_interval": timeframe,
+            "source": row.get("source"),
+        })
+    return out
+
+
+def _evaluate_shadow_gate_refresh(
+    db: Session,
+    pattern: ScanPattern,
+    gate_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    from .promotion_gate import (
+        _count_variants_in_family,
+        cpcv_eval_to_scan_pattern_fields,
+        finalize_promotion_with_cpcv,
+        persist_cpcv_shadow_eval,
+    )
+
+    n_hypotheses = _count_variants_in_family(db, pattern)
+    detail = finalize_promotion_with_cpcv(
+        {},
+        gate_rows,
+        n_hypotheses_tested=max(1, int(n_hypotheses or 1)),
+        scan_pattern=pattern,
+    )
+    payload = detail.get("cpcv_promotion_gate") or {}
+    patch = cpcv_eval_to_scan_pattern_fields(payload)
+    try:
+        persist_cpcv_shadow_eval(db, pattern, payload)
+    except Exception:
+        logger.debug(
+            "%s cpcv_shadow_log failed during stale gate refresh",
+            LOG_PREFIX,
+            exc_info=True,
+        )
+    return {"payload": payload, "patch": patch}
+
+
+def refresh_blocked_shadow_promotion_gates(
+    db: Session,
+    *,
+    candidate_rows: list[dict[str, Any]] | None = None,
+    settings_: Any = None,
+    now: datetime | None = None,
+    execute: bool = True,
+) -> dict[str, Any]:
+    """Refresh stale CPCV gate fields for strong shadows before pilot vetting.
+
+    This does not promote by itself. It only recomputes and persists the same
+    promotion-gate columns the normal backtest/CPCV path owns, then the regular
+    shadow-vetting cycle decides whether the refreshed pattern can enter pilot.
+    """
+    if settings_ is None:
+        from ...config import settings as _settings
+
+        settings_ = _settings
+    if not bool(
+        getattr(settings_, "chili_shadow_vetting_refresh_blocked_gate_enabled", True)
+    ):
+        return {"ok": True, "skipped": "flag_disabled"}
+
+    limit = int(
+        getattr(settings_, "chili_shadow_vetting_refresh_blocked_gate_limit", 4) or 0
+    )
+    if limit <= 0:
+        return {"ok": True, "skipped": "limit_disabled"}
+
+    rows = (
+        list(candidate_rows)
+        if candidate_rows is not None
+        else select_shadow_vetting_candidates(db, settings_=settings_, now=now)
+    )
+    candidates = _shadow_gate_refresh_candidates(rows, settings_=settings_)[:limit]
+    planned = [
+        {
+            "scan_pattern_id": int(row["scan_pattern_id"]),
+            "pilot_score": row.get("pilot_score"),
+            "pilot_score_threshold": row.get("pilot_score_threshold"),
+            "promotion_gate_refresh_effective_floor": row.get(
+                "promotion_gate_refresh_effective_floor"
+            ),
+            "effective_sample_n": row.get("effective_sample_n"),
+            "weighted_directional_wr": row.get("weighted_directional_wr"),
+            "recent_directional_wr": row.get("recent_directional_wr"),
+            "freshness": row.get("freshness"),
+        }
+        for row in candidates
+    ]
+    if not candidates:
+        return {
+            "ok": True,
+            "dry_run": not bool(execute),
+            "planned": [],
+            "planned_count": 0,
+            "refreshed_count": 0,
+            "refreshed": [],
+            "skipped": [],
+            "failed": [],
+        }
+    if not bool(execute):
+        return {
+            "ok": True,
+            "dry_run": True,
+            "planned": planned,
+            "planned_count": len(planned),
+            "refreshed_count": 0,
+            "refreshed": [],
+            "skipped": [],
+            "failed": [],
+        }
+
+    min_trades = int(getattr(settings_, "chili_cpcv_min_trades", 15) or 15)
+    refreshed: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+
+    for row in candidates:
+        pid = int(row["scan_pattern_id"])
+        pattern = db.get(ScanPattern, pid)
+        if pattern is None:
+            skipped.append({"scan_pattern_id": pid, "reason": "pattern_not_found"})
+            continue
+        try:
+            gate_rows = _gate_rows_from_pattern_trades(db, pattern)
+            if len(gate_rows) < min_trades:
+                skipped.append({
+                    "scan_pattern_id": pid,
+                    "reason": "insufficient_pattern_trade_rows",
+                    "rows": len(gate_rows),
+                    "min_required": min_trades,
+                })
+                continue
+            eval_result = _evaluate_shadow_gate_refresh(db, pattern, gate_rows)
+            payload = dict(eval_result.get("payload") or {})
+            patch = dict(eval_result.get("patch") or {})
+            if not patch:
+                skipped.append({
+                    "scan_pattern_id": pid,
+                    "reason": str(payload.get("reason") or "no_cpcv_patch"),
+                })
+                continue
+
+            old_gate = bool(pattern.promotion_gate_passed)
+            for key, value in patch.items():
+                setattr(pattern, key, value)
+            db.commit()
+            refreshed.append({
+                "scan_pattern_id": pid,
+                "old_promotion_gate_passed": old_gate,
+                "new_promotion_gate_passed": bool(pattern.promotion_gate_passed),
+                "promotion_gate_reasons": list(pattern.promotion_gate_reasons or []),
+                "cpcv_n_paths": int(pattern.cpcv_n_paths or 0),
+                "cpcv_median_sharpe": pattern.cpcv_median_sharpe,
+                "deflated_sharpe": pattern.deflated_sharpe,
+                "pbo": pattern.pbo,
+            })
+        except Exception as exc:
+            db.rollback()
+            logger.warning(
+                "%s stale promotion-gate refresh failed pattern_id=%s: %s",
+                LOG_PREFIX,
+                pid,
+                exc,
+                exc_info=True,
+            )
+            failed.append({
+                "scan_pattern_id": pid,
+                "reason": f"{type(exc).__name__}: {str(exc)[:200]}",
+            })
+
+    return {
+        "ok": not failed,
+        "dry_run": False,
+        "planned": planned,
+        "planned_count": len(planned),
+        "refreshed_count": len(refreshed),
+        "refreshed": refreshed,
+        "skipped": skipped,
+        "failed": failed,
+    }
+
+
+def _negative_realized_gate_hold_reason(
+    row: dict[str, Any],
+    *,
+    settings_: Any,
+) -> str | None:
+    """Return a hold reason when realized CPCV says a shadow is economically bad."""
+    if not bool(
+        getattr(settings_, "chili_shadow_vetting_hold_failed_realized_gate_enabled", True)
+    ):
+        return None
+    if row.get("lifecycle_stage") != "shadow_promoted":
+        return None
+    if bool(row.get("promotion_gate_passed")):
+        return None
+    reasons = {str(x) for x in (row.get("promotion_gate_reasons") or [])}
+    if not reasons or "cpcv_n_paths_below_provisional_min" in reasons:
+        return None
+    if "adaptive_median_sharpe_below_pool_threshold" not in reasons:
+        return None
+    med_sharpe = _safe_float(row.get("cpcv_median_sharpe"))
+    max_bad = float(
+        getattr(settings_, "chili_shadow_vetting_failed_gate_max_median_sharpe", 0.0)
+    )
+    if med_sharpe is None or med_sharpe > max_bad:
+        return None
+    cpcv_paths = int(row.get("cpcv_n_paths") or 0)
+    if cpcv_paths <= 0:
+        return None
+    return "negative_realized_cpcv_gate"
 
 
 def run_shadow_vetting_cycle(
@@ -694,6 +1226,34 @@ def run_shadow_vetting_cycle(
         return {"ok": False, "error": f"score_refresh_failed:{type(exc).__name__}"}
 
     now = now or datetime.utcnow()
+    initial_candidates = select_shadow_vetting_candidates(db, settings_=settings_, now=now)
+    gate_refresh_result = refresh_blocked_shadow_promotion_gates(
+        db,
+        candidate_rows=initial_candidates,
+        settings_=settings_,
+        now=now,
+    )
+    score_result_after_gate_refresh = None
+    if int(gate_refresh_result.get("refreshed_count") or 0) > 0:
+        try:
+            from .pattern_quality_score import compute_and_persist_scores
+
+            score_result_after_gate_refresh = compute_and_persist_scores(
+                db, settings_=settings_,
+            )
+        except Exception as exc:
+            db.rollback()
+            logger.warning(
+                "%s post gate-refresh score refresh failed: %s",
+                LOG_PREFIX,
+                exc,
+                exc_info=True,
+            )
+            return {
+                "ok": False,
+                "error": f"post_gate_refresh_score_failed:{type(exc).__name__}",
+                "promotion_gate_refresh": gate_refresh_result,
+            }
     candidates = select_shadow_vetting_candidates(db, settings_=settings_, now=now)
     alpha_gate_snapshot: dict[str, Any] | None = None
     alpha_gate_allows_full_risk = True
@@ -743,6 +1303,7 @@ def run_shadow_vetting_cycle(
     promoted_ids: list[int] = []
     pilot_ids: list[int] = []
     realized_ev_blocked_ids: list[int] = []
+    realized_gate_held_ids: list[int] = []
     collecting = 0
     held = 0
 
@@ -758,6 +1319,48 @@ def run_shadow_vetting_cycle(
         if pattern is None:
             continue
         old_lifecycle = (pattern.lifecycle_stage or "").strip().lower()
+        old_status_for_hold = (pattern.promotion_status or "").strip()
+        realized_gate_hold_reason = _negative_realized_gate_hold_reason(
+            row,
+            settings_=settings_,
+        )
+        if realized_gate_hold_reason:
+            pattern.lifecycle_stage = "challenged"
+            pattern.promotion_status = "shadow_realized_gate_failed"
+            pattern.lifecycle_changed_at = now
+            pattern.active = False
+            pattern.recert_required = False
+            pattern.recert_reason = realized_gate_hold_reason
+            realized_gate_held_ids.append(pid)
+            try:
+                from .brain_work.promotion_surface import emit_promotion_surface_change
+
+                emit_promotion_surface_change(
+                    db,
+                    scan_pattern_id=pid,
+                    old_promotion_status=old_status_for_hold,
+                    old_lifecycle_stage=old_lifecycle,
+                    new_promotion_status=pattern.promotion_status,
+                    new_lifecycle_stage=pattern.lifecycle_stage,
+                    source="shadow_vetting_realized_gate_hold",
+                    extra={
+                        "reason": realized_gate_hold_reason,
+                        "cpcv_n_paths": row.get("cpcv_n_paths"),
+                        "cpcv_median_sharpe": row.get("cpcv_median_sharpe"),
+                        "deflated_sharpe": row.get("deflated_sharpe"),
+                        "pbo": row.get("pbo"),
+                        "promotion_gate_reasons": row.get("promotion_gate_reasons") or [],
+                        "pilot_score": row.get("pilot_score"),
+                        "pilot_score_threshold": row.get("pilot_score_threshold"),
+                    },
+                )
+            except Exception:
+                logger.debug(
+                    "%s realized gate hold surface emit failed",
+                    LOG_PREFIX,
+                    exc_info=True,
+                )
+            continue
         if row["eligible"] and bool(
             getattr(settings_, "chili_shadow_vetting_require_realized_ev_for_full", True)
         ):
@@ -851,6 +1454,15 @@ def run_shadow_vetting_cycle(
                             "directional_decay": row["directional_decay"],
                             "freshness": row["freshness"],
                             "path_quality": row["path_quality"],
+                            "pilot_min_roster_eligible": row.get(
+                                "pilot_min_roster_eligible"
+                            ),
+                            "pilot_min_roster_reason": row.get(
+                                "pilot_min_roster_reason"
+                            ),
+                            "pilot_min_roster_effective_floor": row.get(
+                                "pilot_min_roster_effective_floor"
+                            ),
                         },
                     )
                 except Exception:
@@ -873,6 +1485,8 @@ def run_shadow_vetting_cycle(
     result = {
         "ok": True,
         "score_result": score_result,
+        "score_result_after_gate_refresh": score_result_after_gate_refresh,
+        "promotion_gate_refresh": gate_refresh_result,
         "shadow_candidates": len(candidates),
         "promoted_count": len(promoted_ids),
         "promoted_ids": promoted_ids,
@@ -880,6 +1494,8 @@ def run_shadow_vetting_cycle(
         "pilot_ids": pilot_ids,
         "realized_ev_blocked_count": len(realized_ev_blocked_ids),
         "realized_ev_blocked_ids": realized_ev_blocked_ids,
+        "realized_gate_held_count": len(realized_gate_held_ids),
+        "realized_gate_held_ids": realized_gate_held_ids,
         "collecting_ev": collecting,
         "held": held,
         "alpha_portfolio_gate": {
