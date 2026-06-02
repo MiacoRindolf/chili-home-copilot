@@ -35,4 +35,11 @@
 .ws-rb .os-dot{position:absolute;bottom:5px;left:50%;transform:translateX(-50%);width:4px;height:4px;border-radius:50%;background:var(--ws-accent);opacity:0;transition:opacity .15s}
 .ws-rb.os-open .os-dot{opacity:1}
 
+/* taskbar (minimized windows) */
+.os-taskbar{position:absolute;left:0;right:0;bottom:0;display:none;gap:var(--ws-s2);padding:var(--ws-s2) var(--ws-s4);background:color-mix(in srgb,var(--ws-surface) 82%,transparent);backdrop-filter:blur(12px);border-top:1px solid var(--ws-border);z-index:9997}
+.os-taskbar.show{display:flex}
+.os-chip{display:inline-flex;align-items:center;gap:7px;height:30px;padding:0 12px;border-radius:var(--ws-r-pill);background:var(--ws-surface-2);border:1px solid var(--ws-border);color:var(--ws-text-2);font:var(--ws-fw-med) var(--ws-fs-12)/1 var(--ws-font-ui);cursor:pointer;transition:all var(--ws-dur)}
+.os-chip:hover{color:var(--ws-text);border-color:var(--ws-border-strong);transform:translateY(-1px)}
+.os-chip .ci{font-size:13px}
+
 @media(max-width:760px){.os-win{left:8px!important;top:8px!important;width:calc(100vw - 72px)!important;height:calc(100vh - 80px)!important}.os-rs{display:none}}

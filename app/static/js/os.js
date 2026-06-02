@@ -9,6 +9,27 @@
   if (!desktop) return;
   var Z = 20, wins = {}, order = [];
 
+  // Taskbar for minimized windows (bottom of the desktop).
+  var taskbar = document.createElement('div');
+  taskbar.className = 'os-taskbar';
+  desktop.appendChild(taskbar);
+  function addChip(app, title, icon) {
+    if (taskbar.querySelector('[data-chip="' + app + '"]')) return;
+    var c = document.createElement('button');
+    c.className = 'os-chip'; c.dataset.chip = app; c.title = 'Restore ' + title;
+    c.innerHTML = '<span class="ci">' + (icon || '🗔') + '</span>' + title;
+    c.addEventListener('click', function () {
+      var w = wins[app]; if (w) { w.style.display = 'flex'; focusWin(app); }
+      removeChip(app); syncHome();
+    });
+    taskbar.appendChild(c); taskbar.classList.add('show');
+  }
+  function removeChip(app) {
+    var c = taskbar.querySelector('[data-chip="' + app + '"]');
+    if (c) c.remove();
+    if (!taskbar.children.length) taskbar.classList.remove('show');
+  }
+
   function appsOpen() { return Object.keys(wins).filter(function (a) { return wins[a]; }).length; }
   function syncHome() { home && home.classList.toggle('dimmed', appsOpen() > 0); }
   function setHash() {
@@ -26,7 +47,7 @@
 
   function openApp(cfg) {
     var app = cfg.app;
-    if (wins[app]) { wins[app].style.display = 'flex'; focusWin(app); return; }
+    if (wins[app]) { wins[app].style.display = 'flex'; focusWin(app); removeChip(app); syncHome(); return; }
     var n = order.length;
     var el = document.createElement('div');
     el.className = 'os-win active';
@@ -49,7 +70,7 @@
     var ifr = el.querySelector('iframe');
     ifr.addEventListener('load', function () { var l = el.querySelector('.os-loading'); if (l) l.remove(); });
     el.querySelector('.close').addEventListener('click', function () { closeApp(app); });
-    el.querySelector('.min').addEventListener('click', function () { el.style.display = 'none'; order = order.filter(function (a) { return a !== app; }); syncHome(); setHash(); });
+    el.querySelector('.min').addEventListener('click', function () { el.style.display = 'none'; order = order.filter(function (a) { return a !== app; }); addChip(app, cfg.title, cfg.icon); syncHome(); setHash(); });
     var restore = null;
     el.querySelector('.max').addEventListener('click', function () {
       if (restore) { el.style.left = restore.l; el.style.top = restore.t; el.style.width = restore.w; el.style.height = restore.h; restore = null; }
@@ -65,7 +86,7 @@
     setTimeout(function () { el.remove(); }, 120);
     delete wins[app]; order = order.filter(function (a) { return a !== app; });
     var d = dock(app); if (d) d.classList.remove('os-open');
-    syncHome(); setHash();
+    removeChip(app); syncHome(); setHash();
   }
   function snap(el, zone) {
     el.classList.add('snapping');
@@ -120,6 +141,15 @@
     o.addEventListener('click', function (e) {
       e.preventDefault(); openApp(cfgFromEl(o));
       var scrim = document.getElementById('ws-scrim'); if (scrim) scrim.classList.remove('open');
+    });
+  });
+
+  // Any [data-os-open="app"] element (e.g. dashboard buttons/quick-actions)
+  // opens that app as a window instead of navigating. href stays as a fallback.
+  document.querySelectorAll('[data-os-open]').forEach(function (el) {
+    el.addEventListener('click', function (e) {
+      var b = document.querySelector('.ws-rb[data-app="' + el.dataset.osOpen + '"][data-src]');
+      if (b) { e.preventDefault(); openApp(cfgFromEl(b)); }
     });
   });
 
