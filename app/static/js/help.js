@@ -39,4 +39,16 @@
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     e.preventDefault(); toggle();
   });
+
+  // ── First-run welcome — shown once (gated on localStorage), then dismissed. ──
+  var wscrim = document.getElementById('ws-welcome-scrim');
+  if (wscrim) {
+    var go = document.getElementById('ws-welcome-go');
+    var welcomed = false; try { welcomed = localStorage.getItem('chili-os-welcomed') === '1'; } catch (e) {}
+    var closeWelcome = function () { wscrim.classList.remove('open'); try { localStorage.setItem('chili-os-welcomed', '1'); } catch (e) {} };
+    if (!welcomed) { wscrim.classList.add('open'); if (go) try { go.focus(); } catch (e) {} }
+    if (go) go.addEventListener('click', closeWelcome);
+    wscrim.addEventListener('click', function (e) { if (e.target === wscrim) closeWelcome(); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && wscrim.classList.contains('open')) { e.preventDefault(); closeWelcome(); } });
+  }
 })();
