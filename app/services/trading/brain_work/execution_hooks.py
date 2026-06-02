@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Optional
 
 from sqlalchemy import text
@@ -26,6 +27,123 @@ logger = logging.getLogger(__name__)
 
 def _exec_feedback_debounce_s() -> int:
     return int(getattr(settings, "brain_work_exec_feedback_debounce_seconds", 45))
+
+
+TIME_DECAY_EXIT_VARIANT_SOURCE = "paper_time_decay_edge_miss"
+TIME_DECAY_EXIT_VARIANT_REASONS = frozenset({
+    "exit_engine_time_decay",
+    "time_decay",
+    "exit_time_decay",
+})
+
+
+def _json_dict(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _finite_float(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return out if math.isfinite(out) else None
+
+
+def _paper_expected_net_pct(pt: PaperTrade) -> float | None:
+    sig = _json_dict(getattr(pt, "signal_json", None))
+    edge = _json_dict(sig.get("entry_edge"))
+    expected = _finite_float(edge.get("expected_net_pct"))
+    if expected is not None:
+        return expected
+    return _finite_float(sig.get("entry_edge_expected_net_pct"))
+
+
+def _paper_asset_class(pt: PaperTrade) -> str:
+    sig = _json_dict(getattr(pt, "signal_json", None))
+    raw = str(sig.get("asset_class") or sig.get("asset_type") or "").strip().lower()
+    if raw in {"crypto", "coin", "coinbase_spot"}:
+        return "crypto"
+    if raw in {"option", "options", "robinhood_options"}:
+        return "options"
+    ticker = str(getattr(pt, "ticker", "") or "").strip().upper()
+    if ticker.endswith("-USD"):
+        return "crypto"
+    return "stock"
+
+
+def _emit_time_decay_exit_variant_work(
+    db: Session,
+    pt: PaperTrade,
+    *,
+    close_extra: dict[str, Any],
+) -> int | None:
+    reason = str(getattr(pt, "exit_reason", "") or "").strip().lower()
+    if reason not in TIME_DECAY_EXIT_VARIANT_REASONS:
+        return None
+    pattern_id = getattr(pt, "scan_pattern_id", None)
+    if pattern_id is None:
+        return None
+    expected_net_pct = _paper_expected_net_pct(pt)
+    if expected_net_pct is None or expected_net_pct <= 0.0:
+        return None
+    realized_return_pct = _finite_float(close_extra.get("realized_return_pct"))
+    pnl = _finite_float(getattr(pt, "pnl", None))
+    if (realized_return_pct is None or realized_return_pct >= 0.0) and (
+        pnl is None or pnl >= 0.0
+    ):
+        return None
+
+    sig = _json_dict(getattr(pt, "signal_json", None))
+    paper_meta = _json_dict(sig.get("_paper_meta"))
+    exit_config = _json_dict(paper_meta.get("exit_config"))
+    asset_class = _paper_asset_class(pt)
+    edge_bucket = max(0, min(50, int(math.floor(expected_net_pct))))
+    return_shortfall = abs(realized_return_pct) if realized_return_pct is not None else 0.0
+    expected_value = round(max(expected_net_pct, expected_net_pct + return_shortfall), 6)
+
+    from ..edge_reliability import EXIT_VARIANT_REFRESH, emit_targeted_profitability_work
+
+    return emit_targeted_profitability_work(
+        db,
+        event_type=EXIT_VARIANT_REFRESH,
+        scan_pattern_id=int(pattern_id),
+        source=TIME_DECAY_EXIT_VARIANT_SOURCE,
+        asset_class=asset_class,
+        evidence_fingerprint=f"td_loss_e{edge_bucket}_{asset_class}_v1",
+        payload={
+            "cash_deployment_category": "positive_ev_time_decay_loss",
+            "recommended_work_event": EXIT_VARIANT_REFRESH,
+            "paper_trade_id": int(getattr(pt, "id", 0) or 0),
+            "ticker": str(getattr(pt, "ticker", "") or "").strip().upper(),
+            "exit_reason": reason,
+            "expected_net_pct": round(float(expected_net_pct), 6),
+            "realized_return_pct": (
+                round(float(realized_return_pct), 6)
+                if realized_return_pct is not None
+                else None
+            ),
+            "pnl": pnl,
+            "expected_evidence_value": expected_value,
+            "graduation_blocker": "exit_thesis_mismatch",
+            "paper_shadow": bool(
+                getattr(pt, "paper_shadow_of_alert_id", None)
+                or sig.get("paper_shadow")
+                or sig.get("shadow_of_alert_id")
+            ),
+            "paper_shadow_of_alert_id": getattr(pt, "paper_shadow_of_alert_id", None),
+            "entry_price": getattr(pt, "entry_price", None),
+            "exit_price": getattr(pt, "exit_price", None),
+            "quantity": getattr(pt, "quantity", None),
+            "timeframe": exit_config.get("timeframe"),
+            "max_bars": exit_config.get("max_bars"),
+            "exit_defaults_source": exit_config.get("exit_defaults_source"),
+            "dynamic_monitor_reason": _json_dict(
+                paper_meta.get("dynamic_monitor")
+            ).get("last_reason"),
+        },
+    )
 
 
 # ── Phase B (f-execution-truth-wiring): venue-truth + cost-estimate refresh ──
@@ -221,6 +339,7 @@ def _refresh_rolling_cost_estimate(db: Session, trade_or_pt: Any) -> None:
 def on_paper_trade_closed(db: Session, pt: PaperTrade) -> None:
     """Call in the same transaction as the paper close (before commit)."""
     try:
+        close_extra = paper_trade_close_attribution_dict(pt)
         emit_paper_trade_closed_outcome(
             db,
             paper_trade_id=int(pt.id),
@@ -229,8 +348,15 @@ def on_paper_trade_closed(db: Session, pt: PaperTrade) -> None:
             ticker=(pt.ticker or "").strip(),
             pnl=pt.pnl,
             exit_reason=(pt.exit_reason or "").strip(),
-            extra=paper_trade_close_attribution_dict(pt),
+            extra=close_extra,
         )
+        try:
+            _emit_time_decay_exit_variant_work(db, pt, close_extra=close_extra)
+        except Exception:
+            logger.debug(
+                "[execution_hooks] time-decay exit variant work enqueue failed",
+                exc_info=True,
+            )
         uid = pt.user_id
         if uid is not None:
             enqueue_or_refresh_debounced_work(
