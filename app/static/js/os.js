@@ -121,6 +121,11 @@
       saveLayout();
     });
     el.addEventListener('mousedown', function () { focusWin(app); });
+    // Double-clicking the title bar maximizes / restores (reuses the max toggle).
+    el.querySelector('.os-bar').addEventListener('dblclick', function (e) {
+      if (e.target.closest('.os-ctrls') || e.target.closest('a.pop')) return;
+      el.querySelector('.max').click();
+    });
     dragify(el, app); resizify(el);
     focusWin(app); syncHome();
     if (geom && geom.min) minimizeApp(app);
