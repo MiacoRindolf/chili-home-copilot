@@ -35,8 +35,33 @@
     else renderPanel();
   }
 
+  // ── Desktop (browser) alerts — opt-in; fired only for critical events so a
+  //    trader is alerted even with the tab backgrounded. ──
+  var ALERTS_KEY = 'chili-desktop-alerts', alertsOn = false;
+  try { alertsOn = localStorage.getItem(ALERTS_KEY) === '1'; } catch (e) {}
+  function persistAlerts() { try { localStorage.setItem(ALERTS_KEY, alertsOn ? '1' : '0'); } catch (e) {} }
+  function desktopReady() { return alertsOn && typeof Notification !== 'undefined' && Notification.permission === 'granted'; }
+  function fireDesktop(o) {
+    if (!desktopReady()) return;
+    try { new Notification('CHILI · ' + o.title, { body: o.body || '', tag: 'chili-' + o.title }); } catch (e) {}
+  }
+  function setAlerts(on) {
+    if (!on || typeof Notification === 'undefined') { alertsOn = false; persistAlerts(); renderPanel(); return; }
+    if (Notification.permission === 'granted') { alertsOn = true; persistAlerts(); renderPanel(); return; }
+    if (Notification.permission === 'denied') {
+      alertsOn = false; persistAlerts(); renderPanel();
+      toast({ kind: 'info', icon: '🔕', title: 'Desktop alerts blocked', body: 'Allow notifications in your browser settings' });
+      return;
+    }
+    Notification.requestPermission().then(function (p) {
+      alertsOn = (p === 'granted'); persistAlerts(); renderPanel();
+      if (!alertsOn) toast({ kind: 'info', icon: '🔕', title: 'Desktop alerts not enabled', body: 'Browser permission was not granted' });
+    });
+  }
+
   function toast(o) {
     record(o);
+    if (o.kind === 'bad') fireDesktop(o);  // push critical events to the desktop
     var t = document.createElement('div');
     t.className = 'ws-toast ' + (o.kind || 'info');
     t.setAttribute('role', 'status');
@@ -68,7 +93,9 @@
             '<span class="nr-time">' + esc(n.t) + '</span></div>';
         }).join('')
       : '<div class="ws-notif-empty">No notifications yet.</div>';
-    panel.innerHTML = rows + (history.length ? '<button class="ws-notif-clear" id="ws-notif-clear" type="button">Clear all</button>' : '');
+    panel.innerHTML = rows + (history.length ? '<button class="ws-notif-clear" id="ws-notif-clear" type="button">Clear all</button>' : '') +
+      '<label class="ws-notif-alerts"><input type="checkbox" id="ws-notif-alerts-cb"' + (alertsOn ? ' checked' : '') + '>' +
+      '<span class="na-txt">Desktop alerts</span><span class="na-sub">critical events</span></label>';
   }
   function openPanel() {
     if (!wrap) return;
@@ -84,6 +111,9 @@
   if (panel) panel.addEventListener('click', function (e) {
     e.stopPropagation();
     if (e.target.closest('#ws-notif-clear')) { history = []; renderPanel(); }
+  });
+  if (panel) panel.addEventListener('change', function (e) {
+    if (e.target && e.target.id === 'ws-notif-alerts-cb') setAlerts(e.target.checked);
   });
   document.addEventListener('click', function (e) {
     if (wrap && wrap.classList.contains('open') && !wrap.contains(e.target)) closePanel();
