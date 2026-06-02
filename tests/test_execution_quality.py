@@ -44,6 +44,9 @@ def _trade(**overrides):
         tca_reference_domain=None,
         tca_entry_slippage_bps=None,
         tca_exit_slippage_bps=None,
+        avg_fill_price=None,
+        broker_order_id=None,
+        broker_status=None,
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -130,3 +133,45 @@ def test_implementation_shortfall_skips_malformed_tca_bps():
     assert out["mean_delay_bps"] == pytest.approx(100.0)
     assert out["mean_spread_bps"] == pytest.approx(11.0)
     assert out["mean_total_is_bps"] == pytest.approx(111.0)
+
+
+def test_implementation_shortfall_skips_unverified_extreme_tca_bps():
+    rows = [
+        _trade(
+            ticker="POND-USD",
+            entry_price=101.0,
+            indicator_snapshot={"signal_price": 100.0},
+            tca_entry_slippage_bps=1426.0,
+            tca_exit_slippage_bps=None,
+        ),
+        _trade(
+            ticker="AAPL",
+            entry_price=101.0,
+            indicator_snapshot={"signal_price": 100.0},
+            tca_entry_slippage_bps=5.0,
+            tca_exit_slippage_bps=6.0,
+        ),
+    ]
+
+    out = compute_implementation_shortfall(_FakeDb(rows), user_id=1)
+
+    assert out["measurable"] == 1
+    assert out["mean_spread_bps"] == pytest.approx(11.0)
+
+
+def test_implementation_shortfall_keeps_broker_backed_extreme_tca_bps():
+    rows = [
+        _trade(
+            ticker="POND-USD",
+            entry_price=101.0,
+            indicator_snapshot={"signal_price": 100.0},
+            tca_entry_slippage_bps=1426.0,
+            tca_exit_slippage_bps=None,
+            broker_order_id="cb-real-fill",
+        ),
+    ]
+
+    out = compute_implementation_shortfall(_FakeDb(rows), user_id=1)
+
+    assert out["measurable"] == 1
+    assert out["mean_spread_bps"] == pytest.approx(1426.0)

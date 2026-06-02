@@ -116,10 +116,16 @@ def _option_reference_is_premium(
     return False
 
 
-def _tca_bps_or_zero(value: Any) -> float | None:
+def _tca_bps_or_zero(trade: Any, attr: str) -> float | None:
+    value = getattr(trade, attr, None)
     if value is None:
         return 0.0
-    return _finite_float(value)
+    try:
+        from .execution_cost_builder import _usable_tca_bps
+
+        return _usable_tca_bps(trade, attr)
+    except Exception:
+        return _finite_float(value)
 
 
 def compute_execution_stats(
@@ -342,8 +348,8 @@ def compute_implementation_shortfall(
         components["delay_bps"].append(delay_bps)
 
         # Spread cost from TCA
-        entry_slip = _tca_bps_or_zero(getattr(t, "tca_entry_slippage_bps", None))
-        exit_slip = _tca_bps_or_zero(getattr(t, "tca_exit_slippage_bps", None))
+        entry_slip = _tca_bps_or_zero(t, "tca_entry_slippage_bps")
+        exit_slip = _tca_bps_or_zero(t, "tca_exit_slippage_bps")
         if entry_slip is None or exit_slip is None:
             components["delay_bps"].pop()
             continue
