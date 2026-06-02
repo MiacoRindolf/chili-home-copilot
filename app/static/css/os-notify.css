@@ -1,0 +1,18 @@
+/* CHILI OS notifications — toast stack (top-right of the OS shell).
+   Layers over workspace.css tokens. */
+.ws-toasts{position:fixed;top:64px;right:18px;z-index:var(--ws-z-toast,300);display:flex;flex-direction:column;gap:10px;width:320px;max-width:calc(100vw - 36px);pointer-events:none}
+.ws-toast{pointer-events:auto;display:flex;align-items:flex-start;gap:10px;padding:11px 12px;background:var(--ws-surface);border:1px solid var(--ws-border-strong);border-left:3px solid var(--ws-text-3);border-radius:var(--ws-r-md);box-shadow:var(--ws-shadow-lg);animation:wsToastIn .2s var(--ws-ease,ease)}
+.ws-toast.ok{border-left-color:var(--ws-up)}
+.ws-toast.bad{border-left-color:var(--ws-down)}
+.ws-toast.warn{border-left-color:var(--ws-gold)}
+.ws-toast.info{border-left-color:var(--ws-accent)}
+.ws-toast.out{animation:wsToastOut .2s var(--ws-ease,ease) forwards}
+@keyframes wsToastIn{from{opacity:0;transform:translateX(14px)}to{opacity:1;transform:none}}
+@keyframes wsToastOut{to{opacity:0;transform:translateX(14px)}}
+.ws-toast .wt-ic{font-size:15px;line-height:1.3;flex-shrink:0}
+.ws-toast .wt-body{flex:1;min-width:0}
+.ws-toast .wt-title{font-size:var(--ws-fs-13);font-weight:var(--ws-fw-semi);color:var(--ws-text)}
+.ws-toast .wt-sub{font-size:var(--ws-fs-12);color:var(--ws-text-3);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ws-toast .wt-x{border:none;background:transparent;color:var(--ws-text-3);cursor:pointer;font-size:16px;line-height:1;padding:0 2px;flex-shrink:0}
+.ws-toast .wt-x:hover{color:var(--ws-text)}
+@media (prefers-reduced-motion:reduce){.ws-toast,.ws-toast.out{animation:none}}
