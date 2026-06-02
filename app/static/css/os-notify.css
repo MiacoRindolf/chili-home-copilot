@@ -16,3 +16,23 @@
 .ws-toast .wt-x{border:none;background:transparent;color:var(--ws-text-3);cursor:pointer;font-size:16px;line-height:1;padding:0 2px;flex-shrink:0}
 .ws-toast .wt-x:hover{color:var(--ws-text)}
 @media (prefers-reduced-motion:reduce){.ws-toast,.ws-toast.out{animation:none}}
+
+/* ── Notification center (topbar bell + panel) ── */
+.ws-notif{position:relative}
+.ws-notif-badge{position:absolute;top:-3px;right:-3px;min-width:16px;height:16px;padding:0 4px;border-radius:999px;background:var(--ws-down);color:#fff;font-size:10px;font-weight:var(--ws-fw-bold);line-height:16px;text-align:center;box-shadow:0 0 0 2px var(--ws-surface)}
+.ws-notif-panel{position:absolute;top:calc(100% + 8px);right:0;width:320px;max-width:calc(100vw - 36px);max-height:60vh;overflow-y:auto;background:var(--ws-surface);border:1px solid var(--ws-border-strong);border-radius:var(--ws-r-lg);box-shadow:var(--ws-shadow-lg);padding:6px;z-index:var(--ws-z-toast,300);display:none}
+.ws-notif.open .ws-notif-panel{display:block;animation:wsToastIn .12s var(--ws-ease,ease)}
+.ws-notif-row{display:flex;align-items:flex-start;gap:9px;padding:8px 9px;border-radius:var(--ws-r-md)}
+.ws-notif-row:hover{background:var(--ws-surface-2)}
+.ws-notif-row .nr-dot{width:7px;height:7px;border-radius:50%;margin-top:5px;flex-shrink:0;background:var(--ws-text-3)}
+.ws-notif-row.ok .nr-dot{background:var(--ws-up)}
+.ws-notif-row.bad .nr-dot{background:var(--ws-down)}
+.ws-notif-row.warn .nr-dot{background:var(--ws-gold)}
+.ws-notif-row.info .nr-dot{background:var(--ws-accent)}
+.ws-notif-row .nr-body{flex:1;min-width:0}
+.ws-notif-row .nr-title{font-size:var(--ws-fs-13);font-weight:var(--ws-fw-semi);color:var(--ws-text)}
+.ws-notif-row .nr-sub{font-size:var(--ws-fs-12);color:var(--ws-text-3);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ws-notif-row .nr-time{font-size:var(--ws-fs-11);color:var(--ws-text-3);flex-shrink:0;margin-top:2px}
+.ws-notif-empty{padding:18px 9px;text-align:center;font-size:var(--ws-fs-12);color:var(--ws-text-3)}
+.ws-notif-clear{width:100%;margin-top:4px;border:none;border-top:1px solid var(--ws-border);background:transparent;color:var(--ws-text-3);font-size:var(--ws-fs-12);font-weight:var(--ws-fw-med);padding:8px;cursor:pointer;border-radius:0 0 var(--ws-r-md) var(--ws-r-md)}
+.ws-notif-clear:hover{color:var(--ws-text);background:var(--ws-surface-2)}
