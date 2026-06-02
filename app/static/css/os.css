@@ -6,10 +6,16 @@
 .os-home.dimmed{filter:saturate(.7) brightness(.86);pointer-events:none;transition:filter .2s}
 
 /* window */
-.os-win{position:absolute;display:flex;flex-direction:column;background:var(--ws-surface);border:1px solid var(--ws-border-strong);border-radius:var(--ws-r-lg);box-shadow:var(--ws-shadow-lg);overflow:hidden;min-width:340px;min-height:220px}
-.os-win.active{border-color:color-mix(in srgb,var(--ws-accent) 55%,var(--ws-border-strong))}
+.os-win{position:absolute;display:flex;flex-direction:column;background:var(--ws-surface);border:1px solid var(--ws-border-strong);border-radius:var(--ws-r-lg);box-shadow:var(--ws-shadow-md);overflow:hidden;min-width:340px;min-height:220px;transition:box-shadow .18s var(--ws-ease),border-color .18s var(--ws-ease)}
+/* Inactive windows recede; the focused one lifts with a stronger shadow + accent edge. */
+.os-win.active{border-color:color-mix(in srgb,var(--ws-accent) 55%,var(--ws-border-strong));box-shadow:var(--ws-shadow-lg)}
 .os-win.snapping{transition:left .14s var(--ws-ease),top .14s var(--ws-ease),width .14s var(--ws-ease),height .14s var(--ws-ease)}
 .os-win.closing{transition:opacity .12s,transform .12s;opacity:0;transform:scale(.97)}
+/* Entrance (open / restore-from-taskbar) */
+.os-win.os-in{animation:osWinIn .17s var(--ws-ease)}
+@keyframes osWinIn{from{opacity:0;transform:scale(.96) translateY(6px)}to{opacity:1;transform:none}}
+/* Minimize shrink toward the taskbar */
+.os-win.os-out{transition:opacity .15s var(--ws-ease),transform .15s var(--ws-ease);opacity:0;transform:scale(.9) translateY(14px);transform-origin:bottom center;pointer-events:none}
 .os-bar{height:38px;flex-shrink:0;display:flex;align-items:center;gap:var(--ws-s3);padding:0 var(--ws-s2) 0 var(--ws-s3);background:var(--ws-surface-2);border-bottom:1px solid var(--ws-border);cursor:default;user-select:none}
 .os-win.active .os-bar{background:color-mix(in srgb,var(--ws-accent) 7%,var(--ws-surface-2))}
 .os-bar .wi{width:22px;height:22px;border-radius:6px;display:grid;place-items:center;font-size:14px;flex-shrink:0;background:var(--ws-accent-bg)}
@@ -43,3 +49,9 @@
 .os-chip .ci{font-size:13px}
 
 @media(max-width:760px){.os-win{left:8px!important;top:8px!important;width:calc(100vw - 72px)!important;height:calc(100vh - 80px)!important}.os-rs{display:none}}
+
+/* Honor reduced-motion: keep windows snappy but drop the easing/animation. */
+@media (prefers-reduced-motion:reduce){
+  .os-win,.os-win.active,.os-win.snapping,.os-win.closing,.os-win.os-out,.os-home.dimmed,.os-ghost,.os-chip{transition:none}
+  .os-win.os-in{animation:none}
+}
