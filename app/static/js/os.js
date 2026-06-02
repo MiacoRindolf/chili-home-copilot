@@ -19,7 +19,7 @@
     c.className = 'os-chip'; c.dataset.chip = app; c.title = 'Restore ' + title;
     c.innerHTML = '<span class="ci">' + (icon || '🗔') + '</span>' + title;
     c.addEventListener('click', function () {
-      var w = wins[app]; if (w) { w.style.display = 'flex'; focusWin(app); }
+      var w = wins[app]; if (w) { w.style.display = 'flex'; animIn(w); focusWin(app); }
       removeChip(app); syncHome();
     });
     taskbar.appendChild(c); taskbar.classList.add('show');
@@ -45,6 +45,12 @@
   }
   function dock(app) { return document.querySelector('.ws-rb[data-app="' + app + '"]'); }
 
+  // Respect the user's reduced-motion preference for window animations.
+  var _reduceMotion = false;
+  try { _reduceMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (e) {}
+  // Re-trigger the entrance animation (open / restore-from-taskbar).
+  function animIn(el) { if (_reduceMotion || !el) return; el.classList.remove('os-in'); void el.offsetWidth; el.classList.add('os-in'); }
+
   // Append the embed flag that strips an app's chrome inside an OS window.
   function withEmbed(src) { return src + (src.indexOf('?') === -1 ? '?' : '&') + 'embed=1'; }
 
@@ -57,7 +63,9 @@
         var ifr0 = ex.querySelector('iframe'), want = withEmbed(cfg.src);
         if (ifr0 && ifr0.getAttribute('src') !== want) ifr0.setAttribute('src', want);
       }
-      ex.style.display = 'flex'; focusWin(app); removeChip(app); syncHome(); saveLayout(); return;
+      var wasHidden = ex.style.display === 'none';
+      ex.style.display = 'flex'; if (wasHidden) animIn(ex);
+      focusWin(app); removeChip(app); syncHome(); saveLayout(); return;
     }
     var n = order.length;
     var el = document.createElement('div');
@@ -78,7 +86,7 @@
       '<div class="os-body"><div class="os-loading">Loading ' + cfg.title + '…</div>' +
       '<iframe src="' + src + '" title="' + cfg.title + '" loading="lazy"></iframe></div>' +
       '<div class="os-rs"></div>';
-    desktop.appendChild(el); wins[app] = el; order.push(app);
+    desktop.appendChild(el); wins[app] = el; order.push(app); animIn(el);
     var d = dock(app); if (d) d.classList.add('os-open');
     var ifr = el.querySelector('iframe');
     ifr.addEventListener('load', function () { var l = el.querySelector('.os-loading'); if (l) l.remove(); });
@@ -99,8 +107,14 @@
   // Minimize a window to a taskbar chip (top-level so keyboard shortcuts can drive it).
   function minimizeApp(app) {
     var el = wins[app]; if (!el) return;
-    el.style.display = 'none'; order = order.filter(function (a) { return a !== app; });
-    addChip(app, el.dataset.title, el.dataset.icon); syncHome(); setHash(); saveLayout();
+    order = order.filter(function (a) { return a !== app; });
+    addChip(app, el.dataset.title, el.dataset.icon);
+    var finish = function () { el.classList.remove('os-out'); el.style.display = 'none'; syncHome(); setHash(); saveLayout(); };
+    // Skip the shrink while replaying a saved layout (restoring) or under
+    // reduced-motion — hide immediately so there's no flash.
+    if (_reduceMotion || restoring) { finish(); return; }
+    el.classList.add('os-out');
+    setTimeout(finish, 150);
   }
   function closeApp(app) {
     var el = wins[app]; if (!el) return;
