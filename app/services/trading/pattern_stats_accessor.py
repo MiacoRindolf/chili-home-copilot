@@ -15,6 +15,7 @@ read-corrected-first / fallback-to-legacy contract has one home.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -51,18 +52,17 @@ def get_corrected_pattern_stats(pat: Any) -> CorrectedPatternStats:
     n, n_src = _pick(pat, "corrected_trade_count", "trade_count")
     wr, wr_src = _pick(pat, "corrected_win_rate", "win_rate")
     ret, ret_src = _pick(pat, "corrected_avg_return_pct", "avg_return_pct")
-    try:
-        n_int = int(n) if n is not None else None
-    except (TypeError, ValueError):
-        n_int = None
-    try:
-        wr_f = float(wr) if wr is not None else None
-    except (TypeError, ValueError):
+
+    n_f = _finite_float(n)
+    n_int = None
+    if n_f is not None and n_f >= 0.0 and n_f == int(n_f):
+        n_int = int(n_f)
+
+    wr_f = _finite_float(wr)
+    if wr_f is not None and not 0.0 <= wr_f <= 1.0:
         wr_f = None
-    try:
-        ret_f = float(ret) if ret is not None else None
-    except (TypeError, ValueError):
-        ret_f = None
+
+    ret_f = _finite_float(ret)
     return CorrectedPatternStats(
         trade_count=n_int,
         win_rate=wr_f,
@@ -71,3 +71,13 @@ def get_corrected_pattern_stats(pat: Any) -> CorrectedPatternStats:
         source_win_rate=wr_src,
         source_avg_return_pct=ret_src,
     )
+
+
+def _finite_float(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None

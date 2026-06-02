@@ -77,44 +77,44 @@ class AlphaPortfolioConfig:
 
 def config_from_settings(settings_: Any) -> AlphaPortfolioConfig:
     return AlphaPortfolioConfig(
-        recert_stale_days=int(getattr(
+        recert_stale_days=_positive_int_or_default(getattr(
             settings_, "chili_alpha_portfolio_recert_stale_days", 30,
-        )),
-        min_realized_trades=int(getattr(
+        ), 30),
+        min_realized_trades=_positive_int_or_default(getattr(
             settings_, "chili_alpha_portfolio_min_realized_trades", 5,
-        )),
-        min_oos_trades=int(getattr(
+        ), 5),
+        min_oos_trades=_positive_int_or_default(getattr(
             settings_, "chili_alpha_portfolio_min_oos_trades", 5,
-        )),
-        min_oos_avg_return_pct=float(getattr(
+        ), 5),
+        min_oos_avg_return_pct=_finite_float_or_default(getattr(
             settings_, "chili_alpha_portfolio_min_oos_avg_return_pct", 0.0,
-        )),
-        min_oos_win_rate=float(getattr(
+        ), 0.0),
+        min_oos_win_rate=_probability_or_default(getattr(
             settings_, "chili_alpha_portfolio_min_oos_win_rate", 0.0,
-        )),
-        min_risk_sleeves=int(getattr(
+        ), 0.0),
+        min_risk_sleeves=_positive_int_or_default(getattr(
             settings_, "chili_alpha_portfolio_min_risk_sleeves", 3,
-        )),
-        min_shadow_score=float(getattr(
+        ), 3),
+        min_shadow_score=_probability_or_default(getattr(
             settings_, "chili_alpha_portfolio_min_shadow_score", 0.52,
-        )),
-        max_shadow_total=int(getattr(
+        ), 0.52),
+        max_shadow_total=_nonnegative_int_or_default(getattr(
             settings_, "chili_alpha_portfolio_max_shadow_total", 4,
-        )),
-        max_shadow_per_sleeve=int(getattr(
+        ), 4),
+        max_shadow_per_sleeve=_nonnegative_int_or_default(getattr(
             settings_, "chili_alpha_portfolio_max_shadow_per_sleeve", 1,
-        )),
-        execution_lookback_days=int(getattr(
+        ), 1),
+        execution_lookback_days=_positive_int_or_default(getattr(
             settings_, "chili_alpha_portfolio_execution_lookback_days", 30,
-        )),
-        execution_min_samples=int(getattr(
+        ), 30),
+        execution_min_samples=_nonnegative_int_or_default(getattr(
             settings_, "chili_alpha_portfolio_execution_min_samples", 10,
-        )),
-        execution_max_p90_slippage_pct=float(getattr(
+        ), 10),
+        execution_max_p90_slippage_pct=_nonnegative_float_or_default(getattr(
             settings_,
             "chili_alpha_portfolio_execution_max_p90_slippage_pct",
             0.75,
-        )),
+        ), 0.75),
     )
 
 
@@ -140,9 +140,66 @@ def _safe_int(value: Any) -> int | None:
     if value is None or isinstance(value, bool):
         return None
     try:
-        return int(value)
+        out = float(value)
     except Exception:
         return None
+    if not math.isfinite(out) or out < 0.0 or out != int(out):
+        return None
+    return int(out)
+
+
+def _positive_int_or_default(value: Any, default: int) -> int:
+    out = _safe_int(value)
+    if out is None or out <= 0:
+        return int(default)
+    return out
+
+
+def _nonnegative_int_or_default(value: Any, default: int) -> int:
+    out = _safe_int(value)
+    return int(default) if out is None else out
+
+
+def _finite_float_or_default(value: Any, default: float) -> float:
+    out = _safe_float(value)
+    return float(default) if out is None else out
+
+
+def _positive_float_or_default(value: Any, default: float) -> float:
+    out = _safe_float(value)
+    if out is None or out <= 0.0:
+        return float(default)
+    return out
+
+
+def _nonnegative_float_or_default(value: Any, default: float) -> float:
+    out = _safe_float(value)
+    if out is None or out < 0.0:
+        return float(default)
+    return out
+
+
+def _probability_or_default(value: Any, default: float) -> float:
+    out = _probability_or_none(value)
+    return float(default) if out is None else out
+
+
+def _probability_or_none(value: Any) -> float | None:
+    out = _safe_float(value)
+    if out is None or out < 0.0 or out > 1.0:
+        return None
+    return out
+
+
+def _win_rate_fraction_or_none(value: Any) -> float | None:
+    out = _safe_float(value)
+    if out is None:
+        return None
+    if out > 1.0:
+        out = out / 100.0
+    if out < 0.0 or out > 1.0:
+        return None
+    return out
 
 
 def _priority_recert_pattern_ids(settings_: Any) -> list[int]:
@@ -282,17 +339,13 @@ def recert_reasons_for_pattern(
         oos_avg = _safe_float(_get(pattern, "oos_avg_return_pct", None))
         if oos_avg is not None and oos_avg < cfg.min_oos_avg_return_pct:
             reasons.append("negative_oos_recert")
-        oos_wr = _safe_float(_get(pattern, "oos_win_rate", None))
-        if oos_wr is not None and oos_wr > 1.0:
-            oos_wr = oos_wr / 100.0
-        if (
-            cfg.min_oos_win_rate > 0.0
-            and oos_wr is not None
-            and oos_wr < cfg.min_oos_win_rate
+        oos_wr = _win_rate_fraction_or_none(_get(pattern, "oos_win_rate", None))
+        if cfg.min_oos_win_rate > 0.0 and (
+            oos_wr is None or oos_wr < cfg.min_oos_win_rate
         ):
             reasons.append("weak_oos_win_rate_recert")
 
-    if _get(pattern, "quality_composite_score", None) is None:
+    if _probability_or_none(_get(pattern, "quality_composite_score", None)) is None:
         reasons.append("missing_quality_composite_score")
 
     raw_n = _safe_int(_get(pattern, "raw_realized_trade_count", None)) or 0
@@ -407,12 +460,13 @@ def broker_risk_probation_allows_live(
         return False
 
     cpcv = _safe_float(_get(pattern, "cpcv_median_sharpe", None))
-    min_cpcv = float(
+    min_cpcv = _positive_float_or_default(
         getattr(
             settings_,
             "chili_autotrader_probation_min_cpcv_sharpe",
             BROKER_RISK_PROBATION_DEFAULT_MIN_CPCV_SHARPE,
-        )
+        ),
+        BROKER_RISK_PROBATION_DEFAULT_MIN_CPCV_SHARPE,
     )
     if cpcv is None or cpcv < min_cpcv:
         return False
@@ -422,12 +476,13 @@ def broker_risk_probation_allows_live(
         or _safe_int(_get(pattern, "realized_n_trades", None))
         or 0
     )
-    min_realized = int(
+    min_realized = _positive_int_or_default(
         getattr(
             settings_,
             "chili_autotrader_probation_min_realized_trades",
             BROKER_RISK_PROBATION_DEFAULT_MIN_REALIZED_TRADES,
-        )
+        ),
+        BROKER_RISK_PROBATION_DEFAULT_MIN_REALIZED_TRADES,
     )
     if realized_n < min_realized:
         return False
@@ -466,21 +521,21 @@ def candidate_base_score(
     cfg = config or AlphaPortfolioConfig()
     components: dict[str, dict[str, float]] = {}
 
-    quality = _safe_float(row.get("quality_composite_score"))
+    quality = _probability_or_none(row.get("quality_composite_score"))
     if quality is not None:
-        components["quality"] = {"value": _clip(quality), "weight": 0.35}
+        components["quality"] = {"value": quality, "weight": 0.35}
 
     cpcv = _safe_float(row.get("cpcv_median_sharpe"))
     if cpcv is not None:
         components["cpcv"] = {"value": _clip(cpcv / 4.0), "weight": 0.20}
 
-    dsr = _safe_float(row.get("deflated_sharpe"))
+    dsr = _probability_or_none(row.get("deflated_sharpe"))
     if dsr is not None:
-        components["deflated_sharpe"] = {"value": _clip(dsr), "weight": 0.10}
+        components["deflated_sharpe"] = {"value": dsr, "weight": 0.10}
 
-    pbo = _safe_float(row.get("pbo"))
+    pbo = _probability_or_none(row.get("pbo"))
     if pbo is not None:
-        components["pbo_inverse"] = {"value": 1.0 - _clip(pbo), "weight": 0.10}
+        components["pbo_inverse"] = {"value": 1.0 - pbo, "weight": 0.10}
 
     edge, edge_n = _realized_edge_fraction(row)
     if edge is not None and edge_n >= cfg.min_realized_trades:
@@ -552,8 +607,10 @@ def _candidate_floor_blocks(row: Mapping[str, Any], cfg: AlphaPortfolioConfig) -
     reasons: list[str] = []
     if row.get("promotion_gate_passed") is not True:
         reasons.append("promotion_gate_not_passed")
-    for key in ("cpcv_median_sharpe", "deflated_sharpe", "pbo"):
-        if _safe_float(row.get(key)) is None:
+    if _safe_float(row.get("cpcv_median_sharpe")) is None:
+        reasons.append("missing_cpcv_median_sharpe")
+    for key in ("deflated_sharpe", "pbo"):
+        if _probability_or_none(row.get(key)) is None:
             reasons.append(f"missing_{key}")
 
     live_realized_n = _safe_int(row.get("realized_n_trades")) or 0
@@ -587,6 +644,7 @@ def _load_pattern_rows(
     pattern_id: int | None = None,
     realized_window_days: int = 90,
 ) -> list[dict[str, Any]]:
+    window_days = _positive_int_or_default(realized_window_days, 90)
     rows = db.execute(
         text(f"""
             WITH realized_samples AS (
@@ -655,7 +713,7 @@ def _load_pattern_rows(
         ),
         {
             "pattern_id": pattern_id,
-            "window_days": int(realized_window_days),
+            "window_days": window_days,
         },
     ).mappings().all()
     return [dict(r) for r in rows]
@@ -680,12 +738,16 @@ def execution_health_summary(
             "error": type(exc).__name__,
         }
 
-    measurable = int(stats.get("measurable", 0) or 0)
+    measurable = _safe_int(stats.get("measurable"))
+    if measurable is None:
+        measurable = 0
     p90 = _safe_float(stats.get("p90_slippage_pct"))
     reasons: list[str] = []
     if measurable < config.execution_min_samples:
         reasons.append("insufficient_execution_quality_samples")
-    if p90 is not None and p90 > config.execution_max_p90_slippage_pct:
+    elif p90 is None:
+        reasons.append("p90_slippage_missing")
+    elif p90 > config.execution_max_p90_slippage_pct:
         reasons.append("p90_slippage_above_limit")
     return {
         "clean": not reasons,
@@ -733,9 +795,9 @@ def scan_alpha_portfolio(
     rows = _load_pattern_rows(
         db,
         pattern_id=pattern_id,
-        realized_window_days=int(getattr(
+        realized_window_days=_positive_int_or_default(getattr(
             settings_, "chili_cohort_score_realized_window_days", 90,
-        )),
+        ), 90),
     )
 
     lifecycle_counts = Counter(str(r.get("lifecycle_stage") or "unknown") for r in rows)

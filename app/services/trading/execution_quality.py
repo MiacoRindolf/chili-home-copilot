@@ -12,16 +12,114 @@ Decision-stack realism rollups for momentum viability JSON live in
 """
 from __future__ import annotations
 
+import json
 import logging
 from collections import defaultdict
 from datetime import datetime, timedelta
-from typing import Any
+import math
+from typing import Any, Mapping
 
 from sqlalchemy.orm import Session
 
 from ...models.trading import Trade
 
 logger = logging.getLogger(__name__)
+
+
+def _finite_float(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
+def _positive_float(value: Any) -> float | None:
+    out = _finite_float(value)
+    if out is None or out <= 0.0:
+        return None
+    return out
+
+
+def _as_mapping(value: Any) -> Mapping[str, Any] | None:
+    if isinstance(value, Mapping):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            return None
+        if isinstance(parsed, Mapping):
+            return parsed
+    return None
+
+
+def _mapping_get(mapping: Mapping[str, Any] | None, key: str) -> Any:
+    return mapping.get(key) if isinstance(mapping, Mapping) else None
+
+
+def _domain_is_option_premium(value: Any) -> bool:
+    return str(value or "").strip().lower() == "option_premium"
+
+
+def _is_option_trade(trade: Any, snap: Mapping[str, Any] | None = None) -> bool:
+    try:
+        from .autopilot_scope import is_option_trade
+
+        return bool(is_option_trade(trade))
+    except Exception:
+        pass
+
+    markers = [
+        getattr(trade, "asset_kind", None),
+        getattr(trade, "asset_type", None),
+        _mapping_get(snap, "asset_kind"),
+        _mapping_get(snap, "asset_type"),
+        _mapping_get(snap, "asset_class"),
+    ]
+    breakout = _as_mapping(_mapping_get(snap, "breakout_alert"))
+    if breakout:
+        markers.extend([
+            breakout.get("asset_kind"),
+            breakout.get("asset_type"),
+            breakout.get("asset_class"),
+        ])
+    return any("option" in str(marker or "").strip().lower() for marker in markers)
+
+
+def _option_reference_is_premium(
+    trade: Any,
+    snap: Mapping[str, Any] | None = None,
+) -> bool:
+    if _domain_is_option_premium(getattr(trade, "tca_reference_domain", None)):
+        return True
+    entry_execution = _as_mapping(_mapping_get(snap, "entry_execution"))
+    if entry_execution:
+        if _domain_is_option_premium(entry_execution.get("tca_reference_domain")):
+            return True
+        if _domain_is_option_premium(entry_execution.get("option_price_domain")):
+            return True
+    domains = _as_mapping(_mapping_get(snap, "price_domains"))
+    if domains:
+        for key in ("entry_price", "limit_price", "current_price", "signal_price"):
+            if _domain_is_option_premium(domains.get(key)):
+                return True
+    option_meta = _as_mapping(_mapping_get(snap, "option_meta"))
+    if option_meta and _domain_is_option_premium(option_meta.get("price_domain")):
+        return True
+    breakout = _as_mapping(_mapping_get(snap, "breakout_alert"))
+    if breakout:
+        if _option_reference_is_premium(trade, breakout):
+            return True
+    return False
+
+
+def _tca_bps_or_zero(value: Any) -> float | None:
+    if value is None:
+        return 0.0
+    return _finite_float(value)
 
 
 def compute_execution_stats(
@@ -47,14 +145,16 @@ def compute_execution_stats(
 
     for t in trades:
         signal_price = _extract_signal_price(t)
-        if signal_price is None or signal_price <= 0:
+        entry_price = _positive_float(getattr(t, "entry_price", None))
+        if signal_price is None or entry_price is None:
             continue
 
-        slip_pct = abs(t.entry_price - signal_price) / signal_price * 100
+        slip_pct = abs(entry_price - signal_price) / signal_price * 100
         slippages.append(slip_pct)
-        by_ticker[t.ticker].append(slip_pct)
+        ticker = str(getattr(t, "ticker", "") or "")
+        by_ticker[ticker].append(slip_pct)
 
-        asset_class = "crypto" if t.ticker.endswith("-USD") else "stock"
+        asset_class = "option" if _is_option_trade(t) else ("crypto" if ticker.endswith("-USD") else "stock")
         by_class[asset_class].append(slip_pct)
 
     if not slippages:
@@ -165,25 +265,34 @@ def flag_poor_execution_tickers(
 
 def _extract_signal_price(trade: Trade) -> float | None:
     """Extract the signal/brain-recommended price from trade metadata."""
-    import json
+    snap = _as_mapping(getattr(trade, "indicator_snapshot", None))
+    is_option = _is_option_trade(trade, snap)
 
-    if trade.indicator_snapshot:
-        try:
-            snap = json.loads(trade.indicator_snapshot) if isinstance(trade.indicator_snapshot, str) else trade.indicator_snapshot
-            sp = snap.get("signal_price") or snap.get("brain_price") or snap.get("price", {}).get("value")
-            if sp:
-                return float(sp)
-        except Exception:
-            pass
+    tca_ref = _positive_float(getattr(trade, "tca_reference_entry_price", None))
+    if tca_ref is not None:
+        if not is_option or _option_reference_is_premium(trade, snap):
+            return tca_ref
+        return None
 
-    if trade.tags:
-        try:
-            tags = json.loads(trade.tags) if isinstance(trade.tags, str) and trade.tags.startswith("{") else {}
-            sp = tags.get("signal_price") or tags.get("brain_entry")
-            if sp:
-                return float(sp)
-        except Exception:
-            pass
+    if snap:
+        price_obj = _as_mapping(snap.get("price"))
+        candidates = [
+            snap.get("signal_price"),
+            snap.get("brain_price"),
+            price_obj.get("value") if price_obj else None,
+        ]
+        if not is_option or _option_reference_is_premium(trade, snap):
+            for candidate in candidates:
+                price = _positive_float(candidate)
+                if price is not None:
+                    return price
+
+    tags = _as_mapping(getattr(trade, "tags", None))
+    if tags and not is_option:
+        for candidate in (tags.get("signal_price"), tags.get("brain_entry")):
+            price = _positive_float(candidate)
+            if price is not None:
+                return price
 
     return None
 
@@ -224,16 +333,20 @@ def compute_implementation_shortfall(
 
     for t in trades:
         signal_price = _extract_signal_price(t)
-        if signal_price is None or signal_price <= 0 or not t.entry_price:
+        entry_price = _positive_float(getattr(t, "entry_price", None))
+        if signal_price is None or entry_price is None:
             continue
 
         # Delay cost: signal_price -> arrival_price (use entry_price as proxy)
-        delay_bps = abs(t.entry_price - signal_price) / signal_price * 10000
+        delay_bps = abs(entry_price - signal_price) / signal_price * 10000
         components["delay_bps"].append(delay_bps)
 
         # Spread cost from TCA
-        entry_slip = float(t.tca_entry_slippage_bps or 0)
-        exit_slip = float(t.tca_exit_slippage_bps or 0)
+        entry_slip = _tca_bps_or_zero(getattr(t, "tca_entry_slippage_bps", None))
+        exit_slip = _tca_bps_or_zero(getattr(t, "tca_exit_slippage_bps", None))
+        if entry_slip is None or exit_slip is None:
+            components["delay_bps"].pop()
+            continue
         spread_bps = entry_slip + exit_slip
         components["spread_bps"].append(spread_bps)
 

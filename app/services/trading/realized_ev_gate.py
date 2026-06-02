@@ -66,20 +66,52 @@ def _settings_get(name: str, default: Any) -> Any:
 
 
 def _safe_int(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
     try:
-        return int(value) if value is not None else None
+        out = float(value)
     except (TypeError, ValueError):
         return None
+    if not math.isfinite(out) or out < 0.0 or out != int(out):
+        return None
+    return int(out)
 
 
 def _safe_float(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
     try:
-        out = float(value) if value is not None else None
+        out = float(value)
     except (TypeError, ValueError):
         return None
-    if out is None or not math.isfinite(out):
+    if not math.isfinite(out):
         return None
     return out
+
+
+def _win_rate_or_none(value: Any) -> float | None:
+    out = _safe_float(value)
+    if out is None or out < 0.0 or out > 1.0:
+        return None
+    return out
+
+
+def _positive_int_setting(name: str, default: int) -> int:
+    value = _settings_get(name, default)
+    out = _safe_int(value)
+    if out is None or out <= 0:
+        return int(default)
+    return out
+
+
+def _finite_float_setting(name: str, default: float) -> float:
+    out = _safe_float(_settings_get(name, default))
+    return float(default) if out is None else out
+
+
+def _win_rate_setting(name: str, default: float) -> float:
+    out = _win_rate_or_none(_settings_get(name, default))
+    return float(default) if out is None else out
 
 
 def evaluate_realized_ev(scan_pattern: Any) -> EvGateResult:
@@ -101,16 +133,16 @@ def evaluate_realized_ev(scan_pattern: Any) -> EvGateResult:
     from .pattern_stats_accessor import get_corrected_pattern_stats
 
     enabled = bool(_settings_get("chili_realized_ev_gate_enabled", True))
-    min_n = int(_settings_get("chili_realized_ev_min_trades", 5))
-    min_ret = float(_settings_get("chili_realized_ev_min_avg_return_pct", 0.0))
-    min_wr = float(_settings_get("chili_realized_ev_min_win_rate", 0.0))
+    min_n = _positive_int_setting("chili_realized_ev_min_trades", 5)
+    min_ret = _finite_float_setting("chili_realized_ev_min_avg_return_pct", 0.0)
+    min_wr = _win_rate_setting("chili_realized_ev_min_win_rate", 0.0)
     allow_raw_fallback = bool(
         _settings_get("chili_realized_ev_gate_allow_raw_fallback", True)
     )
 
     stats = get_corrected_pattern_stats(scan_pattern)
     raw_n = _safe_int(getattr(scan_pattern, "raw_realized_trade_count", None))
-    raw_wr = _safe_float(getattr(scan_pattern, "raw_realized_win_rate", None))
+    raw_wr = _win_rate_or_none(getattr(scan_pattern, "raw_realized_win_rate", None))
     raw_ret = _safe_float(getattr(scan_pattern, "raw_realized_avg_return_pct", None))
 
     n = int(stats.trade_count or 0)

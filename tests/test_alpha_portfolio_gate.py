@@ -14,6 +14,8 @@ from app.services.trading.alpha_portfolio_gate import (
     _realized_edge_fraction,
     broker_risk_probation_allows_live,
     candidate_base_score,
+    config_from_settings,
+    execution_health_summary,
     infer_alpha_sleeve,
     pilot_bootstrap_recert_allows_live,
     persist_alpha_portfolio_snapshot,
@@ -80,6 +82,41 @@ def _settings(**overrides):
     )
     base.update(overrides)
     return SimpleNamespace(**base)
+
+
+def test_config_from_settings_rejects_malformed_gate_thresholds():
+    cfg = config_from_settings(
+        _settings(
+            chili_alpha_portfolio_recert_stale_days=1.5,
+            chili_alpha_portfolio_min_realized_trades=True,
+            chili_alpha_portfolio_min_oos_trades=float("nan"),
+            chili_alpha_portfolio_min_oos_avg_return_pct=float("inf"),
+            chili_alpha_portfolio_min_oos_win_rate=1.5,
+            chili_alpha_portfolio_min_risk_sleeves=False,
+            chili_alpha_portfolio_min_shadow_score=True,
+            chili_alpha_portfolio_max_shadow_total=0,
+            chili_alpha_portfolio_max_shadow_per_sleeve=1.5,
+            chili_alpha_portfolio_execution_lookback_days=True,
+            chili_alpha_portfolio_execution_min_samples=0,
+            chili_alpha_portfolio_execution_max_p90_slippage_pct=float("-inf"),
+        )
+    )
+
+    assert cfg.recert_stale_days == 30
+    assert cfg.min_realized_trades == 5
+    assert cfg.min_oos_trades == 5
+    assert cfg.min_oos_avg_return_pct == 0.0
+    assert cfg.min_oos_win_rate == 0.0
+    assert cfg.min_risk_sleeves == 3
+    assert cfg.min_shadow_score == 0.52
+    assert cfg.max_shadow_total == 0
+    assert cfg.max_shadow_per_sleeve == 1
+    assert cfg.execution_lookback_days == 30
+    assert cfg.execution_min_samples == 0
+    assert cfg.execution_max_p90_slippage_pct == 0.75
+    assert config_from_settings(
+        _settings(chili_alpha_portfolio_execution_max_p90_slippage_pct=0.0)
+    ).execution_max_p90_slippage_pct == 0.0
 
 
 def test_infer_alpha_sleeve_uses_asset_timeframe_and_setup_text():
@@ -181,6 +218,30 @@ def test_recert_reasons_flag_thin_oos_sample():
     assert reasons == ["thin_oos_recert"]
 
 
+def test_recert_reasons_treat_invalid_probability_evidence_as_missing():
+    pattern = SimpleNamespace(
+        lifecycle_stage="promoted",
+        promotion_status="promoted",
+        promotion_gate_passed=True,
+        oos_evaluated_at=datetime(2026, 5, 25),
+        oos_trade_count=47,
+        oos_win_rate=150.0,
+        oos_avg_return_pct=3.0,
+        quality_composite_score=1.2,
+        raw_realized_trade_count=12,
+        raw_realized_avg_return_pct=1.0,
+    )
+
+    reasons = recert_reasons_for_pattern(
+        pattern,
+        now=datetime(2026, 5, 25),
+        config=AlphaPortfolioConfig(min_oos_trades=5, min_oos_win_rate=0.45),
+    )
+
+    assert "weak_oos_win_rate_recert" in reasons
+    assert "missing_quality_composite_score" in reasons
+
+
 def test_pilot_bootstrap_recert_allows_live_only_for_soft_cert_debt():
     soft_pilot = SimpleNamespace(
         lifecycle_stage="pilot_promoted",
@@ -247,6 +308,26 @@ def test_broker_risk_probation_rejects_boolean_numeric_evidence():
         settings_=_settings(
             chili_autotrader_probation_min_cpcv_sharpe=0.5,
             chili_autotrader_probation_min_realized_trades=1,
+        ),
+    )
+
+
+def test_broker_risk_probation_rejects_malformed_threshold_settings():
+    promoted_with_one_realized_trade = SimpleNamespace(
+        lifecycle_stage="promoted",
+        recert_required=True,
+        recert_reason="missing_oos_recert",
+        promotion_gate_passed=True,
+        cpcv_median_sharpe=2.0,
+        raw_realized_trade_count=1,
+        raw_realized_avg_return_pct=1.0,
+    )
+
+    assert not broker_risk_probation_allows_live(
+        promoted_with_one_realized_trade,
+        settings_=_settings(
+            chili_autotrader_probation_min_cpcv_sharpe=float("nan"),
+            chili_autotrader_probation_min_realized_trades=True,
         ),
     )
 
@@ -423,6 +504,29 @@ def test_candidate_base_score_rejects_boolean_numeric_evidence():
     assert out["components"] == {}
 
 
+def test_candidate_base_score_rejects_out_of_range_probability_metrics():
+    row = {
+        "alpha_sleeve": "short_overbought",
+        "promotion_gate_passed": True,
+        "quality_composite_score": 1.2,
+        "cpcv_median_sharpe": 2.0,
+        "deflated_sharpe": -0.1,
+        "pbo": -0.5,
+        "realized_n_trades": 10,
+        "realized_avg_pnl_pct": 0.01,
+        "payoff_ratio": 2.0,
+        "payoff_ratio_n": 10,
+    }
+
+    out = candidate_base_score(row)
+
+    assert out["score"] is not None
+    assert "quality" not in out["components"]
+    assert "deflated_sharpe" not in out["components"]
+    assert "pbo_inverse" not in out["components"]
+    assert "missing_quality_score" in out["penalties"]
+
+
 def test_candidate_floor_blocks_boolean_gate_metrics_as_missing():
     row = {
         "promotion_gate_passed": True,
@@ -439,6 +543,26 @@ def test_candidate_floor_blocks_boolean_gate_metrics_as_missing():
     )
 
     assert "missing_cpcv_median_sharpe" in reasons
+    assert "missing_deflated_sharpe" in reasons
+    assert "missing_pbo" in reasons
+
+
+def test_candidate_floor_blocks_out_of_range_probability_metrics_as_missing():
+    row = {
+        "promotion_gate_passed": True,
+        "cpcv_median_sharpe": 2.0,
+        "deflated_sharpe": 1.2,
+        "pbo": -0.1,
+        "realized_n_trades": 5,
+        "realized_avg_pnl_pct": 0.01,
+    }
+
+    reasons = _candidate_floor_blocks(
+        row,
+        AlphaPortfolioConfig(min_realized_trades=5),
+    )
+
+    assert "missing_cpcv_median_sharpe" not in reasons
     assert "missing_deflated_sharpe" in reasons
     assert "missing_pbo" in reasons
 
@@ -476,6 +600,20 @@ def test_realized_edge_prefers_broader_raw_paper_dynamic_sample():
     assert edge is not None
     assert abs(edge - (-0.012)) < 1e-12
     assert n == 12
+
+
+def test_realized_edge_rejects_fractional_sample_counts():
+    row = {
+        "realized_n_trades": 1.5,
+        "realized_avg_pnl_pct": 0.05,
+        "raw_realized_trade_count": 12.5,
+        "raw_realized_avg_return_pct": -1.2,
+    }
+
+    edge, n = _realized_edge_fraction(row)
+
+    assert edge == 0.05
+    assert n == 0
 
 
 def test_candidate_floor_uses_negative_broader_paper_dynamic_ev():
@@ -534,6 +672,58 @@ def test_load_pattern_rows_counts_only_computable_realized_return_samples():
     assert "t.filled_quantity" in sql
     assert "t.partial_taken_qty" in sql
     assert db.params == {"pattern_id": 123, "window_days": 45}
+
+
+def test_load_pattern_rows_rejects_malformed_realized_window_days():
+    for bad_window in (True, 1.5, float("nan"), 0, -7):
+        db = _SqlCaptureDb()
+
+        _load_pattern_rows(db, pattern_id=123, realized_window_days=bad_window)
+
+        assert db.params == {"pattern_id": 123, "window_days": 90}
+
+
+def test_execution_health_rejects_malformed_measurable_samples(monkeypatch):
+    from app.services.trading import execution_quality
+
+    monkeypatch.setattr(
+        execution_quality,
+        "compute_execution_stats",
+        lambda *_args, **_kwargs: {"measurable": True, "p90_slippage_pct": 0.0},
+    )
+
+    out = execution_health_summary(
+        None,
+        config=AlphaPortfolioConfig(execution_min_samples=1),
+    )
+
+    assert out["clean"] is False
+    assert "insufficient_execution_quality_samples" in out["reasons"]
+
+
+def test_execution_health_rejects_missing_or_malformed_p90_slippage(monkeypatch):
+    from app.services.trading import execution_quality
+
+    for bad_p90 in (None, True, float("nan"), float("inf")):
+        monkeypatch.setattr(
+            execution_quality,
+            "compute_execution_stats",
+            lambda *_args, _bad_p90=bad_p90, **_kwargs: {
+                "measurable": 10,
+                "p90_slippage_pct": _bad_p90,
+            },
+        )
+
+        out = execution_health_summary(
+            None,
+            config=AlphaPortfolioConfig(
+                execution_min_samples=10,
+                execution_max_p90_slippage_pct=0.75,
+            ),
+        )
+
+        assert out["clean"] is False
+        assert "p90_slippage_missing" in out["reasons"]
 
 
 def test_scan_alpha_portfolio_marks_recert_and_selects_sleeve_candidates(db):
