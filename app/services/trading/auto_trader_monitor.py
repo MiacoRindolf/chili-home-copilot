@@ -482,6 +482,17 @@ def _coerce_pct(v: Any) -> float | None:
         return None
 
 
+def _rollback_monitor_session(db: Session, reason: str) -> None:
+    try:
+        db.rollback()
+    except Exception:
+        logger.debug(
+            "[autotrader_monitor] rollback after %s failed",
+            reason,
+            exc_info=True,
+        )
+
+
 # f-options-exit-monitor-pattern-exit-now-audit (2026-05-06):
 # the previous local definitions of _latest_monitor_decisions_by_trade
 # and _fresh_monitor_exit_meta moved to ._exit_monitor_common. The
@@ -532,6 +543,7 @@ def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
                     db, uid, skip_trade_ids=skip
                 )
             except Exception as e:
+                _rollback_monitor_session(db, "paper_exits")
                 logger.warning("[autotrader_monitor] check_paper_exits failed: %s", e)
                 summary["errors"].append(str(e))
             try:
@@ -548,6 +560,7 @@ def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
                             total_p,
                         )
             except Exception as e:
+                _rollback_monitor_session(db, "paper_daily_loss")
                 logger.warning("[autotrader_monitor] paper daily loss check failed: %s", e)
         return summary
 

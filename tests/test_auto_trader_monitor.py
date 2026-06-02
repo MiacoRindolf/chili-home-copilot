@@ -118,6 +118,103 @@ def _patch_monitor_settings(**overrides):
     return s
 
 
+def test_paper_monitor_rolls_back_after_exit_failure_before_daily_loss():
+    from app.services.trading.auto_trader_monitor import tick_auto_trader_monitor
+
+    class FakeDB:
+        failed = False
+        rollback_count = 0
+
+        def rollback(self):
+            self.failed = False
+            self.rollback_count += 1
+
+    db_sess = FakeDB()
+    daily_checked = {"ok": False}
+
+    def _raise_exit_failure(*_args, **_kwargs):
+        db_sess.failed = True
+        raise RuntimeError("paper_exit_deadlock")
+
+    def _paper_pnl(db_arg, _user_id):
+        if db_arg.failed:
+            raise RuntimeError("session still failed")
+        daily_checked["ok"] = True
+        return 0.0
+
+    _patch_monitor_settings(
+        chili_autotrader_live_enabled=False,
+        chili_autotrader_user_id=7,
+        brain_default_user_id=7,
+    )
+    try:
+        with patch("app.services.trading.governance.is_kill_switch_active", return_value=False), patch(
+            "app.services.trading.autotrader_desk.effective_autotrader_runtime",
+            return_value={"live_orders_effective": False},
+        ), patch(
+            "app.services.trading.auto_trader_position_overrides.paused_paper_trade_ids_for_user",
+            return_value=set(),
+        ), patch(
+            "app.services.trading.paper_trading.check_paper_exits",
+            side_effect=_raise_exit_failure,
+        ), patch(
+            "app.services.trading.auto_trader_rules.autotrader_paper_realized_pnl_today_et",
+            side_effect=_paper_pnl,
+        ):
+            out = tick_auto_trader_monitor(db_sess)
+    finally:
+        patch.stopall()
+
+    assert out["errors"] == ["paper_exit_deadlock"]
+    assert db_sess.rollback_count == 1
+    assert daily_checked["ok"] is True
+
+
+def test_paper_monitor_rolls_back_after_daily_loss_failure():
+    from app.services.trading.auto_trader_monitor import tick_auto_trader_monitor
+
+    class FakeDB:
+        failed = False
+        rollback_count = 0
+
+        def rollback(self):
+            self.failed = False
+            self.rollback_count += 1
+
+    db_sess = FakeDB()
+
+    def _raise_daily_loss_failure(*_args, **_kwargs):
+        db_sess.failed = True
+        raise RuntimeError("paper_pnl_deadlock")
+
+    _patch_monitor_settings(
+        chili_autotrader_live_enabled=False,
+        chili_autotrader_user_id=7,
+        brain_default_user_id=7,
+    )
+    try:
+        with patch("app.services.trading.governance.is_kill_switch_active", return_value=False), patch(
+            "app.services.trading.autotrader_desk.effective_autotrader_runtime",
+            return_value={"live_orders_effective": False},
+        ), patch(
+            "app.services.trading.auto_trader_position_overrides.paused_paper_trade_ids_for_user",
+            return_value=set(),
+        ), patch(
+            "app.services.trading.paper_trading.check_paper_exits",
+            return_value={"checked": 0, "closed": 0, "trailing_updated": 0},
+        ), patch(
+            "app.services.trading.auto_trader_rules.autotrader_paper_realized_pnl_today_et",
+            side_effect=_raise_daily_loss_failure,
+        ):
+            out = tick_auto_trader_monitor(db_sess)
+    finally:
+        patch.stopall()
+
+    assert out["paper_exits"] == {"checked": 0, "closed": 0, "trailing_updated": 0}
+    assert db_sess.rollback_count == 1
+    assert db_sess.failed is False
+
+
 def _mock_execution_window(**overrides):
     base = {
         "ticker": "ZZZ",
