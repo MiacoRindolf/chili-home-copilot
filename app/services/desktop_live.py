@@ -35,6 +35,29 @@ def _numbers(db: Session, user_id: Optional[int]) -> Dict[str, Any]:
                 "open_positions": 0, "closes_today": 0, "top_patterns": 0}
 
 
+def _lists(db: Session, user_id: Optional[int]) -> Dict[str, Any]:
+    # Compact live lists for the glance widgets: currently-open tickers/sides and
+    # the latest few closed trades (already money-formatted by dashboard_summary).
+    # Each section degrades to [] on failure so the poll never 500s.
+    try:
+        from .dashboard_summary import build_dashboard
+        d = build_dashboard(db, user_id)
+        t = d.get("trading") or {}
+        positions = [
+            {"ticker": p.get("ticker"), "side": p.get("side") or ""}
+            for p in (t.get("open_positions") or []) if isinstance(p, dict)
+        ][:6]
+        closes = [
+            {"ticker": c.get("ticker"), "pattern": c.get("pattern") or "—",
+             "pnl_fmt": c.get("pnl_fmt") or "—", "pnl_up": bool(c.get("pnl_up"))}
+            for c in (t.get("closes_fmt") or []) if isinstance(c, dict)
+        ][:5]
+        return {"positions": positions, "closes": closes}
+    except Exception as e:
+        logger.warning("[desktop_live] lists failed: %s", e)
+        return {"positions": [], "closes": []}
+
+
 def _kill_switch() -> Dict[str, Any]:
     # active=True means trading is HALTED (the alarm state). On read failure we
     # report ok=False so the widget shows "unknown" rather than a false "clear".
@@ -71,6 +94,7 @@ def build_live(db: Session, user_id: Optional[int]) -> Dict[str, Any]:
     """Return the compact live cockpit view-model (safe to poll repeatedly)."""
     out: Dict[str, Any] = {"ok": True}
     out.update(_numbers(db, user_id))
+    out.update(_lists(db, user_id))
     out["kill_switch"] = _kill_switch()
     out["breaker"] = _breaker()
     out["market"] = _market()
