@@ -377,3 +377,105 @@ def test_time_decay_exit_variant_enqueue_failure_does_not_block_digest(
 
     assert digest_calls
     assert digest_calls[0]["event_type"] == "execution_feedback_digest"
+
+
+def test_time_decay_exit_variant_sweep_enqueues_bounded_positive_edge_misses(
+    monkeypatch,
+) -> None:
+    work: list[dict[str, object]] = []
+
+    def _fake_profitability_work(_db, **kwargs):
+        work.append(kwargs)
+        return 900 + len(work)
+
+    monkeypatch.setattr(
+        "app.services.trading.edge_reliability.emit_targeted_profitability_work",
+        _fake_profitability_work,
+    )
+
+    eligible = SimpleNamespace(
+        id=91,
+        user_id=9,
+        scan_pattern_id=42,
+        paper_shadow_of_alert_id=77,
+        ticker="EDGE-USD",
+        pnl=-2.0,
+        pnl_pct=None,
+        entry_price=100.0,
+        exit_price=98.0,
+        quantity=1.0,
+        direction="long",
+        exit_reason="exit_engine_time_decay",
+        signal_json={
+            "paper_shadow": True,
+            "entry_edge": {"expected_net_pct": 3.2},
+        },
+        tca_entry_slippage_bps=None,
+        tca_exit_slippage_bps=None,
+    )
+    no_edge = SimpleNamespace(
+        id=92,
+        scan_pattern_id=43,
+        paper_shadow_of_alert_id=78,
+        ticker="NOEDGE-USD",
+        pnl=-1.0,
+        pnl_pct=None,
+        entry_price=100.0,
+        exit_price=99.0,
+        quantity=1.0,
+        direction="long",
+        exit_reason="exit_engine_time_decay",
+        signal_json={"paper_shadow": True},
+        tca_entry_slippage_bps=None,
+        tca_exit_slippage_bps=None,
+    )
+    not_shadow = SimpleNamespace(
+        id=93,
+        scan_pattern_id=44,
+        paper_shadow_of_alert_id=None,
+        ticker="PLAIN",
+        pnl=-1.0,
+        pnl_pct=None,
+        entry_price=100.0,
+        exit_price=99.0,
+        quantity=1.0,
+        direction="long",
+        exit_reason="exit_engine_time_decay",
+        signal_json={"entry_edge": {"expected_net_pct": 2.0}},
+        tca_entry_slippage_bps=None,
+        tca_exit_slippage_bps=None,
+    )
+
+    class _Query:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def filter(self, *_args):
+            return self
+
+        def order_by(self, *_args):
+            return self
+
+        def limit(self, _limit):
+            return self
+
+        def all(self):
+            return [eligible, no_edge, not_shadow]
+
+    class _Db:
+        def query(self, _model):
+            return _Query([eligible, no_edge, not_shadow])
+
+    result = execution_hooks.enqueue_recent_time_decay_exit_variant_work(
+        _Db(),
+        lookback_hours=24,
+        limit=5,
+    )
+
+    assert result["ok"] is True
+    assert result["candidate_rows"] == 3
+    assert result["queued"] == 1
+    assert result["skipped_no_positive_edge"] == 1
+    assert result["skipped_not_shadow"] == 1
+    assert work[0]["event_type"] == "exit_variant_refresh"
+    assert work[0]["source"] == execution_hooks.TIME_DECAY_EXIT_VARIANT_SOURCE

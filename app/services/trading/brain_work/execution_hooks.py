@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+from datetime import UTC, datetime, timedelta
 from typing import Any, Optional
 
 from sqlalchemy import text
@@ -35,6 +36,9 @@ TIME_DECAY_EXIT_VARIANT_REASONS = frozenset({
     "time_decay",
     "exit_time_decay",
 })
+TIME_DECAY_EXIT_VARIANT_SWEEP_DEFAULT_LOOKBACK_HOURS = 48.0
+TIME_DECAY_EXIT_VARIANT_SWEEP_DEFAULT_LIMIT = 25
+TIME_DECAY_EXIT_VARIANT_SWEEP_FETCH_MULTIPLIER = 6
 
 
 def _json_dict(value: Any) -> dict[str, Any]:
@@ -144,6 +148,113 @@ def _emit_time_decay_exit_variant_work(
             ).get("last_reason"),
         },
     )
+
+
+def _is_autotrader_or_shadow_paper(pt: PaperTrade) -> bool:
+    sig = _json_dict(getattr(pt, "signal_json", None))
+    return bool(
+        getattr(pt, "paper_shadow_of_alert_id", None)
+        or sig.get("paper_shadow")
+        or sig.get("shadow_of_alert_id")
+        or sig.get("auto_trader_v1")
+    )
+
+
+def enqueue_recent_time_decay_exit_variant_work(
+    db: Session,
+    *,
+    lookback_hours: float | None = None,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """Backfill exit-variant work for recent positive-edge time-decay losses.
+
+    The close hook covers future rows. This bounded sweep catches already
+    closed paper/shadow rows without scanning the full paper-trade table.
+    """
+    enabled = bool(
+        getattr(settings, "brain_work_time_decay_exit_variant_sweep_enabled", True)
+    )
+    if not enabled:
+        return {"ok": True, "skipped": True, "reason": "disabled_by_setting"}
+
+    lookback = _finite_float(
+        lookback_hours
+        if lookback_hours is not None
+        else getattr(
+            settings,
+            "brain_work_time_decay_exit_variant_sweep_lookback_hours",
+            TIME_DECAY_EXIT_VARIANT_SWEEP_DEFAULT_LOOKBACK_HOURS,
+        )
+    )
+    lookback = max(1.0, lookback or TIME_DECAY_EXIT_VARIANT_SWEEP_DEFAULT_LOOKBACK_HOURS)
+    max_items = int(
+        limit
+        if limit is not None
+        else getattr(
+            settings,
+            "brain_work_time_decay_exit_variant_sweep_limit",
+            TIME_DECAY_EXIT_VARIANT_SWEEP_DEFAULT_LIMIT,
+        )
+    )
+    if max_items <= 0:
+        return {"ok": True, "skipped": True, "reason": "limit_not_positive"}
+
+    cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=lookback)
+    fetch_limit = max_items * TIME_DECAY_EXIT_VARIANT_SWEEP_FETCH_MULTIPLIER
+    rows = (
+        db.query(PaperTrade)
+        .filter(PaperTrade.status == "closed")
+        .filter(PaperTrade.exit_reason.in_(tuple(TIME_DECAY_EXIT_VARIANT_REASONS)))
+        .filter(PaperTrade.exit_date >= cutoff)
+        .filter(PaperTrade.pnl < 0)
+        .filter(PaperTrade.scan_pattern_id.isnot(None))
+        .order_by(PaperTrade.exit_date.desc(), PaperTrade.id.desc())
+        .limit(fetch_limit)
+        .all()
+    )
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "skipped": False,
+        "lookback_hours": lookback,
+        "limit": max_items,
+        "candidate_rows": len(rows),
+        "checked": 0,
+        "queued": 0,
+        "deduped_or_existing": 0,
+        "skipped_not_shadow": 0,
+        "skipped_no_positive_edge": 0,
+        "skipped_no_loss": 0,
+    }
+    for row in rows:
+        if int(result["checked"]) >= max_items:
+            break
+        if not _is_autotrader_or_shadow_paper(row):
+            result["skipped_not_shadow"] += 1
+            continue
+        expected_net_pct = _paper_expected_net_pct(row)
+        if expected_net_pct is None or expected_net_pct <= 0.0:
+            result["skipped_no_positive_edge"] += 1
+            continue
+        close_extra = paper_trade_close_attribution_dict(row)
+        realized_return_pct = _finite_float(close_extra.get("realized_return_pct"))
+        pnl = _finite_float(getattr(row, "pnl", None))
+        if (realized_return_pct is None or realized_return_pct >= 0.0) and (
+            pnl is None or pnl >= 0.0
+        ):
+            result["skipped_no_loss"] += 1
+            continue
+        result["checked"] += 1
+        event_id = _emit_time_decay_exit_variant_work(
+            db,
+            row,
+            close_extra=close_extra,
+        )
+        if event_id is None:
+            result["deduped_or_existing"] += 1
+        else:
+            result["queued"] += 1
+    return result
 
 
 # ── Phase B (f-execution-truth-wiring): venue-truth + cost-estimate refresh ──
