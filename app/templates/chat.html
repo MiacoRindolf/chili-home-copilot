@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}CHILI Chat{% endblock %}
+{% block title %}{% if request is defined and request.query_params.get('embed') == '1' %}Chat{% else %}CHILI Chat{% endif %}{% endblock %}
 
 {% block head_extra %}
   <style>
@@ -479,7 +479,7 @@
 {% endblock %}
 
 {% block content %}
-  {% if request.query_params.get('embed') != '1' %}
+  {% if not (request is defined and request.query_params.get('embed') == '1') %}
   <header>
     <div style="display:flex;align-items:center;gap:10px;">
       <button id="sidebar-toggle-btn" title="Toggle sidebar" style="background:none;border:1px solid var(--border);border-radius:6px;padding:4px 10px;cursor:pointer;font-size:16px;color:var(--text-secondary);">☰</button>
