@@ -100,28 +100,29 @@
     removeChip(app); syncHome(); setHash(); saveLayout();
   }
 
-  // ── Session restore: remember which windows are open, where, and how big,
-  //    so reopening the workspace brings the desktop back as you left it. ──
-  var LAYOUT_KEY = 'chili-os-layout', restoring = false;
+  // ── Session restore + named Spaces: a layout is the set of open windows with
+  //    their geometry/min-state/focus order. The current layout auto-restores on
+  //    reload; named Spaces let you snapshot and switch between arrangements. ──
+  var LAYOUT_KEY = 'chili-os-layout', SPACES_KEY = 'chili-os-spaces', restoring = false;
+
+  // Serialize the current desktop into a plain layout object.
+  function captureLayout() {
+    var apps = Object.keys(wins).map(function (app) {
+      var el = wins[app]; if (!el) return null;
+      return { app: app, left: el.style.left, top: el.style.top, width: el.style.width, height: el.style.height, min: el.style.display === 'none' };
+    }).filter(Boolean);
+    return { apps: apps, order: order.slice() };
+  }
   function saveLayout() {
     if (restoring) return;  // don't thrash storage while replaying a layout
-    try {
-      var apps = Object.keys(wins).map(function (app) {
-        var el = wins[app]; if (!el) return null;
-        return { app: app, left: el.style.left, top: el.style.top, width: el.style.width, height: el.style.height, min: el.style.display === 'none' };
-      }).filter(Boolean);
-      localStorage.setItem(LAYOUT_KEY, JSON.stringify({ apps: apps, order: order.slice() }));
-    } catch (e) {}
+    try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(captureLayout())); } catch (e) {}
   }
-  function restoreLayout() {
-    var raw; try { raw = localStorage.getItem(LAYOUT_KEY); } catch (e) { return false; }
-    if (!raw) return false;
-    var data; try { data = JSON.parse(raw); } catch (e) { return false; }
+  // Replay a layout object onto the desktop (in saved focus order, last on top).
+  function applyLayout(data) {
     if (!data || !data.apps || !data.apps.length) return false;
     restoring = true;
-    // Open in saved focus order so the last-focused window ends up on top.
     var byApp = {}; data.apps.forEach(function (s) { byApp[s.app] = s; });
-    var seq = (data.order && data.order.length ? data.order : data.apps.map(function (s) { return s.app; }));
+    var seq = (data.order && data.order.length ? data.order.slice() : data.apps.map(function (s) { return s.app; }));
     data.apps.forEach(function (s) { if (seq.indexOf(s.app) === -1) seq.push(s.app); });
     seq.forEach(function (app) {
       var s = byApp[app]; if (!s) return;
@@ -131,6 +132,45 @@
     restoring = false; saveLayout();
     return Object.keys(wins).length > 0;
   }
+  function restoreLayout() {
+    var raw; try { raw = localStorage.getItem(LAYOUT_KEY); } catch (e) { return false; }
+    if (!raw) return false;
+    var data; try { data = JSON.parse(raw); } catch (e) { return false; }
+    return applyLayout(data);
+  }
+  // Immediately tear down every open window (used when switching Spaces).
+  function closeAllNow() {
+    restoring = true;
+    Object.keys(wins).forEach(function (app) {
+      var el = wins[app]; if (el) el.remove();
+      var d = dock(app); if (d) d.classList.remove('os-open');
+      removeChip(app);
+    });
+    wins = {}; order = [];
+    restoring = false; syncHome(); setHash();
+  }
+
+  // Named Spaces store (array preserves the user's ordering).
+  function loadSpaces() {
+    try { var d = JSON.parse(localStorage.getItem(SPACES_KEY) || '{}'); return Array.isArray(d.spaces) ? d.spaces : []; }
+    catch (e) { return []; }
+  }
+  function persistSpaces(arr) { try { localStorage.setItem(SPACES_KEY, JSON.stringify({ spaces: arr })); } catch (e) {} }
+  function saveSpace(name) {
+    name = (name || '').trim(); if (!name) return false;
+    var arr = loadSpaces(), snap = captureLayout(), entry = { name: name, apps: snap.apps, order: snap.order };
+    var i = arr.map(function (s) { return s.name; }).indexOf(name);
+    if (i >= 0) arr[i] = entry; else arr.push(entry);
+    persistSpaces(arr); return true;
+  }
+  function openSpace(name) {
+    var sp = loadSpaces().filter(function (s) { return s.name === name; })[0];
+    if (!sp) return false;
+    closeAllNow();
+    applyLayout({ apps: sp.apps, order: sp.order });
+    return true;
+  }
+  function removeSpace(name) { persistSpaces(loadSpaces().filter(function (s) { return s.name !== name; })); }
   function snap(el, zone) {
     el.classList.add('snapping');
     var W = desktop.clientWidth, H = desktop.clientHeight;
@@ -218,8 +258,17 @@
     else if (e.key.toLowerCase() === 'w') { e.preventDefault(); closeApp(top); }
   });
 
-  // expose for other UI (e.g. quick actions, palette) to open windows.
-  // Returns true if the app was opened as a window, false otherwise (caller can
+  // expose for other UI (quick actions, palette, the Spaces menu) to drive the OS.
+  // open() returns true if the app opened as a window, false otherwise (caller can
   // then fall back to navigation — e.g. Dashboard, which is the desktop home).
-  window.ChiliOS = { open: function (app) { var b = document.querySelector('.ws-rb[data-app="' + app + '"][data-src]'); if (b) { openApp(cfgFromEl(b)); return true; } return false; } };
+  window.ChiliOS = {
+    open: function (app) { var b = document.querySelector('.ws-rb[data-app="' + app + '"][data-src]'); if (b) { openApp(cfgFromEl(b)); return true; } return false; },
+    // Named Spaces — snapshot/restore window arrangements by name.
+    spaces: {
+      list: function () { return loadSpaces().map(function (s) { return { name: s.name, count: (s.apps || []).length }; }); },
+      save: saveSpace,
+      open: openSpace,
+      remove: removeSpace
+    }
+  };
 })();

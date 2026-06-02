@@ -39,6 +39,12 @@
       </button>
       <div class="ws-topbar-right">
         {% block ws_topbar_extra %}{% endblock %}
+        <div class="ws-spaces" id="ws-spaces">
+          <button class="ws-iconbtn" id="ws-spaces-btn" type="button" title="Spaces — saved window layouts" aria-haspopup="true" aria-expanded="false">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+          </button>
+          <div class="ws-spaces-menu" id="ws-spaces-menu" role="menu" aria-label="Spaces"></div>
+        </div>
         <button class="ws-iconbtn" id="ws-theme-toggle" type="button" title="Toggle theme" aria-label="Toggle theme">
           <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
         </button>

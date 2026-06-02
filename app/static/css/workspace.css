@@ -168,6 +168,24 @@
 .ws-palette .opt .pi svg{width:15px;height:15px}
 .ws-palette .opt .pk{margin-left:auto;color:var(--ws-text-3);font-size:var(--ws-fs-11)}
 
+/* ── Spaces menu (saved window layouts) ── */
+.ws-spaces{position:relative}
+.ws-spaces-menu{position:absolute;top:calc(100% + 8px);right:0;min-width:248px;background:var(--ws-surface);border:1px solid var(--ws-border-strong);border-radius:var(--ws-r-lg);box-shadow:var(--ws-shadow-lg);padding:6px;z-index:1000;display:none;flex-direction:column;gap:2px}
+.ws-spaces.open .ws-spaces-menu{display:flex;animation:wsPop .12s var(--ws-ease,ease)}
+@keyframes wsPop{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+.ws-space-row{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:var(--ws-r-md);cursor:pointer;font-size:var(--ws-fs-13);color:var(--ws-text);transition:background var(--ws-dur,.12s)}
+.ws-space-row:hover,.ws-space-row:focus-visible{background:var(--ws-accent-bg);outline:none}
+.ws-space-name{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:var(--ws-fw-semi)}
+.ws-space-count{font-size:var(--ws-fs-11);color:var(--ws-text-3);background:var(--ws-surface-3);border-radius:var(--ws-r-pill);padding:1px 7px;min-width:20px;text-align:center}
+.ws-space-del{border:none;background:transparent;color:var(--ws-text-3);cursor:pointer;font-size:17px;line-height:1;width:20px;height:20px;border-radius:6px;display:grid;place-items:center;flex-shrink:0;transition:all var(--ws-dur,.12s)}
+.ws-space-del:hover{background:var(--ws-down-bg);color:var(--ws-down)}
+.ws-space-empty{padding:12px 9px;font-size:var(--ws-fs-12);color:var(--ws-text-3);text-align:center}
+.ws-space-save{display:flex;gap:6px;padding:7px 4px 2px;margin-top:4px;border-top:1px solid var(--ws-border)}
+.ws-space-save input{flex:1;min-width:0;background:var(--ws-surface-2);border:1px solid var(--ws-border);border-radius:var(--ws-r-md);padding:7px 9px;color:var(--ws-text);font-size:var(--ws-fs-12);font-family:var(--ws-font-ui)}
+.ws-space-save input:focus{outline:none;border-color:var(--ws-accent)}
+.ws-space-save button{background:var(--ws-accent);color:#fff;border:none;border-radius:var(--ws-r-md);padding:7px 13px;font-size:var(--ws-fs-12);font-weight:var(--ws-fw-semi);cursor:pointer;transition:filter var(--ws-dur,.12s)}
+.ws-space-save button:hover{filter:brightness(1.08)}
+
 @media(max-width:1100px){.ws-kpis{grid-template-columns:repeat(2,1fr)}.ws-c8,.ws-c6,.ws-c4{grid-column:span 12}}
 @media(max-width:760px){.ws-app{grid-template-columns:56px 1fr}.ws-cmdk{display:none}.ws-content{padding:var(--ws-s5)}}
 @media (prefers-reduced-motion:reduce){.ws-kpi,.ws-qa a,.ws-palette{transition:none;animation:none}}
