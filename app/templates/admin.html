@@ -261,6 +261,7 @@
 {% block content %}
 <div class="admin-shell">
 
+  {% if request.query_params.get('embed') != '1' %}
   <div class="admin-topbar">
     <h1>
       <span style="font-size:1.6rem;">&#127798;</span> CHILI Admin
@@ -274,6 +275,7 @@
       <button class="nav-btn" id="theme-toggle" title="Toggle dark mode"></button>
     </nav>
   </div>
+  {% endif %}
 
   <div class="alerts-bar" id="alerts-bar"></div>
 

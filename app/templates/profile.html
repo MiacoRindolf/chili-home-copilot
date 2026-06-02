@@ -185,6 +185,7 @@
 {% block content %}
 <div class="profile-shell">
 
+  {% if request.query_params.get('embed') != '1' %}
   <div class="p-topbar">
     <h1>Profile</h1>
     <nav>
@@ -194,6 +195,7 @@
       <button id="theme-toggle" title="Toggle dark mode"></button>
     </nav>
   </div>
+  {% endif %}
 
   <!-- Header -->
   <div class="profile-header">
