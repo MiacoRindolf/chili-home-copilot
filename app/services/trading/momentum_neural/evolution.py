@@ -6,7 +6,7 @@ import math
 from datetime import datetime, timedelta
 from typing import Any, Iterable, Optional
 
-from sqlalchemy import func
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from ....config import settings
@@ -28,6 +28,7 @@ _LIVE_WEIGHT_FULL_N = 3
 _REFINEMENT_MIN_OUTCOMES = 3
 _MAX_REFINED_CHILDREN = 3
 _REFINEMENT_LOOKBACK_DAYS = 30
+_GOVERNANCE_OR_RISK_CLASSES = ("governance_exit", "risk_block", "stale_data_abort")
 
 
 def record_evolution_trace(
@@ -204,20 +205,14 @@ def aggregate_recent_outcomes_for_variant(
 ) -> dict[str, Any]:
     """Weighted aggregates for one variant (optional mode filter: paper | live)."""
     since = datetime.utcnow() - timedelta(days=max(1, min(int(days), 365)))
-    q = db.query(
-        MomentumAutomationOutcome.evidence_weight,
-        MomentumAutomationOutcome.return_bps,
-        MomentumAutomationOutcome.realized_pnl_usd,
-        MomentumAutomationOutcome.outcome_class,
-    ).filter(
+    q = _weighted_outcome_stats_query(db).filter(
         MomentumAutomationOutcome.variant_id == int(variant_id),
         MomentumAutomationOutcome.terminal_at >= since,
         MomentumAutomationOutcome.contributes_to_evolution.is_(True),
     )
     if mode:
         q = q.filter(MomentumAutomationOutcome.mode == mode.lower().strip())
-    rows = q.all()
-    return _aggregate_rows(rows)
+    return _aggregate_from_stats_row(q.one_or_none())
 
 
 def aggregate_recent_outcomes_for_symbol_variant(
@@ -228,22 +223,98 @@ def aggregate_recent_outcomes_for_symbol_variant(
     days: int = 14,
 ) -> dict[str, Any]:
     since = datetime.utcnow() - timedelta(days=max(1, min(int(days), 365)))
-    rows = (
-        db.query(
-            MomentumAutomationOutcome.evidence_weight,
-            MomentumAutomationOutcome.return_bps,
-            MomentumAutomationOutcome.realized_pnl_usd,
-            MomentumAutomationOutcome.outcome_class,
-        )
+    row = (
+        _weighted_outcome_stats_query(db)
         .filter(
             MomentumAutomationOutcome.symbol == symbol.strip().upper(),
             MomentumAutomationOutcome.variant_id == int(variant_id),
             MomentumAutomationOutcome.terminal_at >= since,
             MomentumAutomationOutcome.contributes_to_evolution.is_(True),
         )
-        .all()
+        .one_or_none()
     )
-    return _aggregate_rows(rows)
+    return _aggregate_from_stats_row(row)
+
+
+def _weighted_outcome_stats_query(db: Session) -> Any:
+    weight = func.coalesce(MomentumAutomationOutcome.evidence_weight, 1.0)
+    return db.query(
+        func.count(MomentumAutomationOutcome.id).label("n"),
+        func.coalesce(func.sum(weight), 0.0).label("weight_sum"),
+        func.coalesce(
+            func.sum(
+                case(
+                    (MomentumAutomationOutcome.return_bps.isnot(None), MomentumAutomationOutcome.return_bps * weight),
+                    else_=0.0,
+                )
+            ),
+            0.0,
+        ).label("weighted_return_bps_sum"),
+        func.coalesce(
+            func.sum(
+                case(
+                    (
+                        MomentumAutomationOutcome.realized_pnl_usd.isnot(None),
+                        MomentumAutomationOutcome.realized_pnl_usd * weight,
+                    ),
+                    else_=0.0,
+                )
+            ),
+            0.0,
+        ).label("weighted_pnl_sum"),
+        func.coalesce(
+            func.sum(case((MomentumAutomationOutcome.outcome_class.in_(_GOVERNANCE_OR_RISK_CLASSES), 1), else_=0)),
+            0,
+        ).label("governance_or_risk_count"),
+    )
+
+
+def _weighted_outcome_stats_by_mode_query(db: Session) -> Any:
+    weight = func.coalesce(MomentumAutomationOutcome.evidence_weight, 1.0)
+    return db.query(
+        MomentumAutomationOutcome.mode,
+        func.count(MomentumAutomationOutcome.id).label("n"),
+        func.coalesce(func.sum(weight), 0.0).label("weight_sum"),
+        func.coalesce(
+            func.sum(
+                case(
+                    (MomentumAutomationOutcome.return_bps.isnot(None), MomentumAutomationOutcome.return_bps * weight),
+                    else_=0.0,
+                )
+            ),
+            0.0,
+        ).label("weighted_return_bps_sum"),
+        func.coalesce(
+            func.sum(
+                case(
+                    (
+                        MomentumAutomationOutcome.realized_pnl_usd.isnot(None),
+                        MomentumAutomationOutcome.realized_pnl_usd * weight,
+                    ),
+                    else_=0.0,
+                )
+            ),
+            0.0,
+        ).label("weighted_pnl_sum"),
+        func.coalesce(
+            func.sum(case((MomentumAutomationOutcome.outcome_class.in_(_GOVERNANCE_OR_RISK_CLASSES), 1), else_=0)),
+            0,
+        ).label("governance_or_risk_count"),
+    )
+
+
+def _aggregate_from_stats_row(row: Any) -> dict[str, Any]:
+    if row is None:
+        return _aggregate_from_stats(0, 0.0, 0.0, 0.0, 0)
+    if isinstance(row, (tuple, list)):
+        n, w_sum, wrb, wp, gr = row
+    else:
+        n = getattr(row, "n", 0)
+        w_sum = getattr(row, "weight_sum", 0.0)
+        wrb = getattr(row, "weighted_return_bps_sum", 0.0)
+        wp = getattr(row, "weighted_pnl_sum", 0.0)
+        gr = getattr(row, "governance_or_risk_count", 0)
+    return _aggregate_from_stats(int(n or 0), float(w_sum or 0.0), float(wrb or 0.0), float(wp or 0.0), int(gr or 0))
 
 
 def paper_vs_live_performance_slices(
@@ -254,22 +325,17 @@ def paper_vs_live_performance_slices(
 ) -> dict[str, Any]:
     since = datetime.utcnow() - timedelta(days=max(1, min(int(days), 365)))
     rows = (
-        db.query(
-            MomentumAutomationOutcome.mode,
-            MomentumAutomationOutcome.evidence_weight,
-            MomentumAutomationOutcome.return_bps,
-            MomentumAutomationOutcome.realized_pnl_usd,
-            MomentumAutomationOutcome.outcome_class,
-        )
+        _weighted_outcome_stats_by_mode_query(db)
         .filter(
             MomentumAutomationOutcome.variant_id == int(variant_id),
             MomentumAutomationOutcome.terminal_at >= since,
             MomentumAutomationOutcome.contributes_to_evolution.is_(True),
             MomentumAutomationOutcome.mode.in_(("paper", "live")),
         )
+        .group_by(MomentumAutomationOutcome.mode)
         .all()
     )
-    by_mode = _aggregate_rows_by_mode(rows)
+    by_mode = _aggregate_stats_rows_by_mode(rows)
     paper = by_mode["paper"]
     live = by_mode["live"]
     return {
@@ -279,6 +345,33 @@ def paper_vs_live_performance_slices(
         "live": live,
         "live_sample_caution": live["n"] < _LIVE_WEIGHT_FULL_N,
     }
+
+
+def _aggregate_stats_rows_by_mode(rows: Iterable[Any]) -> dict[str, dict[str, Any]]:
+    out = {
+        "paper": _aggregate_from_stats(0, 0.0, 0.0, 0.0, 0),
+        "live": _aggregate_from_stats(0, 0.0, 0.0, 0.0, 0),
+    }
+    for row in rows:
+        if isinstance(row, (tuple, list)):
+            mode, n, w_sum, wrb, wp, gr = row
+        else:
+            mode = getattr(row, "mode", "")
+            n = getattr(row, "n", 0)
+            w_sum = getattr(row, "weight_sum", 0.0)
+            wrb = getattr(row, "weighted_return_bps_sum", 0.0)
+            wp = getattr(row, "weighted_pnl_sum", 0.0)
+            gr = getattr(row, "governance_or_risk_count", 0)
+        mode_key = str(mode or "").lower()
+        if mode_key in out:
+            out[mode_key] = _aggregate_from_stats(
+                int(n or 0),
+                float(w_sum or 0.0),
+                float(wrb or 0.0),
+                float(wp or 0.0),
+                int(gr or 0),
+            )
+    return out
 
 
 def _aggregate_rows(rows: Iterable[Any]) -> dict[str, Any]:
@@ -303,7 +396,7 @@ def _aggregate_rows(rows: Iterable[Any]) -> dict[str, Any]:
         if realized_pnl_usd is not None:
             wp += float(realized_pnl_usd) * w
         oc = outcome_class or ""
-        if oc in ("governance_exit", "risk_block", "stale_data_abort"):
+        if oc in _GOVERNANCE_OR_RISK_CLASSES:
             gr += 1
     return _aggregate_from_stats(n, w_sum, wrb, wp, gr)
 
@@ -345,7 +438,7 @@ def _aggregate_rows_by_mode(rows: Iterable[Any]) -> dict[str, dict[str, Any]]:
         if realized_pnl_usd is not None:
             bucket[3] += float(realized_pnl_usd) * w
         oc = outcome_class or ""
-        if oc in ("governance_exit", "risk_block", "stale_data_abort"):
+        if oc in _GOVERNANCE_OR_RISK_CLASSES:
             bucket[4] += 1
     return {
         mode: _aggregate_from_stats(int(values[0]), values[1], values[2], values[3], int(values[4]))
@@ -501,6 +594,19 @@ def _return_bps_column_stats(rows: Iterable[Any]) -> tuple[int, int, Optional[fl
     return n, wins, (total_bps / n if n else None)
 
 
+def _return_bps_stats_from_row(row: Any) -> tuple[int, int, Optional[float]]:
+    if row is None:
+        return 0, 0, None
+    if isinstance(row, (tuple, list)):
+        n, wins, mean_bps = row
+    else:
+        n = getattr(row, "n", 0)
+        wins = getattr(row, "wins", 0)
+        mean_bps = getattr(row, "mean_bps", None)
+    n_int = int(n or 0)
+    return n_int, int(wins or 0), (float(mean_bps) if n_int and mean_bps is not None else None)
+
+
 def maybe_kill_underperforming_variant(db: Session, *, variant_id: int) -> dict[str, Any]:
     """Deactivate variant + viability if sustained poor track record (Phase 5c)."""
     n, wins, mean_bps = _recent_return_stats_for_variant(db, variant_id=int(variant_id), days=90)
@@ -548,22 +654,33 @@ def _recent_return_stats_for_variant(
     days: int = 90,
 ) -> tuple[int, int, Optional[float]]:
     since = datetime.utcnow() - timedelta(days=max(1, int(days)))
-    rows = (
-        db.query(MomentumAutomationOutcome.return_bps)
+    row = (
+        db.query(
+            func.count(MomentumAutomationOutcome.return_bps).label("n"),
+            func.coalesce(
+                func.sum(case((MomentumAutomationOutcome.return_bps > 0.0, 1), else_=0)),
+                0,
+            ).label("wins"),
+            func.avg(MomentumAutomationOutcome.return_bps).label("mean_bps"),
+        )
         .filter(
             MomentumAutomationOutcome.variant_id == int(variant_id),
             MomentumAutomationOutcome.contributes_to_evolution.is_(True),
             MomentumAutomationOutcome.created_at >= since,
         )
-        .all()
+        .one_or_none()
     )
-    return _return_bps_column_stats(rows)
+    return _return_bps_stats_from_row(row)
 
 
-def _recent_outcomes_for_variant(db: Session, *, variant_id: int, days: int = _REFINEMENT_LOOKBACK_DAYS) -> list[MomentumAutomationOutcome]:
+def _recent_outcomes_for_variant(db: Session, *, variant_id: int, days: int = _REFINEMENT_LOOKBACK_DAYS) -> list[Any]:
     since = datetime.utcnow() - timedelta(days=max(1, int(days)))
     return (
-        db.query(MomentumAutomationOutcome)
+        db.query(
+            MomentumAutomationOutcome.return_bps,
+            MomentumAutomationOutcome.hold_seconds,
+            MomentumAutomationOutcome.mode,
+        )
         .filter(
             MomentumAutomationOutcome.variant_id == int(variant_id),
             MomentumAutomationOutcome.contributes_to_evolution.is_(True),

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import desc
+from sqlalchemy import case, desc, func
 
 from .context import MomentumRegimeContext, VolatilityRegime
 from .features import ExecutionReadinessFeatures
@@ -43,6 +43,41 @@ class ViabilityResult:
         }
 
 
+def _memory_adjust_from_stats(*, n: int, wins: int) -> float:
+    if n < 3:
+        return 0.0
+    wr = int(wins) / int(n)
+    if n >= 5 and wr > 0.55:
+        return min(0.08, 0.05 * (wr - 0.55))
+    if wr < 0.5:
+        return -max(0.0, 0.1 * (0.5 - wr))
+    return 0.0
+
+
+def _memory_stats_from_row(row: Any) -> tuple[int, int]:
+    if row is None:
+        return 0, 0
+    if isinstance(row, (tuple, list)):
+        n, wins = row
+    else:
+        n = getattr(row, "n", 0)
+        wins = getattr(row, "wins", 0)
+    return int(n or 0), int(wins or 0)
+
+
+def _memory_stats_from_return_rows(rows: Any) -> tuple[int, int]:
+    n = 0
+    wins = 0
+    for row in rows:
+        raw = row[0] if isinstance(row, (tuple, list)) else getattr(row, "return_bps", row)
+        if raw is None:
+            continue
+        n += 1
+        if float(raw) > 0:
+            wins += 1
+    return n, wins
+
+
 def _symbol_family_memory_adjust(db: "Session", symbol: str, family_id: str) -> float:
     """Boost/penalize from recent symbol × family outcomes (Phase 4b)."""
     from ....models.trading import MomentumAutomationOutcome, MomentumStrategyVariant
@@ -50,8 +85,8 @@ def _symbol_family_memory_adjust(db: "Session", symbol: str, family_id: str) -> 
     sym = (symbol or "").strip().upper()
     if sym in ("", "__AGGREGATE__"):
         return 0.0
-    rows = (
-        db.query(MomentumAutomationOutcome.return_bps)
+    latest = (
+        db.query(MomentumAutomationOutcome.return_bps.label("return_bps"))
         .join(MomentumStrategyVariant, MomentumStrategyVariant.id == MomentumAutomationOutcome.variant_id)
         .filter(
             MomentumAutomationOutcome.symbol == sym,
@@ -60,25 +95,14 @@ def _symbol_family_memory_adjust(db: "Session", symbol: str, family_id: str) -> 
         )
         .order_by(desc(MomentumAutomationOutcome.created_at))
         .limit(10)
-        .all()
+        .subquery()
     )
-    n = 0
-    wins = 0
-    for r in rows:
-        raw = r[0]
-        if raw is None:
-            continue
-        n += 1
-        if float(raw) > 0:
-            wins += 1
-    if n < 3:
-        return 0.0
-    wr = wins / n
-    if n >= 5 and wr > 0.55:
-        return min(0.08, 0.05 * (wr - 0.55))
-    if wr < 0.5:
-        return -max(0.0, 0.1 * (0.5 - wr))
-    return 0.0
+    row = db.query(
+        func.count(latest.c.return_bps).label("n"),
+        func.coalesce(func.sum(case((latest.c.return_bps > 0.0, 1), else_=0)), 0).label("wins"),
+    ).one_or_none()
+    n, wins = _memory_stats_from_row(row)
+    return _memory_adjust_from_stats(n=n, wins=wins)
 
 
 def score_viability(

@@ -138,9 +138,43 @@ def _surface_from_runtime_row(
     )
 
 
+def _scanner_latest_ok_values(row: Any) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    if isinstance(row, (tuple, list)):
+        job_id, job_type, payload_json, ended_at, started_at = row
+    else:
+        job_id = getattr(row, "id", None)
+        job_type = getattr(row, "job_type", None)
+        payload_json = getattr(row, "payload_json", None)
+        ended_at = getattr(row, "ended_at", None)
+        started_at = getattr(row, "started_at", None)
+    return {
+        "id": job_id,
+        "job_type": job_type,
+        "payload_json": payload_json,
+        "ended_at": ended_at,
+        "started_at": started_at,
+    }
+
+
+def _broker_session_updated_at(row: Any) -> Any:
+    if row is None:
+        return None
+    if isinstance(row, (tuple, list)):
+        return row[0] if row else None
+    return getattr(row, "updated_at", None)
+
+
 def scanner_status(db: Session) -> dict[str, Any]:
     latest_ok = (
-        db.query(BrainBatchJob)
+        db.query(
+            BrainBatchJob.id,
+            BrainBatchJob.job_type,
+            BrainBatchJob.payload_json,
+            BrainBatchJob.ended_at,
+            BrainBatchJob.started_at,
+        )
         .filter(
             BrainBatchJob.job_type.in_(_SCANNER_JOB_TYPES),
             BrainBatchJob.status == "ok",
@@ -148,6 +182,7 @@ def scanner_status(db: Session) -> dict[str, Any]:
         .order_by(BrainBatchJob.ended_at.desc().nullslast(), BrainBatchJob.started_at.desc())
         .first()
     )
+    latest_values = _scanner_latest_ok_values(latest_ok)
     stale_running_since = datetime.utcnow() - timedelta(seconds=_STALE_SCANNER)
     stale_running = (
         db.query(BrainBatchJob)
@@ -159,31 +194,31 @@ def scanner_status(db: Session) -> dict[str, Any]:
         .count()
     )
     if stale_running:
-        latest_ts = latest_ok.ended_at if latest_ok is not None else None
+        latest_ts = latest_values["ended_at"] if latest_values is not None else None
         return _surface(
             "scanner",
             stale_threshold=_STALE_SCANNER,
             as_of=_parse_dt(latest_ts),
             state="error",
             extra={
-                "latest_job_type": latest_ok.job_type if latest_ok is not None else None,
+                "latest_job_type": latest_values["job_type"] if latest_values is not None else None,
                 "stale_running_jobs": int(stale_running),
             },
             note="stale running scanner job(s) detected",
         )
-    if latest_ok is None:
+    if latest_values is None:
         return _surface("scanner", stale_threshold=_STALE_SCANNER, state="no_data")
-    payload = dict(latest_ok.payload_json or {})
+    payload = dict(latest_values["payload_json"] or {})
     extra = {
-        "latest_job_type": latest_ok.job_type,
-        "latest_job_id": latest_ok.id,
+        "latest_job_type": latest_values["job_type"],
+        "latest_job_id": latest_values["id"],
         "source": "brain_batch_jobs",
         "payload": payload,
     }
     return _surface(
         "scanner",
         stale_threshold=_STALE_SCANNER,
-        as_of=_parse_dt(latest_ok.ended_at or latest_ok.started_at),
+        as_of=_parse_dt(latest_values["ended_at"] or latest_values["started_at"]),
         state="ok",
         extra=extra,
     )
@@ -200,12 +235,12 @@ def predictions_status(db: Session) -> dict[str, Any]:
 def broker_status(db: Session) -> dict[str, Any]:
     row = read_runtime_surface_state(db, surface="broker")
     session_row = (
-        db.query(BrokerSession)
+        db.query(BrokerSession.updated_at)
         .filter(BrokerSession.broker == "robinhood")
         .order_by(BrokerSession.updated_at.desc())
         .first()
     )
-    session_as_of = _parse_dt(session_row.updated_at if session_row is not None else None)
+    session_as_of = _parse_dt(_broker_session_updated_at(session_row))
     if row is None:
         return _surface(
             "broker",

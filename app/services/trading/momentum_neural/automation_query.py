@@ -582,6 +582,29 @@ def _focus_priority(sess: TradingAutomationSession) -> tuple[int, float]:
     return (2, -ts)
 
 
+def _session_bulk_read_keys(rows: Any) -> tuple[list[int], list[str], list[int]]:
+    ids: list[int] = []
+    symbols: list[str] = []
+    variant_ids: list[int] = []
+    seen_ids: set[int] = set()
+    seen_symbols: set[str] = set()
+    seen_variant_ids: set[int] = set()
+    for sess, _variant in rows:
+        sid = int(sess.id)
+        if sid not in seen_ids:
+            ids.append(sid)
+            seen_ids.add(sid)
+        symbol = str(sess.symbol)
+        if symbol not in seen_symbols:
+            symbols.append(symbol)
+            seen_symbols.add(symbol)
+        variant_id = int(sess.variant_id)
+        if variant_id not in seen_variant_ids:
+            variant_ids.append(variant_id)
+            seen_variant_ids.add(variant_id)
+    return ids, symbols, variant_ids
+
+
 def list_automation_sessions(
     db: Session,
     *,
@@ -625,7 +648,7 @@ def list_automation_sessions(
         q = q.filter(TradingAutomationSession.symbol == symbol.strip().upper())
 
     rows = q.limit(min(max(limit, 1), 500)).all()
-    ids = [int(s[0].id) for s in rows]
+    ids, symbols, variant_ids = _session_bulk_read_keys(rows)
     counts: dict[int, int] = {}
     fill_counts: dict[int, int] = {}
     fills_present = _table_exists(db, "trading_automation_simulated_fills")
@@ -666,8 +689,6 @@ def list_automation_sessions(
             ):
                 binding_map[int(row.session_id)] = row
 
-    symbols = [str(s[0].symbol) for s in rows]
-    variant_ids = [int(s[0].variant_id) for s in rows]
     viability_map: dict[tuple[str, int], MomentumSymbolViability] = {}
     if symbols and variant_ids:
         for via in (

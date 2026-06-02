@@ -6,7 +6,13 @@ from types import SimpleNamespace
 
 from app.models.trading import MomentumAutomationOutcome, MomentumStrategyVariant, MomentumSymbolViability
 from app.services.trading.momentum_neural import evolution
-from app.services.trading.momentum_neural.evolution import _aggregate_rows_by_mode, _outcome_return_stats
+from app.services.trading.momentum_neural.evolution import (
+    _aggregate_from_stats_row,
+    _aggregate_rows_by_mode,
+    _aggregate_stats_rows_by_mode,
+    _outcome_return_stats,
+    _return_bps_stats_from_row,
+)
 
 
 class _TrackingOutcomes:
@@ -48,6 +54,9 @@ class _FakeQuery:
     def order_by(self, *_args, **_kwargs):
         return self
 
+    def group_by(self, *_args, **_kwargs):
+        return self
+
     def limit(self, _limit: int):
         return self
 
@@ -58,6 +67,49 @@ class _FakeQuery:
 
     def all(self):
         return self.result
+
+
+def _aggregate_outcome_rows(rows: list[SimpleNamespace]) -> SimpleNamespace:
+    n = 0
+    w_sum = 0.0
+    wrb = 0.0
+    wp = 0.0
+    gr = 0
+    for row in rows:
+        evidence_weight, return_bps, realized_pnl_usd, outcome_class = row
+        n += 1
+        weight = float(evidence_weight or 1.0)
+        w_sum += weight
+        if return_bps is not None:
+            wrb += float(return_bps) * weight
+        if realized_pnl_usd is not None:
+            wp += float(realized_pnl_usd) * weight
+        if outcome_class in ("governance_exit", "risk_block", "stale_data_abort"):
+            gr += 1
+    return SimpleNamespace(
+        n=n,
+        weight_sum=w_sum,
+        weighted_return_bps_sum=wrb,
+        weighted_pnl_sum=wp,
+        governance_or_risk_count=gr,
+    )
+
+
+def _aggregate_outcome_rows_by_mode(rows: list[SimpleNamespace]) -> list[SimpleNamespace]:
+    grouped = {
+        "paper": [],
+        "live": [],
+    }
+    for row in rows:
+        mode = str(row[0] or "").lower()
+        if mode in grouped:
+            grouped[mode].append(row[1:])
+    out = []
+    for mode, bucket in grouped.items():
+        stats = _aggregate_outcome_rows(bucket)
+        if stats.n:
+            out.append(SimpleNamespace(mode=mode, **stats.__dict__))
+    return out
 
 
 class _FakeDb:
@@ -75,8 +127,11 @@ class _FakeDb:
         ]
         self.outcome_rows = outcome_rows or []
         self.outcome_query_count = 0
+        self.refinement_column_query_count = 0
         self.return_bps_query_count = 0
+        self.return_bps_stats_query_count = 0
         self.paper_live_column_query_count = 0
+        self.paper_live_aggregate_query_count = 0
         self.aggregate_column_query_count = 0
 
     def query(self, *models):
@@ -87,9 +142,28 @@ class _FakeDb:
         if len(models) == 1 and models[0] is MomentumAutomationOutcome:
             self.outcome_query_count += 1
             return _FakeQuery(self.outcome_rows)
+        if (
+            len(models) == 3
+            and models[0] is MomentumAutomationOutcome.return_bps
+            and models[1] is MomentumAutomationOutcome.hold_seconds
+            and models[2] is MomentumAutomationOutcome.mode
+        ):
+            self.refinement_column_query_count += 1
+            return _FakeQuery(self.outcome_rows)
         if len(models) == 1 and models[0] is MomentumAutomationOutcome.return_bps:
             self.return_bps_query_count += 1
             return _FakeQuery(self.outcome_rows)
+        if len(models) == 3:
+            self.return_bps_stats_query_count += 1
+            n, wins, mean_bps = evolution._return_bps_column_stats(self.outcome_rows)
+            return _FakeQuery(SimpleNamespace(n=n, wins=wins, mean_bps=mean_bps))
+        if (
+            len(models) == 6
+            and models[0] is MomentumAutomationOutcome.mode
+            and models[1] is not MomentumAutomationOutcome.evidence_weight
+        ):
+            self.paper_live_aggregate_query_count += 1
+            return _FakeQuery(_aggregate_outcome_rows_by_mode(self.outcome_rows))
         if (
             len(models) == 5
             and models[0] is MomentumAutomationOutcome.mode
@@ -100,15 +174,9 @@ class _FakeDb:
         ):
             self.paper_live_column_query_count += 1
             return _FakeQuery(self.outcome_rows)
-        if (
-            len(models) == 4
-            and models[0] is MomentumAutomationOutcome.evidence_weight
-            and models[1] is MomentumAutomationOutcome.return_bps
-            and models[2] is MomentumAutomationOutcome.realized_pnl_usd
-            and models[3] is MomentumAutomationOutcome.outcome_class
-        ):
+        if len(models) == 5 and models[0] is not MomentumAutomationOutcome.mode:
             self.aggregate_column_query_count += 1
-            return _FakeQuery(self.outcome_rows)
+            return _FakeQuery(_aggregate_outcome_rows(self.outcome_rows))
         raise AssertionError(f"unexpected query models {models!r}")
 
 
@@ -135,7 +203,8 @@ def test_maybe_kill_underperforming_variant_uses_return_only_stats(monkeypatch) 
     assert db.viability_rows[0].paper_eligible is False
     assert db.viability_rows[0].live_eligible is False
     assert db.outcome_query_count == 0
-    assert db.return_bps_query_count == 1
+    assert db.return_bps_query_count == 0
+    assert db.return_bps_stats_query_count == 1
     assert feedback[0]["sample_size"] == 5
 
 
@@ -149,6 +218,32 @@ def test_maybe_pause_symbol_variant_after_losses_uses_return_only_rows() -> None
     assert db.return_bps_query_count == 1
     assert db.viability_rows[0].explain_json["variant_symbol_pause_until_utc"]
     assert db.viability_rows[0].updated_at is not None
+
+
+def test_return_bps_stats_from_row_handles_tuple_object_and_empty() -> None:
+    assert _return_bps_stats_from_row((4, 2, -5.0)) == (4, 2, -5.0)
+    assert _return_bps_stats_from_row(SimpleNamespace(n=3, wins=1, mean_bps=12.5)) == (3, 1, 12.5)
+    assert _return_bps_stats_from_row((0, 0, None)) == (0, 0, None)
+    assert _return_bps_stats_from_row(None) == (0, 0, None)
+
+
+def test_recent_refinement_outcomes_use_column_only_rows() -> None:
+    rows = [
+        SimpleNamespace(return_bps=20.0, hold_seconds=120, mode="paper"),
+        SimpleNamespace(return_bps=-40.0, hold_seconds=240, mode="live"),
+        SimpleNamespace(return_bps=30.0, hold_seconds=180, mode="paper"),
+        SimpleNamespace(return_bps=45.0, hold_seconds=150, mode="live"),
+    ]
+    db = _FakeDb(rows)
+
+    out = evolution._recent_outcomes_for_variant(db, variant_id=7)
+    refined, meta = evolution.refine_strategy_params({"entry_viability_min": 0.52}, out)
+
+    assert db.outcome_query_count == 0
+    assert db.refinement_column_query_count == 1
+    assert len(out) == 4
+    assert meta["sample_size"] == 4
+    assert "entry_viability_min" in refined
 
 
 def test_aggregate_rows_by_mode_separates_paper_and_live_once() -> None:
@@ -194,6 +289,50 @@ def test_recent_outcome_aggregates_use_metric_column_queries() -> None:
     assert symbol == variant
 
 
+def test_aggregate_from_stats_row_handles_tuple_object_and_empty() -> None:
+    assert _aggregate_from_stats_row((2, 3.0, -40.0, -6.0, 1)) == {
+        "n": 2,
+        "weighted_return_bps_sum": -40.0,
+        "weighted_pnl_sum": -6.0,
+        "weight_sum": 3.0,
+        "mean_return_bps": -13.3333,
+        "governance_or_risk_count": 1,
+    }
+    assert _aggregate_from_stats_row(
+        SimpleNamespace(
+            n=1,
+            weight_sum=2.0,
+            weighted_return_bps_sum=10.0,
+            weighted_pnl_sum=4.0,
+            governance_or_risk_count=0,
+        )
+    )["mean_return_bps"] == 5.0
+    assert _aggregate_from_stats_row(None)["n"] == 0
+
+
+def test_aggregate_stats_rows_by_mode_handles_tuple_object_and_empty() -> None:
+    by_mode = _aggregate_stats_rows_by_mode(
+        [
+            ("paper", 2, 3.0, 140.0, 2.0, 0),
+            SimpleNamespace(
+                mode="live",
+                n=1,
+                weight_sum=2.0,
+                weighted_return_bps_sum=-60.0,
+                weighted_pnl_sum=-8.0,
+                governance_or_risk_count=1,
+            ),
+            ("shadow", 1, 1.0, 999.0, 999.0, 1),
+        ]
+    )
+
+    assert by_mode["paper"]["n"] == 2
+    assert by_mode["paper"]["mean_return_bps"] == 46.6667
+    assert by_mode["live"]["n"] == 1
+    assert by_mode["live"]["governance_or_risk_count"] == 1
+    assert _aggregate_stats_rows_by_mode([])["paper"]["n"] == 0
+
+
 def test_paper_vs_live_performance_slices_queries_outcomes_once() -> None:
     db = _FakeDb(
         [
@@ -205,7 +344,8 @@ def test_paper_vs_live_performance_slices_queries_outcomes_once() -> None:
     out = evolution.paper_vs_live_performance_slices(db, variant_id=7, days=14)
 
     assert db.outcome_query_count == 0
-    assert db.paper_live_column_query_count == 1
+    assert db.paper_live_column_query_count == 0
+    assert db.paper_live_aggregate_query_count == 1
     assert out["variant_id"] == 7
     assert out["paper"]["n"] == 1
     assert out["paper"]["mean_return_bps"] == 20.0
@@ -236,7 +376,8 @@ def test_apply_outcome_feedback_uses_single_paper_live_query() -> None:
 
     via = db.viability_rows[0]
     assert db.outcome_query_count == 0
-    assert db.paper_live_column_query_count == 1
+    assert db.paper_live_column_query_count == 0
+    assert db.paper_live_aggregate_query_count == 1
     assert via.updated_at is not None
     live = via.evidence_window_json["neural_feedback_v1"]["live"]
     assert live["n"] == 1

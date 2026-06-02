@@ -14,6 +14,7 @@ from app.services.trading.momentum_neural.automation_query import (
     STATE_QUEUED,
     STATE_QUEUED_LIVE,
     _session_summary_counts_from_grouped_rows,
+    _session_bulk_read_keys,
     _table_exists,
     _tables_present,
 )
@@ -100,3 +101,24 @@ def test_session_summary_counts_from_grouped_rows_preserves_bucket_semantics() -
         "archived": 29,
         "expired": 31,
     }
+
+
+def test_session_bulk_read_keys_deduplicates_followup_query_inputs() -> None:
+    class _Session:
+        def __init__(self, sid: int, symbol: str, variant_id: int) -> None:
+            self.id = sid
+            self.symbol = symbol
+            self.variant_id = variant_id
+
+    rows = [
+        (_Session(1, "BTC-USD", 7), object()),
+        (_Session(2, "BTC-USD", 7), object()),
+        (_Session(1, "ETH-USD", 8), object()),
+        (_Session(3, "ETH-USD", 7), object()),
+    ]
+
+    ids, symbols, variant_ids = _session_bulk_read_keys(rows)
+
+    assert ids == [1, 2, 3]
+    assert symbols == ["BTC-USD", "ETH-USD"]
+    assert variant_ids == [7, 8]

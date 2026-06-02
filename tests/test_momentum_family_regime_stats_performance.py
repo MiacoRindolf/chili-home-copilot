@@ -26,6 +26,26 @@ def _row(
     return out, var
 
 
+def _column_row(
+    *,
+    family: str,
+    return_bps: float,
+    volatility_regime: str = "high",
+    session_label: str = "trend",
+    entry: bool = True,
+):
+    snapshot = {
+        "volatility_regime": volatility_regime,
+        "session_label": session_label,
+    }
+    return (
+        return_bps,
+        snapshot if entry else {},
+        snapshot,
+        family,
+    )
+
+
 def test_target_family_regime_summary_matches_aggregate_bucket() -> None:
     rows = [
         _row(family="breakout", return_bps=-30),
@@ -100,18 +120,27 @@ def test_aggregate_family_regime_performance_groups_bucket_rows() -> None:
     class FakeDb:
         def __init__(self, rows):
             self.rows = rows
+            self.full_orm_query_count = 0
+            self.column_query_count = 0
 
-        def query(self, *_args):
+        def query(self, *args):
+            if len(args) == 2:
+                self.full_orm_query_count += 1
+            if len(args) == 4:
+                self.column_query_count += 1
             return FakeQuery(self.rows)
 
     rows = [
-        _row(family="breakout", return_bps=20),
-        _row(family="breakout", return_bps=-10),
-        _row(family="meanrev", return_bps=-30),
+        _column_row(family="breakout", return_bps=20),
+        _column_row(family="breakout", return_bps=-10),
+        _column_row(family="meanrev", return_bps=-30),
     ]
 
-    out = family_regime_stats.aggregate_family_regime_performance(FakeDb(rows))
+    db = FakeDb(rows)
+    out = family_regime_stats.aggregate_family_regime_performance(db)
 
+    assert db.full_orm_query_count == 0
+    assert db.column_query_count == 1
     assert out == [
         {
             "family_id": "breakout",
@@ -161,3 +190,39 @@ def test_target_family_regime_summary_returns_none_when_bucket_missing() -> None
     )
 
     assert target is None
+
+
+def test_column_target_family_regime_summary_matches_object_summary() -> None:
+    rows = [
+        _column_row(family="breakout", return_bps=-30),
+        _column_row(family="breakout", return_bps=10),
+        _column_row(family="meanrev", return_bps=100),
+        _column_row(family="breakout", return_bps=-99, volatility_regime="low"),
+    ]
+
+    target = family_regime_stats._target_family_regime_summary_from_column_rows(
+        rows,
+        family_id="breakout",
+        volatility_regime="high",
+        session_label="trend",
+    )
+
+    assert target == {
+        "family_id": "breakout",
+        "volatility_regime": "high",
+        "session_label": "trend",
+        "n": 2,
+        "win_rate": 0.5,
+        "mean_return_bps": -10.0,
+    }
+
+
+def test_outcome_family_columns_uses_regime_snapshot_fallback() -> None:
+    value, fam, vol, session = family_regime_stats._outcome_family_columns(
+        _column_row(family="breakout", return_bps=-20, entry=False)
+    )
+
+    assert value == -20.0
+    assert fam == "breakout"
+    assert vol == "high"
+    assert session == "trend"
