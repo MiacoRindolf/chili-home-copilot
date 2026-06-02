@@ -110,6 +110,28 @@ def _conditions_fingerprint(conditions: list[dict[str, Any]]) -> str:
     return json.dumps(conditions, sort_keys=True, default=str)
 
 
+def _snapshot_proposal_field(row: Any, name: str, index: int) -> Any:
+    if hasattr(row, name):
+        return getattr(row, name)
+    mapping = getattr(row, "_mapping", None)
+    if mapping is not None and name in mapping:
+        return mapping[name]
+    if isinstance(row, dict):
+        return row.get(name)
+    try:
+        return row[index]
+    except (IndexError, KeyError, TypeError):
+        return None
+
+
+def _snapshot_proposal_values(row: Any) -> tuple[Any, Any, Any]:
+    return (
+        _snapshot_proposal_field(row, "future_return_5d", 0),
+        _snapshot_proposal_field(row, "indicator_data", 1),
+        _snapshot_proposal_field(row, "close_price", 2),
+    )
+
+
 def mine_proposals_from_snapshots(
     db: Session,
     *,
@@ -123,7 +145,11 @@ def mine_proposals_from_snapshots(
     from .learning_predictions import _indicator_data_to_flat_snapshot
 
     rows = (
-        db.query(MarketSnapshot)
+        db.query(
+            MarketSnapshot.future_return_5d,
+            MarketSnapshot.indicator_data,
+            MarketSnapshot.close_price,
+        )
         .filter(MarketSnapshot.future_return_5d.isnot(None))
         .filter(MarketSnapshot.indicator_data.isnot(None))
         .order_by(MarketSnapshot.id.desc())
@@ -135,11 +161,12 @@ def mine_proposals_from_snapshots(
 
     parsed: list[tuple[dict[str, Any], float]] = []
     for s in rows:
+        future_return_5d, indicator_data, close_price = _snapshot_proposal_values(s)
         try:
-            fr = float(s.future_return_5d or 0)
+            fr = float(future_return_5d or 0)
         except (TypeError, ValueError):
             continue
-        ind = s.indicator_data
+        ind = indicator_data
         if isinstance(ind, str):
             try:
                 ind = json.loads(ind)
@@ -147,7 +174,7 @@ def mine_proposals_from_snapshots(
                 continue
         if not isinstance(ind, dict):
             continue
-        flat = _indicator_data_to_flat_snapshot(ind, float(s.close_price or 0) or None)
+        flat = _indicator_data_to_flat_snapshot(ind, float(close_price or 0) or None)
         parsed.append((flat, fr))
 
     if len(parsed) < min_samples:

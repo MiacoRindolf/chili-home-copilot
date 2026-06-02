@@ -30,10 +30,24 @@ logger = logging.getLogger(__name__)
 def _guest_like_user(user: User | None) -> bool:
     if user is None:
         return False
-    if user.email:
+    if _user_identity_field(user, "email", 1):
         return False
-    name = str(user.name or "").strip().lower()
+    name = str(_user_identity_field(user, "name", 2) or "").strip().lower()
     return name.startswith("trader-")
+
+
+def _user_identity_field(row: Any, name: str, index: int) -> Any:
+    if hasattr(row, name):
+        return getattr(row, name)
+    mapping = getattr(row, "_mapping", None)
+    if mapping is not None and name in mapping:
+        return mapping[name]
+    if isinstance(row, dict):
+        return row.get(name)
+    try:
+        return row[index]
+    except (IndexError, KeyError, TypeError):
+        return None
 
 
 def _choose_canonical_user_id(
@@ -49,13 +63,14 @@ def _choose_canonical_user_id(
         return int(preferred_user_id)
 
     users = {
-        int(u.id): u
-        for u in db.query(User).filter(User.id.in_(ids)).all()
+        int(_user_identity_field(u, "id", 0)): u
+        for u in db.query(User.id, User.email, User.name).filter(User.id.in_(ids)).all()
+        if _user_identity_field(u, "id", 0) is not None
     }
     email_id = min(
         (
             uid for uid in ids
-            if users.get(uid) is not None and bool(users[uid].email)
+            if users.get(uid) is not None and bool(_user_identity_field(users[uid], "email", 1))
         ),
         default=None,
     )

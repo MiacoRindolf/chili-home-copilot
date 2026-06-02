@@ -723,6 +723,20 @@ def _dt_to_iso(value: Any) -> str | None:
     return value.isoformat() + "Z" if isinstance(value, datetime) else None
 
 
+def _parity_summary_field(row: Any, name: str, index: int) -> Any:
+    if hasattr(row, name):
+        return getattr(row, name)
+    mapping = getattr(row, "_mapping", None)
+    if mapping is not None and name in mapping:
+        return mapping[name]
+    if isinstance(row, dict):
+        return row.get(name)
+    try:
+        return row[index]
+    except (IndexError, KeyError, TypeError):
+        return None
+
+
 def _automation_parity_candidate_item(
     db: Session,
     row: MomentumAutomationOutcome,
@@ -965,7 +979,16 @@ def ledger_summary(
     )
 
     top_disagreements = (
-        db.query(LedgerParityLog)
+        db.query(
+            LedgerParityLog.id,
+            LedgerParityLog.source,
+            LedgerParityLog.ticker,
+            LedgerParityLog.trade_id,
+            LedgerParityLog.paper_trade_id,
+            LedgerParityLog.legacy_pnl,
+            LedgerParityLog.ledger_pnl,
+            LedgerParityLog.delta_pnl,
+        )
         .filter(LedgerParityLog.created_at >= since, LedgerParityLog.agree_bool.is_(False))
         .order_by(LedgerParityLog.delta_abs.desc().nullslast())
         .limit(10)
@@ -973,14 +996,14 @@ def ledger_summary(
     )
     top_list = [
         {
-            "id": int(r.id),
-            "source": r.source,
-            "ticker": r.ticker,
-            "trade_id": r.trade_id,
-            "paper_trade_id": r.paper_trade_id,
-            "legacy_pnl": r.legacy_pnl,
-            "ledger_pnl": r.ledger_pnl,
-            "delta_pnl": r.delta_pnl,
+            "id": int(_parity_summary_field(r, "id", 0)),
+            "source": _parity_summary_field(r, "source", 1),
+            "ticker": _parity_summary_field(r, "ticker", 2),
+            "trade_id": _parity_summary_field(r, "trade_id", 3),
+            "paper_trade_id": _parity_summary_field(r, "paper_trade_id", 4),
+            "legacy_pnl": _parity_summary_field(r, "legacy_pnl", 5),
+            "ledger_pnl": _parity_summary_field(r, "ledger_pnl", 6),
+            "delta_pnl": _parity_summary_field(r, "delta_pnl", 7),
         }
         for r in top_disagreements
     ]

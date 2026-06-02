@@ -23,6 +23,10 @@ logger = logging.getLogger(__name__)
 SNAPSHOT_LOOKBACK = 10  # marker-q2j
 STALE_SECONDS_DEFAULT = 7200
 MIN_SNAPS_FOR_TRAJECTORY = 3
+PENDING_ALERT_VITALS_LIMIT = 200
+PENDING_ALERT_VITALS_RECENT_HOURS = 6
+PENDING_ALERT_VITALS_FALLBACK_HOURS = 24
+PENDING_ALERT_VITALS_MIN_BREADTH = 50
 
 # Default RSI overbought threshold; can be overridden via the
 # StrategyParameter registry (family="setup_vitals", key="rsi_overbought").
@@ -288,7 +292,7 @@ def load_snapshot_flats_chronological(
     from ...models.trading import MarketSnapshot
 
     rows = (
-        db.query(MarketSnapshot)
+        db.query(MarketSnapshot.indicator_data, MarketSnapshot.close_price)
         .filter(MarketSnapshot.ticker == ticker)
         .filter(MarketSnapshot.bar_interval == bar_interval)
         .filter(MarketSnapshot.indicator_data.isnot(None))
@@ -301,8 +305,9 @@ def load_snapshot_flats_chronological(
     rows.reverse()
     out: list[dict[str, Any]] = []
     for s in rows:
-        ind = _parse_indicator_data(s.indicator_data)
-        cp = float(s.close_price or 0) or 0.0
+        indicator_data, close_price = _snapshot_flat_values(s)
+        ind = _parse_indicator_data(indicator_data)
+        cp = float(close_price or 0) or 0.0
         out.append(_flat_from_snap(ind, cp))
     return out
 
@@ -376,19 +381,68 @@ def merge_direction_into_flat(flat: dict[str, Any], vitals: SetupVitals) -> dict
     return merged
 
 
+def _snapshot_flat_field(row: Any, name: str, index: int) -> Any:
+    if hasattr(row, name):
+        return getattr(row, name)
+    mapping = getattr(row, "_mapping", None)
+    if mapping is not None and name in mapping:
+        return mapping[name]
+    if isinstance(row, dict):
+        return row.get(name)
+    try:
+        return row[index]
+    except (IndexError, KeyError, TypeError):
+        return None
+
+
+def _snapshot_flat_values(row: Any) -> tuple[Any, Any]:
+    return (
+        _snapshot_flat_field(row, "indicator_data", 0),
+        _snapshot_flat_field(row, "close_price", 1),
+    )
+
+
+def _ticker_vitals_field(row: Any, name: str, index: int) -> Any:
+    if hasattr(row, name):
+        return getattr(row, name)
+    mapping = getattr(row, "_mapping", None)
+    if mapping is not None and name in mapping:
+        return mapping[name]
+    if isinstance(row, dict):
+        return row.get(name)
+    try:
+        return row[index]
+    except (IndexError, KeyError, TypeError):
+        return None
+
+
 def _ticker_vitals_row_to_setup(row: Any) -> SetupVitals:
-    tj = row.trajectory_json or {}
+    tj = _ticker_vitals_field(row, "trajectory_json", 5) or {}
     return SetupVitals(
-        momentum_score=float(row.momentum_score or 0),
-        volume_score=float(row.volume_score or 0),
-        trend_score=float(row.trend_score or 0),
-        overextension_risk=float(row.overextension_risk or 0),
-        composite_health=float(row.composite_health or 0.5),
-        divergences=list(row.divergences_json or []),
+        momentum_score=float(_ticker_vitals_field(row, "momentum_score", 0) or 0),
+        volume_score=float(_ticker_vitals_field(row, "volume_score", 1) or 0),
+        trend_score=float(_ticker_vitals_field(row, "trend_score", 2) or 0),
+        overextension_risk=float(_ticker_vitals_field(row, "overextension_risk", 3) or 0),
+        composite_health=float(_ticker_vitals_field(row, "composite_health", 4) or 0.5),
+        divergences=list(_ticker_vitals_field(row, "divergences_json", 6) or []),
         trajectory_details=dict(tj) if isinstance(tj, dict) else {},
         degradation_signals=[],
         source="cache",
     )
+
+
+def _vitals_history_field(row: Any, name: str, index: int) -> Any:
+    if hasattr(row, name):
+        return getattr(row, name)
+    mapping = getattr(row, "_mapping", None)
+    if mapping is not None and name in mapping:
+        return mapping[name]
+    if isinstance(row, dict):
+        return row.get(name)
+    try:
+        return row[index]
+    except (IndexError, KeyError, TypeError):
+        return None
 
 
 def get_or_compute_ticker_vitals(
@@ -405,11 +459,21 @@ def get_or_compute_ticker_vitals(
     now = datetime.utcnow()
     if not force_refresh:
         row = (
-            db.query(TickerVitals)
+            db.query(
+                TickerVitals.momentum_score,
+                TickerVitals.volume_score,
+                TickerVitals.trend_score,
+                TickerVitals.overextension_risk,
+                TickerVitals.composite_health,
+                TickerVitals.trajectory_json,
+                TickerVitals.divergences_json,
+                TickerVitals.computed_at,
+            )
             .filter(TickerVitals.ticker == ticker, TickerVitals.bar_interval == bar_interval)
             .first()
         )
-        if row and row.computed_at and (now - row.computed_at).total_seconds() < max_age_seconds:
+        computed_at = _ticker_vitals_field(row, "computed_at", 7) if row else None
+        if row and computed_at and (now - computed_at).total_seconds() < max_age_seconds:
             return _ticker_vitals_row_to_setup(row)
 
     vitals = compute_setup_vitals(db, ticker, bar_interval)
@@ -490,10 +554,26 @@ def monitored_tickers_for_vitals(db: Session) -> list[str]:
     except Exception:
         pass
     try:
-        q = db.query(BreakoutAlert.ticker).filter(BreakoutAlert.outcome == "pending")
-        for (t,) in q.distinct().limit(200):
-            if t:
-                tickers.add(str(t).strip().upper())
+        now = datetime.utcnow()
+
+        def _add_recent_pending(hours: int, limit: int) -> None:
+            if limit <= 0:
+                return
+            cutoff = now - timedelta(hours=hours)
+            q = db.query(BreakoutAlert.ticker).filter(
+                BreakoutAlert.outcome == "pending",
+                BreakoutAlert.alerted_at >= cutoff,
+            )
+            for (t,) in q.distinct().limit(limit):
+                if t:
+                    tickers.add(str(t).strip().upper())
+
+        _add_recent_pending(PENDING_ALERT_VITALS_RECENT_HOURS, PENDING_ALERT_VITALS_LIMIT)
+        if len(tickers) < PENDING_ALERT_VITALS_MIN_BREADTH:
+            _add_recent_pending(
+                PENDING_ALERT_VITALS_FALLBACK_HOURS,
+                PENDING_ALERT_VITALS_LIMIT - len(tickers),
+            )
     except Exception:
         pass
     return sorted(tickers)
@@ -534,7 +614,7 @@ def load_recent_vitals_history_for_trade(
     from ...models.trading import SetupVitalsHistory
 
     return (
-        db.query(SetupVitalsHistory)
+        db.query(SetupVitalsHistory.momentum_score, SetupVitalsHistory.volume_score)
         .filter(SetupVitalsHistory.trade_id == trade_id)
         .order_by(desc(SetupVitalsHistory.created_at))
         .limit(limit)
@@ -547,7 +627,7 @@ def momentum_drop_urgent(db: Session, trade_id: int, current_momentum: float) ->
     rows = load_recent_vitals_history_for_trade(db, trade_id, limit=1)
     if not rows:
         return False
-    prev = float(rows[0].momentum_score or 0)
+    prev = float(_vitals_history_field(rows[0], "momentum_score", 0) or 0)
     return (prev - current_momentum) > 0.4
 
 
@@ -567,8 +647,8 @@ def detect_multi_check_degradation(
     streak = 0
     max_streak = 0
     for i in range(1, len(chron)):
-        a = float(chron[i - 1].momentum_score or 0)
-        b = float(chron[i].momentum_score or 0)
+        a = float(_vitals_history_field(chron[i - 1], "momentum_score", 0) or 0)
+        b = float(_vitals_history_field(chron[i], "momentum_score", 0) or 0)
         if b < a - 0.05:
             streak += 1
             max_streak = max(max_streak, streak)
@@ -576,7 +656,7 @@ def detect_multi_check_degradation(
             streak = 0
     flags["consecutive_momentum_down"] = max_streak
     if chron:
-        last_vol = float(chron[-1].volume_score or 0)
+        last_vol = float(_vitals_history_field(chron[-1], "volume_score", 1) or 0)
         if last_vol > 0 and current_volume < 0:
             flags["volume_flip_negative"] = True
     if max_streak >= 3:

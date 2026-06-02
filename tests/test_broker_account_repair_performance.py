@@ -19,8 +19,10 @@ class _FakeQuery:
 class _FakeDb:
     def __init__(self, rows):
         self._rows = rows
+        self.queried = None
 
     def query(self, *_args, **_kwargs):
+        self.queried = _args
         return _FakeQuery(self._rows)
 
 
@@ -36,6 +38,7 @@ def test_choose_canonical_user_id_uses_min_without_sorting(monkeypatch) -> None:
     ])
 
     assert repair._choose_canonical_user_id(db, [9, 3, 5]) == 5
+    assert [getattr(col, "key", None) for col in db.queried] == ["id", "email", "name"]
 
 
 def test_choose_canonical_user_id_falls_back_to_smallest_id_without_sorting(monkeypatch) -> None:
@@ -49,3 +52,23 @@ def test_choose_canonical_user_id_falls_back_to_smallest_id_without_sorting(monk
     ])
 
     assert repair._choose_canonical_user_id(db, [9, 3, 7]) == 3
+
+
+def test_choose_canonical_user_id_supports_compact_tuple_rows() -> None:
+    db = _FakeDb([
+        (9, "", "trader-9"),
+        (3, "", "Alice"),
+        (5, "alice@example.com", "Trader"),
+    ])
+
+    assert repair._choose_canonical_user_id(db, [9, 3, 5]) == 5
+    assert [getattr(col, "key", None) for col in db.queried] == ["id", "email", "name"]
+
+
+def test_user_identity_field_supports_object_tuple_and_mapping_rows() -> None:
+    obj = SimpleNamespace(id=1, email="a@example.com", name="A")
+    mapping = {"id": 2, "email": "", "name": "trader-2"}
+
+    assert repair._user_identity_field(obj, "email", 1) == "a@example.com"
+    assert repair._user_identity_field((3, "b@example.com", "B"), "name", 2) == "B"
+    assert repair._user_identity_field(mapping, "id", 0) == 2

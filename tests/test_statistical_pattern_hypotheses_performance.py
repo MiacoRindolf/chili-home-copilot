@@ -25,8 +25,10 @@ class _Rows:
 class _Db:
     def __init__(self, rows):
         self._rows = rows
+        self.queried = None
 
     def query(self, *_args, **_kwargs):
+        self.queried = _args
         return _Rows(self._rows)
 
 
@@ -79,3 +81,66 @@ def test_conditions_fingerprint_uses_canonical_json() -> None:
     second = [{"value": 35, "op": "<", "indicator": "rsi_14"}]
 
     assert sph._conditions_fingerprint(first) == sph._conditions_fingerprint(second)
+
+
+def test_mine_proposals_reads_snapshot_metric_columns_only(monkeypatch) -> None:
+    rows = [
+        (
+            0.40 if i < 30 else -0.05,
+            {"bucket": "winner" if i < 30 else "base"},
+            100.0,
+        )
+        for i in range(60)
+    ]
+    db = _Db(rows)
+
+    def flat_snapshot(indicator_data, _close_price):
+        if indicator_data["bucket"] == "winner":
+            return {
+                "rsi_14": 30.0,
+                "macd_hist": 1.0,
+                "bb_pct_b": 0.1,
+                "adx": 30.0,
+                "stoch_k": 10.0,
+            }
+        return {
+            "rsi_14": 50.0,
+            "macd_hist": -1.0,
+            "bb_pct_b": 0.8,
+            "adx": 5.0,
+            "stoch_k": 70.0,
+        }
+
+    monkeypatch.setattr(
+        "app.services.trading.learning_predictions._indicator_data_to_flat_snapshot",
+        flat_snapshot,
+    )
+
+    proposals = sph.mine_proposals_from_snapshots(
+        db,
+        max_proposals=2,
+        min_samples=5,
+        min_lift_pct=0.01,
+        snapshot_limit=60,
+    )
+
+    assert [getattr(col, "key", None) for col in db.queried] == [
+        "future_return_5d",
+        "indicator_data",
+        "close_price",
+    ]
+    assert len(proposals) == 2
+    assert all(proposal["name"].startswith("Stat_") for proposal in proposals)
+
+
+def test_snapshot_proposal_values_supports_object_tuple_and_mapping_rows() -> None:
+    obj = SimpleNamespace(future_return_5d=1.0, indicator_data={"a": 1}, close_price=10.0)
+    mapping = {
+        "future_return_5d": 2.0,
+        "indicator_data": {"b": 2},
+        "close_price": 20.0,
+    }
+
+    assert sph._snapshot_proposal_values(obj) == (1.0, {"a": 1}, 10.0)
+    assert sph._snapshot_proposal_values((3.0, {"c": 3}, 30.0)) == (3.0, {"c": 3}, 30.0)
+    assert sph._snapshot_proposal_values(mapping) == (2.0, {"b": 2}, 20.0)

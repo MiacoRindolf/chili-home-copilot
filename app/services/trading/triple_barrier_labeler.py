@@ -270,6 +270,29 @@ def _fetch_forward_bars(
     return out
 
 
+def _snapshot_label_field(row: Any, name: str, index: int) -> Any:
+    if hasattr(row, name):
+        return getattr(row, name)
+    mapping = getattr(row, "_mapping", None)
+    if mapping is not None and name in mapping:
+        return mapping[name]
+    if isinstance(row, dict):
+        return row.get(name)
+    try:
+        return row[index]
+    except (IndexError, KeyError, TypeError):
+        return None
+
+
+def _snapshot_label_values(row: Any) -> tuple[Any, Any, Any, Any]:
+    return (
+        _snapshot_label_field(row, "id", 0),
+        _snapshot_label_field(row, "ticker", 1),
+        _snapshot_label_field(row, "snapshot_date", 2),
+        _snapshot_label_field(row, "close_price", 3),
+    )
+
+
 def label_snapshots(
     db: Session,
     *,
@@ -303,7 +326,12 @@ def label_snapshots(
 
     cutoff = datetime.utcnow() - timedelta(days=min_lookback_days)
     rows = (
-        db.query(MarketSnapshot)
+        db.query(
+            MarketSnapshot.id,
+            MarketSnapshot.ticker,
+            MarketSnapshot.snapshot_date,
+            MarketSnapshot.close_price,
+        )
         .filter(MarketSnapshot.snapshot_date <= cutoff)
         .order_by(MarketSnapshot.snapshot_date.desc())
         .limit(limit)
@@ -313,9 +341,10 @@ def label_snapshots(
 
     for snap in rows:
         try:
-            snap_date = snap.snapshot_date.date() if hasattr(snap.snapshot_date, "date") else snap.snapshot_date
+            snap_id, ticker, snapshot_date, close_price = _snapshot_label_values(snap)
+            snap_date = snapshot_date.date() if hasattr(snapshot_date, "date") else snapshot_date
             bars = _fetch_forward_bars(
-                ticker=snap.ticker,
+                ticker=ticker,
                 from_date=snap_date,
                 max_bars=cfg.max_bars,
             )
@@ -324,13 +353,13 @@ def label_snapshots(
                 continue
             outcome = label_single(
                 db,
-                ticker=snap.ticker,
+                ticker=ticker,
                 label_date=snap_date,
-                entry_close=float(snap.close_price),
+                entry_close=float(close_price),
                 future_bars=bars,
                 side=side,
                 cfg=cfg,
-                snapshot_id=int(snap.id),
+                snapshot_id=int(snap_id),
                 mode_override=mode,
             )
             rep.details.append(outcome)
@@ -351,7 +380,8 @@ def label_snapshots(
             _ = lbl  # label value preserved in outcome
         except Exception:
             logger.exception(
-                "[triple_barrier_labeler] snapshot %s failed", getattr(snap, "id", None),
+                "[triple_barrier_labeler] snapshot %s failed",
+                _snapshot_label_field(snap, "id", 0),
             )
             rep.errors += 1
 

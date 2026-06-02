@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date as _date, datetime
-from typing import Iterable, Mapping
+from typing import Any, Iterable, Mapping
 
 from sqlalchemy.dialects.postgresql import insert as _pg_insert
 from sqlalchemy.orm import Session
@@ -132,6 +132,24 @@ def record_bulk(
     return n
 
 
+def _status_from_row(row: Any) -> str | None:
+    if row is None:
+        return None
+    if hasattr(row, "status"):
+        return row.status
+    mapping = getattr(row, "_mapping", None)
+    if mapping is not None and "status" in mapping:
+        return mapping["status"]
+    if isinstance(row, dict):
+        status = row.get("status")
+        return str(status) if status is not None else None
+    try:
+        status = row[0]
+    except (IndexError, KeyError, TypeError):
+        return None
+    return str(status) if status is not None else None
+
+
 def lookup_status(
     db: Session,
     *,
@@ -146,10 +164,10 @@ def lookup_status(
     tkr = (ticker or "").strip().upper()
     aod = _coerce_date(as_of_date)
     row = (
-        db.query(UniverseSnapshot)
+        db.query(UniverseSnapshot.status)
         .filter(UniverseSnapshot.ticker == tkr, UniverseSnapshot.as_of_date <= aod)
         .order_by(UniverseSnapshot.as_of_date.desc())
         .limit(1)
         .first()
     )
-    return row.status if row is not None else None
+    return _status_from_row(row)

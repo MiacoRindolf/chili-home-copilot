@@ -27,6 +27,22 @@ def _iso(dt: datetime | None) -> str | None:
     return a.isoformat() if a else None
 
 
+def _ended_at_from_row(row: Any) -> Any:
+    if row is None:
+        return None
+    if hasattr(row, "ended_at"):
+        return row.ended_at
+    mapping = getattr(row, "_mapping", None)
+    if mapping is not None and "ended_at" in mapping:
+        return mapping["ended_at"]
+    if isinstance(row, dict):
+        return row.get("ended_at")
+    try:
+        return row[0]
+    except (IndexError, KeyError, TypeError):
+        return None
+
+
 def collect_source_freshness(db: Session) -> dict[str, Any]:
     """Latest known timestamps for feeds that feed the board (UTC ISO or null).
 
@@ -60,7 +76,7 @@ def collect_source_freshness(db: Session) -> dict[str, Any]:
         logger.debug("[source_freshness] prescreen_candidate: %s", e)
     try:
         row = (
-            db.query(BrainBatchJob)
+            db.query(BrainBatchJob.ended_at)
             .filter(
                 BrainBatchJob.job_type == JOB_PATTERN_IMMINENT_SCANNER,
                 BrainBatchJob.status == "ok",
@@ -69,7 +85,7 @@ def collect_source_freshness(db: Session) -> dict[str, Any]:
             .order_by(BrainBatchJob.ended_at.desc())
             .first()
         )
-        out["imminent_job_ok_latest_utc"] = _iso(row.ended_at) if row else None
+        out["imminent_job_ok_latest_utc"] = _iso(_ended_at_from_row(row))
     except Exception as e:
         logger.debug("[source_freshness] imminent_job: %s", e)
 

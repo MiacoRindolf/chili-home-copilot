@@ -67,13 +67,27 @@ def brain_batch_job_finish(
         row.payload_json = payload_json
 
 
+def _latest_payload_field(row: Any, name: str, index: int) -> Any:
+    if hasattr(row, name):
+        return getattr(row, name)
+    mapping = getattr(row, "_mapping", None)
+    if mapping is not None and name in mapping:
+        return mapping[name]
+    if isinstance(row, dict):
+        return row.get(name)
+    try:
+        return row[index]
+    except (IndexError, KeyError, TypeError):
+        return None
+
+
 def fetch_latest_ok_payload(
     db: Session,
     job_type: str,
 ) -> tuple[dict[str, Any] | None, datetime | None, dict[str, Any] | None]:
     """Return (payload_json, ended_at, meta_json) for latest successful job of this type."""
     row = (
-        db.query(BrainBatchJob)
+        db.query(BrainBatchJob.payload_json, BrainBatchJob.ended_at, BrainBatchJob.meta_json)
         .filter(
             BrainBatchJob.job_type == job_type,
             BrainBatchJob.status == "ok",
@@ -84,7 +98,11 @@ def fetch_latest_ok_payload(
     )
     if not row:
         return None, None, None
-    return row.payload_json, row.ended_at, row.meta_json
+    return (
+        _latest_payload_field(row, "payload_json", 0),
+        _latest_payload_field(row, "ended_at", 1),
+        _latest_payload_field(row, "meta_json", 2),
+    )
 
 
 def fetch_batch_jobs_page(
