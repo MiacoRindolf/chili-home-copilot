@@ -162,6 +162,7 @@
 {% block content %}
 <div class="metrics-shell" id="metrics-root">
 
+  {% if request.query_params.get('embed') != '1' %}
   <div class="m-topbar">
     <div>
       <h1>Metrics <span class="m-subtitle">Analytics Dashboard</span></h1>
@@ -177,6 +178,7 @@
       <button id="theme-toggle" title="Toggle dark mode"></button>
     </nav>
   </div>
+  {% endif %}
 
   <!-- Quick Stats -->
   <div class="stats-row" id="stats-row">
