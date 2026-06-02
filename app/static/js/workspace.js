@@ -97,4 +97,58 @@
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openPalette(); }
     else if (e.key === 'Escape') closePalette();
   });
+
+  // ── Spaces menu: snapshot the current window arrangement under a name and
+  //    switch between saved arrangements. Backed by window.ChiliOS.spaces. ──
+  var spacesWrap = document.getElementById('ws-spaces');
+  var spacesBtn = document.getElementById('ws-spaces-btn');
+  var spacesMenu = document.getElementById('ws-spaces-menu');
+  function spacesApi() { return window.ChiliOS && window.ChiliOS.spaces; }
+  function renderSpaces() {
+    var api = spacesApi(); if (!spacesMenu || !api) return;
+    var list = api.list();
+    var rows = list.length
+      ? list.map(function (s) {
+          return '<div class="ws-space-row" role="menuitem" tabindex="0" data-space="' + esc(s.name) + '">' +
+            '<span class="ws-space-name">' + esc(s.name) + '</span>' +
+            '<span class="ws-space-count" title="' + s.count + ' window(s)">' + s.count + '</span>' +
+            '<button class="ws-space-del" data-del="' + esc(s.name) + '" title="Delete space" aria-label="Delete ' + esc(s.name) + '">×</button>' +
+          '</div>';
+        }).join('')
+      : '<div class="ws-space-empty">No saved spaces yet.</div>';
+    spacesMenu.innerHTML = rows +
+      '<div class="ws-space-save">' +
+        '<input id="ws-space-new" type="text" placeholder="Save current as…" autocomplete="off" maxlength="40">' +
+        '<button id="ws-space-save-btn" type="button">Save</button>' +
+      '</div>';
+  }
+  function openSpacesMenu() { if (!spacesWrap) return; renderSpaces(); spacesWrap.classList.add('open'); if (spacesBtn) spacesBtn.setAttribute('aria-expanded', 'true'); }
+  function closeSpacesMenu() { if (!spacesWrap) return; spacesWrap.classList.remove('open'); if (spacesBtn) spacesBtn.setAttribute('aria-expanded', 'false'); }
+  function toggleSpacesMenu() { (spacesWrap && spacesWrap.classList.contains('open')) ? closeSpacesMenu() : openSpacesMenu(); }
+  function saveCurrentSpace() {
+    var api = spacesApi(); if (!api) return;
+    var inp = document.getElementById('ws-space-new');
+    var name = inp && inp.value.trim();
+    if (!name) { if (inp) inp.focus(); return; }
+    api.save(name); renderSpaces();
+    var again = document.getElementById('ws-space-new'); if (again) again.focus();
+  }
+  if (spacesBtn) spacesBtn.addEventListener('click', function (e) { e.stopPropagation(); toggleSpacesMenu(); });
+  if (spacesMenu) spacesMenu.addEventListener('click', function (e) {
+    e.stopPropagation();
+    var api = spacesApi(); if (!api) return;
+    var del = e.target.closest('.ws-space-del');
+    if (del) { api.remove(del.getAttribute('data-del')); renderSpaces(); return; }
+    if (e.target.closest('#ws-space-save-btn')) { saveCurrentSpace(); return; }
+    var row = e.target.closest('.ws-space-row');
+    if (row) { api.open(row.getAttribute('data-space')); closeSpacesMenu(); }
+  });
+  if (spacesMenu) spacesMenu.addEventListener('keydown', function (e) {
+    if (e.target.id === 'ws-space-new' && e.key === 'Enter') { e.preventDefault(); saveCurrentSpace(); }
+    else if (e.target.classList.contains('ws-space-row') && e.key === 'Enter') { e.preventDefault(); var api = spacesApi(); if (api) { api.open(e.target.getAttribute('data-space')); closeSpacesMenu(); } }
+  });
+  document.addEventListener('click', function (e) {
+    if (spacesWrap && spacesWrap.classList.contains('open') && !spacesWrap.contains(e.target)) closeSpacesMenu();
+  });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeSpacesMenu(); });
 })();
