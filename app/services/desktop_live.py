@@ -120,6 +120,32 @@ def _last_activity(db: Session, user_id: Optional[int]) -> Optional[str]:
         return None
 
 
+def _data_fresh(db: Session) -> Optional[str]:
+    # Timestamp of the most recently ingested market-data snapshot, as an
+    # ISO-8601 UTC string (``...Z``). This is GLOBAL (not per-user) — the
+    # learning cycle mines patterns from ``trading_snapshots``, whose
+    # ``snapshot_date`` column is non-null on every row and stamped at capture,
+    # so its MAX is the freshest proof the data pipeline is alive. Distinct from
+    # "last trade": this advances even when the brain isn't trading. Any failure
+    # (or an empty table) degrades to None so the cockpit shows "—".
+    try:
+        from datetime import timezone
+        from sqlalchemy import func
+        from ..models.trading import MarketSnapshot
+        latest = db.query(func.max(MarketSnapshot.snapshot_date)).scalar()
+        if latest is None:
+            return None
+        # Stored naive-UTC; treat naive as UTC, normalize aware.
+        if latest.tzinfo is None:
+            latest = latest.replace(tzinfo=timezone.utc)
+        else:
+            latest = latest.astimezone(timezone.utc)
+        return latest.isoformat().replace("+00:00", "Z")
+    except Exception as e:
+        logger.warning("[desktop_live] data freshness read failed: %s", e)
+        return None
+
+
 def build_live(db: Session, user_id: Optional[int]) -> Dict[str, Any]:
     """Return the compact live cockpit view-model (safe to poll repeatedly)."""
     out: Dict[str, Any] = {"ok": True}
@@ -129,4 +155,5 @@ def build_live(db: Session, user_id: Optional[int]) -> Dict[str, Any]:
     out["breaker"] = _breaker()
     out["market"] = _market()
     out["last_trade_iso"] = _last_activity(db, user_id)
+    out["data_fresh_iso"] = _data_fresh(db)
     return out
