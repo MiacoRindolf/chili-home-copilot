@@ -9,6 +9,7 @@
 {% block head_extra %}
 <link rel="stylesheet" href="/static/css/workspace.css">
 <link rel="stylesheet" href="/static/css/os.css">
+<link rel="stylesheet" href="/static/css/os-notify.css">
 {% block ws_head %}{% endblock %}
 {% endblock %}
 
@@ -65,6 +66,8 @@
   </div>
 </div>
 </div>
+<div class="ws-toasts" id="ws-toasts" aria-live="polite" aria-label="Notifications"></div>
 <script src="/static/js/workspace.js"></script>
 <script src="/static/js/os.js"></script>
+<script src="/static/js/notifications.js"></script>
 {% endblock %}
