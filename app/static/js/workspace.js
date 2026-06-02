@@ -21,6 +21,56 @@
     });
   }
 
+  // ── Accent picker: override the --ws-accent tokens across the OS chrome and
+  //    persist the choice ('chili-accent'). Applies to the top document (rail,
+  //    topbar, windows chrome, palette, cockpit); iframe app interiors keep the
+  //    default accent. ──
+  var ACCENTS = {
+    blue:   { a: '#5b8cff', a2: '#7aa2ff', bg: 'rgba(91,140,255,.13)' },
+    violet: { a: '#a78bfa', a2: '#bda6ff', bg: 'rgba(167,139,250,.15)' },
+    green:  { a: '#3fdd9a', a2: '#6fe9b6', bg: 'rgba(63,221,154,.14)' },
+    chili:  { a: '#ff6b4a', a2: '#ff8a6e', bg: 'rgba(255,107,74,.14)' },
+    amber:  { a: '#f2c14e', a2: '#f6d27d', bg: 'rgba(242,193,78,.16)' },
+    cyan:   { a: '#22c5d6', a2: '#5bd9e6', bg: 'rgba(34,197,214,.14)' }
+  };
+  function applyAccent(name) {
+    var c = ACCENTS[name]; if (!c) return;
+    root.style.setProperty('--ws-accent', c.a);
+    root.style.setProperty('--ws-accent-2', c.a2);
+    root.style.setProperty('--ws-accent-bg', c.bg);
+  }
+  var savedAccent = null; try { savedAccent = localStorage.getItem('chili-accent'); } catch (e) {}
+  if (savedAccent && ACCENTS[savedAccent]) applyAccent(savedAccent);
+
+  var accWrap = document.getElementById('ws-accent');
+  var accBtn = document.getElementById('ws-accent-btn');
+  var accMenu = document.getElementById('ws-accent-menu');
+  function markActive() {
+    if (!accMenu) return;
+    var cur = (savedAccent && ACCENTS[savedAccent]) ? savedAccent : 'blue';
+    Array.prototype.forEach.call(accMenu.querySelectorAll('.ws-swatch'), function (s) {
+      s.classList.toggle('active', s.getAttribute('data-accent') === cur);
+    });
+  }
+  if (accBtn) accBtn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    var open = accWrap.classList.toggle('open');
+    accBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open) markActive();
+  });
+  if (accMenu) accMenu.addEventListener('click', function (e) {
+    e.stopPropagation();
+    var s = e.target.closest('.ws-swatch'); if (!s) return;
+    var name = s.getAttribute('data-accent');
+    applyAccent(name); savedAccent = name;
+    try { localStorage.setItem('chili-accent', name); } catch (x) {}
+    markActive();
+  });
+  document.addEventListener('click', function (e) {
+    if (accWrap && accWrap.classList.contains('open') && !accWrap.contains(e.target)) { accWrap.classList.remove('open'); if (accBtn) accBtn.setAttribute('aria-expanded', 'false'); }
+  });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && accWrap && accWrap.classList.contains('open')) { accWrap.classList.remove('open'); if (accBtn) accBtn.setAttribute('aria-expanded', 'false'); } });
+
   // ── Command palette: live search across destinations, patterns, tickers ──
   var scrim = document.getElementById('ws-scrim');
   var input = document.getElementById('ws-palette-in');
