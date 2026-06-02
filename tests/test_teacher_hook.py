@@ -83,8 +83,10 @@ class TestSpawnRunsEscalation:
         # escalation coroutine to assert it's driven with our args.
         captured = {}
 
-        async def fake_escalate(user_request, tool_results, agent_reply, reason, *, llm_caller):
+        async def fake_escalate(user_request, tool_results, agent_reply, reason,
+                                *, llm_caller, skill_saver=None):
             captured["args"] = (user_request, agent_reply, reason)
+            captured["has_saver"] = skill_saver is not None
             return "skill-name"
 
         class _SyncThread:
@@ -98,3 +100,4 @@ class TestSpawnRunsEscalation:
              patch("app.teacher_escalation.escalate_and_learn", side_effect=fake_escalate):
             th._spawn_escalation("do x", _FAILED_TOOLS, "reply", "reason", "t1")
         assert captured["args"] == ("do x", "reply", "reason")
+        assert captured["has_saver"] is True  # combined file+index saver injected

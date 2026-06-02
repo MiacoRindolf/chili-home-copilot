@@ -56,11 +56,28 @@ def _spawn_escalation(user_request: str, tool_results: List[Dict[str, Any]],
             asyncio.run(te.escalate_and_learn(
                 user_request, tool_results, agent_reply, reason,
                 llm_caller=_make_strong_llm_caller(trace_id),
+                skill_saver=_combined_skill_saver,
             ))
         except Exception as e:  # pragma: no cover - thread-internal best-effort
             logger.warning("[teacher_hook] escalation thread error: %s", e)
 
     threading.Thread(target=_run, daemon=True, name="teacher-escalation").start()
+
+
+def _combined_skill_saver(skill: Dict[str, Any]) -> bool:
+    """Persist a learned skill to the JSONL store AND index it for semantic recall.
+
+    The file save is authoritative (its success is returned); the vector index is
+    best-effort so an unavailable embedding backend can't drop the skill.
+    """
+    from .. import teacher_escalation as te
+    ok = te.FileSkillStore().save(skill)
+    try:
+        from . import skill_memory
+        skill_memory.index_skill(skill)
+    except Exception as e:  # pragma: no cover - best-effort indexing
+        logger.warning("[teacher_hook] skill index failed: %s", e)
+    return ok
 
 
 def maybe_fire_teacher_escalation(user_request: str,
