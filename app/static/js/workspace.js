@@ -94,6 +94,16 @@
   if (scrim) scrim.addEventListener('click', function (e) { if (e.target === scrim) closePalette(); });
 
   function esc(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+  // Bold the matched substring of the current query inside a label (HTML-safe:
+  // each segment is escaped, only the match is wrapped).
+  var lastQuery = '';
+  function highlight(label, q) {
+    label = label == null ? '' : String(label);
+    if (!q) return esc(label);
+    var i = label.toLowerCase().indexOf(q.toLowerCase());
+    if (i < 0) return esc(label);
+    return esc(label.slice(0, i)) + '<mark class="ws-hl">' + esc(label.slice(i, i + q.length)) + '</mark>' + esc(label.slice(i + q.length));
+  }
 
   function render(results) {
     if (!resultsEl) return;
@@ -105,7 +115,7 @@
         (r.cmd ? ' data-cmd="' + esc(r.cmd) + '"' : '') +
         ' data-url="' + esc(r.url || '') + '"' + (r.blank ? ' data-blank="1"' : '') + '>' +
         '<span class="pi">' + esc(r.icon || '•') + '</span>' +
-        '<span>' + esc(r.label) + '</span>' +
+        '<span>' + highlight(r.label, lastQuery) + '</span>' +
         '<span class="pk">' + esc(r.sub || '') + '</span></div>';
     }).join('');
     syncActiveDescendant();  // point the combobox at the selected option (a11y)
@@ -194,6 +204,7 @@
 
   function runSearch(q) {
     var seq = ++reqSeq;
+    lastQuery = (q || '').trim();  // remembered so render() can highlight the match
     // recents only on the empty query; spaces always (filtered by q); commands match by label
     var pre = (q ? [] : recentResults()).concat(spaceResults(q));
     fetch('/api/workspace/search?q=' + encodeURIComponent(q), { credentials: 'same-origin' })
