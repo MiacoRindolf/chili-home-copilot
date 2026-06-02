@@ -164,6 +164,33 @@ def test_seal_snapshot_append_only_and_parity(db: Session) -> None:
     _assert_line_parity(legacy_a[0], row)
 
 
+def test_seal_snapshot_rejects_ticker_count_line_mismatch() -> None:
+    class NoWriteDb:
+        def add(self, _row: object) -> None:
+            raise AssertionError("mismatch must reject before db.add")
+
+        def flush(self) -> None:
+            raise AssertionError("mismatch must reject before db.flush")
+
+    repo = SqlAlchemyBrainPredictionSnapshotRepository()
+    legacy = [
+        {
+            "ticker": "X",
+            "score": 5.0,
+            "confidence": 70,
+            "direction": "long",
+            "vix_regime": "normal",
+        }
+    ]
+    header = PredictionSnapshotSealDTO(
+        universe_fingerprint=prediction_universe_fingerprint(["x", "y"]),
+        ticker_count=2,
+    )
+
+    with pytest.raises(ValueError, match="prediction_snapshot_ticker_count_mismatch"):
+        repo.seal_snapshot(NoWriteDb(), header=header, lines=legacy_prediction_rows_to_dtos(legacy))
+
+
 def test_mirror_write_skips_empty_and_respects_flag(
     db: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:

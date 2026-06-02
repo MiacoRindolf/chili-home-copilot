@@ -23,7 +23,7 @@ from .pattern_imminent_alerts import (
 )
 from .prescreen_job import load_active_global_candidate_tickers
 from .speculative_momentum_engine import build_speculative_momentum_slice
-from .trading_source_freshness import collect_source_freshness, compute_board_data_as_of
+from .trading_source_freshness import collect_source_freshness, compute_board_freshness_status
 
 logger = logging.getLogger(__name__)
 
@@ -231,6 +231,9 @@ def _board_data_quality_gate(
     board_truncated: bool,
     data_as_of_min_keys: list[str],
     source_freshness: dict[str, Any],
+    missing_source_keys: list[str] | None = None,
+    invalid_source_keys: list[str] | None = None,
+    source_status: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     reasons: list[dict[str, Any]] = []
     hard_block_reason_code: str | None = None
@@ -266,7 +269,10 @@ def _board_data_quality_gate(
     if hard_block_reason_code:
         status = "block"
 
-    missing_keys = sorted(k for k, v in (source_freshness or {}).items() if not v)
+    missing_keys = sorted(
+        set(missing_source_keys or [k for k, v in (source_freshness or {}).items() if not v])
+    )
+    invalid_keys = sorted(set(invalid_source_keys or []))
     return {
         "gate": "opportunity_board_data_quality",
         "status": status,
@@ -281,6 +287,8 @@ def _board_data_quality_gate(
         "is_stale": bool(is_stale),
         "board_truncated": bool(board_truncated),
         "missing_source_keys": missing_keys,
+        "invalid_source_keys": invalid_keys,
+        "source_status": dict(source_status or {}),
         "reasons": reasons,
     }
 
@@ -831,7 +839,9 @@ def get_trading_opportunity_board(
 
     # Freshness: grounded on DB + prediction cache times, not HTTP request duration.
     source_freshness = collect_source_freshness(db)
-    data_as_of, data_as_of_min_keys = compute_board_data_as_of(source_freshness)
+    freshness_status = compute_board_freshness_status(source_freshness)
+    data_as_of = freshness_status.get("data_as_of")
+    data_as_of_min_keys = list(freshness_status.get("data_as_of_min_keys") or [])
 
     rows, meta = gather_imminent_candidate_rows(
         db,
@@ -950,7 +960,7 @@ def get_trading_opportunity_board(
 
     stale_sec = int(settings.opportunity_board_stale_seconds)
     now_utc = datetime.now(timezone.utc)
-    freshness_unknown = data_as_of is None
+    freshness_unknown = bool(freshness_status.get("freshness_unknown"))
     if data_as_of:
         try:
             das = data_as_of.replace("Z", "+00:00")
@@ -977,6 +987,9 @@ def get_trading_opportunity_board(
         board_truncated=bool(meta.get("board_eval_budget_hit")),
         data_as_of_min_keys=data_as_of_min_keys,
         source_freshness=source_freshness,
+        missing_source_keys=list(freshness_status.get("missing_source_keys") or []),
+        invalid_source_keys=list(freshness_status.get("invalid_source_keys") or []),
+        source_status=dict(freshness_status.get("source_status") or {}),
     )
 
     op_sum = {
@@ -989,6 +1002,8 @@ def get_trading_opportunity_board(
         "data_freshness_unknown": freshness_unknown,
         "data_quality_status": data_quality_gate.get("status"),
         "capital_lane_eligible": data_quality_gate.get("capital_lane_eligible"),
+        "missing_source_keys": data_quality_gate.get("missing_source_keys"),
+        "invalid_source_keys": data_quality_gate.get("invalid_source_keys"),
     }
 
     _annotate_desk_fields(tier_a)
@@ -1033,6 +1048,9 @@ def get_trading_opportunity_board(
         ),
         "data_as_of_min_keys": data_as_of_min_keys,
         "source_freshness": source_freshness,
+        "source_status": freshness_status.get("source_status"),
+        "missing_source_keys": freshness_status.get("missing_source_keys"),
+        "invalid_source_keys": freshness_status.get("invalid_source_keys"),
         "age_seconds": round(age_sec, 3) if age_sec is not None else None,
         "is_stale": is_stale,
         "stale_threshold_seconds": stale_sec,

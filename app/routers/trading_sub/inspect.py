@@ -79,10 +79,12 @@ def inspect_sources(
 ):
     from ...services.trading.learning import get_prediction_swr_cache_meta
     from ...services.trading.prescreen_job import count_active_global_candidates
-    from ...services.trading.trading_source_freshness import collect_source_freshness, compute_board_data_as_of
+    from ...services.trading.trading_source_freshness import collect_source_freshness, compute_board_freshness_status
 
     sf = collect_source_freshness(db)
-    dao, keys = compute_board_data_as_of(sf)
+    freshness_status = compute_board_freshness_status(sf)
+    dao = freshness_status.get("data_as_of")
+    keys = freshness_status.get("data_as_of_min_keys") or []
     pred_meta = get_prediction_swr_cache_meta()
     scan_ct = int(db.query(func.count(ScanResult.id)).scalar() or 0)
     prescreen_ct = count_active_global_candidates(db)
@@ -113,6 +115,10 @@ def inspect_sources(
                 "source_freshness": sf,
                 "data_as_of": dao,
                 "data_as_of_min_keys": keys,
+                "source_status": freshness_status.get("source_status"),
+                "missing_source_keys": freshness_status.get("missing_source_keys"),
+                "invalid_source_keys": freshness_status.get("invalid_source_keys"),
+                "freshness_unknown": freshness_status.get("freshness_unknown"),
                 "predictions_cache_meta": pred_meta,
                 "scan_result_row_count": scan_ct,
                 "prescreen_active_candidate_count": prescreen_ct,
@@ -131,13 +137,18 @@ def inspect_health(
     """Lightweight dependency sanity for operators (no full board build)."""
     from ...services import trading_scheduler
     from ...services.trading.learning import get_prediction_swr_cache_meta
-    from ...services.trading.trading_source_freshness import collect_source_freshness, compute_board_data_as_of
+    from ...services.trading.trading_source_freshness import collect_source_freshness, compute_board_freshness_status
 
     degraded: list[str] = []
     sf = collect_source_freshness(db)
-    dao, _ = compute_board_data_as_of(sf)
+    freshness_status = compute_board_freshness_status(sf)
+    dao = freshness_status.get("data_as_of")
     if dao is None:
         degraded.append("no_composite_data_as_of")
+    if freshness_status.get("missing_source_keys"):
+        degraded.append("missing_source_clocks")
+    if freshness_status.get("invalid_source_keys"):
+        degraded.append("invalid_source_clocks")
     if not any(sf.get(k) for k in sf):
         degraded.append("all_source_timestamps_null")
 
@@ -169,6 +180,10 @@ def inspect_health(
                 "degraded": degraded,
                 "source_freshness": sf,
                 "data_as_of": dao,
+                "source_status": freshness_status.get("source_status"),
+                "missing_source_keys": freshness_status.get("missing_source_keys"),
+                "invalid_source_keys": freshness_status.get("invalid_source_keys"),
+                "freshness_unknown": freshness_status.get("freshness_unknown"),
                 "predictions_cache_meta": pred,
                 "scan_result_row_count": scan_ct,
                 "scheduler": sched,

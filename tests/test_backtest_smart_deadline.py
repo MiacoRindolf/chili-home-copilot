@@ -84,6 +84,9 @@ def test_smart_backtest_soft_deadline_stops_between_ticker_waves(monkeypatch):
     assert out["backtests_run"] == 1
     assert out["tickers_selected"] == len(tickers)
     assert out["soft_deadline_hit"] is True
+    assert out["complete_ticker_attempts"] is False
+    assert "complete_ticker_attempts" in out["lineage_missing_fields"]
+    assert out["promotion_grade_provenance"] is False
     assert [r["ticker"] for r in saved] == ["AAA"]
 
 

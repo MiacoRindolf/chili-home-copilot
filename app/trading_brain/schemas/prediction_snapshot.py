@@ -30,7 +30,7 @@ class PredictionSnapshotSealDTO(BaseModel):
     """Header fields before insert; `as_of_ts` and `correlation_id` set at seal time."""
 
     universe_fingerprint: str
-    ticker_count: int
+    ticker_count: int = Field(ge=0)
     source_tag: str = "legacy_get_current_predictions"
     as_of_ts: datetime | None = None
     correlation_id: str | None = None

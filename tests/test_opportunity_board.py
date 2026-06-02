@@ -70,8 +70,15 @@ def test_opportunity_board_empty_shape(monkeypatch) -> None:
         },
     )
     monkeypatch.setattr(
-        "app.services.trading.opportunity_board.compute_board_data_as_of",
-        lambda sf: ("2026-01-01T12:00:00+00:00", ["predictions_cache_last_updated_utc"]),
+        "app.services.trading.opportunity_board.compute_board_freshness_status",
+        lambda sf: {
+            "data_as_of": "2026-01-01T12:00:00+00:00",
+            "data_as_of_min_keys": ["predictions_cache_last_updated_utc"],
+            "freshness_unknown": False,
+            "missing_source_keys": [],
+            "invalid_source_keys": [],
+            "source_status": {"predictions_cache_last_updated_utc": "complete"},
+        },
     )
 
     out = get_trading_opportunity_board(db, 1, include_research=False, include_debug=False)
@@ -137,8 +144,15 @@ def test_opportunity_board_truncated_when_budget_hit(monkeypatch) -> None:
         lambda *_a, **_k: {"predictions_cache_last_updated_utc": "2026-01-01T12:00:00+00:00"},
     )
     monkeypatch.setattr(
-        "app.services.trading.opportunity_board.compute_board_data_as_of",
-        lambda sf: ("2026-01-01T12:00:00+00:00", ["predictions_cache_last_updated_utc"]),
+        "app.services.trading.opportunity_board.compute_board_freshness_status",
+        lambda sf: {
+            "data_as_of": "2026-01-01T12:00:00+00:00",
+            "data_as_of_min_keys": ["predictions_cache_last_updated_utc"],
+            "freshness_unknown": False,
+            "missing_source_keys": [],
+            "invalid_source_keys": [],
+            "source_status": {"predictions_cache_last_updated_utc": "complete"},
+        },
     )
 
     out = get_trading_opportunity_board(db, 1, include_research=False, include_debug=False)
@@ -212,3 +226,30 @@ def test_opportunity_board_data_quality_blocks_capital_not_learning() -> None:
     assert row["capital_lane"]["approved_for_direct_execution"] is False
     assert row["capital_lane"]["hard_block_reason_code"] == "board_data_stale"
     assert row["net_edge_estimate"]["capital_lane"] == "blocked_data_quality"
+
+
+def test_opportunity_board_data_quality_blocks_missing_source_clock() -> None:
+    gate = _board_data_quality_gate(
+        data_as_of="2026-01-01T12:00:00+00:00",
+        age_sec=30.0,
+        stale_threshold_seconds=180,
+        freshness_unknown=True,
+        is_stale=False,
+        board_truncated=False,
+        data_as_of_min_keys=["scan_results_latest_utc"],
+        source_freshness={
+            "scan_results_latest_utc": "2026-01-01T12:00:00+00:00",
+            "prescreen_snapshot_finished_latest_utc": None,
+        },
+        missing_source_keys=["prescreen_snapshot_finished_latest_utc"],
+        source_status={
+            "scan_results_latest_utc": "complete",
+            "prescreen_snapshot_finished_latest_utc": "missing",
+        },
+    )
+
+    assert gate["status"] == "block"
+    assert gate["capital_lane_eligible"] is False
+    assert gate["hard_block_reason_code"] == "board_freshness_unknown"
+    assert gate["missing_source_keys"] == ["prescreen_snapshot_finished_latest_utc"]
+    assert gate["source_status"]["prescreen_snapshot_finished_latest_utc"] == "missing"

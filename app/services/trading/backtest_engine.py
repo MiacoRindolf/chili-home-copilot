@@ -15,6 +15,8 @@ against the same handful of mega-caps, it:
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import random
@@ -33,6 +35,19 @@ from ..symbol_hygiene import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _lineage_hash(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+
 
 # ---------------------------------------------------------------------------
 # Sector-diverse ticker groups (mirrors comment groups in market_data.py)
@@ -1117,6 +1132,27 @@ def smart_backtest_insight(
     _bt_comm = float(
         getattr(_bt_settings, "backtest_commission", _SMART_BACKTEST_DEFAULT_COMMISSION)
     )
+    conditions_hash = _lineage_hash(conditions)
+    exit_config_hash = _lineage_hash(exit_config or {})
+    selected_tickers_hash = _lineage_hash(list(tickers))
+    settings_hash = _lineage_hash(
+        {
+            "conditions_hash": conditions_hash,
+            "exit_config_hash": exit_config_hash,
+            "selected_tickers_hash": selected_tickers_hash,
+            "interval": bt_interval,
+            "period": bt_period,
+            "timeframe": timeframe,
+            "oos_holdout_fraction": _oos_frac,
+            "spread": _bt_spread,
+            "commission": _bt_comm,
+            "target_tickers": int(target_tickers),
+            "ticker_scope": _scope,
+            "asset_class": _asset_class,
+            "scan_pattern_id": linked_scan_pattern_id,
+            "pattern_name": pattern_name,
+        }
+    )
 
     def _run_one_pattern(ticker: str) -> dict[str, Any] | None:
         if shutdown.is_set():
@@ -1138,19 +1174,57 @@ def smart_backtest_insight(
 
     wins, losses, total = 0, 0, 0
     persisted_results = 0
+    persisted_backtest_result_ids: list[int] = []
+    persisted_param_set_ids: list[int] = []
+    persisted_param_hashes: list[str] = []
 
     def _persist_result(result: dict[str, Any] | None) -> None:
         nonlocal persisted_results, wins, losses, total
         if result is None:
             return
         try:
-            save_backtest(
+            backtest_row = save_backtest(
                 db,
                 insight.user_id,
                 result,
                 insight_id=insight.id,
                 scan_pattern_id=linked_scan_pattern_id,
             )
+            if backtest_row is not None:
+                bt_id = getattr(backtest_row, "id", None)
+                try:
+                    bt_id_i = int(bt_id) if bt_id is not None else None
+                except (TypeError, ValueError):
+                    bt_id_i = None
+                if bt_id_i is not None and bt_id_i not in persisted_backtest_result_ids:
+                    persisted_backtest_result_ids.append(bt_id_i)
+
+                ps_id = getattr(backtest_row, "param_set_id", None)
+                try:
+                    ps_id_i = int(ps_id) if ps_id is not None else None
+                except (TypeError, ValueError):
+                    ps_id_i = None
+                if ps_id_i is not None and ps_id_i not in persisted_param_set_ids:
+                    persisted_param_set_ids.append(ps_id_i)
+                    try:
+                        from ...models.trading import BacktestParamSet
+
+                        get_row = getattr(db, "get", None)
+                        ps_row = (
+                            get_row(BacktestParamSet, ps_id_i)
+                            if callable(get_row)
+                            else None
+                        )
+                        ps_hash = getattr(ps_row, "param_hash", None)
+                        if ps_hash:
+                            ps_hash_s = str(ps_hash)[:64]
+                            if ps_hash_s not in persisted_param_hashes:
+                                persisted_param_hashes.append(ps_hash_s)
+                    except Exception:
+                        logger.debug(
+                            "[backtest_engine] param_set lineage lookup failed",
+                            exc_info=True,
+                        )
         except Exception:
             try:
                 db.rollback()
@@ -1295,9 +1369,73 @@ def smart_backtest_insight(
         except Exception:
             logger.exception("[backtest_engine] Failed to log zero-trade event")
 
+    code_version = (os.environ.get("CHILI_VERSION") or "").strip()[:40] or None
+    if code_version is None:
+        try:
+            from .experiment_tracker import get_git_sha
+
+            code_version = (get_git_sha() or "").strip()[:40] or None
+        except Exception:
+            code_version = None
+
+    canonical_backtest_result_ids = sorted(set(persisted_backtest_result_ids))
+    canonical_param_set_ids = sorted(set(persisted_param_set_ids))
+    canonical_param_hashes = sorted(set(persisted_param_hashes))
+
+    run_lineage_payload = {
+        "insight_id": getattr(insight, "id", None),
+        "scan_pattern_id": linked_scan_pattern_id,
+        "backtest_result_ids": canonical_backtest_result_ids,
+        "backtest_param_set_ids": canonical_param_set_ids,
+        "backtest_param_hashes": canonical_param_hashes,
+        "settings_hash": settings_hash,
+        "conditions_hash": conditions_hash,
+        "exit_config_hash": exit_config_hash,
+        "selected_tickers_hash": selected_tickers_hash,
+        "code_version": code_version,
+        "wins": wins,
+        "losses": losses,
+        "total": total,
+        "backtests_run": attempted_count,
+        "tickers_selected": jobs_count,
+        "selected_tickers": list(tickers),
+        "soft_deadline_hit": runtime_budget_hit,
+    }
+    run_lineage = _lineage_hash(run_lineage_payload)
+    lineage_missing_fields = [
+        key
+        for key, value in {
+            "backtest_result_ids": canonical_backtest_result_ids,
+            "backtest_param_set_ids": canonical_param_set_ids,
+            "backtest_param_hashes": canonical_param_hashes,
+            "settings_hash": settings_hash,
+            "conditions_hash": conditions_hash,
+            "exit_config_hash": exit_config_hash,
+            "selected_tickers_hash": selected_tickers_hash,
+            "code_version": code_version,
+            "run_lineage": run_lineage,
+            "complete_ticker_attempts": attempted_count >= jobs_count,
+        }.items()
+        if not value
+    ]
+    complete_ticker_attempts = attempted_count >= jobs_count
+
     return {
         "wins": wins, "losses": losses, "total": total,
         "backtests_run": attempted_count,
         "tickers_selected": jobs_count,
         "soft_deadline_hit": runtime_budget_hit,
+        "backtest_result_ids": canonical_backtest_result_ids,
+        "backtest_param_set_ids": canonical_param_set_ids,
+        "backtest_param_hashes": canonical_param_hashes,
+        "settings_hash": settings_hash,
+        "conditions_hash": conditions_hash,
+        "exit_config_hash": exit_config_hash,
+        "selected_tickers_hash": selected_tickers_hash,
+        "code_version": code_version,
+        "run_lineage": run_lineage,
+        "complete_ticker_attempts": complete_ticker_attempts,
+        "lineage_missing_fields": lineage_missing_fields,
+        "lineage_status": "complete" if not lineage_missing_fields else "incomplete",
+        "promotion_grade_provenance": not lineage_missing_fields,
     }
