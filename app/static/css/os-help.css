@@ -15,3 +15,21 @@
 .ws-help kbd{font:var(--ws-fw-semi) var(--ws-fs-11)/1 var(--ws-font-ui);background:var(--ws-surface-3);border:1px solid var(--ws-border);border-bottom-width:2px;border-radius:6px;padding:4px 7px;color:var(--ws-text);min-width:16px;text-align:center}
 @media(max-width:620px){.ws-help-grid{grid-template-columns:1fr}}
 @media (prefers-reduced-motion:reduce){.ws-help-scrim.open{animation:none}}
+
+/* First-run welcome */
+.ws-welcome-scrim{position:fixed;inset:0;z-index:calc(var(--ws-z-toast,300) + 10);display:none;align-items:center;justify-content:center;background:rgba(4,7,12,.62);backdrop-filter:blur(4px);padding:24px}
+.ws-welcome-scrim.open{display:flex;animation:wsHelpFade .16s var(--ws-ease,ease)}
+.ws-welcome{width:min(520px,94vw);max-height:88vh;overflow-y:auto;background:var(--ws-surface);border:1px solid var(--ws-border-strong);border-radius:var(--ws-r-lg);box-shadow:var(--ws-shadow-lg);padding:28px 26px;text-align:center}
+.ws-welcome .ww-logo{font-size:40px;line-height:1}
+.ws-welcome h2{font-size:var(--ws-fs-22);font-weight:var(--ws-fw-bold);margin-top:10px;color:var(--ws-text)}
+.ws-welcome>p{color:var(--ws-text-3);font-size:var(--ws-fs-13);margin-top:6px}
+.ws-welcome .ww-list{list-style:none;text-align:left;margin:18px 0 8px;display:flex;flex-direction:column;gap:12px}
+.ws-welcome .ww-list li{display:flex;gap:12px;align-items:flex-start}
+.ws-welcome .ww-list .ww-ic{flex-shrink:0;width:34px;height:34px;border-radius:9px;background:var(--ws-surface-2);border:1px solid var(--ws-border);display:flex;align-items:center;justify-content:center;gap:2px;font-size:16px;color:var(--ws-accent)}
+.ws-welcome .ww-list .ww-ic b{font:var(--ws-fw-semi) var(--ws-fs-11)/1 var(--ws-font-ui);color:var(--ws-text-2)}
+.ws-welcome .ww-list div{font-size:var(--ws-fs-13);color:var(--ws-text-2);line-height:1.45}
+.ws-welcome .ww-list b{color:var(--ws-text)}
+.ws-welcome kbd{font:var(--ws-fw-semi) var(--ws-fs-11)/1 var(--ws-font-ui);background:var(--ws-surface-3);border:1px solid var(--ws-border);border-radius:5px;padding:3px 6px;color:var(--ws-text)}
+.ws-welcome .ww-go{margin-top:16px;background:var(--ws-accent);color:#fff;border:none;border-radius:var(--ws-r-md);padding:11px 22px;font-size:var(--ws-fs-14);font-weight:var(--ws-fw-semi);cursor:pointer;font-family:var(--ws-font-ui)}
+.ws-welcome .ww-go:hover{filter:brightness(1.06)}
+@media (prefers-reduced-motion:reduce){.ws-welcome-scrim.open{animation:none}}
