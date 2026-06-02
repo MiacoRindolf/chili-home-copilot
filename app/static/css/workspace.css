@@ -215,6 +215,7 @@
 .ws-cockpit-pill.unknown{opacity:.7}
 @keyframes wsPulse{0%,100%{box-shadow:0 0 0 0 color-mix(in srgb,var(--ws-down) 40%,transparent)}50%{box-shadow:0 0 0 4px transparent}}
 .ws-cockpit-spacer{flex:1 1 auto}
+.ws-cockpit-activity{font-size:var(--ws-fs-11);font-weight:var(--ws-fw-med);color:var(--ws-text-3);font-variant-numeric:tabular-nums;letter-spacing:.2px;white-space:nowrap}
 .ws-cockpit-status{display:inline-flex;align-items:center;gap:6px;font-size:var(--ws-fs-11);font-weight:var(--ws-fw-med);color:var(--ws-text-3);text-transform:uppercase;letter-spacing:.6px}
 .ws-cockpit-status .dot{width:6px;height:6px;border-radius:50%;background:var(--ws-text-3)}
 .ws-cockpit-status.live .dot{background:var(--ws-up);animation:wsBlink 2s ease-in-out infinite}
