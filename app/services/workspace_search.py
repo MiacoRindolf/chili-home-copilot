@@ -1,7 +1,8 @@
 """Command-palette search for CHILI OS (⌘K).
 
 Read-only and defensive: searches across workspace destinations/actions, trading
-patterns (scan_patterns), the user's tickers, and the user's research topics.
+patterns (scan_patterns), the user's tickers, the user's research topics, and
+the user's planner projects/tasks.
 Every DB query is wrapped so a failure degrades that group to empty rather than
 erroring the palette.
 
@@ -95,6 +96,48 @@ def _research(db: Session, user_id: Optional[int], q: str, limit: int) -> List[D
         return []
 
 
+def _planner(db: Session, user_id: Optional[int], q: str, limit: int) -> List[Dict[str, Any]]:
+    if not user_id:
+        return []
+    out: List[Dict[str, Any]] = []
+    # Projects the user is a member of, matched by name. No deep-link: the planner
+    # page only honors ?project_id=&task_id= together (both required), so a
+    # project-only link would not focus anything — open the planner as-is.
+    try:
+        from ..models import PlanProject, ProjectMember
+        rows = (
+            db.query(PlanProject.id, PlanProject.name)
+            .join(ProjectMember, ProjectMember.project_id == PlanProject.id)
+            .filter(ProjectMember.user_id == user_id, PlanProject.name.ilike(f"%{q}%"))
+            .order_by(PlanProject.updated_at.desc().nullslast())
+            .limit(limit)
+            .all()
+        )
+        out += [{"type": "project", "label": name, "sub": "Project", "icon": "🗂",
+                 "app": "planner", "url": "/planner"} for pid, name in rows if name]
+    except Exception as e:
+        logger.warning("[workspace_search] planner project search failed: %s", e)
+    # Tasks in those projects, matched by title. Deep-link is honored:
+    # ?project_id=<pid>&task_id=<tid> selects the project and opens the task.
+    try:
+        from ..models import PlanProject, PlanTask, ProjectMember
+        rows = (
+            db.query(PlanTask.id, PlanTask.title, PlanTask.project_id)
+            .join(PlanProject, PlanProject.id == PlanTask.project_id)
+            .join(ProjectMember, ProjectMember.project_id == PlanProject.id)
+            .filter(ProjectMember.user_id == user_id, PlanTask.title.ilike(f"%{q}%"))
+            .order_by(PlanTask.updated_at.desc().nullslast())
+            .limit(limit)
+            .all()
+        )
+        out += [{"type": "task", "label": title, "sub": "Task", "icon": "✓",
+                 "app": "planner", "url": f"/planner?project_id={proj_id}&task_id={tid}"}
+                for tid, title, proj_id in rows if title]
+    except Exception as e:
+        logger.warning("[workspace_search] planner task search failed: %s", e)
+    return out[:limit]
+
+
 def search(db: Session, user_id: Optional[int], q: str, limit: int = 10) -> List[Dict[str, Any]]:
     """Return ranked palette results for query `q` (empty q → destinations)."""
     q = (q or "").strip()
@@ -110,4 +153,5 @@ def search(db: Session, user_id: Optional[int], q: str, limit: int = 10) -> List
     out += _tickers(db, user_id, q, 5)
     out += _patterns(db, q, 5)
     out += _research(db, user_id, q, 5)
+    out += _planner(db, user_id, q, 5)
     return out[:limit]
