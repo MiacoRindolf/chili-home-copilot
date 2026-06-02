@@ -1608,35 +1608,37 @@ class Settings(BaseSettings):
     google_pse_cx: str = ""        # Google Programmable Search engine id (cx)
     search_request_timeout: int = 20          # per-provider HTTP timeout (s)
     search_content_cache_ttl_sec: int = 1800  # page-content fetch cache TTL (s)
-    # When True, background research (reasoning_brain / project_brain) enriches
-    # its top results with fetched full-page article text before LLM
-    # summarization, instead of summarizing from search snippets alone. Default
-    # OFF — opt-in so the live research cadence is unchanged until enabled.
-    search_fetch_sources: bool = False
+    # Background research (reasoning_brain / project_brain) enriches its top
+    # results with fetched full-page article text before LLM summarization,
+    # instead of summarizing from search snippets alone. ON by default — full
+    # article text materially improves catalyst research. Set False to kill.
+    search_fetch_sources: bool = True
     search_max_fetch: int = 3                  # max pages fetched per research query
 
     # External MCP (Model Context Protocol) client (app/mcp_client.py). Lets the
-    # brain consume EXTERNAL MCP servers (e.g. SEC filings, news). DORMANT by
-    # default. Read-only by policy: a hard in-code denylist blocks any
+    # brain consume EXTERNAL MCP servers (e.g. SEC filings, news). ON — but inert
+    # until mcp_servers_json lists a server (so default behavior is unchanged
+    # until you add one). Read-only by policy: a hard in-code denylist blocks any
     # order/trade/withdraw-style tool even if allowlisted (see mcp_client.py).
-    mcp_enabled: bool = False
+    mcp_enabled: bool = True
     # JSON array of server configs, e.g.:
     # [{"id":"sec","name":"SEC EDGAR","transport":"sse","url":"https://...",
     #   "allowed_tools":["search","get_filing"]}]
     mcp_servers_json: str = ""
 
-    # Teacher-escalation skill learning (app/teacher_escalation.py). When a
-    # weak/local model fails, a strong "teacher" model rescues it and distills a
-    # reusable skill. DORMANT by default; ready utility, not yet wired into the
-    # live LLM path.
-    teacher_escalation_enabled: bool = False
+    # Teacher-escalation skill learning (app/teacher_escalation.py + teacher_hook).
+    # On a failed chat turn, a strong "teacher" model distills a reusable skill in
+    # the background (fire-and-forget; indexed into skill_memory). ON by default —
+    # fires ONLY on detected failures, so cost is bounded to genuinely-failed
+    # turns. Set False to kill (e.g. to cap paid-LLM spend).
+    teacher_escalation_enabled: bool = True
     teacher_skill_dir: str = "data/skills"   # where FileSkillStore persists skills
 
     # Daily trading brief scheduled job (app/services/trading/daily_trading_brief.py).
     # Generates a per-user HTML brief once daily (read-only; reuses the on-demand
-    # /api/brain/trading/brief stack). DORMANT by default — opt-in since it adds a
-    # scheduler job. Writes HTML files under the dir below; no broker/DB writes.
-    chili_daily_trading_brief_enabled: bool = False
+    # /api/brain/trading/brief stack). ON by default; writes HTML files under the
+    # dir below — no broker/DB writes. Set False to kill the scheduled job.
+    chili_daily_trading_brief_enabled: bool = True
     chili_daily_trading_brief_hour_pt: int = 17        # local America/Los_Angeles hour
     chili_daily_trading_brief_window_hours: int = 24   # lookback for the brief
     chili_daily_trading_brief_dir: str = "data/briefs"

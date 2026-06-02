@@ -785,10 +785,13 @@ async def lifespan(app: FastAPI):
             )
 
     # External MCP client supervisor — owns all live MCP connections inside one
-    # async task (anyio-safe). Off unless mcp_enabled; skipped under pytest.
+    # async task (anyio-safe). Starts only when mcp_enabled (kill switch) AND at
+    # least one server is configured, so it's a no-op idle until you add a server
+    # to mcp_servers_json — no separate "activate" flip needed. Skipped under pytest.
     _mcp_started = False
     from .config import settings as _mcp_settings
-    if not _pytest_mode and getattr(_mcp_settings, "mcp_enabled", False):
+    _mcp_has_servers = bool((getattr(_mcp_settings, "mcp_servers_json", "") or "").strip())
+    if not _pytest_mode and getattr(_mcp_settings, "mcp_enabled", False) and _mcp_has_servers:
         try:
             from .mcp_client import get_mcp_supervisor
             get_mcp_supervisor().start()

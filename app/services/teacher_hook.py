@@ -103,3 +103,32 @@ def maybe_fire_teacher_escalation(user_request: str,
     except Exception as e:
         logger.warning("[teacher_hook] maybe_fire failed: %s", e)
         return False
+
+
+# Action types that mean "no tool was attempted" — a plain conversational reply.
+# A non-executed turn of one of these is NOT a tool failure to learn from.
+_CONVERSATIONAL_ACTIONS = frozenset({"unknown", "general_chat", ""})
+
+
+def maybe_fire_for_turn(message: str, action_type: str, llm_reply: str,
+                        executed: bool, is_guest: bool, trace_id: str = "chat") -> bool:
+    """Chat-path entry point: decide & fire teacher escalation for a finished turn.
+
+    Scopes failure signaling so the hook does NOT fire on ordinary chat:
+      - guests are skipped (a permission block is not a model failure);
+      - conversational turns (action_type unknown/general_chat, no tool attempted)
+        do not count as tool failures — only a real tool action that was planned
+        but did NOT execute does;
+      - verbal give-ups in the reply are still caught by should_escalate's regex.
+    Never raises.
+    """
+    if is_guest:
+        return False
+    conversational = action_type in _CONVERSATIONAL_ACTIONS
+    tool_error = "tool_execution_failed" if (not executed and not conversational) else None
+    return maybe_fire_teacher_escalation(
+        message,
+        [{"tool": action_type, "output": llm_reply, "error": tool_error}],
+        llm_reply,
+        trace_id=trace_id,
+    )

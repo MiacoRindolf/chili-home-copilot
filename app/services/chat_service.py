@@ -227,20 +227,14 @@ def resolve_response(
 
     llm_reply, executed, action_type, client_action = execute_tool_with_client_action(db, action_type, action_data, llm_reply, is_guest, user_id=user_id)
 
-    # Teacher-escalation hook (DORMANT unless teacher_escalation_enabled): on a
-    # detected tool/turn failure, a strong "teacher" model distills a reusable
-    # skill in the background. All gating + the daemon thread live in
-    # teacher_hook; this is a cheap no-op when the flag is off and never raises
-    # or blocks the response.
+    # Teacher-escalation hook: on a GENUINE tool failure (or a verbal give-up), a
+    # strong "teacher" model distills a reusable skill in the background. All
+    # scoping (skip guests / conversational turns), gating, and the daemon thread
+    # live in teacher_hook.maybe_fire_for_turn; this never blocks/raises into the
+    # response and does not fire on ordinary chat.
     try:
-        from .teacher_hook import maybe_fire_teacher_escalation
-        maybe_fire_teacher_escalation(
-            message,
-            [{"tool": action_type, "output": llm_reply,
-              "error": None if executed else "tool_execution_failed"}],
-            llm_reply,
-            trace_id=trace_id,
-        )
+        from .teacher_hook import maybe_fire_for_turn
+        maybe_fire_for_turn(message, action_type, llm_reply, executed, is_guest, trace_id=trace_id)
     except Exception:
         pass
 
