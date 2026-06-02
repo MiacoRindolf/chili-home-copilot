@@ -51,6 +51,7 @@
     var n = order.length;
     var el = document.createElement('div');
     el.className = 'os-win active';
+    el.dataset.title = cfg.title; el.dataset.icon = cfg.icon || '🗔';
     el.style.left = (40 + n * 34) + 'px'; el.style.top = (24 + n * 28) + 'px';
     el.style.width = 'min(640px,72vw)'; el.style.height = 'min(520px,72vh)';
     if (geom) { if (geom.left) el.style.left = geom.left; if (geom.top) el.style.top = geom.top; if (geom.width) el.style.width = geom.width; if (geom.height) el.style.height = geom.height; }
@@ -59,9 +60,9 @@
       '<div class="os-bar"><span class="wi">' + (cfg.icon || '🗔') + '</span><span class="wt">' + cfg.title + '</span>' +
       '<a class="pop" href="' + cfg.src + '" target="_blank" rel="noopener" title="Open in new tab"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M14 4h6v6M10 14L20 4M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5"/></svg></a>' +
       '<div class="os-ctrls">' +
-      '<button class="min" title="Minimize"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M5 12h14"/></svg></button>' +
-      '<button class="max" title="Tile / restore"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/></svg></button>' +
-      '<button class="close" title="Close"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>' +
+      '<button class="min" title="Minimize (Ctrl/⌘+Alt+↓)"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M5 12h14"/></svg></button>' +
+      '<button class="max" title="Tile / restore (Ctrl/⌘+Alt+↑/←/→)"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/></svg></button>' +
+      '<button class="close" title="Close (Ctrl/⌘+Alt+W)"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>' +
       '</div></div>' +
       '<div class="os-body"><div class="os-loading">Loading ' + cfg.title + '…</div>' +
       '<iframe src="' + src + '" title="' + cfg.title + '" loading="lazy"></iframe></div>' +
@@ -70,9 +71,8 @@
     var d = dock(app); if (d) d.classList.add('os-open');
     var ifr = el.querySelector('iframe');
     ifr.addEventListener('load', function () { var l = el.querySelector('.os-loading'); if (l) l.remove(); });
-    function minimize() { el.style.display = 'none'; order = order.filter(function (a) { return a !== app; }); addChip(app, cfg.title, cfg.icon); syncHome(); setHash(); saveLayout(); }
     el.querySelector('.close').addEventListener('click', function () { closeApp(app); });
-    el.querySelector('.min').addEventListener('click', minimize);
+    el.querySelector('.min').addEventListener('click', function () { minimizeApp(app); });
     var restore = null;
     el.querySelector('.max').addEventListener('click', function () {
       if (restore) { el.style.left = restore.l; el.style.top = restore.t; el.style.width = restore.w; el.style.height = restore.h; restore = null; }
@@ -82,8 +82,14 @@
     el.addEventListener('mousedown', function () { focusWin(app); });
     dragify(el, app); resizify(el);
     focusWin(app); syncHome();
-    if (geom && geom.min) minimize();
+    if (geom && geom.min) minimizeApp(app);
     saveLayout();
+  }
+  // Minimize a window to a taskbar chip (top-level so keyboard shortcuts can drive it).
+  function minimizeApp(app) {
+    var el = wins[app]; if (!el) return;
+    el.style.display = 'none'; order = order.filter(function (a) { return a !== app; });
+    addChip(app, el.dataset.title, el.dataset.icon); syncHome(); setHash(); saveLayout();
   }
   function closeApp(app) {
     var el = wins[app]; if (!el) return;
@@ -190,6 +196,27 @@
   restoreLayout();
   var m = (location.hash || '').match(/app=([a-z0-9_-]+)/i);
   if (m) { var b = document.querySelector('.ws-rb[data-app="' + m[1] + '"][data-src]'); if (b) openApp(cfgFromEl(b)); }
+
+  // ── Keyboard window management — drive the focused (top) window without the
+  //    mouse. Combos are chosen to avoid clashing with browser/OS bindings:
+  //      Ctrl/⌘ + `            cycle focus to the next window
+  //      Ctrl/⌘ + Alt + ←/→/↑  tile left / right / maximize
+  //      Ctrl/⌘ + Alt + ↓      minimize
+  //      Ctrl/⌘ + Alt + W      close
+  //    (Only fire while the OS chrome has focus — keydown inside an app iframe
+  //     stays with that iframe, which is the expected browser behavior.) ──
+  document.addEventListener('keydown', function (e) {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    if (e.key === '`') { if (order.length > 1) { e.preventDefault(); focusWin(order[0]); } return; }
+    if (!e.altKey) return;
+    var top = order[order.length - 1], el = top && wins[top];
+    if (!el) return;
+    if (e.key === 'ArrowLeft') { e.preventDefault(); snap(el, 'left'); saveLayout(); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); snap(el, 'right'); saveLayout(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); snap(el, 'max'); saveLayout(); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); minimizeApp(top); }
+    else if (e.key.toLowerCase() === 'w') { e.preventDefault(); closeApp(top); }
+  });
 
   // expose for other UI (e.g. quick actions, palette) to open windows.
   // Returns true if the app was opened as a window, false otherwise (caller can
