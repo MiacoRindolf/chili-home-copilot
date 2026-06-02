@@ -224,6 +224,14 @@
 .ws-kpi .val.ws-flash{animation:wsKpiFlash .9s var(--ws-ease,ease)}
 @keyframes wsKpiFlash{0%{background:var(--ws-accent-bg);box-shadow:0 0 0 6px var(--ws-accent-bg)}100%{background:transparent;box-shadow:0 0 0 0 transparent}}
 
+/* ── Accent picker ── */
+.ws-accent{position:relative}
+.ws-accent-menu{position:absolute;top:calc(100% + 8px);right:0;display:none;grid-template-columns:repeat(3,1fr);gap:8px;padding:10px;background:var(--ws-surface);border:1px solid var(--ws-border-strong);border-radius:var(--ws-r-md);box-shadow:var(--ws-shadow-lg);z-index:1000}
+.ws-accent.open .ws-accent-menu{display:grid;animation:wsPop .12s var(--ws-ease,ease)}
+.ws-swatch{width:26px;height:26px;border-radius:50%;border:2px solid transparent;background:var(--sw);cursor:pointer;padding:0;transition:transform var(--ws-dur,.12s);box-shadow:0 0 0 1px var(--ws-border) inset}
+.ws-swatch:hover{transform:scale(1.12)}
+.ws-swatch.active{border-color:var(--ws-text);box-shadow:0 0 0 2px var(--ws-surface),0 0 0 4px var(--sw)}
+
 @media(max-width:1100px){.ws-kpis{grid-template-columns:repeat(2,1fr)}.ws-c8,.ws-c6,.ws-c4{grid-column:span 12}}
 @media(max-width:760px){.ws-app{grid-template-columns:56px 1fr}.ws-cmdk{display:none}.ws-content{padding:var(--ws-s5)}}
 @media (prefers-reduced-motion:reduce){.ws-kpi,.ws-qa a,.ws-palette{transition:none;animation:none}}
