@@ -87,7 +87,10 @@
       '</div></div>' +
       '<div class="os-body"><div class="os-loading">Loading ' + cfg.title + '…</div>' +
       '<iframe src="' + src + '" title="' + cfg.title + '" loading="lazy"></iframe></div>' +
-      '<div class="os-rs"></div>';
+      '<div class="os-re n" data-dir="n"></div><div class="os-re s" data-dir="s"></div>' +
+      '<div class="os-re e" data-dir="e"></div><div class="os-re w" data-dir="w"></div>' +
+      '<div class="os-re ne" data-dir="ne"></div><div class="os-re nw" data-dir="nw"></div>' +
+      '<div class="os-re sw" data-dir="sw"></div><div class="os-re se" data-dir="se"></div>';
     desktop.appendChild(el); wins[app] = el; order.push(app); animIn(el);
     var d = dock(app); if (d) d.classList.add('os-open');
     var ifr = el.querySelector('iframe');
@@ -275,10 +278,26 @@
     window.addEventListener('mouseup', function () { if (drag) { if (zone) snap(el, zone); saveLayout(); } drag = false; hideGhost(); });
   }
   function resizify(el) {
-    var h = el.querySelector('.os-rs'), sx, sy, ow, oh, rz = false;
-    h.addEventListener('mousedown', function (e) { rz = true; sx = e.clientX; sy = e.clientY; ow = el.offsetWidth; oh = el.offsetHeight; e.preventDefault(); e.stopPropagation(); });
-    window.addEventListener('mousemove', function (e) { if (!rz) return; el.style.width = Math.max(340, ow + e.clientX - sx) + 'px'; el.style.height = Math.max(220, oh + e.clientY - sy) + 'px'; });
-    window.addEventListener('mouseup', function () { if (rz) { rz = false; saveLayout(); } });
+    var rz = false, dir = '', sx, sy, ol, ot, ow, oh;
+    Array.prototype.forEach.call(el.querySelectorAll('.os-re'), function (hnd) {
+      hnd.addEventListener('mousedown', function (e) {
+        rz = true; dir = hnd.dataset.dir; sx = e.clientX; sy = e.clientY;
+        ol = el.offsetLeft; ot = el.offsetTop; ow = el.offsetWidth; oh = el.offsetHeight;
+        e.preventDefault(); e.stopPropagation();
+        // Keep mousemove flowing even when the cursor crosses an iframe.
+        desktop.classList.add('os-resizing');
+      });
+    });
+    window.addEventListener('mousemove', function (e) {
+      if (!rz) return;
+      var dx = e.clientX - sx, dy = e.clientY - sy, nw = ow, nh = oh, nl = ol, nt = ot;
+      if (dir.indexOf('e') >= 0) nw = Math.max(340, ow + dx);
+      if (dir.indexOf('s') >= 0) nh = Math.max(220, oh + dy);
+      if (dir.indexOf('w') >= 0) { nw = Math.max(340, ow - dx); nl = ol + (ow - nw); }
+      if (dir.indexOf('n') >= 0) { nh = Math.max(220, oh - dy); nt = ot + (oh - nh); }
+      el.style.width = nw + 'px'; el.style.height = nh + 'px'; el.style.left = nl + 'px'; el.style.top = nt + 'px';
+    });
+    window.addEventListener('mouseup', function () { if (rz) { rz = false; desktop.classList.remove('os-resizing'); saveLayout(); } });
   }
   function showGhost(x, y, w, h) { if (!ghost) return; ghost.style.display = 'block'; ghost.style.left = x + 'px'; ghost.style.top = y + 'px'; ghost.style.width = w + 'px'; ghost.style.height = h + 'px'; }
   function hideGhost() { if (ghost) ghost.style.display = 'none'; }
