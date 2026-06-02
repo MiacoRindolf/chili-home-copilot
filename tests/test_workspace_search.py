@@ -62,6 +62,49 @@ def test_research_helper_swallows_failure():
     assert wss._research(_Boom(), 1, "ai", 5) == []
 
 
+def test_includes_planner():
+    with patch.object(wss, "_patterns", return_value=[]), \
+         patch.object(wss, "_tickers", return_value=[]), \
+         patch.object(wss, "_research", return_value=[]), \
+         patch.object(wss, "_planner", return_value=[
+             {"type": "project", "label": "Kitchen Remodel", "sub": "Project", "icon": "🗂", "app": "planner", "url": "/planner"},
+             {"type": "task", "label": "Paint walls", "sub": "Task", "icon": "✓", "app": "planner", "url": "/planner?project_id=3&task_id=7"},
+         ]):
+        out = wss.search(object(), 1, "k")
+    types = {r["type"] for r in out}
+    assert "project" in types and "task" in types
+    proj = next(r for r in out if r["type"] == "project")
+    assert proj["app"] == "planner" and proj["url"] == "/planner"
+    task = next(r for r in out if r["type"] == "task")
+    assert task["url"] == "/planner?project_id=3&task_id=7"
+
+
+def test_guest_gets_no_planner():
+    # Real helper (unpatched): user_id None short-circuits to [].
+    assert wss._planner(object(), None, "k", 5) == []
+    out = wss.search(object(), None, "k")
+    assert not any(r["type"] in ("project", "task") for r in out)
+
+
+def test_planner_helper_swallows_failure():
+    # A broken DB session must degrade to [] rather than raise.
+    class _Boom:
+        def query(self, *a, **k):
+            raise RuntimeError("db down")
+
+    assert wss._planner(_Boom(), 1, "k", 5) == []
+
+
+def test_planner_limit_respected():
+    many = [{"type": "task", "label": f"T{i}", "app": "planner", "url": "/planner", "icon": "✓", "sub": "Task"} for i in range(20)]
+    with patch.object(wss, "_patterns", return_value=[]), \
+         patch.object(wss, "_tickers", return_value=[]), \
+         patch.object(wss, "_research", return_value=[]), \
+         patch.object(wss, "_planner", return_value=many):
+        out = wss.search(object(), 1, "t", limit=4)
+    assert len(out) <= 4
+
+
 def test_action_matches():
     with patch.object(wss, "_patterns", return_value=[]), \
          patch.object(wss, "_tickers", return_value=[]):
