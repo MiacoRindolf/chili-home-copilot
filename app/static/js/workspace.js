@@ -64,7 +64,11 @@
     if (!opt) return;
     var app = opt.getAttribute('data-app'), url = opt.getAttribute('data-url'), blank = opt.getAttribute('data-blank');
     closePalette();
-    if (app && window.ChiliOS && window.ChiliOS.open && window.ChiliOS.open(app)) return;
+    // A result URL carrying query params (e.g. /trading?ticker=NVDA) is a
+    // deep-link: open the app window pointed at it. Plain destinations open
+    // their default surface.
+    var deep = (url && url.indexOf('?') !== -1) ? url : null;
+    if (app && window.ChiliOS && window.ChiliOS.open && window.ChiliOS.open(app, deep)) return;
     if (blank) { window.open(url, '_blank', 'noopener'); return; }
     if (url) window.location.href = url;
   }
