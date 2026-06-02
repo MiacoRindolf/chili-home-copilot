@@ -416,6 +416,8 @@
       saveLayout();
       return n;
     },
+    // Close every window and forget the saved session layout.
+    resetLayout: function () { closeAllNow(); try { localStorage.removeItem(LAYOUT_KEY); } catch (e) {} },
     // Named Spaces — snapshot/restore window arrangements by name.
     spaces: {
       list: function () { return loadSpaces().map(function (s) { return { name: s.name, count: (s.apps || []).length }; }); },

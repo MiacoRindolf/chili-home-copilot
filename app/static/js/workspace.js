@@ -199,8 +199,11 @@
     var cmds = [
       { cmd: 'theme', label: 'Toggle light / dark theme', icon: '🌓' },
       { cmd: 'help', label: 'Show keyboard shortcuts', icon: '⌨️' },
+      { cmd: 'welcome', label: 'Show welcome', icon: '🌶️' },
       { cmd: 'tidy', label: 'Tidy windows', icon: '🪟' },
       { cmd: 'grid', label: 'Grid windows', icon: '🪟' },
+      { cmd: 'reset-layout', label: 'Reset window layout', icon: '🪟' },
+      { cmd: 'reset-appearance', label: 'Reset appearance', icon: '🎨' },
       { cmd: 'wp:aurora', label: 'Wallpaper: Aurora', icon: '🖼️' },
       { cmd: 'wp:mesh', label: 'Wallpaper: Mesh', icon: '🖼️' },
       { cmd: 'wp:sunset', label: 'Wallpaper: Sunset', icon: '🖼️' },
@@ -232,6 +235,18 @@
       if (window.ChiliOS && window.ChiliOS.tidy) window.ChiliOS.tidy();
     } else if (id === 'grid') {
       if (window.ChiliOS && window.ChiliOS.grid) window.ChiliOS.grid();
+    } else if (id === 'welcome') {
+      var ws = document.getElementById('ws-welcome-scrim');
+      try { localStorage.removeItem('chili-os-welcomed'); } catch (e) {}
+      if (ws) ws.classList.add('open');
+    } else if (id === 'reset-layout') {
+      if (window.ChiliOS && window.ChiliOS.resetLayout) window.ChiliOS.resetLayout();
+    } else if (id === 'reset-appearance') {
+      ['--ws-accent', '--ws-accent-2', '--ws-accent-bg', '--ws-bg-grad'].forEach(function (p) { root.style.removeProperty(p); });
+      root.setAttribute('data-theme', 'dark');
+      savedAccent = null;
+      try { localStorage.removeItem('chili-accent'); localStorage.removeItem('chili-wallpaper'); localStorage.setItem('chili-theme', 'dark'); } catch (e) {}
+      markActive();
     } else if (id.indexOf('wp:') === 0) {
       var wp = id.slice(3); applyWallpaper(wp);
       try { localStorage.setItem('chili-wallpaper', wp); } catch (e) {}
