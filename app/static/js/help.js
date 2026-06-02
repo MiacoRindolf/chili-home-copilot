@@ -6,9 +6,25 @@
   var btn = document.getElementById('ws-help-btn');
   var closeBtn = document.getElementById('ws-help-x');
 
-  function open() { scrim.classList.add('open'); if (btn) btn.setAttribute('aria-expanded', 'true'); }
-  function close() { scrim.classList.remove('open'); if (btn) btn.setAttribute('aria-expanded', 'false'); }
+  var lastFocus = null;
+  function open() {
+    lastFocus = document.activeElement;
+    scrim.classList.add('open');
+    if (btn) btn.setAttribute('aria-expanded', 'true');
+    if (closeBtn) try { closeBtn.focus(); } catch (e) {}  // move focus into the dialog
+  }
+  function close() {
+    if (!scrim.classList.contains('open')) return;
+    scrim.classList.remove('open');
+    if (btn) btn.setAttribute('aria-expanded', 'false');
+    if (lastFocus && lastFocus.focus) { try { lastFocus.focus(); } catch (e) {} }
+    lastFocus = null;
+  }
   function toggle() { scrim.classList.contains('open') ? close() : open(); }
+  // Trap focus inside the dialog (the close button is the only focusable).
+  scrim.addEventListener('keydown', function (e) {
+    if (e.key === 'Tab' && scrim.classList.contains('open')) { e.preventDefault(); if (closeBtn) closeBtn.focus(); }
+  });
 
   if (btn) btn.addEventListener('click', function (e) { e.stopPropagation(); toggle(); });
   if (closeBtn) closeBtn.addEventListener('click', close);

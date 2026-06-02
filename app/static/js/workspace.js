@@ -76,14 +76,20 @@
   var input = document.getElementById('ws-palette-in');
   var resultsEl = document.getElementById('ws-palette-results');
   var trigger = document.getElementById('ws-cmdk-trigger');
-  var debounce, reqSeq = 0;
+  var debounce, reqSeq = 0, lastPaletteFocus = null;
 
   function openPalette() {
     if (!scrim) return;
+    lastPaletteFocus = document.activeElement;  // restore focus here on close (a11y)
     scrim.classList.add('open');
     setTimeout(function () { if (input) { input.value = ''; input.focus(); runSearch(''); } }, 20);
   }
-  function closePalette() { if (scrim) scrim.classList.remove('open'); }
+  function closePalette() {
+    if (!scrim || !scrim.classList.contains('open')) return;
+    scrim.classList.remove('open');
+    if (lastPaletteFocus && lastPaletteFocus.focus) { try { lastPaletteFocus.focus(); } catch (e) {} }
+    lastPaletteFocus = null;
+  }
   if (trigger) trigger.addEventListener('click', openPalette);
   if (scrim) scrim.addEventListener('click', function (e) { if (e.target === scrim) closePalette(); });
 
@@ -93,7 +99,7 @@
     if (!resultsEl) return;
     if (!results.length) { resultsEl.innerHTML = '<div class="ws-empty" style="padding:18px">No matches.</div>'; return; }
     resultsEl.innerHTML = results.map(function (r, i) {
-      return '<div class="opt' + (i === 0 ? ' sel' : '') + '" role="option"' +
+      return '<div class="opt' + (i === 0 ? ' sel' : '') + '" role="option" id="ws-opt-' + i + '" aria-selected="' + (i === 0 ? 'true' : 'false') + '"' +
         (r.app ? ' data-app="' + esc(r.app) + '"' : '') +
         (r.space ? ' data-space="' + esc(r.space) + '"' : '') +
         (r.cmd ? ' data-cmd="' + esc(r.cmd) + '"' : '') +
@@ -102,6 +108,14 @@
         '<span>' + esc(r.label) + '</span>' +
         '<span class="pk">' + esc(r.sub || '') + '</span></div>';
     }).join('');
+    syncActiveDescendant();  // point the combobox at the selected option (a11y)
+  }
+  // Reflect the selected result to assistive tech via aria-activedescendant.
+  function syncActiveDescendant() {
+    if (!input) return;
+    var sel = resultsEl && resultsEl.querySelector('.opt.sel');
+    if (sel && sel.id) input.setAttribute('aria-activedescendant', sel.id);
+    else input.removeAttribute('aria-activedescendant');
   }
 
   // Client-side Spaces (localStorage, not the DB) shown first in the palette so
@@ -210,9 +224,11 @@
   function move(dir) {
     var list = curOpts(); if (!list.length) return;
     var idx = list.findIndex(function (o) { return o.classList.contains('sel'); });
-    if (idx >= 0) list[idx].classList.remove('sel');
+    if (idx >= 0) { list[idx].classList.remove('sel'); list[idx].setAttribute('aria-selected', 'false'); }
     var next = (idx + dir + list.length) % list.length;
-    list[next].classList.add('sel'); list[next].scrollIntoView({ block: 'nearest' });
+    list[next].classList.add('sel'); list[next].setAttribute('aria-selected', 'true');
+    list[next].scrollIntoView({ block: 'nearest' });
+    syncActiveDescendant();
   }
 
   if (resultsEl) resultsEl.addEventListener('click', function (e) {
@@ -228,6 +244,7 @@
       if (e.key === 'ArrowDown') { e.preventDefault(); move(1); }
       else if (e.key === 'ArrowUp') { e.preventDefault(); move(-1); }
       else if (e.key === 'Enter') { e.preventDefault(); openResult(curOpts().find(function (o) { return o.classList.contains('sel'); }) || curOpts()[0]); }
+      else if (e.key === 'Tab') { e.preventDefault(); move(e.shiftKey ? -1 : 1); }  // trap focus; Tab also moves selection
     });
   }
   document.addEventListener('keydown', function (e) {
