@@ -40,6 +40,12 @@
   var ALERTS_KEY = 'chili-desktop-alerts', alertsOn = false;
   try { alertsOn = localStorage.getItem(ALERTS_KEY) === '1'; } catch (e) {}
   function persistAlerts() { try { localStorage.setItem(ALERTS_KEY, alertsOn ? '1' : '0'); } catch (e) {} }
+
+  // ── Per-category preferences — mute the noisy categories; safety (kill switch
+  //    / breaker) is always on and can't be muted. ──
+  var PREFS_KEY = 'chili-notif-prefs', prefs = { market: true, trades: true };
+  try { var sp = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}'); if (sp && typeof sp === 'object') { if (sp.market === false) prefs.market = false; if (sp.trades === false) prefs.trades = false; } } catch (e) {}
+  function persistPrefs() { try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch (e) {} }
   function desktopReady() { return alertsOn && typeof Notification !== 'undefined' && Notification.permission === 'granted'; }
   function fireDesktop(o) {
     if (!desktopReady()) return;
@@ -94,8 +100,15 @@
         }).join('')
       : '<div class="ws-notif-empty">No notifications yet.</div>';
     panel.innerHTML = rows + (history.length ? '<button class="ws-notif-clear" id="ws-notif-clear" type="button">Clear all</button>' : '') +
-      '<label class="ws-notif-alerts"><input type="checkbox" id="ws-notif-alerts-cb"' + (alertsOn ? ' checked' : '') + '>' +
-      '<span class="na-txt">Desktop alerts</span><span class="na-sub">critical events</span></label>';
+      '<div class="ws-notif-prefs">' +
+        '<label class="ws-notif-alerts"><input type="checkbox" id="ws-notif-alerts-cb"' + (alertsOn ? ' checked' : '') + '>' +
+          '<span class="na-txt">Desktop alerts</span><span class="na-sub">critical events</span></label>' +
+        '<label class="ws-notif-alerts"><input type="checkbox" id="ws-notif-pref-market"' + (prefs.market ? ' checked' : '') + '>' +
+          '<span class="na-txt">Market open / close</span></label>' +
+        '<label class="ws-notif-alerts"><input type="checkbox" id="ws-notif-pref-trades"' + (prefs.trades ? ' checked' : '') + '>' +
+          '<span class="na-txt">Trade closes</span></label>' +
+        '<div class="ws-notif-prefs-note">Safety alerts (kill switch · breaker) are always on.</div>' +
+      '</div>';
   }
   function openPanel() {
     if (!wrap) return;
@@ -113,7 +126,10 @@
     if (e.target.closest('#ws-notif-clear')) { history = []; renderPanel(); }
   });
   if (panel) panel.addEventListener('change', function (e) {
-    if (e.target && e.target.id === 'ws-notif-alerts-cb') setAlerts(e.target.checked);
+    var t = e.target; if (!t) return;
+    if (t.id === 'ws-notif-alerts-cb') setAlerts(t.checked);
+    else if (t.id === 'ws-notif-pref-market') { prefs.market = t.checked; persistPrefs(); }
+    else if (t.id === 'ws-notif-pref-trades') { prefs.trades = t.checked; persistPrefs(); }
   });
   document.addEventListener('click', function (e) {
     if (wrap && wrap.classList.contains('open') && !wrap.contains(e.target)) closePanel();
@@ -137,14 +153,14 @@
           : { kind: 'ok', icon: '✓', title: 'Drawdown breaker reset' });
       }
       var pm = prev.market || {}, cm = cur.market || {};
-      if (cm.ok && pm.ok && cm.equities_open != null && pm.equities_open != null && cm.equities_open !== pm.equities_open) {
+      if (prefs.market && cm.ok && pm.ok && cm.equities_open != null && pm.equities_open != null && cm.equities_open !== pm.equities_open) {
         toast(cm.equities_open
           ? { kind: 'ok', icon: '●', title: 'Market open', body: 'US equities regular session' }
           : { kind: 'info', icon: '○', title: 'Market closed', body: 'US equities' });
       }
       var pc = (typeof prev.closes_today === 'number') ? prev.closes_today : null;
       var cc = (typeof cur.closes_today === 'number') ? cur.closes_today : null;
-      if (pc != null && cc != null && cc > pc) {
+      if (prefs.trades && pc != null && cc != null && cc > pc) {
         var k = cc - pc, rep = (cur.closes || [])[0] || null;
         toast({
           kind: rep ? (rep.pnl_up ? 'ok' : 'bad') : 'info',

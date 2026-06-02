@@ -40,3 +40,6 @@
 .ws-notif-alerts input{accent-color:var(--ws-accent);width:14px;height:14px;cursor:pointer;flex-shrink:0}
 .ws-notif-alerts .na-txt{font-weight:var(--ws-fw-med);color:var(--ws-text)}
 .ws-notif-alerts .na-sub{margin-left:auto;color:var(--ws-text-3);font-size:var(--ws-fs-11)}
+.ws-notif-prefs{border-top:1px solid var(--ws-border);margin-top:2px}
+.ws-notif-prefs .ws-notif-alerts{border-top:none;padding-top:6px;padding-bottom:6px}
+.ws-notif-prefs-note{padding:2px 9px 8px;font-size:var(--ws-fs-11);color:var(--ws-text-3);line-height:1.4}
