@@ -376,4 +376,40 @@
     if (spacesWrap && spacesWrap.classList.contains('open') && !spacesWrap.contains(e.target)) closeSpacesMenu();
   });
   document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeSpacesMenu(); });
+
+  // ── Dock reorder: drag the rail's app buttons to reorder them; persisted to
+  //    'chili-dock-order' and re-applied on load. (Click-to-open is unaffected —
+  //    a click without a drag still fires.) ──
+  var rail = document.querySelector('.ws-rail');
+  function dockApps() { return rail ? Array.prototype.slice.call(rail.querySelectorAll('.ws-rb[data-app]')) : []; }
+  function persistDockOrder() {
+    try { localStorage.setItem('chili-dock-order', JSON.stringify(dockApps().map(function (b) { return b.dataset.app; }))); } catch (e) {}
+  }
+  (function applyDockOrder() {
+    if (!rail) return;
+    var saved; try { saved = JSON.parse(localStorage.getItem('chili-dock-order') || '[]'); } catch (e) { saved = []; }
+    if (!saved.length) return;
+    var spacer = rail.querySelector('.ws-rail-spacer'); if (!spacer) return;
+    var byApp = {}; dockApps().forEach(function (b) { byApp[b.dataset.app] = b; });
+    saved.forEach(function (app) { var b = byApp[app]; if (b) rail.insertBefore(b, spacer); });  // unlisted apps keep their place
+  })();
+  if (rail) {
+    var dockDrag = null;
+    var clearDockDrop = function () { dockApps().forEach(function (x) { x.classList.remove('ws-rb-drop'); }); };
+    dockApps().forEach(function (b) {
+      b.setAttribute('draggable', 'true');
+      b.addEventListener('dragstart', function (e) {
+        dockDrag = b; b.classList.add('ws-rb-dragging');
+        try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', b.dataset.app); } catch (x) {}
+      });
+      b.addEventListener('dragend', function () { if (dockDrag) dockDrag.classList.remove('ws-rb-dragging'); clearDockDrop(); dockDrag = null; });
+      b.addEventListener('dragover', function (e) { if (!dockDrag || dockDrag === b) return; e.preventDefault(); clearDockDrop(); b.classList.add('ws-rb-drop'); });
+      b.addEventListener('drop', function (e) {
+        if (!dockDrag || dockDrag === b) return;
+        e.preventDefault();
+        rail.insertBefore(dockDrag, b);  // insert before the drop target (vertical rail)
+        clearDockDrop(); persistDockOrder(); dockDrag = null;
+      });
+    });
+  }
 })();
