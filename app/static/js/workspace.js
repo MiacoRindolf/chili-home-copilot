@@ -455,4 +455,21 @@
     if (tray && tray.classList.contains('open') && !tray.contains(e.target)) closeTray();
   });
   document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeTray(); });
+
+  // ── Live dock badges: the cockpit poll (desktop.js dispatches 'chili:desktop')
+  //    drives small count/alert badges on rail icons — open positions on
+  //    Trading, and a red "!" when a safety system trips. No extra polling. ──
+  function setDockBadge(app, text, danger) {
+    var b = document.querySelector('.ws-rb[data-app="' + app + '"]'); if (!b) return;
+    var el = b.querySelector('.ws-rb-badge');
+    if (!text) { if (el) el.remove(); return; }
+    if (!el) { el = document.createElement('span'); el.className = 'ws-rb-badge'; b.appendChild(el); }
+    el.textContent = text; el.classList.toggle('danger', !!danger);
+  }
+  document.addEventListener('chili:desktop', function (e) {
+    var d = e.detail; if (!d || !d.ok) return;
+    var tripped = (d.kill_switch && d.kill_switch.active) || (d.breaker && d.breaker.tripped);
+    if (tripped) setDockBadge('trading', '!', true);
+    else setDockBadge('trading', (d.open_positions > 0) ? (d.open_positions > 9 ? '9+' : String(d.open_positions)) : '', false);
+  });
 })();
