@@ -5,17 +5,15 @@ from types import SimpleNamespace
 from app import migrations
 
 
-def test_migration_285_registered_after_phase5b_tca_filter() -> None:
+def test_migration_293_registered_without_reusing_live_285_id() -> None:
     ids = [version_id for version_id, _fn in migrations.MIGRATIONS]
 
     assert "284_phase5b_tca_quality_filter" in ids
-    assert "285_execution_slippage_unfilled_hygiene" in ids
-    assert ids.index("285_execution_slippage_unfilled_hygiene") == (
-        ids.index("284_phase5b_tca_quality_filter") + 1
-    )
+    assert "285_execution_slippage_unfilled_hygiene" not in ids
+    assert "293_execution_slippage_unfilled_hygiene" in ids
 
 
-def test_migration_285_nulls_only_unfilled_realized_slippage(monkeypatch) -> None:
+def test_migration_293_nulls_only_unfilled_realized_slippage(monkeypatch) -> None:
     class FakeConn:
         def __init__(self) -> None:
             self.sql: list[str] = []
@@ -35,7 +33,7 @@ def test_migration_285_nulls_only_unfilled_realized_slippage(monkeypatch) -> Non
         lambda _conn: {"trading_execution_events"},
     )
 
-    migrations._migration_285_execution_slippage_unfilled_hygiene(fake)
+    migrations._migration_293_execution_slippage_unfilled_hygiene(fake)
 
     sql = "\n".join(fake.sql)
     assert "UPDATE trading_execution_events" in sql

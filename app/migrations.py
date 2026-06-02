@@ -19985,7 +19985,7 @@ def _migration_284_phase5b_tca_quality_filter(conn) -> None:
     logger.info("[mig284] Phase 5B TCA aggregate quality filter installed")
 
 
-def _migration_285_execution_slippage_unfilled_hygiene(conn) -> None:
+def _migration_293_execution_slippage_unfilled_hygiene(conn) -> None:
     """Null realized slippage on order-state observations with no real fill."""
     if "trading_execution_events" not in _tables(conn):
         return
@@ -20005,7 +20005,7 @@ def _migration_285_execution_slippage_unfilled_hygiene(conn) -> None:
     """))
     conn.commit()
     logger.info(
-        "[mig285] nulled realized slippage on %s unfilled execution events",
+        "[mig293] nulled realized slippage on %s unfilled execution events",
         getattr(result, "rowcount", None),
     )
 
@@ -20361,8 +20361,8 @@ MIGRATIONS = [
      _migration_283_position_identity_phase5h_physical_rename),
     ("284_phase5b_tca_quality_filter",
      _migration_284_phase5b_tca_quality_filter),
-    ("285_execution_slippage_unfilled_hygiene",
-     _migration_285_execution_slippage_unfilled_hygiene),
+    ("293_execution_slippage_unfilled_hygiene",
+     _migration_293_execution_slippage_unfilled_hygiene),
 ]
 
 
