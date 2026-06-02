@@ -32,8 +32,19 @@
 .os-body{flex:1;overflow:auto;min-height:0;position:relative}
 .os-body iframe{width:100%;height:100%;border:0;display:block;background:var(--ws-bg)}
 .os-body .os-loading{position:absolute;inset:0;display:grid;place-items:center;color:var(--ws-text-3);font-size:var(--ws-fs-13);pointer-events:none}
-.os-rs{position:absolute;right:0;bottom:0;width:16px;height:16px;cursor:nwse-resize;z-index:2}
-.os-rs::after{content:'';position:absolute;right:3px;bottom:3px;width:7px;height:7px;border-right:2px solid var(--ws-text-3);border-bottom:2px solid var(--ws-text-3);opacity:.5}
+/* resize handles — all four edges + corners */
+.os-re{position:absolute;z-index:3}
+.os-re.n{top:-3px;left:10px;right:10px;height:8px;cursor:ns-resize}
+.os-re.s{bottom:-3px;left:10px;right:10px;height:8px;cursor:ns-resize}
+.os-re.e{right:-3px;top:10px;bottom:10px;width:8px;cursor:ew-resize}
+.os-re.w{left:-3px;top:10px;bottom:10px;width:8px;cursor:ew-resize}
+.os-re.ne{top:-3px;right:-3px;width:15px;height:15px;cursor:nesw-resize}
+.os-re.nw{top:-3px;left:-3px;width:15px;height:15px;cursor:nwse-resize}
+.os-re.sw{bottom:-3px;left:-3px;width:15px;height:15px;cursor:nesw-resize}
+.os-re.se{bottom:-3px;right:-3px;width:15px;height:15px;cursor:nwse-resize}
+.os-re.se::after{content:'';position:absolute;right:4px;bottom:4px;width:7px;height:7px;border-right:2px solid var(--ws-text-3);border-bottom:2px solid var(--ws-text-3);opacity:.5}
+/* while resizing, let iframes pass mouse events to the window manager */
+.os-desktop.os-resizing iframe{pointer-events:none}
 
 /* snap ghost preview */
 .os-ghost{position:absolute;background:var(--ws-accent-bg);border:1.5px solid var(--ws-accent);border-radius:var(--ws-r-md);z-index:9998;display:none;pointer-events:none;transition:all .1s var(--ws-ease)}
@@ -49,7 +60,7 @@
 .os-chip:hover{color:var(--ws-text);border-color:var(--ws-border-strong);transform:translateY(-1px)}
 .os-chip .ci{font-size:13px}
 
-@media(max-width:760px){.os-win{left:8px!important;top:8px!important;width:calc(100vw - 72px)!important;height:calc(100vh - 80px)!important}.os-rs{display:none}}
+@media(max-width:760px){.os-win{left:8px!important;top:8px!important;width:calc(100vw - 72px)!important;height:calc(100vh - 80px)!important}.os-re{display:none}}
 
 /* Honor reduced-motion: keep windows snappy but drop the easing/animation. */
 @media (prefers-reduced-motion:reduce){
