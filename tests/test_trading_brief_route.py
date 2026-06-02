@@ -49,3 +49,29 @@ class TestTradingBriefRoute:
         # window_hours has ge=1, le=720 — out of range should 422, not 500.
         resp = client.get(_URL, params={"window_hours": 0})
         assert resp.status_code == 422
+
+    def test_json_format_returns_structured_payload(self, client):
+        resp = client.get(_URL, params={"format": "json"})
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("application/json")
+        data = resp.json()
+        assert data["ok"] is True
+        assert "summary" in data and "stats" in data and "sources" in data
+        assert data["title"] == "Daily Trading Brief"
+
+    def test_text_format_returns_plaintext(self, client):
+        resp = client.get(_URL, params={"format": "text"})
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/plain")
+        # plaintext, not HTML
+        assert "<!DOCTYPE html>" not in resp.text
+        assert "Daily Trading Brief" in resp.text
+
+    def test_text_download_header(self, client):
+        resp = client.get(_URL, params={"format": "text", "download": 1})
+        assert resp.status_code == 200
+        assert "chili-trading-brief.txt" in resp.headers.get("content-disposition", "")
+
+    def test_default_format_is_html(self, client):
+        resp = client.get(_URL)
+        assert resp.headers["content-type"].startswith("text/html")
