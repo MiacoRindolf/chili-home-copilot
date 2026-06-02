@@ -20010,6 +20010,20 @@ def _migration_293_execution_slippage_unfilled_hygiene(conn) -> None:
     )
 
 
+def _migration_294_kill_switch_runtime_lookup_index(conn) -> None:
+    """Speed durable kill-switch reads used by runtime safety gates."""
+    if "trading_risk_state" not in _tables(conn):
+        conn.commit()
+        return
+
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_risk_state_kill_switch_latest
+            ON trading_risk_state (regime, created_at DESC, id DESC)
+    """))
+    conn.commit()
+    logger.info("[mig294] Kill-switch runtime lookup index installed")
+
+
 
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -20363,6 +20377,8 @@ MIGRATIONS = [
      _migration_287_phase5b_tca_quality_filter),
     ("293_execution_slippage_unfilled_hygiene",
      _migration_293_execution_slippage_unfilled_hygiene),
+    ("294_kill_switch_runtime_lookup_index",
+     _migration_294_kill_switch_runtime_lookup_index),
 ]
 
 
