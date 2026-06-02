@@ -355,6 +355,7 @@
 {% endblock %}
 
 {% block content %}
+{% if request.query_params.get('embed') != '1' %}
 <header class="home-header">
   <div>
     <h1>&#x1F336;&#xFE0F; CHILI Home</h1>
@@ -382,6 +383,7 @@
     <button id="theme-toggle" title="Toggle dark mode">&#127769;</button>
   </div>
 </header>
+{% endif %}
 
 <div class="dashboard">
   <!-- Insights banner -->
