@@ -353,3 +353,26 @@ def test_transient_db_fail_closed_preserves_manual_halt_reason(monkeypatch):
     assert status["reason"] == "manual_halt"
     assert status["db_error"] is not None
     assert status["transient_db_fail_closed"] is False
+
+
+def test_kill_switch_session_refresh_uses_provided_db_session(monkeypatch):
+    monkeypatch.setattr(governance.settings, "chili_kill_switch_db_poll_enabled", True, raising=False)
+    monkeypatch.setattr(governance.settings, "chili_kill_switch_db_poll_interval_s", 0.0, raising=False)
+
+    expected_db = object()
+    seen: list[object] = []
+
+    def _fetch(sess):
+        seen.append(sess)
+        return (True, "session_scoped_halt", datetime.now(timezone.utc))
+
+    monkeypatch.setattr(governance, "_fetch_latest_kill_switch_state", _fetch)
+    governance._apply_kill_switch_state(active=False, reason=None, set_at=None)
+
+    assert governance.is_kill_switch_active_for_session(expected_db) is True
+
+    monkeypatch.setattr(governance.settings, "chili_kill_switch_db_poll_interval_s", 9999.0, raising=False)
+    status = governance.get_kill_switch_status()
+    assert seen == [expected_db]
+    assert status["active"] is True
+    assert status["reason"] == "session_scoped_halt"

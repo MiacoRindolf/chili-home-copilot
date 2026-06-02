@@ -3283,9 +3283,9 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
     if not getattr(settings, "chili_autotrader_enabled", False):
         return {"ok": True, "skipped": True, "reason": "disabled"}
 
-    from .governance import is_kill_switch_active
+    from .governance import is_kill_switch_active_for_session
 
-    if is_kill_switch_active():
+    if is_kill_switch_active_for_session(db):
         return {"ok": True, "skipped": True, "reason": "kill_switch"}
 
     rt = effective_autotrader_runtime(db)
@@ -4973,14 +4973,14 @@ def _execute_broker_buy(
     path also writes an ``AutoTraderRun`` audit row and increments
     ``out["skipped"]`` so the caller can return immediately.
     """
-    from .governance import is_kill_switch_active
+    from .governance import is_kill_switch_active_for_session
     from .venue.factory import get_adapter
 
     # P0.5 — re-check kill switch immediately before submitting. The
     # initial check at tick entry can go stale if an operator flips the
     # switch while gates are evaluating (feature_parity / LLM can take
     # seconds). Cheap (in-memory lock + bool), so no reason not to.
-    if is_kill_switch_active():
+    if is_kill_switch_active_for_session(db):
         _audit(
             db,
             user_id=uid,
@@ -6766,9 +6766,9 @@ def _execute_new_entry(
             )
             return
 
-        from .governance import is_kill_switch_active
+        from .governance import is_kill_switch_active_for_session
 
-        if is_kill_switch_active():
+        if is_kill_switch_active_for_session(db):
             _block_live_order(
                 db,
                 uid=uid,

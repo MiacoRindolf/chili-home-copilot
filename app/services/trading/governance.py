@@ -110,21 +110,26 @@ def _apply_kill_switch_state(
             _kill_switch_db_persisted = True
 
 
+def _fetch_latest_kill_switch_state(
+    sess: Session,
+) -> tuple[bool, str | None, datetime | None] | None:
+    row = sess.execute(text(
+        "SELECT breaker_tripped, breaker_reason, created_at "
+        "FROM trading_risk_state "
+        "WHERE regime = 'kill_switch' "
+        "ORDER BY created_at DESC, id DESC LIMIT 1"
+    )).fetchone()
+    if not row:
+        return None
+    return bool(row[0]), (row[1] or None), row[2]
+
+
 def _fetch_latest_kill_switch_state_from_db() -> tuple[bool, str | None, datetime | None] | None:
     from ...db import SessionLocal
-    from sqlalchemy import text
 
     sess = SessionLocal()
     try:
-        row = sess.execute(text(
-            "SELECT breaker_tripped, breaker_reason, created_at "
-            "FROM trading_risk_state "
-            "WHERE regime = 'kill_switch' "
-            "ORDER BY created_at DESC, id DESC LIMIT 1"
-        )).fetchone()
-        if not row:
-            return None
-        return bool(row[0]), (row[1] or None), row[2]
+        return _fetch_latest_kill_switch_state(sess)
     finally:
         try:
             sess.rollback()
@@ -133,7 +138,11 @@ def _fetch_latest_kill_switch_state_from_db() -> tuple[bool, str | None, datetim
         sess.close()
 
 
-def _refresh_kill_switch_from_db_if_due(*, force: bool = False) -> None:
+def _refresh_kill_switch_from_db_if_due(
+    *,
+    force: bool = False,
+    db: Session | None = None,
+) -> None:
     """Refresh process-local kill-switch state from durable DB state.
 
     The scheduler and API run in separate processes. Live order paths call
@@ -152,8 +161,17 @@ def _refresh_kill_switch_from_db_if_due(*, force: bool = False) -> None:
             return
         _kill_switch_last_db_check_monotonic = now
     try:
-        state = _fetch_latest_kill_switch_state_from_db()
+        state = (
+            _fetch_latest_kill_switch_state(db)
+            if db is not None
+            else _fetch_latest_kill_switch_state_from_db()
+        )
     except Exception as exc:
+        if db is not None:
+            try:
+                db.rollback()
+            except Exception:
+                logger.debug("[governance] kill-switch session rollback failed", exc_info=True)
         if _looks_like_missing_risk_state_table(exc):
             logger.debug("[governance] kill-switch DB refresh skipped; trading_risk_state missing")
             return
@@ -239,6 +257,12 @@ def deactivate_kill_switch() -> None:
 
 def is_kill_switch_active() -> bool:
     _refresh_kill_switch_from_db_if_due()
+    with _kill_switch_lock:
+        return _kill_switch
+
+
+def is_kill_switch_active_for_session(db: Session) -> bool:
+    _refresh_kill_switch_from_db_if_due(db=db)
     with _kill_switch_lock:
         return _kill_switch
 

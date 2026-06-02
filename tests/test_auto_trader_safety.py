@@ -775,17 +775,16 @@ def test_kill_switch_flipped_mid_flight_blocks_placement(db, monkeypatch):
     monkeypatch.setattr(at_mod, "effective_autotrader_runtime", lambda _db: _live_runtime())
 
     from app.services.trading import governance as gov
-    # Tick-entry check (in auto_trader.run_auto_trader_tick) uses the module
-    # import; _execute_new_entry imports it locally, which means
-    # monkeypatching at_mod's reference is not enough — patch the source
-    # module directly. Starts False, flips True on the 2nd call.
+    # Tick-entry and broker submission checks now reuse the tick DB session;
+    # patch the session-aware source function directly. Starts False, flips
+    # True on the 2nd call.
     calls = {"n": 0}
 
-    def _flipping():
+    def _flipping(*_args, **_kwargs):
         calls["n"] += 1
         return calls["n"] >= 2  # pass the tick gate, fail the placement re-check
 
-    monkeypatch.setattr(gov, "is_kill_switch_active", _flipping)
+    monkeypatch.setattr(gov, "is_kill_switch_active_for_session", _flipping)
 
     # Stub out everything expensive between gates and placement so the
     # second is_kill_switch_active call IS the placement re-check.
@@ -2059,6 +2058,7 @@ def test_scale_in_blocks_live_capital_fallback(monkeypatch):
 
 
 def test_broker_buy_rechecks_circuit_breaker_before_adapter(monkeypatch):
+    from app.services.trading import governance as gov
     from app.services.trading import portfolio_risk
 
     alert = SimpleNamespace(id=88, ticker="OPN-USD")
@@ -2067,6 +2067,7 @@ def test_broker_buy_rechecks_circuit_breaker_before_adapter(monkeypatch):
         "settings",
         SimpleNamespace(chili_autotrader_block_live_on_capital_fallback=True),
     )
+    monkeypatch.setattr(gov, "is_kill_switch_active_for_session", lambda *_a, **_k: False)
     monkeypatch.setattr(
         portfolio_risk,
         "circuit_breaker_entry_block_reason",

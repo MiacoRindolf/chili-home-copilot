@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -84,6 +85,33 @@ def test_kill_switch_refreshes_from_db_cross_process(
         assert status["reason"] == "cross_process_test"
     finally:
         deactivate_kill_switch()
+
+
+def test_orchestrator_kill_switch_refresh_uses_tick_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.config import settings as _s
+    from app.services.trading import governance as gov
+
+    db = MagicMock(spec=Session)
+    monkeypatch.setattr(_s, "chili_autotrader_enabled", True)
+    monkeypatch.setattr(gov.settings, "chili_kill_switch_db_poll_enabled", True, raising=False)
+    monkeypatch.setattr(gov.settings, "chili_kill_switch_db_poll_interval_s", 0.0, raising=False)
+
+    seen: list[object] = []
+
+    def _fetch(sess: object):
+        seen.append(sess)
+        return (True, "session_scoped_halt", datetime.now(timezone.utc))
+
+    monkeypatch.setattr(gov, "_fetch_latest_kill_switch_state", _fetch)
+    gov._apply_kill_switch_state(active=False, reason=None, set_at=None)
+
+    res = run_auto_trader_tick(db)
+
+    assert res.get("skipped") is True
+    assert res.get("reason") == "kill_switch"
+    assert seen == [db]
 
 
 def test_kill_switch_same_reason_retries_failed_persist(monkeypatch: pytest.MonkeyPatch) -> None:
