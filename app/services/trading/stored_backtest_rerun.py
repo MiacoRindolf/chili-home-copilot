@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -24,19 +25,39 @@ def rerun_stored_backtest_by_id(db: Session, bt_id: int) -> dict[str, Any]:
         save_backtest,
     )
 
-    bt = db.query(BacktestResult).filter(BacktestResult.id == bt_id).first()
+    bt_row = (
+        db.query(
+            BacktestResult.user_id,
+            BacktestResult.ticker,
+            BacktestResult.related_insight_id,
+            BacktestResult.scan_pattern_id,
+            BacktestResult.params,
+            BacktestResult.param_set_id,
+        )
+        .filter(BacktestResult.id == bt_id)
+        .first()
+    )
+    bt = _stored_backtest_rerun_values(bt_row)
     if not bt:
         return {"ok": False, "error": "Backtest not found"}
 
     ins = (
-        db.query(TradingInsight).filter(TradingInsight.id == bt.related_insight_id).first()
+        db.query(TradingInsight.user_id, TradingInsight.scan_pattern_id)
+        .filter(TradingInsight.id == bt.related_insight_id)
+        .first()
         if bt.related_insight_id
         else None
     )
+    ins = _related_insight_rerun_values(ins)
     sp_id = bt.scan_pattern_id or (getattr(ins, "scan_pattern_id", None) if ins else None)
     if not sp_id:
         return {"ok": False, "error": "No ScanPattern linked to this backtest"}
-    p = db.get(ScanPattern, int(sp_id))
+    p = (
+        db.query(ScanPattern.name, ScanPattern.rules_json, ScanPattern.exit_config, ScanPattern.timeframe)
+        .filter(ScanPattern.id == int(sp_id))
+        .first()
+    )
+    p = _scan_pattern_rerun_values(p)
     if not p:
         return {"ok": False, "error": "Pattern not found"}
 
@@ -104,6 +125,53 @@ def rerun_stored_backtest_by_id(db: Session, bt_id: int) -> dict[str, Any]:
     return out
 
 
+def _row_value(row: Any, field: str, index: int) -> Any:
+    if row is None:
+        return None
+    if isinstance(row, (tuple, list)):
+        return row[index] if len(row) > index else None
+    return getattr(row, field, None)
+
+
+def _stored_backtest_rerun_values(row: Any) -> Any:
+    if row is None:
+        return None
+    if not isinstance(row, (tuple, list)):
+        return row
+    return SimpleNamespace(
+        user_id=_row_value(row, "user_id", 0),
+        ticker=_row_value(row, "ticker", 1),
+        related_insight_id=_row_value(row, "related_insight_id", 2),
+        scan_pattern_id=_row_value(row, "scan_pattern_id", 3),
+        params=_row_value(row, "params", 4),
+        param_set_id=_row_value(row, "param_set_id", 5),
+    )
+
+
+def _related_insight_rerun_values(row: Any) -> Any:
+    if row is None:
+        return None
+    if not isinstance(row, (tuple, list)):
+        return row
+    return SimpleNamespace(
+        user_id=_row_value(row, "user_id", 0),
+        scan_pattern_id=_row_value(row, "scan_pattern_id", 1),
+    )
+
+
+def _scan_pattern_rerun_values(row: Any) -> Any:
+    if row is None:
+        return None
+    if not isinstance(row, (tuple, list)):
+        return row
+    return SimpleNamespace(
+        name=_row_value(row, "name", 0),
+        rules_json=_row_value(row, "rules_json", 1),
+        exit_config=_row_value(row, "exit_config", 2),
+        timeframe=_row_value(row, "timeframe", 3),
+    )
+
+
 def collect_evidence_listed_backtest_ids(
     db: Session,
     insight_id: int,
@@ -111,13 +179,18 @@ def collect_evidence_listed_backtest_ids(
     limit: int | None = None,
 ) -> tuple[list[int], str | None]:
     """IDs of deduped rows shown in Pattern Evidence (same filter as the panel)."""
-    from ...models.trading import TradingInsight
+    from ...models.trading import ScanPattern, TradingInsight
     from ...routers.trading_sub import ai as _brain_ai
 
-    ins = db.get(TradingInsight, int(insight_id))
+    ins = (
+        db.query(TradingInsight.id, TradingInsight.scan_pattern_id, TradingInsight.pattern_description)
+        .filter(TradingInsight.id == int(insight_id))
+        .first()
+    )
+    ins = _evidence_insight_values(ins)
     if not ins:
         return [], "Insight not found"
-    sp_resolved = _brain_ai._resolve_scan_pattern_id_for_insight(db, ins)
+    sp_resolved = _scan_pattern_id_from_insight_row(db, ins, ScanPattern)
     desc = ins.pattern_description or ""
     univ = _brain_ai._evidence_backtest_asset_universe(
         db, desc, sp_resolved, insight_id=int(insight_id),
@@ -141,6 +214,34 @@ def collect_evidence_listed_backtest_ids(
     if limit is not None and limit > 0:
         ids = ids[:limit]
     return ids, None
+
+
+def _evidence_insight_values(row: Any) -> Any:
+    if row is None:
+        return None
+    if not isinstance(row, (tuple, list)):
+        return row
+    return SimpleNamespace(
+        id=_row_value(row, "id", 0),
+        scan_pattern_id=_row_value(row, "scan_pattern_id", 1),
+        pattern_description=_row_value(row, "pattern_description", 2),
+    )
+
+
+def _scan_pattern_id_from_insight_row(db: Session, insight: Any, scan_pattern_model: Any) -> int | None:
+    sid = getattr(insight, "scan_pattern_id", None)
+    if sid is None:
+        return None
+    try:
+        sid_int = int(sid)
+    except (TypeError, ValueError):
+        return None
+    row = db.query(scan_pattern_model.id).filter(scan_pattern_model.id == sid_int).first()
+    resolved = _row_value(row, "id", 0)
+    try:
+        return int(resolved) if resolved is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def run_insight_stored_backtests_rerun_job(insight_id: int, *, limit: int | None = None) -> None:

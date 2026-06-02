@@ -2,12 +2,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from app.models.trading import BacktestResult
 from app.services.trading.thesis import _best_backtests_by_ticker, build_smart_pick_context_strings
 
 
 class _FakeQuery:
-    def __init__(self, rows: list[SimpleNamespace]) -> None:
+    def __init__(self, rows: list[object]) -> None:
         self.rows = rows
         self.filter_calls = 0
         self.order_by_calls = 0
@@ -25,14 +24,15 @@ class _FakeQuery:
 
 
 class _FakeSession:
-    def __init__(self, rows: list[SimpleNamespace]) -> None:
+    def __init__(self, rows: list[object]) -> None:
         self.rows = rows
         self.query_calls = 0
         self.last_query: _FakeQuery | None = None
+        self.query_args: tuple[object, ...] | None = None
 
-    def query(self, model: object) -> _FakeQuery:
-        assert model is BacktestResult
+    def query(self, *args: object) -> _FakeQuery:
         self.query_calls += 1
+        self.query_args = args
         self.last_query = _FakeQuery(self.rows)
         return self.last_query
 
@@ -71,6 +71,13 @@ def test_best_backtests_by_ticker_batches_lookup() -> None:
 
     assert result == {"AAPL": best_aapl, "MSFT": best_msft}
     assert db.query_calls == 1
+    assert db.query_args is not None
+    assert tuple(getattr(arg, "key", None) for arg in db.query_args) == (
+        "ticker",
+        "strategy_name",
+        "return_pct",
+        "win_rate",
+    )
     assert db.last_query is not None
     assert db.last_query.filter_calls == 1
     assert db.last_query.order_by_calls == 1
@@ -97,3 +104,18 @@ def test_smart_pick_context_batches_duplicate_ticker_backtests() -> None:
     assert context.count("Best backtest:") == 3
     assert "Breakout" in context
     assert "Trend" in context
+
+
+def test_smart_pick_context_handles_compact_backtest_tuple_rows() -> None:
+    db = _FakeSession([("AAPL", "Breakout", 8.5, 0.62)])
+    ctx = {
+        "top_picks": [_pick("AAPL")],
+        "total_scanned": 250,
+        "stats": {},
+    }
+
+    context = build_smart_pick_context_strings(db, ctx)  # type: ignore[arg-type]
+
+    assert db.query_calls == 1
+    assert "Best backtest: Breakout" in context
+    assert "+8.5% return" in context

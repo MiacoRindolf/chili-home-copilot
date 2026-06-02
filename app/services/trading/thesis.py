@@ -7,6 +7,7 @@ evidence panel (why_ranked, key_contributors, invalidation, state_note).
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -253,17 +254,39 @@ def _best_backtests_by_ticker(db: Session, tickers: set[str]) -> dict[str, Any]:
     from ...models.trading import BacktestResult
 
     rows = (
-        db.query(BacktestResult)
+        db.query(
+            BacktestResult.ticker,
+            BacktestResult.strategy_name,
+            BacktestResult.return_pct,
+            BacktestResult.win_rate,
+        )
         .filter(BacktestResult.ticker.in_(sorted(tickers)))
         .order_by(BacktestResult.ticker.asc(), BacktestResult.return_pct.desc())
         .all()
     )
     best: dict[str, Any] = {}
     for row in rows:
-        ticker = str(row.ticker)
+        ticker = str(_backtest_row_value(row, "ticker", 0) or "")
         if ticker not in best:
-            best[ticker] = row
+            best[ticker] = _compact_backtest_row(row)
     return best
+
+
+def _compact_backtest_row(row: Any) -> Any:
+    if isinstance(row, (tuple, list)):
+        return SimpleNamespace(
+            ticker=_backtest_row_value(row, "ticker", 0),
+            strategy_name=_backtest_row_value(row, "strategy_name", 1),
+            return_pct=_backtest_row_value(row, "return_pct", 2),
+            win_rate=_backtest_row_value(row, "win_rate", 3),
+        )
+    return row
+
+
+def _backtest_row_value(row: Any, field: str, index: int) -> Any:
+    if isinstance(row, (tuple, list)):
+        return row[index] if len(row) > index else None
+    return getattr(row, field, None)
 
 
 def build_conversational_thesis(pick: dict[str, Any]) -> str:
@@ -442,7 +465,7 @@ def build_smart_pick_context_strings(db: Session, ctx: dict[str, Any]) -> str:
 
         best_bt = best_backtests.get(str(p["ticker"]))
         if best_bt:
-            _wrp = _bt_wr_pct_for_display(best_bt.win_rate)
+            _wrp = _bt_wr_pct_for_display(_backtest_row_value(best_bt, "win_rate", 3))
             _wr_txt = f"{_wrp:.0f}%" if _wrp is not None else "N/A"
             detail += (
                 f"\n  Best backtest: {best_bt.strategy_name} → "

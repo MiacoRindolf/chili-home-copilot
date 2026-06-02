@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
-from app.services.trading import signal_explainability
+from app.services.trading import pattern_ml, signal_explainability
 
 
 def test_top_importance_contribs_uses_bounded_heap_selection(monkeypatch) -> None:
@@ -93,3 +94,70 @@ def test_conditions_from_rules_native_dict_bypasses_json(monkeypatch) -> None:
     assert signal_explainability._conditions_from_rules(
         {"conditions": [{"indicator": "macd", "op": ">", "value": 0}]}
     ) == ({"indicator": "macd", "op": ">", "value": 0},)
+
+
+class _FakeQuery:
+    def __init__(self, row: object) -> None:
+        self.row = row
+        self.filter_calls = 0
+
+    def filter(self, *args: object) -> "_FakeQuery":
+        self.filter_calls += 1
+        return self
+
+    def first(self) -> object:
+        return self.row
+
+
+class _FakeSession:
+    def __init__(self, row: object) -> None:
+        self.row = row
+        self.query_args: list[tuple[object, ...]] = []
+        self.last_query: _FakeQuery | None = None
+
+    def query(self, *args: object) -> _FakeQuery:
+        self.query_args.append(args)
+        self.last_query = _FakeQuery(self.row)
+        return self.last_query
+
+
+class _NotReadyLearner:
+    def is_ready(self) -> bool:
+        return False
+
+
+def test_explain_signal_reads_pattern_name_and_rules_columns_only(monkeypatch) -> None:
+    monkeypatch.setattr(pattern_ml, "get_meta_learner", lambda: _NotReadyLearner())
+    rules = {
+        "conditions": [
+            {"indicator": "rsi", "op": ">", "value": 50},
+            {"indicator": "adx", "op": ">=", "value": 25},
+        ]
+    }
+    db = _FakeSession(("Momentum break", rules))
+
+    out = signal_explainability.explain_signal(
+        db,
+        "AAPL",
+        scan_pattern_id=42,
+        indicator_values={"rsi": 62, "adx": 30},
+    )
+
+    assert out["pattern_name"] == "Momentum break"
+    assert out["method"] == "rule_based"
+    assert [c["indicator"] for c in out["contributions"]] == ["rsi", "adx"]
+    assert all(c["passed"] is True for c in out["contributions"])
+    assert tuple(getattr(arg, "key", None) for arg in db.query_args[0]) == ("name", "rules_json")
+    assert db.last_query is not None
+    assert db.last_query.filter_calls == 1
+
+
+def test_pattern_explain_values_handles_object_tuple_and_empty_rows() -> None:
+    assert signal_explainability._pattern_explain_values(("Pattern", {"conditions": []})) == (
+        "Pattern",
+        {"conditions": []},
+    )
+    assert signal_explainability._pattern_explain_values(
+        SimpleNamespace(name="Obj", rules_json={"conditions": []})
+    ) == ("Obj", {"conditions": []})
+    assert signal_explainability._pattern_explain_values(()) == (None, None)

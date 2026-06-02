@@ -9,6 +9,7 @@ import logging
 import math
 import random
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -32,7 +33,12 @@ def create_shadow_test(
     min_days: int = MIN_DAYS_FOR_COMPARISON,
 ) -> dict[str, Any]:
     """Register a shadow test between a control (live) pattern and a variant."""
-    control = db.query(ScanPattern).filter(ScanPattern.id == control_pattern_id).first()
+    control = (
+        db.query(ScanPattern.id, ScanPattern.name)
+        .filter(ScanPattern.id == control_pattern_id)
+        .first()
+    )
+    control = _shadow_pattern_identity_row(control)
     variant = db.query(ScanPattern).filter(ScanPattern.id == variant_pattern_id).first()
 
     if not control or not variant:
@@ -66,6 +72,17 @@ def create_shadow_test(
         "min_trades": min_trades,
         "min_days": min_days,
     }
+
+
+def _shadow_pattern_identity_row(row: Any) -> Any:
+    if row is None:
+        return None
+    if isinstance(row, (tuple, list)):
+        return SimpleNamespace(
+            id=row[0] if len(row) > 0 else None,
+            name=row[1] if len(row) > 1 else None,
+        )
+    return row
 
 
 def evaluate_shadow_test(
@@ -148,9 +165,22 @@ def evaluate_shadow_test(
     return result
 
 
-def _get_closed_trades(db: Session, pattern_id: int) -> list[PaperTrade]:
+_PAPER_RETURN_FIELDS = (
+    PaperTrade.exit_date,
+    PaperTrade.pnl,
+    PaperTrade.entry_price,
+    PaperTrade.quantity,
+    PaperTrade.signal_json,
+    PaperTrade.exit_price,
+    PaperTrade.direction,
+    PaperTrade.pnl_pct,
+    PaperTrade.entry_date,
+)
+
+
+def _get_closed_trades(db: Session, pattern_id: int) -> list[Any]:
     return (
-        db.query(PaperTrade)
+        db.query(*_PAPER_RETURN_FIELDS)
         .filter(
             PaperTrade.scan_pattern_id == pattern_id,
             PaperTrade.status == "closed",
@@ -160,10 +190,27 @@ def _get_closed_trades(db: Session, pattern_id: int) -> list[PaperTrade]:
     )
 
 
-def _extract_trade_returns(trades: list[PaperTrade]) -> tuple[list[float], list[float]]:
+def _paper_return_row(row: Any) -> Any:
+    if not isinstance(row, (tuple, list)):
+        return row
+    return SimpleNamespace(
+        exit_date=row[0] if len(row) > 0 else None,
+        pnl=row[1] if len(row) > 1 else None,
+        entry_price=row[2] if len(row) > 2 else None,
+        quantity=row[3] if len(row) > 3 else None,
+        signal_json=row[4] if len(row) > 4 else None,
+        exit_price=row[5] if len(row) > 5 else None,
+        direction=row[6] if len(row) > 6 else None,
+        pnl_pct=row[7] if len(row) > 7 else None,
+        entry_date=row[8] if len(row) > 8 else None,
+    )
+
+
+def _extract_trade_returns(trades: list[Any]) -> tuple[list[float], list[float]]:
     returns: list[float] = []
     hold_days: list[float] = []
-    for t in trades:
+    for raw in trades:
+        t = _paper_return_row(raw)
         realized_return = paper_trade_return_pct(t)
         if realized_return is None:
             continue

@@ -37,10 +37,15 @@ def explain_signal(
     }
 
     if scan_pattern_id:
-        pat = db.query(ScanPattern).filter(ScanPattern.id == scan_pattern_id).first()
-        if pat:
-            explanation["pattern_name"] = pat.name
-            rule_contribs = _explain_rule_based(pat, indicator_values or {})
+        row = (
+            db.query(ScanPattern.name, ScanPattern.rules_json)
+            .filter(ScanPattern.id == scan_pattern_id)
+            .first()
+        )
+        if row:
+            pattern_name, rules_json = _pattern_explain_values(row)
+            explanation["pattern_name"] = pattern_name
+            rule_contribs = _explain_rule_conditions(rules_json, indicator_values or {})
             explanation["contributions"] = rule_contribs
             explanation["method"] = "rule_based"
 
@@ -65,8 +70,22 @@ def _explain_rule_based(
     indicators: dict[str, float],
 ) -> list[dict[str, Any]]:
     """For each condition in a rule-based pattern, compute pass/fail + margin."""
+    return _explain_rule_conditions(pattern.rules_json, indicators)
+
+
+def _pattern_explain_values(row: Any) -> tuple[Any, Any]:
+    if isinstance(row, (tuple, list)):
+        return (row[0] if len(row) > 0 else None, row[1] if len(row) > 1 else None)
+    return getattr(row, "name", None), getattr(row, "rules_json", None)
+
+
+def _explain_rule_conditions(
+    rules_json: Any,
+    indicators: dict[str, float],
+) -> list[dict[str, Any]]:
+    """For each condition in rule JSON, compute pass/fail + margin."""
     try:
-        conditions = _conditions_from_rules(pattern.rules_json)
+        conditions = _conditions_from_rules(rules_json)
     except Exception:
         return []
 
