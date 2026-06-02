@@ -29,6 +29,7 @@ not flip it on without reviewing the report first.
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime
 from typing import Any
 
@@ -63,6 +64,22 @@ _REQUIRED_CLASSIFIER_METADATA = (
     "feature_schema_version",
     "backtest_result_id",
 )
+_ROW_ID_KEYS = ("row_id", "evidence_row_id", "id")
+_SCAN_PATTERN_ID_KEYS = ("scan_pattern_id", "pattern_id")
+_EVIDENCE_TIMESTAMP_KEYS = (
+    "evidence_timestamp",
+    "timestamp",
+    "closed_at",
+    "created_at",
+)
+_HORIZON_KEYS = ("horizon", "label_horizon", "return_horizon")
+_RETURN_UNIT_KEYS = ("return_unit", "realized_return_unit")
+_REALIZED_RETURN_KEYS = (
+    "realized_return_pct",
+    "realized_return",
+    "return_pct",
+    "return_value",
+)
 
 
 def _row_get(row: Any, key: str, default: Any = None) -> Any:
@@ -77,6 +94,24 @@ def _has_value(value: Any) -> bool:
     if isinstance(value, str):
         return bool(value.strip())
     return True
+
+
+def _first_row_value(row: Any, keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        value = _row_get(row, key)
+        if _has_value(value):
+            return value
+    return None
+
+
+def _finite_float_or_none(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
 
 
 def _state_key(value: Any) -> str:
@@ -137,13 +172,17 @@ def classify_promotion_evidence_rows(
     row_list = list(rows or [])
     warnings: list[str] = []
     excluded_rows_by_reason: dict[str, int] = {}
+    excluded_row_ids_by_reason: dict[str, list[Any]] = {}
     row_results: list[dict[str, Any]] = []
+    raw_row_ids: list[Any] = []
+    eligible_row_ids: list[Any] = []
     eligible_rows = 0
 
-    def _add_reason(reasons: list[str], reason: str) -> None:
+    def _add_reason(reasons: list[str], reason: str, row_ref: Any) -> None:
         if reason not in reasons:
             reasons.append(reason)
             excluded_rows_by_reason[reason] = excluded_rows_by_reason.get(reason, 0) + 1
+            excluded_row_ids_by_reason.setdefault(reason, []).append(row_ref)
 
     def _single_row_value_or_default(key: str, default: Any) -> Any:
         if _has_value(default):
@@ -184,6 +223,14 @@ def classify_promotion_evidence_rows(
                 values.add(str(value))
         return values
 
+    def _distinct_canonical_values(keys: tuple[str, ...]) -> set[str]:
+        values: set[str] = set()
+        for row in row_list:
+            value = _first_row_value(row, keys)
+            if _has_value(value):
+                values.add(str(value))
+        return values
+
     mixed_fields: list[str] = []
     for key, default in (
         ("evidence_source", evidence_source),
@@ -194,6 +241,13 @@ def classify_promotion_evidence_rows(
         if len(_distinct_values(key, default)) > 1:
             mixed_fields.append(key)
             warnings.append(f"mixed_{key}")
+    for label, keys in (
+        ("horizon", _HORIZON_KEYS),
+        ("return_unit", _RETURN_UNIT_KEYS),
+    ):
+        if len(_distinct_canonical_values(keys)) > 1:
+            mixed_fields.append(label)
+            warnings.append(f"mixed_{label}")
 
     max_family_trial_burden = _nonnegative_int(family_trial_burden) or 0
     for row in row_list:
@@ -203,10 +257,6 @@ def classify_promotion_evidence_rows(
 
     for idx, row in enumerate(row_list):
         reasons: list[str] = []
-        if required_missing and not owner_override:
-            for key in required_missing:
-                _add_reason(reasons, f"missing_{key}")
-
         row_source = _row_or_default(row, "evidence_source", evidence_source)
         row_broker_truth = _row_or_default(row, "broker_truth_state", broker_truth_state)
         row_quarantine = _row_or_default(row, "quarantine_state", quarantine_state)
@@ -222,42 +272,71 @@ def classify_promotion_evidence_rows(
             "backtest_result_id",
             effective_backtest_result_id,
         )
+        row_id = _first_row_value(row, _ROW_ID_KEYS)
+        row_scan_pattern_id = _first_row_value(row, _SCAN_PATTERN_ID_KEYS)
+        row_timestamp = _first_row_value(row, _EVIDENCE_TIMESTAMP_KEYS)
+        row_horizon = _first_row_value(row, _HORIZON_KEYS)
+        row_return_unit = _first_row_value(row, _RETURN_UNIT_KEYS)
+        row_realized_return_raw = _first_row_value(row, _REALIZED_RETURN_KEYS)
+        row_realized_return = _finite_float_or_none(row_realized_return_raw)
+        row_ref = row_id if _has_value(row_id) else f"row_index:{idx}"
+        raw_row_ids.append(row_ref)
+
+        if required_missing and not owner_override:
+            for key in required_missing:
+                _add_reason(reasons, f"missing_{key}", row_ref)
 
         if not _has_value(row_source):
-            _add_reason(reasons, "missing_evidence_source")
+            _add_reason(reasons, "missing_evidence_source", row_ref)
+        if not _has_value(row_id):
+            _add_reason(reasons, "missing_row_id", row_ref)
+        if not _has_value(row_scan_pattern_id):
+            _add_reason(reasons, "missing_scan_pattern_id", row_ref)
+        if not _has_value(row_timestamp):
+            _add_reason(reasons, "missing_evidence_timestamp", row_ref)
+        if not _has_value(row_horizon):
+            _add_reason(reasons, "missing_horizon", row_ref)
+        if not _has_value(row_return_unit):
+            _add_reason(reasons, "missing_return_unit", row_ref)
+        if not _has_value(row_realized_return_raw):
+            _add_reason(reasons, "missing_realized_return", row_ref)
+        elif row_realized_return is None:
+            _add_reason(reasons, "nonfinite_realized_return", row_ref)
         if _state_key(row_provenance) not in _PROVENANCE_ACCEPTED_STATES:
-            _add_reason(reasons, "provenance_not_accepted")
+            _add_reason(reasons, "provenance_not_accepted", row_ref)
         if _state_key(row_quarantine) not in _QUARANTINE_CLEAR_STATES:
-            _add_reason(reasons, "quarantine_not_clear")
+            _add_reason(reasons, "quarantine_not_clear", row_ref)
         if _row_get(row, "research_integrity") is False or _state_key(
             _row_get(row, "research_integrity")
         ) in {"failed", "fail", "false", "0"}:
-            _add_reason(reasons, "research_integrity_failed")
+            _add_reason(reasons, "research_integrity_failed", row_ref)
         if not _has_value(row_code_version):
-            _add_reason(reasons, "missing_code_version")
+            _add_reason(reasons, "missing_code_version", row_ref)
         if not _has_value(row_feature_schema):
-            _add_reason(reasons, "missing_feature_schema_version")
+            _add_reason(reasons, "missing_feature_schema_version", row_ref)
         if not _has_value(row_backtest_id):
-            _add_reason(reasons, "missing_backtest_result_id")
+            _add_reason(reasons, "missing_backtest_result_id", row_ref)
         for field in mixed_fields:
-            _add_reason(reasons, f"mixed_{field}")
+            _add_reason(reasons, f"mixed_{field}", row_ref)
 
         is_live_fallback = _truthy(_row_get(row, "live_fallback")) or _state_key(
             row_source
         ) in {"live_fallback", "live-fallback", "broker_live_fallback"}
         if is_live_fallback:
             if _state_key(row_broker_truth) not in _BROKER_TRUTH_ACCEPTED_STATES:
-                _add_reason(reasons, "broker_truth_not_accepted")
+                _add_reason(reasons, "broker_truth_not_accepted", row_ref)
             for blocker in _LIVE_FALLBACK_BLOCKER_FIELDS:
                 if _truthy(_row_get(row, blocker)):
-                    _add_reason(reasons, blocker)
+                    _add_reason(reasons, blocker, row_ref)
 
         eligible = not reasons
         if eligible:
             eligible_rows += 1
+            eligible_row_ids.append(row_ref)
         row_results.append(
             {
                 "row_index": idx,
+                "row_ref": row_ref,
                 "eligible": eligible,
                 "excluded_reasons": reasons,
                 "evidence_source": row_source,
@@ -268,6 +347,12 @@ def classify_promotion_evidence_rows(
                 "feature_schema_version": row_feature_schema,
                 "backtest_result_id": row_backtest_id,
                 "family_trial_burden": _family_trial_value(row, family_trial_burden),
+                "row_id": row_id,
+                "scan_pattern_id": row_scan_pattern_id,
+                "evidence_timestamp": row_timestamp,
+                "horizon": row_horizon,
+                "return_unit": row_return_unit,
+                "realized_return": row_realized_return,
             }
         )
 
@@ -275,6 +360,15 @@ def classify_promotion_evidence_rows(
         "raw_rows": len(row_list),
         "eligible_rows": eligible_rows,
         "excluded_rows_by_reason": excluded_rows_by_reason,
+        "raw_row_ids": raw_row_ids,
+        "eligible_row_ids": eligible_row_ids,
+        "excluded_row_ids_by_reason": excluded_row_ids_by_reason,
+        "raw_row_refs": list(raw_row_ids),
+        "eligible_row_refs": list(eligible_row_ids),
+        "excluded_row_refs_by_reason": {
+            reason: list(row_ids)
+            for reason, row_ids in excluded_row_ids_by_reason.items()
+        },
         "warnings": warnings,
         "evidence_source": evidence_source,
         "broker_truth_state": broker_truth_state,
@@ -310,6 +404,7 @@ def _promotion_audit_classifier_rows(
         }
         row_id = _row_get(row, "id")
         if _has_value(row_id):
+            classifier_row["row_id"] = f"scan_pattern:{row_id}"
             classifier_row["pattern_id"] = row_id
         classifier_rows.append(classifier_row)
     return classifier_rows

@@ -95,6 +95,10 @@ def _float_or_none(value: Any) -> float | None:
     return out
 
 
+def _finite_result(value: float) -> float | None:
+    return value if math.isfinite(value) else None
+
+
 def _is_short(direction: Any) -> bool:
     return str(direction or "").strip().lower() == "short"
 
@@ -248,8 +252,8 @@ def price_return_pct(
     if entry is None or entry <= 0 or exit_ is None:
         return None
     if _is_short(direction):
-        return ((entry - exit_) / entry) * 100.0
-    return ((exit_ - entry) / entry) * 100.0
+        return _finite_result(((entry - exit_) / entry) * 100.0)
+    return _finite_result(((exit_ - entry) / entry) * 100.0)
 
 
 def notional_return_pct(
@@ -274,7 +278,10 @@ def notional_return_pct(
         or mult <= 0
     ):
         return None
-    return (pnl_f / (entry * qty * mult)) * 100.0
+    opening_notional = entry * qty * mult
+    if not math.isfinite(opening_notional) or opening_notional <= 0:
+        return None
+    return _finite_result((pnl_f / opening_notional) * 100.0)
 
 
 def _quantity_for_notional(row: Any) -> float | None:
@@ -304,6 +311,8 @@ def _partial_leg_pnl(row: Any, *, entry_price: float, contract_multiplier: float
         partial_pnl = (entry_price - partial_price) * partial_qty * contract_multiplier
     else:
         partial_pnl = (partial_price - entry_price) * partial_qty * contract_multiplier
+    if not math.isfinite(partial_pnl):
+        return None
     return partial_pnl, partial_qty
 
 
@@ -327,9 +336,15 @@ def realized_return_pct(row: Any, *, contract_multiplier: float = 1.0) -> float 
             return None
         partial_pnl, partial_qty = partial
         opening_qty = current_qty + partial_qty
-        if opening_qty <= 0:
+        opening_notional = entry * opening_qty * mult
+        if (
+            not math.isfinite(opening_qty)
+            or opening_qty <= 0
+            or not math.isfinite(opening_notional)
+            or opening_notional <= 0
+        ):
             return None
-        return ((pnl_f + partial_pnl) / (entry * opening_qty * mult)) * 100.0
+        return _finite_result(((pnl_f + partial_pnl) / opening_notional) * 100.0)
 
     qty = _quantity_for_notional(row)
     if qty is None:
@@ -358,7 +373,7 @@ def realized_pnl(row: Any, *, contract_multiplier: float = 1.0) -> float | None:
     if partial is None:
         return None
     partial_pnl, _partial_qty = partial
-    return pnl_f + partial_pnl
+    return _finite_result(pnl_f + partial_pnl)
 
 
 def trade_contract_multiplier(trade: Any) -> float:

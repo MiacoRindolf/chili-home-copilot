@@ -3,9 +3,11 @@ from types import SimpleNamespace
 import pytest
 
 from app.services.trading.return_math import (
+    notional_return_pct,
     paper_trade_realized_pnl,
     paper_trade_return_pct,
     price_return_pct,
+    realized_return_pct,
     trade_realized_pnl,
     trade_return_pct,
 )
@@ -14,6 +16,46 @@ from app.services.trading.return_math import (
 def test_price_return_pct_is_direction_aware_for_shorts() -> None:
     assert price_return_pct(100.0, 80.0, "short") == pytest.approx(20.0)
     assert price_return_pct(100.0, 120.0, "short") == pytest.approx(-20.0)
+
+
+def test_price_return_pct_rejects_overflowing_result() -> None:
+    assert price_return_pct(1e-308, 1e308, "long") is None
+
+
+def test_notional_return_pct_rejects_overflowing_result() -> None:
+    assert notional_return_pct(1e308, 1e-308, 1.0) is None
+
+
+def test_notional_return_pct_rejects_overflowing_opening_notional() -> None:
+    assert notional_return_pct(1.0, 1e308, 1e308) is None
+
+
+def test_realized_return_pct_rejects_overflowing_partial_leg_pnl() -> None:
+    trade = SimpleNamespace(
+        entry_price=1e308,
+        quantity=1.0,
+        pnl=0.0,
+        direction="long",
+        partial_taken=True,
+        partial_taken_qty=1e308,
+        partial_taken_price=1e-308,
+    )
+
+    assert realized_return_pct(trade) is None
+
+
+def test_realized_pnl_rejects_overflowing_partial_total() -> None:
+    trade = SimpleNamespace(
+        entry_price=1.0,
+        quantity=1.0,
+        pnl=1e308,
+        direction="long",
+        partial_taken=True,
+        partial_taken_qty=1.0,
+        partial_taken_price=1e308,
+    )
+
+    assert trade_realized_pnl(trade) is None
 
 
 def test_trade_return_pct_option_uses_contract_multiplier() -> None:

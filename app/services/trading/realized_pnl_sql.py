@@ -85,6 +85,10 @@ def _finite_number_sql(expr: str) -> str:
     )
 
 
+def _positive_finite_number_sql(expr: str) -> str:
+    return f"({_finite_number_sql(expr)} AND ({expr}) > 0)"
+
+
 def _realized_return_fraction_sql(
     alias: str | None,
     *,
@@ -107,31 +111,39 @@ def _realized_return_fraction_sql(
         f"ELSE ({partial_price} - {entry}) * {partial_qty} * {multiplier} "
         "END"
     )
+    partial_denominator = f"({entry} * {opening_qty} * {multiplier})"
+    partial_return = f"(({pnl} + ({partial_pnl})) / {partial_denominator})"
+    non_partial_denominator = f"({entry} * {non_partial_qty} * {multiplier})"
+    non_partial_return = f"({pnl} / {non_partial_denominator})"
     return f"""
         CASE
           WHEN NOT {_finite_number_sql(pnl)}
-            OR NOT {_finite_number_sql(entry)}
-            OR {entry} <= 0
-            OR NOT {_finite_number_sql(multiplier)}
-            OR {multiplier} <= 0
+            OR NOT {_positive_finite_number_sql(entry)}
+            OR NOT {_positive_finite_number_sql(multiplier)}
           THEN NULL
           WHEN {_partial_declared_sql(alias)}
           THEN
             CASE
-              WHEN {_finite_number_sql(qty)}
-                AND {qty} > 0
-                AND {_finite_number_sql(partial_qty)}
-                AND {partial_qty} > 0
-                AND {_finite_number_sql(partial_price)}
-                AND {partial_price} > 0
-                AND {_finite_number_sql(opening_qty)}
-                AND {opening_qty} > 0
-              THEN ({pnl} + ({partial_pnl})) / ({entry} * {opening_qty} * {multiplier})
+              WHEN {_positive_finite_number_sql(qty)}
+                AND {_positive_finite_number_sql(partial_qty)}
+                AND {_positive_finite_number_sql(partial_price)}
+                AND {_positive_finite_number_sql(opening_qty)}
+                AND {_positive_finite_number_sql(partial_denominator)}
+                AND {_finite_number_sql(partial_pnl)}
+              THEN
+                CASE WHEN {_finite_number_sql(partial_return)}
+                  THEN {partial_return}
+                  ELSE NULL
+                END
               ELSE NULL
             END
-          WHEN {_finite_number_sql(non_partial_qty)}
-            AND {non_partial_qty} > 0
-          THEN {pnl} / ({entry} * {non_partial_qty} * {multiplier})
+          WHEN {_positive_finite_number_sql(non_partial_qty)}
+            AND {_positive_finite_number_sql(non_partial_denominator)}
+          THEN
+            CASE WHEN {_finite_number_sql(non_partial_return)}
+              THEN {non_partial_return}
+              ELSE NULL
+            END
           ELSE NULL
         END
     """
