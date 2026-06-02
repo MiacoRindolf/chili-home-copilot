@@ -32,7 +32,7 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         if value is None:
             return default
         out = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
     return out if math.isfinite(out) else default
 
@@ -60,9 +60,16 @@ def _truthy_marker(value: Any) -> bool:
 
 def _normalize_confidence(value: Any) -> float:
     raw = _safe_float(value, 0.0)
+    if raw <= 0.0:
+        return 0.0
+    if raw <= 1.0:
+        return raw
     if raw > 1.0:
-        raw = raw / 10.0
-    return max(0.0, min(1.0, raw))
+        if raw <= 10.0:
+            return raw / 10.0
+        if raw <= 100.0:
+            return raw / 100.0
+    return 0.0
 
 
 def _win_rate_score(value: Any) -> float:

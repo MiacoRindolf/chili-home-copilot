@@ -328,6 +328,17 @@ def test_allocator_session_notional_uses_snapshot_option_multiplier():
 def test_allocator_safe_float_rejects_bool_and_nonfinite_values():
     assert allocator_mod._safe_float(True, 7.0) == 7.0
     assert allocator_mod._safe_float("NaN", 7.0) == 7.0
+    assert allocator_mod._safe_float("1e9999", 7.0) == 7.0
+
+
+def test_allocator_normalizes_confidence_scales_without_fake_certainty():
+    assert allocator_mod._normalize_confidence(True) == 0.0
+    assert allocator_mod._normalize_confidence(-0.1) == 0.0
+    assert allocator_mod._normalize_confidence(0.72) == 0.72
+    assert allocator_mod._normalize_confidence(4.0) == 0.4
+    assert allocator_mod._normalize_confidence(75.0) == 0.75
+    assert allocator_mod._normalize_confidence(95.0) == 0.95
+    assert allocator_mod._normalize_confidence(101.0) == 0.0
 
 
 def test_allocator_session_notional_ignores_false_option_path_marker():

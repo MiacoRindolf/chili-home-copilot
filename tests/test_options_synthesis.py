@@ -403,7 +403,7 @@ def test_synthesize_option_meta_clamps_bad_adaptive_synthesis_knobs(monkeypatch)
         notional_usd=300.0,
         underlying_target=112.0,
         underlying_stop=96.0,
-        confidence=1.25,
+        confidence=0.9,
     )
 
     assert meta is not None
@@ -412,7 +412,28 @@ def test_synthesize_option_meta_clamps_bad_adaptive_synthesis_knobs(monkeypatch)
     assert meta["synthesis_target_dte"] == 30
     assert meta["synthesis_max_spread_pct"] == 30.0
     assert meta["synthesis_budget_usd"] == 300.0
-    assert meta["entry_quality"]["confidence_probability"] == 1.0
+    assert meta["entry_quality"]["confidence_probability"] == 0.9
+
+
+def test_synthesize_option_meta_rejects_out_of_range_confidence(monkeypatch):
+    _wire_synthesis_fakes(
+        monkeypatch,
+        {
+            105.0: {"bid_price": "1.45", "ask_price": "1.50"},
+        },
+    )
+
+    meta = synthesize_option_meta(
+        db=None,
+        underlying="XYZ",
+        spot=100.0,
+        notional_usd=300.0,
+        underlying_target=112.0,
+        underlying_stop=96.0,
+        confidence=1.25,
+    )
+
+    assert meta is None
 
 
 def test_synthesize_option_meta_caches_recent_no_survivor_context(monkeypatch):

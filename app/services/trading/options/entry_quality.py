@@ -67,7 +67,7 @@ def _finite_float_or_none(value: Any) -> Optional[float]:
         return None
     try:
         out = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return out if math.isfinite(out) else None
 
@@ -310,7 +310,11 @@ def evaluate_long_option_entry(
         return OptionEntryDecision(False, "missing_underlying_target", snapshot)
     if stop is None:
         return OptionEntryDecision(False, "missing_underlying_stop", snapshot)
-    if probability is None:
+    if (
+        probability is None
+        or probability < PROBABILITY_FLOOR
+        or probability > PROBABILITY_CEILING
+    ):
         return OptionEntryDecision(False, "invalid_confidence_probability", snapshot)
 
     underlying_reward = abs(target - underlying)

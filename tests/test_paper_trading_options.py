@@ -1469,7 +1469,10 @@ def test_place_partial_close_rejects_bad_current_price_without_raising(
     assert db.commits == 0
 
 
-@pytest.mark.parametrize("bad_confidence", [True, float("nan"), "high"])
+@pytest.mark.parametrize(
+    "bad_confidence",
+    [True, float("nan"), "high", -0.1, 1.25, 101.0],
+)
 def test_auto_enter_option_signal_rejects_bad_confidence_before_risk_gate(
     bad_confidence,
     monkeypatch,
@@ -1499,6 +1502,57 @@ def test_auto_enter_option_signal_rejects_bad_confidence_before_risk_gate(
 
     assert entered == 0
     assert _paper_rows(db) == []
+
+
+def test_auto_enter_option_signal_normalizes_percent_confidence_for_netedge(
+    monkeypatch,
+) -> None:
+    from app.services.trading import paper_trading
+
+    monkeypatch.setattr(paper_trading.settings, "backtest_spread", 0.0, raising=False)
+    signal = {
+        **_option_signal(),
+        "ticker": "SPY",
+        "entry_price": 1.25,
+        "confidence": 90.0,
+        "option_meta": {**OPTION_META, "quantity": 2},
+    }
+    db = _FakeDb()
+    captured = []
+
+    def _capture_score(_db, ctx):
+        captured.append(ctx)
+        return None
+
+    with patch(
+        "app.services.trading.portfolio_risk.check_new_trade_allowed",
+        return_value=(True, "ok"),
+    ), patch(
+        "app.services.trading.portfolio_risk.size_position",
+        side_effect=AssertionError("option contracts must not use share sizing"),
+    ), patch(
+        "app.services.trading.net_edge_ranker.mode_is_active",
+        return_value=True,
+    ), patch(
+        "app.services.trading.net_edge_ranker.score",
+        side_effect=_capture_score,
+    ), patch(
+        "app.services.trading.position_sizer_writer.mode_is_active",
+        return_value=False,
+    ):
+        entered = paper_trading.auto_enter_from_signals(
+            db,
+            user_id=1,
+            signals=[signal],
+            capital=10_000.0,
+        )
+
+    assert entered == 1
+    assert captured
+    assert captured[0].raw_prob == pytest.approx(0.9)
+    trade = _paper_rows(db)[0]
+    assert trade.signal_json["confidence"] == pytest.approx(0.9)
+    assert signal["confidence"] == 90.0
 
 
 @pytest.mark.parametrize("bad_entry", [True, float("inf"), "not-a-price"])

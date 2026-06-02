@@ -26,7 +26,10 @@ from app.services.trading.edge_reliability import (
     _canonical_asset_class,
     _asset_class_for_paper,
     _asset_class_for_trade,
+    _expected_net_pct_from_run,
+    _mean,
     _outcome_label_from_return,
+    _probability_or_none,
     compute_pattern_edge_reliability,
     edge_supply_rows,
     emit_edge_reliability_refresh_requested,
@@ -121,6 +124,17 @@ def test_edge_reliability_label_prefers_partial_aware_return_over_pnl() -> None:
     assert _outcome_label_from_return(-10.0, 4.0) == 1
 
 
+def test_edge_reliability_numeric_helpers_reject_malformed_evidence() -> None:
+    run = SimpleNamespace(rule_snapshot={"entry_edge": {"expected_net_pct": True}})
+
+    assert _expected_net_pct_from_run(run) is None
+    assert _probability_or_none(True) is None
+    assert _probability_or_none(-0.01) is None
+    assert _probability_or_none(1.01) is None
+    assert _probability_or_none(0.55) == pytest.approx(0.55)
+    assert _mean([True, float("nan"), 1.0, 3.0]) == pytest.approx(2.0)
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
@@ -182,6 +196,51 @@ def test_edge_reliability_attribution_from_runs_paper_and_live(db):
     assert row["closed_evidence_count"] == 2
     assert row["brier_score"] == pytest.approx(0.16)
     assert row["recommended_work_event"] == EDGE_RELIABILITY_REFRESH
+
+
+def test_edge_reliability_rejects_malformed_expected_probability_evidence(db):
+    pat = _pattern(db)
+    alert = _alert(db, pat)
+    run = _run(db, pat, alert, expected=2.0)
+    run.rule_snapshot = {
+        "paper_observation_signal_lane": "shadow_near_miss",
+        "entry_edge": {
+            "expected_net_pct": True,
+            "probability": 1.25,
+            "breakeven_probability": False,
+            "probability_source": "bad_model_payload",
+        },
+    }
+    db.add(
+        PaperTrade(
+            scan_pattern_id=pat.id,
+            paper_shadow_of_alert_id=alert.id,
+            ticker="EDGE",
+            direction="long",
+            entry_price=100.0,
+            stop_price=95.0,
+            target_price=110.0,
+            quantity=1.0,
+            status="closed",
+            entry_date=datetime.utcnow(),
+            exit_date=datetime.utcnow(),
+            exit_price=105.0,
+            pnl=5.0,
+            pnl_pct=5.0,
+            signal_json={"paper_shadow": True},
+        )
+    )
+    db.commit()
+
+    row = compute_pattern_edge_reliability(db, pat.id, window_days=7)
+
+    assert row["edge_eval_count"] == 1
+    assert row["expected_ev_pct"] is None
+    assert row["avg_probability"] is None
+    assert row["avg_breakeven_probability"] is None
+    assert row["brier_score"] is None
+    assert row["realized_ev_pct"] == pytest.approx(5.0)
+    assert row["calibrated_ev_pct"] == pytest.approx(5.0)
 
 
 def test_edge_reliability_slices_all_asset_patterns_by_asset(db):

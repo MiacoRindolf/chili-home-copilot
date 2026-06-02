@@ -148,7 +148,9 @@ def _clamp01(value: float, lo: float = 0.01, hi: float = 0.99) -> float:
         v = 0.0
     if v > 1:
         # Treat 0-100 style confidence as a percentage.
-        v = v / 100.0 if v <= 100.0 else 1.0
+        if v > 100.0:
+            return 0.55
+        v = v / 100.0
     return max(lo, min(hi, v))
 
 

@@ -70,18 +70,27 @@ SHADOW_REASONS = frozenset({
 
 
 def _safe_float(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
     try:
         out = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return out if math.isfinite(out) else None
 
 
 def _safe_int(value: Any) -> int | None:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
+    out = _safe_float(value)
+    if out is None or not out.is_integer():
         return None
+    return int(out)
+
+
+def _probability_or_none(value: Any) -> float | None:
+    out = _safe_float(value)
+    if out is None or out < 0.0 or out > 1.0:
+        return None
+    return out
 
 
 def _json_dict(value: Any) -> dict[str, Any]:
@@ -97,7 +106,11 @@ def _json_dict(value: Any) -> dict[str, Any]:
 
 
 def _mean(values: list[float]) -> float | None:
-    vals = [float(v) for v in values if math.isfinite(float(v))]
+    vals = [
+        out
+        for out in (_safe_float(v) for v in values)
+        if out is not None
+    ]
     if not vals:
         return None
     return sum(vals) / len(vals)
@@ -457,12 +470,12 @@ def compute_pattern_edge_reliability(
         expected = _safe_float(edge.get("expected_net_pct"))
         if expected is not None:
             expected_values.append(expected)
-        prob = _safe_float(edge.get("probability"))
+        prob = _probability_or_none(edge.get("probability"))
         if prob is not None:
             probabilities.append(prob)
             if getattr(run, "breakout_alert_id", None) is not None:
                 prob_by_alert[int(run.breakout_alert_id)] = prob
-        be = _safe_float(edge.get("breakeven_probability"))
+        be = _probability_or_none(edge.get("breakeven_probability"))
         if be is not None:
             breakevens.append(be)
         reason = str(getattr(run, "reason", "") or "")

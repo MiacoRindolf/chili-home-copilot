@@ -41,6 +41,8 @@ def test_emitter_clamp01_rejects_bool_confidence() -> None:
     assert _clamp01(True) == pytest.approx(0.55)
     assert _clamp01(False) == pytest.approx(0.55)
     assert _clamp01(75.0) == pytest.approx(0.75)
+    assert _clamp01(100.0) == pytest.approx(0.99)
+    assert _clamp01(101.0) == pytest.approx(0.55)
 
 
 def test_emitter_boolean_prices_do_not_become_one_dollar_sizer_inputs() -> None:

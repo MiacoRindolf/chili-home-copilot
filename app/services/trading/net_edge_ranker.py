@@ -117,7 +117,9 @@ def _probability_or_none(value: Any) -> float | None:
     f = _finite_float(value)
     if f is None:
         return None
-    return max(0.0, min(1.0, f))
+    if f < 0.0 or f > 1.0:
+        return None
+    return f
 
 
 def _hash_float(value: Any, digits: int) -> float | None:
@@ -461,12 +463,8 @@ def _scan_patterns_by_id(db: Session, pattern_ids: set[int]) -> dict[int, ScanPa
 
 def _pattern_raw_prob(pat: ScanPattern) -> float | None:
     for attr in ("oos_win_rate", "win_rate"):
-        v = getattr(pat, attr, None)
-        if v is None:
-            continue
-        try:
-            f = float(v)
-        except (TypeError, ValueError):
+        f = _finite_float(getattr(pat, attr, None))
+        if f is None:
             continue
         # Accept both 0-1 and 0-100 scales.
         if f > 1.0:

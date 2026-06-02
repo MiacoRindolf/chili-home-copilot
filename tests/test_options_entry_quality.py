@@ -166,7 +166,10 @@ def test_option_entry_quality_rejects_boolean_price_domains() -> None:
     assert decision.snapshot["underlying_target"] is None
 
 
-@pytest.mark.parametrize("confidence", [None, True, float("nan"), float("inf")])
+@pytest.mark.parametrize(
+    "confidence",
+    [None, True, float("nan"), float("inf"), -0.01, 1.01, 70.0],
+)
 def test_option_entry_quality_rejects_invalid_confidence(confidence) -> None:
     decision = evaluate_long_option_entry(
         None,

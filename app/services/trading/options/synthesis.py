@@ -62,9 +62,16 @@ def _finite_float_or_none(value: Any) -> float | None:
         return None
     try:
         out = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return out if math.isfinite(out) else None
+
+
+def _probability_or_none(value: Any) -> float | None:
+    out = _finite_float_or_none(value)
+    if out is None or out < 0.0 or out > 1.0:
+        return None
+    return out
 
 
 def _positive_float_or_none(value: Any) -> float | None:
@@ -411,14 +418,12 @@ def synthesize_option_meta(
         return None
     target_f = _positive_float_or_none(underlying_target)
     stop_f = _positive_float_or_none(underlying_stop)
-    confidence_f = _finite_float_or_none(confidence)
+    confidence_f = _probability_or_none(confidence)
     quality_inputs = (underlying_target, underlying_stop, confidence)
     if any(value is not None for value in quality_inputs) and not all(
         value is not None for value in (target_f, stop_f, confidence_f)
     ):
         return None
-    if confidence_f is not None:
-        confidence_f = max(0.0, min(1.0, confidence_f))
 
     from ....config import settings
     from ..strategy_parameter import get_parameter

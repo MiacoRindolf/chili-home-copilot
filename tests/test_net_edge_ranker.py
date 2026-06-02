@@ -384,10 +384,48 @@ def test_calibrator_rejects_nonfinite_raw_probability():
     assert cal.apply(float("nan")) == pytest.approx(0.0, abs=1e-12)
 
 
+def test_probability_parser_rejects_out_of_range_values():
+    assert ner._probability_or_none(True) is None
+    assert ner._probability_or_none(-0.01) is None
+    assert ner._probability_or_none(1.01) is None
+    assert ner._probability_or_none(0.55) == pytest.approx(0.55)
+
+
+def test_calibrator_rejects_out_of_range_raw_probability():
+    cal = ner._Calibrator(
+        method="cold_start",
+        sample_count=0,
+        version_id="test",
+        regime_bucket="risk_on",
+        asset_class="stock",
+        fit=None,
+    )
+
+    assert cal.apply(1.2) == pytest.approx(0.0, abs=1e-12)
+    assert cal.apply(-0.2) == pytest.approx(0.0, abs=1e-12)
+
+
 def test_calibrator_ignores_nonfinite_model_output():
     class _BadFit:
         def predict(self, _values):
             return [float("nan")]
+
+    cal = ner._Calibrator(
+        method="isotonic",
+        sample_count=100,
+        version_id="test",
+        regime_bucket="risk_on",
+        asset_class="stock",
+        fit=_BadFit(),
+    )
+
+    assert cal.apply(0.7) == pytest.approx(0.7, rel=1e-9)
+
+
+def test_calibrator_ignores_out_of_range_model_output():
+    class _BadFit:
+        def predict(self, _values):
+            return [1.25]
 
     cal = ner._Calibrator(
         method="isotonic",
@@ -547,6 +585,17 @@ def test_training_pairs_match_option_asset_aliases():
     assert any(raw == pytest.approx(0.62) and win == 1 for raw, win in pairs)
 
 
+def test_pattern_raw_probability_rejects_boolean_before_percent_fallback():
+    pat = SimpleNamespace(
+        id=1,
+        asset_class="stocks",
+        oos_win_rate=True,
+        win_rate=55.0,
+    )
+
+    assert ner._pattern_raw_prob(pat) == pytest.approx(0.55)
+
+
 def test_score_zero_or_bad_stop_returns_none_and_does_not_log_score(db, shadow_mode, caplog):
     caplog.set_level(logging.INFO, logger="app.services.trading.net_edge_ranker")
     ctx = ner.NetEdgeSignalContext(
@@ -588,6 +637,23 @@ def test_score_nonfinite_raw_probability_returns_none_without_db_read(shadow_mod
         asset_class="stock",
         scan_pattern_id=None,
         raw_prob=float("nan"),
+        entry_price=100.0,
+        stop_price=97.0,
+    )
+
+    result = ner.score(SimpleNamespace(), ctx)
+
+    assert result is None
+    assert any("read=error" in rec.getMessage() for rec in caplog.records)
+
+
+def test_score_out_of_range_raw_probability_returns_none_without_db_read(shadow_mode, caplog):
+    caplog.set_level(logging.INFO, logger="app.services.trading.net_edge_ranker")
+    ctx = ner.NetEdgeSignalContext(
+        ticker="AAPL",
+        asset_class="stock",
+        scan_pattern_id=None,
+        raw_prob=1.2,
         entry_price=100.0,
         stop_price=97.0,
     )

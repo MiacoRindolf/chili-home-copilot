@@ -102,6 +102,17 @@ def _positive_float(value: Any) -> float | None:
     return out if out is not None and out > 0 else None
 
 
+def _confidence_fraction(value: Any) -> float | None:
+    out = _finite_float(value)
+    if out is None or out < 0.0:
+        return None
+    if out > 1.0:
+        if out > 100.0:
+            return None
+        out = out / 100.0
+    return out if 0.0 <= out <= 1.0 else None
+
+
 def _paper_positive_int(value: Any, *, default: int = 1) -> int:
     out = _finite_float(value)
     if out is None:
@@ -2112,20 +2123,22 @@ def auto_enter_from_signals(
     entered = 0
     blocked = 0
     for sig in signals:
-        conf = _finite_float(sig.get("confidence", 0))
+        conf = _confidence_fraction(sig.get("confidence", 0))
         if conf is None or conf < 0.6:
             continue
+        signal_payload = dict(sig)
+        signal_payload["confidence"] = conf
 
-        ticker = sig.get("ticker", "")
-        entry = _positive_float(sig.get("entry_price"))
+        ticker = signal_payload.get("ticker", "")
+        entry = _positive_float(signal_payload.get("entry_price"))
         if entry is None:
-            entry = _positive_float(sig.get("price"))
-        stop_raw = sig.get("stop_price") or sig.get("stop")
-        target_raw = sig.get("target_price") or sig.get("target")
+            entry = _positive_float(signal_payload.get("price"))
+        stop_raw = signal_payload.get("stop_price") or signal_payload.get("stop")
+        target_raw = signal_payload.get("target_price") or signal_payload.get("target")
         if entry is None:
             continue
 
-        is_option_sig = _is_option_signal(sig)
+        is_option_sig = _is_option_signal(signal_payload)
         asset_type = (
             "options"
             if is_option_sig
@@ -2166,8 +2179,8 @@ def auto_enter_from_signals(
                 )
                 blocked += 1
                 continue
-            explicit_qty = "quantity" in _paper_option_meta_from_signal(sig)
-            qty = _option_signal_quantity(sig)
+            explicit_qty = "quantity" in _paper_option_meta_from_signal(signal_payload)
+            qty = _option_signal_quantity(signal_payload)
             if qty is None and explicit_qty:
                 logger.info(
                     "[paper] Option trade blocked for %s: invalid contract quantity",
@@ -2209,15 +2222,15 @@ def auto_enter_from_signals(
                 _ctx = _net_edge.NetEdgeSignalContext(
                     ticker=ticker,
                     asset_class=asset_type,
-                    scan_pattern_id=sig.get("scan_pattern_id"),
+                    scan_pattern_id=signal_payload.get("scan_pattern_id"),
                     raw_prob=float(conf),
                     entry_price=float(entry),
                     stop_price=float(stop),
                     target_price=float(target) if target else None,
-                    direction=str(sig.get("direction") or "long"),
-                    regime=sig.get("regime"),
-                    timeframe=sig.get("timeframe"),
-                    heuristic_score=sig.get("heuristic_score"),
+                    direction=str(signal_payload.get("direction") or "long"),
+                    regime=signal_payload.get("regime"),
+                    timeframe=signal_payload.get("timeframe"),
+                    heuristic_score=signal_payload.get("heuristic_score"),
                 )
                 _net_edge_score = _net_edge.score(db, _ctx)  # logged + persisted
             except Exception as _exc:  # pragma: no cover - defensive
@@ -2250,9 +2263,9 @@ def auto_enter_from_signals(
                         target_price=float(target) if target else None,
                         asset_class=asset_type,
                         user_id=user_id,
-                        pattern_id=sig.get("scan_pattern_id"),
-                        regime=sig.get("regime"),
-                        confidence=float(conf) if conf is not None else None,
+                        pattern_id=signal_payload.get("scan_pattern_id"),
+                        regime=signal_payload.get("regime"),
+                        confidence=conf,
                     ),
                     legacy=LegacySizing(
                         notional=_legacy_notional,
@@ -2268,11 +2281,11 @@ def auto_enter_from_signals(
             db, user_id,
             ticker=ticker,
             entry_price=entry,
-            scan_pattern_id=sig.get("scan_pattern_id"),
+            scan_pattern_id=signal_payload.get("scan_pattern_id"),
             stop_price=stop,
             target_price=target,
             quantity=qty,
-            signal_json=sig,
+            signal_json=signal_payload,
         )
         if pt:
             entered += 1
