@@ -96,6 +96,7 @@
       return '<div class="opt' + (i === 0 ? ' sel' : '') + '" role="option"' +
         (r.app ? ' data-app="' + esc(r.app) + '"' : '') +
         (r.space ? ' data-space="' + esc(r.space) + '"' : '') +
+        (r.cmd ? ' data-cmd="' + esc(r.cmd) + '"' : '') +
         ' data-url="' + esc(r.url || '') + '"' + (r.blank ? ' data-blank="1"' : '') + '>' +
         '<span class="pi">' + esc(r.icon || '•') + '</span>' +
         '<span>' + esc(r.label) + '</span>' +
@@ -146,18 +147,51 @@
     return out;
   }
 
+  // ⌘K commands — run an action instead of navigating (theme, accent, help).
+  function commandResults(q) {
+    var ql = (q || '').trim().toLowerCase(); if (!ql) return [];
+    var cmds = [
+      { cmd: 'theme', label: 'Toggle light / dark theme', icon: '🌓' },
+      { cmd: 'help', label: 'Show keyboard shortcuts', icon: '⌨️' },
+      { cmd: 'accent:blue', label: 'Accent: Blue', icon: '🔵' },
+      { cmd: 'accent:violet', label: 'Accent: Violet', icon: '🟣' },
+      { cmd: 'accent:green', label: 'Accent: Green', icon: '🟢' },
+      { cmd: 'accent:chili', label: 'Accent: Chili', icon: '🔴' },
+      { cmd: 'accent:amber', label: 'Accent: Amber', icon: '🟡' },
+      { cmd: 'accent:cyan', label: 'Accent: Cyan', icon: '🟦' }
+    ];
+    return cmds.filter(function (c) { return c.label.toLowerCase().indexOf(ql) !== -1; })
+      .map(function (c) { return { type: 'command', cmd: c.cmd, label: c.label, icon: c.icon, sub: 'Command' }; });
+  }
+  function runCommand(id) {
+    if (id === 'theme') {
+      var next = root.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+      root.setAttribute('data-theme', next);
+      try { localStorage.setItem('chili-theme', next); } catch (e) {}
+    } else if (id.indexOf('accent:') === 0) {
+      var name = id.slice(7);
+      applyAccent(name); savedAccent = name;
+      try { localStorage.setItem('chili-accent', name); } catch (e) {}
+      markActive();
+    } else if (id === 'help') {
+      var hb = document.getElementById('ws-help-btn'); if (hb) hb.click();
+    }
+  }
+
   function runSearch(q) {
     var seq = ++reqSeq;
-    // recents only on the empty query; spaces always (filtered by q)
+    // recents only on the empty query; spaces always (filtered by q); commands match by label
     var pre = (q ? [] : recentResults()).concat(spaceResults(q));
     fetch('/api/workspace/search?q=' + encodeURIComponent(q), { credentials: 'same-origin' })
       .then(function (r) { return r.json(); })
-      .then(function (d) { if (seq === reqSeq) render(dedup(pre.concat((d && d.results) || []))); })
-      .catch(function () { if (seq === reqSeq) render(dedup(pre)); });
+      .then(function (d) { if (seq === reqSeq) render(dedup(pre.concat((d && d.results) || []).concat(commandResults(q)))); })
+      .catch(function () { if (seq === reqSeq) render(dedup(pre.concat(commandResults(q)))); });
   }
 
   function openResult(opt) {
     if (!opt) return;
+    var cmd = opt.getAttribute('data-cmd');
+    if (cmd) { closePalette(); runCommand(cmd); return; }  // commands run, not recorded
     recordRecent(optData(opt));  // remember what was opened (for the recents list)
     var space = opt.getAttribute('data-space');
     if (space && window.ChiliOS && window.ChiliOS.spaces) { closePalette(); window.ChiliOS.spaces.open(space); return; }
