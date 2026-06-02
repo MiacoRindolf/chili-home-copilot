@@ -1,0 +1,83 @@
+{% extends "_workspace.html" %}
+{% block ws_title %}Dashboard{% endblock %}
+{% block ws_crumb %}Dashboard{% endblock %}
+{% block ws_topbar_extra %}
+{% if dash.trading.net_pnl_fmt %}<span class="ws-pill {{ 'ws-up' if (dash.trading.net_pnl or 0) >= 0 else 'ws-down' }}">{{ '▲' if (dash.trading.net_pnl or 0) >= 0 else '▼' }} {{ dash.trading.net_pnl_fmt }} today</span>{% endif %}
+{% endblock %}
+
+{% block ws_content %}
+<div class="ws-hello">
+  <div>
+    <h1>{{ greeting }}, {{ user_name }} <span class="accent">— here's your desk.</span></h1>
+    <p>{{ dash.trading.closes|length }} closes today · {{ dash.trading.open_positions|length }} open · {{ dash.research|length }} research topics</p>
+  </div>
+  <div class="ws-hello-actions">
+    <a class="ws-btn" href="/chat"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>New chat</a>
+    <a class="ws-btn primary" href="/trading"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M3 17l5-5 4 4 8-9"/></svg>Open desk</a>
+  </div>
+</div>
+
+<div class="ws-kpis">
+  {% for k in dash.kpis %}
+  <div class="ws-kpi"><div class="label">{{ k.label }}</div><div class="val {{ k.cls }}">{{ k.val }}</div></div>
+  {% endfor %}
+</div>
+
+<div class="ws-grid">
+  <!-- Today's closes -->
+  <div class="ws-card ws-c8">
+    <div class="ws-card-head"><h3><span class="ic"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M3 17l5-5 4 4 8-9"/></svg></span>Today's closes</h3><a href="/api/brain/trading/brief" target="_blank" rel="noopener">Daily brief →</a></div>
+    {% if dash.trading.closes_fmt %}
+    <table class="ws-tbl">
+      <thead><tr><th>Ticker</th><th>Pattern</th><th class="num">P/L</th><th>Exit</th></tr></thead>
+      <tbody>
+      {% for c in dash.trading.closes_fmt %}
+        <tr><td class="tick">{{ c.ticker }}</td><td><span class="ws-tag">{{ c.pattern }}</span></td><td class="num {{ 'ws-up' if c.pnl_up else 'ws-down' }}">{{ c.pnl_fmt or '—' }}</td><td>{{ c.reason }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<div class="ws-empty">No closes in the last 24h.</div>{% endif %}
+  </div>
+
+  <!-- Open positions -->
+  <div class="ws-card ws-c4">
+    <div class="ws-card-head"><h3><span class="ic"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span>Open positions</h3></div>
+    {% if dash.trading.open_positions %}
+      {% for p in dash.trading.open_positions %}
+      <div class="ws-stat"><span class="k tick ws-mono">{{ p.ticker }}</span><span class="ws-tag">{{ p.side }}</span></div>
+      {% endfor %}
+    {% else %}<div class="ws-empty">No open positions.</div>{% endif %}
+  </div>
+
+  <!-- Top patterns -->
+  <div class="ws-card ws-c4">
+    <div class="ws-card-head"><h3><span class="ic"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M13 2L3 14h7v8l10-12h-7z"/></svg></span>Top patterns</h3></div>
+    {% if dash.trading.top_patterns %}
+      {% for p in dash.trading.top_patterns %}
+      <div class="ws-stat"><span class="k">{{ p.id }}</span><span><span class="ws-mono {{ 'ws-up' if p.pnl_up else 'ws-down' }}">{{ p.pnl_fmt }}</span> · <span class="ws-mono">{{ p.payoff }}</span></span></div>
+      {% endfor %}
+    {% else %}<div class="ws-empty">No attributed patterns yet.</div>{% endif %}
+  </div>
+
+  <!-- Research digest -->
+  <div class="ws-card ws-c4">
+    <div class="ws-card-head"><h3><span class="ic"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg></span>Research digest</h3><a href="/api/brain/reasoning/research/report" target="_blank" rel="noopener">Open →</a></div>
+    {% if dash.research %}
+      {% for r in dash.research %}
+      <div class="ws-list-row"><div class="av">📈</div><div class="body"><div class="t">{{ r.topic }}</div><div class="m">{{ r.summary }}{% if r.source %} · {{ r.source }}{% endif %}</div></div></div>
+      {% endfor %}
+    {% else %}<div class="ws-empty">No research stored yet.</div>{% endif %}
+  </div>
+
+  <!-- Quick actions -->
+  <div class="ws-card ws-c4">
+    <div class="ws-card-head"><h3><span class="ic"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M13 2L3 14h7v8l10-12h-7z"/></svg></span>Quick actions</h3></div>
+    <div class="ws-qa">
+      <a href="/chat"><span class="qi" style="background:var(--ws-accent-bg);color:var(--ws-accent)"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>Ask Chili</a>
+      <a href="/trading"><span class="qi" style="background:var(--ws-up-bg);color:var(--ws-up)"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M3 17l5-5 4 4 8-9"/></svg></span>Trading desk</a>
+      <a href="/api/brain/trading/brief" target="_blank" rel="noopener"><span class="qi" style="background:var(--ws-chili-bg);color:var(--ws-chili)"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg></span>Daily brief</a>
+      <a href="/brain"><span class="qi" style="background:rgba(167,139,250,.14);color:var(--ws-violet)"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M12 3a4 4 0 0 0-4 4 3 3 0 0 0-1 5.83A3 3 0 0 0 8 18a3 3 0 0 0 4 1 3 3 0 0 0 4-1 3 3 0 0 0 1-5.17A3 3 0 0 0 16 7a4 4 0 0 0-4-4z"/></svg></span>Brain</a>
+    </div>
+  </div>
+</div>
+{% endblock %}
