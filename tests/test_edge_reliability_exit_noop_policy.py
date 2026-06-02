@@ -142,3 +142,49 @@ def test_repeated_non_positive_exit_noops_allow_positive_refresh():
         )
         is False
     )
+
+
+def test_positive_paper_outcome_rescue_can_retest_structural_exit_noop():
+    payload = {
+        "evidence_fingerprint": "old-fp",
+        "created_count": 0,
+        "skip_reason": "edge_debt_too_negative_for_exit_child:-9.0",
+    }
+    request_payload = {
+        "paper_outcome_rescue_probe": True,
+        "paper_outcome_sample_n": 5,
+        "paper_outcome_avg_return_pct": 0.1579,
+        "paper_outcome_reward_risk": 1.56,
+    }
+
+    assert (
+        _exit_noop_blocks_refresh(
+            payload,
+            evidence_fingerprint="new-fp",
+            request_payload=request_payload,
+        )
+        is False
+    )
+
+
+def test_positive_paper_outcome_rescue_still_blocks_same_evidence():
+    payload = {
+        "evidence_fingerprint": "same-fp",
+        "created_count": 0,
+        "skip_reason": "edge_debt_too_negative_for_exit_child:-9.0",
+    }
+    request_payload = {
+        "paper_outcome_rescue_probe": True,
+        "paper_outcome_sample_n": 5,
+        "paper_outcome_avg_return_pct": 0.1579,
+        "paper_outcome_reward_risk": 1.56,
+    }
+
+    assert (
+        _exit_noop_blocks_refresh(
+            payload,
+            evidence_fingerprint="same-fp",
+            request_payload=request_payload,
+        )
+        is True
+    )

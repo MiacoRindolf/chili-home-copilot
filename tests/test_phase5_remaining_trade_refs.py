@@ -8,7 +8,6 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "analyze_phase5_remaining_trade_refs.py"
 
-
 EXPECTED_RUNTIME_COMPAT_WRITER_PATHS = [
     "app/services/coinbase_service.py",
     "app/services/trading/auto_trader.py",
@@ -23,7 +22,7 @@ EXPECTED_RUNTIME_COMPAT_RELATION_SYMBOL_PATHS = [
 EXPECTED_ORM_CONTRACT_GROUP_COUNTS = {
     "learning_research_reporting": 13,
     "live_action_broker_reconcile": 17,
-    "private_helper_type_only": 7,
+    "private_helper_type_only": 8,
     "public_ui_schema_contract": 14,
     "risk_capital_gate": 18,
 }
@@ -43,7 +42,6 @@ EXPECTED_ORM_CONTRACT_GROUP_REPRESENTATIVES = {
         "app/services/trading/robinhood_exit_execution.py",
     ],
     "private_helper_type_only": [
-        "app/models/trading.py",
         "app/services/trading/__init__.py",
         "app/services/trading/auto_trader_position_overrides.py",
         "app/services/trading/autopilot_scope.py",
@@ -64,7 +62,6 @@ EXPECTED_ORM_CONTRACT_GROUP_REPRESENTATIVES = {
         "app/services/trading/portfolio_risk.py",
     ],
 }
-
 
 def _load_module():
     spec = importlib.util.spec_from_file_location("phase5_trade_refs", SCRIPT_PATH)
@@ -197,9 +194,32 @@ def test_runtime_orm_symbol_contract_groups_are_pinned() -> None:
         grouped_paths.setdefault(group, []).append(entry["path"])
 
     assert report["orm_contract_groups"] == EXPECTED_ORM_CONTRACT_GROUP_COUNTS
-    assert sum(report["orm_contract_groups"].values()) == 69
+    assert sum(report["orm_contract_groups"].values()) == 70
     for group, representative_paths in EXPECTED_ORM_CONTRACT_GROUP_REPRESENTATIVES.items():
         assert set(representative_paths).issubset(set(grouped_paths[group]))
+
+
+def test_legacy_trade_relation_symbols_are_centralized() -> None:
+    model_source = (REPO_ROOT / "app" / "models" / "trading.py").read_text(
+        encoding="utf-8"
+    )
+    relation_source = (
+        REPO_ROOT / "app" / "models" / "trade_relation_symbols.py"
+    ).read_text(encoding="utf-8")
+    helper_source = (
+        REPO_ROOT / "app" / "services" / "trading" / "management_envelopes.py"
+    ).read_text(encoding="utf-8")
+
+    assert model_source.count('"trading_trades"') == 0
+    assert "LEGACY_TRADES_COMPAT_RELATION" in model_source
+    assert relation_source.count('"trading_trades"') == 1
+    assert 'LEGACY_TRADES_COMPAT_RELATION = "trading_trades"' in relation_source
+    assert helper_source.count('"trading_trades"') == 0
+    assert relation_source.count('"trading_management_envelopes"') == 1
+    assert (
+        'MANAGEMENT_ENVELOPES_RELATION = "trading_management_envelopes"'
+        in relation_source
+    )
 
 
 def test_build_inventory_scans_sources_and_skips_workspace_noise(tmp_path: Path) -> None:
@@ -293,24 +313,3 @@ def test_raw_sql_only_filters_symbol_and_doc_references(tmp_path: Path) -> None:
     assert report["entries"][0]["path"] == "app/services/trading/pattern_regime_ledger.py"
     assert report["entries"][0]["reference_kind"] == "raw_sql_reader"
     assert report["entries"][0]["raw_sql_references"] == ["FROM trading_trades"]
-
-
-def test_bucket_filter_keeps_global_verdict_and_narrows_entries(tmp_path: Path) -> None:
-    module = _load_module()
-    app_dir = tmp_path / "app" / "services" / "trading"
-    app_dir.mkdir(parents=True)
-    (app_dir / "reader.py").write_text(
-        "SELECT * FROM trading_trades WHERE id = :id\n", encoding="utf-8"
-    )
-    (app_dir / "symbol.py").write_text("from app.models.trading import Trade\n", encoding="utf-8")
-
-    report = module.build_inventory(tmp_path, include_dirs=("app",))
-    narrowed = module.filter_inventory_by_bucket(report, "orm_trade_symbol_compat")
-
-    assert report["ok"] is False
-    assert narrowed["ok"] is False
-    assert narrowed["file_count"] == 1
-    assert narrowed["buckets"] == {"orm_trade_symbol_compat": 1}
-    assert [entry["path"] for entry in narrowed["entries"]] == [
-        "app/services/trading/symbol.py"
-    ]

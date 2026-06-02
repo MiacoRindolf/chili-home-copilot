@@ -10,7 +10,6 @@ from app.models.trading import (
     AutoTraderRun,
     BrainWorkEvent,
     BreakoutAlert,
-    ExecutionCostEstimate,
     PaperTrade,
     ScanPattern,
     Trade,
@@ -19,7 +18,6 @@ from app.models.trading import (
 from app.services.trading.cash_deployment import (
     _recent_blocked_recert_rescue_work,
     _recent_noop_profitability_work,
-    _rolling_execution_cost_pct,
     cash_deployment_rows,
     cash_deployment_summary,
     enqueue_cash_deployment_work,
@@ -153,6 +151,31 @@ def _closed_live(
     )
 
 
+def test_cash_deployment_numeric_helpers_reject_boolean_telemetry():
+    from app.services.trading.cash_deployment import _safe_float, _safe_int
+
+    assert _safe_float(True) is None
+    assert _safe_float(False, 7.5) == 7.5
+    assert _safe_int(True) == 0
+    assert _safe_int(False, 3) == 3
+    assert _safe_float("2.5") == pytest.approx(2.5)
+    assert _safe_int("4") == 4
+
+
+def test_cash_deployment_cost_does_not_credit_negative_execution_rates(monkeypatch):
+    from app.services.trading.cash_deployment import _cost_pct
+
+    monkeypatch.setattr(settings, "chili_cash_deployment_equity_cost_pct", 0.05)
+    monkeypatch.setattr(settings, "chili_cash_deployment_slippage_miss_penalty_pct", 0.5)
+    monkeypatch.setattr(settings, "chili_cash_deployment_broker_reject_penalty_pct", 1.0)
+
+    credited_row = {"slippage_miss_rate": -0.8, "broker_reject_rate": -0.4}
+    assert _cost_pct("stock", credited_row) == pytest.approx(0.05)
+
+    punitive_row = {"slippage_miss_rate": 2.0, "broker_reject_rate": 3.0}
+    assert _cost_pct("stock", punitive_row) == pytest.approx(4.05)
+
+
 def test_cash_deployment_categorizes_positive_blocks_without_live_shortcuts(db, monkeypatch):
     monkeypatch.setattr(settings, "chili_autotrader_live_enabled", True)
     monkeypatch.setattr(settings, "chili_cash_deployment_equity_cost_pct", 0.05)
@@ -181,6 +204,7 @@ def test_cash_deployment_categorizes_positive_blocks_without_live_shortcuts(db, 
 
     reject = _pattern(db, name="cash broker reject")
     reject_alert = _alert(db, reject, ticker="RJCT")
+    _run(db, reject, reject_alert, expected=1.5, reason="broker:quantity_precision")
     _run(db, reject, reject_alert, expected=1.5, reason="broker:quantity_precision")
     _closed_paper(db, reject, reject_alert)
 
@@ -350,6 +374,7 @@ def test_cash_deployment_blocks_positive_slippage_miss_as_execution_debt(db, mon
     pat = _pattern(db, name="cash slippage blocked")
     alert = _alert(db, pat, ticker="SLIP")
     _run(db, pat, alert, expected=2.0, reason="missed_entry_slippage")
+    _run(db, pat, alert, expected=2.0, reason="missed_entry_slippage")
     _closed_paper(db, pat, alert)
     db.commit()
 
@@ -359,141 +384,31 @@ def test_cash_deployment_blocks_positive_slippage_miss_as_execution_debt(db, mon
     assert row["cash_deployment_category"] == "positive_ev_execution_blocked"
     assert row["graduation_blocker"] == "execution_blocked"
     assert row["execution_blocker"] == "missed_entry_slippage"
-    assert row["slippage_miss_count"] == 1
+    assert row["slippage_miss_count"] == 2
     assert row["live_deployable"] is False
     assert row["max_safe_notional"] == 0.0
 
 
-def test_cash_deployment_uses_rolling_execution_cost_estimate(db, monkeypatch):
+def test_cash_deployment_does_not_block_incidental_execution_noise(db, monkeypatch):
     monkeypatch.setattr(settings, "chili_autotrader_live_enabled", True)
     monkeypatch.setattr(settings, "chili_cash_deployment_equity_cost_pct", 0.05)
     monkeypatch.setattr(settings, "chili_cash_deployment_min_closed_evidence", 5)
     monkeypatch.setattr(settings, "chili_cash_deployment_max_brier_score", 0.28)
-    monkeypatch.setattr(settings, "brain_execution_cost_default_fee_bps", 1.0)
-    monkeypatch.setattr(settings, "brain_execution_cost_impact_cap_bps", 0.0)
-    monkeypatch.setattr(settings, "chili_autotrader_per_trade_notional_usd", 1_000.0)
 
-    pat = _pattern(db, name="cash execution cost aware")
-    alert = _alert(db, pat, ticker="XCOST")
+    pat = _pattern(db, name="cash incidental execution noise")
+    alert = _alert(db, pat, ticker="NOISE")
+    _run(db, pat, alert, expected=2.0, reason="broker:one_transient_reject")
     _run(db, pat, alert, expected=2.0)
     _closed_paper(db, pat, alert)
-    db.add(
-        ExecutionCostEstimate(
-            ticker="XCOST",
-            side="long",
-            window_days=30,
-            median_spread_bps=25.0,
-            p90_spread_bps=150.0,
-            median_slippage_bps=10.0,
-            p90_slippage_bps=50.0,
-            avg_daily_volume_usd=1_000_000.0,
-            sample_trades=12,
-            last_updated_at=datetime.utcnow(),
-        )
-    )
     db.commit()
 
-    rows = cash_deployment_rows(db, window_days=30, limit=10)
+    rows = cash_deployment_rows(db, window_days=7, limit=10)
     row = next(x for x in rows if x["scan_pattern_id"] == pat.id)
 
-    assert row["execution_cost_source"] == "rolling_execution_cost_estimate"
-    assert row["estimated_execution_cost_pct"] == pytest.approx(2.01)
-    assert row["calibrated_ev_after_cost_pct"] == pytest.approx(0.49)
+    assert row["broker_reject_count"] == 1
+    assert row["execution_blocker"] is None
     assert row["cash_deployment_category"] == "live_deployable"
-
-
-def test_rolling_execution_cost_uses_30_day_model_without_db_fixture(monkeypatch):
-    monkeypatch.setattr(settings, "brain_execution_cost_default_fee_bps", 1.0)
-    monkeypatch.setattr(settings, "brain_execution_cost_impact_cap_bps", 0.0)
-    monkeypatch.setattr(settings, "chili_autotrader_per_trade_notional_usd", 1_000.0)
-    monkeypatch.setattr(settings, "chili_cash_deployment_execution_cost_min_samples", 5)
-    monkeypatch.setattr(settings, "chili_cash_deployment_execution_cost_low_sample_penalty_pct", 0.25)
-    monkeypatch.setattr(settings, "chili_cash_deployment_execution_cost_max_age_hours", 72.0)
-
-    class _Query:
-        def filter(self, *args, **kwargs):
-            return self
-
-        def order_by(self, *args, **kwargs):
-            return self
-
-        def first(self):
-            return SimpleNamespace(
-                id=42,
-                ticker="XCOST",
-                side="long",
-                window_days=30,
-                median_spread_bps=25.0,
-                p90_spread_bps=150.0,
-                median_slippage_bps=10.0,
-                p90_slippage_bps=50.0,
-                avg_daily_volume_usd=1_000_000.0,
-                sample_trades=12,
-                last_updated_at=datetime.now(),
-            )
-
-    db = SimpleNamespace(query=lambda model: _Query())
-
-    cost, meta = _rolling_execution_cost_pct(
-        db,
-        symbol="XCOST",
-        asset_class="stock",
-        window_days=7,
-    )
-
-    assert cost == pytest.approx(2.01)
-    assert meta["execution_cost_source"] == "rolling_execution_cost_estimate"
-    assert meta["execution_cost_estimate_window_days"] == 30
-    assert meta["execution_cost_requested_window_days"] == 7
-    assert meta["execution_cost_raw_estimate_pct"] == pytest.approx(2.01)
-    assert meta["execution_cost_reliability_penalty_pct"] == pytest.approx(0.0)
-
-
-def test_rolling_execution_cost_penalizes_thin_stale_estimates(monkeypatch):
-    monkeypatch.setattr(settings, "brain_execution_cost_default_fee_bps", 1.0)
-    monkeypatch.setattr(settings, "brain_execution_cost_impact_cap_bps", 0.0)
-    monkeypatch.setattr(settings, "chili_autotrader_per_trade_notional_usd", 1_000.0)
-    monkeypatch.setattr(settings, "chili_cash_deployment_execution_cost_min_samples", 5)
-    monkeypatch.setattr(settings, "chili_cash_deployment_execution_cost_low_sample_penalty_pct", 0.25)
-    monkeypatch.setattr(settings, "chili_cash_deployment_execution_cost_max_age_hours", 72.0)
-    monkeypatch.setattr(settings, "chili_cash_deployment_execution_cost_stale_penalty_pct", 0.25)
-
-    class _Query:
-        def filter(self, *args, **kwargs):
-            return self
-
-        def order_by(self, *args, **kwargs):
-            return self
-
-        def first(self):
-            return SimpleNamespace(
-                id=43,
-                ticker="XCOST",
-                side="long",
-                window_days=30,
-                median_spread_bps=25.0,
-                p90_spread_bps=150.0,
-                median_slippage_bps=10.0,
-                p90_slippage_bps=50.0,
-                avg_daily_volume_usd=1_000_000.0,
-                sample_trades=1,
-                last_updated_at=datetime.now() - timedelta(hours=96),
-            )
-
-    db = SimpleNamespace(query=lambda model: _Query())
-
-    cost, meta = _rolling_execution_cost_pct(
-        db,
-        symbol="XCOST",
-        asset_class="stock",
-        window_days=7,
-    )
-
-    assert meta["execution_cost_raw_estimate_pct"] == pytest.approx(2.01)
-    assert meta["execution_cost_low_sample_penalty_pct"] == pytest.approx(0.2)
-    assert meta["execution_cost_stale_penalty_pct"] == pytest.approx(0.25)
-    assert meta["execution_cost_reliability_penalty_pct"] == pytest.approx(0.45)
-    assert cost == pytest.approx(2.46)
+    assert row["live_deployable"] is True
 
 
 def test_cash_deployment_exposure_cap_blocks_sizing(db, monkeypatch):
@@ -559,6 +474,39 @@ def test_cash_deployment_option_heat_uses_premium_risk_not_underlying_stop(
     )
 
     assert _trade_heat_pct(trade, capital=10_000.0) == pytest.approx(1.25)
+
+
+def test_cash_deployment_stock_heat_is_directional():
+    from app.services.trading.cash_deployment import _trade_heat_pct
+
+    long_bad_stop = SimpleNamespace(
+        ticker="LONG",
+        direction="long",
+        entry_price=100.0,
+        quantity=10.0,
+        stop_loss=105.0,
+        asset_kind="stock",
+    )
+    short_bad_stop = SimpleNamespace(
+        ticker="SHRT",
+        direction="short",
+        entry_price=100.0,
+        quantity=10.0,
+        stop_loss=95.0,
+        asset_kind="stock",
+    )
+    short_valid_stop = SimpleNamespace(
+        ticker="SHRT",
+        direction="short",
+        entry_price=100.0,
+        quantity=10.0,
+        stop_loss=105.0,
+        asset_kind="stock",
+    )
+
+    assert _trade_heat_pct(long_bad_stop, capital=10_000.0) == 0.0
+    assert _trade_heat_pct(short_bad_stop, capital=10_000.0) == 0.0
+    assert _trade_heat_pct(short_valid_stop, capital=10_000.0) == pytest.approx(0.5)
 
 
 def test_cash_deployment_zero_ranks_stale_broker_local_open(db, monkeypatch):
@@ -918,7 +866,6 @@ def test_cash_deployment_skips_recent_blocked_recert_rescue(db, monkeypatch):
         db.query(BrainWorkEvent)
         .filter(BrainWorkEvent.event_kind == "work")
         .filter(BrainWorkEvent.event_type == "recert_rescue_refresh")
-        .filter(BrainWorkEvent.payload["scan_pattern_id"].astext == str(recert.id))
         .count()
         == 0
     )

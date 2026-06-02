@@ -30,6 +30,7 @@ from .edge_reliability import (
     edge_supply_snapshot_rows,
     emit_edge_reliability_refresh_requested,
     emit_targeted_profitability_work,
+    execution_friction_snapshot,
     latest_edge_reliability_snapshot_slices,
     null_lineage_short_paper_candidates,
 )
@@ -52,18 +53,20 @@ NO_TARGETED_WORK = "no_targeted_work"
 
 def _safe_float(value: Any, default: float | None = None) -> float | None:
     try:
-        if value is None:
+        if value is None or isinstance(value, bool):
             return default
         out = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
     return out if math.isfinite(out) else default
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
     try:
+        if isinstance(value, bool):
+            return default
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
@@ -128,178 +131,18 @@ def _symbol_for_row(row: dict[str, Any]) -> str | None:
     return None
 
 
-def _base_cost_pct(asset_class: str) -> float:
+def _cost_pct(asset_class: str, row: dict[str, Any]) -> float:
     if asset_class == "crypto":
-        return _safe_float(getattr(settings, "chili_cash_deployment_crypto_cost_pct", 0.25), 0.25) or 0.0
-    if asset_class == "options":
-        return _safe_float(getattr(settings, "chili_cash_deployment_options_cost_pct", 1.0), 1.0) or 0.0
-    if asset_class == "stock":
-        return _safe_float(getattr(settings, "chili_cash_deployment_equity_cost_pct", 0.05), 0.05) or 0.0
-    return _safe_float(getattr(settings, "chili_cash_deployment_unknown_asset_cost_pct", 0.35), 0.35) or 0.0
-
-
-def _cost_model_notional_usd(asset_class: str) -> float:
-    explicit = _safe_float(
-        getattr(settings, "chili_autotrader_per_trade_notional_usd", 0.0),
-        0.0,
-    ) or 0.0
-    capital = _safe_float(
-        getattr(settings, "chili_autotrader_assumed_capital_usd", 25_000.0),
-        25_000.0,
-    ) or 0.0
-    try:
-        risk_pct = float(get_risk_limits().max_risk_per_trade_pct)
-    except Exception:
-        risk_pct = 0.0
-    notional = explicit if explicit > 0.0 else capital * max(0.0, risk_pct) / 100.0
-    if asset_class == "crypto":
-        cap = _safe_float(getattr(settings, "chili_coinbase_max_notional_usd", 0.0), 0.0) or 0.0
-        if cap > 0.0 and notional > 0.0:
-            notional = min(notional, cap)
+        base = _safe_float(getattr(settings, "chili_cash_deployment_crypto_cost_pct", 0.25), 0.25) or 0.0
     elif asset_class == "options":
-        cap = _safe_float(
-            getattr(settings, "chili_autotrader_options_max_contract_notional_usd", 0.0),
-            0.0,
-        ) or 0.0
-        if cap > 0.0 and notional > 0.0:
-            notional = min(notional, cap)
-    return max(1.0, notional)
-
-
-def _age_hours(value: Any) -> float | None:
-    if not isinstance(value, datetime):
-        return None
-    dt = value
-    if dt.tzinfo is not None:
-        now = datetime.now(dt.tzinfo)
+        base = _safe_float(getattr(settings, "chili_cash_deployment_options_cost_pct", 1.0), 1.0) or 0.0
+    elif asset_class == "stock":
+        base = _safe_float(getattr(settings, "chili_cash_deployment_equity_cost_pct", 0.05), 0.05) or 0.0
     else:
-        now = datetime.now()
-    age = (now - dt).total_seconds() / 3600.0
-    return max(0.0, age)
+        base = _safe_float(getattr(settings, "chili_cash_deployment_unknown_asset_cost_pct", 0.35), 0.35) or 0.0
 
-
-def _execution_cost_reliability_penalty(row: Any) -> tuple[float, dict[str, Any]]:
-    sample_trades = max(0, _safe_int(getattr(row, "sample_trades", 0), 0))
-    min_samples = max(
-        1,
-        _safe_int(
-            getattr(settings, "chili_cash_deployment_execution_cost_min_samples", 5),
-            5,
-        ),
-    )
-    low_sample_penalty_max = _safe_float(
-        getattr(settings, "chili_cash_deployment_execution_cost_low_sample_penalty_pct", 0.25),
-        0.25,
-    ) or 0.0
-    low_sample_penalty = 0.0
-    if sample_trades < min_samples:
-        low_sample_penalty = low_sample_penalty_max * ((min_samples - sample_trades) / min_samples)
-
-    max_age_hours = _safe_float(
-        getattr(settings, "chili_cash_deployment_execution_cost_max_age_hours", 72.0),
-        72.0,
-    ) or 0.0
-    stale_penalty = 0.0
-    age_hours = _age_hours(getattr(row, "last_updated_at", None))
-    if max_age_hours > 0.0 and age_hours is not None and age_hours > max_age_hours:
-        stale_penalty = _safe_float(
-            getattr(settings, "chili_cash_deployment_execution_cost_stale_penalty_pct", 0.25),
-            0.25,
-        ) or 0.0
-
-    penalty = max(0.0, low_sample_penalty + stale_penalty)
-    return penalty, {
-        "execution_cost_reliability_penalty_pct": _round(penalty, 6),
-        "execution_cost_low_sample_penalty_pct": _round(low_sample_penalty, 6),
-        "execution_cost_stale_penalty_pct": _round(stale_penalty, 6),
-        "execution_cost_estimate_min_samples": min_samples,
-        "execution_cost_estimate_age_hours": _round(age_hours, 6),
-        "execution_cost_estimate_max_age_hours": _round(max_age_hours, 6),
-    }
-
-
-def _rolling_execution_cost_pct(
-    db: Session,
-    *,
-    symbol: str | None,
-    asset_class: str,
-    window_days: int,
-) -> tuple[float | None, dict[str, Any]]:
-    if not symbol:
-        return None, {}
-    try:
-        from ...models.trading import ExecutionCostEstimate
-        from .execution_cost_model import estimate_cost_fraction
-
-        estimate_window_days = 30
-        row = (
-            db.query(ExecutionCostEstimate)
-            .filter(ExecutionCostEstimate.ticker == str(symbol).strip().upper())
-            .filter(ExecutionCostEstimate.side.in_(("long", "buy")))
-            .filter(ExecutionCostEstimate.window_days == estimate_window_days)
-            .order_by(ExecutionCostEstimate.last_updated_at.desc())
-            .first()
-        )
-        if row is None:
-            return None, {}
-        notional = _cost_model_notional_usd(asset_class)
-        fee_bps = _safe_float(
-            getattr(settings, "brain_execution_cost_default_fee_bps", 1.0),
-            1.0,
-        ) or 0.0
-        impact_cap_bps = _safe_float(
-            getattr(settings, "brain_execution_cost_impact_cap_bps", 50.0),
-            50.0,
-        ) or 0.0
-        breakdown = estimate_cost_fraction(
-            symbol,
-            row.side,
-            notional,
-            row,
-            fee_bps=fee_bps,
-            impact_cap_bps=impact_cap_bps,
-            use_p90=True,
-        )
-        raw_cost_pct = max(0.0, float(breakdown.total) * 100.0)
-        reliability_penalty, reliability_meta = _execution_cost_reliability_penalty(row)
-        cost_pct = max(0.0, raw_cost_pct + reliability_penalty)
-        return cost_pct, {
-            "execution_cost_source": "rolling_execution_cost_estimate",
-            "execution_cost_estimate_id": int(row.id),
-            "execution_cost_estimate_window_days": int(row.window_days),
-            "execution_cost_estimate_side": row.side,
-            "execution_cost_estimate_sample_trades": int(row.sample_trades),
-            "execution_cost_model_notional_usd": round(notional, 6),
-            "execution_cost_requested_window_days": max(1, int(window_days)),
-            "execution_cost_raw_estimate_pct": _round(raw_cost_pct, 6),
-            **reliability_meta,
-        }
-    except Exception:
-        return None, {}
-
-
-def _cost_details(
-    db: Session,
-    *,
-    asset_class: str,
-    row: dict[str, Any],
-    symbol: str | None,
-    window_days: int,
-) -> tuple[float, dict[str, Any]]:
-    base = _base_cost_pct(asset_class)
-    rolling, meta = _rolling_execution_cost_pct(
-        db,
-        symbol=symbol,
-        asset_class=asset_class,
-        window_days=window_days,
-    )
-    if rolling is not None and rolling > base:
-        base = rolling
-    else:
-        meta = {"execution_cost_source": "static_asset_cost"}
-
-    slip_rate = _safe_float(row.get("slippage_miss_rate"), 0.0) or 0.0
-    reject_rate = _safe_float(row.get("broker_reject_rate"), 0.0) or 0.0
+    slip_rate = max(0.0, _safe_float(row.get("slippage_miss_rate"), 0.0) or 0.0)
+    reject_rate = max(0.0, _safe_float(row.get("broker_reject_rate"), 0.0) or 0.0)
     slip_penalty = _safe_float(
         getattr(settings, "chili_cash_deployment_slippage_miss_penalty_pct", 0.5),
         0.5,
@@ -308,9 +151,7 @@ def _cost_details(
         getattr(settings, "chili_cash_deployment_broker_reject_penalty_pct", 1.0),
         1.0,
     ) or 0.0
-    total = max(0.0, base + (slip_rate * slip_penalty) + (reject_rate * reject_penalty))
-    meta["execution_cost_base_pct"] = _round(base, 6)
-    return total, meta
+    return max(0.0, base + (slip_rate * slip_penalty) + (reject_rate * reject_penalty))
 
 
 def _venue_readiness(asset_class: str) -> tuple[str, float, str | None]:
@@ -360,7 +201,8 @@ def _trade_asset_class(trade: Any) -> str:
 def _trade_heat_pct(trade: Any, *, capital: float) -> float:
     if capital <= 0.0:
         return 0.0
-    if _trade_asset_class(trade) == "options":
+    asset_class = _trade_asset_class(trade)
+    if asset_class == "options":
         risk = _option_premium_risk_dollars(trade)
         if risk is not None:
             return max(0.0, risk / capital * 100.0)
@@ -369,8 +211,13 @@ def _trade_heat_pct(trade: Any, *, capital: float) -> float:
     stop = _safe_float(getattr(trade, "stop_loss", None))
     if entry <= 0.0 or qty <= 0.0 or stop is None:
         return 0.0
-    multiplier = 100.0 if _trade_asset_class(trade) == "options" else 1.0
-    risk = abs(entry - stop) * qty * multiplier
+    side = str(getattr(trade, "direction", "long") or "long").strip().lower()
+    if side == "short":
+        risk_per_unit = max(stop - entry, 0.0)
+    else:
+        risk_per_unit = max(entry - stop, 0.0)
+    multiplier = 100.0 if asset_class == "options" else 1.0
+    risk = risk_per_unit * qty * multiplier
     return max(0.0, risk / capital * 100.0)
 
 
@@ -556,7 +403,7 @@ def _cash_category(
         return "negative_ev"
     if blocker in RECERT_BLOCKERS or bool(row.get("recert_required")):
         return "positive_ev_recert" if positive_supply else "negative_ev"
-    if blocker in EXECUTION_BLOCKERS or _safe_int(row.get("broker_reject_count")) > 0:
+    if execution_blocker:
         return "positive_ev_execution_blocked" if positive_supply else "negative_ev"
     if blocker in SHADOW_BLOCKERS or lifecycle not in LIVE_LIFECYCLES:
         return "positive_ev_shadow" if positive_supply else "negative_ev"
@@ -615,11 +462,20 @@ def _execution_blocker_for_row(
 ) -> str | None:
     if venue_blocker:
         return venue_blocker
-    if _safe_int(row.get("broker_reject_count")) > 0:
+    friction = row.get("execution_friction")
+    if not isinstance(friction, dict):
+        friction = execution_friction_snapshot(
+            broker_rejects=_safe_int(row.get("broker_reject_count")),
+            slippage_misses=_safe_int(row.get("slippage_miss_count")),
+            edge_eval_count=_safe_int(row.get("edge_eval_count")),
+        )
+    if bool(friction.get("broker_reject_blocked")):
         return "broker_rejects"
-    if _safe_int(row.get("slippage_miss_count")) > 0:
+    if bool(friction.get("slippage_miss_blocked")):
         return "missed_entry_slippage"
-    if str(row.get("graduation_blocker") or "").strip().lower() in EXECUTION_BLOCKERS:
+    if bool(friction.get("execution_blocked")) and (
+        str(row.get("graduation_blocker") or "").strip().lower() in EXECUTION_BLOCKERS
+    ):
         return "execution_blocked"
     return None
 
@@ -672,22 +528,15 @@ def annotate_cash_deployment_row(
     out = dict(row)
     asset_class = _asset_class_for_row(out)
     symbol = _symbol_for_row(out)
-    window_days = max(1, int(out.get("window_days") or DEFAULT_WINDOW_DAYS))
     live_perf = _live_asset_performance(
         db,
         scan_pattern_id=_safe_int(out.get("scan_pattern_id")) if out.get("scan_pattern_id") is not None else None,
         asset_class=asset_class,
         user_id=user_id,
-        window_days=window_days,
+        window_days=max(1, int(out.get("window_days") or DEFAULT_WINDOW_DAYS)),
     )
     out.update(live_perf)
-    cost, cost_meta = _cost_details(
-        db,
-        asset_class=asset_class,
-        row=out,
-        symbol=symbol,
-        window_days=window_days,
-    )
+    cost = _cost_pct(asset_class, out)
     calibrated = _safe_float(out.get("calibrated_ev_pct"))
     after_cost = calibrated - cost if calibrated is not None else None
     venue, venue_score, venue_blocker = _venue_readiness(asset_class)
@@ -748,7 +597,6 @@ def annotate_cash_deployment_row(
             "primary_symbol": symbol,
             "calibrated_ev_after_cost_pct": _round(after_cost, 6),
             "estimated_execution_cost_pct": _round(cost, 6),
-            **cost_meta,
             "allocation_score": _allocation_score(
                 out,
                 calibrated_ev_after_cost=after_cost,

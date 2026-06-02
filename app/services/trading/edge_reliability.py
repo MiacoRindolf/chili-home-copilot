@@ -15,7 +15,7 @@ from collections import Counter
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import false, or_
+from sqlalchemy import false, or_, text
 from sqlalchemy.orm import Session
 
 from ...models.trading import (
@@ -49,6 +49,7 @@ from .return_math import (
 EDGE_RELIABILITY_REFRESH = "edge_reliability_refresh"
 RECERT_RESCUE_REFRESH = "recert_rescue_refresh"
 EXIT_VARIANT_REFRESH = "exit_variant_refresh"
+BACKTEST_REQUESTED = "backtest_requested"
 PROVENANCE_BACKFILL = "provenance_backfill"
 NO_TARGETED_WORK = "no_targeted_work"
 EDGE_RELIABILITY_SNAPSHOT = "edge_reliability_snapshot"
@@ -60,6 +61,9 @@ DEFAULT_WINDOW_DAYS = 30
 DEFAULT_MIN_CLOSED_EVIDENCE = 5
 DEFAULT_TOP_LIMIT = 25
 DEFAULT_RECENT_DONE_DEDUPE_MINUTES = 120
+DEFAULT_EXECUTION_BLOCK_MIN_EVENTS = 2
+DEFAULT_MAX_BROKER_REJECT_RATE = 0.05
+DEFAULT_MAX_SLIPPAGE_MISS_RATE = 0.02
 
 def _top_profitability_buckets(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
     n = max(1, int(limit))
@@ -330,6 +334,143 @@ def _outcome_label(pnl: Any) -> int | None:
     return 1 if val > 0.0 else 0
 
 
+def _mapping_get(row: Any, key: str, default: Any = None) -> Any:
+    if isinstance(row, dict):
+        return row.get(key, default)
+    try:
+        return row[key]
+    except Exception:
+        return getattr(row, key, default)
+
+
+def _directional_outcome_return_pct(row: Any) -> float | None:
+    favorable = _safe_float(_mapping_get(row, "window_max_favorable_pct"))
+    adverse = _safe_float(_mapping_get(row, "window_max_adverse_pct"))
+    correct = bool(_mapping_get(row, "directional_correct"))
+    if correct and favorable is not None:
+        return favorable
+    if adverse is not None:
+        return adverse
+    return None
+
+
+def _directional_outcome_label(row: Any) -> int:
+    return 1 if bool(_mapping_get(row, "directional_correct")) else 0
+
+
+def _directional_outcome_rows(
+    db: Session,
+    *,
+    scan_pattern_id: int,
+    cutoff: datetime,
+    asset_slice: str | None,
+) -> list[Any]:
+    try:
+        rows = db.execute(
+            text(
+                """
+                SELECT p.alert_id,
+                       p.scan_pattern_id,
+                       p.ticker,
+                       p.alert_at,
+                       p.evaluated_at,
+                       p.directional_correct,
+                       p.window_max_favorable_pct,
+                       p.window_max_adverse_pct,
+                       p.directional_threshold_pct,
+                       a.sent_via
+                FROM pattern_alert_directional_outcome p
+                LEFT JOIN trading_alerts a ON a.id = p.alert_id
+                WHERE p.scan_pattern_id = :scan_pattern_id
+                  AND p.alert_at >= :cutoff
+                ORDER BY p.alert_at ASC, p.alert_id ASC
+                """
+            ),
+            {"scan_pattern_id": int(scan_pattern_id), "cutoff": cutoff},
+        ).mappings().all()
+    except Exception:
+        return []
+    if not asset_slice:
+        return list(rows)
+    return [
+        row for row in rows
+        if _asset_from_symbol(_mapping_get(row, "ticker")) == asset_slice
+    ]
+
+
+def _execution_block_settings() -> dict[str, Any]:
+    try:
+        from ...config import settings
+
+        min_events = int(
+            getattr(
+                settings,
+                "chili_edge_reliability_execution_block_min_events",
+                DEFAULT_EXECUTION_BLOCK_MIN_EVENTS,
+            )
+            or DEFAULT_EXECUTION_BLOCK_MIN_EVENTS
+        )
+        max_reject_rate = float(
+            getattr(
+                settings,
+                "chili_edge_reliability_max_broker_reject_rate",
+                DEFAULT_MAX_BROKER_REJECT_RATE,
+            )
+        )
+        max_slippage_rate = float(
+            getattr(
+                settings,
+                "chili_edge_reliability_max_slippage_miss_rate",
+                DEFAULT_MAX_SLIPPAGE_MISS_RATE,
+            )
+        )
+    except Exception:
+        min_events = DEFAULT_EXECUTION_BLOCK_MIN_EVENTS
+        max_reject_rate = DEFAULT_MAX_BROKER_REJECT_RATE
+        max_slippage_rate = DEFAULT_MAX_SLIPPAGE_MISS_RATE
+    return {
+        "min_events": max(1, min_events),
+        "max_broker_reject_rate": max(0.0, min(1.0, max_reject_rate)),
+        "max_slippage_miss_rate": max(0.0, min(1.0, max_slippage_rate)),
+    }
+
+
+def execution_friction_snapshot(
+    *,
+    broker_rejects: int,
+    slippage_misses: int,
+    edge_eval_count: int,
+) -> dict[str, Any]:
+    eval_count = max(0, int(edge_eval_count or 0))
+    reject_count = max(0, int(broker_rejects or 0))
+    slippage_count = max(0, int(slippage_misses or 0))
+    reject_rate = reject_count / eval_count if eval_count else 0.0
+    slippage_rate = slippage_count / eval_count if eval_count else 0.0
+    cfg = _execution_block_settings()
+    min_events = int(cfg["min_events"])
+    reject_blocked = (
+        eval_count > 0
+        and reject_count >= min_events
+        and reject_rate >= float(cfg["max_broker_reject_rate"])
+    )
+    slippage_blocked = (
+        eval_count > 0
+        and slippage_count >= min_events
+        and slippage_rate >= float(cfg["max_slippage_miss_rate"])
+    )
+    return {
+        "execution_blocked": bool(reject_blocked or slippage_blocked),
+        "broker_reject_blocked": bool(reject_blocked),
+        "slippage_miss_blocked": bool(slippage_blocked),
+        "broker_reject_count": reject_count,
+        "slippage_miss_count": slippage_count,
+        "edge_eval_count": eval_count,
+        "broker_reject_rate": _round(reject_rate, 6),
+        "slippage_miss_rate": _round(slippage_rate, 6),
+        **cfg,
+    }
+
+
 def _calibrated_ev(
     expected_ev_pct: float | None,
     realized_ev_pct: float | None,
@@ -356,6 +497,7 @@ def _graduation_blocker(
     slippage_misses: int,
     edge_eval_count: int,
     min_closed: int = DEFAULT_MIN_CLOSED_EVIDENCE,
+    execution_blocked: bool | None = None,
 ) -> str:
     lifecycle = str(getattr(pattern, "lifecycle_stage", "") or "").strip().lower()
     recert_required = bool(getattr(pattern, "recert_required", False))
@@ -364,7 +506,15 @@ def _graduation_blocker(
         if reasons & HARD_RECERT_REASONS:
             return "hard_recert_blocked"
         return "recert_blocked"
-    if edge_eval_count > 0 and (broker_rejects > 0 or slippage_misses > 0):
+    if execution_blocked is None:
+        execution_blocked = bool(
+            execution_friction_snapshot(
+                broker_rejects=broker_rejects,
+                slippage_misses=slippage_misses,
+                edge_eval_count=edge_eval_count,
+            ).get("execution_blocked")
+        )
+    if execution_blocked:
         return "execution_blocked"
     if expected_ev_pct is not None and expected_ev_pct <= 0.0:
         return "quality_blocked"
@@ -411,7 +561,7 @@ def _recommended_work_event(
     if blocker == "quality_blocked":
         return EXIT_VARIANT_REFRESH if _positive_exit_variant_evidence(evidence) else NO_TARGETED_WORK
     if blocker == "lifecycle_challenged":
-        return EXIT_VARIANT_REFRESH
+        return BACKTEST_REQUESTED if _positive_exit_variant_evidence(evidence) else NO_TARGETED_WORK
     return EDGE_RELIABILITY_REFRESH
 
 
@@ -425,6 +575,9 @@ def _row_fingerprint(row: dict[str, Any]) -> str:
         "closed_evidence_count": row.get("closed_evidence_count"),
         "expected_ev_pct": row.get("expected_ev_pct"),
         "realized_ev_pct": row.get("realized_ev_pct"),
+        "broker_reject_count": row.get("broker_reject_count"),
+        "slippage_miss_count": row.get("slippage_miss_count"),
+        "execution_friction": row.get("execution_friction"),
         "latest_observed_at": row.get("latest_observed_at"),
         "blocker": row.get("graduation_blocker"),
     }
@@ -575,12 +728,22 @@ def compute_pattern_edge_reliability(
         for row in live_rows_all
         if not asset_slice or _asset_class_for_trade(row, pattern) == asset_slice
     ]
+    directional_rows = _directional_outcome_rows(
+        db,
+        scan_pattern_id=pid,
+        cutoff=cutoff,
+        asset_slice=asset_slice,
+    )
 
     paper_returns = [_paper_return_pct(row) for row in paper_rows]
     paper_returns_f = [v for v in paper_returns if v is not None]
     live_returns = [_live_return_pct(row) for row in live_rows]
     live_returns_f = [v for v in live_returns if v is not None]
-    all_returns = paper_returns_f + live_returns_f
+    directional_returns = [
+        _directional_outcome_return_pct(row) for row in directional_rows
+    ]
+    directional_returns_f = [v for v in directional_returns if v is not None]
+    all_returns = paper_returns_f + live_returns_f + directional_returns_f
 
     labels: list[int] = []
     brier_terms: list[float] = []
@@ -594,6 +757,11 @@ def compute_pattern_edge_reliability(
         pred = prob_by_alert.get(int(alert_id)) if alert_id is not None else fallback_p
         if pred is not None:
             brier_terms.append((float(pred) - float(label)) ** 2)
+    for row in directional_rows:
+        label = _directional_outcome_label(row)
+        labels.append(label)
+        if fallback_p is not None:
+            brier_terms.append((float(fallback_p) - float(label)) ** 2)
     for row in live_rows:
         label = _outcome_label(getattr(row, "pnl", None))
         if label is None:
@@ -618,6 +786,11 @@ def compute_pattern_edge_reliability(
     broker_rejects = int(reason_counts.get("broker_execution_reject", 0))
     slippage_misses = int(reason_counts.get("missed_entry_slippage", 0))
     edge_eval_count = len(runs)
+    execution_friction = execution_friction_snapshot(
+        broker_rejects=broker_rejects,
+        slippage_misses=slippage_misses,
+        edge_eval_count=edge_eval_count,
+    )
     winners = [v for v in all_returns if v > 0.0]
     losers = [abs(v) for v in all_returns if v <= 0.0]
     avg_win = _mean(winners)
@@ -637,6 +810,7 @@ def compute_pattern_edge_reliability(
         slippage_misses=slippage_misses,
         edge_eval_count=edge_eval_count,
         min_closed=min_closed_evidence,
+        execution_blocked=bool(execution_friction.get("execution_blocked")),
     )
     row = {
         "scan_pattern_id": pid,
@@ -660,6 +834,7 @@ def compute_pattern_edge_reliability(
         "recert_block_count": int(reason_counts.get("recert_required", 0)),
         "slippage_miss_count": slippage_misses,
         "broker_reject_count": broker_rejects,
+        "execution_friction": execution_friction,
         "placed_count": int(decision_counts.get("placed", 0)),
         "broker_reject_rate": _round(
             broker_rejects / edge_eval_count if edge_eval_count else 0.0,
@@ -682,10 +857,22 @@ def compute_pattern_edge_reliability(
         "closed_evidence_count": closed_n,
         "paper_closed_count": len(paper_returns_f),
         "live_closed_count": len(live_returns_f),
+        "directional_closed_count": len(directional_returns_f),
+        "machine_closed_count": len(directional_returns_f),
+        "closed_evidence_sources": {
+            "paper": len(paper_returns_f),
+            "live": len(live_returns_f),
+            "directional": len(directional_returns_f),
+        },
         "paper_realized_ev_pct": _round(paper_ev, 6),
         "live_realized_ev_pct": _round(live_ev, 6),
+        "directional_realized_ev_pct": _round(_mean(directional_returns_f), 6),
         "paper_live_gap_pct": _round(paper_live_gap, 6),
         "observed_win_rate": _round(_mean([float(x) for x in labels]), 6),
+        "directional_observed_win_rate": _round(
+            _mean([float(_directional_outcome_label(row)) for row in directional_rows]),
+            6,
+        ),
         "payoff_ratio": _round(payoff_ratio, 6),
         "avg_probability": _round(fallback_p, 6),
         "avg_breakeven_probability": _round(_mean(breakevens), 6),
@@ -870,14 +1057,18 @@ def _recent_noop_exit_variant_exists(
         .filter(BrainWorkEvent.event_kind == "outcome")
         .filter(BrainWorkEvent.event_type == EXIT_VARIANT_DIAGNOSTIC)
         .filter(BrainWorkEvent.created_at >= cutoff)
-        .filter(BrainWorkEvent.payload["scan_pattern_id"].astext == str(int(scan_pattern_id)))
         .order_by(BrainWorkEvent.created_at.desc(), BrainWorkEvent.id.desc())
-        .limit(20)
-        .all()
     )
     diagnostic_payloads: list[dict[str, Any]] = []
-    for row in rows:
-        row_payload = row.payload if isinstance(row.payload, dict) else {}
+    row_iter = rows.yield_per(100) if hasattr(rows, "yield_per") else rows.all()
+    matched = 0
+    for row in row_iter:
+        row_payload = _json_dict(row.payload)
+        if _safe_int(row_payload.get("scan_pattern_id")) != int(scan_pattern_id):
+            continue
+        matched += 1
+        if matched > 20:
+            break
         if row.created_at and row.created_at < general_cutoff:
             if _same_evidence_exit_noop_blocks_refresh(
                 row_payload,
@@ -889,6 +1080,7 @@ def _recent_noop_exit_variant_exists(
         if _exit_noop_blocks_refresh(
             row_payload,
             evidence_fingerprint=evidence_fingerprint,
+            request_payload=payload,
         ):
             return True
         if _non_positive_exit_noop_blocks_weak_request(
@@ -930,13 +1122,17 @@ def _recent_recert_rescue_blocker_exists(
         .filter(BrainWorkEvent.event_kind == "outcome")
         .filter(BrainWorkEvent.event_type == RECERT_RESCUE_DIAGNOSTIC)
         .filter(BrainWorkEvent.created_at >= cutoff)
-        .filter(BrainWorkEvent.payload["scan_pattern_id"].astext == str(int(scan_pattern_id)))
         .order_by(BrainWorkEvent.created_at.desc(), BrainWorkEvent.id.desc())
-        .limit(20)
-        .all()
     )
-    for row in rows:
-        payload = row.payload if isinstance(row.payload, dict) else {}
+    row_iter = rows.yield_per(100) if hasattr(rows, "yield_per") else rows.all()
+    matched = 0
+    for row in row_iter:
+        payload = _json_dict(row.payload)
+        if _safe_int(payload.get("scan_pattern_id")) != int(scan_pattern_id):
+            continue
+        matched += 1
+        if matched > 20:
+            break
         if recert_rescue_diagnostic_blocks_refresh(payload):
             return True
     return False

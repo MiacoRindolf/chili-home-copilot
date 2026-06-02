@@ -26,18 +26,6 @@ def test_churn_audit_prints_all_sections_without_db(monkeypatch, capsys):
         calls.append(("noop", hours, limit))
         return [{"scan_pattern_id": 123, "noop_diagnostics": 1}]
 
-    def top_noop_exit_pattern_rollups(hours: int, limit: int):
-        calls.append(("noop_rollups", hours, limit))
-        return [{"scan_pattern_id": 123, "distinct_fingerprints": 2}]
-
-    def top_recert_rescue_blocker_rollups(hours: int, limit: int):
-        calls.append(("recert_rollups", hours, limit))
-        return [{"scan_pattern_id": 456, "blocker_diagnostics": 3}]
-
-    def top_recert_rescue_action_rollups(hours: int, limit: int):
-        calls.append(("recert_action_rollups", hours, limit))
-        return [{"scan_pattern_id": 789, "action_diagnostics": 1}]
-
     def open_exit_work_with_recent_noop(hours: int, limit: int):
         calls.append(("open_noop", hours, limit))
         return [{"work_id": 77, "skip_reason": "no_loss_report"}]
@@ -58,21 +46,6 @@ def test_churn_audit_prints_all_sections_without_db(monkeypatch, capsys):
     monkeypatch.setattr(audit, "_diagnostic_counts", diagnostic_counts)
     monkeypatch.setattr(audit, "_top_patterns", top_patterns)
     monkeypatch.setattr(audit, "_top_noop_exit_patterns", top_noop_exit_patterns)
-    monkeypatch.setattr(
-        audit,
-        "_top_noop_exit_pattern_rollups",
-        top_noop_exit_pattern_rollups,
-    )
-    monkeypatch.setattr(
-        audit,
-        "_top_recert_rescue_blocker_rollups",
-        top_recert_rescue_blocker_rollups,
-    )
-    monkeypatch.setattr(
-        audit,
-        "_top_recert_rescue_action_rollups",
-        top_recert_rescue_action_rollups,
-    )
     monkeypatch.setattr(
         audit,
         "_open_exit_work_with_recent_noop",
@@ -100,9 +73,6 @@ def test_churn_audit_prints_all_sections_without_db(monkeypatch, capsys):
     assert "## Diagnostic Outcomes" in out
     assert "## Top Work-Producing Patterns" in out
     assert "## Top No-Op Exit Variant Diagnostics" in out
-    assert "## Top No-Op Exit Variant Pattern Rollups" in out
-    assert "## Top Recert Rescue Blocker Rollups" in out
-    assert "## Top Recert Rescue Action Rollups" in out
     assert "## Open Exit Variant Work With Recent No-Op Evidence" in out
     assert "## Open Recert Work With Recent Blocker Diagnostic" in out
     assert "## Duplicate Open Refresh Work" in out
@@ -112,9 +82,6 @@ def test_churn_audit_prints_all_sections_without_db(monkeypatch, capsys):
         ("diagnostics", 6, None),
         ("patterns", 6, 4),
         ("noop", 6, 4),
-        ("noop_rollups", 6, 4),
-        ("recert_rollups", 6, 4),
-        ("recert_action_rollups", 6, 4),
         ("open_noop", 6, 4),
         ("open_recert", 6, 4),
         ("duplicates", 6, 4),
@@ -326,9 +293,6 @@ def test_churn_audit_json_output_without_db(monkeypatch, capsys):
             "diagnostic_outcomes": [],
             "top_work_producing_patterns": [],
             "top_noop_exit_variant_diagnostics": [],
-            "top_noop_exit_variant_pattern_rollups": [],
-            "top_recert_rescue_blocker_rollups": [],
-            "top_recert_rescue_action_rollups": [],
             "open_exit_variant_work_with_recent_noop": [],
             "open_recert_work_with_recent_blocker_diagnostic": [],
             "duplicate_open_refresh_work": [],
@@ -425,9 +389,6 @@ def test_churn_audit_waits_for_database(monkeypatch, capsys):
             "diagnostic_outcomes": [],
             "top_work_producing_patterns": [],
             "top_noop_exit_variant_diagnostics": [],
-            "top_noop_exit_variant_pattern_rollups": [],
-            "top_recert_rescue_blocker_rollups": [],
-            "top_recert_rescue_action_rollups": [],
             "open_exit_variant_work_with_recent_noop": [],
             "open_recert_work_with_recent_blocker_diagnostic": [],
             "duplicate_open_refresh_work": [],
@@ -580,6 +541,7 @@ def test_open_exit_noop_query_keeps_non_positive_skip_evidence_specific(monkeypa
         "structural_exit_noop_prefixes": [
             "edge_debt_too_negative_for_exit_child:%",
             "insufficient_parent_payoff_samples:%",
+            "managed_reward_risk_below_floor:%",
             "reward_risk_below_floor:%",
         ],
         "non_positive_exit_noop_reasons": [

@@ -424,10 +424,6 @@ def main() -> int:
         dest="include_dirs",
         help="Directory or file to scan. May be passed more than once.",
     )
-    parser.add_argument(
-        "--bucket",
-        help="Only print entries from a single classification bucket.",
-    )
     args = parser.parse_args()
 
     report = build_inventory(
@@ -435,11 +431,10 @@ def main() -> int:
         args.include_dirs or DEFAULT_INCLUDE_DIRS,
         raw_sql_only=args.raw_sql_only,
     )
-    report_to_print = filter_inventory_by_bucket(report, args.bucket)
     if args.json:
-        print(json.dumps(report_to_print, sort_keys=True))
+        print(json.dumps(report, sort_keys=True))
     else:
-        _print_table(report_to_print)
+        _print_table(report)
     if args.fail_on_unexpected_runtime and not report["ok"]:
         return 1
     return 0

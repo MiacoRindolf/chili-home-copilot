@@ -890,18 +890,6 @@ def _build_report(hours: int, limit: int) -> dict[str, object]:
         "diagnostic_outcomes": _diagnostic_counts(hours),
         "top_work_producing_patterns": _top_patterns(hours, limit),
         "top_noop_exit_variant_diagnostics": _top_noop_exit_patterns(hours, limit),
-        "top_noop_exit_variant_pattern_rollups": _top_noop_exit_pattern_rollups(
-            hours,
-            limit,
-        ),
-        "top_recert_rescue_blocker_rollups": _top_recert_rescue_blocker_rollups(
-            hours,
-            limit,
-        ),
-        "top_recert_rescue_action_rollups": _top_recert_rescue_action_rollups(
-            hours,
-            limit,
-        ),
         "open_exit_variant_work_with_recent_noop": _open_exit_work_with_recent_noop(
             hours,
             limit,
@@ -938,18 +926,6 @@ def _print_report(report: dict[str, object]) -> None:
     _print_table(
         "Top No-Op Exit Variant Diagnostics",
         report["top_noop_exit_variant_diagnostics"],
-    )
-    _print_table(
-        "Top No-Op Exit Variant Pattern Rollups",
-        report["top_noop_exit_variant_pattern_rollups"],
-    )
-    _print_table(
-        "Top Recert Rescue Blocker Rollups",
-        report["top_recert_rescue_blocker_rollups"],
-    )
-    _print_table(
-        "Top Recert Rescue Action Rollups",
-        report["top_recert_rescue_action_rollups"],
     )
     _print_table(
         "Open Exit Variant Work With Recent No-Op Evidence",

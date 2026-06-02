@@ -15,10 +15,63 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from ...config import settings
 from ...models.trade_relation_symbols import (
     LEGACY_TRADES_COMPAT_RELATION,
     MANAGEMENT_ENVELOPES_RELATION,
 )
+
+OPTION_ASSET_ALIASES_SQL = (
+    "'option', 'options', 'option_contract', 'option_contracts', "
+    "'options_contract', 'options_contracts', 'contract_option', "
+    "'contract_options', 'equity_option', 'equity_options', "
+    "'stock_option', 'stock_options', 'option_spread', "
+    "'options_spread', 'option_spreads', 'options_spreads', "
+    "'optionspread', 'optionspreads'"
+)
+
+_PHASE5B_USABLE_TCA_ENTRY_SQL = """
+            CASE
+                WHEN tca_entry_slippage_bps IS NULL THEN NULL
+                WHEN CAST(tca_entry_slippage_bps AS TEXT) IN ('NaN', 'Infinity', '-Infinity') THEN NULL
+                WHEN ABS(tca_entry_slippage_bps) <= :outlier_bps THEN tca_entry_slippage_bps
+                WHEN COALESCE(envelope_avg_fill_price, 0) > 0
+                  OR COALESCE(NULLIF(BTRIM(envelope_broker_order_id), ''), '') <> ''
+                  OR LOWER(COALESCE(envelope_broker_status, '')) IN ('filled', 'partially_filled')
+                THEN tca_entry_slippage_bps
+                ELSE NULL
+            END
+"""
+
+_PHASE5B_USABLE_TCA_EXIT_SQL = """
+            CASE
+                WHEN tca_exit_slippage_bps IS NULL THEN NULL
+                WHEN CAST(tca_exit_slippage_bps AS TEXT) IN ('NaN', 'Infinity', '-Infinity') THEN NULL
+                WHEN ABS(tca_exit_slippage_bps) <= :outlier_bps THEN tca_exit_slippage_bps
+                WHEN COALESCE(envelope_avg_fill_price, 0) > 0
+                  OR COALESCE(NULLIF(BTRIM(envelope_broker_order_id), ''), '') <> ''
+                  OR LOWER(COALESCE(envelope_broker_status, '')) IN ('filled', 'partially_filled')
+                THEN tca_exit_slippage_bps
+                ELSE NULL
+            END
+"""
+
+
+def _phase5b_unverified_tca_outlier_bps() -> float:
+    try:
+        configured = float(
+            getattr(settings, "brain_execution_cost_unverified_tca_outlier_bps", 500.0)
+        )
+    except (TypeError, ValueError):
+        configured = 500.0
+    return configured if configured > 0 else 500.0
+
+
+def _option_asset_marker_sql(expr: str) -> str:
+    return (
+        f"REPLACE(LOWER(COALESCE({expr}, '')), '-', '_') "
+        f"IN ({OPTION_ASSET_ALIASES_SQL})"
+    )
 
 
 @dataclass(frozen=True)
@@ -53,26 +106,6 @@ class Phase5BParitySummary:
             "decisions_without_envelope": self.decisions_without_envelope,
             "broker_envelopes_missing_position": self.broker_envelopes_missing_position,
             "open_position_envelope_mismatches": self.open_position_envelope_mismatches,
-        }
-
-
-@dataclass(frozen=True)
-class ClosedEnvelopePerformanceSummary:
-    trades: int
-    wins: int
-    pnl: float
-
-    @property
-    def win_rate_pct(self) -> float:
-        if self.trades <= 0:
-            return 0.0
-        return round(self.wins / self.trades * 100.0, 1)
-
-    def to_payload(self) -> dict[str, Any]:
-        return {
-            "trades": int(self.trades),
-            "pnl": round(float(self.pnl or 0.0), 2),
-            "win_rate": self.win_rate_pct,
         }
 
 
@@ -818,28 +851,40 @@ def fetch_synergy_retry_envelope_candidates(
 ) -> list[dict[str, Any]]:
     """Fetch recent retry candidates whose open envelope has a different pattern."""
     return _rows(db, f"""
-        WITH latest AS (
+        WITH source AS (
             SELECT DISTINCT ON (ar.breakout_alert_id)
                    ar.breakout_alert_id,
                    ar.id AS source_run_id,
-                   ar.reason,
                    ar.created_at
               FROM trading_autotrader_runs ar
               JOIN trading_breakout_alerts ba
                 ON ba.id = ar.breakout_alert_id
              WHERE ar.created_at >= NOW() - (:lookback_minutes * INTERVAL '1 minute')
+               AND ar.reason = :source_reason
                AND ba.alert_tier = 'pattern_imminent'
                AND (ba.user_id = :uid OR ba.user_id IS NULL)
+               AND NOT EXISTS (
+                    SELECT 1
+                      FROM trading_autotrader_runs newer
+                     WHERE newer.breakout_alert_id = ar.breakout_alert_id
+                       AND (
+                            newer.created_at > ar.created_at
+                            OR (
+                                newer.created_at = ar.created_at
+                                AND newer.id > ar.id
+                            )
+                       )
+               )
              ORDER BY ar.breakout_alert_id, ar.created_at DESC, ar.id DESC
         ),
         eligible AS (
             SELECT ba.id AS alert_id,
-                   latest.source_run_id,
-                   latest.created_at,
+                   source.source_run_id,
+                   source.created_at,
                    COUNT(*) OVER () AS retry_pool
-              FROM latest
+              FROM source
               JOIN trading_breakout_alerts ba
-                ON ba.id = latest.breakout_alert_id
+                ON ba.id = source.breakout_alert_id
               JOIN LATERAL (
                     SELECT t.id, t.scan_pattern_id, t.entry_date
                       FROM {MANAGEMENT_ENVELOPES_RELATION} t
@@ -850,10 +895,9 @@ def fetch_synergy_retry_envelope_candidates(
                      ORDER BY t.entry_date DESC NULLS LAST, t.id DESC
                      LIMIT 1
               ) open_trade ON TRUE
-             WHERE latest.reason = :source_reason
-               AND COALESCE(open_trade.scan_pattern_id, 0)
+             WHERE COALESCE(open_trade.scan_pattern_id, 0)
                    <> COALESCE(ba.scan_pattern_id, 0)
-             ORDER BY latest.created_at DESC, ba.id DESC
+             ORDER BY source.created_at DESC, ba.id DESC
              LIMIT :query_limit
         )
         SELECT alert_id, source_run_id, retry_pool
@@ -878,9 +922,13 @@ def count_probation_envelopes_since(
     probation_true_flag: str,
     probation_false_flag: str,
     pattern_id: int | None = None,
+    ticker: str | None = None,
+    risk_bearing_only: bool = False,
 ) -> int:
     """Count probation-tagged management envelopes since a UTC cutoff."""
     pattern_clause = ""
+    ticker_clause = ""
+    risk_bearing_clause = ""
     params: dict[str, Any] = {
         "uid": uid,
         "version": autotrader_version,
@@ -893,6 +941,18 @@ def count_probation_envelopes_since(
     if pattern_id is not None:
         pattern_clause = "AND scan_pattern_id = :pattern_id"
         params["pattern_id"] = int(pattern_id)
+    ticker_norm = str(ticker or "").strip().upper()
+    if ticker_norm:
+        ticker_clause = "AND UPPER(ticker) = :ticker"
+        params["ticker"] = ticker_norm
+    if risk_bearing_only:
+        risk_bearing_clause = """
+          AND NOT (
+              status IN ('cancelled', 'rejected')
+              AND COALESCE(filled_quantity, 0) <= 0
+              AND filled_at IS NULL
+          )
+        """
     row = db.execute(text(f"""
         SELECT COUNT(*) AS n
         FROM {MANAGEMENT_ENVELOPES_RELATION}
@@ -908,187 +968,95 @@ def count_probation_envelopes_since(
               :false_flag
           ) = :flag
           {pattern_clause}
+          {ticker_clause}
+          {risk_bearing_clause}
     """), params).scalar()
     return int(row or 0)
 
 
-def summarize_closed_envelope_performance(
+def summarize_probation_envelopes_since(
     db: Session,
     *,
-    user_id: int | None,
-    since: datetime,
-) -> ClosedEnvelopePerformanceSummary:
-    """Summarize closed management-envelope PnL since a cutoff."""
+    uid: int | None,
+    autotrader_version: str,
+    start_utc: Any,
+    entry_execution_key: str,
+    probation_flag_key: str,
+    probation_true_flag: str,
+    probation_false_flag: str,
+    pattern_id: int | None = None,
+    ticker: str | None = None,
+    risk_bearing_only: bool = False,
+) -> dict[str, Any]:
+    """Summarize probation-tagged management envelopes since a UTC cutoff."""
+    pattern_clause = ""
+    ticker_clause = ""
+    risk_bearing_clause = ""
+    params: dict[str, Any] = {
+        "uid": uid,
+        "version": autotrader_version,
+        "start_utc": start_utc,
+        "flag": probation_true_flag,
+        "entry_execution_key": entry_execution_key,
+        "probation_flag_key": probation_flag_key,
+        "false_flag": probation_false_flag,
+    }
+    if pattern_id is not None:
+        pattern_clause = "AND scan_pattern_id = :pattern_id"
+        params["pattern_id"] = int(pattern_id)
+    ticker_norm = str(ticker or "").strip().upper()
+    if ticker_norm:
+        ticker_clause = "AND UPPER(ticker) = :ticker"
+        params["ticker"] = ticker_norm
+    if risk_bearing_only:
+        risk_bearing_clause = """
+          AND NOT (
+              status IN ('cancelled', 'rejected')
+              AND COALESCE(filled_quantity, 0) <= 0
+              AND filled_at IS NULL
+          )
+        """
     row = db.execute(text(f"""
         SELECT
-            COUNT(*)::bigint AS trades,
-            SUM(CASE WHEN COALESCE(pnl, 0) > 0 THEN 1 ELSE 0 END)::bigint AS wins,
-            SUM(COALESCE(pnl, 0))::double precision AS pnl
-          FROM {MANAGEMENT_ENVELOPES_RELATION}
-         WHERE user_id IS NOT DISTINCT FROM :uid
-           AND status = 'closed'
-           AND exit_date >= :since
-    """), {"uid": user_id, "since": since}).mappings().first()
+            COUNT(*) AS total_count,
+            COUNT(*) FILTER (WHERE status IN ('open', 'working')) AS active_count,
+            COUNT(*) FILTER (WHERE status = 'closed') AS closed_count,
+            COUNT(pnl) FILTER (WHERE status = 'closed') AS closed_pnl_count,
+            COALESCE(
+                SUM(pnl) FILTER (WHERE status = 'closed' AND pnl IS NOT NULL),
+                0
+            ) AS closed_pnl
+        FROM {MANAGEMENT_ENVELOPES_RELATION}
+        WHERE user_id IS NOT DISTINCT FROM :uid
+          AND COALESCE(auto_trader_version, '') = :version
+          AND entry_date >= :start_utc
+          AND COALESCE(
+              jsonb_extract_path_text(
+                  indicator_snapshot,
+                  :entry_execution_key,
+                  :probation_flag_key
+              ),
+              :false_flag
+          ) = :flag
+          {pattern_clause}
+          {ticker_clause}
+          {risk_bearing_clause}
+    """), params).mappings().first()
     if not row:
-        return ClosedEnvelopePerformanceSummary(trades=0, wins=0, pnl=0.0)
-    return ClosedEnvelopePerformanceSummary(
-        trades=int(row["trades"] or 0),
-        wins=int(row["wins"] or 0),
-        pnl=float(row["pnl"] or 0.0),
-    )
-
-
-def load_closed_envelope_execution_rows(
-    db: Session,
-    *,
-    user_id: int | None,
-    since: datetime,
-) -> list[dict[str, Any]]:
-    """Load closed management-envelope fields needed for execution-quality reports."""
-    return _rows(db, f"""
-        SELECT
-            id,
-            ticker,
-            entry_price,
-            indicator_snapshot,
-            tags,
-            tca_entry_slippage_bps,
-            tca_exit_slippage_bps
-          FROM {MANAGEMENT_ENVELOPES_RELATION}
-         WHERE user_id IS NOT DISTINCT FROM :uid
-           AND status = 'closed'
-           AND entry_date >= :since
-    """, {"uid": user_id, "since": since})
-
-
-def load_closed_pattern_envelope_rows(
-    db: Session,
-    *,
-    pattern_id: int,
-    user_id: int | None,
-    since: datetime,
-) -> list[dict[str, Any]]:
-    """Load closed management envelopes for pattern-performance attribution."""
-    user_clause = ""
-    params: dict[str, Any] = {
-        "pattern_id": int(pattern_id),
-        "since": since,
+        return {
+            "total_count": 0,
+            "active_count": 0,
+            "closed_count": 0,
+            "closed_pnl_count": 0,
+            "closed_pnl": 0.0,
+        }
+    return {
+        "total_count": int(row.get("total_count") or 0),
+        "active_count": int(row.get("active_count") or 0),
+        "closed_count": int(row.get("closed_count") or 0),
+        "closed_pnl_count": int(row.get("closed_pnl_count") or 0),
+        "closed_pnl": float(row.get("closed_pnl") or 0.0),
     }
-    if user_id is not None:
-        user_clause = "AND user_id = :uid"
-        params["uid"] = int(user_id)
-    return _rows(db, f"""
-        SELECT
-            id,
-            ticker,
-            direction,
-            entry_price,
-            exit_price,
-            quantity,
-            pnl,
-            asset_kind,
-            tags,
-            indicator_snapshot,
-            entry_date,
-            exit_date,
-            tca_entry_slippage_bps,
-            tca_exit_slippage_bps
-          FROM {MANAGEMENT_ENVELOPES_RELATION}
-         WHERE scan_pattern_id = :pattern_id
-           AND status = 'closed'
-           AND exit_date >= :since
-           {user_clause}
-         ORDER BY exit_date ASC
-    """, params)
-
-
-def load_closed_review_envelope_rows(
-    db: Session,
-    *,
-    user_id: int,
-    since: datetime,
-) -> list[dict[str, Any]]:
-    """Load closed management envelopes needed by post-trade review reports."""
-    return _rows(db, f"""
-        SELECT
-            id,
-            ticker,
-            scan_pattern_id,
-            pnl,
-            tca_entry_slippage_bps,
-            tca_exit_slippage_bps
-          FROM {MANAGEMENT_ENVELOPES_RELATION}
-         WHERE user_id = :uid
-           AND status = 'closed'
-           AND exit_date >= :since
-         ORDER BY exit_date ASC
-    """, {"uid": int(user_id), "since": since})
-
-
-def load_recent_ticker_envelope_rows(
-    db: Session,
-    *,
-    user_id: int | None,
-    ticker: str,
-    limit: int = 10,
-) -> list[dict[str, Any]]:
-    """Load recent management envelopes for ticker-specific context reports."""
-    symbol = (ticker or "").strip().upper()
-    if not symbol:
-        return []
-    return _rows(db, f"""
-        SELECT
-            id,
-            user_id,
-            ticker,
-            direction,
-            quantity,
-            entry_price,
-            exit_price,
-            entry_date,
-            exit_date,
-            pnl,
-            status,
-            related_alert_id,
-            stop_loss,
-            take_profit,
-            broker_source,
-            asset_kind,
-            tags,
-            indicator_snapshot
-          FROM {MANAGEMENT_ENVELOPES_RELATION}
-         WHERE user_id IS NOT DISTINCT FROM :uid
-           AND UPPER(ticker) = :ticker
-         ORDER BY entry_date DESC NULLS LAST, id DESC
-         LIMIT :limit
-    """, {"uid": user_id, "ticker": symbol, "limit": max(1, int(limit))})
-
-
-def load_pattern_tagged_envelope_rows(
-    db: Session,
-    *,
-    user_id: int | None,
-    limit: int = 200,
-) -> list[dict[str, Any]]:
-    """Load recent pattern-tagged management envelopes for evidence reports."""
-    return _rows(db, f"""
-        SELECT
-            id,
-            ticker,
-            direction,
-            entry_price,
-            exit_price,
-            pnl,
-            status,
-            entry_date,
-            exit_date,
-            pattern_tags
-          FROM {MANAGEMENT_ENVELOPES_RELATION}
-         WHERE user_id IS NOT DISTINCT FROM :uid
-           AND pattern_tags IS NOT NULL
-         ORDER BY entry_date DESC NULLS LAST, id DESC
-         LIMIT :limit
-    """, {"uid": user_id, "limit": max(1, int(limit))})
 
 
 def load_audit_export_envelope_rows(
@@ -1359,94 +1327,21 @@ def load_autotrader_desk_live_envelope_objects(
     return [_envelope_runtime_object(row) for row in rows]
 
 
-def load_stop_decision_envelope_rows(
-    db: Session,
-    *,
-    user_id: int | None,
-    trade_id: int | None,
-    limit: int,
-) -> list[dict[str, Any]]:
-    """Load stop-decision history through the management-envelope table."""
-    limit_n = int(limit)
-    params: dict[str, Any] = {
-        "uid": user_id,
-        "limit": limit_n,
-    }
-    if trade_id is not None:
-        params["trade_id"] = int(trade_id)
-        return _rows(db, f"""
-            SELECT
-                d.id,
-                d.trade_id,
-                d.as_of_ts,
-                d.state,
-                d.old_stop,
-                d.new_stop,
-                d.trigger,
-                d.reason,
-                d.executed
-              FROM trading_stop_decisions d
-              JOIN {MANAGEMENT_ENVELOPES_RELATION} t ON t.id = d.trade_id
-             WHERE t.user_id IS NOT DISTINCT FROM :uid
-               AND d.trade_id = :trade_id
-             ORDER BY d.as_of_ts DESC, d.id DESC
-             LIMIT :limit
-        """, params)
-
-    return _rows(db, f"""
-        WITH scoped AS MATERIALIZED (
-            SELECT id
-              FROM {MANAGEMENT_ENVELOPES_RELATION}
-             WHERE user_id IS NOT DISTINCT FROM :uid
-        ),
-        per_trade AS (
-            SELECT
-                d.id,
-                d.trade_id,
-                d.as_of_ts,
-                d.state,
-                d.old_stop,
-                d.new_stop,
-                d.trigger,
-                d.reason,
-                d.executed
-              FROM scoped s
-              CROSS JOIN LATERAL (
-                    SELECT
-                        id,
-                        trade_id,
-                        as_of_ts,
-                        state,
-                        old_stop,
-                        new_stop,
-                        trigger,
-                        reason,
-                        executed
-                      FROM trading_stop_decisions
-                     WHERE trade_id = s.id
-                     ORDER BY as_of_ts DESC, id DESC
-                     LIMIT :limit
-              ) d
-        )
-        SELECT *
-          FROM per_trade
-         ORDER BY as_of_ts DESC, id DESC
-         LIMIT :limit
-    """, params)
-
-
 def _option_envelope_predicate_sql(alias: str = "t") -> str:
+    """SQL predicate matching option envelopes that bracket code must skip."""
     snap = f"COALESCE({alias}.indicator_snapshot, '{{}}'::jsonb)"
     breakout = f"({snap}->'breakout_alert')"
     return f"""
         (
-            LOWER(COALESCE({alias}.asset_kind, '')) IN ('option', 'options')
+            {_option_asset_marker_sql(f'{alias}.asset_kind')}
             OR LOWER(COALESCE({alias}.tags, '')) LIKE '%option%'
             OR COALESCE({snap} ? 'option_meta', FALSE)
-            OR LOWER(COALESCE({snap}->>'asset_type', '')) IN ('option', 'options')
+            OR {_option_asset_marker_sql(f"{snap}->>'asset_kind'")}
+            OR {_option_asset_marker_sql(f"{snap}->>'asset_type'")}
             OR LOWER(COALESCE({snap}->>'options_path', '')) IN ('1', 'true', 'yes', 'on')
             OR COALESCE({breakout} ? 'option_meta', FALSE)
-            OR LOWER(COALESCE({breakout}->>'asset_type', '')) IN ('option', 'options')
+            OR {_option_asset_marker_sql(f"{breakout}->>'asset_kind'")}
+            OR {_option_asset_marker_sql(f"{breakout}->>'asset_type'")}
             OR LOWER(COALESCE({breakout}->>'options_path', '')) IN ('1', 'true', 'yes', 'on')
         )
     """
@@ -1457,12 +1352,7 @@ def load_bracket_reconciliation_scope(
     *,
     user_id: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Load management envelopes eligible for bracket reconciliation.
-
-    The contract mirrors the reconciler's historical compatibility-view scope:
-    open broker-backed envelopes plus non-open envelopes whose bracket intent is
-    still unresolved. Paper and option envelopes remain out of scope.
-    """
+    """Load non-option broker envelopes eligible for bracket reconciliation."""
     params: dict[str, Any] = {}
     scope_clause = (
         "( (t.status = 'open' AND t.broker_source IS NOT NULL)"
@@ -1470,7 +1360,7 @@ def load_bracket_reconciliation_scope(
         "     bi.id IS NOT NULL"
         "     AND t.broker_source IS NOT NULL"
         "     AND t.status <> 'open'"
-        "     AND bi.intent_state NOT IN ('reconciled', 'authoritative_closed', 'closed')"
+        "     AND COALESCE(bi.intent_state, '') NOT IN ('reconciled', 'authoritative_closed', 'closed')"
         "   )"
         " )"
     )
@@ -1508,7 +1398,7 @@ def load_stale_bracket_watchdog_candidates(
     user_id: int | None = None,
     stale_after_sec: int,
 ) -> list[dict[str, Any]]:
-    """Load open broker-backed envelopes for the missing-stop watchdog."""
+    """Load open non-option broker envelopes for the missing-stop watchdog."""
     params: dict[str, Any] = {"stale_sec": int(stale_after_sec)}
     user_filter = ""
     if user_id is not None:
@@ -1539,7 +1429,7 @@ def load_stale_bracket_watchdog_candidates(
         WHERE t.status = 'open'
           AND t.broker_source IS NOT NULL
           AND NOT {_option_envelope_predicate_sql('t')}
-          AND bi.intent_state NOT IN ('reconciled', 'authoritative_closed', 'closed')
+          AND COALESCE(bi.intent_state, '') NOT IN ('reconciled', 'authoritative_closed', 'closed')
           {user_filter}
         ORDER BY t.id
     """, params)
@@ -1548,7 +1438,7 @@ def load_stale_bracket_watchdog_candidates(
 def load_coinbase_orphan_adoption_candidates(
     db: Session,
     *,
-    adoptable_states: list[str] | tuple[str, ...] | set[str],
+    adoptable_states: list[str] | tuple[str, ...] | set[str] | frozenset[str],
 ) -> list[dict[str, Any]]:
     """Load naked Coinbase bracket intents from the management-envelope surface.
 
@@ -1557,23 +1447,28 @@ def load_coinbase_orphan_adoption_candidates(
     state. This keeps the one-shot orphan adoption pass away from the legacy
     trade compatibility table while preserving its broker-truth contract.
     """
+    states: list[str] = []
+    for state in adoptable_states:
+        normalized = str(state or "").strip().lower()
+        if normalized:
+            states.append(normalized)
     return _rows(db, f"""
         SELECT
-            bi.id            AS intent_id,
-            bi.trade_id      AS trade_id,
-            bi.ticker        AS ticker,
-            bi.quantity      AS quantity,
-            bi.intent_state  AS intent_state,
+            bi.id           AS intent_id,
+            bi.trade_id     AS trade_id,
+            bi.ticker       AS ticker,
+            bi.quantity     AS quantity,
+            bi.intent_state AS intent_state,
             bi.broker_source AS broker_source
         FROM trading_bracket_intents bi
         JOIN {MANAGEMENT_ENVELOPES_RELATION} t ON t.id = bi.trade_id
         WHERE t.status = 'open'
           AND LOWER(COALESCE(t.broker_source, '')) = 'coinbase'
-          AND bi.broker_source = 'coinbase'
+          AND LOWER(COALESCE(bi.broker_source, '')) = 'coinbase'
           AND bi.broker_stop_order_id IS NULL
-          AND LOWER(bi.intent_state) = ANY(:states)
+          AND LOWER(COALESCE(bi.intent_state, '')) = ANY(:states)
         ORDER BY bi.id
-    """, {"states": list(adoptable_states)})
+    """, {"states": states})
 
 
 def phase5b_parity_summary(db: Session) -> Phase5BParitySummary:
@@ -1584,7 +1479,7 @@ def phase5b_parity_summary(db: Session) -> Phase5BParitySummary:
     links. Corrupt legacy dust rows are excluded by the first counter's
     ``entry_price > 0 AND quantity > 0`` predicate.
     """
-    row = _rows(db, """
+    row = _rows(db, f"""
         WITH phase5a AS (
             SELECT
                 COUNT(*) FILTER (
@@ -1598,7 +1493,7 @@ def phase5b_parity_summary(db: Session) -> Phase5BParitySummary:
                       AND btrim(broker_source) <> ''
                       AND position_id IS NULL
                 )::bigint AS open_broker_trades_missing_position
-            FROM trading_management_envelopes
+            FROM {MANAGEMENT_ENVELOPES_RELATION}
         ),
         phase5a_view AS (
             SELECT COALESCE(orphan_decisions, 0)::bigint AS orphan_decisions
@@ -1674,6 +1569,79 @@ def fetch_decision_envelopes(
     """, params)
 
 
+def load_stop_decision_envelope_rows(
+    db: Session,
+    *,
+    user_id: int | None,
+    trade_id: int | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Load recent stop-decision rows through the management-envelope table."""
+    limit_n = max(1, min(int(limit or 50), 200))
+    params: dict[str, Any] = {"uid": user_id, "limit": limit_n}
+    if trade_id is not None:
+        params["trade_id"] = int(trade_id)
+        return _rows(db, f"""
+            SELECT
+                d.id,
+                d.trade_id,
+                d.as_of_ts,
+                d.state,
+                d.old_stop,
+                d.new_stop,
+                d.trigger,
+                d.reason,
+                d.executed
+              FROM trading_stop_decisions d
+              JOIN {MANAGEMENT_ENVELOPES_RELATION} t ON t.id = d.trade_id
+             WHERE t.user_id IS NOT DISTINCT FROM :uid
+               AND d.trade_id = :trade_id
+             ORDER BY d.as_of_ts DESC, d.id DESC
+             LIMIT :limit
+        """, params)
+
+    return _rows(db, f"""
+        WITH scoped AS MATERIALIZED (
+            SELECT id
+              FROM {MANAGEMENT_ENVELOPES_RELATION}
+             WHERE user_id IS NOT DISTINCT FROM :uid
+        ),
+        per_trade AS (
+            SELECT
+                d.id,
+                d.trade_id,
+                d.as_of_ts,
+                d.state,
+                d.old_stop,
+                d.new_stop,
+                d.trigger,
+                d.reason,
+                d.executed
+              FROM scoped s
+              CROSS JOIN LATERAL (
+                    SELECT
+                        id,
+                        trade_id,
+                        as_of_ts,
+                        state,
+                        old_stop,
+                        new_stop,
+                        trigger,
+                        reason,
+                        executed
+                      FROM trading_stop_decisions
+                     WHERE trade_id = s.id
+                     ORDER BY as_of_ts DESC, id DESC
+                     LIMIT :limit
+              ) d
+        )
+        SELECT *
+          FROM per_trade
+         ORDER BY as_of_ts DESC, id DESC
+         LIMIT :limit
+    """, params)
+
+
 def pattern_decision_performance(
     db: Session,
     *,
@@ -1690,7 +1658,8 @@ def pattern_decision_performance(
     window_days = max(1, int(days or 30))
     min_closed_n = max(0, int(min_closed or 0))
     lim = max(1, min(int(limit or 50), 500))
-    return _rows(db, """
+    outlier_bps = _phase5b_unverified_tca_outlier_bps()
+    return _rows(db, f"""
         SELECT
             scan_pattern_id,
             COUNT(*)::bigint AS decisions,
@@ -1698,8 +1667,8 @@ def pattern_decision_performance(
             COUNT(*) FILTER (WHERE envelope_status = 'open')::bigint AS open_envelopes,
             ROUND(SUM(COALESCE(envelope_pnl, 0))::numeric, 4) AS total_pnl,
             ROUND(AVG(envelope_pnl)::numeric, 4) AS avg_pnl,
-            ROUND(AVG(tca_entry_slippage_bps)::numeric, 2) AS avg_entry_slippage_bps,
-            ROUND(AVG(tca_exit_slippage_bps)::numeric, 2) AS avg_exit_slippage_bps,
+            ROUND(AVG({_PHASE5B_USABLE_TCA_ENTRY_SQL})::numeric, 2) AS avg_entry_slippage_bps,
+            ROUND(AVG({_PHASE5B_USABLE_TCA_EXIT_SQL})::numeric, 2) AS avg_exit_slippage_bps,
             COUNT(*) FILTER (
                 WHERE linkage_status NOT IN (
                     'linked',
@@ -1715,4 +1684,9 @@ def pattern_decision_performance(
         HAVING COUNT(*) FILTER (WHERE envelope_status = 'closed') >= :min_closed
         ORDER BY total_pnl DESC NULLS LAST, decisions DESC
         LIMIT :limit
-    """, {"days": window_days, "min_closed": min_closed_n, "limit": lim})
+    """, {
+        "days": window_days,
+        "min_closed": min_closed_n,
+        "limit": lim,
+        "outlier_bps": outlier_bps,
+    })

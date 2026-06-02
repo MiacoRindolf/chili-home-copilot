@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.models.trading import ScanPattern, Trade, TradingPosition
+from app.models.trading import AlertHistory, ScanPattern, Trade, TradingPosition
 
 
 def _stale_rh_trade(db, *, ticker: str = "ACMR") -> Trade:
@@ -170,6 +170,124 @@ def test_mesh_action_signals_ignore_stale_child_local_state(db):
     assert decision["action"] == "imminent_breakout"
     assert decision["ticker"] == "DEXT-USD"
     assert "broker_truth" not in decision
+
+
+def test_mesh_critical_dispatch_suppresses_coinbase_missing_qty_backoff(db):
+    from app.services.trading.brain_neural_mesh.action_handlers import (
+        handle_action_signals,
+    )
+
+    trade = Trade(
+        user_id=None,
+        ticker="DIEM-USD",
+        direction="long",
+        entry_price=1570.60,
+        quantity=0.02996,
+        status="open",
+        broker_source="coinbase",
+        broker_status="filled",
+        asset_kind="crypto",
+        stop_loss=1551.51,
+        take_profit=2080.73,
+        entry_date=datetime.utcnow() - timedelta(days=1),
+        pending_exit_status="deferred",
+        pending_exit_reason="missing_broker_qty",
+        crypto_broker_zero_qty_streak=19,
+        indicator_snapshot={
+            "crypto_exit_missing_qty_backoff": {
+                "reason": "missing_broker_qty",
+                "streak": 19,
+                "backoff_until": (datetime.utcnow() + timedelta(minutes=5)).isoformat(),
+            }
+        },
+    )
+    db.add(trade)
+    db.commit()
+    state = SimpleNamespace(local_state={}, updated_at=None)
+
+    with patch(
+        "app.services.trading.alerts.dispatch_alert",
+        side_effect=AssertionError("missing-qty backoff must not dispatch mesh alert"),
+    ):
+        decision = handle_action_signals(
+            db,
+            "nm_action_signals",
+            state,
+            {
+                "children_state": {
+                    "nm_stop_eval": {
+                        "trade_id": trade.id,
+                        "ticker": trade.ticker,
+                        "action": "STOP_HIT",
+                        "urgency": "critical",
+                        "price": 1328.86,
+                        "stop_level": 1551.51,
+                    }
+                }
+            },
+        )
+
+    assert decision["action"] == "suppressed_non_actionable_trade_state"
+    assert decision["dispatched"] is False
+    assert decision["suppressed_reason"] == "crypto_missing_broker_qty_backoff"
+    assert decision["broker_truth"]["pending_exit_reason"] == "missing_broker_qty"
+
+
+def test_mesh_critical_dispatch_uses_durable_content_signature_cooldown(db):
+    from app.services.trading.brain_neural_mesh.action_handlers import (
+        _critical_dispatch_signature,
+        handle_action_signals,
+    )
+
+    trade = Trade(
+        user_id=None,
+        ticker="COOL",
+        direction="long",
+        entry_price=10.25,
+        quantity=1.0,
+        status="open",
+        stop_loss=10.0,
+        take_profit=12.0,
+        entry_date=datetime.utcnow() - timedelta(hours=2),
+    )
+    db.add(trade)
+    db.flush()
+    child = {
+        "trade_id": trade.id,
+        "ticker": "COOL",
+        "action": "STOP_HIT",
+        "urgency": "critical",
+        "price": 9.91,
+        "stop_level": 10.0,
+    }
+    db.add(
+        AlertHistory(
+            alert_type="stop_hit",
+            ticker="COOL",
+            message="previous critical",
+            content_signature=_critical_dispatch_signature("STOP_HIT", child),
+            sent_via="twilio",
+            success=True,
+            created_at=datetime.utcnow(),
+        )
+    )
+    db.commit()
+    state = SimpleNamespace(local_state={}, updated_at=None)
+
+    with patch(
+        "app.services.trading.alerts.dispatch_alert",
+        side_effect=AssertionError("durable cooldown must suppress dispatch"),
+    ):
+        decision = handle_action_signals(
+            db,
+            "nm_action_signals",
+            state,
+            {"children_state": {"nm_stop_eval": child}},
+        )
+
+    assert decision["dispatched"] is False
+    assert decision["suppressed_reason"] == "critical_dispatch_cooldown"
+    assert "9.91" not in decision["dispatch_signature"]
 
 
 def test_sync_orders_does_not_refresh_already_filled_entry_clock(db, monkeypatch):

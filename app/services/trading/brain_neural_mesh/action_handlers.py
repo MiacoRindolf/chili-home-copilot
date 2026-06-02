@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+import math
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from sqlalchemy.orm import Session
@@ -27,9 +28,41 @@ _INFO_ACTIONS = frozenset({
     "hold", "BREAKEVEN_REACHED", "breakeven_reached",
     "loosen_target",
 })
-DEFAULT_MESH_CRITICAL_DISPATCH_COOLDOWN_SECONDS = 15 * 60
+DEFAULT_MESH_CRITICAL_DISPATCH_COOLDOWN_SECONDS = 4 * 3600
 DEFAULT_MESH_CHILD_STATE_MAX_AGE_SECONDS = 15 * 60
 _LAST_CRITICAL_DISPATCH_AT: dict[str, datetime] = {}
+
+
+def _critical_dispatch_cooldown_seconds() -> int:
+    try:
+        from ....config import settings
+
+        return int(
+            getattr(
+                settings,
+                "chili_mesh_critical_alert_cooldown_seconds",
+                DEFAULT_MESH_CRITICAL_DISPATCH_COOLDOWN_SECONDS,
+            )
+            or DEFAULT_MESH_CRITICAL_DISPATCH_COOLDOWN_SECONDS
+        )
+    except Exception:
+        return DEFAULT_MESH_CRITICAL_DISPATCH_COOLDOWN_SECONDS
+
+
+def _mesh_child_state_max_age_seconds() -> int:
+    try:
+        from ....config import settings
+
+        return int(
+            getattr(
+                settings,
+                "chili_mesh_child_state_max_age_seconds",
+                DEFAULT_MESH_CHILD_STATE_MAX_AGE_SECONDS,
+            )
+            or DEFAULT_MESH_CHILD_STATE_MAX_AGE_SECONDS
+        )
+    except Exception:
+        return DEFAULT_MESH_CHILD_STATE_MAX_AGE_SECONDS
 
 
 def _child_state_updated_at(state: dict[str, Any]) -> datetime | None:
@@ -52,20 +85,64 @@ def _child_state_stale_for_action(state: dict[str, Any], *, now: datetime) -> bo
     updated_at = _child_state_updated_at(state)
     if updated_at is None:
         return False
-    try:
-        from ....config import settings
+    return (now - updated_at).total_seconds() > max(0, _mesh_child_state_max_age_seconds())
 
-        max_age = int(
-            getattr(
-                settings,
-                "chili_mesh_child_state_max_age_seconds",
-                DEFAULT_MESH_CHILD_STATE_MAX_AGE_SECONDS,
-            )
-            or DEFAULT_MESH_CHILD_STATE_MAX_AGE_SECONDS
-        )
-    except Exception:
-        max_age = DEFAULT_MESH_CHILD_STATE_MAX_AGE_SECONDS
-    return (now - updated_at).total_seconds() > max(0, max_age)
+
+def _signature_value(value: Any) -> str:
+    if value in (None, ""):
+        return ""
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return str(value).strip()
+    if not math.isfinite(out):
+        return ""
+    return f"{out:.8g}"
+
+
+def _pending_exit_suppression_snapshot(trade: Any) -> dict[str, Any] | None:
+    status = str(getattr(trade, "pending_exit_status", "") or "").strip().lower()
+    reason = str(getattr(trade, "pending_exit_reason", "") or "").strip().lower()
+    if status in {"submitted", "working", "queued", "pending"}:
+        return {
+            "id": int(getattr(trade, "id", 0) or 0),
+            "ticker": getattr(trade, "ticker", None),
+            "reason": "pending_exit_already_active",
+            "broker_truth_status": "pending_exit",
+            "stale_broker_position": False,
+            "pending_exit_status": getattr(trade, "pending_exit_status", None),
+            "pending_exit_reason": getattr(trade, "pending_exit_reason", None),
+            "pending_exit_order_id": getattr(trade, "pending_exit_order_id", None),
+        }
+    if status == "deferred" and reason == "missing_broker_qty":
+        backoff_meta = None
+        try:
+            from ..stop_engine import _crypto_missing_qty_backoff_active
+
+            backoff_meta = _crypto_missing_qty_backoff_active(trade)
+        except Exception:
+            backoff_meta = None
+        return {
+            "id": int(getattr(trade, "id", 0) or 0),
+            "ticker": getattr(trade, "ticker", None),
+            "reason": (
+                "crypto_missing_broker_qty_backoff"
+                if backoff_meta is not None
+                else "crypto_missing_broker_qty_deferred"
+            ),
+            "broker_truth_status": "pending_exit",
+            "stale_broker_position": False,
+            "pending_exit_status": getattr(trade, "pending_exit_status", None),
+            "pending_exit_reason": getattr(trade, "pending_exit_reason", None),
+            "pending_exit_order_id": getattr(trade, "pending_exit_order_id", None),
+            "backoff_until": (
+                backoff_meta.get("backoff_until") if isinstance(backoff_meta, dict) else None
+            ),
+            "missing_qty_streak": int(
+                getattr(trade, "crypto_broker_zero_qty_streak", 0) or 0
+            ),
+        }
+    return None
 
 
 def _critical_trade_broker_live(
@@ -98,6 +175,9 @@ def _critical_trade_broker_live(
         stale = broker_stale_open_trade_snapshot(db, trade)
         if stale:
             return False, stale
+        pending_exit = _pending_exit_suppression_snapshot(trade)
+        if pending_exit:
+            return False, pending_exit
         return True, None
     except Exception:
         _log.debug("%s critical broker-live revalidation failed", LOG_PREFIX, exc_info=True)
@@ -107,33 +187,40 @@ def _critical_trade_broker_live(
 def _critical_dispatch_signature(action: str, child_state: dict[str, Any]) -> str:
     return "|".join(
         [
+            "trade_critical",
             str(child_state.get("trade_id") or ""),
             str(child_state.get("ticker") or "").upper(),
-            str(action or ""),
-            str(child_state.get("stop_level") or child_state.get("new_stop") or ""),
-            str(child_state.get("price") or child_state.get("current_price") or ""),
+            str(action or "").strip().lower(),
+            _signature_value(child_state.get("stop_level") or child_state.get("new_stop")),
         ]
     )
 
 
-def _critical_dispatch_in_cooldown(signature: str, now: datetime) -> bool:
-    try:
-        from ....config import settings
-
-        cooldown = int(
-            getattr(
-                settings,
-                "chili_mesh_critical_alert_cooldown_seconds",
-                DEFAULT_MESH_CRITICAL_DISPATCH_COOLDOWN_SECONDS,
-            )
-            or DEFAULT_MESH_CRITICAL_DISPATCH_COOLDOWN_SECONDS
-        )
-    except Exception:
-        cooldown = DEFAULT_MESH_CRITICAL_DISPATCH_COOLDOWN_SECONDS
+def _critical_dispatch_in_cooldown(
+    db: Session,
+    signature: str,
+    now: datetime,
+) -> bool:
+    cooldown = _critical_dispatch_cooldown_seconds()
     last = _LAST_CRITICAL_DISPATCH_AT.get(signature)
-    if last is None:
+    if last is not None and (now - last).total_seconds() < max(0, cooldown):
+        return True
+    try:
+        from ....models.trading import AlertHistory
+
+        now_utc = now.astimezone(timezone.utc).replace(tzinfo=None)
+        cutoff = now_utc - timedelta(seconds=max(0, cooldown))
+        exists = (
+            db.query(AlertHistory.id)
+            .filter(AlertHistory.content_signature == signature)
+            .filter(AlertHistory.created_at >= cutoff)
+            .order_by(AlertHistory.created_at.desc())
+            .first()
+        )
+        return exists is not None
+    except Exception:
+        _log.debug("%s critical cooldown lookup failed", LOG_PREFIX, exc_info=True)
         return False
-    return (now - last).total_seconds() < max(0, cooldown)
 
 
 def _classify_urgency(children: dict[str, dict[str, Any]]) -> tuple[str, str, dict[str, Any]]:
@@ -207,7 +294,7 @@ def _format_mesh_alert_message(
 
     source_nodes = [
         nid for nid, s in children.items()
-        if s and s.get("action") or s.get("alert_event")
+        if s and (s.get("action") or s.get("alert_event"))
     ]
     if source_nodes:
         lines.append(f"Sources: {', '.join(source_nodes)}")
@@ -252,18 +339,27 @@ def handle_action_signals(
     if urgency == "critical":
         broker_live, stale_snapshot = _critical_trade_broker_live(db, best_child)
         if not broker_live:
+            is_stale = bool((stale_snapshot or {}).get("stale_broker_position"))
             decision.update(
                 {
                     "urgency": "none",
-                    "action": "suppressed_stale_broker_position",
+                    "action": (
+                        "suppressed_stale_broker_position"
+                        if is_stale
+                        else "suppressed_non_actionable_trade_state"
+                    ),
                     "dispatched": False,
-                    "suppressed_reason": "stale_broker_position",
+                    "suppressed_reason": (
+                        "stale_broker_position"
+                        if is_stale
+                        else (stale_snapshot or {}).get("reason")
+                    ),
                     "broker_truth": stale_snapshot,
                 }
             )
             state.local_state = decision
             _log.warning(
-                "%s critical alert suppressed for stale broker position: %s",
+                "%s critical alert suppressed for non-actionable trade state: %s",
                 LOG_PREFIX,
                 stale_snapshot,
             )
@@ -275,7 +371,7 @@ def handle_action_signals(
         msg = _format_mesh_alert_message(urgency, action, best_child, children)
         now = datetime.now(timezone.utc)
         dispatch_sig = _critical_dispatch_signature(action, best_child)
-        if _critical_dispatch_in_cooldown(dispatch_sig, now):
+        if _critical_dispatch_in_cooldown(db, dispatch_sig, now):
             decision.update(
                 {
                     "dispatched": False,
@@ -295,6 +391,7 @@ def handle_action_signals(
                 ticker=ticker,
                 message=msg,
                 skip_throttle=True,
+                content_signature=dispatch_sig,
             )
             decision["dispatched"] = True
             decision["alert_type"] = alert_type

@@ -8,7 +8,6 @@ import time as _time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
-from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -18,6 +17,7 @@ from ...models.trading import (
     BreakoutAlert,
     PatternMonitorDecision,
     StrategyProposal,
+    Trade,
 )
 from ..yf_session import get_fundamentals
 from .market_data import (
@@ -26,7 +26,6 @@ from .market_data import (
 )
 from .portfolio import get_watchlist, get_trade_stats, get_insights
 from .journal import get_journal
-from .management_envelopes import load_recent_ticker_envelope_rows
 from .scanner import _score_ticker
 
 logger = logging.getLogger(__name__)
@@ -216,7 +215,7 @@ def _build_pattern_monitor_alignment_block(
     for d in sig[:5]:
         age_m = (datetime.utcnow() - d.created_at).total_seconds() / 60.0
         lines.append(
-            f"- Management envelope #{d.trade_id}: **{d.action.upper()}** {age_m:.0f}m ago @ "
+            f"- Trade #{d.trade_id}: **{d.action.upper()}** {age_m:.0f}m ago @ "
             f"${d.price_at_decision or 0:.4f} (pattern health {d.health_score:.0%}, "
             f"source={d.decision_source or 'n/a'})"
         )
@@ -874,17 +873,11 @@ def build_ai_context(
             )
         parts.append("\n".join(lines))
 
-    trades = [
-        SimpleNamespace(**row)
-        for row in load_recent_ticker_envelope_rows(
-            db,
-            user_id=user_id,
-            ticker=ticker_up,
-            limit=10,
-        )
-    ]
+    trades = db.query(Trade).filter(
+        Trade.user_id == user_id, Trade.ticker == ticker_up,
+    ).order_by(Trade.entry_date.desc()).limit(10).all()
 
-    # Live broker position for this ticker (independent of DB management envelopes).
+    # Live broker position for this ticker (independent of DB Trade rows).
     _live_pos = None
     try:
         from .. import broker_service

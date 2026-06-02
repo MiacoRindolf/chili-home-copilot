@@ -19,6 +19,7 @@ STRUCTURAL_EXIT_NOOP_REASONS = frozenset(
 STRUCTURAL_EXIT_NOOP_PREFIXES = (
     "edge_debt_too_negative_for_exit_child:",
     "insufficient_parent_payoff_samples:",
+    "managed_reward_risk_below_floor:",
     "reward_risk_below_floor:",
 )
 NON_POSITIVE_EXIT_NOOP_REASONS = frozenset(
@@ -45,10 +46,29 @@ def non_positive_exit_noop_reason(reason: Any) -> bool:
     return _token(reason) in NON_POSITIVE_EXIT_NOOP_REASONS
 
 
+def paper_outcome_rescue_request(payload: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict) or not payload.get("paper_outcome_rescue_probe"):
+        return False
+    try:
+        sample_n = int(payload.get("paper_outcome_sample_n") or 0)
+    except (TypeError, ValueError):
+        sample_n = 0
+    try:
+        avg_return = float(payload.get("paper_outcome_avg_return_pct"))
+    except (TypeError, ValueError):
+        avg_return = 0.0
+    try:
+        reward_risk = float(payload.get("paper_outcome_reward_risk"))
+    except (TypeError, ValueError):
+        reward_risk = 0.0
+    return sample_n > 0 and avg_return > 0.0 and reward_risk > 1.0
+
+
 def exit_noop_blocks_refresh(
     payload: dict[str, Any],
     *,
     evidence_fingerprint: str | None,
+    request_payload: dict[str, Any] | None = None,
 ) -> bool:
     try:
         created_count = int(payload.get("created_count"))
@@ -59,6 +79,10 @@ def exit_noop_blocks_refresh(
     fingerprint = str(evidence_fingerprint or "")
     if fingerprint and str(payload.get("evidence_fingerprint") or "") == fingerprint:
         return True
+    if paper_outcome_rescue_request(request_payload) and structural_exit_noop_reason(
+        payload.get("skip_reason")
+    ):
+        return False
     return structural_exit_noop_reason(payload.get("skip_reason"))
 
 

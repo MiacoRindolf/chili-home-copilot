@@ -3,15 +3,13 @@ from __future__ import annotations
 from datetime import datetime
 
 from app.services.trading.management_envelopes import (
+    _option_envelope_predicate_sql,
     aggregate_management_envelope_execution_for_pattern,
     count_probation_envelopes_since,
     fetch_synergy_retry_envelope_candidates,
     load_autotrader_desk_live_envelope_objects,
-    load_closed_management_envelope_tickers_since,
     load_audit_export_envelope_rows,
-    load_closed_envelope_execution_rows,
-    load_closed_pattern_envelope_rows,
-    load_closed_review_envelope_rows,
+    load_closed_management_envelope_tickers_since,
     load_edge_reliability_live_envelope_rows,
     load_execution_cost_estimate_envelope_rows,
     load_imminent_alert_actioned_envelope_ids,
@@ -21,12 +19,10 @@ from app.services.trading.management_envelopes import (
     load_open_active_setup_envelope_objects,
     load_open_setup_vitals_envelope_tickers,
     load_open_stop_position_envelope_objects,
-    load_pattern_tagged_envelope_rows,
-    load_recent_ticker_envelope_rows,
     load_regime_scanner_heatmap_envelope_rows,
     load_stop_decision_envelope_rows,
     load_trades_api_envelope_rows,
-    summarize_closed_envelope_performance,
+    summarize_probation_envelopes_since,
     tca_summary_by_ticker_from_management_envelopes,
 )
 
@@ -41,9 +37,6 @@ class _RowsResult:
     def all(self):
         return self._rows
 
-    def first(self):
-        return self._rows[0] if self._rows else None
-
 
 class _ScalarResult:
     def __init__(self, value):
@@ -51,6 +44,17 @@ class _ScalarResult:
 
     def scalar(self):
         return self._value
+
+
+class _MappingResult:
+    def __init__(self, row):
+        self._row = row
+
+    def mappings(self):
+        return self
+
+    def first(self):
+        return self._row
 
 
 class _FakeDb:
@@ -289,6 +293,8 @@ def test_synergy_retry_candidates_read_management_envelopes_not_trade_view():
     assert rows == [{"alert_id": 11, "source_run_id": 22, "retry_pool": 3}]
     assert "FROM trading_management_envelopes t" in db.sql
     assert "trading_trades" not in db.sql
+    assert "AND ar.reason = :source_reason" in db.sql
+    assert "NOT EXISTS" in db.sql
     assert db.params == {
         "uid": 7,
         "lookback_minutes": 45,
@@ -331,97 +337,147 @@ def test_count_probation_envelopes_reads_management_envelopes_with_pattern_claus
     }
 
 
-def test_closed_envelope_performance_summary_reads_management_envelopes():
-    since = datetime(2026, 5, 30, 15, 0)
-    db = _FakeDb(_RowsResult([{"trades": 4, "wins": 3, "pnl": 12.345}]))
+def test_count_probation_envelopes_can_filter_by_pattern_ticker():
+    start_utc = datetime(2026, 5, 30, 13, 30)
+    db = _FakeDb(_ScalarResult(1))
 
-    summary = summarize_closed_envelope_performance(db, user_id=7, since=since)
+    count = count_probation_envelopes_since(
+        db,
+        uid=7,
+        autotrader_version="v1",
+        start_utc=start_utc,
+        entry_execution_key="entry_execution",
+        probation_flag_key="probation_recert_allowed",
+        probation_true_flag="true",
+        probation_false_flag="false",
+        pattern_id=99,
+        ticker="pair-usd",
+    )
 
-    assert summary.to_payload() == {"trades": 4, "pnl": 12.35, "win_rate": 75.0}
+    assert count == 1
     assert "FROM trading_management_envelopes" in db.sql
-    assert "trading_trades" not in db.sql
-    assert "status = 'closed'" in db.sql
-    assert "exit_date >= :since" in db.sql
-    assert db.params == {"uid": 7, "since": since}
+    assert "AND scan_pattern_id = :pattern_id" in db.sql
+    assert "AND UPPER(ticker) = :ticker" in db.sql
+    assert db.params == {
+        "uid": 7,
+        "version": "v1",
+        "start_utc": start_utc,
+        "flag": "true",
+        "entry_execution_key": "entry_execution",
+        "probation_flag_key": "probation_recert_allowed",
+        "false_flag": "false",
+        "pattern_id": 99,
+        "ticker": "PAIR-USD",
+    }
 
 
-def test_closed_envelope_execution_rows_read_management_envelopes():
-    since = datetime(2026, 5, 30, 15, 0)
+def test_count_probation_envelopes_can_ignore_zero_fill_cancelled_orders():
+    start_utc = datetime(2026, 5, 30, 13, 30)
+    db = _FakeDb(_ScalarResult(0))
+
+    count = count_probation_envelopes_since(
+        db,
+        uid=7,
+        autotrader_version="v1",
+        start_utc=start_utc,
+        entry_execution_key="entry_execution",
+        probation_flag_key="probation_recert_allowed",
+        probation_true_flag="true",
+        probation_false_flag="false",
+        risk_bearing_only=True,
+    )
+
+    assert count == 0
+    assert "status IN ('cancelled', 'rejected')" in db.sql
+    assert "COALESCE(filled_quantity, 0) <= 0" in db.sql
+    assert "filled_at IS NULL" in db.sql
+
+
+def test_summarize_probation_envelopes_reads_active_and_closed_pnl():
+    start_utc = datetime(2026, 5, 30, 13, 30)
     db = _FakeDb(
-        _RowsResult(
-            [
-                {
-                    "id": 1,
-                    "ticker": "ABC",
-                    "entry_price": 10.0,
-                    "indicator_snapshot": {"signal_price": 9.9},
-                    "tags": None,
-                    "tca_entry_slippage_bps": 12,
-                    "tca_exit_slippage_bps": 8,
-                }
-            ]
+        _MappingResult(
+            {
+                "total_count": 4,
+                "active_count": 2,
+                "closed_count": 1,
+                "closed_pnl_count": 1,
+                "closed_pnl": 0.75,
+            }
         )
     )
 
-    rows = load_closed_envelope_execution_rows(db, user_id=7, since=since)
+    summary = summarize_probation_envelopes_since(
+        db,
+        uid=7,
+        autotrader_version="v1",
+        start_utc=start_utc,
+        entry_execution_key="entry_execution",
+        probation_flag_key="probation_recert_allowed",
+        probation_true_flag="true",
+        probation_false_flag="false",
+    )
 
-    assert rows[0]["ticker"] == "ABC"
+    assert summary == {
+        "total_count": 4,
+        "active_count": 2,
+        "closed_count": 1,
+        "closed_pnl_count": 1,
+        "closed_pnl": 0.75,
+    }
+    assert "COUNT(*) FILTER (WHERE status IN ('open', 'working'))" in db.sql
+    assert "SUM(pnl) FILTER (WHERE status = 'closed' AND pnl IS NOT NULL)" in db.sql
     assert "FROM trading_management_envelopes" in db.sql
-    assert "trading_trades" not in db.sql
-    assert "status = 'closed'" in db.sql
-    assert "entry_date >= :since" in db.sql
-    assert db.params == {"uid": 7, "since": since}
 
 
-def test_closed_pattern_envelope_rows_read_management_envelopes():
-    since = datetime(2026, 5, 30, 15, 0)
+def test_audit_export_envelope_rows_read_management_envelopes_with_export_fields():
+    start = datetime(2026, 5, 1)
+    end = datetime(2026, 6, 1)
     db = _FakeDb(_RowsResult([{"id": 9, "ticker": "ABC"}]))
 
-    rows = load_closed_pattern_envelope_rows(
+    rows = load_audit_export_envelope_rows(
         db,
-        pattern_id=42,
         user_id=7,
-        since=since,
+        start=start,
+        end=end,
     )
 
     assert rows == [{"id": 9, "ticker": "ABC"}]
     assert "FROM trading_management_envelopes" in db.sql
     assert "trading_trades" not in db.sql
-    assert "scan_pattern_id = :pattern_id" in db.sql
-    assert "ORDER BY exit_date ASC" in db.sql
-    assert db.params == {"pattern_id": 42, "since": since, "uid": 7}
+    assert "tca_entry_slippage_bps" in db.sql
+    assert "tca_exit_slippage_bps" in db.sql
+    assert "pattern_tags" in db.sql
+    assert "ORDER BY entry_date ASC" in db.sql
+    assert db.params == {"uid": 7, "start": start, "end": end}
 
 
-def test_closed_review_envelope_rows_read_management_envelopes():
-    since = datetime(2026, 5, 30, 15, 0)
+def test_trades_api_envelope_rows_read_management_envelopes_with_public_fields():
     db = _FakeDb(_RowsResult([{"id": 9, "ticker": "ABC"}]))
 
-    rows = load_closed_review_envelope_rows(db, user_id=7, since=since)
+    rows = load_trades_api_envelope_rows(db, user_id=7, status="open", limit=800)
 
     assert rows == [{"id": 9, "ticker": "ABC"}]
     assert "FROM trading_management_envelopes" in db.sql
     assert "trading_trades" not in db.sql
-    assert "status = 'closed'" in db.sql
-    assert "ORDER BY exit_date ASC" in db.sql
-    assert db.params == {"uid": 7, "since": since}
+    assert "broker_order_id" in db.sql
+    assert "tca_reference_entry_price" in db.sql
+    assert "strategy_proposal_id" in db.sql
+    assert "position_id" in db.sql
+    assert "AND status = :status" in db.sql
+    assert "LIMIT :limit" in db.sql
+    assert db.params == {"uid": 7, "limit": 500, "status": "open"}
 
 
-def test_recent_ticker_envelope_rows_read_management_envelopes():
-    db = _FakeDb(_RowsResult([{"id": 1, "ticker": "AAPL"}]))
+def test_option_envelope_predicate_covers_contract_aliases():
+    sql = _option_envelope_predicate_sql("t")
 
-    rows = load_recent_ticker_envelope_rows(
-        db,
-        user_id=7,
-        ticker="aapl",
-        limit=3,
-    )
-
-    assert rows == [{"id": 1, "ticker": "AAPL"}]
-    assert "FROM trading_management_envelopes" in db.sql
-    assert "trading_trades" not in db.sql
-    assert "UPPER(ticker) = :ticker" in db.sql
-    assert "ORDER BY entry_date DESC NULLS LAST, id DESC" in db.sql
-    assert db.params == {"uid": 7, "ticker": "AAPL", "limit": 3}
+    assert "option_contract" in sql
+    assert "option_spread" in sql
+    assert "REPLACE(LOWER(COALESCE(t.asset_kind, '')), '-', '_')" in sql
+    assert "->>'asset_kind'" in sql
+    assert "->>'asset_type'" in sql
+    assert "breakout_alert" in sql
 
 
 def test_tca_summary_by_ticker_reads_management_envelopes():
@@ -515,21 +571,24 @@ def test_execution_robustness_aggregate_reads_management_envelopes():
     assert db.params["user_id"] == 7
 
 
-def test_pattern_tagged_envelope_rows_read_management_envelopes():
-    db = _FakeDb(_RowsResult([{"id": 1, "pattern_tags": "breakout"}]))
+def test_stop_decision_rows_use_lateral_envelope_read_path():
+    db = _FakeDb(_RowsResult([{"id": 1, "trade_id": 2, "state": "hold"}]))
 
-    rows = load_pattern_tagged_envelope_rows(
+    rows = load_stop_decision_envelope_rows(
         db,
         user_id=7,
-        limit=5,
+        trade_id=None,
+        limit=500,
     )
 
-    assert rows == [{"id": 1, "pattern_tags": "breakout"}]
+    assert rows == [{"id": 1, "trade_id": 2, "state": "hold"}]
     assert "FROM trading_management_envelopes" in db.sql
     assert "trading_trades" not in db.sql
-    assert "pattern_tags IS NOT NULL" in db.sql
-    assert "ORDER BY entry_date DESC NULLS LAST, id DESC" in db.sql
-    assert db.params == {"uid": 7, "limit": 5}
+    assert "WITH scoped AS MATERIALIZED" in db.sql
+    assert "CROSS JOIN LATERAL" in db.sql
+    assert "FROM trading_stop_decisions" in db.sql
+    assert "ORDER BY as_of_ts DESC, id DESC" in db.sql
+    assert db.params == {"uid": 7, "limit": 200}
 
 
 def test_audit_export_envelope_rows_read_management_envelopes():
@@ -551,23 +610,6 @@ def test_audit_export_envelope_rows_read_management_envelopes():
     assert "entry_date <= :end" in db.sql
     assert "ORDER BY entry_date ASC NULLS LAST" in db.sql
     assert db.params == {"uid": 7, "start": start, "end": end}
-
-
-def test_trades_api_envelope_rows_read_management_envelopes_with_public_fields():
-    db = _FakeDb(_RowsResult([{"id": 9, "ticker": "ABC"}]))
-
-    rows = load_trades_api_envelope_rows(db, user_id=7, status="open", limit=800)
-
-    assert rows == [{"id": 9, "ticker": "ABC"}]
-    assert "FROM trading_management_envelopes" in db.sql
-    assert "trading_trades" not in db.sql
-    assert "broker_order_id" in db.sql
-    assert "tca_reference_entry_price" in db.sql
-    assert "strategy_proposal_id" in db.sql
-    assert "position_id" in db.sql
-    assert "AND status = :status" in db.sql
-    assert "LIMIT :limit" in db.sql
-    assert db.params == {"uid": 7, "limit": 500, "status": "open"}
 
 
 def test_monitor_decision_envelope_rows_read_management_envelopes():
@@ -778,3 +820,21 @@ def test_stop_decision_envelope_rows_with_trade_id_use_bounded_join():
     assert "t.user_id IS NOT DISTINCT FROM :uid" in db.sql
     assert "trading_trades" not in db.sql
     assert db.params == {"uid": None, "limit": 10, "trade_id": 123}
+
+
+def test_stop_decision_rows_trade_filter_uses_single_trade_path():
+    db = _FakeDb(_RowsResult([]))
+
+    rows = load_stop_decision_envelope_rows(
+        db,
+        user_id=7,
+        trade_id=42,
+        limit=25,
+    )
+
+    assert rows == []
+    assert "JOIN trading_management_envelopes t ON t.id = d.trade_id" in db.sql
+    assert "CROSS JOIN LATERAL" not in db.sql
+    assert "d.trade_id = :trade_id" in db.sql
+    assert "ORDER BY d.as_of_ts DESC, d.id DESC" in db.sql
+    assert db.params == {"uid": 7, "limit": 25, "trade_id": 42}

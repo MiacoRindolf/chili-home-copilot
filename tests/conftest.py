@@ -12,12 +12,15 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
-from contextlib import contextmanager
+import uuid
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 from fastapi.testclient import TestClient
@@ -26,6 +29,24 @@ from fastapi.testclient import TestClient
 _PYTEST_DB_LOCK_CLASSID = 0x4348494C
 _PYTEST_DB_LOCK_OBJID = 0x54455354
 _pytest_db_lock_engine = None
+_pytest_db_slot_lock_file = None
+_pytest_db_slot_id = None
+_schema_initialized = False
+_db_stack_loaded = False
+_test_database_ready = False
+_isolated_test_database_created = False
+_isolated_test_database_cloned_from_base = False
+
+Base = None
+engine = None
+get_db = None
+User = None
+Device = None
+DEVICE_COOKIE_NAME = "chili_device_token"
+
+
+def _truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _hydrate_test_database_url_from_dotenv() -> None:
@@ -78,11 +99,129 @@ def _ensure_postgres_test_url() -> str:
             "name must end with '_test' (e.g. chili_test). This guard prevents accidental TRUNCATE "
             "of the live chili database."
         )
-    os.environ["DATABASE_URL"] = raw
     return raw
 
 
-_ensure_postgres_test_url()
+def _pytest_uses_shared_database() -> bool:
+    isolation = os.environ.get("CHILI_PYTEST_DB_ISOLATION", "").strip().lower()
+    return _truthy_env("CHILI_PYTEST_SHARED_DB") or isolation == "shared"
+
+
+def _database_url_with_name(raw_url: str, database_name: str) -> str:
+    url = make_url(raw_url)
+    return url.set(database=database_name).render_as_string(hide_password=False)
+
+
+def _admin_database_url(base_url: str | None = None) -> str:
+    admin_database = os.environ.get("CHILI_PYTEST_ADMIN_DATABASE", "postgres").strip()
+    return _database_url_with_name(base_url or _BASE_TEST_DATABASE_URL, admin_database or "postgres")
+
+
+def _safe_database_name_parts(base_url: str) -> str:
+    base_name = make_url(base_url).database or "chili_test"
+    safe_base = re.sub(r"[^A-Za-z0-9_]", "_", base_name)
+    if not re.match(r"^[A-Za-z_]", safe_base):
+        safe_base = f"t_{safe_base}"
+    return safe_base
+
+
+def _database_name_with_suffix(base_url: str, suffix: str) -> str:
+    safe_base = _safe_database_name_parts(base_url)
+    max_base_len = max(1, 63 - len(suffix) - 1)
+    return f"{safe_base[:max_base_len]}_{suffix}"
+
+
+def _ephemeral_database_name(base_url: str) -> str:
+    worker = re.sub(
+        r"[^A-Za-z0-9_]",
+        "_",
+        os.environ.get("PYTEST_XDIST_WORKER", "solo"),
+    )
+    suffix = f"pytest_{worker}_{os.getpid()}_{uuid.uuid4().hex[:8]}"
+    return _database_name_with_suffix(base_url, suffix)
+
+
+def _pooled_database_name(base_url: str, slot_id: int) -> str:
+    return _database_name_with_suffix(base_url, f"pytest_slot_{slot_id}")
+
+
+def _try_lock_slot_file(slot_lock_file) -> bool:
+    if os.name == "nt":
+        import msvcrt
+
+        try:
+            msvcrt.locking(slot_lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            return True
+        except OSError:
+            return False
+
+    import fcntl
+
+    try:
+        fcntl.flock(slot_lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+
+
+def _unlock_slot_file(slot_lock_file) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        try:
+            slot_lock_file.seek(0)
+            msvcrt.locking(slot_lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+        return
+
+    import fcntl
+
+    try:
+        fcntl.flock(slot_lock_file.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+
+
+def _acquire_pooled_database_name(base_url: str) -> str | None:
+    global _pytest_db_slot_id, _pytest_db_slot_lock_file
+    if _truthy_env("CHILI_PYTEST_EPHEMERAL_DB"):
+        return None
+    slot_count = max(0, int(os.environ.get("CHILI_PYTEST_DB_POOL_SIZE", "8")))
+    if slot_count <= 0:
+        return None
+    lock_dir = Path(__file__).resolve().parents[1] / ".pytest_cache" / "db-slots"
+    try:
+        lock_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    for slot_id in range(slot_count):
+        slot_lock_file = open(lock_dir / f"slot-{slot_id}.lock", "a+b")
+        if _try_lock_slot_file(slot_lock_file):
+            _pytest_db_slot_lock_file = slot_lock_file
+            _pytest_db_slot_id = slot_id
+            return _pooled_database_name(base_url, slot_id)
+        slot_lock_file.close()
+    return None
+
+
+def _isolated_database_name(base_url: str) -> str:
+    return _acquire_pooled_database_name(base_url) or _ephemeral_database_name(base_url)
+
+
+def _configure_pytest_database_url(base_url: str) -> str:
+    os.environ.setdefault("CHILI_PYTEST_BASE_DATABASE_URL", base_url)
+    if _pytest_uses_shared_database():
+        os.environ["DATABASE_URL"] = base_url
+        os.environ["TEST_DATABASE_URL"] = base_url
+        return base_url
+
+    db_name = _isolated_database_name(base_url)
+    isolated_url = _database_url_with_name(base_url, db_name)
+    os.environ["CHILI_PYTEST_ISOLATED_DB_NAME"] = db_name
+    os.environ["DATABASE_URL"] = isolated_url
+    os.environ["TEST_DATABASE_URL"] = isolated_url
+    return isolated_url
 
 # Skip heavy / lock-prone module-level pattern seeding in app.main when the test client
 # imports the app (see app.main). Pytest truncates tables per test; momentum tests seed
@@ -91,13 +230,8 @@ os.environ["CHILI_PYTEST"] = "1"
 # Avoid APScheduler + most deferred-startup DB maintenance during TestClient runs (reduces
 # concurrent DB sessions when pytest shares a dev database with Docker Compose).
 os.environ.setdefault("CHILI_SCHEDULER_ROLE", "none")
-
-# Engine + models only — no ``app.main`` at import. The full app loads when
-# ``client`` / ``fastapi_app`` is used (routers, scheduler hooks, pattern seeds).
-from app.db import Base, engine  # noqa: E402
-from app.deps import get_db  # noqa: E402
-from app.models import User, Device  # noqa: E402
-from app.pairing import DEVICE_COOKIE_NAME  # noqa: E402
+_BASE_TEST_DATABASE_URL = _ensure_postgres_test_url()
+_CONFIGURED_TEST_DATABASE_URL = _configure_pytest_database_url(_BASE_TEST_DATABASE_URL)
 
 _AGENT_DEBUG_LOG = Path(__file__).resolve().parents[1] / "debug-42a690.log"
 
@@ -120,7 +254,162 @@ def _agent_ndjson(*, hypothesis_id: str, location: str, message: str, data: dict
     # #endregion
 
 
-_schema_initialized = False
+def _validate_database_identifier(db_name: str) -> None:
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,62}", db_name):
+        raise RuntimeError(f"Refusing unsafe pytest database name: {db_name!r}")
+
+
+def _quoted_database_identifier(db_name: str) -> str:
+    _validate_database_identifier(db_name)
+    return f'"{db_name}"'
+
+
+def _ensure_test_database_ready() -> None:
+    """Create the per-process pytest database lazily, only for DB-backed tests."""
+    global _isolated_test_database_cloned_from_base, _isolated_test_database_created
+    global _test_database_ready
+    if _test_database_ready:
+        return
+    if _pytest_uses_shared_database():
+        _test_database_ready = True
+        return
+
+    db_name = make_url(_CONFIGURED_TEST_DATABASE_URL).database or ""
+    base_db_name = make_url(_BASE_TEST_DATABASE_URL).database or ""
+    if db_name == base_db_name:
+        raise RuntimeError("Isolated pytest database resolved to the shared base database.")
+    quoted_db_name = _quoted_database_identifier(db_name)
+    quoted_base_db_name = _quoted_database_identifier(base_db_name)
+    admin_engine = create_engine(
+        _admin_database_url(),
+        isolation_level="AUTOCOMMIT",
+        pool_pre_ping=True,
+        future=True,
+    )
+    try:
+        with admin_engine.connect() as conn:
+            exists = conn.execute(
+                text("SELECT 1 FROM pg_database WHERE datname = :db_name"),
+                {"db_name": db_name},
+            ).scalar()
+            if not exists:
+                try:
+                    conn.execute(
+                        text(
+                            f"CREATE DATABASE {quoted_db_name} "
+                            f"TEMPLATE {quoted_base_db_name}"
+                        )
+                    )
+                    _isolated_test_database_cloned_from_base = True
+                except Exception:
+                    conn.execute(text(f"CREATE DATABASE {quoted_db_name} TEMPLATE template0"))
+                    _isolated_test_database_cloned_from_base = False
+                _isolated_test_database_created = True
+    finally:
+        admin_engine.dispose()
+    _test_database_ready = True
+
+
+def _ensure_app_db_loaded() -> None:
+    """Load app DB globals after pytest has selected the correct database URL."""
+    global Base, Device, DEVICE_COOKIE_NAME, User, _db_stack_loaded, engine, get_db
+    if _db_stack_loaded:
+        return
+    _ensure_test_database_ready()
+    from app.db import Base as app_base
+    from app.db import engine as app_engine
+    from app.deps import get_db as app_get_db
+    from app.models import Device as app_device
+    from app.models import User as app_user
+    from app.pairing import DEVICE_COOKIE_NAME as app_device_cookie_name
+
+    Base = app_base
+    engine = app_engine
+    get_db = app_get_db
+    User = app_user
+    Device = app_device
+    DEVICE_COOKIE_NAME = app_device_cookie_name
+    _db_stack_loaded = True
+
+
+def _dispose_app_engine_if_loaded() -> None:
+    if _pytest_db_lock_engine is not None:
+        try:
+            _pytest_db_lock_engine.dispose()
+        except Exception:
+            pass
+    if engine is not None:
+        try:
+            engine.dispose()
+        except Exception:
+            pass
+
+
+def _release_pooled_database_slot() -> None:
+    global _pytest_db_slot_id, _pytest_db_slot_lock_file
+    if _pytest_db_slot_lock_file is not None:
+        try:
+            _unlock_slot_file(_pytest_db_slot_lock_file)
+        except Exception:
+            pass
+        try:
+            _pytest_db_slot_lock_file.close()
+        except Exception:
+            pass
+    _pytest_db_slot_lock_file = None
+    _pytest_db_slot_id = None
+
+
+def pytest_sessionfinish(session, exitstatus) -> None:
+    """Drop the temporary pytest database after the process is done."""
+    if _pytest_uses_shared_database():
+        _dispose_app_engine_if_loaded()
+        _release_pooled_database_slot()
+        return
+    should_drop_database = (
+        _pytest_db_slot_id is None
+        or _truthy_env("CHILI_PYTEST_DROP_ISOLATED_DB")
+    )
+    if not _isolated_test_database_created or not should_drop_database:
+        _dispose_app_engine_if_loaded()
+        _release_pooled_database_slot()
+        return
+
+    db_name = make_url(_CONFIGURED_TEST_DATABASE_URL).database or ""
+    quoted_db_name = _quoted_database_identifier(db_name)
+    _dispose_app_engine_if_loaded()
+    admin_engine = create_engine(
+        _admin_database_url(),
+        isolation_level="AUTOCOMMIT",
+        pool_pre_ping=True,
+        future=True,
+    )
+    try:
+        with admin_engine.connect() as conn:
+            drop_timeout_ms = max(
+                1000,
+                int(os.environ.get("CHILI_PYTEST_DROP_TIMEOUT_MS", "5000")),
+            )
+            conn.execute(text(f"SET statement_timeout = {drop_timeout_ms}"))
+            conn.execute(
+                text(
+                    """
+                    SELECT pg_terminate_backend(pid)
+                    FROM pg_stat_activity
+                    WHERE datname = :db_name
+                      AND pid <> pg_backend_pid()
+                    """
+                ),
+                {"db_name": db_name},
+            )
+            conn.execute(text(f"DROP DATABASE IF EXISTS {quoted_db_name}"))
+    except Exception:
+        pass
+    finally:
+        admin_engine.dispose()
+        _release_pooled_database_slot()
+
+
 _PROJECT_DOMAIN_TARGETED_TABLES = frozenset(
     {
         "users",
@@ -168,6 +457,10 @@ _PROJECT_DOMAIN_TARGETED_TABLES = frozenset(
         "qa_bug_reports",
         "project_domain_runs",
         "project_analysis_snapshots",
+        "project_autonomy_agent_profiles",
+        "project_autonomy_agent_schedules",
+        "project_autonomy_delegations",
+        "project_autonomy_operator_questions",
         "project_autonomy_runs",
         "project_autonomy_messages",
         "project_autonomy_steps",
@@ -185,7 +478,7 @@ _PROJECT_DOMAIN_TARGETED_TESTS = (
     "test_projects.py",
     "test_code_agent.py",
 )
-_TRADING_DOMAIN_TARGETED_TABLES = frozenset(
+_TRADING_DOMAIN_BASE_TARGETED_TABLES = frozenset(
     {
         "users",
         "devices",
@@ -194,11 +487,13 @@ _TRADING_DOMAIN_TARGETED_TABLES = frozenset(
         "broker_sessions",
         "pattern_evidence_corrections",
         "scan_patterns",
-        *(
-            table.name
-            for table in Base.metadata.sorted_tables
-            if table.name.startswith(("trading_", "fast_path_", "momentum_"))
-        ),
+    }
+)
+_TRADING_DOMAIN_TARGETED_TABLES_CACHE = None
+_POSITION_SIZER_EMITTER_TARGETED_TABLES = frozenset(
+    {
+        "trading_position_sizer_log",
+        "trading_trades",
     }
 )
 _TRADING_DOMAIN_TARGETED_TESTS = (
@@ -208,6 +503,8 @@ _TRADING_DOMAIN_TARGETED_TESTS = (
     "test_auto_trader_safety.py",
     "test_auto_trader_monitor.py",
     "test_autotrader_desk_api.py",
+    "test_autotrader_deployment_report.py",
+    "test_autotrader_deployment_unblock.py",
     "test_autotrader_payoff_sizing.py",
     "test_autotrader_pdt_soft_warn.py",
     "test_autotrader_position_overrides.py",
@@ -225,6 +522,9 @@ _TRADING_DOMAIN_TARGETED_TESTS = (
     "test_governance_daily_loss.py",
     "test_edge_aware_evolution.py",
     "test_edge_reliability.py",
+    "test_edge_reliability_exit_noop_policy.py",
+    "test_edge_reliability_exit_variant_noop.py",
+    "test_edge_reliability_recert_policy.py",
     "test_emergency_liquidation_no_quote.py",
     "test_market_data_dead_cache_fallback.py",
     "test_monitor_api_execution_state.py",
@@ -235,6 +535,7 @@ _TRADING_DOMAIN_TARGETED_TESTS = (
     "test_pattern_directional_outcome.py",
     "test_pattern_cohort_promote.py",
     "test_pattern_imminent_alerts.py",
+    "test_research_shadow_fastlane.py",
     "test_recert_rescue_signal_tickers.py",
     "test_stop_engine_options_auto_exec.py",
     "test_stuck_order_watchdog.py",
@@ -252,10 +553,41 @@ _TRADING_DEFAULT_USER_TESTS = (
 )
 
 
+def _database_has_current_app_schema() -> bool:
+    from app.migrations import MIGRATIONS
+
+    latest_migration = MIGRATIONS[-1][0] if MIGRATIONS else None
+    if latest_migration is None:
+        return False
+    try:
+        with engine.connect() as conn:
+            return bool(
+                conn.execute(text("SELECT to_regclass('public.users')")).scalar()
+                and conn.execute(text("SELECT to_regclass('public.schema_version')")).scalar()
+                and conn.execute(
+                    text(
+                        "SELECT 1 FROM schema_version "
+                        "WHERE version_id = :latest_migration"
+                    ),
+                    {"latest_migration": latest_migration},
+                ).scalar()
+            )
+    except Exception:
+        return False
+
+
 def _bootstrap_test_schema() -> None:
     """Create tables and run versioned migrations (idempotent)."""
     global _schema_initialized
     if _schema_initialized:
+        return
+    _ensure_app_db_loaded()
+    if (
+        not _pytest_uses_shared_database()
+        and not _truthy_env("CHILI_PYTEST_FORCE_SCHEMA_BOOTSTRAP")
+        and _database_has_current_app_schema()
+    ):
+        _schema_initialized = True
         return
     Base.metadata.create_all(bind=engine)
     from app.migrations import run_migrations
@@ -270,6 +602,7 @@ def fastapi_app():
     global _schema_initialized
     import sys
 
+    _ensure_test_database_ready()
     sys.stderr.write(
         "pytest: loading app.main (routers; schema via db fixture when CHILI_PYTEST=1)...\n"
     )
@@ -315,6 +648,7 @@ def _evict_idle_in_transaction_peers() -> None:
     """
     if not (os.environ.get("CHILI_PYTEST") or "").strip():
         return
+    _ensure_app_db_loaded()
     import sys
 
     try:
@@ -352,6 +686,7 @@ def _terminate_stale_truncate_peers(max_age_s: int = 90) -> None:
     """Kill stale active TRUNCATE sessions left behind by timed-out pytest runs."""
     if not (os.environ.get("CHILI_PYTEST") or "").strip():
         return
+    _ensure_app_db_loaded()
     try:
         with engine.begin() as conn:
             conn.execute(
@@ -383,6 +718,7 @@ def _terminate_stale_pytest_lock_holders(max_age_s: int = 90) -> None:
     """
     if not (os.environ.get("CHILI_PYTEST") or "").strip():
         return
+    _ensure_app_db_loaded()
     try:
         with engine.begin() as conn:
             conn.execute(
@@ -440,10 +776,31 @@ def _truncate_relation_names(conn, logical_names: list[str]) -> list[str]:
     return logical_names
 
 
+def _metadata_tables() -> list:
+    _ensure_app_db_loaded()
+    return list(Base.metadata.tables.values())
+
+
+def _metadata_sorted_tables() -> list:
+    _ensure_app_db_loaded()
+    import warnings
+
+    from sqlalchemy.exc import SAWarning
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Cannot correctly sort tables;.*",
+            category=SAWarning,
+        )
+        return list(Base.metadata.sorted_tables)
+
+
 def _targeted_users_delete_sql(table_names: frozenset[str]):
     """Delete only users that are not protected by out-of-scope NO ACTION FKs."""
+    _ensure_app_db_loaded()
     blockers: list[str] = []
-    for table in Base.metadata.sorted_tables:
+    for table in _metadata_tables():
         if table.name in table_names:
             continue
         for column in table.columns:
@@ -462,6 +819,7 @@ def _targeted_users_delete_sql(table_names: frozenset[str]):
 
 def _truncate_app_tables(table_names: frozenset[str] | None = None) -> None:
     """Remove row data between tests; keep schema_version so migrations are not re-run."""
+    _ensure_app_db_loaded()
     # Static neural mesh topology is seeded by migration 086; keep nodes/edges so tests
     # do not need to re-seed the graph definition every time.
     _skip_truncate = frozenset({"schema_version", "brain_graph_nodes", "brain_graph_edges"})
@@ -471,7 +829,7 @@ def _truncate_app_tables(table_names: frozenset[str] | None = None) -> None:
         with engine.begin() as conn:
             targeted_tables = [
                 table
-                for table in reversed(Base.metadata.sorted_tables)
+                for table in reversed(_metadata_sorted_tables())
                 if table.name not in _skip_truncate and table.name in table_names
             ]
             for table in targeted_tables:
@@ -486,7 +844,7 @@ def _truncate_app_tables(table_names: frozenset[str] | None = None) -> None:
         return
     logical_names = [
         t.name
-        for t in Base.metadata.sorted_tables
+        for t in _metadata_tables()
         if t.name not in _skip_truncate and (table_names is None or t.name in table_names)
     ]
     if not logical_names:
@@ -534,6 +892,23 @@ def _test_prefers_targeted_cleanup(request) -> bool:
     return any(token in name for token in _PROJECT_DOMAIN_TARGETED_TESTS)
 
 
+def _trading_domain_targeted_tables() -> frozenset[str]:
+    global _TRADING_DOMAIN_TARGETED_TABLES_CACHE
+    if _TRADING_DOMAIN_TARGETED_TABLES_CACHE is None:
+        _ensure_app_db_loaded()
+        _TRADING_DOMAIN_TARGETED_TABLES_CACHE = frozenset(
+            {
+                *_TRADING_DOMAIN_BASE_TARGETED_TABLES,
+                *(
+                    table.name
+                    for table in _metadata_tables()
+                    if table.name.startswith(("trading_", "fast_path_", "momentum_"))
+                ),
+            }
+        )
+    return _TRADING_DOMAIN_TARGETED_TABLES_CACHE
+
+
 def _test_targeted_cleanup_tables(request) -> frozenset[str] | None:
     try:
         name = Path(str(request.node.fspath)).name.lower()
@@ -541,8 +916,10 @@ def _test_targeted_cleanup_tables(request) -> frozenset[str] | None:
         return None
     if any(token in name for token in _PROJECT_DOMAIN_TARGETED_TESTS):
         return _PROJECT_DOMAIN_TARGETED_TABLES
+    if name == "test_position_sizer_emitter.py":
+        return _POSITION_SIZER_EMITTER_TARGETED_TABLES
     if name in _TRADING_DOMAIN_TARGETED_TESTS:
-        return _TRADING_DOMAIN_TARGETED_TABLES
+        return _trading_domain_targeted_tables()
     return None
 
 
@@ -555,6 +932,7 @@ def _test_needs_default_trading_users(request) -> bool:
 
 
 def _seed_default_trading_users() -> None:
+    _ensure_app_db_loaded()
     with engine.begin() as conn:
         conn.execute(
             text(
@@ -662,6 +1040,7 @@ def _get_pytest_db_lock_engine():
     churn between tests.
     """
     global _pytest_db_lock_engine
+    _ensure_app_db_loaded()
     if _pytest_db_lock_engine is None:
         _pytest_db_lock_engine = create_engine(
             engine.url.render_as_string(hide_password=False),
@@ -681,7 +1060,10 @@ def db(request):
     the app lifespan open; post-test truncate races request/engine cleanup and caused
     teardown errors (lock timeout) after PASSED.
     """
-    with _pytest_db_isolation_lock():
+    _ensure_test_database_ready()
+    _ensure_app_db_loaded()
+    lock_cm = _pytest_db_isolation_lock() if _pytest_uses_shared_database() else nullcontext()
+    with lock_cm:
         _bootstrap_test_schema()
         _reset_trading_test_process_state()
         _truncate_app_tables(_test_targeted_cleanup_tables(request))
@@ -699,6 +1081,7 @@ def db(request):
 @pytest.fixture()
 def client(db, fastapi_app, _asgi_test_client):
     """FastAPI TestClient wired to the same PostgreSQL database as ``db``."""
+    _ensure_app_db_loaded()
 
     def _override_get_db():
         try:
@@ -723,9 +1106,9 @@ def client(db, fastapi_app, _asgi_test_client):
     fastapi_app.dependency_overrides.clear()
 
 
-@pytest.fixture()
-def paired_client(db, client):
+def _pair_test_client(db, client):
     """TestClient with a cookie representing a paired (non-guest) user."""
+    _ensure_app_db_loaded()
     user = User(name="TestUser")
     db.add(user)
     db.flush()
@@ -751,3 +1134,47 @@ def paired_client(db, client):
 
     client.cookies.set(DEVICE_COOKIE_NAME, token)
     return client, user
+
+
+@pytest.fixture()
+def make_router_client(db):
+    """Build a minimal FastAPI app for route tests that do not need app.main."""
+    from fastapi import FastAPI
+
+    _ensure_app_db_loaded()
+    clients = []
+
+    def _make_router_client(*routers):
+        app = FastAPI()
+        for router in routers:
+            app.include_router(router)
+
+        def _override_get_db():
+            try:
+                yield db
+            finally:
+                pass
+
+        app.dependency_overrides[get_db] = _override_get_db
+        route_client = TestClient(app)
+        clients.append(route_client)
+        return route_client
+
+    try:
+        yield _make_router_client
+    finally:
+        for route_client in clients:
+            route_client.close()
+
+
+@pytest.fixture()
+def paired_identity(db):
+    def _pair(client):
+        return _pair_test_client(db, client)
+
+    return _pair
+
+
+@pytest.fixture()
+def paired_client(db, client):
+    return _pair_test_client(db, client)
