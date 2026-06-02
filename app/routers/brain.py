@@ -1574,6 +1574,7 @@ def reasoning_research_report(
         stats={"Topics": len(rows), "Sources": len(sources)},
         sources=sources,
         category="research",
+        embed=(request.query_params.get("embed") == "1"),
     )
     headers = {}
     if download:

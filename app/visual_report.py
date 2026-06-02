@@ -424,6 +424,9 @@ body::before {{
 .sources-list .sdomain {{ color: var(--text-muted); font-size: 0.75rem; margin-left: auto; flex-shrink: 0; }}
 .report-footer {{ text-align: center; padding: 2rem; font-size: 0.75rem; color: var(--text-muted); border-top: 1px solid var(--border); margin-top: 2rem; }}
 @media print {{ .toc-sidebar, .toolbar {{ display: none !important; }} .layout {{ grid-template-columns: 1fr; }} }}
+/* embed mode: shown inside a CHILI OS window that already provides chrome */
+.embed .toolbar, .embed .hero {{ display: none; }}
+.embed .stats-bar {{ margin-top: 0; }}
 {category_css}
 </style>
 </head>
@@ -520,6 +523,7 @@ def generate_report(
     sources: Optional[List[Dict]] = None,
     stats: Optional[Dict] = None,
     category: str = "",
+    embed: bool = False,
 ) -> str:
     """Render a complete, self-contained HTML report from markdown.
 
@@ -603,8 +607,14 @@ def generate_report(
 
     category_css = _category_css(category)
     # Only emit a category- class when the theme actually resolved, so default
-    # reports keep an empty body class (and produce no override CSS).
-    body_class = f"category-{category.strip().lower()}" if category_css else ""
+    # reports keep an empty body class (and produce no override CSS). `embed`
+    # adds an `embed` class that hides the toolbar + hero (the OS window frame).
+    _classes = []
+    if category_css:
+        _classes.append(f"category-{category.strip().lower()}")
+    if embed:
+        _classes.append("embed")
+    body_class = " ".join(_classes)
 
     return _TEMPLATE.format(
         title=html.escape(title_text),
