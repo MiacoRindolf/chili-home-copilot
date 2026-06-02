@@ -171,6 +171,7 @@
 .ws-palette .opt .pi{width:26px;height:26px;border-radius:7px;background:var(--ws-surface-3);display:grid;place-items:center;color:var(--ws-text-2)}
 .ws-palette .opt .pi svg{width:15px;height:15px}
 .ws-palette .opt .pk{margin-left:auto;color:var(--ws-text-3);font-size:var(--ws-fs-11)}
+.ws-palette .ws-hl{background:transparent;color:var(--ws-accent);font-weight:var(--ws-fw-semi)}
 
 /* ── Spaces menu (saved window layouts) ── */
 .ws-spaces{position:relative}
