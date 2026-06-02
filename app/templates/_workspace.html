@@ -40,6 +40,13 @@
       </button>
       <div class="ws-topbar-right">
         {% block ws_topbar_extra %}{% endblock %}
+        <div class="ws-notif" id="ws-notif">
+          <button class="ws-iconbtn" id="ws-notif-btn" type="button" title="Notifications" aria-haspopup="true" aria-expanded="false">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
+            <span class="ws-notif-badge" id="ws-notif-badge" hidden>0</span>
+          </button>
+          <div class="ws-notif-panel" id="ws-notif-panel" role="menu" aria-label="Notifications"></div>
+        </div>
         <div class="ws-spaces" id="ws-spaces">
           <button class="ws-iconbtn" id="ws-spaces-btn" type="button" title="Spaces — saved window layouts" aria-haspopup="true" aria-expanded="false">
             <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
