@@ -9,6 +9,7 @@ import pytest
 
 from app.models.trading import Trade
 from app.services.trading import live_exit_engine as lee
+from app.services.trading.exit_config_defaults import classify_exit_params
 
 
 def _live_trade(
@@ -36,6 +37,9 @@ class _FakeQuery:
 
     def filter(self, *_args, **_kwargs):
         return self
+
+    def first(self):
+        return self._rows[0] if self._rows else None
 
     def all(self):
         return self._rows
@@ -488,6 +492,66 @@ def test_integer_string_max_bars_still_time_decays(monkeypatch):
 
     assert result["action"] == "exit_time_decay"
     assert result["bars_held"] == 21
+
+
+def test_load_exit_config_infers_backtest_classifier_defaults_for_missing_config():
+    from app.models.trading import ScanPattern
+
+    rules_json = {"conditions": [{"indicator": "rsi_14", "op": "<=", "value": 40}]}
+    pat = ScanPattern(
+        id=42,
+        name="1m mean reversion",
+        rules_json=rules_json,
+        timeframe="1m",
+        active=True,
+    )
+
+    cfg = lee._load_exit_config(_FakeDb([pat]), pat.id)
+
+    _atr_mult, max_bars, use_bos = classify_exit_params(
+        rules_json["conditions"],
+        timeframe="1m",
+    )
+    assert cfg["max_bars"] == max_bars == 30
+    assert cfg["use_bos"] is use_bos is True
+    assert cfg["exit_defaults_source"] == "backtest_classifier"
+
+
+def test_load_exit_config_infers_defaults_from_legacy_rules_json_string():
+    from app.models.trading import ScanPattern
+
+    pat = ScanPattern(
+        id=44,
+        name="legacy string rules",
+        rules_json='{"conditions": [{"indicator": "bb_squeeze", "op": ">", "value": 0}]}',
+        timeframe="1m",
+        active=True,
+    )
+
+    cfg = lee._load_exit_config(_FakeDb([pat]), pat.id)
+
+    assert cfg["max_bars"] == 120
+    assert cfg["use_bos"] is False
+    assert cfg["exit_defaults_source"] == "backtest_classifier"
+
+
+def test_load_exit_config_explicit_config_wins_over_classifier_defaults():
+    from app.models.trading import ScanPattern
+
+    pat = ScanPattern(
+        id=43,
+        name="explicit exit config",
+        rules_json={"conditions": [{"indicator": "rsi_14", "op": "<=", "value": 40}]},
+        timeframe="1m",
+        exit_config={"max_bars": 7, "use_bos": False},
+        active=True,
+    )
+
+    cfg = lee._load_exit_config(_FakeDb([pat]), pat.id)
+
+    assert cfg["max_bars"] == 7
+    assert cfg["use_bos"] is False
+    assert "exit_defaults_source" not in cfg
 
 
 @pytest.mark.parametrize("bad_fraction", [0.0, -0.1, 1.01, math.nan, math.inf, "bad"])

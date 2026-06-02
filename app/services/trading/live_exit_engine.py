@@ -409,9 +409,20 @@ def _load_exit_config(db: Session, scan_pattern_id: int | None) -> dict:
         return defaults
     try:
         pat = db.query(ScanPattern).filter(ScanPattern.id == scan_pattern_id).first()
-        if pat and pat.exit_config:
+        if not pat:
+            return defaults
+        if pat.exit_config:
             cfg = pat.exit_config if isinstance(pat.exit_config, dict) else json.loads(pat.exit_config)
             defaults.update({k: v for k, v in cfg.items() if v is not None})
+        else:
+            from .exit_config_defaults import infer_exit_config_defaults
+
+            inferred = infer_exit_config_defaults(
+                getattr(pat, "rules_json", None),
+                getattr(pat, "timeframe", None),
+            )
+            if inferred:
+                defaults.update(inferred)
     except Exception:
         pass
     return defaults

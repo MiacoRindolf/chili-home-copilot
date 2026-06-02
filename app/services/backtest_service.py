@@ -19,6 +19,10 @@ from .trading.research_integrity import (
     enrich_pattern_backtest_result as _enrich_pattern_bt_result,
 )
 from .trading.backtest_provenance import normalize_backtest_storage_metadata
+from .trading.exit_config_defaults import (
+    EXIT_PARAMS_BY_TIMEFRAME as _EXIT_PARAMS_BY_TIMEFRAME,
+    classify_exit_params as _classify_exit_params,
+)
 
 from ..config import (
     BRAIN_EXIT_ENGINE_BACKTEST_CLOSE_AGREEMENT_SAMPLE_PCT_DEFAULT,
@@ -1907,40 +1911,6 @@ _TIMEFRAME_PARAMS: dict[str, dict[str, Any]] = {
     "1d":  {"interval": "1d",  "period": "2y",   "min_bars": 30},
 }
 
-_EXIT_PARAMS_BY_TIMEFRAME: dict[str, dict[str, tuple[float, int, bool]]] = {
-    "1m": {
-        "breakout": (1.0, 120, False),  # ~2 hours of 1m bars
-        "mean_rev": (0.5, 30, True),    # ~30 minutes
-        "default":  (0.8, 60, True),    # ~1 hour
-    },
-    "5m": {
-        "breakout": (1.5, 78, False),
-        "mean_rev": (0.8, 24, True),
-        "default":  (1.2, 48, True),
-    },
-    "15m": {
-        "breakout": (2.0, 26, False),
-        "mean_rev": (1.0, 8, True),
-        "default":  (1.5, 16, True),
-    },
-    "1h": {
-        "breakout": (2.5, 48, False),
-        "mean_rev": (1.2, 8, True),
-        "default":  (1.8, 24, True),
-    },
-    "4h": {
-        "breakout": (2.8, 30, False),
-        "mean_rev": (1.3, 10, True),
-        "default":  (2.0, 18, True),
-    },
-    "1d": {
-        "breakout": (3.0, 50, False),
-        "mean_rev": (1.5, 15, True),
-        "default":  (2.0, 25, True),
-    },
-}
-
-
 def infer_pattern_timeframe(
     conditions: list[dict[str, Any]],
     name: str = "",
@@ -2033,60 +2003,6 @@ def get_brain_backtest_window(timeframe: str) -> tuple[str, str]:
     """
     bp = get_backtest_params(timeframe)
     return bp["period"], bp["interval"]
-
-
-def _classify_exit_params(
-    conditions: list[dict[str, Any]],
-    timeframe: str = "1d",
-) -> tuple[float, int, bool]:
-    """Infer exit parameters from the pattern's condition indicators AND timeframe.
-
-    Returns ``(atr_mult, max_bars, use_bos)`` tuned to both pattern type and
-    timeframe so that intraday patterns exit within hours, not days.
-    """
-    _BREAKOUT_INDICATORS = {
-        "resistance_retests", "bb_squeeze", "bb_squeeze_firing",
-        "narrow_range", "vcp_count", "dist_to_resistance_pct",
-        "retest_range_tightening", "resistance",
-    }
-    _MEAN_REV_INDICATORS = {
-        "vwap_reclaim",
-        "ibs",
-        "pullback_stretch_entry",
-    }
-
-    breakout_score = 0
-    mean_rev_score = 0
-
-    for cond in conditions:
-        ind = cond.get("indicator", "")
-        op = cond.get("op", "")
-        value = cond.get("value")
-
-        if ind in _BREAKOUT_INDICATORS:
-            breakout_score += 2
-        if ind in _MEAN_REV_INDICATORS:
-            mean_rev_score += 2
-
-        if ind == "rsi_14":
-            try:
-                v = float(value) if value is not None else 0
-            except (TypeError, ValueError):
-                v = 0
-            if op in (">", ">=") and v >= 60:
-                breakout_score += 1
-            elif op in ("<", "<=") and v <= 40:
-                mean_rev_score += 1
-
-    tf_params = _EXIT_PARAMS_BY_TIMEFRAME.get(
-        timeframe, _EXIT_PARAMS_BY_TIMEFRAME["1d"]
-    )
-
-    if breakout_score > mean_rev_score:
-        return tf_params["breakout"]
-    if mean_rev_score > breakout_score:
-        return tf_params["mean_rev"]
-    return tf_params["default"]
 
 
 def _run_dynamic_pattern_slice(
