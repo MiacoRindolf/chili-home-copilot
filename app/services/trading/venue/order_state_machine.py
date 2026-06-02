@@ -210,9 +210,9 @@ def _is_enabled() -> bool:
     """
     try:
         from app.config import settings
-        return bool(getattr(settings, "chili_order_state_machine_enabled", False))
+        return bool(getattr(settings, "chili_order_state_machine_enabled", True))
     except Exception:
-        return False
+        return True
 
 
 # ── DB readers ────────────────────────────────────────────────────────

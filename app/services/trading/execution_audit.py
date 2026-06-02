@@ -38,6 +38,35 @@ def _json_safe(value: Any) -> Any:
         return {"_unserializable": str(value)[:4000]}
 
 
+def _order_state_projection_payload(result: Any) -> dict[str, Any]:
+    """Compact diagnostic payload for order-state projection attempts."""
+    return {
+        "wrote": bool(getattr(result, "wrote", False)),
+        "reason": str(getattr(result, "reason", "") or ""),
+        "from_state": (
+            getattr(getattr(result, "from_state", None), "value", None)
+            or getattr(result, "from_state", None)
+        ),
+        "to_state": (
+            getattr(getattr(result, "to_state", None), "value", None)
+            or getattr(result, "to_state", None)
+        ),
+        "order_id": getattr(result, "order_id", None),
+        "client_order_id": getattr(result, "client_order_id", None),
+    }
+
+
+def _attach_order_state_projection_payload(
+    event_row: Any,
+    payload: dict[str, Any],
+) -> None:
+    current = _json_safe(getattr(event_row, "payload_json", None) or {})
+    if not isinstance(current, dict):
+        current = {"raw_payload": current}
+    current["order_state_projection"] = _json_safe(payload)
+    event_row.payload_json = current
+
+
 def _parse_dt(value: Any) -> datetime | None:
     if value is None or value == "":
         return None
@@ -416,14 +445,13 @@ def record_execution_event(
 
     # P1.1 — project the broker-native status onto a canonical state and
     # write one row to ``trading_order_state_log`` per transition. This is
-    # additive: the state machine is opt-in via
-    # ``settings.chili_order_state_machine_enabled`` (default False), so in
-    # the rollout period this is a pure no-op. Failures here must never
-    # mask the authoritative event row that was just written.
+    # additive: the event stream remains authoritative. Projection diagnostics
+    # are echoed into the event payload so missing lifecycle rows can be traced
+    # without relying only on logs.
     try:
         from .venue.order_state_machine import record_from_broker_status
 
-        record_from_broker_status(
+        projection = record_from_broker_status(
             db,
             broker_status=status,
             venue=venue_name,
@@ -438,10 +466,17 @@ def record_execution_event(
                 "average_fill_price": average_fill_price,
             },
         )
+        _attach_order_state_projection_payload(
+            event_row,
+            _order_state_projection_payload(projection),
+        )
     except Exception:
         # Never let the state machine crash the execution event path.
         # The event row is already flushed — that's the authoritative record.
-        pass
+        _attach_order_state_projection_payload(
+            event_row,
+            {"wrote": False, "reason": "exception"},
+        )
 
     return event_row
 

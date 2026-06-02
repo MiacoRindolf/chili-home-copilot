@@ -5,14 +5,17 @@ from types import SimpleNamespace
 
 from app.models import ScanPattern, Trade, User
 from app.services.trading.execution_audit import (
+    _attach_order_state_projection_payload,
     _execution_event_has_real_fill,
     _execution_event_realized_slippage_bps,
+    _order_state_projection_payload,
     aggregate_execution_events_for_pattern,
     apply_execution_event_to_trade,
     normalize_coinbase_order_event,
     normalize_robinhood_order_event,
     record_execution_event,
 )
+from app.services.trading.venue.order_state_machine import OrderState
 
 
 def test_normalize_robinhood_partial_fill_event():
@@ -33,6 +36,48 @@ def test_normalize_robinhood_partial_fill_event():
     assert event["requested_quantity"] == 10.0
     assert event["cumulative_filled_quantity"] == 4.0
     assert event["realized_slippage_bps"] == 50.0
+
+
+def test_order_state_projection_payload_serializes_state_enums():
+    result = SimpleNamespace(
+        wrote=True,
+        reason="ok",
+        from_state=None,
+        to_state=OrderState.ACK,
+        order_id="order-1",
+        client_order_id="client-1",
+    )
+
+    out = _order_state_projection_payload(result)
+
+    assert out == {
+        "wrote": True,
+        "reason": "ok",
+        "from_state": None,
+        "to_state": "ack",
+        "order_id": "order-1",
+        "client_order_id": "client-1",
+    }
+
+
+def test_attach_order_state_projection_payload_preserves_existing_payload():
+    event = SimpleNamespace(payload_json={"broker": {"status": "open"}})
+
+    _attach_order_state_projection_payload(
+        event,
+        {
+            "wrote": False,
+            "reason": "unknown_broker_status",
+            "to_state": OrderState.ACK,
+        },
+    )
+
+    assert event.payload_json["broker"] == {"status": "open"}
+    assert event.payload_json["order_state_projection"] == {
+        "wrote": False,
+        "reason": "unknown_broker_status",
+        "to_state": "ack",
+    }
 
 
 def test_normalize_robinhood_option_event_uses_option_family():
