@@ -154,6 +154,52 @@ def _clamp01(value: float, lo: float = 0.01, hi: float = 0.99) -> float:
     return max(lo, min(hi, v))
 
 
+def _probability_raw_for_evidence(value: Any) -> Any:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float, str)) or value is None:
+        return value
+    return repr(value)
+
+
+def _probability_input_evidence(
+    value: Any,
+    *,
+    source_surface: str,
+    normalized_probability: float,
+    lo: float = 0.01,
+    hi: float = 0.99,
+) -> dict[str, Any]:
+    evidence: dict[str, Any] = {
+        "source_surface": source_surface,
+        "parser": "position_sizer_emitter._clamp01",
+        "raw_value": _probability_raw_for_evidence(value),
+        "accepted_scale": None,
+        "normalized_probability": normalized_probability,
+        "parser_outcome": "accepted",
+        "rejection_reason": None,
+    }
+    if isinstance(value, bool):
+        evidence["parser_outcome"] = "defaulted"
+        evidence["rejection_reason"] = "boolean_probability"
+        return evidence
+    raw = _finite_float(value)
+    if raw is None:
+        evidence["parser_outcome"] = "defaulted"
+        evidence["rejection_reason"] = "not_finite_numeric"
+        return evidence
+    if raw > 100.0:
+        evidence["parser_outcome"] = "defaulted"
+        evidence["rejection_reason"] = "above_percent_ceiling"
+        return evidence
+    evidence["accepted_scale"] = "percent_0_100" if raw > 1.0 else "fraction_0_1"
+    scaled = raw / 100.0 if raw > 1.0 else raw
+    if scaled < lo or scaled > hi:
+        evidence["parser_outcome"] = "clamped"
+        evidence["rejection_reason"] = "probability_clamped_to_bounds"
+    return evidence
+
+
 def _direction(value: Any) -> str:
     side = str(value or "long").strip().lower()
     return "short" if side == "short" else "long"
@@ -252,8 +298,12 @@ def _build_input(
     target_price = _finite_float(signal.target_price)
     if net_edge_score is not None:
         fallback_prob = signal.confidence if signal.confidence is not None else 0.55
-        calibrated_prob = _clamp01(
-            getattr(net_edge_score, "calibrated_prob", fallback_prob)
+        raw_probability = getattr(net_edge_score, "calibrated_prob", fallback_prob)
+        calibrated_prob = _clamp01(raw_probability)
+        probability_input = _probability_input_evidence(
+            raw_probability,
+            source_surface="position_sizer_emitter.net_edge_score",
+            normalized_probability=calibrated_prob,
         )
         payoff_fraction = max(0.0, _finite_float(getattr(net_edge_score, "expected_payoff", 0.0)) or 0.0)
         loss_per_unit = max(0.0, _finite_float(getattr(net_edge_score, "loss_per_unit", 0.0)) or 0.0)
@@ -272,7 +322,13 @@ def _build_input(
             stop_price,
             signal.direction,
         )
-        calibrated_prob = _clamp01(signal.confidence if signal.confidence is not None else 0.55)
+        raw_probability = signal.confidence if signal.confidence is not None else 0.55
+        calibrated_prob = _clamp01(raw_probability)
+        probability_input = _probability_input_evidence(
+            raw_probability,
+            source_surface="position_sizer_emitter.signal_confidence",
+            normalized_probability=calibrated_prob,
+        )
         payoff_fraction = _payoff_fraction(
             entry_price,
             signal.target_price,
@@ -316,6 +372,7 @@ def _build_input(
         ),
         qty_rounding=qty_rounding,
         unit_multiplier=unit_multiplier,
+        probability_input=probability_input,
     )
 
 

@@ -189,6 +189,8 @@ def write_proposal(
         "qty_rounding": inp.qty_rounding,
         "reasoning": output.reasoning,
     }
+    if inp.probability_input is not None:
+        payload["probability_input"] = inp.probability_input
     if correlation is not None:
         payload["correlation_open_notional"] = correlation.open_notional
     if portfolio is not None:

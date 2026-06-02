@@ -1,6 +1,8 @@
 """DB-free guards for the Phase H position-sizer emitter."""
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from app.services.trading.position_sizer_emitter import (
@@ -43,6 +45,61 @@ def test_emitter_clamp01_rejects_bool_confidence() -> None:
     assert _clamp01(75.0) == pytest.approx(0.75)
     assert _clamp01(100.0) == pytest.approx(0.99)
     assert _clamp01(101.0) == pytest.approx(0.55)
+
+
+def test_emitter_records_fraction_confidence_input_evidence() -> None:
+    inp = _build_input(_signal(confidence=0.72), net_edge_score=None)
+
+    assert inp.calibrated_prob == pytest.approx(0.72)
+    assert inp.probability_input == {
+        "source_surface": "position_sizer_emitter.signal_confidence",
+        "parser": "position_sizer_emitter._clamp01",
+        "raw_value": 0.72,
+        "accepted_scale": "fraction_0_1",
+        "normalized_probability": pytest.approx(0.72),
+        "parser_outcome": "accepted",
+        "rejection_reason": None,
+    }
+
+
+def test_emitter_records_percent_confidence_input_evidence() -> None:
+    inp = _build_input(_signal(confidence=75.0), net_edge_score=None)
+
+    assert inp.calibrated_prob == pytest.approx(0.75)
+    assert inp.probability_input["raw_value"] == pytest.approx(75.0)
+    assert inp.probability_input["accepted_scale"] == "percent_0_100"
+    assert inp.probability_input["normalized_probability"] == pytest.approx(0.75)
+    assert inp.probability_input["parser_outcome"] == "accepted"
+
+
+def test_emitter_records_defaulted_confidence_input_evidence() -> None:
+    inp = _build_input(_signal(confidence=101.0), net_edge_score=None)
+
+    assert inp.calibrated_prob == pytest.approx(0.55)
+    assert inp.probability_input["raw_value"] == pytest.approx(101.0)
+    assert inp.probability_input["accepted_scale"] is None
+    assert inp.probability_input["normalized_probability"] == pytest.approx(0.55)
+    assert inp.probability_input["parser_outcome"] == "defaulted"
+    assert inp.probability_input["rejection_reason"] == "above_percent_ceiling"
+
+
+def test_emitter_records_netedge_probability_input_evidence() -> None:
+    net_edge_score = SimpleNamespace(
+        calibrated_prob=0.67,
+        expected_payoff=0.08,
+        loss_per_unit=0.03,
+        costs=None,
+        expected_net_pnl=None,
+    )
+
+    inp = _build_input(_signal(confidence=75.0), net_edge_score=net_edge_score)
+
+    assert inp.calibrated_prob == pytest.approx(0.67)
+    assert inp.probability_input["source_surface"] == "position_sizer_emitter.net_edge_score"
+    assert inp.probability_input["raw_value"] == pytest.approx(0.67)
+    assert inp.probability_input["accepted_scale"] == "fraction_0_1"
+    assert inp.probability_input["normalized_probability"] == pytest.approx(0.67)
+    assert inp.probability_input["parser_outcome"] == "accepted"
 
 
 def test_emitter_boolean_prices_do_not_become_one_dollar_sizer_inputs() -> None:

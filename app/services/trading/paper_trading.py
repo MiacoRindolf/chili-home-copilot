@@ -72,6 +72,7 @@ PAPER_SHADOW_PRIORITY_PILOT_PROMOTED = 55
 PAPER_SHADOW_PRIORITY_LIVE_READY = 65
 PAPER_SHADOW_PRIORITY_RECERT = 75
 PAPER_SHADOW_PRIORITY_NEAR_MISS_SIGNAL_LANE = 50
+PAPER_CONFIDENCE_INPUT_META_KEY = "_confidence_input"
 PAPER_SHADOW_STAGE_PRIORITY = {
     "candidate": PAPER_SHADOW_PRIORITY_CANDIDATE,
     "backtested": PAPER_SHADOW_PRIORITY_VALIDATED,
@@ -103,14 +104,52 @@ def _positive_float(value: Any) -> float | None:
 
 
 def _confidence_fraction(value: Any) -> float | None:
+    return _confidence_fraction_evidence(value)[0]
+
+
+def _confidence_raw_for_evidence(value: Any) -> Any:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float, str)) or value is None:
+        return value
+    return repr(value)
+
+
+def _confidence_fraction_evidence(value: Any) -> tuple[float | None, dict[str, Any]]:
+    evidence: dict[str, Any] = {
+        "source_surface": "paper_trading.auto_enter_from_signals",
+        "parser": "confidence_fraction",
+        "raw_value": _confidence_raw_for_evidence(value),
+        "accepted_scale": None,
+        "normalized_probability": None,
+        "parser_outcome": "rejected",
+        "rejection_reason": None,
+    }
     out = _finite_float(value)
-    if out is None or out < 0.0:
-        return None
+    if out is None:
+        evidence["rejection_reason"] = "not_finite_numeric"
+        return None, evidence
+    if out < 0.0:
+        evidence["rejection_reason"] = "negative_probability"
+        return None, evidence
+    if out > 100.0:
+        evidence["rejection_reason"] = "above_percent_ceiling"
+        return None, evidence
+    accepted_scale = "fraction_0_1"
     if out > 1.0:
-        if out > 100.0:
-            return None
+        accepted_scale = "percent_0_100"
         out = out / 100.0
-    return out if 0.0 <= out <= 1.0 else None
+    if not 0.0 <= out <= 1.0:
+        evidence["rejection_reason"] = "outside_probability_domain"
+        return None, evidence
+    evidence.update(
+        {
+            "accepted_scale": accepted_scale,
+            "normalized_probability": out,
+            "parser_outcome": "accepted",
+        }
+    )
+    return out, evidence
 
 
 def _paper_positive_int(value: Any, *, default: int = 1) -> int:
@@ -2123,11 +2162,14 @@ def auto_enter_from_signals(
     entered = 0
     blocked = 0
     for sig in signals:
-        conf = _confidence_fraction(sig.get("confidence", 0))
+        conf, confidence_input = _confidence_fraction_evidence(
+            sig.get("confidence", 0)
+        )
         if conf is None or conf < 0.6:
             continue
         signal_payload = dict(sig)
         signal_payload["confidence"] = conf
+        signal_payload[PAPER_CONFIDENCE_INPUT_META_KEY] = confidence_input
 
         ticker = signal_payload.get("ticker", "")
         entry = _positive_float(signal_payload.get("entry_price"))
