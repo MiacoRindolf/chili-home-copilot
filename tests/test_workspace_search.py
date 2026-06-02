@@ -27,12 +27,39 @@ def test_includes_patterns_and_tickers():
     assert any(r["label"] == "NVDA" for r in out)
 
 
-def test_defensive_when_db_helpers_raise():
-    # _patterns/_tickers swallow their own errors -> [], so search still works.
+def test_includes_research():
     with patch.object(wss, "_patterns", return_value=[]), \
-         patch.object(wss, "_tickers", return_value=[]):
+         patch.object(wss, "_tickers", return_value=[]), \
+         patch.object(wss, "_research", return_value=[{"type": "research", "label": "AI capex cycle", "sub": "Research", "icon": "🔎", "app": "research", "url": "/api/brain/reasoning/research/report"}]):
+        out = wss.search(object(), 1, "ai")
+    research = [r for r in out if r["type"] == "research"]
+    assert research and research[0]["label"] == "AI capex cycle"
+    assert research[0]["app"] == "research"
+    assert research[0]["url"] == "/api/brain/reasoning/research/report"
+
+
+def test_guest_gets_no_research_or_tickers():
+    # Real helpers (unpatched): user_id None should short-circuit both to [].
+    out = wss.search(object(), None, "ai")
+    assert not any(r["type"] in ("research", "ticker") for r in out)
+
+
+def test_defensive_when_db_helpers_raise():
+    # _patterns/_tickers/_research swallow their own errors -> [], so search still works.
+    with patch.object(wss, "_patterns", return_value=[]), \
+         patch.object(wss, "_tickers", return_value=[]), \
+         patch.object(wss, "_research", return_value=[]):
         out = wss.search(object(), None, "anything")
     assert isinstance(out, list)
+
+
+def test_research_helper_swallows_failure():
+    # A broken DB session must degrade to [] rather than raise.
+    class _Boom:
+        def query(self, *a, **k):
+            raise RuntimeError("db down")
+
+    assert wss._research(_Boom(), 1, "ai", 5) == []
 
 
 def test_action_matches():

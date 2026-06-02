@@ -1,8 +1,9 @@
 """Command-palette search for CHILI OS (⌘K).
 
 Read-only and defensive: searches across workspace destinations/actions, trading
-patterns (scan_patterns), and the user's tickers. Every DB query is wrapped so a
-failure degrades that group to empty rather than erroring the palette.
+patterns (scan_patterns), the user's tickers, and the user's research topics.
+Every DB query is wrapped so a failure degrades that group to empty rather than
+erroring the palette.
 
 Returns a flat, ranked list of result dicts:
     {"type", "label", "sub", "icon", "app"?, "url", "blank"?}
@@ -69,6 +70,31 @@ def _tickers(db: Session, user_id: Optional[int], q: str, limit: int) -> List[Di
         return []
 
 
+def _research(db: Session, user_id: Optional[int], q: str, limit: int) -> List[Dict[str, Any]]:
+    if not user_id:
+        return []
+    try:
+        from ..models import ReasoningResearch
+        rows = (
+            db.query(ReasoningResearch.topic)
+            .filter(
+                ReasoningResearch.user_id == user_id,
+                ReasoningResearch.stale.is_(False),
+                ReasoningResearch.topic.ilike(f"%{q}%"),
+            )
+            .order_by(ReasoningResearch.relevance_score.desc(),
+                      ReasoningResearch.searched_at.desc())
+            .limit(limit)
+            .all()
+        )
+        return [{"type": "research", "label": r[0], "sub": "Research", "icon": "🔎",
+                 "app": "research", "url": "/api/brain/reasoning/research/report"}
+                for r in rows if r and r[0]]
+    except Exception as e:
+        logger.warning("[workspace_search] research search failed: %s", e)
+        return []
+
+
 def search(db: Session, user_id: Optional[int], q: str, limit: int = 10) -> List[Dict[str, Any]]:
     """Return ranked palette results for query `q` (empty q → destinations)."""
     q = (q or "").strip()
@@ -83,4 +109,5 @@ def search(db: Session, user_id: Optional[int], q: str, limit: int = 10) -> List
     # live data (best-effort)
     out += _tickers(db, user_id, q, 5)
     out += _patterns(db, q, 5)
+    out += _research(db, user_id, q, 5)
     return out[:limit]
