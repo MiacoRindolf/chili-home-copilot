@@ -218,6 +218,17 @@ def _gather_phase_summaries(
     return summaries
 
 
+def _exit_engine_counts_from_aggregate(row: Any) -> tuple[int, int]:
+    if row is None:
+        return 0, 0
+    if isinstance(row, (tuple, list)):
+        total, agree = row
+    else:
+        total = getattr(row, "total", 0)
+        agree = getattr(row, "agree", 0)
+    return int(total or 0), int(agree or 0)
+
+
 def _exit_engine_summary(
     *, db: Session, lookback_hours: int,
 ) -> dict[str, Any] | None:
@@ -229,21 +240,21 @@ def _exit_engine_summary(
     """
     try:
         from datetime import datetime, timedelta
-        from sqlalchemy import func
+        from sqlalchemy import case, func
         from ...models.trading import ExitParityLog
 
         since = datetime.utcnow() - timedelta(hours=int(lookback_hours))
-        total = db.query(ExitParityLog).filter(
-            ExitParityLog.created_at >= since,
-        ).count()
-        agree = db.query(ExitParityLog).filter(
-            ExitParityLog.created_at >= since,
-            ExitParityLog.agree_bool.is_(True),
-        ).count()
+        total, agree = _exit_engine_counts_from_aggregate(
+            db.query(
+                func.count(ExitParityLog.id).label("total"),
+                func.sum(case((ExitParityLog.agree_bool.is_(True), 1), else_=0)).label("agree"),
+            )
+            .filter(ExitParityLog.created_at >= since)
+            .one_or_none()
+        )
         disagree = total - agree
         rate = 0.0 if total == 0 else disagree / total
         mode = str(getattr(settings, "brain_exit_engine_mode", "off") or "off")
-        _ = func  # keep import usable if tests mock
         return {
             "mode": mode,
             "lookback_hours": int(lookback_hours),

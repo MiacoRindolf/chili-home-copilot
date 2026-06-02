@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ....config import settings
@@ -58,6 +59,40 @@ def count_concurrent_automation_sessions(
     if exclude_session_id is not None:
         q = q.filter(TradingAutomationSession.id != int(exclude_session_id))
     return int(q.count())
+
+
+def _concurrent_session_counts_from_grouped_rows(rows: Any) -> dict[str, int]:
+    counts = {"total": 0, "paper": 0, "live": 0}
+    for row in rows:
+        if isinstance(row, (tuple, list)):
+            mode, n = row
+        else:
+            mode = row.mode
+            n = row.count
+        count = int(n or 0)
+        counts["total"] += count
+        mode_key = str(mode or "").lower()
+        if mode_key in ("paper", "live"):
+            counts[mode_key] += count
+    return counts
+
+
+def _concurrent_automation_session_counts(
+    db: Session,
+    *,
+    user_id: int,
+    exclude_session_id: Optional[int] = None,
+) -> dict[str, int]:
+    q = db.query(
+        TradingAutomationSession.mode,
+        func.count(TradingAutomationSession.id).label("count"),
+    ).filter(
+        TradingAutomationSession.user_id == user_id,
+        TradingAutomationSession.state.in_(_CONCURRENT_STATES),
+    )
+    if exclude_session_id is not None:
+        q = q.filter(TradingAutomationSession.id != int(exclude_session_id))
+    return _concurrent_session_counts_from_grouped_rows(q.group_by(TradingAutomationSession.mode).all())
 
 
 def _viability_age_seconds(via: MomentumSymbolViability) -> float:
@@ -452,7 +487,16 @@ def evaluate_proposed_momentum_automation(
                 )
 
     # ── Concurrency ─────────────────────────────────────────────────────
-    total_ct = count_concurrent_automation_sessions(db, user_id=user_id, exclude_session_id=exclude_session_id)
+    concurrent_counts = (
+        _concurrent_automation_session_counts(db, user_id=user_id, exclude_session_id=exclude_session_id)
+        if m == "live"
+        else None
+    )
+    total_ct = (
+        concurrent_counts["total"]
+        if concurrent_counts is not None
+        else count_concurrent_automation_sessions(db, user_id=user_id, exclude_session_id=exclude_session_id)
+    )
     ok_tot = total_ct < policy.max_concurrent_sessions
     checks.append(
         _check(
@@ -464,9 +508,7 @@ def evaluate_proposed_momentum_automation(
         )
     )
     if m == "live":
-        live_ct = count_concurrent_automation_sessions(
-            db, user_id=user_id, mode="live", exclude_session_id=exclude_session_id
-        )
+        live_ct = concurrent_counts["live"] if concurrent_counts is not None else 0
         ok_lv = live_ct < policy.max_concurrent_live_sessions
         checks.append(
             _check(
