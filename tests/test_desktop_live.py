@@ -116,6 +116,24 @@ class _FakeDB:
         return _FakeQuery(self._value)
 
 
+class _FakeQueryNoFilter:
+    """Query stub for global (non-filtered) reads — supports a bare .scalar()."""
+
+    def __init__(self, value):
+        self._value = value
+
+    def scalar(self):
+        return self._value
+
+
+class _FakeGlobalDB:
+    def __init__(self, value):
+        self._value = value
+
+    def query(self, *a, **k):
+        return _FakeQueryNoFilter(self._value)
+
+
 def test_last_activity_returns_iso_for_naive_utc():
     from datetime import datetime
     db = _FakeDB(datetime(2026, 6, 2, 13, 30, 0))
@@ -160,6 +178,46 @@ def test_build_live_includes_last_trade_iso():
          patch.object(dl, "_last_activity", return_value="2026-06-02T13:30:00Z"):
         out = dl.build_live(object(), 1)
     assert out["last_trade_iso"] == "2026-06-02T13:30:00Z"
+
+
+def test_data_fresh_returns_iso_for_naive_utc():
+    from datetime import datetime
+    db = _FakeGlobalDB(datetime(2026, 6, 2, 17, 10, 15))
+    # naive snapshot_date is treated as UTC and emitted with a trailing Z
+    assert dl._data_fresh(db) == "2026-06-02T17:10:15Z"
+
+
+def test_data_fresh_normalizes_aware_to_utc_z():
+    from datetime import datetime, timezone, timedelta
+    db = _FakeGlobalDB(datetime(2026, 6, 2, 19, 10, 0, tzinfo=timezone(timedelta(hours=2))))
+    assert dl._data_fresh(db) == "2026-06-02T17:10:00Z"
+
+
+def test_data_fresh_none_when_empty():
+    # no snapshots → MAX returns None → "—"
+    assert dl._data_fresh(_FakeGlobalDB(None)) is None
+
+
+def test_data_fresh_none_on_failure():
+    class _BoomDB:
+        def query(self, *a, **k):
+            raise RuntimeError("boom")
+
+    assert dl._data_fresh(_BoomDB()) is None
+
+
+def test_build_live_includes_data_fresh_iso():
+    with patch.object(dl, "_numbers", return_value={
+            "net_pnl_fmt": "$0.00", "net_pnl_up": True, "win_rate_fmt": "—",
+            "open_positions": 0, "closes_today": 0, "top_patterns": 0}), \
+         patch.object(dl, "_lists", return_value={"positions": [], "closes": []}), \
+         patch.object(dl, "_kill_switch", return_value={"ok": True, "active": False, "reason": None}), \
+         patch.object(dl, "_breaker", return_value={"ok": True, "tripped": False, "reason": None}), \
+         patch.object(dl, "_market", return_value={"ok": True, "equities_open": True, "crypto_open": True}), \
+         patch.object(dl, "_last_activity", return_value=None), \
+         patch.object(dl, "_data_fresh", return_value="2026-06-02T17:10:15Z"):
+        out = dl.build_live(object(), 1)
+    assert out["data_fresh_iso"] == "2026-06-02T17:10:15Z"
 
 
 def test_build_live_includes_lists():

@@ -24,6 +24,10 @@
   // between the 20s polls. Null/unparseable → em dash.
   var lastActivityEl = document.getElementById('ws-last-activity');
   var lastActivityIso = null;  // stashed from the latest poll
+  // Data-freshness indicator: "Data · 8s ago" — when market data was last
+  // ingested (the brain's pipeline heartbeat, distinct from last trade).
+  var dataFreshEl = document.getElementById('ws-data-fresh');
+  var dataFreshIso = null;  // stashed from the latest poll
   function relTime(iso) {
     if (!iso) return '—';
     var t = Date.parse(iso);
@@ -43,8 +47,8 @@
     } catch (e) { return days + 'd ago'; }
   }
   function renderActivity() {
-    if (!lastActivityEl) return;
-    lastActivityEl.textContent = 'Last trade · ' + relTime(lastActivityIso);
+    if (lastActivityEl) lastActivityEl.textContent = 'Last trade · ' + relTime(lastActivityIso);
+    if (dataFreshEl) dataFreshEl.textContent = 'Data · ' + relTime(dataFreshIso);
   }
 
   function tick() { tickClock(); renderActivity(); }
@@ -142,6 +146,7 @@
     else setPill('ws-breaker', b.tripped ? 'bad' : 'ok', b.tripped ? 'Breaker · tripped' : 'Breaker · clear');
 
     lastActivityIso = (typeof d.last_trade_iso === 'string') ? d.last_trade_iso : null;
+    dataFreshIso = (typeof d.data_fresh_iso === 'string') ? d.data_fresh_iso : null;
     renderActivity();
 
     setStatus('live');
