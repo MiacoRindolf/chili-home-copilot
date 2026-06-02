@@ -23,6 +23,13 @@ def _safe_float(value: Any) -> float | None:
         return None
 
 
+def _positive_price(value: Any) -> float | None:
+    price = _safe_float(value)
+    if price is None or price <= 0:
+        return None
+    return price
+
+
 def _json_safe(value: Any) -> Any:
     """Return a JSONB-safe copy of broker payloads that may contain SDK objects."""
     try:
@@ -63,7 +70,9 @@ def _spread_bps(bid: float | None, ask: float | None) -> float | None:
 
 
 def _buy_side_slippage_bps(reference_price: float | None, fill_price: float | None) -> float | None:
-    if reference_price is None or fill_price is None or reference_price <= 0:
+    if reference_price is None or fill_price is None:
+        return None
+    if reference_price <= 0 or fill_price <= 0:
         return None
     return ((fill_price - reference_price) / reference_price) * 10000.0
 
@@ -331,6 +340,7 @@ def record_execution_event(
         ticker=ticker,
         trade=trade,
     )
+    average_fill_price = _positive_price(average_fill_price)
     # f-position-identity-phase-2 (2026-05-18) — double-write: resolve the
     # trading_positions.id for this event alongside trade_id. NEVER raises
     # (resolver swallows all errors). NO READER consults this column yet —
@@ -428,7 +438,7 @@ def normalize_robinhood_order_event(
     first_fill_at = last_fill_at if status in ("filled", "partially_filled") else None
     requested_quantity = _safe_float(order.get("quantity"))
     cumulative_filled_quantity = _safe_float(order.get("cumulative_quantity"))
-    average_fill_price = _safe_float(order.get("average_price"))
+    average_fill_price = _positive_price(order.get("average_price"))
     reference_price = _safe_float(
         getattr(trade, "tca_reference_entry_price", None) or getattr(proposal, "entry_price", None)
     )
@@ -473,7 +483,7 @@ def normalize_coinbase_order_event(
     first_fill_at = last_fill_at if status == "filled" else None
     requested_quantity = _safe_float(order.get("base_size") or order.get("size"))
     cumulative_filled_quantity = _safe_float(order.get("filled_size"))
-    average_fill_price = _safe_float(order.get("average_filled_price"))
+    average_fill_price = _positive_price(order.get("average_filled_price"))
     reference_price = _safe_float(
         getattr(trade, "tca_reference_entry_price", None) or getattr(proposal, "entry_price", None)
     )

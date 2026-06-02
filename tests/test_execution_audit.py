@@ -152,6 +152,67 @@ def test_normalize_coinbase_payload_json_stringifies_sdk_objects():
     assert event["payload_json"]["order_configuration"] == "sdk-order-configuration"
 
 
+def test_normalize_coinbase_open_zero_fill_has_no_slippage():
+    event = normalize_coinbase_order_event(
+        order={
+            "order_id": "cb-open-zero-fill",
+            "status": "OPEN",
+            "product_id": "THQ-USD",
+            "base_size": "100",
+            "filled_size": "0",
+            "average_filled_price": "0",
+        },
+        trade=SimpleNamespace(
+            ticker="THQ-USD",
+            broker_order_id="cb-open-zero-fill",
+            tca_reference_entry_price=0.02063,
+        ),
+    )
+
+    assert event["event_type"] == "ack"
+    assert event["cumulative_filled_quantity"] == 0.0
+    assert event["average_fill_price"] is None
+    assert event["realized_slippage_bps"] is None
+
+
+def test_record_execution_event_sanitizes_zero_average_fill_price(monkeypatch):
+    class FakeExecutionEvent(SimpleNamespace):
+        pass
+
+    captured = []
+    fake_db = SimpleNamespace(
+        add=lambda row: captured.append(row),
+        flush=lambda: None,
+    )
+    monkeypatch.setattr(
+        "app.models.trading.TradingExecutionEvent",
+        FakeExecutionEvent,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.execution_audit._resolve_position_id_for_event",
+        lambda *a, **k: None,
+    )
+
+    event = record_execution_event(
+        fake_db,
+        user_id=None,
+        ticker="THQ-USD",
+        broker_source="coinbase",
+        order_id="cb-open-zero-fill",
+        event_type="ack",
+        status="open",
+        requested_quantity=100.0,
+        cumulative_filled_quantity=0.0,
+        average_fill_price=0.0,
+        reference_price=0.02063,
+        payload_json={"status": "OPEN"},
+        apply_to_trade=False,
+    )
+
+    assert captured == [event]
+    assert event.average_fill_price is None
+
+
 def test_apply_execution_event_to_trade_partial_fill_updates_fill_state():
     trade = SimpleNamespace(
         quantity=10.0,
