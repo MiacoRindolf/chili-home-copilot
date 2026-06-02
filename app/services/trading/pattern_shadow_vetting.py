@@ -31,6 +31,7 @@ from sqlalchemy.orm import Session
 from ...models.trade_relation_symbols import MANAGEMENT_ENVELOPES_RELATION
 from ...models.trading import PatternTradeRow, ScanPattern
 from .realized_pnl_sql import (
+    paper_dynamic_pattern_ev_exit_filter_sql,
     paper_trade_return_fraction_sql,
     trade_return_fraction_sql,
 )
@@ -222,6 +223,7 @@ def _load_directional_evidence(
                       AND pt.pnl IS NOT NULL
                       AND pt.entry_price > 0
                       AND pt.quantity > 0
+                      AND {paper_dynamic_pattern_ev_exit_filter_sql("pt")}
                       AND (
                         pt.paper_shadow_of_alert_id IS NOT NULL
                         OR COALESCE(pt.signal_json, '{{}}'::jsonb) @> '{{"auto_trader_v1": true}}'::jsonb
@@ -957,6 +959,7 @@ def _gate_rows_from_realized_trade_outcomes(
                   AND pt.pnl IS NOT NULL
                   AND pt.entry_price > 0
                   AND pt.quantity > 0
+                  AND {paper_dynamic_pattern_ev_exit_filter_sql("pt")}
                   AND (
                     pt.paper_shadow_of_alert_id IS NOT NULL
                     OR COALESCE(pt.signal_json, '{{}}'::jsonb) @> '{{"auto_trader_v1": true}}'::jsonb

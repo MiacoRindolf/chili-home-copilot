@@ -218,6 +218,7 @@ def test_load_realized_pnl_map_counts_only_computable_return_samples() -> None:
     assert "WHERE realized_return_frac IS NOT NULL" in paper_sql
     assert "pt.partial_taken_qty" in paper_sql
     assert "COALESCE(pt.signal_json" in paper_sql
+    assert "shadow_capacity_janitor" in paper_sql
     assert "COUNT(*)" not in paper_sql
 
 

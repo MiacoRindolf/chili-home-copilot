@@ -117,6 +117,7 @@ def test_shadow_vetting_skips_paper_dynamic_without_realized_return():
     assert "option_contract_multiplier" in paper_sql
     assert "contract_multiplier" in paper_sql
     assert "pnl_pct" not in paper_sql
+    assert "shadow_capacity_janitor" in paper_sql
 
     row = evidence[123]
     assert row["raw_sample_n"] == 2

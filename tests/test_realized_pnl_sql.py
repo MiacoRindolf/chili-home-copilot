@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from app.services.trading.realized_pnl_sql import (
+    PAPER_DYNAMIC_PATTERN_EV_EXCLUDED_EXIT_REASONS,
+    paper_dynamic_pattern_ev_exit_filter_sql,
     paper_trade_contract_multiplier_sql,
     paper_trade_return_fraction_sql,
     trade_contract_multiplier_sql,
@@ -105,6 +107,18 @@ def test_paper_return_fraction_sql_is_partial_aware_without_filled_quantity() ->
     assert "pt.filled_quantity" not in sql
     assert "LOWER(COALESCE(pt.direction, 'long')) = 'short'" in sql
     assert "ELSE NULL" in sql
+
+
+def test_paper_dynamic_pattern_ev_filter_excludes_shadow_janitor_only() -> None:
+    sql = _compact(paper_dynamic_pattern_ev_exit_filter_sql("pt"))
+
+    assert PAPER_DYNAMIC_PATTERN_EV_EXCLUDED_EXIT_REASONS == frozenset({
+        "shadow_capacity_janitor",
+    })
+    assert "LOWER(COALESCE(pt.exit_reason, '')) NOT IN" in sql
+    assert "'shadow_capacity_janitor'" in sql
+    assert "exit_engine_time_decay" not in sql
+    assert "'expired'" not in sql
 
 
 def test_return_fraction_sql_rejects_nonfinite_numeric_inputs() -> None:

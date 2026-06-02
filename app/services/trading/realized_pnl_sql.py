@@ -9,6 +9,9 @@ from __future__ import annotations
 
 OPTION_CONTRACT_MULTIPLIER_SQL = "100.0"
 PRICE_DOMAIN_OPTION_PREMIUM_SQL = "'option_premium'"
+PAPER_DYNAMIC_PATTERN_EV_EXCLUDED_EXIT_REASONS = frozenset({
+    "shadow_capacity_janitor",
+})
 OPTION_ASSET_CLASS_ALIASES_SQL = (
     "('option', 'options', 'option_contract', 'option_contracts', "
     "'options_contract', 'options_contracts', 'contract_option', "
@@ -87,6 +90,16 @@ def _finite_number_sql(expr: str) -> str:
 
 def _positive_finite_number_sql(expr: str) -> str:
     return f"({_finite_number_sql(expr)} AND ({expr}) > 0)"
+
+
+def paper_dynamic_pattern_ev_exit_filter_sql(alias: str | None = None) -> str:
+    """Exclude paper-shadow cleanup rows from pattern EV queries."""
+    exit_reason = _col(alias, "exit_reason")
+    excluded = ", ".join(
+        f"'{reason}'"
+        for reason in sorted(PAPER_DYNAMIC_PATTERN_EV_EXCLUDED_EXIT_REASONS)
+    )
+    return f"LOWER(COALESCE({exit_reason}, '')) NOT IN ({excluded})"
 
 
 def _realized_return_fraction_sql(

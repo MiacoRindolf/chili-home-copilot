@@ -98,6 +98,7 @@ from sqlalchemy.orm import Session
 
 from ...models.trading import ScanPattern
 from .realized_pnl_sql import (
+    paper_dynamic_pattern_ev_exit_filter_sql,
     paper_trade_return_fraction_sql,
     trade_return_fraction_sql,
 )
@@ -498,6 +499,7 @@ def _load_realized_pnl_map(
                       AND pt.pnl IS NOT NULL
                       AND pt.entry_price > 0
                       AND pt.quantity > 0
+                      AND {paper_dynamic_pattern_ev_exit_filter_sql("pt")}
                       AND pt.exit_date > NOW() - make_interval(days => :window_days)
                       AND (
                         pt.paper_shadow_of_alert_id IS NOT NULL

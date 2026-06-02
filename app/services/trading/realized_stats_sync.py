@@ -35,6 +35,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from .realized_pnl_sql import (
+    paper_dynamic_pattern_ev_exit_filter_sql,
     paper_trade_return_fraction_sql,
     trade_return_fraction_sql,
 )
@@ -106,9 +107,11 @@ def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, in
     warn_pct = float(_settings_get("chili_canonical_outcome_divergence_warn_pct", 0.50))
 
     # Realized stats per pattern from closed live trades plus qualified
-    # AutoTrader paper/shadow rows. Mean-of-trade-returns IS the EV. We
-    # compute pct return from realized P&L when present so options normalize
-    # by contract notional and short-side trades keep the correct sign.
+    # AutoTrader paper/shadow rows. Paper-shadow janitor cleanup rows are
+    # excluded because they are observation-pool maintenance, not pattern EV.
+    # Mean-of-trade-returns IS the EV. We compute pct return from realized
+    # P&L when present so options normalize by contract notional and
+    # short-side trades keep the correct sign.
     #
     # f-evaluation-function-fix Tier A #2 (2026-05-18): also refresh
     # avg_winner_pct / avg_loser_pct / payoff_ratio so the
@@ -143,6 +146,7 @@ def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, in
               AND pnl IS NOT NULL
               AND entry_price > 0
               AND quantity > 0
+              AND {paper_dynamic_pattern_ev_exit_filter_sql()}
               AND (
                 paper_shadow_of_alert_id IS NOT NULL
                 OR COALESCE(signal_json, '{{}}'::jsonb) @> '{{"auto_trader_v1": true}}'::jsonb
@@ -295,6 +299,7 @@ def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, in
               AND pt.pnl IS NOT NULL
               AND pt.entry_price > 0
               AND pt.quantity > 0
+              AND {paper_dynamic_pattern_ev_exit_filter_sql("pt")}
               AND (
                 pt.paper_shadow_of_alert_id IS NOT NULL
                 OR COALESCE(pt.signal_json, '{{}}'::jsonb) @> '{{"auto_trader_v1": true}}'::jsonb
