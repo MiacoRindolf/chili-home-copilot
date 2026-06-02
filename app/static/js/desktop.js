@@ -17,8 +17,39 @@
       }).format(new Date());
     } catch (e) { /* Intl/timezone unavailable — leave the placeholder */ }
   }
-  tickClock();
-  setInterval(tickClock, 1000);
+
+  // ── Last-activity indicator: "Last trade · 12m ago", relative to now. ──
+  // The server sends an ISO-8601 UTC string (or null); the relative phrase is
+  // computed client-side and re-rendered on each clock tick so it advances
+  // between the 20s polls. Null/unparseable → em dash.
+  var lastActivityEl = document.getElementById('ws-last-activity');
+  var lastActivityIso = null;  // stashed from the latest poll
+  function relTime(iso) {
+    if (!iso) return '—';
+    var t = Date.parse(iso);
+    if (isNaN(t)) return '—';
+    var secs = Math.floor((Date.now() - t) / 1000);
+    if (secs < 0) secs = 0;  // clock skew — clamp to "just now"
+    if (secs < 45) return 'just now';
+    var mins = Math.floor(secs / 60);
+    if (mins < 60) return mins + 'm ago';
+    var hrs = Math.floor(mins / 60);
+    if (hrs < 24) return hrs + 'h ago';
+    var days = Math.floor(hrs / 24);
+    if (days === 1) return 'yesterday';
+    if (days < 7) return days + 'd ago';
+    try {
+      return new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    } catch (e) { return days + 'd ago'; }
+  }
+  function renderActivity() {
+    if (!lastActivityEl) return;
+    lastActivityEl.textContent = 'Last trade · ' + relTime(lastActivityIso);
+  }
+
+  function tick() { tickClock(); renderActivity(); }
+  tick();
+  setInterval(tick, 1000);
 
   // ── Status pills (market / kill switch / breaker) ──
   // state ∈ {ok, warn, bad, unknown} drives the colour; label is the text.
@@ -109,6 +140,9 @@
     var b = d.breaker || {};
     if (!b.ok) setPill('ws-breaker', 'unknown', 'Breaker · —');
     else setPill('ws-breaker', b.tripped ? 'bad' : 'ok', b.tripped ? 'Breaker · tripped' : 'Breaker · clear');
+
+    lastActivityIso = (typeof d.last_trade_iso === 'string') ? d.last_trade_iso : null;
+    renderActivity();
 
     setStatus('live');
   }

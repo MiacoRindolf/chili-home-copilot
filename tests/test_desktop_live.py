@@ -97,6 +97,71 @@ def test_lists_skips_non_dict_rows():
     assert len(out["closes"]) == 1 and out["closes"][0]["ticker"] == "TSLA"
 
 
+class _FakeQuery:
+    def __init__(self, value):
+        self._value = value
+
+    def filter(self, *a, **k):
+        return self
+
+    def scalar(self):
+        return self._value
+
+
+class _FakeDB:
+    def __init__(self, value):
+        self._value = value
+
+    def query(self, *a, **k):
+        return _FakeQuery(self._value)
+
+
+def test_last_activity_returns_iso_for_naive_utc():
+    from datetime import datetime
+    db = _FakeDB(datetime(2026, 6, 2, 13, 30, 0))
+    out = dl._last_activity(db, 1)
+    # naive is treated as UTC and emitted with a trailing Z
+    assert out == "2026-06-02T13:30:00Z"
+
+
+def test_last_activity_normalizes_aware_to_utc_z():
+    from datetime import datetime, timezone, timedelta
+    # +02:00 → 11:30Z
+    db = _FakeDB(datetime(2026, 6, 2, 13, 30, 0, tzinfo=timezone(timedelta(hours=2))))
+    out = dl._last_activity(db, 1)
+    assert out == "2026-06-02T11:30:00Z"
+
+
+def test_last_activity_none_for_guest():
+    # guest never touches the DB
+    assert dl._last_activity(_FakeDB(object()), None) is None
+
+
+def test_last_activity_none_when_no_trades():
+    assert dl._last_activity(_FakeDB(None), 1) is None
+
+
+def test_last_activity_none_on_failure():
+    class _BoomDB:
+        def query(self, *a, **k):
+            raise RuntimeError("boom")
+
+    assert dl._last_activity(_BoomDB(), 1) is None
+
+
+def test_build_live_includes_last_trade_iso():
+    with patch.object(dl, "_numbers", return_value={
+            "net_pnl_fmt": "$0.00", "net_pnl_up": True, "win_rate_fmt": "—",
+            "open_positions": 0, "closes_today": 0, "top_patterns": 0}), \
+         patch.object(dl, "_lists", return_value={"positions": [], "closes": []}), \
+         patch.object(dl, "_kill_switch", return_value={"ok": True, "active": False, "reason": None}), \
+         patch.object(dl, "_breaker", return_value={"ok": True, "tripped": False, "reason": None}), \
+         patch.object(dl, "_market", return_value={"ok": True, "equities_open": True, "crypto_open": True}), \
+         patch.object(dl, "_last_activity", return_value="2026-06-02T13:30:00Z"):
+        out = dl.build_live(object(), 1)
+    assert out["last_trade_iso"] == "2026-06-02T13:30:00Z"
+
+
 def test_build_live_includes_lists():
     with patch.object(dl, "_numbers", return_value={
             "net_pnl_fmt": "$0.00", "net_pnl_up": True, "win_rate_fmt": "—",

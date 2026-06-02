@@ -90,6 +90,36 @@ def _market() -> Dict[str, Any]:
         return {"ok": False, "equities_open": None, "crypto_open": True}
 
 
+def _last_activity(db: Session, user_id: Optional[int]) -> Optional[str]:
+    # Timestamp of the trading brain's most recent action for this user, as an
+    # ISO-8601 UTC string (``...Z``). "Activity" = the most recent of trade
+    # open (``entry_date``) or close (``exit_date``); ``exit_date`` is NULL while
+    # a position is open, so we max the GREATEST of the two. Guest → None.
+    # Any failure (or no trades) degrades to None so the cockpit shows "—".
+    if user_id is None:
+        return None
+    try:
+        from datetime import timezone
+        from sqlalchemy import func
+        from ..models.trading import Trade
+        latest = (
+            db.query(func.max(func.greatest(Trade.entry_date, Trade.exit_date)))
+            .filter(Trade.user_id == user_id)
+            .scalar()
+        )
+        if latest is None:
+            return None
+        # Stored naive-UTC (datetime.utcnow); treat naive as UTC, normalize aware.
+        if latest.tzinfo is None:
+            latest = latest.replace(tzinfo=timezone.utc)
+        else:
+            latest = latest.astimezone(timezone.utc)
+        return latest.isoformat().replace("+00:00", "Z")
+    except Exception as e:
+        logger.warning("[desktop_live] last activity read failed: %s", e)
+        return None
+
+
 def build_live(db: Session, user_id: Optional[int]) -> Dict[str, Any]:
     """Return the compact live cockpit view-model (safe to poll repeatedly)."""
     out: Dict[str, Any] = {"ok": True}
@@ -98,4 +128,5 @@ def build_live(db: Session, user_id: Optional[int]) -> Dict[str, Any]:
     out["kill_switch"] = _kill_switch()
     out["breaker"] = _breaker()
     out["market"] = _market()
+    out["last_trade_iso"] = _last_activity(db, user_id)
     return out
