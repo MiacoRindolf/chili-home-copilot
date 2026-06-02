@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import logging
 import math
+from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func as sa_func
 from sqlalchemy.orm import Session
+
+from .execution_cost_builder import _usable_tca_bps
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +157,53 @@ def apply_tca_on_trade_close(trade) -> None:
         trade.tca_exit_slippage_bps = bps
 
 
+def _avg_bps(values: list[float]) -> float | None:
+    return round(sum(values) / len(values), 2) if values else None
+
+
+def _group_usable_tca(
+    rows: list[Any],
+    *,
+    attr: str,
+    count_key: str,
+    raw_count_key: str,
+    avg_key: str,
+) -> tuple[list[dict[str, Any]], list[float], int]:
+    grouped: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {"values": [], raw_count_key: 0, "excluded_tca_samples": 0}
+    )
+    overall_values: list[float] = []
+    excluded = 0
+    for trade in rows:
+        ticker = str(getattr(trade, "ticker", "") or "").strip().upper()
+        bucket = grouped[ticker]
+        bucket["ticker"] = ticker
+        bucket[raw_count_key] += 1
+        usable = _usable_tca_bps(trade, attr)
+        if usable is None:
+            bucket["excluded_tca_samples"] += 1
+            excluded += 1
+            continue
+        bucket["values"].append(usable)
+        overall_values.append(usable)
+
+    out: list[dict[str, Any]] = []
+    for bucket in grouped.values():
+        values = list(bucket.pop("values"))
+        bucket[count_key] = len(values)
+        bucket[avg_key] = _avg_bps(values)
+        out.append(bucket)
+    out.sort(
+        key=lambda row: (
+            int(row.get(count_key) or 0),
+            int(row.get(raw_count_key) or 0),
+            str(row.get("ticker") or ""),
+        ),
+        reverse=True,
+    )
+    return out, overall_values, excluded
+
+
 def tca_summary_by_ticker(
     db: Session,
     user_id: int | None,
@@ -173,61 +222,39 @@ def tca_summary_by_ticker(
             "ok": True,
             "window_days": days,
             "overall_fills": 0,
+            "raw_overall_fills": 0,
+            "entry_excluded_tca_samples": 0,
             "overall_avg_entry_slippage_bps": None,
             "by_ticker": [],
             "exit_overall_closes": 0,
+            "raw_exit_overall_closes": 0,
+            "exit_excluded_tca_samples": 0,
             "exit_overall_avg_slippage_bps": None,
             "exit_by_ticker": [],
         }
 
     since = datetime.utcnow() - timedelta(days=max(1, int(days)))
-    q = (
-        db.query(
-            Trade.ticker,
-            sa_func.count(Trade.id),
-            sa_func.avg(Trade.tca_entry_slippage_bps),
-        )
+    entry_rows = (
+        db.query(Trade)
         .filter(
             Trade.tca_entry_slippage_bps.isnot(None),
             Trade.filled_at.isnot(None),
             Trade.filled_at >= since,
             Trade.user_id == user_id,
         )
-    )
-    rows = (
-        q.group_by(Trade.ticker)
-        .order_by(sa_func.count(Trade.id).desc())
-        .limit(limit)
         .all()
     )
-    by_ticker = [
-        {
-            "ticker": r[0],
-            "fills": int(r[1] or 0),
-            "avg_entry_slippage_bps": round(float(r[2]), 2) if r[2] is not None else None,
-        }
-        for r in rows
-    ]
-    overall = (
-        db.query(
-            sa_func.count(Trade.id),
-            sa_func.avg(Trade.tca_entry_slippage_bps),
-        )
-        .filter(
-            Trade.tca_entry_slippage_bps.isnot(None),
-            Trade.filled_at.isnot(None),
-            Trade.filled_at >= since,
-            Trade.user_id == user_id,
-        )
+    by_ticker, entry_values, entry_excluded = _group_usable_tca(
+        entry_rows,
+        attr="tca_entry_slippage_bps",
+        count_key="fills",
+        raw_count_key="raw_fills",
+        avg_key="avg_entry_slippage_bps",
     )
-    oc, oavg = overall.first() or (0, None)
+    by_ticker = by_ticker[: max(1, min(int(limit or 50), 200))]
 
-    qx = (
-        db.query(
-            Trade.ticker,
-            sa_func.count(Trade.id),
-            sa_func.avg(Trade.tca_exit_slippage_bps),
-        )
+    exit_rows = (
+        db.query(Trade)
         .filter(
             Trade.tca_exit_slippage_bps.isnot(None),
             Trade.status == "closed",
@@ -235,41 +262,28 @@ def tca_summary_by_ticker(
             Trade.exit_date >= since,
             Trade.user_id == user_id,
         )
-        .group_by(Trade.ticker)
-        .order_by(sa_func.count(Trade.id).desc())
-        .limit(limit)
         .all()
     )
-    exit_by_ticker = [
-        {
-            "ticker": r[0],
-            "closes": int(r[1] or 0),
-            "avg_exit_slippage_bps": round(float(r[2]), 2) if r[2] is not None else None,
-        }
-        for r in qx
-    ]
-    ox = (
-        db.query(
-            sa_func.count(Trade.id),
-            sa_func.avg(Trade.tca_exit_slippage_bps),
-        )
-        .filter(
-            Trade.tca_exit_slippage_bps.isnot(None),
-            Trade.status == "closed",
-            Trade.exit_date.isnot(None),
-            Trade.exit_date >= since,
-            Trade.user_id == user_id,
-        )
+    exit_by_ticker, exit_values, exit_excluded = _group_usable_tca(
+        exit_rows,
+        attr="tca_exit_slippage_bps",
+        count_key="closes",
+        raw_count_key="raw_closes",
+        avg_key="avg_exit_slippage_bps",
     )
-    exc, exavg = ox.first() or (0, None)
+    exit_by_ticker = exit_by_ticker[: max(1, min(int(limit or 50), 200))]
 
     return {
         "ok": True,
         "window_days": days,
-        "overall_fills": int(oc or 0),
-        "overall_avg_entry_slippage_bps": round(float(oavg), 2) if oavg is not None else None,
+        "overall_fills": len(entry_values),
+        "raw_overall_fills": len(entry_rows),
+        "entry_excluded_tca_samples": entry_excluded,
+        "overall_avg_entry_slippage_bps": _avg_bps(entry_values),
         "by_ticker": by_ticker,
-        "exit_overall_closes": int(exc or 0),
-        "exit_overall_avg_slippage_bps": round(float(exavg), 2) if exavg is not None else None,
+        "exit_overall_closes": len(exit_values),
+        "raw_exit_overall_closes": len(exit_rows),
+        "exit_excluded_tca_samples": exit_excluded,
+        "exit_overall_avg_slippage_bps": _avg_bps(exit_values),
         "exit_by_ticker": exit_by_ticker,
     }

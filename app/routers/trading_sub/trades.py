@@ -40,6 +40,8 @@ def api_get_trades(
 ):
     ctx = get_identity_ctx(request, db)
     trades = ts.get_trades(db, ctx["user_id"], status=status)
+    from ...services.trading.execution_cost_builder import _usable_tca_bps
+
     return JSONResponse({"ok": True, "trades": [
         {
             "id": t.id, "ticker": t.ticker, "direction": t.direction,
@@ -55,8 +57,10 @@ def api_get_trades(
             "avg_fill_price": t.avg_fill_price,
             "tca_reference_entry_price": t.tca_reference_entry_price,
             "tca_entry_slippage_bps": t.tca_entry_slippage_bps,
+            "usable_tca_entry_slippage_bps": _usable_tca_bps(t, "tca_entry_slippage_bps"),
             "tca_reference_exit_price": t.tca_reference_exit_price,
             "tca_exit_slippage_bps": t.tca_exit_slippage_bps,
+            "usable_tca_exit_slippage_bps": _usable_tca_bps(t, "tca_exit_slippage_bps"),
             "strategy_proposal_id": t.strategy_proposal_id,
             "scan_pattern_id": t.scan_pattern_id,
         }
@@ -585,6 +589,7 @@ def api_audit_export(
     import io
 
     from ...models.trading import ScanPattern, Trade, TradingExecutionEvent
+    from ...services.trading.execution_cost_builder import _usable_tca_bps
     from fastapi.responses import StreamingResponse
 
     ctx = get_identity_ctx(request, db)
@@ -615,6 +620,8 @@ def api_audit_export(
             "broker_source": getattr(t, "broker_source", None),
             "tca_entry_slippage_bps": getattr(t, "tca_entry_slippage_bps", None),
             "tca_exit_slippage_bps": getattr(t, "tca_exit_slippage_bps", None),
+            "usable_tca_entry_slippage_bps": _usable_tca_bps(t, "tca_entry_slippage_bps"),
+            "usable_tca_exit_slippage_bps": _usable_tca_bps(t, "tca_exit_slippage_bps"),
             "scan_pattern_id": t.scan_pattern_id,
             "pattern_tags": getattr(t, "pattern_tags", None),
         }

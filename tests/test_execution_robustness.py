@@ -9,6 +9,7 @@ import pytest
 
 from app.services.trading import execution_robustness as er_mod
 from app.services.trading.execution_robustness import (
+    aggregate_trade_execution_for_pattern,
     build_skip_contract,
     compute_execution_robustness_contract,
     compute_execution_robustness_v2_contract,
@@ -44,12 +45,77 @@ def _patch_market_settings(monkeypatch, *, polygon=False, massive_key="", coinba
     )
 
 
+class _FakeQuery:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def filter(self, *_args, **_kwargs):
+        return self
+
+    def all(self):
+        return self._rows
+
+
+class _FakeDb:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def query(self, _model):
+        return _FakeQuery(self._rows)
+
+
 def test_build_skip_contract_has_skip_reason_and_null_rates():
     c = build_skip_contract(skip_reason="insufficient_trade_sample", evaluation_window_days=90)
     assert c["skip_reason"] == "insufficient_trade_sample"
     assert c["fill_rate"] is None
     assert c["robustness_tier"] == "n/a"
     assert c["evaluation_window"]["days"] == 90
+
+
+def test_aggregate_trade_execution_ignores_unverified_extreme_tca() -> None:
+    rows = [
+        SimpleNamespace(
+            filled_at=object(),
+            avg_fill_price=None,
+            broker_status="",
+            broker_order_id="",
+            status="closed",
+            tca_entry_slippage_bps=12.0,
+            tca_exit_slippage_bps=18.0,
+            broker_source="coinbase",
+        ),
+        SimpleNamespace(
+            filled_at=object(),
+            avg_fill_price=None,
+            broker_status="",
+            broker_order_id="",
+            status="closed",
+            tca_entry_slippage_bps=1426.0,
+            tca_exit_slippage_bps=1361.0,
+            broker_source="coinbase",
+        ),
+        SimpleNamespace(
+            filled_at=object(),
+            avg_fill_price=None,
+            broker_status="filled",
+            broker_order_id="order-verified",
+            status="closed",
+            tca_entry_slippage_bps=1426.0,
+            tca_exit_slippage_bps=None,
+            broker_source="coinbase",
+        ),
+    ]
+
+    out = aggregate_trade_execution_for_pattern(
+        _FakeDb(rows),
+        scan_pattern_id=42,
+        user_id=7,
+        window_days=30,
+    )
+
+    assert out["n_orders"] == 3
+    assert out["n_filled"] == 3
+    assert out["slippages_abs_bps"] == pytest.approx([12.0, 18.0, 1426.0])
 
 
 def test_compute_skips_non_repeatable_origin():

@@ -415,6 +415,34 @@ class TestTradesAPI:
         assert resp.status_code == 200
         assert resp.json()["trades"] == []
 
+    def test_get_trades_exposes_usable_tca_without_hiding_raw_audit_value(self, db, client):
+        user, token = _make_paired(db)
+        client.cookies.set(DEVICE_COOKIE_NAME, token)
+        db.add(
+            Trade(
+                user_id=user.id,
+                ticker="POND-USD",
+                direction="long",
+                entry_price=100.0,
+                quantity=1.0,
+                tca_entry_slippage_bps=1426.0,
+                tca_exit_slippage_bps=1361.0,
+                broker_order_id="",
+                broker_status="",
+                avg_fill_price=None,
+            )
+        )
+        db.commit()
+
+        resp = client.get("/api/trading/trades")
+
+        assert resp.status_code == 200
+        trade = resp.json()["trades"][0]
+        assert trade["tca_entry_slippage_bps"] == pytest.approx(1426.0)
+        assert trade["tca_exit_slippage_bps"] == pytest.approx(1361.0)
+        assert trade["usable_tca_entry_slippage_bps"] is None
+        assert trade["usable_tca_exit_slippage_bps"] is None
+
     def test_create_trade(self, db, client):
         user, token = _make_paired(db)
         client.cookies.set(DEVICE_COOKIE_NAME, token)
@@ -1716,12 +1744,32 @@ class TestTcaService:
                 tca_entry_slippage_bps=bps,
             )
             db.add(tr)
+        db.add(
+            Trade(
+                user_id=user.id,
+                ticker="AAPL",
+                direction="long",
+                entry_price=150.0,
+                quantity=1.0,
+                entry_date=now,
+                filled_at=now,
+                tca_entry_slippage_bps=1426.0,
+                broker_order_id="",
+                broker_status="",
+                avg_fill_price=None,
+            )
+        )
         db.commit()
         r = tca_summary_by_ticker(db, user.id, days=7)
         assert r["overall_fills"] == 2
+        assert r["raw_overall_fills"] == 3
+        assert r["entry_excluded_tca_samples"] == 1
         assert r["overall_avg_entry_slippage_bps"] == 20.0
         assert len(r["by_ticker"]) == 1
         assert r["by_ticker"][0]["ticker"] == "AAPL"
+        assert r["by_ticker"][0]["fills"] == 2
+        assert r["by_ticker"][0]["raw_fills"] == 3
+        assert r["by_ticker"][0]["excluded_tca_samples"] == 1
 
 
 class TestTcaAPI:
@@ -1747,6 +1795,8 @@ class TestTcaAPI:
         data = resp.json()
         assert data["ok"] is True
         assert data["overall_fills"] == 1
+        assert data["raw_overall_fills"] == 1
+        assert data["entry_excluded_tca_samples"] == 0
         assert data["by_ticker"][0]["ticker"] == "MSFT"
         assert "exit_overall_closes" in data
 

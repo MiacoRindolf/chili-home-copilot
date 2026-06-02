@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from ...config import settings
 from .execution_audit import aggregate_execution_events_for_pattern
+from .execution_cost_builder import _usable_tca_bps
 from .pattern_validation_projection import read_pattern_validation_projection, write_validation_contract
 
 logger = logging.getLogger(__name__)
@@ -173,12 +174,10 @@ def aggregate_trade_execution_for_pattern(
     )
     slips: list[float] = []
     for t in rows:
-        for col in (t.tca_entry_slippage_bps, t.tca_exit_slippage_bps):
+        for attr in ("tca_entry_slippage_bps", "tca_exit_slippage_bps"):
+            col = _usable_tca_bps(t, attr)
             if col is not None:
-                try:
-                    slips.append(abs(float(col)))
-                except (TypeError, ValueError):
-                    pass
+                slips.append(abs(col))
     brokers = [((t.broker_source or "manual") or "manual").strip().lower() for t in rows]
     broker_mode = max(set(brokers), key=brokers.count) if brokers else None
 

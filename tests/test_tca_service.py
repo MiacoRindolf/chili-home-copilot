@@ -6,6 +6,7 @@ import pytest
 
 from app.services.trading import tca_service
 from app.services.trading.tca_service import (
+    _group_usable_tca,
     apply_tca_on_trade_close,
     apply_tca_on_trade_fill,
     entry_slippage_bps,
@@ -63,6 +64,52 @@ def test_apply_tca_fill_accepts_explicit_trusted_fill_price():
     apply_tca_on_trade_fill(trade, fill_price=100.25)
 
     assert trade.tca_entry_slippage_bps == 25.0
+
+
+def test_group_usable_tca_tracks_raw_and_excluded_outliers():
+    rows = [
+        SimpleNamespace(
+            ticker="pond-usd",
+            tca_entry_slippage_bps=12.0,
+            avg_fill_price=None,
+            broker_order_id="",
+            broker_status="",
+        ),
+        SimpleNamespace(
+            ticker="POND-USD",
+            tca_entry_slippage_bps=1426.0,
+            avg_fill_price=None,
+            broker_order_id="",
+            broker_status="",
+        ),
+        SimpleNamespace(
+            ticker="POND-USD",
+            tca_entry_slippage_bps=1426.0,
+            avg_fill_price=None,
+            broker_order_id="order-verified",
+            broker_status="filled",
+        ),
+    ]
+
+    grouped, overall_values, excluded = _group_usable_tca(
+        rows,
+        attr="tca_entry_slippage_bps",
+        count_key="fills",
+        raw_count_key="raw_fills",
+        avg_key="avg_entry_slippage_bps",
+    )
+
+    assert overall_values == pytest.approx([12.0, 1426.0])
+    assert excluded == 1
+    assert grouped == [
+        {
+            "ticker": "POND-USD",
+            "raw_fills": 3,
+            "excluded_tca_samples": 1,
+            "fills": 2,
+            "avg_entry_slippage_bps": 719.0,
+        }
+    ]
 
 
 def test_apply_tca_close_ignores_invalid_reference_or_fill():
