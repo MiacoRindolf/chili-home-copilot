@@ -252,12 +252,55 @@ def test_record_execution_event_sanitizes_zero_average_fill_price(monkeypatch):
         cumulative_filled_quantity=0.0,
         average_fill_price=0.0,
         reference_price=0.02063,
+        realized_slippage_bps=-10000.0,
         payload_json={"status": "OPEN"},
         apply_to_trade=False,
     )
 
     assert captured == [event]
     assert event.average_fill_price is None
+    assert event.realized_slippage_bps is None
+
+
+def test_record_execution_event_keeps_real_partial_fill_slippage(monkeypatch):
+    class FakeExecutionEvent(SimpleNamespace):
+        pass
+
+    captured = []
+    fake_db = SimpleNamespace(
+        add=lambda row: captured.append(row),
+        flush=lambda: None,
+    )
+    monkeypatch.setattr(
+        "app.models.trading.TradingExecutionEvent",
+        FakeExecutionEvent,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.execution_audit._resolve_position_id_for_event",
+        lambda *a, **k: None,
+    )
+
+    event = record_execution_event(
+        fake_db,
+        user_id=None,
+        ticker="BTC-USD",
+        broker_source="coinbase",
+        order_id="cb-partial-fill",
+        event_type="partial_fill",
+        status="partially_filled",
+        requested_quantity=1.0,
+        cumulative_filled_quantity=0.25,
+        last_fill_quantity=0.25,
+        average_fill_price=50100.0,
+        reference_price=50000.0,
+        realized_slippage_bps=20.0,
+        payload_json={"status": "PARTIALLY_FILLED"},
+        apply_to_trade=False,
+    )
+
+    assert captured == [event]
+    assert event.average_fill_price == 50100.0
+    assert event.realized_slippage_bps == 20.0
 
 
 def test_execution_event_reader_ignores_zero_fill_slippage_noise():

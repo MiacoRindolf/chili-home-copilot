@@ -106,20 +106,37 @@ def _buy_side_slippage_bps(reference_price: float | None, fill_price: float | No
     return ((fill_price - reference_price) / reference_price) * 10000.0
 
 
-def _execution_event_has_real_fill(event: Any) -> bool:
-    cumulative = _safe_float(getattr(event, "cumulative_filled_quantity", None)) or 0.0
-    last_fill = _safe_float(getattr(event, "last_fill_quantity", None)) or 0.0
+def _event_fields_have_real_fill(
+    *,
+    event_type: Any,
+    status: Any,
+    cumulative_filled_quantity: Any,
+    last_fill_quantity: Any,
+    average_fill_price: Any,
+) -> bool:
+    cumulative = _safe_float(cumulative_filled_quantity) or 0.0
+    last_fill = _safe_float(last_fill_quantity) or 0.0
     if cumulative > 0 or last_fill > 0:
         return True
-    average_fill = _positive_price(getattr(event, "average_fill_price", None))
+    average_fill = _positive_price(average_fill_price)
     if average_fill is None:
         return False
-    status = str(getattr(event, "status", "") or "").strip().lower()
-    event_type = str(getattr(event, "event_type", "") or "").strip().lower()
-    return status in {"filled", "partially_filled"} or event_type in {
+    status_s = str(status or "").strip().lower()
+    event_type_s = str(event_type or "").strip().lower()
+    return status_s in {"filled", "partially_filled"} or event_type_s in {
         "fill",
         "partial_fill",
     }
+
+
+def _execution_event_has_real_fill(event: Any) -> bool:
+    return _event_fields_have_real_fill(
+        event_type=getattr(event, "event_type", None),
+        status=getattr(event, "status", None),
+        cumulative_filled_quantity=getattr(event, "cumulative_filled_quantity", None),
+        last_fill_quantity=getattr(event, "last_fill_quantity", None),
+        average_fill_price=getattr(event, "average_fill_price", None),
+    )
 
 
 def _execution_event_realized_slippage_bps(event: Any) -> float | None:
@@ -392,6 +409,14 @@ def record_execution_event(
         trade=trade,
     )
     average_fill_price = _positive_price(average_fill_price)
+    if not _event_fields_have_real_fill(
+        event_type=event_type,
+        status=status,
+        cumulative_filled_quantity=cumulative_filled_quantity,
+        last_fill_quantity=last_fill_quantity,
+        average_fill_price=average_fill_price,
+    ):
+        realized_slippage_bps = None
     # f-position-identity-phase-2 (2026-05-18) — double-write: resolve the
     # trading_positions.id for this event alongside trade_id. NEVER raises
     # (resolver swallows all errors). NO READER consults this column yet —
