@@ -32,6 +32,9 @@ V2_APPROXIMATION_NOTE = (
     "did not capture those fields at order time."
 )
 
+_WARN_CANCEL_REJECT_RATE = 0.25
+_CRITICAL_CANCEL_REJECT_RATE = 0.45
+
 
 def _utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -243,17 +246,28 @@ def compute_execution_robustness_contract(
     if fill_rate < warn_fill:
         flags.append("low_fill_rate")
         impact.append("poor_fill_rate")
+    if miss_rate >= _WARN_CANCEL_REJECT_RATE:
+        flags.append("cancel_reject_elevated")
+        impact.append("elevated_cancel_reject")
     if avg_realized is not None and avg_realized > warn_slip:
         flags.append("elevated_slippage")
         impact.append("high_slippage")
 
     robustness_tier = "healthy"
     exec_cost_tier = "low"
-    if fill_rate <= crit_fill or (avg_realized is not None and avg_realized >= crit_slip):
+    if (
+        fill_rate <= crit_fill
+        or miss_rate >= _CRITICAL_CANCEL_REJECT_RATE
+        or (avg_realized is not None and avg_realized >= crit_slip)
+    ):
         robustness_tier = "critical"
         exec_cost_tier = "high"
         impact.append("review_required")
-    elif fill_rate <= warn_fill or (avg_realized is not None and avg_realized >= warn_slip):
+    elif (
+        fill_rate <= warn_fill
+        or miss_rate >= _WARN_CANCEL_REJECT_RATE
+        or (avg_realized is not None and avg_realized >= warn_slip)
+    ):
         robustness_tier = "warning"
         exec_cost_tier = "medium"
 
@@ -274,6 +288,7 @@ def compute_execution_robustness_contract(
         "fill_rate": fill_rate,
         "partial_fill_rate": partial_fill_rate,
         "miss_rate": miss_rate,
+        "cancel_reject_rate": miss_rate,
         "avg_expected_slippage_bps": None,
         "avg_realized_slippage_bps": avg_realized,
         "slippage_gap_bps": None,
@@ -353,7 +368,7 @@ def compute_execution_robustness_v2_contract(
         flags.append("latency_capture_missing")
     if partial_fill_rate is not None and partial_fill_rate >= 0.35:
         flags.append("partial_fill_elevated")
-    if cancel_reject_rate is not None and cancel_reject_rate >= 0.25:
+    if cancel_reject_rate is not None and cancel_reject_rate >= _WARN_CANCEL_REJECT_RATE:
         flags.append("cancel_reject_elevated")
         impact.append("elevated_cancel_reject")
 
@@ -362,7 +377,7 @@ def compute_execution_robustness_v2_contract(
     if (
         (fill_rate is not None and fill_rate <= crit_fill)
         or (avg_realized is not None and avg_realized >= crit_slip)
-        or (cancel_reject_rate is not None and cancel_reject_rate >= 0.45)
+        or (cancel_reject_rate is not None and cancel_reject_rate >= _CRITICAL_CANCEL_REJECT_RATE)
     ):
         robustness_tier = "critical"
         exec_cost_tier = "high"
@@ -370,6 +385,7 @@ def compute_execution_robustness_v2_contract(
     elif (
         (fill_rate is not None and fill_rate <= warn_fill)
         or (avg_realized is not None and avg_realized >= warn_slip)
+        or (cancel_reject_rate is not None and cancel_reject_rate >= _WARN_CANCEL_REJECT_RATE)
         or source_truth_tier in ("weak", "unknown")
     ):
         robustness_tier = "warning"
@@ -490,6 +506,7 @@ def execution_robustness_summary(contract: dict[str, Any] | None) -> dict[str, A
         "robustness_tier": contract.get("robustness_tier"),
         "fill_rate": contract.get("fill_rate"),
         "miss_rate": contract.get("miss_rate"),
+        "cancel_reject_rate": contract.get("cancel_reject_rate"),
         "avg_realized_slippage_bps": contract.get("avg_realized_slippage_bps"),
         "provider_truth_mode": contract.get("provider_truth_mode"),
         "source_truth_tier": contract.get("source_truth_tier"),

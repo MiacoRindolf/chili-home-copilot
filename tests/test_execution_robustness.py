@@ -192,6 +192,29 @@ def test_compute_critical_slippage(monkeypatch):
     assert "high_slippage" in c["readiness_impact_flags"]
 
 
+def test_compute_warns_on_elevated_miss_rate_even_when_fill_rate_above_floor(monkeypatch):
+    _patch_market_settings(monkeypatch, polygon=True)
+    p = SimpleNamespace(origin="web_discovered")
+    stats = dict(
+        n_orders=10,
+        n_filled=7,
+        n_partial=0,
+        n_miss=3,
+        slippages_abs_bps=[4.0, 5.0],
+        dominant_broker_source="coinbase",
+    )
+
+    c = compute_execution_robustness_contract(pattern=p, stats=stats, settings_mod=_settings_mod())
+
+    assert c["fill_rate"] == pytest.approx(0.7)
+    assert c["miss_rate"] == pytest.approx(0.3)
+    assert c["cancel_reject_rate"] == pytest.approx(0.3)
+    assert c["robustness_tier"] == "warning"
+    assert c["execution_cost_tier"] == "medium"
+    assert "cancel_reject_elevated" in c["robustness_flags"]
+    assert "elevated_cancel_reject" in c["readiness_impact_flags"]
+
+
 def test_provider_truth_exchange_aware(monkeypatch):
     _patch_market_settings(monkeypatch, coinbase=True)
     p = SimpleNamespace(origin="web_discovered")
@@ -245,6 +268,42 @@ def test_compute_v2_healthy_exchange_audited():
     assert c["provider_truth_mode"] == "exchange_event_audited"
     assert c["source_truth_tier"] == "strong"
     assert execution_robustness_v2_summary(c)["avg_expected_slippage_bps"] == 8.0
+
+
+def test_compute_v2_warns_on_elevated_cancel_reject_rate() -> None:
+    p = SimpleNamespace(origin="web_discovered")
+    telemetry = dict(
+        n_orders=10,
+        n_filled=7,
+        n_partial=0,
+        n_miss=3,
+        fill_rate=0.7,
+        partial_fill_rate=0.0,
+        miss_rate=0.3,
+        cancel_reject_rate=0.3,
+        avg_expected_slippage_bps=4.0,
+        avg_realized_slippage_bps=5.0,
+        avg_spread_bps=3.0,
+        latency_p50_ms=250.0,
+        latency_p95_ms=900.0,
+        ack_to_fill_p50_ms=400.0,
+        ack_to_fill_p95_ms=1200.0,
+        provider_truth_mode="exchange_event_audited",
+        dominant_broker_source="coinbase",
+        metric_coverage={"spread_ratio": 1.0, "latency_submit_ack_ratio": 1.0},
+    )
+
+    c = compute_execution_robustness_v2_contract(
+        pattern=p,
+        telemetry=telemetry,
+        settings_mod=_settings_mod(),
+    )
+
+    assert c["robustness_tier"] == "warning"
+    assert c["execution_cost_tier"] == "medium"
+    assert "cancel_reject_elevated" in c["robustness_flags"]
+    assert "elevated_cancel_reject" in c["readiness_impact_flags"]
+    assert execution_robustness_v2_summary(c)["cancel_reject_rate"] == pytest.approx(0.3)
 
 
 def test_compute_v2_missing_metrics_downgrades_truth():
