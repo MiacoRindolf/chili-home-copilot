@@ -133,3 +133,20 @@ def test_return_fraction_sql_rejects_nonfinite_numeric_inputs() -> None:
         assert f"({column}){nonfinite_guard}" in paper_sql
     assert f"pt.quantity + pt.partial_taken_qty)){nonfinite_guard}" in paper_sql
     assert paper_sql.count(nonfinite_guard) >= 7
+
+
+def test_return_fraction_sql_rejects_nonfinite_computed_outputs() -> None:
+    live_sql = _compact(trade_return_fraction_sql("t"))
+    paper_sql = _compact(paper_trade_return_fraction_sql("pt"))
+    nonfinite_guard = "::text NOT IN ('NaN', 'Infinity', '-Infinity')"
+
+    assert f"t.entry_price * (t.quantity + t.partial_taken_qty) * (" in live_sql
+    assert f"t.pnl / (t.entry_price * (CASE WHEN t.filled_quantity" in live_sql
+    assert live_sql.count("CASE WHEN") >= 4
+
+    assert f"pt.entry_price * (pt.quantity + pt.partial_taken_qty) * (" in paper_sql
+    assert f"pt.pnl / (pt.entry_price * (pt.quantity) * (" in paper_sql
+    assert paper_sql.count("CASE WHEN") >= 3
+
+    assert live_sql.count(nonfinite_guard) >= 10
+    assert paper_sql.count(nonfinite_guard) >= 10
