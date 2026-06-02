@@ -54,14 +54,8 @@
 
 <div class="ws-scrim" id="ws-scrim">
   <div class="ws-palette" role="dialog" aria-modal="true" aria-label="Command palette">
-    <input id="ws-palette-in" type="text" placeholder="Search — or open an app…" autocomplete="off">
-    <div class="grp">Open</div>
-    <a class="opt sel" href="/chat" data-app="chat" data-src="/chat" data-title="Chat" data-icon="💬"><span class="pi"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>Chat<span class="pk">↵</span></a>
-    <a class="opt" href="/trading" data-app="trading" data-src="/trading" data-title="Trading Desk" data-icon="📈"><span class="pi"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M3 17l5-5 4 4 8-9"/></svg></span>Trading Desk</a>
-    <a class="opt" href="/brain" data-app="brain" data-src="/brain" data-title="Brain" data-icon="🧠"><span class="pi"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M12 3a4 4 0 0 0-4 4 3 3 0 0 0-1 5.83A3 3 0 0 0 8 18a3 3 0 0 0 4 1 3 3 0 0 0 4-1 3 3 0 0 0 1-5.17A3 3 0 0 0 16 7a4 4 0 0 0-4-4z"/></svg></span>Brain</a>
-    <div class="grp">Actions</div>
-    <a class="opt" href="/api/brain/trading/brief" target="_blank" rel="noopener"><span class="pi">🌶️</span>Open daily trading brief</a>
-    <a class="opt" href="/api/brain/reasoning/research/report" data-app="research" data-src="/api/brain/reasoning/research/report" data-title="Research" data-icon="🔎"><span class="pi">🔎</span>Open research digest</a>
+    <input id="ws-palette-in" type="text" placeholder="Search patterns, tickers, apps…" autocomplete="off" role="combobox" aria-expanded="true" aria-controls="ws-palette-results">
+    <div id="ws-palette-results" role="listbox"></div>
   </div>
 </div>
 </div>
