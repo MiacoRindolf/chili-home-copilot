@@ -290,6 +290,7 @@
   //    mouse. Combos are chosen to avoid clashing with browser/OS bindings:
   //      Ctrl/⌘ + `            cycle focus to the next window
   //      Ctrl/⌘ + Alt + ←/→/↑  tile left / right / maximize
+  //      Ctrl/⌘ + Alt + 1/2/3/4 tile top-left / top-right / bottom-left / bottom-right quarter
   //      Ctrl/⌘ + Alt + ↓      minimize
   //      Ctrl/⌘ + Alt + W      close
   //    (Only fire while the OS chrome has focus — keydown inside an app iframe
@@ -303,6 +304,10 @@
     if (e.key === 'ArrowLeft') { e.preventDefault(); snap(el, 'left'); saveLayout(); }
     else if (e.key === 'ArrowRight') { e.preventDefault(); snap(el, 'right'); saveLayout(); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); snap(el, 'max'); saveLayout(); }
+    else if (e.key === '1') { e.preventDefault(); snap(el, 'tl'); saveLayout(); }
+    else if (e.key === '2') { e.preventDefault(); snap(el, 'tr'); saveLayout(); }
+    else if (e.key === '3') { e.preventDefault(); snap(el, 'bl'); saveLayout(); }
+    else if (e.key === '4') { e.preventDefault(); snap(el, 'br'); saveLayout(); }
     else if (e.key === 'ArrowDown') { e.preventDefault(); minimizeApp(top); }
     else if (e.key.toLowerCase() === 'w') { e.preventDefault(); closeApp(top); }
   });
