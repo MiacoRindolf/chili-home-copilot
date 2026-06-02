@@ -19,12 +19,19 @@ class SqlAlchemyBrainPredictionSnapshotRepository:
         header: PredictionSnapshotSealDTO,
         lines: list[PredictionLineWriteDTO],
     ) -> int:
+        actual_count = len(lines)
+        expected_count = int(header.ticker_count)
+        if expected_count != actual_count:
+            raise ValueError(
+                "prediction_snapshot_ticker_count_mismatch:"
+                f"header={expected_count}:lines={actual_count}"
+            )
         now = datetime.utcnow()
         corr = header.correlation_id or str(uuid4())
         snap = BrainPredictionSnapshot(
             as_of_ts=header.as_of_ts or now,
             universe_fingerprint=header.universe_fingerprint,
-            ticker_count=int(header.ticker_count),
+            ticker_count=expected_count,
             source_tag=header.source_tag or "legacy_get_current_predictions",
             correlation_id=corr[:40],
         )

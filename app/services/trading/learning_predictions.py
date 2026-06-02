@@ -617,12 +617,12 @@ def _get_current_predictions_impl(
             )
 
             _fp = prediction_universe_fingerprint(ticker_batch)
-            brain_prediction_mirror_write_dedicated(
+            snapshot_id = brain_prediction_mirror_write_dedicated(
                 legacy_rows=results,
                 universe_fingerprint=_fp,
-                ticker_count=len(ticker_batch),
+                ticker_count=len(results),
             )
-            dual_write_outcome = DUAL_WRITE_OK
+            dual_write_outcome = DUAL_WRITE_OK if snapshot_id is not None else DUAL_WRITE_FAIL
     except Exception:
         logger.warning("[brain_prediction_dual_write] hook failed (legacy return preserved)", exc_info=True)
         if dw_enabled and results:
@@ -658,4 +658,3 @@ def _get_current_predictions_impl(
         )
 
     return results
-

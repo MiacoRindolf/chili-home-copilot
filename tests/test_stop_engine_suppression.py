@@ -54,6 +54,47 @@ def test_fetch_market_context_normalizes_aware_quote_ts(monkeypatch):
     assert context.quote_ts.tzinfo is None
 
 
+def test_fetch_market_context_marks_missing_quote_ts_stale(monkeypatch):
+    monkeypatch.setattr(
+        market_data,
+        "fetch_quote",
+        lambda _ticker: {"price": 2.04, "bid": 2.03, "ask": 2.05},
+    )
+    monkeypatch.setattr(
+        market_data,
+        "get_indicator_snapshot",
+        lambda _ticker, interval="1d": {"atr": {"value": 0.08}},
+    )
+
+    context = _fetch_market_context("DIEM-USD")
+
+    assert context.is_stale is True
+    assert context.quote_ts is None
+
+
+def test_fetch_market_context_marks_malformed_quote_ts_stale(monkeypatch):
+    monkeypatch.setattr(
+        market_data,
+        "fetch_quote",
+        lambda _ticker: {
+            "price": 2.04,
+            "bid": 2.03,
+            "ask": 2.05,
+            "quote_ts": "not-a-timestamp",
+        },
+    )
+    monkeypatch.setattr(
+        market_data,
+        "get_indicator_snapshot",
+        lambda _ticker, interval="1d": {"atr": {"value": 0.08}},
+    )
+
+    context = _fetch_market_context("DIEM-USD")
+
+    assert context.is_stale is True
+    assert context.quote_ts is None
+
+
 def test_crypto_missing_qty_backoff_active_only_inside_window():
     now = datetime(2026, 5, 28, 19, 50, tzinfo=timezone.utc)
     trade = SimpleNamespace(

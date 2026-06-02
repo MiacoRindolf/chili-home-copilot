@@ -402,6 +402,24 @@ def emit_backtest_completed_outcome(
     }
     if extra:
         payload.update(extra)
+    required_lineage_fields = (
+        "backtest_result_ids",
+        "backtest_param_set_ids",
+        "backtest_param_hashes",
+        "settings_hash",
+        "conditions_hash",
+        "exit_config_hash",
+        "selected_tickers_hash",
+        "code_version",
+        "run_lineage",
+        "complete_ticker_attempts",
+    )
+    missing_lineage = [
+        key for key in required_lineage_fields if not payload.get(key)
+    ]
+    payload["lineage_missing_fields"] = missing_lineage
+    payload["lineage_status"] = "complete" if not missing_lineage else "incomplete"
+    payload["promotion_grade_provenance"] = not missing_lineage
     return enqueue_outcome_event(
         db,
         event_type="backtest_completed",

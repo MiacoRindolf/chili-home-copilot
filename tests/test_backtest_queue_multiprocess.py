@@ -124,6 +124,21 @@ def test_non_deadline_result_can_certify():
     ) is True
 
 
+def test_incomplete_ticker_attempts_cannot_certify_without_deadline_flag():
+    from app.services.trading.backtest_queue_worker import (
+        queue_backtest_can_certify_result,
+    )
+
+    assert queue_backtest_can_certify_result(
+        {
+            "soft_deadline_hit": False,
+            "backtests_run": 12,
+            "tickers_selected": 24,
+            "complete_ticker_attempts": False,
+        }
+    ) is False
+
+
 def test_run_one_pattern_job_keeps_db_child_env_and_delegates(monkeypatch):
     from app.services.trading import backtest_queue_worker as worker
 

@@ -228,7 +228,10 @@ def _to_naive_utc(value: datetime | str | None) -> datetime | None:
             return None
         if raw.endswith("Z"):
             raw = f"{raw[:-1]}+00:00"
-        value = datetime.fromisoformat(raw)
+        try:
+            value = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
     if value.tzinfo is None or value.utcoffset() is None:
         return value
     return value.astimezone(timezone.utc).replace(tzinfo=None)
@@ -1481,11 +1484,17 @@ def _fetch_market_context(
         }
         price = range_price
 
-    quote_ts = _to_naive_utc(q.get("quote_ts")) or _now_naive_utc()
-    age_secs = (_now_naive_utc() - quote_ts).total_seconds()
+    quote_ts = _to_naive_utc(q.get("quote_ts"))
+    age_secs = (
+        (_now_naive_utc() - quote_ts).total_seconds()
+        if quote_ts is not None
+        else None
+    )
     max_age_seconds = _safe_market_float(q.get("max_age_seconds"))
     freshness_window = max_age_seconds or staleness_secs
-    is_stale = bool(q.get("stale")) or age_secs > freshness_window
+    is_stale = bool(q.get("stale")) or quote_ts is None or (
+        age_secs is not None and age_secs > freshness_window
+    )
 
     atr = None
     try:

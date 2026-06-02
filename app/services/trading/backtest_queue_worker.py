@@ -219,6 +219,8 @@ def queue_target_tickers_for_pattern(settings: object, pattern: object) -> int:
 
 def queue_backtest_can_certify_result(result: Mapping[str, object]) -> bool:
     """Return whether a queue result is complete enough to certify gates."""
+    if result.get("complete_ticker_attempts") is False:
+        return False
     if not bool(result.get("soft_deadline_hit")):
         return True
     selected = _non_negative_int(result.get("tickers_selected"))
@@ -635,6 +637,18 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
                     backtests_run=int(backtests_run),
                     win_rate=win_rate,
                     avg_return=avg_return,
+                    extra={
+                        "backtest_result_ids": result.get("backtest_result_ids") or [],
+                        "backtest_param_set_ids": result.get("backtest_param_set_ids") or [],
+                        "backtest_param_hashes": result.get("backtest_param_hashes") or [],
+                        "settings_hash": result.get("settings_hash"),
+                        "conditions_hash": result.get("conditions_hash"),
+                        "exit_config_hash": result.get("exit_config_hash"),
+                        "selected_tickers_hash": result.get("selected_tickers_hash"),
+                        "code_version": result.get("code_version"),
+                        "run_lineage": result.get("run_lineage"),
+                        "complete_ticker_attempts": result.get("complete_ticker_attempts"),
+                    },
                 )
                 db.commit()
             except Exception:

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.trading_brain.infrastructure.prediction_ops_log import (
     CHILI_PREDICTION_OPS_PREFIX,
+    DUAL_WRITE_FAIL,
     DUAL_WRITE_NA,
     DUAL_WRITE_OK,
     READ_COMPARE_MISS,
@@ -128,3 +129,67 @@ def test_ops_log_dual_write_ok_when_enabled(
     hits = [r for r in caplog.records if CHILI_PREDICTION_OPS_PREFIX in r.getMessage()]
     assert len(hits) == 1
     assert f"dual_write={DUAL_WRITE_OK}" in hits[0].getMessage()
+
+
+def test_prediction_dual_write_uses_persisted_line_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services.trading.learning import _get_current_predictions_impl
+
+    monkeypatch.setattr(settings, "brain_prediction_dual_write_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "brain_prediction_read_compare_enabled", False, raising=False)
+    monkeypatch.setattr(settings, "brain_prediction_read_authoritative_enabled", False, raising=False)
+
+    fake_pat = MagicMock()
+    fake_pat.ticker_scope = "universal"
+    ml = MagicMock()
+    ml.is_ready.return_value = False
+
+    def _predict(ticker, *_args, **_kwargs):
+        if ticker == "TST":
+            return _minimal_prediction_row()
+        return None
+
+    with patch("app.services.trading.pattern_engine.get_active_patterns", return_value=[fake_pat]), patch(
+        "app.services.trading.market_data.fetch_quotes_batch",
+        return_value={"TST": {"price": 100.0}, "MISS": {"price": 101.0}},
+    ), patch(
+        "app.services.trading.learning_predictions._predict_single_ticker",
+        side_effect=_predict,
+    ), patch("app.services.trading.market_data.get_vix", return_value=15.0), patch(
+        "app.services.trading.market_data.get_volatility_regime",
+        return_value={"regime": "normal"},
+    ), patch("app.services.trading.pattern_ml.get_meta_learner", return_value=ml), patch(
+        "app.trading_brain.infrastructure.prediction_mirror_session.brain_prediction_mirror_write_dedicated",
+        return_value=123,
+    ) as writer:
+        results = _get_current_predictions_impl(
+            MagicMock(),
+            ["TST", "MISS"],
+            explicit_api_tickers=True,
+        )
+
+    assert len(results) == 1
+    writer.assert_called_once()
+    assert writer.call_args.kwargs["ticker_count"] == 1
+    assert len(writer.call_args.kwargs["legacy_rows"]) == 1
+
+
+def test_ops_log_dual_write_fail_when_writer_returns_none(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(settings, "brain_prediction_ops_log_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "brain_prediction_dual_write_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "brain_prediction_read_compare_enabled", False, raising=False)
+    monkeypatch.setattr(settings, "brain_prediction_read_authoritative_enabled", False, raising=False)
+    caplog.set_level(logging.INFO, logger="app.services.trading")
+    with patch(
+        "app.trading_brain.infrastructure.prediction_mirror_session.brain_prediction_mirror_write_dedicated",
+        return_value=None,
+    ) as w:
+        _run_get_current_predictions_impl_stub(MagicMock(), explicit_api_tickers=False)
+        w.assert_called_once()
+
+    hits = [r for r in caplog.records if CHILI_PREDICTION_OPS_PREFIX in r.getMessage()]
+    assert len(hits) == 1
+    assert f"dual_write={DUAL_WRITE_FAIL}" in hits[0].getMessage()
