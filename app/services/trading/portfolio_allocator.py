@@ -59,17 +59,58 @@ def _truthy_marker(value: Any) -> bool:
 
 
 def _normalize_confidence(value: Any) -> float:
+    return _normalize_confidence_evidence(value)[0]
+
+
+def _confidence_raw_for_evidence(value: Any) -> Any:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float, str)) or value is None:
+        return value
+    return repr(value)
+
+
+def _normalize_confidence_evidence(
+    value: Any,
+    *,
+    source_surface: str = "portfolio_allocator.confidence",
+) -> tuple[float, dict[str, Any]]:
+    evidence: dict[str, Any] = {
+        "source_surface": source_surface,
+        "parser": "portfolio_allocator._normalize_confidence",
+        "raw_value": _confidence_raw_for_evidence(value),
+        "accepted_scale": None,
+        "normalized_probability": 0.0,
+        "parser_outcome": "rejected",
+        "rejection_reason": None,
+    }
+    if isinstance(value, bool):
+        evidence["rejection_reason"] = "boolean_confidence"
+        return 0.0, evidence
     raw = _safe_float(value, 0.0)
     if raw <= 0.0:
-        return 0.0
+        evidence["rejection_reason"] = "non_positive_or_missing_confidence"
+        return 0.0, evidence
     if raw <= 1.0:
-        return raw
-    if raw > 1.0:
-        if raw <= 10.0:
-            return raw / 10.0
-        if raw <= 100.0:
-            return raw / 100.0
-    return 0.0
+        normalized = raw
+        accepted_scale = "fraction_0_1"
+    elif raw <= 10.0:
+        normalized = raw / 10.0
+        accepted_scale = "decile_1_10"
+    elif raw <= 100.0:
+        normalized = raw / 100.0
+        accepted_scale = "percent_0_100"
+    else:
+        evidence["rejection_reason"] = "above_percent_ceiling"
+        return 0.0, evidence
+    evidence.update(
+        {
+            "accepted_scale": accepted_scale,
+            "normalized_probability": normalized,
+            "parser_outcome": "accepted",
+        }
+    )
+    return normalized, evidence
 
 
 def _win_rate_score(value: Any) -> float:
@@ -155,20 +196,28 @@ def _collect_open_trade_conflicts(db: Session, *, user_id: int, symbol: str, sec
         if not buckets:
             continue
         incumbent = patterns.get(int(trade.scan_pattern_id)) if getattr(trade, "scan_pattern_id", None) else None
+        confidence_score = 0.0
+        confidence_input = None
+        if incumbent:
+            confidence_score, confidence_input = _normalize_confidence_evidence(
+                getattr(incumbent, "confidence", None),
+                source_surface="portfolio_allocator.incumbent_pattern_confidence",
+            )
         incumbent_score = (
-            _normalize_confidence(getattr(incumbent, "confidence", None)) * 0.6
+            confidence_score * 0.6
             + _win_rate_score(getattr(incumbent, "oos_win_rate", None) or getattr(incumbent, "win_rate", None)) * 0.4
         ) if incumbent else 0.5
-        out.append(
-            {
-                "conflict_type": "open_trade",
-                "ticker": trade.ticker,
-                "trade_id": int(getattr(trade, "id", 0) or 0),
-                "scan_pattern_id": getattr(trade, "scan_pattern_id", None),
-                "buckets": buckets,
-                "incumbent_score": round(incumbent_score, 4),
-            }
-        )
+        conflict = {
+            "conflict_type": "open_trade",
+            "ticker": trade.ticker,
+            "trade_id": int(getattr(trade, "id", 0) or 0),
+            "scan_pattern_id": getattr(trade, "scan_pattern_id", None),
+            "buckets": buckets,
+            "incumbent_score": round(incumbent_score, 4),
+        }
+        if confidence_input is not None:
+            conflict["incumbent_confidence_input"] = confidence_input
+        out.append(conflict)
     return out
 
 
@@ -611,8 +660,12 @@ def evaluate_allocation_candidate(
 
 def build_pattern_allocation_state(db: Session, pattern: Any, *, user_id: int | None, context: str) -> dict[str, Any]:
     projection = read_pattern_validation_projection(pattern)
+    confidence_score, confidence_input = _normalize_confidence_evidence(
+        getattr(pattern, "confidence", None),
+        source_surface="portfolio_allocator.pattern_confidence",
+    )
     research_quality = round(
-        (_normalize_confidence(getattr(pattern, "confidence", None)) * 0.55)
+        (confidence_score * 0.55)
         + (_win_rate_score(getattr(pattern, "oos_win_rate", None) or getattr(pattern, "win_rate", None)) * 0.45),
         4,
     )
@@ -634,6 +687,7 @@ def build_pattern_allocation_state(db: Session, pattern: Any, *, user_id: int | 
         state["symbol"] = symbol.upper()
     else:
         state["symbol"] = None
+    state.setdefault("score_inputs", {})["confidence_input"] = confidence_input
     write_validation_contract(pattern, "allocation_state", state)
     return state
 
@@ -649,8 +703,12 @@ def build_proposal_allocation_decision(db: Session, proposal: Any, *, user_id: i
             hypothesis_family = getattr(pattern, "hypothesis_family", None)
             pattern_projection = read_pattern_validation_projection(pattern)
 
+    confidence_score, confidence_input = _normalize_confidence_evidence(
+        getattr(proposal, "confidence", None),
+        source_surface="portfolio_allocator.proposal_confidence",
+    )
     research_quality = round(
-        (_normalize_confidence(getattr(proposal, "confidence", None)) * 0.65)
+        (confidence_score * 0.65)
         + (_safe_float(getattr(proposal, "risk_reward_ratio", None), 0.0) / 4.0 * 0.35),
         4,
     )
@@ -671,6 +729,7 @@ def build_proposal_allocation_decision(db: Session, proposal: Any, *, user_id: i
         context="proposal_approval",
         intended_notional_usd=proposal_notional,
     )
+    decision.setdefault("score_inputs", {})["confidence_input"] = confidence_input
     proposal.allocation_decision_json = dict(decision)
     return decision
 
@@ -697,16 +756,23 @@ def build_session_allocation_decision(
         asset_class = getattr(pattern, "asset_class", None) or asset_class
         projection = read_pattern_validation_projection(pattern)
 
+    risk_snapshot = session.risk_snapshot_json or {}
+    if not isinstance(risk_snapshot, dict):
+        risk_snapshot = {}
+    confidence_score, confidence_input = _normalize_confidence_evidence(
+        risk_snapshot.get("confidence"),
+        source_surface="portfolio_allocator.session_risk_snapshot_confidence",
+    )
     research_quality = round(
-        (_normalize_confidence((session.risk_snapshot_json or {}).get("confidence")) * 0.5)
-        + (_safe_float((session.risk_snapshot_json or {}).get("viability_score"), 0.0) * 0.5),
+        (confidence_score * 0.5)
+        + (_safe_float(risk_snapshot.get("viability_score"), 0.0) * 0.5),
         4,
     )
     decision = evaluate_allocation_candidate(
         db,
         user_id=user_id,
         symbol=(getattr(session, "symbol", None) or "").strip().upper(),
-        timeframe=(session.risk_snapshot_json or {}).get("timeframe"),
+        timeframe=risk_snapshot.get("timeframe"),
         asset_class=asset_class,
         hypothesis_family=hypothesis_family,
         research_quality=max(0.0, min(1.0, research_quality if research_quality > 0 else 0.5)),
@@ -716,6 +782,7 @@ def build_session_allocation_decision(
         execution_mode=getattr(session, "mode", None),
         intended_notional_usd=intended_notional_usd,
     )
+    decision.setdefault("score_inputs", {})["confidence_input"] = confidence_input
     session.allocation_decision_json = dict(decision)
     return decision
 

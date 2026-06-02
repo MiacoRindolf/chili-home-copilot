@@ -49,6 +49,14 @@ def test_proposal_allocator_blocks_same_ticker_conflict(db):
     assert decision["allowed_if_enforced"] is False
     assert decision["blocked_reason"] == "same_ticker_conflict"
     assert proposal.allocation_decision_json["blocked_reason"] == "same_ticker_conflict"
+    confidence_input = proposal.allocation_decision_json["score_inputs"][
+        "confidence_input"
+    ]
+    assert confidence_input["source_surface"] == "portfolio_allocator.proposal_confidence"
+    assert confidence_input["raw_value"] == 4.0
+    assert confidence_input["accepted_scale"] == "decile_1_10"
+    assert confidence_input["normalized_probability"] == 0.4
+    assert confidence_input["parser_outcome"] == "accepted"
 
 
 def test_allocator_uses_sector_cap(db, monkeypatch):
@@ -339,6 +347,67 @@ def test_allocator_normalizes_confidence_scales_without_fake_certainty():
     assert allocator_mod._normalize_confidence(75.0) == 0.75
     assert allocator_mod._normalize_confidence(95.0) == 0.95
     assert allocator_mod._normalize_confidence(101.0) == 0.0
+
+
+def test_allocator_confidence_evidence_records_scale_contracts():
+    score, evidence = allocator_mod._normalize_confidence_evidence(
+        4.0,
+        source_surface="unit.allocator",
+    )
+    assert score == 0.4
+    assert evidence == {
+        "source_surface": "unit.allocator",
+        "parser": "portfolio_allocator._normalize_confidence",
+        "raw_value": 4.0,
+        "accepted_scale": "decile_1_10",
+        "normalized_probability": 0.4,
+        "parser_outcome": "accepted",
+        "rejection_reason": None,
+    }
+
+    score, evidence = allocator_mod._normalize_confidence_evidence(75.0)
+    assert score == 0.75
+    assert evidence["accepted_scale"] == "percent_0_100"
+    assert evidence["normalized_probability"] == 0.75
+
+
+def test_allocator_confidence_evidence_rejects_fake_certainty():
+    score, evidence = allocator_mod._normalize_confidence_evidence(True)
+    assert score == 0.0
+    assert evidence["parser_outcome"] == "rejected"
+    assert evidence["rejection_reason"] == "boolean_confidence"
+
+    score, evidence = allocator_mod._normalize_confidence_evidence(101.0)
+    assert score == 0.0
+    assert evidence["parser_outcome"] == "rejected"
+    assert evidence["rejection_reason"] == "above_percent_ceiling"
+
+
+def test_proposal_allocator_records_confidence_evidence_without_db_fixture():
+    proposal = SimpleNamespace(
+        scan_pattern_id=None,
+        confidence=75.0,
+        risk_reward_ratio=2.0,
+        entry_price=1.25,
+        quantity=2.0,
+        ticker="SPY",
+        timeframe="swing",
+        allocation_decision_json=None,
+    )
+
+    decision = build_proposal_allocation_decision(
+        _FakeAllocatorDb(),
+        proposal,
+        user_id=1,
+    )
+
+    confidence_input = decision["score_inputs"]["confidence_input"]
+    assert confidence_input["source_surface"] == "portfolio_allocator.proposal_confidence"
+    assert confidence_input["raw_value"] == 75.0
+    assert confidence_input["accepted_scale"] == "percent_0_100"
+    assert confidence_input["normalized_probability"] == 0.75
+    assert confidence_input["parser_outcome"] == "accepted"
+    assert proposal.allocation_decision_json["score_inputs"]["confidence_input"] == confidence_input
 
 
 def test_allocator_session_notional_ignores_false_option_path_marker():

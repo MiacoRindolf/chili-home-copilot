@@ -102,6 +102,9 @@ class PositionSizerInput:
         Notional multiplier per one quoted unit. Equities/crypto use
         ``1``; listed option contracts use ``100`` because entry/stop
         are option premiums but quantity is whole contracts.
+    probability_input
+        Optional parser evidence for ``calibrated_prob``. This is
+        metadata only; the pure sizing math uses ``calibrated_prob``.
     """
 
     ticker: str
@@ -127,6 +130,7 @@ class PositionSizerInput:
     qty_rounding: Literal["int", "decimal"] = "int"
     correlation_bucket: str | None = None
     unit_multiplier: float = 1.0
+    probability_input: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

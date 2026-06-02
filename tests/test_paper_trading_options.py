@@ -1552,6 +1552,18 @@ def test_auto_enter_option_signal_normalizes_percent_confidence_for_netedge(
     assert captured[0].raw_prob == pytest.approx(0.9)
     trade = _paper_rows(db)[0]
     assert trade.signal_json["confidence"] == pytest.approx(0.9)
+    confidence_input = trade.signal_json[
+        paper_trading.PAPER_CONFIDENCE_INPUT_META_KEY
+    ]
+    assert confidence_input == {
+        "source_surface": "paper_trading.auto_enter_from_signals",
+        "parser": "confidence_fraction",
+        "raw_value": 90.0,
+        "accepted_scale": "percent_0_100",
+        "normalized_probability": pytest.approx(0.9),
+        "parser_outcome": "accepted",
+        "rejection_reason": None,
+    }
     assert signal["confidence"] == 90.0
 
 
@@ -1642,6 +1654,13 @@ def test_auto_enter_option_signal_uses_asset_gate_and_meta_contract_quantity(
     assert trade.entry_price == pytest.approx(1.25)
     assert trade.stop_price == pytest.approx(0.625)
     assert trade.target_price == pytest.approx(2.50)
+    confidence_input = trade.signal_json[
+        paper_trading.PAPER_CONFIDENCE_INPUT_META_KEY
+    ]
+    assert confidence_input["raw_value"] == pytest.approx(0.9)
+    assert confidence_input["accepted_scale"] == "fraction_0_1"
+    assert confidence_input["normalized_probability"] == pytest.approx(0.9)
+    assert confidence_input["parser_outcome"] == "accepted"
 
 
 def test_auto_enter_option_signal_rejects_fractional_contract_quantity(
