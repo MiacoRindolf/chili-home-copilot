@@ -14,13 +14,14 @@
 
 {% block content %}
 {% set _bd = brain_initial_domain|default('hub') %}
+{% set _embed = request is defined and request.query_params.get('embed') == '1' %}
 <script>
 window.__CHILI_TBN_DESK__ = {{ trading_brain_desk_config|default({})|tojson }};
 window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
 </script>
 
 <a href="#bx-runtime-header" class="skip-nav">Skip to main content</a>
-{% if request.query_params.get('embed') != '1' %}{% include "brain/_header.html" %}{% endif %}
+{% if not _embed %}{% include "brain/_header.html" %}{% endif %}
 
 <div class="b-body">
   <div class="b-main" data-brain-initial-domain="{{ _bd }}" data-trading-boot="{% if _bd == 'trading' %}immediate{% else %}deferred{% endif %}">

@@ -352,12 +352,12 @@ class TestWeather:
 
 class TestHomePageRender:
     def test_home_page_loads(self, client):
-        resp = client.get("/")
+        resp = client.get("/home")
         assert resp.status_code == 200
         assert "CHILI Home" in resp.text
 
     def test_home_page_has_dashboard(self, client):
-        resp = client.get("/")
+        resp = client.get("/home")
         assert "dashboard" in resp.text.lower()
         assert "calendar" in resp.text.lower()
         assert "activity" in resp.text.lower()
