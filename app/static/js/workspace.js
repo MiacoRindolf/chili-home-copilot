@@ -177,6 +177,7 @@
     var cmds = [
       { cmd: 'theme', label: 'Toggle light / dark theme', icon: '🌓' },
       { cmd: 'help', label: 'Show keyboard shortcuts', icon: '⌨️' },
+      { cmd: 'tidy', label: 'Tidy windows', icon: '🪟' },
       { cmd: 'accent:blue', label: 'Accent: Blue', icon: '🔵' },
       { cmd: 'accent:violet', label: 'Accent: Violet', icon: '🟣' },
       { cmd: 'accent:green', label: 'Accent: Green', icon: '🟢' },
@@ -199,6 +200,8 @@
       markActive();
     } else if (id === 'help') {
       var hb = document.getElementById('ws-help-btn'); if (hb) hb.click();
+    } else if (id === 'tidy') {
+      if (window.ChiliOS && window.ChiliOS.tidy) window.ChiliOS.tidy();
     }
   }
 

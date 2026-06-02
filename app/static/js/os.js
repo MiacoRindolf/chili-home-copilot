@@ -371,6 +371,21 @@
       if (srcOverride) { cfg.src = srcOverride; cfg.deep = true; }
       openApp(cfg); return true;
     },
+    // Tidy: re-cascade every open (non-minimized) window to a clean default
+    // size + staggered position, in focus order. Returns the count arranged.
+    tidy: function () {
+      var n = 0;
+      order.forEach(function (app) {
+        var el = wins[app]; if (!el || el.style.display === 'none') return;
+        el.classList.add('snapping');
+        el.style.left = (40 + n * 34) + 'px'; el.style.top = (24 + n * 28) + 'px';
+        el.style.width = 'min(640px,72vw)'; el.style.height = 'min(520px,72vh)';
+        (function (e) { setTimeout(function () { e.classList.remove('snapping'); }, 160); })(el);
+        n++;
+      });
+      saveLayout();
+      return n;
+    },
     // Named Spaces — snapshot/restore window arrangements by name.
     spaces: {
       list: function () { return loadSpaces().map(function (s) { return { name: s.name, count: (s.apps || []).length }; }); },
