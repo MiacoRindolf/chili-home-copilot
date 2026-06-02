@@ -42,6 +42,19 @@
   var savedAccent = null; try { savedAccent = localStorage.getItem('chili-accent'); } catch (e) {}
   if (savedAccent && ACCENTS[savedAccent]) applyAccent(savedAccent);
 
+  // ── Wallpaper: retint the OS ambient background (overrides --ws-bg-grad).
+  //    Persisted to 'chili-wallpaper'; applied early like the theme/accent. ──
+  var WALLPAPERS = {
+    aurora: 'radial-gradient(120vw 80vh at 100% -10%,rgba(91,140,255,.07),transparent 55%),radial-gradient(90vw 60vh at -10% 110%,rgba(255,107,74,.05),transparent 55%)',
+    mesh: 'radial-gradient(60vw 50vh at 8% 0%,rgba(167,139,250,.11),transparent 60%),radial-gradient(55vw 50vh at 92% 18%,rgba(63,221,154,.07),transparent 60%),radial-gradient(75vw 60vh at 50% 105%,rgba(91,140,255,.08),transparent 60%)',
+    sunset: 'radial-gradient(100vw 70vh at 100% 0%,rgba(255,107,74,.11),transparent 55%),radial-gradient(85vw 60vh at 0% 100%,rgba(242,193,78,.07),transparent 55%)',
+    ocean: 'radial-gradient(100vw 70vh at 0% 0%,rgba(34,197,214,.10),transparent 55%),radial-gradient(80vw 60vh at 100% 100%,rgba(91,140,255,.08),transparent 55%)',
+    mono: 'none'
+  };
+  function applyWallpaper(name) { var g = WALLPAPERS[name]; if (g) root.style.setProperty('--ws-bg-grad', g); }
+  var savedWp = null; try { savedWp = localStorage.getItem('chili-wallpaper'); } catch (e) {}
+  if (savedWp && WALLPAPERS[savedWp]) applyWallpaper(savedWp);
+
   var accWrap = document.getElementById('ws-accent');
   var accBtn = document.getElementById('ws-accent-btn');
   var accMenu = document.getElementById('ws-accent-menu');
@@ -178,6 +191,11 @@
       { cmd: 'theme', label: 'Toggle light / dark theme', icon: '🌓' },
       { cmd: 'help', label: 'Show keyboard shortcuts', icon: '⌨️' },
       { cmd: 'tidy', label: 'Tidy windows', icon: '🪟' },
+      { cmd: 'wp:aurora', label: 'Wallpaper: Aurora', icon: '🖼️' },
+      { cmd: 'wp:mesh', label: 'Wallpaper: Mesh', icon: '🖼️' },
+      { cmd: 'wp:sunset', label: 'Wallpaper: Sunset', icon: '🖼️' },
+      { cmd: 'wp:ocean', label: 'Wallpaper: Ocean', icon: '🖼️' },
+      { cmd: 'wp:mono', label: 'Wallpaper: Mono', icon: '🖼️' },
       { cmd: 'accent:blue', label: 'Accent: Blue', icon: '🔵' },
       { cmd: 'accent:violet', label: 'Accent: Violet', icon: '🟣' },
       { cmd: 'accent:green', label: 'Accent: Green', icon: '🟢' },
@@ -202,6 +220,9 @@
       var hb = document.getElementById('ws-help-btn'); if (hb) hb.click();
     } else if (id === 'tidy') {
       if (window.ChiliOS && window.ChiliOS.tidy) window.ChiliOS.tidy();
+    } else if (id.indexOf('wp:') === 0) {
+      var wp = id.slice(3); applyWallpaper(wp);
+      try { localStorage.setItem('chili-wallpaper', wp); } catch (e) {}
     }
   }
 
