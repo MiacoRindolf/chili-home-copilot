@@ -97,7 +97,7 @@
     var html = '';
     for (var i = 0; i < list.length; i++) {
       var p = list[i] || {};
-      html += '<div class="ws-stat"><span class="k tick ws-mono">' + esc(p.ticker) +
+      html += '<div class="ws-stat ws-stat-link" data-ticker="' + esc(p.ticker) + '" title="Open ' + esc(p.ticker) + ' on the desk"><span class="k tick ws-mono">' + esc(p.ticker) +
         '</span><span class="ws-tag">' + esc(p.side) + '</span></div>';
     }
     el.innerHTML = html;
@@ -110,12 +110,23 @@
     for (var i = 0; i < list.length; i++) {
       var c = list[i] || {};
       var cls = c.pnl_up ? 'ws-up' : 'ws-down';
-      html += '<div class="ws-stat"><span class="k tick ws-mono">' + esc(c.ticker) +
+      html += '<div class="ws-stat ws-stat-link" data-ticker="' + esc(c.ticker) + '" title="Open ' + esc(c.ticker) + ' on the desk"><span class="k tick ws-mono">' + esc(c.ticker) +
         '</span><span><span class="ws-tag">' + esc(c.pattern || '—') +
         '</span> <span class="ws-mono ' + cls + '">' + esc(c.pnl_fmt || '—') + '</span></span></div>';
     }
     el.innerHTML = html;
   }
+
+  // Click a live position / recent close → open the Trading Desk on that ticker
+  // (uses the deep-link plumbing). Delegated, so it covers re-rendered rows.
+  ['ws-live-positions', 'ws-live-closes'].forEach(function (id) {
+    var box = document.getElementById(id); if (!box) return;
+    box.addEventListener('click', function (e) {
+      var row = e.target.closest('.ws-stat-link'); if (!row) return;
+      var t = row.getAttribute('data-ticker'); if (!t) return;
+      if (window.ChiliOS && window.ChiliOS.open) window.ChiliOS.open('trading', '/trading?ticker=' + encodeURIComponent(t));
+    });
+  });
 
   function apply(d) {
     if (!d || !d.ok) { setStatus('offline'); return; }
