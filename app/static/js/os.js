@@ -79,6 +79,8 @@
       '<div class="os-bar"><span class="wi">' + (cfg.icon || '🗔') + '</span><span class="wt">' + cfg.title + '</span>' +
       '<a class="pop" href="' + cfg.src + '" target="_blank" rel="noopener" title="Open in new tab"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M14 4h6v6M10 14L20 4M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5"/></svg></a>' +
       '<div class="os-ctrls">' +
+      '<button class="reload" title="Reload"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 4v4h-4"/></svg></button>' +
+      '<button class="copy" title="Copy link"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7 0l2-2a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-2 2a5 5 0 0 0 7 7l1-1"/></svg></button>' +
       '<button class="min" title="Minimize (Ctrl/⌘+Alt+↓)"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M5 12h14"/></svg></button>' +
       '<button class="max" title="Tile / restore (Ctrl/⌘+Alt+↑/←/→)"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/></svg></button>' +
       '<button class="close" title="Close (Ctrl/⌘+Alt+W)"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>' +
@@ -92,6 +94,26 @@
     ifr.addEventListener('load', function () { var l = el.querySelector('.os-loading'); if (l) l.remove(); });
     el.querySelector('.close').addEventListener('click', function () { closeApp(app); });
     el.querySelector('.min').addEventListener('click', function () { minimizeApp(app); });
+    el.querySelector('.reload').addEventListener('click', function () {
+      var f = el.querySelector('iframe'); if (!f) return;
+      var body = el.querySelector('.os-body');
+      if (body && !body.querySelector('.os-loading')) {
+        var l = document.createElement('div'); l.className = 'os-loading'; l.textContent = 'Loading ' + cfg.title + '…';
+        body.insertBefore(l, f);  // the iframe 'load' handler clears it
+      }
+      f.setAttribute('src', f.getAttribute('src'));  // re-trigger the load
+    });
+    el.querySelector('.copy').addEventListener('click', function (e) {
+      var f = el.querySelector('iframe'); if (!f) return;
+      var raw = (f.getAttribute('src') || '').replace('?embed=1&', '?').replace('&embed=1', '').replace('?embed=1', '');
+      var url; try { url = new URL(raw, location.origin).href; } catch (x) { url = raw; }
+      var btn = e.currentTarget;
+      var flash = function () { btn.classList.add('copied'); btn.title = 'Copied!'; setTimeout(function () { btn.classList.remove('copied'); btn.title = 'Copy link'; }, 1300); };
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(url).then(flash, function () {}); }
+        else { var ta = document.createElement('textarea'); ta.value = url; document.body.appendChild(ta); ta.select(); try { document.execCommand('copy'); } catch (_) {} ta.remove(); flash(); }
+      } catch (x) {}
+    });
     var restore = null;
     el.querySelector('.max').addEventListener('click', function () {
       if (restore) { el.style.left = restore.l; el.style.top = restore.t; el.style.width = restore.w; el.style.height = restore.h; restore = null; }
