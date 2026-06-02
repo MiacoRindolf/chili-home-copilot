@@ -70,7 +70,7 @@
     var n = order.length;
     var el = document.createElement('div');
     el.className = 'os-win active';
-    el.dataset.title = cfg.title; el.dataset.icon = cfg.icon || '🗔';
+    el.dataset.title = cfg.title; el.dataset.icon = cfg.icon || '🗔'; el.dataset.src = cfg.src;
     el.style.left = (40 + n * 34) + 'px'; el.style.top = (24 + n * 28) + 'px';
     el.style.width = 'min(640px,72vw)'; el.style.height = 'min(520px,72vh)';
     if (geom) { if (geom.left) el.style.left = geom.left; if (geom.top) el.style.top = geom.top; if (geom.width) el.style.width = geom.width; if (geom.height) el.style.height = geom.height; }
@@ -164,7 +164,8 @@
   function captureLayout() {
     var apps = Object.keys(wins).map(function (app) {
       var el = wins[app]; if (!el) return null;
-      return { app: app, left: el.style.left, top: el.style.top, width: el.style.width, height: el.style.height, min: el.style.display === 'none' };
+      return { app: app, src: el.dataset.src, title: el.dataset.title, icon: el.dataset.icon,
+               left: el.style.left, top: el.style.top, width: el.style.width, height: el.style.height, min: el.style.display === 'none' };
     }).filter(Boolean);
     return { apps: apps, order: order.slice() };
   }
@@ -181,8 +182,12 @@
     data.apps.forEach(function (s) { if (seq.indexOf(s.app) === -1) seq.push(s.app); });
     seq.forEach(function (app) {
       var s = byApp[app]; if (!s) return;
-      var b = document.querySelector('.ws-rb[data-app="' + app + '"][data-src]');
-      if (b) openApp(cfgFromEl(b), { left: s.left, top: s.top, width: s.width, height: s.height, min: s.min });
+      // Prefer a live trigger element (rail app or tray surface); else rebuild
+      // the cfg from the stored {app,src,title,icon} so tray windows restore too.
+      var b = document.querySelector('.ws-rb[data-app="' + app + '"][data-src]') ||
+              document.querySelector('[data-os-win][data-app="' + app + '"]');
+      var cfg = b ? cfgFromEl(b) : (s.src ? { app: s.app, src: s.src, title: s.title || s.app, icon: s.icon || '🗔' } : null);
+      if (cfg && cfg.src) openApp(cfg, { left: s.left, top: s.top, width: s.width, height: s.height, min: s.min });
     });
     restoring = false; saveLayout();
     return Object.keys(wins).length > 0;
@@ -316,6 +321,13 @@
   });
   // (Command-palette result clicks are handled in workspace.js, which renders
   //  results dynamically and calls window.ChiliOS.open for app results.)
+
+  // Any [data-os-win] element (e.g. system-tray items) opens its own surface as
+  // a window, defined inline by data-app/data-src/data-title/data-icon. This
+  // lets non-rail surfaces (Profile/Admin/Metrics) live as OS windows.
+  document.querySelectorAll('[data-os-win]').forEach(function (el) {
+    el.addEventListener('click', function (e) { e.preventDefault(); if (el.dataset.src) openApp(cfgFromEl(el)); });
+  });
 
   // Any [data-os-open="app"] element (e.g. dashboard buttons/quick-actions)
   // opens that app as a window instead of navigating. href stays as a fallback.
