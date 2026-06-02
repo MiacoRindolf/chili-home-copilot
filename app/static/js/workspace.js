@@ -191,6 +191,7 @@
       { cmd: 'theme', label: 'Toggle light / dark theme', icon: '🌓' },
       { cmd: 'help', label: 'Show keyboard shortcuts', icon: '⌨️' },
       { cmd: 'tidy', label: 'Tidy windows', icon: '🪟' },
+      { cmd: 'grid', label: 'Grid windows', icon: '🪟' },
       { cmd: 'wp:aurora', label: 'Wallpaper: Aurora', icon: '🖼️' },
       { cmd: 'wp:mesh', label: 'Wallpaper: Mesh', icon: '🖼️' },
       { cmd: 'wp:sunset', label: 'Wallpaper: Sunset', icon: '🖼️' },
@@ -220,6 +221,8 @@
       var hb = document.getElementById('ws-help-btn'); if (hb) hb.click();
     } else if (id === 'tidy') {
       if (window.ChiliOS && window.ChiliOS.tidy) window.ChiliOS.tidy();
+    } else if (id === 'grid') {
+      if (window.ChiliOS && window.ChiliOS.grid) window.ChiliOS.grid();
     } else if (id.indexOf('wp:') === 0) {
       var wp = id.slice(3); applyWallpaper(wp);
       try { localStorage.setItem('chili-wallpaper', wp); } catch (e) {}
