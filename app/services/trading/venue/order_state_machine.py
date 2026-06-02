@@ -38,9 +38,9 @@ Why it matters:
       per venue — which requires canonical transitions, not
       broker-native statuses that each venue spells differently.
 
-Opt-in: controlled by ``settings.chili_order_state_machine_enabled``
-(default False during P1.1 rollout). When disabled, ``record_transition``
-becomes a no-op that returns an informational payload but writes nothing.
+Controlled by ``settings.chili_order_state_machine_enabled`` (default True).
+When disabled, ``record_transition`` becomes a no-op that returns an
+informational payload but writes nothing.
 """
 from __future__ import annotations
 
@@ -205,8 +205,8 @@ def is_transition_allowed(
 def _is_enabled() -> bool:
     """Feature flag — read live so tests can flip via monkeypatch.
 
-    Default False during P1.1 rollout; flip on per-environment once the
-    wiring has been watched in shadow for a week.
+    Default True so execution feedback has canonical order-state telemetry.
+    Operators can still disable the projection explicitly during incidents.
     """
     try:
         from app.config import settings

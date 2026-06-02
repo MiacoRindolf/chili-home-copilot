@@ -2181,10 +2181,11 @@ class Settings(BaseSettings):
     # a single canonical state per order, writing one transition row per
     # state change to ``trading_order_state_log``. The ``TradingExecutionEvent``
     # stream stays authoritative; this is a second-order projection used by
-    # P1.2 venue-health (ack-to-fill P95) and dashboards. Default off so
-    # shipping changes nothing until flipped. Re-read live.
+    # P1.2 venue-health (ack-to-fill P95), cancellation attribution, and
+    # dashboards. Enabled by default; set CHILI_ORDER_STATE_MACHINE_ENABLED=false
+    # only when deliberately suppressing the projection. Re-read live.
     chili_order_state_machine_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_ORDER_STATE_MACHINE_ENABLED"),
     )
 
@@ -2367,11 +2368,11 @@ class Settings(BaseSettings):
     # execution-audit event stream project broker-native statuses onto the
     # canonical DRAFT/SUBMITTING/ACK/PARTIAL/FILLED/CANCELLED/REJECTED/EXPIRED
     # states and write one row per transition to ``trading_order_state_log``.
-    # Off by default during the P1.1 rollout — flip on per-environment once
-    # shadow traffic has been observed for a week. Disabled mode is a hard
-    # no-op: no rows are written, callers receive ``reason='disabled'``.
+    # Enabled by default now that execution-audit feedback depends on the
+    # projection. Disabled mode is still a hard no-op: no rows are written,
+    # callers receive ``reason='disabled'``.
     chili_order_state_machine_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_ORDER_STATE_MACHINE_ENABLED"),
     )
 

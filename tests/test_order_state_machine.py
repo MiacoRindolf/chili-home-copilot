@@ -39,6 +39,15 @@ from app.services.trading.venue.order_state_machine import (
 )
 
 
+def test_order_state_machine_defaults_enabled(monkeypatch):
+    monkeypatch.delenv("CHILI_ORDER_STATE_MACHINE_ENABLED", raising=False)
+    from app.config import Settings
+
+    cfg = Settings(database_url="postgresql://chili:chili@localhost:5433/chili_test")
+
+    assert cfg.chili_order_state_machine_enabled is True
+
+
 def _clear_logs(session, *, order_id: str | None = None, client_order_id: str | None = None) -> None:
     if order_id:
         session.execute(
