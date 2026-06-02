@@ -1488,13 +1488,17 @@ def api_brain_trading_assistant_chat(
 def reasoning_research_report(
     request: Request,
     download: int = Query(0, description="1 = force download as attachment"),
+    format: str = Query("html", description="html (default) | json | text"),
     db: Session = Depends(get_db),
 ):
-    """Render the user's stored reasoning research as a self-contained HTML report.
+    """Render the user's stored reasoning research digest.
 
     Read-only. Aggregates non-stale ReasoningResearch rows into one digest using
     app/visual_report.py. Guests (no user_id) get an empty digest rather than an
-    error. Add ?download=1 to receive it as a file attachment.
+    error.
+
+    `format`: `html` (default; `?download=1` → attachment), `json` (structured
+    `{ok, topic_count, topics, sources}`), or `text` (plaintext).
     """
     import json as _json
     from .. import visual_report
@@ -1520,9 +1524,15 @@ def reasoning_research_report(
 
     parts = ["# Research Digest\n"]
     sources: list[dict] = []
+    topics: list[dict] = []
     seen: set[str] = set()
     for r in rows:
         parts.append(f"## {r.topic}\n\n{r.summary}\n")
+        topics.append({
+            "topic": r.topic,
+            "summary": r.summary,
+            "relevance_score": r.relevance_score,
+        })
         try:
             for s in _json.loads(r.sources or "[]"):
                 if not isinstance(s, dict):
@@ -1539,6 +1549,22 @@ def reasoning_research_report(
             "for you yet. Topics you show interest in get researched in the "
             "background and will appear here.\n"
         )
+
+    fmt = (format or "html").strip().lower()
+    if fmt == "json":
+        return JSONResponse({
+            "ok": True,
+            "title": "Research Digest",
+            "topic_count": len(rows),
+            "topics": topics,
+            "sources": sources,
+        })
+    if fmt == "text":
+        text = visual_report.to_plaintext("\n".join(parts))
+        headers = {}
+        if download:
+            headers["Content-Disposition"] = 'attachment; filename="chili-research-digest.txt"'
+        return PlainTextResponse(content=text, headers=headers)
 
     html = visual_report.generate_report(
         "Research Digest",
