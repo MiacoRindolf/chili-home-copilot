@@ -278,8 +278,21 @@
     else if (zone === 'tr') r = { left: hw, top: '0px', width: hw, height: hh };
     else if (zone === 'bl') r = { left: '0px', top: hh, width: hw, height: hh };
     else if (zone === 'br') r = { left: hw, top: hh, width: hw, height: hh };
+    // Thirds (great on wide monitors): left/right 1/3 and 2/3, full height.
+    else if (zone === 'lthird') r = { left: '0px', top: '0px', width: (W / 3) + 'px', height: H + 'px' };
+    else if (zone === 'l2third') r = { left: '0px', top: '0px', width: (2 * W / 3) + 'px', height: H + 'px' };
+    else if (zone === 'rthird') r = { left: (2 * W / 3) + 'px', top: '0px', width: (W / 3) + 'px', height: H + 'px' };
+    else if (zone === 'r2third') r = { left: (W / 3) + 'px', top: '0px', width: (2 * W / 3) + 'px', height: H + 'px' };
     el.style.left = r.left; el.style.top = r.top; el.style.width = r.width; el.style.height = r.height;
+    el.dataset.cyc = zone;  // remembered so ⌘⌥←/→ can cycle half → third → two-thirds
     setTimeout(function () { el.classList.remove('snapping'); }, 160);
+  }
+  // ⌘⌥←/→ cycles the focused window through half → one-third → two-thirds on that
+  // side (repeat to advance). State lives on the element (dataset.cyc), set by snap.
+  function cycleSnap(el, side) {
+    var order = side === 'left' ? ['left', 'lthird', 'l2third'] : ['right', 'rthird', 'r2third'];
+    var idx = order.indexOf(el.dataset.cyc || '');
+    snap(el, order[(idx + 1) % order.length]);
   }
   function dragify(el, app) {
     var bar = el.querySelector('.os-bar'), sx, sy, ol, ot, drag = false, zone = null;
@@ -384,8 +397,8 @@
     if (e.key.toLowerCase() === 't') { e.preventDefault(); reopenClosed(); return; }  // reopen last-closed (works with 0 windows open)
     var top = order[order.length - 1], el = top && wins[top];
     if (!el) return;
-    if (e.key === 'ArrowLeft') { e.preventDefault(); snap(el, 'left'); saveLayout(); }
-    else if (e.key === 'ArrowRight') { e.preventDefault(); snap(el, 'right'); saveLayout(); }
+    if (e.key === 'ArrowLeft') { e.preventDefault(); cycleSnap(el, 'left'); saveLayout(); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); cycleSnap(el, 'right'); saveLayout(); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); snap(el, 'max'); saveLayout(); }
     else if (e.key === '1') { e.preventDefault(); snap(el, 'tl'); saveLayout(); }
     else if (e.key === '2') { e.preventDefault(); snap(el, 'tr'); saveLayout(); }
@@ -505,6 +518,9 @@
     },
     // Close every window and forget the saved session layout.
     resetLayout: function () { closeAllNow(); try { localStorage.removeItem(LAYOUT_KEY); } catch (e) {} },
+    // Tile a window by zone: 'left'|'right'|'max'|'tl'|'tr'|'bl'|'br'|'lthird'|
+    // 'l2third'|'rthird'|'r2third'. Returns true if the app window exists.
+    snap: function (app, zone) { var el = wins[app]; if (!el) return false; snap(el, zone); saveLayout(); return true; },
     // Mission Control — overlay open windows as a switcher grid (toggle open/closed).
     expose: openExpose,
     // Reopen the most-recently-closed window where it was; false if the stack is empty.
