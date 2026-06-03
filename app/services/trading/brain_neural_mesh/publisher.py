@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import uuid
 from typing import Any, Optional
 
@@ -22,6 +23,23 @@ def _rollback_publish_session(db: Session, *, context: str) -> None:
         db.rollback()
     except Exception as exc:
         _log.debug("%s %s rollback failed: %s", LOG_PREFIX, context, exc, exc_info=True)
+
+
+def _finite_float_or_none(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        converted = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(converted):
+        return None
+    return converted
+
+
+def _finite_float_or_default(value: Any, default: float) -> float:
+    converted = _finite_float_or_none(value)
+    return default if converted is None else converted
 
 
 def publish_market_snapshots_refreshed(db: Session, *, meta: Optional[dict[str, Any]] = None) -> None:
@@ -57,8 +75,8 @@ def publish_setup_vitals_change(
     if not mesh_enabled():
         return
     try:
-        cur = float(getattr(vitals, "composite_health", 0.5) or 0.5)
-        prev = float(previous_composite) if previous_composite is not None else None
+        cur = _finite_float_or_default(getattr(vitals, "composite_health", None), 0.5)
+        prev = _finite_float_or_none(previous_composite)
         if prev is None:
             return
         crossed_low = prev >= 0.45 and cur < 0.45

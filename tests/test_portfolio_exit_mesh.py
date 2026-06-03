@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 from sqlalchemy.orm import Session
 
@@ -60,6 +62,46 @@ def test_publishers_noop_when_mesh_disabled(monkeypatch) -> None:
         None, trade_id=1, ticker="AAPL", reason="stop_hit", source="exit_trigger",
     )
     assert called == []
+
+
+def test_publish_setup_vitals_change_preserves_zero_composite_health(monkeypatch) -> None:
+    captured: list[dict] = []
+
+    def _capture_enqueue(
+        db,
+        *,
+        source_node_id,
+        cause,
+        payload,
+        confidence_delta,
+        propagation_depth,
+        correlation_id,
+    ):
+        captured.append({
+            "source": source_node_id,
+            "cause": cause,
+            "payload": payload,
+            "delta": confidence_delta,
+        })
+        return 1
+
+    monkeypatch.setattr(mesh_pub, "enqueue_activation", _capture_enqueue)
+    monkeypatch.setattr(mesh_pub, "mesh_enabled", lambda: True)
+
+    mesh_pub.publish_setup_vitals_change(
+        None,
+        trade_id=42,
+        ticker="aapl",
+        vitals=SimpleNamespace(composite_health=0.0),
+        previous_composite=0.5,
+    )
+
+    assert len(captured) == 1
+    assert captured[0]["source"] == "nm_setup_health"
+    assert captured[0]["cause"] == "setup_vitals_change"
+    assert captured[0]["payload"]["ticker"] == "AAPL"
+    assert captured[0]["payload"]["composite_health"] == 0.0
+    assert captured[0]["payload"]["previous_composite"] == 0.5
 
 
 def test_publish_exposure_update_routes_over_limit_to_heat_node(monkeypatch) -> None:
