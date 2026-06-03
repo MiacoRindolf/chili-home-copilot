@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:chili_mobile/src/agents/agent.dart';
 import 'package:chili_mobile/src/agents/agent_persistence.dart';
 import 'package:chili_mobile/src/agents/agent_registry.dart';
+import 'package:chili_mobile/src/agents/agent_status_service.dart';
 import 'package:chili_mobile/src/agents/agents_screen.dart';
 
 void main() {
@@ -210,7 +211,7 @@ void main() {
     testWidgets('renders header, list and a working Start control', (WidgetTester tester) async {
       final AgentRegistry r = AgentRegistry();
       await tester.pumpWidget(MaterialApp(
-        home: AgentsScreen(registry: r),
+        home: AgentsScreen(registry: r, livePolling: false),
       ));
       await tester.pumpAndSettle();
 
@@ -218,7 +219,7 @@ void main() {
       expect(find.text('Auto-Trader'), findsWidgets);
       expect(find.text('0 running'), findsOneWidget);
 
-      // Auto-Trader is first → selected by default. Start it.
+      // Auto-Trader is first → selected by default. Start it (not live-backed).
       await tester.tap(find.widgetWithText(FilledButton, 'Start'));
       await tester.pumpAndSettle();
       expect(r.byId('auto-trader')!.status, AgentStatus.running);
@@ -226,7 +227,9 @@ void main() {
     });
 
     testWidgets('kind filter narrows the list', (WidgetTester tester) async {
-      await tester.pumpWidget(const MaterialApp(home: AgentsScreen()));
+      await tester.pumpWidget(const MaterialApp(
+        home: AgentsScreen(livePolling: false),
+      ));
       await tester.pumpAndSettle();
 
       // Coding agents exist; System agents exist. Filter to Coding and confirm
@@ -235,6 +238,146 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Coding Autopilot'), findsWidgets);
       expect(find.text('Broker Sync'), findsNothing);
+    });
+
+    testWidgets('injected live poller drives status + connection pill', (WidgetTester tester) async {
+      final AgentRegistry r = AgentRegistry();
+      await tester.pumpWidget(MaterialApp(
+        home: AgentsScreen(
+          registry: r,
+          livePoller: () async => <String, AgentLiveStatus>{
+            'learning-cycle': const AgentLiveStatus(AgentStatus.running,
+                detail: '12 patterns touched'),
+          },
+        ),
+      ));
+      await tester.pumpAndSettle();
+
+      expect(r.byId('learning-cycle')!.status, AgentStatus.running);
+      expect(find.text('Live'), findsOneWidget); // connection pill
+      expect(find.text('1 running'), findsOneWidget);
+    });
+
+    testWidgets('live-backed agent has read-only controls', (WidgetTester tester) async {
+      await tester.pumpWidget(MaterialApp(
+        home: AgentsScreen(
+          livePoller: () async => const <String, AgentLiveStatus>{},
+        ),
+      ));
+      await tester.pumpAndSettle();
+
+      // Select a live-backed agent (Learning Cycle) and confirm Start is disabled.
+      await tester.tap(find.text('Learning Cycle').first);
+      await tester.pumpAndSettle();
+      final FilledButton start = tester.widget<FilledButton>(
+        find.widgetWithText(FilledButton, 'Start'),
+      );
+      expect(start.onPressed, isNull, reason: 'live agent control is read-only');
+      expect(find.text('LIVE'), findsWidgets);
+    });
+  });
+
+  group('deriveAgentStatuses (AGT-2)', () {
+    test('code-brain mode maps autopilot + watcher', () {
+      final Map<String, AgentLiveStatus> s = deriveAgentStatuses(
+        const AgentStatusInputs(codeStatus: <String, dynamic>{
+          'runtime_state': <String, dynamic>{'mode': 'reactive'},
+          'queue_depth': 3,
+        }),
+      );
+      expect(s['coding-autopilot']!.status, AgentStatus.running);
+      expect(s['coding-autopilot']!.detail, contains('reactive'));
+      expect(s['task-watcher']!.status, AgentStatus.running);
+    });
+
+    test('paused code-brain mode → stopped', () {
+      final Map<String, AgentLiveStatus> s = deriveAgentStatuses(
+        const AgentStatusInputs(codeStatus: <String, dynamic>{
+          'runtime_state': <String, dynamic>{'mode': 'paused'},
+        }),
+      );
+      expect(s['coding-autopilot']!.status, AgentStatus.stopped);
+    });
+
+    test('learning cycle from context flag + last run', () {
+      final Map<String, AgentLiveStatus> s = deriveAgentStatuses(
+        const AgentStatusInputs(
+          contextStatus: <String, dynamic>{
+            'runtime_state': <String, dynamic>{'learning_enabled': true},
+          },
+          learnRuns: <Map<String, dynamic>>[
+            <String, dynamic>{
+              'ended_at': '2026-06-03T12:00:00.000',
+              'success': true,
+              'patterns_touched': 7,
+            },
+          ],
+        ),
+      );
+      final AgentLiveStatus lc = s['learning-cycle']!;
+      expect(lc.status, AgentStatus.running);
+      expect(lc.lastRun, '2026-06-03T12:00:00.000');
+      expect(lc.detail, contains('7'));
+    });
+
+    test('momentum runner: active sessions → running', () {
+      final Map<String, AgentLiveStatus> s = deriveAgentStatuses(
+        const AgentStatusInputs(
+          momentumSummary: <String, dynamic>{'active': 2},
+        ),
+      );
+      expect(s['momentum-live-runner']!.status, AgentStatus.running);
+      expect(s['momentum-live-runner']!.detail, contains('2'));
+    });
+
+    test('position monitor reachable → running with last check', () {
+      final Map<String, AgentLiveStatus> s = deriveAgentStatuses(
+        const AgentStatusInputs(
+          monitorActive: <String, dynamic>{
+            'summary': <String, dynamic>{
+              'active_count': 4,
+              'last_check': '2026-06-03T11:59:00.000',
+            },
+          },
+        ),
+      );
+      expect(s['position-monitor']!.status, AgentStatus.running);
+      expect(s['position-monitor']!.lastRun, '2026-06-03T11:59:00.000');
+    });
+
+    test('empty inputs → no entries (agents stay unknown)', () {
+      final Map<String, AgentLiveStatus> s =
+          deriveAgentStatuses(const AgentStatusInputs());
+      expect(s, isEmpty);
+    });
+
+    test('all live-backed ids are real seeded agents', () {
+      final Set<String> seeded =
+          defaultAgents().map((Agent a) => a.id).toSet();
+      expect(seeded.containsAll(liveBackedAgentIds), isTrue);
+    });
+  });
+
+  group('AgentRegistry.applyLiveStatus', () {
+    test('applies status + lastRun + detail', () {
+      final AgentRegistry r = AgentRegistry();
+      r.applyLiveStatus('learning-cycle', AgentStatus.running,
+          lastRun: '2026-06-03T12:00:00.000', lastResult: '7 patterns');
+      final Agent a = r.byId('learning-cycle')!;
+      expect(a.status, AgentStatus.running);
+      expect(a.lastRun, '2026-06-03T12:00:00.000');
+      expect(a.lastResult, '7 patterns');
+    });
+
+    test('is a no-op when nothing changed (no extra notifications)', () {
+      final AgentRegistry r = AgentRegistry();
+      r.applyLiveStatus('learning-cycle', AgentStatus.running,
+          lastRun: '2026-06-03T12:00:00.000');
+      int n = 0;
+      r.addListener(() => n++);
+      r.applyLiveStatus('learning-cycle', AgentStatus.running,
+          lastRun: '2026-06-03T12:00:00.000');
+      expect(n, 0, reason: 'identical reading should not notify');
     });
   });
 }

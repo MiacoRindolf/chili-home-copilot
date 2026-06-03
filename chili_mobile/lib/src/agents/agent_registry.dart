@@ -57,6 +57,26 @@ class AgentRegistry extends ChangeNotifier {
   void setStatus(String id, AgentStatus status) =>
       _mutate(id, (Agent a) => a.copyWith(status: status));
 
+  /// Apply a backend-derived live reading (AGT-2). No-ops when nothing changed
+  /// so periodic polling doesn't churn listeners / storage.
+  void applyLiveStatus(String id, AgentStatus status,
+      {String? lastRun, String? lastResult}) {
+    _mutate(id, (Agent a) {
+      final String? nextRun = lastRun ?? a.lastRun;
+      final String? nextResult = lastResult ?? a.lastResult;
+      if (a.status == status &&
+          a.lastRun == nextRun &&
+          a.lastResult == nextResult) {
+        return a; // unchanged → _mutate skips notify
+      }
+      return a.copyWith(
+        status: status,
+        lastRun: nextRun,
+        lastResult: nextResult,
+      );
+    });
+  }
+
   /// Toggle whether the agent may run. Disabling also stops it.
   void setEnabled(String id, bool enabled) {
     _mutate(id, (Agent a) {
