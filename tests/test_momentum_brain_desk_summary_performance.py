@@ -3,7 +3,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from app.models.trading import MomentumStrategyVariant
-from app.services.trading.momentum_neural.brain_desk_summary import _momentum_variants_by_id
+from app.services.trading.momentum_neural.brain_desk_summary import (
+    _momentum_variants_by_id,
+    _weighted_mean_return_bps,
+)
 
 
 class _FakeQuery:
@@ -51,3 +54,12 @@ def test_momentum_variants_by_id_skips_empty_lookup() -> None:
 
     assert _momentum_variants_by_id(db, {0}) == {}
     assert db.query_calls == 0
+
+
+def test_weighted_mean_return_preserves_zero_evidence_weight() -> None:
+    rows = [
+        SimpleNamespace(evidence_weight=0.0, return_bps=1000.0),
+        SimpleNamespace(evidence_weight=1.0, return_bps=-12.5),
+    ]
+
+    assert _weighted_mean_return_bps(rows) == -12.5

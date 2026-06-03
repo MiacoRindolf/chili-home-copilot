@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.orm import Session
@@ -15,7 +16,8 @@ from app.models.trading import (
     TradingDecisionPacket,
 )
 from app.services.trading.decision_ledger import seal_decision_packet_snapshot
-from app.services.trading.momentum_neural.evolution import paper_vs_live_performance_slices
+from app.services.trading.momentum_neural import evolution as evolution_mod
+from app.services.trading.momentum_neural.evolution import _aggregate_rows, paper_vs_live_performance_slices
 from app.services.trading.momentum_neural.feedback_emit import (
     reingest_regraded_momentum_outcomes,
     regrade_momentum_outcome_evolution_credit,
@@ -31,6 +33,77 @@ from app.services.trading.momentum_neural.outcome_labels import (
 )
 from app.services.trading.momentum_neural.persistence import ensure_momentum_strategy_variants
 from app.services.trading.momentum_neural.risk_policy import RISK_SNAPSHOT_KEY
+
+
+def test_aggregate_rows_preserves_zero_evidence_weight() -> None:
+    rows = [
+        SimpleNamespace(
+            evidence_weight=0.0,
+            return_bps=1000.0,
+            realized_pnl_usd=50.0,
+            outcome_class="small_win",
+        ),
+        SimpleNamespace(
+            evidence_weight=1.0,
+            return_bps=-10.0,
+            realized_pnl_usd=-1.0,
+            outcome_class="small_loss",
+        ),
+    ]
+
+    out = _aggregate_rows(rows)  # type: ignore[arg-type]
+
+    assert out["n"] == 2
+    assert out["weight_sum"] == 1.0
+    assert out["weighted_return_bps_sum"] == -10.0
+    assert out["weighted_pnl_sum"] == -1.0
+    assert out["mean_return_bps"] == -10.0
+
+
+def test_apply_outcome_feedback_preserves_zero_evidence_weight(monkeypatch) -> None:
+    viability = SimpleNamespace(
+        evidence_window_json={},
+        viability_score=0.5,
+        explain_json={},
+        updated_at=None,
+    )
+
+    class _Query:
+        def filter(self, *_args):
+            return self
+
+        def one_or_none(self):
+            return viability
+
+    class _Db:
+        def query(self, *_args):
+            return _Query()
+
+    monkeypatch.setattr(evolution_mod, "_viability_delta_from_slices", lambda *_args: 0.0)
+    monkeypatch.setattr(
+        evolution_mod,
+        "aggregate_recent_outcomes_for_variant",
+        lambda *_args, **_kwargs: {"n": 0, "mean_return_bps": None},
+    )
+
+    evolution_mod.apply_outcome_feedback_to_viability(
+        _Db(),  # type: ignore[arg-type]
+        SimpleNamespace(
+            symbol="btc-usd",
+            variant_id=7,
+            mode="paper",
+            evidence_weight=0.0,
+            return_bps=1000.0,
+            outcome_class="small_win",
+            session_id=123,
+            terminal_at=datetime(2026, 6, 3, 12, 0, 0),
+        ),
+    )
+
+    paper = viability.evidence_window_json["neural_feedback_v1"]["paper"]
+    assert paper["n"] == 1
+    assert paper["weight_sum"] == 0.0
+    assert paper["weighted_return_bps_sum"] == 0.0
 
 
 def test_derive_outcome_labels() -> None:

@@ -8,6 +8,7 @@ Precedence (documented):
 
 from __future__ import annotations
 
+import math
 import logging
 from datetime import datetime, timedelta
 from typing import Any
@@ -41,6 +42,29 @@ MOMENTUM_GRAPH_NODE_IDS: frozenset[str] = frozenset(
 
 _PREVIEW_VERSION = 1
 _LIVE_LOW_N = 3
+
+
+def _finite_float_or_default(value: Any, default: float) -> float:
+    if isinstance(value, bool) or value is None:
+        return default
+    try:
+        out = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if not math.isfinite(out):
+        return default
+    return out
+
+
+def _weighted_mean_return_bps(rows: list[Any]) -> float | None:
+    wsum = 0.0
+    wrb = 0.0
+    for row in rows:
+        weight = _finite_float_or_default(getattr(row, "evidence_weight", None), 1.0)
+        wsum += weight
+        if getattr(row, "return_bps", None) is not None:
+            wrb += float(row.return_bps) * weight
+    return (wrb / wsum) if wsum > 0 else None
 
 
 def _momentum_variants_by_id(db: Session, variant_ids: set[int]) -> dict[int, MomentumStrategyVariant]:
@@ -139,13 +163,7 @@ def _outcome_windows(db: Session, days: int = 30) -> dict[str, Any]:
                 .all()
             )
             n = len(rows)
-            wsum = sum(float(r.evidence_weight or 1.0) for r in rows)
-            wrb = sum(
-                float(r.return_bps) * float(r.evidence_weight or 1.0)
-                for r in rows
-                if r.return_bps is not None
-            )
-            mean_bps = (wrb / wsum) if wsum > 0 else None
+            mean_bps = _weighted_mean_return_bps(rows)
             out[mode] = {"n": n, "mean_return_bps": round(mean_bps, 2) if mean_bps is not None else None}
 
         mix_rows = (

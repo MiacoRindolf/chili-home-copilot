@@ -62,6 +62,18 @@ def _parse_terminal_at(row: MomentumAutomationOutcome) -> datetime:
     return t
 
 
+def _finite_float_or_default(value: Any, default: float) -> float:
+    if isinstance(value, bool) or value is None:
+        return default
+    try:
+        out = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if not math.isfinite(out):
+        return default
+    return out
+
+
 def compute_session_evidence_weight(db: Session, extracted: dict[str, Any]) -> float:
     """Simple transparent weight: recency decay + modest live boost when enough live samples exist."""
     try:
@@ -268,7 +280,7 @@ def _aggregate_rows(rows: list[MomentumAutomationOutcome]) -> dict[str, Any]:
     wp = 0.0
     gr = 0
     for r in rows:
-        w = float(r.evidence_weight or 1.0)
+        w = _finite_float_or_default(getattr(r, "evidence_weight", None), 1.0)
         w_sum += w
         rb = r.return_bps
         if rb is not None:
@@ -313,10 +325,11 @@ def apply_outcome_feedback_to_viability(db: Session, outcome_row: MomentumAutoma
     bucket = "paper" if mode == "paper" else "live"
     side = dict(fb.get(bucket) or {})
     n = int(side.get("n") or 0) + 1
-    wsum = float(side.get("weight_sum") or 0.0) + float(outcome_row.evidence_weight or 1.0)
+    evidence_weight = _finite_float_or_default(getattr(outcome_row, "evidence_weight", None), 1.0)
+    wsum = float(side.get("weight_sum") or 0.0) + evidence_weight
     wrb = float(side.get("weighted_return_bps_sum") or 0.0)
     if outcome_row.return_bps is not None:
-        wrb += float(outcome_row.return_bps) * float(outcome_row.evidence_weight or 1.0)
+        wrb += float(outcome_row.return_bps) * evidence_weight
     side.update(
         {
             "n": n,
