@@ -268,6 +268,17 @@
     }
   }
 
+  // "Ask CHILI": turn the typed query into an AI prompt that opens Chat with the
+  // text prefilled (NOT auto-sent — chat.html reviews ?q= and the user hits Enter).
+  // Ranked LAST so it never hijacks an exact app/ticker/command match; it's the
+  // natural fallback when what you typed isn't a destination.
+  function askResults(q) {
+    q = (q || '').trim();
+    if (!q) return [];
+    return [{ type: 'ask', app: 'chat', url: '/chat?q=' + encodeURIComponent(q),
+              label: 'Ask CHILI: “' + q + '”', icon: '🌶️', sub: 'AI' }];
+  }
+
   function runSearch(q) {
     var seq = ++reqSeq;
     lastQuery = (q || '').trim();  // remembered so render() can highlight the match
@@ -275,8 +286,8 @@
     var pre = (q ? [] : recentResults()).concat(spaceResults(q));
     fetch('/api/workspace/search?q=' + encodeURIComponent(q), { credentials: 'same-origin' })
       .then(function (r) { return r.json(); })
-      .then(function (d) { if (seq === reqSeq) render(dedup(pre.concat((d && d.results) || []).concat(commandResults(q)))); })
-      .catch(function () { if (seq === reqSeq) render(dedup(pre.concat(commandResults(q)))); });
+      .then(function (d) { if (seq === reqSeq) render(dedup(pre.concat((d && d.results) || []).concat(commandResults(q)).concat(askResults(q)))); })
+      .catch(function () { if (seq === reqSeq) render(dedup(pre.concat(commandResults(q)).concat(askResults(q)))); });
   }
 
   function openResult(opt) {
