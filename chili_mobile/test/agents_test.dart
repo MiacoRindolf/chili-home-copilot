@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:chili_mobile/src/agents/agent.dart';
 import 'package:chili_mobile/src/agents/agent_control_service.dart';
 import 'package:chili_mobile/src/agents/agent_event.dart';
+import 'package:chili_mobile/src/agents/agent_filter.dart';
 import 'package:chili_mobile/src/agents/agent_persistence.dart';
 import 'package:chili_mobile/src/agents/agent_registry.dart';
 import 'package:chili_mobile/src/agents/agent_status_service.dart';
@@ -695,6 +696,88 @@ void main() {
       expect(r.events('c1').first.message, 'Started');
       expect(find.text('Recent activity'.toUpperCase()), findsOneWidget);
       expect(find.text('Started'), findsOneWidget);
+    });
+  });
+
+  group('filterAgents / sortAgents (AGT-6)', () {
+    final List<Agent> seed = defaultAgents();
+
+    test('empty / whitespace query returns all', () {
+      expect(filterAgents(seed, '').length, seed.length);
+      expect(filterAgents(seed, '   ').length, seed.length);
+    });
+
+    test('matches name, id and description, case-insensitively', () {
+      expect(filterAgents(seed, 'MACRO').map((Agent a) => a.id),
+          contains('macro-regime'));
+      expect(filterAgents(seed, 'broker-sync').map((Agent a) => a.id),
+          contains('broker-sync'));
+      expect(filterAgents(seed, 'breakout').any((Agent a) => a.id == 'auto-trader'),
+          isTrue);
+    });
+
+    test('no match returns empty', () {
+      expect(filterAgents(seed, 'zzzznope'), isEmpty);
+    });
+
+    test('sort by name is alphabetical', () {
+      final List<String> names = sortAgents(seed, AgentSort.name)
+          .map((Agent a) => a.name.toLowerCase())
+          .toList();
+      final List<String> expected = <String>[...names]..sort();
+      expect(names, expected);
+    });
+
+    test('sort by status puts running first', () {
+      final AgentRegistry r = AgentRegistry();
+      r.start('scheduler');
+      final List<Agent> s = sortAgents(r.agents, AgentSort.status);
+      expect(s.first.id, 'scheduler');
+    });
+
+    test('sort by kind groups by category order', () {
+      final List<int> kinds = sortAgents(seed, AgentSort.kind)
+          .map((Agent a) => a.kind.index)
+          .toList();
+      final List<int> expected = <int>[...kinds]..sort();
+      expect(kinds, expected);
+    });
+
+    test('sort labels', () {
+      expect(AgentSort.name.label, 'Name');
+      expect(AgentSort.status.label, 'Status');
+      expect(AgentSort.kind.label, 'Kind');
+    });
+  });
+
+  group('Search UI (AGT-6)', () {
+    setUp(() => SharedPreferences.setMockInitialValues(<String, Object>{}));
+
+    testWidgets('search narrows the visible list', (WidgetTester tester) async {
+      await tester.pumpWidget(const MaterialApp(
+        home: AgentsScreen(livePolling: false),
+      ));
+      await tester.pumpAndSettle();
+      // Position Monitor is near the top of the list and is not the selected
+      // (detail) agent, so it's only present via the list.
+      expect(find.text('Position Monitor'), findsOneWidget);
+
+      await tester.enterText(find.byType(TextField).first, 'macro');
+      await tester.pumpAndSettle();
+
+      expect(find.text('Macro Regime'), findsOneWidget);
+      expect(find.text('Position Monitor'), findsNothing);
+    });
+
+    testWidgets('no-match shows a helpful empty state', (WidgetTester tester) async {
+      await tester.pumpWidget(const MaterialApp(
+        home: AgentsScreen(livePolling: false),
+      ));
+      await tester.pumpAndSettle();
+
+      await tester.enterText(find.byType(TextField).first, 'zzzznope');
+      await tester.pumpAndSettle();
+      expect(find.textContaining('No agents match'), findsOneWidget);
     });
   });
 }

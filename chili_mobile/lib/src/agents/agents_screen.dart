@@ -6,6 +6,7 @@ import '../network/chili_api_client.dart';
 import 'agent.dart';
 import 'agent_control_service.dart';
 import 'agent_event.dart';
+import 'agent_filter.dart';
 import 'agent_persistence.dart';
 import 'agent_registry.dart';
 import 'agent_status_service.dart';
@@ -57,6 +58,9 @@ class _AgentsScreenState extends State<AgentsScreen> {
   late final AgentControlInvoker _invoker;
   AgentStatusService? _ownedService;
   AgentKind? _filter; // null = All
+  String _query = ''; // search box
+  AgentSort _sort = AgentSort.defaultOrder;
+  final TextEditingController _search = TextEditingController();
   String? _selectedId;
   Timer? _saveTimer;
   Timer? _pollTimer;
@@ -241,6 +245,7 @@ class _AgentsScreenState extends State<AgentsScreen> {
   void dispose() {
     _saveTimer?.cancel();
     _pollTimer?.cancel();
+    _search.dispose();
     _registry.removeListener(_scheduleSave);
     // Only dispose registries we created.
     if (widget._injectedRegistry == null) _registry.dispose();
@@ -262,7 +267,10 @@ class _AgentsScreenState extends State<AgentsScreen> {
       body: AnimatedBuilder(
         animation: _registry,
         builder: (BuildContext context, _) {
-          final List<Agent> list = _registry.byKind(_filter);
+          final List<Agent> list = sortAgents(
+            filterAgents(_registry.byKind(_filter), _query),
+            _sort,
+          );
           final Agent? selected =
               _selectedId == null ? null : _registry.byId(_selectedId!);
           return Column(
@@ -273,7 +281,7 @@ class _AgentsScreenState extends State<AgentsScreen> {
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: <Widget>[
-                    SizedBox(width: 300, child: _agentList(cs, list)),
+                    SizedBox(width: 300, child: _listColumn(cs, list)),
                     VerticalDivider(width: 1, thickness: 1, color: cs.outlineVariant),
                     Expanded(child: _detail(cs, selected)),
                   ],
@@ -310,6 +318,11 @@ class _AgentsScreenState extends State<AgentsScreen> {
               _CountPill(
                 label: '$running running',
                 color: running > 0 ? Colors.green : cs.onSurfaceVariant,
+              ),
+              const SizedBox(width: 6),
+              _CountPill(
+                label: '${_registry.agents.length} total',
+                color: cs.onSurfaceVariant,
               ),
               const SizedBox(width: 8),
               TextButton.icon(
@@ -361,11 +374,88 @@ class _AgentsScreenState extends State<AgentsScreen> {
     );
   }
 
+  // ── Master list column: search + sort toolbar, then the list ─────────────
+  Widget _listColumn(ColorScheme cs, List<Agent> list) {
+    return Column(
+      children: <Widget>[
+        _listToolbar(cs),
+        Divider(height: 1, color: cs.outlineVariant),
+        Expanded(child: _agentList(cs, list)),
+      ],
+    );
+  }
+
+  Widget _listToolbar(ColorScheme cs) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 6, 4, 6),
+      child: Row(
+        children: <Widget>[
+          Expanded(
+            child: SizedBox(
+              height: 36,
+              child: TextField(
+                controller: _search,
+                style: const TextStyle(fontSize: 13),
+                decoration: InputDecoration(
+                  isDense: true,
+                  hintText: 'Search agents',
+                  prefixIcon: const Icon(Icons.search, size: 18),
+                  suffixIcon: _query.isEmpty
+                      ? null
+                      : IconButton(
+                          icon: const Icon(Icons.close, size: 16),
+                          onPressed: () {
+                            _search.clear();
+                            setState(() => _query = '');
+                          },
+                        ),
+                  contentPadding: const EdgeInsets.symmetric(vertical: 0),
+                  border: const OutlineInputBorder(),
+                ),
+                onChanged: (String v) => setState(() => _query = v),
+              ),
+            ),
+          ),
+          PopupMenuButton<AgentSort>(
+            tooltip: 'Sort',
+            icon: const Icon(Icons.sort, size: 18),
+            initialValue: _sort,
+            onSelected: (AgentSort s) => setState(() => _sort = s),
+            itemBuilder: (BuildContext _) => <PopupMenuEntry<AgentSort>>[
+              for (final AgentSort s in AgentSort.values)
+                PopupMenuItem<AgentSort>(
+                  value: s,
+                  child: Row(
+                    children: <Widget>[
+                      Icon(
+                        s == _sort ? Icons.check : Icons.sort,
+                        size: 16,
+                        color: s == _sort ? cs.primary : cs.onSurfaceVariant,
+                      ),
+                      const SizedBox(width: 8),
+                      Text('Sort by ${s.label}'),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
   // ── Master list ───────────────────────────────────────────────────────────
   Widget _agentList(ColorScheme cs, List<Agent> list) {
     if (list.isEmpty) {
       return Center(
-        child: Text('No agents', style: TextStyle(color: cs.onSurfaceVariant)),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Text(
+            _query.isNotEmpty ? 'No agents match “$_query”' : 'No agents',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: cs.onSurfaceVariant),
+          ),
+        ),
       );
     }
     return ListView.builder(
