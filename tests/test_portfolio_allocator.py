@@ -59,6 +59,64 @@ def test_proposal_allocator_blocks_same_ticker_conflict(db):
     assert confidence_input["parser_outcome"] == "accepted"
 
 
+def test_allocator_same_ticker_conflict_honors_zero_incumbent_margin(monkeypatch):
+    db = _FakeAllocatorDb(
+        trades=[
+            SimpleNamespace(
+                id=1,
+                user_id=1,
+                scan_pattern_id=None,
+                ticker="AAPL",
+                direction="long",
+                entry_price=100.0,
+                quantity=1.0,
+                status="open",
+                broker_source="robinhood",
+            )
+        ]
+    )
+
+    monkeypatch.setattr(
+        allocator_mod,
+        "get_all_broker_statuses",
+        lambda: {"robinhood": {"connected": False}, "coinbase": {"connected": False}},
+    )
+    monkeypatch.setattr(
+        "app.services.trading.portfolio_allocator.settings.brain_allocator_incumbent_score_margin",
+        0.0,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.portfolio_allocator.settings.brain_max_open_per_sector",
+        0,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.portfolio_allocator.settings.brain_max_correlated_positions",
+        0,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.portfolio_allocator.settings.brain_allocator_max_active_risk_items",
+        0,
+    )
+
+    decision = evaluate_allocation_candidate(
+        db,
+        user_id=1,
+        symbol="AAPL",
+        timeframe="swing",
+        asset_class=None,
+        hypothesis_family="breakout",
+        research_quality=0.365,
+        live_drift_contract={},
+        execution_contract={},
+        context="proposal_approval",
+    )
+
+    assert decision["score"] == 0.5102
+    assert decision["conflicts"][0]["incumbent_score"] == 0.5
+    assert decision["blocked_reason"] is None
+    assert decision["allowed_if_enforced"] is True
+
+
 def test_allocator_uses_sector_cap(db, monkeypatch):
     user = User(name="Sector Cap User")
     db.add(user)

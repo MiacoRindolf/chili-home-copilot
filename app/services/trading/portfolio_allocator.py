@@ -608,7 +608,13 @@ def evaluate_allocation_candidate(
     same_symbol_conflicts = [row for row in conflicts if "same_ticker" in row.get("buckets", [])]
     if same_symbol_conflicts:
         best_incumbent = max(_safe_float(row.get("incumbent_score"), 0.5) for row in same_symbol_conflicts)
-        margin = float(getattr(settings, "brain_allocator_incumbent_score_margin", 0.08) or 0.08)
+        margin = max(
+            0.0,
+            _safe_float(
+                getattr(settings, "brain_allocator_incumbent_score_margin", 0.08),
+                0.08,
+            ),
+        )
         if score <= best_incumbent + margin:
             blocked_reason = "same_ticker_conflict"
     if blocked_reason is None and sector_cap > 0:
