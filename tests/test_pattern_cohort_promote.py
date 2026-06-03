@@ -154,7 +154,7 @@ def test_select_cohort_candidates_counts_only_computable_realized_returns():
     assert db.params["unverified_tca_outlier_bps"] == 500.0
 
 
-def test_compute_with_full_evidence_uses_all_5_weights():
+def test_compute_with_saturated_dsr_pbo_excludes_constant_weights():
     pat = SimpleNamespace(
         cpcv_median_sharpe=2.0,
         deflated_sharpe=1.0,
@@ -166,7 +166,7 @@ def test_compute_with_full_evidence_uses_all_5_weights():
     score = compute_quality_composite_score(
         pat, directional_wr=0.7, decay=0.1, weights=DEFAULT_WEIGHTS,
     )
-    assert score == pytest.approx(0.915, rel=1e-6)
+    assert score == pytest.approx(0.869230769, rel=1e-6)
 
 
 def test_compute_pattern_585_calibration_check():
@@ -180,7 +180,7 @@ def test_compute_pattern_585_calibration_check():
     )
     # 0.30*0.7 + 0.20*1.0 + 0.15*1.0 + 0.25*0.733 + 0.10*1.0
     # = 0.21 + 0.20 + 0.15 + 0.18325 + 0.10 = 0.84325
-    assert score == pytest.approx(0.84325, rel=1e-5)
+    assert score == pytest.approx(0.758846154, rel=1e-5)
 
 
 def test_compute_with_null_directional_wr_returns_none():
@@ -243,7 +243,7 @@ def test_compute_negative_cpcv_clips_to_zero():
     score = compute_quality_composite_score(
         pat, directional_wr=0.5, decay=0.0, weights=DEFAULT_WEIGHTS,
     )
-    assert score == pytest.approx(0.575, rel=1e-6)
+    assert score == pytest.approx(0.346153846, rel=1e-6)
 
 
 def test_compute_pbo_above_one_clips_to_full_penalty():
@@ -255,7 +255,7 @@ def test_compute_pbo_above_one_clips_to_full_penalty():
     score = compute_quality_composite_score(
         pat, directional_wr=0.5, decay=0.0, weights=DEFAULT_WEIGHTS,
     )
-    assert score == pytest.approx(0.725, rel=1e-6)
+    assert score == pytest.approx(0.65625, rel=1e-6)
 
 
 def test_compute_settings_propagate_to_score():
@@ -281,7 +281,8 @@ def test_compute_settings_propagate_to_score():
         pat, directional_wr=0.7, decay=0.1, weights=tuned,
     )
     assert default != tuned_score
-    assert tuned_score == pytest.approx(0.845, rel=1e-6)
+    assert default == pytest.approx(0.869230769, rel=1e-6)
+    assert tuned_score == pytest.approx(0.793333333, rel=1e-6)
 
 
 def test_clip_helper_bounds():

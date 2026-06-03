@@ -94,13 +94,56 @@ def _weight(settings_: Any, key: str, default: float) -> float:
     return max(0.0, float(getattr(settings_, key, default)))
 
 
-def _pilot_weights(settings_: Any) -> dict[str, float]:
+def _values_degenerate(values: list[float]) -> bool:
+    if len(values) <= 1:
+        return True
+    first = float(values[0])
+    return all(abs(float(v) - first) <= 1e-12 for v in values[1:])
+
+
+def _is_saturated_deflated_sharpe(value: Any) -> bool:
+    return _is_number(value) and float(value) >= 1.0
+
+
+def _is_saturated_pbo(value: Any) -> bool:
+    return _is_number(value) and float(value) <= 0.0
+
+
+def _pilot_metric_enabled(rows: list[dict[str, Any]]) -> dict[str, bool]:
+    dsr_values = [
+        float(r["deflated_sharpe"])
+        for r in rows
+        if _is_number(r.get("deflated_sharpe"))
+    ]
+    pbo_values = [float(r["pbo"]) for r in rows if _is_number(r.get("pbo"))]
+    pbo_inverse_values = [1.0 - _clip(v) for v in pbo_values]
+    return {
+        "cpcv": True,
+        "dsr": not (
+            _values_degenerate(dsr_values)
+            or all(_is_saturated_deflated_sharpe(v) for v in dsr_values)
+        ),
+        "pbo": not (
+            _values_degenerate(pbo_inverse_values)
+            or all(_is_saturated_pbo(v) for v in pbo_values)
+        ),
+        "directional": True,
+        "decay": True,
+    }
+
+
+def _pilot_weights(
+    settings_: Any,
+    *,
+    metric_enabled: dict[str, bool] | None = None,
+) -> dict[str, float]:
     """Existing composite weights, renormalized for adaptive vetting.
 
     No new raw sample threshold is introduced: pilot/full staging uses the
     operator's existing preference weights for CPCV, DSR, PBO, directional
-    correctness, and decay/freshness. Evidence quality affects the score
-    continuously through Bayesian shrinkage and time decay.
+    correctness, and decay/freshness. DSR/PBO are disabled when the current
+    pilot pool cannot use them to discriminate candidates. Evidence quality
+    affects the score continuously through Bayesian shrinkage and time decay.
     """
     raw = {
         "cpcv": _weight(settings_, "chili_cohort_score_weight_cpcv_sharpe", 0.30),
@@ -108,6 +151,11 @@ def _pilot_weights(settings_: Any) -> dict[str, float]:
         "pbo": _weight(settings_, "chili_cohort_score_weight_pbo_inverse", 0.15),
         "directional": _weight(settings_, "chili_cohort_score_weight_directional_wr", 0.25),
         "decay": _weight(settings_, "chili_cohort_score_weight_decay_inverse", 0.10),
+    }
+    enabled = metric_enabled or {}
+    raw = {
+        key: (value if bool(enabled.get(key, True)) else 0.0)
+        for key, value in raw.items()
     }
     total = sum(raw.values())
     if total <= 0:
@@ -406,8 +454,9 @@ def _pilot_score_for_row(
     *,
     prior_strength: float,
     settings_: Any,
+    metric_enabled: dict[str, bool] | None = None,
 ) -> float:
-    weights = _pilot_weights(settings_)
+    weights = _pilot_weights(settings_, metric_enabled=metric_enabled)
     cpcv_component = _clip(float(row["cpcv_median_sharpe"]) / 2.0)
     dsr_component = _clip(float(row["deflated_sharpe"]))
     pbo_component = 1.0 - _clip(float(row["pbo"]))
@@ -463,10 +512,14 @@ def _pilot_policy(
 ) -> dict[str, Any]:
     rows = _load_pilot_rows(db, now=now, settings_=settings_)
     prior_strength = _pilot_prior_strength(rows)
+    metric_enabled = _pilot_metric_enabled(rows)
     scored = []
     for row in rows:
         pilot_score = _pilot_score_for_row(
-            row, prior_strength=prior_strength, settings_=settings_
+            row,
+            prior_strength=prior_strength,
+            settings_=settings_,
+            metric_enabled=metric_enabled,
         )
         maturity = _evidence_maturity(row, prior_strength)
         scored.append({
@@ -474,6 +527,10 @@ def _pilot_policy(
             "pilot_score": pilot_score,
             "evidence_maturity": maturity,
             "full_score": _clip(pilot_score * maturity),
+            "pilot_metric_enabled": metric_enabled,
+            "pilot_excluded_metrics": sorted(
+                metric for metric, enabled in metric_enabled.items() if not enabled
+            ),
         })
     pct = float(getattr(settings_, "chili_cpcv_target_promotion_pool_pct", 0.05))
     threshold = _empirical_percentile(
@@ -489,6 +546,10 @@ def _pilot_policy(
         "threshold": threshold,
         "full_threshold": full_threshold,
         "prior_strength": prior_strength,
+        "metric_enabled": metric_enabled,
+        "excluded_metrics": sorted(
+            metric for metric, enabled in metric_enabled.items() if not enabled
+        ),
     }
 
 

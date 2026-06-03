@@ -144,6 +144,14 @@ def _finite_float_or_default(value: Any, default: float) -> float:
     return float(default) if out is None else out
 
 
+def _is_saturated_deflated_sharpe(value: float) -> bool:
+    return value >= 1.0
+
+
+def _is_saturated_pbo(value: float) -> bool:
+    return value <= 0.0
+
+
 def _settings_float(settings_: Any, name: str, default: float) -> float:
     return _finite_float_or_default(getattr(settings_, name, default), default)
 
@@ -262,12 +270,6 @@ def compute_quality_composite_score(
     if directional_wr_f is None or decay_f is None:
         return None
 
-    cpcv_n = _clip(cpcv / 2.0)
-    dsr_n = _clip(dsr / 1.0)
-    pbo_inv = 1.0 - _clip(pbo)
-    wr = _clip(directional_wr_f)
-    dec_inv = 1.0 - _clip(decay_f)
-
     w_cpcv = _finite_float_or_default(weights.get("cpcv_sharpe", 0.10), 0.10)
     w_dsr = _finite_float_or_default(weights.get("deflated_sharpe", 0.05), 0.05)
     w_pbo = _finite_float_or_default(weights.get("pbo_inverse", 0.05), 0.05)
@@ -281,27 +283,35 @@ def compute_quality_composite_score(
     realized_quality_input = _finite_float_or_none(realized_pnl_score)
     has_realized = realized_quality_input is not None and n >= 5
     realized_quality = _clip(realized_quality_input) if has_realized else None
-    wr_component = wr * (realized_quality if realized_quality is not None else 1.0)
-    non_realized_terms = (
-        w_cpcv * cpcv_n
-        + w_dsr * dsr_n
-        + w_pbo * pbo_inv
-        + w_wr * wr_component
-        + w_decay * dec_inv
+
+    active_terms: list[tuple[float, float]] = [
+        (w_cpcv, _clip(cpcv / 2.0)),
+    ]
+    if not _is_saturated_deflated_sharpe(dsr):
+        active_terms.append((w_dsr, _clip(dsr / 1.0)))
+    if not _is_saturated_pbo(pbo):
+        active_terms.append((w_pbo, 1.0 - _clip(pbo)))
+
+    wr_component = _clip(directional_wr_f) * (
+        realized_quality if realized_quality is not None else 1.0
     )
+    active_terms.extend([
+        (w_wr, wr_component),
+        (w_decay, 1.0 - _clip(decay_f)),
+    ])
 
     if not has_realized:
-        # Realized component is dormant: rescale the five non-realized
-        # weights so they sum to 1.0. Equivalent to multiplying each by
-        # 1 / (w_cpcv + w_dsr + w_pbo + w_wr + w_decay).
-        non_realized_sum = w_cpcv + w_dsr + w_pbo + w_wr + w_decay
-        if non_realized_sum <= 0:
+        active_weight = sum(w for w, _value in active_terms)
+        if active_weight <= 0:
             return None
-        return non_realized_terms / non_realized_sum
+        return sum(w * value for w, value in active_terms) / active_weight
 
     evidence = realized_evidence_score(n, tau)
-    realized_component = float(realized_quality) * evidence
-    return non_realized_terms + w_realized * realized_component
+    active_terms.append((w_realized, float(realized_quality) * evidence))
+    active_weight = sum(w for w, _value in active_terms)
+    if active_weight <= 0:
+        return None
+    return sum(w * value for w, value in active_terms) / active_weight
 
 
 def _load_directional_quality_map(db: Session) -> dict[int, dict[str, Any]]:

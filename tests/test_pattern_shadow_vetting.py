@@ -15,6 +15,9 @@ import pytest
 from app.models.trading import PaperTrade
 from app.services.trading.pattern_shadow_vetting import (
     _load_directional_evidence,
+    _pilot_metric_enabled,
+    _pilot_score_for_row,
+    _pilot_weights,
     pilot_promoted_risk_multiplier,
     run_shadow_vetting_cycle,
     select_shadow_vetting_candidates,
@@ -41,6 +44,59 @@ def _settings(**overrides):
     )
     base.update(overrides)
     return SimpleNamespace(**base)
+
+
+def test_pilot_score_excludes_saturated_constant_dsr_pbo() -> None:
+    rows = [
+        {"deflated_sharpe": 1.0, "pbo": 0.0},
+        {"deflated_sharpe": 1.0, "pbo": 0.0},
+        {"deflated_sharpe": 1.0, "pbo": 0.0},
+    ]
+    metric_enabled = _pilot_metric_enabled(rows)
+    weights = _pilot_weights(_settings(), metric_enabled=metric_enabled)
+
+    assert metric_enabled["dsr"] is False
+    assert metric_enabled["pbo"] is False
+    assert weights["dsr"] == pytest.approx(0.0)
+    assert weights["pbo"] == pytest.approx(0.0)
+
+    weak_row = {
+        "cpcv_median_sharpe": 0.0,
+        "deflated_sharpe": 1.0,
+        "pbo": 0.0,
+        "cpcv_n_paths": 20,
+        "evidence": {
+            "effective_sample_n": 0.0,
+            "weighted_directional_wr": 0.5,
+            "freshness": 1.0,
+            "directional_decay": 0.0,
+            "path_quality": 1.0,
+        },
+    }
+
+    score = _pilot_score_for_row(
+        weak_row,
+        prior_strength=20,
+        settings_=_settings(),
+        metric_enabled=metric_enabled,
+    )
+
+    assert score == pytest.approx(0.153846154, rel=1e-6)
+
+
+def test_pilot_score_keeps_discriminating_dsr_pbo_metrics() -> None:
+    rows = [
+        {"deflated_sharpe": 0.2, "pbo": 0.8},
+        {"deflated_sharpe": 0.5, "pbo": 0.4},
+        {"deflated_sharpe": 0.8, "pbo": 0.1},
+    ]
+    metric_enabled = _pilot_metric_enabled(rows)
+    weights = _pilot_weights(_settings(), metric_enabled=metric_enabled)
+
+    assert metric_enabled["dsr"] is True
+    assert metric_enabled["pbo"] is True
+    assert weights["dsr"] > 0
+    assert weights["pbo"] > 0
 
 
 def test_shadow_vetting_skips_paper_dynamic_without_realized_return():
@@ -249,6 +305,7 @@ def test_shadow_vetting_advances_strong_shadow_to_pilot_before_full_ev(db, monke
         db,
         name="thin_shadow",
         lifecycle="shadow_promoted",
+        cpcv=2.0,
         quality_score=None,
     )
 
@@ -347,6 +404,7 @@ def test_shadow_vetting_allows_pilot_when_alpha_gate_only_needs_more_samples(
         db,
         name="pilot_soft_alpha_gate",
         lifecycle="shadow_promoted",
+        cpcv=2.0,
         quality_score=None,
     )
 
@@ -392,6 +450,7 @@ def test_shadow_vetting_promotes_scored_top_pool_shadow(db, monkeypatch):
         db,
         name="strong_shadow",
         lifecycle="shadow_promoted",
+        cpcv=2.0,
         quality_score=0.90,
     )
     shadow.raw_realized_trade_count = 5
