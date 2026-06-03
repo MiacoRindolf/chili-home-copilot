@@ -653,7 +653,20 @@ def _robinhood_entry_tca_cost_bps(
                     END AS adverse_entry_slippage_bps
                 FROM trading_trades
                 WHERE UPPER(ticker) = UPPER(:ticker)
-                  AND status = 'closed'
+                  AND (
+                      LOWER(COALESCE(status, '')) = 'closed'
+                      OR (
+                          LOWER(COALESCE(status, '')) IN (
+                              'open', 'filled', 'partially_filled'
+                          )
+                          AND (
+                              COALESCE(avg_fill_price, 0) > 0
+                              OR LOWER(COALESCE(broker_status, '')) IN (
+                                  'filled', 'partially_filled'
+                              )
+                          )
+                      )
+                  )
                   AND LOWER(COALESCE(broker_source, '')) IN ('robinhood', 'rh')
                   AND LOWER(COALESCE(direction, 'long')) = LOWER(:side)
                   AND entry_date >= NOW() - (:window_days * INTERVAL '1 day')
@@ -727,6 +740,7 @@ def _robinhood_entry_tca_cost_bps(
         "sample_trades": samples,
         "min_samples": min_samples_i,
         "sample_basis": "usable_robinhood_adverse_entry_tca_trades",
+        "included_trade_statuses": "closed_or_fill_backed_open",
         "window_days": window_days_i,
         "avg_entry_slippage_bps": round(avg_entry, 4),
         "p90_entry_slippage_bps": round(p90_entry, 4),

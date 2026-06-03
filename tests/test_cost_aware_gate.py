@@ -196,6 +196,9 @@ def test_gate_rh_equity_observed_tca_raises_threshold_and_passes():
     assert res.tca_snapshot["sample_basis"] == (
         "usable_robinhood_adverse_entry_tca_trades"
     )
+    assert res.tca_snapshot["included_trade_statuses"] == (
+        "closed_or_fill_backed_open"
+    )
     assert res.tca_snapshot["avg_entry_slippage_bps"] == pytest.approx(100.2)
     assert res.tca_snapshot["p90_entry_slippage_bps"] == pytest.approx(180.0)
     assert res.tca_snapshot["cost_basis"] == (
@@ -207,6 +210,9 @@ def test_gate_rh_equity_observed_tca_raises_threshold_and_passes():
     assert db.params[0]["window_days"] == 30
     assert db.params[0]["outlier_bps"] == pytest.approx(500.0)
     assert "LOWER(COALESCE(broker_source, '')) IN ('robinhood', 'rh')" in db.sqls[0]
+    assert "LOWER(COALESCE(status, '')) = 'closed'" in db.sqls[0]
+    assert "'open', 'filled', 'partially_filled'" in db.sqls[0]
+    assert "COALESCE(avg_fill_price, 0) > 0" in db.sqls[0]
     assert "broker_order_id" in db.sqls[0]
 
 
