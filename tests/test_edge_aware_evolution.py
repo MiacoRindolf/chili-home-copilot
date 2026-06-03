@@ -16,6 +16,7 @@ from app.services.trading.learning import (
     _learned_exit_config_from_edge_report,
     _parent_eligible_for_variant_spawn,
     _refresh_duplicate_time_decay_learned_exit_child,
+    _request_edge_exit_child_backtest,
     fork_edge_learned_exit_variants,
     fork_entry_variants,
 )
@@ -246,13 +247,32 @@ def test_edge_root_cause_requires_material_insufficient_directional_evidence():
     assert _edge_report_root_cause(report) == "managed_stop_not_tighter_than_base"
 
 
-def test_edge_learned_exit_variant_starts_shadow_research_only(db):
+def test_edge_learned_exit_variant_starts_shadow_research_only(db, monkeypatch):
     pat = _make_pattern(db)
     now = datetime.utcnow().replace(microsecond=0)
     for i in range(5):
         _add_edge_reject(db, pattern_id=pat.id, created_at=now - timedelta(minutes=i))
     db.commit()
     report = _edge_debt_loss_reports(db, now=now, lookback_days=1)[pat.id]
+    emissions: list[dict] = []
+
+    def _emit(db_arg, scan_pattern_id, *, source, asset_class=None, expected_evidence_value=None, payload=None):
+        emissions.append(
+            {
+                "db": db_arg,
+                "scan_pattern_id": scan_pattern_id,
+                "source": source,
+                "asset_class": asset_class,
+                "expected_evidence_value": expected_evidence_value,
+                "payload": payload,
+            }
+        )
+        return 9001
+
+    monkeypatch.setattr(
+        "app.services.trading.brain_work.emitters.emit_backtest_requested_for_pattern",
+        _emit,
+    )
 
     diag: dict = {}
     ids = fork_edge_learned_exit_variants(db, pat.id, edge_loss_report=report, diagnostics=diag)
@@ -261,6 +281,7 @@ def test_edge_learned_exit_variant_starts_shadow_research_only(db):
     assert diag["skip_reason"] is None
     assert diag["created_child_ids"] == ids
     assert diag["created_count"] == 1
+    assert diag["backtest_request_event_id"] == 9001
     child = db.get(ScanPattern, ids[0])
     assert child is not None
     assert child.parent_id == pat.id
@@ -274,6 +295,30 @@ def test_edge_learned_exit_variant_starts_shadow_research_only(db):
     assert cfg["target_reward_fraction"] == 0.02211
     assert cfg["stop_loss_fraction"] == 0.0053
     assert cfg["total_edge_rejects"] == 5
+    assert emissions == [
+        {
+            "db": db,
+            "scan_pattern_id": child.id,
+            "source": "edge_learned_exit_variant",
+            "asset_class": child.asset_class,
+            "expected_evidence_value": 0.0,
+            "payload": {
+                "parent_pattern_id": pat.id,
+                "variant_label": child.variant_label,
+                "origin": EDGE_EXIT_VARIANT_ORIGIN,
+                "promotion_status": EDGE_EXIT_PROMOTION_STATUS,
+                "edge_learned_exit_v1": True,
+                "basis": "realized_parent_payoff_after_edge_debt",
+                "target_pct": 2.211,
+                "stop_pct": 0.53,
+                "reward_risk": 4.171698,
+                "total_edge_rejects": 5,
+                "edge_loss_report_source": EDGE_EXIT_CONFIG_SOURCE,
+                "root_cause": "managed_reward_risk_below_floor",
+                "report_total_rejects": 5,
+            },
+        }
+    ]
 
 
 def test_time_decay_edge_miss_report_uses_paper_geometry_without_parent_payoff():
@@ -570,7 +615,9 @@ def test_duplicate_time_decay_learned_exit_child_refreshes_existing_shadow_child
     parent = SimpleNamespace(id=123, backtest_priority=42)
     existing = SimpleNamespace(
         id=456,
+        parent_id=123,
         origin=EDGE_EXIT_VARIANT_ORIGIN,
+        variant_label="edge-exit-r3.00-s1.50",
         exit_config={
             "source": EDGE_EXIT_CONFIG_SOURCE,
             "edge_learned_exit_v1": True,
@@ -607,7 +654,7 @@ def test_duplicate_time_decay_learned_exit_child_refreshes_existing_shadow_child
     assert existing.exit_config["paper_trade_ids"] == [3, 4, 5]
 
 
-def test_duplicate_time_decay_refresh_bypasses_max_active_child_cap():
+def test_duplicate_time_decay_refresh_bypasses_max_active_child_cap(monkeypatch):
     parent = SimpleNamespace(
         id=123,
         active=True,
@@ -619,7 +666,9 @@ def test_duplicate_time_decay_refresh_bypasses_max_active_child_cap():
     )
     existing = SimpleNamespace(
         id=456,
+        parent_id=123,
         origin=EDGE_EXIT_VARIANT_ORIGIN,
+        variant_label="edge-exit-r3.00-s1.50",
         exit_config={
             "source": EDGE_EXIT_CONFIG_SOURCE,
             "edge_learned_exit_v1": True,
@@ -630,6 +679,24 @@ def test_duplicate_time_decay_refresh_bypasses_max_active_child_cap():
         last_backtest_at=object(),
     )
     commits: list[bool] = []
+    emissions: list[dict] = []
+
+    def _emit(db_arg, scan_pattern_id, *, source, asset_class=None, expected_evidence_value=None, payload=None):
+        emissions.append(
+            {
+                "scan_pattern_id": scan_pattern_id,
+                "source": source,
+                "asset_class": asset_class,
+                "expected_evidence_value": expected_evidence_value,
+                "payload": payload,
+            }
+        )
+        return 9010
+
+    monkeypatch.setattr(
+        "app.services.trading.brain_work.emitters.emit_backtest_requested_for_pattern",
+        _emit,
+    )
 
     class _Query:
         def filter(self, *_args):
@@ -664,9 +731,61 @@ def test_duplicate_time_decay_refresh_bypasses_max_active_child_cap():
     assert commits == [True]
     assert diag["skip_reason"] == "refreshed_duplicate_learned_exit_label"
     assert diag["existing_child_id"] == 456
+    assert diag["backtest_request_event_id"] == 9010
     assert existing.backtest_priority == 75
     assert existing.last_backtest_at is None
     assert existing.exit_config["refreshed_duplicate_label"] is True
+    assert emissions == [
+        {
+            "scan_pattern_id": 456,
+            "source": "edge_learned_exit_variant_refresh",
+            "asset_class": None,
+            "expected_evidence_value": 3.1,
+            "payload": {
+                "parent_pattern_id": 123,
+                "variant_label": "edge-exit-r3.00-s1.50",
+                "origin": EDGE_EXIT_VARIANT_ORIGIN,
+                "edge_learned_exit_v1": True,
+                "basis": "paper_time_decay_shadow_exit_geometry",
+                "target_pct": 3.0,
+                "stop_pct": 1.5,
+                "reward_risk": 2.0,
+                "total_edge_rejects": 5,
+                "paper_time_decay_edge_miss": True,
+                "total_time_decay_losses": 5,
+                "edge_loss_report_source": EDGE_EXIT_CONFIG_SOURCE,
+                "root_cause": "paper_time_decay_exit_thesis_mismatch",
+                "report_total_rejects": 5,
+            },
+        }
+    ]
+
+
+def test_request_edge_exit_child_backtest_swallows_ledger_failures(monkeypatch):
+    def _emit(*_args, **_kwargs):
+        raise RuntimeError("ledger unavailable")
+
+    monkeypatch.setattr(
+        "app.services.trading.brain_work.emitters.emit_backtest_requested_for_pattern",
+        _emit,
+    )
+
+    event_id = _request_edge_exit_child_backtest(
+        object(),
+        SimpleNamespace(
+            id=456,
+            parent_id=123,
+            variant_label="edge-exit-r3.00-s1.50",
+            origin=EDGE_EXIT_VARIANT_ORIGIN,
+            promotion_status=EDGE_EXIT_PROMOTION_STATUS,
+            asset_class="crypto",
+        ),
+        source="edge_learned_exit_variant",
+        cfg={"target_pct": 3.0, "stop_pct": 1.5},
+        report=_time_decay_edge_miss_report(total_rejects=5),
+    )
+
+    assert event_id is None
 
 
 def test_realized_exit_geometry_prefers_edge_learned_exit_config():

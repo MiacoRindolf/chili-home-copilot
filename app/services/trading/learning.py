@@ -9695,6 +9695,60 @@ def _refresh_duplicate_time_decay_learned_exit_child(
     return True
 
 
+def _request_edge_exit_child_backtest(
+    db: Session,
+    child: Any,
+    *,
+    source: str,
+    cfg: dict[str, Any] | None = None,
+    report: dict[str, Any] | None = None,
+) -> int | None:
+    payload: dict[str, Any] = {
+        "parent_pattern_id": getattr(child, "parent_id", None),
+        "variant_label": getattr(child, "variant_label", None),
+        "origin": getattr(child, "origin", None),
+        "promotion_status": getattr(child, "promotion_status", None),
+        "edge_learned_exit_v1": True,
+    }
+    if cfg:
+        for key in (
+            "basis",
+            "target_pct",
+            "stop_pct",
+            "reward_risk",
+            "total_edge_rejects",
+            "paper_time_decay_edge_miss",
+            "total_time_decay_losses",
+        ):
+            if cfg.get(key) is not None:
+                payload[key] = cfg.get(key)
+    if report:
+        payload["edge_loss_report_source"] = report.get("source")
+        payload["root_cause"] = report.get("root_cause")
+        if report.get("total_rejects") is not None:
+            payload["report_total_rejects"] = report.get("total_rejects")
+        if report.get("paper_trade_ids"):
+            payload["paper_trade_ids"] = list(report.get("paper_trade_ids") or [])[:50]
+
+    expected_value = _finite_number((report or {}).get("avg_expected_net_pct"))
+    if expected_value is not None:
+        expected_value = max(0.0, expected_value)
+    try:
+        from .brain_work.emitters import emit_backtest_requested_for_pattern
+
+        return emit_backtest_requested_for_pattern(
+            db,
+            int(child.id),
+            source=source,
+            asset_class=getattr(child, "asset_class", None),
+            expected_evidence_value=expected_value,
+            payload={k: v for k, v in payload.items() if v is not None},
+        )
+    except Exception:
+        logger.debug("[edge_evolution] brain_work emit backtest_requested failed", exc_info=True)
+        return None
+
+
 def _learned_exit_config_from_edge_report(
     parent: "ScanPattern",
     report: dict[str, Any] | None,
@@ -10439,6 +10493,13 @@ def fork_edge_learned_exit_variants(
             report=report,
         )
         if refreshed:
+            event_id = _request_edge_exit_child_backtest(
+                db,
+                existing,
+                source="edge_learned_exit_variant_refresh",
+                cfg=cfg,
+                report=report,
+            )
             db.commit()
             if diagnostics is not None:
                 diagnostics["skip_reason"] = "refreshed_duplicate_learned_exit_label"
@@ -10446,6 +10507,7 @@ def fork_edge_learned_exit_variants(
                 diagnostics["existing_child_id"] = int(existing.id)
                 diagnostics["refreshed_existing_child_id"] = int(existing.id)
                 diagnostics["refreshed_count"] = 1
+                diagnostics["backtest_request_event_id"] = event_id
             logger.info(
                 "[edge_evolution] refreshed learned exit child=%s parent=%s label=%s rejects=%s",
                 existing.id,
@@ -10496,6 +10558,13 @@ def fork_edge_learned_exit_variants(
         cfg.get("reward_risk"),
         cfg.get("total_edge_rejects"),
     )
+    event_id = _request_edge_exit_child_backtest(
+        db,
+        child,
+        source="edge_learned_exit_variant",
+        cfg=cfg,
+        report=report,
+    )
     db.commit()
     created_ids = [int(child.id)]
     if diagnostics is not None:
@@ -10503,6 +10572,7 @@ def fork_edge_learned_exit_variants(
         diagnostics["variant_label"] = label
         diagnostics["created_child_ids"] = created_ids
         diagnostics["created_count"] = len(created_ids)
+        diagnostics["backtest_request_event_id"] = event_id
     return created_ids
 
 
