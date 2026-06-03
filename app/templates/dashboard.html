@@ -34,6 +34,8 @@
   {% for k in dash.kpis %}
   <div class="ws-kpi"{% if k.key %} data-kpi="{{ k.key }}"{% endif %}><div class="label">{{ k.label }}</div><div class="val {{ k.cls }}">{{ k.val }}</div></div>
   {% endfor %}
+  {# WS-58: combined Total P/L (realized 24h + unrealized open) — filled live by desktop.js, hidden until known #}
+  <div class="ws-kpi" data-kpi="total_pnl" title="Realized (24h) + unrealized (open positions)" hidden><div class="label">Total P/L</div><div class="val">—</div></div>
 </div>
 
 <div class="ws-grid">

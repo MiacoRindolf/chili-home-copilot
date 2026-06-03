@@ -81,6 +81,7 @@ def _aggregate(trades: List[Any], quote_fn: Callable[[str], Optional[float]]) ->
         "by_ticker": by_ticker,
         "count": count,
         "priced": priced,
+        "total": round(total, 2),                       # numeric, for combining with realized P/L
         "total_fmt": (_fmt_money(total) if priced else None),
         "total_up": total >= 0,
     }
