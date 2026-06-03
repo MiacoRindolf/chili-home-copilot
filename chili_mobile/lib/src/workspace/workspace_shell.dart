@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../brain/brain_dispatch_screen.dart';
 import '../chat/chat_screen.dart';
@@ -42,6 +43,7 @@ class WorkspaceShell extends StatefulWidget {
 
 class _WorkspaceShellState extends State<WorkspaceShell> {
   final WorkspaceController _ws = WorkspaceController();
+  Size _deskSize = Size.zero; // latest desktop size, for keyboard tiling
 
   // Built app bodies are cached so a window keeps its State across rebuilds /
   // focus changes (and while minimized). Dropped when the window closes.
@@ -86,6 +88,22 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
     _ws.open(id, title: a.title, icon: a.icon, size: a.size);
   }
 
+  // ── Keyboard window management on the focused window (mirrors the web OS). ──
+  void _snapFocused(String zone) {
+    final String? id = _ws.focusedId;
+    if (id != null) _ws.snap(id, zone, _deskSize);
+  }
+
+  void _minimizeFocused() {
+    final String? id = _ws.focusedId;
+    if (id != null) _ws.minimize(id);
+  }
+
+  void _closeFocused() {
+    final String? id = _ws.focusedId;
+    if (id != null) _ws.close(id);
+  }
+
   Widget _bodyFor(String id) {
     return _built.putIfAbsent(id, () => _apps[id]!.build());
   }
@@ -93,13 +111,26 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
   @override
   Widget build(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
-    return Scaffold(
-      body: Row(
-        children: <Widget>[
-          _dock(context, cs),
-          VerticalDivider(width: 1, thickness: 1, color: cs.outlineVariant),
-          Expanded(child: _desktop(context, cs)),
-        ],
+    return CallbackShortcuts(
+      bindings: <ShortcutActivator, VoidCallback>{
+        const SingleActivator(LogicalKeyboardKey.arrowLeft, control: true, alt: true): () => _snapFocused('left'),
+        const SingleActivator(LogicalKeyboardKey.arrowRight, control: true, alt: true): () => _snapFocused('right'),
+        const SingleActivator(LogicalKeyboardKey.arrowUp, control: true, alt: true): () => _snapFocused('max'),
+        const SingleActivator(LogicalKeyboardKey.arrowDown, control: true, alt: true): _minimizeFocused,
+        const SingleActivator(LogicalKeyboardKey.keyW, control: true, alt: true): _closeFocused,
+        const SingleActivator(LogicalKeyboardKey.backquote, control: true): _ws.cycleFocus,
+      },
+      child: Focus(
+        autofocus: true,
+        child: Scaffold(
+          body: Row(
+            children: <Widget>[
+              _dock(context, cs),
+              VerticalDivider(width: 1, thickness: 1, color: cs.outlineVariant),
+              Expanded(child: _desktop(context, cs)),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -108,6 +139,7 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
     return LayoutBuilder(
       builder: (BuildContext context, BoxConstraints constraints) {
         final Size deskSize = Size(constraints.maxWidth, constraints.maxHeight);
+        _deskSize = deskSize; // remembered for keyboard tiling shortcuts
         return AnimatedBuilder(
           animation: _ws,
           builder: (BuildContext context, _) {

@@ -153,4 +153,52 @@ class WorkspaceController extends ChangeNotifier {
     }
     if (any) notifyListeners();
   }
+
+  /// Tile the window into a half / quarter / full zone of the desktop.
+  /// Zones: 'left', 'right', 'max', 'tl', 'tr', 'bl', 'br'.
+  void snap(String id, String zone, Size desktop) {
+    final WsWindow? w = byId(id);
+    if (w == null) return;
+    final double hw = desktop.width / 2;
+    final double hh = desktop.height / 2;
+    Rect r;
+    switch (zone) {
+      case 'left':
+        r = Rect.fromLTWH(0, 0, hw, desktop.height);
+        break;
+      case 'right':
+        r = Rect.fromLTWH(hw, 0, hw, desktop.height);
+        break;
+      case 'max':
+        r = Rect.fromLTWH(0, 0, desktop.width, desktop.height);
+        break;
+      case 'tl':
+        r = Rect.fromLTWH(0, 0, hw, hh);
+        break;
+      case 'tr':
+        r = Rect.fromLTWH(hw, 0, hw, hh);
+        break;
+      case 'bl':
+        r = Rect.fromLTWH(0, hh, hw, hh);
+        break;
+      case 'br':
+        r = Rect.fromLTWH(hw, hh, hw, hh);
+        break;
+      default:
+        return;
+    }
+    w.position = r.topLeft;
+    w.size = r.size;
+    w.maximized = zone == 'max';
+    if (zone != 'max') w.restoreRect = null; // a half/quarter becomes the new geometry
+    focus(id);
+  }
+
+  /// Cycle focus to the bottom-most visible window (mirrors the web OS ⌘`).
+  void cycleFocus() {
+    final List<WsWindow> visible = _windows.where((WsWindow w) => !w.minimized).toList()
+      ..sort((WsWindow a, WsWindow b) => a.z.compareTo(b.z));
+    if (visible.length < 2) return;
+    focus(visible.first.id);
+  }
 }
