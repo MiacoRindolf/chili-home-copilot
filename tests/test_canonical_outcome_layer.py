@@ -62,6 +62,7 @@ def _make_closed_trade(
     asset_kind: str | None = None,
     ticker: str = "TEST",
     direction: str = "long",
+    exit_reason: str = "pattern_exit_now",
 ) -> Trade:
     entry_dt = datetime.utcnow() - timedelta(days=entry_offset_days)
     exit_dt = datetime.utcnow() - timedelta(days=exit_offset_days)
@@ -84,6 +85,7 @@ def _make_closed_trade(
         scan_pattern_id=pattern_id,
         indicator_snapshot=indicator_snapshot,
         asset_kind=asset_kind,
+        exit_reason=exit_reason,
     )
     db.add(t)
     db.flush()

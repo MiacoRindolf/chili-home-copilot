@@ -18,6 +18,7 @@ class _Session:
         self.sqls: list[str] = []
         self.params: list[dict] = []
         self.committed = False
+        self.rolled_back = False
 
     def execute(self, stmt, params=None):
         sql = str(stmt)
@@ -29,6 +30,19 @@ class _Session:
 
     def commit(self):
         self.committed = True
+
+    def rollback(self):
+        self.rolled_back = True
+
+
+class _NoTradesFailureSession(_Session):
+    def execute(self, stmt, params=None):
+        sql = str(stmt)
+        if "WITH valid_return_source AS" in sql:
+            self.sqls.append(sql)
+            self.params.append(dict(params or {}))
+            raise RuntimeError("diagnostic query failed")
+        return super().execute(stmt, params=params)
 
 
 def test_realized_stats_sync_live_source_uses_realized_notional_only() -> None:
@@ -88,3 +102,14 @@ def test_realized_stats_sync_live_source_uses_realized_notional_only() -> None:
     assert "COALESCE(pt.signal_json" in no_trades_sql
     assert "shadow_capacity_janitor" in no_trades_sql
     assert ") IS NOT NULL" in no_trades_sql
+
+
+def test_realized_stats_sync_no_trades_diagnostic_is_best_effort() -> None:
+    sess = _NoTradesFailureSession()
+
+    out = sync_realized_stats(sess, dry_run=False)
+
+    assert out["updated"] == 0
+    assert out["no_trades"] == -1
+    assert sess.committed is True
+    assert sess.rolled_back is True
