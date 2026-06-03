@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from sqlalchemy.exc import DBAPIError, PendingRollbackError
 
 from app import models
 from app.config import (
@@ -177,6 +178,129 @@ def _live_runtime() -> dict:
         "monitor_entries_allowed": True,
         "payload": {},
     }
+
+def test_nonplacement_audit_commit_timeout_is_best_effort() -> None:
+    class _Db:
+        is_active = True
+
+        def __init__(self):
+            self.added: list[AutoTraderRun] = []
+            self.rollback_count = 0
+
+        def add(self, row):
+            self.added.append(row)
+
+        def commit(self):
+            raise DBAPIError.instance(
+                statement="INSERT INTO trading_autotrader_runs ...",
+                params={},
+                orig=Exception("statement timeout"),
+                dbapi_base_err=Exception,
+            )
+
+        def rollback(self):
+            self.rollback_count += 1
+
+    db = _Db()
+    alert = BreakoutAlert(
+        id=9902,
+        ticker="ALEPH-USD",
+        asset_type="crypto",
+        scan_pattern_id=1250,
+        user_id=1,
+    )
+
+    at_mod._audit(
+        db,
+        user_id=1,
+        alert=alert,
+        decision="skipped",
+        reason="non_positive_expected_edge",
+        rule_snapshot={"expected_net_pct": -0.7},
+    )
+
+    assert db.rollback_count == 1
+    assert len(db.added) == 1
+
+
+def test_nonplacement_audit_pending_rollback_is_best_effort() -> None:
+    class _Db:
+        is_active = True
+
+        def __init__(self):
+            self.added: list[AutoTraderRun] = []
+            self.rollback_count = 0
+            self.commit_count = 0
+
+        def add(self, row):
+            self.added.append(row)
+
+        def commit(self):
+            self.commit_count += 1
+            raise PendingRollbackError("pending rollback from prior audit timeout")
+
+        def rollback(self):
+            self.rollback_count += 1
+
+    db = _Db()
+    alert = BreakoutAlert(
+        id=9903,
+        ticker="BLUR-USD",
+        asset_type="crypto",
+        scan_pattern_id=1250,
+        user_id=1,
+    )
+
+    at_mod._audit(
+        db,
+        user_id=1,
+        alert=alert,
+        decision="blocked",
+        reason="pdt_guard:pdt_limit_reached:3>=3",
+        rule_snapshot={"expected_net_pct": -0.1443},
+    )
+
+    assert db.rollback_count == 1
+    assert db.commit_count == 1
+    assert len(db.added) == 1
+
+
+def test_placement_audit_pending_rollback_retries_after_recovery() -> None:
+    class _Db:
+        is_active = True
+
+        def __init__(self):
+            self.added: list[AutoTraderRun] = []
+            self.rollback_count = 0
+            self.commit_count = 0
+
+        def add(self, row):
+            self.added.append(row)
+
+        def commit(self):
+            self.commit_count += 1
+            if self.commit_count == 1:
+                raise PendingRollbackError("pending rollback before placement audit")
+
+        def rollback(self):
+            self.rollback_count += 1
+
+    db = _Db()
+    alert = BreakoutAlert(id=9904, ticker="A8-USD", scan_pattern_id=1267, user_id=1)
+
+    at_mod._audit(
+        db,
+        user_id=1,
+        alert=alert,
+        decision="placed",
+        reason="submitted",
+        rule_snapshot={"trade_id": 123},
+        trade_id=123,
+    )
+
+    assert db.rollback_count == 1
+    assert db.commit_count == 2
+    assert len(db.added) == 2
 
 
 def _patch_tick_shell(monkeypatch, user_id: int) -> None:

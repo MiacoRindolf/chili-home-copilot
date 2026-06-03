@@ -13,7 +13,7 @@ from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, case, or_, text
-from sqlalchemy.exc import PendingRollbackError
+from sqlalchemy.exc import DBAPIError, PendingRollbackError
 from sqlalchemy.orm import Session
 
 from ...config import (
@@ -3313,6 +3313,10 @@ def _queue_shadow_stock_fastlane_for_observation(
     }
 
 
+def _audit_is_nonplacement_decision(decision: str | None) -> bool:
+    return str(decision or "").strip().lower() not in {"placed", "scaled_in"}
+
+
 def _audit(
     db: Session,
     *,
@@ -3372,14 +3376,31 @@ def _audit(
     try:
         db.commit()
     except PendingRollbackError:
+        nonplacement = _audit_is_nonplacement_decision(decision)
         logger.warning(
-            "[autotrader] audit commit hit pending rollback; retrying after rollback alert_id=%s ticker=%s reason=%s",
+            "[autotrader] audit commit hit pending rollback; %s alert_id=%s ticker=%s reason=%s",
+            (
+                "dropping best-effort nonplacement audit after rollback"
+                if nonplacement
+                else "retrying after rollback"
+            ),
             getattr(alert, "id", None),
             (getattr(alert, "ticker", None) or "").upper() or None,
             reason,
             exc_info=True,
         )
-        db.rollback()
+        try:
+            db.rollback()
+        except Exception:
+            logger.debug(
+                "[autotrader] audit rollback failed after pending rollback",
+                exc_info=True,
+            )
+            if nonplacement:
+                return
+            raise
+        if nonplacement:
+            return
         if isinstance(rule_snapshot, dict):
             rule_snapshot = dict(rule_snapshot)
         else:
@@ -3388,6 +3409,24 @@ def _audit(
         rule_snapshot["audit_session_recovery_reason"] = "pending_rollback_retry"
         db.add(_row())
         db.commit()
+    except DBAPIError:
+        if not _audit_is_nonplacement_decision(decision):
+            raise
+        logger.warning(
+            "[autotrader] nonplacement audit commit failed; dropping best-effort audit alert_id=%s ticker=%s reason=%s",
+            getattr(alert, "id", None),
+            (getattr(alert, "ticker", None) or "").upper() or None,
+            reason,
+            exc_info=True,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            logger.debug(
+                "[autotrader] nonplacement audit rollback failed after commit error",
+                exc_info=True,
+            )
+        return
 
     # Q1.T3 phase 2 — shadow-consume unified_signals.
     # No-op when chili_unified_signal_consumer_enabled is False (default).
