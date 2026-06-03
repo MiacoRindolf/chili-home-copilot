@@ -25,6 +25,10 @@ services:
   postgres:
     # Keep in sync with typical dev installs (e.g. local Postgres 16); simplifies pg_dump/restore.
     image: postgres:16-alpine
+    # The D: bind mount already carries postgres ownership; running the
+    # service as postgres avoids the image entrypoint's slow recursive chown
+    # scan before startup.
+    user: postgres
     # Headroom for chili + brain + brain-worker; process-pool queue uses P * (child pool) connections.
     command: ["postgres", "-c", "max_connections=350"]
     restart: unless-stopped

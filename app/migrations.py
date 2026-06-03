@@ -20024,6 +20024,21 @@ def _migration_294_kill_switch_runtime_lookup_index(conn) -> None:
     logger.info("[mig294] Kill-switch runtime lookup index installed")
 
 
+def _migration_295_pattern_regime_perf_pattern_asof_cover_index(conn) -> None:
+    """Speed pattern-regime history rollups used by scheduler safety gates."""
+    if "trading_pattern_regime_performance_daily" not in _tables(conn):
+        conn.commit()
+        return
+
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_pattern_regime_perf_pattern_asof_cover
+            ON trading_pattern_regime_performance_daily (pattern_id, as_of_date)
+            INCLUDE (has_confidence, expectancy)
+    """))
+    conn.commit()
+    logger.info("[mig295] Pattern-regime pattern/as-of covering index installed")
+
+
 
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -20379,6 +20394,8 @@ MIGRATIONS = [
      _migration_293_execution_slippage_unfilled_hygiene),
     ("294_kill_switch_runtime_lookup_index",
      _migration_294_kill_switch_runtime_lookup_index),
+    ("295_pattern_regime_perf_pattern_asof_cover_index",
+     _migration_295_pattern_regime_perf_pattern_asof_cover_index),
 ]
 
 
