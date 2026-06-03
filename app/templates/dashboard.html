@@ -38,6 +38,9 @@
   <div class="ws-kpi" data-kpi="total_pnl" title="Realized (24h) + unrealized (open positions)" hidden><div class="label">Total P/L</div><div class="val">—</div></div>
 </div>
 
+{# WS-59: intraday cumulative realized-P/L sparkline — drawn live by desktop.js, hidden until ≥2 closes #}
+<div class="ws-eqspark-row" id="ws-equity-spark-row" hidden><span class="ws-eqspark-cap">Realized P/L · 24h</span><div class="ws-eqspark" id="ws-equity-spark" title="Cumulative realized P/L over the last 24h"></div></div>
+
 <div class="ws-grid">
   <!-- Today's closes -->
   <div class="ws-card ws-c8">

@@ -194,6 +194,29 @@
     });
   });
 
+  // ── Intraday realized-P/L sparkline: cumulative P/L over the last 24h, drawn
+  //    as an inline SVG polyline scaled to its container with a dashed zero line. ──
+  function renderSpark(points) {
+    var el = document.getElementById('ws-equity-spark'); if (!el) return;
+    var row = document.getElementById('ws-equity-spark-row');
+    if (!points || points.length < 2) { el.innerHTML = ''; if (row) { row.hidden = true; } else { el.hidden = true; } return; }
+    if (row) { row.hidden = false; } else { el.hidden = false; }
+    var W = el.clientWidth || 200, H = el.clientHeight || 34, pad = 3;
+    var min = Math.min.apply(null, points), max = Math.max.apply(null, points), range = (max - min) || 1, n = points.length;
+    var coords = points.map(function (v, i) {
+      var x = pad + (i / (n - 1)) * (W - 2 * pad);
+      var y = pad + (1 - (v - min) / range) * (H - 2 * pad);
+      return x.toFixed(1) + ',' + y.toFixed(1);
+    }).join(' ');
+    var up = points[n - 1] >= 0, color = up ? 'var(--ws-up)' : 'var(--ws-down)', zero = '';
+    if (0 >= min && 0 <= max) {
+      var zy = (pad + (1 - (0 - min) / range) * (H - 2 * pad)).toFixed(1);
+      zero = '<line x1="0" y1="' + zy + '" x2="' + W + '" y2="' + zy + '" stroke="var(--ws-border-strong)" stroke-width="1" stroke-dasharray="2 3"/>';
+    }
+    el.innerHTML = '<svg width="100%" height="100%" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" aria-hidden="true">' +
+      zero + '<polyline fill="none" stroke="' + color + '" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" points="' + coords + '"/></svg>';
+  }
+
   function apply(d) {
     if (!d || !d.ok) { setStatus('offline'); return; }
     setKpi('net_pnl', d.net_pnl_fmt, d.net_pnl_up ? 'ws-up' : 'ws-down');
@@ -220,6 +243,8 @@
       if (d.total_pnl_fmt) { tk.hidden = false; setKpi('total_pnl', d.total_pnl_fmt, d.total_pnl_up ? 'ws-up' : 'ws-down'); }
       else { tk.hidden = true; }
     }
+
+    renderSpark(d.equity_curve && d.equity_curve.points);
 
     var tp = document.getElementById('ws-topbar-pnl');
     if (tp && d.net_pnl_fmt) {
