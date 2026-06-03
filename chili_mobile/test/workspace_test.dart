@@ -1,8 +1,10 @@
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:chili_mobile/src/companion/shared_chat_history.dart';
 import 'package:chili_mobile/src/screen/focus_controller.dart';
+import 'package:chili_mobile/src/workspace/os_window.dart';
 import 'package:chili_mobile/src/workspace/workspace_controller.dart';
 import 'package:chili_mobile/src/workspace/workspace_palette.dart';
 import 'package:chili_mobile/src/workspace/workspace_shell.dart';
@@ -55,6 +57,16 @@ void main() {
       c.close('chat');
       expect(c.isOpen('chat'), isFalse);
       expect(c.windows, isEmpty);
+    });
+
+    test('closeOthers keeps only the named window', () {
+      final WorkspaceController c = WorkspaceController();
+      c.open('a', title: 'A', icon: Icons.abc);
+      c.open('b', title: 'B', icon: Icons.abc);
+      c.open('c', title: 'C', icon: Icons.abc);
+      c.closeOthers('b');
+      expect(c.windows.length, 1);
+      expect(c.isOpen('b'), isTrue);
     });
 
     test('move shifts position; resize clamps to the minimum', () {
@@ -291,6 +303,40 @@ void main() {
       ));
       await tester.pump();
       expect(find.byType(InkWell), findsNothing);
+    });
+  });
+
+  group('OsWindow context menu', () {
+    testWidgets('right-click title bar → menu; "Close others" keeps only this window',
+        (WidgetTester tester) async {
+      final WorkspaceController c = WorkspaceController();
+      c.open('chat', title: 'Chat', icon: Icons.chat);
+      c.open('brain', title: 'Brain', icon: Icons.psychology);
+      final WsWindow chat = c.byId('chat')!;
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: Stack(
+            children: <Widget>[
+              OsWindow(
+                data: chat,
+                controller: c,
+                focused: true,
+                desktopSize: const Size(1000, 800),
+                child: const SizedBox.expand(),
+              ),
+            ],
+          ),
+        ),
+      ));
+      await tester.pump();
+      await tester.tap(find.text('Chat'), buttons: kSecondaryButton); // right-click title bar
+      await tester.pumpAndSettle();
+      expect(find.text('Close others'), findsOneWidget);
+      expect(find.text('Tile left'), findsOneWidget);
+      await tester.tap(find.text('Close others'));
+      await tester.pumpAndSettle();
+      expect(c.windows.length, 1);
+      expect(c.isOpen('chat'), isTrue);
     });
   });
 }
