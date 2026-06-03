@@ -19,8 +19,9 @@
 # local checkout from auto-resurrecting live code after an operator stops it;
 # set CHILI_BIND_MOUNTED_SERVICE_RESTART_POLICY=unless-stopped to opt back in.
 #
-# Persistent data: Postgres, Ollama, and /app/data bind to D:/CHILI-Docker/{postgres,ollama,chili-data} so large state
-# lives off C:. Change these paths if your drive letter or folder differs.
+# Persistent data defaults to D:/CHILI-Docker/{postgres,ollama,chili-data} so
+# large state lives off C:. Postgres can be moved to a Docker named volume after
+# a deliberate migration by setting CHILI_POSTGRES_DATA_SOURCE=chili-postgres-data.
 services:
   postgres:
     # Keep in sync with typical dev installs (e.g. local Postgres 16); simplifies pg_dump/restore.
@@ -41,7 +42,7 @@ services:
       POSTGRES_PASSWORD: chili
       POSTGRES_DB: chili
     volumes:
-      - D:/CHILI-Docker/postgres:/var/lib/postgresql/data
+      - ${CHILI_POSTGRES_DATA_SOURCE:-D:/CHILI-Docker/postgres}:/var/lib/postgresql/data
     ports:
       # Host port 5433 avoids clashing with a local PostgreSQL on 5432.
       # From the host: postgresql://chili:chili@localhost:5433/chili
@@ -937,4 +938,7 @@ services:
         max-size: "50m"
         max-file: "3"
 
-# No named volumes: large persistent state is D-backed bind mounts.
+volumes:
+  # Opt-in target for moving Postgres off the Windows bind mount. The default
+  # remains D:/CHILI-Docker/postgres until CHILI_POSTGRES_DATA_SOURCE is set.
+  chili-postgres-data:
