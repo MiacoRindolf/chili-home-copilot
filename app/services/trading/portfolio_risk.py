@@ -30,15 +30,21 @@ OPTION_HEAT_STOP_PCT_MIN = 10.0
 OPTION_HEAT_STOP_PCT_MAX = 80.0
 
 
+def _finite_float_or_none(value: Any) -> float | None:
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return out if math.isfinite(out) else None
+
+
 def _trade_realized_pnl_with_raw_fallback(trade: Any) -> float | None:
     pnl = trade_realized_pnl(trade)
     if pnl is not None:
         return pnl
-    try:
-        raw = getattr(trade, "pnl", None)
-        return float(raw) if raw is not None else None
-    except (TypeError, ValueError):
-        return None
+    return _finite_float_or_none(getattr(trade, "pnl", None))
 
 
 def _sum_trade_realized_pnl(trades: list[Any]) -> float:

@@ -7,6 +7,7 @@ import pytest
 from app.services.trading.portfolio_risk import (
     RiskLimits,
     _sum_trade_realized_pnl,
+    _trade_realized_pnl_with_raw_fallback,
     compute_trade_risk_pct,
     get_risk_limits,
     size_position,
@@ -88,6 +89,29 @@ def test_sum_trade_realized_pnl_includes_partial_option_leg():
     raw_fallback = SimpleNamespace(pnl=-3.0)
 
     assert _sum_trade_realized_pnl([partial_option, raw_fallback]) == pytest.approx(7.0)
+
+
+def test_raw_realized_pnl_fallback_preserves_zero_and_negative_values():
+    assert _trade_realized_pnl_with_raw_fallback(SimpleNamespace(pnl=0.0)) == 0.0
+    assert _trade_realized_pnl_with_raw_fallback(SimpleNamespace(pnl=-3.25)) == -3.25
+
+
+@pytest.mark.parametrize("bad_pnl", [True, False, "NaN", "Infinity", "-Infinity"])
+def test_raw_realized_pnl_fallback_rejects_boolean_and_nonfinite_values(bad_pnl):
+    assert _trade_realized_pnl_with_raw_fallback(SimpleNamespace(pnl=bad_pnl)) is None
+
+
+def test_sum_trade_realized_pnl_ignores_invalid_raw_fallback_values():
+    rows = [
+        SimpleNamespace(pnl=True),
+        SimpleNamespace(pnl="NaN"),
+        SimpleNamespace(pnl="Infinity"),
+        SimpleNamespace(pnl="-Infinity"),
+        SimpleNamespace(pnl=-3.25),
+        SimpleNamespace(pnl=0.0),
+    ]
+
+    assert _sum_trade_realized_pnl(rows) == pytest.approx(-3.25)
 
 
 def test_compute_trade_risk_pct_rejects_nonfinite_inputs():
