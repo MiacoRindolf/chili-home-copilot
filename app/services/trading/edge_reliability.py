@@ -871,6 +871,7 @@ def emit_edge_reliability_refresh_requested(
     asset_class: str | None = None,
     window_days: int = DEFAULT_WINDOW_DAYS,
     evidence_fingerprint: str | None = None,
+    payload: dict[str, Any] | None = None,
 ) -> int | None:
     fp = (evidence_fingerprint or "latest").strip()[:40]
     slice_key = _canonical_asset_class(asset_class) or "all"
@@ -884,17 +885,16 @@ def emit_edge_reliability_refresh_requested(
         dedupe_key=dedupe_key,
     ):
         return None
+    body = dict(payload or {})
+    body["scan_pattern_id"] = int(scan_pattern_id)
+    body["asset_class"] = _canonical_asset_class(asset_class)
+    body["window_days"] = int(window_days)
+    body.update({"source": source, "evidence_fingerprint": evidence_fingerprint})
     return enqueue_work_event(
         db,
         event_type=EDGE_RELIABILITY_REFRESH,
         dedupe_key=dedupe_key,
-        payload={
-            "scan_pattern_id": int(scan_pattern_id),
-            "asset_class": _canonical_asset_class(asset_class),
-            "window_days": int(window_days),
-            "source": source,
-            "evidence_fingerprint": evidence_fingerprint,
-        },
+        payload=body,
         lease_scope="edge",
     )
 

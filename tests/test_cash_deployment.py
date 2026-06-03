@@ -1060,6 +1060,26 @@ def test_cost_gate_execution_block_rollup_groups_by_pattern_venue_edge_source(db
     db.add(
         BrainWorkEvent(
             domain="trading",
+            event_type="edge_reliability_refresh",
+            event_kind="work",
+            dedupe_key="cost-gate-rollup-direct-edge-refresh",
+            status="pending",
+            payload={
+                **shared,
+                "ticker": "CGB3",
+                "expected_net_pct": 1.4,
+                "cost_gate_edge_gap_pct": 0.7,
+                "cost_gate_edge_bps": 140,
+                "cost_gate_threshold_bps": 210,
+                "cost_gate_tca_cost_bps": 180,
+                "cost_gate_fee_bps": 0,
+            },
+            created_at=now - timedelta(minutes=3),
+        )
+    )
+    db.add(
+        BrainWorkEvent(
+            domain="trading",
             event_type="exit_variant_refresh",
             event_kind="work",
             dedupe_key="cost-gate-rollup-other-source",
@@ -1074,7 +1094,7 @@ def test_cost_gate_execution_block_rollup_groups_by_pattern_venue_edge_source(db
 
     assert out["total_groups"] == 1
     assert out["returned_groups"] == 1
-    assert out["total_blocked_events_returned"] == 2
+    assert out["total_blocked_events_returned"] == 3
     assert out["venues"] == {"robinhood": 1}
     assert out["edge_sources"] == {
         "entry_execution.entry_edge_expected_net_pct": 1,
@@ -1083,13 +1103,13 @@ def test_cost_gate_execution_block_rollup_groups_by_pattern_venue_edge_source(db
     assert row["scan_pattern_id"] == pat.id
     assert row["asset_class"] == "stock"
     assert row["broker_venue"] == "robinhood"
-    assert row["blocked_count"] == 2
-    assert row["ticker_count"] == 2
-    assert row["tickers"] == ["CGB", "CGB2"]
-    assert row["statuses"] == {"pending": 1, "done": 1}
+    assert row["blocked_count"] == 3
+    assert row["ticker_count"] == 3
+    assert row["tickers"] == ["CGB", "CGB2", "CGB3"]
+    assert row["statuses"] == {"pending": 2, "done": 1}
     assert row["avg_expected_net_pct"] == pytest.approx(1.4)
     assert row["max_expected_net_pct"] == pytest.approx(1.6)
-    assert row["avg_cost_gate_edge_gap_pct"] == pytest.approx(1.0)
+    assert row["avg_cost_gate_edge_gap_pct"] == pytest.approx(0.9)
     assert row["max_cost_gate_threshold_bps"] == pytest.approx(230)
     assert row["max_cost_gate_tca_cost_bps"] == pytest.approx(180)
     assert row["cash_deployment_category"] == "positive_ev_execution_blocked"

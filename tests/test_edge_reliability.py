@@ -1153,6 +1153,7 @@ def test_edge_reliability_work_dedupe_and_dispatch(db):
         source="test",
         window_days=7,
         evidence_fingerprint="same",
+        payload={"cost_gate_edge_bps": 120},
     )
     second = emit_edge_reliability_refresh_requested(
         db,
@@ -1165,6 +1166,11 @@ def test_edge_reliability_work_dedupe_and_dispatch(db):
 
     assert first is not None
     assert second is None
+    work = db.get(BrainWorkEvent, first)
+    assert work is not None
+    assert work.payload["source"] == "test"
+    assert work.payload["window_days"] == 7
+    assert work.payload["cost_gate_edge_bps"] == 120
 
     out = run_brain_work_dispatch_round(
         db,

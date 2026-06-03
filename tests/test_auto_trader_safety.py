@@ -1757,9 +1757,14 @@ def test_exit_geometry_variant_work_queues_positive_ev_wide_stop(monkeypatch):
 
 def test_cost_gate_execution_work_queues_positive_ev_blocked_cost(monkeypatch):
     captured: list[dict] = []
+
+    def _emit_edge_refresh(db, scan_pattern_id, **kwargs):
+        captured.append({"scan_pattern_id": scan_pattern_id, **kwargs})
+        return 88
+
     monkeypatch.setattr(
-        "app.services.trading.edge_reliability.emit_targeted_profitability_work",
-        lambda db, **kwargs: captured.append(kwargs) or 88,
+        "app.services.trading.edge_reliability.emit_edge_reliability_refresh_requested",
+        _emit_edge_refresh,
     )
     db = MagicMock()
     pat = ScanPattern(
@@ -1815,7 +1820,6 @@ def test_cost_gate_execution_work_queues_positive_ev_blocked_cost(monkeypatch):
     assert result["cost_gap_pct"] == pytest.approx(0.9)
     assert len(result["evidence_fingerprint"]) == 64
     work = captured[0]
-    assert work["event_type"] == "exit_variant_refresh"
     assert work["scan_pattern_id"] == pat.id
     assert work["source"] == at_mod.COST_GATE_EXECUTION_SOURCE
     assert work["asset_class"] == "stock"
@@ -1823,7 +1827,7 @@ def test_cost_gate_execution_work_queues_positive_ev_blocked_cost(monkeypatch):
     payload = work["payload"]
     assert payload["cash_deployment_category"] == "positive_ev_execution_blocked"
     assert payload["graduation_blocker"] == at_mod.COST_GATE_EXECUTION_BLOCKER
-    assert payload["recommended_work_event"] == "exit_variant_refresh"
+    assert payload["recommended_work_event"] == "edge_reliability_refresh"
     assert payload["expected_net_pct"] == pytest.approx(1.2)
     assert payload["cost_gate_edge_bps"] == 120
     assert payload["cost_gate_threshold_bps"] == 210
@@ -1836,7 +1840,7 @@ def test_cost_gate_execution_work_queues_positive_ev_blocked_cost(monkeypatch):
 def test_cost_gate_execution_work_requires_pattern_attribution(monkeypatch):
     captured: list[dict] = []
     monkeypatch.setattr(
-        "app.services.trading.edge_reliability.emit_targeted_profitability_work",
+        "app.services.trading.edge_reliability.emit_edge_reliability_refresh_requested",
         lambda db, **kwargs: captured.append(kwargs) or 88,
     )
     alert = BreakoutAlert(

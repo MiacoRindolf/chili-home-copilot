@@ -2960,19 +2960,17 @@ def _queue_cost_gate_execution_work(
         "broker_venue": venue,
         "cash_deployment_category": "positive_ev_execution_blocked",
         "graduation_blocker": COST_GATE_EXECUTION_BLOCKER,
-        "recommended_work_event": "exit_variant_refresh",
+        "recommended_work_event": "edge_reliability_refresh",
         "expected_evidence_value": round(float(expected_net_pct) + cost_gap_pct, 6),
     }
     try:
         from .edge_reliability import (
-            EXIT_VARIANT_REFRESH,
-            emit_targeted_profitability_work,
+            emit_edge_reliability_refresh_requested,
         )
 
-        event_id = emit_targeted_profitability_work(
+        event_id = emit_edge_reliability_refresh_requested(
             db,
-            event_type=EXIT_VARIANT_REFRESH,
-            scan_pattern_id=pattern_id,
+            pattern_id,
             source=COST_GATE_EXECUTION_SOURCE,
             asset_class=asset_class,
             evidence_fingerprint=evidence_fingerprint,

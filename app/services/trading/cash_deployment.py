@@ -862,7 +862,11 @@ def cost_gate_execution_block_rollup(
     events = (
         db.query(BrainWorkEvent)
         .filter(BrainWorkEvent.event_kind == "work")
-        .filter(BrainWorkEvent.event_type == EXIT_VARIANT_REFRESH)
+        .filter(
+            BrainWorkEvent.event_type.in_(
+                (EXIT_VARIANT_REFRESH, EDGE_RELIABILITY_REFRESH)
+            )
+        )
         .filter(BrainWorkEvent.created_at >= cutoff)
         .filter(
             BrainWorkEvent.payload["source"].astext
