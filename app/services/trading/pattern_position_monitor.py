@@ -53,7 +53,7 @@ _last_vitals_composite: dict[int, float] = {}
 # exit_now always sends. Cleared opportunistically when oversized.
 _last_monitor_alert_sig: dict[str, str] = {}
 _MONITOR_ALERT_DEDUP_MAX_KEYS = 500
-_DECISION_SOURCE_MAX_LEN = 64
+_DECISION_SOURCE_MAX_LEN = 20
 _DECISION_SOURCE_ALIASES = {
     "mechanical_critical_exit": "mechanical",
     "dynamic_monitor_no_llm": "dynamic_monitor",
