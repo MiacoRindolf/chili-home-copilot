@@ -30,7 +30,9 @@
     if (!taskbar.children.length) taskbar.classList.remove('show');
   }
 
-  function appsOpen() { return Object.keys(wins).filter(function (a) { return wins[a]; }).length; }
+  // Only windows actually covering the desktop count — hidden (show-desktop) and
+  // minimized windows don't, so the home brightens when nothing is on top of it.
+  function appsOpen() { return Object.keys(wins).filter(function (a) { return wins[a] && wins[a].style.display !== 'none'; }).length; }
   function syncHome() { home && home.classList.toggle('dimmed', appsOpen() > 0); }
   function setHash() {
     var top = order[order.length - 1];
@@ -393,12 +395,25 @@
   document.querySelectorAll('.ws-rb[data-app][data-src]').forEach(function (b) {
     b.addEventListener('click', function (e) { e.preventDefault(); openApp(cfgFromEl(b)); });
   });
-  // Dashboard dock button: close/minimize all to show the desktop home.
-  var dashBtn = document.querySelector('.ws-rb[data-app="dashboard"]');
+  // Dashboard dock button: "show desktop" toggle — first click hides all visible
+  // windows to reveal the desktop home; click again to restore them where they
+  // were (last-focused on top). Minimized windows (taskbar chips) are untouched.
+  var dashBtn = document.querySelector('.ws-rb[data-app="dashboard"]'), deskHidden = null;
   if (dashBtn) dashBtn.addEventListener('click', function (e) {
     e.preventDefault();
-    Object.keys(wins).forEach(function (a) { if (wins[a]) wins[a].style.display = 'none'; });
-    order = []; syncHome(); setHash(); saveLayout();
+    if (deskHidden && deskHidden.length) {
+      deskHidden.forEach(function (a) { if (wins[a]) { wins[a].style.display = 'flex'; if (order.indexOf(a) === -1) order.push(a); } });
+      var top = deskHidden[deskHidden.length - 1]; deskHidden = null;
+      if (top && wins[top]) focusWin(top);
+      syncHome(); saveLayout();
+    } else {
+      var vis = order.filter(function (a) { return wins[a] && wins[a].style.display !== 'none'; });
+      if (!vis.length) { deskHidden = null; return; }
+      deskHidden = vis.slice();
+      vis.forEach(function (a) { wins[a].style.display = 'none'; });
+      order = order.filter(function (a) { return vis.indexOf(a) === -1; });
+      syncHome(); setHash(); saveLayout();
+    }
   });
   // (Command-palette result clicks are handled in workspace.js, which renders
   //  results dynamically and calls window.ChiliOS.open for app results.)
