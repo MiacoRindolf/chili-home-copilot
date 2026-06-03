@@ -159,8 +159,10 @@
     var html = '';
     for (var i = 0; i < list.length; i++) {
       var p = list[i] || {};
-      // Live unrealized P/L per position (present only when a quote was available).
-      var pnl = p.pnl_fmt ? ' <span class="ws-mono ' + (p.pnl_up ? 'ws-up' : 'ws-down') + '">' + esc(p.pnl_fmt) + '</span>' : '';
+      // Live unrealized P/L per position (present only when a quote was available),
+      // with the % move shown muted beside the dollar figure.
+      var pct = (p.pnl_fmt && p.pnl_pct_fmt) ? ' <span class="pct ws-mono">' + esc(p.pnl_pct_fmt) + '</span>' : '';
+      var pnl = p.pnl_fmt ? ' <span class="ws-mono ' + (p.pnl_up ? 'ws-up' : 'ws-down') + '">' + esc(p.pnl_fmt) + '</span>' + pct : '';
       html += '<div class="ws-stat ws-stat-link" data-ticker="' + esc(p.ticker) + '" title="Open ' + esc(p.ticker) + ' on the desk"><span class="k tick ws-mono">' + esc(p.ticker) +
         '</span><span><span class="ws-tag">' + esc(p.side) + '</span>' + pnl + '</span></div>';
     }
@@ -210,6 +212,13 @@
         ur.classList.remove('ws-up', 'ws-down'); ur.classList.add(d.unrealized_total_up ? 'ws-up' : 'ws-down');
         ur.hidden = false;
       } else { ur.hidden = true; }
+    }
+
+    // Combined Total P/L KPI = realized (24h) + unrealized (open). Hidden until known.
+    var tk = document.querySelector('.ws-kpi[data-kpi="total_pnl"]');
+    if (tk) {
+      if (d.total_pnl_fmt) { tk.hidden = false; setKpi('total_pnl', d.total_pnl_fmt, d.total_pnl_up ? 'ws-up' : 'ws-down'); }
+      else { tk.hidden = true; }
     }
 
     var tp = document.getElementById('ws-topbar-pnl');
