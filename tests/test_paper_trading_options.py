@@ -1336,6 +1336,52 @@ def test_check_paper_exits_ignores_wrong_side_long_target(monkeypatch) -> None:
     assert db.commits == 0
 
 
+def test_check_paper_exits_cancels_invalid_auto_entry_geometry(
+    monkeypatch,
+) -> None:
+    from app.services.trading import paper_trading
+
+    trade = PaperTrade(
+        id=806,
+        user_id=None,
+        ticker="NOW",
+        direction="long",
+        entry_price=124.865,
+        stop_price=134.01,
+        target_price=122.72,
+        quantity=1.0,
+        status="open",
+        entry_date=datetime.utcnow(),
+        signal_json={
+            "ticker": "NOW",
+            "direction": "short",
+            "signal_type": "orb_breakdown",
+            "_paper_meta": {},
+        },
+    )
+    db = _FakeDb(rows=[trade])
+
+    monkeypatch.setattr(
+        paper_trading,
+        "_paper_current_mark_price",
+        lambda *_args, **_kwargs: pytest.fail("invalid auto-entry geometry needs no quote"),
+    )
+
+    result = paper_trading.check_paper_exits(db)
+
+    assert result["checked"] == 1
+    assert result["closed"] == 0
+    assert trade.status == paper_trading.PAPER_TRADE_STATUS_CANCELLED
+    assert trade.exit_reason == paper_trading.PAPER_AUTO_ENTRY_INVALID_GEOMETRY_REASON
+    assert trade.exit_price is None
+    assert trade.pnl is None
+    assert trade.pnl_pct is None
+    assert trade.signal_json["_paper_invalid_geometry"]["pnl_recorded"] is False
+    assert trade.signal_json["_paper_invalid_geometry"]["signal_direction"] == "short"
+    assert trade.signal_json["_paper_invalid_geometry"]["row_direction"] == "long"
+    assert db.commits == 1
+
+
 def test_shadow_capacity_janitor_counts_serialized_shadow_signal() -> None:
     from app.services.trading import paper_trading
 

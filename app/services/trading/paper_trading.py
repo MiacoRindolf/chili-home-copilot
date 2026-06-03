@@ -56,6 +56,7 @@ PAPER_TRADE_CAPACITY_SCOPE_AUTOTRADER_SHADOW = "autotrader_shadow"
 PAPER_TRADE_STATUS_CANCELLED = "cancelled"
 PAPER_SHADOW_CAPACITY_EVICTED_REASON = "shadow_capacity_evicted"
 PAPER_SHADOW_STALE_NO_QUOTE_REASON = "shadow_stale_no_executable_quote"
+PAPER_AUTO_ENTRY_INVALID_GEOMETRY_REASON = "auto_paper_bad_geometry"
 PAPER_OPTION_EXPIRED_NO_QUOTE_REASON = "option_expired_no_executable_quote"
 PAPER_SHADOW_CAPACITY_EVICTION_MODE = "cancelled_without_pnl"
 PAPER_SHADOW_CAPACITY_EVICTION_META_KEY = "_paper_shadow_eviction"
@@ -73,6 +74,14 @@ PAPER_SHADOW_PRIORITY_PILOT_PROMOTED = 55
 PAPER_SHADOW_PRIORITY_LIVE_READY = 65
 PAPER_SHADOW_PRIORITY_RECERT = 75
 PAPER_SHADOW_PRIORITY_NEAR_MISS_SIGNAL_LANE = 50
+PAPER_AUTO_ENTRY_SIGNAL_TYPES = frozenset(
+    {
+        "momentum_continuation",
+        "orb_breakout",
+        "orb_breakdown",
+        "premarket_gap",
+    }
+)
 PAPER_CONFIDENCE_INPUT_META_KEY = "_confidence_input"
 PAPER_SHADOW_STAGE_PRIORITY = {
     "candidate": PAPER_SHADOW_PRIORITY_CANDIDATE,
@@ -1081,6 +1090,60 @@ def _cancel_paper_option_expired_no_quote(pt: PaperTrade) -> None:
     )
 
 
+def _cancel_paper_auto_entry_invalid_geometry(pt: PaperTrade) -> None:
+    pt.status = PAPER_TRADE_STATUS_CANCELLED
+    pt.exit_date = datetime.utcnow()
+    pt.exit_reason = PAPER_AUTO_ENTRY_INVALID_GEOMETRY_REASON
+    pt.exit_price = None
+    pt.pnl = None
+    pt.pnl_pct = None
+
+    meta = dict(_as_dict(pt.signal_json))
+    invalid_meta = dict(_as_dict(meta.get("_paper_invalid_geometry")))
+    invalid_meta.update(
+        {
+            "reason": PAPER_AUTO_ENTRY_INVALID_GEOMETRY_REASON,
+            "cancelled_at": _utc_iso(pt.exit_date),
+            "pnl_recorded": False,
+            "row_direction": getattr(pt, "direction", None),
+            "signal_direction": _as_dict(pt.signal_json).get("direction"),
+        }
+    )
+    meta["_paper_invalid_geometry"] = invalid_meta
+    pt.signal_json = meta
+
+    logger.info(
+        "[paper] Cancelled invalid auto-entry geometry %s %s; no P&L recorded",
+        pt.direction,
+        pt.ticker,
+    )
+
+
+def _paper_auto_entry_has_invalid_directional_geometry(pt: PaperTrade) -> bool:
+    if _is_autotrader_paper_shadow_row(pt):
+        return False
+    if _is_option_paper_trade(pt):
+        return False
+    sig = _as_dict(pt.signal_json)
+    signal_type = str(sig.get("signal_type") or "").strip().lower()
+    if signal_type not in PAPER_AUTO_ENTRY_SIGNAL_TYPES:
+        return False
+    return (
+        _paper_directional_risk_amount(
+            getattr(pt, "entry_price", None),
+            getattr(pt, "stop_price", None),
+            getattr(pt, "direction", None),
+        )
+        is None
+        or _paper_directional_reward_amount(
+            getattr(pt, "entry_price", None),
+            getattr(pt, "target_price", None),
+            getattr(pt, "direction", None),
+        )
+        is None
+    )
+
+
 def prune_autotrader_paper_shadow_capacity(
     db: Session,
     user_id: int | None,
@@ -1656,6 +1719,10 @@ def check_paper_exits(
             expiry = meta.get("expiry_days", PAPER_TRADE_EXPIRY_DAYS)
 
             is_option_trade = _is_option_paper_trade(pt)
+            if _paper_auto_entry_has_invalid_directional_geometry(pt):
+                _cancel_paper_auto_entry_invalid_geometry(pt)
+                cancelled += 1
+                continue
             quote_purpose = "exit" if is_option_trade else "display"
             price = _paper_current_mark_price(pt, purpose=quote_purpose)
             if price is None:
