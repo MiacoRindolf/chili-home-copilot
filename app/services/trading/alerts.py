@@ -101,6 +101,16 @@ def _positive_finite_float(value: Any) -> float | None:
     return out
 
 
+def _pick_confidence_value(pick: dict[str, Any], *, fallback: Any) -> float | None:
+    """Return first explicit numeric confidence evidence, preserving real zero."""
+    for key in ("brain_confidence", "confidence"):
+        if key in pick:
+            out = _finite_float_or_none(pick.get(key))
+            if out is not None:
+                return out
+    return _finite_float_or_none(fallback)
+
+
 def _validate_long_proposal_levels(
     entry: Any,
     stop: Any,
@@ -457,10 +467,9 @@ def _emit_phase_h_shadow_from_pick(
             if quantity is not None and quantity > 0
             else None
         )
-        confidence = (
-            pick.get("brain_confidence")
-            or pick.get("confidence")
-            or pick.get("combined_score")
+        confidence = _pick_confidence_value(
+            pick,
+            fallback=pick.get("combined_score"),
         )
         is_crypto = bool(pick.get("is_crypto")) or (ticker or "").upper().endswith("-USD")
         emit_shadow_proposal(
@@ -1096,7 +1105,7 @@ def generate_strategy_proposals(
             source="alerts.generate_strategy_proposals",
         )
 
-        confidence = pick.get("brain_confidence") or (combined * 10)
+        confidence = _pick_confidence_value(pick, fallback=combined * 10)
 
         signals = pick.get("signals", [])
         indicators = pick.get("indicators", {})
@@ -1336,7 +1345,7 @@ def create_proposal_from_pick(
         buying_power=buying_power,
         source="alerts.create_proposal_from_pick",
     )
-    confidence = pick.get("brain_confidence") or (combined * 10)
+    confidence = _pick_confidence_value(pick, fallback=combined * 10)
     signals = pick.get("signals", [])
     indicators = pick.get("indicators", {})
 

@@ -21,17 +21,25 @@ class _FakeQuery:
 class _FakeDb:
     def __init__(self, pattern=None):
         self.pattern = pattern
+        self.added = []
         self.commits = 0
         self.rollbacks = 0
 
     def query(self, _model):
         return _FakeQuery(self.pattern)
 
+    def add(self, row):
+        self.added.append(row)
+
     def commit(self):
         self.commits += 1
 
     def rollback(self):
         self.rollbacks += 1
+
+    def refresh(self, row):
+        if getattr(row, "id", None) is None:
+            row.id = len(self.added)
 
 
 def _promoted_pattern(pattern_id: int = 101):
@@ -257,6 +265,35 @@ def test_create_proposal_from_pick_sizing_unavailable_does_not_supersede():
     assert proposal is None
     assert reason == "sizing_unavailable"
     supersede.assert_not_called()
+
+
+def test_create_proposal_from_pick_preserves_zero_brain_confidence():
+    pattern = _promoted_pattern()
+    db = _FakeDb(pattern=pattern)
+    pick = _pick(pattern.id)
+    pick["brain_confidence"] = 0.0
+
+    with patch("app.services.trading.market_data.fetch_quote", return_value={"price": 100.0}), patch(
+        "app.services.trading.alerts._get_buying_power", return_value=10_000.0
+    ), patch(
+        "app.services.trading.alerts._compute_position_size",
+        return_value=(2, 2.0),
+    ), patch(
+        "app.services.trading.alerts._emit_phase_h_shadow_from_pick"
+    ), patch(
+        "app.services.trading.alerts._supersede_proposals"
+    ):
+        proposal, reason = alerts.create_proposal_from_pick(
+            db,
+            user_id=None,
+            ticker="CAPT",
+            pick=pick,
+        )
+
+    assert reason is None
+    assert proposal["confidence"] == 0.0
+    assert db.added[0].confidence == 0.0
+    assert db.commits == 1
 
 
 def test_execute_proposal_blocks_unknown_buying_power_before_risk_or_broker():
