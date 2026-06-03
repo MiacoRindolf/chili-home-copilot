@@ -409,6 +409,16 @@ def _select_pytest_runtime_candidate(
 ) -> PytestRuntimeCandidate:
     if candidates and candidates[0].source == PYTEST_PYTHON_ENV_VAR:
         return candidates[0]
+    supported_isolated = next(
+        (
+            candidate
+            for candidate in candidates
+            if candidate.supported and candidate.isolation_status == "isolated"
+        ),
+        None,
+    )
+    if supported_isolated is not None:
+        return supported_isolated
     supported = next((candidate for candidate in candidates if candidate.supported), None)
     if supported is not None:
         return supported

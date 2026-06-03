@@ -100,6 +100,32 @@ def test_pytest_runtime_contract_prefers_repo_local_supported_python(
     assert contract.isolation_status == "isolated"
 
 
+def test_pytest_runtime_contract_prefers_isolated_supported_runtime(
+    monkeypatch,
+    tmp_path,
+):
+    shared_python = _venv_python(tmp_path, dirname=".pytest_venv")
+    shared_python.parent.mkdir(parents=True)
+    shared_python.write_text("", encoding="utf-8")
+    _write_pyvenv_cfg(tmp_path, dirname=".pytest_venv", include_system=True)
+    isolated_python = _venv_python(tmp_path, dirname=".pytest-venv")
+    isolated_python.parent.mkdir(parents=True)
+    isolated_python.write_text("", encoding="utf-8")
+    _write_pyvenv_cfg(tmp_path, dirname=".pytest-venv", include_system=False)
+
+    monkeypatch.setattr(
+        pytest_adaptive,
+        "pytest_version_for_python",
+        lambda _path: "8.4.2",
+    )
+
+    contract = pytest_adaptive.pytest_runtime_contract(tmp_path)
+
+    assert contract.source == ".pytest-venv"
+    assert contract.python == str(isolated_python.resolve())
+    assert contract.isolation_status == "isolated"
+
+
 def test_pytest_runtime_contract_honors_explicit_python_override(
     monkeypatch,
     tmp_path,
