@@ -103,6 +103,27 @@ class AgentRegistry extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Add a custom agent, or update an existing custom one's editable fields
+  /// (name/kind/description/schedule/config) while preserving its runtime state
+  /// (status/enabled/last-run). Built-in agents are never modified here.
+  void upsertCustom(Agent agent) {
+    final int i = _agents.indexWhere((Agent a) => a.id == agent.id);
+    if (i < 0) {
+      _agents.add(agent.copyWith(builtin: false));
+      notifyListeners();
+      return;
+    }
+    if (_agents[i].builtin) return; // protect the seed
+    _agents[i] = _agents[i].copyWith(
+      name: agent.name,
+      kind: agent.kind,
+      description: agent.description,
+      schedule: agent.schedule,
+      config: agent.config,
+    );
+    notifyListeners();
+  }
+
   /// Remove an agent. Built-in agents are protected.
   void remove(String id) {
     final int i = _agents.indexWhere((Agent a) => a.id == id);
@@ -147,6 +168,24 @@ class AgentRegistry extends ChangeNotifier {
   }
 
   static String _nowIso() => DateTime.now().toIso8601String();
+}
+
+/// Derive a stable kebab-case agent id from a display [name], avoiding any id
+/// already in [existing] by appending -2, -3, … Pure + testable.
+String makeAgentId(String name, Set<String> existing) {
+  String base = name
+      .toLowerCase()
+      .trim()
+      .replaceAll(RegExp(r'[^a-z0-9]+'), '-')
+      .replaceAll(RegExp(r'^-+|-+$'), '');
+  if (base.isEmpty) base = 'agent';
+  String id = base;
+  int n = 2;
+  while (existing.contains(id)) {
+    id = '$base-$n';
+    n++;
+  }
+  return id;
 }
 
 /// The seeded built-in fleet — a curated slice of CHILI's real autonomous
