@@ -22,6 +22,7 @@ _VALID_APPS = {"dashboard", "chat", "trading", "brain", "research", "planner"}
 # The exact top-level key set returned by desktop_live.build_live.
 _DESKTOP_TOP_LEVEL_KEYS = {
     "ok",
+    "net_pnl",
     "net_pnl_fmt",
     "net_pnl_up",
     "win_rate_fmt",
@@ -30,6 +31,11 @@ _DESKTOP_TOP_LEVEL_KEYS = {
     "top_patterns",
     "positions",
     "closes",
+    "unrealized_total_fmt",
+    "unrealized_total_up",
+    "unrealized_priced",
+    "total_pnl_fmt",
+    "equity_curve",
     "kill_switch",
     "breaker",
     "market",
