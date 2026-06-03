@@ -3,12 +3,17 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../agents/agent.dart';
+import '../agents/agent_persistence.dart';
+import '../agents/agent_registry.dart';
+import '../agents/agent_status_service.dart';
 import '../agents/agents_screen.dart';
 import '../brain/brain_dispatch_screen.dart';
 import '../chat/chat_screen.dart';
 import '../companion/shared_chat_history.dart';
 import '../dashboard/dashboard_screen.dart';
 import '../intercom/intercom_screen.dart';
+import '../network/chili_api_client.dart';
 import '../screen/focus_controller.dart';
 import '../settings/settings_screen.dart';
 import 'os_window.dart';
@@ -54,6 +59,16 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
   Timer? _saveTimer; // debounces session saves
   bool _restoring = false; // true while replaying a saved session
 
+  // Shared agent registry (AGT-7): owned at the workspace so the dock badge and
+  // ⌘K palette see the fleet. Polled + persisted once here; the Agents window is
+  // a view over it (livePolling: false).
+  final AgentRegistry _agents = AgentRegistry();
+  late final AgentStatusService _agentStatus =
+      AgentStatusService(ChiliApiClient());
+  Timer? _agentSaveTimer;
+  Timer? _agentPollTimer;
+  static const Duration _agentPollInterval = Duration(seconds: 25);
+
   // Built app bodies are cached so a window keeps its State across rebuilds /
   // focus changes (and while minimized). Dropped when the window closes.
   final Map<String, Widget> _built = <String, Widget>{};
@@ -86,7 +101,7 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
     'agents': _AppDef(
       'Agents',
       Icons.smart_toy,
-      () => const AgentsScreen(),
+      () => AgentsScreen(registry: _agents, livePolling: false),
       size: const Size(940, 620),
     ),
   };
@@ -96,14 +111,64 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
     super.initState();
     _ws.addListener(_scheduleSave);
     _restoreSession();
+    _restoreAgents();
+    _pollAgents();
+    _agentPollTimer = Timer.periodic(_agentPollInterval, (_) => _pollAgents());
   }
 
   @override
   void dispose() {
     _saveTimer?.cancel();
+    _agentSaveTimer?.cancel();
+    _agentPollTimer?.cancel();
     _ws.removeListener(_scheduleSave);
+    _agents.removeListener(_scheduleAgentSave);
     _ws.dispose();
+    _agents.dispose();
     super.dispose();
+  }
+
+  // ── Shared agent lifecycle (AGT-7) ───────────────────────────────────────
+  Future<void> _restoreAgents() async {
+    final List<Map<String, dynamic>> saved = await AgentPersistence.load();
+    if (!mounted) return;
+    _agents.applySaved(saved);
+    _agents.addListener(_scheduleAgentSave);
+  }
+
+  void _scheduleAgentSave() {
+    _agentSaveTimer?.cancel();
+    _agentSaveTimer = Timer(const Duration(milliseconds: 600), () {
+      AgentPersistence.save(_agents.toJson());
+    });
+  }
+
+  Future<void> _pollAgents() async {
+    Map<String, AgentLiveStatus> live;
+    try {
+      live = await _agentStatus.poll();
+    } catch (_) {
+      live = const <String, AgentLiveStatus>{};
+    }
+    if (!mounted) return;
+    live.forEach((String id, AgentLiveStatus s) {
+      _agents.applyLiveStatus(id, s.status,
+          lastRun: s.lastRun, lastResult: s.detail);
+    });
+  }
+
+  /// ⌘K agent command: toggle local start/stop for an agent. Local-only — never
+  /// touches the broker (that path lives in the Agents window behind confirms),
+  /// so it's safe to fire from the palette. Live-backed agents are excluded
+  /// from the palette since their status is backend-owned.
+  void _toggleAgent(String id) {
+    final Agent? a = _agents.byId(id);
+    if (a == null) return;
+    if (a.status == AgentStatus.running) {
+      _agents.stop(id);
+    } else {
+      _agents.start(id);
+    }
   }
 
   void _scheduleSave() {
@@ -171,7 +236,19 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
   List<PaletteItem> get _paletteItems => <PaletteItem>[
         for (final MapEntry<String, _AppDef> e in _apps.entries)
           PaletteItem(e.key, e.value.title, e.value.icon),
+        // ⌘K agent commands (AGT-7): start/stop non-backend agents directly.
+        ...agentPaletteCommands(_agents.agents),
       ];
+
+  void _onPaletteOpen(String id) {
+    setState(() => _paletteOpen = false);
+    final String? agentId = parseAgentToggleId(id);
+    if (agentId != null) {
+      _toggleAgent(agentId);
+    } else {
+      _openApp(id);
+    }
+  }
 
   Widget _bodyFor(String id) {
     return _built.putIfAbsent(id, () => _apps[id]!.build());
@@ -206,10 +283,7 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
               if (_paletteOpen)
                 WorkspacePalette(
                   items: _paletteItems,
-                  onOpen: (String id) {
-                    setState(() => _paletteOpen = false);
-                    _openApp(id);
-                  },
+                  onOpen: _onPaletteOpen,
                   onClose: () => setState(() => _paletteOpen = false),
                 ),
             ],
@@ -345,7 +419,7 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
           const SizedBox(height: 4),
           Expanded(
             child: AnimatedBuilder(
-              animation: _ws,
+              animation: Listenable.merge(<Listenable>[_ws, _agents]),
               builder: (BuildContext context, _) {
                 return ListView(
                   padding: const EdgeInsets.symmetric(vertical: 4),
@@ -374,16 +448,39 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
   Widget _dockButton(BuildContext context, ColorScheme cs, String id, _AppDef def) {
     final bool open = _ws.isOpen(id);
     final bool focused = _ws.focusedId == id;
+    final int badge = id == 'agents' ? _agents.runningCount : 0;
     return _DockIcon(
       icon: def.icon,
-      tooltip: def.title,
+      tooltip: badge > 0 ? '${def.title} · $badge running' : def.title,
       active: open,
       focused: focused,
       cs: cs,
+      badge: badge,
       onTap: () => _openApp(id),
     );
   }
 }
+
+/// Prefix marking a palette entry as an agent start/stop command (AGT-7).
+const String _agentTogglePrefix = 'agent:toggle:';
+
+/// ⌘K command-palette entries that start/stop agents. Built-in agents whose
+/// status is owned by the backend ([liveBackedAgentIds]) are excluded — those
+/// are controlled from the Agents window (behind confirms). Pure + testable.
+List<PaletteItem> agentPaletteCommands(List<Agent> agents) => <PaletteItem>[
+      for (final Agent a in agents)
+        if (!liveBackedAgentIds.contains(a.id))
+          PaletteItem(
+            '$_agentTogglePrefix${a.id}',
+            '${a.status == AgentStatus.running ? 'Stop' : 'Start'} ${a.name}',
+            a.status == AgentStatus.running ? Icons.stop : Icons.play_arrow,
+          ),
+    ];
+
+/// Returns the agent id encoded in an agent-toggle palette id, or null if [id]
+/// is a normal app id.
+String? parseAgentToggleId(String id) =>
+    id.startsWith(_agentTogglePrefix) ? id.substring(_agentTogglePrefix.length) : null;
 
 class _DockIcon extends StatelessWidget {
   final IconData icon;
@@ -391,6 +488,7 @@ class _DockIcon extends StatelessWidget {
   final bool active;
   final bool focused;
   final ColorScheme cs;
+  final int badge;
   final VoidCallback onTap;
 
   const _DockIcon({
@@ -400,6 +498,7 @@ class _DockIcon extends StatelessWidget {
     required this.cs,
     required this.onTap,
     this.focused = false,
+    this.badge = 0,
   });
 
   @override
@@ -411,25 +510,55 @@ class _DockIcon extends StatelessWidget {
         child: InkResponse(
           onTap: onTap,
           radius: 26,
-          child: Container(
-            width: 44,
-            height: 44,
-            decoration: BoxDecoration(
-              color: active
-                  ? Color.alphaBlend(cs.primary.withValues(alpha: 0.16), cs.surface)
-                  : Colors.transparent,
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(
-                color: focused ? cs.primary : Colors.transparent,
-                width: 1.5,
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: <Widget>[
+              Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: active
+                      ? Color.alphaBlend(
+                          cs.primary.withValues(alpha: 0.16), cs.surface)
+                      : Colors.transparent,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: focused ? cs.primary : Colors.transparent,
+                    width: 1.5,
+                  ),
+                ),
+                alignment: Alignment.center,
+                child: Icon(
+                  icon,
+                  size: 22,
+                  color: active ? cs.primary : cs.onSurfaceVariant,
+                ),
               ),
-            ),
-            alignment: Alignment.center,
-            child: Icon(
-              icon,
-              size: 22,
-              color: active ? cs.primary : cs.onSurfaceVariant,
-            ),
+              if (badge > 0)
+                Positioned(
+                  top: -2,
+                  right: -2,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                    constraints: const BoxConstraints(minWidth: 16),
+                    decoration: BoxDecoration(
+                      color: Colors.green,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: cs.surfaceContainerHighest, width: 1.5),
+                    ),
+                    alignment: Alignment.center,
+                    child: Text(
+                      badge > 99 ? '99+' : '$badge',
+                      style: const TextStyle(
+                        fontSize: 9,
+                        height: 1.1,
+                        fontWeight: FontWeight.w800,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
           ),
         ),
       ),

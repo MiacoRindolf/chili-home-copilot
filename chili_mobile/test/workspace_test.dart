@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:chili_mobile/src/agents/agent.dart';
 import 'package:chili_mobile/src/companion/shared_chat_history.dart';
 import 'package:chili_mobile/src/screen/focus_controller.dart';
 import 'package:chili_mobile/src/workspace/os_window.dart';
@@ -393,6 +394,53 @@ void main() {
       TestWidgetsFlutterBinding.ensureInitialized();
       SharedPreferences.setMockInitialValues(<String, Object>{'chili_ws_layout_v1': 'not json'});
       expect(await WorkspacePersistence.load(), isEmpty);
+    });
+  });
+
+  group('⌘K agent commands (AGT-7)', () {
+    const List<Agent> agents = <Agent>[
+      Agent(
+        id: 'local-one',
+        name: 'Local One',
+        kind: AgentKind.brain,
+        description: '',
+        status: AgentStatus.running,
+      ),
+      // live-backed (status owned by backend) → excluded from the palette
+      Agent(
+        id: 'learning-cycle',
+        name: 'Learning Cycle',
+        kind: AgentKind.brain,
+        description: '',
+      ),
+      Agent(
+        id: 'local-two',
+        name: 'Local Two',
+        kind: AgentKind.custom,
+        description: '',
+      ),
+    ];
+
+    test('excludes live-backed agents', () {
+      final List<PaletteItem> cmds = agentPaletteCommands(agents);
+      expect(cmds.length, 2);
+      expect(cmds.any((PaletteItem c) => c.id.contains('learning-cycle')), isFalse);
+    });
+
+    test('label reflects current status', () {
+      final List<PaletteItem> cmds = agentPaletteCommands(agents);
+      final PaletteItem one =
+          cmds.firstWhere((PaletteItem c) => c.id == 'agent:toggle:local-one');
+      final PaletteItem two =
+          cmds.firstWhere((PaletteItem c) => c.id == 'agent:toggle:local-two');
+      expect(one.title, 'Stop Local One'); // running → Stop
+      expect(two.title, 'Start Local Two'); // not running → Start
+    });
+
+    test('parseAgentToggleId round-trips and ignores app ids', () {
+      expect(parseAgentToggleId('agent:toggle:local-one'), 'local-one');
+      expect(parseAgentToggleId('dashboard'), isNull);
+      expect(parseAgentToggleId('agents'), isNull);
     });
   });
 }

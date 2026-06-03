@@ -87,7 +87,9 @@ class _AgentsScreenState extends State<AgentsScreen> {
     }
     _invoker = widget._injectedControl ?? AgentControlService(api!).invoke;
 
-    _restore();
+    // When the registry is injected (e.g. shared by the workspace in AGT-7),
+    // the owner handles persistence + polling; we're just a view.
+    if (widget._injectedRegistry == null) _restore();
     if (widget._livePolling) {
       _poll();
       _pollTimer = Timer.periodic(_pollInterval, (_) => _poll());
