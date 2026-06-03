@@ -661,6 +661,31 @@ def test_live_alpha_evidence_blocks_insufficient_decay_samples():
     assert result.reason == "insufficient_decay_evidence"
 
 
+def test_live_alpha_evidence_preserves_zero_sample_floor():
+    best = {"horizon_s": 60, "sample_count": 1, "mean_return": 0.003}
+    with patch(
+        "app.services.trading.fast_path.settings.load",
+        return_value=_stub_fp_settings(
+            enabled=True, taker_fee_bps=5.0, live_min_samples=0,
+            live_min_net_bps=0.0,
+        ),
+    ), patch(
+        "app.services.trading.fast_path.calibration._fetch_bucket_rows",
+        return_value=[best],
+    ), patch(
+        "app.services.trading.fast_path.calibration._best_sharpe_row",
+        return_value=best,
+    ) as best_row, patch(
+        "app.services.trading.fast_path.decay_miner.score_bucket",
+        return_value="high",
+    ):
+        result = gate_live_alpha_evidence(_alert(), _ctx(spread_bps=0.0, mode="live"))
+
+    assert result.allow is True
+    assert result.detail["sample_count"] == 1
+    best_row.assert_called_once_with([best], min_samples=0)
+
+
 def test_live_alpha_evidence_allows_live_when_bucket_clears_cost():
     best = {"horizon_s": 60, "sample_count": 75, "mean_return": 0.003}
     with patch(

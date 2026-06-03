@@ -66,6 +66,16 @@ def _decay_table_for_execution_mode(exec_mode: str) -> str:
     return decay_table_for_execution_mode(exec_mode)
 
 
+def _int_setting_or_default(settings: Any, name: str, default: int) -> int:
+    value = getattr(settings, name, default)
+    if value is None or value is False:
+        return int(default)
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return int(default)
+
+
 # ── Result + Context types ───────────────────────────────────────────
 
 
@@ -554,7 +564,7 @@ def gate_live_alpha_evidence(alert: dict, ctx: ExecContext) -> GateResult:
     decay_table = _decay_table_for_execution_mode(exec_mode)
     cost_bps = 2.0 * (fee_bps + float(ctx.spread_bps or 0.0))
     min_net_bps = float(getattr(fp_settings, "live_alpha_min_net_bps", 0.0) or 0.0)
-    min_samples = int(getattr(fp_settings, "live_alpha_min_samples", 50) or 50)
+    min_samples = _int_setting_or_default(fp_settings, "live_alpha_min_samples", 50)
     try:
         from .calibration import _best_sharpe_row, _fetch_bucket_rows
         from .decay_miner import score_bucket as _score_bucket
