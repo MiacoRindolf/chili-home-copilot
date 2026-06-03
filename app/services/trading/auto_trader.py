@@ -2507,6 +2507,18 @@ def _snapshot_float(snap: dict[str, Any] | None, key: str) -> float | None:
     return value
 
 
+def _cost_gate_edge_pct_from_snapshot(
+    snap: dict[str, Any] | None,
+) -> tuple[float | None, str]:
+    """Prefer rule-gate expected net edge for venue cost admission."""
+    expected = _snapshot_float(snap, "expected_net_pct")
+    if expected is None:
+        expected = _snapshot_float(snap, "entry_edge_expected_net_pct")
+    if expected is not None:
+        return expected, "entry_edge_expected_net_pct"
+    return _snapshot_float(snap, "projected_profit_pct"), "projected_profit_pct"
+
+
 def _queue_exit_geometry_variant_work(
     db: Session,
     *,
@@ -5401,14 +5413,21 @@ def _execute_broker_buy(
     # (2026-05-09): cost-aware min-edge gate runs BEFORE the broker
     # selector. RH-eligible tickers get fee=0 (no behavior change vs
     # pre-Phase-5; the gate is a no-op). Coinbase-only tickers must
-    # have projected_profit_pct that clears the Tier-1 fee floor
-    # (default 120bps round-trip + 30bps buffer = 150bps min).
+    # have positive expected net edge that clears the Tier-1 fee floor
+    # (default 120bps round-trip + 30bps buffer = 150bps min). If the
+    # rule snapshot lacks expected-net evidence, fall back to the legacy
+    # gross projected-profit field.
     _cost_gate_error: str | None = None
     try:
         from .cost_aware_gate import cost_aware_min_edge_gate as _cost_gate
+        _cost_gate_edge_pct, _cost_gate_edge_source = (
+            _cost_gate_edge_pct_from_snapshot(snap)
+        )
+        snap["cost_gate_edge_pct"] = _cost_gate_edge_pct
+        snap["cost_gate_edge_pct_source"] = _cost_gate_edge_source
         _cost_decision = _cost_gate(
             ticker=alert.ticker,
-            projected_profit_pct=snap.get("projected_profit_pct"),
+            projected_profit_pct=_cost_gate_edge_pct,
             db=db,
         )
     except Exception as exc:

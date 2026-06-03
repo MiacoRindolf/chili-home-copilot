@@ -2685,6 +2685,87 @@ def test_coinbase_cap_uses_passed_price(monkeypatch):
     )
 
 
+def test_broker_buy_cost_gate_uses_expected_net_edge(monkeypatch):
+    from app import config as config_mod
+    from app.services.trading import broker_selector, cost_aware_gate, governance
+    from app.services.trading.venue import factory as venue_factory
+
+    captured: dict[str, object] = {}
+
+    def _fake_cost_gate(**kwargs):
+        captured["projected_profit_pct"] = kwargs.get("projected_profit_pct")
+        return SimpleNamespace(
+            allowed=True,
+            reason="ok",
+            edge_bps=140,
+            threshold_bps=0,
+            fee_bps=0,
+            tca_cost_bps=0,
+            tca_snapshot=None,
+        )
+
+    fake_adapter = MagicMock()
+    fake_adapter.is_enabled.return_value = True
+    fake_adapter.place_market_order.return_value = {"ok": True, "order_id": "cb-ev"}
+
+    monkeypatch.setattr(
+        at_mod,
+        "settings",
+        SimpleNamespace(chili_autotrader_block_live_on_capital_fallback=True),
+    )
+    monkeypatch.setattr(
+        config_mod,
+        "settings",
+        SimpleNamespace(chili_coinbase_autotrader_live=True),
+    )
+    monkeypatch.setattr(governance, "is_kill_switch_active", lambda: False)
+    monkeypatch.setattr(cost_aware_gate, "cost_aware_min_edge_gate", _fake_cost_gate)
+    monkeypatch.setattr(
+        broker_selector,
+        "select_venue",
+        lambda *a, **k: SimpleNamespace(venue="coinbase", reason="test"),
+    )
+    monkeypatch.setattr(at_mod, "_live_venue_health_block_reason", lambda *a, **k: None)
+    monkeypatch.setattr(
+        cost_aware_gate,
+        "per_venue_cap_check",
+        lambda **_k: SimpleNamespace(
+            allowed=True,
+            reason="within_cap",
+            current_positions=0,
+            current_notional_usd=0.0,
+        ),
+    )
+    monkeypatch.setattr(venue_factory, "get_adapter", lambda venue: fake_adapter)
+
+    snap = {
+        "projected_profit_pct": 12.0,
+        "entry_edge_expected_net_pct": 1.4,
+    }
+    res = at_mod._execute_broker_buy(
+        None,
+        uid=1,
+        alert=SimpleNamespace(
+            id=89,
+            ticker="PEPE-USD",
+            entry_price=None,
+            price_at_alert=None,
+        ),
+        qty=10.0,
+        client_order_id="cid-89",
+        snap=snap,
+        llm_snap=None,
+        out={"skipped": 0},
+        px=0.5,
+    )
+
+    assert res is not None and res["ok"] is True
+    assert captured["projected_profit_pct"] == pytest.approx(1.4)
+    assert snap["cost_gate_edge_pct"] == pytest.approx(1.4)
+    assert snap["cost_gate_edge_pct_source"] == "entry_edge_expected_net_pct"
+    assert snap["cost_gate_edge_bps"] == 140
+
+
 def test_broker_reject_suppression_applies_pattern_filter_before_limit(db, monkeypatch):
     monkeypatch.setattr(
         at_mod.settings,
