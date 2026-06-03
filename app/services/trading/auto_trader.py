@@ -3596,11 +3596,7 @@ def _audit(
     except PendingRollbackError:
         logger.warning(
             "[autotrader] audit commit hit pending rollback; %s alert_id=%s ticker=%s reason=%s",
-            (
-                "dropping best-effort nonplacement audit after rollback"
-                if nonplacement
-                else "retrying after rollback"
-            ),
+            "retrying after rollback",
             getattr(alert, "id", None),
             (getattr(alert, "ticker", None) or "").upper() or None,
             reason,
@@ -3617,8 +3613,6 @@ def _audit(
                 _rollback_best_effort_audit_failure(db)
                 return
             raise
-        if nonplacement:
-            return
         if isinstance(rule_snapshot, dict):
             rule_snapshot = dict(rule_snapshot)
         else:
@@ -3626,7 +3620,21 @@ def _audit(
         rule_snapshot["audit_session_recovered"] = True
         rule_snapshot["audit_session_recovery_reason"] = "pending_rollback_retry"
         db.add(_row())
-        db.commit()
+        try:
+            db.commit()
+        except Exception:
+            if not nonplacement:
+                raise
+            logger.warning(
+                "[autotrader] nonplacement audit retry after pending rollback failed; "
+                "dropping best-effort audit alert_id=%s ticker=%s reason=%s",
+                getattr(alert, "id", None),
+                (getattr(alert, "ticker", None) or "").upper() or None,
+                reason,
+                exc_info=True,
+            )
+            _rollback_best_effort_audit_failure(db)
+            return
     except DBAPIError:
         if not nonplacement:
             raise

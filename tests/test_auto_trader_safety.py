@@ -587,7 +587,7 @@ def test_placement_audit_raw_timeout_still_raises() -> None:
     assert db.rollback_count == 0
 
 
-def test_nonplacement_audit_pending_rollback_is_best_effort() -> None:
+def test_nonplacement_audit_pending_rollback_retries_after_recovery() -> None:
     class _Db:
         is_active = True
 
@@ -601,7 +601,8 @@ def test_nonplacement_audit_pending_rollback_is_best_effort() -> None:
 
         def commit(self):
             self.commit_count += 1
-            raise PendingRollbackError("pending rollback from prior audit timeout")
+            if self.commit_count == 1:
+                raise PendingRollbackError("pending rollback from prior audit timeout")
 
         def rollback(self):
             self.rollback_count += 1
@@ -625,8 +626,10 @@ def test_nonplacement_audit_pending_rollback_is_best_effort() -> None:
     )
 
     assert db.rollback_count == 1
-    assert db.commit_count == 1
-    assert len(db.added) == 1
+    assert db.commit_count == 2
+    assert len(db.added) == 2
+    assert db.added[-1].rule_snapshot["audit_session_recovered"] is True
+    assert db.added[-1].rule_snapshot["audit_session_recovery_reason"] == "pending_rollback_retry"
 
 
 def test_placement_audit_pending_rollback_retries_after_recovery() -> None:
