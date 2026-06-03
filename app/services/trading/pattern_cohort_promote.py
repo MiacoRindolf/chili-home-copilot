@@ -19,6 +19,8 @@ A pattern is eligible for broker-blocked observation if:
 - ``pbo`` is non-NULL
 - either ``promotion_gate_passed=True`` OR the pool-relative bootstrap policy
   ranks the pattern as a top CPCV/DSR/PBO near-miss
+- enough recent live exits with mostly reconciler/unknown attribution block
+  cohort staging until exit provenance improves
 - directional outcomes are NOT required; ``shadow_promoted`` is the
   broker-blocked observation stage that collects them
 - ``quality_composite_score`` is optional; scored candidates rank first,
@@ -284,6 +286,14 @@ def select_cohort_candidates(
     max_negative_pct = float(getattr(
         settings_, "chili_cohort_promote_max_realized_avg_pnl_pct_negative", 0.0,
     ))
+    raw_low_confidence_floor = getattr(
+        settings_, "chili_cohort_promote_low_confidence_exit_rate_floor", 0.50,
+    )
+    low_confidence_exit_rate_floor = (
+        _clip(float(raw_low_confidence_floor))
+        if _is_number(raw_low_confidence_floor)
+        else 0.50
+    )
 
     # Do not require directional outcomes here. shadow_promoted is the
     # observation stage that lets a pattern collect those outcomes without
@@ -292,11 +302,46 @@ def select_cohort_candidates(
     # CPCV bootstrap policy can also admit near-misses for shadow-only
     # observation when the stored gate is stale or path-count constrained.
     sql = text(f"""
-        WITH realized_samples AS (
+        WITH eligible_patterns AS (
+            SELECT
+                sp.id,
+                sp.promotion_gate_passed,
+                sp.portfolio_gate_score,
+                sp.quality_composite_score,
+                sp.cpcv_median_sharpe,
+                sp.deflated_sharpe,
+                sp.pbo
+            FROM scan_patterns sp
+            WHERE sp.active IS TRUE
+              AND sp.lifecycle_stage IN ('backtested', 'candidate', 'challenged')
+              AND sp.cpcv_median_sharpe IS NOT NULL
+              AND sp.deflated_sharpe IS NOT NULL
+              AND sp.pbo IS NOT NULL
+        ),
+        live_exit_quality AS (
+            SELECT
+                t.scan_pattern_id,
+                COUNT(*) AS live_realized_exit_count,
+                COUNT(*) FILTER (
+                    WHERE NOT ({clean_live_pattern_ev_exit_filter_sql("t")})
+                ) AS live_low_confidence_exit_count
+            FROM trading_trades t
+            JOIN eligible_patterns ep ON ep.id = t.scan_pattern_id
+            WHERE t.scan_pattern_id IS NOT NULL
+              AND t.scan_pattern_id != -1
+              AND t.status = 'closed'
+              AND t.pnl IS NOT NULL
+              AND t.entry_price > 0
+              AND t.quantity > 0
+              AND t.exit_date > NOW() - make_interval(days => :window_days)
+            GROUP BY t.scan_pattern_id
+        ),
+        realized_samples AS (
             SELECT
                 t.scan_pattern_id,
                 {trade_return_fraction_sql("t")} AS realized_return_frac
             FROM trading_trades t
+            JOIN eligible_patterns ep ON ep.id = t.scan_pattern_id
             WHERE t.scan_pattern_id IS NOT NULL
               AND t.scan_pattern_id != -1
               AND t.status = 'closed'
@@ -322,16 +367,20 @@ def select_cohort_candidates(
             sp.cpcv_median_sharpe,
             sp.deflated_sharpe,
             sp.pbo
-        FROM scan_patterns sp
+        FROM eligible_patterns sp
         LEFT JOIN realized r ON r.scan_pattern_id = sp.id
-        WHERE sp.active IS TRUE
-          AND sp.lifecycle_stage IN ('backtested', 'candidate', 'challenged')
-          AND sp.cpcv_median_sharpe IS NOT NULL
-          AND sp.deflated_sharpe IS NOT NULL
-          AND sp.pbo IS NOT NULL
-          AND (
+        LEFT JOIN live_exit_quality eq ON eq.scan_pattern_id = sp.id
+        WHERE (
               COALESCE(r.n_realized, 0) < :min_n_floor
               OR r.avg_pnl_pct > :max_negative_pct
+          )
+          AND NOT (
+              COALESCE(eq.live_realized_exit_count, 0) >= :min_n_floor
+              AND COALESCE(r.n_realized, 0) < :min_n_floor
+              AND (
+                  COALESCE(eq.live_low_confidence_exit_count, 0)::float
+                  / NULLIF(eq.live_realized_exit_count, 0)
+              ) >= :low_confidence_exit_rate_floor
           )
         """
     )
@@ -341,6 +390,7 @@ def select_cohort_candidates(
             "window_days": window_days,
             "min_n_floor": min_n_floor,
             "max_negative_pct": max_negative_pct,
+            "low_confidence_exit_rate_floor": low_confidence_exit_rate_floor,
         },
     ).mappings().all()]
     bootstrap = _bootstrap_policy(rows, settings_=settings_)

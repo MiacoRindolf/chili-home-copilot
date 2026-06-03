@@ -111,10 +111,17 @@ def test_select_cohort_candidates_counts_only_computable_realized_returns():
 
     assert candidates == []
     sql = " ".join(db.sql.split())
-    assert "WITH realized_samples AS" in sql
+    assert "WITH eligible_patterns AS" in sql
+    assert "live_exit_quality AS" in sql
+    assert "realized_samples AS" in sql
     assert "FROM trading_trades t" in sql
+    assert "JOIN eligible_patterns ep ON ep.id = t.scan_pattern_id" in sql
     assert "COUNT(realized_return_frac) AS n_realized" in sql
     assert "AVG(realized_return_frac) AS avg_pnl_pct" in sql
+    assert "COUNT(*) AS live_realized_exit_count" in sql
+    assert "live_low_confidence_exit_count" in sql
+    assert "LEFT JOIN live_exit_quality eq ON eq.scan_pattern_id = sp.id" in sql
+    assert "low_confidence_exit_rate_floor" in sql
     assert "WHERE realized_return_frac IS NOT NULL" in sql
     assert "t.filled_quantity" in sql
     assert "t.partial_taken_qty" in sql
@@ -123,10 +130,11 @@ def test_select_cohort_candidates_counts_only_computable_realized_returns():
     assert "NOT LIKE '%sync_gone%'" in sql
     assert "NOT LIKE '%position_gone%'" in sql
     assert "NOT LIKE '%position_absent%'" in sql
-    assert "COUNT(*)" not in sql
+    assert "COUNT(*) AS n_realized" not in sql
     assert db.params["window_days"] == 45
     assert db.params["min_n_floor"] == 5
     assert db.params["max_negative_pct"] == -0.01
+    assert db.params["low_confidence_exit_rate_floor"] == 0.5
 
 
 def test_compute_with_full_evidence_uses_all_5_weights():
@@ -451,7 +459,7 @@ def _seed_directional_outcomes(
     db.commit()
 
 
-def _seed_closed_trades(db, *, pattern_id, n=5, pnl_pct=0.02):
+def _seed_closed_trades(db, *, pattern_id, n=5, pnl_pct=0.02, exit_reason="target"):
     now = datetime.utcnow().replace(microsecond=0)
     for i in range(n):
         entry_price = 100.0
@@ -464,7 +472,7 @@ def _seed_closed_trades(db, *, pattern_id, n=5, pnl_pct=0.02):
                 quantity, entry_date, exit_date, status, pnl, exit_reason
             ) VALUES (
                 :pid, 'TEST', 'long', :entry_price, :exit_price,
-                :quantity, :entry_date, :exit_date, 'closed', :pnl, 'target'
+                :quantity, :entry_date, :exit_date, 'closed', :pnl, :exit_reason
             )
             """
         ), {
@@ -475,6 +483,7 @@ def _seed_closed_trades(db, *, pattern_id, n=5, pnl_pct=0.02):
             "entry_date": now - timedelta(days=i + 2),
             "exit_date": now - timedelta(days=i + 1),
             "pnl": pnl,
+            "exit_reason": exit_reason,
         })
     db.commit()
 
@@ -489,6 +498,7 @@ def _truncate_phase4_state(db):
     ))
     db.execute(text("DELETE FROM scan_patterns"))
     db.commit()
+    db.expire_all()
 
 
 def test_kill_switch_off_state_skips_cycle(db):
@@ -581,6 +591,44 @@ def test_eligibility_trusts_adaptive_cpcv_verdict_without_median_floor(db):
     cand_ids = [p.id for p in candidates]
     assert p_lower_cpcv.id in cand_ids
     assert cand_ids.index(p_higher_cpcv.id) < cand_ids.index(p_lower_cpcv.id)
+
+
+def test_eligibility_blocks_when_live_exits_are_low_confidence(db):
+    _truncate_phase4_state(db)
+    p_uncertain = _make_pattern(
+        db,
+        name="mostly_reconciler_exits",
+        cpcv=2.0,
+        quality_score=0.8,
+        promotion_gate=True,
+    )
+    _seed_closed_trades(
+        db,
+        pattern_id=p_uncertain.id,
+        n=6,
+        pnl_pct=-0.02,
+        exit_reason="broker_reconcile_position_gone",
+    )
+    p_clean = _make_pattern(
+        db,
+        name="clean_positive_exits",
+        cpcv=1.8,
+        quality_score=0.7,
+        promotion_gate=True,
+    )
+    _seed_closed_trades(
+        db,
+        pattern_id=p_clean.id,
+        n=6,
+        pnl_pct=0.02,
+        exit_reason="target",
+    )
+
+    candidates = select_cohort_candidates(db, settings_=_settings_stub())
+    cand_ids = {p.id for p in candidates}
+
+    assert p_clean.id in cand_ids
+    assert p_uncertain.id not in cand_ids
 
 
 def test_eligibility_recovers_stale_challenged_when_adaptive_gate_passes(db):
