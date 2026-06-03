@@ -211,6 +211,7 @@ _TRADING_DOMAIN_TARGETED_TESTS = (
     "test_alerts_options_skip.py",
     "test_alpha_portfolio_gate.py",
     "test_auto_trader_synergy.py",
+    "test_auto_trader_integration.py",
     "test_auto_trader_safety.py",
     "test_auto_trader_monitor.py",
     "test_autotrader_desk_api.py",
