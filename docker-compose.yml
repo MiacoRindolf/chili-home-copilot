@@ -1,4 +1,4 @@
-# CHILI full stack — see docs/DOCKER_FULL_STACK.md
+﻿# CHILI full stack — see docs/DOCKER_FULL_STACK.md
 #
 # Logical groups (single file, no extra infra for neural mesh v1):
 #   1) Foundation: postgres, ollama
@@ -31,10 +31,11 @@ services:
     # scan before startup.
     user: postgres
     # Headroom for chili + brain + brain-worker; process-pool queue uses P * (child pool) connections.
-    # Docker Desktop bind mounts can stall end-of-recovery checkpoints when
-    # syncfs flushes the whole mounted filesystem. Keep the default file-by-file
-    # recovery sync path for the CHILI D: data volume.
-    command: ["postgres", "-c", "max_connections=350", "-c", "recovery_init_sync_method=fsync"]
+    # Docker Desktop host-mounted data directories can make Postgres' default
+    # per-file crash-recovery fsync walk painfully slow when stale test DBs
+    # accumulate. Use syncfs so Linux asks the backing filesystem to flush the
+    # data/WAL filesystems in one pass; see the recovery runbook before changing.
+    command: ["postgres", "-c", "max_connections=350", "-c", "recovery_init_sync_method=syncfs"]
     restart: unless-stopped
     stop_grace_period: 180s
     environment:
@@ -53,7 +54,7 @@ services:
         max-size: "50m"
         max-file: "3"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U chili -d chili -t 1"]
+      test: ["CMD-SHELL", "pg_controldata /var/lib/postgresql/data | grep -q 'Database cluster state:.*in production'"]
       interval: 30s
       timeout: 5s
       retries: 30
