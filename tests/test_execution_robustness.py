@@ -176,6 +176,35 @@ def test_compute_critical_low_fill(monkeypatch):
     assert "review_required" in c["readiness_impact_flags"]
 
 
+def test_compute_honors_zero_fill_thresholds(monkeypatch):
+    _patch_market_settings(monkeypatch, polygon=True)
+    p = SimpleNamespace(origin="web_discovered")
+    stats = dict(
+        n_orders=10,
+        n_filled=4,
+        n_partial=6,
+        n_miss=0,
+        slippages_abs_bps=[1.0],
+        dominant_broker_source="coinbase",
+    )
+
+    c = compute_execution_robustness_contract(
+        pattern=p,
+        stats=stats,
+        settings_mod=_settings_mod(
+            brain_execution_robustness_warn_fill_rate=0.0,
+            brain_execution_robustness_critical_fill_rate=0.0,
+            brain_execution_robustness_warn_slippage_bps=999.0,
+            brain_execution_robustness_critical_slippage_bps=999.0,
+        ),
+    )
+
+    assert c["fill_rate"] == pytest.approx(0.4)
+    assert c["robustness_tier"] == "healthy"
+    assert "low_fill_rate" not in c["robustness_flags"]
+    assert "poor_fill_rate" not in c["readiness_impact_flags"]
+
+
 def test_compute_critical_slippage(monkeypatch):
     _patch_market_settings(monkeypatch, polygon=True)
     p = SimpleNamespace(origin="web_discovered")
@@ -268,6 +297,46 @@ def test_compute_v2_healthy_exchange_audited():
     assert c["provider_truth_mode"] == "exchange_event_audited"
     assert c["source_truth_tier"] == "strong"
     assert execution_robustness_v2_summary(c)["avg_expected_slippage_bps"] == 8.0
+
+
+def test_compute_v2_honors_zero_fill_thresholds() -> None:
+    p = SimpleNamespace(origin="web_discovered")
+    telemetry = dict(
+        n_orders=10,
+        n_filled=4,
+        n_partial=6,
+        n_miss=0,
+        fill_rate=0.4,
+        partial_fill_rate=0.6,
+        miss_rate=0.0,
+        cancel_reject_rate=0.0,
+        avg_expected_slippage_bps=1.0,
+        avg_realized_slippage_bps=1.0,
+        avg_spread_bps=1.0,
+        latency_p50_ms=250.0,
+        latency_p95_ms=900.0,
+        ack_to_fill_p50_ms=400.0,
+        ack_to_fill_p95_ms=1200.0,
+        provider_truth_mode="exchange_event_audited",
+        dominant_broker_source="coinbase",
+        metric_coverage={"spread_ratio": 1.0, "latency_submit_ack_ratio": 1.0},
+    )
+
+    c = compute_execution_robustness_v2_contract(
+        pattern=p,
+        telemetry=telemetry,
+        settings_mod=_settings_mod(
+            brain_execution_robustness_warn_fill_rate=0.0,
+            brain_execution_robustness_critical_fill_rate=0.0,
+            brain_execution_robustness_warn_slippage_bps=999.0,
+            brain_execution_robustness_critical_slippage_bps=999.0,
+        ),
+    )
+
+    assert c["fill_rate"] == pytest.approx(0.4)
+    assert c["robustness_tier"] == "healthy"
+    assert "low_fill_rate" not in c["robustness_flags"]
+    assert "poor_fill_rate" not in c["readiness_impact_flags"]
 
 
 def test_compute_v2_warns_on_elevated_cancel_reject_rate() -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -66,6 +67,17 @@ def _source_truth_tier_from_mode(mode: str) -> str:
     if m in ("manual_recorded", "partial_event_audited"):
         return "weak"
     return "unknown"
+
+
+def _settings_float(settings_mod: Any, name: str, default: float) -> float:
+    raw = getattr(settings_mod, name, default)
+    if isinstance(raw, bool) or raw is None:
+        return float(default)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        return float(default)
+    return value if math.isfinite(value) else float(default)
 
 
 def build_skip_contract(
@@ -203,10 +215,10 @@ def compute_execution_robustness_contract(
     """Legacy v1 contract for compatibility."""
     window_days = int(getattr(settings_mod, "brain_execution_robustness_window_days", 120) or 120)
     min_orders = int(getattr(settings_mod, "brain_execution_robustness_min_orders", 5) or 5)
-    warn_fill = float(getattr(settings_mod, "brain_execution_robustness_warn_fill_rate", 0.65) or 0.65)
-    crit_fill = float(getattr(settings_mod, "brain_execution_robustness_critical_fill_rate", 0.45) or 0.45)
-    warn_slip = float(getattr(settings_mod, "brain_execution_robustness_warn_slippage_bps", 35.0) or 35.0)
-    crit_slip = float(getattr(settings_mod, "brain_execution_robustness_critical_slippage_bps", 65.0) or 65.0)
+    warn_fill = _settings_float(settings_mod, "brain_execution_robustness_warn_fill_rate", 0.65)
+    crit_fill = _settings_float(settings_mod, "brain_execution_robustness_critical_fill_rate", 0.45)
+    warn_slip = _settings_float(settings_mod, "brain_execution_robustness_warn_slippage_bps", 35.0)
+    crit_slip = _settings_float(settings_mod, "brain_execution_robustness_critical_slippage_bps", 65.0)
 
     origin = (getattr(pattern, "origin", "") or "").strip().lower()
     if origin not in REPEATABLE_EDGE_ORIGINS:
@@ -315,10 +327,10 @@ def compute_execution_robustness_v2_contract(
 ) -> dict[str, Any]:
     window_days = int(getattr(settings_mod, "brain_execution_robustness_window_days", 120) or 120)
     min_orders = int(getattr(settings_mod, "brain_execution_robustness_min_orders", 5) or 5)
-    warn_fill = float(getattr(settings_mod, "brain_execution_robustness_warn_fill_rate", 0.65) or 0.65)
-    crit_fill = float(getattr(settings_mod, "brain_execution_robustness_critical_fill_rate", 0.45) or 0.45)
-    warn_slip = float(getattr(settings_mod, "brain_execution_robustness_warn_slippage_bps", 35.0) or 35.0)
-    crit_slip = float(getattr(settings_mod, "brain_execution_robustness_critical_slippage_bps", 65.0) or 65.0)
+    warn_fill = _settings_float(settings_mod, "brain_execution_robustness_warn_fill_rate", 0.65)
+    crit_fill = _settings_float(settings_mod, "brain_execution_robustness_critical_fill_rate", 0.45)
+    warn_slip = _settings_float(settings_mod, "brain_execution_robustness_warn_slippage_bps", 35.0)
+    crit_slip = _settings_float(settings_mod, "brain_execution_robustness_critical_slippage_bps", 65.0)
 
     origin = (getattr(pattern, "origin", "") or "").strip().lower()
     if origin not in REPEATABLE_EDGE_ORIGINS:
