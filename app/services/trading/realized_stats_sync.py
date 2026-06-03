@@ -277,48 +277,62 @@ def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, in
     if not dry_run:
         sess.commit()
 
-    no_trades = sess.execute(text(f"""
-        WITH valid_return_source AS (
-            SELECT
-                t.scan_pattern_id,
-                {trade_return_fraction_sql("t")} AS realized_return_frac
-            FROM trading_trades t
-            WHERE t.scan_pattern_id IS NOT NULL
-              AND t.scan_pattern_id != -1
-              AND t.status = 'closed'
-              AND t.pnl IS NOT NULL
-              AND t.entry_price > 0
-              AND t.quantity > 0
-              AND {clean_live_pattern_ev_exit_filter_sql("t")}
-            UNION ALL
-            SELECT
-                pt.scan_pattern_id,
-                {paper_trade_return_fraction_sql("pt")} AS realized_return_frac
-            FROM trading_paper_trades pt
-            WHERE :include_paper_dynamic
-              AND pt.scan_pattern_id IS NOT NULL
-              AND pt.status = 'closed'
-              AND pt.scan_pattern_id != -1
-              AND pt.pnl IS NOT NULL
-              AND pt.entry_price > 0
-              AND pt.quantity > 0
-              AND {paper_dynamic_pattern_ev_exit_filter_sql("pt")}
-              AND (
-                pt.paper_shadow_of_alert_id IS NOT NULL
-                OR COALESCE(pt.signal_json, '{{}}'::jsonb) @> '{{"auto_trader_v1": true}}'::jsonb
-                OR COALESCE(pt.signal_json, '{{}}'::jsonb) @> '{{"paper_shadow": true}}'::jsonb
-              )
-        ),
-        valid_return_patterns AS (
-            SELECT DISTINCT scan_pattern_id
-            FROM valid_return_source
-            WHERE realized_return_frac IS NOT NULL
+    no_trades = -1
+    try:
+        no_trades = sess.execute(text(f"""
+            WITH valid_return_source AS (
+                SELECT
+                    t.scan_pattern_id,
+                    {trade_return_fraction_sql("t")} AS realized_return_frac
+                FROM trading_trades t
+                WHERE t.scan_pattern_id IS NOT NULL
+                  AND t.scan_pattern_id != -1
+                  AND t.status = 'closed'
+                  AND t.pnl IS NOT NULL
+                  AND t.entry_price > 0
+                  AND t.quantity > 0
+                  AND {clean_live_pattern_ev_exit_filter_sql("t")}
+                UNION ALL
+                SELECT
+                    pt.scan_pattern_id,
+                    {paper_trade_return_fraction_sql("pt")} AS realized_return_frac
+                FROM trading_paper_trades pt
+                WHERE :include_paper_dynamic
+                  AND pt.scan_pattern_id IS NOT NULL
+                  AND pt.status = 'closed'
+                  AND pt.scan_pattern_id != -1
+                  AND pt.pnl IS NOT NULL
+                  AND pt.entry_price > 0
+                  AND pt.quantity > 0
+                  AND {paper_dynamic_pattern_ev_exit_filter_sql("pt")}
+                  AND (
+                    pt.paper_shadow_of_alert_id IS NOT NULL
+                    OR COALESCE(pt.signal_json, '{{}}'::jsonb) @> '{{"auto_trader_v1": true}}'::jsonb
+                    OR COALESCE(pt.signal_json, '{{}}'::jsonb) @> '{{"paper_shadow": true}}'::jsonb
+                  )
+            ),
+            valid_return_patterns AS (
+                SELECT DISTINCT scan_pattern_id
+                FROM valid_return_source
+                WHERE realized_return_frac IS NOT NULL
+            )
+            SELECT count(*)
+            FROM scan_patterns sp
+            LEFT JOIN valid_return_patterns v ON v.scan_pattern_id = sp.id
+            WHERE v.scan_pattern_id IS NULL
+        """), {"include_paper_dynamic": include_paper_dynamic}).scalar() or 0
+    except Exception:
+        try:
+            sess.rollback()
+        except Exception:
+            pass
+        logger.warning(
+            "[realized_sync] no_trades diagnostic unavailable after updated=%s "
+            "skipped=%s; committed raw stats are preserved",
+            updated,
+            skipped,
+            exc_info=True,
         )
-        SELECT count(*)
-        FROM scan_patterns sp
-        LEFT JOIN valid_return_patterns v ON v.scan_pattern_id = sp.id
-        WHERE v.scan_pattern_id IS NULL
-    """), {"include_paper_dynamic": include_paper_dynamic}).scalar() or 0
 
     logger.info(
         "[realized_sync] complete: updated=%s skipped=%s live_trades=%s "

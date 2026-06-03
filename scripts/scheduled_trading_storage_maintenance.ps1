@@ -125,6 +125,8 @@ try {
         "--statement-timeout-ms", "$statementTimeoutMs"
     )
     if ($createIndexes) {
+        $maintenanceArgs += "--target"
+        $maintenanceArgs += "divergence-discovery"
         $maintenanceArgs += "--create-indexes"
     }
 

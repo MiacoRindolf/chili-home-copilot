@@ -116,6 +116,36 @@ class _RowsDb(_FakeDb):
         self.query_obj = _RowsQuery(rows)
 
 
+def _rule_gate_settings(**overrides):
+    values = {
+        "chili_autotrader_rth_only": False,
+        "chili_autotrader_allow_extended_hours": False,
+        "chili_autotrader_crypto_enabled": False,
+        "chili_autotrader_options_enabled": False,
+        "chili_autotrader_confidence_floor": 0.5,
+        "chili_autotrader_min_projected_profit_pct": 0.0,
+        "chili_autotrader_max_symbol_price_usd": 500.0,
+        "chili_autotrader_fractional_equity_enabled": True,
+        "chili_autotrader_max_entry_slippage_pct": 5.0,
+        "chili_autotrader_daily_loss_cap_usd": 500.0,
+        "chili_autotrader_daily_loss_cap_pct": 0.0,
+        "chili_autotrader_max_concurrent": 60,
+        "chili_autotrader_max_concurrent_equity": 20,
+        "chili_autotrader_max_concurrent_crypto": 20,
+        "chili_autotrader_max_concurrent_options": 20,
+        "chili_autotrader_assumed_capital_usd": 100_000.0,
+        "chili_autotrader_broker_equity_cache_enabled": False,
+        "chili_autotrader_broker_equity_cache_ttl_seconds": 300,
+        "chili_autotrader_broker_equity_cache_max_stale_seconds": 900,
+        "chili_autotrader_stock_momentum_context_gate_enabled": True,
+        "chili_autotrader_stock_momentum_context_min_queue_pressure": 1.0,
+        "chili_autotrader_stock_momentum_context_min_gap_pct": 5.0,
+        "chili_autotrader_stock_momentum_context_min_volume_ratio": 2.0,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
 def test_count_autotrader_v1_open_treats_working_as_active():
     db = _FakeDb()
 
@@ -280,6 +310,178 @@ def test_passes_rule_gate_expected_edge_fail(_mock_port, _mock_rth):
     assert snap["entry_edge"]["expected_net_pct"] < 0
     assert snap["entry_edge"]["breakeven_probability"] is not None
     assert snap["entry_edge"]["probability_edge"] < 0
+
+
+def test_passes_rule_gate_stock_momentum_context_blocks_weak_stock_when_batch_full():
+    db = MagicMock()
+    alert = BreakoutAlert(
+        ticker="WEAK",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.7,
+        price_at_alert=10.0,
+        entry_price=10.0,
+        stop_loss=9.5,
+        target_price=12.0,
+        user_id=1,
+        indicator_snapshot={
+            "flat_indicators": {"gap_pct": 0.16, "vol_ratio": 0.54}
+        },
+    )
+    ctx = RuleGateContext(
+        current_price=10.0,
+        autotrader_open_count=0,
+        realized_loss_today_usd=0.0,
+        autotrader_open_count_by_lane={"equity": 0, "crypto": 0, "options": 0},
+        candidate_queue_pressure=1.0,
+    )
+
+    with (
+        patch(
+            "app.services.trading.auto_trader_rules.resolve_pattern_signal_context",
+            side_effect=AssertionError("momentum context should reject first"),
+        ),
+        patch(
+            "app.services.trading.auto_trader_rules.evaluate_entry_edge",
+            side_effect=AssertionError("momentum context should reject first"),
+        ),
+    ):
+        ok, reason, snap = passes_rule_gate(
+            db,
+            alert,
+            settings=_rule_gate_settings(),
+            ctx=ctx,
+            for_new_entry=True,
+        )
+
+    gate = snap["stock_momentum_context_gate"]
+    assert not ok
+    assert reason == "stock_momentum_context_below_floor"
+    assert gate["active"] is True
+    assert gate["candidate_queue_pressure"] == 1.0
+    assert gate["gap_passed"] is False
+    assert gate["volume_ratio_passed"] is False
+
+
+def test_passes_rule_gate_stock_momentum_context_waits_for_candidate_pressure():
+    db = MagicMock()
+    alert = BreakoutAlert(
+        ticker="QUIET",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.7,
+        price_at_alert=10.0,
+        entry_price=10.0,
+        stop_loss=9.0,
+        target_price=12.0,
+        user_id=1,
+        indicator_snapshot={"flat_indicators": {"gap_pct": 0.2, "rel_vol": 0.6}},
+    )
+    ctx = RuleGateContext(
+        current_price=10.0,
+        autotrader_open_count=0,
+        realized_loss_today_usd=0.0,
+        autotrader_open_count_by_lane={"equity": 0, "crypto": 0, "options": 0},
+        candidate_queue_pressure=0.4,
+    )
+
+    with (
+        patch(
+            "app.services.trading.auto_trader_rules.resolve_pattern_signal_context",
+            return_value={},
+        ),
+        patch(
+            "app.services.trading.auto_trader_rules.evaluate_entry_edge",
+            return_value=EntryEdgeDecision(
+                True,
+                "positive_expected_edge",
+                {"expected_net_pct": 1.25},
+            ),
+        ),
+        patch(
+            "app.services.trading.auto_trader_rules.resolve_effective_slippage_pct",
+            return_value=(5.0, "test"),
+        ),
+        patch(
+            "app.services.trading.auto_trader_rules.resolve_brain_risk_context",
+            return_value={"dial_value": 1.0},
+        ),
+        patch(
+            "app.services.trading.auto_trader_rules.resolve_effective_capital",
+            return_value=(100_000.0, "test"),
+        ),
+        patch(
+            "app.services.trading.portfolio_risk.check_new_trade_allowed",
+            return_value=(True, "ok"),
+        ),
+    ):
+        ok, reason, snap = passes_rule_gate(
+            db,
+            alert,
+            settings=_rule_gate_settings(),
+            ctx=ctx,
+            for_new_entry=True,
+        )
+
+    assert ok
+    assert reason == "ok"
+    assert snap["stock_momentum_context_gate"]["active"] is False
+    assert (
+        snap["stock_momentum_context_gate"]["inactive_reason"]
+        == "queue_pressure_below_floor"
+    )
+
+
+def test_passes_rule_gate_stock_momentum_context_does_not_bypass_expected_edge():
+    db = MagicMock()
+    alert = BreakoutAlert(
+        ticker="GAPPER",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.7,
+        price_at_alert=10.0,
+        entry_price=10.0,
+        stop_loss=9.5,
+        target_price=12.0,
+        user_id=1,
+        indicator_snapshot={"flat_indicators": {"gap_pct": 7.0, "rel_vol": 3.2}},
+    )
+    ctx = RuleGateContext(
+        current_price=10.0,
+        autotrader_open_count=0,
+        realized_loss_today_usd=0.0,
+        autotrader_open_count_by_lane={"equity": 0, "crypto": 0, "options": 0},
+        candidate_queue_pressure=1.0,
+    )
+
+    with (
+        patch(
+            "app.services.trading.auto_trader_rules.resolve_pattern_signal_context",
+            return_value={},
+        ),
+        patch(
+            "app.services.trading.auto_trader_rules.evaluate_entry_edge",
+            return_value=EntryEdgeDecision(
+                False,
+                "non_positive_expected_edge",
+                {"expected_net_pct": -0.25},
+            ),
+        ),
+    ):
+        ok, reason, snap = passes_rule_gate(
+            db,
+            alert,
+            settings=_rule_gate_settings(),
+            ctx=ctx,
+            for_new_entry=True,
+        )
+
+    gate = snap["stock_momentum_context_gate"]
+    assert not ok
+    assert reason == "non_positive_expected_edge"
+    assert gate["active"] is True
+    assert gate["gap_passed"] is True
+    assert gate["volume_ratio_passed"] is True
 
 
 def test_passes_rule_gate_skips_legacy_stock_price_cap_when_fractional_equity_enabled():

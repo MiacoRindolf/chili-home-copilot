@@ -69,6 +69,10 @@ AUTOTRADER_STALE_CANDIDATE_SWEEP_MAX_SECONDS = (
     AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES * SECONDS_PER_MINUTE
 )
 AUTOTRADER_CANDIDATE_PRICE_PREFETCH_DEFAULT_ENABLED = True
+AUTOTRADER_STOCK_MOMENTUM_CONTEXT_GATE_DEFAULT_ENABLED = True
+AUTOTRADER_STOCK_MOMENTUM_CONTEXT_MIN_QUEUE_PRESSURE_DEFAULT = 1.0
+AUTOTRADER_STOCK_MOMENTUM_CONTEXT_MIN_GAP_PCT_DEFAULT = 5.0
+AUTOTRADER_STOCK_MOMENTUM_CONTEXT_MIN_VOLUME_RATIO_DEFAULT = 2.0
 CRYPTO_EXIT_MISSING_QTY_BACKOFF_DEFAULT_MINUTES = 5
 CRYPTO_EXIT_MISSING_QTY_BACKOFF_MAX_MINUTES = 60
 CRYPTO_EXIT_MISSING_QTY_BACKOFF_DEFAULT_SECONDS = (
@@ -2973,6 +2977,54 @@ class Settings(BaseSettings):
             "When true, AutoTrader batch-prefetches current quotes for selected "
             "candidates and reuses them inside the rule gate, reducing per-alert "
             "market-data latency without weakening execution gates."
+        ),
+    )
+    chili_autotrader_stock_momentum_context_gate_enabled: bool = Field(
+        default=AUTOTRADER_STOCK_MOMENTUM_CONTEXT_GATE_DEFAULT_ENABLED,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_STOCK_MOMENTUM_CONTEXT_GATE_ENABLED"
+        ),
+        description=(
+            "When true, stock AutoTrader entries must carry gap-up and "
+            "relative-volume evidence once the selected candidate lane is full. "
+            "This is a restrictive quality gate; broker, risk, and expected-edge "
+            "checks still run for candidates that pass it."
+        ),
+    )
+    chili_autotrader_stock_momentum_context_min_queue_pressure: float = Field(
+        default=AUTOTRADER_STOCK_MOMENTUM_CONTEXT_MIN_QUEUE_PRESSURE_DEFAULT,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_STOCK_MOMENTUM_CONTEXT_MIN_QUEUE_PRESSURE"
+        ),
+        description=(
+            "Candidate-lane pressure required before the stock momentum-context "
+            "gate activates. A full selected batch is 1.0."
+        ),
+    )
+    chili_autotrader_stock_momentum_context_min_gap_pct: float = Field(
+        default=AUTOTRADER_STOCK_MOMENTUM_CONTEXT_MIN_GAP_PCT_DEFAULT,
+        ge=0.0,
+        le=100.0,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_STOCK_MOMENTUM_CONTEXT_MIN_GAP_PCT"
+        ),
+        description=(
+            "Minimum stock gap/change percent required by the pressure-activated "
+            "momentum-context gate."
+        ),
+    )
+    chili_autotrader_stock_momentum_context_min_volume_ratio: float = Field(
+        default=AUTOTRADER_STOCK_MOMENTUM_CONTEXT_MIN_VOLUME_RATIO_DEFAULT,
+        ge=0.0,
+        le=1000.0,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_STOCK_MOMENTUM_CONTEXT_MIN_VOLUME_RATIO"
+        ),
+        description=(
+            "Minimum relative-volume or volume-ratio evidence required by the "
+            "pressure-activated stock momentum-context gate."
         ),
     )
     chili_autotrader_stock_session_defer_enabled: bool = Field(
