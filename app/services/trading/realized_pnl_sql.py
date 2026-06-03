@@ -12,6 +12,16 @@ PRICE_DOMAIN_OPTION_PREMIUM_SQL = "'option_premium'"
 PAPER_DYNAMIC_PATTERN_EV_EXCLUDED_EXIT_REASONS = frozenset({
     "shadow_capacity_janitor",
 })
+LIVE_PATTERN_EV_LOW_CONFIDENCE_EXIT_REASONS = frozenset({
+    "sync_duplicate",
+    "sync_duplicate_cross_user",
+})
+LIVE_PATTERN_EV_LOW_CONFIDENCE_EXIT_TOKENS = frozenset({
+    "position_absent",
+    "position_gone",
+    "reconcile",
+    "sync_gone",
+})
 OPTION_ASSET_CLASS_ALIASES_SQL = (
     "('option', 'options', 'option_contract', 'option_contracts', "
     "'options_contract', 'options_contracts', 'contract_option', "
@@ -100,6 +110,25 @@ def paper_dynamic_pattern_ev_exit_filter_sql(alias: str | None = None) -> str:
         for reason in sorted(PAPER_DYNAMIC_PATTERN_EV_EXCLUDED_EXIT_REASONS)
     )
     return f"LOWER(COALESCE({exit_reason}, '')) NOT IN ({excluded})"
+
+
+def clean_live_pattern_ev_exit_filter_sql(alias: str | None = None) -> str:
+    """Keep live pattern EV evidence to exits with attributable thesis labels."""
+    exit_reason = _col(alias, "exit_reason")
+    reason = f"LOWER(BTRIM(COALESCE({exit_reason}, '')))"
+    exact_excluded = ", ".join(
+        f"'{reason}'"
+        for reason in sorted(LIVE_PATTERN_EV_LOW_CONFIDENCE_EXIT_REASONS)
+    )
+    token_excluded = " AND ".join(
+        f"{reason} NOT LIKE '%{token}%'"
+        for token in sorted(LIVE_PATTERN_EV_LOW_CONFIDENCE_EXIT_TOKENS)
+    )
+    return (
+        f"{reason} <> '' "
+        f"AND {reason} NOT IN ({exact_excluded}) "
+        f"AND {token_excluded}"
+    )
 
 
 def _realized_return_fraction_sql(

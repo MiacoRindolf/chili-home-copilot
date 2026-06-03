@@ -716,6 +716,48 @@ def test_candidate_floor_preserves_valid_zero_as_nonpositive_ev():
     assert "negative_realized_floor" in reasons
 
 
+def test_candidate_floor_blocks_when_live_exit_evidence_is_low_confidence():
+    row = {
+        "promotion_gate_passed": True,
+        "cpcv_median_sharpe": 2.0,
+        "deflated_sharpe": 1.0,
+        "pbo": 0.0,
+        "realized_n_trades": 1,
+        "realized_avg_pnl_pct": 0.02,
+        "live_realized_exit_count": 6,
+        "live_low_confidence_exit_count": 5,
+    }
+
+    reasons = _candidate_floor_blocks(
+        row,
+        AlphaPortfolioConfig(min_realized_trades=5),
+    )
+
+    assert "low_confidence_realized_exit_floor" in reasons
+    assert "negative_realized_floor" not in reasons
+
+
+def test_candidate_floor_allows_enough_clean_live_exit_evidence():
+    row = {
+        "promotion_gate_passed": True,
+        "cpcv_median_sharpe": 2.0,
+        "deflated_sharpe": 1.0,
+        "pbo": 0.0,
+        "realized_n_trades": 5,
+        "realized_avg_pnl_pct": 0.02,
+        "live_realized_exit_count": 8,
+        "live_low_confidence_exit_count": 4,
+    }
+
+    reasons = _candidate_floor_blocks(
+        row,
+        AlphaPortfolioConfig(min_realized_trades=5),
+    )
+
+    assert "low_confidence_realized_exit_floor" not in reasons
+    assert "negative_realized_floor" not in reasons
+
+
 def test_load_pattern_rows_counts_only_computable_realized_return_samples():
     db = _SqlCaptureDb()
 
@@ -723,12 +765,23 @@ def test_load_pattern_rows_counts_only_computable_realized_return_samples():
 
     assert rows == []
     sql = db.sql
-    assert "WITH realized_samples AS" in sql
+    assert "WITH live_exit_quality AS" in sql
+    assert "realized_samples AS" in sql
     assert "FROM trading_trades t" in sql
     assert "COUNT(realized_return_frac) AS n_trades" in sql
     assert "AVG(realized_return_frac) AS avg_pnl_pct" in sql
     assert "WHERE realized_return_frac IS NOT NULL" in sql
-    assert "COUNT(*)" not in sql
+    assert "live_realized_exit_count" in sql
+    assert "live_low_confidence_exit_count" in sql
+    assert "live_low_confidence_exit_rate" in sql
+    assert "LEFT JOIN live_exit_quality eq ON eq.scan_pattern_id = sp.id" in sql
+    assert "LOWER(BTRIM(COALESCE(t.exit_reason, ''))) <> ''" in sql
+    assert "NOT LIKE '%reconcile%'" in sql
+    assert "NOT LIKE '%sync_gone%'" in sql
+    assert "NOT LIKE '%position_gone%'" in sql
+    assert "NOT LIKE '%position_absent%'" in sql
+    assert "COUNT(*) AS live_realized_exit_count" in sql
+    assert "COUNT(*) AS n_trades" not in sql
     assert "t.filled_quantity" in sql
     assert "t.partial_taken_qty" in sql
     assert db.params == {"pattern_id": 123, "window_days": 45}
