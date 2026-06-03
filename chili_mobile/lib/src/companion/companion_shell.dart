@@ -115,10 +115,15 @@ class _CompanionShellState extends State<CompanionShell> {
 
   Future<void> _switchToFullApp() async {
     _wakeWordListener.stop();
+    // Restore a normal, framed, resizable, on-the-desktop window. The avatar
+    // mode makes the window frameless + always-on-top (see _switchToAvatar);
+    // every one of those must be explicitly undone here or the full app opens
+    // as an undraggable, always-on-top blocker.
     await windowManager.setAlwaysOnTop(false);
     await windowManager.setTitleBarStyle(TitleBarStyle.normal);
-    await windowManager.setMinimumSize(const Size(800, 600));
-    await windowManager.setSize(const Size(1000, 700));
+    await windowManager.setResizable(true);
+    await windowManager.setMinimumSize(const Size(900, 640));
+    await windowManager.setSize(const Size(1280, 860));
     await windowManager.center();
     if (mounted) setState(() => _mode = CompanionMode.fullApp);
   }
