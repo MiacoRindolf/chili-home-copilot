@@ -53,6 +53,28 @@ _last_vitals_composite: dict[int, float] = {}
 # exit_now always sends. Cleared opportunistically when oversized.
 _last_monitor_alert_sig: dict[str, str] = {}
 _MONITOR_ALERT_DEDUP_MAX_KEYS = 500
+_DECISION_SOURCE_MAX_LEN = 64
+_DECISION_SOURCE_ALIASES = {
+    "mechanical_critical_exit": "mechanical",
+    "dynamic_monitor_no_llm": "dynamic_monitor",
+}
+
+
+def _persistable_decision_source(source: Any) -> str | None:
+    """Return a PatternMonitorDecision.decision_source value that fits storage."""
+    if source is None:
+        return None
+    value = str(source).strip()
+    if not value:
+        return None
+    value = _DECISION_SOURCE_ALIASES.get(value, value)
+    if len(value) <= _DECISION_SOURCE_MAX_LEN:
+        return value
+    if value.startswith("mechanical"):
+        return "mechanical"
+    if value.startswith("dynamic_monitor"):
+        return "dynamic_monitor"
+    return value[:_DECISION_SOURCE_MAX_LEN]
 
 
 def _positive_float_or_none(value: Any) -> float | None:
@@ -1235,7 +1257,7 @@ def _evaluate_single(
             if mech
             else (heuristic_dec.new_target if heuristic_dec else None)
         ),
-        decision_source=decision_source,
+        decision_source=_persistable_decision_source(decision_source),
         price_at_decision=current_price,
     )
     db.add(decision)
