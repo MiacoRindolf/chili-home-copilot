@@ -138,6 +138,29 @@ def test_compute_skips_low_sample():
     assert c["skip_reason"] == "insufficient_trade_sample"
 
 
+def test_compute_honors_zero_min_orders(monkeypatch):
+    _patch_market_settings(monkeypatch, polygon=True)
+    p = SimpleNamespace(origin="web_discovered")
+    stats = dict(
+        n_orders=3,
+        n_filled=3,
+        n_partial=0,
+        n_miss=0,
+        slippages_abs_bps=[1.0],
+        dominant_broker_source="coinbase",
+    )
+
+    c = compute_execution_robustness_contract(
+        pattern=p,
+        stats=stats,
+        settings_mod=_settings_mod(brain_execution_robustness_min_orders=0),
+    )
+
+    assert c["skip_reason"] is None
+    assert c["sample_count_orders"] == 3
+    assert c["robustness_tier"] == "healthy"
+
+
 def test_compute_healthy_polygon_aggregated(monkeypatch):
     _patch_market_settings(monkeypatch, polygon=True)
     p = SimpleNamespace(origin="brain_discovered")
@@ -297,6 +320,40 @@ def test_compute_v2_healthy_exchange_audited():
     assert c["provider_truth_mode"] == "exchange_event_audited"
     assert c["source_truth_tier"] == "strong"
     assert execution_robustness_v2_summary(c)["avg_expected_slippage_bps"] == 8.0
+
+
+def test_compute_v2_honors_zero_min_orders() -> None:
+    p = SimpleNamespace(origin="web_discovered")
+    telemetry = dict(
+        n_orders=3,
+        n_filled=3,
+        n_partial=0,
+        n_miss=0,
+        fill_rate=1.0,
+        partial_fill_rate=0.0,
+        miss_rate=0.0,
+        cancel_reject_rate=0.0,
+        avg_expected_slippage_bps=1.0,
+        avg_realized_slippage_bps=1.0,
+        avg_spread_bps=1.0,
+        latency_p50_ms=250.0,
+        latency_p95_ms=900.0,
+        ack_to_fill_p50_ms=400.0,
+        ack_to_fill_p95_ms=1200.0,
+        provider_truth_mode="exchange_event_audited",
+        dominant_broker_source="coinbase",
+        metric_coverage={"spread_ratio": 1.0, "latency_submit_ack_ratio": 1.0},
+    )
+
+    c = compute_execution_robustness_v2_contract(
+        pattern=p,
+        telemetry=telemetry,
+        settings_mod=_settings_mod(brain_execution_robustness_min_orders=0),
+    )
+
+    assert c["skip_reason"] is None
+    assert c["sample_count_orders"] == 3
+    assert c["robustness_tier"] == "healthy"
 
 
 def test_compute_v2_honors_zero_fill_thresholds() -> None:
@@ -471,4 +528,33 @@ def test_merge_hard_block_when_enabled(monkeypatch):
     db = MagicMock()
     db.query.return_value.filter.return_value.first.return_value = pat
     out = merge_repeatable_edge_robustness_into_readiness({}, db, scan_pattern_id=42)
+    assert out.get("_repeatable_edge_block_live") == "execution_robustness_critical"
+
+
+def test_merge_hard_block_honors_zero_min_orders(monkeypatch):
+    monkeypatch.setattr(
+        er_mod,
+        "settings",
+        SimpleNamespace(
+            brain_execution_robustness_live_not_recommended=True,
+            brain_execution_robustness_flag_weak_truth_live=True,
+            brain_execution_robustness_hard_block_live_enabled=True,
+            brain_execution_robustness_min_orders=0,
+        ),
+    )
+    pat = SimpleNamespace(
+        oos_validation_json={
+            "execution_robustness": {
+                "robustness_tier": "critical",
+                "readiness_impact_flags": [],
+                "skip_reason": None,
+                "sample_count_orders": 1,
+            }
+        }
+    )
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = pat
+
+    out = merge_repeatable_edge_robustness_into_readiness({}, db, scan_pattern_id=42)
+
     assert out.get("_repeatable_edge_block_live") == "execution_robustness_critical"

@@ -80,6 +80,16 @@ def _settings_float(settings_mod: Any, name: str, default: float) -> float:
     return value if math.isfinite(value) else float(default)
 
 
+def _settings_int(settings_mod: Any, name: str, default: int) -> int:
+    raw = getattr(settings_mod, name, default)
+    if isinstance(raw, bool) or raw is None:
+        return int(default)
+    try:
+        return int(raw)
+    except (TypeError, ValueError, OverflowError):
+        return int(default)
+
+
 def build_skip_contract(
     *,
     skip_reason: str,
@@ -214,7 +224,7 @@ def compute_execution_robustness_contract(
 ) -> dict[str, Any]:
     """Legacy v1 contract for compatibility."""
     window_days = int(getattr(settings_mod, "brain_execution_robustness_window_days", 120) or 120)
-    min_orders = int(getattr(settings_mod, "brain_execution_robustness_min_orders", 5) or 5)
+    min_orders = _settings_int(settings_mod, "brain_execution_robustness_min_orders", 5)
     warn_fill = _settings_float(settings_mod, "brain_execution_robustness_warn_fill_rate", 0.65)
     crit_fill = _settings_float(settings_mod, "brain_execution_robustness_critical_fill_rate", 0.45)
     warn_slip = _settings_float(settings_mod, "brain_execution_robustness_warn_slippage_bps", 35.0)
@@ -326,7 +336,7 @@ def compute_execution_robustness_v2_contract(
     settings_mod: Any,
 ) -> dict[str, Any]:
     window_days = int(getattr(settings_mod, "brain_execution_robustness_window_days", 120) or 120)
-    min_orders = int(getattr(settings_mod, "brain_execution_robustness_min_orders", 5) or 5)
+    min_orders = _settings_int(settings_mod, "brain_execution_robustness_min_orders", 5)
     warn_fill = _settings_float(settings_mod, "brain_execution_robustness_warn_fill_rate", 0.65)
     crit_fill = _settings_float(settings_mod, "brain_execution_robustness_critical_fill_rate", 0.45)
     warn_slip = _settings_float(settings_mod, "brain_execution_robustness_warn_slippage_bps", 35.0)
@@ -591,14 +601,14 @@ def merge_repeatable_edge_robustness_into_readiness(
             out["repeatable_edge_live_not_recommended"] = True
             out["repeatable_edge_live_not_recommended_reason"] = "weak_provider_truth"
         hard = bool(getattr(settings, "brain_execution_robustness_hard_block_live_enabled", False))
-        min_o = int(getattr(settings, "brain_execution_robustness_min_orders", 5) or 5)
+        min_o = _settings_int(settings, "brain_execution_robustness_min_orders", 5)
         n_o = int(v1.get("sample_count_orders") or 0)
         if hard and tier == "critical" and n_o >= min_o:
             out["_repeatable_edge_block_live"] = "execution_robustness_critical"
 
     if v2 and not v2.get("skip_reason"):
         tier_v2 = (v2.get("robustness_tier") or "").strip().lower()
-        min_o_v2 = int(getattr(settings, "brain_execution_robustness_min_orders", 5) or 5)
+        min_o_v2 = _settings_int(settings, "brain_execution_robustness_min_orders", 5)
         n_o_v2 = int(v2.get("sample_count_orders") or 0)
         if tier_v2 == "critical" and bool(getattr(settings, "brain_execution_robustness_v2_live_not_recommended", False)):
             out["repeatable_edge_live_not_recommended"] = True
