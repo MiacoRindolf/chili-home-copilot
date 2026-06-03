@@ -834,6 +834,11 @@ def test_provenance_backfill_handler_scopes_low_confidence_exit_debt(db):
     assert payload["cash_deployment_category"] == "needs_exit_provenance"
     assert payload["exit_provenance_blocker"] == "low_confidence_live_exit_rate"
     assert payload["exit_attribution_debt_count"] == 1
+    assert payload["edge_reliability_refresh_after_repair"] == {
+        "queued": False,
+        "event_id": None,
+        "reason": "no_repairs",
+    }
     assert payload["low_confidence_exit_attribution_summary"]["total_groups"] == 1
     assert len(rows) == 1
     row = rows[0]
@@ -852,7 +857,10 @@ def test_provenance_backfill_repairs_only_unambiguous_exit_reasons(db):
     from app.services.trading.brain_work.handlers.profitability import (
         handle_provenance_backfill,
     )
-    from app.services.trading.edge_reliability import PROVENANCE_BACKFILL_DIAGNOSTIC
+    from app.services.trading.edge_reliability import (
+        EDGE_RELIABILITY_REFRESH,
+        PROVENANCE_BACKFILL_DIAGNOSTIC,
+    )
 
     pat = _pattern(db, name="handler repairable noisy exits")
     pending = _closed_live(db, pat, ticker="RPAIR", pnl=3.0, exit_reason=None)
@@ -925,6 +933,7 @@ def test_provenance_backfill_repairs_only_unambiguous_exit_reasons(db):
         .one()
     )
     repair = outcome.payload["exit_provenance_repair_summary"]
+    refresh = outcome.payload["edge_reliability_refresh_after_repair"]
 
     assert pending.exit_reason == "pattern_exit_now"
     assert from_event.exit_reason == "target"
@@ -940,6 +949,20 @@ def test_provenance_backfill_repairs_only_unambiguous_exit_reasons(db):
     skipped = {row["trade_id"]: row["reason"] for row in repair["skipped"]}
     assert skipped[duplicate.id] == "unrepairable_current_exit_reason"
     assert skipped[ambiguous.id] == "ambiguous_or_missing_repair_reason"
+    assert refresh["queued"] is True
+    assert refresh["event_type"] == EDGE_RELIABILITY_REFRESH
+    assert refresh["scan_pattern_id"] == pat.id
+    assert refresh["asset_class"] == "stock"
+    assert refresh["repaired_count"] == 2
+    work = (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_type == EDGE_RELIABILITY_REFRESH)
+        .one()
+    )
+    assert refresh["event_id"] == work.id
+    assert work.payload["scan_pattern_id"] == pat.id
+    assert work.payload["asset_class"] == "stock"
+    assert work.payload["source"] == "provenance_backfill_exit_repair"
 
 
 def test_cash_deployment_work_producer_enqueues_targeted_deduped_work(db, monkeypatch):

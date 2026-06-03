@@ -292,6 +292,55 @@ def _repair_low_confidence_exit_provenance(
     return summary
 
 
+def _queue_exit_repair_edge_refresh(
+    db: "Session",
+    *,
+    scan_pattern_id: int | None,
+    asset_class: Any,
+    window_days: int,
+    evidence_key: str,
+    repair_summary: dict[str, Any],
+) -> dict[str, Any]:
+    repaired_count = _positive_int_payload(repair_summary, "repaired_count")
+    if repaired_count <= 0:
+        return {
+            "queued": False,
+            "event_id": None,
+            "reason": "no_repairs",
+        }
+    if scan_pattern_id is None:
+        return {
+            "queued": False,
+            "event_id": None,
+            "reason": "missing_scan_pattern_id",
+        }
+
+    from app.services.trading.edge_reliability import (
+        EDGE_RELIABILITY_REFRESH,
+        emit_edge_reliability_refresh_requested,
+    )
+
+    fp_basis = str(evidence_key or "latest").strip()[:24] or "latest"
+    event_id = emit_edge_reliability_refresh_requested(
+        db,
+        int(scan_pattern_id),
+        source="provenance_backfill_exit_repair",
+        asset_class=str(asset_class or "") or None,
+        window_days=window_days,
+        evidence_fingerprint=f"exit_repair:{fp_basis}:{repaired_count}",
+    )
+    return {
+        "queued": event_id is not None,
+        "event_id": event_id,
+        "event_type": EDGE_RELIABILITY_REFRESH,
+        "reason": "queued" if event_id is not None else "deduped_or_recently_completed",
+        "scan_pattern_id": int(scan_pattern_id),
+        "asset_class": asset_class,
+        "window_days": int(window_days),
+        "repaired_count": repaired_count,
+    }
+
+
 def _recert_reason_set(raw: Any) -> set[str]:
     if isinstance(raw, str):
         return {part.strip() for part in raw.split(",") if part.strip()}
@@ -1259,6 +1308,14 @@ def handle_provenance_backfill(
         key = str(candidates[0].get("evidence_fingerprint") or "none")
     if not key:
         key = "none"
+    edge_refresh_after_repair = _queue_exit_repair_edge_refresh(
+        db,
+        scan_pattern_id=pid,
+        asset_class=asset_class,
+        window_days=window_days,
+        evidence_key=key,
+        repair_summary=exit_repair_summary,
+    )
     enqueue_outcome_event(
         db,
         event_type=PROVENANCE_BACKFILL_DIAGNOSTIC,
@@ -1276,6 +1333,7 @@ def handle_provenance_backfill(
             "low_confidence_exit_attribution": exit_rows,
             "low_confidence_exit_attribution_summary": exit_summary,
             "exit_provenance_repair_summary": exit_repair_summary,
+            "edge_reliability_refresh_after_repair": edge_refresh_after_repair,
             "repair_applied": bool(exit_repair_summary.get("repaired_count")),
             "research_only": not bool(exit_repair_summary.get("repaired_count")),
             "observed_at": _utc_iso(),
