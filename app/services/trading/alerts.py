@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import time
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -270,6 +271,32 @@ def _extract_pattern_keywords(signals: list[str]) -> list[str]:
     return found[:10]
 
 _PROPOSAL_EXPIRE_HOURS = 24  # operational, not scoring
+_PRICE_MONITOR_INTERVAL_SECS = 5 * 60
+_PRICE_MONITOR_BREAKOUT_NORMAL_BUDGET_FRACTION = 0.15
+_PRICE_MONITOR_BREAKOUT_PRESSURE_BUDGET_FRACTION = 0.05
+
+
+def _price_monitor_scan_pressure() -> dict[str, Any]:
+    try:
+        from .scanner import get_scan_status
+
+        status = get_scan_status()
+    except Exception:
+        status = {}
+    return {
+        "scanner_running": bool(status.get("running")),
+        "scanner_phase": status.get("phase"),
+        "scanner_progress_pct": status.get("progress_pct"),
+    }
+
+
+def _price_monitor_breakout_budget_seconds(pressure: dict[str, Any]) -> float:
+    fraction = (
+        _PRICE_MONITOR_BREAKOUT_PRESSURE_BUDGET_FRACTION
+        if pressure.get("scanner_running")
+        else _PRICE_MONITOR_BREAKOUT_NORMAL_BUDGET_FRACTION
+    )
+    return max(5.0, min(45.0, _PRICE_MONITOR_INTERVAL_SECS * fraction))
 
 
 def _get_brain_weight(key: str) -> float:
@@ -962,6 +989,8 @@ def _supersede_proposals(db: Session, user_id: int | None, ticker: str) -> int:
 def generate_strategy_proposals(
     db: Session,
     user_id: int | None,
+    *,
+    picks: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Generate strategy proposals from high-confidence top picks.
 
@@ -974,7 +1003,8 @@ def generate_strategy_proposals(
     from .scanner import generate_top_picks
     from .market_data import fetch_quote
 
-    picks = generate_top_picks(db, user_id)
+    if picks is None:
+        picks = generate_top_picks(db, user_id)
     created: list[dict[str, Any]] = []
     skips: Counter[str] = Counter()
     picks_total = len(picks)
@@ -1705,8 +1735,14 @@ def run_price_monitor(db: Session, user_id: int | None) -> dict[str, Any]:
     results["breakouts"] = _check_breakout_candidates(db, user_id)
 
     # 3. Check for new high-confidence picks → auto-generate proposals
-    proposals = _check_top_picks_for_proposals(db, user_id)
+    proposals, proposal_meta = _check_top_picks_for_proposals(
+        db,
+        user_id,
+        cached_only=True,
+        return_meta=True,
+    )
     results["proposals_generated"] = len(proposals)
+    results["proposal_generation"] = proposal_meta
     try:
         from .execution_quality import suggest_adaptive_spread
 
@@ -1829,48 +1865,105 @@ def _check_breakout_candidates(db: Session, user_id: int | None) -> int:
     """Check recent scan results with breakout signals."""
     from ...models.trading import ScanResult, AlertHistory
     from .market_data import fetch_quote
+    from sqlalchemy import or_
 
     cutoff = datetime.utcnow() - timedelta(hours=6)
-    recent_scans = (
+    alert_cutoff = datetime.utcnow() - timedelta(hours=4)
+    quality_terms = (
+        "breakout",
+        "gap",
+        "momentum",
+        "volume_surge",
+        "relative volume",
+        "rvol",
+        "vwap",
+    )
+    quality_filter = or_(*[ScanResult.rationale.ilike(f"%{term}%") for term in quality_terms])
+
+    scan_rows = (
         db.query(ScanResult)
         .filter(
             ScanResult.scanned_at >= cutoff,
             ScanResult.score >= _get_brain_weight("alert_breakout_min_score"),
+            ScanResult.signal == "buy",
+            quality_filter,
         )
+        .order_by(ScanResult.score.desc(), ScanResult.scanned_at.desc())
         .all()
     )
+    recent_scans = [
+        {
+            "ticker": scan.ticker,
+            "score": scan.score,
+            "signal": scan.signal,
+            "entry_price": scan.entry_price,
+            "take_profit": scan.take_profit,
+            "rationale": scan.rationale,
+            "indicator_data": scan.indicator_data,
+        }
+        for scan in scan_rows
+    ]
+    recent_alerted: set[str] = set()
+    for row in (
+        db.query(AlertHistory.ticker)
+        .filter(
+            AlertHistory.alert_type == BREAKOUT_TRIGGERED,
+            AlertHistory.created_at >= alert_cutoff,
+        )
+        .all()
+    ):
+        ticker = row[0] if isinstance(row, (tuple, list)) else row
+        if ticker:
+            recent_alerted.add(str(ticker).upper())
+    try:
+        db.rollback()
+    except Exception:
+        logger.debug("[alerts] breakout monitor read-snapshot rollback failed", exc_info=True)
 
     breakouts = 0
+    pressure = _price_monitor_scan_pressure()
+    budget_s = _price_monitor_breakout_budget_seconds(pressure)
+    started = time.monotonic()
+    checked = 0
     for scan in recent_scans:
+        if time.monotonic() - started > budget_s:
+            logger.info(
+                "[alerts] Breakout monitor deferred remaining candidates: "
+                "checked=%s total=%s budget_s=%.1f pressure=%s",
+                checked,
+                len(recent_scans),
+                budget_s,
+                pressure,
+            )
+            break
         try:
             # Only alert if we haven't already alerted for this ticker recently
-            recent_alert = (
-                db.query(AlertHistory)
-                .filter(
-                    AlertHistory.ticker == scan.ticker,
-                    AlertHistory.alert_type == BREAKOUT_TRIGGERED,
-                    AlertHistory.created_at >= datetime.utcnow() - timedelta(hours=4),
-                )
-                .first()
-            )
-            if recent_alert:
+            ticker = str(scan["ticker"]).upper()
+            if ticker in recent_alerted:
                 continue
 
-            quote = fetch_quote(scan.ticker)
+            quote = fetch_quote(ticker)
+            checked += 1
             price = quote.get("price", 0) if quote else 0
             if not price:
                 continue
 
             # Check if price has broken above the resistance (take_profit level as proxy)
-            resistance = scan.take_profit or (scan.entry_price * 1.03 if scan.entry_price else 0)
-            if resistance and price > resistance and scan.signal == "buy":
+            entry_price = scan["entry_price"]
+            resistance = scan["take_profit"] or (entry_price * 1.03 if entry_price else 0)
+            if resistance and price > resistance and scan["signal"] == "buy":
                 _dur = ""
                 _bk_trade_type = "breakout"
                 _bk_duration = None
-                if scan.entry_price and resistance and scan.entry_price > 0:
+                if entry_price and resistance and entry_price > 0:
                     try:
                         from .scanner import _estimate_hold_duration, classify_trade_type
-                        _inds = json.loads(scan.indicator_data) if scan.indicator_data else {}
+                        raw_indicators = scan["indicator_data"]
+                        _inds = (
+                            json.loads(raw_indicators)
+                            if isinstance(raw_indicators, str)
+                            else (raw_indicators or {})
+                        )
                         _atr = _inds.get("atr", 0)
                         _adx = _inds.get("adx")
                         _sigs = _inds.get("signals", [])
@@ -1889,7 +1982,7 @@ def _check_breakout_candidates(db: Session, user_id: int | None) -> int:
                 _l2_note = ""
                 try:
                     from .microstructure import get_features
-                    _mf = get_features(scan.ticker)
+                    _mf = get_features(ticker)
                     if _mf.bid_ask_imbalance is not None and _mf.book_depth_levels >= 3:
                         if _mf.bid_ask_imbalance >= 2.0:
                             _l2_note = f" | L2 confirms: {_mf.bid_ask_imbalance:.1f}:1 bid wall"
@@ -1900,19 +1993,20 @@ def _check_breakout_candidates(db: Session, user_id: int | None) -> int:
                 except Exception:
                     pass
                 msg = format_breakout(
-                    scan.ticker, price, resistance, scan.score,
-                    rationale=scan.rationale or "",
+                    ticker, price, resistance, scan["score"],
+                    rationale=scan["rationale"] or "",
                     dur_label=_dur.strip(" |"),
                     l2_note=_l2_note.strip(" |"),
                 )
                 dispatch_alert(
-                    db, user_id, BREAKOUT_TRIGGERED, scan.ticker, msg,
+                    db, user_id, BREAKOUT_TRIGGERED, ticker, msg,
                     trade_type=_bk_trade_type, duration_estimate=_bk_duration,
                 )
+                recent_alerted.add(ticker)
                 breakouts += 1
 
         except Exception as e:
-            logger.debug(f"[alerts] Error checking breakout {scan.ticker}: {e}")
+            logger.debug(f"[alerts] Error checking breakout {scan.get('ticker')}: {e}")
 
     return breakouts
 
@@ -1920,12 +2014,26 @@ def _check_breakout_candidates(db: Session, user_id: int | None) -> int:
 def _check_top_picks_for_proposals(
     db: Session,
     user_id: int | None,
-) -> list[dict]:
+    *,
+    cached_only: bool = False,
+    return_meta: bool = False,
+) -> list[dict] | tuple[list[dict], dict[str, Any]]:
     """If high-confidence picks exist without proposals, create them."""
     from ...models.trading import StrategyProposal
-    from .scanner import generate_top_picks
+    if cached_only:
+        picks, meta = _fresh_cached_top_picks_for_price_monitor()
+        if not picks:
+            logger.info(
+                "[alerts] Price monitor proposal generation skipped: %s",
+                meta,
+            )
+            return ([], meta) if return_meta else []
+    else:
+        from .scanner import generate_top_picks
 
-    picks = generate_top_picks(db, user_id)
+        picks = generate_top_picks(db, user_id)
+        meta = {"status": "loaded", "source": "generate_top_picks"}
+
     new_proposals = []
 
     for pick in picks:
@@ -1947,11 +2055,46 @@ def _check_top_picks_for_proposals(
             continue
 
         # Delegate to the full proposal generator (one at a time)
-        proposals = generate_strategy_proposals(db, user_id)
+        proposals = generate_strategy_proposals(db, user_id, picks=picks)
         new_proposals.extend(proposals)
+        meta = {
+            **meta,
+            "status": "generated",
+            "created": len(new_proposals),
+        }
         break  # generate_strategy_proposals handles all qualifying picks
 
-    return new_proposals
+    if not new_proposals:
+        meta = {**meta, "status": meta.get("status", "checked"), "created": 0}
+    return (new_proposals, meta) if return_meta else new_proposals
+
+
+def _fresh_cached_top_picks_for_price_monitor() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    from .scanner import _TOP_PICKS_TTL, _top_picks_cache, get_top_picks_freshness
+
+    max_age = float(_TOP_PICKS_TTL)
+    freshness = get_top_picks_freshness(stale_threshold_seconds=max_age)
+    picks = [p for p in (_top_picks_cache.get("picks") or []) if isinstance(p, dict)]
+    age = freshness.get("age_seconds")
+    if not picks:
+        return [], {
+            "status": "skipped",
+            "reason": "top_picks_cache_empty",
+            "freshness": freshness,
+        }
+    if age is None or float(age) > max_age:
+        return [], {
+            "status": "skipped",
+            "reason": "top_picks_cache_stale",
+            "max_age_seconds": max_age,
+            "freshness": freshness,
+        }
+    return list(picks), {
+        "status": "loaded",
+        "source": "fresh_top_picks_cache",
+        "max_age_seconds": max_age,
+        "freshness": freshness,
+    }
 
 
 # ── Helpers ───────────────────────────────────────────────────────────

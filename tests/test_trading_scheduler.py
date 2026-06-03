@@ -334,6 +334,46 @@ def test_paper_trade_check_job_uses_isolated_helpers_and_bounded_partial_session
     assert partial_session.closed is True
 
 
+def test_price_monitor_job_uses_short_sessions_per_phase(monkeypatch):
+    import app.db as app_db
+    from app.services import trading_scheduler
+    from app.services.trading import alerts
+
+    user_listing = _FakeIdSession("user_listing", [1, 2])
+    user_one = _FakeBatchSession("user_one")
+    user_two = _FakeBatchSession("user_two")
+    pattern_listing = _FakeIdSession("pattern_listing", ["AAA", "BBB"])
+    sessions = [user_listing, user_one, user_two, pattern_listing]
+    made_sessions = list(sessions)
+    monitor_calls: list[tuple[str, int | None]] = []
+    triggered: list[tuple[list[str], str]] = []
+
+    def _session_factory():
+        return sessions.pop(0)
+
+    def _run_price_monitor(db, *, user_id):
+        monitor_calls.append((db.name, user_id))
+        return {"alerted_tickers": [f"T{user_id}"]}
+
+    monkeypatch.setattr(app_db, "SessionLocal", _session_factory)
+    monkeypatch.setattr(alerts, "run_price_monitor", _run_price_monitor)
+    monkeypatch.setattr(
+        trading_scheduler,
+        "trigger_pattern_monitor_for_tickers",
+        lambda tickers, reason: triggered.append((tickers, reason)),
+    )
+    monkeypatch.setattr(trading_scheduler, "run_scheduler_job_guarded", lambda _id, fn: fn())
+
+    trading_scheduler._run_price_monitor_job()
+
+    assert sessions == []
+    assert monitor_calls == [("user_one", 1), ("user_two", 2)]
+    assert triggered == [(["AAA", "BBB"], "price_monitor")]
+    for session in made_sessions:
+        assert session.rollbacks == 1
+        assert session.closed is True
+
+
 def test_scheduler_web_role_omits_crypto_breakout(monkeypatch):
     from app.services.trading_scheduler import get_scheduler_info, start_scheduler, stop_scheduler
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -187,6 +188,168 @@ def test_generate_strategy_proposals_rejects_inverted_long_levels_without_supers
     compute_position_size.assert_not_called()
     assert persisted["skips"]["invalid_long_levels"] == 1
     assert db.commits == 1
+
+
+def test_price_monitor_proposals_skip_cold_top_picks_cache(monkeypatch):
+    from app.services.trading import scanner
+
+    monkeypatch.setitem(scanner._top_picks_cache, "picks", [])
+    monkeypatch.setitem(scanner._top_picks_cache, "ts", 0.0)
+    monkeypatch.setattr(
+        scanner,
+        "generate_top_picks",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("price monitor must not cold-refresh top picks")
+        ),
+    )
+
+    proposals, meta = alerts._check_top_picks_for_proposals(
+        _FakeDb(),
+        user_id=None,
+        cached_only=True,
+        return_meta=True,
+    )
+
+    assert proposals == []
+    assert meta["status"] == "skipped"
+    assert meta["reason"] == "top_picks_cache_empty"
+
+
+def test_price_monitor_proposals_use_fresh_cached_picks_without_refresh(monkeypatch):
+    from app.services.trading import scanner
+
+    pattern = _promoted_pattern()
+    pick = _pick(pattern.id)
+    seen = {}
+
+    monkeypatch.setitem(scanner._top_picks_cache, "picks", [pick])
+    monkeypatch.setitem(scanner._top_picks_cache, "ts", time.time())
+    monkeypatch.setattr(
+        scanner,
+        "generate_top_picks",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("price monitor must consume the fresh cache")
+        ),
+    )
+
+    def _generate(_db, _user_id, *, picks=None):
+        seen["picks"] = picks
+        return [{"id": 1, "ticker": "CAPT"}]
+
+    monkeypatch.setattr(alerts, "generate_strategy_proposals", _generate)
+
+    proposals, meta = alerts._check_top_picks_for_proposals(
+        _FakeDb(pattern=None),
+        user_id=None,
+        cached_only=True,
+        return_meta=True,
+    )
+
+    assert proposals == [{"id": 1, "ticker": "CAPT"}]
+    assert seen["picks"] == [pick]
+    assert meta["source"] == "fresh_top_picks_cache"
+    assert meta["status"] == "generated"
+
+
+class _FakeChainQuery:
+    def __init__(self, rows):
+        self.rows = rows
+        self.filters = 0
+        self.ordered = False
+
+    def filter(self, *_args, **_kwargs):
+        self.filters += 1
+        return self
+
+    def order_by(self, *_args, **_kwargs):
+        self.ordered = True
+        return self
+
+    def all(self):
+        return self.rows
+
+
+class _FakeBreakoutDb:
+    def __init__(self, scans, alerted):
+        self.queries = []
+        self.rollbacks = 0
+        self._scan_query = _FakeChainQuery(scans)
+        self._alert_query = _FakeChainQuery(alerted)
+
+    def query(self, entity):
+        self.queries.append(entity)
+        if len(self.queries) == 1:
+            return self._scan_query
+        if len(self.queries) == 2:
+            return self._alert_query
+        raise AssertionError("breakout monitor should prefetch alert history once")
+
+    def rollback(self):
+        self.rollbacks += 1
+
+
+def test_breakout_monitor_prefetches_alert_history_and_honors_budget(monkeypatch):
+    scans = [
+        SimpleNamespace(
+            ticker="OLD",
+            score=9.6,
+            signal="buy",
+            entry_price=100.0,
+            take_profit=105.0,
+            rationale="breakout with high relative volume",
+            indicator_data={},
+        ),
+        SimpleNamespace(
+            ticker="NEW1",
+            score=9.5,
+            signal="buy",
+            entry_price=100.0,
+            take_profit=105.0,
+            rationale="gap momentum",
+            indicator_data={},
+        ),
+        SimpleNamespace(
+            ticker="NEW2",
+            score=9.4,
+            signal="buy",
+            entry_price=100.0,
+            take_profit=105.0,
+            rationale="breakout momentum",
+            indicator_data={},
+        ),
+    ]
+    db = _FakeBreakoutDb(scans, [("OLD",)])
+    quotes = []
+    alerts_sent = []
+    monotonic_values = iter([0.0, 0.1, 0.2, 1.0])
+
+    monkeypatch.setattr(alerts, "_price_monitor_scan_pressure", lambda: {"scanner_running": True})
+    monkeypatch.setattr(alerts, "_price_monitor_breakout_budget_seconds", lambda _pressure: 0.5)
+    monkeypatch.setattr(alerts.time, "monotonic", lambda: next(monotonic_values))
+
+    def _fetch_quote(ticker):
+        quotes.append(ticker)
+        return {"price": 110.0}
+
+    def _dispatch_alert(_db, _user_id, _kind, ticker, _msg, **_kwargs):
+        alerts_sent.append(ticker)
+
+    monkeypatch.setattr("app.services.trading.market_data.fetch_quote", _fetch_quote)
+    monkeypatch.setattr(alerts, "dispatch_alert", _dispatch_alert)
+    monkeypatch.setattr(
+        "app.services.trading.microstructure.get_features",
+        lambda _ticker: SimpleNamespace(
+            bid_ask_imbalance=None,
+            book_depth_levels=0,
+            spread_bps=None,
+        ),
+    )
+
+    assert alerts._check_breakout_candidates(db, user_id=None) == 1
+    assert len(db.queries) == 2
+    assert db.rollbacks == 1
+    assert quotes == ["NEW1"]
+    assert alerts_sent == ["NEW1"]
 
 
 def test_create_proposal_from_pick_refuses_unknown_buying_power():
