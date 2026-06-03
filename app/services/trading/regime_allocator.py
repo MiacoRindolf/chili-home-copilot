@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -69,6 +70,35 @@ def _classify_pattern_style(pattern: ScanPattern) -> str:
     return "default"
 
 
+def _probability_or_none(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(parsed) or parsed < 0.0:
+        return None
+    if parsed > 1.0:
+        if parsed > 100.0:
+            return None
+        parsed = parsed / 100.0
+    return max(0.0, min(1.0, parsed))
+
+
+def _probability_or_default(value: Any, default: float) -> float:
+    parsed = _probability_or_none(value)
+    return default if parsed is None else parsed
+
+
+def _pattern_win_rate_or_default(pattern: Any, default: float) -> float:
+    oos_wr = _probability_or_none(getattr(pattern, "oos_win_rate", None))
+    if oos_wr is not None:
+        return oos_wr
+    legacy_wr = _probability_or_none(getattr(pattern, "win_rate", None))
+    return default if legacy_wr is None else legacy_wr
+
+
 def compute_regime_allocations(
     db: Session,
     capital: float = 100_000.0,
@@ -122,8 +152,8 @@ def compute_regime_allocations(
         else:
             weight = base_weight
 
-        confidence = float(pat.confidence or 0.5)
-        oos_wr = float(pat.oos_win_rate or pat.win_rate or 0.5)
+        confidence = _probability_or_default(getattr(pat, "confidence", None), 0.5)
+        oos_wr = _pattern_win_rate_or_default(pat, 0.5)
 
         score = weight * confidence * oos_wr
         raw_weights.append(score)
