@@ -229,6 +229,11 @@
 .ws-space-edit{border:none;background:transparent;color:var(--ws-text-3);cursor:pointer;font-size:12px;line-height:1;width:20px;height:20px;border-radius:6px;display:grid;place-items:center;flex-shrink:0;opacity:0;transition:all var(--ws-dur,.12s)}
 .ws-space-row:hover .ws-space-edit,.ws-space-row:focus-visible .ws-space-edit{opacity:1}
 .ws-space-edit:hover{background:var(--ws-surface-3);color:var(--ws-text)}
+/* WS-66: default-Space star (filled + accent when set; shown on row hover otherwise) */
+.ws-space-star{border:none;background:transparent;color:var(--ws-text-3);cursor:pointer;font-size:13px;line-height:1;width:20px;height:20px;border-radius:6px;display:grid;place-items:center;flex-shrink:0;opacity:0;transition:all var(--ws-dur,.12s)}
+.ws-space-row:hover .ws-space-star,.ws-space-row:focus-visible .ws-space-star{opacity:.75}
+.ws-space-star:hover{background:var(--ws-surface-3);color:var(--ws-accent)}
+.ws-space-star.on{opacity:1;color:var(--ws-accent)}
 .ws-space-rename{flex:1;min-width:0;background:var(--ws-surface-2);border:1px solid var(--ws-accent);border-radius:7px;padding:3px 7px;color:var(--ws-text);font-size:var(--ws-fs-13);font-weight:var(--ws-fw-semi);font-family:var(--ws-font-ui)}
 .ws-space-rename:focus{outline:none}
 .ws-space-row.dragging{opacity:.45}
