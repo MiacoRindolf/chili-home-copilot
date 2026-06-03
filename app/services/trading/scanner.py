@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -31,6 +32,33 @@ def _safe_indicator_dict(indicator_data: Any) -> dict[str, Any]:
     except (json.JSONDecodeError, TypeError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _probability_or_none(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(parsed) or parsed < 0.0:
+        return None
+    if parsed > 1.0:
+        if parsed > 100.0:
+            return None
+        parsed = parsed / 100.0
+    return max(0.0, min(1.0, parsed))
+
+
+def _probability_or_default(value: Any, default: float) -> float:
+    parsed = _probability_or_none(value)
+    return default if parsed is None else parsed
+
+
+def _pattern_weight_evidence_score(pattern: Any) -> float:
+    win_rate = _probability_or_default(getattr(pattern, "win_rate", None), 0.5)
+    confidence = _probability_or_default(getattr(pattern, "confidence", None), 0.5)
+    return win_rate * confidence
 
 
 import os as _os
@@ -672,9 +700,7 @@ def evolve_strategy_weights(db: Session) -> dict[str, Any]:
             except Exception:
                 logger.debug("[scanner] evolve_strategy_weights: item failed, skipping", exc_info=True)
                 continue
-            wr = sp.win_rate or 50.0
-            conf = sp.confidence or 0.5
-            score = (wr / 100.0) * conf
+            score = _pattern_weight_evidence_score(sp)
             for c in conds:
                 ind = c.get("indicator") or c.get("ref", "")
                 for factor in _indicator_to_factor.get(ind, []):

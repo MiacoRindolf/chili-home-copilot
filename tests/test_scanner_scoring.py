@@ -1,4 +1,7 @@
 """Tests for trading scanner scoring and thesis generation."""
+import json
+from types import SimpleNamespace
+
 import pytest
 
 from app.services.trading.thesis import (
@@ -6,6 +9,82 @@ from app.services.trading.thesis import (
     build_conversational_thesis,
     make_plain_english,
 )
+
+
+class _RowsQuery:
+    def __init__(self, rows):
+        self._rows = list(rows)
+
+    def filter(self, *_args, **_kwargs):
+        return self
+
+    def all(self):
+        return list(self._rows)
+
+
+class _ScannerWeightDb:
+    def __init__(self, patterns):
+        self._patterns = list(patterns)
+
+    def query(self, model):
+        if getattr(model, "__name__", "") == "ScanPattern":
+            return _RowsQuery(self._patterns)
+        return _RowsQuery([])
+
+
+def _scan_pattern(*, win_rate, confidence):
+    return SimpleNamespace(
+        rules_json=json.dumps({"conditions": [{"indicator": "macd"}]}),
+        win_rate=win_rate,
+        confidence=confidence,
+    )
+
+
+def test_pattern_weight_evidence_score_normalizes_probability_scales():
+    from app.services.trading import scanner
+
+    assert scanner._pattern_weight_evidence_score(
+        _scan_pattern(win_rate=0.6, confidence=75.0),
+    ) == pytest.approx(0.45)
+    assert scanner._pattern_weight_evidence_score(
+        _scan_pattern(win_rate=60.0, confidence=0.75),
+    ) == pytest.approx(0.45)
+    assert scanner._pattern_weight_evidence_score(
+        _scan_pattern(win_rate=0.0, confidence=1.0),
+    ) == 0.0
+
+
+def test_evolve_strategy_weights_preserves_zero_pattern_win_rate(monkeypatch):
+    from app.services.trading import scanner
+
+    monkeypatch.setattr(scanner, "_adaptive_weights", dict(scanner._DEFAULT_WEIGHTS))
+    monkeypatch.setattr(
+        "app.services.trading.portfolio.get_insights",
+        lambda *_args, **_kwargs: [
+            SimpleNamespace(
+                pattern_description="unrelated",
+                confidence=0.5,
+                evidence_count=0,
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        "app.services.trading.learning.log_learning_event",
+        lambda *_args, **_kwargs: None,
+    )
+
+    out = scanner.evolve_strategy_weights(
+        _ScannerWeightDb(
+            [
+                _scan_pattern(win_rate=0.0, confidence=1.0),
+                _scan_pattern(win_rate=0.0, confidence=1.0),
+            ],
+        ),
+    )
+
+    default = scanner._DEFAULT_WEIGHTS["macd_positive_bonus"]
+    assert out["current_weights"]["macd_positive_bonus"] < default
+    assert any("pattern_score=0.00" in detail for detail in out["details"])
 
 
 class TestBuildConversationalThesis:
