@@ -117,6 +117,8 @@
 .ws-card:hover{border-color:var(--ws-border-strong)}
 .ws-c8{grid-column:span 8}.ws-c4{grid-column:span 4}.ws-c6{grid-column:span 6}.ws-c12{grid-column:span 12}
 .ws-card-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:var(--ws-s4)}
+/* WS-57: total unrealized P/L chip in the open-positions card header */
+.ws-unrealized{margin-left:auto;margin-right:var(--ws-s3);font-size:var(--ws-fs-12);font-weight:var(--ws-fw-semi);font-variant-numeric:tabular-nums}
 .ws-card-head h3{font-size:var(--ws-fs-14);font-weight:var(--ws-fw-semi);display:flex;align-items:center;gap:8px}
 .ws-card-head h3 .ic{width:26px;height:26px;border-radius:8px;display:grid;place-items:center;background:var(--ws-accent-bg);color:var(--ws-accent)}
 .ws-card-head h3 .ic svg{width:15px;height:15px}

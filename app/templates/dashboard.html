@@ -64,7 +64,7 @@
 
   <!-- Live open positions (auto-refreshing via desktop.js) -->
   <div class="ws-card ws-c4">
-    <div class="ws-card-head"><h3><span class="ic"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8 12h8M12 8v8"/></svg></span>Live open positions</h3><span class="ws-cockpit-status live" title="Auto-refreshing every 20s"><span class="dot"></span>live</span></div>
+    <div class="ws-card-head"><h3><span class="ic"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8 12h8M12 8v8"/></svg></span>Live open positions</h3><span class="ws-unrealized ws-mono" id="ws-unrealized" title="Total unrealized P/L across open positions (live quotes)" hidden></span><span class="ws-cockpit-status live" title="Auto-refreshing every 20s"><span class="dot"></span>live</span></div>
     <div id="ws-live-positions">
     {% if dash.trading.open_positions %}
       {% for p in dash.trading.open_positions[:6] %}
