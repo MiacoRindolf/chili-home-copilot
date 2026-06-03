@@ -618,6 +618,16 @@ def _time_decay_payload_sample(payload: dict[str, Any]) -> dict[str, Any] | None
     pnl = _safe_float(payload.get("pnl"))
     if (realized is None or realized >= 0.0) and (pnl is None or pnl >= 0.0):
         return None
+    static_reward = _safe_float(
+        payload.get("target_reward_fraction")
+        or payload.get("reward_fraction")
+        or payload.get("target_fraction")
+    )
+    static_loss = _safe_float(
+        payload.get("stop_loss_fraction")
+        or payload.get("hard_stop_loss_fraction")
+        or payload.get("loss_fraction")
+    )
     return {
         "paper_trade_id": _safe_int(payload.get("paper_trade_id")),
         "ticker": str(payload.get("ticker") or "").strip().upper(),
@@ -626,8 +636,12 @@ def _time_decay_payload_sample(payload: dict[str, Any]) -> dict[str, Any] | None
         "realized_return_pct": realized,
         "pnl": pnl,
         "exit_reason": str(payload.get("exit_reason") or "exit_engine_time_decay").strip().lower(),
-        "static_reward_fraction": None,
-        "static_stop_loss_fraction": None,
+        "static_reward_fraction": (
+            static_reward if static_reward is not None and static_reward > 0.0 else None
+        ),
+        "static_stop_loss_fraction": (
+            static_loss if static_loss is not None and static_loss > 0.0 else None
+        ),
     }
 
 

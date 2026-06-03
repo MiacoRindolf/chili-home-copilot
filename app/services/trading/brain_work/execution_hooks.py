@@ -142,6 +142,12 @@ def _emit_time_decay_exit_variant_work(
             "quantity": getattr(pt, "quantity", None),
             "timeframe": exit_config.get("timeframe"),
             "max_bars": exit_config.get("max_bars"),
+            "target_reward_fraction": exit_config.get("target_reward_fraction")
+            or exit_config.get("reward_fraction")
+            or exit_config.get("target_fraction"),
+            "stop_loss_fraction": exit_config.get("stop_loss_fraction")
+            or exit_config.get("hard_stop_loss_fraction")
+            or exit_config.get("loss_fraction"),
             "exit_defaults_source": exit_config.get("exit_defaults_source"),
             "dynamic_monitor_reason": _json_dict(
                 paper_meta.get("dynamic_monitor")

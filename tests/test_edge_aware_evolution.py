@@ -275,6 +275,46 @@ def test_edge_learned_exit_variant_starts_shadow_research_only(db):
     assert cfg["total_edge_rejects"] == 5
 
 
+def test_time_decay_edge_miss_report_uses_paper_geometry_without_parent_payoff():
+    pat = SimpleNamespace(
+        id=123,
+        corrected_trade_count=6,
+        corrected_avg_return_pct=0.77,
+        trade_count=6,
+        avg_winner_pct=None,
+        avg_loser_pct=None,
+        payoff_ratio=None,
+        payoff_ratio_n=0,
+    )
+    report = {
+        "source": EDGE_EXIT_CONFIG_SOURCE,
+        "original_source": "paper_time_decay_edge_miss",
+        "paper_time_decay_edge_miss": True,
+        "thin_sample": False,
+        "total_rejects": 3,
+        "min_rejects_for_variant": 2,
+        "avg_expected_net_pct": 3.1,
+        "avg_realized_return_pct": -2.0,
+        "total_pnl": -7.5,
+        "avg_static_reward_fraction": 0.06,
+        "avg_static_stop_loss_fraction": 0.02,
+        "root_cause": "paper_time_decay_exit_thesis_mismatch",
+        "paper_trade_ids": [101, 102, 103],
+    }
+
+    cfg, reason = _learned_exit_config_from_edge_report(pat, report)
+
+    assert reason == "ok"
+    assert cfg is not None
+    assert cfg["basis"] == "paper_time_decay_shadow_exit_geometry"
+    assert cfg["paper_time_decay_edge_miss"] is True
+    assert cfg["target_reward_fraction"] == 0.03
+    assert cfg["stop_loss_fraction"] == 0.015
+    assert cfg["reward_risk"] == 2.0
+    assert cfg["sample_n"] == 3
+    assert cfg["paper_trade_ids"] == [101, 102, 103]
+
+
 def test_edge_learned_exit_child_name_fits_scan_pattern_limit(db):
     parent_name = ("Long edge pattern " * 7).strip()[:110]
     assert len(parent_name) <= 120

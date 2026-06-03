@@ -293,6 +293,8 @@ def test_on_paper_trade_closed_queues_exit_variant_for_time_decay_edge_miss(
                 "exit_config": {
                     "timeframe": "1m",
                     "max_bars": 20,
+                    "target_reward_fraction": 0.06,
+                    "stop_loss_fraction": 0.02,
                     "exit_defaults_source": "backtest_classifier",
                 },
                 "dynamic_monitor": {"last_reason": "no_dynamic_exit"},
@@ -320,6 +322,8 @@ def test_on_paper_trade_closed_queues_exit_variant_for_time_decay_edge_miss(
     assert payload["paper_shadow"] is True
     assert payload["timeframe"] == "1m"
     assert payload["max_bars"] == 20
+    assert payload["target_reward_fraction"] == pytest.approx(0.06)
+    assert payload["stop_loss_fraction"] == pytest.approx(0.02)
 
 
 def test_time_decay_exit_variant_enqueue_failure_does_not_block_digest(

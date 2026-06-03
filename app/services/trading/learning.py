@@ -9165,6 +9165,9 @@ _EDGE_EVOLUTION_DEFAULT_PAYOFF_RESCUE_MAX_AVG_NET_PCT = -0.75
 _EDGE_EVOLUTION_DEFAULT_PAYOFF_RESCUE_MIN_REWARD_RISK = 2.0
 _EDGE_EVOLUTION_DEFAULT_MIN_REWARD_RISK = 1.25
 _EDGE_EVOLUTION_DEFAULT_MIN_DIRECTIONAL_SAMPLE_N = 5.0
+_EDGE_EVOLUTION_DEFAULT_TIME_DECAY_TIGHTEN_FRACTION = 0.75
+_TIME_DECAY_EDGE_MISS_SOURCE = "paper_time_decay_edge_miss"
+_TIME_DECAY_EDGE_MISS_ROOT_CAUSE = "paper_time_decay_exit_thesis_mismatch"
 
 _VARIANT_ORIGINS = frozenset({
     "exit_variant",
@@ -9332,6 +9335,17 @@ def _is_edge_debt_report(report: dict[str, Any] | None) -> bool:
         return int(report.get("total_rejects") or 0) > 0
     except (TypeError, ValueError):
         return False
+
+
+def _is_time_decay_edge_miss_report(report: dict[str, Any] | None) -> bool:
+    if not _is_edge_debt_report(report):
+        return False
+    if bool(report.get("paper_time_decay_edge_miss")):
+        return True
+    return (
+        str(report.get("original_source") or "").strip().lower()
+        == _TIME_DECAY_EDGE_MISS_SOURCE
+    )
 
 
 def _edge_debt_loss_reports(
@@ -9510,6 +9524,108 @@ def _edge_debt_blocks_variant_spawn(parent: "ScanPattern", report: dict[str, Any
     return False, ""
 
 
+def _learned_exit_config_from_time_decay_report(
+    parent: "ScanPattern",
+    report: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str]:
+    """Create tighter exit geometry from paper/shadow time-decay loss evidence.
+
+    Time-decay edge misses already prove the original static thesis did not
+    resolve in the intended hold window. Use their static bracket geometry to
+    spawn a challenged research child even when the parent has no mature
+    winner/loser payoff stats yet.
+    """
+    n = int(report.get("total_rejects") or 0)
+    min_losses = int(
+        report.get("min_rejects_for_variant")
+        or _settings_edge_int(
+            "brain_work_time_decay_exit_variant_min_losses",
+            2,
+            minimum=1,
+        )
+    )
+    if n < min_losses:
+        return None, f"insufficient_time_decay_losses:{n}"
+
+    static_reward = _finite_number(report.get("avg_static_reward_fraction"))
+    static_loss = _finite_number(report.get("avg_static_stop_loss_fraction"))
+    if (
+        static_reward is None
+        or static_loss is None
+        or static_reward <= 0.0
+        or static_loss <= 0.0
+    ):
+        return None, "missing_time_decay_static_geometry"
+
+    avg_realized = _finite_number(report.get("avg_realized_return_pct"))
+    observed_loss = (
+        abs(avg_realized) / 100.0
+        if avg_realized is not None and avg_realized < 0.0
+        else static_loss
+    )
+    if observed_loss <= 0.0:
+        return None, "missing_time_decay_loss_geometry"
+
+    tighten = _settings_edge_float(
+        "chili_edge_evolution_time_decay_tighten_fraction",
+        _EDGE_EVOLUTION_DEFAULT_TIME_DECAY_TIGHTEN_FRACTION,
+    )
+    tighten = max(0.25, min(0.95, float(tighten)))
+    loss = min(static_loss * tighten, max(0.0005, observed_loss * tighten))
+
+    min_rr = _settings_edge_float(
+        "chili_edge_evolution_min_reward_risk",
+        _EDGE_EVOLUTION_DEFAULT_MIN_REWARD_RISK,
+    )
+    reward = min(
+        static_reward * tighten,
+        max(static_reward * 0.5, loss * min_rr),
+    )
+    if reward <= 0.0 or loss <= 0.0:
+        return None, "invalid_time_decay_learned_geometry"
+    reward_risk = reward / loss
+    if reward_risk < min_rr:
+        return None, f"time_decay_reward_risk_below_floor:{reward_risk:.3f}"
+    if reward >= static_reward * 0.98:
+        return None, "time_decay_target_not_tighter_than_static"
+    if loss >= static_loss * 0.98:
+        return None, "time_decay_stop_not_tighter_than_static"
+
+    payload = {
+        "source": EDGE_EXIT_CONFIG_SOURCE,
+        "edge_learned_exit_v1": True,
+        "paper_time_decay_edge_miss": True,
+        "original_source": report.get("original_source") or _TIME_DECAY_EDGE_MISS_SOURCE,
+        "basis": "paper_time_decay_shadow_exit_geometry",
+        "parent_pattern_id": int(parent.id),
+        "target_reward_fraction": round(float(reward), 8),
+        "stop_loss_fraction": round(float(loss), 8),
+        "target_pct": round(float(reward) * 100.0, 4),
+        "stop_pct": round(float(loss) * 100.0, 4),
+        "reward_risk": round(float(reward_risk), 6),
+        "sample_n": int(n),
+        "corrected_trade_count": int(
+            getattr(parent, "corrected_trade_count", None)
+            or getattr(parent, "trade_count", None)
+            or 0
+        ),
+        "payoff_ratio_n": int(getattr(parent, "payoff_ratio_n", None) or 0),
+        "avg_rejected_expected_net_pct": report.get("avg_expected_net_pct"),
+        "avg_time_decay_realized_return_pct": report.get("avg_realized_return_pct"),
+        "total_edge_rejects": int(n),
+        "total_time_decay_losses": int(n),
+        "total_pnl": report.get("total_pnl"),
+        "root_cause": report.get("root_cause") or _TIME_DECAY_EDGE_MISS_ROOT_CAUSE,
+        "avg_static_reward_fraction": round(float(static_reward), 8),
+        "avg_static_stop_loss_fraction": round(float(static_loss), 8),
+        "tighten_fraction": round(float(tighten), 6),
+        "payoff_rescue_used": False,
+        "paper_trade_ids": list(report.get("paper_trade_ids") or [])[:50],
+        "created_at_utc": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+    }
+    return payload, "ok"
+
+
 def _learned_exit_config_from_edge_report(
     parent: "ScanPattern",
     report: dict[str, Any] | None,
@@ -9518,6 +9634,8 @@ def _learned_exit_config_from_edge_report(
         return None, "missing_edge_debt_report"
     if bool(report.get("thin_sample")):
         return None, "insufficient_edge_rejects"
+    if _is_time_decay_edge_miss_report(report):
+        return _learned_exit_config_from_time_decay_report(parent, report)
     avg_net = _finite_number(report.get("avg_expected_net_pct"))
     max_avg_net = _settings_edge_float(
         "chili_edge_evolution_max_avg_net_for_child_pct",
@@ -9604,7 +9722,7 @@ def _learned_exit_config_from_edge_report(
         "root_cause": report.get("root_cause"),
         "avg_net_child_threshold_pct": round(float(max_avg_net), 6),
         "payoff_rescue_used": bool(payoff_rescue_used),
-        "created_at_utc": datetime.utcnow().isoformat(),
+        "created_at_utc": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
     }
     if payoff_rescue_used:
         payload.update(
