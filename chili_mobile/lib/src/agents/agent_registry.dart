@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import 'agent.dart';
+import 'agent_event.dart';
 
 /// In-memory, observable collection of [Agent]s. Pure logic (no I/O) so it is
 /// unit-testable like [WorkspaceController]; the screen wires it to
@@ -9,8 +10,28 @@ import 'agent.dart';
 class AgentRegistry extends ChangeNotifier {
   final List<Agent> _agents;
 
+  /// Per-agent session activity log (AGT-5), oldest → newest, capped. Ephemeral.
+  final Map<String, List<AgentEvent>> _events = <String, List<AgentEvent>>{};
+  static const int _maxEventsPerAgent = 40;
+
   AgentRegistry({List<Agent>? seed})
       : _agents = List<Agent>.from(seed ?? defaultAgents());
+
+  /// Activity log for [id], newest first.
+  List<AgentEvent> events(String id) {
+    final List<AgentEvent>? log = _events[id];
+    if (log == null) return const <AgentEvent>[];
+    return List<AgentEvent>.unmodifiable(log.reversed);
+  }
+
+  void _record(String id, AgentEventKind kind, String message) {
+    final List<AgentEvent> log =
+        _events.putIfAbsent(id, () => <AgentEvent>[]);
+    log.add(AgentEvent(kind: kind, message: message, timestamp: _nowIso()));
+    if (log.length > _maxEventsPerAgent) {
+      log.removeRange(0, log.length - _maxEventsPerAgent);
+    }
+  }
 
   List<Agent> get agents => List<Agent>.unmodifiable(_agents);
 
@@ -32,26 +53,43 @@ class AgentRegistry extends ChangeNotifier {
   /// Mark the agent running and stamp [lastRun]. Honours [Agent.canStart] and
   /// [Agent.enabled].
   void start(String id) {
-    _mutate(id, (Agent a) {
-      if (!a.canStart || !a.enabled) return a;
-      return a.copyWith(status: AgentStatus.running, lastRun: _nowIso());
-    });
+    _mutate(
+      id,
+      (Agent a) {
+        if (!a.canStart || !a.enabled || a.status == AgentStatus.running) {
+          return a;
+        }
+        return a.copyWith(status: AgentStatus.running, lastRun: _nowIso());
+      },
+      eventKind: AgentEventKind.action,
+      eventMessage: (_, __) => 'Started',
+    );
   }
 
   void stop(String id) {
-    _mutate(id, (Agent a) {
-      if (!a.canStop) return a;
-      return a.copyWith(status: AgentStatus.stopped);
-    });
+    _mutate(
+      id,
+      (Agent a) {
+        if (!a.canStop || a.status == AgentStatus.stopped) return a;
+        return a.copyWith(status: AgentStatus.stopped);
+      },
+      eventKind: AgentEventKind.action,
+      eventMessage: (_, __) => 'Stopped',
+    );
   }
 
   /// Trigger a single (local) run — records [lastRun]/[lastResult] without
   /// leaving the agent in a running state.
   void runOnce(String id) {
-    _mutate(id, (Agent a) {
-      if (!a.canRunOnce || !a.enabled) return a;
-      return a.copyWith(lastRun: _nowIso(), lastResult: 'Ran once (local)');
-    });
+    _mutate(
+      id,
+      (Agent a) {
+        if (!a.canRunOnce || !a.enabled) return a;
+        return a.copyWith(lastRun: _nowIso(), lastResult: 'Ran once (local)');
+      },
+      eventKind: AgentEventKind.action,
+      eventMessage: (_, __) => 'Ran once',
+    );
   }
 
   void setStatus(String id, AgentStatus status) =>
@@ -61,39 +99,61 @@ class AgentRegistry extends ChangeNotifier {
   /// so periodic polling doesn't churn listeners / storage.
   void applyLiveStatus(String id, AgentStatus status,
       {String? lastRun, String? lastResult}) {
-    _mutate(id, (Agent a) {
-      final String? nextRun = lastRun ?? a.lastRun;
-      final String? nextResult = lastResult ?? a.lastResult;
-      if (a.status == status &&
-          a.lastRun == nextRun &&
-          a.lastResult == nextResult) {
-        return a; // unchanged → _mutate skips notify
-      }
-      return a.copyWith(
-        status: status,
-        lastRun: nextRun,
-        lastResult: nextResult,
-      );
-    });
+    _mutate(
+      id,
+      (Agent a) {
+        final String? nextRun = lastRun ?? a.lastRun;
+        final String? nextResult = lastResult ?? a.lastResult;
+        if (a.status == status &&
+            a.lastRun == nextRun &&
+            a.lastResult == nextResult) {
+          return a; // unchanged → _mutate skips notify
+        }
+        return a.copyWith(
+          status: status,
+          lastRun: nextRun,
+          lastResult: nextResult,
+        );
+      },
+      eventKind: AgentEventKind.status,
+      // Only fires when status actually transitions (else _mutate no-ops).
+      eventMessage: (Agent before, Agent after) =>
+          before.status == after.status
+              ? 'Updated'
+              : 'Status → ${after.status.label}',
+    );
   }
 
   /// Toggle whether the agent may run. Disabling also stops it.
   void setEnabled(String id, bool enabled) {
-    _mutate(id, (Agent a) {
-      if (enabled) return a.copyWith(enabled: true);
-      return a.copyWith(
-        enabled: false,
-        status: a.status == AgentStatus.running ? AgentStatus.stopped : a.status,
-      );
-    });
+    _mutate(
+      id,
+      (Agent a) {
+        if (a.enabled == enabled) return a; // no-op
+        if (enabled) return a.copyWith(enabled: true);
+        return a.copyWith(
+          enabled: false,
+          status:
+              a.status == AgentStatus.running ? AgentStatus.stopped : a.status,
+        );
+      },
+      eventKind: AgentEventKind.action,
+      eventMessage: (_, Agent after) => after.enabled ? 'Enabled' : 'Disabled',
+    );
   }
 
   void setConfig(String id, String key, String value) {
-    _mutate(id, (Agent a) {
-      final Map<String, String> next = Map<String, String>.from(a.config);
-      next[key] = value;
-      return a.copyWith(config: next);
-    });
+    _mutate(
+      id,
+      (Agent a) {
+        if (a.config[key] == value) return a; // no-op
+        final Map<String, String> next = Map<String, String>.from(a.config);
+        next[key] = value;
+        return a.copyWith(config: next);
+      },
+      eventKind: AgentEventKind.config,
+      eventMessage: (_, __) => 'Set $key = $value',
+    );
   }
 
   /// Add a user-defined agent (AGT-4). No-op if the id already exists.
@@ -129,6 +189,7 @@ class AgentRegistry extends ChangeNotifier {
     final int i = _agents.indexWhere((Agent a) => a.id == id);
     if (i < 0 || _agents[i].builtin) return;
     _agents.removeAt(i);
+    _events.remove(id);
     notifyListeners();
   }
 
@@ -158,12 +219,23 @@ class AgentRegistry extends ChangeNotifier {
     notifyListeners();
   }
 
-  void _mutate(String id, Agent Function(Agent) f) {
+  /// Apply [f]; if it changed the agent, optionally record an activity event
+  /// (built from before/after) and notify once.
+  void _mutate(
+    String id,
+    Agent Function(Agent) f, {
+    AgentEventKind? eventKind,
+    String Function(Agent before, Agent after)? eventMessage,
+  }) {
     final int i = _agents.indexWhere((Agent a) => a.id == id);
     if (i < 0) return;
-    final Agent next = f(_agents[i]);
-    if (identical(next, _agents[i])) return;
+    final Agent before = _agents[i];
+    final Agent next = f(before);
+    if (identical(next, before)) return;
     _agents[i] = next;
+    if (eventKind != null && eventMessage != null) {
+      _record(id, eventKind, eventMessage(before, next));
+    }
     notifyListeners();
   }
 

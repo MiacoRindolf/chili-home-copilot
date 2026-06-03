@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../network/chili_api_client.dart';
 import 'agent.dart';
 import 'agent_control_service.dart';
+import 'agent_event.dart';
 import 'agent_persistence.dart';
 import 'agent_registry.dart';
 import 'agent_status_service.dart';
@@ -582,9 +583,79 @@ class _AgentsScreenState extends State<AgentsScreen> {
           for (final MapEntry<String, String> e in a.config.entries)
             _configRow(cs, a, e.key, e.value),
         ],
+        const SizedBox(height: 18),
+        _activitySection(cs, a),
         const SizedBox(height: 24),
       ],
     );
+  }
+
+  // ── Activity log (AGT-5) ─────────────────────────────────────────────────
+  Widget _activitySection(ColorScheme cs, Agent a) {
+    final List<AgentEvent> log = _registry.events(a.id);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        _section(cs, 'Recent activity'),
+        const SizedBox(height: 4),
+        if (log.isEmpty)
+          Text('No activity yet this session.',
+              style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant))
+        else
+          for (final AgentEvent e in log) _activityRow(cs, e),
+      ],
+    );
+  }
+
+  Widget _activityRow(ColorScheme cs, AgentEvent e) {
+    final DateTime? dt = DateTime.tryParse(e.timestamp);
+    final String when = dt == null
+        ? ''
+        : '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}:${dt.second.toString().padLeft(2, '0')}';
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Icon(_eventIcon(e.kind), size: 14, color: _eventColor(e.kind, cs)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(e.message,
+                style: TextStyle(fontSize: 13, color: cs.onSurface)),
+          ),
+          const SizedBox(width: 8),
+          Text(when,
+              style: TextStyle(
+                  fontSize: 11,
+                  color: cs.onSurfaceVariant,
+                  fontFeatures: const <FontFeature>[
+                    FontFeature.tabularFigures()
+                  ])),
+        ],
+      ),
+    );
+  }
+
+  static IconData _eventIcon(AgentEventKind k) {
+    switch (k) {
+      case AgentEventKind.action:
+        return Icons.play_circle_outline;
+      case AgentEventKind.status:
+        return Icons.sync;
+      case AgentEventKind.config:
+        return Icons.tune;
+    }
+  }
+
+  static Color _eventColor(AgentEventKind k, ColorScheme cs) {
+    switch (k) {
+      case AgentEventKind.action:
+        return cs.primary;
+      case AgentEventKind.status:
+        return Colors.green;
+      case AgentEventKind.config:
+        return cs.secondary;
+    }
   }
 
   Widget _localNote(ColorScheme cs) {
