@@ -528,6 +528,28 @@ def api_attribution_execution_alpha_drag(
     return JSONResponse(json_safe(out))
 
 
+@router.post("/attribution/execution-alpha-drag/followups")
+def api_attribution_execution_alpha_drag_followups(
+    request: Request,
+    db: Session = Depends(get_db),
+    days: int = Query(7, ge=1, le=90),
+    limit: int = Query(50, ge=1, le=200),
+    min_positive_edge_events: int = Query(1, ge=1, le=25),
+):
+    """Queue conservative reliability refreshes for positive-edge execution drag."""
+    from ...services.trading.public_api import queue_execution_alpha_drag_followups
+
+    ctx = get_identity_ctx(request, db)
+    out = queue_execution_alpha_drag_followups(
+        db,
+        ctx["user_id"],
+        days=days,
+        limit=limit,
+        min_positive_edge_events=min_positive_edge_events,
+    )
+    return JSONResponse(json_safe(out))
+
+
 # ── Journal & Stats ──────────────────────────────────────────────────────────
 
 @router.get("/journal")

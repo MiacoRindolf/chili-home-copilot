@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -324,6 +325,54 @@ def test_queue_execution_alpha_drag_followups_requests_edge_refresh(monkeypatch)
             "asset_class": "options",
             "window_days": 7,
             "evidence_fingerprint": out["candidates"][0]["evidence_fingerprint"],
+        }
+    ]
+
+
+def test_execution_alpha_drag_followups_endpoint_queues_work(monkeypatch) -> None:
+    from app.routers.trading_sub import trades as trades_router
+    from app.services.trading import public_api
+
+    db = object()
+    calls: list[dict] = []
+
+    def _identity(request, db_arg):
+        return {"user_id": 7}
+
+    def _queue(db_arg, user_id, **kwargs):
+        calls.append({"db": db_arg, "user_id": user_id, **kwargs})
+        return {
+            "ok": True,
+            "window_days": kwargs["days"],
+            "considered": 1,
+            "created": 1,
+            "skipped": 0,
+            "event_ids": [123],
+        }
+
+    monkeypatch.setattr(trades_router, "get_identity_ctx", _identity)
+    monkeypatch.setattr(public_api, "queue_execution_alpha_drag_followups", _queue)
+
+    resp = trades_router.api_attribution_execution_alpha_drag_followups(
+        request=object(),
+        db=db,
+        days=5,
+        limit=20,
+        min_positive_edge_events=2,
+    )
+
+    data = json.loads(resp.body)
+    assert resp.status_code == 200
+    assert data["ok"] is True
+    assert data["created"] == 1
+    assert data["event_ids"] == [123]
+    assert calls == [
+        {
+            "db": db,
+            "user_id": 7,
+            "days": 5,
+            "limit": 20,
+            "min_positive_edge_events": 2,
         }
     ]
 
