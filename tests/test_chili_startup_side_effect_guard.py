@@ -45,6 +45,20 @@ def test_scheduler_roles_keep_deferred_side_effects() -> None:
         assert _deferred_startup_side_effects_disabled(_Settings(role, False)) is False
 
 
+def test_scheduler_worker_broker_restore_only_for_broker_roles(monkeypatch) -> None:
+    from scripts import scheduler_worker
+
+    for role in ("all", "web", "worker", "autotrader_only", "broker_sync_only"):
+        assert scheduler_worker._scheduler_worker_broker_restore_enabled(role) is True
+
+    for role in ("cron_only", "market_snapshot_only", "none", "unknown", ""):
+        assert scheduler_worker._scheduler_worker_broker_restore_enabled(role) is False
+
+    monkeypatch.setenv("CHILI_SCHEDULER_ROLE", " MARKET_SNAPSHOT_ONLY ")
+    assert scheduler_worker._scheduler_worker_role() == "market_snapshot_only"
+    assert scheduler_worker._scheduler_worker_broker_restore_enabled() is False
+
+
 def test_deferred_startup_checks_side_effect_guard_before_broker_restore() -> None:
     src = (REPO / "app/main.py").read_text()
     idx = src.find("def _run_deferred_startup()")
@@ -97,3 +111,19 @@ def test_scheduler_worker_restores_durable_circuit_breaker() -> None:
     assert breaker_pos > 0
     assert kill_pos < breaker_pos
     assert "Circuit breaker restored ACTIVE" in body
+
+
+def test_scheduler_worker_checks_role_before_broker_session_restore() -> None:
+    src = (REPO / "scripts/scheduler_worker.py").read_text()
+    idx = src.find("def main()")
+    assert idx > 0
+    body = src[idx : idx + 1800]
+    role_pos = body.find("role = _scheduler_worker_role()")
+    gate_pos = body.find("_scheduler_worker_broker_restore_enabled(role)")
+    restore_pos = body.find("broker_service.try_restore_session()")
+    skip_pos = body.find("Broker session restore skipped")
+    assert role_pos > 0
+    assert gate_pos > 0
+    assert restore_pos > 0
+    assert skip_pos > 0
+    assert role_pos < gate_pos < restore_pos

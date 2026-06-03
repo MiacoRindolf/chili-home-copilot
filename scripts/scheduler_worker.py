@@ -31,6 +31,25 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+_BROKER_SESSION_RESTORE_ROLES = frozenset(
+    {
+        "all",
+        "web",
+        "worker",
+        "autotrader_only",
+        "broker_sync_only",
+    }
+)
+
+
+def _scheduler_worker_role() -> str:
+    return (os.environ.get("CHILI_SCHEDULER_ROLE") or "worker").strip().lower() or "worker"
+
+
+def _scheduler_worker_broker_restore_enabled(role: str | None = None) -> bool:
+    return (role or _scheduler_worker_role()) in _BROKER_SESSION_RESTORE_ROLES
+
+
 def main() -> None:
     from app.services.trading_scheduler import start_scheduler, stop_scheduler
 
@@ -41,14 +60,20 @@ def main() -> None:
     except Exception as _e:
         logger.debug("[scheduler_worker] brain I/O profile log skipped: %s", _e)
 
-    # Restore Robinhood session so broker sync can run.
-    try:
-        from app.services import broker_service
+    role = _scheduler_worker_role()
 
-        ok = broker_service.try_restore_session()
-        logger.info("[scheduler_worker] Broker session restore: %s", "ok" if ok else "no session")
-    except Exception as _e:
-        logger.warning("[scheduler_worker] Broker session restore failed: %s", _e)
+    # Restore Robinhood sessions only in broker/autotrader-owning scheduler roles.
+    # Support lanes such as market_snapshot_only must stay broker-read-only on restart.
+    if _scheduler_worker_broker_restore_enabled(role):
+        try:
+            from app.services import broker_service
+
+            ok = broker_service.try_restore_session()
+            logger.info("[scheduler_worker] Broker session restore: %s", "ok" if ok else "no session")
+        except Exception as _e:
+            logger.warning("[scheduler_worker] Broker session restore failed: %s", _e)
+    else:
+        logger.info("[scheduler_worker] Broker session restore skipped for CHILI_SCHEDULER_ROLE=%s", role)
 
     # Restore kill-switch state before scheduler starts (Hard Rule 1/2:
     # a tripped breaker must survive process restarts — otherwise the safety
@@ -101,7 +126,7 @@ def main() -> None:
         logger.debug("[scheduler_worker] silent-exposure warning probe failed: %s", _e)
 
     start_scheduler()
-    logger.info("[scheduler_worker] Started (CHILI_SCHEDULER_ROLE=%s)", os.environ.get("CHILI_SCHEDULER_ROLE"))
+    logger.info("[scheduler_worker] Started (CHILI_SCHEDULER_ROLE=%s)", role)
 
     # ── DO NOT REMOVE — CHILI Code Brain wiring (Phase E reactive) ─────
     # Reactive neural architecture that REPLACES the dumb 60s
