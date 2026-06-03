@@ -60,10 +60,24 @@
 .os-chip:hover{color:var(--ws-text);border-color:var(--ws-border-strong);transform:translateY(-1px)}
 .os-chip .ci{font-size:13px}
 
+/* Mission Control (Exposé) — switch/restore open windows from a card grid */
+.os-expose{position:absolute;inset:0;z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:var(--ws-s4);padding:var(--ws-s5,20px);background:color-mix(in srgb,var(--ws-surface) 60%,transparent);backdrop-filter:blur(16px);opacity:0;transition:opacity .14s var(--ws-ease)}
+.os-expose.show{opacity:1}
+.os-expose-hint{font:var(--ws-fw-med) var(--ws-fs-12)/1.2 var(--ws-font-ui);color:var(--ws-text-3);letter-spacing:.01em}
+.os-expose-hint b{color:var(--ws-text-2);font-weight:var(--ws-fw-semi)}
+.os-expose-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(168px,1fr));gap:var(--ws-s3);width:min(900px,88%);max-height:74%;overflow:auto;padding:2px}
+.os-xcard{display:flex;flex-direction:column;align-items:flex-start;gap:7px;padding:var(--ws-s4);background:var(--ws-surface-2);border:1px solid var(--ws-border);border-radius:var(--ws-r-lg);color:var(--ws-text);cursor:pointer;text-align:left;transition:transform .12s var(--ws-ease),border-color .12s var(--ws-ease),box-shadow .12s var(--ws-ease)}
+.os-xcard:hover{transform:translateY(-2px);border-color:var(--ws-border-strong)}
+.os-xcard.sel{border-color:var(--ws-accent);box-shadow:var(--ws-shadow-lg),0 0 0 2px var(--ws-accent-bg);transform:translateY(-2px)}
+.os-xcard .xc-ic{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;font-size:18px;background:var(--ws-accent-bg)}
+.os-xcard .xc-t{font:var(--ws-fw-semi) var(--ws-fs-13)/1.2 var(--ws-font-ui);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.os-xcard .xc-sub{font-size:11px;color:var(--ws-text-3)}
+
 @media(max-width:760px){.os-win{left:8px!important;top:8px!important;width:calc(100vw - 72px)!important;height:calc(100vh - 80px)!important}.os-re{display:none}}
 
 /* Honor reduced-motion: keep windows snappy but drop the easing/animation. */
 @media (prefers-reduced-motion:reduce){
-  .os-win,.os-win.active,.os-win.snapping,.os-win.closing,.os-win.os-out,.os-home.dimmed,.os-ghost,.os-chip{transition:none}
+  .os-win,.os-win.active,.os-win.snapping,.os-win.closing,.os-win.os-out,.os-home.dimmed,.os-ghost,.os-chip,.os-expose,.os-xcard{transition:none}
   .os-win.os-in{animation:none}
+  .os-xcard:hover,.os-xcard.sel{transform:none}
 }
