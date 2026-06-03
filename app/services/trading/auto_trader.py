@@ -52,6 +52,7 @@ from ...config import (
     AUTOTRADER_PAPER_SHADOW_DEFAULT_MAX_OPEN,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_REJECT_ALLOW_DUPLICATE_OPEN,
     AUTOTRADER_PAPER_SHADOW_DEFAULT_REJECT_LIGHTWEIGHT_SIZING_ENABLED,
+    AUTOTRADER_PAPER_SHADOW_QUEUE_SUPPRESSION_DEFAULT_PRESSURE,
     AUTOTRADER_PROBATION_DEFAULT_CRYPTO_MAX_TRADES_PER_DAY,
     AUTOTRADER_PROBATION_DEFAULT_CRYPTO_MIN_EXPECTED_NET_PCT_FOR_EXTRA_QUOTA,
     AUTOTRADER_PROBATION_DEFAULT_MAX_TRADES_PER_PATTERN_TICKER_PER_DAY,
@@ -126,6 +127,16 @@ QUALIFIED_BLOCK_PAPER_SHADOW_DECISIONS = frozenset({
     "skipped_synergy_disabled_second_signal",
     f"skipped_{SYNERGY_RETRY_SOURCE_REASON}",
     f"skipped_{SYNERGY_RETRY_EXHAUSTED_REASON}",
+})
+
+TICK_BUDGET_SUPPRESSIBLE_PAPER_SHADOW_DECISIONS = frozenset({
+    "blocked_regime_gate",
+    "skipped_directional_geometry",
+    "skipped_non_positive_expected_edge",
+})
+QUEUE_PRESSURE_SUPPRESSIBLE_PAPER_SHADOW_DECISIONS = frozenset({
+    "skipped_directional_geometry",
+    "skipped_non_positive_expected_edge",
 })
 
 AUTOTRADER_VERSION = "v1"
@@ -2290,7 +2301,11 @@ def _qualified_reject_shadow_decision(reason: str | None) -> str | None:
     if r in {
         "duplicate_pattern_already_open",
         "non_positive_expected_edge",
+        "stop_not_below_entry",
+        "target_not_above_entry",
     }:
+        if r in {"stop_not_below_entry", "target_not_above_entry"}:
+            return "skipped_directional_geometry"
         return f"skipped_{r}"
     if r in {
         "llm_not_viable",
@@ -2311,6 +2326,80 @@ def _qualified_reject_shadow_decision(reason: str | None) -> str | None:
     }:
         return f"blocked_{r}"
     return None
+
+
+def _paper_shadow_tick_budget_suppression_reason(
+    out: dict[str, Any] | None,
+    *,
+    reject_reason: str | None,
+) -> str | None:
+    decision = _qualified_reject_shadow_decision(reject_reason)
+    if decision not in TICK_BUDGET_SUPPRESSIBLE_PAPER_SHADOW_DECISIONS:
+        return None
+    if not isinstance(out, dict):
+        return None
+    started = out.get("_tick_started_monotonic")
+    budget = out.get("tick_budget_seconds")
+    try:
+        started_f = float(started)
+        budget_f = float(budget)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(started_f) or not math.isfinite(budget_f) or budget_f <= 0.0:
+        return None
+    if (time.monotonic() - started_f) < budget_f:
+        return None
+    out["paper_shadow_tick_budget_suppressed"] = (
+        int(out.get("paper_shadow_tick_budget_suppressed") or 0) + 1
+    )
+    out["paper_shadow_tick_budget_suppressed_last_reason"] = decision
+    return "tick_budget_exhausted"
+
+
+def _paper_shadow_queue_pressure_floor() -> float:
+    try:
+        floor = float(
+            getattr(
+                settings,
+                "chili_autotrader_paper_shadow_queue_pressure_suppression_floor",
+                AUTOTRADER_PAPER_SHADOW_QUEUE_SUPPRESSION_DEFAULT_PRESSURE,
+            )
+        )
+    except (TypeError, ValueError):
+        floor = AUTOTRADER_PAPER_SHADOW_QUEUE_SUPPRESSION_DEFAULT_PRESSURE
+    if not math.isfinite(floor):
+        return AUTOTRADER_PAPER_SHADOW_QUEUE_SUPPRESSION_DEFAULT_PRESSURE
+    return min(1.0, max(0.0, floor))
+
+
+def _paper_shadow_queue_pressure_suppression_reason(
+    out: dict[str, Any] | None,
+    *,
+    reject_reason: str | None,
+    snap: dict[str, Any] | None,
+) -> str | None:
+    decision = _qualified_reject_shadow_decision(reject_reason)
+    if decision not in QUEUE_PRESSURE_SUPPRESSIBLE_PAPER_SHADOW_DECISIONS:
+        return None
+    expected_net_pct = _expected_net_pct_from_snapshot(snap)
+    if expected_net_pct is not None and expected_net_pct > 0.0:
+        return None
+    if not isinstance(out, dict):
+        return None
+    try:
+        queue_pressure = float(out.get("candidate_queue_pressure") or 0.0)
+    except (TypeError, ValueError):
+        queue_pressure = 0.0
+    if (
+        not math.isfinite(queue_pressure)
+        or queue_pressure < _paper_shadow_queue_pressure_floor()
+    ):
+        return None
+    out["paper_shadow_queue_pressure_suppressed"] = (
+        int(out.get("paper_shadow_queue_pressure_suppressed") or 0) + 1
+    )
+    out["paper_shadow_queue_pressure_suppressed_last_reason"] = decision
+    return "queue_pressure"
 
 
 def _maybe_open_reject_paper_shadow(
@@ -3953,6 +4042,11 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         "tick_slowest_alert_elapsed_seconds": 0.0,
         "tick_slowest_alert_id": None,
         "tick_slowest_alert_ticker": None,
+        "paper_shadow_tick_budget_suppressed": 0,
+        "paper_shadow_tick_budget_suppressed_last_reason": None,
+        "paper_shadow_queue_pressure_suppressed": 0,
+        "paper_shadow_queue_pressure_suppressed_last_reason": None,
+        "_tick_started_monotonic": tick_started,
     }
 
     processing_started = time.monotonic()
@@ -4071,6 +4165,7 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         "scaled_in=%d skipped=%d fresh_pool=%d synergy_retry_pool=%d "
         "synergy_retry_batch=%d stock_defer_active=%s stock_deferred_pool=%d "
         "stock_stale_unprocessed=%d tick_budget_s=%s tick_deferred=%d "
+        "shadow_budget_suppressed=%d shadow_queue_suppressed=%d "
         "fresh_fastlane=%s fresh_burst=%s price_prefetch_hits=%s/%s "
         "price_prefetch_elapsed_s=%s "
         "phase_s=runtime:%s cleanup:%s select:%s process:%s diag:%s "
@@ -4101,6 +4196,8 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         out.get("stock_session_stale_unprocessed"),
         out.get("tick_budget_seconds"),
         out.get("tick_budget_deferred"),
+        out.get("paper_shadow_tick_budget_suppressed") or 0,
+        out.get("paper_shadow_queue_pressure_suppressed") or 0,
         out.get("fresh_candidate_fastlane_enabled"),
         out.get("fresh_candidate_burst_enabled"),
         out.get("candidate_price_prefetch_hits"),
@@ -4123,6 +4220,7 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         out.get("tick_last_ticker") or "-",
     )
 
+    out.pop("_tick_started_monotonic", None)
     return {"ok": True, **out}
 
 
@@ -4809,9 +4907,21 @@ def _process_one_alert(
         )
         if _rg_block:
             _rg_full_reason = f"regime_gate:{_rg_reason}"
+            _rg_snap = {
+                "paper_observation_reason": _rg_full_reason,
+                "regime_gate_reason": _rg_reason,
+            }
+            budget_shadow_skip = _paper_shadow_tick_budget_suppression_reason(
+                out,
+                reject_reason=_rg_full_reason,
+            )
+            if budget_shadow_skip is not None:
+                _rg_snap["paper_shadow_suppressed"] = True
+                _rg_snap["paper_shadow_suppressed_reason"] = budget_shadow_skip
+                _rg_snap["paper_shadow_suppressed_scope"] = "tick_budget"
             _audit(db, user_id=uid, alert=alert, decision="skipped",
-                   reason=_rg_full_reason)
-            if live:
+                   reason=_rg_full_reason, rule_snapshot=_rg_snap)
+            if live and budget_shadow_skip is None:
                 _rg_px = _current_price(alert.ticker)
                 if _rg_px is not None:
                     _maybe_open_reject_paper_shadow(
@@ -4819,10 +4929,7 @@ def _process_one_alert(
                         uid=uid,
                         alert=alert,
                         px=_rg_px,
-                        snap={
-                            "paper_observation_reason": _rg_full_reason,
-                            "regime_gate_reason": _rg_reason,
-                        },
+                        snap=_rg_snap,
                         reason=_rg_full_reason,
                     )
             out["skipped"] += 1
@@ -5136,8 +5243,26 @@ def _process_one_alert(
             )
             if exit_geometry_work is not None:
                 snap["exit_geometry_variant_work"] = exit_geometry_work
+        budget_shadow_skip = _paper_shadow_tick_budget_suppression_reason(
+            out,
+            reject_reason=str(reason),
+        )
+        pressure_shadow_skip = None
+        if budget_shadow_skip is None:
+            pressure_shadow_skip = _paper_shadow_queue_pressure_suppression_reason(
+                out,
+                reject_reason=str(reason),
+                snap=snap,
+            )
+        shadow_skip_reason = budget_shadow_skip or pressure_shadow_skip
+        if shadow_skip_reason is not None:
+            snap["paper_shadow_suppressed"] = True
+            snap["paper_shadow_suppressed_reason"] = shadow_skip_reason
+            snap["paper_shadow_suppressed_scope"] = (
+                "tick_budget" if budget_shadow_skip is not None else "queue_pressure"
+            )
         _audit(db, user_id=uid, alert=alert, decision="skipped", reason=reason, rule_snapshot=snap)
-        if live:
+        if live and shadow_skip_reason is None:
             _maybe_open_reject_paper_shadow(
                 db,
                 uid=uid,
