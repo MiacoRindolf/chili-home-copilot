@@ -212,6 +212,40 @@ def test_paper_shadow_queue_pressure_keeps_positive_edge_evidence(monkeypatch):
     assert "paper_shadow_queue_pressure_suppressed" not in out
 
 
+def test_paper_shadow_effective_capacity_tightens_under_queue_pressure(monkeypatch):
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_paper_shadow_queue_pressure_suppression_floor",
+        0.8,
+    )
+
+    positive_edge = at_mod._paper_shadow_effective_capacity(
+        100,
+        5,
+        signal_json={
+            "shadow_decision": "blocked_shadow_promoted",
+            "entry_edge_expected_net_pct": 0.4,
+        },
+        snap={"candidate_queue_pressure": 0.9},
+    )
+    low_quality = at_mod._paper_shadow_effective_capacity(
+        100,
+        5,
+        signal_json={
+            "shadow_decision": "skipped_non_positive_expected_edge",
+            "entry_edge_expected_net_pct": -0.2,
+        },
+        snap={"candidate_queue_pressure": 0.9},
+    )
+
+    assert positive_edge["max_open"] == 100
+    assert positive_edge["buffer"] > 5
+    assert low_quality["max_open"] == 100
+    assert low_quality["buffer"] > positive_edge["buffer"]
+    assert "queue_pressure" in positive_edge["reasons"]
+    assert "low_quality_queue_pressure" in low_quality["reasons"]
+
+
 def test_reject_shadow_uses_lightweight_sizing_without_broker_lookup(monkeypatch):
     alert = SimpleNamespace(
         id=TEST_REJECT_SHADOW_LIGHTWEIGHT_ALERT_ID,
@@ -1313,6 +1347,91 @@ def test_reject_shadow_skips_equal_priority_when_capacity_full(db, monkeypatch):
 
     rows = db.query(PaperTrade).filter(PaperTrade.user_id == alert.user_id).all()
     assert sum(1 for row in rows if row.status == "open") == 2
+    assert all(row.paper_shadow_of_alert_id != alert.id for row in rows)
+    assert all(row.exit_reason != PAPER_SHADOW_CAPACITY_EVICTED_REASON for row in rows)
+
+
+def test_reject_shadow_skips_low_quality_when_dynamic_queue_capacity_full(
+    db,
+    monkeypatch,
+):
+    pat, alert = _seed_pattern_and_alert(db)
+    monkeypatch.setattr(
+        at_mod.settings, "chili_autotrader_paper_shadow_enabled", False,
+    )
+    monkeypatch.setattr(
+        at_mod.settings, "chili_autotrader_paper_shadow_qualified_blocks_enabled", True,
+    )
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_paper_shadow_reject_allow_duplicate_open",
+        True,
+    )
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_paper_shadow_reject_lightweight_sizing_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        at_mod.settings, "chili_autotrader_paper_shadow_max_open", 10,
+    )
+    monkeypatch.setattr(
+        at_mod.settings, "chili_autotrader_paper_shadow_janitor_enabled", True,
+    )
+    monkeypatch.setattr(
+        at_mod.settings, "chili_autotrader_paper_shadow_janitor_max_age_hours", 100,
+    )
+    monkeypatch.setattr(
+        at_mod.settings, "chili_autotrader_paper_shadow_janitor_buffer", 0,
+    )
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_paper_shadow_queue_pressure_suppression_floor",
+        0.8,
+    )
+    db.add_all([
+        PaperTrade(
+            user_id=alert.user_id,
+            scan_pattern_id=pat.id,
+            ticker=f"OLD{i}",
+            direction="long",
+            entry_price=100.0,
+            stop_price=95.0,
+            target_price=110.0,
+            quantity=1,
+            status="open",
+            entry_date=datetime.utcnow() - timedelta(minutes=i + 1),
+            signal_json={
+                "auto_trader_v1": True,
+                "paper_shadow": True,
+                "shadow_decision": "skipped_non_positive_expected_edge",
+                "entry_edge_expected_net_pct": -0.1,
+            },
+        )
+        for i in range(9)
+    ])
+    db.commit()
+
+    monkeypatch.setattr(
+        "app.services.trading.market_data.fetch_quote",
+        lambda ticker: pytest.fail("dynamic capacity skip should not quote"),
+    )
+
+    _maybe_open_reject_paper_shadow(
+        db,
+        uid=alert.user_id,
+        alert=alert,
+        px=100.0,
+        snap={
+            "candidate_queue_pressure": 1.0,
+            "entry_edge": {"expected_net_pct": -0.25},
+        },
+        reason="non_positive_expected_edge",
+        existing_qty=TEST_SHADOW_QUANTITY,
+    )
+
+    rows = db.query(PaperTrade).filter(PaperTrade.user_id == alert.user_id).all()
+    assert sum(1 for row in rows if row.status == "open") == 9
     assert all(row.paper_shadow_of_alert_id != alert.id for row in rows)
     assert all(row.exit_reason != PAPER_SHADOW_CAPACITY_EVICTED_REASON for row in rows)
 

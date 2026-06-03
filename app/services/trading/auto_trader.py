@@ -146,6 +146,11 @@ QUEUE_PRESSURE_SUPPRESSIBLE_PAPER_SHADOW_DECISIONS = frozenset({
     "skipped_directional_geometry",
     "skipped_non_positive_expected_edge",
 })
+PAPER_SHADOW_CAPACITY_QUEUE_BUFFER_RATIO = 0.12
+PAPER_SHADOW_CAPACITY_LOW_QUALITY_BUFFER_RATIO = 0.05
+PAPER_SHADOW_CAPACITY_MAX_DYNAMIC_BUFFER_RATIO = 0.35
+PAPER_SHADOW_CAPACITY_REASON_QUEUE_PRESSURE = "queue_pressure"
+PAPER_SHADOW_CAPACITY_REASON_LOW_QUALITY = "low_quality_queue_pressure"
 
 AUTOTRADER_VERSION = "v1"
 PROBATION_RECERT_ALLOWANCE = "probation"
@@ -2020,6 +2025,9 @@ def _paper_shadow_signal_json(
     expected_net_pct = _expected_net_pct_from_snapshot(safe_snap)
     if expected_net_pct is not None:
         sig["entry_edge_expected_net_pct"] = expected_net_pct
+    queue_pressure = _snapshot_float(safe_snap, "candidate_queue_pressure")
+    if queue_pressure is not None:
+        sig["candidate_queue_pressure"] = round(float(queue_pressure), 4)
     asset_class = _paper_shadow_asset_class(alert, safe_snap)
     sig["asset_class"] = asset_class
     sig["asset_type"] = _paper_shadow_asset_type(
@@ -2119,6 +2127,122 @@ def _paper_shadow_capacity_admission(
     except Exception:
         logger.debug("[autotrader_paper_shadow] capacity admission failed", exc_info=True)
         return {"admit": True, "reason": "admission_check_failed_open"}
+
+
+def _paper_shadow_capacity_int(value: Any, *, default: int) -> int:
+    try:
+        out = int(value)
+    except (TypeError, ValueError):
+        return int(default)
+    return out
+
+
+def _paper_shadow_capacity_queue_pressure(
+    snap: dict[str, Any] | None,
+    signal_json: dict[str, Any] | None,
+) -> float | None:
+    queue_pressure = _snapshot_float(snap, "candidate_queue_pressure")
+    if queue_pressure is None:
+        queue_pressure = _snapshot_float(signal_json, "candidate_queue_pressure")
+    if queue_pressure is None:
+        return None
+    return min(1.0, max(0.0, float(queue_pressure)))
+
+
+def _paper_shadow_capacity_candidate_quality(
+    signal_json: dict[str, Any] | None,
+    snap: dict[str, Any] | None,
+) -> dict[str, Any]:
+    safe_sig = signal_json if isinstance(signal_json, dict) else {}
+    decision = str(safe_sig.get("shadow_decision") or "").strip()
+    expected_net_pct = _expected_net_pct_from_snapshot(snap)
+    if expected_net_pct is None:
+        expected_net_pct = _expected_net_pct_from_snapshot(safe_sig)
+    lane = str(safe_sig.get("paper_observation_signal_lane") or "").strip()
+    if not lane and isinstance(snap, dict):
+        lane = str(snap.get("paper_observation_signal_lane") or "").strip()
+    high_value = (
+        (expected_net_pct is not None and expected_net_pct > 0.0)
+        or lane in SHADOW_OBSERVATION_SIGNAL_LANES
+        or decision in {"placed", "blocked_shadow_promoted"}
+    )
+    low_quality = (
+        (expected_net_pct is not None and expected_net_pct <= 0.0)
+        or decision in QUEUE_PRESSURE_SUPPRESSIBLE_PAPER_SHADOW_DECISIONS
+    )
+    return {
+        "decision": decision,
+        "expected_net_pct": expected_net_pct,
+        "signal_lane": lane or None,
+        "high_value": bool(high_value),
+        "low_quality": bool(low_quality and not high_value),
+    }
+
+
+def _paper_shadow_effective_capacity(
+    shadow_max_open: int,
+    base_buffer: int,
+    *,
+    signal_json: dict[str, Any] | None,
+    snap: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Adapt shadow capacity pressure without raising the configured max."""
+    open_limit = max(1, _paper_shadow_capacity_int(shadow_max_open, default=1))
+    max_buffer = max(0, open_limit - 1)
+    configured_buffer = max(
+        0,
+        _paper_shadow_capacity_int(base_buffer, default=0),
+    )
+    effective_buffer = min(max_buffer, configured_buffer)
+    queue_pressure = _paper_shadow_capacity_queue_pressure(snap, signal_json)
+    quality = _paper_shadow_capacity_candidate_quality(signal_json, snap)
+    reasons: list[str] = []
+
+    if queue_pressure is not None and queue_pressure >= _paper_shadow_queue_pressure_floor():
+        queue_extra = max(
+            1,
+            int(
+                math.ceil(
+                    open_limit
+                    * PAPER_SHADOW_CAPACITY_QUEUE_BUFFER_RATIO
+                    * queue_pressure
+                )
+            ),
+        )
+        effective_buffer += queue_extra
+        reasons.append(PAPER_SHADOW_CAPACITY_REASON_QUEUE_PRESSURE)
+        if bool(quality.get("low_quality")):
+            quality_extra = max(
+                1,
+                int(
+                    math.ceil(
+                        open_limit * PAPER_SHADOW_CAPACITY_LOW_QUALITY_BUFFER_RATIO
+                    )
+                ),
+            )
+            effective_buffer += quality_extra
+            reasons.append(PAPER_SHADOW_CAPACITY_REASON_LOW_QUALITY)
+
+    dynamic_buffer_limit = min(
+        max_buffer,
+        max(
+            configured_buffer,
+            int(math.ceil(open_limit * PAPER_SHADOW_CAPACITY_MAX_DYNAMIC_BUFFER_RATIO)),
+        ),
+    )
+    effective_buffer = min(max_buffer, min(effective_buffer, dynamic_buffer_limit))
+    target_open = max(0, open_limit - effective_buffer)
+    return {
+        "max_open": open_limit,
+        "base_buffer": configured_buffer,
+        "buffer": effective_buffer,
+        "target_open": target_open,
+        "queue_pressure": (
+            round(float(queue_pressure), 4) if queue_pressure is not None else None
+        ),
+        "quality": quality,
+        "reasons": reasons,
+    }
 
 
 def _maybe_open_paper_shadow(
@@ -2251,7 +2375,7 @@ def _maybe_open_paper_shadow(
             )
             or AUTOTRADER_PAPER_SHADOW_DEFAULT_MAX_OPEN
         )
-        shadow_buffer = int(
+        configured_shadow_buffer = int(
             getattr(
                 settings,
                 "chili_autotrader_paper_shadow_janitor_buffer",
@@ -2259,6 +2383,16 @@ def _maybe_open_paper_shadow(
             )
             or 0
         )
+        capacity_pressure = _paper_shadow_effective_capacity(
+            shadow_max_open,
+            configured_shadow_buffer,
+            signal_json=sig,
+            snap=snap,
+        )
+        shadow_max_open = int(capacity_pressure.get("max_open") or shadow_max_open)
+        shadow_buffer = int(capacity_pressure.get("buffer") or 0)
+        if capacity_pressure.get("reasons"):
+            sig["paper_shadow_capacity_pressure"] = capacity_pressure
         capacity_admission = _paper_shadow_capacity_admission(
             db,
             uid=uid,
@@ -5479,6 +5613,7 @@ def _process_one_alert(
             _rg_snap = {
                 "paper_observation_reason": _rg_full_reason,
                 "regime_gate_reason": _rg_reason,
+                "candidate_queue_pressure": out.get("candidate_queue_pressure"),
             }
             budget_shadow_skip = _paper_shadow_tick_budget_suppression_reason(
                 out,
@@ -5803,6 +5938,7 @@ def _process_one_alert(
     ok, reason, snap = passes_rule_gate(
         db, alert, settings=settings, ctx=ctx, for_new_entry=for_new, fallback_user_id=uid,
     )
+    snap["candidate_queue_pressure"] = out.get("candidate_queue_pressure")
     snap["entry_quote_source"] = getattr(
         alert,
         "_chili_current_price_source",
