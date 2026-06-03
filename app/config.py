@@ -73,6 +73,13 @@ AUTOTRADER_STOCK_MOMENTUM_CONTEXT_GATE_DEFAULT_ENABLED = True
 AUTOTRADER_STOCK_MOMENTUM_CONTEXT_MIN_QUEUE_PRESSURE_DEFAULT = 1.0
 AUTOTRADER_STOCK_MOMENTUM_CONTEXT_MIN_GAP_PCT_DEFAULT = 5.0
 AUTOTRADER_STOCK_MOMENTUM_CONTEXT_MIN_VOLUME_RATIO_DEFAULT = 2.0
+AUTOTRADER_COST_GATE_REPEAT_SUPPRESSION_DEFAULT_ENABLED = True
+AUTOTRADER_COST_GATE_REPEAT_SUPPRESSION_DEFAULT_MINUTES = 3
+AUTOTRADER_COST_GATE_REPEAT_SUPPRESSION_MAX_MINUTES = (
+    AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES
+)
+AUTOTRADER_COST_GATE_REPEAT_SUPPRESSION_DEFAULT_MIN_EDGE_GAP_BPS = 50
+AUTOTRADER_COST_GATE_REPEAT_SUPPRESSION_DEFAULT_QUEUE_PRESSURE = 0.8
 CRYPTO_EXIT_MISSING_QTY_BACKOFF_DEFAULT_MINUTES = 5
 CRYPTO_EXIT_MISSING_QTY_BACKOFF_MAX_MINUTES = 60
 CRYPTO_EXIT_MISSING_QTY_BACKOFF_DEFAULT_SECONDS = (
@@ -3034,6 +3041,53 @@ class Settings(BaseSettings):
         description=(
             "Minimum relative-volume or volume-ratio evidence required by the "
             "pressure-activated stock momentum-context gate."
+        ),
+    )
+    chili_autotrader_cost_gate_repeat_suppression_enabled: bool = Field(
+        default=AUTOTRADER_COST_GATE_REPEAT_SUPPRESSION_DEFAULT_ENABLED,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_COST_GATE_REPEAT_SUPPRESSION_ENABLED"
+        ),
+        description=(
+            "When true, AutoTrader may record a repeat cost-gate block before "
+            "expensive quote/gate work when recent same-pattern evidence shows "
+            "the edge is still materially below Coinbase costs."
+        ),
+    )
+    chili_autotrader_cost_gate_repeat_suppression_minutes: int = Field(
+        default=AUTOTRADER_COST_GATE_REPEAT_SUPPRESSION_DEFAULT_MINUTES,
+        ge=1,
+        le=AUTOTRADER_COST_GATE_REPEAT_SUPPRESSION_MAX_MINUTES,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_COST_GATE_REPEAT_SUPPRESSION_MINUTES"
+        ),
+        description=(
+            "Base recent-block window. The effective window expands only with "
+            "quote-prefetch misses, queue pressure, or tick-budget pressure."
+        ),
+    )
+    chili_autotrader_cost_gate_repeat_suppression_min_edge_gap_bps: int = Field(
+        default=AUTOTRADER_COST_GATE_REPEAT_SUPPRESSION_DEFAULT_MIN_EDGE_GAP_BPS,
+        ge=1,
+        le=2000,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_COST_GATE_REPEAT_SUPPRESSION_MIN_EDGE_GAP_BPS"
+        ),
+        description=(
+            "Minimum prior cost-gate edge shortfall required before suppressing "
+            "a repeat Coinbase cost-gate evaluation."
+        ),
+    )
+    chili_autotrader_cost_gate_repeat_suppression_min_queue_pressure: float = Field(
+        default=AUTOTRADER_COST_GATE_REPEAT_SUPPRESSION_DEFAULT_QUEUE_PRESSURE,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_COST_GATE_REPEAT_SUPPRESSION_MIN_QUEUE_PRESSURE"
+        ),
+        description=(
+            "Candidate-lane pressure that allows repeat cost-gate suppression "
+            "even when quote prefetch succeeded."
         ),
     )
     chili_autotrader_stock_session_defer_enabled: bool = Field(
