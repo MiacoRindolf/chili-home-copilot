@@ -10,6 +10,7 @@ import logging
 import time as _time
 from collections import Counter
 from datetime import datetime, time, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy import desc, func
@@ -348,6 +349,26 @@ def _pattern_id_for_rotation(pat: ScanPattern) -> int:
         return int(getattr(pat, "id", None) or PATTERN_ID_ROTATION_FALLBACK)
     except (TypeError, ValueError):
         return PATTERN_ID_ROTATION_FALLBACK
+
+
+def _snapshot_scan_pattern(pat: ScanPattern) -> SimpleNamespace:
+    return SimpleNamespace(**{
+        column.key: getattr(pat, column.key)
+        for column in ScanPattern.__table__.columns
+    })
+
+
+def _release_imminent_read_transaction(db: Session) -> bool:
+    if not db.in_transaction():
+        return False
+    if db.new or db.dirty or db.deleted:
+        return False
+    try:
+        db.rollback()
+    except Exception:
+        logger.debug("[pattern_imminent] read transaction release failed", exc_info=True)
+        return False
+    return True
 
 
 def _rotated_ticker_cap_slice(
@@ -1349,7 +1370,7 @@ def gather_imminent_candidate_rows(
         and not bool(for_opportunity_board)
     )
 
-    patterns = sorted(
+    loaded_patterns = sorted(
         db.query(ScanPattern).filter(ScanPattern.active.is_(True)).all(),
         key=_imminent_scan_priority_key,
     )
@@ -1359,16 +1380,18 @@ def gather_imminent_candidate_rows(
         poor_shadow_details,
     ) = _shadow_poor_edge_pattern_ids(
         db,
-        patterns,
+        loaded_patterns,
         user_id,
     )
     global_uni, uni_counts = build_imminent_ticker_universe(db, user_id, max_tickers)
-    coinbase_spot_tickers = _coinbase_spot_ticker_set()
     open_position_keys = (
         _open_autotrader_position_keys(db, user_id)
         if open_position_deflection_enabled
         else set()
     )
+    patterns = [_snapshot_scan_pattern(pat) for pat in loaded_patterns]
+    read_transaction_released = _release_imminent_read_transaction(db)
+    coinbase_spot_tickers = _coinbase_spot_ticker_set()
 
     candidates: list[dict[str, Any]] = []
     patterns_tried = 0
@@ -1983,6 +2006,7 @@ def gather_imminent_candidate_rows(
         "ticker_rotation_samples": ticker_rotation_samples,
         "open_position_deflection_enabled": open_position_deflection_enabled,
         "open_position_deflection_keys": len(open_position_keys),
+        "read_transaction_released_before_scoring": read_transaction_released,
         "pattern_priority_top_stage_counts": dict(pattern_priority_top_stage_counts),
         "top_suppressed": suppressed,
         "equity_session_open": eq_open,

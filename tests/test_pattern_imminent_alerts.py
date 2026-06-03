@@ -1370,6 +1370,119 @@ def test_gather_imminent_memoizes_ticker_scores_across_patterns(
     assert meta["score_cache_hits"] == 1
 
 
+def test_gather_imminent_releases_read_transaction_before_scoring(
+    monkeypatch,
+) -> None:
+    rules = {
+        "conditions": [
+            {"indicator": "rsi_14", "op": ">", "value": TEST_RSI_BREAKOUT_TRIGGER}
+        ]
+    }
+    pattern = ScanPattern(
+        name="Released read transaction pattern",
+        rules_json=rules,
+        origin="test",
+        asset_class="crypto",
+        lifecycle_stage="promoted",
+        ticker_scope="explicit_list",
+        scope_tickers=f'["{TEST_CACHE_TICKER}"]',
+        avg_return_pct=TEST_PATTERN_AVG_RETURN_PCT,
+        win_rate=TEST_PATTERN_WIN_RATE,
+        evidence_count=TEST_PATTERN_EVIDENCE_COUNT,
+        active=True,
+        id=1001,
+    )
+
+    class _FakeQuery:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def all(self):
+            return [pattern]
+
+    class _FakeSession:
+        new = ()
+        dirty = ()
+        deleted = ()
+
+        def __init__(self) -> None:
+            self._in_transaction = True
+
+        def query(self, *args, **kwargs):
+            return _FakeQuery()
+
+        def in_transaction(self) -> bool:
+            return self._in_transaction
+
+        def rollback(self) -> None:
+            self._in_transaction = False
+
+    fake_db = _FakeSession()
+
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_min_readiness",
+        TEST_MIN_READINESS,
+    )
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_readiness_cap",
+        TEST_FULL_READINESS_CAP,
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "build_imminent_ticker_universe",
+        lambda *args, **kwargs: ([TEST_CACHE_TICKER], {}),
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "_shadow_poor_edge_pattern_ids",
+        lambda *args, **kwargs: (set(), {}, {}),
+    )
+    transaction_checks: list[tuple[str, bool]] = []
+
+    def _fake_coinbase_spot_ticker_set() -> frozenset[str]:
+        transaction_checks.append(("coinbase", fake_db.in_transaction()))
+        return frozenset({TEST_CACHE_TICKER})
+
+    def _fake_score_ticker(
+        ticker: str,
+        skip_fundamentals: bool = True,
+        skip_pattern_engine: bool = False,
+    ):
+        transaction_checks.append(("score", fake_db.in_transaction()))
+        return {
+            "price": TEST_SCORE_PRICE,
+            "entry_price": TEST_SCORE_PRICE,
+            "stop_loss": TEST_SCORE_STOP_LOSS,
+            "take_profit": TEST_SCORE_TAKE_PROFIT,
+            "signals": ["test"],
+            "indicators": {
+                "rsi": TEST_SCORE_RSI,
+                "adx": TEST_SCORE_ADX,
+                "atr": TEST_SCORE_ATR,
+            },
+        }
+
+    monkeypatch.setattr(
+        imminent_mod,
+        "_coinbase_spot_ticker_set",
+        _fake_coinbase_spot_ticker_set,
+    )
+    monkeypatch.setattr(imminent_mod, "_score_ticker", _fake_score_ticker)
+    monkeypatch.setattr(imminent_mod, "recent_swing_resistance", lambda ticker: None)
+
+    candidates, meta = gather_imminent_candidate_rows(
+        fake_db,
+        user_id=1,
+        equity_session_open=False,
+    )
+
+    assert [c["ticker"] for c in candidates] == [TEST_CACHE_TICKER]
+    assert transaction_checks == [("coinbase", False), ("score", False)]
+    assert meta["read_transaction_released_before_scoring"] is True
+
+
 def test_build_imminent_universe_filters_non_coinbase_crypto(
     db,
     monkeypatch,
