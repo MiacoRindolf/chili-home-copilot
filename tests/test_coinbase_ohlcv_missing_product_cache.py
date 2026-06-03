@@ -51,6 +51,18 @@ class _RateLimitResponse:
         raise exc
 
 
+class _DelistedProductResponse:
+    status_code = 400
+
+    def raise_for_status(self) -> None:
+        exc = requests.HTTPError("400 Client Error: Bad Request")
+        exc.response = self
+        raise exc
+
+    def json(self):
+        return {"message": "Not allowed for delisted products"}
+
+
 def _raise_not_found(*_args, **_kwargs):
     return _Response()
 
@@ -149,6 +161,29 @@ def test_public_product_catalog_blocks_known_missing_product(monkeypatch):
     assert calls == [f"{coinbase_ohlcv._COINBASE_EXCHANGE_API_BASE_URL}/products"]
 
 
+def test_public_product_catalog_blocks_delisted_product(monkeypatch):
+    calls: list[str] = []
+
+    def _get(url, **_kwargs):
+        calls.append(str(url))
+        if str(url).endswith("/products"):
+            return _CatalogResponse([
+                {
+                    "id": "BOND-USD",
+                    "quote_currency": "USD",
+                    "status": "delisted",
+                    "trading_disabled": True,
+                },
+                {"id": "BTC-USD", "quote_currency": "USD", "status": "online"},
+            ])
+        raise AssertionError(f"unexpected product-specific request: {url}")
+
+    monkeypatch.setattr(coinbase_ohlcv._SESSION, "get", _get)
+
+    assert coinbase_ohlcv.get_quote("BOND-USD") is None
+    assert calls == [f"{coinbase_ohlcv._COINBASE_EXCHANGE_API_BASE_URL}/products"]
+
+
 def test_public_product_catalog_allows_known_product_quote(monkeypatch):
     calls: list[str] = []
 
@@ -199,6 +234,23 @@ def test_quote_429_opens_provider_backoff(monkeypatch):
     assert calls[-1] == (
         f"{coinbase_ohlcv._COINBASE_EXCHANGE_API_BASE_URL}/products/ETH-USD/ticker"
     )
+
+
+def test_quote_delisted_400_uses_missing_product_cache(monkeypatch):
+    calls: list[str] = []
+
+    def _get(url, **_kwargs):
+        calls.append(str(url))
+        return _DelistedProductResponse()
+
+    monkeypatch.setenv("CHILI_COINBASE_OHLCV_PRODUCT_PREFILTER_ENABLED", "0")
+    monkeypatch.setattr(coinbase_ohlcv._SESSION, "get", _get)
+
+    assert coinbase_ohlcv.get_quote("BOND-USD") is None
+    assert coinbase_ohlcv.get_quote("BOND-USD") is None
+    assert calls == [
+        f"{coinbase_ohlcv._COINBASE_EXCHANGE_API_BASE_URL}/products/BOND-USD/ticker",
+    ]
 
 
 def test_catalog_429_does_not_fall_through_to_product_request(monkeypatch):

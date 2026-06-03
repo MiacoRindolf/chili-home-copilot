@@ -210,6 +210,30 @@ def _product_not_found(exc: requests.RequestException) -> bool:
     return status == _COINBASE_PRODUCT_NOT_FOUND_STATUS
 
 
+def _response_message(exc: requests.RequestException) -> str:
+    response = getattr(exc, "response", None)
+    if response is None:
+        return ""
+    try:
+        data = response.json()
+    except Exception:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    return str(data.get("message") or "")
+
+
+def _product_unavailable(exc: requests.RequestException) -> bool:
+    if _product_not_found(exc):
+        return True
+    if not isinstance(exc, requests.HTTPError):
+        return False
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status != 400:
+        return False
+    return "delisted product" in _response_message(exc).lower()
+
+
 def _product_marked_missing(product_id: str) -> bool:
     now = time.time()
     with _MISSING_PRODUCT_LOCK:
@@ -247,6 +271,11 @@ def _catalog_product_id(row: Any) -> str:
         .upper()
     )
     if quote and quote != "USD":
+        return ""
+    status = str(row.get("status") or "").strip().lower()
+    if status in {"delisted", "offline"}:
+        return ""
+    if row.get("trading_disabled") is True:
         return ""
     return pid
 
@@ -376,7 +405,7 @@ def _record_rate_limit_backoff(exc: requests.RequestException) -> None:
 
 
 def _request_failure_counts(exc: requests.RequestException) -> bool:
-    if _product_not_found(exc):
+    if _product_unavailable(exc):
         return False
     if isinstance(exc, (requests.ConnectionError, requests.Timeout)):
         return True
@@ -530,7 +559,7 @@ def get_ohlcv(
             )
             _record_request_success()
         except requests.RequestException as e:
-            if _product_not_found(e):
+            if _product_unavailable(e):
                 _mark_product_missing(product_id)
             _record_request_failure(e)
             logger.warning(
@@ -613,7 +642,7 @@ def get_quote(ticker: str) -> dict[str, Any] | None:
             return None
         _record_request_success()
     except requests.RequestException as e:
-        if _product_not_found(e):
+        if _product_unavailable(e):
             _mark_product_missing(product_id)
         _record_request_failure(e)
         logger.warning("[coinbase_ohlcv] %s quote request failed: %s", product_id, e)
