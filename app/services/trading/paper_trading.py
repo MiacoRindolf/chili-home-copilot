@@ -2183,6 +2183,19 @@ def _auto_enter_add_block(
     )
 
 
+def _auto_enter_duplicate_reason(existing: Any, direction: str) -> str:
+    existing_direction = str(getattr(existing, "direction", "") or "").strip().lower()
+    incoming_direction = str(direction or "").strip().lower()
+    if existing_direction in {"long", "short"} and incoming_direction in {
+        "long",
+        "short",
+    }:
+        if existing_direction == incoming_direction:
+            return "duplicate_open_same_direction"
+        return "duplicate_open_opposite_direction"
+    return "duplicate_open"
+
+
 def _auto_enter_open_failure_reason(
     db: Session,
     *,
@@ -2220,7 +2233,7 @@ def _auto_enter_open_failure_reason(
     except Exception:
         existing = None
     if existing is not None:
-        return "duplicate_open"
+        return _auto_enter_duplicate_reason(existing, direction)
 
     side = _paper_side(direction)
     if _paper_directional_risk_amount(entry, stop, side) is None:
