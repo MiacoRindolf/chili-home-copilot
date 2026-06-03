@@ -17,6 +17,7 @@ Covers the 8 cases from the brief:
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -141,7 +142,74 @@ def test_reject_shadow_decision_map():
     assert at_mod._qualified_reject_shadow_decision(
         "max_concurrent_crypto"
     ) == "blocked_max_concurrent_crypto"
+    assert at_mod._qualified_reject_shadow_decision(
+        "stop_not_below_entry"
+    ) == "skipped_directional_geometry"
+    assert at_mod._qualified_reject_shadow_decision(
+        "target_not_above_entry"
+    ) == "skipped_directional_geometry"
     assert at_mod._qualified_reject_shadow_decision("no_quote") is None
+
+
+def test_paper_shadow_tick_budget_suppresses_learning_only_reject():
+    out = {
+        "_tick_started_monotonic": time.monotonic() - 16.0,
+        "tick_budget_seconds": 15,
+    }
+
+    reason = at_mod._paper_shadow_tick_budget_suppression_reason(
+        out,
+        reject_reason="regime_gate:negative_ev_consensus",
+    )
+
+    assert reason == "tick_budget_exhausted"
+    assert out["paper_shadow_tick_budget_suppressed"] == 1
+    assert (
+        out["paper_shadow_tick_budget_suppressed_last_reason"]
+        == "blocked_regime_gate"
+    )
+
+
+def test_paper_shadow_queue_pressure_suppresses_low_quality_directional_reject(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_paper_shadow_queue_pressure_suppression_floor",
+        0.6,
+    )
+    out = {"candidate_queue_pressure": 0.6}
+
+    reason = at_mod._paper_shadow_queue_pressure_suppression_reason(
+        out,
+        reject_reason="stop_not_below_entry",
+        snap={"entry_edge": {"expected_net_pct": -0.1}},
+    )
+
+    assert reason == "queue_pressure"
+    assert out["paper_shadow_queue_pressure_suppressed"] == 1
+    assert (
+        out["paper_shadow_queue_pressure_suppressed_last_reason"]
+        == "skipped_directional_geometry"
+    )
+
+
+def test_paper_shadow_queue_pressure_keeps_positive_edge_evidence(monkeypatch):
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_paper_shadow_queue_pressure_suppression_floor",
+        0.6,
+    )
+    out = {"candidate_queue_pressure": 1.0}
+
+    reason = at_mod._paper_shadow_queue_pressure_suppression_reason(
+        out,
+        reject_reason="stop_not_below_entry",
+        snap={"entry_edge": {"expected_net_pct": 0.3}},
+    )
+
+    assert reason is None
+    assert "paper_shadow_queue_pressure_suppressed" not in out
 
 
 def test_reject_shadow_uses_lightweight_sizing_without_broker_lookup(monkeypatch):
