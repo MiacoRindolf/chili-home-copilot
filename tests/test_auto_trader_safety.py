@@ -931,6 +931,75 @@ def test_qualified_block_shadow_decisions_cover_learning_dead_ends():
     )
 
 
+def test_paper_shadow_signal_json_preserves_expected_edge_context():
+    alert = SimpleNamespace(id=11, ticker="BTC-USD", asset_type="crypto")
+    snap = {
+        "entry_edge": {
+            "expected_net_pct": 3.2,
+            "probability_source": "test_edge_model",
+        },
+        "projected_profit_pct": 4.5,
+        "paper_shadow_reject_reason": "venue_degraded:coinbase:error_rate_pct=50.0",
+        "paper_observation_signal_lane": "shadow_near_miss",
+    }
+
+    sig = at_mod._paper_shadow_signal_json(
+        alert,
+        snap,
+        "blocked_venue_health",
+        duplicate_policy=at_mod.PAPER_SHADOW_DUPLICATE_POLICY_REJECT_BYPASS,
+    )
+
+    assert sig["entry_edge"] == snap["entry_edge"]
+    assert sig["entry_edge"] is not snap["entry_edge"]
+    assert sig["entry_edge_expected_net_pct"] == pytest.approx(3.2)
+    assert sig["asset_class"] == "crypto"
+    assert sig["asset_type"] == "crypto"
+    assert sig["paper_shadow_reject_reason"] == (
+        "venue_degraded:coinbase:error_rate_pct=50.0"
+    )
+    assert sig["paper_shadow_duplicate_policy"] == (
+        at_mod.PAPER_SHADOW_DUPLICATE_POLICY_REJECT_BYPASS
+    )
+    assert sig["paper_observation_signal_lane"] == "shadow_near_miss"
+
+
+def test_paper_shadow_signal_json_preserves_top_level_expected_edge():
+    alert = SimpleNamespace(id=12, ticker="EDGE-USD", asset_type=None)
+    snap = {"entry_edge_expected_net_pct": "2.5"}
+
+    sig = at_mod._paper_shadow_signal_json(
+        alert,
+        snap,
+        "placed",
+        duplicate_policy=at_mod.PAPER_SHADOW_DUPLICATE_POLICY_STRICT,
+    )
+
+    assert sig["entry_edge_expected_net_pct"] == pytest.approx(2.5)
+    assert sig["asset_class"] == "crypto"
+    assert sig["asset_type"] == "crypto"
+
+
+def test_paper_shadow_signal_json_requires_contract_context_for_options():
+    alert = SimpleNamespace(id=13, ticker="AAPL", asset_type="options")
+    snap = {
+        "entry_edge_expected_net_pct": 1.7,
+        "options_path": True,
+        "option_meta": {},
+    }
+
+    sig = at_mod._paper_shadow_signal_json(
+        alert,
+        snap,
+        "placed",
+        duplicate_policy=at_mod.PAPER_SHADOW_DUPLICATE_POLICY_STRICT,
+    )
+
+    assert sig["entry_edge_expected_net_pct"] == pytest.approx(1.7)
+    assert sig["asset_class"] == "stock"
+    assert sig["asset_type"] == "stock"
+
+
 def test_synergy_retry_candidates_revisit_recent_distinct_pattern(db, monkeypatch):
     user = models.User(name="synergy_retry_candidate")
     db.add(user)
@@ -1832,15 +1901,34 @@ def test_crypto_probation_quota_uses_pattern_ticker_and_edge_gated_crypto_cap(
     settings.chili_autotrader_probation_crypto_min_expected_net_pct_for_extra_quota = 1.0
     monkeypatch.setattr(at_mod, "settings", settings)
 
-    portfolio_count = 1
+    total_portfolio_count = 1
+    crypto_portfolio_count = 1
+    count_calls: list[dict] = []
 
-    def fake_probation_count(_db, *, uid, pattern_id=None, ticker=None, now=None):
+    def fake_probation_count(
+        _db,
+        *,
+        uid,
+        pattern_id=None,
+        ticker=None,
+        asset_class=None,
+        now=None,
+    ):
         del uid, now
+        count_calls.append(
+            {
+                "pattern_id": pattern_id,
+                "ticker": ticker,
+                "asset_class": asset_class,
+            }
+        )
         if ticker is not None:
             return 1 if ticker == "AAA-USD" else 0
         if pattern_id is not None:
             return 1
-        return portfolio_count
+        if asset_class == "crypto":
+            return crypto_portfolio_count
+        return total_portfolio_count
 
     monkeypatch.setattr(
         at_mod,
@@ -1868,6 +1956,7 @@ def test_crypto_probation_quota_uses_pattern_ticker_and_edge_gated_crypto_cap(
         expected_net_pct=2.0,
     )
     assert diversified_crypto_reason is None
+    assert count_calls[-1]["asset_class"] == "crypto"
 
     low_edge_reason = at_mod._probation_quota_block_reason(
         db,
@@ -1878,8 +1967,10 @@ def test_crypto_probation_quota_uses_pattern_ticker_and_edge_gated_crypto_cap(
         expected_net_pct=0.5,
     )
     assert low_edge_reason == at_mod.PROBATION_QUOTA_REASON_PORTFOLIO
+    assert count_calls[-1]["asset_class"] is None
 
-    portfolio_count = 2
+    total_portfolio_count = 3
+    crypto_portfolio_count = 2
     portfolio_reason = at_mod._probation_quota_block_reason(
         db,
         uid=uid,
@@ -1889,6 +1980,30 @@ def test_crypto_probation_quota_uses_pattern_ticker_and_edge_gated_crypto_cap(
         expected_net_pct=2.0,
     )
     assert portfolio_reason == at_mod.PROBATION_QUOTA_REASON_PORTFOLIO
+    assert count_calls[-1]["asset_class"] == "crypto"
+
+
+def test_probation_trade_count_can_filter_crypto_asset_lane():
+    class _Db:
+        sql: str = ""
+        params: dict = {}
+
+        def execute(self, stmt, params):
+            self.sql = str(stmt)
+            self.params = dict(params)
+            return SimpleNamespace(scalar=lambda: 0)
+
+    db = _Db()
+
+    assert at_mod._probation_trade_count_today(
+        db,
+        uid=123,
+        asset_class="crypto",
+    ) == 0
+
+    assert "LOWER(COALESCE(asset_kind, '')) = 'crypto'" in db.sql
+    assert "UPPER(ticker) LIKE '%-USD'" in db.sql
+    assert db.params["flag"] == at_mod.PROBATION_JSON_TRUE
 
 
 def test_feature_parity_blocks_price_only_snapshot_when_required(monkeypatch):
@@ -1950,6 +2065,83 @@ def test_required_venue_health_blocks_insufficient_data(monkeypatch):
     reason = at_mod._live_venue_health_block_reason(None, venue="coinbase")
 
     assert reason == "venue_health_insufficient_data:coinbase:lifecycle_samples=0<5"
+
+
+def test_venue_health_block_opens_observation_shadow(monkeypatch):
+    assert "blocked_venue_health" in at_mod.QUALIFIED_BLOCK_PAPER_SHADOW_DECISIONS
+    blocked: list[dict] = []
+    shadows: list[dict] = []
+
+    monkeypatch.setattr(
+        at_mod,
+        "_block_live_order",
+        lambda *args, **kwargs: blocked.append(kwargs),
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_maybe_open_paper_shadow",
+        lambda *args, **kwargs: shadows.append(kwargs),
+    )
+
+    out = {"skipped": 0}
+    at_mod._block_live_order_with_paper_shadow(
+        object(),
+        uid=7,
+        alert=SimpleNamespace(id=11, ticker="BTC-USD", scan_pattern_id=22),
+        reason="venue_degraded:coinbase:error_rate_pct=50.0",
+        snap={"entry_edge_expected_net_pct": 2.5},
+        llm_snap=None,
+        out=out,
+        qty=0.01,
+        px=50_000.0,
+        shadow_decision="blocked_venue_health",
+    )
+
+    assert blocked[0]["reason"] == "venue_degraded:coinbase:error_rate_pct=50.0"
+    assert blocked[0]["snap"]["paper_shadow_reject_reason"] == (
+        "venue_degraded:coinbase:error_rate_pct=50.0"
+    )
+    assert shadows == [
+        {
+            "uid": 7,
+            "alert": blocked[0]["alert"],
+            "qty": 0.01,
+            "px": 50_000.0,
+            "snap": blocked[0]["snap"],
+            "decision": "blocked_venue_health",
+        }
+    ]
+
+
+def test_venue_health_block_skips_shadow_when_price_unusable(monkeypatch):
+    blocked: list[dict] = []
+    shadows: list[dict] = []
+    monkeypatch.setattr(
+        at_mod,
+        "_block_live_order",
+        lambda *args, **kwargs: blocked.append(kwargs),
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_maybe_open_paper_shadow",
+        lambda *args, **kwargs: shadows.append(kwargs),
+    )
+
+    at_mod._block_live_order_with_paper_shadow(
+        object(),
+        uid=7,
+        alert=SimpleNamespace(id=11, ticker="BTC-USD", scan_pattern_id=22),
+        reason="venue_health_insufficient_data:coinbase:lifecycle_samples=0<5",
+        snap={},
+        llm_snap=None,
+        out={"skipped": 0},
+        qty=0.01,
+        px=None,
+        shadow_decision="blocked_venue_health",
+    )
+
+    assert blocked
+    assert shadows == []
 
 
 def test_entry_risk_notional_refuses_unproven_fallback_capital(monkeypatch):

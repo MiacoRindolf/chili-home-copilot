@@ -117,6 +117,7 @@ QUALIFIED_BLOCK_PAPER_SHADOW_DECISIONS = frozenset({
     "blocked_regime_gate",
     "blocked_recert_required",
     "blocked_shadow_promoted",
+    "blocked_venue_health",
     "skipped_duplicate_pattern_already_open",
     "skipped_non_positive_expected_edge",
     "skipped_pending_entry_already_working",
@@ -1846,6 +1847,123 @@ def _find_recent_candidate_reason_family_shadow(
     return None, None
 
 
+def _paper_shadow_has_option_context(snap: dict[str, Any] | None) -> bool:
+    if not isinstance(snap, dict):
+        return False
+    option_meta = snap.get("option_meta")
+    return (
+        bool(snap.get("options_path"))
+        and isinstance(option_meta, dict)
+        and bool(option_meta)
+    )
+
+
+def _paper_shadow_asset_class(
+    alert: BreakoutAlert,
+    snap: dict[str, Any] | None,
+) -> str:
+    candidates: list[Any] = []
+    if isinstance(snap, dict):
+        candidates.extend(
+            snap.get(key) for key in ("asset_class", "asset_type", "asset_kind")
+        )
+    candidates.append(getattr(alert, "asset_type", None))
+    has_option_context = _paper_shadow_has_option_context(snap)
+    for raw in candidates:
+        value = str(raw or "").strip().lower()
+        if value in {"crypto", "coin", "coinbase_spot"}:
+            return "crypto"
+        if value in {"option", "options", "robinhood_options"} and has_option_context:
+            return "options"
+        if value in {
+            "stock",
+            "stocks",
+            "equity",
+            "equities",
+            "robinhood",
+            "robinhood_equity",
+        }:
+            return "stock"
+    ticker = str(getattr(alert, "ticker", "") or "").strip().upper()
+    if ticker.endswith("-USD"):
+        return "crypto"
+    return "stock"
+
+
+def _paper_shadow_asset_type(
+    alert: BreakoutAlert,
+    snap: dict[str, Any] | None,
+    *,
+    asset_class: str,
+) -> str:
+    raw = None
+    if isinstance(snap, dict):
+        raw = (
+            snap.get("asset_type")
+            or snap.get("asset_class")
+            or snap.get("asset_kind")
+        )
+    if raw is None:
+        raw = getattr(alert, "asset_type", None)
+    value = str(raw or "").strip().lower()
+    if value in {"crypto", "coin", "coinbase_spot"}:
+        return "crypto"
+    if value in {"option", "options", "robinhood_options"}:
+        return "options" if asset_class == "options" else asset_class
+    if value in {
+        "stock",
+        "stocks",
+        "equity",
+        "equities",
+        "robinhood",
+        "robinhood_equity",
+    }:
+        return "stock"
+    return asset_class
+
+
+def _paper_shadow_signal_json(
+    alert: BreakoutAlert,
+    snap: dict[str, Any] | None,
+    decision: str,
+    *,
+    duplicate_policy: str,
+) -> dict[str, Any]:
+    safe_snap = snap if isinstance(snap, dict) else {}
+    sig: dict[str, Any] = {
+        "auto_trader_v1": True,
+        "breakout_alert_id": int(alert.id),
+        "paper_shadow": True,
+        "shadow_of_alert_id": int(alert.id),
+        "shadow_decision": decision,
+        "projected": safe_snap.get("projected_profit_pct"),
+        "paper_shadow_duplicate_policy": duplicate_policy,
+    }
+    entry_edge = safe_snap.get("entry_edge")
+    if isinstance(entry_edge, dict):
+        sig["entry_edge"] = dict(entry_edge)
+    expected_net_pct = _expected_net_pct_from_snapshot(safe_snap)
+    if expected_net_pct is not None:
+        sig["entry_edge_expected_net_pct"] = expected_net_pct
+    asset_class = _paper_shadow_asset_class(alert, safe_snap)
+    sig["asset_class"] = asset_class
+    sig["asset_type"] = _paper_shadow_asset_type(
+        alert,
+        safe_snap,
+        asset_class=asset_class,
+    )
+    if safe_snap.get("paper_observation_signal_lane"):
+        sig["paper_observation_signal_lane"] = safe_snap.get(
+            "paper_observation_signal_lane"
+        )
+    sig.update({
+        k: v
+        for k, v in safe_snap.items()
+        if isinstance(k, str) and k.startswith(PAPER_SHADOW_AUDIT_PREFIX)
+    })
+    return sig
+
+
 def _paper_shadow_capacity_admission(
     db: Session,
     *,
@@ -1981,28 +2099,16 @@ def _maybe_open_paper_shadow(
             open_paper_trade,
             prune_autotrader_paper_shadow_capacity,
         )
-        sig = {
-            "auto_trader_v1": True,
-            "breakout_alert_id": int(alert.id),
-            "paper_shadow": True,
-            "shadow_of_alert_id": int(alert.id),
-            "shadow_decision": decision,
-            "projected": snap.get("projected_profit_pct"),
-            "paper_shadow_duplicate_policy": (
+        sig = _paper_shadow_signal_json(
+            alert,
+            snap,
+            decision,
+            duplicate_policy=(
                 PAPER_SHADOW_DUPLICATE_POLICY_REJECT_BYPASS
                 if effective_allow_duplicate_open
                 else PAPER_SHADOW_DUPLICATE_POLICY_STRICT
             ),
-        }
-        if snap.get("paper_observation_signal_lane"):
-            sig["paper_observation_signal_lane"] = snap.get(
-                "paper_observation_signal_lane"
-            )
-        sig.update({
-            k: v
-            for k, v in (snap or {}).items()
-            if isinstance(k, str) and k.startswith(PAPER_SHADOW_AUDIT_PREFIX)
-        })
+        )
         if bool(
             getattr(
                 settings,
@@ -3028,6 +3134,48 @@ def _block_live_order(
     )
     out["skipped"] += 1
     _autotrader_tick_note(out, kind="blocked", reason=rsn, alert=alert)
+
+
+def _block_live_order_with_paper_shadow(
+    db: Session,
+    *,
+    uid: int,
+    alert: BreakoutAlert,
+    reason: str,
+    snap: dict[str, Any] | None,
+    llm_snap: dict[str, Any] | None,
+    out: dict[str, Any],
+    qty: float,
+    px: float | None,
+    shadow_decision: str,
+) -> None:
+    shadow_snap = dict(snap or {})
+    shadow_snap["paper_shadow_reject_reason"] = reason
+    _block_live_order(
+        db,
+        uid=uid,
+        alert=alert,
+        reason=reason,
+        snap=shadow_snap,
+        llm_snap=llm_snap,
+        out=out,
+    )
+    try:
+        shadow_qty = float(qty)
+        shadow_px = float(px)
+    except (TypeError, ValueError):
+        return
+    if shadow_qty <= 0.0 or shadow_px <= 0.0:
+        return
+    _maybe_open_paper_shadow(
+        db,
+        uid=uid,
+        alert=alert,
+        qty=shadow_qty,
+        px=shadow_px,
+        snap=shadow_snap,
+        decision=shadow_decision,
+    )
 
 
 def _live_venue_health_block_reason(db: Session, *, venue: str) -> str | None:
@@ -4139,11 +4287,13 @@ def _probation_trade_count_today(
     uid: int | None,
     pattern_id: int | None = None,
     ticker: str | None = None,
+    asset_class: str | None = None,
     now: datetime | None = None,
 ) -> int:
     start_utc = _probation_day_start_utc(now)
     pattern_clause = ""
     ticker_clause = ""
+    asset_clause = ""
     params: dict[str, Any] = {
         "uid": uid,
         "version": AUTOTRADER_VERSION,
@@ -4156,6 +4306,14 @@ def _probation_trade_count_today(
     if ticker:
         ticker_clause = "AND UPPER(ticker) = :ticker"
         params["ticker"] = str(ticker).strip().upper()
+    asset = str(asset_class or "").strip().lower()
+    if asset == "crypto":
+        asset_clause = """
+          AND (
+              LOWER(COALESCE(asset_kind, '')) = 'crypto'
+              OR UPPER(ticker) LIKE '%-USD'
+          )
+        """
     row = db.execute(text(f"""
         SELECT COUNT(*) AS n
         FROM trading_trades
@@ -4172,6 +4330,7 @@ def _probation_trade_count_today(
           ) = :flag
           {pattern_clause}
           {ticker_clause}
+          {asset_clause}
     """), {
         **params,
         "entry_execution_key": ENTRY_EXECUTION_SNAPSHOT_KEY,
@@ -4271,12 +4430,21 @@ def _probation_quota_block_reason(
         )
         if pattern_count >= per_pattern_limit:
             return PROBATION_QUOTA_REASON_PATTERN
+    base_portfolio_limit = portfolio_limit
     portfolio_limit = _probation_portfolio_limit_for_asset(
         asset_class=asset_class,
         expected_net_pct=expected_net_pct,
         base_limit=portfolio_limit,
     )
-    portfolio_count = _probation_trade_count_today(db, uid=uid)
+    portfolio_count = _probation_trade_count_today(
+        db,
+        uid=uid,
+        asset_class=(
+            "crypto"
+            if asset_class == "crypto" and portfolio_limit > base_portfolio_limit
+            else None
+        ),
+    )
     if portfolio_count >= portfolio_limit:
         return PROBATION_QUOTA_REASON_PORTFOLIO
     return None
@@ -5084,7 +5252,7 @@ def _execute_broker_buy(
             return None
         venue_reason = _live_venue_health_block_reason(db, venue="robinhood")
         if venue_reason is not None:
-            _block_live_order(
+            _block_live_order_with_paper_shadow(
                 db,
                 uid=uid,
                 alert=alert,
@@ -5092,6 +5260,9 @@ def _execute_broker_buy(
                 snap=snap,
                 llm_snap=llm_snap,
                 out=out,
+                qty=float(contract_qty),
+                px=float(option_limit_price),
+                shadow_decision="blocked_venue_health",
             )
             return None
         from .venue.robinhood_options import RobinhoodOptionsAdapter
@@ -5329,7 +5500,7 @@ def _execute_broker_buy(
 
         venue_reason = _live_venue_health_block_reason(db, venue="coinbase")
         if venue_reason is not None:
-            _block_live_order(
+            _block_live_order_with_paper_shadow(
                 db,
                 uid=uid,
                 alert=alert,
@@ -5337,6 +5508,9 @@ def _execute_broker_buy(
                 snap=snap,
                 llm_snap=llm_snap,
                 out=out,
+                qty=float(qty),
+                px=px or snap.get("entry_price") or alert.entry_price,
+                shadow_decision="blocked_venue_health",
             )
             return None
 
@@ -5629,7 +5803,7 @@ def _execute_broker_buy(
     # exactly the same arguments it did pre-Phase-3.
     venue_reason = _live_venue_health_block_reason(db, venue="robinhood")
     if venue_reason is not None:
-        _block_live_order(
+        _block_live_order_with_paper_shadow(
             db,
             uid=uid,
             alert=alert,
@@ -5637,6 +5811,9 @@ def _execute_broker_buy(
             snap=snap,
             llm_snap=llm_snap,
             out=out,
+            qty=float(qty),
+            px=px or snap.get("entry_price") or alert.entry_price,
+            shadow_decision="blocked_venue_health",
         )
         return None
 

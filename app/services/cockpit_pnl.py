@@ -81,13 +81,84 @@ def _aggregate(trades: List[Any], quote_fn: Callable[[str], Optional[float]]) ->
         "by_ticker": by_ticker,
         "count": count,
         "priced": priced,
+        "total": round(total, 2),                       # numeric, for combining with realized P/L
         "total_fmt": (_fmt_money(total) if priced else None),
         "total_up": total >= 0,
     }
 
 
 def _empty() -> Dict[str, Any]:
-    return {"by_ticker": {}, "count": 0, "priced": 0, "total_fmt": None, "total_up": True}
+    return {"by_ticker": {}, "count": 0, "priced": 0, "total": 0.0, "total_fmt": None, "total_up": True}
+
+
+def _cumulative(pnls: List[float], cap: int = 60) -> Dict[str, Any]:
+    """Pure: a list of per-close realized P/L values → the running cumulative
+    curve for a sparkline (capped to the most recent ``cap`` points)."""
+    cum = 0.0
+    pts: List[float] = []
+    for v in pnls:
+        try:
+            cum += float(v)
+        except (TypeError, ValueError):
+            continue
+        pts.append(round(cum, 2))
+    if len(pts) > cap:
+        pts = pts[-cap:]
+    last = pts[-1] if pts else None
+    return {
+        "points": pts,
+        "count": len(pts),
+        "last_fmt": (_fmt_money(last) if last is not None else None),
+        "up": (last >= 0) if last is not None else True,
+    }
+
+
+# Separate cache for the intraday curve (changes slowly — closes, not quotes).
+_CURVE_CACHE: Dict[Optional[int], tuple] = {}
+_CURVE_TTL = 45.0
+
+
+def build_intraday_curve(db: Session, user_id: Optional[int], window_hours: int = 24) -> Dict[str, Any]:
+    """Read-only cumulative realized-P/L curve over the trailing window (matches
+    the "Net P/L (24h)" figure): closed trades ordered oldest→newest, running
+    sum of their P/L. Cached per user; neutral empty on any failure."""
+    now = time.time()
+    with _PNL_LOCK:
+        hit = _CURVE_CACHE.get(user_id)
+        if hit and now - hit[0] < _CURVE_TTL:
+            return hit[1]
+    result = _cumulative([])
+    try:
+        if user_id:
+            from datetime import datetime, timedelta
+            from ..models import Trade
+            since = datetime.utcnow() - timedelta(hours=window_hours)
+            rows = (
+                db.query(Trade.pnl)
+                .filter(
+                    Trade.user_id == user_id,
+                    Trade.status == "closed",
+                    Trade.exit_date.isnot(None),
+                    Trade.exit_date >= since,
+                    Trade.pnl.isnot(None),
+                )
+                .order_by(Trade.exit_date.asc())
+                .limit(300)
+                .all()
+            )
+            result = _cumulative([r[0] for r in rows])
+    except Exception as e:
+        logger.warning("[cockpit_pnl] intraday curve build failed: %s", e)
+        result = _cumulative([])
+    with _PNL_LOCK:
+        if len(_CURVE_CACHE) >= _PNL_MAX:
+            cutoff = now - _CURVE_TTL
+            for k in [k for k, v in _CURVE_CACHE.items() if v[0] < cutoff]:
+                _CURVE_CACHE.pop(k, None)
+            if len(_CURVE_CACHE) >= _PNL_MAX:
+                _CURVE_CACHE.clear()
+        _CURVE_CACHE[user_id] = (now, result)
+    return result
 
 
 def build_unrealized(db: Session, user_id: Optional[int]) -> Dict[str, Any]:

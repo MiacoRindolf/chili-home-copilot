@@ -22,6 +22,7 @@ def _numbers(db: Session, user_id: Optional[int]) -> Dict[str, Any]:
         d = build_dashboard(db, user_id)
         t = d.get("trading") or {}
         return {
+            "net_pnl": t.get("net_pnl"),                 # numeric realized (24h), for the combined total
             "net_pnl_fmt": t.get("net_pnl_fmt") or "$0.00",
             "net_pnl_up": (t.get("net_pnl") or 0) >= 0,
             "win_rate_fmt": t.get("win_rate_fmt") or "—",
@@ -163,9 +164,32 @@ def _merge_unrealized(out: Dict[str, Any], db: Session, user_id: Optional[int]) 
         out["unrealized_total_fmt"] = u.get("total_fmt")
         out["unrealized_total_up"] = bool(u.get("total_up"))
         out["unrealized_priced"] = u.get("priced")
+        # Combined Total P/L = realized (24h) + unrealized (open marks). Each part
+        # is included only when known, so the total degrades to whichever exists.
+        from .cockpit_pnl import _fmt_money
+        realized = out.get("net_pnl")
+        unreal_num = u.get("total") if u.get("priced") else None
+        parts = [x for x in (realized, unreal_num) if isinstance(x, (int, float)) and not isinstance(x, bool)]
+        if parts:
+            combined = round(sum(parts), 2)
+            out["total_pnl_fmt"] = _fmt_money(combined)
+            out["total_pnl_up"] = combined >= 0
+        else:
+            out["total_pnl_fmt"] = None
     except Exception as e:
         logger.warning("[desktop_live] unrealized merge failed: %s", e)
         out["unrealized_total_fmt"] = None
+        out["total_pnl_fmt"] = None
+
+
+def _equity_curve(db: Session, user_id: Optional[int]) -> Dict[str, Any]:
+    """Read-only cumulative realized-P/L curve (sparkline) — defensive wrapper."""
+    try:
+        from .cockpit_pnl import build_intraday_curve
+        return build_intraday_curve(db, user_id)
+    except Exception as e:
+        logger.warning("[desktop_live] equity curve failed: %s", e)
+        return {"points": [], "count": 0, "last_fmt": None, "up": True}
 
 
 def build_live(db: Session, user_id: Optional[int]) -> Dict[str, Any]:
@@ -174,6 +198,7 @@ def build_live(db: Session, user_id: Optional[int]) -> Dict[str, Any]:
     out.update(_numbers(db, user_id))
     out.update(_lists(db, user_id))
     _merge_unrealized(out, db, user_id)
+    out["equity_curve"] = _equity_curve(db, user_id)
     out["kill_switch"] = _kill_switch()
     out["breaker"] = _breaker()
     out["market"] = _market()
