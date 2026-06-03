@@ -912,6 +912,7 @@ class Settings(BaseSettings):
     brain_divergence_scorer_yellow_threshold: float = 0.9
     brain_divergence_scorer_red_threshold: float = 1.8
     brain_divergence_scorer_lookback_days: int = 7
+    brain_divergence_scorer_discovery_timeout_ms: int = 5000
     brain_divergence_scorer_cron_hour: int = 6
     brain_divergence_scorer_cron_minute: int = 15
     brain_divergence_scorer_layer_weight_ledger: float = 1.0

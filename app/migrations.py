@@ -20039,6 +20039,156 @@ def _migration_295_pattern_regime_perf_pattern_asof_cover_index(conn) -> None:
     logger.info("[mig295] Pattern-regime pattern/as-of covering index installed")
 
 
+def _migration_296_divergence_discovery_probe_indexes(conn) -> None:
+    """Add/defer source indexes for divergence scheduler pattern discovery."""
+
+    def _pg_error_code(exc: OperationalError) -> str:
+        return str(getattr(getattr(exc, "orig", None), "pgcode", "") or "")
+
+    tables = _tables(conn)
+    heavy_limit_bytes = int(
+        os.environ.get(
+            "CHILI_MIGRATION_HEAVY_DIVERGENCE_INDEX_MAX_BYTES",
+            str(256 * 1024 * 1024),
+        )
+    )
+    build_heavy = (
+        os.environ.get("CHILI_MIGRATION_BUILD_HEAVY_DIVERGENCE_INDEXES", "")
+        .strip()
+        .lower()
+        in {"1", "true", "yes", "on"}
+    )
+    lock_timeout_ms = max(
+        250,
+        int(
+            os.environ.get(
+                "CHILI_MIGRATION_DIVERGENCE_INDEX_LOCK_TIMEOUT_MS",
+                "1000",
+            )
+        ),
+    )
+    statement_timeout_ms = max(
+        1000,
+        int(
+            os.environ.get(
+                "CHILI_MIGRATION_DIVERGENCE_INDEX_STATEMENT_TIMEOUT_MS",
+                "10000",
+            )
+        ),
+    )
+    index_specs = [
+        (
+            "trading_ledger_parity_log",
+            "ix_ledger_parity_created_pattern",
+            {"scan_pattern_id", "created_at", "id"},
+            """
+                CREATE INDEX IF NOT EXISTS ix_ledger_parity_created_pattern
+                ON trading_ledger_parity_log
+                    (created_at, scan_pattern_id, id)
+                WHERE scan_pattern_id IS NOT NULL
+            """,
+        ),
+        (
+            "trading_exit_parity_log",
+            "ix_exit_parity_created_pattern",
+            {"scan_pattern_id", "created_at", "id"},
+            """
+                CREATE INDEX IF NOT EXISTS ix_exit_parity_created_pattern
+                ON trading_exit_parity_log
+                    (created_at, scan_pattern_id, id)
+                WHERE scan_pattern_id IS NOT NULL
+            """,
+        ),
+        (
+            "trading_venue_truth_log",
+            "ix_venue_truth_log_created_trade",
+            {"trade_id", "created_at", "id"},
+            """
+                CREATE INDEX IF NOT EXISTS ix_venue_truth_log_created_trade
+                ON trading_venue_truth_log
+                    (created_at, trade_id, id)
+                WHERE trade_id IS NOT NULL
+            """,
+        ),
+        (
+            "trading_bracket_reconciliation_log",
+            "ix_bracket_reconciliation_observed_trade",
+            {"trade_id", "observed_at", "id"},
+            """
+                CREATE INDEX IF NOT EXISTS ix_bracket_reconciliation_observed_trade
+                ON trading_bracket_reconciliation_log
+                    (observed_at, trade_id, id)
+                WHERE trade_id IS NOT NULL
+            """,
+        ),
+        (
+            "trading_position_sizer_log",
+            "ix_position_sizer_log_observed_pattern",
+            {"pattern_id", "observed_at", "id"},
+            """
+                CREATE INDEX IF NOT EXISTS ix_position_sizer_log_observed_pattern
+                ON trading_position_sizer_log
+                    (observed_at, pattern_id, id)
+                WHERE pattern_id IS NOT NULL
+            """,
+        ),
+    ]
+
+    for table, index_name, required_cols, sql in index_specs:
+        if table not in tables:
+            continue
+        if not required_cols.issubset(_columns(conn, table)):
+            continue
+        if conn.execute(text("SELECT to_regclass(:name)"), {"name": index_name}).scalar():
+            continue
+        table_bytes = int(
+            conn.execute(
+                text("SELECT COALESCE(pg_total_relation_size(to_regclass(:name)), 0)"),
+                {"name": table},
+            ).scalar()
+            or 0
+        )
+        if table_bytes > heavy_limit_bytes and not build_heavy:
+            logger.warning(
+                "[mig296] deferred heavy divergence index %s on %s "
+                "(size=%.2fGB); run scripts/maintain_trading_storage.py "
+                "--target divergence-discovery --create-indexes during a "
+                "maintenance window",
+                index_name,
+                table,
+                table_bytes / (1024 * 1024 * 1024),
+            )
+            continue
+        try:
+            conn.execute(
+                text("SELECT set_config('lock_timeout', :timeout, true)"),
+                {"timeout": f"{lock_timeout_ms}ms"},
+            )
+            conn.execute(
+                text("SELECT set_config('statement_timeout', :timeout, true)"),
+                {"timeout": f"{statement_timeout_ms}ms"},
+            )
+            conn.execute(text(sql))
+            conn.commit()
+        except OperationalError as exc:
+            if _pg_error_code(exc) not in {"40P01", "55P03", "57014"}:
+                raise
+            conn.rollback()
+            logger.warning(
+                "[mig296] deferred divergence index %s on %s due to "
+                "startup lock pressure (pgcode=%s); run "
+                "scripts/maintain_trading_storage.py --target "
+                "divergence-discovery --create-indexes during a maintenance "
+                "window",
+                index_name,
+                table,
+                _pg_error_code(exc),
+            )
+
+    conn.commit()
+    logger.info("[mig296] divergence discovery probe indexes checked")
+
+
 
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -20396,6 +20546,8 @@ MIGRATIONS = [
      _migration_294_kill_switch_runtime_lookup_index),
     ("295_pattern_regime_perf_pattern_asof_cover_index",
      _migration_295_pattern_regime_perf_pattern_asof_cover_index),
+    ("296_divergence_discovery_probe_indexes",
+     _migration_296_divergence_discovery_probe_indexes),
 ]
 
 

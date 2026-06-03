@@ -57,14 +57,44 @@ INDEX_SPECS = [
     ),
     IndexSpec(
         "trading_exit_parity_log",
+        "ix_exit_parity_created_pattern",
+        ("created_at", "scan_pattern_id", "id"),
+        "scan_pattern_id IS NOT NULL",
+    ),
+    IndexSpec(
+        "trading_exit_parity_log",
         "ix_exit_parity_pattern_created",
         ("scan_pattern_id", "created_at", "id"),
         "scan_pattern_id IS NOT NULL",
     ),
     IndexSpec(
+        "trading_ledger_parity_log",
+        "ix_ledger_parity_created_pattern",
+        ("created_at", "scan_pattern_id", "id"),
+        "scan_pattern_id IS NOT NULL",
+    ),
+    IndexSpec(
+        "trading_venue_truth_log",
+        "ix_venue_truth_log_created_trade",
+        ("created_at", "trade_id", "id"),
+        "trade_id IS NOT NULL",
+    ),
+    IndexSpec(
         "trading_bracket_reconciliation_log",
         "ix_bracket_reconciliation_observed_retention",
         ("observed_at", "id"),
+    ),
+    IndexSpec(
+        "trading_bracket_reconciliation_log",
+        "ix_bracket_reconciliation_observed_trade",
+        ("observed_at", "trade_id", "id"),
+        "trade_id IS NOT NULL",
+    ),
+    IndexSpec(
+        "trading_position_sizer_log",
+        "ix_position_sizer_log_observed_pattern",
+        ("observed_at", "pattern_id", "id"),
+        "pattern_id IS NOT NULL",
     ),
     IndexSpec(
         "trading_pattern_trades",
@@ -81,6 +111,13 @@ INDEX_SPECS = [
 INDEX_TARGET_TABLES = {
     "fast-orderbook": {"fast_orderbook_default"},
     "exit-parity": {"trading_exit_parity_log"},
+    "divergence-discovery": {
+        "trading_exit_parity_log",
+        "trading_ledger_parity_log",
+        "trading_venue_truth_log",
+        "trading_bracket_reconciliation_log",
+        "trading_position_sizer_log",
+    },
     "bracket-reconciliation": {"trading_bracket_reconciliation_log"},
     "pattern-trades": {"trading_pattern_trades"},
     "execution-events": {"trading_execution_events"},
@@ -527,6 +564,7 @@ def _resolve_targets(targets: list[str]) -> list[str]:
         return [
             "fast-orderbook",
             "exit-parity",
+            "divergence-discovery",
             "bracket-reconciliation",
             "execution-events",
         ]
@@ -544,6 +582,7 @@ def main() -> int:
             "all",
             "fast-orderbook",
             "exit-parity",
+            "divergence-discovery",
             "bracket-reconciliation",
             "execution-events",
             "pattern-trades",

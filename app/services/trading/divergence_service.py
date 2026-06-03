@@ -51,6 +51,9 @@ from .divergence_model import (
 
 logger = logging.getLogger(__name__)
 _ALLOWED_MODES = ("off", "shadow", "compare", "authoritative")
+_DISCOVERY_TIMEOUT_MIN_MS = 500
+_DISCOVERY_TIMEOUT_MAX_MS = 30_000
+_DISCOVERY_TIMEOUT_PER_LOOKBACK_DAY_MS = 5_000
 
 
 def _effective_mode(override: str | None = None) -> str:
@@ -105,6 +108,54 @@ def _config_from_settings() -> DivergenceConfig:
             settings, "brain_divergence_scorer_red_threshold", 1.8,
         )),
     )
+
+
+def _discovery_statement_timeout_ms(*, lookback_days: int) -> int | None:
+    raw = int(getattr(
+        settings,
+        "brain_divergence_scorer_discovery_timeout_ms",
+        5000,
+    ) or 0)
+    if raw <= 0:
+        return None
+    lookback_pressure_ms = max(1, int(lookback_days)) * (
+        _DISCOVERY_TIMEOUT_PER_LOOKBACK_DAY_MS
+    )
+    return max(
+        _DISCOVERY_TIMEOUT_MIN_MS,
+        min(_DISCOVERY_TIMEOUT_MAX_MS, max(raw, lookback_pressure_ms)),
+    )
+
+
+def _postgres_dialect_name(db: Session) -> str:
+    try:
+        bind = db.get_bind()
+    except Exception:
+        return ""
+    return str(getattr(getattr(bind, "dialect", None), "name", "") or "")
+
+
+def _apply_discovery_statement_timeout(
+    db: Session,
+    *,
+    lookback_days: int,
+) -> int | None:
+    if _postgres_dialect_name(db) != "postgresql":
+        return None
+    timeout_ms = _discovery_statement_timeout_ms(lookback_days=lookback_days)
+    if timeout_ms is None:
+        return None
+    db.execute(text(f"SET LOCAL statement_timeout = '{timeout_ms}ms'"))
+    return timeout_ms
+
+
+def _reset_discovery_statement_timeout(
+    db: Session,
+    timeout_ms: int | None,
+) -> None:
+    if timeout_ms is None:
+        return
+    db.execute(text("SET LOCAL statement_timeout = DEFAULT"))
 
 
 # ---------------------------------------------------------------------------
@@ -489,47 +540,67 @@ def discover_active_patterns(
     Used by the scheduler to pick patterns worth sweeping.
     """
     sql = """
-        WITH recent AS (
-            SELECT DISTINCT scan_pattern_id
+        WITH source_patterns AS (
+            SELECT scan_pattern_id
               FROM trading_ledger_parity_log
              WHERE created_at >= (NOW() - (:ld || ' days')::INTERVAL)
                AND scan_pattern_id IS NOT NULL
-            UNION
-            SELECT DISTINCT scan_pattern_id
+            UNION ALL
+            SELECT scan_pattern_id
               FROM trading_exit_parity_log
              WHERE created_at >= (NOW() - (:ld || ' days')::INTERVAL)
                AND scan_pattern_id IS NOT NULL
-            UNION
-            SELECT DISTINCT t.scan_pattern_id
+            UNION ALL
+            SELECT t.scan_pattern_id
               FROM trading_venue_truth_log v
               JOIN trading_trades t ON t.id = v.trade_id
              WHERE v.created_at >= (NOW() - (:ld || ' days')::INTERVAL)
+               AND v.trade_id IS NOT NULL
                AND t.scan_pattern_id IS NOT NULL
-            UNION
-            SELECT DISTINCT t.scan_pattern_id
+            UNION ALL
+            SELECT t.scan_pattern_id
               FROM trading_bracket_reconciliation_log br
               JOIN trading_trades t ON t.id = br.trade_id
              WHERE br.observed_at >= (NOW() - (:ld || ' days')::INTERVAL)
+               AND br.trade_id IS NOT NULL
                AND t.scan_pattern_id IS NOT NULL
-            UNION
-            SELECT DISTINCT pattern_id AS scan_pattern_id
+            UNION ALL
+            SELECT pattern_id AS scan_pattern_id
               FROM trading_position_sizer_log
              WHERE observed_at >= (NOW() - (:ld || ' days')::INTERVAL)
                AND pattern_id IS NOT NULL
+        ),
+        distinct_patterns AS (
+            SELECT DISTINCT scan_pattern_id
+              FROM source_patterns
         )
-        SELECT r.scan_pattern_id, sp.name
-          FROM recent r
-     LEFT JOIN scan_patterns sp ON sp.id = r.scan_pattern_id
-         ORDER BY r.scan_pattern_id
+        SELECT dp.scan_pattern_id, sp.name
+          FROM distinct_patterns dp
+     LEFT JOIN scan_patterns sp ON sp.id = dp.scan_pattern_id
+         ORDER BY dp.scan_pattern_id
     """
+    timeout_ms = _apply_discovery_statement_timeout(
+        db,
+        lookback_days=int(lookback_days),
+    )
+    params: dict[str, int] = {"ld": int(lookback_days)}
     if limit is not None:
         sql += " LIMIT :lim"
-        rows = db.execute(
-            text(sql),
-            {"ld": int(lookback_days), "lim": int(limit)},
-        ).fetchall()
-    else:
-        rows = db.execute(text(sql), {"ld": int(lookback_days)}).fetchall()
+        params["lim"] = int(limit)
+    try:
+        rows = db.execute(text(sql), params).fetchall()
+        _reset_discovery_statement_timeout(db, timeout_ms)
+    except Exception:
+        logger.warning(
+            "divergence discover_active_patterns failed or timed out",
+            extra={
+                "lookback_days": int(lookback_days),
+                "limit": int(limit) if limit is not None else None,
+                "timeout_ms": timeout_ms,
+            },
+            exc_info=True,
+        )
+        raise
     return [(int(r[0]), r[1]) for r in rows if r[0] is not None]
 
 
