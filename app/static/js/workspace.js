@@ -201,6 +201,7 @@
       { cmd: 'help', label: 'Show keyboard shortcuts', icon: '⌨️' },
       { cmd: 'welcome', label: 'Show welcome', icon: '🌶️' },
       { cmd: 'expose', label: 'Mission Control — switch window', icon: '🗂️' },
+      { cmd: 'reopen', label: 'Reopen closed window', icon: '↩️' },
       { cmd: 'tidy', label: 'Tidy windows', icon: '🪟' },
       { cmd: 'grid', label: 'Grid windows', icon: '🪟' },
       { cmd: 'reset-layout', label: 'Reset window layout', icon: '🪟' },
@@ -238,6 +239,8 @@
       if (window.ChiliOS && window.ChiliOS.grid) window.ChiliOS.grid();
     } else if (id === 'expose') {
       if (window.ChiliOS && window.ChiliOS.expose) window.ChiliOS.expose();
+    } else if (id === 'reopen') {
+      if (window.ChiliOS && window.ChiliOS.reopenClosed) window.ChiliOS.reopenClosed();
     } else if (id === 'welcome') {
       var ws = document.getElementById('ws-welcome-scrim');
       try { localStorage.removeItem('chili-os-welcomed'); } catch (e) {}

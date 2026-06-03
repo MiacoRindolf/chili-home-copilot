@@ -146,8 +146,32 @@
     el.classList.add('os-out');
     setTimeout(finish, 150);
   }
+  // ── Reopen-closed stack: closing a window remembers it (app/src/title/icon +
+  //    geometry) so ⌘/Ctrl+Alt+T — or ⌘K "Reopen closed window" — brings the
+  //    most-recently-closed one back where it was. Deduped by app, capped at 10.
+  //    Switching Spaces / resetLayout tear down via closeAllNow (not closeApp),
+  //    so they never pollute the stack. ──
+  var closedStack = [];
+  function pushClosed(d) {
+    if (!d || !d.src) return;
+    closedStack = closedStack.filter(function (x) { return x.app !== d.app; });  // keep only the newest per app
+    closedStack.push(d);
+    if (closedStack.length > 10) closedStack.shift();
+  }
+  function reopenClosed() {
+    var d = closedStack.pop();
+    if (!d) return false;
+    // Prefer a live dock/tray trigger for fidelity; else rebuild cfg from the descriptor.
+    var b = document.querySelector('.ws-rb[data-app="' + d.app + '"][data-src]') ||
+            document.querySelector('[data-os-win][data-app="' + d.app + '"]');
+    var cfg = b ? cfgFromEl(b) : { app: d.app, src: d.src, title: d.title || d.app, icon: d.icon || '🗔' };
+    openApp(cfg, { left: d.left, top: d.top, width: d.width, height: d.height });
+    return true;
+  }
   function closeApp(app) {
     var el = wins[app]; if (!el) return;
+    pushClosed({ app: app, src: el.dataset.src, title: el.dataset.title, icon: el.dataset.icon,
+                 left: el.style.left, top: el.style.top, width: el.style.width, height: el.style.height });
     el.classList.add('closing');
     setTimeout(function () { el.remove(); }, 120);
     delete wins[app]; order = order.filter(function (a) { return a !== app; });
@@ -357,6 +381,7 @@
     if (!(e.ctrlKey || e.metaKey)) return;
     if (e.key === '`') { if (order.length > 1) { e.preventDefault(); focusWin(order[0]); } return; }
     if (!e.altKey) return;
+    if (e.key.toLowerCase() === 't') { e.preventDefault(); reopenClosed(); return; }  // reopen last-closed (works with 0 windows open)
     var top = order[order.length - 1], el = top && wins[top];
     if (!el) return;
     if (e.key === 'ArrowLeft') { e.preventDefault(); snap(el, 'left'); saveLayout(); }
@@ -482,6 +507,8 @@
     resetLayout: function () { closeAllNow(); try { localStorage.removeItem(LAYOUT_KEY); } catch (e) {} },
     // Mission Control — overlay open windows as a switcher grid (toggle open/closed).
     expose: openExpose,
+    // Reopen the most-recently-closed window where it was; false if the stack is empty.
+    reopenClosed: reopenClosed,
     // Named Spaces — snapshot/restore window arrangements by name.
     spaces: {
       list: function () { return loadSpaces().map(function (s) { return { name: s.name, count: (s.apps || []).length }; }); },
