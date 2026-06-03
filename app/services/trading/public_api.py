@@ -45,9 +45,11 @@ from .portfolio_risk import (
 
 # ── Attribution / review ────────────────────────────────────────────────────
 from .attribution_service import (
+    execution_alpha_drag_followup_candidates,
     execution_alpha_drag_report,
     live_vs_research_by_pattern,
     post_trade_review,
+    queue_execution_alpha_drag_followups,
 )
 from .decision_packet_coverage import decision_packet_coverage_summary
 
@@ -94,7 +96,9 @@ __all__ = [
     "get_breaker_status",
     "reset_breaker",
     # attribution / review
+    "execution_alpha_drag_followup_candidates",
     "execution_alpha_drag_report",
+    "queue_execution_alpha_drag_followups",
     "live_vs_research_by_pattern",
     "post_trade_review",
     "decision_packet_coverage_summary",

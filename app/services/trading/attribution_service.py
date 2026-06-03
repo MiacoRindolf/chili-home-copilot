@@ -244,6 +244,50 @@ def _shadow_reason_family(pt: Any) -> str | None:
     return decision or None
 
 
+def _execution_drag_evidence_fingerprint(group: dict[str, Any]) -> str:
+    body = {
+        "asset_class": group.get("asset_class"),
+        "scan_pattern_id": group.get("scan_pattern_id"),
+        "broker_venue": group.get("broker_venue"),
+        "order_hint": group.get("order_hint"),
+        "reason_family": group.get("reason_family"),
+        "order_status": group.get("order_status"),
+    }
+    import hashlib
+    import json
+
+    return hashlib.sha256(
+        json.dumps(body, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()[:24]
+
+
+def _execution_drag_recommendation(group: dict[str, Any]) -> dict[str, Any]:
+    positive_events = int(group.get("positive_edge_events") or 0)
+    if positive_events <= 0:
+        return {
+            "recommended_work_event": None,
+            "recommended_next_action": "monitor_non_positive_edge_execution_drag",
+        }
+    if group.get("scan_pattern_id") is None:
+        return {
+            "recommended_work_event": "provenance_backfill",
+            "recommended_next_action": "recover_pattern_lineage_before_execution_repair",
+        }
+    reason_family = str(group.get("reason_family") or "").strip().lower()
+    if reason_family == "venue_health":
+        action = "refresh_edge_reliability_and_review_venue_policy"
+    elif reason_family in {"option_entry_no_fill", "place_no_order_id"} or reason_family.startswith("broker_"):
+        action = "refresh_edge_reliability_and_review_entry_execution_geometry"
+    elif reason_family in {"cost_gate", "coinbase_cap"}:
+        action = "refresh_edge_reliability_and_review_capital_or_cost_constraints"
+    else:
+        action = "refresh_edge_reliability_after_execution_drag"
+    return {
+        "recommended_work_event": "edge_reliability_refresh",
+        "recommended_next_action": action,
+    }
+
+
 def _execution_drag_report_from_rows(
     audits: list[Any],
     paper_trades: list[Any],
@@ -364,6 +408,8 @@ def _execution_drag_report_from_rows(
                 ),
             }
         )
+        group["evidence_fingerprint"] = _execution_drag_evidence_fingerprint(group)
+        group.update(_execution_drag_recommendation(group))
         rows.append(group)
 
     rows.sort(
@@ -387,6 +433,45 @@ def _execution_drag_report_from_rows(
         },
         "groups": rows[:safe_limit],
     }
+
+
+def execution_alpha_drag_followup_candidates(
+    report: dict[str, Any],
+    *,
+    min_positive_edge_events: int = 1,
+) -> list[dict[str, Any]]:
+    """Return safe followup work candidates from an execution-drag report."""
+    min_events = max(1, int(min_positive_edge_events))
+    candidates: list[dict[str, Any]] = []
+    for group in report.get("groups") or []:
+        if not isinstance(group, dict):
+            continue
+        event_type = str(group.get("recommended_work_event") or "").strip()
+        if not event_type:
+            continue
+        positive_events = int(group.get("positive_edge_events") or 0)
+        if positive_events < min_events:
+            continue
+        scan_pattern_id = group.get("scan_pattern_id")
+        if scan_pattern_id is None and event_type != "provenance_backfill":
+            continue
+        candidates.append(
+            {
+                "event_type": event_type,
+                "scan_pattern_id": scan_pattern_id,
+                "asset_class": group.get("asset_class"),
+                "evidence_fingerprint": group.get("evidence_fingerprint"),
+                "expected_evidence_value": group.get("total_expected_net_pct"),
+                "positive_edge_events": positive_events,
+                "events": group.get("events"),
+                "reason_family": group.get("reason_family"),
+                "order_status": group.get("order_status"),
+                "broker_venue": group.get("broker_venue"),
+                "order_hint": group.get("order_hint"),
+                "recommended_next_action": group.get("recommended_next_action"),
+            }
+        )
+    return candidates
 
 
 def execution_alpha_drag_report(
@@ -441,6 +526,71 @@ def execution_alpha_drag_report(
         days=safe_days,
         limit=limit,
     )
+
+
+def queue_execution_alpha_drag_followups(
+    db: Session,
+    user_id: int | None,
+    *,
+    days: int = 7,
+    limit: int = 50,
+    min_positive_edge_events: int = 1,
+) -> dict[str, Any]:
+    """Queue conservative followups for positive-edge execution drag groups."""
+    report = execution_alpha_drag_report(db, user_id, days=days, limit=limit)
+    candidates = execution_alpha_drag_followup_candidates(
+        report,
+        min_positive_edge_events=min_positive_edge_events,
+    )
+    created: list[int] = []
+    skipped = 0
+    for candidate in candidates:
+        event_type = str(candidate.get("event_type") or "")
+        event_id: int | None = None
+        if event_type == "edge_reliability_refresh":
+            scan_pattern_id = candidate.get("scan_pattern_id")
+            if scan_pattern_id is None:
+                skipped += 1
+                continue
+            from .edge_reliability import emit_edge_reliability_refresh_requested
+
+            event_id = emit_edge_reliability_refresh_requested(
+                db,
+                int(scan_pattern_id),
+                source="execution_alpha_drag_report",
+                asset_class=candidate.get("asset_class"),
+                window_days=max(1, int(days)),
+                evidence_fingerprint=str(candidate.get("evidence_fingerprint") or ""),
+            )
+        elif event_type == "provenance_backfill":
+            from .edge_reliability import PROVENANCE_BACKFILL, emit_targeted_profitability_work
+
+            event_id = emit_targeted_profitability_work(
+                db,
+                event_type=PROVENANCE_BACKFILL,
+                scan_pattern_id=None,
+                source="execution_alpha_drag_report",
+                asset_class=candidate.get("asset_class"),
+                evidence_fingerprint=str(candidate.get("evidence_fingerprint") or ""),
+                payload=dict(candidate),
+            )
+        else:
+            skipped += 1
+            continue
+        if event_id is None:
+            skipped += 1
+            continue
+        created.append(int(event_id))
+    return {
+        "ok": True,
+        "window_days": max(1, int(days)),
+        "considered": len(candidates),
+        "created": len(created),
+        "skipped": skipped,
+        "event_ids": created,
+        "report_summary": report.get("summary") or {},
+        "candidates": candidates,
+    }
 
 
 def live_vs_research_by_pattern(

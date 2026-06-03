@@ -12,8 +12,10 @@ from app.services.trading.attribution_service import (
     _scan_patterns_by_id,
     _trade_directional_outcome,
     execution_alpha_drag_report,
+    execution_alpha_drag_followup_candidates,
     live_vs_research_by_pattern,
     post_trade_review,
+    queue_execution_alpha_drag_followups,
 )
 
 
@@ -180,9 +182,32 @@ def test_execution_drag_report_groups_positive_edge_no_order_id_shadow() -> None
     assert row["order_hint"] == "limit_post_only"
     assert row["reason_family"] == "place_no_order_id"
     assert row["order_status"] == "no_order_id"
+    assert row["recommended_work_event"] == "edge_reliability_refresh"
+    assert (
+        row["recommended_next_action"]
+        == "refresh_edge_reliability_and_review_entry_execution_geometry"
+    )
     assert row["avg_expected_net_pct"] == pytest.approx(2.5)
     assert row["paper_shadow_avg_return_pct"] == pytest.approx(3.0)
     assert row["paper_shadow_win_rate_pct"] == pytest.approx(100.0)
+    candidates = execution_alpha_drag_followup_candidates(out)
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate["event_type"] == "edge_reliability_refresh"
+    assert candidate["scan_pattern_id"] == 42
+    assert candidate["asset_class"] == "crypto"
+    assert candidate["evidence_fingerprint"] == row["evidence_fingerprint"]
+    assert candidate["expected_evidence_value"] == pytest.approx(2.5)
+    assert candidate["positive_edge_events"] == 1
+    assert candidate["events"] == 1
+    assert candidate["reason_family"] == "place_no_order_id"
+    assert candidate["order_status"] == "no_order_id"
+    assert candidate["broker_venue"] == "coinbase"
+    assert candidate["order_hint"] == "limit_post_only"
+    assert (
+        candidate["recommended_next_action"]
+        == "refresh_edge_reliability_and_review_entry_execution_geometry"
+    )
 
 
 def test_execution_alpha_drag_report_exposes_option_no_fill_groups() -> None:
@@ -239,9 +264,68 @@ def test_execution_alpha_drag_report_exposes_option_no_fill_groups() -> None:
     assert row["reason_family"] == "option_entry_no_fill"
     assert row["order_status"] == "no_fill"
     assert row["positive_edge_events"] == 1
+    assert row["recommended_work_event"] == "edge_reliability_refresh"
+    assert (
+        row["recommended_next_action"]
+        == "refresh_edge_reliability_and_review_entry_execution_geometry"
+    )
     assert row["avg_expected_net_pct"] == pytest.approx(3.1)
     assert row["paper_shadow_avg_return_pct"] == pytest.approx(-12.0)
     assert row["paper_shadow_win_rate_pct"] == pytest.approx(0.0)
+
+
+def test_queue_execution_alpha_drag_followups_requests_edge_refresh(monkeypatch) -> None:
+    audit = SimpleNamespace(
+        id=3,
+        user_id=7,
+        breakout_alert_id=102,
+        scan_pattern_id=88,
+        ticker="AAPL",
+        decision="blocked",
+        reason="broker:option_entry_no_fill:cancelled",
+        rule_snapshot={
+            "entry_edge_expected_net_pct": 2.4,
+            "asset_type": "options",
+            "options_path": True,
+            "option_meta": {"limit_price": 1.35, "expiration": "2026-06-19"},
+            "option_entry_terminal_state": "cancelled",
+        },
+        created_at=datetime(2026, 6, 2, 12, 5),
+    )
+    db = _FakeAttributionSession(
+        trades=[],
+        paper_trades=[],
+        autotrader_runs=[audit],
+        patterns=[],
+    )
+    calls: list[dict] = []
+
+    from app.services.trading import edge_reliability
+
+    def _emit(db_arg, scan_pattern_id, **kwargs):
+        calls.append({"db": db_arg, "scan_pattern_id": scan_pattern_id, **kwargs})
+        return 123
+
+    monkeypatch.setattr(
+        edge_reliability,
+        "emit_edge_reliability_refresh_requested",
+        _emit,
+    )
+
+    out = queue_execution_alpha_drag_followups(db, 7, days=7, limit=10)
+
+    assert out["created"] == 1
+    assert out["event_ids"] == [123]
+    assert calls == [
+        {
+            "db": db,
+            "scan_pattern_id": 88,
+            "source": "execution_alpha_drag_report",
+            "asset_class": "options",
+            "window_days": 7,
+            "evidence_fingerprint": out["candidates"][0]["evidence_fingerprint"],
+        }
+    ]
 
 
 def test_live_vs_research_reports_contract_aware_option_return_after_tca() -> None:
