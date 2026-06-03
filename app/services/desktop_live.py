@@ -182,12 +182,23 @@ def _merge_unrealized(out: Dict[str, Any], db: Session, user_id: Optional[int]) 
         out["total_pnl_fmt"] = None
 
 
+def _equity_curve(db: Session, user_id: Optional[int]) -> Dict[str, Any]:
+    """Read-only cumulative realized-P/L curve (sparkline) — defensive wrapper."""
+    try:
+        from .cockpit_pnl import build_intraday_curve
+        return build_intraday_curve(db, user_id)
+    except Exception as e:
+        logger.warning("[desktop_live] equity curve failed: %s", e)
+        return {"points": [], "count": 0, "last_fmt": None, "up": True}
+
+
 def build_live(db: Session, user_id: Optional[int]) -> Dict[str, Any]:
     """Return the compact live cockpit view-model (safe to poll repeatedly)."""
     out: Dict[str, Any] = {"ok": True}
     out.update(_numbers(db, user_id))
     out.update(_lists(db, user_id))
     _merge_unrealized(out, db, user_id)
+    out["equity_curve"] = _equity_curve(db, user_id)
     out["kill_switch"] = _kill_switch()
     out["breaker"] = _breaker()
     out["market"] = _market()
