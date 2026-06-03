@@ -75,6 +75,11 @@ def _round(value: float | None, digits: int = 6) -> float | None:
     return round(float(value), digits) if value is not None and math.isfinite(float(value)) else None
 
 
+def _mean(values: list[float]) -> float | None:
+    clean = [float(value) for value in values if math.isfinite(float(value))]
+    return (sum(clean) / len(clean)) if clean else None
+
+
 def _canonical_asset_class(value: Any) -> str | None:
     raw = str(value or "").strip().lower()
     if raw in {"all", "unknown", ""}:
@@ -740,6 +745,151 @@ def cash_deployment_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "categories": dict(categories),
         "asset_classes": dict(assets),
         "recommended_work_events": dict(work),
+    }
+
+
+def cost_gate_execution_block_rollup(
+    db: Session,
+    *,
+    window_days: int = DEFAULT_WINDOW_DAYS,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """Group recent positive-edge cost-gate blocks by pattern and venue."""
+    cutoff = datetime.utcnow() - timedelta(days=max(1, int(window_days)))
+    row_limit = max(1, int(limit)) * 50
+    events = (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_kind == "work")
+        .filter(BrainWorkEvent.event_type == EXIT_VARIANT_REFRESH)
+        .filter(BrainWorkEvent.created_at >= cutoff)
+        .filter(
+            BrainWorkEvent.payload["source"].astext
+            == "autotrader_cost_gate_execution_blocked"
+        )
+        .order_by(BrainWorkEvent.created_at.desc(), BrainWorkEvent.id.desc())
+        .limit(row_limit)
+        .all()
+    )
+    groups: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for event in events:
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        pid = _safe_int(payload.get("scan_pattern_id"), 0)
+        if pid <= 0:
+            continue
+        asset = _canonical_asset_class(payload.get("asset_class")) or "unknown"
+        venue = str(payload.get("broker_venue") or "unknown").strip().lower()
+        edge_source = str(
+            payload.get("cost_gate_edge_pct_source") or "unknown"
+        ).strip()
+        key = (pid, asset, venue, edge_source)
+        group = groups.setdefault(
+            key,
+            {
+                "scan_pattern_id": pid,
+                "asset_class": asset,
+                "broker_venue": venue,
+                "cost_gate_edge_pct_source": edge_source,
+                "blocked_count": 0,
+                "latest_event_id": None,
+                "latest_created_at": None,
+                "latest_status": None,
+                "tickers": set(),
+                "statuses": Counter(),
+                "_expected_net_pct_values": [],
+                "_edge_gap_pct_values": [],
+                "_edge_bps_values": [],
+                "_threshold_bps_values": [],
+                "_tca_cost_bps_values": [],
+                "_fee_bps_values": [],
+            },
+        )
+        group["blocked_count"] += 1
+        group["statuses"][str(event.status or "unknown")] += 1
+        ticker = str(payload.get("ticker") or "").strip().upper()
+        if ticker:
+            group["tickers"].add(ticker)
+        created_at = event.created_at
+        if (
+            group.get("latest_created_at") is None
+            or (created_at is not None and created_at > group["latest_created_at"])
+        ):
+            group["latest_event_id"] = int(event.id)
+            group["latest_created_at"] = created_at
+            group["latest_status"] = str(event.status or "unknown")
+        for field, bucket in (
+            ("expected_net_pct", "_expected_net_pct_values"),
+            ("cost_gate_edge_gap_pct", "_edge_gap_pct_values"),
+            ("cost_gate_edge_bps", "_edge_bps_values"),
+            ("cost_gate_threshold_bps", "_threshold_bps_values"),
+            ("cost_gate_tca_cost_bps", "_tca_cost_bps_values"),
+            ("cost_gate_fee_bps", "_fee_bps_values"),
+        ):
+            value = _safe_float(payload.get(field))
+            if value is not None:
+                group[bucket].append(value)
+
+    rows: list[dict[str, Any]] = []
+    for group in groups.values():
+        expected_values = group.pop("_expected_net_pct_values")
+        gap_values = group.pop("_edge_gap_pct_values")
+        edge_values = group.pop("_edge_bps_values")
+        threshold_values = group.pop("_threshold_bps_values")
+        tca_values = group.pop("_tca_cost_bps_values")
+        fee_values = group.pop("_fee_bps_values")
+        tickers = sorted(group.pop("tickers"))
+        statuses = group.pop("statuses")
+        group.update(
+            {
+                "tickers": tickers[:10],
+                "ticker_count": len(tickers),
+                "statuses": dict(statuses),
+                "latest_created_at": (
+                    group["latest_created_at"].isoformat()
+                    if isinstance(group.get("latest_created_at"), datetime)
+                    else None
+                ),
+                "avg_expected_net_pct": _round(_mean(expected_values)),
+                "max_expected_net_pct": _round(max(expected_values) if expected_values else None),
+                "avg_cost_gate_edge_gap_pct": _round(_mean(gap_values)),
+                "max_cost_gate_edge_gap_pct": _round(max(gap_values) if gap_values else None),
+                "avg_cost_gate_edge_bps": _round(_mean(edge_values), 2),
+                "max_cost_gate_threshold_bps": _round(
+                    max(threshold_values) if threshold_values else None,
+                    2,
+                ),
+                "max_cost_gate_tca_cost_bps": _round(
+                    max(tca_values) if tca_values else None,
+                    2,
+                ),
+                "max_cost_gate_fee_bps": _round(
+                    max(fee_values) if fee_values else None,
+                    2,
+                ),
+                "recommended_work_event": EXIT_VARIANT_REFRESH,
+                "cash_deployment_category": "positive_ev_execution_blocked",
+            }
+        )
+        rows.append(group)
+    rows.sort(
+        key=lambda row: (
+            _safe_int(row.get("blocked_count")),
+            _safe_float(row.get("max_cost_gate_edge_gap_pct"), 0.0) or 0.0,
+            _safe_float(row.get("max_expected_net_pct"), 0.0) or 0.0,
+            str(row.get("latest_created_at") or ""),
+        ),
+        reverse=True,
+    )
+    rows = rows[: max(1, int(limit))]
+    total_blocks = sum(_safe_int(row.get("blocked_count")) for row in rows)
+    return {
+        "window_days": int(window_days),
+        "total_groups": len(groups),
+        "returned_groups": len(rows),
+        "total_blocked_events_returned": total_blocks,
+        "venues": dict(Counter(str(row.get("broker_venue") or "unknown") for row in rows)),
+        "asset_classes": dict(Counter(str(row.get("asset_class") or "unknown") for row in rows)),
+        "edge_sources": dict(Counter(str(row.get("cost_gate_edge_pct_source") or "unknown") for row in rows)),
+        "rows": rows,
     }
 
 

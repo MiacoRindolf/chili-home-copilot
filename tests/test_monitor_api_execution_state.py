@@ -738,6 +738,35 @@ def test_cash_deployment_endpoint_separates_deployable_and_provenance(db, paired
         )
     )
     db.add(
+        BrainWorkEvent(
+            domain="trading",
+            event_type="exit_variant_refresh",
+            event_kind="work",
+            dedupe_key=f"cash-deployment-cost-gate-block:{pat.id}",
+            status="pending",
+            payload={
+                "source": "autotrader_cost_gate_execution_blocked",
+                "scan_pattern_id": pat.id,
+                "asset_class": "stock",
+                "ticker": "CASHR",
+                "broker_venue": "robinhood",
+                "cost_gate_edge_pct_source": (
+                    "entry_execution.entry_edge_expected_net_pct"
+                ),
+                "expected_net_pct": 1.2,
+                "cost_gate_edge_gap_pct": 0.9,
+                "cost_gate_edge_bps": 120,
+                "cost_gate_threshold_bps": 210,
+                "cost_gate_tca_cost_bps": 180,
+                "cost_gate_fee_bps": 0,
+                "cash_deployment_category": "positive_ev_execution_blocked",
+                "graduation_blocker": "execution_blocked",
+                "recommended_work_event": "exit_variant_refresh",
+            },
+            created_at=datetime.utcnow(),
+        )
+    )
+    db.add(
         PaperTrade(
             scan_pattern_id=None,
             ticker="NULLW",
@@ -774,6 +803,15 @@ def test_cash_deployment_endpoint_separates_deployable_and_provenance(db, paired
     assert body["summary"]["live_deployable"] >= 1
     assert body["summary"]["needs_provenance"] >= 1
     assert body["null_lineage_research_candidates"][0]["cash_deployment_category"] == "needs_provenance"
+    assert body["cost_gate_execution_block_summary"]["total_groups"] >= 1
+    cost_block = next(
+        x for x in body["cost_gate_execution_blocks"] if x["scan_pattern_id"] == pat.id
+    )
+    assert cost_block["broker_venue"] == "robinhood"
+    assert cost_block["blocked_count"] == 1
+    assert cost_block["tickers"] == ["CASHR"]
+    assert cost_block["avg_expected_net_pct"] == pytest.approx(1.2)
+    assert cost_block["max_cost_gate_tca_cost_bps"] == pytest.approx(180)
 
 
 def test_active_setups_exposes_execution_state(db, paired_client):

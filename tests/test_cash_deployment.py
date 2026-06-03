@@ -18,6 +18,7 @@ from app.models.trading import (
 from app.services.trading.cash_deployment import (
     cash_deployment_rows,
     cash_deployment_summary,
+    cost_gate_execution_block_rollup,
     enqueue_cash_deployment_work,
     enqueue_imminent_edge_snapshot_coverage_work,
 )
@@ -725,6 +726,81 @@ def test_cash_deployment_work_producer_enqueues_targeted_deduped_work(db, monkey
     assert by_type["recert_rescue_refresh"].payload["asset_class"] == "stock"
     assert by_type["exit_variant_refresh"].payload["scan_pattern_id"] == shadow.id
     assert by_type["exit_variant_refresh"].payload["cash_deployment_category"] == "positive_ev_shadow"
+
+
+def test_cost_gate_execution_block_rollup_groups_by_pattern_venue_edge_source(db):
+    pat = _pattern(db, name="cost gate blocked")
+    now = datetime.utcnow()
+    shared = {
+        "source": "autotrader_cost_gate_execution_blocked",
+        "scan_pattern_id": pat.id,
+        "asset_class": "stock",
+        "broker_venue": "robinhood",
+        "cost_gate_edge_pct_source": "entry_execution.entry_edge_expected_net_pct",
+        "cash_deployment_category": "positive_ev_execution_blocked",
+        "graduation_blocker": "execution_blocked",
+        "recommended_work_event": "exit_variant_refresh",
+    }
+    for i, (ticker, expected, gap, threshold) in enumerate(
+        (("CGB", 1.2, 0.9, 210), ("CGB2", 1.6, 1.1, 230)),
+        start=1,
+    ):
+        db.add(
+            BrainWorkEvent(
+                domain="trading",
+                event_type="exit_variant_refresh",
+                event_kind="work",
+                dedupe_key=f"cost-gate-rollup-{i}",
+                status="pending" if i == 1 else "done",
+                payload={
+                    **shared,
+                    "ticker": ticker,
+                    "expected_net_pct": expected,
+                    "cost_gate_edge_gap_pct": gap,
+                    "cost_gate_edge_bps": int(expected * 100),
+                    "cost_gate_threshold_bps": threshold,
+                    "cost_gate_tca_cost_bps": 180,
+                    "cost_gate_fee_bps": 0,
+                },
+                created_at=now - timedelta(minutes=i),
+            )
+        )
+    db.add(
+        BrainWorkEvent(
+            domain="trading",
+            event_type="exit_variant_refresh",
+            event_kind="work",
+            dedupe_key="cost-gate-rollup-other-source",
+            status="pending",
+            payload={**shared, "source": "cash_deployment", "ticker": "IGNORED"},
+            created_at=now,
+        )
+    )
+    db.commit()
+
+    out = cost_gate_execution_block_rollup(db, window_days=7, limit=10)
+
+    assert out["total_groups"] == 1
+    assert out["returned_groups"] == 1
+    assert out["total_blocked_events_returned"] == 2
+    assert out["venues"] == {"robinhood": 1}
+    assert out["edge_sources"] == {
+        "entry_execution.entry_edge_expected_net_pct": 1,
+    }
+    row = out["rows"][0]
+    assert row["scan_pattern_id"] == pat.id
+    assert row["asset_class"] == "stock"
+    assert row["broker_venue"] == "robinhood"
+    assert row["blocked_count"] == 2
+    assert row["ticker_count"] == 2
+    assert row["tickers"] == ["CGB", "CGB2"]
+    assert row["statuses"] == {"pending": 1, "done": 1}
+    assert row["avg_expected_net_pct"] == pytest.approx(1.4)
+    assert row["max_expected_net_pct"] == pytest.approx(1.6)
+    assert row["avg_cost_gate_edge_gap_pct"] == pytest.approx(1.0)
+    assert row["max_cost_gate_threshold_bps"] == pytest.approx(230)
+    assert row["max_cost_gate_tca_cost_bps"] == pytest.approx(180)
+    assert row["cash_deployment_category"] == "positive_ev_execution_blocked"
 
 
 def test_imminent_snapshot_coverage_enqueues_missing_asset_slices(db):

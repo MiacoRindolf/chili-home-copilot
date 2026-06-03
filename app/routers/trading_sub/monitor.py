@@ -26,6 +26,7 @@ from ...services.trading.cash_deployment import (
     cash_deployment_rows,
     cash_deployment_snapshot_rows,
     cash_deployment_summary,
+    cost_gate_execution_block_rollup,
 )
 from ...services.trading.edge_reliability import (
     edge_supply_rows,
@@ -985,6 +986,11 @@ def api_monitor_cash_deployment(
             window_days=window_days,
             limit=10,
         )
+        cost_gate_blocks = cost_gate_execution_block_rollup(
+            db,
+            window_days=window_days,
+            limit=min(25, limit),
+        )
     except Exception as exc:
         logger.exception("[monitor] cash deployment failed")
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
@@ -1004,5 +1010,9 @@ def api_monitor_cash_deployment(
             "rows": json_safe(rows),
             "summary": json_safe(summary),
             "null_lineage_research_candidates": json_safe(null_lineage),
+            "cost_gate_execution_blocks": json_safe(cost_gate_blocks["rows"]),
+            "cost_gate_execution_block_summary": json_safe({
+                k: v for k, v in cost_gate_blocks.items() if k != "rows"
+            }),
         }
     )
