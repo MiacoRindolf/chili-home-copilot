@@ -80,6 +80,16 @@ def _bayesian_shrinkage(
     return w * float(raw_value) + (1.0 - w) * float(pool_mean)
 
 
+def _finite_float_or_default(value: Any, default: float) -> float:
+    if value is None:
+        return float(default)
+    try:
+        out = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return float(default)
+    return out if math.isfinite(out) else float(default)
+
+
 def _z_from_ci(ci_level: float) -> float:
     """One-sided z-score for ``ci_level`` (e.g. 0.90 → ~1.2816)."""
     try:
@@ -418,8 +428,16 @@ def _evaluate_adaptive(
     pool_med = list(pool.get("median_sharpe") or [])
     pool_comp = list(pool.get("composite") or [])
 
-    dsr_pool_mean = sum(pool_dsr) / len(pool_dsr) if pool_dsr else (raw_dsr or 0.5)
-    pbo_pool_mean = sum(pool_pbo) / len(pool_pbo) if pool_pbo else (raw_pbo or 0.5)
+    dsr_pool_mean = (
+        sum(pool_dsr) / len(pool_dsr)
+        if pool_dsr
+        else _finite_float_or_default(raw_dsr, 0.5)
+    )
+    pbo_pool_mean = (
+        sum(pool_pbo) / len(pool_pbo)
+        if pool_pbo
+        else _finite_float_or_default(raw_pbo, 0.5)
+    )
     med_pool_mean = sum(pool_med) / len(pool_med) if pool_med else (raw_med_sh or 0.0)
     # Composite pool_mean: Bayesian-shrunken neutral for NULL composites.
     # When the pool is empty (pre-backfill state), fall back to 0.5 so

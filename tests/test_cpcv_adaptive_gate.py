@@ -98,6 +98,36 @@ def test_shrinkage_zero_n_returns_pool_mean():
     assert _bayesian_shrinkage(1.0, n=0, pool_mean=0.5, prior_n=60) == pytest.approx(0.5)
 
 
+def test_empty_pool_shrinkage_preserves_zero_dsr_and_pbo(monkeypatch):
+    monkeypatch.setattr(settings, "chili_cpcv_target_promotion_pool_pct", 0.05)
+    monkeypatch.setattr(settings, "chili_cpcv_ci_level", 0.90)
+    monkeypatch.setattr(settings, "chili_portfolio_marginal_sharpe_min_bps", 0.0)
+
+    _, _, metric_rows, _ = gate._evaluate_adaptive(
+        {
+            "skipped": False,
+            "n_trades": 11,
+            "deflated_sharpe": 0.0,
+            "pbo": 0.0,
+            "cpcv_n_paths": 20,
+            "cpcv_median_sharpe": 0.0,
+            "quality_composite_score": 0.0,
+            "n_effective_trials": 10,
+        },
+        pool={
+            "prior_n": 60,
+            "dsr": [],
+            "pbo": [],
+            "median_sharpe": [],
+            "composite": [],
+        },
+    )
+
+    by_metric = {row["metric_name"]: row for row in metric_rows}
+    assert by_metric["dsr"]["shrunken_value"] == pytest.approx(0.0)
+    assert by_metric["pbo"]["shrunken_value"] == pytest.approx(0.0)
+
+
 # ── 4. Empirical percentile threshold ─────────────────────────────────
 
 
