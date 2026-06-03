@@ -367,8 +367,70 @@
     else if (e.key === '3') { e.preventDefault(); snap(el, 'bl'); saveLayout(); }
     else if (e.key === '4') { e.preventDefault(); snap(el, 'br'); saveLayout(); }
     else if (e.key === 'ArrowDown') { e.preventDefault(); minimizeApp(top); }
+    else if (e.key.toLowerCase() === 'e') { e.preventDefault(); openExpose(); }
     else if (e.key.toLowerCase() === 'w') { e.preventDefault(); closeApp(top); }
   });
+
+  // ── Mission Control (Exposé): overlay every open window as a card grid so you
+  //    can switch/restore by click or keyboard (⌘/Ctrl+Alt+E, or ⌘K). Reuses
+  //    focusWin + restore-from-minimized; no live thumbnails (kept lightweight). ──
+  function escHtml(s) { var d = document.createElement('div'); d.textContent = (s == null ? '' : String(s)); return d.innerHTML; }
+  var expose = null, exposeSel = 0;
+  function exposeCards() { return expose ? Array.prototype.slice.call(expose.querySelectorAll('.os-xcard')) : []; }
+  function exposeSelect(i) {
+    var cards = exposeCards(); if (!cards.length) return;
+    exposeSel = (i + cards.length) % cards.length;
+    cards.forEach(function (c, j) {
+      var on = j === exposeSel;
+      c.classList.toggle('sel', on); c.setAttribute('aria-selected', on ? 'true' : 'false');
+      if (on) c.scrollIntoView({ block: 'nearest' });
+    });
+  }
+  function closeExpose() { if (expose) { expose.remove(); expose = null; } }
+  function pickExpose(app) {
+    closeExpose();
+    var w = wins[app]; if (!w) return;
+    if (w.style.display === 'none') { w.style.display = 'flex'; animIn(w); removeChip(app); }  // restore if minimized
+    focusWin(app); syncHome();
+  }
+  function openExpose() {
+    if (expose) { closeExpose(); return; }       // toggle off
+    var live = Object.keys(wins).filter(function (a) { return wins[a]; });
+    if (!live.length) return;                      // nothing to switch between
+    var seq = order.slice().reverse();             // top-most first
+    live.forEach(function (a) { if (seq.indexOf(a) === -1) seq.push(a); });  // minimized aren't in `order`
+    expose = document.createElement('div');
+    expose.className = 'os-expose';
+    expose.setAttribute('role', 'dialog'); expose.setAttribute('aria-modal', 'true');
+    expose.setAttribute('aria-label', 'Mission Control — switch window');
+    var cards = seq.map(function (app) {
+      var el = wins[app]; if (!el) return '';
+      var minned = el.style.display === 'none';
+      return '<button class="os-xcard" type="button" role="option" aria-selected="false" data-xapp="' + escHtml(app) + '">' +
+        '<span class="xc-ic">' + escHtml(el.dataset.icon || '🗔') + '</span>' +
+        '<span class="xc-t">' + escHtml(el.dataset.title || app) + '</span>' +
+        '<span class="xc-sub">' + (minned ? 'minimized' : 'open') + '</span>' +
+      '</button>';
+    }).join('');
+    expose.innerHTML = '<div class="os-expose-hint">Mission Control · <b>←→</b> select · <b>↵</b> open · <b>Esc</b> close</div>' +
+      '<div class="os-expose-grid" role="listbox" aria-label="Open windows">' + cards + '</div>';
+    desktop.appendChild(expose);
+    void expose.offsetWidth; expose.classList.add('show');
+    exposeSelect(0);
+    expose.addEventListener('click', function (e) {
+      if (e.target === expose) { closeExpose(); return; }   // click backdrop to dismiss
+      var card = e.target.closest('.os-xcard'); if (card) pickExpose(card.getAttribute('data-xapp'));
+    });
+  }
+  // Capture-phase so Exposé nav pre-empts the palette / tiling key handlers while open.
+  document.addEventListener('keydown', function (e) {
+    if (!expose) return;
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeExpose(); }
+    else if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); e.stopPropagation(); exposeSelect(exposeSel + 1); }
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); e.stopPropagation(); exposeSelect(exposeSel - 1); }
+    else if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); var c = exposeCards()[exposeSel]; if (c) pickExpose(c.getAttribute('data-xapp')); }
+    else if (e.key === 'Tab') { e.preventDefault(); e.stopPropagation(); exposeSelect(exposeSel + (e.shiftKey ? -1 : 1)); }
+  }, true);
 
   // expose for other UI (quick actions, palette, the Spaces menu) to drive the OS.
   // open() returns true if the app opened as a window, false otherwise (caller can
@@ -418,6 +480,8 @@
     },
     // Close every window and forget the saved session layout.
     resetLayout: function () { closeAllNow(); try { localStorage.removeItem(LAYOUT_KEY); } catch (e) {} },
+    // Mission Control — overlay open windows as a switcher grid (toggle open/closed).
+    expose: openExpose,
     // Named Spaces — snapshot/restore window arrangements by name.
     spaces: {
       list: function () { return loadSpaces().map(function (s) { return { name: s.name, count: (s.apps || []).length }; }); },
