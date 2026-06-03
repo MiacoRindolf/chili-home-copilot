@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import false, or_
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from ...models.trading import (
     AutoTraderRun,
@@ -391,6 +391,22 @@ def _recommended_work_event(blocker: str, *, scan_pattern_id: int | None) -> str
     return EDGE_RELIABILITY_REFRESH
 
 
+def _autotrader_run_summary_query(db: Session):
+    """Load only AutoTraderRun fields used by edge reliability diagnostics."""
+    return db.query(AutoTraderRun).options(
+        load_only(
+            AutoTraderRun.id,
+            AutoTraderRun.breakout_alert_id,
+            AutoTraderRun.scan_pattern_id,
+            AutoTraderRun.ticker,
+            AutoTraderRun.decision,
+            AutoTraderRun.reason,
+            AutoTraderRun.rule_snapshot,
+            AutoTraderRun.created_at,
+        )
+    )
+
+
 def _row_fingerprint(row: dict[str, Any]) -> str:
     payload = {
         "scan_pattern_id": row.get("scan_pattern_id"),
@@ -423,7 +439,7 @@ def compute_pattern_edge_reliability(
     cutoff = datetime.utcnow() - timedelta(days=max(1, int(window_days)))
 
     runs = (
-        db.query(AutoTraderRun)
+        _autotrader_run_summary_query(db)
         .filter(AutoTraderRun.scan_pattern_id == pid)
         .filter(AutoTraderRun.created_at >= cutoff)
         .order_by(AutoTraderRun.created_at.asc())
@@ -987,7 +1003,7 @@ def _candidate_pattern_ids_from_recent_runs(
     """Rank candidate patterns by recent evidence value instead of DB row order."""
     fetch_limit = min(10_000, max(1_000, int(limit) * 500))
     rows = (
-        db.query(AutoTraderRun)
+        _autotrader_run_summary_query(db)
         .filter(AutoTraderRun.scan_pattern_id.isnot(None))
         .filter(AutoTraderRun.created_at >= cutoff)
         .order_by(AutoTraderRun.created_at.desc())
@@ -1062,7 +1078,7 @@ def _observed_asset_slices_for_pattern(
 
     slices: set[str] = set()
     recent_runs = (
-        db.query(AutoTraderRun)
+        _autotrader_run_summary_query(db)
         .filter(AutoTraderRun.scan_pattern_id == int(scan_pattern_id))
         .filter(AutoTraderRun.created_at >= cutoff)
         .order_by(AutoTraderRun.created_at.desc())

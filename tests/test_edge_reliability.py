@@ -3,6 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from types import SimpleNamespace
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.orm import Session
 
 from app.models.trading import (
     AutoTraderRun,
@@ -23,6 +26,7 @@ from app.services.trading.edge_reliability import (
     EDGE_RELIABILITY_SNAPSHOT,
     RECERT_RESCUE_REFRESH,
     RECERT_RESCUE_DIAGNOSTIC,
+    _autotrader_run_summary_query,
     _canonical_asset_class,
     _asset_class_for_paper,
     _asset_class_for_trade,
@@ -38,6 +42,25 @@ from app.services.trading.edge_reliability import (
     emit_targeted_profitability_work,
     null_lineage_short_paper_candidates,
 )
+
+
+def test_edge_reliability_autotrader_run_query_is_summary_only() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    with Session(engine) as db:
+        query = _autotrader_run_summary_query(db).filter(
+            AutoTraderRun.scan_pattern_id == 123
+        )
+        sql = str(
+            query.statement.compile(
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        )
+
+    assert "trading_autotrader_runs.scan_pattern_id = 123" in sql
+    assert "trading_autotrader_runs.rule_snapshot" in sql
+    assert "trading_autotrader_runs.llm_snapshot" not in sql
+    assert "trading_autotrader_runs.management_scope" not in sql
 
 
 def _pattern(db, **kwargs) -> ScanPattern:
