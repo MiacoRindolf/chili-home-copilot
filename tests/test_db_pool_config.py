@@ -39,6 +39,88 @@ def test_runtime_pool_uses_operational_budget() -> None:
     )
 
 
+def test_service_pool_cap_shrinks_resident_web_connections() -> None:
+    assert _resolve_pool_config(
+        _settings(),
+        mp_child=False,
+        pytest_process=False,
+        app_name="chili-app",
+        environ={},
+    ) == (
+        8,
+        72,
+        DATABASE_DEFAULT_POOL_TIMEOUT_SECONDS,
+    )
+
+
+def test_service_pool_cap_keeps_bursty_scheduler_bounded() -> None:
+    assert _resolve_pool_config(
+        _settings(database_pool_size=25, database_max_overflow=50),
+        mp_child=False,
+        pytest_process=False,
+        app_name="chili-scheduler-cron",
+        environ={},
+    ) == (
+        8,
+        67,
+        DATABASE_DEFAULT_POOL_TIMEOUT_SECONDS,
+    )
+
+
+def test_service_pool_cap_never_expands_lower_explicit_budget() -> None:
+    assert _resolve_pool_config(
+        _settings(database_pool_size=3, database_max_overflow=2),
+        mp_child=False,
+        pytest_process=False,
+        app_name="chili-autotrader-worker",
+        environ={},
+    ) == (
+        3,
+        2,
+        DATABASE_DEFAULT_POOL_TIMEOUT_SECONDS,
+    )
+
+
+def test_service_pool_cap_preserves_peak_checkout_capacity() -> None:
+    pool_size, max_overflow, _ = _resolve_pool_config(
+        _settings(database_pool_size=10, database_max_overflow=15),
+        mp_child=False,
+        pytest_process=False,
+        app_name="chili-autotrader-worker",
+        environ={},
+    )
+    assert pool_size == 4
+    assert pool_size + max_overflow == 25
+
+
+def test_service_pool_cap_can_be_disabled_by_operator() -> None:
+    assert _resolve_pool_config(
+        _settings(database_pool_size=25, database_max_overflow=50),
+        mp_child=False,
+        pytest_process=False,
+        app_name="chili-scheduler-cron",
+        environ={"CHILI_DATABASE_SERVICE_POOL_CAPS_ENABLED": "0"},
+    ) == (
+        25,
+        50,
+        DATABASE_DEFAULT_POOL_TIMEOUT_SECONDS,
+    )
+
+
+def test_service_pool_cap_does_not_shrink_brain_worker() -> None:
+    assert _resolve_pool_config(
+        _settings(database_pool_size=8, database_max_overflow=12),
+        mp_child=False,
+        pytest_process=False,
+        app_name="chili-brain-worker",
+        environ={},
+    ) == (
+        8,
+        12,
+        DATABASE_DEFAULT_POOL_TIMEOUT_SECONDS,
+    )
+
+
 def test_pytest_pool_is_capped_to_debug_budget() -> None:
     assert _resolve_pool_config(_settings(), mp_child=False, pytest_process=True) == (
         DATABASE_PYTEST_DEFAULT_POOL_SIZE,

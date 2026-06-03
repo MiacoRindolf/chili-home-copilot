@@ -7,10 +7,24 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from .config import settings
 
 _TRUE_ENV_VALUES = frozenset({"1", "true", "yes"})
+_FALSE_ENV_VALUES = frozenset({"0", "false", "no", "off"})
 _PG_KEEPALIVES_ENABLED = 1
 _PG_KEEPALIVE_IDLE_SECONDS = 30
 _PG_KEEPALIVE_INTERVAL_SECONDS = 5
 _PG_KEEPALIVE_COUNT = 5
+_SERVICE_POOL_CAPS_ENABLED_ENV = "CHILI_DATABASE_SERVICE_POOL_CAPS_ENABLED"
+_SERVICE_RETAINED_POOL_CAPS: dict[str, int] = {
+    # Keep resident pools small for long-lived, low-concurrency services. These
+    # caps only shrink the steady-state pool; burst capacity is moved into
+    # max_overflow so the service keeps the same peak checkout budget.
+    "chili-app": 8,
+    "chili-scheduler-cron": 8,
+    "chili-scheduler": 6,
+    "chili-autotrader-worker": 4,
+    "chili-broker-sync-worker": 4,
+    "chili-autotrader-runtime-gate": 2,
+    "chili-kill-switch-reader": 2,
+}
 
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 DATA_DIR.mkdir(exist_ok=True)
@@ -126,7 +140,38 @@ def _is_pytest_process() -> bool:
     return _is_true_env("CHILI_PYTEST") or "pytest" in ((sys.argv[0] if sys.argv else "") or "").lower()
 
 
-def _resolve_pool_config(settings_obj, *, mp_child: bool, pytest_process: bool) -> tuple[int, int, float]:
+def _service_pool_caps_enabled(
+    environ: dict[str, str] | os._Environ[str] | None = None,
+) -> bool:
+    env = environ if environ is not None else os.environ
+    raw = (env.get(_SERVICE_POOL_CAPS_ENABLED_ENV, "") or "").strip().lower()
+    return raw not in _FALSE_ENV_VALUES
+
+
+def _apply_service_pool_cap(
+    pool_size: int,
+    max_overflow: int,
+    *,
+    app_name: str | None,
+    environ: dict[str, str] | os._Environ[str] | None = None,
+) -> tuple[int, int]:
+    if not app_name or not _service_pool_caps_enabled(environ):
+        return pool_size, max_overflow
+    cap_pool = _SERVICE_RETAINED_POOL_CAPS.get(app_name)
+    if cap_pool is None or pool_size <= cap_pool:
+        return pool_size, max_overflow
+    released_slots = pool_size - cap_pool
+    return max(1, cap_pool), max(0, max_overflow + released_slots)
+
+
+def _resolve_pool_config(
+    settings_obj,
+    *,
+    mp_child: bool,
+    pytest_process: bool,
+    app_name: str | None = None,
+    environ: dict[str, str] | os._Environ[str] | None = None,
+) -> tuple[int, int, float]:
     if mp_child:
         return (
             int(settings_obj.brain_mp_child_database_pool_size),
@@ -139,9 +184,15 @@ def _resolve_pool_config(settings_obj, *, mp_child: bool, pytest_process: bool) 
             min(int(settings_obj.database_max_overflow), int(settings_obj.database_pytest_max_overflow)),
             float(settings_obj.database_pytest_pool_timeout_seconds),
         )
-    return (
+    pool_size, max_overflow = _apply_service_pool_cap(
         int(settings_obj.database_pool_size),
         int(settings_obj.database_max_overflow),
+        app_name=app_name,
+        environ=environ,
+    )
+    return (
+        pool_size,
+        max_overflow,
         float(settings_obj.database_pool_timeout_seconds),
     )
 
@@ -155,6 +206,7 @@ _pool_size, _max_overflow, _pool_timeout = _resolve_pool_config(
     settings,
     mp_child=_mp_child,
     pytest_process=_pytest_process,
+    app_name=_app_name,
 )
 _connect_options: list[str] = []
 _idle_xact_timeout_ms = int(settings.database_idle_in_transaction_timeout_ms)
