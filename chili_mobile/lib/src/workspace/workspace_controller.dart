@@ -91,6 +91,13 @@ class WorkspaceController extends ChangeNotifier {
     if (_windows.length != before) notifyListeners();
   }
 
+  /// Close every window except [keepId] (the window context menu's "Close others").
+  void closeOthers(String keepId) {
+    final int before = _windows.length;
+    _windows.removeWhere((WsWindow w) => w.id != keepId);
+    if (_windows.length != before) notifyListeners();
+  }
+
   void focus(String id) {
     final WsWindow? w = byId(id);
     if (w == null) return;

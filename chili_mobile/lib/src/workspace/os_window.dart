@@ -76,6 +76,7 @@ class OsWindow extends StatelessWidget {
       },
       onPanEnd: (_) => controller.commitGhost(data.id, desktopSize),
       onDoubleTap: () => controller.toggleMaximize(data.id, desktopSize),
+      onSecondaryTapDown: (TapDownDetails d) => _showWindowMenu(context, d.globalPosition),
       child: Container(
         height: 38,
         padding: const EdgeInsets.only(left: 12, right: 6),
@@ -129,6 +130,46 @@ class OsWindow extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  /// Right-click context menu on the title bar: window actions (tile / min /
+  /// max / close / close others), reusing the controller's existing ops.
+  Future<void> _showWindowMenu(BuildContext context, Offset globalPos) async {
+    final String? choice = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromLTRB(globalPos.dx, globalPos.dy, globalPos.dx, globalPos.dy),
+      items: <PopupMenuEntry<String>>[
+        const PopupMenuItem<String>(value: 'min', child: Text('Minimize')),
+        PopupMenuItem<String>(value: 'max', child: Text(data.maximized ? 'Restore' : 'Maximize')),
+        const PopupMenuItem<String>(value: 'left', child: Text('Tile left')),
+        const PopupMenuItem<String>(value: 'right', child: Text('Tile right')),
+        const PopupMenuDivider(),
+        const PopupMenuItem<String>(value: 'close', child: Text('Close')),
+        const PopupMenuItem<String>(value: 'closeOthers', child: Text('Close others')),
+      ],
+    );
+    switch (choice) {
+      case 'min':
+        controller.minimize(data.id);
+        break;
+      case 'max':
+        controller.toggleMaximize(data.id, desktopSize);
+        break;
+      case 'left':
+        controller.snap(data.id, 'left', desktopSize);
+        break;
+      case 'right':
+        controller.snap(data.id, 'right', desktopSize);
+        break;
+      case 'close':
+        controller.close(data.id);
+        break;
+      case 'closeOthers':
+        controller.closeOthers(data.id);
+        break;
+      default:
+        break;
+    }
   }
 }
 
