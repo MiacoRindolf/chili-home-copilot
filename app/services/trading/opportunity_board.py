@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -37,11 +38,12 @@ OPPORTUNITY_ENGINE_PATTERN_RESEARCH = "pattern_research"
 
 def _safe_float(value: Any, default: float | None = None) -> float | None:
     try:
-        if value is None:
+        if isinstance(value, bool) or value is None:
             return default
-        return float(value)
-    except (TypeError, ValueError):
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
         return default
+    return parsed if math.isfinite(parsed) else default
 
 
 def _risk_level(score: float, *, good: bool = False) -> str:
@@ -201,7 +203,9 @@ def _net_edge_estimate(
             "reason": "long-side payoff geometry invalid",
             "capital_lane": "shadow_only",
         }
-    prob = max(0.05, min(0.95, _safe_float(candidate.get("repeatability_confidence"), 0.35) or 0.35))
+    raw_prob = _safe_float(candidate.get("repeatability_confidence"))
+    prob = 0.35 if raw_prob is None else raw_prob
+    prob = max(0.05, min(0.95, prob))
     payoff = (target - entry) / entry
     loss = (entry - stop) / entry
     costs = (

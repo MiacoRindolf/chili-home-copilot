@@ -11,6 +11,8 @@ from app.services.trading.opportunity_board import (
     _annotate_desk_fields,
     _apply_board_data_quality_gate,
     _board_data_quality_gate,
+    _net_edge_estimate,
+    _safe_float,
     _scanner_fallback_rows,
     get_trading_opportunity_board,
 )
@@ -192,6 +194,34 @@ def test_opportunity_board_risk_annotations_are_real() -> None:
     assert row["structural_confirmation"]["score"] > 0
     assert row["liquidity_quality"]["score"] > 0
     assert row["net_edge_estimate"]["available"] is True
+
+
+def test_opportunity_board_safe_float_rejects_boolean_and_nonfinite_values() -> None:
+    assert _safe_float(True, 0.35) == 0.35
+    assert _safe_float("NaN", 0.35) == 0.35
+    assert _safe_float("Infinity", 0.35) == 0.35
+    assert _safe_float("-Infinity", 0.35) == 0.35
+    assert _safe_float("0", 0.35) == 0.0
+
+
+def test_net_edge_estimate_preserves_zero_repeatability_confidence() -> None:
+    candidate = {
+        "asset_class": "equity",
+        "entry": 100.0,
+        "stop": 95.0,
+        "target": 110.0,
+        "repeatability_confidence": 0.0,
+    }
+
+    out = _net_edge_estimate(
+        candidate,
+        execution={"expected_slippage_bps": 0.0},
+        extension={"score": 0.0},
+    )
+
+    assert out["available"] is True
+    assert out["probability_proxy"] == 0.05
+    assert out["expected_net_edge"] < 0.0
 
 
 def test_opportunity_board_data_quality_blocks_capital_not_learning() -> None:
