@@ -52,6 +52,18 @@ def _band(value: float | None, edges: list[float]) -> int:
     return len(edges)
 
 
+def _finite_float_or_default(value: Any, default: float) -> float:
+    if isinstance(value, bool) or value is None:
+        return default
+    try:
+        converted = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if not math.isfinite(converted):
+        return default
+    return converted
+
+
 @dataclass
 class SignalSnapshot:
     """All the inputs needed to compute a signal signature."""
@@ -245,7 +257,7 @@ def heuristic_adjustment(
     has_crit = bool(getattr(plan_health, "has_critical_invalidation", False))
     has_any = bool(getattr(plan_health, "has_any_invalidation", False))
     caution = bool(getattr(plan_health, "caution_signals_changed", []))
-    h_score = float(getattr(condition_health, "health_score", 1.0) or 1.0)
+    h_score = _finite_float_or_default(getattr(condition_health, "health_score", None), 1.0)
     h_delta = getattr(condition_health, "health_delta", None)
 
     vd = vitals_degradation or {}
@@ -264,8 +276,8 @@ def heuristic_adjustment(
 
     if vitals is not None:
         try:
-            oe = float(getattr(vitals, "overextension_risk", 0) or 0)
-            mom = float(getattr(vitals, "momentum_score", 0) or 0)
+            oe = _finite_float_or_default(getattr(vitals, "overextension_risk", None), 0.0)
+            mom = _finite_float_or_default(getattr(vitals, "momentum_score", None), 0.0)
             if oe > 0.8 and mom < -0.25 and is_long and current_stop:
                 mid = (current_price + float(current_stop)) / 2.0
                 floor = float(pattern_stop) if pattern_stop is not None else current_stop

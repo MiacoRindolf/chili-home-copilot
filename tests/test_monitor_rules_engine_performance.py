@@ -8,6 +8,7 @@ from app.services.trading.monitor_rules_engine import (
     _monitor_decision_rules_by_key,
     _scan_pattern_names_by_id,
     aggregate_decision_outcomes,
+    heuristic_adjustment,
 )
 
 
@@ -110,6 +111,43 @@ def test_monitor_decision_rules_by_key_skips_empty_lookup() -> None:
 
     assert _monitor_decision_rules_by_key(db, set()) == {}  # type: ignore[arg-type]
     assert db.query_calls == 0
+
+
+def test_heuristic_adjustment_preserves_zero_health_score_before_hold_shortcut() -> None:
+    decision = heuristic_adjustment(
+        plan_health=SimpleNamespace(
+            has_critical_invalidation=False,
+            has_any_invalidation=False,
+            caution_signals_changed=[],
+        ),
+        condition_health=SimpleNamespace(health_score=0.0, health_delta=None),
+        pnl_pct=0.0,
+        current_price=100.0,
+        current_stop=95.0,
+        current_target=130.0,
+        pattern_stop=94.0,
+    )
+
+    assert decision is None
+
+
+def test_heuristic_adjustment_holds_when_health_score_is_healthy() -> None:
+    decision = heuristic_adjustment(
+        plan_health=SimpleNamespace(
+            has_critical_invalidation=False,
+            has_any_invalidation=False,
+            caution_signals_changed=[],
+        ),
+        condition_health=SimpleNamespace(health_score=0.9, health_delta=None),
+        pnl_pct=0.0,
+        current_price=100.0,
+        current_stop=95.0,
+        current_target=130.0,
+        pattern_stop=94.0,
+    )
+
+    assert decision is not None
+    assert decision.action == "hold"
 
 
 def test_aggregate_decision_outcomes_batches_rule_inputs() -> None:
