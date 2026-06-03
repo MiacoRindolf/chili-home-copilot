@@ -2013,6 +2013,13 @@ class ExitParityLog(Base):
             "created_at",
         ),
         Index("ix_exit_parity_created_retention", "created_at", "id"),
+        Index(
+            "ix_exit_parity_created_pattern",
+            "created_at",
+            "scan_pattern_id",
+            "id",
+            postgresql_where=text("scan_pattern_id IS NOT NULL"),
+        ),
         # Migration 230 indices for the verdict/cutover-gate query paths.
         Index("ix_exit_parity_action_class_created", "action_class", "created_at"),
         Index("ix_exit_parity_priority_winner_created", "priority_winner", "created_at"),
@@ -2175,6 +2182,13 @@ class LedgerParityLog(Base):
         Index("ix_ledger_parity_source_created", "source", "created_at"),
         Index("ix_ledger_parity_agree_created", "agree_bool", "created_at"),
         Index("ix_ledger_parity_ticker_created", "ticker", "created_at"),
+        Index(
+            "ix_ledger_parity_created_pattern",
+            "created_at",
+            "scan_pattern_id",
+            "id",
+            postgresql_where=text("scan_pattern_id IS NOT NULL"),
+        ),
     )
 
     id: int = Column(BigInteger, primary_key=True, autoincrement=True)
@@ -2349,6 +2363,13 @@ class VenueTruthLog(Base):
     __table_args__ = (
         Index("ix_venue_truth_log_created", "created_at"),
         Index("ix_venue_truth_log_ticker_created", "ticker", "created_at"),
+        Index(
+            "ix_venue_truth_log_created_trade",
+            "created_at",
+            "trade_id",
+            "id",
+            postgresql_where=text("trade_id IS NOT NULL"),
+        ),
     )
 
     id: int = Column(BigInteger, primary_key=True, autoincrement=True)
@@ -2443,6 +2464,13 @@ class BracketReconciliationLog(Base):
     __table_args__ = (
         Index("ix_bracket_reconciliation_sweep", "sweep_id"),
         Index("ix_bracket_reconciliation_trade", "trade_id"),
+        Index(
+            "ix_bracket_reconciliation_observed_trade",
+            "observed_at",
+            "trade_id",
+            "id",
+            postgresql_where=text("trade_id IS NOT NULL"),
+        ),
         Index("ix_bracket_reconciliation_kind_ts", "kind", "observed_at"),
         Index("ix_bracket_reconciliation_observed_retention", "observed_at", "id"),
     )
@@ -2537,6 +2565,13 @@ class PositionSizerLog(Base):
         Index("ix_position_sizer_log_proposal", "proposal_id"),
         Index("ix_position_sizer_log_source_ts", "source", "observed_at"),
         Index("ix_position_sizer_log_ticker_ts", "ticker", "observed_at"),
+        Index(
+            "ix_position_sizer_log_observed_pattern",
+            "observed_at",
+            "pattern_id",
+            "id",
+            postgresql_where=text("pattern_id IS NOT NULL"),
+        ),
     )
 
     id: int = Column(BigInteger, primary_key=True, autoincrement=True)
