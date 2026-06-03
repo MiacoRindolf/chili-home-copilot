@@ -22,6 +22,13 @@ def test_autotrader_worker_forces_single_tick_instance() -> None:
     assert "CHILI_AUTOTRADER_TICK_MAX_INSTANCES=${" not in block
 
 
+def test_autotrader_worker_uses_skip_storm_resistant_cadence() -> None:
+    block = _compose_service_block("autotrader-worker")
+
+    assert "CHILI_AUTOTRADER_TICK_INTERVAL_SECONDS=60" in block
+    assert "CHILI_AUTOTRADER_MONITOR_INTERVAL_SECONDS=60" in block
+
+
 def test_autotrader_tick_default_is_single_instance() -> None:
     config = (REPO_ROOT / "app" / "config.py").read_text(encoding="utf-8")
 
