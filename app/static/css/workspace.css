@@ -103,6 +103,9 @@
 /* KPI */
 .ws-kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:var(--ws-s4);margin-bottom:var(--ws-s6)}
 .ws-kpi{background:var(--ws-surface);border:1px solid var(--ws-border);border-radius:var(--ws-r-lg);padding:var(--ws-s5);position:relative;overflow:hidden;transition:transform var(--ws-dur) var(--ws-ease),border-color var(--ws-dur)}
+/* WS-63: clickable cockpit elements (KPI tiles + safety pills) open their app */
+.ws-kpi[data-os-open],.ws-cockpit-pill[data-os-open]{cursor:pointer}
+.ws-kpi[data-os-open]:hover,.ws-cockpit-pill[data-os-open]:hover{transform:translateY(-1px);border-color:var(--ws-accent)}
 .ws-kpi:hover{transform:translateY(-2px);border-color:var(--ws-border-strong)}
 .ws-kpi .label{font-size:var(--ws-fs-12);color:var(--ws-text-3);font-weight:var(--ws-fw-med)}
 .ws-kpi .val{font:var(--ws-fw-bold) var(--ws-fs-34)/1.1 var(--ws-font-mono);letter-spacing:-.02em;margin-top:var(--ws-s3)}
