@@ -63,6 +63,40 @@ def test_open_trade_context_stock_preserves_existing_shape() -> None:
     assert line == "  - LONG 3x @ $195.0 (entered 2026-05-26)"
 
 
+def test_brain_prediction_pattern_loader_detaches_before_rollback(monkeypatch) -> None:
+    from app import db as app_db
+    from app.services.trading import pattern_engine
+    from app.services.trading.ai_context import _load_brain_prediction_patterns
+
+    pattern = SimpleNamespace(name="Detached pattern")
+
+    class _PatternSession:
+        def __init__(self) -> None:
+            self.events: list[str] = []
+
+        def expunge(self, obj) -> None:
+            self.events.append(f"expunge:{obj.name}")
+
+        def rollback(self) -> None:
+            self.events.append("rollback")
+
+        def close(self) -> None:
+            self.events.append("close")
+
+    session = _PatternSession()
+
+    def _get_active_patterns(db):
+        assert db is session
+        session.events.append("query")
+        return [pattern]
+
+    monkeypatch.setattr(app_db, "SessionLocal", lambda: session)
+    monkeypatch.setattr(pattern_engine, "get_active_patterns", _get_active_patterns)
+
+    assert _load_brain_prediction_patterns() == [pattern]
+    assert session.events == ["query", "expunge:Detached pattern", "rollback", "close"]
+
+
 @pytest.mark.parametrize("bad_price", [True, float("nan"), float("inf"), 0, -1, "bad"])
 def test_open_trade_context_option_rejects_bad_premium_quote(bad_price) -> None:
     from app.services.trading.ai_context import _format_open_trade_context_line

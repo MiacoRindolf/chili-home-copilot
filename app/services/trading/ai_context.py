@@ -146,6 +146,40 @@ def _format_open_trade_context_line(trade: Any) -> str:
     )
 
 
+def _load_brain_prediction_patterns() -> list[Any]:
+    """Load active patterns for context scoring without retaining a read transaction."""
+    try:
+        from ...db import SessionLocal as _SL
+        from .pattern_engine import get_active_patterns
+
+        _ctx_db = _SL()
+        try:
+            patterns = list(get_active_patterns(_ctx_db) or [])
+            for pattern in patterns:
+                try:
+                    _ctx_db.expunge(pattern)
+                except Exception:
+                    continue
+            return patterns
+        finally:
+            try:
+                _ctx_db.rollback()
+            except Exception:
+                logger.debug(
+                    "[ai_context] active-pattern read rollback failed",
+                    exc_info=True,
+                )
+            try:
+                _ctx_db.close()
+            except Exception:
+                logger.debug(
+                    "[ai_context] active-pattern read close failed",
+                    exc_info=True,
+                )
+    except Exception:
+        return []
+
+
 def _build_pattern_monitor_alignment_block(
     db: Session,
     open_trades: list,
@@ -716,15 +750,7 @@ def build_ai_context(
             meta = get_meta_learner()
             brain_lines = [f"## CHILI BRAIN PREDICTION — {ticker_up}"]
             meta_prob = None
-            try:
-                from ...db import SessionLocal as _SL
-                _ctx_db = _SL()
-                try:
-                    _pats = get_active_patterns(_ctx_db)
-                finally:
-                    _ctx_db.close()
-            except Exception:
-                _pats = []
+            _pats = _load_brain_prediction_patterns()
             if _pats and meta.is_ready():
                 pat_feats = extract_pattern_features(_pats, flat_snap)
                 meta_prob = meta.predict(pat_feats)
