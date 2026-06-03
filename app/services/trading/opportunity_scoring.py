@@ -78,6 +78,27 @@ def readiness_from_evaluable(
     return readiness, all_pass
 
 
+def _probability_or_none(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(parsed) or parsed < 0.0:
+        return None
+    if parsed > 1.0:
+        if parsed > 100.0:
+            return None
+        parsed = parsed / 100.0
+    return max(0.0, min(1.0, parsed))
+
+
+def _probability_or_default(value: Any, default: float) -> float:
+    parsed = _probability_or_none(value)
+    return default if parsed is None else parsed
+
+
 def evaluate_readiness_with_gates(
     conditions: list[dict[str, Any]],
     flat: dict[str, Any],
@@ -110,11 +131,7 @@ def evaluate_readiness_with_gates(
 
 def pattern_quality_score(pat: ScanPattern) -> float:
     """Map stored pattern stats to ~0..1 (deterministic, no ML)."""
-    wr = pat.win_rate
-    if wr is not None and wr > 1:
-        wr = wr / 100.0
-    wr = float(wr) if wr is not None else 0.0
-    wr_c = max(0.0, min(1.0, wr))
+    wr_c = _probability_or_default(getattr(pat, "win_rate", None), 0.0)
 
     ev = int(pat.evidence_count or 0)
     ev_c = min(1.0, math.log1p(ev) / math.log1p(50))
@@ -122,13 +139,9 @@ def pattern_quality_score(pat: ScanPattern) -> float:
     bt = int(pat.backtest_count or 0)
     bt_c = min(1.0, math.log1p(bt) / math.log1p(30))
 
-    oos_wr = pat.oos_win_rate
-    if oos_wr is not None and oos_wr > 1:
-        oos_wr = oos_wr / 100.0
-    oos_c = max(0.0, min(1.0, float(oos_wr))) if oos_wr is not None else 0.35
+    oos_c = _probability_or_default(getattr(pat, "oos_win_rate", None), 0.35)
 
-    conf = float(pat.confidence or 0.0)
-    conf_c = max(0.0, min(1.0, conf))
+    conf_c = _probability_or_default(getattr(pat, "confidence", None), 0.0)
 
     life = (getattr(pat, "lifecycle_stage", None) or "candidate").strip().lower()
     promo = (getattr(pat, "promotion_status", None) or "").strip().lower()
