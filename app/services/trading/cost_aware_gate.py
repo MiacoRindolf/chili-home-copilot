@@ -324,7 +324,8 @@ def cost_aware_min_edge_gate(
             default=5,
         )
         tca_cost_bps, tca_snapshot = _coinbase_tca_cost_bps(
-            db=db, ticker=ticker, side="long", min_samples=min_samples
+            db=db, ticker=ticker, side="long", min_samples=min_samples,
+            settings_=s,
         )
         if tca_snapshot and tca_snapshot.get("used") is False:
             tca_reason = str(tca_snapshot.get("reason") or "")
@@ -362,16 +363,34 @@ def _coinbase_tca_cost_bps(
     ticker: str,
     side: str,
     min_samples: int,
+    settings_: Any | None,
 ) -> tuple[int, dict[str, Any] | None]:
-    """Return p90 spread+slippage bps from execution-cost estimates.
+    """Return Coinbase execution-cost bps for this ticker/side.
 
-    Missing estimates are treated as zero extra cost so the legacy fee+buffer
-    gate remains the fallback. When a persisted estimate is present, it must
-    prove finite cost fields and enough usable backing TCA observations before
-    it can approve Coinbase entry.
+    Prefer raw Coinbase trade TCA filtered by ``broker_source``. Fall back to
+    the legacy aggregate estimate only when there is no Coinbase-specific TCA
+    yet; aggregate rows are still ticker/side/window scoped and may mix venues.
     """
     if db is None:
         return 0, None
+    min_samples_i = max(1, _nonnegative_int(min_samples, default=1))
+
+    venue_cost_bps, venue_snapshot = _coinbase_entry_tca_cost_bps(
+        db=db,
+        ticker=ticker,
+        side=side,
+        min_samples=min_samples_i,
+        window_days=30,
+        settings_=settings_,
+    )
+    if venue_snapshot and venue_snapshot.get("used") is True:
+        return venue_cost_bps, venue_snapshot
+    if venue_snapshot and _nonnegative_int(
+        venue_snapshot.get("sample_trades"),
+        default=0,
+    ) > 0:
+        return venue_cost_bps, venue_snapshot
+
     try:
         row = db.execute(text("""
             SELECT sample_trades, window_days, p90_spread_bps, p90_slippage_bps,
@@ -389,7 +408,6 @@ def _coinbase_tca_cost_bps(
         return 0, None
 
     samples = _nonnegative_int(row.get("sample_trades"), default=0)
-    min_samples_i = max(1, _nonnegative_int(min_samples, default=1))
     if samples < min_samples_i:
         return 0, {
             "sample_trades": samples,
@@ -449,7 +467,8 @@ def _coinbase_tca_cost_bps(
     return tca_cost_bps, {
         "sample_trades": samples,
         "usable_samples": usable_samples,
-        "sample_basis": "usable_finite_tca_trades",
+        "sample_basis": "aggregate_usable_finite_tca_trades",
+        "source": "trading_execution_cost_estimates",
         "window_days": window_days,
         "p90_spread_bps": spread_bps,
         "p90_slippage_bps": slippage_bps,
@@ -470,6 +489,119 @@ def _cost_gate_tca_outlier_bps(settings_: Any | None) -> float:
     if configured is None or configured <= 0:
         return 500.0
     return float(configured)
+
+
+def _coinbase_entry_tca_cost_bps(
+    *,
+    db,
+    ticker: str,
+    side: str,
+    min_samples: int,
+    window_days: int,
+    settings_: Any | None,
+) -> tuple[int, dict[str, Any] | None]:
+    """Return recent adverse Coinbase entry slippage bps from raw trades."""
+    if db is None:
+        return 0, None
+
+    min_samples_i = max(1, _nonnegative_int(min_samples, default=1))
+    window_days_i = max(1, _nonnegative_int(window_days, default=30))
+    outlier_bps = _cost_gate_tca_outlier_bps(settings_)
+    try:
+        row = db.execute(text("""
+            WITH usable AS (
+                SELECT
+                    CASE
+                        WHEN tca_entry_slippage_bps > 0
+                        THEN tca_entry_slippage_bps
+                        ELSE 0.0
+                    END AS adverse_entry_slippage_bps
+                FROM trading_trades
+                WHERE UPPER(ticker) = UPPER(:ticker)
+                  AND status = 'closed'
+                  AND LOWER(COALESCE(broker_source, '')) IN ('coinbase', 'cb')
+                  AND LOWER(COALESCE(direction, 'long')) = LOWER(:side)
+                  AND entry_date >= NOW() - (:window_days * INTERVAL '1 day')
+                  AND tca_entry_slippage_bps IS NOT NULL
+                  AND CAST(tca_entry_slippage_bps AS TEXT) NOT IN (
+                      'NaN', 'Infinity', '-Infinity'
+                  )
+                  AND (
+                      ABS(tca_entry_slippage_bps) <= :outlier_bps
+                      OR COALESCE(avg_fill_price, 0) > 0
+                      OR COALESCE(NULLIF(TRIM(broker_order_id), ''), '') <> ''
+                      OR LOWER(COALESCE(broker_status, '')) IN (
+                          'filled', 'partially_filled'
+                      )
+                  )
+            )
+            SELECT
+                CAST(COUNT(*) AS INTEGER) AS sample_trades,
+                AVG(adverse_entry_slippage_bps) AS avg_entry_slippage_bps,
+                percentile_cont(0.9) WITHIN GROUP (
+                    ORDER BY adverse_entry_slippage_bps
+                ) AS p90_entry_slippage_bps
+            FROM usable
+        """), {
+            "ticker": ticker,
+            "side": side,
+            "window_days": window_days_i,
+            "outlier_bps": outlier_bps,
+        }).mappings().first()
+    except Exception:
+        logger.warning(
+            "[cost_aware_gate] Coinbase TCA cost lookup failed for %s/%s",
+            ticker,
+            side,
+            exc_info=True,
+        )
+        return 0, None
+
+    if not row:
+        return 0, None
+
+    samples = _nonnegative_int(row.get("sample_trades"), default=0)
+    avg_entry = _nonnegative_float(row.get("avg_entry_slippage_bps"))
+    p90_entry = _nonnegative_float(row.get("p90_entry_slippage_bps"))
+    if samples < min_samples_i:
+        return 0, {
+            "sample_trades": samples,
+            "min_samples": min_samples_i,
+            "window_days": window_days_i,
+            "used": False,
+            "reason": "insufficient_samples",
+        }
+    invalid_fields = []
+    if avg_entry is None:
+        invalid_fields.append("avg_entry_slippage_bps")
+    if p90_entry is None:
+        invalid_fields.append("p90_entry_slippage_bps")
+    if invalid_fields:
+        return 0, {
+            "sample_trades": samples,
+            "min_samples": min_samples_i,
+            "window_days": window_days_i,
+            "used": False,
+            "reason": "invalid_tca_estimate",
+            "invalid_fields": invalid_fields,
+        }
+
+    cost_basis_bps = max(avg_entry, p90_entry)
+    tca_cost_bps = int(round(cost_basis_bps))
+    return tca_cost_bps, {
+        "sample_trades": samples,
+        "min_samples": min_samples_i,
+        "sample_basis": "usable_coinbase_adverse_entry_tca_trades",
+        "source": "trading_trades_broker_source",
+        "window_days": window_days_i,
+        "avg_entry_slippage_bps": round(avg_entry, 4),
+        "p90_entry_slippage_bps": round(p90_entry, 4),
+        "cost_basis": "max_avg_p90_adverse_entry_slippage_bps",
+        "cost_basis_bps": round(cost_basis_bps, 4),
+        "tca_cost_bps": tca_cost_bps,
+        "outlier_bps": outlier_bps,
+        "used": True,
+    }
 
 
 def _robinhood_entry_tca_cost_bps(

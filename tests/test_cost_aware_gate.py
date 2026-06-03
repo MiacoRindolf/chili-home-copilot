@@ -95,10 +95,22 @@ class _FakeScalarResult:
 
 
 class _FakeCostDb:
-    def __init__(self, row, *, usable_samples=9, raise_on_usable_count=False):
+    def __init__(
+        self,
+        row,
+        *,
+        usable_samples=9,
+        raise_on_usable_count=False,
+        coinbase_tca_row=None,
+    ):
         self.row = row
         self.usable_samples = usable_samples
         self.raise_on_usable_count = raise_on_usable_count
+        self.coinbase_tca_row = coinbase_tca_row or {
+            "sample_trades": 0,
+            "avg_entry_slippage_bps": None,
+            "p90_entry_slippage_bps": None,
+        }
         self.sqls = []
         self.params = []
 
@@ -106,7 +118,9 @@ class _FakeCostDb:
         sql = str(stmt)
         self.sqls.append(sql)
         self.params.append(params or {})
-        if "COUNT(*)" in sql:
+        if "LOWER(COALESCE(broker_source, '')) IN ('coinbase', 'cb')" in sql:
+            return _FakeResult(self.coinbase_tca_row)
+        if "CAST(COUNT(*) AS INTEGER) AS usable_samples" in sql:
             if self.raise_on_usable_count:
                 raise RuntimeError("usable sample check unavailable")
             return _FakeScalarResult(self.usable_samples)
@@ -420,13 +434,51 @@ def test_gate_coinbase_tca_estimate_raises_threshold():
     assert res.tca_cost_bps == 100
     assert res.tca_snapshot is not None
     assert res.tca_snapshot["used"] is True
-    assert res.tca_snapshot["sample_basis"] == "usable_finite_tca_trades"
+    assert res.tca_snapshot["sample_basis"] == "aggregate_usable_finite_tca_trades"
+    assert res.tca_snapshot["source"] == "trading_execution_cost_estimates"
     assert res.tca_snapshot["usable_samples"] == 9
-    assert db.params[0]["side"] == "long"
+    assert "broker_source" in db.sqls[0]
     assert db.params[1]["side"] == "long"
-    assert db.params[1]["outlier_bps"] == pytest.approx(500.0)
-    assert "ABS(tca_entry_slippage_bps) <= :outlier_bps" in db.sqls[1]
-    assert "broker_order_id" in db.sqls[1]
+    assert db.params[2]["side"] == "long"
+    assert db.params[2]["outlier_bps"] == pytest.approx(500.0)
+    assert "ABS(tca_entry_slippage_bps) <= :outlier_bps" in db.sqls[2]
+    assert "broker_order_id" in db.sqls[2]
+
+
+def test_gate_coinbase_prefers_venue_trade_tca_over_aggregate_estimate():
+    s = _settings_stub(include_tca=True, min_tca_samples=5)
+    db = _FakeCostDb({
+        "sample_trades": 9,
+        "window_days": 30,
+        "p90_spread_bps": 100.0,
+        "p90_slippage_bps": 100.0,
+        "median_spread_bps": 50.0,
+        "median_slippage_bps": 50.0,
+        "last_updated_at": None,
+    }, coinbase_tca_row={
+        "sample_trades": 8,
+        "avg_entry_slippage_bps": 8.2,
+        "p90_entry_slippage_bps": 15.0,
+    })
+
+    res = cost_aware_min_edge_gate(
+        ticker="AKT-USD", projected_profit_pct=1.7, settings_=s, db=db,
+    )
+
+    assert res.allowed is True
+    assert res.reason == REASON_GATE_COINBASE_PASSED
+    assert res.edge_bps == 170
+    assert res.tca_cost_bps == 15
+    assert res.threshold_bps == 165
+    assert res.tca_snapshot is not None
+    assert res.tca_snapshot["used"] is True
+    assert res.tca_snapshot["sample_basis"] == (
+        "usable_coinbase_adverse_entry_tca_trades"
+    )
+    assert res.tca_snapshot["source"] == "trading_trades_broker_source"
+    assert res.tca_snapshot["cost_basis_bps"] == pytest.approx(15.0)
+    assert "LOWER(COALESCE(broker_source, '')) IN ('coinbase', 'cb')" in db.sqls[0]
+    assert not any("trading_execution_cost_estimates" in sql for sql in db.sqls)
 
 
 def test_gate_coinbase_tca_estimate_requires_usable_sample_count():
