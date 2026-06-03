@@ -2719,6 +2719,41 @@ def _evidence_backtest_matches_scan_pattern(bt, scan_pattern_id: int | None) -> 
         return False
 
 
+def _evidence_backtest_summary_query(
+    db: Session,
+    BacktestResult,
+    sibling_insight_ids: list[int],
+    scan_pattern_id: int | None,
+):
+    """Summary-only evidence query.
+
+    The full ORM row includes large payload columns used only by the expanded chart endpoint.
+    Evidence cards and win-rate history need summary fields, so keep this path lean.
+    """
+    from sqlalchemy.orm import load_only
+
+    q = db.query(BacktestResult).options(
+        load_only(
+            BacktestResult.id,
+            BacktestResult.related_insight_id,
+            BacktestResult.scan_pattern_id,
+            BacktestResult.ticker,
+            BacktestResult.strategy_name,
+            BacktestResult.params,
+            BacktestResult.param_set_id,
+            BacktestResult.return_pct,
+            BacktestResult.win_rate,
+            BacktestResult.sharpe,
+            BacktestResult.max_drawdown,
+            BacktestResult.trade_count,
+            BacktestResult.ran_at,
+        )
+    ).filter(BacktestResult.related_insight_id.in_(sibling_insight_ids))
+    if scan_pattern_id is not None:
+        q = q.filter(BacktestResult.scan_pattern_id == int(scan_pattern_id))
+    return q.order_by(BacktestResult.ran_at.desc())
+
+
 def _compute_deduped_backtest_win_stats(
     db: Session,
     sibling_insight_ids: list[int],
@@ -2759,9 +2794,12 @@ def _compute_deduped_backtest_win_stats(
 
     try:
         linked_bts = (
-            db.query(BacktestResult)
-            .filter(BacktestResult.related_insight_id.in_(sibling_insight_ids))
-            .order_by(BacktestResult.ran_at.desc())
+            _evidence_backtest_summary_query(
+                db,
+                BacktestResult,
+                sibling_insight_ids,
+                scan_pattern_id,
+            )
             .limit(linked_limit)
             .all()
         )
@@ -2888,9 +2926,12 @@ def _deduped_win_rate_progress_series(
     points: list[dict] = []
     try:
         raw = (
-            db.query(BacktestResult)
-            .filter(BacktestResult.related_insight_id.in_(sibling_insight_ids))
-            .order_by(BacktestResult.ran_at.desc())
+            _evidence_backtest_summary_query(
+                db,
+                BacktestResult,
+                sibling_insight_ids,
+                scan_pattern_id,
+            )
             .limit(row_limit)
             .all()
         )
