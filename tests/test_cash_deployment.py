@@ -784,6 +784,68 @@ def test_cash_deployment_routes_positive_edge_noisy_live_exits_to_provenance(
     assert work.payload["live_low_confidence_total_pnl_usd"] == pytest.approx(-15.0)
 
 
+def test_provenance_backfill_handler_scopes_low_confidence_exit_debt(db):
+    from app.services.trading.brain_work.handlers.profitability import (
+        handle_provenance_backfill,
+    )
+    from app.services.trading.edge_reliability import PROVENANCE_BACKFILL_DIAGNOSTIC
+
+    pat = _pattern(db, name="handler noisy live exits")
+    _closed_live(db, pat, ticker="HNOISE", pnl=-6.0, exit_reason=None)
+    _closed_live(
+        db,
+        pat,
+        ticker="HNOISE",
+        pnl=-4.0,
+        exit_reason="broker_reconcile_position_gone",
+    )
+    other = _pattern(db, name="handler unrelated noisy exits")
+    _closed_live(db, other, ticker="OTHER", pnl=-99.0, exit_reason=None)
+    parent = BrainWorkEvent(
+        event_type="provenance_backfill",
+        event_kind="work",
+        payload={
+            "scan_pattern_id": pat.id,
+            "asset_class": "stock",
+            "window_days": 7,
+            "cash_deployment_category": "needs_exit_provenance",
+            "exit_provenance_blocker": "low_confidence_live_exit_rate",
+            "evidence_fingerprint": "handler-exit-debt-fp",
+        },
+        dedupe_key="test:provenance:handler-exit-debt",
+        lease_scope="edge",
+    )
+    db.add(parent)
+    db.commit()
+
+    handle_provenance_backfill(db, parent, user_id=None)
+
+    outcome = (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_type == PROVENANCE_BACKFILL_DIAGNOSTIC)
+        .one()
+    )
+    payload = outcome.payload
+    rows = payload["low_confidence_exit_attribution"]
+    assert outcome.parent_event_id == parent.id
+    assert payload["scan_pattern_id"] == pat.id
+    assert payload["cash_deployment_category"] == "needs_exit_provenance"
+    assert payload["exit_provenance_blocker"] == "low_confidence_live_exit_rate"
+    assert payload["exit_attribution_debt_count"] == 1
+    assert payload["low_confidence_exit_attribution_summary"]["total_groups"] == 1
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["scan_pattern_id"] == pat.id
+    assert row["low_confidence_exit_count"] == 2
+    assert row["low_confidence_total_pnl_usd"] == pytest.approx(-10.0)
+    assert row["ticker_count"] == 1
+    assert row["tickers"] == ["HNOISE"]
+    assert len(set(row["low_confidence_trade_ids"])) == 2
+    assert row["exit_reason_counts"]["missing"] == 1
+    assert row["exit_reason_counts"]["broker_reconcile_position_gone"] == 1
+    assert all(x["scan_pattern_id"] != other.id for x in rows)
+
+
 def test_cash_deployment_work_producer_enqueues_targeted_deduped_work(db, monkeypatch):
     monkeypatch.setattr(settings, "chili_autotrader_live_enabled", True)
     monkeypatch.setattr(settings, "chili_cash_deployment_equity_cost_pct", 0.05)

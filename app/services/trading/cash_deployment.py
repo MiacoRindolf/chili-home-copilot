@@ -997,6 +997,8 @@ def low_confidence_exit_attribution_rollup(
     db: Session,
     *,
     user_id: int | None = None,
+    pattern_ids: list[int] | set[int] | tuple[int, ...] | None = None,
+    asset_class: str | None = None,
     window_days: int = DEFAULT_WINDOW_DAYS,
     limit: int = 10,
 ) -> dict[str, Any]:
@@ -1004,6 +1006,12 @@ def low_confidence_exit_attribution_rollup(
     safe_days = max(1, int(window_days))
     cutoff = datetime.utcnow() - timedelta(days=safe_days)
     row_limit = min(5000, max(1, int(limit)) * 500)
+    scoped_pattern_ids = {
+        int(pid)
+        for pid in (pattern_ids or ())
+        if _safe_int(pid) > 0
+    }
+    asset_filter = _canonical_asset_class(asset_class) if asset_class else None
     q = (
         db.query(Trade)
         .filter(Trade.status == "closed")
@@ -1017,6 +1025,8 @@ def low_confidence_exit_attribution_rollup(
     )
     if user_id is not None:
         q = q.filter(Trade.user_id == user_id)
+    if scoped_pattern_ids:
+        q = q.filter(Trade.scan_pattern_id.in_(scoped_pattern_ids))
     q = q.order_by(
         Trade.exit_date.desc().nullslast(),
         Trade.id.desc(),
@@ -1051,6 +1061,7 @@ def low_confidence_exit_attribution_rollup(
                 "tickers": set(),
                 "exit_reasons": Counter(),
                 "exit_families": Counter(),
+                "low_confidence_trade_ids": [],
                 "latest_exit_at": None,
                 "latest_trade_id": None,
             },
@@ -1084,6 +1095,9 @@ def low_confidence_exit_attribution_rollup(
                 group["wins"] += 1
         if _is_low_confidence_exit_family(family):
             group["low_confidence_exit_count"] += 1
+            trade_id = int(getattr(trade, "id", 0) or 0)
+            if trade_id > 0 and len(group["low_confidence_trade_ids"]) < 25:
+                group["low_confidence_trade_ids"].append(trade_id)
             if pnl is not None:
                 group["low_confidence_pnl_sample_n"] += 1
                 group["low_confidence_total_pnl_usd"] += float(pnl)
@@ -1102,6 +1116,8 @@ def low_confidence_exit_attribution_rollup(
     rows: list[dict[str, Any]] = []
     total_low_confidence_groups = 0
     for group in groups.values():
+        if asset_filter and _canonical_asset_class(group.get("asset_class")) != asset_filter:
+            continue
         low_n = _safe_int(group.get("low_confidence_exit_count"))
         if low_n <= 0:
             continue

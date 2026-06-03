@@ -65,6 +65,23 @@ def _window_days(ev: Any) -> int:
         return 30
 
 
+def _positive_int_payload(payload: dict[str, Any], key: str) -> int:
+    try:
+        out = int(payload.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, out)
+
+
+def _needs_exit_provenance_backfill(payload: dict[str, Any]) -> bool:
+    category = str(payload.get("cash_deployment_category") or "").strip().lower()
+    if category in {"needs_exit_provenance", "low_confidence_exit_attribution"}:
+        return True
+    if str(payload.get("exit_provenance_blocker") or "").strip():
+        return True
+    return _positive_int_payload(payload, "live_low_confidence_exit_count") > 0
+
+
 def _recert_reason_set(raw: Any) -> set[str]:
     if isinstance(raw, str):
         return {part.strip() for part in raw.split(",") if part.strip()}
@@ -979,28 +996,64 @@ def handle_provenance_backfill(
     ev: Any,
     user_id: int | None,
 ) -> None:
-    """Record null-lineage short paper candidates for later provenance work."""
+    """Record scoped provenance debt diagnostics for later repair work."""
     from app.services.trading.brain_work.ledger import enqueue_outcome_event
+    from app.services.trading.cash_deployment import low_confidence_exit_attribution_rollup
     from app.services.trading.edge_reliability import (
         PROVENANCE_BACKFILL_DIAGNOSTIC,
         null_lineage_short_paper_candidates,
     )
 
+    payload_in = _payload(ev)
+    pid = _pattern_id(ev)
+    asset_class = payload_in.get("asset_class")
+    window_days = _window_days(ev)
     candidates = null_lineage_short_paper_candidates(
         db,
-        window_days=_window_days(ev),
+        window_days=window_days,
     )
-    key = "none"
-    if candidates:
+    low_confidence_exit_attribution = {
+        "window_days": window_days,
+        "total_groups": 0,
+        "returned_groups": 0,
+        "rows": [],
+    }
+    if _needs_exit_provenance_backfill(payload_in):
+        low_confidence_exit_attribution = low_confidence_exit_attribution_rollup(
+            db,
+            user_id=user_id,
+            pattern_ids=[pid] if pid is not None else None,
+            asset_class=str(asset_class or "") or None,
+            window_days=window_days,
+            limit=10,
+        )
+    exit_rows = list(low_confidence_exit_attribution.get("rows") or [])
+    exit_summary = {
+        k: v for k, v in low_confidence_exit_attribution.items() if k != "rows"
+    }
+    key = str(payload_in.get("evidence_fingerprint") or "").strip()
+    if not key and exit_rows:
+        key = str(exit_rows[0].get("evidence_fingerprint") or "none")
+    if not key and candidates:
         key = str(candidates[0].get("evidence_fingerprint") or "none")
+    if not key:
+        key = "none"
     enqueue_outcome_event(
         db,
         event_type=PROVENANCE_BACKFILL_DIAGNOSTIC,
-        dedupe_key=f"{PROVENANCE_BACKFILL_DIAGNOSTIC}:{key}",
+        dedupe_key=f"{PROVENANCE_BACKFILL_DIAGNOSTIC}:{key[:96]}",
         payload={
             "source": "provenance_backfill",
+            "scan_pattern_id": pid,
+            "asset_class": asset_class,
+            "cash_deployment_category": payload_in.get("cash_deployment_category"),
+            "exit_provenance_blocker": payload_in.get("exit_provenance_blocker"),
+            "evidence_fingerprint": payload_in.get("evidence_fingerprint"),
             "candidate_count": len(candidates),
             "candidates": candidates,
+            "exit_attribution_debt_count": len(exit_rows),
+            "low_confidence_exit_attribution": exit_rows,
+            "low_confidence_exit_attribution_summary": exit_summary,
             "research_only": True,
             "observed_at": _utc_iso(),
         },
