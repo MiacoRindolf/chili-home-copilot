@@ -37,6 +37,8 @@ from app.services.trading.cost_aware_gate import (
     REASON_GATE_COINBASE_PASSED,
     REASON_GATE_NO_VENUE,
     REASON_GATE_RH_FEE_FREE,
+    REASON_GATE_RH_TCA_BLOCKED,
+    REASON_GATE_RH_TCA_PASSED,
     REASON_GATE_TCA_INVALID,
     REASON_GATE_TCA_UNPROVEN,
     cost_aware_min_edge_gate,
@@ -50,6 +52,8 @@ def _settings_stub(
     fee_bps: int = 120, buffer_bps: int = 30,
     max_notional: float = 50.0, max_positions: int = 3,
     include_tca: bool = False, min_tca_samples: int = 5,
+    include_rh_tca: bool = True, rh_min_tca_samples: int = 5,
+    rh_tca_window_days: int = 30,
 ):
     return SimpleNamespace(
         chili_coinbase_taker_fee_bps_round_trip=fee_bps,
@@ -58,7 +62,11 @@ def _settings_stub(
         chili_coinbase_max_concurrent_positions=max_positions,
         chili_coinbase_cost_gate_include_tca_estimates=include_tca,
         chili_coinbase_cost_gate_min_tca_samples=min_tca_samples,
+        chili_robinhood_cost_gate_include_tca_estimates=include_rh_tca,
+        chili_robinhood_cost_gate_min_tca_samples=rh_min_tca_samples,
+        chili_robinhood_cost_gate_window_days=rh_tca_window_days,
         chili_broker_selector_rh_crypto_degraded_fallback_enabled=False,
+        brain_execution_cost_unverified_tca_outlier_bps=500.0,
     )
 
 
@@ -105,6 +113,18 @@ class _FakeCostDb:
         return _FakeResult(self.row)
 
 
+class _FakeRhTcaDb:
+    def __init__(self, row):
+        self.row = row
+        self.sqls = []
+        self.params = []
+
+    def execute(self, stmt, params=None):
+        self.sqls.append(str(stmt))
+        self.params.append(params or {})
+        return _FakeResult(self.row)
+
+
 class _FakeCapRows:
     def __init__(self, rows):
         self._rows = rows
@@ -137,6 +157,78 @@ def test_gate_rh_equity_fee_zero_no_block():
     assert res.allowed is True
     assert res.reason == REASON_GATE_RH_FEE_FREE
     assert res.fee_bps == 0
+
+
+def test_gate_rh_equity_observed_tca_raises_threshold_and_passes():
+    s = _settings_stub(buffer_bps=30, rh_min_tca_samples=5)
+    db = _FakeRhTcaDb({
+        "sample_trades": 9,
+        "avg_entry_slippage_bps": 100.2,
+        "p90_entry_slippage_bps": 180.0,
+    })
+
+    res = cost_aware_min_edge_gate(
+        ticker="AAPL", projected_profit_pct=2.0, settings_=s, db=db,
+    )
+
+    assert res.allowed is True
+    assert res.reason == REASON_GATE_RH_TCA_PASSED
+    assert res.fee_bps == 0
+    assert res.edge_bps == 200
+    assert res.tca_cost_bps == 100
+    assert res.threshold_bps == 130
+    assert res.tca_snapshot is not None
+    assert res.tca_snapshot["used"] is True
+    assert res.tca_snapshot["sample_basis"] == (
+        "usable_robinhood_adverse_entry_tca_trades"
+    )
+    assert res.tca_snapshot["avg_entry_slippage_bps"] == pytest.approx(100.2)
+    assert db.params[0]["ticker"] == "AAPL"
+    assert db.params[0]["side"] == "long"
+    assert db.params[0]["window_days"] == 30
+    assert db.params[0]["outlier_bps"] == pytest.approx(500.0)
+    assert "LOWER(COALESCE(broker_source, '')) IN ('robinhood', 'rh')" in db.sqls[0]
+    assert "broker_order_id" in db.sqls[0]
+
+
+def test_gate_rh_equity_observed_tca_blocks_thin_edge():
+    s = _settings_stub(buffer_bps=30, rh_min_tca_samples=5)
+    db = _FakeRhTcaDb({
+        "sample_trades": 9,
+        "avg_entry_slippage_bps": 100.2,
+        "p90_entry_slippage_bps": 180.0,
+    })
+
+    res = cost_aware_min_edge_gate(
+        ticker="AAPL", projected_profit_pct=1.0, settings_=s, db=db,
+    )
+
+    assert res.allowed is False
+    assert res.reason == REASON_GATE_RH_TCA_BLOCKED
+    assert res.edge_bps == 100
+    assert res.tca_cost_bps == 100
+    assert res.threshold_bps == 130
+
+
+def test_gate_rh_equity_thin_tca_keeps_legacy_fee_free_pass():
+    s = _settings_stub(buffer_bps=30, rh_min_tca_samples=5)
+    db = _FakeRhTcaDb({
+        "sample_trades": 4,
+        "avg_entry_slippage_bps": 100.2,
+        "p90_entry_slippage_bps": 180.0,
+    })
+
+    res = cost_aware_min_edge_gate(
+        ticker="AAPL", projected_profit_pct=1.0, settings_=s, db=db,
+    )
+
+    assert res.allowed is True
+    assert res.reason == REASON_GATE_RH_FEE_FREE
+    assert res.threshold_bps == 0
+    assert res.tca_cost_bps == 0
+    assert res.tca_snapshot is not None
+    assert res.tca_snapshot["used"] is False
+    assert res.tca_snapshot["reason"] == "insufficient_samples"
 
 
 def test_gate_rh_whitelisted_crypto_fee_zero():

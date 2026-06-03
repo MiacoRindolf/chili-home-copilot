@@ -107,6 +107,48 @@ def test_brain_work_outcome_publish_rolls_back_swallowed_db_error(monkeypatch) -
     assert fake_db.rollbacks == 1
 
 
+def test_activation_batch_throttles_global_decay(monkeypatch) -> None:
+    from app.services.trading.brain_neural_mesh import activation_runner
+
+    activation_runner._reset_activation_runner_for_tests()
+    decay_calls: list[int] = []
+
+    monkeypatch.setattr(
+        activation_runner,
+        "apply_global_decay",
+        lambda _db, *, graph_version: decay_calls.append(graph_version) or 0,
+    )
+    monkeypatch.setattr(
+        activation_runner.repo,
+        "claim_pending_batch",
+        lambda _db, *, limit: [],
+    )
+    monkeypatch.setattr(activation_runner, "reap_dead_events", lambda _db: 0)
+    monkeypatch.setattr(
+        activation_runner,
+        "maybe_flush_metrics",
+        lambda _db, *, graph_version: None,
+    )
+
+    first = activation_runner.run_activation_batch(
+        object(),
+        time_budget_sec=0.05,
+        max_events=1,
+        run_decay=True,
+    )
+    second = activation_runner.run_activation_batch(
+        object(),
+        time_budget_sec=0.05,
+        max_events=1,
+        run_decay=True,
+    )
+
+    assert len(decay_calls) == 1
+    assert first["decay_ran"] is True
+    assert second["decay_ran"] is False
+    assert "elapsed_sec" in first
+
+
 @pytest.mark.usefixtures("db")
 def test_enqueue_and_activation_batch(db: Session) -> None:
     src = db.query(BrainGraphNode).filter(BrainGraphNode.id == "nm_snap_daily").one_or_none()

@@ -3876,6 +3876,28 @@ class Settings(BaseSettings):
             "CHILI_COINBASE_COST_GATE_MIN_TCA_SAMPLES"
         ),
     )
+    # Robinhood has no explicit commission, but live TCA can still consume
+    # the expected edge. When enough recent usable RH fills exist, require
+    # projected edge to clear average adverse entry slippage + the shared
+    # safety buffer. Missing/thin evidence leaves legacy fee-free admission.
+    chili_robinhood_cost_gate_include_tca_estimates: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_ROBINHOOD_COST_GATE_INCLUDE_TCA_ESTIMATES"
+        ),
+    )
+    chili_robinhood_cost_gate_min_tca_samples: int = Field(
+        default=5,
+        validation_alias=AliasChoices(
+            "CHILI_ROBINHOOD_COST_GATE_MIN_TCA_SAMPLES"
+        ),
+    )
+    chili_robinhood_cost_gate_window_days: int = Field(
+        default=30,
+        validation_alias=AliasChoices(
+            "CHILI_ROBINHOOD_COST_GATE_WINDOW_DAYS"
+        ),
+    )
     # f-promotion-pipeline-rebalance Phase 2 (2026-05-09):
     # directional-correctness signal — gate-noise-free pattern eval.
     # The autotrader's 7-stage gate chain laundered pattern 585's 1284

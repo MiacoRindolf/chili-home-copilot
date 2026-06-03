@@ -65,17 +65,17 @@ class _SqlCaptureSession:
         return _OneRowResult(self.row)
 
 
-def _new_session(pattern, *, dq_row=None, decay_row=None):
+def _new_session(pattern, *, dq_row=None, decay_row=None, realized_row=(5, 0.01)):
     """Build a MagicMock session whose execute(...).fetchone() returns
-    canned rows in order: directional-WR row first, then decay row.
+    canned rows in order: directional-WR, decay, then realized-PnL row.
 
     Each call to ``session.execute(...).fetchone()`` advances a single
-    shared queue so the two SQL queries inside the handler get the
+    shared queue so the SQL queries inside the handler get the
     correct row.
     """
     s = MagicMock()
     s.get.return_value = pattern
-    queue: list[Any] = [dq_row, decay_row]
+    queue: list[Any] = [dq_row, decay_row, realized_row]
     counter = {"i": 0}
 
     def _execute(*_args, **_kwargs):
@@ -353,6 +353,78 @@ def test_quality_handler_null_when_thin_directional(monkeypatch) -> None:
     # Pattern already NULL → no change → no commits.
     for s in sessions:
         s.commit.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 4b. NULL when realized evidence is below the composite materialization floor
+# ---------------------------------------------------------------------------
+
+
+def test_quality_handler_clears_score_when_realized_sample_below_floor(
+    monkeypatch,
+) -> None:
+    pid = 44555
+    pattern = MagicMock()
+    pattern.id = pid
+    pattern.lifecycle_stage = "candidate"
+    pattern.cpcv_median_sharpe = 2.0
+    pattern.deflated_sharpe = 1.0
+    pattern.pbo = 0.0
+    pattern.quality_composite_score = 0.82
+
+    _patch_pattern_quality_score(
+        monkeypatch,
+        weights={
+            "cpcv_sharpe": 0.30, "deflated_sharpe": 0.20,
+            "pbo_inverse": 0.15, "directional_wr": 0.25,
+            "decay_inverse": 0.10, "realized": 0.35,
+            "realized_pnl_normalizer_pct": 0.01,
+            "realized_window_days": 90,
+        },
+    )
+
+    import app.config as config_mod
+    import app.services.trading.brain_work.ledger as ledger
+    import app.services.trading.pattern_quality_score as pqs
+
+    monkeypatch.setattr(
+        config_mod.settings,
+        "chili_composite_min_realized_trades",
+        5,
+        raising=False,
+    )
+    compute_mock = MagicMock(return_value=0.99)
+    monkeypatch.setattr(pqs, "compute_quality_composite_score", compute_mock)
+    emit_mock = MagicMock(return_value=1001)
+    monkeypatch.setattr(ledger, "enqueue_outcome_event", emit_mock)
+
+    sessions: list[Any] = []
+
+    def _factory() -> Any:
+        s = _new_session(
+            pattern,
+            dq_row=(0.65, 30),
+            decay_row=(0.55, 0.65, 15, 15),
+            realized_row=(4, 0.02),
+        )
+        sessions.append(s)
+        return s
+
+    _install_fake_app_db(monkeypatch, session_factory=_factory)
+
+    from app.services.trading.brain_work.handlers.quality_score import (
+        handle_backtest_completed_quality,
+    )
+
+    ev = _FakeEvent(event_id=445, payload={"scan_pattern_id": pid})
+
+    handle_backtest_completed_quality(MagicMock(), ev, None)
+
+    compute_mock.assert_not_called()
+    assert pattern.quality_composite_score is None
+    assert sessions[0].commit.call_count == 1
+    assert emit_mock.call_count == 1
+    assert emit_mock.call_args.kwargs["payload"]["new_score"] is None
 
 
 # ---------------------------------------------------------------------------

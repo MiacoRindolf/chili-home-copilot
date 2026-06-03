@@ -4106,6 +4106,36 @@ def run_breakout_scan(
 _MOMENTUM_CACHE_TTL = 120  # 2 minutes
 
 
+def get_momentum_cache() -> dict[str, Any]:
+    """Return the latest persisted momentum scan payload without running a scan."""
+    from ...db import SessionLocal
+    from .batch_job_constants import JOB_MOMENTUM_SCANNER
+    from .brain_batch_job_log import fetch_latest_ok_payload
+
+    db = SessionLocal()
+    try:
+        payload, ended_at, _meta = fetch_latest_ok_payload(db, JOB_MOMENTUM_SCANNER)
+        if not payload or not ended_at:
+            return {"results": [], "age_seconds": None}
+        age_s = max(0.0, (datetime.utcnow() - ended_at).total_seconds())
+        results = payload.get("results") or []
+        return {
+            "results": results,
+            "age_seconds": round(age_s),
+            "scan_time": payload.get("scan_time") or ended_at.isoformat(),
+            "candidates_scanned": int(payload.get("candidates_scanned") or 0),
+            "total_sourced": int(payload.get("total_sourced") or 0),
+            "immaculate_count": int(payload.get("immaculate_count") or 0),
+        }
+    finally:
+        # End the implicit read transaction before returning the connection.
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+
+
 def _momentum_payload_from_run(
     results: list[dict[str, Any]],
     *,

@@ -537,6 +537,7 @@ def _drag_run(
     ticker: str = "BTC-USD",
     pattern_id: int = 42,
     user_id: int = 7,
+    alert_id: int = 100,
     expected_net_pct: float | None = 3.0,
     decision: str = "blocked",
     reason: str = "broker:place_no_order_id",
@@ -551,12 +552,44 @@ def _drag_run(
     return SimpleNamespace(
         user_id=user_id,
         scan_pattern_id=pattern_id,
-        breakout_alert_id=100,
+        breakout_alert_id=alert_id,
         ticker=ticker,
         decision=decision,
         reason=reason,
         rule_snapshot=snapshot,
         created_at=datetime.utcnow(),
+    )
+
+
+def _shadow_trade(
+    *,
+    alert_id: int,
+    user_id: int = 7,
+    pnl_pct: float | None = None,
+    entry_price: float = 100.0,
+    exit_price: float | None = None,
+    shadow_decision: str = "blocked_no_order_id",
+):
+    if exit_price is None and pnl_pct is not None:
+        exit_price = entry_price * (1.0 + pnl_pct / 100.0)
+    return SimpleNamespace(
+        user_id=user_id,
+        paper_shadow_of_alert_id=alert_id,
+        scan_pattern_id=42,
+        ticker="BTC-USD",
+        direction="long",
+        entry_price=entry_price,
+        exit_price=exit_price,
+        quantity=1.0,
+        pnl_pct=pnl_pct,
+        pnl=None,
+        status="closed",
+        entry_date=datetime.utcnow(),
+        signal_json={
+            "paper_shadow": True,
+            "shadow_decision": shadow_decision,
+            "asset_class": "crypto",
+        },
     )
 
 
@@ -608,6 +641,8 @@ def test_execution_drag_cost_prices_positive_edge_missed_fills(monkeypatch):
     assert details["reason"] == "measured_execution_drag"
     assert details["attempts"] == 3
     assert details["positive_drag_events"] == 2
+    assert details["penalized_positive_drag_events"] == 2
+    assert details["unobserved_positive_drag_events"] == 2
     assert details["avg_positive_expected_net_pct"] == pytest.approx(3.0)
     assert details["drag_rate"] == pytest.approx(2 / 3)
     assert details["cost_fraction"] == pytest.approx((2 / 3) * 0.03)
@@ -637,6 +672,77 @@ def test_execution_drag_cost_requires_positive_sample_floor(monkeypatch):
 
     assert details["reason"] == "insufficient_positive_drag_events"
     assert details["cost_fraction"] == pytest.approx(0.0)
+
+
+def test_execution_drag_cost_ignores_shadow_spared_losses(monkeypatch):
+    _enable_execution_drag_cost(monkeypatch, min_attempts=3, min_positive=2)
+    db = _NetEdgeDb(
+        pattern=SimpleNamespace(id=42, asset_class="crypto", win_rate=0.6, oos_win_rate=None),
+        papers=[
+            _shadow_trade(alert_id=201, pnl_pct=-2.0),
+            _shadow_trade(alert_id=202, pnl_pct=-1.0),
+        ],
+        runs=[
+            _drag_run(alert_id=201, expected_net_pct=3.0),
+            _drag_run(alert_id=202, expected_net_pct=4.0),
+            _non_drag_run(),
+        ],
+    )
+    ctx = ner.NetEdgeSignalContext(
+        ticker="BTC-USD",
+        asset_class="crypto",
+        scan_pattern_id=42,
+        raw_prob=0.6,
+        entry_price=100.0,
+        stop_price=97.0,
+    )
+
+    details = ner._execution_drag_cost_details(db, ctx)
+
+    assert details["reason"] == "insufficient_shadow_adjusted_positive_drag_events"
+    assert details["positive_drag_events"] == 2
+    assert details["penalized_positive_drag_events"] == 0
+    assert details["paper_shadow_sample_n"] == 2
+    assert details["paper_shadow_spared_loss_events"] == 2
+    assert details["cost_fraction"] == pytest.approx(0.0)
+
+
+def test_execution_drag_cost_keeps_shadow_winners_and_unobserved_misses(monkeypatch):
+    _enable_execution_drag_cost(monkeypatch, min_attempts=4, min_positive=2)
+    db = _NetEdgeDb(
+        pattern=SimpleNamespace(id=42, asset_class="crypto", win_rate=0.6, oos_win_rate=None),
+        papers=[
+            _shadow_trade(alert_id=301, pnl_pct=5.0),
+            _shadow_trade(alert_id=302, pnl_pct=-2.0),
+        ],
+        runs=[
+            _drag_run(alert_id=301, expected_net_pct=2.0),
+            _drag_run(alert_id=302, expected_net_pct=4.0),
+            _drag_run(alert_id=303, expected_net_pct=6.0),
+            _non_drag_run(),
+        ],
+    )
+    ctx = ner.NetEdgeSignalContext(
+        ticker="BTC-USD",
+        asset_class="crypto",
+        scan_pattern_id=42,
+        raw_prob=0.6,
+        entry_price=100.0,
+        stop_price=97.0,
+    )
+
+    details = ner._execution_drag_cost_details(db, ctx)
+
+    assert details["reason"] == "measured_execution_drag"
+    assert details["positive_drag_events"] == 3
+    assert details["penalized_positive_drag_events"] == 2
+    assert details["paper_shadow_confirmed_missed_alpha_events"] == 1
+    assert details["paper_shadow_spared_loss_events"] == 1
+    assert details["unobserved_positive_drag_events"] == 1
+    assert details["avg_positive_expected_net_pct"] == pytest.approx(4.0)
+    assert details["drag_rate"] == pytest.approx(0.5)
+    assert details["raw_positive_drag_rate"] == pytest.approx(0.75)
+    assert details["cost_fraction"] == pytest.approx(0.5 * 0.04)
 
 
 def test_score_includes_execution_drag_cost_in_miss_cost_and_provenance(monkeypatch, shadow_mode):

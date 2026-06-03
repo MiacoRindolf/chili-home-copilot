@@ -47,6 +47,8 @@ logger = logging.getLogger(__name__)
 REASON_GATE_RH_FEE_FREE = "rh_fee_free"
 REASON_GATE_COINBASE_PASSED = "coinbase_clears_fee_threshold"
 REASON_GATE_COINBASE_BLOCKED = "coinbase_below_fee_threshold"
+REASON_GATE_RH_TCA_PASSED = "rh_clears_tca_threshold"
+REASON_GATE_RH_TCA_BLOCKED = "rh_below_tca_threshold"
 REASON_GATE_NO_VENUE = "no_venue_supports"
 REASON_GATE_TCA_INVALID = "coinbase_tca_estimate_invalid"
 REASON_GATE_TCA_UNPROVEN = "coinbase_tca_estimate_unproven"
@@ -238,9 +240,9 @@ def cost_aware_min_edge_gate(
     projected_edge = _finite_float_or_none(projected_profit_pct)
     edge_bps = int(round(projected_edge * 100.0)) if projected_edge is not None else 0
 
-    # Routing-aware: RH-eligible tickers pay no fee at the autotrader
-    # level (RH crypto fee-free; equities sub-bps and absorbed by
-    # the existing min_projected_profit_pct floor).
+    # Routing-aware: RH-eligible tickers pay no explicit fee at the
+    # autotrader level, but observed adverse entry slippage still has to
+    # come out of expected edge once we have enough usable TCA evidence.
     try:
         from .broker_selector import (
             resolve_coinbase_whitelist,
@@ -267,9 +269,42 @@ def cost_aware_min_edge_gate(
         ).degraded
 
     if rh_whitelisted and not rh_crypto_degraded:
+        rh_tca_cost_bps = 0
+        rh_tca_snapshot: dict[str, Any] | None = None
+        if bool(getattr(s, "chili_robinhood_cost_gate_include_tca_estimates", True)):
+            min_samples = _nonnegative_int(
+                getattr(s, "chili_robinhood_cost_gate_min_tca_samples", 5),
+                default=5,
+            )
+            window_days = _nonnegative_int(
+                getattr(s, "chili_robinhood_cost_gate_window_days", 30),
+                default=30,
+            )
+            rh_tca_cost_bps, rh_tca_snapshot = _robinhood_entry_tca_cost_bps(
+                db=db,
+                ticker=ticker,
+                side="long",
+                min_samples=min_samples,
+                window_days=max(1, window_days),
+                settings_=s,
+            )
+        if rh_tca_snapshot and rh_tca_snapshot.get("used") is True:
+            rh_threshold_bps = rh_tca_cost_bps + buffer_bps
+            if edge_bps >= rh_threshold_bps:
+                return CostGateDecision(
+                    allowed=True, reason=REASON_GATE_RH_TCA_PASSED,
+                    fee_bps=0, threshold_bps=rh_threshold_bps, edge_bps=edge_bps,
+                    tca_cost_bps=rh_tca_cost_bps, tca_snapshot=rh_tca_snapshot,
+                )
+            return CostGateDecision(
+                allowed=False, reason=REASON_GATE_RH_TCA_BLOCKED,
+                fee_bps=0, threshold_bps=rh_threshold_bps, edge_bps=edge_bps,
+                tca_cost_bps=rh_tca_cost_bps, tca_snapshot=rh_tca_snapshot,
+            )
         return CostGateDecision(
             allowed=True, reason=REASON_GATE_RH_FEE_FREE,
             fee_bps=0, threshold_bps=0, edge_bps=edge_bps,
+            tca_cost_bps=rh_tca_cost_bps, tca_snapshot=rh_tca_snapshot,
         )
 
     if not coinbase_whitelisted:
@@ -424,6 +459,122 @@ def _coinbase_tca_cost_bps(
         "last_updated_at": (
             last_updated.isoformat() if hasattr(last_updated, "isoformat") else last_updated
         ),
+        "used": True,
+    }
+
+
+def _cost_gate_tca_outlier_bps(settings_: Any | None) -> float:
+    configured = _nonnegative_float(
+        getattr(settings_, "brain_execution_cost_unverified_tca_outlier_bps", 500.0)
+    )
+    if configured is None or configured <= 0:
+        return 500.0
+    return float(configured)
+
+
+def _robinhood_entry_tca_cost_bps(
+    *,
+    db,
+    ticker: str,
+    side: str,
+    min_samples: int,
+    window_days: int,
+    settings_: Any | None,
+) -> tuple[int, dict[str, Any] | None]:
+    """Return recent average adverse RH entry slippage bps.
+
+    Missing/insufficient evidence is fail-open for Robinhood so legacy
+    admission remains unchanged until live fills prove the cost.
+    """
+    if db is None:
+        return 0, None
+
+    min_samples_i = max(1, _nonnegative_int(min_samples, default=1))
+    window_days_i = max(1, _nonnegative_int(window_days, default=30))
+    outlier_bps = _cost_gate_tca_outlier_bps(settings_)
+    try:
+        row = db.execute(text("""
+            WITH usable AS (
+                SELECT
+                    CASE
+                        WHEN tca_entry_slippage_bps > 0
+                        THEN tca_entry_slippage_bps
+                        ELSE 0.0
+                    END AS adverse_entry_slippage_bps
+                FROM trading_trades
+                WHERE UPPER(ticker) = UPPER(:ticker)
+                  AND status = 'closed'
+                  AND LOWER(COALESCE(broker_source, '')) IN ('robinhood', 'rh')
+                  AND LOWER(COALESCE(direction, 'long')) = LOWER(:side)
+                  AND entry_date >= NOW() - (:window_days * INTERVAL '1 day')
+                  AND tca_entry_slippage_bps IS NOT NULL
+                  AND CAST(tca_entry_slippage_bps AS TEXT) NOT IN (
+                      'NaN', 'Infinity', '-Infinity'
+                  )
+                  AND (
+                      ABS(tca_entry_slippage_bps) <= :outlier_bps
+                      OR COALESCE(avg_fill_price, 0) > 0
+                      OR COALESCE(NULLIF(TRIM(broker_order_id), ''), '') <> ''
+                      OR LOWER(COALESCE(broker_status, '')) IN (
+                          'filled', 'partially_filled'
+                      )
+                  )
+            )
+            SELECT
+                CAST(COUNT(*) AS INTEGER) AS sample_trades,
+                AVG(adverse_entry_slippage_bps) AS avg_entry_slippage_bps,
+                percentile_cont(0.9) WITHIN GROUP (
+                    ORDER BY adverse_entry_slippage_bps
+                ) AS p90_entry_slippage_bps
+            FROM usable
+        """), {
+            "ticker": ticker,
+            "side": side,
+            "window_days": window_days_i,
+            "outlier_bps": outlier_bps,
+        }).mappings().first()
+    except Exception:
+        logger.warning(
+            "[cost_aware_gate] RH TCA cost lookup failed for %s/%s",
+            ticker,
+            side,
+            exc_info=True,
+        )
+        return 0, None
+
+    if not row:
+        return 0, None
+
+    samples = _nonnegative_int(row.get("sample_trades"), default=0)
+    avg_entry = _nonnegative_float(row.get("avg_entry_slippage_bps"))
+    p90_entry = _nonnegative_float(row.get("p90_entry_slippage_bps"))
+    if samples < min_samples_i:
+        return 0, {
+            "sample_trades": samples,
+            "min_samples": min_samples_i,
+            "window_days": window_days_i,
+            "used": False,
+            "reason": "insufficient_samples",
+        }
+    if avg_entry is None:
+        return 0, {
+            "sample_trades": samples,
+            "min_samples": min_samples_i,
+            "window_days": window_days_i,
+            "used": False,
+            "reason": "invalid_tca_estimate",
+        }
+
+    tca_cost_bps = int(round(avg_entry))
+    return tca_cost_bps, {
+        "sample_trades": samples,
+        "min_samples": min_samples_i,
+        "sample_basis": "usable_robinhood_adverse_entry_tca_trades",
+        "window_days": window_days_i,
+        "avg_entry_slippage_bps": round(avg_entry, 4),
+        "p90_entry_slippage_bps": round(p90_entry or 0.0, 4),
+        "tca_cost_bps": tca_cost_bps,
+        "outlier_bps": outlier_bps,
         "used": True,
     }
 
@@ -608,6 +759,8 @@ __all__ = [
     "REASON_GATE_COINBASE_PASSED",
     "REASON_GATE_NO_VENUE",
     "REASON_GATE_RH_FEE_FREE",
+    "REASON_GATE_RH_TCA_BLOCKED",
+    "REASON_GATE_RH_TCA_PASSED",
     "REASON_GATE_TCA_INVALID",
     "REASON_GATE_TCA_UNPROVEN",
     "cost_aware_min_edge_gate",

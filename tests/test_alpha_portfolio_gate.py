@@ -527,6 +527,66 @@ def test_candidate_base_score_rejects_out_of_range_probability_metrics():
     assert "missing_quality_score" in out["penalties"]
 
 
+def test_candidate_base_score_excludes_saturated_dsr_pbo_from_ranking():
+    row = {
+        "alpha_sleeve": "volatility_breakout",
+        "promotion_gate_passed": True,
+        "quality_composite_score": 0.70,
+        "cpcv_median_sharpe": 1.4,
+        "deflated_sharpe": 1.0,
+        "pbo": 0.0,
+        "realized_n_trades": 0,
+        "realized_avg_pnl_pct": None,
+        "raw_realized_trade_count": 87,
+        "raw_realized_avg_return_pct": 1.56,
+        "payoff_ratio": 4.5,
+        "payoff_ratio_n": 87,
+    }
+
+    out = candidate_base_score(row)
+    floor_blocks = _candidate_floor_blocks(row, AlphaPortfolioConfig())
+
+    assert out["score"] is not None
+    assert "deflated_sharpe" not in out["components"]
+    assert "pbo_inverse" not in out["components"]
+    assert out["ranking_exclusions"] == [
+        "saturated_deflated_sharpe",
+        "saturated_pbo",
+    ]
+    assert "missing_deflated_sharpe" not in floor_blocks
+    assert "missing_pbo" not in floor_blocks
+
+
+def test_candidate_base_score_preserves_pattern_585_shape_without_dsr_pbo_lift():
+    row = {
+        "alpha_sleeve": "volatility_breakout",
+        "promotion_gate_passed": True,
+        "quality_composite_score": 0.80,
+        "cpcv_median_sharpe": 1.4,
+        "deflated_sharpe": 1.0,
+        "pbo": 0.0,
+        "realized_n_trades": 0,
+        "realized_avg_pnl_pct": None,
+        "raw_realized_trade_count": 87,
+        "raw_realized_avg_return_pct": 1.56,
+        "payoff_ratio": 4.5,
+        "payoff_ratio_n": 87,
+    }
+
+    out = candidate_base_score(row)
+
+    assert out["score"] is not None
+    assert out["score"] >= AlphaPortfolioConfig().min_shadow_score
+    assert set(out["components"]) == {
+        "quality",
+        "cpcv",
+        "realized_edge",
+        "payoff_ratio",
+    }
+    assert out["components"]["realized_edge"]["value"] == 1.0
+    assert out["components"]["payoff_ratio"]["value"] == 1.0
+
+
 def test_candidate_floor_blocks_boolean_gate_metrics_as_missing():
     row = {
         "promotion_gate_passed": True,
@@ -656,6 +716,48 @@ def test_candidate_floor_preserves_valid_zero_as_nonpositive_ev():
     assert "negative_realized_floor" in reasons
 
 
+def test_candidate_floor_blocks_when_live_exit_evidence_is_low_confidence():
+    row = {
+        "promotion_gate_passed": True,
+        "cpcv_median_sharpe": 2.0,
+        "deflated_sharpe": 1.0,
+        "pbo": 0.0,
+        "realized_n_trades": 1,
+        "realized_avg_pnl_pct": 0.02,
+        "live_realized_exit_count": 6,
+        "live_low_confidence_exit_count": 5,
+    }
+
+    reasons = _candidate_floor_blocks(
+        row,
+        AlphaPortfolioConfig(min_realized_trades=5),
+    )
+
+    assert "low_confidence_realized_exit_floor" in reasons
+    assert "negative_realized_floor" not in reasons
+
+
+def test_candidate_floor_allows_enough_clean_live_exit_evidence():
+    row = {
+        "promotion_gate_passed": True,
+        "cpcv_median_sharpe": 2.0,
+        "deflated_sharpe": 1.0,
+        "pbo": 0.0,
+        "realized_n_trades": 5,
+        "realized_avg_pnl_pct": 0.02,
+        "live_realized_exit_count": 8,
+        "live_low_confidence_exit_count": 4,
+    }
+
+    reasons = _candidate_floor_blocks(
+        row,
+        AlphaPortfolioConfig(min_realized_trades=5),
+    )
+
+    assert "low_confidence_realized_exit_floor" not in reasons
+    assert "negative_realized_floor" not in reasons
+
+
 def test_load_pattern_rows_counts_only_computable_realized_return_samples():
     db = _SqlCaptureDb()
 
@@ -663,12 +765,23 @@ def test_load_pattern_rows_counts_only_computable_realized_return_samples():
 
     assert rows == []
     sql = db.sql
-    assert "WITH realized_samples AS" in sql
+    assert "WITH live_exit_quality AS" in sql
+    assert "realized_samples AS" in sql
     assert "FROM trading_trades t" in sql
     assert "COUNT(realized_return_frac) AS n_trades" in sql
     assert "AVG(realized_return_frac) AS avg_pnl_pct" in sql
     assert "WHERE realized_return_frac IS NOT NULL" in sql
-    assert "COUNT(*)" not in sql
+    assert "live_realized_exit_count" in sql
+    assert "live_low_confidence_exit_count" in sql
+    assert "live_low_confidence_exit_rate" in sql
+    assert "LEFT JOIN live_exit_quality eq ON eq.scan_pattern_id = sp.id" in sql
+    assert "LOWER(BTRIM(COALESCE(t.exit_reason, ''))) <> ''" in sql
+    assert "NOT LIKE '%reconcile%'" in sql
+    assert "NOT LIKE '%sync_gone%'" in sql
+    assert "NOT LIKE '%position_gone%'" in sql
+    assert "NOT LIKE '%position_absent%'" in sql
+    assert "COUNT(*) AS live_realized_exit_count" in sql
+    assert "COUNT(*) AS n_trades" not in sql
     assert "t.filled_quantity" in sql
     assert "t.partial_taken_qty" in sql
     assert db.params == {"pattern_id": 123, "window_days": 45}

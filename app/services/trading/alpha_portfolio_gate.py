@@ -28,7 +28,10 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ...models.trading import ScanPattern
-from .realized_pnl_sql import trade_return_fraction_sql
+from .realized_pnl_sql import (
+    clean_live_pattern_ev_exit_filter_sql,
+    trade_return_fraction_sql,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -512,6 +515,32 @@ def _realized_edge_fraction(row: Mapping[str, Any]) -> tuple[float | None, int]:
     return None, max(realized_n, raw_n)
 
 
+def _live_exit_quality_payload(row: Mapping[str, Any]) -> dict[str, Any]:
+    exit_count = _safe_int(row.get("live_realized_exit_count")) or 0
+    low_confidence_count = _safe_int(row.get("live_low_confidence_exit_count")) or 0
+    if low_confidence_count > exit_count:
+        low_confidence_count = exit_count
+    rate = _safe_float(row.get("live_low_confidence_exit_rate"))
+    if rate is None and exit_count > 0:
+        rate = low_confidence_count / float(exit_count)
+    if rate is not None:
+        rate = _clip(rate)
+    return {
+        "live_exit_count": exit_count,
+        "clean_live_exit_count": max(0, exit_count - low_confidence_count),
+        "low_confidence_exit_count": low_confidence_count,
+        "low_confidence_exit_rate": rate,
+    }
+
+
+def _is_saturated_deflated_sharpe(value: float | None) -> bool:
+    return value is not None and value >= 1.0
+
+
+def _is_saturated_pbo(value: float | None) -> bool:
+    return value is not None and value <= 0.0
+
+
 def candidate_base_score(
     row: Mapping[str, Any],
     *,
@@ -520,6 +549,7 @@ def candidate_base_score(
     """Compute single-pattern quality before portfolio crowding adjustment."""
     cfg = config or AlphaPortfolioConfig()
     components: dict[str, dict[str, float]] = {}
+    ranking_exclusions: list[str] = []
 
     quality = _probability_or_none(row.get("quality_composite_score"))
     if quality is not None:
@@ -531,11 +561,17 @@ def candidate_base_score(
 
     dsr = _probability_or_none(row.get("deflated_sharpe"))
     if dsr is not None:
-        components["deflated_sharpe"] = {"value": dsr, "weight": 0.10}
+        if _is_saturated_deflated_sharpe(dsr):
+            ranking_exclusions.append("saturated_deflated_sharpe")
+        else:
+            components["deflated_sharpe"] = {"value": dsr, "weight": 0.10}
 
     pbo = _probability_or_none(row.get("pbo"))
     if pbo is not None:
-        components["pbo_inverse"] = {"value": 1.0 - pbo, "weight": 0.10}
+        if _is_saturated_pbo(pbo):
+            ranking_exclusions.append("saturated_pbo")
+        else:
+            components["pbo_inverse"] = {"value": 1.0 - pbo, "weight": 0.10}
 
     edge, edge_n = _realized_edge_fraction(row)
     if edge is not None and edge_n >= cfg.min_realized_trades:
@@ -551,7 +587,12 @@ def candidate_base_score(
 
     total_weight = sum(c["weight"] for c in components.values())
     if total_weight <= 0:
-        return {"score": None, "components": components, "penalties": []}
+        return {
+            "score": None,
+            "components": components,
+            "penalties": [],
+            "ranking_exclusions": ranking_exclusions,
+        }
 
     score = sum(c["value"] * c["weight"] for c in components.values()) / total_weight
     penalties: list[str] = []
@@ -569,6 +610,7 @@ def candidate_base_score(
         "score": _clip(score),
         "components": components,
         "penalties": penalties,
+        "ranking_exclusions": ranking_exclusions,
     }
 
 
@@ -627,6 +669,13 @@ def _candidate_floor_blocks(row: Mapping[str, Any], cfg: AlphaPortfolioConfig) -
         and realized_avg <= 0.0
     ):
         reasons.append("negative_realized_floor")
+    live_exit_quality = _live_exit_quality_payload(row)
+    if (
+        live_exit_quality["live_exit_count"] >= cfg.min_realized_trades
+        and live_realized_n < cfg.min_realized_trades
+        and (live_exit_quality["low_confidence_exit_rate"] or 0.0) >= 0.50
+    ):
+        reasons.append("low_confidence_realized_exit_floor")
     oos_at = row.get("oos_evaluated_at")
     if oos_at is not None:
         oos_n = _safe_int(row.get("oos_trade_count")) or 0
@@ -645,9 +694,27 @@ def _load_pattern_rows(
     realized_window_days: int = 90,
 ) -> list[dict[str, Any]]:
     window_days = _positive_int_or_default(realized_window_days, 90)
+    clean_live_exit_filter = clean_live_pattern_ev_exit_filter_sql("t")
     rows = db.execute(
         text(f"""
-            WITH realized_samples AS (
+            WITH live_exit_quality AS (
+                SELECT
+                    t.scan_pattern_id,
+                    COUNT(*) AS live_realized_exit_count,
+                    COUNT(*) FILTER (
+                        WHERE NOT ({clean_live_exit_filter})
+                    ) AS live_low_confidence_exit_count
+                FROM trading_trades t
+                WHERE t.scan_pattern_id IS NOT NULL
+                  AND t.scan_pattern_id != -1
+                  AND t.status = 'closed'
+                  AND t.pnl IS NOT NULL
+                  AND t.entry_price > 0
+                  AND t.quantity > 0
+                  AND t.exit_date > NOW() - make_interval(days => :window_days)
+                GROUP BY t.scan_pattern_id
+            ),
+            realized_samples AS (
                 SELECT
                     t.scan_pattern_id,
                     t.pnl,
@@ -660,6 +727,7 @@ def _load_pattern_rows(
                   AND t.entry_price > 0
                   AND t.quantity > 0
                   AND t.exit_date > NOW() - make_interval(days => :window_days)
+                  AND {clean_live_exit_filter}
             ),
             realized AS (
                 SELECT scan_pattern_id,
@@ -701,10 +769,21 @@ def _load_pattern_rows(
                 COALESCE(r.n_trades, 0) AS realized_n_trades,
                 r.avg_pnl_pct AS realized_avg_pnl_pct,
                 COALESCE(r.total_pnl, 0) AS realized_total_pnl,
+                COALESCE(eq.live_realized_exit_count, 0) AS live_realized_exit_count,
+                COALESCE(eq.live_low_confidence_exit_count, 0) AS live_low_confidence_exit_count,
+                CASE
+                  WHEN COALESCE(eq.live_realized_exit_count, 0) > 0
+                  THEN (
+                    COALESCE(eq.live_low_confidence_exit_count, 0)::float
+                    / eq.live_realized_exit_count
+                  )
+                  ELSE NULL
+                END AS live_low_confidence_exit_rate,
                 q.rolling_sample_n,
                 q.rolling_directional_wr
             FROM scan_patterns sp
             LEFT JOIN realized r ON r.scan_pattern_id = sp.id
+            LEFT JOIN live_exit_quality eq ON eq.scan_pattern_id = sp.id
             LEFT JOIN pattern_directional_quality_v q ON q.scan_pattern_id = sp.id
             WHERE sp.active IS TRUE
               AND (:pattern_id IS NULL OR sp.id = :pattern_id)
@@ -767,7 +846,9 @@ def _pattern_update_payload(row: Mapping[str, Any], score_info: Mapping[str, Any
         "base_score": score_info.get("score"),
         "components": score_info.get("components", {}),
         "penalties": score_info.get("penalties", []),
+        "ranking_exclusions": score_info.get("ranking_exclusions", []),
         "diversity": score_info.get("diversity", {}),
+        "live_exit_quality": _live_exit_quality_payload(row),
         "recert_reasons": recert_reasons,
         "lifecycle_stage": row.get("lifecycle_stage"),
         "promotion_status": row.get("promotion_status"),
@@ -872,10 +953,12 @@ def scan_alpha_portfolio(
                 "raw_realized_avg_return_pct": row.get("raw_realized_avg_return_pct"),
                 "payoff_ratio": row.get("payoff_ratio"),
                 "payoff_ratio_n": row.get("payoff_ratio_n"),
+                "live_exit_quality": _live_exit_quality_payload(row),
                 "portfolio_gate_score": score,
                 "base_score": score_info.get("score"),
                 "components": score_info.get("components", {}),
                 "penalties": score_info.get("penalties", []),
+                "ranking_exclusions": score_info.get("ranking_exclusions", []),
                 "diversity": score_info.get("diversity", {}),
                 "floor_blocks": floor_blocks,
             }
@@ -1017,6 +1100,7 @@ def persist_alpha_portfolio_snapshot(
             "reasons_json": {
                 "decision_reason": cand.get("decision_reason"),
                 "components": cand.get("components", {}),
+                "ranking_exclusions": cand.get("ranking_exclusions", []),
                 "diversity": cand.get("diversity", {}),
             },
         })
@@ -1182,18 +1266,43 @@ def stage_shadow_candidates(
     staged: list[int] = []
     for cand in candidates:
         pid = int(cand["scan_pattern_id"])
-        pattern = db.get(ScanPattern, pid)
-        if pattern is None:
+        row = db.execute(
+            text(
+                """
+                SELECT lifecycle_stage, promotion_status
+                FROM scan_patterns
+                WHERE id = :pid
+                """
+            ),
+            {"pid": pid},
+        ).mappings().first()
+        if row is None:
             continue
-        lifecycle = str(pattern.lifecycle_stage or "").strip().lower()
+        lifecycle = str(row.get("lifecycle_stage") or "").strip().lower()
         if lifecycle not in CANDIDATE_LIFECYCLES:
             continue
-        old_lifecycle = pattern.lifecycle_stage
-        old_status = pattern.promotion_status
-        pattern.lifecycle_stage = SHADOW_LIFECYCLE
-        pattern.promotion_status = "shadow_collecting_ev"
-        pattern.lifecycle_changed_at = now
-        pattern.active = True
+        old_lifecycle = row.get("lifecycle_stage")
+        old_status = row.get("promotion_status")
+        result = db.execute(
+            text(
+                """
+                UPDATE scan_patterns
+                SET lifecycle_stage = :lifecycle_stage,
+                    promotion_status = :promotion_status,
+                    lifecycle_changed_at = :now,
+                    active = TRUE
+                WHERE id = :pid
+                """
+            ),
+            {
+                "pid": pid,
+                "lifecycle_stage": SHADOW_LIFECYCLE,
+                "promotion_status": "shadow_collecting_ev",
+                "now": now,
+            },
+        )
+        if int(result.rowcount or 0) != 1:
+            continue
         staged.append(pid)
         try:
             from .brain_work.promotion_surface import emit_promotion_surface_change
@@ -1203,8 +1312,8 @@ def stage_shadow_candidates(
                 scan_pattern_id=pid,
                 old_promotion_status=old_status,
                 old_lifecycle_stage=old_lifecycle,
-                new_promotion_status=pattern.promotion_status,
-                new_lifecycle_stage=pattern.lifecycle_stage,
+                new_promotion_status="shadow_collecting_ev",
+                new_lifecycle_stage=SHADOW_LIFECYCLE,
                 source="alpha_portfolio_gate_shadow",
                 extra={
                     "alpha_sleeve": cand.get("alpha_sleeve"),

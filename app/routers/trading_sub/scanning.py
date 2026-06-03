@@ -230,11 +230,47 @@ def api_run_breakout_scan(background_tasks: BackgroundTasks):
 
 @router.get("/scan/momentum")
 @router.post("/scan/momentum")
-def api_run_momentum_scan():
+def api_run_momentum_scan(background_tasks: BackgroundTasks):
     """Active momentum scanner — finds top intraday setups with strict filters."""
-    from ...services.trading.public_api import run_momentum_scanner
-    result = run_momentum_scanner()
-    return JSONResponse(result)
+    from ...services.trading.scanner import get_momentum_cache, run_momentum_scanner, _brain_meta
+
+    cache = get_momentum_cache()
+    age = cache.get("age_seconds")
+    has_data = age is not None
+
+    progress = ts.get_intraday_scan_progress()
+    momentum_running = bool(
+        progress.get("running") and progress.get("scan_type") == "momentum"
+    )
+    should_refresh = (not has_data) or int(age or 0) >= 120
+    if should_refresh and not momentum_running:
+        background_tasks.add_task(run_momentum_scanner, 10)
+
+    if has_data:
+        return JSONResponse({
+            "ok": True,
+            "scan_type": "momentum",
+            "cached": True,
+            "refreshing": bool(should_refresh and not momentum_running),
+            "matches": len(cache["results"]),
+            "results": cache["results"][:10],
+            "candidates_scanned": cache.get("candidates_scanned", 0),
+            "total_sourced": cache.get("total_sourced", 0),
+            "immaculate_count": cache.get("immaculate_count", 0),
+            "age_seconds": age,
+            "scan_time": cache.get("scan_time"),
+            "brain": _brain_meta(),
+        })
+
+    return JSONResponse({
+        "ok": True,
+        "scan_type": "momentum",
+        "warming_up": True,
+        "matches": 0,
+        "results": [],
+        "message": "Scan started - results will appear shortly",
+        "brain": _brain_meta(),
+    })
 
 
 # ── Portfolio ────────────────────────────────────────────────────────────────

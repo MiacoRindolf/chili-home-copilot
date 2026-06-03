@@ -81,6 +81,153 @@ def _trade_directional_outcome(trade: Any) -> float | None:
     return None
 
 
+def _normalized_exit_reason(trade: Any) -> str:
+    reason = str(getattr(trade, "exit_reason", "") or "").strip().lower()
+    return reason or "missing"
+
+
+def _exit_reason_family(reason: str) -> str:
+    reason_l = str(reason or "").strip().lower()
+    if not reason_l or reason_l == "missing":
+        return "unknown"
+    if (
+        "reconcile" in reason_l
+        or "sync_gone" in reason_l
+        or "position_gone" in reason_l
+        or "position_absent" in reason_l
+        or reason_l in {"sync_duplicate", "sync_duplicate_cross_user"}
+    ):
+        return "reconciler_or_broker_cleanup"
+    if "take_profit" in reason_l or "target" in reason_l:
+        return "planned_profit_capture"
+    if "stop" in reason_l:
+        return "planned_risk_stop"
+    if reason_l == "pattern_exit_now":
+        return "dynamic_pattern_exit"
+    if "expired" in reason_l or "time_decay" in reason_l or "time_stop" in reason_l:
+        return "time_or_expiry"
+    if (
+        reason_l.startswith("emergency_")
+        or reason_l.startswith("kill_switch")
+        or reason_l.startswith("desk_")
+        or reason_l.startswith("manual")
+        or reason_l.startswith("portfolio_close")
+    ):
+        return "operator_or_risk_override"
+    return "other"
+
+
+def _is_low_confidence_exit_family(family: str) -> bool:
+    return family in {"unknown", "reconciler_or_broker_cleanup"}
+
+
+def _exit_reason_quality_rows(trades: list[Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    from collections import defaultdict
+
+    groups: dict[tuple[str, str], dict[str, Any]] = defaultdict(
+        lambda: {
+            "exit_family": "",
+            "exit_reason": "",
+            "trades": 0,
+            "pnl_sample_n": 0,
+            "total_pnl": 0.0,
+            "win_sample_n": 0,
+            "wins": 0,
+        }
+    )
+    total = len(trades)
+    low_confidence_count = 0
+    planned_count = 0
+    dynamic_count = 0
+    missing_count = 0
+    reconciler_count = 0
+    low_confidence_pnls: list[float] = []
+
+    for trade in trades:
+        reason = _normalized_exit_reason(trade)
+        family = _exit_reason_family(reason)
+        row = groups[(family, reason)]
+        row["exit_family"] = family
+        row["exit_reason"] = reason
+        row["trades"] += 1
+        pnl = _trade_realized_pnl_with_raw_fallback(trade)
+        if pnl is not None:
+            row["pnl_sample_n"] += 1
+            row["total_pnl"] += float(pnl)
+            if _is_low_confidence_exit_family(family):
+                low_confidence_pnls.append(float(pnl))
+        outcome = _trade_directional_outcome(trade)
+        if outcome is not None:
+            row["win_sample_n"] += 1
+            if outcome > 0:
+                row["wins"] += 1
+
+        if family in {"planned_profit_capture", "planned_risk_stop"}:
+            planned_count += 1
+        if family == "dynamic_pattern_exit":
+            dynamic_count += 1
+        if family == "unknown":
+            missing_count += 1
+        if family == "reconciler_or_broker_cleanup":
+            reconciler_count += 1
+        if _is_low_confidence_exit_family(family):
+            low_confidence_count += 1
+
+    rows: list[dict[str, Any]] = []
+    for row in groups.values():
+        pnl_n = int(row["pnl_sample_n"] or 0)
+        win_n = int(row["win_sample_n"] or 0)
+        trades_n = int(row["trades"] or 0)
+        rows.append({
+            "exit_family": row["exit_family"],
+            "exit_reason": row["exit_reason"],
+            "trades": trades_n,
+            "trade_rate_pct": (
+                round((trades_n / total) * 100.0, 2) if total > 0 else None
+            ),
+            "pnl_sample_n": pnl_n,
+            "total_pnl": round(float(row["total_pnl"] or 0.0), 2) if pnl_n else None,
+            "win_sample_n": win_n,
+            "win_rate_pct": (
+                round((int(row["wins"] or 0) / win_n) * 100.0, 1)
+                if win_n
+                else None
+            ),
+            "low_confidence_attribution": _is_low_confidence_exit_family(
+                str(row["exit_family"] or "")
+            ),
+        })
+    rows.sort(
+        key=lambda r: (
+            r["trades"],
+            abs(float(r["total_pnl"] or 0.0)),
+            r["exit_family"],
+            r["exit_reason"],
+        ),
+        reverse=True,
+    )
+
+    summary = {
+        "total_closed_trades": total,
+        "planned_exit_count": planned_count,
+        "dynamic_pattern_exit_count": dynamic_count,
+        "reconciler_exit_count": reconciler_count,
+        "missing_exit_reason_count": missing_count,
+        "low_confidence_exit_count": low_confidence_count,
+        "planned_exit_rate_pct": (
+            round((planned_count / total) * 100.0, 2) if total > 0 else None
+        ),
+        "low_confidence_exit_rate_pct": (
+            round((low_confidence_count / total) * 100.0, 2) if total > 0 else None
+        ),
+        "low_confidence_pnl_sample_n": len(low_confidence_pnls),
+        "low_confidence_total_pnl": (
+            round(sum(low_confidence_pnls), 2) if low_confidence_pnls else None
+        ),
+    }
+    return rows, summary
+
+
 def _scan_patterns_by_id(db: Session, pattern_ids: set[int]) -> dict[int, Any]:
     ids = sorted({int(pid) for pid in pattern_ids if int(pid) > 0})
     if not ids:
@@ -332,7 +479,14 @@ def _execution_drag_report_from_rows(
                 "events": 0,
                 "expected_edge_sample_n": 0,
                 "positive_edge_events": 0,
+                "penalized_positive_drag_events": 0,
+                "paper_shadow_sample_n": 0,
+                "paper_shadow_confirmed_missed_alpha_events": 0,
+                "paper_shadow_spared_loss_events": 0,
+                "paper_shadow_unknown_outcome_events": 0,
+                "unobserved_positive_drag_events": 0,
                 "_expected_net_pct_values": [],
+                "_shadow_adjusted_expected_net_pct_values": [],
                 "_paper_shadow_ids": set(),
                 "_paper_shadow_returns": [],
                 "_paper_shadow_pnls": [],
@@ -340,22 +494,49 @@ def _execution_drag_report_from_rows(
             },
         )
         group["events"] += 1
+        alert_id = getattr(row, "breakout_alert_id", None)
+        try:
+            alert_key = int(alert_id)
+        except (TypeError, ValueError):
+            alert_key = 0
+        matching_shadows = []
+        for pt in shadows_by_alert.get(alert_key, []):
+            shadow_family = _shadow_reason_family(pt)
+            if shadow_family and shadow_family != reason_family:
+                continue
+            matching_shadows.append(pt)
+
         expected = _expected_net_pct_from_payload(payload)
         if expected is not None:
             group["expected_edge_sample_n"] += 1
             group["_expected_net_pct_values"].append(expected)
             if expected > 0.0:
                 group["positive_edge_events"] += 1
+                outcomes = []
+                if not matching_shadows:
+                    group["unobserved_positive_drag_events"] += 1
+                    group["penalized_positive_drag_events"] += 1
+                    group["_shadow_adjusted_expected_net_pct_values"].append(expected)
+                else:
+                    group["paper_shadow_sample_n"] += len(matching_shadows)
+                    for pt in matching_shadows:
+                        outcome = paper_trade_return_pct(pt)
+                        if outcome is None:
+                            outcome = _paper_realized_pnl_with_raw_fallback(pt)
+                        if outcome is not None:
+                            outcomes.append(outcome)
+                    if not outcomes:
+                        group["paper_shadow_unknown_outcome_events"] += 1
+                        group["penalized_positive_drag_events"] += 1
+                        group["_shadow_adjusted_expected_net_pct_values"].append(expected)
+                    elif any(outcome > 0.0 for outcome in outcomes):
+                        group["paper_shadow_confirmed_missed_alpha_events"] += 1
+                        group["penalized_positive_drag_events"] += 1
+                        group["_shadow_adjusted_expected_net_pct_values"].append(expected)
+                    else:
+                        group["paper_shadow_spared_loss_events"] += 1
 
-        alert_id = getattr(row, "breakout_alert_id", None)
-        try:
-            alert_key = int(alert_id)
-        except (TypeError, ValueError):
-            alert_key = 0
-        for pt in shadows_by_alert.get(alert_key, []):
-            shadow_family = _shadow_reason_family(pt)
-            if shadow_family and shadow_family != reason_family:
-                continue
+        for pt in matching_shadows:
             shadow_id = getattr(pt, "id", None)
             if shadow_id in group["_paper_shadow_ids"]:
                 continue
@@ -373,11 +554,24 @@ def _execution_drag_report_from_rows(
     rows: list[dict[str, Any]] = []
     for group in groups.values():
         expected_values = group.pop("_expected_net_pct_values")
+        adjusted_expected_values = group.pop("_shadow_adjusted_expected_net_pct_values")
         shadow_ids = group.pop("_paper_shadow_ids")
         shadow_returns = group.pop("_paper_shadow_returns")
         shadow_pnls = group.pop("_paper_shadow_pnls")
         shadow_outcomes = group.pop("_paper_shadow_outcomes")
         wins = sum(1 for outcome in shadow_outcomes if outcome > 0)
+        events = int(group.get("events") or 0)
+        penalized = int(group.get("penalized_positive_drag_events") or 0)
+        adjusted_avg = (
+            sum(adjusted_expected_values) / len(adjusted_expected_values)
+            if adjusted_expected_values
+            else None
+        )
+        execution_drag_cost_fraction = (
+            max(0.0, (penalized / events) * (adjusted_avg / 100.0))
+            if events > 0 and adjusted_avg is not None
+            else 0.0
+        )
         group.update(
             {
                 "avg_expected_net_pct": (
@@ -387,6 +581,34 @@ def _execution_drag_report_from_rows(
                 ),
                 "total_expected_net_pct": (
                     round(sum(expected_values), 4) if expected_values else None
+                ),
+                "shadow_adjusted_avg_expected_net_pct": (
+                    round(adjusted_avg, 4) if adjusted_avg is not None else None
+                ),
+                "shadow_adjusted_total_expected_net_pct": (
+                    round(sum(adjusted_expected_values), 4)
+                    if adjusted_expected_values
+                    else None
+                ),
+                "raw_positive_drag_rate_pct": (
+                    round(
+                        (int(group.get("positive_edge_events") or 0) / events)
+                        * 100.0,
+                        2,
+                    )
+                    if events > 0
+                    else None
+                ),
+                "shadow_adjusted_positive_drag_rate_pct": (
+                    round((penalized / events) * 100.0, 2)
+                    if events > 0
+                    else None
+                ),
+                "net_edge_execution_drag_cost_fraction_estimate": (
+                    round(execution_drag_cost_fraction, 6)
+                ),
+                "net_edge_execution_drag_cost_pct_estimate": (
+                    round(execution_drag_cost_fraction * 100.0, 4)
                 ),
                 "paper_shadow_count": len(shadow_ids),
                 "paper_shadow_return_sample_n": len(shadow_returns),
@@ -428,6 +650,16 @@ def _execution_drag_report_from_rows(
         "summary": {
             "execution_drag_events": sum(row["events"] for row in rows),
             "positive_edge_events": sum(row["positive_edge_events"] for row in rows),
+            "penalized_positive_drag_events": sum(
+                int(row.get("penalized_positive_drag_events") or 0) for row in rows
+            ),
+            "paper_shadow_confirmed_missed_alpha_events": sum(
+                int(row.get("paper_shadow_confirmed_missed_alpha_events") or 0)
+                for row in rows
+            ),
+            "paper_shadow_spared_loss_events": sum(
+                int(row.get("paper_shadow_spared_loss_events") or 0) for row in rows
+            ),
             "groups": len(rows),
             "paper_shadow_count": sum(row["paper_shadow_count"] for row in rows),
         },
@@ -495,6 +727,9 @@ def execution_alpha_drag_report(
             "summary": {
                 "execution_drag_events": 0,
                 "positive_edge_events": 0,
+                "penalized_positive_drag_events": 0,
+                "paper_shadow_confirmed_missed_alpha_events": 0,
+                "paper_shadow_spared_loss_events": 0,
                 "groups": 0,
                 "paper_shadow_count": 0,
             },
@@ -1023,6 +1258,7 @@ def post_trade_review(
     total_pnl = round(sum(pnls), 2) if pnls else None
     avg_pnl = round(sum(pnls) / pnl_n, 2) if pnls else None
     live_win_rate = round(wins / directional_n * 100, 1) if directional_n else None
+    exit_reason_rows, exit_quality = _exit_reason_quality_rows(closed)
 
     # --- Consecutive losses ---
     max_consec_losses = 0
@@ -1106,30 +1342,69 @@ def post_trade_review(
             "live_pnl_sample_n": len(trade_pnls),
             "live_total_pnl": round(sum(trade_pnls), 2) if trade_pnls else None,
         }
+        _, pattern_exit_quality = _exit_reason_quality_rows(trades)
+        row["exit_quality"] = pattern_exit_quality
 
         if delta is not None and t_directional_n >= 3:
+            low_confidence_exit_rate = pattern_exit_quality.get(
+                "low_confidence_exit_rate_pct"
+            )
+            low_confidence_feedback = (
+                low_confidence_exit_rate is not None
+                and float(low_confidence_exit_rate) >= 50.0
+            )
             if delta >= 5:
                 outperformers.append(row)
-                feedback_signals.append({
-                    "pattern_id": pid,
-                    "pattern_name": pat.name if pat else None,
-                    "signal": "upweight",
-                    "reason": (
-                        f"Live win rate {live_wr}% exceeded research {research_wr}% "
-                        f"by {delta}pp over {t_directional_n} directional outcomes"
-                    ),
-                })
+                if low_confidence_feedback:
+                    feedback_signals.append({
+                        "pattern_id": pid,
+                        "pattern_name": pat.name if pat else None,
+                        "signal": "collect_exit_evidence",
+                        "suppressed_signal": "upweight",
+                        "exit_quality": pattern_exit_quality,
+                        "reason": (
+                            f"Live win rate beat research by {delta}pp, but "
+                            f"{low_confidence_exit_rate}% of exits were reconciler/unknown; "
+                            "collect cleaner thesis-exit evidence before upweighting."
+                        ),
+                    })
+                else:
+                    feedback_signals.append({
+                        "pattern_id": pid,
+                        "pattern_name": pat.name if pat else None,
+                        "signal": "upweight",
+                        "exit_quality": pattern_exit_quality,
+                        "reason": (
+                            f"Live win rate {live_wr}% exceeded research {research_wr}% "
+                            f"by {delta}pp over {t_directional_n} directional outcomes"
+                        ),
+                    })
             elif delta <= -10:
                 underperformers.append(row)
-                feedback_signals.append({
-                    "pattern_id": pid,
-                    "pattern_name": pat.name if pat else None,
-                    "signal": "downweight",
-                    "reason": (
-                        f"Live win rate {live_wr}% lagged research {research_wr}% "
-                        f"by {abs(delta)}pp over {t_directional_n} directional outcomes"
-                    ),
-                })
+                if low_confidence_feedback:
+                    feedback_signals.append({
+                        "pattern_id": pid,
+                        "pattern_name": pat.name if pat else None,
+                        "signal": "collect_exit_evidence",
+                        "suppressed_signal": "downweight",
+                        "exit_quality": pattern_exit_quality,
+                        "reason": (
+                            f"Live win rate lagged research by {abs(delta)}pp, but "
+                            f"{low_confidence_exit_rate}% of exits were reconciler/unknown; "
+                            "collect cleaner thesis-exit evidence before downweighting."
+                        ),
+                    })
+                else:
+                    feedback_signals.append({
+                        "pattern_id": pid,
+                        "pattern_name": pat.name if pat else None,
+                        "signal": "downweight",
+                        "exit_quality": pattern_exit_quality,
+                        "reason": (
+                            f"Live win rate {live_wr}% lagged research {research_wr}% "
+                            f"by {abs(delta)}pp over {t_directional_n} directional outcomes"
+                        ),
+                    })
 
     outperformers.sort(key=lambda r: r["delta_pct"] or 0, reverse=True)
     underperformers.sort(key=lambda r: r["delta_pct"] or 0)
@@ -1154,6 +1429,15 @@ def post_trade_review(
         takeaways.append(
             f"{len(high_slip_trades)} trades had high slippage (avg {avg_slip} bps) — review order type/timing."
         )
+    low_confidence_rate = exit_quality.get("low_confidence_exit_rate_pct")
+    if (
+        low_confidence_rate is not None
+        and float(low_confidence_rate) >= 25.0
+    ):
+        takeaways.append(
+            f"{exit_quality['low_confidence_exit_count']} of {n} exits were reconciler/unknown "
+            f"({low_confidence_rate}%) — treat pattern P&L attribution as low-confidence until exit provenance improves."
+        )
     if outperformers:
         takeaways.append(
             f"{len(outperformers)} pattern(s) beat research expectations — consider increasing allocation."
@@ -1175,6 +1459,8 @@ def post_trade_review(
             "pnl_sample_n": pnl_n,
             "total_pnl": total_pnl,
             "avg_pnl": avg_pnl,
+            "exit_quality": exit_quality,
+            "exit_reason_summary": exit_reason_rows[:10],
             "max_consecutive_losses": max_consec_losses,
             "high_slippage_trades": high_slip_trades[:5],
             "outperforming_patterns": outperformers[:5],

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from app.services.trading.realized_pnl_sql import (
+    LIVE_PATTERN_EV_LOW_CONFIDENCE_EXIT_REASONS,
+    LIVE_PATTERN_EV_LOW_CONFIDENCE_EXIT_TOKENS,
     PAPER_DYNAMIC_PATTERN_EV_EXCLUDED_EXIT_REASONS,
+    clean_live_pattern_ev_exit_filter_sql,
     paper_dynamic_pattern_ev_exit_filter_sql,
     paper_trade_contract_multiplier_sql,
     paper_trade_return_fraction_sql,
@@ -119,6 +122,30 @@ def test_paper_dynamic_pattern_ev_filter_excludes_shadow_janitor_only() -> None:
     assert "'shadow_capacity_janitor'" in sql
     assert "exit_engine_time_decay" not in sql
     assert "'expired'" not in sql
+
+
+def test_clean_live_pattern_ev_filter_excludes_low_confidence_exits() -> None:
+    sql = _compact(clean_live_pattern_ev_exit_filter_sql("t"))
+
+    assert LIVE_PATTERN_EV_LOW_CONFIDENCE_EXIT_REASONS == frozenset({
+        "sync_duplicate",
+        "sync_duplicate_cross_user",
+    })
+    assert LIVE_PATTERN_EV_LOW_CONFIDENCE_EXIT_TOKENS == frozenset({
+        "position_absent",
+        "position_gone",
+        "reconcile",
+        "sync_gone",
+    })
+    assert "LOWER(BTRIM(COALESCE(t.exit_reason, ''))) <> ''" in sql
+    assert "LOWER(BTRIM(COALESCE(t.exit_reason, ''))) NOT IN" in sql
+    assert "'sync_duplicate'" in sql
+    assert "'sync_duplicate_cross_user'" in sql
+    assert "NOT LIKE '%reconcile%'" in sql
+    assert "NOT LIKE '%sync_gone%'" in sql
+    assert "NOT LIKE '%position_gone%'" in sql
+    assert "NOT LIKE '%position_absent%'" in sql
+    assert "shadow_capacity_janitor" not in sql
 
 
 def test_return_fraction_sql_rejects_nonfinite_numeric_inputs() -> None:

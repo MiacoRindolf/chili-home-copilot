@@ -21,7 +21,15 @@ _log = logging.getLogger(__name__)
 DEFAULT_MAX_DEPTH = 5
 DEFAULT_EVENT_BATCH = 22
 REAP_INTERVAL_SEC = 300.0  # 5 minutes between dead-event reaping runs
+DECAY_INTERVAL_SEC = 300.0  # Keep decay off the 30s hot path.
 _last_reap_ts: float = 0.0
+_last_decay_ts: float = 0.0
+
+
+def _reset_activation_runner_for_tests() -> None:
+    global _last_decay_ts, _last_reap_ts
+    _last_decay_ts = 0.0
+    _last_reap_ts = 0.0
 
 
 def run_activation_batch(
@@ -42,12 +50,25 @@ def run_activation_batch(
     suppressions = 0
     downstream = 0
     depth_sum = 0
+    decay_ran = False
+    decay_touched = 0
+    decay_elapsed_sec = 0.0
 
+    global _last_decay_ts
+    now_m = time.monotonic()
     if run_decay:
-        try:
-            apply_global_decay(db, graph_version=graph_version)
-        except Exception as e:
-            _log.warning("%s decay step failed: %s", LOG_PREFIX, e)
+        if now_m - _last_decay_ts >= DECAY_INTERVAL_SEC:
+            _last_decay_ts = now_m
+            decay_start = time.monotonic()
+            decay_ran = True
+            try:
+                decay_touched = apply_global_decay(
+                    db,
+                    graph_version=graph_version,
+                )
+            except Exception as e:
+                _log.warning("%s decay step failed: %s", LOG_PREFIX, e)
+            decay_elapsed_sec = round(time.monotonic() - decay_start, 4)
 
     while processed < max_events and (time.monotonic() - t0) < time_budget_sec:
         batch = repo.claim_pending_batch(db, limit=min(8, max_events - processed))
@@ -135,6 +156,9 @@ def run_activation_batch(
         "suppressions": suppressions,
         "downstream_enqueued": downstream,
         "elapsed_sec": elapsed,
+        "decay_ran": decay_ran,
+        "decay_touched": decay_touched,
+        "decay_elapsed_sec": decay_elapsed_sec,
     }
 
 

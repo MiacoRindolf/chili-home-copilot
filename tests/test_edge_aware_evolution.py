@@ -4,6 +4,8 @@ import json
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
+from sqlalchemy import event
+
 from app.models.trading import AutoTraderRun, BreakoutAlert, ScanPattern
 from app.services.trading.auto_trader_rules import _realized_exit_geometry
 from app.services.trading.learning import (
@@ -147,6 +149,61 @@ def _add_too_wide_execution_reject(
             created_at=now,
         )
     )
+
+
+def test_edge_learned_exit_parent_query_omits_bulk_scan_pattern_columns(db):
+    pat = _make_pattern(db)
+    now = datetime.utcnow().replace(microsecond=0)
+    for i in range(5):
+        _add_edge_reject(db, pattern_id=pat.id, created_at=now - timedelta(minutes=i))
+    db.commit()
+    pattern_id = int(pat.id)
+    report = _edge_debt_loss_reports(db, now=now, lookback_days=1)[pattern_id]
+    db.expunge_all()
+
+    statements: list[str] = []
+
+    def _capture(_conn, _cursor, statement, _parameters, _context, _executemany):
+        lowered = statement.lower()
+        if (
+            lowered.lstrip().startswith("select")
+            and "from scan_patterns" in lowered
+        ):
+            statements.append(statement)
+
+    event.listen(db.bind, "before_cursor_execute", _capture)
+    try:
+        ids = fork_edge_learned_exit_variants(
+            db,
+            pattern_id,
+            edge_loss_report=report,
+        )
+    finally:
+        event.remove(db.bind, "before_cursor_execute", _capture)
+
+    assert len(ids) == 1
+    assert statements
+    relevant = [
+        statement.lower()
+        for statement in statements
+        if "limit" in statement.lower()
+        or "count(" in statement.lower()
+    ]
+    assert relevant
+    parent_select = next(
+        statement
+        for statement in relevant
+        if "where scan_patterns.id" in statement
+    )
+    assert "where scan_patterns.id" in parent_select
+    assert "rules_json" in parent_select
+    assert "avg_winner_pct" in parent_select
+    assert any("count(" in statement for statement in relevant)
+    assert any("variant_label" in statement for statement in relevant)
+    for statement in relevant:
+        assert "bench_walk_forward_json" not in statement
+        assert "portfolio_gate_json" not in statement
+        assert "regime_affinity_json" not in statement
 
 
 def test_edge_debt_loss_report_groups_autotrader_rejects(db):

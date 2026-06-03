@@ -15,7 +15,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 from sqlalchemy import func, text
 
 from ...models.trading import (
@@ -10432,6 +10432,47 @@ def fork_scope_variants(
     return created_ids
 
 
+def _edge_learned_exit_parent_query(db: Session, pattern_id: int):
+    from ...models.trading import ScanPattern
+
+    return (
+        db.query(ScanPattern)
+        .options(
+            load_only(
+                ScanPattern.id,
+                ScanPattern.name,
+                ScanPattern.description,
+                ScanPattern.rules_json,
+                ScanPattern.exit_config,
+                ScanPattern.asset_class,
+                ScanPattern.timeframe,
+                ScanPattern.confidence,
+                ScanPattern.min_base_score,
+                ScanPattern.active,
+                ScanPattern.generation,
+                ScanPattern.ticker_scope,
+                ScanPattern.scope_tickers,
+                ScanPattern.hypothesis_family,
+                ScanPattern.lifecycle_stage,
+                ScanPattern.promotion_status,
+                ScanPattern.backtest_count,
+                ScanPattern.win_rate,
+                ScanPattern.avg_return_pct,
+                ScanPattern.backtest_priority,
+                ScanPattern.corrected_trade_count,
+                ScanPattern.corrected_win_rate,
+                ScanPattern.corrected_avg_return_pct,
+                ScanPattern.avg_winner_pct,
+                ScanPattern.avg_loser_pct,
+                ScanPattern.payoff_ratio_n,
+                ScanPattern.trade_count,
+            )
+        )
+        .filter(ScanPattern.id == int(pattern_id))
+        .first()
+    )
+
+
 def fork_edge_learned_exit_variants(
     db: Session,
     pattern_id: int,
@@ -10452,7 +10493,7 @@ def fork_edge_learned_exit_variants(
             }
         )
 
-    parent = db.get(ScanPattern, pattern_id)
+    parent = _edge_learned_exit_parent_query(db, pattern_id)
     if not parent or not parent.active:
         if diagnostics is not None:
             diagnostics["skip_reason"] = "parent_missing_or_inactive"
@@ -10479,6 +10520,20 @@ def fork_edge_learned_exit_variants(
     )[:40]
     existing = (
         db.query(ScanPattern)
+        .options(
+            load_only(
+                ScanPattern.id,
+                ScanPattern.parent_id,
+                ScanPattern.variant_label,
+                ScanPattern.origin,
+                ScanPattern.exit_config,
+                ScanPattern.backtest_priority,
+                ScanPattern.last_backtest_at,
+                ScanPattern.updated_at,
+                ScanPattern.asset_class,
+                ScanPattern.promotion_status,
+            )
+        )
         .filter(
             ScanPattern.parent_id == pattern_id,
             ScanPattern.variant_label == label,
@@ -10523,10 +10578,12 @@ def fork_edge_learned_exit_variants(
         return []
 
     existing_children = (
-        db.query(ScanPattern)
+        db.query(func.count(ScanPattern.id))
         .filter(ScanPattern.parent_id == pattern_id, ScanPattern.active.is_(True))
-        .count()
+        .scalar()
+        or 0
     )
+    existing_children = int(existing_children)
     if existing_children >= _MAX_ACTIVE_VARIANTS:
         if diagnostics is not None:
             diagnostics["skip_reason"] = "max_active_variants"

@@ -173,6 +173,9 @@ def test_execution_drag_report_groups_positive_edge_no_order_id_shadow() -> None
     assert out["summary"] == {
         "execution_drag_events": 1,
         "positive_edge_events": 1,
+        "penalized_positive_drag_events": 1,
+        "paper_shadow_confirmed_missed_alpha_events": 1,
+        "paper_shadow_spared_loss_events": 0,
         "groups": 1,
         "paper_shadow_count": 1,
     }
@@ -189,6 +192,17 @@ def test_execution_drag_report_groups_positive_edge_no_order_id_shadow() -> None
         == "refresh_edge_reliability_and_review_entry_execution_geometry"
     )
     assert row["avg_expected_net_pct"] == pytest.approx(2.5)
+    assert row["shadow_adjusted_avg_expected_net_pct"] == pytest.approx(2.5)
+    assert row["raw_positive_drag_rate_pct"] == pytest.approx(100.0)
+    assert row["shadow_adjusted_positive_drag_rate_pct"] == pytest.approx(100.0)
+    assert row["net_edge_execution_drag_cost_fraction_estimate"] == pytest.approx(0.025)
+    assert row["net_edge_execution_drag_cost_pct_estimate"] == pytest.approx(2.5)
+    assert row["penalized_positive_drag_events"] == 1
+    assert row["paper_shadow_sample_n"] == 1
+    assert row["paper_shadow_confirmed_missed_alpha_events"] == 1
+    assert row["paper_shadow_spared_loss_events"] == 0
+    assert row["paper_shadow_unknown_outcome_events"] == 0
+    assert row["unobserved_positive_drag_events"] == 0
     assert row["paper_shadow_avg_return_pct"] == pytest.approx(3.0)
     assert row["paper_shadow_win_rate_pct"] == pytest.approx(100.0)
     candidates = execution_alpha_drag_followup_candidates(out)
@@ -265,12 +279,23 @@ def test_execution_alpha_drag_report_exposes_option_no_fill_groups() -> None:
     assert row["reason_family"] == "option_entry_no_fill"
     assert row["order_status"] == "no_fill"
     assert row["positive_edge_events"] == 1
+    assert row["penalized_positive_drag_events"] == 0
+    assert row["paper_shadow_sample_n"] == 1
+    assert row["paper_shadow_confirmed_missed_alpha_events"] == 0
+    assert row["paper_shadow_spared_loss_events"] == 1
+    assert row["paper_shadow_unknown_outcome_events"] == 0
+    assert row["unobserved_positive_drag_events"] == 0
     assert row["recommended_work_event"] == "edge_reliability_refresh"
     assert (
         row["recommended_next_action"]
         == "refresh_edge_reliability_and_review_entry_execution_geometry"
     )
     assert row["avg_expected_net_pct"] == pytest.approx(3.1)
+    assert row["shadow_adjusted_avg_expected_net_pct"] is None
+    assert row["raw_positive_drag_rate_pct"] == pytest.approx(100.0)
+    assert row["shadow_adjusted_positive_drag_rate_pct"] == pytest.approx(0.0)
+    assert row["net_edge_execution_drag_cost_fraction_estimate"] == pytest.approx(0.0)
+    assert row["net_edge_execution_drag_cost_pct_estimate"] == pytest.approx(0.0)
     assert row["paper_shadow_avg_return_pct"] == pytest.approx(-12.0)
     assert row["paper_shadow_win_rate_pct"] == pytest.approx(0.0)
 
@@ -317,6 +342,9 @@ def test_queue_execution_alpha_drag_followups_requests_edge_refresh(monkeypatch)
 
     assert out["created"] == 1
     assert out["event_ids"] == [123]
+    assert out["report_summary"]["positive_edge_events"] == 1
+    assert out["report_summary"]["penalized_positive_drag_events"] == 1
+    assert out["report_summary"]["paper_shadow_spared_loss_events"] == 0
     assert calls == [
         {
             "db": db,
@@ -607,6 +635,7 @@ def test_post_trade_review_uses_contract_aware_outcomes_when_pnl_missing() -> No
             asset_kind="option",
             tags=None,
             indicator_snapshot=snapshot,
+            exit_reason="target",
             exit_date=datetime(2026, 5, 30, 15, 30),
             tca_entry_slippage_bps=5.0,
             tca_exit_slippage_bps=5.0,
@@ -625,6 +654,7 @@ def test_post_trade_review_uses_contract_aware_outcomes_when_pnl_missing() -> No
             asset_kind="option",
             tags=None,
             indicator_snapshot=snapshot,
+            exit_reason="stop",
             exit_date=datetime(2026, 5, 30, 15, 31),
             tca_entry_slippage_bps=5.0,
             tca_exit_slippage_bps=5.0,
@@ -643,6 +673,7 @@ def test_post_trade_review_uses_contract_aware_outcomes_when_pnl_missing() -> No
             asset_kind="option",
             tags=None,
             indicator_snapshot=snapshot,
+            exit_reason="target",
             exit_date=datetime(2026, 5, 30, 15, 32),
             tca_entry_slippage_bps=5.0,
             tca_exit_slippage_bps=5.0,
@@ -674,6 +705,76 @@ def test_post_trade_review_uses_contract_aware_outcomes_when_pnl_missing() -> No
     assert outperformer["delta_pct"] == pytest.approx(11.7)
     assert review["underperforming_patterns"] == []
     assert out["feedback_signals"][0]["signal"] == "upweight"
+    assert out["feedback_signals"][0]["exit_quality"]["low_confidence_exit_count"] == 0
+
+
+def test_post_trade_review_suppresses_feedback_when_exits_low_confidence() -> None:
+    pattern = SimpleNamespace(
+        id=43,
+        name="messy-exit-alpha",
+        promotion_status="pilot",
+        win_rate=0.4,
+        oos_win_rate=0.40,
+        oos_avg_return_pct=1.0,
+    )
+    trades = [
+        SimpleNamespace(
+            id=1111,
+            user_id=7,
+            status="closed",
+            scan_pattern_id=43,
+            ticker="SPY",
+            direction="long",
+            entry_price=100.0,
+            exit_price=104.0,
+            quantity=1.0,
+            pnl=4.0,
+            exit_reason="broker_reconcile_position_gone",
+            exit_date=datetime(2026, 5, 30, 15, 30),
+        ),
+        SimpleNamespace(
+            id=1112,
+            user_id=7,
+            status="closed",
+            scan_pattern_id=43,
+            ticker="SPY",
+            direction="long",
+            entry_price=100.0,
+            exit_price=103.0,
+            quantity=1.0,
+            pnl=3.0,
+            exit_reason=None,
+            exit_date=datetime(2026, 5, 30, 15, 31),
+        ),
+        SimpleNamespace(
+            id=1113,
+            user_id=7,
+            status="closed",
+            scan_pattern_id=43,
+            ticker="SPY",
+            direction="long",
+            entry_price=100.0,
+            exit_price=102.0,
+            quantity=1.0,
+            pnl=2.0,
+            exit_reason="target",
+            exit_date=datetime(2026, 5, 30, 15, 32),
+        ),
+    ]
+    db = _FakeAttributionSession(trades=trades, patterns=[pattern])
+
+    out = post_trade_review(db, 7, days=30)
+
+    signal = out["feedback_signals"][0]
+    assert signal["signal"] == "collect_exit_evidence"
+    assert signal["suppressed_signal"] == "upweight"
+    assert signal["exit_quality"]["low_confidence_exit_count"] == 2
+    assert signal["exit_quality"]["low_confidence_exit_rate_pct"] == pytest.approx(66.67)
+    assert "collect cleaner thesis-exit evidence" in signal["reason"]
+
+    outperformer = out["review"]["outperforming_patterns"][0]
+    assert outperformer["scan_pattern_id"] == 43
+    assert outperformer["exit_quality"]["low_confidence_exit_count"] == 2
 
 
 def test_post_trade_review_pnl_totals_include_partial_option_leg() -> None:
@@ -718,6 +819,93 @@ def test_post_trade_review_pnl_totals_include_partial_option_leg() -> None:
     assert review["total_pnl"] == pytest.approx(10.0)
     assert review["avg_pnl"] == pytest.approx(10.0)
     assert review["high_slippage_trades"][0]["pnl"] == pytest.approx(10.0)
+
+
+def test_post_trade_review_reports_exit_attribution_confidence() -> None:
+    trades = [
+        SimpleNamespace(
+            id=1301,
+            user_id=7,
+            status="closed",
+            scan_pattern_id=None,
+            ticker="AAPL",
+            direction="long",
+            entry_price=100.0,
+            exit_price=105.0,
+            quantity=1.0,
+            pnl=5.0,
+            exit_reason="target",
+            exit_date=datetime(2026, 5, 30, 15, 30),
+        ),
+        SimpleNamespace(
+            id=1302,
+            user_id=7,
+            status="closed",
+            scan_pattern_id=None,
+            ticker="AAPL",
+            direction="long",
+            entry_price=100.0,
+            exit_price=102.0,
+            quantity=1.0,
+            pnl=2.0,
+            exit_reason="pattern_exit_now",
+            exit_date=datetime(2026, 5, 30, 15, 31),
+        ),
+        SimpleNamespace(
+            id=1303,
+            user_id=7,
+            status="closed",
+            scan_pattern_id=None,
+            ticker="AAPL",
+            direction="long",
+            entry_price=100.0,
+            exit_price=95.0,
+            quantity=1.0,
+            pnl=-5.0,
+            exit_reason="broker_reconcile_position_gone",
+            exit_date=datetime(2026, 5, 30, 15, 32),
+        ),
+        SimpleNamespace(
+            id=1304,
+            user_id=7,
+            status="closed",
+            scan_pattern_id=None,
+            ticker="AAPL",
+            direction="long",
+            entry_price=100.0,
+            exit_price=98.0,
+            quantity=1.0,
+            pnl=-2.0,
+            exit_reason=None,
+            exit_date=datetime(2026, 5, 30, 15, 33),
+        ),
+    ]
+    db = _FakeAttributionSession(trades=trades, patterns=[])
+
+    out = post_trade_review(db, 7, days=30)
+
+    review = out["review"]
+    quality = review["exit_quality"]
+    assert quality["planned_exit_count"] == 1
+    assert quality["dynamic_pattern_exit_count"] == 1
+    assert quality["reconciler_exit_count"] == 1
+    assert quality["missing_exit_reason_count"] == 1
+    assert quality["low_confidence_exit_count"] == 2
+    assert quality["low_confidence_exit_rate_pct"] == pytest.approx(50.0)
+    assert quality["low_confidence_total_pnl"] == pytest.approx(-7.0)
+
+    by_reason = {
+        row["exit_reason"]: row
+        for row in review["exit_reason_summary"]
+    }
+    assert by_reason["target"]["exit_family"] == "planned_profit_capture"
+    assert by_reason["pattern_exit_now"]["exit_family"] == "dynamic_pattern_exit"
+    assert by_reason["broker_reconcile_position_gone"]["exit_family"] == (
+        "reconciler_or_broker_cleanup"
+    )
+    assert by_reason["missing"]["exit_family"] == "unknown"
+    assert by_reason["missing"]["low_confidence_attribution"] is True
+    assert any("reconciler/unknown" in item for item in review["takeaways"])
 
 
 def test_post_trade_review_excludes_unverified_extreme_slippage_outliers() -> None:

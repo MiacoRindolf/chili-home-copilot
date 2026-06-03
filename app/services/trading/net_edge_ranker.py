@@ -383,6 +383,27 @@ def _ctx_user_id(ctx: NetEdgeSignalContext) -> int | None:
     return int(value)
 
 
+def _positive_int(value: Any) -> int | None:
+    parsed = _finite_float(value)
+    if parsed is None or parsed <= 0 or not parsed.is_integer():
+        return None
+    return int(parsed)
+
+
+def _paper_shadow_outcome_pct(row: PaperTrade) -> float | None:
+    try:
+        outcome = paper_trade_return_pct(row)
+    except Exception:
+        outcome = None
+    if outcome is not None:
+        return outcome
+    for attr in ("pnl_pct", "pnl"):
+        outcome = _finite_float(getattr(row, attr, None))
+        if outcome is not None:
+            return outcome
+    return None
+
+
 def _execution_drag_cost_details(
     db: Session,
     ctx: NetEdgeSignalContext,
@@ -415,17 +436,16 @@ def _execution_drag_cost_details(
     try:
         from .attribution_service import (
             _execution_asset_class,
+            _execution_reason_family,
             _expected_net_pct_from_payload,
             _is_execution_drag_audit,
             _json_dict as _attr_json_dict,
+            _shadow_reason_family,
         )
 
         pattern_id = int(pattern_id_raw)
         cutoff = datetime.utcnow() - timedelta(days=lookback_days)
-        max_rows = max(
-            min_attempts,
-            int(getattr(settings, "brain_net_edge_execution_drag_max_rows", 200) or 200),
-        )
+        max_rows = max(min_attempts, _int_setting("brain_net_edge_execution_drag_max_rows", 200))
         query = db.query(AutoTraderRun).filter(
             AutoTraderRun.scan_pattern_id == pattern_id,
             AutoTraderRun.created_at >= cutoff,
@@ -437,7 +457,7 @@ def _execution_drag_cost_details(
 
         ctx_asset = _score_asset_class(ctx.asset_class)
         attempts = 0
-        positive_edges: list[float] = []
+        positive_candidates: list[dict[str, Any]] = []
         for row in rows:
             row_pattern = _finite_float(getattr(row, "scan_pattern_id", None))
             if row_pattern is None or not row_pattern.is_integer() or int(row_pattern) != pattern_id:
@@ -455,7 +475,13 @@ def _execution_drag_cost_details(
                 continue
             expected = _finite_float(_expected_net_pct_from_payload(payload))
             if expected is not None and expected > 0.0:
-                positive_edges.append(expected)
+                positive_candidates.append(
+                    {
+                        "expected_net_pct": expected,
+                        "alert_id": _positive_int(getattr(row, "breakout_alert_id", None)),
+                        "reason_family": _execution_reason_family(row, payload),
+                    }
+                )
 
         if attempts < min_attempts:
             return {
@@ -463,7 +489,7 @@ def _execution_drag_cost_details(
                 "attempts": attempts,
                 "reason": "insufficient_attempts",
             }
-        positive_drag = len(positive_edges)
+        positive_drag = len(positive_candidates)
         if positive_drag < min_positive_drag:
             return {
                 **base,
@@ -471,16 +497,99 @@ def _execution_drag_cost_details(
                 "positive_drag_events": positive_drag,
                 "reason": "insufficient_positive_drag_events",
             }
-        avg_expected_pct = sum(positive_edges) / positive_drag
-        drag_rate = positive_drag / attempts
+
+        alert_ids = sorted({
+            int(candidate["alert_id"])
+            for candidate in positive_candidates
+            if candidate.get("alert_id") is not None
+        })
+        shadows_by_alert: dict[int, list[PaperTrade]] = {}
+        if alert_ids:
+            shadow_query = db.query(PaperTrade).filter(
+                PaperTrade.paper_shadow_of_alert_id.in_(alert_ids),
+                PaperTrade.entry_date >= cutoff,
+            )
+            if user_id is not None:
+                shadow_query = shadow_query.filter(PaperTrade.user_id == user_id)
+            for pt in shadow_query.limit(max_rows * 2).all():
+                alert_id = _positive_int(getattr(pt, "paper_shadow_of_alert_id", None))
+                if alert_id is None or alert_id not in alert_ids:
+                    continue
+                if user_id is not None:
+                    row_user = _positive_int(getattr(pt, "user_id", None))
+                    if row_user != user_id:
+                        continue
+                shadows_by_alert.setdefault(alert_id, []).append(pt)
+
+        adjusted_edges: list[float] = []
+        paper_shadow_sample_n = 0
+        paper_shadow_confirmed_missed_alpha_events = 0
+        paper_shadow_spared_loss_events = 0
+        paper_shadow_unknown_outcome_events = 0
+        unobserved_positive_drag_events = 0
+        for candidate in positive_candidates:
+            alert_id = candidate.get("alert_id")
+            expected = float(candidate["expected_net_pct"])
+            reason_family = str(candidate.get("reason_family") or "").strip().lower()
+            matches: list[PaperTrade] = []
+            if alert_id is not None:
+                for pt in shadows_by_alert.get(int(alert_id), []):
+                    shadow_family = str(_shadow_reason_family(pt) or "").strip().lower()
+                    if shadow_family and shadow_family != reason_family:
+                        continue
+                    matches.append(pt)
+            if not matches:
+                unobserved_positive_drag_events += 1
+                adjusted_edges.append(expected)
+                continue
+
+            outcomes = []
+            paper_shadow_sample_n += len(matches)
+            for pt in matches:
+                outcome = _paper_shadow_outcome_pct(pt)
+                if outcome is not None:
+                    outcomes.append(outcome)
+            if not outcomes:
+                paper_shadow_unknown_outcome_events += 1
+                adjusted_edges.append(expected)
+            elif any(outcome > 0.0 for outcome in outcomes):
+                paper_shadow_confirmed_missed_alpha_events += 1
+                adjusted_edges.append(expected)
+            else:
+                paper_shadow_spared_loss_events += 1
+
+        adjusted_positive_drag = len(adjusted_edges)
+        if adjusted_positive_drag < min_positive_drag:
+            return {
+                **base,
+                "attempts": attempts,
+                "positive_drag_events": positive_drag,
+                "penalized_positive_drag_events": adjusted_positive_drag,
+                "paper_shadow_sample_n": paper_shadow_sample_n,
+                "paper_shadow_confirmed_missed_alpha_events": paper_shadow_confirmed_missed_alpha_events,
+                "paper_shadow_spared_loss_events": paper_shadow_spared_loss_events,
+                "paper_shadow_unknown_outcome_events": paper_shadow_unknown_outcome_events,
+                "unobserved_positive_drag_events": unobserved_positive_drag_events,
+                "reason": "insufficient_shadow_adjusted_positive_drag_events",
+            }
+
+        avg_expected_pct = sum(adjusted_edges) / adjusted_positive_drag
+        drag_rate = adjusted_positive_drag / attempts
         raw_cost = max(0.0, drag_rate * (avg_expected_pct / 100.0))
         cost_fraction = min(cap_fraction, raw_cost)
         return {
             **base,
             "attempts": attempts,
             "positive_drag_events": positive_drag,
+            "penalized_positive_drag_events": adjusted_positive_drag,
+            "paper_shadow_sample_n": paper_shadow_sample_n,
+            "paper_shadow_confirmed_missed_alpha_events": paper_shadow_confirmed_missed_alpha_events,
+            "paper_shadow_spared_loss_events": paper_shadow_spared_loss_events,
+            "paper_shadow_unknown_outcome_events": paper_shadow_unknown_outcome_events,
+            "unobserved_positive_drag_events": unobserved_positive_drag_events,
             "avg_positive_expected_net_pct": round(avg_expected_pct, 6),
             "drag_rate": round(drag_rate, 6),
+            "raw_positive_drag_rate": round(positive_drag / attempts, 6),
             "cost_fraction": cost_fraction,
             "capped": cost_fraction < raw_cost,
             "reason": "measured_execution_drag",
