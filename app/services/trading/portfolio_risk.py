@@ -548,8 +548,9 @@ def size_position(
     stop_price: float,
     risk_pct: float | None = None,
     limits: RiskLimits | None = None,
+    direction: str = "long",
 ) -> int:
-    """Calculate long position size (shares) for a given risk budget.
+    """Calculate position size (shares) for a given directional risk budget.
 
     Uses fixed-fractional sizing: risk_pct% of capital = max loss.
     """
@@ -578,7 +579,8 @@ def size_position(
         return 0
 
     risk_amount = capital_f * (risk_pct_f / 100)
-    risk_per_share = entry_f - stop_f
+    side = str(direction or "long").strip().lower()
+    risk_per_share = stop_f - entry_f if side == "short" else entry_f - stop_f
     if risk_per_share <= 0:
         return 0
 

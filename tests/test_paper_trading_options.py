@@ -1826,6 +1826,58 @@ def test_auto_enter_option_signal_rejects_wrong_side_premium_stop(
     assert _paper_rows(db) == []
 
 
+def test_auto_enter_stock_short_signal_preserves_directional_geometry(
+    monkeypatch,
+) -> None:
+    from app.services.trading import paper_trading
+
+    monkeypatch.setattr(paper_trading.settings, "backtest_spread", 0.0, raising=False)
+    signal = {
+        "ticker": "MRVL",
+        "entry_price": 308.82,
+        "stop_price": 337.15,
+        "target_price": 300.17,
+        "confidence": 0.89,
+        "direction": "short",
+        "signal_type": "orb_breakdown",
+    }
+    db = _FakeDb()
+    emitted = []
+
+    def _capture_emit(_db, *, signal, legacy, net_edge_score):
+        emitted.append(signal)
+
+    with patch(
+        "app.services.trading.portfolio_risk.check_new_trade_allowed",
+        return_value=(True, "ok"),
+    ), patch(
+        "app.services.trading.net_edge_ranker.mode_is_active",
+        return_value=False,
+    ), patch(
+        "app.services.trading.position_sizer_writer.mode_is_active",
+        return_value=True,
+    ), patch(
+        "app.services.trading.position_sizer_emitter.emit_shadow_proposal",
+        side_effect=_capture_emit,
+    ):
+        entered = paper_trading.auto_enter_from_signals(
+            db,
+            user_id=1,
+            signals=[signal],
+            capital=10_000.0,
+        )
+
+    assert entered == 1
+    trade = _paper_rows(db)[0]
+    assert trade.direction == "short"
+    assert trade.entry_price == pytest.approx(308.82)
+    assert trade.stop_price == pytest.approx(337.15)
+    assert trade.target_price == pytest.approx(300.17)
+    assert trade.quantity > 0
+    assert emitted
+    assert emitted[0].direction == "short"
+
+
 def test_auto_enter_option_signal_rejects_unaffordable_contract_size(
     monkeypatch,
 ) -> None:

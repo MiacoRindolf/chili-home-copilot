@@ -2194,6 +2194,9 @@ def auto_enter_from_signals(
         target_raw = signal_payload.get("target_price") or signal_payload.get("target")
         if entry is None:
             continue
+        direction = str(signal_payload.get("direction") or "long").strip().lower()
+        if direction != "short":
+            direction = "long"
 
         is_option_sig = _is_option_signal(signal_payload)
         asset_type = (
@@ -2263,9 +2266,15 @@ def auto_enter_from_signals(
             stop = _positive_float(stop_raw)
             target = _positive_float(target_raw)
             if not stop:
-                stop = entry * 0.97
+                stop = entry * (1.03 if direction == "short" else 0.97)
 
-            qty = size_position(capital, entry, stop, risk_pct=0.5)
+            qty = size_position(
+                capital,
+                entry,
+                stop,
+                risk_pct=0.5,
+                direction=direction,
+            )
             if qty <= 0:
                 qty = 10
 
@@ -2284,7 +2293,7 @@ def auto_enter_from_signals(
                     entry_price=float(entry),
                     stop_price=float(stop),
                     target_price=float(target) if target else None,
-                    direction=str(signal_payload.get("direction") or "long"),
+                    direction=direction,
                     regime=signal_payload.get("regime"),
                     timeframe=signal_payload.get("timeframe"),
                     heuristic_score=signal_payload.get("heuristic_score"),
@@ -2313,7 +2322,7 @@ def auto_enter_from_signals(
                     signal=EmitterSignal(
                         source="paper_trading.auto_open",
                         ticker=ticker,
-                        direction="long",
+                        direction=direction,
                         entry_price=float(entry),
                         stop_price=float(stop),
                         capital=float(capital or 0.0),
@@ -2343,6 +2352,7 @@ def auto_enter_from_signals(
             target_price=target,
             quantity=qty,
             signal_json=signal_payload,
+            direction=direction,
         )
         if pt:
             entered += 1

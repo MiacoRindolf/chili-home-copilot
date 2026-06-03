@@ -34,6 +34,33 @@ def test_size_position_valid_long_stop_preserves_fixed_fractional_sizing():
     assert size_position(10_000.0, 100.0, 95.0, limits=_limits()) == 20
 
 
+def test_size_position_valid_short_stop_uses_short_side_risk():
+    # 1% of 10k is $100 risk. With a $5 short stop distance, size is 20 shares.
+    assert (
+        size_position(
+            10_000.0,
+            100.0,
+            105.0,
+            limits=_limits(),
+            direction="short",
+        )
+        == 20
+    )
+
+
+def test_size_position_rejects_stop_not_above_short_entry():
+    assert (
+        size_position(
+            10_000.0,
+            100.0,
+            95.0,
+            limits=_limits(),
+            direction="short",
+        )
+        == 0
+    )
+
+
 def test_compute_trade_risk_pct_is_direction_aware_not_absolute():
     assert compute_trade_risk_pct(100.0, 105.0, 10.0, 10_000.0) == 0.0
     assert compute_trade_risk_pct(
