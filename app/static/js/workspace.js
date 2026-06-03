@@ -204,6 +204,9 @@
       { cmd: 'reopen', label: 'Reopen closed window', icon: '↩️' },
       { cmd: 'tidy', label: 'Tidy windows', icon: '🪟' },
       { cmd: 'grid', label: 'Grid windows', icon: '🪟' },
+      { cmd: 'min-all', label: 'Minimize all windows', icon: '⬇️' },
+      { cmd: 'restore-all', label: 'Restore minimized windows', icon: '⬆️' },
+      { cmd: 'close-all', label: 'Close all windows', icon: '✖️' },
       { cmd: 'reset-layout', label: 'Reset window layout', icon: '🪟' },
       { cmd: 'reset-appearance', label: 'Reset appearance', icon: '🎨' },
       { cmd: 'wp:aurora', label: 'Wallpaper: Aurora', icon: '🖼️' },
@@ -241,6 +244,12 @@
       if (window.ChiliOS && window.ChiliOS.expose) window.ChiliOS.expose();
     } else if (id === 'reopen') {
       if (window.ChiliOS && window.ChiliOS.reopenClosed) window.ChiliOS.reopenClosed();
+    } else if (id === 'min-all') {
+      if (window.ChiliOS && window.ChiliOS.minimizeAll) window.ChiliOS.minimizeAll();
+    } else if (id === 'restore-all') {
+      if (window.ChiliOS && window.ChiliOS.restoreMinimized) window.ChiliOS.restoreMinimized();
+    } else if (id === 'close-all') {
+      if (window.ChiliOS && window.ChiliOS.closeAll) window.ChiliOS.closeAll();
     } else if (id === 'welcome') {
       var ws = document.getElementById('ws-welcome-scrim');
       try { localStorage.removeItem('chili-os-welcomed'); } catch (e) {}
