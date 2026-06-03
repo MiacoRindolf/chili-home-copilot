@@ -421,9 +421,9 @@ def test_cohort_eligibility_floor_blocks_negative_realized(db):
         db.execute(text("""
             INSERT INTO trading_trades (user_id, scan_pattern_id, ticker,
                 direction, entry_price, exit_price, quantity, pnl, status,
-                entry_date, exit_date)
+                entry_date, exit_date, exit_reason)
             VALUES (1, 9991, 'TST', 'long', 100.0, 99.0, 10.0, -10.0, 'closed',
-                NOW() - INTERVAL '10 days', NOW() - INTERVAL '5 days')
+                NOW() - INTERVAL '10 days', NOW() - INTERVAL '5 days', 'stop')
         """))
     db.flush()
 
@@ -450,9 +450,9 @@ def test_cohort_eligibility_floor_allows_few_trades(db):
         db.execute(text("""
             INSERT INTO trading_trades (user_id, scan_pattern_id, ticker,
                 direction, entry_price, exit_price, quantity, pnl, status,
-                entry_date, exit_date)
+                entry_date, exit_date, exit_reason)
             VALUES (1, 9992, 'TST', 'long', 100.0, 99.0, 10.0, -10.0, 'closed',
-                NOW() - INTERVAL '10 days', NOW() - INTERVAL '5 days')
+                NOW() - INTERVAL '10 days', NOW() - INTERVAL '5 days', 'stop')
         """))
     db.flush()
 
@@ -478,9 +478,9 @@ def test_cohort_eligibility_floor_allows_positive_avg(db):
         db.execute(text("""
             INSERT INTO trading_trades (user_id, scan_pattern_id, ticker,
                 direction, entry_price, exit_price, quantity, pnl, status,
-                entry_date, exit_date)
+                entry_date, exit_date, exit_reason)
             VALUES (1, 9993, 'TST', 'long', 100.0, 101.0, 10.0, +10.0, 'closed',
-                NOW() - INTERVAL '10 days', NOW() - INTERVAL '5 days')
+                NOW() - INTERVAL '10 days', NOW() - INTERVAL '5 days', 'target')
         """))
     db.flush()
 
@@ -504,9 +504,9 @@ def test_quality_realized_map_option_uses_contract_multiplier(db):
     db.execute(text("""
         INSERT INTO trading_trades (user_id, scan_pattern_id, ticker,
             direction, entry_price, exit_price, quantity, pnl, status,
-            entry_date, exit_date, asset_kind)
+            entry_date, exit_date, asset_kind, exit_reason)
         VALUES (1, 9998, 'SPY', 'long', 5.0, 6.0, 1.0, 100.0, 'closed',
-            NOW() - INTERVAL '10 days', NOW() - INTERVAL '5 days', 'option')
+            NOW() - INTERVAL '10 days', NOW() - INTERVAL '5 days', 'option', 'target')
     """))
     db.flush()
 
@@ -537,9 +537,9 @@ def test_mig244_idempotent_on_second_run(db):
         db.execute(text("""
             INSERT INTO trading_trades (user_id, scan_pattern_id, ticker,
                 direction, entry_price, exit_price, quantity, pnl, status,
-                entry_date, exit_date)
+                entry_date, exit_date, exit_reason)
             VALUES (1, 9994, 'TST', 'long', 100.0, 99.0, 10.0, -10.0, 'closed',
-                NOW() - INTERVAL '10 days', NOW() - INTERVAL '5 days')
+                NOW() - INTERVAL '10 days', NOW() - INTERVAL '5 days', 'stop')
         """))
     db.flush()
     db.commit()

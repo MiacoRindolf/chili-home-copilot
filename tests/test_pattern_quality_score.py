@@ -7,6 +7,7 @@ import pytest
 
 from app.services.trading.pattern_quality_score import (
     _resolve_weights,
+    _load_realized_pnl_map,
     compute_quality_composite_score,
     realized_evidence_score,
     realized_pnl_score,
@@ -32,6 +33,41 @@ def _pattern(**overrides):
     }
     base.update(overrides)
     return SimpleNamespace(**base)
+
+
+class _RowsResult:
+    def fetchall(self):
+        return []
+
+
+class _SqlCaptureDb:
+    def __init__(self):
+        self.sqls: list[str] = []
+        self.params: list[dict] = []
+
+    def execute(self, stmt, params=None):
+        self.sqls.append(str(stmt))
+        self.params.append(dict(params or {}))
+        return _RowsResult()
+
+
+def test_realized_pnl_map_uses_clean_live_exit_evidence() -> None:
+    db = _SqlCaptureDb()
+
+    out = _load_realized_pnl_map(db, 45)
+
+    assert out == {}
+    assert len(db.sqls) == 1
+    sql = " ".join(db.sqls[0].split())
+    assert "FROM trading_trades t" in sql
+    assert "COUNT(realized_return_frac) AS n" in sql
+    assert "AVG(realized_return_frac) AS avg_pnl_pct" in sql
+    assert "LOWER(BTRIM(COALESCE(t.exit_reason, ''))) <> ''" in sql
+    assert "NOT LIKE '%reconcile%'" in sql
+    assert "NOT LIKE '%sync_gone%'" in sql
+    assert "NOT LIKE '%position_gone%'" in sql
+    assert "NOT LIKE '%position_absent%'" in sql
+    assert db.params == [{"window_days": 45}]
 
 
 def test_realized_pnl_score_rejects_boolean_and_nonfinite_inputs() -> None:

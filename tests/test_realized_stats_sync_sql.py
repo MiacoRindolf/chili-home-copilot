@@ -61,6 +61,11 @@ def test_realized_stats_sync_live_source_uses_realized_notional_only() -> None:
     assert "WHEN pnl < 0" not in realized_sql
     assert "exit_price - entry_price" not in realized_sql
     assert "entry_price - exit_price" not in realized_sql
+    assert "LOWER(BTRIM(COALESCE(exit_reason, ''))) <> ''" in live_source_sql
+    assert "NOT LIKE '%reconcile%'" in live_source_sql
+    assert "NOT LIKE '%sync_gone%'" in live_source_sql
+    assert "NOT LIKE '%position_gone%'" in live_source_sql
+    assert "NOT LIKE '%position_absent%'" in live_source_sql
     assert "shadow_capacity_janitor" not in live_source_sql
     assert "shadow_capacity_janitor" in paper_source_sql
 
@@ -75,6 +80,11 @@ def test_realized_stats_sync_live_source_uses_realized_notional_only() -> None:
     assert "t.filled_quantity" in no_trades_sql
     assert "t.partial_taken_qty" in no_trades_sql
     assert "pt.partial_taken_qty" in no_trades_sql
+    assert "LOWER(BTRIM(COALESCE(t.exit_reason, ''))) <> ''" in no_trades_sql
+    assert "NOT LIKE '%reconcile%'" in no_trades_sql
+    assert "NOT LIKE '%sync_gone%'" in no_trades_sql
+    assert "NOT LIKE '%position_gone%'" in no_trades_sql
+    assert "NOT LIKE '%position_absent%'" in no_trades_sql
     assert "COALESCE(pt.signal_json" in no_trades_sql
     assert "shadow_capacity_janitor" in no_trades_sql
     assert ") IS NOT NULL" in no_trades_sql

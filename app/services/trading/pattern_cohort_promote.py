@@ -55,7 +55,10 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ...models.trading import ScanPattern
-from .realized_pnl_sql import trade_return_fraction_sql
+from .realized_pnl_sql import (
+    clean_live_pattern_ev_exit_filter_sql,
+    trade_return_fraction_sql,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -247,6 +250,7 @@ def select_cohort_candidates(
               AND t.entry_price > 0
               AND t.quantity > 0
               AND t.exit_date > NOW() - make_interval(days => :window_days)
+              AND {clean_live_pattern_ev_exit_filter_sql("t")}
         ),
         realized AS (
             SELECT scan_pattern_id,

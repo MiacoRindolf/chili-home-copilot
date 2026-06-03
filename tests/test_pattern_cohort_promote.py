@@ -117,6 +117,11 @@ def test_select_cohort_candidates_counts_only_computable_realized_returns():
     assert "WHERE realized_return_frac IS NOT NULL" in sql
     assert "t.filled_quantity" in sql
     assert "t.partial_taken_qty" in sql
+    assert "LOWER(BTRIM(COALESCE(t.exit_reason, ''))) <> ''" in sql
+    assert "NOT LIKE '%reconcile%'" in sql
+    assert "NOT LIKE '%sync_gone%'" in sql
+    assert "NOT LIKE '%position_gone%'" in sql
+    assert "NOT LIKE '%position_absent%'" in sql
     assert "COUNT(*)" not in sql
     assert db.params["window_days"] == 45
     assert db.params["min_n_floor"] == 5
@@ -315,7 +320,8 @@ def _seed_directional_outcomes(
     base_time = base_time or datetime.utcnow().replace(microsecond=0)
     total = n_correct + n_incorrect
 
-    rows = []
+    alert_ats = []
+    correct_values = []
     for i in range(total):
         # Newer alerts (lower index) come first when ordered by alert_at DESC.
         alert_at = base_time - timedelta(hours=i)
@@ -327,42 +333,46 @@ def _seed_directional_outcomes(
             correct = True
         else:
             correct = False
-        rows.append((alert_at, correct))
+        alert_ats.append(alert_at)
+        correct_values.append(correct)
 
-    for i, (alert_at, correct) in enumerate(rows):
-        # Insert a placeholder trading_alerts row so the FK is satisfied.
-        alert_id = db.execute(text(
-            """
+    db.execute(text(
+        """
+        WITH input_rows AS (
+            SELECT *
+            FROM UNNEST(
+                CAST(:alert_ats AS timestamp[]),
+                CAST(:correct_values AS boolean[])
+            ) AS u(alert_at, directional_correct)
+        ),
+        inserted_alerts AS (
             INSERT INTO trading_alerts (
-                alert_type, ticker, message, sent_via, success,
-                created_at
-            ) VALUES (
-                'pattern_breakout_imminent', 'TEST', 'seed', 'log_only',
-                TRUE, :alert_at
-            ) RETURNING id
-            """
-        ), {"alert_at": alert_at}).scalar()
-
-        db.execute(text(
-            """
-            INSERT INTO pattern_alert_directional_outcome (
-                alert_id, scan_pattern_id, ticker, alert_at,
-                predicted_direction, hold_window_hours,
-                window_close_at, directional_threshold_pct,
-                directional_correct, evaluated_at
-            ) VALUES (
-                :alert_id, :pid, 'TEST', :alert_at, 'up', 24,
-                :wclose, 1.5, :correct, :evaluated_at
+                alert_type, ticker, message, sent_via, success, created_at
             )
-            """
-        ), {
-            "alert_id": alert_id,
-            "pid": pattern_id,
-            "alert_at": alert_at,
-            "wclose": alert_at + timedelta(hours=24),
-            "correct": correct,
-            "evaluated_at": alert_at + timedelta(hours=25),
-        })
+            SELECT
+                'pattern_breakout_imminent', 'TEST', 'seed', 'log_only',
+                TRUE, alert_at
+            FROM input_rows
+            RETURNING id, created_at
+        )
+        INSERT INTO pattern_alert_directional_outcome (
+            alert_id, scan_pattern_id, ticker, alert_at,
+            predicted_direction, hold_window_hours,
+            window_close_at, directional_threshold_pct,
+            directional_correct, evaluated_at
+        )
+        SELECT
+            ia.id, :pid, 'TEST', ia.created_at, 'up', 24,
+            ia.created_at + INTERVAL '24 hours', 1.5,
+            ir.directional_correct, ia.created_at + INTERVAL '25 hours'
+        FROM inserted_alerts ia
+        JOIN input_rows ir ON ir.alert_at = ia.created_at
+        """
+    ), {
+        "pid": pattern_id,
+        "alert_ats": alert_ats,
+        "correct_values": correct_values,
+    })
 
     db.commit()
 
@@ -377,10 +387,10 @@ def _seed_closed_trades(db, *, pattern_id, n=5, pnl_pct=0.02):
             """
             INSERT INTO trading_trades (
                 scan_pattern_id, ticker, direction, entry_price, exit_price,
-                quantity, entry_date, exit_date, status, pnl
+                quantity, entry_date, exit_date, status, pnl, exit_reason
             ) VALUES (
                 :pid, 'TEST', 'long', :entry_price, :exit_price,
-                :quantity, :entry_date, :exit_date, 'closed', :pnl
+                :quantity, :entry_date, :exit_date, 'closed', :pnl, 'target'
             )
             """
         ), {

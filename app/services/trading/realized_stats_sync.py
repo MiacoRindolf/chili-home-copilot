@@ -35,6 +35,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from .realized_pnl_sql import (
+    clean_live_pattern_ev_exit_filter_sql,
     paper_dynamic_pattern_ev_exit_filter_sql,
     paper_trade_return_fraction_sql,
     trade_return_fraction_sql,
@@ -132,6 +133,7 @@ def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, in
               AND entry_price > 0
               AND quantity > 0
               AND exit_date > NOW() - make_interval(days => :lookback)
+              AND {clean_live_pattern_ev_exit_filter_sql()}
             UNION ALL
             SELECT scan_pattern_id,
                    pnl,
@@ -287,6 +289,7 @@ def sync_realized_stats(sess: Session, *, dry_run: bool = False) -> dict[str, in
               AND t.pnl IS NOT NULL
               AND t.entry_price > 0
               AND t.quantity > 0
+              AND {clean_live_pattern_ev_exit_filter_sql("t")}
             UNION ALL
             SELECT
                 pt.scan_pattern_id,

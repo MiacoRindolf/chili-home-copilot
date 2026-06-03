@@ -98,6 +98,7 @@ from sqlalchemy.orm import Session
 
 from ...models.trading import ScanPattern
 from .realized_pnl_sql import (
+    clean_live_pattern_ev_exit_filter_sql,
     paper_dynamic_pattern_ev_exit_filter_sql,
     paper_trade_return_fraction_sql,
     trade_return_fraction_sql,
@@ -462,6 +463,7 @@ def _load_realized_pnl_map(
                   AND t.entry_price > 0
                   AND t.quantity > 0
                   AND t.exit_date > NOW() - make_interval(days => :window_days)
+                  AND {clean_live_pattern_ev_exit_filter_sql("t")}
             )
             SELECT scan_pattern_id,
                    COUNT(realized_return_frac) AS n,
