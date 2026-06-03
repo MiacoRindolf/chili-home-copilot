@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -11,6 +13,7 @@ import '../settings/settings_screen.dart';
 import 'os_window.dart';
 import 'workspace_controller.dart';
 import 'workspace_palette.dart';
+import 'workspace_persistence.dart';
 import 'workspace_taskbar.dart';
 
 /// Definition of a dockable app surface.
@@ -47,6 +50,8 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
   final WorkspaceController _ws = WorkspaceController();
   Size _deskSize = Size.zero; // latest desktop size, for keyboard tiling
   bool _paletteOpen = false; // command palette (Ctrl+K) overlay
+  Timer? _saveTimer; // debounces session saves
+  bool _restoring = false; // true while replaying a saved session
 
   // Built app bodies are cached so a window keeps its State across rebuilds /
   // focus changes (and while minimized). Dropped when the window closes.
@@ -80,9 +85,52 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
   };
 
   @override
+  void initState() {
+    super.initState();
+    _ws.addListener(_scheduleSave);
+    _restoreSession();
+  }
+
+  @override
   void dispose() {
+    _saveTimer?.cancel();
+    _ws.removeListener(_scheduleSave);
     _ws.dispose();
     super.dispose();
+  }
+
+  void _scheduleSave() {
+    if (_restoring) return; // don't thrash storage while replaying a session
+    _saveTimer?.cancel();
+    _saveTimer = Timer(const Duration(milliseconds: 600), () {
+      WorkspacePersistence.save(_ws.toJson());
+    });
+  }
+
+  Future<void> _restoreSession() async {
+    final List<Map<String, dynamic>> saved = await WorkspacePersistence.load();
+    if (saved.isEmpty || !mounted) return;
+    _restoring = true;
+    for (final Map<String, dynamic> w in saved) {
+      final String? id = w['id'] as String?;
+      final _AppDef? def = id == null ? null : _apps[id];
+      if (id == null || def == null) continue;
+      _ws.open(id, title: def.title, icon: def.icon, size: def.size);
+      _ws.applyGeometry(
+        id,
+        position: Offset(
+          (w['x'] as num?)?.toDouble() ?? 40,
+          (w['y'] as num?)?.toDouble() ?? 28,
+        ),
+        size: Size(
+          (w['w'] as num?)?.toDouble() ?? def.size.width,
+          (w['h'] as num?)?.toDouble() ?? def.size.height,
+        ),
+        minimized: w['min'] as bool? ?? false,
+        maximized: w['max'] as bool? ?? false,
+      );
+    }
+    _restoring = false;
   }
 
   void _openApp(String id) {

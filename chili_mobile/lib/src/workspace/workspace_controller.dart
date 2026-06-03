@@ -238,4 +238,42 @@ class WorkspaceController extends ChangeNotifier {
     if (visible.length < 2) return;
     focus(visible.first.id);
   }
+
+  // ── Session persistence: serialize open windows (geometry + state) so the
+  //    desktop restores where you left it. The shell stores/loads the JSON and
+  //    replays it via open() + applyGeometry(). ──
+
+  /// Serialize the open windows, ordered bottom→top (so replaying preserves z).
+  List<Map<String, Object>> toJson() {
+    final List<WsWindow> sorted = _windows.toList()
+      ..sort((WsWindow a, WsWindow b) => a.z.compareTo(b.z));
+    return sorted
+        .map((WsWindow w) => <String, Object>{
+              'id': w.id,
+              'x': w.position.dx,
+              'y': w.position.dy,
+              'w': w.size.width,
+              'h': w.size.height,
+              'min': w.minimized,
+              'max': w.maximized,
+            })
+        .toList();
+  }
+
+  /// Restore a window's geometry/state (used when replaying a saved session).
+  void applyGeometry(
+    String id, {
+    Offset? position,
+    Size? size,
+    bool? minimized,
+    bool? maximized,
+  }) {
+    final WsWindow? w = byId(id);
+    if (w == null) return;
+    if (position != null) w.position = position;
+    if (size != null) w.size = size;
+    if (minimized != null) w.minimized = minimized;
+    if (maximized != null) w.maximized = maximized;
+    notifyListeners();
+  }
 }
