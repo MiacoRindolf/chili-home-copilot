@@ -291,6 +291,22 @@ def test_gate_rh_crypto_degraded_fallback_uses_coinbase_fee_floor(monkeypatch):
     assert res.threshold_bps == 150
 
 
+def test_gate_selected_coinbase_uses_coinbase_fee_floor_for_dual_venue_ticker():
+    s = _settings_stub()
+
+    res = cost_aware_min_edge_gate(
+        ticker="BTC-USD",
+        projected_profit_pct=1.0,
+        settings_=s,
+        selected_venue="coinbase",
+    )
+
+    assert res.allowed is False
+    assert res.reason == REASON_GATE_COINBASE_BLOCKED
+    assert res.fee_bps == 120
+    assert res.threshold_bps == 150
+
+
 def test_gate_rh_crypto_degraded_fallback_passes_high_edge(monkeypatch):
     s = _settings_stub()
     s.chili_broker_selector_rh_crypto_degraded_fallback_enabled = True

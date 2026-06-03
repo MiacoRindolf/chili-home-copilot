@@ -2694,6 +2694,7 @@ def test_broker_buy_cost_gate_uses_expected_net_edge(monkeypatch):
 
     def _fake_cost_gate(**kwargs):
         captured["projected_profit_pct"] = kwargs.get("projected_profit_pct")
+        captured["selected_venue"] = kwargs.get("selected_venue")
         return SimpleNamespace(
             allowed=True,
             reason="ok",
@@ -2761,8 +2762,13 @@ def test_broker_buy_cost_gate_uses_expected_net_edge(monkeypatch):
 
     assert res is not None and res["ok"] is True
     assert captured["projected_profit_pct"] == pytest.approx(1.4)
+    assert captured["selected_venue"] == "coinbase"
     assert snap["cost_gate_edge_pct"] == pytest.approx(1.4)
     assert snap["cost_gate_edge_pct_source"] == "entry_edge_expected_net_pct"
+    assert snap["cost_gate_advisory_venue"] == "coinbase"
+    assert snap["cost_gate_advisory_reason"] == "test"
+    assert snap["broker_selector_venue"] == "coinbase"
+    assert snap["broker_selector_reason"] == "test"
     assert snap["cost_gate_edge_bps"] == 140
 
 

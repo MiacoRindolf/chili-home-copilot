@@ -2519,6 +2519,15 @@ def _cost_gate_edge_pct_from_snapshot(
     return _snapshot_float(snap, "projected_profit_pct"), "projected_profit_pct"
 
 
+def _cost_gate_venue_from_selector_decision(decision: Any) -> str | None:
+    venue = str(getattr(decision, "venue", "") or "").strip().lower()
+    if venue in {"rh", "robinhood"}:
+        return "robinhood"
+    if venue in {"coinbase", "cb"}:
+        return "coinbase"
+    return None
+
+
 def _queue_exit_geometry_variant_work(
     db: Session,
     *,
@@ -5410,14 +5419,36 @@ def _execute_broker_buy(
         return res
 
     # f-coinbase-autotrader-enablement-phase-5-cost-aware-sizing
-    # (2026-05-09): cost-aware min-edge gate runs BEFORE the broker
-    # selector. RH-eligible tickers get fee=0 (no behavior change vs
+    # (2026-05-09): cost-aware min-edge gate runs before broker
+    # placement. Use an advisory selector snapshot for venue-specific
+    # pricing, then re-run the authoritative selector below and record
+    # any drift. RH-eligible tickers get fee=0 (no behavior change vs
     # pre-Phase-5; the gate is a no-op). Coinbase-only tickers must
     # have positive expected net edge that clears the Tier-1 fee floor
     # (default 120bps round-trip + 30bps buffer = 150bps min). If the
     # rule snapshot lacks expected-net evidence, fall back to the legacy
     # gross projected-profit field.
     _cost_gate_error: str | None = None
+    _cost_gate_selected_venue: str | None = None
+    try:
+        from .broker_selector import select_venue as _select_venue_for_cost_gate
+
+        _cost_gate_advisory = _select_venue_for_cost_gate(ticker=alert.ticker, db=db)
+        _cost_gate_selected_venue = _cost_gate_venue_from_selector_decision(
+            _cost_gate_advisory
+        )
+        snap["cost_gate_advisory_venue"] = getattr(
+            _cost_gate_advisory,
+            "venue",
+            None,
+        )
+        snap["cost_gate_advisory_reason"] = getattr(
+            _cost_gate_advisory,
+            "reason",
+            None,
+        )
+    except Exception as exc:
+        snap["cost_gate_advisory_error"] = type(exc).__name__
     try:
         from .cost_aware_gate import cost_aware_min_edge_gate as _cost_gate
         _cost_gate_edge_pct, _cost_gate_edge_source = (
@@ -5429,6 +5460,7 @@ def _execute_broker_buy(
             ticker=alert.ticker,
             projected_profit_pct=_cost_gate_edge_pct,
             db=db,
+            selected_venue=_cost_gate_selected_venue,
         )
     except Exception as exc:
         logger.warning(
@@ -5485,6 +5517,21 @@ def _execute_broker_buy(
     try:
         from .broker_selector import select_venue
         _venue_decision = select_venue(ticker=alert.ticker, db=db)
+        snap["broker_selector_venue"] = getattr(_venue_decision, "venue", None)
+        snap["broker_selector_reason"] = getattr(_venue_decision, "reason", None)
+        _authoritative_cost_venue = _cost_gate_venue_from_selector_decision(
+            _venue_decision
+        )
+        if (
+            _cost_gate_selected_venue is not None
+            and _authoritative_cost_venue is not None
+            and _cost_gate_selected_venue != _authoritative_cost_venue
+        ):
+            snap["broker_selector_advisory_mismatch"] = True
+            snap["broker_selector_advisory_cost_venue"] = _cost_gate_selected_venue
+            snap["broker_selector_authoritative_cost_venue"] = (
+                _authoritative_cost_venue
+            )
     except Exception as exc:
         _block_live_order(
             db,

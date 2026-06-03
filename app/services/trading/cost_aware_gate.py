@@ -211,6 +211,7 @@ def cost_aware_min_edge_gate(
     projected_profit_pct: Optional[float],
     db=None,
     settings_=None,
+    selected_venue: str | None = None,
 ) -> CostGateDecision:
     """Refuses Coinbase entries whose projected edge does not clear
     (fee + buffer). RH-eligible tickers pass with fee=0 (no behavior
@@ -218,6 +219,9 @@ def cost_aware_min_edge_gate(
 
     ``projected_profit_pct`` is the percent (e.g. 6.71 for 6.71%).
     Converted to bps (671) for the fee comparison.
+    ``selected_venue`` is an optional advisory route from the broker
+    selector; when present it prevents this gate from re-inferring a
+    different venue from whitelist state.
     """
     s = settings_
     if s is None:
@@ -258,15 +262,29 @@ def cost_aware_min_edge_gate(
             fee_bps=0, threshold_bps=0, edge_bps=edge_bps,
         )
 
-    rh_whitelisted = resolve_rh_whitelist(ticker)
-    coinbase_whitelisted = resolve_coinbase_whitelist(ticker)
-    rh_crypto_degraded = False
-    if rh_whitelisted and coinbase_whitelisted:
-        rh_crypto_degraded = rh_crypto_degradation_state(
-            ticker,
-            db=db,
-            settings_=settings_,
-        ).degraded
+    selected = str(selected_venue or "").strip().lower()
+    if selected in {"rh", "robinhood"}:
+        rh_whitelisted = True
+        coinbase_whitelisted = False
+        rh_crypto_degraded = False
+    elif selected in {"coinbase", "cb"}:
+        rh_whitelisted = False
+        coinbase_whitelisted = True
+        rh_crypto_degraded = True
+    elif selected == "skip":
+        rh_whitelisted = False
+        coinbase_whitelisted = False
+        rh_crypto_degraded = False
+    else:
+        rh_whitelisted = resolve_rh_whitelist(ticker)
+        coinbase_whitelisted = resolve_coinbase_whitelist(ticker)
+        rh_crypto_degraded = False
+        if rh_whitelisted and coinbase_whitelisted:
+            rh_crypto_degraded = rh_crypto_degradation_state(
+                ticker,
+                db=db,
+                settings_=settings_,
+            ).degraded
 
     if rh_whitelisted and not rh_crypto_degraded:
         rh_tca_cost_bps = 0
