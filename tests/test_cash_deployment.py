@@ -714,6 +714,76 @@ def test_cash_deployment_blocks_live_deployable_on_negative_live_asset_perf(db, 
     assert row["max_safe_notional"] == 0.0
 
 
+def test_cash_deployment_routes_positive_edge_noisy_live_exits_to_provenance(
+    db,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "chili_autotrader_live_enabled", True)
+    monkeypatch.setattr(settings, "chili_cash_deployment_equity_cost_pct", 0.05)
+    monkeypatch.setattr(settings, "chili_cash_deployment_min_closed_evidence", 5)
+    monkeypatch.setattr(settings, "chili_cash_deployment_max_brier_score", 0.28)
+
+    pat = _pattern(db, name="cash noisy live exits")
+    alert = _alert(db, pat, ticker="NEXIT")
+    _run(db, pat, alert, expected=2.0)
+    _closed_paper(db, pat, alert, count=5, pnl_pct=4.0)
+    _closed_live(
+        db,
+        pat,
+        ticker="NEXIT",
+        pnl=-10.0,
+        asset_kind="equity",
+        exit_reason="broker_reconcile_position_gone",
+    )
+    _closed_live(
+        db,
+        pat,
+        ticker="NEXIT",
+        pnl=-5.0,
+        asset_kind="equity",
+        exit_reason=None,
+    )
+    db.commit()
+
+    rows = cash_deployment_rows(db, pattern_ids=[pat.id], window_days=7, limit=10)
+    row = next(x for x in rows if x["scan_pattern_id"] == pat.id)
+    summary = cash_deployment_summary(rows)
+
+    assert row["cash_deployment_category"] == "needs_exit_provenance"
+    assert row["recommended_work_event"] == "provenance_backfill"
+    assert row["exit_provenance_blocker"] == "low_confidence_live_exit_rate"
+    assert row["live_deployable"] is False
+    assert row["max_safe_notional"] == 0.0
+    assert row["closed_evidence_count"] == 5
+    assert row["live_total_closed_count"] == 2
+    assert row["live_low_confidence_exit_count"] == 2
+    assert row["live_low_confidence_exit_rate"] == pytest.approx(1.0)
+    assert row["live_low_confidence_total_pnl_usd"] == pytest.approx(-15.0)
+    assert summary["needs_exit_provenance"] == 1
+    assert summary["live_low_confidence_exit_count"] == 2
+    assert summary["live_low_confidence_pnl_usd"] == pytest.approx(-15.0)
+
+    first = enqueue_cash_deployment_work(
+        db,
+        window_days=7,
+        limit=10,
+        include_null_lineage=False,
+        include_snapshot_coverage=False,
+    )
+    db.commit()
+    assert first["created"] == 1
+    assert first["event_types"] == {"provenance_backfill": 1}
+    work = (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_type == "provenance_backfill")
+        .one()
+    )
+    assert work.payload["cash_deployment_category"] == "needs_exit_provenance"
+    assert work.payload["exit_provenance_blocker"] == "low_confidence_live_exit_rate"
+    assert work.payload["live_low_confidence_exit_count"] == 2
+    assert work.payload["live_low_confidence_total_pnl_usd"] == pytest.approx(-15.0)
+
+
 def test_cash_deployment_work_producer_enqueues_targeted_deduped_work(db, monkeypatch):
     monkeypatch.setattr(settings, "chili_autotrader_live_enabled", True)
     monkeypatch.setattr(settings, "chili_cash_deployment_equity_cost_pct", 0.05)

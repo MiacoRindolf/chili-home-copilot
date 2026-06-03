@@ -52,6 +52,8 @@ LIVE_LIFECYCLES = frozenset({"live", "promoted", "pilot_promoted"})
 RECERT_BLOCKERS = frozenset({"recert_blocked", "hard_recert_blocked"})
 EXECUTION_BLOCKERS = frozenset({"execution_blocked"})
 SHADOW_BLOCKERS = frozenset({"shadow_evidence_collection"})
+LOW_CONFIDENCE_LIVE_EXIT_BLOCK_RATE = 0.50
+LOW_CONFIDENCE_LIVE_EXIT_BLOCK_MIN_COUNT = 2
 
 
 def _safe_float(value: Any, default: float | None = None) -> float | None:
@@ -502,6 +504,8 @@ def _cash_category(
         return "needs_calibration"
     if gap is not None and max_gap > 0.0 and abs(gap) > max_gap:
         return "needs_calibration"
+    if _low_confidence_live_exit_provenance_block(row):
+        return "needs_exit_provenance" if positive_supply else "negative_ev"
     live_closed_n = _safe_int(row.get("live_realized_asset_closed_count"))
     live_avg = _safe_float(row.get("live_realized_asset_avg_return_pct"))
     if live_closed_n > 0 and live_avg is not None and live_avg <= 0.0:
@@ -516,7 +520,7 @@ def _cash_category(
 
 
 def _recommended_work_event(row: dict[str, Any], category: str) -> str:
-    if category == "needs_provenance":
+    if category in {"needs_provenance", "needs_exit_provenance"}:
         return PROVENANCE_BACKFILL
     if category == "stale_broker_local_open":
         return EDGE_RELIABILITY_REFRESH
@@ -549,6 +553,32 @@ def _execution_blocker_for_row(
     return None
 
 
+def _low_confidence_live_exit_provenance_block(row: dict[str, Any]) -> bool:
+    low_n = _safe_int(row.get("live_low_confidence_exit_count"))
+    if low_n < LOW_CONFIDENCE_LIVE_EXIT_BLOCK_MIN_COUNT:
+        return False
+    total_n = _safe_int(row.get("live_total_closed_count"))
+    clean_n = _safe_int(row.get("live_clean_exit_count"))
+    if total_n <= 0:
+        clean_live = _safe_int(row.get("live_closed_count"))
+        total_n = clean_live + low_n
+        clean_n = clean_live
+    if total_n <= 0:
+        return False
+    low_rate = low_n / total_n
+    return clean_n <= 0 or low_rate >= LOW_CONFIDENCE_LIVE_EXIT_BLOCK_RATE
+
+
+def _low_confidence_live_exit_rate(row: dict[str, Any]) -> float | None:
+    low_n = _safe_int(row.get("live_low_confidence_exit_count"))
+    total_n = _safe_int(row.get("live_total_closed_count"))
+    if total_n <= 0:
+        total_n = _safe_int(row.get("live_closed_count")) + low_n
+    if total_n <= 0:
+        return None
+    return _round(low_n / total_n, 6)
+
+
 def _allocation_score(
     row: dict[str, Any],
     *,
@@ -574,6 +604,10 @@ def _allocation_score(
     ) or 3.0
     gap_component = 1.0 if gap is None else _clamp(1.0 - (abs(gap) / max_gap))
     exposure_component = 0.0 if exposure_blocker else 1.0
+    low_confidence_rate = _low_confidence_live_exit_rate(row)
+    exit_quality_component = (
+        1.0 if low_confidence_rate is None else _clamp(1.0 - low_confidence_rate)
+    )
     score = (
         ev_component * 0.30
         + evidence_component * 0.16
@@ -582,7 +616,8 @@ def _allocation_score(
         + live_component * 0.10
         + gap_component * 0.08
         + venue_score * 0.06
-        + exposure_component * 0.04
+        + exposure_component * 0.03
+        + exit_quality_component * 0.01
     )
     return round(_clamp(score) * 100.0, 4)
 
@@ -659,6 +694,15 @@ def annotate_cash_deployment_row(
         evidence_value *= 1.1
     elif category == "positive_ev_execution_blocked":
         evidence_value *= 0.8
+    elif category == "needs_exit_provenance":
+        evidence_value *= 1.15
+
+    low_confidence_rate = _low_confidence_live_exit_rate(out)
+    exit_provenance_blocker = (
+        "low_confidence_live_exit_rate"
+        if _low_confidence_live_exit_provenance_block(out)
+        else None
+    )
 
     out.update(
         {
@@ -680,6 +724,8 @@ def annotate_cash_deployment_row(
             "correlation_bucket": _correlation_bucket(symbol, asset_class),
             "exposure_blocker": exposure_blocker,
             "execution_blocker": execution_blocker,
+            "exit_provenance_blocker": exit_provenance_blocker,
+            "live_low_confidence_exit_rate": _round(low_confidence_rate, 6),
             "recert_blocker": out.get("recert_reason") if category == "positive_ev_recert" else None,
             "recommended_work_event": work_event,
             "expected_evidence_value": round(evidence_value, 6),
@@ -780,7 +826,18 @@ def cash_deployment_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "negative_ev": int(categories.get("negative_ev", 0)),
         "stale_broker_local_open": int(categories.get("stale_broker_local_open", 0)),
         "needs_provenance": int(categories.get("needs_provenance", 0)),
+        "needs_exit_provenance": int(categories.get("needs_exit_provenance", 0)),
         "needs_calibration": int(categories.get("needs_calibration", 0)),
+        "live_low_confidence_exit_count": sum(
+            _safe_int(row.get("live_low_confidence_exit_count")) for row in rows
+        ),
+        "live_low_confidence_pnl_usd": _round(
+            sum(
+                _safe_float(row.get("live_low_confidence_total_pnl_usd"), 0.0) or 0.0
+                for row in rows
+            ),
+            2,
+        ),
         "deployable_cash_notional": round(
             sum(_safe_float(row.get("max_safe_notional"), 0.0) or 0.0 for row in deployable),
             6,
@@ -1457,6 +1514,11 @@ def enqueue_cash_deployment_work(
             "allocation_score": row.get("allocation_score"),
             "expected_evidence_value": row.get("expected_evidence_value"),
             "graduation_blocker": row.get("graduation_blocker"),
+            "exit_provenance_blocker": row.get("exit_provenance_blocker"),
+            "live_low_confidence_exit_count": row.get("live_low_confidence_exit_count"),
+            "live_low_confidence_exit_rate": row.get("live_low_confidence_exit_rate"),
+            "live_low_confidence_total_pnl_usd": row.get("live_low_confidence_total_pnl_usd"),
+            "live_low_confidence_exit_reasons": row.get("live_low_confidence_exit_reasons"),
         }
         evidence_fingerprint = str(row.get("evidence_fingerprint") or "")
         if _recent_noop_profitability_work(
