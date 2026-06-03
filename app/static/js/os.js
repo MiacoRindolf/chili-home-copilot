@@ -509,6 +509,20 @@
     expose: openExpose,
     // Reopen the most-recently-closed window where it was; false if the stack is empty.
     reopenClosed: reopenClosed,
+    // Bulk window actions (⌘K). Close-all routes through closeApp so each window
+    // lands on the reopen stack (⌘⌥T brings them back). Each returns the count.
+    closeAll: function () {
+      var n = 0; Object.keys(wins).forEach(function (a) { if (wins[a]) { closeApp(a); n++; } }); return n;
+    },
+    minimizeAll: function () {
+      var n = 0; Object.keys(wins).forEach(function (a) { var el = wins[a]; if (el && el.style.display !== 'none') { minimizeApp(a); n++; } }); return n;
+    },
+    restoreMinimized: function () {
+      var n = 0, last = null;
+      Object.keys(wins).forEach(function (a) { var el = wins[a]; if (el && el.style.display === 'none') { el.style.display = 'flex'; animIn(el); removeChip(a); last = a; n++; } });
+      if (last) focusWin(last);
+      syncHome(); saveLayout(); return n;
+    },
     // Named Spaces — snapshot/restore window arrangements by name.
     spaces: {
       list: function () { return loadSpaces().map(function (s) { return { name: s.name, count: (s.apps || []).length }; }); },
