@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import pytest
 
@@ -42,6 +43,13 @@ def test_scheduler_baseline_audit_skips_high_frequency_neural_mesh() -> None:
 
     assert not _should_write_scheduler_baseline_audit("neural_mesh_drain")
     assert _should_write_scheduler_baseline_audit("daily_prescreen")
+
+
+def test_neural_mesh_drain_logs_runner_elapsed_time() -> None:
+    src = Path("app/services/trading_scheduler.py").read_text(encoding="utf-8")
+
+    assert 'summary.get("elapsed_sec", 0.0)' in src
+    assert 'summary.get("took_ms", 0.0)' not in src
 
 
 def test_finish_wrapper_batch_job_uses_fresh_session_after_primary_failure() -> None:

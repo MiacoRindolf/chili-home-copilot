@@ -761,7 +761,7 @@ def _run_neural_mesh_drain_job():
                     summary.get("fires", 0),
                     summary.get("inhibitions", 0),
                     summary.get("downstream", 0),
-                    float(summary.get("took_ms", 0.0)),
+                    float(summary.get("elapsed_sec", 0.0)) * 1000.0,
                 )
         except Exception:
             logger.exception("[scheduler] neural_mesh_drain failed")
