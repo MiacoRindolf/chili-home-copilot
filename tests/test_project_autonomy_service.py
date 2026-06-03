@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -1062,6 +1062,495 @@ def test_run_payload_hides_raw_local_model_plan_errors():
         db.close()
 
 
+def test_run_payload_emits_backend_pursuing_goal_contract_without_model_goal():
+    db = _sqlite_autonomy_session()
+    try:
+        run = ProjectAutonomyRun(
+            run_id="pa_pursuing_goal_backend_contract",
+            prompt="Add a durable Pursuing goal contract to Autopilot.",
+            status="awaiting_approval",
+            current_stage="plan",
+            plan_json=json.dumps(
+                {
+                    "analysis": (
+                        "Keep the active objective, current step, next action, "
+                        "and completion gate visible without expanding context."
+                    ),
+                    "files": [
+                        {"path": "app/services/project_autonomy/orchestrator.py"}
+                    ],
+                }
+            ),
+        )
+        db.add(run)
+        db.commit()
+
+        payload = orchestrator.run_payload(db, run)
+        goal = payload["pursuing_goal"]
+
+        assert goal["schema"] == "chili.project-autopilot.pursuing-goal.v1"
+        assert goal["source"] == "backend_run_state"
+        assert goal["objective"] == "Add a durable Pursuing goal contract to Autopilot."
+        assert goal["status_label"] == "Pursuing goal"
+        assert goal["current_step"] == "Draft and review the architect plan"
+        assert goal["next_action"] == "Review the architect plan, then approve it or send feedback."
+        assert goal["completion_gate"] == "The architect quality gate must pass before implementation starts."
+        assert goal["progress_percent"] == 42
+        assert goal["receipt_sections"] == [
+            "Objective",
+            "Current evidence",
+            "Checks",
+            "Next gate",
+        ]
+        assert "Every agent report must name objective-tied evidence" in goal[
+            "agent_prompt_contract"
+        ]
+        assert "Permission boundary" in goal["context_handoff_copy"]
+        assert "does not authorize source/test edits" in goal["context_handoff_copy"]
+    finally:
+        db.close()
+
+
+def test_run_payload_prefers_explicit_pursuing_goal_contract_over_prompt():
+    db = _sqlite_autonomy_session()
+    try:
+        run = ProjectAutonomyRun(
+            run_id="pa_pursuing_goal_explicit_contract",
+            prompt="generic scheduled report pass",
+            status="running",
+            current_stage="validate",
+            plan_json=json.dumps(
+                {
+                    "goal_contract": {
+                        "objective": "Make scheduled reports prove active-goal progress.",
+                        "current_step": "Validate goal receipt parser",
+                        "next_action": "Run focused backend and Flutter checks",
+                        "completion_gate": (
+                            "Every trusted report names objective, evidence path, "
+                            "and next gate."
+                        ),
+                        "progress_percent": 71,
+                        "success_criteria": [
+                            "Goal contract appears in run payloads.",
+                            "Agents cannot claim progress without objective-tied evidence.",
+                        ],
+                    }
+                }
+            ),
+            learning_json=json.dumps(
+                {
+                    "scheduled_quality": {
+                        "goal_contract": {
+                            "score": 64,
+                            "affected_report_count": 1,
+                        }
+                    }
+                }
+            ),
+        )
+        db.add(run)
+        db.commit()
+
+        payload = orchestrator.run_payload(db, run)
+        goal = payload["pursuing_goal"]
+
+        assert goal["source"] == "explicit_goal_contract"
+        assert goal["objective"] == "Make scheduled reports prove active-goal progress."
+        assert goal["current_step"] == "Validate goal receipt parser"
+        assert goal["next_action"] == "Run focused backend and Flutter checks"
+        assert goal["completion_gate"].startswith("Every trusted report names objective")
+        assert goal["progress_percent"] == 71
+        assert "Goal contract appears in run payloads." in goal["success_criteria"]
+        assert "generic scheduled report pass" not in goal["context_handoff_copy"]
+        assert "Make scheduled reports prove active-goal progress." in goal[
+            "agent_prompt_contract"
+        ]
+    finally:
+        db.close()
+
+
+def test_run_payload_surfaces_scheduled_quality_receipts():
+    db = _sqlite_autonomy_session()
+    try:
+        learning_run = ProjectAutonomyRun(
+            run_id="pa_quality_learning",
+            prompt="keep pursuing the current goal until proof is attached",
+            status="completed",
+            current_stage="learn",
+            learning_json=json.dumps(
+                {
+                    "scheduled_quality": {
+                        "goal_contract": {"score": 72},
+                        "report_quality": {"affected_report_count": 1},
+                    }
+                }
+            ),
+        )
+        agent_run = ProjectAutonomyRun(
+            run_id="pa_quality_agent",
+            prompt="coordinate coding agents and hold PR receipt quality",
+            status="running",
+            current_stage="coordinate",
+            agents_json=json.dumps(
+                [
+                    {
+                        "name": "architect",
+                        "scheduled_quality_pressure": {
+                            "goal_drift": {"affected_report_count": 1},
+                        },
+                    }
+                ]
+            ),
+        )
+        artifact_run = ProjectAutonomyRun(
+            run_id="pa_quality_artifact",
+            prompt="repair the PR creation flow",
+            status="awaiting_approval",
+            current_stage="review",
+        )
+        db.add_all([learning_run, agent_run, artifact_run])
+        db.commit()
+        orchestrator._add_artifact(
+            db,
+            artifact_run.run_id,
+            "goal_receipt",
+            "pr_receipt_gate",
+            content_json={
+                "goal_contract": {"score": 64},
+                "pr_receipt": {"missing": True},
+            },
+        )
+
+        learning_payload = orchestrator.run_payload(db, learning_run)
+        agent_payload = orchestrator.run_payload(db, agent_run)
+        artifact_payload = orchestrator.run_payload(db, artifact_run, include_events=True)
+
+        assert learning_payload["scheduled_quality"]["goal_contract"]["score"] == 72
+        assert agent_payload["scheduled_quality"]["goal_drift"]["affected_report_count"] == 1
+        assert artifact_payload["scheduled_quality"]["pr_receipt"]["missing"] is True
+    finally:
+        db.close()
+
+
+def test_run_payload_surfaces_delivery_quality_bar_without_scheduled_conflation():
+    db = _sqlite_autonomy_session()
+    try:
+        learning_run = ProjectAutonomyRun(
+            run_id="pa_quality_bar_learning",
+            prompt="hold PR publication until current-head proof exists",
+            status="running",
+            current_stage="review",
+            learning_json=json.dumps(
+                {
+                    "quality_bar": {
+                        "delivery_blocker_groups": [
+                            {
+                                "key": "pr_blocker_train",
+                                "count": 2,
+                                "gate_label": "Blocked until PR proof",
+                            }
+                        ]
+                    }
+                }
+            ),
+        )
+        agent_run = ProjectAutonomyRun(
+            run_id="pa_quality_bar_agent",
+            prompt="surface recovery brake state",
+            status="running",
+            current_stage="coordinate",
+            agents_json=json.dumps(
+                [
+                    {
+                        "name": "agentops",
+                        "quality_bar": {
+                            "delivery_blocker_groups": [
+                                {
+                                    "key": "recovery_brake",
+                                    "count": 1,
+                                    "decision": "hold_emergency_brake",
+                                }
+                            ]
+                        },
+                    }
+                ]
+            ),
+        )
+        artifact_run = ProjectAutonomyRun(
+            run_id="pa_quality_bar_artifact",
+            prompt="route stable inbox delivery blockers",
+            status="awaiting_approval",
+            current_stage="plan",
+        )
+        db.add_all([learning_run, agent_run, artifact_run])
+        db.commit()
+        orchestrator._add_artifact(
+            db,
+            artifact_run.run_id,
+            "delivery_blocker_quality",
+            "coordination_queue_quality_bar",
+            content_json={
+                "quality_bar": {
+                    "delivery_blocker_groups": [
+                        {
+                            "key": "coordination_queue",
+                            "count": 4,
+                            "stable_inbox_from": "AgentOps",
+                            "stable_inbox_to": "PM",
+                        }
+                    ]
+                }
+            },
+        )
+
+        learning_payload = orchestrator.run_payload(db, learning_run)
+        agent_payload = orchestrator.run_payload(db, agent_run)
+        artifact_payload = orchestrator.run_payload(db, artifact_run, include_events=True)
+
+        assert learning_payload["scheduled_quality"] == {}
+        pr_group = learning_payload["quality_bar"]["delivery_blocker_groups"][0]
+        assert pr_group["key"] == "pr_blocker_train"
+        assert pr_group["pr_publish_verdict"] == "not_publishable"
+        assert pr_group["pr_publish_gate_state"] == "blocked_until_current_head_publication_receipt"
+        assert "current_head_check_receipt" in pr_group["publication_receipt"]["missing_evidence"]
+        assert pr_group["publication_receipt"]["publication_proof_ready"] is False
+        assert "push_or_pr_creation" in pr_group["pr_publish_forbidden_actions"]
+        assert "Project Autopilot PR publication decision packet" in pr_group["pr_publish_packet_copy"]
+        assert "does not authorize source/test edits" in pr_group["pr_publish_packet_copy"]
+        assert agent_payload["quality_bar"]["delivery_blocker_groups"][0]["decision"] == "hold_emergency_brake"
+        assert artifact_payload["quality_bar"]["delivery_blocker_groups"][0]["stable_inbox_to"] == "PM"
+    finally:
+        db.close()
+
+
+def test_pr_blocker_quality_bar_names_recovery_decision_before_pr_movement():
+    packet = orchestrator._quality_bar_from_mapping(
+        {
+            "quality_bar": {
+                "delivery_blocker_groups": [
+                    {
+                        "key": "pr_blocker_train",
+                        "count": 1,
+                        "top_pr": "134",
+                        "top_branch": "codex/brain-work-done-marker-recovery",
+                        "top_merge": "DIRTY",
+                        "top_ci": "no checks",
+                        "gate_state": "pm_operator_disposition_required",
+                        "next_action_detail": (
+                            "Keep the PR frozen until PM/operator accepts "
+                            "close/recreate, clean rebuild, current-head gates, "
+                            "or one named repair path."
+                        ),
+                    }
+                ]
+            }
+        }
+    )
+
+    pr_group = packet["delivery_blocker_groups"][0]
+
+    assert pr_group["pr_publish_verdict"] == "not_publishable"
+    assert pr_group["pr_recovery_decision"] == "wait_for_operator_disposition"
+    assert pr_group["pr_recovery_decision_label"] == "Wait for PM/operator PR disposition"
+    assert pr_group["pr_publish_first_action_owner"] == "PM/operator"
+    assert "choose keep blocked, close/recreate, clean rebuild" in pr_group[
+        "pr_publish_first_action_label"
+    ]
+    assert pr_group["pr_publish_action_plan"][0]["decision"] == "wait_for_operator_disposition"
+    assert "push_or_pr_creation" in pr_group["pr_publish_forbidden_actions"]
+    assert "Recovery decision:" in pr_group["pr_publish_packet_copy"]
+    assert "Wait for PM/operator PR disposition" in pr_group["pr_publish_packet_copy"]
+    assert "does not authorize source/test edits" in pr_group["pr_publish_packet_copy"]
+
+
+def test_pr_blocker_health_scan_promotes_current_head_recovery_packet():
+    packet = orchestrator._quality_bar_from_mapping(
+        {
+            "generated_utc": "2026-06-02T05:12:45Z",
+            "repo": "rindo/chili-home-copilot",
+            "checked_open_pr_count": 2,
+            "ci_blocked_count": 2,
+            "items": [
+                {
+                    "number": 109,
+                    "title": "Release trust route hardening",
+                    "url": "https://github.com/rindo/chili-home-copilot/pull/109",
+                    "draft": True,
+                    "branch": "codex/sswe/release-trust-hardening",
+                    "head_ref_oid": "abc123def4567890",
+                    "base": "main",
+                    "merge_state": "CLEAN",
+                    "ci_state": "failing",
+                    "ci_summary": "flutter test:FAILURE",
+                    "blocker_kind": "ci_failing",
+                    "blocked": True,
+                    "failing_checks": [
+                        {
+                            "name": "flutter test",
+                            "url": "https://github.com/rindo/chili-home-copilot/actions/1",
+                        }
+                    ],
+                },
+                {
+                    "number": 134,
+                    "branch": "codex/brain-work-done-marker-recovery",
+                    "head_ref_oid": "fed9876543210",
+                    "merge_state": "DIRTY",
+                    "ci_state": "no_checks",
+                    "ci_summary": "no checks",
+                    "blocker_kind": "ci_missing_checks",
+                    "blocked": True,
+                },
+            ],
+        }
+    )
+
+    pr_group = packet["delivery_blocker_groups"][0]
+
+    assert packet["source"] == "agent_pr_blocker_health"
+    assert packet["ci_blocked_count"] == 2
+    assert pr_group["top_pr"] == "109"
+    assert pr_group["top_branch"] == "codex/sswe/release-trust-hardening"
+    assert pr_group["head_sha"] == "abc123def4567890"
+    assert pr_group["pr_recovery_decision"] == "repair_current_head_ci"
+    assert pr_group["pr_recovery_decision_label"] == "Run one named owner repair path"
+    assert "current_head_ci_failing" in pr_group["pr_publish_blockers"]
+    assert pr_group["failing_check_names"] == ["flutter test"]
+    assert "head abc123def456" in pr_group["publication_receipt"]["proof_items"]
+    assert "Project Autopilot PR publication decision packet" in pr_group[
+        "pr_publish_packet_copy"
+    ]
+
+
+def test_pr_blocker_health_pending_checks_get_wait_decision():
+    packet = orchestrator._quality_bar_from_mapping(
+        {
+            "agent_pr_blocker_health": {
+                "checked_open_pr_count": 1,
+                "ci_blocked_count": 1,
+                "items": [
+                    {
+                        "number": 191,
+                        "branch": "codex/desktop-pr-publish-flow",
+                        "head_ref_oid": "456789abcdef0000",
+                        "merge_state": "CLEAN",
+                        "ci_state": "pending",
+                        "ci_summary": "desktop build:PENDING",
+                        "blocker_kind": "ci_pending",
+                        "pending_checks": [
+                            {
+                                "name": "desktop build",
+                                "url": "https://github.com/rindo/chili-home-copilot/actions/2",
+                            }
+                        ],
+                    }
+                ],
+            }
+        }
+    )
+
+    pr_group = packet["delivery_blocker_groups"][0]
+
+    assert pr_group["pr_recovery_decision"] == "wait_for_current_head_checks"
+    assert pr_group["pr_recovery_decision_label"] == "Wait for current-head checks"
+    assert "current_head_ci_pending" in pr_group["pr_publish_blockers"]
+    assert "wait for or refresh exact-head check receipts" in pr_group[
+        "pr_publish_first_action_label"
+    ]
+    assert pr_group["pending_check_names"] == ["desktop build"]
+
+
+def test_run_payload_promotes_agent_pr_blocker_health_artifact_quality_bar():
+    db = _sqlite_autonomy_session()
+    try:
+        run = ProjectAutonomyRun(
+            run_id="pa_pr_blocker_health_artifact",
+            prompt="inspect live PR blocker health",
+            status="running",
+            current_stage="review",
+        )
+        db.add(run)
+        db.commit()
+        orchestrator._add_artifact(
+            db,
+            run.run_id,
+            "agent_pr_blocker_health",
+            "current_pr_blocker_scan",
+            content_json={
+                "quality_bar": {
+                    "generated_utc": "2026-06-02T05:12:45Z",
+                    "blocker_count": 1,
+                    "items": [
+                        {
+                            "pr_number": "134",
+                            "pr_branch": "codex/brain-work-done-marker-recovery",
+                            "head_sha": "fed9876543210",
+                            "merge_state": "CLEAN",
+                            "ci_state": "no_checks",
+                            "ci_summary": "no checks",
+                            "blocker_kind": "ci_missing_checks",
+                            "path": "project_ws/SRE/OUT/_state/agent-pr-blocker-health.json",
+                        }
+                    ],
+                }
+            },
+        )
+
+        payload = orchestrator.run_payload(db, run, include_events=True)
+        pr_group = payload["quality_bar"]["delivery_blocker_groups"][0]
+
+        assert payload["quality_bar"]["source"] == "agent_pr_blocker_health"
+        assert pr_group["top_pr"] == "134"
+        assert pr_group["top_branch"] == "codex/brain-work-done-marker-recovery"
+        assert pr_group["pr_recovery_decision"] == "attach_current_head_checks"
+        assert pr_group["pr_publish_first_action_owner"] == "PR owner"
+        assert "current_head_checks_missing" in pr_group["pr_publish_blockers"]
+        assert "Attach current-head checks" in pr_group["pr_publish_packet_copy"]
+        assert (
+            pr_group["next_action_path"]
+            == "project_ws/SRE/OUT/_state/agent-pr-blocker-health.json"
+        )
+    finally:
+        db.close()
+
+
+def test_run_payload_surfaces_pr_publication_receipt_quality_bar_artifact():
+    db = _sqlite_autonomy_session()
+    try:
+        run = ProjectAutonomyRun(
+            run_id="pa_pr_publication_receipt",
+            prompt="inspect PR publication proof",
+            status="running",
+            current_stage="review",
+        )
+        db.add(run)
+        db.commit()
+        orchestrator._add_artifact(
+            db,
+            run.run_id,
+            "delivery_pr_publication_receipt",
+            "current_head_pr_publication_receipt",
+            content_json={
+                "publication_receipt": {
+                    "schema": "chili.execution-pr-publication-receipt.v1",
+                    "status": "warning",
+                    "publication_proof_ready": False,
+                    "missing_evidence": ["current_head_check_receipt"],
+                }
+            },
+        )
+
+        payload = orchestrator.run_payload(db, run, include_events=True)
+
+        assert payload["scheduled_quality"] == {}
+        assert payload["quality_bar"]["publication_receipt"]["status"] == "warning"
+        assert payload["quality_bar"]["publication_receipt"]["missing_evidence"] == [
+            "current_head_check_receipt"
+        ]
+    finally:
+        db.close()
+
+
 def test_start_plan_transitions_chat_to_queued_plan(tmp_path):
     db = _sqlite_autonomy_session()
     try:
@@ -1689,3 +2178,1343 @@ def test_small_desktop_fallback_handles_non_json_chat_response(tmp_path):
     assert "userMessageForHttpStatus(response.statusCode)" in diff
     proc = orchestrator._git(tmp_path, ["apply", "--check"], input_text=diff, timeout=60)
     assert proc.returncode == 0, proc.stderr
+
+
+def _write_agentops_scorecard(root: Path, rel_path: str, body: str) -> None:
+    path = root / rel_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8", newline="\n")
+
+
+def _write_promotion_ready_agentops(root: Path) -> None:
+    capabilities = ", ".join(orchestrator.AGENT_CODING_BENCHMARK_REQUIRED_CAPABILITIES)
+    _write_agentops_scorecard(
+        root,
+        orchestrator.AGENT_CODING_BENCHMARK_SCORECARD_REL_PATH,
+        "\n".join(
+            [
+                "# CHILI Coding Benchmark Scorecard",
+                "",
+                "- Generated UTC: " + datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "- Status: passed",
+                "- Overall score: 100/100",
+                "- Scenarios: 6",
+                "- Pass rate: 6/6",
+                "- Source stability: stable",
+                "- Source changes during run: 0",
+                "- Capability coverage: " + capabilities,
+            ]
+        ),
+    )
+    _write_agentops_scorecard(
+        root,
+        orchestrator.AGENT_MODEL_SHADOW_EVIDENCE_SCORECARD_REL_PATH,
+        "- Status: passed\n- Checks: 7\n- Evidence mode: real_manifest\n",
+    )
+    _write_agentops_scorecard(
+        root,
+        orchestrator.AGENT_MODEL_CANDIDATE_TOURNAMENT_SCORECARD_REL_PATH,
+        "- Status: passed\n- Cases: 6\n- Evidence mode: real_artifacts\n",
+    )
+    _write_agentops_scorecard(
+        root,
+        orchestrator.AGENT_HOSTED_PR_REPAIR_SCORECARD_REL_PATH,
+        "- Status: passed\n- Checks: 18\n- Evidence mode: real_inventory\n- Missing checks: none\n- Promotion eligible: true\n",
+    )
+    _write_agentops_scorecard(
+        root,
+        orchestrator.AGENT_SYNTHETIC_REPO_REPAIR_SCORECARD_REL_PATH,
+        "- Status: passed\n",
+    )
+    _write_agentops_scorecard(
+        root,
+        orchestrator.AGENT_MODEL_PROMOTION_SCORECARD_REL_PATH,
+        "- Status: passed\n",
+    )
+
+
+def test_frontier_model_evidence_intake_status_tracks_required_source_files(tmp_path):
+    manifest_path = tmp_path / orchestrator.AGENT_FRONTIER_PROMPT_PACK_MANIFEST_REL_PATH
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text('{"schema":"test"}\n', encoding="utf-8")
+    codex_root = (
+        tmp_path
+        / orchestrator.AGENT_FRONTIER_MODEL_EVIDENCE_RAW_SOURCES_REL_PATH
+        / "codex"
+    )
+    codex_raw = codex_root / "raw"
+    codex_raw.mkdir(parents=True)
+    for filename in orchestrator.AGENT_FRONTIER_MODEL_EVIDENCE_REQUIRED_SOURCE_FILES:
+        (codex_root / filename).write_text("ok\n", encoding="utf-8")
+    (codex_raw / "candidate.json").write_text("{}\n", encoding="utf-8")
+    claude_root = (
+        tmp_path
+        / orchestrator.AGENT_FRONTIER_MODEL_EVIDENCE_RAW_SOURCES_REL_PATH
+        / "claude"
+    )
+    claude_root.mkdir(parents=True)
+    (claude_root / "metadata.json").write_text("{}\n", encoding="utf-8")
+
+    status = orchestrator._frontier_model_evidence_intake_status(tmp_path)
+
+    assert status["status"] == "partial"
+    assert status["prompt_pack_manifest_present"] is True
+    assert status["required_source_count"] == 3
+    assert status["ready_source_count"] == 1
+    assert status["prepared_source_count"] == 1
+    assert status["missing_source_count"] == 2
+    sources = {source["source_kind"]: source for source in status["sources"]}
+    assert sources["codex"]["status"] == "ready"
+    assert sources["codex"]["raw_drop_count"] == 1
+    assert sources["claude"]["status"] == "partial"
+    assert "raw_sources/claude/prompt_pack.md" in sources["claude"]["missing_files"][0]
+    assert sources["local_model"]["status"] == "missing"
+    assert "claude, local_model" in status["next_action"]
+    assert status["setup_command"] == orchestrator.AGENT_FRONTIER_MODEL_EVIDENCE_SETUP_COMMAND
+    assert status["setup_action_label"] == "Prepare frontier intake folders"
+    assert status["setup_safe"] is True
+    assert status["frontier_source_collection_packet_command"] == orchestrator.AGENT_FRONTIER_SOURCE_COLLECTION_PACKET_COMMAND
+    assert status["frontier_source_collection_packet_action_label"] == "Build source collection packets"
+    assert status["frontier_source_collection_packet_safe"] is True
+    assert status["frontier_source_record_command"] == orchestrator.AGENT_FRONTIER_SOURCE_EVIDENCE_RECORD_COMMAND
+    assert status["frontier_source_record_action_label"] == "Record frontier source evidence"
+    assert status["frontier_source_record_safe"] is True
+    assert (
+        status["frontier_source_record_all_cases_command"]
+        == orchestrator.AGENT_FRONTIER_SOURCE_EVIDENCE_RECORD_ALL_CASES_COMMAND
+    )
+    assert status["frontier_source_record_all_cases_action_label"] == "Record all-cases frontier source evidence"
+    assert status["frontier_source_record_all_cases_safe"] is True
+    assert status["local_model_candidate_run_command"] == orchestrator.AGENT_LOCAL_MODEL_CANDIDATE_RUN_COMMAND
+    assert status["local_model_candidate_run_action_label"] == "Run local-model candidate suite"
+    assert status["local_model_candidate_run_safe"] is True
+    assert status["local_model_record_command"] == orchestrator.AGENT_LOCAL_MODEL_EVIDENCE_RECORD_COMMAND
+    assert status["local_model_record_action_label"] == "Record local-model evidence"
+    assert status["local_model_record_safe"] is True
+    assert "no source/runtime/git/PR/live action" in status["permission_boundary"]
+
+
+def test_frontier_model_evidence_intake_status_attaches_preflight_recovery_route(tmp_path):
+    manifest_path = tmp_path / orchestrator.AGENT_FRONTIER_PROMPT_PACK_MANIFEST_REL_PATH
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text('{"schema":"test"}\n', encoding="utf-8")
+    raw_root = tmp_path / orchestrator.AGENT_FRONTIER_MODEL_EVIDENCE_RAW_SOURCES_REL_PATH
+    for source_kind in orchestrator.AGENT_FRONTIER_MODEL_EVIDENCE_SOURCE_KINDS:
+        source_dir = raw_root / source_kind
+        source_dir.mkdir(parents=True)
+        (source_dir / "raw").mkdir()
+        (source_dir / "prompt_pack.md").write_text(
+            f"prepared {source_kind} prompt pack\n",
+            encoding="utf-8",
+        )
+    _write_agentops_scorecard(
+        tmp_path,
+        orchestrator.AGENT_FRONTIER_EVIDENCE_PREFLIGHT_LIVE_REL_PATH,
+        "\n".join(
+            [
+                "# CHILI Frontier Evidence Preflight",
+                "",
+                "- Schema: chili.frontier-evidence-preflight.v1",
+                "- Status: warning",
+                "- Checks: 1",
+                "- Blockers: 1",
+                "",
+                "| Check | Status | Required | Actual | Evidence | Next action |",
+                "| --- | --- | --- | --- | --- | --- |",
+                "| claude_opus48_live_probe | warning | usable Claude completion | auth failure | claude -p | refresh auth |",
+                "",
+                "## Recovery Routes",
+                "",
+                "| Source | Blocker | Action | All-cases command | Single-case fallback | Boundary |",
+                "| --- | --- | --- | --- | --- | --- |",
+                (
+                    "| claude | claude_opus48_live_probe | Import saved claude response | "
+                    "python scripts/autopilot_frontier_source_evidence_recorder.py "
+                    "--source-kind claude --all-cases --response <claude-all-cases-response.txt> "
+                    "--run-id <real-claude-run-id> "
+                    "--source-command <exact-claude-command-or-session-export> --json | "
+                    "python scripts/autopilot_frontier_source_evidence_recorder.py "
+                    "--source-kind claude --case-id real-chili-preflight-candidate-wins "
+                    "--response <claude-response.txt> --run-id <real-claude-run-id> "
+                    "--source-command <exact-claude-command-or-session-export> --json | "
+                    "collection and evidence import only |"
+                ),
+            ]
+        ),
+    )
+
+    status = orchestrator._frontier_model_evidence_intake_status(tmp_path)
+    sources = {source["source_kind"]: source for source in status["sources"]}
+    claude = sources["claude"]
+
+    assert status["frontier_preflight_recovery_route_count"] == 1
+    assert claude["status"] == "partial"
+    assert claude["preflight_recovery_action_label"] == "Import saved claude response"
+    assert "claude_all_cases_response.txt" in claude[
+        "preflight_recovery_response_staging_file"
+    ]
+    assert "claude_all_cases_response.txt" in claude[
+        "preflight_recovery_dry_run_command"
+    ]
+    assert "--json --no-write" in claude["preflight_recovery_dry_run_command"]
+    assert "--source-kind claude" in claude["preflight_recovery_all_cases_command"]
+    assert "--all-cases" in claude["preflight_recovery_all_cases_command"]
+    assert "claude_all_cases_response.txt" in claude[
+        "preflight_recovery_all_cases_command"
+    ]
+    assert "--no-write" not in claude["preflight_recovery_all_cases_command"]
+    assert "--case-id real-chili-preflight-candidate-wins" in claude[
+        "preflight_recovery_single_case_command"
+    ]
+    assert "claude_single_case_response.txt" in claude[
+        "preflight_recovery_single_case_command"
+    ]
+    assert "--allow-partial --json --no-write" in claude[
+        "preflight_recovery_validation_command"
+    ]
+    assert orchestrator.AGENT_FRONTIER_MODEL_EVIDENCE_RAW_SOURCES_REL_PATH in claude[
+        "preflight_recovery_validation_command"
+    ]
+    assert "--publish-scorecards --json" in claude[
+        "preflight_recovery_publish_command"
+    ]
+    assert "Preflight recovery: Import saved claude response" in claude["next_action"]
+    assert "Save all-cases response to:" in claude["next_action"]
+    assert "Dry-run import first:" in claude["next_action"]
+    assert "After import validation:" in claude["next_action"]
+    assert "Publish only when all sources are ready:" in claude["next_action"]
+    assert "collection and evidence import only" in claude[
+        "preflight_recovery_boundary"
+    ]
+    assert "Preflight recovery available for claude" in status["next_action"]
+    assert "dry-run" in status["next_action"]
+    assert "Validate after import" in status["next_action"]
+
+
+def test_frontier_model_evidence_intake_status_guides_after_safe_setup(tmp_path):
+    from scripts.autopilot_frontier_prompt_pack_bundle import build_prompt_pack_bundle
+
+    bundle_root = tmp_path / orchestrator.AGENT_FRONTIER_PROMPT_PACK_MANIFEST_REL_PATH
+    bundle_root = bundle_root.parent
+    build_prompt_pack_bundle(output_dir=bundle_root)
+    raw_root = tmp_path / orchestrator.AGENT_FRONTIER_MODEL_EVIDENCE_RAW_SOURCES_REL_PATH
+    for source_kind in orchestrator.AGENT_FRONTIER_MODEL_EVIDENCE_SOURCE_KINDS:
+        source_dir = raw_root / source_kind
+        source_dir.mkdir(parents=True)
+        (source_dir / "raw").mkdir()
+        (source_dir / "prompt_pack.md").write_text(
+            (bundle_root / source_kind / "prompt_pack.md").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+
+    status = orchestrator._frontier_model_evidence_intake_status(tmp_path)
+
+    assert status["status"] == "partial"
+    assert status["prepared_source_count"] == 3
+    assert status["ready_source_count"] == 0
+    assert status["missing_source_count"] == 3
+    assert "Record real metadata.json, transcript.jsonl" in status["next_action"]
+    assert "codex, claude, local_model" in status["next_action"]
+    assert "autopilot_frontier_source_collection_packet.py" in status["next_action"]
+    assert "autopilot_frontier_source_evidence_recorder.py" in status["next_action"]
+    assert "--all-cases" in status["next_action"]
+    assert "complete hosted Codex/Claude/source drops" in status["next_action"]
+    assert "only when a hosted source produced one case" in status["next_action"]
+    assert "autopilot_local_model_candidate_runner.py" in status["next_action"]
+    assert "autopilot_local_model_evidence_recorder.py" in status["next_action"]
+
+
+def test_validation_merge_evidence_requires_non_collect_only_signal():
+    collect_only = [
+        {
+            "step_key": "pytest_targeted",
+            "exit_code": 0,
+            "targeted": False,
+            "fallback_collect_only": True,
+            "command": "pytest --collect-only",
+        }
+    ]
+    syntax_plus_collect = [
+        {"step_key": "ast_syntax", "exit_code": 0, "changed_files": ["app/services/example.py"]},
+        collect_only[0],
+    ]
+
+    assert orchestrator.validation_merge_evidence(collect_only, ["app/services/example.py"])["passed"] is False
+    assert orchestrator.validation_merge_evidence(syntax_plus_collect, ["app/services/example.py"])["passed"] is True
+
+
+def test_behavior_validation_evidence_requires_targeted_tests():
+    syntax_only = [
+        {"step_key": "ast_syntax", "exit_code": 0, "changed_files": ["app/services/example.py"]}
+    ]
+    targeted = [
+        {
+            "step_key": "pytest_targeted",
+            "exit_code": 0,
+            "targeted": True,
+            "test_files": ["tests/test_example.py"],
+            "validation_scope": "targeted_tests",
+        }
+    ]
+
+    assert orchestrator.behavior_validation_evidence(syntax_only, ["app/services/example.py"])["passed"] is False
+    assert orchestrator.behavior_validation_evidence(targeted, ["app/services/example.py"])["passed"] is True
+
+
+def test_blast_radius_and_patch_self_review_gates_block_unplanned_or_large_changes():
+    plan = {"files": [{"path": "app/services/example.py", "action": "modify"}]}
+
+    assert orchestrator.change_blast_radius_gate(plan, ["app/services/example.py"])["passed"] is True
+    assert orchestrator.change_blast_radius_gate(plan, ["app/services/other.py"])["passed"] is False
+    assert (
+        orchestrator.patch_self_review_gate(
+            plan,
+            ["app/services/example.py"],
+            numstat_text="500\t240\tapp/services/example.py\n",
+            name_status_text="M\tapp/services/example.py\n",
+        )["passed"]
+        is False
+    )
+
+
+def test_domain_behavior_validation_evidence_requires_trading_invariant_tests():
+    generic = [
+        {
+            "step_key": "pytest_targeted",
+            "exit_code": 0,
+            "targeted": True,
+            "test_files": ["tests/test_trading_runtime.py"],
+            "test_selection": [
+                {
+                    "source_file": "app/services/trading/pdt_guard.py",
+                    "test_file": "tests/test_trading_runtime.py",
+                    "reason": "imports changed module",
+                }
+            ],
+        }
+    ]
+    invariant = [
+        {
+            "step_key": "pytest_targeted",
+            "exit_code": 0,
+            "targeted": True,
+            "test_files": ["tests/test_pdt_intraday_margin_cutover.py"],
+            "test_selection": [
+                {
+                    "source_file": "app/services/trading/pdt_guard.py",
+                    "test_file": "tests/test_pdt_intraday_margin_cutover.py",
+                    "reason": "covers PDT day-trade margin invariant",
+                }
+            ],
+        }
+    ]
+
+    assert orchestrator.domain_behavior_validation_evidence(generic, ["app/services/trading/pdt_guard.py"])["passed"] is False
+    assert orchestrator.domain_behavior_validation_evidence(invariant, ["app/services/trading/pdt_guard.py"])["passed"] is True
+
+
+def test_semantic_patch_review_blocks_public_contract_change():
+    diff = "--- a/app/routers/orders.py\n+++ b/app/routers/orders.py\n@@\n-def create_order(payload):\n+def create_order(payload, user_id):\n"
+
+    result = orchestrator.semantic_patch_review_gate(
+        {"files": [{"path": "app/routers/orders.py"}]},
+        ["app/routers/orders.py"],
+        diff_text=diff,
+        validation=[
+            {
+                "step_key": "pytest_targeted",
+                "exit_code": 0,
+                "targeted": True,
+                "test_files": ["tests/test_orders_unit.py"],
+            }
+        ],
+    )
+
+    assert result["passed"] is False
+    assert result["public_contract_change"] is True
+
+
+def test_implementation_blocks_public_contract_change_without_contract_tests():
+    diff = "--- a/app/routers/orders.py\n+++ b/app/routers/orders.py\n@@\n-def create_order(payload):\n+def create_order(payload, user_id):\n"
+
+    result = orchestrator.semantic_patch_review_gate(
+        {"files": [{"path": "app/routers/orders.py"}]},
+        ["app/routers/orders.py"],
+        diff_text=diff,
+        validation=[
+            {
+                "step_key": "pytest_targeted",
+                "exit_code": 0,
+                "targeted": True,
+                "test_files": ["tests/test_orders_api_contract.py"],
+            }
+        ],
+    )
+
+    assert result["passed"] is True
+    assert "tests/test_orders_api_contract.py" in result["contract_tests"]
+
+
+def test_validation_repair_context_text_preserves_targeted_failure():
+    context = orchestrator.validation_repair_context(
+        [
+            {
+                "step_key": "pytest_targeted",
+                "exit_code": 1,
+                "command": "pytest tests/test_example.py -q",
+                "stdout": "FAILED tests/test_example.py::test_behavior",
+                "test_files": ["tests/test_example.py"],
+            }
+        ],
+        changed_files=["app/services/example.py"],
+        plan_files=[{"path": "app/services/example.py"}],
+    )
+
+    text = orchestrator.validation_repair_context_text(context)
+
+    assert "schema: chili.validation-repair-context.v1" in text
+    assert "pytest tests/test_example.py -q" in text
+    assert "FAILED tests/test_example.py::test_behavior" in text
+
+
+def test_run_needs_visual_qa_for_visible_ui_plan():
+    run = SimpleNamespace(status=orchestrator.RUN_STATUS_COMPLETED, prompt="Make the screen easier to scan.")
+    plan = {"files": [{"path": "chili_mobile/lib/src/brain/brain_dispatch_screen.dart"}]}
+
+    assert orchestrator._run_needs_visual_qa(run, plan) is True
+    assert orchestrator._run_needs_visual_qa(run, {"files": [{"path": "app/services/example.py"}]}) is False
+
+
+def test_coding_benchmark_scorecard_rejects_model_shadow_self_test_mode(tmp_path):
+    _write_promotion_ready_agentops(tmp_path)
+    _write_agentops_scorecard(
+        tmp_path,
+        orchestrator.AGENT_MODEL_SHADOW_EVIDENCE_SCORECARD_REL_PATH,
+        "- Status: passed\n- Checks: 7\n- Evidence mode: self_test\n",
+    )
+
+    signal = orchestrator._agent_coding_benchmark_signal(tmp_path)
+
+    assert signal["status"] == orchestrator.AGENT_OS_READINESS_CHECK_WARNING
+    assert signal["model_shadow"]["evidence_mode"] == "self_test"
+    assert "real shadow evidence" in signal["frontier_evidence_gap_labels"]
+
+
+def test_coding_benchmark_scorecard_rejects_hosted_pr_repair_self_test_mode(tmp_path):
+    _write_promotion_ready_agentops(tmp_path)
+    _write_agentops_scorecard(
+        tmp_path,
+        orchestrator.AGENT_HOSTED_PR_REPAIR_SCORECARD_REL_PATH,
+        "- Status: passed\n- Checks: 18\n- Evidence mode: self_test\n- Missing checks: none\n- Promotion eligible: false\n",
+    )
+
+    signal = orchestrator._agent_coding_benchmark_signal(tmp_path)
+
+    assert signal["status"] == orchestrator.AGENT_OS_READINESS_CHECK_WARNING
+    assert signal["hosted_pr_repair"]["evidence_mode"] == "self_test"
+    assert signal["hosted_pr_repair"]["metadata_values"]["promotion eligible"] == "false"
+    assert "real PR repair inventory" in signal["frontier_evidence_gap_labels"]
+
+
+def test_coding_benchmark_scorecard_rejects_hosted_pr_repair_without_promotion_flag(tmp_path):
+    _write_promotion_ready_agentops(tmp_path)
+    _write_agentops_scorecard(
+        tmp_path,
+        orchestrator.AGENT_HOSTED_PR_REPAIR_SCORECARD_REL_PATH,
+        "- Status: passed\n- Checks: 18\n- Evidence mode: real_inventory\n- Missing checks: none\n- Promotion eligible: false\n",
+    )
+
+    signal = orchestrator._agent_coding_benchmark_signal(tmp_path)
+
+    assert signal["status"] == orchestrator.AGENT_OS_READINESS_CHECK_WARNING
+    assert signal["hosted_pr_repair"]["evidence_mode"] == "real_inventory"
+    assert signal["hosted_pr_repair"]["metadata_values"]["promotion eligible"] == "false"
+
+
+def test_coding_benchmark_scorecard_rejects_source_changes_after_generation(tmp_path):
+    _write_promotion_ready_agentops(tmp_path)
+    changed_file = tmp_path / "app" / "services" / "current_change.py"
+    changed_file.parent.mkdir(parents=True)
+    changed_file.write_text("VALUE = 1\n", encoding="utf-8")
+    os.utime(changed_file, (4102444800, 4102444800))
+
+    signal = orchestrator._agent_coding_benchmark_signal(tmp_path)
+
+    assert signal["status"] == orchestrator.AGENT_OS_READINESS_CHECK_WARNING
+    assert signal["scorecard_freshness"] == "stale"
+    assert signal["source_changes_after_scorecard"] == 1
+    assert "source freshness" in signal["frontier_evidence_gap_labels"]
+    assert "app/services/current_change.py" in signal["source_change_preview_after_scorecard"]
+    assert "changed after scorecard generation" in signal["detail"]
+    assert (
+        signal["source_churn_diagnostics_path"]
+        == orchestrator.AGENT_SOURCE_CHURN_DIAGNOSTICS_REL_PATH
+    )
+    assert "autopilot_source_churn_diagnostics.py" in signal[
+        "source_churn_diagnostics_command"
+    ]
+    source_gap = next(
+        gap for gap in signal["frontier_evidence_gaps"] if gap["gate"] == "source_freshness"
+    )
+    assert "autopilot_source_churn_diagnostics.py" in source_gap["next_action"]
+    assert signal["source_churn_diagnostics"]["status"] == "missing"
+
+
+def test_coding_benchmark_signal_uses_latest_source_churn_diagnostics(tmp_path):
+    _write_promotion_ready_agentops(tmp_path)
+    changed_file = tmp_path / "app" / "services" / "current_change.py"
+    changed_file.parent.mkdir(parents=True)
+    changed_file.write_text("VALUE = 1\n", encoding="utf-8")
+    os.utime(changed_file, (4102444800, 4102444800))
+    _write_agentops_scorecard(
+        tmp_path,
+        orchestrator.AGENT_SOURCE_CHURN_DIAGNOSTICS_REL_PATH,
+        "\n".join(
+            [
+                "# CHILI Source Churn Diagnostics",
+                "",
+                "- Schema: chili.source-churn-diagnostics.v1",
+                "- Generated UTC: 2026-06-03T13:42:27Z",
+                "- Status: warning",
+                "- Promotion impact: blocked",
+                "- Rerun readiness: ready_for_benchmark_rerun",
+                "- Scorecard: project_ws/AgentOps/CODING_BENCHMARK_SCORECARD.md",
+                "- Scorecard status: failed",
+                "- Scorecard generated UTC: 2026-06-03T13:23:01Z",
+                "- Scorecard source stability: changed",
+                "- Source changes during scorecard: 12",
+                "- Current source freshness: stale",
+                "- Source changes after scorecard: 1",
+                "- Watch status: stable",
+                "- Watch seconds: 5.0",
+                "- Source changes during watch: 0",
+                "- Next action: The tree was quiet during this diagnostic window; rerun the full coding benchmark with a source quiet preflight.",
+                "- Safety: read-only source/test diagnostics only",
+                "",
+                "## Files Newer Than Scorecard",
+                "",
+                "| Path | Modified UTC | Seconds after scorecard | Size |",
+                "| --- | --- | ---: | ---: |",
+                "| app/services/current_change.py | 2026-06-03T13:40:23Z | 1041.893 | 10 |",
+                "",
+                "## Files Changed During Watch",
+                "",
+                "| Path | Change | Before UTC | After UTC | Before size | After size |",
+                "| --- | --- | --- | --- | ---: | ---: |",
+                "| none |  |  |  |  |  |",
+            ]
+        ),
+    )
+
+    signal = orchestrator._agent_coding_benchmark_signal(tmp_path)
+
+    diagnostics = signal["source_churn_diagnostics"]
+    assert diagnostics["present"] is True
+    assert diagnostics["status"] == "warning"
+    assert diagnostics["rerun_readiness"] == "ready_for_benchmark_rerun"
+    assert diagnostics["watch_status"] == "stable"
+    assert diagnostics["changed_files"] == ["app/services/current_change.py"]
+    assert "current_change.py" in diagnostics["changed_file_preview"]
+    source_gap = next(
+        gap for gap in signal["frontier_evidence_gaps"] if gap["gate"] == "source_freshness"
+    )
+    assert source_gap["path"] == orchestrator.AGENT_SOURCE_CHURN_DIAGNOSTICS_REL_PATH
+    assert "diagnostic warning" in source_gap["actual"]
+    assert "rerun ready_for_benchmark_rerun" in source_gap["actual"]
+    assert "watch stable" in source_gap["actual"]
+    assert "Latest diagnostic" in source_gap["next_action"]
+    assert "tree was quiet" in source_gap["next_action"]
+    handoff = signal["frontier_evidence_handoff_copy"]
+    assert orchestrator.AGENT_SOURCE_CHURN_DIAGNOSTICS_REL_PATH in handoff
+    assert "diagnostic changed files: app/services/current_change.py" in handoff
+
+
+def test_coding_benchmark_signal_names_frontier_evidence_gaps_for_operator(tmp_path):
+    _write_promotion_ready_agentops(tmp_path)
+    _write_agentops_scorecard(
+        tmp_path,
+        orchestrator.AGENT_MODEL_SHADOW_EVIDENCE_SCORECARD_REL_PATH,
+        "- Status: passed\n- Checks: 7\n- Evidence mode: self_test\n",
+    )
+    _write_agentops_scorecard(
+        tmp_path,
+        orchestrator.AGENT_MODEL_CANDIDATE_TOURNAMENT_SCORECARD_REL_PATH,
+        "- Status: passed\n- Cases: 6\n",
+    )
+    _write_agentops_scorecard(
+        tmp_path,
+        orchestrator.AGENT_HOSTED_PR_REPAIR_SCORECARD_REL_PATH,
+        "- Status: passed\n- Checks: 18\n- Evidence mode: self_test\n- Missing checks: none\n- Promotion eligible: false\n",
+    )
+
+    signal = orchestrator._agent_coding_benchmark_signal(tmp_path)
+
+    assert signal["status"] == orchestrator.AGENT_OS_READINESS_CHECK_WARNING
+    assert signal["frontier_evidence_gap_count"] == 3
+    assert signal["frontier_evidence_gap_labels"] == [
+        "real shadow evidence",
+        "real tournament artifacts",
+        "real PR repair inventory",
+    ]
+    assert signal["frontier_evidence_gaps"][0]["required"] == "real_manifest"
+    assert signal["frontier_evidence_gaps"][1]["actual"] == "missing"
+    assert "promotion eligible false" in signal["frontier_evidence_gaps"][2]["actual"]
+    assert "Close source intake first" in signal["frontier_evidence_next_action"]
+    assert "autopilot_frontier_model_evidence_intake.py" in signal[
+        "frontier_evidence_next_action"
+    ]
+    assert "--publish-scorecards --json" in signal["frontier_evidence_next_action"]
+    assert signal["frontier_evidence_handoff_label"] == "Copy frontier proof packet"
+    intake = signal["frontier_model_evidence_intake"]
+    assert intake["status"] == "missing"
+    assert intake["required_source_count"] == 3
+    assert intake["ready_source_count"] == 0
+    assert intake["raw_source_root"] == orchestrator.AGENT_FRONTIER_MODEL_EVIDENCE_RAW_SOURCES_REL_PATH
+    assert intake["setup_command"] == orchestrator.AGENT_FRONTIER_MODEL_EVIDENCE_SETUP_COMMAND
+    assert intake["frontier_source_collection_packet_command"] == orchestrator.AGENT_FRONTIER_SOURCE_COLLECTION_PACKET_COMMAND
+    assert intake["frontier_source_record_command"] == orchestrator.AGENT_FRONTIER_SOURCE_EVIDENCE_RECORD_COMMAND
+    assert (
+        intake["frontier_source_record_all_cases_command"]
+        == orchestrator.AGENT_FRONTIER_SOURCE_EVIDENCE_RECORD_ALL_CASES_COMMAND
+    )
+    assert intake["local_model_candidate_run_command"] == orchestrator.AGENT_LOCAL_MODEL_CANDIDATE_RUN_COMMAND
+    assert intake["local_model_record_command"] == orchestrator.AGENT_LOCAL_MODEL_EVIDENCE_RECORD_COMMAND
+    handoff = signal["frontier_evidence_handoff_copy"]
+    assert "Project Autopilot frontier evidence proof packet" in handoff
+    assert "real_manifest" in handoff
+    assert "real_artifacts" in handoff
+    assert "real_inventory" in handoff
+    assert "MODEL_SHADOW_EVIDENCE_BENCHMARK.md" in handoff
+    assert "HOSTED_PR_REPAIR_ARTIFACT_BENCHMARK.md" in handoff
+    assert orchestrator.AGENT_FRONTIER_PROMPT_PACK_MANIFEST_REL_PATH in handoff
+    assert "raw_sources/codex/metadata.json" in handoff
+    assert "raw_sources/claude/transcript.jsonl" in handoff
+    assert "raw_sources/local_model/prompt_pack.md" in handoff
+    assert "autopilot_frontier_model_evidence_setup.py --json" in handoff
+    assert "autopilot_frontier_source_collection_packet.py" in handoff
+    assert "autopilot_frontier_source_evidence_recorder.py" in handoff
+    assert "--all-cases" in handoff
+    assert "autopilot_local_model_candidate_runner.py" in handoff
+    assert "autopilot_local_model_evidence_recorder.py" in handoff
+    assert "autopilot_frontier_prompt_pack_bundle.py --validate --json" in handoff
+    assert "--input-root project_ws/AgentOps/frontier_model_evidence_intake/raw_sources" in handoff
+    assert "--publish-scorecards --json" in handoff
+    assert "--manifest-dir project_ws/AgentOps/frontier_model_evidence_intake/manifests" in handoff
+    assert "--drop-dir project_ws/AgentOps/frontier_model_evidence_intake/collected" in handoff
+    assert "--require-provenance --no-write --json" in handoff
+    assert "does not authorize source/test edits" in handoff
+
+
+def test_coding_benchmark_signal_surfaces_local_model_candidate_timeout_recovery(tmp_path):
+    _write_promotion_ready_agentops(tmp_path)
+    _write_agentops_scorecard(
+        tmp_path,
+        orchestrator.AGENT_MODEL_CANDIDATE_TOURNAMENT_SCORECARD_REL_PATH,
+        "- Status: passed\n- Cases: 6\n",
+    )
+    diagnostics_rel = (
+        "project_ws/AgentOps/local_model_candidate_runs/"
+        "local-suite-timeout/suite_diagnostics.json"
+    )
+    prompt_rel = (
+        "project_ws/AgentOps/local_model_candidate_runs/local-suite-timeout/"
+        "cases/real-chili-preflight-candidate-wins.prompt.md"
+    )
+    diagnostics_path = tmp_path / diagnostics_rel
+    diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
+    retry_command = (
+        "python scripts/autopilot_local_model_candidate_runner.py "
+        f"--retry-from-diagnostics {diagnostics_rel} "
+        "--timeout-seconds 300 --json"
+    )
+    import_command = (
+        "python scripts/autopilot_local_model_candidate_runner.py "
+        f"--retry-from-diagnostics {diagnostics_rel} "
+        "--response-file <local-model-real-chili-preflight-candidate-wins-response.txt> "
+        "--run-id <real-local-run-id> "
+        "--source-command <exact-local-model-command> --json"
+    )
+    diagnostics_path.write_text(
+        json.dumps(
+            {
+                "schema": "chili.local-model-suite-diagnostics.v1",
+                "status": "failed",
+                "failure_stage": "model",
+                "failure_reason": (
+                    "real-chili-preflight-candidate-wins: local model timed out after 60s"
+                ),
+                "failed_case_id": "real-chili-preflight-candidate-wins",
+                "case_results": [
+                    {
+                        "case_id": "real-chili-preflight-candidate-wins",
+                        "status": "model_failed",
+                        "prompt": prompt_rel,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_agentops_scorecard(
+        tmp_path,
+        orchestrator.AGENT_LOCAL_MODEL_CANDIDATE_RUN_REL_PATH,
+        "\n".join(
+            [
+                "# CHILI Local Model Candidate Run",
+                "",
+                "- Status: failed",
+                "- Case: all",
+                "- Cases: 6",
+                "- Model: qwen3:4b",
+                "- Failure stage: model",
+                (
+                    "- Failure reason: real-chili-preflight-candidate-wins: "
+                    "local model timed out after 60s"
+                ),
+                "- Failed case: real-chili-preflight-candidate-wins",
+                "",
+                "| Artifact | Path |",
+                "| --- | --- |",
+                "| full_prompt_pack | project_ws/AgentOps/local_model_candidate_runs/local-suite-timeout/full_prompt_pack.md |",
+                "| response | project_ws/AgentOps/local_model_candidate_runs/local-suite-timeout/model_response.txt |",
+                f"| diagnostics | {diagnostics_rel} |",
+            ]
+        ),
+    )
+
+    signal = orchestrator._agent_coding_benchmark_signal(tmp_path)
+
+    assert "real tournament artifacts" in signal["frontier_evidence_gap_labels"]
+    assert "local model candidate diagnostics" in signal["frontier_evidence_gap_labels"]
+    intake = signal["frontier_model_evidence_intake"]
+    local_run = intake["local_model_candidate_run"]
+    assert local_run["status"] == "failed"
+    assert local_run["failed_case_id"] == "real-chili-preflight-candidate-wins"
+    assert local_run["diagnostics"] == diagnostics_rel
+    assert local_run["full_prompt_pack"].endswith("full_prompt_pack.md")
+    assert local_run["response"].endswith("model_response.txt")
+    assert local_run["failed_prompt"] == prompt_rel
+    assert local_run["recovery_route_count"] == 1
+    assert local_run["recovery_routes"][0]["prompt_path"] == prompt_rel
+    assert retry_command in local_run["next_action"]
+    assert import_command in local_run["next_action"]
+    local_gap = next(
+        gap
+        for gap in signal["frontier_evidence_gaps"]
+        if gap["gate"] == "local_model_candidate_run"
+    )
+    assert "local model timed out after 60s" in local_gap["actual"]
+    assert retry_command in local_gap["next_action"]
+    assert local_gap["path"] == diagnostics_rel
+    assert retry_command in signal["frontier_evidence_handoff_copy"]
+    assert diagnostics_rel in signal["frontier_evidence_handoff_copy"]
+    assert "does not authorize source/test edits" in signal["frontier_evidence_handoff_copy"]
+
+
+def test_coding_benchmark_signal_surfaces_local_model_timeout_salvage(tmp_path):
+    _write_promotion_ready_agentops(tmp_path)
+    salvaged_case = "real-chili-preflight-candidate-wins"
+    _write_agentops_scorecard(
+        tmp_path,
+        orchestrator.AGENT_LOCAL_MODEL_CANDIDATE_RUN_REL_PATH,
+        "\n".join(
+            [
+                "# CHILI Local Model Candidate Run",
+                "",
+                "- Status: passed",
+                "- Case: all",
+                "- Cases: 6",
+                "- Model: qwen3:4b",
+                "- Run id: local-suite-timeout-salvage",
+                "- Promotion ready: False",
+                "- Timeout salvaged count: 1",
+                f"- Timeout salvaged cases: {salvaged_case}",
+                "",
+                "| Artifact | Path |",
+                "| --- | --- |",
+                "| full_prompt_pack | project_ws/AgentOps/local_model_candidate_runs/local-suite-timeout-salvage/full_prompt_pack.md |",
+                "| response | project_ws/AgentOps/local_model_candidate_runs/local-suite-timeout-salvage/model_response.txt |",
+            ]
+        ),
+    )
+
+    signal = orchestrator._agent_coding_benchmark_signal(tmp_path)
+
+    local_run = signal["frontier_model_evidence_intake"]["local_model_candidate_run"]
+    assert local_run["status"] == "passed"
+    assert local_run["timeout_salvaged_case_count"] == 1
+    assert local_run["timeout_salvaged_cases"] == [salvaged_case]
+
+
+def test_coding_benchmark_signal_surfaces_frontier_preflight_recovery_routes(tmp_path):
+    _write_promotion_ready_agentops(tmp_path)
+    _write_agentops_scorecard(
+        tmp_path,
+        orchestrator.AGENT_MODEL_SHADOW_EVIDENCE_SCORECARD_REL_PATH,
+        "- Status: passed\n- Checks: 7\n- Evidence mode: self_test\n",
+    )
+    _write_agentops_scorecard(
+        tmp_path,
+        orchestrator.AGENT_FRONTIER_EVIDENCE_PREFLIGHT_LIVE_REL_PATH,
+        "\n".join(
+            [
+                "# CHILI Frontier Evidence Preflight",
+                "",
+                "- Schema: chili.frontier-evidence-preflight.v1",
+                "- Generated UTC: 2026-06-03T11:13:01Z",
+                "- Status: warning",
+                "- Checks: 15",
+                "- Blockers: 1",
+                "",
+                "| Check | Status | Required | Actual | Evidence | Next action |",
+                "| --- | --- | --- | --- | --- | --- |",
+                (
+                    "| claude_opus48_live_probe | warning | Claude Opus 4.8 print mode "
+                    "can return a usable completion | exit_code=1; auth_failure_detected=true "
+                    "| claude -p ... | refresh auth |"
+                ),
+                "",
+                "## Recovery Routes",
+                "",
+                "| Source | Blocker | Action | All-cases command | Single-case fallback | Boundary |",
+                "| --- | --- | --- | --- | --- | --- |",
+                (
+                    "| claude | claude_opus48_live_probe | Import saved claude response | "
+                    "python scripts/autopilot_frontier_source_evidence_recorder.py "
+                    "--source-kind claude --all-cases --response <claude-all-cases-response.txt> "
+                    "--run-id <real-claude-run-id> "
+                    "--source-command <exact-claude-command-or-session-export> --json | "
+                    "python scripts/autopilot_frontier_source_evidence_recorder.py "
+                    "--source-kind claude --case-id real-chili-preflight-candidate-wins "
+                    "--response <claude-response.txt> --run-id <real-claude-run-id> "
+                    "--source-command <exact-claude-command-or-session-export> --json | "
+                    "collection and evidence import only |"
+                ),
+            ]
+        ),
+    )
+
+    signal = orchestrator._agent_coding_benchmark_signal(tmp_path)
+
+    preflight = signal["frontier_evidence_preflight"]
+    assert preflight["status"] == "warning"
+    assert preflight["path"] == orchestrator.AGENT_FRONTIER_EVIDENCE_PREFLIGHT_LIVE_REL_PATH
+    assert preflight["blocker_ids"] == ["claude_opus48_live_probe"]
+    assert "Source" not in preflight["blocker_ids"]
+    assert "claude" not in preflight["blocker_ids"]
+    assert preflight["recovery_route_count"] == 1
+    route = preflight["recovery_routes"][0]
+    assert route["source_kind"] == "claude"
+    assert route["blocker_id"] == "claude_opus48_live_probe"
+    assert route["action_label"] == "Import saved claude response"
+    assert "autopilot_frontier_source_collection_packet.py" in route[
+        "collection_packet_command"
+    ]
+    assert "--source-kind claude" in route["response_import_command"]
+    assert "--all-cases" in route["response_import_command"]
+    assert "claude_all_cases_response.txt" in route["response_staging_file"]
+    assert "claude_all_cases_response.txt" in route["response_import_command"]
+    assert "claude_all_cases_response.txt" in route["dry_run_response_import_command"]
+    assert "--json --no-write" in route["dry_run_response_import_command"]
+    assert route["response_import_command"] == route["all_cases_response_import_command"]
+    assert "--case-id real-chili-preflight-candidate-wins" in route[
+        "single_case_response_import_command"
+    ]
+    assert "claude_single_case_response.txt" in route[
+        "single_case_response_import_command"
+    ]
+    assert "--case-id real-chili-preflight-candidate-wins" not in route[
+        "response_import_command"
+    ]
+    assert signal["frontier_preflight_recovery_route_count"] == 1
+    assert signal["frontier_preflight_recovery_routes"] == preflight["recovery_routes"]
+    handoff = signal["frontier_evidence_handoff_copy"]
+    assert "Hosted-source preflight recovery routes" in handoff
+    assert "Import saved claude response" in handoff
+    assert "autopilot_frontier_source_evidence_recorder.py" in handoff
+    assert "Save all-cases response to" in handoff
+    assert "Dry-run response import" in handoff
+    assert "All-cases response import" in handoff
+    assert "claude_all_cases_response.txt" in handoff
+    assert "Single-case fallback" in handoff
+    assert "does not run models" in handoff
+
+
+def test_coding_benchmark_signal_surfaces_hosted_pr_repair_candidate_reports(tmp_path):
+    _write_promotion_ready_agentops(tmp_path)
+    _write_agentops_scorecard(
+        tmp_path,
+        orchestrator.AGENT_HOSTED_PR_REPAIR_SCORECARD_REL_PATH,
+        "- Status: passed\n- Checks: 18\n- Evidence mode: self_test\n- Missing checks: none\n- Promotion eligible: false\n",
+    )
+    _write_agentops_scorecard(
+        tmp_path,
+        "project_ws/AgentOps/PR_282_CI_REPAIR.md",
+        "\n".join(
+            [
+                "# PR 282 CI Repair Evidence",
+                "",
+                "- Schema: chili.hosted-pr-local-repair-evidence.v1",
+                "- Generated UTC: 2026-06-03T10:40:00Z",
+                "- Updated UTC: 2026-06-03T11:12:00Z",
+                "- PR: https://github.com/MiacoRindolf/chili-home-copilot/pull/282",
+                "- Branch: codex/stock-momentum-context-gate",
+                "- Head SHA inspected: 6350638afc6f8624d6635f22669f1a28ce02136f",
+                "- Current head SHA observed: 6160d0f82d749fc04d0f74ea7030d2fd482b3e6d",
+                "- Hosted run inspected: 26877331577",
+                "- Current hosted green run observed: 26879809423",
+                "- Evidence status: local_repair_verified; current hosted check success observed",
+                "- Promotion status: not real_inventory; publication/current-head proof has not been replayed through the transcript-bound hosted PR repair artifact contract.",
+                "",
+                "## Remaining Hosted Evidence",
+                "",
+                "- bind the publication/current-head proof to transcript-bound real inventory;",
+                "- collect or archive post-repair PR/check status bound to the repaired commit;",
+                "- replay those artifacts through scripts/autopilot_hosted_pr_repair_artifact_benchmark.py in real_inventory mode.",
+            ]
+        ),
+    )
+
+    signal = orchestrator._agent_coding_benchmark_signal(tmp_path)
+
+    candidates = signal["hosted_pr_repair_candidates"]
+    assert candidates["status"] == "candidate_reports_present"
+    assert candidates["candidate_count"] == 1
+    assert signal["hosted_pr_repair_candidate_report_count"] == 1
+    latest = candidates["latest"]
+    assert latest["path"] == "project_ws/AgentOps/PR_282_CI_REPAIR.md"
+    assert latest["pr_url"].endswith("/pull/282")
+    assert latest["current_head_sha_observed"] == "6160d0f82d749fc04d0f74ea7030d2fd482b3e6d"
+    assert latest["current_hosted_green_run_observed"] == "26879809423"
+    assert "current hosted check success observed" in latest["evidence_status"]
+    assert candidates["missing_evidence_count"] == 3
+    assert "publication/current-head proof" in candidates["missing_evidence"][0]
+    assert "autopilot_hosted_pr_repair_artifact_benchmark.py" in candidates[
+        "validation_command"
+    ]
+    assert "autopilot_hosted_pr_repair_collection_packet.py" in candidates[
+        "collection_packet_command"
+    ]
+    assert "--candidate-report project_ws/AgentOps/PR_282_CI_REPAIR.md" in candidates[
+        "collection_packet_command"
+    ]
+    assert "autopilot_hosted_pr_repair_evidence_collector.py" in candidates[
+        "evidence_collector_command"
+    ]
+    assert "--candidate-report project_ws/AgentOps/PR_282_CI_REPAIR.md" in candidates[
+        "evidence_collector_command"
+    ]
+    assert "autopilot_hosted_pr_repair_artifact_assembler.py" in candidates[
+        "artifact_assembler_command"
+    ]
+    assert "--candidate-report project_ws/AgentOps/PR_282_CI_REPAIR.md" in candidates[
+        "artifact_assembler_command"
+    ]
+    assert candidates["collection_packet_action_label"] == (
+        "Build hosted PR repair collection packet"
+    )
+    assert candidates["collection_packet_safe"] is True
+    assert candidates["evidence_collector_action_label"] == (
+        "Collect hosted PR repair evidence"
+    )
+    assert candidates["evidence_collector_safe"] is True
+    assert candidates["artifact_assembler_action_label"] == (
+        "Assemble hosted PR repair artifact"
+    )
+    assert candidates["artifact_assembler_safe"] is True
+    handoff = signal["frontier_evidence_handoff_copy"]
+    assert "Hosted PR repair candidate reports" in handoff
+    assert "PR_282_CI_REPAIR.md" in handoff
+    assert "26879809423" in handoff
+    assert "autopilot_hosted_pr_repair_collection_packet.py" in handoff
+    assert "autopilot_hosted_pr_repair_evidence_collector.py" in handoff
+    assert "autopilot_hosted_pr_repair_artifact_assembler.py" in handoff
+    assert "transcript-bound hosted PR repair artifacts" in handoff
+    assert "no git/PR mutation" in handoff
+
+
+def test_coding_benchmark_scorecard_requires_model_promotion_gate(tmp_path):
+    _write_promotion_ready_agentops(tmp_path)
+    (tmp_path / orchestrator.AGENT_MODEL_PROMOTION_SCORECARD_REL_PATH).unlink()
+
+    signal = orchestrator._agent_coding_benchmark_signal(tmp_path)
+
+    assert signal["status"] == orchestrator.AGENT_OS_READINESS_CHECK_WARNING
+    assert orchestrator.AGENT_MODEL_PROMOTION_SCORECARD_REL_PATH in signal["detail"]
+
+
+def test_autopilot_quality_bar_requires_coding_benchmark_scorecard(tmp_path):
+    signal = orchestrator._agent_coding_benchmark_signal(tmp_path)
+
+    assert signal["status"] == orchestrator.AGENT_OS_READINESS_CHECK_WARNING
+    assert signal["score"] == 0
+    assert "missing" in signal["detail"].lower()
+
+
+def test_coding_benchmark_scorecard_can_satisfy_quality_gate(tmp_path):
+    _write_promotion_ready_agentops(tmp_path)
+
+    signal = orchestrator._agent_coding_benchmark_signal(tmp_path)
+
+    assert signal["status"] == orchestrator.AGENT_OS_READINESS_CHECK_PASSED
+    assert signal["promotion_status"] == "passed"
+    assert signal["selected_scenarios_status"] == "passed"
+    assert signal["promotion_scope"] == "full"
+    assert signal["score"] == 100
+    assert signal["passed_count"] == signal["scenario_count"]
+    assert signal["frontier_evidence_gap_count"] == 0
+    assert signal["frontier_evidence_gap_labels"] == []
+    assert signal["frontier_evidence_handoff_copy"] == ""
+
+
+def test_coding_benchmark_signal_marks_selected_smoke_only(tmp_path):
+    _write_promotion_ready_agentops(tmp_path)
+    capabilities = ", ".join(orchestrator.AGENT_CODING_BENCHMARK_REQUIRED_CAPABILITIES)
+    _write_agentops_scorecard(
+        tmp_path,
+        orchestrator.AGENT_CODING_BENCHMARK_SCORECARD_REL_PATH,
+        "\n".join(
+            [
+                "# CHILI Coding Benchmark Scorecard",
+                "",
+                "- Profile: custom",
+                "- Generated UTC: " + datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "- Status: failed",
+                "- Selected scenarios status: passed",
+                "- Overall score: 100/100",
+                "- Scenarios: 1",
+                "- Pass rate: 1/1",
+                "- Source stability: stable",
+                "- Source changes during run: 0",
+                "- Capability coverage: " + capabilities,
+            ]
+        ),
+    )
+
+    signal = orchestrator._agent_coding_benchmark_signal(tmp_path)
+
+    assert signal["status"] == orchestrator.AGENT_OS_READINESS_CHECK_WARNING
+    assert signal["promotion_status"] == "failed"
+    assert signal["selected_scenarios_status"] == "passed"
+    assert signal["selected_scenario_passed_only"] is True
+    assert signal["promotion_scope"] == "selected_smoke_only"
+    assert signal["profile"] == "custom"
+    assert "selected scenarios passed only" in signal["detail"]
+
+
+def test_coding_benchmark_signal_marks_unstable_full_evidence(tmp_path):
+    _write_promotion_ready_agentops(tmp_path)
+    capabilities = ", ".join(orchestrator.AGENT_CODING_BENCHMARK_REQUIRED_CAPABILITIES)
+    _write_agentops_scorecard(
+        tmp_path,
+        orchestrator.AGENT_CODING_BENCHMARK_SCORECARD_REL_PATH,
+        "\n".join(
+            [
+                "# CHILI Coding Benchmark Scorecard",
+                "",
+                "- Profile: core",
+                "- Generated UTC: " + datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "- Status: failed",
+                "- Selected scenarios status: passed",
+                "- Overall score: 100/100",
+                "- Scenarios: 56",
+                "- Pass rate: 56/56",
+                "- Source stability: changed",
+                "- Source changes during run: 4",
+                "- Source change preview: app/services/project_autonomy/orchestrator.py",
+                "- Capability coverage: " + capabilities,
+            ]
+        ),
+    )
+
+    signal = orchestrator._agent_coding_benchmark_signal(tmp_path)
+
+    assert signal["status"] == orchestrator.AGENT_OS_READINESS_CHECK_WARNING
+    assert signal["promotion_status"] == "failed"
+    assert signal["selected_scenarios_status"] == "passed"
+    assert signal["selected_scenario_passed_only"] is False
+    assert signal["promotion_scope"] == "unstable_full_evidence"
+    assert signal["profile"] == "core"
+    assert signal["pass_rate"] == "56/56"
+    assert signal["effective_pass_rate"] == "56/56"
+    assert signal["missing_capabilities"] == []
+    assert "selected scenarios passed only" not in signal["detail"]
+    assert "source/test files changed during benchmark run" in signal["detail"]
+
+
+def test_coding_benchmark_signal_surfaces_runner_environment_issues(tmp_path):
+    _write_promotion_ready_agentops(tmp_path)
+    capabilities = ", ".join(orchestrator.AGENT_CODING_BENCHMARK_REQUIRED_CAPABILITIES)
+    recovery = (
+        "wait for active benchmark/build workers to drain, then rerun the same "
+        "scenario before judging coding quality"
+    )
+    _write_agentops_scorecard(
+        tmp_path,
+        orchestrator.AGENT_CODING_BENCHMARK_SCORECARD_REL_PATH,
+        "\n".join(
+            [
+                "# CHILI Coding Benchmark Scorecard",
+                "",
+                "- Generated UTC: " + datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "- Status: failed",
+                "- Selected scenarios status: failed",
+                "- Overall score: 100/100",
+                "- Scenarios: 6",
+                "- Pass rate: 6/6",
+                "- Runner/environment issues: 1",
+                f"- Runner/environment recovery: {recovery}",
+                "- Source stability: stable",
+                "- Source changes during run: 0",
+                "- Capability coverage: " + capabilities,
+            ]
+        ),
+    )
+
+    signal = orchestrator._agent_coding_benchmark_signal(tmp_path)
+
+    assert signal["status"] == orchestrator.AGENT_OS_READINESS_CHECK_WARNING
+    assert signal["runner_environment_issues"] == 1
+    assert signal["runner_environment_recovery"] == recovery
+    assert "runner/environment issue(s) require rerun" in signal["detail"]
+    assert "before judging coding quality" in signal["detail"]
+
+
+def test_coding_benchmark_signal_treats_repaired_replay_rows_as_clean(tmp_path):
+    _write_promotion_ready_agentops(tmp_path)
+    _write_agentops_scorecard(
+        tmp_path,
+        orchestrator.AGENT_SYNTHETIC_REPO_REPAIR_SCORECARD_REL_PATH,
+        "- Status: passed\n\n| case | status |\n| --- | --- |\n| repaired-scope | repaired |\n",
+    )
+
+    signal = orchestrator._agent_coding_benchmark_signal(tmp_path)
+
+    assert signal["status"] == orchestrator.AGENT_OS_READINESS_CHECK_PASSED
+
+
+def test_coding_benchmark_signal_uses_newer_repaired_failed_rows(tmp_path):
+    _write_promotion_ready_agentops(tmp_path)
+    missing_capability = "hosted pr repair evidence collector"
+    capabilities = ", ".join(
+        capability
+        for capability in orchestrator.AGENT_CODING_BENCHMARK_REQUIRED_CAPABILITIES
+        if capability != missing_capability
+    )
+    _write_agentops_scorecard(
+        tmp_path,
+        orchestrator.AGENT_CODING_BENCHMARK_SCORECARD_REL_PATH,
+        "\n".join(
+            [
+                "# CHILI Coding Benchmark Scorecard",
+                "",
+                "- Generated UTC: 2026-06-03T06:00:00Z",
+                "- Status: failed",
+                "- Overall score: 91/100",
+                "- Scenarios: 6",
+                "- Pass rate: 3/6",
+                "- Source stability: stable",
+                "- Source changes during run: 0",
+                "- Capability coverage: " + capabilities,
+                "",
+                "| Scenario ID | Scenario | Result |",
+                "| --- | --- | --- |",
+                "| stale-behavior | Behavior evidence | failed |",
+                "| stale-review | Semantic review | failed |",
+                "| stale-env | Worktree isolation | environment_blocked |",
+            ]
+        ),
+    )
+    _write_agentops_scorecard(
+        tmp_path,
+        orchestrator.AGENT_CODING_BENCHMARK_REPAIRED_ROWS_REL_PATH,
+        "\n".join(
+            [
+                "# CHILI Coding Benchmark Scorecard",
+                "",
+                "- Generated UTC: 2026-06-03T06:30:00Z",
+                "- Status: failed",
+                "- Selected scenarios status: passed",
+                "- Overall score: 100/100",
+                "- Scenarios: 3",
+                "- Pass rate: 3/3",
+                "- Source stability: changed",
+                "- Source changes during run: 1",
+                "",
+                "| Scenario ID | Scenario | Capability | Result |",
+                "| --- | --- | --- | --- |",
+                (
+                    "| stale-behavior | Behavior evidence | targeted behavior evidence gate | "
+                    "passed |"
+                ),
+                (
+                    "| stale-review | Semantic review | "
+                    f"semantic patch review gate, {missing_capability} | passed |"
+                ),
+                "| stale-env | Worktree isolation | execution worktree isolation | passed |",
+            ]
+        ),
+    )
+
+    signal = orchestrator._agent_coding_benchmark_signal(tmp_path)
+
+    assert signal["status"] == orchestrator.AGENT_OS_READINESS_CHECK_WARNING
+    assert signal["pass_rate"] == "3/6"
+    assert signal["effective_pass_rate"] == "6/6"
+    assert signal["repaired_failed_rows"]["covers_all_failed_rows"] is True
+    assert signal["repaired_failed_rows"]["covered_ids"] == [
+        "stale-behavior",
+        "stale-env",
+        "stale-review",
+    ]
+    assert signal["missing_capabilities"] == []
+    assert signal["primary_missing_capabilities"] == [missing_capability]
+    assert signal["covered_missing_capabilities"] == [missing_capability]
+    assert signal["repaired_failed_rows"]["covers_all_missing_capabilities"] is True
+    assert "not all scenarios passed" not in signal["detail"]
+    assert "missing required capability coverage" not in signal["detail"]
+    assert "pass rate 6/6 (raw 3/6)" in signal["detail"]
+    assert "stale failed scenarios repaired" in signal["detail"]
+    assert "Targeted repair also covered missing capability coverage" in signal["detail"]
+
+
+def test_agent_os_readiness_operator_inbox_names_goal_receipt_quality(tmp_path):
+    _write_promotion_ready_agentops(tmp_path)
+
+    signal = orchestrator._agent_coding_benchmark_signal(tmp_path)
+
+    assert signal["status"] == orchestrator.AGENT_OS_READINESS_CHECK_PASSED
+    assert "required capability coverage is present" in signal["detail"]
+
+
+def test_coding_replay_debt_inbox_item_surfaces_source_guard_routes(tmp_path):
+    import importlib.util
+    import sys
+
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "autopilot_replay_debt_router.py"
+    scripts_dir = str(script_path.parent)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    spec = importlib.util.spec_from_file_location("autopilot_replay_debt_router", script_path)
+    assert spec is not None
+    assert spec.loader is not None
+    router = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = router
+    spec.loader.exec_module(router)
+
+    items = [
+        router.ReplayDebtItem(
+            source="report_replay",
+            path=f"project_ws/AgentOps/OUT/20260602-0{index}0000Z-thin.md",
+            agent="AgentOps",
+            score=74,
+            status="warning",
+            missing=("pursuing goal or scope anchor", "evidence check marker"),
+            sha256=str(index) * 64,
+            evidence_markers=(),
+        )
+        for index in (1, 2)
+    ]
+
+    route = router.build_routes(
+        items,
+        root=tmp_path,
+        created_utc="2026-06-02T02:10:00Z",
+        write=False,
+    )[0]
+
+    assert route.source_guard_required is True
+    assert route.coordination_resolution == "durable_source_guard_required"
+    assert "## Recurrence Guard" in route.request_markdown
+    assert "Required source guard:" in route.request_markdown
+    assert "No source, runtime, git, database, broker" in route.request_markdown
+
+
+def test_validation_policy_blocker_reaches_global_readiness_actions():
+    validation = [
+        {
+            "step_key": "npm_run_build",
+            "exit_code": 0,
+            "blocker": {"can_rerun": False, "raw_reason": "Policy-blocked script tried to write outside the repo."},
+        }
+    ]
+
+    blocker = validation[0]["blocker"]
+
+    assert blocker["can_rerun"] is False
+    assert orchestrator.validation_merge_evidence(validation, ["app/services/example.py"])["passed"] is False
+
+
+def test_runtime_control_blocked_run_guides_review_instead_of_rerun():
+    prompt = "Start live trading now and keep buying while I am away."
+
+    assert orchestrator._looks_like_live_monitoring_prompt(prompt) is True
+    assert orchestrator._looks_like_plan_start_prompt(prompt) is False
+
+
+def test_runtime_control_prompt_is_not_treated_as_repo_edit():
+    prompt = "Start live trading now and keep buying while I am away."
+
+    assert orchestrator._looks_like_live_monitoring_prompt(prompt) is True
+    assert orchestrator._looks_like_plan_start_prompt(prompt) is False
+    reply = orchestrator._initial_chat_reply(prompt)
+    assert "live monitoring/debugging request" in reply
+    assert "won't scan or edit the repo" in reply
+
+
+def test_planning_phase_blocks_runtime_control_prompt_before_model(monkeypatch, tmp_path):
+    calls: list[str] = []
+
+    class FakeDb:
+        def commit(self) -> None:
+            pass
+
+    run = SimpleNamespace(
+        run_id="pa_live_control",
+        prompt="Start live trading now and keep buying while I am away.",
+        status=None,
+        plan_status=None,
+        started_at=None,
+    )
+    repo = SimpleNamespace(name="repo")
+
+    monkeypatch.setattr(orchestrator, "_record_step", lambda *args, **kwargs: None)
+    monkeypatch.setattr(orchestrator, "_check_cancel", lambda *args, **kwargs: None)
+    monkeypatch.setattr(orchestrator, "_ensure_git_repo", lambda *args, **kwargs: calls.append("git"))
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_reviewed_plan",
+        lambda *args, **kwargs: calls.append("model"),
+    )
+
+    with pytest.raises(orchestrator.AutonomyBlocked) as exc:
+        orchestrator._run_planning_phase(FakeDb(), run, repo, tmp_path)
+
+    assert "live monitoring/debugging request" in str(exc.value)
+    assert calls == []
+
+
+def test_manual_merge_fails_closed_for_non_completed_runs(tmp_path):
+    db = _sqlite_autonomy_session()
+    try:
+        row = ProjectAutonomyRun(
+            run_id="pa_merge_blocked_running",
+            user_id=1,
+            prompt="Change a backend helper.",
+            status=orchestrator.RUN_STATUS_RUNNING,
+            current_stage=orchestrator.STAGE_IMPLEMENT,
+            repo_id=None,
+            integration_branch="autopilot/test",
+            files_json=json.dumps(["app/services/example.py"]),
+        )
+        db.add(row)
+        db.commit()
+
+        payload = orchestrator.merge_run(db, row.run_id, user_id=1)
+
+        assert payload is not None
+        assert payload["merge_status"] == "blocked"
+        assert "completes validation" in payload["merge_message"]
+        assert payload["merge_result"]["ok"] is False
+    finally:
+        db.close()

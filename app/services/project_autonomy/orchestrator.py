@@ -19,9 +19,9 @@ import sys
 import tempfile
 import uuid
 import difflib
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping, Sequence
 from urllib.parse import urlparse
 
 from sqlalchemy import or_
@@ -87,10 +87,14 @@ MERGE_STATUS_PENDING = "pending"
 STAGE_CHAT = "chat"
 STAGE_CLASSIFY = "classify"
 STAGE_IMPLEMENT = "implement"
+STAGE_INTEGRATE = "integrate"
+STAGE_LEARN = "learn"
+STAGE_MERGE = "merge"
 STAGE_PLAN = "plan"
 STAGE_QUEUED = RUN_STATUS_QUEUED
 STAGE_REPO_SCAN = "repo_scan"
 STAGE_ASSIGN_ROLES = "assign_roles"
+STAGE_VALIDATE = "validate"
 STAGE_ARCHITECT_REVIEW = "architect_review"
 ATTACHMENT_KIND_IMAGE = "image"
 ATTACHMENT_ARTIFACT_TYPE_IMAGE = "prompt_image"
@@ -270,6 +274,2188 @@ ACTIVE_STATUSES = frozenset({
     RUN_STATUS_MERGING,
     PLAN_STATUS_REVISING,
 })
+AGENT_OS_READINESS_CHECK_PASSED = "passed"
+AGENT_OS_READINESS_CHECK_WARNING = "warning"
+AGENT_CODING_BENCHMARK_SCORECARD_REL_PATH = "project_ws/AgentOps/CODING_BENCHMARK_SCORECARD.md"
+AGENT_CODING_BENCHMARK_REPAIRED_ROWS_REL_PATH = (
+    "project_ws/AgentOps/CODING_BENCHMARK_REPAIRED_AUTOPILOT_ROWS.md"
+)
+AGENT_SOURCE_CHURN_DIAGNOSTICS_REL_PATH = "project_ws/AgentOps/SOURCE_CHURN_DIAGNOSTICS.md"
+AGENT_SYNTHETIC_REPO_REPAIR_SCORECARD_REL_PATH = "project_ws/AgentOps/SYNTHETIC_REPO_REPAIR_BENCHMARK.md"
+AGENT_MODEL_PROMOTION_SCORECARD_REL_PATH = "project_ws/AgentOps/MODEL_PROMOTION_REPLAY_BENCHMARK.md"
+AGENT_MODEL_SHADOW_EVIDENCE_SCORECARD_REL_PATH = "project_ws/AgentOps/MODEL_SHADOW_EVIDENCE_BENCHMARK.md"
+AGENT_MODEL_CANDIDATE_TOURNAMENT_SCORECARD_REL_PATH = "project_ws/AgentOps/MODEL_CANDIDATE_TOURNAMENT_BENCHMARK.md"
+AGENT_HOSTED_PR_REPAIR_SCORECARD_REL_PATH = "project_ws/AgentOps/HOSTED_PR_REPAIR_ARTIFACT_BENCHMARK.md"
+AGENT_HOSTED_PR_REPAIR_REPORT_GLOB = "PR_*_CI_REPAIR.md"
+AGENT_FRONTIER_EVIDENCE_PREFLIGHT_REL_PATH = "project_ws/AgentOps/FRONTIER_EVIDENCE_PREFLIGHT.md"
+AGENT_FRONTIER_EVIDENCE_PREFLIGHT_LIVE_REL_PATH = (
+    "project_ws/AgentOps/FRONTIER_EVIDENCE_PREFLIGHT_LIVE.md"
+)
+AGENT_FRONTIER_PROMPT_PACK_MANIFEST_REL_PATH = (
+    "project_ws/AgentOps/frontier_model_prompt_packs/manifest.json"
+)
+AGENT_FRONTIER_MODEL_EVIDENCE_RAW_SOURCES_REL_PATH = (
+    "project_ws/AgentOps/frontier_model_evidence_intake/raw_sources"
+)
+AGENT_FRONTIER_MODEL_EVIDENCE_COLLECTION_PACKETS_REL_PATH = (
+    "project_ws/AgentOps/frontier_model_evidence_intake/collection_packets"
+)
+AGENT_FRONTIER_MODEL_EVIDENCE_OUTPUT_ROOT_REL_PATH = (
+    "project_ws/AgentOps/frontier_model_evidence_intake"
+)
+AGENT_LOCAL_MODEL_CANDIDATE_RUN_REL_PATH = "project_ws/AgentOps/LOCAL_MODEL_CANDIDATE_RUN.md"
+AGENT_FRONTIER_MODEL_EVIDENCE_SETUP_COMMAND = (
+    "python scripts/autopilot_frontier_model_evidence_setup.py --json"
+)
+AGENT_FRONTIER_SOURCE_COLLECTION_PACKET_COMMAND = (
+    "python scripts/autopilot_frontier_source_collection_packet.py --json"
+)
+AGENT_FRONTIER_SOURCE_EVIDENCE_RECORD_COMMAND = (
+    "python scripts/autopilot_frontier_source_evidence_recorder.py "
+    "--source-kind <codex|claude|local_model> --case-id <case-id> "
+    "--response <model-response.txt> --run-id <real-source-run-id> "
+    "--source-command <exact-model-command-or-session-export> --json"
+)
+AGENT_FRONTIER_SOURCE_EVIDENCE_RECORD_ALL_CASES_COMMAND = (
+    "python scripts/autopilot_frontier_source_evidence_recorder.py "
+    "--source-kind <codex|claude|local_model> --all-cases "
+    "--response <model-response.txt> --run-id <real-source-run-id> "
+    "--source-command <exact-model-command-or-session-export> --json"
+)
+AGENT_LOCAL_MODEL_EVIDENCE_RECORD_COMMAND = (
+    "python scripts/autopilot_local_model_evidence_recorder.py "
+    "--drop-dir <local-model-drop-dir> --response <local-model-response.txt> "
+    "--run-id <real-local-run-id> --source-command <exact-local-model-command> --json"
+)
+AGENT_LOCAL_MODEL_CANDIDATE_RUN_COMMAND = (
+    "python scripts/autopilot_local_model_candidate_runner.py "
+    "--all-cases --json"
+)
+AGENT_SOURCE_CHURN_DIAGNOSTICS_COMMAND = (
+    "python scripts/autopilot_source_churn_diagnostics.py "
+    "--watch-seconds 30 --json"
+)
+AGENT_FRONTIER_RESPONSE_IMPORT_CASE_ID = "real-chili-preflight-candidate-wins"
+AGENT_HOSTED_PR_REPAIR_ARTIFACT_VALIDATE_COMMAND = (
+    "python scripts/autopilot_hosted_pr_repair_artifact_benchmark.py "
+    "--artifact-dir <hosted-pr-repair-artifact-dir> --json"
+)
+AGENT_HOSTED_PR_REPAIR_COLLECTION_PACKET_COMMAND = (
+    "python scripts/autopilot_hosted_pr_repair_collection_packet.py --json"
+)
+AGENT_HOSTED_PR_REPAIR_EVIDENCE_COLLECTOR_COMMAND = (
+    "python scripts/autopilot_hosted_pr_repair_evidence_collector.py --json"
+)
+AGENT_HOSTED_PR_REPAIR_ARTIFACT_ASSEMBLER_COMMAND = (
+    "python scripts/autopilot_hosted_pr_repair_artifact_assembler.py --json"
+)
+AGENT_MODEL_SHADOW_EVIDENCE_SCHEMA_VERSION = "chili.model-shadow-evidence-benchmark.v1"
+AGENT_MODEL_CANDIDATE_TOURNAMENT_SCHEMA_VERSION = "chili.model-candidate-tournament-benchmark.v1"
+AGENT_HOSTED_PR_REPAIR_SCHEMA_VERSION = "chili.hosted-pr-repair-artifact-benchmark.v1"
+AGENT_CODING_BENCHMARK_TARGET_SCORE = 90
+AGENT_CODING_BENCHMARK_MIN_SCENARIOS = 6
+AGENT_MODEL_SHADOW_EVIDENCE_MIN_CHECKS = 7
+AGENT_MODEL_CANDIDATE_TOURNAMENT_MIN_CASES = 6
+AGENT_HOSTED_PR_REPAIR_MIN_CHECKS = 18
+AGENT_MODEL_SHADOW_REQUIRED_EVIDENCE_MODE = "real_manifest"
+AGENT_MODEL_CANDIDATE_TOURNAMENT_REQUIRED_EVIDENCE_MODE = "real_artifacts"
+AGENT_HOSTED_PR_REPAIR_REQUIRED_EVIDENCE_MODE = "real_inventory"
+try:
+    from scripts.autopilot_coding_benchmark import REQUIRED_CAPABILITIES as _CODING_REQUIRED_CAPABILITIES
+except Exception:
+    _CODING_REQUIRED_CAPABILITIES = ()
+AGENT_CODING_BENCHMARK_REQUIRED_CAPABILITIES = tuple(_CODING_REQUIRED_CAPABILITIES)
+AGENT_FRONTIER_MODEL_EVIDENCE_SOURCE_KINDS = ("codex", "claude", "local_model")
+AGENT_FRONTIER_MODEL_EVIDENCE_REQUIRED_SOURCE_FILES = (
+    "metadata.json",
+    "prompt_pack.md",
+    "transcript.jsonl",
+)
+AGENT_HOSTED_PR_REPAIR_REQUIRED_CHECKS = (
+    "valid_hosted_pr_repair_accepts",
+    "self_test_artifact_rejected",
+    "missing_review_thread_transcript_rejected",
+    "sparse_review_transcript_rejected",
+    "review_transcript_pr_mismatch_rejected",
+    "review_transcript_thread_detail_mismatch_rejected",
+    "missing_line_thread_rejected",
+    "missing_remote_publication_rejected",
+    "post_repair_head_mismatch_rejected",
+    "missing_post_repair_check_receipt_rejected",
+    "transcript_hash_mismatch_rejected",
+    "sparse_publication_transcript_rejected",
+    "publication_transcript_pr_mismatch_rejected",
+    "publication_transcript_commit_mismatch_rejected",
+    "valid_artifact_inventory_accepts",
+    "empty_artifact_inventory_rejected",
+    "duplicate_pr_artifact_rejected",
+    "duplicate_source_run_rejected",
+)
+AGENT_CODING_BENCHMARK_SOURCE_ROOTS = (
+    "app",
+    "tests",
+    "scripts",
+    "chili_mobile/lib",
+    "chili_mobile/test",
+)
+AGENT_CODING_BENCHMARK_SOURCE_SUFFIXES = frozenset(
+    {
+        ".css",
+        ".dart",
+        ".html",
+        ".js",
+        ".json",
+        ".md",
+        ".ps1",
+        ".py",
+        ".ts",
+        ".tsx",
+        ".yaml",
+        ".yml",
+    }
+)
+AGENT_CODING_BENCHMARK_SOURCE_SKIP_DIRS = frozenset(
+    {
+        ".dart_tool",
+        ".git",
+        ".mypy_cache",
+        ".pytest_cache",
+        "__pycache__",
+        "build",
+        "node_modules",
+        "project_ws",
+    }
+)
+AGENT_CODING_BENCHMARK_FRESHNESS_PREVIEW_LIMIT = 8
+_CODING_BENCHMARK_FAILED_ROW_STATUSES = frozenset(
+    {"failed", "timed_out", "error", "blocked", "environment_blocked"}
+)
+_CODING_BENCHMARK_REPAIRED_ROW_STATUSES = frozenset(
+    {"passed", "pass", "repaired", "accepted", "ok", "success", "successful"}
+)
+
+
+def _scorecard_metadata(path: Path) -> dict[str, str]:
+    if not path.is_file():
+        return {}
+    metadata: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
+        if not line.startswith("- ") or ":" not in line:
+            continue
+        key, value = line[2:].split(":", 1)
+        metadata[key.strip().lower()] = value.strip()
+    return metadata
+
+
+def _scorecard_table_rows(path: Path) -> list[dict[str, str]]:
+    if not path.is_file():
+        return []
+    headers: list[str] = []
+    rows: list[dict[str, str]] = []
+    for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
+        if not line.startswith("|") or not line.endswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        if not cells:
+            continue
+        if all(set(cell.replace(" ", "")) <= {"-", ":"} for cell in cells):
+            continue
+        if not headers:
+            headers = [cell.lower() for cell in cells]
+            continue
+        if len(cells) < len(headers):
+            continue
+        rows.append(dict(zip(headers, cells, strict=False)))
+    return rows
+
+
+def _markdown_table_rows_after_heading(path: Path, heading: str) -> list[dict[str, str]]:
+    if not path.is_file():
+        return []
+    target = f"## {heading}".strip().lower()
+    headers: list[str] = []
+    rows: list[dict[str, str]] = []
+    in_section = False
+    for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw_line.strip()
+        if line.startswith("## "):
+            if in_section and line.lower() != target:
+                break
+            in_section = line.lower() == target
+            headers = []
+            continue
+        if not in_section or not line.startswith("|") or not line.endswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        if not cells:
+            continue
+        if all(set(cell.replace(" ", "")) <= {"-", ":"} for cell in cells):
+            continue
+        if not headers:
+            headers = [cell.lower() for cell in cells]
+            continue
+        if len(cells) < len(headers):
+            continue
+        rows.append(dict(zip(headers, cells, strict=False)))
+    return rows
+
+
+def _scorecard_int(metadata: Mapping[str, str], key: str, default: int = 0) -> int:
+    value = str(metadata.get(key.lower()) or "").strip()
+    if "/" in value:
+        value = value.split("/", 1)[0].strip()
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _scorecard_text(metadata: Mapping[str, str], key: str, default: str = "") -> str:
+    return str(metadata.get(key.lower()) or default).strip()
+
+
+def _scorecard_missing_capabilities(metadata: Mapping[str, str]) -> list[str]:
+    coverage = _scorecard_text(metadata, "capability coverage").lower()
+    if not coverage or coverage == "none":
+        return list(AGENT_CODING_BENCHMARK_REQUIRED_CAPABILITIES)
+    return [
+        capability
+        for capability in AGENT_CODING_BENCHMARK_REQUIRED_CAPABILITIES
+        if capability.lower() not in coverage
+    ]
+
+
+def _scorecard_generated_utc(metadata: Mapping[str, str]) -> datetime | None:
+    raw = _scorecard_text(metadata, "generated utc")
+    if not raw:
+        return None
+    value = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _iter_coding_benchmark_source_files(runtime_path: Path) -> Iterable[Path]:
+    for rel_root in AGENT_CODING_BENCHMARK_SOURCE_ROOTS:
+        root = runtime_path / Path(rel_root)
+        if not root.exists():
+            continue
+        candidates = [root] if root.is_file() else root.rglob("*")
+        for path in sorted(candidates):
+            if not path.is_file():
+                continue
+            try:
+                rel_parts = path.relative_to(runtime_path).parts
+            except ValueError:
+                rel_parts = path.parts
+            if any(part in AGENT_CODING_BENCHMARK_SOURCE_SKIP_DIRS for part in rel_parts):
+                continue
+            if path.suffix.lower() in AGENT_CODING_BENCHMARK_SOURCE_SUFFIXES:
+                yield path
+
+
+def _scorecard_source_freshness(runtime_path: Path, metadata: Mapping[str, str]) -> dict[str, Any]:
+    generated_raw = _scorecard_text(metadata, "generated utc")
+    generated_at = _scorecard_generated_utc(metadata)
+    if not generated_raw:
+        return {
+            "status": "missing_generated_utc",
+            "generated_utc": "",
+            "source_changes_after_scorecard": 0,
+            "source_change_preview_after_scorecard": "none",
+            "changed_files": [],
+        }
+    if generated_at is None:
+        return {
+            "status": "invalid_generated_utc",
+            "generated_utc": generated_raw,
+            "source_changes_after_scorecard": 0,
+            "source_change_preview_after_scorecard": "none",
+            "changed_files": [],
+        }
+
+    changed_files: list[str] = []
+    changed_count = 0
+    for path in _iter_coding_benchmark_source_files(runtime_path):
+        try:
+            changed_at = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+        except OSError:
+            continue
+        if changed_at <= generated_at:
+            continue
+        changed_count += 1
+        if len(changed_files) < AGENT_CODING_BENCHMARK_FRESHNESS_PREVIEW_LIMIT:
+            try:
+                changed_files.append(path.relative_to(runtime_path).as_posix())
+            except ValueError:
+                changed_files.append(path.as_posix())
+
+    return {
+        "status": "current" if changed_count == 0 else "stale",
+        "generated_utc": generated_raw,
+        "source_changes_after_scorecard": changed_count,
+        "source_change_preview_after_scorecard": (
+            "none" if not changed_files else ", ".join(changed_files)
+        ),
+        "changed_files": changed_files,
+    }
+
+
+def _source_churn_diagnostics_summary(runtime_path: Path) -> dict[str, Any]:
+    rel_path = AGENT_SOURCE_CHURN_DIAGNOSTICS_REL_PATH
+    report_path = runtime_path / Path(rel_path)
+    if not report_path.is_file():
+        return {
+            "present": False,
+            "status": "missing",
+            "path": rel_path,
+            "generated_utc": "",
+            "promotion_impact": "unknown",
+            "rerun_readiness": "unknown",
+            "scorecard_status": "",
+            "scorecard_source_stability": "",
+            "source_changes_during_scorecard": 0,
+            "current_source_freshness": "",
+            "source_changes_after_scorecard": 0,
+            "watch_status": "",
+            "watch_seconds": "",
+            "source_changes_during_watch": 0,
+            "changed_files": [],
+            "changed_file_preview": "none",
+            "watch_changed_files": [],
+            "watch_change_preview": "none",
+            "next_action": (
+                f"Run {AGENT_SOURCE_CHURN_DIAGNOSTICS_COMMAND}; then wait for "
+                "source/test churn to settle and rerun the full coding benchmark "
+                "with a source quiet preflight."
+            ),
+        }
+
+    metadata = _scorecard_metadata(report_path)
+    newer_rows = _markdown_table_rows_after_heading(report_path, "Files Newer Than Scorecard")
+    watch_rows = _markdown_table_rows_after_heading(report_path, "Files Changed During Watch")
+
+    def _paths(rows: Sequence[Mapping[str, str]]) -> list[str]:
+        paths: list[str] = []
+        for row in rows:
+            path = str(row.get("path") or "").strip()
+            if path and path.lower() != "none":
+                paths.append(path)
+        return paths
+
+    changed_files = _paths(newer_rows)
+    watch_changed_files = _paths(watch_rows)
+    changed_file_preview = (
+        "none"
+        if not changed_files
+        else ", ".join(changed_files[:AGENT_CODING_BENCHMARK_FRESHNESS_PREVIEW_LIMIT])
+    )
+    watch_change_preview = (
+        "none"
+        if not watch_changed_files
+        else ", ".join(watch_changed_files[:AGENT_CODING_BENCHMARK_FRESHNESS_PREVIEW_LIMIT])
+    )
+    return {
+        "present": True,
+        "status": _scorecard_text(metadata, "status", "unknown").lower(),
+        "path": rel_path,
+        "generated_utc": _scorecard_text(metadata, "generated utc"),
+        "promotion_impact": _scorecard_text(metadata, "promotion impact", "unknown"),
+        "rerun_readiness": _scorecard_text(metadata, "rerun readiness", "unknown"),
+        "scorecard_status": _scorecard_text(metadata, "scorecard status"),
+        "scorecard_source_stability": _scorecard_text(
+            metadata,
+            "scorecard source stability",
+        ),
+        "source_changes_during_scorecard": _scorecard_int(
+            metadata,
+            "source changes during scorecard",
+        ),
+        "current_source_freshness": _scorecard_text(
+            metadata,
+            "current source freshness",
+        ),
+        "source_changes_after_scorecard": _scorecard_int(
+            metadata,
+            "source changes after scorecard",
+        ),
+        "watch_status": _scorecard_text(metadata, "watch status"),
+        "watch_seconds": _scorecard_text(metadata, "watch seconds"),
+        "source_changes_during_watch": _scorecard_int(
+            metadata,
+            "source changes during watch",
+        ),
+        "changed_files": changed_files,
+        "changed_file_preview": changed_file_preview,
+        "watch_changed_files": watch_changed_files,
+        "watch_change_preview": watch_change_preview,
+        "next_action": _scorecard_text(
+            metadata,
+            "next action",
+            "Rerun the source churn diagnostic, then rerun the full coding benchmark.",
+        ),
+    }
+
+
+def _scorecard_row_status(row: Mapping[str, str]) -> str:
+    return str(row.get("result") or row.get("status") or "").strip().lower()
+
+
+def _scorecard_row_id(row: Mapping[str, str]) -> str:
+    return str(
+        row.get("scenario id")
+        or row.get("scenario")
+        or row.get("case")
+        or row.get("case id")
+        or ""
+    ).strip()
+
+
+def _scorecard_row_capabilities(row: Mapping[str, str]) -> set[str]:
+    raw = str(row.get("capability") or row.get("capabilities") or "").strip()
+    if not raw:
+        return set()
+    return {
+        item.strip()
+        for item in raw.split(",")
+        if item.strip()
+    }
+
+
+def _coding_benchmark_repaired_failed_rows(
+    runtime_path: Path,
+    primary_metadata: Mapping[str, str],
+    primary_missing_capabilities: Sequence[str] = (),
+) -> dict[str, Any]:
+    primary_rows = _scorecard_table_rows(
+        runtime_path / Path(AGENT_CODING_BENCHMARK_SCORECARD_REL_PATH)
+    )
+    failed_ids = {
+        row_id
+        for row in primary_rows
+        for row_id in [_scorecard_row_id(row)]
+        if row_id and _scorecard_row_status(row) in _CODING_BENCHMARK_FAILED_ROW_STATUSES
+    }
+    repair_path = runtime_path / Path(AGENT_CODING_BENCHMARK_REPAIRED_ROWS_REL_PATH)
+    repair_metadata = _scorecard_metadata(repair_path)
+    repair_rows = _scorecard_table_rows(repair_path)
+    repaired_ids = {
+        row_id
+        for row in repair_rows
+        for row_id in [_scorecard_row_id(row)]
+        if row_id and _scorecard_row_status(row) in _CODING_BENCHMARK_REPAIRED_ROW_STATUSES
+    }
+    repaired_capabilities = sorted(
+        {
+            capability
+            for row in repair_rows
+            if _scorecard_row_status(row) in _CODING_BENCHMARK_REPAIRED_ROW_STATUSES
+            for capability in _scorecard_row_capabilities(row)
+        }
+    )
+    primary_generated = _scorecard_generated_utc(primary_metadata)
+    repair_generated = _scorecard_generated_utc(repair_metadata)
+    repair_is_newer = bool(
+        primary_generated is not None
+        and repair_generated is not None
+        and repair_generated > primary_generated
+    )
+    covered_ids = sorted(failed_ids & repaired_ids) if repair_is_newer else []
+    missing_ids = sorted(failed_ids - repaired_ids) if repair_is_newer else sorted(failed_ids)
+    primary_missing_set = set(primary_missing_capabilities)
+    covered_capabilities = (
+        sorted(primary_missing_set & set(repaired_capabilities))
+        if repair_is_newer
+        else []
+    )
+    missing_capabilities_after_repair = (
+        sorted(primary_missing_set - set(covered_capabilities))
+        if repair_is_newer
+        else sorted(primary_missing_set)
+    )
+    return {
+        "path": AGENT_CODING_BENCHMARK_REPAIRED_ROWS_REL_PATH,
+        "repair_is_newer": repair_is_newer,
+        "failed_ids": sorted(failed_ids),
+        "covered_ids": covered_ids,
+        "missing_ids": missing_ids,
+        "covers_all_failed_rows": bool(failed_ids and repair_is_newer and not missing_ids),
+        "repaired_capabilities": repaired_capabilities if repair_is_newer else [],
+        "covered_missing_capabilities": covered_capabilities,
+        "missing_capabilities_after_repair": missing_capabilities_after_repair,
+        "covers_all_missing_capabilities": bool(
+            primary_missing_set
+            and repair_is_newer
+            and not missing_capabilities_after_repair
+        ),
+    }
+
+
+def _dependent_scorecard_problem(
+    runtime_path: Path,
+    rel_path: str,
+    *,
+    min_checks: int | None = None,
+    min_cases: int | None = None,
+    required_evidence_mode: str | None = None,
+    required_metadata: Mapping[str, str] | None = None,
+) -> tuple[dict[str, Any], list[str]]:
+    path = runtime_path / Path(rel_path)
+    metadata = _scorecard_metadata(path)
+    problems: list[str] = []
+    if not metadata:
+        return {"status": AGENT_OS_READINESS_CHECK_WARNING, "path": rel_path}, [f"missing {rel_path}"]
+    status = _scorecard_text(metadata, "status").lower()
+    if status != AGENT_OS_READINESS_CHECK_PASSED:
+        problems.append(f"{rel_path} status is {status or 'missing'}")
+    checks = _scorecard_int(metadata, "checks")
+    if min_checks is not None and checks < min_checks:
+        problems.append(f"{rel_path} check count is below {min_checks}")
+    cases = _scorecard_int(metadata, "cases")
+    if min_cases is not None and cases < min_cases:
+        problems.append(f"{rel_path} case count is below {min_cases}")
+    evidence_mode = _scorecard_text(metadata, "evidence mode")
+    if required_evidence_mode and evidence_mode != required_evidence_mode:
+        problems.append(
+            f"{rel_path} evidence mode is {evidence_mode or 'missing'} instead of {required_evidence_mode}"
+        )
+    missing_checks = _scorecard_text(metadata, "missing checks")
+    if missing_checks and missing_checks.lower() != "none":
+        problems.append(f"{rel_path} missing checks: {missing_checks}")
+    metadata_values: dict[str, str] = {}
+    for key, expected in (required_metadata or {}).items():
+        actual = _scorecard_text(metadata, key)
+        metadata_values[key] = actual
+        if actual != expected:
+            problems.append(f"{rel_path} {key} is {actual or 'missing'} instead of {expected}")
+    return (
+        {
+            "status": (
+                AGENT_OS_READINESS_CHECK_PASSED
+                if not problems
+                else AGENT_OS_READINESS_CHECK_WARNING
+            ),
+            "path": rel_path,
+            "check_count": checks,
+            "case_count": cases,
+            "evidence_mode": evidence_mode,
+            "metadata_values": metadata_values,
+            "contract_problems": problems,
+        },
+        problems,
+    )
+
+
+def _frontier_evidence_gap(
+    *,
+    gate: str,
+    label: str,
+    required: str,
+    actual: str,
+    path: str,
+    next_action: str,
+    problems: Sequence[str] = (),
+) -> dict[str, Any]:
+    return {
+        "gate": gate,
+        "label": label,
+        "required": required,
+        "actual": actual or "missing",
+        "path": path,
+        "next_action": next_action,
+        "problems": list(problems),
+    }
+
+
+def _synthesized_local_model_candidate_recovery_routes(
+    *,
+    status: str,
+    model_name: str,
+    failed_case_id: str,
+    failure_stage: str,
+    failure_reason: str,
+    diagnostics_path: str = "",
+    prompt_path: str = "",
+    response_path: str = "",
+) -> list[dict[str, Any]]:
+    if status != "failed" or not failed_case_id:
+        return []
+    safe_case = re.sub(r"[^a-z0-9._-]+", "-", failed_case_id.lower()).strip(".-") or "case"
+    timeout_seconds = 300
+    match = re.search(r"timed out after\s+(\d+)s", failure_reason.lower())
+    if match:
+        timeout_seconds = max(300, int(match.group(1)) * 2)
+    if failure_stage == "model" and "timed out" in failure_reason.lower():
+        action_label = "Retry failed case with longer timeout"
+        reason = "The local model timed out before producing a parseable candidate."
+    elif failure_stage == "parse":
+        action_label = "Import corrected failed-case response"
+        reason = "The local model produced output, but CHILI could not parse a valid candidate JSON/diff."
+    else:
+        action_label = "Retry failed local-model case"
+        reason = "The local-model suite stopped before all cases produced verified candidates."
+    model = model_name or "qwen3:4b"
+    retry_command = (
+        "python scripts/autopilot_local_model_candidate_runner.py "
+        f"--retry-from-diagnostics {diagnostics_path} "
+        f"--timeout-seconds {timeout_seconds} --json"
+        if diagnostics_path
+        else (
+            "python scripts/autopilot_local_model_candidate_runner.py "
+            f"--case-id {failed_case_id} --model-name {model} "
+            f"--timeout-seconds {timeout_seconds} --json"
+        )
+    )
+    import_response_command = (
+        "python scripts/autopilot_local_model_candidate_runner.py "
+        f"--retry-from-diagnostics {diagnostics_path} "
+        f"--response-file <local-model-{safe_case}-response.txt> "
+        "--run-id <real-local-run-id> "
+        "--source-command <exact-local-model-command> --json"
+        if diagnostics_path
+        else (
+            "python scripts/autopilot_local_model_candidate_runner.py "
+            f"--case-id {failed_case_id} --model-name {model} "
+            f"--response-file <local-model-{safe_case}-response.txt> "
+            "--run-id <real-local-run-id> "
+            "--source-command <exact-local-model-command> --json"
+        )
+    )
+    return [
+        {
+            "status": "available",
+            "case_id": failed_case_id,
+            "action_label": action_label,
+            "reason": reason,
+            "retry_command": retry_command,
+            "import_response_command": import_response_command,
+            "prompt_path": prompt_path,
+            "response_path": response_path,
+            "permission_boundary": (
+                "local model diagnostics and evidence import only; no source/test edits, "
+                "git/PR action, runtime restart, deployment, database migration, broker call, "
+                "or live trading"
+            ),
+        }
+    ]
+
+
+def _local_model_candidate_run_status(runtime_path: Path) -> dict[str, Any]:
+    rel_path = AGENT_LOCAL_MODEL_CANDIDATE_RUN_REL_PATH
+    report_path = runtime_path / Path(rel_path)
+    metadata = _scorecard_metadata(report_path)
+    if not metadata:
+        return {
+            "status": "missing",
+            "path": rel_path,
+            "failed": False,
+            "case_id": "",
+            "timeout_salvaged_cases": [],
+            "timeout_salvaged_case_count": 0,
+            "failed_case_id": "",
+            "failure_stage": "",
+            "failure_reason": "",
+            "diagnostics": "",
+            "recovery_routes": [],
+            "recovery_route_count": 0,
+            "next_action": "",
+        }
+
+    diagnostics_text = _scorecard_text(metadata, "diagnostics")
+    artifact_paths: dict[str, str] = {}
+    for row in _scorecard_table_rows(report_path):
+        artifact = str(row.get("artifact") or "").strip().lower()
+        path = str(row.get("path") or "").strip()
+        if artifact and path:
+            artifact_paths[artifact] = path
+    if not diagnostics_text:
+        diagnostics_text = artifact_paths.get("diagnostics", "")
+    diagnostics_path = Path(diagnostics_text) if diagnostics_text else Path()
+    if diagnostics_text and not diagnostics_path.is_absolute():
+        diagnostics_path = runtime_path / diagnostics_path
+    diagnostics: Mapping[str, Any] = {}
+    if diagnostics_text and diagnostics_path.is_file():
+        try:
+            loaded = json.loads(diagnostics_path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, json.JSONDecodeError):
+            loaded = {}
+        if isinstance(loaded, Mapping):
+            diagnostics = loaded
+    status = _scorecard_text(metadata, "status", "missing")
+    model_name = _scorecard_text(metadata, "model")
+    failure_reason = _scorecard_text(metadata, "failure reason") or str(
+        diagnostics.get("failure_reason") or ""
+    ).strip()
+    failed_case_id = _scorecard_text(metadata, "failed case") or str(
+        diagnostics.get("failed_case_id") or ""
+    ).strip()
+    failure_stage = _scorecard_text(metadata, "failure stage") or str(
+        diagnostics.get("failure_stage") or ""
+    ).strip()
+    timeout_salvaged_cases_text = _scorecard_text(metadata, "timeout salvaged cases")
+    timeout_salvaged_cases = [
+        item.strip()
+        for item in re.split(r"[,;\n]+", timeout_salvaged_cases_text)
+        if item.strip()
+    ]
+    if not timeout_salvaged_cases:
+        diagnostic_salvaged = diagnostics.get("timeout_salvaged_cases")
+        if isinstance(diagnostic_salvaged, (list, tuple)):
+            timeout_salvaged_cases = [
+                str(item).strip()
+                for item in diagnostic_salvaged
+                if str(item).strip()
+            ]
+    if not timeout_salvaged_cases:
+        timeout_salvaged_cases = [
+            str(result.get("case_id") or "").strip()
+            for result in diagnostics.get("case_results") or []
+            if isinstance(result, Mapping)
+            and result.get("timeout_salvaged") is True
+            and str(result.get("case_id") or "").strip()
+        ]
+    failed_case_result: Mapping[str, Any] = {}
+    for result in diagnostics.get("case_results") or []:
+        if not isinstance(result, Mapping):
+            continue
+        if str(result.get("case_id") or "").strip() == failed_case_id:
+            failed_case_result = result
+            break
+    failed_prompt_path = str(failed_case_result.get("prompt") or "").strip()
+    failed_response_path = str(failed_case_result.get("response") or "").strip()
+    recovery_routes = [
+        dict(route)
+        for route in diagnostics.get("recovery_routes") or []
+        if isinstance(route, Mapping)
+    ]
+    for route in recovery_routes:
+        route.setdefault("prompt_path", failed_prompt_path)
+        route.setdefault("response_path", failed_response_path)
+    if not recovery_routes:
+        recovery_routes = _synthesized_local_model_candidate_recovery_routes(
+            status=status,
+            model_name=model_name,
+            failed_case_id=failed_case_id,
+            failure_stage=failure_stage,
+            failure_reason=failure_reason,
+            diagnostics_path=diagnostics_text,
+            prompt_path=failed_prompt_path,
+            response_path=failed_response_path,
+        )
+    next_action = _scorecard_text(metadata, "next action")
+    if recovery_routes:
+        first_route = recovery_routes[0]
+        retry = str(first_route.get("retry_command") or "").strip()
+        imported = str(first_route.get("import_response_command") or "").strip()
+        if retry and imported:
+            next_action = f"{retry}; or import a saved response with: {imported}"
+        elif retry:
+            next_action = retry
+        elif imported:
+            next_action = imported
+    return {
+        "status": status,
+        "path": rel_path,
+        "failed": status == "failed",
+        "case_id": _scorecard_text(metadata, "case"),
+        "cases": _scorecard_int(metadata, "cases"),
+        "model_name": model_name,
+        "run_id": _scorecard_text(metadata, "run id"),
+        "timeout_salvaged_cases": timeout_salvaged_cases,
+        "timeout_salvaged_case_count": len(timeout_salvaged_cases),
+        "failed_case_id": failed_case_id,
+        "failure_stage": failure_stage,
+        "failure_reason": failure_reason,
+        "diagnostics": diagnostics_text,
+        "artifacts": artifact_paths,
+        "prompt_pack": artifact_paths.get("prompt_pack", ""),
+        "full_prompt_pack": artifact_paths.get("full_prompt_pack", ""),
+        "response": artifact_paths.get("response", ""),
+        "failed_prompt": failed_prompt_path,
+        "failed_response": failed_response_path,
+        "recovery_routes": recovery_routes,
+        "recovery_route_count": len(recovery_routes),
+        "next_action": next_action,
+    }
+
+
+def _frontier_evidence_gap_summary(
+    *,
+    source_stability: str,
+    source_changes: int,
+    source_freshness: Mapping[str, Any],
+    source_churn_diagnostics: Mapping[str, Any],
+    model_shadow: Mapping[str, Any],
+    model_tournament: Mapping[str, Any],
+    hosted_pr_repair: Mapping[str, Any],
+    local_model_candidate_run: Mapping[str, Any],
+    frontier_model_evidence_intake: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    gaps: list[dict[str, Any]] = []
+    model_intake = frontier_model_evidence_intake or {}
+    model_intake_next_action = str(model_intake.get("next_action") or "").strip()
+    model_intake_status = str(model_intake.get("status") or "").strip()
+    model_evidence_publish_command = (
+        "python scripts/autopilot_frontier_model_evidence_intake.py "
+        f"--input-root {AGENT_FRONTIER_MODEL_EVIDENCE_RAW_SOURCES_REL_PATH} "
+        f"--output-root {AGENT_FRONTIER_MODEL_EVIDENCE_OUTPUT_ROOT_REL_PATH} "
+        "--publish-scorecards --json"
+    )
+    if model_intake_status == "ready":
+        model_evidence_next_action = (
+            f"Publish real model scorecards with: {model_evidence_publish_command}."
+        )
+    elif model_intake_next_action:
+        model_evidence_next_action = (
+            f"Close source intake first: {model_intake_next_action} "
+            f"Then publish real model scorecards with: {model_evidence_publish_command}."
+        )
+    else:
+        model_evidence_next_action = (
+            "Collect transcript-verified Codex, Claude, and local-model drops; "
+            f"then publish real model scorecards with: {model_evidence_publish_command}."
+        )
+    freshness_status = str(source_freshness.get("status") or "")
+    if source_stability != "stable" or source_changes or freshness_status == "stale":
+        after_count = int(source_freshness.get("source_changes_after_scorecard") or 0)
+        actual_parts = [
+            f"source stability {source_stability or 'missing'}",
+            f"changes during run {source_changes}",
+        ]
+        if after_count:
+            actual_parts.append(f"changes after scorecard {after_count}")
+        diagnostic_present = bool(source_churn_diagnostics.get("present"))
+        diagnostic_path = str(
+            source_churn_diagnostics.get("path")
+            or AGENT_SOURCE_CHURN_DIAGNOSTICS_REL_PATH
+        )
+        if diagnostic_present:
+            diagnostic_status = str(source_churn_diagnostics.get("status") or "").strip()
+            rerun_readiness = str(
+                source_churn_diagnostics.get("rerun_readiness") or ""
+            ).strip()
+            watch_status = str(source_churn_diagnostics.get("watch_status") or "").strip()
+            if diagnostic_status:
+                actual_parts.append(f"diagnostic {diagnostic_status}")
+            if rerun_readiness:
+                actual_parts.append(f"rerun {rerun_readiness}")
+            if watch_status:
+                actual_parts.append(f"watch {watch_status}")
+            diagnostic_next_action = str(
+                source_churn_diagnostics.get("next_action") or ""
+            ).strip()
+            next_action = (
+                f"Latest diagnostic at {diagnostic_path}: "
+                f"{diagnostic_next_action or 'rerun the full coding benchmark after source/test churn settles.'} "
+                f"Refresh with {AGENT_SOURCE_CHURN_DIAGNOSTICS_COMMAND} if edits resume."
+            )
+            diagnostic_problem = str(
+                source_churn_diagnostics.get("changed_file_preview") or ""
+            ).strip()
+            problems = (
+                [f"diagnostic changed files: {diagnostic_problem}"]
+                if diagnostic_problem and diagnostic_problem != "none"
+                else []
+            )
+        else:
+            next_action = (
+                f"Run {AGENT_SOURCE_CHURN_DIAGNOSTICS_COMMAND}; then wait for "
+                "source/test churn to settle and rerun the full coding benchmark "
+                "with a source quiet preflight."
+            )
+            problems = []
+        gaps.append(
+            _frontier_evidence_gap(
+                gate="source_freshness",
+                label="source freshness",
+                required="stable benchmark with no newer source/test files",
+                actual="; ".join(actual_parts),
+                path=diagnostic_path if diagnostic_present else AGENT_CODING_BENCHMARK_SCORECARD_REL_PATH,
+                next_action=next_action,
+                problems=problems,
+            )
+        )
+
+    if model_shadow.get("status") != AGENT_OS_READINESS_CHECK_PASSED:
+        gaps.append(
+            _frontier_evidence_gap(
+                gate="model_shadow_real_manifest",
+                label="real shadow evidence",
+                required=AGENT_MODEL_SHADOW_REQUIRED_EVIDENCE_MODE,
+                actual=str(model_shadow.get("evidence_mode") or "missing"),
+                path=str(model_shadow.get("path") or AGENT_MODEL_SHADOW_EVIDENCE_SCORECARD_REL_PATH),
+                next_action=model_evidence_next_action,
+                problems=model_shadow.get("contract_problems") or (),
+            )
+        )
+    if model_tournament.get("status") != AGENT_OS_READINESS_CHECK_PASSED:
+        gaps.append(
+            _frontier_evidence_gap(
+                gate="model_tournament_real_artifacts",
+                label="real tournament artifacts",
+                required=AGENT_MODEL_CANDIDATE_TOURNAMENT_REQUIRED_EVIDENCE_MODE,
+                actual=str(model_tournament.get("evidence_mode") or "missing"),
+                path=str(
+                    model_tournament.get("path")
+                    or AGENT_MODEL_CANDIDATE_TOURNAMENT_SCORECARD_REL_PATH
+                ),
+                next_action=model_evidence_next_action,
+                problems=model_tournament.get("contract_problems") or (),
+            )
+        )
+    model_evidence_blocked = (
+        model_shadow.get("status") != AGENT_OS_READINESS_CHECK_PASSED
+        or model_tournament.get("status") != AGENT_OS_READINESS_CHECK_PASSED
+    )
+    if local_model_candidate_run.get("failed") and model_evidence_blocked:
+        failure_reason = str(local_model_candidate_run.get("failure_reason") or "").strip()
+        failed_case = str(local_model_candidate_run.get("failed_case_id") or "").strip()
+        actual = failure_reason or str(local_model_candidate_run.get("status") or "failed")
+        if failed_case and failed_case not in actual:
+            actual = f"{failed_case}: {actual}"
+        timeout_salvaged_count = int(
+            local_model_candidate_run.get("timeout_salvaged_case_count") or 0
+        )
+        if timeout_salvaged_count:
+            actual += f"; partial-timeout salvage recorded for {timeout_salvaged_count} case(s)"
+        gaps.append(
+            _frontier_evidence_gap(
+                gate="local_model_candidate_run",
+                label="local model candidate diagnostics",
+                required="failed local-model suite has a case-scoped retry/import recovery route",
+                actual=actual,
+                path=str(
+                    local_model_candidate_run.get("diagnostics")
+                    or local_model_candidate_run.get("path")
+                    or AGENT_LOCAL_MODEL_CANDIDATE_RUN_REL_PATH
+                ),
+                next_action=str(
+                    local_model_candidate_run.get("next_action")
+                    or AGENT_LOCAL_MODEL_CANDIDATE_RUN_COMMAND
+                ),
+                problems=([failure_reason] if failure_reason else ()),
+            )
+        )
+    if hosted_pr_repair.get("status") != AGENT_OS_READINESS_CHECK_PASSED:
+        hosted_actual = str(hosted_pr_repair.get("evidence_mode") or "missing")
+        hosted_metadata = hosted_pr_repair.get("metadata_values")
+        if isinstance(hosted_metadata, Mapping):
+            promotion_eligible = str(hosted_metadata.get("promotion eligible") or "").strip()
+            if promotion_eligible and promotion_eligible != "true":
+                hosted_actual = f"{hosted_actual}; promotion eligible {promotion_eligible}"
+        gaps.append(
+            _frontier_evidence_gap(
+                gate="hosted_pr_repair_real_inventory",
+                label="real PR repair inventory",
+                required=AGENT_HOSTED_PR_REPAIR_REQUIRED_EVIDENCE_MODE,
+                actual=hosted_actual,
+                path=str(hosted_pr_repair.get("path") or AGENT_HOSTED_PR_REPAIR_SCORECARD_REL_PATH),
+                next_action=(
+                    "Collect hosted PR repair artifacts with review-thread transcripts, "
+                    "publication proof, and current-head check receipts."
+                ),
+                problems=hosted_pr_repair.get("contract_problems") or (),
+            )
+        )
+    return gaps
+
+
+def _frontier_model_evidence_collection_lines() -> list[str]:
+    raw_root = AGENT_FRONTIER_MODEL_EVIDENCE_RAW_SOURCES_REL_PATH
+    output_root = AGENT_FRONTIER_MODEL_EVIDENCE_OUTPUT_ROOT_REL_PATH
+    lines = [
+        "",
+        "Source-specific model collection setup:",
+        f"- Prompt pack manifest: {AGENT_FRONTIER_PROMPT_PACK_MANIFEST_REL_PATH}",
+        f"- Raw source root: {raw_root}",
+        "- Required source directories: codex, claude, local_model.",
+    ]
+    for source_kind in AGENT_FRONTIER_MODEL_EVIDENCE_SOURCE_KINDS:
+        source_root = f"{raw_root}/{source_kind}"
+        lines.append(
+            f"- {source_kind}: {source_root}/metadata.json, "
+            f"{source_root}/prompt_pack.md, {source_root}/transcript.jsonl, "
+            f"and {source_root}/raw/"
+        )
+    lines.extend(
+        [
+            "",
+            "Commands to close model evidence gaps:",
+            f"- Prepare intake folders safely: {AGENT_FRONTIER_MODEL_EVIDENCE_SETUP_COMMAND}",
+            f"- Build copy-ready Codex/Claude collection packets: {AGENT_FRONTIER_SOURCE_COLLECTION_PACKET_COMMAND}",
+            f"- Record Codex/Claude/local source evidence safely: {AGENT_FRONTIER_SOURCE_EVIDENCE_RECORD_COMMAND}",
+            f"- Record all-cases Codex/Claude/local source evidence safely: {AGENT_FRONTIER_SOURCE_EVIDENCE_RECORD_ALL_CASES_COMMAND}",
+            f"- Run local-model candidate suite collection: {AGENT_LOCAL_MODEL_CANDIDATE_RUN_COMMAND}",
+            f"- Record local-model evidence safely: {AGENT_LOCAL_MODEL_EVIDENCE_RECORD_COMMAND}",
+            "- Validate source-specific prompt packs: python scripts/autopilot_frontier_prompt_pack_bundle.py --validate --json",
+            (
+                "- Ingest real source drops and publish scorecards: "
+                "python scripts/autopilot_frontier_model_evidence_intake.py "
+                f"--input-root {raw_root} --output-root {output_root} "
+                "--publish-scorecards --json"
+            ),
+            (
+                "- Verify real shadow manifests: "
+                "python scripts/autopilot_model_shadow_evidence_benchmark.py "
+                f"--manifest-dir {output_root}/manifests --no-write --json"
+            ),
+            (
+                "- Verify real tournament artifacts: "
+                "python scripts/autopilot_model_candidate_tournament_benchmark.py "
+                f"--drop-dir {output_root}/collected --require-provenance "
+                "--no-write --json"
+            ),
+        ]
+    )
+    return lines
+
+
+def _frontier_source_all_cases_response_rel_path(source_kind: str) -> str:
+    return (
+        f"{AGENT_FRONTIER_MODEL_EVIDENCE_COLLECTION_PACKETS_REL_PATH}/"
+        f"{source_kind}_all_cases_response.txt"
+    )
+
+
+def _frontier_source_single_case_response_rel_path(source_kind: str) -> str:
+    return (
+        f"{AGENT_FRONTIER_MODEL_EVIDENCE_COLLECTION_PACKETS_REL_PATH}/"
+        f"{source_kind}_single_case_response.txt"
+    )
+
+
+def _frontier_source_response_import_command(source_kind: str) -> str:
+    return (
+        "python scripts/autopilot_frontier_source_evidence_recorder.py "
+        f"--source-kind {source_kind} "
+        f"--case-id {AGENT_FRONTIER_RESPONSE_IMPORT_CASE_ID} "
+        f"--response {_frontier_source_single_case_response_rel_path(source_kind)} "
+        f"--run-id <real-{source_kind}-run-id> "
+        f"--source-command <exact-{source_kind}-command-or-session-export> --json"
+    )
+
+
+def _frontier_source_response_import_all_cases_command(
+    source_kind: str,
+    *,
+    no_write: bool = False,
+) -> str:
+    command = (
+        "python scripts/autopilot_frontier_source_evidence_recorder.py "
+        f"--source-kind {source_kind} "
+        "--all-cases "
+        f"--response {_frontier_source_all_cases_response_rel_path(source_kind)} "
+        f"--run-id <real-{source_kind}-run-id> "
+        f"--source-command <exact-{source_kind}-command-or-session-export> --json"
+    )
+    if no_write:
+        command += " --no-write"
+    return command
+
+
+def _frontier_source_collection_packet_command(source_kind: str) -> str:
+    return (
+        "python scripts/autopilot_frontier_source_collection_packet.py "
+        f"--source-kind {source_kind} --json"
+    )
+
+
+def _frontier_preflight_report_path(runtime_path: Path) -> tuple[Path, str] | None:
+    candidates = [
+        (runtime_path / Path(rel_path), rel_path)
+        for rel_path in (
+            AGENT_FRONTIER_EVIDENCE_PREFLIGHT_LIVE_REL_PATH,
+            AGENT_FRONTIER_EVIDENCE_PREFLIGHT_REL_PATH,
+        )
+    ]
+    existing = [(path, rel_path) for path, rel_path in candidates if path.is_file()]
+    if not existing:
+        return None
+    return max(
+        existing,
+        key=lambda item: item[0].stat().st_mtime if item[0].exists() else 0,
+    )
+
+
+def _frontier_preflight_blocker_source(blocker_id: str) -> str:
+    normalized = blocker_id.strip().lower()
+    if normalized in {"codex_cli_available", "codex_cli_live_probe"}:
+        return "codex"
+    if normalized in {"claude_cli_available", "claude_opus48_live_probe"}:
+        return "claude"
+    return ""
+
+
+def _frontier_preflight_recovery_route(
+    *,
+    source_kind: str,
+    blocker_id: str,
+) -> dict[str, Any]:
+    cli_blocked = blocker_id.endswith("_available")
+    reason = (
+        f"{source_kind} CLI is unavailable; collect from a trusted UI/API "
+        "session and import the saved response instead."
+        if cli_blocked
+        else (
+            f"{source_kind} automated live probe is not usable right now; "
+            "a saved hosted response can still be transcript-bound and "
+            "validated by the frontier source recorder."
+        )
+    )
+    return {
+        "source_kind": source_kind,
+        "blocker_id": blocker_id,
+        "status": "available",
+        "action_label": f"Import saved {source_kind} response",
+        "reason": reason,
+        "collection_packet_command": _frontier_source_collection_packet_command(source_kind),
+        "response_staging_file": _frontier_source_all_cases_response_rel_path(source_kind),
+        "dry_run_response_import_command": _frontier_source_response_import_all_cases_command(
+            source_kind,
+            no_write=True,
+        ),
+        "response_import_command": _frontier_source_response_import_all_cases_command(source_kind),
+        "all_cases_response_import_command": _frontier_source_response_import_all_cases_command(source_kind),
+        "single_case_response_import_command": _frontier_source_response_import_command(source_kind),
+        "permission_boundary": (
+            "collection and evidence import only; does not run models, edit source/tests, "
+            "use git/PR tools, restart runtime, deploy, or touch live trading"
+        ),
+    }
+
+
+def _frontier_evidence_preflight_status(runtime_path: Path) -> dict[str, Any]:
+    report = _frontier_preflight_report_path(runtime_path)
+    if report is None:
+        return {
+            "status": "missing",
+            "ready": False,
+            "path": AGENT_FRONTIER_EVIDENCE_PREFLIGHT_LIVE_REL_PATH,
+            "generated_utc": "",
+            "check_count": 0,
+            "blocker_count": 0,
+            "blocker_ids": [],
+            "recovery_route_count": 0,
+            "recovery_routes": [],
+            "next_action": (
+                "Run scripts/autopilot_frontier_evidence_preflight.py "
+                "--live-model-probes --json"
+            ),
+            "permission_boundary": (
+                "evidence readiness checks only; no source/runtime/git/PR/live action"
+            ),
+        }
+
+    path, rel_path = report
+    metadata = _scorecard_metadata(path)
+    rows = [
+        row
+        for row in _scorecard_table_rows(path)
+        if _scorecard_row_status(row)
+        in {AGENT_OS_READINESS_CHECK_PASSED, AGENT_OS_READINESS_CHECK_WARNING}
+    ]
+    warning_rows = [
+        row
+        for row in rows
+        if _scorecard_row_status(row) != AGENT_OS_READINESS_CHECK_PASSED
+    ]
+    blocker_ids = [
+        str(row.get("check") or "").strip()
+        for row in warning_rows
+        if str(row.get("check") or "").strip()
+    ]
+    routes_by_blocker: dict[str, dict[str, Any]] = {}
+    for blocker_id in blocker_ids:
+        source_kind = _frontier_preflight_blocker_source(blocker_id)
+        if not source_kind:
+            continue
+        routes_by_blocker.setdefault(
+            blocker_id,
+            _frontier_preflight_recovery_route(
+                source_kind=source_kind,
+                blocker_id=blocker_id,
+            ),
+        )
+    recovery_routes = list(routes_by_blocker.values())
+    status = _scorecard_text(metadata, "status", "missing").lower()
+    check_count = _scorecard_int(metadata, "checks", len(rows))
+    blocker_count = _scorecard_int(metadata, "blockers", len(warning_rows))
+    next_action = ""
+    if recovery_routes:
+        next_action = str(recovery_routes[0].get("response_import_command") or "")
+    elif warning_rows:
+        next_action = str(warning_rows[0].get("next action") or "")
+    if not next_action:
+        next_action = "none" if status == AGENT_OS_READINESS_CHECK_PASSED else (
+            "Run scripts/autopilot_frontier_evidence_preflight.py "
+            "--live-model-probes --json"
+        )
+    return {
+        "status": status,
+        "ready": status == AGENT_OS_READINESS_CHECK_PASSED and not warning_rows,
+        "path": rel_path,
+        "generated_utc": _scorecard_text(metadata, "generated utc"),
+        "check_count": check_count,
+        "blocker_count": blocker_count,
+        "blocker_ids": blocker_ids,
+        "recovery_route_count": len(recovery_routes),
+        "recovery_routes": recovery_routes,
+        "next_action": next_action,
+        "permission_boundary": (
+            "evidence readiness checks and imports only; no source/runtime/git/PR/live action"
+        ),
+    }
+
+
+def _frontier_preflight_recovery_lines(preflight: Mapping[str, Any] | None) -> list[str]:
+    if not isinstance(preflight, Mapping):
+        return []
+    raw_routes = preflight.get("recovery_routes")
+    if not isinstance(raw_routes, Iterable) or isinstance(raw_routes, (str, bytes, Mapping)):
+        return []
+    routes = [route for route in raw_routes if isinstance(route, Mapping)]
+    if not routes:
+        return []
+    lines = [
+        "",
+        "Hosted-source preflight recovery routes:",
+        f"- Preflight report: {preflight.get('path') or AGENT_FRONTIER_EVIDENCE_PREFLIGHT_LIVE_REL_PATH}",
+    ]
+    for route in routes:
+        source_kind = str(route.get("source_kind") or "hosted source")
+        blocker_id = str(route.get("blocker_id") or "unknown blocker")
+        action_label = str(route.get("action_label") or "Import saved response")
+        response_command = str(route.get("response_import_command") or "")
+        dry_run_command = str(route.get("dry_run_response_import_command") or "")
+        fallback_command = str(route.get("single_case_response_import_command") or "")
+        collection_command = str(route.get("collection_packet_command") or "")
+        staging_file = str(route.get("response_staging_file") or "")
+        boundary = str(route.get("permission_boundary") or "")
+        reason = str(route.get("reason") or "")
+        lines.append(f"- {action_label} for {source_kind} blocker {blocker_id}.")
+        if reason:
+            lines.append(f"- Reason: {reason}")
+        if collection_command:
+            lines.append(f"- Collection packet: {collection_command}")
+        if staging_file:
+            lines.append(f"- Save all-cases response to: {staging_file}")
+        if dry_run_command:
+            lines.append(f"- Dry-run response import: {dry_run_command}")
+        if response_command:
+            lines.append(f"- All-cases response import: {response_command}")
+        if fallback_command:
+            lines.append(f"- Single-case fallback: {fallback_command}")
+        if boundary:
+            lines.append(f"- Boundary: {boundary}")
+    return lines
+
+
+def _relative_to_runtime(path: Path, runtime_path: Path) -> str:
+    try:
+        return path.relative_to(runtime_path).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _markdown_section_bullets(text: str, heading: str) -> list[str]:
+    capture = False
+    bullets: list[str] = []
+    heading_line = f"## {heading}".strip().lower()
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if line.lower() == heading_line:
+            capture = True
+            continue
+        if capture and line.startswith("## "):
+            break
+        if capture and line.startswith("- "):
+            bullet = line[2:].strip()
+            if bullet:
+                bullets.append(bullet)
+    return bullets
+
+
+def _hosted_pr_repair_candidate_reports(
+    runtime_path: Path,
+    *,
+    limit: int = 3,
+) -> list[dict[str, Any]]:
+    agentops_root = runtime_path / "project_ws" / "AgentOps"
+    if not agentops_root.is_dir():
+        return []
+    candidates: list[dict[str, Any]] = []
+    for path in agentops_root.glob(AGENT_HOSTED_PR_REPAIR_REPORT_GLOB):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+            modified_at = path.stat().st_mtime
+        except OSError:
+            continue
+        metadata = _scorecard_metadata(path)
+        candidates.append(
+            {
+                "path": _relative_to_runtime(path, runtime_path),
+                "generated_utc": _scorecard_text(metadata, "generated utc"),
+                "updated_utc": _scorecard_text(metadata, "updated utc"),
+                "pr_url": _scorecard_text(metadata, "pr"),
+                "branch": _scorecard_text(metadata, "branch"),
+                "head_sha_inspected": _scorecard_text(metadata, "head sha inspected"),
+                "current_head_sha_observed": _scorecard_text(metadata, "current head sha observed"),
+                "hosted_run_inspected": _scorecard_text(metadata, "hosted run inspected"),
+                "current_hosted_green_run_observed": _scorecard_text(
+                    metadata,
+                    "current hosted green run observed",
+                ),
+                "evidence_status": _scorecard_text(metadata, "evidence status"),
+                "promotion_status": _scorecard_text(metadata, "promotion status"),
+                "missing_evidence": _markdown_section_bullets(text, "Remaining Hosted Evidence"),
+                "modified_at": modified_at,
+            }
+        )
+    candidates.sort(
+        key=lambda item: (
+            str(item.get("updated_utc") or item.get("generated_utc") or ""),
+            float(item.get("modified_at") or 0),
+        ),
+        reverse=True,
+    )
+    for candidate in candidates:
+        candidate.pop("modified_at", None)
+    return candidates[: max(1, int(limit or 1))]
+
+
+def _hosted_pr_repair_collection_packet_command(candidate_path: str = "") -> str:
+    if candidate_path:
+        return (
+            "python scripts/autopilot_hosted_pr_repair_collection_packet.py "
+            f"--candidate-report {candidate_path} --json"
+        )
+    return AGENT_HOSTED_PR_REPAIR_COLLECTION_PACKET_COMMAND
+
+
+def _hosted_pr_repair_evidence_collector_command(candidate_path: str = "") -> str:
+    if candidate_path:
+        return (
+            "python scripts/autopilot_hosted_pr_repair_evidence_collector.py "
+            f"--candidate-report {candidate_path} --json"
+        )
+    return AGENT_HOSTED_PR_REPAIR_EVIDENCE_COLLECTOR_COMMAND
+
+
+def _hosted_pr_repair_artifact_assembler_command(candidate_path: str = "") -> str:
+    if candidate_path:
+        return (
+            "python scripts/autopilot_hosted_pr_repair_artifact_assembler.py "
+            f"--candidate-report {candidate_path} --json"
+        )
+    return AGENT_HOSTED_PR_REPAIR_ARTIFACT_ASSEMBLER_COMMAND
+
+
+def _hosted_pr_repair_candidate_status(runtime_path: Path) -> dict[str, Any]:
+    candidates = _hosted_pr_repair_candidate_reports(runtime_path)
+    if not candidates:
+        return {
+            "status": "missing",
+            "ready": False,
+            "candidate_count": 0,
+            "reports": [],
+            "latest": {},
+            "next_action": (
+                "Collect a real hosted PR repair report with PR URL, repaired head, hosted "
+                "check result, publication transcript, and current-head check receipt."
+            ),
+            "collection_packet_command": AGENT_HOSTED_PR_REPAIR_COLLECTION_PACKET_COMMAND,
+            "collection_packet_action_label": "Build hosted PR repair collection packet",
+            "collection_packet_safe": True,
+            "evidence_collector_command": AGENT_HOSTED_PR_REPAIR_EVIDENCE_COLLECTOR_COMMAND,
+            "evidence_collector_action_label": "Collect hosted PR repair evidence",
+            "evidence_collector_safe": True,
+            "artifact_assembler_command": AGENT_HOSTED_PR_REPAIR_ARTIFACT_ASSEMBLER_COMMAND,
+            "artifact_assembler_action_label": "Assemble hosted PR repair artifact",
+            "artifact_assembler_safe": True,
+            "validation_command": AGENT_HOSTED_PR_REPAIR_ARTIFACT_VALIDATE_COMMAND,
+            "permission_boundary": (
+                "report inspection and evidence validation only; no git/PR mutation, "
+                "runtime restart, deploy, database, broker, or live-trading action"
+            ),
+        }
+    latest = candidates[0]
+    latest_path = str(latest.get("path") or "")
+    missing = latest.get("missing_evidence")
+    missing_count = len(missing) if isinstance(missing, list) else 0
+    return {
+        "status": "candidate_reports_present",
+        "ready": False,
+        "candidate_count": len(candidates),
+        "reports": candidates,
+        "latest": latest,
+        "latest_path": latest_path,
+        "latest_pr_url": latest.get("pr_url") or "",
+        "missing_evidence_count": missing_count,
+        "missing_evidence": missing if isinstance(missing, list) else [],
+        "next_action": (
+            "Promote the latest hosted PR repair candidate only after collecting "
+            "transcript-bound hosted PR repair artifacts: review-thread, publication, "
+            "post-repair PR status, and current-head check-success transcripts, then "
+            "replaying them through the hosted PR repair artifact validator."
+        ),
+        "collection_packet_command": _hosted_pr_repair_collection_packet_command(latest_path),
+        "collection_packet_action_label": "Build hosted PR repair collection packet",
+        "collection_packet_safe": True,
+        "evidence_collector_command": _hosted_pr_repair_evidence_collector_command(latest_path),
+        "evidence_collector_action_label": "Collect hosted PR repair evidence",
+        "evidence_collector_safe": True,
+        "artifact_assembler_command": _hosted_pr_repair_artifact_assembler_command(latest_path),
+        "artifact_assembler_action_label": "Assemble hosted PR repair artifact",
+        "artifact_assembler_safe": True,
+        "validation_command": AGENT_HOSTED_PR_REPAIR_ARTIFACT_VALIDATE_COMMAND,
+        "permission_boundary": (
+            "report inspection and evidence validation only; no git/PR mutation, "
+            "runtime restart, deploy, database, broker, or live-trading action"
+        ),
+    }
+
+
+def _hosted_pr_repair_candidate_lines(
+    candidates: Mapping[str, Any] | None,
+) -> list[str]:
+    if not isinstance(candidates, Mapping):
+        return []
+    latest = candidates.get("latest")
+    if not isinstance(latest, Mapping) or not latest:
+        return []
+    lines = [
+        "",
+        "Hosted PR repair candidate reports:",
+        f"- Latest report: {latest.get('path') or candidates.get('latest_path') or 'missing'}",
+        f"- PR: {latest.get('pr_url') or 'missing'}",
+        f"- Evidence status: {latest.get('evidence_status') or 'missing'}",
+        f"- Promotion status: {latest.get('promotion_status') or 'missing'}",
+        f"- Current head observed: {latest.get('current_head_sha_observed') or 'missing'}",
+        f"- Current hosted green run: {latest.get('current_hosted_green_run_observed') or 'missing'}",
+    ]
+    missing = latest.get("missing_evidence")
+    if isinstance(missing, list) and missing:
+        lines.append("- Missing evidence before real_inventory promotion:")
+        for item in missing[:4]:
+            lines.append(f"  - {item}")
+    lines.extend(
+        [
+            f"- Collection packet: {candidates.get('collection_packet_command') or AGENT_HOSTED_PR_REPAIR_COLLECTION_PACKET_COMMAND}",
+            f"- Evidence collector: {candidates.get('evidence_collector_command') or AGENT_HOSTED_PR_REPAIR_EVIDENCE_COLLECTOR_COMMAND}",
+            f"- Artifact assembler: {candidates.get('artifact_assembler_command') or AGENT_HOSTED_PR_REPAIR_ARTIFACT_ASSEMBLER_COMMAND}",
+            f"- Validation command: {candidates.get('validation_command') or AGENT_HOSTED_PR_REPAIR_ARTIFACT_VALIDATE_COMMAND}",
+            f"- Next action: {candidates.get('next_action') or 'Collect transcript-bound hosted PR repair artifacts.'}",
+            f"- Boundary: {candidates.get('permission_boundary') or 'evidence validation only'}",
+        ]
+    )
+    return lines
+
+
+def _frontier_model_evidence_intake_status(runtime_path: Path) -> dict[str, Any]:
+    raw_root_rel = AGENT_FRONTIER_MODEL_EVIDENCE_RAW_SOURCES_REL_PATH
+    raw_root = runtime_path / Path(raw_root_rel)
+    output_root_rel = AGENT_FRONTIER_MODEL_EVIDENCE_OUTPUT_ROOT_REL_PATH
+    manifest_rel = AGENT_FRONTIER_PROMPT_PACK_MANIFEST_REL_PATH
+    local_model_candidate_run = _local_model_candidate_run_status(runtime_path)
+    frontier_evidence_preflight = _frontier_evidence_preflight_status(runtime_path)
+    preflight_recovery_by_source = {
+        str(route.get("source_kind") or "").strip(): route
+        for route in frontier_evidence_preflight.get("recovery_routes") or []
+        if isinstance(route, Mapping)
+        and str(route.get("source_kind") or "").strip()
+    }
+    source_results: list[dict[str, Any]] = []
+    for source_kind in AGENT_FRONTIER_MODEL_EVIDENCE_SOURCE_KINDS:
+        source_rel = f"{raw_root_rel}/{source_kind}"
+        source_path = runtime_path / Path(source_rel)
+        missing_files: list[str] = []
+        present_files: list[str] = []
+        for filename in AGENT_FRONTIER_MODEL_EVIDENCE_REQUIRED_SOURCE_FILES:
+            rel_file = f"{source_rel}/{filename}"
+            if (runtime_path / Path(rel_file)).is_file():
+                present_files.append(rel_file)
+            else:
+                missing_files.append(rel_file)
+        raw_dir = source_path / "raw"
+        raw_drop_count = 0
+        if raw_dir.is_dir():
+            try:
+                raw_drop_count = sum(1 for path in raw_dir.rglob("*") if path.is_file())
+            except OSError:
+                raw_drop_count = 0
+        if raw_drop_count <= 0:
+            missing_files.append(f"{source_rel}/raw/*")
+        status = (
+            "ready"
+            if not missing_files
+            else "missing"
+            if not source_path.exists()
+            else "partial"
+        )
+        recovery_route = (
+            preflight_recovery_by_source.get(source_kind)
+            if status != "ready"
+            else None
+        )
+        recovery_action_label = (
+            str(recovery_route.get("action_label") or "").strip()
+            if recovery_route
+            else ""
+        )
+        recovery_staging_file = (
+            str(recovery_route.get("response_staging_file") or "").strip()
+            if recovery_route
+            else ""
+        )
+        recovery_dry_run_command = (
+            str(recovery_route.get("dry_run_response_import_command") or "").strip()
+            if recovery_route
+            else ""
+        )
+        recovery_all_cases_command = (
+            str(recovery_route.get("all_cases_response_import_command") or "").strip()
+            if recovery_route
+            else ""
+        )
+        recovery_single_case_command = (
+            str(recovery_route.get("single_case_response_import_command") or "").strip()
+            if recovery_route
+            else ""
+        )
+        recovery_boundary = (
+            str(recovery_route.get("permission_boundary") or "").strip()
+            if recovery_route
+            else ""
+        )
+        recovery_validation_command = (
+            "python scripts/autopilot_frontier_model_evidence_intake.py "
+            f"--input-root {raw_root_rel} --allow-partial --json --no-write"
+            if recovery_route
+            else ""
+        )
+        recovery_publish_command = (
+            "python scripts/autopilot_frontier_model_evidence_intake.py "
+            f"--input-root {raw_root_rel} --publish-scorecards --json"
+            if recovery_route
+            else ""
+        )
+        if status == "ready":
+            source_next_action = "none"
+        elif recovery_route:
+            source_next_action = (
+                f"Preflight recovery: {recovery_action_label or f'import saved {source_kind} response'}. "
+                f"Save all-cases response to: {recovery_staging_file}. "
+                f"Dry-run import first: {recovery_dry_run_command}. "
+                f"All-cases import: {recovery_all_cases_command}. "
+                f"Single-case fallback: {recovery_single_case_command}. "
+                f"After import validation: {recovery_validation_command}. "
+                f"Publish only when all sources are ready: {recovery_publish_command}. "
+                f"Boundary: {recovery_boundary or 'evidence import only'}."
+            )
+        else:
+            source_next_action = (
+                f"Populate {source_rel} with metadata.json, prompt_pack.md, "
+                "transcript.jsonl, and raw candidate artifacts."
+            )
+        source_results.append(
+            {
+                "source_kind": source_kind,
+                "status": status,
+                "path": source_rel,
+                "present_files": present_files,
+                "missing_files": missing_files,
+                "raw_drop_count": raw_drop_count,
+                "next_action": source_next_action,
+                "preflight_recovery_route": recovery_route or {},
+                "preflight_recovery_action_label": recovery_action_label,
+                "preflight_recovery_response_staging_file": recovery_staging_file,
+                "preflight_recovery_dry_run_command": recovery_dry_run_command,
+                "preflight_recovery_all_cases_command": recovery_all_cases_command,
+                "preflight_recovery_single_case_command": recovery_single_case_command,
+                "preflight_recovery_boundary": recovery_boundary,
+                "preflight_recovery_validation_command": recovery_validation_command,
+                "preflight_recovery_publish_command": recovery_publish_command,
+            }
+        )
+    required_count = len(AGENT_FRONTIER_MODEL_EVIDENCE_SOURCE_KINDS)
+    ready_count = sum(1 for source in source_results if source["status"] == "ready")
+    prepared_count = sum(
+        1
+        for source in source_results
+        if f"{source['path']}/prompt_pack.md" not in source["missing_files"]
+    )
+    missing_count = required_count - ready_count
+    manifest_present = (runtime_path / Path(manifest_rel)).is_file()
+    status = (
+        "ready"
+        if ready_count == required_count and manifest_present
+        else "missing"
+        if not raw_root.exists()
+        else "partial"
+    )
+    if not manifest_present:
+        next_action = (
+            "Validate or regenerate source-specific prompt packs before collecting model drops."
+        )
+    elif not raw_root.exists():
+        next_action = (
+            "Prepare frontier source folders with "
+            f"{AGENT_FRONTIER_MODEL_EVIDENCE_SETUP_COMMAND}; then record real "
+            "metadata.json, transcript.jsonl, and raw candidate artifacts."
+        )
+    elif prepared_count == required_count and missing_count:
+        missing_sources = ", ".join(
+            source["source_kind"]
+            for source in source_results
+            if source["status"] != "ready"
+        )
+        recovery_sources = [
+            source
+            for source in source_results
+            if source["status"] != "ready"
+            and source.get("preflight_recovery_all_cases_command")
+        ]
+        recovery_hint = ""
+        if recovery_sources:
+            first_recovery = recovery_sources[0]
+            recovery_hint = (
+                f"Preflight recovery available for {first_recovery['source_kind']}: "
+                f"save response to {first_recovery['preflight_recovery_response_staging_file']}; "
+                f"dry-run {first_recovery['preflight_recovery_dry_run_command']}; "
+                f"{first_recovery['preflight_recovery_all_cases_command']}. "
+                f"Validate after import with {first_recovery['preflight_recovery_validation_command']}. "
+            )
+        local_model_missing = any(
+            source["source_kind"] == "local_model" and source["status"] != "ready"
+            for source in source_results
+        )
+        local_hint = (
+            f" Use {AGENT_LOCAL_MODEL_CANDIDATE_RUN_COMMAND} to generate and record a compact "
+            f"local_model candidate, or {AGENT_LOCAL_MODEL_EVIDENCE_RECORD_COMMAND} to import "
+            "existing local_model drops."
+            if local_model_missing
+            else ""
+        )
+        next_action = (
+            recovery_hint
+            + (
+            "Record real metadata.json, transcript.jsonl, and raw candidate "
+            f"artifacts for prepared frontier sources: {missing_sources}. "
+            f"Use {AGENT_FRONTIER_SOURCE_COLLECTION_PACKET_COMMAND} to generate "
+            "copy-ready hosted-source collection packets. "
+            f"Use {AGENT_FRONTIER_SOURCE_EVIDENCE_RECORD_ALL_CASES_COMMAND} to import "
+            "complete hosted Codex/Claude/source drops; use "
+            f"{AGENT_FRONTIER_SOURCE_EVIDENCE_RECORD_COMMAND} only when a hosted source "
+            f"produced one case.{local_hint}"
+            )
+        )
+    elif missing_count:
+        missing_sources = ", ".join(
+            source["source_kind"]
+            for source in source_results
+            if source["status"] != "ready"
+        )
+        next_action = f"Populate missing frontier source bundles: {missing_sources}."
+    else:
+        next_action = (
+            "Run scripts/autopilot_frontier_model_evidence_intake.py with "
+            "--publish-scorecards to close real model evidence gates."
+        )
+    return {
+        "status": status,
+        "ready": status == "ready",
+        "required_source_count": required_count,
+        "ready_source_count": ready_count,
+        "prepared_source_count": prepared_count,
+        "missing_source_count": missing_count,
+        "prompt_pack_manifest": manifest_rel,
+        "prompt_pack_manifest_present": manifest_present,
+        "raw_source_root": raw_root_rel,
+        "output_root": output_root_rel,
+        "setup_command": AGENT_FRONTIER_MODEL_EVIDENCE_SETUP_COMMAND,
+        "setup_action_label": "Prepare frontier intake folders",
+        "setup_safe": True,
+        "frontier_source_collection_packet_command": AGENT_FRONTIER_SOURCE_COLLECTION_PACKET_COMMAND,
+        "frontier_source_collection_packet_action_label": "Build source collection packets",
+        "frontier_source_collection_packet_safe": True,
+        "frontier_source_record_command": AGENT_FRONTIER_SOURCE_EVIDENCE_RECORD_COMMAND,
+        "frontier_source_record_action_label": "Record frontier source evidence",
+        "frontier_source_record_safe": True,
+        "frontier_source_record_all_cases_command": AGENT_FRONTIER_SOURCE_EVIDENCE_RECORD_ALL_CASES_COMMAND,
+        "frontier_source_record_all_cases_action_label": "Record all-cases frontier source evidence",
+        "frontier_source_record_all_cases_safe": True,
+        "local_model_candidate_run_command": AGENT_LOCAL_MODEL_CANDIDATE_RUN_COMMAND,
+        "local_model_candidate_run_action_label": "Run local-model candidate suite",
+        "local_model_candidate_run_safe": True,
+        "local_model_candidate_run": local_model_candidate_run,
+        "frontier_evidence_preflight": frontier_evidence_preflight,
+        "frontier_preflight_recovery_routes": frontier_evidence_preflight[
+            "recovery_routes"
+        ],
+        "frontier_preflight_recovery_route_count": frontier_evidence_preflight[
+            "recovery_route_count"
+        ],
+        "local_model_record_command": AGENT_LOCAL_MODEL_EVIDENCE_RECORD_COMMAND,
+        "local_model_record_action_label": "Record local-model evidence",
+        "local_model_record_safe": True,
+        "sources": source_results,
+        "next_action": next_action,
+        "permission_boundary": (
+            "evidence collection and verification only; no source/runtime/git/PR/live action"
+        ),
+    }
+
+
+def _frontier_evidence_handoff_copy(
+    *,
+    score: int,
+    scenario_count: int,
+    pass_rate: str,
+    effective_pass_rate: str,
+    profile: str,
+    promotion_status: str,
+    selected_scenarios_status: str,
+    generated_utc: str,
+    gaps: Sequence[Mapping[str, Any]],
+    preflight: Mapping[str, Any] | None = None,
+    hosted_pr_candidates: Mapping[str, Any] | None = None,
+) -> str:
+    preflight_recovery_lines = _frontier_preflight_recovery_lines(preflight)
+    hosted_pr_candidate_lines = _hosted_pr_repair_candidate_lines(hosted_pr_candidates)
+    if not gaps and not preflight_recovery_lines and not hosted_pr_candidate_lines:
+        return ""
+    lines = [
+        "Project Autopilot frontier evidence proof packet",
+        "Purpose: collect or verify the real evidence blocking Codex/Claude-class promotion readiness.",
+        "Do not summarize this as promotion-ready until every listed proof gap has fresh evidence.",
+        "",
+        "Current benchmark evidence:",
+        f"- Profile: {profile or 'missing'}",
+        f"- Promotion status: {promotion_status or 'missing'}",
+        f"- Selected scenarios status: {selected_scenarios_status or 'missing'}",
+        f"- Score: {score}/{AGENT_CODING_BENCHMARK_TARGET_SCORE}",
+        f"- Scenarios: {scenario_count}",
+        f"- Pass rate: {effective_pass_rate or pass_rate or 'missing'}"
+        + (
+            f" (raw {pass_rate})"
+            if pass_rate and effective_pass_rate and pass_rate != effective_pass_rate
+            else ""
+        ),
+        f"- Generated UTC: {generated_utc or 'missing'}",
+        "",
+    ]
+    if gaps:
+        lines.append("Proof gaps to close:")
+        for index, gap in enumerate(gaps, start=1):
+            problems = [
+                str(problem).strip()
+                for problem in gap.get("problems") or []
+                if str(problem).strip()
+            ]
+            lines.extend(
+                [
+                    f"{index}. {gap.get('label') or gap.get('gate') or 'frontier evidence'}",
+                    f"   Required: {gap.get('required') or 'missing'}",
+                    f"   Actual: {gap.get('actual') or 'missing'}",
+                    f"   Evidence path: {gap.get('path') or 'missing'}",
+                    f"   Next action: {gap.get('next_action') or 'Collect current proof evidence.'}",
+                ]
+            )
+            if problems:
+                lines.append(f"   Contract problem: {problems[0]}")
+                for problem in problems[1:3]:
+                    lines.append(f"   Additional problem: {problem}")
+    else:
+        lines.extend(
+            [
+                "Proof gaps to close:",
+                "1. No benchmark proof gaps are currently recorded; preflight recovery is listed below.",
+            ]
+        )
+    if any(
+        str(gap.get("gate") or "").startswith("model_")
+        for gap in gaps
+    ):
+        lines.extend(_frontier_model_evidence_collection_lines())
+    lines.extend(preflight_recovery_lines)
+    lines.extend(hosted_pr_candidate_lines)
+    lines.extend(
+        [
+            "",
+            "Success criteria:",
+            (
+                "- Source freshness gap: generate "
+                f"{AGENT_SOURCE_CHURN_DIAGNOSTICS_REL_PATH}, rerun the full coding "
+                "benchmark after source/test churn settles, and prove the scorecard is current."
+            ),
+            "- Model evidence gaps: provide transcript-verified Codex, Claude, and local-model artifacts with required evidence modes.",
+            "- Hosted PR repair gap: provide real inventory with review-thread transcripts, publication proof, post-repair PR status, and current-head check receipts.",
+            "- Report the exact regenerated scorecard/manifest paths and hashes; do not rely on self-test fixtures.",
+            "",
+            "Permission boundary: evidence collection and verification only. This packet does not authorize source/test edits, runtime restart, Docker, database/migration, broker/API, PR mutation, commit, push, merge, release, deploy, route/model changes, or live-trading behavior.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _agent_coding_benchmark_signal(runtime_path: Path | None) -> dict[str, Any]:
+    runtime_path = runtime_path or Path.cwd()
+    scorecard_path = runtime_path / Path(AGENT_CODING_BENCHMARK_SCORECARD_REL_PATH)
+    metadata = _scorecard_metadata(scorecard_path)
+    frontier_model_evidence_intake = _frontier_model_evidence_intake_status(runtime_path)
+    frontier_evidence_preflight = _frontier_evidence_preflight_status(runtime_path)
+    hosted_pr_repair_candidates = _hosted_pr_repair_candidate_status(runtime_path)
+    source_churn_diagnostics = _source_churn_diagnostics_summary(runtime_path)
+    if not metadata:
+        missing_handoff_lines = [
+            "Project Autopilot frontier evidence proof packet",
+            "Purpose: generate the missing coding benchmark scorecard before judging Codex/Claude-class promotion readiness.",
+            f"Evidence path: {AGENT_CODING_BENCHMARK_SCORECARD_REL_PATH}",
+            "Next action: Generate the coding benchmark scorecard before judging frontier readiness.",
+        ]
+        missing_handoff_lines.extend(_frontier_preflight_recovery_lines(frontier_evidence_preflight))
+        missing_handoff_lines.extend(_hosted_pr_repair_candidate_lines(hosted_pr_repair_candidates))
+        missing_handoff_lines.append(
+            "Permission boundary: evidence collection and verification only. This packet does not authorize source/test edits, runtime restart, Docker, database/migration, broker/API, PR mutation, commit, push, merge, release, deploy, route/model changes, or live-trading behavior."
+        )
+        return {
+            "status": AGENT_OS_READINESS_CHECK_WARNING,
+            "promotion_status": "missing",
+            "selected_scenarios_status": "missing",
+            "selected_scenario_passed_only": False,
+            "promotion_scope": "missing",
+            "profile": "",
+            "score": 0,
+            "scenario_count": 0,
+            "passed_count": 0,
+            "pass_rate": "0/0",
+            "effective_pass_rate": "0/0",
+            "runner_environment_issues": 0,
+            "runner_environment_recovery": "",
+            "source_stability": "missing",
+            "source_changes_during_run": 0,
+            "scorecard_freshness": "missing",
+            "source_changes_after_scorecard": 0,
+            "source_change_preview_after_scorecard": "none",
+            "source_churn_diagnostics_path": AGENT_SOURCE_CHURN_DIAGNOSTICS_REL_PATH,
+            "source_churn_diagnostics_command": AGENT_SOURCE_CHURN_DIAGNOSTICS_COMMAND,
+            "source_churn_diagnostics": source_churn_diagnostics,
+            "generated_utc": "",
+            "path": AGENT_CODING_BENCHMARK_SCORECARD_REL_PATH,
+            "frontier_evidence_gaps": [
+                _frontier_evidence_gap(
+                    gate="coding_scorecard",
+                    label="coding scorecard",
+                    required="promotion-ready coding scorecard",
+                    actual="missing",
+                    path=AGENT_CODING_BENCHMARK_SCORECARD_REL_PATH,
+                    next_action="Generate the coding benchmark scorecard before judging frontier readiness.",
+                )
+            ],
+            "frontier_evidence_gap_count": 1,
+            "frontier_evidence_gap_labels": ["coding scorecard"],
+            "frontier_evidence_next_action": (
+                "Generate the coding benchmark scorecard before judging frontier readiness."
+            ),
+            "frontier_evidence_handoff_label": "Copy frontier proof packet",
+            "frontier_evidence_handoff_copy": "\n".join(missing_handoff_lines),
+            "frontier_model_evidence_intake": frontier_model_evidence_intake,
+            "frontier_evidence_intake": frontier_model_evidence_intake,
+            "frontier_evidence_preflight": frontier_evidence_preflight,
+            "frontier_preflight_recovery_routes": frontier_evidence_preflight["recovery_routes"],
+            "frontier_preflight_recovery_route_count": frontier_evidence_preflight[
+                "recovery_route_count"
+            ],
+            "hosted_pr_repair_candidates": hosted_pr_repair_candidates,
+            "hosted_pr_repair_candidate_report_count": hosted_pr_repair_candidates[
+                "candidate_count"
+            ],
+            "detail": "Coding benchmark scorecard is missing.",
+        }
+
+    score = _scorecard_int(metadata, "overall score")
+    scenario_count = _scorecard_int(metadata, "scenarios")
+    pass_rate = _scorecard_text(metadata, "pass rate")
+    runner_environment_issues = _scorecard_int(metadata, "runner/environment issues")
+    runner_environment_recovery = _scorecard_text(
+        metadata,
+        "runner/environment recovery",
+    )
+    promotion_status = _scorecard_text(metadata, "status", "missing").lower()
+    selected_scenarios_status = _scorecard_text(
+        metadata,
+        "selected scenarios status",
+        promotion_status,
+    ).lower()
+    profile = _scorecard_text(metadata, "profile")
+    selected_scenarios_passed_while_failed = (
+        selected_scenarios_status == AGENT_OS_READINESS_CHECK_PASSED
+        and promotion_status != AGENT_OS_READINESS_CHECK_PASSED
+    )
+    passed_count = 0
+    if "/" in pass_rate:
+        try:
+            passed_count = int(pass_rate.split("/", 1)[0].strip())
+        except ValueError:
+            passed_count = 0
+    source_stability = _scorecard_text(metadata, "source stability", "unknown")
+    source_changes = _scorecard_int(metadata, "source changes during run")
+    source_preview = _scorecard_text(metadata, "source change preview", "none")
+    source_freshness = _scorecard_source_freshness(runtime_path, metadata)
+    primary_missing_capabilities = _scorecard_missing_capabilities(metadata)
+    repaired_failed_rows = _coding_benchmark_repaired_failed_rows(
+        runtime_path,
+        metadata,
+        primary_missing_capabilities,
+    )
+    repaired_failed_rows_count = len(repaired_failed_rows["covered_ids"])
+    effective_missing_raw = repaired_failed_rows.get("missing_capabilities_after_repair")
+    missing_capabilities = (
+        list(effective_missing_raw)
+        if isinstance(effective_missing_raw, list)
+        else list(primary_missing_capabilities)
+    )
+    covered_missing_capabilities = list(
+        repaired_failed_rows.get("covered_missing_capabilities") or []
+    )
+    problems: list[str] = []
+    if promotion_status != AGENT_OS_READINESS_CHECK_PASSED:
+        problems.append("scorecard status is not passed")
+    if score < AGENT_CODING_BENCHMARK_TARGET_SCORE:
+        problems.append(f"score is below {AGENT_CODING_BENCHMARK_TARGET_SCORE}")
+    if scenario_count < AGENT_CODING_BENCHMARK_MIN_SCENARIOS:
+        problems.append(f"scenario count is below {AGENT_CODING_BENCHMARK_MIN_SCENARIOS}")
+    if passed_count != scenario_count and not repaired_failed_rows["covers_all_failed_rows"]:
+        problems.append("not all scenarios passed")
+    elif passed_count != scenario_count:
+        problems.append(
+            f"stale failed scenarios repaired in targeted rerun: {repaired_failed_rows_count}"
+        )
+    if runner_environment_issues:
+        problems.append(
+            f"{runner_environment_issues} runner/environment issue(s) require rerun"
+            + (
+                f": {runner_environment_recovery}"
+                if runner_environment_recovery
+                else ""
+            )
+        )
+    if source_stability == "unknown":
+        problems.append("source stability evidence is missing")
+    elif source_stability != "stable" or source_changes:
+        problems.append(
+            "source/test files changed during benchmark run"
+            + (f": {source_preview}" if source_preview and source_preview != "none" else "")
+        )
+    freshness_status = str(source_freshness.get("status") or "")
+    if freshness_status == "missing_generated_utc":
+        problems.append("scorecard generated UTC is missing")
+    elif freshness_status == "invalid_generated_utc":
+        problems.append(
+            f"scorecard generated UTC is invalid: {source_freshness.get('generated_utc') or 'missing'}"
+        )
+    elif freshness_status == "stale":
+        preview = str(source_freshness.get("source_change_preview_after_scorecard") or "none")
+        problems.append(
+            "source/test files changed after scorecard generation"
+            + (f": {preview}" if preview and preview != "none" else "")
+        )
+    if missing_capabilities:
+        problems.append("missing required capability coverage: " + ", ".join(missing_capabilities[:5]))
+    source_evidence_unstable = (
+        source_stability != "stable"
+        or bool(source_changes)
+        or freshness_status == "stale"
+    )
+    all_scenarios_effectively_passed = (
+        passed_count == scenario_count
+        or repaired_failed_rows["covers_all_failed_rows"]
+    )
+    unstable_full_evidence = (
+        selected_scenarios_passed_while_failed
+        and profile == "core"
+        and score >= AGENT_CODING_BENCHMARK_TARGET_SCORE
+        and scenario_count >= AGENT_CODING_BENCHMARK_MIN_SCENARIOS
+        and all_scenarios_effectively_passed
+        and not runner_environment_issues
+        and not missing_capabilities
+        and source_evidence_unstable
+    )
+    selected_scenario_passed_only = (
+        selected_scenarios_passed_while_failed
+        and not unstable_full_evidence
+    )
+    if selected_scenario_passed_only:
+        problems.append(
+            "selected scenarios passed only; full promotion status is "
+            f"{promotion_status or 'missing'}"
+        )
+
+    model_shadow, shadow_problems = _dependent_scorecard_problem(
+        runtime_path,
+        AGENT_MODEL_SHADOW_EVIDENCE_SCORECARD_REL_PATH,
+        min_checks=AGENT_MODEL_SHADOW_EVIDENCE_MIN_CHECKS,
+        required_evidence_mode=AGENT_MODEL_SHADOW_REQUIRED_EVIDENCE_MODE,
+    )
+    hosted_pr_repair, hosted_problems = _dependent_scorecard_problem(
+        runtime_path,
+        AGENT_HOSTED_PR_REPAIR_SCORECARD_REL_PATH,
+        min_checks=AGENT_HOSTED_PR_REPAIR_MIN_CHECKS,
+        required_evidence_mode=AGENT_HOSTED_PR_REPAIR_REQUIRED_EVIDENCE_MODE,
+        required_metadata={"promotion eligible": "true"},
+    )
+    model_tournament, tournament_problems = _dependent_scorecard_problem(
+        runtime_path,
+        AGENT_MODEL_CANDIDATE_TOURNAMENT_SCORECARD_REL_PATH,
+        min_cases=AGENT_MODEL_CANDIDATE_TOURNAMENT_MIN_CASES,
+        required_evidence_mode=AGENT_MODEL_CANDIDATE_TOURNAMENT_REQUIRED_EVIDENCE_MODE,
+    )
+    for rel_path in (
+        AGENT_SYNTHETIC_REPO_REPAIR_SCORECARD_REL_PATH,
+        AGENT_MODEL_PROMOTION_SCORECARD_REL_PATH,
+    ):
+        _summary, dependent_problems = _dependent_scorecard_problem(runtime_path, rel_path)
+        problems.extend(dependent_problems)
+    problems.extend(shadow_problems)
+    problems.extend(tournament_problems)
+    problems.extend(hosted_problems)
+    frontier_evidence_gaps = _frontier_evidence_gap_summary(
+        source_stability=source_stability,
+        source_changes=source_changes,
+        source_freshness=source_freshness,
+        source_churn_diagnostics=source_churn_diagnostics,
+        model_shadow=model_shadow,
+        model_tournament=model_tournament,
+        hosted_pr_repair=hosted_pr_repair,
+        frontier_model_evidence_intake=frontier_model_evidence_intake,
+        local_model_candidate_run=frontier_model_evidence_intake.get(
+            "local_model_candidate_run"
+        )
+        or {},
+    )
+    frontier_evidence_gap_labels = [
+        str(gap.get("label") or "")
+        for gap in frontier_evidence_gaps
+        if str(gap.get("label") or "").strip()
+    ]
+    frontier_evidence_next_action = (
+        str(frontier_evidence_gaps[0].get("next_action") or "")
+        if frontier_evidence_gaps
+        else ""
+    )
+
+    status = AGENT_OS_READINESS_CHECK_PASSED if not problems else AGENT_OS_READINESS_CHECK_WARNING
+    effective_pass_rate = (
+        f"{scenario_count}/{scenario_count}"
+        if repaired_failed_rows["covers_all_failed_rows"]
+        else pass_rate
+    )
+    pass_rate_detail = (
+        effective_pass_rate
+        if effective_pass_rate == pass_rate
+        else f"{effective_pass_rate} (raw {pass_rate})"
+    )
+    frontier_evidence_handoff_copy = _frontier_evidence_handoff_copy(
+        score=score,
+        scenario_count=scenario_count,
+        pass_rate=pass_rate,
+        effective_pass_rate=effective_pass_rate,
+        profile=profile,
+        promotion_status=promotion_status,
+        selected_scenarios_status=selected_scenarios_status,
+        generated_utc=str(source_freshness.get("generated_utc") or ""),
+        gaps=frontier_evidence_gaps,
+        preflight=frontier_evidence_preflight,
+        hosted_pr_candidates=hosted_pr_repair_candidates,
+    )
+    if status == AGENT_OS_READINESS_CHECK_PASSED:
+        detail = (
+            f"Coding benchmark scorecard is {score}/"
+            f"{AGENT_CODING_BENCHMARK_TARGET_SCORE} across {scenario_count} scenario(s); "
+            f"pass rate {pass_rate_detail}; required capability coverage is present."
+        )
+    else:
+        coverage_suffix = (
+            " Targeted repair also covered missing capability coverage: "
+            + ", ".join(covered_missing_capabilities[:5])
+            + "."
+            if covered_missing_capabilities and not missing_capabilities
+            else ""
+        )
+        detail = (
+            f"Coding benchmark is not promotion-ready: {score}/"
+            f"{AGENT_CODING_BENCHMARK_TARGET_SCORE} across {scenario_count} scenario(s), "
+            f"pass rate {pass_rate_detail}. Scorecard contract: {'; '.join(problems)}."
+            f"{coverage_suffix}"
+        )
+    return {
+        "status": status,
+        "promotion_status": promotion_status,
+        "selected_scenarios_status": selected_scenarios_status,
+        "selected_scenario_passed_only": selected_scenario_passed_only,
+        "promotion_scope": (
+            "full"
+            if status == AGENT_OS_READINESS_CHECK_PASSED
+            else "unstable_full_evidence"
+            if unstable_full_evidence
+            else "selected_smoke_only"
+            if selected_scenario_passed_only
+            else "blocked"
+        ),
+        "profile": profile,
+        "score": score,
+        "scenario_count": scenario_count,
+        "passed_count": passed_count,
+        "pass_rate": pass_rate,
+        "effective_pass_rate": effective_pass_rate,
+        "repaired_failed_rows": repaired_failed_rows,
+        "runner_environment_issues": runner_environment_issues,
+        "runner_environment_recovery": runner_environment_recovery,
+        "source_stability": source_stability,
+        "source_changes_during_run": source_changes,
+        "scorecard_freshness": freshness_status,
+        "source_changes_after_scorecard": source_freshness["source_changes_after_scorecard"],
+        "source_change_preview_after_scorecard": source_freshness[
+            "source_change_preview_after_scorecard"
+        ],
+        "source_churn_diagnostics_path": AGENT_SOURCE_CHURN_DIAGNOSTICS_REL_PATH,
+        "source_churn_diagnostics_command": AGENT_SOURCE_CHURN_DIAGNOSTICS_COMMAND,
+        "source_churn_diagnostics": source_churn_diagnostics,
+        "generated_utc": source_freshness["generated_utc"],
+        "missing_capabilities": missing_capabilities,
+        "primary_missing_capabilities": primary_missing_capabilities,
+        "covered_missing_capabilities": covered_missing_capabilities,
+        "model_shadow": model_shadow,
+        "model_tournament": model_tournament,
+        "hosted_pr_repair": hosted_pr_repair,
+        "frontier_evidence_gaps": frontier_evidence_gaps,
+        "frontier_evidence_gap_count": len(frontier_evidence_gaps),
+        "frontier_evidence_gap_labels": frontier_evidence_gap_labels,
+        "frontier_evidence_next_action": frontier_evidence_next_action,
+        "frontier_evidence_handoff_label": (
+            "Copy frontier proof packet" if frontier_evidence_handoff_copy else ""
+        ),
+        "frontier_evidence_handoff_copy": frontier_evidence_handoff_copy,
+        "frontier_model_evidence_intake": frontier_model_evidence_intake,
+        "frontier_evidence_intake": frontier_model_evidence_intake,
+        "frontier_evidence_preflight": frontier_evidence_preflight,
+        "frontier_preflight_recovery_routes": frontier_evidence_preflight["recovery_routes"],
+        "frontier_preflight_recovery_route_count": frontier_evidence_preflight[
+            "recovery_route_count"
+        ],
+        "hosted_pr_repair_candidates": hosted_pr_repair_candidates,
+        "hosted_pr_repair_candidate_report_count": hosted_pr_repair_candidates[
+            "candidate_count"
+        ],
+        "path": AGENT_CODING_BENCHMARK_SCORECARD_REL_PATH,
+        "detail": detail,
+    }
 
 _MODEL_PREFERENCE = (
     "chili-coder:current",
@@ -355,6 +2541,76 @@ _RAW_MODEL_ERROR_MARKERS = (
     "errno",
     "traceback",
     "ollama:",
+)
+_SCHEDULED_QUALITY_KEYS = (
+    "scheduled_quality",
+    "scheduled_quality_pressure",
+    "report_quality",
+)
+_QUALITY_BAR_KEYS = (
+    "quality_bar",
+    "delivery_quality_bar",
+    "agent_quality_bar",
+)
+_SCHEDULED_QUALITY_ARTIFACT_MARKERS = (
+    "scheduled_quality",
+    "report_quality",
+    "goal_receipt",
+    "goal_proof",
+    "pr_receipt",
+)
+_QUALITY_BAR_ARTIFACT_MARKERS = (
+    "quality_bar",
+    "delivery_blocker",
+    "pr_blocker",
+    "publication_receipt",
+    "pr_publication_receipt",
+    "current_head_pr_publication_receipt",
+    "release_trust",
+    "agent_os_readiness",
+    "goal_pressure",
+    "recovery_brake",
+    "coordination_queue",
+)
+_PR_PUBLICATION_RECEIPT_SCHEMA_VERSION = "chili.execution-pr-publication-receipt.v1"
+_PR_PUBLICATION_REQUIRED_EVIDENCE = (
+    "exact_current_head_sha",
+    "current_head_check_receipt",
+    "clean_merge_state",
+    "pm_operator_publish_disposition",
+    "selected_tests_or_ci_evidence",
+)
+_PR_PUBLICATION_FORBIDDEN_ACTIONS = (
+    "publish_ready_claim",
+    "ready_transition",
+    "push_or_pr_creation",
+    "pr_mutation",
+    "merge",
+    "release",
+    "runtime_refresh",
+    "live_behavior_trust",
+)
+_PR_PUBLICATION_DEFAULT_ALLOWED_DECISIONS = (
+    "Keep blocked with owner, next check path, and blocker evidence.",
+    "Close or recreate only after explicit PM/operator acceptance.",
+    "Clean owner-worktree rebuild with branch, worktree, and current-head proof.",
+    "Run one named owner-repair path with focused check evidence.",
+)
+_PR_HEALTH_PACKET_KEYS = (
+    "agent_pr_blocker_health",
+    "pr_blocker_health",
+    "pr_health",
+    "pr_blockers",
+    "release_trust_summary",
+)
+_PR_HEALTH_ITEM_KEYS = (
+    "items",
+    "prs",
+    "pull_requests",
+    "pr_items",
+    "pr_health_items",
+    "pr_blocker_items",
+    "blocked_items",
 )
 _MODEL_COOLDOWN_ERROR_MARKERS = frozenset({"timed out", "timeouterror", "timeout"})
 _MODEL_COOLDOWNS: dict[str, dict[str, Any]] = {}
@@ -775,6 +3031,259 @@ def _operator_safe_plan_payload(plan: dict[str, Any]) -> dict[str, Any]:
     return safe
 
 
+def _pursuing_goal_explicit_contract(*values: Any) -> dict[str, Any]:
+    for value in values:
+        if not isinstance(value, Mapping) or not value:
+            continue
+        for key in ("pursuing_goal", "goal_snapshot", "goal_contract", "goal"):
+            packet = value.get(key)
+            if isinstance(packet, Mapping) and _pursuing_goal_objective(packet):
+                return dict(packet)
+        if _pursuing_goal_objective(value):
+            return dict(value)
+    return {}
+
+
+def _pursuing_goal_objective(value: Mapping[str, Any]) -> str:
+    return _clip(
+        _first_text(
+            value.get("objective"),
+            value.get("goal"),
+            value.get("active_goal_objective"),
+            value.get("prompt"),
+        ),
+        900,
+    )
+
+
+def _pursuing_goal_status_label(status: str) -> str:
+    if status in {RUN_STATUS_COMPLETED, RUN_STATUS_MERGED}:
+        return "Goal complete"
+    if status in {RUN_STATUS_BLOCKED, RUN_STATUS_FAILED, RUN_STATUS_CANCELLED}:
+        return "Goal blocked"
+    return "Pursuing goal"
+
+
+def _pursuing_goal_current_step(status: str, stage: str) -> str:
+    if status in {RUN_STATUS_COMPLETED, RUN_STATUS_MERGED}:
+        return "Review completion evidence"
+    if status in {RUN_STATUS_BLOCKED, RUN_STATUS_FAILED, RUN_STATUS_CANCELLED}:
+        return "Inspect blocker and choose a safe recovery path"
+    if stage == STAGE_CHAT:
+        return "Clarify the objective before planning"
+    if stage == STAGE_QUEUED:
+        return "Wait for the local Autopilot worker"
+    if stage == STAGE_CLASSIFY:
+        return "Classify the request and safety scope"
+    if stage == STAGE_REPO_SCAN:
+        return "Gather repository context"
+    if stage == STAGE_PLAN:
+        return "Draft and review the architect plan"
+    if stage == STAGE_ASSIGN_ROLES:
+        return "Assign agent lanes and ownership"
+    if stage == STAGE_IMPLEMENT:
+        return "Implement in an isolated worktree"
+    if stage == STAGE_INTEGRATE:
+        return "Integrate agent work"
+    if stage == STAGE_VALIDATE:
+        return "Run validation gates"
+    if stage == STAGE_MERGE:
+        return "Check merge safety"
+    if stage == STAGE_LEARN:
+        return "Record the outcome as local learning evidence"
+    return ""
+
+
+def _pursuing_goal_next_action(row: ProjectAutonomyRun, status: str, stage: str) -> str:
+    if status == RUN_STATUS_AWAITING_APPROVAL:
+        return "Review the architect plan, then approve it or send feedback."
+    if status == RUN_STATUS_AWAITING_CLARIFICATION:
+        return "Answer the clarification before implementation can start."
+    if status == RUN_STATUS_CHATTING:
+        return "Start a plan when the objective and safety boundary are clear."
+    if status in {RUN_STATUS_BLOCKED, RUN_STATUS_FAILED, RUN_STATUS_CANCELLED}:
+        return _first_text(
+            row.error_message,
+            row.merge_message,
+            "Start a recovery run only after the blocker and objective-tied evidence are understood.",
+        )
+    if status in {RUN_STATUS_COMPLETED, RUN_STATUS_MERGED}:
+        return "Review validation and closeout evidence before counting the goal complete."
+    if stage == STAGE_PLAN:
+        return "Wait for the architect quality gate, then review the plan."
+    if stage == STAGE_IMPLEMENT:
+        return "Watch implementation evidence and keep the scope narrow."
+    if stage == STAGE_VALIDATE:
+        return "Review validation results and repair any failing gate."
+    if stage == STAGE_MERGE:
+        return "Confirm merge safety before accepting the result."
+    return "Keep the run tied to the objective and next evidence gate."
+
+
+def _pursuing_goal_completion_gate(status: str, stage: str) -> str:
+    if status == RUN_STATUS_CHATTING:
+        return "A plan must be started before repository scanning or edits count."
+    if status == RUN_STATUS_AWAITING_APPROVAL:
+        return "The architect quality gate must pass before implementation starts."
+    if status in {RUN_STATUS_BLOCKED, RUN_STATUS_FAILED, RUN_STATUS_CANCELLED}:
+        return "A rerun or recovery step must produce fresh objective-tied evidence."
+    if status in {RUN_STATUS_COMPLETED, RUN_STATUS_MERGED}:
+        return "Completion is trusted only when validation and closeout evidence match the objective."
+    if stage == STAGE_VALIDATE:
+        return "All required validation checks must pass or name the safe recovery path."
+    return "Do not count complete until plan, implementation, validation, and closeout evidence match this objective."
+
+
+def _pursuing_goal_progress_percent(status: str, stage: str) -> int:
+    if status in {RUN_STATUS_COMPLETED, RUN_STATUS_MERGED}:
+        return 100
+    stage_progress = {
+        STAGE_CHAT: 8,
+        STAGE_QUEUED: 10,
+        STAGE_CLASSIFY: 18,
+        STAGE_REPO_SCAN: 24,
+        STAGE_PLAN: 35,
+        STAGE_ASSIGN_ROLES: 45,
+        STAGE_IMPLEMENT: 58,
+        STAGE_INTEGRATE: 68,
+        STAGE_VALIDATE: 78,
+        STAGE_MERGE: 88,
+        STAGE_LEARN: 94,
+    }.get(stage, 12)
+    if status in {RUN_STATUS_BLOCKED, RUN_STATUS_FAILED, RUN_STATUS_CANCELLED}:
+        return max(1, min(stage_progress, 95))
+    if status == RUN_STATUS_AWAITING_APPROVAL:
+        return 42
+    if status == RUN_STATUS_AWAITING_CLARIFICATION:
+        return 16
+    if status == RUN_STATUS_CHATTING:
+        return 8
+    return stage_progress
+
+
+def _pursuing_goal_handoff_copy(goal: Mapping[str, Any]) -> str:
+    objective = _first_text(goal.get("objective"), "unknown objective")
+    lines = [
+        "Project Autopilot pursuing goal contract",
+        f"Objective: {objective}",
+        f"Status: {_first_text(goal.get('status_label'), 'Pursuing goal')} ({_first_int(goal.get('progress_percent'))}%)",
+        f"Current step: {_first_text(goal.get('current_step'), 'unknown')}",
+        f"Next action: {_first_text(goal.get('next_action'), 'unknown')}",
+        f"Completion gate: {_first_text(goal.get('completion_gate'), 'objective-tied validation required')}",
+        "",
+        "Receipt rule: do not count progress unless evidence names this objective, the current step, and the next gate.",
+        "Agent rule: every plan, report, recovery action, or closeout must repeat the objective and cite the evidence path or validation result it relies on.",
+        "",
+        "Permission boundary: this goal contract does not authorize source/test edits, commit, push, PR creation, merge, release, deploy, runtime restart, Docker, database/migration, broker/API, route/model changes, or live-trading behavior.",
+    ]
+    return "\n".join(lines)
+
+
+def _pursuing_goal_payload(row: ProjectAutonomyRun, plan: Mapping[str, Any]) -> dict[str, Any]:
+    learning = _json_load(row.learning_json, {})
+    explicit = _pursuing_goal_explicit_contract(learning, plan)
+    status = str(row.status or "").strip().lower()
+    stage = str(row.current_stage or "").strip().lower()
+    objective = _first_text(
+        _pursuing_goal_objective(explicit),
+        row.prompt,
+        row.chat_title,
+    )
+    if not objective:
+        return {}
+    progress = _first_int(
+        explicit.get("progress_percent"),
+        explicit.get("progress"),
+        explicit.get("completion_percent"),
+        explicit.get("percent_complete"),
+        _pursuing_goal_progress_percent(status, stage),
+    )
+    payload: dict[str, Any] = {
+        "schema": "chili.project-autopilot.pursuing-goal.v1",
+        "source": "explicit_goal_contract" if explicit else "backend_run_state",
+        "objective": _clip(objective, 900),
+        "status": status,
+        "status_label": _first_text(
+            explicit.get("status_label"),
+            _pursuing_goal_status_label(status),
+        ),
+        "current_step": _first_text(
+            explicit.get("current_step"),
+            explicit.get("currentStep"),
+            explicit.get("step"),
+            _pursuing_goal_current_step(status, stage),
+        ),
+        "next_action": _first_text(
+            explicit.get("next_action"),
+            explicit.get("nextAction"),
+            explicit.get("operator_next_action"),
+            _pursuing_goal_next_action(row, status, stage),
+        ),
+        "completion_gate": _first_text(
+            explicit.get("completion_gate"),
+            explicit.get("completionGate"),
+            explicit.get("done_when"),
+            explicit.get("acceptance_gate"),
+            _pursuing_goal_completion_gate(status, stage),
+        ),
+        "progress_percent": max(0, min(progress, 100)),
+        "progress_authority": _first_text(
+            explicit.get("progress_authority"),
+            "Recorded run stage, plan, architect review, validation, operator action, and artifact evidence are authoritative.",
+        ),
+        "receipt_sections": _string_sequence(explicit.get("receipt_sections"))
+        or ["Objective", "Current evidence", "Checks", "Next gate"],
+        "receipt_trust_rule": _first_text(
+            explicit.get("receipt_trust_rule"),
+            "Do not count progress unless the run evidence names this objective and the next gate.",
+        ),
+        "receipt_safety_boundary": _first_text(
+            explicit.get("receipt_safety_boundary"),
+            "No merge, release, broker, or live action counts unless an explicit gate records it.",
+        ),
+        "success_criteria": _string_sequence(
+            explicit.get("success_criteria")
+            or explicit.get("acceptance_criteria")
+            or explicit.get("done_when")
+        ),
+        "evidence_required": _string_sequence(explicit.get("evidence_required"))
+        or [
+            "objective_repeated",
+            "current_step_named",
+            "next_gate_named",
+            "evidence_path_or_validation_result",
+        ],
+        "forbidden_completion_claims": _string_sequence(
+            explicit.get("forbidden_completion_claims")
+        )
+        or [
+            "generic_progress_without_objective",
+            "complete_without_validation_or_closeout",
+            "ready_or_merge_claim_without_current_gate_evidence",
+        ],
+        "context_handoff_label": _first_text(
+            explicit.get("context_handoff_label"),
+            explicit.get("handoff_label"),
+            "Copy goal contract",
+        ),
+    }
+    payload["context_handoff_copy"] = _first_text(
+        explicit.get("context_handoff_copy"),
+        explicit.get("handoff"),
+        _pursuing_goal_handoff_copy(payload),
+    )
+    payload["agent_prompt_contract"] = "\n".join(
+        [
+            f"Active objective: {payload['objective']}",
+            f"Current step: {payload['current_step']}",
+            f"Next gate: {payload['completion_gate']}",
+            "Every agent report must name objective-tied evidence before claiming progress.",
+            "This contract grants no source, git, PR, runtime, database, broker, release, or live-trading authority.",
+        ]
+    )
+    return payload
+
+
 def _run_payload(row: ProjectAutonomyRun) -> dict[str, Any]:
     plan = _json_load(row.plan_json, {})
     return {
@@ -799,6 +3308,7 @@ def _run_payload(row: ProjectAutonomyRun) -> dict[str, Any]:
         "merge_status": row.merge_status,
         "merge_message": row.merge_message,
         "plan": _operator_safe_plan_payload(plan),
+        "pursuing_goal": _pursuing_goal_payload(row, plan if isinstance(plan, Mapping) else {}),
         "architect_review": {},
         "agents": _json_load(row.agents_json, []),
         "files": _json_load(row.files_json, []),
@@ -874,6 +3384,926 @@ def _message_payload(row: ProjectAutonomyMessage) -> dict[str, Any]:
     }
 
 
+def _scheduled_quality_from_mapping(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    for key in _SCHEDULED_QUALITY_KEYS:
+        packet = value.get(key)
+        if isinstance(packet, Mapping) and packet:
+            return dict(packet)
+    quality_bar = _quality_bar_from_mapping(value)
+    for key in _SCHEDULED_QUALITY_KEYS:
+        packet = quality_bar.get(key)
+        if isinstance(packet, Mapping) and packet:
+            return dict(packet)
+    return {}
+
+
+def _quality_bar_with_pr_publication_preflight(packet: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = dict(packet)
+    groups = normalized.get("delivery_blocker_groups")
+    if not isinstance(groups, list) or not groups:
+        return normalized
+
+    updated_groups: list[Any] = []
+    changed = False
+    for group in groups:
+        if not isinstance(group, Mapping):
+            updated_groups.append(group)
+            continue
+        group_payload = dict(group)
+        if str(group_payload.get("key") or "").strip() == "pr_blocker_train":
+            enriched = _pr_publication_preflight_group(group_payload, normalized)
+            changed = changed or enriched != group_payload
+            group_payload = enriched
+        updated_groups.append(group_payload)
+    if changed:
+        normalized["delivery_blocker_groups"] = updated_groups
+    return normalized
+
+
+def _pr_publication_preflight_group(
+    group: Mapping[str, Any],
+    packet: Mapping[str, Any],
+) -> dict[str, Any]:
+    enriched = dict(group)
+    receipt = _first_mapping(
+        enriched.get("publication_receipt"),
+        enriched.get("pr_publication_receipt"),
+        enriched.get("current_head_pr_publication_receipt"),
+        packet.get("publication_receipt"),
+        packet.get("pr_publication_receipt"),
+        packet.get("current_head_pr_publication_receipt"),
+    )
+    if receipt and _pr_publication_receipt_ready(receipt):
+        return enriched
+
+    missing_evidence = _dedupe_texts(
+        [
+            *_string_sequence(receipt.get("missing_evidence") if receipt else None),
+            *_string_sequence(enriched.get("required_evidence")),
+            *_PR_PUBLICATION_REQUIRED_EVIDENCE,
+        ]
+    )
+    required_evidence = _dedupe_texts(
+        [
+            *_string_sequence(enriched.get("required_evidence")),
+            *_string_sequence(receipt.get("required_evidence") if receipt else None),
+            *_PR_PUBLICATION_REQUIRED_EVIDENCE,
+        ]
+    )
+    recovery_decision = _pr_publication_recovery_decision(
+        enriched,
+        missing_evidence=missing_evidence,
+    )
+    handoff_copy = _first_text(
+        enriched.get("pr_publish_packet_copy"),
+        enriched.get("report_pr_publish_packet_copy"),
+    )
+    if not handoff_copy:
+        handoff_copy = _pr_publication_preflight_handoff_copy(
+            enriched,
+            missing_evidence=missing_evidence,
+            required_evidence=required_evidence,
+            recovery_decision=recovery_decision,
+        )
+    blockers = _pr_publication_blockers(enriched, missing_evidence=missing_evidence)
+
+    receipt_payload = dict(receipt) if receipt else {}
+    receipt_payload.setdefault("schema", _PR_PUBLICATION_RECEIPT_SCHEMA_VERSION)
+    receipt_payload.setdefault("status", "warning")
+    receipt_payload.setdefault("publication_proof_ready", False)
+    receipt_payload.setdefault("missing_evidence", missing_evidence)
+    receipt_payload.setdefault("required_evidence", required_evidence)
+    receipt_payload.setdefault("proof_items", _pr_publication_proof_items(enriched))
+    receipt_payload.setdefault("blocked_action_label", "Blocked until PR proof")
+    receipt_payload.setdefault("next_action_handoff_label", "Copy PR publication gate")
+    receipt_payload.setdefault("next_action_handoff_copy", handoff_copy)
+    enriched["publication_receipt"] = receipt_payload
+    enriched.setdefault("pr_publish_verdict", "not_publishable")
+    enriched.setdefault(
+        "pr_publish_gate_state",
+        "blocked_until_current_head_publication_receipt",
+    )
+    enriched.setdefault("pr_publish_next_gate", "current_head_check_receipt")
+    enriched.setdefault("pr_publish_blockers", blockers)
+    enriched.setdefault("pr_publish_required_evidence", required_evidence)
+    enriched.setdefault(
+        "pr_publish_forbidden_actions",
+        list(_PR_PUBLICATION_FORBIDDEN_ACTIONS),
+    )
+    enriched.setdefault(
+        "pr_publish_first_action_owner",
+        recovery_decision["owner"],
+    )
+    enriched.setdefault(
+        "pr_publish_first_action_label",
+        recovery_decision["first_action"],
+    )
+    enriched.setdefault(
+        "pr_publish_first_action_proof",
+        recovery_decision["proof"],
+    )
+    enriched.setdefault("pr_recovery_decision", recovery_decision["decision"])
+    enriched.setdefault("pr_recovery_decision_label", recovery_decision["label"])
+    enriched.setdefault("pr_recovery_owner", recovery_decision["owner"])
+    enriched.setdefault("pr_recovery_safe_next_step", recovery_decision["first_action"])
+    enriched.setdefault("pr_recovery_required_proof", recovery_decision["proof"])
+    enriched.setdefault("pr_publish_action_plan", [recovery_decision])
+    enriched.setdefault(
+        "pr_publish_operator_summary",
+        "Do not trust green, publish-ready, ready-transition, merge-ready, or repair-complete claims until current-head PR proof exists.",
+    )
+    enriched.setdefault("pr_publish_packet_label", "Copy PR publication gate")
+    enriched.setdefault("pr_publish_packet_copy", handoff_copy)
+    enriched.setdefault(
+        "blocked_action",
+        "Do not mutate PR state, push, create PRs, merge, or start broad source repair.",
+    )
+    if not _string_sequence(enriched.get("allowed_decisions")):
+        enriched["allowed_decisions"] = list(_PR_PUBLICATION_DEFAULT_ALLOWED_DECISIONS)
+    return enriched
+
+
+def _pr_publication_recovery_decision(
+    group: Mapping[str, Any],
+    *,
+    missing_evidence: Sequence[str],
+) -> dict[str, str]:
+    pr = _first_text(group.get("top_pr"), group.get("pr_number"), group.get("pr"))
+    branch = _first_text(group.get("top_branch"), group.get("branch"))
+    top_ci = str(group.get("top_ci") or group.get("ci") or "").strip().lower()
+    top_merge = str(group.get("top_merge") or group.get("merge_state") or "").strip().lower()
+    posture = str(group.get("top_posture") or group.get("posture") or "").strip().lower()
+    gate_state = str(group.get("gate_state") or "").strip().lower()
+    source_text = " ".join(
+        str(group.get(key) or "")
+        for key in (
+            "gate_state",
+            "gate_label",
+            "top_posture",
+            "blocked_action",
+            "next_action_detail",
+            "required_proof",
+            "owner_agent_next_action",
+        )
+    ).lower()
+    subject = f"PR #{pr}" if pr else f"branch {branch}" if branch else "this PR lane"
+
+    if any(
+        marker in source_text
+        for marker in (
+            "pm_operator_disposition_required",
+            "pm/operator disposition",
+            "terminal captain",
+            "close/recreate",
+            "clean owner-worktree",
+            "clean rebuild",
+            "one named repair path",
+        )
+    ):
+        return {
+            "decision": "wait_for_operator_disposition",
+            "label": "Wait for PM/operator PR disposition",
+            "owner": "PM/operator",
+            "first_action": (
+                f"{subject}: choose keep blocked, close/recreate, clean rebuild, "
+                "exact current-head acceptance, or one named repair path before PR movement."
+            ),
+            "proof": (
+                "Disposition artifact must name the PR/branch, head SHA, accepted path, "
+                "owner lane, current-head gates, and forbidden actions."
+            ),
+        }
+
+    if top_merge and top_merge != "clean":
+        return {
+            "decision": "resolve_or_recreate_pr",
+            "label": "Resolve merge state or close/recreate",
+            "owner": _first_text(group.get("owner_agent"), group.get("owner"), "PR owner"),
+            "first_action": (
+                f"{subject}: keep frozen until a clean owner-worktree rebuild, "
+                "close/recreate decision, or accepted current-head merge proof exists."
+            ),
+            "proof": (
+                "Required proof: clean owner worktree, branch, head SHA, clean merge state, "
+                "focused checks, and PM/operator acceptance for close/recreate or rebuild."
+            ),
+        }
+
+    if "fail" in top_ci or "ci_failing" in posture:
+        return {
+            "decision": "repair_current_head_ci",
+            "label": "Run one named owner repair path",
+            "owner": _first_text(group.get("owner_agent"), group.get("owner"), "PR owner"),
+            "first_action": (
+                f"{subject}: repair only one named failing current-head check path in an isolated owner worktree."
+            ),
+            "proof": (
+                "Required proof: failing check URL/name, exact head SHA, changed files, focused test output, "
+                "and refreshed current-head check receipt."
+            ),
+        }
+
+    if "pending" in top_ci or "ci_pending" in posture:
+        return {
+            "decision": "wait_for_current_head_checks",
+            "label": "Wait for current-head checks",
+            "owner": _first_text(group.get("owner_agent"), group.get("owner"), "DevOps/PR owner"),
+            "first_action": (
+                f"{subject}: wait for or refresh exact-head check receipts before ready, "
+                "repair-complete, publish, or merge claims."
+            ),
+            "proof": (
+                "Receipt must name PR, branch, head SHA, completed check result, source URL, "
+                "and timestamp."
+            ),
+        }
+
+    if "no check" in top_ci or "ci_missing_checks" in posture:
+        return {
+            "decision": "attach_current_head_checks",
+            "label": "Attach current-head checks",
+            "owner": _first_text(group.get("owner_agent"), group.get("owner"), "DevOps/PR owner"),
+            "first_action": (
+                f"{subject}: attach exact-head check receipts before ready, repair-complete, publish, or merge claims."
+            ),
+            "proof": (
+                "Receipt must name PR, branch, head SHA, successful check, source URL, and timestamp."
+            ),
+        }
+
+    if not pr and (
+        str(group.get("existing_pr_found") or "").strip().lower() == "false"
+        or "create_draft_pr" in gate_state
+    ):
+        return {
+            "decision": "prepare_draft_pr_packet",
+            "label": "Prepare draft PR packet",
+            "owner": _first_text(group.get("owner_agent"), group.get("owner"), "PR owner"),
+            "first_action": (
+                f"{subject}: attach branch, head SHA, clean worktree, focused checks, and operator approval before draft PR creation."
+            ),
+            "proof": (
+                "Draft packet must prove no existing PR owns the branch and must name target base, branch, head SHA, checks, and requested reviewers."
+            ),
+        }
+
+    return {
+        "decision": "attach_current_head_publication_receipt",
+        "label": "Attach current-head publication receipt",
+        "owner": _first_text(group.get("owner_agent"), group.get("owner"), "PR owner"),
+        "first_action": (
+            f"{subject}: attach the current-head publication receipt before any ready, repair-complete, publish, or merge claim."
+        ),
+        "proof": (
+            "Receipt must name PR/branch, head SHA, successful check, source URL, timestamp, and PM/operator disposition."
+        ),
+    }
+
+
+def _pr_publication_receipt_ready(receipt: Mapping[str, Any]) -> bool:
+    status = str(receipt.get("status") or receipt.get("state") or "").strip().lower()
+    ready = receipt.get("publication_proof_ready", receipt.get("proof_ready"))
+    if isinstance(ready, bool):
+        return ready and not _string_sequence(receipt.get("missing_evidence"))
+    return status == AGENT_OS_READINESS_CHECK_PASSED and not _string_sequence(
+        receipt.get("missing_evidence")
+    )
+
+
+def _pr_publication_blockers(
+    group: Mapping[str, Any],
+    *,
+    missing_evidence: Sequence[str],
+) -> list[str]:
+    blockers: list[str] = []
+    top_ci = str(group.get("top_ci") or group.get("ci") or "").strip().lower()
+    top_merge = str(group.get("top_merge") or group.get("merge_state") or "").strip().lower()
+    top_posture = str(group.get("top_posture") or group.get("posture") or "").strip().lower()
+    if "current_head_check_receipt" in missing_evidence:
+        blockers.append("current_head_check_receipt_missing")
+    if "no check" in top_ci or "ci_missing_checks" in top_posture:
+        blockers.append("current_head_checks_missing")
+    if "fail" in top_ci or "ci_failing" in top_posture:
+        blockers.append("current_head_ci_failing")
+    if "pending" in top_ci or "ci_pending" in top_posture:
+        blockers.append("current_head_ci_pending")
+    if top_merge and top_merge != "clean":
+        blockers.append("merge_state_not_clean")
+    if str(group.get("gate_state") or "").strip():
+        blockers.append(str(group.get("gate_state")).strip())
+    blockers.append("pm_operator_publish_disposition_missing")
+    return _dedupe_texts([*blockers, *missing_evidence])
+
+
+def _pr_publication_proof_items(group: Mapping[str, Any]) -> list[str]:
+    items = []
+    pr = _first_text(group.get("top_pr"), group.get("pr_number"), group.get("pr"))
+    branch = _first_text(group.get("top_branch"), group.get("branch"))
+    head = _first_text(group.get("head_sha"), group.get("head_ref_oid"), group.get("commit_sha"))
+    merge = _first_text(group.get("top_merge"), group.get("merge_state"))
+    ci = _first_text(group.get("top_ci"), group.get("ci_state"), group.get("ci"))
+    if pr:
+        items.append(f"PR #{pr}")
+    if branch:
+        items.append(f"branch {branch}")
+    if head:
+        items.append(f"head {head[:12]}")
+    if merge:
+        items.append(f"merge {merge}")
+    if ci:
+        items.append(f"ci {ci}")
+    return items
+
+
+def _pr_publication_preflight_handoff_copy(
+    group: Mapping[str, Any],
+    *,
+    missing_evidence: Sequence[str],
+    required_evidence: Sequence[str],
+    recovery_decision: Mapping[str, str] | None = None,
+) -> str:
+    pr = _first_text(group.get("top_pr"), group.get("pr_number"), group.get("pr"), "unknown")
+    branch = _first_text(group.get("top_branch"), group.get("branch"), "unknown")
+    merge = _first_text(group.get("top_merge"), group.get("merge_state"), "unknown")
+    ci = _first_text(group.get("top_ci"), group.get("ci_state"), group.get("ci"), "unknown")
+    path = _first_text(group.get("next_action_path"), group.get("path"), "project_ws/AgentOps/OMNIAGENT_KPI_SCORECARD.md")
+    allowed = _string_sequence(group.get("allowed_decisions")) or list(
+        _PR_PUBLICATION_DEFAULT_ALLOWED_DECISIONS
+    )
+    lines = [
+        "Project Autopilot PR publication decision packet",
+        "Purpose: decide whether a PR can be created, pushed, marked ready, repaired, or published.",
+        "Verdict: not_publishable until current-head publication proof is attached.",
+        "",
+        "Current PR pressure:",
+        f"- PR: #{pr}",
+        f"- Branch: {branch}",
+        f"- Merge: {merge}",
+        f"- CI/checks: {ci}",
+        f"- Evidence path: {path}",
+        "",
+        "Recovery decision:",
+        f"- Decision: {(recovery_decision or {}).get('label') or 'Attach current-head publication receipt'}",
+        f"- Owner: {(recovery_decision or {}).get('owner') or 'PR owner'}",
+        f"- First action: {(recovery_decision or {}).get('first_action') or 'Attach current-head publication proof before PR movement.'}",
+        f"- Proof required: {(recovery_decision or {}).get('proof') or 'Receipt must name PR, branch, head SHA, check, URL, and timestamp.'}",
+        "",
+        "Required evidence before any PR movement:",
+    ]
+    lines.extend(f"- {item}" for item in required_evidence)
+    if missing_evidence:
+        lines.append("")
+        lines.append("Currently missing:")
+        lines.extend(f"- {item}" for item in missing_evidence)
+    lines.append("")
+    lines.append("Allowed decisions:")
+    lines.extend(f"- {item}" for item in allowed)
+    lines.append("")
+    lines.append("Forbidden actions until the gate clears:")
+    lines.extend(f"- {item}" for item in _PR_PUBLICATION_FORBIDDEN_ACTIONS)
+    lines.extend(
+        [
+            "",
+            "Permission boundary: review and evidence routing only. This packet does not authorize source/test edits, commit, push, PR creation, ready transition, PR mutation, merge, release, deploy, runtime restart, Docker, database/migration, broker/API, route/model changes, or live-trading behavior.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _first_mapping(*values: Any) -> dict[str, Any]:
+    for value in values:
+        if isinstance(value, Mapping) and value:
+            return dict(value)
+    return {}
+
+
+def _string_sequence(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, Iterable) and not isinstance(value, Mapping):
+        return [
+            str(item).strip()
+            for item in value
+            if str(item).strip()
+        ]
+    return []
+
+
+def _dedupe_texts(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        clean = str(value).strip()
+        if not clean:
+            continue
+        key = clean.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(clean)
+    return out
+
+
+def _first_text(*values: Any) -> str:
+    for value in values:
+        clean = str(value or "").strip()
+        if clean:
+            return clean
+    return ""
+
+
+def _first_int(*values: Any) -> int:
+    for value in values:
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            return value
+        clean = str(value or "").strip()
+        if not clean:
+            continue
+        try:
+            return int(clean)
+        except ValueError:
+            continue
+    return 0
+
+
+def _bool_value(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    clean = str(value or "").strip().lower()
+    if not clean:
+        return None
+    if clean in {"1", "true", "yes", "y", "blocked", "warning", "failed", "failing"}:
+        return True
+    if clean in {"0", "false", "no", "n", "clear", "passed", "passing", "green", "none"}:
+        return False
+    return None
+
+
+def _looks_like_pr_health_item(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    has_identity = any(
+        key in value
+        for key in (
+            "number",
+            "pr_number",
+            "top_pr",
+            "pr",
+            "url",
+            "branch",
+            "pr_branch",
+            "top_branch",
+            "head_ref_oid",
+            "head_sha",
+        )
+    )
+    has_health = any(
+        key in value
+        for key in (
+            "ci_state",
+            "ci_summary",
+            "top_ci",
+            "blocker_kind",
+            "top_posture",
+            "merge_state",
+            "top_merge",
+            "blocked",
+            "ready_candidate",
+            "pr_publish_verdict",
+        )
+    )
+    return has_identity and has_health
+
+
+def _pr_health_packets_from_mapping(value: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    packets: list[Mapping[str, Any]] = []
+    if _looks_like_pr_health_item(value) or any(
+        isinstance(value.get(key), list) for key in _PR_HEALTH_ITEM_KEYS
+    ):
+        packets.append(value)
+
+    for key in _PR_HEALTH_PACKET_KEYS:
+        packet = value.get(key)
+        if isinstance(packet, Mapping) and packet:
+            packets.append(packet)
+
+    operator_inbox = value.get("operator_inbox")
+    if isinstance(operator_inbox, Mapping):
+        release_trust = operator_inbox.get("release_trust_summary")
+        if isinstance(release_trust, Mapping) and release_trust:
+            packets.append(release_trust)
+        for key in _PR_HEALTH_PACKET_KEYS:
+            packet = operator_inbox.get(key)
+            if isinstance(packet, Mapping) and packet:
+                packets.append(packet)
+
+    out: list[Mapping[str, Any]] = []
+    seen: set[int] = set()
+    for packet in packets:
+        identity = id(packet)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        out.append(packet)
+    return out
+
+
+def _pr_health_items(packet: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    if _looks_like_pr_health_item(packet):
+        return [packet]
+    items: list[Mapping[str, Any]] = []
+    for key in _PR_HEALTH_ITEM_KEYS:
+        raw_items = packet.get(key)
+        if not isinstance(raw_items, Iterable) or isinstance(
+            raw_items,
+            (str, bytes, Mapping),
+        ):
+            continue
+        for item in raw_items:
+            if _looks_like_pr_health_item(item):
+                items.append(item)
+    return items
+
+
+def _pr_health_item_blocked(item: Mapping[str, Any]) -> bool:
+    explicit = _bool_value(item.get("blocked"))
+    if explicit is True:
+        return True
+
+    posture = _first_text(
+        item.get("blocker_kind"),
+        item.get("top_posture"),
+        item.get("posture"),
+        item.get("category"),
+        item.get("report_blocker_category"),
+    ).lower()
+    if posture and posture not in {"none", "clear", "green", "ok", "ready"}:
+        return True
+
+    ci_state = _first_text(
+        item.get("ci_state"),
+        item.get("top_ci"),
+        item.get("ci"),
+    ).lower()
+    normalized_ci = ci_state.replace("_", " ")
+    if any(marker in normalized_ci for marker in ("fail", "pending", "no check", "missing")):
+        return True
+
+    merge = _first_text(item.get("merge_state"), item.get("top_merge")).lower()
+    if merge and merge not in {"clean", "green", "passed", "passing", "ok"}:
+        return True
+
+    return False
+
+
+def _pr_health_check_names(item: Mapping[str, Any], key: str) -> list[str]:
+    checks = item.get(key)
+    if not isinstance(checks, Iterable) or isinstance(checks, (str, bytes, Mapping)):
+        return _string_sequence(checks)
+    names: list[str] = []
+    for check in checks:
+        if isinstance(check, Mapping):
+            names.append(
+                _first_text(
+                    check.get("name"),
+                    check.get("context"),
+                    check.get("workflowName"),
+                    check.get("workflow_name"),
+                    check.get("url"),
+                )
+            )
+        else:
+            names.append(str(check or "").strip())
+    return _dedupe_texts(names)
+
+
+def _pr_health_source_path(item: Mapping[str, Any], packet: Mapping[str, Any]) -> str:
+    return _first_text(
+        item.get("next_action_path"),
+        item.get("path"),
+        item.get("source_path"),
+        packet.get("next_action_path"),
+        packet.get("path"),
+        "project_ws/SRE/OUT/_state/agent-pr-blocker-health.json",
+    )
+
+
+def _pr_blocker_group_from_health_item(
+    item: Mapping[str, Any],
+    packet: Mapping[str, Any],
+    *,
+    count: int,
+) -> dict[str, Any]:
+    pr = _first_text(
+        item.get("number"),
+        item.get("pr_number"),
+        item.get("top_pr"),
+        item.get("pr"),
+    )
+    branch = _first_text(
+        item.get("branch"),
+        item.get("pr_branch"),
+        item.get("headRefName"),
+        item.get("head_ref_name"),
+        item.get("top_branch"),
+    )
+    head = _first_text(
+        item.get("head_ref_oid"),
+        item.get("headRefOid"),
+        item.get("head_sha"),
+        item.get("commit_sha"),
+    )
+    merge = _first_text(
+        item.get("merge_state"),
+        item.get("mergeStateStatus"),
+        item.get("top_merge"),
+    )
+    ci = _first_text(
+        item.get("ci_summary"),
+        item.get("ci_state"),
+        item.get("top_ci"),
+        item.get("ci"),
+    )
+    ci_state = _first_text(item.get("ci_state"), item.get("top_ci"), item.get("ci"))
+    posture = _first_text(
+        item.get("blocker_kind"),
+        item.get("top_posture"),
+        item.get("posture"),
+        item.get("category"),
+        item.get("report_blocker_category"),
+    )
+    path = _pr_health_source_path(item, packet)
+    failing_checks = _pr_health_check_names(item, "failing_checks")
+    pending_checks = _pr_health_check_names(item, "pending_checks")
+
+    detail_parts = []
+    if pr:
+        detail_parts.append(f"PR #{pr}")
+    if branch:
+        detail_parts.append(f"branch {branch}")
+    if head:
+        detail_parts.append(f"head {head[:12]}")
+    if merge:
+        detail_parts.append(f"merge {merge}")
+    if ci:
+        detail_parts.append(f"checks {ci}")
+    if posture:
+        detail_parts.append(f"blocker {posture}")
+    if failing_checks:
+        detail_parts.append("failing checks: " + ", ".join(failing_checks[:3]))
+    if pending_checks:
+        detail_parts.append("pending checks: " + ", ".join(pending_checks[:3]))
+
+    group: dict[str, Any] = {
+        "key": "pr_blocker_train",
+        "count": count,
+        "gate_label": _first_text(
+            item.get("gate_label"),
+            packet.get("gate_label"),
+            "Blocked until PR proof",
+        ),
+        "gate_state": _first_text(
+            item.get("gate_state"),
+            item.get("pr_publish_gate_state"),
+            packet.get("gate_state"),
+            "agent_pr_blocker_health_current_head_gate",
+        ),
+        "top_pr": pr,
+        "top_branch": branch,
+        "head_sha": head,
+        "top_merge": merge,
+        "top_ci": ci,
+        "ci_state": ci_state,
+        "top_posture": posture,
+        "next_action_path": path,
+        "next_action_open_path": _first_text(
+            item.get("open_path"),
+            packet.get("open_path"),
+        ),
+        "next_action_kind": "pr_blocker_train",
+        "next_action_detail": _first_text(
+            item.get("next_action_detail"),
+            item.get("detail"),
+            ". ".join(detail_parts),
+        ),
+        "owner_agent": _first_text(
+            item.get("owner_agent"),
+            item.get("owner"),
+            item.get("agent"),
+            item.get("report_expedite_owner"),
+            packet.get("next_action_agent"),
+            "PR owner",
+        ),
+        "url": _first_text(item.get("url"), item.get("html_url")),
+        "base": _first_text(item.get("base"), item.get("baseRefName")),
+        "source_kind": _first_text(
+            item.get("source_kind"),
+            packet.get("source_kind"),
+            "agent_pr_blocker_health",
+        ),
+        "pr_health_source": "agent_pr_blocker_health",
+        "checked_open_pr_count": _first_int(packet.get("checked_open_pr_count")),
+    }
+    if failing_checks:
+        group["failing_check_names"] = failing_checks
+    if pending_checks:
+        group["pending_check_names"] = pending_checks
+
+    for key in (
+        "publication_receipt",
+        "pr_publication_receipt",
+        "current_head_pr_publication_receipt",
+        "pr_publish_verdict",
+        "pr_publish_gate_state",
+        "pr_publish_next_gate",
+        "pr_publish_blockers",
+        "pr_publish_required_evidence",
+        "pr_publish_forbidden_actions",
+        "pr_publish_packet_label",
+        "pr_publish_packet_copy",
+        "report_pr_publish_packet_label",
+        "report_pr_publish_packet_copy",
+        "allowed_decisions",
+        "blocked_action",
+    ):
+        if key in item:
+            group[key] = item[key]
+    return group
+
+
+def _quality_bar_from_pr_health_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
+    for packet in _pr_health_packets_from_mapping(value):
+        items = _pr_health_items(packet)
+        if not items:
+            continue
+        blocked_items = [item for item in items if _pr_health_item_blocked(item)]
+        blocker_count = _first_int(
+            packet.get("ci_blocked_count"),
+            packet.get("blocker_count"),
+            packet.get("blocked_count"),
+            len(blocked_items),
+        )
+        if not blocked_items and blocker_count <= 0:
+            continue
+        top_item = blocked_items[0] if blocked_items else items[0]
+        count = max(blocker_count, len(blocked_items), 1)
+        group = _pr_blocker_group_from_health_item(top_item, packet, count=count)
+        quality_bar = {
+            "source": "agent_pr_blocker_health",
+            "schema": "chili.agent-pr-blocker-health.quality-bar.v1",
+            "generated_utc": _first_text(
+                packet.get("generated_utc"),
+                packet.get("created_at"),
+            ),
+            "repo": _first_text(packet.get("repo")),
+            "checked_open_pr_count": _first_int(packet.get("checked_open_pr_count")),
+            "ci_blocked_count": count,
+            "delivery_blocker_groups": [group],
+        }
+        return _quality_bar_with_pr_publication_preflight(quality_bar)
+    return {}
+
+
+def _quality_bar_from_mapping(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    for key in _QUALITY_BAR_KEYS:
+        packet = value.get(key)
+        if isinstance(packet, Mapping) and packet:
+            pr_health_packet = _quality_bar_from_pr_health_mapping(packet)
+            if pr_health_packet:
+                return pr_health_packet
+            return _quality_bar_with_pr_publication_preflight(packet)
+    blockers = value.get("delivery_blocker_groups")
+    if isinstance(blockers, list) and blockers:
+        return _quality_bar_with_pr_publication_preflight(value)
+    pr_health_packet = _quality_bar_from_pr_health_mapping(value)
+    if pr_health_packet:
+        return pr_health_packet
+    if _looks_like_pr_publication_receipt_mapping(value):
+        return dict(value)
+    return {}
+
+
+def _looks_like_pr_publication_receipt_mapping(value: Mapping[str, Any]) -> bool:
+    for key in (
+        "publication_receipt",
+        "pr_publication_receipt",
+        "current_head_pr_publication_receipt",
+    ):
+        packet = value.get(key)
+        if isinstance(packet, Mapping) and packet:
+            return True
+    schema = str(value.get("schema") or "").lower()
+    return (
+        "publication-receipt" in schema
+        or "publication_receipt" in schema
+        or "publication_proof_ready" in value
+        or "missing_evidence" in value
+        or "proof_items" in value
+    )
+
+
+def _artifact_scheduled_quality_payload(artifact: ProjectAutonomyArtifact) -> dict[str, Any]:
+    label = f"{artifact.artifact_type or ''} {artifact.name or ''}".lower()
+    if not any(marker in label for marker in _SCHEDULED_QUALITY_ARTIFACT_MARKERS):
+        return {}
+    content = _json_load(artifact.content_json, None)
+    nested = _scheduled_quality_from_mapping(content)
+    if nested:
+        return nested
+    if isinstance(content, Mapping) and content:
+        return dict(content)
+    return {}
+
+
+def _artifact_quality_bar_payload(artifact: ProjectAutonomyArtifact) -> dict[str, Any]:
+    content = _json_load(artifact.content_json, None)
+    packet = _quality_bar_from_mapping(content)
+    if packet:
+        return packet
+    label = f"{artifact.artifact_type or ''} {artifact.name or ''}".lower()
+    if not any(marker in label for marker in _QUALITY_BAR_ARTIFACT_MARKERS):
+        return {}
+    if isinstance(content, Mapping) and content:
+        return dict(content)
+    return {}
+
+
+def _scheduled_quality_payload(
+    db: Session,
+    row: ProjectAutonomyRun,
+    *,
+    artifacts: Iterable[ProjectAutonomyArtifact] | None = None,
+) -> dict[str, Any]:
+    learning = _json_load(row.learning_json, {})
+    packet = _scheduled_quality_from_mapping(learning)
+    if packet:
+        return packet
+
+    agents = _json_load(row.agents_json, [])
+    agent_items = agents if isinstance(agents, list) else [agents]
+    for agent in agent_items:
+        packet = _scheduled_quality_from_mapping(agent)
+        if packet:
+            return packet
+
+    artifact_rows = artifacts
+    if artifact_rows is None:
+        artifact_rows = (
+            db.query(ProjectAutonomyArtifact)
+            .filter(ProjectAutonomyArtifact.run_id == row.run_id)
+            .order_by(ProjectAutonomyArtifact.id.desc())
+            .limit(24)
+            .all()
+        )
+    for artifact in artifact_rows:
+        packet = _artifact_scheduled_quality_payload(artifact)
+        if packet:
+            return packet
+    return {}
+
+
+def _quality_bar_payload(
+    db: Session,
+    row: ProjectAutonomyRun,
+    *,
+    artifacts: Iterable[ProjectAutonomyArtifact] | None = None,
+) -> dict[str, Any]:
+    learning = _json_load(row.learning_json, {})
+    packet = _quality_bar_from_mapping(learning)
+    if packet:
+        return packet
+
+    agents = _json_load(row.agents_json, [])
+    agent_items = agents if isinstance(agents, list) else [agents]
+    for agent in agent_items:
+        packet = _quality_bar_from_mapping(agent)
+        if packet:
+            return packet
+
+    artifact_rows = artifacts
+    if artifact_rows is None:
+        artifact_rows = (
+            db.query(ProjectAutonomyArtifact)
+            .filter(ProjectAutonomyArtifact.run_id == row.run_id)
+            .order_by(ProjectAutonomyArtifact.id.desc())
+            .limit(24)
+            .all()
+        )
+    for artifact in artifact_rows:
+        packet = _artifact_quality_bar_payload(artifact)
+        if packet:
+            return packet
+    return {}
+
+
 def run_payload(db: Session, row: ProjectAutonomyRun, *, include_events: bool = False) -> dict[str, Any]:
     payload = _run_payload(row)
     payload["architect_review"] = _architect_review_payload(_latest_architect_review(db, row.run_id))
@@ -898,16 +4328,22 @@ def run_payload(db: Session, row: ProjectAutonomyRun, *, include_events: bool = 
                 .all()
             )
         ]
+        artifacts = (
+            db.query(ProjectAutonomyArtifact)
+            .filter(ProjectAutonomyArtifact.run_id == row.run_id)
+            .order_by(ProjectAutonomyArtifact.id.asc())
+            .limit(80)
+            .all()
+        )
         payload["artifacts"] = [
             _artifact_payload(artifact)
-            for artifact in (
-                db.query(ProjectAutonomyArtifact)
-                .filter(ProjectAutonomyArtifact.run_id == row.run_id)
-                .order_by(ProjectAutonomyArtifact.id.asc())
-                .limit(80)
-                .all()
-            )
+            for artifact in artifacts
         ]
+        payload["scheduled_quality"] = _scheduled_quality_payload(db, row, artifacts=artifacts)
+        payload["quality_bar"] = _quality_bar_payload(db, row, artifacts=artifacts)
+    else:
+        payload["scheduled_quality"] = _scheduled_quality_payload(db, row)
+        payload["quality_bar"] = _quality_bar_payload(db, row)
     return payload
 
 
@@ -1187,6 +4623,13 @@ def merge_run(db: Session, run_id: str, *, user_id: int | None = None) -> dict[s
     row = _get_run_row(db, run_id, user_id=user_id)
     if row is None:
         return None
+    if row.status != RUN_STATUS_COMPLETED:
+        row.merge_status = "blocked"
+        row.merge_message = "Manual merge is allowed only after the autonomy run completes validation."
+        db.commit()
+        return run_payload(db, row, include_events=True) | {
+            "merge_result": {"ok": False, "reason": row.merge_message}
+        }
     if not row.integration_branch:
         row.merge_status = "blocked"
         row.merge_message = "No integration branch is recorded for this run."
@@ -1955,6 +5398,12 @@ def _completion_message(run: ProjectAutonomyRun) -> str:
 
 
 def _initial_chat_reply(prompt: str) -> str:
+    if _looks_like_live_monitoring_prompt(prompt):
+        return (
+            "This looks like a live monitoring/debugging request rather than a repo-editing task. "
+            "I won't scan or edit the repo for that from Project Autopilot; use the live "
+            "operator/chat monitor, or ask for a specific code change."
+        )
     if _looks_like_greeting_or_chat(prompt):
         return (
             "Hey, I'm here. We can brainstorm, inspect ideas, or shape a plan together. "
@@ -3197,7 +6646,7 @@ def _run_allowlisted(argv: list[str], cwd: Path, *, timeout: int = 300) -> StepR
 
 
 def _step_result_payload(result: StepResult) -> dict[str, Any]:
-    return {
+    payload = {
         "step_key": result.step_key,
         "exit_code": result.exit_code,
         "timed_out": result.timed_out,
@@ -3207,11 +6656,15 @@ def _step_result_payload(result: StepResult) -> dict[str, Any]:
         "skip_reason": result.skip_reason,
         "passed": result.exit_code == 0,
     }
+    metadata = getattr(result, "metadata", None)
+    if isinstance(metadata, Mapping):
+        payload.update(metadata)
+    return payload
 
 
 def run_validation(worktree: Path, changed_files: list[str]) -> list[dict[str, Any]]:
     results: list[StepResult] = [
-        run_ast_syntax(worktree),
+        run_ast_syntax(worktree, changed_files),
         run_ruff_check(worktree),
         run_pytest_targeted(worktree, changed_files),
         run_mypy_check(worktree),
@@ -3231,6 +6684,433 @@ def run_validation(worktree: Path, changed_files: list[str]) -> list[dict[str, A
 
 def validation_passed(results: list[dict[str, Any]]) -> bool:
     return all(int(item.get("exit_code") or 0) == 0 for item in results)
+
+
+def _plan_declared_paths(plan: Mapping[str, Any] | None) -> list[str]:
+    files = plan.get("files") if isinstance(plan, Mapping) else []
+    paths: list[str] = []
+    if not isinstance(files, list):
+        return paths
+    for item in files:
+        if not isinstance(item, Mapping):
+            continue
+        rel = _safe_rel_path(str(item.get("path") or ""))
+        if rel:
+            paths.append(rel)
+    return sorted(dict.fromkeys(paths))
+
+
+def change_blast_radius_gate(
+    plan: Mapping[str, Any] | None,
+    changed_files: Sequence[str] | Iterable[str],
+) -> dict[str, Any]:
+    planned = set(_plan_declared_paths(plan))
+    changed = {
+        rel
+        for value in changed_files
+        for rel in [_safe_rel_path(str(value))]
+        if rel
+    }
+    if changed and not planned:
+        return {
+            "passed": False,
+            "reason": "Patch changed files but the plan did not declare an editable file scope.",
+            "planned_files": [],
+            "changed_files": sorted(changed),
+            "unplanned_files": sorted(changed),
+        }
+    unplanned = sorted(changed - planned)
+    if unplanned:
+        return {
+            "passed": False,
+            "reason": "Patch changed files outside the approved plan scope.",
+            "planned_files": sorted(planned),
+            "changed_files": sorted(changed),
+            "unplanned_files": unplanned,
+        }
+    return {
+        "passed": True,
+        "reason": "Changed files are inside the approved plan scope.",
+        "planned_files": sorted(planned),
+        "changed_files": sorted(changed),
+        "unplanned_files": [],
+    }
+
+
+def _parse_numstat(numstat_text: str | None) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for raw_line in (numstat_text or "").splitlines():
+        parts = raw_line.split("\t")
+        if len(parts) < 3:
+            continue
+        try:
+            added = int(parts[0])
+            deleted = int(parts[1])
+        except ValueError:
+            added = 0
+            deleted = 0
+        rel = _safe_rel_path(parts[2])
+        if rel:
+            rows.append({"path": rel, "added": added, "deleted": deleted, "total": added + deleted})
+    return rows
+
+
+def patch_self_review_gate(
+    plan: Mapping[str, Any] | None,
+    changed_files: Sequence[str] | Iterable[str],
+    *,
+    numstat_text: str | None = None,
+    name_status_text: str | None = None,
+) -> dict[str, Any]:
+    rows = _parse_numstat(numstat_text)
+    changed = {
+        rel
+        for value in changed_files
+        for rel in [_safe_rel_path(str(value))]
+        if rel
+    }
+    if name_status_text:
+        for raw_line in name_status_text.splitlines():
+            parts = raw_line.split("\t")
+            rel = _safe_rel_path(parts[-1] if parts else "")
+            if rel:
+                changed.add(rel)
+    planned = set(_plan_declared_paths(plan))
+    total_delta = sum(int(row["total"]) for row in rows)
+    largest_file_delta = max((int(row["total"]) for row in rows), default=0)
+    file_limit = max(8, len(planned) * 3 if planned else 8)
+    blockers: list[str] = []
+    if len(changed) > file_limit:
+        blockers.append(f"changed {len(changed)} files; limit is {file_limit}")
+    if total_delta > 300:
+        blockers.append(f"patch changed {total_delta} lines; limit is 300")
+    if largest_file_delta > 250:
+        blockers.append(f"largest file delta is {largest_file_delta} lines; limit is 250")
+    if blockers:
+        return {
+            "passed": False,
+            "reason": "Patch is too broad for automatic merge: " + "; ".join(blockers),
+            "changed_files": sorted(changed),
+            "total_delta": total_delta,
+            "largest_file_delta": largest_file_delta,
+            "blockers": blockers,
+        }
+    return {
+        "passed": True,
+        "reason": "Patch size is small enough for automatic review.",
+        "changed_files": sorted(changed),
+        "total_delta": total_delta,
+        "largest_file_delta": largest_file_delta,
+        "blockers": [],
+    }
+
+
+def _validation_step_failed(item: Mapping[str, Any]) -> bool:
+    if item.get("skipped") is True:
+        return False
+    try:
+        return int(item.get("exit_code") or 0) != 0
+    except (TypeError, ValueError):
+        return True
+
+
+def _is_collect_only_validation(item: Mapping[str, Any]) -> bool:
+    scope = str(item.get("validation_scope") or "").lower()
+    command = str(item.get("command") or "").lower()
+    return bool(item.get("fallback_collect_only")) or "collect_only" in scope or "--collect-only" in command
+
+
+def _is_targeted_test_validation(item: Mapping[str, Any]) -> bool:
+    if item.get("skipped") is True or _validation_step_failed(item) or _is_collect_only_validation(item):
+        return False
+    step_key = str(item.get("step_key") or "").lower()
+    command = str(item.get("command") or "").lower()
+    test_files = item.get("test_files")
+    has_test_file = isinstance(test_files, list) and any(str(value).strip() for value in test_files)
+    targeted = item.get("targeted") is True or "target" in str(item.get("validation_scope") or "").lower()
+    return ("pytest" in step_key or "pytest" in command) and targeted and has_test_file
+
+
+def _is_changed_file_syntax_validation(item: Mapping[str, Any]) -> bool:
+    if item.get("skipped") is True or _validation_step_failed(item):
+        return False
+    step_key = str(item.get("step_key") or "").lower()
+    changed = item.get("changed_files")
+    return "syntax" in step_key and isinstance(changed, list) and bool(changed)
+
+
+def validation_merge_evidence(
+    validation: Sequence[Mapping[str, Any]] | Iterable[Mapping[str, Any]],
+    changed_files: Sequence[str] | Iterable[str],
+) -> dict[str, Any]:
+    items = [dict(item) for item in validation if isinstance(item, Mapping)]
+    changed = sorted(
+        rel
+        for value in changed_files
+        for rel in [_safe_rel_path(str(value))]
+        if rel
+    )
+    failed = [item for item in items if _validation_step_failed(item)]
+    if failed:
+        return {
+            "passed": False,
+            "reason": "At least one validation step failed.",
+            "failed_steps": [str(item.get("step_key") or "validation") for item in failed],
+            "changed_files": changed,
+            "evidence_classes": [],
+        }
+    evidence_classes: list[str] = []
+    if any(_is_changed_file_syntax_validation(item) for item in items):
+        evidence_classes.append("changed_file_syntax")
+    if any(_is_targeted_test_validation(item) for item in items):
+        evidence_classes.append("targeted_tests")
+    if not evidence_classes:
+        return {
+            "passed": False,
+            "reason": "Validation did not include changed-file syntax or targeted test evidence.",
+            "failed_steps": [],
+            "changed_files": changed,
+            "evidence_classes": [],
+        }
+    return {
+        "passed": True,
+        "reason": "Validation includes merge-relevant evidence.",
+        "failed_steps": [],
+        "changed_files": changed,
+        "evidence_classes": evidence_classes,
+    }
+
+
+def behavior_validation_evidence(
+    validation: Sequence[Mapping[str, Any]] | Iterable[Mapping[str, Any]],
+    changed_files: Sequence[str] | Iterable[str],
+) -> dict[str, Any]:
+    items = [dict(item) for item in validation if isinstance(item, Mapping)]
+    merge_gate = validation_merge_evidence(items, changed_files)
+    if not merge_gate.get("passed"):
+        return {
+            "passed": False,
+            "reason": str(merge_gate.get("reason") or "Validation evidence is not merge-ready."),
+            "targeted_tests": [],
+            "changed_files": merge_gate.get("changed_files") or [],
+        }
+    targeted = [item for item in items if _is_targeted_test_validation(item)]
+    if not targeted:
+        return {
+            "passed": False,
+            "reason": "Behavior-changing code needs targeted test evidence, not syntax-only validation.",
+            "targeted_tests": [],
+            "changed_files": merge_gate.get("changed_files") or [],
+        }
+    return {
+        "passed": True,
+        "reason": "Targeted behavior tests are present.",
+        "targeted_tests": [str(test) for item in targeted for test in (item.get("test_files") or [])],
+        "changed_files": merge_gate.get("changed_files") or [],
+    }
+
+
+_DOMAIN_INVARIANT_RULES: tuple[tuple[tuple[str, ...], str, tuple[str, ...]], ...] = (
+    (("pdt_guard",), "pdt", ("pdt", "day-trade", "day trade", "intraday", "margin")),
+    (("broker_position", "broker_truth"), "broker_truth", ("broker truth", "readback", "reconcile", "reconciliation")),
+    (("order_watchdog", "order_state"), "order_state", ("order state", "state machine", "stuck order", "watchdog")),
+    (("management_envelopes", "position_identity"), "position_identity", ("position identity", "linked trade", "management envelope")),
+    (("portfolio_risk", "capital_risk"), "capital_risk", ("capital risk", "portfolio risk", "drawdown budget")),
+    (("monthly_dd", "drawdown"), "drawdown", ("drawdown", "loss breaker", "stop bleed")),
+    (("trading_scheduler", "live_control"), "live_control", ("live runtime", "runtime control", "live control", "breaker")),
+)
+
+
+def _required_domain_invariants(changed_files: Sequence[str] | Iterable[str]) -> list[dict[str, Any]]:
+    required: list[dict[str, Any]] = []
+    for value in changed_files:
+        rel = _safe_rel_path(str(value))
+        if not rel:
+            continue
+        lower = rel.lower()
+        invariants = [
+            invariant
+            for tokens, invariant, _evidence_terms in _DOMAIN_INVARIANT_RULES
+            if any(token in lower for token in tokens)
+        ]
+        if invariants:
+            required.append({"source_file": rel, "invariants": sorted(dict.fromkeys(invariants))})
+    return required
+
+
+def _validation_haystack(item: Mapping[str, Any]) -> str:
+    chunks: list[str] = [
+        str(item.get("step_key") or ""),
+        str(item.get("command") or ""),
+        str(item.get("validation_scope") or ""),
+    ]
+    for test_file in item.get("test_files") or []:
+        chunks.append(str(test_file))
+    for selected in item.get("test_selection") or []:
+        if isinstance(selected, Mapping):
+            chunks.extend(str(selected.get(key) or "") for key in ("test_file", "reason"))
+    return " ".join(chunks).lower().replace("_", " ").replace("-", " ")
+
+
+def domain_behavior_validation_evidence(
+    validation: Sequence[Mapping[str, Any]] | Iterable[Mapping[str, Any]],
+    changed_files: Sequence[str] | Iterable[str],
+) -> dict[str, Any]:
+    items = [dict(item) for item in validation if isinstance(item, Mapping)]
+    required = _required_domain_invariants(changed_files)
+    required_names = sorted(
+        dict.fromkeys(
+            invariant
+            for item in required
+            for invariant in item.get("invariants", [])
+        )
+    )
+    covered_names: set[str] = set()
+    for item in items:
+        if not _is_targeted_test_validation(item):
+            continue
+        haystack = _validation_haystack(item)
+        for _tokens, invariant, evidence_terms in _DOMAIN_INVARIANT_RULES:
+            if invariant not in required_names:
+                continue
+            if any(term.replace("_", " ") in haystack for term in evidence_terms):
+                covered_names.add(invariant)
+    covered = [
+        {"source_file": "validation", "invariants": [invariant]}
+        for invariant in required_names
+        if invariant in covered_names
+    ]
+    missing = [
+        {"source_file": "validation", "invariants": [invariant]}
+        for invariant in required_names
+        if invariant not in covered_names
+    ]
+    behavior_gate = behavior_validation_evidence(items, changed_files)
+    blockers: list[str] = []
+    if not behavior_gate.get("passed"):
+        blockers.append(str(behavior_gate.get("reason") or "Targeted behavior tests are missing."))
+    if missing:
+        blockers.append("Missing invariant evidence: " + ", ".join(item["invariants"][0] for item in missing))
+    return {
+        "passed": not blockers,
+        "reason": "Domain behavior evidence is complete." if not blockers else "; ".join(blockers),
+        "required_domain_invariants": required,
+        "covered_domain_invariants": covered,
+        "missing_invariant_evidence": missing,
+        "blockers": blockers,
+    }
+
+
+def semantic_patch_review_gate(
+    plan: Mapping[str, Any] | None,
+    changed_files: Sequence[str] | Iterable[str],
+    *,
+    diff_text: str | None = None,
+    validation: Sequence[Mapping[str, Any]] | Iterable[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    text = diff_text or ""
+    changed = [rel for value in changed_files for rel in [_safe_rel_path(str(value))] if rel]
+    public_contract_change = bool(
+        re.search(r"^-def\s+[A-Za-z_]\w*\(", text, re.MULTILINE)
+        or re.search(r"^-class\s+[A-Za-z_]\w*", text, re.MULTILINE)
+        or any(path.startswith(("app/routers/", "app/api/")) for path in changed)
+    )
+    tests = [
+        str(test)
+        for item in validation
+        if isinstance(item, Mapping)
+        for test in (item.get("test_files") or [])
+    ]
+    has_contract_tests = any(
+        "contract" in test.lower() or "api" in test.lower() or "router" in test.lower()
+        for test in tests
+    )
+    if public_contract_change and not has_contract_tests:
+        return {
+            "passed": False,
+            "reason": "Public contract changes need API or contract test evidence before merge.",
+            "changed_files": changed,
+            "public_contract_change": True,
+            "contract_tests": tests,
+        }
+    return {
+        "passed": True,
+        "reason": "Semantic patch review found no untested public contract change.",
+        "changed_files": changed,
+        "public_contract_change": public_contract_change,
+        "contract_tests": tests,
+    }
+
+
+def validation_repair_context(
+    validation: Sequence[Mapping[str, Any]] | Iterable[Mapping[str, Any]],
+    *,
+    changed_files: Sequence[str] | Iterable[str] = (),
+    plan_files: Sequence[Mapping[str, Any]] | Iterable[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    failed_steps: list[dict[str, Any]] = []
+    for item in validation:
+        if not isinstance(item, Mapping) or not _validation_step_failed(item):
+            continue
+        failed_steps.append(
+            {
+                "step_key": str(item.get("step_key") or "validation"),
+                "exit_code": item.get("exit_code"),
+                "command": str(item.get("command") or ""),
+                "test_files": [str(value) for value in (item.get("test_files") or [])],
+                "test_selection": item.get("test_selection") if isinstance(item.get("test_selection"), list) else [],
+                "stdout_tail": truncate_text(str(item.get("stdout") or ""), 1800),
+                "stderr_tail": truncate_text(str(item.get("stderr") or ""), 1800),
+            }
+        )
+    return {
+        "schema": "chili.validation-repair-context.v1",
+        "changed_files": [rel for value in changed_files for rel in [_safe_rel_path(str(value))] if rel],
+        "plan_files": [dict(item) for item in plan_files if isinstance(item, Mapping)],
+        "failed_steps": failed_steps,
+    }
+
+
+def validation_repair_context_text(context: Mapping[str, Any]) -> str:
+    changed_text = ", ".join(str(value) for value in context.get("changed_files") or []) or "none"
+    lines = [
+        "schema: chili.validation-repair-context.v1",
+        "changed_files: " + changed_text,
+    ]
+    for index, item in enumerate(context.get("failed_steps") or [], start=1):
+        if not isinstance(item, Mapping):
+            continue
+        lines.append(f"failed_step[{index}]: {item.get('step_key')} exit={item.get('exit_code')}")
+        if item.get("command"):
+            lines.append(f"command: {item.get('command')}")
+        tests = ", ".join(str(value) for value in item.get("test_files") or [])
+        if tests:
+            lines.append(f"tests: {tests}")
+        stdout_tail = str(item.get("stdout_tail") or "").strip()
+        stderr_tail = str(item.get("stderr_tail") or "").strip()
+        if stdout_tail:
+            lines.append("stdout_tail:\n" + stdout_tail)
+        if stderr_tail:
+            lines.append("stderr_tail:\n" + stderr_tail)
+    return "\n".join(lines).strip()
+
+
+def _run_needs_visual_qa(run: Any, plan: Mapping[str, Any] | None) -> bool:
+    status = str(getattr(run, "status", "") or "").lower()
+    if status not in {RUN_STATUS_COMPLETED, RUN_STATUS_MERGED, "completed", "merged"}:
+        return False
+    prompt = str(getattr(run, "prompt", "") or "").lower()
+    visual_prompt = any(token in prompt for token in ("ui", "screen", "layout", "visible", "frontend", "button"))
+    visual_paths = []
+    for rel in _plan_declared_paths(plan):
+        lower = rel.lower()
+        suffix = Path(lower).suffix
+        if suffix in {".dart", ".tsx", ".jsx", ".html", ".css"} and any(
+            token in lower
+            for token in ("screen", "view", "widget", "component", "mobile", "desktop", "src/brain")
+        ):
+            visual_paths.append(rel)
+    return bool(visual_paths and (visual_prompt or "screen" in " ".join(visual_paths).lower()))
 
 
 def _validation_failure_text(results: list[dict[str, Any]]) -> str:
