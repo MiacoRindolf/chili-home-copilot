@@ -3,10 +3,12 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:chili_mobile/src/agents/agent.dart';
+import 'package:chili_mobile/src/agents/agent_control_service.dart';
 import 'package:chili_mobile/src/agents/agent_persistence.dart';
 import 'package:chili_mobile/src/agents/agent_registry.dart';
 import 'package:chili_mobile/src/agents/agent_status_service.dart';
 import 'package:chili_mobile/src/agents/agents_screen.dart';
+import 'package:chili_mobile/src/network/chili_api_client.dart';
 
 void main() {
   group('defaultAgents seed', () {
@@ -208,7 +210,7 @@ void main() {
   group('AgentsScreen widget', () {
     setUp(() => SharedPreferences.setMockInitialValues(<String, Object>{}));
 
-    testWidgets('renders header, list and a working Start control', (WidgetTester tester) async {
+    testWidgets('renders header, list and a working local Start control', (WidgetTester tester) async {
       final AgentRegistry r = AgentRegistry();
       await tester.pumpWidget(MaterialApp(
         home: AgentsScreen(registry: r, livePolling: false),
@@ -219,10 +221,12 @@ void main() {
       expect(find.text('Auto-Trader'), findsWidgets);
       expect(find.text('0 running'), findsOneWidget);
 
-      // Auto-Trader is first → selected by default. Start it (not live-backed).
+      // Pick a local-only agent (not control-backed, not live) and Start it.
+      await tester.tap(find.text('Crypto Stop Monitor').first);
+      await tester.pumpAndSettle();
       await tester.tap(find.widgetWithText(FilledButton, 'Start'));
       await tester.pumpAndSettle();
-      expect(r.byId('auto-trader')!.status, AgentStatus.running);
+      expect(r.byId('crypto-stop-monitor')!.status, AgentStatus.running);
       expect(find.text('1 running'), findsOneWidget);
     });
 
@@ -258,7 +262,7 @@ void main() {
       expect(find.text('1 running'), findsOneWidget);
     });
 
-    testWidgets('live-backed agent has read-only controls', (WidgetTester tester) async {
+    testWidgets('read-only live agent (no control endpoint) has disabled Start', (WidgetTester tester) async {
       await tester.pumpWidget(MaterialApp(
         home: AgentsScreen(
           livePoller: () async => const <String, AgentLiveStatus>{},
@@ -266,14 +270,94 @@ void main() {
       ));
       await tester.pumpAndSettle();
 
-      // Select a live-backed agent (Learning Cycle) and confirm Start is disabled.
-      await tester.tap(find.text('Learning Cycle').first);
+      // Position Monitor is live-backed but has no control endpoint → read-only.
+      await tester.tap(find.text('Position Monitor').first);
       await tester.pumpAndSettle();
       final FilledButton start = tester.widget<FilledButton>(
         find.widgetWithText(FilledButton, 'Start'),
       );
-      expect(start.onPressed, isNull, reason: 'live agent control is read-only');
+      expect(start.onPressed, isNull, reason: 'no control endpoint → read-only');
       expect(find.text('LIVE'), findsWidgets);
+    });
+
+    testWidgets('compute-only control invokes backend without a dialog', (WidgetTester tester) async {
+      final List<String> calls = <String>[];
+      await tester.pumpWidget(MaterialApp(
+        home: AgentsScreen(
+          livePoller: () async => const <String, AgentLiveStatus>{},
+          controlInvoker: (String id, AgentAction action) async {
+            calls.add('$id:${action.name}');
+          },
+        ),
+      ));
+      await tester.pumpAndSettle();
+
+      // Filter to Coding so the (lazily-built) tile is on-screen, then select it.
+      await tester.tap(find.widgetWithText(ChoiceChip, 'Coding'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Coding Autopilot').first);
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Start'));
+      await tester.pumpAndSettle();
+
+      expect(calls, <String>['coding-autopilot:start']);
+      // No confirm dialog for compute-only agents.
+      expect(find.text('Resume live trading'), findsNothing);
+    });
+
+    testWidgets('trading control requires confirm; Cancel aborts, Resume fires', (WidgetTester tester) async {
+      final List<String> calls = <String>[];
+      await tester.pumpWidget(MaterialApp(
+        home: AgentsScreen(
+          livePoller: () async => const <String, AgentLiveStatus>{},
+          controlInvoker: (String id, AgentAction action) async {
+            calls.add('$id:${action.name}');
+          },
+        ),
+      ));
+      await tester.pumpAndSettle();
+
+      // Auto-Trader is control-backed AND trading-gated (default selected first).
+      await tester.tap(find.text('Auto-Trader').first);
+      await tester.pumpAndSettle();
+
+      // Tap Start → confirm dialog appears; Cancel → no backend call.
+      await tester.tap(find.widgetWithText(FilledButton, 'Start'));
+      await tester.pumpAndSettle();
+      expect(find.text('Resume live trading'), findsOneWidget);
+      await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+      await tester.pumpAndSettle();
+      expect(calls, isEmpty, reason: 'cancel must not call the backend');
+
+      // Tap Start again → confirm → backend call fires.
+      await tester.tap(find.widgetWithText(FilledButton, 'Start'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Resume live trading'));
+      await tester.pumpAndSettle();
+      expect(calls, <String>['auto-trader:start']);
+    });
+  });
+
+  group('AgentControlService mapping (AGT-3)', () {
+    test('control-backed / run-once / trading-confirm ids are all real agents', () {
+      final Set<String> seeded = defaultAgents().map((Agent a) => a.id).toSet();
+      expect(seeded.containsAll(controlBackedAgentIds), isTrue);
+      expect(controlBackedAgentIds.containsAll(runOnceBackedAgentIds), isTrue);
+      expect(controlBackedAgentIds.containsAll(tradingConfirmAgentIds), isTrue);
+    });
+
+    test('unsupported (id, action) pairs throw before any network call', () async {
+      // Unsupported pairs short-circuit in the switch, so the client is never
+      // touched — a real (unused) client is fine here.
+      final AgentControlService svc = AgentControlService(ChiliApiClient());
+      await expectLater(
+        svc.invoke('auto-trader', AgentAction.runOnce),
+        throwsUnsupportedError,
+      );
+      await expectLater(
+        svc.invoke('no-such-agent', AgentAction.start),
+        throwsUnsupportedError,
+      );
     });
   });
 

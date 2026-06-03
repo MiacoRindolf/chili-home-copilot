@@ -92,6 +92,16 @@ class ChiliApiClient {
         .timeout(_requestTimeout);
   }
 
+  Future<http.Response> _patch(
+    Uri uri, {
+    Map<String, String>? headers,
+    Object? body,
+  }) {
+    return _client
+        .patch(uri, headers: headers, body: body)
+        .timeout(_requestTimeout);
+  }
+
   static const Map<String, String> _pairingJsonHeaders = {
     'Content-Type': 'application/json',
   };
@@ -960,4 +970,61 @@ class ChiliApiClient {
   /// GET /api/trading/monitor/active — active setups + monitor summary.
   Future<Map<String, dynamic>> getActiveSetupsSummary() =>
       _getMapSafe('/api/trading/monitor/active');
+
+  // ── Agents app (AGT-3): control actions ─────────────────────────────────
+  // These mutate backend state, so they THROW on failure (caller surfaces the
+  // error and re-polls) rather than swallowing like the status probes.
+
+  void _ensureOk(http.Response res) {
+    if (res.statusCode == 200 || res.statusCode == 201) return;
+    String msg = 'HTTP ${res.statusCode}';
+    try {
+      final Object? d = jsonDecode(res.body);
+      if (d is Map && (d['error'] ?? d['detail']) is String) {
+        msg = (d['error'] ?? d['detail']) as String;
+      }
+    } catch (_) {}
+    throw Exception(msg);
+  }
+
+  /// POST /api/brain/code/mode — set the code-brain runtime mode
+  /// ("reactive" to run, "paused" to halt the coding autopilot + task watcher).
+  Future<void> setCodeBrainMode(String mode) async {
+    final http.Response res = await _post(
+      Uri.parse('$baseUrl/api/brain/code/mode'),
+      headers: _headers(),
+      body: jsonEncode(<String, String>{'mode': mode}),
+    );
+    _ensureOk(res);
+  }
+
+  /// POST /api/brain/context/budget — toggle the learning cycle on/off.
+  Future<void> setContextLearning(bool enabled) async {
+    final http.Response res = await _post(
+      Uri.parse('$baseUrl/api/brain/context/budget'),
+      headers: _headers(),
+      body: jsonEncode(<String, bool>{'learning_enabled': enabled}),
+    );
+    _ensureOk(res);
+  }
+
+  /// POST /api/trading/learn/cycle — trigger a full learning cycle now.
+  Future<void> triggerLearnCycle() async {
+    final http.Response res = await _post(
+      Uri.parse('$baseUrl/api/trading/learn/cycle'),
+      headers: _headers(),
+    );
+    _ensureOk(res);
+  }
+
+  /// PATCH /api/trading/autotrader/desk — pause/resume the auto-trader desk.
+  /// paused=true halts entries; paused=false RESUMES live trading.
+  Future<void> setAutotraderPaused(bool paused) async {
+    final http.Response res = await _patch(
+      Uri.parse('$baseUrl/api/trading/autotrader/desk'),
+      headers: _headers(),
+      body: jsonEncode(<String, bool>{'paused': paused}),
+    );
+    _ensureOk(res);
+  }
 }

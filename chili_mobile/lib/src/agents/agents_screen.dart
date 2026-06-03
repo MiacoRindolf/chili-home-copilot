@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../network/chili_api_client.dart';
 import 'agent.dart';
+import 'agent_control_service.dart';
 import 'agent_persistence.dart';
 import 'agent_registry.dart';
 import 'agent_status_service.dart';
@@ -11,6 +12,10 @@ import 'agent_status_service.dart';
 /// Signature of the live-status poller — injectable so tests can feed canned
 /// readings without touching the network.
 typedef AgentStatusPoller = Future<Map<String, AgentLiveStatus>> Function();
+
+/// Signature of a control invoker — injectable so tests can record actions
+/// without touching the network.
+typedef AgentControlInvoker = Future<void> Function(String id, AgentAction action);
 
 /// Mission control for CHILI's autonomous agents — check, configure and run the
 /// trading / brain / coding / system fleet. AGT-1: master/detail with local
@@ -21,9 +26,11 @@ class AgentsScreen extends StatefulWidget {
     super.key,
     AgentRegistry? registry,
     AgentStatusPoller? livePoller,
+    AgentControlInvoker? controlInvoker,
     bool livePolling = true,
   })  : _injectedRegistry = registry,
         _injectedPoller = livePoller,
+        _injectedControl = controlInvoker,
         _livePolling = livePolling;
 
   /// Optional registry for tests; production builds seed a fresh one.
@@ -31,6 +38,9 @@ class AgentsScreen extends StatefulWidget {
 
   /// Optional status poller for tests; production builds a real one.
   final AgentStatusPoller? _injectedPoller;
+
+  /// Optional control invoker for tests; production builds a real one.
+  final AgentControlInvoker? _injectedControl;
 
   /// When false, no live polling timer runs (used by tests / when offline use
   /// is undesirable).
@@ -42,7 +52,8 @@ class AgentsScreen extends StatefulWidget {
 
 class _AgentsScreenState extends State<AgentsScreen> {
   late final AgentRegistry _registry;
-  AgentStatusPoller? _poller;
+  late final AgentStatusPoller _poller;
+  late final AgentControlInvoker _invoker;
   AgentStatusService? _ownedService;
   AgentKind? _filter; // null = All
   String? _selectedId;
@@ -58,8 +69,24 @@ class _AgentsScreenState extends State<AgentsScreen> {
     super.initState();
     _registry = widget._injectedRegistry ?? AgentRegistry();
     _selectedId = _registry.agents.isNotEmpty ? _registry.agents.first.id : null;
+
+    // A single shared client backs both the status poll and control actions.
+    final bool needClient =
+        widget._injectedPoller == null || widget._injectedControl == null;
+    final ChiliApiClient? api = needClient ? ChiliApiClient() : null;
+    if (widget._injectedPoller != null) {
+      _poller = widget._injectedPoller!;
+    } else {
+      _ownedService = AgentStatusService(api!);
+      _poller = _ownedService!.poll;
+    }
+    _invoker = widget._injectedControl ?? AgentControlService(api!).invoke;
+
     _restore();
-    if (widget._livePolling) _startPolling();
+    if (widget._livePolling) {
+      _poll();
+      _pollTimer = Timer.periodic(_pollInterval, (_) => _poll());
+    }
   }
 
   Future<void> _restore() async {
@@ -69,23 +96,10 @@ class _AgentsScreenState extends State<AgentsScreen> {
     _registry.addListener(_scheduleSave);
   }
 
-  void _startPolling() {
-    if (widget._injectedPoller != null) {
-      _poller = widget._injectedPoller;
-    } else {
-      _ownedService = AgentStatusService(ChiliApiClient());
-      _poller = _ownedService!.poll;
-    }
-    _poll();
-    _pollTimer = Timer.periodic(_pollInterval, (_) => _poll());
-  }
-
   Future<void> _poll() async {
-    final AgentStatusPoller? poll = _poller;
-    if (poll == null) return;
     Map<String, AgentLiveStatus> live;
     try {
-      live = await poll();
+      live = await _poller();
     } catch (_) {
       live = const <String, AgentLiveStatus>{};
     }
@@ -98,6 +112,85 @@ class _AgentsScreenState extends State<AgentsScreen> {
       _reachable = _ownedService?.reachable ?? live.isNotEmpty;
       _polledOnce = true;
     });
+  }
+
+  // ── Real backend control (AGT-3) ─────────────────────────────────────────
+  Future<void> _control(Agent a, AgentAction action) async {
+    if (tradingConfirmAgentIds.contains(a.id)) {
+      final bool ok = await _confirmTrading(a, action);
+      if (ok != true || !mounted) return;
+    }
+    try {
+      await _invoker(a.id, action);
+      if (!mounted) return;
+      _snack('${a.name}: ${_actionVerb(action)} sent to backend');
+      _poll(); // pull the real status back
+    } catch (e) {
+      if (!mounted) return;
+      _snack('${a.name}: ${_actionVerb(action)} failed — ${_short(e)}',
+          isError: true);
+    }
+  }
+
+  Future<bool> _confirmTrading(Agent a, AgentAction action) async {
+    final bool resuming = action == AgentAction.start;
+    final String title = resuming ? 'Resume ${a.name}?' : 'Pause ${a.name}?';
+    final String body = resuming
+        ? 'This re-enables live trading — the auto-trader can place REAL orders. '
+            'Continue?'
+        : 'This halts new auto-trader entries. Open positions are unaffected.';
+    final bool? ok = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext ctx) {
+        final ColorScheme cs = Theme.of(ctx).colorScheme;
+        return AlertDialog(
+          icon: Icon(resuming ? Icons.warning_amber_rounded : Icons.pause_circle,
+              color: resuming ? cs.error : cs.primary),
+          title: Text(title),
+          content: Text(body),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              style: resuming
+                  ? FilledButton.styleFrom(backgroundColor: cs.error)
+                  : null,
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: Text(resuming ? 'Resume live trading' : 'Pause'),
+            ),
+          ],
+        );
+      },
+    );
+    return ok ?? false;
+  }
+
+  void _snack(String msg, {bool isError = false}) {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(msg),
+      backgroundColor: isError ? cs.errorContainer : null,
+      behavior: SnackBarBehavior.floating,
+      duration: const Duration(seconds: 3),
+    ));
+  }
+
+  static String _actionVerb(AgentAction a) {
+    switch (a) {
+      case AgentAction.start:
+        return 'Start';
+      case AgentAction.stop:
+        return 'Stop';
+      case AgentAction.runOnce:
+        return 'Run';
+    }
+  }
+
+  static String _short(Object e) {
+    final String s = e.toString().replaceFirst('Exception: ', '');
+    return s.length > 80 ? '${s.substring(0, 80)}…' : s;
   }
 
   @override
@@ -291,6 +384,10 @@ class _AgentsScreenState extends State<AgentsScreen> {
       );
     }
     final bool live = liveBackedAgentIds.contains(a.id);
+    final bool ctrl = controlBackedAgentIds.contains(a.id); // real backend control
+    final bool gated = tradingConfirmAgentIds.contains(a.id); // trading → confirm
+    final bool roLive = live && !ctrl; // live status but no control endpoint
+    final bool runOnceBacked = runOnceBackedAgentIds.contains(a.id);
     return ListView(
       padding: const EdgeInsets.all(20),
       children: <Widget>[
@@ -315,37 +412,50 @@ class _AgentsScreenState extends State<AgentsScreen> {
               const SizedBox(width: 8),
               const _LiveTag(),
             ],
+            if (gated) ...<Widget>[
+              const SizedBox(width: 8),
+              _CountPill(label: 'LIVE TRADING', color: cs.error),
+            ],
           ],
         ),
         const SizedBox(height: 12),
         Text(a.description, style: TextStyle(color: cs.onSurfaceVariant, height: 1.4)),
         const SizedBox(height: 20),
-        // Controls. Live-backed agents reflect backend truth (read-only here);
-        // real start/stop control lands in AGT-3.
+        // Controls. ctrl agents act on the real backend (trading ones gated by a
+        // confirm); roLive agents are read-only; the rest are local (AGT-1).
         Wrap(
           spacing: 10,
           runSpacing: 10,
           crossAxisAlignment: WrapCrossAlignment.center,
           children: <Widget>[
             FilledButton.icon(
-              onPressed:
-                  (!live && a.canStart && a.enabled && a.status != AgentStatus.running)
+              onPressed: ctrl
+                  ? (a.status != AgentStatus.running
+                      ? () => _control(a, AgentAction.start)
+                      : null)
+                  : ((!roLive && a.canStart && a.enabled && a.status != AgentStatus.running)
                       ? () => _registry.start(a.id)
-                      : null,
+                      : null),
               icon: const Icon(Icons.play_arrow, size: 18),
               label: const Text('Start'),
             ),
             OutlinedButton.icon(
-              onPressed: (!live && a.canStop && a.status == AgentStatus.running)
-                  ? () => _registry.stop(a.id)
-                  : null,
+              onPressed: ctrl
+                  ? (a.status == AgentStatus.running
+                      ? () => _control(a, AgentAction.stop)
+                      : null)
+                  : ((!roLive && a.canStop && a.status == AgentStatus.running)
+                      ? () => _registry.stop(a.id)
+                      : null),
               icon: const Icon(Icons.stop, size: 18),
               label: const Text('Stop'),
             ),
             OutlinedButton.icon(
-              onPressed: (!live && a.canRunOnce && a.enabled)
-                  ? () => _registry.runOnce(a.id)
-                  : null,
+              onPressed: ctrl
+                  ? (runOnceBacked ? () => _control(a, AgentAction.runOnce) : null)
+                  : ((!roLive && a.canRunOnce && a.enabled)
+                      ? () => _registry.runOnce(a.id)
+                      : null),
               icon: const Icon(Icons.bolt, size: 18),
               label: const Text('Run once'),
             ),
@@ -355,7 +465,9 @@ class _AgentsScreenState extends State<AgentsScreen> {
               children: <Widget>[
                 Switch(
                   value: a.enabled,
-                  onChanged: live ? null : (bool v) => _registry.setEnabled(a.id, v),
+                  onChanged: (live || ctrl)
+                      ? null
+                      : (bool v) => _registry.setEnabled(a.id, v),
                 ),
                 Text('Enabled', style: TextStyle(color: cs.onSurface)),
               ],
@@ -363,7 +475,18 @@ class _AgentsScreenState extends State<AgentsScreen> {
           ],
         ),
         const SizedBox(height: 8),
-        live ? _liveNote(cs) : _localNote(cs),
+        if (ctrl)
+          _noteRow(
+            cs,
+            gated ? Icons.warning_amber_rounded : Icons.cloud_sync_outlined,
+            gated
+                ? 'Acts on the LIVE auto-trader. Resuming can place real orders — every action is confirmed first.'
+                : 'Acts on the live backend (real start/stop/run).',
+          )
+        else if (roLive)
+          _liveNote(cs)
+        else
+          _localNote(cs),
         const SizedBox(height: 18),
         _section(cs, 'Schedule'),
         Text(a.schedule.isEmpty ? '—' : a.schedule,
