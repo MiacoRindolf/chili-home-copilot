@@ -51,7 +51,53 @@
     if (dataFreshEl) dataFreshEl.textContent = 'Data · ' + relTime(dataFreshIso);
   }
 
-  function tick() { tickClock(); renderActivity(); }
+  // ── Market-session countdown: "Opens · 1h 30m" / "Closes · 2h 14m" next to the
+  //    market pill, ticking client-side off the ET clock. The open/closed STATE
+  //    comes from the backend poll (mktOpen); the countdown targets the naive US
+  //    equities regular session (9:30–16:00 ET, Mon–Fri). Holiday-safe: if the
+  //    backend reports closed *during* regular hours it's a holiday/half-day, so
+  //    we show "Market closed" instead of a misleading countdown. ──
+  var mktOpen = null;  // latest equities_open from the poll (true / false / null=unknown)
+  var SESSION_OPEN = 9 * 60 + 30, SESSION_CLOSE = 16 * 60;
+  function etNow() {
+    try {
+      var o = {};
+      new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour12: false, weekday: 'short', hour: '2-digit', minute: '2-digit' })
+        .formatToParts(new Date()).forEach(function (p) { o[p.type] = p.value; });
+      var dow = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }[o.weekday];
+      if (dow == null) return null;
+      return { dow: dow, h: parseInt(o.hour, 10) % 24, m: parseInt(o.minute, 10) };
+    } catch (e) { return null; }
+  }
+  function fmtDur(mins) {
+    if (mins < 1) return '<1m';
+    var d = Math.floor(mins / 1440), h = Math.floor((mins % 1440) / 60), m = mins % 60;
+    if (d > 0) return d + 'd ' + h + 'h';
+    if (h > 0) return h + 'h ' + (m < 10 ? '0' : '') + m + 'm';
+    return m + 'm';
+  }
+  function minsToNextOpen(t) {
+    var now = t.h * 60 + t.m;
+    for (var d = 0; d < 8; d++) {
+      var dow = (t.dow + d) % 7;
+      if (dow >= 1 && dow <= 5) { var at = d * 1440 + SESSION_OPEN; if (at > now) return at - now; }
+    }
+    return 0;
+  }
+  // Pure: backend open-flag + ET parts → the session-countdown label.
+  function sessionLabel(open, t) {
+    if (!t || open == null) return 'Session · —';
+    var now = t.h * 60 + t.m, weekday = t.dow >= 1 && t.dow <= 5;
+    if (open) return 'Closes · ' + fmtDur(Math.max(0, SESSION_CLOSE - now));
+    if (weekday && now >= SESSION_OPEN && now < SESSION_CLOSE) return 'Market closed';  // holiday / halt
+    return 'Opens · ' + fmtDur(minsToNextOpen(t));
+  }
+  function renderSession() {
+    var el = document.getElementById('ws-mkt-countdown'); if (!el) return;
+    el.textContent = sessionLabel(mktOpen, etNow());
+  }
+
+  function tick() { tickClock(); renderActivity(); renderSession(); }
   tick();
   setInterval(tick, 1000);
 
@@ -147,6 +193,8 @@
     var m = d.market || {};
     if (m.ok === false || m.equities_open == null) setPill('ws-mkt', 'unknown', 'Market · —');
     else setPill('ws-mkt', m.equities_open ? 'ok' : 'warn', m.equities_open ? 'Market · open' : 'Market · closed');
+    mktOpen = (m.ok === false || m.equities_open == null) ? null : !!m.equities_open;
+    renderSession();
 
     var k = d.kill_switch || {};
     if (!k.ok) setPill('ws-killswitch', 'unknown', 'Kill switch · —');
@@ -180,4 +228,8 @@
   poll();
   setInterval(poll, 20000);
   document.addEventListener('visibilitychange', function () { if (!document.hidden) poll(); });
+
+  // Expose the pure session-label helper (other widgets / tests can compute the
+  // same "Opens/Closes in …" string for any open-flag + ET time).
+  window.ChiliDesktop = { sessionLabel: sessionLabel, etNow: etNow };
 })();
