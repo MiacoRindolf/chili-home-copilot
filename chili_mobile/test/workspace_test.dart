@@ -6,6 +6,7 @@ import 'package:chili_mobile/src/screen/focus_controller.dart';
 import 'package:chili_mobile/src/workspace/workspace_controller.dart';
 import 'package:chili_mobile/src/workspace/workspace_palette.dart';
 import 'package:chili_mobile/src/workspace/workspace_shell.dart';
+import 'package:chili_mobile/src/workspace/workspace_taskbar.dart';
 
 void main() {
   group('WorkspaceController', () {
@@ -193,6 +194,54 @@ void main() {
       await tester.tap(find.text('Brain'));
       await tester.pump();
       expect(opened, 'brain');
+    });
+  });
+
+  group('WorkspaceTaskbar', () {
+    WsWindow win(String id, String title) => WsWindow(
+          id: id,
+          title: title,
+          icon: Icons.chat,
+          position: Offset.zero,
+          size: const Size(100, 100),
+          z: 1,
+          minimized: true,
+        );
+
+    testWidgets('shows a chip per minimized window; tapping restores it', (WidgetTester tester) async {
+      String? restored;
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: Stack(
+            children: <Widget>[
+              WorkspaceTaskbar(
+                minimized: <WsWindow>[win('chat', 'Chat'), win('brain', 'Brain')],
+                onRestore: (String id) => restored = id,
+              ),
+            ],
+          ),
+        ),
+      ));
+      await tester.pump();
+      expect(find.text('Chat'), findsOneWidget);
+      expect(find.text('Brain'), findsOneWidget);
+      await tester.tap(find.text('Brain'));
+      await tester.pump();
+      expect(restored, 'brain');
+    });
+
+    testWidgets('renders nothing when no window is minimized', (WidgetTester tester) async {
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: Stack(
+            children: <Widget>[
+              WorkspaceTaskbar(minimized: const <WsWindow>[], onRestore: (_) {}),
+            ],
+          ),
+        ),
+      ));
+      await tester.pump();
+      expect(find.byType(InkWell), findsNothing);
     });
   });
 }

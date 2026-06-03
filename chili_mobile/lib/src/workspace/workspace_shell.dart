@@ -11,6 +11,7 @@ import '../settings/settings_screen.dart';
 import 'os_window.dart';
 import 'workspace_controller.dart';
 import 'workspace_palette.dart';
+import 'workspace_taskbar.dart';
 
 /// Definition of a dockable app surface.
 class _AppDef {
@@ -188,6 +189,10 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
                     desktopSize: deskSize,
                     child: _bodyFor(w.id),
                   ),
+                WorkspaceTaskbar(
+                  minimized: _ws.windows.where((WsWindow w) => w.minimized).toList(),
+                  onRestore: _ws.focus,
+                ),
               ],
             );
           },
