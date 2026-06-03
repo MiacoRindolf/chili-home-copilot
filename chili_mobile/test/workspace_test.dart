@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:chili_mobile/src/companion/shared_chat_history.dart';
 import 'package:chili_mobile/src/screen/focus_controller.dart';
 import 'package:chili_mobile/src/workspace/workspace_controller.dart';
+import 'package:chili_mobile/src/workspace/workspace_palette.dart';
 import 'package:chili_mobile/src/workspace/workspace_shell.dart';
 
 void main() {
@@ -144,6 +145,54 @@ void main() {
       expect(find.byIcon(Icons.mic), findsOneWidget);
       expect(find.byIcon(Icons.settings), findsOneWidget);
       expect(find.byIcon(Icons.psychology), findsOneWidget);
+    });
+  });
+
+  group('WorkspacePalette', () {
+    const List<PaletteItem> items = <PaletteItem>[
+      PaletteItem('dashboard', 'Dashboard', Icons.dashboard),
+      PaletteItem('chat', 'Chat', Icons.chat),
+      PaletteItem('intercom', 'Intercom', Icons.mic),
+      PaletteItem('settings', 'Settings', Icons.settings),
+      PaletteItem('brain', 'Brain', Icons.psychology),
+    ];
+
+    test('paletteFuzzy + paletteFilter narrow by subsequence', () {
+      expect(paletteFuzzy('Intercom', 'intr'), isTrue);
+      expect(paletteFuzzy('Intercom', 'xyz'), isFalse);
+      expect(paletteFuzzy('Chat', ''), isTrue);
+      final List<PaletteItem> r = paletteFilter(items, 'set');
+      expect(r.length, 1);
+      expect(r.first.id, 'settings');
+    });
+
+    testWidgets('typing filters the list; tapping an item opens it', (WidgetTester tester) async {
+      String? opened;
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: Stack(
+            children: <Widget>[
+              WorkspacePalette(
+                items: items,
+                onOpen: (String id) => opened = id,
+                onClose: () {},
+              ),
+            ],
+          ),
+        ),
+      ));
+      await tester.pump();
+      expect(find.text('Dashboard'), findsOneWidget);
+      expect(find.text('Brain'), findsOneWidget);
+
+      await tester.enterText(find.byType(TextField), 'brn'); // fuzzy → Brain
+      await tester.pump();
+      expect(find.text('Brain'), findsOneWidget);
+      expect(find.text('Dashboard'), findsNothing);
+
+      await tester.tap(find.text('Brain'));
+      await tester.pump();
+      expect(opened, 'brain');
     });
   });
 }

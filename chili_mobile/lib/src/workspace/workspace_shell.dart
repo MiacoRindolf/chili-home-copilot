@@ -10,6 +10,7 @@ import '../screen/focus_controller.dart';
 import '../settings/settings_screen.dart';
 import 'os_window.dart';
 import 'workspace_controller.dart';
+import 'workspace_palette.dart';
 
 /// Definition of a dockable app surface.
 class _AppDef {
@@ -44,6 +45,7 @@ class WorkspaceShell extends StatefulWidget {
 class _WorkspaceShellState extends State<WorkspaceShell> {
   final WorkspaceController _ws = WorkspaceController();
   Size _deskSize = Size.zero; // latest desktop size, for keyboard tiling
+  bool _paletteOpen = false; // command palette (Ctrl+K) overlay
 
   // Built app bodies are cached so a window keeps its State across rebuilds /
   // focus changes (and while minimized). Dropped when the window closes.
@@ -104,6 +106,17 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
     if (id != null) _ws.close(id);
   }
 
+  void _togglePalette() => setState(() => _paletteOpen = !_paletteOpen);
+
+  void _onEscape() {
+    if (_paletteOpen) setState(() => _paletteOpen = false);
+  }
+
+  List<PaletteItem> get _paletteItems => <PaletteItem>[
+        for (final MapEntry<String, _AppDef> e in _apps.entries)
+          PaletteItem(e.key, e.value.title, e.value.icon),
+      ];
+
   Widget _bodyFor(String id) {
     return _built.putIfAbsent(id, () => _apps[id]!.build());
   }
@@ -119,15 +132,30 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
         const SingleActivator(LogicalKeyboardKey.arrowDown, control: true, alt: true): _minimizeFocused,
         const SingleActivator(LogicalKeyboardKey.keyW, control: true, alt: true): _closeFocused,
         const SingleActivator(LogicalKeyboardKey.backquote, control: true): _ws.cycleFocus,
+        const SingleActivator(LogicalKeyboardKey.keyK, control: true): _togglePalette,
+        const SingleActivator(LogicalKeyboardKey.escape): _onEscape,
       },
       child: Focus(
         autofocus: true,
         child: Scaffold(
-          body: Row(
+          body: Stack(
             children: <Widget>[
-              _dock(context, cs),
-              VerticalDivider(width: 1, thickness: 1, color: cs.outlineVariant),
-              Expanded(child: _desktop(context, cs)),
+              Row(
+                children: <Widget>[
+                  _dock(context, cs),
+                  VerticalDivider(width: 1, thickness: 1, color: cs.outlineVariant),
+                  Expanded(child: _desktop(context, cs)),
+                ],
+              ),
+              if (_paletteOpen)
+                WorkspacePalette(
+                  items: _paletteItems,
+                  onOpen: (String id) {
+                    setState(() => _paletteOpen = false);
+                    _openApp(id);
+                  },
+                  onClose: () => setState(() => _paletteOpen = false),
+                ),
             ],
           ),
         ),
