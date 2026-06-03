@@ -17,6 +17,7 @@ from ...config import (
     AUTOTRADER_DIRECTIONAL_PROBABILITY_DEFAULT_MAX_ROWS,
     AUTOTRADER_DIRECTIONAL_PROBABILITY_DEFAULT_Z,
     AUTOTRADER_DIRECTIONAL_PROBABILITY_MAX_Z,
+    AUTOTRADER_EDGE_DEFAULT_MIN_EXPECTED_NET_AFTER_EMPIRICAL_COST_PCT,
     AUTOTRADER_DIRECTIONAL_PROBABILITY_MIN_ROWS,
     AUTOTRADER_FAVORABLE_ENTRY_DRIFT_DEFAULT_ASSET_TYPES,
     AUTOTRADER_FAVORABLE_ENTRY_DRIFT_DEFAULT_ENABLED,
@@ -1983,6 +1984,14 @@ def evaluate_entry_edge(
     expected_loss = float(edge_math["expected_loss"] or 0.0)
     expected_net = float(edge_math["expected_net"] or 0.0)
     breakeven_probability = edge_math["breakeven_probability"]
+    empirical_cost_used = bool(
+        cost_snapshot.get("used") if isinstance(cost_snapshot, dict) else False
+    )
+    cost_to_expected_reward = (
+        cost_fraction / expected_reward
+        if expected_reward > 0.0 and cost_fraction > 0.0
+        else None
+    )
     geometry_source = (
         REALIZED_DYNAMIC_GEOMETRY_SOURCE
         if realized_geometry.get("used")
@@ -2004,6 +2013,12 @@ def evaluate_entry_edge(
         empirical_cost_fraction=round(cost_fraction, 8),
         cost_fraction=round(cost_fraction, 8),
         empirical_cost=cost_snapshot,
+        empirical_cost_used=empirical_cost_used,
+        empirical_cost_to_expected_reward=(
+            round(float(cost_to_expected_reward), 6)
+            if cost_to_expected_reward is not None
+            else None
+        ),
         expected_net_fraction=round(expected_net, 8),
         expected_net_pct=round(expected_net * 100.0, 4),
         breakeven_probability=(
@@ -2148,6 +2163,8 @@ def evaluate_entry_edge(
                 ),
             )
             expected_net = managed_expected_net
+            expected_reward = managed_expected_reward
+            expected_loss = managed_expected_loss
         else:
             managed_edge["selection_reason"] = (
                 "mode_not_authoritative"
@@ -2185,6 +2202,39 @@ def evaluate_entry_edge(
         return EntryEdgeDecision(False, "execution_stop_loss_too_wide", snap)
     if expected_net <= 0.0:
         return EntryEdgeDecision(False, "non_positive_expected_edge", snap)
+    if empirical_cost_used:
+        min_net_after_cost = (
+            _settings_float(
+                settings,
+                "chili_autotrader_min_expected_net_after_empirical_cost_pct",
+                AUTOTRADER_EDGE_DEFAULT_MIN_EXPECTED_NET_AFTER_EMPIRICAL_COST_PCT,
+                minimum=0.0,
+                maximum=100.0,
+            )
+            / 100.0
+        )
+        final_cost_to_expected_reward = (
+            cost_fraction / expected_reward
+            if expected_reward > 0.0 and cost_fraction > 0.0
+            else None
+        )
+        snap.update(
+            min_expected_net_after_empirical_cost_pct=round(
+                min_net_after_cost * 100.0,
+                4,
+            ),
+            empirical_cost_to_expected_reward=(
+                round(float(final_cost_to_expected_reward), 6)
+                if final_cost_to_expected_reward is not None
+                else None
+            ),
+            empirical_cost_edge_margin_pct=round(
+                (expected_net - min_net_after_cost) * 100.0,
+                4,
+            ),
+        )
+        if min_net_after_cost > 0.0 and expected_net < min_net_after_cost:
+            return EntryEdgeDecision(False, "empirical_cost_edge_margin_too_thin", snap)
     return EntryEdgeDecision(True, "positive_expected_edge", snap)
 
 

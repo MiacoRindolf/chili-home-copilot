@@ -1121,6 +1121,71 @@ def test_evaluate_entry_edge_blocks_absurd_stock_execution_stop_geometry():
     assert decision.snapshot["max_execution_stop_loss_pct"] == 30.0
 
 
+def test_evaluate_entry_edge_blocks_thin_margin_after_empirical_cost():
+    class _Result:
+        def __init__(self, rows=None, first=None):
+            self._rows = rows or []
+            self._first = first
+
+        def mappings(self):
+            return self
+
+        def all(self):
+            return list(self._rows)
+
+        def first(self):
+            return self._first
+
+    class _Db:
+        def execute(self, sql, params=None):
+            text = str(sql)
+            if "trading_execution_cost_estimates" in text:
+                return _Result(
+                    first={
+                        "sample_trades": 12,
+                        "p90_spread_bps": 25.0,
+                        "p90_slippage_bps": 100.0,
+                        "median_spread_bps": 10.0,
+                        "median_slippage_bps": 40.0,
+                        "last_updated_at": datetime(2026, 6, 3, 12, 0),
+                    }
+                )
+            return _Result(rows=[])
+
+    alert = BreakoutAlert(
+        ticker="EDGE",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.9,
+        price_at_alert=100.0,
+        entry_price=100.0,
+        stop_loss=99.0,
+        target_price=102.0,
+        user_id=1,
+    )
+    settings = SimpleNamespace(
+        chili_autotrader_alert_confidence_probability_weight=1.0,
+        chili_autotrader_min_expected_net_after_empirical_cost_pct=0.25,
+        chili_coinbase_cost_gate_min_tca_samples=5,
+    )
+
+    decision = evaluate_entry_edge(
+        _Db(),
+        alert,
+        settings=settings,
+        pat_ctx={},
+        confidence=0.8,
+    )
+
+    assert not decision.allowed
+    assert decision.reason == "empirical_cost_edge_margin_too_thin"
+    assert decision.snapshot["empirical_cost_used"] is True
+    assert decision.snapshot["empirical_cost"]["total_cost_bps"] == 125.0
+    assert decision.snapshot["expected_net_pct"] == pytest.approx(0.15)
+    assert decision.snapshot["min_expected_net_after_empirical_cost_pct"] == 0.25
+    assert decision.snapshot["empirical_cost_edge_margin_pct"] == pytest.approx(-0.1)
+
+
 def test_evaluate_entry_edge_guards_probability_sample_count_to_closed_trades():
     class _EmptyExec:
         def mappings(self):
