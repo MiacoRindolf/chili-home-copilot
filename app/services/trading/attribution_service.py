@@ -81,6 +81,153 @@ def _trade_directional_outcome(trade: Any) -> float | None:
     return None
 
 
+def _normalized_exit_reason(trade: Any) -> str:
+    reason = str(getattr(trade, "exit_reason", "") or "").strip().lower()
+    return reason or "missing"
+
+
+def _exit_reason_family(reason: str) -> str:
+    reason_l = str(reason or "").strip().lower()
+    if not reason_l or reason_l == "missing":
+        return "unknown"
+    if (
+        "reconcile" in reason_l
+        or "sync_gone" in reason_l
+        or "position_gone" in reason_l
+        or "position_absent" in reason_l
+        or reason_l in {"sync_duplicate", "sync_duplicate_cross_user"}
+    ):
+        return "reconciler_or_broker_cleanup"
+    if "take_profit" in reason_l or "target" in reason_l:
+        return "planned_profit_capture"
+    if "stop" in reason_l:
+        return "planned_risk_stop"
+    if reason_l == "pattern_exit_now":
+        return "dynamic_pattern_exit"
+    if "expired" in reason_l or "time_decay" in reason_l or "time_stop" in reason_l:
+        return "time_or_expiry"
+    if (
+        reason_l.startswith("emergency_")
+        or reason_l.startswith("kill_switch")
+        or reason_l.startswith("desk_")
+        or reason_l.startswith("manual")
+        or reason_l.startswith("portfolio_close")
+    ):
+        return "operator_or_risk_override"
+    return "other"
+
+
+def _is_low_confidence_exit_family(family: str) -> bool:
+    return family in {"unknown", "reconciler_or_broker_cleanup"}
+
+
+def _exit_reason_quality_rows(trades: list[Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    from collections import defaultdict
+
+    groups: dict[tuple[str, str], dict[str, Any]] = defaultdict(
+        lambda: {
+            "exit_family": "",
+            "exit_reason": "",
+            "trades": 0,
+            "pnl_sample_n": 0,
+            "total_pnl": 0.0,
+            "win_sample_n": 0,
+            "wins": 0,
+        }
+    )
+    total = len(trades)
+    low_confidence_count = 0
+    planned_count = 0
+    dynamic_count = 0
+    missing_count = 0
+    reconciler_count = 0
+    low_confidence_pnls: list[float] = []
+
+    for trade in trades:
+        reason = _normalized_exit_reason(trade)
+        family = _exit_reason_family(reason)
+        row = groups[(family, reason)]
+        row["exit_family"] = family
+        row["exit_reason"] = reason
+        row["trades"] += 1
+        pnl = _trade_realized_pnl_with_raw_fallback(trade)
+        if pnl is not None:
+            row["pnl_sample_n"] += 1
+            row["total_pnl"] += float(pnl)
+            if _is_low_confidence_exit_family(family):
+                low_confidence_pnls.append(float(pnl))
+        outcome = _trade_directional_outcome(trade)
+        if outcome is not None:
+            row["win_sample_n"] += 1
+            if outcome > 0:
+                row["wins"] += 1
+
+        if family in {"planned_profit_capture", "planned_risk_stop"}:
+            planned_count += 1
+        if family == "dynamic_pattern_exit":
+            dynamic_count += 1
+        if family == "unknown":
+            missing_count += 1
+        if family == "reconciler_or_broker_cleanup":
+            reconciler_count += 1
+        if _is_low_confidence_exit_family(family):
+            low_confidence_count += 1
+
+    rows: list[dict[str, Any]] = []
+    for row in groups.values():
+        pnl_n = int(row["pnl_sample_n"] or 0)
+        win_n = int(row["win_sample_n"] or 0)
+        trades_n = int(row["trades"] or 0)
+        rows.append({
+            "exit_family": row["exit_family"],
+            "exit_reason": row["exit_reason"],
+            "trades": trades_n,
+            "trade_rate_pct": (
+                round((trades_n / total) * 100.0, 2) if total > 0 else None
+            ),
+            "pnl_sample_n": pnl_n,
+            "total_pnl": round(float(row["total_pnl"] or 0.0), 2) if pnl_n else None,
+            "win_sample_n": win_n,
+            "win_rate_pct": (
+                round((int(row["wins"] or 0) / win_n) * 100.0, 1)
+                if win_n
+                else None
+            ),
+            "low_confidence_attribution": _is_low_confidence_exit_family(
+                str(row["exit_family"] or "")
+            ),
+        })
+    rows.sort(
+        key=lambda r: (
+            r["trades"],
+            abs(float(r["total_pnl"] or 0.0)),
+            r["exit_family"],
+            r["exit_reason"],
+        ),
+        reverse=True,
+    )
+
+    summary = {
+        "total_closed_trades": total,
+        "planned_exit_count": planned_count,
+        "dynamic_pattern_exit_count": dynamic_count,
+        "reconciler_exit_count": reconciler_count,
+        "missing_exit_reason_count": missing_count,
+        "low_confidence_exit_count": low_confidence_count,
+        "planned_exit_rate_pct": (
+            round((planned_count / total) * 100.0, 2) if total > 0 else None
+        ),
+        "low_confidence_exit_rate_pct": (
+            round((low_confidence_count / total) * 100.0, 2) if total > 0 else None
+        ),
+        "low_confidence_pnl_sample_n": len(low_confidence_pnls),
+        "low_confidence_total_pnl": (
+            round(sum(low_confidence_pnls), 2) if low_confidence_pnls else None
+        ),
+    }
+    return rows, summary
+
+
 def _scan_patterns_by_id(db: Session, pattern_ids: set[int]) -> dict[int, Any]:
     ids = sorted({int(pid) for pid in pattern_ids if int(pid) > 0})
     if not ids:
@@ -1111,6 +1258,7 @@ def post_trade_review(
     total_pnl = round(sum(pnls), 2) if pnls else None
     avg_pnl = round(sum(pnls) / pnl_n, 2) if pnls else None
     live_win_rate = round(wins / directional_n * 100, 1) if directional_n else None
+    exit_reason_rows, exit_quality = _exit_reason_quality_rows(closed)
 
     # --- Consecutive losses ---
     max_consec_losses = 0
@@ -1242,6 +1390,15 @@ def post_trade_review(
         takeaways.append(
             f"{len(high_slip_trades)} trades had high slippage (avg {avg_slip} bps) — review order type/timing."
         )
+    low_confidence_rate = exit_quality.get("low_confidence_exit_rate_pct")
+    if (
+        low_confidence_rate is not None
+        and float(low_confidence_rate) >= 25.0
+    ):
+        takeaways.append(
+            f"{exit_quality['low_confidence_exit_count']} of {n} exits were reconciler/unknown "
+            f"({low_confidence_rate}%) — treat pattern P&L attribution as low-confidence until exit provenance improves."
+        )
     if outperformers:
         takeaways.append(
             f"{len(outperformers)} pattern(s) beat research expectations — consider increasing allocation."
@@ -1263,6 +1420,8 @@ def post_trade_review(
             "pnl_sample_n": pnl_n,
             "total_pnl": total_pnl,
             "avg_pnl": avg_pnl,
+            "exit_quality": exit_quality,
+            "exit_reason_summary": exit_reason_rows[:10],
             "max_consecutive_losses": max_consec_losses,
             "high_slippage_trades": high_slip_trades[:5],
             "outperforming_patterns": outperformers[:5],

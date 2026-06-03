@@ -748,6 +748,93 @@ def test_post_trade_review_pnl_totals_include_partial_option_leg() -> None:
     assert review["high_slippage_trades"][0]["pnl"] == pytest.approx(10.0)
 
 
+def test_post_trade_review_reports_exit_attribution_confidence() -> None:
+    trades = [
+        SimpleNamespace(
+            id=1301,
+            user_id=7,
+            status="closed",
+            scan_pattern_id=None,
+            ticker="AAPL",
+            direction="long",
+            entry_price=100.0,
+            exit_price=105.0,
+            quantity=1.0,
+            pnl=5.0,
+            exit_reason="target",
+            exit_date=datetime(2026, 5, 30, 15, 30),
+        ),
+        SimpleNamespace(
+            id=1302,
+            user_id=7,
+            status="closed",
+            scan_pattern_id=None,
+            ticker="AAPL",
+            direction="long",
+            entry_price=100.0,
+            exit_price=102.0,
+            quantity=1.0,
+            pnl=2.0,
+            exit_reason="pattern_exit_now",
+            exit_date=datetime(2026, 5, 30, 15, 31),
+        ),
+        SimpleNamespace(
+            id=1303,
+            user_id=7,
+            status="closed",
+            scan_pattern_id=None,
+            ticker="AAPL",
+            direction="long",
+            entry_price=100.0,
+            exit_price=95.0,
+            quantity=1.0,
+            pnl=-5.0,
+            exit_reason="broker_reconcile_position_gone",
+            exit_date=datetime(2026, 5, 30, 15, 32),
+        ),
+        SimpleNamespace(
+            id=1304,
+            user_id=7,
+            status="closed",
+            scan_pattern_id=None,
+            ticker="AAPL",
+            direction="long",
+            entry_price=100.0,
+            exit_price=98.0,
+            quantity=1.0,
+            pnl=-2.0,
+            exit_reason=None,
+            exit_date=datetime(2026, 5, 30, 15, 33),
+        ),
+    ]
+    db = _FakeAttributionSession(trades=trades, patterns=[])
+
+    out = post_trade_review(db, 7, days=30)
+
+    review = out["review"]
+    quality = review["exit_quality"]
+    assert quality["planned_exit_count"] == 1
+    assert quality["dynamic_pattern_exit_count"] == 1
+    assert quality["reconciler_exit_count"] == 1
+    assert quality["missing_exit_reason_count"] == 1
+    assert quality["low_confidence_exit_count"] == 2
+    assert quality["low_confidence_exit_rate_pct"] == pytest.approx(50.0)
+    assert quality["low_confidence_total_pnl"] == pytest.approx(-7.0)
+
+    by_reason = {
+        row["exit_reason"]: row
+        for row in review["exit_reason_summary"]
+    }
+    assert by_reason["target"]["exit_family"] == "planned_profit_capture"
+    assert by_reason["pattern_exit_now"]["exit_family"] == "dynamic_pattern_exit"
+    assert by_reason["broker_reconcile_position_gone"]["exit_family"] == (
+        "reconciler_or_broker_cleanup"
+    )
+    assert by_reason["missing"]["exit_family"] == "unknown"
+    assert by_reason["missing"]["low_confidence_attribution"] is True
+    assert any("reconciler/unknown" in item for item in review["takeaways"])
+
+
 def test_post_trade_review_excludes_unverified_extreme_slippage_outliers() -> None:
     pattern = SimpleNamespace(
         id=42,
