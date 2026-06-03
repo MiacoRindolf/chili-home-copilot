@@ -59,6 +59,15 @@ def _safe_float(value: Any, default: float | None = None) -> float | None:
         return default
 
 
+def _safe_float_or_default(value: Any, default: float) -> float:
+    if isinstance(value, bool):
+        return default
+    out = _safe_float(value)
+    if out is None or not math.isfinite(out):
+        return default
+    return out
+
+
 def _empirical_percentile(values: list[float], q: float) -> float | None:
     """Linear-interpolated empirical percentile for small pattern pools."""
     arr = sorted(float(v) for v in values if _is_number(v))
@@ -472,8 +481,8 @@ def _pilot_score_for_row(
     else:
         cpcv_prior_mean = 0.0
 
-    n_obs = max(0.0, float(evidence.get("effective_sample_n") or 0.0))
-    directional_wr = _clip(float(evidence.get("weighted_directional_wr") or 0.5))
+    n_obs = max(0.0, _safe_float_or_default(evidence.get("effective_sample_n"), 0.0))
+    directional_wr = _clip(_safe_float_or_default(evidence.get("weighted_directional_wr"), 0.5))
     n_prior = min(max(1.0, float(row.get("cpcv_n_paths") or 0)), max(1.0, prior_strength))
     posterior_mean = (
         cpcv_prior_mean * n_prior + directional_wr * n_obs
@@ -484,9 +493,9 @@ def _pilot_score_for_row(
         float(getattr(settings_, "chili_cpcv_ci_level", 0.90)),
     )
     temporal_component = _clip(
-        float(evidence.get("freshness") or 0.0)
-        * (1.0 - _clip(float(evidence.get("directional_decay") or 0.0)))
-        * (0.5 + 0.5 * _clip(float(evidence.get("path_quality") or 0.5)))
+        _safe_float_or_default(evidence.get("freshness"), 0.0)
+        * (1.0 - _clip(_safe_float_or_default(evidence.get("directional_decay"), 0.0)))
+        * (0.5 + 0.5 * _clip(_safe_float_or_default(evidence.get("path_quality"), 0.5)))
     )
     return _clip(
         weights["cpcv"] * cpcv_component
@@ -832,7 +841,7 @@ def select_shadow_vetting_candidates(
                 ),
                 "directional_decay": float(evidence.get("directional_decay") or 0.0),
                 "freshness": float(evidence.get("freshness") or 0.0),
-                "path_quality": float(evidence.get("path_quality") or 0.5),
+                "path_quality": _safe_float_or_default(evidence.get("path_quality"), 0.5),
                 "evidence_maturity": float((pilot_row or {}).get("evidence_maturity") or 0.0),
                 "score_threshold": threshold,
                 "pilot_score": pilot_score,

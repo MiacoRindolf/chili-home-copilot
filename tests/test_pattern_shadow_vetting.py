@@ -84,6 +84,66 @@ def test_pilot_score_excludes_saturated_constant_dsr_pbo() -> None:
     assert score == pytest.approx(0.153846154, rel=1e-6)
 
 
+def test_pilot_score_preserves_zero_directional_win_rate_evidence() -> None:
+    row = {
+        "cpcv_median_sharpe": 0.0,
+        "deflated_sharpe": 0.0,
+        "pbo": 1.0,
+        "cpcv_n_paths": 1,
+        "evidence": {
+            "effective_sample_n": 100.0,
+            "weighted_directional_wr": 0.0,
+            "freshness": 0.0,
+            "directional_decay": 0.0,
+            "path_quality": 0.5,
+        },
+    }
+
+    score = _pilot_score_for_row(
+        row,
+        prior_strength=1.0,
+        settings_=_settings(
+            chili_cohort_score_weight_cpcv_sharpe=0.0,
+            chili_cohort_score_weight_deflated_sharpe=0.0,
+            chili_cohort_score_weight_pbo_inverse=0.0,
+            chili_cohort_score_weight_directional_wr=1.0,
+            chili_cohort_score_weight_decay_inverse=0.0,
+        ),
+    )
+
+    assert score == pytest.approx(0.0)
+
+
+def test_pilot_score_preserves_zero_path_quality_evidence() -> None:
+    row = {
+        "cpcv_median_sharpe": 0.0,
+        "deflated_sharpe": 0.0,
+        "pbo": 1.0,
+        "cpcv_n_paths": 1,
+        "evidence": {
+            "effective_sample_n": 0.0,
+            "weighted_directional_wr": 0.5,
+            "freshness": 1.0,
+            "directional_decay": 0.0,
+            "path_quality": 0.0,
+        },
+    }
+
+    score = _pilot_score_for_row(
+        row,
+        prior_strength=1.0,
+        settings_=_settings(
+            chili_cohort_score_weight_cpcv_sharpe=0.0,
+            chili_cohort_score_weight_deflated_sharpe=0.0,
+            chili_cohort_score_weight_pbo_inverse=0.0,
+            chili_cohort_score_weight_directional_wr=0.0,
+            chili_cohort_score_weight_decay_inverse=1.0,
+        ),
+    )
+
+    assert score == pytest.approx(0.5)
+
+
 def test_pilot_score_keeps_discriminating_dsr_pbo_metrics() -> None:
     rows = [
         {"deflated_sharpe": 0.2, "pbo": 0.8},
