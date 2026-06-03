@@ -28,6 +28,10 @@ def _finite_float(value: Any) -> float | None:
     return out if out == out and out not in (float("inf"), float("-inf")) else None
 
 
+def _json_dict(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
 def _trade_tca_cost_pct(trade: Any) -> float | None:
     """Return entry+exit TCA cost in percent points, or None if incomplete."""
     entry_bps = _usable_tca_bps(trade, "tca_entry_slippage_bps")
@@ -86,6 +90,357 @@ def _scan_patterns_by_id(db: Session, pattern_ids: set[int]) -> dict[int, Any]:
 
     rows = db.query(ScanPattern).filter(ScanPattern.id.in_(ids)).all()
     return {int(row.id): row for row in rows if row.id is not None}
+
+
+def _expected_net_pct_from_payload(payload: dict[str, Any]) -> float | None:
+    edge = _json_dict(payload.get("entry_edge"))
+    expected = _finite_float(edge.get("expected_net_pct"))
+    if expected is not None:
+        return expected
+    expected = _finite_float(payload.get("entry_edge_expected_net_pct"))
+    if expected is not None:
+        return expected
+    entry_execution = _json_dict(payload.get("entry_execution"))
+    return _finite_float(entry_execution.get("entry_edge_expected_net_pct"))
+
+
+def _execution_asset_class(row: Any, payload: dict[str, Any]) -> str:
+    values = [
+        payload.get("asset_class"),
+        payload.get("asset_type"),
+        payload.get("asset_kind"),
+    ]
+    if bool(payload.get("options_path")) and isinstance(payload.get("option_meta"), dict):
+        values.append("options")
+    values.append(getattr(row, "asset_type", None))
+    for raw in values:
+        value = str(raw or "").strip().lower()
+        if value in {"crypto", "coin", "coinbase_spot"}:
+            return "crypto"
+        if value in {"option", "options", "robinhood_options"}:
+            return "options"
+        if value in {"stock", "stocks", "equity", "equities", "robinhood"}:
+            return "stock"
+    ticker = str(getattr(row, "ticker", "") or "").strip().upper()
+    return "crypto" if ticker.endswith("-USD") else "stock"
+
+
+def _execution_venue(row: Any, payload: dict[str, Any]) -> str:
+    venue = str(payload.get("broker_reject_venue") or "").strip().lower()
+    if venue:
+        return venue
+    reason = str(getattr(row, "reason", "") or "").strip().lower()
+    parts = reason.split(":")
+    if reason.startswith("venue_") and len(parts) >= 2 and parts[1]:
+        return parts[1]
+    if bool(payload.get("options_path")) and isinstance(payload.get("option_meta"), dict):
+        return "robinhood_options"
+    ticker = str(getattr(row, "ticker", "") or "").strip().upper()
+    return "coinbase" if ticker.endswith("-USD") else "robinhood"
+
+
+def _execution_order_hint(payload: dict[str, Any]) -> str:
+    hint = str(payload.get("broker_reject_order_hint") or "").strip().lower()
+    if hint:
+        return hint
+    entry_execution = _json_dict(payload.get("entry_execution"))
+    hint = str(
+        entry_execution.get("active_order_type")
+        or entry_execution.get("order_type")
+        or ""
+    ).strip().lower()
+    if hint:
+        return hint
+    if bool(payload.get("options_path")) and isinstance(payload.get("option_meta"), dict):
+        legs = payload.get("option_meta", {}).get("legs")
+        return "option_spread" if isinstance(legs, list) and len(legs) > 1 else "option_limit"
+    return "unknown"
+
+
+def _execution_reason_family(row: Any, payload: dict[str, Any] | None = None) -> str:
+    payload = payload or {}
+    reason = str(getattr(row, "reason", "") or "").strip().lower()
+    decision = str(getattr(row, "decision", "") or "").strip().lower()
+    if reason.startswith("broker:option_entry_no_fill"):
+        return "option_entry_no_fill"
+    if reason == "broker:place_no_order_id" or payload.get("broker_reject_missing_order_id"):
+        return "place_no_order_id"
+    if reason.startswith("broker_reject_suppressed:"):
+        return "broker_reject_suppressed"
+    if reason.startswith("broker:"):
+        broker_reason = reason.split(":", 1)[1].split(":", 1)[0].strip()
+        return f"broker_{broker_reason or 'reject'}"
+    if reason.startswith("venue_") or reason.startswith("venue:"):
+        return "venue_health"
+    if reason.startswith("cost_gate:"):
+        return "cost_gate"
+    if reason.startswith("coinbase_cap"):
+        return "coinbase_cap"
+    if decision:
+        return decision
+    return "unknown"
+
+
+def _execution_order_status(row: Any, payload: dict[str, Any]) -> str:
+    if payload.get("broker_reject_missing_order_id"):
+        return "no_order_id"
+    terminal = str(payload.get("option_entry_terminal_state") or "").strip().lower()
+    if terminal:
+        return "no_fill"
+    reason_family = _execution_reason_family(row, payload)
+    if reason_family == "venue_health":
+        return "venue_blocked"
+    if reason_family in {"cost_gate", "coinbase_cap"}:
+        return "pre_broker_blocked"
+    if str(getattr(row, "reason", "") or "").startswith("broker"):
+        return "broker_rejected"
+    return str(getattr(row, "decision", "") or "unknown").strip().lower() or "unknown"
+
+
+def _is_execution_drag_audit(row: Any) -> bool:
+    payload = _json_dict(getattr(row, "rule_snapshot", None))
+    reason_family = _execution_reason_family(row, payload)
+    if reason_family in {
+        "option_entry_no_fill",
+        "place_no_order_id",
+        "broker_reject_suppressed",
+        "venue_health",
+        "cost_gate",
+        "coinbase_cap",
+    }:
+        return True
+    if reason_family.startswith("broker_"):
+        return True
+    return bool(
+        payload.get("broker_reject_fingerprint")
+        or payload.get("option_entry_terminal_state")
+    )
+
+
+def _paper_shadow_alert_id(pt: Any) -> int | None:
+    raw = getattr(pt, "paper_shadow_of_alert_id", None)
+    if raw is None:
+        raw = _json_dict(getattr(pt, "signal_json", None)).get("shadow_of_alert_id")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _shadow_reason_family(pt: Any) -> str | None:
+    sig = _json_dict(getattr(pt, "signal_json", None))
+    decision = str(sig.get("shadow_decision") or "").strip().lower()
+    if decision == "blocked_option_entry_no_fill":
+        return "option_entry_no_fill"
+    if decision == "blocked_no_order_id":
+        return "place_no_order_id"
+    if decision == "blocked_venue_health":
+        return "venue_health"
+    if decision.startswith("blocked_"):
+        return decision.removeprefix("blocked_")
+    if decision.startswith("skipped_"):
+        return decision.removeprefix("skipped_")
+    return decision or None
+
+
+def _execution_drag_report_from_rows(
+    audits: list[Any],
+    paper_trades: list[Any],
+    *,
+    days: int,
+    limit: int,
+) -> dict[str, Any]:
+    shadows_by_alert: dict[int, list[Any]] = defaultdict(list)
+    for pt in paper_trades:
+        alert_id = _paper_shadow_alert_id(pt)
+        if alert_id is not None:
+            shadows_by_alert[alert_id].append(pt)
+
+    groups: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for row in audits:
+        if not _is_execution_drag_audit(row):
+            continue
+        payload = _json_dict(getattr(row, "rule_snapshot", None))
+        pattern_id = getattr(row, "scan_pattern_id", None)
+        try:
+            pattern_id = int(pattern_id) if pattern_id is not None else None
+        except (TypeError, ValueError):
+            pattern_id = None
+        reason_family = _execution_reason_family(row, payload)
+        key = (
+            _execution_asset_class(row, payload),
+            pattern_id,
+            _execution_venue(row, payload),
+            _execution_order_hint(payload),
+            reason_family,
+            _execution_order_status(row, payload),
+        )
+        group = groups.setdefault(
+            key,
+            {
+                "asset_class": key[0],
+                "scan_pattern_id": key[1],
+                "broker_venue": key[2],
+                "order_hint": key[3],
+                "reason_family": key[4],
+                "order_status": key[5],
+                "events": 0,
+                "expected_edge_sample_n": 0,
+                "positive_edge_events": 0,
+                "_expected_net_pct_values": [],
+                "_paper_shadow_ids": set(),
+                "_paper_shadow_returns": [],
+                "_paper_shadow_pnls": [],
+                "_paper_shadow_outcomes": [],
+            },
+        )
+        group["events"] += 1
+        expected = _expected_net_pct_from_payload(payload)
+        if expected is not None:
+            group["expected_edge_sample_n"] += 1
+            group["_expected_net_pct_values"].append(expected)
+            if expected > 0.0:
+                group["positive_edge_events"] += 1
+
+        alert_id = getattr(row, "breakout_alert_id", None)
+        try:
+            alert_key = int(alert_id)
+        except (TypeError, ValueError):
+            alert_key = 0
+        for pt in shadows_by_alert.get(alert_key, []):
+            shadow_family = _shadow_reason_family(pt)
+            if shadow_family and shadow_family != reason_family:
+                continue
+            shadow_id = getattr(pt, "id", None)
+            if shadow_id in group["_paper_shadow_ids"]:
+                continue
+            group["_paper_shadow_ids"].add(shadow_id)
+            paper_return = paper_trade_return_pct(pt)
+            if paper_return is not None:
+                group["_paper_shadow_returns"].append(paper_return)
+                group["_paper_shadow_outcomes"].append(paper_return)
+            paper_pnl = _paper_realized_pnl_with_raw_fallback(pt)
+            if paper_pnl is not None:
+                group["_paper_shadow_pnls"].append(paper_pnl)
+                if paper_return is None:
+                    group["_paper_shadow_outcomes"].append(paper_pnl)
+
+    rows: list[dict[str, Any]] = []
+    for group in groups.values():
+        expected_values = group.pop("_expected_net_pct_values")
+        shadow_ids = group.pop("_paper_shadow_ids")
+        shadow_returns = group.pop("_paper_shadow_returns")
+        shadow_pnls = group.pop("_paper_shadow_pnls")
+        shadow_outcomes = group.pop("_paper_shadow_outcomes")
+        wins = sum(1 for outcome in shadow_outcomes if outcome > 0)
+        group.update(
+            {
+                "avg_expected_net_pct": (
+                    round(sum(expected_values) / len(expected_values), 4)
+                    if expected_values
+                    else None
+                ),
+                "total_expected_net_pct": (
+                    round(sum(expected_values), 4) if expected_values else None
+                ),
+                "paper_shadow_count": len(shadow_ids),
+                "paper_shadow_return_sample_n": len(shadow_returns),
+                "paper_shadow_avg_return_pct": (
+                    round(sum(shadow_returns) / len(shadow_returns), 4)
+                    if shadow_returns
+                    else None
+                ),
+                "paper_shadow_pnl_sample_n": len(shadow_pnls),
+                "paper_shadow_avg_pnl": (
+                    round(sum(shadow_pnls) / len(shadow_pnls), 4)
+                    if shadow_pnls
+                    else None
+                ),
+                "paper_shadow_win_rate_pct": (
+                    round(wins / len(shadow_outcomes) * 100.0, 2)
+                    if shadow_outcomes
+                    else None
+                ),
+            }
+        )
+        rows.append(group)
+
+    rows.sort(
+        key=lambda r: (
+            r["positive_edge_events"],
+            r["events"],
+            r["avg_expected_net_pct"] or -999.0,
+            r["paper_shadow_count"],
+        ),
+        reverse=True,
+    )
+    safe_limit = max(1, min(200, int(limit)))
+    return {
+        "ok": True,
+        "window_days": days,
+        "summary": {
+            "execution_drag_events": sum(row["events"] for row in rows),
+            "positive_edge_events": sum(row["positive_edge_events"] for row in rows),
+            "groups": len(rows),
+            "paper_shadow_count": sum(row["paper_shadow_count"] for row in rows),
+        },
+        "groups": rows[:safe_limit],
+    }
+
+
+def execution_alpha_drag_report(
+    db: Session,
+    user_id: int | None,
+    *,
+    days: int = 7,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Summarize execution failures separately from thesis outcomes.
+
+    Uses AutoTraderRun audit rows for broker/venue execution drag and matches
+    paper-shadow rows by breakout alert when available.
+    """
+    from ...models.trading import AutoTraderRun, PaperTrade
+
+    if user_id is None:
+        return {
+            "ok": True,
+            "window_days": days,
+            "summary": {
+                "execution_drag_events": 0,
+                "positive_edge_events": 0,
+                "groups": 0,
+                "paper_shadow_count": 0,
+            },
+            "groups": [],
+        }
+
+    safe_days = max(1, int(days))
+    since = datetime.utcnow() - timedelta(days=safe_days)
+    audits = (
+        db.query(AutoTraderRun)
+        .filter(
+            AutoTraderRun.user_id == user_id,
+            AutoTraderRun.created_at >= since,
+        )
+        .all()
+    )
+    paper_trades = (
+        db.query(PaperTrade)
+        .filter(
+            PaperTrade.user_id == user_id,
+            PaperTrade.paper_shadow_of_alert_id.isnot(None),
+            PaperTrade.entry_date >= since,
+        )
+        .all()
+    )
+    return _execution_drag_report_from_rows(
+        audits,
+        paper_trades,
+        days=safe_days,
+        limit=limit,
+    )
 
 
 def live_vs_research_by_pattern(

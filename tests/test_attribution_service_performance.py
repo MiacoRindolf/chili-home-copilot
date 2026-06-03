@@ -5,11 +5,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.models.trading import PaperTrade, ScanPattern, Trade
+from app.models.trading import AutoTraderRun, PaperTrade, ScanPattern, Trade
 from app.services.trading.attribution_service import (
+    _execution_drag_report_from_rows,
     _paper_directional_outcome,
     _scan_patterns_by_id,
     _trade_directional_outcome,
+    execution_alpha_drag_report,
     live_vs_research_by_pattern,
     post_trade_review,
 )
@@ -106,10 +108,12 @@ class _FakeAttributionSession:
         *,
         trades: list[SimpleNamespace],
         paper_trades: list[SimpleNamespace] | None = None,
+        autotrader_runs: list[SimpleNamespace] | None = None,
         patterns: list[SimpleNamespace],
     ) -> None:
         self.trades = trades
         self.paper_trades = list(paper_trades or [])
+        self.autotrader_runs = list(autotrader_runs or [])
         self.patterns = patterns
 
     def query(self, model: object) -> _FakeQuery:
@@ -117,9 +121,127 @@ class _FakeAttributionSession:
             return _FakeQuery(self.trades)
         if model is PaperTrade:
             return _FakeQuery(self.paper_trades)
+        if model is AutoTraderRun:
+            return _FakeQuery(self.autotrader_runs)
         if model is ScanPattern:
             return _FakeQuery(self.patterns)
         raise AssertionError(f"unexpected model query: {model!r}")
+
+
+def test_execution_drag_report_groups_positive_edge_no_order_id_shadow() -> None:
+    audit = SimpleNamespace(
+        id=1,
+        user_id=7,
+        breakout_alert_id=100,
+        scan_pattern_id=42,
+        ticker="BTC-USD",
+        decision="blocked",
+        reason="broker:place_no_order_id",
+        rule_snapshot={
+            "entry_edge_expected_net_pct": 2.5,
+            "broker_reject_missing_order_id": True,
+            "broker_reject_venue": "coinbase",
+            "broker_reject_order_hint": "limit_post_only",
+        },
+        created_at=datetime(2026, 6, 2, 12, 0),
+    )
+    shadow = SimpleNamespace(
+        id=10,
+        paper_shadow_of_alert_id=100,
+        scan_pattern_id=42,
+        ticker="BTC-USD",
+        direction="long",
+        entry_price=100.0,
+        exit_price=103.0,
+        quantity=1.0,
+        pnl=3.0,
+        pnl_pct=3.0,
+        status="closed",
+        signal_json={
+            "paper_shadow": True,
+            "shadow_decision": "blocked_no_order_id",
+            "asset_class": "crypto",
+            "entry_edge_expected_net_pct": 2.5,
+        },
+    )
+
+    out = _execution_drag_report_from_rows([audit], [shadow], days=7, limit=10)
+
+    assert out["summary"] == {
+        "execution_drag_events": 1,
+        "positive_edge_events": 1,
+        "groups": 1,
+        "paper_shadow_count": 1,
+    }
+    row = out["groups"][0]
+    assert row["asset_class"] == "crypto"
+    assert row["scan_pattern_id"] == 42
+    assert row["broker_venue"] == "coinbase"
+    assert row["order_hint"] == "limit_post_only"
+    assert row["reason_family"] == "place_no_order_id"
+    assert row["order_status"] == "no_order_id"
+    assert row["avg_expected_net_pct"] == pytest.approx(2.5)
+    assert row["paper_shadow_avg_return_pct"] == pytest.approx(3.0)
+    assert row["paper_shadow_win_rate_pct"] == pytest.approx(100.0)
+
+
+def test_execution_alpha_drag_report_exposes_option_no_fill_groups() -> None:
+    audit = SimpleNamespace(
+        id=2,
+        user_id=7,
+        breakout_alert_id=101,
+        scan_pattern_id=77,
+        ticker="AAPL",
+        decision="blocked",
+        reason="broker:option_entry_no_fill:cancelled",
+        rule_snapshot={
+            "entry_edge": {"expected_net_pct": 3.1},
+            "asset_type": "options",
+            "options_path": True,
+            "option_meta": {"limit_price": 1.25, "expiration": "2026-06-19"},
+            "option_entry_terminal_state": "cancelled",
+        },
+        created_at=datetime(2026, 6, 2, 12, 5),
+    )
+    shadow = SimpleNamespace(
+        id=11,
+        user_id=7,
+        paper_shadow_of_alert_id=101,
+        scan_pattern_id=77,
+        ticker="AAPL",
+        direction="long",
+        entry_price=1.25,
+        exit_price=1.10,
+        quantity=1.0,
+        pnl=-15.0,
+        pnl_pct=-12.0,
+        status="closed",
+        entry_date=datetime(2026, 6, 2, 12, 5),
+        signal_json={
+            "paper_shadow": True,
+            "shadow_decision": "blocked_option_entry_no_fill",
+            "asset_class": "options",
+        },
+    )
+    db = _FakeAttributionSession(
+        trades=[],
+        paper_trades=[shadow],
+        autotrader_runs=[audit],
+        patterns=[],
+    )
+
+    out = execution_alpha_drag_report(db, 7, days=7, limit=10)
+
+    row = out["groups"][0]
+    assert row["asset_class"] == "options"
+    assert row["broker_venue"] == "robinhood_options"
+    assert row["order_hint"] == "option_limit"
+    assert row["reason_family"] == "option_entry_no_fill"
+    assert row["order_status"] == "no_fill"
+    assert row["positive_edge_events"] == 1
+    assert row["avg_expected_net_pct"] == pytest.approx(3.1)
+    assert row["paper_shadow_avg_return_pct"] == pytest.approx(-12.0)
+    assert row["paper_shadow_win_rate_pct"] == pytest.approx(0.0)
 
 
 def test_live_vs_research_reports_contract_aware_option_return_after_tca() -> None:

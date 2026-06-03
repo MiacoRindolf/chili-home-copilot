@@ -506,6 +506,28 @@ def api_attribution_live_vs_research(
     return JSONResponse(json_safe(out))
 
 
+# ── Execution Attribution ───────────────────────────────────────────────────
+
+@router.get("/attribution/execution-alpha-drag")
+def api_attribution_execution_alpha_drag(
+    request: Request,
+    db: Session = Depends(get_db),
+    days: int = Query(7, ge=1, le=90),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """Execution failures grouped by edge, pattern, venue, and shadow outcome."""
+    from ...services.trading.public_api import execution_alpha_drag_report
+
+    ctx = get_identity_ctx(request, db)
+    out = execution_alpha_drag_report(
+        db,
+        ctx["user_id"],
+        days=days,
+        limit=limit,
+    )
+    return JSONResponse(json_safe(out))
+
+
 # ── Journal & Stats ──────────────────────────────────────────────────────────
 
 @router.get("/journal")

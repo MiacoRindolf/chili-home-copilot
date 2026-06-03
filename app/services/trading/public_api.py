@@ -44,7 +44,11 @@ from .portfolio_risk import (
 )
 
 # ── Attribution / review ────────────────────────────────────────────────────
-from .attribution_service import live_vs_research_by_pattern, post_trade_review
+from .attribution_service import (
+    execution_alpha_drag_report,
+    live_vs_research_by_pattern,
+    post_trade_review,
+)
 from .decision_packet_coverage import decision_packet_coverage_summary
 
 # ── Thesis / evidence ──────────────────────────────────────────────────────
@@ -90,6 +94,7 @@ __all__ = [
     "get_breaker_status",
     "reset_breaker",
     # attribution / review
+    "execution_alpha_drag_report",
     "live_vs_research_by_pattern",
     "post_trade_review",
     "decision_packet_coverage_summary",
