@@ -163,6 +163,17 @@ def _max_new_trades(budget, limits) -> int:
     return min(remaining_slots, heat_slots)
 
 
+def _pattern_win_rate_display_pct(pattern: Any) -> float:
+    """Return OOS win rate if present, else legacy win rate, in display percent."""
+    from .backtest_metrics import backtest_win_rate_db_to_display_pct
+
+    oos_wr = backtest_win_rate_db_to_display_pct(getattr(pattern, "oos_win_rate", None))
+    if oos_wr is not None:
+        return float(oos_wr)
+    legacy_wr = backtest_win_rate_db_to_display_pct(getattr(pattern, "win_rate", None))
+    return float(legacy_wr) if legacy_wr is not None else 0.0
+
+
 def _generate_trade_ideas(db: Session, user_id: int | None, capital: float) -> list[dict[str, Any]]:
     """Pull top promoted patterns and score them as trade ideas."""
     promoted = (
@@ -178,7 +189,7 @@ def _generate_trade_ideas(db: Session, user_id: int | None, capital: float) -> l
 
     ideas = []
     for p in promoted:
-        oos_wr = _safe_float(p.oos_win_rate) or _safe_float(p.win_rate)
+        oos_wr = _pattern_win_rate_display_pct(p)
         avg_ret = _safe_float(p.avg_return_pct)
         score = round((oos_wr / 100) * 0.6 + min(1.0, avg_ret / 5) * 0.4, 3)
 
