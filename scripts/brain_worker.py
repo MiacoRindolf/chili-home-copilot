@@ -1782,6 +1782,10 @@ def _should_skip_reconcile_pass(status: "BrainWorkerStatus") -> tuple[bool, str]
         return False, f"probe_error:{type(e).__name__}"
     finally:
         try:
+            db.rollback()
+        except Exception:
+            pass
+        try:
             db.close()
         except Exception:
             pass

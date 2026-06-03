@@ -91,3 +91,39 @@ def test_local_launchers_default_to_api_only_named_web_process():
         text = (root / script).read_text(encoding="utf-8")
         assert '$env:CHILI_SCHEDULER_ROLE = "none"' in text
         assert '$env:CHILI_APP_NAME = "chili-local-web"' in text
+
+
+def test_runtime_mode_override_rolls_back_owned_read_session(monkeypatch):
+    from app import db as app_db
+    from app.services.trading import runtime_mode_override as rmo
+
+    class _FakeResult:
+        def fetchone(self):
+            return ("shadow",)
+
+    class _RuntimeModeSession:
+        def __init__(self) -> None:
+            self.events = []
+
+        def execute(self, *_args, **_kwargs):
+            self.events.append("execute")
+            return _FakeResult()
+
+        def rollback(self) -> None:
+            self.events.append("rollback")
+
+        def close(self) -> None:
+            self.events.append("close")
+
+    session = _RuntimeModeSession()
+    rmo.invalidate_cache("pattern_regime_tilt")
+    monkeypatch.setattr(app_db, "SessionLocal", lambda: session)
+
+    try:
+        assert (
+            rmo.get_runtime_mode_override("pattern_regime_tilt", bypass_cache=True)
+            == "shadow"
+        )
+        assert session.events == ["execute", "rollback", "close"]
+    finally:
+        rmo.invalidate_cache("pattern_regime_tilt")

@@ -122,6 +122,14 @@ def get_runtime_mode_override(
         finally:
             if close_when_done:
                 try:
+                    db.rollback()
+                except Exception:  # pragma: no cover - defensive
+                    logger.debug(
+                        "[runtime_mode_override] rollback before close failed for %s",
+                        slice_name,
+                        exc_info=True,
+                    )
+                try:
                     db.close()
                 except Exception:  # pragma: no cover - defensive
                     pass
