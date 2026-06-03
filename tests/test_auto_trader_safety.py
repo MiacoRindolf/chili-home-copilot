@@ -931,6 +931,75 @@ def test_qualified_block_shadow_decisions_cover_learning_dead_ends():
     )
 
 
+def test_paper_shadow_signal_json_preserves_expected_edge_context():
+    alert = SimpleNamespace(id=11, ticker="BTC-USD", asset_type="crypto")
+    snap = {
+        "entry_edge": {
+            "expected_net_pct": 3.2,
+            "probability_source": "test_edge_model",
+        },
+        "projected_profit_pct": 4.5,
+        "paper_shadow_reject_reason": "venue_degraded:coinbase:error_rate_pct=50.0",
+        "paper_observation_signal_lane": "shadow_near_miss",
+    }
+
+    sig = at_mod._paper_shadow_signal_json(
+        alert,
+        snap,
+        "blocked_venue_health",
+        duplicate_policy=at_mod.PAPER_SHADOW_DUPLICATE_POLICY_REJECT_BYPASS,
+    )
+
+    assert sig["entry_edge"] == snap["entry_edge"]
+    assert sig["entry_edge"] is not snap["entry_edge"]
+    assert sig["entry_edge_expected_net_pct"] == pytest.approx(3.2)
+    assert sig["asset_class"] == "crypto"
+    assert sig["asset_type"] == "crypto"
+    assert sig["paper_shadow_reject_reason"] == (
+        "venue_degraded:coinbase:error_rate_pct=50.0"
+    )
+    assert sig["paper_shadow_duplicate_policy"] == (
+        at_mod.PAPER_SHADOW_DUPLICATE_POLICY_REJECT_BYPASS
+    )
+    assert sig["paper_observation_signal_lane"] == "shadow_near_miss"
+
+
+def test_paper_shadow_signal_json_preserves_top_level_expected_edge():
+    alert = SimpleNamespace(id=12, ticker="EDGE-USD", asset_type=None)
+    snap = {"entry_edge_expected_net_pct": "2.5"}
+
+    sig = at_mod._paper_shadow_signal_json(
+        alert,
+        snap,
+        "placed",
+        duplicate_policy=at_mod.PAPER_SHADOW_DUPLICATE_POLICY_STRICT,
+    )
+
+    assert sig["entry_edge_expected_net_pct"] == pytest.approx(2.5)
+    assert sig["asset_class"] == "crypto"
+    assert sig["asset_type"] == "crypto"
+
+
+def test_paper_shadow_signal_json_requires_contract_context_for_options():
+    alert = SimpleNamespace(id=13, ticker="AAPL", asset_type="options")
+    snap = {
+        "entry_edge_expected_net_pct": 1.7,
+        "options_path": True,
+        "option_meta": {},
+    }
+
+    sig = at_mod._paper_shadow_signal_json(
+        alert,
+        snap,
+        "placed",
+        duplicate_policy=at_mod.PAPER_SHADOW_DUPLICATE_POLICY_STRICT,
+    )
+
+    assert sig["entry_edge_expected_net_pct"] == pytest.approx(1.7)
+    assert sig["asset_class"] == "stock"
+    assert sig["asset_type"] == "stock"
+
+
 def test_synergy_retry_candidates_revisit_recent_distinct_pattern(db, monkeypatch):
     user = models.User(name="synergy_retry_candidate")
     db.add(user)

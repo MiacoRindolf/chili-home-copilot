@@ -1847,6 +1847,123 @@ def _find_recent_candidate_reason_family_shadow(
     return None, None
 
 
+def _paper_shadow_has_option_context(snap: dict[str, Any] | None) -> bool:
+    if not isinstance(snap, dict):
+        return False
+    option_meta = snap.get("option_meta")
+    return (
+        bool(snap.get("options_path"))
+        and isinstance(option_meta, dict)
+        and bool(option_meta)
+    )
+
+
+def _paper_shadow_asset_class(
+    alert: BreakoutAlert,
+    snap: dict[str, Any] | None,
+) -> str:
+    candidates: list[Any] = []
+    if isinstance(snap, dict):
+        candidates.extend(
+            snap.get(key) for key in ("asset_class", "asset_type", "asset_kind")
+        )
+    candidates.append(getattr(alert, "asset_type", None))
+    has_option_context = _paper_shadow_has_option_context(snap)
+    for raw in candidates:
+        value = str(raw or "").strip().lower()
+        if value in {"crypto", "coin", "coinbase_spot"}:
+            return "crypto"
+        if value in {"option", "options", "robinhood_options"} and has_option_context:
+            return "options"
+        if value in {
+            "stock",
+            "stocks",
+            "equity",
+            "equities",
+            "robinhood",
+            "robinhood_equity",
+        }:
+            return "stock"
+    ticker = str(getattr(alert, "ticker", "") or "").strip().upper()
+    if ticker.endswith("-USD"):
+        return "crypto"
+    return "stock"
+
+
+def _paper_shadow_asset_type(
+    alert: BreakoutAlert,
+    snap: dict[str, Any] | None,
+    *,
+    asset_class: str,
+) -> str:
+    raw = None
+    if isinstance(snap, dict):
+        raw = (
+            snap.get("asset_type")
+            or snap.get("asset_class")
+            or snap.get("asset_kind")
+        )
+    if raw is None:
+        raw = getattr(alert, "asset_type", None)
+    value = str(raw or "").strip().lower()
+    if value in {"crypto", "coin", "coinbase_spot"}:
+        return "crypto"
+    if value in {"option", "options", "robinhood_options"}:
+        return "options" if asset_class == "options" else asset_class
+    if value in {
+        "stock",
+        "stocks",
+        "equity",
+        "equities",
+        "robinhood",
+        "robinhood_equity",
+    }:
+        return "stock"
+    return asset_class
+
+
+def _paper_shadow_signal_json(
+    alert: BreakoutAlert,
+    snap: dict[str, Any] | None,
+    decision: str,
+    *,
+    duplicate_policy: str,
+) -> dict[str, Any]:
+    safe_snap = snap if isinstance(snap, dict) else {}
+    sig: dict[str, Any] = {
+        "auto_trader_v1": True,
+        "breakout_alert_id": int(alert.id),
+        "paper_shadow": True,
+        "shadow_of_alert_id": int(alert.id),
+        "shadow_decision": decision,
+        "projected": safe_snap.get("projected_profit_pct"),
+        "paper_shadow_duplicate_policy": duplicate_policy,
+    }
+    entry_edge = safe_snap.get("entry_edge")
+    if isinstance(entry_edge, dict):
+        sig["entry_edge"] = dict(entry_edge)
+    expected_net_pct = _expected_net_pct_from_snapshot(safe_snap)
+    if expected_net_pct is not None:
+        sig["entry_edge_expected_net_pct"] = expected_net_pct
+    asset_class = _paper_shadow_asset_class(alert, safe_snap)
+    sig["asset_class"] = asset_class
+    sig["asset_type"] = _paper_shadow_asset_type(
+        alert,
+        safe_snap,
+        asset_class=asset_class,
+    )
+    if safe_snap.get("paper_observation_signal_lane"):
+        sig["paper_observation_signal_lane"] = safe_snap.get(
+            "paper_observation_signal_lane"
+        )
+    sig.update({
+        k: v
+        for k, v in safe_snap.items()
+        if isinstance(k, str) and k.startswith(PAPER_SHADOW_AUDIT_PREFIX)
+    })
+    return sig
+
+
 def _paper_shadow_capacity_admission(
     db: Session,
     *,
@@ -1982,28 +2099,16 @@ def _maybe_open_paper_shadow(
             open_paper_trade,
             prune_autotrader_paper_shadow_capacity,
         )
-        sig = {
-            "auto_trader_v1": True,
-            "breakout_alert_id": int(alert.id),
-            "paper_shadow": True,
-            "shadow_of_alert_id": int(alert.id),
-            "shadow_decision": decision,
-            "projected": snap.get("projected_profit_pct"),
-            "paper_shadow_duplicate_policy": (
+        sig = _paper_shadow_signal_json(
+            alert,
+            snap,
+            decision,
+            duplicate_policy=(
                 PAPER_SHADOW_DUPLICATE_POLICY_REJECT_BYPASS
                 if effective_allow_duplicate_open
                 else PAPER_SHADOW_DUPLICATE_POLICY_STRICT
             ),
-        }
-        if snap.get("paper_observation_signal_lane"):
-            sig["paper_observation_signal_lane"] = snap.get(
-                "paper_observation_signal_lane"
-            )
-        sig.update({
-            k: v
-            for k, v in (snap or {}).items()
-            if isinstance(k, str) and k.startswith(PAPER_SHADOW_AUDIT_PREFIX)
-        })
+        )
         if bool(
             getattr(
                 settings,
