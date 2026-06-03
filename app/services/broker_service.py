@@ -2544,6 +2544,21 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             )
             continue
 
+        try:
+            from .trading.broker_position_truth import (
+                pending_exit_thesis_reason as _pending_exit_thesis_reason,
+                reconcile_exit_reason_preserving_pending_thesis as _reconcile_reason,
+            )
+
+            _pending_exit_reason = _pending_exit_thesis_reason(trade)
+            _resolved_reconcile_reason = _reconcile_reason(
+                trade,
+                fallback="broker_reconcile_position_gone",
+            )
+        except Exception:
+            _pending_exit_reason = None
+            _resolved_reconcile_reason = "broker_reconcile_position_gone"
+
         trade.status = "closed"
         trade.exit_date = datetime.utcnow()
         trade.pending_exit_order_id = None
@@ -2566,7 +2581,7 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             else:
                 trade.pnl = round((resolved_exit - entry) * qty, 2)
             if not trade.exit_reason:
-                trade.exit_reason = "broker_reconcile_position_gone"
+                trade.exit_reason = _resolved_reconcile_reason
             trade.notes = (
                 (trade.notes or "")
                 + f"\nAuto-closed: position no longer on Robinhood "
@@ -2627,6 +2642,12 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                 "source": "broker_reconcile_position_gone",
                 "trade_id": _event_trade_id,
                 "exit_reason": trade.exit_reason,
+                "pending_exit_reason": _pending_exit_reason,
+                "broker_reconcile_exit_reason": (
+                    "broker_reconcile_position_gone"
+                    if resolved_exit is not None
+                    else "broker_reconcile_no_exit_price"
+                ),
                 "synthetic": True,
             }
             with db.begin_nested():

@@ -231,7 +231,13 @@ def _exit_reason_repair_candidates(db: "Session", trade: Any) -> dict[str, set[s
         if not isinstance(payload, dict):
             continue
         event_type = _normalized_exit_reason_value(getattr(event, "event_type", None))
-        if event_type not in {"exit_fill", "stop_engine_auto_sell", "coinbase_dust_close"}:
+        if event_type not in {
+            "exit_fill",
+            "stop_engine_auto_sell",
+            "coinbase_dust_close",
+            "broker_reconcile_gone_close",
+            "coinbase_sync_gone_close",
+        }:
             continue
         for key in ("exit_reason", "pending_exit_reason", "reason"):
             _add_exit_repair_candidate(

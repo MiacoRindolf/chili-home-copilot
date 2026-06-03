@@ -225,13 +225,14 @@ def test_stale_close_clears_pending_exit_fields(db):
         bs.sync_positions_to_db(db, user_id=None)
 
     row = db.execute(text("""
-        SELECT status, pending_exit_order_id, pending_exit_status,
+        SELECT status, exit_reason, pending_exit_order_id, pending_exit_status,
                pending_exit_requested_at, pending_exit_reason,
                pending_exit_limit_price
         FROM trading_trades WHERE id = 2010
     """)).first()
     assert row[0] == "closed"
-    assert row[1:] == (None, None, None, None, None)
+    assert row[1] == "stop_loss_hit"
+    assert row[2:] == (None, None, None, None, None)
 
     intent = db.execute(text(
         "SELECT intent_state FROM trading_bracket_intents WHERE id = 42010"

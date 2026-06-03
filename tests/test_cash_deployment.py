@@ -873,6 +873,13 @@ def test_provenance_backfill_repairs_only_unambiguous_exit_reasons(db):
         pnl=5.0,
         exit_reason="broker_reconcile_position_gone",
     )
+    from_reconcile_event = _closed_live(
+        db,
+        pat,
+        ticker="RPAIR",
+        pnl=4.0,
+        exit_reason="broker_reconcile_position_gone",
+    )
     duplicate = _closed_live(
         db,
         pat,
@@ -903,6 +910,18 @@ def test_provenance_backfill_repairs_only_unambiguous_exit_reasons(db):
                 status="filled",
                 payload_json={"side": "sell", "exit_reason": "stop"},
             ),
+            TradingExecutionEvent(
+                trade_id=from_reconcile_event.id,
+                scan_pattern_id=pat.id,
+                ticker="RPAIR",
+                event_type="broker_reconcile_gone_close",
+                status="filled",
+                payload_json={
+                    "side": "sell",
+                    "exit_reason": "broker_reconcile_position_gone",
+                    "pending_exit_reason": "pattern_exit_now",
+                },
+            ),
         ]
     )
     parent = BrainWorkEvent(
@@ -924,7 +943,7 @@ def test_provenance_backfill_repairs_only_unambiguous_exit_reasons(db):
 
     handle_provenance_backfill(db, parent, user_id=None)
     db.flush()
-    for trade in (pending, from_event, duplicate, ambiguous):
+    for trade in (pending, from_event, from_reconcile_event, duplicate, ambiguous):
         db.refresh(trade)
 
     outcome = (
@@ -937,14 +956,16 @@ def test_provenance_backfill_repairs_only_unambiguous_exit_reasons(db):
 
     assert pending.exit_reason == "pattern_exit_now"
     assert from_event.exit_reason == "target"
+    assert from_reconcile_event.exit_reason == "pattern_exit_now"
     assert duplicate.exit_reason == "sync_duplicate"
     assert ambiguous.exit_reason is None
     assert outcome.payload["repair_applied"] is True
     assert outcome.payload["research_only"] is False
-    assert repair["repaired_count"] == 2
+    assert repair["repaired_count"] == 3
     assert {row["trade_id"] for row in repair["repaired"]} == {
         pending.id,
         from_event.id,
+        from_reconcile_event.id,
     }
     skipped = {row["trade_id"]: row["reason"] for row in repair["skipped"]}
     assert skipped[duplicate.id] == "unrepairable_current_exit_reason"
@@ -953,7 +974,7 @@ def test_provenance_backfill_repairs_only_unambiguous_exit_reasons(db):
     assert refresh["event_type"] == EDGE_RELIABILITY_REFRESH
     assert refresh["scan_pattern_id"] == pat.id
     assert refresh["asset_class"] == "stock"
-    assert refresh["repaired_count"] == 2
+    assert refresh["repaired_count"] == 3
     work = (
         db.query(BrainWorkEvent)
         .filter(BrainWorkEvent.event_type == EDGE_RELIABILITY_REFRESH)

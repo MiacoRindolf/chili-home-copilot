@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.models.trading import ScanPattern, Trade, TradingPosition
+from app.models.trading import ScanPattern, Trade, TradingExecutionEvent, TradingPosition
 
 
 def _stale_rh_trade(db, *, ticker: str = "ACMR") -> Trade:
@@ -89,6 +89,52 @@ def test_stop_engine_reconciles_stale_robinhood_trade_before_alerting(db):
     assert trade.exit_price is None
     assert trade.pnl is None
     assert trade.pending_exit_status is None
+
+
+def test_reconcile_stale_robinhood_preserves_pending_exit_thesis(db):
+    from app.services.trading.broker_position_truth import (
+        broker_stale_open_trade_snapshot,
+        reconcile_stale_robinhood_open_trade,
+    )
+
+    trade = _stale_rh_trade(db, ticker="STOPS")
+    trade.pending_exit_order_id = "exit-stops-1"
+    trade.pending_exit_status = "submitted"
+    trade.pending_exit_requested_at = datetime.utcnow() - timedelta(minutes=30)
+    trade.pending_exit_reason = "stop_loss_hit"
+    trade.pending_exit_limit_price = 66.25
+    db.commit()
+
+    snap = broker_stale_open_trade_snapshot(db, trade, grace_seconds=0)
+    out = reconcile_stale_robinhood_open_trade(
+        db,
+        trade,
+        snapshot=snap,
+        source="test",
+        exit_price_resolver=lambda _trade: 66.0,
+    )
+    db.flush()
+
+    assert out is not None
+    assert out["exit_reason"] == "stop_loss_hit"
+    assert trade.status == "closed"
+    assert trade.exit_reason == "stop_loss_hit"
+    assert trade.pending_exit_order_id is None
+    assert trade.pending_exit_status is None
+    assert trade.pending_exit_reason is None
+
+    event = (
+        db.query(TradingExecutionEvent)
+        .filter(TradingExecutionEvent.trade_id == trade.id)
+        .filter(TradingExecutionEvent.event_type == "broker_reconcile_gone_close")
+        .one()
+    )
+    assert event.payload_json["exit_reason"] == "stop_loss_hit"
+    assert event.payload_json["pending_exit_reason"] == "stop_loss_hit"
+    assert (
+        event.payload_json["broker_reconcile_exit_reason"]
+        == "broker_reconcile_position_gone"
+    )
 
 
 def test_mesh_critical_dispatch_suppresses_stale_robinhood_trade(db):

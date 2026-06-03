@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from sqlalchemy import text
 
-from app.models.trading import Trade
+from app.models.trading import Trade, TradingExecutionEvent
 from app.services.coinbase_service import sync_positions_to_db as sync_coinbase_positions_to_db
 from app.services.broker_service import sync_positions_to_db as sync_robinhood_positions_to_db
 from app.services.trading.broker_position_sync import collapse_open_broker_position_duplicates
@@ -178,6 +178,10 @@ def test_coinbase_sync_scores_stale_close_from_sell_fills(
         broker_source="coinbase",
         broker_order_id="buy-1",
         broker_sync_missing_streak=1,
+        pending_exit_status="submitted",
+        pending_exit_requested_at=entry_at,
+        pending_exit_reason="pattern_exit_now",
+        pending_exit_limit_price=1.25,
     )
     db.add(trade)
     db.commit()
@@ -209,12 +213,26 @@ def test_coinbase_sync_scores_stale_close_from_sell_fills(
 
     assert result["closed"] == 1
     assert trade.status == "closed"
-    assert trade.exit_reason == "coinbase_position_sync_gone"
+    assert trade.exit_reason == "pattern_exit_now"
     assert trade.exit_price == 1.25
     assert trade.pnl == 2.5
     assert trade.broker_status == "filled"
     assert trade.last_broker_sync is not None
+    assert trade.pending_exit_status is None
+    assert trade.pending_exit_reason is None
     assert "exit priced from recent_sell_fills" in (trade.notes or "")
+    event = (
+        db.query(TradingExecutionEvent)
+        .filter(TradingExecutionEvent.trade_id == trade.id)
+        .filter(TradingExecutionEvent.event_type == "coinbase_sync_gone_close")
+        .one()
+    )
+    assert event.payload_json["exit_reason"] == "pattern_exit_now"
+    assert event.payload_json["pending_exit_reason"] == "pattern_exit_now"
+    assert (
+        event.payload_json["broker_reconcile_exit_reason"]
+        == "coinbase_position_sync_gone"
+    )
 
 
 @patch(

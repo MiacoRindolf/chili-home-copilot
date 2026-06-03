@@ -19,9 +19,54 @@ from ...models.trading import Trade, TradingPosition
 BROKER_POSITION_TRUTH_SOURCES = frozenset({"coinbase", "robinhood"})
 DEFAULT_BROKER_TRUTH_GRACE_SECONDS = 15 * 60
 
+_UNUSABLE_PENDING_EXIT_REASONS = frozenset({
+    "",
+    "missing",
+    "unknown",
+    "pending_exit",
+    "broker_reconcile_close",
+    "broker_reconcile_position_gone",
+    "broker_reconcile_no_exit_price",
+    "coinbase_position_sync_gone",
+})
+
 
 def _source(trade: Trade) -> str:
     return (getattr(trade, "broker_source", None) or "").strip().lower()
+
+
+def pending_exit_thesis_reason(trade: Any) -> str | None:
+    """Return a high-confidence pending exit thesis before reconcile clears it."""
+    reason = str(getattr(trade, "pending_exit_reason", "") or "").strip()
+    normalized = reason.lower()
+    if normalized in _UNUSABLE_PENDING_EXIT_REASONS:
+        return None
+    if normalized.startswith("broker_reconcile_") or normalized.startswith(
+        "coinbase_position_sync"
+    ):
+        return None
+    has_pending_metadata = any(
+        getattr(trade, attr, None)
+        for attr in (
+            "pending_exit_order_id",
+            "pending_exit_status",
+            "pending_exit_requested_at",
+        )
+    )
+    if not has_pending_metadata:
+        return None
+    return reason[:50]
+
+
+def reconcile_exit_reason_preserving_pending_thesis(
+    trade: Any,
+    *,
+    fallback: str,
+) -> str:
+    current = str(getattr(trade, "exit_reason", "") or "").strip()
+    if current:
+        return current[:50]
+    return pending_exit_thesis_reason(trade) or fallback
 
 
 def _is_live_broker_trade(trade: Trade) -> bool:
@@ -238,6 +283,11 @@ def reconcile_stale_robinhood_open_trade(
         return None
 
     now = datetime.utcnow()
+    pending_exit_reason = pending_exit_thesis_reason(trade)
+    resolved_reconcile_exit_reason = reconcile_exit_reason_preserving_pending_thesis(
+        trade,
+        fallback="broker_reconcile_position_gone",
+    )
     trade.status = "closed"
     trade.exit_date = now
     trade.pending_exit_order_id = None
@@ -273,7 +323,7 @@ def reconcile_stale_robinhood_open_trade(
             else:
                 trade.pnl = round((resolved_exit - entry) * qty, 2)
         if not getattr(trade, "exit_reason", None):
-            trade.exit_reason = "broker_reconcile_position_gone"
+            trade.exit_reason = resolved_reconcile_exit_reason
     else:
         trade.exit_price = None
         trade.pnl = None
@@ -318,6 +368,12 @@ def reconcile_stale_robinhood_open_trade(
                 "synthetic": True,
                 "trade_id": int(getattr(trade, "id", 0) or 0),
                 "exit_reason": trade.exit_reason,
+                "pending_exit_reason": pending_exit_reason,
+                "broker_reconcile_exit_reason": (
+                    "broker_reconcile_position_gone"
+                    if resolved_exit is not None
+                    else "broker_reconcile_no_exit_price"
+                ),
                 "broker_truth_reason": snap.get("reason"),
             },
         )
