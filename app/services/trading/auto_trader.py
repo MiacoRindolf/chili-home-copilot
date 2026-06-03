@@ -13,6 +13,7 @@ from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, case, or_, text
+from sqlalchemy.exc import PendingRollbackError
 from sqlalchemy.orm import Session
 
 from ...config import (
@@ -3323,20 +3324,70 @@ def _audit(
     llm_snapshot: dict[str, Any] | None = None,
     trade_id: Optional[int] = None,
 ) -> None:
-    row = AutoTraderRun(
-        user_id=user_id,
-        breakout_alert_id=alert.id,
-        scan_pattern_id=alert.scan_pattern_id,
-        ticker=(alert.ticker or "").upper(),
-        decision=decision,
-        reason=reason[:2000] if reason else None,
-        rule_snapshot=rule_snapshot,
-        llm_snapshot=llm_snapshot,
-        management_scope=MANAGEMENT_SCOPE_AUTO_TRADER_V1,
-        trade_id=trade_id,
-    )
+    recovered_inactive_session = False
+    try:
+        session_active = bool(getattr(db, "is_active", True))
+    except Exception:
+        session_active = True
+    if not session_active:
+        try:
+            db.rollback()
+            recovered_inactive_session = True
+            logger.warning(
+                "[autotrader] audit recovered inactive db session alert_id=%s ticker=%s reason=%s",
+                getattr(alert, "id", None),
+                (getattr(alert, "ticker", None) or "").upper() or None,
+                reason,
+            )
+        except Exception:
+            logger.exception(
+                "[autotrader] audit failed to rollback inactive db session alert_id=%s",
+                getattr(alert, "id", None),
+            )
+
+    if recovered_inactive_session:
+        if isinstance(rule_snapshot, dict):
+            rule_snapshot = dict(rule_snapshot)
+        else:
+            rule_snapshot = {}
+        rule_snapshot["audit_session_recovered"] = True
+        rule_snapshot["audit_session_recovery_reason"] = "inactive_transaction"
+
+    def _row() -> AutoTraderRun:
+        return AutoTraderRun(
+            user_id=user_id,
+            breakout_alert_id=alert.id,
+            scan_pattern_id=alert.scan_pattern_id,
+            ticker=(alert.ticker or "").upper(),
+            decision=decision,
+            reason=reason[:2000] if reason else None,
+            rule_snapshot=rule_snapshot,
+            llm_snapshot=llm_snapshot,
+            management_scope=MANAGEMENT_SCOPE_AUTO_TRADER_V1,
+            trade_id=trade_id,
+        )
+
+    row = _row()
     db.add(row)
-    db.commit()
+    try:
+        db.commit()
+    except PendingRollbackError:
+        logger.warning(
+            "[autotrader] audit commit hit pending rollback; retrying after rollback alert_id=%s ticker=%s reason=%s",
+            getattr(alert, "id", None),
+            (getattr(alert, "ticker", None) or "").upper() or None,
+            reason,
+            exc_info=True,
+        )
+        db.rollback()
+        if isinstance(rule_snapshot, dict):
+            rule_snapshot = dict(rule_snapshot)
+        else:
+            rule_snapshot = {}
+        rule_snapshot["audit_session_recovered"] = True
+        rule_snapshot["audit_session_recovery_reason"] = "pending_rollback_retry"
+        db.add(_row())
+        db.commit()
 
     # Q1.T3 phase 2 — shadow-consume unified_signals.
     # No-op when chili_unified_signal_consumer_enabled is False (default).

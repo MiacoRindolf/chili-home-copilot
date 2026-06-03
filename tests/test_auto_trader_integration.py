@@ -4,6 +4,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from sqlalchemy.exc import PendingRollbackError
+
 from app import models
 from app.models.trading import AutoTraderRun, BreakoutAlert, PaperTrade, ScanPattern
 from app.services.trading import auto_trader as at_mod
@@ -253,3 +255,74 @@ def test_run_auto_trader_tick_audits_exception_context(db, monkeypatch):
     assert snap["alert_asset_type"] == "crypto"
     assert snap["alert_scan_pattern_id"] == 585
     assert snap["error_frames"]
+
+
+class _AuditRecoverySession:
+    def __init__(self, *, active: bool = True, fail_first_commit: bool = False):
+        self.is_active = active
+        self.fail_first_commit = fail_first_commit
+        self.rows = []
+        self.rollback_count = 0
+        self.commit_count = 0
+
+    def rollback(self):
+        self.rollback_count += 1
+        self.is_active = True
+
+    def add(self, row):
+        self.rows.append(row)
+
+    def commit(self):
+        self.commit_count += 1
+        if self.fail_first_commit and self.commit_count == 1:
+            raise PendingRollbackError("test pending rollback")
+
+
+def _audit_recovery_alert() -> BreakoutAlert:
+    alert = BreakoutAlert(ticker="AUDR", scan_pattern_id=586, entry_price=10.0)
+    alert.id = 123
+    return alert
+
+
+def test_audit_recovers_inactive_session_before_write():
+    db = _AuditRecoverySession(active=False)
+
+    at_mod._audit(
+        db,
+        user_id=1,
+        alert=_audit_recovery_alert(),
+        decision="skipped",
+        reason="test_inactive_session_recovery",
+        rule_snapshot={"source": "test"},
+    )
+
+    assert db.rollback_count == 1
+    assert db.commit_count == 1
+    run = db.rows[0]
+    assert run.decision == "skipped"
+    assert run.reason == "test_inactive_session_recovery"
+    assert run.rule_snapshot["source"] == "test"
+    assert run.rule_snapshot["audit_session_recovered"] is True
+    assert run.rule_snapshot["audit_session_recovery_reason"] == "inactive_transaction"
+
+
+def test_audit_retries_pending_rollback_commit_once():
+    db = _AuditRecoverySession(active=True, fail_first_commit=True)
+
+    at_mod._audit(
+        db,
+        user_id=1,
+        alert=_audit_recovery_alert(),
+        decision="skipped",
+        reason="test_pending_rollback_retry",
+        rule_snapshot={"source": "test"},
+    )
+
+    assert db.rollback_count == 1
+    assert db.commit_count == 2
+    run = db.rows[-1]
+    assert run.decision == "skipped"
+    assert run.reason == "test_pending_rollback_retry"
+    assert run.rule_snapshot["source"] == "test"
+    assert run.rule_snapshot["audit_session_recovered"] is True
+    assert run.rule_snapshot["audit_session_recovery_reason"] == "pending_rollback_retry"
