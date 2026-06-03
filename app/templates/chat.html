@@ -1787,6 +1787,17 @@
       if (!isGuest) loadGuestConversations();
       updateExportBtn();
       input.focus();
+      // Ask CHILI: a ⌘K "Ask CHILI" deep-link arrives as /chat?q=… — prefill the
+      // composer for review (do NOT auto-send; the user presses Enter themselves).
+      try {
+        var _askQ = new URLSearchParams(window.location.search).get('q');
+        if (_askQ && input) {
+          input.value = _askQ;
+          input.dispatchEvent(new Event('input', { bubbles: true }));  // trigger autosize/handlers
+          input.focus();
+          try { input.setSelectionRange(input.value.length, input.value.length); } catch (e) {}
+        }
+      } catch (e) {}
     })();
   </script>
 {% endblock %}
