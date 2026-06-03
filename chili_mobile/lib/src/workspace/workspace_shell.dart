@@ -178,6 +178,7 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
               ..sort((WsWindow a, WsWindow b) => a.z.compareTo(b.z)); // bottom → top
             final String? focusedId = _ws.focusedId;
             return Stack(
+              fit: StackFit.expand, // fill the desktop (the Row gives a loose height)
               children: <Widget>[
                 _desktopBackground(context, cs),
                 for (final WsWindow w in wins)
