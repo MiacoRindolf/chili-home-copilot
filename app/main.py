@@ -593,6 +593,12 @@ def _deferred_startup_side_effects_disabled(settings_obj, scheduler_role: str | 
     return not bool(getattr(settings_obj, "chili_scheduler_runs_externally", False))
 
 
+def _startup_broker_restore_enabled(settings_obj, scheduler_role: str | None = None) -> bool:
+    """True when this process owns broker session restore/sync at startup."""
+    role = (scheduler_role or _scheduler_role_value(settings_obj)).strip().lower()
+    return role != "none"
+
+
 
 def _run_deferred_startup() -> None:
     """Heavy startup work (runs in a daemon thread).
@@ -622,7 +628,13 @@ def _run_deferred_startup() -> None:
             return
         # Robinhood restore can block on device approval / MFA — must not run in lifespan
         # before yield or HTTP never becomes ready (empty reply / TLS handshake failure).
-        _restore_broker_sessions()
+        if _startup_broker_restore_enabled(_settings, _sched_role):
+            _restore_broker_sessions()
+        else:
+            _log.info(
+                "[startup] CHILI_SCHEDULER_ROLE=none: skipping broker session restore; "
+                "dedicated broker/autotrader workers own broker sync"
+            )
         # Broker credential dual-path visibility. `.env` plaintext broker creds are
         # deprecated (see app/config.py ~lines 153-159): the per-user encrypted
         # BrokerCredential vault is the intended path. If both are populated, surface

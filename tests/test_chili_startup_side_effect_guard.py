@@ -24,6 +24,20 @@ def test_role_none_compose_web_with_external_scheduler_keeps_deferred_side_effec
     assert _deferred_startup_side_effects_disabled(_Settings("none", True)) is False
 
 
+def test_role_none_web_never_restores_broker_sessions() -> None:
+    from app.main import _startup_broker_restore_enabled
+
+    assert _startup_broker_restore_enabled(_Settings("none", False)) is False
+    assert _startup_broker_restore_enabled(_Settings("none", True)) is False
+
+
+def test_scheduler_roles_restore_broker_sessions() -> None:
+    from app.main import _startup_broker_restore_enabled
+
+    for role in ("all", "web", "worker", "autotrader_only", "broker_sync_only", "cron_only"):
+        assert _startup_broker_restore_enabled(_Settings(role, False)) is True
+
+
 def test_scheduler_roles_keep_deferred_side_effects() -> None:
     from app.main import _deferred_startup_side_effects_disabled
 
@@ -37,10 +51,13 @@ def test_deferred_startup_checks_side_effect_guard_before_broker_restore() -> No
     assert idx > 0
     body = src[idx : idx + 2500]
     guard_pos = body.find("_deferred_startup_side_effects_disabled(")
+    broker_guard_pos = body.find("_startup_broker_restore_enabled(")
     restore_pos = body.find("_restore_broker_sessions()")
     assert guard_pos > 0
+    assert broker_guard_pos > 0
     assert restore_pos > 0
     assert guard_pos < restore_pos
+    assert broker_guard_pos < restore_pos
 
 
 def test_app_startup_restores_durable_circuit_breaker_after_kill_switch() -> None:
