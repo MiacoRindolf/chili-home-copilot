@@ -362,6 +362,67 @@ def test_option_terminal_zero_fill_is_cancelled_not_open_zero_quantity():
     assert remaining_qty == 0.0
 
 
+def test_option_terminal_zero_fill_records_shadow_observation(monkeypatch):
+    assert "blocked_option_entry_no_fill" in at_mod.QUALIFIED_BLOCK_PAPER_SHADOW_DECISIONS
+    audits: list[dict] = []
+    notes: list[dict] = []
+    shadows: list[dict] = []
+
+    monkeypatch.setattr(at_mod, "_audit", lambda *args, **kwargs: audits.append(kwargs))
+    monkeypatch.setattr(
+        at_mod,
+        "_autotrader_tick_note",
+        lambda out, **kwargs: notes.append(kwargs),
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_maybe_open_paper_shadow",
+        lambda *args, **kwargs: shadows.append(kwargs),
+    )
+
+    alert = SimpleNamespace(
+        id=42,
+        ticker="AAPL",
+        asset_type="options",
+        scan_pattern_id=77,
+    )
+    snap = {
+        "options_path": True,
+        "option_meta": {"limit_price": 1.25, "expiration": "2026-06-19"},
+        "entry_edge_expected_net_pct": 2.1,
+    }
+    out = {"skipped": 0}
+
+    at_mod._record_option_entry_no_fill_with_shadow(
+        object(),
+        uid=7,
+        alert=alert,
+        snap=snap,
+        llm_snap={"llm": "snapshot"},
+        out=out,
+        qty=2.0,
+        px=100.0,
+        entry_broker_status="cancelled",
+    )
+
+    assert snap["option_entry_terminal_state"] == "cancelled"
+    assert audits[0]["decision"] == "blocked"
+    assert audits[0]["reason"] == "broker:option_entry_no_fill:cancelled"
+    assert notes[0]["reason"] == "broker:option_entry_no_fill"
+    assert out["skipped"] == 1
+    assert shadows == [
+        {
+            "uid": 7,
+            "alert": alert,
+            "qty": 2.0,
+            "px": 100.0,
+            "snap": snap,
+            "decision": "blocked_option_entry_no_fill",
+            "allow_duplicate_open": True,
+        }
+    ]
+
+
 def test_option_entry_rejects_invalid_contract_quantity_instead_of_defaulting_to_one():
     src = (REPO / "app/services/trading/auto_trader.py").read_text()
 

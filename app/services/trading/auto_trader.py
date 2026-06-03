@@ -114,6 +114,7 @@ QUALIFIED_BLOCK_PAPER_SHADOW_DECISIONS = frozenset({
     "blocked_max_concurrent_equity",
     "blocked_max_concurrent_global",
     "blocked_max_concurrent_options",
+    "blocked_option_entry_no_fill",
     "blocked_regime_gate",
     "blocked_recert_required",
     "blocked_shadow_promoted",
@@ -3175,6 +3176,48 @@ def _block_live_order_with_paper_shadow(
         px=shadow_px,
         snap=shadow_snap,
         decision=shadow_decision,
+    )
+
+
+def _record_option_entry_no_fill_with_shadow(
+    db: Session,
+    *,
+    uid: int,
+    alert: BreakoutAlert,
+    snap: dict[str, Any],
+    llm_snap: dict[str, Any] | None,
+    out: dict[str, Any],
+    qty: float,
+    px: float,
+    entry_broker_status: str | None,
+) -> None:
+    terminal_state = entry_broker_status or "terminal"
+    snap["option_entry_terminal_state"] = terminal_state
+    _audit(
+        db,
+        user_id=uid,
+        alert=alert,
+        decision="blocked",
+        reason=f"broker:option_entry_no_fill:{terminal_state}",
+        rule_snapshot=snap,
+        llm_snapshot=llm_snap,
+    )
+    out["skipped"] += 1
+    _autotrader_tick_note(
+        out,
+        kind="blocked",
+        reason="broker:option_entry_no_fill",
+        alert=alert,
+    )
+    _maybe_open_paper_shadow(
+        db,
+        uid=uid,
+        alert=alert,
+        qty=qty,
+        px=px,
+        snap=snap,
+        decision="blocked_option_entry_no_fill",
+        allow_duplicate_open=True,
     )
 
 
@@ -7096,22 +7139,16 @@ def _execute_new_entry(
             and _entry_status == "cancelled"
             and float(_entry_filled_qty or 0.0) <= 0.0
         ):
-            snap["option_entry_terminal_state"] = _entry_broker_status
-            _audit(
+            _record_option_entry_no_fill_with_shadow(
                 db,
-                user_id=uid,
+                uid=uid,
                 alert=alert,
-                decision="blocked",
-                reason=f"broker:option_entry_no_fill:{_entry_broker_status or 'terminal'}",
-                rule_snapshot=snap,
-                llm_snapshot=llm_snap,
-            )
-            out["skipped"] += 1
-            _autotrader_tick_note(
-                out,
-                kind="blocked",
-                reason="broker:option_entry_no_fill",
-                alert=alert,
+                snap=snap,
+                llm_snap=llm_snap,
+                out=out,
+                qty=float(_requested_broker_qty),
+                px=px,
+                entry_broker_status=_entry_broker_status,
             )
             return
         _option_terminal_partial_entry = (
