@@ -480,9 +480,28 @@ def run_intraday_signal_sweep(
         results.update(paper_diag)
         if paper_candidates:
             try:
-                from .paper_trading import auto_enter_from_signals
-                entered = auto_enter_from_signals(db, user_id, paper_candidates)
-                results["paper_entered"] = entered
+                from .paper_trading import auto_enter_from_signals_detailed
+                entry_diag = auto_enter_from_signals_detailed(
+                    db,
+                    user_id,
+                    paper_candidates,
+                )
+                results["paper_entered"] = int(entry_diag.get("entered") or 0)
+                results["auto_paper_entry_attempted"] = int(
+                    entry_diag.get("attempted") or 0
+                )
+                results["auto_paper_entry_blocked"] = int(
+                    entry_diag.get("blocked") or 0
+                )
+                results["auto_paper_entry_block_reasons"] = dict(
+                    entry_diag.get("block_reasons") or {}
+                )
+                results["auto_paper_entered_signals"] = list(
+                    entry_diag.get("entered_signals") or []
+                )
+                results["auto_paper_blocked_signals"] = list(
+                    entry_diag.get("blocked_signals") or []
+                )[:10]
             except Exception as e:
                 logger.warning("[intraday] Paper entry failed: %s", e)
                 results["auto_paper_error"] = str(e)

@@ -2155,6 +2155,91 @@ def auto_enter_from_signals(
     signals: list[dict[str, Any]],
     capital: float = DEFAULT_PAPER_CAPITAL,
 ) -> int:
+    """Automatically open paper trades from high-confidence signals."""
+    result = auto_enter_from_signals_detailed(
+        db,
+        user_id,
+        signals,
+        capital=capital,
+    )
+    return int(result.get("entered") or 0)
+
+
+def _auto_enter_add_block(
+    diagnostics: dict[str, Any],
+    *,
+    signal: dict[str, Any],
+    reason: str,
+) -> None:
+    block_reasons = diagnostics.setdefault("block_reasons", {})
+    block_reasons[reason] = int(block_reasons.get(reason) or 0) + 1
+    diagnostics.setdefault("blocked_signals", []).append(
+        {
+            "ticker": signal.get("ticker"),
+            "direction": signal.get("direction"),
+            "signal_type": signal.get("signal_type"),
+            "reason": reason,
+        }
+    )
+
+
+def _auto_enter_open_failure_reason(
+    db: Session,
+    *,
+    user_id: int | None,
+    ticker: Any,
+    scan_pattern_id: Any,
+    entry: float,
+    stop: float | None,
+    target: float | None,
+    direction: str,
+    is_option_signal: bool,
+) -> str:
+    try:
+        open_count = (
+            db.query(PaperTrade)
+            .filter(PaperTrade.user_id == user_id, PaperTrade.status == "open")
+            .count()
+        )
+    except Exception:
+        open_count = None
+    if open_count is not None and open_count >= MAX_OPEN_PAPER_TRADES:
+        return "max_open_paper_trades"
+
+    try:
+        existing = (
+            db.query(PaperTrade)
+            .filter(
+                PaperTrade.user_id == user_id,
+                PaperTrade.ticker == str(ticker or "").upper(),
+                PaperTrade.status == "open",
+                PaperTrade.scan_pattern_id == scan_pattern_id,
+            )
+            .first()
+        )
+    except Exception:
+        existing = None
+    if existing is not None:
+        return "duplicate_open"
+
+    side = _paper_side(direction)
+    if _paper_directional_risk_amount(entry, stop, side) is None:
+        return "invalid_premium_stop" if is_option_signal else "invalid_directional_stop"
+    if _paper_directional_reward_amount(entry, target, side) is None:
+        return (
+            "invalid_premium_target"
+            if is_option_signal
+            else "invalid_directional_target"
+        )
+    return "open_paper_trade_returned_none"
+
+
+def auto_enter_from_signals_detailed(
+    db: Session,
+    user_id: int | None,
+    signals: list[dict[str, Any]],
+    capital: float = DEFAULT_PAPER_CAPITAL,
+) -> dict[str, Any]:
     """Automatically open paper trades from high-confidence signals.
 
     Each signal dict should have: ticker, entry_price, stop_price, target_price,
@@ -2174,13 +2259,25 @@ def auto_enter_from_signals(
         _net_edge = None  # type: ignore[assignment]
         logger.debug("[paper] net_edge_ranker unavailable: %s", _exc)
 
-    entered = 0
-    blocked = 0
+    diagnostics: dict[str, Any] = {
+        "entered": 0,
+        "attempted": 0,
+        "blocked": 0,
+        "entered_signals": [],
+        "blocked_signals": [],
+        "block_reasons": {},
+    }
     for sig in signals:
+        diagnostics["attempted"] = int(diagnostics.get("attempted") or 0) + 1
         conf, confidence_input = _confidence_fraction_evidence(
             sig.get("confidence", 0)
         )
         if conf is None or conf < 0.6:
+            _auto_enter_add_block(
+                diagnostics,
+                signal=dict(sig),
+                reason="confidence_below_floor",
+            )
             continue
         signal_payload = dict(sig)
         signal_payload["confidence"] = conf
@@ -2193,6 +2290,11 @@ def auto_enter_from_signals(
         stop_raw = signal_payload.get("stop_price") or signal_payload.get("stop")
         target_raw = signal_payload.get("target_price") or signal_payload.get("target")
         if entry is None:
+            _auto_enter_add_block(
+                diagnostics,
+                signal=signal_payload,
+                reason="invalid_entry",
+            )
             continue
         direction = str(signal_payload.get("direction") or "long").strip().lower()
         if direction != "short":
@@ -2213,7 +2315,11 @@ def auto_enter_from_signals(
         )
         if not allowed:
             logger.info("[paper] Trade blocked for %s: %s", ticker, reason)
-            blocked += 1
+            _auto_enter_add_block(
+                diagnostics,
+                signal=signal_payload,
+                reason=f"risk_gate:{reason}",
+            )
             continue
 
         if is_option_sig:
@@ -2230,14 +2336,22 @@ def auto_enter_from_signals(
                     "[paper] Option trade blocked for %s: invalid premium stop",
                     ticker,
                 )
-                blocked += 1
+                _auto_enter_add_block(
+                    diagnostics,
+                    signal=signal_payload,
+                    reason="invalid_premium_stop",
+                )
                 continue
             if target is not None and float(target) <= entry:
                 logger.info(
                     "[paper] Option trade blocked for %s: invalid premium target",
                     ticker,
                 )
-                blocked += 1
+                _auto_enter_add_block(
+                    diagnostics,
+                    signal=signal_payload,
+                    reason="invalid_premium_target",
+                )
                 continue
             explicit_qty = "quantity" in _paper_option_meta_from_signal(signal_payload)
             qty = _option_signal_quantity(signal_payload)
@@ -2246,7 +2360,11 @@ def auto_enter_from_signals(
                     "[paper] Option trade blocked for %s: invalid contract quantity",
                     ticker,
                 )
-                blocked += 1
+                _auto_enter_add_block(
+                    diagnostics,
+                    signal=signal_payload,
+                    reason="invalid_contract_quantity",
+                )
                 continue
             if qty is None:
                 qty = _size_option_contracts(
@@ -2260,7 +2378,11 @@ def auto_enter_from_signals(
                     "[paper] Option trade blocked for %s: contract size unavailable",
                     ticker,
                 )
-                blocked += 1
+                _auto_enter_add_block(
+                    diagnostics,
+                    signal=signal_payload,
+                    reason="contract_size_unavailable",
+                )
                 continue
         else:
             stop = _positive_float(stop_raw)
@@ -2355,12 +2477,43 @@ def auto_enter_from_signals(
             direction=direction,
         )
         if pt:
-            entered += 1
+            diagnostics["entered"] = int(diagnostics.get("entered") or 0) + 1
+            diagnostics.setdefault("entered_signals", []).append(
+                {
+                    "ticker": ticker,
+                    "direction": direction,
+                    "signal_type": signal_payload.get("signal_type"),
+                }
+            )
+        else:
+            _auto_enter_add_block(
+                diagnostics,
+                signal=signal_payload,
+                reason=_auto_enter_open_failure_reason(
+                    db,
+                    user_id=user_id,
+                    ticker=ticker,
+                    scan_pattern_id=signal_payload.get("scan_pattern_id"),
+                    entry=float(entry),
+                    stop=float(stop) if stop is not None else None,
+                    target=float(target) if target is not None else None,
+                    direction=direction,
+                    is_option_signal=is_option_sig,
+                ),
+            )
 
-    if entered > 0:
+    if int(diagnostics.get("entered") or 0) > 0:
         db.commit()
 
-    if blocked > 0:
-        logger.info("[paper] %d signals blocked by risk gate, %d entered", blocked, entered)
+    diagnostics["blocked"] = sum(
+        int(count or 0) for count in diagnostics.get("block_reasons", {}).values()
+    )
+    if int(diagnostics.get("blocked") or 0) > 0:
+        logger.info(
+            "[paper] auto-enter diagnostics entered=%d blocked=%d reasons=%s",
+            int(diagnostics.get("entered") or 0),
+            int(diagnostics.get("blocked") or 0),
+            diagnostics.get("block_reasons"),
+        )
 
-    return entered
+    return diagnostics

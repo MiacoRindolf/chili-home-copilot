@@ -1878,6 +1878,67 @@ def test_auto_enter_stock_short_signal_preserves_directional_geometry(
     assert emitted[0].direction == "short"
 
 
+def test_auto_enter_detailed_reports_duplicate_open_block(
+    monkeypatch,
+) -> None:
+    from app.services.trading import paper_trading
+
+    monkeypatch.setattr(paper_trading.settings, "backtest_spread", 0.0, raising=False)
+    existing = PaperTrade(
+        user_id=1,
+        ticker="MRVL",
+        direction="short",
+        entry_price=300.0,
+        stop_price=337.0,
+        target_price=291.0,
+        quantity=1,
+        status="open",
+        scan_pattern_id=None,
+        signal_json={"signal_type": "orb_breakdown"},
+    )
+    signal = {
+        "ticker": "MRVL",
+        "entry_price": 300.35,
+        "stop_price": 337.15,
+        "target_price": 291.7,
+        "confidence": 0.89,
+        "direction": "short",
+        "signal_type": "orb_breakdown",
+    }
+    db = _FakeDb([existing])
+
+    with patch(
+        "app.services.trading.portfolio_risk.check_new_trade_allowed",
+        return_value=(True, "ok"),
+    ), patch(
+        "app.services.trading.net_edge_ranker.mode_is_active",
+        return_value=False,
+    ), patch(
+        "app.services.trading.position_sizer_writer.mode_is_active",
+        return_value=False,
+    ):
+        result = paper_trading.auto_enter_from_signals_detailed(
+            db,
+            user_id=1,
+            signals=[signal],
+            capital=10_000.0,
+        )
+
+    assert result["entered"] == 0
+    assert result["attempted"] == 1
+    assert result["blocked"] == 1
+    assert result["block_reasons"] == {"duplicate_open": 1}
+    assert result["blocked_signals"] == [
+        {
+            "ticker": "MRVL",
+            "direction": "short",
+            "signal_type": "orb_breakdown",
+            "reason": "duplicate_open",
+        }
+    ]
+    assert _paper_rows(db) == []
+
+
 def test_auto_enter_option_signal_rejects_unaffordable_contract_size(
     monkeypatch,
 ) -> None:

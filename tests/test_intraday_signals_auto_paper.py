@@ -125,11 +125,29 @@ def test_run_intraday_sweep_reports_auto_paper_diagnostics(monkeypatch):
 
     def _fake_auto_enter(db, user_id, signals):
         captured["signals"] = signals
-        return len(signals)
+        return {
+            "entered": len(signals),
+            "attempted": len(signals),
+            "blocked": 0,
+            "block_reasons": {},
+            "entered_signals": [
+                {
+                    "ticker": sig.get("ticker"),
+                    "direction": sig.get("direction"),
+                    "signal_type": sig.get("signal_type"),
+                }
+                for sig in signals
+            ],
+            "blocked_signals": [],
+        }
 
     from app.services.trading import paper_trading
 
-    monkeypatch.setattr(paper_trading, "auto_enter_from_signals", _fake_auto_enter)
+    monkeypatch.setattr(
+        paper_trading,
+        "auto_enter_from_signals_detailed",
+        _fake_auto_enter,
+    )
 
     out = intraday_signals.run_intraday_signal_sweep(
         _DummyDb(),
@@ -138,6 +156,16 @@ def test_run_intraday_sweep_reports_auto_paper_diagnostics(monkeypatch):
     )
 
     assert out["paper_entered"] == 1
+    assert out["auto_paper_entry_attempted"] == 1
+    assert out["auto_paper_entry_blocked"] == 0
+    assert out["auto_paper_entry_block_reasons"] == {}
+    assert out["auto_paper_entered_signals"] == [
+        {
+            "ticker": "BTC-USD",
+            "direction": None,
+            "signal_type": "momentum_continuation",
+        }
+    ]
     assert out["auto_paper_candidates_considered"] == 2
     assert out["auto_paper_candidates_eligible"] == 1
     assert out["auto_paper_skip_reasons"] == {"stock_session_closed": 1}
