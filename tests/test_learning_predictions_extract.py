@@ -1,6 +1,8 @@
 ﻿"""learning_predictions extraction: facade parity and prediction row shape."""
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 
@@ -49,3 +51,66 @@ def test_get_current_predictions_explicit_list_bypasses_cache(monkeypatch: pytes
     monkeypatch.setattr(learning_mod, "_get_current_predictions_impl", fake_impl)
     learning_mod.get_current_predictions(None, ["AAA", "BBB"])  # type: ignore[arg-type]
     assert calls == [(("AAA", "BBB"), True)]
+
+
+def test_prediction_dynamic_prior_session_rolls_back_before_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import db as app_db
+    from app.services.trading import dynamic_priors
+    from app.services.trading import learning_predictions as LP
+    from app.services.trading import pattern_engine
+
+    class _PriorSession:
+        def __init__(self) -> None:
+            self.events: list[str] = []
+
+        def rollback(self) -> None:
+            self.events.append("rollback")
+
+        def close(self) -> None:
+            self.events.append("close")
+
+    prior_session = _PriorSession()
+
+    monkeypatch.setattr(app_db, "SessionLocal", lambda: prior_session)
+    monkeypatch.setattr(dynamic_priors, "population_win_rate", lambda _db: 0.6)
+    monkeypatch.setattr(
+        LP,
+        "get_indicator_snapshot",
+        lambda _ticker: {
+            "ticker": "TST",
+            "interval": "1d",
+            "rsi": {"value": 51.0},
+            "ema_20": {"value": 100.0},
+            "atr": {"value": 2.0},
+        },
+    )
+    monkeypatch.setattr(LP, "fetch_quote", lambda _ticker: {"price": 100.0})
+    monkeypatch.setattr(
+        pattern_engine,
+        "evaluate_patterns_with_strength",
+        lambda _flat, _patterns: [
+            {
+                "name": "Prior-backed fallback",
+                "win_rate": None,
+                "avg_strength": 2.0,
+                "match_quality": 1.0,
+                "score_boost": 1.0,
+            }
+        ],
+    )
+
+    row = LP._predict_single_ticker(
+        "TST",
+        {},
+        None,
+        {"regime": "normal"},
+        False,
+        lambda _features: None,
+        active_patterns=[SimpleNamespace(ticker_scope="universal")],
+    )
+
+    assert row is not None
+    assert row["score"] == 1.2
+    assert prior_session.events == ["rollback", "close"]

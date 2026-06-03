@@ -430,6 +430,13 @@ def _predict_single_ticker(
                 try:
                     _pop_wr = _pop_wr_fn(_priors_db)
                 finally:
+                    try:
+                        _priors_db.rollback()
+                    except Exception:
+                        logger.debug(
+                            "[learning_predictions] dynamic-prior rollback failed",
+                            exc_info=True,
+                        )
                     _priors_db.close()
             except Exception:
                 _pop_wr = None
