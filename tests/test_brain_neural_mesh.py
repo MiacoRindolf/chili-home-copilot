@@ -31,6 +31,21 @@ def test_compute_activation_delta_polarity() -> None:
     assert inh < 0
 
 
+def test_compute_activation_delta_preserves_zero_edge_weight() -> None:
+    e = SimpleNamespace(weight=0.0)
+
+    assert prop.compute_activation_delta(
+        e,
+        confidence_delta=0.5,
+        polarity="excitatory",
+    ) == pytest.approx(0.0)
+    assert prop.compute_activation_delta(
+        e,
+        confidence_delta=0.5,
+        polarity="inhibitory",
+    ) == pytest.approx(0.0)
+
+
 def test_decay_reduces_confidence() -> None:
     st = BrainNodeState(
         node_id="n1",

@@ -30,6 +30,18 @@ def _clamp01(x: float) -> float:
     return max(0.0, min(1.0, float(x)))
 
 
+def _finite_float_or_default(value: Any, default: float) -> float:
+    if isinstance(value, bool) or value is None:
+        return default
+    try:
+        converted = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if not math.isfinite(converted):
+        return default
+    return converted
+
+
 def signal_from_payload(payload: Optional[dict[str, Any]]) -> str:
     if not payload:
         return "*"
@@ -94,7 +106,7 @@ def compute_activation_delta(
     Scales by edge weight, edge type, and source confidence quality.
     """
     base = abs(float(confidence_delta)) if confidence_delta != 0.0 else 0.12
-    w = float(edge.weight or 1.0)
+    w = _finite_float_or_default(getattr(edge, "weight", None), 1.0)
     edge_type = getattr(edge, "edge_type", "dataflow") or "dataflow"
     type_scale = _EDGE_TYPE_SCALE.get(edge_type, 1.0)
     # Source confidence attenuates: weak sources don't strongly activate targets.
