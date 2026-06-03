@@ -162,8 +162,9 @@ services:
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
       - ./docs:/app/docs
-      # LOCAL DEV — mount Python package so scheduler/WS-off fixes apply without ``docker build``.
-      - ./app:/app/app
+      # Keep application code image-backed: this service auto-restarts, so a
+      # dirty bind-mounted checkout must not become the live API runtime.
+      # Local dev can use scripts/start-dev.ps1 for bind-mounted app code.
       # LOCAL DEV ONLY — writable host checkout at /workspace for Project Autopilot
       # worktrees/branches and in-container coding validation (CODE_BRAIN_REPOS=/workspace).
       # Omit for production-like deploys.
@@ -480,9 +481,8 @@ services:
       - CHILI_CONTAINER_CPU_LIMIT=2
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
-      - ./app:/app/app
-      # Round-19 (2026-04-30): mount scripts/ -- workers loading scripts/*.py would otherwise run baked-in copies.
-      - ./scripts:/app/scripts
+      # Auto-restart lane: run image-backed app/scripts code so dirty local
+      # checkout changes cannot alter alert scanning after a container restart.
     depends_on:
       postgres:
         condition: service_healthy
@@ -528,8 +528,8 @@ services:
       - PYTHONUNBUFFERED=1
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
-      - ./app:/app/app
-      - ./scripts:/app/scripts
+      # Auto-restart lane: run image-backed app/scripts code so dirty local
+      # checkout changes cannot alter snapshot maintenance after a restart.
     depends_on:
       postgres:
         condition: service_healthy
