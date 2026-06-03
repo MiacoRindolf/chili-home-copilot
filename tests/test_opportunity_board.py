@@ -1,12 +1,17 @@
 """Light tests for Trading Brain opportunity board (tiers + payload shape)."""
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
+from sqlalchemy.orm import Session
+
+from app.models.trading import ScanResult
 from app.services.trading.opportunity_board import (
     _annotate_desk_fields,
     _apply_board_data_quality_gate,
     _board_data_quality_gate,
+    _scanner_fallback_rows,
     get_trading_opportunity_board,
 )
 
@@ -253,3 +258,40 @@ def test_opportunity_board_data_quality_blocks_missing_source_clock() -> None:
     assert gate["hard_block_reason_code"] == "board_freshness_unknown"
     assert gate["missing_source_keys"] == ["prescreen_snapshot_finished_latest_utc"]
     assert gate["source_status"]["prescreen_snapshot_finished_latest_utc"] == "missing"
+
+
+def test_scanner_fallback_rows_ignore_stale_scans(db: Session) -> None:
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    db.add_all(
+        [
+            ScanResult(
+                user_id=None,
+                ticker="FRESH",
+                score=7.2,
+                signal="buy",
+                scanned_at=now,
+            ),
+            ScanResult(
+                user_id=None,
+                ticker="STALE",
+                score=9.1,
+                signal="buy",
+                scanned_at=now - timedelta(hours=2),
+            ),
+        ]
+    )
+    db.commit()
+
+    tier_b, tier_c = _scanner_fallback_rows(
+        db,
+        set(),
+        max_rows=4,
+        min_score_b=6.5,
+        max_age_seconds=180,
+    )
+
+    rows = tier_b + tier_c
+    tickers = {row["ticker"] for row in rows}
+    assert "FRESH" in tickers
+    assert "STALE" not in tickers
+    assert rows[0]["scanner_age_seconds"] is not None

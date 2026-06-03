@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy.orm import Session
@@ -91,6 +91,27 @@ def test_cluster_event_driven_spike(db: Session, scan_event_only: None) -> None:
 def test_build_speculative_momentum_slice_empty_db(db: Session) -> None:
     out = build_speculative_momentum_slice(db, limit=5)
     assert out["ok"] is True
+    assert out["items"] == []
+
+
+def test_build_speculative_momentum_slice_ignores_stale_scan_rows(db: Session) -> None:
+    db.add(
+        ScanResult(
+            user_id=None,
+            ticker="OLDMOMO",
+            score=9.5,
+            signal="buy",
+            risk_level="medium",
+            rationale="Short squeeze with abnormal volume spike.",
+            indicator_data={"volume_ratio": 4.2},
+            scanned_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=2),
+        )
+    )
+    db.commit()
+
+    out = build_speculative_momentum_slice(db, limit=5, max_scan_age_seconds=180)
+    assert out["ok"] is True
+    assert out["max_scan_age_seconds"] == 180
     assert out["items"] == []
 
 
