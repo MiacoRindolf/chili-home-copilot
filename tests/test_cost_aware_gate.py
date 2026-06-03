@@ -168,21 +168,26 @@ def test_gate_rh_equity_observed_tca_raises_threshold_and_passes():
     })
 
     res = cost_aware_min_edge_gate(
-        ticker="AAPL", projected_profit_pct=2.0, settings_=s, db=db,
+        ticker="AAPL", projected_profit_pct=2.2, settings_=s, db=db,
     )
 
     assert res.allowed is True
     assert res.reason == REASON_GATE_RH_TCA_PASSED
     assert res.fee_bps == 0
-    assert res.edge_bps == 200
-    assert res.tca_cost_bps == 100
-    assert res.threshold_bps == 130
+    assert res.edge_bps == 220
+    assert res.tca_cost_bps == 180
+    assert res.threshold_bps == 210
     assert res.tca_snapshot is not None
     assert res.tca_snapshot["used"] is True
     assert res.tca_snapshot["sample_basis"] == (
         "usable_robinhood_adverse_entry_tca_trades"
     )
     assert res.tca_snapshot["avg_entry_slippage_bps"] == pytest.approx(100.2)
+    assert res.tca_snapshot["p90_entry_slippage_bps"] == pytest.approx(180.0)
+    assert res.tca_snapshot["cost_basis"] == (
+        "max_avg_p90_adverse_entry_slippage_bps"
+    )
+    assert res.tca_snapshot["cost_basis_bps"] == pytest.approx(180.0)
     assert db.params[0]["ticker"] == "AAPL"
     assert db.params[0]["side"] == "long"
     assert db.params[0]["window_days"] == 30
@@ -206,8 +211,8 @@ def test_gate_rh_equity_observed_tca_blocks_thin_edge():
     assert res.allowed is False
     assert res.reason == REASON_GATE_RH_TCA_BLOCKED
     assert res.edge_bps == 100
-    assert res.tca_cost_bps == 100
-    assert res.threshold_bps == 130
+    assert res.tca_cost_bps == 180
+    assert res.threshold_bps == 210
 
 
 def test_gate_rh_equity_thin_tca_keeps_legacy_fee_free_pass():

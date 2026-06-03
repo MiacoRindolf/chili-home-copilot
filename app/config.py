@@ -3886,7 +3886,7 @@ class Settings(BaseSettings):
     )
     # Robinhood has no explicit commission, but live TCA can still consume
     # the expected edge. When enough recent usable RH fills exist, require
-    # projected edge to clear average adverse entry slippage + the shared
+    # projected edge to clear tail adverse entry slippage + the shared
     # safety buffer. Missing/thin evidence leaves legacy fee-free admission.
     chili_robinhood_cost_gate_include_tca_estimates: bool = Field(
         default=True,

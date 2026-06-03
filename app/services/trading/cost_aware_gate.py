@@ -556,23 +556,32 @@ def _robinhood_entry_tca_cost_bps(
             "used": False,
             "reason": "insufficient_samples",
         }
+    invalid_fields = []
     if avg_entry is None:
+        invalid_fields.append("avg_entry_slippage_bps")
+    if p90_entry is None:
+        invalid_fields.append("p90_entry_slippage_bps")
+    if invalid_fields:
         return 0, {
             "sample_trades": samples,
             "min_samples": min_samples_i,
             "window_days": window_days_i,
             "used": False,
             "reason": "invalid_tca_estimate",
+            "invalid_fields": invalid_fields,
         }
 
-    tca_cost_bps = int(round(avg_entry))
+    cost_basis_bps = max(avg_entry, p90_entry)
+    tca_cost_bps = int(round(cost_basis_bps))
     return tca_cost_bps, {
         "sample_trades": samples,
         "min_samples": min_samples_i,
         "sample_basis": "usable_robinhood_adverse_entry_tca_trades",
         "window_days": window_days_i,
         "avg_entry_slippage_bps": round(avg_entry, 4),
-        "p90_entry_slippage_bps": round(p90_entry or 0.0, 4),
+        "p90_entry_slippage_bps": round(p90_entry, 4),
+        "cost_basis": "max_avg_p90_adverse_entry_slippage_bps",
+        "cost_basis_bps": round(cost_basis_bps, 4),
         "tca_cost_bps": tca_cost_bps,
         "outlier_bps": outlier_bps,
         "used": True,
