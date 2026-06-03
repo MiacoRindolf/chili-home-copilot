@@ -1998,6 +1998,83 @@ def test_required_venue_health_blocks_insufficient_data(monkeypatch):
     assert reason == "venue_health_insufficient_data:coinbase:lifecycle_samples=0<5"
 
 
+def test_venue_health_block_opens_observation_shadow(monkeypatch):
+    assert "blocked_venue_health" in at_mod.QUALIFIED_BLOCK_PAPER_SHADOW_DECISIONS
+    blocked: list[dict] = []
+    shadows: list[dict] = []
+
+    monkeypatch.setattr(
+        at_mod,
+        "_block_live_order",
+        lambda *args, **kwargs: blocked.append(kwargs),
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_maybe_open_paper_shadow",
+        lambda *args, **kwargs: shadows.append(kwargs),
+    )
+
+    out = {"skipped": 0}
+    at_mod._block_live_order_with_paper_shadow(
+        object(),
+        uid=7,
+        alert=SimpleNamespace(id=11, ticker="BTC-USD", scan_pattern_id=22),
+        reason="venue_degraded:coinbase:error_rate_pct=50.0",
+        snap={"entry_edge_expected_net_pct": 2.5},
+        llm_snap=None,
+        out=out,
+        qty=0.01,
+        px=50_000.0,
+        shadow_decision="blocked_venue_health",
+    )
+
+    assert blocked[0]["reason"] == "venue_degraded:coinbase:error_rate_pct=50.0"
+    assert blocked[0]["snap"]["paper_shadow_reject_reason"] == (
+        "venue_degraded:coinbase:error_rate_pct=50.0"
+    )
+    assert shadows == [
+        {
+            "uid": 7,
+            "alert": blocked[0]["alert"],
+            "qty": 0.01,
+            "px": 50_000.0,
+            "snap": blocked[0]["snap"],
+            "decision": "blocked_venue_health",
+        }
+    ]
+
+
+def test_venue_health_block_skips_shadow_when_price_unusable(monkeypatch):
+    blocked: list[dict] = []
+    shadows: list[dict] = []
+    monkeypatch.setattr(
+        at_mod,
+        "_block_live_order",
+        lambda *args, **kwargs: blocked.append(kwargs),
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_maybe_open_paper_shadow",
+        lambda *args, **kwargs: shadows.append(kwargs),
+    )
+
+    at_mod._block_live_order_with_paper_shadow(
+        object(),
+        uid=7,
+        alert=SimpleNamespace(id=11, ticker="BTC-USD", scan_pattern_id=22),
+        reason="venue_health_insufficient_data:coinbase:lifecycle_samples=0<5",
+        snap={},
+        llm_snap=None,
+        out={"skipped": 0},
+        qty=0.01,
+        px=None,
+        shadow_decision="blocked_venue_health",
+    )
+
+    assert blocked
+    assert shadows == []
+
+
 def test_entry_risk_notional_refuses_unproven_fallback_capital(monkeypatch):
     from app.services.trading import auto_trader_rules as rules_mod
 

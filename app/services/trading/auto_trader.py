@@ -117,6 +117,7 @@ QUALIFIED_BLOCK_PAPER_SHADOW_DECISIONS = frozenset({
     "blocked_regime_gate",
     "blocked_recert_required",
     "blocked_shadow_promoted",
+    "blocked_venue_health",
     "skipped_duplicate_pattern_already_open",
     "skipped_non_positive_expected_edge",
     "skipped_pending_entry_already_working",
@@ -3030,6 +3031,48 @@ def _block_live_order(
     _autotrader_tick_note(out, kind="blocked", reason=rsn, alert=alert)
 
 
+def _block_live_order_with_paper_shadow(
+    db: Session,
+    *,
+    uid: int,
+    alert: BreakoutAlert,
+    reason: str,
+    snap: dict[str, Any] | None,
+    llm_snap: dict[str, Any] | None,
+    out: dict[str, Any],
+    qty: float,
+    px: float | None,
+    shadow_decision: str,
+) -> None:
+    shadow_snap = dict(snap or {})
+    shadow_snap["paper_shadow_reject_reason"] = reason
+    _block_live_order(
+        db,
+        uid=uid,
+        alert=alert,
+        reason=reason,
+        snap=shadow_snap,
+        llm_snap=llm_snap,
+        out=out,
+    )
+    try:
+        shadow_qty = float(qty)
+        shadow_px = float(px)
+    except (TypeError, ValueError):
+        return
+    if shadow_qty <= 0.0 or shadow_px <= 0.0:
+        return
+    _maybe_open_paper_shadow(
+        db,
+        uid=uid,
+        alert=alert,
+        qty=shadow_qty,
+        px=shadow_px,
+        snap=shadow_snap,
+        decision=shadow_decision,
+    )
+
+
 def _live_venue_health_block_reason(db: Session, *, venue: str) -> str | None:
     venue_key = (venue or "").strip().lower() or "unknown"
     require_healthy = bool(
@@ -5104,7 +5147,7 @@ def _execute_broker_buy(
             return None
         venue_reason = _live_venue_health_block_reason(db, venue="robinhood")
         if venue_reason is not None:
-            _block_live_order(
+            _block_live_order_with_paper_shadow(
                 db,
                 uid=uid,
                 alert=alert,
@@ -5112,6 +5155,9 @@ def _execute_broker_buy(
                 snap=snap,
                 llm_snap=llm_snap,
                 out=out,
+                qty=float(contract_qty),
+                px=float(option_limit_price),
+                shadow_decision="blocked_venue_health",
             )
             return None
         from .venue.robinhood_options import RobinhoodOptionsAdapter
@@ -5349,7 +5395,7 @@ def _execute_broker_buy(
 
         venue_reason = _live_venue_health_block_reason(db, venue="coinbase")
         if venue_reason is not None:
-            _block_live_order(
+            _block_live_order_with_paper_shadow(
                 db,
                 uid=uid,
                 alert=alert,
@@ -5357,6 +5403,9 @@ def _execute_broker_buy(
                 snap=snap,
                 llm_snap=llm_snap,
                 out=out,
+                qty=float(qty),
+                px=px or snap.get("entry_price") or alert.entry_price,
+                shadow_decision="blocked_venue_health",
             )
             return None
 
@@ -5649,7 +5698,7 @@ def _execute_broker_buy(
     # exactly the same arguments it did pre-Phase-3.
     venue_reason = _live_venue_health_block_reason(db, venue="robinhood")
     if venue_reason is not None:
-        _block_live_order(
+        _block_live_order_with_paper_shadow(
             db,
             uid=uid,
             alert=alert,
@@ -5657,6 +5706,9 @@ def _execute_broker_buy(
             snap=snap,
             llm_snap=llm_snap,
             out=out,
+            qty=float(qty),
+            px=px or snap.get("entry_price") or alert.entry_price,
+            shadow_decision="blocked_venue_health",
         )
         return None
 
