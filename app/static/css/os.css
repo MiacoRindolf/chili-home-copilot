@@ -60,6 +60,12 @@
 .os-chip:hover{color:var(--ws-text);border-color:var(--ws-border-strong);transform:translateY(-1px)}
 .os-chip .ci{font-size:13px}
 
+/* Window title-bar context menu (right-click) */
+.os-ctxmenu{position:absolute;z-index:10000;min-width:170px;padding:5px;background:var(--ws-surface);border:1px solid var(--ws-border-strong);border-radius:var(--ws-r-md);box-shadow:var(--ws-shadow-lg);display:flex;flex-direction:column;gap:1px}
+.os-ctx-item{display:block;width:100%;text-align:left;padding:7px 10px;border-radius:var(--ws-r-sm,6px);background:transparent;border:0;color:var(--ws-text);font:var(--ws-fw-med) var(--ws-fs-13)/1.1 var(--ws-font-ui);cursor:pointer}
+.os-ctx-item:hover{background:var(--ws-accent-bg);color:var(--ws-text)}
+.os-ctx-sep{height:1px;margin:4px 6px;background:var(--ws-border)}
+
 /* Mission Control (Exposé) — switch/restore open windows from a card grid */
 .os-expose{position:absolute;inset:0;z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:var(--ws-s4);padding:var(--ws-s5,20px);background:color-mix(in srgb,var(--ws-surface) 60%,transparent);backdrop-filter:blur(16px);opacity:0;transition:opacity .14s var(--ws-ease)}
 .os-expose.show{opacity:1}

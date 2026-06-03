@@ -129,6 +129,11 @@
       if (e.target.closest('.os-ctrls') || e.target.closest('a.pop')) return;
       el.querySelector('.max').click();
     });
+    // Right-click the title bar → window context menu (tile / minimize / close…).
+    el.querySelector('.os-bar').addEventListener('contextmenu', function (e) {
+      if (e.target.closest('.os-ctrls') || e.target.closest('a.pop')) return;
+      e.preventDefault(); focusWin(app); showCtxMenu(e.clientX, e.clientY, app);
+    });
     dragify(el, app); resizify(el);
     focusWin(app); syncHome();
     if (geom && geom.min) minimizeApp(app);
@@ -178,6 +183,45 @@
     var d = dock(app); if (d) d.classList.remove('os-open');
     removeChip(app); syncHome(); setHash(); saveLayout();
   }
+
+  // ── Window context menu (right-click the title bar): tile / minimize / close /
+  //    close-others, reusing the existing window ops. One reusable menu element. ──
+  var ctxMenu = null;
+  function closeCtxMenu() { if (ctxMenu) { ctxMenu.remove(); ctxMenu = null; } }
+  function showCtxMenu(clientX, clientY, app) {
+    closeCtxMenu();
+    var el = wins[app]; if (!el) return;
+    var items = [
+      { label: 'Minimize', act: function () { minimizeApp(app); } },
+      { label: 'Maximize', act: function () { snap(el, 'max'); saveLayout(); } },
+      { label: 'Tile left', act: function () { snap(el, 'left'); saveLayout(); } },
+      { label: 'Tile right', act: function () { snap(el, 'right'); saveLayout(); } },
+      { sep: true },
+      { label: 'Close', act: function () { closeApp(app); } },
+      { label: 'Close others', act: function () { Object.keys(wins).forEach(function (a) { if (a !== app && wins[a]) closeApp(a); }); } }
+    ];
+    ctxMenu = document.createElement('div');
+    ctxMenu.className = 'os-ctxmenu'; ctxMenu.setAttribute('role', 'menu');
+    ctxMenu.innerHTML = items.map(function (it, i) {
+      return it.sep ? '<div class="os-ctx-sep"></div>'
+        : '<button class="os-ctx-item" type="button" role="menuitem" data-i="' + i + '">' + escHtml(it.label) + '</button>';
+    }).join('');
+    desktop.appendChild(ctxMenu);
+    // Keep the menu inside the desktop bounds.
+    var rect = desktop.getBoundingClientRect(), mw = ctxMenu.offsetWidth, mh = ctxMenu.offsetHeight;
+    var lx = clientX - rect.left, ly = clientY - rect.top;
+    if (lx + mw > desktop.clientWidth) lx = desktop.clientWidth - mw - 4;
+    if (ly + mh > desktop.clientHeight) ly = desktop.clientHeight - mh - 4;
+    ctxMenu.style.left = Math.max(0, lx) + 'px'; ctxMenu.style.top = Math.max(0, ly) + 'px';
+    ctxMenu.addEventListener('click', function (e) {
+      var b = e.target.closest('.os-ctx-item'); if (!b) return;
+      var it = items[+b.getAttribute('data-i')]; closeCtxMenu(); if (it && it.act) it.act();
+    });
+  }
+  // Dismiss the context menu on outside click / Esc / scroll / blur.
+  document.addEventListener('mousedown', function (e) { if (ctxMenu && !ctxMenu.contains(e.target)) closeCtxMenu(); });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeCtxMenu(); });
+  window.addEventListener('blur', closeCtxMenu);
 
   // ── Session restore + named Spaces: a layout is the set of open windows with
   //    their geometry/min-state/focus order. The current layout auto-restores on
