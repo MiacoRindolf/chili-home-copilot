@@ -1072,6 +1072,77 @@ def test_coinbase_maker_first_cancels_when_fallback_edge_is_too_thin(db, monkeyp
     db.commit()
 
 
+def test_coinbase_maker_first_cancels_wide_spread_taker_fallback(db, monkeypatch):
+    _allow_replacement_buy_entry_gate(monkeypatch)
+    u = models.User(name="stuck_wd_cb_wide_spread")
+    db.add(u)
+    db.flush()
+
+    t = _make_trade(
+        db,
+        user_id=u.id,
+        broker_order_id="cb-maker-wide",
+        broker_status="accepted",
+        entry_date=datetime.utcnow() - timedelta(seconds=180),
+        broker_source="coinbase",
+        status="working",
+        remaining_quantity=1.0,
+        indicator_snapshot={
+            "entry_execution": {
+                "active_order_type": "limit_post_only",
+                "coinbase_maker_only": True,
+                "entry_edge_expected_net_pct": 8.0,
+                "cost_gate_fee_bps": 120,
+            }
+        },
+    )
+    db.commit()
+
+    cfg = SimpleNamespace(
+        chili_stuck_order_watchdog_enabled=True,
+        chili_stuck_order_market_timeout_seconds=300,
+        chili_stuck_order_limit_timeout_seconds=1800,
+        chili_coinbase_maker_first_fallback_enabled=True,
+        chili_coinbase_maker_first_fallback_after_seconds=120,
+        chili_coinbase_maker_first_min_net_after_cost_pct=0.0,
+        chili_coinbase_maker_first_taker_price_buffer_bps=10.0,
+        chili_coinbase_maker_first_taker_max_spread_bps=200.0,
+        chili_coinbase_maker_first_edge_thin_hold_enabled=False,
+        chili_coinbase_taker_fee_bps_round_trip=120,
+        chili_min_edge_safety_buffer_bps=30,
+    )
+    monkeypatch.setattr(wd, "settings", cfg)
+
+    fake_adapter = MagicMock()
+    fake_adapter.get_order.return_value = (
+        _fake_normalized("open", order_id="cb-maker-wide"),
+        FreshnessMeta(retrieved_at_utc=datetime.utcnow(), max_age_seconds=15.0),
+    )
+    fake_adapter.get_best_bid_ask.return_value = (
+        NormalizedTicker(product_id="ZZTEST", bid=100.0, ask=103.5, spread_bps=350.0),
+        FreshnessMeta(retrieved_at_utc=datetime.utcnow(), max_age_seconds=15.0),
+    )
+    fake_adapter.cancel_order.return_value = {"ok": True}
+    monkeypatch.setattr(wd, "_get_adapter", lambda _src: fake_adapter)
+
+    out = wd.tick_stuck_order_watchdog(db)
+
+    assert out["outcomes"].get("maker_first_fallback_wide_spread_cancel_requested") == 1
+    fake_adapter.cancel_order.assert_called_once_with("cb-maker-wide")
+    fake_adapter.place_limit_order_gtc.assert_not_called()
+
+    db.refresh(t)
+    assert t.status == "working"
+    assert t.broker_status == "cancel_requested"
+    entry = t.indicator_snapshot["entry_execution"]
+    assert entry["maker_first_fallback_decision"] == "wide_spread"
+    assert entry["cancel_request_reason"] == "maker_first_wide_spread"
+    costs = entry["maker_first_fallback_costs"]
+    assert costs["spread_bps"] == 350.0
+    assert costs["max_taker_spread_bps"] == 200.0
+    assert costs["net_after_cost_pct"] > costs["min_net_after_cost_pct"]
+
+
 def test_coinbase_maker_first_holds_thin_edge_maker_until_hold_timeout(db, monkeypatch):
     _allow_replacement_buy_entry_gate(monkeypatch)
     u = models.User(name="stuck_wd_cb_thin_hold")

@@ -924,6 +924,95 @@ def _try_maker_first_fallback(
             "min_net_after_cost_pct": min_net_pct,
         }
     }
+    max_taker_spread_bps = max(
+        0.0,
+        float(
+            getattr(
+                settings,
+                "chili_coinbase_maker_first_taker_max_spread_bps",
+                200.0,
+            )
+            or 0.0
+        ),
+    )
+    fallback_snapshot["maker_first_fallback"]["max_taker_spread_bps"] = (
+        max_taker_spread_bps
+    )
+    if max_taker_spread_bps > 0.0 and spread_bps > max_taker_spread_bps:
+        hold_timeout = _maker_first_edge_thin_hold_timeout()
+        elapsed = _elapsed_since_submit(t, now)
+        if (
+            _maker_first_edge_thin_hold_enabled()
+            and elapsed is not None
+            and elapsed < hold_timeout
+        ):
+            entry_before_hold = _entry_execution_snapshot(t)
+            first_hold = not bool(
+                entry_before_hold.get("maker_first_wide_spread_hold_started_at")
+            )
+            t.broker_status = (
+                getattr(order_normalized, "status", None) or t.broker_status or "open"
+            ).lower()
+            t.last_broker_sync = datetime.utcnow()
+            _update_entry_execution(
+                t,
+                maker_first_fallback_decision="wide_spread_holding_maker",
+                maker_first_fallback_checked_at=now.isoformat(),
+                maker_first_fallback_costs=fallback_snapshot["maker_first_fallback"],
+                maker_first_wide_spread_hold_started_at=(
+                    entry_before_hold.get("maker_first_wide_spread_hold_started_at")
+                    or now.isoformat()
+                ),
+                maker_first_wide_spread_hold_seconds=int(hold_timeout.total_seconds()),
+                maker_first_wide_spread_hold_elapsed_seconds=int(elapsed.total_seconds()),
+            )
+            if first_hold:
+                _record_fallback_audit(
+                    db,
+                    t,
+                    decision="placed",
+                    reason="maker_first_wide_spread_holding_maker",
+                    snapshot=fallback_snapshot,
+                )
+            db.commit()
+            return "maker_first_wide_spread_holding_maker"
+
+        cancel_result = _try_cancel(adapter, t)
+        if cancel_result.get("ok"):
+            prior_status = (
+                getattr(order_normalized, "status", None)
+                or t.broker_status
+                or "open"
+            )
+            t.status = "working"
+            t.broker_status = "cancel_requested"
+            t.last_broker_sync = datetime.utcnow()
+            _update_entry_execution(
+                t,
+                maker_first_fallback_attempted=True,
+                maker_first_fallback_decision="wide_spread",
+                maker_first_fallback_checked_at=now.isoformat(),
+                maker_first_fallback_costs=fallback_snapshot["maker_first_fallback"],
+            )
+            _record_cancel_request_evidence(
+                db,
+                t,
+                now=now,
+                reason="maker_first_wide_spread",
+                cancel_result=cancel_result,
+                prior_broker_status=str(prior_status).lower(),
+            )
+            _record_fallback_audit(
+                db,
+                t,
+                decision="blocked",
+                reason="maker_first_fallback_wide_spread_cancel_requested",
+                snapshot=fallback_snapshot,
+            )
+            db.commit()
+            return "maker_first_fallback_wide_spread_cancel_requested"
+        return "maker_first_fallback_wide_spread_cancel_failed"
+
     if net_after_cost_pct is None or net_after_cost_pct < min_net_pct:
         hold_timeout = _maker_first_edge_thin_hold_timeout()
         elapsed = _elapsed_since_submit(t, now)

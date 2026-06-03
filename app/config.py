@@ -3417,6 +3417,19 @@ class Settings(BaseSettings):
         le=250.0,
         validation_alias=AliasChoices("CHILI_COINBASE_MAKER_FIRST_TAKER_PRICE_BUFFER_BPS"),
     )
+    # Wide-spread taker fallback ceiling. The fallback already subtracts
+    # spread from expected edge, but recent TCA shows the damage is
+    # concentrated in a >200bps tail. Above this ceiling the watchdog holds
+    # the maker order briefly (or cancels it after the hold window) rather
+    # than replacing it with a takerable limit.
+    chili_coinbase_maker_first_taker_max_spread_bps: float = Field(
+        default=200.0,
+        ge=0.0,
+        le=10_000.0,
+        validation_alias=AliasChoices(
+            "CHILI_COINBASE_MAKER_FIRST_TAKER_MAX_SPREAD_BPS"
+        ),
+    )
 
     chili_coinbase_maker_only_improve_bid_ticks: int = Field(
         default=1,
