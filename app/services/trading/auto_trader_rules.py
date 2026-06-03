@@ -42,6 +42,10 @@ from ...config import (
     AUTOTRADER_MANAGED_EDGE_DEFAULT_MIN_REWARD_RISK,
     AUTOTRADER_MANAGED_EDGE_DEFAULT_MODE,
     AUTOTRADER_MANAGED_EDGE_DEFAULT_STATIC_TO_MANAGED_REWARD_RATIO,
+    AUTOTRADER_STOCK_MOMENTUM_CONTEXT_GATE_DEFAULT_ENABLED,
+    AUTOTRADER_STOCK_MOMENTUM_CONTEXT_MIN_GAP_PCT_DEFAULT,
+    AUTOTRADER_STOCK_MOMENTUM_CONTEXT_MIN_QUEUE_PRESSURE_DEFAULT,
+    AUTOTRADER_STOCK_MOMENTUM_CONTEXT_MIN_VOLUME_RATIO_DEFAULT,
 )
 from ...models.trading import AutoTraderRun, BreakoutAlert, PaperTrade, ScanPattern, Trade
 from .ops_log_prefixes import CHILI_RISK_CACHE
@@ -85,6 +89,8 @@ AUTOTRADER_EDGE_MAX_CRYPTO_EXECUTION_STOP_LOSS_PCT = 60.0
 AUTOTRADER_EDGE_MAX_OPTIONS_EXECUTION_STOP_LOSS_PCT = 0.0
 AUTOTRADER_POSITIVE_REPRICE_DEFAULT_ENABLED = True
 AUTOTRADER_POSITIVE_REPRICE_DEFAULT_ASSET_TYPES = "stock,crypto"
+STOCK_MOMENTUM_CONTEXT_BELOW_FLOOR_REASON = "stock_momentum_context_below_floor"
+STOCK_MOMENTUM_CONTEXT_MISSING_REASON = "stock_momentum_context_missing"
 
 
 @dataclass
@@ -100,6 +106,7 @@ class RuleGateContext:
     # 'options'. Missing keys default to 0 — the gate also keeps the global
     # cap as a final-safety ceiling.
     autotrader_open_count_by_lane: Optional[dict] = None
+    candidate_queue_pressure: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -171,6 +178,18 @@ class RuleGateSettings:
     broker_equity_cache_ttl_seconds: int = 300
     broker_equity_cache_max_stale_seconds: int = 900
 
+    # Stock momentum-context gate. This does not approve trades; it only
+    # rejects stock candidates that lack gap/relative-volume evidence when
+    # weak rows are competing for the AutoTrader tick budget.
+    stock_momentum_context_gate_enabled: bool = AUTOTRADER_STOCK_MOMENTUM_CONTEXT_GATE_DEFAULT_ENABLED
+    stock_momentum_context_min_queue_pressure: float = (
+        AUTOTRADER_STOCK_MOMENTUM_CONTEXT_MIN_QUEUE_PRESSURE_DEFAULT
+    )
+    stock_momentum_context_min_gap_pct: float = AUTOTRADER_STOCK_MOMENTUM_CONTEXT_MIN_GAP_PCT_DEFAULT
+    stock_momentum_context_min_volume_ratio: float = (
+        AUTOTRADER_STOCK_MOMENTUM_CONTEXT_MIN_VOLUME_RATIO_DEFAULT
+    )
+
     @classmethod
     def from_settings(cls, source: Any) -> "RuleGateSettings":
         """Build a snapshot from any object exposing the ``chili_autotrader_*``
@@ -179,6 +198,39 @@ class RuleGateSettings:
         """
         def g(name: str, default: Any) -> Any:
             return getattr(source, name, default)
+
+        def safe_bool(name: str, default: bool) -> bool:
+            raw = g(name, default)
+            if isinstance(raw, bool):
+                return raw
+            if isinstance(raw, str):
+                value = raw.strip().lower()
+                if value in {"1", "true", "yes", "on"}:
+                    return True
+                if value in {"0", "false", "no", "off"}:
+                    return False
+            if isinstance(raw, int) and raw in (0, 1):
+                return bool(raw)
+            return default
+
+        def safe_float(name: str, default: float, *, lower: float | None = None, upper: float | None = None) -> float:
+            raw = g(name, default)
+            if isinstance(raw, bool):
+                value = default
+            elif isinstance(raw, (int, float, str)):
+                try:
+                    value = float(raw)
+                except (TypeError, ValueError):
+                    value = default
+            else:
+                value = default
+            if not math.isfinite(value):
+                value = default
+            if lower is not None:
+                value = max(float(lower), value)
+            if upper is not None:
+                value = min(float(upper), value)
+            return value
 
         return cls(
             assumed_capital_usd=float(g("chili_autotrader_assumed_capital_usd", cls.assumed_capital_usd)),
@@ -242,7 +294,131 @@ class RuleGateSettings:
                     cls.broker_equity_cache_max_stale_seconds,
                 )
             ),
+            stock_momentum_context_gate_enabled=safe_bool(
+                "chili_autotrader_stock_momentum_context_gate_enabled",
+                cls.stock_momentum_context_gate_enabled,
+            ),
+            stock_momentum_context_min_queue_pressure=safe_float(
+                "chili_autotrader_stock_momentum_context_min_queue_pressure",
+                cls.stock_momentum_context_min_queue_pressure,
+                lower=0.0,
+                upper=1.0,
+            ),
+            stock_momentum_context_min_gap_pct=safe_float(
+                "chili_autotrader_stock_momentum_context_min_gap_pct",
+                cls.stock_momentum_context_min_gap_pct,
+                lower=0.0,
+                upper=100.0,
+            ),
+            stock_momentum_context_min_volume_ratio=safe_float(
+                "chili_autotrader_stock_momentum_context_min_volume_ratio",
+                cls.stock_momentum_context_min_volume_ratio,
+                lower=0.0,
+                upper=1000.0,
+            ),
         )
+
+
+def _finite_float_or_none(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float, str)):
+        try:
+            out = float(value)
+        except (TypeError, ValueError):
+            return None
+        return out if math.isfinite(out) else None
+    return None
+
+
+def _indicator_flat_snapshot(alert: BreakoutAlert) -> dict[str, Any]:
+    snapshot = alert.indicator_snapshot if isinstance(alert.indicator_snapshot, dict) else {}
+    flat = snapshot.get("flat_indicators")
+    if isinstance(flat, dict):
+        return flat
+    return snapshot
+
+
+def _indicator_first_float(flat: dict[str, Any], names: tuple[str, ...]) -> tuple[float | None, str | None]:
+    for name in names:
+        value = _finite_float_or_none(flat.get(name))
+        if value is not None:
+            return value, name
+    return None, None
+
+
+def _clamped_pressure(value: Any) -> float:
+    pressure = _finite_float_or_none(value)
+    if pressure is None:
+        return 0.0
+    return min(1.0, max(0.0, pressure))
+
+
+def _stock_momentum_context_gate(
+    alert: BreakoutAlert,
+    *,
+    settings_snapshot: RuleGateSettings,
+    ctx: RuleGateContext,
+) -> tuple[bool, str | None, dict[str, Any]]:
+    pressure = _clamped_pressure(ctx.candidate_queue_pressure)
+    min_pressure = _clamped_pressure(
+        settings_snapshot.stock_momentum_context_min_queue_pressure
+    )
+    min_gap_pct = float(settings_snapshot.stock_momentum_context_min_gap_pct)
+    min_volume_ratio = float(settings_snapshot.stock_momentum_context_min_volume_ratio)
+    snap = {
+        "enabled": bool(settings_snapshot.stock_momentum_context_gate_enabled),
+        "active": False,
+        "candidate_queue_pressure": round(pressure, 4),
+        "min_queue_pressure": round(min_pressure, 4),
+        "min_gap_pct": round(min_gap_pct, 4),
+        "min_volume_ratio": round(min_volume_ratio, 4),
+    }
+    if not bool(settings_snapshot.stock_momentum_context_gate_enabled):
+        snap["inactive_reason"] = "disabled"
+        return True, None, snap
+    if pressure + 1e-9 < min_pressure:
+        snap["inactive_reason"] = "queue_pressure_below_floor"
+        return True, None, snap
+
+    snap["active"] = True
+    flat = _indicator_flat_snapshot(alert)
+    gap_pct, gap_source = _indicator_first_float(
+        flat,
+        (
+            "gap_pct",
+            "premarket_gap_pct",
+            "pre_market_gap_pct",
+            "todaysChangePerc",
+            "daily_change_pct",
+            "change_pct",
+        ),
+    )
+    volume_ratio, volume_source = _indicator_first_float(
+        flat,
+        ("volume_ratio", "vol_ratio", "rel_vol", "relative_volume"),
+    )
+    snap.update(
+        gap_pct=round(gap_pct, 4) if gap_pct is not None else None,
+        gap_source=gap_source,
+        volume_ratio=round(volume_ratio, 4) if volume_ratio is not None else None,
+        volume_ratio_source=volume_source,
+    )
+    missing = []
+    if gap_pct is None:
+        missing.append("gap_pct")
+    if volume_ratio is None:
+        missing.append("volume_ratio")
+    if missing:
+        snap["missing"] = missing
+        return False, STOCK_MOMENTUM_CONTEXT_MISSING_REASON, snap
+    if gap_pct < min_gap_pct or volume_ratio < min_volume_ratio:
+        snap["gap_passed"] = gap_pct >= min_gap_pct
+        snap["volume_ratio_passed"] = volume_ratio >= min_volume_ratio
+        return False, STOCK_MOMENTUM_CONTEXT_BELOW_FLOOR_REASON, snap
+    snap["gap_passed"] = True
+    snap["volume_ratio_passed"] = True
+    return True, None, snap
 
 
 # ── Broker-equity TTL cache (Phase B) ────────────────────────────────
@@ -2307,6 +2483,14 @@ def passes_rule_gate(
         # historical continuity; the snapshot's asset_type and *_path
         # fields tell the operator which flag would unblock.
         return False, "not_stock", snap
+
+    if for_new_entry and asset_type_l == "stock":
+        stock_momentum_ok, stock_momentum_reason, stock_momentum_snap = (
+            _stock_momentum_context_gate(alert, settings_snapshot=gs, ctx=ctx)
+        )
+        snap["stock_momentum_context_gate"] = stock_momentum_snap
+        if not stock_momentum_ok:
+            return False, str(stock_momentum_reason), snap
 
     # For options, the operator-driven entry has already chosen a strike,
     # expiration, qty, and limit price. Validate that the alert carries

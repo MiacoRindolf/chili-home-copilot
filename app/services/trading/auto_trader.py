@@ -3679,6 +3679,10 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         )
         candidates.extend(retry_candidates)
     candidate_pool = candidate_pool_base + retry_pool
+    candidate_queue_pressure = min(
+        1.0,
+        max(0.0, candidate_pool / float(max(1, effective_batch_limit))),
+    )
     candidate_select_elapsed_s = round(time.monotonic() - candidate_select_started, 3)
     prefetched_prices, prefetched_sources, price_prefetch_meta = (
         _prefetch_candidate_prices(candidates)
@@ -3693,6 +3697,7 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         "candidate_pool": candidate_pool,
         "candidate_batch_base_size": batch_limit,
         "candidate_batch_effective_size": effective_batch_limit,
+        "candidate_queue_pressure": round(candidate_queue_pressure, 4),
         "candidate_query_limit": int(candidate_query_limit),
         "candidate_pool_exact": bool(candidate_pool_exact),
         "stale_candidate_sweep_checked": bool(stale_candidate_sweep_checked),
@@ -3880,7 +3885,7 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         "query_limit=%d stale_sweep_checked=%s stale_sweep_interval_s=%s "
         "stock_max_age_min=%s non_stock_max_age_min=%s "
         "batch=%d base_batch=%d "
-        "effective_batch=%d processed=%d placed=%d "
+        "effective_batch=%d queue_pressure=%s processed=%d placed=%d "
         "scaled_in=%d skipped=%d fresh_pool=%d synergy_retry_pool=%d "
         "synergy_retry_batch=%d stock_defer_active=%s stock_deferred_pool=%d "
         "stock_stale_unprocessed=%d tick_budget_s=%s tick_deferred=%d "
@@ -3901,6 +3906,7 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         len(candidates),
         batch_limit,
         effective_batch_limit,
+        out.get("candidate_queue_pressure"),
         out["processed"],
         out["placed"],
         out["scaled_in"],
@@ -4684,6 +4690,7 @@ def _process_one_alert(
         autotrader_open_count=open_n,
         realized_loss_today_usd=loss_today,
         autotrader_open_count_by_lane=open_by_lane,
+        candidate_queue_pressure=float(out.get("candidate_queue_pressure") or 0.0),
     )
 
     existing_trade = None
