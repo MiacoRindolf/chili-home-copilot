@@ -112,3 +112,145 @@ def test_exit_variant_refresh_uses_evolution_for_positive_evidence(monkeypatch) 
     assert payload["created_child_ids"] == [9001]
     assert payload["variant_label"] == "learned_exit_ev_positive"
     assert payload.get("fast_skipped") is None
+
+
+def test_exit_variant_refresh_builds_report_from_time_decay_edge_misses(
+    monkeypatch,
+) -> None:
+    from app.services.trading.brain_work import ledger
+    import app.services.trading.learning as learning
+
+    outcomes: list[dict[str, object]] = []
+    captured: dict[str, object] = {}
+
+    eligible_1 = SimpleNamespace(
+        id=10,
+        scan_pattern_id=537,
+        paper_shadow_of_alert_id=88,
+        ticker="EDGE-USD",
+        pnl=-2.0,
+        pnl_pct=None,
+        entry_price=100.0,
+        exit_price=98.0,
+        quantity=1.0,
+        direction="long",
+        exit_reason="exit_engine_time_decay",
+        signal_json={
+            "paper_shadow": True,
+            "asset_class": "crypto",
+            "entry_edge": {"expected_net_pct": 3.0},
+            "_paper_meta": {
+                "exit_config": {
+                    "target_reward_fraction": 0.06,
+                    "stop_loss_fraction": 0.02,
+                },
+            },
+        },
+    )
+    eligible_2 = SimpleNamespace(
+        id=11,
+        scan_pattern_id=537,
+        paper_shadow_of_alert_id=89,
+        ticker="EDGE-USD",
+        pnl=-1.5,
+        pnl_pct=None,
+        entry_price=50.0,
+        exit_price=49.0,
+        quantity=1.0,
+        direction="long",
+        exit_reason="exit_engine_time_decay",
+        signal_json={
+            "paper_shadow": True,
+            "asset_class": "crypto",
+            "entry_edge": {"expected_net_pct": 2.0},
+            "_paper_meta": {
+                "exit_config": {
+                    "target_reward_fraction": 0.04,
+                    "stop_loss_fraction": 0.015,
+                },
+            },
+        },
+    )
+    no_edge = SimpleNamespace(
+        id=12,
+        scan_pattern_id=537,
+        paper_shadow_of_alert_id=90,
+        ticker="NOEDGE-USD",
+        pnl=-1.0,
+        pnl_pct=None,
+        entry_price=100.0,
+        exit_price=99.0,
+        quantity=1.0,
+        direction="long",
+        exit_reason="exit_engine_time_decay",
+        signal_json={"paper_shadow": True},
+    )
+
+    class _Query:
+        def filter(self, *_args):
+            return self
+
+        def order_by(self, *_args):
+            return self
+
+        def limit(self, _limit):
+            return self
+
+        def all(self):
+            return [eligible_1, eligible_2, no_edge]
+
+    class _Db:
+        def query(self, _model):
+            return _Query()
+
+    def _loss_reports(*_args, **_kwargs):
+        raise AssertionError("paper time-decay refresh should use the paper-loss report")
+
+    def _forks(_db, pattern_id, *, edge_loss_report, diagnostics):
+        captured["report"] = edge_loss_report
+        assert pattern_id == 537
+        assert edge_loss_report["paper_time_decay_edge_miss"] is True
+        assert edge_loss_report["original_source"] == "paper_time_decay_edge_miss"
+        assert edge_loss_report["total_rejects"] == 2
+        assert edge_loss_report["thin_sample"] is False
+        assert edge_loss_report["avg_expected_net_pct"] == 2.5
+        diagnostics["variant_label"] = "edge-exit-time-decay"
+        return [9010]
+
+    monkeypatch.setattr(learning, "_edge_debt_loss_reports", _loss_reports)
+    monkeypatch.setattr(learning, "fork_edge_learned_exit_variants", _forks)
+
+    def _enqueue_outcome_event(_db, **kwargs):
+        outcomes.append(kwargs)
+        return 1003
+
+    monkeypatch.setattr(ledger, "enqueue_outcome_event", _enqueue_outcome_event)
+
+    ev = SimpleNamespace(
+        id=903,
+        payload={
+            "scan_pattern_id": 537,
+            "asset_class": "crypto",
+            "source": "paper_time_decay_edge_miss",
+            "cash_deployment_category": "positive_ev_time_decay_loss",
+            "expected_evidence_value": 4.5,
+            "expected_net_pct": 2.0,
+            "realized_return_pct": -2.0,
+            "pnl": -1.5,
+            "paper_trade_id": 11,
+            "ticker": "EDGE-USD",
+            "exit_reason": "exit_engine_time_decay",
+            "evidence_fingerprint": "td-loss-fp",
+            "graduation_blocker": "exit_thesis_mismatch",
+        },
+    )
+
+    handle_exit_variant_refresh(_Db(), ev, user_id=None)
+
+    assert captured["report"]["paper_trade_ids"] == [10, 11]
+    assert len(outcomes) == 1
+    payload = outcomes[0]["payload"]
+    assert payload["created_count"] == 1
+    assert payload["created_child_ids"] == [9010]
+    assert payload["variant_label"] == "edge-exit-time-decay"
+    assert payload["loss_report"]["root_cause"] == "paper_time_decay_exit_thesis_mismatch"

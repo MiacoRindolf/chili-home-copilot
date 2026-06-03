@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime
+import json
+from datetime import UTC, datetime, timedelta
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -21,11 +22,31 @@ LOG_PREFIX = "[brain_work:profitability]"
 
 _RECERT_RESCUE_MIN_EDGE_EVALS = 5
 _RECERT_RESCUE_MIN_POSITIVE_EV_PCT = 0.0
+_TIME_DECAY_EDGE_MISS_SOURCE = "paper_time_decay_edge_miss"
+_TIME_DECAY_EDGE_MISS_REASONS = frozenset({
+    "exit_engine_time_decay",
+    "time_decay",
+    "exit_time_decay",
+})
+_TIME_DECAY_EDGE_MISS_DEFAULT_MIN_LOSSES = 2
+_TIME_DECAY_EDGE_MISS_FETCH_LIMIT = 200
 
 
 def _payload(ev: Any) -> dict[str, Any]:
     raw = getattr(ev, "payload", None)
     return raw if isinstance(raw, dict) else {}
+
+
+def _json_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        return dict(parsed) if isinstance(parsed, dict) else {}
+    return {}
 
 
 def _pattern_id(ev: Any) -> int | None:
@@ -73,6 +94,26 @@ def _safe_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _mean_float(values: list[float]) -> float | None:
+    vals = [
+        out
+        for out in (_safe_float(v) for v in values)
+        if out is not None
+    ]
+    if not vals:
+        return None
+    return sum(vals) / len(vals)
+
+
+def _counter_add(counter: dict[str, int], value: Any, *, fallback: str = "unknown") -> None:
+    key = str(value or fallback).strip().lower() or fallback
+    counter[key] = int(counter.get(key, 0) or 0) + 1
+
+
+def _utc_iso() -> str:
+    return datetime.now(UTC).replace(tzinfo=None).isoformat()
 
 
 def _hard_reason_still_unresolved(pattern: Any, reason: str, config: Any) -> bool:
@@ -373,7 +414,7 @@ def handle_recert_rescue_post_backtest(
         "uses_existing_probation_only": True,
         "calibrated_ev_pct": reliability.get("calibrated_ev_pct"),
         "realized_ev_pct": reliability.get("realized_ev_pct"),
-        "observed_at": datetime.utcnow().isoformat(),
+        "observed_at": _utc_iso(),
     }
     enqueue_outcome_event(
         db,
@@ -530,7 +571,7 @@ def handle_recert_rescue_refresh(
         "uses_existing_probation_only": True,
         "calibrated_ev_pct": reliability.get("calibrated_ev_pct"),
         "realized_ev_pct": reliability.get("realized_ev_pct"),
-        "observed_at": datetime.utcnow().isoformat(),
+        "observed_at": _utc_iso(),
     }
     enqueue_outcome_event(
         db,
@@ -569,6 +610,242 @@ def _exit_variant_fast_skip_reason(payload: dict[str, Any]) -> str | None:
     return None
 
 
+def _time_decay_payload_sample(payload: dict[str, Any]) -> dict[str, Any] | None:
+    expected = _safe_float(payload.get("expected_net_pct"))
+    if expected is None or expected <= 0.0:
+        return None
+    realized = _safe_float(payload.get("realized_return_pct"))
+    pnl = _safe_float(payload.get("pnl"))
+    if (realized is None or realized >= 0.0) and (pnl is None or pnl >= 0.0):
+        return None
+    return {
+        "paper_trade_id": _safe_int(payload.get("paper_trade_id")),
+        "ticker": str(payload.get("ticker") or "").strip().upper(),
+        "asset_class": payload.get("asset_class"),
+        "expected_net_pct": expected,
+        "realized_return_pct": realized,
+        "pnl": pnl,
+        "exit_reason": str(payload.get("exit_reason") or "exit_engine_time_decay").strip().lower(),
+        "static_reward_fraction": None,
+        "static_stop_loss_fraction": None,
+    }
+
+
+def _time_decay_row_sample(row: Any, fallback_asset_class: Any) -> dict[str, Any] | None:
+    sig = _json_dict(getattr(row, "signal_json", None))
+    if not (
+        getattr(row, "paper_shadow_of_alert_id", None)
+        or sig.get("paper_shadow")
+        or sig.get("shadow_of_alert_id")
+        or sig.get("auto_trader_v1")
+    ):
+        return None
+    edge = _json_dict(sig.get("entry_edge"))
+    expected = _safe_float(edge.get("expected_net_pct"))
+    if expected is None:
+        expected = _safe_float(sig.get("entry_edge_expected_net_pct"))
+    if expected is None or expected <= 0.0:
+        return None
+
+    pnl = _safe_float(getattr(row, "pnl", None))
+    realized = _safe_float(getattr(row, "pnl_pct", None))
+    if realized is None:
+        entry = _safe_float(getattr(row, "entry_price", None))
+        exit_price = _safe_float(getattr(row, "exit_price", None))
+        qty = _safe_float(getattr(row, "quantity", None)) or 0.0
+        direction = str(getattr(row, "direction", "") or "").strip().lower()
+        if entry is not None and entry > 0.0 and exit_price is not None and qty > 0.0:
+            raw = ((exit_price - entry) / entry) * 100.0
+            realized = -raw if direction == "short" else raw
+    if (realized is None or realized >= 0.0) and (pnl is None or pnl >= 0.0):
+        return None
+
+    paper_meta = _json_dict(sig.get("_paper_meta"))
+    exit_config = _json_dict(paper_meta.get("exit_config"))
+    static_reward = _safe_float(
+        exit_config.get("target_reward_fraction")
+        or exit_config.get("reward_fraction")
+        or exit_config.get("target_fraction")
+    )
+    static_loss = _safe_float(
+        exit_config.get("hard_stop_loss_fraction")
+        or exit_config.get("stop_loss_fraction")
+        or exit_config.get("loss_fraction")
+    )
+    asset_class = (
+        sig.get("asset_class")
+        or sig.get("asset_type")
+        or fallback_asset_class
+        or ("crypto" if str(getattr(row, "ticker", "") or "").upper().endswith("-USD") else None)
+    )
+    return {
+        "paper_trade_id": _safe_int(getattr(row, "id", None)),
+        "ticker": str(getattr(row, "ticker", "") or "").strip().upper(),
+        "asset_class": asset_class,
+        "expected_net_pct": expected,
+        "realized_return_pct": realized,
+        "pnl": pnl,
+        "exit_reason": str(getattr(row, "exit_reason", "") or "").strip().lower(),
+        "static_reward_fraction": static_reward if static_reward and static_reward > 0.0 else None,
+        "static_stop_loss_fraction": static_loss if static_loss and static_loss > 0.0 else None,
+    }
+
+
+def _paper_time_decay_edge_miss_report(
+    db: "Session",
+    *,
+    pattern_id: int,
+    payload: dict[str, Any],
+    window_days: int,
+) -> dict[str, Any] | None:
+    """Build a learned-exit report from positive-edge paper time-decay losses."""
+    source = str(payload.get("source") or "").strip().lower()
+    blocker = str(payload.get("graduation_blocker") or "").strip().lower()
+    exit_reason = str(payload.get("exit_reason") or "").strip().lower()
+    category = str(payload.get("cash_deployment_category") or "").strip().lower()
+    is_time_decay_mismatch = (
+        blocker == "exit_thesis_mismatch"
+        and (
+            exit_reason in _TIME_DECAY_EDGE_MISS_REASONS
+            or "time_decay" in category
+        )
+    )
+    if source != _TIME_DECAY_EDGE_MISS_SOURCE and not is_time_decay_mismatch:
+        return None
+
+    from app.config import settings
+    from app.models.trading import PaperTrade
+    from app.services.trading.learning import EDGE_EXIT_CONFIG_SOURCE
+
+    rows: list[Any] = []
+    cutoff = datetime.now(UTC).replace(tzinfo=None) - timedelta(
+        days=max(1, int(window_days))
+    )
+    try:
+        rows = (
+            db.query(PaperTrade)
+            .filter(PaperTrade.status == "closed")
+            .filter(PaperTrade.scan_pattern_id == int(pattern_id))
+            .filter(PaperTrade.exit_reason.in_(tuple(_TIME_DECAY_EDGE_MISS_REASONS)))
+            .filter(PaperTrade.exit_date >= cutoff)
+            .filter(PaperTrade.pnl < 0)
+            .order_by(PaperTrade.exit_date.desc(), PaperTrade.id.desc())
+            .limit(_TIME_DECAY_EDGE_MISS_FETCH_LIMIT)
+            .all()
+        )
+    except Exception:
+        logger.debug(
+            "%s time_decay edge-miss report query failed pattern_id=%s",
+            LOG_PREFIX,
+            pattern_id,
+            exc_info=True,
+        )
+
+    samples: list[dict[str, Any]] = []
+    seen_ids: set[int] = set()
+    fallback_asset_class = payload.get("asset_class")
+    for row in rows:
+        sample = _time_decay_row_sample(row, fallback_asset_class)
+        if not sample:
+            continue
+        paper_trade_id = sample.get("paper_trade_id")
+        if paper_trade_id is not None:
+            seen_ids.add(int(paper_trade_id))
+        samples.append(sample)
+
+    payload_sample = _time_decay_payload_sample(payload)
+    if payload_sample:
+        payload_id = payload_sample.get("paper_trade_id")
+        if payload_id is None or int(payload_id) not in seen_ids:
+            samples.append(payload_sample)
+
+    if not samples:
+        return None
+
+    try:
+        min_losses = max(
+            1,
+            int(
+                getattr(
+                    settings,
+                    "brain_work_time_decay_exit_variant_min_losses",
+                    _TIME_DECAY_EDGE_MISS_DEFAULT_MIN_LOSSES,
+                )
+            ),
+        )
+    except (TypeError, ValueError):
+        min_losses = _TIME_DECAY_EDGE_MISS_DEFAULT_MIN_LOSSES
+
+    expected_vals = [
+        float(s["expected_net_pct"])
+        for s in samples
+        if _safe_float(s.get("expected_net_pct")) is not None
+    ]
+    realized_vals = [
+        float(s["realized_return_pct"])
+        for s in samples
+        if _safe_float(s.get("realized_return_pct")) is not None
+    ]
+    pnl_vals = [
+        float(s["pnl"])
+        for s in samples
+        if _safe_float(s.get("pnl")) is not None
+    ]
+    static_reward_vals = [
+        float(s["static_reward_fraction"])
+        for s in samples
+        if _safe_float(s.get("static_reward_fraction")) is not None
+    ]
+    static_loss_vals = [
+        float(s["static_stop_loss_fraction"])
+        for s in samples
+        if _safe_float(s.get("static_stop_loss_fraction")) is not None
+    ]
+    tickers: dict[str, int] = {}
+    asset_types: dict[str, int] = {}
+    reject_reasons: dict[str, int] = {}
+    for sample in samples:
+        _counter_add(tickers, sample.get("ticker"), fallback="unknown")
+        _counter_add(asset_types, sample.get("asset_class"), fallback="unknown")
+        _counter_add(reject_reasons, sample.get("exit_reason"), fallback="exit_engine_time_decay")
+
+    total = len(samples)
+    return {
+        "source": EDGE_EXIT_CONFIG_SOURCE,
+        "original_source": _TIME_DECAY_EDGE_MISS_SOURCE,
+        "paper_time_decay_edge_miss": True,
+        "scan_pattern_id": int(pattern_id),
+        "total_rejects": total,
+        "min_rejects_for_variant": min_losses,
+        "thin_sample": bool(total < min_losses),
+        "avg_expected_net_pct": round(_mean_float(expected_vals) or 0.0, 6),
+        "min_expected_net_pct": round(min(expected_vals), 6) if expected_vals else None,
+        "max_expected_net_pct": round(max(expected_vals), 6) if expected_vals else None,
+        "avg_realized_return_pct": (
+            round(_mean_float(realized_vals), 6) if realized_vals else None
+        ),
+        "total_pnl": round(sum(pnl_vals), 6) if pnl_vals else None,
+        "avg_static_reward_fraction": (
+            round(_mean_float(static_reward_vals), 8) if static_reward_vals else None
+        ),
+        "avg_static_stop_loss_fraction": (
+            round(_mean_float(static_loss_vals), 8) if static_loss_vals else None
+        ),
+        "tickers": tickers,
+        "asset_types": asset_types,
+        "signal_lanes": {"paper_shadow_or_autotrader": total},
+        "managed_geometry_reasons": {"time_decay_exit_thesis_mismatch": total},
+        "probability_sources": {"paper_entry_edge": total},
+        "reject_reasons": reject_reasons,
+        "paper_trade_ids": [
+            int(s["paper_trade_id"])
+            for s in samples
+            if _safe_int(s.get("paper_trade_id")) is not None
+        ][:50],
+        "root_cause": "paper_time_decay_exit_thesis_mismatch",
+    }
+
+
 def handle_exit_variant_refresh(
     db: "Session",
     ev: Any,
@@ -604,7 +881,7 @@ def handle_exit_variant_refresh(
                 "loss_report": None,
                 "fast_skipped": True,
                 "shadow_only": True,
-                "observed_at": datetime.utcnow().isoformat(),
+                "observed_at": _utc_iso(),
             },
             parent_event_id=int(getattr(ev, "id", 0) or 0),
             claimable=False,
@@ -623,7 +900,15 @@ def handle_exit_variant_refresh(
         fork_edge_learned_exit_variants,
     )
 
-    report = _edge_debt_loss_reports(db, lookback_days=_window_days(ev)).get(pid)
+    window_days = _window_days(ev)
+    report = _paper_time_decay_edge_miss_report(
+        db,
+        pattern_id=pid,
+        payload=payload_in,
+        window_days=window_days,
+    )
+    if report is None:
+        report = _edge_debt_loss_reports(db, lookback_days=window_days).get(pid)
     variant_diag: dict[str, Any] = {}
     created_ids = fork_edge_learned_exit_variants(
         db,
@@ -644,7 +929,7 @@ def handle_exit_variant_refresh(
         "created_count": len(created_ids),
         "loss_report": report,
         "shadow_only": True,
-        "observed_at": datetime.utcnow().isoformat(),
+        "observed_at": _utc_iso(),
     }
     key_basis = (report or {}).get("avg_expected_net_pct")
     enqueue_outcome_event(
@@ -685,7 +970,7 @@ def handle_provenance_backfill(
             "candidate_count": len(candidates),
             "candidates": candidates,
             "research_only": True,
-            "observed_at": datetime.utcnow().isoformat(),
+            "observed_at": _utc_iso(),
         },
         parent_event_id=int(getattr(ev, "id", 0) or 0),
         claimable=False,
