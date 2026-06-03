@@ -164,6 +164,14 @@ def _recompute_for_pattern(
     from app.config import settings as _settings
 
     weights = _resolve_weights(_settings)
+    raw_min_realized_n = getattr(_settings, "chili_composite_min_realized_trades", 5)
+    try:
+        min_realized_n = (
+            5 if isinstance(raw_min_realized_n, bool) else int(raw_min_realized_n)
+        )
+    except (TypeError, ValueError):
+        min_realized_n = 5
+    min_realized_n = max(0, min_realized_n)
 
     directional_wr, sample_n = _load_directional_wr_for_pattern(sess, pid)
     decay = _load_decay_for_pattern(sess, pid)
@@ -180,6 +188,8 @@ def _recompute_for_pattern(
 
     if sample_n < 30 or decay is None:
         new_score: Optional[float] = None
+    elif min_realized_n > 0 and int(rp_n or 0) < min_realized_n:
+        new_score = None
     else:
         new_score = compute_quality_composite_score(
             pattern, directional_wr, decay, weights,
