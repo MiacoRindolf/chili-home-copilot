@@ -1832,15 +1832,34 @@ def test_crypto_probation_quota_uses_pattern_ticker_and_edge_gated_crypto_cap(
     settings.chili_autotrader_probation_crypto_min_expected_net_pct_for_extra_quota = 1.0
     monkeypatch.setattr(at_mod, "settings", settings)
 
-    portfolio_count = 1
+    total_portfolio_count = 1
+    crypto_portfolio_count = 1
+    count_calls: list[dict] = []
 
-    def fake_probation_count(_db, *, uid, pattern_id=None, ticker=None, now=None):
+    def fake_probation_count(
+        _db,
+        *,
+        uid,
+        pattern_id=None,
+        ticker=None,
+        asset_class=None,
+        now=None,
+    ):
         del uid, now
+        count_calls.append(
+            {
+                "pattern_id": pattern_id,
+                "ticker": ticker,
+                "asset_class": asset_class,
+            }
+        )
         if ticker is not None:
             return 1 if ticker == "AAA-USD" else 0
         if pattern_id is not None:
             return 1
-        return portfolio_count
+        if asset_class == "crypto":
+            return crypto_portfolio_count
+        return total_portfolio_count
 
     monkeypatch.setattr(
         at_mod,
@@ -1868,6 +1887,7 @@ def test_crypto_probation_quota_uses_pattern_ticker_and_edge_gated_crypto_cap(
         expected_net_pct=2.0,
     )
     assert diversified_crypto_reason is None
+    assert count_calls[-1]["asset_class"] == "crypto"
 
     low_edge_reason = at_mod._probation_quota_block_reason(
         db,
@@ -1878,8 +1898,10 @@ def test_crypto_probation_quota_uses_pattern_ticker_and_edge_gated_crypto_cap(
         expected_net_pct=0.5,
     )
     assert low_edge_reason == at_mod.PROBATION_QUOTA_REASON_PORTFOLIO
+    assert count_calls[-1]["asset_class"] is None
 
-    portfolio_count = 2
+    total_portfolio_count = 3
+    crypto_portfolio_count = 2
     portfolio_reason = at_mod._probation_quota_block_reason(
         db,
         uid=uid,
@@ -1889,6 +1911,30 @@ def test_crypto_probation_quota_uses_pattern_ticker_and_edge_gated_crypto_cap(
         expected_net_pct=2.0,
     )
     assert portfolio_reason == at_mod.PROBATION_QUOTA_REASON_PORTFOLIO
+    assert count_calls[-1]["asset_class"] == "crypto"
+
+
+def test_probation_trade_count_can_filter_crypto_asset_lane():
+    class _Db:
+        sql: str = ""
+        params: dict = {}
+
+        def execute(self, stmt, params):
+            self.sql = str(stmt)
+            self.params = dict(params)
+            return SimpleNamespace(scalar=lambda: 0)
+
+    db = _Db()
+
+    assert at_mod._probation_trade_count_today(
+        db,
+        uid=123,
+        asset_class="crypto",
+    ) == 0
+
+    assert "LOWER(COALESCE(asset_kind, '')) = 'crypto'" in db.sql
+    assert "UPPER(ticker) LIKE '%-USD'" in db.sql
+    assert db.params["flag"] == at_mod.PROBATION_JSON_TRUE
 
 
 def test_feature_parity_blocks_price_only_snapshot_when_required(monkeypatch):

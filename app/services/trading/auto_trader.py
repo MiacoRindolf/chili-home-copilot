@@ -4139,11 +4139,13 @@ def _probation_trade_count_today(
     uid: int | None,
     pattern_id: int | None = None,
     ticker: str | None = None,
+    asset_class: str | None = None,
     now: datetime | None = None,
 ) -> int:
     start_utc = _probation_day_start_utc(now)
     pattern_clause = ""
     ticker_clause = ""
+    asset_clause = ""
     params: dict[str, Any] = {
         "uid": uid,
         "version": AUTOTRADER_VERSION,
@@ -4156,6 +4158,14 @@ def _probation_trade_count_today(
     if ticker:
         ticker_clause = "AND UPPER(ticker) = :ticker"
         params["ticker"] = str(ticker).strip().upper()
+    asset = str(asset_class or "").strip().lower()
+    if asset == "crypto":
+        asset_clause = """
+          AND (
+              LOWER(COALESCE(asset_kind, '')) = 'crypto'
+              OR UPPER(ticker) LIKE '%-USD'
+          )
+        """
     row = db.execute(text(f"""
         SELECT COUNT(*) AS n
         FROM trading_trades
@@ -4172,6 +4182,7 @@ def _probation_trade_count_today(
           ) = :flag
           {pattern_clause}
           {ticker_clause}
+          {asset_clause}
     """), {
         **params,
         "entry_execution_key": ENTRY_EXECUTION_SNAPSHOT_KEY,
@@ -4271,12 +4282,21 @@ def _probation_quota_block_reason(
         )
         if pattern_count >= per_pattern_limit:
             return PROBATION_QUOTA_REASON_PATTERN
+    base_portfolio_limit = portfolio_limit
     portfolio_limit = _probation_portfolio_limit_for_asset(
         asset_class=asset_class,
         expected_net_pct=expected_net_pct,
         base_limit=portfolio_limit,
     )
-    portfolio_count = _probation_trade_count_today(db, uid=uid)
+    portfolio_count = _probation_trade_count_today(
+        db,
+        uid=uid,
+        asset_class=(
+            "crypto"
+            if asset_class == "crypto" and portfolio_limit > base_portfolio_limit
+            else None
+        ),
+    )
     if portfolio_count >= portfolio_limit:
         return PROBATION_QUOTA_REASON_PORTFOLIO
     return None
