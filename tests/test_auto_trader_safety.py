@@ -223,6 +223,77 @@ def test_nonplacement_audit_commit_timeout_is_best_effort() -> None:
     assert len(db.added) == 1
 
 
+def test_nonplacement_audit_raw_timeout_is_best_effort() -> None:
+    class _Db:
+        is_active = True
+
+        def __init__(self):
+            self.added: list[AutoTraderRun] = []
+            self.rollback_count = 0
+
+        def add(self, row):
+            self.added.append(row)
+
+        def commit(self):
+            raise TimeoutError("raw driver timeout")
+
+        def rollback(self):
+            self.rollback_count += 1
+
+    db = _Db()
+    alert = BreakoutAlert(
+        id=9905,
+        ticker="AERGO-USD",
+        asset_type="crypto",
+        scan_pattern_id=1250,
+        user_id=1,
+    )
+
+    at_mod._audit(
+        db,
+        user_id=1,
+        alert=alert,
+        decision="skipped",
+        reason="empirical_cost_edge_margin_too_thin",
+        rule_snapshot={"expected_net_pct": 0.2},
+    )
+
+    assert db.rollback_count == 1
+    assert len(db.added) == 1
+
+
+def test_placement_audit_raw_timeout_still_raises() -> None:
+    class _Db:
+        is_active = True
+
+        def __init__(self):
+            self.rollback_count = 0
+
+        def add(self, _row):
+            pass
+
+        def commit(self):
+            raise TimeoutError("raw driver timeout")
+
+        def rollback(self):
+            self.rollback_count += 1
+
+    db = _Db()
+    alert = BreakoutAlert(id=9906, ticker="A8-USD", scan_pattern_id=1267, user_id=1)
+
+    with pytest.raises(TimeoutError):
+        at_mod._audit(
+            db,
+            user_id=1,
+            alert=alert,
+            decision="placed",
+            reason="submitted",
+            rule_snapshot={"order_id": "live-order"},
+        )
+
+    assert db.rollback_count == 0
+
+
 def test_nonplacement_audit_pending_rollback_is_best_effort() -> None:
     class _Db:
         is_active = True

@@ -3318,6 +3318,29 @@ def _audit_is_nonplacement_decision(decision: str | None) -> bool:
     return str(decision or "").strip().lower() not in {"placed", "scaled_in"}
 
 
+def _rollback_best_effort_audit_failure(db: Session) -> None:
+    try:
+        db.rollback()
+        return
+    except Exception:
+        logger.debug(
+            "[autotrader] nonplacement audit rollback failed after commit error",
+            exc_info=True,
+        )
+    for attr in ("invalidate", "close"):
+        try:
+            recovery = getattr(db, attr, None)
+            if callable(recovery):
+                recovery()
+                return
+        except Exception:
+            logger.debug(
+                "[autotrader] nonplacement audit session %s failed after rollback failure",
+                attr,
+                exc_info=True,
+            )
+
+
 def _audit(
     db: Session,
     *,
@@ -3373,11 +3396,11 @@ def _audit(
         )
 
     row = _row()
-    db.add(row)
+    nonplacement = _audit_is_nonplacement_decision(decision)
     try:
+        db.add(row)
         db.commit()
     except PendingRollbackError:
-        nonplacement = _audit_is_nonplacement_decision(decision)
         logger.warning(
             "[autotrader] audit commit hit pending rollback; %s alert_id=%s ticker=%s reason=%s",
             (
@@ -3398,6 +3421,7 @@ def _audit(
                 exc_info=True,
             )
             if nonplacement:
+                _rollback_best_effort_audit_failure(db)
                 return
             raise
         if nonplacement:
@@ -3411,7 +3435,7 @@ def _audit(
         db.add(_row())
         db.commit()
     except DBAPIError:
-        if not _audit_is_nonplacement_decision(decision):
+        if not nonplacement:
             raise
         logger.warning(
             "[autotrader] nonplacement audit commit failed; dropping best-effort audit alert_id=%s ticker=%s reason=%s",
@@ -3420,13 +3444,19 @@ def _audit(
             reason,
             exc_info=True,
         )
-        try:
-            db.rollback()
-        except Exception:
-            logger.debug(
-                "[autotrader] nonplacement audit rollback failed after commit error",
-                exc_info=True,
-            )
+        _rollback_best_effort_audit_failure(db)
+        return
+    except Exception:
+        if not nonplacement:
+            raise
+        logger.warning(
+            "[autotrader] nonplacement audit commit failed; dropping best-effort audit alert_id=%s ticker=%s reason=%s",
+            getattr(alert, "id", None),
+            (getattr(alert, "ticker", None) or "").upper() or None,
+            reason,
+            exc_info=True,
+        )
+        _rollback_best_effort_audit_failure(db)
         return
 
     # Q1.T3 phase 2 — shadow-consume unified_signals.
