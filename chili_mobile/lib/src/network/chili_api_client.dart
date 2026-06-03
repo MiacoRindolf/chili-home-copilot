@@ -890,4 +890,74 @@ class ChiliApiClient {
     final raw = (decoded?['projects'] ?? []) as List<dynamic>;
     return raw.map((e) => Map<String, dynamic>.from(e as Map)).toList();
   }
+
+  // ── Agents app (AGT-2): read-only status probes ─────────────────────────
+  // Tolerant: any failure (offline backend, non-200, bad JSON) yields an empty
+  // value so the Agents panel degrades to "unknown" rather than throwing.
+
+  Future<Map<String, dynamic>> _getMapSafe(String path) async {
+    try {
+      final res = await _get(
+        Uri.parse('$baseUrl$path'),
+        headers: _headers(json: false),
+      );
+      if (res.statusCode != 200) return const <String, dynamic>{};
+      final Object? decoded = jsonDecode(res.body);
+      return decoded is Map<String, dynamic>
+          ? decoded
+          : const <String, dynamic>{};
+    } catch (_) {
+      return const <String, dynamic>{};
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> _getListSafe(
+    String path, {
+    String? itemsKey,
+  }) async {
+    try {
+      final res = await _get(
+        Uri.parse('$baseUrl$path'),
+        headers: _headers(json: false),
+      );
+      if (res.statusCode != 200) return const <Map<String, dynamic>>[];
+      final Object? decoded = jsonDecode(res.body);
+      final List<dynamic> raw = decoded is List
+          ? decoded
+          : (itemsKey != null && decoded is Map
+              ? (decoded[itemsKey] as List? ?? const <dynamic>[])
+              : const <dynamic>[]);
+      return raw
+          .whereType<Map>()
+          .map((Map e) => Map<String, dynamic>.from(e))
+          .toList();
+    } catch (_) {
+      return const <Map<String, dynamic>>[];
+    }
+  }
+
+  /// GET /api/brain/dispatch/status — code-dispatch kill switch + counters.
+  Future<Map<String, dynamic>> getDispatchStatusSafe() =>
+      _getMapSafe('/api/brain/dispatch/status');
+
+  /// GET /api/brain/code/status — code-brain runtime mode + queue + spend.
+  Future<Map<String, dynamic>> getCodeBrainStatus() =>
+      _getMapSafe('/api/brain/code/status');
+
+  /// GET /api/brain/context/status — learning/distillation runtime state.
+  Future<Map<String, dynamic>> getContextStatusSafe() =>
+      _getMapSafe('/api/brain/context/status');
+
+  /// GET /api/brain/context/gateway/learn/runs — recent learning-cycle runs.
+  Future<List<Map<String, dynamic>>> getLearnRuns({int limit = 5}) =>
+      _getListSafe('/api/brain/context/gateway/learn/runs?limit=$limit',
+          itemsKey: 'runs');
+
+  /// GET /api/trading/momentum/automation/summary — automation session counts.
+  Future<Map<String, dynamic>> getMomentumAutomationSummary() =>
+      _getMapSafe('/api/trading/momentum/automation/summary');
+
+  /// GET /api/trading/monitor/active — active setups + monitor summary.
+  Future<Map<String, dynamic>> getActiveSetupsSummary() =>
+      _getMapSafe('/api/trading/monitor/active');
 }

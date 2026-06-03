@@ -2,20 +2,39 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../network/chili_api_client.dart';
 import 'agent.dart';
 import 'agent_persistence.dart';
 import 'agent_registry.dart';
+import 'agent_status_service.dart';
+
+/// Signature of the live-status poller — injectable so tests can feed canned
+/// readings without touching the network.
+typedef AgentStatusPoller = Future<Map<String, AgentLiveStatus>> Function();
 
 /// Mission control for CHILI's autonomous agents — check, configure and run the
-/// trading / brain / coding / system fleet. AGT-1: a master/detail surface with
-/// local run/stop, enable toggles and editable config; real backend status and
-/// control wire in later increments.
+/// trading / brain / coding / system fleet. AGT-1: master/detail with local
+/// run/stop, enable toggles and editable config. AGT-2: live backend status for
+/// the agents that expose it (read-only) with a connection indicator.
 class AgentsScreen extends StatefulWidget {
-  const AgentsScreen({super.key, AgentRegistry? registry})
-      : _injectedRegistry = registry;
+  const AgentsScreen({
+    super.key,
+    AgentRegistry? registry,
+    AgentStatusPoller? livePoller,
+    bool livePolling = true,
+  })  : _injectedRegistry = registry,
+        _injectedPoller = livePoller,
+        _livePolling = livePolling;
 
   /// Optional registry for tests; production builds seed a fresh one.
   final AgentRegistry? _injectedRegistry;
+
+  /// Optional status poller for tests; production builds a real one.
+  final AgentStatusPoller? _injectedPoller;
+
+  /// When false, no live polling timer runs (used by tests / when offline use
+  /// is undesirable).
+  final bool _livePolling;
 
   @override
   State<AgentsScreen> createState() => _AgentsScreenState();
@@ -23,9 +42,16 @@ class AgentsScreen extends StatefulWidget {
 
 class _AgentsScreenState extends State<AgentsScreen> {
   late final AgentRegistry _registry;
+  AgentStatusPoller? _poller;
+  AgentStatusService? _ownedService;
   AgentKind? _filter; // null = All
   String? _selectedId;
   Timer? _saveTimer;
+  Timer? _pollTimer;
+  bool _reachable = false; // backend responded on the last poll
+  bool _polledOnce = false;
+
+  static const Duration _pollInterval = Duration(seconds: 25);
 
   @override
   void initState() {
@@ -33,6 +59,7 @@ class _AgentsScreenState extends State<AgentsScreen> {
     _registry = widget._injectedRegistry ?? AgentRegistry();
     _selectedId = _registry.agents.isNotEmpty ? _registry.agents.first.id : null;
     _restore();
+    if (widget._livePolling) _startPolling();
   }
 
   Future<void> _restore() async {
@@ -42,9 +69,41 @@ class _AgentsScreenState extends State<AgentsScreen> {
     _registry.addListener(_scheduleSave);
   }
 
+  void _startPolling() {
+    if (widget._injectedPoller != null) {
+      _poller = widget._injectedPoller;
+    } else {
+      _ownedService = AgentStatusService(ChiliApiClient());
+      _poller = _ownedService!.poll;
+    }
+    _poll();
+    _pollTimer = Timer.periodic(_pollInterval, (_) => _poll());
+  }
+
+  Future<void> _poll() async {
+    final AgentStatusPoller? poll = _poller;
+    if (poll == null) return;
+    Map<String, AgentLiveStatus> live;
+    try {
+      live = await poll();
+    } catch (_) {
+      live = const <String, AgentLiveStatus>{};
+    }
+    if (!mounted) return;
+    live.forEach((String id, AgentLiveStatus s) {
+      _registry.applyLiveStatus(id, s.status,
+          lastRun: s.lastRun, lastResult: s.detail);
+    });
+    setState(() {
+      _reachable = _ownedService?.reachable ?? live.isNotEmpty;
+      _polledOnce = true;
+    });
+  }
+
   @override
   void dispose() {
     _saveTimer?.cancel();
+    _pollTimer?.cancel();
     _registry.removeListener(_scheduleSave);
     // Only dispose registries we created.
     if (widget._injectedRegistry == null) _registry.dispose();
@@ -115,6 +174,16 @@ class _AgentsScreenState extends State<AgentsScreen> {
                 label: '$running running',
                 color: running > 0 ? Colors.green : cs.onSurfaceVariant,
               ),
+              const Spacer(),
+              if (widget._livePolling) ...<Widget>[
+                _ConnPill(reachable: _reachable, polled: _polledOnce),
+                IconButton(
+                  tooltip: 'Refresh status',
+                  visualDensity: VisualDensity.compact,
+                  icon: const Icon(Icons.refresh, size: 18),
+                  onPressed: _poll,
+                ),
+              ],
             ],
           ),
           const SizedBox(height: 8),
@@ -194,9 +263,17 @@ class _AgentsScreenState extends State<AgentsScreen> {
                     ],
                   ),
                 ),
+                if (liveBackedAgentIds.contains(a.id))
+                  const Padding(
+                    padding: EdgeInsets.only(left: 4),
+                    child: _LiveTag(),
+                  ),
                 if (!a.enabled)
-                  Icon(Icons.pause_circle_outline,
-                      size: 16, color: cs.onSurfaceVariant),
+                  Padding(
+                    padding: const EdgeInsets.only(left: 4),
+                    child: Icon(Icons.pause_circle_outline,
+                        size: 16, color: cs.onSurfaceVariant),
+                  ),
               ],
             ),
           ),
@@ -213,6 +290,7 @@ class _AgentsScreenState extends State<AgentsScreen> {
             style: TextStyle(color: cs.onSurfaceVariant)),
       );
     }
+    final bool live = liveBackedAgentIds.contains(a.id);
     return ListView(
       padding: const EdgeInsets.all(20),
       children: <Widget>[
@@ -233,34 +311,41 @@ class _AgentsScreenState extends State<AgentsScreen> {
             _CountPill(label: a.kind.label, color: cs.onSurfaceVariant),
             const SizedBox(width: 8),
             _CountPill(label: a.status.label, color: _statusColor(a.status, cs)),
+            if (live) ...<Widget>[
+              const SizedBox(width: 8),
+              const _LiveTag(),
+            ],
           ],
         ),
         const SizedBox(height: 12),
         Text(a.description, style: TextStyle(color: cs.onSurfaceVariant, height: 1.4)),
         const SizedBox(height: 20),
-        // Controls.
+        // Controls. Live-backed agents reflect backend truth (read-only here);
+        // real start/stop control lands in AGT-3.
         Wrap(
           spacing: 10,
           runSpacing: 10,
           crossAxisAlignment: WrapCrossAlignment.center,
           children: <Widget>[
             FilledButton.icon(
-              onPressed: (a.canStart && a.enabled && a.status != AgentStatus.running)
-                  ? () => _registry.start(a.id)
-                  : null,
+              onPressed:
+                  (!live && a.canStart && a.enabled && a.status != AgentStatus.running)
+                      ? () => _registry.start(a.id)
+                      : null,
               icon: const Icon(Icons.play_arrow, size: 18),
               label: const Text('Start'),
             ),
             OutlinedButton.icon(
-              onPressed: (a.canStop && a.status == AgentStatus.running)
+              onPressed: (!live && a.canStop && a.status == AgentStatus.running)
                   ? () => _registry.stop(a.id)
                   : null,
               icon: const Icon(Icons.stop, size: 18),
               label: const Text('Stop'),
             ),
             OutlinedButton.icon(
-              onPressed:
-                  (a.canRunOnce && a.enabled) ? () => _registry.runOnce(a.id) : null,
+              onPressed: (!live && a.canRunOnce && a.enabled)
+                  ? () => _registry.runOnce(a.id)
+                  : null,
               icon: const Icon(Icons.bolt, size: 18),
               label: const Text('Run once'),
             ),
@@ -270,7 +355,7 @@ class _AgentsScreenState extends State<AgentsScreen> {
               children: <Widget>[
                 Switch(
                   value: a.enabled,
-                  onChanged: (bool v) => _registry.setEnabled(a.id, v),
+                  onChanged: live ? null : (bool v) => _registry.setEnabled(a.id, v),
                 ),
                 Text('Enabled', style: TextStyle(color: cs.onSurface)),
               ],
@@ -278,7 +363,7 @@ class _AgentsScreenState extends State<AgentsScreen> {
           ],
         ),
         const SizedBox(height: 8),
-        _localNote(cs),
+        live ? _liveNote(cs) : _localNote(cs),
         const SizedBox(height: 18),
         _section(cs, 'Schedule'),
         Text(a.schedule.isEmpty ? '—' : a.schedule,
@@ -315,13 +400,29 @@ class _AgentsScreenState extends State<AgentsScreen> {
   }
 
   Widget _localNote(ColorScheme cs) {
+    return _noteRow(
+      cs,
+      Icons.info_outline,
+      'Controls update local state. Live backend status & control arrive in a later update.',
+    );
+  }
+
+  Widget _liveNote(ColorScheme cs) {
+    return _noteRow(
+      cs,
+      Icons.cloud_done_outlined,
+      'Live status from the backend (read-only). Start/stop control lands in a later update.',
+    );
+  }
+
+  Widget _noteRow(ColorScheme cs, IconData icon, String text) {
     return Row(
       children: <Widget>[
-        Icon(Icons.info_outline, size: 14, color: cs.onSurfaceVariant),
+        Icon(icon, size: 14, color: cs.onSurfaceVariant),
         const SizedBox(width: 6),
         Expanded(
           child: Text(
-            'Controls update local state. Live backend status & control arrive in a later update.',
+            text,
             style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
           ),
         ),
@@ -448,6 +549,58 @@ class _CountPill extends StatelessWidget {
         label,
         style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: color),
       ),
+    );
+  }
+}
+
+/// Small "LIVE" tag marking agents whose status comes from the backend.
+class _LiveTag extends StatelessWidget {
+  const _LiveTag();
+
+  @override
+  Widget build(BuildContext context) {
+    const Color c = Colors.green;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: c.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: const Text(
+        'LIVE',
+        style: TextStyle(
+          fontSize: 9,
+          fontWeight: FontWeight.w800,
+          letterSpacing: 0.5,
+          color: c,
+        ),
+      ),
+    );
+  }
+}
+
+/// Header connection indicator: green when the backend answered the last poll.
+class _ConnPill extends StatelessWidget {
+  const _ConnPill({required this.reachable, required this.polled});
+  final bool reachable;
+  final bool polled;
+
+  @override
+  Widget build(BuildContext context) {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    final Color c = !polled
+        ? cs.onSurfaceVariant
+        : (reachable ? Colors.green : cs.onSurfaceVariant);
+    final String label =
+        !polled ? 'Connecting…' : (reachable ? 'Live' : 'Offline');
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        Icon(reachable && polled ? Icons.circle : Icons.circle_outlined,
+            size: 9, color: c),
+        const SizedBox(width: 5),
+        Text(label, style: TextStyle(fontSize: 11, color: c)),
+      ],
     );
   }
 }
