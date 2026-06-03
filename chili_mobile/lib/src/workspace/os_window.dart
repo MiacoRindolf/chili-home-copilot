@@ -69,7 +69,12 @@ class OsWindow extends StatelessWidget {
         : cs.surfaceContainerHighest;
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onPanUpdate: (DragUpdateDetails d) => controller.move(data.id, d.delta),
+      onPanUpdate: (DragUpdateDetails d) {
+        controller.move(data.id, d.delta);
+        final Rect r = Rect.fromLTWH(data.position.dx, data.position.dy, data.size.width, data.size.height);
+        controller.setGhost(controller.zoneForRect(r, desktopSize)); // drag-to-edge preview
+      },
+      onPanEnd: (_) => controller.commitGhost(data.id, desktopSize),
       onDoubleTap: () => controller.toggleMaximize(data.id, desktopSize),
       child: Container(
         height: 38,

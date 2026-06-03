@@ -189,6 +189,19 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
                     desktopSize: deskSize,
                     child: _bodyFor(w.id),
                   ),
+                if (_ws.snapGhost != null)
+                  Positioned.fromRect(
+                    rect: _ws.rectForZone(_ws.snapGhost!, deskSize),
+                    child: IgnorePointer(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: cs.primary.withValues(alpha: 0.18),
+                          border: Border.all(color: cs.primary, width: 2),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                      ),
+                    ),
+                  ),
                 WorkspaceTaskbar(
                   minimized: _ws.windows.where((WsWindow w) => w.minimized).toList(),
                   onRestore: _ws.focus,

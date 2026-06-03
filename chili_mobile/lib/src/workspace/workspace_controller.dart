@@ -31,6 +31,7 @@ class WorkspaceController extends ChangeNotifier {
   final List<WsWindow> _windows = <WsWindow>[];
   int _zTop = 10;
   int _opened = 0;
+  String? snapGhost; // drag-to-edge preview zone, set while a title bar is dragged
 
   static const double minWinW = 320;
   static const double minWinH = 220;
@@ -154,44 +155,73 @@ class WorkspaceController extends ChangeNotifier {
     if (any) notifyListeners();
   }
 
-  /// Tile the window into a half / quarter / full zone of the desktop.
-  /// Zones: 'left', 'right', 'max', 'tl', 'tr', 'bl', 'br'.
+  /// The pixel rect a snap zone occupies on [d].
+  /// Zones: 'left', 'right', 'max', 'tl', 'tr', 'bl', 'br' (else Rect.zero).
+  Rect rectForZone(String zone, Size d) {
+    final double hw = d.width / 2;
+    final double hh = d.height / 2;
+    switch (zone) {
+      case 'left':
+        return Rect.fromLTWH(0, 0, hw, d.height);
+      case 'right':
+        return Rect.fromLTWH(hw, 0, hw, d.height);
+      case 'max':
+        return Rect.fromLTWH(0, 0, d.width, d.height);
+      case 'tl':
+        return Rect.fromLTWH(0, 0, hw, hh);
+      case 'tr':
+        return Rect.fromLTWH(hw, 0, hw, hh);
+      case 'bl':
+        return Rect.fromLTWH(0, hh, hw, hh);
+      case 'br':
+        return Rect.fromLTWH(hw, hh, hw, hh);
+      default:
+        return Rect.zero;
+    }
+  }
+
+  /// Tile the window into a snap zone of the desktop.
   void snap(String id, String zone, Size desktop) {
     final WsWindow? w = byId(id);
     if (w == null) return;
-    final double hw = desktop.width / 2;
-    final double hh = desktop.height / 2;
-    Rect r;
-    switch (zone) {
-      case 'left':
-        r = Rect.fromLTWH(0, 0, hw, desktop.height);
-        break;
-      case 'right':
-        r = Rect.fromLTWH(hw, 0, hw, desktop.height);
-        break;
-      case 'max':
-        r = Rect.fromLTWH(0, 0, desktop.width, desktop.height);
-        break;
-      case 'tl':
-        r = Rect.fromLTWH(0, 0, hw, hh);
-        break;
-      case 'tr':
-        r = Rect.fromLTWH(hw, 0, hw, hh);
-        break;
-      case 'bl':
-        r = Rect.fromLTWH(0, hh, hw, hh);
-        break;
-      case 'br':
-        r = Rect.fromLTWH(hw, hh, hw, hh);
-        break;
-      default:
-        return;
-    }
+    final Rect r = rectForZone(zone, desktop);
+    if (r == Rect.zero) return;
     w.position = r.topLeft;
     w.size = r.size;
     w.maximized = zone == 'max';
     if (zone != 'max') w.restoreRect = null; // a half/quarter becomes the new geometry
     focus(id);
+  }
+
+  // ── Drag-to-edge snapping: while a title bar is dragged, the shell shows a
+  //    translucent [snapGhost] preview; releasing in a zone snaps the window. ──
+
+  /// The snap zone a window rect is hovering (top→max, left→left-half,
+  /// right→right-half), or null. Drives the ghost preview during a drag.
+  String? zoneForRect(Rect r, Size desktop) {
+    const double edge = 28;
+    if (r.top <= edge) return 'max';
+    if (r.left <= edge) return 'left';
+    if (r.right >= desktop.width - edge) return 'right';
+    return null;
+  }
+
+  void setGhost(String? zone) {
+    if (snapGhost != zone) {
+      snapGhost = zone;
+      notifyListeners();
+    }
+  }
+
+  /// Commit the current drag: snap to [snapGhost] if one is set, then clear it.
+  void commitGhost(String id, Size desktop) {
+    final String? z = snapGhost;
+    snapGhost = null;
+    if (z != null) {
+      snap(id, z, desktop); // snap() focuses + notifies
+    } else {
+      notifyListeners();
+    }
   }
 
   /// Cycle focus to the bottom-most visible window (mirrors the web OS ⌘`).

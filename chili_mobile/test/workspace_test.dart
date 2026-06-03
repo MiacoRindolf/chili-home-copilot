@@ -120,6 +120,36 @@ void main() {
       c.cycleFocus();
       expect(c.focusedId, 'a'); // bottom-most raised to top
     });
+
+    test('zoneForRect detects edge snap zones for drag-to-edge', () {
+      final WorkspaceController c = WorkspaceController();
+      const Size d = Size(1000, 800);
+      expect(c.zoneForRect(const Rect.fromLTWH(5, 200, 400, 300), d), 'left');
+      expect(c.zoneForRect(const Rect.fromLTWH(700, 200, 295, 300), d), 'right');
+      expect(c.zoneForRect(const Rect.fromLTWH(300, 5, 400, 300), d), 'max');
+      expect(c.zoneForRect(const Rect.fromLTWH(300, 300, 400, 300), d), isNull);
+    });
+
+    test('rectForZone gives the expected geometry', () {
+      final WorkspaceController c = WorkspaceController();
+      const Size d = Size(1000, 800);
+      expect(c.rectForZone('left', d), const Rect.fromLTWH(0, 0, 500, 800));
+      expect(c.rectForZone('max', d), const Rect.fromLTWH(0, 0, 1000, 800));
+      expect(c.rectForZone('tr', d), const Rect.fromLTWH(500, 0, 500, 400));
+      expect(c.rectForZone('nope', d), Rect.zero);
+    });
+
+    test('commitGhost snaps to the ghost zone then clears it', () {
+      final WorkspaceController c = WorkspaceController();
+      const Size d = Size(1000, 800);
+      c.open('chat', title: 'Chat', icon: Icons.chat);
+      c.setGhost('right');
+      expect(c.snapGhost, 'right');
+      c.commitGhost('chat', d);
+      expect(c.snapGhost, isNull);
+      expect(c.byId('chat')!.position, const Offset(500, 0));
+      expect(c.byId('chat')!.size, const Size(500, 800));
+    });
   });
 
   group('WorkspaceShell', () {
