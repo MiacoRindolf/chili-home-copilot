@@ -31,8 +31,12 @@ services:
     # scan before startup.
     user: postgres
     # Headroom for chili + brain + brain-worker; process-pool queue uses P * (child pool) connections.
-    command: ["postgres", "-c", "max_connections=350"]
+    # Docker Desktop bind mounts can stall end-of-recovery checkpoints when
+    # syncfs flushes the whole mounted filesystem. Keep the default file-by-file
+    # recovery sync path for the CHILI D: data volume.
+    command: ["postgres", "-c", "max_connections=350", "-c", "recovery_init_sync_method=fsync"]
     restart: unless-stopped
+    stop_grace_period: 180s
     environment:
       POSTGRES_USER: chili
       POSTGRES_PASSWORD: chili
@@ -112,7 +116,7 @@ services:
         CHILI_GIT_COMMIT: ${CHILI_GIT_COMMIT:-}
     image: chili-app:local
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8001:8000"
     env_file:
       - path: .env
         required: false

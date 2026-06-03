@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass
-from typing import Optional
+from types import SimpleNamespace
+from typing import Any, Optional
 
 from sqlalchemy.orm import Session
 
@@ -105,7 +105,26 @@ def _bucket_cap_pct(asset_class: Optional[str]) -> float:
     )
 
 
-def _is_option_trade_safe(trade: Trade) -> bool:
+def _trade_budget_field(row: Any, field: str, index: int) -> Any:
+    if isinstance(row, (tuple, list)):
+        return row[index] if len(row) > index else None
+    return getattr(row, field, None)
+
+
+def _trade_budget_row(row: Any) -> Any:
+    if not isinstance(row, (tuple, list)):
+        return row
+    return SimpleNamespace(
+        ticker=_trade_budget_field(row, "ticker", 0),
+        quantity=_trade_budget_field(row, "quantity", 1),
+        entry_price=_trade_budget_field(row, "entry_price", 2),
+        asset_kind=_trade_budget_field(row, "asset_kind", 3),
+        tags=_trade_budget_field(row, "tags", 4),
+        indicator_snapshot=_trade_budget_field(row, "indicator_snapshot", 5),
+    )
+
+
+def _is_option_trade_safe(trade: Any) -> bool:
     try:
         from .autopilot_scope import is_option_trade
 
@@ -114,7 +133,8 @@ def _is_option_trade_safe(trade: Trade) -> bool:
         return False
 
 
-def _trade_notional_usd(trade: Trade) -> float:
+def _trade_notional_usd(trade: Any) -> float:
+    trade = _trade_budget_row(trade)
     qty = _positive_float(getattr(trade, "quantity", None))
     entry = _positive_float(getattr(trade, "entry_price", None))
     if qty is None or entry is None:
@@ -146,7 +166,14 @@ def compute_correlation_budget(
 
     try:
         q = (
-            db.query(Trade)
+            db.query(
+                Trade.ticker,
+                Trade.quantity,
+                Trade.entry_price,
+                Trade.asset_kind,
+                Trade.tags,
+                Trade.indicator_snapshot,
+            )
             .filter(Trade.status == "open")
             .filter(Trade.ticker.isnot(None))
         )
@@ -160,7 +187,7 @@ def compute_correlation_budget(
     open_notional = 0.0
     for row in rows:
         try:
-            other_bucket = bucket_for(row.ticker)
+            other_bucket = bucket_for(_trade_budget_field(row, "ticker", 0))
             if other_bucket != bucket:
                 continue
             open_notional += _trade_notional_usd(row)
@@ -189,9 +216,16 @@ def compute_portfolio_budget(
     dial). It is included here so the caller can pass a tighter
     limit when testing.
     """
-    rows: list[Trade] = []
+    rows: list[Any] = []
     try:
-        q = db.query(Trade).filter(Trade.status == "open")
+        q = db.query(
+            Trade.ticker,
+            Trade.quantity,
+            Trade.entry_price,
+            Trade.asset_kind,
+            Trade.tags,
+            Trade.indicator_snapshot,
+        ).filter(Trade.status == "open")
         if user_id is not None:
             q = q.filter(Trade.user_id == user_id)
         rows = q.all()
@@ -204,7 +238,7 @@ def compute_portfolio_budget(
     ticker_open = sum(
         _trade_notional_usd(row)
         for row in rows
-        if str(row.ticker or "").strip().upper() == wanted_ticker
+        if str(_trade_budget_field(row, "ticker", 0) or "").strip().upper() == wanted_ticker
     )
 
     capital_f = max(0.0, _finite_float(capital, 0.0))

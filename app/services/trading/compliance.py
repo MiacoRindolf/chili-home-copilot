@@ -67,7 +67,7 @@ def check_pdt_status(
     """
     cutoff = datetime.utcnow() - timedelta(days=PDT_WINDOW_DAYS)
 
-    day_trades = db.query(Trade).filter(
+    day_trades = db.query(Trade.entry_date, Trade.exit_date, Trade.ticker).filter(
         Trade.user_id == user_id,
         Trade.status == "closed",
         Trade.entry_date >= cutoff,
@@ -76,9 +76,12 @@ def check_pdt_status(
     # Count same-day round trips (open and close on same calendar day)
     same_day_count = 0
     for t in day_trades:
-        if t.entry_date and t.exit_date:
-            if t.entry_date.date() == t.exit_date.date():
-                is_crypto = (t.ticker or "").upper().endswith("-USD")
+        entry_date = _pdt_trade_field(t, "entry_date", 0)
+        exit_date = _pdt_trade_field(t, "exit_date", 1)
+        if entry_date and exit_date:
+            if entry_date.date() == exit_date.date():
+                ticker = str(_pdt_trade_field(t, "ticker", 2) or "")
+                is_crypto = ticker.upper().endswith("-USD")
                 if not is_crypto:  # PDT only applies to equities
                     same_day_count += 1
 
@@ -94,6 +97,12 @@ def check_pdt_status(
         "can_day_trade": can_day_trade,
         "window_days": PDT_WINDOW_DAYS,
     }
+
+
+def _pdt_trade_field(row: Any, field: str, index: int) -> Any:
+    if isinstance(row, (tuple, list)):
+        return row[index] if len(row) > index else None
+    return getattr(row, field, None)
 
 
 def check_concentration_limits(
