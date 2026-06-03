@@ -146,11 +146,34 @@ def _data_fresh(db: Session) -> Optional[str]:
         return None
 
 
+def _merge_unrealized(out: Dict[str, Any], db: Session, user_id: Optional[int]) -> None:
+    """Enrich the open-positions list with live unrealized P/L + a portfolio total
+    (read-only, via cockpit_pnl). Defensive: a quote outage leaves the positions
+    list intact and the total as None, so the cockpit simply omits the P/L."""
+    try:
+        from .cockpit_pnl import build_unrealized
+        u = build_unrealized(db, user_id)
+        by = u.get("by_ticker") or {}
+        for p in out.get("positions") or []:
+            info = by.get(p.get("ticker"))
+            if info and info.get("priced"):
+                p["pnl_fmt"] = info.get("pnl_fmt")
+                p["pnl_up"] = info.get("pnl_up")
+                p["pnl_pct_fmt"] = info.get("pnl_pct_fmt")
+        out["unrealized_total_fmt"] = u.get("total_fmt")
+        out["unrealized_total_up"] = bool(u.get("total_up"))
+        out["unrealized_priced"] = u.get("priced")
+    except Exception as e:
+        logger.warning("[desktop_live] unrealized merge failed: %s", e)
+        out["unrealized_total_fmt"] = None
+
+
 def build_live(db: Session, user_id: Optional[int]) -> Dict[str, Any]:
     """Return the compact live cockpit view-model (safe to poll repeatedly)."""
     out: Dict[str, Any] = {"ok": True}
     out.update(_numbers(db, user_id))
     out.update(_lists(db, user_id))
+    _merge_unrealized(out, db, user_id)
     out["kill_switch"] = _kill_switch()
     out["breaker"] = _breaker()
     out["market"] = _market()

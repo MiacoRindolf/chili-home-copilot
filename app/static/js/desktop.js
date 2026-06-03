@@ -159,8 +159,10 @@
     var html = '';
     for (var i = 0; i < list.length; i++) {
       var p = list[i] || {};
+      // Live unrealized P/L per position (present only when a quote was available).
+      var pnl = p.pnl_fmt ? ' <span class="ws-mono ' + (p.pnl_up ? 'ws-up' : 'ws-down') + '">' + esc(p.pnl_fmt) + '</span>' : '';
       html += '<div class="ws-stat ws-stat-link" data-ticker="' + esc(p.ticker) + '" title="Open ' + esc(p.ticker) + ' on the desk"><span class="k tick ws-mono">' + esc(p.ticker) +
-        '</span><span class="ws-tag">' + esc(p.side) + '</span></div>';
+        '</span><span><span class="ws-tag">' + esc(p.side) + '</span>' + pnl + '</span></div>';
     }
     el.innerHTML = html;
   }
@@ -199,6 +201,16 @@
 
     renderPositions(d.positions);
     renderCloses(d.closes);
+
+    // Total unrealized P/L across open positions (header chip on the positions card).
+    var ur = document.getElementById('ws-unrealized');
+    if (ur) {
+      if (d.unrealized_total_fmt) {
+        ur.textContent = d.unrealized_total_fmt + ' unreal.';
+        ur.classList.remove('ws-up', 'ws-down'); ur.classList.add(d.unrealized_total_up ? 'ws-up' : 'ws-down');
+        ur.hidden = false;
+      } else { ur.hidden = true; }
+    }
 
     var tp = document.getElementById('ws-topbar-pnl');
     if (tp && d.net_pnl_fmt) {
