@@ -9626,6 +9626,40 @@ def _learned_exit_config_from_time_decay_report(
     return payload, "ok"
 
 
+def _time_decay_report_can_spawn_challenged_shadow_child(
+    report: dict[str, Any] | None,
+) -> bool:
+    if not _is_time_decay_edge_miss_report(report):
+        return False
+    if bool(report.get("thin_sample")):
+        return False
+    n = int(report.get("total_rejects") or 0)
+    min_losses = int(
+        report.get("min_rejects_for_variant")
+        or _settings_edge_int(
+            "brain_work_time_decay_exit_variant_min_losses",
+            2,
+            minimum=1,
+        )
+    )
+    if n < min_losses:
+        return False
+    avg_net = _finite_number(report.get("avg_expected_net_pct"))
+    if avg_net is None or avg_net <= 0.0:
+        return False
+    root = str(report.get("root_cause") or "").strip().lower()
+    if root != _TIME_DECAY_EDGE_MISS_ROOT_CAUSE:
+        return False
+    static_reward = _finite_number(report.get("avg_static_reward_fraction"))
+    static_loss = _finite_number(report.get("avg_static_stop_loss_fraction"))
+    return (
+        static_reward is not None
+        and static_reward > 0.0
+        and static_loss is not None
+        and static_loss > 0.0
+    )
+
+
 def _learned_exit_config_from_edge_report(
     parent: "ScanPattern",
     report: dict[str, Any] | None,
@@ -9805,6 +9839,15 @@ def _parent_eligible_for_variant_spawn(
         return True, ""
     stage = (getattr(parent, "lifecycle_stage", "") or "").strip().lower()
     if stage in _VARIANT_GATE_BLOCKED_STAGES:
+        if (
+            stage == "challenged"
+            and (getattr(parent, "promotion_status", "") or "").strip().lower()
+            != "demoted_evidence_gap"
+            and _time_decay_report_can_spawn_challenged_shadow_child(
+                edge_loss_report
+            )
+        ):
+            return True, ""
         return False, f"parent_lifecycle_blocked:{stage}"
     if (getattr(parent, "promotion_status", "") or "").strip().lower() == "demoted_evidence_gap":
         return False, "parent_evidence_demoted"

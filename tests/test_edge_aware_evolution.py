@@ -315,6 +315,24 @@ def test_time_decay_edge_miss_report_uses_paper_geometry_without_parent_payoff()
     assert cfg["paper_trade_ids"] == [101, 102, 103]
 
 
+def _time_decay_edge_miss_report(**overrides) -> dict:
+    report = {
+        "source": EDGE_EXIT_CONFIG_SOURCE,
+        "original_source": "paper_time_decay_edge_miss",
+        "paper_time_decay_edge_miss": True,
+        "thin_sample": False,
+        "total_rejects": 3,
+        "min_rejects_for_variant": 2,
+        "avg_expected_net_pct": 3.1,
+        "avg_realized_return_pct": -2.0,
+        "avg_static_reward_fraction": 0.06,
+        "avg_static_stop_loss_fraction": 0.02,
+        "root_cause": "paper_time_decay_exit_thesis_mismatch",
+    }
+    report.update(overrides)
+    return report
+
+
 def test_edge_learned_exit_child_name_fits_scan_pattern_limit(db):
     parent_name = ("Long edge pattern " * 7).strip()[:110]
     assert len(parent_name) <= 120
@@ -484,6 +502,67 @@ def test_edge_spawn_gate_ignores_legacy_loss_report():
 
     assert ok is True
     assert reason == ""
+
+
+def test_edge_spawn_gate_allows_challenged_time_decay_shadow_repair():
+    parent = SimpleNamespace(
+        lifecycle_stage="challenged",
+        promotion_status="promoted",
+        backtest_count=80,
+        win_rate=0.05,
+        corrected_trade_count=12,
+        corrected_avg_return_pct=-1.0,
+        corrected_win_rate=0.0,
+    )
+
+    ok, reason = _parent_eligible_for_variant_spawn(
+        parent,
+        edge_loss_report=_time_decay_edge_miss_report(),
+    )
+
+    assert ok is True
+    assert reason == ""
+
+
+def test_edge_spawn_gate_keeps_hard_blocks_for_time_decay_reports():
+    retired_parent = SimpleNamespace(
+        lifecycle_stage="retired",
+        promotion_status="promoted",
+        backtest_count=0,
+        win_rate=None,
+    )
+    ok, reason = _parent_eligible_for_variant_spawn(
+        retired_parent,
+        edge_loss_report=_time_decay_edge_miss_report(),
+    )
+    assert ok is False
+    assert reason == "parent_lifecycle_blocked:retired"
+
+    demoted_parent = SimpleNamespace(
+        lifecycle_stage="challenged",
+        promotion_status="demoted_evidence_gap",
+        backtest_count=0,
+        win_rate=None,
+    )
+    ok, reason = _parent_eligible_for_variant_spawn(
+        demoted_parent,
+        edge_loss_report=_time_decay_edge_miss_report(),
+    )
+    assert ok is False
+    assert reason == "parent_lifecycle_blocked:challenged"
+
+    weak_report_parent = SimpleNamespace(
+        lifecycle_stage="challenged",
+        promotion_status="promoted",
+        backtest_count=0,
+        win_rate=None,
+    )
+    ok, reason = _parent_eligible_for_variant_spawn(
+        weak_report_parent,
+        edge_loss_report=_time_decay_edge_miss_report(avg_expected_net_pct=0.0),
+    )
+    assert ok is False
+    assert reason == "parent_lifecycle_blocked:challenged"
 
 
 def test_realized_exit_geometry_prefers_edge_learned_exit_config():
