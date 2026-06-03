@@ -16,7 +16,7 @@ from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from ...config import settings
-from ...models.trading import BrainWorkEvent, BreakoutAlert
+from ...models.trading import BrainWorkEvent, BreakoutAlert, ScanPattern, Trade
 from .asset_class import (
     PATTERN_ASSET_CLASS_CRYPTO,
     PATTERN_ASSET_CLASS_OPTIONS,
@@ -42,6 +42,10 @@ from .portfolio_risk import get_risk_limits, _option_premium_risk_dollars
 from .return_math import (
     trade_realized_pnl as _realized_trade_pnl,
     trade_return_pct as _realized_trade_return_pct,
+)
+from .realized_pnl_sql import (
+    LIVE_PATTERN_EV_LOW_CONFIDENCE_EXIT_REASONS,
+    LIVE_PATTERN_EV_LOW_CONFIDENCE_EXIT_TOKENS,
 )
 
 LIVE_LIFECYCLES = frozenset({"live", "promoted", "pilot_promoted"})
@@ -257,6 +261,45 @@ def _trade_return_pct(trade: Any) -> float | None:
     if pnl is None or notional <= 0.0:
         return None
     return (pnl / notional) * 100.0
+
+
+def _normalized_exit_reason(trade: Any) -> str:
+    reason = str(getattr(trade, "exit_reason", "") or "").strip().lower()
+    return reason or "missing"
+
+
+def _cash_deployment_exit_family(reason: Any) -> str:
+    reason_l = str(reason or "").strip().lower()
+    if not reason_l or reason_l == "missing":
+        return "unknown"
+    if reason_l in LIVE_PATTERN_EV_LOW_CONFIDENCE_EXIT_REASONS or any(
+        token in reason_l for token in LIVE_PATTERN_EV_LOW_CONFIDENCE_EXIT_TOKENS
+    ):
+        return "reconciler_or_broker_cleanup"
+    if "take_profit" in reason_l or "target" in reason_l:
+        return "planned_profit_capture"
+    if "stop" in reason_l:
+        return "planned_risk_stop"
+    if reason_l == "pattern_exit_now":
+        return "dynamic_pattern_exit"
+    if "expired" in reason_l or "time_decay" in reason_l or "time_stop" in reason_l:
+        return "time_or_expiry"
+    if (
+        reason_l.startswith("emergency_")
+        or reason_l.startswith("kill_switch")
+        or reason_l.startswith("desk_")
+        or reason_l.startswith("manual")
+        or reason_l.startswith("portfolio_close")
+    ):
+        return "operator_or_risk_override"
+    return "other"
+
+
+def _is_low_confidence_exit_family(family: Any) -> bool:
+    return str(family or "").strip().lower() in {
+        "unknown",
+        "reconciler_or_broker_cleanup",
+    }
 
 
 def _trade_realized_pnl_usd(trade: Any) -> float | None:
@@ -889,6 +932,224 @@ def cost_gate_execution_block_rollup(
         "venues": dict(Counter(str(row.get("broker_venue") or "unknown") for row in rows)),
         "asset_classes": dict(Counter(str(row.get("asset_class") or "unknown") for row in rows)),
         "edge_sources": dict(Counter(str(row.get("cost_gate_edge_pct_source") or "unknown") for row in rows)),
+        "rows": rows,
+    }
+
+
+def low_confidence_exit_attribution_rollup(
+    db: Session,
+    *,
+    user_id: int | None = None,
+    window_days: int = DEFAULT_WINDOW_DAYS,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """Rank pattern/asset slices whose realized EV is polluted by noisy exits."""
+    safe_days = max(1, int(window_days))
+    cutoff = datetime.utcnow() - timedelta(days=safe_days)
+    row_limit = min(5000, max(1, int(limit)) * 500)
+    q = (
+        db.query(Trade)
+        .filter(Trade.status == "closed")
+        .filter(Trade.scan_pattern_id.isnot(None))
+        .filter(
+            or_(
+                Trade.exit_date >= cutoff,
+                and_(Trade.exit_date.is_(None), Trade.entry_date >= cutoff),
+            )
+        )
+    )
+    if user_id is not None:
+        q = q.filter(Trade.user_id == user_id)
+    q = q.order_by(
+        Trade.exit_date.desc().nullslast(),
+        Trade.id.desc(),
+    ).limit(row_limit)
+
+    groups: dict[tuple[int, str], dict[str, Any]] = {}
+    pattern_ids: set[int] = set()
+    for trade in q.all():
+        pid = _safe_int(getattr(trade, "scan_pattern_id", None), 0)
+        if pid <= 0:
+            continue
+        asset = _trade_asset_class(trade)
+        key = (pid, asset)
+        pattern_ids.add(pid)
+        group = groups.setdefault(
+            key,
+            {
+                "scan_pattern_id": pid,
+                "asset_class": asset,
+                "closed_trades": 0,
+                "low_confidence_exit_count": 0,
+                "missing_exit_reason_count": 0,
+                "reconciler_exit_count": 0,
+                "planned_exit_count": 0,
+                "dynamic_pattern_exit_count": 0,
+                "pnl_sample_n": 0,
+                "total_pnl_usd": 0.0,
+                "low_confidence_pnl_sample_n": 0,
+                "low_confidence_total_pnl_usd": 0.0,
+                "win_sample_n": 0,
+                "wins": 0,
+                "tickers": set(),
+                "exit_reasons": Counter(),
+                "exit_families": Counter(),
+                "latest_exit_at": None,
+                "latest_trade_id": None,
+            },
+        )
+        group["closed_trades"] += 1
+        ticker = str(getattr(trade, "ticker", "") or "").strip().upper()
+        if ticker:
+            group["tickers"].add(ticker)
+        reason = _normalized_exit_reason(trade)
+        family = _cash_deployment_exit_family(reason)
+        group["exit_reasons"][reason] += 1
+        group["exit_families"][family] += 1
+
+        if family == "unknown":
+            group["missing_exit_reason_count"] += 1
+        elif family == "reconciler_or_broker_cleanup":
+            group["reconciler_exit_count"] += 1
+        elif family in {"planned_profit_capture", "planned_risk_stop"}:
+            group["planned_exit_count"] += 1
+        elif family == "dynamic_pattern_exit":
+            group["dynamic_pattern_exit_count"] += 1
+
+        pnl = _trade_realized_pnl_usd(trade)
+        if pnl is not None:
+            group["pnl_sample_n"] += 1
+            group["total_pnl_usd"] += float(pnl)
+        ret = _trade_return_pct(trade)
+        if ret is not None:
+            group["win_sample_n"] += 1
+            if ret > 0.0:
+                group["wins"] += 1
+        if _is_low_confidence_exit_family(family):
+            group["low_confidence_exit_count"] += 1
+            if pnl is not None:
+                group["low_confidence_pnl_sample_n"] += 1
+                group["low_confidence_total_pnl_usd"] += float(pnl)
+
+        exit_at = getattr(trade, "exit_date", None) or getattr(trade, "entry_date", None)
+        latest = group.get("latest_exit_at")
+        if latest is None or (exit_at is not None and exit_at > latest):
+            group["latest_exit_at"] = exit_at
+            group["latest_trade_id"] = int(getattr(trade, "id", 0) or 0) or None
+
+    patterns_by_id = {
+        int(row.id): row
+        for row in db.query(ScanPattern).filter(ScanPattern.id.in_(pattern_ids)).all()
+    } if pattern_ids else {}
+
+    rows: list[dict[str, Any]] = []
+    total_low_confidence_groups = 0
+    for group in groups.values():
+        low_n = _safe_int(group.get("low_confidence_exit_count"))
+        if low_n <= 0:
+            continue
+        total_low_confidence_groups += 1
+        closed_n = max(1, _safe_int(group.get("closed_trades")))
+        pnl_n = _safe_int(group.get("pnl_sample_n"))
+        low_pnl_n = _safe_int(group.get("low_confidence_pnl_sample_n"))
+        win_n = _safe_int(group.get("win_sample_n"))
+        tickers = sorted(group.pop("tickers"))
+        reasons = group.pop("exit_reasons")
+        families = group.pop("exit_families")
+        latest_at = group.get("latest_exit_at")
+        pid = _safe_int(group.get("scan_pattern_id"))
+        pat = patterns_by_id.get(pid)
+        dominant_low = _dominant_counter_key(
+            {
+                reason: count
+                for reason, count in reasons.items()
+                if _is_low_confidence_exit_family(_cash_deployment_exit_family(reason))
+            }
+        )
+        low_rate = (low_n / closed_n) * 100.0
+        low_pnl = float(group.get("low_confidence_total_pnl_usd") or 0.0)
+        total_pnl = float(group.get("total_pnl_usd") or 0.0)
+        fingerprint = (
+            f"exit_attribution_debt:{pid}:{group.get('asset_class')}:"
+            f"{low_n}:{dominant_low or 'mixed'}:"
+            f"{latest_at.isoformat() if isinstance(latest_at, datetime) else 'unknown'}"
+        )
+        group.update(
+            {
+                "pattern_name": getattr(pat, "name", None) if pat else None,
+                "lifecycle_stage": getattr(pat, "lifecycle_stage", None) if pat else None,
+                "promotion_status": getattr(pat, "promotion_status", None) if pat else None,
+                "tickers": tickers[:10],
+                "ticker_count": len(tickers),
+                "exit_reason_counts": dict(reasons),
+                "exit_family_counts": dict(families),
+                "dominant_exit_reason": _dominant_counter_key(reasons),
+                "dominant_low_confidence_exit_reason": dominant_low,
+                "low_confidence_exit_rate_pct": _round(low_rate, 2),
+                "planned_exit_rate_pct": _round(
+                    (_safe_int(group.get("planned_exit_count")) / closed_n) * 100.0,
+                    2,
+                ),
+                "win_rate_pct": _round(
+                    (_safe_int(group.get("wins")) / win_n) * 100.0 if win_n else None,
+                    2,
+                ),
+                "total_pnl_usd": _round(total_pnl, 2) if pnl_n else None,
+                "low_confidence_total_pnl_usd": (
+                    _round(low_pnl, 2) if low_pnl_n else None
+                ),
+                "latest_exit_at": (
+                    latest_at.isoformat() if isinstance(latest_at, datetime) else None
+                ),
+                "cash_deployment_category": "low_confidence_exit_attribution",
+                "recommended_work_event": PROVENANCE_BACKFILL,
+                "recommended_next_action": "repair_exit_provenance_before_feedback_or_sizing",
+                "evidence_fingerprint": fingerprint,
+                "expected_evidence_value": _round(
+                    low_n * (low_rate / 100.0) * math.log1p(abs(low_pnl) + 1.0),
+                    6,
+                ),
+            }
+        )
+        rows.append(group)
+
+    rows.sort(
+        key=lambda row: (
+            _safe_int(row.get("low_confidence_exit_count")),
+            _safe_float(row.get("low_confidence_exit_rate_pct"), 0.0) or 0.0,
+            abs(_safe_float(row.get("low_confidence_total_pnl_usd"), 0.0) or 0.0),
+            _safe_float(row.get("expected_evidence_value"), 0.0) or 0.0,
+            str(row.get("latest_exit_at") or ""),
+        ),
+        reverse=True,
+    )
+    rows = rows[: max(1, int(limit))]
+    return {
+        "window_days": safe_days,
+        "total_groups": total_low_confidence_groups,
+        "returned_groups": len(rows),
+        "total_closed_trades_returned": sum(
+            _safe_int(row.get("closed_trades")) for row in rows
+        ),
+        "total_low_confidence_exits_returned": sum(
+            _safe_int(row.get("low_confidence_exit_count")) for row in rows
+        ),
+        "total_low_confidence_pnl_usd_returned": _round(
+            sum(
+                _safe_float(row.get("low_confidence_total_pnl_usd"), 0.0) or 0.0
+                for row in rows
+            ),
+            2,
+        ),
+        "asset_classes": dict(
+            Counter(str(row.get("asset_class") or "unknown") for row in rows)
+        ),
+        "dominant_low_confidence_exit_reasons": dict(
+            Counter(
+                str(row.get("dominant_low_confidence_exit_reason") or "unknown")
+                for row in rows
+            )
+        ),
         "rows": rows,
     }
 

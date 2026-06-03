@@ -766,6 +766,55 @@ def test_cash_deployment_endpoint_separates_deployable_and_provenance(db, paired
             created_at=datetime.utcnow(),
         )
     )
+    db.add_all(
+        [
+            Trade(
+                user_id=user.id,
+                scan_pattern_id=pat.id,
+                ticker="CASHR",
+                direction="long",
+                entry_price=50.0,
+                exit_price=49.0,
+                quantity=1.0,
+                status="closed",
+                entry_date=datetime.utcnow() - timedelta(hours=6),
+                exit_date=datetime.utcnow() - timedelta(hours=5),
+                pnl=-1.0,
+                asset_kind="equity",
+                exit_reason=None,
+            ),
+            Trade(
+                user_id=user.id,
+                scan_pattern_id=pat.id,
+                ticker="CASHR",
+                direction="long",
+                entry_price=50.0,
+                exit_price=48.0,
+                quantity=1.0,
+                status="closed",
+                entry_date=datetime.utcnow() - timedelta(hours=5),
+                exit_date=datetime.utcnow() - timedelta(hours=4),
+                pnl=-2.0,
+                asset_kind="equity",
+                exit_reason="broker_reconcile_position_gone",
+            ),
+            Trade(
+                user_id=user.id,
+                scan_pattern_id=pat.id,
+                ticker="CASHR",
+                direction="long",
+                entry_price=50.0,
+                exit_price=54.0,
+                quantity=1.0,
+                status="closed",
+                entry_date=datetime.utcnow() - timedelta(hours=4),
+                exit_date=datetime.utcnow() - timedelta(hours=3),
+                pnl=4.0,
+                asset_kind="equity",
+                exit_reason="target",
+            ),
+        ]
+    )
     db.add(
         PaperTrade(
             scan_pattern_id=None,
@@ -812,6 +861,16 @@ def test_cash_deployment_endpoint_separates_deployable_and_provenance(db, paired
     assert cost_block["tickers"] == ["CASHR"]
     assert cost_block["avg_expected_net_pct"] == pytest.approx(1.2)
     assert cost_block["max_cost_gate_tca_cost_bps"] == pytest.approx(180)
+    assert body["low_confidence_exit_attribution_summary"]["total_groups"] >= 1
+    exit_debt = next(
+        x for x in body["low_confidence_exit_attribution"] if x["scan_pattern_id"] == pat.id
+    )
+    assert exit_debt["cash_deployment_category"] == "low_confidence_exit_attribution"
+    assert exit_debt["closed_trades"] == 3
+    assert exit_debt["low_confidence_exit_count"] == 2
+    assert exit_debt["low_confidence_exit_rate_pct"] == pytest.approx(66.67)
+    assert exit_debt["low_confidence_total_pnl_usd"] == pytest.approx(-3.0)
+    assert exit_debt["recommended_work_event"] == "provenance_backfill"
 
 
 def test_active_setups_exposes_execution_state(db, paired_client):

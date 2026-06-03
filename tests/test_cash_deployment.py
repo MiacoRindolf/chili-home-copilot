@@ -21,6 +21,7 @@ from app.services.trading.cash_deployment import (
     cost_gate_execution_block_rollup,
     enqueue_cash_deployment_work,
     enqueue_imminent_edge_snapshot_coverage_work,
+    low_confidence_exit_attribution_rollup,
 )
 
 
@@ -131,6 +132,7 @@ def _closed_live(
     entry_price: float = 100.0,
     quantity: float = 1.0,
     indicator_snapshot: dict | None = None,
+    exit_reason: str | None = None,
 ):
     db.add(
         Trade(
@@ -146,6 +148,7 @@ def _closed_live(
             pnl=pnl,
             asset_kind=asset_kind,
             indicator_snapshot=indicator_snapshot,
+            exit_reason=exit_reason,
         )
     )
 
@@ -524,6 +527,44 @@ def test_cash_deployment_exposes_live_asset_slice_performance(db, monkeypatch):
     assert row["live_realized_asset_avg_return_pct"] == pytest.approx(4.0)
     assert row["live_realized_asset_win_rate"] == pytest.approx(1.0)
     assert row["live_realized_asset_last_exit_at"] is not None
+
+
+def test_low_confidence_exit_attribution_rollup_groups_noisy_exits(db):
+    pat = _pattern(db, name="cash noisy exit attribution")
+    _closed_live(db, pat, ticker="NOISY", pnl=-10.0, exit_reason=None)
+    _closed_live(
+        db,
+        pat,
+        ticker="NOISY",
+        pnl=-5.0,
+        exit_reason="broker_reconcile_position_gone",
+    )
+    _closed_live(db, pat, ticker="NOISY", pnl=2.0, exit_reason="sync_duplicate")
+    _closed_live(db, pat, ticker="NOISY", pnl=8.0, exit_reason="target")
+    db.commit()
+
+    rollup = low_confidence_exit_attribution_rollup(
+        db,
+        window_days=7,
+        limit=10,
+    )
+
+    row = next(x for x in rollup["rows"] if x["scan_pattern_id"] == pat.id)
+    assert rollup["total_groups"] >= 1
+    assert row["cash_deployment_category"] == "low_confidence_exit_attribution"
+    assert row["recommended_work_event"] == "provenance_backfill"
+    assert row["closed_trades"] == 4
+    assert row["low_confidence_exit_count"] == 3
+    assert row["low_confidence_exit_rate_pct"] == pytest.approx(75.0)
+    assert row["missing_exit_reason_count"] == 1
+    assert row["reconciler_exit_count"] == 2
+    assert row["planned_exit_count"] == 1
+    assert row["low_confidence_total_pnl_usd"] == pytest.approx(-13.0)
+    assert row["total_pnl_usd"] == pytest.approx(-5.0)
+    assert row["exit_reason_counts"]["missing"] == 1
+    assert row["exit_reason_counts"]["broker_reconcile_position_gone"] == 1
+    assert row["exit_reason_counts"]["sync_duplicate"] == 1
+    assert row["tickers"] == ["NOISY"]
 
 
 def test_cash_deployment_options_returns_use_contract_multiplier(db, monkeypatch):
