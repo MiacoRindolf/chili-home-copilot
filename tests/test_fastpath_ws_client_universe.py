@@ -19,9 +19,16 @@ from app.services.trading.fast_path.ws_client import CoinbaseWSClient
 class _FakeSession:
     def __init__(self) -> None:
         self.closed = False
+        self.rollbacks = 0
+        self.events: list[str] = []
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
+        self.events.append("rollback")
 
     def close(self) -> None:
         self.closed = True
+        self.events.append("close")
 
 
 class _FakeStatus:
@@ -140,6 +147,7 @@ def test_rotation_empty_returns_empty_without_legacy_fallback():
         tickers = client._resolve_active_pairs()
 
     assert tickers == []
+    assert fake_db.events == ["rollback", "close"]
     assert fake_db.closed is True
 
 
@@ -218,6 +226,7 @@ def test_rotation_tracks_entry_pairs_separately_from_exit_subscriptions():
     assert stats["entry_pairs_count"] == 1
     assert stats["exit_only_subscription_pairs"] == ["OPEN-ONLY-USD"]
     assert stats["exit_only_subscription_pairs_count"] == 1
+    assert fake_db.events == ["rollback", "close"]
     assert fake_db.closed is True
 
 
@@ -246,6 +255,7 @@ def test_universe_refresh_reconnects_when_rotator_pairs_change():
     assert ("OLD-USD", "universe_rotated") in status.paused
     assert status.registered == ["KEEP-USD", "NEW-USD"]
     assert status.reconnected == ["KEEP-USD", "NEW-USD"]
+    assert fake_db.events == ["rollback", "close"]
     assert fake_db.closed is True
     assert client.stats()["entry_pairs"] == ["NEW-USD"]
     assert client.stats()["universe_refreshes_total"] == 1

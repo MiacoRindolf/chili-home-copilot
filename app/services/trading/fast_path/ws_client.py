@@ -233,6 +233,10 @@ class CoinbaseWSClient:
                 tickers = get_subscribed_pairs(db, settings=self._settings)
                 entry_tickers = get_entry_pairs(db, settings=self._settings)
             finally:
+                try:
+                    db.rollback()
+                except Exception:
+                    logger.debug("[fast_path] universe read rollback failed", exc_info=True)
                 db.close()
             if tickers:
                 self._entry_pairs = set(entry_tickers)
