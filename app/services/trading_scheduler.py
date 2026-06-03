@@ -2172,28 +2172,45 @@ def _run_price_monitor_job():
 
     def _work() -> None:
         logger.info("[scheduler] Starting price monitor check")
-        db = SessionLocal()
         alerted_tickers: list[str] = []
+        from ..models.trading import Trade
+        from sqlalchemy import distinct
+
+        db = SessionLocal()
         try:
-            from ..models.trading import Trade
-            from sqlalchemy import distinct
             user_ids = [
                 r[0] for r in db.query(distinct(Trade.user_id))
                 .filter(Trade.status == "open", Trade.user_id.isnot(None))
                 .all()
             ]
-            if not user_ids:
-                user_ids = [None]
-            for uid in user_ids:
-                try:
-                    result = run_price_monitor(db, user_id=uid)
-                    logger.info(f"[scheduler] Price monitor user_id={uid}: {result}")
-                    if isinstance(result, dict):
-                        alerted_tickers.extend(result.get("alerted_tickers", []))
-                except Exception:
-                    logger.warning(f"[scheduler] Price monitor failed for user_id={uid}", exc_info=True)
+        finally:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
 
-            # Trigger event-driven pattern monitor for all open pattern-linked tickers
+        if not user_ids:
+            user_ids = [None]
+        for uid in user_ids:
+            db = SessionLocal()
+            try:
+                result = run_price_monitor(db, user_id=uid)
+                logger.info(f"[scheduler] Price monitor user_id={uid}: {result}")
+                if isinstance(result, dict):
+                    alerted_tickers.extend(result.get("alerted_tickers", []))
+            except Exception:
+                logger.warning(f"[scheduler] Price monitor failed for user_id={uid}", exc_info=True)
+            finally:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                db.close()
+
+        db = SessionLocal()
+        try:
+            # Trigger event-driven pattern monitor for all open pattern-linked tickers.
             pattern_tickers = [
                 r[0] for r in db.query(distinct(Trade.ticker))
                 .filter(
@@ -2205,7 +2222,6 @@ def _run_price_monitor_job():
             if pattern_tickers:
                 trigger_pattern_monitor_for_tickers(pattern_tickers, reason="price_monitor")
         finally:
-            # FIX 46 pattern (rollback before close).
             try:
                 db.rollback()
             except Exception:
