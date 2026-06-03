@@ -3,8 +3,8 @@ import 'package:window_manager/window_manager.dart';
 
 import 'avatar_view.dart';
 import 'shared_chat_history.dart';
-import '../app_shell.dart';
 import '../config/app_config.dart';
+import '../workspace/workspace_shell.dart';
 import '../screen/focus_controller.dart';
 import '../voice/calibration_dialog.dart';
 import '../voice/wake_word_listener.dart';
@@ -152,7 +152,7 @@ class _CompanionShellState extends State<CompanionShell> {
             wakeWordPartial: _wakeWordPartial,
             wakeWordFollowUpActive: _followUpActive,
           )
-        : AppShell(
+        : WorkspaceShell(
             sharedHistory: _sharedHistory,
             onBackToAvatar: _switchToAvatar,
             pauseListening: _pauseWakeWord,
