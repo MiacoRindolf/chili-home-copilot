@@ -173,6 +173,9 @@ def test_execution_drag_report_groups_positive_edge_no_order_id_shadow() -> None
     assert out["summary"] == {
         "execution_drag_events": 1,
         "positive_edge_events": 1,
+        "penalized_positive_drag_events": 1,
+        "paper_shadow_confirmed_missed_alpha_events": 1,
+        "paper_shadow_spared_loss_events": 0,
         "groups": 1,
         "paper_shadow_count": 1,
     }
@@ -189,6 +192,17 @@ def test_execution_drag_report_groups_positive_edge_no_order_id_shadow() -> None
         == "refresh_edge_reliability_and_review_entry_execution_geometry"
     )
     assert row["avg_expected_net_pct"] == pytest.approx(2.5)
+    assert row["shadow_adjusted_avg_expected_net_pct"] == pytest.approx(2.5)
+    assert row["raw_positive_drag_rate_pct"] == pytest.approx(100.0)
+    assert row["shadow_adjusted_positive_drag_rate_pct"] == pytest.approx(100.0)
+    assert row["net_edge_execution_drag_cost_fraction_estimate"] == pytest.approx(0.025)
+    assert row["net_edge_execution_drag_cost_pct_estimate"] == pytest.approx(2.5)
+    assert row["penalized_positive_drag_events"] == 1
+    assert row["paper_shadow_sample_n"] == 1
+    assert row["paper_shadow_confirmed_missed_alpha_events"] == 1
+    assert row["paper_shadow_spared_loss_events"] == 0
+    assert row["paper_shadow_unknown_outcome_events"] == 0
+    assert row["unobserved_positive_drag_events"] == 0
     assert row["paper_shadow_avg_return_pct"] == pytest.approx(3.0)
     assert row["paper_shadow_win_rate_pct"] == pytest.approx(100.0)
     candidates = execution_alpha_drag_followup_candidates(out)
@@ -265,12 +279,23 @@ def test_execution_alpha_drag_report_exposes_option_no_fill_groups() -> None:
     assert row["reason_family"] == "option_entry_no_fill"
     assert row["order_status"] == "no_fill"
     assert row["positive_edge_events"] == 1
+    assert row["penalized_positive_drag_events"] == 0
+    assert row["paper_shadow_sample_n"] == 1
+    assert row["paper_shadow_confirmed_missed_alpha_events"] == 0
+    assert row["paper_shadow_spared_loss_events"] == 1
+    assert row["paper_shadow_unknown_outcome_events"] == 0
+    assert row["unobserved_positive_drag_events"] == 0
     assert row["recommended_work_event"] == "edge_reliability_refresh"
     assert (
         row["recommended_next_action"]
         == "refresh_edge_reliability_and_review_entry_execution_geometry"
     )
     assert row["avg_expected_net_pct"] == pytest.approx(3.1)
+    assert row["shadow_adjusted_avg_expected_net_pct"] is None
+    assert row["raw_positive_drag_rate_pct"] == pytest.approx(100.0)
+    assert row["shadow_adjusted_positive_drag_rate_pct"] == pytest.approx(0.0)
+    assert row["net_edge_execution_drag_cost_fraction_estimate"] == pytest.approx(0.0)
+    assert row["net_edge_execution_drag_cost_pct_estimate"] == pytest.approx(0.0)
     assert row["paper_shadow_avg_return_pct"] == pytest.approx(-12.0)
     assert row["paper_shadow_win_rate_pct"] == pytest.approx(0.0)
 
@@ -317,6 +342,9 @@ def test_queue_execution_alpha_drag_followups_requests_edge_refresh(monkeypatch)
 
     assert out["created"] == 1
     assert out["event_ids"] == [123]
+    assert out["report_summary"]["positive_edge_events"] == 1
+    assert out["report_summary"]["penalized_positive_drag_events"] == 1
+    assert out["report_summary"]["paper_shadow_spared_loss_events"] == 0
     assert calls == [
         {
             "db": db,

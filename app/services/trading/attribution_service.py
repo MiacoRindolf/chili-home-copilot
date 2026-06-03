@@ -332,7 +332,14 @@ def _execution_drag_report_from_rows(
                 "events": 0,
                 "expected_edge_sample_n": 0,
                 "positive_edge_events": 0,
+                "penalized_positive_drag_events": 0,
+                "paper_shadow_sample_n": 0,
+                "paper_shadow_confirmed_missed_alpha_events": 0,
+                "paper_shadow_spared_loss_events": 0,
+                "paper_shadow_unknown_outcome_events": 0,
+                "unobserved_positive_drag_events": 0,
                 "_expected_net_pct_values": [],
+                "_shadow_adjusted_expected_net_pct_values": [],
                 "_paper_shadow_ids": set(),
                 "_paper_shadow_returns": [],
                 "_paper_shadow_pnls": [],
@@ -340,22 +347,49 @@ def _execution_drag_report_from_rows(
             },
         )
         group["events"] += 1
+        alert_id = getattr(row, "breakout_alert_id", None)
+        try:
+            alert_key = int(alert_id)
+        except (TypeError, ValueError):
+            alert_key = 0
+        matching_shadows = []
+        for pt in shadows_by_alert.get(alert_key, []):
+            shadow_family = _shadow_reason_family(pt)
+            if shadow_family and shadow_family != reason_family:
+                continue
+            matching_shadows.append(pt)
+
         expected = _expected_net_pct_from_payload(payload)
         if expected is not None:
             group["expected_edge_sample_n"] += 1
             group["_expected_net_pct_values"].append(expected)
             if expected > 0.0:
                 group["positive_edge_events"] += 1
+                outcomes = []
+                if not matching_shadows:
+                    group["unobserved_positive_drag_events"] += 1
+                    group["penalized_positive_drag_events"] += 1
+                    group["_shadow_adjusted_expected_net_pct_values"].append(expected)
+                else:
+                    group["paper_shadow_sample_n"] += len(matching_shadows)
+                    for pt in matching_shadows:
+                        outcome = paper_trade_return_pct(pt)
+                        if outcome is None:
+                            outcome = _paper_realized_pnl_with_raw_fallback(pt)
+                        if outcome is not None:
+                            outcomes.append(outcome)
+                    if not outcomes:
+                        group["paper_shadow_unknown_outcome_events"] += 1
+                        group["penalized_positive_drag_events"] += 1
+                        group["_shadow_adjusted_expected_net_pct_values"].append(expected)
+                    elif any(outcome > 0.0 for outcome in outcomes):
+                        group["paper_shadow_confirmed_missed_alpha_events"] += 1
+                        group["penalized_positive_drag_events"] += 1
+                        group["_shadow_adjusted_expected_net_pct_values"].append(expected)
+                    else:
+                        group["paper_shadow_spared_loss_events"] += 1
 
-        alert_id = getattr(row, "breakout_alert_id", None)
-        try:
-            alert_key = int(alert_id)
-        except (TypeError, ValueError):
-            alert_key = 0
-        for pt in shadows_by_alert.get(alert_key, []):
-            shadow_family = _shadow_reason_family(pt)
-            if shadow_family and shadow_family != reason_family:
-                continue
+        for pt in matching_shadows:
             shadow_id = getattr(pt, "id", None)
             if shadow_id in group["_paper_shadow_ids"]:
                 continue
@@ -373,11 +407,24 @@ def _execution_drag_report_from_rows(
     rows: list[dict[str, Any]] = []
     for group in groups.values():
         expected_values = group.pop("_expected_net_pct_values")
+        adjusted_expected_values = group.pop("_shadow_adjusted_expected_net_pct_values")
         shadow_ids = group.pop("_paper_shadow_ids")
         shadow_returns = group.pop("_paper_shadow_returns")
         shadow_pnls = group.pop("_paper_shadow_pnls")
         shadow_outcomes = group.pop("_paper_shadow_outcomes")
         wins = sum(1 for outcome in shadow_outcomes if outcome > 0)
+        events = int(group.get("events") or 0)
+        penalized = int(group.get("penalized_positive_drag_events") or 0)
+        adjusted_avg = (
+            sum(adjusted_expected_values) / len(adjusted_expected_values)
+            if adjusted_expected_values
+            else None
+        )
+        execution_drag_cost_fraction = (
+            max(0.0, (penalized / events) * (adjusted_avg / 100.0))
+            if events > 0 and adjusted_avg is not None
+            else 0.0
+        )
         group.update(
             {
                 "avg_expected_net_pct": (
@@ -387,6 +434,34 @@ def _execution_drag_report_from_rows(
                 ),
                 "total_expected_net_pct": (
                     round(sum(expected_values), 4) if expected_values else None
+                ),
+                "shadow_adjusted_avg_expected_net_pct": (
+                    round(adjusted_avg, 4) if adjusted_avg is not None else None
+                ),
+                "shadow_adjusted_total_expected_net_pct": (
+                    round(sum(adjusted_expected_values), 4)
+                    if adjusted_expected_values
+                    else None
+                ),
+                "raw_positive_drag_rate_pct": (
+                    round(
+                        (int(group.get("positive_edge_events") or 0) / events)
+                        * 100.0,
+                        2,
+                    )
+                    if events > 0
+                    else None
+                ),
+                "shadow_adjusted_positive_drag_rate_pct": (
+                    round((penalized / events) * 100.0, 2)
+                    if events > 0
+                    else None
+                ),
+                "net_edge_execution_drag_cost_fraction_estimate": (
+                    round(execution_drag_cost_fraction, 6)
+                ),
+                "net_edge_execution_drag_cost_pct_estimate": (
+                    round(execution_drag_cost_fraction * 100.0, 4)
                 ),
                 "paper_shadow_count": len(shadow_ids),
                 "paper_shadow_return_sample_n": len(shadow_returns),
@@ -428,6 +503,16 @@ def _execution_drag_report_from_rows(
         "summary": {
             "execution_drag_events": sum(row["events"] for row in rows),
             "positive_edge_events": sum(row["positive_edge_events"] for row in rows),
+            "penalized_positive_drag_events": sum(
+                int(row.get("penalized_positive_drag_events") or 0) for row in rows
+            ),
+            "paper_shadow_confirmed_missed_alpha_events": sum(
+                int(row.get("paper_shadow_confirmed_missed_alpha_events") or 0)
+                for row in rows
+            ),
+            "paper_shadow_spared_loss_events": sum(
+                int(row.get("paper_shadow_spared_loss_events") or 0) for row in rows
+            ),
             "groups": len(rows),
             "paper_shadow_count": sum(row["paper_shadow_count"] for row in rows),
         },
@@ -495,6 +580,9 @@ def execution_alpha_drag_report(
             "summary": {
                 "execution_drag_events": 0,
                 "positive_edge_events": 0,
+                "penalized_positive_drag_events": 0,
+                "paper_shadow_confirmed_missed_alpha_events": 0,
+                "paper_shadow_spared_loss_events": 0,
                 "groups": 0,
                 "paper_shadow_count": 0,
             },
