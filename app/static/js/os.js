@@ -241,7 +241,7 @@
   // ── Session restore + named Spaces: a layout is the set of open windows with
   //    their geometry/min-state/focus order. The current layout auto-restores on
   //    reload; named Spaces let you snapshot and switch between arrangements. ──
-  var LAYOUT_KEY = 'chili-os-layout', SPACES_KEY = 'chili-os-spaces', restoring = false;
+  var LAYOUT_KEY = 'chili-os-layout', SPACES_KEY = 'chili-os-spaces', DEFAULT_KEY = 'chili-os-default-space', restoring = false;
 
   // Serialize the current desktop into a plain layout object.
   function captureLayout() {
@@ -313,13 +313,24 @@
     applyLayout({ apps: sp.apps, order: sp.order });
     return true;
   }
-  function removeSpace(name) { persistSpaces(loadSpaces().filter(function (s) { return s.name !== name; })); }
+  // A "default" Space auto-opens on a fresh session (when there's no saved layout).
+  function getDefaultSpace() { try { return localStorage.getItem(DEFAULT_KEY) || ''; } catch (e) { return ''; } }
+  function setDefaultSpace(name) {
+    try { if (name) localStorage.setItem(DEFAULT_KEY, name); else localStorage.removeItem(DEFAULT_KEY); } catch (e) {}
+    return getDefaultSpace();
+  }
+  function removeSpace(name) {
+    persistSpaces(loadSpaces().filter(function (s) { return s.name !== name; }));
+    if (getDefaultSpace() === name) setDefaultSpace('');   // forget the default if its Space was removed
+  }
   function renameSpace(oldName, newName) {
     newName = (newName || '').trim(); if (!newName || newName === oldName) return false;
     var arr = loadSpaces(), i = arr.map(function (s) { return s.name; }).indexOf(oldName);
     if (i < 0) return false;
     if (arr.some(function (s, j) { return j !== i && s.name === newName; })) return false;  // no duplicate names
-    arr[i].name = newName; persistSpaces(arr); return true;
+    arr[i].name = newName; persistSpaces(arr);
+    if (getDefaultSpace() === oldName) setDefaultSpace(newName);   // the default follows the rename
+    return true;
   }
   function reorderSpaces(names) {
     var arr = loadSpaces(), byName = {}; arr.forEach(function (s) { byName[s.name] = s; });
@@ -449,7 +460,9 @@
 
   // On load: restore the saved window layout, then honor a deep-link hash
   // (#app=chat) by opening/focusing that app on top.
-  restoreLayout();
+  var _restored = restoreLayout();
+  // Fresh session with nothing to restore → open the default Space, if one is set.
+  if (!_restored) { try { var _dn = getDefaultSpace(); if (_dn) openSpace(_dn); } catch (e) {} }
   var m = (location.hash || '').match(/app=([a-z0-9_-]+)/i);
   if (m) { var b = document.querySelector('.ws-rb[data-app="' + m[1] + '"][data-src]'); if (b) openApp(cfgFromEl(b)); }
 
@@ -618,7 +631,9 @@
       open: openSpace,
       remove: removeSpace,
       rename: renameSpace,
-      reorder: reorderSpaces
+      reorder: reorderSpaces,
+      getDefault: getDefaultSpace,
+      setDefault: setDefaultSpace
     }
   };
 })();

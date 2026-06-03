@@ -349,12 +349,15 @@
   function renderSpaces() {
     var api = spacesApi(); if (!spacesMenu || !api) return;
     var list = api.list();
+    var def = api.getDefault ? api.getDefault() : '';
     var rows = list.length
       ? list.map(function (s) {
+          var isDef = s.name === def;
           return '<div class="ws-space-row" role="menuitem" tabindex="0" draggable="true" data-space="' + esc(s.name) + '">' +
             '<span class="ws-space-grip" aria-hidden="true" title="Drag to reorder">⠿</span>' +
             '<span class="ws-space-name">' + esc(s.name) + '</span>' +
             '<span class="ws-space-count" title="' + s.count + ' window(s)">' + s.count + '</span>' +
+            '<button class="ws-space-star' + (isDef ? ' on' : '') + '" data-star="' + esc(s.name) + '" title="' + (isDef ? 'Default space — opens on a fresh session (click to unset)' : 'Set as default space') + '" aria-label="Toggle ' + esc(s.name) + ' as default space">' + (isDef ? '★' : '☆') + '</button>' +
             '<button class="ws-space-edit" data-edit="' + esc(s.name) + '" title="Rename space" aria-label="Rename ' + esc(s.name) + '">✎</button>' +
             '<button class="ws-space-del" data-del="' + esc(s.name) + '" title="Delete space" aria-label="Delete ' + esc(s.name) + '">×</button>' +
           '</div>';
@@ -404,6 +407,12 @@
   if (spacesMenu) spacesMenu.addEventListener('click', function (e) {
     e.stopPropagation();
     var api = spacesApi(); if (!api) return;
+    var star = e.target.closest('.ws-space-star');
+    if (star && api.setDefault) {  // toggle this Space as the default (opens on a fresh session)
+      var nm = star.getAttribute('data-star');
+      api.setDefault(api.getDefault && api.getDefault() === nm ? '' : nm);
+      renderSpaces(); return;
+    }
     var del = e.target.closest('.ws-space-del');
     if (del) { api.remove(del.getAttribute('data-del')); renderSpaces(); return; }
     var edit = e.target.closest('.ws-space-edit');
