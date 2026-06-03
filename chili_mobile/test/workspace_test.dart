@@ -177,6 +177,25 @@ void main() {
       expect(find.byIcon(Icons.settings), findsOneWidget);
       expect(find.byIcon(Icons.psychology), findsOneWidget);
     });
+
+    testWidgets('the desktop fills its area (hint centered both axes, not collapsed)', (WidgetTester tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final SharedChatHistory history = SharedChatHistory();
+      final FocusController focus = FocusController();
+      addTearDown(focus.dispose);
+      await tester.pumpWidget(MaterialApp(
+        home: WorkspaceShell(onBackToAvatar: () {}, sharedHistory: history, focusController: focus),
+      ));
+      await tester.pump();
+      final Offset c = tester.getCenter(find.text('CHILI OS'));
+      // Horizontal: not collapsed behind the dock (~x65).
+      expect(c.dx, greaterThan(400), reason: 'desktop collapsed horizontally — hint at ${c.dx}');
+      // Vertical: REGRESSION for the StackFit.expand fix — a Stack with only
+      // Positioned children + the Row's loose height collapsed to height 0,
+      // putting the hint at dy ~0 instead of vertically centered.
+      expect(c.dy, greaterThan(200), reason: 'desktop collapsed vertically — hint at ${c.dy}');
+    });
   });
 
   group('WorkspacePalette', () {
