@@ -114,6 +114,7 @@ QUALIFIED_BLOCK_PAPER_SHADOW_DECISIONS = frozenset({
     "blocked_max_concurrent_equity",
     "blocked_max_concurrent_global",
     "blocked_max_concurrent_options",
+    "blocked_no_order_id",
     "blocked_option_entry_no_fill",
     "blocked_regime_gate",
     "blocked_recert_required",

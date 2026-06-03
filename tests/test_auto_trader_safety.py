@@ -895,6 +895,8 @@ def test_feature_parity_uses_decision_snapshot_not_recomputed(monkeypatch):
 
 
 def test_qualified_block_shadow_decisions_cover_learning_dead_ends():
+    assert "blocked_no_order_id" in at_mod.QUALIFIED_BLOCK_PAPER_SHADOW_DECISIONS
+    assert "blocked_option_entry_no_fill" in at_mod.QUALIFIED_BLOCK_PAPER_SHADOW_DECISIONS
     assert (
         at_mod._qualified_reject_shadow_decision(
             "regime_gate:negative_ev_consensus:n_neg=2/4"
