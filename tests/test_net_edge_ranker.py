@@ -21,7 +21,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.config import settings
-from app.models.trading import PaperTrade, ScanPattern, Trade
+from app.models.trading import AutoTraderRun, PaperTrade, ScanPattern, Trade
 from app.services.trading import net_edge_ranker as ner
 from app.trading_brain.infrastructure.net_edge_ops_log import (
     CHILI_NET_EDGE_OPS_PREFIX,
@@ -505,9 +505,11 @@ class _NetEdgeQuery:
 
 
 class _NetEdgeDb:
-    def __init__(self, *, pattern, papers):
+    def __init__(self, *, pattern, papers, runs=None):
         self.pattern = pattern
         self.papers = papers
+        self.runs = runs or []
+        self.added = []
 
     def query(self, model):
         if model is Trade:
@@ -516,7 +518,160 @@ class _NetEdgeDb:
             return _NetEdgeQuery(self.papers)
         if model is ScanPattern:
             return _NetEdgeQuery([self.pattern])
+        if model is AutoTraderRun:
+            return _NetEdgeQuery(self.runs)
         raise AssertionError(f"unexpected model query: {model!r}")
+
+    def add(self, row):
+        self.added.append(row)
+
+    def commit(self):
+        return None
+
+    def rollback(self):
+        return None
+
+
+def _drag_run(
+    *,
+    ticker: str = "BTC-USD",
+    pattern_id: int = 42,
+    user_id: int = 7,
+    expected_net_pct: float | None = 3.0,
+    decision: str = "blocked",
+    reason: str = "broker:place_no_order_id",
+    asset_class: str = "crypto",
+):
+    snapshot = {
+        "asset_class": asset_class,
+        "broker_reject_missing_order_id": True,
+    }
+    if expected_net_pct is not None:
+        snapshot["entry_edge_expected_net_pct"] = expected_net_pct
+    return SimpleNamespace(
+        user_id=user_id,
+        scan_pattern_id=pattern_id,
+        breakout_alert_id=100,
+        ticker=ticker,
+        decision=decision,
+        reason=reason,
+        rule_snapshot=snapshot,
+        created_at=datetime.utcnow(),
+    )
+
+
+def _non_drag_run(*, ticker: str = "BTC-USD", pattern_id: int = 42, user_id: int = 7):
+    return SimpleNamespace(
+        user_id=user_id,
+        scan_pattern_id=pattern_id,
+        breakout_alert_id=101,
+        ticker=ticker,
+        decision="placed",
+        reason="",
+        rule_snapshot={"asset_class": "crypto"},
+        created_at=datetime.utcnow(),
+    )
+
+
+def _enable_execution_drag_cost(monkeypatch, *, min_attempts=3, min_positive=2, cap=0.05):
+    monkeypatch.setattr(settings, "brain_net_edge_execution_drag_cost_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "brain_net_edge_execution_drag_lookback_days", 7, raising=False)
+    monkeypatch.setattr(settings, "brain_net_edge_execution_drag_min_attempts", min_attempts, raising=False)
+    monkeypatch.setattr(settings, "brain_net_edge_execution_drag_min_positive_events", min_positive, raising=False)
+    monkeypatch.setattr(settings, "brain_net_edge_execution_drag_cost_cap_fraction", cap, raising=False)
+
+
+def test_execution_drag_cost_prices_positive_edge_missed_fills(monkeypatch):
+    _enable_execution_drag_cost(monkeypatch)
+    db = _NetEdgeDb(
+        pattern=SimpleNamespace(id=42, asset_class="crypto", win_rate=0.6, oos_win_rate=None),
+        papers=[],
+        runs=[
+            _drag_run(expected_net_pct=2.0),
+            _drag_run(expected_net_pct=4.0),
+            _non_drag_run(),
+            _drag_run(pattern_id=99, expected_net_pct=20.0),
+        ],
+    )
+    ctx = ner.NetEdgeSignalContext(
+        ticker="BTC-USD",
+        asset_class="crypto",
+        scan_pattern_id=42,
+        raw_prob=0.6,
+        entry_price=100.0,
+        stop_price=97.0,
+        extra={"user_id": 7},
+    )
+
+    details = ner._execution_drag_cost_details(db, ctx)
+
+    assert details["reason"] == "measured_execution_drag"
+    assert details["attempts"] == 3
+    assert details["positive_drag_events"] == 2
+    assert details["avg_positive_expected_net_pct"] == pytest.approx(3.0)
+    assert details["drag_rate"] == pytest.approx(2 / 3)
+    assert details["cost_fraction"] == pytest.approx((2 / 3) * 0.03)
+
+
+def test_execution_drag_cost_requires_positive_sample_floor(monkeypatch):
+    _enable_execution_drag_cost(monkeypatch, min_attempts=3, min_positive=2)
+    db = _NetEdgeDb(
+        pattern=SimpleNamespace(id=42, asset_class="crypto", win_rate=0.6, oos_win_rate=None),
+        papers=[],
+        runs=[
+            _drag_run(expected_net_pct=2.0),
+            _non_drag_run(),
+            _non_drag_run(),
+        ],
+    )
+    ctx = ner.NetEdgeSignalContext(
+        ticker="BTC-USD",
+        asset_class="crypto",
+        scan_pattern_id=42,
+        raw_prob=0.6,
+        entry_price=100.0,
+        stop_price=97.0,
+    )
+
+    details = ner._execution_drag_cost_details(db, ctx)
+
+    assert details["reason"] == "insufficient_positive_drag_events"
+    assert details["cost_fraction"] == pytest.approx(0.0)
+
+
+def test_score_includes_execution_drag_cost_in_miss_cost_and_provenance(monkeypatch, shadow_mode):
+    _enable_execution_drag_cost(monkeypatch)
+    monkeypatch.setattr(settings, "backtest_spread", 0.0)
+    monkeypatch.setattr(settings, "brain_net_edge_ops_log_enabled", False)
+    db = _NetEdgeDb(
+        pattern=SimpleNamespace(id=42, asset_class="crypto", win_rate=0.6, oos_win_rate=None),
+        papers=[],
+        runs=[
+            _drag_run(expected_net_pct=2.0),
+            _drag_run(expected_net_pct=4.0),
+            _non_drag_run(),
+        ],
+    )
+    ctx = ner.NetEdgeSignalContext(
+        ticker="BTC-USD",
+        asset_class="crypto",
+        scan_pattern_id=42,
+        raw_prob=0.6,
+        entry_price=100.0,
+        stop_price=97.0,
+        target_price=106.0,
+    )
+
+    result = ner.score(db, ctx)
+
+    assert result is not None
+    drag_cost = (2 / 3) * 0.03
+    assert result.costs.miss_prob_cost == pytest.approx(
+        ner._miss_prob_cost_fraction(ctx) + drag_cost
+    )
+    assert result.provenance.execution_drag_cost_fraction == pytest.approx(drag_cost)
+    assert result.provenance.execution_drag_sample["reason"] == "measured_execution_drag"
+    assert db.added[-1].provenance_json["execution_drag_cost_fraction"] == pytest.approx(drag_cost)
 
 
 def test_training_pairs_match_stock_asset_aliases():

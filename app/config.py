@@ -581,6 +581,42 @@ class Settings(BaseSettings):
     brain_net_edge_min_samples: int = 50
     brain_net_edge_cache_ttl_s: int = 300
     brain_net_edge_shadow_sample_pct: float = 1.0
+    brain_net_edge_execution_drag_cost_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("BRAIN_NET_EDGE_EXECUTION_DRAG_COST_ENABLED"),
+        description=(
+            "When true, NetEdge adds a bounded missed-fill opportunity-cost "
+            "penalty from recent positive-edge execution drag for the same pattern."
+        ),
+    )
+    brain_net_edge_execution_drag_lookback_days: int = Field(
+        default=7,
+        ge=1,
+        le=90,
+        validation_alias=AliasChoices("BRAIN_NET_EDGE_EXECUTION_DRAG_LOOKBACK_DAYS"),
+    )
+    brain_net_edge_execution_drag_min_attempts: int = Field(
+        default=3,
+        ge=1,
+        le=500,
+        validation_alias=AliasChoices("BRAIN_NET_EDGE_EXECUTION_DRAG_MIN_ATTEMPTS"),
+    )
+    brain_net_edge_execution_drag_min_positive_events: int = Field(
+        default=2,
+        ge=1,
+        le=100,
+        validation_alias=AliasChoices("BRAIN_NET_EDGE_EXECUTION_DRAG_MIN_POSITIVE_EVENTS"),
+    )
+    brain_net_edge_execution_drag_cost_cap_fraction: float = Field(
+        default=0.02,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("BRAIN_NET_EDGE_EXECUTION_DRAG_COST_CAP_FRACTION"),
+        description=(
+            "Maximum fraction-of-notional cost NetEdge may add for measured "
+            "positive-edge execution drag."
+        ),
+    )
 
     # ExitEngine unification (Phase B) — canonical ExitEvaluator shadow rollout.
     # Rollout ladder mirrors the prediction-mirror + NetEdgeRanker contract:

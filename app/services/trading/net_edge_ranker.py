@@ -41,6 +41,7 @@ from sqlalchemy.orm import Session
 
 from ...config import settings
 from ...models.trading import (
+    AutoTraderRun,
     NetEdgeCalibrationSnapshot,
     NetEdgeScoreLog,
     PaperTrade,
@@ -200,6 +201,8 @@ class NetEdgeProvenance:
     regime_bucket: str
     cold_start: bool
     produced_at: datetime
+    execution_drag_cost_fraction: float = 0.0
+    execution_drag_sample: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -245,6 +248,8 @@ class NetEdgeScore:
                 "regime_bucket": self.provenance.regime_bucket,
                 "cold_start": self.provenance.cold_start,
                 "produced_at": self.provenance.produced_at.isoformat(),
+                "execution_drag_cost_fraction": self.provenance.execution_drag_cost_fraction,
+                "execution_drag_sample": self.provenance.execution_drag_sample,
             },
         }
 
@@ -348,13 +353,165 @@ def _partial_fill_cost_fraction(ctx: NetEdgeSignalContext) -> float:
     return max(0.0, bps / 10_000.0)
 
 
-def _compose_costs(db: Session, ctx: NetEdgeSignalContext) -> NetEdgeCostBreakdown:
+def _int_setting(name: str, default: int, *, minimum: int = 1) -> int:
+    value = _finite_float(getattr(settings, name, default))
+    if value is None:
+        return max(minimum, int(default))
+    return max(minimum, int(value))
+
+
+def _execution_drag_cost_settings() -> tuple[bool, int, int, int, float]:
+    enabled = bool(getattr(settings, "brain_net_edge_execution_drag_cost_enabled", True))
+    lookback_days = _int_setting("brain_net_edge_execution_drag_lookback_days", 7)
+    min_attempts = _int_setting("brain_net_edge_execution_drag_min_attempts", 3)
+    min_positive_drag = _int_setting("brain_net_edge_execution_drag_min_positive_events", 2)
+    cap_fraction = max(
+        0.0,
+        _nonnegative_cost_fraction(
+            getattr(settings, "brain_net_edge_execution_drag_cost_cap_fraction", 0.02),
+            default=0.02,
+        ),
+    )
+    return enabled, lookback_days, min_attempts, min_positive_drag, cap_fraction
+
+
+def _ctx_user_id(ctx: NetEdgeSignalContext) -> int | None:
+    raw = ctx.extra.get("user_id") if isinstance(ctx.extra, dict) else None
+    value = _finite_float(raw)
+    if value is None or value <= 0 or not value.is_integer():
+        return None
+    return int(value)
+
+
+def _execution_drag_cost_details(
+    db: Session,
+    ctx: NetEdgeSignalContext,
+) -> dict[str, Any]:
+    """Return a measured missed-fill drag for this pattern.
+
+    This prices repeated positive-edge execution failures as opportunity
+    cost: observed positive-edge drag rate times the missed expected net edge.
+    It is conservative by construction and fail-open to zero.
+    """
+    enabled, lookback_days, min_attempts, min_positive_drag, cap_fraction = (
+        _execution_drag_cost_settings()
+    )
+    base = {
+        "enabled": enabled,
+        "lookback_days": lookback_days,
+        "attempts": 0,
+        "positive_drag_events": 0,
+        "avg_positive_expected_net_pct": None,
+        "drag_rate": None,
+        "cost_fraction": 0.0,
+        "capped": False,
+    }
+    if not enabled:
+        return {**base, "reason": "disabled"}
+    pattern_id_raw = _finite_float(ctx.scan_pattern_id)
+    if pattern_id_raw is None or pattern_id_raw <= 0 or not pattern_id_raw.is_integer():
+        return {**base, "reason": "missing_scan_pattern_id"}
+
+    try:
+        from .attribution_service import (
+            _execution_asset_class,
+            _expected_net_pct_from_payload,
+            _is_execution_drag_audit,
+            _json_dict as _attr_json_dict,
+        )
+
+        pattern_id = int(pattern_id_raw)
+        cutoff = datetime.utcnow() - timedelta(days=lookback_days)
+        max_rows = max(
+            min_attempts,
+            int(getattr(settings, "brain_net_edge_execution_drag_max_rows", 200) or 200),
+        )
+        query = db.query(AutoTraderRun).filter(
+            AutoTraderRun.scan_pattern_id == pattern_id,
+            AutoTraderRun.created_at >= cutoff,
+        )
+        user_id = _ctx_user_id(ctx)
+        if user_id is not None:
+            query = query.filter(AutoTraderRun.user_id == user_id)
+        rows = query.order_by(desc(AutoTraderRun.created_at)).limit(max_rows).all()
+
+        ctx_asset = _score_asset_class(ctx.asset_class)
+        attempts = 0
+        positive_edges: list[float] = []
+        for row in rows:
+            row_pattern = _finite_float(getattr(row, "scan_pattern_id", None))
+            if row_pattern is None or not row_pattern.is_integer() or int(row_pattern) != pattern_id:
+                continue
+            if user_id is not None:
+                row_user = _finite_float(getattr(row, "user_id", None))
+                if row_user is None or not row_user.is_integer() or int(row_user) != user_id:
+                    continue
+            payload = _attr_json_dict(getattr(row, "rule_snapshot", None))
+            row_asset = _score_asset_class(_execution_asset_class(row, payload))
+            if row_asset != ctx_asset:
+                continue
+            attempts += 1
+            if not _is_execution_drag_audit(row):
+                continue
+            expected = _finite_float(_expected_net_pct_from_payload(payload))
+            if expected is not None and expected > 0.0:
+                positive_edges.append(expected)
+
+        if attempts < min_attempts:
+            return {
+                **base,
+                "attempts": attempts,
+                "reason": "insufficient_attempts",
+            }
+        positive_drag = len(positive_edges)
+        if positive_drag < min_positive_drag:
+            return {
+                **base,
+                "attempts": attempts,
+                "positive_drag_events": positive_drag,
+                "reason": "insufficient_positive_drag_events",
+            }
+        avg_expected_pct = sum(positive_edges) / positive_drag
+        drag_rate = positive_drag / attempts
+        raw_cost = max(0.0, drag_rate * (avg_expected_pct / 100.0))
+        cost_fraction = min(cap_fraction, raw_cost)
+        return {
+            **base,
+            "attempts": attempts,
+            "positive_drag_events": positive_drag,
+            "avg_positive_expected_net_pct": round(avg_expected_pct, 6),
+            "drag_rate": round(drag_rate, 6),
+            "cost_fraction": cost_fraction,
+            "capped": cost_fraction < raw_cost,
+            "reason": "measured_execution_drag",
+        }
+    except Exception as exc:  # pragma: no cover - defensive fail-open
+        logger.debug("[net_edge] execution drag cost fell back to zero: %s", exc)
+        return {**base, "reason": "error"}
+
+
+def _execution_drag_cost_fraction(db: Session, ctx: NetEdgeSignalContext) -> float:
+    return _nonnegative_cost_fraction(
+        _execution_drag_cost_details(db, ctx).get("cost_fraction"),
+        default=0.0,
+    )
+
+
+def _compose_costs(
+    db: Session,
+    ctx: NetEdgeSignalContext,
+    *,
+    execution_drag_cost_fraction: float = 0.0,
+) -> NetEdgeCostBreakdown:
     spread = _spread_cost_fraction(db, ctx)
     return NetEdgeCostBreakdown(
         spread_cost=spread,
         slippage_cost=0.5 * spread,
         fees_cost=_fees_cost_fraction(ctx),
-        miss_prob_cost=_miss_prob_cost_fraction(ctx),
+        miss_prob_cost=(
+            _miss_prob_cost_fraction(ctx)
+            + _nonnegative_cost_fraction(execution_drag_cost_fraction)
+        ),
         partial_fill_cost=_partial_fill_cost_fraction(ctx),
     )
 
@@ -744,7 +901,15 @@ def score(db: Session, ctx: NetEdgeSignalContext) -> NetEdgeScore | None:
         cal = _calibrator_for(db, ctx)
         calibrated_prob = cal.apply(raw_prob)
         payoff = _payoff_fraction(ctx, loss_per_unit)
-        costs = _compose_costs(db, ctx)
+        execution_drag = _execution_drag_cost_details(db, ctx)
+        costs = _compose_costs(
+            db,
+            ctx,
+            execution_drag_cost_fraction=_nonnegative_cost_fraction(
+                execution_drag.get("cost_fraction"),
+                default=0.0,
+            ),
+        )
 
         expected_net_pnl = (
             calibrated_prob * payoff
@@ -777,6 +942,11 @@ def score(db: Session, ctx: NetEdgeSignalContext) -> NetEdgeScore | None:
             regime_bucket=cal.regime_bucket,
             cold_start=cal.cold_start,
             produced_at=datetime.utcnow(),
+            execution_drag_cost_fraction=_nonnegative_cost_fraction(
+                execution_drag.get("cost_fraction"),
+                default=0.0,
+            ),
+            execution_drag_sample=execution_drag,
         )
 
         result = NetEdgeScore(
