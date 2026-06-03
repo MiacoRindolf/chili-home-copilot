@@ -45,28 +45,29 @@ def tickers_from_latest_predictions(db: Session, limit: int | None = None) -> di
     out: dict[str, list[dict[str, Any]]] = {}
     try:
         snap = (
-            db.query(BrainPredictionSnapshot)
+            db.query(BrainPredictionSnapshot.id)
             .order_by(desc(BrainPredictionSnapshot.id))
             .first()
         )
         if not snap:
             return out
+        snapshot_id = _row_field(snap, "id", 0)
         lines = (
-            db.query(BrainPredictionLine)
-            .filter(BrainPredictionLine.snapshot_id == snap.id)
+            db.query(BrainPredictionLine.ticker, BrainPredictionLine.sort_rank, BrainPredictionLine.score)
+            .filter(BrainPredictionLine.snapshot_id == snapshot_id)
             .order_by(BrainPredictionLine.sort_rank.asc())
             .limit(lim)
             .all()
         )
         for ln in lines:
-            tn = normalize_prescreen_ticker(ln.ticker)
+            tn = normalize_prescreen_ticker(_row_field(ln, "ticker", 0))
             if not tn:
                 continue
             reason = {
                 "kind": "brain_prediction",
-                "snapshot_id": int(snap.id),
-                "sort_rank": int(ln.sort_rank),
-                "score": float(ln.score),
+                "snapshot_id": int(snapshot_id),
+                "sort_rank": int(_row_field(ln, "sort_rank", 1)),
+                "score": float(_row_field(ln, "score", 2)),
             }
             out.setdefault(tn, []).append(reason)
     except Exception as e:
@@ -109,7 +110,7 @@ def tickers_from_warming_patterns(db: Session, limit: int | None = None) -> dict
     try:
         since = datetime.utcnow() - timedelta(hours=_WARMING_PATTERN_LOOKBACK_HOURS)
         rows = (
-            db.query(ScanPattern)
+            db.query(ScanPattern.id, ScanPattern.scope_tickers)
             .filter(ScanPattern.active.is_(True))
             .filter(ScanPattern.updated_at >= since)
             .filter(ScanPattern.ticker_scope != "universal")
@@ -123,11 +124,11 @@ def tickers_from_warming_patterns(db: Session, limit: int | None = None) -> dict
         for sp in rows:
             if len(seen) >= lim:
                 break
-            for tn in iter_normalized_prescreen_tickers(sp.scope_tickers):
+            for tn in iter_normalized_prescreen_tickers(_row_field(sp, "scope_tickers", 1)):
                 if tn in seen:
                     continue
                 seen.add(tn)
-                out[tn] = [{"kind": "warming_pattern", "scan_pattern_id": int(sp.id)}]
+                out[tn] = [{"kind": "warming_pattern", "scan_pattern_id": int(_row_field(sp, "id", 0))}]
     except Exception as e:
         logger.warning("[prescreen_internal] warming_patterns: %s", e)
     return out
@@ -144,3 +145,9 @@ def collect_internal_prescreen_tickers(db: Session) -> dict[str, list[dict[str, 
         for t, reasons in bucket(db).items():
             merged.setdefault(t, []).extend(reasons)
     return merged
+
+
+def _row_field(row: Any, field: str, index: int) -> Any:
+    if isinstance(row, (tuple, list)):
+        return row[index] if len(row) > index else None
+    return getattr(row, field, None)

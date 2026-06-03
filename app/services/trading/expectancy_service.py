@@ -32,11 +32,15 @@ def compute_expectancy_edges(
     """Return gross/net expectancy-like scores in fraction-of-notional space (approximate)."""
     research_prior = max(0.0, min(1.0, _sf(viability_score, 0.0)))
     if scan_pattern_id:
-        p = db.query(ScanPattern).filter(ScanPattern.id == int(scan_pattern_id)).one_or_none()
-        if p:
-            oos_ret = _sf(getattr(p, "oos_avg_return_pct", None), 0.0)
+        row = (
+            db.query(ScanPattern.oos_avg_return_pct, ScanPattern.avg_return_pct)
+            .filter(ScanPattern.id == int(scan_pattern_id))
+            .one_or_none()
+        )
+        if row:
+            oos_ret = _sf(_pattern_return_field(row, "oos_avg_return_pct", 0), 0.0)
             if oos_ret == 0:
-                oos_ret = _sf(getattr(p, "avg_return_pct", None), 0.0)
+                oos_ret = _sf(_pattern_return_field(row, "avg_return_pct", 1), 0.0)
             research_prior = max(research_prior, min(0.08, abs(oos_ret) / 100.0 * 0.6))
 
     gross = research_prior * max(0.5, min(1.5, regime_multiplier))
@@ -57,3 +61,9 @@ def compute_expectancy_edges(
         "research_prior": round(research_prior, 6),
         "uncertainty_haircut": round(hair, 4),
     }
+
+
+def _pattern_return_field(row: Any, field: str, index: int) -> Any:
+    if isinstance(row, (tuple, list)):
+        return row[index] if len(row) > index else None
+    return getattr(row, field, None)
