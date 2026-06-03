@@ -15,9 +15,11 @@
 # this prevents a Docker Desktop crash loop from auto-starting the full fleet
 # before Postgres and the web/API have stabilized.
 #
-# Bind-mounted app/worker services default to restart=no. This keeps a dirty
-# local checkout from auto-resurrecting live code after an operator stops it;
-# set CHILI_BIND_MOUNTED_SERVICE_RESTART_POLICY=unless-stopped to opt back in.
+# Bind-mounted services that can touch live broker state default to restart=no.
+# This keeps a dirty local checkout from auto-resurrecting live order code after
+# an operator stops it. Safe support lanes below (API, fast scan, market
+# snapshots) restart unless-stopped so freshness does not silently die after a
+# transient container exit.
 #
 # Persistent data defaults to D:/CHILI-Docker/{postgres,ollama,chili-data} so
 # large state lives off C:. Postgres can be moved to a Docker named volume after
@@ -170,7 +172,7 @@ services:
       - D:/dev:/host_dev
       # Brain Worker UI controls the separate ``brain-worker`` service — needs engine access
       - /var/run/docker.sock:/var/run/docker.sock
-    restart: "${CHILI_BIND_MOUNTED_SERVICE_RESTART_POLICY:-no}"
+    restart: unless-stopped
     logging:
       driver: json-file
       options:
@@ -459,7 +461,7 @@ services:
   # Fast scan worker. 1-5 min breakout/momentum detection on promoted patterns, fires alerts.
   fast-scan-worker:
     image: chili-app:local
-    restart: "${CHILI_BIND_MOUNTED_SERVICE_RESTART_POLICY:-no}"
+    restart: unless-stopped
     command: ["python", "scripts/brain_worker.py", "--mode", "fast-scan", "--interval", "${CHILI_FAST_SCAN_INTERVAL_MINUTES:-1}"]
     env_file:
       - path: .env
@@ -501,7 +503,7 @@ services:
   # requiring the full heavy scheduler/research profile.
   market-snapshot-worker:
     image: chili-app:local
-    restart: "${CHILI_BIND_MOUNTED_SERVICE_RESTART_POLICY:-no}"
+    restart: unless-stopped
     labels:
       com.chili.service: market-snapshot-worker
       com.chili.entrypoint: scheduler_worker_market_snapshots
