@@ -1,11 +1,13 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:chili_mobile/src/companion/shared_chat_history.dart';
 import 'package:chili_mobile/src/screen/focus_controller.dart';
 import 'package:chili_mobile/src/workspace/os_window.dart';
 import 'package:chili_mobile/src/workspace/workspace_controller.dart';
+import 'package:chili_mobile/src/workspace/workspace_persistence.dart';
 import 'package:chili_mobile/src/workspace/workspace_palette.dart';
 import 'package:chili_mobile/src/workspace/workspace_shell.dart';
 import 'package:chili_mobile/src/workspace/workspace_taskbar.dart';
@@ -337,6 +339,60 @@ void main() {
       await tester.pumpAndSettle();
       expect(c.windows.length, 1);
       expect(c.isOpen('chat'), isTrue);
+    });
+  });
+
+  group('session persistence', () {
+    test('toJson serializes windows with geometry + state', () {
+      final WorkspaceController c = WorkspaceController();
+      c.open('chat', title: 'Chat', icon: Icons.chat, size: const Size(400, 300));
+      c.open('brain', title: 'Brain', icon: Icons.psychology);
+      c.move('chat', const Offset(10, 20));
+      c.minimize('brain');
+      final List<Map<String, Object>> j = c.toJson();
+      expect(j.length, 2);
+      final Map<String, Object> chat = j.firstWhere((Map<String, Object> m) => m['id'] == 'chat');
+      expect(chat['w'], 400.0);
+      expect(chat['min'], false);
+      final Map<String, Object> brain = j.firstWhere((Map<String, Object> m) => m['id'] == 'brain');
+      expect(brain['min'], true);
+    });
+
+    test('applyGeometry restores a window geometry + state', () {
+      final WorkspaceController c = WorkspaceController();
+      c.open('chat', title: 'Chat', icon: Icons.chat);
+      c.applyGeometry('chat',
+          position: const Offset(120, 80), size: const Size(500, 360), maximized: true);
+      final WsWindow w = c.byId('chat')!;
+      expect(w.position, const Offset(120, 80));
+      expect(w.size, const Size(500, 360));
+      expect(w.maximized, isTrue);
+    });
+
+    test('WorkspacePersistence save → load round-trips', () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      await WorkspacePersistence.save(<Map<String, Object>>[
+        <String, Object>{
+          'id': 'chat',
+          'x': 10.0,
+          'y': 20.0,
+          'w': 400.0,
+          'h': 300.0,
+          'min': false,
+          'max': false,
+        },
+      ]);
+      final List<Map<String, dynamic>> loaded = await WorkspacePersistence.load();
+      expect(loaded.length, 1);
+      expect(loaded.first['id'], 'chat');
+      expect(loaded.first['w'], 400.0);
+    });
+
+    test('WorkspacePersistence.load is empty + safe on missing/corrupt data', () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      SharedPreferences.setMockInitialValues(<String, Object>{'chili_ws_layout_v1': 'not json'});
+      expect(await WorkspacePersistence.load(), isEmpty);
     });
   });
 }
