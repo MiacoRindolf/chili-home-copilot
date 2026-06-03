@@ -1031,7 +1031,7 @@ def test_cost_gate_execution_block_rollup_groups_by_pattern_venue_edge_source(db
         "cost_gate_edge_pct_source": "entry_execution.entry_edge_expected_net_pct",
         "cash_deployment_category": "positive_ev_execution_blocked",
         "graduation_blocker": "execution_blocked",
-        "recommended_work_event": "exit_variant_refresh",
+        "recommended_work_event": "edge_reliability_refresh",
     }
     for i, (ticker, expected, gap, threshold) in enumerate(
         (("CGB", 1.2, 0.9, 210), ("CGB2", 1.6, 1.1, 230)),
@@ -1093,6 +1093,7 @@ def test_cost_gate_execution_block_rollup_groups_by_pattern_venue_edge_source(db
     assert row["max_cost_gate_threshold_bps"] == pytest.approx(230)
     assert row["max_cost_gate_tca_cost_bps"] == pytest.approx(180)
     assert row["cash_deployment_category"] == "positive_ev_execution_blocked"
+    assert row["recommended_work_event"] == "edge_reliability_refresh"
 
 
 def test_imminent_snapshot_coverage_enqueues_missing_asset_slices(db):

@@ -7,7 +7,10 @@ from types import SimpleNamespace
 from app.services.trading.brain_work.handlers.profitability import (
     handle_exit_variant_refresh,
 )
-from app.services.trading.edge_reliability import EXIT_VARIANT_DIAGNOSTIC
+from app.services.trading.edge_reliability import (
+    EDGE_RELIABILITY_REFRESH,
+    EXIT_VARIANT_DIAGNOSTIC,
+)
 
 
 def test_exit_variant_refresh_fast_skips_negative_ev_without_learning(monkeypatch) -> None:
@@ -112,6 +115,83 @@ def test_exit_variant_refresh_uses_evolution_for_positive_evidence(monkeypatch) 
     assert payload["created_child_ids"] == [9001]
     assert payload["variant_label"] == "learned_exit_ev_positive"
     assert payload.get("fast_skipped") is None
+
+
+def test_exit_variant_refresh_routes_cost_gate_blocks_to_edge_refresh(monkeypatch) -> None:
+    from app.services.trading.brain_work import ledger
+    import app.services.trading.edge_reliability as edge_reliability
+    import app.services.trading.learning as learning
+
+    outcomes: list[dict[str, object]] = []
+    refreshes: list[dict[str, object]] = []
+
+    def _loss_reports(*args, **kwargs):
+        raise AssertionError("cost-gate execution debt should not scan loss reports")
+
+    def _forks(*args, **kwargs):
+        raise AssertionError("cost-gate execution debt should not fork exit variants")
+
+    monkeypatch.setattr(learning, "_edge_debt_loss_reports", _loss_reports)
+    monkeypatch.setattr(learning, "fork_edge_learned_exit_variants", _forks)
+
+    def _enqueue_outcome_event(_db, **kwargs):
+        outcomes.append(kwargs)
+        return 1005
+
+    def _emit_edge_refresh(_db, scan_pattern_id, **kwargs):
+        refreshes.append({"scan_pattern_id": scan_pattern_id, **kwargs})
+        return 222
+
+    monkeypatch.setattr(ledger, "enqueue_outcome_event", _enqueue_outcome_event)
+    monkeypatch.setattr(
+        edge_reliability,
+        "emit_edge_reliability_refresh_requested",
+        _emit_edge_refresh,
+    )
+
+    ev = SimpleNamespace(
+        id=905,
+        payload={
+            "scan_pattern_id": 537,
+            "asset_class": "stock",
+            "source": "autotrader_cost_gate_execution_blocked",
+            "cash_deployment_category": "positive_ev_execution_blocked",
+            "graduation_blocker": "execution_blocked",
+            "cost_gate_reason": "rh_below_tca_threshold",
+            "cost_gate_edge_gap_pct": 0.9,
+            "cost_gate_tca_cost_bps": 180,
+            "evidence_fingerprint": "cost-gate-fp",
+            "window_days": "not-a-number",
+        },
+    )
+
+    handle_exit_variant_refresh(object(), ev, user_id=None)
+
+    assert refreshes == [
+        {
+            "scan_pattern_id": 537,
+            "source": "cost_gate_execution_blocked",
+            "asset_class": "stock",
+            "window_days": 30,
+            "evidence_fingerprint": "cost-gate-fp",
+        }
+    ]
+    assert len(outcomes) == 1
+    assert outcomes[0]["event_type"] == EXIT_VARIANT_DIAGNOSTIC
+    payload = outcomes[0]["payload"]
+    assert payload["skip_reason"] == "execution_cost_block_routed_to_edge_reliability"
+    assert payload["created_count"] == 0
+    assert payload["created_child_ids"] == []
+    assert payload["fast_skipped"] is True
+    assert payload["edge_reliability_refresh"] == {
+        "queued": True,
+        "event_id": 222,
+        "event_type": EDGE_RELIABILITY_REFRESH,
+        "reason": "queued",
+        "scan_pattern_id": 537,
+        "asset_class": "stock",
+        "window_days": 30,
+    }
 
 
 def test_exit_variant_refresh_builds_report_from_time_decay_edge_misses(

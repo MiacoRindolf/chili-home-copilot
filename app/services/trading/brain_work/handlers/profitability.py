@@ -106,6 +106,48 @@ def _needs_exit_provenance_backfill(payload: dict[str, Any]) -> bool:
     return _positive_int_payload(payload, "live_low_confidence_exit_count") > 0
 
 
+def _is_cost_gate_execution_block_payload(payload: dict[str, Any]) -> bool:
+    source = str(payload.get("source") or "").strip().lower()
+    if source == "autotrader_cost_gate_execution_blocked":
+        return True
+    reason = str(payload.get("reason") or "").strip().lower()
+    blocker = str(payload.get("graduation_blocker") or "").strip().lower()
+    return blocker == "execution_blocked" and (
+        reason.startswith("cost_gate") or bool(payload.get("cost_gate_reason"))
+    )
+
+
+def _queue_cost_gate_edge_refresh(
+    db: "Session",
+    *,
+    scan_pattern_id: int,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    from app.services.trading.edge_reliability import (
+        EDGE_RELIABILITY_REFRESH,
+        emit_edge_reliability_refresh_requested,
+    )
+
+    window_days = _positive_int_value(payload.get("window_days")) or 30
+    event_id = emit_edge_reliability_refresh_requested(
+        db,
+        int(scan_pattern_id),
+        source="cost_gate_execution_blocked",
+        asset_class=payload.get("asset_class"),
+        window_days=window_days,
+        evidence_fingerprint=str(payload.get("evidence_fingerprint") or "latest"),
+    )
+    return {
+        "queued": event_id is not None,
+        "event_id": event_id,
+        "event_type": EDGE_RELIABILITY_REFRESH,
+        "reason": "queued" if event_id is not None else "deduped_or_recently_completed",
+        "scan_pattern_id": int(scan_pattern_id),
+        "asset_class": payload.get("asset_class"),
+        "window_days": window_days,
+    }
+
+
 def _normalized_exit_reason_value(value: Any) -> str:
     return str(value or "").strip().lower()
 
@@ -1149,6 +1191,49 @@ def handle_exit_variant_refresh(
     if pid is None:
         raise ValueError("exit_variant_refresh missing scan_pattern_id")
     payload_in = _payload(ev)
+    if _is_cost_gate_execution_block_payload(payload_in):
+        edge_refresh = _queue_cost_gate_edge_refresh(
+            db,
+            scan_pattern_id=pid,
+            payload=payload_in,
+        )
+        enqueue_outcome_event(
+            db,
+            event_type=EXIT_VARIANT_DIAGNOSTIC,
+            dedupe_key=(
+                f"{EXIT_VARIANT_DIAGNOSTIC}:p{pid}:fast_skip:"
+                f"execution_cost_block_routed_to_edge_reliability:"
+                f"{payload_in.get('evidence_fingerprint') or 'none'}"
+            ),
+            payload={
+                "scan_pattern_id": pid,
+                "source": "exit_variant_refresh",
+                "asset_class": payload_in.get("asset_class"),
+                "cash_deployment_category": payload_in.get("cash_deployment_category"),
+                "evidence_fingerprint": payload_in.get("evidence_fingerprint"),
+                "graduation_blocker": payload_in.get("graduation_blocker"),
+                "skip_reason": "execution_cost_block_routed_to_edge_reliability",
+                "created_child_ids": [],
+                "created_count": 0,
+                "loss_report": None,
+                "cost_gate_reason": payload_in.get("cost_gate_reason"),
+                "cost_gate_edge_gap_pct": payload_in.get("cost_gate_edge_gap_pct"),
+                "cost_gate_tca_cost_bps": payload_in.get("cost_gate_tca_cost_bps"),
+                "edge_reliability_refresh": edge_refresh,
+                "fast_skipped": True,
+                "shadow_only": True,
+                "observed_at": _utc_iso(),
+            },
+            parent_event_id=int(getattr(ev, "id", 0) or 0),
+            claimable=False,
+        )
+        logger.info(
+            "%s exit_variant_refresh ev_id=%s pattern_id=%s routed cost gate to edge refresh",
+            LOG_PREFIX,
+            getattr(ev, "id", None),
+            pid,
+        )
+        return
     fast_skip_reason = _exit_variant_fast_skip_reason(payload_in)
     if fast_skip_reason:
         enqueue_outcome_event(

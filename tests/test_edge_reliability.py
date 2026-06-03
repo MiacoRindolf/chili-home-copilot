@@ -31,17 +31,35 @@ from app.services.trading.edge_reliability import (
     _asset_class_for_paper,
     _asset_class_for_trade,
     _expected_net_pct_from_run,
+    _graduation_blocker,
     _live_return_pct,
     _mean,
     _outcome_label_from_return,
     _paper_return_pct,
     _probability_or_none,
+    _reason_bucket,
     compute_pattern_edge_reliability,
     edge_supply_rows,
     emit_edge_reliability_refresh_requested,
     emit_targeted_profitability_work,
     null_lineage_short_paper_candidates,
 )
+
+
+def test_cost_gate_reasons_bucket_as_execution_cost_blockers() -> None:
+    assert _reason_bucket("cost_gate:rh_below_tca_threshold") == "execution_cost_block"
+    blocker = _graduation_blocker(
+        SimpleNamespace(lifecycle_stage="promoted", recert_required=False),
+        expected_ev_pct=1.2,
+        calibrated_ev_pct=1.0,
+        realized_ev_pct=0.8,
+        closed_n=5,
+        broker_rejects=0,
+        slippage_misses=0,
+        edge_eval_count=1,
+        execution_cost_blocks=1,
+    )
+    assert blocker == "execution_blocked"
 
 
 def test_edge_reliability_autotrader_run_query_is_summary_only() -> None:

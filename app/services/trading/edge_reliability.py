@@ -260,6 +260,8 @@ def _reason_bucket(reason: str) -> str:
     r = str(reason or "").strip().lower()
     if r == "non_positive_expected_edge":
         return "negative_expected_edge"
+    if r.startswith("cost_gate:"):
+        return "execution_cost_block"
     if r in {"missed_entry_slippage", "slippage_reprice_cooldown"}:
         return "missed_entry_slippage"
     if r.startswith("broker:") or "adapter" in r or r.startswith("venue_"):
@@ -378,6 +380,7 @@ def _graduation_blocker(
     broker_rejects: int,
     slippage_misses: int,
     edge_eval_count: int,
+    execution_cost_blocks: int = 0,
     min_closed: int = DEFAULT_MIN_CLOSED_EVIDENCE,
 ) -> str:
     lifecycle = str(getattr(pattern, "lifecycle_stage", "") or "").strip().lower()
@@ -387,7 +390,9 @@ def _graduation_blocker(
         if reasons & HARD_RECERT_REASONS:
             return "hard_recert_blocked"
         return "recert_blocked"
-    if edge_eval_count > 0 and (broker_rejects > 0 or slippage_misses > 0):
+    if edge_eval_count > 0 and (
+        broker_rejects > 0 or slippage_misses > 0 or execution_cost_blocks > 0
+    ):
         return "execution_blocked"
     if expected_ev_pct is not None and expected_ev_pct <= 0.0:
         return "quality_blocked"
@@ -682,6 +687,7 @@ def compute_pattern_edge_reliability(
     )
     broker_rejects = int(reason_counts.get("broker_execution_reject", 0))
     slippage_misses = int(reason_counts.get("missed_entry_slippage", 0))
+    execution_cost_blocks = int(reason_counts.get("execution_cost_block", 0))
     edge_eval_count = len(runs)
     winners = [v for v in all_returns if v > 0.0]
     losers = [abs(v) for v in all_returns if v <= 0.0]
@@ -701,6 +707,7 @@ def compute_pattern_edge_reliability(
         broker_rejects=broker_rejects,
         slippage_misses=slippage_misses,
         edge_eval_count=edge_eval_count,
+        execution_cost_blocks=execution_cost_blocks,
         min_closed=min_closed_evidence,
     )
     row = {
@@ -725,6 +732,7 @@ def compute_pattern_edge_reliability(
         "recert_block_count": int(reason_counts.get("recert_required", 0)),
         "slippage_miss_count": slippage_misses,
         "broker_reject_count": broker_rejects,
+        "execution_cost_block_count": execution_cost_blocks,
         "placed_count": int(decision_counts.get("placed", 0)),
         "broker_reject_rate": _round(
             broker_rejects / edge_eval_count if edge_eval_count else 0.0,
@@ -732,6 +740,10 @@ def compute_pattern_edge_reliability(
         ),
         "slippage_miss_rate": _round(
             slippage_misses / edge_eval_count if edge_eval_count else 0.0,
+            6,
+        ),
+        "execution_cost_block_rate": _round(
+            execution_cost_blocks / edge_eval_count if edge_eval_count else 0.0,
             6,
         ),
         "expected_ev_pct": _round(expected_ev, 6),

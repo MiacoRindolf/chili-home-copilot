@@ -546,6 +546,8 @@ def _execution_blocker_for_row(
         return venue_blocker
     if _safe_int(row.get("broker_reject_count")) > 0:
         return "broker_rejects"
+    if _safe_int(row.get("execution_cost_block_count")) > 0:
+        return "execution_cost_gate"
     if _safe_int(row.get("slippage_miss_count")) > 0:
         return "missed_entry_slippage"
     if str(row.get("graduation_blocker") or "").strip().lower() in EXECUTION_BLOCKERS:
@@ -965,7 +967,7 @@ def cost_gate_execution_block_rollup(
                     max(fee_values) if fee_values else None,
                     2,
                 ),
-                "recommended_work_event": EXIT_VARIANT_REFRESH,
+                "recommended_work_event": EDGE_RELIABILITY_REFRESH,
                 "cash_deployment_category": "positive_ev_execution_blocked",
             }
         )

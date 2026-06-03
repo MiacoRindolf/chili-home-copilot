@@ -761,7 +761,7 @@ def test_cash_deployment_endpoint_separates_deployable_and_provenance(db, paired
                 "cost_gate_fee_bps": 0,
                 "cash_deployment_category": "positive_ev_execution_blocked",
                 "graduation_blocker": "execution_blocked",
-                "recommended_work_event": "exit_variant_refresh",
+                "recommended_work_event": "edge_reliability_refresh",
             },
             created_at=datetime.utcnow(),
         )
@@ -861,6 +861,7 @@ def test_cash_deployment_endpoint_separates_deployable_and_provenance(db, paired
     assert cost_block["tickers"] == ["CASHR"]
     assert cost_block["avg_expected_net_pct"] == pytest.approx(1.2)
     assert cost_block["max_cost_gate_tca_cost_bps"] == pytest.approx(180)
+    assert cost_block["recommended_work_event"] == "edge_reliability_refresh"
     assert body["low_confidence_exit_attribution_summary"]["total_groups"] >= 1
     exit_debt = next(
         x for x in body["low_confidence_exit_attribution"] if x["scan_pattern_id"] == pat.id
