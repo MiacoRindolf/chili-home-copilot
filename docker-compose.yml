@@ -25,9 +25,17 @@ services:
   postgres:
     # Keep in sync with typical dev installs (e.g. local Postgres 16); simplifies pg_dump/restore.
     image: postgres:16-alpine
+    # The D: bind mount already carries postgres ownership; running the
+    # service as postgres avoids the image entrypoint's slow recursive chown
+    # scan before startup.
+    user: postgres
     # Headroom for chili + brain + brain-worker; process-pool queue uses P * (child pool) connections.
-    command: ["postgres", "-c", "max_connections=350"]
+    # Docker Desktop bind mounts can stall end-of-recovery checkpoints when
+    # syncfs flushes the whole mounted filesystem. Keep the default file-by-file
+    # recovery sync path for the CHILI D: data volume.
+    command: ["postgres", "-c", "max_connections=350", "-c", "recovery_init_sync_method=fsync"]
     restart: unless-stopped
+    stop_grace_period: 180s
     environment:
       POSTGRES_USER: chili
       POSTGRES_PASSWORD: chili
@@ -44,11 +52,11 @@ services:
         max-size: "50m"
         max-file: "3"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U chili -d chili"]
-      interval: 10s
+      test: ["CMD-SHELL", "pg_isready -U chili -d chili -t 1"]
+      interval: 30s
       timeout: 5s
       retries: 30
-      start_period: 120s
+      start_period: 300s
     deploy:
       resources:
         limits:
@@ -107,7 +115,7 @@ services:
         CHILI_GIT_COMMIT: ${CHILI_GIT_COMMIT:-}
     image: chili-app:local
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8001:8000"
     env_file:
       - path: .env
         required: false
