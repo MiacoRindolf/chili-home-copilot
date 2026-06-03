@@ -546,6 +546,55 @@ class TestMassiveClient:
         assert len(calls) == 1
         assert calls[0][1]["apiKey"] == "test-key"
 
+    def test_get_connection_failures_open_breaker_before_extra_retries(
+        self,
+        monkeypatch,
+    ):
+        import requests
+
+        from app.services import massive_client as mc
+
+        def _reset_breaker() -> None:
+            mc._breaker_state = "closed"
+            mc._breaker_consecutive_failures = 0
+            mc._breaker_opened_at = 0.0
+            mc._breaker_log_throttle_until = 0.0
+
+        calls = []
+
+        def _fake_get(url, *, params=None, timeout=None):
+            calls.append((url, dict(params or {}), timeout))
+            raise requests.ConnectionError("connection refused")
+
+        _reset_breaker()
+        try:
+            monkeypatch.setattr(
+                mc.settings,
+                "massive_breaker_failure_threshold",
+                2,
+                raising=False,
+            )
+            monkeypatch.setattr(
+                mc.settings,
+                "massive_breaker_cooldown_sec",
+                30,
+                raising=False,
+            )
+            monkeypatch.setattr(mc, "_api_key", lambda: "test-key")
+            monkeypatch.setattr(mc, "_rate_limit_wait", lambda: None)
+            monkeypatch.setattr(mc.time, "sleep", lambda _seconds: None)
+            monkeypatch.setattr(mc._session, "get", _fake_get)
+
+            url = "https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers/AAPL"
+
+            assert mc._get(url, {}) is None
+
+            assert len(calls) == 2
+            assert mc.get_breaker_status()["state"] == "open"
+            assert mc.get_breaker_status()["consecutive_failures"] == 2
+        finally:
+            _reset_breaker()
+
     @patch("app.services.massive_client._get")
     @patch("app.services.massive_client._api_key", return_value="test-key")
     def test_get_stock_snapshot_fallback_to_prev_close(self, _key, mock_get):

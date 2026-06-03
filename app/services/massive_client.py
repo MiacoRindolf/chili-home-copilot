@@ -403,11 +403,19 @@ def _get(url: str, params: dict[str, Any] | None = None) -> dict[str, Any] | Non
             return None
         except requests.RequestException as e:
             _bump("errors")
+            _breaker_record_failure()
+            if not _breaker_allow_request():
+                logger.warning(
+                    "[massive] request failed; breaker opened after attempt %d/%d: %s",
+                    attempt + 1,
+                    _MAX_RETRIES + 1,
+                    e,
+                )
+                return None
             if attempt < _MAX_RETRIES:
                 time.sleep(_BACKOFF_BASE)
                 continue
             logger.warning(f"[massive] request failed after {_MAX_RETRIES + 1} attempts: {e}")
-            _breaker_record_failure()
             return None
     return None
 
