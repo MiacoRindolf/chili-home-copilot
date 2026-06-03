@@ -509,6 +509,101 @@ def test_live_vs_research_ignores_unverified_extreme_tca_costs() -> None:
     assert row["live_avg_exit_slippage_bps"] == pytest.approx(18.0)
 
 
+def test_live_vs_research_reports_expected_edge_consumed_by_execution_cost() -> None:
+    pattern = SimpleNamespace(
+        id=42,
+        name="stock-alpha",
+        promotion_status="pilot",
+        win_rate=0.6,
+        oos_win_rate=0.55,
+        oos_avg_return_pct=1.7,
+    )
+    robinhood = SimpleNamespace(
+        id=1010,
+        user_id=7,
+        status="closed",
+        scan_pattern_id=42,
+        ticker="AAPL",
+        direction="long",
+        entry_price=100.0,
+        exit_price=101.8,
+        quantity=1.0,
+        pnl=1.8,
+        exit_date=datetime(2026, 5, 30, 15, 30),
+        broker_source="robinhood",
+        indicator_snapshot={
+            "entry_edge_expected_net_pct": 1.2,
+            "entry_execution": {
+                "broker_source": "robinhood",
+                "active_order_type": "market",
+            },
+        },
+        tca_entry_slippage_bps=100.0,
+        tca_exit_slippage_bps=30.0,
+        avg_fill_price=100.0,
+        broker_order_id="rh-fill",
+        broker_status="filled",
+    )
+    coinbase = SimpleNamespace(
+        id=1011,
+        user_id=7,
+        status="closed",
+        scan_pattern_id=42,
+        ticker="BTC-USD",
+        direction="long",
+        entry_price=100.0,
+        exit_price=102.0,
+        quantity=1.0,
+        pnl=2.0,
+        exit_date=datetime(2026, 5, 30, 15, 31),
+        broker_source="coinbase",
+        indicator_snapshot={
+            "entry_edge": {"expected_net_pct": 2.0},
+            "entry_execution": {
+                "broker_source": "coinbase",
+                "order_type": "limit_post_only",
+            },
+        },
+        tca_entry_slippage_bps=5.0,
+        tca_exit_slippage_bps=5.0,
+        avg_fill_price=100.0,
+        broker_order_id="cb-fill",
+        broker_status="filled",
+    )
+    db = _FakeAttributionSession(
+        trades=[robinhood, coinbase],
+        patterns=[pattern],
+    )
+
+    out = live_vs_research_by_pattern(db, 7, days=30, limit=10)
+
+    row = out["patterns"][0]
+    summary = row["live_execution_edge_cost_summary"]
+    assert summary["expected_edge_sample_n"] == 2
+    assert summary["tca_cost_sample_n"] == 2
+    assert summary["positive_expected_edge_events"] == 2
+    assert summary["tca_consumed_expected_edge_events"] == 1
+    assert summary["tca_consumed_expected_edge_rate_pct"] == pytest.approx(50.0)
+
+    by_venue = {
+        (item["broker_venue"], item["order_hint"]): item
+        for item in row["live_execution_edge_cost_by_venue"]
+    }
+    rh = by_venue[("robinhood", "market")]
+    assert rh["avg_expected_net_pct"] == pytest.approx(1.2)
+    assert rh["avg_tca_cost_pct"] == pytest.approx(1.3)
+    assert rh["avg_tca_adjusted_expected_net_pct"] == pytest.approx(-0.1)
+    assert rh["avg_entry_slippage_bps"] == pytest.approx(100.0)
+    assert rh["avg_tca_cost_to_expected_net_ratio"] == pytest.approx(1.0833)
+    assert rh["tca_consumed_expected_edge_rate_pct"] == pytest.approx(100.0)
+
+    cb = by_venue[("coinbase", "limit_post_only")]
+    assert cb["avg_expected_net_pct"] == pytest.approx(2.0)
+    assert cb["avg_tca_cost_pct"] == pytest.approx(0.1)
+    assert cb["avg_tca_adjusted_expected_net_pct"] == pytest.approx(1.9)
+    assert cb["tca_consumed_expected_edge_rate_pct"] == pytest.approx(0.0)
+
+
 def test_live_vs_research_live_pnl_total_includes_partial_option_leg() -> None:
     pattern = SimpleNamespace(
         id=42,

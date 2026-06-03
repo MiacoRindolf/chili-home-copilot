@@ -304,6 +304,173 @@ def _execution_order_hint(payload: dict[str, Any]) -> str:
     return "unknown"
 
 
+def _trade_execution_payload(trade: Any) -> dict[str, Any]:
+    return _json_dict(getattr(trade, "indicator_snapshot", None))
+
+
+def _trade_execution_venue(trade: Any, payload: dict[str, Any]) -> str:
+    entry_execution = _json_dict(payload.get("entry_execution"))
+    for raw in (
+        getattr(trade, "broker_source", None),
+        entry_execution.get("broker_source"),
+        payload.get("_chili_broker_source"),
+        payload.get("broker_source"),
+    ):
+        venue = str(raw or "").strip().lower()
+        if venue:
+            return venue
+    if bool(payload.get("options_path")) and isinstance(payload.get("option_meta"), dict):
+        return "robinhood_options"
+    ticker = str(getattr(trade, "ticker", "") or "").strip().upper()
+    return "coinbase" if ticker.endswith("-USD") else "robinhood"
+
+
+def _trade_execution_order_hint(payload: dict[str, Any]) -> str:
+    entry_execution = _json_dict(payload.get("entry_execution"))
+    hint = str(
+        entry_execution.get("active_order_type")
+        or entry_execution.get("order_type")
+        or payload.get("order_type")
+        or ""
+    ).strip().lower()
+    return hint or "unknown"
+
+
+def _execution_edge_cost_rows(trades: list[Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    groups: dict[tuple[str, str], dict[str, Any]] = defaultdict(
+        lambda: {
+            "broker_venue": "",
+            "order_hint": "",
+            "live_trades": 0,
+            "_expected_net_pct_values": [],
+            "_tca_cost_pct_values": [],
+            "_tca_adjusted_expected_net_pct_values": [],
+            "_entry_slippage_bps_values": [],
+            "_exit_slippage_bps_values": [],
+            "_tca_cost_to_expected_net_ratios": [],
+            "positive_expected_edge_events": 0,
+            "tca_consumed_expected_edge_events": 0,
+        }
+    )
+    summary = {
+        "expected_edge_sample_n": 0,
+        "tca_cost_sample_n": 0,
+        "tca_adjusted_expected_edge_sample_n": 0,
+        "positive_expected_edge_events": 0,
+        "tca_consumed_expected_edge_events": 0,
+    }
+
+    for trade in trades:
+        payload = _trade_execution_payload(trade)
+        key = (
+            _trade_execution_venue(trade, payload),
+            _trade_execution_order_hint(payload),
+        )
+        group = groups[key]
+        group["broker_venue"] = key[0]
+        group["order_hint"] = key[1]
+        group["live_trades"] += 1
+
+        expected_net_pct = _expected_net_pct_from_payload(payload)
+        tca_cost_pct = _trade_tca_cost_pct(trade)
+        entry_bps = _trade_tca_bps(trade, "tca_entry_slippage_bps")
+        exit_bps = _trade_tca_bps(trade, "tca_exit_slippage_bps")
+
+        if expected_net_pct is not None:
+            group["_expected_net_pct_values"].append(expected_net_pct)
+            summary["expected_edge_sample_n"] += 1
+            if expected_net_pct > 0.0:
+                group["positive_expected_edge_events"] += 1
+                summary["positive_expected_edge_events"] += 1
+        if tca_cost_pct is not None:
+            group["_tca_cost_pct_values"].append(tca_cost_pct)
+            summary["tca_cost_sample_n"] += 1
+        if entry_bps is not None:
+            group["_entry_slippage_bps_values"].append(entry_bps)
+        if exit_bps is not None:
+            group["_exit_slippage_bps_values"].append(exit_bps)
+        if expected_net_pct is None or tca_cost_pct is None:
+            continue
+
+        adjusted = expected_net_pct - tca_cost_pct
+        group["_tca_adjusted_expected_net_pct_values"].append(adjusted)
+        summary["tca_adjusted_expected_edge_sample_n"] += 1
+        if expected_net_pct > 0.0:
+            group["_tca_cost_to_expected_net_ratios"].append(
+                tca_cost_pct / expected_net_pct
+            )
+            if tca_cost_pct >= expected_net_pct:
+                group["tca_consumed_expected_edge_events"] += 1
+                summary["tca_consumed_expected_edge_events"] += 1
+
+    rows: list[dict[str, Any]] = []
+    for group in groups.values():
+        expected_values = group.pop("_expected_net_pct_values")
+        tca_cost_values = group.pop("_tca_cost_pct_values")
+        adjusted_values = group.pop("_tca_adjusted_expected_net_pct_values")
+        entry_values = group.pop("_entry_slippage_bps_values")
+        exit_values = group.pop("_exit_slippage_bps_values")
+        ratios = group.pop("_tca_cost_to_expected_net_ratios")
+        positive_n = int(group.get("positive_expected_edge_events") or 0)
+        consumed_n = int(group.get("tca_consumed_expected_edge_events") or 0)
+        group.update(
+            {
+                "expected_edge_sample_n": len(expected_values),
+                "avg_expected_net_pct": (
+                    round(sum(expected_values) / len(expected_values), 4)
+                    if expected_values
+                    else None
+                ),
+                "tca_cost_sample_n": len(tca_cost_values),
+                "avg_tca_cost_pct": (
+                    round(sum(tca_cost_values) / len(tca_cost_values), 4)
+                    if tca_cost_values
+                    else None
+                ),
+                "avg_tca_adjusted_expected_net_pct": (
+                    round(sum(adjusted_values) / len(adjusted_values), 4)
+                    if adjusted_values
+                    else None
+                ),
+                "avg_entry_slippage_bps": (
+                    round(sum(entry_values) / len(entry_values), 2)
+                    if entry_values
+                    else None
+                ),
+                "avg_exit_slippage_bps": (
+                    round(sum(exit_values) / len(exit_values), 2)
+                    if exit_values
+                    else None
+                ),
+                "avg_tca_cost_to_expected_net_ratio": (
+                    round(sum(ratios) / len(ratios), 4) if ratios else None
+                ),
+                "tca_consumed_expected_edge_rate_pct": (
+                    round((consumed_n / positive_n) * 100.0, 2)
+                    if positive_n > 0
+                    else None
+                ),
+            }
+        )
+        rows.append(group)
+
+    rows.sort(
+        key=lambda r: (
+            r["tca_consumed_expected_edge_events"],
+            r["positive_expected_edge_events"],
+            r["live_trades"],
+            r["avg_tca_cost_pct"] or 0.0,
+        ),
+        reverse=True,
+    )
+    positive_n = int(summary["positive_expected_edge_events"] or 0)
+    consumed_n = int(summary["tca_consumed_expected_edge_events"] or 0)
+    summary["tca_consumed_expected_edge_rate_pct"] = (
+        round((consumed_n / positive_n) * 100.0, 2) if positive_n > 0 else None
+    )
+    return rows, summary
+
+
 def _execution_reason_family(row: Any, payload: dict[str, Any] | None = None) -> str:
     payload = payload or {}
     reason = str(getattr(row, "reason", "") or "").strip().lower()
@@ -930,6 +1097,9 @@ def live_vs_research_by_pattern(
             for t in tlist
             if (v := _trade_tca_bps(t, "tca_exit_slippage_bps")) is not None
         ]
+        execution_edge_cost_rows, execution_edge_cost_summary = (
+            _execution_edge_cost_rows(tlist)
+        )
         paper_pnls = [
             p
             for p in (_paper_realized_pnl_with_raw_fallback(pt) for pt in ptlist)
@@ -1007,6 +1177,8 @@ def live_vs_research_by_pattern(
                 "live_avg_exit_slippage_bps": round(sum(exit_slips) / len(exit_slips), 2)
                 if exit_slips
                 else None,
+                "live_execution_edge_cost_summary": execution_edge_cost_summary,
+                "live_execution_edge_cost_by_venue": execution_edge_cost_rows,
                 "paper_closed_trades": len(ptlist),
                 "paper_win_sample_n": len(paper_directional_outcomes),
                 "paper_win_rate_pct": (
