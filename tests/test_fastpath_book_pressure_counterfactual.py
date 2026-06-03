@@ -57,6 +57,22 @@ def test_observation_from_book_row_uses_depth_weighted_microprice():
     assert obs.top_ask_notional_usd == pytest.approx(200.04)
 
 
+def test_observation_from_book_row_preserves_zero_imbalance():
+    obs = observation_from_book_row(
+        _row(
+            at=datetime(2026, 5, 24, 18, 0, 0),
+            bid=100.0,
+            ask=100.02,
+            bid_size=1.0,
+            ask_size=9.0,
+            imbalance=0.0,
+        )
+    )
+
+    assert obs is not None
+    assert obs.imbalance == 0.0
+
+
 def test_build_windows_computes_reclaim_metrics():
     start = datetime(2026, 5, 24, 18, 0, 0)
     observations = [

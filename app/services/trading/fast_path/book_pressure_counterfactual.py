@@ -29,6 +29,18 @@ from .calibration import (
 from .scanner import BPS_PER_UNIT
 
 
+def _finite_float_or_default(value: Any, default: float) -> float:
+    if isinstance(value, bool) or value is None:
+        return default
+    try:
+        out = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if not math.isfinite(out):
+        return default
+    return out
+
+
 @dataclass(frozen=True)
 class BookPressureObservation:
     ticker: str
@@ -156,7 +168,7 @@ def observation_from_book_row(row: dict[str, Any]) -> BookPressureObservation | 
     snapshot_at = row.get("snapshot_at")
     if not isinstance(snapshot_at, datetime):
         return None
-    imbalance = max(0.0, min(1.0, float(row.get("imbalance") or 0.5)))
+    imbalance = max(0.0, min(1.0, _finite_float_or_default(row.get("imbalance"), 0.5)))
     return BookPressureObservation(
         ticker=str(row.get("ticker") or ""),
         snapshot_at=snapshot_at,
