@@ -105,6 +105,30 @@ def test_isolated_mesh_publish_rolls_back_private_session(monkeypatch) -> None:
     assert session.closed is True
 
 
+def test_recover_dispatch_session_invalidates_when_rollback_fails() -> None:
+    """A broken rollback must not leave the dispatcher on a poisoned connection."""
+    from app.services.trading.brain_work import dispatcher
+
+    class PoisonedSession:
+        def __init__(self) -> None:
+            self.rollbacks = 0
+            self.invalidated = False
+
+        def rollback(self) -> None:
+            self.rollbacks += 1
+            raise RuntimeError("connection already closed")
+
+        def invalidate(self) -> None:
+            self.invalidated = True
+
+    session = PoisonedSession()
+
+    dispatcher._recover_dispatch_session(session, "handler failure")
+
+    assert session.rollbacks == 1
+    assert session.invalidated is True
+
+
 def test_mark_done_recovers_isolated_handler_disconnect(monkeypatch) -> None:
     """If only the done marker loses its socket, isolated side effects should not replay."""
     from app.services.trading.brain_work import dispatcher

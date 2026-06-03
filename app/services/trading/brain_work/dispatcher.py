@@ -70,13 +70,25 @@ def _recover_dispatch_session(db: Session, context: str) -> None:
     try:
         db.rollback()
     except Exception as exc:
-        logger.debug(
+        logger.warning(
             "%s rollback after swallowed %s failed: %s",
             LOG_PREFIX,
             context,
             exc,
             exc_info=True,
         )
+        invalidate = getattr(db, "invalidate", None)
+        if callable(invalidate):
+            try:
+                invalidate()
+            except Exception as invalidate_exc:
+                logger.warning(
+                    "%s invalidate after swallowed %s failed: %s",
+                    LOG_PREFIX,
+                    context,
+                    invalidate_exc,
+                    exc_info=True,
+                )
 
 
 def _looks_like_transient_db_disconnect(exc: BaseException) -> bool:
@@ -697,19 +709,13 @@ def run_brain_work_dispatch_round(
                 processed += 1
             except Exception as e:
                 logger.warning("%s work id=%s type=%s failed: %s", LOG_PREFIX, ev_id, event_type, e, exc_info=True)
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
+                _recover_dispatch_session(db, f"{event_type} handler failure")
                 try:
                     mark_work_retry_or_dead(db, ev_id, str(e))
                     db.commit()
                 except Exception as e2:
                     logger.warning("%s mark retry failed id=%s: %s", LOG_PREFIX, ev_id, e2)
-                    try:
-                        db.rollback()
-                    except Exception:
-                        pass
+                    _recover_dispatch_session(db, "mark retry failure")
                 errors.append(f"id={ev_id}:{event_type}:{e!s}")
         per_type[event_type] = n_done
 
