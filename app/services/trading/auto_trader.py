@@ -142,6 +142,7 @@ TICK_BUDGET_SUPPRESSIBLE_PAPER_SHADOW_DECISIONS = frozenset({
     "skipped_non_positive_expected_edge",
 })
 QUEUE_PRESSURE_SUPPRESSIBLE_PAPER_SHADOW_DECISIONS = frozenset({
+    "blocked_regime_gate",
     "skipped_directional_geometry",
     "skipped_non_positive_expected_edge",
 })
@@ -3341,6 +3342,120 @@ def _rollback_best_effort_audit_failure(db: Session) -> None:
             )
 
 
+def _session_has_pending_orm_writes(db: Session) -> bool:
+    for attr in ("new", "dirty", "deleted"):
+        try:
+            if bool(getattr(db, attr)):
+                return True
+        except Exception:
+            return True
+    return False
+
+
+def _nonplacement_audit_pressure_drop_reason(
+    db: Session,
+    *,
+    decision: str,
+    reason: str,
+    rule_snapshot: dict[str, Any] | None,
+) -> str | None:
+    if not _audit_is_nonplacement_decision(decision):
+        return None
+    if not isinstance(rule_snapshot, dict):
+        return None
+    if (
+        bool(rule_snapshot.get("cost_gate_repeat_suppressed"))
+        and str(reason or "") == COST_GATE_RECENT_REPEAT_REASON
+    ):
+        pressure_state = rule_snapshot.get("cost_gate_repeat_pressure")
+        if isinstance(pressure_state, dict) and bool(pressure_state.get("active")):
+            return "cost_gate_repeat_pressure_best_effort_audit"
+    if not bool(rule_snapshot.get("paper_shadow_suppressed")):
+        return None
+    if str(rule_snapshot.get("paper_shadow_suppressed_scope") or "") != "queue_pressure":
+        return None
+    qualified_reject = _qualified_reject_shadow_decision(reason)
+    if qualified_reject == "blocked_regime_gate":
+        return "queue_pressure_regime_gate_best_effort_audit"
+    if qualified_reject == "skipped_non_positive_expected_edge":
+        return "queue_pressure_non_positive_expected_edge_best_effort_audit"
+    return None
+
+
+def _drop_pressure_suppressed_nonplacement_audit(
+    *,
+    alert_id: int | None,
+    ticker: str | None,
+    decision: str,
+    reason: str,
+    drop_reason: str,
+) -> None:
+    logger.info(
+        "[autotrader] nonplacement audit dropped under queue pressure "
+        "alert_id=%s ticker=%s decision=%s reason=%s drop_reason=%s",
+        alert_id,
+        ticker,
+        decision,
+        reason,
+        drop_reason,
+    )
+
+
+def _commit_pending_pressure_suppressed_nonplacement_audit(
+    db: Session,
+    *,
+    alert_id: int | None,
+    ticker: str | None,
+    decision: str,
+    reason: str,
+    drop_reason: str,
+) -> None:
+    try:
+        db.commit()
+    except PendingRollbackError:
+        logger.warning(
+            "[autotrader] pending-write commit for dropped nonplacement audit "
+            "hit pending rollback; dropping best-effort audit alert_id=%s "
+            "ticker=%s reason=%s",
+            alert_id,
+            ticker,
+            reason,
+            exc_info=True,
+        )
+        _rollback_best_effort_audit_failure(db)
+        return
+    except DBAPIError:
+        logger.warning(
+            "[autotrader] pending-write commit for dropped nonplacement audit "
+            "failed; dropping best-effort audit alert_id=%s ticker=%s reason=%s",
+            alert_id,
+            ticker,
+            reason,
+            exc_info=True,
+        )
+        _rollback_best_effort_audit_failure(db)
+        return
+    except Exception:
+        logger.warning(
+            "[autotrader] pending-write commit for dropped nonplacement audit "
+            "failed; dropping best-effort audit alert_id=%s ticker=%s reason=%s",
+            alert_id,
+            ticker,
+            reason,
+            exc_info=True,
+        )
+        _rollback_best_effort_audit_failure(db)
+        return
+
+    _drop_pressure_suppressed_nonplacement_audit(
+        alert_id=alert_id,
+        ticker=ticker,
+        decision=decision,
+        reason=reason,
+        drop_reason=drop_reason,
+    )
+
+
 def _audit(
     db: Session,
     *,
@@ -3381,6 +3496,35 @@ def _audit(
         rule_snapshot["audit_session_recovered"] = True
         rule_snapshot["audit_session_recovery_reason"] = "inactive_transaction"
 
+    nonplacement = _audit_is_nonplacement_decision(decision)
+    pressure_drop_reason = _nonplacement_audit_pressure_drop_reason(
+        db,
+        decision=decision,
+        reason=reason,
+        rule_snapshot=rule_snapshot,
+    )
+    if pressure_drop_reason is not None:
+        alert_id = getattr(alert, "id", None)
+        alert_ticker = (getattr(alert, "ticker", None) or "").upper() or None
+        if _session_has_pending_orm_writes(db):
+            _commit_pending_pressure_suppressed_nonplacement_audit(
+                db,
+                alert_id=alert_id,
+                ticker=alert_ticker,
+                decision=decision,
+                reason=reason,
+                drop_reason=pressure_drop_reason,
+            )
+        else:
+            _drop_pressure_suppressed_nonplacement_audit(
+                alert_id=alert_id,
+                ticker=alert_ticker,
+                decision=decision,
+                reason=reason,
+                drop_reason=pressure_drop_reason,
+            )
+        return
+
     def _row() -> AutoTraderRun:
         return AutoTraderRun(
             user_id=user_id,
@@ -3396,7 +3540,6 @@ def _audit(
         )
 
     row = _row()
-    nonplacement = _audit_is_nonplacement_decision(decision)
     try:
         db.add(row)
         db.commit()
@@ -5259,13 +5402,23 @@ def _process_one_alert(
                 out,
                 reject_reason=_rg_full_reason,
             )
-            if budget_shadow_skip is not None:
+            pressure_shadow_skip = None
+            if budget_shadow_skip is None:
+                pressure_shadow_skip = _paper_shadow_queue_pressure_suppression_reason(
+                    out,
+                    reject_reason=_rg_full_reason,
+                    snap=_rg_snap,
+                )
+            shadow_skip_reason = budget_shadow_skip or pressure_shadow_skip
+            if shadow_skip_reason is not None:
                 _rg_snap["paper_shadow_suppressed"] = True
-                _rg_snap["paper_shadow_suppressed_reason"] = budget_shadow_skip
-                _rg_snap["paper_shadow_suppressed_scope"] = "tick_budget"
+                _rg_snap["paper_shadow_suppressed_reason"] = shadow_skip_reason
+                _rg_snap["paper_shadow_suppressed_scope"] = (
+                    "tick_budget" if budget_shadow_skip is not None else "queue_pressure"
+                )
             _audit(db, user_id=uid, alert=alert, decision="skipped",
                    reason=_rg_full_reason, rule_snapshot=_rg_snap)
-            if live and budget_shadow_skip is None:
+            if live and shadow_skip_reason is None:
                 _rg_px = _current_price(alert.ticker)
                 if _rg_px is not None:
                     _maybe_open_reject_paper_shadow(

@@ -179,6 +179,249 @@ def _live_runtime() -> dict:
         "payload": {},
     }
 
+
+def test_queue_pressure_non_positive_edge_audit_drops_before_commit() -> None:
+    class _Db:
+        is_active = True
+        new = ()
+        dirty = ()
+        deleted = ()
+
+        def __init__(self):
+            self.rollback_count = 0
+
+        def add(self, _row):
+            raise AssertionError("pressure-dropped audit should not add a row")
+
+        def commit(self):
+            raise AssertionError("pressure-dropped audit should not commit")
+
+        def rollback(self):
+            self.rollback_count += 1
+
+    db = _Db()
+    alert = BreakoutAlert(
+        id=9907,
+        ticker="AI-USD",
+        asset_type="crypto",
+        scan_pattern_id=1248,
+        user_id=1,
+    )
+
+    at_mod._audit(
+        db,
+        user_id=1,
+        alert=alert,
+        decision="skipped",
+        reason="non_positive_expected_edge",
+        rule_snapshot={
+            "paper_shadow_suppressed": True,
+            "paper_shadow_suppressed_reason": "queue_pressure",
+            "paper_shadow_suppressed_scope": "queue_pressure",
+        },
+    )
+
+    assert db.rollback_count == 0
+
+
+def test_queue_pressure_non_positive_edge_audit_commits_pending_without_row() -> None:
+    class _Db:
+        is_active = True
+        dirty = ()
+        deleted = ()
+
+        def __init__(self):
+            self.new = [object()]
+            self.added: list[AutoTraderRun] = []
+            self.committed = False
+            self.rollback_count = 0
+
+        def add(self, row):
+            self.added.append(row)
+
+        def commit(self):
+            self.committed = True
+
+        def rollback(self):
+            self.rollback_count += 1
+
+    db = _Db()
+    alert = BreakoutAlert(
+        id=9908,
+        ticker="AERO-USD",
+        asset_type="crypto",
+        scan_pattern_id=1248,
+        user_id=1,
+    )
+
+    at_mod._audit(
+        db,
+        user_id=1,
+        alert=alert,
+        decision="skipped",
+        reason="non_positive_expected_edge",
+        rule_snapshot={
+            "paper_shadow_suppressed": True,
+            "paper_shadow_suppressed_reason": "queue_pressure",
+            "paper_shadow_suppressed_scope": "queue_pressure",
+        },
+    )
+
+    assert db.rollback_count == 0
+    assert db.committed is True
+    assert db.added == []
+
+
+def test_queue_pressure_regime_gate_audit_drops_before_commit() -> None:
+    class _Db:
+        is_active = True
+        new = ()
+        dirty = ()
+        deleted = ()
+
+        def __init__(self):
+            self.rollback_count = 0
+
+        def add(self, _row):
+            raise AssertionError("pressure-dropped audit should not add a row")
+
+        def commit(self):
+            raise AssertionError("pressure-dropped audit should not commit")
+
+        def rollback(self):
+            self.rollback_count += 1
+
+    db = _Db()
+    alert = BreakoutAlert(
+        id=9909,
+        ticker="ACX-USD",
+        asset_type="crypto",
+        scan_pattern_id=1248,
+        user_id=1,
+    )
+
+    at_mod._audit(
+        db,
+        user_id=1,
+        alert=alert,
+        decision="skipped",
+        reason="regime_gate:negative_ev_consensus:n_neg=3/3:worst_dim=breadth_regime",
+        rule_snapshot={
+            "paper_shadow_suppressed": True,
+            "paper_shadow_suppressed_reason": "queue_pressure",
+            "paper_shadow_suppressed_scope": "queue_pressure",
+        },
+    )
+
+    assert db.rollback_count == 0
+
+
+def test_cost_gate_repeat_pressure_audit_drops_before_commit() -> None:
+    class _Db:
+        is_active = True
+        new = ()
+        dirty = ()
+        deleted = ()
+
+        def __init__(self):
+            self.rollback_count = 0
+
+        def add(self, _row):
+            raise AssertionError("pressure-dropped repeat audit should not add a row")
+
+        def commit(self):
+            raise AssertionError("pressure-dropped repeat audit should not commit")
+
+        def rollback(self):
+            self.rollback_count += 1
+
+    db = _Db()
+    alert = BreakoutAlert(
+        id=9910,
+        ticker="ACS-USD",
+        asset_type="crypto",
+        scan_pattern_id=1248,
+        user_id=1,
+    )
+
+    at_mod._audit(
+        db,
+        user_id=1,
+        alert=alert,
+        decision="blocked",
+        reason=at_mod.COST_GATE_RECENT_REPEAT_REASON,
+        rule_snapshot={
+            "cost_gate_repeat_suppressed": True,
+            "cost_gate_repeat_pressure": {"active": True, "reasons": ["queue_pressure"]},
+        },
+    )
+
+    assert db.rollback_count == 0
+
+
+def test_placement_audit_with_queue_pressure_snapshot_still_writes() -> None:
+    class _Db:
+        is_active = True
+        new = ()
+        dirty = ()
+        deleted = ()
+
+        def __init__(self):
+            self.added: list[AutoTraderRun] = []
+            self.committed = False
+
+        def add(self, row):
+            self.added.append(row)
+
+        def commit(self):
+            self.committed = True
+
+    db = _Db()
+    alert = BreakoutAlert(
+        id=9911,
+        ticker="A8-USD",
+        asset_type="crypto",
+        scan_pattern_id=1248,
+        user_id=1,
+    )
+
+    at_mod._audit(
+        db,
+        user_id=1,
+        alert=alert,
+        decision="placed",
+        reason="submitted",
+        rule_snapshot={
+            "paper_shadow_suppressed": True,
+            "paper_shadow_suppressed_reason": "queue_pressure",
+            "paper_shadow_suppressed_scope": "queue_pressure",
+        },
+        trade_id=123,
+    )
+
+    assert db.committed is True
+    assert len(db.added) == 1
+
+
+def test_regime_gate_can_use_queue_pressure_shadow_suppression(monkeypatch) -> None:
+    settings = _minimal_settings(1)
+    settings.chili_autotrader_paper_shadow_queue_pressure_suppression_floor = 0.8
+    monkeypatch.setattr(at_mod, "settings", settings)
+    out = {"candidate_queue_pressure": 1.0}
+
+    reason = at_mod._paper_shadow_queue_pressure_suppression_reason(
+        out,
+        reject_reason="regime_gate:negative_ev_consensus:n_neg=3/3",
+        snap={},
+    )
+
+    assert reason == "queue_pressure"
+    assert out["paper_shadow_queue_pressure_suppressed"] == 1
+    assert out["paper_shadow_queue_pressure_suppressed_last_reason"] == (
+        "blocked_regime_gate"
+    )
+
+
 def test_nonplacement_audit_commit_timeout_is_best_effort() -> None:
     class _Db:
         is_active = True
