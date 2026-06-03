@@ -208,6 +208,8 @@ SHADOW_OBSERVATION_REASON_SIGNAL_LANE_DISABLED = (
 )
 EXIT_GEOMETRY_REFRESH_REASON = "execution_stop_loss_too_wide"
 EXIT_GEOMETRY_REFRESH_SOURCE = "autotrader_execution_stop_loss_too_wide"
+COST_GATE_EXECUTION_BLOCKER = "execution_blocked"
+COST_GATE_EXECUTION_SOURCE = "autotrader_cost_gate_execution_blocked"
 SHADOW_OBSERVATION_SIZING_MODE_BASE_RISK = "base_risk_notional"
 SHADOW_OBSERVATION_SIZING_MODE_FULL_DIAGNOSTICS = "full_diagnostics"
 SHADOW_OBSERVATION_DIAGNOSTIC_SIZING_SETTING = (
@@ -2539,6 +2541,152 @@ def _cost_gate_venue_from_selector_decision(decision: Any) -> str | None:
     if venue in {"coinbase", "cb"}:
         return "coinbase"
     return None
+
+
+def _cost_gate_execution_asset_class(alert: BreakoutAlert) -> str | None:
+    raw = str(getattr(alert, "asset_type", "") or "").strip().lower()
+    if raw in {"crypto", "coin", "coinbase_spot"}:
+        return "crypto"
+    if raw in {"option", "options", "robinhood_options"}:
+        return "options"
+    if raw in {"stock", "stocks", "equity", "equities", "robinhood"}:
+        return "stock"
+    ticker = str(getattr(alert, "ticker", "") or "").strip().upper()
+    if ticker.endswith("-USD"):
+        return "crypto"
+    return "stock" if ticker else None
+
+
+def _queue_cost_gate_execution_work(
+    db: Session,
+    *,
+    alert: BreakoutAlert,
+    pattern: ScanPattern | None,
+    cost_decision: Any,
+    snap: dict[str, Any],
+    reason: str,
+) -> dict[str, Any] | None:
+    """Queue repair work when positive expected edge is blocked by execution cost."""
+    if db is None:
+        return {"queued": False, "reason": "db_unavailable"}
+    try:
+        pattern_id = int(getattr(alert, "scan_pattern_id", None) or 0)
+    except (TypeError, ValueError):
+        pattern_id = 0
+    if pattern_id <= 0 or pattern is None:
+        return {"queued": False, "reason": "missing_pattern_id"}
+
+    expected_net_pct = _expected_net_pct_from_snapshot(snap)
+    if expected_net_pct is None or expected_net_pct <= 0.0:
+        return {
+            "queued": False,
+            "reason": "expected_net_not_positive_for_cost_gate_work",
+            "expected_net_pct": expected_net_pct,
+        }
+
+    edge_bps = int(getattr(cost_decision, "edge_bps", 0) or 0)
+    threshold_bps = int(getattr(cost_decision, "threshold_bps", 0) or 0)
+    if edge_bps <= 0 or threshold_bps <= edge_bps:
+        return {
+            "queued": False,
+            "reason": "not_positive_execution_cost_gap",
+            "edge_bps": edge_bps,
+            "threshold_bps": threshold_bps,
+        }
+
+    ticker = str(getattr(alert, "ticker", "") or "").strip().upper()
+    asset_class = _cost_gate_execution_asset_class(alert)
+    edge_source = str(snap.get("cost_gate_edge_pct_source") or "").strip()
+    venue = str(
+        snap.get("cost_gate_advisory_venue")
+        or snap.get("broker_selector_venue")
+        or "unknown"
+    ).strip().lower()
+    tca_snapshot = (
+        dict(getattr(cost_decision, "tca_snapshot"))
+        if isinstance(getattr(cost_decision, "tca_snapshot", None), dict)
+        else None
+    )
+    tca_cost_bps = int(getattr(cost_decision, "tca_cost_bps", 0) or 0)
+    fee_bps = int(getattr(cost_decision, "fee_bps", 0) or 0)
+    cost_gap_pct = round(max(0, threshold_bps - edge_bps) / 100.0, 6)
+    fingerprint_body = {
+        "reason": COST_GATE_EXECUTION_BLOCKER,
+        "cost_gate_reason": str(getattr(cost_decision, "reason", "") or reason),
+        "scan_pattern_id": pattern_id,
+        "ticker": ticker,
+        "asset_class": asset_class,
+        "venue": venue,
+        "edge_source": edge_source,
+        "edge_bps": edge_bps,
+        "threshold_bps": threshold_bps,
+        "tca_cost_bps": tca_cost_bps,
+        "fee_bps": fee_bps,
+        "expected_net_pct": round(float(expected_net_pct), 6),
+    }
+    evidence_fingerprint = hashlib.sha256(
+        json.dumps(fingerprint_body, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+    payload = {
+        "alert_id": int(getattr(alert, "id", 0) or 0),
+        "ticker": ticker,
+        "reason": COST_GATE_EXECUTION_BLOCKER,
+        "cost_gate_reason": str(getattr(cost_decision, "reason", "") or reason),
+        "lifecycle_stage": getattr(pattern, "lifecycle_stage", None),
+        "promotion_status": getattr(pattern, "promotion_status", None),
+        "expected_net_pct": expected_net_pct,
+        "cost_gate_edge_pct_source": edge_source,
+        "cost_gate_edge_bps": edge_bps,
+        "cost_gate_threshold_bps": threshold_bps,
+        "cost_gate_fee_bps": fee_bps,
+        "cost_gate_tca_cost_bps": tca_cost_bps,
+        "cost_gate_threshold_pct": round(threshold_bps / 100.0, 6),
+        "cost_gate_edge_gap_pct": cost_gap_pct,
+        "cost_gate_tca_snapshot": tca_snapshot,
+        "broker_venue": venue,
+        "cash_deployment_category": "positive_ev_execution_blocked",
+        "graduation_blocker": COST_GATE_EXECUTION_BLOCKER,
+        "recommended_work_event": "exit_variant_refresh",
+        "expected_evidence_value": round(float(expected_net_pct) + cost_gap_pct, 6),
+    }
+    try:
+        from .edge_reliability import (
+            EXIT_VARIANT_REFRESH,
+            emit_targeted_profitability_work,
+        )
+
+        event_id = emit_targeted_profitability_work(
+            db,
+            event_type=EXIT_VARIANT_REFRESH,
+            scan_pattern_id=pattern_id,
+            source=COST_GATE_EXECUTION_SOURCE,
+            asset_class=asset_class,
+            evidence_fingerprint=evidence_fingerprint,
+            payload=payload,
+        )
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.debug(
+            "[autotrader] cost gate execution work enqueue failed alert_id=%s pattern_id=%s",
+            getattr(alert, "id", None),
+            pattern_id,
+            exc_info=True,
+        )
+        return {"queued": False, "reason": "queue_failed"}
+
+    return {
+        "queued": event_id is not None,
+        "event_id": event_id,
+        "pattern_id": pattern_id,
+        "expected_net_pct": expected_net_pct,
+        "edge_bps": edge_bps,
+        "threshold_bps": threshold_bps,
+        "cost_gap_pct": cost_gap_pct,
+        "evidence_fingerprint": evidence_fingerprint,
+    }
 
 
 def _queue_exit_geometry_variant_work(
@@ -5498,6 +5646,23 @@ def _execute_broker_buy(
         if _cost_decision.tca_snapshot is not None:
             snap["cost_gate_tca_snapshot"] = _cost_decision.tca_snapshot
         _cost_reason = f"cost_gate:{_cost_decision.reason}"
+        try:
+            _cost_pattern = _pattern_row(
+                db,
+                getattr(alert, "scan_pattern_id", None),
+            )
+        except Exception:
+            _cost_pattern = None
+        _cost_execution_work = _queue_cost_gate_execution_work(
+            db,
+            alert=alert,
+            pattern=_cost_pattern,
+            cost_decision=_cost_decision,
+            snap=snap,
+            reason=_cost_reason,
+        )
+        if _cost_execution_work is not None:
+            snap["cost_gate_execution_work"] = _cost_execution_work
         _audit(
             db,
             user_id=uid,

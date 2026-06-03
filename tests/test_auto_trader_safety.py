@@ -1626,6 +1626,123 @@ def test_exit_geometry_variant_work_queues_positive_ev_wide_stop(monkeypatch):
     assert payload["expected_evidence_value"] > payload["expected_net_pct"]
 
 
+def test_cost_gate_execution_work_queues_positive_ev_blocked_cost(monkeypatch):
+    captured: list[dict] = []
+    monkeypatch.setattr(
+        "app.services.trading.edge_reliability.emit_targeted_profitability_work",
+        lambda db, **kwargs: captured.append(kwargs) or 88,
+    )
+    db = MagicMock()
+    pat = ScanPattern(
+        id=456,
+        name="Cost blocked parent",
+        rules_json={},
+        lifecycle_stage="pilot_promoted",
+        promotion_status="promoted",
+        active=True,
+    )
+    alert = BreakoutAlert(
+        id=987,
+        ticker="AAOX",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.9,
+        price_at_alert=45.5,
+        entry_price=45.5,
+        user_id=1,
+        scan_pattern_id=pat.id,
+    )
+    decision = SimpleNamespace(
+        reason="rh_below_tca_threshold",
+        edge_bps=120,
+        threshold_bps=210,
+        fee_bps=0,
+        tca_cost_bps=180,
+        tca_snapshot={
+            "used": True,
+            "sample_basis": "usable_robinhood_adverse_entry_tca_trades",
+        },
+    )
+    snap = {
+        "entry_execution": {"entry_edge_expected_net_pct": 1.2},
+        "cost_gate_edge_pct_source": "entry_execution.entry_edge_expected_net_pct",
+        "cost_gate_advisory_venue": "robinhood",
+    }
+
+    result = at_mod._queue_cost_gate_execution_work(
+        db,
+        alert=alert,
+        pattern=pat,
+        cost_decision=decision,
+        snap=snap,
+        reason="cost_gate:rh_below_tca_threshold",
+    )
+
+    assert result is not None
+    assert result["queued"] is True
+    assert result["event_id"] == 88
+    assert result["pattern_id"] == pat.id
+    assert result["expected_net_pct"] == pytest.approx(1.2)
+    assert result["cost_gap_pct"] == pytest.approx(0.9)
+    assert len(result["evidence_fingerprint"]) == 64
+    work = captured[0]
+    assert work["event_type"] == "exit_variant_refresh"
+    assert work["scan_pattern_id"] == pat.id
+    assert work["source"] == at_mod.COST_GATE_EXECUTION_SOURCE
+    assert work["asset_class"] == "stock"
+    assert work["evidence_fingerprint"] == result["evidence_fingerprint"]
+    payload = work["payload"]
+    assert payload["cash_deployment_category"] == "positive_ev_execution_blocked"
+    assert payload["graduation_blocker"] == at_mod.COST_GATE_EXECUTION_BLOCKER
+    assert payload["recommended_work_event"] == "exit_variant_refresh"
+    assert payload["expected_net_pct"] == pytest.approx(1.2)
+    assert payload["cost_gate_edge_bps"] == 120
+    assert payload["cost_gate_threshold_bps"] == 210
+    assert payload["cost_gate_edge_gap_pct"] == pytest.approx(0.9)
+    assert payload["cost_gate_tca_snapshot"]["used"] is True
+    assert payload["broker_venue"] == "robinhood"
+    assert payload["expected_evidence_value"] == pytest.approx(2.1)
+
+
+def test_cost_gate_execution_work_requires_pattern_attribution(monkeypatch):
+    captured: list[dict] = []
+    monkeypatch.setattr(
+        "app.services.trading.edge_reliability.emit_targeted_profitability_work",
+        lambda db, **kwargs: captured.append(kwargs) or 88,
+    )
+    alert = BreakoutAlert(
+        id=988,
+        ticker="AAOX",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.9,
+        price_at_alert=45.5,
+        entry_price=45.5,
+        user_id=1,
+        scan_pattern_id=None,
+    )
+    decision = SimpleNamespace(
+        reason="rh_below_tca_threshold",
+        edge_bps=120,
+        threshold_bps=210,
+        fee_bps=0,
+        tca_cost_bps=180,
+        tca_snapshot={"used": True},
+    )
+
+    result = at_mod._queue_cost_gate_execution_work(
+        MagicMock(),
+        alert=alert,
+        pattern=None,
+        cost_decision=decision,
+        snap={"entry_edge_expected_net_pct": 1.2},
+        reason="cost_gate:rh_below_tca_threshold",
+    )
+
+    assert result == {"queued": False, "reason": "missing_pattern_id"}
+    assert captured == []
+
+
 def test_shadow_observation_uses_lightweight_sizing_path(monkeypatch):
     settings = _minimal_settings(1)
     settings.chili_autotrader_shadow_observation_diagnostic_sizing_enabled = False
@@ -2708,6 +2825,7 @@ def test_coinbase_cap_uses_passed_price(monkeypatch):
 def test_broker_buy_cost_gate_uses_expected_net_edge(monkeypatch):
     from app import config as config_mod
     from app.services.trading import broker_selector, cost_aware_gate, governance
+    from app.services.trading import portfolio_risk
     from app.services.trading.venue import factory as venue_factory
 
     captured: dict[str, object] = {}
@@ -2740,6 +2858,11 @@ def test_broker_buy_cost_gate_uses_expected_net_edge(monkeypatch):
         SimpleNamespace(chili_coinbase_autotrader_live=True),
     )
     monkeypatch.setattr(governance, "is_kill_switch_active", lambda: False)
+    monkeypatch.setattr(
+        portfolio_risk,
+        "circuit_breaker_entry_block_reason",
+        lambda *a, **k: None,
+    )
     monkeypatch.setattr(cost_aware_gate, "cost_aware_min_edge_gate", _fake_cost_gate)
     monkeypatch.setattr(
         broker_selector,
@@ -2790,6 +2913,92 @@ def test_broker_buy_cost_gate_uses_expected_net_edge(monkeypatch):
     assert snap["broker_selector_venue"] == "coinbase"
     assert snap["broker_selector_reason"] == "test"
     assert snap["cost_gate_edge_bps"] == 140
+
+
+def test_broker_buy_cost_gate_block_records_execution_work(monkeypatch):
+    from app.services.trading import broker_selector, governance
+    from app.services.trading import portfolio_risk
+
+    audits: list[dict] = []
+
+    def _fake_cost_gate(**_kwargs):
+        return SimpleNamespace(
+            allowed=False,
+            reason="rh_below_tca_threshold",
+            edge_bps=120,
+            threshold_bps=210,
+            fee_bps=0,
+            tca_cost_bps=180,
+            tca_snapshot={"used": True},
+        )
+
+    monkeypatch.setattr(
+        "app.services.trading.cost_aware_gate.cost_aware_min_edge_gate",
+        _fake_cost_gate,
+    )
+    monkeypatch.setattr(
+        broker_selector,
+        "select_venue",
+        lambda *a, **k: SimpleNamespace(venue="robinhood", reason="test"),
+    )
+    monkeypatch.setattr(governance, "is_kill_switch_active", lambda: False)
+    monkeypatch.setattr(
+        governance,
+        "is_kill_switch_active_for_session",
+        lambda *a, **k: False,
+    )
+    monkeypatch.setattr(
+        portfolio_risk,
+        "circuit_breaker_entry_block_reason",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_pattern_row",
+        lambda *_args, **_kwargs: ScanPattern(
+            id=456,
+            rules_json={},
+            lifecycle_stage="pilot_promoted",
+            promotion_status="promoted",
+        ),
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_queue_cost_gate_execution_work",
+        lambda *a, **k: {"queued": True, "event_id": 88},
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_audit",
+        lambda *a, **k: audits.append(k),
+    )
+
+    snap = {"entry_edge_expected_net_pct": 1.2}
+    out = {"skipped": 0}
+    res = at_mod._execute_broker_buy(
+        MagicMock(),
+        uid=1,
+        alert=SimpleNamespace(
+            id=90,
+            ticker="AAOX",
+            scan_pattern_id=456,
+            entry_price=45.5,
+            price_at_alert=45.5,
+        ),
+        qty=1.0,
+        client_order_id="cid-90",
+        snap=snap,
+        llm_snap=None,
+        out=out,
+        px=45.5,
+    )
+
+    assert res is None
+    assert out["skipped"] == 1
+    assert audits[0]["decision"] == "blocked"
+    assert audits[0]["reason"] == "cost_gate:rh_below_tca_threshold"
+    assert snap["cost_gate_execution_work"] == {"queued": True, "event_id": 88}
+    assert snap["cost_gate_tca_snapshot"] == {"used": True}
 
 
 def test_cost_gate_edge_uses_entry_execution_edge_before_projected_profit():
