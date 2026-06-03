@@ -48,11 +48,11 @@ services:
         max-size: "50m"
         max-file: "3"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U chili -d chili"]
-      interval: 10s
+      test: ["CMD-SHELL", "/usr/local/bin/pg_controldata /var/lib/postgresql/data | /bin/grep -q 'Database cluster state:.*in production'"]
+      interval: 30s
       timeout: 5s
       retries: 30
-      start_period: 120s
+      start_period: 300s
     deploy:
       resources:
         limits:
