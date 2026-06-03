@@ -527,6 +527,66 @@ def test_candidate_base_score_rejects_out_of_range_probability_metrics():
     assert "missing_quality_score" in out["penalties"]
 
 
+def test_candidate_base_score_excludes_saturated_dsr_pbo_from_ranking():
+    row = {
+        "alpha_sleeve": "volatility_breakout",
+        "promotion_gate_passed": True,
+        "quality_composite_score": 0.70,
+        "cpcv_median_sharpe": 1.4,
+        "deflated_sharpe": 1.0,
+        "pbo": 0.0,
+        "realized_n_trades": 0,
+        "realized_avg_pnl_pct": None,
+        "raw_realized_trade_count": 87,
+        "raw_realized_avg_return_pct": 1.56,
+        "payoff_ratio": 4.5,
+        "payoff_ratio_n": 87,
+    }
+
+    out = candidate_base_score(row)
+    floor_blocks = _candidate_floor_blocks(row, AlphaPortfolioConfig())
+
+    assert out["score"] is not None
+    assert "deflated_sharpe" not in out["components"]
+    assert "pbo_inverse" not in out["components"]
+    assert out["ranking_exclusions"] == [
+        "saturated_deflated_sharpe",
+        "saturated_pbo",
+    ]
+    assert "missing_deflated_sharpe" not in floor_blocks
+    assert "missing_pbo" not in floor_blocks
+
+
+def test_candidate_base_score_preserves_pattern_585_shape_without_dsr_pbo_lift():
+    row = {
+        "alpha_sleeve": "volatility_breakout",
+        "promotion_gate_passed": True,
+        "quality_composite_score": 0.80,
+        "cpcv_median_sharpe": 1.4,
+        "deflated_sharpe": 1.0,
+        "pbo": 0.0,
+        "realized_n_trades": 0,
+        "realized_avg_pnl_pct": None,
+        "raw_realized_trade_count": 87,
+        "raw_realized_avg_return_pct": 1.56,
+        "payoff_ratio": 4.5,
+        "payoff_ratio_n": 87,
+    }
+
+    out = candidate_base_score(row)
+
+    assert out["score"] is not None
+    assert out["score"] >= AlphaPortfolioConfig().min_shadow_score
+    assert set(out["components"]) == {
+        "quality",
+        "cpcv",
+        "realized_edge",
+        "payoff_ratio",
+    }
+    assert out["components"]["realized_edge"]["value"] == 1.0
+    assert out["components"]["payoff_ratio"]["value"] == 1.0
+
+
 def test_candidate_floor_blocks_boolean_gate_metrics_as_missing():
     row = {
         "promotion_gate_passed": True,

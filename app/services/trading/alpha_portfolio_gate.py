@@ -512,6 +512,14 @@ def _realized_edge_fraction(row: Mapping[str, Any]) -> tuple[float | None, int]:
     return None, max(realized_n, raw_n)
 
 
+def _is_saturated_deflated_sharpe(value: float | None) -> bool:
+    return value is not None and value >= 1.0
+
+
+def _is_saturated_pbo(value: float | None) -> bool:
+    return value is not None and value <= 0.0
+
+
 def candidate_base_score(
     row: Mapping[str, Any],
     *,
@@ -520,6 +528,7 @@ def candidate_base_score(
     """Compute single-pattern quality before portfolio crowding adjustment."""
     cfg = config or AlphaPortfolioConfig()
     components: dict[str, dict[str, float]] = {}
+    ranking_exclusions: list[str] = []
 
     quality = _probability_or_none(row.get("quality_composite_score"))
     if quality is not None:
@@ -531,11 +540,17 @@ def candidate_base_score(
 
     dsr = _probability_or_none(row.get("deflated_sharpe"))
     if dsr is not None:
-        components["deflated_sharpe"] = {"value": dsr, "weight": 0.10}
+        if _is_saturated_deflated_sharpe(dsr):
+            ranking_exclusions.append("saturated_deflated_sharpe")
+        else:
+            components["deflated_sharpe"] = {"value": dsr, "weight": 0.10}
 
     pbo = _probability_or_none(row.get("pbo"))
     if pbo is not None:
-        components["pbo_inverse"] = {"value": 1.0 - pbo, "weight": 0.10}
+        if _is_saturated_pbo(pbo):
+            ranking_exclusions.append("saturated_pbo")
+        else:
+            components["pbo_inverse"] = {"value": 1.0 - pbo, "weight": 0.10}
 
     edge, edge_n = _realized_edge_fraction(row)
     if edge is not None and edge_n >= cfg.min_realized_trades:
@@ -551,7 +566,12 @@ def candidate_base_score(
 
     total_weight = sum(c["weight"] for c in components.values())
     if total_weight <= 0:
-        return {"score": None, "components": components, "penalties": []}
+        return {
+            "score": None,
+            "components": components,
+            "penalties": [],
+            "ranking_exclusions": ranking_exclusions,
+        }
 
     score = sum(c["value"] * c["weight"] for c in components.values()) / total_weight
     penalties: list[str] = []
@@ -569,6 +589,7 @@ def candidate_base_score(
         "score": _clip(score),
         "components": components,
         "penalties": penalties,
+        "ranking_exclusions": ranking_exclusions,
     }
 
 
@@ -767,6 +788,7 @@ def _pattern_update_payload(row: Mapping[str, Any], score_info: Mapping[str, Any
         "base_score": score_info.get("score"),
         "components": score_info.get("components", {}),
         "penalties": score_info.get("penalties", []),
+        "ranking_exclusions": score_info.get("ranking_exclusions", []),
         "diversity": score_info.get("diversity", {}),
         "recert_reasons": recert_reasons,
         "lifecycle_stage": row.get("lifecycle_stage"),
@@ -876,6 +898,7 @@ def scan_alpha_portfolio(
                 "base_score": score_info.get("score"),
                 "components": score_info.get("components", {}),
                 "penalties": score_info.get("penalties", []),
+                "ranking_exclusions": score_info.get("ranking_exclusions", []),
                 "diversity": score_info.get("diversity", {}),
                 "floor_blocks": floor_blocks,
             }
@@ -1017,6 +1040,7 @@ def persist_alpha_portfolio_snapshot(
             "reasons_json": {
                 "decision_reason": cand.get("decision_reason"),
                 "components": cand.get("components", {}),
+                "ranking_exclusions": cand.get("ranking_exclusions", []),
                 "diversity": cand.get("diversity", {}),
             },
         })
@@ -1182,18 +1206,43 @@ def stage_shadow_candidates(
     staged: list[int] = []
     for cand in candidates:
         pid = int(cand["scan_pattern_id"])
-        pattern = db.get(ScanPattern, pid)
-        if pattern is None:
+        row = db.execute(
+            text(
+                """
+                SELECT lifecycle_stage, promotion_status
+                FROM scan_patterns
+                WHERE id = :pid
+                """
+            ),
+            {"pid": pid},
+        ).mappings().first()
+        if row is None:
             continue
-        lifecycle = str(pattern.lifecycle_stage or "").strip().lower()
+        lifecycle = str(row.get("lifecycle_stage") or "").strip().lower()
         if lifecycle not in CANDIDATE_LIFECYCLES:
             continue
-        old_lifecycle = pattern.lifecycle_stage
-        old_status = pattern.promotion_status
-        pattern.lifecycle_stage = SHADOW_LIFECYCLE
-        pattern.promotion_status = "shadow_collecting_ev"
-        pattern.lifecycle_changed_at = now
-        pattern.active = True
+        old_lifecycle = row.get("lifecycle_stage")
+        old_status = row.get("promotion_status")
+        result = db.execute(
+            text(
+                """
+                UPDATE scan_patterns
+                SET lifecycle_stage = :lifecycle_stage,
+                    promotion_status = :promotion_status,
+                    lifecycle_changed_at = :now,
+                    active = TRUE
+                WHERE id = :pid
+                """
+            ),
+            {
+                "pid": pid,
+                "lifecycle_stage": SHADOW_LIFECYCLE,
+                "promotion_status": "shadow_collecting_ev",
+                "now": now,
+            },
+        )
+        if int(result.rowcount or 0) != 1:
+            continue
         staged.append(pid)
         try:
             from .brain_work.promotion_surface import emit_promotion_surface_change
@@ -1203,8 +1252,8 @@ def stage_shadow_candidates(
                 scan_pattern_id=pid,
                 old_promotion_status=old_status,
                 old_lifecycle_stage=old_lifecycle,
-                new_promotion_status=pattern.promotion_status,
-                new_lifecycle_stage=pattern.lifecycle_stage,
+                new_promotion_status="shadow_collecting_ev",
+                new_lifecycle_stage=SHADOW_LIFECYCLE,
                 source="alpha_portfolio_gate_shadow",
                 extra={
                     "alpha_sleeve": cand.get("alpha_sleeve"),
