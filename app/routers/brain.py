@@ -1105,6 +1105,49 @@ def api_brain_network_graph_compat(db: Session = Depends(get_db)):
 _PTR_READY_MIN_ROWS = 30  # alignment with promotion_gate.py CPCV n_trades threshold
 
 
+def _ptr_ready_but_ungated_query():
+    """Bound PTR probes by the CPCV-ready threshold.
+
+    The endpoint only needs to know whether a pattern has at least
+    ``_PTR_READY_MIN_ROWS`` rows.  A full-table aggregate can be very expensive
+    on retained/bloated PTR history, so each pattern stops scanning after the
+    threshold is met.
+    """
+    return text(
+        """
+        WITH candidate_patterns AS (
+            SELECT sp.id              AS pattern_id,
+                   sp.name            AS name,
+                   sp.lifecycle_stage AS lifecycle_stage,
+                   sp.last_backtest_at AS last_backtest_at,
+                   sp.cpcv_n_paths IS NOT NULL AS has_cpcv_data
+            FROM scan_patterns sp
+            WHERE sp.cpcv_n_paths IS NULL
+        )
+        SELECT cp.pattern_id,
+               cp.name,
+               cp.lifecycle_stage,
+               cp.last_backtest_at,
+               cp.has_cpcv_data,
+               ptr.n AS ptr_rows,
+               :min_rows AS ptr_rows_capped_at
+        FROM candidate_patterns cp
+        JOIN LATERAL (
+            SELECT COUNT(*)::int AS n
+            FROM (
+                SELECT 1
+                FROM trading_pattern_trades t
+                WHERE t.scan_pattern_id = cp.pattern_id
+                LIMIT :min_rows
+            ) bounded_ptr
+        ) ptr ON TRUE
+        WHERE ptr.n >= :min_rows
+        ORDER BY cp.pattern_id ASC
+        LIMIT 200
+        """
+    )
+
+
 @router.get("/api/brain/patterns/ptr-ready-but-ungated")
 def api_brain_patterns_ptr_ready_but_ungated(db: Session = Depends(get_db)):
     """Patterns with enough PTR rows for CPCV but no CPCV verdict yet.
@@ -1117,27 +1160,7 @@ def api_brain_patterns_ptr_ready_but_ungated(db: Session = Depends(get_db)):
     """
     try:
         rows = db.execute(
-            text(
-                """
-                SELECT sp.id              AS pattern_id,
-                       sp.name            AS name,
-                       sp.lifecycle_stage AS lifecycle_stage,
-                       sp.last_backtest_at AS last_backtest_at,
-                       sp.cpcv_n_paths IS NOT NULL AS has_cpcv_data,
-                       COALESCE(ptr.n, 0) AS ptr_rows
-                FROM scan_patterns sp
-                LEFT JOIN (
-                    SELECT scan_pattern_id, COUNT(*) AS n
-                    FROM trading_pattern_trades
-                    WHERE scan_pattern_id IS NOT NULL
-                    GROUP BY scan_pattern_id
-                ) ptr ON ptr.scan_pattern_id = sp.id
-                WHERE sp.cpcv_n_paths IS NULL
-                  AND COALESCE(ptr.n, 0) >= :min_rows
-                ORDER BY ptr.n DESC NULLS LAST, sp.id ASC
-                LIMIT 200
-                """
-            ),
+            _ptr_ready_but_ungated_query(),
             {"min_rows": _PTR_READY_MIN_ROWS},
         ).fetchall()
         items = []
@@ -1148,6 +1171,7 @@ def api_brain_patterns_ptr_ready_but_ungated(db: Session = Depends(get_db)):
                 "name": m["name"],
                 "lifecycle_stage": m["lifecycle_stage"],
                 "ptr_rows": int(m["ptr_rows"] or 0),
+                "ptr_rows_capped_at": int(m["ptr_rows_capped_at"] or _PTR_READY_MIN_ROWS),
                 "has_cpcv_data": bool(m["has_cpcv_data"]),
                 "last_backtest_at": (
                     m["last_backtest_at"].isoformat()
@@ -1676,5 +1700,4 @@ def trading_brief_report(
     if download:
         headers["Content-Disposition"] = 'attachment; filename="chili-trading-brief.html"'
     return HTMLResponse(content=html, headers=headers)
-
 

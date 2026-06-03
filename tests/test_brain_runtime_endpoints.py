@@ -18,9 +18,18 @@ from datetime import datetime, timedelta
 from sqlalchemy import text
 
 from app.models import ScanPattern
+from app.routers.brain import _ptr_ready_but_ungated_query
 
 
 PTR_MIN = 30
+
+
+def test_ptr_ready_query_is_threshold_bounded() -> None:
+    sql = str(_ptr_ready_but_ungated_query()).lower()
+
+    assert "join lateral" in sql
+    assert "limit :min_rows" in sql
+    assert "group by scan_pattern_id" not in sql
 
 
 def _mk_pattern(db, name: str, *, cpcv_n_paths=None, lifecycle="candidate") -> int:
