@@ -605,6 +605,46 @@ def test_reconcile_agrees_within_tolerance(db, shadow_mode):
     assert parity.delta_abs == pytest.approx(0.0, abs=1e-6)
 
 
+def test_reconcile_honors_zero_parity_tolerance(monkeypatch):
+    class _FakeScalarQuery:
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def scalar(self):
+            return 1000.0
+
+    class _FakeDb:
+        def __init__(self):
+            self.added = []
+
+        def query(self, *_args, **_kwargs):
+            return _FakeScalarQuery()
+
+        def add(self, row):
+            self.added.append(row)
+
+        def flush(self):
+            return None
+
+    monkeypatch.setattr(settings, "brain_economic_ledger_mode", MODE_SHADOW)
+    monkeypatch.setattr(settings, "brain_economic_ledger_parity_tolerance_usd", 0.0)
+    fake_db = _FakeDb()
+
+    parity = el.reconcile_trade(
+        fake_db,
+        source="paper",
+        paper_trade_id=404,
+        ticker="AAPL",
+        legacy_pnl=999.995,
+    )
+
+    assert parity is not None
+    assert fake_db.added == [parity]
+    assert parity.tolerance_usd == pytest.approx(0.0, abs=1e-12)
+    assert parity.delta_abs == pytest.approx(0.005, abs=1e-6)
+    assert parity.agree_bool is False
+
+
 def test_reconcile_flags_disagreement_outside_tolerance(db, shadow_mode):
     el.record_exit_fill(
         db,

@@ -26,6 +26,7 @@ Safety properties:
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -67,10 +68,16 @@ def _ops_log_enabled() -> bool:
 
 
 def _parity_tolerance_usd() -> float:
-    try:
-        return float(getattr(settings, "brain_economic_ledger_parity_tolerance_usd", 0.01) or 0.01)
-    except Exception:
+    raw = getattr(settings, "brain_economic_ledger_parity_tolerance_usd", 0.01)
+    if isinstance(raw, bool) or raw is None:
         return 0.01
+    try:
+        tolerance = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        return 0.01
+    if not math.isfinite(tolerance) or tolerance < 0.0:
+        return 0.01
+    return tolerance
 
 
 def _normalize_direction(direction: str | None) -> str:
