@@ -464,4 +464,141 @@ void main() {
       expect(n, 0, reason: 'identical reading should not notify');
     });
   });
+
+  group('makeAgentId (AGT-4)', () {
+    test('kebab-cases and strips punctuation', () {
+      expect(makeAgentId('My Cool Bot', <String>{}), 'my-cool-bot');
+      expect(makeAgentId('  Auto-Trader!!!  ', <String>{}), 'auto-trader');
+    });
+
+    test('dedups against existing ids', () {
+      expect(makeAgentId('x', <String>{'x'}), 'x-2');
+      expect(makeAgentId('x', <String>{'x', 'x-2'}), 'x-3');
+    });
+
+    test('falls back to "agent" when name has no usable chars', () {
+      expect(makeAgentId('!!!', <String>{}), 'agent');
+    });
+  });
+
+  group('AgentRegistry.upsertCustom (AGT-4)', () {
+    test('adds a new custom agent (forced non-builtin)', () {
+      final AgentRegistry r = AgentRegistry();
+      r.upsertCustom(const Agent(
+        id: 'c1',
+        name: 'C1',
+        kind: AgentKind.custom,
+        description: 'd',
+        builtin: true, // should be coerced to false
+      ));
+      expect(r.byId('c1'), isNotNull);
+      expect(r.byId('c1')!.builtin, isFalse);
+    });
+
+    test('updates editable fields but preserves runtime state', () {
+      final AgentRegistry r = AgentRegistry();
+      r.upsertCustom(const Agent(
+          id: 'c1', name: 'C1', kind: AgentKind.custom, description: 'd'));
+      r.start('c1');
+      expect(r.byId('c1')!.status, AgentStatus.running);
+      r.upsertCustom(const Agent(
+        id: 'c1',
+        name: 'C1 renamed',
+        kind: AgentKind.brain,
+        description: 'd2',
+        schedule: 'daily',
+        config: <String, String>{'k': 'v'},
+      ));
+      final Agent a = r.byId('c1')!;
+      expect(a.name, 'C1 renamed');
+      expect(a.kind, AgentKind.brain);
+      expect(a.schedule, 'daily');
+      expect(a.config['k'], 'v');
+      expect(a.status, AgentStatus.running, reason: 'runtime state preserved');
+    });
+
+    test('never modifies a built-in agent', () {
+      final AgentRegistry r = AgentRegistry();
+      r.upsertCustom(const Agent(
+          id: 'auto-trader',
+          name: 'HACKED',
+          kind: AgentKind.custom,
+          description: 'x'));
+      expect(r.byId('auto-trader')!.name, 'Auto-Trader');
+    });
+  });
+
+  group('Custom agent UI (AGT-4)', () {
+    setUp(() => SharedPreferences.setMockInitialValues(<String, Object>{}));
+
+    testWidgets('New → fill → Create adds a selectable agent', (WidgetTester tester) async {
+      final AgentRegistry r = AgentRegistry();
+      await tester.pumpWidget(MaterialApp(
+        home: AgentsScreen(registry: r, livePolling: false),
+      ));
+      await tester.pumpAndSettle();
+      final int before = r.agents.length;
+
+      await tester.tap(find.widgetWithText(TextButton, 'New'));
+      await tester.pumpAndSettle();
+      final Finder name = find
+          .descendant(of: find.byType(AlertDialog), matching: find.byType(TextField))
+          .first;
+      await tester.enterText(name, 'My Bot');
+      await tester.tap(find.widgetWithText(FilledButton, 'Create'));
+      await tester.pumpAndSettle();
+
+      expect(r.agents.length, before + 1);
+      expect(r.byId('my-bot'), isNotNull);
+      expect(r.byId('my-bot')!.builtin, isFalse);
+    });
+
+    testWidgets('empty name is rejected', (WidgetTester tester) async {
+      final AgentRegistry r = AgentRegistry();
+      await tester.pumpWidget(MaterialApp(
+        home: AgentsScreen(registry: r, livePolling: false),
+      ));
+      await tester.pumpAndSettle();
+      final int before = r.agents.length;
+
+      await tester.tap(find.widgetWithText(TextButton, 'New'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Create'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Name is required'), findsOneWidget);
+      expect(r.agents.length, before, reason: 'nothing created');
+    });
+
+    testWidgets('delete a custom agent via its menu', (WidgetTester tester) async {
+      final AgentRegistry r = AgentRegistry(seed: <Agent>[
+        ...defaultAgents(),
+        const Agent(
+          id: 'my-bot',
+          name: 'My Bot',
+          kind: AgentKind.custom,
+          description: 'mine',
+          builtin: false,
+        ),
+      ]);
+      await tester.pumpWidget(MaterialApp(
+        home: AgentsScreen(registry: r, livePolling: false),
+      ));
+      await tester.pumpAndSettle();
+
+      // Filter to Custom so the lone custom agent is on-screen, then select it.
+      await tester.tap(find.widgetWithText(ChoiceChip, 'Custom'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('My Bot').first); // select it
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(Icons.more_vert));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
+      await tester.pumpAndSettle();
+
+      expect(r.byId('my-bot'), isNull);
+    });
+  });
 }

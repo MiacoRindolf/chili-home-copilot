@@ -193,6 +193,49 @@ class _AgentsScreenState extends State<AgentsScreen> {
     return s.length > 80 ? '${s.substring(0, 80)}…' : s;
   }
 
+  // ── Custom agents (AGT-4) ────────────────────────────────────────────────
+  Future<void> _showAgentEditor({Agent? initial}) async {
+    final Set<String> existing = _registry.agents.map((Agent a) => a.id).toSet();
+    final Agent? result = await showDialog<Agent>(
+      context: context,
+      builder: (BuildContext _) =>
+          _AgentEditorDialog(initial: initial, existingIds: existing),
+    );
+    if (result == null || !mounted) return;
+    _registry.upsertCustom(result);
+    setState(() => _selectedId = result.id);
+  }
+
+  Future<void> _deleteCustom(Agent a) async {
+    final bool? ok = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext ctx) => AlertDialog(
+        title: Text('Delete ${a.name}?'),
+        content: const Text('This removes the custom agent. It cannot be undone.'),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+                backgroundColor: Theme.of(ctx).colorScheme.error),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    _registry.remove(a.id);
+    setState(() {
+      if (_selectedId == a.id) {
+        _selectedId =
+            _registry.agents.isNotEmpty ? _registry.agents.first.id : null;
+      }
+    });
+  }
+
   @override
   void dispose() {
     _saveTimer?.cancel();
@@ -266,6 +309,13 @@ class _AgentsScreenState extends State<AgentsScreen> {
               _CountPill(
                 label: '$running running',
                 color: running > 0 ? Colors.green : cs.onSurfaceVariant,
+              ),
+              const SizedBox(width: 8),
+              TextButton.icon(
+                onPressed: () => _showAgentEditor(),
+                icon: const Icon(Icons.add, size: 18),
+                label: const Text('New'),
+                style: TextButton.styleFrom(visualDensity: VisualDensity.compact),
               ),
               const Spacer(),
               if (widget._livePolling) ...<Widget>[
@@ -415,6 +465,21 @@ class _AgentsScreenState extends State<AgentsScreen> {
             if (gated) ...<Widget>[
               const SizedBox(width: 8),
               _CountPill(label: 'LIVE TRADING', color: cs.error),
+            ],
+            if (!a.builtin) ...<Widget>[
+              const SizedBox(width: 4),
+              PopupMenuButton<String>(
+                tooltip: 'Edit agent',
+                icon: const Icon(Icons.more_vert, size: 18),
+                onSelected: (String v) {
+                  if (v == 'edit') _showAgentEditor(initial: a);
+                  if (v == 'delete') _deleteCustom(a);
+                },
+                itemBuilder: (BuildContext _) => const <PopupMenuEntry<String>>[
+                  PopupMenuItem<String>(value: 'edit', child: Text('Edit')),
+                  PopupMenuItem<String>(value: 'delete', child: Text('Delete')),
+                ],
+              ),
             ],
           ],
         ),
@@ -725,5 +790,212 @@ class _ConnPill extends StatelessWidget {
         Text(label, style: TextStyle(fontSize: 11, color: c)),
       ],
     );
+  }
+}
+
+/// Create / edit a custom agent. Returns the built [Agent] via Navigator.pop,
+/// or null on cancel. For a new agent it generates a unique id; for an edit it
+/// keeps the existing id (the registry preserves runtime state).
+class _AgentEditorDialog extends StatefulWidget {
+  const _AgentEditorDialog({this.initial, required this.existingIds});
+  final Agent? initial;
+  final Set<String> existingIds;
+
+  @override
+  State<_AgentEditorDialog> createState() => _AgentEditorDialogState();
+}
+
+class _AgentEditorDialogState extends State<_AgentEditorDialog> {
+  late final TextEditingController _name;
+  late final TextEditingController _desc;
+  late final TextEditingController _schedule;
+  late AgentKind _kind;
+  late final List<_ConfigRowControllers> _config;
+  String? _nameError;
+
+  @override
+  void initState() {
+    super.initState();
+    final Agent? a = widget.initial;
+    _name = TextEditingController(text: a?.name ?? '');
+    _desc = TextEditingController(text: a?.description ?? '');
+    _schedule = TextEditingController(text: a?.schedule ?? '');
+    _kind = a?.kind ?? AgentKind.custom;
+    _config = <_ConfigRowControllers>[
+      for (final MapEntry<String, String> e in (a?.config ?? const <String, String>{}).entries)
+        _ConfigRowControllers(e.key, e.value),
+    ];
+  }
+
+  @override
+  void dispose() {
+    _name.dispose();
+    _desc.dispose();
+    _schedule.dispose();
+    for (final _ConfigRowControllers c in _config) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  void _save() {
+    final String name = _name.text.trim();
+    if (name.isEmpty) {
+      setState(() => _nameError = 'Name is required');
+      return;
+    }
+    final Map<String, String> config = <String, String>{};
+    for (final _ConfigRowControllers c in _config) {
+      final String k = c.key.text.trim();
+      if (k.isEmpty) continue;
+      config[k] = c.value.text.trim();
+    }
+    final String id = widget.initial?.id ??
+        makeAgentId(name, widget.existingIds);
+    Navigator.of(context).pop(Agent(
+      id: id,
+      name: name,
+      kind: _kind,
+      description: _desc.text.trim(),
+      schedule: _schedule.text.trim(),
+      config: config,
+      builtin: false,
+      status: widget.initial?.status ?? AgentStatus.unknown,
+      enabled: widget.initial?.enabled ?? true,
+    ));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bool editing = widget.initial != null;
+    return AlertDialog(
+      title: Text(editing ? 'Edit agent' : 'New agent'),
+      content: SizedBox(
+        width: 420,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              TextField(
+                controller: _name,
+                autofocus: true,
+                decoration: InputDecoration(
+                  labelText: 'Name',
+                  errorText: _nameError,
+                  border: const OutlineInputBorder(),
+                ),
+                onChanged: (_) {
+                  if (_nameError != null) setState(() => _nameError = null);
+                },
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<AgentKind>(
+                initialValue: _kind,
+                decoration: const InputDecoration(
+                  labelText: 'Kind',
+                  border: OutlineInputBorder(),
+                ),
+                items: <DropdownMenuItem<AgentKind>>[
+                  for (final AgentKind k in AgentKind.values)
+                    DropdownMenuItem<AgentKind>(value: k, child: Text(k.label)),
+                ],
+                onChanged: (AgentKind? v) =>
+                    setState(() => _kind = v ?? AgentKind.custom),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _desc,
+                maxLines: 2,
+                decoration: const InputDecoration(
+                  labelText: 'Description',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _schedule,
+                decoration: const InputDecoration(
+                  labelText: 'Schedule',
+                  hintText: 'e.g. every 5min, daily, on demand',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 16),
+              Row(
+                children: <Widget>[
+                  Text('Config', style: Theme.of(context).textTheme.labelLarge),
+                  const Spacer(),
+                  TextButton.icon(
+                    onPressed: () => setState(
+                        () => _config.add(_ConfigRowControllers('', ''))),
+                    icon: const Icon(Icons.add, size: 16),
+                    label: const Text('Add field'),
+                  ),
+                ],
+              ),
+              for (int i = 0; i < _config.length; i++)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: TextField(
+                          controller: _config[i].key,
+                          decoration: const InputDecoration(
+                            isDense: true,
+                            labelText: 'key',
+                            border: OutlineInputBorder(),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: TextField(
+                          controller: _config[i].value,
+                          decoration: const InputDecoration(
+                            isDense: true,
+                            labelText: 'value',
+                            border: OutlineInputBorder(),
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Remove field',
+                        icon: const Icon(Icons.close, size: 18),
+                        onPressed: () => setState(() {
+                          _config.removeAt(i).dispose();
+                        }),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+      actions: <Widget>[
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: _save,
+          child: Text(editing ? 'Save' : 'Create'),
+        ),
+      ],
+    );
+  }
+}
+
+class _ConfigRowControllers {
+  _ConfigRowControllers(String k, String v)
+      : key = TextEditingController(text: k),
+        value = TextEditingController(text: v);
+  final TextEditingController key;
+  final TextEditingController value;
+  void dispose() {
+    key.dispose();
+    value.dispose();
   }
 }
