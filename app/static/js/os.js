@@ -56,14 +56,27 @@
   // Append the embed flag that strips an app's chrome inside an OS window.
   function withEmbed(src) { return src + (src.indexOf('?') === -1 ? '?' : '&') + 'embed=1'; }
 
+  // A deep-link's context (ticker/symbol) → a short title suffix, so a window
+  // opened on a ticker reads e.g. "Trading Desk · NVDA".
+  function ctxLabel(src) {
+    try {
+      var qs = (src || '').indexOf('?'); if (qs === -1) return '';
+      var t = new URLSearchParams(src.slice(qs + 1)).get('ticker') || new URLSearchParams(src.slice(qs + 1)).get('symbol');
+      return t ? t.toUpperCase().slice(0, 12) : '';
+    } catch (e) { return ''; }
+  }
+  function titleWithCtx(title, src) { var c = ctxLabel(src); return c ? (title + ' · ' + c) : title; }
+
   function openApp(cfg, geom) {
-    var app = cfg.app;
+    var app = cfg.app, dispTitle = titleWithCtx(cfg.title, cfg.src);
     if (wins[app]) {
       var ex = wins[app];
       // A deep-link (e.g. ⌘K "NVDA") re-points an already-open window's iframe.
       if (cfg.deep && cfg.src) {
         var ifr0 = ex.querySelector('iframe'), want = withEmbed(cfg.src);
         if (ifr0 && ifr0.getAttribute('src') !== want) ifr0.setAttribute('src', want);
+        var wt0 = ex.querySelector('.wt'); if (wt0) wt0.textContent = dispTitle;   // reflect the new context
+        ex.dataset.title = dispTitle;
       }
       var wasHidden = ex.style.display === 'none';
       ex.style.display = 'flex'; if (wasHidden) animIn(ex);
@@ -72,13 +85,13 @@
     var n = order.length;
     var el = document.createElement('div');
     el.className = 'os-win active';
-    el.dataset.title = cfg.title; el.dataset.icon = cfg.icon || '🗔'; el.dataset.src = cfg.src;
+    el.dataset.title = dispTitle; el.dataset.icon = cfg.icon || '🗔'; el.dataset.src = cfg.src;
     el.style.left = (40 + n * 34) + 'px'; el.style.top = (24 + n * 28) + 'px';
     el.style.width = 'min(640px,72vw)'; el.style.height = 'min(520px,72vh)';
     if (geom) { if (geom.left) el.style.left = geom.left; if (geom.top) el.style.top = geom.top; if (geom.width) el.style.width = geom.width; if (geom.height) el.style.height = geom.height; }
     var src = withEmbed(cfg.src);
     el.innerHTML =
-      '<div class="os-bar"><span class="wi">' + (cfg.icon || '🗔') + '</span><span class="wt">' + cfg.title + '</span>' +
+      '<div class="os-bar"><span class="wi">' + (cfg.icon || '🗔') + '</span><span class="wt">' + escHtml(dispTitle) + '</span>' +
       '<a class="pop" href="' + cfg.src + '" target="_blank" rel="noopener" title="Open in new tab"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M14 4h6v6M10 14L20 4M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5"/></svg></a>' +
       '<div class="os-ctrls">' +
       '<button class="reload" title="Reload"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 4v4h-4"/></svg></button>' +
