@@ -9660,6 +9660,41 @@ def _time_decay_report_can_spawn_challenged_shadow_child(
     )
 
 
+def _refresh_duplicate_time_decay_learned_exit_child(
+    existing: Any,
+    parent: Any,
+    *,
+    cfg: dict[str, Any],
+    report: dict[str, Any] | None,
+) -> bool:
+    if not _is_time_decay_edge_miss_report(report):
+        return False
+    if (getattr(existing, "origin", "") or "").strip() != EDGE_EXIT_VARIANT_ORIGIN:
+        return False
+    current = _variant_json_dict(getattr(existing, "exit_config", None)) or {}
+    if not (
+        current.get("edge_learned_exit_v1")
+        or current.get("source") == EDGE_EXIT_CONFIG_SOURCE
+    ):
+        return False
+
+    refreshed = dict(cfg)
+    refreshed["refreshed_duplicate_label"] = True
+    refreshed["previous_total_edge_rejects"] = current.get("total_edge_rejects")
+    refreshed["previous_paper_trade_ids"] = list(current.get("paper_trade_ids") or [])[:50]
+    existing.exit_config = refreshed
+    existing.backtest_priority = max(
+        75,
+        int(getattr(existing, "backtest_priority", 0) or 0),
+        int(getattr(parent, "backtest_priority", 0) or 0),
+    )
+    if hasattr(existing, "last_backtest_at"):
+        existing.last_backtest_at = None
+    if hasattr(existing, "updated_at"):
+        existing.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    return True
+
+
 def _learned_exit_config_from_edge_report(
     parent: "ScanPattern",
     report: dict[str, Any] | None,
@@ -10369,17 +10404,6 @@ def fork_edge_learned_exit_variants(
             diagnostics["skip_reason"] = "parent_missing_or_inactive"
         return []
 
-    existing_children = (
-        db.query(ScanPattern)
-        .filter(ScanPattern.parent_id == pattern_id, ScanPattern.active.is_(True))
-        .count()
-    )
-    if existing_children >= _MAX_ACTIVE_VARIANTS:
-        if diagnostics is not None:
-            diagnostics["skip_reason"] = "max_active_variants"
-            diagnostics["active_child_count"] = int(existing_children)
-        return []
-
     report = edge_loss_report
     if report is None:
         report = _edge_debt_loss_reports(db).get(int(pattern_id))
@@ -10408,10 +10432,44 @@ def fork_edge_learned_exit_variants(
         .first()
     )
     if existing:
+        refreshed = _refresh_duplicate_time_decay_learned_exit_child(
+            existing,
+            parent,
+            cfg=cfg,
+            report=report,
+        )
+        if refreshed:
+            db.commit()
+            if diagnostics is not None:
+                diagnostics["skip_reason"] = "refreshed_duplicate_learned_exit_label"
+                diagnostics["variant_label"] = label
+                diagnostics["existing_child_id"] = int(existing.id)
+                diagnostics["refreshed_existing_child_id"] = int(existing.id)
+                diagnostics["refreshed_count"] = 1
+            logger.info(
+                "[edge_evolution] refreshed learned exit child=%s parent=%s label=%s rejects=%s",
+                existing.id,
+                pattern_id,
+                label,
+                cfg.get("total_edge_rejects"),
+            )
+            return []
         if diagnostics is not None:
             diagnostics["skip_reason"] = "duplicate_learned_exit_label"
             diagnostics["variant_label"] = label
             diagnostics["existing_child_id"] = int(existing.id)
+        return []
+
+    existing_children = (
+        db.query(ScanPattern)
+        .filter(ScanPattern.parent_id == pattern_id, ScanPattern.active.is_(True))
+        .count()
+    )
+    if existing_children >= _MAX_ACTIVE_VARIANTS:
+        if diagnostics is not None:
+            diagnostics["skip_reason"] = "max_active_variants"
+            diagnostics["active_child_count"] = int(existing_children)
+            diagnostics["variant_label"] = label
         return []
 
     child = _create_variant_child(

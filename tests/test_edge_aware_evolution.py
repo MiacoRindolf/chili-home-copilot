@@ -15,6 +15,7 @@ from app.services.trading.learning import (
     _edge_report_root_cause,
     _learned_exit_config_from_edge_report,
     _parent_eligible_for_variant_spawn,
+    _refresh_duplicate_time_decay_learned_exit_child,
     fork_edge_learned_exit_variants,
     fork_entry_variants,
 )
@@ -563,6 +564,109 @@ def test_edge_spawn_gate_keeps_hard_blocks_for_time_decay_reports():
     )
     assert ok is False
     assert reason == "parent_lifecycle_blocked:challenged"
+
+
+def test_duplicate_time_decay_learned_exit_child_refreshes_existing_shadow_child():
+    parent = SimpleNamespace(id=123, backtest_priority=42)
+    existing = SimpleNamespace(
+        id=456,
+        origin=EDGE_EXIT_VARIANT_ORIGIN,
+        exit_config={
+            "source": EDGE_EXIT_CONFIG_SOURCE,
+            "edge_learned_exit_v1": True,
+            "total_edge_rejects": 2,
+            "paper_trade_ids": [1, 2],
+        },
+        backtest_priority=10,
+        last_backtest_at=object(),
+    )
+    cfg = {
+        "source": EDGE_EXIT_CONFIG_SOURCE,
+        "edge_learned_exit_v1": True,
+        "paper_time_decay_edge_miss": True,
+        "target_reward_fraction": 0.03,
+        "stop_loss_fraction": 0.015,
+        "total_edge_rejects": 5,
+        "paper_trade_ids": [3, 4, 5],
+    }
+
+    refreshed = _refresh_duplicate_time_decay_learned_exit_child(
+        existing,
+        parent,
+        cfg=cfg,
+        report=_time_decay_edge_miss_report(total_rejects=5),
+    )
+
+    assert refreshed is True
+    assert existing.backtest_priority == 75
+    assert existing.last_backtest_at is None
+    assert existing.exit_config["refreshed_duplicate_label"] is True
+    assert existing.exit_config["previous_total_edge_rejects"] == 2
+    assert existing.exit_config["previous_paper_trade_ids"] == [1, 2]
+    assert existing.exit_config["total_edge_rejects"] == 5
+    assert existing.exit_config["paper_trade_ids"] == [3, 4, 5]
+
+
+def test_duplicate_time_decay_refresh_bypasses_max_active_child_cap():
+    parent = SimpleNamespace(
+        id=123,
+        active=True,
+        backtest_priority=42,
+        avg_winner_pct=None,
+        avg_loser_pct=None,
+        corrected_trade_count=6,
+        trade_count=6,
+    )
+    existing = SimpleNamespace(
+        id=456,
+        origin=EDGE_EXIT_VARIANT_ORIGIN,
+        exit_config={
+            "source": EDGE_EXIT_CONFIG_SOURCE,
+            "edge_learned_exit_v1": True,
+            "total_edge_rejects": 2,
+            "paper_trade_ids": [1, 2],
+        },
+        backtest_priority=10,
+        last_backtest_at=object(),
+    )
+    commits: list[bool] = []
+
+    class _Query:
+        def filter(self, *_args):
+            return self
+
+        def first(self):
+            return existing
+
+        def count(self):
+            raise AssertionError("duplicate refresh should run before max-child cap")
+
+    class _Db:
+        def get(self, _model, _id):
+            return parent
+
+        def query(self, _model):
+            return _Query()
+
+        def commit(self):
+            commits.append(True)
+
+    diag: dict = {}
+
+    ids = fork_edge_learned_exit_variants(
+        _Db(),
+        parent.id,
+        edge_loss_report=_time_decay_edge_miss_report(total_rejects=5),
+        diagnostics=diag,
+    )
+
+    assert ids == []
+    assert commits == [True]
+    assert diag["skip_reason"] == "refreshed_duplicate_learned_exit_label"
+    assert diag["existing_child_id"] == 456
+    assert existing.backtest_priority == 75
+    assert existing.last_backtest_at is None
+    assert existing.exit_config["refreshed_duplicate_label"] is True
 
 
 def test_realized_exit_geometry_prefers_edge_learned_exit_config():
