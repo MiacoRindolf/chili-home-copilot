@@ -1,6 +1,8 @@
 import inspect
 from pathlib import Path
 
+from sqlalchemy.exc import OperationalError
+
 from app import migrations
 from app.models.trading import (
     BracketReconciliationLog,
@@ -74,7 +76,63 @@ def test_divergence_probe_index_migration_registered_and_deferred():
 
     assert "CHILI_MIGRATION_BUILD_HEAVY_DIVERGENCE_INDEXES" in src
     assert "deferred heavy divergence index" in src
+    assert "startup lock pressure" in src
+    assert '"55P03"' in src
+    assert '"40P01"' in src
     assert "--target divergence-discovery --create-indexes" in src
+
+
+def test_divergence_probe_migration_defers_on_lock_pressure(monkeypatch):
+    class _Result:
+        def __init__(self, value=None):
+            self._value = value
+
+        def scalar(self):
+            return self._value
+
+    class _Orig:
+        pgcode = "55P03"
+
+    class _Conn:
+        def __init__(self):
+            self.commits = 0
+            self.rollbacks = 0
+            self.statements: list[str] = []
+
+        def execute(self, statement, _params=None):
+            sql = str(statement)
+            self.statements.append(sql)
+            if "to_regclass" in sql:
+                return _Result(None)
+            if "pg_total_relation_size" in sql:
+                return _Result(0)
+            if "CREATE INDEX" in sql:
+                raise OperationalError("CREATE INDEX", {}, _Orig())
+            return _Result(None)
+
+        def commit(self):
+            self.commits += 1
+
+        def rollback(self):
+            self.rollbacks += 1
+
+    monkeypatch.setattr(
+        migrations,
+        "_tables",
+        lambda _conn: {"trading_venue_truth_log"},
+    )
+    monkeypatch.setattr(
+        migrations,
+        "_columns",
+        lambda _conn, _table: {"trade_id", "created_at", "id"},
+    )
+
+    conn = _Conn()
+    migrations._migration_296_divergence_discovery_probe_indexes(conn)
+
+    assert any("CREATE INDEX" in statement for statement in conn.statements)
+    assert conn.rollbacks == 1
+    assert conn.commits == 1
 
 
 def test_storage_maintenance_can_build_divergence_indexes_concurrently():

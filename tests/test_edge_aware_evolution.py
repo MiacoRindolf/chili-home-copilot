@@ -756,21 +756,30 @@ def test_duplicate_time_decay_refresh_bypasses_max_active_child_cap(monkeypatch)
     )
 
     class _Query:
+        def __init__(self, db):
+            self._db = db
+
+        def options(self, *_args):
+            return self
+
         def filter(self, *_args):
             return self
 
         def first(self):
-            return existing
+            return self._db.first_results.pop(0)
 
         def count(self):
             raise AssertionError("duplicate refresh should run before max-child cap")
 
     class _Db:
+        def __init__(self):
+            self.first_results = [parent, existing]
+
         def get(self, _model, _id):
             return parent
 
         def query(self, _model):
-            return _Query()
+            return _Query(self)
 
         def commit(self):
             commits.append(True)

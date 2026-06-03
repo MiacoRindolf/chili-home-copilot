@@ -20042,6 +20042,9 @@ def _migration_295_pattern_regime_perf_pattern_asof_cover_index(conn) -> None:
 def _migration_296_divergence_discovery_probe_indexes(conn) -> None:
     """Add/defer source indexes for divergence scheduler pattern discovery."""
 
+    def _pg_error_code(exc: OperationalError) -> str:
+        return str(getattr(getattr(exc, "orig", None), "pgcode", "") or "")
+
     tables = _tables(conn)
     heavy_limit_bytes = int(
         os.environ.get(
@@ -20054,6 +20057,24 @@ def _migration_296_divergence_discovery_probe_indexes(conn) -> None:
         .strip()
         .lower()
         in {"1", "true", "yes", "on"}
+    )
+    lock_timeout_ms = max(
+        250,
+        int(
+            os.environ.get(
+                "CHILI_MIGRATION_DIVERGENCE_INDEX_LOCK_TIMEOUT_MS",
+                "1000",
+            )
+        ),
+    )
+    statement_timeout_ms = max(
+        1000,
+        int(
+            os.environ.get(
+                "CHILI_MIGRATION_DIVERGENCE_INDEX_STATEMENT_TIMEOUT_MS",
+                "10000",
+            )
+        ),
     )
     index_specs = [
         (
@@ -20138,7 +20159,31 @@ def _migration_296_divergence_discovery_probe_indexes(conn) -> None:
                 table_bytes / (1024 * 1024 * 1024),
             )
             continue
-        conn.execute(text(sql))
+        try:
+            conn.execute(
+                text("SELECT set_config('lock_timeout', :timeout, true)"),
+                {"timeout": f"{lock_timeout_ms}ms"},
+            )
+            conn.execute(
+                text("SELECT set_config('statement_timeout', :timeout, true)"),
+                {"timeout": f"{statement_timeout_ms}ms"},
+            )
+            conn.execute(text(sql))
+            conn.commit()
+        except OperationalError as exc:
+            if _pg_error_code(exc) not in {"40P01", "55P03", "57014"}:
+                raise
+            conn.rollback()
+            logger.warning(
+                "[mig296] deferred divergence index %s on %s due to "
+                "startup lock pressure (pgcode=%s); run "
+                "scripts/maintain_trading_storage.py --target "
+                "divergence-discovery --create-indexes during a maintenance "
+                "window",
+                index_name,
+                table,
+                _pg_error_code(exc),
+            )
 
     conn.commit()
     logger.info("[mig296] divergence discovery probe indexes checked")
