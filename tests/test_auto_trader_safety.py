@@ -278,6 +278,135 @@ def test_recent_live_exit_cooldown_blocks_stock_reentry(db, monkeypatch):
     assert snap["cooldown_policy"] == "stop_reentry"
 
 
+def test_recent_cost_gate_repeat_suppresses_prefetch_miss(db, monkeypatch):
+    user = models.User(name="cost_gate_repeat_prefetch_miss")
+    db.add(user)
+    db.flush()
+    settings = _minimal_settings(user.id)
+    settings.chili_autotrader_cost_gate_repeat_suppression_enabled = True
+    settings.chili_autotrader_cost_gate_repeat_suppression_minutes = 3
+    settings.chili_autotrader_cost_gate_repeat_suppression_min_edge_gap_bps = 50
+    settings.chili_autotrader_cost_gate_repeat_suppression_min_queue_pressure = 0.8
+    monkeypatch.setattr(at_mod, "settings", settings)
+
+    now = datetime.utcnow()
+    pattern = ScanPattern(name="Cost gate repeat", rules_json={}, active=True)
+    db.add(pattern)
+    db.flush()
+    alert = BreakoutAlert(
+        user_id=user.id,
+        ticker="ACS-USD",
+        asset_type="crypto",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.9,
+        price_at_alert=10.0,
+        entry_price=10.0,
+        stop_loss=9.5,
+        target_price=10.4,
+        scan_pattern_id=pattern.id,
+        alerted_at=now,
+    )
+    db.add(alert)
+    db.add(
+        AutoTraderRun(
+            user_id=user.id,
+            scan_pattern_id=pattern.id,
+            ticker="ACS-USD",
+            decision="blocked",
+            reason=at_mod.COST_GATE_COINBASE_BELOW_FEE_REASON,
+            created_at=now - timedelta(minutes=2),
+            rule_snapshot={
+                "cost_gate_edge_bps": 68,
+                "cost_gate_threshold_bps": 150,
+                "projected_profit_pct": 4.5,
+            },
+        )
+    )
+    db.commit()
+    out = {
+        "candidate_queue_pressure": 0.2,
+        "candidate_price_prefetch_enabled": True,
+        "candidate_price_prefetch_requested": 1,
+        "tick_budget_seconds": 15,
+        "_tick_started_monotonic": at_mod.time.monotonic(),
+    }
+
+    snap = at_mod._recent_cost_gate_repeat_suppression_snapshot(
+        db,
+        alert,
+        out,
+        now=now,
+    )
+
+    assert snap is not None
+    assert snap["cost_gate_repeat_reason"] == at_mod.COST_GATE_RECENT_REPEAT_REASON
+    assert snap["cost_gate_repeat_pressure"]["reasons"] == ["quote_prefetch_miss"]
+    assert snap["cost_gate_repeat_cooldown_minutes"] == 6
+    assert snap["cost_gate_repeat_edge_gap_bps"] == 82
+
+
+def test_recent_cost_gate_repeat_keeps_materially_better_alert(db, monkeypatch):
+    user = models.User(name="cost_gate_repeat_better_edge")
+    db.add(user)
+    db.flush()
+    settings = _minimal_settings(user.id)
+    settings.chili_autotrader_cost_gate_repeat_suppression_enabled = True
+    settings.chili_autotrader_cost_gate_repeat_suppression_min_edge_gap_bps = 50
+    settings.chili_autotrader_cost_gate_repeat_suppression_min_queue_pressure = 0.8
+    monkeypatch.setattr(at_mod, "settings", settings)
+
+    now = datetime.utcnow()
+    pattern = ScanPattern(name="Cost gate recheck", rules_json={}, active=True)
+    db.add(pattern)
+    db.flush()
+    alert = BreakoutAlert(
+        user_id=user.id,
+        ticker="ACS-USD",
+        asset_type="crypto",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.9,
+        price_at_alert=10.0,
+        entry_price=10.0,
+        stop_loss=9.5,
+        target_price=11.0,
+        scan_pattern_id=pattern.id,
+        alerted_at=now,
+    )
+    db.add(alert)
+    db.add(
+        AutoTraderRun(
+            user_id=user.id,
+            scan_pattern_id=pattern.id,
+            ticker="ACS-USD",
+            decision="blocked",
+            reason=at_mod.COST_GATE_COINBASE_BELOW_FEE_REASON,
+            created_at=now - timedelta(minutes=2),
+            rule_snapshot={
+                "cost_gate_edge_bps": 68,
+                "cost_gate_threshold_bps": 150,
+                "projected_profit_pct": 4.5,
+            },
+        )
+    )
+    db.commit()
+    out = {
+        "candidate_queue_pressure": 1.0,
+        "candidate_price_prefetch_enabled": True,
+        "candidate_price_prefetch_requested": 1,
+        "tick_budget_seconds": 15,
+        "_tick_started_monotonic": at_mod.time.monotonic(),
+    }
+
+    snap = at_mod._recent_cost_gate_repeat_suppression_snapshot(
+        db,
+        alert,
+        out,
+        now=now,
+    )
+
+    assert snap is None
+
+
 def test_closed_stock_session_defers_stock_without_starving_crypto(db, monkeypatch):
     user = models.User(name="stock_defer_closed")
     db.add(user)

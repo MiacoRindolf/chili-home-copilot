@@ -19,6 +19,11 @@ from ...config import (
     AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE,
     AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS,
     AUTOTRADER_DEFAULT_TICK_MAX_SECONDS,
+    AUTOTRADER_COST_GATE_REPEAT_SUPPRESSION_DEFAULT_ENABLED,
+    AUTOTRADER_COST_GATE_REPEAT_SUPPRESSION_DEFAULT_MIN_EDGE_GAP_BPS,
+    AUTOTRADER_COST_GATE_REPEAT_SUPPRESSION_DEFAULT_MINUTES,
+    AUTOTRADER_COST_GATE_REPEAT_SUPPRESSION_DEFAULT_QUEUE_PRESSURE,
+    AUTOTRADER_COST_GATE_REPEAT_SUPPRESSION_MAX_MINUTES,
     AUTOTRADER_FRESH_CANDIDATE_BURST_DEFAULT_ENABLED,
     AUTOTRADER_FRESH_CANDIDATE_FASTLANE_DEFAULT_MAX_AGE_SECONDS,
     AUTOTRADER_NON_STOCK_CANDIDATE_MAX_AGE_DEFAULT_MINUTES,
@@ -221,6 +226,8 @@ EXIT_GEOMETRY_REFRESH_REASON = "execution_stop_loss_too_wide"
 EXIT_GEOMETRY_REFRESH_SOURCE = "autotrader_execution_stop_loss_too_wide"
 COST_GATE_EXECUTION_BLOCKER = "execution_blocked"
 COST_GATE_EXECUTION_SOURCE = "autotrader_cost_gate_execution_blocked"
+COST_GATE_COINBASE_BELOW_FEE_REASON = "cost_gate:coinbase_below_fee_threshold"
+COST_GATE_RECENT_REPEAT_REASON = "cost_gate:recent_coinbase_below_fee_threshold"
 SHADOW_OBSERVATION_SIZING_MODE_BASE_RISK = "base_risk_notional"
 SHADOW_OBSERVATION_SIZING_MODE_FULL_DIAGNOSTICS = "full_diagnostics"
 SHADOW_OBSERVATION_DIAGNOSTIC_SIZING_SETTING = (
@@ -2623,6 +2630,224 @@ def _cost_gate_edge_pct_from_snapshot(
     return _snapshot_float(snap, "projected_profit_pct"), "projected_profit_pct"
 
 
+def _alert_prefetched_price_available(alert: BreakoutAlert) -> bool:
+    return _float_or_none(
+        getattr(alert, "_chili_prefetched_current_price", None)
+    ) is not None
+
+
+def _alert_static_target_edge_bps(alert: BreakoutAlert) -> int | None:
+    entry = _float_or_none(getattr(alert, "entry_price", None))
+    if entry is None:
+        entry = _float_or_none(getattr(alert, "price_at_alert", None))
+    target = _float_or_none(getattr(alert, "target_price", None))
+    if entry is None or target is None or target <= entry:
+        return None
+    return int(round(((target - entry) / entry) * 10_000.0))
+
+
+def _cost_gate_repeat_pressure_state(
+    alert: BreakoutAlert,
+    out: dict[str, Any],
+) -> dict[str, Any]:
+    queue_pressure = 0.0
+    try:
+        queue_pressure = float(out.get("candidate_queue_pressure") or 0.0)
+    except (TypeError, ValueError):
+        queue_pressure = 0.0
+    queue_pressure = max(0.0, min(1.0, queue_pressure))
+
+    min_queue_pressure = float(
+        getattr(
+            settings,
+            "chili_autotrader_cost_gate_repeat_suppression_min_queue_pressure",
+            AUTOTRADER_COST_GATE_REPEAT_SUPPRESSION_DEFAULT_QUEUE_PRESSURE,
+        )
+        or AUTOTRADER_COST_GATE_REPEAT_SUPPRESSION_DEFAULT_QUEUE_PRESSURE
+    )
+    min_queue_pressure = max(0.0, min(1.0, min_queue_pressure))
+
+    try:
+        tick_budget_s = float(out.get("tick_budget_seconds") or 0.0)
+    except (TypeError, ValueError):
+        tick_budget_s = 0.0
+    started = out.get("_tick_started_monotonic")
+    tick_elapsed_ratio = 0.0
+    if tick_budget_s > 0 and isinstance(started, (int, float)):
+        tick_elapsed_ratio = max(
+            0.0,
+            min(1.0, (time.monotonic() - float(started)) / tick_budget_s),
+        )
+
+    prefetch_enabled = bool(out.get("candidate_price_prefetch_enabled"))
+    try:
+        prefetch_requested = int(out.get("candidate_price_prefetch_requested") or 0)
+    except (TypeError, ValueError):
+        prefetch_requested = 0
+    quote_prefetch_miss = (
+        prefetch_enabled
+        and prefetch_requested > 0
+        and not _alert_prefetched_price_available(alert)
+    )
+    active_reasons: list[str] = []
+    if quote_prefetch_miss:
+        active_reasons.append("quote_prefetch_miss")
+    if queue_pressure >= min_queue_pressure:
+        active_reasons.append("queue_pressure")
+    if tick_elapsed_ratio >= 0.5:
+        active_reasons.append("tick_budget_pressure")
+
+    pressure = max(
+        queue_pressure,
+        tick_elapsed_ratio,
+        1.0 if quote_prefetch_miss else 0.0,
+    )
+    return {
+        "active": bool(active_reasons),
+        "reasons": active_reasons,
+        "queue_pressure": round(queue_pressure, 4),
+        "min_queue_pressure": round(min_queue_pressure, 4),
+        "quote_prefetch_miss": bool(quote_prefetch_miss),
+        "tick_elapsed_ratio": round(tick_elapsed_ratio, 4),
+        "pressure": round(pressure, 4),
+    }
+
+
+def _cost_gate_repeat_effective_minutes(pressure_state: dict[str, Any]) -> int:
+    try:
+        base_minutes = int(
+            getattr(
+                settings,
+                "chili_autotrader_cost_gate_repeat_suppression_minutes",
+                AUTOTRADER_COST_GATE_REPEAT_SUPPRESSION_DEFAULT_MINUTES,
+            )
+        )
+    except (TypeError, ValueError):
+        base_minutes = AUTOTRADER_COST_GATE_REPEAT_SUPPRESSION_DEFAULT_MINUTES
+    base_minutes = max(1, base_minutes)
+
+    try:
+        pressure = float(pressure_state.get("pressure") or 0.0)
+    except (TypeError, ValueError):
+        pressure = 0.0
+    pressure = max(0.0, min(1.0, pressure))
+    multiplier = 1.0 + pressure
+    if pressure_state.get("quote_prefetch_miss"):
+        multiplier = max(multiplier, 2.0)
+    return max(
+        1,
+        min(
+            AUTOTRADER_COST_GATE_REPEAT_SUPPRESSION_MAX_MINUTES,
+            int(math.ceil(base_minutes * multiplier)),
+        ),
+    )
+
+
+def _recent_cost_gate_repeat_suppression_snapshot(
+    db: Session,
+    alert: BreakoutAlert,
+    out: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any] | None:
+    if not bool(
+        getattr(
+            settings,
+            "chili_autotrader_cost_gate_repeat_suppression_enabled",
+            AUTOTRADER_COST_GATE_REPEAT_SUPPRESSION_DEFAULT_ENABLED,
+        )
+    ):
+        return None
+    ticker = str(getattr(alert, "ticker", "") or "").strip().upper()
+    if not ticker.endswith("-USD"):
+        return None
+
+    pressure_state = _cost_gate_repeat_pressure_state(alert, out)
+    if not pressure_state.get("active"):
+        return None
+
+    lookback_minutes = _cost_gate_repeat_effective_minutes(pressure_state)
+    cutoff = (now or datetime.utcnow()) - timedelta(minutes=lookback_minutes)
+    query = (
+        db.query(AutoTraderRun)
+        .filter(
+            AutoTraderRun.ticker == ticker,
+            AutoTraderRun.reason == COST_GATE_COINBASE_BELOW_FEE_REASON,
+            AutoTraderRun.created_at >= cutoff,
+        )
+        .order_by(AutoTraderRun.created_at.desc(), AutoTraderRun.id.desc())
+    )
+    pattern_id = getattr(alert, "scan_pattern_id", None)
+    if pattern_id is None:
+        query = query.filter(AutoTraderRun.scan_pattern_id.is_(None))
+    else:
+        query = query.filter(AutoTraderRun.scan_pattern_id == int(pattern_id))
+    recent = query.first()
+    if recent is None:
+        return None
+
+    snap = recent.rule_snapshot if isinstance(recent.rule_snapshot, dict) else {}
+    edge_bps_f = _snapshot_float(snap, "cost_gate_edge_bps")
+    threshold_bps_f = _snapshot_float(snap, "cost_gate_threshold_bps")
+    if edge_bps_f is None or threshold_bps_f is None:
+        return None
+    edge_bps = int(round(edge_bps_f))
+    threshold_bps = int(round(threshold_bps_f))
+    edge_gap_bps = threshold_bps - edge_bps
+    try:
+        min_gap_bps = int(
+            getattr(
+                settings,
+                "chili_autotrader_cost_gate_repeat_suppression_min_edge_gap_bps",
+                AUTOTRADER_COST_GATE_REPEAT_SUPPRESSION_DEFAULT_MIN_EDGE_GAP_BPS,
+            )
+        )
+    except (TypeError, ValueError):
+        min_gap_bps = AUTOTRADER_COST_GATE_REPEAT_SUPPRESSION_DEFAULT_MIN_EDGE_GAP_BPS
+    min_gap_bps = max(1, min_gap_bps)
+    if edge_gap_bps < min_gap_bps:
+        return None
+
+    current_static_edge_bps = _alert_static_target_edge_bps(alert)
+    prior_projected_pct = _snapshot_float(snap, "projected_profit_pct")
+    prior_projected_bps = (
+        int(round(prior_projected_pct * 100.0))
+        if prior_projected_pct is not None
+        else None
+    )
+    if (
+        current_static_edge_bps is not None
+        and prior_projected_bps is not None
+        and current_static_edge_bps > prior_projected_bps + min_gap_bps
+    ):
+        return None
+
+    source_created_at = getattr(recent, "created_at", None)
+    return {
+        "cost_gate_repeat_suppressed": True,
+        "cost_gate_repeat_reason": COST_GATE_RECENT_REPEAT_REASON,
+        "cost_gate_repeat_source_reason": COST_GATE_COINBASE_BELOW_FEE_REASON,
+        "cost_gate_repeat_source_run_id": getattr(recent, "id", None),
+        "cost_gate_repeat_source_alert_id": getattr(recent, "breakout_alert_id", None),
+        "cost_gate_repeat_source_created_at": (
+            source_created_at.isoformat()
+            if hasattr(source_created_at, "isoformat")
+            else None
+        ),
+        "cost_gate_repeat_cooldown_minutes": lookback_minutes,
+        "cost_gate_repeat_pressure": pressure_state,
+        "cost_gate_repeat_edge_bps": edge_bps,
+        "cost_gate_repeat_threshold_bps": threshold_bps,
+        "cost_gate_repeat_edge_gap_bps": edge_gap_bps,
+        "cost_gate_repeat_min_edge_gap_bps": min_gap_bps,
+        "cost_gate_repeat_current_static_edge_bps": current_static_edge_bps,
+        "cost_gate_repeat_prior_projected_bps": prior_projected_bps,
+        "cost_gate_edge_bps": edge_bps,
+        "cost_gate_threshold_bps": threshold_bps,
+        "cost_gate_edge_gap_bps": edge_gap_bps,
+    }
+
+
 def _cost_gate_venue_from_selector_decision(decision: Any) -> str | None:
     venue = str(getattr(decision, "venue", "") or "").strip().lower()
     if venue in {"rh", "robinhood"}:
@@ -4940,6 +5165,29 @@ def _process_one_alert(
         # Defense-in-depth: never let the regime gate's wiring error block
         # an alert. The gate is an additive safety, not a critical path.
         logger.debug("[regime_gate] eval skipped due to error: %s", _rg_exc)
+
+    cost_gate_repeat_snap = _recent_cost_gate_repeat_suppression_snapshot(
+        db,
+        alert,
+        out,
+    )
+    if cost_gate_repeat_snap is not None:
+        _audit(
+            db,
+            user_id=uid,
+            alert=alert,
+            decision="blocked",
+            reason=COST_GATE_RECENT_REPEAT_REASON,
+            rule_snapshot=cost_gate_repeat_snap,
+        )
+        out["skipped"] += 1
+        _autotrader_tick_note(
+            out,
+            kind="blocked",
+            reason=COST_GATE_RECENT_REPEAT_REASON,
+            alert=alert,
+        )
+        return
 
     px = _current_price_for_alert(alert)
     if px is None:

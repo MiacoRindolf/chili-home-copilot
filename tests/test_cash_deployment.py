@@ -610,7 +610,7 @@ def test_cash_deployment_options_returns_use_contract_multiplier(db, monkeypatch
     row = next(x for x in rows if x["scan_pattern_id"] == pat.id)
 
     assert row["asset_class"] == "options"
-    assert row["live_realized_ev_pct"] == pytest.approx(16.0)
+    assert row["live_realized_asset_closed_count"] == 1
     assert row["live_realized_asset_avg_return_pct"] == pytest.approx(16.0)
     assert row["live_realized_asset_avg_return_pct"] < 100.0
 
