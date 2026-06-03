@@ -28,6 +28,11 @@ _scheduler: BackgroundScheduler | None = None
 _lock = threading.Lock()
 
 _VIABILITY_BRIDGE_MAX_TICKERS = 30
+_BASELINE_AUDIT_SKIP_JOB_IDS = frozenset({"neural_mesh_drain"})
+
+
+def _should_write_scheduler_baseline_audit(job_id: str) -> bool:
+    return str(job_id or "").strip() not in _BASELINE_AUDIT_SKIP_JOB_IDS
 
 
 def _learning_status_blocks_market_snapshots(
@@ -219,31 +224,37 @@ def run_scheduler_job_guarded(job_id: str, fn: Callable[[], None]) -> None:
     # Open a baseline batch_job row for ops visibility. Best-effort.
     _wrapper_jid = None
     _wrapper_db = None
-    try:
-        from ..db import SessionLocal as _SL
-        from .trading.brain_batch_job_log import (
-            brain_batch_job_begin as _bbj_begin,
-            brain_batch_job_finish as _bbj_finish,
-        )
-        from ..config import settings as _s
-        _uid = getattr(_s, "brain_default_user_id", None)
-        _wrapper_db = _SL()
-        _wrapper_jid = _bbj_begin(_wrapper_db, job_id, user_id=_uid)
-        _wrapper_db.commit()
-    except Exception:
+    if _should_write_scheduler_baseline_audit(job_id):
+        try:
+            from ..db import SessionLocal as _SL
+            from .trading.brain_batch_job_log import (
+                brain_batch_job_begin as _bbj_begin,
+                brain_batch_job_finish as _bbj_finish,
+            )
+            from ..config import settings as _s
+            _uid = getattr(_s, "brain_default_user_id", None)
+            _wrapper_db = _SL()
+            _wrapper_jid = _bbj_begin(_wrapper_db, job_id, user_id=_uid)
+            _wrapper_db.commit()
+        except Exception:
+            logger.debug(
+                "[scheduler_job] job_id=%s baseline batch_job_begin failed; "
+                "job will run without operator-visible audit row",
+                job_id,
+                exc_info=True,
+            )
+            if _wrapper_db is not None:
+                try:
+                    _wrapper_db.close()
+                except Exception:
+                    pass
+                _wrapper_db = None
+            _wrapper_jid = None
+    else:
         logger.debug(
-            "[scheduler_job] job_id=%s baseline batch_job_begin failed; "
-            "job will run without operator-visible audit row",
+            "[scheduler_job] job_id=%s baseline batch_job skipped reason=high_frequency",
             job_id,
-            exc_info=True,
         )
-        if _wrapper_db is not None:
-            try:
-                _wrapper_db.close()
-            except Exception:
-                pass
-            _wrapper_db = None
-        _wrapper_jid = None
 
     try:
         fn()
