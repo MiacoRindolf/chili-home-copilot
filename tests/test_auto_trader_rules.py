@@ -1137,11 +1137,18 @@ def test_evaluate_entry_edge_blocks_thin_margin_after_empirical_cost():
             return self._first
 
     class _Db:
+        def __init__(self):
+            self.sqls = []
+            self.params = []
+
         def execute(self, sql, params=None):
             text = str(sql)
+            self.sqls.append(text)
+            self.params.append(params or {})
             if "trading_execution_cost_estimates" in text:
                 return _Result(
                     first={
+                        "side": "long",
                         "sample_trades": 12,
                         "p90_spread_bps": 25.0,
                         "p90_slippage_bps": 100.0,
@@ -1168,9 +1175,10 @@ def test_evaluate_entry_edge_blocks_thin_margin_after_empirical_cost():
         chili_autotrader_min_expected_net_after_empirical_cost_pct=0.25,
         chili_coinbase_cost_gate_min_tca_samples=5,
     )
+    db = _Db()
 
     decision = evaluate_entry_edge(
-        _Db(),
+        db,
         alert,
         settings=settings,
         pat_ctx={},
@@ -1180,10 +1188,15 @@ def test_evaluate_entry_edge_blocks_thin_margin_after_empirical_cost():
     assert not decision.allowed
     assert decision.reason == "empirical_cost_edge_margin_too_thin"
     assert decision.snapshot["empirical_cost_used"] is True
+    assert decision.snapshot["empirical_cost"]["matched_side"] == "long"
+    assert decision.snapshot["empirical_cost"]["side_aliases"] == ["long", "buy"]
     assert decision.snapshot["empirical_cost"]["total_cost_bps"] == 125.0
     assert decision.snapshot["expected_net_pct"] == pytest.approx(0.15)
     assert decision.snapshot["min_expected_net_after_empirical_cost_pct"] == 0.25
     assert decision.snapshot["empirical_cost_edge_margin_pct"] == pytest.approx(-0.1)
+    assert "LOWER(side) IN ('long', 'buy')" in db.sqls[0]
+    assert "COALESCE(sample_trades, 0) >= :min_samples" in db.sqls[0]
+    assert db.params[0]["min_samples"] == 5
 
 
 def test_evaluate_entry_edge_guards_probability_sample_count_to_closed_trades():

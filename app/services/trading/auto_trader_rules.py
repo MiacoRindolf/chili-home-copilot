@@ -1700,42 +1700,62 @@ def _empirical_entry_cost_fraction(
     still adds explicit fee protection downstream.
     """
     try:
-        from sqlalchemy import text
-
-        row = db.execute(text("""
-            SELECT sample_trades, p90_spread_bps, p90_slippage_bps,
-                   median_spread_bps, median_slippage_bps, last_updated_at
-            FROM trading_execution_cost_estimates
-            WHERE UPPER(ticker) = UPPER(:ticker)
-              AND LOWER(side) = 'buy'
-            ORDER BY last_updated_at DESC
-            LIMIT 1
-        """), {"ticker": ticker}).mappings().first()
-    except Exception:
-        return 0.0, {"used": False, "reason": "query_failed"}
-    if (
-        not row
-        or not hasattr(row, "get")
-        or row.__class__.__module__.startswith("unittest.mock")
-    ):
-        return 0.0, {"used": False, "reason": "no_estimate"}
-
-    try:
-        samples = int(row.get("sample_trades") or 0)
-    except (TypeError, ValueError):
-        samples = 0
-    try:
         min_samples = max(
             1, int(getattr(settings, "chili_coinbase_cost_gate_min_tca_samples", 5))
         )
     except Exception:
         min_samples = 5
+    try:
+        from sqlalchemy import text
+
+        row = db.execute(text("""
+            SELECT side, sample_trades, p90_spread_bps, p90_slippage_bps,
+                   median_spread_bps, median_slippage_bps, last_updated_at
+            FROM trading_execution_cost_estimates
+            WHERE UPPER(ticker) = UPPER(:ticker)
+              AND LOWER(side) IN ('long', 'buy')
+            ORDER BY
+              CASE
+                WHEN COALESCE(sample_trades, 0) >= :min_samples THEN 0
+                ELSE 1
+              END,
+              CASE
+                WHEN LOWER(side) = 'long' THEN 0
+                WHEN LOWER(side) = 'buy' THEN 1
+                ELSE 2
+              END,
+              last_updated_at DESC
+            LIMIT 1
+        """), {"ticker": ticker, "min_samples": min_samples}).mappings().first()
+    except Exception:
+        return 0.0, {
+            "used": False,
+            "reason": "query_failed",
+            "side_aliases": ["long", "buy"],
+        }
+    if (
+        not row
+        or not hasattr(row, "get")
+        or row.__class__.__module__.startswith("unittest.mock")
+    ):
+        return 0.0, {
+            "used": False,
+            "reason": "no_estimate",
+            "side_aliases": ["long", "buy"],
+        }
+
+    try:
+        samples = int(row.get("sample_trades") or 0)
+    except (TypeError, ValueError):
+        samples = 0
     if samples < min_samples:
         return 0.0, {
             "used": False,
             "reason": "insufficient_samples",
             "sample_trades": samples,
             "min_samples": min_samples,
+            "matched_side": row.get("side"),
+            "side_aliases": ["long", "buy"],
         }
 
     def _bps(name: str) -> float:
@@ -1751,6 +1771,8 @@ def _empirical_entry_cost_fraction(
     last_updated = row.get("last_updated_at")
     return total_bps / 10000.0, {
         "used": True,
+        "matched_side": row.get("side"),
+        "side_aliases": ["long", "buy"],
         "sample_trades": samples,
         "p90_spread_bps": p90_spread,
         "p90_slippage_bps": p90_slip,
