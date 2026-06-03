@@ -31,12 +31,26 @@ from app.services.trading.momentum_neural.paper_fsm import (
     assert_transition,
     can_transition,
 )
-from app.services.trading.momentum_neural.paper_runner import list_runnable_paper_sessions, tick_paper_session
+from app.services.trading.momentum_neural.paper_runner import (
+    _execution_readiness_costs,
+    list_runnable_paper_sessions,
+    tick_paper_session,
+)
 from app.services.trading.momentum_neural.risk_policy import RISK_SNAPSHOT_KEY
 from app.services.trading.momentum_neural.automation_query import cancel_automation_session
 from app.services.trading.momentum_neural.persistence import ensure_momentum_strategy_variants
 
 PAPER_FILL_SYMBOL = "SIM-USD"
+
+
+def test_execution_readiness_costs_preserve_explicit_zero_costs() -> None:
+    assert _execution_readiness_costs(
+        {
+            "spread_bps": 0.0,
+            "slippage_estimate_bps": 0.0,
+            "fee_to_target_ratio": 0.0,
+        }
+    ) == (0.0, 0.0, 0.0)
 
 
 def _seed_live_eligible_row(db: Session, *, symbol: str = "SOL-USD") -> tuple[int, MomentumStrategyVariant]:

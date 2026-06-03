@@ -12,6 +12,7 @@ Risk snapshot contract (do not violate in future phases):
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
@@ -83,6 +84,27 @@ QuoteFn = Callable[[str], dict[str, Any]]
 
 def _utcnow() -> datetime:
     return datetime.utcnow()
+
+
+def _finite_float_or_default(value: Any, default: float) -> float:
+    if isinstance(value, bool) or value is None:
+        return default
+    try:
+        out = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if not math.isfinite(out):
+        return default
+    return out
+
+
+def _execution_readiness_costs(execution_readiness: Any) -> tuple[float, float, float]:
+    ex = execution_readiness if isinstance(execution_readiness, dict) else {}
+    return (
+        _finite_float_or_default(ex.get("spread_bps"), 12.0),
+        _finite_float_or_default(ex.get("slippage_estimate_bps"), 10.0),
+        _finite_float_or_default(ex.get("fee_to_target_ratio"), 0.08),
+    )
 
 
 def _effective_viability(via: MomentumSymbolViability, max_age_sec: float) -> float:
@@ -569,19 +591,7 @@ def tick_paper_session(
         family_id=variant.family if variant is not None else None,
     )
 
-    ex = via.execution_readiness_json if isinstance(via.execution_readiness_json, dict) else {}
-    try:
-        spread_bps = float(ex.get("spread_bps") or 12.0)
-    except (TypeError, ValueError):
-        spread_bps = 12.0
-    try:
-        slip_bps = float(ex.get("slippage_estimate_bps") or 10.0)
-    except (TypeError, ValueError):
-        slip_bps = 10.0
-    try:
-        fee_ratio = float(ex.get("fee_to_target_ratio") or 0.08)
-    except (TypeError, ValueError):
-        fee_ratio = 0.08
+    spread_bps, slip_bps, fee_ratio = _execution_readiness_costs(via.execution_readiness_json)
 
     caps = _policy_caps(snap)
     try:
