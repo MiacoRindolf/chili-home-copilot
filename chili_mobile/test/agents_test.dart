@@ -4,6 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:chili_mobile/src/agents/agent.dart';
 import 'package:chili_mobile/src/agents/agent_control_service.dart';
+import 'package:chili_mobile/src/agents/agent_event.dart';
 import 'package:chili_mobile/src/agents/agent_persistence.dart';
 import 'package:chili_mobile/src/agents/agent_registry.dart';
 import 'package:chili_mobile/src/agents/agent_status_service.dart';
@@ -599,6 +600,101 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(r.byId('my-bot'), isNull);
+    });
+  });
+
+  group('Activity log (AGT-5)', () {
+    test('start/stop/runOnce record action events (newest first)', () {
+      final AgentRegistry r = AgentRegistry();
+      const String id = 'auto-trader';
+      expect(r.events(id), isEmpty);
+      r.start(id);
+      r.runOnce(id);
+      r.stop(id);
+      final List<AgentEvent> log = r.events(id);
+      expect(log.map((AgentEvent e) => e.message).toList(),
+          <String>['Stopped', 'Ran once', 'Started']);
+      expect(log.every((AgentEvent e) => e.kind == AgentEventKind.action), isTrue);
+    });
+
+    test('start while already running records nothing extra', () {
+      final AgentRegistry r = AgentRegistry();
+      r.start('auto-trader');
+      r.start('auto-trader'); // no-op
+      expect(r.events('auto-trader').length, 1);
+    });
+
+    test('setEnabled records, and no-ops do not', () {
+      final AgentRegistry r = AgentRegistry();
+      r.setEnabled('auto-trader', true); // already enabled → no event
+      expect(r.events('auto-trader'), isEmpty);
+      r.setEnabled('auto-trader', false);
+      expect(r.events('auto-trader').first.message, 'Disabled');
+    });
+
+    test('setConfig records the change; same value is a no-op', () {
+      final AgentRegistry r = AgentRegistry();
+      r.setConfig('auto-trader', 'tick_interval_s', '5');
+      expect(r.events('auto-trader').first.message, 'Set tick_interval_s = 5');
+      expect(r.events('auto-trader').first.kind, AgentEventKind.config);
+      r.setConfig('auto-trader', 'tick_interval_s', '5'); // unchanged
+      expect(r.events('auto-trader').length, 1);
+    });
+
+    test('applyLiveStatus records a transition, not a repeat', () {
+      final AgentRegistry r = AgentRegistry();
+      r.applyLiveStatus('learning-cycle', AgentStatus.running);
+      expect(r.events('learning-cycle').first.message, 'Status → Running');
+      expect(r.events('learning-cycle').first.kind, AgentEventKind.status);
+      r.applyLiveStatus('learning-cycle', AgentStatus.running); // same → no-op
+      expect(r.events('learning-cycle').length, 1);
+    });
+
+    test('log is capped at 40, keeping the newest', () {
+      final AgentRegistry r = AgentRegistry();
+      for (int i = 0; i < 45; i++) {
+        r.setConfig('auto-trader', 'tick_interval_s', '$i');
+      }
+      final List<AgentEvent> log = r.events('auto-trader');
+      expect(log.length, 40);
+      expect(log.first.message, 'Set tick_interval_s = 44'); // newest
+    });
+
+    test('removing a custom agent clears its log', () {
+      final AgentRegistry r = AgentRegistry();
+      r.addCustom(const Agent(
+          id: 'c1', name: 'C1', kind: AgentKind.custom, description: 'd'));
+      r.start('c1');
+      expect(r.events('c1'), isNotEmpty);
+      r.remove('c1');
+      expect(r.events('c1'), isEmpty);
+    });
+
+    testWidgets('a Start action shows up in Recent activity', (WidgetTester tester) async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      // A custom agent uses the local control path (built-ins like auto-trader
+      // are routed to the backend in AGT-3).
+      final AgentRegistry r = AgentRegistry(seed: <Agent>[
+        const Agent(
+          id: 'c1',
+          name: 'C1',
+          kind: AgentKind.custom,
+          description: 'mine',
+          builtin: false,
+        ),
+      ]);
+      await tester.pumpWidget(MaterialApp(
+        home: AgentsScreen(registry: r, livePolling: false),
+      ));
+      await tester.pumpAndSettle();
+
+      expect(find.text('No activity yet this session.'), findsOneWidget);
+      await tester.tap(find.widgetWithText(FilledButton, 'Start'));
+      await tester.pumpAndSettle();
+
+      expect(r.events('c1').first.message, 'Started');
+      expect(find.text('Recent activity'.toUpperCase()), findsOneWidget);
+      expect(find.text('Started'), findsOneWidget);
     });
   });
 }
