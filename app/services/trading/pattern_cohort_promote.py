@@ -21,6 +21,8 @@ A pattern is eligible for broker-blocked observation if:
   ranks the pattern as a top CPCV/DSR/PBO near-miss
 - enough recent live exits with mostly reconciler/unknown attribution block
   cohort staging until exit provenance improves
+- enough recent live trades whose entry+exit TCA consumes the expected entry
+  edge block cohort staging until the venue/order geometry improves
 - directional outcomes are NOT required; ``shadow_promoted`` is the
   broker-blocked observation stage that collects them
 - ``quality_composite_score`` is optional; scored candidates rank first,
@@ -294,6 +296,31 @@ def select_cohort_candidates(
         if _is_number(raw_low_confidence_floor)
         else 0.50
     )
+    min_tca_edge_samples = max(
+        1,
+        int(getattr(
+            settings_,
+            "chili_cohort_promote_min_tca_edge_samples_for_floor",
+            min_n_floor,
+        )),
+    )
+    raw_tca_consumed_floor = getattr(
+        settings_, "chili_cohort_promote_tca_consumed_expected_edge_rate_floor", 0.50,
+    )
+    tca_consumed_expected_edge_rate_floor = (
+        _clip(float(raw_tca_consumed_floor))
+        if _is_number(raw_tca_consumed_floor)
+        else 0.50
+    )
+    raw_unverified_tca_outlier_bps = getattr(
+        settings_, "brain_execution_cost_unverified_tca_outlier_bps", 500.0,
+    )
+    unverified_tca_outlier_bps = (
+        float(raw_unverified_tca_outlier_bps)
+        if _is_number(raw_unverified_tca_outlier_bps)
+        and float(raw_unverified_tca_outlier_bps) > 0.0
+        else 500.0
+    )
 
     # Do not require directional outcomes here. shadow_promoted is the
     # observation stage that lets a pattern collect those outcomes without
@@ -301,6 +328,7 @@ def select_cohort_candidates(
     # Stored promotion_gate_passed is honored, and a separate pool-relative
     # CPCV bootstrap policy can also admit near-misses for shadow-only
     # observation when the stored gate is stale or path-count constrained.
+    numeric_pattern = r"^[+-]?((\d+(\.\d*)?)|(\.\d+))([eE][+-]?\d+)?$"
     sql = text(f"""
         WITH eligible_patterns AS (
             SELECT
@@ -351,10 +379,71 @@ def select_cohort_candidates(
               AND t.exit_date > NOW() - make_interval(days => :window_days)
               AND {clean_live_pattern_ev_exit_filter_sql("t")}
         ),
+        execution_edge_samples AS (
+            SELECT
+                t.scan_pattern_id,
+                CASE
+                    WHEN (t.indicator_snapshot -> 'entry_edge' ->> 'expected_net_pct') ~ :numeric_pattern
+                        THEN (t.indicator_snapshot -> 'entry_edge' ->> 'expected_net_pct')::float
+                    WHEN (t.indicator_snapshot ->> 'entry_edge_expected_net_pct') ~ :numeric_pattern
+                        THEN (t.indicator_snapshot ->> 'entry_edge_expected_net_pct')::float
+                    WHEN (t.indicator_snapshot -> 'entry_execution' ->> 'entry_edge_expected_net_pct') ~ :numeric_pattern
+                        THEN (t.indicator_snapshot -> 'entry_execution' ->> 'entry_edge_expected_net_pct')::float
+                    ELSE NULL
+                END AS expected_net_pct,
+                CASE
+                    WHEN t.tca_entry_slippage_bps IS NULL
+                      OR t.tca_exit_slippage_bps IS NULL
+                        THEN NULL
+                    WHEN (t.tca_entry_slippage_bps::text !~ :numeric_pattern)
+                      OR (t.tca_exit_slippage_bps::text !~ :numeric_pattern)
+                        THEN NULL
+                    WHEN (
+                        (
+                               ABS(t.tca_entry_slippage_bps) <= :unverified_tca_outlier_bps
+                            OR t.avg_fill_price > 0
+                            OR BTRIM(COALESCE(t.broker_order_id, '')) <> ''
+                            OR LOWER(BTRIM(COALESCE(t.broker_status, ''))) IN ('filled', 'partially_filled')
+                        )
+                        AND (
+                               ABS(t.tca_exit_slippage_bps) <= :unverified_tca_outlier_bps
+                            OR t.avg_fill_price > 0
+                            OR BTRIM(COALESCE(t.broker_order_id, '')) <> ''
+                            OR LOWER(BTRIM(COALESCE(t.broker_status, ''))) IN ('filled', 'partially_filled')
+                        )
+                    )
+                        THEN (t.tca_entry_slippage_bps + t.tca_exit_slippage_bps) / 100.0
+                    ELSE NULL
+                END AS tca_cost_pct
+            FROM trading_trades t
+            JOIN eligible_patterns ep ON ep.id = t.scan_pattern_id
+            WHERE t.scan_pattern_id IS NOT NULL
+              AND t.scan_pattern_id != -1
+              AND t.status = 'closed'
+              AND t.exit_date > NOW() - make_interval(days => :window_days)
+        ),
+        execution_edge_quality AS (
+            SELECT
+                scan_pattern_id,
+                COUNT(*) FILTER (
+                    WHERE expected_net_pct > 0.0
+                ) AS positive_expected_edge_events,
+                COUNT(*) FILTER (
+                    WHERE expected_net_pct > 0.0
+                      AND tca_cost_pct IS NOT NULL
+                ) AS tca_adjusted_expected_edge_events,
+                COUNT(*) FILTER (
+                    WHERE expected_net_pct > 0.0
+                      AND tca_cost_pct IS NOT NULL
+                      AND tca_cost_pct >= expected_net_pct
+                ) AS tca_consumed_expected_edge_events
+            FROM execution_edge_samples
+            GROUP BY scan_pattern_id
+        ),
         realized AS (
             SELECT scan_pattern_id,
                    COUNT(realized_return_frac) AS n_realized,
-                   AVG(realized_return_frac) AS avg_pnl_pct
+                   AVG(realized_return_frac * 100.0) AS avg_pnl_pct
             FROM realized_samples
             WHERE realized_return_frac IS NOT NULL
             GROUP BY scan_pattern_id
@@ -370,6 +459,7 @@ def select_cohort_candidates(
         FROM eligible_patterns sp
         LEFT JOIN realized r ON r.scan_pattern_id = sp.id
         LEFT JOIN live_exit_quality eq ON eq.scan_pattern_id = sp.id
+        LEFT JOIN execution_edge_quality xq ON xq.scan_pattern_id = sp.id
         WHERE (
               COALESCE(r.n_realized, 0) < :min_n_floor
               OR r.avg_pnl_pct > :max_negative_pct
@@ -382,6 +472,14 @@ def select_cohort_candidates(
                   / NULLIF(eq.live_realized_exit_count, 0)
               ) >= :low_confidence_exit_rate_floor
           )
+          AND NOT (
+              COALESCE(xq.positive_expected_edge_events, 0) >= :min_tca_edge_samples
+              AND COALESCE(xq.tca_adjusted_expected_edge_events, 0) >= :min_tca_edge_samples
+              AND (
+                  COALESCE(xq.tca_consumed_expected_edge_events, 0)::float
+                  / NULLIF(xq.positive_expected_edge_events, 0)
+              ) >= :tca_consumed_expected_edge_rate_floor
+          )
         """
     )
     rows = [dict(r) for r in db.execute(
@@ -391,6 +489,12 @@ def select_cohort_candidates(
             "min_n_floor": min_n_floor,
             "max_negative_pct": max_negative_pct,
             "low_confidence_exit_rate_floor": low_confidence_exit_rate_floor,
+            "min_tca_edge_samples": min_tca_edge_samples,
+            "numeric_pattern": numeric_pattern,
+            "tca_consumed_expected_edge_rate_floor": (
+                tca_consumed_expected_edge_rate_floor
+            ),
+            "unverified_tca_outlier_bps": unverified_tca_outlier_bps,
         },
     ).mappings().all()]
     bootstrap = _bootstrap_policy(rows, settings_=settings_)

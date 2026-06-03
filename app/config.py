@@ -4180,6 +4180,24 @@ class Settings(BaseSettings):
             "CHILI_COHORT_PROMOTE_MAX_REALIZED_AVG_PNL_PCT_NEGATIVE"
         ),
     )
+    chili_cohort_promote_low_confidence_exit_rate_floor: float = Field(
+        default=0.50,
+        validation_alias=AliasChoices(
+            "CHILI_COHORT_PROMOTE_LOW_CONFIDENCE_EXIT_RATE_FLOOR"
+        ),
+    )
+    chili_cohort_promote_min_tca_edge_samples_for_floor: int = Field(
+        default=5,
+        validation_alias=AliasChoices(
+            "CHILI_COHORT_PROMOTE_MIN_TCA_EDGE_SAMPLES_FOR_FLOOR"
+        ),
+    )
+    chili_cohort_promote_tca_consumed_expected_edge_rate_floor: float = Field(
+        default=0.50,
+        validation_alias=AliasChoices(
+            "CHILI_COHORT_PROMOTE_TCA_CONSUMED_EXPECTED_EDGE_RATE_FLOOR"
+        ),
+    )
     # Legacy knobs kept for env compatibility. The active cohort selector now
     # fills the adaptive roster target from chili_cpcv_target_promotion_pool_pct
     # instead of fixed top-N / weekly caps.

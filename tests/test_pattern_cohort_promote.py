@@ -22,6 +22,7 @@ Integration (DB; ``_test``-suffixed):
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
@@ -105,7 +106,7 @@ def test_select_cohort_candidates_counts_only_computable_realized_returns():
         settings_=_settings_stub(
             chili_cohort_score_realized_window_days=45,
             chili_cohort_promote_min_realized_trades_for_floor=5,
-            chili_cohort_promote_max_realized_avg_pnl_pct_negative=-0.01,
+            chili_cohort_promote_max_realized_avg_pnl_pct_negative=-1.0,
         ),
     )
 
@@ -114,13 +115,26 @@ def test_select_cohort_candidates_counts_only_computable_realized_returns():
     assert "WITH eligible_patterns AS" in sql
     assert "live_exit_quality AS" in sql
     assert "realized_samples AS" in sql
+    assert "execution_edge_samples AS" in sql
+    assert "execution_edge_quality AS" in sql
     assert "FROM trading_trades t" in sql
     assert "JOIN eligible_patterns ep ON ep.id = t.scan_pattern_id" in sql
     assert "COUNT(realized_return_frac) AS n_realized" in sql
-    assert "AVG(realized_return_frac) AS avg_pnl_pct" in sql
+    assert "AVG(realized_return_frac * 100.0) AS avg_pnl_pct" in sql
     assert "COUNT(*) AS live_realized_exit_count" in sql
     assert "live_low_confidence_exit_count" in sql
+    assert "positive_expected_edge_events" in sql
+    assert "tca_adjusted_expected_edge_events" in sql
+    assert "tca_consumed_expected_edge_events" in sql
+    assert "t.indicator_snapshot -> 'entry_edge' ->> 'expected_net_pct'" in sql
+    assert "t.indicator_snapshot ->> 'entry_edge_expected_net_pct'" in sql
+    assert (
+        "t.indicator_snapshot -> 'entry_execution' ->> "
+        "'entry_edge_expected_net_pct'"
+    ) in sql
+    assert "tca_consumed_expected_edge_rate_floor" in sql
     assert "LEFT JOIN live_exit_quality eq ON eq.scan_pattern_id = sp.id" in sql
+    assert "LEFT JOIN execution_edge_quality xq ON xq.scan_pattern_id = sp.id" in sql
     assert "low_confidence_exit_rate_floor" in sql
     assert "WHERE realized_return_frac IS NOT NULL" in sql
     assert "t.filled_quantity" in sql
@@ -133,8 +147,11 @@ def test_select_cohort_candidates_counts_only_computable_realized_returns():
     assert "COUNT(*) AS n_realized" not in sql
     assert db.params["window_days"] == 45
     assert db.params["min_n_floor"] == 5
-    assert db.params["max_negative_pct"] == -0.01
+    assert db.params["max_negative_pct"] == -1.0
     assert db.params["low_confidence_exit_rate_floor"] == 0.5
+    assert db.params["min_tca_edge_samples"] == 5
+    assert db.params["tca_consumed_expected_edge_rate_floor"] == 0.5
+    assert db.params["unverified_tca_outlier_bps"] == 500.0
 
 
 def test_compute_with_full_evidence_uses_all_5_weights():
@@ -459,8 +476,22 @@ def _seed_directional_outcomes(
     db.commit()
 
 
-def _seed_closed_trades(db, *, pattern_id, n=5, pnl_pct=0.02, exit_reason="target"):
+def _seed_closed_trades(
+    db,
+    *,
+    pattern_id,
+    n=5,
+    pnl_pct=0.02,
+    exit_reason="target",
+    indicator_snapshot=None,
+    tca_entry_slippage_bps=None,
+    tca_exit_slippage_bps=None,
+    broker_status=None,
+):
     now = datetime.utcnow().replace(microsecond=0)
+    snapshot_json = (
+        json.dumps(indicator_snapshot) if indicator_snapshot is not None else None
+    )
     for i in range(n):
         entry_price = 100.0
         quantity = 1.0
@@ -469,10 +500,14 @@ def _seed_closed_trades(db, *, pattern_id, n=5, pnl_pct=0.02, exit_reason="targe
             """
             INSERT INTO trading_trades (
                 scan_pattern_id, ticker, direction, entry_price, exit_price,
-                quantity, entry_date, exit_date, status, pnl, exit_reason
+                quantity, entry_date, exit_date, status, pnl, exit_reason,
+                indicator_snapshot, tca_entry_slippage_bps, tca_exit_slippage_bps,
+                broker_status
             ) VALUES (
                 :pid, 'TEST', 'long', :entry_price, :exit_price,
-                :quantity, :entry_date, :exit_date, 'closed', :pnl, :exit_reason
+                :quantity, :entry_date, :exit_date, 'closed', :pnl, :exit_reason,
+                CAST(:indicator_snapshot AS jsonb), :tca_entry_slippage_bps,
+                :tca_exit_slippage_bps, :broker_status
             )
             """
         ), {
@@ -484,6 +519,10 @@ def _seed_closed_trades(db, *, pattern_id, n=5, pnl_pct=0.02, exit_reason="targe
             "exit_date": now - timedelta(days=i + 1),
             "pnl": pnl,
             "exit_reason": exit_reason,
+            "indicator_snapshot": snapshot_json,
+            "tca_entry_slippage_bps": tca_entry_slippage_bps,
+            "tca_exit_slippage_bps": tca_exit_slippage_bps,
+            "broker_status": broker_status,
         })
     db.commit()
 
@@ -629,6 +668,52 @@ def test_eligibility_blocks_when_live_exits_are_low_confidence(db):
 
     assert p_clean.id in cand_ids
     assert p_uncertain.id not in cand_ids
+
+
+def test_eligibility_blocks_when_tca_consumes_expected_entry_edge(db):
+    _truncate_phase4_state(db)
+    p_consumed = _make_pattern(
+        db,
+        name="edge_consumed_by_tca",
+        cpcv=2.0,
+        quality_score=0.8,
+        promotion_gate=True,
+    )
+    _seed_closed_trades(
+        db,
+        pattern_id=p_consumed.id,
+        n=6,
+        pnl_pct=0.03,
+        exit_reason="target",
+        indicator_snapshot={"entry_edge_expected_net_pct": 1.2},
+        tca_entry_slippage_bps=100.0,
+        tca_exit_slippage_bps=30.0,
+        broker_status="filled",
+    )
+    p_clean = _make_pattern(
+        db,
+        name="edge_survives_tca",
+        cpcv=1.8,
+        quality_score=0.7,
+        promotion_gate=True,
+    )
+    _seed_closed_trades(
+        db,
+        pattern_id=p_clean.id,
+        n=6,
+        pnl_pct=0.03,
+        exit_reason="target",
+        indicator_snapshot={"entry_edge": {"expected_net_pct": 2.0}},
+        tca_entry_slippage_bps=5.0,
+        tca_exit_slippage_bps=5.0,
+        broker_status="filled",
+    )
+
+    candidates = select_cohort_candidates(db, settings_=_settings_stub())
+    cand_ids = {p.id for p in candidates}
+
+    assert p_clean.id in cand_ids
+    assert p_consumed.id not in cand_ids
 
 
 def test_eligibility_recovers_stale_challenged_when_adaptive_gate_passes(db):
