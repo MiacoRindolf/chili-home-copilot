@@ -1029,6 +1029,73 @@ def _candidate_order_by_clauses(
     ]
 
 
+def _candidate_ref_recency_sort_key(
+    ref: tuple[int, datetime | None],
+) -> tuple[bool, float, int]:
+    alerted_at = ref[1]
+    if isinstance(alerted_at, datetime):
+        if alerted_at.tzinfo is None:
+            alerted_at = alerted_at.replace(tzinfo=timezone.utc)
+        rank = alerted_at.timestamp()
+    else:
+        rank = -math.inf
+    return (ref[1] is None, rank, int(ref[0]))
+
+
+def _merge_candidate_ref_lanes(
+    refs: list[tuple[int, datetime | None]],
+    *,
+    limit: int,
+    recent_first: bool,
+) -> list[tuple[int, datetime | None]]:
+    if limit <= 0:
+        return []
+    merged: list[tuple[int, datetime | None]] = []
+    seen: set[int] = set()
+    for row_id, alerted_at in refs:
+        candidate_id = int(row_id)
+        if candidate_id in seen:
+            continue
+        seen.add(candidate_id)
+        merged.append((candidate_id, alerted_at))
+    if recent_first:
+        merged.sort(key=_candidate_ref_recency_sort_key, reverse=True)
+    else:
+        merged.sort(key=lambda ref: int(ref[0]))
+    return merged[:limit]
+
+
+def _select_candidate_refs_by_user_scope(
+    candidate_base: Any,
+    uid: int,
+    *,
+    limit: int,
+    order_by_clauses: tuple[Any, ...],
+    recent_first: bool,
+) -> list[tuple[int, datetime | None]]:
+    safe_limit = max(0, int(limit or 0))
+    if safe_limit <= 0:
+        return []
+    refs: list[tuple[int, datetime | None]] = []
+    for scope_filter in (
+        BreakoutAlert.user_id == uid,
+        BreakoutAlert.user_id.is_(None),
+    ):
+        rows = (
+            candidate_base.filter(scope_filter)
+            .order_by(*order_by_clauses)
+            .with_entities(BreakoutAlert.id, BreakoutAlert.alerted_at)
+            .limit(safe_limit)
+            .all()
+        )
+        refs.extend((int(row_id), alerted_at) for row_id, alerted_at in rows)
+    return _merge_candidate_ref_lanes(
+        refs,
+        limit=safe_limit,
+        recent_first=recent_first,
+    )
+
+
 def _fresh_candidate_burst_batch_size(
     *,
     base_limit: int,
@@ -4449,11 +4516,10 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         return {"ok": False, "error": "no_user_id"}
 
     candidate_select_started = time.monotonic()
-    # Match alerts scoped to this autotrader user AND system-generated
-    # (``user_id IS NULL``) pattern-imminent alerts. The imminent generator
-    # writes alerts without a specific owner; treating them as processable by
-    # the configured autotrader user is the intended behavior (single-tenant
-    # deployment). Use ``OR`` so explicit-user alerts are still honored.
+    # Match alerts scoped to this autotrader user and system-generated
+    # (``user_id IS NULL``) pattern-imminent alerts. Keep those scopes in
+    # separate SQL lanes below so a large system backlog cannot force the
+    # explicit-user lane through the broad OR query shape.
     processed_alert_exists = (
         db.query(AutoTraderRun.id)
         .filter(AutoTraderRun.breakout_alert_id == BreakoutAlert.id)
@@ -4471,7 +4537,6 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         db.query(BreakoutAlert)
         .filter(
             BreakoutAlert.alert_tier == "pattern_imminent",
-            or_(BreakoutAlert.user_id == uid, BreakoutAlert.user_id.is_(None)),
             ~processed_alert_exists,
         )
     )
@@ -4526,12 +4591,15 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
     stale_candidate_sweep_checked = True
     stale_candidate_sweep_interval_s = _stale_candidate_sweep_interval_seconds()
     if bool(fresh_fastlane.get("enabled")) and isinstance(fresh_cutoff, datetime):
-        fresh_candidate_refs = (
-            candidate_base.filter(BreakoutAlert.alerted_at >= fresh_cutoff)
-            .order_by(BreakoutAlert.alerted_at.desc(), BreakoutAlert.id.desc())
-            .with_entities(BreakoutAlert.id, BreakoutAlert.alerted_at)
-            .limit(candidate_query_limit)
-            .all()
+        fresh_candidate_refs = _select_candidate_refs_by_user_scope(
+            candidate_base.filter(BreakoutAlert.alerted_at >= fresh_cutoff),
+            uid,
+            limit=candidate_query_limit,
+            order_by_clauses=(
+                BreakoutAlert.alerted_at.desc(),
+                BreakoutAlert.id.desc(),
+            ),
+            recent_first=True,
         )
         remaining_candidate_slots = max(
             0,
@@ -4543,17 +4611,20 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
                 stale_candidate_sweep_interval_s,
             ) = _should_probe_stale_candidates()
         if remaining_candidate_slots > 0 and stale_candidate_sweep_checked:
-            older_candidate_refs = (
+            older_candidate_refs = _select_candidate_refs_by_user_scope(
                 candidate_base.filter(
                     or_(
                         BreakoutAlert.alerted_at < fresh_cutoff,
                         BreakoutAlert.alerted_at.is_(None),
                     )
-                )
-                .order_by(BreakoutAlert.alerted_at.desc(), BreakoutAlert.id.desc())
-                .with_entities(BreakoutAlert.id, BreakoutAlert.alerted_at)
-                .limit(remaining_candidate_slots)
-                .all()
+                ),
+                uid,
+                limit=remaining_candidate_slots,
+                order_by_clauses=(
+                    BreakoutAlert.alerted_at.desc(),
+                    BreakoutAlert.id.desc(),
+                ),
+                recent_first=True,
             )
         else:
             older_candidate_refs = []
@@ -4561,11 +4632,12 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         fresh_candidate_pool = len(fresh_candidate_refs)
         fresh_candidate_pool_exact = len(fresh_candidate_refs) < candidate_query_limit
     else:
-        candidate_refs = (
-            candidate_base.order_by(BreakoutAlert.id.asc())
-            .with_entities(BreakoutAlert.id, BreakoutAlert.alerted_at)
-            .limit(candidate_query_limit)
-            .all()
+        candidate_refs = _select_candidate_refs_by_user_scope(
+            candidate_base,
+            uid,
+            limit=candidate_query_limit,
+            order_by_clauses=(BreakoutAlert.id.asc(),),
+            recent_first=False,
         )
         fresh_candidate_pool = len(candidate_refs)
         fresh_candidate_pool_exact = len(candidate_refs) < candidate_query_limit

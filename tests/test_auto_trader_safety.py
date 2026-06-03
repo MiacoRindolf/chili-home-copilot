@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.exc import DBAPIError, PendingRollbackError
 
 from app import models
@@ -1113,6 +1114,98 @@ def test_fresh_candidate_fastlane_prioritizes_new_alerts(db, monkeypatch):
     assert out["ok"] is True
     assert out["fresh_candidate_fastlane_enabled"] is True
     assert processed == ["NEWFAST"]
+
+
+def test_candidate_selector_splits_user_and_system_scope_lanes(db, monkeypatch):
+    user = models.User(name="scope_split")
+    db.add(user)
+    db.flush()
+    now = datetime.utcnow()
+    user_alert = BreakoutAlert(
+        ticker="USERLANE",
+        asset_type="crypto",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.8,
+        price_at_alert=10.0,
+        entry_price=10.0,
+        stop_loss=9.0,
+        target_price=12.0,
+        user_id=user.id,
+        alerted_at=now - timedelta(seconds=5),
+    )
+    system_alert = BreakoutAlert(
+        ticker="SYSLANE",
+        asset_type="crypto",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.8,
+        price_at_alert=10.0,
+        entry_price=10.0,
+        stop_loss=9.0,
+        target_price=12.0,
+        user_id=None,
+        alerted_at=now,
+    )
+    db.add_all([user_alert, system_alert])
+    db.commit()
+
+    settings = _minimal_settings(user.id)
+    settings.chili_autotrader_candidate_batch_size = 2
+    settings.chili_autotrader_fresh_candidate_fastlane_enabled = True
+    settings.chili_autotrader_fresh_candidate_fastlane_max_age_seconds = 30
+    settings.chili_autotrader_candidate_price_prefetch_enabled = False
+    settings.chili_autotrader_stock_session_defer_enabled = False
+    monkeypatch.setattr(at_mod, "settings", settings)
+    monkeypatch.setattr(at_mod, "_last_stale_candidate_sweep_at", 0.0)
+    monkeypatch.setattr(
+        at_mod,
+        "effective_autotrader_runtime",
+        lambda _db: _live_runtime(),
+    )
+    from app.services.trading import governance
+
+    monkeypatch.setattr(governance, "is_kill_switch_active", lambda: False)
+    processed: list[str] = []
+    monkeypatch.setattr(at_mod, "_process_one_alert", _audit_only_process(processed))
+
+    selector_statements: list[str] = []
+
+    def _capture_statement(
+        _conn,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        normalized = " ".join(str(statement).upper().split())
+        if (
+            "FROM TRADING_BREAKOUT_ALERTS" in normalized
+            and "TRADING_AUTOTRADER_RUNS" in normalized
+        ):
+            selector_statements.append(normalized)
+
+    engine = db.get_bind()
+    event.listen(engine, "before_cursor_execute", _capture_statement)
+    try:
+        out = at_mod.run_auto_trader_tick(db)
+    finally:
+        event.remove(engine, "before_cursor_execute", _capture_statement)
+
+    assert out["ok"] is True
+    assert processed == ["SYSLANE", "USERLANE"]
+    assert any(
+        "TRADING_BREAKOUT_ALERTS.USER_ID =" in statement
+        for statement in selector_statements
+    )
+    assert any(
+        "TRADING_BREAKOUT_ALERTS.USER_ID IS NULL" in statement
+        for statement in selector_statements
+    )
+    assert not any(
+        "TRADING_BREAKOUT_ALERTS.USER_ID =" in statement
+        and "TRADING_BREAKOUT_ALERTS.USER_ID IS NULL" in statement
+        for statement in selector_statements
+    )
 
 
 def test_fresh_fastlane_throttles_stale_backlog_sweeps(db, monkeypatch):
