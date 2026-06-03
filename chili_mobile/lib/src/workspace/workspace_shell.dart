@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../agents/agents_screen.dart';
 import '../brain/brain_dispatch_screen.dart';
 import '../chat/chat_screen.dart';
 import '../companion/shared_chat_history.dart';
@@ -81,6 +82,12 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
       Icons.psychology,
       () => BrainDispatchScreen(onOpenSettings: () => _openApp('settings')),
       size: const Size(900, 600),
+    ),
+    'agents': _AppDef(
+      'Agents',
+      Icons.smart_toy,
+      () => const AgentsScreen(),
+      size: const Size(940, 620),
     ),
   };
 
