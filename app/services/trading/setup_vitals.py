@@ -67,6 +67,13 @@ def _safe_float(x: Any) -> float | None:
         return None
 
 
+def _safe_float_or_default(x: Any, default: float) -> float:
+    out = _safe_float(x)
+    if out is None or not math.isfinite(out):
+        return default
+    return out
+
+
 def _parse_indicator_data(raw: Any) -> dict[str, Any]:
     if raw is None:
         return {}
@@ -375,11 +382,11 @@ def merge_direction_into_flat(flat: dict[str, Any], vitals: SetupVitals) -> dict
 def _ticker_vitals_row_to_setup(row: Any) -> SetupVitals:
     tj = row.trajectory_json or {}
     return SetupVitals(
-        momentum_score=float(row.momentum_score or 0),
-        volume_score=float(row.volume_score or 0),
-        trend_score=float(row.trend_score or 0),
-        overextension_risk=float(row.overextension_risk or 0),
-        composite_health=float(row.composite_health or 0.5),
+        momentum_score=_safe_float_or_default(row.momentum_score, 0.0),
+        volume_score=_safe_float_or_default(row.volume_score, 0.0),
+        trend_score=_safe_float_or_default(row.trend_score, 0.0),
+        overextension_risk=_safe_float_or_default(row.overextension_risk, 0.0),
+        composite_health=_safe_float_or_default(row.composite_health, 0.5),
         divergences=list(row.divergences_json or []),
         trajectory_details=dict(tj) if isinstance(tj, dict) else {},
         degradation_signals=[],
