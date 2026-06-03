@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import heapq
 import logging
+import math
 import time
 from collections import Counter, deque
 from dataclasses import dataclass, field
@@ -77,6 +78,19 @@ BOOK_PRESSURE_MIN_MID_MOVE_BPS = 0.25
 BOOK_PRESSURE_COOLDOWN_S = IMBALANCE_COOLDOWN_S
 BOOK_PRESSURE_MIN_TOUCH_NOTIONAL_USD = 25.0
 BPS_PER_UNIT = 10_000.0
+
+
+def _finite_float_or_default(value: Any, default: float) -> float:
+    if isinstance(value, bool) or value is None:
+        return default
+    try:
+        out = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if not math.isfinite(out):
+        return default
+    return out
+
 
 # F8a: starting value for the pullback-fade experiment. F6 showed
 # volume_breakout_long has mean forward return ≈ −28.5 bps over n=120,
@@ -447,7 +461,7 @@ class MomentumScanner:
             return []
         st = self._state_for(str(ticker))
         st.last_spread_bps = float(book.get("spread_bps") or 0.0)
-        imb = float(book.get("imbalance") or 0.5)
+        imb = _finite_float_or_default(book.get("imbalance"), 0.5)
         ts: datetime = book.get("snapshot_at") or datetime.now(timezone.utc).replace(tzinfo=None)
         alerts: list[dict] = []
         # F8a: drain pending pullback-deferred emits whose deadline has
@@ -632,7 +646,7 @@ class MomentumScanner:
             (best_ask * bid_total_size) + (best_bid * ask_total_size)
         ) / depth_denom
         microprice_edge_bps = ((microprice - mid) / mid) * BPS_PER_UNIT
-        imbalance = float(book.get("imbalance") or 0.5)
+        imbalance = _finite_float_or_default(book.get("imbalance"), 0.5)
         top_bid_notional_usd = top_bid_size * best_bid
         top_ask_notional_usd = top_ask_size * best_ask
         return {

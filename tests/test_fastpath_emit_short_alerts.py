@@ -49,6 +49,17 @@ def test_emit_short_alerts_default_true_preserves_backwards_compat():
     assert s.suppressed_short_alert_disabled == 0
 
 
+def test_zero_imbalance_is_preserved_as_short_pressure():
+    s = MomentumScanner()
+
+    alerts = s.on_book_emit(_make_book(imbalance=0.0), now_monotonic=0.0)
+
+    short_alert = next(a for a in alerts if a["alert_type"] == "imbalance_short")
+    assert short_alert["signal_score"] == pytest.approx(1.0)
+    assert short_alert["features"]["imbalance"] == 0.0
+    assert s.fired_imbalance_short == 1
+
+
 def test_emit_short_alerts_false_suppresses_imbalance_short():
     """Scanner with emit_short_alerts=False must NOT emit imbalance_short
     even on a strong short imbalance. Counter

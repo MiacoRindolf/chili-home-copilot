@@ -141,6 +141,23 @@ def test_book_pressure_rejects_when_current_microprice_pressure_fades():
     ] == 1
 
 
+def test_book_pressure_observation_preserves_zero_imbalance():
+    scanner = _scanner()
+
+    obs = scanner._book_pressure_observation(
+        _book(
+            best_bid=100.00,
+            best_ask=100.02,
+            bid_size=1.0,
+            ask_size=9.0,
+            imbalance=0.0,
+        )
+    )
+
+    assert obs is not None
+    assert obs["imbalance"] == 0.0
+
+
 def test_book_pressure_rejects_when_mid_has_already_run_too_far():
     scanner = _scanner()
     start = datetime(2026, 5, 23, 18, 0, 0)
