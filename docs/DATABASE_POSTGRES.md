@@ -25,7 +25,28 @@ The repo `docker-compose.yml` defines a **`postgres`** service and wires the **`
 
 - Port **5433** on the host maps to Postgres **5432** inside Compose so a separate PostgreSQL on **5432** does not conflict.
 - The `chili` service **`environment`** entry for `DATABASE_URL` overrides any `DATABASE_URL` in `.env` when using Compose, so the app always resolves the `postgres` hostname on the Docker network.
-- Data persists under host paths **`D:/CHILI-Docker/postgres`**, **`D:/CHILI-Docker/chili-data`**, and **`D:/CHILI-Docker/ollama`** (bind mounts in `docker-compose.yml`). `docker compose down` does not remove that data; deleting those folders would.
+- Data persists under host paths **`D:/CHILI-Docker/postgres`**, **`D:/CHILI-Docker/chili-data`**, and **`D:/CHILI-Docker/ollama`** by default. `docker compose down` does not remove that data; deleting those folders would.
+- Postgres can be moved off the Windows bind mount after a deliberate copy by setting **`CHILI_POSTGRES_DATA_SOURCE=chili-postgres-data`**. The default remains `D:/CHILI-Docker/postgres` until you opt in.
+
+### Moving Postgres off the Windows bind mount
+
+If Postgres crash recovery is extremely slow on Docker Desktop for Windows, or logs show long WAL redo while the data directory lives under `D:/CHILI-Docker/postgres`, move the database to the Docker named volume `chili-postgres-data`. This is intended to reduce Windows bind-mount I/O pressure; it does not change trading gates, broker behavior, or risk limits.
+
+Dry-run first:
+
+```powershell
+.\scripts\migrate-postgres-bind-to-volume.ps1
+```
+
+Execute the copy:
+
+```powershell
+.\scripts\migrate-postgres-bind-to-volume.ps1 -Execute -UpdateEnvFile
+docker compose up -d --force-recreate postgres
+docker compose ps postgres
+```
+
+The helper stops only the `postgres` service, refuses to copy into a non-empty target volume, and does not delete `D:\CHILI-Docker\postgres`. Keep the original directory until the named-volume instance has started, passed health, and a recent backup exists.
 
 Use **`bash scripts/docker-setup.sh`** to start Postgres + Ollama, wait for health, pull models, start CHILI, and run RAG ingest.
 
