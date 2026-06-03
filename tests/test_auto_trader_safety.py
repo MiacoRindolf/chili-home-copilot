@@ -99,6 +99,56 @@ def test_prefetched_price_for_alert_preserves_provider_source(monkeypatch):
     assert getattr(alert, "_chili_current_price_prefetch_used") is True
 
 
+def test_release_candidate_read_transaction_detaches_before_prefetch():
+    class _FakeSession:
+        new = ()
+        dirty = ()
+        deleted = ()
+
+        def __init__(self) -> None:
+            self.detached: list[object] = []
+            self.rollback_count = 0
+
+        def in_transaction(self) -> bool:
+            return True
+
+        def expunge(self, obj: object) -> None:
+            self.detached.append(obj)
+
+        def rollback(self) -> None:
+            self.rollback_count += 1
+
+    db = _FakeSession()
+    alert = SimpleNamespace(ticker="REL-USD")
+
+    meta = at_mod._release_autotrader_candidate_read_transaction(db, [alert])
+
+    assert meta == {
+        "released": True,
+        "detached_candidates": 1,
+        "skipped_reason": None,
+    }
+    assert db.detached == [alert]
+    assert db.rollback_count == 1
+
+
+def test_copy_candidate_sidecar_attrs_preserves_prefetch_and_retry_state():
+    source = SimpleNamespace(
+        _chili_prefetched_current_price=101.5,
+        _chili_prefetched_current_price_source="batch_prefetch",
+        _chili_synergy_retry=True,
+        ticker="OLD",
+    )
+    target = SimpleNamespace(ticker="FRESH")
+
+    at_mod._copy_candidate_sidecar_attrs(source, target)
+
+    assert target.ticker == "FRESH"
+    assert target._chili_prefetched_current_price == 101.5
+    assert target._chili_prefetched_current_price_source == "batch_prefetch"
+    assert target._chili_synergy_retry is True
+
+
 def _minimal_settings(user_id: int) -> SimpleNamespace:
     return SimpleNamespace(
         chili_autotrader_enabled=True,

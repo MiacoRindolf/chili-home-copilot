@@ -1211,6 +1211,56 @@ def _attach_prefetched_prices(
         )
 
 
+def _copy_candidate_sidecar_attrs(source: Any, target: Any) -> None:
+    for name, value in vars(source).items():
+        if name.startswith("_chili_"):
+            setattr(target, name, value)
+
+
+def _release_autotrader_candidate_read_transaction(
+    db: Session,
+    candidates: list[BreakoutAlert],
+) -> dict[str, Any]:
+    meta: dict[str, Any] = {
+        "released": False,
+        "detached_candidates": 0,
+        "skipped_reason": None,
+    }
+    try:
+        in_tx = bool(db.in_transaction())
+    except Exception:
+        in_tx = False
+    if not in_tx:
+        meta["skipped_reason"] = "no_transaction"
+        return meta
+    try:
+        has_pending_writes = bool(db.new or db.dirty or db.deleted)
+    except Exception:
+        has_pending_writes = True
+    if has_pending_writes:
+        meta["skipped_reason"] = "pending_writes"
+        return meta
+    detached = 0
+    for candidate in candidates:
+        try:
+            db.expunge(candidate)
+            detached += 1
+        except Exception:
+            continue
+    meta["detached_candidates"] = detached
+    try:
+        db.rollback()
+    except Exception as exc:
+        meta["skipped_reason"] = f"rollback_failed:{type(exc).__name__}"
+        logger.debug(
+            "[autotrader] candidate read transaction release failed",
+            exc_info=True,
+        )
+        return meta
+    meta["released"] = True
+    return meta
+
+
 def _current_price_for_alert(alert: BreakoutAlert) -> float | None:
     prefetched = getattr(alert, "_chili_prefetched_current_price", None)
     try:
@@ -4442,6 +4492,10 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         max(0.0, candidate_pool / float(max(1, effective_batch_limit))),
     )
     candidate_select_elapsed_s = round(time.monotonic() - candidate_select_started, 3)
+    candidate_read_release_meta = _release_autotrader_candidate_read_transaction(
+        db,
+        candidates,
+    )
     prefetched_prices, prefetched_sources, price_prefetch_meta = (
         _prefetch_candidate_prices(candidates)
     )
@@ -4504,6 +4558,15 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
             "elapsed_seconds"
         ),
         "candidate_price_prefetch_error": price_prefetch_meta.get("error"),
+        "candidate_read_transaction_released_before_prefetch": bool(
+            candidate_read_release_meta.get("released")
+        ),
+        "candidate_read_transaction_release_skipped_reason": (
+            candidate_read_release_meta.get("skipped_reason")
+        ),
+        "candidate_read_transaction_detached_candidates": int(
+            candidate_read_release_meta.get("detached_candidates") or 0
+        ),
         "stock_session_defer_active": bool(stock_defer.get("active")),
         "stock_session_defer_reason": stock_defer.get("reason"),
         "stock_session_defer_max_age_hours": stock_defer.get("max_age_hours"),
@@ -4596,6 +4659,17 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
                     alert=alert,
                 )
                 continue
+            fresh_alert = db.get(BreakoutAlert, alert_id)
+            if fresh_alert is None:
+                _autotrader_tick_note(
+                    out,
+                    kind="skipped",
+                    reason="alert_missing_after_claim",
+                    alert=alert,
+                )
+                continue
+            _copy_candidate_sidecar_attrs(alert, fresh_alert)
+            alert = fresh_alert
 
             try:
                 _process_one_alert(db, uid, alert, out, rt)
