@@ -92,9 +92,25 @@
     if (weekday && now >= SESSION_OPEN && now < SESSION_CLOSE) return 'Market closed';  // holiday / halt
     return 'Opens · ' + fmtDur(minsToNextOpen(t));
   }
+  // Fraction of the regular session elapsed (0..1), or null when not mid-session.
+  function sessionProgress(open, t) {
+    if (open !== true || !t) return null;
+    var now = t.h * 60 + t.m;
+    return Math.max(0, Math.min(1, (now - SESSION_OPEN) / (SESSION_CLOSE - SESSION_OPEN)));
+  }
   function renderSession() {
     var el = document.getElementById('ws-mkt-countdown'); if (!el) return;
-    el.textContent = sessionLabel(mktOpen, etNow());
+    var t = etNow();
+    el.textContent = sessionLabel(mktOpen, t);
+    // Progress underline: a 2px accent bar filling left→right as the session elapses.
+    var p = sessionProgress(mktOpen, t);
+    if (p == null) { el.style.backgroundImage = ''; el.classList.remove('in-session'); return; }
+    var pct = (p * 100).toFixed(1) + '%';
+    el.style.backgroundImage = 'linear-gradient(90deg,var(--ws-accent) ' + pct + ',transparent ' + pct + ')';
+    el.style.backgroundRepeat = 'no-repeat';
+    el.style.backgroundPosition = 'left bottom';
+    el.style.backgroundSize = '100% 2px';
+    el.classList.add('in-session');
   }
 
   function tick() { tickClock(); renderActivity(); renderSession(); }
@@ -231,5 +247,5 @@
 
   // Expose the pure session-label helper (other widgets / tests can compute the
   // same "Opens/Closes in …" string for any open-flag + ET time).
-  window.ChiliDesktop = { sessionLabel: sessionLabel, etNow: etNow };
+  window.ChiliDesktop = { sessionLabel: sessionLabel, sessionProgress: sessionProgress, etNow: etNow };
 })();
