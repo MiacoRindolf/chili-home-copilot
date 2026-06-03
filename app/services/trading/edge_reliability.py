@@ -37,7 +37,12 @@ from .return_math import (
     paper_trade_contract_multiplier,
     paper_trade_return_pct as _realized_paper_return_pct,
     trade_contract_multiplier,
+    trade_realized_pnl as _realized_trade_pnl,
     trade_return_pct as _realized_trade_return_pct,
+)
+from .realized_pnl_sql import (
+    LIVE_PATTERN_EV_LOW_CONFIDENCE_EXIT_REASONS,
+    LIVE_PATTERN_EV_LOW_CONFIDENCE_EXIT_TOKENS,
 )
 
 EDGE_RELIABILITY_REFRESH = "edge_reliability_refresh"
@@ -314,6 +319,26 @@ def _live_return_pct(row: Trade) -> float | None:
     return (pnl / notional) * 100.0
 
 
+def _live_realized_pnl_usd(row: Trade) -> float | None:
+    realized = _realized_trade_pnl(row)
+    if realized is not None:
+        return realized
+    return _safe_float(getattr(row, "pnl", None))
+
+
+def _normalized_live_exit_reason(row: Trade) -> str:
+    return str(getattr(row, "exit_reason", "") or "").strip().lower()
+
+
+def _is_low_confidence_live_exit(row: Trade) -> bool:
+    reason = _normalized_live_exit_reason(row)
+    if not reason:
+        return True
+    if reason in LIVE_PATTERN_EV_LOW_CONFIDENCE_EXIT_REASONS:
+        return True
+    return any(token in reason for token in LIVE_PATTERN_EV_LOW_CONFIDENCE_EXIT_TOKENS)
+
+
 def _outcome_label(pnl: Any) -> int | None:
     val = _safe_float(pnl)
     if val is None:
@@ -415,6 +440,8 @@ def _row_fingerprint(row: dict[str, Any]) -> str:
         "window_days": row.get("window_days"),
         "edge_eval_count": row.get("edge_eval_count"),
         "closed_evidence_count": row.get("closed_evidence_count"),
+        "live_low_confidence_exit_count": row.get("live_low_confidence_exit_count"),
+        "live_total_closed_count": row.get("live_total_closed_count"),
         "expected_ev_pct": row.get("expected_ev_pct"),
         "realized_ev_pct": row.get("realized_ev_pct"),
         "latest_observed_at": row.get("latest_observed_at"),
@@ -572,11 +599,30 @@ def compute_pattern_edge_reliability(
         for row in live_rows_all
         if not asset_slice or _asset_class_for_trade(row, pattern) == asset_slice
     ]
+    live_clean_rows = [
+        row for row in live_rows if not _is_low_confidence_live_exit(row)
+    ]
+    live_low_confidence_rows = [
+        row for row in live_rows if _is_low_confidence_live_exit(row)
+    ]
 
     paper_returns = [_paper_return_pct(row) for row in paper_rows]
     paper_returns_f = [v for v in paper_returns if v is not None]
-    live_returns = [_live_return_pct(row) for row in live_rows]
+    live_returns = [_live_return_pct(row) for row in live_clean_rows]
     live_returns_f = [v for v in live_returns if v is not None]
+    live_low_confidence_returns = [
+        _live_return_pct(row) for row in live_low_confidence_rows
+    ]
+    live_low_confidence_returns_f = [
+        v for v in live_low_confidence_returns if v is not None
+    ]
+    live_low_confidence_pnls = [
+        pnl
+        for pnl in (
+            _live_realized_pnl_usd(row) for row in live_low_confidence_rows
+        )
+        if pnl is not None
+    ]
     all_returns = paper_returns_f + live_returns_f
 
     labels: list[int] = []
@@ -594,7 +640,7 @@ def compute_pattern_edge_reliability(
         pred = prob_by_alert.get(int(alert_id)) if alert_id is not None else fallback_p
         if pred is not None:
             brier_terms.append((float(pred) - float(label)) ** 2)
-    for row, realized_return_pct in zip(live_rows, live_returns):
+    for row, realized_return_pct in zip(live_clean_rows, live_returns):
         label = _outcome_label_from_return(
             getattr(row, "pnl", None),
             realized_return_pct,
@@ -607,12 +653,28 @@ def compute_pattern_edge_reliability(
         if pred is not None:
             brier_terms.append((float(pred) - float(label)) ** 2)
 
+    live_low_confidence_labels: list[int] = []
+    live_low_confidence_reasons: Counter[str] = Counter()
+    for row, realized_return_pct in zip(
+        live_low_confidence_rows,
+        live_low_confidence_returns,
+    ):
+        reason = _normalized_live_exit_reason(row) or "missing"
+        live_low_confidence_reasons[reason] += 1
+        label = _outcome_label_from_return(
+            getattr(row, "pnl", None),
+            realized_return_pct,
+        )
+        if label is not None:
+            live_low_confidence_labels.append(label)
+
     expected_ev = _mean(expected_values)
     realized_ev = _mean(all_returns)
     closed_n = len(all_returns)
     calibrated_ev = _calibrated_ev(expected_ev, realized_ev, closed_n)
     paper_ev = _mean(paper_returns_f)
     live_ev = _mean(live_returns_f)
+    live_low_confidence_ev = _mean(live_low_confidence_returns_f)
     paper_live_gap = (
         live_ev - paper_ev
         if live_ev is not None and paper_ev is not None
@@ -685,8 +747,23 @@ def compute_pattern_edge_reliability(
         "closed_evidence_count": closed_n,
         "paper_closed_count": len(paper_returns_f),
         "live_closed_count": len(live_returns_f),
+        "live_clean_exit_count": len(live_clean_rows),
+        "live_total_closed_count": len(live_rows),
+        "live_low_confidence_exit_count": len(live_low_confidence_rows),
+        "live_low_confidence_return_count": len(live_low_confidence_returns_f),
+        "live_low_confidence_pnl_sample_n": len(live_low_confidence_pnls),
+        "live_low_confidence_total_pnl_usd": _round(
+            sum(live_low_confidence_pnls) if live_low_confidence_pnls else None,
+            2,
+        ),
+        "live_low_confidence_exit_reasons": dict(live_low_confidence_reasons),
         "paper_realized_ev_pct": _round(paper_ev, 6),
         "live_realized_ev_pct": _round(live_ev, 6),
+        "live_low_confidence_realized_ev_pct": _round(live_low_confidence_ev, 6),
+        "live_low_confidence_win_rate": _round(
+            _mean([float(x) for x in live_low_confidence_labels]),
+            6,
+        ),
         "paper_live_gap_pct": _round(paper_live_gap, 6),
         "observed_win_rate": _round(_mean([float(x) for x in labels]), 6),
         "payoff_ratio": _round(payoff_ratio, 6),

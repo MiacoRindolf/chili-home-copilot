@@ -241,6 +241,7 @@ def test_edge_reliability_attribution_from_runs_paper_and_live(db):
             exit_date=datetime.utcnow(),
             exit_price=102.0,
             pnl=2.0,
+            exit_reason="target",
         )
     )
     db.commit()
@@ -254,6 +255,78 @@ def test_edge_reliability_attribution_from_runs_paper_and_live(db):
     assert row["closed_evidence_count"] == 2
     assert row["brier_score"] == pytest.approx(0.16)
     assert row["recommended_work_event"] == EDGE_RELIABILITY_REFRESH
+
+
+def test_edge_reliability_separates_low_confidence_live_exits_from_clean_ev(db):
+    pat = _pattern(db)
+    alert = _alert(db, pat)
+    _run(db, pat, alert, expected=2.0)
+    db.add_all(
+        [
+            Trade(
+                scan_pattern_id=pat.id,
+                related_alert_id=alert.id,
+                ticker="EDGE",
+                direction="long",
+                entry_price=100.0,
+                quantity=1.0,
+                status="closed",
+                entry_date=datetime.utcnow(),
+                exit_date=datetime.utcnow(),
+                exit_price=104.0,
+                pnl=4.0,
+                exit_reason="target",
+            ),
+            Trade(
+                scan_pattern_id=pat.id,
+                related_alert_id=alert.id,
+                ticker="EDGE",
+                direction="long",
+                entry_price=100.0,
+                quantity=1.0,
+                status="closed",
+                entry_date=datetime.utcnow(),
+                exit_date=datetime.utcnow(),
+                exit_price=90.0,
+                pnl=-10.0,
+                exit_reason="broker_reconcile_position_gone",
+            ),
+            Trade(
+                scan_pattern_id=pat.id,
+                related_alert_id=alert.id,
+                ticker="EDGE",
+                direction="long",
+                entry_price=100.0,
+                quantity=1.0,
+                status="closed",
+                entry_date=datetime.utcnow(),
+                exit_date=datetime.utcnow(),
+                exit_price=95.0,
+                pnl=-5.0,
+                exit_reason=None,
+            ),
+        ]
+    )
+    db.commit()
+
+    row = compute_pattern_edge_reliability(db, pat.id, window_days=7)
+
+    assert row["closed_evidence_count"] == 1
+    assert row["live_closed_count"] == 1
+    assert row["live_clean_exit_count"] == 1
+    assert row["live_total_closed_count"] == 3
+    assert row["realized_ev_pct"] == pytest.approx(4.0)
+    assert row["live_realized_ev_pct"] == pytest.approx(4.0)
+    assert row["observed_win_rate"] == pytest.approx(1.0)
+    assert row["brier_score"] == pytest.approx(0.16)
+    assert row["live_low_confidence_exit_count"] == 2
+    assert row["live_low_confidence_return_count"] == 2
+    assert row["live_low_confidence_pnl_sample_n"] == 2
+    assert row["live_low_confidence_total_pnl_usd"] == pytest.approx(-15.0)
+    assert row["live_low_confidence_realized_ev_pct"] == pytest.approx(-7.5)
+    assert row["live_low_confidence_win_rate"] == pytest.approx(0.0)
+    assert row["live_low_confidence_exit_reasons"]["missing"] == 1
+    assert row["live_low_confidence_exit_reasons"]["broker_reconcile_position_gone"] == 1
 
 
 def test_edge_reliability_rejects_malformed_expected_probability_evidence(db):
@@ -503,6 +576,7 @@ def test_edge_reliability_labels_option_live_with_confirmed_return_fallback(db):
             exit_price=1.45,
             pnl=None,
             asset_kind="option",
+            exit_reason="target",
             indicator_snapshot={
                 "asset_type": "options",
                 "option_meta": {"price_domain": "option_premium"},
