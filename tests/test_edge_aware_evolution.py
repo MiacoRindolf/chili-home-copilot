@@ -314,7 +314,7 @@ def test_edge_learned_exit_variant_starts_shadow_research_only(db, monkeypatch):
                 "reward_risk": 4.171698,
                 "total_edge_rejects": 5,
                 "edge_loss_report_source": EDGE_EXIT_CONFIG_SOURCE,
-                "root_cause": "managed_reward_risk_below_floor",
+                "root_cause": "shadow_near_miss_noise",
                 "report_total_rejects": 5,
             },
         }
