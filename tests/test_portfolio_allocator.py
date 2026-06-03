@@ -383,6 +383,43 @@ def test_allocator_confidence_evidence_rejects_fake_certainty():
     assert evidence["rejection_reason"] == "above_percent_ceiling"
 
 
+def test_allocator_win_rate_score_preserves_zero_oos_evidence():
+    pattern = SimpleNamespace(oos_win_rate=0.0, win_rate=0.9)
+
+    assert allocator_mod._pattern_win_rate_score(pattern) == 0.0
+
+
+def test_pattern_allocator_research_quality_respects_zero_oos_win_rate(monkeypatch):
+    monkeypatch.setattr(
+        allocator_mod,
+        "get_all_broker_statuses",
+        lambda: {"robinhood": {"connected": True}, "coinbase": {"connected": True}},
+    )
+    pattern = SimpleNamespace(
+        name="zero oos allocator pattern",
+        scope_tickers="AAPL",
+        timeframe="1d",
+        asset_class="stock",
+        hypothesis_family="breakout",
+        confidence=1.0,
+        oos_win_rate=0.0,
+        win_rate=1.0,
+        oos_validation_json={},
+    )
+
+    state = allocator_mod.build_pattern_allocation_state(
+        _FakeAllocatorDb(),
+        pattern,
+        user_id=1,
+        context="unit_test",
+    )
+
+    assert state["score_inputs"]["research_quality"] == 0.55
+    assert pattern.oos_validation_json["allocation_state"]["score_inputs"][
+        "research_quality"
+    ] == 0.55
+
+
 def test_proposal_allocator_records_confidence_evidence_without_db_fixture():
     proposal = SimpleNamespace(
         scan_pattern_id=None,

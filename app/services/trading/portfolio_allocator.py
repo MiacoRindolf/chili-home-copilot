@@ -120,6 +120,16 @@ def _win_rate_score(value: Any) -> float:
     return max(0.0, min(1.0, raw))
 
 
+def _pattern_win_rate_score(pattern: Any) -> float:
+    """Score OOS win rate when present; fall back to legacy only when missing."""
+    if pattern is None:
+        return 0.0
+    oos_value = getattr(pattern, "oos_win_rate", None)
+    if oos_value is not None:
+        return _win_rate_score(oos_value)
+    return _win_rate_score(getattr(pattern, "win_rate", None))
+
+
 def _tier_score(contract: dict[str, Any]) -> float:
     tier = (contract.get("composite_tier") or contract.get("robustness_tier") or contract.get("drift_tier") or "n/a")
     tier = str(tier).strip().lower()
@@ -205,7 +215,7 @@ def _collect_open_trade_conflicts(db: Session, *, user_id: int, symbol: str, sec
             )
         incumbent_score = (
             confidence_score * 0.6
-            + _win_rate_score(getattr(incumbent, "oos_win_rate", None) or getattr(incumbent, "win_rate", None)) * 0.4
+            + _pattern_win_rate_score(incumbent) * 0.4
         ) if incumbent else 0.5
         conflict = {
             "conflict_type": "open_trade",
@@ -666,7 +676,7 @@ def build_pattern_allocation_state(db: Session, pattern: Any, *, user_id: int | 
     )
     research_quality = round(
         (confidence_score * 0.55)
-        + (_win_rate_score(getattr(pattern, "oos_win_rate", None) or getattr(pattern, "win_rate", None)) * 0.45),
+        + (_pattern_win_rate_score(pattern) * 0.45),
         4,
     )
     state = evaluate_allocation_candidate(
