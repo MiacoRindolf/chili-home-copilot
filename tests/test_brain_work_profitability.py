@@ -254,3 +254,71 @@ def test_exit_variant_refresh_builds_report_from_time_decay_edge_misses(
     assert payload["created_child_ids"] == [9010]
     assert payload["variant_label"] == "edge-exit-time-decay"
     assert payload["loss_report"]["root_cause"] == "paper_time_decay_exit_thesis_mismatch"
+
+
+def test_exit_variant_refresh_surfaces_duplicate_refresh_diagnostics(
+    monkeypatch,
+) -> None:
+    from app.services.trading.brain_work import ledger
+    import app.services.trading.learning as learning
+
+    outcomes: list[dict[str, object]] = []
+    report = {
+        "source": "autotrader_edge_debt_v1",
+        "original_source": "paper_time_decay_edge_miss",
+        "paper_time_decay_edge_miss": True,
+        "total_rejects": 5,
+        "avg_expected_net_pct": 3.1,
+    }
+
+    def _loss_reports(_db, *, lookback_days):
+        assert lookback_days == 30
+        return {537: report}
+
+    def _forks(_db, pattern_id, *, edge_loss_report, diagnostics):
+        assert pattern_id == 537
+        assert edge_loss_report == report
+        diagnostics.update(
+            skip_reason="refreshed_duplicate_learned_exit_label",
+            variant_label="edge-exit-r3.00-s1.50",
+            existing_child_id=456,
+            refreshed_existing_child_id=456,
+            refreshed_count=1,
+        )
+        return []
+
+    monkeypatch.setattr(learning, "_edge_debt_loss_reports", _loss_reports)
+    monkeypatch.setattr(learning, "fork_edge_learned_exit_variants", _forks)
+
+    def _enqueue_outcome_event(_db, **kwargs):
+        outcomes.append(kwargs)
+        return 1004
+
+    monkeypatch.setattr(ledger, "enqueue_outcome_event", _enqueue_outcome_event)
+
+    ev = SimpleNamespace(
+        id=904,
+        payload={
+            "scan_pattern_id": 537,
+            "asset_class": "crypto",
+            "cash_deployment_category": "positive_ev_time_decay_loss",
+            "expected_evidence_value": 4.5,
+            "evidence_fingerprint": "td-refresh-fp",
+            "graduation_blocker": "exit_thesis_mismatch",
+        },
+    )
+
+    handle_exit_variant_refresh(object(), ev, user_id=None)
+
+    assert len(outcomes) == 1
+    assert outcomes[0]["event_type"] == EXIT_VARIANT_DIAGNOSTIC
+    assert (
+        outcomes[0]["dedupe_key"]
+        == "exit_variant_diagnostic:p537:3.1:refreshed_duplicate_learned_exit_label:456"
+    )
+    payload = outcomes[0]["payload"]
+    assert payload["created_count"] == 0
+    assert payload["refreshed_count"] == 1
+    assert payload["existing_child_id"] == 456
+    assert payload["refreshed_existing_child_id"] == 456
+    assert payload["variant_diagnostics"]["refreshed_count"] == 1

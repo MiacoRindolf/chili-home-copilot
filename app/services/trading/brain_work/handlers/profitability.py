@@ -930,6 +930,7 @@ def handle_exit_variant_refresh(
         edge_loss_report=report,
         diagnostics=variant_diag,
     )
+    skip_reason = variant_diag.get("skip_reason")
     payload = {
         "scan_pattern_id": pid,
         "source": "exit_variant_refresh",
@@ -937,19 +938,36 @@ def handle_exit_variant_refresh(
         "cash_deployment_category": payload_in.get("cash_deployment_category"),
         "evidence_fingerprint": payload_in.get("evidence_fingerprint"),
         "graduation_blocker": payload_in.get("graduation_blocker"),
-        "skip_reason": variant_diag.get("skip_reason"),
+        "skip_reason": skip_reason,
         "variant_label": variant_diag.get("variant_label"),
+        "existing_child_id": variant_diag.get("existing_child_id"),
+        "refreshed_existing_child_id": variant_diag.get(
+            "refreshed_existing_child_id"
+        ),
+        "refreshed_count": int(variant_diag.get("refreshed_count") or 0),
+        "active_child_count": variant_diag.get("active_child_count"),
         "created_child_ids": created_ids,
         "created_count": len(created_ids),
         "loss_report": report,
+        "variant_diagnostics": dict(variant_diag),
         "shadow_only": True,
         "observed_at": _utc_iso(),
     }
     key_basis = (report or {}).get("avg_expected_net_pct")
+    action_key = skip_reason or ("created" if created_ids else "none")
+    child_key = (
+        variant_diag.get("refreshed_existing_child_id")
+        or variant_diag.get("existing_child_id")
+        or ",".join(str(x) for x in created_ids)
+        or "none"
+    )
     enqueue_outcome_event(
         db,
         event_type=EXIT_VARIANT_DIAGNOSTIC,
-        dedupe_key=f"{EXIT_VARIANT_DIAGNOSTIC}:p{pid}:{key_basis}:{len(created_ids)}",
+        dedupe_key=(
+            f"{EXIT_VARIANT_DIAGNOSTIC}:p{pid}:{key_basis}:"
+            f"{action_key}:{child_key}"
+        ),
         payload=payload,
         parent_event_id=int(getattr(ev, "id", 0) or 0),
         claimable=False,
