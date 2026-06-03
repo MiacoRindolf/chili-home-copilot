@@ -1688,11 +1688,131 @@ def _realized_exit_geometry(
     return reward, loss, snap
 
 
+def _entry_edge_venue_from_selector_decision(decision: Any) -> str | None:
+    venue = str(getattr(decision, "venue", "") or "").strip().lower()
+    if venue in {"rh", "robinhood"}:
+        return "robinhood"
+    if venue in {"coinbase", "cb"}:
+        return "coinbase"
+    return None
+
+
+def _advisory_entry_edge_venue(
+    db: Session | None,
+    alert: BreakoutAlert,
+    *,
+    settings: Any,
+) -> tuple[str | None, dict[str, Any]]:
+    ticker = str(getattr(alert, "ticker", "") or "").strip()
+    if not ticker:
+        return None, {}
+    try:
+        from .broker_selector import select_venue
+
+        decision = select_venue(ticker=ticker, db=db, settings_=settings)
+    except Exception as exc:
+        return None, {"entry_edge_advisory_error": type(exc).__name__}
+
+    selected = _entry_edge_venue_from_selector_decision(decision)
+    snap = {
+        "entry_edge_advisory_venue": getattr(decision, "venue", None),
+        "entry_edge_advisory_reason": getattr(decision, "reason", None),
+    }
+    if selected is not None:
+        snap["entry_edge_selected_venue"] = selected
+    return selected, snap
+
+
+def _selected_venue_entry_tca_cost_fraction(
+    db: Session,
+    *,
+    ticker: str,
+    settings: Any,
+    selected_venue: str,
+) -> tuple[float | None, dict[str, Any]]:
+    selected = str(selected_venue or "").strip().lower()
+    if selected == "rh":
+        selected = "robinhood"
+    elif selected == "cb":
+        selected = "coinbase"
+    if selected not in {"robinhood", "coinbase"}:
+        return None, {
+            "used": False,
+            "reason": "no_selected_venue",
+            "selected_venue": selected or None,
+        }
+
+    try:
+        from .cost_aware_gate import (
+            _coinbase_entry_tca_cost_bps,
+            _robinhood_entry_tca_cost_bps,
+        )
+    except Exception as exc:
+        return None, {
+            "used": False,
+            "reason": "venue_tca_import_failed",
+            "selected_venue": selected,
+            "error": type(exc).__name__,
+        }
+
+    min_samples_attr = (
+        "chili_robinhood_cost_gate_min_tca_samples"
+        if selected == "robinhood"
+        else "chili_coinbase_cost_gate_min_tca_samples"
+    )
+    window_days_attr = (
+        "chili_robinhood_cost_gate_window_days"
+        if selected == "robinhood"
+        else "chili_coinbase_cost_gate_window_days"
+    )
+    min_samples = _settings_int(settings, min_samples_attr, 5, minimum=1)
+    window_days = _settings_int(settings, window_days_attr, 30, minimum=1)
+    helper = (
+        _robinhood_entry_tca_cost_bps
+        if selected == "robinhood"
+        else _coinbase_entry_tca_cost_bps
+    )
+    try:
+        cost_bps, raw_snapshot = helper(
+            db=db,
+            ticker=ticker,
+            side="long",
+            min_samples=min_samples,
+            window_days=window_days,
+            settings_=settings,
+        )
+    except Exception as exc:
+        return None, {
+            "used": False,
+            "reason": "venue_tca_lookup_failed",
+            "selected_venue": selected,
+            "error": type(exc).__name__,
+        }
+    if raw_snapshot is None:
+        return None, {
+            "used": False,
+            "reason": "no_venue_tca_estimate",
+            "selected_venue": selected,
+            "min_samples": min_samples,
+            "window_days": window_days,
+        }
+
+    snap = dict(raw_snapshot)
+    snap["selected_venue"] = selected
+    snap.setdefault("source", "trading_trades_broker_source")
+    snap.setdefault("min_samples", min_samples)
+    snap.setdefault("window_days", window_days)
+    if snap.get("used") is True:
+        return max(0.0, float(cost_bps) / 10000.0), snap
+    return None, snap
+
+
 def _empirical_entry_cost_fraction(
     db: Session,
     *,
     ticker: str,
     settings: Any,
+    selected_venue: str | None = None,
 ) -> tuple[float, dict[str, Any]]:
     """Return empirical entry cost fraction from TCA rows.
 
@@ -1705,6 +1825,21 @@ def _empirical_entry_cost_fraction(
         )
     except Exception:
         min_samples = 5
+    selected = str(selected_venue or "").strip().lower()
+    if selected == "rh":
+        selected = "robinhood"
+    elif selected == "cb":
+        selected = "coinbase"
+    venue_tca: dict[str, Any] | None = None
+    if selected in {"robinhood", "coinbase"}:
+        venue_cost, venue_tca = _selected_venue_entry_tca_cost_fraction(
+            db,
+            ticker=ticker,
+            settings=settings,
+            selected_venue=selected,
+        )
+        if venue_cost is not None:
+            return venue_cost, venue_tca
     try:
         from sqlalchemy import text
 
@@ -1732,6 +1867,8 @@ def _empirical_entry_cost_fraction(
             "used": False,
             "reason": "query_failed",
             "side_aliases": ["long", "buy"],
+            "selected_venue": selected or None,
+            "venue_tca": venue_tca,
         }
     if (
         not row
@@ -1742,6 +1879,8 @@ def _empirical_entry_cost_fraction(
             "used": False,
             "reason": "no_estimate",
             "side_aliases": ["long", "buy"],
+            "selected_venue": selected or None,
+            "venue_tca": venue_tca,
         }
 
     try:
@@ -1756,6 +1895,8 @@ def _empirical_entry_cost_fraction(
             "min_samples": min_samples,
             "matched_side": row.get("side"),
             "side_aliases": ["long", "buy"],
+            "selected_venue": selected or None,
+            "venue_tca": venue_tca,
         }
 
     def _bps(name: str) -> float:
@@ -1773,6 +1914,7 @@ def _empirical_entry_cost_fraction(
         "used": True,
         "matched_side": row.get("side"),
         "side_aliases": ["long", "buy"],
+        "selected_venue": selected or None,
         "sample_trades": samples,
         "p90_spread_bps": p90_spread,
         "p90_slippage_bps": p90_slip,
@@ -1782,6 +1924,7 @@ def _empirical_entry_cost_fraction(
         "last_updated_at": (
             last_updated.isoformat() if hasattr(last_updated, "isoformat") else last_updated
         ),
+        "venue_tca": venue_tca,
     }
 
 
@@ -1947,6 +2090,7 @@ def evaluate_entry_edge(
     settings: Any,
     pat_ctx: dict[str, Any],
     confidence: float,
+    selected_venue: str | None = None,
 ) -> EntryEdgeDecision:
     entry = alert.entry_price
     target = alert.target_price
@@ -1993,7 +2137,10 @@ def evaluate_entry_edge(
         loss=loss,
     )
     cost_fraction, cost_snapshot = _empirical_entry_cost_fraction(
-        db, ticker=alert.ticker, settings=settings,
+        db,
+        ticker=alert.ticker,
+        settings=settings,
+        selected_venue=selected_venue,
     )
 
     edge_math = _expected_edge_components(
@@ -2552,12 +2699,19 @@ def passes_rule_gate(
         ppp = projected_profit_pct(entry, target)
         snap["projected_profit_pct"] = ppp
         snap["projected_profit_pct_source"] = "stock_entry_target"
+        entry_edge_selected_venue, entry_edge_advisory = _advisory_entry_edge_venue(
+            db,
+            alert,
+            settings=settings,
+        )
+        snap.update(entry_edge_advisory)
         edge_decision = evaluate_entry_edge(
             db,
             alert,
             settings=settings,
             pat_ctx=pat_ctx,
             confidence=conf,
+            selected_venue=entry_edge_selected_venue,
         )
         snap["entry_edge"] = edge_decision.snapshot
         snap["entry_edge_reason"] = edge_decision.reason
@@ -2632,6 +2786,7 @@ def passes_rule_gate(
                     settings=settings,
                     pat_ctx=pat_ctx,
                     confidence=conf,
+                    selected_venue=entry_edge_selected_venue,
                 )
                 snap["favorable_entry_drift_edge"] = adjusted_edge.snapshot
                 snap["favorable_entry_drift_edge_reason"] = adjusted_edge.reason
@@ -2671,6 +2826,7 @@ def passes_rule_gate(
                         settings=settings,
                         pat_ctx=pat_ctx,
                         confidence=conf,
+                        selected_venue=entry_edge_selected_venue,
                     )
                     snap["slippage_reprice_edge"] = adjusted_edge.snapshot
                     snap["slippage_reprice_edge_reason"] = adjusted_edge.reason

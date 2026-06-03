@@ -451,6 +451,93 @@ def test_passes_rule_gate_shadow_observation_skips_live_risk_authority():
     assert snap["portfolio_check"]["reason"] == "shadow_observation_only"
 
 
+def test_rule_gate_passes_advisory_venue_to_entry_edge():
+    db = MagicMock()
+    settings = SimpleNamespace(
+        chili_autotrader_rth_only=False,
+        chili_autotrader_allow_extended_hours=False,
+        chili_autotrader_crypto_enabled=True,
+        chili_autotrader_options_enabled=False,
+        chili_autotrader_confidence_floor=0.5,
+        chili_autotrader_min_projected_profit_pct=0.0,
+        chili_autotrader_max_symbol_price_usd=500.0,
+        chili_autotrader_fractional_equity_enabled=True,
+        chili_autotrader_max_entry_slippage_pct=5.0,
+        chili_autotrader_daily_loss_cap_usd=500.0,
+        chili_autotrader_daily_loss_cap_pct=1.5,
+        chili_autotrader_max_concurrent=60,
+        chili_autotrader_max_concurrent_equity=20,
+        chili_autotrader_max_concurrent_crypto=20,
+        chili_autotrader_max_concurrent_options=20,
+        chili_autotrader_assumed_capital_usd=100_000.0,
+        chili_autotrader_broker_equity_cache_enabled=False,
+        chili_autotrader_broker_equity_cache_ttl_seconds=300,
+        chili_autotrader_broker_equity_cache_max_stale_seconds=900,
+    )
+    alert = BreakoutAlert(
+        ticker="EDGE-USD",
+        asset_type="crypto",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.7,
+        price_at_alert=100.0,
+        entry_price=100.0,
+        stop_loss=90.0,
+        target_price=115.0,
+        user_id=1,
+    )
+    ctx = RuleGateContext(
+        current_price=100.0,
+        autotrader_open_count=0,
+        realized_loss_today_usd=0.0,
+        autotrader_open_count_by_lane={"equity": 0, "crypto": 0, "options": 0},
+    )
+
+    with (
+        patch(
+            "app.services.trading.auto_trader_rules.resolve_pattern_signal_context",
+            return_value={},
+        ),
+        patch(
+            "app.services.trading.broker_selector.select_venue",
+            return_value=SimpleNamespace(venue="coinbase", reason="test"),
+        ),
+        patch(
+            "app.services.trading.auto_trader_rules.evaluate_entry_edge",
+            return_value=EntryEdgeDecision(
+                True,
+                "positive_expected_edge",
+                {"expected_net_pct": 1.25},
+            ),
+        ) as edge_mock,
+        patch(
+            "app.services.trading.auto_trader_rules.resolve_effective_slippage_pct",
+            return_value=(5.0, "test"),
+        ),
+        patch(
+            "app.services.trading.auto_trader_rules.resolve_brain_risk_context",
+            return_value={"dial_value": 1.0},
+        ),
+        patch(
+            "app.services.trading.auto_trader_rules.resolve_effective_capital",
+            return_value=(100_000.0, "broker"),
+        ),
+        patch(
+            "app.services.trading.portfolio_risk.check_new_trade_allowed",
+            return_value=(True, "ok"),
+        ),
+    ):
+        ok, reason, snap = passes_rule_gate(
+            db, alert, settings=settings, ctx=ctx, for_new_entry=True
+        )
+
+    assert ok
+    assert reason == "ok"
+    assert edge_mock.call_args.kwargs["selected_venue"] == "coinbase"
+    assert snap["entry_edge_advisory_venue"] == "coinbase"
+    assert snap["entry_edge_advisory_reason"] == "test"
+    assert snap["entry_edge_selected_venue"] == "coinbase"
+
+
 def test_daily_loss_cap_uses_static_dollar_cap_when_equity_is_unproven():
     db = MagicMock()
     settings = SimpleNamespace(
@@ -1197,6 +1284,84 @@ def test_evaluate_entry_edge_blocks_thin_margin_after_empirical_cost():
     assert "LOWER(side) IN ('long', 'buy')" in db.sqls[0]
     assert "COALESCE(sample_trades, 0) >= :min_samples" in db.sqls[0]
     assert db.params[0]["min_samples"] == 5
+
+
+def test_evaluate_entry_edge_prefers_selected_venue_broker_source_tca():
+    class _Result:
+        def __init__(self, rows=None, first=None):
+            self._rows = rows or []
+            self._first = first
+
+        def mappings(self):
+            return self
+
+        def all(self):
+            return list(self._rows)
+
+        def first(self):
+            return self._first
+
+    class _Db:
+        def __init__(self):
+            self.sqls = []
+            self.params = []
+
+        def execute(self, sql, params=None):
+            text = str(sql)
+            self.sqls.append(text)
+            self.params.append(params or {})
+            if "LOWER(COALESCE(broker_source, '')) IN ('robinhood', 'rh')" in text:
+                return _Result(
+                    first={
+                        "sample_trades": 12,
+                        "avg_entry_slippage_bps": 80.0,
+                        "p90_entry_slippage_bps": 125.0,
+                    }
+                )
+            if "trading_execution_cost_estimates" in text:
+                raise AssertionError("aggregate estimate should not be queried")
+            return _Result(rows=[])
+
+    alert = BreakoutAlert(
+        ticker="EDGE",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.9,
+        price_at_alert=100.0,
+        entry_price=100.0,
+        stop_loss=99.0,
+        target_price=102.0,
+        user_id=1,
+    )
+    settings = SimpleNamespace(
+        chili_autotrader_alert_confidence_probability_weight=1.0,
+        chili_autotrader_min_expected_net_after_empirical_cost_pct=0.25,
+        chili_robinhood_cost_gate_min_tca_samples=5,
+        chili_robinhood_cost_gate_window_days=30,
+        brain_execution_cost_unverified_tca_outlier_bps=500.0,
+    )
+    db = _Db()
+
+    decision = evaluate_entry_edge(
+        db,
+        alert,
+        settings=settings,
+        pat_ctx={},
+        confidence=0.8,
+        selected_venue="robinhood",
+    )
+
+    assert not decision.allowed
+    assert decision.reason == "empirical_cost_edge_margin_too_thin"
+    assert decision.snapshot["empirical_cost_used"] is True
+    assert decision.snapshot["empirical_cost"]["selected_venue"] == "robinhood"
+    assert decision.snapshot["empirical_cost"]["source"] == "trading_trades_broker_source"
+    assert decision.snapshot["empirical_cost"]["sample_basis"] == (
+        "usable_robinhood_adverse_entry_tca_trades"
+    )
+    assert decision.snapshot["empirical_cost"]["tca_cost_bps"] == 125
+    assert decision.snapshot["expected_net_pct"] == pytest.approx(0.15)
+    assert "broker_source" in db.sqls[0]
 
 
 def test_evaluate_entry_edge_guards_probability_sample_count_to_closed_trades():
