@@ -52,6 +52,7 @@ BRAIN_EXIT_ENGINE_BACKTEST_OPS_LOG_DEFAULT_ENABLED = False
 AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE = 5
 AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE = 50
 AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS = 10
+AUTOTRADER_SCHEDULER_TICK_INTERVAL_DEFAULT_SECONDS = 60
 AUTOTRADER_DEFAULT_TICK_MAX_SECONDS = 45
 AUTOTRADER_MIN_TICK_MAX_SECONDS = 5
 AUTOTRADER_MAX_TICK_MAX_SECONDS = 300
@@ -3180,7 +3181,7 @@ class Settings(BaseSettings):
         ),
     )
     chili_autotrader_monitor_interval_seconds: int = Field(
-        default=30,
+        default=60,
         ge=5,
         le=600,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_MONITOR_INTERVAL_SECONDS"),
@@ -4549,7 +4550,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_AUTOTRADER_ASSUMED_CAPITAL_USD"),
     )
     chili_autotrader_tick_interval_seconds: int = Field(
-        default=AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS,
+        default=AUTOTRADER_SCHEDULER_TICK_INTERVAL_DEFAULT_SECONDS,
         ge=5,
         le=120,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_TICK_INTERVAL_SECONDS"),
