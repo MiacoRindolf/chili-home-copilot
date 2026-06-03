@@ -35,6 +35,7 @@ from app.services.trading.pattern_quality_score import (
     _clip,
 )
 from app.services.trading.pattern_cohort_promote import (
+    _bootstrap_policy,
     count_recent_cohort_promotions,
     run_cohort_promote_cycle,
     select_cohort_candidates,
@@ -263,6 +264,79 @@ def test_clip_helper_bounds():
     assert _clip(0.5) == 0.5
     assert _clip(1.5) == 1.0
     assert _clip(2.5, lo=0.0, hi=2.0) == 2.0
+
+
+def test_bootstrap_policy_excludes_saturated_constant_dsr_pbo_from_ranking():
+    records = [
+        {
+            "id": 1,
+            "cpcv_median_sharpe": 0.5,
+            "deflated_sharpe": 1.0,
+            "pbo": 0.0,
+        },
+        {
+            "id": 2,
+            "cpcv_median_sharpe": 1.0,
+            "deflated_sharpe": 1.0,
+            "pbo": 0.0,
+        },
+        {
+            "id": 3,
+            "cpcv_median_sharpe": 2.0,
+            "deflated_sharpe": 1.0,
+            "pbo": 0.0,
+        },
+    ]
+
+    policy = _bootstrap_policy(records, settings_=_settings_stub())
+
+    assert policy["metric_enabled"] == {
+        "cpcv": True,
+        "dsr": False,
+        "pbo_inverse": False,
+    }
+    assert policy["excluded_metrics"] == ["dsr", "pbo_inverse"]
+    assert policy["weights"]["cpcv"] == pytest.approx(1.0)
+    assert policy["weights"]["dsr"] == pytest.approx(0.0)
+    assert policy["weights"]["pbo_inverse"] == pytest.approx(0.0)
+    assert policy["scores"][1] == pytest.approx(0.0)
+    assert policy["scores"][2] == pytest.approx(0.5)
+    assert policy["scores"][3] == pytest.approx(1.0)
+
+
+def test_bootstrap_policy_keeps_discriminating_dsr_pbo_metrics():
+    records = [
+        {
+            "id": 1,
+            "cpcv_median_sharpe": 0.5,
+            "deflated_sharpe": 0.2,
+            "pbo": 0.8,
+        },
+        {
+            "id": 2,
+            "cpcv_median_sharpe": 1.0,
+            "deflated_sharpe": 0.5,
+            "pbo": 0.4,
+        },
+        {
+            "id": 3,
+            "cpcv_median_sharpe": 2.0,
+            "deflated_sharpe": 0.8,
+            "pbo": 0.1,
+        },
+    ]
+
+    policy = _bootstrap_policy(records, settings_=_settings_stub())
+
+    assert policy["metric_enabled"] == {
+        "cpcv": True,
+        "dsr": True,
+        "pbo_inverse": True,
+    }
+    assert policy["excluded_metrics"] == []
+    assert policy["weights"]["cpcv"] > 0.0
+    assert policy["weights"]["dsr"] > 0.0
+    assert policy["weights"]["pbo_inverse"] > 0.0
 
 
 # ── Integration tests (DB-bound) ─────────────────────────────────────

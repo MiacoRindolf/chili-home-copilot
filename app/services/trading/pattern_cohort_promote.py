@@ -111,7 +111,51 @@ def _rank_pct(sorted_values: list[float], value: Any) -> float:
     return _clip(idx / (len(arr) - 1))
 
 
-def _bootstrap_weights(settings_: Any) -> dict[str, float]:
+def _is_saturated_deflated_sharpe(value: Any) -> bool:
+    return _is_number(value) and float(value) >= 1.0
+
+
+def _is_saturated_pbo(value: Any) -> bool:
+    return _is_number(value) and float(value) <= 0.0
+
+
+def _values_degenerate(values: list[float]) -> bool:
+    if len(values) <= 1:
+        return True
+    first = float(values[0])
+    return all(abs(float(v) - first) <= 1e-12 for v in values[1:])
+
+
+def _bootstrap_metric_enabled(records: list[dict[str, Any]]) -> dict[str, bool]:
+    """Detect bootstrap metrics that cannot discriminate this candidate pool.
+
+    DSR and PBO have repeatedly appeared as saturated constants in live
+    diagnostics. Keeping a constant component in the near-miss score creates
+    false precision and can let the bootstrap lane rank by overfit-looking
+    inputs. CPCV remains the primary discovery axis even when the pool is
+    small; saturated/constant DSR/PBO are dropped and weights are renormalized.
+    """
+    dsr_values = [float(r["deflated_sharpe"]) for r in records]
+    pbo_values = [float(r["pbo"]) for r in records]
+    pbo_inverse_values = [1.0 - _clip(v) for v in pbo_values]
+    return {
+        "cpcv": True,
+        "dsr": not (
+            _values_degenerate(dsr_values)
+            or all(_is_saturated_deflated_sharpe(v) for v in dsr_values)
+        ),
+        "pbo_inverse": not (
+            _values_degenerate(pbo_inverse_values)
+            or all(_is_saturated_pbo(v) for v in pbo_values)
+        ),
+    }
+
+
+def _bootstrap_weights(
+    settings_: Any,
+    *,
+    metric_enabled: dict[str, bool] | None = None,
+) -> dict[str, float]:
     raw = {
         "cpcv": max(0.0, float(getattr(
             settings_, "chili_cohort_score_weight_cpcv_sharpe", 0.10,
@@ -122,6 +166,11 @@ def _bootstrap_weights(settings_: Any) -> dict[str, float]:
         "pbo_inverse": max(0.0, float(getattr(
             settings_, "chili_cohort_score_weight_pbo_inverse", 0.05,
         ))),
+    }
+    enabled = metric_enabled or {}
+    raw = {
+        key: (value if bool(enabled.get(key, True)) else 0.0)
+        for key, value in raw.items()
     }
     total = sum(raw.values())
     if total <= 0.0:
@@ -175,7 +224,8 @@ def _bootstrap_policy(
     cpcv_vals = sorted(float(r["cpcv_median_sharpe"]) for r in metric_ready)
     dsr_vals = sorted(float(r["deflated_sharpe"]) for r in metric_ready)
     pbo_inv_vals = sorted(1.0 - _clip(float(r["pbo"])) for r in metric_ready)
-    weights = _bootstrap_weights(settings_)
+    metric_enabled = _bootstrap_metric_enabled(metric_ready)
+    weights = _bootstrap_weights(settings_, metric_enabled=metric_enabled)
 
     scores: dict[int, float] = {}
     for r in metric_ready:
@@ -194,6 +244,10 @@ def _bootstrap_policy(
         "threshold": threshold,
         "scores": scores,
         "weights": weights,
+        "metric_enabled": metric_enabled,
+        "excluded_metrics": sorted(
+            metric for metric, enabled in metric_enabled.items() if not enabled
+        ),
         "metric_ready_count": len(metric_ready),
         "floor_passed_ids": sorted(floor_passed_ids),
     }
