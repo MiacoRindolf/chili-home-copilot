@@ -982,6 +982,26 @@ def test_paper_shadow_signal_json_preserves_top_level_expected_edge():
     assert sig["asset_type"] == "crypto"
 
 
+def test_paper_shadow_signal_json_preserves_entry_execution_expected_edge():
+    alert = SimpleNamespace(id=14, ticker="EDGE-USD", asset_type=None)
+    snap = {
+        "entry_execution": {"entry_edge_expected_net_pct": "1.8"},
+        "projected_profit_pct": 12.0,
+    }
+
+    sig = at_mod._paper_shadow_signal_json(
+        alert,
+        snap,
+        "blocked_cost_gate",
+        duplicate_policy=at_mod.PAPER_SHADOW_DUPLICATE_POLICY_STRICT,
+    )
+
+    assert sig["entry_edge_expected_net_pct"] == pytest.approx(1.8)
+    assert sig["projected"] == pytest.approx(12.0)
+    assert sig["asset_class"] == "crypto"
+    assert sig["asset_type"] == "crypto"
+
+
 def test_paper_shadow_signal_json_requires_contract_context_for_options():
     alert = SimpleNamespace(id=13, ticker="AAPL", asset_type="options")
     snap = {
@@ -2770,6 +2790,16 @@ def test_broker_buy_cost_gate_uses_expected_net_edge(monkeypatch):
     assert snap["broker_selector_venue"] == "coinbase"
     assert snap["broker_selector_reason"] == "test"
     assert snap["cost_gate_edge_bps"] == 140
+
+
+def test_cost_gate_edge_uses_entry_execution_edge_before_projected_profit():
+    edge, source = at_mod._cost_gate_edge_pct_from_snapshot({
+        "projected_profit_pct": 12.0,
+        "entry_execution": {"entry_edge_expected_net_pct": "1.4"},
+    })
+
+    assert edge == pytest.approx(1.4)
+    assert source == "entry_execution.entry_edge_expected_net_pct"
 
 
 def test_broker_reject_suppression_applies_pattern_filter_before_limit(db, monkeypatch):

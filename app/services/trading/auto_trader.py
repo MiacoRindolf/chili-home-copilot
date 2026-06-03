@@ -2475,11 +2475,15 @@ def _expected_net_pct_from_snapshot(snap: dict[str, Any] | None) -> float | None
         raw = edge.get("expected_net_pct")
     if raw is None:
         raw = snap.get("entry_edge_expected_net_pct")
+    if raw is None:
+        entry_execution = snap.get("entry_execution")
+        if isinstance(entry_execution, dict):
+            raw = entry_execution.get("entry_edge_expected_net_pct")
     try:
         value = float(raw)
     except (TypeError, ValueError):
         return None
-    if value != value:
+    if not math.isfinite(value):
         return None
     return value
 
@@ -2516,6 +2520,15 @@ def _cost_gate_edge_pct_from_snapshot(
         expected = _snapshot_float(snap, "entry_edge_expected_net_pct")
     if expected is not None:
         return expected, "entry_edge_expected_net_pct"
+    if isinstance(snap, dict):
+        entry_execution = snap.get("entry_execution")
+        if isinstance(entry_execution, dict):
+            expected = _snapshot_float(
+                entry_execution,
+                "entry_edge_expected_net_pct",
+            )
+            if expected is not None:
+                return expected, "entry_execution.entry_edge_expected_net_pct"
     return _snapshot_float(snap, "projected_profit_pct"), "projected_profit_pct"
 
 
@@ -7237,6 +7250,7 @@ def _execute_new_entry(
         _trade_stop, _trade_target, _managed_exit_execution = (
             _managed_edge_execution_levels(alert, px=px, snap=snap)
         )
+        _entry_edge_expected_net_pct = _expected_net_pct_from_snapshot(snap)
         _option_meta_for_trade = (
             _normalize_option_meta_for_alert(
                 alert,
@@ -7325,7 +7339,7 @@ def _execute_new_entry(
             "probation_recert_notional_multiplier": snap.get(
                 "probation_recert_notional_multiplier"
             ),
-            "entry_edge_expected_net_pct": snap.get("entry_edge_expected_net_pct"),
+            "entry_edge_expected_net_pct": _entry_edge_expected_net_pct,
             "cost_gate_fee_bps": snap.get("cost_gate_fee_bps"),
             "cost_gate_threshold_bps": snap.get("cost_gate_threshold_bps"),
             "cost_gate_tca_cost_bps": snap.get("cost_gate_tca_cost_bps"),
