@@ -91,6 +91,33 @@ void main() {
       c.showDesktop();
       expect(c.hasVisibleWindows, isFalse);
     });
+
+    test('snap tiles the window into halves / quarters / full', () {
+      final WorkspaceController c = WorkspaceController();
+      const Size d = Size(1000, 800);
+      c.open('chat', title: 'Chat', icon: Icons.chat);
+      c.snap('chat', 'left', d);
+      expect(c.byId('chat')!.position, Offset.zero);
+      expect(c.byId('chat')!.size, const Size(500, 800));
+      c.snap('chat', 'right', d);
+      expect(c.byId('chat')!.position, const Offset(500, 0));
+      c.snap('chat', 'br', d);
+      expect(c.byId('chat')!.position, const Offset(500, 400));
+      expect(c.byId('chat')!.size, const Size(500, 400));
+      c.snap('chat', 'max', d);
+      expect(c.byId('chat')!.maximized, isTrue);
+      expect(c.byId('chat')!.size, d);
+    });
+
+    test('cycleFocus moves focus to the bottom-most visible window', () {
+      final WorkspaceController c = WorkspaceController();
+      c.open('a', title: 'A', icon: Icons.abc);
+      c.open('b', title: 'B', icon: Icons.abc);
+      c.open('c', title: 'C', icon: Icons.abc);
+      expect(c.focusedId, 'c'); // last opened is on top
+      c.cycleFocus();
+      expect(c.focusedId, 'a'); // bottom-most raised to top
+    });
   });
 
   group('WorkspaceShell', () {
