@@ -10,6 +10,7 @@ from app.models.trading import (
     AutoTraderRun,
     BrainWorkEvent,
     BreakoutAlert,
+    TradingExecutionEvent,
     PaperTrade,
     ScanPattern,
     Trade,
@@ -134,23 +135,24 @@ def _closed_live(
     indicator_snapshot: dict | None = None,
     exit_reason: str | None = None,
 ):
-    db.add(
-        Trade(
-            scan_pattern_id=pat.id,
-            ticker=ticker,
-            direction="long",
-            entry_price=entry_price,
-            quantity=quantity,
-            status="closed",
-            entry_date=datetime.utcnow() - timedelta(hours=2),
-            exit_date=datetime.utcnow() - timedelta(hours=1),
-            exit_price=entry_price + (pnl / quantity),
-            pnl=pnl,
-            asset_kind=asset_kind,
-            indicator_snapshot=indicator_snapshot,
-            exit_reason=exit_reason,
-        )
+    trade = Trade(
+        scan_pattern_id=pat.id,
+        ticker=ticker,
+        direction="long",
+        entry_price=entry_price,
+        quantity=quantity,
+        status="closed",
+        entry_date=datetime.utcnow() - timedelta(hours=2),
+        exit_date=datetime.utcnow() - timedelta(hours=1),
+        exit_price=entry_price + (pnl / quantity),
+        pnl=pnl,
+        asset_kind=asset_kind,
+        indicator_snapshot=indicator_snapshot,
+        exit_reason=exit_reason,
     )
+    db.add(trade)
+    db.flush()
+    return trade
 
 
 def test_cash_deployment_categorizes_positive_blocks_without_live_shortcuts(db, monkeypatch):
@@ -844,6 +846,100 @@ def test_provenance_backfill_handler_scopes_low_confidence_exit_debt(db):
     assert row["exit_reason_counts"]["missing"] == 1
     assert row["exit_reason_counts"]["broker_reconcile_position_gone"] == 1
     assert all(x["scan_pattern_id"] != other.id for x in rows)
+
+
+def test_provenance_backfill_repairs_only_unambiguous_exit_reasons(db):
+    from app.services.trading.brain_work.handlers.profitability import (
+        handle_provenance_backfill,
+    )
+    from app.services.trading.edge_reliability import PROVENANCE_BACKFILL_DIAGNOSTIC
+
+    pat = _pattern(db, name="handler repairable noisy exits")
+    pending = _closed_live(db, pat, ticker="RPAIR", pnl=3.0, exit_reason=None)
+    pending.pending_exit_reason = "pattern_exit_now"
+    pending.pending_exit_status = "filled"
+    from_event = _closed_live(
+        db,
+        pat,
+        ticker="RPAIR",
+        pnl=5.0,
+        exit_reason="broker_reconcile_position_gone",
+    )
+    duplicate = _closed_live(
+        db,
+        pat,
+        ticker="RPAIR",
+        pnl=-1.0,
+        exit_reason="sync_duplicate",
+    )
+    duplicate.pending_exit_reason = "target"
+    ambiguous = _closed_live(db, pat, ticker="RPAIR", pnl=1.0, exit_reason=None)
+    ambiguous.pending_exit_reason = "target"
+    ambiguous.pending_exit_status = "filled"
+    db.flush()
+    db.add_all(
+        [
+            TradingExecutionEvent(
+                trade_id=from_event.id,
+                scan_pattern_id=pat.id,
+                ticker="RPAIR",
+                event_type="exit_fill",
+                status="filled",
+                payload_json={"side": "sell", "exit_reason": "target"},
+            ),
+            TradingExecutionEvent(
+                trade_id=ambiguous.id,
+                scan_pattern_id=pat.id,
+                ticker="RPAIR",
+                event_type="exit_fill",
+                status="filled",
+                payload_json={"side": "sell", "exit_reason": "stop"},
+            ),
+        ]
+    )
+    parent = BrainWorkEvent(
+        event_type="provenance_backfill",
+        event_kind="work",
+        payload={
+            "scan_pattern_id": pat.id,
+            "asset_class": "stock",
+            "window_days": 7,
+            "cash_deployment_category": "needs_exit_provenance",
+            "exit_provenance_blocker": "low_confidence_live_exit_rate",
+            "evidence_fingerprint": "handler-exit-repair-fp",
+        },
+        dedupe_key="test:provenance:handler-exit-repair",
+        lease_scope="edge",
+    )
+    db.add(parent)
+    db.commit()
+
+    handle_provenance_backfill(db, parent, user_id=None)
+    db.flush()
+    for trade in (pending, from_event, duplicate, ambiguous):
+        db.refresh(trade)
+
+    outcome = (
+        db.query(BrainWorkEvent)
+        .filter(BrainWorkEvent.event_type == PROVENANCE_BACKFILL_DIAGNOSTIC)
+        .one()
+    )
+    repair = outcome.payload["exit_provenance_repair_summary"]
+
+    assert pending.exit_reason == "pattern_exit_now"
+    assert from_event.exit_reason == "target"
+    assert duplicate.exit_reason == "sync_duplicate"
+    assert ambiguous.exit_reason is None
+    assert outcome.payload["repair_applied"] is True
+    assert outcome.payload["research_only"] is False
+    assert repair["repaired_count"] == 2
+    assert {row["trade_id"] for row in repair["repaired"]} == {
+        pending.id,
+        from_event.id,
+    }
+    skipped = {row["trade_id"]: row["reason"] for row in repair["skipped"]}
+    assert skipped[duplicate.id] == "unrepairable_current_exit_reason"
+    assert skipped[ambiguous.id] == "ambiguous_or_missing_repair_reason"
 
 
 def test_cash_deployment_work_producer_enqueues_targeted_deduped_work(db, monkeypatch):

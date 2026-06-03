@@ -4,7 +4,8 @@ Handlers here are deliberately conservative:
 * edge reliability writes aggregate outcome snapshots only;
 * recert rescue recomputes existing quality evidence but never clears recert;
 * exit variant refresh delegates to existing ScanPattern evolution gates;
-* provenance backfill writes diagnostics only.
+* provenance backfill writes diagnostics plus unambiguous closed-trade
+  exit-reason repairs only.
 """
 from __future__ import annotations
 
@@ -30,6 +31,25 @@ _TIME_DECAY_EDGE_MISS_REASONS = frozenset({
 })
 _TIME_DECAY_EDGE_MISS_DEFAULT_MIN_LOSSES = 2
 _TIME_DECAY_EDGE_MISS_FETCH_LIMIT = 200
+_REPAIRABLE_LOW_CONFIDENCE_EXIT_REASONS = frozenset({
+    "",
+    "missing",
+    "broker_reconcile_close",
+    "broker_reconcile_position_gone",
+})
+_UNUSABLE_EXIT_REPAIR_REASONS = frozenset({
+    "",
+    "missing",
+    "unknown",
+    "pending_exit",
+})
+_TERMINAL_PENDING_EXIT_STATUSES = frozenset({
+    "filled",
+    "complete",
+    "completed",
+    "closed",
+    "executed",
+})
 
 
 def _payload(ev: Any) -> dict[str, Any]:
@@ -66,8 +86,12 @@ def _window_days(ev: Any) -> int:
 
 
 def _positive_int_payload(payload: dict[str, Any], key: str) -> int:
+    return _positive_int_value(payload.get(key))
+
+
+def _positive_int_value(value: Any) -> int:
     try:
-        out = int(payload.get(key) or 0)
+        out = int(value or 0)
     except (TypeError, ValueError):
         return 0
     return max(0, out)
@@ -80,6 +104,192 @@ def _needs_exit_provenance_backfill(payload: dict[str, Any]) -> bool:
     if str(payload.get("exit_provenance_blocker") or "").strip():
         return True
     return _positive_int_payload(payload, "live_low_confidence_exit_count") > 0
+
+
+def _normalized_exit_reason_value(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _is_low_confidence_exit_reason_value(value: Any) -> bool:
+    reason = _normalized_exit_reason_value(value)
+    if reason in _UNUSABLE_EXIT_REPAIR_REASONS:
+        return True
+    from app.services.trading.realized_pnl_sql import (
+        LIVE_PATTERN_EV_LOW_CONFIDENCE_EXIT_REASONS,
+        LIVE_PATTERN_EV_LOW_CONFIDENCE_EXIT_TOKENS,
+    )
+
+    return reason in LIVE_PATTERN_EV_LOW_CONFIDENCE_EXIT_REASONS or any(
+        token in reason for token in LIVE_PATTERN_EV_LOW_CONFIDENCE_EXIT_TOKENS
+    )
+
+
+def _repairable_current_exit_reason(value: Any) -> bool:
+    reason = _normalized_exit_reason_value(value)
+    if reason in _REPAIRABLE_LOW_CONFIDENCE_EXIT_REASONS:
+        return True
+    if reason.startswith("broker_reconcile_") and "no_exit_price" not in reason:
+        return True
+    return False
+
+
+def _usable_exit_repair_reason(value: Any) -> str | None:
+    reason = _normalized_exit_reason_value(value)
+    if reason in _UNUSABLE_EXIT_REPAIR_REASONS:
+        return None
+    if _is_low_confidence_exit_reason_value(reason):
+        return None
+    return reason[:50]
+
+
+def _trade_has_realized_exit_basis(trade: Any) -> bool:
+    if _safe_float(getattr(trade, "pnl", None)) is not None:
+        return True
+    entry = _safe_float(getattr(trade, "entry_price", None))
+    exit_px = _safe_float(getattr(trade, "exit_price", None))
+    qty = _safe_float(getattr(trade, "quantity", None))
+    return bool(entry and entry > 0.0 and exit_px and exit_px > 0.0 and qty and qty > 0.0)
+
+
+def _add_exit_repair_candidate(
+    candidates: dict[str, set[str]],
+    *,
+    reason: Any,
+    source: str,
+) -> None:
+    clean = _usable_exit_repair_reason(reason)
+    if not clean:
+        return
+    candidates.setdefault(clean, set()).add(source)
+
+
+def _exit_reason_repair_candidates(db: "Session", trade: Any) -> dict[str, set[str]]:
+    from app.models.trading import EconomicLedgerEvent, TradingExecutionEvent
+
+    candidates: dict[str, set[str]] = {}
+    pending_status = _normalized_exit_reason_value(
+        getattr(trade, "pending_exit_status", None)
+    )
+    if pending_status in _TERMINAL_PENDING_EXIT_STATUSES:
+        _add_exit_repair_candidate(
+            candidates,
+            reason=getattr(trade, "pending_exit_reason", None),
+            source="trade.pending_exit_reason",
+        )
+
+    events = (
+        db.query(TradingExecutionEvent)
+        .filter(TradingExecutionEvent.trade_id == int(getattr(trade, "id", 0) or 0))
+        .order_by(TradingExecutionEvent.recorded_at.desc(), TradingExecutionEvent.id.desc())
+        .limit(20)
+        .all()
+    )
+    for event in events:
+        payload = getattr(event, "payload_json", None)
+        if not isinstance(payload, dict):
+            continue
+        event_type = _normalized_exit_reason_value(getattr(event, "event_type", None))
+        if event_type not in {"exit_fill", "stop_engine_auto_sell", "coinbase_dust_close"}:
+            continue
+        for key in ("exit_reason", "pending_exit_reason", "reason"):
+            _add_exit_repair_candidate(
+                candidates,
+                reason=payload.get(key),
+                source=f"execution_event.{event_type}.{key}",
+            )
+
+    ledger_rows = (
+        db.query(EconomicLedgerEvent)
+        .filter(EconomicLedgerEvent.trade_id == int(getattr(trade, "id", 0) or 0))
+        .filter(EconomicLedgerEvent.event_type == "exit_fill")
+        .order_by(EconomicLedgerEvent.created_at.desc(), EconomicLedgerEvent.id.desc())
+        .limit(10)
+        .all()
+    )
+    for row in ledger_rows:
+        provenance = getattr(row, "provenance_json", None)
+        if not isinstance(provenance, dict):
+            continue
+        _add_exit_repair_candidate(
+            candidates,
+            reason=provenance.get("exit_reason"),
+            source="economic_ledger.exit_fill.exit_reason",
+        )
+    return candidates
+
+
+def _repair_low_confidence_exit_provenance(
+    db: "Session",
+    rows: list[dict[str, Any]],
+    *,
+    user_id: int | None,
+) -> dict[str, Any]:
+    from app.models.trading import Trade
+
+    trade_ids = sorted({
+        int(tid)
+        for row in rows
+        for tid in (row.get("low_confidence_trade_ids") or [])
+        if _positive_int_value(tid) > 0
+    })
+    summary: dict[str, Any] = {
+        "considered_trade_ids": trade_ids,
+        "considered_count": len(trade_ids),
+        "repaired_count": 0,
+        "repaired": [],
+        "skipped": [],
+    }
+    if not trade_ids:
+        return summary
+
+    q = (
+        db.query(Trade)
+        .filter(Trade.id.in_(trade_ids))
+        .filter(Trade.status == "closed")
+    )
+    if user_id is not None:
+        q = q.filter(Trade.user_id == user_id)
+
+    trades = {int(trade.id): trade for trade in q.all()}
+    for trade_id in trade_ids:
+        trade = trades.get(trade_id)
+        if trade is None:
+            summary["skipped"].append({"trade_id": trade_id, "reason": "not_closed_or_not_found"})
+            continue
+        old_reason = _normalized_exit_reason_value(getattr(trade, "exit_reason", None)) or "missing"
+        if not _is_low_confidence_exit_reason_value(old_reason):
+            summary["skipped"].append({"trade_id": trade_id, "reason": "already_high_confidence"})
+            continue
+        if not _repairable_current_exit_reason(old_reason):
+            summary["skipped"].append({
+                "trade_id": trade_id,
+                "reason": "unrepairable_current_exit_reason",
+                "exit_reason": old_reason,
+            })
+            continue
+        if not _trade_has_realized_exit_basis(trade):
+            summary["skipped"].append({"trade_id": trade_id, "reason": "missing_realized_exit_basis"})
+            continue
+        candidates = _exit_reason_repair_candidates(db, trade)
+        if len(candidates) != 1:
+            summary["skipped"].append({
+                "trade_id": trade_id,
+                "reason": "ambiguous_or_missing_repair_reason",
+                "candidate_reasons": sorted(candidates),
+            })
+            continue
+        repaired_reason, sources = next(iter(candidates.items()))
+        trade.exit_reason = repaired_reason[:50]
+        db.add(trade)
+        repaired = {
+            "trade_id": trade_id,
+            "old_exit_reason": old_reason,
+            "new_exit_reason": trade.exit_reason,
+            "sources": sorted(sources),
+        }
+        summary["repaired"].append(repaired)
+    summary["repaired_count"] = len(summary["repaired"])
+    return summary
 
 
 def _recert_reason_set(raw: Any) -> set[str]:
@@ -1031,6 +1241,17 @@ def handle_provenance_backfill(
     exit_summary = {
         k: v for k, v in low_confidence_exit_attribution.items() if k != "rows"
     }
+    exit_repair_summary = _repair_low_confidence_exit_provenance(
+        db,
+        exit_rows,
+        user_id=user_id,
+    ) if exit_rows else {
+        "considered_trade_ids": [],
+        "considered_count": 0,
+        "repaired_count": 0,
+        "repaired": [],
+        "skipped": [],
+    }
     key = str(payload_in.get("evidence_fingerprint") or "").strip()
     if not key and exit_rows:
         key = str(exit_rows[0].get("evidence_fingerprint") or "none")
@@ -1054,7 +1275,9 @@ def handle_provenance_backfill(
             "exit_attribution_debt_count": len(exit_rows),
             "low_confidence_exit_attribution": exit_rows,
             "low_confidence_exit_attribution_summary": exit_summary,
-            "research_only": True,
+            "exit_provenance_repair_summary": exit_repair_summary,
+            "repair_applied": bool(exit_repair_summary.get("repaired_count")),
+            "research_only": not bool(exit_repair_summary.get("repaired_count")),
             "observed_at": _utc_iso(),
         },
         parent_event_id=int(getattr(ev, "id", 0) or 0),
