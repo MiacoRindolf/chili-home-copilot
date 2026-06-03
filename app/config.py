@@ -3758,6 +3758,65 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_COINBASE_AUTOTRADER_LIVE"),
     )
+    # Coinbase live probation: even when the venue live flag is enabled,
+    # require recent Coinbase-managed crypto AutoTrader exits to show clean,
+    # positive realized venue evidence before paying live fees. Blocks still
+    # flow into paper-shadow observation from the AutoTrader call site.
+    chili_coinbase_autotrader_probation_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_COINBASE_AUTOTRADER_PROBATION_ENABLED"
+        ),
+    )
+    chili_coinbase_autotrader_probation_window_days: int = Field(
+        default=30,
+        ge=1,
+        validation_alias=AliasChoices(
+            "CHILI_COINBASE_AUTOTRADER_PROBATION_WINDOW_DAYS"
+        ),
+    )
+    chili_coinbase_autotrader_probation_min_closed_trades: int = Field(
+        default=25,
+        ge=0,
+        validation_alias=AliasChoices(
+            "CHILI_COINBASE_AUTOTRADER_PROBATION_MIN_CLOSED_TRADES"
+        ),
+    )
+    chili_coinbase_autotrader_probation_max_low_confidence_exit_rate: float = Field(
+        default=0.35,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices(
+            "CHILI_COINBASE_AUTOTRADER_PROBATION_MAX_LOW_CONFIDENCE_EXIT_RATE"
+        ),
+    )
+    chili_coinbase_autotrader_probation_min_low_confidence_exits: int = Field(
+        default=10,
+        ge=0,
+        validation_alias=AliasChoices(
+            "CHILI_COINBASE_AUTOTRADER_PROBATION_MIN_LOW_CONFIDENCE_EXITS"
+        ),
+    )
+    chili_coinbase_autotrader_probation_min_avg_pnl_usd: float = Field(
+        default=0.0,
+        validation_alias=AliasChoices(
+            "CHILI_COINBASE_AUTOTRADER_PROBATION_MIN_AVG_PNL_USD"
+        ),
+    )
+    chili_coinbase_autotrader_probation_min_payoff_ratio: float = Field(
+        default=1.0,
+        ge=0.0,
+        validation_alias=AliasChoices(
+            "CHILI_COINBASE_AUTOTRADER_PROBATION_MIN_PAYOFF_RATIO"
+        ),
+    )
+    chili_coinbase_autotrader_probation_cache_seconds: int = Field(
+        default=60,
+        ge=0,
+        validation_alias=AliasChoices(
+            "CHILI_COINBASE_AUTOTRADER_PROBATION_CACHE_SECONDS"
+        ),
+    )
     chili_broker_selector_rh_crypto_degraded_fallback_enabled: bool = Field(
         default=BROKER_SELECTOR_RH_CRYPTO_DEGRADED_FALLBACK_DEFAULT_ENABLED,
         validation_alias=AliasChoices(

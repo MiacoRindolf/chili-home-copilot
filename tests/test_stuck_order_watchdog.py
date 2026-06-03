@@ -86,6 +86,15 @@ def _allow_replacement_buy_entry_gate(monkeypatch) -> None:
         "app.services.trading.portfolio_risk.circuit_breaker_entry_block_reason",
         lambda *_args, **_kwargs: None,
     )
+    monkeypatch.setattr(
+        wd,
+        "coinbase_live_probation_check",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            allowed=True,
+            reason="coinbase_probation:passed",
+            snapshot={},
+        ),
+    )
 
 
 def test_watchdog_disabled_returns_skipped(db, monkeypatch):
@@ -792,6 +801,82 @@ def test_coinbase_maker_first_blocks_replacement_buy_when_breaker_active(db, mon
     assert audit.decision == "blocked"
     assert audit.reason == (
         "maker_first_fallback_blocked:Circuit breaker active: test_breaker"
+    )
+
+
+def test_coinbase_maker_first_blocks_taker_fallback_on_probation(db, monkeypatch):
+    u = models.User(name="stuck_wd_cb_probation_block")
+    db.add(u)
+    db.flush()
+
+    t = _make_trade(
+        db,
+        user_id=u.id,
+        broker_order_id="cb-maker-probation",
+        broker_status="accepted",
+        entry_date=datetime.utcnow() - timedelta(seconds=180),
+        broker_source="coinbase",
+        status="working",
+        quantity=2.0,
+        remaining_quantity=2.0,
+        indicator_snapshot={
+            "entry_execution": {
+                "active_order_type": "limit_post_only",
+                "coinbase_maker_only": True,
+                "entry_edge_expected_net_pct": 5.0,
+                "cost_gate_fee_bps": 120,
+            }
+        },
+    )
+
+    cfg = SimpleNamespace(
+        chili_stuck_order_watchdog_enabled=True,
+        chili_stuck_order_market_timeout_seconds=300,
+        chili_stuck_order_limit_timeout_seconds=1800,
+        chili_coinbase_maker_first_fallback_enabled=True,
+        chili_coinbase_maker_first_fallback_after_seconds=120,
+    )
+    monkeypatch.setattr(wd, "settings", cfg)
+    monkeypatch.setattr(
+        "app.services.trading.governance.is_kill_switch_active",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.portfolio_risk.circuit_breaker_entry_block_reason",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        wd,
+        "coinbase_live_probation_check",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            allowed=False,
+            reason="coinbase_probation:low_confidence_exit_provenance",
+            snapshot={"closed_count": 264},
+        ),
+    )
+
+    fake_adapter = MagicMock()
+    fake_adapter.get_order.return_value = (
+        _fake_normalized("open", order_id="cb-maker-probation"),
+        FreshnessMeta(retrieved_at_utc=datetime.utcnow(), max_age_seconds=15.0),
+    )
+    monkeypatch.setattr(wd, "_get_adapter", lambda _src: fake_adapter)
+
+    out = wd.tick_stuck_order_watchdog(db)
+
+    assert out["outcomes"].get("maker_first_fallback_blocked_entry_gate") == 1
+    fake_adapter.get_best_bid_ask.assert_not_called()
+    fake_adapter.cancel_order.assert_not_called()
+    fake_adapter.place_limit_order_gtc.assert_not_called()
+
+    db.refresh(t)
+    assert t.status == "working"
+    assert t.broker_status == "accepted"
+    assert t.broker_order_id == "cb-maker-probation"
+    entry = t.indicator_snapshot["entry_execution"]
+    assert entry["maker_first_fallback_decision"] == "blocked_entry_gate"
+    assert entry["maker_first_fallback_blocked_reason"] == (
+        "coinbase_probation:low_confidence_exit_provenance"
     )
 
 

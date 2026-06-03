@@ -115,6 +115,7 @@ SYNERGY_RETRY_EXHAUSTED_REASON = "synergy_retry_not_applicable"
 
 QUALIFIED_BLOCK_PAPER_SHADOW_DECISIONS = frozenset({
     "blocked_coinbase_cap",
+    "blocked_coinbase_probation",
     "blocked_llm_not_viable",
     "blocked_llm_unavailable",
     "blocked_max_concurrent_crypto",
@@ -6358,6 +6359,35 @@ def _execute_broker_buy(
                 "current_positions=%d current_notional_usd=%.2f reason=%s",
                 alert.ticker, _cap.current_positions,
                 _cap.current_notional_usd, _cap.reason,
+            )
+            return None
+
+        from .coinbase_probation_gate import coinbase_live_probation_check
+
+        _probation = coinbase_live_probation_check(
+            db,
+            settings_obj=_cfg_p3,
+        )
+        snap["coinbase_probation"] = _probation.snapshot
+        if not _probation.allowed:
+            _block_live_order_with_paper_shadow(
+                db,
+                uid=uid,
+                alert=alert,
+                reason=_probation.reason,
+                snap=snap,
+                llm_snap=llm_snap,
+                out=out,
+                qty=float(qty),
+                px=float(_cap_px),
+                shadow_decision="blocked_coinbase_probation",
+            )
+            logger.warning(
+                "[autotrader] Coinbase probation blocked live entry "
+                "ticker=%s reason=%s snapshot=%s",
+                alert.ticker,
+                _probation.reason,
+                _probation.snapshot,
             )
             return None
 

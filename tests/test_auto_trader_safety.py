@@ -3027,6 +3027,11 @@ def test_coinbase_cap_uses_passed_price(monkeypatch):
     )
     monkeypatch.setattr(governance, "is_kill_switch_active", lambda: False)
     monkeypatch.setattr(
+        governance,
+        "is_kill_switch_active_for_session",
+        lambda *a, **k: False,
+    )
+    monkeypatch.setattr(
         cost_aware_gate,
         "cost_aware_min_edge_gate",
         lambda *a, **k: SimpleNamespace(
@@ -3077,6 +3082,213 @@ def test_coinbase_cap_uses_passed_price(monkeypatch):
         base_size="10.0",
         client_order_id="cid-88",
     )
+
+
+def test_coinbase_probation_blocks_before_adapter_with_shadow(monkeypatch):
+    from app import config as config_mod
+    from app.services.trading import broker_selector, cost_aware_gate, governance
+    from app.services.trading.coinbase_probation_gate import CoinbaseProbationDecision
+    from app.services.trading.venue import factory as venue_factory
+
+    blocked: list[dict] = []
+
+    monkeypatch.setattr(
+        at_mod,
+        "settings",
+        SimpleNamespace(chili_autotrader_block_live_on_capital_fallback=True),
+    )
+    monkeypatch.setattr(
+        config_mod,
+        "settings",
+        SimpleNamespace(chili_coinbase_autotrader_live=True),
+    )
+    monkeypatch.setattr(governance, "is_kill_switch_active", lambda: False)
+    monkeypatch.setattr(
+        governance,
+        "is_kill_switch_active_for_session",
+        lambda *a, **k: False,
+    )
+    monkeypatch.setattr(
+        cost_aware_gate,
+        "cost_aware_min_edge_gate",
+        lambda *a, **k: SimpleNamespace(
+            allowed=True,
+            reason="ok",
+            edge_bps=500,
+            threshold_bps=0,
+            fee_bps=0,
+            tca_cost_bps=0,
+            tca_snapshot=None,
+        ),
+    )
+    monkeypatch.setattr(
+        broker_selector,
+        "select_venue",
+        lambda *a, **k: SimpleNamespace(venue="coinbase", reason="test"),
+    )
+    monkeypatch.setattr(at_mod, "_live_venue_health_block_reason", lambda *a, **k: None)
+    monkeypatch.setattr(
+        cost_aware_gate,
+        "per_venue_cap_check",
+        lambda **_k: SimpleNamespace(
+            allowed=True,
+            reason="within_cap",
+            current_positions=0,
+            current_notional_usd=0.0,
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.trading.coinbase_probation_gate.coinbase_live_probation_check",
+        lambda *a, **k: CoinbaseProbationDecision(
+            allowed=False,
+            reason="coinbase_probation:low_confidence_exit_provenance",
+            snapshot={"closed_count": 264, "low_confidence_exit_rate": 0.628},
+        ),
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_block_live_order_with_paper_shadow",
+        lambda *a, **k: blocked.append(k),
+    )
+    monkeypatch.setattr(
+        venue_factory,
+        "get_adapter",
+        lambda venue: pytest.fail("probation block must happen before adapter lookup"),
+    )
+
+    snap = {"projected_profit_pct": 5.0}
+    res = at_mod._execute_broker_buy(
+        object(),
+        uid=1,
+        alert=SimpleNamespace(
+            id=90,
+            ticker="PEPE-USD",
+            entry_price=None,
+            price_at_alert=None,
+        ),
+        qty=10.0,
+        client_order_id="cid-90",
+        snap=snap,
+        llm_snap=None,
+        out={"skipped": 0},
+        px=0.5,
+    )
+
+    assert res is None
+    assert snap["coinbase_probation"]["closed_count"] == 264
+    assert blocked[0]["reason"] == "coinbase_probation:low_confidence_exit_provenance"
+    assert blocked[0]["shadow_decision"] == "blocked_coinbase_probation"
+    assert blocked[0]["px"] == pytest.approx(0.5)
+
+
+def _coinbase_probation_settings(**overrides):
+    values = {
+        "chili_coinbase_autotrader_probation_enabled": True,
+        "chili_coinbase_autotrader_probation_window_days": 30,
+        "chili_coinbase_autotrader_probation_min_closed_trades": 3,
+        "chili_coinbase_autotrader_probation_max_low_confidence_exit_rate": 0.5,
+        "chili_coinbase_autotrader_probation_min_low_confidence_exits": 2,
+        "chili_coinbase_autotrader_probation_min_avg_pnl_usd": 0.0,
+        "chili_coinbase_autotrader_probation_min_payoff_ratio": 1.0,
+        "chili_coinbase_autotrader_probation_cache_seconds": 0,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _add_closed_coinbase_trade(
+    db,
+    *,
+    pnl: float,
+    exit_reason: str,
+    now: datetime | None = None,
+) -> None:
+    now = now or datetime.utcnow()
+    db.add(
+        Trade(
+            ticker="ZZTEST-USD",
+            direction="long",
+            entry_price=1.0,
+            exit_price=1.0,
+            quantity=1.0,
+            entry_date=now - timedelta(days=1),
+            exit_date=now,
+            status="closed",
+            pnl=pnl,
+            exit_reason=exit_reason,
+            broker_source="coinbase",
+            management_scope="auto_trader_v1",
+            asset_kind="crypto",
+        )
+    )
+
+
+def test_coinbase_probation_gate_blocks_low_confidence_churn(db):
+    from app.services.trading.coinbase_probation_gate import (
+        coinbase_live_probation_check,
+        reset_coinbase_probation_cache,
+    )
+
+    reset_coinbase_probation_cache()
+    for pnl, reason in [
+        (1.0, "coinbase_position_sync_gone"),
+        (1.0, "broker_reconcile_no_exit_price"),
+        (1.0, "target_hit"),
+    ]:
+        _add_closed_coinbase_trade(db, pnl=pnl, exit_reason=reason)
+    db.commit()
+
+    decision = coinbase_live_probation_check(
+        db,
+        settings_obj=_coinbase_probation_settings(),
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == "coinbase_probation:low_confidence_exit_provenance"
+    assert decision.snapshot["low_confidence_exit_count"] == 2
+    assert decision.snapshot["low_confidence_exit_rate"] == pytest.approx(2 / 3)
+
+
+def test_coinbase_probation_gate_blocks_negative_realized_ev(db):
+    from app.services.trading.coinbase_probation_gate import (
+        coinbase_live_probation_check,
+        reset_coinbase_probation_cache,
+    )
+
+    reset_coinbase_probation_cache()
+    for pnl in [-1.0, -0.5, 0.2]:
+        _add_closed_coinbase_trade(db, pnl=pnl, exit_reason="target_or_stop")
+    db.commit()
+
+    decision = coinbase_live_probation_check(
+        db,
+        settings_obj=_coinbase_probation_settings(),
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == "coinbase_probation:negative_realized_venue_ev"
+    assert decision.snapshot["pnl_usd"] == pytest.approx(-1.3)
+
+
+def test_coinbase_probation_gate_allows_positive_clean_evidence(db):
+    from app.services.trading.coinbase_probation_gate import (
+        coinbase_live_probation_check,
+        reset_coinbase_probation_cache,
+    )
+
+    reset_coinbase_probation_cache()
+    for pnl in [2.0, -1.0, 1.0]:
+        _add_closed_coinbase_trade(db, pnl=pnl, exit_reason="target_or_stop")
+    db.commit()
+
+    decision = coinbase_live_probation_check(
+        db,
+        settings_obj=_coinbase_probation_settings(),
+    )
+
+    assert decision.allowed is True
+    assert decision.reason == "coinbase_probation:passed"
+    assert decision.snapshot["avg_pnl_usd"] == pytest.approx(2.0 / 3.0)
 
 
 def test_broker_buy_cost_gate_uses_expected_net_edge(monkeypatch):

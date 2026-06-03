@@ -40,6 +40,7 @@ from sqlalchemy.orm import Session
 
 from ...config import settings
 from ...models.trading import AutoTraderRun, Trade
+from .coinbase_probation_gate import coinbase_live_probation_check
 
 logger = logging.getLogger(__name__)
 
@@ -772,7 +773,7 @@ def _fallback_entry_gate_block_reason(db: Session, t: Trade) -> str | None:
     try:
         from .portfolio_risk import circuit_breaker_entry_block_reason
 
-        return circuit_breaker_entry_block_reason(db, user_id=t.user_id)
+        breaker_reason = circuit_breaker_entry_block_reason(db, user_id=t.user_id)
     except Exception as exc:
         logger.warning(
             "[stuck_order_watchdog] circuit-breaker gate failed for fallback trade=%s",
@@ -780,6 +781,12 @@ def _fallback_entry_gate_block_reason(db: Session, t: Trade) -> str | None:
             exc_info=True,
         )
         return f"circuit_breaker_check_failed:{type(exc).__name__}"
+    if breaker_reason is not None:
+        return breaker_reason
+
+    probation = coinbase_live_probation_check(db, settings_obj=settings)
+    if not probation.allowed:
+        return probation.reason
 
 
 def _block_maker_first_fallback(
