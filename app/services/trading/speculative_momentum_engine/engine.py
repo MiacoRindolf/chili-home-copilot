@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import desc
@@ -33,6 +33,7 @@ def build_speculative_momentum_slice(
     *,
     limit: int = 12,
     min_scanner_score: float = 6.0,
+    max_scan_age_seconds: float | None = None,
 ) -> dict[str, Any]:
     generated_at = datetime.now(timezone.utc).isoformat()
     methodology_note = (
@@ -42,12 +43,14 @@ def build_speculative_momentum_slice(
     )
 
     try:
-        rows = (
-            db.query(ScanResult)
-            .order_by(desc(ScanResult.scanned_at))
-            .limit(max(80, limit * 6))
-            .all()
-        )
+        query = db.query(ScanResult)
+        if max_scan_age_seconds is not None and float(max_scan_age_seconds) > 0:
+            cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+                seconds=float(max_scan_age_seconds)
+            )
+            query = query.filter(ScanResult.scanned_at.isnot(None))
+            query = query.filter(ScanResult.scanned_at >= cutoff)
+        rows = query.order_by(desc(ScanResult.scanned_at)).limit(max(80, limit * 6)).all()
     except Exception as e:
         logger.warning("[speculative_momentum_engine] scan query failed: %s", e)
         return {
@@ -56,6 +59,7 @@ def build_speculative_momentum_slice(
             "engine_version": ENGINE_VERSION,
             "methodology": METHODOLOGY_KEY,
             "methodology_note": methodology_note,
+            "max_scan_age_seconds": max_scan_age_seconds,
             "generated_at": generated_at,
             "items": [],
             "error": str(e),
@@ -139,6 +143,7 @@ def build_speculative_momentum_slice(
         "engine_version": ENGINE_VERSION,
         "methodology": METHODOLOGY_KEY,
         "methodology_note": methodology_note,
+        "max_scan_age_seconds": max_scan_age_seconds,
         "generated_at": generated_at,
         "items": items,
     }

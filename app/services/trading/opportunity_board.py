@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -610,6 +610,7 @@ def _scanner_fallback_rows(
     *,
     max_rows: int,
     min_score_b: float,
+    max_age_seconds: float | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Recent AI scanner picks as Tier B (stronger score) or C; no pattern composite."""
     tier_b: list[dict[str, Any]] = []
@@ -617,12 +618,14 @@ def _scanner_fallback_rows(
     if max_rows <= 0:
         return tier_b, tier_c
     try:
-        rows = (
-            db.query(ScanResult)
-            .order_by(desc(ScanResult.scanned_at))
-            .limit(max(30, max_rows * 5))
-            .all()
-        )
+        query = db.query(ScanResult)
+        if max_age_seconds is not None and float(max_age_seconds) > 0:
+            cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+                seconds=float(max_age_seconds)
+            )
+            query = query.filter(ScanResult.scanned_at.isnot(None))
+            query = query.filter(ScanResult.scanned_at >= cutoff)
+        rows = query.order_by(desc(ScanResult.scanned_at)).limit(max(30, max_rows * 5)).all()
     except Exception as e:
         logger.warning("[opportunity_board] scanner fallback query failed: %s", e)
         return tier_b, tier_c
@@ -638,11 +641,13 @@ def _scanner_fallback_rows(
         seen.add(t)
         tier_label = "B" if float(sr.score or 0) >= float(min_score_b) else "C"
         scanned_iso = None
+        scanned_age_seconds = None
         if sr.scanned_at:
             dt = sr.scanned_at
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             scanned_iso = dt.isoformat()
+            scanned_age_seconds = max(0.0, (datetime.now(timezone.utc) - dt.astimezone(timezone.utc)).total_seconds())
         wh = (
             f"Scanner pick ({sr.signal or 'n/a'}) with confluence score {sr.score:.1f}/10"
             + (f", as of {scanned_iso}" if scanned_iso else "")
@@ -678,6 +683,7 @@ def _scanner_fallback_rows(
             "scanner_score": float(sr.score) if sr.score is not None else None,
             "scanner_signal": sr.signal,
             "scanner_scanned_at_utc": scanned_iso,
+            "scanner_age_seconds": round(scanned_age_seconds, 3) if scanned_age_seconds is not None else None,
             "why_here": wh,
             "why_not_higher_tier": wnh,
             "main_risk": risk,
@@ -867,7 +873,13 @@ def get_trading_opportunity_board(
     sb_max = int(getattr(settings, "opportunity_board_max_scanner_fallback", 6))
     ps_max = int(getattr(settings, "opportunity_board_max_prescreener_fallback", 8))
     min_sb = float(getattr(settings, "opportunity_board_scanner_fallback_min_score_b", 6.5))
-    scan_b, scan_c = _scanner_fallback_rows(db, seen, max_rows=sb_max, min_score_b=min_sb)
+    scan_b, scan_c = _scanner_fallback_rows(
+        db,
+        seen,
+        max_rows=sb_max,
+        min_score_b=min_sb,
+        max_age_seconds=float(settings.opportunity_board_stale_seconds),
+    )
     tier_b.extend(scan_b)
     tier_c.extend(scan_c)
     tier_c.extend(_prescreener_fallback_rows(db, seen, max_rows=ps_max))
@@ -1024,7 +1036,11 @@ def get_trading_opportunity_board(
 
     speculative_envelope: dict[str, Any]
     try:
-        speculative_envelope = build_speculative_momentum_slice(db, limit=12)
+        speculative_envelope = build_speculative_momentum_slice(
+            db,
+            limit=12,
+            max_scan_age_seconds=float(settings.opportunity_board_stale_seconds),
+        )
     except Exception as e:
         logger.warning("[opportunity_board] speculative slice failed: %s", e)
         speculative_envelope = {
