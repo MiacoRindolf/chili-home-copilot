@@ -6284,11 +6284,37 @@ def mine_fakeout_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
     def _check_condition(inds, condition_fn):
         return sum(1 for i in inds if condition_fn(i)) / max(len(inds), 1) * 100
 
+    def _indicator_float(ind: dict[str, Any], key: str, default: float) -> float:
+        value = ind.get(key)
+        if value is None:
+            return float(default)
+        try:
+            out = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return float(default)
+        return out if math.isfinite(out) else float(default)
+
     conditions = [
-        ("RSI > 65 at alert", lambda i: (i.get("rsi") or 50) > 65, "overbought squeeze fakeout"),
-        ("RVOL < 1.0", lambda i: (i.get("rvol") or 1.0) < 1.0, "low volume fakeout"),
-        ("ADX > 30", lambda i: (i.get("adx") or 0) > 30, "trending squeeze fakeout"),
-        ("BB width narrow (<0.02)", lambda i: (i.get("bb_width") or 1.0) < 0.02, "extremely narrow range fakeout"),
+        (
+            "RSI > 65 at alert",
+            lambda i: _indicator_float(i, "rsi", 50.0) > 65,
+            "overbought squeeze fakeout",
+        ),
+        (
+            "RVOL < 1.0",
+            lambda i: _indicator_float(i, "rvol", 1.0) < 1.0,
+            "low volume fakeout",
+        ),
+        (
+            "ADX > 30",
+            lambda i: _indicator_float(i, "adx", 0.0) > 30,
+            "trending squeeze fakeout",
+        ),
+        (
+            "BB width narrow (<0.02)",
+            lambda i: _indicator_float(i, "bb_width", 1.0) < 0.02,
+            "extremely narrow range fakeout",
+        ),
     ]
 
     for label, cond, keyword in conditions:
