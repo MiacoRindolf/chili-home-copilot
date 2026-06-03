@@ -635,6 +635,7 @@ def test_post_trade_review_uses_contract_aware_outcomes_when_pnl_missing() -> No
             asset_kind="option",
             tags=None,
             indicator_snapshot=snapshot,
+            exit_reason="target",
             exit_date=datetime(2026, 5, 30, 15, 30),
             tca_entry_slippage_bps=5.0,
             tca_exit_slippage_bps=5.0,
@@ -653,6 +654,7 @@ def test_post_trade_review_uses_contract_aware_outcomes_when_pnl_missing() -> No
             asset_kind="option",
             tags=None,
             indicator_snapshot=snapshot,
+            exit_reason="stop",
             exit_date=datetime(2026, 5, 30, 15, 31),
             tca_entry_slippage_bps=5.0,
             tca_exit_slippage_bps=5.0,
@@ -671,6 +673,7 @@ def test_post_trade_review_uses_contract_aware_outcomes_when_pnl_missing() -> No
             asset_kind="option",
             tags=None,
             indicator_snapshot=snapshot,
+            exit_reason="target",
             exit_date=datetime(2026, 5, 30, 15, 32),
             tca_entry_slippage_bps=5.0,
             tca_exit_slippage_bps=5.0,
@@ -702,6 +705,76 @@ def test_post_trade_review_uses_contract_aware_outcomes_when_pnl_missing() -> No
     assert outperformer["delta_pct"] == pytest.approx(11.7)
     assert review["underperforming_patterns"] == []
     assert out["feedback_signals"][0]["signal"] == "upweight"
+    assert out["feedback_signals"][0]["exit_quality"]["low_confidence_exit_count"] == 0
+
+
+def test_post_trade_review_suppresses_feedback_when_exits_low_confidence() -> None:
+    pattern = SimpleNamespace(
+        id=43,
+        name="messy-exit-alpha",
+        promotion_status="pilot",
+        win_rate=0.4,
+        oos_win_rate=0.40,
+        oos_avg_return_pct=1.0,
+    )
+    trades = [
+        SimpleNamespace(
+            id=1111,
+            user_id=7,
+            status="closed",
+            scan_pattern_id=43,
+            ticker="SPY",
+            direction="long",
+            entry_price=100.0,
+            exit_price=104.0,
+            quantity=1.0,
+            pnl=4.0,
+            exit_reason="broker_reconcile_position_gone",
+            exit_date=datetime(2026, 5, 30, 15, 30),
+        ),
+        SimpleNamespace(
+            id=1112,
+            user_id=7,
+            status="closed",
+            scan_pattern_id=43,
+            ticker="SPY",
+            direction="long",
+            entry_price=100.0,
+            exit_price=103.0,
+            quantity=1.0,
+            pnl=3.0,
+            exit_reason=None,
+            exit_date=datetime(2026, 5, 30, 15, 31),
+        ),
+        SimpleNamespace(
+            id=1113,
+            user_id=7,
+            status="closed",
+            scan_pattern_id=43,
+            ticker="SPY",
+            direction="long",
+            entry_price=100.0,
+            exit_price=102.0,
+            quantity=1.0,
+            pnl=2.0,
+            exit_reason="target",
+            exit_date=datetime(2026, 5, 30, 15, 32),
+        ),
+    ]
+    db = _FakeAttributionSession(trades=trades, patterns=[pattern])
+
+    out = post_trade_review(db, 7, days=30)
+
+    signal = out["feedback_signals"][0]
+    assert signal["signal"] == "collect_exit_evidence"
+    assert signal["suppressed_signal"] == "upweight"
+    assert signal["exit_quality"]["low_confidence_exit_count"] == 2
+    assert signal["exit_quality"]["low_confidence_exit_rate_pct"] == pytest.approx(66.67)
+    assert "collect cleaner thesis-exit evidence" in signal["reason"]
+
+    outperformer = out["review"]["outperforming_patterns"][0]
+    assert outperformer["scan_pattern_id"] == 43
+    assert outperformer["exit_quality"]["low_confidence_exit_count"] == 2
 
 
 def test_post_trade_review_pnl_totals_include_partial_option_leg() -> None:

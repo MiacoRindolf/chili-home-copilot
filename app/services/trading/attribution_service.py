@@ -1342,30 +1342,69 @@ def post_trade_review(
             "live_pnl_sample_n": len(trade_pnls),
             "live_total_pnl": round(sum(trade_pnls), 2) if trade_pnls else None,
         }
+        _, pattern_exit_quality = _exit_reason_quality_rows(trades)
+        row["exit_quality"] = pattern_exit_quality
 
         if delta is not None and t_directional_n >= 3:
+            low_confidence_exit_rate = pattern_exit_quality.get(
+                "low_confidence_exit_rate_pct"
+            )
+            low_confidence_feedback = (
+                low_confidence_exit_rate is not None
+                and float(low_confidence_exit_rate) >= 50.0
+            )
             if delta >= 5:
                 outperformers.append(row)
-                feedback_signals.append({
-                    "pattern_id": pid,
-                    "pattern_name": pat.name if pat else None,
-                    "signal": "upweight",
-                    "reason": (
-                        f"Live win rate {live_wr}% exceeded research {research_wr}% "
-                        f"by {delta}pp over {t_directional_n} directional outcomes"
-                    ),
-                })
+                if low_confidence_feedback:
+                    feedback_signals.append({
+                        "pattern_id": pid,
+                        "pattern_name": pat.name if pat else None,
+                        "signal": "collect_exit_evidence",
+                        "suppressed_signal": "upweight",
+                        "exit_quality": pattern_exit_quality,
+                        "reason": (
+                            f"Live win rate beat research by {delta}pp, but "
+                            f"{low_confidence_exit_rate}% of exits were reconciler/unknown; "
+                            "collect cleaner thesis-exit evidence before upweighting."
+                        ),
+                    })
+                else:
+                    feedback_signals.append({
+                        "pattern_id": pid,
+                        "pattern_name": pat.name if pat else None,
+                        "signal": "upweight",
+                        "exit_quality": pattern_exit_quality,
+                        "reason": (
+                            f"Live win rate {live_wr}% exceeded research {research_wr}% "
+                            f"by {delta}pp over {t_directional_n} directional outcomes"
+                        ),
+                    })
             elif delta <= -10:
                 underperformers.append(row)
-                feedback_signals.append({
-                    "pattern_id": pid,
-                    "pattern_name": pat.name if pat else None,
-                    "signal": "downweight",
-                    "reason": (
-                        f"Live win rate {live_wr}% lagged research {research_wr}% "
-                        f"by {abs(delta)}pp over {t_directional_n} directional outcomes"
-                    ),
-                })
+                if low_confidence_feedback:
+                    feedback_signals.append({
+                        "pattern_id": pid,
+                        "pattern_name": pat.name if pat else None,
+                        "signal": "collect_exit_evidence",
+                        "suppressed_signal": "downweight",
+                        "exit_quality": pattern_exit_quality,
+                        "reason": (
+                            f"Live win rate lagged research by {abs(delta)}pp, but "
+                            f"{low_confidence_exit_rate}% of exits were reconciler/unknown; "
+                            "collect cleaner thesis-exit evidence before downweighting."
+                        ),
+                    })
+                else:
+                    feedback_signals.append({
+                        "pattern_id": pid,
+                        "pattern_name": pat.name if pat else None,
+                        "signal": "downweight",
+                        "exit_quality": pattern_exit_quality,
+                        "reason": (
+                            f"Live win rate {live_wr}% lagged research {research_wr}% "
+                            f"by {abs(delta)}pp over {t_directional_n} directional outcomes"
+                        ),
+                    })
 
     outperformers.sort(key=lambda r: r["delta_pct"] or 0, reverse=True)
     underperformers.sort(key=lambda r: r["delta_pct"] or 0)
