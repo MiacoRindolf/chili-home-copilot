@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .venv/
+.pytest_venv/
 .env
 .env.*
 .env.bak
