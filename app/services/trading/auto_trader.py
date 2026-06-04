@@ -907,9 +907,6 @@ def _autotrader_candidate_batch_size() -> int:
     return _settings_int_clamped(
         "chili_autotrader_candidate_batch_size",
         AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE,
-    AUTOTRADER_CANDIDATE_SELECT_TIMEOUT_DEFAULT_FRACTION,
-    AUTOTRADER_CANDIDATE_SELECT_TIMEOUT_MAX_MS,
-    AUTOTRADER_CANDIDATE_SELECT_TIMEOUT_MIN_MS,
         lower=1,
         upper=AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
     )

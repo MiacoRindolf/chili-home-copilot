@@ -30,6 +30,17 @@ def test_candidate_select_statement_timeout_uses_configured_value(monkeypatch) -
     assert at_mod._candidate_select_statement_timeout_ms(tick_budget_s=15) == 1234
 
 
+def test_candidate_batch_size_still_uses_keyword_clamps(monkeypatch) -> None:
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_candidate_batch_size",
+        7,
+        raising=False,
+    )
+
+    assert at_mod._autotrader_candidate_batch_size() == 7
+
+
 def test_candidate_select_statement_timeout_derives_from_tick_budget(monkeypatch) -> None:
     monkeypatch.setattr(
         at_mod.settings,
