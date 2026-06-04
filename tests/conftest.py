@@ -1,4 +1,4 @@
-﻿"""Shared fixtures for CHILI tests.
+"""Shared fixtures for CHILI tests.
 
 Requires PostgreSQL: set ``TEST_DATABASE_URL`` or ``DATABASE_URL`` to a
 *dedicated* database (e.g. ``chili_test``) before running pytest. See

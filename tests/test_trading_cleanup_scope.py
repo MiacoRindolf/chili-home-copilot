@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import sys
 from pathlib import Path
@@ -83,6 +83,7 @@ def test_full_cleanup_bounds_truncate_statement_timeout(monkeypatch) -> None:
     assert "SET LOCAL statement_timeout = '37s'" in calls
     assert calls[-1].startswith("TRUNCATE ")
     assert "users" in calls[-1]
+
 
 def test_full_cleanup_caps_oversized_statement_timeout(monkeypatch) -> None:
     conftest = sys.modules["tests.conftest"]
