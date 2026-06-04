@@ -385,6 +385,28 @@ def test_nonnegative_counter_env_accepts_zero_values(env_name, attr):
     assert getattr(loaded, attr) == 0
 
 
+@pytest.mark.parametrize("raw", ["-0.01", "-5", "nan", "inf", "-inf", "1e309"])
+def test_live_alpha_min_net_env_rejects_negative_or_non_finite_values(raw):
+    with mock.patch.dict(
+        os.environ,
+        {"CHILI_FAST_PATH_LIVE_ALPHA_MIN_NET_BPS": raw},
+        clear=True,
+    ):
+        loaded = load()
+    assert loaded.live_alpha_min_net_bps == 0.0
+
+
+@pytest.mark.parametrize("raw", ["0", "0.0", "2.5"])
+def test_live_alpha_min_net_env_accepts_nonnegative_values(raw):
+    with mock.patch.dict(
+        os.environ,
+        {"CHILI_FAST_PATH_LIVE_ALPHA_MIN_NET_BPS": raw},
+        clear=True,
+    ):
+        loaded = load()
+    assert loaded.live_alpha_min_net_bps == float(raw)
+
+
 def test_universe_learning_retention_defaults_to_short_horizon_and_floor():
     with mock.patch.dict(
         os.environ,

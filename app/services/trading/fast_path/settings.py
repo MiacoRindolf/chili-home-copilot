@@ -527,6 +527,13 @@ def _env_positive_float(
     return value
 
 
+def _env_nonnegative_float(name: str, default: float) -> float:
+    value = _env_float(name, default)
+    if not math.isfinite(value) or value < 0.0:
+        return default
+    return value
+
+
 def load() -> FastPathSettings:
     """Read settings from the process environment. Called once at
     container boot by ``scripts/fast_data_worker.py``."""
@@ -634,7 +641,7 @@ def load() -> FastPathSettings:
             "CHILI_FAST_PATH_LIVE_ALPHA_EVIDENCE_GATE_ENABLED", True),
         live_alpha_min_samples=_env_nonnegative_int(
             "CHILI_FAST_PATH_LIVE_ALPHA_MIN_SAMPLES", 50),
-        live_alpha_min_net_bps=_env_float(
+        live_alpha_min_net_bps=_env_nonnegative_float(
             "CHILI_FAST_PATH_LIVE_ALPHA_MIN_NET_BPS", 0.0),
         negative_edge_filter_ttl_s=_env_int(
             "CHILI_FAST_PATH_NEGATIVE_EDGE_FILTER_TTL_S", 30),
