@@ -29,6 +29,16 @@ DEFAULT_MAKER_TICK_FRACTION_OF_MID = 1e-4
 MAX_MAKER_TICK_FRACTION_OF_MID = 0.01
 """Largest accepted fallback maker tick offset fraction (1% of mid)."""
 
+FAST_PATH_MODES = frozenset({"paper", "live"})
+"""Supported fast-path operating modes."""
+
+FAST_PATH_EXECUTION_MODES = frozenset({
+    "taker",
+    "maker_only",
+    "maker_first_then_taker",
+})
+"""Supported fast-path execution modes."""
+
 
 def _env_bool(name: str, default: bool) -> bool:
     raw = (os.environ.get(name) or "").strip().lower()
@@ -84,6 +94,11 @@ def _env_pairs(name: str, default: list[str]) -> list[str]:
         if p:
             out.append(p)
     return out or list(default)
+
+
+def _env_choice(name: str, default: str, choices: frozenset[str]) -> str:
+    raw = (os.environ.get(name) or default).strip().lower()
+    return raw if raw in choices else default
 
 
 @dataclass(frozen=True)
@@ -562,7 +577,7 @@ def load() -> FastPathSettings:
     )
     return FastPathSettings(
         enabled=_env_bool("CHILI_FAST_PATH_ENABLED", False),
-        mode=(os.environ.get("CHILI_FAST_PATH_MODE") or "paper").strip().lower(),
+        mode=_env_choice("CHILI_FAST_PATH_MODE", "paper", FAST_PATH_MODES),
         pairs=_env_pairs("CHILI_FAST_PATH_PAIRS", []),
         bar_window=_env_positive_int("CHILI_FAST_PATH_BAR_WINDOW", 500),
         book_depth=_env_positive_int("CHILI_FAST_PATH_BOOK_DEPTH", 25),
@@ -642,9 +657,11 @@ def load() -> FastPathSettings:
         cost_aware_live_fee_enabled=_env_bool(
             "CHILI_FAST_PATH_COST_AWARE_LIVE_FEE_ENABLED", False),
         # f-fastpath-maker-only (2026-05-08)
-        execution_mode=(
-            os.environ.get("CHILI_FAST_PATH_EXECUTION_MODE") or "taker"
-        ).strip().lower(),
+        execution_mode=_env_choice(
+            "CHILI_FAST_PATH_EXECUTION_MODE",
+            "taker",
+            FAST_PATH_EXECUTION_MODES,
+        ),
         cost_aware_maker_fee_bps=_env_nonnegative_float(
             "CHILI_FAST_PATH_COST_AWARE_MAKER_FEE_BPS", 40.0),
         live_alpha_evidence_gate_enabled=_env_bool(
@@ -716,6 +733,8 @@ def load() -> FastPathSettings:
 __all__ = [
     "DEFAULT_UNIVERSE_HYSTERESIS_RANKS",
     "DEFAULT_UNIVERSE_LEARNING_RETENTION_HORIZON_S",
+    "FAST_PATH_EXECUTION_MODES",
+    "FAST_PATH_MODES",
     "FastPathSettings",
     "load",
 ]

@@ -145,6 +145,58 @@ def test_bool_loader_tolerates_inline_operator_note():
     assert loaded.cost_aware_admission_enabled is True
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("paper", "paper"),
+        ("PAPER", "paper"),
+        (" live ", "live"),
+        ("LIVE", "live"),
+    ],
+)
+def test_fast_path_mode_env_accepts_supported_values(raw, expected):
+    with mock.patch.dict(os.environ, {"CHILI_FAST_PATH_MODE": raw}, clear=True):
+        loaded = load()
+    assert loaded.mode == expected
+
+
+@pytest.mark.parametrize("raw", ["", "prod", "real", "maker_only", "bad"])
+def test_fast_path_mode_env_rejects_unsupported_values(raw):
+    with mock.patch.dict(os.environ, {"CHILI_FAST_PATH_MODE": raw}, clear=True):
+        loaded = load()
+    assert loaded.mode == "paper"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("taker", "taker"),
+        ("TAKER", "taker"),
+        (" maker_only ", "maker_only"),
+        ("MAKER_FIRST_THEN_TAKER", "maker_first_then_taker"),
+    ],
+)
+def test_execution_mode_env_accepts_supported_values(raw, expected):
+    with mock.patch.dict(
+        os.environ,
+        {"CHILI_FAST_PATH_EXECUTION_MODE": raw},
+        clear=True,
+    ):
+        loaded = load()
+    assert loaded.execution_mode == expected
+
+
+@pytest.mark.parametrize("raw", ["", "maker", "post_only", "live", "bad"])
+def test_execution_mode_env_rejects_unsupported_values(raw):
+    with mock.patch.dict(
+        os.environ,
+        {"CHILI_FAST_PATH_EXECUTION_MODE": raw},
+        clear=True,
+    ):
+        loaded = load()
+    assert loaded.execution_mode == "taker"
+
+
 def test_universe_empty_fallback_defaults_off():
     """Empty rotator output should be visible instead of hidden by stale pairs."""
     assert FastPathSettings().universe_empty_fallback_enabled is False

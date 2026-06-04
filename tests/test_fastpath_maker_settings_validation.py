@@ -143,11 +143,9 @@ def test_load_rejects_implausible_maker_tick_fraction(raw):
     assert s.maker_tick_fraction_of_mid == pytest.approx(1e-4)
 
 
-def test_load_invalid_execution_mode_string_loaded_as_is():
-    """The dataclass doesn't enum-validate execution_mode (gate-side
-    code does the dispatch); confirm the env value flows through
-    unchanged for downstream validation paths."""
+def test_load_invalid_execution_mode_string_defaults_to_taker():
+    """Unsupported execution modes must not leak into downstream gates."""
     with _env_clean("CHILI_FAST_PATH_EXECUTION_MODE"):
         os.environ["CHILI_FAST_PATH_EXECUTION_MODE"] = "BIZARRE_MODE"
         s = load()
-    assert s.execution_mode == "bizarre_mode"  # lower-cased by load()
+    assert s.execution_mode == "taker"
