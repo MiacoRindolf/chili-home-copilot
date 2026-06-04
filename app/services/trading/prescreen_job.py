@@ -19,6 +19,29 @@ from .prescreener import collect_prescreen_with_provenance
 
 logger = logging.getLogger(__name__)
 
+_PRESCREEN_SOURCE_PRIORITY = {
+    "massive_momentum_gappers": 0,
+    "massive_high_rel_volume": 1,
+    "massive_top_gainers": 2,
+    "massive_unusual_volume": 3,
+    "massive_most_volatile": 4,
+    "massive_new_high": 5,
+    "brain_prediction": 10,
+    "insight_evidence": 11,
+    "warming_pattern": 12,
+    "yf_day_gainers": 20,
+    "yf_small_cap_gainers": 21,
+    "massive_high_volume": 22,
+    "massive_most_active": 23,
+    "yf_most_actives": 24,
+    "massive_upgrades": 30,
+    "massive_earnings": 31,
+    "crypto": 50,
+    "core_default": 70,
+    "static_fallback": 90,
+}
+_PRESCREEN_DEFAULT_PRIORITY = 100
+
 
 def _settings_subset() -> dict[str, Any]:
     return {
@@ -46,6 +69,47 @@ def _global_candidates_by_ticker_norm(
     for row in rows:
         candidates.setdefault(row.ticker_norm, row)
     return candidates
+
+
+def _candidate_source_tags(row: PrescreenCandidate) -> list[str]:
+    payload = getattr(row, "sources_json", None) or {}
+    if not isinstance(payload, dict):
+        return []
+    tags = payload.get("tags") or []
+    if isinstance(tags, str):
+        return [tags]
+    if isinstance(tags, (list, tuple, set)):
+        return [str(tag) for tag in tags if tag]
+    return []
+
+
+def _candidate_reason_kinds(row: PrescreenCandidate) -> list[str]:
+    reasons = getattr(row, "entry_reasons", None) or []
+    if not isinstance(reasons, list):
+        return []
+    kinds: list[str] = []
+    for reason in reasons:
+        if isinstance(reason, dict) and reason.get("kind"):
+            kinds.append(str(reason["kind"]))
+    return kinds
+
+
+def _candidate_priority(row: PrescreenCandidate) -> tuple[int, int, int, str]:
+    tags = _candidate_source_tags(row)
+    kinds = _candidate_reason_kinds(row)
+    priorities = [
+        _PRESCREEN_SOURCE_PRIORITY.get(source, _PRESCREEN_DEFAULT_PRIORITY)
+        for source in (*tags, *kinds)
+    ]
+    best = min(priorities) if priorities else _PRESCREEN_DEFAULT_PRIORITY
+    evidence_count = sum(
+        1
+        for source in (*tags, *kinds)
+        if _PRESCREEN_SOURCE_PRIORITY.get(source, _PRESCREEN_DEFAULT_PRIORITY)
+        < _PRESCREEN_DEFAULT_PRIORITY
+    )
+    asset_rank = 0 if getattr(row, "asset_universe", "") == "stock" else 1
+    return (best, -evidence_count, asset_rank, str(getattr(row, "ticker_norm", "") or ""))
 
 
 def run_daily_prescreen_job(db: Session) -> dict[str, Any]:
@@ -194,7 +258,7 @@ def run_daily_prescreen_job(db: Session) -> dict[str, Any]:
 
 
 def load_active_global_candidate_tickers(db: Session) -> list[str]:
-    """Tickers for full scan: active global prescreen rows, ordered by ticker_norm.
+    """Tickers for full scan: active global rows, ordered by evidence quality.
 
     Round-16 FIX (2026-04-30): explicit ``db.rollback()`` after the read
     to close the implicit read transaction. Same bug class as FIX 46
@@ -207,12 +271,17 @@ def load_active_global_candidate_tickers(db: Session) -> list[str]:
     without forcing the caller to know about transaction state.
     """
     rows = (
-        db.query(PrescreenCandidate.ticker_norm)
+        db.query(PrescreenCandidate)
         .filter(PrescreenCandidate.user_id.is_(None))
         .filter(PrescreenCandidate.active.is_(True))
         .order_by(PrescreenCandidate.ticker_norm.asc())
         .all()
     )
+    ordered_tickers = [
+        row.ticker_norm
+        for row in sorted(rows, key=_candidate_priority)
+        if row.ticker_norm
+    ]
     try:
         db.rollback()
     except Exception:
@@ -221,7 +290,7 @@ def load_active_global_candidate_tickers(db: Session) -> list[str]:
             "load_active_global_candidate_tickers; not fatal",
             exc_info=True,
         )
-    return [r[0] for r in rows if r[0]]
+    return ordered_tickers
 
 
 def prescreen_candidates_for_universe(

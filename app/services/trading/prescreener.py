@@ -346,6 +346,7 @@ def _prescreen_source_callables() -> dict[str, Any]:
     return {
         "massive_most_active": _massive_most_active,
         "massive_top_gainers": _massive_top_gainers,
+        "massive_momentum_gappers": _massive_momentum_gappers,
         "massive_new_high": _massive_new_high,
         "massive_unusual_volume": _massive_unusual_volume,
         "massive_most_volatile": _massive_most_volatile,

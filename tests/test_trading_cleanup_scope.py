@@ -40,6 +40,20 @@ def test_autotrader_integration_db_tests_use_trading_targeted_cleanup() -> None:
     assert "birthdays" not in tables
 
 
+def test_prescreen_artifact_db_tests_use_trading_targeted_cleanup() -> None:
+    conftest = sys.modules["tests.conftest"]
+
+    tables = conftest._test_targeted_cleanup_tables(
+        _request_for("test_prescreen_artifacts.py")
+    )
+
+    assert tables is conftest._TRADING_DOMAIN_TARGETED_TABLES
+    assert "trading_prescreen_candidates" in tables
+    assert "trading_prescreen_snapshots" in tables
+    assert "brain_batch_jobs" in tables
+    assert "birthdays" not in tables
+
+
 def test_neural_mesh_db_tests_use_mesh_targeted_cleanup() -> None:
     conftest = sys.modules["tests.conftest"]
 

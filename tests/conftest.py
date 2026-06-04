@@ -198,6 +198,7 @@ _TRADING_DOMAIN_TARGETED_TABLES = frozenset(
         "brain_work_events",
         "broker_credentials",
         "broker_sessions",
+        "brain_batch_jobs",
         "pattern_evidence_corrections",
         "scan_patterns",
         *(
@@ -246,6 +247,7 @@ _TRADING_DOMAIN_TARGETED_TESTS = (
     "test_pattern_directional_outcome.py",
     "test_pattern_cohort_promote.py",
     "test_pattern_imminent_alerts.py",
+    "test_prescreen_artifacts.py",
     "test_stop_engine_options_auto_exec.py",
     "test_stuck_order_watchdog.py",
     "test_trade_assign_pattern.py",

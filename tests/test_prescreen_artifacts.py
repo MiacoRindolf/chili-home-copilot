@@ -8,6 +8,7 @@ from app.services.trading.prescreen_job import (
     load_active_global_candidate_tickers,
     run_daily_prescreen_job,
 )
+from app.services.trading import prescreener
 from app.services.trading.prescreen_normalize import (
     iter_normalized_prescreen_tickers,
     normalize_prescreen_ticker,
@@ -49,7 +50,7 @@ def test_run_daily_prescreen_upsert_and_deactivate(
     r1 = run_daily_prescreen_job(db)
     assert r1.get("ok") is True
     active = load_active_global_candidate_tickers(db)
-    assert active == ["AAA", "MSFT", "ZZZ"]
+    assert active == ["MSFT", "ZZZ", "AAA"]
     _aa = db.query(PrescreenCandidate).filter(PrescreenCandidate.ticker_norm == "AAA").first()
     assert _aa is not None and _aa.asset_universe == "stock"
     _jobs = db.query(BrainBatchJob).filter(BrainBatchJob.job_type == "daily_prescreen").all()
@@ -86,6 +87,44 @@ def test_snapshot_row_written(mock_collect, mock_internal, db) -> None:
 
 def test_load_active_global_empty(db) -> None:
     assert load_active_global_candidate_tickers(db) == []
+
+
+def test_load_active_global_prioritizes_momentum_source_tags(db) -> None:
+    db.add_all(
+        [
+            PrescreenCandidate(
+                ticker="AAA",
+                ticker_norm="AAA",
+                asset_universe="stock",
+                active=True,
+                entry_reasons=[],
+                sources_json={"tags": ["core_default"]},
+            ),
+            PrescreenCandidate(
+                ticker="ZZZ",
+                ticker_norm="ZZZ",
+                asset_universe="stock",
+                active=True,
+                entry_reasons=[],
+                sources_json={"tags": ["massive_momentum_gappers"]},
+            ),
+            PrescreenCandidate(
+                ticker="BBB",
+                ticker_norm="BBB",
+                asset_universe="stock",
+                active=True,
+                entry_reasons=[],
+                sources_json={"tags": ["massive_high_rel_volume"]},
+            ),
+        ]
+    )
+    db.commit()
+
+    assert load_active_global_candidate_tickers(db) == ["ZZZ", "BBB", "AAA"]
+
+
+def test_main_prescreen_includes_momentum_gappers_source() -> None:
+    assert "massive_momentum_gappers" in prescreener._prescreen_source_callables()
 
 
 def test_scheduler_prescreen_skips_when_disabled(monkeypatch) -> None:
