@@ -17,6 +17,7 @@ from app.models.trading import (
     TradingPosition,
 )
 from app.services.trading.cash_deployment import (
+    _allocation_score,
     cash_deployment_rows,
     cash_deployment_summary,
     cost_gate_execution_block_rollup,
@@ -24,6 +25,27 @@ from app.services.trading.cash_deployment import (
     enqueue_imminent_edge_snapshot_coverage_work,
     low_confidence_exit_attribution_rollup,
 )
+
+
+def test_cash_deployment_allocation_score_preserves_zero_closed_evidence_floor(monkeypatch):
+    monkeypatch.setattr(settings, "chili_cash_deployment_min_closed_evidence", 0)
+    monkeypatch.setattr(settings, "chili_cash_deployment_max_brier_score", 0.28)
+    monkeypatch.setattr(settings, "chili_cash_deployment_max_abs_paper_live_gap_pct", 3.0)
+
+    score = _allocation_score(
+        {
+            "closed_evidence_count": 0,
+            "brier_score": 0.0,
+            "realized_ev_pct": 0.0,
+            "live_realized_asset_closed_count": 0,
+            "paper_live_gap_pct": None,
+        },
+        calibrated_ev_after_cost=0.0,
+        venue_score=0.0,
+        exposure_blocker=None,
+    )
+
+    assert score == pytest.approx(47.5)
 
 
 def _pattern(

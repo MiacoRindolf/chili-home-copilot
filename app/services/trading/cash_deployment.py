@@ -73,6 +73,14 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _min_closed_evidence_floor() -> int:
+    raw = getattr(settings, "chili_cash_deployment_min_closed_evidence", 5)
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 5
+
+
 def _clamp(value: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, float(value)))
 
@@ -488,7 +496,7 @@ def _cash_category(
     if blocker in SHADOW_BLOCKERS or lifecycle not in LIVE_LIFECYCLES:
         return "positive_ev_shadow" if positive_supply else "negative_ev"
 
-    min_closed = int(getattr(settings, "chili_cash_deployment_min_closed_evidence", 5) or 0)
+    min_closed = _min_closed_evidence_floor()
     closed_n = _safe_int(row.get("closed_evidence_count"))
     brier = _safe_float(row.get("brier_score"))
     max_brier = _safe_float(getattr(settings, "chili_cash_deployment_max_brier_score", 0.28), 0.28) or 0.28
@@ -528,7 +536,7 @@ def _recommended_work_event(row: dict[str, Any], category: str) -> str:
         return RECERT_RESCUE_REFRESH
     if category == "positive_ev_shadow":
         closed_n = _safe_int(row.get("closed_evidence_count"))
-        min_closed = int(getattr(settings, "chili_cash_deployment_min_closed_evidence", 5) or 0)
+        min_closed = _min_closed_evidence_floor()
         return EXIT_VARIANT_REFRESH if closed_n >= min_closed else EDGE_RELIABILITY_REFRESH
     if category == "negative_ev":
         return EXIT_VARIANT_REFRESH
@@ -590,8 +598,8 @@ def _allocation_score(
 ) -> float:
     ev_component = _clamp((calibrated_ev_after_cost or 0.0) / 5.0)
     closed_n = _safe_int(row.get("closed_evidence_count"))
-    min_closed = max(1, int(getattr(settings, "chili_cash_deployment_min_closed_evidence", 5) or 5))
-    evidence_component = _clamp(closed_n / (min_closed * 4.0))
+    min_closed = _min_closed_evidence_floor()
+    evidence_component = 1.0 if min_closed <= 0 else _clamp(closed_n / (min_closed * 4.0))
     brier = _safe_float(row.get("brier_score"))
     max_brier = _safe_float(getattr(settings, "chili_cash_deployment_max_brier_score", 0.28), 0.28) or 0.28
     calibration_component = 0.35 if brier is None else _clamp(1.0 - (brier / max_brier))
