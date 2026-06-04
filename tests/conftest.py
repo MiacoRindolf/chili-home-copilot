@@ -260,6 +260,21 @@ _TRADING_SCAN_ONLY_TARGETED_TESTS = (
     "test_opportunity_board.py",
     "test_speculative_momentum_surface.py",
 )
+_TRADING_NEURAL_MESH_TARGETED_TABLES = frozenset(
+    {
+        "brain_activation_events",
+        "brain_activation_path_log",
+        "brain_fire_log",
+        "brain_graph_edge_mutations",
+        "brain_graph_metrics",
+        "brain_graph_snapshots",
+        "brain_node_states",
+        "brain_validation_slice_ledger",
+    }
+)
+_TRADING_NEURAL_MESH_TARGETED_TESTS = (
+    "test_brain_neural_mesh.py",
+)
 _TRADING_DEFAULT_USER_TESTS = (
     "test_pattern_imminent_alerts.py",
     "test_signal_to_reconcile_e2e.py",
@@ -496,6 +511,8 @@ def _test_targeted_cleanup_tables(request) -> frozenset[str] | None:
         return _PROJECT_DOMAIN_TARGETED_TABLES
     if any(token in name for token in _TRADING_SCAN_ONLY_TARGETED_TESTS):
         return frozenset({"trading_scans"})
+    if any(token in name for token in _TRADING_NEURAL_MESH_TARGETED_TESTS):
+        return _TRADING_NEURAL_MESH_TARGETED_TABLES
     if any(token in name for token in _TRADING_DOMAIN_TARGETED_TESTS):
         return _TRADING_DOMAIN_TARGETED_TABLES
     return None

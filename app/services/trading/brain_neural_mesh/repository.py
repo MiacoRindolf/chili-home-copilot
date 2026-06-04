@@ -41,6 +41,20 @@ def _validate_payload(cause: str, payload: Optional[dict[str, Any]]) -> None:
 
 MAX_PENDING_QUEUE_DEPTH = 500
 MAX_EVENTS_PER_CORRELATION = 100
+QUEUE_PRESSURE_PROTECTED_CAUSES = frozenset({
+    "brain_market_snapshots",
+    "momentum_context_refresh",
+})
+QUEUE_PRESSURE_SHEDDABLE_CAUSES = frozenset({
+    "imminent_eval",
+})
+QUEUE_PRESSURE_SHED_MIN_AGE_SECONDS = 30 * 60
+
+
+def _naive_utc(dt: datetime) -> datetime:
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
 
 
 def pending_queue_depth(db: Session) -> int:
@@ -53,6 +67,61 @@ def correlation_event_count(db: Session, correlation_id: str) -> int:
         .filter(BrainActivationEvent.correlation_id == correlation_id)
         .count()
     )
+
+
+def _shed_stale_low_priority_pending_event(
+    db: Session,
+    *,
+    incoming_cause: str,
+    now: datetime | None = None,
+) -> dict[str, Any] | None:
+    """Replace stale low-priority backlog with protected refresh events.
+
+    This keeps the global queue cap fixed. Under full-queue pressure, a fresh
+    market/momentum context refresh can mark one stale ``imminent_eval`` dead so
+    high-volume alert chatter cannot starve context propagation. The row remains
+    auditable and is later reaped by normal retention.
+    """
+    if incoming_cause not in QUEUE_PRESSURE_PROTECTED_CAUSES:
+        return None
+    now_dt = _naive_utc(now or datetime.now(timezone.utc))
+    cutoff = now_dt - timedelta(seconds=QUEUE_PRESSURE_SHED_MIN_AGE_SECONDS)
+    stale = (
+        db.query(BrainActivationEvent)
+        .filter(
+            BrainActivationEvent.status == "pending",
+            BrainActivationEvent.cause.in_(QUEUE_PRESSURE_SHEDDABLE_CAUSES),
+            BrainActivationEvent.created_at <= cutoff,
+        )
+        .order_by(BrainActivationEvent.created_at.asc(), BrainActivationEvent.id.asc())
+        .with_for_update(skip_locked=True)
+        .first()
+    )
+    if stale is None:
+        return None
+    created_at = getattr(stale, "created_at", None)
+    age_seconds: float | None = None
+    if isinstance(created_at, datetime):
+        age_seconds = max(
+            0.0,
+            (now_dt - created_at.replace(tzinfo=None)).total_seconds(),
+        )
+    info = {
+        "event_id": int(stale.id),
+        "cause": stale.cause,
+        "age_seconds": round(age_seconds, 3) if age_seconds is not None else None,
+    }
+    audit_payload = dict(stale.payload or {})
+    audit_payload["_queue_pressure_shed"] = {
+        "shed_for_cause": incoming_cause,
+        "shed_at": now_dt.isoformat(),
+        "age_seconds": info["age_seconds"],
+    }
+    stale.payload = audit_payload
+    stale.status = "dead"
+    stale.processed_at = now_dt
+    db.flush()
+    return info
 
 
 def enqueue_activation(
@@ -77,19 +146,32 @@ def enqueue_activation(
     _validate_payload(cause, payload)
     cid = correlation_id or str(uuid.uuid4())
 
-    # Circuit breaker: global queue depth
-    if pending_queue_depth(db) >= MAX_PENDING_QUEUE_DEPTH:
-        _log.warning(
-            "%s enqueue rejected — queue depth >= %s (source=%s cause=%s)",
-            LOG_PREFIX, MAX_PENDING_QUEUE_DEPTH, source_node_id, cause,
-        )
-        return -1
-
     # Circuit breaker: per-correlation-id cap
     if correlation_event_count(db, cid) >= MAX_EVENTS_PER_CORRELATION:
         _log.warning(
             "%s enqueue rejected — correlation %s has >= %s events (source=%s)",
             LOG_PREFIX, cid, MAX_EVENTS_PER_CORRELATION, source_node_id,
+        )
+        return -1
+
+    # Circuit breaker: global queue depth
+    queue_depth = pending_queue_depth(db)
+    if queue_depth == MAX_PENDING_QUEUE_DEPTH:
+        shed = _shed_stale_low_priority_pending_event(db, incoming_cause=cause)
+        if shed is not None:
+            _log.warning(
+                "%s queue pressure shed stale pending event id=%s cause=%s "
+                "age_seconds=%s for protected cause=%s",
+                LOG_PREFIX,
+                shed.get("event_id"),
+                shed.get("cause"),
+                shed.get("age_seconds"),
+                cause,
+            )
+    if pending_queue_depth(db) >= MAX_PENDING_QUEUE_DEPTH:
+        _log.warning(
+            "%s enqueue rejected — queue depth >= %s (source=%s cause=%s)",
+            LOG_PREFIX, MAX_PENDING_QUEUE_DEPTH, source_node_id, cause,
         )
         return -1
 

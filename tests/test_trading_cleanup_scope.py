@@ -40,6 +40,20 @@ def test_autotrader_integration_db_tests_use_trading_targeted_cleanup() -> None:
     assert "birthdays" not in tables
 
 
+def test_neural_mesh_db_tests_use_mesh_targeted_cleanup() -> None:
+    conftest = sys.modules["tests.conftest"]
+
+    tables = conftest._test_targeted_cleanup_tables(
+        _request_for("test_brain_neural_mesh.py")
+    )
+
+    assert tables is conftest._TRADING_NEURAL_MESH_TARGETED_TABLES
+    assert "brain_activation_events" in tables
+    assert "brain_node_states" in tables
+    assert "brain_graph_nodes" not in tables
+    assert "birthdays" not in tables
+
+
 def test_full_cleanup_bounds_truncate_statement_timeout(monkeypatch) -> None:
     conftest = sys.modules["tests.conftest"]
     calls: list[str] = []

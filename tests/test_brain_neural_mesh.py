@@ -10,11 +10,15 @@ import pytest
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.models.trading import BrainGraphNode, BrainNodeState
+from app.models.trading import BrainActivationEvent, BrainGraphNode, BrainNodeState
 from app.services.trading.brain_neural_mesh import propagation as prop
 from app.services.trading.brain_neural_mesh import repository as repo
 from app.services.trading.brain_neural_mesh.activation_runner import run_activation_batch
 from app.services.trading.brain_neural_mesh.projection import build_neural_graph_projection
+
+
+def _naive_utcnow() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def test_gate_allows_wildcard_and_specific() -> None:
@@ -209,6 +213,213 @@ def test_enqueue_and_activation_batch(db: Session) -> None:
     out = run_activation_batch(db, time_budget_sec=3.0, max_events=10, run_decay=False)
     db.commit()
     assert out.get("processed", 0) >= 1
+
+
+@pytest.mark.parametrize("protected_cause", ["brain_market_snapshots", "momentum_context_refresh"])
+def test_protected_refresh_sheds_stale_imminent_eval_under_queue_pressure(
+    db: Session,
+    monkeypatch,
+    protected_cause: str,
+) -> None:
+    db.query(BrainActivationEvent).delete()
+    old = _naive_utcnow() - timedelta(hours=2)
+    monkeypatch.setattr(repo, "MAX_PENDING_QUEUE_DEPTH", 3)
+    monkeypatch.setattr(repo, "QUEUE_PRESSURE_SHED_MIN_AGE_SECONDS", 60)
+    db.add_all([
+        BrainActivationEvent(
+            source_node_id=None,
+            cause="imminent_eval",
+            payload={"signal_type": "imminent_eval"},
+            correlation_id=f"old-{idx}",
+            status="pending",
+            created_at=old + timedelta(seconds=idx),
+        )
+        for idx in range(3)
+    ])
+    db.flush()
+
+    event_id = repo.enqueue_activation(
+        db,
+        source_node_id="nm_event_bus",
+        cause=protected_cause,
+        payload={"signal_type": protected_cause},
+        correlation_id=f"protected-refresh-{protected_cause}",
+    )
+
+    assert event_id > 0
+    assert repo.pending_queue_depth(db) == 3
+    assert (
+        db.query(BrainActivationEvent)
+        .filter(BrainActivationEvent.status == "pending")
+        .filter(BrainActivationEvent.cause == "imminent_eval")
+        .count()
+    ) == 2
+    assert (
+        db.query(BrainActivationEvent)
+        .filter(BrainActivationEvent.status == "pending")
+        .filter(BrainActivationEvent.cause == protected_cause)
+        .count()
+    ) == 1
+    shed = (
+        db.query(BrainActivationEvent)
+        .filter(BrainActivationEvent.status == "dead")
+        .filter(BrainActivationEvent.cause == "imminent_eval")
+        .one()
+    )
+    assert shed.processed_at is not None
+    assert (shed.payload or {}).get("_queue_pressure_shed", {}).get("shed_for_cause") == protected_cause
+
+
+def test_queue_pressure_does_not_shed_for_unprotected_causes(
+    db: Session,
+    monkeypatch,
+) -> None:
+    db.query(BrainActivationEvent).delete()
+    old = _naive_utcnow() - timedelta(hours=2)
+    monkeypatch.setattr(repo, "MAX_PENDING_QUEUE_DEPTH", 2)
+    monkeypatch.setattr(repo, "QUEUE_PRESSURE_SHED_MIN_AGE_SECONDS", 60)
+    db.add_all([
+        BrainActivationEvent(
+            source_node_id=None,
+            cause="imminent_eval",
+            payload={"signal_type": "imminent_eval"},
+            correlation_id=f"old-unprotected-{idx}",
+            status="pending",
+            created_at=old + timedelta(seconds=idx),
+        )
+        for idx in range(2)
+    ])
+    db.flush()
+
+    event_id = repo.enqueue_activation(
+        db,
+        source_node_id="nm_other",
+        cause="setup_vitals_change",
+        payload={"signal_type": "setup_vitals_change"},
+        correlation_id="unprotected",
+    )
+
+    assert event_id == -1
+    assert repo.pending_queue_depth(db) == 2
+    assert (
+        db.query(BrainActivationEvent)
+        .filter(BrainActivationEvent.cause == "imminent_eval")
+        .count()
+    ) == 2
+
+
+def test_protected_refresh_keeps_fresh_imminent_eval_when_queue_full(
+    db: Session,
+    monkeypatch,
+) -> None:
+    db.query(BrainActivationEvent).delete()
+    monkeypatch.setattr(repo, "MAX_PENDING_QUEUE_DEPTH", 2)
+    monkeypatch.setattr(repo, "QUEUE_PRESSURE_SHED_MIN_AGE_SECONDS", 3600)
+    db.add_all([
+        BrainActivationEvent(
+            source_node_id=None,
+            cause="imminent_eval",
+            payload={"signal_type": "imminent_eval"},
+            correlation_id=f"fresh-{idx}",
+            status="pending",
+            created_at=_naive_utcnow(),
+        )
+        for idx in range(2)
+    ])
+    db.flush()
+
+    event_id = repo.enqueue_activation(
+        db,
+        source_node_id="nm_event_bus",
+        cause="momentum_context_refresh",
+        payload={"signal_type": "momentum_context_refresh"},
+        correlation_id="fresh-protected",
+    )
+
+    assert event_id == -1
+    assert repo.pending_queue_depth(db) == 2
+    assert (
+        db.query(BrainActivationEvent)
+        .filter(BrainActivationEvent.cause == "imminent_eval")
+        .count()
+    ) == 2
+
+
+def test_queue_pressure_does_not_shed_when_correlation_cap_is_exhausted(
+    db: Session,
+    monkeypatch,
+) -> None:
+    db.query(BrainActivationEvent).delete()
+    old = _naive_utcnow() - timedelta(hours=2)
+    monkeypatch.setattr(repo, "MAX_PENDING_QUEUE_DEPTH", 2)
+    monkeypatch.setattr(repo, "MAX_EVENTS_PER_CORRELATION", 2)
+    monkeypatch.setattr(repo, "QUEUE_PRESSURE_SHED_MIN_AGE_SECONDS", 60)
+    db.add_all([
+        BrainActivationEvent(
+            source_node_id=None,
+            cause="imminent_eval",
+            payload={"signal_type": "imminent_eval"},
+            correlation_id="exhausted-correlation",
+            status="pending",
+            created_at=old + timedelta(seconds=idx),
+        )
+        for idx in range(2)
+    ])
+    db.flush()
+
+    event_id = repo.enqueue_activation(
+        db,
+        source_node_id="nm_event_bus",
+        cause="momentum_context_refresh",
+        payload={"signal_type": "momentum_context_refresh"},
+        correlation_id="exhausted-correlation",
+    )
+
+    assert event_id == -1
+    assert repo.pending_queue_depth(db) == 2
+    assert (
+        db.query(BrainActivationEvent)
+        .filter(BrainActivationEvent.status == "dead")
+        .count()
+    ) == 0
+
+
+def test_queue_pressure_does_not_shed_when_queue_is_over_cap(
+    db: Session,
+    monkeypatch,
+) -> None:
+    db.query(BrainActivationEvent).delete()
+    old = _naive_utcnow() - timedelta(hours=2)
+    monkeypatch.setattr(repo, "MAX_PENDING_QUEUE_DEPTH", 2)
+    monkeypatch.setattr(repo, "QUEUE_PRESSURE_SHED_MIN_AGE_SECONDS", 60)
+    db.add_all([
+        BrainActivationEvent(
+            source_node_id=None,
+            cause="imminent_eval",
+            payload={"signal_type": "imminent_eval"},
+            correlation_id=f"over-cap-{idx}",
+            status="pending",
+            created_at=old + timedelta(seconds=idx),
+        )
+        for idx in range(3)
+    ])
+    db.flush()
+
+    event_id = repo.enqueue_activation(
+        db,
+        source_node_id="nm_event_bus",
+        cause="momentum_context_refresh",
+        payload={"signal_type": "momentum_context_refresh"},
+        correlation_id="over-cap-protected",
+    )
+
+    assert event_id == -1
+    assert repo.pending_queue_depth(db) == 3
+    assert (
+        db.query(BrainActivationEvent)
+        .filter(BrainActivationEvent.status == "dead")
+        .count()
+    ) == 0
 
 
 @pytest.mark.usefixtures("db")
