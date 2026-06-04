@@ -2431,6 +2431,70 @@ def test_get_entry_pairs_retains_recent_learning_tickers():
     assert subscribed_pairs == ["RANKED-USD", "RECENT-USD"]
 
 
+def test_get_entry_pairs_default_settings_retains_recent_learning_tickers(
+    monkeypatch,
+):
+    from sqlalchemy import create_engine, text
+
+    from app.services.trading.fast_path.universe_rotator import (
+        get_entry_pairs,
+        get_subscribed_pairs,
+    )
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    settings = _StubSettings(
+        universe_learning_retention_horizon_s=300,
+        universe_learning_retention_max_n=2,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.fast_path.settings.load",
+        lambda: settings,
+    )
+    engine = create_engine("sqlite:///:memory:")
+    with engine.begin() as db:
+        db.execute(text("""
+            CREATE TABLE fast_path_universe (
+                ticker TEXT NOT NULL,
+                status TEXT NOT NULL,
+                rank INTEGER NULL,
+                composite_score REAL NULL,
+                rotation_at TEXT NOT NULL
+            )
+        """))
+        db.execute(text("""
+            CREATE TABLE fast_alerts (
+                ticker TEXT NOT NULL,
+                fired_at TIMESTAMP NOT NULL
+            )
+        """))
+        db.execute(text("""
+            CREATE TABLE fast_path_maker_attempts (
+                ticker TEXT NOT NULL,
+                placed_at TIMESTAMP NOT NULL
+            )
+        """))
+        db.execute(text("""
+            INSERT INTO fast_path_universe (
+                ticker, status, rank, composite_score, rotation_at
+            ) VALUES
+              ('RANKED-USD', 'shadow', 1, 1.0, '2026-05-27T11:10:00'),
+              ('RECENT-USD', 'inactive', NULL, 2.0, '2026-05-27T11:10:00')
+        """))
+        db.execute(text("""
+            INSERT INTO fast_alerts (ticker, fired_at)
+            VALUES (:ticker, :recent_at)
+        """), {
+            "ticker": "RECENT-USD",
+            "recent_at": now - timedelta(seconds=60),
+        })
+
+        entry_pairs = get_entry_pairs(db)
+        subscribed_pairs = get_subscribed_pairs(db)
+
+    assert entry_pairs == ["RANKED-USD", "RECENT-USD"]
+    assert subscribed_pairs == ["RANKED-USD", "RECENT-USD"]
+
+
 # ---------------------------------------------------------------------------
 # Book-gate behaviour (f-fastpath-rotator-coinbase-fixes-bundle, 2026-05-08)
 # ---------------------------------------------------------------------------

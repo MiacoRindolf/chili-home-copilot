@@ -2768,7 +2768,17 @@ def get_entry_pairs(db, settings=None) -> list[str]:
     }).fetchall()
     pairs = [str(r.ticker) for r in rows]
     if settings is None:
-        return pairs
+        try:
+            from .settings import load as _load_fast_path_settings
+
+            settings = _load_fast_path_settings()
+        except Exception as exc:
+            logger.debug(
+                "[fast_path_rotator] entry-pair settings load skipped: %s",
+                exc,
+                exc_info=True,
+            )
+            return pairs
     seen = set(pairs)
     for ticker in _recent_learning_retention_entry_pairs(
         db,
