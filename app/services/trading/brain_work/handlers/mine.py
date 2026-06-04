@@ -136,6 +136,16 @@ def handle_market_snapshots_batch(db: "Session", ev, user_id: int | None) -> Non
     if uid is None:
         uid = getattr(settings, "brain_default_user_id", None)
 
+    try:
+        db.rollback()
+    except Exception:
+        logger.debug(
+            "%s dispatcher session release before mine failed ev_id=%s",
+            LOG_PREFIX,
+            ev.id,
+            exc_info=True,
+        )
+
     # Run mining in its own session so a long mine doesn't hold the dispatcher's
     # session open (the dispatcher's `db` is shared across handlers in the batch).
     sess = SessionLocal()

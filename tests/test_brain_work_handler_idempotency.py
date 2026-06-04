@@ -267,6 +267,67 @@ def test_mine_handler_skips_obsolete_snapshot_batch(monkeypatch) -> None:
     mine_mock.assert_not_called()
 
 
+def test_mine_handler_releases_dispatch_session_before_long_mine(monkeypatch) -> None:
+    events: list[str] = []
+
+    def mine_patterns(_session, _user_id):
+        events.append("mine")
+        return []
+
+    class DispatchDb:
+        def execute(self, *args, **kwargs):
+            events.append("obsolete_check")
+            return types.SimpleNamespace(scalar=lambda: None)
+
+        def rollback(self):
+            events.append("dispatch_rollback")
+
+    class IsolatedSession:
+        def commit(self):
+            events.append("isolated_commit")
+
+        def rollback(self):
+            events.append("isolated_rollback")
+
+        def close(self):
+            events.append("isolated_close")
+
+    def session_factory():
+        events.append("isolated_open")
+        return IsolatedSession()
+
+    import app.services.trading.learning as learning
+
+    monkeypatch.setattr(learning, "mine_patterns", mine_patterns)
+    monkeypatch.setattr("app.db.SessionLocal", session_factory)
+
+    from app.services.trading.brain_work.handlers.mine import (
+        handle_market_snapshots_batch,
+    )
+
+    ev = _FakeEvent(
+        event_id=45,
+        payload={
+            "snapshots_taken_daily": 25,
+            "intraday_snapshots_taken": 0,
+            "universe_size": 25,
+            "job_id": "fresh",
+        },
+    )
+    ev.created_at = datetime.utcnow()
+
+    handle_market_snapshots_batch(DispatchDb(), ev, None)
+
+    assert events == [
+        "obsolete_check",
+        "dispatch_rollback",
+        "isolated_open",
+        "mine",
+        "isolated_commit",
+        "isolated_close",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Handler 5: regime_ledger (handle_trade_closed_for_ledger)
 #
