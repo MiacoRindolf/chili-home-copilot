@@ -1,12 +1,14 @@
 """Unit tests for setup_vitals trajectory scoring."""
 from __future__ import annotations
 
+import inspect
 from types import SimpleNamespace
 
 from app.services.trading.setup_vitals import (
     _compute_vitals_from_flats,
     _normalized_slope,
     _ticker_vitals_row_to_setup,
+    monitored_tickers_for_vitals,
 )
 
 
@@ -67,3 +69,13 @@ def test_ticker_vitals_row_to_setup_defaults_missing_composite_health() -> None:
     vitals = _ticker_vitals_row_to_setup(row)
 
     assert vitals.composite_health == 0.5
+
+
+def test_monitored_tickers_for_vitals_avoids_pending_distinct_scan() -> None:
+    src = inspect.getsource(monitored_tickers_for_vitals)
+
+    assert "q.distinct().limit(200)" not in src
+    assert "BreakoutAlert.alerted_at.desc()" in src
+    assert "BreakoutAlert.ticker.asc()" in src
+    assert "pending_scan_limit = 600" in src
+    assert "pending_ticker_limit = 200" in src

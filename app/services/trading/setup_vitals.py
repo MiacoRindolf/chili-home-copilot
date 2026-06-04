@@ -485,6 +485,8 @@ def monitored_tickers_for_vitals(db: Session) -> list[str]:
     """Tickers with open trades or pending breakout alerts worth refreshing."""
     from ...models.trading import BreakoutAlert, Trade
 
+    pending_scan_limit = 600
+    pending_ticker_limit = 200
     tickers: set[str] = set()
     try:
         for (t,) in db.query(Trade.ticker).filter(Trade.status == "open").distinct():
@@ -493,10 +495,20 @@ def monitored_tickers_for_vitals(db: Session) -> list[str]:
     except Exception:
         pass
     try:
-        q = db.query(BreakoutAlert.ticker).filter(BreakoutAlert.outcome == "pending")
-        for (t,) in q.distinct().limit(200):
-            if t:
-                tickers.add(str(t).strip().upper())
+        pending_tickers: set[str] = set()
+        q = (
+            db.query(BreakoutAlert.ticker)
+            .filter(BreakoutAlert.outcome == "pending")
+            .order_by(BreakoutAlert.alerted_at.desc(), BreakoutAlert.ticker.asc())
+            .limit(pending_scan_limit)
+        )
+        for (t,) in q:
+            if not t:
+                continue
+            pending_tickers.add(str(t).strip().upper())
+            if len(pending_tickers) >= pending_ticker_limit:
+                break
+        tickers.update(pending_tickers)
     except Exception:
         pass
     return sorted(tickers)
