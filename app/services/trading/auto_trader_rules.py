@@ -90,7 +90,11 @@ AUTOTRADER_EDGE_MAX_OPTIONS_EXECUTION_STOP_LOSS_PCT = 0.0
 AUTOTRADER_POSITIVE_REPRICE_DEFAULT_ENABLED = True
 AUTOTRADER_POSITIVE_REPRICE_DEFAULT_ASSET_TYPES = "stock,crypto"
 STOCK_MOMENTUM_CONTEXT_BELOW_FLOOR_REASON = "stock_momentum_context_below_floor"
+STOCK_MOMENTUM_CONTEXT_HALTED_REASON = "stock_momentum_context_halted"
 STOCK_MOMENTUM_CONTEXT_MISSING_REASON = "stock_momentum_context_missing"
+STOCK_MOMENTUM_CONTEXT_NO_CATALYST_REASON = "stock_momentum_context_no_catalyst"
+STOCK_MOMENTUM_CONTEXT_WIDE_SPREAD_REASON = "stock_momentum_context_wide_spread"
+SMALL_CAP_MOMENTUM_CONTEXT_KEY = "small_cap_momentum_context"
 
 
 @dataclass
@@ -339,11 +343,50 @@ def _indicator_flat_snapshot(alert: BreakoutAlert) -> dict[str, Any]:
     return snapshot
 
 
+def _indicator_momentum_context_snapshot(alert: BreakoutAlert) -> tuple[dict[str, Any], bool]:
+    snapshot = alert.indicator_snapshot if isinstance(alert.indicator_snapshot, dict) else {}
+    flat = snapshot.get("flat_indicators")
+    base = dict(flat) if isinstance(flat, dict) else dict(snapshot)
+    nested = snapshot.get(SMALL_CAP_MOMENTUM_CONTEXT_KEY)
+    if not isinstance(nested, dict):
+        nested = base.get(SMALL_CAP_MOMENTUM_CONTEXT_KEY)
+    if isinstance(nested, dict) and nested:
+        merged = dict(base)
+        merged.update(nested)
+        return merged, True
+    return base, False
+
+
 def _indicator_first_float(flat: dict[str, Any], names: tuple[str, ...]) -> tuple[float | None, str | None]:
     for name in names:
         value = _finite_float_or_none(flat.get(name))
         if value is not None:
             return value, name
+    return None, None
+
+
+def _indicator_first_text(flat: dict[str, Any], names: tuple[str, ...]) -> tuple[str | None, str | None]:
+    for name in names:
+        value = flat.get(name)
+        if value is None:
+            continue
+        text_value = str(value).strip()
+        if text_value:
+            return text_value, name
+    return None, None
+
+
+def _indicator_first_bool(flat: dict[str, Any], names: tuple[str, ...]) -> tuple[bool | None, str | None]:
+    for name in names:
+        value = flat.get(name)
+        if isinstance(value, bool):
+            return value, name
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on", "halted"}:
+                return True, name
+            if normalized in {"0", "false", "no", "off", "none", "clear"}:
+                return False, name
     return None, None
 
 
@@ -366,6 +409,10 @@ def _stock_momentum_context_gate(
     )
     min_gap_pct = float(settings_snapshot.stock_momentum_context_min_gap_pct)
     min_volume_ratio = float(settings_snapshot.stock_momentum_context_min_volume_ratio)
+    max_spread_bps = max(
+        25.0,
+        float(settings_snapshot.max_entry_slippage_pct) * 100.0 * max(0.25, 1.0 - pressure * 0.75),
+    )
     snap = {
         "enabled": bool(settings_snapshot.stock_momentum_context_gate_enabled),
         "active": False,
@@ -373,16 +420,23 @@ def _stock_momentum_context_gate(
         "min_queue_pressure": round(min_pressure, 4),
         "min_gap_pct": round(min_gap_pct, 4),
         "min_volume_ratio": round(min_volume_ratio, 4),
+        "max_spread_bps": round(max_spread_bps, 4),
     }
     if not bool(settings_snapshot.stock_momentum_context_gate_enabled):
         snap["inactive_reason"] = "disabled"
         return True, None, snap
-    if pressure + 1e-9 < min_pressure:
+    flat, packet_present = _indicator_momentum_context_snapshot(alert)
+    snap["small_cap_momentum_context_present"] = packet_present
+    if pressure + 1e-9 < min_pressure and not packet_present:
         snap["inactive_reason"] = "queue_pressure_below_floor"
         return True, None, snap
 
     snap["active"] = True
-    flat = _indicator_flat_snapshot(alert)
+    snap["active_reason"] = (
+        "small_cap_momentum_context"
+        if packet_present and pressure + 1e-9 < min_pressure
+        else "queue_pressure"
+    )
     gap_pct, gap_source = _indicator_first_float(
         flat,
         (
@@ -396,13 +450,31 @@ def _stock_momentum_context_gate(
     )
     volume_ratio, volume_source = _indicator_first_float(
         flat,
-        ("volume_ratio", "vol_ratio", "rel_vol", "relative_volume"),
+        ("volume_ratio", "vol_ratio", "rel_vol", "relative_volume", "rvol"),
     )
+    spread_bps, spread_source = _indicator_first_float(flat, ("spread_bps",))
+    news_count, news_count_source = _indicator_first_float(flat, ("news_count",))
+    news_sentiment, news_sentiment_source = _indicator_first_float(flat, ("news_sentiment",))
+    float_bucket, float_bucket_source = _indicator_first_text(flat, ("float_bucket",))
+    halted, halted_source = _indicator_first_bool(flat, ("halted", "halt_status"))
+    halt_status, halt_status_source = _indicator_first_text(flat, ("halt_status",))
     snap.update(
         gap_pct=round(gap_pct, 4) if gap_pct is not None else None,
         gap_source=gap_source,
         volume_ratio=round(volume_ratio, 4) if volume_ratio is not None else None,
         volume_ratio_source=volume_source,
+        spread_bps=round(spread_bps, 4) if spread_bps is not None else None,
+        spread_source=spread_source,
+        news_count=round(news_count, 4) if news_count is not None else None,
+        news_count_source=news_count_source,
+        news_sentiment=round(news_sentiment, 4) if news_sentiment is not None else None,
+        news_sentiment_source=news_sentiment_source,
+        float_bucket=float_bucket,
+        float_bucket_source=float_bucket_source,
+        halted=halted,
+        halted_source=halted_source,
+        halt_status=halt_status,
+        halt_status_source=halt_status_source,
     )
     missing = []
     if gap_pct is None:
@@ -416,6 +488,24 @@ def _stock_momentum_context_gate(
         snap["gap_passed"] = gap_pct >= min_gap_pct
         snap["volume_ratio_passed"] = volume_ratio >= min_volume_ratio
         return False, STOCK_MOMENTUM_CONTEXT_BELOW_FLOOR_REASON, snap
+    if halted is True or str(halt_status or "").strip().lower() in {"halted", "paused"}:
+        snap["halt_passed"] = False
+        return False, STOCK_MOMENTUM_CONTEXT_HALTED_REASON, snap
+    snap["halt_passed"] = True
+    if spread_bps is not None and spread_bps > max_spread_bps:
+        snap["spread_passed"] = False
+        return False, STOCK_MOMENTUM_CONTEXT_WIDE_SPREAD_REASON, snap
+    snap["spread_passed"] = True
+    if (
+        packet_present
+        and news_count is not None
+        and news_sentiment is not None
+        and news_count <= 0.0
+        and news_sentiment <= 0.05
+    ):
+        snap["catalyst_passed"] = False
+        return False, STOCK_MOMENTUM_CONTEXT_NO_CATALYST_REASON, snap
+    snap["catalyst_passed"] = True
     snap["gap_passed"] = True
     snap["volume_ratio_passed"] = True
     return True, None, snap

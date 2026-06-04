@@ -485,6 +485,57 @@ def test_passes_rule_gate_stock_momentum_context_waits_for_candidate_pressure():
     )
 
 
+def test_passes_rule_gate_stock_momentum_context_enforces_packet_below_candidate_pressure():
+    db = MagicMock()
+    alert = BreakoutAlert(
+        ticker="QUIETCTX",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.7,
+        price_at_alert=10.0,
+        entry_price=10.0,
+        stop_loss=9.0,
+        target_price=12.0,
+        user_id=1,
+        indicator_snapshot={
+            "small_cap_momentum_context": {
+                "gap_pct": 0.2,
+                "rvol": 0.6,
+                "news_count": 1,
+                "news_sentiment": 0.2,
+            },
+        },
+    )
+    ctx = RuleGateContext(
+        current_price=10.0,
+        autotrader_open_count=0,
+        realized_loss_today_usd=0.0,
+        autotrader_open_count_by_lane={"equity": 0, "crypto": 0, "options": 0},
+        candidate_queue_pressure=0.0,
+    )
+
+    with patch(
+        "app.services.trading.auto_trader_rules.evaluate_entry_edge",
+        side_effect=AssertionError("weak packet should reject before entry edge"),
+    ):
+        ok, reason, snap = passes_rule_gate(
+            db,
+            alert,
+            settings=_rule_gate_settings(),
+            ctx=ctx,
+            for_new_entry=True,
+        )
+
+    gate = snap["stock_momentum_context_gate"]
+    assert not ok
+    assert reason == "stock_momentum_context_below_floor"
+    assert gate["active"] is True
+    assert gate["active_reason"] == "small_cap_momentum_context"
+    assert gate["small_cap_momentum_context_present"] is True
+    assert gate["gap_passed"] is False
+    assert gate["volume_ratio_passed"] is False
+
+
 def test_passes_rule_gate_stock_momentum_context_does_not_bypass_expected_edge():
     db = MagicMock()
     alert = BreakoutAlert(
@@ -535,6 +586,223 @@ def test_passes_rule_gate_stock_momentum_context_does_not_bypass_expected_edge()
     assert gate["active"] is True
     assert gate["gap_passed"] is True
     assert gate["volume_ratio_passed"] is True
+
+
+def test_passes_rule_gate_stock_momentum_context_reads_nested_packet():
+    db = MagicMock()
+    alert = BreakoutAlert(
+        ticker="NESTED",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.7,
+        price_at_alert=10.0,
+        entry_price=10.0,
+        stop_loss=9.5,
+        target_price=12.0,
+        user_id=1,
+        indicator_snapshot={
+            "flat_indicators": {"price": 10.0},
+            "small_cap_momentum_context": {
+                "gap_pct": 7.0,
+                "rvol": 3.2,
+                "news_count": 3,
+                "news_sentiment": 0.28,
+                "float_bucket": "micro_float_proxy",
+                "spread_bps": 35.0,
+            },
+        },
+    )
+    ctx = RuleGateContext(
+        current_price=10.0,
+        autotrader_open_count=0,
+        realized_loss_today_usd=0.0,
+        autotrader_open_count_by_lane={"equity": 0, "crypto": 0, "options": 0},
+        candidate_queue_pressure=1.0,
+    )
+
+    with (
+        patch(
+            "app.services.trading.auto_trader_rules.resolve_pattern_signal_context",
+            return_value={},
+        ),
+        patch(
+            "app.services.trading.auto_trader_rules.evaluate_entry_edge",
+            return_value=EntryEdgeDecision(
+                False,
+                "non_positive_expected_edge",
+                {"expected_net_pct": -0.25},
+            ),
+        ),
+    ):
+        ok, reason, snap = passes_rule_gate(
+            db,
+            alert,
+            settings=_rule_gate_settings(),
+            ctx=ctx,
+            for_new_entry=True,
+        )
+
+    gate = snap["stock_momentum_context_gate"]
+    assert not ok
+    assert reason == "non_positive_expected_edge"
+    assert gate["small_cap_momentum_context_present"] is True
+    assert gate["gap_passed"] is True
+    assert gate["volume_ratio_passed"] is True
+    assert gate["spread_passed"] is True
+    assert gate["catalyst_passed"] is True
+    assert gate["gap_source"] == "gap_pct"
+    assert gate["volume_ratio_source"] == "rvol"
+    assert gate["float_bucket"] == "micro_float_proxy"
+
+
+def test_passes_rule_gate_stock_momentum_context_blocks_halted_packet_before_edge():
+    db = MagicMock()
+    alert = BreakoutAlert(
+        ticker="HALT",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.7,
+        price_at_alert=10.0,
+        entry_price=10.0,
+        stop_loss=9.5,
+        target_price=12.0,
+        user_id=1,
+        indicator_snapshot={
+            "small_cap_momentum_context": {
+                "gap_pct": 7.0,
+                "relative_volume": 3.2,
+                "halted": True,
+                "news_count": 4,
+                "news_sentiment": 0.4,
+            },
+        },
+    )
+    ctx = RuleGateContext(
+        current_price=10.0,
+        autotrader_open_count=0,
+        realized_loss_today_usd=0.0,
+        autotrader_open_count_by_lane={"equity": 0, "crypto": 0, "options": 0},
+        candidate_queue_pressure=1.0,
+    )
+
+    with (
+        patch(
+            "app.services.trading.auto_trader_rules.resolve_pattern_signal_context",
+            side_effect=AssertionError("halt should reject before pattern context"),
+        ),
+        patch(
+            "app.services.trading.auto_trader_rules.evaluate_entry_edge",
+            side_effect=AssertionError("halt should reject before entry edge"),
+        ),
+    ):
+        ok, reason, snap = passes_rule_gate(
+            db,
+            alert,
+            settings=_rule_gate_settings(),
+            ctx=ctx,
+            for_new_entry=True,
+        )
+
+    assert not ok
+    assert reason == "stock_momentum_context_halted"
+    assert snap["stock_momentum_context_gate"]["halt_passed"] is False
+
+
+def test_passes_rule_gate_stock_momentum_context_blocks_wide_spread_under_pressure():
+    db = MagicMock()
+    alert = BreakoutAlert(
+        ticker="WIDE",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.7,
+        price_at_alert=10.0,
+        entry_price=10.0,
+        stop_loss=9.5,
+        target_price=12.0,
+        user_id=1,
+        indicator_snapshot={
+            "small_cap_momentum_context": {
+                "gap_pct": 7.0,
+                "rvol": 3.2,
+                "news_count": 2,
+                "news_sentiment": 0.2,
+                "spread_bps": 200.0,
+            },
+        },
+    )
+    ctx = RuleGateContext(
+        current_price=10.0,
+        autotrader_open_count=0,
+        realized_loss_today_usd=0.0,
+        autotrader_open_count_by_lane={"equity": 0, "crypto": 0, "options": 0},
+        candidate_queue_pressure=1.0,
+    )
+
+    with patch(
+        "app.services.trading.auto_trader_rules.evaluate_entry_edge",
+        side_effect=AssertionError("wide spread should reject before entry edge"),
+    ):
+        ok, reason, snap = passes_rule_gate(
+            db,
+            alert,
+            settings=_rule_gate_settings(),
+            ctx=ctx,
+            for_new_entry=True,
+        )
+
+    gate = snap["stock_momentum_context_gate"]
+    assert not ok
+    assert reason == "stock_momentum_context_wide_spread"
+    assert gate["spread_passed"] is False
+    assert gate["spread_bps"] == 200.0
+    assert gate["max_spread_bps"] == 125.0
+
+
+def test_passes_rule_gate_stock_momentum_context_blocks_explicit_no_catalyst_packet():
+    db = MagicMock()
+    alert = BreakoutAlert(
+        ticker="NOCAT",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.7,
+        price_at_alert=10.0,
+        entry_price=10.0,
+        stop_loss=9.5,
+        target_price=12.0,
+        user_id=1,
+        indicator_snapshot={
+            "small_cap_momentum_context": {
+                "gap_pct": 7.0,
+                "rvol": 3.2,
+                "news_count": 0,
+                "news_sentiment": 0.0,
+                "spread_bps": 25.0,
+            },
+        },
+    )
+    ctx = RuleGateContext(
+        current_price=10.0,
+        autotrader_open_count=0,
+        realized_loss_today_usd=0.0,
+        autotrader_open_count_by_lane={"equity": 0, "crypto": 0, "options": 0},
+        candidate_queue_pressure=1.0,
+    )
+
+    with patch(
+        "app.services.trading.auto_trader_rules.evaluate_entry_edge",
+        side_effect=AssertionError("no catalyst should reject before entry edge"),
+    ):
+        ok, reason, snap = passes_rule_gate(
+            db,
+            alert,
+            settings=_rule_gate_settings(),
+            ctx=ctx,
+            for_new_entry=True,
+        )
+
+    assert not ok
+    assert reason == "stock_momentum_context_no_catalyst"
+    assert snap["stock_momentum_context_gate"]["catalyst_passed"] is False
 
 
 def test_passes_rule_gate_skips_legacy_stock_price_cap_when_fractional_equity_enabled():
