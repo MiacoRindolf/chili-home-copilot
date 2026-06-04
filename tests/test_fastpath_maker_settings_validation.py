@@ -128,6 +128,29 @@ def test_load_overrides_fallback_seconds_from_env():
     assert s.maker_first_taker_fallback_s == 2
 
 
+@pytest.mark.parametrize(
+    ("env_name", "attr", "default"),
+    [
+        (
+            "CHILI_FAST_PATH_MAKER_CANCEL_ON_TIMEOUT_S",
+            "maker_cancel_on_timeout_s",
+            10,
+        ),
+        (
+            "CHILI_FAST_PATH_MAKER_FIRST_TAKER_FALLBACK_S",
+            "maker_first_taker_fallback_s",
+            5,
+        ),
+    ],
+)
+@pytest.mark.parametrize("raw", ["0", "-1", "bad"])
+def test_load_rejects_invalid_maker_timeout_env(env_name, attr, default, raw):
+    with _env_clean(env_name):
+        os.environ[env_name] = raw
+        s = load()
+    assert getattr(s, attr) == default
+
+
 def test_load_overrides_maker_tick_fraction_from_env():
     with _env_clean("CHILI_FAST_PATH_MAKER_TICK_FRACTION_OF_MID"):
         os.environ["CHILI_FAST_PATH_MAKER_TICK_FRACTION_OF_MID"] = "0.0002"

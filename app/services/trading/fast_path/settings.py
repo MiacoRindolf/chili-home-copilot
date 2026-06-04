@@ -670,11 +670,11 @@ def load() -> FastPathSettings:
             "CHILI_FAST_PATH_LIVE_ALPHA_MIN_SAMPLES", 50),
         live_alpha_min_net_bps=_env_nonnegative_float(
             "CHILI_FAST_PATH_LIVE_ALPHA_MIN_NET_BPS", 0.0),
-        negative_edge_filter_ttl_s=_env_int(
+        negative_edge_filter_ttl_s=_env_nonnegative_int(
             "CHILI_FAST_PATH_NEGATIVE_EDGE_FILTER_TTL_S", 30),
-        maker_cancel_on_timeout_s=_env_int(
+        maker_cancel_on_timeout_s=_env_positive_int(
             "CHILI_FAST_PATH_MAKER_CANCEL_ON_TIMEOUT_S", 10),
-        maker_first_taker_fallback_s=_env_int(
+        maker_first_taker_fallback_s=_env_positive_int(
             "CHILI_FAST_PATH_MAKER_FIRST_TAKER_FALLBACK_S", 5),
         maker_tick_fraction_of_mid=_env_positive_float(
             "CHILI_FAST_PATH_MAKER_TICK_FRACTION_OF_MID",
@@ -683,7 +683,7 @@ def load() -> FastPathSettings:
         ),
         maker_attempt_adverse_filter_enabled=_env_bool(
             "CHILI_FAST_PATH_MAKER_ATTEMPT_ADVERSE_FILTER_ENABLED", True),
-        maker_attempt_adverse_filter_window_h=_env_int(
+        maker_attempt_adverse_filter_window_h=_env_positive_int(
             "CHILI_FAST_PATH_MAKER_ATTEMPT_ADVERSE_FILTER_WINDOW_H", 24),
         # Short-alert gate (2026-05-17)
         emit_short_alerts=_env_bool(

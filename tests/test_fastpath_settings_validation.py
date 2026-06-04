@@ -318,6 +318,27 @@ def test_negative_edge_filter_ttl_env_override_works():
     assert loaded.negative_edge_filter_ttl_s == 45
 
 
+@pytest.mark.parametrize("raw", ["-1", "bad"])
+def test_negative_edge_filter_ttl_env_rejects_negative_values(raw):
+    with mock.patch.dict(
+        os.environ,
+        {"CHILI_FAST_PATH_NEGATIVE_EDGE_FILTER_TTL_S": raw},
+        clear=True,
+    ):
+        loaded = load()
+    assert loaded.negative_edge_filter_ttl_s == 30
+
+
+def test_negative_edge_filter_ttl_env_accepts_zero_value():
+    with mock.patch.dict(
+        os.environ,
+        {"CHILI_FAST_PATH_NEGATIVE_EDGE_FILTER_TTL_S": "0"},
+        clear=True,
+    ):
+        loaded = load()
+    assert loaded.negative_edge_filter_ttl_s == 0
+
+
 def test_maker_attempt_adverse_filter_env_overrides_work():
     with mock.patch.dict(
         os.environ,
@@ -329,6 +350,17 @@ def test_maker_attempt_adverse_filter_env_overrides_work():
         loaded = load()
     assert loaded.maker_attempt_adverse_filter_enabled is False
     assert loaded.maker_attempt_adverse_filter_window_h == 12
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "bad"])
+def test_maker_attempt_adverse_filter_window_env_rejects_invalid_values(raw):
+    with mock.patch.dict(
+        os.environ,
+        {"CHILI_FAST_PATH_MAKER_ATTEMPT_ADVERSE_FILTER_WINDOW_H": raw},
+        clear=True,
+    ):
+        loaded = load()
+    assert loaded.maker_attempt_adverse_filter_window_h == 24
 
 
 def test_universe_shadow_min_top_book_defaults_to_exec_notional():
