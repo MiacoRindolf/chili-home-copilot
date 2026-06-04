@@ -441,12 +441,14 @@ def _truncate_app_tables(table_names: frozenset[str] | None = None) -> None:
         return
     attempts = max(1, int(os.environ.get("CHILI_PYTEST_TRUNCATE_ATTEMPTS", "6")))
     lock_s = max(30, int(os.environ.get("CHILI_PYTEST_LOCK_TIMEOUT_S", "120")))
+    statement_s = max(30, int(os.environ.get("CHILI_PYTEST_TRUNCATE_STATEMENT_TIMEOUT_S", "90")))
     for attempt in range(attempts):
         _evict_idle_in_transaction_peers()
         _terminate_stale_truncate_peers()
         try:
             with engine.begin() as conn:
                 conn.execute(text(f"SET LOCAL lock_timeout = '{lock_s}s'"))
+                conn.execute(text(f"SET LOCAL statement_timeout = '{statement_s}s'"))
                 names = [f'"{name}"' for name in _truncate_relation_names(conn, logical_names)]
                 stmt = text(f"TRUNCATE {', '.join(names)} RESTART IDENTITY CASCADE")
                 conn.execute(stmt)
