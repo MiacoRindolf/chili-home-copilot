@@ -58,6 +58,25 @@ def test_bounded_breakout_alert_count_caps_without_exact_count() -> None:
     assert query.limit_value == 4
 
 
+def test_queue_pressure_floor_one_disables_shadow_suppression(monkeypatch) -> None:
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_paper_shadow_queue_pressure_suppression_floor",
+        1.0,
+        raising=False,
+    )
+    out = {"candidate_queue_pressure": 1.0}
+
+    reason = at_mod._paper_shadow_queue_pressure_suppression_reason(
+        out,
+        reject_reason="non_positive_expected_edge",
+        snap={"expected_net_pct": -1.0},
+    )
+
+    assert reason is None
+    assert "paper_shadow_queue_pressure_suppressed" not in out
+
+
 def test_candidate_batch_size_still_uses_keyword_clamps(monkeypatch) -> None:
     monkeypatch.setattr(
         at_mod.settings,

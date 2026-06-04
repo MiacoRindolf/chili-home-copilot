@@ -2779,7 +2779,7 @@ def _paper_shadow_queue_pressure_suppression_reason(
         queue_pressure = 0.0
     if (
         not math.isfinite(queue_pressure)
-        or queue_pressure < _paper_shadow_queue_pressure_floor()
+        or queue_pressure <= _paper_shadow_queue_pressure_floor()
     ):
         return None
     out["paper_shadow_queue_pressure_suppressed"] = (
