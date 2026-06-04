@@ -13,6 +13,7 @@ from app.services.trading.auto_trader_rules import (
     EntryEdgeDecision,
     RuleGateContext,
     RuleGateSettings,
+    _alert_confidence_probability,
     _max_execution_stop_loss_fraction,
     _non_positive_reprice_marker,
     _positive_reprice_entry_enabled_for,
@@ -182,6 +183,20 @@ def test_positive_reprice_entry_reads_typed_env(monkeypatch):
         _env_file=None,
     )
     assert _positive_reprice_entry_enabled_for(disabled_cfg, "crypto") is False
+
+
+def test_alert_confidence_probability_weight_reads_typed_env(monkeypatch):
+    monkeypatch.setenv("CHILI_AUTOTRADER_ALERT_CONFIDENCE_PROBABILITY_WEIGHT", "0.5")
+    cfg = Settings(
+        database_url="postgresql://chili:chili@localhost:5433/chili_test",
+        _env_file=None,
+    )
+
+    probability, details = _alert_confidence_probability(0.9, cfg)
+
+    assert cfg.chili_autotrader_alert_confidence_probability_weight == 0.5
+    assert probability == pytest.approx(0.7)
+    assert details["weight"] == 0.5
 
 
 def test_count_autotrader_v1_open_treats_working_as_active():

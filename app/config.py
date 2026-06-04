@@ -2866,6 +2866,18 @@ class Settings(BaseSettings):
             "CHILI_AUTOTRADER_MIN_EXPECTED_NET_AFTER_EMPIRICAL_COST_PCT"
         ),
     )
+    chili_autotrader_alert_confidence_probability_weight: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_ALERT_CONFIDENCE_PROBABILITY_WEIGHT"
+        ),
+        description=(
+            "Weight applied when converting uncalibrated alert confidence into "
+            "edge probability; 0 keeps probability at 50%, 1 trusts confidence fully."
+        ),
+    )
     chili_autotrader_stock_max_execution_stop_loss_pct: float = Field(
         default=30.0,
         ge=0.0,
