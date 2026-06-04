@@ -69,6 +69,9 @@ AUTOTRADER_STALE_CANDIDATE_SWEEP_MAX_SECONDS = (
     AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES * SECONDS_PER_MINUTE
 )
 AUTOTRADER_CANDIDATE_PRICE_PREFETCH_DEFAULT_ENABLED = True
+AUTOTRADER_CANDIDATE_PRICE_PREFETCH_BATCH_TIMEOUT_DEFAULT_SECONDS = 2.0
+AUTOTRADER_CANDIDATE_PRICE_PREFETCH_BATCH_TIMEOUT_MIN_SECONDS = 0.1
+AUTOTRADER_CANDIDATE_PRICE_PREFETCH_BATCH_TIMEOUT_MAX_SECONDS = 5.0
 AUTOTRADER_CANDIDATE_SELECT_TIMEOUT_DEFAULT_FRACTION = 0.15
 AUTOTRADER_CANDIDATE_SELECT_TIMEOUT_MIN_MS = 1000
 AUTOTRADER_CANDIDATE_SELECT_TIMEOUT_MAX_MS = 2500
@@ -3041,6 +3044,20 @@ class Settings(BaseSettings):
             "When true, AutoTrader batch-prefetches current quotes for selected "
             "candidates and reuses them inside the rule gate, reducing per-alert "
             "market-data latency without weakening execution gates."
+        ),
+    )
+    chili_autotrader_candidate_price_prefetch_batch_timeout_seconds: float = Field(
+        default=AUTOTRADER_CANDIDATE_PRICE_PREFETCH_BATCH_TIMEOUT_DEFAULT_SECONDS,
+        ge=AUTOTRADER_CANDIDATE_PRICE_PREFETCH_BATCH_TIMEOUT_MIN_SECONDS,
+        le=AUTOTRADER_CANDIDATE_PRICE_PREFETCH_BATCH_TIMEOUT_MAX_SECONDS,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_CANDIDATE_PRICE_PREFETCH_BATCH_TIMEOUT_SECONDS"
+        ),
+        description=(
+            "Wall-clock cap for the opportunistic AutoTrader candidate quote "
+            "batch prefetch. When exceeded, the tick proceeds without the "
+            "prefetched quote rather than spending the trading budget on "
+            "market-data latency."
         ),
     )
     chili_autotrader_stock_momentum_context_gate_enabled: bool = Field(

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import concurrent.futures
 import json
 import logging
 import math
@@ -18,6 +19,9 @@ from sqlalchemy.orm import Session
 
 from ...config import (
     AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE,
+    AUTOTRADER_CANDIDATE_PRICE_PREFETCH_BATCH_TIMEOUT_DEFAULT_SECONDS,
+    AUTOTRADER_CANDIDATE_PRICE_PREFETCH_BATCH_TIMEOUT_MAX_SECONDS,
+    AUTOTRADER_CANDIDATE_PRICE_PREFETCH_BATCH_TIMEOUT_MIN_SECONDS,
     AUTOTRADER_CANDIDATE_SELECT_TIMEOUT_DEFAULT_FRACTION,
     AUTOTRADER_CANDIDATE_SELECT_TIMEOUT_MAX_MS,
     AUTOTRADER_CANDIDATE_SELECT_TIMEOUT_MIN_MS,
@@ -1393,6 +1397,40 @@ def _candidate_price_prefetch_enabled() -> bool:
     )
 
 
+def _candidate_price_prefetch_batch_timeout_seconds() -> float:
+    return _settings_float_clamped(
+        "chili_autotrader_candidate_price_prefetch_batch_timeout_seconds",
+        AUTOTRADER_CANDIDATE_PRICE_PREFETCH_BATCH_TIMEOUT_DEFAULT_SECONDS,
+        lower=AUTOTRADER_CANDIDATE_PRICE_PREFETCH_BATCH_TIMEOUT_MIN_SECONDS,
+        upper=AUTOTRADER_CANDIDATE_PRICE_PREFETCH_BATCH_TIMEOUT_MAX_SECONDS,
+    )
+
+
+def _fetch_quotes_batch_with_timeout(
+    fetch_quotes_batch: Any,
+    tickers: list[str],
+    *,
+    timeout_s: float,
+) -> tuple[bool, dict[str, Any]]:
+    executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="chili-price-prefetch",
+    )
+    future = executor.submit(
+        fetch_quotes_batch,
+        tickers,
+        allow_provider_fallback=False,
+    )
+    try:
+        quotes = future.result(timeout=max(0.1, float(timeout_s)))
+        return True, dict(quotes or {})
+    except concurrent.futures.TimeoutError:
+        future.cancel()
+        return False, {}
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
 def _quote_price_from_snapshot(snapshot: Any) -> float | None:
     if not isinstance(snapshot, dict):
         return None
@@ -1433,6 +1471,7 @@ def _prefetch_candidate_prices(
         "price_bus_hits": 0,
         "batch_requested": 0,
         "batch_hits": 0,
+        "batch_timeout_seconds": 0.0,
         "elapsed_seconds": 0.0,
         "error": None,
     }
@@ -1469,7 +1508,21 @@ def _prefetch_candidate_prices(
         from .market_data import fetch_quotes_batch
 
         meta["batch_requested"] = len(missing)
-        quotes = fetch_quotes_batch(missing, allow_provider_fallback=False) or {}
+        timeout_s = _candidate_price_prefetch_batch_timeout_seconds()
+        meta["batch_timeout_seconds"] = timeout_s
+        batch_ok, quotes = _fetch_quotes_batch_with_timeout(
+            fetch_quotes_batch,
+            missing,
+            timeout_s=timeout_s,
+        )
+        if not batch_ok:
+            meta["error"] = f"batch_timeout:{timeout_s}s"
+            logger.warning(
+                "[autotrader] candidate price prefetch batch timed out "
+                "tickers=%d timeout_s=%s",
+                len(missing),
+                timeout_s,
+            )
         batch_hits = 0
         for ticker in missing:
             quote = quotes.get(ticker) or quotes.get(ticker.upper())

@@ -10,6 +10,7 @@ Covers:
 """
 from __future__ import annotations
 
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -99,6 +100,39 @@ def test_prefetched_price_for_alert_preserves_provider_source(monkeypatch):
     assert at_mod._current_price_for_alert(alert) == pytest.approx(42.5)
     assert getattr(alert, "_chili_current_price_source") == "massive_ws"
     assert getattr(alert, "_chili_current_price_prefetch_used") is True
+
+
+def test_candidate_price_prefetch_batch_timeout_does_not_block_tick(monkeypatch):
+    monkeypatch.setattr(
+        at_mod,
+        "settings",
+        SimpleNamespace(
+            chili_autotrader_candidate_price_prefetch_enabled=True,
+            chili_autotrader_candidate_price_prefetch_batch_timeout_seconds=0.1,
+        ),
+    )
+    from app.services.trading import market_data, price_bus
+
+    monkeypatch.setattr(price_bus, "get_live_quote", lambda _ticker: None)
+
+    def _slow_batch(_tickers, **_kwargs):
+        time.sleep(0.5)
+        return {"SLOW-USD": {"price": 99.0}}
+
+    monkeypatch.setattr(market_data, "fetch_quotes_batch", _slow_batch)
+
+    started = time.monotonic()
+    prices, sources, meta = at_mod._prefetch_candidate_prices(
+        [SimpleNamespace(ticker="SLOW-USD")]
+    )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.4
+    assert prices == {}
+    assert sources == {}
+    assert meta["batch_requested"] == 1
+    assert meta["batch_timeout_seconds"] == pytest.approx(0.1)
+    assert str(meta["error"]).startswith("batch_timeout:")
 
 
 def test_release_candidate_read_transaction_detaches_before_prefetch():
