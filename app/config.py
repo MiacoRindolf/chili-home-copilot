@@ -4147,6 +4147,13 @@ class Settings(BaseSettings):
             "CHILI_COINBASE_COST_GATE_MIN_TCA_SAMPLES"
         ),
     )
+    chili_coinbase_cost_gate_window_days: int = Field(
+        default=30,
+        ge=1,
+        validation_alias=AliasChoices(
+            "CHILI_COINBASE_COST_GATE_WINDOW_DAYS"
+        ),
+    )
     # Robinhood has no explicit commission, but live TCA can still consume
     # the expected edge. When enough recent usable RH fills exist, require
     # projected edge to clear tail adverse entry slippage + the shared

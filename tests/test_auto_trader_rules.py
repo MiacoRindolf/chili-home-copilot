@@ -16,6 +16,7 @@ from app.services.trading.auto_trader_rules import (
     _max_execution_stop_loss_fraction,
     _non_positive_reprice_marker,
     _positive_reprice_entry_enabled_for,
+    _selected_venue_entry_tca_cost_fraction,
     alert_confidence_from_score,
     autotrader_paper_realized_pnl_today_et,
     autotrader_realized_pnl_today_et,
@@ -1616,6 +1617,53 @@ def test_evaluate_entry_edge_prefers_selected_venue_broker_source_tca():
     assert decision.snapshot["empirical_cost"]["tca_cost_bps"] == 125
     assert decision.snapshot["expected_net_pct"] == pytest.approx(0.15)
     assert "broker_source" in db.sqls[0]
+
+
+def test_coinbase_cost_gate_window_reads_typed_env(monkeypatch):
+    class _Result:
+        def __init__(self, row):
+            self._row = row
+
+        def mappings(self):
+            return self
+
+        def first(self):
+            return self._row
+
+    class _Db:
+        def __init__(self):
+            self.params = []
+
+        def execute(self, _sql, params=None):
+            self.params.append(params or {})
+            return _Result(
+                {
+                    "sample_trades": 8,
+                    "avg_entry_slippage_bps": 12.0,
+                    "p90_entry_slippage_bps": 34.0,
+                }
+            )
+
+    monkeypatch.setenv("CHILI_COINBASE_COST_GATE_MIN_TCA_SAMPLES", "7")
+    monkeypatch.setenv("CHILI_COINBASE_COST_GATE_WINDOW_DAYS", "17")
+    cfg = Settings(
+        database_url="postgresql://chili:chili@localhost:5433/chili_test",
+        _env_file=None,
+    )
+    db = _Db()
+
+    cost_fraction, snap = _selected_venue_entry_tca_cost_fraction(
+        db,
+        ticker="BTC-USD",
+        settings=cfg,
+        selected_venue="coinbase",
+    )
+
+    assert cost_fraction == pytest.approx(0.0034)
+    assert db.params[0]["window_days"] == 17
+    assert snap["selected_venue"] == "coinbase"
+    assert snap["window_days"] == 17
+    assert snap["min_samples"] == 7
 
 
 def test_evaluate_entry_edge_guards_probability_sample_count_to_closed_trades():
