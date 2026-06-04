@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from sqlalchemy import text
 
+from app.config import Settings
 from app.services.trading import execution_event_lag as eel
 
 
@@ -24,6 +25,22 @@ def _insert_event(db, *, venue, event_at, recorded_at=None):
         ),
         {"venue": venue, "event_at": event_at, "rec_at": recorded_at},
     )
+
+
+class _LagRows:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def fetchall(self):
+        return list(self._rows)
+
+
+class _FakeLagDb:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def execute(self, *_args, **_kwargs):
+        return _LagRows(self._rows)
 
 
 def test_measure_with_no_events_returns_empty_summary(db):
@@ -97,6 +114,30 @@ def test_p95_breach_warn_flips_breach_field(db, monkeypatch):
 
     db.execute(text("DELETE FROM trading_execution_events WHERE ticker = 'ZZLAG'"))
     db.commit()
+
+
+def test_min_samples_setting_drives_breach_floor(monkeypatch):
+    db = _FakeLagDb([("robinhood", 20_000.0)] * 3)
+    monkeypatch.setenv("CHILI_EXECUTION_EVENT_LAG_WARN_P95_MS", "5000")
+    monkeypatch.setenv("CHILI_EXECUTION_EVENT_LAG_ERROR_P95_MS", "60000")
+    monkeypatch.setenv("CHILI_EXECUTION_EVENT_LAG_MIN_SAMPLES", "4")
+    cfg = Settings(_env_file=None)  # type: ignore[call-arg]
+    monkeypatch.setattr(eel, "settings", cfg)
+
+    summary = eel.measure_execution_event_lag(db, lookback_seconds=300)
+    assert cfg.chili_execution_event_lag_min_samples == 4
+    assert summary.sample_size == 3
+    assert summary.p95_ms and summary.p95_ms >= 5_000.0
+    assert summary.breach == "ok"
+
+    monkeypatch.setenv("CHILI_EXECUTION_EVENT_LAG_MIN_SAMPLES", "3")
+    cfg = Settings(_env_file=None)  # type: ignore[call-arg]
+    monkeypatch.setattr(eel, "settings", cfg)
+
+    summary = eel.measure_execution_event_lag(db, lookback_seconds=300)
+    assert cfg.chili_execution_event_lag_min_samples == 3
+    assert summary.sample_size == 3
+    assert summary.breach == "warn"
 
 
 def test_p95_breach_error_escalates(db, monkeypatch):

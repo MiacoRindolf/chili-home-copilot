@@ -1889,6 +1889,12 @@ class Settings(BaseSettings):
         ge=0,
         validation_alias=AliasChoices("CHILI_MESH_PLASTICITY_PER_EDGE_COOLDOWN_TRADES"),
     )
+    chili_mesh_critical_alert_cooldown_seconds: int = Field(
+        default=15 * 60,
+        ge=0,
+        le=86_400,
+        validation_alias=AliasChoices("CHILI_MESH_CRITICAL_ALERT_COOLDOWN_SECONDS"),
+    )
 
     # Robinhood spot venue adapter (execution layer; equities via robin_stocks).
     chili_robinhood_spot_adapter_enabled: bool = Field(
@@ -3572,6 +3578,12 @@ class Settings(BaseSettings):
         ge=500.0,
         le=3_600_000.0,
         validation_alias=AliasChoices("CHILI_EXECUTION_EVENT_LAG_ERROR_P95_MS"),
+    )
+    chili_execution_event_lag_min_samples: int = Field(
+        default=5,
+        ge=1,
+        le=10_000,
+        validation_alias=AliasChoices("CHILI_EXECUTION_EVENT_LAG_MIN_SAMPLES"),
     )
     # Upper bound on a single sample's lag before we treat it as orphan/bad-data
     # rather than legitimate lag. Without this, a single broker event with a

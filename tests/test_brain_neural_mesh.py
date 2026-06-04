@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy.orm import Session
 
+from app.config import Settings
 from app.models.trading import BrainGraphNode, BrainNodeState
 from app.services.trading.brain_neural_mesh import propagation as prop
 from app.services.trading.brain_neural_mesh import repository as repo
@@ -92,6 +93,32 @@ def test_should_fire_respects_cooldown_for_naive_utc_last_fired() -> None:
     )
 
     assert prop.should_fire(node, state, now) is False
+
+
+def test_critical_mesh_alert_cooldown_setting_drives_suppression(monkeypatch) -> None:
+    from app.services.trading.brain_neural_mesh import action_handlers
+
+    signature = "trade-1|TEST|STOP_HIT|89.25|88.00"
+    now = datetime.now(timezone.utc)
+    action_handlers._LAST_CRITICAL_DISPATCH_AT.clear()
+    action_handlers._LAST_CRITICAL_DISPATCH_AT[signature] = now - timedelta(seconds=30)
+
+    try:
+        monkeypatch.setenv("CHILI_MESH_CRITICAL_ALERT_COOLDOWN_SECONDS", "45")
+        settings = Settings(_env_file=None)  # type: ignore[call-arg]
+        monkeypatch.setattr("app.config.settings", settings)
+
+        assert settings.chili_mesh_critical_alert_cooldown_seconds == 45
+        assert action_handlers._critical_dispatch_in_cooldown(signature, now) is True
+
+        monkeypatch.setenv("CHILI_MESH_CRITICAL_ALERT_COOLDOWN_SECONDS", "20")
+        settings = Settings(_env_file=None)  # type: ignore[call-arg]
+        monkeypatch.setattr("app.config.settings", settings)
+
+        assert settings.chili_mesh_critical_alert_cooldown_seconds == 20
+        assert action_handlers._critical_dispatch_in_cooldown(signature, now) is False
+    finally:
+        action_handlers._LAST_CRITICAL_DISPATCH_AT.pop(signature, None)
 
 
 def test_brain_work_outcome_publish_rolls_back_swallowed_db_error(monkeypatch) -> None:
