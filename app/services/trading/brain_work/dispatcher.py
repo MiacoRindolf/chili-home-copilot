@@ -28,6 +28,18 @@ logger = logging.getLogger(__name__)
 LOG_PREFIX = "[brain_work_dispatch]"
 _BACKTEST_REQUESTED_SERIAL_CLAIM_LIMIT = 1
 
+
+def _lease_seconds_for_event(event_type: str, default_lease_s: int) -> int:
+    """Use a longer lease for full-universe mining than ordinary ledger work."""
+    if event_type != "market_snapshots_batch":
+        return default_lease_s
+    try:
+        mine_lease_s = int(getattr(settings, "brain_work_mine_lease_seconds", 3600))
+    except (TypeError, ValueError):
+        mine_lease_s = 3600
+    return max(default_lease_s, mine_lease_s)
+
+
 # f-brain-phase2-producer-completion (2026-05-09): watchdog-style
 # mining producer. The APScheduler brain_market_snapshots job is
 # wired in trading_scheduler.py:262 but stopped firing 2026-05-05;
@@ -508,7 +520,11 @@ def run_brain_work_dispatch_round(
         if lim <= 0:
             continue
         rows = claim_work_batch(
-            db, limit=lim, lease_seconds=lease_s, holder_id=holder, event_type=event_type
+            db,
+            limit=lim,
+            lease_seconds=_lease_seconds_for_event(event_type, lease_s),
+            holder_id=holder,
+            event_type=event_type,
         )
         db.commit()
         claimed_total += len(rows)

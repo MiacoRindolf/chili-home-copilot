@@ -633,6 +633,15 @@ class Settings(BaseSettings):
     brain_work_ledger_enabled: bool = True
     brain_work_dispatch_batch_size: int = 8  # backtest_requested items per worker tick
     brain_work_lease_seconds: int = 900
+    brain_work_mine_lease_seconds: int = Field(
+        default=3600,
+        ge=900,
+        le=21600,
+        validation_alias=AliasChoices(
+            "BRAIN_WORK_MINE_LEASE_SECONDS",
+            "CHILI_BRAIN_WORK_MINE_LEASE_SECONDS",
+        ),
+    )
     brain_work_max_attempts_default: int = 5
     brain_work_retry_base_seconds: int = 30
     brain_work_retry_multiplier: int = 2

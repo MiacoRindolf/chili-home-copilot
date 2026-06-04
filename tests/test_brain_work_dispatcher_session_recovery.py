@@ -320,3 +320,46 @@ def test_backtest_handler_rolls_back_dispatch_session_before_done(monkeypatch) -
     assert dispatch_db.rollbacks == 1
     assert len(opened_sessions) == 2
     assert all(sess.closed for sess in opened_sessions)
+
+
+def test_dispatcher_uses_extended_mining_lease(db, monkeypatch) -> None:
+    """Full-universe mining can outlast the generic work lease."""
+    from types import SimpleNamespace
+
+    from app.services.trading.brain_work import dispatcher
+
+    captured: list[tuple[str, int]] = []
+
+    def fake_claim_work_batch(_db, *, limit, lease_seconds, holder_id, event_type):
+        captured.append((event_type, lease_seconds))
+        return []
+
+    monkeypatch.setattr(
+        dispatcher,
+        "settings",
+        SimpleNamespace(
+            brain_work_lease_seconds=900,
+            brain_work_mine_lease_seconds=3600,
+        ),
+    )
+    monkeypatch.setattr(dispatcher, "claim_work_batch", fake_claim_work_batch)
+
+    result = dispatcher.run_brain_work_dispatch_round(
+        db,
+        max_backtest=0,
+        max_exec_feedback=0,
+        max_edge_reliability=0,
+        max_recert_rescue=0,
+        max_exit_variant=0,
+        max_provenance=0,
+        max_mine=1,
+        max_cpcv_gate=0,
+        max_promote=0,
+        max_trade_close=0,
+        run_thin_evidence_sweep=False,
+        run_time_decay_exit_variant_sweep=False,
+        run_market_snapshots_watchdog=False,
+    )
+
+    assert result["processed"] == 0
+    assert captured == [("market_snapshots_batch", 3600)]
