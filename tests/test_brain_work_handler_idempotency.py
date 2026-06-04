@@ -269,6 +269,7 @@ def test_mine_handler_skips_obsolete_snapshot_batch(monkeypatch) -> None:
 
 def test_mine_handler_releases_dispatch_session_before_long_mine(monkeypatch) -> None:
     events: list[str] = []
+    state = {"after_dispatch_rollback": False}
 
     def mine_patterns(_session, _user_id):
         events.append("mine")
@@ -281,6 +282,7 @@ def test_mine_handler_releases_dispatch_session_before_long_mine(monkeypatch) ->
 
         def rollback(self):
             events.append("dispatch_rollback")
+            state["after_dispatch_rollback"] = True
 
     class IsolatedSession:
         def commit(self):
@@ -305,16 +307,23 @@ def test_mine_handler_releases_dispatch_session_before_long_mine(monkeypatch) ->
         handle_market_snapshots_batch,
     )
 
-    ev = _FakeEvent(
-        event_id=45,
-        payload={
+    class EventWithExpiredAttrs:
+        created_at = datetime.utcnow()
+
+        payload = {
             "snapshots_taken_daily": 25,
             "intraday_snapshots_taken": 0,
             "universe_size": 25,
             "job_id": "fresh",
-        },
-    )
-    ev.created_at = datetime.utcnow()
+        }
+
+        @property
+        def id(self) -> int:
+            if state["after_dispatch_rollback"]:
+                events.append("event_id_after_dispatch_rollback")
+            return 45
+
+    ev = EventWithExpiredAttrs()
 
     handle_market_snapshots_batch(DispatchDb(), ev, None)
 

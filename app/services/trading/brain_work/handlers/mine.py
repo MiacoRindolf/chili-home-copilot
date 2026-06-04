@@ -90,6 +90,7 @@ def handle_market_snapshots_batch(db: "Session", ev, user_id: int | None) -> Non
     from ..ledger import enqueue_outcome_event  # noqa: F401  (planned: emit pattern_added)
     from ...learning import mine_patterns
 
+    ev_id = int(getattr(ev, "id", 0) or 0)
     payload = ev.payload if isinstance(ev.payload, dict) else {}
     universe_size = int(payload.get("universe_size") or 0)
     job_id = (payload.get("job_id") or "").strip()
@@ -108,7 +109,7 @@ def handle_market_snapshots_batch(db: "Session", ev, user_id: int | None) -> Non
     if (daily + intraday) < min_snapshots:
         logger.info(
             "%s skip ev_id=%s job_id=%s daily=%d intraday=%d below_floor=%d",
-            LOG_PREFIX, ev.id, job_id, daily, intraday, min_snapshots,
+            LOG_PREFIX, ev_id, job_id, daily, intraday, min_snapshots,
         )
         return
 
@@ -126,7 +127,7 @@ def handle_market_snapshots_batch(db: "Session", ev, user_id: int | None) -> Non
         logger.info(
             "%s skip ev_id=%s job_id=%s obsolete_snapshot_batch grace_s=%d",
             LOG_PREFIX,
-            ev.id,
+            ev_id,
             job_id,
             obsolete_grace_s,
         )
@@ -142,7 +143,7 @@ def handle_market_snapshots_batch(db: "Session", ev, user_id: int | None) -> Non
         logger.debug(
             "%s dispatcher session release before mine failed ev_id=%s",
             LOG_PREFIX,
-            ev.id,
+            ev_id,
             exc_info=True,
         )
 
@@ -152,13 +153,13 @@ def handle_market_snapshots_batch(db: "Session", ev, user_id: int | None) -> Non
     try:
         logger.info(
             "%s ev_id=%s job_id=%s starting mine (universe~%d, daily=%d intraday=%d)",
-            LOG_PREFIX, ev.id, job_id, universe_size, daily, intraday,
+            LOG_PREFIX, ev_id, job_id, universe_size, daily, intraday,
         )
         discoveries = mine_patterns(sess, uid)
         sess.commit()
         n = len(discoveries) if isinstance(discoveries, list) else 0
         logger.info(
-            "%s ev_id=%s job_id=%s mined patterns=%d", LOG_PREFIX, ev.id, job_id, n
+            "%s ev_id=%s job_id=%s mined patterns=%d", LOG_PREFIX, ev_id, job_id, n
         )
         # NOTE: pattern_added emitter is the natural next step here so
         # cpcv_gate handler can immediately backtest fresh discoveries.
@@ -170,7 +171,7 @@ def handle_market_snapshots_batch(db: "Session", ev, user_id: int | None) -> Non
         except Exception:
             pass
         logger.warning(
-            "%s ev_id=%s mine failed: %s", LOG_PREFIX, ev.id, e, exc_info=True
+            "%s ev_id=%s mine failed: %s", LOG_PREFIX, ev_id, e, exc_info=True
         )
         raise
     finally:

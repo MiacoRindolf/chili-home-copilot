@@ -322,13 +322,17 @@ def test_backtest_handler_rolls_back_dispatch_session_before_done(monkeypatch) -
     assert all(sess.closed for sess in opened_sessions)
 
 
-def test_dispatcher_uses_extended_mining_lease(db, monkeypatch) -> None:
+def test_dispatcher_uses_extended_mining_lease(monkeypatch) -> None:
     """Full-universe mining can outlast the generic work lease."""
     from types import SimpleNamespace
 
     from app.services.trading.brain_work import dispatcher
 
     captured: list[tuple[str, int]] = []
+
+    class DispatchDb:
+        def commit(self) -> None:
+            pass
 
     def fake_claim_work_batch(_db, *, limit, lease_seconds, holder_id, event_type):
         captured.append((event_type, lease_seconds))
@@ -343,9 +347,20 @@ def test_dispatcher_uses_extended_mining_lease(db, monkeypatch) -> None:
         ),
     )
     monkeypatch.setattr(dispatcher, "claim_work_batch", fake_claim_work_batch)
+    monkeypatch.setattr(dispatcher, "release_stale_leases", lambda _db: 0)
+    monkeypatch.setattr(
+        dispatcher,
+        "recover_retryable_dead_work",
+        lambda _db: {"ok": True, "recovered": 0, "ids": []},
+    )
+    monkeypatch.setattr(
+        dispatcher,
+        "coalesce_duplicate_open_work",
+        lambda _db: {"retired": 0, "ids": []},
+    )
 
     result = dispatcher.run_brain_work_dispatch_round(
-        db,
+        DispatchDb(),
         max_backtest=0,
         max_exec_feedback=0,
         max_edge_reliability=0,
