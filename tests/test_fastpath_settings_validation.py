@@ -539,6 +539,199 @@ def test_scanner_threshold_env_overrides_work():
     assert loaded.scanner_max_pending_deferred == 42
 
 
+@pytest.mark.parametrize(
+    ("env_name", "attr", "default"),
+    [
+        (
+            "CHILI_FAST_PATH_SCANNER_VOL_BREAKOUT_LOOKBACK",
+            "scanner_vol_breakout_lookback",
+            20,
+        ),
+        (
+            "CHILI_FAST_PATH_SCANNER_VOL_BREAKOUT_MULT",
+            "scanner_vol_breakout_mult",
+            2.0,
+        ),
+        (
+            "CHILI_FAST_PATH_SCANNER_SPREAD_SQUEEZE_VOL_MULT",
+            "scanner_spread_squeeze_vol_mult",
+            1.2,
+        ),
+        (
+            "CHILI_FAST_PATH_SCANNER_BOOK_PRESSURE_WINDOW",
+            "scanner_book_pressure_window",
+            5,
+        ),
+    ],
+)
+@pytest.mark.parametrize("raw", ["0", "-1", "bad", "nan"])
+def test_scanner_positive_env_rejects_non_positive_values(
+    env_name,
+    attr,
+    default,
+    raw,
+):
+    with mock.patch.dict(os.environ, {env_name: raw}, clear=True):
+        loaded = load()
+    assert getattr(loaded, attr) == default
+
+
+@pytest.mark.parametrize(
+    ("env_name", "attr", "default"),
+    [
+        (
+            "CHILI_FAST_PATH_SCANNER_IMBALANCE_LONG_THRESHOLD",
+            "scanner_imbalance_long_threshold",
+            0.65,
+        ),
+        (
+            "CHILI_FAST_PATH_SCANNER_IMBALANCE_SHORT_THRESHOLD",
+            "scanner_imbalance_short_threshold",
+            0.35,
+        ),
+        (
+            "CHILI_FAST_PATH_SCANNER_BOOK_PRESSURE_MIN_AVG_IMBALANCE",
+            "scanner_book_pressure_min_avg_imbalance",
+            0.65,
+        ),
+    ],
+)
+@pytest.mark.parametrize("raw", ["-0.01", "1.01", "bad", "nan"])
+def test_scanner_unit_interval_env_rejects_out_of_range_values(
+    env_name,
+    attr,
+    default,
+    raw,
+):
+    with mock.patch.dict(os.environ, {env_name: raw}, clear=True):
+        loaded = load()
+    assert getattr(loaded, attr) == default
+
+
+@pytest.mark.parametrize(
+    ("env_name", "attr"),
+    [
+        (
+            "CHILI_FAST_PATH_SCANNER_IMBALANCE_LONG_THRESHOLD",
+            "scanner_imbalance_long_threshold",
+        ),
+        (
+            "CHILI_FAST_PATH_SCANNER_IMBALANCE_SHORT_THRESHOLD",
+            "scanner_imbalance_short_threshold",
+        ),
+        (
+            "CHILI_FAST_PATH_SCANNER_BOOK_PRESSURE_MIN_AVG_IMBALANCE",
+            "scanner_book_pressure_min_avg_imbalance",
+        ),
+    ],
+)
+@pytest.mark.parametrize("raw", ["0", "1"])
+def test_scanner_unit_interval_env_accepts_boundaries(env_name, attr, raw):
+    with mock.patch.dict(os.environ, {env_name: raw}, clear=True):
+        loaded = load()
+    assert getattr(loaded, attr) == float(raw)
+
+
+@pytest.mark.parametrize(
+    ("env_name", "attr", "default"),
+    [
+        (
+            "CHILI_FAST_PATH_SCANNER_IMBALANCE_COOLDOWN_S",
+            "scanner_imbalance_cooldown_s",
+            30.0,
+        ),
+        (
+            "CHILI_FAST_PATH_SCANNER_SPREAD_SQUEEZE_BPS",
+            "scanner_spread_squeeze_bps",
+            1.5,
+        ),
+        (
+            "CHILI_FAST_PATH_SCANNER_SPREAD_SQUEEZE_COOLDOWN_S",
+            "scanner_spread_squeeze_cooldown_s",
+            60.0,
+        ),
+        (
+            "CHILI_FAST_PATH_SCANNER_BOOK_PRESSURE_MIN_MICROPRICE_BPS",
+            "scanner_book_pressure_min_microprice_bps",
+            0.25,
+        ),
+        (
+            "CHILI_FAST_PATH_SCANNER_BOOK_PRESSURE_MAX_SPREAD_BPS",
+            "scanner_book_pressure_max_spread_bps",
+            3.0,
+        ),
+        (
+            "CHILI_FAST_PATH_SCANNER_BOOK_PRESSURE_MIN_MID_MOVE_BPS",
+            "scanner_book_pressure_min_mid_move_bps",
+            0.25,
+        ),
+        (
+            "CHILI_FAST_PATH_SCANNER_BOOK_PRESSURE_COOLDOWN_S",
+            "scanner_book_pressure_cooldown_s",
+            30.0,
+        ),
+        (
+            "CHILI_FAST_PATH_SCANNER_BOOK_PRESSURE_MIN_TOUCH_NOTIONAL_USD",
+            "scanner_book_pressure_min_touch_notional_usd",
+            25.0,
+        ),
+    ],
+)
+@pytest.mark.parametrize("raw", ["-0.01", "-5", "bad", "nan"])
+def test_scanner_nonnegative_env_rejects_negative_values(
+    env_name,
+    attr,
+    default,
+    raw,
+):
+    with mock.patch.dict(os.environ, {env_name: raw}, clear=True):
+        loaded = load()
+    assert getattr(loaded, attr) == default
+
+
+@pytest.mark.parametrize(
+    ("env_name", "attr"),
+    [
+        (
+            "CHILI_FAST_PATH_SCANNER_IMBALANCE_COOLDOWN_S",
+            "scanner_imbalance_cooldown_s",
+        ),
+        (
+            "CHILI_FAST_PATH_SCANNER_SPREAD_SQUEEZE_BPS",
+            "scanner_spread_squeeze_bps",
+        ),
+        (
+            "CHILI_FAST_PATH_SCANNER_SPREAD_SQUEEZE_COOLDOWN_S",
+            "scanner_spread_squeeze_cooldown_s",
+        ),
+        (
+            "CHILI_FAST_PATH_SCANNER_BOOK_PRESSURE_MIN_MICROPRICE_BPS",
+            "scanner_book_pressure_min_microprice_bps",
+        ),
+        (
+            "CHILI_FAST_PATH_SCANNER_BOOK_PRESSURE_MAX_SPREAD_BPS",
+            "scanner_book_pressure_max_spread_bps",
+        ),
+        (
+            "CHILI_FAST_PATH_SCANNER_BOOK_PRESSURE_MIN_MID_MOVE_BPS",
+            "scanner_book_pressure_min_mid_move_bps",
+        ),
+        (
+            "CHILI_FAST_PATH_SCANNER_BOOK_PRESSURE_COOLDOWN_S",
+            "scanner_book_pressure_cooldown_s",
+        ),
+        (
+            "CHILI_FAST_PATH_SCANNER_BOOK_PRESSURE_MIN_TOUCH_NOTIONAL_USD",
+            "scanner_book_pressure_min_touch_notional_usd",
+        ),
+    ],
+)
+def test_scanner_nonnegative_env_accepts_zero_values(env_name, attr):
+    with mock.patch.dict(os.environ, {env_name: "0"}, clear=True):
+        loaded = load()
+    assert getattr(loaded, attr) == 0.0
+
+
 def test_scanner_book_pressure_touch_notional_defaults_to_exec_notional():
     with mock.patch.dict(
         os.environ,

@@ -534,6 +534,13 @@ def _env_nonnegative_float(name: str, default: float) -> float:
     return value
 
 
+def _env_unit_interval_float(name: str, default: float) -> float:
+    value = _env_float(name, default)
+    if not math.isfinite(value) or value < 0.0 or value > 1.0:
+        return default
+    return value
+
+
 def load() -> FastPathSettings:
     """Read settings from the process environment. Called once at
     container boot by ``scripts/fast_data_worker.py``."""
@@ -663,37 +670,37 @@ def load() -> FastPathSettings:
             "CHILI_FAST_PATH_EMIT_SHORT_ALERTS", False),
         emit_raw_imbalance_alerts=_env_bool(
             "CHILI_FAST_PATH_EMIT_RAW_IMBALANCE_ALERTS", False),
-        scanner_vol_breakout_lookback=_env_int(
+        scanner_vol_breakout_lookback=_env_positive_int(
             "CHILI_FAST_PATH_SCANNER_VOL_BREAKOUT_LOOKBACK", 20),
-        scanner_vol_breakout_mult=_env_float(
+        scanner_vol_breakout_mult=_env_positive_float(
             "CHILI_FAST_PATH_SCANNER_VOL_BREAKOUT_MULT", 2.0),
-        scanner_imbalance_long_threshold=_env_float(
+        scanner_imbalance_long_threshold=_env_unit_interval_float(
             "CHILI_FAST_PATH_SCANNER_IMBALANCE_LONG_THRESHOLD", 0.65),
-        scanner_imbalance_short_threshold=_env_float(
+        scanner_imbalance_short_threshold=_env_unit_interval_float(
             "CHILI_FAST_PATH_SCANNER_IMBALANCE_SHORT_THRESHOLD", 0.35),
-        scanner_imbalance_cooldown_s=_env_float(
+        scanner_imbalance_cooldown_s=_env_nonnegative_float(
             "CHILI_FAST_PATH_SCANNER_IMBALANCE_COOLDOWN_S", 30.0),
-        scanner_spread_squeeze_bps=_env_float(
+        scanner_spread_squeeze_bps=_env_nonnegative_float(
             "CHILI_FAST_PATH_SCANNER_SPREAD_SQUEEZE_BPS", 1.5),
-        scanner_spread_squeeze_vol_mult=_env_float(
+        scanner_spread_squeeze_vol_mult=_env_positive_float(
             "CHILI_FAST_PATH_SCANNER_SPREAD_SQUEEZE_VOL_MULT", 1.2),
-        scanner_spread_squeeze_cooldown_s=_env_float(
+        scanner_spread_squeeze_cooldown_s=_env_nonnegative_float(
             "CHILI_FAST_PATH_SCANNER_SPREAD_SQUEEZE_COOLDOWN_S", 60.0),
         scanner_book_pressure_enabled=_env_bool(
             "CHILI_FAST_PATH_SCANNER_BOOK_PRESSURE_ENABLED", True),
-        scanner_book_pressure_window=_env_int(
+        scanner_book_pressure_window=_env_positive_int(
             "CHILI_FAST_PATH_SCANNER_BOOK_PRESSURE_WINDOW", 5),
-        scanner_book_pressure_min_avg_imbalance=_env_float(
+        scanner_book_pressure_min_avg_imbalance=_env_unit_interval_float(
             "CHILI_FAST_PATH_SCANNER_BOOK_PRESSURE_MIN_AVG_IMBALANCE", 0.65),
-        scanner_book_pressure_min_microprice_bps=_env_float(
+        scanner_book_pressure_min_microprice_bps=_env_nonnegative_float(
             "CHILI_FAST_PATH_SCANNER_BOOK_PRESSURE_MIN_MICROPRICE_BPS", 0.25),
-        scanner_book_pressure_max_spread_bps=_env_float(
+        scanner_book_pressure_max_spread_bps=_env_nonnegative_float(
             "CHILI_FAST_PATH_SCANNER_BOOK_PRESSURE_MAX_SPREAD_BPS", 3.0),
-        scanner_book_pressure_min_mid_move_bps=_env_float(
+        scanner_book_pressure_min_mid_move_bps=_env_nonnegative_float(
             "CHILI_FAST_PATH_SCANNER_BOOK_PRESSURE_MIN_MID_MOVE_BPS", 0.25),
-        scanner_book_pressure_cooldown_s=_env_float(
+        scanner_book_pressure_cooldown_s=_env_nonnegative_float(
             "CHILI_FAST_PATH_SCANNER_BOOK_PRESSURE_COOLDOWN_S", 30.0),
-        scanner_book_pressure_min_touch_notional_usd=_env_float(
+        scanner_book_pressure_min_touch_notional_usd=_env_nonnegative_float(
             "CHILI_FAST_PATH_SCANNER_BOOK_PRESSURE_MIN_TOUCH_NOTIONAL_USD",
             exec_notional_usd,
         ),
