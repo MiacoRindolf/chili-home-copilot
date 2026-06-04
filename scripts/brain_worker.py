@@ -1056,6 +1056,33 @@ def _run_subtask_crypto_pattern_miner(status: "BrainWorkerStatus") -> dict:
         db.close()
 
 
+def _run_subtask_equity_pattern_miner(status: "BrainWorkerStatus") -> dict:
+    """Run equity-native pattern miner — the equity counterpart of the crypto
+    miner. Extracts indicator signatures from profitable equity winners (live +
+    paper-shadow, sourced from the linked breakout alert) and spawns variant
+    candidates so the equity book has empirically-grounded alpha to certify,
+    not just theory-first web-researched setups.
+
+    Added 2026-06-04. Ships dormant (brain_equity_miner_enabled=False). Runs
+    every 6 cycles since realized winners don't accumulate quickly.
+    """
+    status.set_step("EquityMiner", "Mining equity patterns from realized winners...")
+    from app.services.trading.equity_pattern_miner import run_equity_pattern_miner
+    db = SessionLocal()
+    try:
+        return run_equity_pattern_miner(db)
+    except Exception as e:
+        logger.warning("[brain:subtask] equity_pattern_miner failed: %s", e)
+        return {"error": str(e)}
+    finally:
+        # FIX 46 pattern: rollback before close (read txn cleanup).
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
+
+
 def _run_subtask_ticker_autotune(status: "BrainWorkerStatus") -> dict:
     """Auto-narrow ScanPattern.scope_tickers from realized per-ticker PnL.
 
@@ -1096,6 +1123,7 @@ _SUBTASKS = [
     ("realized_sync", _run_subtask_realized_sync, 1),
     ("ticker_autotune", _run_subtask_ticker_autotune, 6),
     ("crypto_pattern_miner", _run_subtask_crypto_pattern_miner, 6),
+    ("equity_pattern_miner", _run_subtask_equity_pattern_miner, 6),
     ("pattern_regime_ledger", _run_subtask_pattern_regime_ledger, 12),
 ]
 _subtask_counters: dict[str, int] = {name: 0 for name, _, _ in _SUBTASKS}
