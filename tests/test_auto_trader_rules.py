@@ -7,10 +7,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from app.config import Settings
 from app.models.trading import AutoTraderRun, BreakoutAlert
 from app.services.trading.auto_trader_rules import (
     EntryEdgeDecision,
     RuleGateContext,
+    RuleGateSettings,
     _non_positive_reprice_marker,
     alert_confidence_from_score,
     autotrader_paper_realized_pnl_today_et,
@@ -144,6 +146,19 @@ def _rule_gate_settings(**overrides):
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def test_rule_gate_settings_reads_typed_daily_loss_pct_env(monkeypatch):
+    monkeypatch.setenv("CHILI_AUTOTRADER_DAILY_LOSS_CAP_PCT", "0.75")
+
+    cfg = Settings(
+        database_url="postgresql://chili:chili@localhost:5433/chili_test",
+        _env_file=None,
+    )
+    gate_settings = RuleGateSettings.from_settings(cfg)
+
+    assert cfg.chili_autotrader_daily_loss_cap_pct == 0.75
+    assert gate_settings.daily_loss_cap_pct == 0.75
 
 
 def test_count_autotrader_v1_open_treats_working_as_active():

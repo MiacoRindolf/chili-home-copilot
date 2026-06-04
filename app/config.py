@@ -3199,6 +3199,13 @@ class Settings(BaseSettings):
         ge=0.0,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_DAILY_LOSS_CAP_USD"),
     )
+    chili_autotrader_daily_loss_cap_pct: float = Field(
+        default=1.5,
+        ge=0.0,
+        le=100.0,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_DAILY_LOSS_CAP_PCT"),
+        description="Percent-of-proven-equity autotrader daily loss cap before falling back to the static USD cap.",
+    )
     # VV — legacy global concurrency cap. Kept as the outer-safety
     # ceiling on the SUM of all open autotrader-v1 positions across all
     # lanes (equity + crypto + options). Per-lane caps live in the three
