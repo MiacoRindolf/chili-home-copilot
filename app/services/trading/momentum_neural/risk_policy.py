@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -12,6 +13,27 @@ from ..execution_family_registry import EXECUTION_FAMILY_COINBASE_SPOT
 POLICY_VERSION = 1
 RISK_SNAPSHOT_KEY = "momentum_risk"
 POLICY_SNAPSHOT_KEY = "momentum_risk_policy_summary"
+
+
+def policy_float_cap(policy: dict[str, Any], key: str, default: float) -> float:
+    raw = policy.get(key, default)
+    if isinstance(raw, bool) or raw is None:
+        return float(default)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        return float(default)
+    return value if math.isfinite(value) else float(default)
+
+
+def policy_int_cap(policy: dict[str, Any], key: str, default: int) -> int:
+    raw = policy.get(key, default)
+    if isinstance(raw, bool) or raw is None:
+        return int(default)
+    try:
+        return int(raw)
+    except (TypeError, ValueError, OverflowError):
+        return int(default)
 
 
 @dataclass(frozen=True)
@@ -136,8 +158,8 @@ def build_session_risk_snapshot(
     # Frozen caps for runner enforcement (Phase 7+); do not overwrite after admission.
     snap["momentum_policy_caps"] = {
         "max_hold_seconds": int(policy_full.get("max_hold_seconds") or 86_400),
-        "cooldown_after_stopout_seconds": int(policy_full.get("cooldown_after_stopout_seconds") or 300),
-        "max_notional_per_trade_usd": float(policy_full.get("max_notional_per_trade_usd") or 500.0),
-        "max_loss_per_trade_usd": float(policy_full.get("max_loss_per_trade_usd") or 50.0),
+        "cooldown_after_stopout_seconds": policy_int_cap(policy_full, "cooldown_after_stopout_seconds", 300),
+        "max_notional_per_trade_usd": policy_float_cap(policy_full, "max_notional_per_trade_usd", 500.0),
+        "max_loss_per_trade_usd": policy_float_cap(policy_full, "max_loss_per_trade_usd", 50.0),
     }
     return snap

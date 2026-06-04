@@ -18,7 +18,13 @@ from app.services.trading.momentum_neural.variants import get_family
 from app.services.trading.momentum_neural.automation_query import get_automation_session_detail
 from app.services.trading.momentum_neural.operator_actions import create_paper_draft_session
 from app.services.trading.momentum_neural.risk_evaluator import evaluate_proposed_momentum_automation
-from app.services.trading.momentum_neural.risk_policy import RISK_SNAPSHOT_KEY, resolve_effective_risk_policy
+from app.services.trading.momentum_neural.risk_policy import (
+    RISK_SNAPSHOT_KEY,
+    build_session_risk_snapshot,
+    policy_float_cap,
+    policy_int_cap,
+    resolve_effective_risk_policy,
+)
 
 
 def _seed_live_eligible_row(db: Session, *, symbol: str = "SOL-USD") -> tuple[int, MomentumStrategyVariant]:
@@ -63,6 +69,47 @@ def test_resolve_effective_risk_policy_has_version() -> None:
     p = resolve_effective_risk_policy()
     assert p.get("policy_version") == 1
     assert "max_concurrent_sessions" in p
+
+
+def test_policy_cap_readers_preserve_zero_values() -> None:
+    caps = {
+        "max_notional_per_trade_usd": 0.0,
+        "max_loss_per_trade_usd": 0.0,
+        "cooldown_after_stopout_seconds": 0,
+    }
+
+    assert policy_float_cap(caps, "max_notional_per_trade_usd", 500.0) == 0.0
+    assert policy_float_cap(caps, "max_loss_per_trade_usd", 50.0) == 0.0
+    assert policy_int_cap(caps, "cooldown_after_stopout_seconds", 300) == 0
+    assert policy_float_cap({}, "max_notional_per_trade_usd", 500.0) == 500.0
+    assert policy_int_cap({}, "cooldown_after_stopout_seconds", 300) == 300
+
+
+def test_session_risk_snapshot_preserves_zero_operator_caps() -> None:
+    snap = build_session_risk_snapshot(
+        policy_full={
+            "resolved_at_utc": "2026-06-04T00:00:00+00:00",
+            "max_hold_seconds": 86_400,
+            "cooldown_after_stopout_seconds": 0,
+            "max_notional_per_trade_usd": 0.0,
+            "max_loss_per_trade_usd": 0.0,
+        },
+        evaluation={
+            "evaluated_at_utc": "2026-06-04T00:00:00+00:00",
+            "allowed": True,
+            "severity": "ok",
+            "checks": [],
+            "warnings": [],
+            "errors": [],
+        },
+        viability_brief=None,
+        readiness_subset=None,
+    )
+
+    caps = snap["momentum_policy_caps"]
+    assert caps["max_notional_per_trade_usd"] == 0.0
+    assert caps["max_loss_per_trade_usd"] == 0.0
+    assert caps["cooldown_after_stopout_seconds"] == 0
 
 
 def test_evaluate_live_blocked_when_kill_switch(db: Session) -> None:

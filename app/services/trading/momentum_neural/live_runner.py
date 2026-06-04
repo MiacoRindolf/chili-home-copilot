@@ -41,7 +41,7 @@ from ..decision_ledger import (
 )
 from ..deployment_ladder_service import record_trade_outcome_metrics
 from .risk_evaluator import evaluate_proposed_momentum_automation
-from .risk_policy import RISK_SNAPSHOT_KEY
+from .risk_policy import RISK_SNAPSHOT_KEY, policy_float_cap, policy_int_cap
 from .paper_execution import regime_atr_pct, stop_target_prices, utc_iso
 from .persistence import variant_for_id
 from .live_fsm import (
@@ -1075,12 +1075,11 @@ def tick_live_session(
         return {"ok": False, "error": "product_not_tradable"}
 
     caps = _policy_caps(snap)
-    try:
-        max_notional = float(
-            caps.get("max_notional_per_trade_usd") or settings.chili_momentum_risk_max_notional_per_trade_usd
-        )
-    except (TypeError, ValueError):
-        max_notional = float(settings.chili_momentum_risk_max_notional_per_trade_usd)
+    max_notional = policy_float_cap(
+        caps,
+        "max_notional_per_trade_usd",
+        settings.chili_momentum_risk_max_notional_per_trade_usd,
+    )
     try:
         cap_max_hold = int(caps.get("max_hold_seconds") or settings.chili_momentum_risk_max_hold_seconds)
     except (TypeError, ValueError):
@@ -1895,13 +1894,11 @@ def tick_live_session(
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
     if st == STATE_LIVE_EXITED:
-        try:
-            cd_sec = int(
-                caps.get("cooldown_after_stopout_seconds")
-                or settings.chili_momentum_risk_cooldown_after_stopout_seconds
-            )
-        except (TypeError, ValueError):
-            cd_sec = int(settings.chili_momentum_risk_cooldown_after_stopout_seconds)
+        cd_sec = policy_int_cap(
+            caps,
+            "cooldown_after_stopout_seconds",
+            settings.chili_momentum_risk_cooldown_after_stopout_seconds,
+        )
         until = _utcnow() + timedelta(seconds=max(0, cd_sec))
         le["cooldown_until_utc"] = until.isoformat()
         _safe_transition(db, sess, STATE_LIVE_COOLDOWN)

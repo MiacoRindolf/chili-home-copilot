@@ -36,7 +36,7 @@ from .persistence import (
     upsert_trading_automation_session_binding,
 )
 from .risk_evaluator import evaluate_proposed_momentum_automation
-from .risk_policy import RISK_SNAPSHOT_KEY
+from .risk_policy import RISK_SNAPSHOT_KEY, policy_float_cap, policy_int_cap
 from .paper_execution import (
     build_synthetic_quote,
     default_reference_mid,
@@ -599,12 +599,11 @@ def tick_paper_session(
     except (TypeError, ValueError):
         cap_max_hold = int(settings.chili_momentum_risk_max_hold_seconds)
     max_hold = min(int(params.get("max_hold_seconds") or cap_max_hold), cap_max_hold)
-    try:
-        max_notional = float(
-            caps.get("max_notional_per_trade_usd") or settings.chili_momentum_risk_max_notional_per_trade_usd
-        )
-    except (TypeError, ValueError):
-        max_notional = float(settings.chili_momentum_risk_max_notional_per_trade_usd)
+    max_notional = policy_float_cap(
+        caps,
+        "max_notional_per_trade_usd",
+        settings.chili_momentum_risk_max_notional_per_trade_usd,
+    )
 
     try:
         max_age_sec = float(getattr(settings, "chili_momentum_risk_viability_max_age_seconds", 600.0) or 600.0)
@@ -1217,13 +1216,11 @@ def tick_paper_session(
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
     if st == STATE_EXITED:
-        try:
-            cd_sec = int(
-                caps.get("cooldown_after_stopout_seconds")
-                or settings.chili_momentum_risk_cooldown_after_stopout_seconds
-            )
-        except (TypeError, ValueError):
-            cd_sec = int(settings.chili_momentum_risk_cooldown_after_stopout_seconds)
+        cd_sec = policy_int_cap(
+            caps,
+            "cooldown_after_stopout_seconds",
+            settings.chili_momentum_risk_cooldown_after_stopout_seconds,
+        )
         until = _utcnow() + timedelta(seconds=max(0, cd_sec))
         pe["cooldown_until_utc"] = until.isoformat()
         _safe_transition(db, sess, STATE_COOLDOWN)
