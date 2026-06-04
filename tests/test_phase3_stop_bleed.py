@@ -17,9 +17,11 @@ from datetime import datetime, timedelta
 import pytest
 from sqlalchemy import text
 
+from app.config import Settings
 from app.models.trading import ScanPattern, Trade, _NO_PATTERN_SENTINEL
 from app.services.trading import portfolio_risk
 from app.services.trading.portfolio_risk import (
+    DrawdownLimits,
     _assert_portfolio_breaker_ok,
     _monthly_attributed_pnl,
     _monthly_dd_threshold,
@@ -892,6 +894,52 @@ class TestPortfolioBreakerSeparation:
         monkeypatch.setenv("CHILI_PATTERN_DD_BREAKER_ENABLED", "false")
         s2 = Settings()
         assert s2.chili_pattern_dd_breaker_enabled is False
+
+
+def test_consecutive_loss_floor_setting_controls_micro_loss_breaker(db, monkeypatch):
+    uid = _seed_user(db, user_id=1003)
+    for days_ago, pnl in enumerate((-8.0, -7.0, -6.0), start=1):
+        _seed_chili_attributed_trade(db, user_id=uid, pnl=pnl, days_ago=days_ago)
+    persisted = []
+    monkeypatch.setattr(
+        portfolio_risk,
+        "_compute_unrealized_pnl",
+        lambda *_args, **_kwargs: 0.0,
+    )
+    monkeypatch.setattr(
+        portfolio_risk,
+        "_persist_breaker_state",
+        lambda *args, **kwargs: persisted.append((args, kwargs)),
+    )
+    limits = DrawdownLimits(
+        max_5day_dd_pct=99.0,
+        max_30day_dd_pct=99.0,
+        max_consecutive_losses=3,
+    )
+
+    monkeypatch.setenv("BRAIN_RISK_MIN_STREAK_LOSS_PCT", "3.0")
+    settings_obj = Settings(_env_file=None)  # type: ignore[call-arg]
+    monkeypatch.setattr("app.config.settings", settings_obj)
+
+    tripped, reason = check_drawdown_breaker(db, uid, capital=1_000.0, limits=limits)
+
+    assert settings_obj.brain_risk_min_streak_loss_pct == 3.0
+    assert tripped is False
+    assert reason is None
+    assert persisted == []
+
+    monkeypatch.setenv("BRAIN_RISK_MIN_STREAK_LOSS_PCT", "1.0")
+    settings_obj = Settings(_env_file=None)  # type: ignore[call-arg]
+    monkeypatch.setattr("app.config.settings", settings_obj)
+
+    tripped, reason = check_drawdown_breaker(db, uid, capital=1_000.0, limits=limits)
+
+    assert settings_obj.brain_risk_min_streak_loss_pct == 1.0
+    assert tripped is True
+    assert reason is not None
+    assert "3 consecutive losing trades" in reason
+    assert "floor=$10.00" in reason
+    assert persisted == [((True, reason), {"user_id": uid, "capital": 1_000.0})]
 
 
 # --------------------------------------------------------------------- #

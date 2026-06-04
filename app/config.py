@@ -906,6 +906,12 @@ class Settings(BaseSettings):
     brain_risk_max_5d_dd_pct: float = 3.0
     brain_risk_max_30d_dd_pct: float = 8.0
     brain_risk_max_consec_losses: int = 5
+    brain_risk_min_streak_loss_pct: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=100.0,
+        validation_alias=AliasChoices("BRAIN_RISK_MIN_STREAK_LOSS_PCT"),
+    )
     brain_risk_cooldown_hours: int = 24
 
     # Portfolio-level position + heat caps. ``portfolio_risk.get_risk_limits``
