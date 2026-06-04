@@ -148,6 +148,24 @@ def test_reject_shadow_decision_map():
     assert at_mod._qualified_reject_shadow_decision(
         "target_not_above_entry"
     ) == "skipped_directional_geometry"
+    assert at_mod._qualified_reject_shadow_decision(
+        "pending_entry_already_working"
+    ) == "skipped_pending_entry_already_working"
+    assert at_mod._qualified_reject_shadow_decision(
+        "recent_live_exit_cooldown"
+    ) == "blocked_recent_live_exit_cooldown"
+    assert at_mod._qualified_reject_shadow_decision(
+        "cost_gate:rh_below_tca_threshold"
+    ) == "blocked_cost_gate"
+    assert at_mod._qualified_reject_shadow_decision(
+        "feature_parity_unavailable:no_reference_df"
+    ) == "blocked_feature_parity"
+    assert at_mod._qualified_reject_shadow_decision(
+        "feature_parity:critical_mismatch:rsi_14"
+    ) == "blocked_feature_parity"
+    assert at_mod._qualified_reject_shadow_decision(
+        "selector:coinbase_routing_shadow_log"
+    ) == "blocked_coinbase_live_disabled"
     assert at_mod._qualified_reject_shadow_decision("no_quote") is None
 
 

@@ -117,8 +117,11 @@ SYNERGY_RETRY_SOURCE_REASON = "synergy_not_applicable"
 SYNERGY_RETRY_EXHAUSTED_REASON = "synergy_retry_not_applicable"
 
 QUALIFIED_BLOCK_PAPER_SHADOW_DECISIONS = frozenset({
+    "blocked_coinbase_live_disabled",
     "blocked_coinbase_cap",
     "blocked_coinbase_probation",
+    "blocked_cost_gate",
+    "blocked_feature_parity",
     "blocked_llm_not_viable",
     "blocked_llm_unavailable",
     "blocked_max_concurrent_crypto",
@@ -127,6 +130,7 @@ QUALIFIED_BLOCK_PAPER_SHADOW_DECISIONS = frozenset({
     "blocked_max_concurrent_options",
     "blocked_no_order_id",
     "blocked_option_entry_no_fill",
+    "blocked_recent_live_exit_cooldown",
     "blocked_regime_gate",
     "blocked_recert_required",
     "blocked_shadow_promoted",
@@ -2655,8 +2659,22 @@ def _maybe_open_paper_shadow(
 def _qualified_reject_shadow_decision(reason: str | None) -> str | None:
     """Map live-only reject reasons to safe paper-shadow observation labels."""
     r = (reason or "").strip()
+    if r.startswith("cost_gate:"):
+        return "blocked_cost_gate"
+    if (
+        r.startswith("feature_parity:")
+        or r.startswith("feature_parity_unavailable:")
+        or r == "feature_parity_required_disabled"
+    ):
+        return "blocked_feature_parity"
     if r.startswith("regime_gate:"):
         return "blocked_regime_gate"
+    if r == "selector:coinbase_routing_shadow_log":
+        return "blocked_coinbase_live_disabled"
+    if r == RECENT_LIVE_EXIT_COOLDOWN_REASON:
+        return "blocked_recent_live_exit_cooldown"
+    if r == PENDING_ENTRY_ALREADY_WORKING_REASON:
+        return f"skipped_{r}"
     if r in {
         "duplicate_pattern_already_open",
         "non_positive_expected_edge",
@@ -6261,6 +6279,14 @@ def _process_one_alert(
                 rule_snapshot=snap,
                 llm_snapshot=llm_snap,
             )
+            _maybe_open_reject_paper_shadow(
+                db,
+                uid=uid,
+                alert=alert,
+                px=px,
+                snap=snap,
+                reason=rsn,
+            )
             out["skipped"] += 1
             _autotrader_tick_note(out, kind="blocked", reason=rsn, alert=alert)
             return
@@ -6711,6 +6737,22 @@ def _execute_broker_buy(
             rule_snapshot=snap,
             llm_snapshot=llm_snap,
         )
+        if isinstance(_cost_execution_work, dict) and bool(
+            _cost_execution_work.get("queued")
+        ):
+            _maybe_open_reject_paper_shadow(
+                db,
+                uid=uid,
+                alert=alert,
+                px=(
+                    px
+                    or snap.get("entry_price")
+                    or getattr(alert, "entry_price", None)
+                    or getattr(alert, "price_at_alert", None)
+                ),
+                snap=snap,
+                reason=_cost_reason,
+            )
         out["skipped"] += 1
         _autotrader_tick_note(
             out, kind="blocked", reason=_cost_reason, alert=alert,
@@ -6807,6 +6849,19 @@ def _execute_broker_buy(
                 db, user_id=uid, alert=alert,
                 decision="blocked", reason=_shadow_reason,
                 rule_snapshot=snap, llm_snapshot=llm_snap,
+            )
+            _maybe_open_reject_paper_shadow(
+                db,
+                uid=uid,
+                alert=alert,
+                px=(
+                    px
+                    or snap.get("entry_price")
+                    or getattr(alert, "entry_price", None)
+                    or getattr(alert, "price_at_alert", None)
+                ),
+                snap=snap,
+                reason=_shadow_reason,
             )
             out["skipped"] += 1
             _autotrader_tick_note(

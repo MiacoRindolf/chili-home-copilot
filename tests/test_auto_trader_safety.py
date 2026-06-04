@@ -1632,8 +1632,47 @@ def test_feature_parity_uses_decision_snapshot_not_recomputed(monkeypatch):
 
 
 def test_qualified_block_shadow_decisions_cover_learning_dead_ends():
+    assert "blocked_coinbase_live_disabled" in at_mod.QUALIFIED_BLOCK_PAPER_SHADOW_DECISIONS
+    assert "blocked_cost_gate" in at_mod.QUALIFIED_BLOCK_PAPER_SHADOW_DECISIONS
+    assert "blocked_feature_parity" in at_mod.QUALIFIED_BLOCK_PAPER_SHADOW_DECISIONS
     assert "blocked_no_order_id" in at_mod.QUALIFIED_BLOCK_PAPER_SHADOW_DECISIONS
     assert "blocked_option_entry_no_fill" in at_mod.QUALIFIED_BLOCK_PAPER_SHADOW_DECISIONS
+    assert (
+        at_mod._qualified_reject_shadow_decision("cost_gate:rh_below_tca_threshold")
+        == "blocked_cost_gate"
+    )
+    assert (
+        at_mod._qualified_reject_shadow_decision(
+            "selector:coinbase_routing_shadow_log"
+        )
+        == "blocked_coinbase_live_disabled"
+    )
+    assert (
+        at_mod._qualified_reject_shadow_decision("feature_parity_required_disabled")
+        == "blocked_feature_parity"
+    )
+    assert (
+        at_mod._qualified_reject_shadow_decision(
+            "feature_parity_unavailable:no_live_snapshot"
+        )
+        == "blocked_feature_parity"
+    )
+    assert (
+        at_mod._qualified_reject_shadow_decision("feature_parity:critical_mismatch")
+        == "blocked_feature_parity"
+    )
+    assert (
+        at_mod._qualified_reject_shadow_decision(
+            at_mod.PENDING_ENTRY_ALREADY_WORKING_REASON
+        )
+        == "skipped_pending_entry_already_working"
+    )
+    assert (
+        at_mod._qualified_reject_shadow_decision(
+            at_mod.RECENT_LIVE_EXIT_COOLDOWN_REASON
+        )
+        == "blocked_recent_live_exit_cooldown"
+    )
     assert (
         at_mod._qualified_reject_shadow_decision(
             "regime_gate:negative_ev_consensus:n_neg=2/4"
@@ -2928,6 +2967,88 @@ def test_feature_parity_blocks_price_only_snapshot_when_required(monkeypatch):
     assert reason == "feature_parity_unavailable:no_signal_features"
 
 
+def test_feature_parity_live_block_opens_reject_shadow(monkeypatch):
+    from app.services.trading import regime_gate
+
+    audits: list[dict] = []
+    shadows: list[dict] = []
+    monkeypatch.setattr(at_mod, "settings", _minimal_settings(1))
+    monkeypatch.setattr(at_mod, "_current_price_for_alert", lambda _alert: 10.0)
+    monkeypatch.setattr(
+        regime_gate,
+        "regime_gate_blocks_entry",
+        lambda *a, **k: (False, None),
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_recent_cost_gate_repeat_suppression_snapshot",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_recent_live_exit_cooldown_snapshot",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(at_mod, "_maybe_substitute_with_options", lambda *a, **k: None)
+    monkeypatch.setattr(at_mod, "count_autotrader_v1_open", lambda *a, **k: 0)
+    monkeypatch.setattr(at_mod, "count_autotrader_v1_open_by_lane", lambda *a, **k: {})
+    monkeypatch.setattr(at_mod, "autotrader_realized_pnl_today_et", lambda *a, **k: 0.0)
+    monkeypatch.setattr(at_mod, "find_open_autotrader_trade", lambda *a, **k: None)
+    monkeypatch.setattr(
+        at_mod,
+        "check_autopilot_entry_gate",
+        lambda *a, **k: {"allowed": True},
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "passes_rule_gate",
+        lambda *a, **k: (True, None, {"entry_edge_expected_net_pct": 1.2}),
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_should_run_llm_revalidation",
+        lambda _alert: (False, None),
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_maybe_check_feature_parity",
+        lambda *a, **k: "feature_parity:critical_mismatch:rsi_14",
+    )
+    monkeypatch.setattr(at_mod, "_audit", lambda *a, **k: audits.append(k))
+    monkeypatch.setattr(
+        at_mod,
+        "_maybe_open_reject_paper_shadow",
+        lambda *a, **k: shadows.append(k),
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_execute_new_entry",
+        lambda *a, **k: pytest.fail("feature parity block must stop live entry"),
+    )
+
+    out = {"skipped": 0}
+    at_mod._process_one_alert(
+        MagicMock(),
+        1,
+        SimpleNamespace(
+            id=101,
+            ticker="PAR",
+            scan_pattern_id=None,
+            entry_price=10.0,
+            price_at_alert=10.0,
+            indicator_snapshot={},
+            signals_snapshot={},
+        ),
+        out,
+        {"live_orders_effective": True},
+    )
+
+    assert out["skipped"] == 1
+    assert audits[0]["reason"] == "feature_parity:critical_mismatch:rsi_14"
+    assert shadows[0]["reason"] == "feature_parity:critical_mismatch:rsi_14"
+    assert shadows[0]["px"] == pytest.approx(10.0)
+
+
 def test_required_venue_health_blocks_insufficient_data(monkeypatch):
     from app.services.trading.venue import venue_health
 
@@ -3665,6 +3786,90 @@ def test_coinbase_probation_blocks_before_adapter_with_shadow(monkeypatch):
     assert blocked[0]["px"] == pytest.approx(0.5)
 
 
+def test_coinbase_shadow_log_opens_reject_shadow_without_broker(monkeypatch):
+    from app import config as config_mod
+    from app.services.trading import broker_selector, cost_aware_gate, governance
+    from app.services.trading import portfolio_risk
+    from app.services.trading.venue import factory as venue_factory
+
+    audits: list[dict] = []
+    shadows: list[dict] = []
+    monkeypatch.setattr(
+        at_mod,
+        "settings",
+        SimpleNamespace(chili_autotrader_block_live_on_capital_fallback=True),
+    )
+    monkeypatch.setattr(
+        config_mod,
+        "settings",
+        SimpleNamespace(chili_coinbase_autotrader_live=False),
+    )
+    monkeypatch.setattr(
+        governance,
+        "is_kill_switch_active_for_session",
+        lambda *a, **k: False,
+    )
+    monkeypatch.setattr(
+        portfolio_risk,
+        "circuit_breaker_entry_block_reason",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(
+        cost_aware_gate,
+        "cost_aware_min_edge_gate",
+        lambda *a, **k: SimpleNamespace(
+            allowed=True,
+            reason="ok",
+            edge_bps=500,
+            threshold_bps=0,
+            fee_bps=0,
+            tca_cost_bps=0,
+            tca_snapshot=None,
+        ),
+    )
+    monkeypatch.setattr(
+        broker_selector,
+        "select_venue",
+        lambda *a, **k: SimpleNamespace(venue="coinbase", reason="coinbase_only"),
+    )
+    monkeypatch.setattr(
+        venue_factory,
+        "get_adapter",
+        lambda _venue: pytest.fail("coinbase shadow-log must not reach broker"),
+    )
+    monkeypatch.setattr(at_mod, "_audit", lambda *a, **k: audits.append(k))
+    monkeypatch.setattr(
+        at_mod,
+        "_maybe_open_reject_paper_shadow",
+        lambda *a, **k: shadows.append(k),
+    )
+
+    out = {"skipped": 0}
+    res = at_mod._execute_broker_buy(
+        MagicMock(),
+        uid=1,
+        alert=SimpleNamespace(
+            id=91,
+            ticker="PEPE-USD",
+            scan_pattern_id=456,
+            entry_price=None,
+            price_at_alert=None,
+        ),
+        qty=10.0,
+        client_order_id="cid-91",
+        snap={"projected_profit_pct": 5.0, "capital_source": "broker_equity"},
+        llm_snap=None,
+        out=out,
+        px=0.5,
+    )
+
+    assert res is None
+    assert out["skipped"] == 1
+    assert audits[0]["reason"] == "selector:coinbase_routing_shadow_log"
+    assert shadows[0]["reason"] == "selector:coinbase_routing_shadow_log"
+    assert shadows[0]["px"] == pytest.approx(0.5)
+
+
 def _coinbase_probation_settings(**overrides):
     values = {
         "chili_coinbase_autotrader_probation_enabled": True,
@@ -3873,6 +4078,7 @@ def test_broker_buy_cost_gate_block_records_execution_work(monkeypatch):
     from app.services.trading import portfolio_risk
 
     audits: list[dict] = []
+    shadows: list[dict] = []
 
     def _fake_cost_gate(**_kwargs):
         return SimpleNamespace(
@@ -3925,6 +4131,11 @@ def test_broker_buy_cost_gate_block_records_execution_work(monkeypatch):
         "_audit",
         lambda *a, **k: audits.append(k),
     )
+    monkeypatch.setattr(
+        at_mod,
+        "_maybe_open_reject_paper_shadow",
+        lambda *a, **k: shadows.append(k),
+    )
 
     snap = {"entry_edge_expected_net_pct": 1.2}
     out = {"skipped": 0}
@@ -3950,6 +4161,8 @@ def test_broker_buy_cost_gate_block_records_execution_work(monkeypatch):
     assert out["skipped"] == 1
     assert audits[0]["decision"] == "blocked"
     assert audits[0]["reason"] == "cost_gate:rh_below_tca_threshold"
+    assert shadows[0]["reason"] == "cost_gate:rh_below_tca_threshold"
+    assert shadows[0]["px"] == pytest.approx(45.5)
     assert snap["cost_gate_execution_work"] == {"queued": True, "event_id": 88}
     assert snap["cost_gate_tca_snapshot"] == {"used": True}
 
