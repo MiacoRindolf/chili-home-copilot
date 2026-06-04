@@ -544,7 +544,10 @@ def _env_unit_interval_float(name: str, default: float) -> float:
 def load() -> FastPathSettings:
     """Read settings from the process environment. Called once at
     container boot by ``scripts/fast_data_worker.py``."""
-    exec_notional_usd = _env_float("CHILI_FAST_PATH_EXEC_NOTIONAL_USD", 25.0)
+    exec_notional_usd = _env_positive_float(
+        "CHILI_FAST_PATH_EXEC_NOTIONAL_USD",
+        25.0,
+    )
     universe_hysteresis_ranks = _env_nonnegative_int(
         "CHILI_FAST_PATH_UNIVERSE_HYSTERESIS_RANKS",
         DEFAULT_UNIVERSE_HYSTERESIS_RANKS,
@@ -586,30 +589,30 @@ def load() -> FastPathSettings:
             "CHILI_FAST_PATH_UNIVERSE_SHADOW_TERMINAL_REPROBE_ENABLED", False),
         universe_shadow_capacity_probe_enabled=_env_bool(
             "CHILI_FAST_PATH_UNIVERSE_SHADOW_CAPACITY_PROBE_ENABLED", False),
-        universe_top_n=_env_int("CHILI_FAST_PATH_UNIVERSE_TOP_N", 25),
+        universe_top_n=_env_positive_int("CHILI_FAST_PATH_UNIVERSE_TOP_N", 25),
         universe_hysteresis_ranks=universe_hysteresis_ranks,
-        universe_shadow_window_h=_env_int(
+        universe_shadow_window_h=_env_positive_int(
             "CHILI_FAST_PATH_UNIVERSE_SHADOW_WINDOW_H", 24),
-        universe_min_volume_24h_usd=_env_float(
+        universe_min_volume_24h_usd=_env_nonnegative_float(
             "CHILI_FAST_PATH_UNIVERSE_MIN_VOLUME_24H_USD", 10_000_000.0),
-        universe_max_spread_bps=_env_float(
+        universe_max_spread_bps=_env_nonnegative_float(
             "CHILI_FAST_PATH_UNIVERSE_MAX_SPREAD_BPS",
-            _env_float("CHILI_FAST_PATH_EXEC_MAX_SPREAD_BPS", 8.0),
+            _env_nonnegative_float("CHILI_FAST_PATH_EXEC_MAX_SPREAD_BPS", 8.0),
         ),
-        universe_min_top_of_book_usd=_env_float(
+        universe_min_top_of_book_usd=_env_nonnegative_float(
             "CHILI_FAST_PATH_UNIVERSE_MIN_TOP_OF_BOOK_USD", 5_000.0),
-        universe_shadow_min_top_of_book_usd=_env_float(
+        universe_shadow_min_top_of_book_usd=_env_nonnegative_float(
             "CHILI_FAST_PATH_UNIVERSE_SHADOW_MIN_TOP_OF_BOOK_USD",
             exec_notional_usd,
         ),
-        universe_min_range_24h_bps=_env_float(
+        universe_min_range_24h_bps=_env_nonnegative_float(
             "CHILI_FAST_PATH_UNIVERSE_MIN_RANGE_24H_BPS", 150.0),
         universe_adaptive_range_floor_enabled=_env_bool(
             "CHILI_FAST_PATH_UNIVERSE_ADAPTIVE_RANGE_FLOOR_ENABLED", True),
         universe_missing_grace_passes=_env_nonnegative_int(
             "CHILI_FAST_PATH_UNIVERSE_MISSING_GRACE_PASSES", 2),
         universe_min_shadow_exploration_n=universe_min_shadow_exploration_n,
-        universe_market_velocity_cost_parity_ratio=_env_float(
+        universe_market_velocity_cost_parity_ratio=_env_nonnegative_float(
             "CHILI_FAST_PATH_UNIVERSE_MARKET_VELOCITY_COST_PARITY_RATIO",
             1.0,
         ),
@@ -630,7 +633,7 @@ def load() -> FastPathSettings:
             "CHILI_FAST_PATH_UNIVERSE_REST_REQUEST_PACING_S",
             0.12,
         ),
-        universe_min_trades_24h=_env_int(
+        universe_min_trades_24h=_env_nonnegative_int(
             "CHILI_FAST_PATH_UNIVERSE_MIN_TRADES_24H", 1_000),
         cost_aware_admission_enabled=_env_bool(
             "CHILI_FAST_PATH_COST_AWARE_ADMISSION_ENABLED", False),

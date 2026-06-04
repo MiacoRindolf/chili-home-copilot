@@ -496,6 +496,141 @@ def test_universe_rest_request_pacing_env_override_works():
     assert loaded.universe_rest_request_pacing_s == 0.2
 
 
+@pytest.mark.parametrize(
+    ("env_name", "attr", "default"),
+    [
+        ("CHILI_FAST_PATH_UNIVERSE_TOP_N", "universe_top_n", 25),
+        (
+            "CHILI_FAST_PATH_UNIVERSE_SHADOW_WINDOW_H",
+            "universe_shadow_window_h",
+            24,
+        ),
+    ],
+)
+@pytest.mark.parametrize("raw", ["0", "-1", "bad"])
+def test_universe_positive_env_rejects_non_positive_values(
+    env_name,
+    attr,
+    default,
+    raw,
+):
+    with mock.patch.dict(os.environ, {env_name: raw}, clear=True):
+        loaded = load()
+    assert getattr(loaded, attr) == default
+
+
+@pytest.mark.parametrize(
+    ("env_name", "attr", "default"),
+    [
+        (
+            "CHILI_FAST_PATH_UNIVERSE_MIN_VOLUME_24H_USD",
+            "universe_min_volume_24h_usd",
+            10_000_000.0,
+        ),
+        (
+            "CHILI_FAST_PATH_UNIVERSE_MAX_SPREAD_BPS",
+            "universe_max_spread_bps",
+            8.0,
+        ),
+        (
+            "CHILI_FAST_PATH_EXEC_MAX_SPREAD_BPS",
+            "universe_max_spread_bps",
+            8.0,
+        ),
+        (
+            "CHILI_FAST_PATH_UNIVERSE_MIN_TOP_OF_BOOK_USD",
+            "universe_min_top_of_book_usd",
+            5_000.0,
+        ),
+        (
+            "CHILI_FAST_PATH_UNIVERSE_SHADOW_MIN_TOP_OF_BOOK_USD",
+            "universe_shadow_min_top_of_book_usd",
+            25.0,
+        ),
+        (
+            "CHILI_FAST_PATH_UNIVERSE_MIN_RANGE_24H_BPS",
+            "universe_min_range_24h_bps",
+            150.0,
+        ),
+        (
+            "CHILI_FAST_PATH_UNIVERSE_MARKET_VELOCITY_COST_PARITY_RATIO",
+            "universe_market_velocity_cost_parity_ratio",
+            1.0,
+        ),
+    ],
+)
+@pytest.mark.parametrize("raw", ["-0.01", "-5", "bad", "nan"])
+def test_universe_nonnegative_float_env_rejects_negative_values(
+    env_name,
+    attr,
+    default,
+    raw,
+):
+    with mock.patch.dict(os.environ, {env_name: raw}, clear=True):
+        loaded = load()
+    assert getattr(loaded, attr) == default
+
+
+@pytest.mark.parametrize(
+    ("env_name", "attr"),
+    [
+        ("CHILI_FAST_PATH_UNIVERSE_MIN_VOLUME_24H_USD", "universe_min_volume_24h_usd"),
+        ("CHILI_FAST_PATH_UNIVERSE_MAX_SPREAD_BPS", "universe_max_spread_bps"),
+        ("CHILI_FAST_PATH_EXEC_MAX_SPREAD_BPS", "universe_max_spread_bps"),
+        (
+            "CHILI_FAST_PATH_UNIVERSE_MIN_TOP_OF_BOOK_USD",
+            "universe_min_top_of_book_usd",
+        ),
+        (
+            "CHILI_FAST_PATH_UNIVERSE_SHADOW_MIN_TOP_OF_BOOK_USD",
+            "universe_shadow_min_top_of_book_usd",
+        ),
+        ("CHILI_FAST_PATH_UNIVERSE_MIN_RANGE_24H_BPS", "universe_min_range_24h_bps"),
+        (
+            "CHILI_FAST_PATH_UNIVERSE_MARKET_VELOCITY_COST_PARITY_RATIO",
+            "universe_market_velocity_cost_parity_ratio",
+        ),
+    ],
+)
+def test_universe_nonnegative_float_env_accepts_zero_values(env_name, attr):
+    with mock.patch.dict(os.environ, {env_name: "0"}, clear=True):
+        loaded = load()
+    assert getattr(loaded, attr) == 0.0
+
+
+@pytest.mark.parametrize("raw", ["-1", "bad"])
+def test_universe_min_trades_env_rejects_negative_values(raw):
+    with mock.patch.dict(
+        os.environ,
+        {"CHILI_FAST_PATH_UNIVERSE_MIN_TRADES_24H": raw},
+        clear=True,
+    ):
+        loaded = load()
+    assert loaded.universe_min_trades_24h == 1_000
+
+
+def test_universe_min_trades_env_accepts_zero_value():
+    with mock.patch.dict(
+        os.environ,
+        {"CHILI_FAST_PATH_UNIVERSE_MIN_TRADES_24H": "0"},
+        clear=True,
+    ):
+        loaded = load()
+    assert loaded.universe_min_trades_24h == 0
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "bad", "nan"])
+def test_exec_notional_env_rejects_invalid_shadow_depth_default(raw):
+    with mock.patch.dict(
+        os.environ,
+        {"CHILI_FAST_PATH_EXEC_NOTIONAL_USD": raw},
+        clear=True,
+    ):
+        loaded = load()
+    assert loaded.universe_shadow_min_top_of_book_usd == 25.0
+    assert loaded.scanner_book_pressure_min_touch_notional_usd == 25.0
+
+
 def test_scanner_threshold_env_overrides_work():
     with mock.patch.dict(
         os.environ,
