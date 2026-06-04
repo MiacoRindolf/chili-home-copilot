@@ -331,6 +331,39 @@ def _purpose_model_override(purpose: str, policy: PurposePolicy | None = None) -
     return model.strip()
 
 
+# Code-generation gateway purposes that benefit from a frontier brain when
+# ``chili_code_frontier_enabled`` is on. The "code_dispatch" prefix covers
+# plan / edit / create / diagnose / pr_repair; "code_review" is the self-review
+# critic. Retrieval-only "code_search" is intentionally excluded (high volume,
+# little gain from a frontier model).
+_CODE_FRONTIER_EXACT_PURPOSES = frozenset({"code_review"})
+
+
+def _is_code_frontier_purpose(purpose: str) -> bool:
+    p = (purpose or "").strip()
+    return p.startswith("code_dispatch") or p in _CODE_FRONTIER_EXACT_PURPOSES
+
+
+def _frontier_code_override(policy: PurposePolicy | None) -> str | None:
+    """Frontier model for code-generation purposes when frontier routing is
+    enabled and a frontier provider is configured. Explicit per-purpose JSON
+    overrides (``_purpose_model_override``) are resolved first and take
+    precedence; high-stakes purposes are never auto-routed. Returns ``None``
+    (no change) unless every gate passes, so default behavior is preserved."""
+    if policy is None:
+        return None
+    if not getattr(settings, "chili_code_frontier_enabled", False):
+        return None
+    if getattr(policy, "high_stakes", False):
+        return None
+    if not _is_code_frontier_purpose(getattr(policy, "purpose", "")):
+        return None
+    if not openai_client._frontier_configured():
+        return None
+    model = (getattr(settings, "frontier_model", "") or "").strip()
+    return model or None
+
+
 def _open_db_session():
     """Helper: gateway is called from many contexts (with or without a
     db session in scope). Open a fresh SessionLocal when none provided."""
@@ -632,7 +665,7 @@ def gateway_chat(
             policy = PurposePolicy(
                 **{**policy.__dict__, "routing_strategy": "passthrough"},
             )
-        model_override = _purpose_model_override(policy.purpose, policy)
+        model_override = _purpose_model_override(policy.purpose, policy) or _frontier_code_override(policy)
 
         log_id = _write_gateway_log_start(
             db,
@@ -880,7 +913,7 @@ def gateway_chat_stream(
             policy = PurposePolicy(
                 **{**policy.__dict__, "routing_strategy": "passthrough"},
             )
-        model_override = _purpose_model_override(policy.purpose, policy)
+        model_override = _purpose_model_override(policy.purpose, policy) or _frontier_code_override(policy)
 
         log_id = _write_gateway_log_start(
             db,

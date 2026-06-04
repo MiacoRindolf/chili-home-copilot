@@ -647,6 +647,69 @@ def _chat_gemini(
     return None
 
 
+# ── Frontier code-generation tier (opt-in) ──────────────────────────────
+# An optional top-of-cascade tier used ONLY when a frontier model is explicitly
+# requested via ``model_override`` (the gateway sets this for code-generation
+# purposes when ``chili_code_frontier_enabled`` is on). Reuses the generic
+# OpenAI-compatible ``_call_provider`` — Anthropic exposes an OpenAI-compatible
+# endpoint, so no new SDK is needed. Reads ``settings`` live (like the Groq /
+# Gemini tiers) so tests and hot-reload see config changes. Returns ``None`` on
+# any failure so ``chat()`` transparently falls back to the standard cascade.
+def _frontier_configured() -> bool:
+    return bool(
+        (settings.frontier_api_key or "").strip()
+        and (settings.frontier_base_url or "").strip()
+        and (settings.frontier_model or "").strip()
+    )
+
+
+def _is_frontier_model(model: str | None) -> bool:
+    """True when ``model`` is the configured frontier model. The gateway sets
+    ``model_override`` to ``settings.frontier_model`` for code purposes; that is
+    the only trigger that prepends the frontier tier, keeping all other paths
+    byte-identical to the existing cascade."""
+    if not model or not (settings.frontier_model or "").strip():
+        return False
+    return model.strip() == settings.frontier_model.strip()
+
+
+def _chat_frontier(
+    prompt,
+    messages,
+    user_message,
+    trace_id,
+    max_tokens,
+    strict_escalation,
+    model_override: str | None = None,
+):
+    if not _frontier_configured():
+        return None
+    if _is_auth_failed(settings.frontier_base_url):
+        log_info(trace_id, "frontier skipped (auth previously failed)")
+        return None
+    try:
+        model = (model_override or settings.frontier_model).strip() or settings.frontier_model
+        log_info(
+            trace_id,
+            f"trying frontier provider={_provider_host(settings.frontier_base_url)} model={model}",
+        )
+        return _call_provider(
+            settings.frontier_api_key,
+            settings.frontier_base_url,
+            model,
+            messages,
+            prompt,
+            trace_id,
+            max_tokens=max_tokens,
+        )
+    except Exception as e:
+        if _looks_like_auth_error(e):
+            _mark_auth_failed(settings.frontier_base_url, trace_id, str(e))
+            return None
+        log_info(trace_id, f"frontier_error={e}")
+    return None
+
+
 # ── DO NOT REMOVE — CHILI Dispatch (Phase D.0): llm_call_log writer ──
 # Every chat() invocation produces one row per tier attempt, so distillation
 # training data accumulates whether or not the cascade ultimately succeeded.
@@ -784,6 +847,14 @@ def chat(
             (_chat_gemini, _provider_host(settings.premium_base_url), 3),
         )
 
+    # Frontier code-gen tier (opt-in): only when a frontier model is explicitly
+    # requested (the gateway sets model_override for code-generation purposes)
+    # AND a frontier provider is configured. Tried first; any failure falls
+    # through to the standard cascade above. Every other call keeps the exact
+    # cascade order above, so default behavior is unchanged.
+    if _frontier_configured() and _is_frontier_model(model_override):
+        order = ((_chat_frontier, "frontier", 0),) + order
+
     # Concatenated user content for log fidelity (system prompt logged separately).
     _user_prompt = "\n".join(
         (m.get("content") or "") for m in messages if isinstance(m, dict) and m.get("role") != "system"
@@ -791,7 +862,7 @@ def chat(
 
     for step, provider_name, tier_num in order:
         _t0 = time.monotonic()
-        if step in (_chat_openai, _chat_gemini):
+        if step in (_chat_openai, _chat_gemini, _chat_frontier):
             result = step(
                 prompt,
                 messages,
