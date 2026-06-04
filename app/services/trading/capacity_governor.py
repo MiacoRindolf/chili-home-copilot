@@ -55,8 +55,8 @@ def evaluate_capacity(
         reasons.append({"code": "slippage_estimate_exceeds_cap", "slippage_bps": estimated_slippage_bps, "max": max_slip})
         soft_penalty += 0.15
 
-    if min_volume_usd_proxy is not None and min_volume_usd_proxy > 0:
-        frac_cap = adv_cap if adv_cap > 0 else 0.25
+    if adv_cap > 0 and min_volume_usd_proxy is not None and min_volume_usd_proxy > 0:
+        frac_cap = adv_cap
         if intended_notional_usd > min_volume_usd_proxy * frac_cap:
             blocked_codes.append("liquidity_thin_vs_intended")
             reasons.append(

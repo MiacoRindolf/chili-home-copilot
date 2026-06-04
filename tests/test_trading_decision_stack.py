@@ -237,6 +237,31 @@ def test_capacity_governor_blocks_when_enforced(db, monkeypatch):
     assert out["capacity_blocked"] is True
 
 
+def test_capacity_governor_zero_adv_cap_disables_volume_proxy_gate(monkeypatch):
+    monkeypatch.setattr(settings, "brain_enable_capacity_governor", True)
+    monkeypatch.setattr(settings, "brain_capacity_hard_block_paper", True)
+    monkeypatch.setattr(settings, "brain_max_adv_notional_pct", 0.0)
+    monkeypatch.setattr(settings, "chili_momentum_risk_max_spread_bps_paper", 100.0)
+    monkeypatch.setattr(settings, "chili_momentum_risk_max_estimated_slippage_bps", 100.0)
+
+    out = evaluate_capacity(
+        None,
+        user_id=1,
+        symbol="BTC-USD",
+        spread_bps=1.0,
+        estimated_slippage_bps=1.0,
+        intended_notional_usd=1_000.0,
+        execution_mode="paper",
+        adv_usd_proxy=1_000.0,
+        min_volume_usd_proxy=1_000.0,
+    )
+
+    assert out["capacity_hard_signals"] is False
+    assert out["capacity_blocked"] is False
+    assert out["capacity_reasons"] == []
+    assert out["soft_penalty"] == 0.0
+
+
 def test_attach_shadow_signal_packets_reuses_recent_board_packet(db, momentum_user_and_session, monkeypatch):
     monkeypatch.setattr(settings, "brain_enable_decision_ledger", True)
     monkeypatch.setattr(settings, "brain_opportunity_board_decision_packets_enabled", True)
