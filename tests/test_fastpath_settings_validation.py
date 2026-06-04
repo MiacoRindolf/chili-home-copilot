@@ -334,6 +334,7 @@ def test_scanner_threshold_env_overrides_work():
             "CHILI_FAST_PATH_SCANNER_BOOK_PRESSURE_MIN_MID_MOVE_BPS": "0.35",
             "CHILI_FAST_PATH_SCANNER_BOOK_PRESSURE_COOLDOWN_S": "29",
             "CHILI_FAST_PATH_SCANNER_BOOK_PRESSURE_MIN_TOUCH_NOTIONAL_USD": "18.5",
+            "CHILI_FAST_PATH_SCANNER_MAX_PENDING_DEFERRED": "42",
         },
     ):
         loaded = load()
@@ -353,6 +354,7 @@ def test_scanner_threshold_env_overrides_work():
     assert loaded.scanner_book_pressure_min_mid_move_bps == 0.35
     assert loaded.scanner_book_pressure_cooldown_s == 29.0
     assert loaded.scanner_book_pressure_min_touch_notional_usd == 18.5
+    assert loaded.scanner_max_pending_deferred == 42
 
 
 def test_scanner_book_pressure_touch_notional_defaults_to_exec_notional():
@@ -362,6 +364,16 @@ def test_scanner_book_pressure_touch_notional_defaults_to_exec_notional():
     ):
         loaded = load()
     assert loaded.scanner_book_pressure_min_touch_notional_usd == 37.5
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "bad"])
+def test_scanner_max_pending_deferred_rejects_invalid_env(raw):
+    with mock.patch.dict(
+        os.environ,
+        {"CHILI_FAST_PATH_SCANNER_MAX_PENDING_DEFERRED": raw},
+    ):
+        loaded = load()
+    assert loaded.scanner_max_pending_deferred == 1000
 
 
 def test_cost_aware_taker_fee_bps_in_plausible_range():

@@ -57,9 +57,9 @@ from .gates import ALERT_RECENCY_MAX_AGE_S
 logger = logging.getLogger(__name__)
 
 
-# Default thresholds — tuned conservatively. Operators can override
-# via env (CHILI_FAST_PATH_SCANNER_*) but for now these are constants
-# so the module ships with sane behavior out of the box.
+# Default thresholds tuned conservatively. Production wiring passes
+# ``FastPathSettings`` values, while these constants keep direct unit tests
+# and helper use sane out of the box.
 VOL_BREAKOUT_LOOKBACK = 20            # bars
 VOL_BREAKOUT_MULT = 2.0               # 2x mean-volume
 IMBALANCE_LONG_THRESHOLD = 0.65
@@ -88,6 +88,18 @@ def _finite_float_or_default(value: Any, default: float) -> float:
     except (TypeError, ValueError, OverflowError):
         return default
     if not math.isfinite(out):
+        return default
+    return out
+
+
+def _positive_int_or_default(value: Any, default: int) -> int:
+    if isinstance(value, bool) or value is None:
+        return default
+    try:
+        out = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if out <= 0:
         return default
     return out
 
@@ -255,6 +267,7 @@ class MomentumScanner:
         book_pressure_min_touch_notional_usd: float = (
             BOOK_PRESSURE_MIN_TOUCH_NOTIONAL_USD
         ),
+        max_pending_deferred: int = MAX_PENDING_DEFERRED,
     ) -> None:
         self._state: dict[str, _PerTickerState] = {}
         self._emit_short_alerts = bool(emit_short_alerts)
@@ -294,6 +307,9 @@ class MomentumScanner:
         )
         self._book_pressure_min_touch_notional_usd = max(
             0.0, float(book_pressure_min_touch_notional_usd or 0.0)
+        )
+        self._max_pending_deferred = _positive_int_or_default(
+            max_pending_deferred, MAX_PENDING_DEFERRED,
         )
         # Diagnostic counters — surfaced via stats().
         self.bars_seen = 0
@@ -701,19 +717,19 @@ class MomentumScanner:
     ) -> None:
         """Push a deferred pullback emit onto this ticker's heap.
 
-        Capped at ``MAX_PENDING_DEFERRED`` *globally* (sum across all
+        Capped at ``max_pending_deferred`` *globally* (sum across all
         per-ticker heaps); new arrivals are dropped above the cap
         rather than evicting already-scheduled emits whose deadlines
         are imminent. Sum-across-dict is O(N_tickers) and N_tickers
         ≤ 5 in production, so the cap check is negligible cost.
         """
         total_pending = sum(len(h) for h in self._pullback_heaps.values())
-        if total_pending >= MAX_PENDING_DEFERRED:
+        if total_pending >= self._max_pending_deferred:
             self.deferred_dropped_overcap += 1
             logger.warning(
                 "[fast_path] scanner deferred-emit cap reached "
                 "(total_pending=%d, cap=%d); dropping new arrival ticker=%s",
-                total_pending, MAX_PENDING_DEFERRED, ticker,
+                total_pending, self._max_pending_deferred, ticker,
             )
             return
         # F8b: per-ticker delay, data-derived from
@@ -927,6 +943,7 @@ class MomentumScanner:
                 "book_pressure_cooldown_s": self._book_pressure_cooldown_s,
                 "book_pressure_min_touch_notional_usd":
                     self._book_pressure_min_touch_notional_usd,
+                "max_pending_deferred": self._max_pending_deferred,
             },
         }
 

@@ -305,6 +305,7 @@ def test_ws_client_passes_scanner_threshold_settings():
         scanner_book_pressure_min_mid_move_bps=0.35,
         scanner_book_pressure_cooldown_s=29.0,
         scanner_book_pressure_min_touch_notional_usd=18.5,
+        scanner_max_pending_deferred=42,
     )
     client = _client(settings)
 
@@ -325,6 +326,7 @@ def test_ws_client_passes_scanner_threshold_settings():
     assert cfg["book_pressure_min_mid_move_bps"] == 0.35
     assert cfg["book_pressure_cooldown_s"] == 29.0
     assert cfg["book_pressure_min_touch_notional_usd"] == 18.5
+    assert cfg["max_pending_deferred"] == 42
 
 
 def test_stale_replay_bars_warm_scanner_without_emitting_alerts():

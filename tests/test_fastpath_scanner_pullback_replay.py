@@ -88,6 +88,26 @@ def test_due_pullback_inside_recency_window_still_emits() -> None:
     assert scanner.deferred_dropped_stale == 0
 
 
+def test_pullback_deferred_cap_drops_new_arrivals() -> None:
+    scanner = MomentumScanner(max_pending_deferred=1)
+    original = datetime(2026, 5, 23, 12, 0, 0)
+
+    _schedule(scanner, original=original, delay_s=30.0)
+    _schedule(scanner, original=original + timedelta(seconds=1), delay_s=30.0)
+
+    stats = scanner.stats()
+    assert stats["pullback_pending_heap"] == 1
+    assert scanner.deferred_scheduled == 1
+    assert scanner.deferred_dropped_overcap == 1
+    assert stats["pullback_deferred_dropped_overcap"] == 1
+    assert stats["config"]["max_pending_deferred"] == 1
+
+
+def test_pullback_deferred_cap_rejects_bad_constructor_value() -> None:
+    scanner = MomentumScanner(max_pending_deferred="bad")
+    assert scanner.stats()["config"]["max_pending_deferred"] == 1000
+
+
 def test_bar_close_emit_disabled_warms_without_alert_or_deferred() -> None:
     scanner = MomentumScanner()
     start = datetime(2026, 5, 23, 12, 0, 0)

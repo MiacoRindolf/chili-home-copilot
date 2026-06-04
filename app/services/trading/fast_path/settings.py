@@ -53,6 +53,13 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_positive_int(name: str, default: int) -> int:
+    value = _env_int(name, default)
+    if isinstance(value, bool) or value <= 0:
+        return default
+    return value
+
+
 def _env_pairs(name: str, default: list[str]) -> list[str]:
     raw = (os.environ.get(name) or "").strip()
     if not raw:
@@ -474,6 +481,10 @@ class FastPathSettings:
     confirmation. Defaults to the configured execution notional so a
     dust best level cannot manufacture fake microprice pressure."""
 
+    scanner_max_pending_deferred: int = 1000
+    """Global cap on pending pullback-deferred emits. Prevents scanner
+    heap growth when book channels go quiet after volume-breakout spikes."""
+
 
 def _env_float(name: str, default: float) -> float:
     raw = (os.environ.get(name) or "").strip()
@@ -655,6 +666,9 @@ def load() -> FastPathSettings:
         scanner_book_pressure_min_touch_notional_usd=_env_float(
             "CHILI_FAST_PATH_SCANNER_BOOK_PRESSURE_MIN_TOUCH_NOTIONAL_USD",
             exec_notional_usd,
+        ),
+        scanner_max_pending_deferred=_env_positive_int(
+            "CHILI_FAST_PATH_SCANNER_MAX_PENDING_DEFERRED", 1000,
         ),
     )
 

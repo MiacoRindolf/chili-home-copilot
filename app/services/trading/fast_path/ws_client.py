@@ -139,6 +139,9 @@ class CoinbaseWSClient:
                 "scanner_book_pressure_min_touch_notional_usd",
                 25.0,
             ),
+            max_pending_deferred=getattr(
+                settings, "scanner_max_pending_deferred", 1000,
+            ),
         )
         # Diagnostic counters — surfaced via stats() so the supervisor
         # metrics line shows whether we're seeing raw traffic at all
