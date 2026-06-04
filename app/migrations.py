@@ -20189,6 +20189,41 @@ def _migration_296_divergence_discovery_probe_indexes(conn) -> None:
     logger.info("[mig296] divergence discovery probe indexes checked")
 
 
+def _migration_299_breakout_alert_pending_ticker_distinct_index(conn) -> None:
+    """Speed DISTINCT pending-alert ticker refreshes used by setup vitals."""
+
+    if "trading_breakout_alerts" not in _tables(conn):
+        conn.commit()
+        return
+
+    if getattr(getattr(conn, "dialect", None), "name", "") == "postgresql":
+        invalid_index = bool(
+            conn.execute(text("""
+                SELECT EXISTS (
+                    SELECT 1
+                      FROM pg_index
+                     WHERE indexrelid = to_regclass(
+                               'ix_breakout_alerts_pending_ticker_distinct_299'
+                           )
+                       AND NOT indisvalid
+                )
+            """)).scalar()
+        )
+        if invalid_index:
+            conn.execute(text(
+                "DROP INDEX IF EXISTS ix_breakout_alerts_pending_ticker_distinct_299"
+            ))
+
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_breakout_alerts_pending_ticker_distinct_299
+            ON trading_breakout_alerts (ticker)
+            WHERE outcome = 'pending'
+    """))
+    conn.execute(text("ANALYZE trading_breakout_alerts"))
+    conn.commit()
+    logger.info("[mig299] pending breakout-alert ticker DISTINCT index installed")
+
+
 
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -20548,6 +20583,8 @@ MIGRATIONS = [
      _migration_295_pattern_regime_perf_pattern_asof_cover_index),
     ("296_divergence_discovery_probe_indexes",
      _migration_296_divergence_discovery_probe_indexes),
+    ("299_breakout_alert_pending_ticker_distinct_index",
+     _migration_299_breakout_alert_pending_ticker_distinct_index),
 ]
 
 
