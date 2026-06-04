@@ -875,6 +875,49 @@ def test_gate_falls_back_to_static_fee_when_live_fee_unavailable():
     assert result.detail["cost_bps"] == pytest.approx(20.0)
 
 
+@pytest.mark.parametrize("bad_live_taker_fee", [-80.0, "nan", "inf", "bad"])
+def test_gate_falls_back_to_static_fee_when_live_taker_fee_invalid(
+    bad_live_taker_fee,
+):
+    fake_row = {
+        "horizon_s": 60,
+        "sample_count": 100,
+        "mean_return": 0.003,
+        "m2_return": 0.0001,
+    }
+    with patch(
+        "app.services.trading.fast_path.settings.load",
+        return_value=_stub_fp_settings(
+            enabled=True,
+            taker_fee_bps=5.0,
+            live_fee_enabled=True,
+        ),
+    ), patch(
+        "app.services.coinbase_service.get_fee_rates_bps",
+        return_value={
+            "maker_fee_bps": 40.0,
+            "taker_fee_bps": bad_live_taker_fee,
+            "pricing_tier": "Broken",
+        },
+    ), patch(
+        "app.services.trading.fast_path.calibration._fetch_bucket_rows",
+        return_value=[fake_row],
+    ), patch(
+        "app.services.trading.fast_path.calibration._best_sharpe_row",
+        return_value=fake_row,
+    ), patch(
+        "app.services.trading.fast_path.decay_miner.score_bucket",
+        return_value="high",
+    ):
+        result = gate_cost_aware_admission(_alert(), _ctx(spread_bps=5.0))
+
+    assert result.allow is True
+    assert result.detail["fee_source"] == "settings_fallback"
+    assert result.detail["fee_error"] == "live_fee_invalid:taker_fee_bps"
+    assert result.detail["fee_bps"] == pytest.approx(5.0)
+    assert result.detail["cost_bps"] == pytest.approx(20.0)
+
+
 # ---------------------------------------------------------------------------
 # Best-row mean below 2x cost -> reject
 # ---------------------------------------------------------------------------

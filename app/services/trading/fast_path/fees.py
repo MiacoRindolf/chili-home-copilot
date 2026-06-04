@@ -6,11 +6,14 @@ depend on hand-entered Coinbase constants.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
 
 MAKER_EXECUTION_MODES = frozenset({"maker_only", "maker_first_then_taker"})
+DEFAULT_STATIC_MAKER_FEE_BPS = 40.0
+DEFAULT_STATIC_TAKER_FEE_BPS = 60.0
 
 
 @dataclass(frozen=True)
@@ -32,11 +35,36 @@ class FastPathFeeRates:
 
 def _settings_rates(settings: Any, *, source: str, error: str = "") -> FastPathFeeRates:
     return FastPathFeeRates(
-        maker_fee_bps=float(getattr(settings, "cost_aware_maker_fee_bps", 0.0) or 0.0),
-        taker_fee_bps=float(getattr(settings, "cost_aware_taker_fee_bps", 0.0) or 0.0),
+        maker_fee_bps=_setting_fee_bps(
+            settings,
+            "cost_aware_maker_fee_bps",
+            DEFAULT_STATIC_MAKER_FEE_BPS,
+        ),
+        taker_fee_bps=_setting_fee_bps(
+            settings,
+            "cost_aware_taker_fee_bps",
+            DEFAULT_STATIC_TAKER_FEE_BPS,
+        ),
         source=source,
         error=error,
     )
+
+
+def _nonnegative_fee_bps(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        fee_bps = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(fee_bps) or fee_bps < 0.0:
+        return None
+    return fee_bps
+
+
+def _setting_fee_bps(settings: Any, name: str, default: float) -> float:
+    fee_bps = _nonnegative_fee_bps(getattr(settings, name, default))
+    return default if fee_bps is None else fee_bps
 
 
 def effective_fee_rates(settings: Any) -> FastPathFeeRates:
@@ -58,16 +86,27 @@ def effective_fee_rates(settings: Any) -> FastPathFeeRates:
         )
 
     settings_fallback = _settings_rates(settings, source="settings")
-    maker_fee_bps = float(
-        live.get("maker_fee_bps", settings_fallback.maker_fee_bps)
-        if live.get("maker_fee_bps") is not None
-        else settings_fallback.maker_fee_bps
-    )
-    taker_fee_bps = float(
-        live.get("taker_fee_bps", settings_fallback.taker_fee_bps)
-        if live.get("taker_fee_bps") is not None
-        else settings_fallback.taker_fee_bps
-    )
+    invalid_live_keys: list[str] = []
+    maker_fee_bps = settings_fallback.maker_fee_bps
+    taker_fee_bps = settings_fallback.taker_fee_bps
+    if "maker_fee_bps" in live:
+        live_maker_fee_bps = _nonnegative_fee_bps(live.get("maker_fee_bps"))
+        if live_maker_fee_bps is None:
+            invalid_live_keys.append("maker_fee_bps")
+        else:
+            maker_fee_bps = live_maker_fee_bps
+    if "taker_fee_bps" in live:
+        live_taker_fee_bps = _nonnegative_fee_bps(live.get("taker_fee_bps"))
+        if live_taker_fee_bps is None:
+            invalid_live_keys.append("taker_fee_bps")
+        else:
+            taker_fee_bps = live_taker_fee_bps
+    if invalid_live_keys:
+        return _settings_rates(
+            settings,
+            source="settings_fallback",
+            error="live_fee_invalid:" + ",".join(invalid_live_keys),
+        )
     return FastPathFeeRates(
         maker_fee_bps=maker_fee_bps,
         taker_fee_bps=taker_fee_bps,

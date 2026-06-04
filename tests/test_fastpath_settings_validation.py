@@ -71,6 +71,47 @@ def test_cost_aware_taker_fee_bps_env_override_works():
     assert loaded.cost_aware_taker_fee_bps == 15.0
 
 
+@pytest.mark.parametrize(
+    ("env_name", "attr", "default"),
+    [
+        (
+            "CHILI_FAST_PATH_COST_AWARE_TAKER_FEE_BPS",
+            "cost_aware_taker_fee_bps",
+            60.0,
+        ),
+        (
+            "CHILI_FAST_PATH_COST_AWARE_MAKER_FEE_BPS",
+            "cost_aware_maker_fee_bps",
+            40.0,
+        ),
+    ],
+)
+@pytest.mark.parametrize("raw", ["-0.01", "-5", "nan", "inf", "-inf", "bad"])
+def test_cost_aware_fee_env_rejects_negative_or_non_finite_values(
+    env_name,
+    attr,
+    default,
+    raw,
+):
+    with mock.patch.dict(os.environ, {env_name: raw}, clear=True):
+        loaded = load()
+    assert getattr(loaded, attr) == default
+
+
+@pytest.mark.parametrize(
+    ("env_name", "attr"),
+    [
+        ("CHILI_FAST_PATH_COST_AWARE_TAKER_FEE_BPS", "cost_aware_taker_fee_bps"),
+        ("CHILI_FAST_PATH_COST_AWARE_MAKER_FEE_BPS", "cost_aware_maker_fee_bps"),
+    ],
+)
+@pytest.mark.parametrize("raw", ["0", "0.0", "8.5"])
+def test_cost_aware_fee_env_accepts_nonnegative_values(env_name, attr, raw):
+    with mock.patch.dict(os.environ, {env_name: raw}, clear=True):
+        loaded = load()
+    assert getattr(loaded, attr) == float(raw)
+
+
 @pytest.mark.parametrize("raw", ["nan", "inf", "-inf", "1e309"])
 def test_float_env_loader_rejects_non_finite_values(raw):
     with mock.patch.dict(

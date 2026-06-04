@@ -627,7 +627,7 @@ def load() -> FastPathSettings:
             "CHILI_FAST_PATH_UNIVERSE_MIN_TRADES_24H", 1_000),
         cost_aware_admission_enabled=_env_bool(
             "CHILI_FAST_PATH_COST_AWARE_ADMISSION_ENABLED", False),
-        cost_aware_taker_fee_bps=_env_float(
+        cost_aware_taker_fee_bps=_env_nonnegative_float(
             "CHILI_FAST_PATH_COST_AWARE_TAKER_FEE_BPS", 60.0),
         cost_aware_live_fee_enabled=_env_bool(
             "CHILI_FAST_PATH_COST_AWARE_LIVE_FEE_ENABLED", False),
@@ -635,7 +635,7 @@ def load() -> FastPathSettings:
         execution_mode=(
             os.environ.get("CHILI_FAST_PATH_EXECUTION_MODE") or "taker"
         ).strip().lower(),
-        cost_aware_maker_fee_bps=_env_float(
+        cost_aware_maker_fee_bps=_env_nonnegative_float(
             "CHILI_FAST_PATH_COST_AWARE_MAKER_FEE_BPS", 40.0),
         live_alpha_evidence_gate_enabled=_env_bool(
             "CHILI_FAST_PATH_LIVE_ALPHA_EVIDENCE_GATE_ENABLED", True),
