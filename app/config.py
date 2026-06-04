@@ -2078,6 +2078,21 @@ class Settings(BaseSettings):
         le=86_400,
         validation_alias=AliasChoices("CHILI_MESH_CRITICAL_ALERT_COOLDOWN_SECONDS"),
     )
+    mesh_daily_llm_cap: int = Field(
+        default=50,
+        ge=0,
+        le=500,
+        validation_alias=AliasChoices("MESH_DAILY_LLM_CAP", "CHILI_MESH_DAILY_LLM_CAP"),
+    )
+    mesh_teacher_queue_pressure_block_fraction: float = Field(
+        default=0.8,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices(
+            "MESH_TEACHER_QUEUE_PRESSURE_BLOCK_FRACTION",
+            "CHILI_MESH_TEACHER_QUEUE_PRESSURE_BLOCK_FRACTION",
+        ),
+    )
 
     # Robinhood spot venue adapter (execution layer; equities via robin_stocks).
     chili_robinhood_spot_adapter_enabled: bool = Field(

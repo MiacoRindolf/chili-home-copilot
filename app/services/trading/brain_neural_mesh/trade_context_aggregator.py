@@ -35,8 +35,9 @@ from .graduation import (
     update_stats,
 )
 
-# Daily GPT-5.4 cost cap (0 = unlimited; user will tune later)
-DEFAULT_DAILY_LLM_CAP = 0
+# Daily GPT-5.4 cost cap (0 = unlimited for emergency override).
+DEFAULT_DAILY_LLM_CAP = 50
+DEFAULT_TEACHER_QUEUE_PRESSURE_BLOCK_FRACTION = 0.8
 
 # ── In-memory cost / cache tracking ───────────────────────────────
 
@@ -67,6 +68,42 @@ def _increment_daily_calls() -> None:
     old_keys = [k for k in _daily_llm_calls if k != key]
     for k in old_keys:
         del _daily_llm_calls[k]
+
+
+def _teacher_blocked_by_queue_pressure(db: Session | None) -> bool:
+    if db is None:
+        return False
+    try:
+        from ....config import settings
+
+        block_fraction = float(
+            getattr(
+                settings,
+                "mesh_teacher_queue_pressure_block_fraction",
+                DEFAULT_TEACHER_QUEUE_PRESSURE_BLOCK_FRACTION,
+            )
+            or 0.0
+        )
+    except Exception:
+        block_fraction = DEFAULT_TEACHER_QUEUE_PRESSURE_BLOCK_FRACTION
+    if block_fraction <= 0.0:
+        return False
+    try:
+        from .repository import MAX_PENDING_QUEUE_DEPTH, pending_queue_depth
+
+        max_depth = max(1, int(MAX_PENDING_QUEUE_DEPTH))
+        pressure = pending_queue_depth(db) / max_depth
+        if pressure >= min(1.0, block_fraction):
+            _log.info(
+                "%s teacher LLM skipped: activation queue pressure %.2f >= %.2f",
+                LOG_PREFIX,
+                pressure,
+                block_fraction,
+            )
+            return True
+    except Exception:
+        _log.debug("%s teacher queue-pressure probe failed", LOG_PREFIX, exc_info=True)
+    return False
 
 
 def _get_graduation_state(state: BrainNodeState) -> dict[str, Any]:
@@ -261,8 +298,10 @@ def handle_trade_context(
 
     use_teacher = should_call_teacher(stage)
 
+    teacher_allowed = use_teacher and not _teacher_blocked_by_queue_pressure(db)
+
     if stage == "bootstrap" or stage == "demoted":
-        if use_teacher:
+        if teacher_allowed:
             teacher_decision = _call_teacher_llm(children)
         if teacher_decision:
             final_decision = teacher_decision
@@ -273,7 +312,7 @@ def handle_trade_context(
 
     else:  # shadow or graduated
         final_decision = mechanical_decision
-        if use_teacher:
+        if teacher_allowed:
             teacher_decision = _call_teacher_llm(children)
             if teacher_decision and mechanical_decision:
                 update_stats(grad, mechanical_decision, teacher_decision)
