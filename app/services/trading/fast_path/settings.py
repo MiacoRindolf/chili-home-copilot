@@ -53,9 +53,16 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-def _env_positive_int(name: str, default: int) -> int:
+def _env_positive_int(
+    name: str,
+    default: int,
+    *,
+    max_value: int | None = None,
+) -> int:
     value = _env_int(name, default)
     if isinstance(value, bool) or value <= 0:
+        return default
+    if max_value is not None and value > max_value:
         return default
     return value
 
@@ -540,7 +547,11 @@ def load() -> FastPathSettings:
         batch_interval_ms=_env_positive_int(
             "CHILI_FAST_PATH_BATCH_INTERVAL_MS", 200),
         cb_threshold=_env_positive_int("CHILI_FAST_PATH_CB_THRESHOLD", 5),
-        healthz_port=_env_positive_int("CHILI_FAST_PATH_HEALTHZ_PORT", 8090),
+        healthz_port=_env_positive_int(
+            "CHILI_FAST_PATH_HEALTHZ_PORT",
+            8090,
+            max_value=65535,
+        ),
         metrics_log_interval_s=_env_positive_int(
             "CHILI_FAST_PATH_METRICS_INTERVAL_S", 60),
         # f-fastpath-universe-rotation (2026-05-07)

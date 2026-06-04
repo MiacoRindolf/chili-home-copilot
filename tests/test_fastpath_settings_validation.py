@@ -154,6 +154,19 @@ def test_core_runtime_int_env_rejects_non_positive_values(
     assert getattr(loaded, attr) == default
 
 
+@pytest.mark.parametrize("raw", ["65536", "999999"])
+def test_healthz_port_env_rejects_out_of_range_values(raw):
+    with mock.patch.dict(os.environ, {"CHILI_FAST_PATH_HEALTHZ_PORT": raw}):
+        loaded = load()
+    assert loaded.healthz_port == 8090
+
+
+def test_healthz_port_env_accepts_highest_valid_value():
+    with mock.patch.dict(os.environ, {"CHILI_FAST_PATH_HEALTHZ_PORT": "65535"}):
+        loaded = load()
+    assert loaded.healthz_port == 65535
+
+
 def test_universe_empty_fallback_env_override_works():
     with mock.patch.dict(
         os.environ,
