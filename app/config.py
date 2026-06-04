@@ -553,6 +553,48 @@ class Settings(BaseSettings):
     brain_work_max_attempts_default: int = 5
     brain_work_retry_base_seconds: int = 30
     brain_work_retry_multiplier: int = 2
+    brain_work_dead_letter_recovery_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("BRAIN_WORK_DEAD_LETTER_RECOVERY_ENABLED"),
+    )
+    brain_work_dead_letter_recovery_limit: int = Field(
+        default=8,
+        ge=0,
+        le=10_000,
+        validation_alias=AliasChoices("BRAIN_WORK_DEAD_LETTER_RECOVERY_LIMIT"),
+    )
+    brain_work_dead_letter_recovery_max_per_event: int = Field(
+        default=3,
+        ge=0,
+        le=10_000,
+        validation_alias=AliasChoices("BRAIN_WORK_DEAD_LETTER_RECOVERY_MAX_PER_EVENT"),
+    )
+    brain_work_dead_letter_recovery_delay_seconds: int = Field(
+        default=10,
+        ge=0,
+        le=86_400 * 30,
+        validation_alias=AliasChoices("BRAIN_WORK_DEAD_LETTER_RECOVERY_DELAY_SECONDS"),
+    )
+    brain_work_dead_letter_recovery_cap_reset_delay_seconds: int = Field(
+        default=3600,
+        ge=0,
+        le=86_400 * 30,
+        validation_alias=AliasChoices(
+            "BRAIN_WORK_DEAD_LETTER_RECOVERY_CAP_RESET_DELAY_SECONDS"
+        ),
+    )
+    brain_work_dead_letter_recovery_max_cap_resets: int = Field(
+        default=2,
+        ge=0,
+        le=10_000,
+        validation_alias=AliasChoices(
+            "BRAIN_WORK_DEAD_LETTER_RECOVERY_MAX_CAP_RESETS"
+        ),
+    )
+    brain_work_dead_letter_reuse_dedupe_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("BRAIN_WORK_DEAD_LETTER_REUSE_DEDUPE_ENABLED"),
+    )
     # When True, run_learning_cycle skips in-cycle queue drain; brain-worker work-ledger batch owns it.
     # Requires brain_work_ledger table to exist; set False to drain queue in-cycle.
     brain_work_delegate_queue_from_cycle: bool = False

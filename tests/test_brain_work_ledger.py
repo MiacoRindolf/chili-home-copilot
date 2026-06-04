@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+from app.config import Settings
 from app.models.trading import BrainWorkEvent
 from app.services.trading.brain_work import ledger as ledger_mod
 from app.services.trading.brain_work.emitters import emit_backtest_requested_for_pattern
@@ -19,6 +20,59 @@ from app.services.trading.brain_work.ledger import (
     recover_retryable_dead_work,
     release_stale_leases,
 )
+
+
+def test_dead_letter_recovery_settings_drive_safety_gates(monkeypatch) -> None:
+    monkeypatch.setenv("BRAIN_WORK_DEAD_LETTER_RECOVERY_ENABLED", "true")
+    monkeypatch.setenv("BRAIN_WORK_DEAD_LETTER_RECOVERY_LIMIT", "11")
+    monkeypatch.setenv("BRAIN_WORK_DEAD_LETTER_RECOVERY_MAX_PER_EVENT", "7")
+    monkeypatch.setenv("BRAIN_WORK_DEAD_LETTER_RECOVERY_DELAY_SECONDS", "45")
+    monkeypatch.setenv(
+        "BRAIN_WORK_DEAD_LETTER_RECOVERY_CAP_RESET_DELAY_SECONDS",
+        "120",
+    )
+    monkeypatch.setenv("BRAIN_WORK_DEAD_LETTER_RECOVERY_MAX_CAP_RESETS", "4")
+    monkeypatch.setenv("BRAIN_WORK_DEAD_LETTER_REUSE_DEDUPE_ENABLED", "false")
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    monkeypatch.setattr(ledger_mod, "settings", settings)
+
+    assert settings.brain_work_dead_letter_recovery_enabled is True
+    assert settings.brain_work_dead_letter_recovery_limit == 11
+    assert ledger_mod._dead_recovery_max_per_event() == 7
+    assert ledger_mod._dead_recovery_delay_seconds() == 45
+    assert ledger_mod._dead_recovery_cap_reset_delay_seconds() == 120
+    assert ledger_mod._dead_recovery_max_cap_resets() == 4
+    assert (
+        ledger_mod._reuse_retryable_dead_dedupe(
+            object(),
+            event_type="backtest_requested",
+            dedupe_key="bt_req:settings-disabled",
+            payload={},
+            lease_scope="backtest",
+            max_attempts=5,
+        )
+        is None
+    )
+
+    monkeypatch.setenv("BRAIN_WORK_DEAD_LETTER_RECOVERY_LIMIT", "0")
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    monkeypatch.setattr(ledger_mod, "settings", settings)
+    assert ledger_mod.recover_retryable_dead_work(object()) == {
+        "ok": True,
+        "enabled": True,
+        "recovered": 0,
+        "ids": [],
+    }
+
+    monkeypatch.setenv("BRAIN_WORK_DEAD_LETTER_RECOVERY_ENABLED", "false")
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    monkeypatch.setattr(ledger_mod, "settings", settings)
+    assert ledger_mod.recover_retryable_dead_work(object()) == {
+        "ok": True,
+        "enabled": False,
+        "recovered": 0,
+        "ids": [],
+    }
 
 
 def test_enqueue_work_open_dedupe_second_returns_none(db) -> None:
