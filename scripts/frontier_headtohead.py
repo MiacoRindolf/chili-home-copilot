@@ -196,6 +196,127 @@ def test_strings():
     assert dedupe(["b", "a", "b", "c"]) == ["b", "a", "c"]
 ''',
     },
+    {
+        "id": "lru_cache",
+        "buggy": '''\
+class LRUCache:
+    def __init__(self, capacity):
+        self.capacity = capacity
+        self.data = {}
+        self.order = []
+
+    def get(self, key):
+        if key not in self.data:
+            return -1
+        return self.data[key]
+
+    def put(self, key, value):
+        if key in self.data:
+            self.order.remove(key)
+        elif len(self.data) >= self.capacity:
+            del self.data[self.order.pop(0)]
+        self.data[key] = value
+        self.order.append(key)
+''',
+        "fixed": '''\
+class LRUCache:
+    def __init__(self, capacity):
+        self.capacity = capacity
+        self.data = {}
+        self.order = []
+
+    def get(self, key):
+        if key not in self.data:
+            return -1
+        self.order.remove(key)
+        self.order.append(key)
+        return self.data[key]
+
+    def put(self, key, value):
+        if key in self.data:
+            self.order.remove(key)
+        elif len(self.data) >= self.capacity:
+            del self.data[self.order.pop(0)]
+        self.data[key] = value
+        self.order.append(key)
+''',
+        "test": '''\
+from mod import LRUCache
+
+def test_eviction_respects_get_recency():
+    c = LRUCache(2)
+    c.put(1, 1)
+    c.put(2, 2)
+    assert c.get(1) == 1          # touch 1 -> 2 is now least-recent
+    c.put(3, 3)                   # must evict 2, not 1
+    assert c.get(2) == -1
+    assert c.get(1) == 1
+    assert c.get(3) == 3
+
+def test_update_existing():
+    c = LRUCache(2)
+    c.put(1, 1)
+    c.put(2, 2)
+    c.put(1, 10)
+    c.put(3, 3)                   # evicts 2 (1 was just updated)
+    assert c.get(2) == -1
+    assert c.get(1) == 10
+''',
+    },
+    {
+        "id": "parse_csv",
+        "buggy": '''\
+def parse_csv(line):
+    return line.split(",")
+''',
+        "fixed": '''\
+def parse_csv(line):
+    out = []
+    field = []
+    i = 0
+    in_quotes = False
+    while i < len(line):
+        ch = line[i]
+        if in_quotes:
+            if ch == '"':
+                if i + 1 < len(line) and line[i + 1] == '"':
+                    field.append('"')
+                    i += 2
+                    continue
+                in_quotes = False
+                i += 1
+                continue
+            field.append(ch)
+            i += 1
+        elif ch == '"':
+            in_quotes = True
+            i += 1
+        elif ch == ",":
+            out.append("".join(field))
+            field = []
+            i += 1
+        else:
+            field.append(ch)
+            i += 1
+    out.append("".join(field))
+    return out
+''',
+        "test": '''\
+from mod import parse_csv
+
+def test_simple():
+    assert parse_csv("a,b,c") == ["a", "b", "c"]
+
+def test_quoted_comma():
+    assert parse_csv('a,"b,c",d') == ["a", "b,c", "d"]
+
+def test_escaped_quote():
+    assert parse_csv('"she said ""hi""",x') == ['she said "hi"', "x"]
+
+def test_empty_fields():
+    assert parse_csv("a,,c") == ["a", "", "c"]
+''',
+    },
 ]
 
 SYSTEM = (
