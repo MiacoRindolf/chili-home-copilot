@@ -4,8 +4,10 @@ import json
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy import event
 
+from app.config import Settings
 from app.models.trading import AutoTraderRun, BreakoutAlert, ScanPattern
 from app.services.trading.auto_trader_rules import _realized_exit_geometry
 from app.services.trading.learning import (
@@ -416,6 +418,41 @@ def test_time_decay_edge_miss_report_uses_paper_geometry_without_parent_payoff()
     assert cfg["reward_risk"] == 2.0
     assert cfg["sample_n"] == 3
     assert cfg["paper_trade_ids"] == [101, 102, 103]
+
+
+def test_time_decay_tighten_fraction_setting_drives_learned_geometry(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CHILI_EDGE_EVOLUTION_TIME_DECAY_TIGHTEN_FRACTION", "0.60")
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    monkeypatch.setattr("app.config.settings", settings)
+
+    pat = SimpleNamespace(
+        id=123,
+        corrected_trade_count=6,
+        corrected_avg_return_pct=0.77,
+        trade_count=6,
+        avg_winner_pct=None,
+        avg_loser_pct=None,
+        payoff_ratio=None,
+        payoff_ratio_n=0,
+    )
+
+    cfg, reason = _learned_exit_config_from_edge_report(
+        pat,
+        _time_decay_edge_miss_report(),
+    )
+
+    assert settings.chili_edge_evolution_time_decay_tighten_fraction == pytest.approx(
+        0.60
+    )
+    assert reason == "ok"
+    assert cfg is not None
+    assert cfg["basis"] == "paper_time_decay_shadow_exit_geometry"
+    assert cfg["target_reward_fraction"] == pytest.approx(0.03)
+    assert cfg["stop_loss_fraction"] == pytest.approx(0.012)
+    assert cfg["reward_risk"] == pytest.approx(2.5)
+    assert cfg["tighten_fraction"] == pytest.approx(0.60)
 
 
 def _time_decay_edge_miss_report(**overrides) -> dict:

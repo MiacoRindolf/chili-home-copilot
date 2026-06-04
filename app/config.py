@@ -3670,6 +3670,14 @@ class Settings(BaseSettings):
         le=100.0,
         validation_alias=AliasChoices("CHILI_EDGE_EVOLUTION_MIN_REWARD_RISK"),
     )
+    chili_edge_evolution_time_decay_tighten_fraction: float = Field(
+        default=0.75,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices(
+            "CHILI_EDGE_EVOLUTION_TIME_DECAY_TIGHTEN_FRACTION"
+        ),
+    )
     chili_edge_evolution_min_directional_sample_n: float = Field(
         default=5.0,
         ge=0.0,
