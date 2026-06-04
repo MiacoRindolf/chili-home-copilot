@@ -15,6 +15,7 @@ from app.services.trading.auto_trader_rules import (
     RuleGateSettings,
     _max_execution_stop_loss_fraction,
     _non_positive_reprice_marker,
+    _positive_reprice_entry_enabled_for,
     alert_confidence_from_score,
     autotrader_paper_realized_pnl_today_et,
     autotrader_realized_pnl_today_et,
@@ -160,6 +161,26 @@ def test_rule_gate_settings_reads_typed_daily_loss_pct_env(monkeypatch):
 
     assert cfg.chili_autotrader_daily_loss_cap_pct == 0.75
     assert gate_settings.daily_loss_cap_pct == 0.75
+
+
+def test_positive_reprice_entry_reads_typed_env(monkeypatch):
+    monkeypatch.setenv("CHILI_AUTOTRADER_POSITIVE_REPRICE_ENTRY_ENABLED", "true")
+    monkeypatch.setenv("CHILI_AUTOTRADER_POSITIVE_REPRICE_ENTRY_ASSET_TYPES", "crypto")
+
+    cfg = Settings(
+        database_url="postgresql://chili:chili@localhost:5433/chili_test",
+        _env_file=None,
+    )
+
+    assert _positive_reprice_entry_enabled_for(cfg, "crypto") is True
+    assert _positive_reprice_entry_enabled_for(cfg, "stock") is False
+
+    monkeypatch.setenv("CHILI_AUTOTRADER_POSITIVE_REPRICE_ENTRY_ENABLED", "false")
+    disabled_cfg = Settings(
+        database_url="postgresql://chili:chili@localhost:5433/chili_test",
+        _env_file=None,
+    )
+    assert _positive_reprice_entry_enabled_for(disabled_cfg, "crypto") is False
 
 
 def test_count_autotrader_v1_open_treats_working_as_active():

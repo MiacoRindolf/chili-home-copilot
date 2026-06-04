@@ -3341,6 +3341,23 @@ class Settings(BaseSettings):
             "CHILI_AUTOTRADER_FAVORABLE_ENTRY_DRIFT_MAX_PCT"
         ),
     )
+    chili_autotrader_positive_reprice_entry_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_POSITIVE_REPRICE_ENTRY_ENABLED"
+        ),
+        description=(
+            "Allow adverse slipped entries to proceed only after rechecking "
+            "that expected net edge remains positive at the current price."
+        ),
+    )
+    chili_autotrader_positive_reprice_entry_asset_types: str = Field(
+        default="stock,crypto",
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_POSITIVE_REPRICE_ENTRY_ASSET_TYPES"
+        ),
+        description="Comma-separated asset types eligible for positive-edge slippage reprice acceptance.",
+    )
     chili_autotrader_slippage_reprice_cooldown_enabled: bool = Field(
         default=AUTOTRADER_SLIPPAGE_REPRICE_COOLDOWN_DEFAULT_ENABLED,
         validation_alias=AliasChoices(
