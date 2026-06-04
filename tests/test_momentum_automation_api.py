@@ -389,6 +389,14 @@ def test_opportunities_hide_scan_only_without_symbol_viability(paired_client, db
         lambda symbol: True,
     )
 
+    def _unexpected_auto_assess(*args, **kwargs):
+        raise AssertionError("GET must stay cache-only")
+
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.opportunities._auto_assess_scan_only",
+        _unexpected_auto_assess,
+    )
+
     r = c.get("/api/trading/momentum/opportunities?mode=paper&asset_class=all&limit=20")
     assert r.status_code == 200
     body = r.json()

@@ -305,7 +305,6 @@ def list_momentum_opportunities(
     hidden_scan_only_count = 0
     visible: list[dict[str, Any]] = []
     discovered: list[dict[str, Any]] = []
-    scan_only_tickers: list[str] = []
     hidden_market_closed_count = 0
     hidden_non_actionable_count = 0
 
@@ -318,7 +317,7 @@ def list_momentum_opportunities(
         viability_pair = viability_by_symbol.get(sym)
         if viability_pair is None and sym in scan_map:
             hidden_scan_only_count += 1
-            scan_only_tickers.append(sym)
+            # Keep this GET endpoint cache-only; refresh workers own viability writes.
             discovered.append({
                 "symbol": sym,
                 "asset_class": asset_class,
@@ -392,9 +391,6 @@ def list_momentum_opportunities(
 
     visible.sort(key=_sort_key, reverse=True)
     discovered.sort(key=lambda d: float((d.get("scan_context") or {}).get("score") or 0), reverse=True)
-
-    if scan_only_tickers:
-        _auto_assess_scan_only(db, scan_only_tickers[:_INLINE_ASSESS_MAX_TICKERS])
 
     pipeline = get_viability_pipeline_health(db)
     return {
