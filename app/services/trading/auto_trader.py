@@ -927,12 +927,58 @@ def _autotrader_tick_soft_budget_seconds() -> int:
     )
 
 
-def _bounded_breakout_alert_count(query: Any, *, cap: int) -> int:
+def _bounded_breakout_alert_count(
+    query: Any,
+    *,
+    cap: int,
+    tick_budget_s: float | None = None,
+    context: str = "breakout_alert_count",
+) -> int:
     cap_i = max(0, int(cap))
     if cap_i <= 0:
         return 0
-    rows = query.with_entities(BreakoutAlert.id).limit(cap_i + 1).all()
-    return min(len(rows), cap_i)
+    session = getattr(query, "session", None)
+    timeout_ms: int | None = None
+    failed = False
+    try:
+        if tick_budget_s is not None and session is not None:
+            timeout_ms = _apply_candidate_select_statement_timeout(
+                session,
+                tick_budget_s=tick_budget_s,
+            )
+        rows = query.with_entities(BreakoutAlert.id).limit(cap_i + 1).all()
+        return min(len(rows), cap_i)
+    except DBAPIError as exc:
+        failed = True
+        if session is not None:
+            try:
+                session.rollback()
+            except Exception:
+                logger.debug(
+                    "[autotrader] bounded alert count rollback failed context=%s",
+                    context,
+                    exc_info=True,
+                )
+        logger.warning(
+            "[autotrader] bounded alert count unavailable context=%s "
+            "timeout_ms=%s cap=%s error=%s",
+            context,
+            timeout_ms,
+            cap_i,
+            type(exc).__name__,
+            exc_info=True,
+        )
+        return cap_i
+    finally:
+        if not failed and session is not None:
+            try:
+                _reset_candidate_select_statement_timeout(session, timeout_ms)
+            except Exception:
+                logger.debug(
+                    "[autotrader] bounded alert count timeout reset failed context=%s",
+                    context,
+                    exc_info=True,
+                )
 
 
 def _candidate_actionability_state(
@@ -4798,12 +4844,16 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
                     BreakoutAlert.alerted_at >= stock_defer["cutoff"]
                 ),
                 cap=stock_defer_count_cap,
+                tick_budget_s=tick_budget_s,
+                context="stock_deferred_pool",
             )
         stock_stale_unprocessed = _bounded_breakout_alert_count(
             stock_unprocessed_base.filter(
                 BreakoutAlert.alerted_at < stock_defer["cutoff"]
             ),
             cap=stock_defer_count_cap,
+            tick_budget_s=tick_budget_s,
+            context="stock_stale_unprocessed",
         )
     effective_batch_limit, fresh_burst_meta = _fresh_candidate_burst_batch_size(
         base_limit=batch_limit,

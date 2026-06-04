@@ -1,17 +1,23 @@
 from types import SimpleNamespace
 
+from sqlalchemy.exc import DBAPIError
+
 from app.services.trading import auto_trader as at_mod
 
 
 class _FakePostgresSession:
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.rollback_count = 0
 
     def get_bind(self):
         return SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
 
     def execute(self, statement):
         self.calls.append(str(statement))
+
+    def rollback(self):
+        self.rollback_count += 1
 
 
 class _FakeSqliteSession(_FakePostgresSession):
@@ -20,8 +26,16 @@ class _FakeSqliteSession(_FakePostgresSession):
 
 
 class _FakeAlertCountQuery:
-    def __init__(self, rows: int) -> None:
+    def __init__(
+        self,
+        rows: int,
+        *,
+        session: object | None = None,
+        error: Exception | None = None,
+    ) -> None:
         self.rows = rows
+        self.session = session
+        self.error = error
         self.limit_value: int | None = None
         self.with_entities_called = False
 
@@ -34,6 +48,8 @@ class _FakeAlertCountQuery:
         return self
 
     def all(self):
+        if self.error is not None:
+            raise self.error
         return [(i,) for i in range(self.rows)]
 
 
@@ -56,6 +72,36 @@ def test_bounded_breakout_alert_count_caps_without_exact_count() -> None:
     assert count == 3
     assert query.with_entities_called is True
     assert query.limit_value == 4
+
+
+def test_bounded_breakout_alert_count_times_out_conservatively(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_candidate_select_statement_timeout_ms",
+        1500,
+        raising=False,
+    )
+    session = _FakePostgresSession()
+    query = _FakeAlertCountQuery(
+        rows=0,
+        session=session,
+        error=DBAPIError("select", {}, Exception("statement timeout")),
+    )
+
+    count = at_mod._bounded_breakout_alert_count(
+        query,
+        cap=3,
+        tick_budget_s=15,
+        context="stock_stale_unprocessed",
+    )
+
+    assert count == 3
+    assert query.with_entities_called is True
+    assert query.limit_value == 4
+    assert session.calls == ["SET LOCAL statement_timeout = '1500ms'"]
+    assert session.rollback_count == 1
 
 
 def test_queue_pressure_floor_one_disables_shadow_suppression(monkeypatch) -> None:
