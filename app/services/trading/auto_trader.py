@@ -5965,6 +5965,10 @@ def _process_one_alert(
                 else:
                     setattr(alert, "_chili_pilot_bootstrap_recert_allowed", True)
             _allowed = _eligible_lifecycle_stages(live=live)
+            # Flag trade-eligibility so the stock momentum-context gate can
+            # exempt certified/promoted patterns — their (often mean-reversion)
+            # setups must not be dropped by the gap/volume momentum proxy.
+            setattr(alert, "_chili_pattern_trade_eligible", _stage in _allowed)
             if (
                 not bool(getattr(alert, "_chili_shadow_observation_only", False))
                 and _stage not in _allowed

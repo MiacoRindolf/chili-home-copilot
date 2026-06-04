@@ -193,6 +193,14 @@ class RuleGateSettings:
     stock_momentum_context_min_volume_ratio: float = (
         AUTOTRADER_STOCK_MOMENTUM_CONTEXT_MIN_VOLUME_RATIO_DEFAULT
     )
+    # When true, patterns already certified + promoted to a trade-eligible
+    # lifecycle skip this gate. The gap/relative-volume requirement is a
+    # momentum-surge proxy that systematically drops the mean-reversion setups
+    # (oversold bounce, IBS, BB reversion) that are a large share of the equity
+    # book's proven edge; those patterns have already cleared a far higher bar
+    # and still face the expected-edge gate downstream. Only weaker
+    # (non-eligible / shadow exploration) rows remain subject to the proxy.
+    stock_momentum_context_exempt_eligible: bool = True
 
     @classmethod
     def from_settings(cls, source: Any) -> "RuleGateSettings":
@@ -320,6 +328,10 @@ class RuleGateSettings:
                 lower=0.0,
                 upper=1000.0,
             ),
+            stock_momentum_context_exempt_eligible=safe_bool(
+                "chili_autotrader_stock_momentum_context_exempt_eligible",
+                cls.stock_momentum_context_exempt_eligible,
+            ),
         )
 
 
@@ -424,6 +436,15 @@ def _stock_momentum_context_gate(
     }
     if not bool(settings_snapshot.stock_momentum_context_gate_enabled):
         snap["inactive_reason"] = "disabled"
+        return True, None, snap
+    # Trade-eligible (certified + promoted) patterns are exempt: the gap/volume
+    # momentum proxy must not drop their (often mean-reversion) setups. They
+    # still face the expected-edge / PDT / regime / stop-width gates downstream.
+    if bool(settings_snapshot.stock_momentum_context_exempt_eligible) and bool(
+        getattr(alert, "_chili_pattern_trade_eligible", False)
+    ):
+        snap["inactive_reason"] = "pattern_trade_eligible_exempt"
+        snap["pattern_trade_eligible"] = True
         return True, None, snap
     flat, packet_present = _indicator_momentum_context_snapshot(alert)
     snap["small_cap_momentum_context_present"] = packet_present

@@ -3160,6 +3160,23 @@ class Settings(BaseSettings):
             "pressure-activated stock momentum-context gate."
         ),
     )
+    chili_autotrader_stock_momentum_context_exempt_eligible: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_STOCK_MOMENTUM_CONTEXT_EXEMPT_ELIGIBLE"
+        ),
+        description=(
+            "When true, patterns already certified + promoted to a trade-eligible "
+            "lifecycle (promoted/pilot/live) skip the stock momentum-context gate. "
+            "Its gap/relative-volume requirement is a momentum-surge proxy that "
+            "systematically drops the mean-reversion setups (oversold bounce, IBS, "
+            "BB reversion) that are a large share of the equity book's proven edge; "
+            "those patterns cleared a far higher bar and still face the "
+            "expected-edge gate downstream. Set false to restore the legacy "
+            "behavior where the proxy gates every stock candidate when the "
+            "candidate queue is saturated."
+        ),
+    )
     chili_autotrader_cost_gate_repeat_suppression_enabled: bool = Field(
         default=AUTOTRADER_COST_GATE_REPEAT_SUPPRESSION_DEFAULT_ENABLED,
         validation_alias=AliasChoices(
