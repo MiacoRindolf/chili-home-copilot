@@ -164,24 +164,41 @@ def load_resolved_context(
     rows = db.execute(
         text(
             """
-            SELECT DISTINCT ON (regime_dimension)
-                regime_dimension,
-                regime_label,
-                as_of_date,
-                window_days,
-                n_trades,
-                hit_rate,
-                mean_pnl_pct,
-                expectancy,
-                profit_factor,
-                has_confidence
-            FROM trading_pattern_regime_performance_daily
-            WHERE pattern_id = :pattern_id
-              AND regime_dimension = ANY(:dims)
-              AND as_of_date <= :as_of
-              AND as_of_date >= :cutoff
-              AND has_confidence = TRUE
-            ORDER BY regime_dimension, as_of_date DESC, id DESC
+            WITH requested_dims AS (
+                SELECT unnest(CAST(:dims AS text[])) AS regime_dimension
+            )
+            SELECT
+                requested_dims.regime_dimension,
+                latest.regime_label,
+                latest.as_of_date,
+                latest.window_days,
+                latest.n_trades,
+                latest.hit_rate,
+                latest.mean_pnl_pct,
+                latest.expectancy,
+                latest.profit_factor,
+                latest.has_confidence
+            FROM requested_dims
+            JOIN LATERAL (
+                SELECT
+                    regime_label,
+                    as_of_date,
+                    window_days,
+                    n_trades,
+                    hit_rate,
+                    mean_pnl_pct,
+                    expectancy,
+                    profit_factor,
+                    has_confidence
+                FROM trading_pattern_regime_performance_daily
+                WHERE pattern_id = :pattern_id
+                  AND regime_dimension = requested_dims.regime_dimension
+                  AND as_of_date <= :as_of
+                  AND as_of_date >= :cutoff
+                  AND has_confidence = TRUE
+                ORDER BY as_of_date DESC, id DESC
+                LIMIT 1
+            ) latest ON TRUE
             """
         ),
         {
