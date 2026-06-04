@@ -70,6 +70,16 @@ def test_cost_aware_taker_fee_bps_env_override_works():
     assert loaded.cost_aware_taker_fee_bps == 15.0
 
 
+@pytest.mark.parametrize("raw", ["nan", "inf", "-inf", "1e309"])
+def test_float_env_loader_rejects_non_finite_values(raw):
+    with mock.patch.dict(
+        os.environ,
+        {"CHILI_FAST_PATH_COST_AWARE_TAKER_FEE_BPS": raw},
+    ):
+        loaded = load()
+    assert loaded.cost_aware_taker_fee_bps == 60.0
+
+
 def test_cost_aware_live_fee_default_is_off_for_unit_determinism():
     assert FastPathSettings().cost_aware_live_fee_enabled is False
 

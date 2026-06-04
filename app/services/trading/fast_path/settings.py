@@ -491,9 +491,12 @@ def _env_float(name: str, default: float) -> float:
     if not raw:
         return default
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError:
         return default
+    if not math.isfinite(value):
+        return default
+    return value
 
 
 def _env_positive_float(
