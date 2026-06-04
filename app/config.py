@@ -556,6 +556,30 @@ class Settings(BaseSettings):
     # Per-handler dispatch budgets (ledger round processes execution_feedback_digest before backtests).
     brain_work_exec_feedback_batch_size: int = 3
     brain_work_exec_feedback_debounce_seconds: int = 45
+    brain_work_time_decay_exit_variant_sweep_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("BRAIN_WORK_TIME_DECAY_EXIT_VARIANT_SWEEP_ENABLED"),
+    )
+    brain_work_time_decay_exit_variant_sweep_lookback_hours: float = Field(
+        default=48.0,
+        ge=1.0,
+        le=24.0 * 30.0,
+        validation_alias=AliasChoices(
+            "BRAIN_WORK_TIME_DECAY_EXIT_VARIANT_SWEEP_LOOKBACK_HOURS"
+        ),
+    )
+    brain_work_time_decay_exit_variant_sweep_limit: int = Field(
+        default=25,
+        ge=0,
+        le=10_000,
+        validation_alias=AliasChoices("BRAIN_WORK_TIME_DECAY_EXIT_VARIANT_SWEEP_LIMIT"),
+    )
+    brain_work_time_decay_exit_variant_min_losses: int = Field(
+        default=2,
+        ge=1,
+        le=10_000,
+        validation_alias=AliasChoices("BRAIN_WORK_TIME_DECAY_EXIT_VARIANT_MIN_LOSSES"),
+    )
     brain_work_cash_deployment_producer_enabled: bool = True
     brain_work_cash_deployment_producer_interval_minutes: int = 30
     brain_work_cash_deployment_producer_window_days: int = 30

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.config import Settings
 from app.services.trading.brain_work import emitters, execution_hooks
 from app.services.trading.brain_work.execution_attribution import (
     paper_trade_close_attribution_dict,
@@ -483,3 +484,88 @@ def test_time_decay_exit_variant_sweep_enqueues_bounded_positive_edge_misses(
     assert result["skipped_not_shadow"] == 1
     assert work[0]["event_type"] == "exit_variant_refresh"
     assert work[0]["source"] == execution_hooks.TIME_DECAY_EXIT_VARIANT_SOURCE
+
+
+def test_time_decay_exit_variant_sweep_settings_drive_window_and_limit(
+    monkeypatch,
+) -> None:
+    work: list[dict[str, object]] = []
+    captured: dict[str, int] = {}
+
+    monkeypatch.setenv("BRAIN_WORK_TIME_DECAY_EXIT_VARIANT_SWEEP_ENABLED", "true")
+    monkeypatch.setenv("BRAIN_WORK_TIME_DECAY_EXIT_VARIANT_SWEEP_LOOKBACK_HOURS", "12.5")
+    monkeypatch.setenv("BRAIN_WORK_TIME_DECAY_EXIT_VARIANT_SWEEP_LIMIT", "1")
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    monkeypatch.setattr(execution_hooks, "settings", settings)
+
+    def _fake_profitability_work(_db, **kwargs):
+        work.append(kwargs)
+        return 900 + len(work)
+
+    monkeypatch.setattr(
+        "app.services.trading.edge_reliability.emit_targeted_profitability_work",
+        _fake_profitability_work,
+    )
+
+    eligible = SimpleNamespace(
+        id=91,
+        user_id=9,
+        scan_pattern_id=42,
+        paper_shadow_of_alert_id=77,
+        ticker="EDGE-USD",
+        pnl=-2.0,
+        pnl_pct=None,
+        entry_price=100.0,
+        exit_price=98.0,
+        quantity=1.0,
+        direction="long",
+        exit_reason="exit_engine_time_decay",
+        signal_json={
+            "paper_shadow": True,
+            "entry_edge": {"expected_net_pct": 3.2},
+        },
+        tca_entry_slippage_bps=None,
+        tca_exit_slippage_bps=None,
+    )
+
+    class _Query:
+        def filter(self, *_args):
+            return self
+
+        def order_by(self, *_args):
+            return self
+
+        def limit(self, limit):
+            captured["fetch_limit"] = int(limit)
+            return self
+
+        def all(self):
+            return [eligible, eligible]
+
+    class _Db:
+        def query(self, _model):
+            return _Query()
+
+    result = execution_hooks.enqueue_recent_time_decay_exit_variant_work(_Db())
+
+    assert settings.brain_work_time_decay_exit_variant_sweep_lookback_hours == (
+        pytest.approx(12.5)
+    )
+    assert settings.brain_work_time_decay_exit_variant_sweep_limit == 1
+    assert result["lookback_hours"] == pytest.approx(12.5)
+    assert result["limit"] == 1
+    assert result["checked"] == 1
+    assert result["queued"] == 1
+    assert captured["fetch_limit"] == (
+        execution_hooks.TIME_DECAY_EXIT_VARIANT_SWEEP_FETCH_MULTIPLIER
+    )
+
+    monkeypatch.setenv("BRAIN_WORK_TIME_DECAY_EXIT_VARIANT_SWEEP_ENABLED", "false")
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    monkeypatch.setattr(execution_hooks, "settings", settings)
+
+    assert execution_hooks.enqueue_recent_time_decay_exit_variant_work(_Db()) == {
+        "ok": True,
+        "skipped": True,
+        "reason": "disabled_by_setting",
+    }

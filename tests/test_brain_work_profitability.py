@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from app.config import Settings
 from app.services.trading.brain_work.handlers.profitability import (
     handle_exit_variant_refresh,
 )
@@ -334,6 +335,57 @@ def test_exit_variant_refresh_builds_report_from_time_decay_edge_misses(
     assert payload["created_child_ids"] == [9010]
     assert payload["variant_label"] == "edge-exit-time-decay"
     assert payload["loss_report"]["root_cause"] == "paper_time_decay_exit_thesis_mismatch"
+
+
+def test_time_decay_exit_variant_min_losses_setting_marks_thin_sample(
+    monkeypatch,
+) -> None:
+    from app.services.trading.brain_work.handlers import profitability
+
+    monkeypatch.setenv("BRAIN_WORK_TIME_DECAY_EXIT_VARIANT_MIN_LOSSES", "3")
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    monkeypatch.setattr("app.config.settings", settings)
+
+    class _Query:
+        def filter(self, *_args):
+            return self
+
+        def order_by(self, *_args):
+            return self
+
+        def limit(self, _limit):
+            return self
+
+        def all(self):
+            return []
+
+    class _Db:
+        def query(self, _model):
+            return _Query()
+
+    report = profitability._paper_time_decay_edge_miss_report(
+        _Db(),
+        pattern_id=537,
+        window_days=30,
+        payload={
+            "source": "paper_time_decay_edge_miss",
+            "cash_deployment_category": "positive_ev_time_decay_loss",
+            "asset_class": "crypto",
+            "expected_net_pct": 2.0,
+            "realized_return_pct": -2.0,
+            "pnl": -1.5,
+            "paper_trade_id": 11,
+            "ticker": "EDGE-USD",
+            "exit_reason": "exit_engine_time_decay",
+            "graduation_blocker": "exit_thesis_mismatch",
+        },
+    )
+
+    assert settings.brain_work_time_decay_exit_variant_min_losses == 3
+    assert report is not None
+    assert report["total_rejects"] == 1
+    assert report["min_rejects_for_variant"] == 3
+    assert report["thin_sample"] is True
 
 
 def test_exit_variant_refresh_surfaces_duplicate_refresh_diagnostics(
