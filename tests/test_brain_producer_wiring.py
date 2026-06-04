@@ -26,6 +26,7 @@ from unittest.mock import MagicMock
 import pytest
 from sqlalchemy import text
 
+from app.config import Settings
 from app.services.trading.brain_work import dispatcher as disp
 from app.services.trading.brain_work.dispatcher import (
     _maybe_run_dispatch_market_snapshots,
@@ -64,6 +65,39 @@ def _patch_run_snapshots(monkeypatch, *, daily=10, intraday=5, universe=42):
 
 
 # ── INTEGRATION TEST (LIVE PATH) ─────────────────────────────────────
+
+
+def test_profitability_dispatch_batch_settings_drive_limits(monkeypatch) -> None:
+    monkeypatch.setenv("BRAIN_WORK_EDGE_RELIABILITY_BATCH_SIZE", "6")
+    monkeypatch.setenv("BRAIN_WORK_RECERT_RESCUE_BATCH_SIZE", "5")
+    monkeypatch.setenv("BRAIN_WORK_EXIT_VARIANT_BATCH_SIZE", "4")
+    monkeypatch.setenv("BRAIN_WORK_PROVENANCE_BATCH_SIZE", "3")
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    monkeypatch.setattr(disp, "settings", settings)
+
+    limits = dict(disp._dispatch_limits())
+
+    assert settings.brain_work_edge_reliability_batch_size == 6
+    assert settings.brain_work_recert_rescue_batch_size == 5
+    assert settings.brain_work_exit_variant_batch_size == 4
+    assert settings.brain_work_provenance_batch_size == 3
+    assert limits["edge_reliability_refresh"] == 6
+    assert limits["recert_rescue_refresh"] == 5
+    assert limits["exit_variant_refresh"] == 4
+    assert limits["provenance_backfill"] == 3
+
+    overrides = dict(
+        disp._dispatch_limits(
+            max_edge_reliability=1,
+            max_recert_rescue=0,
+            max_exit_variant=2,
+            max_provenance=0,
+        )
+    )
+    assert overrides["edge_reliability_refresh"] == 1
+    assert overrides["recert_rescue_refresh"] == 0
+    assert overrides["exit_variant_refresh"] == 2
+    assert overrides["provenance_backfill"] == 0
 
 
 def test_integration_dispatch_round_emits_market_snapshots_batch(

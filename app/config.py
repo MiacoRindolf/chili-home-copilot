@@ -559,6 +559,30 @@ class Settings(BaseSettings):
     # Per-handler dispatch budgets (ledger round processes execution_feedback_digest before backtests).
     brain_work_exec_feedback_batch_size: int = 3
     brain_work_exec_feedback_debounce_seconds: int = 45
+    brain_work_edge_reliability_batch_size: int = Field(
+        default=4,
+        ge=0,
+        le=10_000,
+        validation_alias=AliasChoices("BRAIN_WORK_EDGE_RELIABILITY_BATCH_SIZE"),
+    )
+    brain_work_recert_rescue_batch_size: int = Field(
+        default=2,
+        ge=0,
+        le=10_000,
+        validation_alias=AliasChoices("BRAIN_WORK_RECERT_RESCUE_BATCH_SIZE"),
+    )
+    brain_work_exit_variant_batch_size: int = Field(
+        default=2,
+        ge=0,
+        le=10_000,
+        validation_alias=AliasChoices("BRAIN_WORK_EXIT_VARIANT_BATCH_SIZE"),
+    )
+    brain_work_provenance_batch_size: int = Field(
+        default=1,
+        ge=0,
+        le=10_000,
+        validation_alias=AliasChoices("BRAIN_WORK_PROVENANCE_BATCH_SIZE"),
+    )
     brain_work_time_decay_exit_variant_sweep_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("BRAIN_WORK_TIME_DECAY_EXIT_VARIANT_SWEEP_ENABLED"),
