@@ -2891,10 +2891,8 @@ def _paper_shadow_queue_pressure_suppression_reason(
         queue_pressure = float(out.get("candidate_queue_pressure") or 0.0)
     except (TypeError, ValueError):
         queue_pressure = 0.0
-    if (
-        not math.isfinite(queue_pressure)
-        or queue_pressure <= _paper_shadow_queue_pressure_floor()
-    ):
+    floor = _paper_shadow_queue_pressure_floor()
+    if not math.isfinite(queue_pressure) or floor >= 1.0 or queue_pressure < floor:
         return None
     out["paper_shadow_queue_pressure_suppressed"] = (
         int(out.get("paper_shadow_queue_pressure_suppressed") or 0) + 1
