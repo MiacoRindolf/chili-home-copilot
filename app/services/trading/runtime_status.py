@@ -5,11 +5,18 @@ import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import or_
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from ...config import (
+    AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS,
+    AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES,
+    AUTOTRADER_STALE_CANDIDATE_SWEEP_DEFAULT_SECONDS,
+    SECONDS_PER_MINUTE,
+    settings,
+)
 from ...models.core import BrainWorkerControl, BrokerSession
-from ...models.trading import BrainBatchJob
+from ...models.trading import AutoTraderRun, BrainBatchJob, BreakoutAlert
 from .batch_job_constants import (
     JOB_MOMENTUM_SCANNER,
     JOB_PATTERN_IMMINENT_SCANNER,
@@ -23,6 +30,7 @@ _STALE_BROKER_SYNC = 300
 _STALE_LEARNING = 3600
 _STALE_MARKET_DATA = 120
 _STALE_REGIME = 900
+_AUTOTRADER_STALE_MULTIPLIER = 3
 
 _SCANNER_JOB_TYPES = (
     JOB_PATTERN_IMMINENT_SCANNER,
@@ -260,6 +268,150 @@ def regime_status(db: Session) -> dict[str, Any]:
     )
 
 
+def _positive_int_setting(name: str, default: int) -> int:
+    try:
+        value = int(getattr(settings, name, default) or 0)
+    except (TypeError, ValueError):
+        value = int(default)
+    return max(0, value)
+
+
+def _autotrader_stale_threshold_seconds() -> int:
+    monitor_interval = _positive_int_setting(
+        "chili_autotrader_monitor_interval_seconds",
+        AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS,
+    )
+    stale_sweep_interval = _positive_int_setting(
+        "chili_autotrader_stale_candidate_sweep_interval_seconds",
+        AUTOTRADER_STALE_CANDIDATE_SWEEP_DEFAULT_SECONDS,
+    )
+    fresh_window = _positive_int_setting(
+        "chili_autotrader_fresh_candidate_fastlane_max_age_seconds",
+        AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS * _AUTOTRADER_STALE_MULTIPLIER,
+    )
+    base_cadence = max(
+        AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS,
+        monitor_interval,
+        stale_sweep_interval,
+        fresh_window,
+    )
+    scanner_cadence = AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES * SECONDS_PER_MINUTE
+    threshold = min(
+        scanner_cadence,
+        base_cadence * _AUTOTRADER_STALE_MULTIPLIER,
+    )
+
+    max_age_candidates = [
+        _positive_int_setting("chili_autotrader_stock_candidate_max_age_minutes", 0) * SECONDS_PER_MINUTE,
+        _positive_int_setting("chili_autotrader_non_stock_candidate_max_age_minutes", 0) * SECONDS_PER_MINUTE,
+    ]
+    bounded_candidate_ages = [age for age in max_age_candidates if age > 0]
+    if bounded_candidate_ages:
+        threshold = min(threshold, min(bounded_candidate_ages))
+    return max(AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS, int(threshold))
+
+
+def autotrader_status(db: Session) -> dict[str, Any]:
+    threshold = _autotrader_stale_threshold_seconds()
+    enabled = bool(getattr(settings, "chili_autotrader_enabled", False))
+    latest_run = (
+        db.query(AutoTraderRun)
+        .order_by(AutoTraderRun.created_at.desc(), AutoTraderRun.id.desc())
+        .first()
+    )
+    latest_run_at = _parse_dt(latest_run.created_at if latest_run is not None else None)
+    latest_alert = (
+        db.query(BreakoutAlert)
+        .filter(BreakoutAlert.alert_tier == "pattern_imminent")
+        .order_by(BreakoutAlert.alerted_at.desc(), BreakoutAlert.id.desc())
+        .first()
+    )
+    latest_alert_at = _parse_dt(latest_alert.alerted_at if latest_alert is not None else None)
+    stale_cutoff = datetime.utcnow() - timedelta(seconds=threshold)
+
+    backlog_q = (
+        db.query(BreakoutAlert)
+        .outerjoin(AutoTraderRun, AutoTraderRun.breakout_alert_id == BreakoutAlert.id)
+        .filter(
+            BreakoutAlert.alert_tier == "pattern_imminent",
+            AutoTraderRun.id.is_(None),
+        )
+    )
+    if latest_run is not None and latest_run.created_at is not None:
+        backlog_q = backlog_q.filter(BreakoutAlert.alerted_at > latest_run.created_at)
+    else:
+        lookback_seconds = max(threshold, _positive_int_setting(
+            "chili_autotrader_stock_candidate_max_age_minutes",
+            AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES * 2,
+        ) * SECONDS_PER_MINUTE)
+        backlog_q = backlog_q.filter(
+            BreakoutAlert.alerted_at >= datetime.utcnow() - timedelta(seconds=lookback_seconds)
+        )
+
+    stats = backlog_q.with_entities(
+        func.count(BreakoutAlert.id),
+        func.count(BreakoutAlert.id).filter(BreakoutAlert.asset_type == "stock"),
+        func.count(BreakoutAlert.id).filter(BreakoutAlert.asset_type == "crypto"),
+        func.count(BreakoutAlert.id).filter(BreakoutAlert.alerted_at <= stale_cutoff),
+        func.max(BreakoutAlert.id),
+        func.max(BreakoutAlert.alerted_at),
+    ).one()
+    backlog_total = int(stats[0] or 0)
+    stock_backlog = int(stats[1] or 0)
+    crypto_backlog = int(stats[2] or 0)
+    stale_backlog = int(stats[3] or 0)
+    latest_unprocessed_id = int(stats[4]) if stats[4] is not None else None
+    latest_unprocessed_at = _parse_dt(stats[5])
+
+    extra = {
+        "enabled": enabled,
+        "live_enabled": bool(getattr(settings, "chili_autotrader_live_enabled", False)),
+        "latest_run_id": getattr(latest_run, "id", None),
+        "latest_run_at": _iso(latest_run_at),
+        "latest_run_age_seconds": _age_seconds(latest_run_at),
+        "latest_alert_id": getattr(latest_alert, "id", None),
+        "latest_alert_at": _iso(latest_alert_at),
+        "latest_alert_age_seconds": _age_seconds(latest_alert_at),
+        "latest_unprocessed_alert_id": latest_unprocessed_id,
+        "latest_unprocessed_alert_at": _iso(latest_unprocessed_at),
+        "unprocessed_alerts_after_last_run": backlog_total,
+        "unprocessed_stock_alerts_after_last_run": stock_backlog,
+        "unprocessed_crypto_alerts_after_last_run": crypto_backlog,
+        "stale_unprocessed_alerts": stale_backlog,
+        "stale_threshold_seconds": threshold,
+        "source": "trading_autotrader_runs/trading_breakout_alerts",
+    }
+    if not enabled:
+        return _surface(
+            "autotrader",
+            state="disabled",
+            extra=extra,
+            note="AutoTrader is disabled by configuration",
+        )
+    if stale_backlog > 0:
+        return _surface(
+            "autotrader",
+            state="error",
+            as_of=latest_run_at,
+            extra=extra,
+            note="unprocessed pattern-imminent alerts exceeded the AutoTrader freshness window",
+        )
+    if latest_run is None and latest_alert is not None:
+        return _surface(
+            "autotrader",
+            state="no_data",
+            as_of=latest_alert_at,
+            extra=extra,
+            note="pattern-imminent alerts exist but no AutoTrader audit rows were found",
+        )
+    return _surface(
+        "autotrader",
+        state="ok",
+        as_of=latest_run_at,
+        extra=extra,
+    )
+
+
 def circuit_breaker_status() -> dict[str, Any]:
     try:
         from .portfolio_risk import get_breaker_status
@@ -300,6 +452,7 @@ def kill_switch_status() -> dict[str, Any]:
 def get_runtime_overview(db: Session) -> dict[str, Any]:
     surfaces = [
         scanner_status(db),
+        autotrader_status(db),
         predictions_status(db),
         broker_status(db),
         learning_status(db),
@@ -321,6 +474,7 @@ def get_freshness_summary(db: Session) -> dict[str, Any]:
     items = []
     for entry in (
         scanner_status(db),
+        autotrader_status(db),
         predictions_status(db),
         market_data_status(db),
         regime_status(db),
