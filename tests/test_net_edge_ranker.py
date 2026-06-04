@@ -20,7 +20,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.config import settings
+from app.config import Settings, settings
 from app.models.trading import AutoTraderRun, PaperTrade, ScanPattern, Trade
 from app.services.trading import net_edge_ranker as ner
 from app.trading_brain.infrastructure.net_edge_ops_log import (
@@ -485,8 +485,9 @@ def test_score_composition_matches_formula(db, shadow_mode):
 
 
 class _NetEdgeQuery:
-    def __init__(self, rows):
+    def __init__(self, rows, *, limit_sink=None):
         self.rows = rows
+        self.limit_sink = limit_sink
 
     def filter(self, *_args, **_kwargs):
         return self
@@ -494,7 +495,9 @@ class _NetEdgeQuery:
     def order_by(self, *_args, **_kwargs):
         return self
 
-    def limit(self, *_args, **_kwargs):
+    def limit(self, *args, **_kwargs):
+        if self.limit_sink is not None and args:
+            self.limit_sink.append(int(args[0]))
         return self
 
     def all(self):
@@ -510,6 +513,7 @@ class _NetEdgeDb:
         self.papers = papers
         self.runs = runs or []
         self.added = []
+        self.autotrader_run_limits: list[int] = []
 
     def query(self, model):
         if model is Trade:
@@ -519,7 +523,7 @@ class _NetEdgeDb:
         if model is ScanPattern:
             return _NetEdgeQuery([self.pattern])
         if model is AutoTraderRun:
-            return _NetEdgeQuery(self.runs)
+            return _NetEdgeQuery(self.runs, limit_sink=self.autotrader_run_limits)
         raise AssertionError(f"unexpected model query: {model!r}")
 
     def add(self, row):
@@ -646,6 +650,32 @@ def test_execution_drag_cost_prices_positive_edge_missed_fills(monkeypatch):
     assert details["avg_positive_expected_net_pct"] == pytest.approx(3.0)
     assert details["drag_rate"] == pytest.approx(2 / 3)
     assert details["cost_fraction"] == pytest.approx((2 / 3) * 0.03)
+
+
+def test_execution_drag_max_rows_setting_bounds_autotrader_scan(monkeypatch):
+    monkeypatch.setenv("BRAIN_NET_EDGE_EXECUTION_DRAG_MAX_ROWS", "9")
+    settings_obj = Settings(_env_file=None)  # type: ignore[call-arg]
+    monkeypatch.setattr(ner, "settings", settings_obj)
+    db = _NetEdgeDb(
+        pattern=SimpleNamespace(id=42, asset_class="crypto", win_rate=0.6),
+        papers=[],
+        runs=[],
+    )
+    ctx = ner.NetEdgeSignalContext(
+        ticker="BTC-USD",
+        asset_class="crypto",
+        scan_pattern_id=42,
+        raw_prob=0.6,
+        entry_price=100.0,
+        stop_price=97.0,
+        extra={"user_id": 7},
+    )
+
+    details = ner._execution_drag_cost_details(db, ctx)
+
+    assert settings_obj.brain_net_edge_execution_drag_max_rows == 9
+    assert db.autotrader_run_limits == [9]
+    assert details["reason"] == "insufficient_attempts"
 
 
 def test_execution_drag_cost_requires_positive_sample_floor(monkeypatch):

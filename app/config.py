@@ -731,6 +731,12 @@ class Settings(BaseSettings):
         le=100,
         validation_alias=AliasChoices("BRAIN_NET_EDGE_EXECUTION_DRAG_MIN_POSITIVE_EVENTS"),
     )
+    brain_net_edge_execution_drag_max_rows: int = Field(
+        default=200,
+        ge=1,
+        le=10_000,
+        validation_alias=AliasChoices("BRAIN_NET_EDGE_EXECUTION_DRAG_MAX_ROWS"),
+    )
     brain_net_edge_execution_drag_cost_cap_fraction: float = Field(
         default=0.02,
         ge=0.0,
