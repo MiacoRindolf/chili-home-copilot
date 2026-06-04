@@ -1,12 +1,13 @@
 """f-fastpath-maker-only settings-validation tests.
 
-Pins the four new fast-path settings introduced for maker-only mode:
+Pins the maker fast-path settings introduced for maker-only mode:
 
   * ``execution_mode`` defaults to ``"taker"`` (bit-identical to today).
   * ``cost_aware_maker_fee_bps`` defaults to ``40.0`` (Coinbase Advanced
     Trade retail tier 1 maker, per-side, in bps).
   * ``maker_cancel_on_timeout_s`` defaults to ``10`` seconds.
   * ``maker_first_taker_fallback_s`` defaults to ``5`` seconds.
+  * ``maker_tick_fraction_of_mid`` defaults to ``1e-4`` (1bp of mid).
 
 The brief explicitly calls out
 ``test_cost_aware_maker_fee_bps_default_is_retail_tier_1`` as a hard
@@ -38,7 +39,9 @@ def _env_clean(*names):
         yield
     finally:
         for n, v in saved.items():
-            if v is not None:
+            if v is None:
+                os.environ.pop(n, None)
+            else:
                 os.environ[n] = v
 
 
@@ -74,6 +77,11 @@ def test_maker_cancel_on_timeout_s_default():
 def test_maker_first_taker_fallback_s_default():
     s = FastPathSettings()
     assert s.maker_first_taker_fallback_s == 5
+
+
+def test_maker_tick_fraction_default_is_one_bp():
+    s = FastPathSettings()
+    assert s.maker_tick_fraction_of_mid == pytest.approx(1e-4)
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +126,21 @@ def test_load_overrides_fallback_seconds_from_env():
         os.environ["CHILI_FAST_PATH_MAKER_FIRST_TAKER_FALLBACK_S"] = "2"
         s = load()
     assert s.maker_first_taker_fallback_s == 2
+
+
+def test_load_overrides_maker_tick_fraction_from_env():
+    with _env_clean("CHILI_FAST_PATH_MAKER_TICK_FRACTION_OF_MID"):
+        os.environ["CHILI_FAST_PATH_MAKER_TICK_FRACTION_OF_MID"] = "0.0002"
+        s = load()
+    assert s.maker_tick_fraction_of_mid == pytest.approx(0.0002)
+
+
+@pytest.mark.parametrize("raw", ["0", "-0.1", "nan", "0.02", "bad"])
+def test_load_rejects_implausible_maker_tick_fraction(raw):
+    with _env_clean("CHILI_FAST_PATH_MAKER_TICK_FRACTION_OF_MID"):
+        os.environ["CHILI_FAST_PATH_MAKER_TICK_FRACTION_OF_MID"] = raw
+        s = load()
+    assert s.maker_tick_fraction_of_mid == pytest.approx(1e-4)
 
 
 def test_load_invalid_execution_mode_string_loaded_as_is():

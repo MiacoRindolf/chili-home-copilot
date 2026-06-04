@@ -44,6 +44,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import time
 from dataclasses import dataclass
@@ -64,7 +65,7 @@ from .gates import (
     run_gates,
 )
 from .order_book import OrderBookAggregator
-from .settings import FastPathSettings
+from .settings import DEFAULT_MAKER_TICK_FRACTION_OF_MID, FastPathSettings
 from .universe_status import UNIVERSE_STATUS_ACTIVE, UNIVERSE_STATUS_SHADOW
 
 logger = logging.getLogger(__name__)
@@ -262,23 +263,25 @@ def _place_coinbase_order_live(ticker: str, side: str, quantity: float,
 # ── Maker-only execution helpers (f-fastpath-maker-only-executor) ────
 
 
-MAKER_LIMIT_TICK_FRACTION_OF_MID = 1e-4
+MAKER_LIMIT_TICK_FRACTION_OF_MID = DEFAULT_MAKER_TICK_FRACTION_OF_MID
 """Default tick offset, expressed as a fraction of mid-price, when the
 venue's quote_increment isn't available. 1bp = 0.01% — small enough
 that the resting limit is consistently inside the spread for any
 reasonable Coinbase pair (median spread is well above 1bp), but not so
 small that it lands at the same price as a competing best bid/ask.
 
-Settings-tunable via ``CHILI_FAST_PATH_MAKER_TICK_FRACTION_OF_MID`` if a
-follow-up brief lifts this into ``settings.py``. For now the constant
-encodes the default; an operator override should NOT be needed since
-the gate already filters wide-spread pairs."""
+Settings-tunable via ``CHILI_FAST_PATH_MAKER_TICK_FRACTION_OF_MID``.
+The default remains small because the gate already filters wide-spread
+pairs."""
 
 MAKER_TIMEOUT_TASK_NAME_PREFIX = "fast_path_maker_timeout"
 BPS_PER_UNIT = 10_000.0
 
 
-def _maker_default_tick_size(mid_price: float) -> float:
+def _maker_default_tick_size(
+    mid_price: float,
+    tick_fraction_of_mid: float = MAKER_LIMIT_TICK_FRACTION_OF_MID,
+) -> float:
     """Fallback tick offset in absolute price units when the venue
     quote_increment isn't available. Bounded below by $1e-8 so we
     don't generate sub-Coinbase-tick prices for high-priced assets like
@@ -286,7 +289,13 @@ def _maker_default_tick_size(mid_price: float) -> float:
     """
     if mid_price <= 0:
         return 0.0
-    return max(mid_price * MAKER_LIMIT_TICK_FRACTION_OF_MID, 1e-8)
+    try:
+        tick_fraction = float(tick_fraction_of_mid)
+    except (TypeError, ValueError):
+        tick_fraction = MAKER_LIMIT_TICK_FRACTION_OF_MID
+    if not math.isfinite(tick_fraction) or tick_fraction <= 0.0:
+        tick_fraction = MAKER_LIMIT_TICK_FRACTION_OF_MID
+    return max(mid_price * tick_fraction, 1e-8)
 
 
 def _compute_maker_limit_price(side: str, best_bid: float, best_ask: float,
@@ -897,10 +906,17 @@ class FastPathExecutor:
             self._metrics.decisions_rejected += 1
             return
 
-        tick_size = _maker_default_tick_size(
+        mid_price = (
             (ctx.best_bid + ctx.best_ask) / 2.0
-            if (ctx.best_bid > 0 and ctx.best_ask > 0)
-            else fill_price,
+            if (ctx.best_bid > 0 and ctx.best_ask > 0) else fill_price
+        )
+        tick_size = _maker_default_tick_size(
+            mid_price,
+            tick_fraction_of_mid=getattr(
+                self._settings,
+                "maker_tick_fraction_of_mid",
+                MAKER_LIMIT_TICK_FRACTION_OF_MID,
+            ),
         )
         limit_price = _compute_maker_limit_price(
             side, ctx.best_bid, ctx.best_ask, tick_size,

@@ -968,6 +968,9 @@ def get_maker_stats() -> JSONResponse:
             "maker_first_taker_fallback_s": int(
                 fp_settings.maker_first_taker_fallback_s
             ),
+            "maker_tick_fraction_of_mid": float(
+                fp_settings.maker_tick_fraction_of_mid
+            ),
         },
         "window_hours": MAKER_STATS_WINDOW_HOURS,
         "totals": {

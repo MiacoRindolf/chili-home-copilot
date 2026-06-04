@@ -171,6 +171,14 @@ def test_compute_maker_limit_unknown_side_zero():
 def test_default_tick_size_scales_with_mid():
     """Tick is `mid * 1bp` by default — order-of-magnitude sanity."""
     assert _maker_default_tick_size(100.0) == pytest.approx(0.01)
+    assert _maker_default_tick_size(
+        100.0,
+        tick_fraction_of_mid=2e-4,
+    ) == pytest.approx(0.02)
+    assert _maker_default_tick_size(
+        100.0,
+        tick_fraction_of_mid=0.0,
+    ) == pytest.approx(0.01)
     assert _maker_default_tick_size(0.0) == 0.0
 
 

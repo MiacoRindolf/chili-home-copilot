@@ -7,6 +7,7 @@ loader; settings here are pure env reads.
 """
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 
@@ -21,6 +22,12 @@ This is the largest scalp-decay bucket before the multi-hour observation
 horizons. It lets the rotator collect 1s/5s/30s/60s/300s evidence without
 pinning a symbol for the 30m/1h/4h research horizons.
 """
+
+DEFAULT_MAKER_TICK_FRACTION_OF_MID = 1e-4
+"""Default maker fallback tick offset as a fraction of mid-price."""
+
+MAX_MAKER_TICK_FRACTION_OF_MID = 0.01
+"""Largest accepted fallback maker tick offset fraction (1% of mid)."""
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -371,6 +378,12 @@ class FastPathSettings:
     paying the taker fee, so the operator wants the maker chance brief.
     Override via ``CHILI_FAST_PATH_MAKER_FIRST_TAKER_FALLBACK_S``."""
 
+    maker_tick_fraction_of_mid: float = DEFAULT_MAKER_TICK_FRACTION_OF_MID
+    """Fallback maker tick offset as a fraction of mid-price when Coinbase
+    ``quote_increment`` is unavailable. Bounded in ``load`` so operator
+    typos cannot turn a passive probe into a coarse, always-join limit.
+    Override via ``CHILI_FAST_PATH_MAKER_TICK_FRACTION_OF_MID``."""
+
     # ── Short-alert gate (2026-05-17) ─────────────────────────────────
     maker_attempt_adverse_filter_enabled: bool = True
     """When True, maker modes reject lanes whose recent maker-attempt
@@ -470,6 +483,20 @@ def _env_float(name: str, default: float) -> float:
         return float(raw)
     except ValueError:
         return default
+
+
+def _env_positive_float(
+    name: str,
+    default: float,
+    *,
+    max_value: float | None = None,
+) -> float:
+    value = _env_float(name, default)
+    if not math.isfinite(value) or value <= 0.0:
+        return default
+    if max_value is not None and value > max_value:
+        return default
+    return value
 
 
 def load() -> FastPathSettings:
@@ -581,6 +608,11 @@ def load() -> FastPathSettings:
             "CHILI_FAST_PATH_MAKER_CANCEL_ON_TIMEOUT_S", 10),
         maker_first_taker_fallback_s=_env_int(
             "CHILI_FAST_PATH_MAKER_FIRST_TAKER_FALLBACK_S", 5),
+        maker_tick_fraction_of_mid=_env_positive_float(
+            "CHILI_FAST_PATH_MAKER_TICK_FRACTION_OF_MID",
+            DEFAULT_MAKER_TICK_FRACTION_OF_MID,
+            max_value=MAX_MAKER_TICK_FRACTION_OF_MID,
+        ),
         maker_attempt_adverse_filter_enabled=_env_bool(
             "CHILI_FAST_PATH_MAKER_ATTEMPT_ADVERSE_FILTER_ENABLED", True),
         maker_attempt_adverse_filter_window_h=_env_int(

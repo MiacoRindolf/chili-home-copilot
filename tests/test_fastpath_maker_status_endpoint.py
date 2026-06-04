@@ -6,7 +6,7 @@ against `fast_path_maker_attempts`; we patch the engine context
 manager so a stub `execute()` returns canned aggregated rows.
 
 Pinned behavior:
-  * Settings keys present (execution_mode, fee, both timeouts).
+  * Settings keys present (execution_mode, fee, timeouts, tick fraction).
   * Per-pair shape matches the brief.
   * fill_rate < 0.25 -> advisory: 'uneconomic for maker-only'.
   * fill_rate >= 0.25 -> advisory is null.
@@ -56,6 +56,7 @@ def _stub_settings(execution_mode="taker"):
         cost_aware_maker_fee_bps=40.0,
         maker_cancel_on_timeout_s=10,
         maker_first_taker_fallback_s=5,
+        maker_tick_fraction_of_mid=1e-4,
     )
 
 
@@ -87,6 +88,7 @@ def test_response_includes_all_maker_settings():
         "cost_aware_maker_fee_bps",
         "maker_cancel_on_timeout_s",
         "maker_first_taker_fallback_s",
+        "maker_tick_fraction_of_mid",
     ):
         assert key in s
 
@@ -97,6 +99,9 @@ def test_settings_carry_through_overrides():
     assert payload["settings"]["cost_aware_maker_fee_bps"] == 40.0
     assert payload["settings"]["maker_cancel_on_timeout_s"] == 10
     assert payload["settings"]["maker_first_taker_fallback_s"] == 5
+    assert payload["settings"]["maker_tick_fraction_of_mid"] == pytest.approx(
+        1e-4
+    )
 
 
 # ---------------------------------------------------------------------------
