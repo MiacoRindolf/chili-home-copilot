@@ -117,6 +117,23 @@ def test_brain_learning_cycle_config_defaults():
     assert int(getattr(settings, "brain_recert_queue_dispatch_interval_minutes", 0)) == 60
 
 
+def test_memory_watcher_interval_setting_drives_scheduler_floor(monkeypatch):
+    from app.config import Settings
+    from app.services.trading_scheduler import _memory_watcher_interval_seconds
+
+    monkeypatch.setenv("CHILI_MEMORY_WATCHER_INTERVAL_S", "75")
+    settings_obj = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings_obj.chili_memory_watcher_interval_s == 75
+    assert _memory_watcher_interval_seconds(settings_obj) == 75
+
+    monkeypatch.setenv("CHILI_MEMORY_WATCHER_INTERVAL_S", "15")
+    settings_obj = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings_obj.chili_memory_watcher_interval_s == 15
+    assert _memory_watcher_interval_seconds(settings_obj) == 60
+
+
 def test_scheduler_failure_recording_falls_back_after_broken_primary_session():
     from app.services.trading_scheduler import _record_batch_job_failure_resilient
 

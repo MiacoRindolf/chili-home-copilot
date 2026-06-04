@@ -1994,6 +1994,11 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_SCHEDULER_RUNS_EXTERNALLY"),
     )
+    chili_memory_watcher_interval_s: int = Field(
+        default=300,
+        ge=1,
+        validation_alias=AliasChoices("CHILI_MEMORY_WATCHER_INTERVAL_S"),
+    )
 
     # Brain learning worker: UI starts the Docker Compose ``brain-worker`` service (not subprocess).
     brain_worker_compose_service: str = "brain-worker"

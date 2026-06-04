@@ -35,6 +35,10 @@ def _should_write_scheduler_baseline_audit(job_id: str) -> bool:
     return str(job_id or "").strip() not in _BASELINE_AUDIT_SKIP_JOB_IDS
 
 
+def _memory_watcher_interval_seconds(settings_obj) -> int:
+    return max(60, int(getattr(settings_obj, "chili_memory_watcher_interval_s", 300)))
+
+
 def _learning_status_blocks_market_snapshots(
     status: dict,
     settings_obj,
@@ -5115,7 +5119,7 @@ def start_scheduler():
         # so we can compare scheduler-cron vs autotrader-worker vs broker-sync-
         # worker memory profiles independently. Cheap (~50ms per tick).
         try:
-            _mw_interval_s = max(60, int(getattr(settings, "chili_memory_watcher_interval_s", 300)))
+            _mw_interval_s = _memory_watcher_interval_seconds(settings)
             _scheduler.add_job(
                 _run_memory_watcher_job,
                 trigger=IntervalTrigger(seconds=_mw_interval_s),
