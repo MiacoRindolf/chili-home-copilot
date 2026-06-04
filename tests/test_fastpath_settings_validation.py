@@ -15,6 +15,7 @@ from unittest import mock
 import pytest
 
 from app.services.trading.fast_path.settings import (
+    DEFAULT_UNIVERSE_HYSTERESIS_RANKS,
     DEFAULT_UNIVERSE_LEARNING_RETENTION_HORIZON_S,
     FastPathSettings,
     load,
@@ -312,6 +313,76 @@ def test_universe_shadow_exploration_floor_env_override_works():
     ):
         loaded = load()
     assert loaded.universe_min_shadow_exploration_n == 0
+
+
+@pytest.mark.parametrize(
+    ("env_name", "attr", "default"),
+    [
+        (
+            "CHILI_FAST_PATH_UNIVERSE_HYSTERESIS_RANKS",
+            "universe_hysteresis_ranks",
+            DEFAULT_UNIVERSE_HYSTERESIS_RANKS,
+        ),
+        (
+            "CHILI_FAST_PATH_UNIVERSE_MISSING_GRACE_PASSES",
+            "universe_missing_grace_passes",
+            2,
+        ),
+        (
+            "CHILI_FAST_PATH_UNIVERSE_MIN_SHADOW_EXPLORATION_N",
+            "universe_min_shadow_exploration_n",
+            DEFAULT_UNIVERSE_HYSTERESIS_RANKS,
+        ),
+        (
+            "CHILI_FAST_PATH_UNIVERSE_LEARNING_RETENTION_HORIZON_S",
+            "universe_learning_retention_horizon_s",
+            DEFAULT_UNIVERSE_LEARNING_RETENTION_HORIZON_S,
+        ),
+        (
+            "CHILI_FAST_PATH_UNIVERSE_LEARNING_RETENTION_MAX_N",
+            "universe_learning_retention_max_n",
+            DEFAULT_UNIVERSE_HYSTERESIS_RANKS,
+        ),
+        (
+            "CHILI_FAST_PATH_LIVE_ALPHA_MIN_SAMPLES",
+            "live_alpha_min_samples",
+            50,
+        ),
+    ],
+)
+def test_nonnegative_counter_env_rejects_negative_values(env_name, attr, default):
+    with mock.patch.dict(os.environ, {env_name: "-1"}, clear=True):
+        loaded = load()
+    assert getattr(loaded, attr) == default
+
+
+@pytest.mark.parametrize(
+    ("env_name", "attr"),
+    [
+        ("CHILI_FAST_PATH_UNIVERSE_HYSTERESIS_RANKS", "universe_hysteresis_ranks"),
+        (
+            "CHILI_FAST_PATH_UNIVERSE_MISSING_GRACE_PASSES",
+            "universe_missing_grace_passes",
+        ),
+        (
+            "CHILI_FAST_PATH_UNIVERSE_MIN_SHADOW_EXPLORATION_N",
+            "universe_min_shadow_exploration_n",
+        ),
+        (
+            "CHILI_FAST_PATH_UNIVERSE_LEARNING_RETENTION_HORIZON_S",
+            "universe_learning_retention_horizon_s",
+        ),
+        (
+            "CHILI_FAST_PATH_UNIVERSE_LEARNING_RETENTION_MAX_N",
+            "universe_learning_retention_max_n",
+        ),
+        ("CHILI_FAST_PATH_LIVE_ALPHA_MIN_SAMPLES", "live_alpha_min_samples"),
+    ],
+)
+def test_nonnegative_counter_env_accepts_zero_values(env_name, attr):
+    with mock.patch.dict(os.environ, {env_name: "0"}, clear=True):
+        loaded = load()
+    assert getattr(loaded, attr) == 0
 
 
 def test_universe_learning_retention_defaults_to_short_horizon_and_floor():

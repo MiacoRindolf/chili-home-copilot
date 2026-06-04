@@ -67,6 +67,13 @@ def _env_positive_int(
     return value
 
 
+def _env_nonnegative_int(name: str, default: int) -> int:
+    value = _env_int(name, default)
+    if isinstance(value, bool) or value < 0:
+        return default
+    return value
+
+
 def _env_pairs(name: str, default: list[str]) -> list[str]:
     raw = (os.environ.get(name) or "").strip()
     if not raw:
@@ -524,15 +531,15 @@ def load() -> FastPathSettings:
     """Read settings from the process environment. Called once at
     container boot by ``scripts/fast_data_worker.py``."""
     exec_notional_usd = _env_float("CHILI_FAST_PATH_EXEC_NOTIONAL_USD", 25.0)
-    universe_hysteresis_ranks = _env_int(
+    universe_hysteresis_ranks = _env_nonnegative_int(
         "CHILI_FAST_PATH_UNIVERSE_HYSTERESIS_RANKS",
         DEFAULT_UNIVERSE_HYSTERESIS_RANKS,
     )
-    universe_min_shadow_exploration_n = _env_int(
+    universe_min_shadow_exploration_n = _env_nonnegative_int(
         "CHILI_FAST_PATH_UNIVERSE_MIN_SHADOW_EXPLORATION_N",
         universe_hysteresis_ranks,
     )
-    universe_learning_retention_max_n = _env_int(
+    universe_learning_retention_max_n = _env_nonnegative_int(
         "CHILI_FAST_PATH_UNIVERSE_LEARNING_RETENTION_MAX_N",
         universe_min_shadow_exploration_n,
     )
@@ -585,7 +592,7 @@ def load() -> FastPathSettings:
             "CHILI_FAST_PATH_UNIVERSE_MIN_RANGE_24H_BPS", 150.0),
         universe_adaptive_range_floor_enabled=_env_bool(
             "CHILI_FAST_PATH_UNIVERSE_ADAPTIVE_RANGE_FLOOR_ENABLED", True),
-        universe_missing_grace_passes=_env_int(
+        universe_missing_grace_passes=_env_nonnegative_int(
             "CHILI_FAST_PATH_UNIVERSE_MISSING_GRACE_PASSES", 2),
         universe_min_shadow_exploration_n=universe_min_shadow_exploration_n,
         universe_market_velocity_cost_parity_ratio=_env_float(
@@ -596,7 +603,7 @@ def load() -> FastPathSettings:
             "CHILI_FAST_PATH_UNIVERSE_MARKET_VELOCITY_DEADLOCK_PROBE_ENABLED",
             True,
         ),
-        universe_learning_retention_horizon_s=_env_int(
+        universe_learning_retention_horizon_s=_env_nonnegative_int(
             "CHILI_FAST_PATH_UNIVERSE_LEARNING_RETENTION_HORIZON_S",
             DEFAULT_UNIVERSE_LEARNING_RETENTION_HORIZON_S,
         ),
@@ -625,7 +632,7 @@ def load() -> FastPathSettings:
             "CHILI_FAST_PATH_COST_AWARE_MAKER_FEE_BPS", 40.0),
         live_alpha_evidence_gate_enabled=_env_bool(
             "CHILI_FAST_PATH_LIVE_ALPHA_EVIDENCE_GATE_ENABLED", True),
-        live_alpha_min_samples=_env_int(
+        live_alpha_min_samples=_env_nonnegative_int(
             "CHILI_FAST_PATH_LIVE_ALPHA_MIN_SAMPLES", 50),
         live_alpha_min_net_bps=_env_float(
             "CHILI_FAST_PATH_LIVE_ALPHA_MIN_NET_BPS", 0.0),
