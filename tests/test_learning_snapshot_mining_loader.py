@@ -107,3 +107,40 @@ def test_labeled_snapshot_mining_loader_rolls_back_and_degrades():
 
     assert _load_recent_labeled_snapshots_for_mining(db, limit=5000) == []
     assert db.rolled_back is True
+
+
+def test_mine_patterns_releases_session_before_ohlcv_fetch(monkeypatch):
+    from app.services.trading import learning
+
+    events: list[str] = []
+
+    class _Session:
+        def rollback(self):
+            events.append("rollback")
+
+    class _Budget:
+        def remaining_ohlcv(self):
+            return 1
+
+        def try_ohlcv(self, *args, **kwargs):
+            return True
+
+        def record_miner_error(self, *args, **kwargs):
+            return None
+
+    def _mine_from_history(*args, **kwargs):
+        events.append("fetch")
+        return []
+
+    monkeypatch.setattr(learning, "provider_egress_available_for_brain_work", lambda: True)
+    monkeypatch.setattr(learning, "_mine_from_history", _mine_from_history)
+    monkeypatch.setattr(learning, "_load_recent_labeled_snapshots_for_mining", lambda *a, **k: [])
+    monkeypatch.setattr(learning, "get_volatility_regime", lambda: {"regime": "unknown"})
+
+    assert learning.mine_patterns(
+        _Session(),
+        user_id=None,
+        ticker_universe=["SPY"],
+        budget=_Budget(),
+    ) == []
+    assert events == ["rollback", "fetch"]

@@ -2664,6 +2664,14 @@ def mine_patterns(
         logger.warning("[learning] Pattern mining skipped: provider egress unavailable")
         return []
 
+    try:
+        db.rollback()
+    except Exception:
+        logger.debug(
+            "[learning] mine_patterns: DB session release before OHLCV fetch failed",
+            exc_info=True,
+        )
+
     if budget is None:
         budget = BrainResourceBudget.from_settings()
 
