@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from ....config import settings
 from ....models.trading import MomentumStrategyVariant, MomentumSymbolViability
-from ..scanner import get_crypto_breakout_cache, run_momentum_scanner
+from ..scanner import get_crypto_breakout_cache, get_momentum_cache as _get_momentum_cache
 from .market_profile import asset_class_for_symbol, is_coinbase_spot_symbol, market_open_now
 from .operator_readiness import build_momentum_operator_readiness
 from .strategy_params import summarize_strategy_params
@@ -20,6 +20,17 @@ from .viability_scope import VIABILITY_SCOPE_SYMBOL
 _log = logging.getLogger(__name__)
 
 _INLINE_ASSESS_MAX_TICKERS = 20
+
+
+def run_momentum_scanner(max_results: int = 20) -> dict[str, Any]:
+    """Return cached stock momentum scan data for the opportunities read model.
+
+    Keep this module-level name as the test seam used by the endpoint tests, but
+    do not launch the active scanner from a GET request. The scheduler owns live
+    full-market scans; this endpoint should stay cache-only and fast.
+    """
+    _ = max_results
+    return _get_momentum_cache()
 
 
 def _auto_assess_scan_only(db: Session, tickers: list[str]) -> None:
