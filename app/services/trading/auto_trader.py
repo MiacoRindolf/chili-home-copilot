@@ -113,6 +113,8 @@ from .ops_log_prefixes import CHILI_MARKET_DATA
 
 logger = logging.getLogger(__name__)
 
+AUTOTRADER_STOCK_SESSION_DEFER_COUNT_DEFAULT_CAP = 1000
+
 SYNERGY_RETRY_SOURCE_REASON = "synergy_not_applicable"
 SYNERGY_RETRY_EXHAUSTED_REASON = "synergy_retry_not_applicable"
 
@@ -923,6 +925,14 @@ def _autotrader_tick_soft_budget_seconds() -> int:
         lower=AUTOTRADER_MIN_TICK_MAX_SECONDS,
         upper=AUTOTRADER_MAX_TICK_MAX_SECONDS,
     )
+
+
+def _bounded_breakout_alert_count(query: Any, *, cap: int) -> int:
+    cap_i = max(0, int(cap))
+    if cap_i <= 0:
+        return 0
+    rows = query.with_entities(BreakoutAlert.id).limit(cap_i + 1).all()
+    return min(len(rows), cap_i)
 
 
 def _candidate_actionability_state(
@@ -4767,6 +4777,12 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         stock_defer.get("enabled") and stock_defer.get("active")
     )
     if stock_session_defer_counts_checked:
+        stock_defer_count_cap = _settings_int_clamped(
+            "chili_autotrader_stock_session_defer_count_cap",
+            AUTOTRADER_STOCK_SESSION_DEFER_COUNT_DEFAULT_CAP,
+            lower=1,
+            upper=100000,
+        )
         stock_unprocessed_base = (
             db.query(BreakoutAlert)
             .filter(
@@ -4777,15 +4793,17 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
             )
         )
         if stock_defer.get("active"):
-            stock_deferred_pool = int(
+            stock_deferred_pool = _bounded_breakout_alert_count(
                 stock_unprocessed_base.filter(
                     BreakoutAlert.alerted_at >= stock_defer["cutoff"]
-                ).count()
+                ),
+                cap=stock_defer_count_cap,
             )
-        stock_stale_unprocessed = int(
+        stock_stale_unprocessed = _bounded_breakout_alert_count(
             stock_unprocessed_base.filter(
                 BreakoutAlert.alerted_at < stock_defer["cutoff"]
-            ).count()
+            ),
+            cap=stock_defer_count_cap,
         )
     effective_batch_limit, fresh_burst_meta = _fresh_candidate_burst_batch_size(
         base_limit=batch_limit,

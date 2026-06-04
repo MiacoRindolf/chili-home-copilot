@@ -19,6 +19,24 @@ class _FakeSqliteSession(_FakePostgresSession):
         return SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
 
 
+class _FakeAlertCountQuery:
+    def __init__(self, rows: int) -> None:
+        self.rows = rows
+        self.limit_value: int | None = None
+        self.with_entities_called = False
+
+    def with_entities(self, *_entities):
+        self.with_entities_called = True
+        return self
+
+    def limit(self, value: int):
+        self.limit_value = int(value)
+        return self
+
+    def all(self):
+        return [(i,) for i in range(self.rows)]
+
+
 def test_candidate_select_statement_timeout_uses_configured_value(monkeypatch) -> None:
     monkeypatch.setattr(
         at_mod.settings,
@@ -28,6 +46,16 @@ def test_candidate_select_statement_timeout_uses_configured_value(monkeypatch) -
     )
 
     assert at_mod._candidate_select_statement_timeout_ms(tick_budget_s=15) == 1234
+
+
+def test_bounded_breakout_alert_count_caps_without_exact_count() -> None:
+    query = _FakeAlertCountQuery(rows=5)
+
+    count = at_mod._bounded_breakout_alert_count(query, cap=3)
+
+    assert count == 3
+    assert query.with_entities_called is True
+    assert query.limit_value == 4
 
 
 def test_candidate_batch_size_still_uses_keyword_clamps(monkeypatch) -> None:
