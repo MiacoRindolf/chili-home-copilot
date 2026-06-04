@@ -447,12 +447,18 @@ def test_scheduler_market_snapshot_only_role_is_dedicated_lane(monkeypatch):
         start_scheduler()
         job_ids = {j["id"] for j in get_scheduler_info().get("jobs", [])}
         assert "brain_market_snapshots" in job_ids
+        assert "neural_mesh_drain" in job_ids
         assert "cash_deployment_work_producer" in job_ids
         assert "brain_batch_reconciler" in job_ids
         assert HEARTBEAT_JOB_ID in job_ids
         assert "daily_market_scan" not in job_ids
         assert "broker_sync" not in job_ids
-        assert "autotrader_tick" not in job_ids
+        assert "auto_trader_tick" not in job_ids
+        assert "auto_trader_monitor" not in job_ids
+        assert "momentum_live_runner_batch" not in job_ids
+        assert "stuck_order_watchdog" not in job_ids
+        assert "momentum_scanner" not in job_ids
+        assert "pattern_imminent_scanner" not in job_ids
         assert "price_monitor" not in job_ids
     finally:
         stop_scheduler()

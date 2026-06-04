@@ -4333,6 +4333,10 @@ def start_scheduler():
         # cron_only = legacy 'worker' role minus autotrader minus broker_sync
         # (so scheduler-worker container drops both hot-loop call paths).
         include_heavy = role in ("all", "worker", "cron_only")
+        # The minimal market-snapshot lane is a mesh producer. It also needs a
+        # bounded drain so stale imminent_eval chatter cannot starve fresh
+        # market/momentum context when heavy workers are offline.
+        include_neural_mesh_drain = include_heavy or role == "market_snapshot_only"
         include_web_light = role in ("all", "web", "cron_only")
         # Market snapshots feed HRP/cash deployment, pattern mining, and
         # vitals. Keep them available in the minimal trading stack without
@@ -5101,7 +5105,7 @@ def start_scheduler():
         # 500 and every enqueue is rejected (stop_eval, pattern_health,
         # learning-cycle signals all silently dropped).
         try:
-            if include_heavy:
+            if include_neural_mesh_drain:
                 _scheduler.add_job(
                     _run_neural_mesh_drain_job,
                     trigger=IntervalTrigger(seconds=30),
