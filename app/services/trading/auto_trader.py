@@ -927,6 +927,18 @@ def _autotrader_tick_soft_budget_seconds() -> int:
     )
 
 
+_bounded_breakout_alert_count_timeout_cache: dict[tuple[str, int], float] = {}
+
+
+def _bounded_breakout_alert_count_timeout_cooldown_seconds() -> int:
+    return _settings_int_clamped(
+        "chili_autotrader_bounded_alert_count_timeout_cooldown_seconds",
+        300,
+        lower=0,
+        upper=3600,
+    )
+
+
 def _bounded_breakout_alert_count(
     query: Any,
     *,
@@ -937,6 +949,13 @@ def _bounded_breakout_alert_count(
     cap_i = max(0, int(cap))
     if cap_i <= 0:
         return 0
+    cache_key = (str(context or "breakout_alert_count"), cap_i)
+    cached_until = _bounded_breakout_alert_count_timeout_cache.get(cache_key)
+    if cached_until is not None:
+        now = time.monotonic()
+        if cached_until > now:
+            return cap_i
+        _bounded_breakout_alert_count_timeout_cache.pop(cache_key, None)
     session = getattr(query, "session", None)
     timeout_ms: int | None = None
     failed = False
@@ -947,9 +966,15 @@ def _bounded_breakout_alert_count(
                 tick_budget_s=tick_budget_s,
             )
         rows = query.with_entities(BreakoutAlert.id).limit(cap_i + 1).all()
+        _bounded_breakout_alert_count_timeout_cache.pop(cache_key, None)
         return min(len(rows), cap_i)
     except DBAPIError as exc:
         failed = True
+        cooldown_s = _bounded_breakout_alert_count_timeout_cooldown_seconds()
+        if cooldown_s > 0:
+            _bounded_breakout_alert_count_timeout_cache[cache_key] = (
+                time.monotonic() + float(cooldown_s)
+            )
         if session is not None:
             try:
                 session.rollback()
@@ -961,10 +986,11 @@ def _bounded_breakout_alert_count(
                 )
         logger.warning(
             "[autotrader] bounded alert count unavailable context=%s "
-            "timeout_ms=%s cap=%s error=%s",
+            "timeout_ms=%s cap=%s cooldown_s=%s error=%s",
             context,
             timeout_ms,
             cap_i,
+            cooldown_s,
             type(exc).__name__,
             exc_info=True,
         )

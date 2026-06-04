@@ -1,8 +1,16 @@
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy.exc import DBAPIError
 
 from app.services.trading import auto_trader as at_mod
+
+
+@pytest.fixture(autouse=True)
+def _clear_bounded_count_timeout_cache():
+    at_mod._bounded_breakout_alert_count_timeout_cache.clear()
+    yield
+    at_mod._bounded_breakout_alert_count_timeout_cache.clear()
 
 
 class _FakePostgresSession:
@@ -38,6 +46,7 @@ class _FakeAlertCountQuery:
         self.error = error
         self.limit_value: int | None = None
         self.with_entities_called = False
+        self.all_count = 0
 
     def with_entities(self, *_entities):
         self.with_entities_called = True
@@ -48,6 +57,7 @@ class _FakeAlertCountQuery:
         return self
 
     def all(self):
+        self.all_count += 1
         if self.error is not None:
             raise self.error
         return [(i,) for i in range(self.rows)]
@@ -102,6 +112,75 @@ def test_bounded_breakout_alert_count_times_out_conservatively(
     assert query.limit_value == 4
     assert session.calls == ["SET LOCAL statement_timeout = '1500ms'"]
     assert session.rollback_count == 1
+
+
+def test_bounded_breakout_alert_count_reuses_timeout_cap_during_cooldown(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_candidate_select_statement_timeout_ms",
+        1500,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        at_mod,
+        "_bounded_breakout_alert_count_timeout_cooldown_seconds",
+        lambda: 300,
+    )
+    now = [1000.0]
+    monkeypatch.setattr(at_mod.time, "monotonic", lambda: now[0])
+
+    first_session = _FakePostgresSession()
+    first_query = _FakeAlertCountQuery(
+        rows=0,
+        session=first_session,
+        error=DBAPIError("select", {}, Exception("statement timeout")),
+    )
+
+    first_count = at_mod._bounded_breakout_alert_count(
+        first_query,
+        cap=3,
+        tick_budget_s=15,
+        context="stock_stale_unprocessed",
+    )
+
+    assert first_count == 3
+    assert first_query.all_count == 1
+    assert first_session.rollback_count == 1
+
+    second_session = _FakePostgresSession()
+    second_query = _FakeAlertCountQuery(rows=1, session=second_session)
+
+    second_count = at_mod._bounded_breakout_alert_count(
+        second_query,
+        cap=3,
+        tick_budget_s=15,
+        context="stock_stale_unprocessed",
+    )
+
+    assert second_count == 3
+    assert second_query.with_entities_called is False
+    assert second_query.all_count == 0
+    assert second_session.calls == []
+
+    now[0] += 301.0
+    third_session = _FakePostgresSession()
+    third_query = _FakeAlertCountQuery(rows=1, session=third_session)
+
+    third_count = at_mod._bounded_breakout_alert_count(
+        third_query,
+        cap=3,
+        tick_budget_s=15,
+        context="stock_stale_unprocessed",
+    )
+
+    assert third_count == 1
+    assert third_query.all_count == 1
+    assert third_session.calls == [
+        "SET LOCAL statement_timeout = '1500ms'",
+        "SET LOCAL statement_timeout = DEFAULT",
+    ]
 
 
 def test_queue_pressure_floor_one_disables_shadow_suppression(monkeypatch) -> None:
