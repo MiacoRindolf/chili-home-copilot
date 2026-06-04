@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time as _time
 from collections import Counter
 from datetime import datetime, time, timedelta, timezone
@@ -50,6 +51,7 @@ from ...models.trading import (
     AlertHistory,
     AutoTraderRun,
     BreakoutAlert,
+    MarketSnapshot,
     ScanPattern,
     ScanResult,
     Trade,
@@ -80,7 +82,7 @@ from .pattern_ml import compute_condition_strength
 from .portfolio import get_watchlist
 from .prescreen_job import load_active_global_candidate_tickers
 from .scanner import _estimate_hold_duration, _score_ticker, classify_trade_type
-from .learning_predictions import _build_prediction_tickers
+from .learning_predictions import _build_prediction_tickers, _indicator_data_to_flat_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +154,8 @@ _COINBASE_SPOT_TICKER_CACHE: dict[str, Any] = {
     "tickers": frozenset(),
 }
 _SCORE_FAILURE_CACHE: dict[str, dict[str, float | int]] = {}
+SMALL_CAP_MOMENTUM_CONTEXT_KEY = "small_cap_momentum_context"
+MOMENTUM_CONTEXT_SNAPSHOT_STALE_CADENCE_MULTIPLIER = 2.0
 
 
 def _non_negative_int_setting(name: str, default: int) -> int:
@@ -625,7 +629,12 @@ def flat_indicators_from_score(
     vr = ind.get("vol_ratio")
     if vr is None:
         vr = score.get("vol_ratio")
+    if vr is None:
+        vr = ind.get("rvol")
+    if vr is None:
+        vr = score.get("rvol")
     if vr is not None:
+        flat["rvol"] = float(vr)
         flat["rel_vol"] = float(vr)
         flat["volume_ratio"] = float(vr)
 
@@ -1053,6 +1062,406 @@ def _float_or_none(value: Any) -> float | None:
         return None
 
 
+def _finite_float_or_none(value: Any) -> float | None:
+    value_f = _float_or_none(value)
+    if value_f is None or not math.isfinite(value_f):
+        return None
+    return value_f
+
+
+def _string_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return None
+
+
+def _isoformat_or_none(value: Any) -> str | None:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.isoformat()
+    return _string_or_none(value)
+
+
+MOMENTUM_CONTEXT_FLAT_MERGE_KEYS = frozenset({
+    "gap_pct",
+    "premarket_gap_pct",
+    "daily_change_pct",
+    "rvol",
+    "rel_vol",
+    "volume_ratio",
+    "news_sentiment",
+    "news_count",
+    "sector",
+    "market_cap",
+    "market_cap_b",
+    "float_proxy_shares",
+    "shares_outstanding_proxy",
+    "float_bucket",
+    "float_proxy_source",
+    "premarket_high",
+    "day_high",
+    "bid",
+    "ask",
+    "spread_abs",
+    "spread_bps",
+    "halted",
+    "halt_status",
+    "halt_reason",
+})
+
+
+MOMENTUM_CONTEXT_FACT_KEYS = MOMENTUM_CONTEXT_FLAT_MERGE_KEYS - frozenset({
+    "float_bucket",
+    "float_proxy_source",
+})
+
+
+def _context_value(score: dict[str, Any], flat: dict[str, Any], key: str) -> Any:
+    for source in (flat, score):
+        if isinstance(source, dict):
+            if key in source:
+                return source.get(key)
+            nested = source.get(SMALL_CAP_MOMENTUM_CONTEXT_KEY)
+            if isinstance(nested, dict) and key in nested:
+                return nested.get(key)
+    ind = score.get("indicators") if isinstance(score, dict) else None
+    if isinstance(ind, dict):
+        if key in ind:
+            return ind.get(key)
+        nested = ind.get(SMALL_CAP_MOMENTUM_CONTEXT_KEY)
+        if isinstance(nested, dict) and key in nested:
+            return nested.get(key)
+    return None
+
+
+def _copy_numeric_context_value(
+    context: dict[str, Any],
+    score: dict[str, Any],
+    flat: dict[str, Any],
+    out_key: str,
+    *aliases: str,
+) -> None:
+    if out_key in context:
+        return
+    for key in aliases or (out_key,):
+        value = _finite_float_or_none(_context_value(score, flat, key))
+        if value is not None:
+            context[out_key] = value
+            return
+
+
+def _copy_text_context_value(
+    context: dict[str, Any],
+    score: dict[str, Any],
+    flat: dict[str, Any],
+    out_key: str,
+    *aliases: str,
+) -> None:
+    if out_key in context:
+        return
+    for key in aliases or (out_key,):
+        value = _string_or_none(_context_value(score, flat, key))
+        if value is not None:
+            context[out_key] = value
+            return
+
+
+def _copy_bool_context_value(
+    context: dict[str, Any],
+    score: dict[str, Any],
+    flat: dict[str, Any],
+    out_key: str,
+    *aliases: str,
+) -> None:
+    if out_key in context:
+        return
+    for key in aliases or (out_key,):
+        value = _context_value(score, flat, key)
+        if isinstance(value, bool):
+            context[out_key] = value
+            return
+
+
+def _small_cap_momentum_context(
+    score: dict[str, Any],
+    flat: dict[str, Any],
+) -> dict[str, Any]:
+    """Copy Ross-style momentum facts that are already present in score/flat."""
+    context: dict[str, Any] = {}
+    for source in (
+        score.get(SMALL_CAP_MOMENTUM_CONTEXT_KEY) if isinstance(score, dict) else None,
+        flat.get(SMALL_CAP_MOMENTUM_CONTEXT_KEY) if isinstance(flat, dict) else None,
+    ):
+        if not isinstance(source, dict):
+            continue
+        for key, value in source.items():
+            if _flat_indicator_value_supported(value):
+                context[str(key)] = value
+
+    for key in (
+        "gap_pct",
+        "premarket_gap_pct",
+        "daily_change_pct",
+        "news_sentiment",
+        "news_count",
+        "market_cap",
+        "market_cap_b",
+        "float_proxy_shares",
+        "shares_outstanding_proxy",
+        "premarket_high",
+        "day_high",
+        "bid",
+        "ask",
+        "spread_abs",
+        "spread_bps",
+    ):
+        _copy_numeric_context_value(context, score, flat, key)
+    _copy_numeric_context_value(
+        context,
+        score,
+        flat,
+        "rvol",
+        "rvol",
+        "rel_vol",
+        "volume_ratio",
+        "vol_ratio",
+    )
+    _copy_numeric_context_value(
+        context,
+        score,
+        flat,
+        "rel_vol",
+        "rel_vol",
+        "rvol",
+        "volume_ratio",
+        "vol_ratio",
+    )
+    _copy_numeric_context_value(
+        context,
+        score,
+        flat,
+        "volume_ratio",
+        "volume_ratio",
+        "rvol",
+        "rel_vol",
+        "vol_ratio",
+    )
+
+    for key in ("sector", "float_bucket", "float_proxy_source", "halt_status", "halt_reason"):
+        _copy_text_context_value(context, score, flat, key)
+    _copy_bool_context_value(context, score, flat, "halted")
+
+    bid = _finite_float_or_none(context.get("bid"))
+    ask = _finite_float_or_none(context.get("ask"))
+    if bid is not None and ask is not None and ask >= bid:
+        spread_abs = _finite_float_or_none(context.get("spread_abs"))
+        if spread_abs is None:
+            spread_abs = ask - bid
+            context["spread_abs"] = round(spread_abs, 6)
+        spread_bps = _finite_float_or_none(context.get("spread_bps"))
+        mid = (bid + ask) / 2.0
+        if spread_bps is None and mid > 0:
+            context["spread_bps"] = round(spread_abs / mid * 10_000.0, 6)
+
+    price = _finite_float_or_none(_context_value(score, flat, "price"))
+    market_cap = _finite_float_or_none(context.get("market_cap"))
+    market_cap_b = _finite_float_or_none(context.get("market_cap_b"))
+    if market_cap is None and market_cap_b is not None:
+        market_cap = market_cap_b * 1_000_000_000.0
+        context["market_cap"] = round(market_cap, 2)
+    elif market_cap is not None and market_cap_b is None:
+        context["market_cap_b"] = round(market_cap / 1_000_000_000.0, 6)
+    shares_proxy = _finite_float_or_none(
+        _first_present(
+            context.get("shares_outstanding_proxy"),
+            context.get("float_proxy_shares"),
+        )
+    )
+    if shares_proxy is None and market_cap is not None and price and price > 0:
+        shares_proxy = market_cap / price
+    if shares_proxy is not None and shares_proxy > 0:
+        rounded_proxy = round(shares_proxy, 2)
+        context.setdefault("shares_outstanding_proxy", rounded_proxy)
+        context.setdefault("float_proxy_shares", rounded_proxy)
+        context.setdefault("float_proxy_source", "market_cap/price_proxy")
+        if "float_bucket" not in context:
+            if shares_proxy < 5_000_000:
+                context["float_bucket"] = "micro_float_proxy"
+            elif shares_proxy < 20_000_000:
+                context["float_bucket"] = "low_float_proxy"
+            elif shares_proxy > 50_000_000:
+                context["float_bucket"] = "high_float_proxy"
+            else:
+                context["float_bucket"] = "mid_float_proxy"
+
+    return {
+        key: value
+        for key, value in context.items()
+        if _flat_indicator_value_supported(value)
+    }
+
+
+def _decode_indicator_payload(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            decoded = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        return decoded if isinstance(decoded, dict) else {}
+    return {}
+
+
+def _momentum_context_snapshot_max_age_seconds() -> float:
+    cadence_minutes = max(
+        1.0,
+        _non_negative_float_setting("brain_market_snapshot_interval_minutes", 15.0)
+        or 15.0,
+    )
+    cadence_seconds = cadence_minutes * SECONDS_PER_MINUTE
+    board_stale_seconds = _non_negative_float_setting(
+        "opportunity_board_stale_seconds",
+        int(cadence_seconds),
+    )
+    return max(
+        board_stale_seconds,
+        cadence_seconds * MOMENTUM_CONTEXT_SNAPSHOT_STALE_CADENCE_MULTIPLIER,
+    )
+
+
+def _market_snapshot_context_from_row(row: MarketSnapshot) -> dict[str, Any]:
+    indicator_data = _decode_indicator_payload(getattr(row, "indicator_data", None))
+    price = _finite_float_or_none(getattr(row, "close_price", None))
+    flat: dict[str, Any] = {}
+    if indicator_data:
+        try:
+            flat.update(_indicator_data_to_flat_snapshot(indicator_data, price))
+        except Exception:
+            logger.debug(
+                "[pattern_imminent] market snapshot flat conversion failed for %s",
+                getattr(row, "ticker", None),
+                exc_info=True,
+            )
+        _copy_scalar_indicator_fields(flat, indicator_data)
+    score = {
+        "ticker": getattr(row, "ticker", None),
+        "price": price,
+        "news_sentiment": getattr(row, "news_sentiment", None),
+        "news_count": getattr(row, "news_count", None),
+        "market_cap_b": getattr(row, "market_cap_b", None),
+    }
+    for key in (
+        "sector",
+        "gap_pct",
+        "premarket_gap_pct",
+        "daily_change_pct",
+        "volume_ratio",
+        "rvol",
+        "rel_vol",
+        "premarket_high",
+        "day_high",
+        "bid",
+        "ask",
+        "spread_bps",
+        "halted",
+        "halt_status",
+        "halt_reason",
+    ):
+        if key in indicator_data and key not in flat:
+            flat[key] = indicator_data[key]
+    context = _small_cap_momentum_context(score, flat)
+    if not any(key in context for key in MOMENTUM_CONTEXT_FACT_KEYS):
+        return {}
+    context["context_source"] = "market_snapshot"
+    context["market_snapshot_id"] = int(getattr(row, "id", 0) or 0)
+    context["market_snapshot_date"] = _isoformat_or_none(
+        getattr(row, "snapshot_date", None)
+    )
+    bar_start = _isoformat_or_none(getattr(row, "bar_start_at", None))
+    if bar_start:
+        context["market_snapshot_bar_start_at"] = bar_start
+    bar_interval = _string_or_none(getattr(row, "bar_interval", None))
+    if bar_interval:
+        context["market_snapshot_bar_interval"] = bar_interval
+    return context
+
+
+def _latest_fresh_market_snapshot_context(
+    db: Session,
+    ticker: str,
+    *,
+    now: datetime | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    ticker_u = str(ticker or "").strip().upper()
+    if not ticker_u:
+        return {}, {"status": "missing_ticker"}
+    try:
+        row = (
+            db.query(MarketSnapshot)
+            .filter(MarketSnapshot.ticker == ticker_u)
+            .order_by(desc(MarketSnapshot.snapshot_date), desc(MarketSnapshot.id))
+            .first()
+        )
+    except Exception:
+        logger.debug(
+            "[pattern_imminent] market snapshot context query failed for %s",
+            ticker_u,
+            exc_info=True,
+        )
+        return {}, {"status": "query_failed"}
+    if row is None:
+        return {}, {"status": "missing"}
+    snapshot_date = getattr(row, "snapshot_date", None)
+    if not isinstance(snapshot_date, datetime):
+        return {}, {"status": "missing_timestamp"}
+    now_dt = now or datetime.utcnow()
+    snapshot_naive = (
+        snapshot_date.replace(tzinfo=None)
+        if snapshot_date.tzinfo is not None
+        else snapshot_date
+    )
+    now_naive = now_dt.replace(tzinfo=None) if now_dt.tzinfo is not None else now_dt
+    age_seconds = max(0.0, (now_naive - snapshot_naive).total_seconds())
+    max_age_seconds = _momentum_context_snapshot_max_age_seconds()
+    meta = {
+        "status": "fresh",
+        "age_seconds": round(age_seconds, 3),
+        "max_age_seconds": round(max_age_seconds, 3),
+    }
+    if age_seconds > max_age_seconds:
+        meta["status"] = "stale"
+        return {}, meta
+    context = _market_snapshot_context_from_row(row)
+    if not context:
+        meta["status"] = "empty"
+        return {}, meta
+    context["context_age_seconds"] = round(age_seconds, 3)
+    context["context_max_age_seconds"] = round(max_age_seconds, 3)
+    return context, meta
+
+
+def _merge_momentum_context_into_flat(
+    flat: dict[str, Any],
+    context: dict[str, Any],
+) -> None:
+    for key in MOMENTUM_CONTEXT_FLAT_MERGE_KEYS:
+        if key in context and flat.get(key) is None:
+            flat[key] = context[key]
+
+
 def _expected_net_pct_from_rule_snapshot(snapshot: Any) -> float | None:
     if isinstance(snapshot, str):
         try:
@@ -1243,11 +1652,31 @@ def _insert_imminent_breakout_alert(
         scorecard["shadow_near_miss_source"] = shadow_near_miss_source
     if hard_recert_reasons:
         scorecard["hard_recert_reasons"] = hard_recert_reasons
+    momentum_context = _small_cap_momentum_context(score, flat)
     snap = {
         "flat_indicators": {k: v for k, v in flat.items() if v is not None},
         "imminent_scorecard": scorecard,
     }
+    if momentum_context:
+        snap[SMALL_CAP_MOMENTUM_CONTEXT_KEY] = momentum_context
     asset = "crypto" if is_crypto(ticker) else "stock"
+    signals_snapshot = {"signals": (score.get("signals") or [])[:12]}
+    if momentum_context:
+        signals_snapshot[SMALL_CAP_MOMENTUM_CONTEXT_KEY] = momentum_context
+    sector = _string_or_none(
+        _first_present(
+            momentum_context.get("sector"),
+            flat.get("sector"),
+            score.get("sector"),
+        )
+    )
+    news_sentiment = _finite_float_or_none(
+        _first_present(
+            momentum_context.get("news_sentiment"),
+            flat.get("news_sentiment"),
+            score.get("news_sentiment"),
+        )
+    )
     row = BreakoutAlert(
         ticker=ticker,
         asset_type=asset,
@@ -1258,8 +1687,10 @@ def _insert_imminent_breakout_alert(
         entry_price=score.get("entry_price"),
         stop_loss=score.get("stop_loss"),
         target_price=score.get("take_profit"),
-        signals_snapshot={"signals": (score.get("signals") or [])[:12]},
+        signals_snapshot=signals_snapshot,
         outcome="pending",
+        sector=sector[:60] if sector else None,
+        news_sentiment_at_alert=news_sentiment,
         user_id=user_id,
         scan_pattern_id=pat.id,
         timeframe=(pat.timeframe or "1d")[:10],
@@ -1479,6 +1910,11 @@ def gather_imminent_candidate_rows(
     ticker_rotation_applied = 0
     ticker_rotation_total_available = 0
     ticker_rotation_samples: list[dict[str, Any]] = []
+    momentum_context_cache: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
+    momentum_context_candidates = 0
+    momentum_context_snapshot_lookups = 0
+    momentum_context_snapshot_enriched = 0
+    momentum_context_snapshot_status_counts: Counter[str] = Counter()
     pattern_priority_top_stage_counts: Counter[str] = Counter(
         _lifecycle_stage(pat) or UNKNOWN_LIFECYCLE_STAGE
         for pat in patterns[: max(0, suppressed_limit)]
@@ -1822,6 +2258,28 @@ def gather_imminent_candidate_rows(
             if res is None:
                 res = recent_swing_resistance(ticker)
             flat = flat_indicators_from_score(score, resistance=res)
+            if not is_crypto(ticker):
+                momentum_context = _small_cap_momentum_context(score, flat)
+                snapshot_cached = momentum_context_cache.get(cache_key)
+                if snapshot_cached is None:
+                    snapshot_context, snapshot_meta = _latest_fresh_market_snapshot_context(
+                        db,
+                        ticker,
+                    )
+                    momentum_context_cache[cache_key] = (snapshot_context, snapshot_meta)
+                    momentum_context_snapshot_lookups += 1
+                else:
+                    snapshot_context, snapshot_meta = snapshot_cached
+                snapshot_status = str(snapshot_meta.get("status") or "unknown")
+                momentum_context_snapshot_status_counts[snapshot_status] += 1
+                if snapshot_context:
+                    momentum_context_snapshot_enriched += 1
+                    for ctx_key, ctx_value in snapshot_context.items():
+                        momentum_context.setdefault(ctx_key, ctx_value)
+                if momentum_context:
+                    momentum_context_candidates += 1
+                    _merge_momentum_context_into_flat(flat, momentum_context)
+                    score[SMALL_CAP_MOMENTUM_CONTEXT_KEY] = momentum_context
 
             readiness, all_pass, ratio, missing = evaluate_readiness_with_gates(
                 conditions,
@@ -2047,6 +2505,16 @@ def gather_imminent_candidate_rows(
         "ticker_rotation_samples": ticker_rotation_samples,
         "open_position_deflection_enabled": open_position_deflection_enabled,
         "open_position_deflection_keys": len(open_position_keys),
+        "small_cap_momentum_context_key": SMALL_CAP_MOMENTUM_CONTEXT_KEY,
+        "small_cap_momentum_context_candidates": momentum_context_candidates,
+        "small_cap_momentum_context_snapshot_lookups": momentum_context_snapshot_lookups,
+        "small_cap_momentum_context_snapshot_enriched": momentum_context_snapshot_enriched,
+        "small_cap_momentum_context_snapshot_status_counts": dict(
+            momentum_context_snapshot_status_counts
+        ),
+        "small_cap_momentum_context_snapshot_max_age_seconds": (
+            _momentum_context_snapshot_max_age_seconds()
+        ),
         "read_transaction_released_before_scoring": read_transaction_released,
         "pattern_priority_top_stage_counts": dict(pattern_priority_top_stage_counts),
         "top_suppressed": suppressed,

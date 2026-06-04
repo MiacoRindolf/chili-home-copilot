@@ -7,7 +7,14 @@ from types import SimpleNamespace
 import pytest
 
 from app.models.core import User
-from app.models.trading import AlertHistory, AutoTraderRun, BreakoutAlert, ScanPattern, Trade
+from app.models.trading import (
+    AlertHistory,
+    AutoTraderRun,
+    BreakoutAlert,
+    MarketSnapshot,
+    ScanPattern,
+    Trade,
+)
 from app.services.trading import pattern_imminent_alerts as imminent_mod
 from app.services.trading.alerts import PATTERN_BREAKOUT_IMMINENT
 from app.services.trading.pattern_imminent_alerts import (
@@ -209,6 +216,36 @@ def test_flat_indicators_exposes_pattern_condition_aliases() -> None:
     assert flat["stochastic_d"] == TEST_ALIAS_STOCH_D
     assert flat["bb_pct"] == TEST_ALIAS_BB_PCT_FRACTION
     assert flat["bb_pct_percent"] == TEST_ALIAS_BB_PCT_PERCENT
+    assert readiness is not None
+    assert all_pass is True
+    assert ratio == 1.0
+
+
+def test_flat_indicators_maps_rvol_alias_to_all_volume_keys() -> None:
+    flat = flat_indicators_from_score(
+        {
+            "price": TEST_SCORE_PRICE,
+            "indicators": {
+                "rvol": TEST_ALIAS_VOLUME_RATIO,
+            },
+        },
+        resistance=None,
+    )
+    conditions = [
+        {"indicator": "rvol", "op": ">", "value": 1.5},
+        {"indicator": "rel_vol", "op": ">", "value": 1.5},
+        {"indicator": "volume_ratio", "op": ">", "value": 1.5},
+    ]
+
+    readiness, all_pass, ratio = evaluate_imminent_readiness(
+        conditions,
+        flat,
+        evaluable_ratio_floor=1.0,
+    )
+
+    assert flat["rvol"] == TEST_ALIAS_VOLUME_RATIO
+    assert flat["rel_vol"] == TEST_ALIAS_VOLUME_RATIO
+    assert flat["volume_ratio"] == TEST_ALIAS_VOLUME_RATIO
     assert readiness is not None
     assert all_pass is True
     assert ratio == 1.0
@@ -2452,6 +2489,135 @@ def _recent_pattern_imminent_breakout(
         )
     )
     db.commit()
+
+
+def test_market_snapshot_context_helper_uses_latest_snapshot_row(db) -> None:
+    now = datetime.utcnow()
+    ticker = "SNAPCTX"
+    older = MarketSnapshot(
+        ticker=ticker,
+        snapshot_date=now - timedelta(minutes=10),
+        bar_start_at=now - timedelta(minutes=15),
+        bar_interval="1d",
+        close_price=5.0,
+        indicator_data={"sector": "Old Sector", "premarket_high": 5.5},
+        news_sentiment=-0.1,
+        news_count=1,
+        market_cap_b=0.01,
+    )
+    newer = MarketSnapshot(
+        ticker=ticker,
+        snapshot_date=now - timedelta(minutes=1),
+        bar_start_at=now - timedelta(minutes=5),
+        bar_interval="1d",
+        close_price=4.0,
+        indicator_data={"sector": "Healthcare", "premarket_high": 4.8},
+        news_sentiment=0.31,
+        news_count=7,
+        market_cap_b=0.02,
+    )
+    db.add_all([older, newer])
+    db.commit()
+
+    context, meta = imminent_mod._latest_fresh_market_snapshot_context(
+        db,
+        ticker,
+        now=now,
+    )
+
+    assert meta["status"] == "fresh"
+    assert context["market_snapshot_id"] == newer.id
+    assert context["sector"] == "Healthcare"
+    assert context["news_sentiment"] == pytest.approx(0.31)
+    assert context["news_count"] == pytest.approx(7)
+    assert context["market_cap_b"] == pytest.approx(0.02)
+    assert context["market_cap"] == pytest.approx(20_000_000.0)
+    assert context["float_proxy_shares"] == pytest.approx(5_000_000.0)
+    assert context["premarket_high"] == pytest.approx(4.8)
+    assert context["context_source"] == "market_snapshot"
+
+
+def test_insert_imminent_breakout_alert_persists_momentum_context_and_alert_columns(
+    db,
+    monkeypatch,
+) -> None:
+    _ensure_test_user(db)
+    pattern = ScanPattern(
+        name="Momentum context persistence",
+        rules_json={"conditions": []},
+        origin="test",
+        asset_class="stocks",
+        lifecycle_stage=imminent_mod.PROMOTED_STAGE,
+        timeframe="1d",
+    )
+    db.add(pattern)
+    db.commit()
+    monkeypatch.setattr(
+        "app.services.trading.contracts.signal_emit.emit_signal_for_breakout_alert",
+        lambda *args, **kwargs: None,
+    )
+
+    context = {
+        "gap_pct": 8.5,
+        "rvol": 3.2,
+        "sector": "Technology",
+        "news_sentiment": 0.27,
+        "market_cap_b": 0.04,
+        "bid": 9.98,
+        "ask": 10.02,
+    }
+    score = {
+        "price": 10.0,
+        "entry_price": 10.0,
+        "stop_loss": 9.0,
+        "take_profit": 12.0,
+        "signals": ["Gap and RVOL aligned"],
+        imminent_mod.SMALL_CAP_MOMENTUM_CONTEXT_KEY: context,
+    }
+    flat = {
+        "price": 10.0,
+        "gap_pct": 8.5,
+        "volume_ratio": 3.2,
+    }
+
+    imminent_mod._insert_imminent_breakout_alert(
+        db,
+        TEST_USER_ID,
+        pattern,
+        "CTXMOM",
+        score,
+        flat,
+        composite=0.75,
+        score_breakdown={"readiness": 0.5},
+        readiness=0.62,
+        coverage_ratio=0.8,
+        eta_lo=0.1,
+        eta_hi=1.0,
+        signal_lane=imminent_mod.STANDARD_SIGNAL_LANE,
+    )
+
+    row = (
+        db.query(BreakoutAlert)
+        .filter(BreakoutAlert.ticker == "CTXMOM")
+        .order_by(BreakoutAlert.id.desc())
+        .first()
+    )
+
+    assert row is not None
+    persisted = row.indicator_snapshot[imminent_mod.SMALL_CAP_MOMENTUM_CONTEXT_KEY]
+    assert persisted["gap_pct"] == pytest.approx(8.5)
+    assert persisted["rvol"] == pytest.approx(3.2)
+    assert persisted["rel_vol"] == pytest.approx(3.2)
+    assert persisted["volume_ratio"] == pytest.approx(3.2)
+    assert persisted["sector"] == "Technology"
+    assert persisted["news_sentiment"] == pytest.approx(0.27)
+    assert persisted["market_cap"] == pytest.approx(40_000_000.0)
+    assert persisted["float_proxy_shares"] == pytest.approx(4_000_000.0)
+    assert persisted["float_bucket"] == "micro_float_proxy"
+    assert persisted["spread_bps"] == pytest.approx(40.0)
+    assert row.signals_snapshot[imminent_mod.SMALL_CAP_MOMENTUM_CONTEXT_KEY] == persisted
+    assert row.sector == "Technology"
+    assert row.news_sentiment_at_alert == pytest.approx(0.27)
 
 
 def test_run_pattern_imminent_scan_rearms_equity_shadow_after_rth_open(
