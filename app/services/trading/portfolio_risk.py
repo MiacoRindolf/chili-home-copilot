@@ -113,9 +113,10 @@ def get_risk_limits(settings: Any | None = None) -> RiskLimits:
         ),
         max_risk_per_trade_pct=_risk_limit_float(
             settings,
-            "brain_risk_per_trade_pct",
+            "brain_risk_max_risk_per_trade_pct",
             defaults.max_risk_per_trade_pct,
             max_value=100.0,
+            fallback_names=("brain_risk_per_trade_pct",),
         ),
         max_same_ticker=_risk_limit_int(
             settings,
@@ -144,8 +145,15 @@ def _risk_limit_float(
     *,
     min_value: float = 0.0,
     max_value: float | None = None,
+    fallback_names: tuple[str, ...] = (),
 ) -> float:
-    value = _risk_limit_number(getattr(settings, name, None))
+    raw = getattr(settings, name, None)
+    if raw in (None, ""):
+        for fallback_name in fallback_names:
+            raw = getattr(settings, fallback_name, None)
+            if raw not in (None, ""):
+                break
+    value = _risk_limit_number(raw)
     if value is None or value < min_value:
         return float(default)
     if max_value is not None and value > max_value:

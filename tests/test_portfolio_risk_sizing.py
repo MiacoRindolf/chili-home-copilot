@@ -131,7 +131,7 @@ def test_get_risk_limits_defaults_malformed_settings_without_raising():
             brain_risk_max_crypto=True,
             brain_risk_max_stocks="NaN",
             brain_risk_max_heat_pct="Infinity",
-            brain_risk_per_trade_pct=-1.0,
+            brain_risk_max_risk_per_trade_pct=-1.0,
             brain_risk_max_same_ticker="",
             brain_risk_max_sector_pct=500.0,
             brain_risk_max_avg_correlation=2.0,
@@ -148,7 +148,7 @@ def test_get_risk_limits_preserves_explicit_zero_as_restrictive():
             brain_risk_max_crypto=0,
             brain_risk_max_stocks=0,
             brain_risk_max_heat_pct=0.0,
-            brain_risk_per_trade_pct=0.0,
+            brain_risk_max_risk_per_trade_pct=0.0,
             brain_risk_max_same_ticker=0,
             brain_risk_max_sector_pct=0.0,
             brain_risk_max_avg_correlation=0.0,
@@ -163,3 +163,28 @@ def test_get_risk_limits_preserves_explicit_zero_as_restrictive():
     assert limits.max_same_ticker == 0
     assert limits.max_sector_pct == 0.0
     assert limits.max_avg_correlation == 0.0
+
+
+def test_get_risk_limits_reads_declared_max_risk_per_trade_setting():
+    limits = get_risk_limits(
+        SimpleNamespace(brain_risk_max_risk_per_trade_pct=0.35)
+    )
+
+    assert limits.max_risk_per_trade_pct == pytest.approx(0.35)
+
+
+def test_get_risk_limits_prefers_declared_max_risk_per_trade_setting():
+    limits = get_risk_limits(
+        SimpleNamespace(
+            brain_risk_max_risk_per_trade_pct=0.35,
+            brain_risk_per_trade_pct=2.5,
+        )
+    )
+
+    assert limits.max_risk_per_trade_pct == pytest.approx(0.35)
+
+
+def test_get_risk_limits_preserves_legacy_per_trade_risk_alias():
+    limits = get_risk_limits(SimpleNamespace(brain_risk_per_trade_pct=0.45))
+
+    assert limits.max_risk_per_trade_pct == pytest.approx(0.45)
