@@ -129,6 +129,31 @@ def test_fast_path_pairs_env_override_works():
     assert loaded.pairs == ["ZEC-USD", "INJ-USD", "PENDLE-USD"]
 
 
+@pytest.mark.parametrize(
+    ("env_name", "attr", "default"),
+    [
+        ("CHILI_FAST_PATH_BAR_WINDOW", "bar_window", 500),
+        ("CHILI_FAST_PATH_BOOK_DEPTH", "book_depth", 25),
+        ("CHILI_FAST_PATH_QUEUE_MAX", "queue_max", 10_000),
+        ("CHILI_FAST_PATH_BATCH_SIZE", "batch_size", 50),
+        ("CHILI_FAST_PATH_BATCH_INTERVAL_MS", "batch_interval_ms", 200),
+        ("CHILI_FAST_PATH_CB_THRESHOLD", "cb_threshold", 5),
+        ("CHILI_FAST_PATH_HEALTHZ_PORT", "healthz_port", 8090),
+        ("CHILI_FAST_PATH_METRICS_INTERVAL_S", "metrics_log_interval_s", 60),
+    ],
+)
+@pytest.mark.parametrize("raw", ["0", "-1", "bad"])
+def test_core_runtime_int_env_rejects_non_positive_values(
+    env_name,
+    attr,
+    default,
+    raw,
+):
+    with mock.patch.dict(os.environ, {env_name: raw}):
+        loaded = load()
+    assert getattr(loaded, attr) == default
+
+
 def test_universe_empty_fallback_env_override_works():
     with mock.patch.dict(
         os.environ,

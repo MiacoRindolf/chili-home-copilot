@@ -533,14 +533,16 @@ def load() -> FastPathSettings:
         enabled=_env_bool("CHILI_FAST_PATH_ENABLED", False),
         mode=(os.environ.get("CHILI_FAST_PATH_MODE") or "paper").strip().lower(),
         pairs=_env_pairs("CHILI_FAST_PATH_PAIRS", []),
-        bar_window=_env_int("CHILI_FAST_PATH_BAR_WINDOW", 500),
-        book_depth=_env_int("CHILI_FAST_PATH_BOOK_DEPTH", 25),
-        queue_max=_env_int("CHILI_FAST_PATH_QUEUE_MAX", 10_000),
-        batch_size=_env_int("CHILI_FAST_PATH_BATCH_SIZE", 50),
-        batch_interval_ms=_env_int("CHILI_FAST_PATH_BATCH_INTERVAL_MS", 200),
-        cb_threshold=_env_int("CHILI_FAST_PATH_CB_THRESHOLD", 5),
-        healthz_port=_env_int("CHILI_FAST_PATH_HEALTHZ_PORT", 8090),
-        metrics_log_interval_s=_env_int("CHILI_FAST_PATH_METRICS_INTERVAL_S", 60),
+        bar_window=_env_positive_int("CHILI_FAST_PATH_BAR_WINDOW", 500),
+        book_depth=_env_positive_int("CHILI_FAST_PATH_BOOK_DEPTH", 25),
+        queue_max=_env_positive_int("CHILI_FAST_PATH_QUEUE_MAX", 10_000),
+        batch_size=_env_positive_int("CHILI_FAST_PATH_BATCH_SIZE", 50),
+        batch_interval_ms=_env_positive_int(
+            "CHILI_FAST_PATH_BATCH_INTERVAL_MS", 200),
+        cb_threshold=_env_positive_int("CHILI_FAST_PATH_CB_THRESHOLD", 5),
+        healthz_port=_env_positive_int("CHILI_FAST_PATH_HEALTHZ_PORT", 8090),
+        metrics_log_interval_s=_env_positive_int(
+            "CHILI_FAST_PATH_METRICS_INTERVAL_S", 60),
         # f-fastpath-universe-rotation (2026-05-07)
         universe_rotation_enabled=_env_bool(
             "CHILI_FAST_PATH_UNIVERSE_ROTATION_ENABLED", False),
