@@ -3374,6 +3374,31 @@ class Settings(BaseSettings):
             "CHILI_AUTOTRADER_SLIPPAGE_REPRICE_COOLDOWN_ASSET_TYPES"
         ),
     )
+    chili_autotrader_live_reentry_cooldown_asset_types: str = Field(
+        default="stock",
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_LIVE_REENTRY_COOLDOWN_ASSET_TYPES"
+        ),
+        description="Comma-separated asset types protected by live same-ticker post-exit reentry cooldowns.",
+    )
+    chili_autotrader_live_reentry_cooldown_minutes: float = Field(
+        default=30.0,
+        ge=0.0,
+        le=1440.0,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_LIVE_REENTRY_COOLDOWN_MINUTES"
+        ),
+        description="Cooldown after a non-stop live exit before re-entering the same ticker; 0 disables this branch.",
+    )
+    chili_autotrader_live_stop_reentry_cooldown_minutes: float = Field(
+        default=120.0,
+        ge=0.0,
+        le=1440.0,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_LIVE_STOP_REENTRY_COOLDOWN_MINUTES"
+        ),
+        description="Cooldown after a stop-related live exit before re-entering the same ticker; 0 disables this branch.",
+    )
     chili_autotrader_monitor_interval_seconds: int = Field(
         default=60,
         ge=5,

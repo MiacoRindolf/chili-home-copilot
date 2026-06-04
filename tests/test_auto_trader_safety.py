@@ -32,6 +32,7 @@ from app.config import (
     AUTOTRADER_STOCK_SESSION_DEFER_DEFAULT_MAX_AGE_HOURS,
     AUTOTRADER_MAX_TICK_MAX_SECONDS,
     AUTOTRADER_MIN_TICK_MAX_SECONDS,
+    Settings,
 )
 from app.models.trading import (
     AutoTraderRun,
@@ -217,6 +218,29 @@ def _minimal_settings(user_id: int) -> SimpleNamespace:
         chili_autotrader_probation_min_cpcv_sharpe=TEST_STRONG_CPCV_SHARPE,
         chili_autotrader_probation_min_realized_trades=TEST_REALIZED_TRADE_COUNT,
     )
+
+
+def test_live_reentry_cooldown_reads_typed_env(monkeypatch):
+    monkeypatch.setenv("CHILI_AUTOTRADER_LIVE_REENTRY_COOLDOWN_ASSET_TYPES", "crypto,options")
+    monkeypatch.setenv("CHILI_AUTOTRADER_LIVE_REENTRY_COOLDOWN_MINUTES", "11.5")
+    monkeypatch.setenv("CHILI_AUTOTRADER_LIVE_STOP_REENTRY_COOLDOWN_MINUTES", "47")
+    cfg = Settings(
+        database_url="postgresql://chili:chili@localhost:5433/chili_test",
+        _env_file=None,
+    )
+    monkeypatch.setattr(at_mod, "settings", cfg)
+
+    assert at_mod._live_reentry_cooldown_asset_enabled("crypto") is True
+    assert at_mod._live_reentry_cooldown_asset_enabled("options") is True
+    assert at_mod._live_reentry_cooldown_asset_enabled("stock") is False
+    assert at_mod._bounded_minutes_setting(
+        "chili_autotrader_live_reentry_cooldown_minutes",
+        at_mod.LIVE_REENTRY_COOLDOWN_DEFAULT_MINUTES,
+    ) == pytest.approx(11.5)
+    assert at_mod._bounded_minutes_setting(
+        "chili_autotrader_live_stop_reentry_cooldown_minutes",
+        at_mod.LIVE_STOP_REENTRY_COOLDOWN_DEFAULT_MINUTES,
+    ) == pytest.approx(47.0)
 
 
 def _live_runtime() -> dict:
