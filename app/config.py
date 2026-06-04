@@ -1978,6 +1978,12 @@ class Settings(BaseSettings):
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_MAX_NOTIONAL_PER_TRADE_USD"),
     )
+    chili_momentum_order_notional_guard_bps: float = Field(
+        default=25.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ORDER_NOTIONAL_GUARD_BPS"),
+        description="Extra bps cushion applied to live market-entry ask when sizing against max notional; 0 disables.",
+    )
     chili_momentum_risk_max_position_size_base: float = Field(
         default=1_000_000.0,
         ge=0.0,

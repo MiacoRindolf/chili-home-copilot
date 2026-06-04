@@ -660,7 +660,8 @@ def _fmt_base_size(q: float) -> str:
 
 def _notional_guard_multiplier() -> float:
     try:
-        bps = float(getattr(settings, "chili_momentum_order_notional_guard_bps", 25.0) or 25.0)
+        raw_bps = getattr(settings, "chili_momentum_order_notional_guard_bps", 25.0)
+        bps = 25.0 if raw_bps is None else float(raw_bps)
     except (TypeError, ValueError):
         bps = 25.0
     return 1.0 + max(0.0, bps) / 10_000.0
@@ -696,7 +697,8 @@ def _quote_quality_block(tick: Any, freshness: Any) -> dict[str, Any] | None:
     if not math.isfinite(spread_bps):
         spread_bps = ((ask - bid) / mid) * 10_000.0
     try:
-        max_spread = float(getattr(settings, "chili_momentum_risk_max_spread_bps_live", 12.0) or 12.0)
+        raw_max_spread = getattr(settings, "chili_momentum_risk_max_spread_bps_live", 12.0)
+        max_spread = 12.0 if raw_max_spread is None else float(raw_max_spread)
     except (TypeError, ValueError):
         max_spread = 12.0
     if spread_bps > max_spread:

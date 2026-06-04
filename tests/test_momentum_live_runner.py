@@ -23,6 +23,8 @@ from app.services.trading.momentum_neural.live_fsm import (
     can_transition_live,
 )
 from app.services.trading.momentum_neural.live_runner import (
+    _notional_guard_multiplier,
+    _quote_quality_block,
     list_runnable_live_sessions,
     summarize_live_execution,
     tick_live_session,
@@ -138,6 +140,34 @@ def test_summarize_live_execution_helpers() -> None:
     assert s.get("last_exit_return_bps") == 200.0
     assert s.get("last_partial_exit_notional_basis_usd") == 1.0
     assert s.get("last_partial_exit_return_bps") == 100.0
+
+
+def test_quote_quality_block_preserves_zero_live_spread_cap(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "chili_momentum_risk_max_spread_bps_live", 0.0)
+    fresh = _fresh()
+
+    gate = _quote_quality_block(
+        NormalizedTicker(
+            product_id="SOL-USD",
+            bid=99.995,
+            ask=100.005,
+            mid=100.0,
+            spread_bps=1.0,
+            freshness=fresh,
+        ),
+        fresh,
+    )
+
+    assert gate is not None
+    assert gate["reason"] == "wide_bbo_spread"
+    assert gate["spread_bps"] == 1.0
+    assert gate["max_spread_bps"] == 0.0
+
+
+def test_notional_guard_multiplier_preserves_zero_bps(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "chili_momentum_order_notional_guard_bps", 0.0)
+
+    assert _notional_guard_multiplier() == 1.0
 
 
 def test_live_exit_intent_records_packet_context(monkeypatch) -> None:
