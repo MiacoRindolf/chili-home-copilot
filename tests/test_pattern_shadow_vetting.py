@@ -15,12 +15,16 @@ import pytest
 from app.config import Settings
 from app.models.trading import PaperTrade
 from app.services.trading.pattern_shadow_vetting import (
+    _negative_realized_gate_hold_reason,
     _apply_min_pilot_roster,
     _load_directional_evidence,
     _pilot_metric_enabled,
     _pilot_score_for_row,
+    _shadow_gate_refresh_candidates,
+    _shadow_gate_refresh_effective_floor,
     _pilot_weights,
     pilot_promoted_risk_multiplier,
+    refresh_blocked_shadow_promotion_gates,
     run_shadow_vetting_cycle,
     select_shadow_vetting_candidates,
 )
@@ -97,6 +101,87 @@ def test_shadow_vetting_min_pilot_roster_settings_drive_gate(monkeypatch) -> Non
     assert rows[0].get("pilot_eligible") is not True
     assert rows[1]["pilot_eligible"] is True
     assert rows[1]["pilot_min_roster_effective_floor"] == pytest.approx(0.855)
+
+
+def test_shadow_vetting_refresh_and_failed_gate_settings_drive_policy(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CHILI_SHADOW_VETTING_MIN_PILOT_SCORE", "0.82")
+    monkeypatch.setenv("CHILI_SHADOW_VETTING_REFRESH_BLOCKED_GATE_ENABLED", "true")
+    monkeypatch.setenv("CHILI_SHADOW_VETTING_REFRESH_BLOCKED_GATE_LIMIT", "3")
+    monkeypatch.setenv(
+        "CHILI_SHADOW_VETTING_REFRESH_BLOCKED_GATE_THRESHOLD_RATIO", "0.90"
+    )
+    monkeypatch.setenv("CHILI_SHADOW_VETTING_HOLD_FAILED_REALIZED_GATE_ENABLED", "true")
+    monkeypatch.setenv("CHILI_SHADOW_VETTING_FAILED_GATE_MAX_MEDIAN_SHARPE", "-0.10")
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.chili_shadow_vetting_refresh_blocked_gate_enabled is True
+    assert settings.chili_shadow_vetting_refresh_blocked_gate_limit == 3
+    assert settings.chili_shadow_vetting_refresh_blocked_gate_min_score is None
+    assert settings.chili_shadow_vetting_refresh_blocked_gate_threshold_ratio == (
+        pytest.approx(0.90)
+    )
+    assert settings.chili_shadow_vetting_hold_failed_realized_gate_enabled is True
+    assert settings.chili_shadow_vetting_failed_gate_max_median_sharpe == pytest.approx(
+        -0.10
+    )
+
+    refresh_row = {
+        "scan_pattern_id": 42,
+        "lifecycle_stage": "shadow_promoted",
+        "promotion_gate_passed": False,
+        "cpcv_ready": True,
+        "pilot_score": 0.86,
+        "pilot_score_threshold": 0.90,
+        "effective_sample_n": 20.0,
+        "weighted_directional_wr": 0.60,
+        "recent_directional_wr": 0.61,
+        "freshness": 0.50,
+        "directional_decay": 0.20,
+    }
+
+    assert _shadow_gate_refresh_effective_floor(
+        refresh_row, settings_=settings,
+    ) == pytest.approx(0.82)
+    candidates = _shadow_gate_refresh_candidates([refresh_row], settings_=settings)
+    assert [row["scan_pattern_id"] for row in candidates] == [42]
+
+    monkeypatch.setenv("CHILI_SHADOW_VETTING_REFRESH_BLOCKED_GATE_MIN_SCORE", "0.88")
+    stricter_settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert _shadow_gate_refresh_effective_floor(
+        refresh_row, settings_=stricter_settings,
+    ) == pytest.approx(0.88)
+    assert _shadow_gate_refresh_candidates(
+        [refresh_row], settings_=stricter_settings,
+    ) == []
+
+    disabled_settings = _settings(
+        chili_shadow_vetting_refresh_blocked_gate_enabled=False,
+    )
+    assert refresh_blocked_shadow_promotion_gates(
+        object(),
+        candidate_rows=[refresh_row],
+        settings_=disabled_settings,
+    ) == {"ok": True, "skipped": "flag_disabled"}
+
+    failed_gate_row = {
+        "lifecycle_stage": "shadow_promoted",
+        "promotion_gate_passed": False,
+        "promotion_gate_reasons": ["adaptive_median_sharpe_below_pool_threshold"],
+        "cpcv_median_sharpe": -0.20,
+        "cpcv_n_paths": 10,
+    }
+    assert _negative_realized_gate_hold_reason(
+        failed_gate_row, settings_=settings,
+    ) == "negative_realized_cpcv_gate"
+    monkeypatch.setenv("CHILI_SHADOW_VETTING_FAILED_GATE_MAX_MEDIAN_SHARPE", "-0.30")
+    stricter_failed_gate_settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert _negative_realized_gate_hold_reason(
+        failed_gate_row, settings_=stricter_failed_gate_settings,
+    ) is None
 
 
 def test_pilot_score_excludes_saturated_constant_dsr_pbo() -> None:

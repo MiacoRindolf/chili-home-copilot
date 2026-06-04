@@ -4587,6 +4587,45 @@ class Settings(BaseSettings):
             "CHILI_SHADOW_VETTING_MAX_PILOT_DIRECTIONAL_DECAY"
         ),
     )
+    chili_shadow_vetting_refresh_blocked_gate_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_SHADOW_VETTING_REFRESH_BLOCKED_GATE_ENABLED"
+        ),
+    )
+    chili_shadow_vetting_refresh_blocked_gate_limit: int = Field(
+        default=4,
+        ge=0,
+        validation_alias=AliasChoices("CHILI_SHADOW_VETTING_REFRESH_BLOCKED_GATE_LIMIT"),
+    )
+    chili_shadow_vetting_refresh_blocked_gate_min_score: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices(
+            "CHILI_SHADOW_VETTING_REFRESH_BLOCKED_GATE_MIN_SCORE"
+        ),
+    )
+    chili_shadow_vetting_refresh_blocked_gate_threshold_ratio: float = Field(
+        default=0.85,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices(
+            "CHILI_SHADOW_VETTING_REFRESH_BLOCKED_GATE_THRESHOLD_RATIO"
+        ),
+    )
+    chili_shadow_vetting_hold_failed_realized_gate_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_SHADOW_VETTING_HOLD_FAILED_REALIZED_GATE_ENABLED"
+        ),
+    )
+    chili_shadow_vetting_failed_gate_max_median_sharpe: float = Field(
+        default=0.0,
+        validation_alias=AliasChoices(
+            "CHILI_SHADOW_VETTING_FAILED_GATE_MAX_MEDIAN_SHARPE"
+        ),
+    )
     # Pilot stage: broker-eligible but confidence-sized. This is the
     # non-binary ramp between broker-blocked shadow observation and full
     # promoted sizing.

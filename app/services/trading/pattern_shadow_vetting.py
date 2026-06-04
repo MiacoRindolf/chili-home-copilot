@@ -869,13 +869,16 @@ def _shadow_gate_refresh_effective_floor(
     pilot_score = _safe_float(row.get("pilot_score"))
     if pilot_score is None:
         return None
-    min_score = float(
-        getattr(
-            settings_,
-            "chili_shadow_vetting_refresh_blocked_gate_min_score",
-            getattr(settings_, "chili_shadow_vetting_min_pilot_score", 0.70),
-        )
+    refresh_min_score = getattr(
+        settings_,
+        "chili_shadow_vetting_refresh_blocked_gate_min_score",
+        None,
     )
+    if refresh_min_score is None:
+        refresh_min_score = getattr(
+            settings_, "chili_shadow_vetting_min_pilot_score", 0.70
+        )
+    min_score = float(refresh_min_score)
     threshold_ratio = float(
         getattr(
             settings_,
