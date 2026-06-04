@@ -11,6 +11,29 @@ script. No live trading behavior was changed.
 
 ---
 
+> ## ⚠️ CORRECTION (2026-06-04, same-day follow-up)
+>
+> **Section 3 ("crypto bleed → eligibility leak") and Recommendation A
+> (#1–#2, "crypto eligibility symmetry") are SUPERSEDED — do not act on them.**
+> Deeper investigation disproved the leak:
+> - The lifecycle eligibility gate is **sound** — it actively blocks
+>   non-eligible patterns on BOTH crypto and equity (`pattern_lifecycle_not_eligible`
+>   fired 706×challenged + 612×candidate on crypto in 7d; 0 non-eligible
+>   placements in the last 24h).
+> - The "by current stage" counterfactual was **confounded by reactive
+>   demotion**: the challenged/retired patterns in §3 traded *while promoted*
+>   and were demoted *after* losing. Crypto is net **+$466/30d on currently-
+>   promoted patterns** — a normal drawdown week, not a structural leak.
+> - **No eligibility change was made or should be made.**
+>
+> The validated root cause of thin equity flow is **certified-pattern supply**,
+> addressed by **PR #308 (equity-native pattern miner)** — mining equity
+> candidates from realized winners. See that PR + the activation runbook below.
+> The other live levers (momentum-floor mismatch, signature bucketing) are
+> scoped in the "Follow-up" section appended at the end of this report.
+
+---
+
 ## TL;DR
 
 1. **Massive is healthy and signal-rich — it is not the bottleneck.** Feed is
@@ -176,6 +199,48 @@ CPCV/composite-driven cohort promotion.
 
 ## Open questions for operator / Cowork
 - Approve the 1252-only pilot? (Recommended.)
-- Approve a crypto eligibility-symmetry + per-pattern realized-loss breaker design
-  brief? (This is where the real $ leak is.)
+- ~~Approve a crypto eligibility-symmetry + per-pattern realized-loss breaker
+  brief?~~ **WITHDRAWN — see the correction banner; the gate is sound, no leak.**
 - Deploy disposition for the 218-file uncommitted working tree?
+
+---
+
+## Follow-up (appended 2026-06-04 same-day — supersedes the crypto-eligibility line)
+
+After the correction above, the operator chose **"generate new equity alpha"**
+as the durable fix for thin certified-pattern supply. Status of that work:
+
+### Shipped — PR #308: equity-native pattern miner (dormant)
+Mirrors the crypto miner but mines equity candidates FROM realized equity
+winners (live + paper-shadow, indicators sourced from the linked breakout
+alert). Adaptive exit seed (max_bars from observed holds; atr/target inherited
+from parent). Flag-gated `brain_equity_miner_enabled=False`. 4 unit tests pass.
+Read-only validation on live data: 209 winners → 168 signatures → ~5 spawnable
+candidates.
+
+### Activation runbook (a deploy — operator-run)
+The running `chili-clean-recovery-*` stack is a custom baked-image deploy
+(`chili-app:main-clean-7550b2f`), main-derived (no os-deploy divergence), and
+the brain-worker runs **no migrations**. To activate:
+1. Build a `chili-app` image from **current main** (now includes #308) in a
+   clean main checkout.
+2. Recreate **only** the brain-worker with that image + env
+   `BRAIN_EQUITY_MINER_ENABLED=true`. Autotrader/broker stay on the old image →
+   trading uninterrupted; reversible by recreating from the prior image.
+3. Verify: `docker logs <brain> | grep equity_pattern_miner` → expect
+   `spawned equity candidate id=… origin='equity_miner_auto'`. New candidates
+   flow through the normal certification ladder before any live capital.
+
+### Remaining live levers (need operator go-ahead — both are live-behavior)
+- **Miner yield (#1):** the alert-join already mitigates trade-row snapshot
+  sparsity; the binding limiter is *signature diversity* (only 6/168 signatures
+  repeat ≥3×) driven by low equity trade volume + fine bucketing. Safe tuning:
+  coarser equity signature bucketing and/or `min_winners=2` for equity (with
+  overfit guards) — adjustable inside the miner, still cert-gated.
+- **Momentum-floor mismatch (#3):** when the candidate queue saturates
+  (pressure=1.0), `stock_momentum_context_below_floor` requires **5% gap + 2×
+  relative volume** — a momentum-*surge* profile that structurally rejects the
+  *mean-reversion* setups (oversold bounce, IBS, BB reversion) that ARE the
+  equity book's style (today's rejects: ~0.8% gap, 0.16× vol). Adaptive fix:
+  when saturated, rank candidates by **pattern expected/realized edge**, not a
+  fixed gap/vol momentum proxy. No magic numbers; style-agnostic.
