@@ -1,153 +1,100 @@
-# RUNBOOK: Migrate Postgres off the Windows bind mount
+# RUNBOOK: Move Postgres onto a fast disk (new 1 TB drive)
 
-**Status:** PLANNED (not yet executed) — created 2026-06-04, revised same day with
-environment-specific facts. Needs a maintenance window + verified backup. Do **not**
-run ad hoc.
+**Status:** PLANNED — awaiting new disk (operator ordered a 1 TB drive, ETA ~2026-06-06).
+Needs a maintenance window + kill switch. Created 2026-06-04; supersedes the earlier
+"cold-copy to a Docker named volume on D:" plan (proven infeasible — see below).
 
-## Why
+## Root cause (confirmed 2026-06-04)
 
-The live `chili` database (~**75 GB**) stores its data dir on a **Windows bind mount**
-(`D:/CHILI-Docker/postgres`), where `fsync()` is pathologically slow through Docker
-Desktop's host-mount translation layer. Observed 2026-06-04:
+**D: is a slow 7200 rpm HDD** — `ST1000DM003` (Seagate Barracuda). The live `chili`
+Postgres data dir lives there (`D:/CHILI-Docker/postgres`), and the Docker Desktop WSL
+vhdx is *also* on D: (`D:/CHILI-Docker/docker-desktop-wsl`). Postgres' fsync-heavy
+checkpoints on a spinning disk took **80–237 s**, stalling the autotrader's transaction
+→ `idle-in-transaction` connection kills → `PendingRollbackError` / 210 s "tick failed".
 
-- Checkpoint sync phases of **26–170 s** (e.g. 08:29 checkpoint: `sync=169.7s`,
-  `longest=39.7s` for one file, `sync files=223`).
-- That stall trips the app's per-session idle/statement timeout →
-  `FATAL: terminating connection due to idle-in-transaction timeout` →
-  `server closed the connection unexpectedly` → poisoned session → a 210 s autotrader
-  tick that failed (3 ticks skipped) + chronic 20–42 s slow ticks.
+There is an SSD (`C:`, Samsung 850 EVO) but it had only ~57 GB free vs a 75 GB DB —
+hence the new 1 TB drive.
 
-A reloadable palliative was applied 2026-06-04 (`checkpoint_timeout=1800s`,
-`max_wal_size=4GB`, `wal_compression=on`, `synchronous_commit=off`). Effect measured:
-checkpoints went from ~5 min to ~30 min apart, and a subsequent **169 s** checkpoint
-caused **0** tick failures (vs. the earlier kill) because commits no longer wait on
-fsync. But each checkpoint still pays the slow-fsync tax (169 s) — the palliative
-reduces frequency/blast-radius, it does **not** fix the storage. This migration does.
+Measured disk facts (so future readers don't re-test):
+- D: HDD native write under live load ≈ **6.5 MB/s**; 9p single-big-file read ≈ 34 MB/s.
+- **Many-small-files copy through the 9p bind mount ≈ 0.2 MB/s** — the DB is tens of
+  thousands of small files, so a file-by-file `cp`/`tar` of the data dir is INFEASIBLE
+  (80 GB would take ~105 h). A cold-copy migration was attempted 2026-06-04 and
+  aborted/rolled back cleanly (~15 min downtime, no data loss).
+- A Docker **named volume does NOT escape D:** — its vhdx is on the same HDD. So the
+  old "move to a named volume" plan would not have fixed fsync.
 
-A Docker **named volume** lives on the Docker Desktop VM's ext4 filesystem, where
-`fsync()` is milliseconds — no host-mount translation.
+## What's already done (no downtime)
 
-## Environment facts (verified 2026-06-04)
+- **Palliative live** (reloadable, persisted in `postgresql.auto.conf`):
+  `checkpoint_timeout=1800s`, `max_wal_size=4GB`, `wal_compression=on`,
+  `synchronous_commit=off`. Effect: fewer, survivable checkpoint storms.
+- **Cleanup (2026-06-04): chili 65 GB → 29 GB**, data dir ~80 GB → ~31 GB, D: free
+  217 → 266 GB:
+  - Dropped 83 stale DBs (kept only `chili`, `chili_test`, `chili_staging`, `postgres`,
+    `template0/1`).
+  - TRUNCATEd `fast_orderbook_default` (37 GB, fast-path paused).
+  - **Still pending:** prune `trading_exit_parity_log` (~17 GB) to **14 days** — do this
+    as part of the migration (a fresh `pg_dump`/restore naturally drops old rows if dumped
+    after a `DELETE`, or run the DELETE + a `VACUUM FULL`/repack on the fast disk where
+    it's cheap).
 
-- Postgres: **16.13**, image `postgres:16-alpine`, service runs as `user: postgres`
-  → data files owned by **uid 70** (Alpine postgres), *not* 999. `cp -a` preserves it.
-- Docker VM disk (`/`, where volumes live): **914 GB available** of 1007 GB.
-- Docker VM disk image (`ext4.vhdx`) is on **D:** (`D:\CHILI-Docker\docker-desktop-wsl\main`),
-  and D: has ~218 GB free → room for the vhdx to grow by ~80 GB.
-- `docker-compose.yml` is **already wired** for this migration:
-  - line 46: `${CHILI_POSTGRES_DATA_SOURCE:-D:/CHILI-Docker/postgres}:/var/lib/postgresql/data`
-  - line 945: top-level named volume `chili-postgres-data` declared (local driver).
-  - So the switch is **one `.env` line** — no compose edit.
-- Compose project name is `chili-home-copilot`, so the named volume materializes as
-  **`chili-home-copilot_chili-postgres-data`**.
-- `.env` currently has **no** `CHILI_POSTGRES_DATA_SOURCE` (on the bind-mount default).
-- `postgres` service has `stop_grace_period: 180s` and a `recovery_init_sync_method=syncfs`
-  command flag — leave both as-is.
+## Migration plan (when the 1 TB disk arrives)
 
-## Preconditions
+Even at 29 GB, the data dir is still many small files, so the per-file 9p `cp` wall still
+applies — **do NOT use a Docker file-copy.** Use a method that bypasses per-file 9p:
+either Windows-native `robocopy` (physical) or `pg_dump`/`pg_restore` (logical).
 
-- Scheduled window. Postgres downtime takes the whole stack down. Prefer markets
-  closed / low activity (weekend or overnight ET).
-- **Kill switch ON** first: `CHILI_AUTOTRADER_KILL_SWITCH=1` (halts both venues ~30 s).
-- A **verified** backup you've confirmed restores.
-- No active pytest/other writers hammering the shared Postgres (they amplify the copy).
-- Confirm D: free space ≥ (data-dir size + headroom). Data dir ≈ `chili` 75 GB +
-  `chili_test`/`chili_staging`/`postgres` + WAL. Measure exact size during step 2.
+### 0. Prep
+- Install + format the new drive (NTFS), assign a letter — assume **`E:`** below.
+- Decide the end-state (recommended: **Docker data root on the SSD** so named volumes get
+  fast ext4 fsync with no 9p; simpler interim: a bind mount on the SSD, which is fast even
+  with 9p because the disk is fast). Both are fine; pick one.
+- Kill switch ON: `CHILI_AUTOTRADER_KILL_SWITCH=1`. Stop the DB-touching containers
+  (the `chili-clean-recovery-*` set + fast-scan), then `docker stop chili-home-copilot-postgres-1`
+  (clean shutdown — it exits 0).
+- Record pre-counts: `SELECT count(*) FROM trading_management_envelopes;` etc.
 
-## Procedure (cold physical copy — exact, safest for 75 GB)
-
-The old bind-mount dir is the rollback artifact; it is opened read-only (`:ro`) and
-never modified.
-
-1. **Quiesce.** Set the kill switch, then stop every DB-touching container (app,
-   workers, and the `chili-clean-recovery-*` containers). Leave Postgres up briefly
-   for step 2–3.
-
-2. **Record pre-migration truth (compare after):**
-   ```sql
-   SELECT 'envelopes', count(*) FROM trading_management_envelopes
-   UNION ALL SELECT 'exec_events', count(*) FROM trading_execution_events
-   UNION ALL SELECT 'decisions',  count(*) FROM trading_decisions
-   UNION ALL SELECT 'paper',      count(*) FROM trading_paper_trades;
-   ```
-   And size: `docker exec chili-home-copilot-postgres-1 du -sh /var/lib/postgresql/data`.
-
-3. **Stop Postgres cleanly** (so the data dir is consistent for a physical copy):
-   ```
-   docker compose stop postgres        # honors stop_grace_period 180s
-   ```
-
-4. **Create the named volume with the exact compose name:**
-   ```
-   docker volume create chili-home-copilot_chili-postgres-data
-   ```
-
-5. **Copy the data dir into the volume** — `cp -a` preserves uid 70 / perms / symlinks.
-   Read from the bind mount **read-only**:
-   ```
-   docker run --rm \
-     -v D:/CHILI-Docker/postgres:/src:ro \
-     -v chili-home-copilot_chili-postgres-data:/dst \
-     alpine sh -c "cp -a /src/. /dst/ && echo COPIED && ls -ld /dst/PG_VERSION /dst/base && stat -c '%u:%g %n' /dst/PG_VERSION"
-   ```
-   Confirm `PG_VERSION` exists in `/dst` and is owned by `70:70`.
-
-6. **Flip the source** — add one line to `.env`:
-   ```
-   CHILI_POSTGRES_DATA_SOURCE=chili-postgres-data
-   ```
-
-7. **Start Postgres only, validate before anything else connects:**
-   ```
-   docker compose up -d postgres
-   docker exec chili-home-copilot-postgres-1 pg_isready -U chili
-   docker inspect chili-home-copilot-postgres-1 \
-     --format '{{range .Mounts}}{{.Type}} {{.Name}}{{.Source}} -> {{.Destination}}{{println}}{{end}}'
-   # MUST show:  volume chili-home-copilot_chili-postgres-data -> /var/lib/postgresql/data
-   ```
-   - Row counts match step 2 **exactly**.
-   - Watch one checkpoint — `sync` should now be **sub-second to low-seconds**, not 169 s:
-     `docker logs chili-home-copilot-postgres-1 --since <ts> | grep "checkpoint complete"`
-
-8. **Bring the stack back up.** Start app + workers. Confirm `/trading` 200, autotrader
-   tick time back under budget, **no** idle-in-transaction FATALs, broker-sync
-   reconciliation running. Only then reset the kill switch.
-
-9. **Retain rollback.** Keep `D:/CHILI-Docker/postgres` untouched for N days. Once the
-   named volume is proven under a full learning + tick cycle, archive/delete it to
-   reclaim ~75 GB on D:.
-
-## Rollback (fast — no data copy needed)
-
-The bind-mount dir was never modified. Revert is just the env flip:
+### Method A — Windows-native physical copy (simplest, exact)
 ```
-docker compose stop postgres
-# remove or comment CHILI_POSTGRES_DATA_SOURCE in .env  (back to the D: default)
-docker compose up -d postgres
+robocopy D:\CHILI-Docker\postgres E:\CHILI-Docker\postgres /MIR /COPY:DAT /DCOPY:DAT /R:1 /W:1
 ```
+Native NTFS many-small-file copy on a fast SSD target — no 9p, far faster than the 0.2 MB/s
+Docker path. Then point Postgres at the new path: set
+`CHILI_POSTGRES_DATA_SOURCE=E:/CHILI-Docker/postgres` in `.env` (the compose volume is
+parameterized: `${CHILI_POSTGRES_DATA_SOURCE:-D:/CHILI-Docker/postgres}`), and ensure file
+ownership stays uid 70 (Alpine postgres) — `cp -a`/robocopy preserve; if PG won't start,
+`docker run --rm -v E:/CHILI-Docker/postgres:/d alpine chown -R 70:70 /d`.
 
-## Downtime estimate
+### Method B — logical dump/restore (also debloats; drops old exit-parity rows)
+```
+# dump (PG still running on D:):
+docker exec chili-home-copilot-postgres-1 pg_dump -U chili -d chili -Fc -f /tmp/chili.dump
+docker cp chili-home-copilot-postgres-1:/tmp/chili.dump E:\chili.dump
+# new PG on the SSD (fresh data dir on E:), then:
+pg_restore -U chili -d chili --no-owner -j 4 E:\chili.dump
+```
+Slower to dump (PG reads the HDD) but yields a compact, freshly-packed DB on the SSD and is
+the natural place to apply the exit-parity 14-day retention (DELETE old rows before dump).
 
-Dominated by the cold copy in step 5: reading ~75–100 GB off the slow bind mount.
-Budget **~30–120 min** for the copy + ~15 min validation; measure with the step-2 `du`
-and, if you want a tighter number, time a copy of just `base/` first. (A lower-downtime
-alternative is `pg_basebackup` into the volume while PG runs, then a short stop +
-final catch-up — more moving parts; only worth it if the cold-copy downtime is too long.)
+### Restore & validate
+- Start Postgres on the new disk; `pg_isready`; `docker inspect` shows the new data source.
+- Row counts match pre-migration.
+- **Watch one checkpoint — `sync` should be sub-second** (the whole point).
+- Revert the brain-worker lean-cycle interval to the default (5 min) once on the SSD.
+- Bring the workers back; `/trading` 200; autotrader tick under budget; reset kill switch.
+- Keep `D:\CHILI-Docker\postgres` as rollback for N days, then reclaim.
 
-## Validation checklist
+## Also at migration time — consolidate the manual recovery containers
 
-- [ ] `docker inspect` shows the named volume mounted at the data dir.
-- [ ] Key table row counts match pre-migration.
-- [ ] Checkpoint `sync` time < a few seconds.
-- [ ] No `idle-in-transaction` / `server closed the connection` events.
-- [ ] Autotrader tick time under the 15 s advisory budget.
-- [ ] `/trading` 200; broker-sync reconciliation running.
-- [ ] Kill switch reset; a full learning + tick cycle completes clean.
+The live stack currently runs as **manual `docker run` containers** named
+`chili-clean-recovery-*` (web, autotrader, broker-sync, scheduler, brain, market-snapshot)
++ a clean fast-scan — all from `chili-app:main-clean-<sha>` images, mounting only
+`/app/data` (no dirty code). They have `restart=unless-stopped` but are NOT compose-managed:
+**do not `docker compose up` those services** (it creates duplicates). The migration window
+is the right time to fold them back into compose (once the dirty checkout is resolved or the
+app is rebuilt from clean main).
 
-## Notes
-
-- Infra only — no trading-logic, schema, or authority-contract change.
-- If a restart is being taken anyway, clear the stale pending `max_connections` change
-  in `postgresql.auto.conf` (a config reload currently logs
-  `parameter "max_connections" cannot be changed without restarting`). The live value
-  comes from the compose `command` flag (`max_connections=350`).
+## Rollback
+Stop PG, set `CHILI_POSTGRES_DATA_SOURCE` back to the D: default (or unset), restart. The
+D: data dir is untouched by a `robocopy /MIR` *to* E: (it only reads D:).
