@@ -213,6 +213,21 @@ def test_candidate_batch_size_still_uses_keyword_clamps(monkeypatch) -> None:
     assert at_mod._autotrader_candidate_batch_size() == 7
 
 
+@pytest.mark.parametrize("raw", [float("inf"), "inf", "-inf", "nan"])
+def test_int_clamp_rejects_non_finite_settings(monkeypatch, raw) -> None:
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_candidate_batch_size",
+        raw,
+        raising=False,
+    )
+
+    assert (
+        at_mod._autotrader_candidate_batch_size()
+        == at_mod.AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE
+    )
+
+
 def test_candidate_select_statement_timeout_derives_from_tick_budget(monkeypatch) -> None:
     monkeypatch.setattr(
         at_mod.settings,
@@ -228,6 +243,36 @@ def test_candidate_select_statement_timeout_derives_from_tick_budget(monkeypatch
     )
 
     assert at_mod._candidate_select_statement_timeout_ms(tick_budget_s=20) == 2000
+
+
+@pytest.mark.parametrize("raw", [float("inf"), "inf", "-inf", "nan"])
+def test_float_clamp_rejects_non_finite_settings(monkeypatch, raw) -> None:
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_candidate_select_statement_timeout_ms",
+        0,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        at_mod.settings,
+        "chili_autotrader_candidate_select_timeout_fraction",
+        raw,
+        raising=False,
+    )
+
+    expected = int(
+        20
+        * 1000.0
+        * at_mod.AUTOTRADER_CANDIDATE_SELECT_TIMEOUT_DEFAULT_FRACTION
+    )
+    expected = max(
+        at_mod.AUTOTRADER_CANDIDATE_SELECT_TIMEOUT_MIN_MS,
+        min(at_mod.AUTOTRADER_CANDIDATE_SELECT_TIMEOUT_MAX_MS, expected),
+    )
+    assert (
+        at_mod._candidate_select_statement_timeout_ms(tick_budget_s=20)
+        == expected
+    )
 
 
 def test_candidate_select_applies_and_resets_postgres_statement_timeout(

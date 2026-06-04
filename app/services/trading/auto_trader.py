@@ -887,7 +887,7 @@ def _settings_int_clamped(name: str, default: int, *, lower: int, upper: int) ->
     raw = getattr(settings, name, default)
     try:
         value = int(raw)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         value = int(default)
     return max(int(lower), min(int(upper), value))
 
@@ -902,9 +902,9 @@ def _settings_float_clamped(
     raw = getattr(settings, name, default)
     try:
         value = float(raw)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         value = float(default)
-    if value != value:
+    if not math.isfinite(value):
         value = float(default)
     return max(float(lower), min(float(upper), value))
 
