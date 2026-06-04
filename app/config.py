@@ -353,6 +353,38 @@ class Settings(BaseSettings):
     premium_model: str = "gemini-2.0-flash"
     premium_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
+    # ── Frontier code-generation tier (opt-in) ───────────────────────────
+    # When a frontier provider key is present AND chili_code_frontier_enabled
+    # is True, CHILI routes its code-generation gateway purposes (plan / edit /
+    # create / diagnose / pr-repair / review) to a frontier model. This runs
+    # CHILI's full coding harness — worktree isolation, anti-hallucination diff
+    # validation, the test-repair loop, and the review gate — on a frontier
+    # brain instead of the local Groq/OpenAI cascade. Any frontier failure
+    # (auth, rate-limit, error) falls back to the local cascade, so enabling it
+    # never makes the code path worse than today. Inert by default: with no key
+    # or the flag off, behavior is byte-identical to the existing cascade.
+    # Defaults target Anthropic's OpenAI-compatible endpoint + Claude Opus 4.8;
+    # point frontier_base_url / frontier_model at any OpenAI-compatible frontier
+    # (e.g. OpenAI's strongest coding model) to use a different provider.
+    frontier_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "ANTHROPIC_API_KEY", "FRONTIER_API_KEY", "CHILI_FRONTIER_API_KEY"
+        ),
+    )
+    frontier_base_url: str = Field(
+        default="https://api.anthropic.com/v1",
+        validation_alias=AliasChoices("FRONTIER_BASE_URL", "CHILI_FRONTIER_BASE_URL"),
+    )
+    frontier_model: str = Field(
+        default="claude-opus-4-8",
+        validation_alias=AliasChoices("FRONTIER_MODEL", "CHILI_FRONTIER_MODEL"),
+    )
+    chili_code_frontier_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_CODE_FRONTIER_ENABLED"),
+    )
+
     # Cascade order toggle (Phase B, b1). When True AND both OPENAI_API_KEY and
     # LLM_API_KEY are set, reorder to Groq primary → Groq secondary →
     # OpenAI official → Gemini, saving paid OpenAI calls whenever the
