@@ -1014,6 +1014,17 @@ class Settings(BaseSettings):
     brain_crypto_miner_min_winners_per_signature: int = 3
     brain_crypto_miner_max_variants_per_run: int = 10
 
+    # Equity-native pattern miner (2026-06-04). Equity counterpart of the
+    # crypto miner: mines candidate patterns from the indicator signatures of
+    # profitable equity winners (live + paper-shadow, sourced from the linked
+    # breakout alert). Ships DORMANT — generates research candidates only, which
+    # still pass certification + operator promotion before any live capital.
+    # See app/services/trading/equity_pattern_miner.py.
+    brain_equity_miner_enabled: bool = False
+    brain_equity_miner_lookback_days: int = 90  # equity trades sparser than crypto
+    brain_equity_miner_min_winners_per_signature: int = 3
+    brain_equity_miner_max_variants_per_run: int = 10
+
     # FIX 34 (2026-04-29): Independent fast_backtest timer. Pulls the
     # backtest-queue drain out of the after-cycle subtask sweep so it
     # runs every N seconds regardless of whether run_learning_cycle is
