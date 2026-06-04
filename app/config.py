@@ -1005,6 +1005,11 @@ class Settings(BaseSettings):
     brain_capital_reweight_cron_hour: int = 18
     brain_capital_reweight_lookback_days: int = 14
     brain_capital_reweight_max_single_bucket_pct: float = 35.0
+    brain_capital_reweight_total_capital_default: float = Field(
+        default=100_000.0,
+        ge=0.0,
+        validation_alias=AliasChoices("BRAIN_CAPITAL_REWEIGHT_TOTAL_CAPITAL_DEFAULT"),
+    )
 
     # Phase J - Drift monitor + re-cert queue (shadow rollout).
     brain_drift_monitor_mode: str = "shadow"
@@ -5477,6 +5482,12 @@ class Settings(BaseSettings):
     brain_oos_bootstrap_iterations: int = 500
     # Reject promotion when bootstrap CI lower bound for mean OOS WR is below this (None = skip).
     brain_oos_bootstrap_ci_min_wr: Optional[float] = 0.42
+    brain_hypothesis_bootstrap_iterations: int = Field(
+        default=500,
+        ge=1,
+        le=100_000,
+        validation_alias=AliasChoices("BRAIN_HYPOTHESIS_BOOTSTRAP_ITERATIONS"),
+    )
 
     # Edge-vs-luck (v1 weak-null permutations) for OOS-gated repeatable-edge patterns only.
     brain_edge_evidence_enabled: bool = True
