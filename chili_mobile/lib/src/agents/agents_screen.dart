@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../network/chili_api_client.dart';
 import 'agent.dart';
+import 'agent_activity_service.dart';
 import 'agent_control_service.dart';
 import 'agent_event.dart';
 import 'agent_filter.dart';
@@ -19,6 +20,9 @@ typedef AgentStatusPoller = Future<Map<String, AgentLiveStatus>> Function();
 /// without touching the network.
 typedef AgentControlInvoker = Future<void> Function(String id, AgentAction action);
 
+/// Signature of a backend recent-runs fetcher — injectable for tests (AGT-8).
+typedef AgentRunsFetcher = Future<List<AgentRun>> Function(String id);
+
 /// Mission control for CHILI's autonomous agents — check, configure and run the
 /// trading / brain / coding / system fleet. AGT-1: master/detail with local
 /// run/stop, enable toggles and editable config. AGT-2: live backend status for
@@ -29,10 +33,12 @@ class AgentsScreen extends StatefulWidget {
     AgentRegistry? registry,
     AgentStatusPoller? livePoller,
     AgentControlInvoker? controlInvoker,
+    AgentRunsFetcher? runsFetcher,
     bool livePolling = true,
   })  : _injectedRegistry = registry,
         _injectedPoller = livePoller,
         _injectedControl = controlInvoker,
+        _injectedRunsFetcher = runsFetcher,
         _livePolling = livePolling;
 
   /// Optional registry for tests; production builds seed a fresh one.
@@ -43,6 +49,9 @@ class AgentsScreen extends StatefulWidget {
 
   /// Optional control invoker for tests; production builds a real one.
   final AgentControlInvoker? _injectedControl;
+
+  /// Optional backend recent-runs fetcher for tests; production builds a real one.
+  final AgentRunsFetcher? _injectedRunsFetcher;
 
   /// When false, no live polling timer runs (used by tests / when offline use
   /// is undesirable).
@@ -56,7 +65,11 @@ class _AgentsScreenState extends State<AgentsScreen> {
   late final AgentRegistry _registry;
   late final AgentStatusPoller _poller;
   late final AgentControlInvoker _invoker;
+  late final AgentRunsFetcher _runsFetcher;
   AgentStatusService? _ownedService;
+  // Cached backend-runs futures per agent (AGT-8); cleared on manual refresh.
+  final Map<String, Future<List<AgentRun>>> _runsFutures =
+      <String, Future<List<AgentRun>>>{};
   AgentKind? _filter; // null = All
   String _query = ''; // search box
   AgentSort _sort = AgentSort.defaultOrder;
@@ -75,9 +88,11 @@ class _AgentsScreenState extends State<AgentsScreen> {
     _registry = widget._injectedRegistry ?? AgentRegistry();
     _selectedId = _registry.agents.isNotEmpty ? _registry.agents.first.id : null;
 
-    // A single shared client backs both the status poll and control actions.
-    final bool needClient =
-        widget._injectedPoller == null || widget._injectedControl == null;
+    // A single shared client backs the status poll, control actions and the
+    // backend-runs feed.
+    final bool needClient = widget._injectedPoller == null ||
+        widget._injectedControl == null ||
+        widget._injectedRunsFetcher == null;
     final ChiliApiClient? api = needClient ? ChiliApiClient() : null;
     if (widget._injectedPoller != null) {
       _poller = widget._injectedPoller!;
@@ -86,6 +101,8 @@ class _AgentsScreenState extends State<AgentsScreen> {
       _poller = _ownedService!.poll;
     }
     _invoker = widget._injectedControl ?? AgentControlService(api!).invoke;
+    _runsFetcher =
+        widget._injectedRunsFetcher ?? AgentActivityService(api!).fetch;
 
     // When the registry is injected (e.g. shared by the workspace in AGT-7),
     // the owner handles persistence + polling; we're just a view.
@@ -101,6 +118,17 @@ class _AgentsScreenState extends State<AgentsScreen> {
     if (!mounted) return;
     _registry.applySaved(saved); // overlay before we start listening to saves
     _registry.addListener(_scheduleSave);
+  }
+
+  /// Cached per-agent backend-runs future (AGT-8) — fetched once until a manual
+  /// refresh clears the cache.
+  Future<List<AgentRun>> _runsFuture(String id) =>
+      _runsFutures.putIfAbsent(id, () => _runsFetcher(id));
+
+  /// Header refresh: re-pull live status AND re-fetch backend runs.
+  void _manualRefresh() {
+    setState(_runsFutures.clear);
+    _poll();
   }
 
   Future<void> _poll() async {
@@ -337,10 +365,10 @@ class _AgentsScreenState extends State<AgentsScreen> {
               if (widget._livePolling) ...<Widget>[
                 _ConnPill(reachable: _reachable, polled: _polledOnce),
                 IconButton(
-                  tooltip: 'Refresh status',
+                  tooltip: 'Refresh status & runs',
                   visualDensity: VisualDensity.compact,
                   icon: const Icon(Icons.refresh, size: 18),
-                  onPressed: _poll,
+                  onPressed: _manualRefresh,
                 ),
               ],
             ],
@@ -675,10 +703,85 @@ class _AgentsScreenState extends State<AgentsScreen> {
           for (final MapEntry<String, String> e in a.config.entries)
             _configRow(cs, a, e.key, e.value),
         ],
+        if (agentHasBackendRuns(a.id)) ...<Widget>[
+          const SizedBox(height: 18),
+          _backendRunsSection(cs, a),
+        ],
         const SizedBox(height: 18),
         _activitySection(cs, a),
         const SizedBox(height: 24),
       ],
+    );
+  }
+
+  // ── Backend runs feed (AGT-8) ────────────────────────────────────────────
+  Widget _backendRunsSection(ColorScheme cs, Agent a) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        _section(cs, 'Backend runs'),
+        const SizedBox(height: 4),
+        FutureBuilder<List<AgentRun>>(
+          future: _runsFuture(a.id),
+          builder: (BuildContext context,
+              AsyncSnapshot<List<AgentRun>> snap) {
+            if (snap.connectionState == ConnectionState.waiting) {
+              return Row(
+                children: <Widget>[
+                  const SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                  const SizedBox(width: 8),
+                  Text('Loading…',
+                      style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+                ],
+              );
+            }
+            final List<AgentRun> runs = snap.data ?? const <AgentRun>[];
+            if (runs.isEmpty) {
+              return Text(
+                'No backend runs (offline or none recorded).',
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+              );
+            }
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                for (final AgentRun r in runs) _runRow(cs, r),
+              ],
+            );
+          },
+        ),
+      ],
+    );
+  }
+
+  Widget _runRow(ColorScheme cs, AgentRun r) {
+    final DateTime? dt = DateTime.tryParse(r.when);
+    final String when = dt == null
+        ? r.when
+        : '${dt.month.toString().padLeft(2, '0')}/${dt.day.toString().padLeft(2, '0')} '
+            '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Icon(Icons.cloud_outlined, size: 14, color: cs.secondary),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              r.outcome == null ? r.title : '${r.title} — ${r.outcome}',
+              style: TextStyle(fontSize: 13, color: cs.onSurface),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(when,
+              style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+        ],
+      ),
     );
   }
 

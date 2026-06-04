@@ -1027,4 +1027,10 @@ class ChiliApiClient {
     );
     _ensureOk(res);
   }
+
+  /// Tolerant GET returning a JSON list (top-level array, or [itemsKey] in an
+  /// object). Used by the Agents backend-activity feed (AGT-8).
+  Future<List<Map<String, dynamic>>> getJsonListSafe(String path,
+          {String? itemsKey}) =>
+      _getListSafe(path, itemsKey: itemsKey);
 }

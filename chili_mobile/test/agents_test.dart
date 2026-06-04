@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:chili_mobile/src/agents/agent.dart';
+import 'package:chili_mobile/src/agents/agent_activity_service.dart';
 import 'package:chili_mobile/src/agents/agent_control_service.dart';
 import 'package:chili_mobile/src/agents/agent_event.dart';
 import 'package:chili_mobile/src/agents/agent_filter.dart';
@@ -778,6 +779,88 @@ void main() {
       await tester.enterText(find.byType(TextField).first, 'zzzznope');
       await tester.pumpAndSettle();
       expect(find.textContaining('No agents match'), findsOneWidget);
+    });
+  });
+
+  group('parseAgentRuns / backend feed (AGT-8)', () {
+    test('parses a learning-cycle run (phase + success + patterns)', () {
+      final List<AgentRun> runs = parseAgentRuns(<Map<String, dynamic>>[
+        <String, dynamic>{
+          'phase': 'mine',
+          'ended_at': '2026-06-03T12:00:00.000',
+          'success': true,
+          'patterns_touched': 7,
+        },
+      ]);
+      expect(runs.length, 1);
+      expect(runs.first.title, 'mine');
+      expect(runs.first.when, '2026-06-03T12:00:00.000');
+      expect(runs.first.outcome, contains('7 patterns'));
+    });
+
+    test('parses a momentum decision with ticker subject', () {
+      final List<AgentRun> runs = parseAgentRuns(<Map<String, dynamic>>[
+        <String, dynamic>{
+          'decision_type': 'enter',
+          'chosen_ticker': 'BTC',
+          'decided_at': '2026-06-03T11:00:00.000',
+          'outcome_status': 'filled',
+        },
+      ]);
+      expect(runs.first.title, 'enter · BTC');
+      expect(runs.first.outcome, 'filled');
+      expect(runs.first.when, '2026-06-03T11:00:00.000');
+    });
+
+    test('sparse record falls back to "run" / empty', () {
+      final List<AgentRun> runs =
+          parseAgentRuns(<Map<String, dynamic>>[<String, dynamic>{'foo': 'bar'}]);
+      expect(runs.first.title, 'run');
+      expect(runs.first.when, '');
+      expect(runs.first.outcome, isNull);
+    });
+
+    test('empty input → empty', () {
+      expect(parseAgentRuns(<Map<String, dynamic>>[]), isEmpty);
+    });
+
+    test('backend-runs agents are real seeded agents', () {
+      final Set<String> seeded = defaultAgents().map((Agent a) => a.id).toSet();
+      expect(seeded.containsAll(backendRunsAgentIds), isTrue);
+      expect(agentHasBackendRuns('learning-cycle'), isTrue);
+      expect(agentHasBackendRuns('scheduler'), isFalse);
+    });
+
+    testWidgets('detail shows injected backend runs', (WidgetTester tester) async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final AgentRegistry r = AgentRegistry();
+      await tester.pumpWidget(MaterialApp(
+        home: AgentsScreen(
+          registry: r,
+          livePolling: false,
+          runsFetcher: (String id) async => id == 'learning-cycle'
+              ? const <AgentRun>[
+                  AgentRun(
+                    when: '2026-06-03T12:00:00.000',
+                    title: 'mine',
+                    outcome: 'ok · 7 patterns',
+                  ),
+                ]
+              : const <AgentRun>[],
+        ),
+      ));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.widgetWithText(ChoiceChip, 'Brain'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Learning Cycle').first);
+      await tester.pumpAndSettle();
+
+      // Backend-runs section is near the bottom of the detail ListView.
+      await tester.drag(find.byType(ListView).last, const Offset(0, -700));
+      await tester.pumpAndSettle();
+      expect(find.text('Backend runs'.toUpperCase()), findsOneWidget);
+      expect(find.textContaining('mine'), findsWidgets);
     });
   });
 }
