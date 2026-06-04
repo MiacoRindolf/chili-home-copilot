@@ -47,9 +47,14 @@ class _FakeAlertCountQuery:
         self.limit_value: int | None = None
         self.with_entities_called = False
         self.all_count = 0
+        self.order_by_called = False
 
     def with_entities(self, *_entities):
         self.with_entities_called = True
+        return self
+
+    def order_by(self, *_clauses):
+        self.order_by_called = True
         return self
 
     def limit(self, value: int):
@@ -112,7 +117,6 @@ def test_bounded_breakout_alert_count_times_out_conservatively(
     assert query.limit_value == 4
     assert session.calls == ["SET LOCAL statement_timeout = '1500ms'"]
     assert session.rollback_count == 1
-
 
 def test_bounded_breakout_alert_count_reuses_timeout_cap_during_cooldown(
     monkeypatch,
@@ -181,6 +185,38 @@ def test_bounded_breakout_alert_count_reuses_timeout_cap_during_cooldown(
         "SET LOCAL statement_timeout = '1500ms'",
         "SET LOCAL statement_timeout = DEFAULT",
     ]
+
+
+def test_bounded_breakout_alert_count_caps_stock_probe_by_tick_budget() -> None:
+    query = _FakeAlertCountQuery(rows=121)
+
+    count = at_mod._bounded_breakout_alert_count(
+        query,
+        cap=1000,
+        tick_budget_s=15,
+        context="stock_stale_unprocessed",
+        order_recent=True,
+    )
+
+    assert count == 1000
+    assert query.order_by_called is True
+    assert query.limit_value == 121
+
+
+def test_bounded_breakout_alert_count_keeps_exact_small_stock_probe() -> None:
+    query = _FakeAlertCountQuery(rows=17)
+
+    count = at_mod._bounded_breakout_alert_count(
+        query,
+        cap=1000,
+        tick_budget_s=15,
+        context="stock_deferred_pool",
+        order_recent=True,
+    )
+
+    assert count == 17
+    assert query.order_by_called is True
+    assert query.limit_value == 121
 
 
 def test_queue_pressure_floor_one_disables_shadow_suppression(monkeypatch) -> None:

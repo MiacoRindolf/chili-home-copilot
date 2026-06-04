@@ -114,6 +114,9 @@ from .ops_log_prefixes import CHILI_MARKET_DATA
 logger = logging.getLogger(__name__)
 
 AUTOTRADER_STOCK_SESSION_DEFER_COUNT_DEFAULT_CAP = 1000
+AUTOTRADER_STOCK_SESSION_DEFER_COUNT_MIN_PROBE_ROWS = 25
+AUTOTRADER_STOCK_SESSION_DEFER_COUNT_MAX_PROBE_ROWS = 250
+AUTOTRADER_STOCK_SESSION_DEFER_COUNT_ROWS_PER_TICK_SECOND = 8
 
 SYNERGY_RETRY_SOURCE_REASON = "synergy_not_applicable"
 SYNERGY_RETRY_EXHAUSTED_REASON = "synergy_retry_not_applicable"
@@ -945,6 +948,7 @@ def _bounded_breakout_alert_count(
     cap: int,
     tick_budget_s: float | None = None,
     context: str = "breakout_alert_count",
+    order_recent: bool = False,
 ) -> int:
     cap_i = max(0, int(cap))
     if cap_i <= 0:
@@ -956,6 +960,11 @@ def _bounded_breakout_alert_count(
         if cached_until > now:
             return cap_i
         _bounded_breakout_alert_count_timeout_cache.pop(cache_key, None)
+    probe_cap = _bounded_breakout_alert_probe_cap(
+        cap_i,
+        tick_budget_s=tick_budget_s,
+        context=context,
+    )
     session = getattr(query, "session", None)
     timeout_ms: int | None = None
     failed = False
@@ -965,8 +974,16 @@ def _bounded_breakout_alert_count(
                 session,
                 tick_budget_s=tick_budget_s,
             )
-        rows = query.with_entities(BreakoutAlert.id).limit(cap_i + 1).all()
+        count_query = query
+        if order_recent:
+            count_query = count_query.order_by(
+                BreakoutAlert.alerted_at.desc(),
+                BreakoutAlert.id.desc(),
+            )
+        rows = count_query.with_entities(BreakoutAlert.id).limit(probe_cap + 1).all()
         _bounded_breakout_alert_count_timeout_cache.pop(cache_key, None)
+        if len(rows) > probe_cap:
+            return cap_i
         return min(len(rows), cap_i)
     except DBAPIError as exc:
         failed = True
@@ -1005,6 +1022,31 @@ def _bounded_breakout_alert_count(
                     context,
                     exc_info=True,
                 )
+
+
+def _bounded_breakout_alert_probe_cap(
+    cap: int,
+    *,
+    tick_budget_s: float | None,
+    context: str,
+) -> int:
+    cap_i = max(0, int(cap))
+    if cap_i <= 0:
+        return 0
+    if context not in {"stock_deferred_pool", "stock_stale_unprocessed"}:
+        return cap_i
+    if tick_budget_s is None:
+        return cap_i
+    try:
+        budget = max(0.0, float(tick_budget_s))
+    except (TypeError, ValueError):
+        return cap_i
+    dynamic_cap = int(round(budget * AUTOTRADER_STOCK_SESSION_DEFER_COUNT_ROWS_PER_TICK_SECOND))
+    dynamic_cap = max(
+        AUTOTRADER_STOCK_SESSION_DEFER_COUNT_MIN_PROBE_ROWS,
+        min(AUTOTRADER_STOCK_SESSION_DEFER_COUNT_MAX_PROBE_ROWS, dynamic_cap),
+    )
+    return max(1, min(cap_i, dynamic_cap))
 
 
 def _candidate_actionability_state(
@@ -4872,6 +4914,7 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
                 cap=stock_defer_count_cap,
                 tick_budget_s=tick_budget_s,
                 context="stock_deferred_pool",
+                order_recent=True,
             )
         stock_stale_unprocessed = _bounded_breakout_alert_count(
             stock_unprocessed_base.filter(
@@ -4880,6 +4923,7 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
             cap=stock_defer_count_cap,
             tick_budget_s=tick_budget_s,
             context="stock_stale_unprocessed",
+            order_recent=True,
         )
     effective_batch_limit, fresh_burst_meta = _fresh_candidate_burst_batch_size(
         base_limit=batch_limit,
