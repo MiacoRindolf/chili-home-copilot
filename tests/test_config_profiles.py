@@ -1,7 +1,9 @@
 """Tests for config profile presets (P5)."""
 from __future__ import annotations
 
+import ast
 import os
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -107,3 +109,25 @@ def test_bracket_watchdog_stale_after_sec_accepts_documented_bounds(monkeypatch)
     monkeypatch.setenv("CHILI_BRACKET_WATCHDOG_STALE_AFTER_SEC", "3600")
     upper = Settings(_env_file=None, database_url="postgresql://x:x@localhost/test")
     assert upper.chili_bracket_watchdog_stale_after_sec == 3600
+
+
+def test_settings_has_no_duplicate_field_declarations():
+    tree = ast.parse(Path("app/config.py").read_text(encoding="utf-8"))
+    settings_class = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef) and node.name == "Settings"
+    )
+    seen: dict[str, list[int]] = {}
+    for stmt in settings_class.body:
+        name: str | None = None
+        if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+            name = stmt.target.id
+        elif isinstance(stmt, ast.Assign):
+            names = [target.id for target in stmt.targets if isinstance(target, ast.Name)]
+            name = names[0] if names else None
+        if name is not None:
+            seen.setdefault(name, []).append(stmt.lineno)
+
+    duplicates = {name: lines for name, lines in seen.items() if len(lines) > 1}
+    assert duplicates == {}
