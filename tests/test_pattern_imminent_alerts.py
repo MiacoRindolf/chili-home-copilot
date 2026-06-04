@@ -1,12 +1,13 @@
 ﻿"""Tests for ScanPattern imminent breakout alert helpers."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 
-from app.models.trading import AlertHistory, AutoTraderRun, ScanPattern, Trade
+from app.models.core import User
+from app.models.trading import AlertHistory, AutoTraderRun, BreakoutAlert, ScanPattern, Trade
 from app.services.trading import pattern_imminent_alerts as imminent_mod
 from app.services.trading.alerts import PATTERN_BREAKOUT_IMMINENT
 from app.services.trading.pattern_imminent_alerts import (
@@ -2365,6 +2366,254 @@ def test_gather_imminent_routes_offsession_stock_to_shadow_lane(
     assert meta["offsession_stock_shadow_active"] is True
     assert meta["equity_extended_session_open"] is True
     assert meta["offsession_stock_shadow_admitted"] == 1
+
+
+def _rearm_candidate(pattern: ScanPattern, signal_lane: str = imminent_mod.STANDARD_SIGNAL_LANE):
+    return {
+        "pattern": pattern,
+        "ticker": TEST_OFFSESSION_STOCK_TICKER,
+        "eta_lo": 0.05,
+        "eta_hi": 0.25,
+        "score": {
+            "price": TEST_SCORE_PRICE,
+            "entry_price": TEST_SCORE_PRICE,
+            "stop_loss": TEST_SCORE_STOP_LOSS,
+            "take_profit": TEST_SCORE_TAKE_PROFIT,
+            "signals": ["gap", "rvol"],
+        },
+        "trade_type": "day",
+        "duration_estimate": "opening drive",
+        "hold_label": "opening drive",
+        "composite": 0.92,
+        "readiness": 0.55,
+        "flat": {"gap_pct": 7.5, "volume_ratio": 3.2, "price": TEST_SCORE_PRICE},
+        "score_breakdown": {"quality": 0.92},
+        "coverage_ratio": 0.8,
+        "signal_lane": signal_lane,
+    }
+
+
+def _recent_imminent_alert_history(db, pattern: ScanPattern) -> None:
+    _ensure_test_user(db)
+    db.add(
+        AlertHistory(
+            user_id=TEST_USER_ID,
+            alert_type=PATTERN_BREAKOUT_IMMINENT,
+            ticker=TEST_OFFSESSION_STOCK_TICKER,
+            message="recent shadow cooldown",
+            scan_pattern_id=pattern.id,
+            success=True,
+            created_at=datetime.utcnow() - timedelta(minutes=5),
+        )
+    )
+    db.commit()
+
+
+def _ensure_test_user(db) -> None:
+    if db.get(User, TEST_USER_ID) is not None:
+        return
+    db.add(
+        User(
+            id=TEST_USER_ID,
+            name="pattern-imminent-test-user",
+            email="pattern-imminent-test-user@example.com",
+        )
+    )
+    db.flush()
+
+
+def _recent_pattern_imminent_breakout(
+    db,
+    pattern: ScanPattern,
+    *,
+    signal_lane: str,
+) -> None:
+    _ensure_test_user(db)
+    db.add(
+        BreakoutAlert(
+            ticker=TEST_OFFSESSION_STOCK_TICKER,
+            asset_type="stock",
+            alert_tier="pattern_imminent",
+            score_at_alert=0.9,
+            price_at_alert=TEST_SCORE_PRICE,
+            entry_price=TEST_SCORE_PRICE,
+            stop_loss=TEST_SCORE_STOP_LOSS,
+            target_price=TEST_SCORE_TAKE_PROFIT,
+            user_id=TEST_USER_ID,
+            scan_pattern_id=pattern.id,
+            indicator_snapshot={
+                "flat_indicators": {
+                    "gap_pct": 7.5,
+                    "volume_ratio": 3.2,
+                },
+                "imminent_scorecard": {"signal_lane": signal_lane},
+            },
+            alerted_at=datetime.utcnow() - timedelta(minutes=5),
+        )
+    )
+    db.commit()
+
+
+def test_run_pattern_imminent_scan_rearms_equity_shadow_after_rth_open(
+    db,
+    monkeypatch,
+) -> None:
+    pattern = ScanPattern(
+        name="RTH rearm stock",
+        rules_json={"conditions": []},
+        origin="test",
+        asset_class="stocks",
+        lifecycle_stage=imminent_mod.PROMOTED_STAGE,
+        ticker_scope="explicit_list",
+        scope_tickers=f'["{TEST_OFFSESSION_STOCK_TICKER}"]',
+    )
+    db.add(pattern)
+    db.commit()
+    _recent_imminent_alert_history(db, pattern)
+    _recent_pattern_imminent_breakout(
+        db,
+        pattern,
+        signal_lane=imminent_mod.EQUITY_SESSION_SHADOW_SIGNAL_LANE,
+    )
+
+    inserted: list[str] = []
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_max_per_run", 1)
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_cooldown_hours", 3.0)
+    monkeypatch.setattr(
+        "app.services.trading.brain_neural_mesh.publisher.publish_imminent_eval",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "gather_imminent_candidate_rows",
+        lambda *args, **kwargs: (
+            [_rearm_candidate(pattern)],
+            {"patterns_active": 1, "tickers_scored": 1},
+        ),
+    )
+    monkeypatch.setattr(imminent_mod, "dispatch_alert", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        imminent_mod,
+        "_insert_imminent_breakout_alert",
+        lambda db, user_id, pat, ticker, *args, **kwargs: inserted.append(
+            kwargs["signal_lane"]
+        ),
+    )
+
+    result = run_pattern_imminent_scan(
+        db,
+        user_id=TEST_USER_ID,
+        equity_session_open=True,
+    )
+
+    assert inserted == [imminent_mod.STANDARD_SIGNAL_LANE]
+    assert result["alerts_sent"] == 1
+    assert result["cooldown_skipped"] == 0
+    assert result["equity_shadow_rearm_cooldown_bypassed"] == 1
+
+
+def test_run_pattern_imminent_scan_keeps_non_shadow_cooldown_block(
+    db,
+    monkeypatch,
+) -> None:
+    pattern = ScanPattern(
+        name="RTH no rearm stock",
+        rules_json={"conditions": []},
+        origin="test",
+        asset_class="stocks",
+        lifecycle_stage=imminent_mod.PROMOTED_STAGE,
+        ticker_scope="explicit_list",
+        scope_tickers=f'["{TEST_OFFSESSION_STOCK_TICKER}"]',
+    )
+    db.add(pattern)
+    db.commit()
+    _recent_imminent_alert_history(db, pattern)
+
+    inserted: list[str] = []
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_max_per_run", 1)
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_cooldown_hours", 3.0)
+    monkeypatch.setattr(
+        imminent_mod,
+        "gather_imminent_candidate_rows",
+        lambda *args, **kwargs: (
+            [_rearm_candidate(pattern)],
+            {"patterns_active": 1, "tickers_scored": 1},
+        ),
+    )
+    monkeypatch.setattr(imminent_mod, "dispatch_alert", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        imminent_mod,
+        "_insert_imminent_breakout_alert",
+        lambda *args, **kwargs: inserted.append(kwargs["signal_lane"]),
+    )
+
+    result = run_pattern_imminent_scan(
+        db,
+        user_id=TEST_USER_ID,
+        equity_session_open=True,
+    )
+
+    assert inserted == []
+    assert result["alerts_sent"] == 0
+    assert result["cooldown_skipped"] == 1
+    assert result["equity_shadow_rearm_cooldown_bypassed"] == 0
+
+
+def test_run_pattern_imminent_scan_does_not_rearm_duplicate_standard_alert(
+    db,
+    monkeypatch,
+) -> None:
+    pattern = ScanPattern(
+        name="RTH duplicate standard stock",
+        rules_json={"conditions": []},
+        origin="test",
+        asset_class="stocks",
+        lifecycle_stage=imminent_mod.PROMOTED_STAGE,
+        ticker_scope="explicit_list",
+        scope_tickers=f'["{TEST_OFFSESSION_STOCK_TICKER}"]',
+    )
+    db.add(pattern)
+    db.commit()
+    _recent_imminent_alert_history(db, pattern)
+    _recent_pattern_imminent_breakout(
+        db,
+        pattern,
+        signal_lane=imminent_mod.EQUITY_SESSION_SHADOW_SIGNAL_LANE,
+    )
+    _recent_pattern_imminent_breakout(
+        db,
+        pattern,
+        signal_lane=imminent_mod.STANDARD_SIGNAL_LANE,
+    )
+
+    inserted: list[str] = []
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_max_per_run", 1)
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_cooldown_hours", 3.0)
+    monkeypatch.setattr(
+        imminent_mod,
+        "gather_imminent_candidate_rows",
+        lambda *args, **kwargs: (
+            [_rearm_candidate(pattern)],
+            {"patterns_active": 1, "tickers_scored": 1},
+        ),
+    )
+    monkeypatch.setattr(imminent_mod, "dispatch_alert", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        imminent_mod,
+        "_insert_imminent_breakout_alert",
+        lambda *args, **kwargs: inserted.append(kwargs["signal_lane"]),
+    )
+
+    result = run_pattern_imminent_scan(
+        db,
+        user_id=TEST_USER_ID,
+        equity_session_open=True,
+    )
+
+    assert inserted == []
+    assert result["alerts_sent"] == 0
+    assert result["cooldown_skipped"] == 1
+    assert result["equity_shadow_rearm_cooldown_bypassed"] == 0
 
 
 def test_gather_imminent_can_keep_offsession_stock_shadow_disabled(

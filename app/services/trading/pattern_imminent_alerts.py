@@ -1003,6 +1003,47 @@ def _cooldown_active(
     return False
 
 
+def _breakout_alert_signal_lane(row: BreakoutAlert) -> str:
+    snap = row.indicator_snapshot if isinstance(row.indicator_snapshot, dict) else {}
+    scorecard = snap.get("imminent_scorecard") if isinstance(snap, dict) else {}
+    if not isinstance(scorecard, dict):
+        return STANDARD_SIGNAL_LANE
+    return str(scorecard.get("signal_lane") or STANDARD_SIGNAL_LANE).strip().lower()
+
+
+def _equity_shadow_rearm_cooldown_override_allowed(
+    db: Session,
+    user_id: int | None,
+    ticker: str,
+    pattern_id: int,
+    hours: float,
+) -> bool:
+    cutoff = datetime.utcnow() - timedelta(hours=hours)
+    q = (
+        db.query(BreakoutAlert)
+        .filter(
+            BreakoutAlert.alert_tier == "pattern_imminent",
+            BreakoutAlert.ticker == ticker,
+            BreakoutAlert.scan_pattern_id == pattern_id,
+            BreakoutAlert.asset_type == "stock",
+            BreakoutAlert.alerted_at >= cutoff,
+        )
+    )
+    if user_id is not None:
+        q = q.filter(
+            (BreakoutAlert.user_id == user_id) | BreakoutAlert.user_id.is_(None)
+        )
+    q = q.order_by(BreakoutAlert.alerted_at.desc(), BreakoutAlert.id.desc()).limit(25)
+    saw_equity_shadow = False
+    for row in q.all():
+        lane = _breakout_alert_signal_lane(row)
+        if lane == STANDARD_SIGNAL_LANE:
+            return False
+        if lane == EQUITY_SESSION_SHADOW_SIGNAL_LANE:
+            saw_equity_shadow = True
+    return saw_equity_shadow
+
+
 def _float_or_none(value: Any) -> float | None:
     try:
         if value is None:
@@ -2137,6 +2178,7 @@ def run_pattern_imminent_scan(
     shadow_diversity_skipped = 0
     main_quota_skipped = 0
     shadow_quota_skipped = 0
+    equity_shadow_rearm_cooldown_bypassed = 0
     dispatch_candidates = (
         _shadow_reserved_dispatch_order(candidates, shadow_reserve=shadow_reserve)
         if shadow_enabled and shadow_quota > 0
@@ -2164,11 +2206,27 @@ def run_pattern_imminent_scan(
         else:
             ticker_cooldown_h = cooldown_h_crypto if is_crypto(ticker) else cooldown_h
         if _cooldown_active(db, user_id, ticker, pat.id, ticker_cooldown_h):
-            if is_shadow:
-                shadow_skipped_cd += 1
+            rearm_from_equity_shadow = (
+                bool(eq_open)
+                and not is_shadow
+                and _candidate_signal_lane(c) == STANDARD_SIGNAL_LANE
+                and not is_crypto(ticker)
+                and _equity_shadow_rearm_cooldown_override_allowed(
+                    db,
+                    user_id,
+                    ticker,
+                    pat.id,
+                    ticker_cooldown_h,
+                )
+            )
+            if rearm_from_equity_shadow:
+                equity_shadow_rearm_cooldown_bypassed += 1
             else:
-                skipped_cd += 1
-            continue
+                if is_shadow:
+                    shadow_skipped_cd += 1
+                else:
+                    skipped_cd += 1
+                continue
         if is_shadow:
             if shadow_per_ticker.get(ticker, 0) >= shadow_max_per_ticker:
                 shadow_diversity_skipped += 1
@@ -2298,6 +2356,7 @@ def run_pattern_imminent_scan(
         "shadow_diversity_skipped": shadow_diversity_skipped,
         "main_quota_skipped": main_quota_skipped,
         "shadow_quota_skipped": shadow_quota_skipped,
+        "equity_shadow_rearm_cooldown_bypassed": equity_shadow_rearm_cooldown_bypassed,
         "shadow_observation_enabled": shadow_enabled,
         "shadow_reserve_per_run": shadow_reserve,
         "shadow_extra_per_run": shadow_extra,
