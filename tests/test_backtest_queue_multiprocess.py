@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.config import Settings
+
 _TEST_PATTERN_ID = 123
 _TEST_USER_ID = 7
 _TEST_BACKTESTS_RUN = 5
@@ -80,6 +82,35 @@ def test_queue_pattern_soft_runtime_disabled_when_walltime_zero(monkeypatch):
     monkeypatch.setenv(QUEUE_PATTERN_WALLTIME_SECONDS_ENV, "0")
 
     assert queue_pattern_soft_runtime_seconds() is None
+
+
+def test_queue_pattern_walltime_settings_drive_soft_budget(monkeypatch):
+    from app.services.trading.backtest_queue_worker import (
+        QUEUE_PATTERN_SOFT_DEADLINE_FRACTION_ENV,
+        QUEUE_PATTERN_WALLTIME_SECONDS_ENV,
+        queue_pattern_soft_runtime_seconds,
+        queue_pattern_walltime_seconds,
+    )
+
+    monkeypatch.delenv(QUEUE_PATTERN_WALLTIME_SECONDS_ENV, raising=False)
+    monkeypatch.delenv(QUEUE_PATTERN_SOFT_DEADLINE_FRACTION_ENV, raising=False)
+    monkeypatch.setenv("CHILI_BACKTEST_QUEUE_PATTERN_WALLTIME_SECONDS", "120")
+    monkeypatch.setenv("CHILI_BACKTEST_QUEUE_PATTERN_SOFT_DEADLINE_FRACTION", "0.5")
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.brain_queue_pattern_walltime_seconds == pytest.approx(120.0)
+    assert settings.brain_queue_pattern_soft_deadline_fraction == pytest.approx(0.5)
+    assert queue_pattern_walltime_seconds(settings_obj=settings, environ={}) == (
+        pytest.approx(120.0)
+    )
+    assert queue_pattern_soft_runtime_seconds(settings_obj=settings, environ={}) == (
+        pytest.approx(60.0)
+    )
+
+    assert queue_pattern_walltime_seconds(
+        settings_obj=settings,
+        environ={QUEUE_PATTERN_WALLTIME_SECONDS_ENV: "20"},
+    ) == pytest.approx(20.0)
 
 
 def test_partial_soft_deadline_result_cannot_certify_recert_or_promotion():

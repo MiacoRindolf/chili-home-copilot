@@ -526,6 +526,24 @@ class Settings(BaseSettings):
     brain_mp_child_database_pool_size: int = 1   # SQLAlchemy pool per child process (avoid P * parent pool connections)
     brain_mp_child_database_max_overflow: int = 2
     brain_smart_bt_max_workers_in_process: int = BRAIN_QUEUE_MP_CHILD_TICKER_WORKERS_DEFAULT
+    brain_queue_pattern_walltime_seconds: float = Field(
+        default=900.0,
+        ge=0.0,
+        le=86_400.0,
+        validation_alias=AliasChoices(
+            "BRAIN_QUEUE_PATTERN_WALLTIME_SECONDS",
+            "CHILI_BACKTEST_QUEUE_PATTERN_WALLTIME_SECONDS",
+        ),
+    )
+    brain_queue_pattern_soft_deadline_fraction: float = Field(
+        default=0.85,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices(
+            "BRAIN_QUEUE_PATTERN_SOFT_DEADLINE_FRACTION",
+            "CHILI_BACKTEST_QUEUE_PATTERN_SOFT_DEADLINE_FRACTION",
+        ),
+    )
     brain_queue_process_memory_guard_enabled: bool = Field(
         default=BRAIN_QUEUE_PROCESS_MEMORY_GUARD_DEFAULT_ENABLED,
         validation_alias=AliasChoices("BRAIN_QUEUE_PROCESS_MEMORY_GUARD_ENABLED"),
