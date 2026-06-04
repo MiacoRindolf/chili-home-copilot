@@ -2866,6 +2866,27 @@ class Settings(BaseSettings):
             "CHILI_AUTOTRADER_MIN_EXPECTED_NET_AFTER_EMPIRICAL_COST_PCT"
         ),
     )
+    chili_autotrader_stock_max_execution_stop_loss_pct: float = Field(
+        default=30.0,
+        ge=0.0,
+        le=100.0,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_STOCK_MAX_EXECUTION_STOP_LOSS_PCT"),
+        description="Max stock stop distance the live executor may use; 0 disables the cap.",
+    )
+    chili_autotrader_crypto_max_execution_stop_loss_pct: float = Field(
+        default=60.0,
+        ge=0.0,
+        le=100.0,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_CRYPTO_MAX_EXECUTION_STOP_LOSS_PCT"),
+        description="Max crypto stop distance the live executor may use; 0 disables the cap.",
+    )
+    chili_autotrader_options_max_execution_stop_loss_pct: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=100.0,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_OPTIONS_MAX_EXECUTION_STOP_LOSS_PCT"),
+        description="Max options stop distance the live executor may use; 0 disables the cap.",
+    )
     chili_autotrader_directional_probability_z: float = Field(
         default=AUTOTRADER_DIRECTIONAL_PROBABILITY_DEFAULT_Z,
         ge=0.0,

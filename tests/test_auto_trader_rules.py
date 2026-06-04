@@ -13,6 +13,7 @@ from app.services.trading.auto_trader_rules import (
     EntryEdgeDecision,
     RuleGateContext,
     RuleGateSettings,
+    _max_execution_stop_loss_fraction,
     _non_positive_reprice_marker,
     alert_confidence_from_score,
     autotrader_paper_realized_pnl_today_et,
@@ -1423,6 +1424,21 @@ def test_evaluate_entry_edge_blocks_absurd_stock_execution_stop_geometry():
     assert decision.reason == "execution_stop_loss_too_wide"
     assert decision.snapshot["execution_stop_loss_fraction"] > 0.8
     assert decision.snapshot["max_execution_stop_loss_pct"] == 30.0
+
+
+def test_execution_stop_loss_caps_read_typed_env(monkeypatch):
+    monkeypatch.setenv("CHILI_AUTOTRADER_STOCK_MAX_EXECUTION_STOP_LOSS_PCT", "22.5")
+    monkeypatch.setenv("CHILI_AUTOTRADER_CRYPTO_MAX_EXECUTION_STOP_LOSS_PCT", "44")
+    monkeypatch.setenv("CHILI_AUTOTRADER_OPTIONS_MAX_EXECUTION_STOP_LOSS_PCT", "0")
+
+    cfg = Settings(
+        database_url="postgresql://chili:chili@localhost:5433/chili_test",
+        _env_file=None,
+    )
+
+    assert _max_execution_stop_loss_fraction(cfg, "stock") == pytest.approx(0.225)
+    assert _max_execution_stop_loss_fraction(cfg, "crypto") == pytest.approx(0.44)
+    assert _max_execution_stop_loss_fraction(cfg, "options") is None
 
 
 def test_evaluate_entry_edge_blocks_thin_margin_after_empirical_cost():
