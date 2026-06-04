@@ -444,6 +444,36 @@ class Settings(BaseSettings):
     robinhood_totp_secret: str = ""
     coinbase_api_key: str = ""
     coinbase_api_secret: str = ""
+    broker_login_ttl_seconds: int = Field(
+        default=3600,
+        ge=1,
+        validation_alias=AliasChoices("BROKER_LOGIN_TTL_SECONDS"),
+    )
+    broker_cache_ttl_seconds: int = Field(
+        default=300,
+        ge=0,
+        validation_alias=AliasChoices("BROKER_CACHE_TTL_SECONDS"),
+    )
+    broker_order_poll_timeout: int = Field(
+        default=30,
+        ge=1,
+        validation_alias=AliasChoices("BROKER_ORDER_POLL_TIMEOUT"),
+    )
+    broker_order_poll_interval: float = Field(
+        default=2.0,
+        gt=0.0,
+        validation_alias=AliasChoices("BROKER_ORDER_POLL_INTERVAL"),
+    )
+    broker_challenge_poll_timeout: int = Field(
+        default=15,
+        ge=1,
+        validation_alias=AliasChoices("BROKER_CHALLENGE_POLL_TIMEOUT"),
+    )
+    broker_reconcile_confirm_seconds: int = Field(
+        default=300,
+        ge=0,
+        validation_alias=AliasChoices("BROKER_RECONCILE_CONFIRM_SECONDS"),
+    )
 
     # Massive.com market data (primary â€” real-time quotes & aggregates)
     massive_api_key: str = ""
@@ -3990,6 +4020,20 @@ class Settings(BaseSettings):
     chili_reconcile_partial_list_streak_min: int = Field(
         default=2,
         validation_alias=AliasChoices("CHILI_RECONCILE_PARTIAL_LIST_STREAK_MIN"),
+    )
+    chili_coinbase_absent_no_fill_reconcile_streak_min: int = Field(
+        default=12,
+        ge=0,
+        validation_alias=AliasChoices(
+            "CHILI_COINBASE_ABSENT_NO_FILL_RECONCILE_STREAK_MIN"
+        ),
+    )
+    chili_coinbase_absent_no_fill_reconcile_min_age_seconds: int = Field(
+        default=1800,
+        ge=0,
+        validation_alias=AliasChoices(
+            "CHILI_COINBASE_ABSENT_NO_FILL_RECONCILE_MIN_AGE_SECONDS"
+        ),
     )
     # f-phase-e-revert-and-bracket-writer-crash-fix (2026-05-08):
     # cooldown in seconds applied to a bracket_intent after ANY

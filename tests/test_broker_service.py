@@ -1,9 +1,51 @@
 """Tests for broker service: order status mapping, sync logic, P&L calculation."""
+import importlib
+
 import pytest
 from unittest.mock import patch, MagicMock
 from datetime import datetime
 
+from app import config as app_config
+from app.config import Settings
 from app.models.trading import Trade
+
+
+def test_broker_timing_settings_drive_import_time_constants(monkeypatch):
+    original_settings = app_config.settings
+    monkeypatch.setenv("BROKER_LOGIN_TTL_SECONDS", "7200")
+    monkeypatch.setenv("BROKER_CACHE_TTL_SECONDS", "45")
+    monkeypatch.setenv("BROKER_ORDER_POLL_TIMEOUT", "11")
+    monkeypatch.setenv("BROKER_ORDER_POLL_INTERVAL", "0.75")
+    monkeypatch.setenv("BROKER_CHALLENGE_POLL_TIMEOUT", "6")
+    monkeypatch.setenv("BROKER_RECONCILE_CONFIRM_SECONDS", "123")
+    monkeypatch.setenv("CHILI_COINBASE_ABSENT_NO_FILL_RECONCILE_STREAK_MIN", "9")
+    monkeypatch.setenv(
+        "CHILI_COINBASE_ABSENT_NO_FILL_RECONCILE_MIN_AGE_SECONDS",
+        "444",
+    )
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+    monkeypatch.setattr(app_config, "settings", settings)
+
+    from app.services import broker_service, coinbase_service
+
+    try:
+        broker_service = importlib.reload(broker_service)
+        coinbase_service = importlib.reload(coinbase_service)
+
+        assert settings.broker_login_ttl_seconds == 7200
+        assert broker_service._LOGIN_TTL == 7200
+        assert broker_service._CACHE_TTL == 45
+        assert broker_service._ORDER_POLL_TIMEOUT == 11
+        assert broker_service._ORDER_POLL_INTERVAL == 0.75
+        assert broker_service._CHALLENGE_POLL_TIMEOUT == 6
+        assert broker_service._RECONCILE_CONFIRM_WINDOW == 123
+        assert coinbase_service._COINBASE_RECONCILE_CONFIRM_WINDOW == 123
+        assert coinbase_service._COINBASE_ABSENT_NO_FILL_STREAK_MIN == 9
+        assert coinbase_service._COINBASE_ABSENT_NO_FILL_MIN_AGE_SECONDS == 444
+    finally:
+        monkeypatch.setattr(app_config, "settings", original_settings)
+        importlib.reload(broker_service)
+        importlib.reload(coinbase_service)
 
 
 class TestOrderStatusMapping:
