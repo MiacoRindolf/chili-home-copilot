@@ -12,8 +12,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.config import Settings
 from app.models.trading import PaperTrade
 from app.services.trading.pattern_shadow_vetting import (
+    _apply_min_pilot_roster,
     _load_directional_evidence,
     _pilot_metric_enabled,
     _pilot_score_for_row,
@@ -44,6 +46,57 @@ def _settings(**overrides):
     )
     base.update(overrides)
     return SimpleNamespace(**base)
+
+
+def test_shadow_vetting_min_pilot_roster_settings_drive_gate(monkeypatch) -> None:
+    monkeypatch.setenv("CHILI_SHADOW_VETTING_MIN_PILOT_ROSTER", "1")
+    monkeypatch.setenv("CHILI_SHADOW_VETTING_MIN_PILOT_SCORE", "0.85")
+    monkeypatch.setenv(
+        "CHILI_SHADOW_VETTING_MIN_PILOT_SCORE_THRESHOLD_RATIO", "0.95"
+    )
+    monkeypatch.setenv("CHILI_SHADOW_VETTING_MIN_PILOT_EFFECTIVE_N", "20")
+    monkeypatch.setenv("CHILI_SHADOW_VETTING_MIN_PILOT_WEIGHTED_WR", "0.65")
+    monkeypatch.setenv("CHILI_SHADOW_VETTING_MIN_PILOT_RECENT_WR", "0.66")
+    monkeypatch.setenv("CHILI_SHADOW_VETTING_MIN_PILOT_FRESHNESS", "0.40")
+    monkeypatch.setenv("CHILI_SHADOW_VETTING_MAX_PILOT_DIRECTIONAL_DECAY", "0.20")
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.chili_shadow_vetting_min_pilot_roster == 1
+    assert settings.chili_shadow_vetting_min_pilot_score == pytest.approx(0.85)
+    assert (
+        settings.chili_shadow_vetting_min_pilot_score_threshold_ratio
+        == pytest.approx(0.95)
+    )
+    assert settings.chili_shadow_vetting_min_pilot_effective_n == pytest.approx(20.0)
+    assert settings.chili_shadow_vetting_min_pilot_weighted_wr == pytest.approx(0.65)
+    assert settings.chili_shadow_vetting_min_pilot_recent_wr == pytest.approx(0.66)
+    assert settings.chili_shadow_vetting_min_pilot_freshness == pytest.approx(0.40)
+    assert settings.chili_shadow_vetting_max_pilot_directional_decay == pytest.approx(
+        0.20
+    )
+
+    base_row = {
+        "lifecycle_stage": "shadow_promoted",
+        "recert_required": False,
+        "promotion_gate_passed": True,
+        "cpcv_ready": True,
+        "pilot_score_threshold": 0.90,
+        "effective_sample_n": 24.0,
+        "weighted_directional_wr": 0.66,
+        "recent_directional_wr": 0.67,
+        "freshness": 0.50,
+        "directional_decay": 0.10,
+    }
+    rows = [
+        {**base_row, "scan_pattern_id": 1, "pilot_score": 0.84},
+        {**base_row, "scan_pattern_id": 2, "pilot_score": 0.87},
+    ]
+
+    _apply_min_pilot_roster(rows, settings_=settings)
+
+    assert rows[0].get("pilot_eligible") is not True
+    assert rows[1]["pilot_eligible"] is True
+    assert rows[1]["pilot_min_roster_effective_floor"] == pytest.approx(0.855)
 
 
 def test_pilot_score_excludes_saturated_constant_dsr_pbo() -> None:

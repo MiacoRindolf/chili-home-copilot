@@ -4537,6 +4537,56 @@ class Settings(BaseSettings):
             "CHILI_SHADOW_VETTING_INCLUDE_PAPER_DYNAMIC_OUTCOMES"
         ),
     )
+    chili_shadow_vetting_min_pilot_roster: int = Field(
+        default=1,
+        ge=0,
+        validation_alias=AliasChoices("CHILI_SHADOW_VETTING_MIN_PILOT_ROSTER"),
+    )
+    chili_shadow_vetting_min_pilot_score: float = Field(
+        default=0.70,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_SHADOW_VETTING_MIN_PILOT_SCORE"),
+    )
+    chili_shadow_vetting_min_pilot_score_threshold_ratio: float = Field(
+        default=0.90,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices(
+            "CHILI_SHADOW_VETTING_MIN_PILOT_SCORE_THRESHOLD_RATIO"
+        ),
+    )
+    chili_shadow_vetting_min_pilot_effective_n: float = Field(
+        default=10.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_SHADOW_VETTING_MIN_PILOT_EFFECTIVE_N"),
+    )
+    chili_shadow_vetting_min_pilot_weighted_wr: float = Field(
+        default=0.55,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_SHADOW_VETTING_MIN_PILOT_WEIGHTED_WR"),
+    )
+    chili_shadow_vetting_min_pilot_recent_wr: float = Field(
+        default=0.55,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_SHADOW_VETTING_MIN_PILOT_RECENT_WR"),
+    )
+    chili_shadow_vetting_min_pilot_freshness: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_SHADOW_VETTING_MIN_PILOT_FRESHNESS"),
+    )
+    chili_shadow_vetting_max_pilot_directional_decay: float = Field(
+        default=0.40,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices(
+            "CHILI_SHADOW_VETTING_MAX_PILOT_DIRECTIONAL_DECAY"
+        ),
+    )
     # Pilot stage: broker-eligible but confidence-sized. This is the
     # non-binary ramp between broker-blocked shadow observation and full
     # promoted sizing.
