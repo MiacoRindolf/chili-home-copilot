@@ -104,3 +104,27 @@ backup + kill-switch + downtime. Not executed in this pass.
   checkout is on `os-deploy` with 511 unrelated dirty files (Codex task said "stay
   on main"; not disturbing that tree). These two docs are written but untracked —
   can be landed on `main` via a clean worktree on request.
+
+## Addendum — follow-ups (2026-06-04, ~08:10–08:35 UTC, operator-approved)
+
+- **`synchronous_commit` flipped to `off`** (supersedes the "held deliberately" note
+  above) — operator opted into the bigger per-commit fsync win. Reversible:
+  `ALTER SYSTEM RESET synchronous_commit; SELECT pg_reload_conf();`. All four palliative
+  settings now live: `checkpoint_timeout=1800s`, `max_wal_size=4GB`, `wal_compression=on`,
+  `synchronous_commit=off`.
+- **Docs landed on `main`** via PR #302 (squash → `0d7ae2e`) from a clean worktree off
+  `origin/main`; the `os-deploy` dirty tree was not touched. (This addendum + the revised
+  runbook follow in a second docs PR.)
+- **Post-tuning checkpoint measured (the prediction above):** the 08:26→08:29 checkpoint
+  ran `sync=169.7s` / `total=176.2s` / `longest=39.7s` / `sync files=223`. So the
+  bind-mount fsync tax is **unchanged** per-checkpoint — but two wins held: checkpoints
+  are now ~30 min apart (was ~5 min), and **0 tick failures** occurred during that 169 s
+  checkpoint (vs. the 07:37 kill), because `synchronous_commit=off` keeps the autotrader's
+  commits from sitting idle-in-transaction on fsync. Net: fewer, survivable storms.
+  Longer interval concentrates more dirty files per checkpoint (223) → fewer-but-longer,
+  a tradeoff. **Confirms the migration is the real fix, not more tuning.**
+- **Migration runbook revised** with environment facts: compose already supports the
+  switch via `CHILI_POSTGRES_DATA_SOURCE=chili-postgres-data` (named volume declared,
+  no compose edit); Docker VM has **914 GB free** with its vhdx on D:; PG 16.13 /
+  `postgres:16-alpine` → data owned by **uid 70** (corrected from 999). Migration is a
+  populate-volume + one-`.env`-line flip; rollback is unflipping the env var.
