@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import sys
 from pathlib import Path
@@ -83,3 +83,44 @@ def test_full_cleanup_bounds_truncate_statement_timeout(monkeypatch) -> None:
     assert "SET LOCAL statement_timeout = '37s'" in calls
     assert calls[-1].startswith("TRUNCATE ")
     assert "users" in calls[-1]
+
+def test_full_cleanup_caps_oversized_statement_timeout(monkeypatch) -> None:
+    conftest = sys.modules["tests.conftest"]
+    calls: list[str] = []
+
+    class _Conn:
+        def execute(self, statement):
+            calls.append(str(statement))
+
+    class _Begin:
+        def __enter__(self):
+            return _Conn()
+
+        def __exit__(self, *_exc):
+            return False
+
+    class _Engine:
+        def begin(self):
+            return _Begin()
+
+    monkeypatch.setenv("CHILI_PYTEST_TRUNCATE_STATEMENT_TIMEOUT_S", "900")
+    monkeypatch.setattr(conftest, "engine", _Engine())
+    monkeypatch.setattr(
+        conftest,
+        "Base",
+        SimpleNamespace(
+            metadata=SimpleNamespace(
+                sorted_tables=[
+                    SimpleNamespace(name="schema_version"),
+                    SimpleNamespace(name="users"),
+                ]
+            )
+        ),
+    )
+    monkeypatch.setattr(conftest, "_evict_idle_in_transaction_peers", lambda: None)
+    monkeypatch.setattr(conftest, "_terminate_stale_truncate_peers", lambda: None)
+    monkeypatch.setattr(conftest, "_truncate_relation_names", lambda _conn, names: names)
+
+    conftest._truncate_app_tables()
+
+    assert "SET LOCAL statement_timeout = '90s'" in calls

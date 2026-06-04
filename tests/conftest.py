@@ -1,4 +1,4 @@
-"""Shared fixtures for CHILI tests.
+﻿"""Shared fixtures for CHILI tests.
 
 Requires PostgreSQL: set ``TEST_DATABASE_URL`` or ``DATABASE_URL`` to a
 *dedicated* database (e.g. ``chili_test``) before running pytest. See
@@ -441,7 +441,10 @@ def _truncate_app_tables(table_names: frozenset[str] | None = None) -> None:
         return
     attempts = max(1, int(os.environ.get("CHILI_PYTEST_TRUNCATE_ATTEMPTS", "6")))
     lock_s = max(30, int(os.environ.get("CHILI_PYTEST_LOCK_TIMEOUT_S", "120")))
-    statement_s = max(30, int(os.environ.get("CHILI_PYTEST_TRUNCATE_STATEMENT_TIMEOUT_S", "90")))
+    statement_s = min(
+        max(30, int(os.environ.get("CHILI_PYTEST_TRUNCATE_STATEMENT_TIMEOUT_S", "90"))),
+        90,
+    )
     for attempt in range(attempts):
         _evict_idle_in_transaction_peers()
         _terminate_stale_truncate_peers()
