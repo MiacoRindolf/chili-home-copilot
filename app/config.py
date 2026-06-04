@@ -1469,6 +1469,26 @@ class Settings(BaseSettings):
     brain_mine_labeled_snapshot_limit: int = 5000
     # Require stability across chronological segments before save_insight from mine_patterns.
     brain_mining_purged_cpcv_enabled: bool = True
+    brain_mining_min_samples: int = Field(
+        default=20,
+        ge=1,
+        le=100_000,
+        validation_alias=AliasChoices("BRAIN_MINING_MIN_SAMPLES"),
+    )
+    brain_mining_min_win_rate: float = Field(
+        default=0.58,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("BRAIN_MINING_MIN_WIN_RATE"),
+    )
+    brain_mining_emit_scan_patterns: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("BRAIN_MINING_EMIT_SCAN_PATTERNS"),
+    )
+    brain_mining_use_v2_promotion: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("BRAIN_MINING_USE_V2_PROMOTION"),
+    )
     # When True, CPCV + DSR + PBO gate blocks promotion after ensemble/DSR/holdout (HR1 path).
     # Default OFF: metrics computed at promotion-attempt time only; shadow / logging only.
     chili_cpcv_promotion_gate_enabled: bool = False

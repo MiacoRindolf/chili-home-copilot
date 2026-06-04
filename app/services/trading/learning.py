@@ -11,7 +11,7 @@ import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -76,6 +76,33 @@ mount_bounded_http_adapters(_PROVIDER_PREFLIGHT_SESSION)
 
 _PROVIDER_EGRESS_LOCK = threading.Lock()
 _PROVIDER_EGRESS_CACHE: dict[str, Any] = {"ts": 0.0, "ok": True}
+
+
+class _MiningPromotionControls(NamedTuple):
+    min_samples: int
+    min_win_rate: float
+    purged_cpcv_enabled: bool
+    emit_scan_patterns: bool
+    use_v2_promotion: bool
+
+
+def _mining_promotion_controls(settings_obj: Any | None = None) -> _MiningPromotionControls:
+    if settings_obj is None:
+        from ...config import settings as settings_obj
+
+    return _MiningPromotionControls(
+        min_samples=max(20, int(getattr(settings_obj, "brain_mining_min_samples", 20))),
+        min_win_rate=float(getattr(settings_obj, "brain_mining_min_win_rate", 0.58)),
+        purged_cpcv_enabled=bool(
+            getattr(settings_obj, "brain_mining_purged_cpcv_enabled", True)
+        ),
+        emit_scan_patterns=bool(
+            getattr(settings_obj, "brain_mining_emit_scan_patterns", True)
+        ),
+        use_v2_promotion=bool(
+            getattr(settings_obj, "brain_mining_use_v2_promotion", True)
+        ),
+    )
 
 
 def provider_egress_available_for_brain_work() -> bool:
@@ -2786,11 +2813,12 @@ def mine_patterns(
     regime_tag = f" [{vol_regime['label']}]" if vol_regime.get("regime") != "unknown" else ""
 
     discoveries: list[str] = []
-    MIN_SAMPLES = max(20, int(getattr(settings, "brain_mining_min_samples", 20)))
-    MIN_WIN_RATE = float(getattr(settings, "brain_mining_min_win_rate", 0.58))
-    _cpcv_on = getattr(settings, "brain_mining_purged_cpcv_enabled", True)
-    _emit_scan_patterns = bool(getattr(settings, "brain_mining_emit_scan_patterns", True))
-    _use_v2_gates = bool(getattr(settings, "brain_mining_use_v2_promotion", True))
+    mining_controls = _mining_promotion_controls(settings)
+    MIN_SAMPLES = mining_controls.min_samples
+    MIN_WIN_RATE = mining_controls.min_win_rate
+    _cpcv_on = mining_controls.purged_cpcv_enabled
+    _emit_scan_patterns = mining_controls.emit_scan_patterns
+    _use_v2_gates = mining_controls.use_v2_promotion
 
     _insight_cache = preload_active_insights(db, user_id)
 
