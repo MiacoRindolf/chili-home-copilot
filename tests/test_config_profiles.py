@@ -4,6 +4,9 @@ from __future__ import annotations
 import os
 from unittest.mock import patch
 
+import pytest
+from pydantic import ValidationError
+
 from app.config import CONFIG_PROFILES
 
 
@@ -80,3 +83,27 @@ def test_get_active_profile_info():
     assert "profile" in info
     assert "overrides" in info
     assert isinstance(info["overrides"], dict)
+
+
+def test_bracket_watchdog_stale_after_sec_rejects_out_of_range_env(monkeypatch):
+    from app.config import Settings
+
+    monkeypatch.setenv("CHILI_BRACKET_WATCHDOG_STALE_AFTER_SEC", "29")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, database_url="postgresql://x:x@localhost/test")
+
+    monkeypatch.setenv("CHILI_BRACKET_WATCHDOG_STALE_AFTER_SEC", "3601")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, database_url="postgresql://x:x@localhost/test")
+
+
+def test_bracket_watchdog_stale_after_sec_accepts_documented_bounds(monkeypatch):
+    from app.config import Settings
+
+    monkeypatch.setenv("CHILI_BRACKET_WATCHDOG_STALE_AFTER_SEC", "30")
+    lower = Settings(_env_file=None, database_url="postgresql://x:x@localhost/test")
+    assert lower.chili_bracket_watchdog_stale_after_sec == 30
+
+    monkeypatch.setenv("CHILI_BRACKET_WATCHDOG_STALE_AFTER_SEC", "3600")
+    upper = Settings(_env_file=None, database_url="postgresql://x:x@localhost/test")
+    assert upper.chili_bracket_watchdog_stale_after_sec == 3600

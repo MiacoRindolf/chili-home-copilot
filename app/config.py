@@ -2601,19 +2601,6 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_AUTOPILOT_STRICT_PRIMARY"),
     )
 
-    # P0.5 — Bracket reconciler watchdog: alert when an open live trade's most
-    # recent reconciliation kind is missing_stop / orphan_stop and the observation
-    # is older than this threshold. Since RH has no native brackets, a live
-    # unprotected position is a critical operator signal.
-    chili_bracket_watchdog_enabled: bool = Field(
-        default=False,
-        validation_alias=AliasChoices("CHILI_BRACKET_WATCHDOG_ENABLED"),
-    )
-    chili_bracket_watchdog_stale_after_sec: int = Field(
-        default=300,
-        validation_alias=AliasChoices("CHILI_BRACKET_WATCHDOG_STALE_AFTER_SEC"),
-    )
-
     # P1.1 — formal order state machine. When enabled, venue adapters and the
     # execution-audit event stream project broker-native statuses onto the
     # canonical DRAFT/SUBMITTING/ACK/PARTIAL/FILLED/CANCELLED/REJECTED/EXPIRED
