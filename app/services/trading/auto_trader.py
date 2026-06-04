@@ -18,6 +18,9 @@ from sqlalchemy.orm import Session
 
 from ...config import (
     AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE,
+    AUTOTRADER_CANDIDATE_SELECT_TIMEOUT_DEFAULT_FRACTION,
+    AUTOTRADER_CANDIDATE_SELECT_TIMEOUT_MAX_MS,
+    AUTOTRADER_CANDIDATE_SELECT_TIMEOUT_MIN_MS,
     AUTOTRADER_DEFAULT_TICK_INTERVAL_SECONDS,
     AUTOTRADER_DEFAULT_TICK_MAX_SECONDS,
     AUTOTRADER_COST_GATE_REPEAT_SUPPRESSION_DEFAULT_ENABLED,
@@ -904,6 +907,9 @@ def _autotrader_candidate_batch_size() -> int:
     return _settings_int_clamped(
         "chili_autotrader_candidate_batch_size",
         AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE,
+    AUTOTRADER_CANDIDATE_SELECT_TIMEOUT_DEFAULT_FRACTION,
+    AUTOTRADER_CANDIDATE_SELECT_TIMEOUT_MAX_MS,
+    AUTOTRADER_CANDIDATE_SELECT_TIMEOUT_MIN_MS,
         lower=1,
         upper=AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
     )
@@ -1065,6 +1071,59 @@ def _merge_candidate_ref_lanes(
     return merged[:limit]
 
 
+def _autotrader_db_backend_is_postgres(db: Session) -> bool:
+    try:
+        bind = db.get_bind()
+        return getattr(getattr(bind, "dialect", None), "name", "") == "postgresql"
+    except Exception:
+        return False
+
+
+def _candidate_select_statement_timeout_ms(*, tick_budget_s: float) -> int:
+    configured = _settings_int_clamped(
+        "chili_autotrader_candidate_select_statement_timeout_ms",
+        0,
+        lower=0,
+        upper=10000,
+    )
+    if configured > 0:
+        return int(configured)
+    fraction = _settings_float_clamped(
+        "chili_autotrader_candidate_select_timeout_fraction",
+        AUTOTRADER_CANDIDATE_SELECT_TIMEOUT_DEFAULT_FRACTION,
+        lower=0.01,
+        upper=0.5,
+    )
+    derived = int(max(0.0, float(tick_budget_s)) * 1000.0 * fraction)
+    return max(
+        AUTOTRADER_CANDIDATE_SELECT_TIMEOUT_MIN_MS,
+        min(AUTOTRADER_CANDIDATE_SELECT_TIMEOUT_MAX_MS, derived),
+    )
+
+
+def _apply_candidate_select_statement_timeout(
+    db: Session,
+    *,
+    tick_budget_s: float,
+) -> int | None:
+    if not _autotrader_db_backend_is_postgres(db):
+        return None
+    timeout_ms = _candidate_select_statement_timeout_ms(tick_budget_s=tick_budget_s)
+    if timeout_ms <= 0:
+        return None
+    db.execute(text(f"SET LOCAL statement_timeout = '{int(timeout_ms)}ms'"))
+    return int(timeout_ms)
+
+
+def _reset_candidate_select_statement_timeout(
+    db: Session,
+    timeout_ms: int | None,
+) -> None:
+    if timeout_ms is None:
+        return
+    db.execute(text("SET LOCAL statement_timeout = DEFAULT"))
+
+
 def _select_candidate_refs_by_user_scope(
     candidate_base: Any,
     uid: int,
@@ -1072,23 +1131,65 @@ def _select_candidate_refs_by_user_scope(
     limit: int,
     order_by_clauses: tuple[Any, ...],
     recent_first: bool,
+    tick_budget_s: float | None = None,
+    context: str = "candidate_refs",
 ) -> list[tuple[int, datetime | None]]:
     safe_limit = max(0, int(limit or 0))
     if safe_limit <= 0:
         return []
     refs: list[tuple[int, datetime | None]] = []
-    for scope_filter in (
-        BreakoutAlert.user_id == uid,
-        BreakoutAlert.user_id.is_(None),
-    ):
-        rows = (
-            candidate_base.filter(scope_filter)
-            .order_by(*order_by_clauses)
-            .with_entities(BreakoutAlert.id, BreakoutAlert.alerted_at)
-            .limit(safe_limit)
-            .all()
+    timeout_ms: int | None = None
+    failed = False
+    try:
+        if tick_budget_s is not None:
+            timeout_ms = _apply_candidate_select_statement_timeout(
+                candidate_base.session,
+                tick_budget_s=tick_budget_s,
+            )
+        for scope_filter in (
+            BreakoutAlert.user_id == uid,
+            BreakoutAlert.user_id.is_(None),
+        ):
+            rows = (
+                candidate_base.filter(scope_filter)
+                .order_by(*order_by_clauses)
+                .with_entities(BreakoutAlert.id, BreakoutAlert.alerted_at)
+                .limit(safe_limit)
+                .all()
+            )
+            refs.extend((int(row_id), alerted_at) for row_id, alerted_at in rows)
+    except DBAPIError as exc:
+        failed = True
+        try:
+            candidate_base.session.rollback()
+        except Exception:
+            logger.debug(
+                "[autotrader] candidate selection rollback failed context=%s",
+                context,
+                exc_info=True,
+            )
+        logger.warning(
+            "[autotrader] candidate selection unavailable context=%s "
+            "timeout_ms=%s error=%s",
+            context,
+            timeout_ms,
+            type(exc).__name__,
+            exc_info=True,
         )
-        refs.extend((int(row_id), alerted_at) for row_id, alerted_at in rows)
+        return []
+    finally:
+        if not failed:
+            try:
+                _reset_candidate_select_statement_timeout(
+                    candidate_base.session,
+                    timeout_ms,
+                )
+            except Exception:
+                logger.debug(
+                    "[autotrader] candidate selection timeout reset failed context=%s",
+                    context,
+                    exc_info=True,
+                )
     return _merge_candidate_ref_lanes(
         refs,
         limit=safe_limit,
@@ -4600,6 +4701,8 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
                 BreakoutAlert.id.desc(),
             ),
             recent_first=True,
+            tick_budget_s=tick_budget_s,
+            context="fresh_candidate_refs",
         )
         remaining_candidate_slots = max(
             0,
@@ -4625,6 +4728,8 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
                     BreakoutAlert.id.desc(),
                 ),
                 recent_first=True,
+                tick_budget_s=tick_budget_s,
+                context="older_candidate_refs",
             )
         else:
             older_candidate_refs = []
@@ -4638,6 +4743,8 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
             limit=candidate_query_limit,
             order_by_clauses=(BreakoutAlert.id.asc(),),
             recent_first=False,
+            tick_budget_s=tick_budget_s,
+            context="candidate_refs",
         )
         fresh_candidate_pool = len(candidate_refs)
         fresh_candidate_pool_exact = len(candidate_refs) < candidate_query_limit

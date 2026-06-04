@@ -69,6 +69,9 @@ AUTOTRADER_STALE_CANDIDATE_SWEEP_MAX_SECONDS = (
     AUTOTRADER_IMMINENT_SCANNER_CADENCE_MINUTES * SECONDS_PER_MINUTE
 )
 AUTOTRADER_CANDIDATE_PRICE_PREFETCH_DEFAULT_ENABLED = True
+AUTOTRADER_CANDIDATE_SELECT_TIMEOUT_DEFAULT_FRACTION = 0.15
+AUTOTRADER_CANDIDATE_SELECT_TIMEOUT_MIN_MS = 1000
+AUTOTRADER_CANDIDATE_SELECT_TIMEOUT_MAX_MS = 2500
 AUTOTRADER_STOCK_MOMENTUM_CONTEXT_GATE_DEFAULT_ENABLED = True
 AUTOTRADER_STOCK_MOMENTUM_CONTEXT_MIN_QUEUE_PRESSURE_DEFAULT = 1.0
 AUTOTRADER_STOCK_MOMENTUM_CONTEXT_MIN_GAP_PCT_DEFAULT = 5.0
@@ -2975,6 +2978,31 @@ class Settings(BaseSettings):
         le=AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_CANDIDATE_BATCH_SIZE"),
         description="Maximum AutoTrader alerts processed in one tick.",
+    )
+    chili_autotrader_candidate_select_statement_timeout_ms: int = Field(
+        default=0,
+        ge=0,
+        le=10000,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_CANDIDATE_SELECT_STATEMENT_TIMEOUT_MS"
+        ),
+        description=(
+            "Optional hard Postgres statement timeout for each AutoTrader "
+            "candidate selection query. Zero derives the timeout from the "
+            "tick budget fraction."
+        ),
+    )
+    chili_autotrader_candidate_select_timeout_fraction: float = Field(
+        default=AUTOTRADER_CANDIDATE_SELECT_TIMEOUT_DEFAULT_FRACTION,
+        ge=0.01,
+        le=0.5,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_CANDIDATE_SELECT_TIMEOUT_FRACTION"
+        ),
+        description=(
+            "Fraction of the AutoTrader tick budget reserved for each "
+            "candidate selection query when no explicit statement timeout is set."
+        ),
     )
     chili_autotrader_fresh_candidate_fastlane_enabled: bool = Field(
         default=AUTOTRADER_FRESH_CANDIDATE_FASTLANE_DEFAULT_ENABLED,
