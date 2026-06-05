@@ -1359,101 +1359,157 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final spendToday = (s['spend_today'] as List?) ?? [];
     final lastIso = s['last_dispatch_activity_at'] as String?;
 
-    return ListView(
+    final cs = Theme.of(context).colorScheme;
+    double spendTotal = 0;
+    for (final row in spendToday) {
+      if (row is Map && row['spend_usd'] is num) {
+        spendTotal += (row['spend_usd'] as num).toDouble();
+      }
+    }
+
+    return RefreshIndicator(
+      onRefresh: _refreshStatus,
+      child: ListView(
+      physics: const AlwaysScrollableScrollPhysics(),
       padding: const EdgeInsets.all(24),
       children: [
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Kill switch',
-                    style: Theme.of(context).textTheme.titleMedium),
-                const SizedBox(height: 8),
-                Text(
-                  active ? 'ON${reason.isNotEmpty ? ': $reason' : ''}' : 'Off',
-                  style: TextStyle(
-                    fontWeight: FontWeight.w600,
-                    color: active ? Colors.red.shade700 : Colors.green.shade700,
+        // Batch 6 — Kill switch panel: color-coded state + single toggle.
+        ApPanel(
+          color: active
+              ? cs.error.withValues(alpha: 0.06)
+              : Colors.green.withValues(alpha: 0.05),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(active ? Icons.block : Icons.shield_outlined,
+                      color: active ? cs.error : Colors.green.shade600, size: 20),
+                  const SizedBox(width: 8),
+                  Text('Kill switch',
+                      style: Theme.of(context).textTheme.titleMedium),
+                  const SizedBox(width: 10),
+                  ApStatusPill(
+                    active ? 'ON' : 'Off',
+                    color: active ? Colors.red : Colors.green,
                   ),
+                  const Spacer(),
+                  if (!active)
+                    FilledButton.icon(
+                      onPressed: () => _confirmKillSwitch(true),
+                      icon: const Icon(Icons.block, size: 16),
+                      label: const Text('Enable'),
+                      style: FilledButton.styleFrom(backgroundColor: cs.error),
+                    )
+                  else
+                    OutlinedButton.icon(
+                      onPressed: () => _confirmKillSwitch(false),
+                      icon: const Icon(Icons.play_arrow, size: 16),
+                      label: const Text('Disable'),
+                    ),
+                ],
+              ),
+              if (active && reason.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Text(reason, style: TextStyle(color: cs.onSurfaceVariant)),
+              ],
+              const SizedBox(height: 6),
+              Text(
+                active
+                    ? 'Automated dispatch is halted until disabled.'
+                    : 'Automated dispatch is allowed.',
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 10),
+        // Batch 9 — freshness line.
+        Row(
+          children: [
+            Icon(Icons.schedule, size: 14, color: cs.onSurfaceVariant),
+            const SizedBox(width: 6),
+            Text('Last activity ${_agoLabel(lastIso)}',
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+          ],
+        ),
+        const SizedBox(height: 18),
+        // Batch 7 — 5-min counters as stat tiles.
+        const ApSectionHeader('Counters · last 5 min', icon: Icons.bolt),
+        const SizedBox(height: 6),
+        if (counters.isEmpty)
+          Text('No runs in the last 5 minutes',
+              style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant))
+        else
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: counters.entries.map((e) {
+              return SizedBox(
+                width: 130,
+                child: ApStatCard(
+                  label: e.key.toString().replaceAll('_', ' '),
+                  value: '${e.value}',
                 ),
-                const SizedBox(height: 12),
-                Row(
-                  children: [
-                    if (!active)
-                      FilledButton(
-                        onPressed: () => _confirmKillSwitch(true),
-                        child: const Text('Enable'),
-                      )
-                    else
-                      OutlinedButton(
-                        onPressed: () => _confirmKillSwitch(false),
-                        child: const Text('Disable'),
-                      ),
-                  ],
-                ),
+              );
+            }).toList(),
+          ),
+        const SizedBox(height: 20),
+        // Batch 8 — spend today panel + total.
+        ApSectionHeader(
+          'LLM spend · today',
+          icon: Icons.attach_money,
+          trailing: spendToday.isEmpty
+              ? null
+              : Text('\$${spendTotal.toStringAsFixed(4)}',
+                  style: TextStyle(
+                      fontWeight: FontWeight.w700, color: cs.onSurface)),
+        ),
+        const SizedBox(height: 6),
+        if (spendToday.isEmpty)
+          Text('No LLM spend recorded today',
+              style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant))
+        else
+          ApPanel(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: Column(
+              children: [
+                for (int i = 0; i < spendToday.length; i++) ...[
+                  if (i > 0) Divider(height: 14, color: cs.outlineVariant),
+                  Builder(builder: (context) {
+                    final m = Map<String, dynamic>.from(
+                        spendToday[i] as Map<dynamic, dynamic>);
+                    final prov = '${m['provider'] ?? ''}';
+                    final calls = m['calls'] ?? 0;
+                    final usd = (m['spend_usd'] is num)
+                        ? (m['spend_usd'] as num).toDouble()
+                        : 0.0;
+                    return Row(
+                      children: [
+                        Icon(Icons.smart_toy_outlined,
+                            size: 16, color: cs.secondary),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(prov,
+                              style: const TextStyle(
+                                  fontWeight: FontWeight.w600)),
+                        ),
+                        Text('$calls calls',
+                            style: TextStyle(
+                                fontSize: 12, color: cs.onSurfaceVariant)),
+                        const SizedBox(width: 12),
+                        Text('\$${usd.toStringAsFixed(4)}',
+                            style:
+                                const TextStyle(fontWeight: FontWeight.w600)),
+                      ],
+                    );
+                  }),
+                ],
               ],
             ),
           ),
-        ),
-        const SizedBox(height: 12),
-        Text('Last activity: ${_agoLabel(lastIso)}',
-            style: TextStyle(color: Colors.grey.shade700)),
-        const SizedBox(height: 16),
-        Text('Counters (5 min)',
-            style: Theme.of(context).textTheme.titleMedium),
-        const SizedBox(height: 8),
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: counters.entries.map((e) {
-            return Chip(label: Text('${e.key}: ${e.value}'));
-          }).toList(),
-        ),
-        if (counters.isEmpty)
-          Padding(
-            padding: const EdgeInsets.only(top: 8),
-            child: Text('No runs in the last 5 minutes',
-                style: TextStyle(color: Colors.grey.shade600)),
-          ),
-        const SizedBox(height: 20),
-        Text('Spend today', style: Theme.of(context).textTheme.titleMedium),
-        const SizedBox(height: 8),
-        if (spendToday.isEmpty)
-          Text('No LLM spend recorded today',
-              style: TextStyle(color: Colors.grey.shade600))
-        else
-          ...spendToday.map((row) {
-            final m = Map<String, dynamic>.from(row as Map<dynamic, dynamic>);
-            final prov = m['provider'] ?? '';
-            final calls = m['calls'] ?? 0;
-            final usd = (m['spend_usd'] is num)
-                ? (m['spend_usd'] as num).toDouble()
-                : 0.0;
-            return ListTile(
-              dense: true,
-              title: Text('$prov'),
-              subtitle: Text('$calls calls · \$${usd.toStringAsFixed(4)}'),
-            );
-          }),
-        if (spendToday.isNotEmpty) ...[
-          const Divider(),
-          Builder(
-            builder: (context) {
-              double total = 0;
-              for (final row in spendToday) {
-                final m =
-                    Map<String, dynamic>.from(row as Map<dynamic, dynamic>);
-                final u = m['spend_usd'];
-                if (u is num) total += u.toDouble();
-              }
-              return Text('Total today: \$${total.toStringAsFixed(4)}',
-                  style: const TextStyle(fontWeight: FontWeight.bold));
-            },
-          ),
-        ],
       ],
+      ),
     );
   }
 
