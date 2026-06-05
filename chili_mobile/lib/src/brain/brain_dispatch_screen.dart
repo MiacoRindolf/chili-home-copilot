@@ -13,6 +13,7 @@ import '../network/network_error_message.dart';
 import '../screen/focus_controller.dart';
 import '../screen/focus_target.dart';
 import 'autonomy_run_presenter.dart';
+import 'autopilot_ui.dart';
 import 'device_auth_store.dart';
 
 /// Dispatch monitor: status, queue task, run history.
@@ -1121,12 +1122,24 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
+                  Icon(Icons.smart_toy,
+                      size: 40, color: Theme.of(context).colorScheme.primary),
+                  const SizedBox(height: 12),
                   Text(
                     'Pair Your Device',
                     textAlign: TextAlign.center,
                     style: Theme.of(context).textTheme.titleLarge,
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Connect to the Brain autopilot',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      fontSize: 13,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
                   if (_pairError != null)
                     Padding(
                       padding: const EdgeInsets.only(bottom: 12),
@@ -1240,18 +1253,42 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(24, 16, 24, 0),
-          child:
-              Text('Brain', style: Theme.of(context).textTheme.headlineMedium),
+          padding: const EdgeInsets.fromLTRB(24, 16, 16, 8),
+          child: Row(
+            children: [
+              Icon(Icons.smart_toy, color: Theme.of(context).colorScheme.primary),
+              const SizedBox(width: 10),
+              Text(
+                'Brain',
+                style: Theme.of(context)
+                    .textTheme
+                    .headlineSmall
+                    ?.copyWith(fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(width: 8),
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  'Autopilot',
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    fontSize: 13,
+                  ),
+                ),
+              ),
+              const Spacer(),
+              _headerStatusPill(context),
+            ],
+          ),
         ),
         TabBar(
           controller: _tabs,
           tabs: const [
-            Tab(text: 'Status'),
-            Tab(text: 'Autopilot'),
-            Tab(text: 'Queue'),
-            Tab(text: 'History'),
-            Tab(text: 'Context'),
+            Tab(text: 'Status', icon: Icon(Icons.dashboard_outlined, size: 18)),
+            Tab(text: 'Autopilot', icon: Icon(Icons.auto_awesome, size: 18)),
+            Tab(text: 'Queue', icon: Icon(Icons.playlist_add, size: 18)),
+            Tab(text: 'History', icon: Icon(Icons.history, size: 18)),
+            Tab(text: 'Context', icon: Icon(Icons.account_tree_outlined, size: 18)),
           ],
         ),
         Expanded(
@@ -1270,27 +1307,47 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     );
   }
 
+  /// Compact header indicator: kill-switch state, else live/connecting.
+  Widget _headerStatusPill(BuildContext context) {
+    final s = _status;
+    if (s == null) {
+      return const ApStatusPill('Connecting…',
+          color: Colors.grey, icon: Icons.cloud_off);
+    }
+    final killRaw = s['kill_switch'];
+    final active = killRaw is Map && killRaw['active'] == true;
+    if (active) {
+      return const ApStatusPill('Kill switch ON',
+          color: Colors.red, icon: Icons.block);
+    }
+    return const ApStatusPill('Live', color: Colors.green, icon: Icons.bolt);
+  }
+
   Widget _buildStatusTab() {
     if (_statusError != null) {
-      return ListView(
-        padding: const EdgeInsets.all(24),
-        children: [
-          Card(
-            color: Colors.red.shade50,
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Text(_statusError!,
-                  style: TextStyle(color: Colors.red.shade900)),
-            ),
-          ),
-          const SizedBox(height: 12),
-          FilledButton(onPressed: _refreshStatus, child: const Text('Retry')),
-        ],
+      return ApEmptyState(
+        icon: Icons.cloud_off,
+        message: 'Couldn’t load status',
+        detail: _statusError,
+        action: FilledButton.icon(
+          onPressed: _refreshStatus,
+          icon: const Icon(Icons.refresh, size: 18),
+          label: const Text('Retry'),
+        ),
       );
     }
     final s = _status;
     if (s == null) {
-      return const Center(child: CircularProgressIndicator());
+      return const Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(height: 12),
+            Text('Loading status…'),
+          ],
+        ),
+      );
     }
     final killRaw = s['kill_switch'];
     final kill = killRaw is Map
