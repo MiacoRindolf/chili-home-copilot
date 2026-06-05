@@ -3736,12 +3736,14 @@ def _queue_shadow_stock_fastlane_for_observation(
     reason: str,
     snap: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """Boost live-quality stock observations toward fresh graduation evidence.
+    """Boost live-quality stock/crypto observations toward fresh graduation evidence.
 
     This does not place a broker order and does not change lifecycle rules. It
-    only makes the backtest queue notice stock shadow observations that already
-    passed the normal positive-edge gate, so their patterns can earn or fail
-    promotion evidence sooner.
+    only makes the backtest queue notice stock or crypto shadow observations that
+    already passed the normal positive-edge gate, so their patterns can earn or
+    fail promotion evidence sooner. Crypto was previously hard-excluded here, so
+    crypto shadow observations never earned graduation evidence; this is the
+    crypto extension of the (already-cooldown-guarded) stock fastlane.
     """
     if not bool(
         getattr(
@@ -3751,7 +3753,8 @@ def _queue_shadow_stock_fastlane_for_observation(
         )
     ):
         return None
-    if (getattr(alert, "asset_type", "") or "").strip().lower() != "stock":
+    asset_type = (getattr(alert, "asset_type", "") or "").strip().lower()
+    if asset_type not in ("stock", "crypto"):
         return None
     ticker = str(getattr(alert, "ticker", "") or "").strip().upper()
     try:
@@ -3841,7 +3844,7 @@ def _queue_shadow_stock_fastlane_for_observation(
             db,
             pattern_id,
             source="autotrader_shadow_stock_fastlane",
-            asset_class="stock",
+            asset_class=asset_type,
             expected_evidence_value=expected_net_pct,
             payload={
                 "alert_id": int(getattr(alert, "id", 0) or 0),
