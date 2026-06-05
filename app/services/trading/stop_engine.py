@@ -299,7 +299,14 @@ def _build_brain_context(trade, db: Session | None) -> BrainContext:
                 ctx.pattern_name = pattern.name
                 ctx.pattern_id = pattern.id
                 ctx.lifecycle_stage = getattr(pattern, "lifecycle_stage", None)
-                ctx.pattern_win_rate = pattern.win_rate
+                # Realized-ONLY win rate for the live stop-tighten lever (~line 343:
+                # <0.40 multiplies lifecycle_stop_factor by 0.90, feeding the ATR
+                # stop and chandelier trail on a real open trade). corrected_* ->
+                # raw_realized_* -> None; never the conflated legacy win_rate
+                # (mining/backtest overwrite it with no provenance). None -> the
+                # tighten is skipped, not applied on a backtest/mining number.
+                from .pattern_stats_accessor import get_realized_pattern_stats
+                ctx.pattern_win_rate = get_realized_pattern_stats(pattern).win_rate
                 ctx.pattern_timeframe = pattern.timeframe
 
                 ec = getattr(pattern, "exit_config", None)

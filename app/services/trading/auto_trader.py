@@ -5584,7 +5584,12 @@ def _emit_netedge_shadow_score(
 
         raw_prob: float | None = None
         if alert.scan_pattern_id:
-            from .pattern_stats_accessor import get_corrected_pattern_stats
+            # Realized-ONLY (corrected_* -> raw_realized_* -> missing); never the
+            # conflated legacy win_rate. raw_prob is the net-edge ENTRY probability
+            # for live momentum/auto-trade scoring; a backtest/mining legacy
+            # win_rate must not seed it. No clean realized -> raw_prob stays None
+            # and scoring is skipped (the `if raw_prob is None: return` below).
+            from .pattern_stats_accessor import get_realized_pattern_stats
 
             pat = (
                 db.query(ScanPattern)
@@ -5592,7 +5597,7 @@ def _emit_netedge_shadow_score(
                 .one_or_none()
             )
             if pat is not None:
-                stats = get_corrected_pattern_stats(pat)
+                stats = get_realized_pattern_stats(pat)
                 if stats.win_rate is not None:
                     wr = float(stats.win_rate)
                     raw_prob = wr / 100.0 if wr > 1.0 else wr

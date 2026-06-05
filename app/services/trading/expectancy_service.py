@@ -38,9 +38,13 @@ def compute_expectancy_edges(
             .one_or_none()
         )
         if row:
+            # RESEARCH prior: rest on the OOS/backtest field only. The legacy
+            # avg_return_pct fallback is CONFLATED (mining/backtest/realized writers
+            # overwrite it with no provenance) — pulling a realized- or
+            # mining-sourced value into a slot treated as a backtest research prior
+            # (and abs() would inflate the prior even from a realized loss). When
+            # there is no OOS return, research_prior rests on viability_score.
             oos_ret = _sf(_pattern_return_field(row, "oos_avg_return_pct", 0), 0.0)
-            if oos_ret == 0:
-                oos_ret = _sf(_pattern_return_field(row, "avg_return_pct", 1), 0.0)
             research_prior = max(research_prior, min(0.08, abs(oos_ret) / 100.0 * 0.6))
 
     gross = research_prior * max(0.5, min(1.5, regime_multiplier))

@@ -261,11 +261,15 @@ def _baseline_research_win_rate_pct(pattern: Any, oos_val: dict[str, Any]) -> tu
 
 
 def _baseline_research_expectancy_pct(pattern: Any) -> float | None:
-    for attr in ("oos_avg_return_pct", "avg_return_pct"):
-        v = _safe_float(getattr(pattern, attr, None))
-        if v is not None:
-            return v
-    return None
+    # Research/OOS baseline ONLY — no legacy fallback (mirrors the
+    # _baseline_research_win_rate_pct sibling, which uses oos_win_rate with no
+    # legacy fallback). The legacy avg_return_pct column is CONFLATED (overwritten
+    # by mining/backtest/realized writers with no provenance) and is frequently
+    # REALIZED-written; using it as the drift baseline collapses
+    # expectancy_ratio = runtime/baseline toward 1.0 and MASKS the very drift this
+    # detects, suppressing auto-challenge demotion of a decaying live pattern.
+    # None -> caller emits skip_reason='no_research_baseline'.
+    return _safe_float(getattr(pattern, "oos_avg_return_pct", None))
 
 
 def baseline_degenerate(

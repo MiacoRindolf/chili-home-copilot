@@ -30,13 +30,20 @@ class CorrectedPatternStats:
     source_avg_return_pct: str
 
 
-def _pick(pat: Any, corrected_attr: str, legacy_attr: str) -> tuple[Any, str]:
-    v = getattr(pat, corrected_attr, None)
+def _pick(
+    pat: Any,
+    primary_attr: str,
+    fallback_attr: str,
+    *,
+    primary_src: str = "corrected",
+    fallback_src: str = "legacy",
+) -> tuple[Any, str]:
+    v = getattr(pat, primary_attr, None)
     if v is not None:
-        return v, "corrected"
-    v = getattr(pat, legacy_attr, None)
+        return v, primary_src
+    v = getattr(pat, fallback_attr, None)
     if v is not None:
-        return v, "legacy"
+        return v, fallback_src
     return None, "missing"
 
 
@@ -53,6 +60,43 @@ def get_corrected_pattern_stats(pat: Any) -> CorrectedPatternStats:
     wr, wr_src = _pick(pat, "corrected_win_rate", "win_rate")
     ret, ret_src = _pick(pat, "corrected_avg_return_pct", "avg_return_pct")
 
+    return _sanitize(n, wr, ret, n_src, wr_src, ret_src)
+
+
+def get_realized_pattern_stats(pat: Any) -> CorrectedPatternStats:
+    """Realized-ONLY stats for DECISION paths: corrected_* -> raw_realized_* -> missing.
+
+    NEVER falls back to the conflated legacy columns (win_rate / avg_return_pct /
+    trade_count), which are overwritten by the mining (ensure_mined_scan_pattern)
+    and backtest (mark_pattern_tested) writers with no provenance tag — so a
+    legacy value can be backtest- or mining-derived, not realized. Use THIS (not
+    get_corrected_pattern_stats) anywhere a realized-EV / live-performance
+    DECISION is made: entry-edge probability, position sizing, stop geometry,
+    promotion / demotion eligibility. ``source_* in {"corrected",
+    "raw_realized", "missing"}`` — callers should treat "missing" as 'no clean
+    realized evidence' and fall through to their own neutral path rather than
+    acting on a number. Mirrors the PR #366 realized-EV gate fix (legacy is
+    non-authoritative). Both corrected_* and raw_realized_* exclude dirty
+    reconcile / sync-gone / position-gone placeholder exits.
+    """
+    n, n_src = _pick(
+        pat, "corrected_trade_count", "raw_realized_trade_count",
+        fallback_src="raw_realized",
+    )
+    wr, wr_src = _pick(
+        pat, "corrected_win_rate", "raw_realized_win_rate",
+        fallback_src="raw_realized",
+    )
+    ret, ret_src = _pick(
+        pat, "corrected_avg_return_pct", "raw_realized_avg_return_pct",
+        fallback_src="raw_realized",
+    )
+    return _sanitize(n, wr, ret, n_src, wr_src, ret_src)
+
+
+def _sanitize(
+    n: Any, wr: Any, ret: Any, n_src: str, wr_src: str, ret_src: str
+) -> CorrectedPatternStats:
     n_f = _finite_float(n)
     n_int = None
     if n_f is not None and n_f >= 0.0 and n_f == int(n_f):
