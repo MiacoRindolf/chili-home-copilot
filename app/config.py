@@ -4118,6 +4118,15 @@ class Settings(BaseSettings):
         default=120,
         validation_alias=AliasChoices("CHILI_COINBASE_TAKER_FEE_BPS_ROUND_TRIP"),
     )
+    # Round-trip MAKER fee for Coinbase. Used by the cost-aware gate instead of
+    # the taker fee when chili_coinbase_maker_only_enabled is set, because
+    # entries route strictly post-only (maker) and never pay taker. Default
+    # 80bps = 40bps/side (Tier-1 Advanced Trade maker), ~2/3 of the 120bps taker
+    # round-trip; lower at higher volume tiers.
+    chili_coinbase_maker_fee_bps_round_trip: int = Field(
+        default=80,
+        validation_alias=AliasChoices("CHILI_COINBASE_MAKER_FEE_BPS_ROUND_TRIP"),
+    )
     # Cushion above the raw fee floor — covers spread + slippage
     # plus a small margin for execution drift. 30bps is conservative
     # for Tier 1 retail; tighter at higher tiers.
