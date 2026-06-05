@@ -40,9 +40,13 @@ class ChatMessageBubble extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     final bgColor = isUser
         ? userColor
         : (isSystem ? systemColor : assistantColor);
+    // Batch C1/C2 — non-user bubbles sit on a theme surface, so their text uses
+    // onSurface (was hardcoded Colors.black87 → invisible/jarring in dark mode).
+    final onBubble = cs.onSurface;
 
     final images = imagePaths;
     final hasImages = images != null && images.isNotEmpty;
@@ -54,7 +58,7 @@ class ChatMessageBubble extends StatelessWidget {
         style: TextStyle(
           fontSize: fontSize,
           height: isUser ? 1.4 : null,
-          color: isUser ? Colors.white : Colors.black87,
+          color: isUser ? Colors.white : onBubble,
         ),
       );
     } else {
@@ -70,21 +74,21 @@ class ChatMessageBubble extends StatelessWidget {
           p: TextStyle(
             fontSize: fontSize,
             height: 1.4,
-            color: Colors.black87,
+            color: onBubble,
           ),
           strong: TextStyle(
             fontSize: fontSize,
             fontWeight: FontWeight.bold,
-            color: Colors.black87,
+            color: onBubble,
           ),
           code: TextStyle(
             fontSize: fontSize - 1,
-            backgroundColor: Colors.grey.shade200,
-            color: Colors.black87,
+            backgroundColor: cs.surfaceContainerHighest,
+            color: onBubble,
           ),
           listBullet: TextStyle(
             fontSize: fontSize,
-            color: Colors.black87,
+            color: onBubble,
           ),
         ),
       );
@@ -168,11 +172,13 @@ class _BrokenImagePlaceholder extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    // Batch C5 — theme placeholder (was grey.shade300 / grey).
     return Container(
       width: 80,
       height: 60,
-      color: Colors.grey.shade300,
-      child: const Icon(Icons.broken_image, color: Colors.grey),
+      color: cs.surfaceContainerHighest,
+      child: Icon(Icons.broken_image, color: cs.onSurfaceVariant),
     );
   }
 }

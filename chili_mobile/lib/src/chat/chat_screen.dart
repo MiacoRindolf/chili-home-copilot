@@ -296,14 +296,17 @@ class _ChatScreenState extends State<ChatScreen> {
                           vertical: 8,
                         ),
                         decoration: BoxDecoration(
-                          color: Colors.white,
+                          // Batch C4 \u2014 theme surface (was Colors.white).
+                          color: Theme.of(context)
+                              .colorScheme
+                              .surfaceContainerHighest,
                           borderRadius: BorderRadius.circular(16),
                         ),
                         child: Text(
                           '$_streamingReply\u200B',
                           style: TextStyle(
                             fontSize: _chatFontSize,
-                            color: Colors.black87,
+                            color: Theme.of(context).colorScheme.onSurface,
                           ),
                         ),
                       ),
@@ -328,8 +331,11 @@ class _ChatScreenState extends State<ChatScreen> {
                       borderRadius: BorderRadius.circular(16),
                       maxWidth: null,
                       userColor: Theme.of(context).colorScheme.primary,
-                      assistantColor: Colors.white,
-                      systemColor: Colors.amber.shade100,
+                      // Batch C3 — assistant bubble on a theme surface (was
+                      // Colors.white → wrong in dark mode).
+                      assistantColor:
+                          Theme.of(context).colorScheme.surfaceContainerHighest,
+                      systemColor: Colors.amber.withValues(alpha: 0.18),
                       imagePaths: m.imagePaths,
                     ),
                   );
