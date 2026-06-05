@@ -5702,6 +5702,24 @@ def update_pattern_stats_from_closed_trades(db: Session, user_id: int | None) ->
     backfill_mode = _evidence_correction_first_run(db)
 
     cutoff = datetime.utcnow() - timedelta(days=180)
+    # f-realized-ev-exit-cleanliness (2026-06-05): exclude dirty reconcile /
+    # sync-gone / position-gone placeholder exits from the canonical corrected-EV
+    # evidence, matching clean_live_pattern_ev_exit_filter_sql which the raw-stats
+    # writer (realized_stats_sync) ALREADY applies. This writer was the ONLY one
+    # not cleaning, so the corrected_* stats the realized-EV gate reads were
+    # polluted: e.g. pattern 1246's -0.14% "net-loser" verdict came entirely from
+    # 7 position_sync_gone / broker_reconcile rows whose real broker fills were ALL
+    # POSITIVE (+1.75..+17.03%) -> a FALSE net-loser block of a genuine winner.
+    from sqlalchemy import func as _sa_func
+    from .realized_pnl_sql import (
+        LIVE_PATTERN_EV_LOW_CONFIDENCE_EXIT_REASONS as _DIRTY_EXIT_REASONS,
+        LIVE_PATTERN_EV_LOW_CONFIDENCE_EXIT_TOKENS as _DIRTY_EXIT_TOKENS,
+    )
+    _clean_reason = _sa_func.lower(_sa_func.btrim(_sa_func.coalesce(Trade.exit_reason, "")))
+    _clean_exit_conds = [
+        _clean_reason != "",
+        _clean_reason.notin_(sorted(_DIRTY_EXIT_REASONS)),
+    ] + [_clean_reason.notlike(f"%{_t}%") for _t in sorted(_DIRTY_EXIT_TOKENS)]
     try:
         # f-add-paper-shadow-mode (2026-05-06): this function reads ONLY
         # the live ``Trade`` table; ``PaperTrade`` (which is where
@@ -5736,6 +5754,7 @@ def update_pattern_stats_from_closed_trades(db: Session, user_id: int | None) ->
                 Trade.entry_date.isnot(None),
                 Trade.exit_date.isnot(None),
                 Trade.exit_date >= cutoff,
+                *_clean_exit_conds,
             )
         )
         if user_id is not None:
