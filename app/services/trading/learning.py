@@ -11337,20 +11337,24 @@ def run_scheduled_market_snapshots(db: Session, user_id: int | None) -> dict[str
         f"{CHILI_BRAIN_IO} scheduled_market_snapshots_start universe_build=1 snapshot_workers=%s",
         _sw,
     )
-    top_tickers, _drv = build_snapshot_ticker_universe(db, user_id)
+    full_universe, _drv = build_snapshot_ticker_universe(db, user_id)
     max_tickers = max(
         1,
         int(getattr(_snap_sched_settings, "brain_scheduled_snapshot_max_tickers", 120)),
     )
-    if max_tickers > 0:
-        top_tickers = top_tickers[:max_tickers]
+    top_tickers = full_universe[:max_tickers] if max_tickers > 0 else list(full_universe)
     daily_count = take_snapshots_parallel(
         db,
         top_tickers,
         max_workers=_sw,
         bar_interval="1d",
     )
-    intra_count = _take_intraday_crypto_snapshots(db, top_tickers, max_workers=_sw)
+    # Intraday crypto snapshots draw from the FULL universe's crypto, not the
+    # equity-ranked top-N cap. During market hours the top-N holds 0 crypto, so
+    # the capped list stalled the crypto miner's fresh intraday supply
+    # (brain_market_snapshots logged daily=119 intra=0). _take_intraday_crypto_snapshots
+    # applies its own '-USD' filter + brain_intraday_max_tickers cap.
+    intra_count = _take_intraday_crypto_snapshots(db, full_universe, max_workers=_sw)
 
     vitals_refresh: dict[str, Any] = {}
     try:
