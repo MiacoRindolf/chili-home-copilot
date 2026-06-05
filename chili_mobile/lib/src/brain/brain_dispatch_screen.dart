@@ -1819,11 +1819,24 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                     },
               icon: const Icon(Icons.add, size: 18),
               label: const Text('New run'),
+              // Batch 14 — full-width, taller, prominent primary action.
+              style: FilledButton.styleFrom(
+                  minimumSize: const Size.fromHeight(40)),
             ),
           ),
           Expanded(
             child: _autonomyLoading
-                ? const Center(child: CircularProgressIndicator())
+                // Batch 15 — labeled loading state.
+                ? const Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        CircularProgressIndicator(),
+                        SizedBox(height: 12),
+                        Text('Loading runs…'),
+                      ],
+                    ),
+                  )
                 : _autonomyRuns.isEmpty
                     ? _emptyAutonomyState('No run history yet')
                     : ListView.builder(
@@ -1847,7 +1860,15 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final color = _autonomyStatusColor(status);
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
-      child: Material(
+      child: DecoratedBox(
+        // Batch 12 — clearer selection: tinted fill + colored border.
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(8),
+          border: selected
+              ? Border.all(color: color.withValues(alpha: 0.55))
+              : null,
+        ),
+        child: Material(
         color: selected
             ? _autonomyBubbleBackground(
                 Theme.of(context).colorScheme.primary,
@@ -1905,13 +1926,22 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                   ],
                 ),
                 const SizedBox(height: 6),
-                Text(
-                  _shortStamp(run['updated_at'] ?? run['created_at']),
-                  style: TextStyle(color: _mutedTextColor(), fontSize: 11),
+                // Batch 13 — relative "ago" timestamp with a clock icon.
+                Row(
+                  children: [
+                    Icon(Icons.schedule, size: 11, color: _mutedTextColor()),
+                    const SizedBox(width: 4),
+                    Text(
+                      _agoLabel(
+                          (run['updated_at'] ?? run['created_at'])?.toString()),
+                      style: TextStyle(color: _mutedTextColor(), fontSize: 11),
+                    ),
+                  ],
                 ),
               ],
             ),
           ),
+        ),
         ),
       ),
     );
@@ -2749,12 +2779,9 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   }
 
   Widget _emptyAutonomyState(String label) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Text(label, style: TextStyle(color: _mutedTextColor())),
-      ),
-    );
+    // Batch 11 — shared empty state upgraded to the AP-UX primitive (icon +
+    // typographic hierarchy); improves all six call sites at once.
+    return ApEmptyState(icon: Icons.forum_outlined, message: label);
   }
 
   IconData _autonomyStatusIcon(String status) {
