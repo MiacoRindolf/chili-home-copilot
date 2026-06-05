@@ -18,6 +18,18 @@ class Skill {
   bool get hasSteps => steps.isNotEmpty;
 }
 
+/// Case-insensitive filter over name + description + steps (SF-1). Empty → all.
+List<Skill> filterSkills(List<Skill> skills, String query) {
+  final String q = query.trim().toLowerCase();
+  if (q.isEmpty) return skills;
+  return skills
+      .where((Skill s) =>
+          s.name.toLowerCase().contains(q) ||
+          s.description.toLowerCase().contains(q) ||
+          s.steps.any((String st) => st.toLowerCase().contains(q)))
+      .toList();
+}
+
 List<Skill> parseSkills(List<Map<String, dynamic>> raw) => <Skill>[
       for (final Map<String, dynamic> s in raw)
         if (_str(s['name']).isNotEmpty) _skill(s),

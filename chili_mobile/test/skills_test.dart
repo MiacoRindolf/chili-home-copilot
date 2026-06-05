@@ -45,6 +45,22 @@ void main() {
     });
   });
 
+  group('filterSkills (SF-1)', () {
+    const List<Skill> skills = <Skill>[
+      Skill(name: 'Retry with backoff', description: 'transient errors',
+          steps: <String>['catch', 'retry'], savedAtMs: 0),
+      Skill(name: 'Cache lookups', description: 'speed', steps: <String>[],
+          savedAtMs: 0),
+    ];
+    test('empty → all; matches name / description / steps', () {
+      expect(filterSkills(skills, '').length, 2);
+      expect(filterSkills(skills, 'RETRY').single.name, 'Retry with backoff');
+      expect(filterSkills(skills, 'speed').single.name, 'Cache lookups');
+      expect(filterSkills(skills, 'catch').single.name, 'Retry with backoff');
+      expect(filterSkills(skills, 'zzz'), isEmpty);
+    });
+  });
+
   group('SkillsScreen widget', () {
     testWidgets('renders skills with steps', (WidgetTester tester) async {
       await tester.pumpWidget(MaterialApp(
@@ -71,6 +87,25 @@ void main() {
       ));
       await tester.pumpAndSettle();
       expect(find.text('No skills learned yet'), findsOneWidget);
+    });
+
+    testWidgets('SF-1: search filters the skill list', (WidgetTester tester) async {
+      await tester.pumpWidget(MaterialApp(
+        home: SkillsScreen(
+          fetcher: () async => <Map<String, dynamic>>[
+            <String, dynamic>{'name': 'Retry with backoff'},
+            <String, dynamic>{'name': 'Cache lookups'},
+          ],
+        ),
+      ));
+      await tester.pumpAndSettle();
+      expect(find.text('Retry with backoff'), findsOneWidget);
+      expect(find.text('Cache lookups'), findsOneWidget);
+
+      await tester.enterText(find.byType(TextField).first, 'cache');
+      await tester.pump();
+      expect(find.text('Cache lookups'), findsOneWidget);
+      expect(find.text('Retry with backoff'), findsNothing);
     });
   });
 }

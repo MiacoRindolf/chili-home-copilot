@@ -60,6 +60,19 @@ void main() {
     });
   });
 
+  group('filterResearchTopics (SF-1)', () {
+    const List<ResearchTopic> topics = <ResearchTopic>[
+      ResearchTopic(topic: 'Rate cuts', summary: 'Fed easing', relevance: 0.9),
+      ResearchTopic(topic: 'AI chips', summary: 'GPU demand', relevance: 0.8),
+    ];
+    test('empty query returns all; matches topic or summary', () {
+      expect(filterResearchTopics(topics, '').length, 2);
+      expect(filterResearchTopics(topics, 'RATE').single.topic, 'Rate cuts');
+      expect(filterResearchTopics(topics, 'gpu').single.topic, 'AI chips');
+      expect(filterResearchTopics(topics, 'zzz'), isEmpty);
+    });
+  });
+
   group('ResearchScreen widget', () {
     testWidgets('renders topics from an injected digest + Open report enabled',
         (WidgetTester tester) async {
@@ -165,6 +178,34 @@ void main() {
       await tester.tap(find.byTooltip('Discuss in Chat'));
       await tester.pump();
       expect(discussed, 'Quantum');
+    });
+
+    testWidgets('SF-1: typing filters topics; no-match offers research',
+        (WidgetTester tester) async {
+      await tester.pumpWidget(MaterialApp(
+        home: ResearchScreen(
+          fetcher: () async => <String, dynamic>{
+            'topics': <Map<String, dynamic>>[
+              <String, dynamic>{'topic': 'Quantum', 'summary': 's'},
+              <String, dynamic>{'topic': 'Bitcoin', 'summary': 's'},
+            ],
+          },
+          reportOpener: () async => false,
+          runner: (String _) async => const <String, dynamic>{},
+        ),
+      ));
+      await tester.pumpAndSettle();
+      expect(find.text('Quantum'), findsOneWidget);
+      expect(find.text('Bitcoin'), findsOneWidget);
+
+      await tester.enterText(find.byType(TextField).first, 'quan');
+      await tester.pump();
+      expect(find.text('Quantum'), findsOneWidget);
+      expect(find.text('Bitcoin'), findsNothing);
+
+      await tester.enterText(find.byType(TextField).first, 'zzzz');
+      await tester.pump();
+      expect(find.textContaining('No topics match'), findsOneWidget);
     });
   });
 }
