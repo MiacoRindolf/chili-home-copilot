@@ -19,6 +19,7 @@ import '../network/chili_api_client.dart';
 import '../notifications/notification_center.dart';
 import '../notifications/notification_panel.dart';
 import '../research/research_screen.dart';
+import '../skills/skills_screen.dart';
 import '../realtime/live_channel.dart';
 import '../realtime/live_sources.dart';
 import '../realtime/live_status.dart';
@@ -145,6 +146,12 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
       'MCP Tools',
       Icons.hub_outlined,
       () => const McpScreen(),
+      size: const Size(820, 620),
+    ),
+    'skills': _AppDef(
+      'Skills',
+      Icons.school_outlined,
+      () => const SkillsScreen(),
       size: const Size(820, 620),
     ),
   };

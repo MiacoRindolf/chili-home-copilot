@@ -1644,6 +1644,24 @@ def mcp_status():
     })
 
 
+@router.get("/api/brain/teacher/skills")
+def teacher_skills(limit: int = 50):
+    """Read-only listing of teacher-written reusable skills (Odysseus salvage).
+
+    The teacher-escalation loop distills a portable skill from a failed trace
+    when a strong "teacher" model recovers, and persists it to a bounded JSONL
+    store. This surfaces them for the desktop Skills viewer. No DB, no LLM calls.
+    """
+    from ..teacher_escalation import FileSkillStore
+
+    try:
+        capped = max(1, min(int(limit), 200))
+        skills = FileSkillStore().list(limit=capped)
+    except Exception:  # pragma: no cover - defensive
+        skills = []
+    return JSONResponse({"ok": True, "count": len(skills), "skills": skills})
+
+
 @router.get("/api/brain/trading/brief", response_class=HTMLResponse)
 def trading_brief_report(
     request: Request,
