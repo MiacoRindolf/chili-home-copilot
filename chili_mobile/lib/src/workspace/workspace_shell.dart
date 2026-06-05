@@ -71,6 +71,9 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
   final NotificationCenter _notifications = NotificationCenter();
   bool _notifOpen = false;
   LiveStatus _prevConn = LiveStatus.idle;
+
+  // UK-2 — inbox for ⌘K "Ask CHILI"; Chat consumes a non-null query and sends it.
+  final ValueNotifier<String?> _chatAsk = ValueNotifier<String?>(null);
   Timer? _saveTimer; // debounces session saves
   bool _restoring = false; // true while replaying a saved session
 
@@ -113,6 +116,7 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
       () => ChatScreen(
         sharedHistory: widget.sharedHistory,
         focusController: widget.focusController,
+        askPrompt: _chatAsk,
       ),
     ),
     'intercom': _AppDef('Intercom', Icons.mic, () => const IntercomScreen()),
@@ -173,6 +177,7 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
     _agentChannel.removeListener(_onAgentChannel);
     _agentChannel.dispose();
     _notifications.dispose();
+    _chatAsk.dispose();
     _ws.removeListener(_scheduleSave);
     _agents.removeListener(_scheduleAgentSave);
     _ws.dispose();
@@ -327,6 +332,13 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
         ...workspaceActionCommands(),
       ];
 
+  /// ⌘K "Ask CHILI: <query>" — open Chat and send the typed query (UK-2).
+  void _onAsk(String query) {
+    setState(() => _paletteOpen = false);
+    _chatAsk.value = query; // staged first; Chat consumes on build or via listener
+    _openApp('chat');
+  }
+
   void _onPaletteOpen(String id) {
     setState(() => _paletteOpen = false);
     final String? agentId = parseAgentToggleId(id);
@@ -387,6 +399,7 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
                 WorkspacePalette(
                   items: _paletteItems,
                   onOpen: _onPaletteOpen,
+                  onAsk: _onAsk,
                   onClose: () => setState(() => _paletteOpen = false),
                 ),
               if (_notifOpen)

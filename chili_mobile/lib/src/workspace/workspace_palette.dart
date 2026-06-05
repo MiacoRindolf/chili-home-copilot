@@ -31,11 +31,16 @@ class WorkspacePalette extends StatefulWidget {
   final void Function(String id) onOpen;
   final VoidCallback onClose;
 
+  /// When provided, a non-empty query surfaces an "Ask CHILI: <query>" entry
+  /// that sends the typed text to Chat (UK-2).
+  final void Function(String query)? onAsk;
+
   const WorkspacePalette({
     super.key,
     required this.items,
     required this.onOpen,
     required this.onClose,
+    this.onAsk,
   });
 
   @override
@@ -48,9 +53,16 @@ class _WorkspacePaletteState extends State<WorkspacePalette> {
 
   List<PaletteItem> get _filtered => paletteFilter(widget.items, _query);
 
+  bool get _showAsk => widget.onAsk != null && _query.trim().isNotEmpty;
+
+  /// Enter: open the top app match if any, else ask CHILI the typed query.
   void _openTop() {
     final List<PaletteItem> f = _filtered;
-    if (f.isNotEmpty) widget.onOpen(f.first.id);
+    if (f.isNotEmpty) {
+      widget.onOpen(f.first.id);
+    } else if (_showAsk) {
+      widget.onAsk!(_query.trim());
+    }
   }
 
   @override
@@ -100,24 +112,31 @@ class _WorkspacePaletteState extends State<WorkspacePalette> {
                     ),
                     Divider(height: 1, color: cs.outlineVariant),
                     Flexible(
-                      child: items.isEmpty
+                      child: (items.isEmpty && !_showAsk)
                           ? const Padding(
                               padding: EdgeInsets.all(20),
                               child: Text('No matches.'),
                             )
-                          : ListView.builder(
+                          : ListView(
                               shrinkWrap: true,
                               padding: const EdgeInsets.symmetric(vertical: 4),
-                              itemCount: items.length,
-                              itemBuilder: (BuildContext context, int i) {
-                                final PaletteItem it = items[i];
-                                return ListTile(
-                                  dense: true,
-                                  leading: Icon(it.icon, color: cs.primary),
-                                  title: Text(it.title),
-                                  onTap: () => widget.onOpen(it.id),
-                                );
-                              },
+                              children: <Widget>[
+                                for (final PaletteItem it in items)
+                                  ListTile(
+                                    dense: true,
+                                    leading: Icon(it.icon, color: cs.primary),
+                                    title: Text(it.title),
+                                    onTap: () => widget.onOpen(it.id),
+                                  ),
+                                if (_showAsk)
+                                  ListTile(
+                                    dense: true,
+                                    leading:
+                                        Icon(Icons.auto_awesome, color: cs.primary),
+                                    title: Text('Ask CHILI: “${_query.trim()}”'),
+                                    onTap: () => widget.onAsk!(_query.trim()),
+                                  ),
+                              ],
                             ),
                     ),
                   ],
