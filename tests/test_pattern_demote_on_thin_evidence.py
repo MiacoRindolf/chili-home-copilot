@@ -47,8 +47,15 @@ def _stub_promoted_thin():
     return SimpleNamespace(
         id=585,
         lifecycle_stage="promoted",
+        # Predicate reads REALIZED-only (corrected_* -> raw_realized_*), not legacy.
         trade_count=30,
         win_rate=0.25,
+        corrected_trade_count=30,
+        corrected_win_rate=0.25,
+        corrected_avg_return_pct=None,
+        raw_realized_trade_count=None,
+        raw_realized_win_rate=None,
+        raw_realized_avg_return_pct=None,
         oos_win_rate=None,
         cpcv_median_sharpe=None,  # no CPCV → no Phase 1 escape
         promotion_gate_reasons=["provisional_small_paths"],
@@ -72,18 +79,18 @@ def test_trade_count_at_or_above_min_excludes():
     is below the post-Phase-1 floor (30) → predicate returns False
     (protected), same outcome as the pre-Phase-1 assertion."""
     p = _stub_promoted_thin()
-    p.trade_count = THIN_EVIDENCE_MIN_TRADES  # 10 (deprecated constant)
+    p.corrected_trade_count = THIN_EVIDENCE_MIN_TRADES  # 10 (deprecated constant)
     assert _matches_thin_evidence_criteria(p) is False
-    p.trade_count = THIN_EVIDENCE_MIN_TRADES + 1  # 11
+    p.corrected_trade_count = THIN_EVIDENCE_MIN_TRADES + 1  # 11
     assert _matches_thin_evidence_criteria(p) is False
 
 
 def test_win_rate_at_or_above_floor_excludes():
     """win_rate >= 0.33 (the brief's `< 0.33` floor)."""
     p = _stub_promoted_thin()
-    p.win_rate = THIN_EVIDENCE_WIN_RATE_FLOOR  # exactly 0.33
+    p.corrected_win_rate = THIN_EVIDENCE_WIN_RATE_FLOOR  # exactly 0.33
     assert _matches_thin_evidence_criteria(p) is False
-    p.win_rate = 0.50
+    p.corrected_win_rate = 0.50
     assert _matches_thin_evidence_criteria(p) is False
 
 
@@ -91,7 +98,7 @@ def test_win_rate_none_excludes():
     """No win-rate signal => no demote (sample is too thin to even
     score)."""
     p = _stub_promoted_thin()
-    p.win_rate = None
+    p.corrected_win_rate = None
     assert _matches_thin_evidence_criteria(p) is False
 
 
@@ -189,8 +196,11 @@ def _seed_scan_pattern(
         id=pid,
         name=name,
         lifecycle_stage=lifecycle_stage,
+        # Predicate reads REALIZED-only (corrected_* -> raw_realized_*), not legacy.
         trade_count=trade_count,
         win_rate=win_rate,
+        corrected_trade_count=trade_count,
+        corrected_win_rate=win_rate,
         oos_win_rate=oos_win_rate,
         promotion_gate_reasons=list(promotion_gate_reasons),
         promotion_status=promotion_status,

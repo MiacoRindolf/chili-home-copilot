@@ -139,3 +139,52 @@ def test_dirty_post_floor_exits_excluded(db):
     db.refresh(p)
     assert p.lifecycle_stage == "promoted"
     assert summary["kept_unrepresentative_clean_window"] == 1
+
+
+def test_null_frac_rows_excluded_from_n_no_crash(db):
+    # pnl=NaN passes the WHERE (NaN IS NOT NULL) but trade_return_fraction_sql -> NULL.
+    # count(frac) must exclude them so n=0 -> KEPT. Under the old count(*) these 6
+    # would be n=6 "representative" with avg_ret_pct=None -> spurious demote / format crash.
+    uid = _user(db, "nanf")
+    p = _promoted(db, "nanpat")
+    for i in range(6):
+        db.add(_trade(uid, p.id, pnl=float("nan"), exit_dt=POST + timedelta(days=i * 2)))
+    db.commit()
+    summary = _run(db)  # must not raise
+    db.refresh(p)
+    assert p.lifecycle_stage == "promoted"
+    assert summary["demoted_failing_gate"] == 0
+    assert summary["kept_unrepresentative_clean_window"] == 1
+
+
+def test_demote_reason_persisted_via_raw_sql(db):
+    # promotion_demote_reason is an UNMAPPED column (ORM assignment is discarded);
+    # it must be persisted via raw SQL.
+    from sqlalchemy import text
+    uid = _user(db, "reasonp")
+    p = _promoted(db, "reasonpat")
+    _seed(db, uid, p.id, pnls=[-3, -2, -4, -1, -5, -2], base_dt=POST, day_step=2)
+    _run(db)
+    db.refresh(p)
+    assert p.lifecycle_stage == "challenged"
+    row = db.execute(
+        text("SELECT promotion_demote_reason FROM scan_patterns WHERE id = :pid"),
+        {"pid": p.id},
+    ).first()
+    assert row is not None and row[0] is not None
+    assert "clean-window" in row[0]
+
+
+def test_thin_evidence_criteria_ignores_legacy_stats():
+    # The twin demotion predicate must read realized-only, not conflated legacy.
+    from types import SimpleNamespace
+    from app.services.trading.learning import _matches_thin_evidence_criteria
+    p = SimpleNamespace(
+        lifecycle_stage="promoted",
+        win_rate=0.1, trade_count=50,  # legacy (backtest) -- must be ignored
+        corrected_trade_count=None, corrected_win_rate=None, corrected_avg_return_pct=None,
+        raw_realized_trade_count=None, raw_realized_win_rate=None, raw_realized_avg_return_pct=None,
+        oos_win_rate=None, promotion_gate_reasons=[], cpcv_median_sharpe=None,
+    )
+    # No clean realized evidence -> realized n=0 < min_realized -> NOT thin-evidence-demote-eligible.
+    assert _matches_thin_evidence_criteria(p) is False

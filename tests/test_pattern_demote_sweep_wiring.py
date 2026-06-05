@@ -61,8 +61,11 @@ def _seed_scan_pattern(
         id=pid,
         name=name,
         lifecycle_stage=lifecycle_stage,
+        # Predicate reads REALIZED-only (corrected_* -> raw_realized_*), not legacy.
         trade_count=trade_count,
         win_rate=win_rate,
+        corrected_trade_count=trade_count,
+        corrected_win_rate=win_rate,
         oos_win_rate=oos_win_rate,
         promotion_gate_reasons=list(promotion_gate_reasons),
         promotion_status=promotion_status,

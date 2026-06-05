@@ -62,8 +62,17 @@ def _stub_thin_evidence(
     return SimpleNamespace(
         id=585,
         lifecycle_stage="promoted",
+        # The predicate now reads REALIZED-only stats (corrected_* -> raw_realized_*),
+        # not the conflated legacy trade_count/win_rate. Seed the clean realized
+        # columns with the intended realized values.
         trade_count=trade_count,
         win_rate=win_rate,
+        corrected_trade_count=trade_count,
+        corrected_win_rate=win_rate,
+        corrected_avg_return_pct=None,
+        raw_realized_trade_count=None,
+        raw_realized_win_rate=None,
+        raw_realized_avg_return_pct=None,
         oos_win_rate=oos_win_rate,
         cpcv_median_sharpe=cpcv_median_sharpe,
         promotion_gate_reasons=list(promotion_gate_reasons),
