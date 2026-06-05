@@ -1680,6 +1680,49 @@ def _compute_indicators(df: pd.DataFrame, *, crypto: bool = False) -> dict[str, 
         elif result["atr"] >= float(atr50.quantile(0.75)):
             result["atr_state"] = "expanding"
 
+    # Expanded vocabulary: volume-flow, alt-momentum, volatility-squeeze. Computed
+    # via indicator_core helpers so scan-time values match compute_all_from_df
+    # (the entry surface) by construction. These auto-flow to flat_indicators
+    # (_copy_scalar_indicator_fields) so the miner can discover patterns on them.
+    # Excluded from the feature-parity catalog (like Fibonacci/FVG) so they never
+    # gate live entries.
+    try:
+        from .indicator_core import (
+            compute_obv, compute_mfi, compute_vwap, compute_cci, compute_roc,
+            compute_keltner,
+        )
+
+        def _last(s: pd.Series) -> float | None:
+            try:
+                v = s.iloc[-1]
+                return float(v) if pd.notna(v) else None
+            except Exception:
+                return None
+
+        result["obv"] = _last(compute_obv(close, volume))
+        result["mfi"] = _last(compute_mfi(high, low, close, volume))
+        _vwap_last = _last(compute_vwap(high, low, close, volume))
+        result["vwap"] = _vwap_last
+        result["vwap_dist_pct"] = (
+            round((price - _vwap_last) / _vwap_last * 100.0, 4)
+            if _vwap_last not in (None, 0)
+            else None
+        )
+        result["cci"] = _last(compute_cci(high, low, close))
+        result["roc"] = _last(compute_roc(close))
+        _kc = compute_keltner(high, low, close)
+        result["keltner_upper"] = _last(_kc["upper"])
+        result["keltner_lower"] = _last(_kc["lower"])
+        result["keltner_mid"] = _last(_kc["mid"])
+        _ku, _kl = result["keltner_upper"], result["keltner_lower"]
+        _bu, _bl = result.get("bb_upper"), result.get("bb_lower")
+        result["ttm_squeeze"] = bool(
+            _bu is not None and _bl is not None and _ku is not None and _kl is not None
+            and _bu < _ku and _bl > _kl
+        )
+    except Exception:
+        logger.debug("[scanner] expanded-vocabulary indicators failed", exc_info=True)
+
     return result
 
 

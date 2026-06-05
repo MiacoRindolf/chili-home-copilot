@@ -127,6 +127,74 @@ def compute_swing_low(low: pd.Series, lookback: int = 5) -> pd.Series:
     return low.rolling(lookback * 2 + 1, center=True).min()
 
 
+def compute_obv(close: pd.Series, volume: pd.Series) -> pd.Series:
+    """On-Balance Volume — cumulative volume signed by price direction."""
+    try:
+        from ta.volume import OnBalanceVolumeIndicator
+        return OnBalanceVolumeIndicator(close, volume).on_balance_volume()
+    except Exception:
+        direction = np.sign(close.diff().fillna(0.0))
+        return (direction * volume).fillna(0.0).cumsum()
+
+
+def compute_mfi(high: pd.Series, low: pd.Series, close: pd.Series,
+                volume: pd.Series, window: int = 14) -> pd.Series:
+    """Money Flow Index — volume-weighted RSI in [0, 100]."""
+    try:
+        from ta.volume import MFIIndicator
+        return MFIIndicator(high, low, close, volume, window=window).money_flow_index()
+    except Exception:
+        tp = (high + low + close) / 3.0
+        mf = tp * volume
+        pos = mf.where(tp > tp.shift(1), 0.0).rolling(window).sum()
+        neg = mf.where(tp < tp.shift(1), 0.0).rolling(window).sum()
+        mfr = pos / neg.replace(0, np.nan)
+        return 100 - (100 / (1 + mfr))
+
+
+def compute_vwap(high: pd.Series, low: pd.Series, close: pd.Series,
+                 volume: pd.Series, window: int = 20) -> pd.Series:
+    """Rolling volume-weighted average price (session-agnostic proxy).
+
+    A true anchored VWAP needs a session boundary; for continuous (esp. 24/7
+    crypto) bars a rolling window is the cross-asset-consistent proxy.
+    """
+    tp = (high + low + close) / 3.0
+    pv = (tp * volume).rolling(window).sum()
+    vol = volume.rolling(window).sum().replace(0, np.nan)
+    return pv / vol
+
+
+def compute_cci(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 20) -> pd.Series:
+    """Commodity Channel Index — typical-price deviation from its mean."""
+    try:
+        from ta.trend import CCIIndicator
+        return CCIIndicator(high, low, close, window=window).cci()
+    except Exception:
+        tp = (high + low + close) / 3.0
+        sma = tp.rolling(window).mean()
+        mad = (tp - sma).abs().rolling(window).mean()
+        return (tp - sma) / (0.015 * mad.replace(0, np.nan))
+
+
+def compute_roc(close: pd.Series, window: int = 10) -> pd.Series:
+    """Rate of change — percent momentum over *window* bars."""
+    try:
+        from ta.momentum import ROCIndicator
+        return ROCIndicator(close, window=window).roc()
+    except Exception:
+        return (close / close.shift(window).replace(0, np.nan) - 1.0) * 100.0
+
+
+def compute_keltner(high: pd.Series, low: pd.Series, close: pd.Series,
+                    ema_window: int = 20, atr_window: int = 10,
+                    mult: float = 1.5) -> dict[str, pd.Series]:
+    """Keltner channels (EMA mid +/- mult*ATR). Returns upper/lower/mid."""
+    mid = close.ewm(span=ema_window, adjust=False).mean()
+    atr = compute_atr(high, low, close, window=atr_window)
+    return {"upper": mid + mult * atr, "lower": mid - mult * atr, "mid": mid}
+
+
 def compute_all_from_df(
     df: pd.DataFrame,
     needed: set[str] | None = None,
@@ -201,6 +269,49 @@ def compute_all_from_df(
 
     if compute_all or "gap_pct" in needed:
         result["gap_pct"] = _safe(compute_gap_pct(df["Open"].astype(float), close))
+
+    # ── Volume-flow indicators ────────────────────────────────────────
+    if compute_all or "obv" in needed:
+        result["obv"] = _safe(compute_obv(close, volume))
+
+    if compute_all or "mfi" in needed:
+        result["mfi"] = _safe(compute_mfi(high, low, close, volume))
+
+    if compute_all or "vwap" in needed or "vwap_dist_pct" in needed:
+        _vwap = compute_vwap(high, low, close, volume)
+        result["vwap"] = _safe(_vwap)
+        result["vwap_dist_pct"] = _safe((close - _vwap) / _vwap.replace(0, np.nan) * 100.0)
+
+    # ── Alt momentum / mean-reversion ─────────────────────────────────
+    if compute_all or "cci" in needed:
+        result["cci"] = _safe(compute_cci(high, low, close))
+
+    if compute_all or "roc" in needed:
+        result["roc"] = _safe(compute_roc(close))
+
+    # ── Volatility squeeze (breakout precursor) ───────────────────────
+    if compute_all or any(
+        k in needed for k in ("keltner_upper", "keltner_lower", "keltner_mid", "ttm_squeeze")
+    ):
+        _kc = compute_keltner(high, low, close)
+        result["keltner_upper"] = _safe(_kc["upper"])
+        result["keltner_lower"] = _safe(_kc["lower"])
+        result["keltner_mid"] = _safe(_kc["mid"])
+        # TTM squeeze: Bollinger inside Keltner = volatility compression coiling
+        # for a breakout. True iff both BB bands sit inside the Keltner channel.
+        _bb_u = result.get("bb_upper")
+        _bb_l = result.get("bb_lower")
+        if _bb_u is None or _bb_l is None:
+            _bb = compute_bollinger(close)
+            _bb_u = _safe(_bb["upper"])
+            _bb_l = _safe(_bb["lower"])
+        result["ttm_squeeze"] = [
+            (bu is not None and bl is not None and ku is not None and kl is not None
+             and bu < ku and bl > kl)
+            for bu, bl, ku, kl in zip(
+                _bb_u, _bb_l, result["keltner_upper"], result["keltner_lower"]
+            )
+        ]
 
     # ── Derived boolean indicators ────────────────────────────────────
     _EMA_STACK_KEYS = {"ema_stack"}
