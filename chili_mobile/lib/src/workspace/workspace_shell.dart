@@ -10,6 +10,7 @@ import '../agents/agent_status_service.dart';
 import '../agents/agents_screen.dart';
 import '../brain/brain_dispatch_screen.dart';
 import '../chat/chat_screen.dart';
+import '../cockpit/cockpit_screen.dart';
 import '../companion/shared_chat_history.dart';
 import '../dashboard/dashboard_screen.dart';
 import '../intercom/intercom_screen.dart';
@@ -91,6 +92,12 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
 
   late final Map<String, _AppDef> _apps = <String, _AppDef>{
     'dashboard': _AppDef('Dashboard', Icons.dashboard, () => const DashboardScreen()),
+    'cockpit': _AppDef(
+      'Cockpit',
+      Icons.candlestick_chart,
+      () => const CockpitScreen(),
+      size: const Size(900, 640),
+    ),
     'chat': _AppDef(
       'Chat',
       Icons.chat,
