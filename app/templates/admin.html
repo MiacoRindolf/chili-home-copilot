@@ -295,6 +295,14 @@
     </div>
   </div>
 
+  <div class="card">
+    <div class="card-header">
+      <h2>LLM Cost &mdash; per purpose (24h)</h2>
+      <span class="refresh-dot"></span>
+    </div>
+    <div id="llm-cost-panel"></div>
+  </div>
+
   <div class="grid-2">
     <div class="card">
       <div class="card-header"><h2>Messages (14 days)</h2></div>
@@ -479,6 +487,39 @@ function renderPerf(){
   }).join('');
 }
 
+function _escCost(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c];});}
+
+// LLM cost per purpose (24h) — consumes main's existing gateway observability
+// (llm_gateway_log via GET /api/brain/context/gateway/summary). No parallel system.
+function renderLlmCost(){
+  var el=document.getElementById('llm-cost-panel'); if(!el) return;
+  fetch('/api/brain/context/gateway/summary').then(function(r){return r.json();}).then(function(data){
+    var items=(data&&data.items)||[];
+    if(!items.length){ el.innerHTML='<span style="color:var(--text-muted);font-size:.88rem;">No gateway-logged LLM calls in the last 24h.</span>'; return; }
+    var total=items.reduce(function(s,r){return s+(r.total_premium_usd||0);},0);
+    var calls=items.reduce(function(s,r){return s+(r.calls||0);},0);
+    var head='<div class="perf-grid" style="margin-bottom:12px;">'+
+      '<div class="perf-item"><div class="perf-value">$'+total.toFixed(4)+'</div><div class="perf-label">24h Premium Spend</div></div>'+
+      '<div class="perf-item"><div class="perf-value">'+calls+'</div><div class="perf-label">Gateway Calls</div></div>'+
+      '<div class="perf-item"><div class="perf-value">'+items.length+'</div><div class="perf-label">Purposes</div></div>'+
+      '</div>';
+    var rows=items.map(function(r){
+      var pct=total>0?Math.round((r.total_premium_usd||0)/total*100):0;
+      return '<tr><td>'+_escCost(r.purpose)+'</td>'+
+        '<td style="text-align:right;">'+(r.calls||0)+'</td>'+
+        '<td style="text-align:right;">'+Math.round((r.success_rate||0)*100)+'%</td>'+
+        '<td style="text-align:right;">$'+(r.total_premium_usd||0).toFixed(4)+'</td>'+
+        '<td style="text-align:right;color:var(--text-muted);">'+pct+'%</td>'+
+        '<td style="text-align:right;color:var(--text-muted);">'+(r.avg_latency_ms||0)+'ms</td></tr>';
+    }).join('');
+    el.innerHTML=head+'<table class="activity-table" style="width:100%;font-size:.85rem;"><thead><tr>'+
+      '<th style="text-align:left;">Purpose</th><th style="text-align:right;">Calls</th>'+
+      '<th style="text-align:right;">Success</th><th style="text-align:right;">Cost</th>'+
+      '<th style="text-align:right;">% Spend</th><th style="text-align:right;">Latency</th></tr></thead>'+
+      '<tbody>'+rows+'</tbody></table>';
+  }).catch(function(){ el.innerHTML='<span style="color:var(--text-muted);font-size:.88rem;">Gateway summary unavailable.</span>'; });
+}
+
 function renderFeatures(){
   var el=document.getElementById('feature-list'); if(!el) return;
   var f=D.features||{};
@@ -611,6 +652,7 @@ renderLeaderboard();
 renderChoreRates();
 renderRAG();
 renderDataSummary();
+renderLlmCost();
 initCharts();
 
 setInterval(function(){
@@ -619,6 +661,7 @@ setInterval(function(){
     renderFeatures(); renderConvoStats(); renderLeaderboard(); renderChoreRates();
     renderRAG(); renderDataSummary(); initCharts();
   }).catch(function(){});
+  renderLlmCost();
 }, 30000);
 
 var activityPage=0;
