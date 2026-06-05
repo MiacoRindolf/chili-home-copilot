@@ -2,10 +2,32 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:chili_mobile/src/cockpit/cockpit_screen.dart';
+import 'package:chili_mobile/src/cockpit/sparkline.dart';
 import 'package:chili_mobile/src/cockpit/trading_models.dart';
 import 'package:chili_mobile/src/notifications/notification_center.dart';
 
 void main() {
+  group('sparklinePoints (TC-2)', () {
+    test('maps a rising series across the box, inverting y', () {
+      final List<Offset> p =
+          sparklinePoints(<double>[0, 5, 10], const Size(100, 50));
+      expect(p.length, 3);
+      expect(p.first.dx, 0);
+      expect(p.last.dx, 100);
+      expect(p.first.dy, 50); // lowest value → bottom
+      expect(p.last.dy, 0); // highest value → top
+      expect(p[1].dy, closeTo(25, 1e-9)); // midpoint
+    });
+
+    test('flat series sits mid-height; <2 points → empty', () {
+      final List<Offset> flat =
+          sparklinePoints(<double>[7, 7, 7], const Size(60, 40));
+      expect(flat.every((Offset o) => o.dy == 20), isTrue);
+      expect(sparklinePoints(<double>[1], const Size(60, 40)), isEmpty);
+      expect(sparklinePoints(<double>[], const Size(60, 40)), isEmpty);
+    });
+  });
+
   group('buildTradingSnapshot', () {
     test('combines positions / portfolio / governance / risk', () {
       final TradingSnapshot s = buildTradingSnapshot(
