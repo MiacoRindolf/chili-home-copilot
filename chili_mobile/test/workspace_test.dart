@@ -259,6 +259,37 @@ void main() {
       await tester.pump();
       expect(opened, 'brain');
     });
+
+    testWidgets('UK-2: "Ask CHILI" appears and submitting a no-match query asks',
+        (WidgetTester tester) async {
+      String? asked;
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: Stack(
+            children: <Widget>[
+              WorkspacePalette(
+                items: items,
+                onOpen: (_) {},
+                onAsk: (String q) => asked = q,
+                onClose: () {},
+              ),
+            ],
+          ),
+        ),
+      ));
+      await tester.pump();
+
+      // A query that matches no app surfaces only the Ask entry.
+      await tester.enterText(find.byType(TextField), 'what is the vix');
+      await tester.pump();
+      expect(find.textContaining('Ask CHILI'), findsOneWidget);
+      expect(find.text('Dashboard'), findsNothing);
+
+      // Enter (no app match) → asks CHILI the typed query.
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+      expect(asked, 'what is the vix');
+    });
   });
 
   group('WorkspaceTaskbar', () {

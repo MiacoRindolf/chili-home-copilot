@@ -22,10 +22,14 @@ class ChatScreen extends StatefulWidget {
     super.key,
     required this.sharedHistory,
     required this.focusController,
+    this.askPrompt,
   });
 
   final SharedChatHistory sharedHistory;
   final FocusController focusController;
+
+  /// UK-2 — an inbox for ⌘K "Ask CHILI": when set, the typed query is sent.
+  final ValueNotifier<String?>? askPrompt;
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
@@ -54,11 +58,30 @@ class _ChatScreenState extends State<ChatScreen> {
     widget.sharedHistory.addListener(_onHistoryChanged);
     _chatFocusNode.addListener(_onChatFocusChange);
     _chatSender = ChatSendController(_client);
+    // UK-2 — consume a pending ⌘K ask (set before this screen mounted) and
+    // listen for new ones while it's open.
+    widget.askPrompt?.addListener(_consumeAsk);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _consumeAsk());
+  }
+
+  /// Send a query pushed into [ChatScreen.askPrompt] by ⌘K "Ask CHILI".
+  void _consumeAsk() {
+    final ValueNotifier<String?>? inbox = widget.askPrompt;
+    final String? q = inbox?.value;
+    if (q == null || q.trim().isEmpty) return;
+    inbox!.value = null; // consume (idempotent on re-entry)
+    if (!mounted || _isSending) {
+      _controller.text = q; // can't auto-send now — leave it staged
+      return;
+    }
+    _controller.text = q;
+    _sendMessage();
   }
 
   @override
   void dispose() {
     widget.sharedHistory.removeListener(_onHistoryChanged);
+    widget.askPrompt?.removeListener(_consumeAsk);
     _chatFocusNode.removeListener(_onChatFocusChange);
     _chatFocusNode.dispose();
     _controller.dispose();
