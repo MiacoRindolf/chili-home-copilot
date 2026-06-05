@@ -103,7 +103,7 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
     'cockpit': _AppDef(
       'Cockpit',
       Icons.candlestick_chart,
-      () => const CockpitScreen(),
+      () => CockpitScreen(notifications: _notifications),
       size: const Size(900, 640),
     ),
     'chat': _AppDef(

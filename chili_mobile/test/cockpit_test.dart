@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:chili_mobile/src/cockpit/cockpit_screen.dart';
 import 'package:chili_mobile/src/cockpit/trading_models.dart';
+import 'package:chili_mobile/src/notifications/notification_center.dart';
 
 void main() {
   group('buildTradingSnapshot', () {
@@ -139,6 +140,47 @@ void main() {
       expect(find.text('Kill switch off'), findsOneWidget);
       expect(find.text('Breaker ok'), findsOneWidget);
       expect(find.text('AAPL'), findsOneWidget);
+    });
+
+    testWidgets('NC-2: a kill-switch transition pushes a notification',
+        (WidgetTester tester) async {
+      final NotificationCenter nc = NotificationCenter();
+      int call = 0;
+      TradingSnapshot snap({required bool kill}) => TradingSnapshot(
+            totalEquity: 1000,
+            cash: 0,
+            buyingPower: 0,
+            dayPnl: 0,
+            totalPnl: 0,
+            realizedPnl: 0,
+            unrealizedPnl: 0,
+            killSwitchActive: kill,
+            killSwitchReason: kill ? 'manual halt' : '',
+            automationEnabled: true,
+            ensembleMode: '',
+            breakerTripped: false,
+            breakerReason: '',
+            totalHeatPct: 0,
+            positions: const <Position>[],
+          );
+
+      await tester.pumpWidget(MaterialApp(
+        home: CockpitScreen(
+          notifications: nc,
+          // 1st poll = baseline (off), subsequent polls = kill ON.
+          fetcher: () async => snap(kill: (call++) >= 1),
+        ),
+      ));
+      await tester.pumpAndSettle();
+      expect(nc.unreadCount, 0, reason: 'first snapshot is baseline, no alert');
+
+      // Advance past the 4s active poll interval → second snapshot (kill ON).
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pumpAndSettle();
+
+      expect(nc.unreadCount, greaterThanOrEqualTo(1));
+      expect(nc.items.first.title, 'Kill switch activated');
+      expect(nc.items.first.kind, NotifKind.error);
     });
   });
 }
