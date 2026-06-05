@@ -527,6 +527,88 @@ def _run_brain_market_snapshot_job():
     run_scheduler_job_guarded("brain_market_snapshots", _work)
 
 
+def _detect_work_ledger_stalls(
+    db, thr_min: int, min_pending: int
+) -> "list[tuple[str, int, int]]":
+    """Return ``[(event_type, overdue_pending, oldest_pending_min)]`` for work types
+    whose processor has gone SILENT — overdue pending work AND zero processing in the
+    threshold window — i.e. the owning worker is dead/absent. A live handler (recent
+    ``done``) is never returned, so benign starvation of old/superseded events does
+    NOT false-positive. Pure read; easy to unit-test."""
+    from sqlalchemy import text
+
+    rows = db.execute(
+        text(
+            """
+            SELECT event_type,
+                   count(*) FILTER (
+                       WHERE status='pending'
+                         AND next_run_at < now() - make_interval(mins => :thr)
+                   ) AS overdue_pending,
+                   count(*) FILTER (
+                       WHERE status='done'
+                         AND processed_at > now() - make_interval(mins => :thr)
+                   ) AS done_recent,
+                   count(*) FILTER (WHERE status='done') AS done_ever,
+                   round(extract(epoch FROM now() - min(next_run_at)
+                         FILTER (WHERE status='pending')) / 60.0)::int AS oldest_min
+            FROM brain_work_events
+            GROUP BY event_type
+            """
+        ),
+        {"thr": int(thr_min)},
+    ).fetchall()
+    return [
+        (str(r[0]), int(r[1] or 0), int(r[4] or 0))
+        for r in rows
+        # dead processor: a historically-real type with overdue pending but ZERO
+        # processing in the window.
+        if int(r[1] or 0) >= min_pending
+        and int(r[2] or 0) == 0
+        and int(r[3] or 0) > 10
+    ]
+
+
+def _run_work_ledger_stall_watchdog_job():
+    """Catch work-ledger processors that have gone silent (dead/absent) — the failure
+    mode that stalled the backtest pipeline for 46h unnoticed (a dedicated worker
+    died on a DB hiccup with no restart policy). Surfaces LOUD (logger.error) + a
+    LearningEvent so a stall is visible in minutes, not hours."""
+
+    def _work() -> None:
+        from ..db import SessionLocal
+        from ..config import settings
+        from .trading.learning_events import log_learning_event
+
+        thr = max(15, int(getattr(settings, "chili_work_ledger_stall_threshold_minutes", 120) or 120))
+        min_pending = max(1, int(getattr(settings, "chili_work_ledger_stall_min_pending", 5) or 5))
+        db = SessionLocal()
+        try:
+            stalls = _detect_work_ledger_stalls(db, thr, min_pending)
+            if stalls:
+                detail = "; ".join(f"{t}: overdue={n} oldest={age}min" for t, n, age in stalls)
+                logger.error(
+                    "[work_ledger_watchdog] STALL DETECTED — processor(s) SILENT "
+                    "(dead/absent) for >%dmin: %s — a pipeline stage is stalled; "
+                    "check the owning worker container",
+                    thr, detail,
+                )
+                try:
+                    log_learning_event(
+                        db, None, "work_ledger_stall",
+                        f"Work-ledger stall: {detail} (no processing in {thr}min). "
+                        "A dedicated worker may be dead/absent.",
+                    )
+                except Exception:
+                    logger.debug("[work_ledger_watchdog] LearningEvent emit failed", exc_info=True)
+            else:
+                logger.info("[work_ledger_watchdog] ok — all work-ledger processors live")
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("work_ledger_stall_watchdog", _work)
+
+
 def _run_paper_trade_check_job():
     """Check open paper trades for stop/target/expiry exits, plus live exit engine recommendations."""
 
@@ -4794,6 +4876,19 @@ def start_scheduler():
                 name="Momentum scanner (9:30-11AM ET every 15min)",
                 replace_existing=True,
                 max_instances=1,
+            )
+
+            # Reliability: detect a work-ledger processor going silent (dead/absent)
+            # within minutes instead of hours — the failure mode that stalled the
+            # backtest pipeline for 46h (a dedicated worker died with no restart policy).
+            _scheduler.add_job(
+                _run_work_ledger_stall_watchdog_job,
+                trigger=IntervalTrigger(minutes=15),
+                id="work_ledger_stall_watchdog",
+                name="Work-ledger stall watchdog (every 15min)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=90),
             )
 
             _scheduler.add_job(
