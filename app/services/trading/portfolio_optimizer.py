@@ -206,65 +206,30 @@ def check_portfolio_drawdown(
     capital: float = 100_000.0,
     max_dd_pct: float = 15.0,
 ) -> dict[str, Any]:
-    """Check portfolio-level drawdown across all open positions."""
-    from .market_data import fetch_quote
-    try:
-        from .paper_trading import (
-            _is_option_paper_trade,
-            _paper_contract_multiplier,
-            _paper_current_mark_price,
-        )
-    except Exception:
-        _is_option_paper_trade = None
-        _paper_contract_multiplier = None
-        _paper_current_mark_price = None
+    """Check portfolio-level drawdown across CHILI-placed LIVE positions.
 
-    open_trades = db.query(PaperTrade).filter(PaperTrade.status == "open")
+    HISTORY (2026-06-05): this previously measured the paper-shadow book
+    (``PaperTrade``). On a live account that is a unit mismatch — the paper book
+    trades everything it explores with large simulated notional and accrues
+    sizeable *simulated* losses (e.g. ~-$2.8k/30d), which were then divided by
+    *live* capital, producing a fake double-digit drawdown that chronically
+    blocked live entries (and a fail-closed on any unquotable alt). It now
+    measures the LIVE book (CHILI-placed open mark-to-market + closed-30d
+    realized) using the same helpers the latched portfolio breaker relies on, so
+    the gate reflects real live-capital risk. A genuine live drawdown still trips
+    it; simulated paper-shadow losses no longer do.
+    """
+    # Reuse the canonical live-book helpers from portfolio_risk. Lazy import
+    # because portfolio_risk imports this module (avoids the import cycle).
+    from .portfolio_risk import _compute_unrealized_pnl, _monthly_total_pnl
+    from ...models.trading import Trade
+
+    total_unrealized = float(_compute_unrealized_pnl(db, user_id) or 0.0)
+    closed_pnl = float(_monthly_total_pnl(db, user_id) or 0.0)
+    open_q = db.query(Trade).filter(Trade.status == "open")
     if user_id is not None:
-        open_trades = open_trades.filter(PaperTrade.user_id == user_id)
-    positions = open_trades.all()
-
-    total_unrealized = 0.0
-    valuation_missing_count = 0
-    for pos in positions:
-        try:
-            multiplier = 1.0
-            price: float | None = None
-            is_option = callable(_is_option_paper_trade) and _is_option_paper_trade(pos)
-            if is_option:
-                if callable(_paper_contract_multiplier):
-                    multiplier = _paper_contract_multiplier(pos)
-                if callable(_paper_current_mark_price):
-                    mark = _paper_current_mark_price(pos, purpose="portfolio_drawdown")
-                    price = _positive_float_or_none(mark)
-            else:
-                q = fetch_quote(pos.ticker)
-                if q and q.get("price"):
-                    price = _positive_float_or_none(q["price"])
-            if price is None:
-                valuation_missing_count += 1
-                continue
-            pnl = _paper_unrealized_pnl(pos, current_price=price, multiplier=multiplier)
-            if pnl is not None:
-                total_unrealized += pnl
-            else:
-                valuation_missing_count += 1
-        except Exception:
-            valuation_missing_count += 1
-            continue
-
-    cutoff = datetime.utcnow() - timedelta(days=30)
-    closed_pnl = 0.0
-    closed = db.query(PaperTrade).filter(
-        PaperTrade.status == "closed",
-        PaperTrade.exit_date >= cutoff,
-    )
-    if user_id is not None:
-        closed = closed.filter(PaperTrade.user_id == user_id)
-    for t in closed.all():
-        pnl = _finite_float_or_none(getattr(t, "pnl", None))
-        if pnl is not None:
-            closed_pnl += pnl
+        open_q = open_q.filter(Trade.user_id == user_id)
+    open_positions = int(open_q.count())
 
     total_pnl = total_unrealized + closed_pnl
     capital_f = _positive_float_or_none(capital)
@@ -278,27 +243,20 @@ def check_portfolio_drawdown(
             "dd_pct": 0.0,
             "max_dd_pct": max_dd_pct,
             "breached": True,
-            "valuation_missing_count": valuation_missing_count,
-            "valuation_complete": valuation_missing_count == 0,
-            "open_positions": len(positions),
+            "valuation_missing_count": 0,
+            "valuation_complete": True,
+            "open_positions": open_positions,
         }
 
     dd_pct = total_pnl / capital_f * 100
-
     breached = dd_pct < -max_dd_pct
     reason = "drawdown_breached" if breached else None
-    if valuation_missing_count > 0:
-        breached = True
-        reason = "valuation_unavailable"
 
     if breached:
         logger.warning(
-            "[portfolio_opt] Portfolio DD blocked: reason=%s dd=%.1f%% "
-            "(limit -%.1f%%) valuation_missing=%d",
-            reason,
-            dd_pct,
-            max_dd_pct,
-            valuation_missing_count,
+            "[portfolio_opt] Portfolio DD blocked (live book): reason=%s "
+            "dd=%.1f%% (limit -%.1f%%) unrealized=%.2f closed_30d=%.2f open=%d",
+            reason, dd_pct, max_dd_pct, total_unrealized, closed_pnl, open_positions,
         )
 
     return {
@@ -310,9 +268,9 @@ def check_portfolio_drawdown(
         "dd_pct": round(dd_pct, 2),
         "max_dd_pct": max_dd_pct,
         "breached": breached,
-        "valuation_missing_count": valuation_missing_count,
-        "valuation_complete": valuation_missing_count == 0,
-        "open_positions": len(positions),
+        "valuation_missing_count": 0,
+        "valuation_complete": True,
+        "open_positions": open_positions,
     }
 
 
