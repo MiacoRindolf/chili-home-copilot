@@ -194,3 +194,22 @@ def test_research_topic_now_blank_topic_returns_none(monkeypatch):
     monkeypatch.setattr(web_researcher.settings, "reasoning_enabled", True)
     assert web_researcher.research_topic_now(db, user_id=7, topic="   ") is None
     assert db.added == []
+
+
+def test_research_topic_now_forces_full_content_fetch(monkeypatch):
+    db = FakeDb()
+    captured = {}
+
+    def fake_search(topic, trace_id, *, fetch_content=None):
+        captured["fetch_content"] = fetch_content
+        return json.dumps(
+            [{"title": "VIX", "href": "https://x.com", "body": "The VIX measures volatility."}]
+        )
+
+    monkeypatch.setattr(web_researcher.settings, "reasoning_enabled", True)
+    monkeypatch.setattr(web_researcher, "_search_topic", fake_search)
+
+    data = web_researcher.research_topic_now(db, user_id=7, topic="vix")
+
+    assert data is not None
+    assert captured["fetch_content"] is True  # on-demand forces full-content

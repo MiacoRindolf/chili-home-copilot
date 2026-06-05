@@ -13,13 +13,16 @@ from ... import web_search as web_search_module
 from ... import openai_client
 
 
-def _search_topic(topic: str, trace_id: str) -> str:
+def _search_topic(topic: str, trace_id: str, *, fetch_content: bool | None = None) -> str:
     """Search via the web_search module and return JSON text.
 
-    Uses research_search so that, when settings.search_fetch_sources is enabled,
-    top results carry fetched full-page content for richer summarization.
+    Uses research_search so top results can carry fetched full-page content for
+    richer summarization. [fetch_content] overrides the global toggle (None =
+    follow settings.search_fetch_sources; True = force full-content fetch).
     """
-    result = web_search_module.research_search(topic, trace_id=trace_id)
+    result = web_search_module.research_search(
+        topic, trace_id=trace_id, fetch_content=fetch_content
+    )
     if isinstance(result, dict):
         return json.dumps(result, ensure_ascii=False)
     return str(result)
@@ -262,6 +265,10 @@ def research_topic_now(
     gateway only if the mechanical path yields nothing. Gated by the existing
     ``reasoning_enabled`` setting; bounded to one topic. Returns the stored
     ``{topic, summary, sources, relevance_score}`` or None.
+
+    On-demand research forces full-content fetch (``fetch_sources=True``) so a
+    user-initiated query gets the richer, full-article summary regardless of the
+    background cadence's global toggle.
     """
     if not settings.reasoning_enabled:
         return None
@@ -269,7 +276,7 @@ def research_topic_now(
     if not topic:
         return None
 
-    raw = _search_topic(topic, trace_id)
+    raw = _search_topic(topic, trace_id, fetch_content=True)
     if not raw:
         return None
 
