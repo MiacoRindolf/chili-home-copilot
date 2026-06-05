@@ -6,8 +6,49 @@ from datetime import datetime, timedelta
 from app.models.core import User
 from app.models.trading import AutoTraderRun
 from app.services.trading.autotrader_deployment_report import (
+    _recommended_actions,
     build_autotrader_deployment_report,
 )
+
+
+def test_actions_ignore_process_local_disabled_when_runs_exist():
+    # Served by a process whose config disables the autotrader (e.g. web), but runs
+    # exist -> must NOT claim disabled (process-local config is contradicted by activity).
+    funnel = {
+        "total_runs": 100,
+        "placement_rate_pct": 0.5,
+        "top_blockers": [{"reason": "non_positive_expected_edge", "decision": "skipped", "pct_of_total": 40.0}],
+    }
+    gates = {
+        "autotrader": {"enabled": False, "live_enabled": False},
+        "kill_switch": {"active": False},
+        "circuit_breaker": {"tripped": False},
+    }
+    actions = _recommended_actions(funnel, gates, {})
+    assert not any("disabled" in a.lower() for a in actions)
+    assert any("non_positive_expected_edge" in a for a in actions)
+
+
+def test_actions_flag_disabled_only_when_no_runs():
+    funnel = {"total_runs": 0, "top_blockers": []}
+    gates = {
+        "autotrader": {"enabled": False, "live_enabled": False},
+        "kill_switch": {"active": False},
+        "circuit_breaker": {"tripped": False},
+    }
+    actions = _recommended_actions(funnel, gates, {})
+    assert any("disabled" in a.lower() for a in actions)
+
+
+def test_actions_still_flag_kill_switch_regardless_of_runs():
+    funnel = {"total_runs": 500, "placement_rate_pct": 1.0, "top_blockers": []}
+    gates = {
+        "autotrader": {"enabled": True, "live_enabled": True},
+        "kill_switch": {"active": True, "reason": "manual"},
+        "circuit_breaker": {"tripped": False},
+    }
+    actions = _recommended_actions(funnel, gates, {})
+    assert any("Kill switch is ACTIVE" in a for a in actions)
 
 
 def _user(db, name):
