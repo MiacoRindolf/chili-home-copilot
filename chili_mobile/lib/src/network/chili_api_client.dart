@@ -1074,6 +1074,10 @@ class ChiliApiClient {
   Future<Map<String, dynamic>> getMcpStatus() =>
       _getMapSafe('/api/brain/mcp/status');
 
+  /// GET the flat list of policy-permitted MCP tools (read-only). MC-2.
+  Future<List<Map<String, dynamic>>> getMcpTools() =>
+      _getListSafe('/api/brain/mcp/tools', itemsKey: 'tools');
+
   /// GET teacher-written reusable skills (read-only). SK-1.
   Future<List<Map<String, dynamic>>> getTeacherSkills({int limit = 50}) =>
       _getListSafe('/api/brain/teacher/skills?limit=$limit', itemsKey: 'skills');

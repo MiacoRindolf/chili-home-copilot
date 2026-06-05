@@ -7,15 +7,20 @@ import 'mcp_models.dart';
 /// Fetches MCP status JSON — injectable for tests.
 typedef McpStatusFetcher = Future<Map<String, dynamic>> Function();
 
+/// Fetches the flat MCP tool list — injectable for tests (MC-2).
+typedef McpToolsFetcher = Future<List<Map<String, dynamic>>> Function();
+
 /// MCP Tools — surfaces CHILI's external Model-Context-Protocol tool servers
-/// (salvaged from Odysseus): which servers are configured, their live
-/// connection status, permitted vs. safety-blocked tool counts, and the
-/// allowlist/denylist policy. Read-only (MC-1).
+/// (salvaged from Odysseus): configured servers, live connection status, the
+/// permitted tools each exposes (MC-2), and the allowlist/denylist policy.
+/// Read-only.
 class McpScreen extends StatefulWidget {
-  const McpScreen({super.key, McpStatusFetcher? fetcher})
-      : _injectedFetcher = fetcher;
+  const McpScreen({super.key, McpStatusFetcher? fetcher, McpToolsFetcher? toolsFetcher})
+      : _injectedFetcher = fetcher,
+        _injectedToolsFetcher = toolsFetcher;
 
   final McpStatusFetcher? _injectedFetcher;
+  final McpToolsFetcher? _injectedToolsFetcher;
 
   @override
   State<McpScreen> createState() => _McpScreenState();
@@ -23,14 +28,21 @@ class McpScreen extends StatefulWidget {
 
 class _McpScreenState extends State<McpScreen> {
   late final McpStatusFetcher _fetcher;
+  late final McpToolsFetcher _toolsFetcher;
   McpStatus? _status;
+  Map<String, List<McpTool>> _tools = const <String, List<McpTool>>{};
   bool _loading = true;
   String? _error;
 
   @override
   void initState() {
     super.initState();
-    _fetcher = widget._injectedFetcher ?? ChiliApiClient().getMcpStatus;
+    final ChiliApiClient? api =
+        (widget._injectedFetcher == null || widget._injectedToolsFetcher == null)
+            ? ChiliApiClient()
+            : null;
+    _fetcher = widget._injectedFetcher ?? api!.getMcpStatus;
+    _toolsFetcher = widget._injectedToolsFetcher ?? api!.getMcpTools;
     _load();
   }
 
@@ -40,10 +52,15 @@ class _McpScreenState extends State<McpScreen> {
       _error = null;
     });
     try {
-      final Map<String, dynamic> json = await _fetcher();
+      final List<Object> r = await Future.wait(<Future<Object>>[
+        _fetcher(),
+        _toolsFetcher(),
+      ]);
       if (!mounted) return;
       setState(() {
-        _status = parseMcpStatus(json);
+        _status = parseMcpStatus(r[0] as Map<String, dynamic>);
+        _tools = groupToolsByServer(
+            parseMcpTools(r[1] as List<Map<String, dynamic>>));
         _loading = false;
       });
     } catch (e) {
@@ -217,6 +234,40 @@ class _McpScreenState extends State<McpScreen> {
             if (srv.error != null) ...<Widget>[
               const SizedBox(height: 8),
               Text(srv.error!, style: TextStyle(color: cs.error, fontSize: 12)),
+            ],
+            // MC-2 — live tools this server exposes (name + description).
+            if ((_tools[srv.id] ?? const <McpTool>[]).isNotEmpty) ...<Widget>[
+              const SizedBox(height: 12),
+              const ApSectionHeader('Tools', icon: Icons.build_outlined),
+              const SizedBox(height: 4),
+              for (final McpTool t in _tools[srv.id]!)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 3),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      Icon(Icons.bolt, size: 14, color: cs.secondary),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: <Widget>[
+                            Text(t.name,
+                                style: TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                    color: cs.onSurface)),
+                            if (t.description.isNotEmpty)
+                              Text(t.description,
+                                  style: TextStyle(
+                                      fontSize: 12,
+                                      color: cs.onSurfaceVariant)),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
             ],
             if (srv.allowedTools.isNotEmpty) ...<Widget>[
               const SizedBox(height: 12),

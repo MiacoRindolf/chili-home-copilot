@@ -1644,6 +1644,33 @@ def mcp_status():
     })
 
 
+@router.get("/api/brain/mcp/tools")
+def mcp_tools():
+    """Read-only flat list of policy-permitted MCP tools across connected servers.
+
+    Returns the tools the safety policy allows (the denylist is applied at
+    discovery, so dangerous tools never appear here). Empty when MCP is disabled
+    or no server is connected. Does NOT invoke anything.
+    """
+    from .. import mcp_client as mcpc
+
+    try:
+        raw = mcpc.mcp_client.list_tools()
+    except Exception:  # pragma: no cover - defensive
+        raw = []
+    tools = [
+        {
+            "server_id": t.get("server_id"),
+            "server_name": t.get("server_name"),
+            "name": t.get("name"),
+            "qualified_name": t.get("qualified_name"),
+            "description": t.get("description", ""),
+        }
+        for t in raw
+    ]
+    return JSONResponse({"ok": True, "count": len(tools), "tools": tools})
+
+
 class _ResearchRunReq(BaseModel):
     model_config = {"extra": "forbid"}
     topic: str
