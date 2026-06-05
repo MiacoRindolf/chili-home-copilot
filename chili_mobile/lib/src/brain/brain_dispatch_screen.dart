@@ -3208,14 +3208,27 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                     ],
                   ),
                   if (output.trim().isNotEmpty) ...[
-                    const SizedBox(height: 4),
-                    SelectableText(
-                      output.length > 600
-                          ? '${output.substring(0, 600)}...'
-                          : output,
-                      style: const TextStyle(
-                        fontFamily: 'monospace',
-                        fontSize: 12,
+                    const SizedBox(height: 6),
+                    // Batch 36 — console-style output block.
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: Theme.of(context)
+                            .colorScheme
+                            .surfaceContainerHighest
+                            .withValues(alpha: 0.6),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: SelectableText(
+                        output.length > 600
+                            ? '${output.substring(0, 600)}…'
+                            : output,
+                        style: const TextStyle(
+                          fontFamily: 'monospace',
+                          fontSize: 12,
+                          height: 1.3,
+                        ),
                       ),
                     ),
                   ],
@@ -3271,8 +3284,10 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                   children: [
                     Row(
                       children: [
+                        // Batch 38 — artifact icon coloured for quick scanning.
                         Icon(_autonomyArtifactIcon(type),
-                            size: 18, color: _mutedTextColor()),
+                            size: 18,
+                            color: Theme.of(context).colorScheme.secondary),
                         const SizedBox(width: 8),
                         Expanded(
                           child: Text(
@@ -3306,8 +3321,13 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                         path != null &&
                         File(path).existsSync()) ...[
                       const SizedBox(height: 8),
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(6),
+                      // Batch 40 — framed image preview.
+                      Container(
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(color: _autonomyDividerColor()),
+                        ),
+                        clipBehavior: Clip.antiAlias,
                         child: Image.file(
                           File(path),
                           height: 120,
@@ -3321,6 +3341,18 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
               ),
             );
           }),
+        // Batch 39 — surface what the take(18) cap hides (no silent truncation).
+        if (visible.length > 18)
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Text(
+              'Showing 18 of ${visible.length} artifacts',
+              style: TextStyle(
+                  color: _mutedTextColor(),
+                  fontSize: 11,
+                  fontStyle: FontStyle.italic),
+            ),
+          ),
       ],
     );
   }
@@ -3370,10 +3402,14 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
             final status = step['status']?.toString() ?? '';
             final agent = step['agent_name']?.toString() ?? '';
             final time = _shortStamp(step['created_at']);
+            // Batch 37 — timeline dot coloured by step status.
+            final dotColor = status.isNotEmpty
+                ? _autonomyStatusColor(status)
+                : _mutedTextColor();
             return ListTile(
               dense: true,
               contentPadding: EdgeInsets.zero,
-              leading: Icon(Icons.circle, size: 10, color: _mutedTextColor()),
+              leading: Icon(Icons.circle, size: 10, color: dotColor),
               title: Text(title, overflow: TextOverflow.ellipsis),
               subtitle: Wrap(
                 spacing: 6,
