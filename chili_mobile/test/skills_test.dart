@@ -89,6 +89,37 @@ void main() {
       expect(find.text('No skills learned yet'), findsOneWidget);
     });
 
+    testWidgets('RC-2: Discuss-in-Chat button fires onDiscuss with the skill name',
+        (WidgetTester tester) async {
+      String? discussed;
+      await tester.pumpWidget(MaterialApp(
+        home: SkillsScreen(
+          fetcher: () async => <Map<String, dynamic>>[
+            <String, dynamic>{'name': 'Retry with backoff'},
+          ],
+          onDiscuss: (String name) => discussed = name,
+        ),
+      ));
+      await tester.pumpAndSettle();
+      expect(find.text('Discuss in Chat'), findsOneWidget);
+      await tester.tap(find.text('Discuss in Chat'));
+      await tester.pump();
+      expect(discussed, 'Retry with backoff');
+    });
+
+    testWidgets('no Discuss button when onDiscuss is absent',
+        (WidgetTester tester) async {
+      await tester.pumpWidget(MaterialApp(
+        home: SkillsScreen(
+          fetcher: () async => <Map<String, dynamic>>[
+            <String, dynamic>{'name': 'Retry with backoff'},
+          ],
+        ),
+      ));
+      await tester.pumpAndSettle();
+      expect(find.text('Discuss in Chat'), findsNothing);
+    });
+
     testWidgets('SF-1: search filters the skill list', (WidgetTester tester) async {
       await tester.pumpWidget(MaterialApp(
         home: SkillsScreen(

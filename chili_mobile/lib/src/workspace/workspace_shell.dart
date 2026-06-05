@@ -155,7 +155,7 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
     'skills': _AppDef(
       'Skills',
       Icons.school_outlined,
-      () => const SkillsScreen(),
+      () => SkillsScreen(onDiscuss: _onDiscussSkill),
       size: const Size(820, 620),
     ),
   };
@@ -342,6 +342,12 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
   /// RC-1 — "Discuss" a research topic: open Chat asking about it (reuses UK-2).
   void _onDiscussTopic(String topic) {
     _chatAsk.value = 'Tell me more about: $topic';
+    _openApp('chat');
+  }
+
+  /// RC-2 — "Discuss" a learned skill: open Chat asking how/when to apply it.
+  void _onDiscussSkill(String skillName) {
+    _chatAsk.value = 'Explain this learned skill and when to apply it: $skillName';
     _openApp('chat');
   }
 
