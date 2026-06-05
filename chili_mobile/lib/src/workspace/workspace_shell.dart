@@ -14,6 +14,9 @@ import '../companion/shared_chat_history.dart';
 import '../dashboard/dashboard_screen.dart';
 import '../intercom/intercom_screen.dart';
 import '../network/chili_api_client.dart';
+import '../realtime/live_channel.dart';
+import '../realtime/live_sources.dart';
+import '../realtime/live_status.dart';
 import '../screen/focus_controller.dart';
 import '../settings/settings_screen.dart';
 import 'os_window.dart';
@@ -66,8 +69,19 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
   late final AgentStatusService _agentStatus =
       AgentStatusService(ChiliApiClient());
   Timer? _agentSaveTimer;
-  Timer? _agentPollTimer;
-  static const Duration _agentPollInterval = Duration(seconds: 25);
+
+  // RT-2 — agent status now flows through the real-time layer: one LiveChannel
+  // with adaptive cadence + backoff drives both the registry and the workspace
+  // connection indicator, replacing the bespoke 25s poll timer.
+  late final LiveChannel<Map<String, AgentLiveStatus>> _agentChannel =
+      LiveChannel<Map<String, AgentLiveStatus>>(
+    () => PollingLiveSource<Map<String, AgentLiveStatus>>(
+      _fetchAgentStatuses,
+      activeInterval: const Duration(seconds: 12),
+      idleInterval: const Duration(seconds: 25),
+    ),
+    dedupe: false,
+  );
 
   // Built app bodies are cached so a window keeps its State across rebuilds /
   // focus changes (and while minimized). Dropped when the window closes.
@@ -112,15 +126,16 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
     _ws.addListener(_scheduleSave);
     _restoreSession();
     _restoreAgents();
-    _pollAgents();
-    _agentPollTimer = Timer.periodic(_agentPollInterval, (_) => _pollAgents());
+    _agentChannel.addListener(_onAgentChannel);
+    _agentChannel.start();
   }
 
   @override
   void dispose() {
     _saveTimer?.cancel();
     _agentSaveTimer?.cancel();
-    _agentPollTimer?.cancel();
+    _agentChannel.removeListener(_onAgentChannel);
+    _agentChannel.dispose();
     _ws.removeListener(_scheduleSave);
     _agents.removeListener(_scheduleAgentSave);
     _ws.dispose();
@@ -143,18 +158,26 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
     });
   }
 
-  Future<void> _pollAgents() async {
-    Map<String, AgentLiveStatus> live;
-    try {
-      live = await _agentStatus.poll();
-    } catch (_) {
-      live = const <String, AgentLiveStatus>{};
+  /// LiveChannel fetch: poll backend agent status; throw when unreachable so the
+  /// channel enters error/backoff (and the connection indicator shows offline).
+  Future<Map<String, AgentLiveStatus>> _fetchAgentStatuses() async {
+    final Map<String, AgentLiveStatus> live = await _agentStatus.poll();
+    if (!_agentStatus.reachable) {
+      throw Exception('agents backend unreachable');
     }
-    if (!mounted) return;
-    live.forEach((String id, AgentLiveStatus s) {
-      _agents.applyLiveStatus(id, s.status,
-          lastRun: s.lastRun, lastResult: s.detail);
-    });
+    return live;
+  }
+
+  /// Apply each live reading to the shared registry; rebuild for the indicator.
+  void _onAgentChannel() {
+    final Map<String, AgentLiveStatus>? live = _agentChannel.value;
+    if (live != null) {
+      live.forEach((String id, AgentLiveStatus s) {
+        _agents.applyLiveStatus(id, s.status,
+            lastRun: s.lastRun, lastResult: s.detail);
+      });
+    }
+    if (mounted) setState(() {});
   }
 
   /// ⌘K agent command: toggle local start/stop for an agent. Local-only — never
@@ -439,6 +462,9 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
             cs: cs,
             onTap: _ws.showDesktop,
           ),
+          const SizedBox(height: 8),
+          // RT-2 — live connection indicator (real-time layer status).
+          _ConnectionDot(status: _agentChannel.status, cs: cs),
           const SizedBox(height: 12),
         ],
       ),
@@ -481,6 +507,36 @@ List<PaletteItem> agentPaletteCommands(List<Agent> agents) => <PaletteItem>[
 /// is a normal app id.
 String? parseAgentToggleId(String id) =>
     id.startsWith(_agentTogglePrefix) ? id.substring(_agentTogglePrefix.length) : null;
+
+/// Dock footer indicator showing the real-time layer's connection status (RT-2).
+class _ConnectionDot extends StatelessWidget {
+  const _ConnectionDot({required this.status, required this.cs});
+  final LiveStatus status;
+  final ColorScheme cs;
+
+  @override
+  Widget build(BuildContext context) {
+    late final Color color;
+    late final IconData icon;
+    switch (status) {
+      case LiveStatus.live:
+        color = Colors.green;
+        icon = Icons.wifi;
+      case LiveStatus.connecting:
+      case LiveStatus.error:
+        color = Colors.amber;
+        icon = Icons.wifi_tethering;
+      case LiveStatus.offline:
+      case LiveStatus.idle:
+        color = cs.onSurfaceVariant;
+        icon = Icons.wifi_off;
+    }
+    return Tooltip(
+      message: 'Realtime: ${status.label}',
+      child: Icon(icon, size: 18, color: color),
+    );
+  }
+}
 
 class _DockIcon extends StatelessWidget {
   final IconData icon;
