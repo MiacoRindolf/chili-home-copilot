@@ -2571,6 +2571,67 @@ def test_market_snapshot_context_helper_uses_latest_snapshot_row(db) -> None:
     assert context["context_source"] == "market_snapshot"
 
 
+def test_market_snapshot_context_merge_overrides_gap_and_preserves_scanner_rvol() -> None:
+    context = {
+        "gap_pct": -11.49,
+        "rvol": 17.05,
+        "rel_vol": 17.05,
+        "volume_ratio": 17.05,
+        "news_count": 0,
+    }
+    snapshot_context = {
+        "context_source": "market_snapshot",
+        "market_snapshot_id": 123,
+        "gap_pct": 22.9008,
+        "rvol": 0.5778,
+        "rel_vol": 0.5778,
+        "volume_ratio": 0.5778,
+        "news_count": 1,
+        "news_sentiment": 0.12,
+    }
+
+    changed = imminent_mod._merge_market_snapshot_context_into_momentum_context(
+        context,
+        snapshot_context,
+    )
+
+    assert changed is True
+    assert context["context_source"] == "market_snapshot"
+    assert context["market_snapshot_id"] == 123
+    assert context["gap_pct"] == pytest.approx(22.9008)
+    assert context["scanner_gap_pct"] == pytest.approx(-11.49)
+    assert context["market_snapshot_gap_pct"] == pytest.approx(22.9008)
+    assert context["volume_ratio"] == pytest.approx(17.05)
+    assert context["rvol"] == pytest.approx(17.05)
+    assert context["rel_vol"] == pytest.approx(17.05)
+    assert context["market_snapshot_volume_ratio"] == pytest.approx(0.5778)
+    assert context["market_snapshot_rvol"] == pytest.approx(0.5778)
+    assert context["market_snapshot_rel_vol"] == pytest.approx(0.5778)
+    assert context["news_count"] == pytest.approx(1)
+    assert context["scanner_news_count"] == pytest.approx(0)
+    assert context["news_sentiment"] == pytest.approx(0.12)
+
+
+def test_market_snapshot_context_merge_uses_snapshot_volume_when_scanner_missing() -> None:
+    context = {"gap_pct": 6.0}
+    snapshot_context = {
+        "context_source": "market_snapshot",
+        "volume_ratio": 2.4,
+        "rvol": 2.4,
+        "rel_vol": 2.4,
+    }
+
+    imminent_mod._merge_market_snapshot_context_into_momentum_context(
+        context,
+        snapshot_context,
+    )
+
+    assert context["volume_ratio"] == pytest.approx(2.4)
+    assert context["rvol"] == pytest.approx(2.4)
+    assert context["rel_vol"] == pytest.approx(2.4)
+    assert context["market_snapshot_volume_ratio"] == pytest.approx(2.4)
+
+
 def test_insert_imminent_breakout_alert_persists_momentum_context_and_alert_columns(
     db,
     monkeypatch,

@@ -160,6 +160,45 @@ _SCORE_FAILURE_CACHE: dict[str, dict[str, float | int]] = {}
 SMALL_CAP_MOMENTUM_CONTEXT_KEY = "small_cap_momentum_context"
 PRESCREEN_SOURCE_TAGS_CONTEXT_KEY = "prescreen_source_tags"
 MOMENTUM_CONTEXT_SNAPSHOT_STALE_CADENCE_MULTIPLIER = 2.0
+MARKET_SNAPSHOT_CONTEXT_PREFIX = "market_snapshot_"
+SCANNER_CONTEXT_PREFIX = "scanner_"
+MARKET_SNAPSHOT_CANONICAL_OVERRIDE_KEYS = frozenset({
+    "gap_pct",
+    "premarket_gap_pct",
+    "daily_change_pct",
+    "news_sentiment",
+    "news_count",
+    "sector",
+    "market_cap",
+    "market_cap_b",
+    "float_proxy_shares",
+    "shares_outstanding_proxy",
+    "float_bucket",
+    "float_proxy_source",
+    "premarket_high",
+    "day_high",
+    "bid",
+    "ask",
+    "spread_abs",
+    "spread_bps",
+    "halted",
+    "halt_status",
+    "halt_reason",
+})
+MARKET_SNAPSHOT_VOLUME_OBSERVATION_KEYS = frozenset({
+    "rvol",
+    "rel_vol",
+    "volume_ratio",
+})
+MARKET_SNAPSHOT_METADATA_KEYS = frozenset({
+    "context_source",
+    "market_snapshot_id",
+    "market_snapshot_date",
+    "market_snapshot_bar_start_at",
+    "market_snapshot_bar_interval",
+    "context_age_seconds",
+    "context_max_age_seconds",
+})
 
 
 def _non_negative_int_setting(name: str, default: int) -> int:
@@ -1536,6 +1575,82 @@ def _merge_momentum_context_into_flat(
             flat[key] = context[key]
 
 
+def _context_values_differ(left: Any, right: Any) -> bool:
+    if isinstance(left, bool) or isinstance(right, bool):
+        return bool(left) != bool(right)
+    left_f = _finite_float_or_none(left)
+    right_f = _finite_float_or_none(right)
+    if left_f is not None and right_f is not None:
+        return abs(left_f - right_f) > 1e-9
+    return left != right
+
+
+def _set_supported_context_value(
+    context: dict[str, Any],
+    key: str,
+    value: Any,
+) -> bool:
+    key_s = str(key or "").strip()
+    if not key_s or not _momentum_context_value_supported(key_s, value):
+        return False
+    if key_s in context and not _context_values_differ(context.get(key_s), value):
+        return False
+    context[key_s] = value
+    return True
+
+
+def _merge_market_snapshot_context_into_momentum_context(
+    context: dict[str, Any],
+    snapshot_context: dict[str, Any],
+) -> bool:
+    """Merge fresh snapshot facts without losing scanner-specific evidence.
+
+    The scanner's intraday RVOL is a better Ross-style liquidity signal than a
+    daily snapshot volume ratio, but opening-gap/catalyst/float facts from a
+    fresh market snapshot should replace stale score-cache values.
+    """
+    changed = False
+    if not isinstance(snapshot_context, dict) or not snapshot_context:
+        return changed
+
+    for raw_key, value in snapshot_context.items():
+        key = str(raw_key or "").strip()
+        if not key or not _momentum_context_value_supported(key, value):
+            continue
+
+        if key in MARKET_SNAPSHOT_METADATA_KEYS:
+            changed = _set_supported_context_value(context, key, value) or changed
+            continue
+
+        snapshot_key = f"{MARKET_SNAPSHOT_CONTEXT_PREFIX}{key}"
+        changed = _set_supported_context_value(context, snapshot_key, value) or changed
+
+        if key in MARKET_SNAPSHOT_VOLUME_OBSERVATION_KEYS:
+            if key not in context:
+                changed = _set_supported_context_value(context, key, value) or changed
+            continue
+
+        if key in MARKET_SNAPSHOT_CANONICAL_OVERRIDE_KEYS:
+            existing = context.get(key)
+            if (
+                existing is not None
+                and _momentum_context_value_supported(key, existing)
+                and _context_values_differ(existing, value)
+            ):
+                scanner_key = f"{SCANNER_CONTEXT_PREFIX}{key}"
+                changed = (
+                    _set_supported_context_value(context, scanner_key, existing)
+                    or changed
+                )
+            changed = _set_supported_context_value(context, key, value) or changed
+            continue
+
+        if key not in context:
+            changed = _set_supported_context_value(context, key, value) or changed
+
+    return changed
+
+
 def _expected_net_pct_from_rule_snapshot(snapshot: Any) -> float | None:
     if isinstance(snapshot, str):
         try:
@@ -2367,8 +2482,10 @@ def gather_imminent_candidate_rows(
                 momentum_context_snapshot_status_counts[snapshot_status] += 1
                 if snapshot_context:
                     momentum_context_snapshot_enriched += 1
-                    for ctx_key, ctx_value in snapshot_context.items():
-                        momentum_context.setdefault(ctx_key, ctx_value)
+                    _merge_market_snapshot_context_into_momentum_context(
+                        momentum_context,
+                        snapshot_context,
+                    )
                 if _merge_prescreen_source_tags_into_momentum_context(
                     momentum_context,
                     prescreen_source_tags_by_ticker.get(cache_key, []),
