@@ -47,8 +47,8 @@ def test_adaptive_exit_config_floor_and_parent_inheritance():
     assert fb["target_r_multiple"] == m._FALLBACK_TARGET_R
 
 
-def test_miner_is_dormant_by_default(monkeypatch):
-    """Ships disabled: returns skipped without touching the session."""
+def test_miner_skips_when_disabled(monkeypatch):
+    """When the flag is off, returns skipped without touching the session."""
     from app.config import settings
 
     monkeypatch.setattr(settings, "brain_equity_miner_enabled", False, raising=False)

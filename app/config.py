@@ -1026,10 +1026,13 @@ class Settings(BaseSettings):
     # Equity-native pattern miner (2026-06-04). Equity counterpart of the
     # crypto miner: mines candidate patterns from the indicator signatures of
     # profitable equity winners (live + paper-shadow, sourced from the linked
-    # breakout alert). Ships DORMANT — generates research candidates only, which
-    # still pass certification + operator promotion before any live capital.
+    # breakout alert). Generates research candidates only, which still pass
+    # certification + operator promotion before any live capital.
     # See app/services/trading/equity_pattern_miner.py.
-    brain_equity_miner_enabled: bool = False
+    # Activated 2026-06-05: validated live (209 winners / 168 signatures found,
+    # spawns deduped variants for signatures with >=3 winners); runs every 6
+    # brain cycles, bounded to <=10 variants/run.
+    brain_equity_miner_enabled: bool = True
     brain_equity_miner_lookback_days: int = 90  # equity trades sparser than crypto
     brain_equity_miner_min_winners_per_signature: int = 3
     brain_equity_miner_max_variants_per_run: int = 10
