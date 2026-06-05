@@ -14,7 +14,10 @@ from typing import Any, Dict
 from sqlalchemy.orm import Session
 
 from ..base import AgentBase
-from ...llm_caller import call_llm
+from functools import partial as _functools_partial
+from .llm_cost import call_agent_llm as _call_agent_llm
+# Route this agent's LLM calls through the cost-tracked wrapper (per-agent attribution).
+call_llm = _functools_partial(_call_agent_llm, purpose="project_ai_engineer")
 
 logger = logging.getLogger(__name__)
 
