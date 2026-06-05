@@ -10,10 +10,13 @@ typedef SkillsFetcher = Future<List<Map<String, dynamic>>> Function();
 /// Skills viewer (SK-1): the reusable skills CHILI's teacher-escalation loop
 /// (salvaged from Odysseus) has learned from past failures. Read-only.
 class SkillsScreen extends StatefulWidget {
-  const SkillsScreen({super.key, SkillsFetcher? fetcher})
+  const SkillsScreen({super.key, SkillsFetcher? fetcher, this.onDiscuss})
       : _injectedFetcher = fetcher;
 
   final SkillsFetcher? _injectedFetcher;
+
+  /// RC-2 — pivot a learned skill into Chat (reuses the UK-2 ask inbox).
+  final void Function(String skillName)? onDiscuss;
 
   @override
   State<SkillsScreen> createState() => _SkillsScreenState();
@@ -233,6 +236,17 @@ class _SkillsScreenState extends State<SkillsScreen> {
                     ],
                   ),
                 ),
+            ],
+            if (widget.onDiscuss != null) ...<Widget>[
+              const SizedBox(height: 4),
+              Align(
+                alignment: Alignment.centerRight,
+                child: TextButton.icon(
+                  onPressed: () => widget.onDiscuss!(s.name),
+                  icon: const Icon(Icons.forum_outlined, size: 16),
+                  label: const Text('Discuss in Chat'),
+                ),
+              ),
             ],
           ],
         ),
