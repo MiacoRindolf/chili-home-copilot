@@ -1074,6 +1074,30 @@ def _probability_sample_count(
     return n, None
 
 
+def _overall_realized_winrate(pattern: Any) -> tuple[float, int] | None:
+    """Return (win_rate, trade_count) from a pattern's overall realized record.
+
+    Used as an informative empirical-Bayes prior for the regime-conditioned hit
+    rate. The regime ledger averages hit rate across the current regime's cells,
+    which can be built on thin per-cell samples (cold start); a heavily-sampled
+    overall realized win rate should anchor the estimate so a proven pattern's
+    edge is not buried by a noisy regime cell. Returns None for cold-start
+    patterns (no usable realized record), which then fall back to the neutral
+    0.5 prior unchanged.
+    """
+    if pattern is None or pattern.__class__.__module__.startswith("unittest.mock"):
+        return None
+    wr = _fraction01(getattr(pattern, "raw_realized_win_rate", None))
+    raw_n = getattr(pattern, "raw_realized_trade_count", None)
+    try:
+        n = int(raw_n) if raw_n is not None else 0
+    except (TypeError, ValueError):
+        n = 0
+    if wr is None or n <= 0:
+        return None
+    return wr, n
+
+
 def _settings_int(settings: Any, name: str, default: int, *, minimum: int = 0) -> int:
     raw = getattr(settings, name, default)
     if _looks_like_mock_setting(raw):
@@ -1749,20 +1773,44 @@ def _pattern_probability(
             details["alert_confidence"] = alert_details
             source = "alert_confidence_shrunk"
 
-    # Shrink pattern-derived probabilities toward break-even until the
-    # realized-EV evidence count matures. The prior size reuses CHILI's
-    # existing promotion evidence knob instead of inventing a new threshold.
+    # Shrink pattern-derived probabilities toward a prior until the realized-EV
+    # evidence count matures. The default prior is the neutral 0.5 (break-even).
+    # When the pattern has a well-sampled OVERALL realized win rate, use that as
+    # an informative, pattern-specific empirical-Bayes prior instead: the regime
+    # ledger averages hit rate across the current regime's cells, which can be
+    # built on thin per-cell samples, so a noisy regime estimate should not bury
+    # a heavily-sampled realized record. The prior weight is the realized sample
+    # size capped at the regime sample, so the regime estimate keeps >=50% weight
+    # when both are mature, and losers (low realized WR) stay below break-even.
     if (
         n is not None
         and n > 0
         and not source.startswith("alert_")
         and not source.startswith("directional_")
     ):
+        prior_mean = 0.5
         prior_n = _settings_int(settings, "chili_realized_ev_min_trades", 5, minimum=0)
+        if bool(getattr(settings, "chili_edge_realized_aware_prior_enabled", True)):
+            realized = _overall_realized_winrate(
+                pattern or _load_scan_pattern_for_edge(db, alert.scan_pattern_id)
+            )
+            # Only anchor on the realized win rate once it is itself well sampled
+            # (>= the realized-EV floor). A 1-2 trade record — win or loss — is too
+            # noisy to set the prior, so thin patterns keep the neutral 0.5.
+            if realized is not None and int(realized[1]) >= prior_n:
+                p_overall, n_overall = realized
+                prior_mean = float(p_overall)
+                prior_n = min(int(n_overall), int(n))
+                details["realized_prior_mean"] = round(float(p_overall), 6)
+                details["realized_prior_n"] = prior_n
         if prior_n > 0:
-            p = (p * n + 0.5 * prior_n) / max(1, n + prior_n)
-            source = f"{source}_shrunk"
-            details["neutral_prior_n"] = prior_n
+            p = (p * n + prior_mean * prior_n) / max(1, n + prior_n)
+            source = (
+                f"{source}_shrunk"
+                if prior_mean == 0.5
+                else f"{source}_realized_prior_blend"
+            )
+            details["prior_mean"] = round(float(prior_mean), 6)
 
     # Imminent-alert outcomes are gate-chain-free observations. Use them as a
     # cold-start prior when closed-trade evidence is thin, but let actual
