@@ -434,20 +434,27 @@ def _stock_momentum_context_gate(
         "min_volume_ratio": round(min_volume_ratio, 4),
         "max_spread_bps": round(max_spread_bps, 4),
     }
+    flat, packet_present = _indicator_momentum_context_snapshot(alert)
+    snap["small_cap_momentum_context_present"] = packet_present
     if not bool(settings_snapshot.stock_momentum_context_gate_enabled):
         snap["inactive_reason"] = "disabled"
         return True, None, snap
-    # Trade-eligible (certified + promoted) patterns are exempt: the gap/volume
-    # momentum proxy must not drop their (often mean-reversion) setups. They
-    # still face the expected-edge / PDT / regime / stop-width gates downstream.
-    if bool(settings_snapshot.stock_momentum_context_exempt_eligible) and bool(
-        getattr(alert, "_chili_pattern_trade_eligible", False)
-    ):
+
+    pattern_trade_eligible = bool(getattr(alert, "_chili_pattern_trade_eligible", False))
+    eligible_exempt = bool(settings_snapshot.stock_momentum_context_exempt_eligible) and pattern_trade_eligible
+    packet_under_pressure = packet_present and pressure + 1e-9 >= min_pressure
+    # Trade-eligible (certified + promoted) patterns are exempt by default so
+    # the momentum proxy does not drop quiet mean-reversion setups. When the
+    # queue is saturated and the alert already carries explicit momentum facts,
+    # the proxy becomes a quality-pressure gate instead of a blanket bypass.
+    if eligible_exempt and not packet_under_pressure:
         snap["inactive_reason"] = "pattern_trade_eligible_exempt"
         snap["pattern_trade_eligible"] = True
         return True, None, snap
-    flat, packet_present = _indicator_momentum_context_snapshot(alert)
-    snap["small_cap_momentum_context_present"] = packet_present
+    if eligible_exempt and packet_under_pressure:
+        snap["pattern_trade_eligible"] = True
+        snap["eligible_exemption_suppressed_reason"] = "momentum_context_queue_pressure"
+
     if pressure + 1e-9 < min_pressure and not packet_present:
         snap["inactive_reason"] = "queue_pressure_below_floor"
         return True, None, snap
