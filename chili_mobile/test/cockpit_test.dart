@@ -138,6 +138,55 @@ void main() {
     });
   });
 
+  group('venueExposures (TC-5)', () {
+    Position pos(String ticker, String venue, double mv, double pnl) =>
+        Position(
+          ticker: ticker,
+          qty: 1,
+          entryPrice: 1,
+          currentPrice: 1,
+          marketValue: mv,
+          unrealizedPnl: pnl,
+          unrealizedPnlPct: 0,
+          venue: venue,
+        );
+
+    test('aggregates market value + P/L per venue, sorted by value desc', () {
+      final List<VenueExposure> exp = venueExposures(<Position>[
+        pos('AAPL', 'robinhood', 1000, 50),
+        pos('TSLA', 'robinhood', 2000, -100),
+        pos('BTC', 'coinbase', 6000, 300),
+      ]);
+      expect(exp.length, 2);
+      // coinbase (6000) sorts before robinhood (3000).
+      expect(exp.first.venue, 'coinbase');
+      expect(exp.first.marketValue, 6000);
+      expect(exp.first.unrealizedPnl, 300);
+      expect(exp.first.count, 1);
+      expect(exp.first.share, closeTo(6000 / 9000, 1e-9));
+
+      final VenueExposure rh = exp[1];
+      expect(rh.venue, 'robinhood');
+      expect(rh.marketValue, 3000);
+      expect(rh.unrealizedPnl, -50);
+      expect(rh.count, 2);
+      expect(rh.share, closeTo(3000 / 9000, 1e-9));
+    });
+
+    test('blank venue groups under "other"; zero total → zero shares', () {
+      final List<VenueExposure> exp = venueExposures(<Position>[
+        pos('X', '', 0, 0),
+        pos('Y', 'coinbase', 0, 0),
+      ]);
+      expect(exp.map((VenueExposure e) => e.venue), containsAll(<String>['other', 'coinbase']));
+      expect(exp.every((VenueExposure e) => e.share == 0), isTrue);
+    });
+
+    test('empty positions → empty', () {
+      expect(venueExposures(const <Position>[]), isEmpty);
+    });
+  });
+
   group('buildTradingSnapshot', () {
     test('combines positions / portfolio / governance / risk', () {
       final TradingSnapshot s = buildTradingSnapshot(
@@ -318,6 +367,54 @@ void main() {
       final double winY = tester.getTopLeft(find.text('WIN')).dy;
       final double lossY = tester.getTopLeft(find.text('LOSS')).dy;
       expect(winY, lessThan(lossY));
+    });
+
+    testWidgets('TC-5: exposure-by-venue panel renders with ≥2 venues',
+        (WidgetTester tester) async {
+      tester.view.physicalSize = const Size(1100, 1000);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      Position pos(String t, String venue, double mv) => Position(
+            ticker: t,
+            qty: 1,
+            entryPrice: 1,
+            currentPrice: 1,
+            marketValue: mv,
+            unrealizedPnl: 1,
+            unrealizedPnlPct: 1,
+            venue: venue,
+          );
+      await tester.pumpWidget(MaterialApp(
+        home: CockpitScreen(
+          fetcher: () async => TradingSnapshot(
+            totalEquity: 1000,
+            cash: 0,
+            buyingPower: 0,
+            dayPnl: 0,
+            totalPnl: 0,
+            realizedPnl: 0,
+            unrealizedPnl: 0,
+            killSwitchActive: false,
+            killSwitchReason: '',
+            automationEnabled: true,
+            ensembleMode: '',
+            breakerTripped: false,
+            breakerReason: '',
+            totalHeatPct: 0,
+            positions: <Position>[
+              pos('AAPL', 'robinhood', 3000),
+              pos('BTC', 'coinbase', 1000),
+            ],
+          ),
+        ),
+      ));
+      await tester.pumpAndSettle();
+      expect(find.text('EXPOSURE BY VENUE'), findsOneWidget); // ApSectionHeader uppercases
+      // robinhood 3000/4000 = 75%, coinbase 1000/4000 = 25%.
+      expect(find.text('75%'), findsOneWidget);
+      expect(find.text('25%'), findsOneWidget);
+      expect(find.text('robinhood · 1 pos'), findsOneWidget);
     });
 
     testWidgets('TC-4: venue chips filter the open-positions list',

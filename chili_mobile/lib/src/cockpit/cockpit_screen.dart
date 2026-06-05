@@ -298,6 +298,27 @@ class _CockpitScreenState extends State<CockpitScreen> {
               style: TextStyle(color: cs.error, fontSize: 12)),
         ],
         const SizedBox(height: 20),
+        // TC-5 — per-venue exposure breakdown (only when spread across brokers).
+        ...() {
+          final List<VenueExposure> exp = venueExposures(s.positions);
+          if (exp.length < 2) return const <Widget>[];
+          return <Widget>[
+            const ApSectionHeader('Exposure by venue', icon: Icons.pie_chart_outline),
+            const SizedBox(height: 6),
+            ApPanel(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              child: Column(
+                children: <Widget>[
+                  for (int i = 0; i < exp.length; i++) ...<Widget>[
+                    if (i > 0) const SizedBox(height: 10),
+                    _venueExposureRow(cs, exp[i]),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 20),
+          ];
+        }(),
         Row(
           children: <Widget>[
             Expanded(
@@ -345,6 +366,52 @@ class _CockpitScreenState extends State<CockpitScreen> {
             );
           }),
         const SizedBox(height: 24),
+      ],
+    );
+  }
+
+  // TC-5 — one venue's exposure: share bar + market value + unrealized P/L.
+  Widget _venueExposureRow(ColorScheme cs, VenueExposure e) {
+    final Color pnlColor = _pnlColor(e.unrealizedPnl, cs);
+    final int pct = (e.share * 100).round();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        Row(
+          children: <Widget>[
+            Expanded(
+              child: Text(
+                '${e.venue} · ${e.count} pos',
+                style: TextStyle(
+                    fontWeight: FontWeight.w700, color: cs.onSurface),
+              ),
+            ),
+            Text('${_money(e.marketValue)}  ',
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+            Text(_signed(e.unrealizedPnl),
+                style:
+                    TextStyle(fontWeight: FontWeight.w700, color: pnlColor)),
+          ],
+        ),
+        const SizedBox(height: 4),
+        Row(
+          children: <Widget>[
+            Expanded(
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(3),
+                child: LinearProgressIndicator(
+                  value: e.share.clamp(0.0, 1.0),
+                  minHeight: 6,
+                  backgroundColor: cs.surfaceContainerHighest,
+                  valueColor: AlwaysStoppedAnimation<Color>(cs.primary),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text('$pct%',
+                style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+          ],
+        ),
       ],
     );
   }
