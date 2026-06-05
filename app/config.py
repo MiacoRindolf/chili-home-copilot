@@ -768,6 +768,15 @@ class Settings(BaseSettings):
     brain_io_workers_low: int | None = None
     brain_snapshot_io_workers: int | None = None
     brain_prediction_io_workers: int | None = None
+    # Provider-aware I/O concurrency (network fetches sized to each provider's
+    # rate budget, NOT the CPU budget). None -> adaptive default per provider.
+    # Coinbase public OHLCV is 429-prone; keep it gentle (defaults to the
+    # fast-path's proven snapshot concurrency). yfinance is fragile + globally
+    # paced. brain_io_fanout_ceiling caps heterogeneous I/O fan-outs (AI context,
+    # prescreener) — independent multi-source calls bound by task count, not CPU.
+    coinbase_fetch_concurrency: int | None = None
+    yfinance_fetch_concurrency: int | None = None
+    brain_io_fanout_ceiling: int | None = None
     brain_market_snapshot_defer_while_learning_running: bool = True
 
     # NetEdgeRanker (Phase E) — calibrated expected-net-PnL scoring, shadow by default.

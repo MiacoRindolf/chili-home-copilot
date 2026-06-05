@@ -71,7 +71,11 @@ from ta.volatility import BollingerBands, AverageTrueRange
 
 _shutting_down = threading.Event()
 _CPU_COUNT = _os.cpu_count() or 4
-_MAX_SCAN_WORKERS = min(64, max(16, _CPU_COUNT * 2))
+# Scanner scoring is CPU-bound indicator math (with per-ticker fetch). Size to the
+# cgroup-EFFECTIVE CPUs, not host cpu_count, which oversubscribes a CPU-limited
+# container. Preserves the prior ~16-worker magnitude at the current CPU budget.
+from .brain_io_concurrency import cpu_workers as _cpu_workers
+_MAX_SCAN_WORKERS = _cpu_workers(None, multiplier=2.0, floor=16, ceiling=64)
 
 _top_picks_cache: dict[str, Any] = {"picks": [], "ts": 0.0}
 _TOP_PICKS_TTL = 300  # 5 minutes — data doesn't change meaningfully faster

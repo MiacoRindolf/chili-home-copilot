@@ -17,6 +17,7 @@ from collections import defaultdict
 from typing import Any
 
 from ..socket_budget import mount_bounded_http_adapters
+from .brain_io_concurrency import io_fanout_workers
 
 logger = logging.getLogger(__name__)
 
@@ -391,7 +392,7 @@ def _collect_prescreen_uncached(
         combined.append(tn)
         ticker_src[tn].add("core_default")
 
-    with ThreadPoolExecutor(max_workers=20) as executor:
+    with ThreadPoolExecutor(max_workers=io_fanout_workers(20, ceiling=20)) as executor:
         future_map = {executor.submit(fn): name for name, fn in sources.items()}
         for future in as_completed(future_map):
             name = future_map[future]
@@ -621,7 +622,7 @@ def get_daytrade_candidates() -> tuple[list[str], int]:
             seen.add(t)
             combined.append(t)
 
-    with ThreadPoolExecutor(max_workers=20) as executor:
+    with ThreadPoolExecutor(max_workers=io_fanout_workers(20, ceiling=20)) as executor:
         future_map = {executor.submit(fn): name for name, fn in sources.items()}
         for future in as_completed(future_map):
             name = future_map[future]
@@ -733,7 +734,7 @@ def get_breakout_candidates() -> tuple[list[str], int]:
             seen.add(t)
             combined.append(t)
 
-    with ThreadPoolExecutor(max_workers=20) as executor:
+    with ThreadPoolExecutor(max_workers=io_fanout_workers(20, ceiling=20)) as executor:
         future_map = {executor.submit(fn): name for name, fn in sources.items()}
         for future in as_completed(future_map):
             name = future_map[future]
