@@ -151,8 +151,29 @@ def evaluate_realized_ev(scan_pattern: Any) -> EvGateResult:
     stats_source = "corrected_or_legacy"
     raw_fallback_blocked_reason: str | None = None
 
+    # f-realized-ev-legacy-not-authoritative (2026-06-05): ONLY clean
+    # ``corrected_*`` evidence may pre-empt the clean ``raw_realized_*``
+    # fallback. The legacy ``{trade_count, win_rate, avg_return_pct}`` columns
+    # are conflated -- they are overwritten by mining
+    # (``ensure_mined_scan_pattern``), backtests (``backtest_queue``), AND the
+    # realized writer, and pre-fix they also absorbed DIRTY reconcile /
+    # sync-gone / position-gone placeholder exits. So a legacy-SOURCED sample
+    # must not be treated as authoritative realized evidence: it can neither
+    # be "sufficient" on its own nor assert a "clear live loss" that blocks the
+    # raw fallback. Pattern 1246 is the canonical case -- corrected_*=NULL (all
+    # its closed trades are dirty, so the cleaned writer can't compute a
+    # corrected stat), legacy avg=-0.14% (7 dirty sync-gone rows whose real
+    # fills were positive), raw_realized=+2.66% (12 clean rows). The gate must
+    # consult the clean +2.66% signal, not block on the polluted -0.14%.
+    # corrected_* remains the authoritative LIVE-loss signal (a genuine clean
+    # corrected loss still takes precedence over paper/raw -- safety preserved).
+    sample_from_corrected = (
+        stats.source_trade_count == "corrected"
+        and stats.source_avg_return_pct == "corrected"
+    )
+
     corrected_clear_loss = False
-    if n > 0:
+    if n > 0 and sample_from_corrected:
         try:
             corrected_clear_loss = (
                 (ret is not None and float(ret) <= min_ret)
@@ -165,7 +186,7 @@ def evaluate_realized_ev(scan_pattern: Any) -> EvGateResult:
         raw_fallback_blocked_reason = "disabled"
     elif raw_n is None or raw_n < min_n:
         raw_fallback_blocked_reason = f"raw_realized_n_below_min:{int(raw_n or 0)}<{min_n}"
-    elif n >= min_n:
+    elif n >= min_n and sample_from_corrected:
         raw_fallback_blocked_reason = f"corrected_sample_sufficient:{n}>={min_n}"
     elif corrected_clear_loss:
         raw_fallback_blocked_reason = "corrected_live_loss_takes_precedence"
@@ -193,6 +214,7 @@ def evaluate_realized_ev(scan_pattern: Any) -> EvGateResult:
         "raw_realized_fallback_allowed": allow_raw_fallback,
         "raw_realized_fallback_used": stats_source == "raw_realized_fallback",
         "raw_realized_fallback_blocked_reason": raw_fallback_blocked_reason,
+        "sample_from_corrected": sample_from_corrected,
         "min_trades_required": min_n,
         "min_avg_return_pct_required": min_ret,
         "min_win_rate_required": min_wr,
