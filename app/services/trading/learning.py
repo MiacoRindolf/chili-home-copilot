@@ -8964,6 +8964,16 @@ _COMPLEMENTARY_POOL: list[dict[str, Any]] = [
     {"indicator": "ema_stack", "op": "==", "value": True},
     {"indicator": "resistance_retests", "op": ">=", "value": 2,
      "params": {"tolerance_pct": 1.5, "lookback": 20}},
+    # Expanded vocabulary (volume-flow, mean-reversion, volatility-squeeze).
+    # Present consistently across the snapshot (miner source), the alert path,
+    # and compute_all_from_df (entry), so patterns built on them evaluate
+    # correctly at entry. Thresholds are standard starting points; the miner
+    # mutates them via _tweak_threshold.
+    {"indicator": "mfi", "op": "<", "value": 20},
+    {"indicator": "mfi", "op": ">", "value": 80},
+    {"indicator": "cci", "op": "<", "value": -100},
+    {"indicator": "cci", "op": ">", "value": 100},
+    {"indicator": "ttm_squeeze", "op": "==", "value": True},
 ]
 
 
