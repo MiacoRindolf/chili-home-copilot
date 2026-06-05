@@ -73,7 +73,71 @@ void main() {
     });
   });
 
+  group('sortResearchTopics (RS-4)', () {
+    const List<ResearchTopic> topics = <ResearchTopic>[
+      ResearchTopic(topic: 'Zinc', summary: '', relevance: 0.4),
+      ResearchTopic(topic: 'Apples', summary: '', relevance: 0.9),
+      ResearchTopic(topic: 'Mango', summary: '', relevance: 0.9), // ties Apples
+    ];
+
+    test('relevance sorts highest-first, ties break by title A→Z', () {
+      expect(
+          sortResearchTopics(topics, ResearchTopicSort.relevance)
+              .map((ResearchTopic t) => t.topic),
+          <String>['Apples', 'Mango', 'Zinc']);
+    });
+
+    test('title sorts A→Z', () {
+      expect(
+          sortResearchTopics(topics, ResearchTopicSort.title)
+              .map((ResearchTopic t) => t.topic),
+          <String>['Apples', 'Mango', 'Zinc']);
+    });
+
+    test('does not mutate the input list', () {
+      final List<ResearchTopic> input = List<ResearchTopic>.of(topics);
+      sortResearchTopics(input, ResearchTopicSort.relevance);
+      expect(input.first.topic, 'Zinc'); // original order preserved
+    });
+
+    test('researchSortLabel covers every variant', () {
+      for (final ResearchTopicSort s in ResearchTopicSort.values) {
+        expect(researchSortLabel(s), isNotEmpty);
+      }
+    });
+  });
+
   group('ResearchScreen widget', () {
+    testWidgets('RS-4: topics render most-relevant-first with a sort toggle',
+        (WidgetTester tester) async {
+      await tester.pumpWidget(MaterialApp(
+        home: ResearchScreen(
+          fetcher: () async => <String, dynamic>{
+            'title': 'D',
+            'topics': <Map<String, dynamic>>[
+              <String, dynamic>{
+                'topic': 'LowRel',
+                'summary': 's',
+                'relevance_score': 0.2,
+              },
+              <String, dynamic>{
+                'topic': 'HighRel',
+                'summary': 's',
+                'relevance_score': 0.95,
+              },
+            ],
+            'sources': <Map<String, dynamic>>[],
+          },
+        ),
+      ));
+      await tester.pumpAndSettle();
+      expect(find.widgetWithText(ChoiceChip, 'Relevance'), findsOneWidget);
+      // Default relevance-desc → HighRel sits above LowRel.
+      final double highY = tester.getTopLeft(find.text('HighRel')).dy;
+      final double lowY = tester.getTopLeft(find.text('LowRel')).dy;
+      expect(highY, lessThan(lowY));
+    });
+
     testWidgets('renders topics from an injected digest + Open report enabled',
         (WidgetTester tester) async {
       bool opened = false;

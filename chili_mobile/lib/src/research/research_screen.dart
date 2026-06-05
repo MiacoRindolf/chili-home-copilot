@@ -53,6 +53,9 @@ class _ResearchScreenState extends State<ResearchScreen> {
   bool _running = false;
   String? _error;
 
+  // RS-4 — topic sort order (default: most relevant first).
+  ResearchTopicSort _sort = ResearchTopicSort.relevance;
+
   @override
   void initState() {
     super.initState();
@@ -274,9 +277,10 @@ class _ResearchScreenState extends State<ResearchScreen> {
             'CHILI researches topics you show interest in. Results will appear here.',
       );
     }
-    // SF-1 — filter the shown topics by the run-bar text.
+    // SF-1 — filter the shown topics by the run-bar text; RS-4 — then sort.
     final String q = _topicCtrl.text.trim();
-    final List<ResearchTopic> topics = filterResearchTopics(d.topics, q);
+    final List<ResearchTopic> topics =
+        sortResearchTopics(filterResearchTopics(d.topics, q), _sort);
     if (topics.isEmpty) {
       return ApEmptyState(
         icon: Icons.search_off,
@@ -292,6 +296,10 @@ class _ResearchScreenState extends State<ResearchScreen> {
     return ListView(
       padding: const EdgeInsets.all(20),
       children: <Widget>[
+        if (topics.length > 1) ...<Widget>[
+          _sortToggle(cs),
+          const SizedBox(height: 8),
+        ],
         for (final ResearchTopic t in topics) _topicCard(cs, t),
         if (q.isEmpty && d.sources.isNotEmpty) ...<Widget>[
           const SizedBox(height: 8),
@@ -300,6 +308,29 @@ class _ResearchScreenState extends State<ResearchScreen> {
           for (final ResearchSource s in d.sources) _sourceRow(cs, s),
         ],
         const SizedBox(height: 24),
+      ],
+    );
+  }
+
+  // RS-4 — segmented sort toggle for the topic list.
+  Widget _sortToggle(ColorScheme cs) {
+    return Row(
+      children: <Widget>[
+        Icon(Icons.sort, size: 14, color: cs.onSurfaceVariant),
+        const SizedBox(width: 6),
+        Text('Sort',
+            style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+        const SizedBox(width: 10),
+        for (final ResearchTopicSort s in ResearchTopicSort.values)
+          Padding(
+            padding: const EdgeInsets.only(right: 6),
+            child: ChoiceChip(
+              label: Text(researchSortLabel(s)),
+              selected: _sort == s,
+              onSelected: (_) => setState(() => _sort = s),
+              visualDensity: VisualDensity.compact,
+            ),
+          ),
       ],
     );
   }

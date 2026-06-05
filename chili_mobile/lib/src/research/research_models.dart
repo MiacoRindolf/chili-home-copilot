@@ -48,6 +48,38 @@ class ResearchDigest {
   );
 }
 
+/// How research-digest topics are ordered (RS-4).
+enum ResearchTopicSort { relevance, title }
+
+String researchSortLabel(ResearchTopicSort s) {
+  switch (s) {
+    case ResearchTopicSort.relevance:
+      return 'Relevance';
+    case ResearchTopicSort.title:
+      return 'Title';
+  }
+}
+
+/// Return a NEW list ordered by [sort] (RS-4). Pure — never mutates [topics].
+/// Relevance sorts highest-first (ties fall back to title A→Z for stability);
+/// title sorts A→Z case-insensitively.
+List<ResearchTopic> sortResearchTopics(
+    List<ResearchTopic> topics, ResearchTopicSort sort) {
+  final List<ResearchTopic> out = List<ResearchTopic>.of(topics);
+  int byTitle(ResearchTopic a, ResearchTopic b) =>
+      a.topic.toLowerCase().compareTo(b.topic.toLowerCase());
+  switch (sort) {
+    case ResearchTopicSort.relevance:
+      out.sort((ResearchTopic a, ResearchTopic b) {
+        final int c = b.relevance.compareTo(a.relevance);
+        return c != 0 ? c : byTitle(a, b);
+      });
+    case ResearchTopicSort.title:
+      out.sort(byTitle);
+  }
+  return out;
+}
+
 /// Case-insensitive filter over topic + summary (SF-1). Empty query → unchanged.
 List<ResearchTopic> filterResearchTopics(
     List<ResearchTopic> topics, String query) {
