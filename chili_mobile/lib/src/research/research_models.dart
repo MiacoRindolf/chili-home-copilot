@@ -13,6 +13,17 @@ class ResearchSource {
     final String h = u?.host ?? '';
     return h.startsWith('www.') ? h.substring(4) : h;
   }
+
+  /// Whether this source can be safely opened in a browser (RS-5).
+  bool get isOpenable => isHttpUrl(url);
+}
+
+/// True only for http/https URLs with a host (RS-5). Pure — blocks file:,
+/// javascript:, data:, and other schemes from being launched from a tap.
+bool isHttpUrl(String url) {
+  final Uri? u = Uri.tryParse(url.trim());
+  if (u == null) return false;
+  return (u.scheme == 'http' || u.scheme == 'https') && u.host.isNotEmpty;
 }
 
 class ResearchTopic {

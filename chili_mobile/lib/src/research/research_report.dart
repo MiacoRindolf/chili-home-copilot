@@ -3,6 +3,16 @@ import 'dart:io';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../network/chili_api_client.dart';
+import 'research_models.dart';
+
+/// Open a research source URL in the OS browser (RS-5). Guards with isHttpUrl
+/// so only http/https links launch; returns false for anything else or on
+/// launch failure.
+Future<bool> openExternalUrl(String url) async {
+  if (!isHttpUrl(url)) return false;
+  return launchUrl(Uri.parse(url.trim()),
+      mode: LaunchMode.externalApplication);
+}
 
 /// Fetches the self-contained HTML research report, writes it to a temp file,
 /// and opens it in the OS browser — the report renders fully offline (no

@@ -73,6 +73,30 @@ void main() {
     });
   });
 
+  group('isHttpUrl / ResearchSource.isOpenable (RS-5)', () {
+    test('accepts http/https with a host, rejects other schemes', () {
+      expect(isHttpUrl('https://nature.com/q'), isTrue);
+      expect(isHttpUrl('http://example.org'), isTrue);
+      expect(isHttpUrl('  https://example.org  '), isTrue); // trimmed
+      expect(isHttpUrl('file:///etc/passwd'), isFalse);
+      expect(isHttpUrl('javascript:alert(1)'), isFalse);
+      expect(isHttpUrl('data:text/html,x'), isFalse);
+      expect(isHttpUrl('https://'), isFalse); // no host
+      expect(isHttpUrl('not a url'), isFalse);
+      expect(isHttpUrl(''), isFalse);
+    });
+
+    test('isOpenable reflects isHttpUrl', () {
+      expect(
+          const ResearchSource(title: 'N', url: 'https://nature.com')
+              .isOpenable,
+          isTrue);
+      expect(
+          const ResearchSource(title: 'F', url: 'file:///x').isOpenable,
+          isFalse);
+    });
+  });
+
   group('sortResearchTopics (RS-4)', () {
     const List<ResearchTopic> topics = <ResearchTopic>[
       ResearchTopic(topic: 'Zinc', summary: '', relevance: 0.4),
@@ -173,6 +197,41 @@ void main() {
       await tester.pumpAndSettle();
       expect(opened, isTrue);
       expect(find.textContaining('Opened research report'), findsOneWidget);
+    });
+
+    testWidgets('RS-5: tapping a source opens its URL via the injected opener',
+        (WidgetTester tester) async {
+      String? opened;
+      await tester.pumpWidget(MaterialApp(
+        home: ResearchScreen(
+          fetcher: () async => <String, dynamic>{
+            'title': 'D',
+            'topics': <Map<String, dynamic>>[
+              <String, dynamic>{
+                'topic': 'Quantum',
+                'summary': 's',
+                'relevance_score': 0.5,
+              },
+            ],
+            'sources': <Map<String, dynamic>>[
+              <String, dynamic>{
+                'title': 'Nature',
+                'url': 'https://nature.com/quantum',
+              },
+            ],
+          },
+          urlOpener: (String url) async {
+            opened = url;
+            return true;
+          },
+        ),
+      ));
+      await tester.pumpAndSettle();
+      expect(find.text('Nature'), findsOneWidget);
+      expect(find.byIcon(Icons.open_in_new), findsWidgets); // source + report btn
+      await tester.tap(find.text('Nature'));
+      await tester.pump();
+      expect(opened, 'https://nature.com/quantum');
     });
 
     testWidgets('shows empty state when there is no research',
