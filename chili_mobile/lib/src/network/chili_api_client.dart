@@ -1033,4 +1033,27 @@ class ChiliApiClient {
   Future<List<Map<String, dynamic>>> getJsonListSafe(String path,
           {String? itemsKey}) =>
       _getListSafe(path, itemsKey: itemsKey);
+
+  // ── Research app (RS-1) — surfaces the salvaged Odysseus research power. ──
+
+  /// GET research digest as JSON ({title, topic_count, topics[], sources[]}).
+  Future<Map<String, dynamic>> getResearchDigest() =>
+      _getMapSafe('/api/brain/reasoning/research/report?format=json');
+
+  /// GET the self-contained HTML visual report (renders offline). '' on failure.
+  Future<String> getResearchReportHtml() async {
+    try {
+      final res = await _get(
+        Uri.parse('$baseUrl/api/brain/reasoning/research/report'),
+        headers: _headers(json: false),
+      );
+      return res.statusCode == 200 ? res.body : '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  /// GET MCP tool-server status (read-only; no auth required).
+  Future<Map<String, dynamic>> getMcpStatus() =>
+      _getMapSafe('/api/brain/mcp/status');
 }

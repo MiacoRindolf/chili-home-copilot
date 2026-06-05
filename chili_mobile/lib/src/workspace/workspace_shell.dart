@@ -14,6 +14,7 @@ import '../companion/shared_chat_history.dart';
 import '../dashboard/dashboard_screen.dart';
 import '../intercom/intercom_screen.dart';
 import '../network/chili_api_client.dart';
+import '../research/research_screen.dart';
 import '../realtime/live_channel.dart';
 import '../realtime/live_sources.dart';
 import '../realtime/live_status.dart';
@@ -117,6 +118,12 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
       Icons.smart_toy,
       () => AgentsScreen(registry: _agents, livePolling: false),
       size: const Size(940, 620),
+    ),
+    'research': _AppDef(
+      'Research',
+      Icons.travel_explore,
+      () => const ResearchScreen(),
+      size: const Size(880, 640),
     ),
   };
 
