@@ -27,6 +27,40 @@ class McpServer {
   bool get isConnected => status == 'connected';
 }
 
+/// One policy-permitted tool exposed by a connected MCP server (MC-2).
+class McpTool {
+  const McpTool({
+    required this.serverId,
+    required this.serverName,
+    required this.name,
+    required this.description,
+  });
+  final String serverId;
+  final String serverName;
+  final String name;
+  final String description;
+}
+
+List<McpTool> parseMcpTools(List<Map<String, dynamic>> raw) => <McpTool>[
+      for (final Map<String, dynamic> t in raw)
+        if (_str(t['name']).isNotEmpty)
+          McpTool(
+            serverId: _str(t['server_id']),
+            serverName: _str(t['server_name']),
+            name: _str(t['name']),
+            description: _str(t['description']),
+          ),
+    ];
+
+/// Group tools by their server id (MC-2).
+Map<String, List<McpTool>> groupToolsByServer(List<McpTool> tools) {
+  final Map<String, List<McpTool>> out = <String, List<McpTool>>{};
+  for (final McpTool t in tools) {
+    out.putIfAbsent(t.serverId, () => <McpTool>[]).add(t);
+  }
+  return out;
+}
+
 class McpStatus {
   const McpStatus({
     required this.enabled,

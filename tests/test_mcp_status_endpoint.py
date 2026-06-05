@@ -11,7 +11,7 @@ import json
 from unittest.mock import patch
 
 from app import mcp_client as mcpc
-from app.routers.brain import mcp_status
+from app.routers.brain import mcp_status, mcp_tools
 
 
 def _body(resp) -> dict:
@@ -63,3 +63,40 @@ class TestMcpStatusEndpoint:
         with patch.object(mcpc.settings, "mcp_servers_json", "{not json", create=True):
             data = _body(mcp_status())
         assert data["configured_servers"] == 0
+
+
+class TestMcpToolsEndpoint:
+    """GET /api/brain/mcp/tools — read-only list of policy-permitted tools."""
+
+    def test_empty_when_nothing_connected(self):
+        with patch.object(mcpc.mcp_client, "list_tools", return_value=[]):
+            data = _body(mcp_tools())
+        assert data["ok"] is True
+        assert data["count"] == 0
+        assert data["tools"] == []
+
+    def test_lists_connected_tools_without_input_schema(self):
+        fake = [
+            {"server_id": "sec", "server_name": "SEC", "name": "search",
+             "qualified_name": "mcp__sec__search", "description": "Search filings",
+             "input_schema": {"type": "object", "secret": "x"}},
+        ]
+        with patch.object(mcpc.mcp_client, "list_tools", return_value=fake):
+            resp = mcp_tools()
+        data = _body(resp)
+        assert data["count"] == 1
+        t = data["tools"][0]
+        assert t["name"] == "search"
+        assert t["qualified_name"] == "mcp__sec__search"
+        assert t["description"] == "Search filings"
+        # The raw input_schema is not echoed to the client.
+        assert "input_schema" not in t
+        assert "secret" not in resp.body.decode("utf-8")
+
+    def test_tolerates_list_tools_failure(self):
+        def boom():
+            raise RuntimeError("not connected")
+        with patch.object(mcpc.mcp_client, "list_tools", side_effect=boom):
+            data = _body(mcp_tools())
+        assert data["ok"] is True
+        assert data["tools"] == []

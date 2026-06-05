@@ -84,8 +84,43 @@ void main() {
     });
   });
 
+  group('parseMcpTools / groupToolsByServer', () {
+    test('parses a flat tool list, skipping nameless entries', () {
+      final List<McpTool> tools = parseMcpTools(<Map<String, dynamic>>[
+        <String, dynamic>{
+          'server_id': 'sec',
+          'server_name': 'SEC',
+          'name': 'search_filings',
+          'description': 'Full-text search of EDGAR filings',
+        },
+        <String, dynamic>{'server_id': 'sec', 'name': ''}, // skipped
+        <String, dynamic>{
+          'server_id': 'news',
+          'server_name': 'News',
+          'name': 'headlines',
+        },
+      ]);
+      expect(tools.length, 2);
+      expect(tools.first.name, 'search_filings');
+      expect(tools.first.description, 'Full-text search of EDGAR filings');
+      expect(tools.last.description, ''); // tolerant of missing description
+    });
+
+    test('groups tools by their server id', () {
+      final Map<String, List<McpTool>> g =
+          groupToolsByServer(parseMcpTools(<Map<String, dynamic>>[
+        <String, dynamic>{'server_id': 'sec', 'name': 'a'},
+        <String, dynamic>{'server_id': 'sec', 'name': 'b'},
+        <String, dynamic>{'server_id': 'news', 'name': 'c'},
+      ]));
+      expect(g.keys, containsAll(<String>['sec', 'news']));
+      expect(g['sec']!.map((McpTool t) => t.name), <String>['a', 'b']);
+      expect(g['news']!.single.name, 'c');
+    });
+  });
+
   group('McpScreen widget', () {
-    testWidgets('renders a connected server with its tools',
+    testWidgets('renders a connected server with its live tools (MC-2)',
         (WidgetTester tester) async {
       await tester.pumpWidget(MaterialApp(
         home: McpScreen(
@@ -104,13 +139,23 @@ void main() {
               'sec': <String, dynamic>{'status': 'connected', 'tool_count': 1},
             },
           },
+          toolsFetcher: () async => <Map<String, dynamic>>[
+            <String, dynamic>{
+              'server_id': 'sec',
+              'server_name': 'SEC Filings',
+              'name': 'search_filings',
+              'description': 'Full-text search of EDGAR filings',
+            },
+          ],
         ),
       ));
       await tester.pumpAndSettle();
       expect(find.text('MCP Tools'), findsOneWidget);
       expect(find.text('SEC Filings'), findsOneWidget);
       expect(find.text('connected'), findsOneWidget);
-      expect(find.text('search_filings'), findsOneWidget);
+      // The live tool name + description both render.
+      expect(find.text('search_filings'), findsWidgets);
+      expect(find.text('Full-text search of EDGAR filings'), findsOneWidget);
     });
 
     testWidgets('shows disabled empty state when MCP is off',
@@ -118,6 +163,7 @@ void main() {
       await tester.pumpWidget(MaterialApp(
         home: McpScreen(
           fetcher: () async => <String, dynamic>{'enabled': false},
+          toolsFetcher: () async => <Map<String, dynamic>>[],
         ),
       ));
       await tester.pumpAndSettle();
