@@ -6,6 +6,7 @@ import '../realtime/live_channel.dart';
 import '../realtime/live_sources.dart';
 import '../realtime/live_status.dart';
 import '../ui/app_ui.dart';
+import 'sparkline.dart';
 import 'trading_models.dart';
 
 /// Fetches a combined trading snapshot — injectable for tests.
@@ -56,8 +57,19 @@ class _CockpitScreenState extends State<CockpitScreen> {
   bool? _prevKill;
   bool? _prevBreaker;
 
+  // TC-2 — rolling session equity buffer for the sparkline (capped).
+  final List<double> _equityHistory = <double>[];
+  static const int _equityHistoryMax = 180; // ~12 min at 4s
+
   void _onTick() {
     _emitRiskAlerts();
+    final TradingSnapshot? s = _channel.value;
+    if (s != null && s.totalEquity > 0) {
+      _equityHistory.add(s.totalEquity);
+      if (_equityHistory.length > _equityHistoryMax) {
+        _equityHistory.removeAt(0);
+      }
+    }
     if (mounted) setState(() {});
   }
 
@@ -225,6 +237,21 @@ class _CockpitScreenState extends State<CockpitScreen> {
             ),
           ],
         ),
+        // TC-2 — live session equity curve.
+        if (_equityHistory.length >= 2) ...<Widget>[
+          const SizedBox(height: 14),
+          ApPanel(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                const ApSectionHeader('Equity · session',
+                    icon: Icons.show_chart),
+                const SizedBox(height: 8),
+                Sparkline(values: _equityHistory),
+              ],
+            ),
+          ),
+        ],
         const SizedBox(height: 14),
         // Risk / governance pills.
         Wrap(
