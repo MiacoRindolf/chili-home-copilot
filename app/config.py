@@ -4982,6 +4982,18 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_LLM_REVALIDATION_ENABLED"),
     )
+    # Deterministic native revalidation replaces the per-candidate LLM viability
+    # call with the same hard-invalidation checks computed directly (instant, no
+    # model call, cannot fail-closed on LLM unavailability). Default ON; set False
+    # to fall back to the LLM path. The _should_run_llm_revalidation gate (incl.
+    # the enabled flag above and shadow/options skips) still decides whether to
+    # revalidate at all.
+    chili_autotrader_deterministic_revalidation_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_AUTOTRADER_DETERMINISTIC_REVALIDATION_ENABLED"
+        ),
+    )
     chili_autotrader_llm_revalidation_skip_shadow_observation: bool = Field(
         default=AUTOTRADER_LLM_REVALIDATION_DEFAULT_SKIP_SHADOW_OBSERVATION,
         validation_alias=AliasChoices(

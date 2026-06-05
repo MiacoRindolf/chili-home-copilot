@@ -80,6 +80,7 @@ from ...config import (
 )
 from ...models.trading import AutoTraderRun, BreakoutAlert, PaperTrade, ScanPattern, Trade
 from .auto_trader_llm import run_revalidation_llm
+from .auto_trader_revalidation import deterministic_revalidation
 from .auto_trader_rules import (
     MANAGED_EDGE_GEOMETRY_SOURCE,
     RuleGateContext,
@@ -6463,14 +6464,30 @@ def _process_one_alert(
         snap["llm_revalidation_skipped"] = True
         snap["llm_revalidation_skip_reason"] = _llm_skip_reason
     if _run_llm_revalidation:
-        ohlcv = _ohlcv_summary(alert.ticker)
-        viable, llm_snap = run_revalidation_llm(
-            alert,
-            current_price=px,
-            ohlcv_summary=ohlcv,
-            pattern_name=_pattern_name(db, alert.scan_pattern_id),
-            trace_id=f"autotrader-{alert.id}",
-        )
+        # Deterministic native mechanics are the default revalidation path: the
+        # LLM prompt only catches HARD invalidations (stop hit, target met,
+        # incoherent levels, corrupt data) and is forbidden from judging the
+        # setup, so a ~14s non-deterministic call that FAILS CLOSED on model
+        # unavailability adds latency and a trade-killing failure mode, not
+        # quality. The LLM remains a revertible fallback behind the flag.
+        if bool(
+            getattr(settings, "chili_autotrader_deterministic_revalidation_enabled", True)
+        ):
+            viable, llm_snap = deterministic_revalidation(
+                alert, current_price=px, settings_=settings,
+            )
+            snap["revalidation_mode"] = "deterministic"
+            snap["revalidation_reason"] = str((llm_snap or {}).get("reason") or "")
+        else:
+            ohlcv = _ohlcv_summary(alert.ticker)
+            viable, llm_snap = run_revalidation_llm(
+                alert,
+                current_price=px,
+                ohlcv_summary=ohlcv,
+                pattern_name=_pattern_name(db, alert.scan_pattern_id),
+                trace_id=f"autotrader-{alert.id}",
+            )
+            snap["revalidation_mode"] = "llm"
         if not viable:
             llm_block_reason = _llm_revalidation_block_reason(llm_snap)
             snap["llm_revalidation_block_reason"] = llm_block_reason
