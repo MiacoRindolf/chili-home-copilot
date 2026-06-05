@@ -13,6 +13,7 @@ import '../chat/chat_screen.dart';
 import '../companion/shared_chat_history.dart';
 import '../dashboard/dashboard_screen.dart';
 import '../intercom/intercom_screen.dart';
+import '../mcp/mcp_screen.dart';
 import '../network/chili_api_client.dart';
 import '../research/research_screen.dart';
 import '../realtime/live_channel.dart';
@@ -124,6 +125,12 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
       Icons.travel_explore,
       () => const ResearchScreen(),
       size: const Size(880, 640),
+    ),
+    'mcp': _AppDef(
+      'MCP Tools',
+      Icons.hub_outlined,
+      () => const McpScreen(),
+      size: const Size(820, 620),
     ),
   };
 
