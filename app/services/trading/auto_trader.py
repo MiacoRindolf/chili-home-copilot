@@ -916,12 +916,64 @@ def _settings_float_clamped(
     return max(float(lower), min(float(upper), value))
 
 
+# Adaptive candidate-batch sizing. Rather than a hardcoded per-tick count, the
+# fetch batch is sized so the tick fills (without badly overrunning) its soft
+# time budget at the *observed* per-candidate latency: fast skips -> larger
+# batch, slow LLM revalidations -> smaller. The tick's own budget mechanism
+# still defers any overflow, so this only needs to be approximately right.
+# ``_candidate_tick_ewma_s`` is the EWMA of (tick_elapsed / processed), folded
+# in at the end of every tick by ``_update_candidate_tick_ewma``.
+_candidate_tick_ewma_s: float = 0.0
+_CANDIDATE_TICK_EWMA_ALPHA: float = 0.3  # smoothing factor for the latency EWMA
+
+
+def _update_candidate_tick_ewma(tick_elapsed_s: Any, processed: Any) -> None:
+    """Fold the latest tick's per-candidate latency into the EWMA used to size
+    the next fetch batch. No-op on empty/degenerate ticks."""
+    global _candidate_tick_ewma_s
+    try:
+        processed_i = int(processed)
+        elapsed_f = float(tick_elapsed_s)
+    except (TypeError, ValueError):
+        return
+    if processed_i <= 0 or elapsed_f <= 0.0:
+        return
+    sample = elapsed_f / float(processed_i)
+    if _candidate_tick_ewma_s <= 0.0:
+        _candidate_tick_ewma_s = sample
+    else:
+        _candidate_tick_ewma_s = (
+            (1.0 - _CANDIDATE_TICK_EWMA_ALPHA) * _candidate_tick_ewma_s
+            + _CANDIDATE_TICK_EWMA_ALPHA * sample
+        )
+
+
 def _autotrader_candidate_batch_size() -> int:
-    return _settings_int_clamped(
+    """Per-tick candidate fetch-batch size.
+
+    Adaptive by default: derived from the tick's soft time budget divided by the
+    observed per-candidate latency (EWMA), clamped to the [default, max] band —
+    so the batch auto-tunes to throughput instead of a fixed magic count. Set
+    ``chili_autotrader_candidate_batch_adaptive=False`` to pin it to the static
+    ``chili_autotrader_candidate_batch_size`` value (also used as the cold-start
+    seed before any latency telemetry has accrued).
+    """
+    static = _settings_int_clamped(
         "chili_autotrader_candidate_batch_size",
         AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE,
         lower=1,
         upper=AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
+    )
+    if not bool(getattr(settings, "chili_autotrader_candidate_batch_adaptive", True)):
+        return static
+    per_candidate = _candidate_tick_ewma_s
+    if per_candidate <= 0.0:
+        return static  # cold start: seed from config until telemetry accrues
+    soft_budget = float(_autotrader_tick_soft_budget_seconds())
+    target = int(soft_budget / per_candidate)
+    return max(
+        AUTOTRADER_DEFAULT_CANDIDATE_BATCH_SIZE,
+        min(AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE, target),
     )
 
 
@@ -5241,6 +5293,8 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         if diag is not None:
             out["candidate_pool_zero_diag"] = diag
     out["tick_elapsed_seconds"] = round(time.monotonic() - tick_started, 3)
+    # Feed this tick's per-candidate latency into the adaptive batch EWMA.
+    _update_candidate_tick_ewma(out.get("tick_elapsed_seconds"), out.get("processed"))
 
     logger.info(
         "[autotrader] tick uid=%s candidate_pool=%d pool_exact=%s "

@@ -2983,7 +2983,24 @@ class Settings(BaseSettings):
         ge=1,
         le=AUTOTRADER_MAX_CANDIDATE_BATCH_SIZE,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_CANDIDATE_BATCH_SIZE"),
-        description="Maximum AutoTrader alerts processed in one tick.",
+        description=(
+            "AutoTrader alerts fetched per tick. When "
+            "chili_autotrader_candidate_batch_adaptive is True (default) this is "
+            "only the cold-start seed; the live batch is sized adaptively from "
+            "the tick budget and observed per-candidate latency. When adaptive is "
+            "False this is the fixed batch."
+        ),
+    )
+    chili_autotrader_candidate_batch_adaptive: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_CANDIDATE_BATCH_ADAPTIVE"),
+        description=(
+            "When True (default), size the per-tick candidate fetch batch "
+            "adaptively: soft tick budget / EWMA per-candidate latency, clamped "
+            "to [default, max]. Fast skips => larger batch, slow LLM "
+            "revalidations => smaller; the tick budget defers any overflow. Set "
+            "False to pin the batch to chili_autotrader_candidate_batch_size."
+        ),
     )
     chili_autotrader_candidate_select_statement_timeout_ms: int = Field(
         default=0,
