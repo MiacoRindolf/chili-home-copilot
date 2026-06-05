@@ -5453,6 +5453,13 @@ class Settings(BaseSettings):
     brain_budget_pattern_injects_per_cycle: int = 32
     brain_budget_miner_error_trip: int = 5
 
+    # Work-ledger stall watchdog: flag a work type whose processor has gone silent
+    # (overdue pending + zero processing in the window) — catches a dead/absent
+    # dedicated worker in minutes, not hours. Conservative defaults to avoid
+    # false-positives on slow-cadence work types.
+    chili_work_ledger_stall_threshold_minutes: int = 120
+    chili_work_ledger_stall_min_pending: int = 5
+
     # Secondary miners: high-vol regime hypothesis (crypto 15m) â€” additive to compression intraday miner.
     brain_high_vol_miner_enabled: bool = True
     # Spawn ScanPattern from miner stats; must still pass normal backtest/OOS gates.
