@@ -12,6 +12,7 @@ from app.models.trading import (
     AutoTraderRun,
     BreakoutAlert,
     MarketSnapshot,
+    PrescreenCandidate,
     ScanPattern,
     Trade,
 )
@@ -2201,7 +2202,24 @@ def test_gather_imminent_scores_stock_structural_fields(
         win_rate=TEST_PATTERN_WIN_RATE,
         evidence_count=TEST_PATTERN_EVIDENCE_COUNT,
     )
-    db.add(pattern)
+    db.add_all(
+        [
+            pattern,
+            PrescreenCandidate(
+                ticker=stock_ticker,
+                ticker_norm=stock_ticker,
+                asset_universe="stock",
+                active=True,
+                entry_reasons=[],
+                sources_json={
+                    "tags": [
+                        "massive_momentum_gappers",
+                        "massive_high_rel_volume",
+                    ],
+                },
+            ),
+        ]
+    )
     db.commit()
 
     monkeypatch.setattr(
@@ -2254,9 +2272,25 @@ def test_gather_imminent_scores_stock_structural_fields(
     )
 
     assert [c["ticker"] for c in candidates] == [stock_ticker]
+    momentum_context = candidates[0]["score"][
+        imminent_mod.SMALL_CAP_MOMENTUM_CONTEXT_KEY
+    ]
+    assert momentum_context[
+        imminent_mod.PRESCREEN_SOURCE_TAGS_CONTEXT_KEY
+    ] == [
+        "massive_momentum_gappers",
+        "massive_high_rel_volume",
+    ]
+    assert momentum_context["prescreen_source_count"] == 2
+    assert momentum_context["prescreen_momentum_gapper"] is True
+    assert momentum_context["prescreen_high_relative_volume"] is True
     assert candidates[0]["flat"]["ibs"] == TEST_STRUCTURAL_IBS
     assert candidates[0]["flat"]["pullback_stretch_entry"] is False
+    assert imminent_mod.PRESCREEN_SOURCE_TAGS_CONTEXT_KEY not in candidates[0]["flat"]
+    assert "prescreen_momentum_gapper" not in candidates[0]["flat"]
     assert meta["skip_reasons"]["readiness_unusable"] == 0
+    assert meta["small_cap_momentum_context_prescreen_tagged"] == 1
+    assert meta["small_cap_momentum_context_prescreen_tag_lookup_failed"] is False
 
 
 def test_tickers_for_pattern_treats_stock_aliases_as_session_gated() -> None:
@@ -2565,6 +2599,12 @@ def test_insert_imminent_breakout_alert_persists_momentum_context_and_alert_colu
         "market_cap_b": 0.04,
         "bid": 9.98,
         "ask": 10.02,
+        imminent_mod.PRESCREEN_SOURCE_TAGS_CONTEXT_KEY: [
+            "massive_momentum_gappers",
+            "massive_high_rel_volume",
+        ],
+        "prescreen_momentum_gapper": True,
+        "prescreen_high_relative_volume": True,
     }
     score = {
         "price": 10.0,
@@ -2615,6 +2655,12 @@ def test_insert_imminent_breakout_alert_persists_momentum_context_and_alert_colu
     assert persisted["float_proxy_shares"] == pytest.approx(4_000_000.0)
     assert persisted["float_bucket"] == "micro_float_proxy"
     assert persisted["spread_bps"] == pytest.approx(40.0)
+    assert persisted[imminent_mod.PRESCREEN_SOURCE_TAGS_CONTEXT_KEY] == [
+        "massive_momentum_gappers",
+        "massive_high_rel_volume",
+    ]
+    assert persisted["prescreen_momentum_gapper"] is True
+    assert persisted["prescreen_high_relative_volume"] is True
     assert row.signals_snapshot[imminent_mod.SMALL_CAP_MOMENTUM_CONTEXT_KEY] == persisted
     assert row.sector == "Technology"
     assert row.news_sentiment_at_alert == pytest.approx(0.27)

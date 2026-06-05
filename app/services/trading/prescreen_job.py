@@ -83,6 +83,40 @@ def _candidate_source_tags(row: PrescreenCandidate) -> list[str]:
     return []
 
 
+def load_active_global_candidate_source_tags(
+    db: Session,
+    tickers: list[str] | tuple[str, ...] | set[str] | None = None,
+) -> dict[str, list[str]]:
+    """Return active global prescreen source tags keyed by normalized ticker."""
+    ticker_norms: set[str] = set()
+    if tickers:
+        ticker_norms = {
+            tn
+            for raw in tickers
+            if (tn := normalize_prescreen_ticker(raw))
+        }
+        if not ticker_norms:
+            return {}
+
+    q = (
+        db.query(PrescreenCandidate)
+        .filter(PrescreenCandidate.user_id.is_(None))
+        .filter(PrescreenCandidate.active.is_(True))
+    )
+    if ticker_norms:
+        q = q.filter(PrescreenCandidate.ticker_norm.in_(sorted(ticker_norms)))
+
+    out: dict[str, list[str]] = {}
+    for row in q.all():
+        ticker_norm = str(getattr(row, "ticker_norm", "") or "").strip().upper()
+        if not ticker_norm:
+            continue
+        tags = _candidate_source_tags(row)
+        if tags:
+            out[ticker_norm] = tags
+    return out
+
+
 def _candidate_reason_kinds(row: PrescreenCandidate) -> list[str]:
     reasons = getattr(row, "entry_reasons", None) or []
     if not isinstance(reasons, list):

@@ -777,6 +777,8 @@ def test_passes_rule_gate_stock_momentum_context_blocks_explicit_no_catalyst_pac
                 "news_count": 0,
                 "news_sentiment": 0.0,
                 "spread_bps": 25.0,
+                "prescreen_source_tags": ["massive_momentum_gappers"],
+                "prescreen_momentum_gapper": True,
             },
         },
     )

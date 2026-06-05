@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from app.models.trading import BrainBatchJob, PrescreenCandidate, PrescreenSnapshot
 from app.services.trading.prescreen_job import (
+    load_active_global_candidate_source_tags,
     load_active_global_candidate_tickers,
     run_daily_prescreen_job,
 )
@@ -121,6 +122,10 @@ def test_load_active_global_prioritizes_momentum_source_tags(db) -> None:
     db.commit()
 
     assert load_active_global_candidate_tickers(db) == ["ZZZ", "BBB", "AAA"]
+    assert load_active_global_candidate_source_tags(db, {"ZZZ", "AAA"}) == {
+        "AAA": ["core_default"],
+        "ZZZ": ["massive_momentum_gappers"],
+    }
 
 
 def test_main_prescreen_includes_momentum_gappers_source() -> None:

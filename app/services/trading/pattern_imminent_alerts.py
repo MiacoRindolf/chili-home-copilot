@@ -80,7 +80,10 @@ from .opportunity_scoring import (
 from .pattern_engine import _condition_has_data, _eval_condition
 from .pattern_ml import compute_condition_strength
 from .portfolio import get_watchlist
-from .prescreen_job import load_active_global_candidate_tickers
+from .prescreen_job import (
+    load_active_global_candidate_source_tags,
+    load_active_global_candidate_tickers,
+)
 from .scanner import _estimate_hold_duration, _score_ticker, classify_trade_type
 from .learning_predictions import _build_prediction_tickers, _indicator_data_to_flat_snapshot
 
@@ -155,6 +158,7 @@ _COINBASE_SPOT_TICKER_CACHE: dict[str, Any] = {
 }
 _SCORE_FAILURE_CACHE: dict[str, dict[str, float | int]] = {}
 SMALL_CAP_MOMENTUM_CONTEXT_KEY = "small_cap_momentum_context"
+PRESCREEN_SOURCE_TAGS_CONTEXT_KEY = "prescreen_source_tags"
 MOMENTUM_CONTEXT_SNAPSHOT_STALE_CADENCE_MULTIPLIER = 2.0
 
 
@@ -562,6 +566,17 @@ def _flat_indicator_value_supported(value: Any) -> bool:
     if isinstance(value, float) and value != value:
         return False
     return isinstance(value, (bool, int, float, str))
+
+
+def _momentum_context_value_supported(key: str, value: Any) -> bool:
+    if _flat_indicator_value_supported(value):
+        return True
+    if key == PRESCREEN_SOURCE_TAGS_CONTEXT_KEY and isinstance(value, list):
+        return bool(value) and all(
+            isinstance(item, str) and bool(item.strip())
+            for item in value
+        )
+    return False
 
 
 def _copy_scalar_indicator_fields(
@@ -1128,6 +1143,17 @@ MOMENTUM_CONTEXT_FACT_KEYS = MOMENTUM_CONTEXT_FLAT_MERGE_KEYS - frozenset({
 })
 
 
+PRESCREEN_SOURCE_TAG_CONTEXT_LIMIT = 32
+PRESCREEN_SOURCE_TAG_BOOL_FLAGS = {
+    "massive_momentum_gappers": "prescreen_momentum_gapper",
+    "massive_high_rel_volume": "prescreen_high_relative_volume",
+    "massive_top_gainers": "prescreen_top_gainer",
+    "yf_small_cap_gainers": "prescreen_top_gainer",
+    "massive_unusual_volume": "prescreen_unusual_volume",
+    "massive_new_high": "prescreen_new_high",
+}
+
+
 def _context_value(score: dict[str, Any], flat: dict[str, Any], key: str) -> Any:
     for source in (flat, score):
         if isinstance(source, dict):
@@ -1194,6 +1220,53 @@ def _copy_bool_context_value(
             return
 
 
+def _prescreen_source_tags_from_payload(payload: Any) -> list[str]:
+    if not isinstance(payload, dict):
+        return []
+    tags = payload.get("tags") or []
+    if isinstance(tags, str):
+        raw_tags = (tags,)
+    elif isinstance(tags, (list, tuple, set, frozenset)):
+        raw_tags = tags
+    else:
+        return []
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for tag in raw_tags:
+        tag_s = str(tag or "").strip()
+        if not tag_s or tag_s in seen:
+            continue
+        seen.add(tag_s)
+        out.append(tag_s)
+        if len(out) >= PRESCREEN_SOURCE_TAG_CONTEXT_LIMIT:
+            break
+    return out
+
+
+def _merge_prescreen_source_tags_into_momentum_context(
+    context: dict[str, Any],
+    tags: list[str],
+) -> bool:
+    cleaned = _prescreen_source_tags_from_payload({"tags": tags})
+    if not cleaned:
+        return False
+
+    existing = _prescreen_source_tags_from_payload({
+        "tags": context.get(PRESCREEN_SOURCE_TAGS_CONTEXT_KEY),
+    })
+    merged = _prescreen_source_tags_from_payload({"tags": [*existing, *cleaned]})
+    if not merged:
+        return False
+
+    context[PRESCREEN_SOURCE_TAGS_CONTEXT_KEY] = merged
+    context["prescreen_source_count"] = len(merged)
+    for tag, flag_key in PRESCREEN_SOURCE_TAG_BOOL_FLAGS.items():
+        if tag in merged:
+            context.setdefault(flag_key, True)
+    return True
+
+
 def _small_cap_momentum_context(
     score: dict[str, Any],
     flat: dict[str, Any],
@@ -1207,8 +1280,9 @@ def _small_cap_momentum_context(
         if not isinstance(source, dict):
             continue
         for key, value in source.items():
-            if _flat_indicator_value_supported(value):
-                context[str(key)] = value
+            key_s = str(key)
+            if _momentum_context_value_supported(key_s, value):
+                context[key_s] = value
 
     for key in (
         "gap_pct",
@@ -1309,7 +1383,7 @@ def _small_cap_momentum_context(
     return {
         key: value
         for key, value in context.items()
-        if _flat_indicator_value_supported(value)
+        if _momentum_context_value_supported(key, value)
     }
 
 
@@ -1856,6 +1930,24 @@ def gather_imminent_candidate_rows(
         user_id,
     )
     global_uni, uni_counts = build_imminent_ticker_universe(db, user_id, max_tickers)
+    prescreen_source_tag_tickers: set[str] = set(global_uni)
+    for pat in loaded_patterns:
+        scope = (getattr(pat, "ticker_scope", None) or "universal").strip().lower()
+        if scope in ("ticker_specific", "explicit_list"):
+            prescreen_source_tag_tickers.update(_parse_scope_tickers(pat))
+    prescreen_source_tags_by_ticker: dict[str, list[str]] = {}
+    prescreen_source_tag_lookup_failed = False
+    try:
+        prescreen_source_tags_by_ticker = load_active_global_candidate_source_tags(
+            db,
+            prescreen_source_tag_tickers,
+        )
+    except Exception:
+        prescreen_source_tag_lookup_failed = True
+        logger.debug(
+            "[pattern_imminent] prescreen source tag lookup failed",
+            exc_info=True,
+        )
     open_position_keys = (
         _open_autotrader_position_keys(db, user_id)
         if open_position_deflection_enabled
@@ -1912,6 +2004,7 @@ def gather_imminent_candidate_rows(
     ticker_rotation_samples: list[dict[str, Any]] = []
     momentum_context_cache: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
     momentum_context_candidates = 0
+    momentum_context_prescreen_tagged = 0
     momentum_context_snapshot_lookups = 0
     momentum_context_snapshot_enriched = 0
     momentum_context_snapshot_status_counts: Counter[str] = Counter()
@@ -2276,6 +2369,11 @@ def gather_imminent_candidate_rows(
                     momentum_context_snapshot_enriched += 1
                     for ctx_key, ctx_value in snapshot_context.items():
                         momentum_context.setdefault(ctx_key, ctx_value)
+                if _merge_prescreen_source_tags_into_momentum_context(
+                    momentum_context,
+                    prescreen_source_tags_by_ticker.get(cache_key, []),
+                ):
+                    momentum_context_prescreen_tagged += 1
                 if momentum_context:
                     momentum_context_candidates += 1
                     _merge_momentum_context_into_flat(flat, momentum_context)
@@ -2507,6 +2605,15 @@ def gather_imminent_candidate_rows(
         "open_position_deflection_keys": len(open_position_keys),
         "small_cap_momentum_context_key": SMALL_CAP_MOMENTUM_CONTEXT_KEY,
         "small_cap_momentum_context_candidates": momentum_context_candidates,
+        "small_cap_momentum_context_prescreen_tagged": (
+            momentum_context_prescreen_tagged
+        ),
+        "small_cap_momentum_context_prescreen_tag_tickers": (
+            len(prescreen_source_tags_by_ticker)
+        ),
+        "small_cap_momentum_context_prescreen_tag_lookup_failed": (
+            prescreen_source_tag_lookup_failed
+        ),
         "small_cap_momentum_context_snapshot_lookups": momentum_context_snapshot_lookups,
         "small_cap_momentum_context_snapshot_enriched": momentum_context_snapshot_enriched,
         "small_cap_momentum_context_snapshot_status_counts": dict(
