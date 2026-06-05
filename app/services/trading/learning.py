@@ -1107,12 +1107,21 @@ def _matches_thin_evidence_criteria(p, *, settings_=None) -> bool:
         getattr(s, "chili_pattern_demote_require_cpcv_degrade", True)
     )
 
-    n = int(getattr(p, "trade_count", 0) or 0)
+    # Realized-ONLY stats (corrected_* -> raw_realized_* -> missing); never the
+    # conflated legacy trade_count/win_rate (mining/backtest overwrite them with no
+    # provenance). This predicate gates a real live demotion
+    # (run_thin_evidence_demote sets lifecycle_stage='challenged'): a backtest-
+    # inflated legacy WR must not spare a realized-failing pattern, nor a backtest
+    # trade_count make a never-realized pattern demote-eligible. No clean realized
+    # evidence -> do not demote. (Twin of the evolve_patterns fix.)
+    from .pattern_stats_accessor import get_realized_pattern_stats
+    _rstats = get_realized_pattern_stats(p)
+    n = int(_rstats.trade_count or 0)
     # Phase 1 inversion: don't demote on realized stats with n < min_realized.
     if n < min_realized:
         return False
 
-    wr = getattr(p, "win_rate", None)
+    wr = _rstats.win_rate
     if wr is None:
         return False
     try:

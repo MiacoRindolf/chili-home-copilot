@@ -48,7 +48,7 @@ def build_clean_window_report(db: Session) -> dict[str, Any]:
     per_asset_sql = text(
         f"""
         SELECT COALESCE(asset_kind, 'unknown') AS asset_class,
-               count(*) AS n,
+               count(frac) AS n,
                avg(frac * 100.0) AS avg_ret_pct,
                sum(CASE WHEN frac > 0 THEN 1 ELSE 0 END) AS wins,
                min(exit_date) AS mind,

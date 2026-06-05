@@ -90,7 +90,7 @@ def _clean_window_live_ev(
     sql = text(
         f"""
         SELECT scan_pattern_id AS pid,
-               count(*) AS n,
+               count(frac) AS n,
                avg(frac * 100.0) AS avg_ret_pct,
                sum(CASE WHEN frac > 0 THEN 1 ELSE 0 END) AS wins,
                min(exit_date) AS mind,
@@ -188,6 +188,7 @@ def run_realized_ev_demote_pass(db: Session) -> dict[str, Any]:
     kept_unrepresentative = 0
     kept_passing = 0
     demoted_ids: list[int] = []
+    reason_updates: list[tuple[int, str]] = []
 
     for p in promoted:
         base["evaluated"] += 1
@@ -195,10 +196,13 @@ def run_realized_ev_demote_pass(db: Session) -> dict[str, Any]:
         # Settle-in window — anchored on the promotion-time lifecycle change,
         # NOT updated_at (which any write resets). Give a freshly-promoted
         # pattern the configured days to accumulate post-floor evidence.
+        # Anchor on lifecycle_changed_at (set at promotion), then created_at (a
+        # stable, NON-NULL lower bound) -- NEVER updated_at, which any write
+        # (recompute / migration / stats refresh) bumps, silently restarting the
+        # settle clock. (promoted_at is not a ScanPattern column.)
         anchor = (
             getattr(p, "lifecycle_changed_at", None)
-            or getattr(p, "promoted_at", None)
-            or getattr(p, "updated_at", None)
+            or getattr(p, "created_at", None)
             or datetime.utcnow()
         )
         if anchor >= settle_cutoff:
@@ -225,20 +229,20 @@ def run_realized_ev_demote_pass(db: Session) -> dict[str, Any]:
         # Representative post-floor clean LIVE evidence, net-negative -> demote.
         p.lifecycle_stage = "challenged"
         p.promotion_status = "demote_clean_window_realized_ev"[:30]
+        _avg = s["avg_ret_pct"] if s["avg_ret_pct"] is not None else 0.0
         reason = (
             f"realized_ev_demote_pass(clean-window>={since}) "
             f"{datetime.utcnow().isoformat(timespec='seconds')}: "
-            f"post_floor_live n={s['n']} avg_ret_pct={s['avg_ret_pct']:.3f} "
+            f"post_floor_live n={s['n']} avg_ret_pct={_avg:.3f} "
             f"win_rate={(s['win_rate'] or 0.0):.3f} span_days={s['span_days']} "
             f"(representative & net-negative; min_n={min_trades} min_days={min_days})"
         )
-        existing_reason = getattr(p, "promotion_demote_reason", None) or ""
-        p.promotion_demote_reason = (existing_reason + "\n" + reason).strip()[:2000]
         now = datetime.utcnow()
         p.lifecycle_changed_at = now
         p.updated_at = now
         demoted += 1
         demoted_ids.append(int(p.id))
+        reason_updates.append((int(p.id), reason))
         logger.warning(
             "[realized_ev_demote_pass] DEMOTE id=%s name=%s post_floor_live_n=%s "
             "avg_ret_pct=%.3f win_rate=%.3f span_days=%s",
@@ -247,6 +251,28 @@ def run_realized_ev_demote_pass(db: Session) -> dict[str, Any]:
         )
 
     db.commit()
+
+    # promotion_demote_reason is NOT a mapped ScanPattern column (it exists in the
+    # DB only, via migration) -- ORM attribute assignment is silently discarded at
+    # flush, exactly as run_thin_evidence_demote documents. Persist the audit
+    # reason via raw SQL after the lifecycle commit (append to any prior reason).
+    for _pid, _reason in reason_updates:
+        try:
+            _row = db.execute(
+                text("SELECT promotion_demote_reason FROM scan_patterns WHERE id = :pid"),
+                {"pid": _pid},
+            ).first()
+            _existing = (_row[0] if _row and _row[0] else "") or ""
+            db.execute(
+                text("UPDATE scan_patterns SET promotion_demote_reason = :r WHERE id = :pid"),
+                {"r": (_existing + "\n" + _reason).strip()[:2000], "pid": _pid},
+            )
+        except Exception:
+            logger.warning(
+                "[realized_ev_demote_pass] failed to persist demote reason for pattern %s", _pid
+            )
+    if reason_updates:
+        db.commit()
 
     base["demoted_failing_gate"] = demoted
     base["kept_within_settle_window"] = kept_within_settle
