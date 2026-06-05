@@ -918,6 +918,56 @@ def _enrich_snapshot_cross_tf(
     return snap
 
 
+def _expanded_vocab_indicators(high, low, close, volume) -> dict[str, Any]:
+    """Last-bar scalars for the expanded vocabulary (volume-flow, alt-momentum,
+    volatility-squeeze) for the _score_ticker indicator dicts, so they flow to
+    flat_indicators -> the miner. Computed via the shared indicator_core helpers
+    so scan-time values match the entry surface (compute_all_from_df) by
+    construction. These keys are deliberately absent from feature_parity's
+    DEFAULT_FEATURES catalog, so they never gate live entries.
+    """
+    out: dict[str, Any] = {}
+    try:
+        from .indicator_core import (
+            compute_obv, compute_mfi, compute_vwap, compute_cci, compute_roc,
+            compute_keltner, compute_bollinger,
+        )
+
+        def _last(s) -> float | None:
+            try:
+                v = s.iloc[-1]
+                return float(v) if pd.notna(v) else None
+            except Exception:
+                return None
+
+        out["obv"] = _last(compute_obv(close, volume))
+        out["mfi"] = _last(compute_mfi(high, low, close, volume))
+        _vwap_last = _last(compute_vwap(high, low, close, volume))
+        out["vwap"] = _vwap_last
+        _price = _last(close)
+        out["vwap_dist_pct"] = (
+            round((_price - _vwap_last) / _vwap_last * 100.0, 4)
+            if _vwap_last not in (None, 0) and _price is not None
+            else None
+        )
+        out["cci"] = _last(compute_cci(high, low, close))
+        out["roc"] = _last(compute_roc(close))
+        _kc = compute_keltner(high, low, close)
+        out["keltner_upper"] = _last(_kc["upper"])
+        out["keltner_lower"] = _last(_kc["lower"])
+        out["keltner_mid"] = _last(_kc["mid"])
+        _bb = compute_bollinger(close)
+        _bu, _bl = _last(_bb["upper"]), _last(_bb["lower"])
+        _ku, _kl = out["keltner_upper"], out["keltner_lower"]
+        out["ttm_squeeze"] = bool(
+            _bu is not None and _bl is not None and _ku is not None and _kl is not None
+            and _bu < _ku and _bl > _kl
+        )
+    except Exception:
+        logger.debug("[scanner] expanded-vocab indicators failed", exc_info=True)
+    return out
+
+
 def _score_ticker_impl(
     ticker: str,
     *,
@@ -1296,6 +1346,7 @@ def _score_ticker_impl(
                     (price - float(close.iloc[-2])) / float(close.iloc[-2]) * 100, 2
                 ) if len(close) >= 2 and float(close.iloc[-2]) > 0 else 0.0,
                 **pattern_structural_indicators,
+                **_expanded_vocab_indicators(high, low, close, volume),
             },
         }
     except Exception:
@@ -1569,6 +1620,7 @@ def _score_ticker_intraday(ticker: str) -> dict[str, Any] | None:
                 "atr": round(atr_f, 4),
                 "stoch_k": round(float(stoch_k), 1) if pd.notna(stoch_k) else None,
                 "vol_ratio": vol_ratio,
+                **_expanded_vocab_indicators(high, low, close, volume),
             },
         }
     except Exception:
@@ -2922,6 +2974,7 @@ def _score_crypto_breakout(ticker: str) -> dict[str, Any] | None:
                 "stoch_k": round(float(stoch_k), 1) if pd.notna(stoch_k) else None,
                 "stoch_d": round(float(stoch_d), 1) if pd.notna(stoch_d) else None,
                 "rvol": rvol,
+                **_expanded_vocab_indicators(ind["high"], ind["low"], ind["close"], ind["volume"]),
             },
             "news_sentiment": _news_score,
             "sector": "crypto",
@@ -3678,6 +3731,7 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
                 "ema_50": smart_round(float(ema_50), crypto=_cr) if pd.notna(ema_50) else None,
                 "ema_100": smart_round(float(ema_100), crypto=_cr) if pd.notna(ema_100) else None,
                 "bb_width_pctile": round(bb_width_pct_rank, 0),
+                **_expanded_vocab_indicators(ind["high"], ind["low"], ind["close"], ind["volume"]),
             },
             "news_sentiment": _news_score,
             "sector": _get_sector_for_ticker(ticker),
