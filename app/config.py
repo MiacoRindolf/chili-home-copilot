@@ -4766,6 +4766,24 @@ class Settings(BaseSettings):
             "CHILI_SHADOW_VETTING_FAILED_GATE_MAX_MEDIAN_SHARPE"
         ),
     )
+    # Realized-edge pilot lane: graduate a shadow pattern to the reversible
+    # pilot lane when the lower-confidence bound of its realized per-trade
+    # expectancy is provably positive. Complements the CPCV/quality-weighted
+    # pilot score, which under-credits high-consistency low-variance grinders.
+    # Default ON (the bar is a provably positive realized edge; losers can
+    # never clear it).
+    chili_shadow_vetting_realized_edge_pilot_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "CHILI_SHADOW_VETTING_REALIZED_EDGE_PILOT_ENABLED"
+        ),
+    )
+    chili_shadow_vetting_realized_edge_ci_level: float = Field(
+        default=0.90,
+        validation_alias=AliasChoices(
+            "CHILI_SHADOW_VETTING_REALIZED_EDGE_CI_LEVEL"
+        ),
+    )
     # Pilot stage: broker-eligible but confidence-sized. This is the
     # non-binary ramp between broker-blocked shadow observation and full
     # promoted sizing.

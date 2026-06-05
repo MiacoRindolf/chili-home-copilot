@@ -1274,6 +1274,75 @@ def _negative_realized_gate_hold_reason(
     return "negative_realized_cpcv_gate"
 
 
+def _realized_edge_pilot_eligible(
+    pattern: Any,
+    *,
+    settings_: Any,
+) -> tuple[bool, dict[str, Any]]:
+    """Adaptive realized-edge pilot lane (the symmetric upside of the negative gate).
+
+    The CPCV-weighted pilot score under-credits high-consistency, low-variance
+    "grinder" patterns (modest per-trade edge, large realized sample) relative to
+    high-variance "slugger" patterns. Such grinders can therefore sit in
+    ``shadow_vetted_hold`` indefinitely despite a provably profitable live/paper
+    record (e.g. a pattern with 100%+ cumulative realized return over 130+ trades
+    whose per-trade edge is too small to clear the CPCV/quality-weighted score).
+
+    This lane graduates a shadow pattern to the (smaller-risk, reversible) pilot
+    lane when the *lower confidence bound* of its realized per-trade expectancy is
+    positive: i.e. we are statistically confident, at ``ci_level``, that the
+    realized win/loss geometry pays. Realized magnitudes are already net of fees,
+    so cost is not subtracted again — conservatism comes entirely from the
+    win-rate lower-confidence bound, which is self-regulating: a thin sample
+    widens the interval and pulls the bound toward zero, so a short record cannot
+    pass unless its edge is large. No fixed score threshold is introduced; the bar
+    is a provably positive expectancy (ev_lcb > 0). Losers (negative realized,
+    payoff < 1 with low win-rate, etc.) can never clear it.
+    """
+    detail: dict[str, Any] = {}
+    n = _safe_float(getattr(pattern, "raw_realized_trade_count", None), 0.0)
+    wr = _safe_float(getattr(pattern, "raw_realized_win_rate", None))
+    payoff = _safe_float(getattr(pattern, "payoff_ratio", None))
+    avg_win = _safe_float(getattr(pattern, "avg_winner_pct", None))
+    detail.update({"n": n, "wr": wr, "payoff": payoff, "avg_win": avg_win})
+    # Minimum-evidence floor reuses the portfolio gate's realized-trades floor
+    # (not a new magic number); the LCB already self-regulates thin samples.
+    min_n = _safe_float_or_default(
+        getattr(settings_, "chili_alpha_portfolio_min_realized_trades", 5), 5.0
+    )
+    if (
+        n is None
+        or n < min_n
+        or wr is None
+        or payoff is None
+        or payoff <= 0.0
+        or avg_win is None
+        or avg_win <= 0.0
+    ):
+        detail.update(
+            {"eligible": False, "reason": "insufficient_realized_evidence", "min_n": min_n}
+        )
+        return False, detail
+    ci_level = _safe_float_or_default(
+        getattr(settings_, "chili_shadow_vetting_realized_edge_ci_level", 0.90), 0.90
+    )
+    wr_lcb = _lower_confidence_bound(wr, n, ci_level)
+    avg_loss = avg_win / payoff  # payoff_ratio == avg_win / avg_loss
+    ev_lcb = wr_lcb * avg_win - (1.0 - wr_lcb) * avg_loss
+    eligible = ev_lcb > 0.0
+    detail.update(
+        {
+            "min_n": min_n,
+            "ci_level": ci_level,
+            "wr_lcb": wr_lcb,
+            "avg_loss": avg_loss,
+            "ev_lcb": ev_lcb,
+            "eligible": eligible,
+        }
+    )
+    return eligible, detail
+
+
 def run_shadow_vetting_cycle(
     db: Session,
     *,
@@ -1437,6 +1506,22 @@ def run_shadow_vetting_cycle(
                     exc_info=True,
                 )
             continue
+        # Adaptive realized-edge pilot lane: graduate provably-profitable
+        # "grinder" shadows that the CPCV/quality-weighted pilot score
+        # under-credits. Reversible (pilot lane) and subject to the same pilot
+        # risk gate as the score-based path.
+        realized_edge_eligible = False
+        realized_edge_detail: dict[str, Any] | None = None
+        if bool(
+            getattr(settings_, "chili_shadow_vetting_realized_edge_pilot_enabled", True)
+        ):
+            realized_edge_eligible, realized_edge_detail = _realized_edge_pilot_eligible(
+                pattern, settings_=settings_
+            )
+            if not alpha_gate_allows_pilot_risk:
+                realized_edge_eligible = False
+            row["realized_edge_pilot_eligible"] = realized_edge_eligible
+            row["realized_edge_pilot_detail"] = realized_edge_detail
         if row["eligible"] and bool(
             getattr(settings_, "chili_shadow_vetting_require_realized_ev_for_full", True)
         ):
@@ -1500,11 +1585,15 @@ def run_shadow_vetting_cycle(
                 )
             except Exception:
                 logger.debug("%s promotion_surface emit failed", LOG_PREFIX, exc_info=True)
-        elif row["pilot_eligible"]:
+        elif row["pilot_eligible"] or realized_edge_eligible:
             if old_lifecycle != "pilot_promoted":
                 old_status = (pattern.promotion_status or "").strip()
                 pattern.lifecycle_stage = "pilot_promoted"
-                pattern.promotion_status = "pilot_via_shadow_vetting"
+                pattern.promotion_status = (
+                    "pilot_via_shadow_vetting"
+                    if row["pilot_eligible"]
+                    else "pilot_via_realized_edge"
+                )
                 pattern.lifecycle_changed_at = now
                 pattern.active = True
                 pilot_ids.append(pid)
@@ -1518,8 +1607,14 @@ def run_shadow_vetting_cycle(
                         old_lifecycle_stage=old_lifecycle,
                         new_promotion_status=pattern.promotion_status,
                         new_lifecycle_stage=pattern.lifecycle_stage,
-                        source="shadow_vetting_pilot",
+                        source=(
+                            "shadow_vetting_pilot"
+                            if row["pilot_eligible"]
+                            else "shadow_vetting_realized_edge"
+                        ),
                         extra={
+                            "realized_edge_pilot_eligible": realized_edge_eligible,
+                            "realized_edge_pilot_detail": realized_edge_detail,
                             "pilot_score": row["pilot_score"],
                             "pilot_score_threshold": row["pilot_score_threshold"],
                             "evidence_maturity": row["evidence_maturity"],
