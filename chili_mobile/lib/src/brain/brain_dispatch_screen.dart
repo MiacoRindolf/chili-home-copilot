@@ -3030,8 +3030,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('Architect plan', style: Theme.of(context).textTheme.titleSmall),
-        const SizedBox(height: 8),
+        const ApSectionHeader('Architect plan', icon: Icons.architecture),
+        const SizedBox(height: 4),
         if (planBody.isEmpty && files.isEmpty)
           Text('Waiting for plan', style: TextStyle(color: _mutedTextColor()))
         else ...[
@@ -3060,8 +3060,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('Agent lanes', style: Theme.of(context).textTheme.titleSmall),
-        const SizedBox(height: 8),
+        const ApSectionHeader('Agent lanes', icon: Icons.groups_outlined),
+        const SizedBox(height: 4),
         if (agents.isEmpty)
           Text('Waiting for lane assignment',
               style: TextStyle(color: _mutedTextColor()))
@@ -3120,7 +3120,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('Validation', style: Theme.of(context).textTheme.titleSmall),
+        const ApSectionHeader('Validation', icon: Icons.fact_check_outlined),
         const SizedBox(height: 8),
         if (validation.isEmpty)
           Text('No validation results yet',
@@ -3201,7 +3201,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('Artifacts', style: Theme.of(context).textTheme.titleSmall),
+        const ApSectionHeader('Artifacts', icon: Icons.folder_open_outlined),
         const SizedBox(height: 8),
         if (visible.isEmpty)
           Text('No artifacts yet', style: TextStyle(color: _mutedTextColor()))
@@ -3290,7 +3290,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('Learning signals', style: Theme.of(context).textTheme.titleSmall),
+        const ApSectionHeader('Learning signals', icon: Icons.school_outlined),
         const SizedBox(height: 8),
         if (learning.isEmpty)
           Text('No learning sample recorded yet',
