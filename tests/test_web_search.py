@@ -168,6 +168,32 @@ class TestResearchSearch:
             out = ws.research_search("topic")
         assert "content" not in out[0]
 
+    @patch("app.web_search.fetch_sources")
+    @patch("app.web_search.search")
+    def test_override_true_forces_fetch_despite_flag_off(self, mock_search, mock_fetch_sources):
+        # On-demand research passes fetch_sources=True to get full content even
+        # when the background default (search_fetch_sources) is off.
+        from app import web_search as ws
+        mock_search.return_value = self._fresh_results()
+        mock_fetch_sources.return_value = [
+            {"url": "https://a.com", "success": True, "content": "FULL ARTICLE TEXT"},
+        ]
+        with patch.object(ws.settings, "search_fetch_sources", False, create=True), \
+             patch.object(ws.settings, "search_max_fetch", 1, create=True):
+            out = ws.research_search("topic", fetch_content=True)
+        mock_fetch_sources.assert_called_once()
+        assert out[0]["content"] == "FULL ARTICLE TEXT"
+
+    @patch("app.web_search.fetch_sources")
+    @patch("app.web_search.search")
+    def test_override_false_forces_snippets_despite_flag_on(self, mock_search, mock_fetch_sources):
+        from app import web_search as ws
+        mock_search.return_value = self._fresh_results()
+        with patch.object(ws.settings, "search_fetch_sources", True, create=True):
+            out = ws.research_search("topic", fetch_content=False)
+        mock_fetch_sources.assert_not_called()
+        assert all("content" not in r for r in out)
+
 
 class TestFetchSources:
     """fetch_sources() is a thin wrapper over search_providers.fetch_many."""
