@@ -15,6 +15,9 @@ typedef ResearchReportOpener = Future<bool> Function();
 /// Runs on-demand research on a topic; returns {ok, stored, ...} — injectable.
 typedef ResearchRunner = Future<Map<String, dynamic>> Function(String topic);
 
+/// Opens a source URL in the browser; returns true on success — injectable (RS-5).
+typedef ResearchUrlOpener = Future<bool> Function(String url);
+
 /// CHILI Research — surfaces the salvaged Odysseus research power: browse the
 /// digest + open the visual report (RS-1), and run research on demand (RS-2).
 class ResearchScreen extends StatefulWidget {
@@ -23,14 +26,17 @@ class ResearchScreen extends StatefulWidget {
     ResearchDigestFetcher? fetcher,
     ResearchReportOpener? reportOpener,
     ResearchRunner? runner,
+    ResearchUrlOpener? urlOpener,
     this.onDiscuss,
   })  : _injectedFetcher = fetcher,
         _injectedOpener = reportOpener,
-        _injectedRunner = runner;
+        _injectedRunner = runner,
+        _injectedUrlOpener = urlOpener;
 
   final ResearchDigestFetcher? _injectedFetcher;
   final ResearchReportOpener? _injectedOpener;
   final ResearchRunner? _injectedRunner;
+  final ResearchUrlOpener? _injectedUrlOpener;
 
   /// RC-1 — pivot a research topic into Chat ("Discuss"). Wired by the workspace
   /// to the shared ⌘K ask-inbox so Chat opens and asks about the topic.
@@ -44,6 +50,7 @@ class _ResearchScreenState extends State<ResearchScreen> {
   late final ResearchDigestFetcher _fetcher;
   late final ResearchReportOpener _opener;
   late final ResearchRunner _runner;
+  late final ResearchUrlOpener _urlOpener; // RS-5
   final TextEditingController _topicCtrl = TextEditingController();
   ChiliApiClient? _api;
 
@@ -67,6 +74,7 @@ class _ResearchScreenState extends State<ResearchScreen> {
     _opener = widget._injectedOpener ??
         () async => (await openResearchReport(_api!)) != null;
     _runner = widget._injectedRunner ?? _api!.runResearch;
+    _urlOpener = widget._injectedUrlOpener ?? openExternalUrl;
     _load();
   }
 
@@ -386,30 +394,52 @@ class _ResearchScreenState extends State<ResearchScreen> {
     );
   }
 
+  // RS-5 — open a source in the OS browser; toast on failure / unopenable.
+  Future<void> _openSource(ResearchSource s) async {
+    if (!s.isOpenable) return;
+    final bool ok = await _urlOpener(s.url);
+    if (!ok && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Couldn’t open ${s.host}')),
+      );
+    }
+  }
+
   Widget _sourceRow(ColorScheme cs, ResearchSource s) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 3),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          Icon(Icons.link, size: 14, color: cs.secondary),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                Text(s.title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(fontSize: 13, color: cs.onSurface)),
-                if (s.host.isNotEmpty)
-                  Text(s.host,
-                      style:
-                          TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
-              ],
+    final bool openable = s.isOpenable; // RS-5
+    return InkWell(
+      onTap: openable ? () => _openSource(s) : null,
+      borderRadius: BorderRadius.circular(6),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 5, horizontal: 2),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Icon(Icons.link, size: 14, color: cs.secondary),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text(s.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                          fontSize: 13,
+                          color: openable ? cs.primary : cs.onSurface)),
+                  if (s.host.isNotEmpty)
+                    Text(s.host,
+                        style: TextStyle(
+                            fontSize: 11, color: cs.onSurfaceVariant)),
+                ],
+              ),
             ),
-          ),
-        ],
+            if (openable) ...<Widget>[
+              const SizedBox(width: 8),
+              Icon(Icons.open_in_new, size: 14, color: cs.onSurfaceVariant),
+            ],
+          ],
+        ),
       ),
     );
   }
