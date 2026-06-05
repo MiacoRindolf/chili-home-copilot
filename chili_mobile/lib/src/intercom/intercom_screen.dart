@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../network/chili_api_client.dart';
+import '../ui/app_ui.dart';
 
 class IntercomScreen extends StatefulWidget {
   const IntercomScreen({super.key});
@@ -64,32 +65,51 @@ class _IntercomScreenState extends State<IntercomScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Intercom',
-              style: Theme.of(context).textTheme.headlineMedium),
+          // Batch I1 — header with icon + theme subtitle.
+          Row(children: [
+            Icon(Icons.record_voice_over,
+                color: Theme.of(context).colorScheme.primary),
+            const SizedBox(width: 10),
+            Text('Intercom',
+                style: Theme.of(context).textTheme.headlineMedium),
+          ]),
           const SizedBox(height: 4),
           Text('Push-to-talk with your housemates',
-              style: TextStyle(color: Colors.grey.shade600)),
+              style: TextStyle(
+                  color: Theme.of(context).colorScheme.onSurfaceVariant)),
           const SizedBox(height: 20),
 
           if (_error != null)
-            Card(
-              color: Colors.amber.shade50,
-              child: Padding(
-                padding: const EdgeInsets.all(20),
-                child: Row(children: [
-                  Icon(Icons.info_outline, color: Colors.amber.shade800),
-                  const SizedBox(width: 12),
-                  Expanded(
-                      child: Text(_error!,
-                          style: TextStyle(color: Colors.amber.shade900))),
-                  IconButton(
-                      icon: const Icon(Icons.refresh),
-                      onPressed: _loadStatus),
-                ]),
-              ),
+            // Batch I4 — theme-tinted warning panel (was amber.shade50).
+            ApPanel(
+              color: Colors.amber.withValues(alpha: 0.10),
+              child: Row(children: [
+                Icon(Icons.info_outline, color: Colors.amber.shade700),
+                const SizedBox(width: 12),
+                Expanded(
+                    child: Text(_error!,
+                        style: TextStyle(
+                            color:
+                                Theme.of(context).colorScheme.onSurface))),
+                IconButton(
+                    icon: const Icon(Icons.refresh), onPressed: _loadStatus),
+              ]),
             )
           else if (_loading)
-            const Center(child: CircularProgressIndicator())
+            // Batch I2 — labeled loading.
+            const Center(
+              child: Padding(
+                padding: EdgeInsets.all(32),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    CircularProgressIndicator(),
+                    SizedBox(height: 12),
+                    Text('Loading housemates…'),
+                  ],
+                ),
+              ),
+            )
           else ...[
             Card(
               child: Padding(
@@ -115,17 +135,21 @@ class _IntercomScreenState extends State<IntercomScreen> {
               ),
             ),
             const SizedBox(height: 20),
-            Text('Housemates',
-                style: Theme.of(context).textTheme.titleMedium),
+            // Batch I5 — section title with icon.
+            Row(children: [
+              Icon(Icons.groups_outlined,
+                  size: 18, color: Theme.of(context).colorScheme.primary),
+              const SizedBox(width: 8),
+              Text('Housemates',
+                  style: Theme.of(context).textTheme.titleMedium),
+            ]),
             const SizedBox(height: 8),
             if (_housemates.isEmpty)
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(24),
-                  child: Center(
-                      child: Text('No housemates found. Pair devices first.',
-                          style: TextStyle(color: Colors.grey.shade600))),
-                ),
+              // Batch I3 — shared empty state.
+              const ApEmptyState(
+                icon: Icons.group_off_outlined,
+                message: 'No housemates found',
+                detail: 'Pair devices first to see them here.',
               )
             else
               ..._housemates.map(_housemateCard),
