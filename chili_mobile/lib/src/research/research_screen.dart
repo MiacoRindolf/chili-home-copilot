@@ -12,19 +12,24 @@ typedef ResearchDigestFetcher = Future<Map<String, dynamic>> Function();
 /// Opens the visual report; returns true on success — injectable for tests.
 typedef ResearchReportOpener = Future<bool> Function();
 
-/// CHILI Research — surfaces the salvaged Odysseus research power (RS-1):
-/// browse the user's research digest (topics + sources) and open the
-/// self-contained HTML visual report in the browser.
+/// Runs on-demand research on a topic; returns {ok, stored, ...} — injectable.
+typedef ResearchRunner = Future<Map<String, dynamic>> Function(String topic);
+
+/// CHILI Research — surfaces the salvaged Odysseus research power: browse the
+/// digest + open the visual report (RS-1), and run research on demand (RS-2).
 class ResearchScreen extends StatefulWidget {
   const ResearchScreen({
     super.key,
     ResearchDigestFetcher? fetcher,
     ResearchReportOpener? reportOpener,
+    ResearchRunner? runner,
   })  : _injectedFetcher = fetcher,
-        _injectedOpener = reportOpener;
+        _injectedOpener = reportOpener,
+        _injectedRunner = runner;
 
   final ResearchDigestFetcher? _injectedFetcher;
   final ResearchReportOpener? _injectedOpener;
+  final ResearchRunner? _injectedRunner;
 
   @override
   State<ResearchScreen> createState() => _ResearchScreenState();
@@ -33,23 +38,67 @@ class ResearchScreen extends StatefulWidget {
 class _ResearchScreenState extends State<ResearchScreen> {
   late final ResearchDigestFetcher _fetcher;
   late final ResearchReportOpener _opener;
+  late final ResearchRunner _runner;
+  final TextEditingController _topicCtrl = TextEditingController();
   ChiliApiClient? _api;
 
   ResearchDigest? _digest;
   bool _loading = true;
   bool _openingReport = false;
+  bool _running = false;
   String? _error;
 
   @override
   void initState() {
     super.initState();
-    final bool needClient =
-        widget._injectedFetcher == null || widget._injectedOpener == null;
+    final bool needClient = widget._injectedFetcher == null ||
+        widget._injectedOpener == null ||
+        widget._injectedRunner == null;
     _api = needClient ? ChiliApiClient() : null;
     _fetcher = widget._injectedFetcher ?? _api!.getResearchDigest;
     _opener = widget._injectedOpener ??
         () async => (await openResearchReport(_api!)) != null;
+    _runner = widget._injectedRunner ?? _api!.runResearch;
     _load();
+  }
+
+  @override
+  void dispose() {
+    _topicCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _runResearch() async {
+    final String topic = _topicCtrl.text.trim();
+    if (topic.isEmpty || _running) return;
+    setState(() => _running = true);
+    Map<String, dynamic> res;
+    try {
+      res = await _runner(topic);
+    } catch (_) {
+      res = const <String, dynamic>{};
+    }
+    if (!mounted) return;
+    setState(() => _running = false);
+    final bool stored = res['stored'] == true;
+    if (stored) {
+      _topicCtrl.clear();
+      _snack('Researched “$topic” — added to your digest');
+      _load(); // refresh to show the new topic
+    } else {
+      final String note = (res['error'] ?? res['note'] ?? '').toString();
+      _snack(note.isEmpty
+          ? 'Couldn’t research that topic'
+          : note);
+    }
+  }
+
+  void _snack(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(msg),
+      behavior: SnackBarBehavior.floating,
+      duration: const Duration(seconds: 3),
+    ));
   }
 
   Future<void> _load() async {
@@ -98,8 +147,47 @@ class _ResearchScreenState extends State<ResearchScreen> {
       body: Column(
         children: <Widget>[
           _header(cs),
+          _runBar(cs),
           const Divider(height: 1),
           Expanded(child: _body(cs)),
+        ],
+      ),
+    );
+  }
+
+  // RS-2 — on-demand research: type a topic, CHILI researches it now.
+  Widget _runBar(ColorScheme cs) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 0, 16, 12),
+      child: Row(
+        children: <Widget>[
+          Expanded(
+            child: TextField(
+              controller: _topicCtrl,
+              enabled: !_running,
+              textInputAction: TextInputAction.search,
+              onSubmitted: (_) => _runResearch(),
+              decoration: InputDecoration(
+                isDense: true,
+                hintText: 'Research a topic now…',
+                prefixIcon: const Icon(Icons.search, size: 18),
+                border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12)),
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          FilledButton.icon(
+            onPressed: _running ? null : _runResearch,
+            icon: _running
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.bolt, size: 18),
+            label: Text(_running ? 'Researching…' : 'Research'),
+            style: FilledButton.styleFrom(minimumSize: const Size(0, 44)),
+          ),
         ],
       ),
     );

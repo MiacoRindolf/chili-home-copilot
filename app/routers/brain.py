@@ -1644,6 +1644,59 @@ def mcp_status():
     })
 
 
+class _ResearchRunReq(BaseModel):
+    model_config = {"extra": "forbid"}
+    topic: str
+
+
+@router.post("/api/brain/reasoning/research/run")
+def reasoning_research_run(
+    payload: _ResearchRunReq,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Run research on a topic on demand and store it for the paired user.
+
+    Web search → mechanical (non-LLM) summary, LLM fallback only if needed; gated
+    by the existing ``reasoning_enabled`` setting. User-scoped (research is
+    per-user) — guests must pair first. Topic is length-capped.
+    """
+    ctx = get_identity_ctx(request, db)
+    user_id = ctx.get("user_id")
+    if ctx.get("is_guest") or not user_id:
+        return JSONResponse(
+            {"ok": False, "error": "Pair your device to run research."},
+            status_code=401,
+        )
+    topic = (payload.topic or "").strip()[:200]
+    if not topic:
+        return JSONResponse({"ok": False, "error": "Topic is required."}, status_code=400)
+
+    try:
+        from ..services.reasoning_brain.web_researcher import research_topic_now
+
+        data = research_topic_now(db, user_id, topic)
+    except Exception as e:  # pragma: no cover - defensive
+        return JSONResponse(
+            {"ok": False, "error": str(e)[:200]}, status_code=500
+        )
+
+    if not data:
+        return JSONResponse({
+            "ok": True,
+            "stored": False,
+            "topic": topic,
+            "note": "No result — research is disabled or returned nothing.",
+        })
+    return JSONResponse({
+        "ok": True,
+        "stored": True,
+        "topic": data.get("topic", topic),
+        "summary": data.get("summary", ""),
+        "sources": data.get("sources", []),
+    })
+
+
 @router.get("/api/brain/teacher/skills")
 def teacher_skills(limit: int = 50):
     """Read-only listing of teacher-written reusable skills (Odysseus salvage).

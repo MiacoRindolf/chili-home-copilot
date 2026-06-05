@@ -88,7 +88,7 @@ void main() {
       ));
       await tester.pumpAndSettle();
 
-      expect(find.text('Research'), findsOneWidget);
+      expect(find.text('Research'), findsWidgets); // header title + run button
       expect(find.text('Quantum'), findsOneWidget);
       expect(find.text('1 topics'), findsOneWidget);
 
@@ -104,10 +104,46 @@ void main() {
         home: ResearchScreen(
           fetcher: () async => <String, dynamic>{'topics': <Object?>[]},
           reportOpener: () async => false,
+          runner: (String _) async => const <String, dynamic>{},
         ),
       ));
       await tester.pumpAndSettle();
       expect(find.text('No research yet'), findsOneWidget);
+    });
+
+    testWidgets('RS-2: run research stores a topic and reloads the digest',
+        (WidgetTester tester) async {
+      int fetches = 0;
+      String? ranTopic;
+      await tester.pumpWidget(MaterialApp(
+        home: ResearchScreen(
+          // 1st load empty; after a run, the reload returns the new topic.
+          fetcher: () async {
+            fetches++;
+            return fetches == 1
+                ? <String, dynamic>{'topics': <Object?>[]}
+                : <String, dynamic>{
+                    'topics': <Map<String, dynamic>>[
+                      <String, dynamic>{'topic': 'Bitcoin ETFs', 'summary': 'x'},
+                    ],
+                  };
+          },
+          reportOpener: () async => false,
+          runner: (String t) async {
+            ranTopic = t;
+            return <String, dynamic>{'ok': true, 'stored': true, 'topic': t};
+          },
+        ),
+      ));
+      await tester.pumpAndSettle();
+      expect(find.text('No research yet'), findsOneWidget);
+
+      await tester.enterText(find.byType(TextField).first, 'Bitcoin ETFs');
+      await tester.tap(find.widgetWithText(FilledButton, 'Research'));
+      await tester.pumpAndSettle();
+
+      expect(ranTopic, 'Bitcoin ETFs');
+      expect(find.text('Bitcoin ETFs'), findsWidgets); // reloaded digest
     });
   });
 }
