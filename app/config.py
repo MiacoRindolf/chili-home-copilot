@@ -1648,6 +1648,20 @@ class Settings(BaseSettings):
     # one-time retroactive sweep; this is the going-forward enforcement.
     chili_realized_ev_demote_pass_enabled: bool = True
     chili_realized_ev_demote_settle_days: int = 14
+    # 2026-06-05: realized-EV CLEAN WINDOW (instrumentation floor). The live
+    # execution system churned heavily through early 2026 (constantly-changing
+    # algo-trader, execution discrepancies, gate/quality drift), so realized
+    # PnL before this date is NOT apples-to-apples with current behaviour and
+    # must not be treated as a trustworthy demote signal. The demote pass judges
+    # promoted patterns on their REPRESENTATIVE post-floor clean realized EV
+    # only; patterns whose post-floor evidence is too thin (data-starved, e.g.
+    # equity) or unrepresentative are KEPT, never demoted on pre-floor churn.
+    # This is an instrumentation floor, NOT applied to the promotion gate (post-
+    # floor supply is too thin to graduate on — flooring promotion would starve
+    # it, equity especially). Tune the floor as post-floor data accumulates.
+    chili_realized_ev_clean_window_since: str = "2026-05-22"
+    chili_realized_ev_clean_window_min_trades: int = 5
+    chili_realized_ev_clean_window_min_days: int = 5
     # Round-12 (2026-04-30): backtest queue improvements.
     # 1. priority scorer runs daily and updates backtest_priority based
     #    on lifecycle/staleness/evidence-gap signals.

@@ -695,6 +695,24 @@ def api_monitor_autotrader_deployment_report(
     return JSONResponse(json_safe(report))
 
 
+@router.get("/monitor/realized-ev-clean-window")
+def api_monitor_realized_ev_clean_window(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Per-asset-class realized-EV clean-window report (read-only): post-floor
+    (>= chili_realized_ev_clean_window_since), dirty-excluded, LIVE-only realized
+    EV split by asset class, plus each promoted pattern's representativeness and
+    demote-eligibility. Surfaces the crypto/equity coverage asymmetry so realized
+    EV is read per asset class, never pooled."""
+    get_identity_ctx(request, db)
+    from ...services.trading.realized_ev_clean_window_report import (
+        build_clean_window_report,
+    )
+
+    return JSONResponse(json_safe(build_clean_window_report(db)))
+
+
 @router.get("/monitor/imminent-alerts")
 def api_monitor_imminent_alerts(
     request: Request,
