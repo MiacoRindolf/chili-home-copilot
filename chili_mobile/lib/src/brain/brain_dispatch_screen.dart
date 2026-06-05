@@ -3320,29 +3320,42 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   }
 
   Widget _buildQueueTab() {
+    // Batch 18 — empty-projects state via the shared primitive.
     if (_projects.isEmpty) {
-      return ListView(
-        padding: const EdgeInsets.all(24),
-        children: [
-          Text(
-            'No planner projects available. Create one in the web planner, then refresh.',
-            style: TextStyle(color: Colors.grey.shade700),
-          ),
-          const SizedBox(height: 12),
-          FilledButton(
-              onPressed: _loadProjectsPicker,
-              child: const Text('Reload projects')),
-        ],
+      return ApEmptyState(
+        icon: Icons.folder_off_outlined,
+        message: 'No planner projects',
+        detail: 'Create one in the web planner, then reload.',
+        action: FilledButton.icon(
+          onPressed: _loadProjectsPicker,
+          icon: const Icon(Icons.refresh, size: 18),
+          label: const Text('Reload projects'),
+        ),
       );
     }
+    final cs = Theme.of(context).colorScheme;
     return ListView(
       padding: const EdgeInsets.all(24),
       children: [
+        const ApSectionHeader('Queue a task', icon: Icons.playlist_add),
+        const SizedBox(height: 10),
         if (_queueError != null)
           Padding(
             padding: const EdgeInsets.only(bottom: 12),
-            child: Text(_queueError!,
-                style: TextStyle(color: Colors.red.shade800)),
+            child: ApPanel(
+              color: cs.error.withValues(alpha: 0.06),
+              padding: const EdgeInsets.all(12),
+              child: Row(
+                children: [
+                  Icon(Icons.error_outline, size: 18, color: cs.error),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(_queueError!,
+                        style: TextStyle(color: cs.error)),
+                  ),
+                ],
+              ),
+            ),
           ),
         TextField(
           controller: _titleCtrl,
@@ -3403,29 +3416,37 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                   child: CircularProgressIndicator(strokeWidth: 2),
                 )
               : const Icon(Icons.send),
-          label: const Text('Queue task'),
+          label: Text(_queueBusy ? 'Queueing…' : 'Queue task'),
+          // Batch 18 — full-width primary action.
+          style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(46)),
         ),
       ],
     );
   }
 
   Widget _buildContextTab() {
+    // Batch 19 — consistent loading / error states.
     if (_ctxLoading) {
-      return const Center(child: CircularProgressIndicator());
-    }
-    if (_ctxError != null) {
-      return Center(
+      return const Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text('Failed to load Context Brain status',
-                style: TextStyle(color: Colors.red.shade800)),
-            const SizedBox(height: 8),
-            Text(_ctxError!, style: TextStyle(color: Colors.grey.shade700)),
-            const SizedBox(height: 16),
-            FilledButton(
-                onPressed: _loadContextBrain, child: const Text('Retry')),
+            CircularProgressIndicator(),
+            SizedBox(height: 12),
+            Text('Loading Context Brain…'),
           ],
+        ),
+      );
+    }
+    if (_ctxError != null) {
+      return ApEmptyState(
+        icon: Icons.cloud_off,
+        message: 'Failed to load Context Brain status',
+        detail: _ctxError,
+        action: FilledButton.icon(
+          onPressed: _loadContextBrain,
+          icon: const Icon(Icons.refresh, size: 18),
+          label: const Text('Retry'),
         ),
       );
     }
@@ -3452,10 +3473,14 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                       Text('Runtime',
                           style: Theme.of(context).textTheme.titleMedium),
                       const Spacer(),
-                      Chip(
-                        label: Text(state['mode']?.toString() ?? 'unknown'),
-                        backgroundColor: Colors.green.shade50,
-                      ),
+                      // Batch 20 — mode pill color-coded like the header.
+                      Builder(builder: (_) {
+                        final mode = state['mode']?.toString() ?? 'unknown';
+                        final color = mode == 'paused'
+                            ? Colors.red
+                            : (mode == 'unknown' ? Colors.grey : Colors.green);
+                        return ApStatusPill(mode, color: color);
+                      }),
                     ],
                   ),
                   const Divider(),
@@ -3585,18 +3610,28 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   }
 
   Widget _buildHistoryTab() {
+    // Batch 16 — consistent loading / error states.
     if (_runsLoading) {
-      return const Center(child: CircularProgressIndicator());
-    }
-    if (_runsError != null) {
-      return Center(
+      return const Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(_runsError!),
-            const SizedBox(height: 12),
-            FilledButton(onPressed: _loadRuns, child: const Text('Retry')),
+            CircularProgressIndicator(),
+            SizedBox(height: 12),
+            Text('Loading run history…'),
           ],
+        ),
+      );
+    }
+    if (_runsError != null) {
+      return ApEmptyState(
+        icon: Icons.cloud_off,
+        message: 'Couldn’t load run history',
+        detail: _runsError,
+        action: FilledButton.icon(
+          onPressed: _loadRuns,
+          icon: const Icon(Icons.refresh, size: 18),
+          label: const Text('Retry'),
         ),
       );
     }
@@ -3619,7 +3654,11 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final notifyCount = _runs.where((r) => r['notify_user'] == true).length;
 
     if (filtered.isEmpty && _runs.isEmpty) {
-      return const Center(child: Text('No runs yet'));
+      return const ApEmptyState(
+        icon: Icons.history,
+        message: 'No runs yet',
+        detail: 'Autopilot runs will appear here as they happen.',
+      );
     }
 
     return Column(
@@ -3675,28 +3714,17 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         ),
         if (filtered.isEmpty)
           Expanded(
-            child: Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.check_circle_outline,
-                      size: 48, color: Colors.green.shade300),
-                  const SizedBox(height: 8),
-                  Text(
-                    'No runs match the current filter',
-                    style: TextStyle(color: Colors.grey.shade700),
-                  ),
-                  if (hiddenCount > 0)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 8),
-                      child: TextButton(
-                        onPressed: () =>
-                            setState(() => _hideRouterEscalate = false),
-                        child: Text('Show $hiddenCount auto-escalations'),
-                      ),
-                    ),
-                ],
-              ),
+            child: ApEmptyState(
+              icon: Icons.filter_alt_off_outlined,
+              message: 'No runs match the current filter',
+              detail: 'Everything is clear — nothing needs review.',
+              action: hiddenCount > 0
+                  ? TextButton(
+                      onPressed: () =>
+                          setState(() => _hideRouterEscalate = false),
+                      child: Text('Show $hiddenCount auto-escalations'),
+                    )
+                  : null,
             ),
           )
         else
