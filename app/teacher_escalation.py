@@ -263,6 +263,18 @@ class FileSkillStore:
             logger.warning("[teacher_escalation] skill store read failed: %s", e)
         return out
 
+    def list(self, limit: int = 200) -> List[Dict]:
+        """Read-only listing of stored skills, newest first.
+
+        File order is oldest→newest; reverse first so equal ``saved_at`` stamps
+        (same-second saves) still come back newest-first, then stable-sort by the
+        stamp for correctness across longer spans.
+        """
+        with self._lock:
+            items = list(reversed(self._read_all()))
+        items.sort(key=lambda s: s.get("saved_at", 0), reverse=True)
+        return items[: max(0, int(limit))]
+
     def save(self, skill: Dict[str, Any]) -> bool:
         name = (skill.get("name") or "").strip()
         if not name:

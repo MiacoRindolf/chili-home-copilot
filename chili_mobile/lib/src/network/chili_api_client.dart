@@ -1057,6 +1057,10 @@ class ChiliApiClient {
   Future<Map<String, dynamic>> getMcpStatus() =>
       _getMapSafe('/api/brain/mcp/status');
 
+  /// GET teacher-written reusable skills (read-only). SK-1.
+  Future<List<Map<String, dynamic>>> getTeacherSkills({int limit = 50}) =>
+      _getListSafe('/api/brain/teacher/skills?limit=$limit', itemsKey: 'skills');
+
   // ── Live Trading Cockpit (TC-1) — read-only snapshot endpoints. ──
   Future<Map<String, dynamic>> getBrokerPositions() =>
       _getMapSafe('/api/trading/broker/positions');

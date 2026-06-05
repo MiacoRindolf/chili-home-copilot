@@ -192,3 +192,19 @@ class TestFileSkillStore:
         with tempfile.TemporaryDirectory() as d:
             store = FileSkillStore(path=os.path.join(d, "s.jsonl"))
             assert store.save({"procedure": ["x"]}) is False
+
+    def test_list_newest_first_and_limit(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = FileSkillStore(path=os.path.join(d, "s.jsonl"))
+            for n in ["a", "b", "c"]:
+                assert store.save({"name": n}) is True
+            listed = store.list()
+            # newest first (save stamps saved_at; "c" saved last)
+            assert [s["name"] for s in listed][0] == "c"
+            assert {s["name"] for s in listed} == {"a", "b", "c"}
+            assert len(store.list(limit=2)) == 2
+
+    def test_list_missing_file_is_empty(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = FileSkillStore(path=os.path.join(d, "nope.jsonl"))
+            assert store.list() == []
