@@ -20224,6 +20224,65 @@ def _migration_299_breakout_alert_pending_ticker_distinct_index(conn) -> None:
     logger.info("[mig299] pending breakout-alert ticker DISTINCT index installed")
 
 
+def _migration_300_realized_ev_clean_window_recompute(conn) -> None:
+    """Clear stale realized-EV stats stamped from DIRTY exits so the cleaned writers
+    recompute onto broker-attributable evidence only.
+
+    The realized-EV gate reads scan_patterns.corrected_* (written by
+    learning.update_pattern_stats_from_closed_trades). Until the companion
+    exit-cleanliness filter, that writer was the ONLY one NOT excluding dirty
+    reconcile / sync-gone / position-gone placeholder exits, so the gate's verdict
+    was polluted. Smoking gun: pattern 1246 (the '#1246 net-loser' named in the #359
+    commit) had its entire corrected_avg_return_pct=-0.14% computed from 7
+    position_sync_gone / broker_reconcile rows whose real broker fills were ALL
+    POSITIVE -> a FALSE net-loser block of a genuine winner.
+
+    NULLs corrected_*/raw_realized_* for any pattern whose closed-trade evidence
+    includes a dirty exit, so the next learning cycle recomputes them onto clean
+    evidence (dirty-only patterns like 1246 stay NULL = 'no clean evidence' and the
+    EV gate stops blocking on a contamination artifact). updated_at is bumped to
+    restart the demote-pass settle clock so good-but-now-unproven patterns are not
+    instantly demoted on history cleanup. Hard Rule 3 (data-first). Idempotent: the
+    cycle repopulates clean stats; a re-run only re-clears patterns still carrying
+    dirty rows.
+    """
+    existing = _tables(conn)
+    if "scan_patterns" not in existing or "trading_trades" not in existing:
+        conn.commit()
+        return
+    result = conn.execute(text("""
+        UPDATE scan_patterns
+           SET corrected_avg_return_pct = NULL,
+               corrected_win_rate = NULL,
+               corrected_trade_count = NULL,
+               corrected_stats_updated_at = NULL,
+               raw_realized_avg_return_pct = NULL,
+               raw_realized_win_rate = NULL,
+               raw_realized_trade_count = NULL,
+               raw_realized_stats_updated_at = NULL,
+               updated_at = NOW()
+         WHERE id IN (
+               SELECT DISTINCT t.scan_pattern_id
+                 FROM trading_trades t
+                WHERE t.scan_pattern_id IS NOT NULL
+                  AND t.status = 'closed'
+                  AND (
+                      LOWER(BTRIM(COALESCE(t.exit_reason, ''))) = ''
+                   OR LOWER(BTRIM(COALESCE(t.exit_reason, ''))) IN ('sync_duplicate', 'sync_duplicate_cross_user')
+                   OR LOWER(BTRIM(COALESCE(t.exit_reason, ''))) LIKE '%position_absent%'
+                   OR LOWER(BTRIM(COALESCE(t.exit_reason, ''))) LIKE '%position_gone%'
+                   OR LOWER(BTRIM(COALESCE(t.exit_reason, ''))) LIKE '%reconcile%'
+                   OR LOWER(BTRIM(COALESCE(t.exit_reason, ''))) LIKE '%sync_gone%'
+                  )
+         )
+    """))
+    conn.commit()
+    logger.info(
+        "[mig300] cleared dirty-exit-contaminated realized-EV stats for %s patterns "
+        "(recompute clean on next learning cycle)",
+        getattr(result, "rowcount", "?"),
+    )
+
 
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -20585,6 +20644,8 @@ MIGRATIONS = [
      _migration_296_divergence_discovery_probe_indexes),
     ("299_breakout_alert_pending_ticker_distinct_index",
      _migration_299_breakout_alert_pending_ticker_distinct_index),
+    ("300_realized_ev_clean_window_recompute",
+     _migration_300_realized_ev_clean_window_recompute),
 ]
 
 
