@@ -1596,6 +1596,13 @@ class Settings(BaseSettings):
     chili_realized_ev_min_trades: int = 5
     chili_realized_ev_min_avg_return_pct: float = 0.0
     chili_realized_ev_min_win_rate: float = 0.0
+    # Realized-aware edge prior: when shrinking the regime-conditioned hit rate
+    # for the expected-edge gate, use the pattern's own well-sampled overall
+    # realized win rate as the empirical-Bayes prior (capped at the regime
+    # sample) instead of a neutral 0.5, so a noisy regime cell cannot bury a
+    # proven pattern's edge. Losers (low realized WR) stay below break-even.
+    # Default ON (no dark flags); set False to revert to the neutral prior.
+    chili_edge_realized_aware_prior_enabled: bool = True
     # Let paper/shadow evidence from raw_realized_* clear the EV gate only
     # when corrected/live evidence is missing or still below the minimum sample.
     # It never overrides a live/corrected sample that already shows clear loss.
