@@ -1991,11 +1991,18 @@ def _pattern_probability(
         source = "missing"
         if alert.scan_pattern_id:
             try:
-                from .pattern_stats_accessor import get_corrected_pattern_stats
+                # Realized-ONLY stats for this LIVE entry-probability decision:
+                # corrected_* -> raw_realized_* -> missing. NEVER the conflated
+                # legacy win_rate (mining/backtest overwrite it with no provenance),
+                # which could lift p above breakeven and flip a live entry from
+                # rejected to allowed on a backtest-inflated number. When no clean
+                # realized evidence exists, stats.win_rate is None -> this branch is
+                # skipped and p falls through to the directional / alert path.
+                from .pattern_stats_accessor import get_realized_pattern_stats
 
                 pat = pattern or _load_scan_pattern_for_edge(db, alert.scan_pattern_id)
                 if pat is not None:
-                    stats = get_corrected_pattern_stats(pat)
+                    stats = get_realized_pattern_stats(pat)
                     p2 = _fraction01(stats.win_rate)
                     n2, n_guard = _probability_sample_count(pat, stats.trade_count)
                     if p2 is not None and n2 is not None and n2 > 0:
@@ -2211,9 +2218,13 @@ def _realized_exit_geometry(
         return static_reward, static_loss, snap
 
     try:
-        from .pattern_stats_accessor import get_corrected_pattern_stats
+        # Realized-ONLY (corrected_* -> raw_realized_* -> missing); never the
+        # conflated legacy avg_return/trade_count. These drive the
+        # non_positive_realized_avg_return veto and the evidence weight of a blend
+        # labeled "realized" — a backtest/mining legacy value must not set them.
+        from .pattern_stats_accessor import get_realized_pattern_stats
 
-        stats = get_corrected_pattern_stats(pattern)
+        stats = get_realized_pattern_stats(pattern)
         avg_return = _finite_float(stats.avg_return_pct)
         n = int(stats.trade_count or 0)
     except Exception:

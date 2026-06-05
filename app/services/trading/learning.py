@@ -8887,7 +8887,17 @@ def evolve_patterns(db: Session, min_evidence: int = 5, min_confidence: float = 
             continue
 
         if (p.evidence_count or 0) >= min_evidence and (p.confidence or 0) < min_confidence:
-            if (p.win_rate or 0) >= 0.4:
+            # Spare from deactivation (a real live demotion -> removed from
+            # get_active_patterns) only on clean REALIZED win rate. p.win_rate is
+            # the conflated legacy column, and this runs as Step D of the same cycle
+            # whose Step C (test_pattern_hypothesis) just overwrote win_rate with
+            # IN-SAMPLE BACKTEST values -> a backtest WR could grant a false reprieve
+            # to a realized-failing pattern (or a poor backtest WR deactivate a
+            # realized-fine one). corrected_* -> raw_realized_* -> None; no clean
+            # realized evidence -> do NOT spare, deactivate.
+            from .pattern_stats_accessor import get_realized_pattern_stats
+            _realized_wr = get_realized_pattern_stats(p).win_rate
+            if _realized_wr is not None and _realized_wr >= 0.4:
                 continue
             p.active = False
             modified += 1
@@ -9620,17 +9630,15 @@ def _edge_debt_blocks_variant_spawn(parent: "ScanPattern", report: dict[str, Any
                 f"avg_sample_n={avg_directional_n:.3f}"
             )
 
-    corrected_n = int(getattr(parent, "corrected_trade_count", None) or getattr(parent, "trade_count", None) or 0)
-    corrected_avg = _finite_number(
-        getattr(parent, "corrected_avg_return_pct", None)
-        if getattr(parent, "corrected_avg_return_pct", None) is not None
-        else getattr(parent, "avg_return_pct", None)
-    )
-    corrected_wr = _finite_number(
-        getattr(parent, "corrected_win_rate", None)
-        if getattr(parent, "corrected_win_rate", None) is not None
-        else getattr(parent, "win_rate", None)
-    )
+    # Realized-ONLY parent stats (corrected_* -> raw_realized_* -> missing); never
+    # the conflated legacy columns. These reason strings claim "realized", so a
+    # backtest/mining legacy value must not block (or fail to block) research-
+    # variant spawning under a realized label. No clean realized evidence -> skip.
+    from .pattern_stats_accessor import get_realized_pattern_stats
+    _rstats = get_realized_pattern_stats(parent)
+    corrected_n = int(_rstats.trade_count or 0)
+    corrected_avg = _finite_number(_rstats.avg_return_pct)
+    corrected_wr = _finite_number(_rstats.win_rate)
     if corrected_n >= 5 and corrected_avg is not None and corrected_avg <= 0.0:
         return True, f"edge_debt_parent_non_positive_realized_avg:{corrected_avg:.3f}"
     if corrected_n >= 5 and corrected_wr is not None and corrected_wr <= 0.10:
@@ -9879,11 +9887,14 @@ def _learned_exit_config_from_edge_report(
         _EDGE_EVOLUTION_DEFAULT_MAX_AVG_NET_FOR_CHILD_PCT,
     )
 
-    avg_return = _finite_number(
-        getattr(parent, "corrected_avg_return_pct", None)
-        if getattr(parent, "corrected_avg_return_pct", None) is not None
-        else getattr(parent, "avg_return_pct", None)
-    )
+    # Realized-ONLY parent stats (corrected_* -> raw_realized_* -> missing); never
+    # the conflated legacy avg_return/trade_count. The veto reason is literally
+    # "non_positive_parent_realized_avg" (basis "realized_parent_payoff..."), so a
+    # backtest/mining legacy value must not set or clear it. No clean realized avg
+    # (None) -> the negative-avg veto does not fire (we cannot assert a loss).
+    from .pattern_stats_accessor import get_realized_pattern_stats
+    _rstats = get_realized_pattern_stats(parent)
+    avg_return = _finite_number(_rstats.avg_return_pct)
     if avg_return is not None and avg_return <= 0.0:
         return None, "non_positive_parent_realized_avg"
 
@@ -9895,7 +9906,7 @@ def _learned_exit_config_from_edge_report(
     if reward is None or loss is None or reward <= 0.0 or loss <= 0.0:
         return None, "missing_parent_payoff_geometry"
 
-    corrected_n = int(getattr(parent, "corrected_trade_count", None) or getattr(parent, "trade_count", None) or 0)
+    corrected_n = int(_rstats.trade_count or 0)
     payoff_n = int(getattr(parent, "payoff_ratio_n", None) or 0)
     sample_candidates = [n for n in (corrected_n, payoff_n) if n > 0]
     sample_n = min(sample_candidates) if sample_candidates else 0
@@ -10576,6 +10587,9 @@ def _edge_learned_exit_parent_query(db: Session, pattern_id: int):
                 ScanPattern.corrected_trade_count,
                 ScanPattern.corrected_win_rate,
                 ScanPattern.corrected_avg_return_pct,
+                ScanPattern.raw_realized_trade_count,
+                ScanPattern.raw_realized_win_rate,
+                ScanPattern.raw_realized_avg_return_pct,
                 ScanPattern.avg_winner_pct,
                 ScanPattern.avg_loser_pct,
                 ScanPattern.payoff_ratio_n,

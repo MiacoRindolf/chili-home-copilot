@@ -63,7 +63,12 @@ def test_pattern_return_field_handles_object_tuple_and_empty_rows() -> None:
     assert expectancy_service._pattern_return_field((), "oos_avg_return_pct", 0) is None
 
 
-def test_compute_expectancy_edges_falls_back_to_average_return_column() -> None:
+def test_compute_expectancy_edges_ignores_conflated_legacy_avg_return() -> None:
+    # oos_avg_return_pct=0 (no research return) and legacy avg_return_pct=-9.0.
+    # The legacy column is CONFLATED (mining/backtest/realized writers overwrite it
+    # with no provenance), so it must NOT seed the backtest research prior — and
+    # abs() would have turned a realized LOSS into a positive prior boost. The
+    # research prior must rest on viability_score instead.
     db = _FakeSession((0.0, -9.0))
 
     out = expectancy_service.compute_expectancy_edges(
@@ -78,4 +83,6 @@ def test_compute_expectancy_edges_falls_back_to_average_return_column() -> None:
         correlation_penalty=0.0,
     )
 
-    assert out["research_prior"] == 0.054
+    # Was 0.054 (abs(-9.0)/100*0.6) while the legacy fallback existed; now the
+    # conflated legacy value is ignored and the prior rests on viability_score.
+    assert out["research_prior"] == 0.01
