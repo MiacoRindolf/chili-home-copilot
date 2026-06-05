@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../network/chili_api_client.dart';
+import '../ui/app_ui.dart';
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
@@ -44,7 +45,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   @override
   Widget build(BuildContext context) {
-    if (_loading) return const Center(child: CircularProgressIndicator());
+    // Batch D1 — labeled loading state.
+    if (_loading) {
+      return const Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(height: 12),
+            Text('Loading dashboard…'),
+          ],
+        ),
+      );
+    }
 
     return RefreshIndicator(
       onRefresh: _loadData,
@@ -98,22 +111,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Widget _statCard(String label, String value, Color color, IconData icon) {
+    // Batch D2 — shared ApStatCard primitive (consistent with the autopilot).
     return Expanded(
-      child: Card(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(children: [
-            Icon(icon, color: color, size: 28),
-            const SizedBox(height: 8),
-            Text(value,
-                style: TextStyle(
-                    fontSize: 28, fontWeight: FontWeight.bold, color: color)),
-            const SizedBox(height: 4),
-            Text(label,
-                style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
-          ]),
-        ),
-      ),
+      child: ApStatCard(label: label, value: value, icon: icon, color: color),
     );
   }
 
@@ -131,10 +131,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ]),
             const Divider(),
             if (_chores.isEmpty)
-              const Padding(
-                  padding: EdgeInsets.all(12),
+              Padding(
+                  padding: const EdgeInsets.all(12),
                   child: Text('No chores yet',
-                      style: TextStyle(color: Colors.grey)))
+                      style: TextStyle(
+                          color:
+                              Theme.of(context).colorScheme.onSurfaceVariant)))
             else
               ..._chores.take(10).map(_choreRow),
           ],
@@ -144,6 +146,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Widget _choreRow(dynamic c) {
+    final cs = Theme.of(context).colorScheme;
     final done = c['done'] == true;
     final title = c['title'] ?? '';
     final priority = c['priority'] ?? 'medium';
@@ -151,28 +154,22 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(children: [
+        // Batch D5 — theme colours (were grey / red.shade50, light-only).
         Icon(done ? Icons.check_circle : Icons.radio_button_unchecked,
-            color: done ? Colors.green : Colors.grey, size: 20),
+            color: done ? Colors.green : cs.onSurfaceVariant, size: 20),
         const SizedBox(width: 8),
         Expanded(
             child: Text(title,
                 style: TextStyle(
                     fontSize: 13,
                     decoration: done ? TextDecoration.lineThrough : null,
-                    color: done ? Colors.grey : null))),
+                    color: done ? cs.onSurfaceVariant : null))),
         if (priority == 'high')
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-            decoration: BoxDecoration(
-                color: Colors.red.shade50,
-                borderRadius: BorderRadius.circular(4)),
-            child: Text('High',
-                style: TextStyle(fontSize: 10, color: Colors.red.shade700)),
-          ),
+          ApStatusPill('High', color: cs.error),
         if (dueDate != null) ...[
           const SizedBox(width: 6),
           Text(dueDate,
-              style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
+              style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
         ],
       ]),
     );
@@ -193,10 +190,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ]),
             const Divider(),
             if (_birthdays.isEmpty)
-              const Padding(
-                  padding: EdgeInsets.all(12),
+              Padding(
+                  padding: const EdgeInsets.all(12),
                   child: Text('No birthdays yet',
-                      style: TextStyle(color: Colors.grey)))
+                      style: TextStyle(
+                          color:
+                              Theme.of(context).colorScheme.onSurfaceVariant)))
             else
               ..._birthdays.take(8).map(_birthdayRow),
           ],
@@ -206,11 +205,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Widget _birthdayRow(dynamic b) {
+    final cs = Theme.of(context).colorScheme;
     final name = b['name'] ?? '';
     final daysUntil = b['days_until'] ?? 999;
     final date = b['date'] ?? '';
-    Color bg = Colors.grey.shade200;
-    Color fg = Colors.grey.shade700;
+    // Batch D5 — theme defaults (were grey.shade200/700, light-only).
+    Color bg = cs.surfaceContainerHighest;
+    Color fg = cs.onSurfaceVariant;
     String label = '${daysUntil}d';
     if (daysUntil == 0) {
       bg = const Color(0xFFEF5350);
@@ -233,8 +234,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         ),
         const SizedBox(width: 10),
         Expanded(child: Text(name, style: const TextStyle(fontSize: 13))),
-        Text(date,
-            style: TextStyle(fontSize: 11, color: Colors.grey.shade500)),
+        Text(date, style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
       ]),
     );
   }
@@ -258,10 +258,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ]),
             const Divider(),
             if (_activity.isEmpty)
-              const Padding(
-                  padding: EdgeInsets.all(12),
+              Padding(
+                  padding: const EdgeInsets.all(12),
                   child: Text('No activity yet',
-                      style: TextStyle(color: Colors.grey)))
+                      style: TextStyle(
+                          color:
+                              Theme.of(context).colorScheme.onSurfaceVariant)))
             else
               ..._activity.take(10).map(_activityRow),
           ],
@@ -283,12 +285,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(children: [
-        Icon(icon, size: 18, color: Colors.grey.shade600),
+        // Batch D4 — theme colours (was grey.shade600 / black87, dark-mode bug).
+        Icon(icon,
+            size: 18, color: Theme.of(context).colorScheme.onSurfaceVariant),
         const SizedBox(width: 10),
         Expanded(
           child: RichText(
             text: TextSpan(
-              style: const TextStyle(fontSize: 13, color: Colors.black87),
+              style: TextStyle(
+                  fontSize: 13,
+                  color: Theme.of(context).colorScheme.onSurface),
               children: [
                 if (userName.isNotEmpty)
                   TextSpan(
