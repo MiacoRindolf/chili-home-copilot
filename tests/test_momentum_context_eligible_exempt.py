@@ -2,8 +2,8 @@
 
 The gate's gap/relative-volume requirement is a momentum-surge proxy. It must
 not drop quiet mean-reversion setups that already cleared certification and
-promotion, but explicit momentum packets should still be quality-gated when the
-stock queue is saturated.
+promotion, but explicit surge-sourced momentum packets should still be
+quality-gated.
 """
 from app.models.trading import BreakoutAlert
 from app.services.trading.auto_trader_rules import (
@@ -69,8 +69,7 @@ def test_trade_eligible_momentum_packet_is_gated_under_queue_pressure():
         "small_cap_momentum_context": {
             "gap_pct": 0.16,
             "rvol": 0.54,
-            "prescreen_source_tags": ["massive_momentum_gappers"],
-            "prescreen_momentum_gapper": True,
+            "prescreen_source_tags": ["yf_small_caps"],
         },
     }
     setattr(alert, "_chili_pattern_trade_eligible", True)
@@ -95,8 +94,7 @@ def test_trade_eligible_momentum_packet_is_exempt_when_queue_is_quiet():
         "small_cap_momentum_context": {
             "gap_pct": 0.16,
             "rvol": 0.54,
-            "prescreen_source_tags": ["massive_momentum_gappers"],
-            "prescreen_momentum_gapper": True,
+            "prescreen_source_tags": ["yf_small_caps"],
         },
     }
     setattr(alert, "_chili_pattern_trade_eligible", True)
@@ -117,6 +115,45 @@ def test_trade_eligible_momentum_packet_is_exempt_when_queue_is_quiet():
     assert snap["active"] is False
     assert snap["small_cap_momentum_context_present"] is True
     assert snap["inactive_reason"] == "pattern_trade_eligible_exempt"
+
+
+def test_trade_eligible_surge_tagged_packet_is_gated_when_queue_is_quiet():
+    alert = _weak_stock_alert()
+    alert.indicator_snapshot = {
+        "small_cap_momentum_context": {
+            "gap_pct": 0.04,
+            "rvol": 2.96,
+            "prescreen_source_tags": [
+                "massive_high_rel_volume",
+                "massive_unusual_volume",
+            ],
+        },
+    }
+    setattr(alert, "_chili_pattern_trade_eligible", True)
+    quiet_ctx = RuleGateContext(
+        current_price=10.0,
+        autotrader_open_count=0,
+        realized_loss_today_usd=0.0,
+        autotrader_open_count_by_lane={"equity": 0, "crypto": 0, "options": 0},
+        candidate_queue_pressure=0.4,
+    )
+
+    ok, reason, snap = _stock_momentum_context_gate(
+        alert, settings_snapshot=_settings(exempt_eligible=True), ctx=quiet_ctx
+    )
+
+    assert ok is False
+    assert reason == "stock_momentum_context_below_floor"
+    assert snap["active"] is True
+    assert snap["active_reason"] == "momentum_context_surge_tag"
+    assert snap["pattern_trade_eligible"] is True
+    assert snap["eligible_exemption_suppressed_reason"] == "momentum_context_surge_tag"
+    assert snap["momentum_context_surge_tags"] == [
+        "massive_high_rel_volume",
+        "massive_unusual_volume",
+    ]
+    assert snap["gap_passed"] is False
+    assert snap["volume_ratio_passed"] is True
 
 
 def test_non_eligible_row_still_gated():

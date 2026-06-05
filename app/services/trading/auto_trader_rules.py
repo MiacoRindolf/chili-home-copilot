@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from types import SimpleNamespace
-from typing import Any, Optional, Tuple
+from typing import Any, Iterable, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
@@ -95,6 +95,29 @@ STOCK_MOMENTUM_CONTEXT_MISSING_REASON = "stock_momentum_context_missing"
 STOCK_MOMENTUM_CONTEXT_NO_CATALYST_REASON = "stock_momentum_context_no_catalyst"
 STOCK_MOMENTUM_CONTEXT_WIDE_SPREAD_REASON = "stock_momentum_context_wide_spread"
 SMALL_CAP_MOMENTUM_CONTEXT_KEY = "small_cap_momentum_context"
+PRESCREEN_SOURCE_TAGS_CONTEXT_KEY = "prescreen_source_tags"
+ROSS_STYLE_MOMENTUM_SOURCE_TAGS = frozenset(
+    {
+        "massive_high_rel_volume",
+        "massive_high_volume",
+        "massive_momentum_gappers",
+        "massive_most_active",
+        "massive_most_volatile",
+        "massive_new_high",
+        "massive_top_gainers",
+        "massive_unusual_volume",
+        "yf_day_gainers",
+    }
+)
+ROSS_STYLE_MOMENTUM_BOOL_FLAGS = frozenset(
+    {
+        "prescreen_high_relative_volume",
+        "prescreen_momentum_gapper",
+        "prescreen_new_high",
+        "prescreen_top_gainer",
+        "prescreen_unusual_volume",
+    }
+)
 
 
 @dataclass
@@ -369,6 +392,34 @@ def _indicator_momentum_context_snapshot(alert: BreakoutAlert) -> tuple[dict[str
     return base, False
 
 
+def _momentum_context_surge_tags(flat: dict[str, Any]) -> list[str]:
+    raw_tags = flat.get(PRESCREEN_SOURCE_TAGS_CONTEXT_KEY)
+    if isinstance(raw_tags, str):
+        tag_values: Iterable[Any] = (raw_tags,)
+    elif isinstance(raw_tags, (list, tuple, set, frozenset)):
+        tag_values = raw_tags
+    else:
+        tag_values = ()
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for tag in tag_values:
+        normalized = str(tag or "").strip().lower()
+        if normalized in ROSS_STYLE_MOMENTUM_SOURCE_TAGS and normalized not in seen:
+            seen.add(normalized)
+            out.append(normalized)
+
+    for flag in sorted(ROSS_STYLE_MOMENTUM_BOOL_FLAGS):
+        value = flat.get(flag)
+        truthy = value is True
+        if isinstance(value, str):
+            truthy = value.strip().lower() in {"1", "true", "yes", "on"}
+        if truthy and flag not in seen:
+            seen.add(flag)
+            out.append(flag)
+    return out
+
+
 def _indicator_first_float(flat: dict[str, Any], names: tuple[str, ...]) -> tuple[float | None, str | None]:
     for name in names:
         value = _finite_float_or_none(flat.get(name))
@@ -443,17 +494,25 @@ def _stock_momentum_context_gate(
     pattern_trade_eligible = bool(getattr(alert, "_chili_pattern_trade_eligible", False))
     eligible_exempt = bool(settings_snapshot.stock_momentum_context_exempt_eligible) and pattern_trade_eligible
     packet_under_pressure = packet_present and pressure + 1e-9 >= min_pressure
+    surge_tags = _momentum_context_surge_tags(flat) if packet_present else []
+    if surge_tags:
+        snap["momentum_context_surge_tags"] = surge_tags
+    packet_quality_pressure = packet_under_pressure or bool(surge_tags)
     # Trade-eligible (certified + promoted) patterns are exempt by default so
     # the momentum proxy does not drop quiet mean-reversion setups. When the
-    # queue is saturated and the alert already carries explicit momentum facts,
-    # the proxy becomes a quality-pressure gate instead of a blanket bypass.
-    if eligible_exempt and not packet_under_pressure:
+    # queue is saturated, or when the packet is explicitly sourced from
+    # momentum/gapper/high-volume screens, the proxy becomes a quality gate.
+    if eligible_exempt and not packet_quality_pressure:
         snap["inactive_reason"] = "pattern_trade_eligible_exempt"
         snap["pattern_trade_eligible"] = True
         return True, None, snap
-    if eligible_exempt and packet_under_pressure:
+    if eligible_exempt and packet_quality_pressure:
         snap["pattern_trade_eligible"] = True
-        snap["eligible_exemption_suppressed_reason"] = "momentum_context_queue_pressure"
+        snap["eligible_exemption_suppressed_reason"] = (
+            "momentum_context_queue_pressure"
+            if packet_under_pressure
+            else "momentum_context_surge_tag"
+        )
 
     if pressure + 1e-9 < min_pressure and not packet_present:
         snap["inactive_reason"] = "queue_pressure_below_floor"
@@ -461,9 +520,13 @@ def _stock_momentum_context_gate(
 
     snap["active"] = True
     snap["active_reason"] = (
-        "small_cap_momentum_context"
-        if packet_present and pressure + 1e-9 < min_pressure
-        else "queue_pressure"
+        "momentum_context_surge_tag"
+        if surge_tags and pressure + 1e-9 < min_pressure
+        else (
+            "small_cap_momentum_context"
+            if packet_present and pressure + 1e-9 < min_pressure
+            else "queue_pressure"
+        )
     )
     gap_pct, gap_source = _indicator_first_float(
         flat,
