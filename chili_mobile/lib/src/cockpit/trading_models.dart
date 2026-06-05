@@ -138,6 +138,57 @@ double _d(Object? v) {
 
 String _s(Object? v) => v?.toString().trim() ?? '';
 
+/// Aggregate exposure on one venue (TC-5).
+class VenueExposure {
+  const VenueExposure({
+    required this.venue,
+    required this.marketValue,
+    required this.unrealizedPnl,
+    required this.count,
+    required this.share,
+  });
+
+  final String venue;
+  final double marketValue;
+  final double unrealizedPnl;
+  final int count; // open positions on this venue
+  final double share; // 0..1 fraction of total market value
+}
+
+/// Per-venue exposure summary over [positions], sorted by market value desc
+/// (TC-5). Pure. Positions with a blank venue are grouped under "other".
+/// `share` is each venue's fraction of total absolute market value (0 when the
+/// total is 0, so it never divides by zero).
+List<VenueExposure> venueExposures(List<Position> positions) {
+  final Map<String, List<Position>> byVenue = <String, List<Position>>{};
+  for (final Position p in positions) {
+    final String v = p.venue.trim().isEmpty ? 'other' : p.venue.trim();
+    byVenue.putIfAbsent(v, () => <Position>[]).add(p);
+  }
+  double totalMv = 0;
+  for (final Position p in positions) {
+    totalMv += p.marketValue.abs();
+  }
+  final List<VenueExposure> out = <VenueExposure>[];
+  byVenue.forEach((String venue, List<Position> ps) {
+    double mv = 0, pnl = 0;
+    for (final Position p in ps) {
+      mv += p.marketValue;
+      pnl += p.unrealizedPnl;
+    }
+    out.add(VenueExposure(
+      venue: venue,
+      marketValue: mv,
+      unrealizedPnl: pnl,
+      count: ps.length,
+      share: totalMv == 0 ? 0 : mv.abs() / totalMv,
+    ));
+  });
+  out.sort((VenueExposure a, VenueExposure b) =>
+      b.marketValue.abs().compareTo(a.marketValue.abs()));
+  return out;
+}
+
 /// Distinct, non-empty venues present in [positions], sorted A→Z (TC-4).
 List<String> venuesOf(List<Position> positions) {
   final Set<String> set = <String>{
