@@ -94,6 +94,50 @@ void main() {
     });
   });
 
+  group('venue filter (TC-4)', () {
+    Position pos(String ticker, String venue) => Position(
+          ticker: ticker,
+          qty: 1,
+          entryPrice: 1,
+          currentPrice: 1,
+          marketValue: 1,
+          unrealizedPnl: 0,
+          unrealizedPnlPct: 0,
+          venue: venue,
+        );
+
+    final List<Position> sample = <Position>[
+      pos('AAPL', 'robinhood'),
+      pos('BTC', 'coinbase'),
+      pos('TSLA', 'robinhood'),
+      pos('NOVENUE', ''),
+    ];
+
+    test('venuesOf returns distinct non-empty venues, sorted', () {
+      expect(venuesOf(sample), <String>['coinbase', 'robinhood']);
+      expect(venuesOf(const <Position>[]), isEmpty);
+    });
+
+    test('filterPositionsByVenue is case-insensitive', () {
+      expect(
+          filterPositionsByVenue(sample, 'ROBINHOOD')
+              .map((Position p) => p.ticker),
+          <String>['AAPL', 'TSLA']);
+      expect(
+          filterPositionsByVenue(sample, 'coinbase')
+              .map((Position p) => p.ticker),
+          <String>['BTC']);
+    });
+
+    test('null / empty venue returns all (and does not mutate input)', () {
+      expect(filterPositionsByVenue(sample, null).length, sample.length);
+      expect(filterPositionsByVenue(sample, '  ').length, sample.length);
+      final List<Position> copy = filterPositionsByVenue(sample, null);
+      copy.clear();
+      expect(sample.length, 4); // original untouched
+    });
+  });
+
   group('buildTradingSnapshot', () {
     test('combines positions / portfolio / governance / risk', () {
       final TradingSnapshot s = buildTradingSnapshot(
@@ -274,6 +318,60 @@ void main() {
       final double winY = tester.getTopLeft(find.text('WIN')).dy;
       final double lossY = tester.getTopLeft(find.text('LOSS')).dy;
       expect(winY, lessThan(lossY));
+    });
+
+    testWidgets('TC-4: venue chips filter the open-positions list',
+        (WidgetTester tester) async {
+      tester.view.physicalSize = const Size(1100, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      Position pos(String t, String venue) => Position(
+            ticker: t,
+            qty: 1,
+            entryPrice: 1,
+            currentPrice: 1,
+            marketValue: 100,
+            unrealizedPnl: 1,
+            unrealizedPnlPct: 1,
+            venue: venue,
+          );
+      await tester.pumpWidget(MaterialApp(
+        home: CockpitScreen(
+          fetcher: () async => TradingSnapshot(
+            totalEquity: 1000,
+            cash: 0,
+            buyingPower: 0,
+            dayPnl: 0,
+            totalPnl: 0,
+            realizedPnl: 0,
+            unrealizedPnl: 0,
+            killSwitchActive: false,
+            killSwitchReason: '',
+            automationEnabled: true,
+            ensembleMode: '',
+            breakerTripped: false,
+            breakerReason: '',
+            totalHeatPct: 0,
+            positions: <Position>[
+              pos('AAPL', 'robinhood'),
+              pos('BTC', 'coinbase'),
+            ],
+          ),
+        ),
+      ));
+      await tester.pumpAndSettle();
+      // Both venues present → filter chips show, both tickers visible.
+      expect(find.widgetWithText(ChoiceChip, 'All'), findsOneWidget);
+      expect(find.widgetWithText(ChoiceChip, 'coinbase'), findsOneWidget);
+      expect(find.text('AAPL'), findsOneWidget);
+      expect(find.text('BTC'), findsOneWidget);
+
+      // Tap "coinbase" → only BTC remains.
+      await tester.tap(find.widgetWithText(ChoiceChip, 'coinbase'));
+      await tester.pumpAndSettle();
+      expect(find.text('BTC'), findsOneWidget);
+      expect(find.text('AAPL'), findsNothing);
     });
 
     testWidgets('NC-2: a kill-switch transition pushes a notification',

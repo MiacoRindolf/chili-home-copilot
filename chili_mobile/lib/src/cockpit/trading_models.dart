@@ -138,6 +138,26 @@ double _d(Object? v) {
 
 String _s(Object? v) => v?.toString().trim() ?? '';
 
+/// Distinct, non-empty venues present in [positions], sorted A→Z (TC-4).
+List<String> venuesOf(List<Position> positions) {
+  final Set<String> set = <String>{
+    for (final Position p in positions)
+      if (p.venue.trim().isNotEmpty) p.venue.trim(),
+  };
+  final List<String> out = set.toList()..sort();
+  return out;
+}
+
+/// Keep only positions on [venue] (case-insensitive). Null/empty → all (TC-4).
+/// Pure — never mutates [positions].
+List<Position> filterPositionsByVenue(List<Position> positions, String? venue) {
+  final String v = (venue ?? '').trim().toLowerCase();
+  if (v.isEmpty) return List<Position>.of(positions);
+  return positions
+      .where((Position p) => p.venue.trim().toLowerCase() == v)
+      .toList();
+}
+
 /// How the cockpit's open-positions list is ordered (TC-3).
 enum PositionSort { pnl, pnlPct, value, ticker }
 
