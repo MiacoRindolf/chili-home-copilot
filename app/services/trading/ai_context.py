@@ -392,8 +392,10 @@ def build_ai_context(
         except Exception:
             return None
 
+    from .brain_io_concurrency import io_fanout_workers
     futures = {}
-    with ThreadPoolExecutor(max_workers=24) as pool:
+    # Heterogeneous I/O fan-out (independent sub-fetches), not a CPU pool.
+    with ThreadPoolExecutor(max_workers=io_fanout_workers(24, ceiling=24)) as pool:
         futures["indicators"] = pool.submit(_fetch_indicators)
         futures["quote"] = pool.submit(fetch_quote, ticker)
         futures["fundamentals"] = pool.submit(_fetch_fundamentals)
@@ -1074,7 +1076,9 @@ def _build_market_context_fresh(db: Session, user_id: int | None) -> str:
     neutral = 0
     rsi_vals: list[float] = []
 
-    with ThreadPoolExecutor(max_workers=32) as pool:
+    from .brain_io_concurrency import io_fanout_workers
+    # Basket fan-out: size to the actual ticker count (capped), not a fixed const.
+    with ThreadPoolExecutor(max_workers=io_fanout_workers(len(sample_tickers), ceiling=32)) as pool:
         # Kick off all scoring + quote fetches concurrently
         score_futures = {pool.submit(_score_ticker, t): t for t in sample_tickers}
         spy_fut = pool.submit(fetch_quote, "SPY")

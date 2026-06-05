@@ -199,3 +199,198 @@ _SNAPSHOT_BATCH_STATS = BrainIoCycleStats()
 
 def snapshot_batch_stats() -> BrainIoCycleStats:
     return _SNAPSHOT_BATCH_STATS
+
+
+# ===========================================================================
+# CPU-bound compute sizing
+# ---------------------------------------------------------------------------
+# Pools that crunch already-fetched data (indicator math, pattern detection,
+# backtests) are bound by CPU, so size them to the cgroup-effective CPU budget.
+# Prefer this over raw ``os.cpu_count() * k`` formulas: inside Docker, cpu_count
+# reflects the host, so a host-based pool oversubscribes a CPU-limited container.
+# ===========================================================================
+def cpu_workers(
+    settings: Any | None = None,
+    *,
+    multiplier: float = 1.0,
+    floor: int = 1,
+    ceiling: int | None = None,
+) -> int:
+    """Worker count for CPU-bound compute, sized to the cgroup-effective CPUs.
+
+    ``multiplier`` allows mild oversubscription for work that still blocks on
+    occasional I/O (e.g. scanner scoring that also fetches a quote); keep it ~1
+    for pure compute. ``ceiling`` caps the result; ``floor`` is the minimum.
+    """
+    eff = effective_cpu_budget(settings)
+    n = max(int(floor), int(round(eff * float(multiplier))))
+    if ceiling is not None:
+        n = min(int(ceiling), n)
+    return max(1, n)
+
+
+# ===========================================================================
+# Provider-aware I/O concurrency
+# ---------------------------------------------------------------------------
+# Network fetches are bound by the *provider's* rate budget + connection pool,
+# NOT by CPU. Sizing provider fetches off the CPU budget (the legacy
+# ``io_workers_*`` pattern) is the root cause of two failures:
+#   1. A mixed-provider batch sharing one CPU-sized pool throttles a FAST
+#      provider (Massive: 100 rps, 512-conn pool) down to the pace dictated by
+#      a SLOW one — equity mining strangled by crypto's Coinbase limit.
+#   2. The same pool simultaneously *hammers* the slow provider (Coinbase),
+#      tripping its 429 rate-limit + 60s backoff (which stalls the whole fetch).
+# Fix: size each provider to ITSELF, and split mixed universes by provider so
+# each group runs at its own safe concurrency.
+# ===========================================================================
+def massive_fetch_concurrency(settings: Any) -> int:
+    """Concurrent Massive OHLCV fetches. Mirrors the proven massive_client batch
+    sizer: rate-governed (massive_max_rps, which the client paces internally) and
+    bounded by half the urllib3 pool so overlapping scans don't exhaust it."""
+    rps = max(1, int(getattr(settings, "massive_max_rps", 100) or 100))
+    pool_cap = max(16, int(getattr(settings, "massive_http_pool_maxsize", 512) or 512) // 2)
+    return max(1, min(80, max(30, rps), pool_cap))
+
+
+def polygon_fetch_concurrency(settings: Any) -> int:
+    """Concurrent Polygon OHLCV fetches (dedicated batch worker setting)."""
+    return max(1, int(getattr(settings, "market_data_polygon_batch_workers", 48) or 48))
+
+
+def coinbase_fetch_concurrency(settings: Any) -> int:
+    """Concurrent Coinbase REST fetches — GENTLE. Coinbase public OHLCV is
+    429-prone (opens a 60s backoff on rate-limit), so match the fast-path's
+    proven snapshot concurrency rather than a CPU-derived number."""
+    o = getattr(settings, "coinbase_fetch_concurrency", None)
+    if o is not None:
+        return max(1, int(o))
+    return max(1, int(getattr(settings, "universe_snapshot_fetch_concurrency", 4) or 4))
+
+
+def yfinance_fetch_concurrency(settings: Any) -> int:
+    """Concurrent yfinance fetches — GENTLE. yfinance is fragile and already
+    globally paced (yf_session.acquire); a small pool avoids tripping it."""
+    o = getattr(settings, "yfinance_fetch_concurrency", None)
+    if o is not None:
+        return max(1, int(o))
+    return 4
+
+
+_PROVIDER_FETCH_SIZERS = {
+    "massive": massive_fetch_concurrency,
+    "polygon": polygon_fetch_concurrency,
+    "coinbase": coinbase_fetch_concurrency,
+    "yfinance": yfinance_fetch_concurrency,
+    "yf": yfinance_fetch_concurrency,
+}
+
+
+def io_fanout_workers(n_tasks: int, settings: Any | None = None, *, ceiling: int = 32) -> int:
+    """Workers for a HETEROGENEOUS I/O fan-out — a fixed handful of *independent*
+    network/DB calls run together (e.g. assembling AI context from several
+    sources, or a prescreener pulling candidates from multiple feeds).
+
+    These are bound by the NUMBER OF CONCURRENT TASKS, not by CPU and not by any
+    single provider's rate, so sizing them off the CPU budget would wrongly
+    serialize independent I/O. Size to the task count up to a safety ceiling
+    (tunable via ``brain_io_fanout_ceiling``)."""
+    o = getattr(settings, "brain_io_fanout_ceiling", None) if settings is not None else None
+    cap = max(1, int(o)) if o is not None else int(ceiling)
+    return max(1, min(cap, int(n_tasks)))
+
+
+def io_workers_for_provider(provider: str, n_items: int, settings: Any) -> int:
+    """Worker count for fetching ``n_items`` from a single named provider.
+
+    Provider one of: massive | polygon | coinbase | yfinance. Unknown/mixed
+    falls back to the gentlest (Coinbase) so we never accidentally hammer a
+    rate-limited API. Always clamped to ``n_items`` (no idle threads)."""
+    n = max(1, int(n_items))
+    sizer = _PROVIDER_FETCH_SIZERS.get((provider or "").strip().lower())
+    cap = sizer(settings) if sizer is not None else coinbase_fetch_concurrency(settings)
+    return max(1, min(cap, n))
+
+
+def ohlcv_provider_for_ticker(ticker: str) -> str:
+    """Route a ticker to the provider that actually serves its OHLCV history.
+
+    Crypto (``-USD``) is served by Coinbase (Massive is dead for crypto, so the
+    real rate pressure is Coinbase); everything else is equity → Massive primary.
+    This determines which provider's rate budget bounds the fetch."""
+    return "coinbase" if str(ticker or "").upper().endswith("-USD") else "massive"
+
+
+def split_tickers_by_provider(tickers: "list[str]") -> "dict[str, list[str]]":
+    """Partition a mixed universe into ``{provider: [tickers]}`` groups so each
+    group can be fetched at its own provider-safe concurrency."""
+    groups: "dict[str, list[str]]" = {}
+    for t in tickers:
+        groups.setdefault(ohlcv_provider_for_ticker(t), []).append(t)
+    return groups
+
+
+def parallel_fetch_by_provider(
+    items: "list",
+    worker_fn: "Any",
+    settings: Any,
+    *,
+    ticker_of: "Any" = None,
+    shutdown_event: "Any" = None,
+    cap: "int | None" = None,
+) -> "list":
+    """Provider-split parallel map: run ``worker_fn(item)`` over ``items``,
+    partitioned by each item's OHLCV provider so a FAST provider (Massive) is
+    never throttled to a SLOW one's pace (Coinbase) and the slow one is never
+    hammered into 429s. Provider groups run concurrently; within a group the
+    pool is sized to that provider's rate budget.
+
+    ``ticker_of(item) -> ticker`` routes each item (default: the item itself, for
+    plain ticker strings). ``cap`` optionally bounds each provider group's worker
+    count (e.g. honor a caller-tuned ``max_workers`` while still splitting).
+    Returns the list of ``worker_fn`` results in completion order (exceptions
+    dropped). Callers decide whether to ``extend`` (worker returns a list) or
+    filter-truthy (worker returns a scalar/None).
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    _key = ticker_of if ticker_of is not None else (lambda x: x)
+    groups: "dict[str, list]" = {}
+    for it in items:
+        groups.setdefault(ohlcv_provider_for_ticker(_key(it)), []).append(it)
+
+    def _run_group(provider: str, group: "list") -> "list":
+        if not group:
+            return []
+        workers = io_workers_for_provider(provider, len(group), settings)
+        if cap is not None:
+            workers = max(1, min(int(cap), workers))
+        out: "list" = []
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futs = {ex.submit(worker_fn, it): it for it in group}
+            for f in as_completed(futs):
+                if shutdown_event is not None and shutdown_event.is_set():
+                    break
+                try:
+                    out.append(f.result())
+                except Exception:
+                    continue
+        return out
+
+    results: "list" = []
+    if len(groups) <= 1:
+        for provider, group in groups.items():
+            results.extend(_run_group(provider, group))
+    else:
+        with ThreadPoolExecutor(max_workers=len(groups)) as outer:
+            gfuts = [
+                outer.submit(_run_group, provider, group)
+                for provider, group in groups.items()
+            ]
+            for gf in as_completed(gfuts):
+                if shutdown_event is not None and shutdown_event.is_set():
+                    break
+                try:
+                    results.extend(gf.result())
+                except Exception:
+                    continue
+    return results

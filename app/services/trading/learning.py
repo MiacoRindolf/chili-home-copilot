@@ -38,6 +38,11 @@ from .brain_io_concurrency import (
     io_workers_low,
     io_workers_med,
     io_workers_for_snapshot_batch,
+    io_workers_for_provider,
+    split_tickers_by_provider,
+    parallel_fetch_by_provider,
+    cpu_workers,
+    effective_cpu_budget,
     snapshot_batch_stats,
 )
 from ..socket_budget import mount_bounded_http_adapters
@@ -1805,33 +1810,31 @@ def take_snapshots_parallel(
                 logger.debug("[learning] take_snapshots_parallel: non-critical operation failed", exc_info=True)
 
     _t0 = time.time()
-    fetched: list[tuple] = []
     total = len(tickers)
-    with ThreadPoolExecutor(max_workers=resolved_workers) as executor:
-        futures = {executor.submit(_snapshot_data, t, bar_interval): t for t in tickers}
-        for future in as_completed(futures):
-            if _shutting_down.is_set():
-                executor.shutdown(wait=False, cancel_futures=True)
-                break
-            try:
-                fetched.append(future.result())
-            except Exception:
-                logger.debug("[learning] take_snapshots_parallel: non-critical operation failed", exc_info=True)
-            # Progress logging every 100 tickers
-            done = len(fetched)
-            if done % 100 == 0 or done == total:
-                elapsed = round(time.time() - _t0, 1)
-                logger.info(f"[learning] Snapshot progress: {done}/{total} ({elapsed}s)")
-                # graph-node: c_state/snapshots_daily (progress text; metadata in learning_cycle_architecture)
-                apply_learning_cycle_step_status_progress(
-                    _learning_status, "c_state", "snapshots_daily", done, total,
-                )
+    # Provider-split snapshot fetch: equity (Massive) and crypto (Coinbase) run at
+    # their own rate-safe concurrency, concurrently — a mixed universe no longer
+    # throttles equity to Coinbase's pace nor hammers Coinbase into 429s. An
+    # explicit caller max_workers caps each provider group (keeps tuned jobs gentle).
+    _cap = int(max_workers) if max_workers is not None else None
+    fetched: list[tuple] = parallel_fetch_by_provider(
+        tickers,
+        lambda t: _snapshot_data(t, bar_interval),
+        _settings,
+        cap=_cap,
+        shutdown_event=_shutting_down,
+    )
+    try:
+        apply_learning_cycle_step_status_progress(
+            _learning_status, "c_state", "snapshots_daily", len(fetched), total,
+        )
+    except Exception:
+        logger.debug("[learning] take_snapshots_parallel: progress status failed", exc_info=True)
 
     _fetch_elapsed = round(time.time() - _t0, 1)
     _t_db0 = time.time()
     logger.info(
         f"[learning] Snapshot data fetch: {len(fetched)}/{len(tickers)} tickers "
-        f"in {_fetch_elapsed}s ({resolved_workers} workers) interval={bar_interval}"
+        f"in {_fetch_elapsed}s (provider-split cap={_cap}) interval={bar_interval}"
     )
     vix = get_vix()
     count = 0
@@ -2049,21 +2052,18 @@ def backfill_future_returns(db: Session) -> int:
 
     from ...config import settings as _bf_settings
 
-    _workers = (
-        io_workers_high(_bf_settings)
-        if (_use_massive() or _use_polygon())
-        else io_workers_med(_bf_settings)
-    )
+    # Provider-split by each snapshot's ticker: equity returns backfill fast on
+    # Massive, crypto stays gentle on 429-prone Coinbase.
     _t0 = time.time()
-    results = []
-    with ThreadPoolExecutor(max_workers=_workers) as executor:
-        futures = {executor.submit(_fetch_returns, s): s for s in unfilled}
-        for f in as_completed(futures):
-            if _shutting_down.is_set():
-                break
-            r = f.result()
-            if r:
-                results.append(r)
+    results = [
+        r
+        for r in parallel_fetch_by_provider(
+            unfilled, _fetch_returns, _bf_settings,
+            ticker_of=lambda s: getattr(s, "ticker", ""),
+            shutdown_event=_shutting_down,
+        )
+        if r
+    ]
 
     st = _bf_stats
     logger.info(
@@ -2675,14 +2675,43 @@ def mine_patterns(
     if budget is None:
         budget = BrainResourceBudget.from_settings()
 
+    # Provider-aware OHLCV concurrency (replaces the legacy CPU-sized single pool).
+    # _mine_from_history fetches from a market-data provider then computes indicators;
+    # the fetch (network) is the wall-clock cost. Equity routes to Massive (100 rps,
+    # 512-conn pool — safe at high concurrency) and crypto routes to Coinbase (429-
+    # prone, must stay gentle). A single CPU-sized pool throttled the fast equity
+    # fetches to crypto's pace AND hammered Coinbase into 60s backoffs. We now split
+    # each interval's tickers by provider and fetch each group at its own rate-safe
+    # concurrency, with the groups running concurrently.
     worker_override = getattr(settings, "brain_mine_patterns_workers", None)
-    if worker_override is not None:
-        _workers = max(1, int(worker_override))
-    else:
-        _workers = min(4, io_workers_low(settings))
     _t0 = time.time()
     all_rows: list[dict] = []
     fetch_jobs = 0
+    _worker_profile: dict[str, int] = {}
+
+    def _fetch_provider_group(provider: str, group: list[str], bar_iv: str) -> list[dict]:
+        if not group:
+            return []
+        if worker_override is not None:
+            w = max(1, int(worker_override))
+        else:
+            w = io_workers_for_provider(provider, len(group), settings)
+        _worker_profile[provider] = w
+        out: list[dict] = []
+        with ThreadPoolExecutor(max_workers=w) as executor:
+            futures = {
+                executor.submit(_mine_from_history, t, bar_iv, budget): t
+                for t in group
+            }
+            for future in as_completed(futures):
+                if _shutting_down.is_set():
+                    break
+                try:
+                    out.extend(future.result())
+                except Exception:
+                    continue
+        return out
+
     for idx, (bar_iv, tick_chunk) in enumerate(interval_jobs):
         if _shutting_down.is_set():
             break
@@ -2697,25 +2726,31 @@ def mine_patterns(
         if not planned_chunk:
             continue
         fetch_jobs += len(planned_chunk)
-        with ThreadPoolExecutor(max_workers=_workers) as executor:
-            futures = {
-                executor.submit(_mine_from_history, t, bar_iv, budget): t
-                for t in planned_chunk
-            }
+        groups = split_tickers_by_provider(planned_chunk)
+        if len(groups) <= 1:
+            for provider, group in groups.items():
+                all_rows.extend(_fetch_provider_group(provider, group, bar_iv))
+        else:
+            # equity (Massive) + crypto (Coinbase) groups fetch concurrently so the
+            # gentle Coinbase pace never blocks the fast Massive equity fetches.
+            with ThreadPoolExecutor(max_workers=len(groups)) as outer:
+                gfutures = [
+                    outer.submit(_fetch_provider_group, provider, group, bar_iv)
+                    for provider, group in groups.items()
+                ]
+                for gf in as_completed(gfutures):
+                    if _shutting_down.is_set():
+                        break
+                    try:
+                        all_rows.extend(gf.result())
+                    except Exception:
+                        continue
 
-            for future in as_completed(futures):
-                if _shutting_down.is_set():
-                    break
-                try:
-                    rows = future.result()
-                    all_rows.extend(rows)
-                except Exception:
-                    continue
-
+    _wp = ",".join(f"{p}={w}" for p, w in sorted(_worker_profile.items())) or "none"
     logger.info(
         f"[learning] Pattern mining OHLCV fetch: universe={len(mine_tickers)} "
         f"interval_jobs={len(interval_jobs)} fetch_jobs={fetch_jobs} -> "
-        f"{len(all_rows)} data rows in {time.time() - _t0:.1f}s ({_workers} workers)"
+        f"{len(all_rows)} data rows in {time.time() - _t0:.1f}s (workers {_wp})"
     )
 
     snapshot_limit = max(
@@ -3630,21 +3665,15 @@ def seek_pattern_data(db: Session, user_id: int | None) -> dict[str, Any]:
     seek_tickers = seek_tickers[:400]
     from ...config import settings as _seek_settings
 
-    _workers = (
-        io_workers_high(_seek_settings)
-        if (_use_massive() or _use_polygon())
-        else io_workers_med(_seek_settings)
-    )
+    # Mixed equity+crypto universe -> provider-split: Massive equity mining runs
+    # at full concurrency while crypto stays gentle on 429-prone Coinbase.
     extra_rows: list[dict] = []
-    with ThreadPoolExecutor(max_workers=_workers) as pool:
-        futs = {pool.submit(_mine_from_history, t): t for t in seek_tickers}
-        for f in as_completed(futs):
-            if _shutting_down.is_set():
-                break
-            try:
-                extra_rows.extend(f.result())
-            except Exception:
-                logger.debug("[learning] seek_pattern_data: non-critical operation failed", exc_info=True)
+    for _rows in parallel_fetch_by_provider(
+        seek_tickers, _mine_from_history, _seek_settings,
+        shutdown_event=_shutting_down,
+    ):
+        if _rows:
+            extra_rows.extend(_rows)
 
     extra_rows = dedupe_sample_rows(extra_rows)
 
@@ -4128,8 +4157,11 @@ def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int 
     _release_queue_parent_session(db, reason="dispatching long-running queue workers")
 
     max_workers = settings.brain_backtest_parallel
-    if settings.brain_max_cpu_pct is not None and _CPU_COUNT:
-        cap = max(1, int(_CPU_COUNT * settings.brain_max_cpu_pct / 100))
+    if settings.brain_max_cpu_pct is not None:
+        # Cap CPU-bound backtest workers by the cgroup-EFFECTIVE CPUs, not host
+        # cpu_count (which over-allocates a CPU-limited container's process pool).
+        _eff_cpus = effective_cpu_budget(settings)
+        cap = max(1, int(_eff_cpus * settings.brain_max_cpu_pct / 100))
         max_workers = min(max_workers, cap)
     max_workers = min(max_workers, len(pattern_ids))
     proc_cap = getattr(settings, "brain_queue_process_cap", None)
@@ -4275,18 +4307,13 @@ def validate_and_evolve(db: Session, user_id: int | None) -> dict[str, Any]:
     from ...config import settings as _ve_settings
     import random
 
-    _workers = (
-        io_workers_high(_ve_settings)
-        if (_use_massive() or _use_polygon())
-        else io_workers_med(_ve_settings)
-    )
-    with ThreadPoolExecutor(max_workers=_workers) as pool:
-        futs = {pool.submit(_mine_from_history, t): t for t in mine_tickers}
-        for f in as_completed(futs):
-            try:
-                rows.extend(f.result())
-            except Exception:
-                logger.debug("[learning] validate_and_evolve: non-critical operation failed", exc_info=True)
+    # Mixed universe -> provider-split (Massive equity fast, Coinbase crypto gentle).
+    for _r in parallel_fetch_by_provider(
+        mine_tickers, _mine_from_history, _ve_settings,
+        shutdown_event=_shutting_down,
+    ):
+        if _r:
+            rows.extend(_r)
 
     if len(rows) < 30:
         return {"tested": 0, "note": "insufficient data for self-validation"}
@@ -5044,7 +5071,9 @@ def mine_intraday_patterns(
 
     from ...config import settings as _intraday_settings
 
-    _workers = io_workers_low(_intraday_settings)
+    # Mixed crypto+equity intraday bars; crypto routes to 429-prone Coinbase, so
+    # size to the gentle Coinbase budget for this shared pool (small fixed universe).
+    _workers = io_workers_for_provider("coinbase", len(tickers), _intraday_settings)
     discoveries = 0
     rows_total = 0
     intervals_used: list[str] = []
@@ -5340,7 +5369,8 @@ def mine_high_vol_regime_patterns(
         return {"discoveries": 0, "rows_mined": 0, "tickers": 0, "skipped": True}
 
     tickers = [t for t in DEFAULT_CRYPTO_TICKERS if str(t).endswith("-USD")][:30]
-    _hv_workers = io_workers_low(settings)
+    # Crypto-only -> Coinbase OHLCV (429-prone): size gently, not off the CPU budget.
+    _hv_workers = io_workers_for_provider("coinbase", len(tickers), settings)
     discoveries = 0
     _fam = BRAIN_HYPOTHESIS_FAMILY_HIGH_VOL
     rows_total = 0
@@ -6795,21 +6825,14 @@ def refine_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
     mine_tickers = list(ALL_SCAN_TICKERS)[:600]
     from ...config import settings as _ref_settings
 
-    _workers = (
-        io_workers_high(_ref_settings)
-        if (_use_massive() or _use_polygon())
-        else io_workers_med(_ref_settings)
-    )
+    # Mixed universe -> provider-split (Massive equity fast, Coinbase crypto gentle).
     all_rows: list[dict] = []
-    with ThreadPoolExecutor(max_workers=_workers) as pool:
-        futs = {pool.submit(_mine_from_history, t): t for t in mine_tickers}
-        for f in as_completed(futs):
-            if _shutting_down.is_set():
-                break
-            try:
-                all_rows.extend(f.result())
-            except Exception:
-                logger.debug("[learning] refine_patterns: non-critical operation failed", exc_info=True)
+    for _r in parallel_fetch_by_provider(
+        mine_tickers, _mine_from_history, _ref_settings,
+        shutdown_event=_shutting_down,
+    ):
+        if _r:
+            all_rows.extend(_r)
 
     if len(all_rows) < 50:
         return {"refined": 0, "note": "insufficient data for refinement"}
