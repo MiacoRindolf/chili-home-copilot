@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../network/chili_api_client.dart';
+import '../ui/app_ui.dart';
 import 'agent.dart';
 import 'agent_activity_service.dart';
 import 'agent_control_service.dart';
@@ -11,6 +12,7 @@ import 'agent_filter.dart';
 import 'agent_persistence.dart';
 import 'agent_registry.dart';
 import 'agent_status_service.dart';
+import 'run_health.dart';
 
 /// Signature of the live-status poller — injectable so tests can feed canned
 /// readings without touching the network.
@@ -746,9 +748,26 @@ class _AgentsScreenState extends State<AgentsScreen> {
                 style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
               );
             }
+            final RunHealth health = summarizeRuns(runs);
             return Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
+                // AG-1 — run-health summary: outcome strip + success-rate pill.
+                Row(
+                  children: <Widget>[
+                    Expanded(child: RunOutcomeStrip(runs)),
+                    if (health.successLabel != null) ...<Widget>[
+                      const SizedBox(width: 8),
+                      ApStatusPill(
+                        health.successLabel!,
+                        color: (health.successRate ?? 0) >= 0.5
+                            ? const Color(0xFF2E9E5B)
+                            : cs.error,
+                      ),
+                    ],
+                  ],
+                ),
+                const SizedBox(height: 6),
                 for (final AgentRun r in runs) _runRow(cs, r),
               ],
             );
