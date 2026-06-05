@@ -62,16 +62,22 @@ def _recommended_actions(
             f"Drawdown circuit breaker is TRIPPED{why}. Trades blocked until "
             "manual reset (see docs/DRAWDOWN_BREAKER_RUNBOOK.md)."
         )
-    if not at.get("enabled"):
-        actions.append("AutoTrader is disabled by configuration (chili_autotrader_enabled=false).")
-    elif not at.get("live_enabled"):
-        actions.append(
-            "AutoTrader is enabled but LIVE trading is OFF "
-            "(chili_autotrader_live_enabled=false) — running in shadow."
-        )
-
     total = funnel.get("total_runs") or 0
     if total == 0:
+        # enabled/live_enabled are PROCESS-LOCAL config: this report may be served by a
+        # non-autotrader process (e.g. the web container) whose config disables the
+        # autotrader even while the autotrader process itself is running. Only surface
+        # them as a cause when there is also no activity in the window to contradict them.
+        if not at.get("enabled"):
+            actions.append(
+                "AutoTrader shows disabled in this process (chili_autotrader_enabled=false) "
+                "and produced no runs in the window."
+            )
+        elif not at.get("live_enabled"):
+            actions.append(
+                "AutoTrader shows LIVE trading OFF in this process "
+                "(chili_autotrader_live_enabled=false) and produced no runs in the window."
+            )
         actions.append(
             "No AutoTrader runs in the window — check scanner supply and the brain "
             "worker (no pattern-imminent alerts are being processed)."
@@ -202,6 +208,10 @@ def build_autotrader_deployment_report(
             "state": at.get("state"),
             "enabled": at.get("enabled"),
             "live_enabled": at.get("live_enabled"),
+            # enabled/live_enabled reflect THIS serving process's config (process-local);
+            # active_in_window is the container-independent ground truth (runs exist).
+            "config_is_process_local": True,
+            "active_in_window": total > 0,
             "latest_run_at": at.get("latest_run_at"),
             "latest_run_age_seconds": at.get("latest_run_age_seconds"),
         },
