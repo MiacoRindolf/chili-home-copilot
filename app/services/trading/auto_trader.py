@@ -172,6 +172,15 @@ PAPER_SHADOW_CAPACITY_REASON_LOW_QUALITY = "low_quality_queue_pressure"
 AUTOTRADER_VERSION = "v1"
 PROBATION_RECERT_ALLOWANCE = "probation"
 PILOT_BOOTSTRAP_RECERT_ALLOWANCE = "pilot_bootstrap"
+# Recert reasons a realized-edge pilot may carry into a small reversible live
+# ramp: the CPCV / OOS evidence gaps that proven realized EV (the realized-edge
+# lane's basis) directly supersedes. Deliberately excludes stale_oos_recert (a
+# decay signal) and every hard execution / data block — those still freeze it.
+REALIZED_EDGE_RECERT_EXEMPT_REASONS = frozenset({
+    "missing_oos_recert",
+    "thin_oos_recert",
+    "promotion_gate_not_currently_passed",
+})
 PROBATION_TIMEZONE = "America/New_York"
 ENTRY_EXECUTION_SNAPSHOT_KEY = "entry_execution"
 PROBATION_ENTRY_FLAG = "probation_recert_allowed"
@@ -5703,12 +5712,58 @@ def _live_recert_block_applies(pat: ScanPattern) -> bool:
     return _live_recert_allowance(pat) is None
 
 
+def _realized_edge_recert_exempt(pat: ScanPattern) -> bool:
+    """True iff *pat* is a realized-edge pilot whose recert debt is CPCV/OOS
+    evidence its proven realized EV supersedes.
+
+    The realized-edge promotion lane graduates a shadow to pilot on a provably
+    positive realized edge (win-rate LCB > 0, n >= floor) rather than CPCV. The
+    recert system then flags ``promotion_gate_not_currently_passed`` — the CPCV
+    gate the pattern never needed. Freezing such a pilot in observation means it
+    can never place the small reversible live trade the pilot lane exists for,
+    even though it already carries the forward realized evidence the recert would
+    gather. Exempt it — but only when (a) the debt is CPCV/OOS-solvable (never a
+    hard execution/data block, never stale-cert decay) and (b) the realized edge
+    is currently provably positive. Non-realized patterns are never exempted.
+    """
+    if not bool(getattr(settings, "chili_shadow_vetting_realized_edge_pilot_enabled", True)):
+        return False
+    if str(getattr(pat, "lifecycle_stage", "") or "").strip().lower() != "pilot_promoted":
+        return False
+    try:
+        from .alpha_portfolio_gate import _recert_reason_set
+
+        reasons = _recert_reason_set(pat)
+    except Exception:
+        return False
+    if not reasons or not reasons.issubset(REALIZED_EDGE_RECERT_EXEMPT_REASONS):
+        return False
+    try:
+        from .pattern_shadow_vetting import _realized_edge_pilot_eligible
+
+        eligible, _ = _realized_edge_pilot_eligible(pat, settings_=settings)
+    except Exception:
+        return False
+    return bool(eligible)
+
+
 def _live_recert_allowance(pat: ScanPattern) -> str | None:
     """Return the reduced-risk lane that may pass recert debt, if any."""
     if not bool(getattr(pat, "recert_required", False)):
         return None
     if not bool(getattr(settings, "chili_autotrader_block_live_on_recert_required", True)):
         return PILOT_BOOTSTRAP_RECERT_ALLOWANCE
+    # Realized-edge pilots already carry the forward realized evidence their
+    # CPCV/OOS recert debt is meant to gather, so they take the small reversible
+    # pilot-bootstrap lane rather than freezing in observation. Hard execution/
+    # data debt and non-realized patterns are excluded inside the helper.
+    try:
+        if _realized_edge_recert_exempt(pat):
+            return PILOT_BOOTSTRAP_RECERT_ALLOWANCE
+    except Exception:
+        logger.debug(
+            "[autotrader] realized-edge recert exemption check failed", exc_info=True
+        )
     try:
         from .alpha_portfolio_gate import broker_risk_probation_allows_live
 
