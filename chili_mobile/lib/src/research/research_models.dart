@@ -48,6 +48,18 @@ class ResearchDigest {
   );
 }
 
+/// Case-insensitive filter over topic + summary (SF-1). Empty query → unchanged.
+List<ResearchTopic> filterResearchTopics(
+    List<ResearchTopic> topics, String query) {
+  final String q = query.trim().toLowerCase();
+  if (q.isEmpty) return topics;
+  return topics
+      .where((ResearchTopic t) =>
+          t.topic.toLowerCase().contains(q) ||
+          t.summary.toLowerCase().contains(q))
+      .toList();
+}
+
 ResearchDigest parseResearchDigest(Map<String, dynamic> json) {
   final List<ResearchTopic> topics = <ResearchTopic>[
     for (final Object? t in (json['topics'] as List? ?? const <Object?>[]))

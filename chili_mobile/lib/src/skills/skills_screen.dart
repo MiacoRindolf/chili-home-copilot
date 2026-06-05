@@ -21,6 +21,7 @@ class SkillsScreen extends StatefulWidget {
 
 class _SkillsScreenState extends State<SkillsScreen> {
   late final SkillsFetcher _fetcher;
+  final TextEditingController _search = TextEditingController(); // SF-1
   List<Skill>? _skills;
   bool _loading = true;
   String? _error;
@@ -30,6 +31,12 @@ class _SkillsScreenState extends State<SkillsScreen> {
     super.initState();
     _fetcher = widget._injectedFetcher ?? ChiliApiClient().getTeacherSkills;
     _load();
+  }
+
+  @override
+  void dispose() {
+    _search.dispose();
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -61,9 +68,33 @@ class _SkillsScreenState extends State<SkillsScreen> {
       body: Column(
         children: <Widget>[
           _header(cs),
+          if ((_skills?.length ?? 0) > 0) _searchBar(cs), // SF-1
           const Divider(height: 1),
           Expanded(child: _body(cs)),
         ],
+      ),
+    );
+  }
+
+  Widget _searchBar(ColorScheme cs) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+      child: TextField(
+        controller: _search,
+        onChanged: (_) => setState(() {}),
+        decoration: InputDecoration(
+          isDense: true,
+          hintText: 'Search skills…',
+          prefixIcon: const Icon(Icons.search, size: 18),
+          suffixIcon: _search.text.isEmpty
+              ? null
+              : IconButton(
+                  icon: const Icon(Icons.close, size: 16),
+                  onPressed: () => setState(() => _search.clear()),
+                ),
+          border:
+              OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+        ),
       ),
     );
   }
@@ -120,13 +151,21 @@ class _SkillsScreenState extends State<SkillsScreen> {
         ),
       );
     }
-    final List<Skill> skills = _skills ?? const <Skill>[];
-    if (skills.isEmpty) {
+    final List<Skill> all = _skills ?? const <Skill>[];
+    if (all.isEmpty) {
       return const ApEmptyState(
         icon: Icons.school_outlined,
         message: 'No skills learned yet',
         detail:
             'The teacher loop distills a reusable skill when a strong model recovers from a failure.',
+      );
+    }
+    // SF-1 — filter by the search box.
+    final List<Skill> skills = filterSkills(all, _search.text);
+    if (skills.isEmpty) {
+      return ApEmptyState(
+        icon: Icons.search_off,
+        message: 'No skills match “${_search.text.trim()}”',
       );
     }
     return ListView(

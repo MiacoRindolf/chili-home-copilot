@@ -171,10 +171,12 @@ class _ResearchScreenState extends State<ResearchScreen> {
               controller: _topicCtrl,
               enabled: !_running,
               textInputAction: TextInputAction.search,
+              // SF-1 — filter shown topics as you type; submit researches it.
+              onChanged: (_) => setState(() {}),
               onSubmitted: (_) => _runResearch(),
               decoration: InputDecoration(
                 isDense: true,
-                hintText: 'Research a topic now…',
+                hintText: 'Filter topics — or research a new one…',
                 prefixIcon: const Icon(Icons.search, size: 18),
                 border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(12)),
@@ -272,11 +274,26 @@ class _ResearchScreenState extends State<ResearchScreen> {
             'CHILI researches topics you show interest in. Results will appear here.',
       );
     }
+    // SF-1 — filter the shown topics by the run-bar text.
+    final String q = _topicCtrl.text.trim();
+    final List<ResearchTopic> topics = filterResearchTopics(d.topics, q);
+    if (topics.isEmpty) {
+      return ApEmptyState(
+        icon: Icons.search_off,
+        message: 'No topics match “$q”',
+        detail: 'Press Research to look it up on the web.',
+        action: FilledButton.icon(
+          onPressed: _running ? null : _runResearch,
+          icon: const Icon(Icons.bolt, size: 18),
+          label: Text('Research “$q”'),
+        ),
+      );
+    }
     return ListView(
       padding: const EdgeInsets.all(20),
       children: <Widget>[
-        for (final ResearchTopic t in d.topics) _topicCard(cs, t),
-        if (d.sources.isNotEmpty) ...<Widget>[
+        for (final ResearchTopic t in topics) _topicCard(cs, t),
+        if (q.isEmpty && d.sources.isNotEmpty) ...<Widget>[
           const SizedBox(height: 8),
           ApSectionHeader('Sources · ${d.sources.length}', icon: Icons.link),
           const SizedBox(height: 6),
