@@ -243,6 +243,36 @@ class _CockpitScreenState extends State<CockpitScreen> {
             ),
           ],
         ),
+        const SizedBox(height: 12),
+        // TC-6 — cash / buying-power / cash-weight tiles.
+        Row(
+          children: <Widget>[
+            Expanded(
+              child: ApStatCard(
+                label: 'Cash',
+                value: _money(s.cash),
+                icon: Icons.payments_outlined,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: ApStatCard(
+                label: 'Buying power',
+                value: _money(s.buyingPower),
+                icon: Icons.add_card_outlined,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: ApStatCard(
+                label: 'Cash weight',
+                value:
+                    '${(cashFractionOfEquity(s.cash, s.totalEquity) * 100).round()}%',
+                icon: Icons.pie_chart_outline,
+              ),
+            ),
+          ],
+        ),
         // TC-2 — live session equity curve.
         if (_equityHistory.length >= 2) ...<Widget>[
           const SizedBox(height: 14),

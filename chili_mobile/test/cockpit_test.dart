@@ -138,6 +138,16 @@ void main() {
     });
   });
 
+  group('cashFractionOfEquity (TC-6)', () {
+    test('cash / equity, clamped, divide-by-zero safe', () {
+      expect(cashFractionOfEquity(2500, 10000), closeTo(0.25, 1e-9));
+      expect(cashFractionOfEquity(0, 10000), 0);
+      expect(cashFractionOfEquity(5000, 0), 0); // no equity → 0, not NaN/inf
+      expect(cashFractionOfEquity(-100, 10000), 0); // clamped low
+      expect(cashFractionOfEquity(20000, 10000), 1); // clamped high
+    });
+  });
+
   group('venueExposures (TC-5)', () {
     Position pos(String ticker, String venue, double mv, double pnl) =>
         Position(
@@ -321,6 +331,12 @@ void main() {
       expect(find.text('Kill switch off'), findsOneWidget);
       expect(find.text('Breaker ok'), findsOneWidget);
       expect(find.text('AAPL'), findsOneWidget);
+      // TC-6 — cash / buying-power / cash-weight tiles.
+      expect(find.text('Cash'), findsOneWidget);
+      expect(find.text('Buying power'), findsOneWidget);
+      expect(find.text('\$5,000.00'), findsOneWidget); // cash
+      expect(find.text('Cash weight'), findsOneWidget);
+      expect(find.text('20%'), findsOneWidget); // 5000 / 25000
     });
 
     testWidgets('TC-3: positions render in default P/L-desc order with a sorter',
