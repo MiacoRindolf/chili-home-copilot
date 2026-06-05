@@ -137,3 +137,47 @@ double _d(Object? v) {
 }
 
 String _s(Object? v) => v?.toString().trim() ?? '';
+
+/// How the cockpit's open-positions list is ordered (TC-3).
+enum PositionSort { pnl, pnlPct, value, ticker }
+
+String positionSortLabel(PositionSort s) {
+  switch (s) {
+    case PositionSort.pnl:
+      return 'P/L';
+    case PositionSort.pnlPct:
+      return 'P/L %';
+    case PositionSort.value:
+      return 'Value';
+    case PositionSort.ticker:
+      return 'Ticker';
+  }
+}
+
+/// Return a NEW list ordered by [sort] (TC-3). Pure — never mutates [positions].
+/// P/L, P/L %, and value sort biggest-first (most actionable on top); ticker
+/// sorts A→Z case-insensitively. Ties fall back to ticker A→Z for stability.
+List<Position> sortPositions(List<Position> positions, PositionSort sort) {
+  final List<Position> out = List<Position>.of(positions);
+  int byTicker(Position a, Position b) =>
+      a.ticker.toLowerCase().compareTo(b.ticker.toLowerCase());
+  int desc(num a, num b, Position pa, Position pb) {
+    final int c = b.compareTo(a);
+    return c != 0 ? c : byTicker(pa, pb);
+  }
+
+  switch (sort) {
+    case PositionSort.pnl:
+      out.sort((Position a, Position b) =>
+          desc(a.unrealizedPnl, b.unrealizedPnl, a, b));
+    case PositionSort.pnlPct:
+      out.sort((Position a, Position b) =>
+          desc(a.unrealizedPnlPct, b.unrealizedPnlPct, a, b));
+    case PositionSort.value:
+      out.sort((Position a, Position b) =>
+          desc(a.marketValue, b.marketValue, a, b));
+    case PositionSort.ticker:
+      out.sort(byTicker);
+  }
+  return out;
+}
