@@ -315,6 +315,9 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
           PaletteItem(e.key, e.value.title, e.value.icon),
         // ⌘K agent commands (AGT-7): start/stop non-backend agents directly.
         ...agentPaletteCommands(_agents.agents),
+        // UK-1: jump to any open window + workspace actions + ask CHILI.
+        ...windowPaletteCommands(_ws.windows),
+        ...workspaceActionCommands(),
       ];
 
   void _onPaletteOpen(String id) {
@@ -322,9 +325,25 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
     final String? agentId = parseAgentToggleId(id);
     if (agentId != null) {
       _toggleAgent(agentId);
-    } else {
-      _openApp(id);
+      return;
     }
+    final String? windowId = parseWindowFocusId(id);
+    if (windowId != null) {
+      _ws.focus(windowId);
+      return;
+    }
+    switch (id) {
+      case 'action:ask':
+        _openApp('chat');
+        return;
+      case 'action:show-desktop':
+        _ws.showDesktop();
+        return;
+      case 'action:avatar':
+        widget.onBackToAvatar();
+        return;
+    }
+    _openApp(id);
   }
 
   Widget _bodyFor(String id) {
@@ -579,6 +598,28 @@ List<PaletteItem> agentPaletteCommands(List<Agent> agents) => <PaletteItem>[
 /// is a normal app id.
 String? parseAgentToggleId(String id) =>
     id.startsWith(_agentTogglePrefix) ? id.substring(_agentTogglePrefix.length) : null;
+
+const String _windowFocusPrefix = 'window:';
+
+/// ⌘K "Go to <window>" commands for every open window (UK-1). Pure + testable.
+List<PaletteItem> windowPaletteCommands(Iterable<WsWindow> windows) =>
+    <PaletteItem>[
+      for (final WsWindow w in windows)
+        PaletteItem('$_windowFocusPrefix${w.id}', 'Go to ${w.title}', w.icon),
+    ];
+
+/// Returns the window id encoded in a window-focus palette id, or null.
+String? parseWindowFocusId(String id) => id.startsWith(_windowFocusPrefix)
+    ? id.substring(_windowFocusPrefix.length)
+    : null;
+
+/// Global workspace action commands available from ⌘K (UK-1).
+List<PaletteItem> workspaceActionCommands() => const <PaletteItem>[
+      PaletteItem('action:ask', 'Ask CHILI', Icons.auto_awesome),
+      PaletteItem(
+          'action:show-desktop', 'Show desktop', Icons.desktop_windows_outlined),
+      PaletteItem('action:avatar', 'Minimize to avatar', Icons.bolt),
+    ];
 
 /// Dock footer indicator showing the real-time layer's connection status (RT-2).
 class _ConnectionDot extends StatelessWidget {

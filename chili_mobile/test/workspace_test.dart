@@ -443,4 +443,29 @@ void main() {
       expect(parseAgentToggleId('agents'), isNull);
     });
   });
+
+  group('Universal ⌘K (UK-1)', () {
+    test('windowPaletteCommands → "Go to <title>" for each open window', () {
+      final WorkspaceController ws = WorkspaceController();
+      ws.open('chat', title: 'Chat', icon: Icons.chat);
+      ws.open('cockpit', title: 'Cockpit', icon: Icons.candlestick_chart);
+      final List<PaletteItem> cmds = windowPaletteCommands(ws.windows);
+      expect(cmds.length, 2);
+      expect(cmds.map((PaletteItem c) => c.id),
+          containsAll(<String>['window:chat', 'window:cockpit']));
+      expect(cmds.map((PaletteItem c) => c.title), contains('Go to Cockpit'));
+    });
+
+    test('parseWindowFocusId round-trips and ignores other ids', () {
+      expect(parseWindowFocusId('window:cockpit'), 'cockpit');
+      expect(parseWindowFocusId('dashboard'), isNull);
+      expect(parseWindowFocusId('agent:toggle:x'), isNull);
+    });
+
+    test('workspaceActionCommands includes ask / show-desktop / avatar', () {
+      final List<String> ids =
+          workspaceActionCommands().map((PaletteItem c) => c.id).toList();
+      expect(ids, containsAll(<String>['action:ask', 'action:show-desktop', 'action:avatar']));
+    });
+  });
 }
