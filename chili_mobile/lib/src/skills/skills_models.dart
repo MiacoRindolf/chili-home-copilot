@@ -18,6 +18,37 @@ class Skill {
   bool get hasSteps => steps.isNotEmpty;
 }
 
+/// How the Skills viewer orders learned skills (SK-2).
+enum SkillSort { recent, name }
+
+String skillSortLabel(SkillSort s) {
+  switch (s) {
+    case SkillSort.recent:
+      return 'Recent';
+    case SkillSort.name:
+      return 'Name';
+  }
+}
+
+/// Return a NEW list ordered by [sort] (SK-2). Pure — never mutates [skills].
+/// Recent sorts newest-first by savedAtMs (ties / unknown timestamps fall back
+/// to name A→Z for stability); name sorts A→Z case-insensitively.
+List<Skill> sortSkills(List<Skill> skills, SkillSort sort) {
+  final List<Skill> out = List<Skill>.of(skills);
+  int byName(Skill a, Skill b) =>
+      a.name.toLowerCase().compareTo(b.name.toLowerCase());
+  switch (sort) {
+    case SkillSort.recent:
+      out.sort((Skill a, Skill b) {
+        final int c = b.savedAtMs.compareTo(a.savedAtMs);
+        return c != 0 ? c : byName(a, b);
+      });
+    case SkillSort.name:
+      out.sort(byName);
+  }
+  return out;
+}
+
 /// Case-insensitive filter over name + description + steps (SF-1). Empty → all.
 List<Skill> filterSkills(List<Skill> skills, String query) {
   final String q = query.trim().toLowerCase();

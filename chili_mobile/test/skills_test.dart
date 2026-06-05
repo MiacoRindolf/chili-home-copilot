@@ -45,6 +45,38 @@ void main() {
     });
   });
 
+  group('sortSkills (SK-2)', () {
+    const List<Skill> skills = <Skill>[
+      Skill(name: 'Zebra', description: '', steps: <String>[], savedAtMs: 100),
+      Skill(name: 'Apple', description: '', steps: <String>[], savedAtMs: 300),
+      Skill(name: 'Mango', description: '', steps: <String>[], savedAtMs: 300),
+    ];
+
+    test('recent sorts newest-first, ties break by name A→Z', () {
+      expect(
+          sortSkills(skills, SkillSort.recent).map((Skill s) => s.name),
+          <String>['Apple', 'Mango', 'Zebra']);
+    });
+
+    test('name sorts A→Z', () {
+      expect(
+          sortSkills(skills, SkillSort.name).map((Skill s) => s.name),
+          <String>['Apple', 'Mango', 'Zebra']);
+    });
+
+    test('does not mutate the input list', () {
+      final List<Skill> input = List<Skill>.of(skills);
+      sortSkills(input, SkillSort.recent);
+      expect(input.first.name, 'Zebra'); // original order preserved
+    });
+
+    test('skillSortLabel covers every variant', () {
+      for (final SkillSort s in SkillSort.values) {
+        expect(skillSortLabel(s), isNotEmpty);
+      }
+    });
+  });
+
   group('filterSkills (SF-1)', () {
     const List<Skill> skills = <Skill>[
       Skill(name: 'Retry with backoff', description: 'transient errors',
@@ -87,6 +119,24 @@ void main() {
       ));
       await tester.pumpAndSettle();
       expect(find.text('No skills learned yet'), findsOneWidget);
+    });
+
+    testWidgets('SK-2: skills render newest-first with a sort toggle',
+        (WidgetTester tester) async {
+      await tester.pumpWidget(MaterialApp(
+        home: SkillsScreen(
+          fetcher: () async => <Map<String, dynamic>>[
+            <String, dynamic>{'name': 'Older', 'saved_at': 1000},
+            <String, dynamic>{'name': 'Newer', 'saved_at': 2000},
+          ],
+        ),
+      ));
+      await tester.pumpAndSettle();
+      expect(find.widgetWithText(ChoiceChip, 'Recent'), findsOneWidget);
+      // Default recent-desc → Newer renders above Older.
+      final double newerY = tester.getTopLeft(find.text('Newer')).dy;
+      final double olderY = tester.getTopLeft(find.text('Older')).dy;
+      expect(newerY, lessThan(olderY));
     });
 
     testWidgets('RC-2: Discuss-in-Chat button fires onDiscuss with the skill name',

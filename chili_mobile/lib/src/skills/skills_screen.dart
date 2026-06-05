@@ -28,6 +28,7 @@ class _SkillsScreenState extends State<SkillsScreen> {
   List<Skill>? _skills;
   bool _loading = true;
   String? _error;
+  SkillSort _sort = SkillSort.recent; // SK-2
 
   @override
   void initState() {
@@ -163,8 +164,8 @@ class _SkillsScreenState extends State<SkillsScreen> {
             'The teacher loop distills a reusable skill when a strong model recovers from a failure.',
       );
     }
-    // SF-1 — filter by the search box.
-    final List<Skill> skills = filterSkills(all, _search.text);
+    // SF-1 — filter by the search box; SK-2 — then sort.
+    final List<Skill> skills = sortSkills(filterSkills(all, _search.text), _sort);
     if (skills.isEmpty) {
       return ApEmptyState(
         icon: Icons.search_off,
@@ -174,8 +175,35 @@ class _SkillsScreenState extends State<SkillsScreen> {
     return ListView(
       padding: const EdgeInsets.all(20),
       children: <Widget>[
+        if (skills.length > 1) ...<Widget>[
+          _sortToggle(cs),
+          const SizedBox(height: 8),
+        ],
         for (final Skill s in skills) _skillCard(cs, s),
         const SizedBox(height: 24),
+      ],
+    );
+  }
+
+  // SK-2 — segmented sort toggle for the skills list.
+  Widget _sortToggle(ColorScheme cs) {
+    return Row(
+      children: <Widget>[
+        Icon(Icons.sort, size: 14, color: cs.onSurfaceVariant),
+        const SizedBox(width: 6),
+        Text('Sort',
+            style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+        const SizedBox(width: 10),
+        for (final SkillSort s in SkillSort.values)
+          Padding(
+            padding: const EdgeInsets.only(right: 6),
+            child: ChoiceChip(
+              label: Text(skillSortLabel(s)),
+              selected: _sort == s,
+              onSelected: (_) => setState(() => _sort = s),
+              visualDensity: VisualDensity.compact,
+            ),
+          ),
       ],
     );
   }
