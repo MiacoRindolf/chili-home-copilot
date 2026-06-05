@@ -23,6 +23,7 @@ class ResearchScreen extends StatefulWidget {
     ResearchDigestFetcher? fetcher,
     ResearchReportOpener? reportOpener,
     ResearchRunner? runner,
+    this.onDiscuss,
   })  : _injectedFetcher = fetcher,
         _injectedOpener = reportOpener,
         _injectedRunner = runner;
@@ -30,6 +31,10 @@ class ResearchScreen extends StatefulWidget {
   final ResearchDigestFetcher? _injectedFetcher;
   final ResearchReportOpener? _injectedOpener;
   final ResearchRunner? _injectedRunner;
+
+  /// RC-1 — pivot a research topic into Chat ("Discuss"). Wired by the workspace
+  /// to the shared ⌘K ask-inbox so Chat opens and asks about the topic.
+  final void Function(String topic)? onDiscuss;
 
   @override
   State<ResearchScreen> createState() => _ResearchScreenState();
@@ -304,6 +309,16 @@ class _ResearchScreenState extends State<ResearchScreen> {
                 if (t.relevance > 0)
                   ApStatusPill('${(t.relevance * 100).round()}%',
                       color: cs.primary),
+                if (widget.onDiscuss != null) ...<Widget>[
+                  const SizedBox(width: 4),
+                  // RC-1 — pivot this research topic into a Chat conversation.
+                  IconButton(
+                    tooltip: 'Discuss in Chat',
+                    visualDensity: VisualDensity.compact,
+                    icon: const Icon(Icons.forum_outlined, size: 18),
+                    onPressed: () => widget.onDiscuss!(t.topic),
+                  ),
+                ],
               ],
             ),
             if (t.summary.trim().isNotEmpty) ...<Widget>[
