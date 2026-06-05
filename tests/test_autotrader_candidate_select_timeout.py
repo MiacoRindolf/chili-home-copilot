@@ -8,8 +8,10 @@ from app.services.trading import auto_trader as at_mod
 
 @pytest.fixture(autouse=True)
 def _clear_bounded_count_timeout_cache():
+    at_mod._candidate_tick_ewma_s = 0.0
     at_mod._bounded_breakout_alert_count_timeout_cache.clear()
     yield
+    at_mod._candidate_tick_ewma_s = 0.0
     at_mod._bounded_breakout_alert_count_timeout_cache.clear()
 
 

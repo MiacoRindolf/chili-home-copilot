@@ -44,6 +44,14 @@ from app.models.trading import (
 )
 from app.services.trading import auto_trader as at_mod
 
+
+@pytest.fixture(autouse=True)
+def _reset_candidate_batch_telemetry():
+    at_mod._candidate_tick_ewma_s = 0.0
+    yield
+    at_mod._candidate_tick_ewma_s = 0.0
+
+
 TEST_ENTRY_PRICE = 50.0
 TEST_STOP_PRICE = 48.0
 TEST_TARGET_PRICE = 55.0
