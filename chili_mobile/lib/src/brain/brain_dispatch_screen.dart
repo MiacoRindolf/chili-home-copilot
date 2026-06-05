@@ -2207,6 +2207,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     List<String> imagePaths = const [],
     bool alignRight = false,
   }) {
+    final bool truncated = body.length > _autopilotMessagePreviewLimit;
     final content = ConstrainedBox(
       constraints: const BoxConstraints(maxWidth: _autopilotBubbleMaxWidth),
       child: Container(
@@ -2215,7 +2216,13 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         decoration: BoxDecoration(
           color: background,
           border: Border.all(color: color.withValues(alpha: 0.18)),
-          borderRadius: BorderRadius.circular(8),
+          // Batch 21 — asymmetric "tail" corner toward the speaker.
+          borderRadius: BorderRadius.only(
+            topLeft: const Radius.circular(12),
+            topRight: const Radius.circular(12),
+            bottomLeft: Radius.circular(alignRight ? 12 : 4),
+            bottomRight: Radius.circular(alignRight ? 4 : 12),
+          ),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -2237,8 +2244,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
             if (body.trim().isNotEmpty) ...[
               const SizedBox(height: 8),
               SelectableText(
-                body.length > _autopilotMessagePreviewLimit
-                    ? '${body.substring(0, _autopilotMessagePreviewLimit)}...'
+                truncated
+                    ? '${body.substring(0, _autopilotMessagePreviewLimit)}…'
                     : body,
                 style: TextStyle(
                   color: Theme.of(context).colorScheme.onSurface,
@@ -2246,6 +2253,19 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                   height: 1.35,
                 ),
               ),
+              // Batch 22 — explicit truncation hint.
+              if (truncated)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(
+                    'message truncated',
+                    style: TextStyle(
+                      color: _mutedTextColor(),
+                      fontSize: 11,
+                      fontStyle: FontStyle.italic,
+                    ),
+                  ),
+                ),
             ],
             if (imagePaths.isNotEmpty) ...[
               const SizedBox(height: 10),
@@ -2436,7 +2456,12 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                               ? _autopilotAttachedImagePromptLabel
                               : 'Message CHILI about this run',
                       alignLabelWithHint: true,
-                      border: const OutlineInputBorder(),
+                      // Batch 23 — modern rounded, filled input.
+                      filled: true,
+                      fillColor: Theme.of(context).colorScheme.surface,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
                     ),
                   ),
                 ),
@@ -2463,12 +2488,30 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
               ),
             ],
           ),
+          // Batch 24 — input affordance hint.
+          const SizedBox(height: 6),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              'Enter to send · attach, paste or drag-drop images',
+              style: TextStyle(color: _mutedTextColor(), fontSize: 11),
+            ),
+          ),
           if (_codeRepos.isEmpty) ...[
             const SizedBox(height: 8),
-            Text(
-              'No registered local repos are visible to this desktop backend.',
-              style: TextStyle(
-                  color: _autonomyStatusColor('blocked'), fontSize: 13),
+            Row(
+              children: [
+                Icon(Icons.warning_amber_rounded,
+                    size: 16, color: _autonomyStatusColor('blocked')),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    'No registered local repos are visible to this desktop backend.',
+                    style: TextStyle(
+                        color: _autonomyStatusColor('blocked'), fontSize: 13),
+                  ),
+                ),
+              ],
             ),
           ],
         ],
@@ -2501,6 +2544,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                       color: dropColor.withValues(alpha: 0.42),
                       width: 2,
                     ),
+                    // Batch 25 — rounded drop highlight.
+                    borderRadius: BorderRadius.circular(12),
                   ),
                   child: Container(
                     padding:
