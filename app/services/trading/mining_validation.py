@@ -314,7 +314,13 @@ def _finalize_cpcv_promotion_ready(
         n_hypotheses_tested=n_hypotheses_tested,
         scan_pattern=scan_pattern,
     )
-    if detail.get("blocked") == "cpcv_promotion_gate_failed":
+    # Both the CPCV gate and the realized-EV gate can block here, and the EV gate
+    # appends "+realized_ev_gate_failed" to any pre-existing reason. An exact-string
+    # test only caught the CPCV case, so a pattern that PASSED CPCV but FAILED
+    # realized-EV (high win-rate / negative expectancy, e.g. #1246) was reported
+    # promotion-ready. A substring test catches either / both.
+    blocked = str(detail.get("blocked") or "")
+    if "cpcv_promotion_gate_failed" in blocked or "realized_ev_gate_failed" in blocked:
         return False, detail
     detail["ready"] = True
     return True, detail

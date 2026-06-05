@@ -1165,6 +1165,15 @@ def finalize_promotion_with_cpcv(
             else:
                 detail["blocked"] = "realized_ev_gate_failed"
             detail["cpcv_gate_reasons"] = list(existing_reasons) + [f"ev:{r}" for r in ev_reasons]
+            # The realized-EV gate is authoritative for the PERSISTED promotion
+            # flag: a pattern that fails "did it actually make money?" must not
+            # record promotion_gate_passed=True just because CPCV (risk-adjusted
+            # backtest) passed. Without this, cpcv_eval_to_scan_pattern_fields
+            # writes the stale CPCV-only True and a net-loser graduates (#1246).
+            eval_payload["promotion_gate_passed"] = False
+            eval_payload["promotion_gate_reasons"] = list(
+                eval_payload.get("promotion_gate_reasons") or []
+            ) + [f"ev:{r}" for r in ev_reasons]
     except Exception as _ev_exc:
         logger.warning("[realized_ev_gate] evaluation failed (continuing on CPCV alone): %s", _ev_exc)
 
