@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../network/chili_api_client.dart';
+import '../notifications/notification_center.dart';
 import '../realtime/live_channel.dart';
 import '../realtime/live_sources.dart';
 import '../realtime/live_status.dart';
@@ -14,10 +15,16 @@ typedef TradingSnapshotFetcher = Future<TradingSnapshot> Function();
 /// state, and open positions — streamed through the RT-1 real-time layer
 /// (adaptive 4s active / 15s idle + backoff) with a live connection indicator.
 class CockpitScreen extends StatefulWidget {
-  const CockpitScreen({super.key, TradingSnapshotFetcher? fetcher})
-      : _injectedFetcher = fetcher;
+  const CockpitScreen({
+    super.key,
+    TradingSnapshotFetcher? fetcher,
+    this.notifications,
+  }) : _injectedFetcher = fetcher;
 
   final TradingSnapshotFetcher? _injectedFetcher;
+
+  /// NC-2 — optional shared notification center for kill-switch / breaker alerts.
+  final NotificationCenter? notifications;
 
   @override
   State<CockpitScreen> createState() => _CockpitScreenState();
@@ -45,8 +52,47 @@ class _CockpitScreenState extends State<CockpitScreen> {
     _channel.start();
   }
 
+  // NC-2 — previous risk state for transition detection (null = not yet seen).
+  bool? _prevKill;
+  bool? _prevBreaker;
+
   void _onTick() {
+    _emitRiskAlerts();
     if (mounted) setState(() {});
+  }
+
+  /// Push a notification when the kill switch or breaker transitions (not on the
+  /// first snapshot, which only establishes the baseline).
+  void _emitRiskAlerts() {
+    final NotificationCenter? nc = widget.notifications;
+    final TradingSnapshot? s = _channel.value;
+    if (nc == null || s == null) return;
+    if (_prevKill != null && s.killSwitchActive != _prevKill) {
+      if (s.killSwitchActive) {
+        nc.add(NotifKind.error, 'Kill switch activated',
+            detail: s.killSwitchReason.isEmpty
+                ? 'Automated trading is halted.'
+                : s.killSwitchReason,
+            source: 'Cockpit');
+      } else {
+        nc.add(NotifKind.success, 'Kill switch cleared',
+            detail: 'Automated trading may resume.', source: 'Cockpit');
+      }
+    }
+    if (_prevBreaker != null && s.breakerTripped != _prevBreaker) {
+      if (s.breakerTripped) {
+        nc.add(NotifKind.error, 'Drawdown breaker tripped',
+            detail: s.breakerReason.isEmpty
+                ? 'Trading blocked until reset.'
+                : s.breakerReason,
+            source: 'Cockpit');
+      } else {
+        nc.add(NotifKind.success, 'Drawdown breaker reset',
+            source: 'Cockpit');
+      }
+    }
+    _prevKill = s.killSwitchActive;
+    _prevBreaker = s.breakerTripped;
   }
 
   Future<TradingSnapshot> _liveFetch() async {
