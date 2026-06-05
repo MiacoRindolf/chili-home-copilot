@@ -158,6 +158,43 @@ void main() {
       expect(find.text('Full-text search of EDGAR filings'), findsOneWidget);
     });
 
+    testWidgets('MC-3: Discuss button fires onDiscuss with tool + server name',
+        (WidgetTester tester) async {
+      String? tool;
+      String? server;
+      await tester.pumpWidget(MaterialApp(
+        home: McpScreen(
+          fetcher: () async => <String, dynamic>{
+            'enabled': true,
+            'servers': <Map<String, dynamic>>[
+              <String, dynamic>{'id': 'sec', 'name': 'SEC Filings', 'transport': 'sse'},
+            ],
+            'live_status': <String, dynamic>{
+              'sec': <String, dynamic>{'status': 'connected', 'tool_count': 1},
+            },
+          },
+          toolsFetcher: () async => <Map<String, dynamic>>[
+            <String, dynamic>{
+              'server_id': 'sec',
+              'server_name': 'SEC Filings',
+              'name': 'search_filings',
+              'description': 'Search EDGAR',
+            },
+          ],
+          onDiscuss: (String t, String s) {
+            tool = t;
+            server = s;
+          },
+        ),
+      ));
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Discuss in Chat'), findsOneWidget);
+      await tester.tap(find.byTooltip('Discuss in Chat'));
+      await tester.pump();
+      expect(tool, 'search_filings');
+      expect(server, 'SEC Filings');
+    });
+
     testWidgets('shows disabled empty state when MCP is off',
         (WidgetTester tester) async {
       await tester.pumpWidget(MaterialApp(

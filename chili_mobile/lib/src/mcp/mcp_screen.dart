@@ -15,12 +15,19 @@ typedef McpToolsFetcher = Future<List<Map<String, dynamic>>> Function();
 /// permitted tools each exposes (MC-2), and the allowlist/denylist policy.
 /// Read-only.
 class McpScreen extends StatefulWidget {
-  const McpScreen({super.key, McpStatusFetcher? fetcher, McpToolsFetcher? toolsFetcher})
-      : _injectedFetcher = fetcher,
+  const McpScreen({
+    super.key,
+    McpStatusFetcher? fetcher,
+    McpToolsFetcher? toolsFetcher,
+    this.onDiscuss,
+  })  : _injectedFetcher = fetcher,
         _injectedToolsFetcher = toolsFetcher;
 
   final McpStatusFetcher? _injectedFetcher;
   final McpToolsFetcher? _injectedToolsFetcher;
+
+  /// MC-3 — pivot an MCP tool into Chat to ask what it does / how to use it.
+  final void Function(String toolName, String serverName)? onDiscuss;
 
   @override
   State<McpScreen> createState() => _McpScreenState();
@@ -265,6 +272,15 @@ class _McpScreenState extends State<McpScreen> {
                           ],
                         ),
                       ),
+                      if (widget.onDiscuss != null)
+                        IconButton(
+                          tooltip: 'Discuss in Chat',
+                          visualDensity: VisualDensity.compact,
+                          icon: Icon(Icons.forum_outlined,
+                              size: 16, color: cs.primary),
+                          onPressed: () =>
+                              widget.onDiscuss!(t.name, t.serverName),
+                        ),
                     ],
                   ),
                 ),

@@ -149,7 +149,7 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
     'mcp': _AppDef(
       'MCP Tools',
       Icons.hub_outlined,
-      () => const McpScreen(),
+      () => McpScreen(onDiscuss: _onDiscussMcpTool),
       size: const Size(820, 620),
     ),
     'skills': _AppDef(
@@ -348,6 +348,14 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
   /// RC-2 — "Discuss" a learned skill: open Chat asking how/when to apply it.
   void _onDiscussSkill(String skillName) {
     _chatAsk.value = 'Explain this learned skill and when to apply it: $skillName';
+    _openApp('chat');
+  }
+
+  /// MC-3 — "Discuss" an MCP tool: open Chat asking what it does / how to use it.
+  void _onDiscussMcpTool(String toolName, String serverName) {
+    final String where = serverName.trim().isEmpty ? '' : ' (from $serverName)';
+    _chatAsk.value =
+        'What does the MCP tool "$toolName"$where do, and when would you use it?';
     _openApp('chat');
   }
 
