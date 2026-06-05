@@ -16,6 +16,8 @@ import '../dashboard/dashboard_screen.dart';
 import '../intercom/intercom_screen.dart';
 import '../mcp/mcp_screen.dart';
 import '../network/chili_api_client.dart';
+import '../notifications/notification_center.dart';
+import '../notifications/notification_panel.dart';
 import '../research/research_screen.dart';
 import '../realtime/live_channel.dart';
 import '../realtime/live_sources.dart';
@@ -62,6 +64,12 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
   final WorkspaceController _ws = WorkspaceController();
   Size _deskSize = Size.zero; // latest desktop size, for keyboard tiling
   bool _paletteOpen = false; // command palette (Ctrl+K) overlay
+
+  // NC-1 — cross-window activity / notification center, fed by the real-time
+  // connection state. Owned here so the dock bell + panel can show it.
+  final NotificationCenter _notifications = NotificationCenter();
+  bool _notifOpen = false;
+  LiveStatus _prevConn = LiveStatus.idle;
   Timer? _saveTimer; // debounces session saves
   bool _restoring = false; // true while replaying a saved session
 
@@ -157,6 +165,7 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
     _agentSaveTimer?.cancel();
     _agentChannel.removeListener(_onAgentChannel);
     _agentChannel.dispose();
+    _notifications.dispose();
     _ws.removeListener(_scheduleSave);
     _agents.removeListener(_scheduleAgentSave);
     _ws.dispose();
@@ -198,7 +207,26 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
             lastRun: s.lastRun, lastResult: s.detail);
       });
     }
+    _notifyConnectionTransitions();
     if (mounted) setState(() {});
+  }
+
+  /// NC-1 — emit a notification when the real-time connection drops or recovers.
+  void _notifyConnectionTransitions() {
+    final LiveStatus s = _agentChannel.status;
+    if (s == _prevConn) return;
+    final bool wasLive = _prevConn == LiveStatus.live;
+    final bool wasDown =
+        _prevConn == LiveStatus.error || _prevConn == LiveStatus.offline;
+    final bool isDown = s == LiveStatus.error || s == LiveStatus.offline;
+    if (s == LiveStatus.live && wasDown) {
+      _notifications.add(NotifKind.success, 'Reconnected',
+          detail: 'Live data restored.', source: 'Realtime');
+    } else if (isDown && wasLive) {
+      _notifications.add(NotifKind.warning, 'Connection lost',
+          detail: 'Reconnecting to the backend…', source: 'Realtime');
+    }
+    _prevConn = s;
   }
 
   /// ⌘K agent command: toggle local start/stop for an agent. Local-only — never
@@ -274,7 +302,12 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
   void _togglePalette() => setState(() => _paletteOpen = !_paletteOpen);
 
   void _onEscape() {
-    if (_paletteOpen) setState(() => _paletteOpen = false);
+    if (_paletteOpen || _notifOpen) {
+      setState(() {
+        _paletteOpen = false;
+        _notifOpen = false;
+      });
+    }
   }
 
   List<PaletteItem> get _paletteItems => <PaletteItem>[
@@ -329,6 +362,14 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
                   items: _paletteItems,
                   onOpen: _onPaletteOpen,
                   onClose: () => setState(() => _paletteOpen = false),
+                ),
+              if (_notifOpen)
+                AnimatedBuilder(
+                  animation: _notifications,
+                  builder: (BuildContext context, _) => NotificationPanel(
+                    center: _notifications,
+                    onClose: () => setState(() => _notifOpen = false),
+                  ),
                 ),
             ],
           ),
@@ -483,7 +524,17 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
             cs: cs,
             onTap: _ws.showDesktop,
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 4),
+          // NC-1 — notification bell with unread badge.
+          AnimatedBuilder(
+            animation: _notifications,
+            builder: (BuildContext context, _) => NotificationBell(
+              center: _notifications,
+              cs: cs,
+              onTap: () => setState(() => _notifOpen = !_notifOpen),
+            ),
+          ),
+          const SizedBox(height: 4),
           // RT-2 — live connection indicator (real-time layer status).
           _ConnectionDot(status: _agentChannel.status, cs: cs),
           const SizedBox(height: 12),
