@@ -676,6 +676,25 @@ def api_monitor_run(
     return JSONResponse({"ok": True, **summary})
 
 
+@router.get("/monitor/autotrader-deployment-report")
+def api_monitor_autotrader_deployment_report(
+    request: Request,
+    db: Session = Depends(get_db),
+    hours: int = Query(24, ge=1, le=720, description="Look-back window in hours"),
+):
+    """Lean AutoTrader deployment report (read-only): the decision funnel from
+    trading_autotrader_runs, a rule_snapshot drill-down for the top blockers, the
+    live gate status (kill switch / drawdown breaker / enablement), the candidate
+    supply backlog, and deterministic recommended actions."""
+    ctx = get_identity_ctx(request, db)
+    from ...services.trading.autotrader_deployment_report import (
+        build_autotrader_deployment_report,
+    )
+
+    report = build_autotrader_deployment_report(db, user_id=ctx["user_id"], hours=hours)
+    return JSONResponse(json_safe(report))
+
+
 @router.get("/monitor/imminent-alerts")
 def api_monitor_imminent_alerts(
     request: Request,
