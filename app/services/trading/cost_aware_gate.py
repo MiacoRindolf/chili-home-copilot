@@ -231,10 +231,24 @@ def cost_aware_min_edge_gate(
         except Exception:
             s = None
 
-    fee_bps = _nonnegative_int(
+    # Maker-aware fee. Coinbase entries route strictly post-only (maker) when
+    # chili_coinbase_maker_only_enabled is set, so the round-trip cost the
+    # executor actually pays is the MAKER fee — not the taker fee. Pricing the
+    # taker fee here over-blocks positive-EV trades the post-only order never
+    # pays taker on (the dominant coinbase_below_fee_threshold cause), then
+    # bounces them to exit_variant_refresh. Falls back to the taker fee when
+    # maker-only routing is off (preserving prior behavior).
+    taker_fee_bps = _nonnegative_int(
         getattr(s, "chili_coinbase_taker_fee_bps_round_trip", 120),
         default=120,
     )
+    if bool(getattr(s, "chili_coinbase_maker_only_enabled", False)):
+        fee_bps = _nonnegative_int(
+            getattr(s, "chili_coinbase_maker_fee_bps_round_trip", 80),
+            default=80,
+        )
+    else:
+        fee_bps = taker_fee_bps
     buffer_bps = _nonnegative_int(
         getattr(s, "chili_min_edge_safety_buffer_bps", 30),
         default=30,

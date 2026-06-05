@@ -388,6 +388,54 @@ def test_gate_coinbase_none_edge_treated_as_zero_blocks():
     assert res.edge_bps == 0
 
 
+def _maker_settings(maker_fee_bps: int = 80, **kw):
+    s = _settings_stub(**kw)
+    s.chili_coinbase_maker_only_enabled = True
+    s.chili_coinbase_maker_fee_bps_round_trip = maker_fee_bps
+    return s
+
+
+def test_gate_coinbase_maker_only_uses_maker_fee_threshold():
+    """Maker-only routes post-only, so the gate prices the maker fee (80) not the
+    taker fee (120). A 1.2% (120bps) edge — blocked under the 150bps taker
+    threshold — now PASSES the 110bps maker threshold (post-only never pays taker).
+    """
+    s = _maker_settings()
+    res = cost_aware_min_edge_gate(
+        ticker="AKT-USD", projected_profit_pct=1.2, settings_=s,
+    )
+    assert res.allowed is True
+    assert res.reason == REASON_GATE_COINBASE_PASSED
+    assert res.fee_bps == 80
+    assert res.threshold_bps == 110
+    assert res.edge_bps == 120
+
+
+def test_gate_coinbase_maker_only_below_maker_threshold_still_blocks():
+    """No quality loss: 1.0% (100bps) edge is still below the 110bps maker
+    threshold, so it stays blocked."""
+    s = _maker_settings()
+    res = cost_aware_min_edge_gate(
+        ticker="AKT-USD", projected_profit_pct=1.0, settings_=s,
+    )
+    assert res.allowed is False
+    assert res.reason == REASON_GATE_COINBASE_BLOCKED
+    assert res.fee_bps == 80
+    assert res.threshold_bps == 110
+
+
+def test_gate_coinbase_maker_only_off_uses_taker_fee():
+    """Backward-compat: with maker-only off (stub omits the flag), the gate uses
+    the taker fee (120) and 150bps threshold, so a 1.2% edge stays blocked."""
+    s = _settings_stub()
+    res = cost_aware_min_edge_gate(
+        ticker="AKT-USD", projected_profit_pct=1.2, settings_=s,
+    )
+    assert res.allowed is False
+    assert res.fee_bps == 120
+    assert res.threshold_bps == 150
+
+
 @pytest.mark.parametrize("projected_edge", [float("nan"), float("inf"), True, "bad"])
 def test_gate_coinbase_nonfinite_projected_edge_blocks(projected_edge):
     s = _settings_stub()
