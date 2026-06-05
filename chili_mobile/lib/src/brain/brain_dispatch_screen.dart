@@ -3908,15 +3908,18 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         started.length >= 19 ? started.substring(11, 19) : started;
     final shortDate = started.length >= 10 ? started.substring(0, 10) : '';
 
+    final cs = Theme.of(context).colorScheme;
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+      // Batch 43 — dark-mode-safe highlight/notify tints (were *.shade50).
       color: highlight
-          ? Colors.amber.shade50
-          : (notify ? Colors.red.shade50 : null),
+          ? Colors.amber.withValues(alpha: 0.12)
+          : (notify ? cs.error.withValues(alpha: 0.08) : null),
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(8),
+        // Batch 44 — theme border (was Colors.grey.shade200).
         side: BorderSide(
-          color: notify ? Colors.red.shade200 : Colors.grey.shade200,
+          color: notify ? cs.error.withValues(alpha: 0.4) : cs.outlineVariant,
           width: 1,
         ),
       ),
@@ -3941,7 +3944,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
             const Spacer(),
             Text(
               '$shortDate $shortTime',
-              style: TextStyle(color: Colors.grey.shade600, fontSize: 11),
+              // Batch 45 — theme-muted (was Colors.grey.shade600).
+              style: TextStyle(color: _mutedTextColor(), fontSize: 11),
             ),
           ],
         ),
@@ -3992,12 +3996,28 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                   _kvSelectable('Push URL', pushUrl),
                 if (snap != null) ...[
                   const SizedBox(height: 8),
-                  Text('llm_snapshot',
-                      style: Theme.of(context).textTheme.labelLarge),
+                  const ApSectionHeader('LLM snapshot', icon: Icons.memory),
                   const SizedBox(height: 4),
-                  SelectableText(
-                    _snapshotPreview(snap),
-                    style: const TextStyle(fontSize: 12, color: Colors.black54),
+                  // Batch 41/42 — console block; fixes a dark-mode legibility
+                  // bug (was hardcoded Colors.black54, invisible on dark).
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: Theme.of(context)
+                          .colorScheme
+                          .surfaceContainerHighest
+                          .withValues(alpha: 0.6),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: SelectableText(
+                      _snapshotPreview(snap),
+                      style: const TextStyle(
+                        fontFamily: 'monospace',
+                        fontSize: 12,
+                        height: 1.3,
+                      ),
+                    ),
                   ),
                 ],
               ],
