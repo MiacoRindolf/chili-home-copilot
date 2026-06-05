@@ -153,3 +153,44 @@ def test_reasoning_web_research_source_has_no_direct_chat_fallback():
     source = Path(web_researcher.__file__).read_text(encoding="utf-8")
 
     assert "openai_client.chat(" not in source
+
+
+def test_research_topic_now_stores_mechanical(monkeypatch):
+    db = FakeDb()
+    raw_results = [
+        {
+            "title": "VIX explainer",
+            "href": "https://example.com/vix",
+            "body": "The VIX measures expected 30-day volatility implied by S&P 500 options.",
+        }
+    ]
+    monkeypatch.setattr(web_researcher.settings, "reasoning_enabled", True)
+    monkeypatch.setattr(
+        web_researcher, "_search_topic", lambda *_a, **_k: json.dumps(raw_results)
+    )
+
+    data = web_researcher.research_topic_now(db, user_id=7, topic="what is the VIX")
+
+    assert data is not None
+    assert data["topic"] == "what is the VIX"
+    assert "VIX measures" in data["summary"]
+    assert len(db.added) == 1
+    assert db.added[0].user_id == 7
+    assert db.commits == 1
+
+
+def test_research_topic_now_disabled_returns_none(monkeypatch):
+    db = FakeDb()
+    monkeypatch.setattr(web_researcher.settings, "reasoning_enabled", False)
+    monkeypatch.setattr(
+        web_researcher, "_search_topic", lambda *_a, **_k: "[]"
+    )
+    assert web_researcher.research_topic_now(db, user_id=7, topic="x") is None
+    assert db.added == []
+
+
+def test_research_topic_now_blank_topic_returns_none(monkeypatch):
+    db = FakeDb()
+    monkeypatch.setattr(web_researcher.settings, "reasoning_enabled", True)
+    assert web_researcher.research_topic_now(db, user_id=7, topic="   ") is None
+    assert db.added == []

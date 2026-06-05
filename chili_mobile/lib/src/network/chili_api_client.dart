@@ -1040,6 +1040,23 @@ class ChiliApiClient {
   Future<Map<String, dynamic>> getResearchDigest() =>
       _getMapSafe('/api/brain/reasoning/research/report?format=json');
 
+  /// POST run research on a topic on demand (RS-2). Returns {ok, stored, ...}.
+  Future<Map<String, dynamic>> runResearch(String topic) async {
+    try {
+      final res = await _post(
+        Uri.parse('$baseUrl/api/brain/reasoning/research/run'),
+        headers: _headers(),
+        body: jsonEncode(<String, String>{'topic': topic}),
+      );
+      final Object? decoded = jsonDecode(res.body);
+      return decoded is Map<String, dynamic>
+          ? decoded
+          : const <String, dynamic>{};
+    } catch (_) {
+      return const <String, dynamic>{};
+    }
+  }
+
   /// GET the self-contained HTML visual report (renders offline). '' on failure.
   Future<String> getResearchReportHtml() async {
     try {

@@ -248,3 +248,74 @@ def refresh_research_for_top_interests(db: Session, user_id: int, trace_id: str 
 
     db.commit()
 
+
+def research_topic_now(
+    db: Session,
+    user_id: int,
+    topic: str,
+    trace_id: str = "reasoning_ondemand",
+) -> dict | None:
+    """Research a single topic on demand and persist a ReasoningResearch row.
+
+    Mirrors :func:`refresh_research_for_top_interests` for one user-supplied
+    topic: web search → a mechanical (non-LLM) summary, falling back to the LLM
+    gateway only if the mechanical path yields nothing. Gated by the existing
+    ``reasoning_enabled`` setting; bounded to one topic. Returns the stored
+    ``{topic, summary, sources, relevance_score}`` or None.
+    """
+    if not settings.reasoning_enabled:
+        return None
+    topic = (topic or "").strip()
+    if not topic:
+        return None
+
+    raw = _search_topic(topic, trace_id)
+    if not raw:
+        return None
+
+    data = _mechanical_research_summary(topic, raw)
+    if not data:
+        if not openai_client.is_configured():
+            return None
+        prompt = (
+            f"You are Chili's researcher. Summarize the latest knowledge about '{topic}'.\n\n"
+            "Use this raw search result payload (may be JSON or text):\n"
+            f"{raw}\n\n"
+            "Return ONLY valid JSON with keys:\n"
+            "{\n"
+            '  "topic": "...",\n'
+            '  "summary": "3-6 sentence concise explanation, assuming the user is technically savvy",\n'
+            '  "sources": [{"title": "...", "url": "..."}],\n'
+            '  "relevance_score": 0.0\n'
+            "}\n"
+        )
+        try:
+            from ..context_brain.llm_gateway import gateway_chat
+
+            result = gateway_chat(
+                messages=[{"role": "user", "content": prompt}],
+                purpose="reasoning_web_research",
+                system_prompt="You are a precise summarization engine. Return only valid JSON.",
+                trace_id=trace_id,
+            )
+        except Exception as e:  # pragma: no cover - defensive
+            log_info(trace_id, f"reasoning_research_ondemand_error topic={topic!r} err={e}")
+            return None
+        if not result.get("reply"):
+            return None
+        data = _parse_research_reply(result["reply"], trace_id, topic)
+        if not data:
+            return None
+
+    if not _store_research_row(
+        db,
+        user_id=user_id,
+        topic=topic,
+        data=data,
+        trace_id=trace_id,
+        source="on_demand",
+    ):
+        return None
+    db.commit()
+    return {"topic": topic, **data}
+
