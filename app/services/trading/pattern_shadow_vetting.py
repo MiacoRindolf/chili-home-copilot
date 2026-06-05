@@ -590,8 +590,6 @@ def pilot_promoted_risk_multiplier(
         if row["lifecycle_stage"] != "pilot_promoted":
             return None
         threshold = policy["threshold"]
-        if threshold is None or float(row["pilot_score"]) < float(threshold):
-            return 0.0
         n_prior = min(
             max(1.0, float(row.get("cpcv_n_paths") or 0)),
             max(1.0, float(policy.get("prior_strength") or 1.0)),
@@ -601,7 +599,26 @@ def pilot_promoted_risk_multiplier(
         exposure_support = _clip(
             prior_support + forward_support - prior_support * forward_support
         )
-        return _clip(float(row["pilot_score"]) * exposure_support)
+        pilot_score = float(row["pilot_score"])
+        if threshold is not None and pilot_score >= float(threshold):
+            return _clip(pilot_score * exposure_support)
+        # Below the CPCV/quality pilot-score bar. A pattern that earned its pilot
+        # lane via the REALIZED-EDGE lane (provably positive realized EV) is sized
+        # by that realized confidence — small and reversible — instead of blocked
+        # at 0. Without this a realized-edge-promoted pilot can never place a live
+        # trade: it lacks the CPCV pilot_score the promotion lane intentionally
+        # bypassed, so its multiplier is 0 and every entry is skipped as
+        # pilot_promoted_confidence_below_policy. Gated on the same flag as the
+        # promotion lane so promotion and sizing stay consistent.
+        if bool(
+            getattr(settings_, "chili_shadow_vetting_realized_edge_pilot_enabled", True)
+        ):
+            pat_obj = db.get(ScanPattern, int(scan_pattern_id))
+            eligible, detail = _realized_edge_pilot_eligible(pat_obj, settings_=settings_)
+            if eligible:
+                realized_conf = _clip(float(detail.get("wr_lcb") or 0.0))
+                return _clip(realized_conf * exposure_support)
+        return 0.0
     return None
 
 
