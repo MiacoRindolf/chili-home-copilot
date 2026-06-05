@@ -1170,8 +1170,9 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                       'Enter the email your admin registered for you. '
                       "We'll send a 6-digit verification code.",
                       textAlign: TextAlign.center,
-                      style:
-                          TextStyle(color: Colors.grey.shade700, fontSize: 13),
+                      style: TextStyle(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                          fontSize: 13),
                     ),
                     const SizedBox(height: 20),
                     TextField(
@@ -1200,7 +1201,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                         _pairCodeMessage!,
                         textAlign: TextAlign.center,
                         style: TextStyle(
-                            color: Colors.grey.shade700, fontSize: 13),
+                            color: Theme.of(context).colorScheme.onSurfaceVariant,
+                            fontSize: 13),
                       ),
                     const SizedBox(height: 16),
                     TextField(
@@ -3709,7 +3711,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                       '${(a['sources_used'] is Map) ? (a['sources_used'] as Map).keys.join(',') : '-'}',
                     ),
                     trailing: Text('#${a['id']}',
-                        style: TextStyle(color: Colors.grey.shade600)),
+                        style: TextStyle(color: _mutedTextColor())),
                   ),
                 )),
           ],
@@ -3725,7 +3727,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
         children: [
           SizedBox(
             width: 200,
-            child: Text(k, style: TextStyle(color: Colors.grey.shade700)),
+            child: Text(k, style: TextStyle(color: _mutedTextColor())),
           ),
           Expanded(
             child: Text(v, style: const TextStyle(fontWeight: FontWeight.w500)),
@@ -4101,7 +4103,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
           SizedBox(
             width: 130,
             child: Text(k,
-                style: TextStyle(color: Colors.grey.shade700, fontSize: 12)),
+                style: TextStyle(color: _mutedTextColor(), fontSize: 12)),
           ),
           Expanded(
             child: SelectableText.rich(
