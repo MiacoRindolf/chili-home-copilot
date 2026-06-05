@@ -459,6 +459,119 @@ def circuit_breaker_entry_block_reason(
     return None
 
 
+def check_live_portfolio_drawdown(
+    db: Session,
+    user_id: int | None = None,
+    capital: float = 100_000.0,
+    max_dd_pct: float = 15.0,
+) -> dict[str, Any]:
+    """Live broker portfolio drawdown — measured against the user's REAL broker
+    positions and REAL equity, NOT the paper/shadow book.
+
+    This is the gate used for LIVE auto-trader entries. The paper-shadow gate
+    (``check_portfolio_drawdown`` in ``portfolio_optimizer``) queries
+    ``PaperTrade`` positions; routing the live entry path through it meant a
+    paper-shadow drawdown (paper PnL ÷ the caller's real equity) — or stranded
+    unpriceable sim positions — wrongly blocked real trading. ``capital`` is the
+    caller's resolved real equity (``auto_trader_rules`` passes
+    ``resolve_effective_capital``); the 100k default is a non-authoritative
+    fallback for callers that cannot resolve equity (the live path blocks
+    upstream on unproven capital, so it never relies on the fallback).
+    """
+    from datetime import datetime, timedelta
+
+    try:
+        from .market_data import fetch_quote
+    except Exception:
+        fetch_quote = None  # type: ignore[assignment]
+
+    open_trades = _broker_live_open_trades(db, user_id)
+    total_unrealized = 0.0
+    valuation_missing_count = 0
+    for t in open_trades:
+        try:
+            entry = _float_or_none(getattr(t, "entry_price", None))
+            qty = _float_or_none(getattr(t, "quantity", None))
+            if entry is None or qty is None:
+                valuation_missing_count += 1
+                continue
+            price: float | None = None
+            if callable(fetch_quote):
+                q = fetch_quote(t.ticker)
+                if q and q.get("price"):
+                    price = _float_or_none(q.get("price"))
+            if price is None:
+                valuation_missing_count += 1
+                continue
+            if (getattr(t, "direction", "") or "").lower() == "short":
+                total_unrealized += (entry - price) * qty
+            else:
+                total_unrealized += (price - entry) * qty
+        except Exception:
+            valuation_missing_count += 1
+            continue
+
+    cutoff = datetime.utcnow() - timedelta(days=30)
+    closed_q = db.query(Trade).filter(
+        Trade.status == "closed",
+        Trade.exit_date >= cutoff,
+    )
+    if user_id is not None:
+        closed_q = closed_q.filter(Trade.user_id == user_id)
+    closed_pnl = 0.0
+    for t in closed_q.all():
+        pnl = _finite_float_or_none(getattr(t, "pnl", None))
+        if pnl is not None:
+            closed_pnl += pnl
+
+    total_pnl = total_unrealized + closed_pnl
+    capital_f = _float_or_none(capital)
+    if capital_f is None or capital_f <= 0:
+        return {
+            "ok": False,
+            "scope": "live_broker",
+            "reason": "invalid_capital",
+            "unrealized_pnl": round(total_unrealized, 2),
+            "closed_30d_pnl": round(closed_pnl, 2),
+            "total_pnl": round(total_pnl, 2),
+            "dd_pct": 0.0,
+            "max_dd_pct": max_dd_pct,
+            "breached": True,
+            "valuation_missing_count": valuation_missing_count,
+            "valuation_complete": valuation_missing_count == 0,
+            "open_positions": len(open_trades),
+        }
+
+    dd_pct = total_pnl / capital_f * 100
+    breached = dd_pct < -max_dd_pct
+    reason = "drawdown_breached" if breached else None
+    if valuation_missing_count > 0:
+        breached = True
+        reason = "valuation_unavailable"
+
+    if breached:
+        logger.warning(
+            "[risk] Live portfolio DD blocked: reason=%s dd=%.1f%% "
+            "(limit -%.1f%%) valuation_missing=%d open=%d",
+            reason, dd_pct, max_dd_pct, valuation_missing_count, len(open_trades),
+        )
+
+    return {
+        "ok": True,
+        "scope": "live_broker",
+        "reason": reason,
+        "unrealized_pnl": round(total_unrealized, 2),
+        "closed_30d_pnl": round(closed_pnl, 2),
+        "total_pnl": round(total_pnl, 2),
+        "dd_pct": round(dd_pct, 2),
+        "max_dd_pct": max_dd_pct,
+        "breached": breached,
+        "valuation_missing_count": valuation_missing_count,
+        "valuation_complete": valuation_missing_count == 0,
+        "open_positions": len(open_trades),
+    }
+
+
 def check_new_trade_allowed(
     db: Session,
     user_id: int | None,
@@ -541,10 +654,10 @@ def check_new_trade_allowed(
         )
         return False, "correlation_check_unavailable"
 
-    # Portfolio optimizer drawdown requires complete open-position valuation.
+    # Live broker drawdown — measured against REAL positions/equity, not the
+    # paper-shadow book (the paper gate wrongly blocked live entries on paper PnL).
     try:
-        from .portfolio_optimizer import check_portfolio_drawdown
-        dd = check_portfolio_drawdown(db, user_id, capital_f)
+        dd = check_live_portfolio_drawdown(db, user_id, capital_f)
         if dd.get("reason") in {"valuation_unavailable", "invalid_capital"}:
             return False, "portfolio_drawdown_unavailable"
         if dd.get("breached"):
@@ -2297,10 +2410,9 @@ def unified_risk_check(
         detail["correlation_check_reason"] = "check_failed"
         return False, "correlation_check_unavailable", detail
 
-    # 8. Portfolio-level drawdown check (optimizer)
+    # 8. Portfolio-level drawdown check (live broker scope, not paper-shadow)
     try:
-        from .portfolio_optimizer import check_portfolio_drawdown
-        dd = check_portfolio_drawdown(db, user_id, capital_f)
+        dd = check_live_portfolio_drawdown(db, user_id, capital_f)
         detail["portfolio_dd_pct"] = dd.get("dd_pct")
         detail["portfolio_drawdown_reason"] = dd.get("reason")
         detail["portfolio_valuation_missing_count"] = dd.get("valuation_missing_count")

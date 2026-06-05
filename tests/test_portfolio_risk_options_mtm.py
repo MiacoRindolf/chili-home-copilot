@@ -552,7 +552,7 @@ def test_check_new_trade_allowed_blocks_when_correlation_check_errors() -> None:
         "app.services.trading.portfolio_risk.check_correlation_risk",
         side_effect=RuntimeError("correlation probe failed"),
     ), patch(
-        "app.services.trading.portfolio_optimizer.check_portfolio_drawdown",
+        "app.services.trading.portfolio_risk.check_live_portfolio_drawdown",
         side_effect=AssertionError("drawdown must not run after correlation failure"),
     ):
         ok, reason = check_new_trade_allowed(
@@ -660,7 +660,7 @@ def test_unified_risk_check_blocks_when_correlation_check_errors() -> None:
         "app.services.trading.portfolio_risk.check_correlation_risk",
         side_effect=RuntimeError("correlation probe failed"),
     ), patch(
-        "app.services.trading.portfolio_optimizer.check_portfolio_drawdown",
+        "app.services.trading.portfolio_risk.check_live_portfolio_drawdown",
         side_effect=AssertionError("drawdown must not run after correlation failure"),
     ):
         ok, reason, detail = unified_risk_check(
@@ -734,7 +734,7 @@ def test_check_new_trade_allowed_blocks_when_drawdown_valuation_unavailable() ->
         "app.services.trading.portfolio_risk.estimate_portfolio_cvar",
         return_value=None,
     ), patch(
-        "app.services.trading.portfolio_optimizer.check_portfolio_drawdown",
+        "app.services.trading.portfolio_risk.check_live_portfolio_drawdown",
         return_value={
             "breached": True,
             "dd_pct": 0.0,
@@ -789,7 +789,7 @@ def test_check_new_trade_allowed_blocks_when_drawdown_check_errors() -> None:
         "app.services.trading.portfolio_risk.estimate_portfolio_cvar",
         return_value=None,
     ), patch(
-        "app.services.trading.portfolio_optimizer.check_portfolio_drawdown",
+        "app.services.trading.portfolio_risk.check_live_portfolio_drawdown",
         side_effect=RuntimeError("drawdown probe failed"),
     ):
         ok, reason = check_new_trade_allowed(
@@ -802,6 +802,55 @@ def test_check_new_trade_allowed_blocks_when_drawdown_check_errors() -> None:
 
     assert ok is False
     assert reason == "portfolio_drawdown_unavailable"
+
+
+def test_check_live_portfolio_drawdown_uses_real_positions_and_equity() -> None:
+    """Regression: the live entry gate must measure REAL broker positions against
+    REAL equity, never the paper/shadow book. Long 100 sh @ 10, now 12 = +$200
+    unrealized; against $10k equity that's +2.0% (not breached)."""
+    from app.services.trading.portfolio_risk import check_live_portfolio_drawdown
+
+    live_pos = SimpleNamespace(
+        ticker="SPY", entry_price=10.0, quantity=100.0, direction="long",
+    )
+    with patch(
+        "app.services.trading.portfolio_risk._broker_live_open_trades",
+        return_value=[live_pos],
+    ), patch(
+        "app.services.trading.market_data.fetch_quote",
+        return_value={"price": 12.0},
+    ):
+        dd = check_live_portfolio_drawdown(_FakeDb([]), user_id=1, capital=10_000.0)
+
+    assert dd["scope"] == "live_broker"
+    assert dd["open_positions"] == 1
+    assert dd["unrealized_pnl"] == 200.0
+    assert dd["dd_pct"] == 2.0
+    assert dd["breached"] is False
+    assert dd["reason"] is None
+
+
+def test_check_live_portfolio_drawdown_breaches_against_real_equity_not_100k() -> None:
+    """Regression for the hardcoded $100k: the same -$200 loss is measured against
+    the caller's REAL equity. Long 100 @ 10, now 8 = -$200; against $1,000 equity
+    that's -20% (breached). Against the old $100k fiction it was -0.2% (passed)."""
+    from app.services.trading.portfolio_risk import check_live_portfolio_drawdown
+
+    live_pos = SimpleNamespace(
+        ticker="SPY", entry_price=10.0, quantity=100.0, direction="long",
+    )
+    with patch(
+        "app.services.trading.portfolio_risk._broker_live_open_trades",
+        return_value=[live_pos],
+    ), patch(
+        "app.services.trading.market_data.fetch_quote",
+        return_value={"price": 8.0},
+    ):
+        dd = check_live_portfolio_drawdown(_FakeDb([]), user_id=1, capital=1_000.0)
+
+    assert dd["dd_pct"] == -20.0
+    assert dd["breached"] is True
+    assert dd["reason"] == "drawdown_breached"
 
 
 def test_portfolio_budget_counts_options_outside_stock_cap() -> None:
@@ -867,7 +916,7 @@ def test_option_entry_is_not_blocked_by_full_stock_cap() -> None:
         "app.services.trading.portfolio_risk.estimate_portfolio_cvar",
         return_value=None,
     ), patch(
-        "app.services.trading.portfolio_optimizer.check_portfolio_drawdown",
+        "app.services.trading.portfolio_risk.check_live_portfolio_drawdown",
         return_value={"breached": False, "dd_pct": 0.0, "reason": None},
     ):
         stock_ok, stock_reason = check_new_trade_allowed(

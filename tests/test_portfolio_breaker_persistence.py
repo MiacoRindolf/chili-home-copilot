@@ -179,7 +179,7 @@ def test_check_new_trade_allowed_scopes_persisted_breaker_to_user() -> None:
             "app.services.trading.portfolio_risk.check_correlation_risk",
             return_value=(True, "ok"),
         ), patch(
-            "app.services.trading.portfolio_optimizer.check_portfolio_drawdown",
+            "app.services.trading.portfolio_risk.check_live_portfolio_drawdown",
             return_value={"breached": False, "dd_pct": 0.0, "reason": None},
         ):
             ok, reason = check_new_trade_allowed(
@@ -260,7 +260,7 @@ def test_check_new_trade_allowed_honors_latest_persisted_reset_over_stale_memory
             "app.services.trading.portfolio_risk.check_correlation_risk",
             return_value=(True, "ok"),
         ), patch(
-            "app.services.trading.portfolio_optimizer.check_portfolio_drawdown",
+            "app.services.trading.portfolio_risk.check_live_portfolio_drawdown",
             return_value={"breached": False, "dd_pct": 0.0, "reason": None},
         ):
             ok, reason = check_new_trade_allowed(
