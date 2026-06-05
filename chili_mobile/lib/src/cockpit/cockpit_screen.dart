@@ -61,6 +61,9 @@ class _CockpitScreenState extends State<CockpitScreen> {
   final List<double> _equityHistory = <double>[];
   static const int _equityHistoryMax = 180; // ~12 min at 4s
 
+  // TC-3 — open-positions sort order (default: biggest P/L first).
+  PositionSort _sort = PositionSort.pnl;
+
   void _onTick() {
     _emitRiskAlerts();
     final TradingSnapshot? s = _channel.value;
@@ -292,26 +295,62 @@ class _CockpitScreenState extends State<CockpitScreen> {
               style: TextStyle(color: cs.error, fontSize: 12)),
         ],
         const SizedBox(height: 20),
-        ApSectionHeader('Open positions · ${s.positions.length}',
-            icon: Icons.list_alt),
+        Row(
+          children: <Widget>[
+            Expanded(
+              child: ApSectionHeader('Open positions · ${s.positions.length}',
+                  icon: Icons.list_alt),
+            ),
+            if (s.positions.length > 1) _sortSelector(cs),
+          ],
+        ),
         const SizedBox(height: 6),
         if (s.positions.isEmpty)
           Text('No open positions.',
               style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant))
         else
-          ApPanel(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-            child: Column(
-              children: <Widget>[
-                for (int i = 0; i < s.positions.length; i++) ...<Widget>[
-                  if (i > 0) Divider(height: 14, color: cs.outlineVariant),
-                  _positionRow(cs, s.positions[i]),
+          Builder(builder: (BuildContext _) {
+            final List<Position> sorted = sortPositions(s.positions, _sort);
+            return ApPanel(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+              child: Column(
+                children: <Widget>[
+                  for (int i = 0; i < sorted.length; i++) ...<Widget>[
+                    if (i > 0) Divider(height: 14, color: cs.outlineVariant),
+                    _positionRow(cs, sorted[i]),
+                  ],
                 ],
-              ],
-            ),
-          ),
+              ),
+            );
+          }),
         const SizedBox(height: 24),
       ],
+    );
+  }
+
+  // TC-3 — compact sort menu for the open-positions list.
+  Widget _sortSelector(ColorScheme cs) {
+    return PopupMenuButton<PositionSort>(
+      tooltip: 'Sort positions',
+      initialValue: _sort,
+      onSelected: (PositionSort v) => setState(() => _sort = v),
+      itemBuilder: (BuildContext _) => <PopupMenuEntry<PositionSort>>[
+        for (final PositionSort s in PositionSort.values)
+          PopupMenuItem<PositionSort>(
+            value: s,
+            child: Text(positionSortLabel(s)),
+          ),
+      ],
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Icon(Icons.sort, size: 14, color: cs.onSurfaceVariant),
+          const SizedBox(width: 4),
+          Text(positionSortLabel(_sort),
+              style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+          Icon(Icons.arrow_drop_down, size: 16, color: cs.onSurfaceVariant),
+        ],
+      ),
     );
   }
 

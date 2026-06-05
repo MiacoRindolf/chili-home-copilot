@@ -28,6 +28,72 @@ void main() {
     });
   });
 
+  group('sortPositions (TC-3)', () {
+    Position pos(String ticker,
+            {double pnl = 0, double pct = 0, double value = 0}) =>
+        Position(
+          ticker: ticker,
+          qty: 1,
+          entryPrice: 1,
+          currentPrice: 1,
+          marketValue: value,
+          unrealizedPnl: pnl,
+          unrealizedPnlPct: pct,
+          venue: '',
+        );
+
+    final List<Position> sample = <Position>[
+      pos('AAPL', pnl: 150, pct: 10, value: 1650),
+      pos('TSLA', pnl: -300, pct: -5, value: 9000),
+      pos('NVDA', pnl: 500, pct: 2, value: 4000),
+    ];
+
+    test('P/L sorts biggest-first', () {
+      expect(
+          sortPositions(sample, PositionSort.pnl)
+              .map((Position p) => p.ticker),
+          <String>['NVDA', 'AAPL', 'TSLA']);
+    });
+
+    test('P/L % sorts biggest-first', () {
+      expect(
+          sortPositions(sample, PositionSort.pnlPct)
+              .map((Position p) => p.ticker),
+          <String>['AAPL', 'NVDA', 'TSLA']);
+    });
+
+    test('Value sorts biggest-first', () {
+      expect(
+          sortPositions(sample, PositionSort.value)
+              .map((Position p) => p.ticker),
+          <String>['TSLA', 'NVDA', 'AAPL']);
+    });
+
+    test('Ticker sorts A→Z, case-insensitive', () {
+      expect(
+          sortPositions(sample, PositionSort.ticker)
+              .map((Position p) => p.ticker),
+          <String>['AAPL', 'NVDA', 'TSLA']);
+    });
+
+    test('does not mutate the input list and breaks ties by ticker', () {
+      final List<Position> input = <Position>[
+        pos('ZZZ', pnl: 100),
+        pos('AAA', pnl: 100), // tie on P/L → ticker decides
+      ];
+      final List<Position> sorted = sortPositions(input, PositionSort.pnl);
+      expect(sorted.map((Position p) => p.ticker), <String>['AAA', 'ZZZ']);
+      // original order preserved (purity).
+      expect(input.map((Position p) => p.ticker), <String>['ZZZ', 'AAA']);
+    });
+
+    test('positionSortLabel covers every variant', () {
+      for (final PositionSort s in PositionSort.values) {
+        expect(positionSortLabel(s), isNotEmpty);
+      }
+    });
+  });
+
   group('buildTradingSnapshot', () {
     test('combines positions / portfolio / governance / risk', () {
       final TradingSnapshot s = buildTradingSnapshot(
@@ -162,6 +228,52 @@ void main() {
       expect(find.text('Kill switch off'), findsOneWidget);
       expect(find.text('Breaker ok'), findsOneWidget);
       expect(find.text('AAPL'), findsOneWidget);
+    });
+
+    testWidgets('TC-3: positions render in default P/L-desc order with a sorter',
+        (WidgetTester tester) async {
+      tester.view.physicalSize = const Size(1100, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      Position pos(String t, double pnl) => Position(
+            ticker: t,
+            qty: 1,
+            entryPrice: 1,
+            currentPrice: 1,
+            marketValue: 100,
+            unrealizedPnl: pnl,
+            unrealizedPnlPct: pnl,
+            venue: '',
+          );
+      await tester.pumpWidget(MaterialApp(
+        home: CockpitScreen(
+          fetcher: () async => TradingSnapshot(
+            totalEquity: 1000,
+            cash: 0,
+            buyingPower: 0,
+            dayPnl: 0,
+            totalPnl: 0,
+            realizedPnl: 0,
+            unrealizedPnl: 0,
+            killSwitchActive: false,
+            killSwitchReason: '',
+            automationEnabled: true,
+            ensembleMode: '',
+            breakerTripped: false,
+            breakerReason: '',
+            totalHeatPct: 0,
+            positions: <Position>[pos('LOSS', -50), pos('WIN', 200)],
+          ),
+        ),
+      ));
+      await tester.pumpAndSettle();
+      // Sort selector chip is visible (>1 position).
+      expect(find.byTooltip('Sort positions'), findsOneWidget);
+      // Default P/L-desc → WIN row sits above LOSS row.
+      final double winY = tester.getTopLeft(find.text('WIN')).dy;
+      final double lossY = tester.getTopLeft(find.text('LOSS')).dy;
+      expect(winY, lessThan(lossY));
     });
 
     testWidgets('NC-2: a kill-switch transition pushes a notification',
