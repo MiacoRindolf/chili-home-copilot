@@ -23,6 +23,8 @@ from .portfolio import get_watchlist, get_trade_stats, get_insights
 
 logger = logging.getLogger(__name__)
 
+PATTERN_IMMINENT_ALERT_TIER = "pattern_imminent"
+
 
 def _safe_indicator_dict(indicator_data: Any) -> dict[str, Any]:
     if not indicator_data:
@@ -5127,6 +5129,52 @@ def clear_scanner_caches() -> None:
     clear_ohlcv_cache()
 
 
+def _append_unique_ticker(
+    out: list[str],
+    seen: set[str],
+    ticker: Any,
+) -> bool:
+    ticker_s = str(ticker or "").strip().upper()
+    if not ticker_s or ticker_s in seen:
+        return False
+    seen.add(ticker_s)
+    out.append(ticker_s)
+    return True
+
+
+def _recent_stock_imminent_alert_tickers_for_snapshots(
+    db: Session,
+    user_id: int | None,
+    *,
+    limit: int,
+    max_age_hours: float,
+) -> list[str]:
+    if limit <= 0:
+        return []
+    from ...models.trading import BreakoutAlert
+
+    cutoff = datetime.utcnow() - timedelta(hours=max(0.0, float(max_age_hours)))
+    q = (
+        db.query(BreakoutAlert.ticker)
+        .filter(BreakoutAlert.alert_tier == PATTERN_IMMINENT_ALERT_TIER)
+        .filter(BreakoutAlert.asset_type == "stock")
+        .filter(BreakoutAlert.alerted_at >= cutoff)
+        .order_by(BreakoutAlert.alerted_at.desc(), BreakoutAlert.id.desc())
+    )
+    if user_id is None:
+        q = q.filter(BreakoutAlert.user_id.is_(None))
+    else:
+        q = q.filter(BreakoutAlert.user_id == user_id)
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for (ticker,) in q.limit(max(limit * 3, limit)).all():
+        _append_unique_ticker(out, seen, ticker)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def load_top_scan_tickers_for_snapshots(
     db: Session,
     user_id: int | None,
@@ -5134,16 +5182,27 @@ def load_top_scan_tickers_for_snapshots(
     limit: int | None = None,
     max_age_hours: float = 48.0,
 ) -> tuple[list[str], dict[str, Any]]:
-    """Ranked tickers from latest ``trading_scans`` for snapshot driver; prescreen fallback if empty."""
+    """Ranked tickers for snapshot driver, aligned with active alert/prescreen lanes."""
     from ...config import settings as _snap_settings
     from ...models.trading import ScanResult
     from .prescreen_job import load_active_global_candidate_tickers
 
-    _lim = limit if limit is not None else int(
-        getattr(_snap_settings, "brain_snapshot_top_tickers", 1000),
+    _lim_raw = limit if limit is not None else getattr(
+        _snap_settings,
+        "brain_snapshot_top_tickers",
+        1000,
     )
+    _lim = max(0, int(_lim_raw or 0))
     cutoff = datetime.utcnow() - timedelta(hours=max_age_hours)
-    rows = (
+    alert_tickers = _recent_stock_imminent_alert_tickers_for_snapshots(
+        db,
+        user_id,
+        limit=max(0, _lim),
+        max_age_hours=max_age_hours,
+    )
+    _max_pre = int(getattr(_snap_settings, "brain_prescreen_max_total", 3000))
+    prescreen_tickers = load_active_global_candidate_tickers(db)[: min(_lim, _max_pre)]
+    scan_rows = (
         db.query(ScanResult.ticker)
         .filter(ScanResult.user_id == user_id)
         .filter(ScanResult.scanned_at >= cutoff)
@@ -5151,25 +5210,31 @@ def load_top_scan_tickers_for_snapshots(
         .limit(_lim)
         .all()
     )
-    tickers = [r[0] for r in rows if r[0]]
+    scan_tickers = [r[0] for r in scan_rows if r[0]]
+    tickers: list[str] = []
+    seen: set[str] = set()
+    for source_tickers in (alert_tickers, prescreen_tickers, scan_tickers):
+        for ticker in source_tickers:
+            if len(tickers) >= _lim:
+                break
+            _append_unique_ticker(tickers, seen, ticker)
+        if len(tickers) >= _lim:
+            break
     meta: dict[str, Any] = {
-        "snapshot_driver": "trading_scans",
+        "snapshot_driver": "alerts_prescreen_scans",
         "row_count": len(tickers),
+        "recent_stock_imminent_alert_tickers": len(alert_tickers),
+        "prescreen_tickers": len(prescreen_tickers),
+        "scan_rows": len(scan_tickers),
     }
     if not tickers:
-        _max_pre = int(getattr(_snap_settings, "brain_prescreen_max_total", 3000))
-        pres = load_active_global_candidate_tickers(db)
-        tickers = pres[: min(_lim, _max_pre)]
-        meta["snapshot_driver"] = "prescreen_only"
-        meta["fallback"] = "no_recent_scan_rows"
-        if not tickers:
-            tickers = list(ALL_SCAN_TICKERS[:_lim])
-            meta["snapshot_driver"] = "static_universe_slice"
-            meta["fallback"] = "no_scan_no_prescreen"
-            logger.warning(
-                "[scanner] load_top_scan_tickers_for_snapshots: empty scan + prescreen; "
-                "using static list slice",
-            )
+        tickers = list(ALL_SCAN_TICKERS[:_lim])
+        meta["snapshot_driver"] = "static_universe_slice"
+        meta["fallback"] = "no_alerts_no_scan_no_prescreen"
+        logger.warning(
+            "[scanner] load_top_scan_tickers_for_snapshots: empty alerts + scan + prescreen; "
+            "using static list slice",
+        )
     return tickers, meta
 
 
