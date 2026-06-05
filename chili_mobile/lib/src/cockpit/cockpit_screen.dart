@@ -64,6 +64,9 @@ class _CockpitScreenState extends State<CockpitScreen> {
   // TC-3 — open-positions sort order (default: biggest P/L first).
   PositionSort _sort = PositionSort.pnl;
 
+  // TC-4 — venue filter for the open-positions list (null = all venues).
+  String? _venue;
+
   void _onTick() {
     _emitRiskAlerts();
     final TradingSnapshot? s = _channel.value;
@@ -310,20 +313,61 @@ class _CockpitScreenState extends State<CockpitScreen> {
               style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant))
         else
           Builder(builder: (BuildContext _) {
-            final List<Position> sorted = sortPositions(s.positions, _sort);
-            return ApPanel(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-              child: Column(
-                children: <Widget>[
-                  for (int i = 0; i < sorted.length; i++) ...<Widget>[
-                    if (i > 0) Divider(height: 14, color: cs.outlineVariant),
-                    _positionRow(cs, sorted[i]),
-                  ],
+            final List<String> venues = venuesOf(s.positions);
+            final List<Position> shown = sortPositions(
+                filterPositionsByVenue(s.positions, _venue), _sort);
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                if (venues.length > 1) ...<Widget>[
+                  _venueFilter(cs, venues),
+                  const SizedBox(height: 8),
                 ],
-              ),
+                if (shown.isEmpty)
+                  Text('No positions on $_venue.',
+                      style:
+                          TextStyle(fontSize: 12, color: cs.onSurfaceVariant))
+                else
+                  ApPanel(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 6),
+                    child: Column(
+                      children: <Widget>[
+                        for (int i = 0; i < shown.length; i++) ...<Widget>[
+                          if (i > 0)
+                            Divider(height: 14, color: cs.outlineVariant),
+                          _positionRow(cs, shown[i]),
+                        ],
+                      ],
+                    ),
+                  ),
+              ],
             );
           }),
         const SizedBox(height: 24),
+      ],
+    );
+  }
+
+  // TC-4 — venue filter chips ("All" + one per broker present).
+  Widget _venueFilter(ColorScheme cs, List<String> venues) {
+    Widget chip(String label, String? value) {
+      final bool selected = _venue == value;
+      return Padding(
+        padding: const EdgeInsets.only(right: 6),
+        child: ChoiceChip(
+          label: Text(label),
+          selected: selected,
+          onSelected: (_) => setState(() => _venue = value),
+          visualDensity: VisualDensity.compact,
+        ),
+      );
+    }
+
+    return Wrap(
+      children: <Widget>[
+        chip('All', null),
+        for (final String v in venues) chip(v, v),
       ],
     );
   }
