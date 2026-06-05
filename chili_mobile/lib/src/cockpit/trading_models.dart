@@ -138,6 +138,14 @@ double _d(Object? v) {
 
 String _s(Object? v) => v?.toString().trim() ?? '';
 
+/// Cash as a fraction (0..1) of total equity (TC-6). Pure; 0 when equity ≤ 0
+/// so it never divides by zero. Clamped to [0, 1].
+double cashFractionOfEquity(double cash, double totalEquity) {
+  if (totalEquity <= 0) return 0;
+  final double f = cash / totalEquity;
+  return f.clamp(0.0, 1.0);
+}
+
 /// Aggregate exposure on one venue (TC-5).
 class VenueExposure {
   const VenueExposure({
