@@ -1971,9 +1971,15 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     final merge = run?['merge_status']?.toString() ?? '';
     final planStatus = run?['plan_status']?.toString() ?? '';
     final color = _autonomyStatusColor(status);
+    final runId = run?['run_id']?.toString() ?? '';
     return Container(
       padding: const EdgeInsets.fromLTRB(18, 12, 14, 12),
       decoration: BoxDecoration(
+        // Batch 31 — subtle tint separates the header from the chat area.
+        color: Theme.of(context)
+            .colorScheme
+            .surfaceContainerHighest
+            .withValues(alpha: 0.35),
         border: Border(bottom: BorderSide(color: _autonomyDividerColor())),
       ),
       child: Row(
@@ -2021,6 +2027,23 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
               ],
             ),
           ),
+          // Batch 32 — copy the run ID for sharing / lookups.
+          if (runId.isNotEmpty)
+            IconButton(
+              tooltip: 'Copy run ID',
+              visualDensity: VisualDensity.compact,
+              onPressed: () {
+                Clipboard.setData(ClipboardData(text: runId));
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Run ID copied'),
+                    behavior: SnackBarBehavior.floating,
+                    duration: Duration(seconds: 2),
+                  ),
+                );
+              },
+              icon: const Icon(Icons.copy, size: 18),
+            ),
           IconButton(
             tooltip: 'Refresh',
             onPressed: _autonomyBusy || run == null
@@ -2963,9 +2986,32 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
               _kvSelectable('Worktree', worktree),
             ],
             if (mergeMessage.isNotEmpty) _kvSelectable('Merge', mergeMessage),
-            if (errorMessage.isNotEmpty)
-              _kvSelectable(
-                  'Blocked', AutonomyRunPresenter.blockedRunMessage(run)),
+            // Batch 33 — blocked/error surfaced as a prominent banner.
+            if (errorMessage.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              ApPanel(
+                color: Theme.of(context)
+                    .colorScheme
+                    .error
+                    .withValues(alpha: 0.06),
+                padding: const EdgeInsets.all(12),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(Icons.error_outline,
+                        size: 18, color: Theme.of(context).colorScheme.error),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: SelectableText(
+                        AutonomyRunPresenter.blockedRunMessage(run),
+                        style: TextStyle(
+                            color: Theme.of(context).colorScheme.error),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
             const Divider(height: 28),
             _buildAutonomyArchitectQuality(architectReview),
             const Divider(height: 28),
@@ -2994,9 +3040,8 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('Architect quality',
-            style: Theme.of(context).textTheme.titleSmall),
-        const SizedBox(height: 8),
+        const ApSectionHeader('Architect quality', icon: Icons.verified_outlined),
+        const SizedBox(height: 4),
         if (body.isEmpty)
           Text('Waiting for architect review',
               style: TextStyle(color: _mutedTextColor()))
@@ -3314,7 +3359,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('Run steps', style: Theme.of(context).textTheme.titleSmall),
+        const ApSectionHeader('Run steps', icon: Icons.timeline),
         const SizedBox(height: 8),
         if (steps.isEmpty)
           Text('Waiting for events', style: TextStyle(color: _mutedTextColor()))
