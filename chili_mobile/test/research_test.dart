@@ -145,5 +145,26 @@ void main() {
       expect(ranTopic, 'Bitcoin ETFs');
       expect(find.text('Bitcoin ETFs'), findsWidgets); // reloaded digest
     });
+
+    testWidgets('RC-1: Discuss button pivots a topic to chat',
+        (WidgetTester tester) async {
+      String? discussed;
+      await tester.pumpWidget(MaterialApp(
+        home: ResearchScreen(
+          fetcher: () async => <String, dynamic>{
+            'topics': <Map<String, dynamic>>[
+              <String, dynamic>{'topic': 'Quantum', 'summary': 's'},
+            ],
+          },
+          reportOpener: () async => false,
+          runner: (String _) async => const <String, dynamic>{},
+          onDiscuss: (String t) => discussed = t,
+        ),
+      ));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Discuss in Chat'));
+      await tester.pump();
+      expect(discussed, 'Quantum');
+    });
   });
 }

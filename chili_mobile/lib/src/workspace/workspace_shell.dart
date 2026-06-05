@@ -143,7 +143,7 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
     'research': _AppDef(
       'Research',
       Icons.travel_explore,
-      () => const ResearchScreen(),
+      () => ResearchScreen(onDiscuss: _onDiscussTopic),
       size: const Size(880, 640),
     ),
     'mcp': _AppDef(
@@ -336,6 +336,12 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
   void _onAsk(String query) {
     setState(() => _paletteOpen = false);
     _chatAsk.value = query; // staged first; Chat consumes on build or via listener
+    _openApp('chat');
+  }
+
+  /// RC-1 — "Discuss" a research topic: open Chat asking about it (reuses UK-2).
+  void _onDiscussTopic(String topic) {
+    _chatAsk.value = 'Tell me more about: $topic';
     _openApp('chat');
   }
 
