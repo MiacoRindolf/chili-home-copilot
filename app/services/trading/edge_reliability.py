@@ -863,6 +863,55 @@ def _recent_completed_work_exists(
     )
 
 
+def _recent_prefix_work_exists(
+    db: Session,
+    *,
+    event_type: str,
+    dedupe_prefix: str,
+) -> bool:
+    """Fingerprint-independent recency guard for producer work.
+
+    ``_recent_completed_work_exists`` matches the EXACT dedupe_key, which is
+    defeated when the evidence-fingerprint suffix rotates every producer sweep
+    (edge_eval_count / expected_ev change continuously while a pattern keeps
+    signaling). A recert-blocked, still-signaling pattern therefore re-emits the
+    same recert_rescue / exit_variant / edge_reliability work every 30-min sweep
+    (~130 events/day for a single pattern). This guard skips emission when ANY
+    work of the same ``{event_type, pattern, asset_slice}`` PREFIX was touched
+    within the cooldown window, ignoring the fingerprint suffix — capping a
+    single pattern to ~one emission per window.
+    """
+    try:
+        from ...config import settings
+
+        minutes = int(
+            getattr(
+                settings,
+                "brain_work_recent_done_dedupe_minutes",
+                DEFAULT_RECENT_DONE_DEDUPE_MINUTES,
+            )
+        )
+    except Exception:
+        minutes = DEFAULT_RECENT_DONE_DEDUPE_MINUTES
+    if minutes <= 0:
+        return False
+    cutoff = datetime.utcnow() - timedelta(minutes=minutes)
+    return (
+        db.query(BrainWorkEvent.id)
+        .filter(BrainWorkEvent.event_kind == "work")
+        .filter(BrainWorkEvent.event_type == event_type)
+        .filter(BrainWorkEvent.dedupe_key.startswith(dedupe_prefix, autoescape=True))
+        .filter(
+            BrainWorkEvent.status.in_(
+                ("done", "pending", "processing", "retry_wait", "retry")
+            )
+        )
+        .filter(BrainWorkEvent.updated_at >= cutoff)
+        .first()
+        is not None
+    )
+
+
 def emit_edge_reliability_refresh_requested(
     db: Session,
     scan_pattern_id: int,
@@ -879,7 +928,14 @@ def emit_edge_reliability_refresh_requested(
         f"{EDGE_RELIABILITY_REFRESH}:p{int(scan_pattern_id)}:"
         f"a{slice_key}:w{int(window_days)}:{fp}"
     )
-    if _recent_completed_work_exists(
+    if _recent_prefix_work_exists(
+        db,
+        event_type=EDGE_RELIABILITY_REFRESH,
+        dedupe_prefix=(
+            f"{EDGE_RELIABILITY_REFRESH}:p{int(scan_pattern_id)}:"
+            f"a{slice_key}:w{int(window_days)}:"
+        ),
+    ) or _recent_completed_work_exists(
         db,
         event_type=EDGE_RELIABILITY_REFRESH,
         dedupe_key=dedupe_key,
@@ -919,7 +975,11 @@ def emit_targeted_profitability_work(
     fp = (evidence_fingerprint or "latest").strip()[:40]
     slice_key = _canonical_asset_class(asset_class) or "all"
     dedupe_key = f"{event_type}:{pid_key}:a{slice_key}:{fp}"
-    if _recent_completed_work_exists(
+    if _recent_prefix_work_exists(
+        db,
+        event_type=event_type,
+        dedupe_prefix=f"{event_type}:{pid_key}:a{slice_key}:",
+    ) or _recent_completed_work_exists(
         db,
         event_type=event_type,
         dedupe_key=dedupe_key,
