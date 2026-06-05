@@ -1629,6 +1629,21 @@ def _compute_single_indicator(
         s = VolumeWeightedAveragePrice(high=high, low=low, close=close, volume=volume).volume_weighted_average_price()
         return _series_to_records(timestamps, s, "value")
 
+    if name == "ttm_squeeze":
+        # Bollinger inside Keltner = volatility compression (breakout precursor).
+        # Computed via indicator_core so the snapshot value matches the entry
+        # surface (compute_all_from_df) exactly.
+        from .indicator_core import compute_keltner, compute_bollinger
+        kc = compute_keltner(high, low, close)
+        bb = compute_bollinger(close)
+        out = []
+        for i, ts in enumerate(timestamps):
+            bu, bl = bb["upper"].iloc[i], bb["lower"].iloc[i]
+            ku, kl = kc["upper"].iloc[i], kc["lower"].iloc[i]
+            if pd.notna(bu) and pd.notna(bl) and pd.notna(ku) and pd.notna(kl):
+                out.append({"time": ts, "value": bool(bu < ku and bl > kl)})
+        return out
+
     if name in ("psar", "sar"):
         p = PSARIndicator(high=high, low=low, close=close)
         psar_up = p.psar_up()
@@ -1883,6 +1898,10 @@ def get_indicator_snapshot(
         "roc_10", "realized_vol_20", "volume_z_20", "volume_z_60",
         "obv_slope_5", "atr_percentile_60", "macd_hist_slope_3",
         "volume_ratio", "gap_pct",
+        # Expanded vocabulary for the miner (snapshot source). mfi/cci use the
+        # same ta windows as indicator_core; ttm_squeeze via the shared helper.
+        # vwap intentionally omitted (anchored ta vwap != rolling entry vwap).
+        "mfi", "cci", "ttm_squeeze",
     ]
     result = compute_indicators(
         ticker,
