@@ -33,11 +33,40 @@ class BrainResourceBudget:
     def from_settings(cls) -> BrainResourceBudget:
         from ...config import settings
 
+        # Universe basis: how many tickers a cycle is configured to mine. The caps
+        # used to be FIXED at slow-serial-fetch sizes (ohlcv=280, which was 280 x
+        # ~8s/fetch = ~38 min/cycle), throttling mining to <30% of the universe.
+        # With provider-aware concurrency the full universe fetches fast AND
+        # rate-safe (each provider's rate governor bounds load), so the caps now
+        # SCALE to cover it. An explicit setting still pins them (operator override).
+        _max_tickers = max(1, int(getattr(settings, "brain_mine_patterns_max_tickers", 1000) or 1000))
+        _intraday = [
+            iv for iv in str(getattr(settings, "brain_intraday_intervals", "") or "").split(",")
+            if iv.strip() and iv.strip() != "1d"
+        ]
+        _interval_sweeps = 1 + len(_intraday)  # 1d + each intraday interval
+
+        # OHLCV fetch count is cheap (rate-governed); cover a full sweep of every
+        # interval + headroom for other miners that may share a cycle's budget.
+        _ohlcv_override = getattr(settings, "brain_budget_ohlcv_per_cycle", None)
+        ohlcv_cap = (
+            max(0, int(_ohlcv_override)) if _ohlcv_override is not None
+            else _max_tickers * _interval_sweeps + _max_tickers // 2
+        )
+
+        # Miner rows are held in RAM (a memory guard, not a rate limit): ~1yr of
+        # daily bars (~256/ticker) + intraday headroom, scaled to the universe.
+        _rows_override = getattr(settings, "brain_budget_miner_rows_per_cycle", None)
+        miner_rows_cap = (
+            max(0, int(_rows_override)) if _rows_override is not None
+            else _max_tickers * 400
+        )
+
         return cls(
-            ohlcv_cap=max(0, int(getattr(settings, "brain_budget_ohlcv_per_cycle", 200))),
-            miner_rows_cap=max(0, int(getattr(settings, "brain_budget_miner_rows_per_cycle", 80000))),
-            pattern_inject_cap=max(0, int(getattr(settings, "brain_budget_pattern_injects_per_cycle", 24))),
-            miner_error_trip=max(1, int(getattr(settings, "brain_budget_miner_error_trip", 5))),
+            ohlcv_cap=ohlcv_cap,
+            miner_rows_cap=miner_rows_cap,
+            pattern_inject_cap=max(0, int(getattr(settings, "brain_budget_pattern_injects_per_cycle", 32) or 32)),
+            miner_error_trip=max(1, int(getattr(settings, "brain_budget_miner_error_trip", 5) or 5)),
         )
 
     def try_ohlcv(self, miner: str, n: int = 1) -> bool:

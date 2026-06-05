@@ -5441,9 +5441,15 @@ class Settings(BaseSettings):
     brain_oos_min_oos_trades_crypto: Optional[int] = None
     brain_oos_min_oos_trades_high_vol_family: Optional[int] = None
 
-    # Per learning-cycle resource caps (miners). Zero cap = unlimited for that dimension.
-    brain_budget_ohlcv_per_cycle: int = 280
-    brain_budget_miner_rows_per_cycle: int = 100000
+    # Per learning-cycle resource caps (miners). Zero cap = unlimited for that
+    # dimension; None => ADAPTIVE (BrainResourceBudget.from_settings derives it from
+    # the mining universe brain_mine_patterns_max_tickers). The OHLCV/row caps used
+    # to be fixed at slow-serial-fetch sizes (280 fetches x ~8s = ~38 min/cycle),
+    # which throttled mining to <30% of the universe. With provider-aware
+    # concurrency the full universe fetches fast AND rate-safe, so they now scale
+    # to cover it. An explicit int still pins them (operator override).
+    brain_budget_ohlcv_per_cycle: int | None = None
+    brain_budget_miner_rows_per_cycle: int | None = None
     brain_budget_pattern_injects_per_cycle: int = 32
     brain_budget_miner_error_trip: int = 5
 

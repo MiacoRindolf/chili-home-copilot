@@ -24,8 +24,7 @@ PROFILES: dict[str, dict[str, Any]] = {
         # Mining — higher bar for discoveries
         "brain_evolution_min_trades": 10,
 
-        # Backtesting
-        "brain_budget_ohlcv_per_cycle": 200,
+        # (OHLCV fetch budget is now adaptive — see BrainResourceBudget.from_settings)
 
         # Signals — fewer, higher quality
         "brain_fast_eval_max_tickers": 200,
@@ -47,8 +46,6 @@ PROFILES: dict[str, dict[str, Any]] = {
 
         "brain_evolution_min_trades": 5,
 
-        "brain_budget_ohlcv_per_cycle": 280,
-
         "brain_fast_eval_max_tickers": 400,
         "brain_fast_eval_interval_minutes": 10,
         "brain_queue_exploration_max": 40,
@@ -66,8 +63,6 @@ PROFILES: dict[str, dict[str, Any]] = {
         "brain_bench_require_stress_pass": False,
 
         "brain_evolution_min_trades": 3,
-
-        "brain_budget_ohlcv_per_cycle": 400,
 
         "brain_fast_eval_max_tickers": 600,
         "brain_fast_eval_interval_minutes": 5,
