@@ -127,12 +127,18 @@ class ApStatCard extends StatelessWidget {
                 Icon(icon, size: 16, color: c),
                 const SizedBox(width: 6),
               ],
-              Text(
-                value,
-                style: TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.w700,
-                  color: cs.onSurface,
+              // Flexible so a long value (e.g. "$25,000.00") never overflows a
+              // narrow tile — it ellipsises gracefully instead.
+              Flexible(
+                child: Text(
+                  value,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.w700,
+                    color: cs.onSurface,
+                  ),
                 ),
               ),
             ],

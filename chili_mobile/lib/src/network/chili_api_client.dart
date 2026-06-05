@@ -1056,4 +1056,14 @@ class ChiliApiClient {
   /// GET MCP tool-server status (read-only; no auth required).
   Future<Map<String, dynamic>> getMcpStatus() =>
       _getMapSafe('/api/brain/mcp/status');
+
+  // ── Live Trading Cockpit (TC-1) — read-only snapshot endpoints. ──
+  Future<Map<String, dynamic>> getBrokerPositions() =>
+      _getMapSafe('/api/trading/broker/positions');
+  Future<Map<String, dynamic>> getBrokerPortfolio() =>
+      _getMapSafe('/api/trading/broker/portfolio');
+  Future<Map<String, dynamic>> getTradingGovernance() =>
+      _getMapSafe('/api/trading/brain/governance');
+  Future<Map<String, dynamic>> getRiskBudget() =>
+      _getMapSafe('/api/trading/risk/budget');
 }
