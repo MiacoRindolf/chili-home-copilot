@@ -96,6 +96,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (mounted) setState(() {});
   }
 
+  // Batch S2 — consistent section title (icon + label) for every settings card.
+  Widget _sectionTitle(IconData icon, String text) {
+    return Row(children: [
+      Icon(icon, size: 18, color: Theme.of(context).colorScheme.primary),
+      const SizedBox(width: 8),
+      Text(text, style: Theme.of(context).textTheme.titleMedium),
+    ]);
+  }
+
   @override
   Widget build(BuildContext context) {
     final mutedColor = Theme.of(context).colorScheme.onSurfaceVariant;
@@ -104,7 +113,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Settings', style: Theme.of(context).textTheme.headlineMedium),
+          // Batch S1 — header with brand icon.
+          Row(children: [
+            Icon(Icons.settings, color: Theme.of(context).colorScheme.primary),
+            const SizedBox(width: 10),
+            Text('Settings', style: Theme.of(context).textTheme.headlineMedium),
+          ]),
           const SizedBox(height: 24),
 
           // Server connection
@@ -114,8 +128,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('Server Connection',
-                      style: Theme.of(context).textTheme.titleMedium),
+                  _sectionTitle(Icons.dns_outlined, 'Server Connection'),
                   const SizedBox(height: 12),
                   TextField(
                     controller: _urlController,
@@ -126,10 +139,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
                   ),
                   const SizedBox(height: 12),
-                  ElevatedButton.icon(
+                  FilledButton.icon(
                     onPressed: _saveBaseUrl,
-                    icon: const Icon(Icons.save),
+                    icon: const Icon(Icons.save, size: 18),
                     label: const Text('Save'),
+                    // Batch S4 — full-width primary action.
+                    style: FilledButton.styleFrom(
+                        minimumSize: const Size.fromHeight(44)),
                   ),
                 ],
               ),
@@ -144,8 +160,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('Appearance',
-                      style: Theme.of(context).textTheme.titleMedium),
+                  _sectionTitle(Icons.palette_outlined, 'Appearance'),
                   const SizedBox(height: 12),
                   Text(
                     'Theme',
@@ -189,8 +204,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('Privacy',
-                      style: Theme.of(context).textTheme.titleMedium),
+                  _sectionTitle(Icons.lock_outline, 'Privacy'),
                   const SizedBox(height: 12),
                   const Text(
                     'Clear conversation history from the quick chat and full app. This does not affect the server.',
@@ -223,8 +237,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('Wake Word',
-                      style: Theme.of(context).textTheme.titleMedium),
+                  _sectionTitle(Icons.mic_none_outlined, 'Wake Word'),
                   const SizedBox(height: 12),
                   TextField(
                     controller: _wakeWordController,
@@ -302,8 +315,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('Accessibility',
-                      style: Theme.of(context).textTheme.titleMedium),
+                  _sectionTitle(Icons.accessibility_new_outlined, 'Accessibility'),
                   const SizedBox(height: 12),
                   Row(
                     children: [
@@ -399,8 +411,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('Shortcuts',
-                      style: Theme.of(context).textTheme.titleMedium),
+                  _sectionTitle(Icons.keyboard_outlined, 'Shortcuts'),
                   const SizedBox(height: 12),
                   _shortcutRow('Single-click avatar', 'Toggle chat bubble'),
                   _shortcutRow('Double-click avatar', 'Open full app'),
@@ -426,7 +437,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('About', style: Theme.of(context).textTheme.titleMedium),
+                  _sectionTitle(Icons.info_outline, 'About'),
                   const SizedBox(height: 12),
                   const Text('CHILI Desktop Companion v0.1.0'),
                   const SizedBox(height: 4),
@@ -455,7 +466,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
         Expanded(
             child: Text(desc,
-                style: TextStyle(fontSize: 13, color: Colors.grey.shade600))),
+                style: TextStyle(
+                    fontSize: 13,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant))),
       ]),
     );
   }
