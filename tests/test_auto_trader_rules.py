@@ -1733,6 +1733,136 @@ def test_evaluate_entry_edge_blocks_absurd_stock_execution_stop_geometry():
     assert decision.snapshot["max_execution_stop_loss_pct"] == 30.0
 
 
+def test_evaluate_entry_edge_records_shadow_ross_tight_stop_without_execution():
+    class _EmptyExec:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return []
+
+        def first(self):
+            return None
+
+    class _Query:
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def one_or_none(self):
+            return None
+
+    class _Db:
+        def query(self, *_args, **_kwargs):
+            return _Query()
+
+        def execute(self, *_args, **_kwargs):
+            return _EmptyExec()
+
+    alert = BreakoutAlert(
+        ticker="ROSS",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        scan_pattern_id=1256,
+        score_at_alert=0.7,
+        price_at_alert=10.0,
+        entry_price=10.0,
+        stop_loss=4.0,
+        target_price=13.0,
+        user_id=1,
+        indicator_snapshot={
+            "flat_indicators": {"support": 9.0},
+            "small_cap_momentum_context": {
+                "gap_pct": 15.0,
+                "rel_vol": 5.0,
+                "source_tags": ["massive_momentum_gappers"],
+            },
+        },
+    )
+
+    decision = evaluate_entry_edge(
+        _Db(),
+        alert,
+        settings=SimpleNamespace(chili_autotrader_stock_max_execution_stop_loss_pct=30.0),
+        pat_ctx={},
+        confidence=0.95,
+    )
+
+    assert not decision.allowed
+    assert decision.reason == "execution_stop_loss_too_wide"
+    assert alert.stop_loss == 4.0
+    plan = decision.snapshot["ross_tight_stop_plan"]
+    assert plan["used_for_execution"] is False
+    assert plan["reason"] == "shadow_candidate_found"
+    assert plan["candidate_source"] == "flat_indicators.support"
+    assert plan["candidate_stop_price"] == 9.0
+    assert plan["candidate_stop_loss_fraction"] == pytest.approx(0.1)
+    assert plan["candidate_reward_risk"] == pytest.approx(3.0)
+
+
+def test_evaluate_entry_edge_shadow_ross_tight_stop_requires_momentum_floor():
+    class _EmptyExec:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return []
+
+        def first(self):
+            return None
+
+    class _Query:
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def one_or_none(self):
+            return None
+
+    class _Db:
+        def query(self, *_args, **_kwargs):
+            return _Query()
+
+        def execute(self, *_args, **_kwargs):
+            return _EmptyExec()
+
+    alert = BreakoutAlert(
+        ticker="WEAK",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        scan_pattern_id=1256,
+        score_at_alert=0.7,
+        price_at_alert=10.0,
+        entry_price=10.0,
+        stop_loss=4.0,
+        target_price=13.0,
+        user_id=1,
+        indicator_snapshot={
+            "flat_indicators": {"support": 9.0},
+            "small_cap_momentum_context": {
+                "gap_pct": 1.0,
+                "rel_vol": 1.0,
+                "source_tags": ["massive_momentum_gappers"],
+            },
+        },
+    )
+
+    decision = evaluate_entry_edge(
+        _Db(),
+        alert,
+        settings=SimpleNamespace(chili_autotrader_stock_max_execution_stop_loss_pct=30.0),
+        pat_ctx={},
+        confidence=0.95,
+    )
+
+    assert not decision.allowed
+    assert decision.reason == "execution_stop_loss_too_wide"
+    assert alert.stop_loss == 4.0
+    plan = decision.snapshot["ross_tight_stop_plan"]
+    assert plan["used_for_execution"] is False
+    assert plan["reason"] == "momentum_context_below_floor"
+    assert plan["gap_passed"] is False
+    assert plan["volume_ratio_passed"] is False
+
+
 def test_execution_stop_loss_caps_read_typed_env(monkeypatch):
     monkeypatch.setenv("CHILI_AUTOTRADER_STOCK_MAX_EXECUTION_STOP_LOSS_PCT", "22.5")
     monkeypatch.setenv("CHILI_AUTOTRADER_CRYPTO_MAX_EXECUTION_STOP_LOSS_PCT", "44")

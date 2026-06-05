@@ -118,6 +118,14 @@ ROSS_STYLE_MOMENTUM_BOOL_FLAGS = frozenset(
         "prescreen_unusual_volume",
     }
 )
+ROSS_TIGHT_STOP_SHADOW_DEFAULT_ENABLED = True
+ROSS_TIGHT_STOP_SHADOW_DEFAULT_MIN_REWARD_RISK = 2.0
+ROSS_TIGHT_STOP_LEVEL_KEYS: tuple[tuple[str, str], ...] = (
+    ("support", "flat_indicators.support"),
+    ("vwap", "flat_indicators.vwap"),
+    ("premarket_high", "momentum_context.premarket_high"),
+    ("day_high", "momentum_context.day_high"),
+)
 
 
 @dataclass
@@ -1754,6 +1762,178 @@ def _expected_edge_components(
     }
 
 
+def _ross_tight_stop_shadow_plan(
+    alert: BreakoutAlert,
+    *,
+    settings: Any,
+    entry_price: float,
+    target_price: float,
+    static_stop_price: float,
+    static_reward_fraction: float,
+    static_loss_fraction: float,
+) -> dict[str, Any]:
+    enabled = _settings_bool(
+        settings,
+        "chili_autotrader_ross_tight_stop_shadow_enabled",
+        ROSS_TIGHT_STOP_SHADOW_DEFAULT_ENABLED,
+    )
+    snap: dict[str, Any] = {
+        "enabled": enabled,
+        "used_for_execution": False,
+        "reason": "disabled" if not enabled else "uninitialized",
+    }
+    if not enabled:
+        return snap
+
+    asset_type = str(getattr(alert, "asset_type", None) or "stock").strip().lower()
+    snap["asset_type"] = asset_type
+    if asset_type not in {"stock", "equity"}:
+        snap["reason"] = "non_stock_asset"
+        return snap
+    if entry_price <= 0.0 or target_price <= entry_price or static_stop_price <= 0.0:
+        snap["reason"] = "invalid_static_geometry"
+        return snap
+
+    flat, packet_present = _indicator_momentum_context_snapshot(alert)
+    snap["small_cap_momentum_context_present"] = packet_present
+    min_gap_pct = _settings_float(
+        settings,
+        "chili_autotrader_stock_momentum_context_min_gap_pct",
+        AUTOTRADER_STOCK_MOMENTUM_CONTEXT_MIN_GAP_PCT_DEFAULT,
+        minimum=0.0,
+        maximum=100.0,
+    )
+    min_volume_ratio = _settings_float(
+        settings,
+        "chili_autotrader_stock_momentum_context_min_volume_ratio",
+        AUTOTRADER_STOCK_MOMENTUM_CONTEXT_MIN_VOLUME_RATIO_DEFAULT,
+        minimum=0.0,
+        maximum=1000.0,
+    )
+    min_reward_risk = _settings_float(
+        settings,
+        "chili_autotrader_ross_tight_stop_shadow_min_reward_risk",
+        ROSS_TIGHT_STOP_SHADOW_DEFAULT_MIN_REWARD_RISK,
+        minimum=0.0,
+    )
+    snap.update(
+        min_gap_pct=round(min_gap_pct, 4),
+        min_volume_ratio=round(min_volume_ratio, 4),
+        min_reward_risk=round(min_reward_risk, 4),
+        static_stop_price=round(static_stop_price, 8),
+        static_stop_loss_fraction=round(static_loss_fraction, 8),
+        static_reward_fraction=round(static_reward_fraction, 8),
+    )
+
+    gap_pct, gap_source = _indicator_first_float(
+        flat,
+        (
+            "gap_pct",
+            "premarket_gap_pct",
+            "pre_market_gap_pct",
+            "todaysChangePerc",
+            "daily_change_pct",
+            "change_pct",
+        ),
+    )
+    volume_ratio, volume_source = _indicator_first_float(
+        flat,
+        ("volume_ratio", "vol_ratio", "rel_vol", "relative_volume", "rvol"),
+    )
+    surge_tags = _momentum_context_surge_tags(flat) if packet_present else []
+    if surge_tags:
+        snap["momentum_context_surge_tags"] = surge_tags
+    snap.update(
+        gap_pct=round(gap_pct, 4) if gap_pct is not None else None,
+        gap_source=gap_source,
+        volume_ratio=round(volume_ratio, 4) if volume_ratio is not None else None,
+        volume_ratio_source=volume_source,
+    )
+    if gap_pct is None or volume_ratio is None:
+        snap["reason"] = "missing_momentum_context"
+        return snap
+    if gap_pct < min_gap_pct or volume_ratio < min_volume_ratio:
+        snap["gap_passed"] = gap_pct >= min_gap_pct
+        snap["volume_ratio_passed"] = volume_ratio >= min_volume_ratio
+        snap["reason"] = "momentum_context_below_floor"
+        return snap
+    snap["gap_passed"] = True
+    snap["volume_ratio_passed"] = True
+
+    max_execution_loss = _max_execution_stop_loss_fraction(
+        settings,
+        getattr(alert, "asset_type", None),
+    )
+    if max_execution_loss is not None:
+        snap["max_execution_stop_loss_fraction"] = round(float(max_execution_loss), 8)
+    candidates: list[dict[str, Any]] = []
+    for key, source in ROSS_TIGHT_STOP_LEVEL_KEYS:
+        level = _finite_float_or_none(flat.get(key))
+        if level is None or level <= 0.0 or level >= entry_price:
+            continue
+        stop_loss_fraction = (entry_price - level) / entry_price
+        reward_risk = (
+            static_reward_fraction / stop_loss_fraction
+            if stop_loss_fraction > 0.0
+            else 0.0
+        )
+        candidate = {
+            "source": source,
+            "stop_price": round(level, 8),
+            "stop_loss_fraction": round(stop_loss_fraction, 8),
+            "reward_risk": round(reward_risk, 6),
+            "tighter_than_static": stop_loss_fraction < static_loss_fraction,
+            "within_execution_cap": (
+                True
+                if max_execution_loss is None
+                else stop_loss_fraction <= max_execution_loss
+            ),
+            "reward_risk_passed": reward_risk >= min_reward_risk,
+        }
+        candidates.append(candidate)
+    snap["candidate_count"] = len(candidates)
+    if not candidates:
+        snap["reason"] = "no_structural_stop_level"
+        return snap
+
+    candidates.sort(
+        key=lambda item: (
+            not bool(item["within_execution_cap"]),
+            not bool(item["reward_risk_passed"]),
+            not bool(item["tighter_than_static"]),
+            float(item["stop_loss_fraction"]),
+        )
+    )
+    snap["candidates"] = candidates[:4]
+    viable = [
+        candidate
+        for candidate in candidates
+        if candidate["within_execution_cap"]
+        and candidate["reward_risk_passed"]
+        and candidate["tighter_than_static"]
+    ]
+    if not viable:
+        if not any(candidate["within_execution_cap"] for candidate in candidates):
+            snap["reason"] = "stop_exceeds_execution_cap"
+        elif not any(candidate["reward_risk_passed"] for candidate in candidates):
+            snap["reason"] = "reward_risk_below_floor"
+        else:
+            snap["reason"] = "candidate_not_tighter_than_static"
+        return snap
+
+    selected = viable[0]
+    snap.update(
+        reason="shadow_candidate_found",
+        shadow_candidate_found=True,
+        selected_candidate=selected,
+        candidate_stop_price=selected["stop_price"],
+        candidate_stop_loss_fraction=selected["stop_loss_fraction"],
+        candidate_reward_risk=selected["reward_risk"],
+        candidate_source=selected["source"],
+    )
+    return snap
+
+
 def _alert_confidence_probability(confidence: float, settings: Any) -> tuple[float, dict[str, Any]]:
     raw = _fraction01(confidence, 0.5)
     if raw is None:
@@ -2623,6 +2803,15 @@ def evaluate_entry_edge(
         "expected_net_pct": snap.get("expected_net_pct"),
         "reward_risk": snap.get("reward_risk"),
     }
+    snap["ross_tight_stop_plan"] = _ross_tight_stop_shadow_plan(
+        alert,
+        settings=settings,
+        entry_price=e,
+        target_price=t,
+        static_stop_price=s,
+        static_reward_fraction=static_reward,
+        static_loss_fraction=static_loss,
+    )
 
     managed_reward, managed_loss, managed_geometry = _managed_exit_geometry_from_directional(
         alert=alert,
