@@ -41,6 +41,17 @@
         <Panel Grid.Row="1">
             <Border Background="Transparent"
                     BorderBrush="{StaticResource AccentBrush}" BorderThickness="6"/>
+            <!-- edge resize handles (live within the 6px solid border) -->
+            <Border Name="EdgeL" Width="6" HorizontalAlignment="Left" VerticalAlignment="Stretch"
+                    Background="Transparent" Cursor="LeftSide"/>
+            <Border Name="EdgeR" Width="6" HorizontalAlignment="Right" VerticalAlignment="Stretch"
+                    Background="Transparent" Cursor="RightSide"/>
+            <Border Name="EdgeB" Height="6" VerticalAlignment="Bottom" HorizontalAlignment="Stretch"
+                    Background="Transparent" Cursor="BottomSide"/>
+            <!-- bottom-left corner resize grip -->
+            <Border Name="GripBL" Width="20" Height="20"
+                    HorizontalAlignment="Left" VerticalAlignment="Bottom"
+                    Background="Transparent" Cursor="BottomLeftCorner"/>
             <!-- bottom-right corner resize grip -->
             <Border Name="GripBR" Width="20" Height="20"
                     HorizontalAlignment="Right" VerticalAlignment="Bottom"

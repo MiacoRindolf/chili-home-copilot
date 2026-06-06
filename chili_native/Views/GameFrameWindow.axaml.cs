@@ -49,13 +49,12 @@ public partial class GameFrameWindow : Window
                 if (e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
                     BeginMoveDrag(e);
             };
-        var grip = this.FindControl<Border>("GripBR");
-        if (grip != null)
-            grip.PointerPressed += (_, e) =>
-            {
-                if (e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
-                    BeginResizeDrag(WindowEdge.SouthEast, e);
-            };
+        WireResize("GripBR", WindowEdge.SouthEast);
+        WireResize("EdgeL", WindowEdge.West);
+        WireResize("EdgeR", WindowEdge.East);
+        WireResize("EdgeB", WindowEdge.South);
+        WireResize("GripBL", WindowEdge.SouthWest);
+
         var prices = this.FindControl<Button>("PricesBtn");
         if (prices != null)
             prices.Click += (_, _) =>
@@ -63,6 +62,17 @@ public partial class GameFrameWindow : Window
                 // float the price overlay just inside the game's top-left corner
                 var at = new PixelPoint(Position.X + _bpx + 12, Position.Y + _tpx + 12);
                 PriceOverlayWindow.Open(at);
+            };
+    }
+
+    private void WireResize(string name, WindowEdge edge)
+    {
+        var c = this.FindControl<Border>(name);
+        if (c != null)
+            c.PointerPressed += (_, e) =>
+            {
+                if (e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
+                    BeginResizeDrag(edge, e);
             };
     }
 
@@ -118,13 +128,16 @@ public partial class GameFrameWindow : Window
         int gripPx = (int)Math.Round(20 * _scale);
         IntPtr outer = CreateRectRgn(0, 0, _wpx, _hpx);
         IntPtr hole = CreateRectRgn(_bpx, _tpx, _bpx + _gw, _tpx + _gh);
-        // Keep the bottom-right resize grip solid (don't let the hole eat it).
-        IntPtr grip = CreateRectRgn(_wpx - gripPx, _hpx - gripPx, _wpx, _hpx);
-        CombineRgn(hole, hole, grip, RGN_DIFF);   // hole := hole − grip corner
+        // Keep both bottom resize grips solid (don't let the hole eat them).
+        IntPtr gripR = CreateRectRgn(_wpx - gripPx, _hpx - gripPx, _wpx, _hpx);
+        IntPtr gripL = CreateRectRgn(0, _hpx - gripPx, gripPx, _hpx);
+        CombineRgn(hole, hole, gripR, RGN_DIFF);   // hole := hole − BR grip
+        CombineRgn(hole, hole, gripL, RGN_DIFF);   // hole := hole − BL grip
         CombineRgn(outer, outer, hole, RGN_DIFF);  // outer := outer − hole
         SetWindowRgn(hwnd, outer, true);           // window owns `outer` now
         DeleteObject(hole);
-        DeleteObject(grip);
+        DeleteObject(gripR);
+        DeleteObject(gripL);
     }
 
     /// <summary>Drive the target to match the frame: move it under the titlebar and
