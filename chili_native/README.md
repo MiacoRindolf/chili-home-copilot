@@ -93,4 +93,7 @@ of truth until this reaches parity.
 - [x] **NATIVE-16** — the main window remembers its last position + size (saved to
       `%APPDATA%/CHILI/window.json` on close, restored on launch; only when not
       maximized). Verified end-to-end (reopens at the saved bounds).
+- [x] **NATIVE-17** — refresh button on the price card: a ↻ button beside the price
+      re-fetches the live GE price + trend for the current item (RefreshCommand).
+      Verified rendering beside the copy button.
       (Port Chat·Trading·Research with the backend: next.)
