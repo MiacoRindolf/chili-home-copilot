@@ -98,4 +98,6 @@ of truth until this reaches parity.
       Verified rendering beside the copy button.
 - [x] **NATIVE-18** — price freshness line: shows "GE update · <date>" (from the
       WeirdGloop timestamp) under the volume. Verified (abyssal whip → Jun 6, 2026).
-      (Port Chat·Trading·Research with the backend: next.)
+- [x] **NATIVE-19** — the title bar shows the active app name (e.g. "CHILI native ·
+      Games"), bound to Current.Name and updating on app switch. Verified
+      (Ctrl+4 → Games). (Port Chat·Trading·Research with the backend: next.)

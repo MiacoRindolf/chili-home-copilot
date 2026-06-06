@@ -91,6 +91,10 @@
                             Padding="6,2" VerticalAlignment="Center">
                         <TextBlock Text="native" FontSize="10" Foreground="{StaticResource TextLowBrush}"/>
                     </Border>
+                    <TextBlock Text="·" FontSize="13" VerticalAlignment="Center"
+                               Foreground="{StaticResource TextLowBrush}"/>
+                    <TextBlock Text="{Binding Current.Name}" FontSize="12" FontWeight="SemiBold"
+                               VerticalAlignment="Center" Foreground="{StaticResource TextMidBrush}"/>
                 </StackPanel>
 
                 <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
