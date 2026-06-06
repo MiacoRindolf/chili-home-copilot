@@ -56,7 +56,9 @@ public partial class HomeViewModel : ViewModelBase
                 });
             }
         }
-        Status = Events.Count == 0 ? "No recent activity" : $"{Events.Count} recent events · updated";
+        Status = Events.Count == 0
+            ? "No recent activity"
+            : $"{Events.Count} recent events · auto-refresh · {DateTime.Now:HH:mm:ss}";
     }
 
     private static string GlyphFor(string icon) => icon switch

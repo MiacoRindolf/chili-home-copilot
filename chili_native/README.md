@@ -146,3 +146,7 @@ of truth until this reaches parity.
 - [x] **NATIVE-28** — **Home app** (backend): the household/system activity feed
       (`/api/activity`) — recent events with type icon, description, user, and a
       relative time. Set as the default landing app. **Verified live** (25 events).
+- [x] **NATIVE-29** — live cockpits: `Views/AutoRefresh` drives the Trading (15s),
+      Brain (20s), and Home (30s) refresh commands on a timer **while the view is
+      visible** (stops when backgrounded). Each status shows a live timestamp.
+      Verified (Trading status ticked 16:17:33 → 16:17:44 with no interaction).

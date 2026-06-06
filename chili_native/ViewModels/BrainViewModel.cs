@@ -1,3 +1,4 @@
+using System;
 using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Text.Json;
@@ -117,7 +118,7 @@ public partial class BrainViewModel : ViewModelBase
             LearningOn = rs.TryGetProperty("learning_enabled", out var le) && le.ValueKind is JsonValueKind.True;
         }
 
-        Status = $"{Runs.Count} recent runs · updated";
+        Status = $"{Runs.Count} recent runs · auto-refresh · {DateTime.Now:HH:mm:ss}";
     }
 
     private static string Tokens(long n) =>
