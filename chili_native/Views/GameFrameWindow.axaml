@@ -22,10 +22,18 @@
                     <TextBlock Name="TitleText" Text="CHILI" FontSize="12" FontWeight="Bold"
                                Foreground="{StaticResource TextHiBrush}" VerticalAlignment="Center"/>
                 </StackPanel>
-                <Button Grid.Column="1" Name="CloseBtn" Content="✕" Width="34" Height="32"
-                        Background="Transparent" BorderThickness="0"
-                        Foreground="{StaticResource TextMidBrush}"
-                        HorizontalContentAlignment="Center" VerticalContentAlignment="Center"/>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button Name="PricesBtn" Content="◈ Prices" Height="26" Padding="9,0"
+                            Margin="0,0,6,0" CornerRadius="7" FontSize="11"
+                            Background="{StaticResource Surface2Brush}"
+                            Foreground="{StaticResource AccentBrush}"
+                            BorderBrush="{StaticResource StrokeBrush}" BorderThickness="1"
+                            VerticalContentAlignment="Center"/>
+                    <Button Name="CloseBtn" Content="✕" Width="34" Height="32"
+                            Background="Transparent" BorderThickness="0"
+                            Foreground="{StaticResource TextMidBrush}"
+                            HorizontalContentAlignment="Center" VerticalContentAlignment="Center"/>
+                </StackPanel>
             </Grid>
         </Border>
 

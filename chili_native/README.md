@@ -57,4 +57,10 @@ of truth until this reaches parity.
       the hollow region) resizes the frame and the target follows live
       (BeginResizeDrag + a unified move/resize sync). The frame now both moves and
       resizes the picked window. Verified grip + borders around Notepad.
-      (Window grouping / on-game price overlay: next.)
+- [x] **NATIVE-7** — on-game price overlay (`Views/PriceOverlayWindow`): a small
+      frameless, always-on-top RS price card that floats over the framed game,
+      opened from the frame titlebar's "◈ Prices" button (anchored at the game's
+      top-left), draggable by its handle. The real-time gaming awareness — and the
+      exact thing Flutter multi-window couldn't position/frameless on Windows; a
+      native Avalonia window just works. Verified over a framed Notepad.
+      (Window grouping / port Chat·Trading·Research: next.)

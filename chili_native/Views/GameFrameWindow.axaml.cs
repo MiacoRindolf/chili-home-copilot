@@ -56,6 +56,14 @@ public partial class GameFrameWindow : Window
                 if (e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
                     BeginResizeDrag(WindowEdge.SouthEast, e);
             };
+        var prices = this.FindControl<Button>("PricesBtn");
+        if (prices != null)
+            prices.Click += (_, _) =>
+            {
+                // float the price overlay just inside the game's top-left corner
+                var at = new PixelPoint(Position.X + _bpx + 12, Position.Y + _tpx + 12);
+                PriceOverlayWindow.Open(at);
+            };
     }
 
     /// <summary>Wrap the given (user-picked) window in a CHILI frame.</summary>
