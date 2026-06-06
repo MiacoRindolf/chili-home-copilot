@@ -1,0 +1,133 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:Chili.ViewModels"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d" d:DesignWidth="1100" d:DesignHeight="720"
+        x:Class="Chili.Views.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Width="1100" Height="720" MinWidth="720" MinHeight="480"
+        Title="CHILI"
+        Background="Transparent"
+        TransparencyLevelHint="AcrylicBlur"
+        ExtendClientAreaToDecorationsHint="True"
+        ExtendClientAreaChromeHints="NoChrome"
+        ExtendClientAreaTitleBarHeightHint="-1">
+
+    <Design.DataContext>
+        <vm:MainWindowViewModel/>
+    </Design.DataContext>
+
+    <Window.Styles>
+        <!-- Window control buttons (min / max / close) -->
+        <Style Selector="Button.winbtn">
+            <Setter Property="Width" Value="44"/>
+            <Setter Property="Height" Value="32"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="{StaticResource TextMidBrush}"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="CornerRadius" Value="0"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="HorizontalContentAlignment" Value="Center"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+        </Style>
+        <Style Selector="Button.winbtn:pointerover /template/ ContentPresenter">
+            <Setter Property="Background" Value="#22FFFFFF"/>
+            <Setter Property="Foreground" Value="{StaticResource TextHiBrush}"/>
+        </Style>
+        <Style Selector="Button.close:pointerover /template/ ContentPresenter">
+            <Setter Property="Background" Value="#E6453A"/>
+            <Setter Property="Foreground" Value="White"/>
+        </Style>
+
+        <!-- Dock app tiles -->
+        <Style Selector="Button.dock">
+            <Setter Property="Width" Value="46"/>
+            <Setter Property="Height" Value="46"/>
+            <Setter Property="Margin" Value="5,0"/>
+            <Setter Property="CornerRadius" Value="13"/>
+            <Setter Property="Background" Value="{StaticResource Surface2Brush}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource StrokeBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="FontSize" Value="18"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Foreground" Value="{StaticResource TextMidBrush}"/>
+            <Setter Property="HorizontalContentAlignment" Value="Center"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="RenderTransform" Value="none"/>
+            <Setter Property="Transitions">
+                <Transitions>
+                    <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.16"/>
+                    <BrushTransition Property="Foreground" Duration="0:0:0.16"/>
+                </Transitions>
+            </Setter>
+        </Style>
+        <Style Selector="Button.dock:pointerover">
+            <Setter Property="RenderTransform" Value="translateY(-6px) scale(1.06)"/>
+            <Setter Property="Foreground" Value="{StaticResource AccentBrush}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
+        </Style>
+    </Window.Styles>
+
+    <!-- Root surface -->
+    <Border Background="{StaticResource BgBaseBrush}">
+        <Grid RowDefinitions="40,*,84">
+
+            <!-- ===== Title bar (draggable) ===== -->
+            <Grid Grid.Row="0" Name="TitleBar" Background="Transparent" ColumnDefinitions="*,Auto">
+                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center"
+                            Margin="14,0,0,0" Spacing="9">
+                    <Border Width="14" Height="14" CornerRadius="4"
+                            Background="{StaticResource BrandBrush}"/>
+                    <TextBlock Text="CHILI" FontSize="13" FontWeight="Bold"
+                               Foreground="{StaticResource TextHiBrush}" VerticalAlignment="Center"/>
+                    <Border Background="{StaticResource Surface2Brush}" CornerRadius="5"
+                            Padding="6,2" VerticalAlignment="Center">
+                        <TextBlock Text="native" FontSize="10" Foreground="{StaticResource TextLowBrush}"/>
+                    </Border>
+                </StackPanel>
+
+                <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
+                    <Button Name="MinBtn" Classes="winbtn" Content="&#x2013;"/>
+                    <Button Name="MaxBtn" Classes="winbtn" Content="&#x25A1;"/>
+                    <Button Name="CloseBtn" Classes="winbtn close" Content="&#x2715;"/>
+                </StackPanel>
+            </Grid>
+
+            <!-- ===== Workspace ===== -->
+            <Panel Grid.Row="1">
+                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="14">
+                    <Border Background="#1635D08A" CornerRadius="20" Padding="12,5"
+                            HorizontalAlignment="Center">
+                        <StackPanel Orientation="Horizontal" Spacing="7">
+                            <Border Width="7" Height="7" CornerRadius="4" VerticalAlignment="Center"
+                                    Background="{StaticResource AccentBrush}"/>
+                            <TextBlock Text="native shell online" FontSize="11"
+                                       Foreground="{StaticResource AccentBrush}"/>
+                        </StackPanel>
+                    </Border>
+
+                    <TextBlock Text="CHILI" FontSize="64" FontWeight="Bold"
+                               Foreground="{StaticResource TextHiBrush}"
+                               HorizontalAlignment="Center"/>
+                    <TextBlock Text="native desktop  ·  C# + Avalonia  ·  powerful and beautiful"
+                               FontSize="14" Foreground="{StaticResource TextMidBrush}"
+                               HorizontalAlignment="Center"/>
+                </StackPanel>
+            </Panel>
+
+            <!-- ===== Dock ===== -->
+            <Border Grid.Row="2" HorizontalAlignment="Center" VerticalAlignment="Center"
+                    Background="#CC11161B" CornerRadius="18" Padding="8,7"
+                    BorderBrush="{StaticResource StrokeBrush}" BorderThickness="1">
+                <StackPanel Orientation="Horizontal">
+                    <Button Classes="dock" Content="&#9993;" ToolTip.Tip="Chat"/>
+                    <Button Classes="dock" Content="$" ToolTip.Tip="Trading"/>
+                    <Button Classes="dock" Content="&#9670;" ToolTip.Tip="Games"/>
+                    <Button Classes="dock" Content="&#9906;" ToolTip.Tip="Research"/>
+                    <Button Classes="dock" Content="&#9679;" ToolTip.Tip="Agents"/>
+                </StackPanel>
+            </Border>
+        </Grid>
+    </Border>
+</Window>

@@ -1,0 +1,37 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="Chili.App"
+             xmlns:local="using:Chili"
+             RequestedThemeVariant="Dark">
+
+    <Application.DataTemplates>
+        <local:ViewLocator/>
+    </Application.DataTemplates>
+
+    <Application.Resources>
+        <!-- CHILI palette — shared brand tokens (carried over from the Flutter app). -->
+        <Color x:Key="BgBase">#0E1116</Color>
+        <Color x:Key="Surface">#161B20</Color>
+        <Color x:Key="Surface2">#1E252C</Color>
+        <Color x:Key="Stroke">#2A323A</Color>
+        <Color x:Key="TextHi">#ECEFF1</Color>
+        <Color x:Key="TextMid">#9AA2AA</Color>
+        <Color x:Key="TextLow">#6B747C</Color>
+        <Color x:Key="Accent">#35D08A</Color>
+        <Color x:Key="Brand">#FF6B5B</Color>
+
+        <SolidColorBrush x:Key="BgBaseBrush" Color="{StaticResource BgBase}"/>
+        <SolidColorBrush x:Key="SurfaceBrush" Color="{StaticResource Surface}"/>
+        <SolidColorBrush x:Key="Surface2Brush" Color="{StaticResource Surface2}"/>
+        <SolidColorBrush x:Key="StrokeBrush" Color="{StaticResource Stroke}"/>
+        <SolidColorBrush x:Key="TextHiBrush" Color="{StaticResource TextHi}"/>
+        <SolidColorBrush x:Key="TextMidBrush" Color="{StaticResource TextMid}"/>
+        <SolidColorBrush x:Key="TextLowBrush" Color="{StaticResource TextLow}"/>
+        <SolidColorBrush x:Key="AccentBrush" Color="{StaticResource Accent}"/>
+        <SolidColorBrush x:Key="BrandBrush" Color="{StaticResource Brand}"/>
+    </Application.Resources>
+
+    <Application.Styles>
+        <FluentTheme />
+    </Application.Styles>
+</Application>
