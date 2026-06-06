@@ -4733,16 +4733,23 @@ def start_scheduler():
                 )
 
             if include_broker_sync:
+                # CRYPTO-24/7 FIX (2026-06-06): crypto fills happen 24/7 — overnight
+                # and on weekends — but this position+order sync was gated to
+                # mon-fri 8am-8pm ET (stock market hours, inherited from the stock
+                # use case). A resting crypto stop/target that fills Friday night or
+                # over the weekend therefore went UNRECONCILED for up to ~60h: the
+                # local Trade row stayed "open" while the broker no longer held the
+                # position (observed 2026-06-06 with ETC-USD + SHIB-USD, sold
+                # overnight, still showing "open" in CHILI's monitoring tab). Run
+                # 24/7 so crypto exits reconcile within ~2min. Stock sync outside
+                # market hours is a cheap no-op (held names stay in rh_tickers; the
+                # R32-empty / missing-streak / confirm-window guards already prevent
+                # transient partial-list false closes).
                 _scheduler.add_job(
                     _run_broker_sync_job,
-                    trigger=CronTrigger(
-                        day_of_week="mon-fri",
-                        hour="8-20",
-                        minute="*/2",
-                        timezone="US/Eastern",
-                    ),
+                    trigger=IntervalTrigger(minutes=2),
                     id="broker_sync",
-                    name="Robinhood order+position sync (ET 8am-8pm every 2min)",
+                    name="Robinhood order+position sync (24/7 every 2min — crypto fills 24/7)",
                     replace_existing=True,
                     max_instances=1,
                 )
