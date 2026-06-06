@@ -53,6 +53,20 @@ public sealed class ChiliApiClient
         catch { return false; }
     }
 
+    /// <summary>GET a JSON endpoint and return the (cloned) root element, or null.</summary>
+    public async Task<JsonElement?> GetJsonAsync(string path, CancellationToken ct = default)
+    {
+        try
+        {
+            using var resp = await _http.SendAsync(Build(HttpMethod.Get, path), ct);
+            if (!resp.IsSuccessStatusCode) return null;
+            var s = await resp.Content.ReadAsStringAsync(ct);
+            using var doc = JsonDocument.Parse(s);
+            return doc.RootElement.Clone(); // survives doc disposal
+        }
+        catch { return null; }
+    }
+
     /// <summary>Stream a chat reply token-by-token from /api/mobile/chat/stream.
     /// Returns the conversation id from the final event (for threading).</summary>
     public async Task<int?> StreamChatAsync(string message, int? conversationId,
