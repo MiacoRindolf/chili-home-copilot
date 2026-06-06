@@ -188,6 +188,10 @@ public partial class RsPriceCardViewModel : ViewModelBase
         await SearchAsync();
     }
 
+    /// <summary>Clear the recent-searches list.</summary>
+    [RelayCommand]
+    private void ClearRecent() => Recent.Clear();
+
     /// <summary>Record an item name at the front of the recent list (deduped, capped).</summary>
     private void Remember(string name)
     {

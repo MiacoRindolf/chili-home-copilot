@@ -100,4 +100,7 @@ of truth until this reaches parity.
       WeirdGloop timestamp) under the volume. Verified (abyssal whip → Jun 6, 2026).
 - [x] **NATIVE-19** — the title bar shows the active app name (e.g. "CHILI native ·
       Games"), bound to Current.Name and updating on app switch. Verified
-      (Ctrl+4 → Games). (Port Chat·Trading·Research with the backend: next.)
+      (Ctrl+4 → Games).
+- [x] **NATIVE-20** — "Clear" button for recent searches (ClearRecentCommand →
+      Recent.Clear; the chips row hides when empty). Verified end-to-end (chips
+      appear, click Clear, chips gone). (Port Chat·Trading·Research with the backend: next.)
