@@ -84,20 +84,19 @@ def _account_equity_usd() -> float | None:
         return None
 
 
-def equity_relative_notional_cap(fixed_fallback_usd: float) -> float:
-    """Per-trade notional cap = account equity x ONE documented fraction.
+def _equity_relative_cap(fixed_fallback_usd: float, fraction: Any) -> float:
+    """Cap = account_equity x fraction (equity-relative, not a fixed $).
 
-    Equity-relative (not a fixed $): scales UP as equity grows and DOWN in
-    drawdown (auto-de-risk). Falls back to ``fixed_fallback_usd`` when equity or
-    the fraction is unavailable (never trade against unknown equity). The fraction
-    is the single documented risk-appetite knob. docs/DESIGN/MOMENTUM_LANE.md
+    Scales UP as equity grows and DOWN in drawdown (auto-de-risk). Falls back to
+    ``fixed_fallback_usd`` when equity or the fraction is unavailable (never size
+    against unknown equity). A 0 / non-positive fixed cap is a deliberate operator
+    disable/block and is preserved. docs/DESIGN/MOMENTUM_LANE.md
     """
     fixed = float(fixed_fallback_usd)
     if fixed <= 0:
-        # A 0 / non-positive cap is a deliberate operator disable/block — preserve it.
         return fixed
     try:
-        frac = float(getattr(settings, "chili_momentum_risk_notional_fraction_of_equity", 0.15) or 0.0)
+        frac = float(fraction or 0.0)
     except (TypeError, ValueError):
         frac = 0.0
     if frac <= 0 or not math.isfinite(frac):
@@ -106,6 +105,24 @@ def equity_relative_notional_cap(fixed_fallback_usd: float) -> float:
     if eq is None or eq <= 0:
         return fixed
     return round(eq * frac, 2)
+
+
+def equity_relative_notional_cap(fixed_fallback_usd: float) -> float:
+    """Per-trade NOTIONAL cap as a fraction of account equity (documented
+    per-trade SIZE knob). docs/DESIGN/MOMENTUM_LANE.md"""
+    return _equity_relative_cap(
+        fixed_fallback_usd,
+        getattr(settings, "chili_momentum_risk_notional_fraction_of_equity", 0.15),
+    )
+
+
+def equity_relative_loss_cap(fixed_fallback_usd: float) -> float:
+    """Per-trade MAX-LOSS cap as a fraction of account equity (documented
+    per-trade RISK knob). docs/DESIGN/MOMENTUM_LANE.md"""
+    return _equity_relative_cap(
+        fixed_fallback_usd,
+        getattr(settings, "chili_momentum_risk_loss_fraction_of_equity", 0.01),
+    )
 
 
 @dataclass(frozen=True)
@@ -247,6 +264,9 @@ def build_session_risk_snapshot(
         "max_notional_per_trade_usd": equity_relative_notional_cap(
             policy_float_cap(policy_full, "max_notional_per_trade_usd", 500.0)
         ),
-        "max_loss_per_trade_usd": policy_float_cap(policy_full, "max_loss_per_trade_usd", 50.0),
+        # Equity-relative per-trade max-loss (no fixed-$ magic); same fallback rules.
+        "max_loss_per_trade_usd": equity_relative_loss_cap(
+            policy_float_cap(policy_full, "max_loss_per_trade_usd", 50.0)
+        ),
     }
     return snap

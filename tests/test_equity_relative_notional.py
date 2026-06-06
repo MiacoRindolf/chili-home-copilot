@@ -49,3 +49,24 @@ def test_equity_relative_preserves_zero_disable_cap(monkeypatch) -> None:
     monkeypatch.setattr(settings, "chili_momentum_risk_notional_fraction_of_equity", 0.15)
     monkeypatch.setattr(rp, "_account_equity_usd", lambda: 2000.0)
     assert rp.equity_relative_notional_cap(0.0) == 0.0
+
+
+# ── per-trade MAX-LOSS cap (sibling of the notional cap) ──────────────────────
+
+
+def test_equity_relative_loss_cap_uses_equity(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "chili_momentum_risk_loss_fraction_of_equity", 0.01)
+    monkeypatch.setattr(rp, "_account_equity_usd", lambda: 2000.0)
+    assert rp.equity_relative_loss_cap(50.0) == pytest.approx(20.0)  # 2000 * 0.01
+
+
+def test_equity_relative_loss_cap_preserves_zero(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "chili_momentum_risk_loss_fraction_of_equity", 0.01)
+    monkeypatch.setattr(rp, "_account_equity_usd", lambda: 2000.0)
+    assert rp.equity_relative_loss_cap(0.0) == 0.0
+
+
+def test_equity_relative_loss_cap_falls_back_no_equity(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "chili_momentum_risk_loss_fraction_of_equity", 0.01)
+    monkeypatch.setattr(rp, "_account_equity_usd", lambda: None)
+    assert rp.equity_relative_loss_cap(50.0) == 50.0
