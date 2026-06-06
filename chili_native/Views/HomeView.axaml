@@ -1,0 +1,59 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:Chili.ViewModels"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d" d:DesignWidth="640" d:DesignHeight="560"
+             x:Class="Chili.Views.HomeView"
+             x:DataType="vm:HomeViewModel">
+
+    <Border Width="640" Height="560" Background="{StaticResource SurfaceBrush}"
+            CornerRadius="16" BorderBrush="{StaticResource StrokeBrush}" BorderThickness="1"
+            Padding="20" BoxShadow="0 8 24 0 #70000000">
+        <DockPanel LastChildFill="True">
+            <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto" Margin="0,0,0,4">
+                <StackPanel Grid.Column="0" Spacing="2">
+                    <TextBlock Text="Activity" FontSize="18" FontWeight="Bold"
+                               Foreground="{StaticResource TextHiBrush}"/>
+                    <TextBlock Text="Recent household &amp; system events" FontSize="12"
+                               Foreground="{StaticResource TextLowBrush}"/>
+                </StackPanel>
+                <Button Grid.Column="1" Content="↻  Refresh" Command="{Binding RefreshCommand}"
+                        VerticalAlignment="Center" Padding="12,7" CornerRadius="9"
+                        Background="{StaticResource Surface2Brush}"
+                        Foreground="{StaticResource AccentBrush}" BorderThickness="0"/>
+            </Grid>
+
+            <TextBlock DockPanel.Dock="Bottom" Text="{Binding Status}" FontSize="11"
+                       Foreground="{StaticResource TextLowBrush}" Margin="2,10,0,0"/>
+
+            <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="0,12,0,0">
+                <ItemsControl ItemsSource="{Binding Events}">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate><StackPanel Spacing="2"/></ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:ActivityRow">
+                            <Border CornerRadius="9" Padding="12,10" Background="{StaticResource Surface2Brush}">
+                                <Grid ColumnDefinitions="30,*">
+                                    <Border Grid.Column="0" Width="26" Height="26" CornerRadius="7"
+                                            VerticalAlignment="Top" Background="{StaticResource BgBaseBrush}">
+                                        <TextBlock Text="{Binding Glyph}" FontSize="13"
+                                                   Foreground="{StaticResource AccentBrush}"
+                                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    </Border>
+                                    <StackPanel Grid.Column="1" Spacing="2" Margin="10,0,0,0">
+                                        <TextBlock Text="{Binding Description}" FontSize="13"
+                                                   Foreground="{StaticResource TextHiBrush}" TextWrapping="Wrap"/>
+                                        <TextBlock Text="{Binding Meta}" FontSize="11"
+                                                   Foreground="{StaticResource TextLowBrush}"/>
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </ScrollViewer>
+        </DockPanel>
+    </Border>
+</UserControl>

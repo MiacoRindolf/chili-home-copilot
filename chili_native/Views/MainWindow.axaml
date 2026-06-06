@@ -112,6 +112,9 @@
                     <DataTemplate DataType="vm:RsPriceCardViewModel">
                         <views:RsPriceCard/>
                     </DataTemplate>
+                    <DataTemplate DataType="vm:HomeViewModel">
+                        <views:HomeView/>
+                    </DataTemplate>
                     <DataTemplate DataType="vm:ChatViewModel">
                         <views:ChatView/>
                     </DataTemplate>
