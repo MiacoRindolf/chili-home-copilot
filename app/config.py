@@ -5318,6 +5318,28 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_CRYPTO_EXIT_MONITOR_ENABLED"),
     )
+    # Fix 5B (2026-06-05): the pattern monitor's ``exit_now`` advisory is
+    # beneficial only ~21% of the time (measured via was_beneficial); a fresh but
+    # UNCORROBORATED exit_now is rerouted to a stop-TIGHTEN instead of a hard cut.
+    # An exit_now is honored as a hard market exit only once price has traversed
+    # at least this fraction of the entry->stop distance (price corroborates the
+    # exit); below it, the protective stop is tightened to the corroboration level
+    # so a genuine adverse move still triggers a normal stop while a recovery keeps
+    # its upside. Only ever tightens (never loosens) the stop; the hard stop +
+    # drawdown breaker are untouched. Policy knob, live + on.
+    chili_monitor_exit_corroboration_floor: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MONITOR_EXIT_CORROBORATION_FLOOR"),
+    )
+    # Comma-separated ``decision_source`` values whose ``exit_now`` is dropped
+    # entirely (not even rerouted). Seeded with ``heuristic`` -- measured 0/296
+    # beneficial exit_now decisions over 90d. Data-derived denylist, tunable.
+    chili_monitor_exit_denylisted_sources: str = Field(
+        default="heuristic",
+        validation_alias=AliasChoices("CHILI_MONITOR_EXIT_DENYLISTED_SOURCES"),
+    )
 
     chili_autotrader_crypto_exit_missing_qty_backoff_seconds: int = Field(
         default=CRYPTO_EXIT_MISSING_QTY_BACKOFF_DEFAULT_SECONDS,

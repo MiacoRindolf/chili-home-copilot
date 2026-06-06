@@ -185,7 +185,10 @@ def test_case1_closes_on_fresh_exit_now(db):
     t = _seed_open_crypto_trade(db, name_suffix="case1")
     _seed_decision(db, t.id, action="exit_now")
 
-    out, sell_mock, _ = _run_with_mocks(db, quote_price=10.40)
+    # px 9.30: above the stop (9.0) so no stop-hit, but >=50% of the way from
+    # entry (10) to stop -> the exit_now is CORROBORATED (Fix 5B) and fires as
+    # pattern_exit_now. (An uncorroborated price would reroute to a stop-tighten.)
+    out, sell_mock, _ = _run_with_mocks(db, quote_price=9.30)
 
     assert out.get("closed") == 1
     db.refresh(t)
@@ -754,11 +757,12 @@ def test_case5b_no_trigger_plus_fresh_exit_now_still_closes(db):
     t = _seed_open_crypto_trade(db, name_suffix="case5b")
     _seed_decision(db, t.id, action="exit_now")
 
-    # entry $10, px $11 -- ratio 1.1, well within (0.1, 10), so
-    # _evaluate_exit_triggers returns (False, "no_trigger") and the
-    # monitor consultation IS allowed to fire.
+    # entry $10, px $9.30 -- ratio 0.93, well within (0.1, 10), so
+    # _evaluate_exit_triggers returns (False, "no_trigger") and the monitor
+    # consultation IS allowed to fire. 9.30 is above the stop (9.0) so no stop-hit,
+    # but corroborates the exit_now (>=50% of the way to stop), so it still closes.
     out, sell_mock, _ = _run_with_mocks(
-        db, quote_price=11.00, sell_order_id="test-oid-5b"
+        db, quote_price=9.30, sell_order_id="test-oid-5b"
     )
 
     assert out.get("closed") == 1
