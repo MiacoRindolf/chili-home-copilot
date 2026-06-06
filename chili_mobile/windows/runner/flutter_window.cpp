@@ -148,6 +148,24 @@ void FitGameToFrame(HWND frame) {
   ::SetWindowPos(game, frame, gx, gy, gw, gh, SWP_NOACTIVATE);
 }
 
+// Make the frame a hollow "picture frame": only the title bar + borders are
+// part of the window; the middle is a hole the game shows through. This means
+// the frame can never cover the game, whatever the z-order, and clicks in the
+// middle go straight to the game.
+void ApplyFrameRegion(HWND frame) {
+  RECT wr;
+  ::GetWindowRect(frame, &wr);
+  int w = wr.right - wr.left;
+  int h = wr.bottom - wr.top;
+  if (w <= 2 * kBorder || h <= kTitleH + kBorder) return;
+  HRGN outer = ::CreateRectRgn(0, 0, w, h);
+  HRGN hole =
+      ::CreateRectRgn(kBorder, kTitleH, w - kBorder, h - kBorder);
+  ::CombineRgn(outer, outer, hole, RGN_DIFF);
+  ::DeleteObject(hole);
+  ::SetWindowRgn(frame, outer, TRUE);  // window takes ownership of outer
+}
+
 // Window proc for the CHILI frame chrome: the title bar drags the whole thing
 // (HTCAPTION) and the edges / corner resize it (HTRIGHT/HTBOTTOM/...). As the
 // frame moves or resizes, the game is fitted to its client area.
@@ -181,7 +199,10 @@ LRESULT CALLBACK FrameBarProc(HWND h, UINT m, WPARAM w, LPARAM l) {
       return 0;
     }
     case WM_MOVE:
+      FitGameToFrame(h);
+      return 0;
     case WM_SIZE:
+      ApplyFrameRegion(h);  // keep the hollow shape in sync
       FitGameToFrame(h);
       return 0;
     case WM_GETMINMAXINFO: {
@@ -352,13 +373,14 @@ bool FlutterWindow::FrameWindow(HWND game, const std::wstring& name) {
                       reinterpret_cast<LONG_PTR>(game));
   framed_game_ = game;
   g_frame_owner = this;
+  ApplyFrameRegion(frame_bar_);  // hollow picture-frame shape
   ::ShowWindow(frame_bar_, SW_SHOWNOACTIVATE);
   ::UpdateWindow(frame_bar_);
   // Bring the frame + game in front of the CHILI shell so they're actually
   // visible (the CHILI window otherwise covers the game after the picker).
   ::SetWindowPos(frame_bar_, HWND_TOP, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-  FitGameToFrame(frame_bar_);  // place the game in the client area, above frame
+  FitGameToFrame(frame_bar_);  // place the game in the hole, above the frame
   ::SetForegroundWindow(game);
   return true;
 }
