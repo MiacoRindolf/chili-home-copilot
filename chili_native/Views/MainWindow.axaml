@@ -98,6 +98,12 @@
                 </StackPanel>
 
                 <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
+                    <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center"
+                                Margin="0,0,14,0" ToolTip.Tip="Backend connection">
+                        <Border Width="7" Height="7" CornerRadius="4" Background="{Binding OnlineBrush}"/>
+                        <TextBlock Text="{Binding OnlineText}" FontSize="11"
+                                   Foreground="{StaticResource TextLowBrush}"/>
+                    </StackPanel>
                     <Button Name="MinBtn" Classes="winbtn" Content="&#x2013;"/>
                     <Button Name="MaxBtn" Classes="winbtn" Content="&#x25A1;"/>
                     <Button Name="CloseBtn" Classes="winbtn close" Content="&#x2715;"/>
