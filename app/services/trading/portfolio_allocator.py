@@ -918,7 +918,13 @@ def allocate_momentum_session_entry(
     if execution_mode == "paper" and not bool(getattr(settings, "brain_paper_deployment_enforcement", True)):
         mult = 1.0
 
-    intended_notional = max(10.0, base_cap * max(0.0, min(1.0, mult)))
+    # ADAPTIVE SIZE BY CONVICTION (operator idea, 2026-06-06): scale the entry
+    # notional by CHILI's confidence in the setup — the viability/conviction score
+    # in [0,1]. A tentative setup risks little; a high-conviction one earns more.
+    # No fixed cap; combined with the deployment-ladder `mult` the lane also starts
+    # small and scales as it proves itself. (See feedback_adaptive_no_magic.)
+    _conf = max(0.0, min(1.0, _safe_float(getattr(viability, "viability_score", None), 0.0)))
+    intended_notional = max(10.0, base_cap * max(0.0, min(1.0, mult)) * _conf)
     alloc = build_session_allocation_decision(
         db,
         session,
