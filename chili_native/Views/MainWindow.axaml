@@ -4,6 +4,7 @@
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         mc:Ignorable="d" d:DesignWidth="1100" d:DesignHeight="720"
+        xmlns:views="using:Chili.Views"
         x:Class="Chili.Views.MainWindow"
         x:DataType="vm:MainWindowViewModel"
         Width="1100" Height="720" MinWidth="720" MinHeight="480"
@@ -96,23 +97,24 @@
 
             <!-- ===== Workspace ===== -->
             <Panel Grid.Row="1">
-                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="14">
-                    <Border Background="#1635D08A" CornerRadius="20" Padding="12,5"
-                            HorizontalAlignment="Center">
-                        <StackPanel Orientation="Horizontal" Spacing="7">
-                            <Border Width="7" Height="7" CornerRadius="4" VerticalAlignment="Center"
-                                    Background="{StaticResource AccentBrush}"/>
-                            <TextBlock Text="native shell online" FontSize="11"
-                                       Foreground="{StaticResource AccentBrush}"/>
-                        </StackPanel>
-                    </Border>
+                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center"
+                            Spacing="22" Width="360">
+                    <StackPanel Spacing="10" HorizontalAlignment="Center">
+                        <TextBlock Text="CHILI" FontSize="44" FontWeight="Bold"
+                                   Foreground="{StaticResource TextHiBrush}"
+                                   HorizontalAlignment="Center"/>
+                        <Border Background="#1635D08A" CornerRadius="20" Padding="12,5"
+                                HorizontalAlignment="Center">
+                            <StackPanel Orientation="Horizontal" Spacing="7">
+                                <Border Width="7" Height="7" CornerRadius="4" VerticalAlignment="Center"
+                                        Background="{StaticResource AccentBrush}"/>
+                                <TextBlock Text="RuneScape Grand Exchange  ·  live prices" FontSize="11"
+                                           Foreground="{StaticResource AccentBrush}"/>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
 
-                    <TextBlock Text="CHILI" FontSize="64" FontWeight="Bold"
-                               Foreground="{StaticResource TextHiBrush}"
-                               HorizontalAlignment="Center"/>
-                    <TextBlock Text="native desktop  ·  C# + Avalonia  ·  powerful and beautiful"
-                               FontSize="14" Foreground="{StaticResource TextMidBrush}"
-                               HorizontalAlignment="Center"/>
+                    <views:RsPriceCard DataContext="{Binding PriceCard}"/>
                 </StackPanel>
             </Panel>
 

@@ -37,3 +37,6 @@ Incremental port of the Flutter capabilities. The Flutter app stays the source
 of truth until this reaches parity.
 
 - [x] **NATIVE-1** — scaffold + CHILI dark shell (custom chrome, dock).
+- [x] **NATIVE-2** — RuneScape price engine (C# port: WeirdGloop GE price + RS
+      Wiki search/info/thumbnail) + animated price card hosted in the shell.
+      Verified live (image + GE price + wiki blurb, fuzzy search).

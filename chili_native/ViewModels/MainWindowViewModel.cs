@@ -1,6 +1,7 @@
-﻿namespace Chili.ViewModels;
+namespace Chili.ViewModels;
 
 public partial class MainWindowViewModel : ViewModelBase
 {
-    public string Greeting { get; } = "Welcome to Avalonia!";
+    /// <summary>The RuneScape price card hosted in the workspace (NATIVE-2).</summary>
+    public RsPriceCardViewModel PriceCard { get; } = new();
 }
