@@ -182,6 +182,158 @@ def fresh_monitor_exit_meta(
     }
 
 
+# ── Fix 5B: exit_now corroboration + reroute-to-tighten ────────────────
+#
+# The pattern monitor's ``exit_now`` advisory is beneficial only ~21% of the time
+# (measured via PatternMonitorDecision.was_beneficial; the ``heuristic`` source is
+# 0/296), whereas ``tighten_stop`` is ~69% beneficial. So a fresh but
+# UNCORROBORATED exit_now (price has not yet deteriorated toward the stop) is
+# rerouted to a stop-tighten instead of a hard market exit, and provably
+# non-beneficial sources are dropped entirely. This NEVER loosens a stop, never
+# moves it to/beyond the current price, and leaves the hard stop + drawdown
+# breaker fully intact.
+
+
+def _denylisted_exit_sources() -> "frozenset[str]":
+    try:
+        from ...config import settings
+
+        raw = getattr(settings, "chili_monitor_exit_denylisted_sources", "") or ""
+    except Exception:
+        raw = ""
+    return frozenset(s.strip().lower() for s in str(raw).split(",") if s.strip())
+
+
+def _corroboration_floor() -> float:
+    try:
+        from ...config import settings
+
+        return float(getattr(settings, "chili_monitor_exit_corroboration_floor", 0.5))
+    except Exception:
+        return 0.5
+
+
+def resolve_monitor_exit_action(
+    decision: "PatternMonitorDecision | None",
+    *,
+    entry: float | None,
+    stop: float | None,
+    current_px: float | None,
+    is_long: bool,
+    corroboration_floor: float | None = None,
+    denylisted_sources: "frozenset[str] | None" = None,
+) -> tuple[str, float | None, dict[str, Any] | None]:
+    """Decide how an exit lane should act on a pattern-monitor exit_now advisory.
+
+    Returns ``(verdict, new_stop, meta)``:
+      * ``("exit", None, meta)``       -- honor exit_now as a hard market exit
+                                          (price corroborates, or geometry is
+                                          unavailable so prior behavior is
+                                          preserved). ``meta`` is the audit dict.
+      * ``("tighten_stop", px, None)`` -- reroute: tighten the protective stop to
+                                          ``px`` (the corroboration level) instead
+                                          of cutting. Keeps upside, caps downside.
+      * ``("hold", None, None)``       -- do nothing (no fresh exit_now; a
+                                          denylisted source; or the stop is already
+                                          trailed into profit so the trailing stop
+                                          governs).
+
+    Invariants: any returned ``new_stop`` is strictly tighter than the current
+    stop and strictly inside the current price. The hard stop + drawdown breaker
+    are unaffected.
+    """
+    meta = fresh_monitor_exit_meta(decision)
+    if meta is None:
+        return ("hold", None, None)
+    if denylisted_sources is None:
+        denylisted_sources = _denylisted_exit_sources()
+    src = (getattr(decision, "decision_source", "") or "").strip().lower()
+    if src in denylisted_sources:
+        return ("hold", None, None)
+    if corroboration_floor is None:
+        corroboration_floor = _corroboration_floor()
+    # Geometry is needed for corroboration; if any is missing/degenerate, preserve
+    # the prior behavior (honor the advisory) rather than silently swallow an exit.
+    try:
+        e = float(entry)  # type: ignore[arg-type]
+        s = float(stop)  # type: ignore[arg-type]
+        px = float(current_px)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return ("exit", None, meta)
+    if e <= 0 or s <= 0 or px <= 0:
+        return ("exit", None, meta)
+    risk = (e - s) if is_long else (s - e)
+    if risk <= 0:
+        # The stop is already on the profit side of entry (trailed into a gain):
+        # the trailing stop already protects the position, so an uncorroborated
+        # exit_now should not force a premature take-profit. Let the stop govern.
+        return ("hold", None, None)
+    adverse = (e - px) if is_long else (px - e)
+    if (adverse / risk) >= corroboration_floor:
+        return ("exit", None, meta)  # price corroborates the exit -> cut now
+    # Not corroborated -> reroute to a tighter stop at the corroboration level.
+    new_stop = (
+        (e - corroboration_floor * risk)
+        if is_long
+        else (e + corroboration_floor * risk)
+    )
+    if is_long:
+        if not (s < new_stop < px):
+            return ("hold", None, None)
+    else:
+        if not (px < new_stop < s):
+            return ("hold", None, None)
+    return ("tighten_stop", new_stop, meta)
+
+
+def apply_monitor_exit_reroute_tighten(
+    db: "Session",
+    trade: Any,
+    *,
+    new_stop: float,
+    decision_meta: dict[str, Any] | None = None,
+) -> bool:
+    """Tighten ``trade.stop_loss`` to ``new_stop`` instead of cutting the position.
+
+    Only ever tightens (long -> raise the stop; short -> lower it); refuses to
+    loosen. Does NOT create a pending exit. Returns True if the stop moved.
+    """
+    import logging
+
+    logger = logging.getLogger(__name__)
+    try:
+        ns = float(new_stop)
+    except (TypeError, ValueError):
+        return False
+    if ns <= 0:
+        return False
+    is_long = (getattr(trade, "direction", "long") or "long").lower() != "short"
+    cur = getattr(trade, "stop_loss", None)
+    if cur is not None:
+        cur = float(cur)
+        if is_long and ns <= cur:
+            return False
+        if (not is_long) and ns >= cur:
+            return False
+    trade.stop_loss = ns
+    db.add(trade)
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        return False
+    logger.info(
+        "[monitor_exit_reroute] trade=%s ticker=%s exit_now rerouted to stop-tighten: "
+        "stop %s -> %.8f (decision=%s)",
+        getattr(trade, "id", None),
+        getattr(trade, "ticker", None),
+        (round(cur, 8) if cur is not None else None),
+        ns,
+        (decision_meta or {}).get("decision_id"),
+    )
+    return True
+
+
 __all__ = [
     "MONITOR_EXIT_NOW_MAX_AGE_HOURS",
     "IMPLAUSIBLE_QUOTE_RATIO_LOW",
@@ -190,4 +342,6 @@ __all__ = [
     "fresh_monitor_exit_meta",
     "is_implausible_quote",
     "should_consult_monitor_after_refusal",
+    "resolve_monitor_exit_action",
+    "apply_monitor_exit_reroute_tighten",
 ]

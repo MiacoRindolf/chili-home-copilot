@@ -64,6 +64,8 @@ from .._exit_monitor_common import (
     latest_monitor_decisions_by_trade as _latest_monitor_decisions_by_trade,
     fresh_monitor_exit_meta as _fresh_monitor_exit_meta,
     should_consult_monitor_after_refusal,
+    resolve_monitor_exit_action,
+    apply_monitor_exit_reroute_tighten,
 )
 
 
@@ -742,12 +744,29 @@ def run_crypto_exit_pass(db: Session) -> dict[str, Any]:
         # so all three lanes use one trust-boundary definition.
         monitor_exit_meta: Optional[dict[str, Any]] = None
         if not should_exit and should_consult_monitor_after_refusal(reason):
-            monitor_exit_meta = _fresh_monitor_exit_meta(
-                latest_monitor_decisions.get(int(t.id))
+            # Fix 5B: an uncorroborated exit_now (price hasn't deteriorated toward
+            # the stop) is rerouted to a stop-tighten instead of a premature cut;
+            # denylisted (0%-beneficial) sources are dropped. Honors exit_now only
+            # when price corroborates it.
+            _verdict, _new_stop, _meta = resolve_monitor_exit_action(
+                latest_monitor_decisions.get(int(t.id)),
+                entry=entry,
+                stop=stop,
+                current_px=px,
+                is_long=(t.direction or "long").lower() != "short",
             )
-            if monitor_exit_meta is not None:
+            if _verdict == "exit":
+                monitor_exit_meta = _meta
                 should_exit = True
                 reason = "pattern_exit_now"
+            elif _verdict == "tighten_stop" and _new_stop is not None:
+                if apply_monitor_exit_reroute_tighten(
+                    db, t, new_stop=_new_stop, decision_meta=_meta
+                ):
+                    out["rerouted_tighten"] = (
+                        int(out.get("rerouted_tighten", 0) or 0) + 1
+                    )
+                continue
         if not should_exit:
             continue
         now = _utcnow_naive()

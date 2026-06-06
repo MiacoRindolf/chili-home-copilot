@@ -612,7 +612,7 @@ def test_monitor_closes_on_latest_pattern_exit_now_decision(db):
 
     ad = MagicMock()
     ad.is_enabled.return_value = True
-    ad.get_quote_price.return_value = 10.4  # above stop and below target
+    ad.get_quote_price.return_value = 9.3  # above stop (9.0), corroborates exit_now (Fix 5B)
     ad.place_market_order.return_value = {
         "ok": True,
         "order_id": "oid-exit-now",
@@ -1119,7 +1119,7 @@ def test_monitor_defers_weekend_exit_now_without_queueing(db):
 
     ad = MagicMock()
     ad.is_enabled.return_value = True
-    ad.get_quote_price.return_value = 10.3
+    ad.get_quote_price.return_value = 9.3  # above stop (9.0), corroborates exit_now (Fix 5B)
     ad.place_market_order.return_value = {"ok": True}
     ad.place_limit_order_gtc.return_value = {"ok": True}
 
@@ -1207,7 +1207,7 @@ def test_monitor_marks_offhours_exit_order_working(db):
 
     ad = MagicMock()
     ad.is_enabled.return_value = True
-    ad.get_quote_price.return_value = 10.2
+    ad.get_quote_price.return_value = 9.3  # above stop (9.0), corroborates exit_now (Fix 5B)
     ad.place_limit_order_gtc.return_value = {
         "ok": True,
         "state": "working",

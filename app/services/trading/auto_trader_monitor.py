@@ -37,6 +37,8 @@ from ._exit_monitor_common import (
     is_implausible_quote,
     latest_monitor_decisions_by_trade as _latest_monitor_decisions_by_trade,
     fresh_monitor_exit_meta as _fresh_monitor_exit_meta,
+    resolve_monitor_exit_action,
+    apply_monitor_exit_reroute_tighten,
 )
 
 
@@ -799,9 +801,29 @@ def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
         )
         hit_stop = bool(trigger.get("hit_stop"))
         hit_target = bool(trigger.get("hit_target"))
-        monitor_exit_meta = _fresh_monitor_exit_meta(
-            latest_monitor_decisions.get(int(t.id))
+        # Fix 5B: gate the pattern-monitor exit_now advisory. An uncorroborated
+        # exit_now (price hasn't deteriorated toward the stop) is rerouted to a
+        # stop-tighten instead of a premature cut; denylisted (0%-beneficial)
+        # sources are dropped. monitor_exit_meta stays non-None (-> pattern_exit_now
+        # exit below) only when price corroborates the exit. Stop/target hits are
+        # evaluated independently above and always take precedence.
+        _md_decision = latest_monitor_decisions.get(int(t.id))
+        _px_now = _safe_float(quote_snapshot.get("price")) if quote_snapshot else None
+        _verdict, _new_stop, _meta = resolve_monitor_exit_action(
+            _md_decision,
+            entry=float(t.entry_price or 0.0),
+            stop=stop,
+            current_px=_px_now,
+            is_long=is_long,
         )
+        monitor_exit_meta = _meta if _verdict == "exit" else None
+        if _verdict == "tighten_stop" and _new_stop is not None:
+            if apply_monitor_exit_reroute_tighten(
+                db, t, new_stop=_new_stop, decision_meta=_meta
+            ):
+                summary["rerouted_tighten"] = (
+                    int(summary.get("rerouted_tighten", 0) or 0) + 1
+                )
         pending_reason = (t.pending_exit_reason or "").strip().lower()
         pending_status = (t.pending_exit_status or "").strip().lower()
         if pending_reason == "pattern_exit_now" and monitor_exit_meta is None and (
