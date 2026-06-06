@@ -89,5 +89,8 @@ of truth until this reaches parity.
       76.5k – 88.7k gp).
 - [x] **NATIVE-15** — copy-price button: a copy icon next to the price copies the
       raw value to the clipboard (TopLevel.Clipboard) with a brief "Copied!"
-      feedback. Verified end-to-end (clipboard = 85139). (Port Chat·Trading·Research
-      with the backend: next.)
+      feedback. Verified end-to-end (clipboard = 85139).
+- [x] **NATIVE-16** — the main window remembers its last position + size (saved to
+      `%APPDATA%/CHILI/window.json` on close, restored on launch; only when not
+      maximized). Verified end-to-end (reopens at the saved bounds).
+      (Port Chat·Trading·Research with the backend: next.)
