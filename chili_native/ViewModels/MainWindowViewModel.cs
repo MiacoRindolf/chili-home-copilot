@@ -19,8 +19,7 @@ public partial class MainWindowViewModel : ViewModelBase
                 "Chat", "Talk to CHILI — local-first assistant. Coming soon.", "✉")),
             new("Trading", "$", new PlaceholderViewModel(
                 "Trading", "Live P/L cockpit and the autonomous trading brain. Coming soon.", "$")),
-            new("Games", "◆", new PlaceholderViewModel(
-                "Games", "Launch installed games with a CHILI frame + on-game overlays. Coming soon.", "◆")),
+            new("Games", "◆", new GamesViewModel()),
             new("Research", "⎰", new PlaceholderViewModel(
                 "Research", "Multi-source research with visual reports. Coming soon.", "⎰")),
         };

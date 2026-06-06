@@ -108,6 +108,9 @@
                     <DataTemplate DataType="vm:RsPriceCardViewModel">
                         <views:RsPriceCard/>
                     </DataTemplate>
+                    <DataTemplate DataType="vm:GamesViewModel">
+                        <views:GamesView/>
+                    </DataTemplate>
                     <DataTemplate DataType="vm:PlaceholderViewModel">
                         <views:PlaceholderView/>
                     </DataTemplate>
