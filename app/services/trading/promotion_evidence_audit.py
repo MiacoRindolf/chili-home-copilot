@@ -627,6 +627,41 @@ def run_promotion_evidence_audit(db: Session) -> dict[str, Any]:
     )
     summary["actionable_demote_ids"] = actionable_ids
 
+    # f-realized-pnl-authority (2026-06-05): realized-EV-passing ESCAPE. A promoted
+    # pattern proving itself on CLEAN realized PnL (passes the realized-EV gate:
+    # >= min clean trades, net-positive) is NOT demoted for a backtest/OOS
+    # evidence gap -- live realized PnL is the higher-information signal, parallel
+    # to the CPCV-passing escape above. (Operator directive: rank by realized PnL.)
+    if actionable_ids:
+        from ...models.trading import ScanPattern
+        from .realized_ev_gate import check_realized_ev_blocking
+
+        _pats = {
+            p.id: p
+            for p in db.query(ScanPattern).filter(ScanPattern.id.in_(actionable_ids)).all()
+        }
+        _protected_realized: list[int] = []
+        _still_actionable: list[int] = []
+        for _pid in actionable_ids:
+            _p = _pats.get(_pid)
+            _blocked = True
+            if _p is not None:
+                try:
+                    _blocked, _, _ = check_realized_ev_blocking(_p)
+                except Exception:
+                    _blocked = True
+            (_protected_realized if not _blocked else _still_actionable).append(_pid)
+        if _protected_realized:
+            logger.info(
+                "%s realized-EV-passing escape protected %d pattern(s) from "
+                "evidence-gap demote: %s",
+                LOG_PREFIX, len(_protected_realized), _protected_realized,
+            )
+        actionable_ids = _still_actionable
+        summary["realized_ev_protected_count"] = len(_protected_realized)
+        summary["realized_ev_protected_ids"] = _protected_realized
+        summary["actionable_demote_ids"] = actionable_ids
+
     if _auto_demote_enabled() and actionable_ids:
         ids = actionable_ids
         if _auto_demote_dry_run():

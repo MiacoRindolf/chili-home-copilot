@@ -1959,6 +1959,47 @@ def _run_realized_ev_demote_pass_job():
     run_scheduler_job_guarded("realized_ev_demote_pass", _work)
 
 
+def _run_realized_pnl_promotion_job():
+    """Daily realized-PnL promotion pass: graduate not-yet-promoted patterns that
+    prove themselves on CLEAN realized PnL even when their backtest CPCV/OOS gates
+    disagree (operator 2026-06-05: rank by realized PnL). The kill switch /
+    drawdown breaker still gate the actual trade at execution time. See
+    :mod:`app.services.trading.realized_pnl_promotion`."""
+    def _work() -> None:
+        from ..db import SessionLocal
+        from .trading.brain_batch_job_log import brain_batch_job_begin, brain_batch_job_finish
+        from .trading.realized_pnl_promotion import run_realized_pnl_promotion_pass
+
+        from ..config import settings as _settings
+        _uid = getattr(_settings, "brain_default_user_id", None)
+
+        db = SessionLocal()
+        jid = None
+        try:
+            jid = brain_batch_job_begin(db, "realized_pnl_promotion", user_id=_uid)
+            db.commit()
+            summary = run_realized_pnl_promotion_pass(db)
+            logger.info("[scheduler] Realized-PnL promotion pass done: %s", summary)
+            brain_batch_job_finish(db, jid, ok=True, meta=summary)
+            db.commit()
+        except Exception as exc:
+            logger.exception("[scheduler] realized_pnl_promotion failed")
+            if jid is not None:
+                try:
+                    brain_batch_job_finish(db, jid, ok=False, error=str(exc)[:500])
+                    db.commit()
+                except Exception:
+                    logger.exception("[scheduler] realized_pnl_promotion batch_job_finish failed")
+        finally:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("realized_pnl_promotion", _work)
+
+
 def _run_breaker_heartbeat_job():
     """Daily drawdown-breaker liveness snapshot.
 
@@ -5159,6 +5200,22 @@ def start_scheduler():
                 trigger=CronTrigger(hour=4, minute=0, timezone="America/Los_Angeles"),
                 id="realized_ev_demote_pass",
                 name="Realized-EV demote pass (daily 4:00AM PT)",
+                replace_existing=True,
+                max_instances=1,
+            )
+
+        # 2026-06-05 (rank by realized PnL): daily realized-PnL promotion pass --
+        # graduate not-yet-promoted patterns proving themselves on clean realized
+        # PnL even when their backtest CPCV/OOS gates disagree. Runs just after the
+        # demote pass so the promoted set is freshly reconciled first.
+        if include_web_light and bool(
+            getattr(settings, "chili_realized_pnl_promotion_enabled", True)
+        ):
+            _scheduler.add_job(
+                _run_realized_pnl_promotion_job,
+                trigger=CronTrigger(hour=4, minute=30, timezone="America/Los_Angeles"),
+                id="realized_pnl_promotion",
+                name="Realized-PnL promotion pass (daily 4:30AM PT)",
                 replace_existing=True,
                 max_instances=1,
             )
