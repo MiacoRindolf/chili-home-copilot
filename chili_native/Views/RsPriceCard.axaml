@@ -136,6 +136,8 @@
                             </StackPanel>
                             <TextBlock Text="{Binding VolumeText}" Foreground="{StaticResource TextLowBrush}"
                                        FontSize="11"/>
+                            <TextBlock Text="{Binding AsOfText}" IsVisible="{Binding HasAsOf}"
+                                       Foreground="{StaticResource TextLowBrush}" FontSize="10"/>
                         </StackPanel>
                     </Grid>
 

@@ -96,4 +96,6 @@ of truth until this reaches parity.
 - [x] **NATIVE-17** — refresh button on the price card: a ↻ button beside the price
       re-fetches the live GE price + trend for the current item (RefreshCommand).
       Verified rendering beside the copy button.
+- [x] **NATIVE-18** — price freshness line: shows "GE update · <date>" (from the
+      WeirdGloop timestamp) under the volume. Verified (abyssal whip → Jun 6, 2026).
       (Port Chat·Trading·Research with the backend: next.)
