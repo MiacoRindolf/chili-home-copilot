@@ -258,6 +258,29 @@ def filter_broker_stale_open_trades(
     return live, stale
 
 
+def _default_rh_exit_price_resolver(trade: Trade) -> float | None:
+    """Resolve the real exit price from Robinhood order history (then a live
+    quote) when a reconcile caller passes no explicit resolver.
+
+    Data-first fix (2026-06-05): only ``broker_service.sync_positions_to_db``
+    used to pass an ``exit_price_resolver``. The autotrader-monitor, stop-engine,
+    pattern-monitor, and alerts reconcile paths passed ``None`` -- so whichever
+    of those (each runs ~every 60s) caught a stale Robinhood position first
+    closed it with ``pnl=NULL`` and ``exit_reason='broker_reconcile_no_exit_price'``,
+    silently dropping a real exit from the realized-EV signal. Defaulting to the
+    same resolver those paths *should* have used recovers the price. Lazy import
+    breaks the ``broker_service`` <-> ``broker_position_truth`` cycle. Never
+    fabricates: returns ``None`` (caller stores ``pnl=NULL``) when neither the
+    broker order history nor a live quote yields a usable price.
+    """
+    try:
+        from ..broker_service import _resolve_close_exit_price
+
+        return _resolve_close_exit_price(getattr(trade, "ticker", "") or "")
+    except Exception:
+        return None
+
+
 def reconcile_stale_robinhood_open_trade(
     db: Session,
     trade: Trade,
@@ -306,12 +329,18 @@ def reconcile_stale_robinhood_open_trade(
             pass
 
     resolved_exit: float | None = None
-    if exit_price_resolver is not None:
-        try:
-            candidate = exit_price_resolver(trade)
-            resolved_exit = float(candidate) if candidate and candidate > 0 else None
-        except Exception:
-            resolved_exit = None
+    # Default to Robinhood order-history resolution when no explicit resolver is
+    # passed. The autotrader-monitor / stop-engine / pattern-monitor / alerts
+    # reconcile paths historically passed None -> pnl=NULL +
+    # exit_reason='broker_reconcile_no_exit_price', silently dropping real exits
+    # from the realized-EV signal. broker_service.sync_positions_to_db already
+    # passes the same resolver explicitly, so this only changes the None paths.
+    _resolver = exit_price_resolver or _default_rh_exit_price_resolver
+    try:
+        candidate = _resolver(trade)
+        resolved_exit = float(candidate) if candidate and candidate > 0 else None
+    except Exception:
+        resolved_exit = None
 
     if resolved_exit is not None:
         trade.exit_price = float(resolved_exit)

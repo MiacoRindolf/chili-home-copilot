@@ -87,6 +87,16 @@ _COINBASE_ABSENT_NO_FILL_MIN_AGE_SECONDS = int(
     )
 )
 
+# When a Coinbase position is broker-gone but only PARTIAL sell fills are
+# recoverable, price the whole close at the observed-fill VWAP (a real traded
+# price) above this coverage floor instead of discarding it to pnl=NULL /
+# no_exit_price (data-first 2026-06-05). Below the floor the partial fills are
+# too thin to represent the close, so the exit price stays unknown -- never
+# fabricated. Value knob (documented), not a magic number.
+_COINBASE_STALE_CLOSE_MIN_FILL_COVERAGE = float(
+    getattr(settings, "chili_coinbase_stale_close_min_fill_coverage", 0.5)
+)
+
 # Recent bookkeeping closes are eligible for inverse reconcile when Coinbase
 # still reports the position and no real sell fill is recorded.
 _COINBASE_BOOKKEEPING_REOPEN_LOOKBACK_HOURS = 72
@@ -924,19 +934,29 @@ def _coinbase_stale_close_fill(trade: Any) -> dict[str, Any] | None:
 
     if total_qty <= 0 or total_value <= 0:
         return None
-    if target_qty > 0 and total_qty < (target_qty * 0.95):
+    vwap = total_value / total_qty
+    coverage = (total_qty / target_qty) if target_qty > 0 else 1.0
+    if target_qty > 0 and coverage < _COINBASE_STALE_CLOSE_MIN_FILL_COVERAGE:
         logger.debug(
-            "[coinbase] stale close sell fills below coverage for %s: %.8f < %.8f",
+            "[coinbase] stale close sell fills below min coverage for %s: "
+            "%.8f/%.8f (coverage=%.2f < floor=%.2f) -> exit price unknown",
             product_id,
             total_qty,
             target_qty,
+            coverage,
+            _COINBASE_STALE_CLOSE_MIN_FILL_COVERAGE,
         )
         return None
+    partial = bool(target_qty > 0 and coverage < 0.999)
     return {
-        "price": total_value / total_qty,
-        "quantity": total_qty,
+        "price": vwap,
+        # Broker shows the position fully gone; on partial fill-coverage price the
+        # WHOLE position at the observed-fill VWAP (best real-price estimate) so
+        # pnl reflects the full close, not only the covered slice.
+        "quantity": target_qty if target_qty > 0 else total_qty,
         "exit_at": latest_at,
-        "source": "recent_sell_fills",
+        "source": "recent_sell_fills_partial" if partial else "recent_sell_fills",
+        "partial_coverage": partial,
     }
 
 

@@ -4003,6 +4003,20 @@ class Settings(BaseSettings):
             "CHILI_COINBASE_ABSENT_NO_FILL_RECONCILE_MIN_AGE_SECONDS"
         ),
     )
+    # Minimum fraction of the position that recoverable broker SELL fills must
+    # cover for a stale-Coinbase close to be priced at the observed-fill VWAP
+    # (data-first 2026-06-05). Above this floor, the whole close is priced at the
+    # real VWAP (best estimate) instead of pnl=NULL / no_exit_price; below it the
+    # fills are too thin to represent the close so the exit price stays unknown
+    # (never fabricated). 0.5 = at least half the position must be observed.
+    chili_coinbase_stale_close_min_fill_coverage: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices(
+            "CHILI_COINBASE_STALE_CLOSE_MIN_FILL_COVERAGE"
+        ),
+    )
     # f-phase-e-revert-and-bracket-writer-crash-fix (2026-05-08):
     # cooldown in seconds applied to a bracket_intent after ANY
     # exception (not just broker terminal-reject) raised inside

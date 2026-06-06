@@ -76,6 +76,13 @@ def test_stop_engine_reconciles_stale_robinhood_trade_before_alerting(db):
     ), patch(
         "app.services.trading.stop_engine.get_adaptive_cooldowns",
         return_value={},
+    ), patch(
+        # The stop-engine reconcile path now defaults to the RH order-history
+        # resolver (data-first fix). Force it to yield no price so this test
+        # deterministically exercises the no-fabrication branch (broker
+        # unavailable -> pnl stays NULL), not a live quote for a real ticker.
+        "app.services.broker_service._resolve_close_exit_price",
+        return_value=None,
     ):
         out = evaluate_all(db, user_id=None)
 
@@ -89,6 +96,39 @@ def test_stop_engine_reconciles_stale_robinhood_trade_before_alerting(db):
     assert trade.exit_price is None
     assert trade.pnl is None
     assert trade.pending_exit_status is None
+
+
+def test_stale_robinhood_reconcile_resolves_price_via_default_resolver(db):
+    """Data-first fix: monitor reconcile paths that pass no explicit resolver
+    now default to the RH order-history resolver, so a stale-position close
+    gets a REAL exit price + pnl instead of pnl=NULL / no_exit_price."""
+    from app.services.trading.broker_position_truth import (
+        broker_stale_open_trade_snapshot,
+        reconcile_stale_robinhood_open_trade,
+    )
+
+    trade = _stale_rh_trade(db, ticker="ACMR")
+    db.commit()
+
+    snap = broker_stale_open_trade_snapshot(db, trade, grace_seconds=0)
+    # No exit_price_resolver passed (the autotrader-monitor / stop-engine /
+    # pattern-monitor / alerts paths) -> must fall through to the default,
+    # which resolves the broker-truth sell price.
+    with patch(
+        "app.services.broker_service._resolve_close_exit_price",
+        return_value=70.0,
+    ):
+        out = reconcile_stale_robinhood_open_trade(
+            db, trade, snapshot=snap, source="test_default_resolver",
+        )
+    db.flush()
+
+    assert out is not None
+    assert trade.status == "closed"
+    assert trade.exit_price == 70.0
+    # entry 67.4, qty 6.0, long -> pnl = (70.0 - 67.4) * 6 = 15.6
+    assert trade.pnl == round((70.0 - 67.4) * 6.0, 2)
+    assert trade.exit_reason != "broker_reconcile_no_exit_price"
 
 
 def test_reconcile_stale_robinhood_preserves_pending_exit_thesis(db):
