@@ -15,6 +15,7 @@ import '../cockpit/cockpit_screen.dart';
 import '../cockpit/trading_models.dart';
 import '../companion/shared_chat_history.dart';
 import '../dashboard/dashboard_screen.dart';
+import '../games/games_screen.dart';
 import '../intercom/intercom_screen.dart';
 import '../mcp/mcp_screen.dart';
 import '../network/chili_api_client.dart';
@@ -172,6 +173,12 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
       Icons.hub_outlined,
       () => McpScreen(onDiscuss: _onDiscussMcpTool),
       size: const Size(820, 620),
+    ),
+    'games': _AppDef(
+      'Games',
+      Icons.sports_esports,
+      () => const GamesScreen(),
+      size: const Size(960, 680),
     ),
     'skills': _AppDef(
       'Skills',
