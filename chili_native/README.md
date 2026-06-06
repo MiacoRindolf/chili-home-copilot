@@ -40,3 +40,5 @@ of truth until this reaches parity.
 - [x] **NATIVE-2** — RuneScape price engine (C# port: WeirdGloop GE price + RS
       Wiki search/info/thumbnail) + animated price card hosted in the shell.
       Verified live (image + GE price + wiki blurb, fuzzy search).
+- [x] **NATIVE-3** — app-switching shell: the dock launches apps (Prices, Chat,
+      Trading, Games, Research) into the workspace; selected-tile highlight.
