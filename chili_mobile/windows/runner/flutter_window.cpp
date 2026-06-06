@@ -18,6 +18,10 @@ constexpr int kGrip = 16;    // bottom-right resize grip
 // The game name shown on the CHILI title bar (one frame at a time).
 std::wstring g_frame_name;
 
+// The window that owns the active frame, so the bar's close button can ask it
+// to tear the frame down (one frame at a time).
+FlutterWindow* g_frame_owner = nullptr;
+
 std::wstring ToLower(std::wstring s) {
   std::transform(s.begin(), s.end(), s.begin(),
                  [](wchar_t c) { return static_cast<wchar_t>(::towlower(c)); });
@@ -156,12 +160,25 @@ LRESULT CALLBACK FrameBarProc(HWND h, UINT m, WPARAM w, LPARAM l) {
       int y = GET_Y_LPARAM(l) - wr.top;
       int ww = wr.right - wr.left;
       int wh = wr.bottom - wr.top;
+      // Close button (top-right square) must receive clicks, so HTCLIENT.
+      if (y < kTitleH && x >= ww - kTitleH) return HTCLIENT;
       if (x >= ww - kGrip && y >= wh - kGrip) return HTBOTTOMRIGHT;
       if (x <= kBorder) return HTLEFT;
       if (x >= ww - kBorder) return HTRIGHT;
       if (y >= wh - kBorder) return HTBOTTOM;
       if (y < kTitleH) return HTCAPTION;  // title bar = drag
       return HTCLIENT;
+    }
+    case WM_LBUTTONDOWN: {
+      RECT rc;
+      ::GetClientRect(h, &rc);
+      int x = GET_X_LPARAM(l);
+      int y = GET_Y_LPARAM(l);
+      if (y < kTitleH && x >= rc.right - kTitleH) {
+        if (g_frame_owner) g_frame_owner->DismissFrame();
+        return 0;
+      }
+      return 0;
     }
     case WM_MOVE:
     case WM_SIZE:
@@ -188,10 +205,21 @@ LRESULT CALLBACK FrameBarProc(HWND h, UINT m, WPARAM w, LPARAM l) {
       ::DeleteObject(ab);
       ::SetBkMode(hdc, TRANSPARENT);
       ::SetTextColor(hdc, RGB(236, 239, 241));
-      RECT tr = {34, 0, rc.right - 12, kTitleH};
+      RECT tr = {34, 0, rc.right - kTitleH - 8, kTitleH};
       std::wstring label = L"CHILI  -  " + g_frame_name;
       ::DrawTextW(hdc, label.c_str(), -1, &tr,
                   DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS);
+      // Close (X) button in the top-right square.
+      int cx0 = rc.right - kTitleH;
+      HPEN pen = ::CreatePen(PS_SOLID, 1, RGB(205, 210, 214));
+      HGDIOBJ oldp = ::SelectObject(hdc, pen);
+      int pad = 11;
+      ::MoveToEx(hdc, cx0 + pad, pad, nullptr);
+      ::LineTo(hdc, rc.right - pad, kTitleH - pad);
+      ::MoveToEx(hdc, rc.right - pad, pad, nullptr);
+      ::LineTo(hdc, cx0 + pad, kTitleH - pad);
+      ::SelectObject(hdc, oldp);
+      ::DeleteObject(pen);
       ::EndPaint(h, &ps);
       return 0;
     }
@@ -272,6 +300,7 @@ void FlutterWindow::StopFrame() {
   frame_bar_ = nullptr;
   framed_game_ = nullptr;
   framed_orig_style_ = 0;
+  g_frame_owner = nullptr;
 }
 
 bool FlutterWindow::StartFrame(const std::wstring& title,
@@ -322,11 +351,19 @@ bool FlutterWindow::FrameWindow(HWND game, const std::wstring& name) {
   ::SetWindowLongPtrW(frame_bar_, GWLP_USERDATA,
                       reinterpret_cast<LONG_PTR>(game));
   framed_game_ = game;
+  g_frame_owner = this;
   ::ShowWindow(frame_bar_, SW_SHOWNOACTIVATE);
   ::UpdateWindow(frame_bar_);
-  FitGameToFrame(frame_bar_);  // place the game in the client area
+  // Bring the frame + game in front of the CHILI shell so they're actually
+  // visible (the CHILI window otherwise covers the game after the picker).
+  ::SetWindowPos(frame_bar_, HWND_TOP, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+  FitGameToFrame(frame_bar_);  // place the game in the client area, above frame
+  ::SetForegroundWindow(game);
   return true;
 }
+
+void FlutterWindow::DismissFrame() { StopFrame(); }
 
 void FlutterWindow::SetupFrameChannel() {
   frame_channel_ =
