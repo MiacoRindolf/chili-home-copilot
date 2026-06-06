@@ -43,6 +43,13 @@ ROSS_PILLAR_WEIGHTS: dict[str, float] = {
     "liquidity": 0.20,
 }
 
+# Max tilt the Ross momentum quality applies to a momentum-neural viability
+# score. ``ross_score`` in [0,1] is centered at 0.5, so the applied tilt is
+# +/- (TILT/2): at 0.20 a top-decile explosive setup gets +0.10 — enough to
+# clear the live-eligibility floor a generic setup would miss — and a dull one
+# -0.10. Same order of magnitude as the existing hand-coded viability nudges.
+ROSS_QUALITY_VIABILITY_TILT = 0.20
+
 
 @dataclass
 class RossMomentumScore:

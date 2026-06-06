@@ -81,6 +81,22 @@ def run_momentum_neural_tick(
         except Exception:
             pass
 
+    # Ross momentum-quality (M2): the scanner bridge forwards the RVOL/gap/
+    # daily-change/float signals it computed as meta["ross_signals"] instead of
+    # discarding them. Rank the batch once here and pass each symbol's [0,1]
+    # quality through ctx_meta below so score_viability prefers EXPLOSIVE
+    # instruments. Strict no-op when absent.
+    _ross_signals = meta.get("ross_signals")
+    if isinstance(_ross_signals, dict) and _ross_signals:
+        try:
+            from .ross_momentum import score_universe as _ross_score_universe
+
+            meta["ross_scores"] = {
+                s: rs.score for s, rs in _ross_score_universe(_ross_signals).items()
+            }
+        except Exception:
+            pass
+
     ctx_meta = {
         k: meta[k]
         for k in (
@@ -95,6 +111,7 @@ def run_momentum_neural_tick(
             "hurst_proxy",
             "adx",
             "adx_14",
+            "ross_scores",
         )
         if k in meta
     }

@@ -99,3 +99,31 @@ def test_in_top_fraction_is_adaptive_cutoff():
     top = [s for s in res.values() if s.in_top_fraction(0.2)]
     assert len(top) == 2  # top 20% of 10
     assert all(s.rank <= 2 for s in top)
+
+
+def test_viability_tilt_prefers_explosive_setup():
+    """End-to-end wiring (M2): ross_scores threaded via ctx.meta makes
+    score_viability tilt toward the explosive symbol and away from the dull one,
+    while a symbol with no ross_score is unaffected (strict no-op)."""
+    from app.services.trading.momentum_neural.context import (
+        build_momentum_regime_context,
+    )
+    from app.services.trading.momentum_neural.features import (
+        ExecutionReadinessFeatures,
+    )
+    from app.services.trading.momentum_neural.variants import iter_momentum_families
+    from app.services.trading.momentum_neural.viability import score_viability
+
+    ctx = build_momentum_regime_context(
+        realized_vol_rank=None,
+        atr_pct=None,
+        meta={"ross_scores": {"HOT": 0.95, "COLD": 0.05}},
+    )
+    feats = ExecutionReadinessFeatures.from_meta({})
+    fam = next(iter(iter_momentum_families()))
+
+    hot = score_viability("HOT", fam, ctx, feats, db=None)
+    cold = score_viability("COLD", fam, ctx, feats, db=None)
+    neutral = score_viability("NOSCORE", fam, ctx, feats, db=None)  # no tilt
+
+    assert hot.viability > neutral.viability > cold.viability

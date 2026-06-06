@@ -211,6 +211,32 @@ def score_viability(
         except Exception:
             pass
 
+    # Ross momentum-quality tilt (M2): prefer EXPLOSIVE instruments (high relative
+    # volume + already-moving + low float) — the selection edge a momentum
+    # day-trader relies on. ``ross_score`` is a [0,1] percentile-blend from
+    # ross_momentum.score_universe(), threaded via ctx.meta by the scanner bridge
+    # (which now forwards the RVOL/gap/daily-change/float signals it used to
+    # discard). Centered at 0.5 so it boosts above-median momentum and discounts
+    # below-median; a strict no-op when the signal is absent, so aggregate ticks
+    # and non-bridge callers are unaffected.
+    try:
+        _ross_scores = (
+            ctx.meta.get("ross_scores")
+            if isinstance(getattr(ctx, "meta", None), dict)
+            else None
+        )
+        if isinstance(_ross_scores, dict) and symbol in _ross_scores:
+            from .ross_momentum import ROSS_QUALITY_VIABILITY_TILT
+
+            _rqf = float(_ross_scores[symbol])
+            base += ROSS_QUALITY_VIABILITY_TILT * (_rqf - 0.5)
+            if _rqf >= 0.8:
+                warnings.append(f"High Ross momentum quality ({_rqf:.2f})")
+            elif _rqf <= 0.2:
+                warnings.append(f"Low Ross momentum quality ({_rqf:.2f}) — generic setup")
+    except (TypeError, ValueError, AttributeError):
+        pass
+
     viability = max(0.0, min(1.0, base))
 
     rationale = (

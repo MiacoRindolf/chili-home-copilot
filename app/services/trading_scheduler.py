@@ -3086,10 +3086,15 @@ def _bridge_scanner_to_viability(
     slow or not running.
     """
     tickers: list[str] = []
+    ross_signals: dict[str, dict] = {}
     for r in results:
         t = str(r.get("ticker") or r.get("symbol") or "").strip().upper()
         if t and t not in tickers:
             tickers.append(t)
+            # M2: forward the Ross pillars (RVOL/gap/daily-change/float) the
+            # scanner already computed instead of discarding them — the momentum
+            # lane ranks explosive instruments from these (docs/DESIGN/MOMENTUM_LANE.md).
+            ross_signals[t] = r
         if len(tickers) >= _VIABILITY_BRIDGE_MAX_TICKERS:
             break
     if not tickers:
@@ -3097,7 +3102,9 @@ def _bridge_scanner_to_viability(
     try:
         from .trading.momentum_neural.pipeline import run_momentum_neural_tick
 
-        run_momentum_neural_tick(db, meta={"tickers": tickers})
+        run_momentum_neural_tick(
+            db, meta={"tickers": tickers, "ross_signals": ross_signals}
+        )
         db.commit()
         logger.info(
             "[scheduler] viability bridge (%s): %d tickers → direct tick ok",
