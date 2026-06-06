@@ -847,6 +847,24 @@ def _restore_broker_sessions():
                 .filter(BrokerCredential.broker == "coinbase")
                 .all()
             )
+            # Prefer the operator credential matching the deployment env key (the
+            # validated full-scope trading key). Otherwise the auto-reconnect grabs
+            # whichever vault row comes first — which may be a stale/limited key that
+            # lacks TRADE scope and silently breaks the live sell/exit path (can buy,
+            # can't sell). See docs/DESIGN/MOMENTUM_LANE.md.
+            try:
+                from .config import settings as _cfg_cb
+                _env_cb_key = getattr(_cfg_cb, "coinbase_api_key", None)
+            except Exception:
+                _env_cb_key = None
+            if _env_cb_key and len(cb_creds) > 1:
+                def _cb_matches_env(_c):
+                    try:
+                        _d = decrypt_credentials(_c.encrypted_data) or {}
+                        return (_d.get("api_key") or "") == _env_cb_key
+                    except Exception:
+                        return False
+                cb_creds = sorted(cb_creds, key=lambda _c: 0 if _cb_matches_env(_c) else 1)
             if not cb_creds:
                 _log.debug("[startup] No Coinbase credentials in vault")
             else:
