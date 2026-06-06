@@ -49,6 +49,7 @@ public partial class RsPriceCardViewModel : ViewModelBase
     [ObservableProperty] private string _itemName = "";
     [ObservableProperty] private string _priceText = "";
     [ObservableProperty] private string _volumeText = "";
+    [ObservableProperty] private long _priceValue;
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasBlurb))]
@@ -102,6 +103,7 @@ public partial class RsPriceCardViewModel : ViewModelBase
             }
 
             ItemName = p.Name;
+            PriceValue = p.Price;
             PriceText = $"{RuneScapePrices.FormatGpFull(p.Price)} gp";
             VolumeText = $"Vol {RuneScapePrices.FormatGpFull(p.Volume)}/day";
             Blurb = "";
