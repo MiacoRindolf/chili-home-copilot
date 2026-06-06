@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
+
+from ....config import settings
 
 
 @dataclass
@@ -89,15 +92,32 @@ def stop_target_prices(
     atr_pct: float,
     side_long: bool = True,
     stop_atr_mult: float = 0.60,
-    target_atr_mult: float = 0.90,
+    target_atr_mult: float = 0.90,  # legacy; superseded by reward_risk below
+    reward_risk: float | None = None,
 ) -> tuple[float, float]:
-    """Simple ATR-scaled stop/target for long momentum stub."""
+    """ATR-scaled STOP + a reward:risk-anchored TARGET (Ross-style, >= 2:1).
+
+    The TARGET is derived from the ACTUAL stop distance x a reward:risk multiple
+    (not an independent ATR mult), so R:R is explicit and at least the documented
+    floor — fixing the old ~1.3-1.5:1 (target_atr 0.90 vs stop_atr 0.60) that sat
+    below Ross's strict 2:1. ``reward_risk`` defaults to
+    chili_momentum_risk_reward_risk_ratio (2.0) — the single documented, learnable
+    R:R knob (Ross = floor, the learner can raise it). docs/DESIGN/MOMENTUM_LANE.md
+    """
+    try:
+        rr = float(reward_risk) if reward_risk is not None else float(
+            getattr(settings, "chili_momentum_risk_reward_risk_ratio", 2.0) or 2.0
+        )
+    except (TypeError, ValueError):
+        rr = 2.0
+    if not math.isfinite(rr) or rr <= 0:
+        rr = 2.0
     if side_long:
         stop = entry * (1.0 - max(0.003, atr_pct * float(stop_atr_mult)))
-        target = entry * (1.0 + max(0.004, atr_pct * float(target_atr_mult)))
+        target = entry + rr * (entry - stop)  # reward = rr x risk(stop distance)
     else:
         stop = entry * (1.0 + max(0.003, atr_pct * float(stop_atr_mult)))
-        target = entry * (1.0 - max(0.004, atr_pct * float(target_atr_mult)))
+        target = entry - rr * (stop - entry)
     return stop, target
 
 
