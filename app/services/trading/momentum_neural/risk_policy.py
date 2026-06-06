@@ -125,6 +125,16 @@ def equity_relative_loss_cap(fixed_fallback_usd: float) -> float:
     )
 
 
+def equity_relative_daily_loss_cap(fixed_fallback_usd: float) -> float:
+    """Daily-loss cap as a fraction of account equity (documented DAILY risk knob).
+    Evaluated live so the daily circuit-breaker adapts to current equity.
+    docs/DESIGN/MOMENTUM_LANE.md"""
+    return _equity_relative_cap(
+        fixed_fallback_usd,
+        getattr(settings, "chili_momentum_risk_daily_loss_fraction_of_equity", 0.05),
+    )
+
+
 @dataclass(frozen=True)
 class MomentumAutomationRiskPolicy:
     """Conservative defaults for short-horizon crypto momentum (pre-runner gates)."""

@@ -22,6 +22,7 @@ from .risk_policy import (
     MomentumAutomationRiskPolicy,
     POLICY_VERSION,
     adaptive_max_spread_bps,
+    equity_relative_daily_loss_cap,
     resolve_effective_risk_policy,
 )
 
@@ -494,14 +495,17 @@ def evaluate_proposed_momentum_automation(
 
     # ── Daily loss cap (momentum-local) ───────────────────────────────────
     daily_pnl = _daily_realized_pnl(db, user_id)
-    ok_dloss = daily_pnl > -policy.max_daily_loss_usd
+    # Equity-relative daily-loss circuit-breaker (no fixed-$ magic); falls back to
+    # the fixed cap when equity is unavailable. [[feedback_adaptive_no_magic]]
+    max_daily_loss = equity_relative_daily_loss_cap(policy.max_daily_loss_usd)
+    ok_dloss = daily_pnl > -max_daily_loss
     checks.append(
         _check(
             "daily_loss_cap",
             ok_dloss,
             severity="block" if not ok_dloss and m == "live" else ("warn" if not ok_dloss else "ok"),
-            message=f"Daily realized PnL ${daily_pnl:+.2f} vs max loss -${policy.max_daily_loss_usd:.2f}.",
-            detail={"daily_pnl_usd": daily_pnl, "max_daily_loss_usd": policy.max_daily_loss_usd},
+            message=f"Daily realized PnL ${daily_pnl:+.2f} vs max loss -${max_daily_loss:.2f}.",
+            detail={"daily_pnl_usd": daily_pnl, "max_daily_loss_usd": max_daily_loss},
         )
     )
 
