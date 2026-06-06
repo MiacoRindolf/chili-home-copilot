@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:chili_mobile/src/games/game_awareness.dart';
+import 'package:chili_mobile/src/games/game_frame.dart';
 import 'package:chili_mobile/src/games/games_screen.dart';
 import 'package:chili_mobile/src/games/steam_models.dart';
 
@@ -190,6 +192,60 @@ void main() {
       ));
       await tester.pumpAndSettle();
       expect(find.text('No Steam games found'), findsOneWidget);
+    });
+
+    testWidgets('GAME-3: frame toggle is present and switchable',
+        (WidgetTester tester) async {
+      await tester.pumpWidget(MaterialApp(
+        home: GamesScreen(
+          fetcher: () async => sample,
+          launcher: (SteamGame g) async => true,
+          runningFetcher: () async => '0',
+        ),
+      ));
+      await tester.pumpAndSettle();
+      final Finder chip = find.widgetWithText(FilterChip, 'Frame (beta)');
+      expect(chip, findsOneWidget);
+      expect(tester.widget<FilterChip>(chip).selected, isFalse);
+      await tester.tap(chip);
+      await tester.pumpAndSettle();
+      expect(tester.widget<FilterChip>(chip).selected, isTrue);
+    });
+  });
+
+  group('GameFrame (GAME-3)', () {
+    const MethodChannel ch = MethodChannel('chili/game_frame');
+    final List<MethodCall> calls = <MethodCall>[];
+
+    setUp(() {
+      calls.clear();
+      TestWidgetsFlutterBinding.ensureInitialized();
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(ch, (MethodCall call) async {
+        calls.add(call);
+        return true;
+      });
+    });
+
+    tearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(ch, null);
+    });
+
+    test('start sends the title and returns the native result', () async {
+      const GameFrame f = GameFrame();
+      final bool ok = await f.start('Dota 2');
+      expect(ok, isTrue);
+      expect(calls.single.method, 'start');
+      expect((calls.single.arguments as Map)['title'], 'Dota 2');
+    });
+
+    test('tolerates a missing native handler', () async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(ch, null);
+      const GameFrame f = GameFrame();
+      expect(await f.start('x'), isFalse);
+      await f.stop(); // must not throw
     });
   });
 }

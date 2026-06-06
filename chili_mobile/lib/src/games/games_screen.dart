@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../ui/app_ui.dart';
 import 'game_awareness.dart';
+import 'game_frame.dart';
 import 'steam_models.dart';
 import 'steam_service.dart';
 
@@ -30,16 +31,19 @@ class GamesScreen extends StatefulWidget {
     GameLauncher? launcher,
     RunningAppIdFetcher? runningFetcher,
     GameProbe? probe,
+    GameFrame? frame,
     this.clock,
   })  : _fetcher = fetcher,
         _launcher = launcher,
         _runningFetcher = runningFetcher,
-        _probe = probe;
+        _probe = probe,
+        _frame = frame;
 
   final GamesFetcher? _fetcher;
   final GameLauncher? _launcher;
   final RunningAppIdFetcher? _runningFetcher;
   final GameProbe? _probe;
+  final GameFrame? _frame;
 
   /// Test seam for the session clock.
   final DateTime Function()? clock;
@@ -53,7 +57,13 @@ class _GamesScreenState extends State<GamesScreen> {
   late final GameLauncher _launcher;
   late final RunningAppIdFetcher _runningFetcher;
   late final GameProbe _probe;
+  late final GameFrame _frame;
   late final DateTime Function() _now;
+
+  // GAME-3 — CHILI frame mode (drag the frame → game follows).
+  bool _frameMode = false;
+  bool _framedActive = false;
+  Timer? _frameAttach;
 
   List<SteamGame>? _games;
   bool _loading = true;
@@ -78,6 +88,7 @@ class _GamesScreenState extends State<GamesScreen> {
     _launcher = widget._launcher ?? svc.launch;
     _runningFetcher = widget._runningFetcher ?? svc.runningAppId;
     _probe = widget._probe ?? const GameAwareness().probe;
+    _frame = widget._frame ?? const GameFrame();
     _now = widget.clock ?? DateTime.now;
     _load();
   }
@@ -88,6 +99,8 @@ class _GamesScreenState extends State<GamesScreen> {
     _postLaunch?.cancel();
     _sessionTicker?.cancel();
     _probeTimer?.cancel();
+    _frameAttach?.cancel();
+    if (_framedActive) _frame.stop();
     super.dispose();
   }
 
@@ -154,6 +167,8 @@ class _GamesScreenState extends State<GamesScreen> {
     _sessionTicker = null;
     _probeTimer?.cancel();
     _probeTimer = null;
+    // The game ended — tear down the CHILI frame too.
+    if (_framedActive || _frameAttach != null) _stopFraming();
     if (mounted) {
       setState(() {
         _sessionAppId = null;
@@ -189,7 +204,32 @@ class _GamesScreenState extends State<GamesScreen> {
       // Give Steam a moment, then re-check what's running.
       _postLaunch?.cancel();
       _postLaunch = Timer(const Duration(seconds: 3), _refreshRunning);
+      if (_frameMode) _startFraming(game);
     }
+  }
+
+  // GAME-3 — poll until the game window exists, then attach the CHILI frame.
+  void _startFraming(SteamGame game) {
+    _frameAttach?.cancel();
+    int tries = 0;
+    _frameAttach =
+        Timer.periodic(const Duration(milliseconds: 800), (Timer t) async {
+      if (!mounted || tries++ > 40) {
+        t.cancel();
+        return;
+      }
+      final bool ok = await _frame.start(game.name);
+      if (ok) {
+        t.cancel();
+        if (mounted) setState(() => _framedActive = true);
+      }
+    });
+  }
+
+  Future<void> _stopFraming() async {
+    _frameAttach?.cancel();
+    await _frame.stop();
+    if (mounted) setState(() => _framedActive = false);
   }
 
   @override
@@ -216,20 +256,42 @@ class _GamesScreenState extends State<GamesScreen> {
         children: <Widget>[
           Icon(Icons.sports_esports, color: cs.primary),
           const SizedBox(width: 10),
-          Text('Games',
-              style: Theme.of(context)
-                  .textTheme
-                  .headlineSmall
-                  ?.copyWith(fontWeight: FontWeight.w700)),
-          const SizedBox(width: 12),
-          if (count > 0)
-            ApStatusPill('$count installed', color: cs.secondary),
-          if (playing != null) ...<Widget>[
-            const SizedBox(width: 8),
-            ApStatusPill('Playing: ${playing.name}',
-                color: const Color(0xFF2E9E5B), icon: Icons.videogame_asset),
-          ],
-          const Spacer(),
+          // Title + pills shrink/wrap so the header never overflows.
+          Expanded(
+            child: Wrap(
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: 8,
+              runSpacing: 4,
+              children: <Widget>[
+                Text('Games',
+                    style: Theme.of(context)
+                        .textTheme
+                        .headlineSmall
+                        ?.copyWith(fontWeight: FontWeight.w700)),
+                if (count > 0)
+                  ApStatusPill('$count installed', color: cs.secondary),
+                if (playing != null)
+                  ApStatusPill('Playing: ${playing.name}',
+                      color: const Color(0xFF2E9E5B),
+                      icon: Icons.videogame_asset),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          // GAME-3 — frame mode: launch with a draggable CHILI frame that moves
+          // the game window (SetWindowPos — no reparent/injection).
+          FilterChip(
+            label: const Text('Frame (beta)'),
+            avatar: Icon(Icons.flip_to_front,
+                size: 16,
+                color: _frameMode ? cs.onPrimary : cs.onSurfaceVariant),
+            selected: _frameMode,
+            onSelected: (bool v) => setState(() => _frameMode = v),
+            tooltip:
+                'Launch with a CHILI frame on top; drag it to move the game '
+                '(windowed games only)',
+          ),
+          const SizedBox(width: 8),
           IconButton(
             tooltip: 'Rescan library',
             icon: const Icon(Icons.refresh, size: 20),
@@ -385,6 +447,18 @@ class _GamesScreenState extends State<GamesScreen> {
             ),
           ),
           const SizedBox(width: 12),
+          if (_framedActive)
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: Tooltip(
+                message: 'Remove the CHILI frame (game stays where it is)',
+                child: OutlinedButton.icon(
+                  onPressed: _stopFraming,
+                  icon: const Icon(Icons.flip_to_front, size: 16),
+                  label: const Text('Unframe'),
+                ),
+              ),
+            ),
           // Mini monitor map — CHILI's awareness of where the game sits.
           if (info != null) _monitorMap(cs, info),
         ],
