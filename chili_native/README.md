@@ -31,6 +31,14 @@ dotnet build chili_native -c Debug
 - `ViewModels/` — MVVM view models.
 - (coming) `Services/` — RS price engine port, HTTP. `Interop/` — Win32 P/Invoke.
 
+## Backend connection
+
+The native client talks to the CHILI FastAPI backend (`https://localhost:8000`)
+exactly like the Flutter app: `Authorization: Bearer <device_token>`, JSON bodies,
+SSE for streaming chat. Settings live in `%APPDATA%/CHILI/settings.json`
+(`BaseUrl` + `DeviceToken`); the local dev self-signed cert is trusted for
+localhost only. See `Services/ChiliApiClient.cs`.
+
 ## Migration status
 
 Incremental port of the Flutter capabilities. The Flutter app stays the source
@@ -110,4 +118,9 @@ of truth until this reaches parity.
 - [x] **NATIVE-22** — "pop out" button in the Prices app: opens the price card as a
       standalone floating, always-on-top overlay window (reuses PriceOverlayWindow)
       near the main window — a price widget anywhere, not just from the game frame.
-      Verified (floating overlay appears). (Port Chat·Trading·Research with the backend: next.)
+      Verified (floating overlay appears).
+- [x] **NATIVE-23** — **Chat app** (first backend-connected port): `AppSettings`
+      (base URL + device token in %APPDATA%), `ChiliApiClient` (Bearer auth, SSE),
+      and a streaming chat UI (bubbles + composer) hitting `/api/mobile/chat/stream`.
+      **Verified live** against the running backend — authenticated as the paired
+      user, streamed a real reply. (Next: Trading cockpit, Research.)

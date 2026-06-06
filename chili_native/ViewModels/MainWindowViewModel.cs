@@ -15,8 +15,7 @@ public partial class MainWindowViewModel : ViewModelBase
         Apps = new ObservableCollection<DockApp>
         {
             new("Prices", "◈", new RsPriceCardViewModel()),
-            new("Chat", "✉", new PlaceholderViewModel(
-                "Chat", "Talk to CHILI — local-first assistant. Coming soon.", "✉")),
+            new("Chat", "✉", new ChatViewModel()),
             new("Trading", "$", new PlaceholderViewModel(
                 "Trading", "Live P/L cockpit and the autonomous trading brain. Coming soon.", "$")),
             new("Games", "◆", new GamesViewModel()),
