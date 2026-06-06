@@ -337,6 +337,11 @@ void main() {
       expect(find.text('\$5,000.00'), findsOneWidget); // cash
       expect(find.text('Cash weight'), findsOneWidget);
       expect(find.text('20%'), findsOneWidget); // 5000 / 25000
+      // TC-8 — realized / unrealized / total P&L breakdown.
+      expect(find.text('REALIZED'), findsOneWidget);
+      expect(find.text('TOTAL'), findsOneWidget);
+      expect(find.text('+\$600.00'), findsOneWidget); // realized
+      expect(find.text('+\$1,000.00'), findsOneWidget); // total
     });
 
     testWidgets('TC-3: positions render in default P/L-desc order with a sorter',

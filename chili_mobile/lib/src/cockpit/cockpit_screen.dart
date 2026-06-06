@@ -277,6 +277,20 @@ class _CockpitScreenState extends State<CockpitScreen> {
             ),
           ],
         ),
+        const SizedBox(height: 14),
+        // TC-8 — realized / unrealized / total P&L breakdown.
+        ApPanel(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          child: Row(
+            children: <Widget>[
+              Expanded(child: _pnlCell(cs, 'Realized', s.realizedPnl)),
+              _pnlDivider(cs),
+              Expanded(child: _pnlCell(cs, 'Unrealized', s.unrealizedPnl)),
+              _pnlDivider(cs),
+              Expanded(child: _pnlCell(cs, 'Total', s.totalPnl)),
+            ],
+          ),
+        ),
         // TC-2 — live session equity curve.
         if (_equityHistory.length >= 2) ...<Widget>[
           const SizedBox(height: 14),
@@ -472,6 +486,36 @@ class _CockpitScreenState extends State<CockpitScreen> {
       ],
     );
   }
+
+  // TC-8 — one cell of the P&L breakdown panel (label + signed colored value).
+  Widget _pnlCell(ColorScheme cs, String label, double value) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        Text(label.toUpperCase(),
+            style: TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.5,
+                color: cs.onSurfaceVariant)),
+        const SizedBox(height: 2),
+        Text(_signed(value),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.w700,
+                color: _pnlColor(value, cs))),
+      ],
+    );
+  }
+
+  Widget _pnlDivider(ColorScheme cs) => Container(
+        width: 1,
+        height: 30,
+        margin: const EdgeInsets.symmetric(horizontal: 12),
+        color: cs.outlineVariant,
+      );
 
   // TC-3 — compact sort menu for the open-positions list.
   Widget _sortSelector(ColorScheme cs) {
