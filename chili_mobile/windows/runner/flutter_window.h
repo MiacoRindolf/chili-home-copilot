@@ -38,11 +38,12 @@ class FlutterWindow : public Win32Window {
   // use). Opt-in and best-effort.
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
       frame_channel_;
-  HWND frame_bar_ = nullptr;     // the CHILI bar window
-  HWND framed_game_ = nullptr;   // the game it controls
+  HWND frame_bar_ = nullptr;       // the CHILI chrome window
+  HWND framed_game_ = nullptr;     // the game it controls
+  LONG_PTR framed_orig_style_ = 0; // game's style before we made it borderless
 
   void SetupFrameChannel();
-  bool StartFrame(const std::wstring& title);
+  bool StartFrame(const std::wstring& title, const std::wstring& name);
   void StopFrame();
 };
 

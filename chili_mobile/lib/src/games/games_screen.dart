@@ -60,8 +60,8 @@ class _GamesScreenState extends State<GamesScreen> {
   late final GameFrame _frame;
   late final DateTime Function() _now;
 
-  // GAME-3 — CHILI frame mode (drag the frame → game follows).
-  bool _frameMode = false;
+  // GAME-3 — CHILI frame mode (drag the frame → game follows). On by default.
+  bool _frameMode = true;
   bool _framedActive = false;
   Timer? _frameAttach;
 

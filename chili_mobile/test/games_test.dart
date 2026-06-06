@@ -206,10 +206,11 @@ void main() {
       await tester.pumpAndSettle();
       final Finder chip = find.widgetWithText(FilterChip, 'Frame (beta)');
       expect(chip, findsOneWidget);
-      expect(tester.widget<FilterChip>(chip).selected, isFalse);
+      // On by default now.
+      expect(tester.widget<FilterChip>(chip).selected, isTrue);
       await tester.tap(chip);
       await tester.pumpAndSettle();
-      expect(tester.widget<FilterChip>(chip).selected, isTrue);
+      expect(tester.widget<FilterChip>(chip).selected, isFalse);
     });
   });
 

@@ -10,12 +10,15 @@ class GameFrame {
 
   static const MethodChannel _ch = MethodChannel('chili/game_frame');
 
-  /// Attach the CHILI frame bar to the window whose title contains [title].
-  /// Returns true once the game window is found and the bar is shown.
-  Future<bool> start(String title) async {
+  /// Attach the CHILI frame to the window whose title contains [title]. [name]
+  /// is shown on the CHILI title bar. Returns true once the game is found and
+  /// framed.
+  Future<bool> start(String title, {String? name}) async {
     try {
-      return (await _ch.invokeMethod<bool>(
-              'start', <String, Object?>{'title': title})) ??
+      return (await _ch.invokeMethod<bool>('start', <String, Object?>{
+            'title': title,
+            'name': name ?? title,
+          })) ??
           false;
     } catch (_) {
       return false;
