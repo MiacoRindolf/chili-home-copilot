@@ -1913,6 +1913,7 @@ def gather_imminent_candidate_rows(
     all_active_patterns: bool = False,
     apply_main_dispatch_filters: bool = False,
     for_opportunity_board: bool = False,
+    timeframe_in: frozenset[str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Score (pattern × ticker) rows using shared composite math.
 
@@ -2031,8 +2032,17 @@ def gather_imminent_candidate_rows(
         and not bool(for_opportunity_board)
     )
 
+    _pattern_query = db.query(ScanPattern).filter(ScanPattern.active.is_(True))
+    if timeframe_in:
+        # Timeframe-tiered scan: the fast pass scopes to short-timeframe
+        # (e.g. 1m/5m) patterns so they are evaluated at their own cadence,
+        # which a 15-min sweep structurally misses (many bars elapse between
+        # looks). Slow tier passes timeframe_in=None and sees every pattern.
+        _pattern_query = _pattern_query.filter(
+            ScanPattern.timeframe.in_(sorted(timeframe_in))
+        )
     loaded_patterns = sorted(
-        db.query(ScanPattern).filter(ScanPattern.active.is_(True)).all(),
+        _pattern_query.all(),
         key=_imminent_scan_priority_key,
     )
     (
@@ -2809,8 +2819,13 @@ def run_pattern_imminent_scan(
     *,
     equity_session_open: bool | None = None,
     dry_run: bool | None = None,
+    timeframe_in: frozenset[str] | None = None,
 ) -> dict[str, Any]:
-    """Evaluate promoted/live patterns; dispatch imminent alerts by composite rank."""
+    """Evaluate promoted/live patterns; dispatch imminent alerts by composite rank.
+
+    *timeframe_in*: when set, only patterns on those timeframes are scanned — the
+    fast tier passes ``{"1m", "5m"}`` to catch short-timeframe setups at cadence.
+    """
     if not getattr(settings, "pattern_imminent_alert_enabled", True):
         return {"ok": True, "skipped": True, "reason": "disabled"}
 
@@ -2854,6 +2869,7 @@ def run_pattern_imminent_scan(
         equity_session_open=eq_open,
         all_active_patterns=False,
         apply_main_dispatch_filters=True,
+        timeframe_in=timeframe_in,
     )
 
     sent = 0

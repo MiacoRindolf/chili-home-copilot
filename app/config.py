@@ -5793,6 +5793,17 @@ class Settings(BaseSettings):
 
     # Imminent ScanPattern breakout alerts (scheduler + pattern_imminent_alerts).
     pattern_imminent_alert_enabled: bool = True
+    # Timeframe-tiered scan: a FAST imminent pass for short-timeframe patterns
+    # (1m/5m) runs every ~60s, alongside the standard 15-min sweep. A 15-min
+    # scan structurally cannot catch a 1m/5m setup — many bars elapse between
+    # looks — so intraday/scalping patterns need detection at their own cadence.
+    # ON by default. Crypto runs 24/7; stock is gated to US hours by the
+    # existing session check inside the scan. Interval matches the fastest tier
+    # timeframe (1m -> 60s); widen the timeframe set only after measuring the
+    # alert / LLM-revalidation load it generates.
+    pattern_imminent_fast_enabled: bool = True
+    pattern_imminent_fast_interval_seconds: int = 60
+    pattern_imminent_fast_timeframes: str = "1m,5m"
     pattern_imminent_max_eta_hours: float = 4.0
     # Loosened defaults: many ScanPatterns reference indicators absent from the swing snapshot;
     # with only 1â€“2 evaluable conditions, a high ratio floor produced zero candidates forever.

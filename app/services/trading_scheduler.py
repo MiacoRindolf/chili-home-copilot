@@ -2697,6 +2697,59 @@ def _run_pattern_imminent_job():
     run_scheduler_job_guarded("pattern_imminent_scanner", _work)
 
 
+def _run_pattern_imminent_fast_job():
+    """FAST tier of the imminent scan: short-timeframe (1m/5m) patterns only,
+    every ~60s. A 15-min sweep cannot catch a 1m/5m setup — many bars elapse
+    between looks — so these patterns are detected at their own cadence. Crypto
+    runs 24/7; stock is gated to US hours inside ``run_pattern_imminent_scan``.
+
+    Intentionally does NOT write a brain_batch_jobs row per run: at 60s cadence
+    that is ~1440 rows/day of churn. Observability is the concise logger line.
+    """
+    from ..config import settings as _settings
+    from ..db import SessionLocal
+    from .trading.pattern_imminent_alerts import run_pattern_imminent_scan
+
+    if not getattr(_settings, "pattern_imminent_alert_enabled", True):
+        return
+    if not getattr(_settings, "pattern_imminent_fast_enabled", True):
+        return
+
+    _tf_raw = str(getattr(_settings, "pattern_imminent_fast_timeframes", "1m,5m") or "")
+    fast_timeframes = frozenset(t.strip().lower() for t in _tf_raw.split(",") if t.strip())
+    if not fast_timeframes:
+        return
+
+    def _work() -> None:
+        db = SessionLocal()
+        try:
+            _uid = getattr(_settings, "brain_default_user_id", None)
+            result = run_pattern_imminent_scan(
+                db, user_id=_uid, timeframe_in=fast_timeframes
+            )
+            db.commit()
+            logger.info(
+                "[scheduler] Pattern imminent FAST tier (tf=%s): "
+                "candidates=%s alerts_sent=%s shadow=%s tickers_scored=%s elapsed=%ss",
+                ",".join(sorted(fast_timeframes)),
+                result.get("candidates", 0),
+                result.get("alerts_sent", 0),
+                result.get("shadow_alerts_sent", 0),
+                result.get("tickers_scored", 0),
+                result.get("score_elapsed_seconds", "?"),
+            )
+        except Exception as e:
+            logger.error("[scheduler] Pattern imminent FAST scan failed: %s", e)
+        finally:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("pattern_imminent_fast_scanner", _work)
+
+
 def _run_auto_trader_tick_job():
     """Run the autotrader tick. Inner broker calls are individually
     wrapped in ``_call_with_timeout`` so they can't hang indefinitely.
@@ -4961,6 +5014,27 @@ def start_scheduler():
                 max_instances=1,
                 next_run_time=datetime.now() + timedelta(seconds=20),
             )
+
+            # Timeframe-tiered FAST pass: short-timeframe (1m/5m) patterns at
+            # their own cadence (~60s), 24/7. A 15-min sweep structurally misses
+            # 1m/5m setups (many bars elapse between looks). ON by default; the
+            # 15-min sweep above still covers every timeframe as a safe baseline.
+            if bool(getattr(settings, "pattern_imminent_fast_enabled", True)):
+                _pi_fast_s = max(
+                    15, int(getattr(settings, "pattern_imminent_fast_interval_seconds", 60))
+                )
+                _scheduler.add_job(
+                    _run_pattern_imminent_fast_job,
+                    trigger=IntervalTrigger(seconds=_pi_fast_s),
+                    id="pattern_imminent_fast_scanner",
+                    name=(
+                        "ScanPattern imminent FAST tier "
+                        "(1m/5m patterns, ~60s, 24/7 crypto + US-hrs stock)"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=35),
+                )
 
         # FIX 45a (2026-04-29): autotrader tick + monitor carved out under
         # their own flag so the autotrader-worker container can register them

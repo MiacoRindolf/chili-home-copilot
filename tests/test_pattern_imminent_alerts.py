@@ -640,6 +640,81 @@ def test_gather_imminent_skips_poor_shadow_pattern_but_keeps_healthy(
     assert meta["top_suppressed"][0]["cooldown_basis"] == "stored_avg_return"
 
 
+def test_gather_imminent_timeframe_in_scopes_to_fast_patterns(db, monkeypatch) -> None:
+    """The fast tier scopes the scan to short-timeframe patterns: passing
+    timeframe_in={1m,5m} loads only those, excluding the 1h swing pattern."""
+    rules = {"conditions": [{"indicator": "rsi_14", "op": ">", "value": 60}]}
+
+    def _mk(name: str, tf: str, ticker: str) -> ScanPattern:
+        return ScanPattern(
+            name=name,
+            rules_json=rules,
+            origin="test",
+            asset_class="crypto",
+            lifecycle_stage="promoted",
+            timeframe=tf,
+            active=True,
+            ticker_scope="explicit_list",
+            scope_tickers=f'["{ticker}"]',
+            win_rate=0.6,
+            evidence_count=10,
+        )
+
+    db.add_all([
+        _mk("Scalp 1m", "1m", "AAA-USD"),
+        _mk("Scalp 5m", "5m", "BBB-USD"),
+        _mk("Swing 1h", "1h", "CCC-USD"),
+    ])
+    db.commit()
+
+    monkeypatch.setattr(imminent_mod.settings, "pattern_imminent_min_readiness", 0.0)
+    monkeypatch.setattr(
+        imminent_mod.settings,
+        "pattern_imminent_min_composite_main",
+        TEST_MIN_COMPOSITE_DISABLED,
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "build_imminent_ticker_universe",
+        lambda *a, **k: (["AAA-USD", "BBB-USD", "CCC-USD"], {}),
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "_coinbase_spot_ticker_set",
+        lambda: frozenset({"AAA-USD", "BBB-USD", "CCC-USD"}),
+    )
+    monkeypatch.setattr(
+        imminent_mod,
+        "_score_ticker",
+        lambda ticker, skip_fundamentals=True, skip_pattern_engine=False: {
+            "price": 100.0,
+            "entry_price": 100.0,
+            "stop_loss": 95.0,
+            "take_profit": 110.0,
+            "signals": ["test"],
+            "indicators": {"rsi": 55.0, "adx": 20.0, "atr": 2.0},
+        },
+    )
+    monkeypatch.setattr(imminent_mod, "recent_swing_resistance", lambda ticker: None)
+
+    _, meta_all = gather_imminent_candidate_rows(
+        db,
+        user_id=1,
+        equity_session_open=False,
+        apply_main_dispatch_filters=True,
+    )
+    assert meta_all["patterns_active"] == 3
+
+    _, meta_fast = gather_imminent_candidate_rows(
+        db,
+        user_id=1,
+        equity_session_open=False,
+        apply_main_dispatch_filters=True,
+        timeframe_in=frozenset({"1m", "5m"}),
+    )
+    assert meta_fast["patterns_active"] == 2
+
+
 def test_gather_imminent_reports_readiness_band_and_lifecycle_diagnostics(
     db,
     monkeypatch,
