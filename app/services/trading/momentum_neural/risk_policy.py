@@ -68,6 +68,46 @@ def adaptive_max_spread_bps(
     return max(base, r * em)
 
 
+def _account_equity_usd() -> float | None:
+    """Best-effort account equity (USD) for equity-relative sizing.
+
+    Uses the Coinbase portfolio equity. Returns None when unavailable so callers
+    fall back to the documented fixed cap (never size against unknown equity).
+    """
+    try:
+        from ...coinbase_service import get_portfolio
+
+        pf = get_portfolio() or {}
+        eq = float(pf.get("equity") or 0.0)
+        return eq if eq > 0 else None
+    except Exception:
+        return None
+
+
+def equity_relative_notional_cap(fixed_fallback_usd: float) -> float:
+    """Per-trade notional cap = account equity x ONE documented fraction.
+
+    Equity-relative (not a fixed $): scales UP as equity grows and DOWN in
+    drawdown (auto-de-risk). Falls back to ``fixed_fallback_usd`` when equity or
+    the fraction is unavailable (never trade against unknown equity). The fraction
+    is the single documented risk-appetite knob. docs/DESIGN/MOMENTUM_LANE.md
+    """
+    fixed = float(fixed_fallback_usd)
+    if fixed <= 0:
+        # A 0 / non-positive cap is a deliberate operator disable/block — preserve it.
+        return fixed
+    try:
+        frac = float(getattr(settings, "chili_momentum_risk_notional_fraction_of_equity", 0.15) or 0.0)
+    except (TypeError, ValueError):
+        frac = 0.0
+    if frac <= 0 or not math.isfinite(frac):
+        return fixed
+    eq = _account_equity_usd()
+    if eq is None or eq <= 0:
+        return fixed
+    return round(eq * frac, 2)
+
+
 @dataclass(frozen=True)
 class MomentumAutomationRiskPolicy:
     """Conservative defaults for short-horizon crypto momentum (pre-runner gates)."""
@@ -201,7 +241,12 @@ def build_session_risk_snapshot(
     snap["momentum_policy_caps"] = {
         "max_hold_seconds": int(policy_full.get("max_hold_seconds") or 86_400),
         "cooldown_after_stopout_seconds": policy_int_cap(policy_full, "cooldown_after_stopout_seconds", 300),
-        "max_notional_per_trade_usd": policy_float_cap(policy_full, "max_notional_per_trade_usd", 500.0),
+        # Equity-relative per-trade notional (no fixed-$ magic): a fraction of
+        # account equity, frozen at admission; falls back to the fixed cap when
+        # equity is unavailable. [[feedback_adaptive_no_magic]]
+        "max_notional_per_trade_usd": equity_relative_notional_cap(
+            policy_float_cap(policy_full, "max_notional_per_trade_usd", 500.0)
+        ),
         "max_loss_per_trade_usd": policy_float_cap(policy_full, "max_loss_per_trade_usd", 50.0),
     }
     return snap
