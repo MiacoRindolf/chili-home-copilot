@@ -2302,6 +2302,16 @@ class Settings(BaseSettings):
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_MAX_NOTIONAL_PER_TRADE_USD"),
     )
+    # Equity-relative per-trade notional cap: a fraction of ACCOUNT EQUITY (not a
+    # fixed $). Frozen at session admission; scales up as equity grows and DOWN in
+    # drawdown. The cap above is the fixed-$ FALLBACK when equity is unavailable.
+    # This single fraction is the documented per-trade size risk-appetite knob.
+    chili_momentum_risk_notional_fraction_of_equity: float = Field(
+        default=0.15,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_NOTIONAL_FRACTION_OF_EQUITY"),
+    )
     chili_momentum_order_notional_guard_bps: float = Field(
         default=25.0,
         ge=0.0,
