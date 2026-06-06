@@ -3750,24 +3750,108 @@ def _run_fast_path_universe_rotator_job():
         db.close()
 
 
-def _run_crypto_viability_refresh_job():
-    """24/7 crypto viability refresh: pull latest breakout scan results and bridge to viability.
+def _build_crypto_momentum_universe() -> list[dict]:
+    """Live crypto momentum universe from the venue's own 24h stats.
 
-    Complements the crypto breakout scanner by ensuring viability rows stay fresh
-    even between breakout scan runs. Uses the cached breakout results (no new scan).
+    The legacy crypto breakout scanner was removed, which left the momentum lane
+    with NO live viability source (its cache went stale past the live freshness
+    gate, blocking every guarded-live crypto entry). This rebuilds the feed
+    directly from the trade venue: a single Coinbase ``get_products()`` call
+    returns every spot product with 24h stats, which map cleanly onto the three
+    Ross pillars the viability scorer consumes:
+
+      * ``price_percentage_change_24h`` -> momentum (already-moving)
+      * ``volume_percentage_change_24h`` -> relative volume (RVOL proxy: a +150%
+        volume day is ~2.5x normal)
+      * ``approximate_quote_24h_volume`` -> liquidity (USD turnover)
+
+    USD/USDC spot only, tradable, real price + turnover. We return the full
+    qualifying set; ``_bridge_scanner_to_viability`` ranks it by Ross momentum
+    quality (percentile, no hardcoded thresholds) and keeps the explosive leaders.
+    docs/DESIGN/MOMENTUM_LANE.md
+    """
+    from .trading.execution_family_registry import (
+        EXECUTION_FAMILY_COINBASE_SPOT,
+        resolve_live_spot_adapter_factory,
+    )
+
+    def _f(v):
+        try:
+            if v is None or v == "":
+                return None
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    factory = resolve_live_spot_adapter_factory(EXECUTION_FAMILY_COINBASE_SPOT)
+    adapter = factory()
+    products, _fr = adapter.get_products()
+    out: list[dict] = []
+    seen_base: dict[str, int] = {}  # base currency -> index in out (USD/USDC dedupe)
+    for p in products:
+        try:
+            if (getattr(p, "quote_currency", "") or "").upper() not in ("USD", "USDC"):
+                continue
+            if not p.tradable_for_spot_momentum():
+                continue
+            raw = p.raw or {}
+            price = _f(raw.get("price"))
+            chg = _f(raw.get("price_percentage_change_24h"))
+            vol_pct = _f(raw.get("volume_percentage_change_24h"))
+            qvol = _f(raw.get("approximate_quote_24h_volume") or raw.get("quote_volume_24h"))
+            bvol = _f(raw.get("volume_24h") or raw.get("base_volume_24h"))
+            if price is None or price <= 0:
+                continue
+            if qvol is None or qvol <= 0:  # no turnover signal -> not a momentum candidate
+                continue
+            # RVOL proxy from the venue's own 24h volume %change: +150% vol => ~2.5x.
+            rvol = (1.0 + vol_pct / 100.0) if vol_pct is not None else None
+            base = (getattr(p, "base_currency", "") or "").upper()
+            quote = (getattr(p, "quote_currency", "") or "").upper()
+            entry = {
+                "symbol": p.product_id,
+                "price": price,
+                "change_24h": chg,        # momentum pillar (scorer reads change_24h)
+                "daily_change_pct": chg,  # alias the scorer also accepts
+                "rvol": rvol,             # relative-volume pillar (scorer reads rvol)
+                "quote_volume_24h": qvol,  # liquidity pillar
+                "volume_24h": bvol,
+                "source": "coinbase_products_24h",
+            }
+            # Dedupe a coin's USD/USDC books so the bridge top-N cap covers N
+            # DISTINCT movers; prefer the -USD book.
+            if base and base in seen_base:
+                ex_idx = seen_base[base]
+                if quote == "USD" and not str(out[ex_idx]["symbol"]).endswith("-USD"):
+                    out[ex_idx] = entry
+                continue
+            if base:
+                seen_base[base] = len(out)
+            out.append(entry)
+        except Exception:
+            continue
+    return out
+
+
+def _run_crypto_viability_refresh_job():
+    """24/7 crypto viability refresh: pull a FRESH crypto momentum universe from the
+    live venue (Coinbase products + 24h stats) and bridge it to viability.
+
+    Replaces the removed legacy breakout-scanner cache (which left viability stale
+    past the 600s live freshness gate, blocking all live crypto entries). The
+    refresh interval is tied to that freshness gate at registration so viability
+    stays fresh enough for the guarded live runner. docs/DESIGN/MOMENTUM_LANE.md
     """
     from ..db import SessionLocal
-    from .trading.scanner import get_crypto_breakout_cache
 
-    logger.info("[scheduler] Running crypto viability refresh")
+    logger.info("[scheduler] Running crypto viability refresh (live venue feed)")
     db = SessionLocal()
     try:
-        cache = get_crypto_breakout_cache()
-        results = list(cache.get("results") or [])
+        results = _build_crypto_momentum_universe()
         if results:
             _bridge_scanner_to_viability(db, results, source="crypto_viability_refresh")
         else:
-            logger.debug("[scheduler] crypto viability refresh: no cached breakout results")
+            logger.warning("[scheduler] crypto viability refresh: empty venue universe (adapter off?)")
     except Exception as e:
         logger.warning("[scheduler] crypto viability refresh failed: %s", e)
     finally:
@@ -5020,14 +5104,25 @@ def start_scheduler():
                 next_run_time=datetime.now() + timedelta(seconds=90),
             )
 
+            # Refresh faster than the live runner's viability freshness gate so live
+            # crypto sessions always see fresh viability (else they error "stale").
+            # Interval derived from the gate (no magic): half the max age, 60s floor.
+            from ..config import settings as _cvr_settings
+            try:
+                _cvr_max_age = float(
+                    getattr(_cvr_settings, "chili_momentum_risk_viability_max_age_seconds", 600.0)
+                )
+            except (TypeError, ValueError):
+                _cvr_max_age = 600.0
+            _cvr_secs = max(60, int(_cvr_max_age / 2))
             _scheduler.add_job(
                 _run_crypto_viability_refresh_job,
-                trigger=IntervalTrigger(minutes=30),
+                trigger=IntervalTrigger(seconds=_cvr_secs),
                 id="crypto_viability_refresh",
-                name="Crypto viability refresh (every 30min, 24/7)",
+                name="Crypto viability refresh (live venue feed, ~half freshness gate, 24/7)",
                 replace_existing=True,
                 max_instances=1,
-                next_run_time=datetime.now() + timedelta(seconds=90),
+                next_run_time=datetime.now() + timedelta(seconds=20),
             )
 
             _scheduler.add_job(
@@ -6247,7 +6342,7 @@ def start_scheduler():
             f"project brain every {_pb_minutes}min, "
             "weekly review Sun 6PM, broker sync market hours every 2min, price monitor every 5min, "
             "momentum scanner 9:30-11AM ET, "
-            "crypto viability refresh every 30min 24/7, "
+            "crypto viability refresh (live venue feed, ~half freshness gate) 24/7, "
             "pattern imminent scanner every 15min; legacy generic breakout scanners retired; "
             "web pattern research + variant evolution run inside the brain worker learning cycle)"
         )
