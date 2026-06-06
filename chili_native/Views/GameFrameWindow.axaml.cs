@@ -96,6 +96,12 @@ public partial class GameFrameWindow : Window
         Position = new PixelPoint(gx - _bpx, gy - _tpx);
 
         ApplyHollowRegion();
+
+        // Group the frame with the game (owner relationship) so they stay together
+        // in alt-tab / the taskbar and the frame floats above the game.
+        var hwnd = TryGetPlatformHandle()?.Handle ?? IntPtr.Zero;
+        if (hwnd != IntPtr.Zero) NativeWindows.SetOwner(hwnd, _target);
+
         PositionChanged += (_, _) => SyncTarget();
 
         _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(60) };

@@ -51,6 +51,9 @@ public static class NativeWindows
     private static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
 
     [DllImport("user32.dll")]
+    private static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+
+    [DllImport("user32.dll")]
     private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
         int X, int Y, int cx, int cy, uint uFlags);
 
@@ -61,6 +64,7 @@ public static class NativeWindows
     private struct RECT { public int Left, Top, Right, Bottom; }
 
     private const int GWL_EXSTYLE = -20;
+    private const int GWLP_HWNDPARENT = -8;
     private const long WS_EX_TOOLWINDOW = 0x00000080;
     private const long WS_EX_NOACTIVATE = 0x08000000;
 
@@ -131,6 +135,14 @@ public static class NativeWindows
 
     /// <summary>Bring a window to the foreground.</summary>
     public static void BringToFront(IntPtr hWnd) => SetForegroundWindow(hWnd);
+
+    /// <summary>Make <paramref name="child"/> an OWNED window of <paramref name="owner"/>
+    /// (GWLP_HWNDPARENT) so they group in the taskbar/alt-tab and the owned window
+    /// floats above its owner. This is a standard owner relationship (what dialogs
+    /// use) — it sets an attribute on the CHILD only; it does not reparent, and it
+    /// never touches the owner's memory or input.</summary>
+    public static void SetOwner(IntPtr child, IntPtr owner)
+        => SetWindowLongPtr(child, GWLP_HWNDPARENT, owner);
 
     private static string ProcessName(uint pid)
     {

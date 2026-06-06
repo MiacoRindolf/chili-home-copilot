@@ -63,4 +63,8 @@ of truth until this reaches parity.
       top-left), draggable by its handle. The real-time gaming awareness — and the
       exact thing Flutter multi-window couldn't position/frameless on Windows; a
       native Avalonia window just works. Verified over a framed Notepad.
-      (Window grouping / port Chat·Trading·Research: next.)
+- [x] **NATIVE-8** — window grouping: the frame is made an OWNED window of the game
+      (`SetWindowLongPtr` GWLP_HWNDPARENT) so they group in alt-tab / the taskbar
+      and the frame floats above the game — easy to return to after app-switching.
+      Safe: sets an attribute on the frame only; never reparents/injects/touches
+      the game. (Port Chat·Trading·Research with the backend: next.)
