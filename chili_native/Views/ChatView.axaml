@@ -1,0 +1,86 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:Chili.ViewModels"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d" d:DesignWidth="700" d:DesignHeight="560"
+             x:Class="Chili.Views.ChatView"
+             x:DataType="vm:ChatViewModel">
+
+    <UserControl.Styles>
+        <Style Selector="Border.bubble">
+            <Setter Property="HorizontalAlignment" Value="Left"/>
+            <Setter Property="Background" Value="{StaticResource Surface2Brush}"/>
+            <Setter Property="CornerRadius" Value="13"/>
+            <Setter Property="Padding" Value="13,10"/>
+            <Setter Property="Margin" Value="0,0,70,9"/>
+            <Setter Property="MaxWidth" Value="540"/>
+        </Style>
+        <Style Selector="Border.bubble.user">
+            <Setter Property="HorizontalAlignment" Value="Right"/>
+            <Setter Property="Background" Value="#1F35D08A"/>
+            <Setter Property="Margin" Value="70,0,0,9"/>
+        </Style>
+        <Style Selector="TextBox#Composer /template/ Border#PART_BorderElement">
+            <Setter Property="BorderBrush" Value="{StaticResource StrokeBrush}"/>
+        </Style>
+        <Style Selector="TextBox#Composer:focus /template/ Border#PART_BorderElement">
+            <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
+        </Style>
+    </UserControl.Styles>
+
+    <Border Width="700" Height="560" Background="{StaticResource SurfaceBrush}"
+            CornerRadius="16" BorderBrush="{StaticResource StrokeBrush}" BorderThickness="1"
+            Padding="0" ClipToBounds="True" BoxShadow="0 8 24 0 #70000000">
+        <Grid RowDefinitions="Auto,*,Auto">
+            <!-- header -->
+            <Border Grid.Row="0" Padding="18,14" BorderBrush="{StaticResource StrokeBrush}"
+                    BorderThickness="0,0,0,1">
+                <StackPanel Orientation="Horizontal" Spacing="9">
+                    <Border Width="10" Height="10" CornerRadius="5" VerticalAlignment="Center"
+                            Background="{StaticResource AccentBrush}"/>
+                    <TextBlock Text="Chat" FontSize="16" FontWeight="Bold"
+                               Foreground="{StaticResource TextHiBrush}"/>
+                    <TextBlock Text="local-first assistant" FontSize="11" VerticalAlignment="Bottom"
+                               Margin="2,0,0,2" Foreground="{StaticResource TextLowBrush}"/>
+                </StackPanel>
+            </Border>
+
+            <!-- messages -->
+            <ScrollViewer Grid.Row="1" Name="Scroller" Padding="18,14"
+                          VerticalScrollBarVisibility="Auto">
+                <ItemsControl ItemsSource="{Binding Messages}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:ChatMessage">
+                            <Border Classes="bubble" Classes.user="{Binding IsUser}">
+                                <SelectableTextBlock Text="{Binding Text}" TextWrapping="Wrap"
+                                                     FontSize="13.5" LineHeight="20"
+                                                     Foreground="{StaticResource TextHiBrush}"/>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </ScrollViewer>
+
+            <!-- composer -->
+            <Border Grid.Row="2" Padding="14" BorderBrush="{StaticResource StrokeBrush}"
+                    BorderThickness="0,1,0,0">
+                <Grid ColumnDefinitions="*,Auto">
+                    <TextBox Grid.Column="0" Name="Composer" Text="{Binding Input, Mode=TwoWay}"
+                             Watermark="Message CHILI…" AcceptsReturn="False"
+                             Background="{StaticResource Surface2Brush}"
+                             Foreground="{StaticResource TextHiBrush}"
+                             BorderThickness="1" CornerRadius="10" Padding="12,9" FontSize="14">
+                        <TextBox.KeyBindings>
+                            <KeyBinding Gesture="Enter" Command="{Binding SendCommand}"/>
+                        </TextBox.KeyBindings>
+                    </TextBox>
+                    <Button Grid.Column="1" Content="Send" Command="{Binding SendCommand}"
+                            Margin="8,0,0,0" Padding="16,9" CornerRadius="10" FontWeight="SemiBold"
+                            Background="{StaticResource AccentBrush}" Foreground="#0E1116"
+                            BorderThickness="0"/>
+                </Grid>
+            </Border>
+        </Grid>
+    </Border>
+</UserControl>
