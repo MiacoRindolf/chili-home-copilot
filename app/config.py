@@ -1678,6 +1678,14 @@ class Settings(BaseSettings):
     chili_realized_pnl_promotion_min_trades: int = 8
     chili_realized_pnl_promotion_min_avg_return_pct: float = 0.5
     chili_realized_pnl_promotion_max_per_run: int = 10
+    # 2026-06-05 backtest<->live parity: the backtest charges the system's OWN
+    # MEASURED realized round-trip execution cost per asset class (incl. venue
+    # fees) instead of hardcoded spread/commission floors, so a pattern whose edge
+    # does not survive its real execution cost no longer backtests positive. The
+    # only tunable is this sample-size guard (a statistical floor, NOT a cost
+    # number): an asset class needs at least this many measured observations
+    # before its derived cost is used; below it, the legacy fallback applies.
+    chili_backtest_cost_min_measured_samples: int = 8
     # Round-12 (2026-04-30): backtest queue improvements.
     # 1. priority scorer runs daily and updates backtest_priority based
     #    on lifecycle/staleness/evidence-gap signals.
