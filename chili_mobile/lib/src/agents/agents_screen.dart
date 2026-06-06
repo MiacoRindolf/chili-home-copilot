@@ -37,11 +37,16 @@ class AgentsScreen extends StatefulWidget {
     AgentControlInvoker? controlInvoker,
     AgentRunsFetcher? runsFetcher,
     bool livePolling = true,
+    this.onDiscussRun,
   })  : _injectedRegistry = registry,
         _injectedPoller = livePoller,
         _injectedControl = controlInvoker,
         _injectedRunsFetcher = runsFetcher,
         _livePolling = livePolling;
+
+  /// AG-2 — tap a backend run to discuss it in Chat (reuses the UK-2 ask inbox).
+  /// (agentLabel, run) so the prompt can name which agent the run belongs to.
+  final void Function(String agentLabel, AgentRun run)? onDiscussRun;
 
   /// Optional registry for tests; production builds seed a fresh one.
   final AgentRegistry? _injectedRegistry;
@@ -768,7 +773,7 @@ class _AgentsScreenState extends State<AgentsScreen> {
                   ],
                 ),
                 const SizedBox(height: 6),
-                for (final AgentRun r in runs) _runRow(cs, r),
+                for (final AgentRun r in runs) _runRow(cs, a, r),
               ],
             );
           },
@@ -777,29 +782,45 @@ class _AgentsScreenState extends State<AgentsScreen> {
     );
   }
 
-  Widget _runRow(ColorScheme cs, AgentRun r) {
+  Widget _runRow(ColorScheme cs, Agent a, AgentRun r) {
     final DateTime? dt = DateTime.tryParse(r.when);
     final String when = dt == null
         ? r.when
         : '${dt.month.toString().padLeft(2, '0')}/${dt.day.toString().padLeft(2, '0')} '
             '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 3),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          Icon(Icons.cloud_outlined, size: 14, color: cs.secondary),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              r.outcome == null ? r.title : '${r.title} — ${r.outcome}',
-              style: TextStyle(fontSize: 13, color: cs.onSurface),
-            ),
+    final bool tappable = widget.onDiscussRun != null; // AG-2
+    final Widget row = Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        Icon(Icons.cloud_outlined, size: 14, color: cs.secondary),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            r.outcome == null ? r.title : '${r.title} — ${r.outcome}',
+            style: TextStyle(fontSize: 13, color: cs.onSurface),
           ),
-          const SizedBox(width: 8),
-          Text(when,
-              style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+        ),
+        const SizedBox(width: 8),
+        Text(when,
+            style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+        if (tappable) ...<Widget>[
+          const SizedBox(width: 6),
+          Icon(Icons.forum_outlined, size: 13, color: cs.onSurfaceVariant),
         ],
+      ],
+    );
+    if (!tappable) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: row,
+      );
+    }
+    return InkWell(
+      onTap: () => widget.onDiscussRun!(a.name, r),
+      borderRadius: BorderRadius.circular(6),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 2),
+        child: row,
       ),
     );
   }

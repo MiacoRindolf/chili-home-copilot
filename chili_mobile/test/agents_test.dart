@@ -862,5 +862,45 @@ void main() {
       expect(find.text('Backend runs'.toUpperCase()), findsOneWidget);
       expect(find.textContaining('mine'), findsWidgets);
     });
+
+    testWidgets('AG-2: tapping a backend run fires onDiscussRun',
+        (WidgetTester tester) async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final AgentRegistry r = AgentRegistry();
+      String? agentLabel;
+      AgentRun? tappedRun;
+      await tester.pumpWidget(MaterialApp(
+        home: AgentsScreen(
+          registry: r,
+          livePolling: false,
+          onDiscussRun: (String label, AgentRun run) {
+            agentLabel = label;
+            tappedRun = run;
+          },
+          runsFetcher: (String id) async => id == 'learning-cycle'
+              ? const <AgentRun>[
+                  AgentRun(
+                    when: '2026-06-03T12:00:00.000',
+                    title: 'mine',
+                    outcome: 'ok · 7 patterns',
+                  ),
+                ]
+              : const <AgentRun>[],
+        ),
+      ));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(ChoiceChip, 'Brain'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Learning Cycle').first);
+      await tester.pumpAndSettle();
+      await tester.drag(find.byType(ListView).last, const Offset(0, -700));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.textContaining('mine').last);
+      await tester.pump();
+      expect(tappedRun, isNotNull);
+      expect(tappedRun!.title, 'mine');
+      expect(agentLabel, isNotEmpty);
+    });
   });
 }
