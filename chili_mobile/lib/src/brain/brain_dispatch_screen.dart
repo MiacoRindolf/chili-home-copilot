@@ -18,9 +18,22 @@ import 'device_auth_store.dart';
 
 /// Dispatch monitor: status, queue task, run history.
 class BrainDispatchScreen extends StatefulWidget {
-  const BrainDispatchScreen({super.key, required this.onOpenSettings});
+  const BrainDispatchScreen({
+    super.key,
+    required this.onOpenSettings,
+    this.autopilotOnly = false,
+    this.onOpenAutopilot,
+  });
 
   final VoidCallback onOpenSettings;
+
+  /// When true, render only the Autopilot workspace (no Status/Queue/History/
+  /// Context tabs). Used by the standalone Autopilot dock app.
+  final bool autopilotOnly;
+
+  /// In Brain mode, opens the standalone Autopilot app (the Autopilot tab is a
+  /// redirect now that it has its own window).
+  final VoidCallback? onOpenAutopilot;
 
   @override
   State<BrainDispatchScreen> createState() => _BrainDispatchScreenState();
@@ -131,7 +144,13 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
   @override
   void initState() {
     super.initState();
-    _tabs = TabController(length: 5, vsync: this);
+    // autopilotOnly opens on the Autopilot index (1) so the live poll — which
+    // gates on `_tabs.index == 1` — stays active in the standalone app.
+    _tabs = TabController(
+      length: 5,
+      vsync: this,
+      initialIndex: widget.autopilotOnly ? 1 : 0,
+    );
     _tabs.addListener(_onTabChanged);
     unawaited(_boot());
   }
@@ -1251,6 +1270,35 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
       );
     }
 
+    // Standalone Autopilot app — just the workspace, no Brain tabs.
+    if (widget.autopilotOnly) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(24, 16, 16, 8),
+            child: Row(
+              children: [
+                Icon(Icons.auto_awesome,
+                    color: Theme.of(context).colorScheme.primary),
+                const SizedBox(width: 10),
+                Text(
+                  'Autopilot',
+                  style: Theme.of(context)
+                      .textTheme
+                      .headlineSmall
+                      ?.copyWith(fontWeight: FontWeight.w700),
+                ),
+                const Spacer(),
+                _headerStatusPill(context),
+              ],
+            ),
+          ),
+          Expanded(child: _buildAutopilotTab()),
+        ],
+      );
+    }
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -1266,17 +1314,6 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
                     .textTheme
                     .headlineSmall
                     ?.copyWith(fontWeight: FontWeight.w700),
-              ),
-              const SizedBox(width: 8),
-              Padding(
-                padding: const EdgeInsets.only(top: 4),
-                child: Text(
-                  'Autopilot',
-                  style: TextStyle(
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                    fontSize: 13,
-                  ),
-                ),
               ),
               const Spacer(),
               _headerStatusPill(context),
@@ -1298,7 +1335,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
             controller: _tabs,
             children: [
               _buildStatusTab(),
-              _buildAutopilotTab(),
+              _buildAutopilotRedirect(),
               _buildQueueTab(),
               _buildHistoryTab(),
               _buildContextTab(),
@@ -1306,6 +1343,47 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
           ),
         ),
       ],
+    );
+  }
+
+  /// Brain's Autopilot tab is now a pointer: Autopilot has its own app for room
+  /// to work. Keeps the tab index map intact while moving the heavy workspace
+  /// out of Brain.
+  Widget _buildAutopilotRedirect() {
+    final cs = Theme.of(context).colorScheme;
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 420),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CircleAvatar(
+              radius: 26,
+              backgroundColor: cs.primary.withValues(alpha: 0.12),
+              child: Icon(Icons.auto_awesome, size: 26, color: cs.primary),
+            ),
+            const SizedBox(height: 14),
+            Text('Autopilot has its own app now',
+                style: Theme.of(context)
+                    .textTheme
+                    .titleMedium
+                    ?.copyWith(fontWeight: FontWeight.w700)),
+            const SizedBox(height: 8),
+            Text(
+              'It moved out of Brain for more room to plan, build, and review '
+              'runs. Open it from the dock or with the button below.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: _mutedTextColor(), fontSize: 13, height: 1.4),
+            ),
+            const SizedBox(height: 18),
+            FilledButton.icon(
+              onPressed: widget.onOpenAutopilot,
+              icon: const Icon(Icons.open_in_new, size: 18),
+              label: const Text('Open Autopilot'),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
