@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.IO;
 using System.Threading.Tasks;
 using Avalonia;
@@ -24,7 +25,14 @@ public partial class RsPriceCardViewModel : ViewModelBase
     private int _seq;
 
     public RsPriceCardViewModel(RuneScapePrices? prices = null)
-        => _prices = prices ?? new RuneScapePrices();
+    {
+        _prices = prices ?? new RuneScapePrices();
+        Recent.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasRecent));
+    }
+
+    /// <summary>Recently looked-up item names (most recent first), clickable to re-search.</summary>
+    public ObservableCollection<string> Recent { get; } = new();
+    public bool HasRecent => Recent.Count > 0;
 
     [ObservableProperty] private string _searchText = "";
 
@@ -95,6 +103,7 @@ public partial class RsPriceCardViewModel : ViewModelBase
             VolumeText = $"Vol {RuneScapePrices.FormatGpFull(p.Volume)}/day";
             Blurb = "";
             Phase = CardPhase.Ok;
+            Remember(p.Name);
 
             // Enrich with the wiki blurb + thumbnail (best-effort).
             try
@@ -140,6 +149,23 @@ public partial class RsPriceCardViewModel : ViewModelBase
             MessageText = "Lookup failed — check your connection";
             Phase = CardPhase.Error;
         }
+    }
+
+    /// <summary>Re-run a search for a recent item name (chip click).</summary>
+    [RelayCommand]
+    private async Task SearchRecent(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return;
+        SearchText = name!;
+        await SearchAsync();
+    }
+
+    /// <summary>Record an item name at the front of the recent list (deduped, capped).</summary>
+    private void Remember(string name)
+    {
+        Recent.Remove(name);
+        Recent.Insert(0, name);
+        while (Recent.Count > 6) Recent.RemoveAt(Recent.Count - 1);
     }
 
     /// <summary>Scale a price series into a polyline geometry within a w×h box.</summary>
