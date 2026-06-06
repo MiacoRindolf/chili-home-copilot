@@ -24,11 +24,12 @@ public partial class GameFrameWindow : Window
     private const int Border = 6;   // DIP — matches the XAML border thickness
 
     private IntPtr _target;
-    private int _gw, _gh;           // target size in physical px (move-only; size fixed)
+    private int _gw, _gh;           // target size in physical px (follows the frame)
     private double _scale = 1.0;
     private int _bpx, _tpx, _wpx, _hpx;
     private DispatcherTimer? _timer;
     private bool _closing;
+    private (int x, int y, int w, int h) _lastPushed = (-1, -1, -1, -1);
 
     [DllImport("gdi32.dll")] private static extern IntPtr CreateRectRgn(int l, int t, int r, int b);
     [DllImport("gdi32.dll")] private static extern int CombineRgn(IntPtr dst, IntPtr a, IntPtr b, int mode);
@@ -47,6 +48,13 @@ public partial class GameFrameWindow : Window
             {
                 if (e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
                     BeginMoveDrag(e);
+            };
+        var grip = this.FindControl<Border>("GripBR");
+        if (grip != null)
+            grip.PointerPressed += (_, e) =>
+            {
+                if (e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
+                    BeginResizeDrag(WindowEdge.SouthEast, e);
             };
     }
 
@@ -80,9 +88,9 @@ public partial class GameFrameWindow : Window
         Position = new PixelPoint(gx - _bpx, gy - _tpx);
 
         ApplyHollowRegion();
-        PositionChanged += (_, _) => DriveTarget();
+        PositionChanged += (_, _) => SyncTarget();
 
-        _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
+        _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(60) };
         _timer.Tick += Tick;
         _timer.Start();
     }
@@ -93,20 +101,41 @@ public partial class GameFrameWindow : Window
         var hwnd = TryGetPlatformHandle()?.Handle ?? IntPtr.Zero;
         if (hwnd == IntPtr.Zero) return;
 
+        int gripPx = (int)Math.Round(20 * _scale);
         IntPtr outer = CreateRectRgn(0, 0, _wpx, _hpx);
         IntPtr hole = CreateRectRgn(_bpx, _tpx, _bpx + _gw, _tpx + _gh);
-        CombineRgn(outer, outer, hole, RGN_DIFF);
-        SetWindowRgn(hwnd, outer, true); // window owns `outer` now
+        // Keep the bottom-right resize grip solid (don't let the hole eat it).
+        IntPtr grip = CreateRectRgn(_wpx - gripPx, _hpx - gripPx, _wpx, _hpx);
+        CombineRgn(hole, hole, grip, RGN_DIFF);   // hole := hole − grip corner
+        CombineRgn(outer, outer, hole, RGN_DIFF);  // outer := outer − hole
+        SetWindowRgn(hwnd, outer, true);           // window owns `outer` now
         DeleteObject(hole);
+        DeleteObject(grip);
     }
 
-    /// <summary>Reposition the target to sit inside the frame's hole.</summary>
-    private void DriveTarget()
+    /// <summary>Drive the target to match the frame: move it under the titlebar and
+    /// resize it to the frame's current inner area. Only pushes when something
+    /// actually changed (avoids per-tick churn / flicker).</summary>
+    private void SyncTarget()
     {
         if (_closing) return;
+
+        int wpx = (int)Math.Round(ClientSize.Width * _scale);
+        int hpx = (int)Math.Round(ClientSize.Height * _scale);
+        int gw = Math.Max(80, wpx - 2 * _bpx);
+        int gh = Math.Max(40, hpx - _tpx - _bpx);
         int gx = Position.X + _bpx;
         int gy = Position.Y + _tpx;
-        NativeWindows.MoveResize(_target, gx, gy, _gw, _gh);
+
+        var next = (gx, gy, gw, gh);
+        if (next == _lastPushed) return;
+        _lastPushed = next;
+
+        bool sizeChanged = gw != _gw || gh != _gh;
+        _gw = gw; _gh = gh; _wpx = wpx; _hpx = hpx;
+
+        NativeWindows.MoveResize(_target, gx, gy, gw, gh);
+        if (sizeChanged) ApplyHollowRegion(); // hole tracks the new size
     }
 
     private void Tick(object? sender, EventArgs e)
@@ -117,7 +146,7 @@ public partial class GameFrameWindow : Window
             CloseFrame(); // the framed window is gone
             return;
         }
-        ApplyHollowRegion(); // re-assert in case the compositor reset it
+        SyncTarget(); // picks up live resize from the corner grip
     }
 
     private void CloseFrame()

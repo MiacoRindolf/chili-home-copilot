@@ -52,4 +52,9 @@ of truth until this reaches parity.
       window — titlebar + thin border, center clicks pass through. Drag the
       titlebar → the frame DRIVES the target (MoveResize). Closes when the target
       closes. Picked from the Games app's "Frame" button or `--frame <title>`.
-      Verified attaching around Notepad. (Resize-by-frame + grouping: next.)
+      Verified attaching around Notepad.
+- [x] **NATIVE-6** — resize-by-frame: a bottom-right corner grip (kept solid in
+      the hollow region) resizes the frame and the target follows live
+      (BeginResizeDrag + a unified move/resize sync). The frame now both moves and
+      resizes the picked window. Verified grip + borders around Notepad.
+      (Window grouping / on-game price overlay: next.)
