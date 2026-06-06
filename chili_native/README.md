@@ -138,3 +138,8 @@ of truth until this reaches parity.
       device token fields (token masked), Save, and a "Test connection" button
       (`ChiliApiClient.TestConnectionAsync` — health + authed probe). Makes the
       client configurable on any machine. Verified ("✓ Connected — token accepted").
+- [x] **NATIVE-27** — **Brain app** (backend): the autonomous-coding/dispatch
+      cockpit — 24h LLM spend ($ / calls / tokens, per provider), context-brain
+      mode, dispatch kill-switch, and recent dispatch runs with color-coded
+      decisions, from `/api/brain/dispatch/status` + `/context/status`.
+      **Verified live** ($0.26/24h, 613 calls, 10 recent runs). 7th dock app.

@@ -19,6 +19,7 @@ public partial class MainWindowViewModel : ViewModelBase
             new("Trading", "$", new TradingViewModel()),
             new("Games", "◆", new GamesViewModel()),
             new("Research", "⎰", new ResearchViewModel()),
+            new("Brain", "✦", new BrainViewModel()),
             new("Settings", "⚙", new SettingsViewModel()),
         };
         _current = Apps[0];
