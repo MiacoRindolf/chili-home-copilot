@@ -247,6 +247,27 @@ void main() {
       expect(find.text('No research yet'), findsOneWidget);
     });
 
+    testWidgets('RS-6: empty state offers quick-start chips that run research',
+        (WidgetTester tester) async {
+      String? ran;
+      await tester.pumpWidget(MaterialApp(
+        home: ResearchScreen(
+          fetcher: () async => <String, dynamic>{'topics': <Object?>[]},
+          reportOpener: () async => false,
+          runner: (String topic) async {
+            ran = topic;
+            return const <String, dynamic>{}; // not stored → no reload needed
+          },
+        ),
+      ));
+      await tester.pumpAndSettle();
+      expect(find.byType(ActionChip), findsWidgets);
+      expect(find.text('AI chip demand'), findsOneWidget);
+      await tester.tap(find.text('AI chip demand'));
+      await tester.pump();
+      expect(ran, 'AI chip demand');
+    });
+
     testWidgets('RS-2: run research stores a topic and reloads the digest',
         (WidgetTester tester) async {
       int fetches = 0;

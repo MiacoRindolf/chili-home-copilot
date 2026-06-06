@@ -84,9 +84,10 @@ class _ResearchScreenState extends State<ResearchScreen> {
     super.dispose();
   }
 
-  Future<void> _runResearch() async {
-    final String topic = _topicCtrl.text.trim();
+  Future<void> _runResearch([String? presetTopic]) async {
+    final String topic = (presetTopic ?? _topicCtrl.text).trim();
     if (topic.isEmpty || _running) return;
+    if (presetTopic != null) _topicCtrl.text = topic; // reflect in the run-bar
     setState(() => _running = true);
     Map<String, dynamic> res;
     try {
@@ -278,11 +279,12 @@ class _ResearchScreenState extends State<ResearchScreen> {
     }
     final ResearchDigest d = _digest ?? ResearchDigest.empty;
     if (d.isEmpty) {
-      return const ApEmptyState(
+      return ApEmptyState(
         icon: Icons.travel_explore,
         message: 'No research yet',
         detail:
-            'CHILI researches topics you show interest in. Results will appear here.',
+            'Type a topic above, or start with one of these:',
+        action: _quickStart(cs),
       );
     }
     // SF-1 — filter the shown topics by the run-bar text; RS-4 — then sort.
@@ -316,6 +318,30 @@ class _ResearchScreenState extends State<ResearchScreen> {
           for (final ResearchSource s in d.sources) _sourceRow(cs, s),
         ],
         const SizedBox(height: 24),
+      ],
+    );
+  }
+
+  /// RS-6 — suggested starter topics for the empty state.
+  static const List<String> _quickStartTopics = <String>[
+    'Federal Reserve rate outlook',
+    'AI chip demand',
+    'Bitcoin ETF flows',
+    'Crude oil supply',
+  ];
+
+  Widget _quickStart(ColorScheme cs) {
+    return Wrap(
+      alignment: WrapAlignment.center,
+      spacing: 8,
+      runSpacing: 8,
+      children: <Widget>[
+        for (final String t in _quickStartTopics)
+          ActionChip(
+            avatar: const Icon(Icons.bolt, size: 16),
+            label: Text(t),
+            onPressed: _running ? null : () => _runResearch(t),
+          ),
       ],
     );
   }
