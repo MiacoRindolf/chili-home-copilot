@@ -3085,6 +3085,27 @@ def _bridge_scanner_to_viability(
     events that trigger the "viability pipeline stale" warning when the brain worker is
     slow or not running.
     """
+    # M4: process the most EXPLOSIVE instruments first. Ross trades the leading
+    # movers, not an arbitrary slice — so rank the full universe by Ross momentum
+    # quality (RVOL + already-moving) and reorder before the cap below picks the
+    # top _VIABILITY_BRIDGE_MAX_TICKERS. No-op on failure (keeps original order).
+    # See docs/DESIGN/MOMENTUM_LANE.md.
+    try:
+        from .trading.momentum_neural.ross_momentum import score_universe as _ross_su
+
+        def _bsym(_r: dict) -> str:
+            return str(_r.get("ticker") or _r.get("symbol") or "").strip().upper()
+
+        _ross_ranked = _ross_su({_bsym(r): r for r in results if _bsym(r)})
+        results = sorted(
+            results,
+            key=lambda r: (
+                _ross_ranked[_bsym(r)].rank if _bsym(r) in _ross_ranked else 10**9
+            ),
+        )
+    except Exception:
+        logger.debug("[scheduler] ross momentum universe sort skipped", exc_info=True)
+
     tickers: list[str] = []
     ross_signals: dict[str, dict] = {}
     for r in results:
