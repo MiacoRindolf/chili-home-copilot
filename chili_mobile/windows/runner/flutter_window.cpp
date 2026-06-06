@@ -12,8 +12,8 @@ namespace {
 
 constexpr wchar_t kFrameClass[] = L"ChiliGameFrameBar";
 constexpr int kTitleH = 32;  // CHILI title bar height
-constexpr int kBorder = 2;   // side / bottom border thickness
-constexpr int kGrip = 16;    // bottom-right resize grip
+constexpr int kBorder = 6;   // side / bottom border (grabbable for resize)
+constexpr int kGrip = 18;    // corner resize zone size
 
 // The game name shown on the CHILI title bar (one frame at a time).
 std::wstring g_frame_name;
@@ -178,9 +178,17 @@ LRESULT CALLBACK FrameBarProc(HWND h, UINT m, WPARAM w, LPARAM l) {
       int y = GET_Y_LPARAM(l) - wr.top;
       int ww = wr.right - wr.left;
       int wh = wr.bottom - wr.top;
-      // Close button (top-right square) must receive clicks, so HTCLIENT.
-      if (y < kTitleH && x >= ww - kTitleH) return HTCLIENT;
+      // Four corners resize (checked first so they win over edges/title bar).
+      if (x <= kGrip && y <= kGrip) return HTTOPLEFT;
+      if (x >= ww - kGrip && y <= kGrip) return HTTOPRIGHT;
+      if (x <= kGrip && y >= wh - kGrip) return HTBOTTOMLEFT;
       if (x >= ww - kGrip && y >= wh - kGrip) return HTBOTTOMRIGHT;
+      // Close button: a title-bar square inset from the top-right corner so it
+      // doesn't fight the corner resize. HTCLIENT so it receives the click.
+      int close_r = ww - kGrip;
+      int close_l = close_r - kTitleH;
+      if (y < kTitleH && x >= close_l && x < close_r) return HTCLIENT;
+      // Edges.
       if (x <= kBorder) return HTLEFT;
       if (x >= ww - kBorder) return HTRIGHT;
       if (y >= wh - kBorder) return HTBOTTOM;
@@ -192,7 +200,9 @@ LRESULT CALLBACK FrameBarProc(HWND h, UINT m, WPARAM w, LPARAM l) {
       ::GetClientRect(h, &rc);
       int x = GET_X_LPARAM(l);
       int y = GET_Y_LPARAM(l);
-      if (y < kTitleH && x >= rc.right - kTitleH) {
+      int close_r = rc.right - kGrip;
+      int close_l = close_r - kTitleH;
+      if (y < kTitleH && x >= close_l && x < close_r) {
         if (g_frame_owner) g_frame_owner->DismissFrame();
         return 0;
       }
@@ -226,19 +236,20 @@ LRESULT CALLBACK FrameBarProc(HWND h, UINT m, WPARAM w, LPARAM l) {
       ::DeleteObject(ab);
       ::SetBkMode(hdc, TRANSPARENT);
       ::SetTextColor(hdc, RGB(236, 239, 241));
-      RECT tr = {34, 0, rc.right - kTitleH - 8, kTitleH};
+      int close_r = rc.right - kGrip;
+      int close_l = close_r - kTitleH;
+      RECT tr = {34, 0, close_l - 8, kTitleH};
       std::wstring label = L"CHILI  -  " + g_frame_name;
       ::DrawTextW(hdc, label.c_str(), -1, &tr,
                   DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_END_ELLIPSIS);
-      // Close (X) button in the top-right square.
-      int cx0 = rc.right - kTitleH;
+      // Close (X) button, drawn in its inset square.
       HPEN pen = ::CreatePen(PS_SOLID, 1, RGB(205, 210, 214));
       HGDIOBJ oldp = ::SelectObject(hdc, pen);
       int pad = 11;
-      ::MoveToEx(hdc, cx0 + pad, pad, nullptr);
-      ::LineTo(hdc, rc.right - pad, kTitleH - pad);
-      ::MoveToEx(hdc, rc.right - pad, pad, nullptr);
-      ::LineTo(hdc, cx0 + pad, kTitleH - pad);
+      ::MoveToEx(hdc, close_l + pad, pad, nullptr);
+      ::LineTo(hdc, close_r - pad, kTitleH - pad);
+      ::MoveToEx(hdc, close_r - pad, pad, nullptr);
+      ::LineTo(hdc, close_l + pad, kTitleH - pad);
       ::SelectObject(hdc, oldp);
       ::DeleteObject(pen);
       ::EndPaint(h, &ps);
