@@ -70,3 +70,18 @@ def test_equity_relative_loss_cap_falls_back_no_equity(monkeypatch) -> None:
     monkeypatch.setattr(settings, "chili_momentum_risk_loss_fraction_of_equity", 0.01)
     monkeypatch.setattr(rp, "_account_equity_usd", lambda: None)
     assert rp.equity_relative_loss_cap(50.0) == 50.0
+
+
+# ── DAILY-LOSS circuit-breaker cap (global, evaluated live) ───────────────────
+
+
+def test_equity_relative_daily_loss_uses_equity(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "chili_momentum_risk_daily_loss_fraction_of_equity", 0.05)
+    monkeypatch.setattr(rp, "_account_equity_usd", lambda: 2000.0)
+    assert rp.equity_relative_daily_loss_cap(250.0) == pytest.approx(100.0)  # 2000 * 0.05
+
+
+def test_equity_relative_daily_loss_falls_back_no_equity(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "chili_momentum_risk_daily_loss_fraction_of_equity", 0.05)
+    monkeypatch.setattr(rp, "_account_equity_usd", lambda: None)
+    assert rp.equity_relative_daily_loss_cap(250.0) == 250.0
