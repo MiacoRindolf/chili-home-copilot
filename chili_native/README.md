@@ -128,4 +128,9 @@ of truth until this reaches parity.
       power / cash, per-broker breakdown, kill-switch + risk-heat strip, and the
       open-positions list with color-coded P/L, from `/api/trading/broker/portfolio`,
       `/brain/governance`, `/risk/budget`, `/broker/positions` (+ Refresh).
-      **Verified live** ($13,157.77 equity, 35 positions). (Next: Research.)
+      **Verified live** ($13,157.77 equity, 35 positions).
+- [x] **NATIVE-25** — **Research** (backend): shows the stored research digest
+      (`/research/report?format=json`) and runs on-demand research
+      (`POST /research/run` {topic}) — web + LLM — rendering the summary + sources.
+      **Verified live** ("latest RuneScape 3 game updates" → full summary + 4 sources).
+      **All three backend apps (Chat · Trading · Research) are now live.**
