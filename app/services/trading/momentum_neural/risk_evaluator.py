@@ -18,7 +18,12 @@ from ..governance import get_kill_switch_status, is_kill_switch_active
 from .market_profile import is_coinbase_spot_symbol
 from .live_fsm import LIVE_RUNNER_ACTIVE_FOR_CONCURRENCY
 from .paper_fsm import LIVE_INTENT_STATES, PAPER_CONCURRENT_STATES
-from .risk_policy import MomentumAutomationRiskPolicy, POLICY_VERSION, resolve_effective_risk_policy
+from .risk_policy import (
+    MomentumAutomationRiskPolicy,
+    POLICY_VERSION,
+    adaptive_max_spread_bps,
+    resolve_effective_risk_policy,
+)
 
 # Count toward concurrency limits (pre-runner + paper/live runner actives until terminal).
 _CONCURRENT_STATES = (
@@ -116,6 +121,7 @@ def evaluate_proposed_momentum_automation(
     mode: str,
     execution_family: str = "coinbase_spot",
     exclude_session_id: Optional[int] = None,
+    expected_move_bps: Optional[float] = None,
 ) -> dict[str, Any]:
     """
     Server-side risk gate for operator flows (paper draft, live arm, confirm).
@@ -332,7 +338,15 @@ def evaluate_proposed_momentum_automation(
         # ── Execution readiness (spread / slip / fee) ──────────────────
         ex = via.execution_readiness_json if isinstance(via.execution_readiness_json, dict) else {}
         nums = _readiness_numbers(ex)
-        max_spread = policy.max_spread_bps_live if m == "live" else policy.max_spread_bps_paper
+        # Live spread cap is volatility-relative (adaptive) when the caller passes
+        # the instrument's expected move — the live runner does; other callers fall
+        # back to the documented base floor. Paper keeps its fixed cap.
+        if m == "live":
+            max_spread = adaptive_max_spread_bps(
+                policy.max_spread_bps_live, expected_move_bps, policy.spread_to_expected_move_ratio
+            )
+        else:
+            max_spread = policy.max_spread_bps_paper
         spread = nums.get("spread_bps")
         if spread is not None:
             try:

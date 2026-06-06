@@ -626,6 +626,8 @@ def _safe_transition(db: Session, sess: TradingAutomationSession, new_state: str
 def runner_boundary_risk_ok(
     db: Session,
     sess: TradingAutomationSession,
+    *,
+    expected_move_bps: float | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     if sess.user_id is None:
         return False, {"reason": "no_user"}
@@ -637,6 +639,7 @@ def runner_boundary_risk_ok(
         mode="live",
         execution_family=normalize_execution_family(sess.execution_family),
         exclude_session_id=int(sess.id),
+        expected_move_bps=expected_move_bps,
     )
     return bool(ev.get("allowed", False)), ev
 
@@ -667,6 +670,57 @@ def _notional_guard_multiplier() -> float:
     return 1.0 + max(0.0, bps) / 10_000.0
 
 
+def _expected_move_bps_from_ohlcv(df: Any) -> float | None:
+    """Typical recent 15m bar range in bps (ATR / last close) as an expected-move
+    proxy. The BBO spread is a round-trip cost, so the adaptive spread gate
+    tolerates proportionally more of it on instruments that actually move this
+    much. Returns None when candle data is missing or too thin to be meaningful.
+    Pure + side-effect-free for unit testing. (docs/DESIGN/MOMENTUM_LANE.md)"""
+    try:
+        if df is None or getattr(df, "empty", True) or len(df) < 5:
+            return None
+        import pandas as pd
+
+        high = df["High"].astype(float)
+        low = df["Low"].astype(float)
+        close = df["Close"].astype(float)
+        prev_close = close.shift(1)
+        true_range = pd.concat(
+            [(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()],
+            axis=1,
+        ).max(axis=1).dropna()
+        if len(true_range) < 1:
+            return None
+        n = min(14, len(true_range))
+        atr = float(true_range.tail(n).mean())
+        last_close = float(close.iloc[-1])
+        if not math.isfinite(atr) or atr <= 0 or last_close <= 0:
+            return None
+        return (atr / last_close) * 10_000.0
+    except Exception:
+        return None
+
+
+def _adaptive_live_max_spread_bps(expected_move_bps: float | None) -> float:
+    """Live spread cap, volatility-relative: ``max(base_floor, ratio x expected
+    move)``. Reuses the shared, tested policy helper so the runner BBO gate and
+    the pre-entry risk evaluator agree on the same adaptive tolerance. Reads the
+    documented base floor + ratio knobs from settings (no inline magic)."""
+    from .risk_policy import adaptive_max_spread_bps
+
+    try:
+        raw_base = getattr(settings, "chili_momentum_risk_max_spread_bps_live", 12.0)
+        base = 12.0 if raw_base is None else float(raw_base)
+    except (TypeError, ValueError):
+        base = 12.0
+    try:
+        raw_ratio = getattr(settings, "chili_momentum_risk_spread_to_expected_move_ratio", 0.5)
+        ratio = 0.5 if raw_ratio is None else float(raw_ratio)
+    except (TypeError, ValueError):
+        ratio = 0.5
+    return adaptive_max_spread_bps(base, expected_move_bps, ratio)
+
+
 def _live_entry_quote_gate_applies(sess: TradingAutomationSession, le: dict[str, Any]) -> bool:
     state = sess.state
     if state in (STATE_ARMED_PENDING_RUNNER, STATE_QUEUED_LIVE, STATE_WATCHING_LIVE, STATE_LIVE_ENTRY_CANDIDATE):
@@ -674,7 +728,9 @@ def _live_entry_quote_gate_applies(sess: TradingAutomationSession, le: dict[str,
     return state == STATE_LIVE_PENDING_ENTRY and not le.get("entry_submitted")
 
 
-def _quote_quality_block(tick: Any, freshness: Any) -> dict[str, Any] | None:
+def _quote_quality_block(
+    tick: Any, freshness: Any, max_spread_bps: float | None = None
+) -> dict[str, Any] | None:
     meta = getattr(tick, "freshness", None) or freshness
     if meta is not None and not is_fresh_enough(meta):
         return {
@@ -696,9 +752,17 @@ def _quote_quality_block(tick: Any, freshness: Any) -> dict[str, Any] | None:
         spread_bps = ((ask - bid) / mid) * 10_000.0
     if not math.isfinite(spread_bps):
         spread_bps = ((ask - bid) / mid) * 10_000.0
-    try:
+    # max_spread_bps is the caller-supplied ADAPTIVE tolerance (volatility-relative);
+    # fall back to the documented base floor when absent or invalid.
+    raw_max_spread = max_spread_bps
+    if raw_max_spread is None:
         raw_max_spread = getattr(settings, "chili_momentum_risk_max_spread_bps_live", 12.0)
+    try:
+        # A 0.0 cap is a deliberate "block all" and is preserved; only None / NaN /
+        # inf / unparseable values fall back to the documented default.
         max_spread = 12.0 if raw_max_spread is None else float(raw_max_spread)
+        if not math.isfinite(max_spread):
+            max_spread = 12.0
     except (TypeError, ValueError):
         max_spread = 12.0
     if spread_bps > max_spread:
@@ -1017,8 +1081,38 @@ def tick_live_session(
         db.flush()
         return {"ok": True, "blocked": True, "reason": "no_quote"}
 
-    quote_block = _quote_quality_block(tick, _fr)
+    # Adaptive spread tolerance (no magic 12 bps): the BBO spread is a round-trip
+    # cost, so gate it relative to how far THIS instrument actually moves (its
+    # realized 15m volatility). Explosive momentum names (Ross's universe) carry
+    # wider absolute spreads that are still tiny vs. their move; we only ever
+    # loosen above the documented floor. The 15m candles are reused below by the
+    # M4.1 momentum-continuation trigger, so fetch them once per pre-entry tick.
+    # (docs/DESIGN/MOMENTUM_LANE.md)
+    _entry_df = None
+    _expected_move_bps: float | None = None
+    _adaptive_max_spread: float | None = None
+    if _live_entry_quote_gate_applies(sess, le):
+        try:
+            from ..market_data import fetch_ohlcv_df
+
+            _entry_df = fetch_ohlcv_df(sess.symbol, interval="15m", period="5d")
+        except Exception:
+            _entry_df = None
+        _expected_move_bps = _expected_move_bps_from_ohlcv(_entry_df)
+        _adaptive_max_spread = _adaptive_live_max_spread_bps(_expected_move_bps)
+        _log.info(
+            "[momentum_live] adaptive_spread symbol=%s state=%s expected_move_bps=%s max_spread_bps=%.2f",
+            sess.symbol,
+            sess.state,
+            None if _expected_move_bps is None else round(_expected_move_bps, 2),
+            _adaptive_max_spread,
+        )
+
+    quote_block = _quote_quality_block(tick, _fr, max_spread_bps=_adaptive_max_spread)
     if quote_block is not None:
+        quote_block["expected_move_bps"] = (
+            None if _expected_move_bps is None else round(_expected_move_bps, 4)
+        )
         _emit(db, sess, "live_blocked_by_risk", quote_block)
         le["last_quote_quality_gate"] = quote_block
         _commit_le(sess, le)
@@ -1032,7 +1126,7 @@ def tick_live_session(
     bid = float(tick.bid or mid)
     ask = float(tick.ask or mid)
 
-    ok_b, ev = runner_boundary_risk_ok(db, sess)
+    ok_b, ev = runner_boundary_risk_ok(db, sess, expected_move_bps=_expected_move_bps)
     if not ok_b:
         _emit(
             db,
@@ -1124,10 +1218,15 @@ def tick_live_session(
         _trigger_ok, _trigger_reason = True, "score_only"
         if _score_ok:
             try:
-                from ..market_data import fetch_ohlcv_df
                 from .entry_gates import momentum_volume_confirmation
 
-                _df = fetch_ohlcv_df(sess.symbol, interval="15m", period="5d")
+                # Reuse the candles already fetched for the adaptive spread gate
+                # this tick; fall back to a fresh fetch only if that was skipped.
+                _df = _entry_df
+                if _df is None:
+                    from ..market_data import fetch_ohlcv_df
+
+                    _df = fetch_ohlcv_df(sess.symbol, interval="15m", period="5d")
                 if _df is None or getattr(_df, "empty", True):
                     _trigger_ok, _trigger_reason = False, "no_data_wait"
                 else:
