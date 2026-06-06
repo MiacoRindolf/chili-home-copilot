@@ -279,8 +279,33 @@ void EnsureFrameClass() {
 // ---- GAME-11: in-game item-price search overlay --------------------------
 
 constexpr wchar_t kSearchClass[] = L"ChiliSearchOverlay";
-std::wstring g_search_result;       // last lookup result (one overlay at a time)
+constexpr int kCardW = 340;
+constexpr int kCardH = 116;
+constexpr int kEditH = 30;
 WNDPROC g_orig_edit_proc = nullptr;  // original EDIT proc, for subclassing
+
+// Structured result state (one overlay at a time): 0 idle, 1 searching, 2 ok,
+// 3 message (empty / error).
+int g_res_state = 0;
+std::wstring g_res_name, g_res_price, g_res_vol, g_res_msg;
+
+// Lazily-created modern GDI resources.
+HFONT g_font_price = nullptr, g_font_body = nullptr, g_font_small = nullptr;
+HBRUSH g_edit_bg = nullptr;
+
+void EnsureSearchGdi() {
+  if (g_font_price) return;
+  auto mk = [](int h, int weight) {
+    return ::CreateFontW(h, 0, 0, 0, weight, FALSE, FALSE, FALSE,
+                         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                         CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                         DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+  };
+  g_font_price = mk(-24, FW_SEMIBOLD);
+  g_font_body = mk(-15, FW_NORMAL);
+  g_font_small = mk(-12, FW_NORMAL);
+  g_edit_bg = ::CreateSolidBrush(RGB(32, 38, 45));
+}
 
 // Subclass the EDIT so Enter submits the query instead of dinging.
 LRESULT CALLBACK SearchEditProc(HWND h, UINT m, WPARAM w, LPARAM l) {
@@ -298,24 +323,60 @@ LRESULT CALLBACK SearchEditProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 }
 
 LRESULT CALLBACK SearchOverlayProc(HWND h, UINT m, WPARAM w, LPARAM l) {
-  if (m == WM_PAINT) {
-    PAINTSTRUCT ps;
-    HDC hdc = ::BeginPaint(h, &ps);
-    RECT rc;
-    ::GetClientRect(h, &rc);
-    HBRUSH bg = ::CreateSolidBrush(RGB(18, 22, 27));
-    ::FillRect(hdc, &rc, bg);
-    ::DeleteObject(bg);
-    ::SetBkMode(hdc, TRANSPARENT);
-    ::SetTextColor(hdc, g_search_result.empty() ? RGB(150, 156, 162)
-                                                : RGB(120, 230, 170));
-    RECT tr = {8, 36, rc.right - 8, rc.bottom - 4};
-    const wchar_t* txt = g_search_result.empty()
-                             ? L"Type an item + Enter for GE price"
-                             : g_search_result.c_str();
-    ::DrawTextW(hdc, txt, -1, &tr, DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS);
-    ::EndPaint(h, &ps);
-    return 0;
+  switch (m) {
+    case WM_CTLCOLOREDIT: {
+      HDC dc = reinterpret_cast<HDC>(w);
+      ::SetTextColor(dc, RGB(236, 239, 241));
+      ::SetBkColor(dc, RGB(32, 38, 45));
+      return reinterpret_cast<LRESULT>(g_edit_bg);
+    }
+    case WM_PAINT: {
+      PAINTSTRUCT ps;
+      HDC hdc = ::BeginPaint(h, &ps);
+      RECT rc;
+      ::GetClientRect(h, &rc);
+      // Card background + a 1px accent edge along the top.
+      HBRUSH bg = ::CreateSolidBrush(RGB(20, 24, 28));
+      ::FillRect(hdc, &rc, bg);
+      ::DeleteObject(bg);
+      RECT accent = {0, 0, rc.right, 2};
+      HBRUSH ab = ::CreateSolidBrush(RGB(46, 200, 130));
+      ::FillRect(hdc, &accent, ab);
+      ::DeleteObject(ab);
+      ::SetBkMode(hdc, TRANSPARENT);
+      const int x = 14;
+      const int top = kEditH + 14;  // below the search field
+      if (g_res_state == 2) {
+        // Item name (secondary).
+        ::SelectObject(hdc, g_font_small);
+        ::SetTextColor(hdc, RGB(150, 157, 164));
+        ::TextOutW(hdc, x, top, g_res_name.c_str(),
+                   static_cast<int>(g_res_name.size()));
+        // Price (hero).
+        ::SelectObject(hdc, g_font_price);
+        ::SetTextColor(hdc, RGB(64, 206, 134));
+        ::TextOutW(hdc, x, top + 16, g_res_price.c_str(),
+                   static_cast<int>(g_res_price.size()));
+        // Volume (muted).
+        ::SelectObject(hdc, g_font_small);
+        ::SetTextColor(hdc, RGB(122, 131, 139));
+        ::TextOutW(hdc, x, top + 46, g_res_vol.c_str(),
+                   static_cast<int>(g_res_vol.size()));
+      } else {
+        ::SelectObject(hdc, g_font_body);
+        ::SetTextColor(hdc, g_res_state == 1 ? RGB(64, 206, 134)
+                                             : RGB(150, 157, 164));
+        std::wstring msg = g_res_state == 1 ? L"Searching…"
+                           : g_res_state == 3
+                               ? g_res_msg
+                               : L"Type an item, press Enter for its GE price";
+        RECT tr = {x, top, rc.right - 12, rc.bottom - 8};
+        ::DrawTextW(hdc, msg.c_str(), -1, &tr,
+                    DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS);
+      }
+      ::EndPaint(h, &ps);
+      return 0;
+    }
   }
   return ::DefWindowProcW(h, m, w, l);
 }
@@ -466,16 +527,27 @@ void FlutterWindow::DismissFrame() { StopFrame(); }
 
 void FlutterWindow::CreateSearchOverlay(HWND game, int gx, int gy) {
   EnsureSearchClass();
+  EnsureSearchGdi();
   HINSTANCE inst = ::GetModuleHandleW(nullptr);
-  const int ow = 300, oh = 70;
   search_overlay_ = ::CreateWindowExW(WS_EX_TOOLWINDOW, kSearchClass, L"",
-                                      WS_POPUP | WS_VISIBLE, gx + 8, gy + 8, ow,
-                                      oh, game, nullptr, inst, nullptr);
+                                      WS_POPUP | WS_VISIBLE, gx + 10, gy + 10,
+                                      kCardW, kCardH, game, nullptr, inst,
+                                      nullptr);
   if (!search_overlay_) return;
-  search_edit_ = ::CreateWindowExW(
-      WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 6,
-      6, ow - 12, 24, search_overlay_, nullptr, inst, nullptr);
+  // Rounded-card shape.
+  ::SetWindowRgn(search_overlay_,
+                 ::CreateRoundRectRgn(0, 0, kCardW + 1, kCardH + 1, 16, 16),
+                 TRUE);
+  g_res_state = 0;
+  search_edit_ = ::CreateWindowExW(0, L"EDIT", L"",
+                                   WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 10,
+                                   10, kCardW - 20, kEditH, search_overlay_,
+                                   nullptr, inst, nullptr);
   if (search_edit_) {
+    ::SendMessageW(search_edit_, WM_SETFONT,
+                   reinterpret_cast<WPARAM>(g_font_body), TRUE);
+    ::SendMessageW(search_edit_, EM_SETMARGINS,
+                   EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(8, 8));
     g_orig_edit_proc = reinterpret_cast<WNDPROC>(::SetWindowLongPtrW(
         search_edit_, GWLP_WNDPROC,
         reinterpret_cast<LONG_PTR>(SearchEditProc)));
@@ -489,7 +561,11 @@ void FlutterWindow::DestroySearchOverlay() {
   }
   search_overlay_ = nullptr;
   search_edit_ = nullptr;
-  g_search_result.clear();
+  g_res_state = 0;
+  g_res_name.clear();
+  g_res_price.clear();
+  g_res_vol.clear();
+  g_res_msg.clear();
 }
 
 void FlutterWindow::RepositionSearchOverlay() {
@@ -505,7 +581,7 @@ void FlutterWindow::RepositionSearchOverlay() {
 
 void FlutterWindow::OnSearchSubmit(const std::wstring& text) {
   if (!frame_channel_) return;
-  g_search_result = L"Searching...";
+  g_res_state = 1;  // searching
   if (search_overlay_) ::InvalidateRect(search_overlay_, nullptr, TRUE);
   flutter::EncodableMap args;
   args[flutter::EncodableValue("q")] =
@@ -553,8 +629,17 @@ void FlutterWindow::SetupFrameChannel() {
           return;
         }
         if (call.method_name() == "searchResult") {
-          std::string text = args ? GetString(*args, "text") : std::string();
-          g_search_result = Utf8ToWide(text);
+          const std::string st = args ? GetString(*args, "state") : "";
+          if (st == "ok") {
+            g_res_state = 2;
+            g_res_name = Utf8ToWide(GetString(*args, "name"));
+            g_res_price = Utf8ToWide(GetString(*args, "price"));
+            g_res_vol = Utf8ToWide(GetString(*args, "volume"));
+          } else {
+            g_res_state = 3;
+            g_res_msg =
+                Utf8ToWide(args ? GetString(*args, "message") : std::string());
+          }
           if (search_overlay_ && ::IsWindow(search_overlay_)) {
             ::InvalidateRect(search_overlay_, nullptr, TRUE);
           }
