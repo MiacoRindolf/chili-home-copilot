@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../agents/agent.dart';
+import '../agents/agent_activity_service.dart';
 import '../agents/agent_persistence.dart';
 import '../agents/agent_registry.dart';
 import '../agents/agent_status_service.dart';
@@ -141,7 +142,11 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
     'agents': _AppDef(
       'Agents',
       Icons.smart_toy,
-      () => AgentsScreen(registry: _agents, livePolling: false),
+      () => AgentsScreen(
+            registry: _agents,
+            livePolling: false,
+            onDiscussRun: _onDiscussAgentRun,
+          ),
       size: const Size(940, 620),
     ),
     'research': _AppDef(
@@ -352,6 +357,18 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
   /// RC-2 — "Discuss" a learned skill: open Chat asking how/when to apply it.
   void _onDiscussSkill(String skillName) {
     _chatAsk.value = 'Explain this learned skill and when to apply it: $skillName';
+    _openApp('chat');
+  }
+
+  /// AG-2 — "Discuss" a backend agent run: open Chat with the run's context so
+  /// the user can ask what happened / what to do next.
+  void _onDiscussAgentRun(String agentLabel, AgentRun run) {
+    final String outcome =
+        run.outcome == null || run.outcome!.isEmpty ? '' : ' (${run.outcome})';
+    final String when = run.when.trim().isEmpty ? '' : ' at ${run.when}';
+    _chatAsk.value =
+        'Explain this "$agentLabel" run$when: ${run.title}$outcome. '
+        'What does it mean and is any follow-up needed?';
     _openApp('chat');
   }
 
