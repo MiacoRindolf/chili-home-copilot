@@ -143,3 +143,6 @@ of truth until this reaches parity.
       mode, dispatch kill-switch, and recent dispatch runs with color-coded
       decisions, from `/api/brain/dispatch/status` + `/context/status`.
       **Verified live** ($0.26/24h, 613 calls, 10 recent runs). 7th dock app.
+- [x] **NATIVE-28** — **Home app** (backend): the household/system activity feed
+      (`/api/activity`) — recent events with type icon, description, user, and a
+      relative time. Set as the default landing app. **Verified live** (25 events).
