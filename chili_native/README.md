@@ -79,4 +79,9 @@ of truth until this reaches parity.
       note. Verified rendering.
 - [x] **NATIVE-12** — keyboard shortcuts + double-click-maximize: Ctrl+1..6 switch
       dock apps, Ctrl+W closes; double-clicking the title bar toggles maximize.
-      Verified (Ctrl+3 → Trading). (Port Chat·Trading·Research with the backend: next.)
+      Verified (Ctrl+3 → Trading).
+- [x] **NATIVE-13** — frame edge-resize: resize the framed window from the left,
+      right, and bottom edges + both bottom corners (not just BR). Edge handles
+      live in the solid 6px border; both bottom corners are kept solid in the
+      hollow region. Verified frame renders intact around Notepad.
+      (Port Chat·Trading·Research with the backend: next.)
