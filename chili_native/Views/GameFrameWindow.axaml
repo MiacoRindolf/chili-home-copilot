@@ -1,0 +1,35 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d"
+        x:Class="Chili.Views.GameFrameWindow"
+        Title="CHILI Frame"
+        SystemDecorations="None" CanResize="False"
+        Background="Transparent" TransparencyLevelHint="Transparent"
+        Topmost="True" ShowInTaskbar="False">
+
+    <Grid RowDefinitions="34,*">
+        <!-- Titlebar (drives the framed window) -->
+        <Border Grid.Row="0" Name="TitleBar" Background="{StaticResource SurfaceBrush}"
+                BorderBrush="{StaticResource AccentBrush}" BorderThickness="0,0,0,2">
+            <Grid ColumnDefinitions="*,Auto" Margin="10,0">
+                <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8"
+                            VerticalAlignment="Center">
+                    <Border Width="11" Height="11" CornerRadius="3"
+                            Background="{StaticResource BrandBrush}"/>
+                    <TextBlock Name="TitleText" Text="CHILI" FontSize="12" FontWeight="Bold"
+                               Foreground="{StaticResource TextHiBrush}" VerticalAlignment="Center"/>
+                </StackPanel>
+                <Button Grid.Column="1" Name="CloseBtn" Content="✕" Width="34" Height="32"
+                        Background="Transparent" BorderThickness="0"
+                        Foreground="{StaticResource TextMidBrush}"
+                        HorizontalContentAlignment="Center" VerticalContentAlignment="Center"/>
+            </Grid>
+        </Border>
+
+        <!-- Border outline around the framed window; center stays transparent + hollow -->
+        <Border Grid.Row="1" Background="Transparent"
+                BorderBrush="{StaticResource AccentBrush}" BorderThickness="6"/>
+    </Grid>
+</Window>

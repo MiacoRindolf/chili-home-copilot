@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using Chili.Interop;
+using Chili.Views;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 
@@ -26,5 +27,14 @@ public partial class GamesViewModel : ViewModelBase
         foreach (var w in NativeWindows.ListTopLevelWindows())
             Windows.Add(w);
         Status = Windows.Count == 1 ? "1 open window" : $"{Windows.Count} open windows";
+    }
+
+    /// <summary>Wrap the user-picked window in a CHILI frame (you choose it —
+    /// never auto-grabbed).</summary>
+    [RelayCommand]
+    private void Frame(DesktopWindow? w)
+    {
+        if (w is null) return;
+        GameFrameWindow.Attach(w);
     }
 }

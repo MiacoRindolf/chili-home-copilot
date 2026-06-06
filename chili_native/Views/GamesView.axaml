@@ -58,7 +58,7 @@
                     <ItemsControl.ItemTemplate>
                         <DataTemplate x:DataType="interop:DesktopWindow">
                             <Border Classes="row">
-                                <Grid ColumnDefinitions="Auto,12,*">
+                                <Grid ColumnDefinitions="Auto,12,*,Auto">
                                     <Border Grid.Column="0" Width="34" Height="34" CornerRadius="8"
                                             Background="{StaticResource BgBaseBrush}">
                                         <TextBlock Text="▢" FontSize="16" Foreground="{StaticResource TextMidBrush}"
@@ -71,6 +71,14 @@
                                         <TextBlock Text="{Binding Subtitle}" FontSize="11"
                                                    Foreground="{StaticResource TextLowBrush}"/>
                                     </StackPanel>
+                                    <Button Grid.Column="3" Content="Frame" VerticalAlignment="Center"
+                                            Padding="12,6" CornerRadius="8" FontSize="12"
+                                            Background="{StaticResource BgBaseBrush}"
+                                            Foreground="{StaticResource AccentBrush}"
+                                            BorderBrush="{StaticResource StrokeBrush}" BorderThickness="1"
+                                            CommandParameter="{Binding}"
+                                            Command="{Binding ((vm:GamesViewModel)DataContext).FrameCommand,
+                                                      RelativeSource={RelativeSource AncestorType=UserControl}}"/>
                                 </Grid>
                             </Border>
                         </DataTemplate>
