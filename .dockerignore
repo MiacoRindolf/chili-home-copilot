@@ -36,6 +36,10 @@ tmp/
 .tmp/
 _tmp*/
 
+# Operator agent worktrees (git worktrees under project_ws) are large repo
+# copies and must never be baked into the backend image / build context.
+project_ws/
+
 # Frontend/mobile workspaces are mounted from the host for dev workflows; the
 # Python backend image does not need to carry their toolchains or build output.
 chili_mobile/
