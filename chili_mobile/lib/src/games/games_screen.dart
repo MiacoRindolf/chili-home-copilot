@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import '../ui/app_ui.dart';
 import 'game_awareness.dart';
 import 'game_frame.dart';
+import 'rs_item_overlay.dart';
 import 'runescape_prices.dart';
 import 'steam_models.dart';
 import 'steam_service.dart';
@@ -408,6 +409,15 @@ class _GamesScreenState extends State<GamesScreen> {
     return Column(
       children: <Widget>[
         if (playing != null) _nowPlayingBanner(cs, playing),
+        // GAME-14 — rich RuneScape item-price card while a game is running.
+        if (playing != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: RsItemOverlay(prices: _prices),
+            ),
+          ),
         Expanded(
           child: GridView.builder(
             padding: const EdgeInsets.all(20),
