@@ -1445,7 +1445,21 @@ def enqueue_imminent_edge_snapshot_coverage_work(
         recent_refresh = (
             db.query(BrainWorkEvent.id)
             .filter(BrainWorkEvent.event_type == EDGE_RELIABILITY_REFRESH)
-            .filter(BrainWorkEvent.created_at >= stale_cutoff)
+            # Dedup against any OPEN coverage refresh for this slice, not only
+            # recently-created ones. These coverage events carry no
+            # expected_evidence_value, so they sort last in the dispatcher and
+            # get starved behind evidence-valued work; a pure recency check let
+            # old pending rows pile up unboundedly (hundreds, attempts=0). One
+            # open coverage refresh per slice is enough — it recomputes the
+            # latest snapshot whenever it does run.
+            .filter(
+                or_(
+                    BrainWorkEvent.created_at >= stale_cutoff,
+                    BrainWorkEvent.status.in_(
+                        ("pending", "processing", "retry_wait")
+                    ),
+                )
+            )
             .filter(BrainWorkEvent.payload["scan_pattern_id"].astext == str(int(pid)))
             .filter(BrainWorkEvent.payload["asset_class"].astext == asset)
             .filter(BrainWorkEvent.payload["window_days"].astext == str(int(window_days)))
