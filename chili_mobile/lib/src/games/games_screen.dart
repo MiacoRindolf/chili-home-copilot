@@ -96,13 +96,32 @@ class _GamesScreenState extends State<GamesScreen> {
 
   final RuneScapePrices _prices = RuneScapePrices();
 
-  /// Resolve a typed RS item query to a one-line GE price string for the overlay.
-  Future<String> _runItemSearch(String query) async {
-    if (query.trim().isEmpty) return 'Type an item name';
-    final ItemPrice? p = await _prices.lookup(query);
-    if (p == null) return 'No GE price for “$query”';
-    return '${p.name}: ${formatGpFull(p.price)} gp  '
-        '(vol ${formatGpFull(p.volume)})';
+  /// Resolve a typed RS item query to a structured GE price result for the
+  /// modern overlay (name / price / volume, or a friendly message).
+  Future<Map<String, Object?>> _runItemSearch(String query) async {
+    if (query.trim().isEmpty) {
+      return <String, Object?>{'state': 'error', 'message': 'Type an item name'};
+    }
+    try {
+      final ItemPrice? p = await _prices.lookup(query);
+      if (p == null) {
+        return <String, Object?>{
+          'state': 'empty',
+          'message': 'No GE price for “$query”',
+        };
+      }
+      return <String, Object?>{
+        'state': 'ok',
+        'name': p.name,
+        'price': '${formatGpFull(p.price)} gp',
+        'volume': 'Vol ${formatGpFull(p.volume)}/day',
+      };
+    } catch (_) {
+      return <String, Object?>{
+        'state': 'error',
+        'message': 'Lookup failed — check your connection',
+      };
+    }
   }
 
   @override
