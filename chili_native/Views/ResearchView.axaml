@@ -1,0 +1,104 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:Chili.ViewModels"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d" d:DesignWidth="720" d:DesignHeight="580"
+             x:Class="Chili.Views.ResearchView"
+             x:DataType="vm:ResearchViewModel">
+
+    <UserControl.Styles>
+        <Style Selector="TextBox#Topic /template/ Border#PART_BorderElement">
+            <Setter Property="BorderBrush" Value="{StaticResource StrokeBrush}"/>
+        </Style>
+        <Style Selector="TextBox#Topic:focus /template/ Border#PART_BorderElement">
+            <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
+        </Style>
+    </UserControl.Styles>
+
+    <Border Width="720" Height="580" Background="{StaticResource SurfaceBrush}"
+            CornerRadius="16" BorderBrush="{StaticResource StrokeBrush}" BorderThickness="1"
+            Padding="20" BoxShadow="0 8 24 0 #70000000">
+        <DockPanel LastChildFill="True">
+            <TextBlock DockPanel.Dock="Top" Text="Research" FontSize="18" FontWeight="Bold"
+                       Foreground="{StaticResource TextHiBrush}" Margin="0,0,0,12"/>
+
+            <!-- run a topic -->
+            <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto" Margin="0,0,0,8">
+                <TextBox Grid.Column="0" Name="Topic" Text="{Binding TopicInput, Mode=TwoWay}"
+                         Watermark="Research a topic…" Background="{StaticResource Surface2Brush}"
+                         Foreground="{StaticResource TextHiBrush}" BorderThickness="1"
+                         CornerRadius="10" Padding="12,9" FontSize="14">
+                    <TextBox.KeyBindings>
+                        <KeyBinding Gesture="Enter" Command="{Binding RunCommand}"/>
+                    </TextBox.KeyBindings>
+                </TextBox>
+                <Button Grid.Column="1" Content="Research" Command="{Binding RunCommand}"
+                        Margin="8,0,0,0" Padding="16,9" CornerRadius="10" FontWeight="SemiBold"
+                        Background="{StaticResource AccentBrush}" Foreground="#0E1116" BorderThickness="0"/>
+            </Grid>
+
+            <TextBlock DockPanel.Dock="Top" Text="{Binding Status}" FontSize="11"
+                       Foreground="{StaticResource TextLowBrush}" Margin="2,0,0,12"
+                       TextWrapping="Wrap"/>
+
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <StackPanel Spacing="14">
+                    <!-- on-demand result -->
+                    <Border IsVisible="{Binding HasResult}" Background="{StaticResource Surface2Brush}"
+                            CornerRadius="12" Padding="16">
+                        <StackPanel Spacing="9">
+                            <TextBlock Text="{Binding ResultTitle}" FontSize="15" FontWeight="Bold"
+                                       Foreground="{StaticResource AccentBrush}" TextWrapping="Wrap"/>
+                            <SelectableTextBlock Text="{Binding ResultSummary}" FontSize="13"
+                                                 LineHeight="20" Foreground="{StaticResource TextMidBrush}"
+                                                 TextWrapping="Wrap"/>
+                            <ItemsControl ItemsSource="{Binding Sources}" Margin="0,4,0,0">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate x:DataType="vm:SourceRow">
+                                        <StackPanel Spacing="1" Margin="0,0,0,7">
+                                            <TextBlock Text="{Binding Title}" FontSize="12"
+                                                       Foreground="{StaticResource TextHiBrush}"
+                                                       TextTrimming="CharacterEllipsis"/>
+                                            <TextBlock Text="{Binding Url}" FontSize="10.5"
+                                                       Foreground="{StaticResource TextLowBrush}"
+                                                       TextTrimming="CharacterEllipsis"/>
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- stored digest -->
+                    <TextBlock IsVisible="{Binding HasTopics}" Text="Research digest" FontSize="12"
+                               FontWeight="SemiBold" Foreground="{StaticResource TextLowBrush}"/>
+                    <ItemsControl ItemsSource="{Binding Topics}">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate><StackPanel Spacing="8"/></ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="vm:TopicRow">
+                                <Border Background="{StaticResource Surface2Brush}" CornerRadius="10" Padding="13,11">
+                                    <StackPanel Spacing="4">
+                                        <TextBlock Text="{Binding Name}" FontSize="13" FontWeight="SemiBold"
+                                                   Foreground="{StaticResource TextHiBrush}"/>
+                                        <TextBlock Text="{Binding Summary}" FontSize="12" LineHeight="18"
+                                                   Foreground="{StaticResource TextMidBrush}" TextWrapping="Wrap"
+                                                   MaxLines="3" TextTrimming="CharacterEllipsis"/>
+                                    </StackPanel>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+
+                    <!-- empty hint -->
+                    <TextBlock IsVisible="{Binding !HasResult}" Margin="2,4,0,0"
+                               Text="No saved research yet — type a topic above and CHILI will research it (web + LLM) and store a digest."
+                               FontSize="12.5" LineHeight="19" Foreground="{StaticResource TextMidBrush}"
+                               TextWrapping="Wrap"/>
+                </StackPanel>
+            </ScrollViewer>
+        </DockPanel>
+    </Border>
+</UserControl>

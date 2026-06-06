@@ -118,6 +118,9 @@
                     <DataTemplate DataType="vm:TradingViewModel">
                         <views:TradingView/>
                     </DataTemplate>
+                    <DataTemplate DataType="vm:ResearchViewModel">
+                        <views:ResearchView/>
+                    </DataTemplate>
                     <DataTemplate DataType="vm:GamesViewModel">
                         <views:GamesView/>
                     </DataTemplate>
