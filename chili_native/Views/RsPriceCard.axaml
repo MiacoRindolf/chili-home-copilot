@@ -54,26 +54,33 @@
                 </TextBox>
             </Border>
 
-            <!-- recent searches (clickable chips) -->
+            <!-- recent searches (clickable chips + clear) -->
             <Border Padding="12,0,12,8" IsVisible="{Binding HasRecent}">
-                <ItemsControl ItemsSource="{Binding Recent}">
-                    <ItemsControl.ItemsPanel>
-                        <ItemsPanelTemplate>
-                            <WrapPanel/>
-                        </ItemsPanelTemplate>
-                    </ItemsControl.ItemsPanel>
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate x:DataType="sys:String">
-                            <Button Content="{Binding}" Margin="0,0,6,6" Padding="9,4" FontSize="11"
-                                    CornerRadius="9" BorderThickness="0"
-                                    Background="{StaticResource Surface2Brush}"
-                                    Foreground="{StaticResource TextMidBrush}"
-                                    CommandParameter="{Binding}"
-                                    Command="{Binding ((vm:RsPriceCardViewModel)DataContext).SearchRecentCommand,
-                                              RelativeSource={RelativeSource AncestorType=UserControl}}"/>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
+                <Grid ColumnDefinitions="*,Auto">
+                    <ItemsControl Grid.Column="0" ItemsSource="{Binding Recent}">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <WrapPanel/>
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="sys:String">
+                                <Button Content="{Binding}" Margin="0,0,6,6" Padding="9,4" FontSize="11"
+                                        CornerRadius="9" BorderThickness="0"
+                                        Background="{StaticResource Surface2Brush}"
+                                        Foreground="{StaticResource TextMidBrush}"
+                                        CommandParameter="{Binding}"
+                                        Command="{Binding ((vm:RsPriceCardViewModel)DataContext).SearchRecentCommand,
+                                                  RelativeSource={RelativeSource AncestorType=UserControl}}"/>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <Button Grid.Column="1" Content="Clear" ToolTip.Tip="Clear recent searches"
+                            VerticalAlignment="Top" Margin="6,0,0,0" Padding="8,4" FontSize="11"
+                            CornerRadius="9" BorderThickness="0" Background="Transparent"
+                            Foreground="{StaticResource TextLowBrush}"
+                            Command="{Binding ClearRecentCommand}"/>
+                </Grid>
             </Border>
 
             <!-- content area (states stacked; one visible at a time) -->
