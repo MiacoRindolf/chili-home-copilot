@@ -22,6 +22,7 @@ public partial class MainWindowViewModel : ViewModelBase
             new("Games", "◆", new GamesViewModel()),
             new("Research", "⎰", new PlaceholderViewModel(
                 "Research", "Multi-source research with visual reports. Coming soon.", "⎰")),
+            new("Settings", "⚙", new SettingsViewModel()),
         };
         _current = Apps[0];
         _current.IsSelected = true;
