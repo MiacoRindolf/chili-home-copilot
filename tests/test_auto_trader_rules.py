@@ -1905,12 +1905,16 @@ def test_evaluate_entry_edge_blocks_thin_margin_after_empirical_cost():
             if "trading_execution_cost_estimates" in text:
                 return _Result(
                     first={
+                        # Fix 2 (2026-06-05): entry cost is now MEDIAN-central (not
+                        # P90). Median spread+slip = 125bps reproduces the thin-margin
+                        # block point under the new logic; p90 is higher but unused
+                        # at the default buffer weight (0 => pure median).
                         "side": "long",
                         "sample_trades": 12,
-                        "p90_spread_bps": 25.0,
-                        "p90_slippage_bps": 100.0,
-                        "median_spread_bps": 10.0,
-                        "median_slippage_bps": 40.0,
+                        "p90_spread_bps": 50.0,
+                        "p90_slippage_bps": 200.0,
+                        "median_spread_bps": 25.0,
+                        "median_slippage_bps": 100.0,
                         "last_updated_at": datetime(2026, 6, 3, 12, 0),
                     }
                 )

@@ -1686,6 +1686,17 @@ class Settings(BaseSettings):
     # number): an asset class needs at least this many measured observations
     # before its derived cost is used; below it, the legacy fallback applies.
     chili_backtest_cost_min_measured_samples: int = 8
+    # 2026-06-05 entry-cost parity (Fix 2/4): the live entry-edge cost now uses the
+    # MEASURED median (not P90) per-ticker spread+slippage, floored by the same
+    # measured asset-class round-trip cost the backtest charges (incl. venue fees;
+    # closes the cold-start zero-cost hole), then self-corrects via the measured
+    # realized-vs-expected gap. Knobs below are control/statistical params (NOT cost
+    # numbers): the p90 buffer weight defaults to 0 (pure median); the feedback is
+    # bounded (max bps), gated by a min-observation count, over a lookback window.
+    chili_entry_cost_p90_buffer_weight: float = 0.0
+    chili_venue_truth_feedback_max_bps: float = 50.0
+    chili_venue_truth_feedback_min_obs: int = 5
+    chili_venue_truth_feedback_lookback_days: int = 30
     # Round-12 (2026-04-30): backtest queue improvements.
     # 1. priority scorer runs daily and updates backtest_priority based
     #    on lifecycle/staleness/evidence-gap signals.

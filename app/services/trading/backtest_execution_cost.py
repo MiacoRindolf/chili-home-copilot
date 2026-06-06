@@ -143,3 +143,57 @@ def backtest_costs_for_ticker(
     if not entry:
         return None
     return float(entry.get("spread", 0.0)), float(entry.get("commission", 0.0))
+
+
+def asset_class_cost_floor(db: Session, ticker: str) -> tuple[float | None, str]:
+    """Measured round-trip cost FLOOR (incl. venue fees) for the ticker's asset
+    class -- the minimum cost any ticker of that asset pays. Same data source as
+    the backtest (``derive_asset_class_backtest_costs``), so the entry gate and the
+    backtest charge the SAME measured cost. Returns (fraction|None, source)."""
+    try:
+        costs = derive_asset_class_backtest_costs(db)
+    except Exception:
+        return None, "derive_failed"
+    asset = "crypto" if _is_crypto_ticker(ticker) else "equity"
+    entry = costs.get(asset)
+    if not entry:
+        return None, f"no_measured_data:{asset}"
+    return float(entry["round_trip_cost_fraction"]), f"{asset}:{entry.get('source','')}"
+
+
+def realized_cost_bias_fraction(
+    db: Session,
+    ticker: str,
+    *,
+    max_fraction: float,
+    min_obs: int,
+    lookback_days: int,
+) -> tuple[float, dict[str, Any]]:
+    """Fix 4 feedback: the MEASURED (realized - expected) entry-cost gap for this
+    ticker from the venue-truth log, so the cost estimate self-corrects its
+    optimism. Upward-only (we only inflate when we under-estimated; a single bad
+    fill cannot lock a ticker out -- bounded by ``max_fraction``). Returns
+    (bias_fraction, snapshot)."""
+    try:
+        row = db.execute(text(
+            """
+            SELECT percentile_cont(0.5) WITHIN GROUP
+                       (ORDER BY (realized_cost_fraction - expected_cost_fraction)) AS gap,
+                   COUNT(*) AS n
+              FROM trading_venue_truth_log
+             WHERE UPPER(ticker) = UPPER(:t)
+               AND realized_cost_fraction IS NOT NULL
+               AND expected_cost_fraction IS NOT NULL
+               AND COALESCE(paper_bool, FALSE) = FALSE
+               AND created_at >= NOW() - make_interval(days => :lb)
+            """
+        ), {"t": ticker, "lb": int(lookback_days)}).mappings().first()
+    except Exception:
+        return 0.0, {"used": False, "reason": "query_failed"}
+    n = int(row["n"] or 0) if row else 0
+    gap = float(row["gap"]) if (row and row["gap"] is not None) else None
+    if gap is None or n < int(min_obs):
+        return 0.0, {"used": False, "reason": "insufficient_obs", "n": n, "min_obs": int(min_obs)}
+    bias = max(0.0, min(gap, float(max_fraction)))
+    return bias, {"used": True, "n": n, "measured_gap_fraction": round(gap, 6),
+                  "bias_fraction": round(bias, 6), "max_fraction": float(max_fraction)}

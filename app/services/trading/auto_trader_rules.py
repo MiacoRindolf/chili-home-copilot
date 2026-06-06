@@ -2466,60 +2466,92 @@ def _empirical_entry_cost_fraction(
             "selected_venue": selected or None,
             "venue_tca": venue_tca,
         }
-    if (
-        not row
-        or not hasattr(row, "get")
-        or row.__class__.__module__.startswith("unittest.mock")
-    ):
-        return 0.0, {
-            "used": False,
-            "reason": "no_estimate",
-            "side_aliases": ["long", "buy"],
-            "selected_venue": selected or None,
-            "venue_tca": venue_tca,
-        }
-
-    try:
-        samples = int(row.get("sample_trades") or 0)
-    except (TypeError, ValueError):
-        samples = 0
-    if samples < min_samples:
-        return 0.0, {
-            "used": False,
-            "reason": "insufficient_samples",
-            "sample_trades": samples,
-            "min_samples": min_samples,
-            "matched_side": row.get("side"),
-            "side_aliases": ["long", "buy"],
-            "selected_venue": selected or None,
-            "venue_tca": venue_tca,
-        }
+    _valid_row = bool(
+        row
+        and hasattr(row, "get")
+        and not row.__class__.__module__.startswith("unittest.mock")
+    )
 
     def _bps(name: str) -> float:
+        if not _valid_row:
+            return 0.0
         try:
             v = float(row.get(name) or 0.0)
             return v if v > 0.0 else 0.0
         except (TypeError, ValueError):
             return 0.0
 
-    p90_spread = _bps("p90_spread_bps")
-    p90_slip = _bps("p90_slippage_bps")
-    total_bps = p90_spread + p90_slip
-    last_updated = row.get("last_updated_at")
-    return total_bps / 10000.0, {
-        "used": True,
-        "matched_side": row.get("side"),
+    try:
+        samples = int(row.get("sample_trades") or 0) if _valid_row else 0
+    except (TypeError, ValueError):
+        samples = 0
+
+    # Per-ticker measured signal: MEDIAN spread+slippage (not P90 -- P90-as-central
+    # over-priced the typical fill), plus an optional p90 tail buffer (default 0 =>
+    # pure median). Cold-start / unsampled tickers leave ticker_cost=0 and rely on
+    # the measured ASSET-CLASS floor below instead of a fabricated zero.
+    ticker_cost = 0.0
+    median_spread = median_slip = p90_spread = p90_slip = 0.0
+    if _valid_row and samples >= min_samples:
+        median_spread = _bps("median_spread_bps")
+        median_slip = _bps("median_slippage_bps")
+        p90_spread = _bps("p90_spread_bps")
+        p90_slip = _bps("p90_slippage_bps")
+        try:
+            buffer_w = max(0.0, float(getattr(settings, "chili_entry_cost_p90_buffer_weight", 0.0)))
+        except Exception:
+            buffer_w = 0.0
+        central_bps = median_spread + median_slip
+        buffer_bps = max(0.0, buffer_w * ((p90_spread + p90_slip) - central_bps))
+        ticker_cost = (central_bps + buffer_bps) / 10_000.0
+
+    # Measured ASSET-CLASS floor (incl. venue fees) -- SAME data the backtest
+    # charges (backtest<->entry cost parity). Closes the cold-start zero-cost hole
+    # and folds in crypto venue fees that the per-ticker spread+slippage excludes.
+    asset_floor: float | None = None
+    asset_src = "skipped"
+    try:
+        from .backtest_execution_cost import asset_class_cost_floor
+        asset_floor, asset_src = asset_class_cost_floor(db, ticker)
+    except Exception:
+        asset_floor, asset_src = None, "error"
+    base_cost = max(ticker_cost, asset_floor or 0.0)
+
+    # Fix 4 feedback: inflate by the MEASURED (realized-expected) cost gap so the
+    # estimate self-corrects its optimism (bounded, upward-only).
+    bias = 0.0
+    bias_snap: dict[str, Any] = {"used": False, "reason": "skipped"}
+    try:
+        _fb_max = max(0.0, float(getattr(settings, "chili_venue_truth_feedback_max_bps", 50.0))) / 10_000.0
+        _fb_min_obs = int(getattr(settings, "chili_venue_truth_feedback_min_obs", 5))
+        _fb_lb = int(getattr(settings, "chili_venue_truth_feedback_lookback_days", 30))
+        from .backtest_execution_cost import realized_cost_bias_fraction
+        bias, bias_snap = realized_cost_bias_fraction(
+            db, ticker, max_fraction=_fb_max, min_obs=_fb_min_obs, lookback_days=_fb_lb,
+        )
+    except Exception:
+        bias, bias_snap = 0.0, {"used": False, "reason": "error"}
+
+    cost = base_cost + bias
+    return cost, {
+        "used": cost > 0.0,
+        "reason": "measured" if cost > 0.0 else "no_measured_data",
+        "matched_side": (row.get("side") if _valid_row else None),
         "side_aliases": ["long", "buy"],
         "selected_venue": selected or None,
         "sample_trades": samples,
+        "min_samples": min_samples,
+        "median_spread_bps": median_spread,
+        "median_slippage_bps": median_slip,
         "p90_spread_bps": p90_spread,
         "p90_slippage_bps": p90_slip,
-        "median_spread_bps": _bps("median_spread_bps"),
-        "median_slippage_bps": _bps("median_slippage_bps"),
-        "total_cost_bps": round(total_bps, 3),
-        "last_updated_at": (
-            last_updated.isoformat() if hasattr(last_updated, "isoformat") else last_updated
-        ),
+        "ticker_cost_fraction": round(ticker_cost, 6),
+        "asset_class_floor_fraction": (round(asset_floor, 6) if asset_floor is not None else None),
+        "asset_class_floor_source": asset_src,
+        "base_cost_fraction": round(base_cost, 6),
+        "feedback_bias": bias_snap,
+        "cost_fraction": round(cost, 6),
+        "total_cost_bps": round(cost * 10_000.0, 3),
         "venue_tca": venue_tca,
     }
 
