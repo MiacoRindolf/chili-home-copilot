@@ -30,6 +30,35 @@
 
                 <Border Height="1" Background="{StaticResource StrokeBrush}" Margin="0,2"/>
 
+                <!-- backend connection -->
+                <TextBlock Text="Backend connection" FontSize="12" FontWeight="SemiBold"
+                           Foreground="{StaticResource TextLowBrush}"/>
+                <StackPanel Spacing="8">
+                    <TextBlock Text="Base URL" FontSize="11" Foreground="{StaticResource TextLowBrush}"/>
+                    <TextBox Text="{Binding BaseUrl, Mode=TwoWay}" Watermark="https://localhost:8000"
+                             Background="{StaticResource Surface2Brush}" Foreground="{StaticResource TextHiBrush}"
+                             BorderThickness="1" CornerRadius="9" Padding="11,8" FontSize="13"/>
+                    <TextBlock Text="Device token" FontSize="11" Foreground="{StaticResource TextLowBrush}"/>
+                    <TextBox Text="{Binding DeviceToken, Mode=TwoWay}" PasswordChar="●"
+                             Watermark="paste your paired device token"
+                             Background="{StaticResource Surface2Brush}" Foreground="{StaticResource TextHiBrush}"
+                             BorderThickness="1" CornerRadius="9" Padding="11,8" FontSize="13"/>
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button Content="Save" Command="{Binding SaveCommand}" Padding="16,8"
+                                CornerRadius="9" FontWeight="SemiBold" BorderThickness="0"
+                                Background="{StaticResource AccentBrush}" Foreground="#0E1116"/>
+                        <Button Content="Test connection" Command="{Binding TestCommand}" Padding="14,8"
+                                CornerRadius="9" BorderThickness="1"
+                                BorderBrush="{StaticResource StrokeBrush}"
+                                Background="{StaticResource Surface2Brush}"
+                                Foreground="{StaticResource TextMidBrush}"/>
+                        <TextBlock Text="{Binding ConnectionStatus}" FontSize="12" VerticalAlignment="Center"
+                                   Foreground="{StaticResource AccentBrush}" TextWrapping="Wrap"/>
+                    </StackPanel>
+                </StackPanel>
+
+                <Border Height="1" Background="{StaticResource StrokeBrush}" Margin="0,2"/>
+
                 <TextBlock Text="Capabilities" FontSize="12" FontWeight="SemiBold"
                            Foreground="{StaticResource TextLowBrush}"/>
                 <ItemsControl ItemsSource="{Binding Capabilities}">

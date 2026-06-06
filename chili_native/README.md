@@ -134,3 +134,7 @@ of truth until this reaches parity.
       (`POST /research/run` {topic}) — web + LLM — rendering the summary + sources.
       **Verified live** ("latest RuneScape 3 game updates" → full summary + 4 sources).
       **All three backend apps (Chat · Trading · Research) are now live.**
+- [x] **NATIVE-26** — Settings → **editable backend connection**: base URL +
+      device token fields (token masked), Save, and a "Test connection" button
+      (`ChiliApiClient.TestConnectionAsync` — health + authed probe). Makes the
+      client configurable on any machine. Verified ("✓ Connected — token accepted").
