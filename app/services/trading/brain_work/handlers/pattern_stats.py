@@ -107,6 +107,27 @@ def _run_pattern_stats_recompute(
             int(result.get("patterns_updated", 0) or 0),
             result.get("cycle_run_id"),
         )
+        # Event-driven graduation: the realized stats just changed for this close,
+        # so run the realized-PnL promotion pass NOW -- a pattern that just crossed
+        # the bar graduates this dispatch round instead of waiting for the daily
+        # 4:30 PT cron (which stays as a backstop). The pass is idempotent, honors
+        # the kill switch + per-run cap, and uses the same direct realized-PnL
+        # promotion as the cron (so it correctly bypasses CPCV for realized winners).
+        try:
+            from app.services.trading.realized_pnl_promotion import (
+                run_realized_pnl_promotion_pass,
+            )
+            promo = run_realized_pnl_promotion_pass(sess)
+            if int(promo.get("promoted", 0) or 0) > 0:
+                logger.info(
+                    "%s event-driven realized-PnL promotion: %s",
+                    LOG_PREFIX, promo.get("promoted_pattern_ids"),
+                )
+        except Exception:
+            logger.debug(
+                "%s event-driven promotion trigger failed (cron backstop still runs)",
+                LOG_PREFIX, exc_info=True,
+            )
     except Exception as e:
         logger.exception(
             "%s source=%s event_id=%s failed: %s",
