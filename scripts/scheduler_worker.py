@@ -70,6 +70,23 @@ def main() -> None:
 
             ok = broker_service.try_restore_session()
             logger.info("[scheduler_worker] Broker session restore: %s", "ok" if ok else "no session")
+            # Connect Coinbase Advanced in THIS process too. try_restore_session
+            # only covers Robinhood; the momentum live runner trades Coinbase spot,
+            # so without an in-process Coinbase connection coinbase_service.is_connected()
+            # is False here and live arms/entries are blocked ("broker_not_ready").
+            # main.py does this for the web container; the scheduler worker needs it
+            # for live momentum. connect() uses the COINBASE_API_KEY/SECRET env creds.
+            try:
+                from app.services import coinbase_service
+
+                if not coinbase_service.is_connected():
+                    _cb = coinbase_service.connect()
+                    _cbs = _cb.get("status") if isinstance(_cb, dict) else _cb
+                    logger.info("[scheduler_worker] Coinbase connect: %s", _cbs)
+                else:
+                    logger.info("[scheduler_worker] Coinbase already connected")
+            except Exception as _cbe:
+                logger.warning("[scheduler_worker] Coinbase connect failed: %s", _cbe)
         except Exception as _e:
             logger.warning("[scheduler_worker] Broker session restore failed: %s", _e)
     else:
