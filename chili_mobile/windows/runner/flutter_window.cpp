@@ -212,10 +212,12 @@ LRESULT CALLBACK FrameBarProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
     case WM_MOVE:
       FitGameToFrame(h);
+      if (g_frame_owner) g_frame_owner->RepositionSearchOverlay();
       return 0;
     case WM_SIZE:
       ApplyFrameRegion(h);  // keep the hollow shape in sync
       FitGameToFrame(h);
+      if (g_frame_owner) g_frame_owner->RepositionSearchOverlay();
       return 0;
     case WM_GETMINMAXINFO: {
       auto* mmi = reinterpret_cast<MINMAXINFO*>(l);
@@ -274,6 +276,62 @@ void EnsureFrameClass() {
   registered = true;
 }
 
+// ---- GAME-11: in-game item-price search overlay --------------------------
+
+constexpr wchar_t kSearchClass[] = L"ChiliSearchOverlay";
+std::wstring g_search_result;       // last lookup result (one overlay at a time)
+WNDPROC g_orig_edit_proc = nullptr;  // original EDIT proc, for subclassing
+
+// Subclass the EDIT so Enter submits the query instead of dinging.
+LRESULT CALLBACK SearchEditProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+  if (m == WM_KEYDOWN && w == VK_RETURN) {
+    int len = ::GetWindowTextLengthW(h);
+    if (len > 0 && g_frame_owner) {
+      std::wstring t(len + 1, L'\0');
+      ::GetWindowTextW(h, &t[0], len + 1);
+      t.resize(len);
+      g_frame_owner->OnSearchSubmit(t);
+    }
+    return 0;
+  }
+  return ::CallWindowProcW(g_orig_edit_proc, h, m, w, l);
+}
+
+LRESULT CALLBACK SearchOverlayProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+  if (m == WM_PAINT) {
+    PAINTSTRUCT ps;
+    HDC hdc = ::BeginPaint(h, &ps);
+    RECT rc;
+    ::GetClientRect(h, &rc);
+    HBRUSH bg = ::CreateSolidBrush(RGB(18, 22, 27));
+    ::FillRect(hdc, &rc, bg);
+    ::DeleteObject(bg);
+    ::SetBkMode(hdc, TRANSPARENT);
+    ::SetTextColor(hdc, g_search_result.empty() ? RGB(150, 156, 162)
+                                                : RGB(120, 230, 170));
+    RECT tr = {8, 36, rc.right - 8, rc.bottom - 4};
+    const wchar_t* txt = g_search_result.empty()
+                             ? L"Type an item + Enter for GE price"
+                             : g_search_result.c_str();
+    ::DrawTextW(hdc, txt, -1, &tr, DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS);
+    ::EndPaint(h, &ps);
+    return 0;
+  }
+  return ::DefWindowProcW(h, m, w, l);
+}
+
+void EnsureSearchClass() {
+  static bool registered = false;
+  if (registered) return;
+  WNDCLASSW wc = {};
+  wc.lpfnWndProc = SearchOverlayProc;
+  wc.hInstance = ::GetModuleHandleW(nullptr);
+  wc.lpszClassName = kSearchClass;
+  wc.hCursor = ::LoadCursor(nullptr, IDC_ARROW);
+  ::RegisterClassW(&wc);
+  registered = true;
+}
+
 }  // namespace
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
@@ -322,6 +380,7 @@ void FlutterWindow::OnDestroy() {
 }
 
 void FlutterWindow::StopFrame() {
+  DestroySearchOverlay();  // GAME-11
   // Give the game back its own title bar / border.
   if (framed_game_ && ::IsWindow(framed_game_) && framed_orig_style_) {
     ::SetWindowLongPtrW(framed_game_, GWL_STYLE, framed_orig_style_);
@@ -397,10 +456,63 @@ bool FlutterWindow::FrameWindow(HWND game, const std::wstring& name) {
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
   FitGameToFrame(frame_bar_);  // place the game in the hole, above the frame
   ::SetForegroundWindow(game);
+  RECT gr;
+  ::GetWindowRect(game, &gr);
+  CreateSearchOverlay(game, gr.left, gr.top);  // GAME-11 price search overlay
   return true;
 }
 
 void FlutterWindow::DismissFrame() { StopFrame(); }
+
+void FlutterWindow::CreateSearchOverlay(HWND game, int gx, int gy) {
+  EnsureSearchClass();
+  HINSTANCE inst = ::GetModuleHandleW(nullptr);
+  const int ow = 300, oh = 70;
+  search_overlay_ = ::CreateWindowExW(WS_EX_TOOLWINDOW, kSearchClass, L"",
+                                      WS_POPUP | WS_VISIBLE, gx + 8, gy + 8, ow,
+                                      oh, game, nullptr, inst, nullptr);
+  if (!search_overlay_) return;
+  search_edit_ = ::CreateWindowExW(
+      WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 6,
+      6, ow - 12, 24, search_overlay_, nullptr, inst, nullptr);
+  if (search_edit_) {
+    g_orig_edit_proc = reinterpret_cast<WNDPROC>(::SetWindowLongPtrW(
+        search_edit_, GWLP_WNDPROC,
+        reinterpret_cast<LONG_PTR>(SearchEditProc)));
+  }
+  ::ShowWindow(search_overlay_, SW_SHOWNOACTIVATE);
+}
+
+void FlutterWindow::DestroySearchOverlay() {
+  if (search_overlay_ && ::IsWindow(search_overlay_)) {
+    ::DestroyWindow(search_overlay_);
+  }
+  search_overlay_ = nullptr;
+  search_edit_ = nullptr;
+  g_search_result.clear();
+}
+
+void FlutterWindow::RepositionSearchOverlay() {
+  if (!search_overlay_ || !::IsWindow(search_overlay_) || !framed_game_ ||
+      !::IsWindow(framed_game_)) {
+    return;
+  }
+  RECT gr;
+  ::GetWindowRect(framed_game_, &gr);
+  ::SetWindowPos(search_overlay_, nullptr, gr.left + 8, gr.top + 8, 0, 0,
+                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+void FlutterWindow::OnSearchSubmit(const std::wstring& text) {
+  if (!frame_channel_) return;
+  g_search_result = L"Searching...";
+  if (search_overlay_) ::InvalidateRect(search_overlay_, nullptr, TRUE);
+  flutter::EncodableMap args;
+  args[flutter::EncodableValue("q")] =
+      flutter::EncodableValue(WideToUtf8(text));
+  frame_channel_->InvokeMethod(
+      "query", std::make_unique<flutter::EncodableValue>(args));
+}
 
 void FlutterWindow::SetupFrameChannel() {
   frame_channel_ =
@@ -437,6 +549,15 @@ void FlutterWindow::SetupFrameChannel() {
         }
         if (call.method_name() == "stop") {
           StopFrame();
+          result->Success(flutter::EncodableValue(true));
+          return;
+        }
+        if (call.method_name() == "searchResult") {
+          std::string text = args ? GetString(*args, "text") : std::string();
+          g_search_result = Utf8ToWide(text);
+          if (search_overlay_ && ::IsWindow(search_overlay_)) {
+            ::InvalidateRect(search_overlay_, nullptr, TRUE);
+          }
           result->Success(flutter::EncodableValue(true));
           return;
         }

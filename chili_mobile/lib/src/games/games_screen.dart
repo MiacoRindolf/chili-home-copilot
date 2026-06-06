@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import '../ui/app_ui.dart';
 import 'game_awareness.dart';
 import 'game_frame.dart';
+import 'runescape_prices.dart';
 import 'steam_models.dart';
 import 'steam_service.dart';
 
@@ -88,7 +89,20 @@ class _GamesScreenState extends State<GamesScreen> {
     _probe = widget._probe ?? const GameAwareness().probe;
     _frame = widget._frame ?? const GameFrame();
     _now = widget.clock ?? DateTime.now;
+    // GAME-11 — answer item-price queries from the in-game search overlay.
+    _frame.bindSearch(_runItemSearch);
     _load();
+  }
+
+  final RuneScapePrices _prices = RuneScapePrices();
+
+  /// Resolve a typed RS item query to a one-line GE price string for the overlay.
+  Future<String> _runItemSearch(String query) async {
+    if (query.trim().isEmpty) return 'Type an item name';
+    final ItemPrice? p = await _prices.lookup(query);
+    if (p == null) return 'No GE price for “$query”';
+    return '${p.name}: ${formatGpFull(p.price)} gp  '
+        '(vol ${formatGpFull(p.volume)})';
   }
 
   @override
