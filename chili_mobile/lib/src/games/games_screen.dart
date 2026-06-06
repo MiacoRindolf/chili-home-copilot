@@ -226,6 +226,22 @@ class _GamesScreenState extends State<GamesScreen> {
     });
   }
 
+  // GAME-3 — frame an already-running game on demand (one-shot + feedback).
+  Future<void> _frameNow(SteamGame game) async {
+    final bool ok = await _frame.start(game.name);
+    if (!mounted) return;
+    if (ok) {
+      setState(() => _framedActive = true);
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Couldn’t frame ${game.name}. Set it to '
+              'Windowed / Borderless mode (fullscreen can’t be framed).'),
+        ),
+      );
+    }
+  }
+
   Future<void> _stopFraming() async {
     _frameAttach?.cancel();
     await _frame.stop();
@@ -421,44 +437,63 @@ class _GamesScreenState extends State<GamesScreen> {
                         fontWeight: FontWeight.w700,
                         color: cs.onSurface)),
                 const SizedBox(height: 4),
-                Row(
+                Wrap(
+                  spacing: 14,
+                  runSpacing: 2,
+                  crossAxisAlignment: WrapCrossAlignment.center,
                   children: <Widget>[
-                    Icon(Icons.timer_outlined,
-                        size: 14, color: cs.onSurfaceVariant),
-                    const SizedBox(width: 4),
-                    Text('Session ${_elapsedLabel()}',
-                        style: TextStyle(
-                            fontSize: 12, color: cs.onSurfaceVariant)),
-                    if (info != null) ...<Widget>[
-                      const SizedBox(width: 14),
-                      Icon(Icons.crop_free,
-                          size: 14, color: cs.onSurfaceVariant),
-                      const SizedBox(width: 4),
-                      Text(
-                        '${info.window.width.toInt()}×${info.window.height.toInt()} '
-                        '@ (${info.window.left.toInt()}, ${info.window.top.toInt()})',
-                        style: TextStyle(
-                            fontSize: 12, color: cs.onSurfaceVariant),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                        Icon(Icons.timer_outlined,
+                            size: 14, color: cs.onSurfaceVariant),
+                        const SizedBox(width: 4),
+                        Text('Session ${_elapsedLabel()}',
+                            style: TextStyle(
+                                fontSize: 12, color: cs.onSurfaceVariant)),
+                      ],
+                    ),
+                    if (info != null)
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: <Widget>[
+                          Icon(Icons.crop_free,
+                              size: 14, color: cs.onSurfaceVariant),
+                          const SizedBox(width: 4),
+                          Text(
+                            '${info.window.width.toInt()}×${info.window.height.toInt()} '
+                            '@ (${info.window.left.toInt()}, ${info.window.top.toInt()})',
+                            style: TextStyle(
+                                fontSize: 12, color: cs.onSurfaceVariant),
+                          ),
+                        ],
                       ),
-                    ],
                   ],
                 ),
               ],
             ),
           ),
           const SizedBox(width: 12),
-          if (_framedActive)
-            Padding(
-              padding: const EdgeInsets.only(right: 8),
-              child: Tooltip(
-                message: 'Remove the CHILI frame (game stays where it is)',
-                child: OutlinedButton.icon(
-                  onPressed: _stopFraming,
-                  icon: const Icon(Icons.flip_to_front, size: 16),
-                  label: const Text('Unframe'),
-                ),
-              ),
-            ),
+          Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: _framedActive
+                ? Tooltip(
+                    message: 'Remove the CHILI frame (game stays where it is)',
+                    child: OutlinedButton.icon(
+                      onPressed: _stopFraming,
+                      icon: const Icon(Icons.flip_to_front, size: 16),
+                      label: const Text('Unframe'),
+                    ),
+                  )
+                : Tooltip(
+                    message: 'Put a draggable CHILI frame on this game',
+                    child: FilledButton.icon(
+                      onPressed: () => _frameNow(game),
+                      icon: const Icon(Icons.flip_to_front, size: 16),
+                      label: const Text('Frame'),
+                    ),
+                  ),
+          ),
           // Mini monitor map — CHILI's awareness of where the game sits.
           if (info != null) _monitorMap(cs, info),
         ],

@@ -194,6 +194,10 @@ bool FlutterWindow::StartFrame(const std::wstring& title) {
                       reinterpret_cast<LONG_PTR>(game));
   framed_game_ = game;
   ::ShowWindow(frame_bar_, SW_SHOWNOACTIVATE);
+  // Force it visible and above the game even if the game grabbed foreground.
+  ::SetWindowPos(frame_bar_, HWND_TOPMOST, x, y, w, kBarHeight,
+                 SWP_SHOWWINDOW | SWP_NOACTIVATE);
+  ::UpdateWindow(frame_bar_);
   return true;
 }
 
