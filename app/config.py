@@ -1665,6 +1665,19 @@ class Settings(BaseSettings):
     chili_realized_ev_clean_window_since: str = "2026-05-22"
     chili_realized_ev_clean_window_min_trades: int = 5
     chili_realized_ev_clean_window_min_days: int = 5
+    # 2026-06-05 (rank by realized PnL): once realized EV is trustworthy (clean
+    # exits, clean corrected_*/raw_realized_* columns, no backtest/mining bleed), a
+    # pattern PROVING itself on clean realized PnL graduates on that evidence even
+    # when its backtest CPCV/OOS gates disagree -- live realized PnL is the
+    # higher-information signal for a pattern that has actually traded. The
+    # realized-PnL promotion pass promotes active, not-yet-promoted patterns that
+    # pass the clean realized-EV gate AND clear a meaningful realized-edge floor,
+    # ranked by realized average return, capped per run. The kill switch / drawdown
+    # breaker still gate the actual trade at execution time.
+    chili_realized_pnl_promotion_enabled: bool = True
+    chili_realized_pnl_promotion_min_trades: int = 8
+    chili_realized_pnl_promotion_min_avg_return_pct: float = 0.5
+    chili_realized_pnl_promotion_max_per_run: int = 10
     # Round-12 (2026-04-30): backtest queue improvements.
     # 1. priority scorer runs daily and updates backtest_priority based
     #    on lifecycle/staleness/evidence-gap signals.
