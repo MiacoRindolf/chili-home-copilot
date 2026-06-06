@@ -141,3 +141,57 @@ On a screened candidate's recent bars, detect a continuation entry **directly**
 - Not an ML engine; explicit rules for transparency.
 - Not touching the prediction-mirror authority (Hard Rule 5) or reconciliation.
 - Adaptive thresholds only — no hardcoded pillar cutoffs.
+
+## 7. REVISED ARCHITECTURE (post `momentum_neural` audit, 2026-06-06)
+
+A deep audit of `app/services/trading/momentum_neural/` (37 files) changed the
+build calculus: **the execution engine AND the Ross signal already exist** — the
+Ross signal is just discarded before scoring.
+
+- `momentum_neural` is a mature, **crypto-first, 24/7** momentum-automation
+  engine: FSM live runner (`live_runner.py:854`, `live_fsm.py`), full safety
+  wiring (kill-switch/drawdown/lane-cap/notional-guard via `risk_evaluator.py`),
+  Coinbase adapter, decision ledger, and `MomentumSymbolViability` /
+  `TradingAutomationSession` structs. Live runner is OFF behind
+  `chili_momentum_live_runner_enabled` (`config.py:2744`).
+- **Its selection is NOT Ross-shaped:** `score_viability` (`viability.py:78`)
+  ranks on regime + microstructure (spread/slip/fee/tape-z) across 10 generic
+  families. RVOL/gap/float/catalyst are **absent** from its scoring.
+- **The signal exists upstream but is thrown away:** `scanner.py:1480-1515`
+  already computes RVOL bands, gap play, micro-float bonus, and news sentiment —
+  but the scanner→viability bridge (`trading_scheduler.py:3088-3092`) passes
+  **only ticker symbols**, discarding RVOL/gap/float/news before scoring.
+- Risk model is ATR-symmetric stops + fixed-notional sizing (`paper_execution.py:86`,
+  `portfolio_allocator.py:879-945`), R≈1.4-1.8 — below Ross's 2:1+, and not a
+  structure stop / fixed-fractional-risk model.
+- **Safety gap:** momentum live positions are NOT covered by the broker-sync /
+  bracket-reconciler hardened in PR #435 (`live_runner.py:814` only warns) — same
+  bug class as the ETC/SHIB weekend phantom.
+
+**Refined decision:** build a thin Ross **selection + risk** layer ON TOP of the
+reused execution+safety substrate. Do NOT fork the runner or gut `score_viability`.
+
+**Reuse unchanged (high value, low risk):** the live FSM + exit/stop/trail/bailout
+machinery (`live_runner.py:854`), the safety stack (`risk_evaluator.py:110`),
+`MomentumSymbolViability`/`TradingAutomationSession` + `list_momentum_opportunities`
+(`opportunities.py:261`), the decision ledger, and the Coinbase venue adapter.
+
+**Build new (the 5 Ross gaps):**
+1. **`RossMomentumScorer`** — rank by RVOL (rank, not 1.5× binary), gap/daily-change
+   %, float/market-cap tier, catalyst; promote the signal `scanner.py:1480-1515`
+   already computes by **un-discarding it at the bridge** (`trading_scheduler.py:3088`).
+   Emit Ross viability rows the runner consumes. *(highest leverage — do first)*
+2. **Continuation trigger** — wire bull-flag / micro-pullback / new-high
+   (resurrect `entry_gates.py:115`) into `WATCHING_LIVE → ENTRY_CANDIDATE`,
+   replacing the bare score crossing at `live_runner.py:1116`.
+3. **Structure-based stops** — stop under the swing low
+   (`entry_gates._compute_confirmed_swing_low_last:24` already exists), replacing
+   the symmetric ATR stop.
+4. **Fixed-fractional-risk sizing** — `size = risk_budget / (entry − stop)`, 2:1+
+   target, replacing fixed-notional `portfolio_allocator.py:921`.
+5. **Broker-truth reconciliation** for momentum live sessions — fold into the
+   PR #435 broker-sync path so 24/7 fills aren't stranded.
+
+**Revised phases:** M2 `RossMomentumScorer` + un-discard bridge signal → M3 validate
+(vs Ross trades + vs CHILI rejections) → M4 trigger + structure stops + fixed-fractional
+sizing → M5 broker reconciliation + go-live wiring → M6 live + compare impact to Ross.
