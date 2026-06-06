@@ -136,8 +136,20 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
     'brain': _AppDef(
       'Brain',
       Icons.psychology,
-      () => BrainDispatchScreen(onOpenSettings: () => _openApp('settings')),
+      () => BrainDispatchScreen(
+            onOpenSettings: () => _openApp('settings'),
+            onOpenAutopilot: () => _openApp('autopilot'),
+          ),
       size: const Size(900, 600),
+    ),
+    'autopilot': _AppDef(
+      'Autopilot',
+      Icons.auto_awesome,
+      () => BrainDispatchScreen(
+            autopilotOnly: true,
+            onOpenSettings: () => _openApp('settings'),
+          ),
+      size: const Size(1180, 720),
     ),
     'agents': _AppDef(
       'Agents',
