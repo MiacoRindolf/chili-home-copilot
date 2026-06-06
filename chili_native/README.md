@@ -76,4 +76,7 @@ of truth until this reaches parity.
       re-search. Verified (Rune platebody · Dragon claw · Abyssal whip).
 - [x] **NATIVE-11** — Settings/About app (6th dock tile ⚙): version + stack,
       tagline, a green-checkmark capabilities list, and the anti-cheat safety
-      note. Verified rendering. (Port Chat·Trading·Research with the backend: next.)
+      note. Verified rendering.
+- [x] **NATIVE-12** — keyboard shortcuts + double-click-maximize: Ctrl+1..6 switch
+      dock apps, Ctrl+W closes; double-clicking the title bar toggles maximize.
+      Verified (Ctrl+3 → Trading). (Port Chat·Trading·Research with the backend: next.)

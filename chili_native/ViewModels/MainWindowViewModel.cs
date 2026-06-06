@@ -35,4 +35,10 @@ public partial class MainWindowViewModel : ViewModelBase
         foreach (var a in Apps) a.IsSelected = a == app;
         Current = app;
     }
+
+    /// <summary>Switch to the app at <paramref name="index"/> (Ctrl+1..N shortcuts).</summary>
+    public void SelectByIndex(int index)
+    {
+        if (index >= 0 && index < Apps.Count) Select(Apps[index]);
+    }
 }
