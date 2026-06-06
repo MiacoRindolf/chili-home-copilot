@@ -42,13 +42,23 @@ def build_momentum_operator_readiness(
 
     brokers = get_all_broker_statuses()
     coinbase_connected = bool(brokers.get("coinbase", {}).get("connected"))
+    # Sell-scope preflight: a connected but view-only / buy-only Coinbase key lets
+    # live ENTRIES through but blocks EXITS ("403 Missing Required Scopes" on sell).
+    # Require verified TRADE permission before allowing live. docs/DESIGN/MOMENTUM_LANE.md
+    coinbase_can_trade = False
+    if coinbase_connected:
+        try:
+            from app.services.coinbase_service import can_trade as _cb_can_trade
+            coinbase_can_trade = bool(_cb_can_trade())
+        except Exception:
+            coinbase_can_trade = False
 
     gov = get_kill_switch_status()
     kill_active = bool(gov.get("active"))
     block_paper_ks = bool(settings.chili_momentum_risk_block_paper_when_kill_switch)
     inhibit_live_gov = bool(settings.chili_momentum_risk_disable_live_if_governance_inhibit)
 
-    broker_ready_for_live = coinbase_connected and coinbase_adapter
+    broker_ready_for_live = coinbase_connected and coinbase_adapter and coinbase_can_trade
     if symbol and broker_ready_for_live:
         # Crypto path expects Coinbase for -USD; readiness already Coinbase-specific.
         _ = symbol
@@ -79,6 +89,7 @@ def build_momentum_operator_readiness(
         "momentum_neural_enabled": neural_on,
         "coinbase_spot_adapter_enabled": coinbase_adapter,
         "broker_coinbase_connected": coinbase_connected,
+        "broker_coinbase_can_trade": coinbase_can_trade,
         "broker_ready_for_live": broker_ready_for_live,
         "paper_runner_enabled": paper_runner,
         "live_runner_enabled": live_runner,
