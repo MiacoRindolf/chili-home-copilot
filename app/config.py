@@ -2312,6 +2312,15 @@ class Settings(BaseSettings):
         le=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_NOTIONAL_FRACTION_OF_EQUITY"),
     )
+    # Equity-relative per-trade MAX-LOSS cap: a fraction of ACCOUNT EQUITY (not a
+    # fixed $). Frozen at admission; scales with equity. The fixed loss cap is the
+    # FALLBACK when equity is unavailable. Single documented per-trade RISK knob.
+    chili_momentum_risk_loss_fraction_of_equity: float = Field(
+        default=0.01,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_LOSS_FRACTION_OF_EQUITY"),
+    )
     chili_momentum_order_notional_guard_bps: float = Field(
         default=25.0,
         ge=0.0,
