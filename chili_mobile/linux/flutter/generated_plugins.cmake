@@ -5,6 +5,7 @@
 list(APPEND FLUTTER_PLUGIN_LIST
   audioplayers_linux
   desktop_drop
+  desktop_multi_window
   flutter_screen_capture
   hotkey_manager_linux
   local_notifier
