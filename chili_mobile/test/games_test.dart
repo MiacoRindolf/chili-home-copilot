@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:chili_mobile/src/games/game_awareness.dart';
 import 'package:chili_mobile/src/games/games_screen.dart';
 import 'package:chili_mobile/src/games/steam_models.dart';
 
@@ -87,6 +88,40 @@ void main() {
     });
   });
 
+  group('game awareness (GAME-2)', () {
+    test('parseWindowProbe reads window rect + screen size', () {
+      final GameWindowInfo? info = parseWindowProbe('10,20,1290,740;1920,1080');
+      expect(info, isNotNull);
+      expect(info!.window, const Rect.fromLTRB(10, 20, 1290, 740));
+      expect(info.screen, const Size(1920, 1080));
+    });
+
+    test('parseWindowProbe is tolerant of junk / empty', () {
+      expect(parseWindowProbe(''), isNull);
+      expect(parseWindowProbe('nope'), isNull);
+      expect(parseWindowProbe('1,2,3;4,5'), isNull); // wrong arity
+      expect(parseWindowProbe('0,0,0,0;1920,1080'), isNull); // zero-size window
+    });
+
+    test('normalized maps the window into 0..1 of the screen', () {
+      const GameWindowInfo info = GameWindowInfo(
+        window: Rect.fromLTWH(960, 0, 960, 540),
+        screen: Size(1920, 1080),
+      );
+      final Rect n = info.normalized;
+      expect(n.left, closeTo(0.5, 1e-9));
+      expect(n.top, closeTo(0.0, 1e-9));
+      expect(n.width, closeTo(0.5, 1e-9));
+      expect(n.height, closeTo(0.5, 1e-9));
+    });
+
+    test('probeScript sanitises the title (no quote/backtick/\$ injection)', () {
+      final String s = GameAwareness.probeScript('a"b`c\$d');
+      expect(s.contains('abcd'), isTrue); // quote/backtick/\$ stripped out
+      expect(s.contains('a"b'), isFalse);
+    });
+  });
+
   group('GamesScreen widget (GAME-1)', () {
     const List<SteamGame> sample = <SteamGame>[
       SteamGame(appId: '570', name: 'Dota 2', sizeOnDisk: 39440000000),
@@ -117,18 +152,31 @@ void main() {
       expect(launched!.appId, '570');
     });
 
-    testWidgets('shows PLAYING NOW for the running game',
+    testWidgets('GAME-2: shows the Now Playing banner with session + position',
         (WidgetTester tester) async {
       await tester.pumpWidget(MaterialApp(
         home: GamesScreen(
           fetcher: () async => sample,
           launcher: (SteamGame g) async => true,
           runningFetcher: () async => '730', // CS2 running
+          clock: () => DateTime(2026, 1, 1), // fixed → '00:00:00'
+          probe: (String title) async => const GameWindowInfo(
+            window: Rect.fromLTWH(0, 0, 1920, 1080),
+            screen: Size(1920, 1080),
+          ),
         ),
       ));
-      await tester.pumpAndSettle();
-      expect(find.text('PLAYING NOW'), findsOneWidget);
+      // Don't pumpAndSettle — a 1s session ticker runs forever; drain with pumps.
+      for (int i = 0; i < 5; i++) {
+        await tester.pump(const Duration(milliseconds: 30));
+      }
+      expect(find.text('NOW PLAYING'), findsOneWidget);
+      expect(find.textContaining('Session 00:00:00'), findsOneWidget);
+      expect(find.textContaining('1920×1080'), findsOneWidget);
+      // The header still flags the running game.
       expect(find.textContaining('Playing: Counter-Strike 2'), findsOneWidget);
+      // Dispose to cancel the session timers cleanly.
+      await tester.pumpWidget(const SizedBox());
     });
 
     testWidgets('empty state when no games found',

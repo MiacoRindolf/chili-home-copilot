@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 
 import '../ui/app_ui.dart';
+import 'game_awareness.dart';
 import 'steam_models.dart';
 import 'steam_service.dart';
 
@@ -16,6 +17,9 @@ typedef GameLauncher = Future<bool> Function(SteamGame game);
 /// Returns the currently-running Steam app id ('0' if none) — injectable.
 typedef RunningAppIdFetcher = Future<String> Function();
 
+/// Reads the running game window's geometry (read-only) — injectable.
+typedef GameProbe = Future<GameWindowInfo?> Function(String title);
+
 /// CHILI Games (GAME-1) — discovers the Steam games installed on this PC,
 /// launches them through Steam, and stays aware in real time of which game is
 /// running (the "PLAYING NOW" badge). An encapsulated launcher inside the OS.
@@ -25,13 +29,20 @@ class GamesScreen extends StatefulWidget {
     GamesFetcher? fetcher,
     GameLauncher? launcher,
     RunningAppIdFetcher? runningFetcher,
+    GameProbe? probe,
+    this.clock,
   })  : _fetcher = fetcher,
         _launcher = launcher,
-        _runningFetcher = runningFetcher;
+        _runningFetcher = runningFetcher,
+        _probe = probe;
 
   final GamesFetcher? _fetcher;
   final GameLauncher? _launcher;
   final RunningAppIdFetcher? _runningFetcher;
+  final GameProbe? _probe;
+
+  /// Test seam for the session clock.
+  final DateTime Function()? clock;
 
   @override
   State<GamesScreen> createState() => _GamesScreenState();
@@ -41,6 +52,8 @@ class _GamesScreenState extends State<GamesScreen> {
   late final GamesFetcher _fetcher;
   late final GameLauncher _launcher;
   late final RunningAppIdFetcher _runningFetcher;
+  late final GameProbe _probe;
+  late final DateTime Function() _now;
 
   List<SteamGame>? _games;
   bool _loading = true;
@@ -50,6 +63,13 @@ class _GamesScreenState extends State<GamesScreen> {
   Timer? _poll;
   Timer? _postLaunch;
 
+  // GAME-2 — live "now playing" session awareness.
+  String? _sessionAppId; // app id of the session currently being tracked
+  DateTime? _runningSince; // when the current game session started
+  GameWindowInfo? _probeInfo; // live read-only window geometry
+  Timer? _sessionTicker; // 1s — refreshes the elapsed display
+  Timer? _probeTimer; // 2s — refreshes the window geometry
+
   @override
   void initState() {
     super.initState();
@@ -57,6 +77,8 @@ class _GamesScreenState extends State<GamesScreen> {
     _fetcher = widget._fetcher ?? svc.installedGames;
     _launcher = widget._launcher ?? svc.launch;
     _runningFetcher = widget._runningFetcher ?? svc.runningAppId;
+    _probe = widget._probe ?? const GameAwareness().probe;
+    _now = widget.clock ?? DateTime.now;
     _load();
   }
 
@@ -64,6 +86,8 @@ class _GamesScreenState extends State<GamesScreen> {
   void dispose() {
     _poll?.cancel();
     _postLaunch?.cancel();
+    _sessionTicker?.cancel();
+    _probeTimer?.cancel();
     super.dispose();
   }
 
@@ -96,12 +120,60 @@ class _GamesScreenState extends State<GamesScreen> {
   Future<void> _refreshRunning() async {
     try {
       final String id = await _runningFetcher();
-      if (mounted && id != _runningAppId) {
-        setState(() => _runningAppId = id);
+      if (!mounted || id == _runningAppId) return;
+      setState(() => _runningAppId = id);
+      final SteamGame? g = _runningGame;
+      if (g != null) {
+        _startSession(g);
+      } else {
+        _stopSession();
       }
     } catch (_) {
       // ignore — awareness is best-effort
     }
+  }
+
+  // GAME-2 — begin tracking a live game session (timer + window geometry).
+  void _startSession(SteamGame game) {
+    if (_sessionAppId != game.appId) {
+      _sessionAppId = game.appId;
+      _runningSince = _now();
+      _probeInfo = null;
+    }
+    _sessionTicker ??=
+        Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
+    _probeTimer ??= Timer.periodic(
+        const Duration(seconds: 2), (_) => _pollProbe(game.name));
+    _pollProbe(game.name);
+  }
+
+  void _stopSession() {
+    _sessionTicker?.cancel();
+    _sessionTicker = null;
+    _probeTimer?.cancel();
+    _probeTimer = null;
+    if (mounted) {
+      setState(() {
+        _sessionAppId = null;
+        _runningSince = null;
+        _probeInfo = null;
+      });
+    }
+  }
+
+  Future<void> _pollProbe(String title) async {
+    final GameWindowInfo? info = await _probe(title);
+    if (mounted) setState(() => _probeInfo = info);
+  }
+
+  String _elapsedLabel() {
+    final DateTime? since = _runningSince;
+    if (since == null) return '00:00:00';
+    final Duration d = _now().difference(since);
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${two(d.inHours)}:${two(d.inMinutes % 60)}:${two(d.inSeconds % 60)}';
   }
 
   Future<void> _launch(SteamGame game) async {
@@ -210,16 +282,149 @@ class _GamesScreenState extends State<GamesScreen> {
             'Make sure Steam is installed and you have at least one game downloaded, then rescan.',
       );
     }
-    return GridView.builder(
-      padding: const EdgeInsets.all(20),
-      gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-        maxCrossAxisExtent: 190,
-        childAspectRatio: 0.62,
-        crossAxisSpacing: 16,
-        mainAxisSpacing: 16,
+    final SteamGame? playing = _runningGame;
+    return Column(
+      children: <Widget>[
+        if (playing != null) _nowPlayingBanner(cs, playing),
+        Expanded(
+          child: GridView.builder(
+            padding: const EdgeInsets.all(20),
+            gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+              maxCrossAxisExtent: 190,
+              childAspectRatio: 0.62,
+              crossAxisSpacing: 16,
+              mainAxisSpacing: 16,
+            ),
+            itemCount: games.length,
+            itemBuilder: (BuildContext _, int i) => _gameCard(cs, games[i]),
+          ),
+        ),
+      ],
+    );
+  }
+
+  // GAME-2 — live "Now Playing" overlay HUD: CHILI is aware of the running game
+  // and where its window sits, framed to feel like it's inside the OS.
+  Widget _nowPlayingBanner(ColorScheme cs, SteamGame game) {
+    const Color accent = Color(0xFF2E9E5B);
+    final GameWindowInfo? info = _probeInfo;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(20, 16, 20, 4),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: accent.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: accent.withValues(alpha: 0.45), width: 1.5),
       ),
-      itemCount: games.length,
-      itemBuilder: (BuildContext _, int i) => _gameCard(cs, games[i]),
+      child: Row(
+        children: <Widget>[
+          ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: SizedBox(
+              width: 54,
+              height: 72,
+              child: game.coverPath != null
+                  ? _cover(cs, game)
+                  : Container(
+                      color: cs.primary.withValues(alpha: 0.12),
+                      alignment: Alignment.center,
+                      child: Icon(Icons.videogame_asset,
+                          color: cs.primary, size: 26),
+                    ),
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                const Row(
+                  children: <Widget>[
+                    Icon(Icons.sensors, size: 16, color: accent),
+                    SizedBox(width: 6),
+                    Text('NOW PLAYING',
+                        style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 0.6,
+                            color: accent)),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(game.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                        color: cs.onSurface)),
+                const SizedBox(height: 4),
+                Row(
+                  children: <Widget>[
+                    Icon(Icons.timer_outlined,
+                        size: 14, color: cs.onSurfaceVariant),
+                    const SizedBox(width: 4),
+                    Text('Session ${_elapsedLabel()}',
+                        style: TextStyle(
+                            fontSize: 12, color: cs.onSurfaceVariant)),
+                    if (info != null) ...<Widget>[
+                      const SizedBox(width: 14),
+                      Icon(Icons.crop_free,
+                          size: 14, color: cs.onSurfaceVariant),
+                      const SizedBox(width: 4),
+                      Text(
+                        '${info.window.width.toInt()}×${info.window.height.toInt()} '
+                        '@ (${info.window.left.toInt()}, ${info.window.top.toInt()})',
+                        style: TextStyle(
+                            fontSize: 12, color: cs.onSurfaceVariant),
+                      ),
+                    ],
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          // Mini monitor map — CHILI's awareness of where the game sits.
+          if (info != null) _monitorMap(cs, info),
+        ],
+      ),
+    );
+  }
+
+  Widget _monitorMap(ColorScheme cs, GameWindowInfo info) {
+    final double sw = info.screen.width <= 0 ? 16 : info.screen.width;
+    final double sh = info.screen.height <= 0 ? 9 : info.screen.height;
+    const double mapW = 96;
+    final double mapH = (mapW * sh / sw).clamp(40.0, 96.0);
+    final Rect n = info.normalized;
+    return Tooltip(
+      message: 'Where the game window sits on your screen',
+      child: Container(
+        width: mapW,
+        height: mapH,
+        decoration: BoxDecoration(
+          color: cs.surface,
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: cs.outlineVariant),
+        ),
+        child: Stack(
+          children: <Widget>[
+            Positioned(
+              left: n.left * mapW,
+              top: n.top * mapH,
+              width: (n.width * mapW).clamp(3.0, mapW),
+              height: (n.height * mapH).clamp(3.0, mapH),
+              child: Container(
+                decoration: BoxDecoration(
+                  color: cs.primary.withValues(alpha: 0.30),
+                  border: Border.all(color: cs.primary, width: 1),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
