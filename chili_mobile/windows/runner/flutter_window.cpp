@@ -145,7 +145,9 @@ void FitGameToFrame(HWND frame) {
   int gh = (fr.bottom - fr.top) - kTitleH - kBorder;
   if (gw < 50) gw = 50;
   if (gh < 50) gh = 50;
-  ::SetWindowPos(game, frame, gx, gy, gw, gh, SWP_NOACTIVATE);
+  // Move/size only — the frame is owned by the game, so the owner relationship
+  // keeps the (hollow) frame above it; the game shows through the hole.
+  ::SetWindowPos(game, nullptr, gx, gy, gw, gh, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
 // Make the frame a hollow "picture frame": only the title bar + borders are
@@ -369,8 +371,10 @@ bool FlutterWindow::FrameWindow(HWND game, const std::wstring& name) {
   int fx = r0.left - kBorder;
   int fy = r0.top - kTitleH;
   if (fy < 0) fy = 0;
+  // Own the frame by the game so they group: the frame always stays above the
+  // game and follows it through alt-tab, minimize/restore, and taskbar clicks.
   frame_bar_ = ::CreateWindowExW(WS_EX_TOOLWINDOW, kFrameClass, L"CHILI Frame",
-                                 WS_POPUP | WS_VISIBLE, fx, fy, fw, fh, nullptr,
+                                 WS_POPUP | WS_VISIBLE, fx, fy, fw, fh, game,
                                  nullptr, ::GetModuleHandleW(nullptr), nullptr);
   if (!frame_bar_) {
     // Restore the game's chrome on failure.
