@@ -2330,6 +2330,14 @@ class Settings(BaseSettings):
         le=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_DAILY_LOSS_FRACTION_OF_EQUITY"),
     )
+    # Reward:risk multiple — the TARGET is set this many x the actual stop distance
+    # (Ross-style 2:1 floor; the per-instrument/regime learner can raise it). Fixes
+    # the old ~1.3-1.5:1 that sat below Ross's strict 2:1. One documented R:R knob.
+    chili_momentum_risk_reward_risk_ratio: float = Field(
+        default=2.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_REWARD_RISK_RATIO"),
+    )
     chili_momentum_order_notional_guard_bps: float = Field(
         default=25.0,
         ge=0.0,
