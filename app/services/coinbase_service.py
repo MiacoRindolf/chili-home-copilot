@@ -322,6 +322,42 @@ def get_fee_rates_bps(*, prefer_env_credentials: bool = False) -> dict[str, Any]
 
 # ── Data fetching ────────────────────────────────────────────────────
 
+_CAN_TRADE_TTL = 300.0  # seconds — cache key-permission checks (infra TTL, not a trading param)
+_can_trade_cache: dict[str, Any] = {"value": None, "ts": 0.0}
+
+
+def can_trade() -> bool:
+    """True if the connected Coinbase key has TRADE permission (place buy AND sell).
+
+    Guards the live path against a view-only / buy-only key that lets ENTRIES
+    through but blocks EXITS ("403 Missing Required Scopes" on sell). Uses
+    Coinbase's own ``get_api_key_permissions`` (no order placed). Cached briefly;
+    fail-closed unless a recent positive verification exists.
+    See docs/DESIGN/MOMENTUM_LANE.md.
+    """
+    client = _get_client()
+    if not client or not is_connected():
+        return False
+    now = time.time()
+    cached = _can_trade_cache.get("value")
+    cached_fresh = cached is True and (now - float(_can_trade_cache.get("ts") or 0.0)) < _CAN_TRADE_TTL
+    if cached_fresh:
+        return True
+    try:
+        perms = client.get_api_key_permissions()
+        pd = perms if isinstance(perms, dict) else (
+            perms.to_dict() if hasattr(perms, "to_dict") else getattr(perms, "__dict__", {})
+        )
+        ok = bool(pd.get("can_trade"))
+        _can_trade_cache["value"] = ok
+        _can_trade_cache["ts"] = now
+        return ok
+    except Exception as e:
+        logger.warning("[coinbase] can_trade permission check failed: %s", e)
+        # Fail-closed: only allow if a recent check already confirmed trade scope.
+        return cached_fresh
+
+
 def get_accounts_raw() -> list[dict]:
     """Fetch all Coinbase accounts (wallets). Cached."""
     cached = _cache_get("accounts")
