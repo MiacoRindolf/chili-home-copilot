@@ -84,4 +84,6 @@ of truth until this reaches parity.
       right, and bottom edges + both bottom corners (not just BR). Edge handles
       live in the solid 6px border; both bottom corners are kept solid in the
       hollow region. Verified frame renders intact around Notepad.
-      (Port Chat·Trading·Research with the backend: next.)
+- [x] **NATIVE-14** — 90-day high/low range line in the price card (computed from
+      the history series, shown under the sparkline). Verified (abyssal whip
+      76.5k – 88.7k gp). (Port Chat·Trading·Research with the backend: next.)

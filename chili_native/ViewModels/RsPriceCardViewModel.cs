@@ -76,6 +76,8 @@ public partial class RsPriceCardViewModel : ViewModelBase
 
     public IBrush ChangeBrush => new SolidColorBrush(Color.Parse(ChangeUp ? "#35D08A" : "#FF6B5B"));
 
+    [ObservableProperty] private string _rangeText = "";
+
     [RelayCommand]
     private async Task SearchAsync()
     {
@@ -86,6 +88,7 @@ public partial class RsPriceCardViewModel : ViewModelBase
         Thumb = null;
         Spark = null;
         ChangeText = "";
+        RangeText = "";
 
         try
         {
@@ -136,6 +139,10 @@ public partial class RsPriceCardViewModel : ViewModelBase
                     double pct = first == 0 ? 0 : (last - first) * 100.0 / first;
                     ChangeUp = last >= first;
                     ChangeText = $"{(pct >= 0 ? "+" : "")}{pct:0.#}%  ·  90d";
+
+                    long lo = hist[0], hi = hist[0];
+                    foreach (var v in hist) { if (v < lo) lo = v; if (v > hi) hi = v; }
+                    RangeText = $"90d range  ·  {RuneScapePrices.FormatGp(lo)} – {RuneScapePrices.FormatGp(hi)} gp";
                 }
             }
             catch
