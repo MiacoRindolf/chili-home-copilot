@@ -86,4 +86,8 @@ of truth until this reaches parity.
       hollow region. Verified frame renders intact around Notepad.
 - [x] **NATIVE-14** — 90-day high/low range line in the price card (computed from
       the history series, shown under the sparkline). Verified (abyssal whip
-      76.5k – 88.7k gp). (Port Chat·Trading·Research with the backend: next.)
+      76.5k – 88.7k gp).
+- [x] **NATIVE-15** — copy-price button: a copy icon next to the price copies the
+      raw value to the clipboard (TopLevel.Clipboard) with a brief "Copied!"
+      feedback. Verified end-to-end (clipboard = 85139). (Port Chat·Trading·Research
+      with the backend: next.)
