@@ -52,6 +52,12 @@ public partial class RsPriceCardViewModel : ViewModelBase
     [ObservableProperty] private long _priceValue;
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasAsOf))]
+    private string _asOfText = "";
+
+    public bool HasAsOf => !string.IsNullOrEmpty(AsOfText);
+
+    [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasBlurb))]
     private string _blurb = "";
 
@@ -90,6 +96,7 @@ public partial class RsPriceCardViewModel : ViewModelBase
         Spark = null;
         ChangeText = "";
         RangeText = "";
+        AsOfText = "";
 
         try
         {
@@ -106,6 +113,9 @@ public partial class RsPriceCardViewModel : ViewModelBase
             PriceValue = p.Price;
             PriceText = $"{RuneScapePrices.FormatGpFull(p.Price)} gp";
             VolumeText = $"Vol {RuneScapePrices.FormatGpFull(p.Volume)}/day";
+            AsOfText = p.TimestampMs > 0
+                ? $"GE update · {DateTimeOffset.FromUnixTimeMilliseconds(p.TimestampMs).ToLocalTime():MMM d, yyyy}"
+                : "";
             Blurb = "";
             Phase = CardPhase.Ok;
             Remember(p.Name);
