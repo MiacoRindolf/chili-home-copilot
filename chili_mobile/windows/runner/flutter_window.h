@@ -18,6 +18,9 @@ class FlutterWindow : public Win32Window {
   explicit FlutterWindow(const flutter::DartProject& project);
   virtual ~FlutterWindow();
 
+  // Called by the CHILI frame bar's own close button (GAME-6).
+  void DismissFrame();
+
  protected:
   // Win32Window:
   bool OnCreate() override;
