@@ -1,0 +1,36 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:Chili.ViewModels"
+        xmlns:views="using:Chili.Views"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d" d:DesignWidth="360" d:DesignHeight="200"
+        x:Class="Chili.Views.PriceOverlayWindow"
+        x:DataType="vm:RsPriceCardViewModel"
+        Title="CHILI Prices"
+        SystemDecorations="None" CanResize="False"
+        SizeToContent="WidthAndHeight"
+        Background="Transparent" TransparencyLevelHint="Transparent"
+        Topmost="True" ShowInTaskbar="False">
+
+    <StackPanel Width="360">
+        <!-- drag handle -->
+        <Border Name="Handle" Background="{StaticResource SurfaceBrush}"
+                CornerRadius="12,12,0,0" Padding="11,7"
+                BorderBrush="{StaticResource StrokeBrush}" BorderThickness="1,1,1,0">
+            <Grid ColumnDefinitions="*,Auto">
+                <StackPanel Orientation="Horizontal" Spacing="7" VerticalAlignment="Center">
+                    <Border Width="9" Height="9" CornerRadius="3" Background="{StaticResource BrandBrush}"/>
+                    <TextBlock Text="CHILI · GE prices" FontSize="11" FontWeight="SemiBold"
+                               Foreground="{StaticResource TextMidBrush}"/>
+                </StackPanel>
+                <Button Name="CloseBtn" Grid.Column="1" Content="✕" Width="24" Height="22"
+                        Padding="0" FontSize="11" Background="Transparent" BorderThickness="0"
+                        Foreground="{StaticResource TextMidBrush}"
+                        HorizontalContentAlignment="Center" VerticalContentAlignment="Center"/>
+            </Grid>
+        </Border>
+        <!-- the price card inherits this window's RsPriceCardViewModel DataContext -->
+        <views:RsPriceCard/>
+    </StackPanel>
+</Window>
