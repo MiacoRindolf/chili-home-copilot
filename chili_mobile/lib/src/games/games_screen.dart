@@ -60,10 +60,8 @@ class _GamesScreenState extends State<GamesScreen> {
   late final GameFrame _frame;
   late final DateTime Function() _now;
 
-  // GAME-3 — CHILI frame mode (drag the frame → game follows). On by default.
-  bool _frameMode = true;
+  // GAME-3 — CHILI frame state (drag the frame → game follows).
   bool _framedActive = false;
-  Timer? _frameAttach;
 
   List<SteamGame>? _games;
   bool _loading = true;
@@ -99,7 +97,6 @@ class _GamesScreenState extends State<GamesScreen> {
     _postLaunch?.cancel();
     _sessionTicker?.cancel();
     _probeTimer?.cancel();
-    _frameAttach?.cancel();
     if (_framedActive) _frame.stop();
     super.dispose();
   }
@@ -168,7 +165,7 @@ class _GamesScreenState extends State<GamesScreen> {
     _probeTimer?.cancel();
     _probeTimer = null;
     // The game ended — tear down the CHILI frame too.
-    if (_framedActive || _frameAttach != null) _stopFraming();
+    if (_framedActive) _stopFraming();
     if (mounted) {
       setState(() {
         _sessionAppId = null;
@@ -204,38 +201,67 @@ class _GamesScreenState extends State<GamesScreen> {
       // Give Steam a moment, then re-check what's running.
       _postLaunch?.cancel();
       _postLaunch = Timer(const Duration(seconds: 3), _refreshRunning);
-      if (_frameMode) _startFraming(game);
     }
   }
 
-  // GAME-3 — poll until the game window exists, then attach the CHILI frame.
-  void _startFraming(SteamGame game) {
-    _frameAttach?.cancel();
-    int tries = 0;
-    _frameAttach =
-        Timer.periodic(const Duration(milliseconds: 800), (Timer t) async {
-      if (!mounted || tries++ > 40) {
-        t.cancel();
-        return;
-      }
-      final bool ok = await _frame.start(game.name);
-      if (ok) {
-        t.cancel();
-        if (mounted) setState(() => _framedActive = true);
-      }
+  // GAME-5 — pick the exact window to frame. CHILI never guesses by title
+  // (which could grab a launcher or anti-cheat login window that shares the
+  // game's name); the user points at the real game window.
+  Future<void> _pickAndFrame(SteamGame game) async {
+    final List<FrameWindowOption> wins = await _frame.listWindows();
+    if (!mounted) return;
+    if (wins.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No open windows found to frame.')),
+      );
+      return;
+    }
+    // Surface the likely game window(s) first, but let the user decide.
+    final String q = game.name.toLowerCase();
+    wins.sort((FrameWindowOption a, FrameWindowOption b) {
+      final bool am = a.title.toLowerCase().contains(q);
+      final bool bm = b.title.toLowerCase().contains(q);
+      if (am == bm) return a.title.toLowerCase().compareTo(b.title.toLowerCase());
+      return am ? -1 : 1;
     });
-  }
-
-  // GAME-3 — frame an already-running game on demand (one-shot + feedback).
-  Future<void> _frameNow(SteamGame game) async {
-    final bool ok = await _frame.start(game.name);
+    final FrameWindowOption? choice = await showDialog<FrameWindowOption>(
+      context: context,
+      builder: (BuildContext ctx) => SimpleDialog(
+        title: const Text('Pick the game window to frame'),
+        children: <Widget>[
+          Padding(
+            padding: const EdgeInsets.fromLTRB(24, 0, 24, 8),
+            child: Text(
+              'Choose the actual game window — not its launcher or login '
+              'screen.',
+              style: TextStyle(
+                  fontSize: 12, color: Theme.of(ctx).colorScheme.onSurfaceVariant),
+            ),
+          ),
+          for (final FrameWindowOption w in wins)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(ctx, w),
+              child: Row(
+                children: <Widget>[
+                  const Icon(Icons.window_outlined, size: 18),
+                  const SizedBox(width: 10),
+                  Expanded(
+                      child: Text(w.title, overflow: TextOverflow.ellipsis)),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+    if (choice == null || !mounted) return;
+    final bool ok = await _frame.startByHandle(choice.hwnd, name: game.name);
     if (!mounted) return;
     if (ok) {
       setState(() => _framedActive = true);
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Couldn’t frame ${game.name}. Set it to '
+          content: Text('Couldn’t frame “${choice.title}”. Set the game to '
               'Windowed / Borderless mode (fullscreen can’t be framed).'),
         ),
       );
@@ -243,7 +269,6 @@ class _GamesScreenState extends State<GamesScreen> {
   }
 
   Future<void> _stopFraming() async {
-    _frameAttach?.cancel();
     await _frame.stop();
     if (mounted) setState(() => _framedActive = false);
   }
@@ -292,20 +317,6 @@ class _GamesScreenState extends State<GamesScreen> {
                       icon: Icons.videogame_asset),
               ],
             ),
-          ),
-          const SizedBox(width: 8),
-          // GAME-3 — frame mode: launch with a draggable CHILI frame that moves
-          // the game window (SetWindowPos — no reparent/injection).
-          FilterChip(
-            label: const Text('Frame (beta)'),
-            avatar: Icon(Icons.flip_to_front,
-                size: 16,
-                color: _frameMode ? cs.onPrimary : cs.onSurfaceVariant),
-            selected: _frameMode,
-            onSelected: (bool v) => setState(() => _frameMode = v),
-            tooltip:
-                'Launch with a CHILI frame on top; drag it to move the game '
-                '(windowed games only)',
           ),
           const SizedBox(width: 8),
           IconButton(
@@ -486,9 +497,9 @@ class _GamesScreenState extends State<GamesScreen> {
                     ),
                   )
                 : Tooltip(
-                    message: 'Put a draggable CHILI frame on this game',
+                    message: 'Put a draggable CHILI frame on a game window',
                     child: FilledButton.icon(
-                      onPressed: () => _frameNow(game),
+                      onPressed: () => _pickAndFrame(game),
                       icon: const Icon(Icons.flip_to_front, size: 16),
                       label: const Text('Frame'),
                     ),
