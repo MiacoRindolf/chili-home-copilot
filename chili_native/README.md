@@ -71,4 +71,7 @@ of truth until this reaches parity.
 - [x] **NATIVE-9** — 90-day price sparkline: the price card fetches the WeirdGloop
       `last90d` history and draws a StreamGeometry trend line + a color-coded
       % change (green up / chili-red down). Verified live (abyssal whip +10.9%).
+- [x] **NATIVE-10** — recent searches: looked-up items appear as clickable chips
+      below the search box (most-recent-first, deduped, capped at 6); click to
+      re-search. Verified (Rune platebody · Dragon claw · Abyssal whip).
       (Port Chat·Trading·Research with the backend: next.)
