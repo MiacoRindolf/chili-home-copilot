@@ -433,6 +433,53 @@ void main() {
       expect(find.text('robinhood · 1 pos'), findsOneWidget);
     });
 
+    testWidgets('TC-7: tapping a position fires onDiscussPosition',
+        (WidgetTester tester) async {
+      tester.view.physicalSize = const Size(1100, 900);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      Position? discussed;
+      await tester.pumpWidget(MaterialApp(
+        home: CockpitScreen(
+          onDiscussPosition: (Position p) => discussed = p,
+          fetcher: () async => const TradingSnapshot(
+            totalEquity: 1000,
+            cash: 0,
+            buyingPower: 0,
+            dayPnl: 0,
+            totalPnl: 0,
+            realizedPnl: 0,
+            unrealizedPnl: 0,
+            killSwitchActive: false,
+            killSwitchReason: '',
+            automationEnabled: true,
+            ensembleMode: '',
+            breakerTripped: false,
+            breakerReason: '',
+            totalHeatPct: 0,
+            positions: <Position>[
+              Position(
+                ticker: 'AAPL',
+                qty: 10,
+                entryPrice: 150,
+                currentPrice: 165,
+                marketValue: 1650,
+                unrealizedPnl: 150,
+                unrealizedPnlPct: 10,
+                venue: 'robinhood',
+              ),
+            ],
+          ),
+        ),
+      ));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('AAPL'));
+      await tester.pump();
+      expect(discussed, isNotNull);
+      expect(discussed!.ticker, 'AAPL');
+    });
+
     testWidgets('TC-4: venue chips filter the open-positions list',
         (WidgetTester tester) async {
       tester.view.physicalSize = const Size(1100, 900);

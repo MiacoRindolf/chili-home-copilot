@@ -20,12 +20,16 @@ class CockpitScreen extends StatefulWidget {
     super.key,
     TradingSnapshotFetcher? fetcher,
     this.notifications,
+    this.onDiscussPosition,
   }) : _injectedFetcher = fetcher;
 
   final TradingSnapshotFetcher? _injectedFetcher;
 
   /// NC-2 — optional shared notification center for kill-switch / breaker alerts.
   final NotificationCenter? notifications;
+
+  /// TC-7 — tap a position to discuss it in Chat (reuses the UK-2 ask inbox).
+  final void Function(Position position)? onDiscussPosition;
 
   @override
   State<CockpitScreen> createState() => _CockpitScreenState();
@@ -497,7 +501,8 @@ class _CockpitScreenState extends State<CockpitScreen> {
 
   Widget _positionRow(ColorScheme cs, Position p) {
     final Color pnlColor = _pnlColor(p.unrealizedPnl, cs);
-    return Row(
+    final bool tappable = widget.onDiscussPosition != null; // TC-7
+    final Widget row = Row(
       children: <Widget>[
         SizedBox(
           width: 78,
@@ -529,7 +534,20 @@ class _CockpitScreenState extends State<CockpitScreen> {
                 style: TextStyle(fontSize: 11, color: pnlColor)),
           ],
         ),
+        if (tappable) ...<Widget>[
+          const SizedBox(width: 6),
+          Icon(Icons.forum_outlined, size: 14, color: cs.onSurfaceVariant),
+        ],
       ],
+    );
+    if (!tappable) return row;
+    return InkWell(
+      onTap: () => widget.onDiscussPosition!(p),
+      borderRadius: BorderRadius.circular(6),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: row,
+      ),
     );
   }
 
