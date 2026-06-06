@@ -169,6 +169,15 @@ public partial class RsPriceCardViewModel : ViewModelBase
         await SearchAsync();
     }
 
+    /// <summary>Re-fetch the live price for the current item (refresh button).</summary>
+    [RelayCommand]
+    private async Task Refresh()
+    {
+        if (string.IsNullOrWhiteSpace(ItemName)) return;
+        SearchText = ItemName;
+        await SearchAsync();
+    }
+
     /// <summary>Record an item name at the front of the recent list (deduped, capped).</summary>
     private void Remember(string name)
     {
