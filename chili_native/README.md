@@ -106,4 +106,8 @@ of truth until this reaches parity.
       appear, click Clear, chips gone).
 - [x] **NATIVE-21** — welcome/empty-state polish: the idle price card shows
       clickable example-item chips (Abyssal whip, Dragon claws, Twisted bow, …)
-      that run a search. Verified rendering. (Port Chat·Trading·Research with the backend: next.)
+      that run a search. Verified rendering.
+- [x] **NATIVE-22** — "pop out" button in the Prices app: opens the price card as a
+      standalone floating, always-on-top overlay window (reuses PriceOverlayWindow)
+      near the main window — a price widget anywhere, not just from the game frame.
+      Verified (floating overlay appears). (Port Chat·Trading·Research with the backend: next.)
