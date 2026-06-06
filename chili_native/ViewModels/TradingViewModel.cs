@@ -1,3 +1,4 @@
+using System;
 using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Text.Json;
@@ -112,7 +113,7 @@ public partial class TradingViewModel : ViewModelBase
             }
         }
 
-        Status = $"{Positions.Count} positions · updated";
+        Status = $"{Positions.Count} positions · auto-refresh · {DateTime.Now:HH:mm:ss}";
     }
 
     private static double? Num(JsonElement e, string key) =>
