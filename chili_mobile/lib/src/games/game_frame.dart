@@ -68,6 +68,31 @@ class GameFrame {
     }
   }
 
+  /// Listen for item-search queries submitted from the native in-game overlay
+  /// (GAME-11). [handler] resolves a typed query to a display string; the
+  /// result is pushed back to the overlay. Safe to call repeatedly.
+  void bindSearch(Future<String> Function(String query) handler) {
+    _ch.setMethodCallHandler((MethodCall call) async {
+      if (call.method == 'query') {
+        final Object? raw = call.arguments;
+        final String q = raw is Map ? '${raw['q'] ?? ''}' : '';
+        String text;
+        try {
+          text = await handler(q);
+        } catch (_) {
+          text = 'Lookup failed';
+        }
+        try {
+          await _ch.invokeMethod<void>(
+              'searchResult', <String, Object?>{'text': text});
+        } catch (_) {
+          // ignore — overlay gone / non-Windows
+        }
+      }
+      return null;
+    });
+  }
+
   /// Remove the CHILI frame (the game window is left exactly where it is).
   Future<void> stop() async {
     try {

@@ -21,6 +21,13 @@ class FlutterWindow : public Win32Window {
   // Called by the CHILI frame bar's own close button (GAME-6).
   void DismissFrame();
 
+  // Called by the search overlay's edit box when the user submits a query
+  // (GAME-11); routes the query to Dart for an RS3 GE price lookup.
+  void OnSearchSubmit(const std::wstring& text);
+
+  // Keep the search overlay pinned to the game's top-left as it moves (GAME-11).
+  void RepositionSearchOverlay();
+
  protected:
   // Win32Window:
   bool OnCreate() override;
@@ -44,11 +51,15 @@ class FlutterWindow : public Win32Window {
   HWND frame_bar_ = nullptr;       // the CHILI chrome window
   HWND framed_game_ = nullptr;     // the game it controls
   LONG_PTR framed_orig_style_ = 0; // game's style before we made it borderless
+  HWND search_overlay_ = nullptr;  // GAME-11 item-price search overlay
+  HWND search_edit_ = nullptr;     // its text box
 
   void SetupFrameChannel();
   bool StartFrame(const std::wstring& title, const std::wstring& name);
   bool FrameWindow(HWND game, const std::wstring& name);
   void StopFrame();
+  void CreateSearchOverlay(HWND game, int gx, int gy);
+  void DestroySearchOverlay();
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_
