@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Net.Http;
 using System.Text.Json;
@@ -55,6 +56,15 @@ public sealed class RuneScapePrices
         return ParseWeirdGloopLatest(json, name);
     }
 
+    /// <summary>Last-90-days GE price series (oldest → newest) for an exact name.</summary>
+    public async Task<IReadOnlyList<long>> PriceHistory(string name)
+    {
+        var url = "https://api.weirdgloop.org/exchange/history/rs/last90d?name="
+                  + Uri.EscapeDataString(name);
+        var json = await _http.GetStringAsync(url).ConfigureAwait(false);
+        return ParseHistory(json);
+    }
+
     /// <summary>Search then price in one call (fuzzy query → GE price).</summary>
     public async Task<ItemPrice?> Lookup(string query)
     {
@@ -100,6 +110,25 @@ public sealed class RuneScapePrices
                 ReadTimestampMs(v, "timestamp"));
         }
         return null;
+    }
+
+    /// <summary>Parse a WeirdGloop history body → the price series (oldest → newest).
+    /// The response is an object keyed by item name → [{timestamp, price, volume}].</summary>
+    public static IReadOnlyList<long> ParseHistory(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+        if (root.ValueKind != JsonValueKind.Object) return Array.Empty<long>();
+        foreach (var prop in root.EnumerateObject())
+        {
+            if (prop.Value.ValueKind != JsonValueKind.Array) continue;
+            var list = new List<long>();
+            foreach (var el in prop.Value.EnumerateArray())
+                if (el.ValueKind == JsonValueKind.Object)
+                    list.Add(ReadLong(el, "price"));
+            return list;
+        }
+        return Array.Empty<long>();
     }
 
     /// <summary>Parse the wiki query response → extract + thumbnail.</summary>

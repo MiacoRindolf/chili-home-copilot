@@ -67,4 +67,8 @@ of truth until this reaches parity.
       (`SetWindowLongPtr` GWLP_HWNDPARENT) so they group in alt-tab / the taskbar
       and the frame floats above the game — easy to return to after app-switching.
       Safe: sets an attribute on the frame only; never reparents/injects/touches
-      the game. (Port Chat·Trading·Research with the backend: next.)
+      the game.
+- [x] **NATIVE-9** — 90-day price sparkline: the price card fetches the WeirdGloop
+      `last90d` history and draws a StreamGeometry trend line + a color-coded
+      % change (green up / chili-red down). Verified live (abyssal whip +10.9%).
+      (Port Chat·Trading·Research with the backend: next.)

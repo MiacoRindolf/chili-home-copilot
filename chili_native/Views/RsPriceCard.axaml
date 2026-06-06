@@ -99,6 +99,22 @@
                         </StackPanel>
                     </Grid>
 
+                    <!-- 90-day price trend -->
+                    <StackPanel IsVisible="{Binding HasSpark}" Spacing="2">
+                        <Grid ColumnDefinitions="*,Auto">
+                            <TextBlock Grid.Column="0" Text="90-day trend" FontSize="10"
+                                       Foreground="{StaticResource TextLowBrush}" VerticalAlignment="Center"/>
+                            <TextBlock Grid.Column="1" Text="{Binding ChangeText}"
+                                       Foreground="{Binding ChangeBrush}" FontSize="11"
+                                       FontWeight="SemiBold"/>
+                        </Grid>
+                        <Panel Height="42">
+                            <Path Data="{Binding Spark}" Stroke="{Binding ChangeBrush}"
+                                  StrokeThickness="1.6" StrokeLineCap="Round" StrokeJoin="Round"
+                                  HorizontalAlignment="Left" VerticalAlignment="Stretch"/>
+                        </Panel>
+                    </StackPanel>
+
                     <TextBlock IsVisible="{Binding HasBlurb}" Text="{Binding Blurb}"
                                Foreground="{StaticResource TextMidBrush}" FontSize="12"
                                LineHeight="17" TextWrapping="Wrap"/>
