@@ -68,6 +68,11 @@
             <Setter Property="Foreground" Value="{StaticResource AccentBrush}"/>
             <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
         </Style>
+        <Style Selector="Button.dock.selected">
+            <Setter Property="Foreground" Value="{StaticResource AccentBrush}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
+            <Setter Property="Background" Value="#2235D08A"/>
+        </Style>
     </Window.Styles>
 
     <!-- Root surface -->
@@ -95,40 +100,40 @@
                 </StackPanel>
             </Grid>
 
-            <!-- ===== Workspace ===== -->
-            <Panel Grid.Row="1">
-                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center"
-                            Spacing="22" Width="360">
-                    <StackPanel Spacing="10" HorizontalAlignment="Center">
-                        <TextBlock Text="CHILI" FontSize="44" FontWeight="Bold"
-                                   Foreground="{StaticResource TextHiBrush}"
-                                   HorizontalAlignment="Center"/>
-                        <Border Background="#1635D08A" CornerRadius="20" Padding="12,5"
-                                HorizontalAlignment="Center">
-                            <StackPanel Orientation="Horizontal" Spacing="7">
-                                <Border Width="7" Height="7" CornerRadius="4" VerticalAlignment="Center"
-                                        Background="{StaticResource AccentBrush}"/>
-                                <TextBlock Text="RuneScape Grand Exchange  ·  live prices" FontSize="11"
-                                           Foreground="{StaticResource AccentBrush}"/>
-                            </StackPanel>
-                        </Border>
-                    </StackPanel>
-
-                    <views:RsPriceCard DataContext="{Binding PriceCard}"/>
-                </StackPanel>
-            </Panel>
+            <!-- ===== Workspace (hosts the selected app) ===== -->
+            <ContentControl Grid.Row="1" Content="{Binding Current.Content}"
+                            HorizontalAlignment="Center" VerticalAlignment="Center"
+                            Margin="24">
+                <ContentControl.DataTemplates>
+                    <DataTemplate DataType="vm:RsPriceCardViewModel">
+                        <views:RsPriceCard/>
+                    </DataTemplate>
+                    <DataTemplate DataType="vm:PlaceholderViewModel">
+                        <views:PlaceholderView/>
+                    </DataTemplate>
+                </ContentControl.DataTemplates>
+            </ContentControl>
 
             <!-- ===== Dock ===== -->
             <Border Grid.Row="2" HorizontalAlignment="Center" VerticalAlignment="Center"
                     Background="#CC11161B" CornerRadius="18" Padding="8,7"
                     BorderBrush="{StaticResource StrokeBrush}" BorderThickness="1">
-                <StackPanel Orientation="Horizontal">
-                    <Button Classes="dock" Content="&#9993;" ToolTip.Tip="Chat"/>
-                    <Button Classes="dock" Content="$" ToolTip.Tip="Trading"/>
-                    <Button Classes="dock" Content="&#9670;" ToolTip.Tip="Games"/>
-                    <Button Classes="dock" Content="&#9906;" ToolTip.Tip="Research"/>
-                    <Button Classes="dock" Content="&#9679;" ToolTip.Tip="Agents"/>
-                </StackPanel>
+                <ItemsControl ItemsSource="{Binding Apps}">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel Orientation="Horizontal"/>
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="vm:DockApp">
+                            <Button Classes="dock" Classes.selected="{Binding IsSelected}"
+                                    Content="{Binding Glyph}" ToolTip.Tip="{Binding Name}"
+                                    CommandParameter="{Binding}"
+                                    Command="{Binding ((vm:MainWindowViewModel)DataContext).SelectCommand,
+                                              RelativeSource={RelativeSource AncestorType=Window}}"/>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
             </Border>
         </Grid>
     </Border>

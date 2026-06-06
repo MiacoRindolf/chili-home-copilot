@@ -1,0 +1,22 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:Chili.ViewModels"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d" d:DesignWidth="440" d:DesignHeight="300"
+             x:Class="Chili.Views.PlaceholderView"
+             x:DataType="vm:PlaceholderViewModel">
+
+    <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="14" MaxWidth="440">
+        <Border Width="68" Height="68" CornerRadius="18" HorizontalAlignment="Center"
+                Background="{StaticResource Surface2Brush}"
+                BorderBrush="{StaticResource StrokeBrush}" BorderThickness="1">
+            <TextBlock Text="{Binding Glyph}" FontSize="28" Foreground="{StaticResource TextMidBrush}"
+                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+        </Border>
+        <TextBlock Text="{Binding Title}" FontSize="30" FontWeight="Bold"
+                   Foreground="{StaticResource TextHiBrush}" HorizontalAlignment="Center"/>
+        <TextBlock Text="{Binding Subtitle}" FontSize="14" Foreground="{StaticResource TextMidBrush}"
+                   HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap"/>
+    </StackPanel>
+</UserControl>
