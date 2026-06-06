@@ -7,6 +7,7 @@ import '../ui/app_ui.dart';
 import 'game_awareness.dart';
 import 'game_frame.dart';
 import 'rs_item_overlay.dart';
+import 'rs_overlay_window.dart';
 import 'runescape_prices.dart';
 import 'steam_models.dart';
 import 'steam_service.dart';
@@ -302,6 +303,24 @@ class _GamesScreenState extends State<GamesScreen> {
     }
   }
 
+  // GAME-15 — open the price card as a floating window over the game's top-left.
+  Future<void> _popOutPrices(GameWindowInfo? info) async {
+    Rect? at;
+    if (info != null) {
+      final double dpr = MediaQuery.of(context).devicePixelRatio;
+      at = Rect.fromLTWH(info.window.left / dpr + 12,
+          info.window.top / dpr + 12, 380, 360);
+    }
+    try {
+      await openRsPriceWindow(gameRect: at);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Couldn’t open the price window: $e')),
+      );
+    }
+  }
+
   Future<void> _stopFraming() async {
     await _frame.stop();
     if (mounted) setState(() => _framedActive = false);
@@ -528,6 +547,18 @@ class _GamesScreenState extends State<GamesScreen> {
             ),
           ),
           const SizedBox(width: 12),
+          // GAME-15 — pop the price card out as a floating window over the game.
+          Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: Tooltip(
+              message: 'Float the RuneScape price card over the game',
+              child: OutlinedButton.icon(
+                onPressed: () => _popOutPrices(info),
+                icon: const Icon(Icons.open_in_new, size: 16),
+                label: const Text('Prices'),
+              ),
+            ),
+          ),
           Padding(
             padding: const EdgeInsets.only(right: 8),
             child: _framedActive

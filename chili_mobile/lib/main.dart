@@ -1,5 +1,7 @@
+import 'dart:convert';
 import 'dart:io';
 
+import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:window_manager/window_manager.dart';
@@ -10,9 +12,36 @@ import 'src/companion/companion_shell.dart';
 import 'src/companion/desktop_powers.dart';
 import 'src/config/app_config.dart';
 import 'src/config/layout_constants.dart';
+import 'src/games/rs_overlay_window.dart';
 
-Future<void> main() async {
+Future<void> main(List<String> args) async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // GAME-15 — a secondary engine (the floating RS price overlay) re-enters
+  // main(). Ask the plugin which window this is; if it's our overlay, render
+  // just that and skip the full CHILI shell. Guarded so a missing/!ready plugin
+  // never blocks the normal app from launching.
+  if (!kIsWeb && (Platform.isWindows || Platform.isLinux || Platform.isMacOS)) {
+    String overlayArgs = '';
+    try {
+      final WindowController wc = await WindowController.fromCurrentEngine();
+      overlayArgs = wc.arguments;
+    } catch (_) {
+      overlayArgs = '';
+    }
+    if (overlayArgs.isNotEmpty) {
+      try {
+        final Map<String, dynamic> m =
+            jsonDecode(overlayArgs) as Map<String, dynamic>;
+        if (m['kind'] == kRsPriceKind) {
+          runApp(RsOverlayWindowApp(argument: m));
+          return;
+        }
+      } catch (_) {
+        // not our overlay — fall through to the normal app
+      }
+    }
+  }
 
   if (!kIsWeb && (Platform.isWindows || Platform.isLinux || Platform.isMacOS)) {
     await windowManager.ensureInitialized();

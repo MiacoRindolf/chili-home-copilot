@@ -8,6 +8,7 @@
 
 #include <audioplayers_linux/audioplayers_linux_plugin.h>
 #include <desktop_drop/desktop_drop_plugin.h>
+#include <desktop_multi_window/desktop_multi_window_plugin.h>
 #include <flutter_screen_capture/flutter_screen_capture_plugin.h>
 #include <hotkey_manager_linux/hotkey_manager_linux_plugin.h>
 #include <local_notifier/local_notifier_plugin.h>
@@ -25,6 +26,9 @@ void fl_register_plugins(FlPluginRegistry* registry) {
   g_autoptr(FlPluginRegistrar) desktop_drop_registrar =
       fl_plugin_registry_get_registrar_for_plugin(registry, "DesktopDropPlugin");
   desktop_drop_plugin_register_with_registrar(desktop_drop_registrar);
+  g_autoptr(FlPluginRegistrar) desktop_multi_window_registrar =
+      fl_plugin_registry_get_registrar_for_plugin(registry, "DesktopMultiWindowPlugin");
+  desktop_multi_window_plugin_register_with_registrar(desktop_multi_window_registrar);
   g_autoptr(FlPluginRegistrar) flutter_screen_capture_registrar =
       fl_plugin_registry_get_registrar_for_plugin(registry, "FlutterScreenCapturePlugin");
   flutter_screen_capture_plugin_register_with_registrar(flutter_screen_capture_registrar);
