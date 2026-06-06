@@ -463,6 +463,10 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
                   builder: (BuildContext context, _) => NotificationPanel(
                     center: _notifications,
                     onClose: () => setState(() => _notifOpen = false),
+                    onOpenApp: (String appId) {
+                      setState(() => _notifOpen = false);
+                      _openApp(appId); // NC-3 — jump to the alert's source app
+                    },
                   ),
                 ),
             ],

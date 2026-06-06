@@ -77,10 +77,15 @@ class NotificationPanel extends StatelessWidget {
     super.key,
     required this.center,
     required this.onClose,
+    this.onOpenApp,
   });
 
   final NotificationCenter center;
   final VoidCallback onClose;
+
+  /// NC-3 — open the app a notification points at (its appId). When null,
+  /// notifications are not tappable.
+  final void Function(String appId)? onOpenApp;
 
   @override
   Widget build(BuildContext context) {
@@ -172,7 +177,10 @@ class NotificationPanel extends StatelessWidget {
 
   Widget _row(ColorScheme cs, AppNotification n) {
     final Color c = _kindColor(n.kind, cs);
-    return Container(
+    // NC-3 — tappable when it targets an app and a handler is wired.
+    final bool tappable =
+        onOpenApp != null && (n.appId?.isNotEmpty ?? false);
+    final Widget body = Container(
       color: n.read ? null : c.withValues(alpha: 0.05),
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
       child: Row(
@@ -216,8 +224,20 @@ class NotificationPanel extends StatelessWidget {
               ],
             ),
           ),
+          if (tappable) ...<Widget>[
+            const SizedBox(width: 6),
+            Icon(Icons.chevron_right, size: 18, color: cs.onSurfaceVariant),
+          ],
         ],
       ),
+    );
+    if (!tappable) return body;
+    return InkWell(
+      onTap: () {
+        onClose();
+        onOpenApp!(n.appId!);
+      },
+      child: body,
     );
   }
 

@@ -95,7 +95,7 @@ class _CockpitScreenState extends State<CockpitScreen> {
             detail: s.killSwitchReason.isEmpty
                 ? 'Automated trading is halted.'
                 : s.killSwitchReason,
-            source: 'Cockpit');
+            source: 'Cockpit', appId: 'cockpit');
       } else {
         nc.add(NotifKind.success, 'Kill switch cleared',
             detail: 'Automated trading may resume.', source: 'Cockpit');
@@ -107,10 +107,10 @@ class _CockpitScreenState extends State<CockpitScreen> {
             detail: s.breakerReason.isEmpty
                 ? 'Trading blocked until reset.'
                 : s.breakerReason,
-            source: 'Cockpit');
+            source: 'Cockpit', appId: 'cockpit');
       } else {
         nc.add(NotifKind.success, 'Drawdown breaker reset',
-            source: 'Cockpit');
+            source: 'Cockpit', appId: 'cockpit');
       }
     }
     _prevKill = s.killSwitchActive;
