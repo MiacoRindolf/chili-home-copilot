@@ -3,6 +3,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.VisualTree;
+using Chili.Services;
 using Chili.ViewModels;
 
 namespace Chili.Views;
@@ -12,6 +13,13 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+
+        RestoreBounds();
+        Closing += (_, _) =>
+        {
+            if (WindowState == WindowState.Normal)
+                WindowStateStore.Save(new WindowBounds(Position.X, Position.Y, Width, Height));
+        };
 
         var titleBar = this.FindControl<Grid>("TitleBar");
         if (titleBar != null)
@@ -25,6 +33,15 @@ public partial class MainWindow : Window
         this.FindControl<Button>("CloseBtn")!.Click += (_, _) => Close();
 
         KeyDown += OnKeyDown;
+    }
+
+    private void RestoreBounds()
+    {
+        var b = WindowStateStore.Load();
+        if (b == null) return;
+        if (b.W >= 600 && b.H >= 400) { Width = b.W; Height = b.H; }
+        WindowStartupLocation = WindowStartupLocation.Manual;
+        Opened += (_, _) => Position = new PixelPoint(b.X, b.Y);
     }
 
     private void ToggleMaximize() =>
