@@ -3,6 +3,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.VisualTree;
+using Chili.ViewModels;
 
 namespace Chili.Views;
 
@@ -14,14 +15,37 @@ public partial class MainWindow : Window
 
         var titleBar = this.FindControl<Grid>("TitleBar");
         if (titleBar != null)
+        {
             titleBar.PointerPressed += OnTitleBarPressed;
+            titleBar.DoubleTapped += (_, _) => ToggleMaximize();
+        }
 
         this.FindControl<Button>("MinBtn")!.Click += (_, _) => WindowState = WindowState.Minimized;
-        this.FindControl<Button>("MaxBtn")!.Click += (_, _) =>
-            WindowState = WindowState == WindowState.Maximized
-                ? WindowState.Normal
-                : WindowState.Maximized;
+        this.FindControl<Button>("MaxBtn")!.Click += (_, _) => ToggleMaximize();
         this.FindControl<Button>("CloseBtn")!.Click += (_, _) => Close();
+
+        KeyDown += OnKeyDown;
+    }
+
+    private void ToggleMaximize() =>
+        WindowState = WindowState == WindowState.Maximized
+            ? WindowState.Normal
+            : WindowState.Maximized;
+
+    // Ctrl+1..6 switch dock apps; Ctrl+W closes.
+    private void OnKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (!e.KeyModifiers.HasFlag(KeyModifiers.Control)) return;
+        if (e.Key is >= Key.D1 and <= Key.D9)
+        {
+            (DataContext as MainWindowViewModel)?.SelectByIndex(e.Key - Key.D1);
+            e.Handled = true;
+        }
+        else if (e.Key == Key.W)
+        {
+            Close();
+            e.Handled = true;
+        }
     }
 
     private void OnTitleBarPressed(object? sender, PointerPressedEventArgs e)
