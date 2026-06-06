@@ -5,7 +5,8 @@
         mc:Ignorable="d"
         x:Class="Chili.Views.GameFrameWindow"
         Title="CHILI Frame"
-        SystemDecorations="None" CanResize="False"
+        SystemDecorations="None" CanResize="True"
+        MinWidth="160" MinHeight="120"
         Background="Transparent" TransparencyLevelHint="Transparent"
         Topmost="True" ShowInTaskbar="False">
 
@@ -29,7 +30,16 @@
         </Border>
 
         <!-- Border outline around the framed window; center stays transparent + hollow -->
-        <Border Grid.Row="1" Background="Transparent"
-                BorderBrush="{StaticResource AccentBrush}" BorderThickness="6"/>
+        <Panel Grid.Row="1">
+            <Border Background="Transparent"
+                    BorderBrush="{StaticResource AccentBrush}" BorderThickness="6"/>
+            <!-- bottom-right corner resize grip -->
+            <Border Name="GripBR" Width="20" Height="20"
+                    HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                    Background="{StaticResource AccentBrush}" Cursor="BottomRightCorner">
+                <TextBlock Text="⤡" FontSize="11" Foreground="#0E1116"
+                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+        </Panel>
     </Grid>
 </Window>
