@@ -114,6 +114,49 @@ mount_bounded_http_adapters(
     pool_block=True,
 )
 
+# ── Proactive client-side rate limiter ──────────────────────────────────────
+# Space Coinbase HTTP calls under the public limit so bursts (the fast pattern
+# scan + cost gate + mining/backtest candle fetches sharing this process) don't
+# trip 429s and the 60s reactive backoff above. Per-process; the rate is
+# env-configurable and defaults under Coinbase's ~10 rps ceiling. Set the env
+# to 0 to disable.
+_COINBASE_MAX_RPS_ENV = "CHILI_COINBASE_OHLCV_MAX_REQUESTS_PER_SECOND"
+_COINBASE_DEFAULT_MAX_RPS = 8.0
+_RATE_GATE_LOCK = threading.Lock()
+_RATE_GATE_NEXT_AT = 0.0
+
+
+def _coinbase_max_rps() -> float:
+    try:
+        return max(0.0, float(os.environ.get(_COINBASE_MAX_RPS_ENV, _COINBASE_DEFAULT_MAX_RPS)))
+    except (TypeError, ValueError):
+        return _COINBASE_DEFAULT_MAX_RPS
+
+
+def _coinbase_rate_gate() -> None:
+    """Block until this process may make its next Coinbase HTTP call, spacing
+    calls at <= the configured requests/second. Reserving the slot under the
+    lock (then sleeping outside it) lets concurrent callers queue without
+    serialising on the sleep itself."""
+    rps = _coinbase_max_rps()
+    if rps <= 0.0:
+        return
+    min_interval = 1.0 / rps
+    global _RATE_GATE_NEXT_AT
+    with _RATE_GATE_LOCK:
+        now = time.monotonic()
+        scheduled = now if now >= _RATE_GATE_NEXT_AT else _RATE_GATE_NEXT_AT
+        _RATE_GATE_NEXT_AT = scheduled + min_interval
+    wait = scheduled - time.monotonic()
+    if wait > 0.0:
+        time.sleep(wait)
+
+
+def _throttled_session_get(*args, **kwargs):
+    """``_SESSION.get`` behind the proactive rate gate."""
+    _coinbase_rate_gate()
+    return _SESSION.get(*args, **kwargs)
+
 # Map a -USD ticker to a Coinbase product ID. For most cases it's identity:
 # "BTC-USD" → "BTC-USD". For aliases we may add overrides here.
 _PRODUCT_ALIASES: dict[str, str] = {
@@ -285,7 +328,7 @@ def _fetch_public_product_catalog() -> set[str] | None:
         return None
     url = f"{_COINBASE_EXCHANGE_API_BASE_URL}{_COINBASE_PRODUCTS_PATH}"
     try:
-        resp = _SESSION.get(url, timeout=_request_timeout_s())
+        resp = _throttled_session_get(url, timeout=_request_timeout_s())
         resp.raise_for_status()
         data = resp.json()
         if not isinstance(data, list):
@@ -491,7 +534,7 @@ def _request_chunk(
         "start": start_dt.isoformat(),
         "end": end_dt.isoformat(),
     }
-    resp = _SESSION.get(url, params=params, timeout=timeout_s)
+    resp = _throttled_session_get(url, params=params, timeout=timeout_s)
     resp.raise_for_status()
     data = resp.json()
     if not isinstance(data, list):
@@ -632,7 +675,7 @@ def get_quote(ticker: str) -> dict[str, Any] | None:
     path = _COINBASE_TICKER_PATH_TEMPLATE.format(product_id=product_id)
     url = f"{_COINBASE_EXCHANGE_API_BASE_URL}{path}"
     try:
-        resp = _SESSION.get(url, timeout=_request_timeout_s())
+        resp = _throttled_session_get(url, timeout=_request_timeout_s())
         resp.raise_for_status()
         data = resp.json()
         if not isinstance(data, dict):
