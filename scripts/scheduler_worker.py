@@ -70,27 +70,31 @@ def main() -> None:
 
             ok = broker_service.try_restore_session()
             logger.info("[scheduler_worker] Broker session restore: %s", "ok" if ok else "no session")
-            # Connect Coinbase Advanced in THIS process too. try_restore_session
-            # only covers Robinhood; the momentum live runner trades Coinbase spot,
-            # so without an in-process Coinbase connection coinbase_service.is_connected()
-            # is False here and live arms/entries are blocked ("broker_not_ready").
-            # main.py does this for the web container; the scheduler worker needs it
-            # for live momentum. connect() uses the COINBASE_API_KEY/SECRET env creds.
-            try:
-                from app.services import coinbase_service
-
-                if not coinbase_service.is_connected():
-                    _cb = coinbase_service.connect()
-                    _cbs = _cb.get("status") if isinstance(_cb, dict) else _cb
-                    logger.info("[scheduler_worker] Coinbase connect: %s", _cbs)
-                else:
-                    logger.info("[scheduler_worker] Coinbase already connected")
-            except Exception as _cbe:
-                logger.warning("[scheduler_worker] Coinbase connect failed: %s", _cbe)
         except Exception as _e:
             logger.warning("[scheduler_worker] Broker session restore failed: %s", _e)
     else:
         logger.info("[scheduler_worker] Broker session restore skipped for CHILI_SCHEDULER_ROLE=%s", role)
+
+    # Coinbase live connection (role-independent). The momentum live runner trades
+    # Coinbase spot in THIS process and runs under cron_only/web/all — but the
+    # Robinhood broker restore above is SKIPPED for cron_only. So connect Coinbase
+    # whenever the live runner is enabled, regardless of role; otherwise
+    # coinbase_service.is_connected() stays False here and live arms/entries are
+    # blocked with broker_not_ready ("connect Coinbase Advanced").
+    try:
+        from app.config import settings as _cfg
+
+        if bool(getattr(_cfg, "chili_momentum_live_runner_enabled", False)):
+            from app.services import coinbase_service
+
+            if not coinbase_service.is_connected():
+                _cb = coinbase_service.connect()
+                _cbs = _cb.get("status") if isinstance(_cb, dict) else _cb
+                logger.info("[scheduler_worker] Coinbase live connect: %s", _cbs)
+            else:
+                logger.info("[scheduler_worker] Coinbase already connected (live momentum)")
+    except Exception as _cbe:
+        logger.warning("[scheduler_worker] Coinbase live connect failed: %s", _cbe)
 
     # Restore kill-switch state before scheduler starts (Hard Rule 1/2:
     # a tripped breaker must survive process restarts — otherwise the safety
