@@ -1,0 +1,82 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:Chili.ViewModels"
+             xmlns:interop="using:Chili.Interop"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d" d:DesignWidth="560" d:DesignHeight="460"
+             x:Class="Chili.Views.GamesView"
+             x:DataType="vm:GamesViewModel">
+
+    <UserControl.Styles>
+        <Style Selector="Border.row">
+            <Setter Property="Background" Value="{StaticResource Surface2Brush}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource StrokeBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="10"/>
+            <Setter Property="Padding" Value="12,9"/>
+            <Setter Property="Transitions">
+                <Transitions>
+                    <BrushTransition Property="BorderBrush" Duration="0:0:0.14"/>
+                </Transitions>
+            </Setter>
+        </Style>
+        <Style Selector="Border.row:pointerover">
+            <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
+        </Style>
+    </UserControl.Styles>
+
+    <Border Width="560" MaxHeight="540" Background="{StaticResource SurfaceBrush}"
+            CornerRadius="16" BorderBrush="{StaticResource StrokeBrush}" BorderThickness="1"
+            Padding="18" BoxShadow="0 8 24 0 #70000000">
+        <DockPanel LastChildFill="True">
+            <!-- header -->
+            <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto" Margin="0,0,0,4">
+                <StackPanel Grid.Column="0" Spacing="2">
+                    <TextBlock Text="Window awareness" FontSize="18" FontWeight="Bold"
+                               Foreground="{StaticResource TextHiBrush}"/>
+                    <TextBlock Text="Live top-level windows · read-only Win32"
+                               FontSize="12" Foreground="{StaticResource TextLowBrush}"/>
+                </StackPanel>
+                <Button Grid.Column="1" Content="↻  Refresh" Command="{Binding RefreshCommand}"
+                        VerticalAlignment="Center" Padding="12,7" CornerRadius="9"
+                        Background="{StaticResource Surface2Brush}"
+                        Foreground="{StaticResource AccentBrush}"
+                        BorderBrush="{StaticResource StrokeBrush}" BorderThickness="1"/>
+            </Grid>
+
+            <TextBlock DockPanel.Dock="Top" Text="{Binding Status}" FontSize="12"
+                       Foreground="{StaticResource TextMidBrush}" Margin="0,8,0,10"/>
+
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <ItemsControl ItemsSource="{Binding Windows}">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel Spacing="7"/>
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="interop:DesktopWindow">
+                            <Border Classes="row">
+                                <Grid ColumnDefinitions="Auto,12,*">
+                                    <Border Grid.Column="0" Width="34" Height="34" CornerRadius="8"
+                                            Background="{StaticResource BgBaseBrush}">
+                                        <TextBlock Text="▢" FontSize="16" Foreground="{StaticResource TextMidBrush}"
+                                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    </Border>
+                                    <StackPanel Grid.Column="2" Spacing="1" VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding Title}" FontSize="13" FontWeight="SemiBold"
+                                                   Foreground="{StaticResource TextHiBrush}"
+                                                   TextTrimming="CharacterEllipsis"/>
+                                        <TextBlock Text="{Binding Subtitle}" FontSize="11"
+                                                   Foreground="{StaticResource TextLowBrush}"/>
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </ScrollViewer>
+        </DockPanel>
+    </Border>
+</UserControl>

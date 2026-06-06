@@ -42,3 +42,8 @@ of truth until this reaches parity.
       Verified live (image + GE price + wiki blurb, fuzzy search).
 - [x] **NATIVE-3** — app-switching shell: the dock launches apps (Prices, Chat,
       Trading, Games, Research) into the workspace; selected-tile highlight.
+- [x] **NATIVE-4** — Win32 interop (`Interop/NativeWindows.cs`): read-only window
+      enumeration (title/process/geometry) + the safe SetWindowPos MoveResize
+      primitive. Games app lists live windows (the frame's picker). **Safety
+      boundary documented: read geometry + SetWindowPos only; never SetParent /
+      inject.**
