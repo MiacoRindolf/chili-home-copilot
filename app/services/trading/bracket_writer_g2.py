@@ -1240,6 +1240,49 @@ def _is_option_trade_for_bracket_writer(db: Session, trade_id: int | None) -> bo
         return False
 
 
+def _symbol_has_active_momentum_live_session(db: Session, ticker: str) -> bool:
+    """True if an active momentum live session currently owns this symbol.
+
+    The momentum lane manages its own (tight, dynamic) stops for its live
+    positions. A general resting missing-stop from g2 on the same symbol would
+    hold the base balance — blocking the momentum runner's market exit — and
+    double-manage the position with a far/structure stop. So g2 must defer to the
+    momentum lane while a live session is active. (docs/DESIGN/MOMENTUM_LANE.md)
+    """
+    try:
+        from .momentum_neural.live_fsm import (
+            LIVE_RUNNER_ACTIVE_FOR_CONCURRENCY,
+            STATE_LIVE_COOLDOWN,
+            STATE_LIVE_EXITED,
+        )
+        from ...models.trading import TradingAutomationSession
+
+        # States where the lane still OWNS an open/pending position (a g2 resting
+        # stop would conflict / hold the balance). Exclude post-position states
+        # (exited / cooldown): the position is gone, so g2 may cover normally.
+        holding_states = LIVE_RUNNER_ACTIVE_FOR_CONCURRENCY - {STATE_LIVE_EXITED, STATE_LIVE_COOLDOWN}
+
+        t = (ticker or "").strip().upper()
+        if not t:
+            return False
+        cands = {t, t + "-USD", t + "-USDC"}
+        if "-" in t:
+            base = t.split("-")[0]
+            cands.update({base, base + "-USD", base + "-USDC"})
+        rows = (
+            db.query(TradingAutomationSession.symbol)
+            .filter(
+                TradingAutomationSession.mode == "live",
+                TradingAutomationSession.state.in_(tuple(holding_states)),
+            )
+            .all()
+        )
+        return any((s or "").strip().upper() in cands for (s,) in rows)
+    except Exception:
+        # Fail-open to g2's normal behavior; never crash the coverage path.
+        return False
+
+
 def place_missing_stop(
     db: Session,
     *,
@@ -1276,6 +1319,21 @@ def place_missing_stop(
     if decision.kind != "missing_stop":
         return WriterAction(
             action="place_missing_stop", ok=False, reason="invalid_decision",
+            broker_source=broker_source, ticker=ticker,
+        )
+
+    # Defer to the momentum lane for its own live positions. It runs tight dynamic
+    # stops; a g2 resting stop here would hold the base balance (blocking the
+    # momentum market exit) and place a far/structure stop that conflicts with the
+    # lane's risk management. (docs/DESIGN/MOMENTUM_LANE.md)
+    if _symbol_has_active_momentum_live_session(db, ticker):
+        logger.info(
+            f"{BRACKET_WRITER_G2} place_missing_stop SKIPPED intent=%s ticker=%s "
+            "reason=momentum_lane_managed",
+            bracket_intent_id, ticker,
+        )
+        return WriterAction(
+            action="place_missing_stop", ok=False, reason="momentum_lane_managed",
             broker_source=broker_source, ticker=ticker,
         )
 
