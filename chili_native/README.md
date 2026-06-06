@@ -123,4 +123,9 @@ of truth until this reaches parity.
       (base URL + device token in %APPDATA%), `ChiliApiClient` (Bearer auth, SSE),
       and a streaming chat UI (bubbles + composer) hitting `/api/mobile/chat/stream`.
       **Verified live** against the running backend — authenticated as the paired
-      user, streamed a real reply. (Next: Trading cockpit, Research.)
+      user, streamed a real reply.
+- [x] **NATIVE-24** — **Trading cockpit** (backend): live total equity / buying
+      power / cash, per-broker breakdown, kill-switch + risk-heat strip, and the
+      open-positions list with color-coded P/L, from `/api/trading/broker/portfolio`,
+      `/brain/governance`, `/risk/budget`, `/broker/positions` (+ Refresh).
+      **Verified live** ($13,157.77 equity, 35 positions). (Next: Research.)

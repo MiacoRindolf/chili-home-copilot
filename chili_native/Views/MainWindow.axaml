@@ -115,6 +115,9 @@
                     <DataTemplate DataType="vm:ChatViewModel">
                         <views:ChatView/>
                     </DataTemplate>
+                    <DataTemplate DataType="vm:TradingViewModel">
+                        <views:TradingView/>
+                    </DataTemplate>
                     <DataTemplate DataType="vm:GamesViewModel">
                         <views:GamesView/>
                     </DataTemplate>

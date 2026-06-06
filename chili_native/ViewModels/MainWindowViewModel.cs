@@ -16,8 +16,7 @@ public partial class MainWindowViewModel : ViewModelBase
         {
             new("Prices", "◈", new RsPriceCardViewModel()),
             new("Chat", "✉", new ChatViewModel()),
-            new("Trading", "$", new PlaceholderViewModel(
-                "Trading", "Live P/L cockpit and the autonomous trading brain. Coming soon.", "$")),
+            new("Trading", "$", new TradingViewModel()),
             new("Games", "◆", new GamesViewModel()),
             new("Research", "⎰", new PlaceholderViewModel(
                 "Research", "Multi-source research with visual reports. Coming soon.", "⎰")),
