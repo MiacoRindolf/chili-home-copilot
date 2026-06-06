@@ -81,6 +81,7 @@ from ...config import (
 from ...models.trading import AutoTraderRun, BreakoutAlert, PaperTrade, ScanPattern, Trade
 from .auto_trader_llm import run_revalidation_llm
 from .auto_trader_revalidation import deterministic_revalidation
+from .timeframe_utils import timeframe_to_seconds
 from .auto_trader_rules import (
     MANAGED_EDGE_GEOMETRY_SOURCE,
     RuleGateContext,
@@ -1622,6 +1623,10 @@ def _attach_prefetched_prices(
             "_chili_prefetched_current_price_source",
             str(sources.get(key) or "batch_prefetch").strip() or "batch_prefetch",
         )
+        # Stamp when this price was attached so revalidation can veto a stale
+        # price (the price→decision gap widens when a tick runs slow, e.g. a
+        # Coinbase rate-limit backoff).
+        setattr(alert, "_chili_prefetched_current_price_at", time.time())
 
 
 def _copy_candidate_sidecar_attrs(source: Any, target: Any) -> None:
@@ -6533,8 +6538,22 @@ def _process_one_alert(
         if bool(
             getattr(settings, "chili_autotrader_deterministic_revalidation_enabled", True)
         ):
+            _px_at = getattr(alert, "_chili_prefetched_current_price_at", None)
+            _price_age_s = (time.time() - float(_px_at)) if _px_at else None
+            _age_ceiling_s = float(
+                getattr(settings, "chili_autotrader_revalidation_max_price_age_seconds", 60) or 0
+            )
+            _tf_s = float(timeframe_to_seconds(getattr(alert, "timeframe", None) or "") or 0)
+            # Adaptive max age: as fresh as the setup's own bar window, capped by
+            # the configured ceiling (an entry always needs a current price).
+            _age_bounds = [v for v in (_tf_s, _age_ceiling_s) if v > 0]
+            _max_price_age_s = min(_age_bounds) if _age_bounds else None
             viable, llm_snap = deterministic_revalidation(
-                alert, current_price=px, settings_=settings,
+                alert,
+                current_price=px,
+                settings_=settings,
+                price_age_s=_price_age_s,
+                max_price_age_s=_max_price_age_s,
             )
             snap["revalidation_mode"] = "deterministic"
             snap["revalidation_reason"] = str((llm_snap or {}).get("reason") or "")

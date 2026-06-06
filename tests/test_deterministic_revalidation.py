@@ -85,3 +85,45 @@ def test_no_momentum_or_caution_rejection():
     # for weak momentum / general caution / wait-for-confirmation".
     viable, _ = deterministic_revalidation(_alert(), current_price=97.5)
     assert viable is True
+
+
+def test_blocks_stale_price():
+    # A price older than the max-age window is a HARD data-integrity veto.
+    viable, snap = deterministic_revalidation(
+        _alert(), current_price=99.0, price_age_s=120.0, max_price_age_s=60.0
+    )
+    assert viable is False
+    assert snap["reason"] == "stale_price"
+    assert snap["price_age_s"] == 120.0
+    assert snap["max_price_age_s"] == 60.0
+
+
+def test_fresh_price_not_blocked():
+    viable, snap = deterministic_revalidation(
+        _alert(), current_price=99.0, price_age_s=5.0, max_price_age_s=60.0
+    )
+    assert viable is True
+    assert snap["reason"] == "ok"
+
+
+def test_stale_guard_noop_when_age_unknown():
+    # Backward-compatible: with no age info the guard is inert (default path).
+    viable, snap = deterministic_revalidation(
+        _alert(), current_price=99.0, price_age_s=None, max_price_age_s=60.0
+    )
+    assert viable is True and snap["reason"] == "ok"
+    # No ceiling -> no veto either.
+    viable2, _ = deterministic_revalidation(
+        _alert(), current_price=99.0, price_age_s=120.0, max_price_age_s=None
+    )
+    assert viable2 is True
+
+
+def test_stale_price_takes_precedence_over_price_checks():
+    # A stale price must not be trusted even for the stop/target comparison: the
+    # stale veto fires before through_stop / target_met (don't act on bad data).
+    viable, snap = deterministic_revalidation(
+        _alert(), current_price=94.0, price_age_s=120.0, max_price_age_s=60.0
+    )
+    assert viable is False
+    assert snap["reason"] == "stale_price"  # not "price_through_stop"
