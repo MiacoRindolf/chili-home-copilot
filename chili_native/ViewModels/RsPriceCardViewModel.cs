@@ -1,5 +1,9 @@
+using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
+using Avalonia;
+using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Chili.Services;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -50,6 +54,20 @@ public partial class RsPriceCardViewModel : ViewModelBase
 
     public bool HasThumb => Thumb != null;
 
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasSpark))]
+    private Geometry? _spark;
+
+    public bool HasSpark => Spark != null;
+
+    [ObservableProperty] private string _changeText = "";
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ChangeBrush))]
+    private bool _changeUp;
+
+    public IBrush ChangeBrush => new SolidColorBrush(Color.Parse(ChangeUp ? "#35D08A" : "#FF6B5B"));
+
     [RelayCommand]
     private async Task SearchAsync()
     {
@@ -58,6 +76,8 @@ public partial class RsPriceCardViewModel : ViewModelBase
         var seq = ++_seq;
         Phase = CardPhase.Loading;
         Thumb = null;
+        Spark = null;
+        ChangeText = "";
 
         try
         {
@@ -94,6 +114,25 @@ public partial class RsPriceCardViewModel : ViewModelBase
             {
                 // price still shows without the blurb/image
             }
+
+            // Enrich with a 90-day price sparkline + change (best-effort).
+            try
+            {
+                var hist = await _prices.PriceHistory(p.Name);
+                if (seq != _seq) return;
+                if (hist.Count > 1)
+                {
+                    Spark = BuildSpark(hist, 312, 40);
+                    long first = hist[0], last = hist[hist.Count - 1];
+                    double pct = first == 0 ? 0 : (last - first) * 100.0 / first;
+                    ChangeUp = last >= first;
+                    ChangeText = $"{(pct >= 0 ? "+" : "")}{pct:0.#}%  ·  90d";
+                }
+            }
+            catch
+            {
+                // price still shows without the trend
+            }
         }
         catch
         {
@@ -101,5 +140,26 @@ public partial class RsPriceCardViewModel : ViewModelBase
             MessageText = "Lookup failed — check your connection";
             Phase = CardPhase.Error;
         }
+    }
+
+    /// <summary>Scale a price series into a polyline geometry within a w×h box.</summary>
+    private static Geometry BuildSpark(IReadOnlyList<long> prices, double w, double h)
+    {
+        long min = prices[0], max = prices[0];
+        foreach (var v in prices) { if (v < min) min = v; if (v > max) max = v; }
+        double range = Math.Max(1, max - min);
+
+        var geo = new StreamGeometry();
+        using var ctx = geo.Open();
+        for (int i = 0; i < prices.Count; i++)
+        {
+            double x = (double)i / (prices.Count - 1) * w;
+            double y = h - (prices[i] - min) / (double)range * h;
+            var pt = new Point(x, y);
+            if (i == 0) ctx.BeginFigure(pt, false);
+            else ctx.LineTo(pt);
+        }
+        ctx.EndFigure(false);
+        return geo;
     }
 }
