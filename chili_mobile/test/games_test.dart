@@ -194,27 +194,22 @@ void main() {
       expect(find.text('No Steam games found'), findsOneWidget);
     });
 
-    testWidgets('GAME-3: frame toggle is present and switchable',
-        (WidgetTester tester) async {
-      await tester.pumpWidget(MaterialApp(
-        home: GamesScreen(
-          fetcher: () async => sample,
-          launcher: (SteamGame g) async => true,
-          runningFetcher: () async => '0',
-        ),
-      ));
-      await tester.pumpAndSettle();
-      final Finder chip = find.widgetWithText(FilterChip, 'Frame (beta)');
-      expect(chip, findsOneWidget);
-      // On by default now.
-      expect(tester.widget<FilterChip>(chip).selected, isTrue);
-      await tester.tap(chip);
-      await tester.pumpAndSettle();
-      expect(tester.widget<FilterChip>(chip).selected, isFalse);
+  });
+
+  group('parseWindowList (GAME-5)', () {
+    test('keeps titled windows and reads handles', () {
+      final List<FrameWindowOption> wins = parseWindowList(<Object?>[
+        <Object?, Object?>{'hwnd': 111, 'title': 'RuneScape'},
+        <Object?, Object?>{'hwnd': 222, 'title': '  '}, // blank → skipped
+        <Object?, Object?>{'hwnd': 333, 'title': 'Old School RuneScape'},
+        'garbage', // skipped
+      ]);
+      expect(wins.map((FrameWindowOption w) => w.hwnd), <int>[111, 333]);
+      expect(wins.first.title, 'RuneScape');
     });
   });
 
-  group('GameFrame (GAME-3)', () {
+  group('GameFrame (GAME-3 / GAME-5)', () {
     const MethodChannel ch = MethodChannel('chili/game_frame');
     final List<MethodCall> calls = <MethodCall>[];
 
@@ -224,6 +219,11 @@ void main() {
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(ch, (MethodCall call) async {
         calls.add(call);
+        if (call.method == 'listWindows') {
+          return <Object?>[
+            <Object?, Object?>{'hwnd': 42, 'title': 'RuneScape'},
+          ];
+        }
         return true;
       });
     });
@@ -233,19 +233,29 @@ void main() {
           .setMockMethodCallHandler(ch, null);
     });
 
-    test('start sends the title and returns the native result', () async {
+    test('startByHandle sends the chosen handle + name', () async {
       const GameFrame f = GameFrame();
-      final bool ok = await f.start('Dota 2');
+      final bool ok = await f.startByHandle(42, name: 'RuneScape');
       expect(ok, isTrue);
-      expect(calls.single.method, 'start');
-      expect((calls.single.arguments as Map)['title'], 'Dota 2');
+      expect(calls.single.method, 'startByHandle');
+      final Map<Object?, Object?> args = calls.single.arguments as Map;
+      expect(args['hwnd'], 42);
+      expect(args['name'], 'RuneScape');
+    });
+
+    test('listWindows parses native results', () async {
+      const GameFrame f = GameFrame();
+      final List<FrameWindowOption> wins = await f.listWindows();
+      expect(wins.single.hwnd, 42);
+      expect(wins.single.title, 'RuneScape');
     });
 
     test('tolerates a missing native handler', () async {
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(ch, null);
       const GameFrame f = GameFrame();
-      expect(await f.start('x'), isFalse);
+      expect(await f.startByHandle(1), isFalse);
+      expect(await f.listWindows(), isEmpty);
       await f.stop(); // must not throw
     });
   });

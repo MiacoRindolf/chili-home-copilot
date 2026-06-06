@@ -1,5 +1,22 @@
 import 'package:flutter/services.dart';
 
+/// One pickable top-level window (GAME-5 frame picker).
+class FrameWindowOption {
+  const FrameWindowOption({required this.hwnd, required this.title});
+  final int hwnd;
+  final String title;
+}
+
+/// Parse the native `listWindows` payload into options. Pure + tolerant.
+List<FrameWindowOption> parseWindowList(List<Object?> raw) => <FrameWindowOption>[
+      for (final Object? w in raw)
+        if (w is Map && w['hwnd'] != null && '${w['title']}'.trim().isNotEmpty)
+          FrameWindowOption(
+            hwnd: (w['hwnd'] as num).toInt(),
+            title: '${w['title']}'.trim(),
+          ),
+    ];
+
 /// Bridge to the native "CHILI frame" channel (GAME-3). Shows a small
 /// always-on-top CHILI bar above a running game; dragging the bar moves the
 /// game window to follow (native `SetWindowPos` only — a plain window move, the
@@ -25,7 +42,33 @@ class GameFrame {
     }
   }
 
-  /// Remove the CHILI frame bar (the game window is left exactly where it is).
+  /// List visible top-level windows so the user can pick which one to frame
+  /// (GAME-5). Avoids auto-grabbing the wrong window — e.g. a game launcher or
+  /// anti-cheat login window that shares the game's title.
+  Future<List<FrameWindowOption>> listWindows() async {
+    try {
+      final List<Object?>? raw =
+          await _ch.invokeListMethod<Object?>('listWindows');
+      return parseWindowList(raw ?? const <Object?>[]);
+    } catch (_) {
+      return const <FrameWindowOption>[];
+    }
+  }
+
+  /// Frame the exact window the user picked, by its native handle (GAME-5).
+  Future<bool> startByHandle(int hwnd, {String? name}) async {
+    try {
+      return (await _ch.invokeMethod<bool>('startByHandle', <String, Object?>{
+            'hwnd': hwnd,
+            'name': name ?? '',
+          })) ??
+          false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Remove the CHILI frame (the game window is left exactly where it is).
   Future<void> stop() async {
     try {
       await _ch.invokeMethod<void>('stop');

@@ -74,6 +74,59 @@ std::string GetString(const flutter::EncodableMap& m, const char* key) {
   return std::string();
 }
 
+int64_t GetInt64(const flutter::EncodableMap& m, const char* key) {
+  auto it = m.find(flutter::EncodableValue(std::string(key)));
+  if (it == m.end()) return 0;
+  if (auto p = std::get_if<int64_t>(&it->second)) return *p;
+  if (auto p = std::get_if<int>(&it->second)) return *p;
+  return 0;
+}
+
+std::string WideToUtf8(const std::wstring& w) {
+  if (w.empty()) return std::string();
+  int len = ::WideCharToMultiByte(CP_UTF8, 0, w.c_str(),
+                                  static_cast<int>(w.size()), nullptr, 0,
+                                  nullptr, nullptr);
+  std::string out(len, '\0');
+  ::WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()),
+                        &out[0], len, nullptr, nullptr);
+  return out;
+}
+
+struct WinList {
+  HWND host = nullptr;
+  flutter::EncodableList items;
+};
+
+BOOL CALLBACK CollectWindows(HWND h, LPARAM l) {
+  auto* wl = reinterpret_cast<WinList*>(l);
+  if (h == wl->host) return TRUE;
+  if (!::IsWindowVisible(h)) return TRUE;
+  LONG_PTR ex = ::GetWindowLongPtr(h, GWL_EXSTYLE);
+  if (ex & WS_EX_TOOLWINDOW) return TRUE;     // overlays/tooltips
+  if (::GetWindow(h, GW_OWNER) != nullptr) return TRUE;  // owned dialogs
+  int len = ::GetWindowTextLengthW(h);
+  if (len <= 0) return TRUE;
+  std::wstring t(len + 1, L'\0');
+  ::GetWindowTextW(h, &t[0], len + 1);
+  t.resize(len);
+  flutter::EncodableMap item;
+  item[flutter::EncodableValue("hwnd")] = flutter::EncodableValue(
+      static_cast<int64_t>(reinterpret_cast<intptr_t>(h)));
+  item[flutter::EncodableValue("title")] =
+      flutter::EncodableValue(WideToUtf8(t));
+  wl->items.push_back(flutter::EncodableValue(item));
+  return TRUE;
+}
+
+// Read-only list of visible top-level app windows (for the frame picker).
+flutter::EncodableList EnumerateAppWindows(HWND host) {
+  WinList wl;
+  wl.host = host;
+  ::EnumWindows(CollectWindows, reinterpret_cast<LPARAM>(&wl));
+  return wl.items;
+}
+
 // Pin the framed game (HWND in the frame's USERDATA) into the frame's client
 // area — below the CHILI title bar, inside the borders — and keep it just
 // above the frame in z-order. Plain window move/size, never a reparent.
@@ -225,6 +278,11 @@ bool FlutterWindow::StartFrame(const std::wstring& title,
                               const std::wstring& name) {
   HWND game = FindGameWindow(title, GetHandle());
   if (!game) return false;
+  return FrameWindow(game, name);
+}
+
+bool FlutterWindow::FrameWindow(HWND game, const std::wstring& name) {
+  if (!game || !::IsWindow(game) || game == GetHandle()) return false;
   StopFrame();
   EnsureFrameClass();
   g_frame_name = name.empty() ? L"Game" : name;
@@ -287,6 +345,19 @@ void FlutterWindow::SetupFrameChannel() {
           std::string name = args ? GetString(*args, "name") : std::string();
           if (name.empty()) name = title;
           bool ok = StartFrame(Utf8ToWide(title), Utf8ToWide(name));
+          result->Success(flutter::EncodableValue(ok));
+          return;
+        }
+        if (call.method_name() == "listWindows") {
+          result->Success(
+              flutter::EncodableValue(EnumerateAppWindows(GetHandle())));
+          return;
+        }
+        if (call.method_name() == "startByHandle") {
+          int64_t raw = args ? GetInt64(*args, "hwnd") : 0;
+          std::string name = args ? GetString(*args, "name") : std::string();
+          HWND game = reinterpret_cast<HWND>(static_cast<intptr_t>(raw));
+          bool ok = FrameWindow(game, Utf8ToWide(name));
           result->Success(flutter::EncodableValue(ok));
           return;
         }

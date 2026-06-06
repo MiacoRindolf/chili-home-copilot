@@ -44,6 +44,7 @@ class FlutterWindow : public Win32Window {
 
   void SetupFrameChannel();
   bool StartFrame(const std::wstring& title, const std::wstring& name);
+  bool FrameWindow(HWND game, const std::wstring& name);
   void StopFrame();
 };
 
