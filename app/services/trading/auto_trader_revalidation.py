@@ -36,6 +36,7 @@ REVALIDATION_REASON_DATA_CORRUPT = "data_corrupt"
 REVALIDATION_REASON_INCOHERENT = "incoherent_levels"
 REVALIDATION_REASON_THROUGH_STOP = "price_through_stop"
 REVALIDATION_REASON_TARGET_MET = "target_already_met"
+REVALIDATION_REASON_STALE_PRICE = "stale_price"
 
 
 def _finite_pos(*values: Any) -> bool:
@@ -58,6 +59,8 @@ def deterministic_revalidation(
     *,
     current_price: float,
     settings_: Any = None,
+    price_age_s: float | None = None,
+    max_price_age_s: float | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """Return ``(viable, snapshot)`` replicating the LLM revalidation veto.
 
@@ -93,6 +96,27 @@ def deterministic_revalidation(
     coherent = (stop_f < entry_f < target_f) if is_long else (stop_f > entry_f > target_f)
     if not coherent:
         snap.update(viable=False, confidence=0.0, reason=REVALIDATION_REASON_INCOHERENT)
+        return False, snap
+
+    # 2.5 Stale price — a HARD invalidation (data integrity, not strategy): when
+    # the current price is older than the setup's own bar window (or a configured
+    # ceiling), the stop/target comparisons below are tested against data the
+    # market has already moved past. This matters most when a tick runs slow
+    # (e.g. a Coinbase rate-limit backoff delays the price→revalidation gap).
+    # Trade on fresh prices only; a stale-price veto fails *closed*.
+    if (
+        price_age_s is not None
+        and max_price_age_s is not None
+        and float(max_price_age_s) > 0.0
+        and float(price_age_s) > float(max_price_age_s)
+    ):
+        snap.update(
+            viable=False,
+            confidence=0.0,
+            reason=REVALIDATION_REASON_STALE_PRICE,
+            price_age_s=round(float(price_age_s), 3),
+            max_price_age_s=round(float(max_price_age_s), 3),
+        )
         return False, snap
 
     # 3. Stop already hit — the position would stop out immediately on open.

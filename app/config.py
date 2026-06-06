@@ -5811,6 +5811,12 @@ class Settings(BaseSettings):
     brain_deployment_degrade_negative_expectancy_rolls: int = Field(default=3, validation_alias=AliasChoices("CHILI_BRAIN_DEPLOYMENT_DEGRADE_NEGATIVE_EXPECTANCY_ROLLS"))
 
     # Imminent ScanPattern breakout alerts (scheduler + pattern_imminent_alerts).
+    # Deterministic revalidation stale-price veto: an entry must trade on a
+    # price no older than this ceiling (seconds). Adaptive per setup — capped at
+    # the pattern's own bar window — so it tightens for short timeframes. Guards
+    # against acting on a price the market has moved past when a tick runs slow
+    # (e.g. a Coinbase rate-limit backoff widens the price→decision gap).
+    chili_autotrader_revalidation_max_price_age_seconds: int = 60
     pattern_imminent_alert_enabled: bool = True
     # Timeframe-tiered scan: a FAST imminent pass for short-timeframe patterns
     # (1m/5m) runs every ~60s, alongside the standard 15-min sweep. A 15-min
