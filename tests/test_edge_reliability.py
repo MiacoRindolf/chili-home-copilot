@@ -1208,7 +1208,12 @@ def test_edge_reliability_work_dedupe_and_dispatch(db):
     assert recent_repeat is None
 
 
-def test_profitability_work_dedupe_skips_recent_done_same_fingerprint(db):
+def test_profitability_work_cooldown_is_fingerprint_independent(db):
+    """PR #356: the producer cooldown throttles repeat work for the same
+    {event_type, pattern, asset} within the window REGARDLESS of the evidence
+    fingerprint. A recert-blocked pattern whose fingerprint suffix rotates each
+    sweep must not re-emit ~130 events/day — one emission per window is enough.
+    """
     pat = _pattern(db)
     pat_id = pat.id
 
@@ -1229,6 +1234,9 @@ def test_profitability_work_dedupe_skips_recent_done_same_fingerprint(db):
     row.processed_at = datetime.utcnow()
     db.commit()
 
+    # Within the cooldown window both a same-fingerprint AND a
+    # different-fingerprint emission are throttled — the guard keys on the
+    # {event_type, pattern, asset} prefix and ignores the rotating fingerprint.
     repeat = emit_targeted_profitability_work(
         db,
         event_type=RECERT_RESCUE_REFRESH,
@@ -1250,4 +1258,4 @@ def test_profitability_work_dedupe_skips_recent_done_same_fingerprint(db):
     db.commit()
 
     assert repeat is None
-    assert fresh is not None
+    assert fresh is None
