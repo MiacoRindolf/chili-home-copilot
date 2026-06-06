@@ -53,6 +53,20 @@ public sealed class ChiliApiClient
         catch { return false; }
     }
 
+    /// <summary>Smoke-test the connection: reachability (/healthz) + that the
+    /// device token is accepted by an authed endpoint. Returns a human message.</summary>
+    public async Task<string> TestConnectionAsync()
+    {
+        if (!await HealthAsync())
+            return "✗  Backend unreachable at " + _settings.BaseUrl;
+        if (string.IsNullOrWhiteSpace(_settings.DeviceToken))
+            return "Backend reachable — but no device token set.";
+        var probe = await GetJsonAsync("/api/trading/brain/governance");
+        if (probe is { } p && p.TryGetProperty("ok", out var ok) && ok.ValueKind == JsonValueKind.True)
+            return "✓  Connected — backend reachable and token accepted.";
+        return "Reachable, but the token was rejected (check it).";
+    }
+
     /// <summary>GET a JSON endpoint and return the (cloned) root element, or null.</summary>
     public async Task<JsonElement?> GetJsonAsync(string path, CancellationToken ct = default)
     {
