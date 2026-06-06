@@ -103,4 +103,7 @@ of truth until this reaches parity.
       (Ctrl+4 → Games).
 - [x] **NATIVE-20** — "Clear" button for recent searches (ClearRecentCommand →
       Recent.Clear; the chips row hides when empty). Verified end-to-end (chips
-      appear, click Clear, chips gone). (Port Chat·Trading·Research with the backend: next.)
+      appear, click Clear, chips gone).
+- [x] **NATIVE-21** — welcome/empty-state polish: the idle price card shows
+      clickable example-item chips (Abyssal whip, Dragon claws, Twisted bow, …)
+      that run a search. Verified rendering. (Port Chat·Trading·Research with the backend: next.)

@@ -34,6 +34,12 @@ public partial class RsPriceCardViewModel : ViewModelBase
     public ObservableCollection<string> Recent { get; } = new();
     public bool HasRecent => Recent.Count > 0;
 
+    /// <summary>Example items shown in the idle state (clickable to search).</summary>
+    public IReadOnlyList<string> Examples { get; } = new[]
+    {
+        "Abyssal whip", "Dragon claws", "Twisted bow", "Bandos chestplate", "Shark",
+    };
+
     [ObservableProperty] private string _searchText = "";
 
     [ObservableProperty]
