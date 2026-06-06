@@ -1113,9 +1113,35 @@ def tick_live_session(
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
     if st == STATE_WATCHING_LIVE:
-        if float(via.viability_score or 0) >= float(params["entry_viability_min"]) and via.live_eligible:
+        _score_ok = (
+            float(via.viability_score or 0) >= float(params["entry_viability_min"])
+            and via.live_eligible
+        )
+        # M4.1: require an active momentum-continuation trigger (price > EMA-9 +
+        # volume surge) on top of the viability score — Ross enters on confirmed
+        # strength, never on a stale score. No confirmation -> WAIT this tick.
+        # (docs/DESIGN/MOMENTUM_LANE.md)
+        _trigger_ok, _trigger_reason = True, "score_only"
+        if _score_ok:
+            try:
+                from ..market_data import fetch_ohlcv_df
+                from .entry_gates import momentum_volume_confirmation
+
+                _df = fetch_ohlcv_df(sess.symbol, interval="15m", period="5d")
+                if _df is None or getattr(_df, "empty", True):
+                    _trigger_ok, _trigger_reason = False, "no_data_wait"
+                else:
+                    _trigger_ok, _trigger_reason = momentum_volume_confirmation(_df)
+            except Exception:
+                _trigger_ok, _trigger_reason = False, "trigger_error_wait"
+        if _score_ok and _trigger_ok:
             _safe_transition(db, sess, STATE_LIVE_ENTRY_CANDIDATE)
-            _emit(db, sess, "live_entry_candidate_detected", {"viability_score": via.viability_score})
+            _emit(
+                db, sess, "live_entry_candidate_detected",
+                {"viability_score": via.viability_score, "trigger": _trigger_reason},
+            )
+        elif _score_ok:
+            _emit(db, sess, "live_entry_trigger_wait", {"reason": _trigger_reason})
         db.flush()
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
