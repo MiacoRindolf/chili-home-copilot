@@ -106,6 +106,15 @@ public static class NativeWindows
         return result;
     }
 
+    /// <summary>Find the first visible window whose title contains <paramref name="substring"/>.</summary>
+    public static DesktopWindow? FindByTitle(string substring)
+    {
+        foreach (var w in ListTopLevelWindows())
+            if (w.Title.Contains(substring, StringComparison.OrdinalIgnoreCase))
+                return w;
+        return null;
+    }
+
     /// <summary>Read a window's current bounds (passive). Returns false if it's gone.</summary>
     public static bool TryGetBounds(IntPtr hWnd, out int left, out int top, out int width, out int height)
     {

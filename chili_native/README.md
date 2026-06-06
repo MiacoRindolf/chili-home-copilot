@@ -47,3 +47,9 @@ of truth until this reaches parity.
       primitive. Games app lists live windows (the frame's picker). **Safety
       boundary documented: read geometry + SetWindowPos only; never SetParent /
       inject.**
+- [x] **NATIVE-5** — game frame (`Views/GameFrameWindow`): a transparent, always-
+      on-top, **hollow** (SetWindowRgn) CHILI frame placed around a *picked*
+      window — titlebar + thin border, center clicks pass through. Drag the
+      titlebar → the frame DRIVES the target (MoveResize). Closes when the target
+      closes. Picked from the Games app's "Frame" button or `--frame <title>`.
+      Verified attaching around Notepad. (Resize-by-frame + grouping: next.)
