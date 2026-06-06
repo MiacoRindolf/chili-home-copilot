@@ -51,6 +51,45 @@ ItemPrice? parseWeirdGloopLatest(Map<String, dynamic> json) {
   return null;
 }
 
+/// Brief wiki info for an item (GAME-13): an intro description + a thumbnail
+/// image URL, from the RuneScape Wiki.
+class ItemInfo {
+  const ItemInfo({required this.extract, this.thumbUrl});
+  final String extract;
+  final String? thumbUrl;
+}
+
+/// Parse a MediaWiki `query&prop=extracts|pageimages` response into [ItemInfo].
+/// Pure + tolerant. GAME-13.
+ItemInfo parseWikiInfo(Object? json) {
+  if (json is Map) {
+    final Object? query = json['query'];
+    final Object? pages = query is Map ? query['pages'] : null;
+    if (pages is Map && pages.isNotEmpty) {
+      final Object? page = pages.values.first;
+      if (page is Map) {
+        final String extract = '${page['extract'] ?? ''}'.trim();
+        final Object? thumb = page['thumbnail'];
+        final String? url =
+            thumb is Map ? thumb['source'] as String? : null;
+        return ItemInfo(extract: extract, thumbUrl: url);
+      }
+    }
+  }
+  return const ItemInfo(extract: '');
+}
+
+/// Trim an intro to a short, single-paragraph blurb (≈[maxChars]). GAME-13.
+String briefBlurb(String extract, {int maxChars = 160}) {
+  String s = extract.replaceAll(RegExp(r'\s+'), ' ').trim();
+  if (s.isEmpty) return '';
+  if (s.length <= maxChars) return s;
+  // Prefer cutting at a sentence boundary within the budget.
+  final int dot = s.lastIndexOf('. ', maxChars);
+  if (dot >= 60) return s.substring(0, dot + 1);
+  return '${s.substring(0, maxChars).trimRight()}…';
+}
+
 /// Compact gp formatting: 85139 → "85.1K", 1500000 → "1.50M". GAME-10.
 String formatGp(int gp) {
   final int a = gp.abs();
@@ -115,6 +154,18 @@ class RuneScapePrices {
     final Object? json = jsonDecode(await _get(url));
     if (json is Map<String, dynamic>) return parseWeirdGloopLatest(json);
     return null;
+  }
+
+  /// Brief wiki info (intro + thumbnail) for an exact item name. GAME-13.
+  Future<ItemInfo> wikiInfo(String name) async {
+    final String n = name.trim();
+    if (n.isEmpty) return const ItemInfo(extract: '');
+    final Uri url = Uri.parse(
+        'https://runescape.wiki/api.php?action=query'
+        '&prop=extracts%7Cpageimages&exintro=1&explaintext=1'
+        '&piprop=thumbnail&pithumbsize=96&redirects=1&format=json'
+        '&titles=${Uri.encodeQueryComponent(n)}');
+    return parseWikiInfo(jsonDecode(await _get(url)));
   }
 
   /// Resolve a typed query to a priced item: try it as an exact name first,
