@@ -11,6 +11,7 @@ import '../agents/agents_screen.dart';
 import '../brain/brain_dispatch_screen.dart';
 import '../chat/chat_screen.dart';
 import '../cockpit/cockpit_screen.dart';
+import '../cockpit/trading_models.dart';
 import '../companion/shared_chat_history.dart';
 import '../dashboard/dashboard_screen.dart';
 import '../intercom/intercom_screen.dart';
@@ -107,7 +108,10 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
     'cockpit': _AppDef(
       'Cockpit',
       Icons.candlestick_chart,
-      () => CockpitScreen(notifications: _notifications),
+      () => CockpitScreen(
+            notifications: _notifications,
+            onDiscussPosition: _onDiscussPosition,
+          ),
       size: const Size(900, 640),
     ),
     'chat': _AppDef(
@@ -348,6 +352,20 @@ class _WorkspaceShellState extends State<WorkspaceShell> {
   /// RC-2 — "Discuss" a learned skill: open Chat asking how/when to apply it.
   void _onDiscussSkill(String skillName) {
     _chatAsk.value = 'Explain this learned skill and when to apply it: $skillName';
+    _openApp('chat');
+  }
+
+  /// TC-7 — "Discuss" an open position: open Chat with its full context so the
+  /// user can ask for analysis ("should I exit?", "why is this down?").
+  void _onDiscussPosition(Position p) {
+    final String pnl =
+        '${p.unrealizedPnl >= 0 ? '+' : '-'}\$${p.unrealizedPnl.abs().toStringAsFixed(2)} '
+        '(${p.unrealizedPnlPct >= 0 ? '+' : ''}${p.unrealizedPnlPct.toStringAsFixed(2)}%)';
+    final String venue = p.venue.trim().isEmpty ? '' : ' on ${p.venue}';
+    _chatAsk.value =
+        'Analyze my ${p.ticker} position$venue: ${p.qty} @ \$${p.entryPrice.toStringAsFixed(2)} '
+        '(now \$${p.currentPrice.toStringAsFixed(2)}), unrealized $pnl. '
+        'What are the risks and would you hold, trim, or exit?';
     _openApp('chat');
   }
 
