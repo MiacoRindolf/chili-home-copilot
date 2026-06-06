@@ -1,0 +1,66 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:Chili.ViewModels"
+             xmlns:sys="using:System"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d" d:DesignWidth="480" d:DesignHeight="460"
+             x:Class="Chili.Views.SettingsView"
+             x:DataType="vm:SettingsViewModel">
+
+    <Border Width="480" MaxHeight="560" Background="{StaticResource SurfaceBrush}"
+            CornerRadius="16" BorderBrush="{StaticResource StrokeBrush}" BorderThickness="1"
+            Padding="22" BoxShadow="0 8 24 0 #70000000">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+            <StackPanel Spacing="14">
+                <!-- header -->
+                <StackPanel Orientation="Horizontal" Spacing="11" VerticalAlignment="Center">
+                    <Border Width="38" Height="38" CornerRadius="11"
+                            Background="{StaticResource BrandBrush}"/>
+                    <StackPanel Spacing="2" VerticalAlignment="Center">
+                        <TextBlock Text="{Binding Version}" FontSize="18" FontWeight="Bold"
+                                   Foreground="{StaticResource TextHiBrush}"/>
+                        <TextBlock Text="{Binding Stack}" FontSize="11"
+                                   Foreground="{StaticResource TextLowBrush}"/>
+                    </StackPanel>
+                </StackPanel>
+
+                <TextBlock Text="{Binding Tagline}" FontSize="13" TextWrapping="Wrap"
+                           LineHeight="19" Foreground="{StaticResource TextMidBrush}"/>
+
+                <Border Height="1" Background="{StaticResource StrokeBrush}" Margin="0,2"/>
+
+                <TextBlock Text="Capabilities" FontSize="12" FontWeight="SemiBold"
+                           Foreground="{StaticResource TextLowBrush}"/>
+                <ItemsControl ItemsSource="{Binding Capabilities}">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel Spacing="7"/>
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="sys:String">
+                            <Grid ColumnDefinitions="Auto,10,*">
+                                <TextBlock Grid.Column="0" Text="✓" FontSize="13" FontWeight="Bold"
+                                           Foreground="{StaticResource AccentBrush}"
+                                           VerticalAlignment="Top"/>
+                                <TextBlock Grid.Column="2" Text="{Binding}" FontSize="13"
+                                           TextWrapping="Wrap" LineHeight="18"
+                                           Foreground="{StaticResource TextMidBrush}"/>
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <Border Background="{StaticResource Surface2Brush}" CornerRadius="10" Padding="12">
+                    <StackPanel Spacing="4">
+                        <TextBlock Text="🛡  Anti-cheat safety" FontSize="11" FontWeight="SemiBold"
+                                   Foreground="{StaticResource AccentBrush}"/>
+                        <TextBlock Text="{Binding Safety}" FontSize="11" TextWrapping="Wrap"
+                                   LineHeight="16" Foreground="{StaticResource TextLowBrush}"/>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+    </Border>
+</UserControl>

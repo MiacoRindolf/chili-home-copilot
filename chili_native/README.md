@@ -74,4 +74,6 @@ of truth until this reaches parity.
 - [x] **NATIVE-10** — recent searches: looked-up items appear as clickable chips
       below the search box (most-recent-first, deduped, capped at 6); click to
       re-search. Verified (Rune platebody · Dragon claw · Abyssal whip).
-      (Port Chat·Trading·Research with the backend: next.)
+- [x] **NATIVE-11** — Settings/About app (6th dock tile ⚙): version + stack,
+      tagline, a green-checkmark capabilities list, and the anti-cheat safety
+      note. Verified rendering. (Port Chat·Trading·Research with the backend: next.)

@@ -111,6 +111,9 @@
                     <DataTemplate DataType="vm:GamesViewModel">
                         <views:GamesView/>
                     </DataTemplate>
+                    <DataTemplate DataType="vm:SettingsViewModel">
+                        <views:SettingsView/>
+                    </DataTemplate>
                     <DataTemplate DataType="vm:PlaceholderViewModel">
                         <views:PlaceholderView/>
                     </DataTemplate>
