@@ -150,3 +150,6 @@ of truth until this reaches parity.
       Brain (20s), and Home (30s) refresh commands on a timer **while the view is
       visible** (stops when backgrounded). Each status shows a live timestamp.
       Verified (Trading status ticked 16:17:33 → 16:17:44 with no interaction).
+- [x] **NATIVE-30** — backend connection indicator: the title bar shows a live
+      "● online / offline" dot (MainWindowViewModel polls `/healthz` every 20s).
+      At-a-glance backend health across the whole shell. Verified ("● online").
