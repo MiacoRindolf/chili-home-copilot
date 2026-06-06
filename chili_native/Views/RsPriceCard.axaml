@@ -136,6 +136,8 @@
                                   StrokeThickness="1.6" StrokeLineCap="Round" StrokeJoin="Round"
                                   HorizontalAlignment="Left" VerticalAlignment="Stretch"/>
                         </Panel>
+                        <TextBlock Text="{Binding RangeText}" FontSize="10"
+                                   Foreground="{StaticResource TextLowBrush}"/>
                     </StackPanel>
 
                     <TextBlock IsVisible="{Binding HasBlurb}" Text="{Binding Blurb}"
