@@ -36,6 +36,38 @@ def policy_int_cap(policy: dict[str, Any], key: str, default: int) -> int:
         return int(default)
 
 
+def adaptive_max_spread_bps(
+    base_max_spread_bps: float,
+    expected_move_bps: float | None,
+    ratio: float,
+) -> float:
+    """Volatility-relative spread tolerance (no magic fixed cap).
+
+    The BBO/quote spread is a round-trip execution cost; we tolerate
+    proportionally more of it when the instrument's expected move (realized
+    volatility) is larger. This ONLY ever loosens above ``base_max_spread_bps``
+    (the documented live floor) — it never tightens below it, so the change is a
+    safe, monotonic relaxation for explosive momentum names while quiet/illiquid
+    names keep the conservative floor. ``ratio`` is the single documented knob:
+    the spread may be at most ``ratio`` x the expected per-bar move. Falls back to
+    the base floor when expected move or ratio is unknown / non-finite / <= 0.
+    """
+    base = float(base_max_spread_bps)
+    try:
+        em = float(expected_move_bps) if expected_move_bps is not None else None
+    except (TypeError, ValueError):
+        em = None
+    if em is None or not math.isfinite(em) or em <= 0:
+        return base
+    try:
+        r = float(ratio)
+    except (TypeError, ValueError):
+        return base
+    if not math.isfinite(r) or r <= 0:
+        return base
+    return max(base, r * em)
+
+
 @dataclass(frozen=True)
 class MomentumAutomationRiskPolicy:
     """Conservative defaults for short-horizon crypto momentum (pre-runner gates)."""
@@ -51,6 +83,13 @@ class MomentumAutomationRiskPolicy:
     max_position_size_base: float = 1_000_000.0
     max_spread_bps_paper: float = 28.0
     max_spread_bps_live: float = 12.0
+    # Adaptive spread tolerance. The BBO/quote spread is a round-trip cost, so we
+    # gate it RELATIVE to how far the instrument actually moves (its realized 15m
+    # volatility), never below the live floor above. This single documented knob is
+    # the max spread as a fraction of that expected per-bar move (0.5 => the spread
+    # may be at most half a typical bar's range). Lets Ross-style explosive names
+    # (wide absolute spread, tiny vs. their move) trade without a magic fixed cap.
+    spread_to_expected_move_ratio: float = 0.5
     max_estimated_slippage_bps: float = 18.0
     max_fee_to_target_ratio: float = 0.35
     max_hold_seconds: int = 86_400
@@ -78,6 +117,9 @@ class MomentumAutomationRiskPolicy:
             max_position_size_base=float(getattr(s, "chili_momentum_risk_max_position_size_base", 1_000_000.0)),
             max_spread_bps_paper=float(getattr(s, "chili_momentum_risk_max_spread_bps_paper", 28.0)),
             max_spread_bps_live=float(getattr(s, "chili_momentum_risk_max_spread_bps_live", 12.0)),
+            spread_to_expected_move_ratio=float(
+                getattr(s, "chili_momentum_risk_spread_to_expected_move_ratio", 0.5)
+            ),
             max_estimated_slippage_bps=float(getattr(s, "chili_momentum_risk_max_estimated_slippage_bps", 18.0)),
             max_fee_to_target_ratio=float(getattr(s, "chili_momentum_risk_max_fee_to_target_ratio", 0.35)),
             max_hold_seconds=int(getattr(s, "chili_momentum_risk_max_hold_seconds", 86_400)),

@@ -2323,6 +2323,16 @@ class Settings(BaseSettings):
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_SPREAD_BPS", "CHILI_MOMENTUM_RISK_MAX_SPREAD_BPS_LIVE"),
     )
+    # Adaptive spread tolerance: the live spread cap above is a FLOOR; the runner
+    # also allows up to this fraction of the instrument's expected per-bar move
+    # (realized 15m volatility) so explosive momentum names (wide absolute spread,
+    # tiny vs. their move) are tradable without a magic fixed bps cap. Only ever
+    # loosens above the floor; quiet/illiquid names keep the conservative floor.
+    chili_momentum_risk_spread_to_expected_move_ratio: float = Field(
+        default=0.5,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_SPREAD_TO_EXPECTED_MOVE_RATIO"),
+    )
     chili_momentum_risk_max_estimated_slippage_bps: float = Field(
         default=18.0,
         ge=0.0,

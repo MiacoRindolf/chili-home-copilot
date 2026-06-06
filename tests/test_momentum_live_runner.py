@@ -23,6 +23,8 @@ from app.services.trading.momentum_neural.live_fsm import (
     can_transition_live,
 )
 from app.services.trading.momentum_neural.live_runner import (
+    _adaptive_live_max_spread_bps,
+    _expected_move_bps_from_ohlcv,
     _notional_guard_multiplier,
     _quote_quality_block,
     list_runnable_live_sessions,
@@ -168,6 +170,66 @@ def test_notional_guard_multiplier_preserves_zero_bps(monkeypatch) -> None:
     monkeypatch.setattr(settings, "chili_momentum_order_notional_guard_bps", 0.0)
 
     assert _notional_guard_multiplier() == 1.0
+
+
+def test_adaptive_max_spread_bps_floor_and_loosening() -> None:
+    from app.services.trading.momentum_neural.risk_policy import adaptive_max_spread_bps
+
+    base = 12.0
+    # Unknown / non-finite / non-positive expected move -> base floor (no loosen).
+    assert adaptive_max_spread_bps(base, None, 0.5) == base
+    assert adaptive_max_spread_bps(base, 0.0, 0.5) == base
+    assert adaptive_max_spread_bps(base, -5.0, 0.5) == base
+    assert adaptive_max_spread_bps(base, float("nan"), 0.5) == base
+    # Bad ratio -> base floor.
+    assert adaptive_max_spread_bps(base, 400.0, 0.0) == base
+    assert adaptive_max_spread_bps(base, 400.0, -1.0) == base
+    # Low-vol instrument: ratio*move below the floor -> keep the floor (never tighten).
+    assert adaptive_max_spread_bps(base, 10.0, 0.5) == base  # 0.5*10 = 5 < 12
+    # Explosive instrument: ratio*move above the floor -> loosen proportionally.
+    assert adaptive_max_spread_bps(base, 400.0, 0.5) == pytest.approx(200.0)
+
+
+def test_adaptive_live_max_spread_bps_reads_settings(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "chili_momentum_risk_max_spread_bps_live", 12.0)
+    monkeypatch.setattr(settings, "chili_momentum_risk_spread_to_expected_move_ratio", 0.5)
+    assert _adaptive_live_max_spread_bps(None) == 12.0  # no move -> floor
+    assert _adaptive_live_max_spread_bps(10.0) == 12.0  # quiet -> floor
+    assert _adaptive_live_max_spread_bps(300.0) == pytest.approx(150.0)  # mover -> loosen
+
+
+def test_expected_move_bps_from_ohlcv() -> None:
+    import pandas as pd
+
+    assert _expected_move_bps_from_ohlcv(None) is None
+    assert _expected_move_bps_from_ohlcv(pd.DataFrame()) is None
+    # Steady ~2% per-bar range around 100 -> ~200 bps expected move (ATR/close).
+    price = 100.0
+    rows = [
+        {"High": price * 1.01, "Low": price * 0.99, "Close": price, "Volume": 1000.0}
+        for _ in range(30)
+    ]
+    em = _expected_move_bps_from_ohlcv(pd.DataFrame(rows))
+    assert em is not None
+    assert em == pytest.approx(200.0, rel=0.1)
+
+
+def test_quote_quality_block_adaptive_override_allows_wide_spread_on_mover() -> None:
+    fresh = _fresh()
+    tick = NormalizedTicker(
+        product_id="MOV-USD",
+        bid=99.65,
+        ask=100.35,
+        mid=100.0,
+        spread_bps=70.0,
+        freshness=fresh,
+    )
+    # Base floor (12 bps) blocks a 70 bps spread...
+    blocked = _quote_quality_block(tick, fresh, max_spread_bps=12.0)
+    assert blocked is not None and blocked["reason"] == "wide_bbo_spread"
+    # ...but an adaptive tolerance from a high expected move (0.5 * 300 = 150)
+    # lets the explosive mover through.
+    assert _quote_quality_block(tick, fresh, max_spread_bps=150.0) is None
 
 
 def test_live_exit_intent_records_packet_context(monkeypatch) -> None:
