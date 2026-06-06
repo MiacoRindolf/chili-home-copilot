@@ -1958,7 +1958,7 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
           _buildAutonomyConversationHeader(run),
           Expanded(
             child: run == null
-                ? _emptyAutonomyState('Start or select an Autopilot run')
+                ? _buildAutopilotWelcome()
                 : _buildAutonomyChatTimeline(run),
           ),
           _buildAutonomyComposer(),
@@ -2829,29 +2829,171 @@ class _BrainDispatchScreenState extends State<BrainDispatchScreen>
           if (errorMessage.isNotEmpty)
             _kvSelectable(
                 'Blocked', AutonomyRunPresenter.blockedRunMessage(run)),
-          const Divider(height: 28),
-          _buildAutonomyArchitectQuality(architectReview),
-          const Divider(height: 28),
-          _buildAutonomyPlan(plan, files),
-          const Divider(height: 28),
-          _buildAutonomyAgents(agents),
-          const Divider(height: 28),
-          _buildAutonomyValidation(validation),
-          const Divider(height: 28),
-          _buildAutonomyArtifacts(artifacts),
-          const Divider(height: 28),
-          _buildAutonomyLearning(learning),
-          const Divider(height: 28),
-          _buildAutonomySteps(steps),
+          // AP-UX — only show detail sections that have content, each preceded
+          // by a divider, so the panel stays focused instead of listing seven
+          // mostly-empty "No … yet" placeholders.
+          ..._autonomyDetailSections(<Widget>[
+            if (architectReview.isNotEmpty)
+              _buildAutonomyArchitectQuality(architectReview),
+            if (plan.isNotEmpty || files.isNotEmpty)
+              _buildAutonomyPlan(plan, files),
+            if (agents.isNotEmpty) _buildAutonomyAgents(agents),
+            if (validation.isNotEmpty) _buildAutonomyValidation(validation),
+            if (artifacts.isNotEmpty) _buildAutonomyArtifacts(artifacts),
+            if (learning.isNotEmpty) _buildAutonomyLearning(learning),
+            if (steps.isNotEmpty) _buildAutonomySteps(steps),
+          ]),
         ],
       ),
     );
   }
 
+  /// AP-UX — interleave a divider before each present detail section. Returns
+  /// an empty list when nothing has content, so no trailing dividers linger.
+  List<Widget> _autonomyDetailSections(List<Widget> sections) => <Widget>[
+        for (final section in sections) ...<Widget>[
+          const Divider(height: 28),
+          section,
+        ],
+      ];
+
   Widget _emptyAutonomyState(String label) {
     // Batch 11 — shared empty state upgraded to the AP-UX primitive (icon +
     // typographic hierarchy); improves all six call sites at once.
     return ApEmptyState(icon: Icons.forum_outlined, message: label);
+  }
+
+  // AP-UX welcome — example starter prompts that teach how to begin a run.
+  static const List<String> _autopilotExamplePrompts = <String>[
+    'Summarize the biggest risks in this repo and suggest safe next steps.',
+    'Find and fix any flaky or skipped tests.',
+    'Add input validation to the login form and write tests for it.',
+    'Improve the README: clearer setup steps and a quickstart.',
+  ];
+
+  void _useAutopilotExample(String prompt) {
+    setState(() {
+      _autopilotPromptCtrl.text = prompt;
+      _autopilotPromptCtrl.selection = TextSelection.collapsed(
+        offset: prompt.length,
+      );
+    });
+  }
+
+  /// AP-UX — friendly onboarding shown when no run is selected, modeled on the
+  /// Claude/Codex welcome: what Autopilot does, the 3-step flow, and tappable
+  /// example prompts that pre-fill the composer.
+  Widget _buildAutopilotWelcome() {
+    final cs = Theme.of(context).colorScheme;
+    final muted = _mutedTextColor();
+    Widget step(IconData icon, String title, String body) => Expanded(
+          child: Column(
+            children: [
+              CircleAvatar(
+                radius: 18,
+                backgroundColor: cs.primary.withValues(alpha: 0.12),
+                child: Icon(icon, size: 18, color: cs.primary),
+              ),
+              const SizedBox(height: 8),
+              Text(title,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontWeight: FontWeight.w700)),
+              const SizedBox(height: 2),
+              Text(body,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 12, color: muted)),
+            ],
+          ),
+        );
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(28),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 560),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              CircleAvatar(
+                radius: 26,
+                backgroundColor: cs.primary.withValues(alpha: 0.12),
+                child: Icon(Icons.auto_awesome, size: 26, color: cs.primary),
+              ),
+              const SizedBox(height: 14),
+              Text('Project Autopilot',
+                  style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                      fontWeight: FontWeight.w700)),
+              const SizedBox(height: 8),
+              Text(
+                'Describe a change in plain language. CHILI plans it, implements '
+                'it in an isolated worktree, validates the result, and asks you '
+                'before anything is merged.',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 14, height: 1.4, color: muted),
+              ),
+              const SizedBox(height: 24),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  step(Icons.edit_note, '1. Describe',
+                      'Tell CHILI what you want.'),
+                  step(Icons.auto_fix_high, '2. CHILI builds',
+                      'Plans, codes, and tests it.'),
+                  step(Icons.fact_check_outlined, '3. You review',
+                      'Approve before it merges.'),
+                ],
+              ),
+              const SizedBox(height: 26),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text('Try one of these',
+                    style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.4,
+                        color: muted)),
+              ),
+              const SizedBox(height: 10),
+              ..._autopilotExamplePrompts.map(
+                (p) => Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: InkWell(
+                    onTap: () => _useAutopilotExample(p),
+                    borderRadius: BorderRadius.circular(10),
+                    child: Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 12),
+                      decoration: BoxDecoration(
+                        color: cs.surface,
+                        border: Border.all(color: _autonomyDividerColor()),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(Icons.bolt, size: 16, color: cs.primary),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(p,
+                                style: const TextStyle(fontSize: 13))),
+                          Icon(Icons.north_east, size: 14, color: muted),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Pick a repo on the right, then press Start — or tap an example '
+                'to fill the box below.',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 12, color: muted),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   IconData _autonomyStatusIcon(String status) {
