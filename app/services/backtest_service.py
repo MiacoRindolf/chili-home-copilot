@@ -2264,6 +2264,7 @@ def run_pattern_backtest(
     ohlc_end: str | None = None,
     df_override: pd.DataFrame | None = None,
     scan_pattern_id: int | None = None,
+    asset_class_costs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run a backtest using actual pattern conditions as entry signals.
 
@@ -2292,10 +2293,21 @@ def run_pattern_backtest(
     if spread is None:
         spread = float(settings.backtest_spread)
 
-    # Asset-class cost scaling: crypto has wider spreads than equities
-    spread, commission = _scale_costs_for_asset_class(
-        ticker, spread, commission,
-    )
+    # Execution cost: prefer the system's OWN MEASURED realized round-trip cost
+    # for this ticker's asset class (data-derived, incl. venue fees -> backtest
+    # mirrors live execution; no magic floors). Fall back to the legacy
+    # asset-class scaling only when no measured cost is available.
+    _derived_costs = None
+    if asset_class_costs:
+        try:
+            from .trading.backtest_execution_cost import backtest_costs_for_ticker
+            _derived_costs = backtest_costs_for_ticker(ticker, asset_class_costs)
+        except Exception:
+            _derived_costs = None
+    if _derived_costs is not None:
+        spread, commission = _derived_costs
+    else:
+        spread, commission = _scale_costs_for_asset_class(ticker, spread, commission)
 
     if not pattern_name:
         pattern_name = generate_strategy_name(conditions)
@@ -2552,6 +2564,7 @@ def benchmark_walk_forward_evaluate(
                 exit_config=exit_config,
                 df_override=sub,
                 oos_holdout_fraction=None,
+                asset_class_costs=asset_class_costs,
             )
             ts0 = int(pd.Timestamp(sub.index[0]).timestamp())
             ts1 = int(pd.Timestamp(sub.index[-1]).timestamp())

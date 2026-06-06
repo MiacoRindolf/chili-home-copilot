@@ -1132,6 +1132,20 @@ def smart_backtest_insight(
     _bt_comm = float(
         getattr(_bt_settings, "backtest_commission", _SMART_BACKTEST_DEFAULT_COMMISSION)
     )
+    # backtest<->live parity: derive the system's OWN MEASURED round-trip execution
+    # cost per asset class ONCE here (thread-safe immutable dict passed to each
+    # per-ticker worker), so backtests are charged what live actually pays.
+    _asset_class_costs = None
+    try:
+        from ...db import SessionLocal
+        from .backtest_execution_cost import derive_asset_class_backtest_costs
+        _cost_db = SessionLocal()
+        try:
+            _asset_class_costs = derive_asset_class_backtest_costs(_cost_db)
+        finally:
+            _cost_db.close()
+    except Exception:
+        logger.debug("[smart_backtest] measured backtest-cost derivation failed; legacy fallback", exc_info=True)
     conditions_hash = _lineage_hash(conditions)
     exit_config_hash = _lineage_hash(exit_config or {})
     selected_tickers_hash = _lineage_hash(list(tickers))
@@ -1165,6 +1179,7 @@ def smart_backtest_insight(
                 oos_holdout_fraction=_oos_frac,
                 spread=_bt_spread,
                 commission=_bt_comm,
+                asset_class_costs=_asset_class_costs,
             )
             if result.get("ok"):
                 return result
