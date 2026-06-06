@@ -127,3 +127,21 @@ def test_viability_tilt_prefers_explosive_setup():
     neutral = score_viability("NOSCORE", fam, ctx, feats, db=None)  # no tilt
 
     assert hot.viability > neutral.viability > cold.viability
+
+
+def test_crypto_breakout_schema_keys_work():
+    """The crypto-breakout cache (the live crypto source) uses 'rvol'/'change_24h',
+    NOT 'vol_ratio'/'daily_change_pct'. The scorer must read those equivalent
+    keys — the M2 deploy found crypto viability flat at base because of this exact
+    key mismatch (no signal -> no tilt)."""
+    res = score_universe(
+        {
+            "HOT-USD": {"rvol": 9.0, "change_24h": 30.0},
+            "COLD-USD": {"rvol": 0.5, "change_24h": -2.0},
+        }
+    )
+    assert res["HOT-USD"].rank == 1
+    assert res["COLD-USD"].rank == 2
+    assert res["HOT-USD"].rvol_pct > res["COLD-USD"].rvol_pct
+    # must NOT be flat — the bug was both scoring identically at base
+    assert res["HOT-USD"].score != res["COLD-USD"].score

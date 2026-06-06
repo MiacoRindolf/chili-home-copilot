@@ -90,29 +90,46 @@ def _percentile_rank(value: float, sorted_vals: list[float]) -> float:
     return bisect.bisect_right(sorted_vals, value) / n
 
 
+def _first_float(signal: dict, *keys) -> float | None:
+    """First present, parseable value among ``keys``. Schema-tolerant: the
+    intraday scanner emits ``vol_ratio``/``daily_change_pct`` while the
+    crypto-breakout cache emits ``rvol``/``change_24h`` for the SAME Ross
+    pillars — read both so the scorer works on either result source."""
+    for k in keys:
+        v = _to_float(signal.get(k))
+        if v is not None:
+            return v
+    return None
+
+
 def _extract_pillars(signal: dict) -> tuple[float | None, float | None, float | None]:
-    """(rvol, momentum, liquidity) raw pillar values from a scanner result dict.
+    """(rvol, momentum, liquidity) raw pillar values from a scanner/breakout
+    result dict (reads the equivalent key from either schema).
 
-    * rvol      — relative volume (``vol_ratio``).
-    * momentum  — signed "already moving" %, the stronger of daily change / gap
-                  (long bias: a down-mover ranks low, a high-volume *dump* —
-                  high rvol but negative momentum — correctly does not top-rank).
+    * rvol      — relative volume (``vol_ratio`` | ``rvol`` | ``volume_ratio``).
+    * momentum  — signed "already moving" %, the stronger of daily/24h change
+                  (``daily_change_pct`` | ``change_24h`` | ``change_pct``) and the
+                  gap (``gap_pct``). Long bias: a down-mover ranks low; a
+                  high-volume *dump* (high rvol, negative momentum) correctly does
+                  not top-rank.
     * liquidity — explosiveness of supply: SMALLER float / market-cap → MORE
-                  explosive, so we return ``-log10(size)`` (bigger = smaller =
-                  more explosive). ``None`` when the size field is unavailable
-                  (common for crypto via the intraday scanner today).
+                  explosive, so we return ``-log10(size)``. ``None`` when the size
+                  field is unavailable (common for the crypto result sources).
     """
-    rvol = _to_float(signal.get("vol_ratio"))
+    rvol = _first_float(signal, "vol_ratio", "rvol", "volume_ratio")
 
-    daily = _to_float(signal.get("daily_change_pct"))
-    gap = _to_float(signal.get("gap_pct"))
-    cands = [x for x in (daily, gap) if x is not None]
+    cands = [
+        x
+        for x in (
+            _first_float(signal, "daily_change_pct", "change_24h", "change_pct"),
+            _first_float(signal, "gap_pct"),
+        )
+        if x is not None
+    ]
     momentum = max(cands) if cands else None
 
-    shares = _to_float(signal.get("float_shares"))
-    mcap = _to_float(signal.get("market_cap"))
-    size = shares if (shares and shares > 0) else (mcap if (mcap and mcap > 0) else None)
-    liquidity = -math.log10(size) if size else None
+    size = _first_float(signal, "float_shares", "market_cap")
+    liquidity = -math.log10(size) if (size and size > 0) else None
 
     return rvol, momentum, liquidity
 
