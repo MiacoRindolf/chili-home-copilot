@@ -13,6 +13,7 @@ class AppNotification {
     required this.source,
     required this.timestampMs,
     required this.read,
+    this.appId,
   });
 
   final String id;
@@ -23,6 +24,10 @@ class AppNotification {
   final int timestampMs;
   final bool read;
 
+  /// NC-3 — optional target app id; when set, tapping the notification opens
+  /// that app (e.g. a kill-switch alert → 'cockpit').
+  final String? appId;
+
   AppNotification copyWith({bool? read}) => AppNotification(
         id: id,
         kind: kind,
@@ -31,6 +36,7 @@ class AppNotification {
         source: source,
         timestampMs: timestampMs,
         read: read ?? this.read,
+        appId: appId,
       );
 }
 
@@ -61,6 +67,7 @@ class NotificationCenter extends ChangeNotifier {
     String detail = '',
     String source = '',
     String? dedupeKey,
+    String? appId,
   }) {
     if (dedupeKey != null &&
         _items.isNotEmpty &&
@@ -75,6 +82,7 @@ class NotificationCenter extends ChangeNotifier {
       source: source,
       timestampMs: _clock(),
       read: false,
+      appId: appId,
     ));
     if (_items.length > _max) {
       _items.removeRange(0, _items.length - _max);

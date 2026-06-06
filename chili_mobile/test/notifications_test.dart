@@ -17,6 +17,16 @@ void main() {
       expect(c.items.last.title, 'A');
     });
 
+    test('add stores appId and markAllRead preserves it (NC-3)', () {
+      final NotificationCenter c = NotificationCenter();
+      c.add(NotifKind.error, 'Kill switch', appId: 'cockpit');
+      c.add(NotifKind.info, 'General');
+      expect(c.items.first.appId, isNull); // 'General' newest, no appId
+      expect(c.items.last.appId, 'cockpit');
+      c.markAllRead();
+      expect(c.items.last.appId, 'cockpit'); // copyWith carries it
+    });
+
     test('markAllRead clears unread', () {
       final NotificationCenter c = NotificationCenter();
       c.add(NotifKind.info, 'A');
@@ -99,6 +109,44 @@ void main() {
       ));
       await tester.pumpAndSettle();
       expect(find.text('No notifications'), findsOneWidget);
+    });
+
+    testWidgets('NC-3: tapping an appId notification opens that app + closes',
+        (WidgetTester tester) async {
+      final NotificationCenter c = NotificationCenter();
+      c.add(NotifKind.error, 'Kill switch activated',
+          detail: 'Halted.', source: 'Cockpit', appId: 'cockpit');
+      c.add(NotifKind.info, 'No target'); // no appId → not tappable
+      String? opened;
+      bool closed = false;
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: NotificationPanel(
+            center: c,
+            onClose: () => closed = true,
+            onOpenApp: (String id) => opened = id,
+          ),
+        ),
+      ));
+      await tester.pumpAndSettle();
+      // Only the targeted notification shows a chevron affordance.
+      expect(find.byIcon(Icons.chevron_right), findsOneWidget);
+      await tester.tap(find.text('Kill switch activated'));
+      await tester.pump();
+      expect(opened, 'cockpit');
+      expect(closed, isTrue);
+    });
+
+    testWidgets('NC-3: notifications are inert when no onOpenApp is wired',
+        (WidgetTester tester) async {
+      final NotificationCenter c = NotificationCenter();
+      c.add(NotifKind.error, 'Kill switch activated',
+          source: 'Cockpit', appId: 'cockpit');
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(body: NotificationPanel(center: c, onClose: () {})),
+      ));
+      await tester.pumpAndSettle();
+      expect(find.byIcon(Icons.chevron_right), findsNothing);
     });
   });
 }
