@@ -526,6 +526,24 @@ def run_brain_work_dispatch_round(
             holder_id=holder,
             event_type=event_type,
         )
+        # FIX (idle-in-transaction cascade, 2026-06-07): detach the claimed
+        # BrainWorkEvent snapshots BEFORE committing the lease. claim_work_batch
+        # returns fully-loaded rows and applies the lease via a raw UPDATE in this
+        # txn, so detaching the ORM snapshots cannot lose the lease. Without this,
+        # the commit below expires the rows, so the per-event ``ev.id`` /
+        # ``ev.payload`` reads in the loop RELOAD BrainWorkEvent on the dispatcher
+        # session -- opening a transaction that then sits idle-in-transaction while
+        # the handler runs heavy work (many handlers use their own SessionLocal).
+        # Once that idle interval exceeds idle_in_transaction_session_timeout
+        # (db.py, 120s) Postgres kills the dispatcher connection (observed: FATAL on
+        # ``SELECT brain_work_events``). Handlers only READ ev.id / ev.payload
+        # (scalar columns, no relationships, never mutated) and mark-done/retry key
+        # off event_id, so detached-with-data access is safe.
+        for _claimed in rows:
+            try:
+                db.expunge(_claimed)
+            except Exception:
+                pass
         db.commit()
         claimed_total += len(rows)
         n_done = 0
