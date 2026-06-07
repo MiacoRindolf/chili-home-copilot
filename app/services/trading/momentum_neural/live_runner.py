@@ -1307,12 +1307,23 @@ def tick_live_session(
                         _trigger_ok, _trigger_reason = momentum_volume_confirmation(_df)
             except Exception:
                 _trigger_ok, _trigger_reason = False, "trigger_error_wait"
-        if _score_ok and _trigger_ok:
+        # E3: equities can only ENTER during US regular hours; crypto is 24/7.
+        # Never advance a stock to entry outside RTH (the order would not fill).
+        _mkt_open = True
+        try:
+            from .market_profile import market_open_now
+
+            _mkt_open = bool(market_open_now(sess.symbol))
+        except Exception:
+            _mkt_open = True
+        if _score_ok and _trigger_ok and _mkt_open:
             _safe_transition(db, sess, STATE_LIVE_ENTRY_CANDIDATE)
             _emit(
                 db, sess, "live_entry_candidate_detected",
                 {"viability_score": via.viability_score, "trigger": _trigger_reason},
             )
+        elif _score_ok and not _mkt_open:
+            _emit(db, sess, "live_entry_wait_market_closed", {"symbol": sess.symbol})
         elif _score_ok:
             _emit(db, sess, "live_entry_trigger_wait", {"reason": _trigger_reason})
         db.flush()

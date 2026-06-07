@@ -66,6 +66,18 @@ def _is_coinbase_tradeable_symbol(symbol: str) -> bool:
     return "-USD" in str(symbol or "").upper()
 
 
+def _symbol_market_open(symbol: str) -> bool:
+    """True if the symbol can be entered NOW. Crypto is 24/7; equities only during
+    US regular hours (9:30-16:00 ET) — never arm a stock that can't fill."""
+    try:
+        from .market_profile import market_open_now
+
+        return bool(market_open_now(symbol))
+    except Exception:
+        # Fail safe: crypto (-USD) is always tradeable; if unsure on an equity, skip.
+        return "-USD" in str(symbol or "").upper()
+
+
 def _max_watch_seconds() -> int:
     return max(60, int(getattr(settings, "chili_momentum_auto_arm_max_watch_seconds", 1800)))
 
@@ -276,6 +288,8 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
         out["checked"] += 1
         if _auto_arm_crypto_only() and not _is_coinbase_tradeable_symbol(c.symbol):
             continue  # defensive: never arm an equity via the coinbase_spot lane
+        if not _symbol_market_open(c.symbol):
+            continue  # equities only during RTH; crypto always passes (24/7)
         if not _symbol_free(db, c.symbol, uid):
             continue
         fires, reason = _entry_trigger_fires(c.symbol)

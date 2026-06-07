@@ -180,6 +180,26 @@ def test_equity_candidate_skipped_even_if_higher_viability(happy):
     assert out["symbol"] == "KAIO-USD"
 
 
+def test_market_closed_equity_skipped(happy):
+    # crypto_only OFF so equities can flow; an equity whose market is CLOSED must be
+    # skipped (would not fill), the 24/7 crypto armed instead.
+    happy.setattr(aa.settings, "chili_momentum_auto_arm_crypto_only", False, raising=False)
+    happy.setattr(
+        aa, "_fresh_live_eligible_candidates",
+        lambda db, *, limit: [_cand("ARKK", 8, 0.80), _cand("KAIO-USD", 8, 0.65)],
+    )
+    happy.setattr(aa, "_symbol_market_open", lambda sym: sym.endswith("-USD"))
+    happy.setattr(aa, "_entry_trigger_fires", lambda sym: (True, "momentum_ok"))
+    out = aa.run_auto_arm_pass(_FakeDB())
+    assert out["armed"] == 1
+    assert out["symbol"] == "KAIO-USD"  # ARKK skipped: market closed
+
+
+def test_market_open_helper_crypto_always_open(monkeypatch):
+    # crypto is 24/7 -> always True regardless of market_open_now
+    assert aa._symbol_market_open("BTC-USD") is True
+
+
 def test_reaper_cancels_stale_pre_entry_sessions(monkeypatch):
     from datetime import datetime
     cancelled = []
