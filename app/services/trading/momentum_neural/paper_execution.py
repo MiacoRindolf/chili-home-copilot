@@ -30,6 +30,37 @@ def regime_atr_pct(regime_json: dict[str, Any]) -> float:
     return max(0.004, min(v, 0.12))
 
 
+def effective_stop_atr_pct(
+    regime_atr_pct_val: float,
+    expected_move_bps: float | None,
+    *,
+    stop_atr_mult: float,
+    vol_floor_mult: float = 0.5,
+) -> float:
+    """Floor the stop's ATR-pct so the stop sits OUTSIDE the live intraday noise.
+
+    The regime ATR is a slow measure; on a coin whose LIVE 15m volatility
+    (``expected_move_bps``, the same one the adaptive spread gate uses) is much
+    larger, a regime-sized stop lands INSIDE the noise and gets shaken out
+    (KAIO: 72bps stop vs 400bps move -> stopped, then it ran to target). Floor the
+    stop distance at ``vol_floor_mult x expected_move``; risk-first sizing then
+    trims qty to keep $risk constant (wider stop -> smaller size). No new
+    volatility magic — reuses the live expected_move. docs/DESIGN/MOMENTUM_LANE.md
+    """
+    base = max(0.004, float(regime_atr_pct_val or 0.0))
+    try:
+        em_pct = float(expected_move_bps or 0.0) / 10_000.0
+        mult = float(stop_atr_mult or 0.0)
+        floor = float(vol_floor_mult or 0.0)
+    except (TypeError, ValueError):
+        return base
+    if em_pct <= 0 or mult <= 0 or floor <= 0:
+        return base
+    # stop_distance = entry x atr_pct x stop_atr_mult; we want it >= floor x em_pct.
+    floor_atr_pct = (floor * em_pct) / mult
+    return max(0.004, min(max(base, floor_atr_pct), 0.15))
+
+
 def default_reference_mid(
     *,
     viability_score: float,
