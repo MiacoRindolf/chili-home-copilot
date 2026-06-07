@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from ....config import settings
 from ....models.trading import MomentumSymbolViability, TradingAutomationSession
 from ..execution_family_registry import (
+    EXECUTION_FAMILY_COINBASE_SPOT,
     ExecutionFamilyNotImplementedError,
     normalize_execution_family,
     momentum_runner_supports_execution_family,
@@ -997,8 +998,13 @@ def tick_live_session(
         return {"ok": True, "skipped": "not_runnable", "state": sess.state}
 
     product_id = sess.symbol.upper().strip()
-    if not product_id.endswith("-USD"):
-        product_id = f"{product_id}-USD"
+    if ef == EXECUTION_FAMILY_COINBASE_SPOT:
+        # Coinbase crypto convention: ensure the BASE-USD pair suffix.
+        if not product_id.endswith("-USD"):
+            product_id = f"{product_id}-USD"
+    # robinhood_spot: pass the symbol AS-IS — a bare equity ticker (AAPL, ARKK) or
+    # an -USD RH-crypto pair. NEVER append -USD to an equity (that broke the entry:
+    # AAPL -> AAPL-USD is not a Robinhood product).
 
     # C2: Orphaned order recovery — reconcile with venue (rate-limited)
     _reconcile_venue_position(adapter, db, sess, product_id)

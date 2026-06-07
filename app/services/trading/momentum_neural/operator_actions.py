@@ -393,10 +393,12 @@ def begin_live_arm(
     )
 
     ef_live = normalize_execution_family(execution_family)
+    from ...execution_family_registry import venue_for_execution_family
+
     sess = create_trading_automation_session(
         db,
         user_id=user_id,
-        venue="coinbase",
+        venue=venue_for_execution_family(ef_live),
         execution_family=ef_live,
         mode="live",
         symbol=sym,
