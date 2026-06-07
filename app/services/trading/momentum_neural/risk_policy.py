@@ -68,13 +68,27 @@ def adaptive_max_spread_bps(
     return max(base, r * em)
 
 
-def _account_equity_usd() -> float | None:
-    """Best-effort account equity (USD) for equity-relative sizing.
+def _account_equity_usd(execution_family: str | None = None) -> float | None:
+    """Best-effort account equity (USD) for equity-relative sizing, PER VENUE.
 
-    Uses the Coinbase portfolio equity. Returns None when unavailable so callers
-    fall back to the documented fixed cap (never size against unknown equity).
+    robinhood_spot -> Robinhood account equity (equities are bought with RH buying
+    power, not Coinbase crypto equity); else Coinbase portfolio equity (crypto).
+    Returns None when unavailable so callers fall back to the documented fixed cap
+    (never size against unknown equity). docs/DESIGN/MOMENTUM_LANE.md
     """
+    from ..execution_family_registry import (
+        EXECUTION_FAMILY_ROBINHOOD_SPOT,
+        normalize_execution_family,
+    )
+
+    ef = normalize_execution_family(execution_family)
     try:
+        if ef == EXECUTION_FAMILY_ROBINHOOD_SPOT:
+            from ...broker_service import get_portfolio as _rh_portfolio
+
+            pf = _rh_portfolio() or {}
+            eq = float(pf.get("equity") or 0.0)
+            return eq if eq > 0 else None
         from ...coinbase_service import get_portfolio
 
         pf = get_portfolio() or {}
@@ -84,8 +98,10 @@ def _account_equity_usd() -> float | None:
         return None
 
 
-def _equity_relative_cap(fixed_fallback_usd: float, fraction: Any) -> float:
-    """Cap = account_equity x fraction (equity-relative, not a fixed $).
+def _equity_relative_cap(
+    fixed_fallback_usd: float, fraction: Any, execution_family: str | None = None
+) -> float:
+    """Cap = account_equity x fraction (equity-relative, not a fixed $), per venue.
 
     Scales UP as equity grows and DOWN in drawdown (auto-de-risk). Falls back to
     ``fixed_fallback_usd`` when equity or the fraction is unavailable (never size
@@ -101,37 +117,40 @@ def _equity_relative_cap(fixed_fallback_usd: float, fraction: Any) -> float:
         frac = 0.0
     if frac <= 0 or not math.isfinite(frac):
         return fixed
-    eq = _account_equity_usd()
+    eq = _account_equity_usd(execution_family)
     if eq is None or eq <= 0:
         return fixed
     return round(eq * frac, 2)
 
 
-def equity_relative_notional_cap(fixed_fallback_usd: float) -> float:
+def equity_relative_notional_cap(fixed_fallback_usd: float, execution_family: str | None = None) -> float:
     """Per-trade NOTIONAL cap as a fraction of account equity (documented
     per-trade SIZE knob). docs/DESIGN/MOMENTUM_LANE.md"""
     return _equity_relative_cap(
         fixed_fallback_usd,
         getattr(settings, "chili_momentum_risk_notional_fraction_of_equity", 0.15),
+        execution_family,
     )
 
 
-def equity_relative_loss_cap(fixed_fallback_usd: float) -> float:
+def equity_relative_loss_cap(fixed_fallback_usd: float, execution_family: str | None = None) -> float:
     """Per-trade MAX-LOSS cap as a fraction of account equity (documented
     per-trade RISK knob). docs/DESIGN/MOMENTUM_LANE.md"""
     return _equity_relative_cap(
         fixed_fallback_usd,
         getattr(settings, "chili_momentum_risk_loss_fraction_of_equity", 0.01),
+        execution_family,
     )
 
 
-def equity_relative_daily_loss_cap(fixed_fallback_usd: float) -> float:
+def equity_relative_daily_loss_cap(fixed_fallback_usd: float, execution_family: str | None = None) -> float:
     """Daily-loss cap as a fraction of account equity (documented DAILY risk knob).
     Evaluated live so the daily circuit-breaker adapts to current equity.
     docs/DESIGN/MOMENTUM_LANE.md"""
     return _equity_relative_cap(
         fixed_fallback_usd,
         getattr(settings, "chili_momentum_risk_daily_loss_fraction_of_equity", 0.05),
+        execution_family,
     )
 
 
@@ -293,6 +312,7 @@ def build_session_risk_snapshot(
     viability_brief: dict[str, Any] | None,
     readiness_subset: dict[str, Any] | None,
     extra: dict[str, Any] | None = None,
+    execution_family: str | None = None,
 ) -> dict[str, Any]:
     """Merge operator keys (e.g. arm_token) with frozen policy + evaluation."""
     snap: dict[str, Any] = dict(extra or {})
@@ -322,11 +342,13 @@ def build_session_risk_snapshot(
         # account equity, frozen at admission; falls back to the fixed cap when
         # equity is unavailable. [[feedback_adaptive_no_magic]]
         "max_notional_per_trade_usd": equity_relative_notional_cap(
-            policy_float_cap(policy_full, "max_notional_per_trade_usd", 500.0)
+            policy_float_cap(policy_full, "max_notional_per_trade_usd", 500.0),
+            execution_family,
         ),
         # Equity-relative per-trade max-loss (no fixed-$ magic); same fallback rules.
         "max_loss_per_trade_usd": equity_relative_loss_cap(
-            policy_float_cap(policy_full, "max_loss_per_trade_usd", 50.0)
+            policy_float_cap(policy_full, "max_loss_per_trade_usd", 50.0),
+            execution_family,
         ),
     }
     return snap

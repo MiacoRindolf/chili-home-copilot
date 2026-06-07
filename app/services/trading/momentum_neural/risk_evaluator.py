@@ -497,7 +497,7 @@ def evaluate_proposed_momentum_automation(
     daily_pnl = _daily_realized_pnl(db, user_id)
     # Equity-relative daily-loss circuit-breaker (no fixed-$ magic); falls back to
     # the fixed cap when equity is unavailable. [[feedback_adaptive_no_magic]]
-    max_daily_loss = equity_relative_daily_loss_cap(policy.max_daily_loss_usd)
+    max_daily_loss = equity_relative_daily_loss_cap(policy.max_daily_loss_usd, ef)
     ok_dloss = daily_pnl > -max_daily_loss
     checks.append(
         _check(

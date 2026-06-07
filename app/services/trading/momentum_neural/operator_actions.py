@@ -394,6 +394,7 @@ def begin_live_arm(
             "expires_at_utc": expires,
             "phase": 6,
         },
+        execution_family=execution_family,
     )
 
     ef_live = normalize_execution_family(execution_family)
@@ -565,6 +566,7 @@ def confirm_live_arm(
         viability_brief=_viability_brief(row),
         readiness_subset=_readiness_subset(row),
         extra=dict(sess.risk_snapshot_json or {}),
+        execution_family=sess.execution_family,
     )
     final_snap["arm_confirmed_at_utc"] = _utcnow().isoformat()
     final_snap["arm_confirmed"] = True
