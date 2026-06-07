@@ -2857,6 +2857,14 @@ class Settings(BaseSettings):
         le=100,
         validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_SCAN_LIMIT"),
     )
+    # Reap a pre-entry live session that has watched this long without entering,
+    # freeing the slot for a fresher mover (Ross moves on; default 30min).
+    chili_momentum_auto_arm_max_watch_seconds: int = Field(
+        default=1800,
+        ge=60,
+        le=86400,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_MAX_WATCH_SECONDS"),
+    )
 
     chili_auto_execute_stops: bool = Field(
         default=False,
