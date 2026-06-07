@@ -728,6 +728,20 @@ def _live_entry_quote_gate_applies(sess: TradingAutomationSession, le: dict[str,
     return state == STATE_LIVE_PENDING_ENTRY and not le.get("entry_submitted")
 
 
+_HELD_LIVE_STATES = frozenset(
+    {STATE_LIVE_ENTERED, STATE_LIVE_SCALING_OUT, STATE_LIVE_TRAILING, STATE_LIVE_BAILOUT}
+)
+
+
+def _held_position_keeps_exit_on_boundary_fail(state: str, has_position: Any) -> bool:
+    """A held momentum position must keep its EXIT/stop management even when the
+    entry-oriented boundary risk eval (viability freshness / caps / concurrency)
+    refuses. The stop/target is a SAFETY mechanism that must always run — only the
+    kill-switch force-exits. Returns True when the tick must fall through to the
+    exit handler instead of blocking. (docs/DESIGN/MOMENTUM_LANE.md)"""
+    return bool(has_position) and state in _HELD_LIVE_STATES
+
+
 def _quote_quality_block(
     tick: Any, freshness: Any, max_spread_bps: float | None = None
 ) -> dict[str, Any] | None:
@@ -1136,14 +1150,26 @@ def tick_live_session(
         )
         if sess.state in (STATE_ARMED_PENDING_RUNNER, STATE_QUEUED_LIVE):
             _safe_transition(db, sess, STATE_LIVE_ERROR)
-        elif sess.state == STATE_LIVE_PENDING_ENTRY and le.get("entry_order_id") and not le.get("position"):
+            db.flush()
+            return {"ok": True, "blocked": True, "risk_evaluation": ev}
+        if sess.state == STATE_LIVE_PENDING_ENTRY and le.get("entry_order_id") and not le.get("position"):
             adapter.cancel_order(str(le["entry_order_id"]))
             _safe_transition(db, sess, STATE_WATCHING_LIVE)
-        elif sess.state == STATE_LIVE_ENTERED and le.get("position"):
+            db.flush()
+            return {"ok": True, "blocked": True, "risk_evaluation": ev}
+        if _held_position_keeps_exit_on_boundary_fail(sess.state, le.get("position")):
+            # BUGFIX: do NOT block a held position's stop/target on an entry-risk
+            # refusal. Kill-switch still force-exits; otherwise fall through to the
+            # exit handler below (it places no new entry/scale-in), so the stop is
+            # always enforced even if viability went stale / a cap tripped.
             if _handle_kill_switch_mid_run():
                 _safe_transition(db, sess, STATE_LIVE_EXITED)
-        db.flush()
-        return {"ok": True, "blocked": True, "risk_evaluation": ev}
+                db.flush()
+                return {"ok": True, "blocked": True, "risk_evaluation": ev}
+            # fall through to exit management (no early return)
+        else:
+            db.flush()
+            return {"ok": True, "blocked": True, "risk_evaluation": ev}
 
     if _kill_switch_blocks_live() and sess.state in (
         STATE_LIVE_PENDING_ENTRY,
