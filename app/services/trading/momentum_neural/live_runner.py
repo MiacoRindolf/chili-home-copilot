@@ -42,7 +42,7 @@ from ..decision_ledger import (
 from ..deployment_ladder_service import record_trade_outcome_metrics
 from .risk_evaluator import evaluate_proposed_momentum_automation
 from .risk_policy import RISK_SNAPSHOT_KEY, compute_risk_first_quantity, policy_float_cap, policy_int_cap
-from .paper_execution import regime_atr_pct, stop_target_prices, utc_iso
+from .paper_execution import effective_stop_atr_pct, regime_atr_pct, stop_target_prices, utc_iso
 from .persistence import variant_for_id
 from .live_fsm import (
     LIVE_RUNNER_RUNNABLE_STATES,
@@ -733,6 +733,16 @@ _HELD_LIVE_STATES = frozenset(
 )
 
 
+def _stop_vol_floor_mult() -> float:
+    """Fraction of the live expected-move the stop must clear to sit outside the
+    noise (default 0.5). One documented knob; everything else derived."""
+    try:
+        v = float(getattr(settings, "chili_momentum_risk_stop_vol_floor_mult", 0.5))
+    except (TypeError, ValueError):
+        return 0.5
+    return v if v >= 0 else 0.0
+
+
 def _held_position_keeps_exit_on_boundary_fail(state: str, has_position: Any) -> bool:
     """A held momentum position must keep its EXIT/stop management even when the
     entry-oriented boundary risk eval (viability freshness / caps / concurrency)
@@ -1321,12 +1331,21 @@ def tick_live_session(
                     "target_price": None,
                 }
                 regime = via.regime_snapshot_json if isinstance(via.regime_snapshot_json, dict) else {}
-                atrp = regime_atr_pct(regime)
+                _stop_atr_mult = float(params["stop_atr_mult"])
+                # Reuse the vol-floored ATR frozen at sizing time so the ACTUAL stop
+                # matches the stop the qty was risk-sized against (else a wider stop
+                # would over-risk, a narrower one would re-introduce the shake-out).
+                atrp = le.get("entry_stop_atr_pct")
+                if not atrp or float(atrp) <= 0:
+                    atrp = effective_stop_atr_pct(
+                        regime_atr_pct(regime), _expected_move_bps,
+                        stop_atr_mult=_stop_atr_mult, vol_floor_mult=_stop_vol_floor_mult(),
+                    )
                 stop_px, target_px = stop_target_prices(
                     avg,
-                    atr_pct=atrp,
+                    atr_pct=float(atrp),
                     side_long=True,
-                    stop_atr_mult=float(params["stop_atr_mult"]),
+                    stop_atr_mult=_stop_atr_mult,
                     target_atr_mult=float(params["target_atr_mult"]),
                 )
                 le["position"]["stop_price"] = stop_px
@@ -1593,16 +1612,26 @@ def tick_live_session(
         # tighter stop buys MORE size at constant risk. Falls back to notional-first
         # when ATR/inputs are unusable. (docs/DESIGN/MOMENTUM_LANE.md)
         _regime = via.regime_snapshot_json if isinstance(via.regime_snapshot_json, dict) else {}
+        _stop_atr_mult = float(params.get("stop_atr_mult") or 0.60)
+        # Vol-floored stop ATR-pct: never tighter than vol_floor_mult x the live
+        # expected-move, so the stop sits OUTSIDE the intraday noise (the KAIO
+        # shake-out fix). Frozen in le and reused at the post-fill stop so sizing
+        # and the actual stop agree. (docs/DESIGN/MOMENTUM_LANE.md)
+        _eff_atr_pct = effective_stop_atr_pct(
+            regime_atr_pct(_regime), _expected_move_bps,
+            stop_atr_mult=_stop_atr_mult, vol_floor_mult=_stop_vol_floor_mult(),
+        )
+        le["entry_stop_atr_pct"] = _eff_atr_pct
         _rf_qty, _rf_meta = compute_risk_first_quantity(
             entry_price=guarded_ask,
-            atr_pct=regime_atr_pct(_regime),
+            atr_pct=_eff_atr_pct,
             max_loss_usd=policy_float_cap(
                 caps, "max_loss_per_trade_usd", settings.chili_momentum_risk_max_loss_per_trade_usd
             ),
             max_notional_ceiling_usd=max_notional,
             base_increment=inc,
             base_min_size=mn,
-            stop_atr_mult=float(params.get("stop_atr_mult") or 0.60),
+            stop_atr_mult=_stop_atr_mult,
         )
         if _rf_qty and _rf_qty > 0:
             qty = _rf_qty

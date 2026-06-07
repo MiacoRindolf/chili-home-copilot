@@ -2338,6 +2338,16 @@ class Settings(BaseSettings):
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_REWARD_RISK_RATIO"),
     )
+    # Shake-out fix: the stop must clear at least this fraction of the live 15m
+    # expected-move so it sits OUTSIDE intraday noise (KAIO: 72bps stop / 400bps
+    # move got shaken out, then hit target). Risk-first sizing trims qty to keep
+    # $risk constant. ONE documented knob; the move itself is the live ATR.
+    chili_momentum_risk_stop_vol_floor_mult: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=5.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_STOP_VOL_FLOOR_MULT"),
+    )
     # Entry trigger mode: "hybrid" (Ross pullback-break on 1m/5m, momentum_volume
     # fallback), "pullback_break" (pullback only), or "momentum_volume" (legacy 15m).
     chili_momentum_entry_trigger_mode: str = Field(
