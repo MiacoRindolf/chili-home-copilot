@@ -257,6 +257,7 @@ def create_paper_draft_session(
         viability_brief=vb,
         readiness_subset=rs,
         extra=None,
+        db=db,
     )
 
     runner_on = bool(settings.chili_momentum_paper_runner_enabled)
@@ -396,6 +397,7 @@ def begin_live_arm(
             "phase": 6,
         },
         execution_family=execution_family,
+        db=db,
     )
 
     ef_live = normalize_execution_family(execution_family)
@@ -567,6 +569,7 @@ def confirm_live_arm(
         readiness_subset=_readiness_subset(row),
         extra=dict(sess.risk_snapshot_json or {}),
         execution_family=sess.execution_family,
+        db=db,
     )
     final_snap["arm_confirmed_at_utc"] = _utcnow().isoformat()
     final_snap["arm_confirmed"] = True
@@ -723,6 +726,7 @@ def promote_paper_session_to_live_arm(
                 "severity": paper_snap.get("severity"),
             },
         },
+        db=db,
     )
 
     sess = create_trading_automation_session(
