@@ -800,6 +800,44 @@ def _run_momentum_live_runner_batch_job():
     run_scheduler_job_guarded("momentum_live_runner_batch", _work)
 
 
+def _run_momentum_auto_arm_live_job():
+    """Autonomously arm ONE live momentum session for the candidate whose entry
+    trigger is firing now (Ross-style), fully guarded via the operator arm flow.
+    (trading.momentum_neural.auto_arm.run_auto_arm_pass)"""
+
+    def _work() -> None:
+        from ..config import settings as _settings
+        from ..db import SessionLocal
+
+        if not getattr(_settings, "chili_momentum_auto_arm_live_enabled", True):
+            return
+        if not getattr(_settings, "chili_momentum_auto_arm_live_scheduler_enabled", True):
+            return
+        if not _settings.chili_momentum_live_runner_enabled:
+            return
+
+        db = SessionLocal()
+        try:
+            from .trading.momentum_neural.auto_arm import run_auto_arm_pass
+
+            summary = run_auto_arm_pass(db)
+            db.commit()
+            if summary.get("armed") or summary.get("begin_error") or summary.get("confirm_error"):
+                logger.info("[scheduler] auto_arm: %s", summary)
+        except Exception:
+            db.rollback()
+            logger.warning("[scheduler] auto_arm pass failed", exc_info=True)
+        finally:
+            # FIX 46 pattern (rollback before close).
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("momentum_auto_arm_live", _work)
+
+
 def _run_neural_mesh_drain_job():
     """Drain the neural-mesh activation queue.
 
@@ -5367,15 +5405,49 @@ def start_scheduler():
             and settings.chili_momentum_live_runner_enabled
             and settings.chili_momentum_live_runner_scheduler_enabled
         ):
-            _lr_m = max(2, int(settings.chili_momentum_live_runner_scheduler_interval_minutes))
+            # Ross-style fast cadence: prefer the SECONDS knob (>0) so a fleeting
+            # momentum break is caught within ~30s instead of up to 2min. coalesce
+            # + max_instances=1 collapse any overlap if a run runs long.
+            _lr_secs = int(getattr(settings, "chili_momentum_live_runner_scheduler_interval_seconds", 0) or 0)
+            if _lr_secs > 0:
+                _lr_secs = max(10, _lr_secs)
+                _lr_trigger = IntervalTrigger(seconds=_lr_secs)
+                _lr_label = f"{_lr_secs}s"
+            else:
+                _lr_m = max(2, int(settings.chili_momentum_live_runner_scheduler_interval_minutes))
+                _lr_trigger = IntervalTrigger(minutes=_lr_m)
+                _lr_label = f"{_lr_m}min"
             _scheduler.add_job(
                 _run_momentum_live_runner_batch_job,
-                trigger=IntervalTrigger(minutes=_lr_m),
+                trigger=_lr_trigger,
                 id="momentum_live_runner_batch",
-                name=f"Momentum live automation runner (every {_lr_m}min; real orders)",
+                name=f"Momentum live automation runner (every {_lr_label}; real orders)",
                 replace_existing=True,
                 max_instances=1,
-                next_run_time=datetime.now() + timedelta(seconds=65),
+                coalesce=True,
+                next_run_time=datetime.now() + timedelta(seconds=20),
+            )
+
+        # Auto-arm-live: autonomously arm the surging Ross candidate (one live
+        # session at a time). Only runs when the live runner is also on (no point
+        # arming a session nothing will process). Guards live in the arm flow.
+        if (
+            include_web_light
+            and settings.chili_momentum_live_runner_enabled
+            and settings.chili_momentum_live_runner_scheduler_enabled
+            and getattr(settings, "chili_momentum_auto_arm_live_enabled", True)
+            and getattr(settings, "chili_momentum_auto_arm_live_scheduler_enabled", True)
+        ):
+            _aa_secs = max(10, int(getattr(settings, "chili_momentum_auto_arm_live_scheduler_interval_seconds", 30)))
+            _scheduler.add_job(
+                _run_momentum_auto_arm_live_job,
+                trigger=IntervalTrigger(seconds=_aa_secs),
+                id="momentum_auto_arm_live",
+                name=f"Momentum auto-arm-live (every {_aa_secs}s; arms one Ross candidate)",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now() + timedelta(seconds=40),
             )
 
         # Data retention: archive old snapshots, prune payloads daily at 3:30 AM

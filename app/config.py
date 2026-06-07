@@ -2823,6 +2823,40 @@ class Settings(BaseSettings):
         le=1440,
         validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_SCHEDULER_INTERVAL_MINUTES"),
     )
+    # Ross-style cadence: a momentum entry/exit window is fleeting (seconds-
+    # minutes), so the 2min floor above missed fast breaks. When > 0 this
+    # SECONDS cadence wins over the minutes knob. 30s = 4x faster, safely above
+    # the ~12s batch run time (max_instances=1 + coalesce prevent overlap).
+    chili_momentum_live_runner_scheduler_interval_seconds: int = Field(
+        default=30,
+        ge=0,
+        le=3600,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_SCHEDULER_INTERVAL_SECONDS"),
+    )
+    # Auto-arm-live: autonomously arm ONE live session for the fresh, live-
+    # eligible candidate whose momentum trigger is firing now (Ross "the one
+    # moving right now"). Guarded by kill-switch + drawdown + concurrency=1 +
+    # broker can_trade + equity-relative caps via the operator arm flow.
+    chili_momentum_auto_arm_live_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_LIVE_ENABLED"),
+    )
+    chili_momentum_auto_arm_live_scheduler_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_LIVE_SCHEDULER_ENABLED"),
+    )
+    chili_momentum_auto_arm_live_scheduler_interval_seconds: int = Field(
+        default=30,
+        ge=10,
+        le=3600,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_LIVE_SCHEDULER_INTERVAL_SECONDS"),
+    )
+    chili_momentum_auto_arm_scan_limit: int = Field(
+        default=10,
+        ge=1,
+        le=100,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_SCAN_LIMIT"),
+    )
 
     chili_auto_execute_stops: bool = Field(
         default=False,
