@@ -151,6 +151,46 @@ def test_pass_waits_when_horizon_not_elapsed(monkeypatch):
     assert out["labeled"] == 0
 
 
+def test_pass_skips_open_reentered_session(monkeypatch):
+    # A session that re-entered after the exit that set the marker (state holding)
+    # must be SKIPPED: the live runner owns its le and would clobber any label.
+    from datetime import datetime, timedelta
+    from types import SimpleNamespace
+
+    import app.services.trading.momentum_neural.post_exit_excursion as pex
+
+    now = datetime(2026, 6, 7, 3, 0, 0)
+    pending = {
+        "symbol": "KAIO-USD", "entry_price": 0.0415, "exit_price": 0.0408,
+        "original_stop": 0.0411, "original_target": 0.0420, "side_long": True,
+        "exit_reason": "stop", "realized_pnl": -4.0,
+        "exit_time_utc": (now - timedelta(seconds=3600)).isoformat(),
+        "horizon_seconds": 1800, "state": "pending",
+    }
+    sess = SimpleNamespace(
+        id=9, state="live_trailing",  # re-entered, holding a position
+        risk_snapshot_json={"momentum_live_execution": {"post_exit_excursion_pending": pending}},
+    )
+
+    class _DB:
+        def query(self, *a, **k):
+            class _Q:
+                def filter(self, *a, **k): return self
+                def order_by(self, *a, **k): return self
+                def limit(self, *a, **k): return self
+                def all(self_inner): return [sess]
+            return _Q()
+        def add(self, *a, **k): pass
+        def commit(self): pass
+
+    out = pex.run_post_exit_excursion_pass(_DB(), now=now)
+    assert out["skipped_open"] == 1
+    assert out["checked"] == 0
+    assert out["labeled"] == 0
+    # marker untouched (still pending) — resolves on the next real exit
+    assert sess.risk_snapshot_json["momentum_live_execution"]["post_exit_excursion_pending"]["state"] == "pending"
+
+
 def test_short_side_shakeout():
     # short: entry 100, stopped at 102, then price fell to 95 (past target 96)
     out = compute_post_exit_excursion(

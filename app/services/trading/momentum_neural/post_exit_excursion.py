@@ -138,7 +138,18 @@ def _parse_iso(value: Any):
 def _persist_pending(db, sess, snap: dict, le: dict, pend: dict) -> None:
     le["post_exit_excursion_pending"] = pend
     snap["momentum_live_execution"] = le
-    sess.risk_snapshot_json = dict(snap)  # reassign so JSONB mutation is detected
+    sess.risk_snapshot_json = dict(snap)
+    # `snap` here is the LIVE attribute (run_post_exit_excursion_pass reads
+    # sess.risk_snapshot_json directly), and the column is a plain JSONB with no
+    # MutableDict tracking — so the nested in-place mutation above is NOT detected
+    # as a change and the UPDATE is silently dropped (markers stay 'pending'
+    # forever, reprocessed every cycle). Force the flush explicitly.
+    try:
+        from sqlalchemy.orm.attributes import flag_modified
+
+        flag_modified(sess, "risk_snapshot_json")
+    except Exception:
+        pass  # non-ORM instance (tests) — the direct reassignment above suffices
     db.add(sess)
     db.commit()
 
@@ -186,7 +197,17 @@ def run_post_exit_excursion_pass(db, *, now=None) -> dict[str, Any]:
     from ....config import settings
     from ....models.trading import TradingAutomationSession
 
-    out: dict[str, Any] = {"checked": 0, "labeled": 0, "shakeouts": 0, "waiting": 0, "errors": 0}
+    from .live_fsm import STATE_LIVE_ENTERED, STATE_LIVE_SCALING_OUT, STATE_LIVE_TRAILING
+
+    # Sessions currently HOLDING a position: they re-entered after the exit that
+    # set this marker, so the live runner owns `momentum_live_execution` and
+    # rewrites it every tick — any label we persist would be clobbered, and an
+    # open trade has not truly exited. Skip them; the marker resolves on the next
+    # real exit. (Without this the labeler fights the runner and re-labels the
+    # same open position every cycle.)
+    _holding_states = frozenset({STATE_LIVE_ENTERED, STATE_LIVE_TRAILING, STATE_LIVE_SCALING_OUT})
+
+    out: dict[str, Any] = {"checked": 0, "labeled": 0, "shakeouts": 0, "waiting": 0, "errors": 0, "skipped_open": 0}
     now = now or datetime.now(timezone.utc).replace(tzinfo=None)
     horizon_default = int(getattr(settings, "chili_momentum_post_exit_horizon_seconds", 1800) or 1800)
     lookback = timedelta(seconds=horizon_default * 4 + 3600)
@@ -211,6 +232,9 @@ def run_post_exit_excursion_pass(db, *, now=None) -> dict[str, Any]:
             continue
         pend = le.get("post_exit_excursion_pending")
         if not isinstance(pend, dict) or pend.get("state") != "pending":
+            continue
+        if getattr(sess, "state", None) in _holding_states:
+            out["skipped_open"] += 1
             continue
         out["checked"] += 1
         exit_t = _parse_iso(pend.get("exit_time_utc"))
