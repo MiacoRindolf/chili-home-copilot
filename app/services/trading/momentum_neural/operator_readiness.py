@@ -7,7 +7,11 @@ from typing import Any, Optional
 from ....config import settings
 from app.services.broker_manager import get_all_broker_statuses
 from ..brain_neural_mesh.schema import mesh_enabled
-from ..execution_family_registry import is_momentum_automation_implemented, normalize_execution_family
+from ..execution_family_registry import (
+    EXECUTION_FAMILY_ROBINHOOD_SPOT,
+    is_momentum_automation_implemented,
+    normalize_execution_family,
+)
 from ..governance import get_kill_switch_status
 
 
@@ -30,6 +34,8 @@ def build_momentum_operator_readiness(
     mesh_on = bool(mesh_enabled())
     neural_on = bool(settings.chili_momentum_neural_enabled)
     coinbase_adapter = bool(settings.chili_coinbase_spot_adapter_enabled)
+    robinhood_adapter = bool(getattr(settings, "chili_robinhood_spot_adapter_enabled", False))
+    is_robinhood = ef == EXECUTION_FAMILY_ROBINHOOD_SPOT
 
     paper_runner = bool(settings.chili_momentum_paper_runner_enabled)
     live_runner = bool(settings.chili_momentum_live_runner_enabled)
@@ -53,17 +59,25 @@ def build_momentum_operator_readiness(
         except Exception:
             coinbase_can_trade = False
 
+    # Robinhood (equities + RH-crypto): an authenticated RH session implies TRADE
+    # capability — there is no Coinbase-style view-only API scope — so "connected"
+    # is the can-trade signal. docs/DESIGN/MOMENTUM_LANE.md
+    robinhood_connected = bool(brokers.get("robinhood", {}).get("connected"))
+    robinhood_can_trade = robinhood_connected
+
     gov = get_kill_switch_status()
     kill_active = bool(gov.get("active"))
     block_paper_ks = bool(settings.chili_momentum_risk_block_paper_when_kill_switch)
     inhibit_live_gov = bool(settings.chili_momentum_risk_disable_live_if_governance_inhibit)
 
-    broker_ready_for_live = coinbase_connected and coinbase_adapter and coinbase_can_trade
-    if symbol and broker_ready_for_live:
-        # Crypto path expects Coinbase for -USD; readiness already Coinbase-specific.
-        _ = symbol
-
-    execution_ready = exec_impl and coinbase_adapter
+    # Broker readiness is per-venue: a robinhood_spot session must NOT be gated on
+    # Coinbase (it would block with "connect Coinbase" even when RH is trade-ready).
+    if is_robinhood:
+        broker_ready_for_live = robinhood_connected and robinhood_adapter and robinhood_can_trade
+        execution_ready = exec_impl and robinhood_adapter
+    else:
+        broker_ready_for_live = coinbase_connected and coinbase_adapter and coinbase_can_trade
+        execution_ready = exec_impl and coinbase_adapter
     governance_blocks_live = kill_active and inhibit_live_gov
     governance_blocks_paper = kill_active and block_paper_ks
 
@@ -88,8 +102,11 @@ def build_momentum_operator_readiness(
         "mesh_enabled": mesh_on,
         "momentum_neural_enabled": neural_on,
         "coinbase_spot_adapter_enabled": coinbase_adapter,
+        "robinhood_spot_adapter_enabled": robinhood_adapter,
         "broker_coinbase_connected": coinbase_connected,
         "broker_coinbase_can_trade": coinbase_can_trade,
+        "broker_robinhood_connected": robinhood_connected,
+        "broker_robinhood_can_trade": robinhood_can_trade,
         "broker_ready_for_live": broker_ready_for_live,
         "paper_runner_enabled": paper_runner,
         "live_runner_enabled": live_runner,
@@ -160,6 +177,8 @@ def next_action_required(
 ) -> str:
     """Short operator-facing CTA string."""
     if blocked == "broker_not_ready":
+        if (readiness.get("execution_family") or "") == EXECUTION_FAMILY_ROBINHOOD_SPOT:
+            return "Connect Robinhood + enable CHILI_ROBINHOOD_SPOT_ADAPTER_ENABLED for live equity execution."
         return "Connect Coinbase Advanced (or fix credentials) for live execution."
     if blocked == "paper_runner_disabled" and (mode or "").lower() == "paper":
         return "Enable CHILI_MOMENTUM_PAPER_RUNNER_ENABLED (and optional scheduler) or use dev tick."
