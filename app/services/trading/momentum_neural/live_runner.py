@@ -395,6 +395,34 @@ def _submit_live_market_exit(
     return result
 
 
+def _broker_balance_confirms_zero(symbol: str) -> bool:
+    """True ONLY when a SUCCESSFUL Coinbase fetch shows ~0 of the symbol's base
+    asset. A failed/disconnected fetch returns False so it never triggers a false
+    reconcile (mirrors the M5a safe-fetch rule). (crypto/coinbase only)"""
+    try:
+        from ...coinbase_service import get_accounts_raw
+
+        accts = get_accounts_raw()
+        if not accts:
+            return False  # disconnected / fetch failed -> unknown, do NOT reconcile
+        base = str(symbol or "").upper().split("-", 1)[0]
+        for a in accts:
+            if not isinstance(a, dict):
+                continue
+            if str(a.get("currency") or "").upper() != base:
+                continue
+            bal = a.get("available_balance", {})
+            hold = a.get("hold", {})
+            v = (
+                float((bal.get("value") if isinstance(bal, dict) else 0) or 0)
+                + float((hold.get("value") if isinstance(hold, dict) else 0) or 0)
+            )
+            return v <= 1e-9
+        return True  # base wallet absent in a successful fetch -> confirmed zero
+    except Exception:
+        return False
+
+
 def _live_exit_submit_succeeded(
     db: Session,
     sess: TradingAutomationSession,
@@ -406,6 +434,29 @@ def _live_exit_submit_succeeded(
     if result.get("ok") and le.get("exit_order_id"):
         return True
     missing_order_id = bool(result.get("ok")) and not le.get("exit_order_id")
+    # BUGFIX: an exit/bailout sell that fails with "insufficient balance" while the
+    # broker CONFIRMS zero means the position already left (sold externally / a
+    # prior fill we missed) — retrying loops forever on insufficient balance and
+    # pins the slot. Reconcile to EXITED instead of spinning. (coinbase only;
+    # confirmed-zero only — never on a failed balance fetch.)
+    _err = str(result.get("error") or "").lower()
+    if (
+        ("insufficient balance" in _err or "insufficient_balance" in _err)
+        and normalize_execution_family(sess.execution_family) == EXECUTION_FAMILY_COINBASE_SPOT
+        and _broker_balance_confirms_zero(sess.symbol)
+    ):
+        le["position"] = None
+        le["last_exit_reason"] = (reason or "exit") + "_broker_zero_reconcile"
+        le.pop("pending_exit_reason", None)
+        le.pop("pending_exit_quantity", None)
+        le.pop("pending_exit_submitted_at_utc", None)
+        _commit_le(sess, le)
+        _safe_transition(db, sess, STATE_LIVE_EXITED)
+        _emit(
+            db, sess, "live_exit_reconciled_broker_zero",
+            {"reason": reason, "note": "broker holds 0 — position already exited externally; not retrying"},
+        )
+        return True
     failed = {
         "reason": reason,
         "result": {
