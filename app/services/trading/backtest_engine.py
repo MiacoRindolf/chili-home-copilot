@@ -1266,6 +1266,26 @@ def smart_backtest_insight(
                 wins += 1
             else:
                 losses += 1
+        # FIX (idle-in-transaction cascade, 2026-06-07): save_backtest() and
+        # persist_rows_from_backtest_result() already committed every write, so
+        # the only thing still holding a transaction here is the read-only
+        # param-set lineage lookup above (db.get(BacktestParamSet, ...)), which
+        # opens a fresh transaction AFTER that commit. Left open, it sits
+        # idle-in-transaction across the NEXT ticker's run_pattern_backtest()
+        # compute; once that compute exceeds idle_in_transaction_session_timeout
+        # (db.py, default 120s) Postgres kills the connection ("FATAL:
+        # terminating connection due to idle-in-transaction timeout") and the
+        # next ORM use poisons the session (OperationalError ->
+        # PendingRollbackError / DetachedInstanceError). The tail is read-only,
+        # so releasing the transaction discards nothing. Mirrors
+        # _release_queue_parent_session() in learning.py.
+        try:
+            db.rollback()
+        except Exception:
+            logger.debug(
+                "[backtest_engine] read-transaction release after persist failed",
+                exc_info=True,
+            )
 
     soft_budget_child = (
         runtime_budget is not None
