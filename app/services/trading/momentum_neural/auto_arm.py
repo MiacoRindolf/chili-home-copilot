@@ -297,6 +297,30 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     except Exception:
         pass
 
+    # Guard 4: daily-loss circuit breaker. If today's realized PnL already breached
+    # the equity-relative daily cap, EVERY begin_live_arm returns risk_blocked — so
+    # skip the whole scan (OHLCV fetches + arm attempts) and report it CLEARLY rather
+    # than churning the top candidate every 30s with a misleading begin_blocked. The
+    # cap is authoritatively re-enforced in begin_live_arm; this is a cheap early-out
+    # that mirrors risk_evaluator's daily_loss_cap check. Fail-open. MOMENTUM_LANE.md
+    try:
+        from .risk_evaluator import _daily_realized_pnl
+        from .risk_policy import equity_relative_daily_loss_cap
+        from ..execution_family_registry import EXECUTION_FAMILY_COINBASE_SPOT
+
+        _max_dl = equity_relative_daily_loss_cap(
+            float(getattr(settings, "chili_momentum_risk_max_daily_loss_usd", 250.0)),
+            EXECUTION_FAMILY_COINBASE_SPOT,
+        )
+        _daily_pnl = _daily_realized_pnl(db, int(uid))
+        if _daily_pnl <= -_max_dl:
+            out["skipped"] = "daily_loss_cap"
+            out["daily_pnl_usd"] = round(float(_daily_pnl), 2)
+            out["max_daily_loss_usd"] = round(float(_max_dl), 2)
+            return out
+    except Exception:
+        pass
+
     # Clear expired pending arms so they do not pin a concurrency slot.
     try:
         from .automation_query import expire_stale_live_arm_sessions

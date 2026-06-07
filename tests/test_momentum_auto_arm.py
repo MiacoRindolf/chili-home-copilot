@@ -155,6 +155,30 @@ def test_deduped_begin_skips_confirm(happy):
     assert out.get("armed", 0) == 0
 
 
+def test_daily_loss_cap_skips_scan(happy, monkeypatch):
+    # Today's realized loss already breached the equity-relative daily cap: the pass
+    # must early-out with skipped=daily_loss_cap (Guard 4) instead of scanning +
+    # churning candidates that begin_live_arm would all risk_block on the same cap.
+    from app.services.trading.momentum_neural import risk_evaluator, risk_policy
+
+    monkeypatch.setattr(risk_policy, "equity_relative_daily_loss_cap", lambda *a, **k: 130.0)
+    monkeypatch.setattr(risk_evaluator, "_daily_realized_pnl", lambda db, uid: -131.0)
+    out = aa.run_auto_arm_pass(_FakeDB())
+    assert out["skipped"] == "daily_loss_cap"
+    assert out.get("armed", 0) == 0
+    assert out["daily_pnl_usd"] == -131.0
+
+
+def test_within_daily_loss_cap_does_not_skip(happy, monkeypatch):
+    # Comfortably within the cap -> Guard 4 must NOT trip (the pass proceeds to arm).
+    from app.services.trading.momentum_neural import risk_evaluator, risk_policy
+
+    monkeypatch.setattr(risk_policy, "equity_relative_daily_loss_cap", lambda *a, **k: 130.0)
+    monkeypatch.setattr(risk_evaluator, "_daily_realized_pnl", lambda db, uid: -10.0)
+    out = aa.run_auto_arm_pass(_FakeDB())
+    assert out.get("skipped") != "daily_loss_cap"
+
+
 def test_dedupe_by_symbol_keeps_best_variant_distinct_symbols():
     # 10 RSC variants (top), then FIDA, then SOL — dedupe must yield 3 distinct symbols
     rows = (
