@@ -91,14 +91,47 @@ Branch `chili/exit-parity-retention` → PR (one logical change, 7 files).
   live rows). Used `PARALLEL 0` because the container's default 64 MB
   `/dev/shm` makes parallel vacuum workers fail.
 
-## Deferred / operator-coordinated
+## Prod rollout — EXECUTED 2026-06-07 (operator approved "merge + apply now")
 
-- **Apply migration 301 + run the heap reclaim** in a low-activity window.
-  Migration 301 auto-applies on the next worker restart; index drops take a
-  brief ACCESS EXCLUSIVE lock and the first post-migration autovacuum (with
-  `cost_delay=0`) will scan the still-large table once, so deploy + reclaim
-  together when load is low. The `VACUUM (FULL)` in the reclaim script blocks
-  the table for its duration.
+Migration 301 + the heap reclaim were applied to prod the same session.
+
+| Metric | Before | After |
+|---|---|---|
+| **Database `chili`** | 30 GB | **10.1 GB** (~20 GB reclaimed) |
+| `trading_exit_parity_log` total | 20 GB | **616 MB** |
+| heap | 8 GB | 472 MB |
+| rows | 42.7 M | 2.49 M |
+| indexes | 10 (~12 GB) | 3 (used only) |
+
+Steps:
+1. **Migration 301** applied via atomic psql (`lock_timeout=30s`) → 7 indexes
+   dropped, autovacuum pinned, `schema_version` row inserted. Instant ~10 GB
+   reclaim (30 → 20 GB).
+2. **Heap reclaim via CTAS keep-set + atomic swap** (NOT the DELETE+VACUUM FULL
+   in the script — see below). A batched drain of the 40.25 M-row backlog ran
+   at only ~4 k rows/s (the just-pinned aggressive autovacuum competed for I/O
+   on the 8 GB heap), so I pivoted to a `CREATE TABLE … (LIKE … INCLUDING
+   DEFAULTS/CONSTRAINTS/STORAGE)` of the 2.49 M keep-set + rename swap + rebuild
+   the 3 indexes + re-own the id sequence, all in ONE transaction (rollback-safe).
+   Heavy parity writers (backtest-worker, scheduler, brain) stopped for the
+   ~60 s ACCESS EXCLUSIVE window; autotrader/web kept running (their parity
+   writes are try/except-guarded shadow rows). INSERT kept 2,489,482 rows;
+   heap 8 GB → 472 MB.
+3. **Verified post-swap:** 3 correct indexes, CHECK constraint intact, reloptions
+   set, `seq.last_value == max(id) == 47,196,159` (no id collisions), live rows
+   (209 k) preserved, inserts flowing (row count grew immediately), all
+   containers healthy, `schema_version` has 301.
+
+## Surprise mid-rollout — Docker Desktop outage
+
+Right after the safe small-table VACUUMs (which succeeded), Docker Desktop's
+Linux engine went down (CLI lost the `dockerDesktopLinuxEngine` pipe; whole
+CHILI stack offline ~? min). Plain `VACUUM ANALYZE` can't kill the host engine
+— this was a Docker Desktop/host event. I could not start it headlessly
+(`Start-Service com.docker.service` = access denied, no elevation), but
+`Start-Process "Docker Desktop.exe"` + waiting brought the engine back; the
+containers auto-recovered (`restart: unless-stopped`) and Postgres replayed
+WAL cleanly. No data loss. The earlier VACUUM had committed before the outage.
 
 ## Surprises
 

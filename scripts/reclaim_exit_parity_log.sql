@@ -29,6 +29,40 @@
 -- maintenance window. It needs free disk ~= the *kept* (post-delete) size,
 -- which is small here; E: NVMe has ample headroom.
 --
+-- LARGE BACKLOG? Prefer the CTAS keep-set + swap below. This DELETE+VACUUM
+-- FULL path marks every doomed row dead then rewrites -- fine for incremental
+-- reclaims, but when the backlog is huge and the keep-set is tiny (e.g. the
+-- 2026-06-07 reclaim: 40.25M doomed / 2.49M kept) deleting 40M rows is slow
+-- (and the pinned aggressive autovacuum competes for I/O). The CTAS-swap
+-- writes ONLY the keep-set and is atomic/rollback-safe. That is what was
+-- actually run on 2026-06-07 (heap 8 GB -> 472 MB, DB 30 GB -> 10 GB):
+--
+--   -- stop heavy parity writers first:
+--   --   docker compose stop scheduler-worker brain-worker backtest-worker
+--   SET statement_timeout = 0; SET idle_in_transaction_session_timeout = 0;
+--   SET lock_timeout = '60s';
+--   BEGIN;
+--   CREATE TABLE trading_exit_parity_log_new
+--     (LIKE trading_exit_parity_log INCLUDING DEFAULTS INCLUDING CONSTRAINTS INCLUDING STORAGE);
+--   INSERT INTO trading_exit_parity_log_new
+--     SELECT * FROM trading_exit_parity_log
+--      WHERE NOT ((source='backtest' AND created_at < now()-interval '7 days')
+--              OR (COALESCE(source,'')<>'backtest' AND created_at < now()-interval '30 days'));
+--   ALTER TABLE trading_exit_parity_log RENAME TO trading_exit_parity_log_old;
+--   ALTER TABLE trading_exit_parity_log_new RENAME TO trading_exit_parity_log;
+--   ALTER SEQUENCE trading_exit_parity_log_id_seq OWNED BY trading_exit_parity_log.id;
+--   DROP TABLE trading_exit_parity_log_old;      -- after re-owning the sequence!
+--   CREATE INDEX ix_exit_parity_created_retention ON trading_exit_parity_log (created_at, id);
+--   CREATE INDEX ix_exit_parity_mode_created      ON trading_exit_parity_log (mode, created_at);
+--   CREATE INDEX ix_exit_parity_pattern_created   ON trading_exit_parity_log (scan_pattern_id, created_at DESC, id DESC) WHERE scan_pattern_id IS NOT NULL;
+--   ALTER TABLE trading_exit_parity_log SET (autovacuum_vacuum_scale_factor=0,
+--     autovacuum_vacuum_threshold=50000, autovacuum_analyze_scale_factor=0,
+--     autovacuum_analyze_threshold=50000, autovacuum_vacuum_cost_delay=0);
+--   ANALYZE trading_exit_parity_log;
+--   COMMIT;
+--   -- then: docker compose start scheduler-worker brain-worker backtest-worker
+--   -- verify: SELECT last_value FROM trading_exit_parity_log_id_seq; -- must be >= max(id)
+--
 -- The retention windows below MIRROR the config defaults
 --   brain_retention_exit_parity_backtest_days = 7
 --   brain_retention_exit_parity_live_days     = 30
