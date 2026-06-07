@@ -54,6 +54,18 @@ def _scan_limit() -> int:
     return max(1, int(getattr(settings, "chili_momentum_auto_arm_scan_limit", 10)))
 
 
+def _auto_arm_crypto_only() -> bool:
+    return bool(getattr(settings, "chili_momentum_auto_arm_crypto_only", True))
+
+
+def _is_coinbase_tradeable_symbol(symbol: str) -> bool:
+    """The momentum live lane trades via coinbase_spot. Coinbase crypto pairs use
+    the ``-USD`` / ``-USDC`` convention; equities (ARKK, CLSK) are bare tickers. So
+    a ``-USD`` substring distinguishes a crypto pair the venue can actually trade
+    from an equity that would fail at order time (esp. once US market opens)."""
+    return "-USD" in str(symbol or "").upper()
+
+
 def _max_watch_seconds() -> int:
     return max(60, int(getattr(settings, "chili_momentum_auto_arm_max_watch_seconds", 1800)))
 
@@ -133,14 +145,17 @@ def _fresh_live_eligible_candidates(db: Session, *, limit: int) -> list[Momentum
     """
     max_age = float(getattr(settings, "chili_momentum_risk_viability_max_age_seconds", 600.0) or 600.0)
     cutoff = datetime.utcnow() - timedelta(seconds=max_age)
+    q = db.query(MomentumSymbolViability).filter(
+        MomentumSymbolViability.scope == "symbol",
+        MomentumSymbolViability.live_eligible.is_(True),
+        MomentumSymbolViability.freshness_ts >= cutoff,
+    )
+    if _auto_arm_crypto_only():
+        # Exclude equities (ARKK, CLSK...) that go live-eligible at US market open —
+        # the coinbase_spot lane cannot trade them. Crypto pairs carry "-USD".
+        q = q.filter(MomentumSymbolViability.symbol.like("%-USD%"))
     rows = (
-        db.query(MomentumSymbolViability)
-        .filter(
-            MomentumSymbolViability.scope == "symbol",
-            MomentumSymbolViability.live_eligible.is_(True),
-            MomentumSymbolViability.freshness_ts >= cutoff,
-        )
-        .order_by(MomentumSymbolViability.viability_score.desc())
+        q.order_by(MomentumSymbolViability.viability_score.desc())
         .limit(max(int(limit) * 25, 200))
         .all()
     )
@@ -259,6 +274,8 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     chosen_reason: str | None = None
     for c in candidates:
         out["checked"] += 1
+        if _auto_arm_crypto_only() and not _is_coinbase_tradeable_symbol(c.symbol):
+            continue  # defensive: never arm an equity via the coinbase_spot lane
         if not _symbol_free(db, c.symbol, uid):
             continue
         fires, reason = _entry_trigger_fires(c.symbol)
