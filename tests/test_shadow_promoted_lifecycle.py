@@ -218,6 +218,13 @@ def _autotrader_scaffold_patches():
         patch.object(
             auto_trader, "run_revalidation_llm", return_value=(True, {}),
         ),
+        # Deterministic revalidation is the DEFAULT path
+        # (chili_autotrader_deterministic_revalidation_enabled=True), so stub it
+        # alongside the LLM path — these routing tests must not be gated on the
+        # real price-age / mechanics checks.
+        patch.object(
+            auto_trader, "deterministic_revalidation", return_value=(True, {}),
+        ),
         patch.object(auto_trader, "_maybe_check_feature_parity", return_value=None),
         patch.object(auto_trader, "_emit_netedge_shadow_score", return_value=None),
         patch.object(auto_trader, "_maybe_emit_regime_diagnostic", return_value=None),

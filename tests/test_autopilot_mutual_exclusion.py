@@ -495,6 +495,8 @@ def test_auto_trader_v1_allowed_when_symbol_is_free(db, monkeypatch):
     ), patch.object(
         auto_trader, "run_revalidation_llm", return_value=(True, {}),
     ), patch.object(
+        auto_trader, "deterministic_revalidation", return_value=(True, {}),
+    ), patch.object(
         auto_trader, "_execute_new_entry", side_effect=_fake_exec
     ):
         auto_trader._process_one_alert(db, u.id, alert, out, runtime)

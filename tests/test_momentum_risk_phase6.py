@@ -211,6 +211,11 @@ def test_confirm_live_arm_blocked_if_kill_switch_after_arm(paired_client, db: Se
             "metamask": {"connected": False},
         },
     )
+    # Coinbase live-readiness also requires verified TRADE scope (sell-scope
+    # preflight) and the spot adapter enabled, so the broker gate passes and the
+    # request reaches the kill-switch risk check. docs/DESIGN/MOMENTUM_LANE.md
+    monkeypatch.setattr("app.services.coinbase_service.can_trade", lambda: True)
+    monkeypatch.setattr(settings, "chili_coinbase_spot_adapter_enabled", True)
     vid, _ = _seed_live_eligible_row(db, symbol="CFK-USD")
     db.commit()
     c, _user = paired_client

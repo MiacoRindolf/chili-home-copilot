@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models.trading import MomentumSymbolViability, MomentumStrategyVariant, TradingAutomationSession
 from app.services.trading.momentum_neural.context import build_momentum_regime_context
 from app.services.trading.momentum_neural.features import ExecutionReadinessFeatures
@@ -162,6 +163,10 @@ def _patch_broker_ready(monkeypatch) -> None:
             "metamask": {"connected": False, "label": "MetaMask"},
         },
     )
+    # Coinbase live-readiness also requires verified TRADE scope (sell-scope
+    # preflight) and the spot adapter enabled. docs/DESIGN/MOMENTUM_LANE.md
+    monkeypatch.setattr("app.services.coinbase_service.can_trade", lambda: True)
+    monkeypatch.setattr(settings, "chili_coinbase_spot_adapter_enabled", True)
 
 
 def test_arm_then_confirm_creates_armed_session(paired_client, db: Session, monkeypatch) -> None:

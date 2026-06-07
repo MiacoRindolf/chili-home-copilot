@@ -1317,7 +1317,7 @@ def test_live_tick_runs_entry_decision_before_place_market_order(db, momentum_us
 
     import app.services.trading.momentum_neural.live_runner as live_runner_mod
 
-    monkeypatch.setattr(live_runner_mod, "runner_boundary_risk_ok", lambda _db, _sess: (True, {}))
+    monkeypatch.setattr(live_runner_mod, "runner_boundary_risk_ok", lambda _db, _sess, **kwargs: (True, {}))
     monkeypatch.setattr(live_runner_mod, "is_kill_switch_active", lambda: False)
 
     decision_calls: list[int] = []
@@ -1388,7 +1388,7 @@ def test_live_tick_packet_required_even_when_ledger_disabled(db, momentum_user_a
 
     import app.services.trading.momentum_neural.live_runner as live_runner_mod
 
-    monkeypatch.setattr(live_runner_mod, "runner_boundary_risk_ok", lambda _db, _sess: (True, {}))
+    monkeypatch.setattr(live_runner_mod, "runner_boundary_risk_ok", lambda _db, _sess, **kwargs: (True, {}))
     monkeypatch.setattr(live_runner_mod, "is_kill_switch_active", lambda: False)
 
     fresh = FreshnessMeta(retrieved_at_utc=datetime.now(timezone.utc))
@@ -1453,7 +1453,7 @@ def test_live_tick_caps_order_size_before_adapter(db, momentum_user_and_live_ses
 
     import app.services.trading.momentum_neural.live_runner as live_runner_mod
 
-    monkeypatch.setattr(live_runner_mod, "runner_boundary_risk_ok", lambda _db, _sess: (True, {}))
+    monkeypatch.setattr(live_runner_mod, "runner_boundary_risk_ok", lambda _db, _sess, **kwargs: (True, {}))
     monkeypatch.setattr(live_runner_mod, "is_kill_switch_active", lambda: False)
 
     fresh = FreshnessMeta(retrieved_at_utc=datetime.now(timezone.utc))

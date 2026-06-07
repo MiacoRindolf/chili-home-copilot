@@ -383,6 +383,7 @@ def test_confirmed_live_exit_is_the_only_flatten_path(monkeypatch) -> None:
         id=45,
         state=STATE_LIVE_ENTERED,
         mode="live",
+        symbol="BTC-USD",
         risk_snapshot_json={},
         correlation_id="corr-confirmed",
     )

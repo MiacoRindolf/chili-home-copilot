@@ -2501,6 +2501,7 @@ def benchmark_walk_forward_evaluate(
     cash: float = 100_000,
     commission: float | None = None,
     spread: float | None = None,
+    asset_class_costs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Contiguous-window backtests on a fixed ticker set (benchmark robustness).
 

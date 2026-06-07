@@ -116,6 +116,9 @@ def _seed_closed_trade(
         indicator_snapshot=indicator_snapshot,
         asset_kind=asset_kind,
         scan_pattern_id=pattern_id,
+        # Clean (non-dirty, non-empty) exit reason so the writer's
+        # f-realized-ev-exit-cleanliness filter (learning.py) keeps the row.
+        exit_reason="target_hit",
     )
     db.add(t)
     db.commit()
