@@ -401,10 +401,49 @@ def _submit_live_market_exit(
     return result
 
 
+def _is_unsellable_dust(symbol: str, qty: float) -> bool:
+    """True when `qty` of `symbol`'s base asset is below what Coinbase will accept as
+    a SELL — below the product base_min_size, OR whose notional (qty x price) is below
+    quote_min_size (typically $1). Such a residual can never be flattened, so for
+    reconcile purposes it is effectively ZERO: leaving it 'live' makes the exit loop
+    re-submit doomed sells forever ('Insufficient balance'). Conservative — any failure
+    to determine the venue minimums returns False so a real, sellable position is never
+    false-reconciled. (This is the dust that wedged session 52 / CTSI: 3.65 units ~=
+    $0.09, below the $1 quote_min but above the strict ~0 check.)"""
+    try:
+        if not qty or float(qty) <= 0.0:
+            return True
+        from ...coinbase_service import get_coinbase_rest_client
+
+        client = get_coinbase_rest_client()
+        if client is None:
+            return False
+        sym = str(symbol or "").upper()
+        product_id = sym if "-" in sym else f"{sym}-USD"
+        prod = client.get_product(product_id)
+        pd = prod if isinstance(prod, dict) else (getattr(prod, "__dict__", {}) or {})
+        base_min = float(pd.get("base_min_size") or 0.0)
+        quote_min = float(pd.get("quote_min_size") or 0.0)
+        price = float(pd.get("price") or 0.0)
+        if base_min > 0.0 and float(qty) < base_min:
+            return True  # below the venue's minimum sellable size
+        if quote_min > 0.0 and price > 0.0 and (float(qty) * price) < quote_min:
+            return True  # notional below the venue's minimum order value
+        return False
+    except Exception:
+        return False
+
+
 def _broker_balance_confirms_zero(symbol: str) -> bool:
-    """True ONLY when a SUCCESSFUL Coinbase fetch shows ~0 of the symbol's base
-    asset. A failed/disconnected fetch returns False so it never triggers a false
-    reconcile (mirrors the M5a safe-fetch rule). (crypto/coinbase only)"""
+    """True when a SUCCESSFUL Coinbase fetch shows the symbol's base asset is ~0 OR an
+    UNSELLABLE-DUST residual (below the venue's min sell size / notional). A
+    failed/disconnected fetch returns False so it never triggers a false reconcile
+    (mirrors the M5a safe-fetch rule). (crypto/coinbase only)
+
+    The strict ~0 (1e-9) check alone was DEFEATED by dust: a position sold down to a
+    fractional remainder the venue rejects as an order (CTSI 3.65 units = $0.09 < $1
+    quote_min) left the exit loop re-submitting doomed sells forever. Dust IS
+    effectively zero for reconcile purposes."""
     try:
         from ...coinbase_service import get_accounts_raw
 
@@ -423,7 +462,9 @@ def _broker_balance_confirms_zero(symbol: str) -> bool:
                 float((bal.get("value") if isinstance(bal, dict) else 0) or 0)
                 + float((hold.get("value") if isinstance(hold, dict) else 0) or 0)
             )
-            return v <= 1e-9
+            if v <= 1e-9:
+                return True
+            return _is_unsellable_dust(symbol, v)  # non-zero but unsellable dust == zero
         return True  # base wallet absent in a successful fetch -> confirmed zero
     except Exception:
         return False
