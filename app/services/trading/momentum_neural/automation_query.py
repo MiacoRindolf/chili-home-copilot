@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Optional
 
 from sqlalchemy import func, inspect as sa_inspect
@@ -25,6 +25,7 @@ from ..brain_batch_job_log import brain_batch_job_record_completed
 from ..batch_job_constants import JOB_SCHEDULER_WORKER_HEARTBEAT
 from ..brain_neural_mesh.schema import mesh_enabled
 from ..execution_family_registry import (
+    EXECUTION_FAMILY_COINBASE_SPOT,
     ExecutionFamilyNotImplementedError,
     normalize_execution_family,
     resolve_live_spot_adapter_factory,
@@ -583,6 +584,49 @@ def _focus_priority(sess: TradingAutomationSession) -> tuple[int, float]:
     return (2, -ts)
 
 
+def _compute_lane_status(db: Session, *, user_id: int) -> dict[str, Any]:
+    """Daily-loss circuit-breaker status for the momentum LIVE lane.
+
+    Mirrors auto_arm Guard 4 / risk_evaluator's daily_loss_cap check so the
+    Monitor card can render an explicit HALTED banner instead of the misleading
+    "waiting for a setup" empty copy when the equity-relative daily-loss breaker
+    has tripped (the breaker blocks new arms until the daily window rolls over).
+    Read-only and fail-open: a compute error never reports halted.
+
+    ``resets_at_utc`` is the next local-midnight boundary — the SAME ``date.today()``
+    window ``_daily_realized_pnl`` sums over — so the shown reset is exactly when
+    today's realized losses roll out and the breaker clears. Production containers
+    run UTC, so this is 00:00 UTC.
+    docs/DESIGN/MOMENTUM_LANE.md; see [[project_momentum_lane]].
+    """
+    status: dict[str, Any] = {
+        "halted": False,
+        "halt_reason": None,
+        "daily_pnl_usd": None,
+        "max_daily_loss_usd": None,
+        "resets_at_utc": None,
+    }
+    try:
+        from .risk_evaluator import _daily_realized_pnl
+        from .risk_policy import equity_relative_daily_loss_cap
+
+        max_dl = equity_relative_daily_loss_cap(
+            float(getattr(settings, "chili_momentum_risk_max_daily_loss_usd", 250.0)),
+            EXECUTION_FAMILY_COINBASE_SPOT,
+        )
+        daily_pnl = _daily_realized_pnl(db, int(user_id))
+        resets_at = datetime.combine(date.today() + timedelta(days=1), datetime.min.time())
+        status["daily_pnl_usd"] = round(float(daily_pnl), 2)
+        status["max_daily_loss_usd"] = round(float(max_dl), 2)
+        status["resets_at_utc"] = resets_at.isoformat()
+        status["halted"] = bool(daily_pnl <= -max_dl)
+        if status["halted"]:
+            status["halt_reason"] = "daily_loss_cap"
+    except Exception:
+        pass
+    return status
+
+
 def list_automation_sessions(
     db: Session,
     *,
@@ -600,6 +644,7 @@ def list_automation_sessions(
             "neural": neural_config_strip(),
             "governance": governance_strip(),
             "risk_policy_summary": effective_policy_summary(),
+            "lane_status": _compute_lane_status(db, user_id=user_id),
             "limitations_note": LIMITATIONS_NOTE,
             "paper_runner_queued": 0,
             "paper_runner_active": 0,
@@ -787,11 +832,15 @@ def list_automation_sessions(
         row.update(op_fields)
         sessions_out.append(row)
 
+    lane_status = _compute_lane_status(db, user_id=user_id)
+    end_read_only_transaction(db, context="automation_sessions_lane_status")
+
     return {
         "sessions": sessions_out,
         "neural": neural_config_strip(),
         "governance": governance_strip(),
         "risk_policy_summary": effective_policy_summary(),
+        "lane_status": lane_status,
         "limitations_note": LIMITATIONS_NOTE,
         "operator_readiness": build_momentum_operator_readiness(execution_family="coinbase_spot"),
     }

@@ -41,6 +41,19 @@
   (function(){
     var ACTIVE = ['queued_live','watching_live','live_entry_candidate','live_pending_entry','live_entered','live_scaling_out','live_trailing','live_bailout','live_cooldown'];
     function pnl(v){ if(v==null||isNaN(Number(v)))return ''; var n=Number(v); return (n>=0?'+$':'-$')+Math.abs(n).toFixed(2); }
+    // Reset boundary is naive-UTC midnight (containers run UTC); show HH:MM UTC.
+    function fmtReset(iso){ if(!iso)return ''; var m=String(iso).match(/T(\d{2}:\d{2})/); return (m?m[1]:'00:00')+' UTC'; }
+    // HALTED banner — the lane is BLOCKED by the daily-loss breaker, not starved of
+    // setups. Surfaced even when sessions are still open (breaker blocks new arms).
+    function haltBanner(ls){
+      if(!ls || !ls.halted) return '';
+      var dp = ls.daily_pnl_usd, cap = ls.max_daily_loss_usd;
+      var capPart = (cap!=null && isFinite(Number(cap))) ? (' of -$'+Math.abs(Number(cap)).toFixed(0)+' cap') : '';
+      var resetPart = ls.resets_at_utc ? (' · resumes '+fmtReset(ls.resets_at_utc)) : '';
+      return '<div style="display:flex;align-items:center;gap:8px;font-size:.88em;padding:5px 8px;border-radius:4px;'
+        + 'background:rgba(248,81,73,.12);border:1px solid rgba(248,81,73,.4);color:#f85149;font-weight:600;">'
+        + '⛔ Lane HALTED — daily loss '+pnl(dp)+capPart+resetPart+'</div>';
+    }
     function load(){
       try {
         fetch('/api/trading/momentum/automation/sessions?mode=live&limit=30', {credentials:'same-origin'})
@@ -51,16 +64,33 @@
             if(!list) return;
             var rows = ((d && d.sessions) || []).filter(function(s){ return ACTIVE.indexOf((s.state||'').toLowerCase()) >= 0; });
             if(cnt) cnt.textContent = rows.length ? '(' + rows.length + ' live)' : '';
-            if(!rows.length){ list.innerHTML = '<div style="opacity:.6;font-size:.85em;padding:2px 4px;">No live momentum sessions right now — waiting for an explosive setup.</div>'; return; }
-            list.innerHTML = rows.map(function(s){
+            var banner = haltBanner(d && d.lane_status);
+            if(!rows.length){
+              // When halted, say so explicitly — the lane is blocked, NOT waiting for a setup.
+              list.innerHTML = banner || '<div style="opacity:.6;font-size:.85em;padding:2px 4px;">No live momentum sessions right now — waiting for an explosive setup.</div>';
+              return;
+            }
+            list.innerHTML = banner + rows.map(function(s){
               var le = s.live_execution || {};
               var inpos = le.in_position ? '<span style="color:#3fb950;"> · in position</span>' : '';
+              // Realized (closed-lot) P/L.
               var p = pnl(le.realized_pnl_usd);
-              var pc = p ? ('<span style="margin-left:auto;color:'+(String(p).indexOf('-')===0?'#f85149':'#3fb950')+';">'+p+'</span>') : '';
+              var pc = p ? ('<span title="Realized (closed lots)" style="color:'+(String(p).indexOf('-')===0?'#f85149':'#3fb950')+';">R '+p+'</span>') : '';
+              // Unrealized mark-to-market on the open lot — the operator-relevant number
+              // while trailing. Inputs (avg_entry_price, quantity, last_mid) are in the payload.
+              var uc = '';
+              if(le.in_position){
+                var em = Number(le.avg_entry_price), qm = Number(le.quantity), mm = Number(le.last_mid);
+                if(isFinite(em) && isFinite(qm) && isFinite(mm) && em>0 && qm>0){
+                  var u = (mm - em) * qm, us = pnl(u);
+                  if(us) uc = '<span title="Unrealized (open lot, mark-to-market)" style="color:'+(u<0?'#f85149':'#3fb950')+';">U '+us+'</span>';
+                }
+              }
+              var pnlGroup = (uc||pc) ? ('<span style="margin-left:auto;display:flex;gap:8px;align-items:center;">'+uc+pc+'</span>') : '';
               return '<div style="display:flex;align-items:center;gap:8px;font-size:.88em;padding:3px 6px;border-radius:4px;background:rgba(255,255,255,.03);">'
                 + '<strong>'+(s.symbol||'?')+'</strong>'
                 + '<span class="ta-badge" style="font-size:.8em;">'+(s.state||'')+'</span>'
-                + inpos + pc + '</div>';
+                + inpos + pnlGroup + '</div>';
             }).join('');
           })
           .catch(function(){});
