@@ -152,6 +152,80 @@ def momentum_volume_confirmation(df: pd.DataFrame) -> tuple[bool, str]:
     return True, "momentum_ok_abs_vol"
 
 
+def pullback_break_confirmation(
+    df: pd.DataFrame,
+    *,
+    entry_interval: str = "5m",
+    max_pullback_bars: int = 3,
+    retracement_threshold: float = 0.50,
+    volume_spike_multiple: float = 1.5,
+) -> tuple[bool, str, dict[str, Any]]:
+    """Ross-style pullback-break entry on intraday (1m/5m) bars.
+
+    After an up-impulse, a SHALLOW pullback (retraces < ``retracement_threshold`` of
+    the recent range, holding above EMA-9), fire ENTRY on the first bar that BREAKS
+    the pullback's high with a volume spike — Ross's low-risk continuation point, vs
+    buying mid-trend extension. Returns ``(ok, reason, debug)``; ``debug`` carries
+    ``pullback_low`` (the structural stop) on success. docs/DESIGN/MOMENTUM_LANE.md
+    """
+    if df is None or getattr(df, "empty", True) or len(df) < 10:
+        return False, "insufficient_bars", {"bars": 0 if df is None else len(df), "entry_interval": entry_interval}
+    close = df["Close"].astype(float)
+    high = df["High"].astype(float)
+    low = df["Low"].astype(float)
+    vol = df["Volume"].astype(float)
+    n = len(df)
+    cur = n - 1
+    arrays = compute_all_from_df(df, needed={"ema_9", "volume_ratio"})
+    ema9 = arrays.get("ema_9") or []
+    vr = arrays.get("volume_ratio") or []
+
+    # Recent impulse window (excluding the current evaluation bar).
+    look = min(20, cur)
+    win_high = float(high.iloc[cur - look:cur].max())
+    win_low = float(low.iloc[cur - look:cur].min())
+    impulse_range = win_high - win_low
+    if impulse_range <= 0:
+        return False, "no_range", {"entry_interval": entry_interval}
+
+    # The pullback = the recent few bars before the current bar: its HIGH is the
+    # level to break, its LOW is the structural stop.
+    pb_start = max(0, cur - max_pullback_bars)
+    pb_high = float(high.iloc[pb_start:cur].max())
+    pb_low = float(low.iloc[pb_start:cur].min())
+    debug = {"entry_interval": entry_interval, "pullback_high": pb_high, "pullback_low": pb_low,
+             "win_high": win_high}
+
+    # Shallow: must not retrace more than the threshold of the impulse range.
+    retrace = (win_high - pb_low) / impulse_range
+    debug["retrace"] = round(retrace, 3)
+    if retrace > float(retracement_threshold):
+        return False, "pullback_too_deep", debug
+
+    # Held above EMA-9 (structural support) during the pullback.
+    ema_cur = ema9[cur] if cur < len(ema9) and ema9[cur] is not None else None
+    if ema_cur is not None and pb_low < float(ema_cur) * 0.999:
+        debug["ema_9"] = float(ema_cur)
+        return False, "pullback_below_ema9", debug
+
+    # Break: current bar's high must exceed the pullback high.
+    if float(high.iloc[cur]) <= pb_high:
+        debug["cur_high"] = float(high.iloc[cur])
+        return False, "waiting_for_break", debug
+
+    # Volume spike on the break.
+    vol_ratio = float(vr[cur]) if cur < len(vr) and vr[cur] is not None else None
+    if vol_ratio is None:
+        w = vol.tail(21)
+        avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
+        vol_ratio = (float(vol.iloc[-1]) / avg) if avg > 0 else 0.0
+    debug["vol_ratio"] = round(vol_ratio, 2)
+    if vol_ratio < float(volume_spike_multiple):
+        return False, "break_low_volume", debug
+
+    return True, "pullback_break_ok", debug
+
+
 def regime_entry_allowed(
     family_id: str | None,
     *,

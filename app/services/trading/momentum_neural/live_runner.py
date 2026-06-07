@@ -1215,22 +1215,36 @@ def tick_live_session(
         # volume surge) on top of the viability score — Ross enters on confirmed
         # strength, never on a stale score. No confirmation -> WAIT this tick.
         # (docs/DESIGN/MOMENTUM_LANE.md)
+        # M4.2: trigger mode (config, default "hybrid") — Ross-style pullback-break
+        # on 1m/5m (price breaks the pullback high after a shallow, EMA-9-holding
+        # pullback, with a volume spike) PREFERRED, with momentum_volume (15m
+        # price>EMA-9 + volume) as the fallback. live + on, fallback-safe.
         _trigger_ok, _trigger_reason = True, "score_only"
         if _score_ok:
             try:
-                from .entry_gates import momentum_volume_confirmation
+                from .entry_gates import momentum_volume_confirmation, pullback_break_confirmation
+                from ..market_data import fetch_ohlcv_df
 
-                # Reuse the candles already fetched for the adaptive spread gate
-                # this tick; fall back to a fresh fetch only if that was skipped.
-                _df = _entry_df
-                if _df is None:
-                    from ..market_data import fetch_ohlcv_df
-
-                    _df = fetch_ohlcv_df(sess.symbol, interval="15m", period="5d")
-                if _df is None or getattr(_df, "empty", True):
-                    _trigger_ok, _trigger_reason = False, "no_data_wait"
-                else:
-                    _trigger_ok, _trigger_reason = momentum_volume_confirmation(_df)
+                _mode = str(getattr(settings, "chili_momentum_entry_trigger_mode", "hybrid") or "hybrid").lower()
+                _interval = str(getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m")
+                _trigger_ok, _trigger_reason = False, "trigger_wait"
+                if _mode in ("hybrid", "pullback_break"):
+                    try:
+                        _df_pb = fetch_ohlcv_df(sess.symbol, interval=_interval, period="5d")
+                        if _df_pb is not None and not getattr(_df_pb, "empty", True):
+                            _trigger_ok, _trigger_reason, _ = pullback_break_confirmation(
+                                _df_pb, entry_interval=_interval
+                            )
+                    except Exception:
+                        _trigger_ok = False
+                if not _trigger_ok and _mode != "pullback_break":
+                    _df = _entry_df  # reuse the adaptive-spread 15m candles if present
+                    if _df is None:
+                        _df = fetch_ohlcv_df(sess.symbol, interval="15m", period="5d")
+                    if _df is None or getattr(_df, "empty", True):
+                        _trigger_ok, _trigger_reason = False, "no_data_wait"
+                    else:
+                        _trigger_ok, _trigger_reason = momentum_volume_confirmation(_df)
             except Exception:
                 _trigger_ok, _trigger_reason = False, "trigger_error_wait"
         if _score_ok and _trigger_ok:
