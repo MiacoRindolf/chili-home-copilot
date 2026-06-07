@@ -654,6 +654,323 @@ def _cancel_coinbase_open_sell_orders(ticker: str) -> list[str]:
     return cancelled
 
 
+# --- M5a: broker-truth phantom reconcile (Coinbase) -------------------------
+# The momentum lane sells a position directly via coinbase_service; the local
+# Trade row was closed only by the *separate* broker-sync, which lagged -> the
+# Monitor tab showed a phantom open position for minutes. broker_position_truth
+# deliberately fails OPEN for Coinbase (snapshots proved partial during API
+# failures), so nothing closed these locally. This pass closes a Coinbase Trade
+# whose broker balance is *confirmed* zero, guarded against a transient/partial
+# snapshot by (a) requiring a real accounts fetch (the USD wallet is always
+# present on success, so an empty list == disconnected == UNKNOWN, never close),
+# (b) a post-entry settle grace, and (c) a time-confirm window spanning >=2
+# independent broker snapshots. docs/STRATEGY (f-crypto-stale-trade-closer).
+CRYPTO_BROKER_ZERO_RECONCILE_SNAPSHOT_KEY = "crypto_broker_zero_reconcile"
+
+
+def _coinbase_cache_ttl_seconds() -> int:
+    try:
+        from ... import coinbase_service
+
+        return int(getattr(coinbase_service, "_CACHE_TTL", 300) or 300)
+    except Exception:
+        return 300
+
+
+def _broker_zero_reconcile_confirm_seconds() -> int:
+    """Min wall-clock a Coinbase position must read zero before we close it.
+
+    Derived from the broker cache TTL (one documented base) x2 so the zero is
+    confirmed across at least two independent cached snapshots -- no second
+    magic number to drift out of sync with the cache.
+    """
+    return max(60, 2 * _coinbase_cache_ttl_seconds())
+
+
+def _broker_zero_reconcile_grace_seconds() -> int:
+    """Post-entry settle window -- never reconcile a freshly-opened position
+    whose buy may not be reflected in balances yet. One extra cache cycle
+    beyond the confirm window."""
+    return _broker_zero_reconcile_confirm_seconds() + _coinbase_cache_ttl_seconds()
+
+
+def _coerce_balance_value(bal: Any) -> float:
+    try:
+        raw = bal.get("value") if isinstance(bal, dict) else getattr(bal, "value", 0)
+        return float(raw or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _coinbase_currency_balances() -> dict[str, float] | None:
+    """BASE-CURRENCY -> total (available+hold) qty from one Coinbase accounts
+    fetch. ``None`` when the fetch failed (cannot see even the USD wallet) so
+    the caller treats it as UNKNOWN and never closes on it."""
+    try:
+        from ... import coinbase_service
+
+        accounts = coinbase_service.get_accounts_raw()
+    except Exception:
+        return None
+    if not accounts:
+        return None  # disconnected / fetch failed -> unknown, fail open
+    out: dict[str, float] = {}
+    for acc in accounts:
+        if not isinstance(acc, dict):
+            continue
+        bal = acc.get("available_balance", {})
+        hold = acc.get("hold", {})
+        currency = str(
+            acc.get("currency")
+            or (bal.get("currency") if isinstance(bal, dict) else "")
+            or ""
+        ).upper()
+        if not currency:
+            continue
+        out[currency] = out.get(currency, 0.0) + _coerce_balance_value(bal) + _coerce_balance_value(hold)
+    return out
+
+
+def _base_currency(ticker: str) -> str:
+    t = str(ticker or "").upper().strip()
+    if "-" in t:
+        return t.split("-", 1)[0]
+    if t.endswith("USD") and len(t) > 3:
+        return t[:-3]
+    return t
+
+
+def _trade_entry_time(trade: Trade) -> datetime | None:
+    for attr in ("entry_date", "last_fill_at", "created_at"):
+        val = getattr(trade, attr, None)
+        if isinstance(val, datetime):
+            return val.replace(tzinfo=None) if val.tzinfo is not None else val
+    return None
+
+
+def _resolve_recorded_sell_price(db: Session, trade: Trade) -> float | None:
+    """Real exit price from the recorded broker SELL fill (never fabricated).
+
+    Prefers the momentum/auto exit fill for this trade (or its position). Returns
+    ``None`` -> caller stores pnl=NULL rather than guessing from a stale quote.
+    """
+    try:
+        from sqlalchemy import text as _t
+
+        tid = int(getattr(trade, "id", 0) or 0)
+        pid = getattr(trade, "position_id", None)
+        row = db.execute(
+            _t(
+                """
+                SELECT average_fill_price FROM trading_execution_events
+                WHERE status = 'filled'
+                  AND LOWER(payload_json->>'side') = 'sell'
+                  AND average_fill_price IS NOT NULL AND average_fill_price > 0
+                  AND COALESCE(LOWER(payload_json->>'synthetic'), 'false')
+                      NOT IN ('true', '1', 'yes')
+                  AND (trade_id = :tid OR (:pid IS NOT NULL AND position_id = :pid))
+                ORDER BY id DESC LIMIT 1
+                """
+            ),
+            {"tid": tid, "pid": int(pid) if pid is not None else None},
+        ).first()
+        if row and row[0] is not None and float(row[0]) > 0:
+            return float(row[0])
+    except Exception:
+        return None
+    return None
+
+
+def _clear_broker_zero_reconcile_marker(trade: Trade) -> bool:
+    changed = False
+    if int(getattr(trade, "crypto_broker_zero_qty_streak", 0) or 0) != 0:
+        trade.crypto_broker_zero_qty_streak = 0
+        changed = True
+    snap = _trade_snapshot_dict(trade)
+    if CRYPTO_BROKER_ZERO_RECONCILE_SNAPSHOT_KEY in snap:
+        snap.pop(CRYPTO_BROKER_ZERO_RECONCILE_SNAPSHOT_KEY, None)
+        trade.indicator_snapshot = snap
+        changed = True
+    return changed
+
+
+def _close_broker_exited_crypto_trade(
+    db: Session,
+    trade: Trade,
+    *,
+    exit_px: float | None,
+    elapsed_seconds: float,
+    source: str = "crypto_exit_monitor",
+) -> None:
+    """Close a Coinbase Trade whose broker balance is confirmed zero. Local
+    bookkeeping only -- never submits an order, never fabricates PnL."""
+    now = _utcnow_naive()
+    entry = float(getattr(trade, "entry_price", 0.0) or 0.0)
+    qty = float(getattr(trade, "quantity", 0.0) or 0.0)
+
+    trade.status = "closed"
+    trade.exit_date = now
+    trade.last_broker_sync = now
+    trade.broker_status = "no_position"
+    trade.pending_exit_order_id = None
+    trade.pending_exit_status = None
+    trade.pending_exit_requested_at = None
+    trade.pending_exit_reason = None
+    trade.crypto_broker_zero_qty_streak = 0
+    snap = _trade_snapshot_dict(trade)
+    snap.pop(CRYPTO_BROKER_ZERO_RECONCILE_SNAPSHOT_KEY, None)
+    trade.indicator_snapshot = snap
+
+    if exit_px is not None and exit_px > 0:
+        trade.exit_price = float(exit_px)
+        if entry > 0 and qty > 0:
+            pnl = (float(exit_px) - entry) * qty
+            if str(getattr(trade, "direction", "long") or "long").lower() == "short":
+                pnl = -pnl
+            trade.pnl = round(pnl, 4)
+        trade.exit_reason = "broker_truth_zero_qty"
+        price_note = f"Exit ${float(exit_px):.6f} from recorded broker sell fill."
+    else:
+        trade.exit_price = None
+        trade.pnl = None
+        trade.exit_reason = "broker_truth_zero_qty_no_exit_price"
+        price_note = "Exit price unknown; PnL left NULL."
+    trade.notes = (getattr(trade, "notes", None) or "") + (
+        f"\nAuto-closed phantom: Coinbase balance for {_base_currency(trade.ticker)} "
+        f"confirmed 0 for {elapsed_seconds:.0f}s (>= confirm window) at "
+        f"{now.strftime('%Y-%m-%d %H:%M')} UTC via {source}. {price_note}"
+    )
+    db.add(trade)
+    db.commit()
+
+    try:
+        from ..execution_audit import record_execution_event
+
+        record_execution_event(
+            db,
+            user_id=trade.user_id,
+            ticker=trade.ticker,
+            trade=trade,
+            scan_pattern_id=getattr(trade, "scan_pattern_id", None),
+            broker_source="coinbase",
+            order_id=None,
+            event_type="broker_truth_zero_qty_close",
+            status="filled",
+            average_fill_price=trade.exit_price,
+            cumulative_filled_quantity=qty,
+            payload_json={
+                "side": "sell",
+                "synthetic": True,
+                "source": source,
+                "trade_id": int(getattr(trade, "id", 0) or 0),
+                "exit_reason": trade.exit_reason,
+                "confirm_elapsed_seconds": round(float(elapsed_seconds), 1),
+            },
+        )
+    except Exception:
+        logger.debug(
+            "[crypto_exit] broker-zero close execution_event failed trade#%s",
+            getattr(trade, "id", None), exc_info=True,
+        )
+    try:
+        from ..brain_work.execution_hooks import on_broker_reconciled_close
+
+        on_broker_reconciled_close(db, trade, source="coinbase_broker_truth_zero_qty")
+    except Exception:
+        logger.debug(
+            "[crypto_exit] broker-zero close learning hook failed trade#%s",
+            getattr(trade, "id", None), exc_info=True,
+        )
+    try:
+        from ..bracket_intent_writer import mark_closed
+        from sqlalchemy import text as _t
+
+        ids = db.execute(
+            _t(
+                "SELECT id FROM trading_bracket_intents "
+                "WHERE trade_id = :tid AND intent_state <> 'closed'"
+            ),
+            {"tid": int(getattr(trade, "id", 0) or 0)},
+        ).scalars().all()
+        for intent_id in ids:
+            mark_closed(db, int(intent_id), reason="broker_truth_zero_qty")
+    except Exception:
+        logger.debug(
+            "[crypto_exit] broker-zero close bracket cleanup failed trade#%s",
+            getattr(trade, "id", None), exc_info=True,
+        )
+
+
+def _maybe_reconcile_broker_zero_qty(
+    db: Session,
+    trade: Trade,
+    *,
+    balances: dict[str, float] | None,
+    now: datetime,
+) -> str | None:
+    """Pre-eval phantom reconcile for Coinbase trades.
+
+    Returns ``"closed"`` (phantom closed), ``"deferred"`` (confirmed zero but
+    not yet over the confirm window), or ``None`` (real position / unknown /
+    within grace -> proceed to normal exit eval).
+    """
+    if _broker_source_for_trade(trade) != "coinbase":
+        return None
+    if balances is None:
+        return None  # unknown -- fail open
+    qty = float(balances.get(_base_currency(trade.ticker), 0.0) or 0.0)
+    if qty > 0:
+        if _clear_broker_zero_reconcile_marker(trade):
+            db.add(trade)
+            db.commit()
+        return None
+
+    entry_at = _trade_entry_time(trade)
+    grace = _broker_zero_reconcile_grace_seconds()
+    if entry_at is not None and (now - entry_at).total_seconds() < grace:
+        return None  # too soon post-entry; buy may not be reflected yet
+
+    snap = _trade_snapshot_dict(trade)
+    meta = snap.get(CRYPTO_BROKER_ZERO_RECONCILE_SNAPSHOT_KEY)
+    first_seen = (
+        _parse_backoff_until(meta.get("first_zero_at"))
+        if isinstance(meta, dict)
+        else None
+    ) or now
+    streak = int(getattr(trade, "crypto_broker_zero_qty_streak", 0) or 0) + 1
+    confirm = _broker_zero_reconcile_confirm_seconds()
+    elapsed = (now - first_seen).total_seconds()
+
+    if elapsed >= confirm:
+        exit_px = _resolve_recorded_sell_price(db, trade)
+        _close_broker_exited_crypto_trade(
+            db, trade, exit_px=exit_px, elapsed_seconds=elapsed,
+        )
+        logger.warning(
+            "[crypto_exit] reconciled phantom (Coinbase holds 0) trade#%s %s "
+            "elapsed=%.0fs streak=%s exit_px=%s",
+            trade.id, trade.ticker, elapsed, streak, exit_px,
+        )
+        return "closed"
+
+    snap[CRYPTO_BROKER_ZERO_RECONCILE_SNAPSHOT_KEY] = {
+        "first_zero_at": first_seen.isoformat(),
+        "observed_at": now.isoformat(),
+        "streak": streak,
+        "confirm_seconds": confirm,
+    }
+    trade.indicator_snapshot = snap
+    trade.crypto_broker_zero_qty_streak = streak
+    db.add(trade)
+    db.commit()
+    logger.info(
+        "[crypto_exit] Coinbase 0-balance pending reconcile trade#%s %s "
+        "elapsed=%.0fs/%ss streak=%s",
+        trade.id, trade.ticker, elapsed, confirm, streak,
+    )
+    return "deferred"
+
+
 def run_crypto_exit_pass(db: Session) -> dict[str, Any]:
     """Single pass over open crypto Trade rows. Returns a summary dict."""
     out: dict[str, Any] = {
@@ -703,11 +1020,30 @@ def run_crypto_exit_pass(db: Session) -> dict[str, Any]:
         [int(t.id) for t in crypto_rows],
     )
 
+    # M5a: one Coinbase accounts fetch per pass feeds the broker-truth phantom
+    # reconcile (None == fetch failed -> never close). Skip when no Coinbase rows.
+    _has_coinbase = any(_broker_source_for_trade(t) == "coinbase" for t in crypto_rows)
+    coinbase_balances = _coinbase_currency_balances() if _has_coinbase else None
+
     for t in crypto_rows:
         out["checked"] += 1
         # Already submitted exit -- defer
         if t.pending_exit_order_id:
             out["deferred"] += 1
+            continue
+        # M5a: close a phantom whose Coinbase balance is confirmed zero (e.g. the
+        # momentum lane already sold it directly) BEFORE normal stop/target eval,
+        # so it stops lingering in the Monitor tab until broker-sync catches up.
+        _zero_verdict = _maybe_reconcile_broker_zero_qty(
+            db, t, balances=coinbase_balances, now=_utcnow_naive()
+        )
+        if _zero_verdict == "closed":
+            out["closed"] += 1
+            out["broker_zero_reconciled"] = int(out.get("broker_zero_reconciled") or 0) + 1
+            continue
+        if _zero_verdict == "deferred":
+            out["deferred"] += 1
+            out["broker_zero_pending"] = int(out.get("broker_zero_pending") or 0) + 1
             continue
         entry = float(t.entry_price or 0.0)
         stop = float(t.stop_loss) if t.stop_loss is not None else None
