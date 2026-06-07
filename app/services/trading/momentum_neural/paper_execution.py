@@ -61,6 +61,41 @@ def effective_stop_atr_pct(
     return max(0.004, min(max(base, floor_atr_pct), 0.15))
 
 
+def structural_or_vol_floored_atr_pct(
+    *,
+    vol_floored_atr_pct: float,
+    structural_stop_price: float | None,
+    entry_price: float,
+    stop_atr_mult: float,
+) -> tuple[float, str]:
+    """Ross structural stop vs the vol floor — take whichever sits FURTHER from entry.
+
+    The pullback-break entry yields a structural stop: the pullback low. Ross stops
+    just under that structure, giving the trade room to breathe WITHIN the pattern
+    instead of at a noise-tight ATR (the lane's all-stop-out streak: every trade
+    flagged ``stop_too_tight`` then ran 3-13%). But a very shallow pullback can put
+    that level inside intraday noise and re-create the shake-out — so never go
+    TIGHTER than the vol floor. Returns the effective stop ATR-pct (so the existing
+    risk-first sizing + 2:1-target machinery is reused unchanged) and the model tag.
+    Same 0.15 sanity cap as the vol floor. (docs/DESIGN/MOMENTUM_LANE.md)
+    """
+    eff = float(vol_floored_atr_pct)
+    model = "vol_floored_atr"
+    try:
+        sp = float(structural_stop_price) if structural_stop_price is not None else 0.0
+        ep = float(entry_price)
+        mult = float(stop_atr_mult)
+    except (TypeError, ValueError):
+        return eff, model
+    if sp > 0.0 and ep > 0.0 and sp < ep and mult > 0.0:
+        struct_atr_pct = (ep - sp) / ep / mult
+        struct_atr_pct = min(struct_atr_pct, 0.15)  # same sanity cap as the vol floor
+        if struct_atr_pct > eff:
+            eff = struct_atr_pct
+            model = "structural_pullback"
+    return eff, model
+
+
 def default_reference_mid(
     *,
     viability_score: float,

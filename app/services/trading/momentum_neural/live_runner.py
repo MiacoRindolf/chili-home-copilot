@@ -43,7 +43,13 @@ from ..decision_ledger import (
 from ..deployment_ladder_service import record_trade_outcome_metrics
 from .risk_evaluator import evaluate_proposed_momentum_automation
 from .risk_policy import RISK_SNAPSHOT_KEY, compute_risk_first_quantity, policy_float_cap, policy_int_cap
-from .paper_execution import effective_stop_atr_pct, regime_atr_pct, stop_target_prices, utc_iso
+from .paper_execution import (
+    effective_stop_atr_pct,
+    regime_atr_pct,
+    stop_target_prices,
+    structural_or_vol_floored_atr_pct,
+    utc_iso,
+)
 from .persistence import variant_for_id
 from .live_fsm import (
     LIVE_RUNNER_RUNNABLE_STATES,
@@ -1331,6 +1337,7 @@ def tick_live_session(
         # pullback, with a volume spike) PREFERRED, with momentum_volume (15m
         # price>EMA-9 + volume) as the fallback. live + on, fallback-safe.
         _trigger_ok, _trigger_reason = True, "score_only"
+        _pb_debug = {}
         if _score_ok:
             try:
                 from .entry_gates import momentum_volume_confirmation, pullback_break_confirmation
@@ -1343,7 +1350,7 @@ def tick_live_session(
                     try:
                         _df_pb = fetch_ohlcv_df(sess.symbol, interval=_interval, period="5d")
                         if _df_pb is not None and not getattr(_df_pb, "empty", True):
-                            _trigger_ok, _trigger_reason, _ = pullback_break_confirmation(
+                            _trigger_ok, _trigger_reason, _pb_debug = pullback_break_confirmation(
                                 _df_pb, entry_interval=_interval
                             )
                     except Exception:
@@ -1368,10 +1375,20 @@ def tick_live_session(
         except Exception:
             _mkt_open = True
         if _score_ok and _trigger_ok and _mkt_open:
+            # Ross structural stop: when the pullback-break trigger fired, stash the
+            # pullback low so sizing + placement can stop just UNDER the structure
+            # (not at a noise-tight ATR). The momentum_volume fallback has no
+            # structure -> clear it so the vol-floored ATR stop is used instead.
+            if _trigger_reason == "pullback_break_ok" and _pb_debug.get("pullback_low"):
+                le["structural_stop_price"] = float(_pb_debug["pullback_low"])
+            else:
+                le.pop("structural_stop_price", None)
+            _commit_le(sess, le)
             _safe_transition(db, sess, STATE_LIVE_ENTRY_CANDIDATE)
             _emit(
                 db, sess, "live_entry_candidate_detected",
-                {"viability_score": via.viability_score, "trigger": _trigger_reason},
+                {"viability_score": via.viability_score, "trigger": _trigger_reason,
+                 "structural_stop": le.get("structural_stop_price")},
             )
         elif _score_ok and not _mkt_open:
             _emit(db, sess, "live_entry_wait_market_closed", {"symbol": sess.symbol})
@@ -1707,7 +1724,22 @@ def tick_live_session(
             regime_atr_pct(_regime), _expected_move_bps,
             stop_atr_mult=_stop_atr_mult, vol_floor_mult=_stop_vol_floor_mult(),
         )
+        # Ross structural stop: if the pullback-break captured a pullback low, stop
+        # just UNDER that structure instead of a noise-tight ATR — but never TIGHTER
+        # than the vol floor (shake-out guard). Risk-first sizing then trims qty
+        # against the wider, structure-aware distance (constant $risk); the 2:1
+        # target auto-scales off the actual stop distance. Fix for the lane's
+        # all-stop-out streak (every exit flagged stop_too_tight). MOMENTUM_LANE.md
+        _eff_atr_pct, _stop_model = structural_or_vol_floored_atr_pct(
+            vol_floored_atr_pct=_eff_atr_pct,
+            structural_stop_price=le.get("structural_stop_price"),
+            entry_price=guarded_ask,
+            stop_atr_mult=_stop_atr_mult,
+        )
         le["entry_stop_atr_pct"] = _eff_atr_pct
+        le["entry_stop_model"] = _stop_model
+        if _stop_model == "structural_pullback":
+            le["structural_stop_atr_pct"] = round(_eff_atr_pct, 6)
         _rf_qty, _rf_meta = compute_risk_first_quantity(
             entry_price=guarded_ask,
             atr_pct=_eff_atr_pct,
