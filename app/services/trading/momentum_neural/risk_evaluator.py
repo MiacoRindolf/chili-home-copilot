@@ -542,6 +542,53 @@ def evaluate_proposed_momentum_automation(
         # is additive / informational at pre-entry.
         pass
 
+    # ── Portfolio drawdown breaker (Hard Rule 2 — spans every entry path) ──
+    # The portfolio tier samples ALL closed trades (attributed + no_pattern
+    # + manual + reconcile-inferred), independent of the momentum-local
+    # daily-loss cap above. Wired here so the AUTHORITATIVE momentum arm
+    # path enforces Hard Rule 2 as a hard block — not only at the
+    # venue-adapter BUY gate (_assert_portfolio_breaker_ok) + auto_arm
+    # Guard 3 (both fail-open pre-checks). check_portfolio_drawdown_breaker
+    # returns (False, None) when disabled / shadow / insufficient history /
+    # not tripped, and (True, reason) ONLY when enabled AND live AND the
+    # trip condition is met (it is fail-CLOSED on its own DB/threshold
+    # errors in live mode). Shadow-mode "would_have_tripped" logging is
+    # emitted inside the helper. (2026-06-07 momentum-lane audit.)
+    try:
+        from ..portfolio_risk import check_portfolio_drawdown_breaker
+
+        pdd_tripped, pdd_reason = check_portfolio_drawdown_breaker(db, user_id)
+    except Exception:
+        # A setup/import failure (NOT a breaker trip — a genuine trip
+        # returns normally above and never raises). Fail-open with a warn so
+        # an unwired environment is not bricked; the venue-adapter gate is
+        # the live-money backstop.
+        checks.append(
+            _check(
+                "portfolio_dd_breaker",
+                True,
+                severity="warn",
+                message=(
+                    "Portfolio drawdown breaker check unavailable (setup error); "
+                    "venue-adapter gate is the backstop."
+                ),
+            )
+        )
+    else:
+        checks.append(
+            _check(
+                "portfolio_dd_breaker",
+                not pdd_tripped,
+                severity="block" if pdd_tripped and m == "live" else ("warn" if pdd_tripped else "ok"),
+                message=(
+                    str(pdd_reason)
+                    if pdd_tripped
+                    else "Portfolio drawdown breaker not tripped."
+                ),
+                detail={"tripped": bool(pdd_tripped)},
+            )
+        )
+
     checks.append(
         _check(
             "notional_cap",
