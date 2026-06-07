@@ -6,7 +6,7 @@ import math
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from ....config import settings
@@ -207,6 +207,28 @@ def record_feedback_ingestion_trace(db: Session, payload: dict[str, Any]) -> Non
     st.updated_at = datetime.utcnow()
 
 
+def _stop_too_tight_label_expr():
+    """JSONB text accessor: `extracted_summary_json.post_exit_label.stop_too_tight`."""
+    return MomentumAutomationOutcome.extracted_summary_json["post_exit_label"]["stop_too_tight"].astext
+
+
+def _contributes_or_shakeout_filter():
+    """Rows eligible for the SELECTION aggregate.
+
+    A too-tight-stop shake-out is recorded as a non-strategy `cancelled_in_trade`
+    (so `contributes_to_evolution` is False — it never reached a strategy-caused
+    terminal outcome), yet its post-exit label is HIGH-QUALITY deferred evidence
+    that the SETUP was right and only the stop gave it back. Excluding it teaches
+    the brain "this setup loses". Let those labeled rows back in alongside the
+    normal credited rows; `_aggregate_rows` then reinterprets their raw loss via
+    the setup-quality signal instead of scoring it as a thesis failure.
+    """
+    return or_(
+        MomentumAutomationOutcome.contributes_to_evolution.is_(True),
+        _stop_too_tight_label_expr() == "true",
+    )
+
+
 def aggregate_recent_outcomes_for_variant(
     db: Session,
     *,
@@ -219,7 +241,7 @@ def aggregate_recent_outcomes_for_variant(
     q = db.query(MomentumAutomationOutcome).filter(
         MomentumAutomationOutcome.variant_id == int(variant_id),
         MomentumAutomationOutcome.terminal_at >= since,
-        MomentumAutomationOutcome.contributes_to_evolution.is_(True),
+        _contributes_or_shakeout_filter(),
     )
     if mode:
         q = q.filter(MomentumAutomationOutcome.mode == mode.lower().strip())
@@ -241,7 +263,7 @@ def aggregate_recent_outcomes_for_symbol_variant(
             MomentumAutomationOutcome.symbol == symbol.strip().upper(),
             MomentumAutomationOutcome.variant_id == int(variant_id),
             MomentumAutomationOutcome.terminal_at >= since,
-            MomentumAutomationOutcome.contributes_to_evolution.is_(True),
+            _contributes_or_shakeout_filter(),
         )
         .all()
     )
@@ -265,6 +287,17 @@ def paper_vs_live_performance_slices(
     }
 
 
+def _post_exit_label(row: Any) -> dict[str, Any]:
+    """The deferred shake-out label stamped onto the outcome's extracted_summary_json
+    by post_exit_excursion.run_post_exit_excursion_pass (empty dict when absent)."""
+    summary = getattr(row, "extracted_summary_json", None)
+    if isinstance(summary, dict):
+        label = summary.get("post_exit_label")
+        if isinstance(label, dict):
+            return label
+    return {}
+
+
 def _aggregate_rows(rows: list[MomentumAutomationOutcome]) -> dict[str, Any]:
     if not rows:
         return {
@@ -273,30 +306,78 @@ def _aggregate_rows(rows: list[MomentumAutomationOutcome]) -> dict[str, Any]:
             "weighted_pnl_sum": 0.0,
             "weight_sum": 0.0,
             "mean_return_bps": None,
+            "weighted_setup_adjusted_return_bps_sum": 0.0,
+            "mean_setup_adjusted_return_bps": None,
+            "mean_setup_quality": None,
+            "setup_credited_count": 0,
+            "shakeout_count": 0,
             "governance_or_risk_count": 0,
         }
     w_sum = 0.0
     wrb = 0.0
     wp = 0.0
     gr = 0
+    # Setup-quality channel: a too-tight-stop shake-out is a GOOD setup the stop
+    # gave back. For the SELECTION learner (which is choosing setups, not stops) we
+    # credit such a row with the favorable post-exit excursion it actually achieved,
+    # weighted by how strong the setup signal was (setup_quality), instead of letting
+    # the realized loss read as a thesis failure. Raw `mean_return_bps` is kept intact
+    # (it is honest realized P&L); the setup-adjusted channel is what feeds viability.
+    w_setup_adj_rb = 0.0
+    w_setup_q = 0.0
+    credited = 0
+    shakeouts = 0
     for r in rows:
         w = _finite_float_or_default(getattr(r, "evidence_weight", None), 1.0)
         w_sum += w
         rb = r.return_bps
-        if rb is not None:
-            wrb += float(rb) * w
+        raw_rb = float(rb) if rb is not None else None
+        if raw_rb is not None:
+            wrb += raw_rb * w
         if r.realized_pnl_usd is not None:
             wp += float(r.realized_pnl_usd) * w
         oc = r.outcome_class or ""
         if oc in ("governance_exit", "risk_block", "stale_data_abort"):
             gr += 1
+
+        label = _post_exit_label(r)
+        sq_raw = label.get("setup_quality")
+        stop_too_tight = bool(label.get("stop_too_tight"))
+        if sq_raw is not None:
+            setup_q = max(0.0, min(1.0, _finite_float_or_default(sq_raw, 0.5)))
+        elif raw_rb is not None:
+            setup_q = 1.0 if raw_rb > 0 else (0.0 if raw_rb < 0 else 0.5)
+        else:
+            setup_q = 0.5
+        w_setup_q += setup_q * w
+
+        eff_rb = raw_rb
+        if eff_rb is not None and stop_too_tight and sq_raw is not None and eff_rb < 0.0:
+            # Blend realized loss with the demonstrated favorable post-exit move,
+            # by setup strength: a full shake-out (setup_quality=1.0) is credited the
+            # whole post-exit MFE; a premature_stop (0.6) gets a partial credit.
+            mfe_bps = _finite_float_or_default(label.get("post_exit_mfe_pct"), 0.0) * 100.0
+            eff_rb = eff_rb * (1.0 - setup_q) + mfe_bps * setup_q
+            credited += 1
+            if str(label.get("outcome_class") or "") == "shakeout":
+                shakeouts += 1
+        if eff_rb is not None:
+            w_setup_adj_rb += eff_rb * w
+
     mean_bps = (wrb / w_sum) if w_sum > 0 else None
+    mean_setup_adj = (w_setup_adj_rb / w_sum) if w_sum > 0 else None
+    mean_setup_q = (w_setup_q / w_sum) if w_sum > 0 else None
     return {
         "n": len(rows),
         "weighted_return_bps_sum": round(wrb, 6),
         "weighted_pnl_sum": round(wp, 6),
         "weight_sum": round(w_sum, 6),
         "mean_return_bps": round(mean_bps, 4) if mean_bps is not None else None,
+        "weighted_setup_adjusted_return_bps_sum": round(w_setup_adj_rb, 6),
+        "mean_setup_adjusted_return_bps": round(mean_setup_adj, 4) if mean_setup_adj is not None else None,
+        "mean_setup_quality": round(mean_setup_q, 4) if mean_setup_q is not None else None,
+        "setup_credited_count": credited,
+        "shakeout_count": shakeouts,
         "governance_or_risk_count": gr,
     }
 
@@ -575,11 +656,20 @@ def maybe_publish_refined_variant(db: Session, *, variant_id: int) -> dict[str, 
 
 
 def _viability_delta_from_slices(paper: dict[str, Any], live: dict[str, Any]) -> float:
-    """Small capped delta; live dominates only when sample size sufficient."""
+    """Small capped delta; live dominates only when sample size sufficient.
+
+    Uses the SETUP-ADJUSTED mean return (shake-outs credited to the setup) so a
+    too-tight stop no longer degrades viability for a setup that actually worked;
+    falls back to raw `mean_return_bps` for any slice that predates the channel.
+    """
     p_n = int(paper.get("n") or 0)
     l_n = int(live.get("n") or 0)
-    p_mean = paper.get("mean_return_bps")
-    l_mean = live.get("mean_return_bps")
+    p_mean = paper.get("mean_setup_adjusted_return_bps")
+    if p_mean is None:
+        p_mean = paper.get("mean_return_bps")
+    l_mean = live.get("mean_setup_adjusted_return_bps")
+    if l_mean is None:
+        l_mean = live.get("mean_return_bps")
 
     # Paper-only channel
     delta = 0.0
