@@ -126,7 +126,16 @@ def test_critical_mesh_alert_cooldown_setting_drives_suppression(monkeypatch) ->
 
 
 def test_brain_work_outcome_publish_rolls_back_swallowed_db_error(monkeypatch) -> None:
-    """Publisher helpers must not return a poisoned SQLAlchemy session."""
+    """Publisher helpers must not return a DB-error-poisoned SQLAlchemy session.
+
+    A mid-statement disconnect surfaces as a SQLAlchemy ``OperationalError``; the
+    publisher must roll back so the caller's next query doesn't cascade with
+    ``PendingRollbackError``. (A non-DB publish failure leaves the transaction
+    healthy and must NOT trigger a rollback — see
+    ``tests/test_session_rollback_on_disconnect.py``.)
+    """
+    from sqlalchemy.exc import OperationalError
+
     from app.services.trading.brain_neural_mesh import publisher
 
     class FakeSession:
@@ -137,7 +146,11 @@ def test_brain_work_outcome_publish_rolls_back_swallowed_db_error(monkeypatch) -
             self.rollbacks += 1
 
     def broken_enqueue(*_args, **_kwargs) -> int:
-        raise RuntimeError("server closed the connection unexpectedly")
+        raise OperationalError(
+            "INSERT INTO brain_activation_events ...",
+            {},
+            Exception("server closed the connection unexpectedly"),
+        )
 
     fake_db = FakeSession()
     monkeypatch.setattr(publisher, "mesh_enabled", lambda: True)

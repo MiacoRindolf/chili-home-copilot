@@ -1104,7 +1104,7 @@ def _run_drift_monitor_daily_job():
                 )
             return
         from datetime import date as _date
-        from ..db import SessionLocal
+        from ..db import SessionLocal, rollback_if_poisoned
         from .trading.drift_monitor_service import (
             DriftInputBundle,
             run_sweep as _drift_run_sweep,
@@ -1197,6 +1197,10 @@ def _run_drift_monitor_daily_job():
                         logger.exception(
                             "[scheduler] drift_monitor_daily queue_from_drift failed",
                         )
+                        # Recover a session poisoned by a mid-transaction
+                        # disconnect so the next red row doesn't cascade with
+                        # PendingRollbackError.
+                        rollback_if_poisoned(db)
         except Exception:
             logger.exception("[scheduler] drift_monitor_daily sweep failed")
         finally:
@@ -2364,7 +2368,7 @@ def _run_price_monitor_job():
 
     Also triggers event-driven pattern monitor for tickers where alerts fired.
     """
-    from ..db import SessionLocal
+    from ..db import SessionLocal, rollback_if_poisoned
     from .trading.alerts import run_price_monitor
 
     def _work() -> None:
@@ -2389,6 +2393,10 @@ def _run_price_monitor_job():
                         alerted_tickers.extend(result.get("alerted_tickers", []))
                 except Exception:
                     logger.warning(f"[scheduler] Price monitor failed for user_id={uid}", exc_info=True)
+                    # Recover a session poisoned by a mid-transaction disconnect
+                    # so the next user (and the pattern-ticker query below) don't
+                    # cascade with PendingRollbackError.
+                    rollback_if_poisoned(db)
 
             # Trigger event-driven pattern monitor for all open pattern-linked tickers
             pattern_tickers = [
@@ -2552,7 +2560,7 @@ def _run_stop_alert_dispatch_job():
     Job ID is intentionally kept as ``crypto_stop_monitor`` so
     ``brain_batch_jobs`` history continuity is preserved.
     """
-    from ..db import SessionLocal
+    from ..db import SessionLocal, rollback_if_poisoned
     from .trading.stop_engine import evaluate_all, dispatch_stop_alerts
     from ..models.trading import Trade
     from sqlalchemy import distinct
@@ -2586,6 +2594,9 @@ def _run_stop_alert_dispatch_job():
                         logger.info("[scheduler] stop_alert_dispatch uid=%s: %d alerts dispatched", uid, dispatched)
                 except Exception:
                     logger.warning("[scheduler] stop_alert_dispatch failed for uid=%s", uid, exc_info=True)
+                    # Recover a session poisoned by a mid-transaction disconnect
+                    # so the next user doesn't cascade with PendingRollbackError.
+                    rollback_if_poisoned(db)
         finally:
             # FIX 46 pattern (rollback before close).
             try:
@@ -2603,7 +2614,7 @@ def _run_pattern_position_monitor_job():
     Runs less frequently (30-min heartbeat) as the primary evaluation path
     is now event-driven via the price monitor and broker sync callbacks.
     """
-    from ..db import SessionLocal
+    from ..db import SessionLocal, rollback_if_poisoned
     from ..models.trading import Trade
     from sqlalchemy import and_, distinct, or_
 
@@ -2631,6 +2642,9 @@ def _run_pattern_position_monitor_job():
                     run_pattern_position_monitor(db, uid, event_driven=True)
                 except Exception:
                     logger.warning("[scheduler] pattern_position_monitor failed uid=%s", uid, exc_info=True)
+                    # Recover a session poisoned by a mid-transaction disconnect
+                    # so the next user doesn't cascade with PendingRollbackError.
+                    rollback_if_poisoned(db)
         finally:
             # FIX 46 pattern (rollback before close).
             try:
@@ -2897,7 +2911,7 @@ def _run_auto_trader_tick_job():
 
 def _run_auto_trader_monitor_job():
     from ..config import settings as _settings
-    from ..db import SessionLocal
+    from ..db import SessionLocal, rollback_if_poisoned
     from .trading.auto_trader_monitor import tick_auto_trader_monitor
 
     if not getattr(_settings, "chili_autotrader_enabled", False):
@@ -2920,6 +2934,10 @@ def _run_auto_trader_monitor_job():
                 logger.info("[scheduler] options_exit_pass: %s", opt_summary)
         except Exception:
             logger.exception("[scheduler] options_exit_pass failed (non-fatal)")
+            # The crypto pass below shares this session. If a DB-error
+            # (mid-transaction disconnect) poisoned it, roll back so the crypto
+            # pass doesn't cascade with PendingRollbackError.
+            rollback_if_poisoned(db)
         # HHH -- crypto-aware exit monitor, parallel to options. Equity
         # monitor skips robinhood -USD tickers; without this pass the
         # stop/target on crypto Trade rows never fires.
@@ -2930,6 +2948,7 @@ def _run_auto_trader_monitor_job():
                 logger.info("[scheduler] crypto_exit_pass: %s", crypto_summary)
         except Exception:
             logger.exception("[scheduler] crypto_exit_pass failed (non-fatal)")
+            rollback_if_poisoned(db)
     except Exception:
         logger.exception("[scheduler] auto_trader monitor failed")
     finally:
