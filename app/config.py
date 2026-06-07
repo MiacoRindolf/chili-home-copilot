@@ -2875,6 +2875,14 @@ class Settings(BaseSettings):
         le=100,
         validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_SCAN_LIMIT"),
     )
+    # Auto-arm checks each candidate's entry trigger via an OHLCV fetch; run them
+    # concurrently so a pass is ~the slowest single fetch (not the serial sum).
+    chili_momentum_auto_arm_trigger_workers: int = Field(
+        default=8,
+        ge=1,
+        le=32,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_TRIGGER_WORKERS"),
+    )
     # Reap a pre-entry live session that has watched this long without entering,
     # freeing the slot for a fresher mover (Ross moves on; default 30min).
     chili_momentum_auto_arm_max_watch_seconds: int = Field(

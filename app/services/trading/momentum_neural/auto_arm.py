@@ -282,8 +282,8 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
         out["skipped"] = "no_fresh_live_eligible"
         return out
 
-    chosen: MomentumSymbolViability | None = None
-    chosen_reason: str | None = None
+    # Cheap pre-filter (no network): venue, market hours, per-symbol mutex.
+    eligible: list[MomentumSymbolViability] = []
     for c in candidates:
         out["checked"] += 1
         if _auto_arm_crypto_only() and not _is_coinbase_tradeable_symbol(c.symbol):
@@ -292,10 +292,41 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
             continue  # equities only during RTH; crypto always passes (24/7)
         if not _symbol_free(db, c.symbol, uid):
             continue
-        fires, reason = _entry_trigger_fires(c.symbol)
-        if fires:
-            chosen, chosen_reason = c, reason
-            break
+        eligible.append(c)
+
+    # Check entry triggers CONCURRENTLY. Each _entry_trigger_fires fetches OHLCV
+    # (network-bound), so checking serially made a pass take ~40s — past the 30s
+    # cadence, so the scheduler skipped overlapping runs and the lane reacted
+    # slowly to fresh breaks. Parallel fetch -> a pass is ~the slowest single
+    # fetch (~5s). Selection is unchanged: the FIRST (highest-viability) firing.
+    chosen: MomentumSymbolViability | None = None
+    chosen_reason: str | None = None
+    if eligible:
+        import concurrent.futures
+
+        _workers = min(
+            len(eligible),
+            max(1, int(getattr(settings, "chili_momentum_auto_arm_trigger_workers", 8))),
+        )
+        _results: dict[str, tuple[bool, str]] = {}
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=_workers) as _ex:
+                _futs = {_ex.submit(_entry_trigger_fires, c.symbol): c.symbol for c in eligible}
+                for _fut in concurrent.futures.as_completed(_futs):
+                    _sym = _futs[_fut]
+                    try:
+                        _results[_sym] = _fut.result()
+                    except Exception:
+                        _results[_sym] = (False, "trigger_error")
+        except Exception:
+            # Fall back to serial if the pool fails for any reason.
+            for c in eligible:
+                _results[c.symbol] = _entry_trigger_fires(c.symbol)
+        for c in eligible:
+            fires, reason = _results.get(c.symbol, (False, "no_result"))
+            if fires:
+                chosen, chosen_reason = c, reason
+                break
 
     if chosen is None:
         out["skipped"] = "no_active_trigger"
