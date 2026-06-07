@@ -59,12 +59,36 @@ def _global_candidates_by_ticker_norm(
     if not ticker_norms:
         return {}
 
-    rows = (
-        db.query(PrescreenCandidate)
-        .filter(PrescreenCandidate.user_id.is_(None))
-        .filter(PrescreenCandidate.ticker_norm.in_(sorted(ticker_norms)))
-        .all()
-    )
+    try:
+        rows = (
+            db.query(PrescreenCandidate)
+            .filter(PrescreenCandidate.user_id.is_(None))
+            .filter(PrescreenCandidate.ticker_norm.in_(sorted(ticker_norms)))
+            .all()
+        )
+    except Exception:
+        # FIX 46 pattern (cf. load_active_global_candidate_tickers below): a
+        # transient connection drop (psycopg2.OperationalError) leaves the
+        # session's transaction aborted, so every later query — including the
+        # error-path brain_batch_job_finish in run_daily_prescreen_job — would
+        # raise PendingRollbackError and cascade. Roll back to clear the dead
+        # transaction so the outer handler runs on a clean session, then
+        # re-raise: we cannot safely upsert candidates without knowing which
+        # rows already exist, and the snapshot row was rolled back with the tx.
+        logger.warning(
+            "[prescreen_job] _global_candidates_by_ticker_norm query failed; "
+            "rolling back aborted transaction",
+            exc_info=True,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            logger.debug(
+                "[prescreen_job] post-error rollback failed in "
+                "_global_candidates_by_ticker_norm; not fatal",
+                exc_info=True,
+            )
+        raise
     candidates: dict[str, PrescreenCandidate] = {}
     for row in rows:
         candidates.setdefault(row.ticker_norm, row)

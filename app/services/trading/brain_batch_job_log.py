@@ -55,7 +55,40 @@ def brain_batch_job_finish(
     meta: dict[str, Any] | None = None,
     payload_json: dict[str, Any] | None = None,
 ) -> None:
-    row = db.query(BrainBatchJob).filter(BrainBatchJob.id == job_id).first()
+    try:
+        row = db.query(BrainBatchJob).filter(BrainBatchJob.id == job_id).first()
+    except Exception:
+        # FIX 46 pattern: a transient connection drop (psycopg2.OperationalError)
+        # leaves the session's transaction aborted, so this read raises
+        # PendingRollbackError instead of executing. This finish() is itself the
+        # error-handler of callers like run_daily_prescreen_job, so without a
+        # rollback the original failure cascades into a second, noisier traceback
+        # here. Roll back to clear the dead transaction, then retry the read once
+        # on a clean connection; if it still fails, log and return rather than
+        # propagate (the caller already has the real error to record).
+        logger.warning(
+            "[brain_batch_job] finish read failed id=%s; rolling back + retrying",
+            job_id,
+            exc_info=True,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            logger.debug(
+                "[brain_batch_job] rollback failed id=%s; giving up on finish",
+                job_id,
+                exc_info=True,
+            )
+            return
+        try:
+            row = db.query(BrainBatchJob).filter(BrainBatchJob.id == job_id).first()
+        except Exception:
+            logger.warning(
+                "[brain_batch_job] finish read still failing id=%s after rollback; giving up",
+                job_id,
+                exc_info=True,
+            )
+            return
     if not row:
         logger.warning("[brain_batch_job] missing row id=%s", job_id)
         return

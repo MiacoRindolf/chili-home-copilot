@@ -3,8 +3,16 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+from sqlalchemy import text
+
 from app.models.trading import BrainBatchJob, PrescreenCandidate, PrescreenSnapshot
+from app.services.trading.brain_batch_job_log import (
+    brain_batch_job_begin,
+    brain_batch_job_finish,
+)
 from app.services.trading.prescreen_job import (
+    _global_candidates_by_ticker_norm,
     load_active_global_candidate_source_tags,
     load_active_global_candidate_tickers,
     run_daily_prescreen_job,
@@ -14,6 +22,19 @@ from app.services.trading.prescreen_normalize import (
     iter_normalized_prescreen_tickers,
     normalize_prescreen_ticker,
 )
+
+
+def _poison_session(session) -> None:
+    """Leave the session's transaction in the aborted state a transient Postgres
+    drop produces. A failed statement makes PostgreSQL abort the current
+    transaction, so the *next* ORM query raises ``PendingRollbackError`` ("Can't
+    reconnect until invalid transaction is rolled back") — exactly the cascade in
+    the prescreen tracebacks (psycopg2.OperationalError -> PendingRollbackError).
+    """
+    try:
+        session.execute(text("SELECT 1 FROM __chili_nonexistent_table_zzz__"))
+    except Exception:
+        pass
 
 
 def test_normalize_prescreen_ticker_crypto_bare() -> None:
@@ -138,3 +159,92 @@ def test_scheduler_prescreen_skips_when_disabled(monkeypatch) -> None:
 
     monkeypatch.setattr(settings, "brain_prescreen_scheduler_enabled", False)
     _run_daily_prescreen_job()
+
+
+# ---------------------------------------------------------------------------
+# Connection-drop resilience (FIX 46 rollback-on-error): a transient Postgres
+# drop must not cascade into a failed prescreen run / noisy traceback storm.
+# ---------------------------------------------------------------------------
+
+
+def test_brain_batch_job_finish_recovers_from_aborted_transaction(db) -> None:
+    """finish() rolls back an aborted tx and retries instead of raising PendingRollbackError."""
+    job_id = brain_batch_job_begin(db, "daily_prescreen")
+    db.commit()  # persist so the row survives the rollback finish() must perform
+
+    _poison_session(db)  # simulate the connection drop -> aborted transaction
+
+    # Pre-fix this raised PendingRollbackError; now it recovers and marks the job.
+    brain_batch_job_finish(db, job_id, ok=True, meta={"recovered": True})
+    db.commit()
+
+    row = db.query(BrainBatchJob).filter(BrainBatchJob.id == job_id).first()
+    assert row is not None
+    assert row.status == "ok"
+    assert row.ended_at is not None
+    assert row.meta_json == {"recovered": True}
+
+
+def test_global_candidates_lookup_rolls_back_aborted_transaction(db) -> None:
+    """The lookup clears the aborted tx (re-raising) so the session stays usable."""
+    db.add(
+        PrescreenCandidate(
+            ticker="AAPL",
+            ticker_norm="AAPL",
+            asset_universe="stock",
+            active=True,
+            entry_reasons=[],
+            sources_json={"tags": ["core_default"]},
+        )
+    )
+    db.commit()
+
+    _poison_session(db)
+
+    # It cannot safely upsert without the existing-row map, so it re-raises —
+    # but only after rolling the dead transaction back.
+    with pytest.raises(Exception):
+        _global_candidates_by_ticker_norm(db, {"AAPL"})
+
+    # The cascade is broken: a follow-up query works rather than hitting
+    # PendingRollbackError.
+    healthy = _global_candidates_by_ticker_norm(db, {"AAPL"})
+    assert "AAPL" in healthy
+
+
+@patch("app.services.trading.prescreen_job.collect_internal_prescreen_tickers")
+@patch("app.services.trading.prescreen_job.collect_prescreen_with_provenance")
+def test_run_daily_prescreen_recovers_from_connection_drop(
+    mock_collect, mock_internal, db,
+) -> None:
+    """A mid-run connection drop fails the run gracefully and leaves the next run healthy."""
+    mock_collect.return_value = (
+        ["AAPL", "MSFT"],
+        {"AAPL": ["massive_top_gainers"], "MSFT": ["core_default"]},
+        {"massive_top_gainers": 1, "core_default": 1},
+        0.05,
+    )
+
+    def _drop_connection_then_return(session):
+        # Poison the tx just before the _global_candidates_by_ticker_norm lookup
+        # so it hits the aborted-transaction path mid-run.
+        _poison_session(session)
+        return {}
+
+    mock_internal.side_effect = _drop_connection_then_return
+
+    # Must report failure, NOT raise PendingRollbackError out of the job.
+    result = run_daily_prescreen_job(db)
+    assert result.get("ok") is False
+    assert "error" in result
+
+    # The decisive check: the session recovered, so the NEXT scheduled run
+    # (the fresh universe feeding the 2:30am market scan) succeeds.
+    db.rollback()
+    mock_internal.side_effect = None
+    mock_internal.return_value = {}
+    result2 = run_daily_prescreen_job(db)
+    assert result2.get("ok") is True
+    active = load_active_global_candidate_tickers(db)
+    assert "AAPL" in active
+    assert "MSFT" in active
