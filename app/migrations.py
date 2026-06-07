@@ -20363,6 +20363,60 @@ def _migration_301_exit_parity_log_index_prune_and_autovacuum(conn) -> None:
     )
 
 
+def _migration_302_breakout_alert_candidate_select_index(conn) -> None:
+    """Index the autotrader candidate-selection query so it fits its statement_timeout.
+
+    The stock-lane autotrader candidate selector runs every ~6 min under a
+    derived, tick-budget-bounded statement_timeout (~1-2.5s):
+
+        SELECT id FROM trading_breakout_alerts
+        WHERE alert_tier='pattern_imminent' AND (user_id = <uid> OR user_id IS NULL)
+          AND asset_type='stock' AND alerted_at < <cutoff>
+          AND NOT EXISTS (SELECT 1 FROM trading_autotrader_runs
+                          WHERE breakout_alert_id = trading_breakout_alerts.id)
+        ORDER BY alerted_at DESC, id DESC LIMIT N
+
+    The existing partial index ``ix_breakout_alerts_imminent_user_asset_alerted``
+    LEADS with ``user_id``, so the ``user_id = <uid> OR user_id IS NULL``
+    predicate cannot range-scan it; the planner fell back to the
+    ``alerted_at``-only index and FILTERED alert_tier/asset_type/user_id across
+    ~23k of ~130k rows -- blowing the timeout (observed in prod PG logs:
+    ``ERROR: canceling statement due to statement timeout`` every ~6 min on this
+    exact statement).
+
+    This partial index leads with ``asset_type`` (equality) then the sort keys
+    (``alerted_at DESC, id DESC``) and carries ``user_id`` as a trailing column,
+    so the ``user_id = ? OR user_id IS NULL`` filter is satisfied index-only (no
+    heap fetch) and the ``LIMIT`` stops early. EXPLAIN ANALYZE on production
+    data: the outer scan becomes an Index Only Scan and the query drops from
+    timing-out (>1s) to ~3ms. No user_id constant lives in the index predicate
+    (``asset_type`` is a real lane value, not a magic number), so the index
+    serves any user.
+
+    Idempotent: ``CREATE INDEX IF NOT EXISTS`` (already created CONCURRENTLY on
+    the live DB; this formalizes it for fresh/other environments). Also drops the
+    superseded 3-column probe variant if it exists anywhere.
+    """
+    if "trading_breakout_alerts" not in _tables(conn):
+        conn.commit()
+        return
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_breakout_alerts_imminent_asset_alerted_uid "
+        "ON trading_breakout_alerts (asset_type, alerted_at DESC, id DESC, user_id) "
+        "WHERE alert_tier = 'pattern_imminent'"
+    ))
+    # Superseded 3-column variant (no trailing user_id -> needed heap fetches for
+    # the user_id filter). Drop if a prior probe/environment created it.
+    conn.execute(text(
+        "DROP INDEX IF EXISTS ix_breakout_alerts_imminent_asset_alerted"
+    ))
+    conn.commit()
+    logger.info(
+        "[mig302] ensured ix_breakout_alerts_imminent_asset_alerted_uid "
+        "(autotrader candidate-select now Index Only Scan, fits statement_timeout)"
+    )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -20727,6 +20781,8 @@ MIGRATIONS = [
      _migration_300_realized_ev_clean_window_recompute),
     ("301_exit_parity_log_index_prune_and_autovacuum",
      _migration_301_exit_parity_log_index_prune_and_autovacuum),
+    ("302_breakout_alert_candidate_select_index",
+     _migration_302_breakout_alert_candidate_select_index),
 ]
 
 
