@@ -2338,6 +2338,17 @@ class Settings(BaseSettings):
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_REWARD_RISK_RATIO"),
     )
+    # Entry trigger mode: "hybrid" (Ross pullback-break on 1m/5m, momentum_volume
+    # fallback), "pullback_break" (pullback only), or "momentum_volume" (legacy 15m).
+    chili_momentum_entry_trigger_mode: str = Field(
+        default="hybrid",
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_TRIGGER_MODE"),
+    )
+    # Timeframe for the Ross pullback-break trigger (1m = scalp, 5m = default).
+    chili_momentum_pullback_entry_interval: str = Field(
+        default="5m",
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_ENTRY_INTERVAL"),
+    )
     chili_momentum_order_notional_guard_bps: float = Field(
         default=25.0,
         ge=0.0,
