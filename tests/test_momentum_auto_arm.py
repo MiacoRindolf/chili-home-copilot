@@ -140,6 +140,57 @@ def test_dedupe_respects_limit():
     assert [r.symbol for r in out] == [f"S{i}-USD" for i in range(5)]
 
 
+class _FakeQuery:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def filter(self, *_a, **_k):
+        return self
+
+    def all(self):
+        return self._rows
+
+
+class _DBWithRows(_FakeDB):
+    def __init__(self, rows):
+        self._rows = rows
+
+    def query(self, *_a, **_k):
+        return _FakeQuery(self._rows)
+
+
+def test_reaper_cancels_stale_pre_entry_sessions(monkeypatch):
+    from datetime import datetime
+    cancelled = []
+    monkeypatch.setattr(
+        operator_actions, "begin_live_arm", lambda *a, **k: {"ok": False},
+    )  # unused
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.automation_query.cancel_automation_session",
+        lambda db, *, user_id, session_id: cancelled.append(session_id) or {"ok": True},
+    )
+    rows = [
+        SimpleNamespace(id=8, symbol="RSC-USD", state="watching_live"),
+        SimpleNamespace(id=9, symbol="FIDA-USD", state="queued_live"),
+    ]
+    n = aa._reap_stale_watching_sessions(_DBWithRows(rows), user_id=1, now=datetime.utcnow())
+    assert n == 2
+    assert cancelled == [8, 9]
+
+
+def test_reaper_returns_zero_when_none(monkeypatch):
+    from datetime import datetime
+    n = aa._reap_stale_watching_sessions(_DBWithRows([]), user_id=1, now=datetime.utcnow())
+    assert n == 0
+
+
+def test_pass_surfaces_reaped_count(happy):
+    happy.setattr(aa, "_reap_stale_watching_sessions", lambda db, *, user_id, now: 1)
+    out = aa.run_auto_arm_pass(_FakeDB())
+    assert out.get("reaped") == 1
+    assert out["armed"] == 1  # reaping a stale slot then arming the fresh mover
+
+
 def test_picks_first_firing_candidate(happy):
     cands = [_cand("AAA-USD", 8, 0.70), _cand("BBB-USD", 8, 0.65), _cand("CCC-USD", 8, 0.60)]
     happy.setattr(aa, "_fresh_live_eligible_candidates", lambda db, *, limit: cands)

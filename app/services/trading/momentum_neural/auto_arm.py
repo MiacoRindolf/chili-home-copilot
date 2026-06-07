@@ -24,9 +24,20 @@ from sqlalchemy.orm import Session
 
 from ....config import settings
 from ....models.trading import MomentumSymbolViability, TradingAutomationSession
-from .live_fsm import LIVE_RUNNER_ACTIVE_FOR_CONCURRENCY
+from .live_fsm import (
+    LIVE_RUNNER_ACTIVE_FOR_CONCURRENCY,
+    STATE_ARMED_PENDING_RUNNER,
+    STATE_QUEUED_LIVE,
+    STATE_WATCHING_LIVE,
+)
 
 logger = logging.getLogger(__name__)
+
+# Pre-entry live states safe to reap (no position yet). Never reap entered/
+# holding/scaling/trailing/exited/cooldown — those own or just owned a position.
+_REAPABLE_PRE_ENTRY_STATES = frozenset(
+    {STATE_ARMED_PENDING_RUNNER, STATE_QUEUED_LIVE, STATE_WATCHING_LIVE}
+)
 
 
 def _auto_arm_user_id() -> int | None:
@@ -41,6 +52,46 @@ def _max_live_sessions() -> int:
 
 def _scan_limit() -> int:
     return max(1, int(getattr(settings, "chili_momentum_auto_arm_scan_limit", 10)))
+
+
+def _max_watch_seconds() -> int:
+    return max(60, int(getattr(settings, "chili_momentum_auto_arm_max_watch_seconds", 1800)))
+
+
+def _reap_stale_watching_sessions(db: Session, *, user_id: int | None, now: datetime) -> int:
+    """Cancel PRE-ENTRY live sessions that have watched too long without entering,
+    freeing the concurrency slot for a fresher surging candidate — Ross moves on
+    when a setup never triggers. Never touches a session that holds a position.
+    """
+    cutoff = now - timedelta(seconds=_max_watch_seconds())
+    try:
+        q = db.query(TradingAutomationSession).filter(
+            TradingAutomationSession.mode == "live",
+            TradingAutomationSession.state.in_(_REAPABLE_PRE_ENTRY_STATES),
+            TradingAutomationSession.started_at < cutoff,
+        )
+        if user_id is not None:
+            q = q.filter(TradingAutomationSession.user_id == int(user_id))
+        rows = q.all()
+    except Exception:
+        return 0
+    if not rows:
+        return 0
+    from .automation_query import cancel_automation_session
+
+    reaped = 0
+    for s in rows:
+        try:
+            cancel_automation_session(db, user_id=int(user_id), session_id=int(s.id))
+            reaped += 1
+            logger.warning(
+                "[auto_arm] reaped stale pre-entry session=%s %s state=%s "
+                "(watched > %ss, never entered) — freeing slot for a fresher mover",
+                s.id, s.symbol, s.state, _max_watch_seconds(),
+            )
+        except Exception:
+            logger.debug("[auto_arm] reap failed session=%s", getattr(s, "id", None), exc_info=True)
+    return reaped
 
 
 def _active_live_session_count(db: Session, *, user_id: int | None) -> int:
@@ -162,6 +213,13 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
             return out
     except Exception:
         pass
+
+    # Reap stale pre-entry sessions FIRST so a faded leftover (e.g. a name armed
+    # long ago whose intraday move never triggered) does not pin the only slot.
+    reaped = _reap_stale_watching_sessions(db, user_id=uid, now=datetime.utcnow())
+    if reaped:
+        out["reaped"] = reaped
+        db.commit()
 
     # Guard 2: global concurrency (one live position at a time by default).
     active = _active_live_session_count(db, user_id=uid)
