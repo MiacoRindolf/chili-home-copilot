@@ -159,6 +159,27 @@ class _DBWithRows(_FakeDB):
         return _FakeQuery(self._rows)
 
 
+def test_is_coinbase_tradeable_symbol():
+    assert aa._is_coinbase_tradeable_symbol("KAIO-USD") is True
+    assert aa._is_coinbase_tradeable_symbol("BTC-USDC") is True
+    assert aa._is_coinbase_tradeable_symbol("ARKK") is False
+    assert aa._is_coinbase_tradeable_symbol("CLSK") is False
+    assert aa._is_coinbase_tradeable_symbol("") is False
+
+
+def test_equity_candidate_skipped_even_if_higher_viability(happy):
+    # ARKK (equity) ranks higher + its trigger fires, but the coinbase_spot lane
+    # cannot trade it -> must be skipped; the crypto KAIO is armed instead.
+    happy.setattr(
+        aa, "_fresh_live_eligible_candidates",
+        lambda db, *, limit: [_cand("ARKK", 8, 0.80), _cand("KAIO-USD", 8, 0.65)],
+    )
+    happy.setattr(aa, "_entry_trigger_fires", lambda sym: (True, "momentum_ok"))
+    out = aa.run_auto_arm_pass(_FakeDB())
+    assert out["armed"] == 1
+    assert out["symbol"] == "KAIO-USD"
+
+
 def test_reaper_cancels_stale_pre_entry_sessions(monkeypatch):
     from datetime import datetime
     cancelled = []

@@ -2875,6 +2875,14 @@ class Settings(BaseSettings):
         le=86400,
         validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_MAX_WATCH_SECONDS"),
     )
+    # The momentum live lane executes via coinbase_spot (crypto). The viability
+    # board ALSO carries equities (ARKK, CLSK...) that go live-eligible at US
+    # market open — auto-arming one via Coinbase would fail mid-session. When True
+    # (default) auto-arm only considers Coinbase-tradeable crypto pairs.
+    chili_momentum_auto_arm_crypto_only: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_CRYPTO_ONLY"),
+    )
     # Shake-out learning: how long after an exit to watch the price path to judge
     # whether the thesis would have worked (was the stop too tight?). 30min.
     chili_momentum_post_exit_horizon_seconds: int = Field(
