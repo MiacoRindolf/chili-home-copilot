@@ -31,6 +31,45 @@
     </div>
   </div>
   <div id="plans-portfolio-banner" class="mon-plans-portfolio" style="display:none;"></div>
+  <!-- Momentum Lane (autonomous Ross-style) — live automation sessions, surfaced here
+       so they're visible alongside open positions. Self-contained + graceful-fail. -->
+  <details class="mon-feed-details" id="monitor-momentum-details" open>
+    <summary class="mon-feed-summary">Momentum Lane <span class="mon-feed-hint" id="mon-momentum-count"></span> <span class="mon-feed-hint">· live autonomous sessions · <a href="/trading/automation">full view →</a></span></summary>
+    <div id="monitor-momentum-list" class="mon-feed-list" style="display:flex;flex-direction:column;gap:4px;padding:4px 0;"></div>
+  </details>
+  <script>
+  (function(){
+    var ACTIVE = ['queued_live','watching_live','live_entry_candidate','live_pending_entry','live_entered','live_scaling_out','live_trailing','live_bailout','live_cooldown'];
+    function pnl(v){ if(v==null||isNaN(Number(v)))return ''; var n=Number(v); return (n>=0?'+$':'-$')+Math.abs(n).toFixed(2); }
+    function load(){
+      try {
+        fetch('/api/trading/momentum/automation/sessions?mode=live&limit=30', {credentials:'same-origin'})
+          .then(function(r){ return r.json(); })
+          .then(function(d){
+            var list = document.getElementById('monitor-momentum-list');
+            var cnt = document.getElementById('mon-momentum-count');
+            if(!list) return;
+            var rows = ((d && d.sessions) || []).filter(function(s){ return ACTIVE.indexOf((s.state||'').toLowerCase()) >= 0; });
+            if(cnt) cnt.textContent = rows.length ? '(' + rows.length + ' live)' : '';
+            if(!rows.length){ list.innerHTML = '<div style="opacity:.6;font-size:.85em;padding:2px 4px;">No live momentum sessions right now — waiting for an explosive setup.</div>'; return; }
+            list.innerHTML = rows.map(function(s){
+              var le = s.live_execution || {};
+              var inpos = le.in_position ? '<span style="color:#3fb950;"> · in position</span>' : '';
+              var p = pnl(le.realized_pnl_usd);
+              var pc = p ? ('<span style="margin-left:auto;color:'+(String(p).indexOf('-')===0?'#f85149':'#3fb950')+';">'+p+'</span>') : '';
+              return '<div style="display:flex;align-items:center;gap:8px;font-size:.88em;padding:3px 6px;border-radius:4px;background:rgba(255,255,255,.03);">'
+                + '<strong>'+(s.symbol||'?')+'</strong>'
+                + '<span class="ta-badge" style="font-size:.8em;">'+(s.state||'')+'</span>'
+                + inpos + pc + '</div>';
+            }).join('');
+          })
+          .catch(function(){});
+      } catch(e){}
+    }
+    load();
+    setInterval(load, 20000);
+  })();
+  </script>
   <details class="mon-imminent-details" id="monitor-imminent-details">
     <summary class="mon-imminent-summary">Imminent alerts <span class="mon-imminent-count" id="mon-imminent-count"></span> <span class="mon-feed-hint">viable alerts you haven't acted on</span></summary>
     <div id="monitor-imminent-list" class="mon-imminent-list"></div>
