@@ -73,10 +73,18 @@ def test_kill_switch_skips(happy):
 
 
 def test_concurrency_skips(happy):
-    happy.setattr(aa, "_active_live_session_count", lambda db, *, user_id: 1)
+    # default max_concurrent_live_sessions is now 5 — full at 5 active
+    happy.setattr(aa, "_active_live_session_count", lambda db, *, user_id: 5)
     out = aa.run_auto_arm_pass(_FakeDB())
     assert out["skipped"] == "live_session_active"
-    assert out["active"] == 1
+    assert out["active"] == 5
+
+
+def test_arms_when_below_concurrency_cap(happy):
+    # 3 active < 5 cap -> still arms a new one
+    happy.setattr(aa, "_active_live_session_count", lambda db, *, user_id: 3)
+    out = aa.run_auto_arm_pass(_FakeDB())
+    assert out["armed"] == 1
 
 
 def test_drawdown_breaker_skips(happy):

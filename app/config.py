@@ -2280,19 +2280,19 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_LOSS_PER_TRADE_USD", "CHILI_MOMENTUM_RISK_MAX_LOSS_PER_TRADE_USD"),
     )
     chili_momentum_risk_max_concurrent_sessions: int = Field(
-        default=6,
+        default=10,
         ge=1,
         le=100,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_MAX_CONCURRENT_SESSIONS"),
     )
     chili_momentum_risk_max_concurrent_live_sessions: int = Field(
-        default=1,
+        default=5,
         ge=1,
         le=20,
         validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_CONCURRENT_LIVE_SESSIONS", "CHILI_MOMENTUM_RISK_MAX_CONCURRENT_LIVE_SESSIONS"),
     )
     chili_momentum_risk_max_concurrent_positions: int = Field(
-        default=3,
+        default=5,
         ge=1,
         le=50,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_MAX_CONCURRENT_POSITIONS"),
