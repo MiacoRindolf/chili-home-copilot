@@ -135,6 +135,56 @@ def equity_relative_daily_loss_cap(fixed_fallback_usd: float) -> float:
     )
 
 
+def compute_risk_first_quantity(
+    *,
+    entry_price: float,
+    atr_pct: float,
+    max_loss_usd: float,
+    max_notional_ceiling_usd: float,
+    base_increment: float | None = None,
+    base_min_size: float | None = None,
+    stop_atr_mult: float = 0.60,
+) -> tuple[float, dict[str, Any]]:
+    """Risk-first sizing (Ross-style): qty = max_loss_usd / stop_distance, capped at
+    the notional ceiling.
+
+    A TIGHTER stop buys MORE size at constant risk (Ross's core sizing edge) — vs
+    notional-first where stop distance doesn't drive size. Stop distance uses the
+    same ATR formula as ``stop_target_prices`` (max(0.003, atr_pct x stop_atr_mult)).
+    Returns ``(qty, meta)``; qty=0 with a ``reason`` when inputs are unusable.
+    docs/DESIGN/MOMENTUM_LANE.md
+    """
+    e = float(entry_price or 0.0)
+    if e <= 0 or not math.isfinite(e):
+        return 0.0, {"reason": "invalid_entry"}
+    loss = float(max_loss_usd or 0.0)
+    if loss <= 0 or not math.isfinite(loss):
+        return 0.0, {"reason": "max_loss_nonpositive"}
+    stop_pct = max(0.003, float(atr_pct or 0.0) * float(stop_atr_mult or 0.60))
+    stop_distance = e * stop_pct
+    if stop_distance <= 0 or not math.isfinite(stop_distance):
+        return 0.0, {"reason": "stop_distance_invalid"}
+    qty = loss / stop_distance
+    capped_by = None
+    ceiling = float(max_notional_ceiling_usd or 0.0)
+    if ceiling > 0 and qty * e > ceiling:
+        qty = ceiling / e
+        capped_by = "notional_ceiling"
+    inc = float(base_increment) if base_increment and base_increment > 0 else None
+    if inc:
+        qty = math.floor(qty / inc) * inc
+    mn = float(base_min_size) if base_min_size and base_min_size > 0 else None
+    if mn and qty < mn:
+        return 0.0, {"reason": "below_min_size", "stop_distance": round(stop_distance, 8)}
+    return float(qty), {
+        "model": "risk_first",
+        "stop_distance": round(stop_distance, 8),
+        "risk_usd": round(loss, 2),
+        "notional_usd": round(qty * e, 2),
+        "capped_by": capped_by,
+    }
+
+
 @dataclass(frozen=True)
 class MomentumAutomationRiskPolicy:
     """Conservative defaults for short-horizon crypto momentum (pre-runner gates)."""

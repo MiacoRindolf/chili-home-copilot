@@ -41,7 +41,7 @@ from ..decision_ledger import (
 )
 from ..deployment_ladder_service import record_trade_outcome_metrics
 from .risk_evaluator import evaluate_proposed_momentum_automation
-from .risk_policy import RISK_SNAPSHOT_KEY, policy_float_cap, policy_int_cap
+from .risk_policy import RISK_SNAPSHOT_KEY, compute_risk_first_quantity, policy_float_cap, policy_int_cap
 from .paper_execution import regime_atr_pct, stop_target_prices, utc_iso
 from .persistence import variant_for_id
 from .live_fsm import (
@@ -1548,8 +1548,28 @@ def tick_live_session(
         inc = prod.base_increment if prod else None
         mn = prod.base_min_size if prod else None
         guarded_ask = ask * _notional_guard_multiplier()
-        qty_raw = max_notional / guarded_ask
-        qty = _round_base_size(qty_raw, inc, mn)
+        # Risk-first sizing (Ross-style): qty = per-trade max-loss / stop distance,
+        # capped at the (conviction-scaled, equity-relative) notional ceiling — a
+        # tighter stop buys MORE size at constant risk. Falls back to notional-first
+        # when ATR/inputs are unusable. (docs/DESIGN/MOMENTUM_LANE.md)
+        _regime = via.regime_snapshot_json if isinstance(via.regime_snapshot_json, dict) else {}
+        _rf_qty, _rf_meta = compute_risk_first_quantity(
+            entry_price=guarded_ask,
+            atr_pct=regime_atr_pct(_regime),
+            max_loss_usd=policy_float_cap(
+                caps, "max_loss_per_trade_usd", settings.chili_momentum_risk_max_loss_per_trade_usd
+            ),
+            max_notional_ceiling_usd=max_notional,
+            base_increment=inc,
+            base_min_size=mn,
+            stop_atr_mult=float(params.get("stop_atr_mult") or 0.60),
+        )
+        if _rf_qty and _rf_qty > 0:
+            qty = _rf_qty
+            le["entry_sizing"] = _rf_meta
+        else:
+            qty = _round_base_size(max_notional / guarded_ask, inc, mn)
+            le["entry_sizing"] = {"model": "notional_first_fallback", "reason": _rf_meta.get("reason")}
         if qty <= 0:
             _emit(db, sess, "live_error", {"reason": "size_zero_after_rounding"})
             _safe_transition(db, sess, STATE_LIVE_ERROR)
