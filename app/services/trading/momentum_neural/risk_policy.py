@@ -212,9 +212,9 @@ class MomentumAutomationRiskPolicy:
     mode_scope: str = "both"  # paper | live | both (informational)
     max_daily_loss_usd: float = 250.0
     max_loss_per_trade_usd: float = 50.0
-    max_concurrent_sessions: int = 6
-    max_concurrent_live_sessions: int = 1
-    max_concurrent_positions: int = 3
+    max_concurrent_sessions: int = 10
+    max_concurrent_live_sessions: int = 5
+    max_concurrent_positions: int = 5
     max_notional_per_trade_usd: float = 500.0
     max_position_size_base: float = 1_000_000.0
     max_spread_bps_paper: float = 28.0
@@ -246,9 +246,9 @@ class MomentumAutomationRiskPolicy:
         return cls(
             max_daily_loss_usd=float(getattr(s, "chili_momentum_risk_max_daily_loss_usd", 250.0)),
             max_loss_per_trade_usd=float(getattr(s, "chili_momentum_risk_max_loss_per_trade_usd", 50.0)),
-            max_concurrent_sessions=int(getattr(s, "chili_momentum_risk_max_concurrent_sessions", 6)),
-            max_concurrent_live_sessions=int(getattr(s, "chili_momentum_risk_max_concurrent_live_sessions", 1)),
-            max_concurrent_positions=int(getattr(s, "chili_momentum_risk_max_concurrent_positions", 3)),
+            max_concurrent_sessions=int(getattr(s, "chili_momentum_risk_max_concurrent_sessions", 10)),
+            max_concurrent_live_sessions=int(getattr(s, "chili_momentum_risk_max_concurrent_live_sessions", 5)),
+            max_concurrent_positions=int(getattr(s, "chili_momentum_risk_max_concurrent_positions", 5)),
             max_notional_per_trade_usd=float(getattr(s, "chili_momentum_risk_max_notional_per_trade_usd", 500.0)),
             max_position_size_base=float(getattr(s, "chili_momentum_risk_max_position_size_base", 1_000_000.0)),
             max_spread_bps_paper=float(getattr(s, "chili_momentum_risk_max_spread_bps_paper", 28.0)),
