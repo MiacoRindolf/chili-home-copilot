@@ -107,8 +107,9 @@ def test_smart_backtest_persists_completed_tickers_without_order_blocking(monkey
         evidence_count=0,
     )
 
+    session = _FakeSession()
     result = backtest_engine.smart_backtest_insight(
-        _FakeSession(),
+        session,
         insight,
         target_tickers=_TARGET_TICKERS,
     )
@@ -136,6 +137,12 @@ def test_smart_backtest_persists_completed_tickers_without_order_blocking(monkey
     assert result["lineage_status"] == "complete"
     assert result["lineage_missing_fields"] == []
     assert result["promotion_grade_provenance"] is True
+
+    # idle-in-transaction hygiene: every persisted ticker must release its
+    # read transaction (the param-set lineage SELECT runs AFTER save_backtest
+    # commits) so it does not sit idle-in-transaction across the next ticker's
+    # backtest compute and trip idle_in_transaction_session_timeout.
+    assert session.rollbacks >= _TARGET_TICKERS
 
     saved_tickers.clear()
     condition_threshold[0] = 55
