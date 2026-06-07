@@ -230,10 +230,14 @@ def test_shadow_score_skipped_when_pattern_has_no_corrected_win_rate(db, shadow_
     assert after == before
 
 
-def test_shadow_score_falls_back_to_legacy_win_rate_when_corrected_null(db, shadow_mode):
-    """Phase A contract: corrected_* preferred, legacy win_rate is a valid fallback."""
+def test_shadow_score_falls_back_to_raw_realized_win_rate_when_corrected_null(db, shadow_mode):
+    """Realized-only contract (PR #366 / ff9cc05): corrected_* preferred, raw_realized_*
+    is the valid fallback. The conflated legacy ``win_rate`` is NEVER used for live
+    decisions (get_realized_pattern_stats), so a present legacy value must be ignored."""
     pat = _mk_pattern(db, corrected_win_rate=None)
-    pat.win_rate = 0.58
+    pat.raw_realized_win_rate = 0.58
+    pat.raw_realized_trade_count = 120
+    pat.win_rate = 0.99  # legacy must be ignored — never seeds raw_prob
     db.flush()
     alert = _mk_alert(db, pattern_id=pat.id, regime_at_alert="range")
 

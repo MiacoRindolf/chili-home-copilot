@@ -86,6 +86,9 @@ def _seed_closed_trade(
         pnl=pnl,
         scan_pattern_id=pattern_id,
         user_id=user_id,
+        # Clean (non-dirty, non-empty) exit reason so the writer's
+        # f-realized-ev-exit-cleanliness filter (learning.py) keeps the row.
+        exit_reason="target_hit",
     )
     db.add(t)
     db.commit()

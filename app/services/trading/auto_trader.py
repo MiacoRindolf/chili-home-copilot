@@ -6543,7 +6543,14 @@ def _process_one_alert(
             _age_ceiling_s = float(
                 getattr(settings, "chili_autotrader_revalidation_max_price_age_seconds", 60) or 0
             )
-            _tf_s = float(timeframe_to_seconds(getattr(alert, "timeframe", None) or "") or 0)
+            _tf_raw = getattr(alert, "timeframe", None) or ""
+            try:
+                _tf_s = float(timeframe_to_seconds(_tf_raw))
+            except ValueError:
+                # Alert without a usable timeframe: skip the bar-window age bound
+                # (the configured ceiling below still applies). Preserves the prior
+                # ``or 0`` intent, which the strict helper otherwise defeats by raising.
+                _tf_s = 0.0
             # Adaptive max age: as fresh as the setup's own bar window, capped by
             # the configured ceiling (an entry always needs a current price).
             _age_bounds = [v for v in (_tf_s, _age_ceiling_s) if v > 0]
