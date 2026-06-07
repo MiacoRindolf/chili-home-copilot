@@ -237,6 +237,25 @@ def score_viability(
     except (TypeError, ValueError, AttributeError):
         pass
 
+    # E5: news-catalyst tilt — a mover with a known earnings catalyst is more
+    # likely a real Ross gapper than a random spike. Additive boost (never a
+    # penalty); no-op when the catalyst set is absent or for crypto. (catalyst.py)
+    try:
+        _cat_syms = (
+            ctx.meta.get("catalyst_symbols")
+            if isinstance(getattr(ctx, "meta", None), dict)
+            else None
+        )
+        if _cat_syms:
+            from .catalyst import catalyst_viability_delta
+
+            _cat_delta = catalyst_viability_delta(symbol, _cat_syms)
+            if _cat_delta:
+                base += _cat_delta
+                warnings.append("News catalyst (earnings) — Ross-style")
+    except (TypeError, ValueError, AttributeError):
+        pass
+
     viability = max(0.0, min(1.0, base))
 
     rationale = (
