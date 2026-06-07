@@ -2930,6 +2930,19 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_POST_EXIT_HORIZON_SECONDS"),
     )
 
+    # Shake-out learning: outer age bound for the durable-cursor labeler. A pending
+    # marker older than this (measured from the marker's own exit_time, NOT the
+    # session's frozen updated_at) is retired as 'expired' rather than labeled — the
+    # post-exit bars would be gappy and the signal stale. Generous (48h) so a
+    # scheduler restart / backlog can never orphan a marker the way the old
+    # updated_at>=now-3h window did. (post_exit_excursion.run_post_exit_excursion_pass)
+    chili_momentum_post_exit_max_age_seconds: int = Field(
+        default=172800,
+        ge=3600,
+        le=1209600,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_POST_EXIT_MAX_AGE_SECONDS"),
+    )
+
     chili_auto_execute_stops: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_AUTO_EXECUTE_STOPS"),

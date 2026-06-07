@@ -207,19 +207,36 @@ def run_post_exit_excursion_pass(db, *, now=None) -> dict[str, Any]:
     # same open position every cycle.)
     _holding_states = frozenset({STATE_LIVE_ENTERED, STATE_LIVE_TRAILING, STATE_LIVE_SCALING_OUT})
 
-    out: dict[str, Any] = {"checked": 0, "labeled": 0, "shakeouts": 0, "waiting": 0, "errors": 0, "skipped_open": 0}
+    out: dict[str, Any] = {
+        "checked": 0, "labeled": 0, "shakeouts": 0, "waiting": 0,
+        "errors": 0, "skipped_open": 0, "expired": 0,
+    }
     now = now or datetime.now(timezone.utc).replace(tzinfo=None)
     horizon_default = int(getattr(settings, "chili_momentum_post_exit_horizon_seconds", 1800) or 1800)
-    lookback = timedelta(seconds=horizon_default * 4 + 3600)
+    max_age_seconds = int(getattr(settings, "chili_momentum_post_exit_max_age_seconds", 172800) or 172800)
+    # Durable cursor — select on the MARKER STATE in JSONB, not a wall-clock window
+    # on updated_at. A terminal session freezes updated_at at exit, but a marker can
+    # only be labeled AFTER its horizon (~30min) elapses; the old
+    # `updated_at >= now - lookback` (~3h) window therefore orphaned every marker
+    # whenever the gap between exit and this pass exceeded the window (scheduler
+    # restart, backlog) — permanently, since updated_at never moves again. Filtering
+    # on `post_exit_excursion_pending.state == 'pending'` re-selects a marker until
+    # it is actually processed; the max-age guard + attempts cap below bound the work
+    # and processed markers drop out of the 'pending' set, keeping the scan small.
+    pending_state = (
+        TradingAutomationSession.risk_snapshot_json["momentum_live_execution"][
+            "post_exit_excursion_pending"
+        ]["state"].astext
+    )
     try:
         rows = (
             db.query(TradingAutomationSession)
             .filter(
                 TradingAutomationSession.mode == "live",
-                TradingAutomationSession.updated_at >= now - lookback,
+                pending_state == "pending",
             )
             .order_by(TradingAutomationSession.updated_at.desc())
-            .limit(200)
+            .limit(500)
             .all()
         )
     except Exception:
@@ -244,7 +261,15 @@ def run_post_exit_excursion_pass(db, *, now=None) -> dict[str, Any]:
             _persist_pending(db, sess, snap, le, pend)
             out["errors"] += 1
             continue
-        if (now - exit_t).total_seconds() < horizon:
+        age_seconds = (now - exit_t).total_seconds()
+        if age_seconds > max_age_seconds:
+            # Too old to label reliably — retire the marker so it leaves the
+            # 'pending' set instead of being rescanned forever.
+            pend["state"] = "expired"
+            _persist_pending(db, sess, snap, le, pend)
+            out["expired"] += 1
+            continue
+        if age_seconds < horizon:
             out["waiting"] += 1
             continue
         try:

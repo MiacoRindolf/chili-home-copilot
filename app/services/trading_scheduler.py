@@ -855,7 +855,10 @@ def _run_momentum_post_exit_excursion_job():
             from .trading.momentum_neural.post_exit_excursion import run_post_exit_excursion_pass
 
             summary = run_post_exit_excursion_pass(db)
-            if summary.get("labeled") or summary.get("shakeouts"):
+            # Surface whenever the pass touched OR retired a marker (not only on a
+            # successful label) so a silent stall — markers checked/expired/errored
+            # but never labeled — is observable instead of invisible.
+            if any(summary.get(k) for k in ("labeled", "shakeouts", "checked", "expired", "errors")):
                 logger.info("[scheduler] post_exit_excursion: %s", summary)
         except Exception:
             db.rollback()

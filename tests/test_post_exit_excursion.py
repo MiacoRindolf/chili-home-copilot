@@ -191,6 +191,44 @@ def test_pass_skips_open_reentered_session(monkeypatch):
     assert sess.risk_snapshot_json["momentum_live_execution"]["post_exit_excursion_pending"]["state"] == "pending"
 
 
+def test_pass_expires_ancient_marker(monkeypatch):
+    # A pending marker far older than the max-age bound is retired as 'expired'
+    # (leaves the durable 'pending' set) rather than rescanned or labeled forever.
+    from datetime import datetime, timedelta
+    from types import SimpleNamespace
+
+    import app.services.trading.momentum_neural.post_exit_excursion as pex
+
+    now = datetime(2026, 6, 7, 3, 0, 0)
+    pending = {
+        "symbol": "KAIO-USD", "entry_price": 0.0415, "exit_price": 0.0408,
+        "original_stop": 0.0411, "original_target": 0.0420, "side_long": True,
+        "exit_reason": "stop", "realized_pnl": -4.0,
+        "exit_time_utc": (now - timedelta(hours=60)).isoformat(),  # > 48h max-age
+        "horizon_seconds": 1800, "state": "pending",
+    }
+    sess = SimpleNamespace(
+        id=9, state="live_cancelled",
+        risk_snapshot_json={"momentum_live_execution": {"post_exit_excursion_pending": pending}},
+    )
+
+    class _DB:
+        def query(self, *a, **k):
+            class _Q:
+                def filter(self, *a, **k): return self
+                def order_by(self, *a, **k): return self
+                def limit(self, *a, **k): return self
+                def all(self_inner): return [sess]
+            return _Q()
+        def add(self, *a, **k): pass
+        def commit(self): pass
+
+    out = pex.run_post_exit_excursion_pass(_DB(), now=now)
+    assert out["expired"] == 1
+    assert out["labeled"] == 0
+    assert sess.risk_snapshot_json["momentum_live_execution"]["post_exit_excursion_pending"]["state"] == "expired"
+
+
 def test_short_side_shakeout():
     # short: entry 100, stopped at 102, then price fell to 95 (past target 96)
     out = compute_post_exit_excursion(
@@ -200,3 +238,76 @@ def test_short_side_shakeout():
     )
     assert out["counterfactual_target_hit"] is True
     assert out["outcome_class"] == "shakeout"
+
+
+# --- consumer parity: the SELECTION aggregate must USE the shake-out label, not
+# just store it. A shake-out (negative realized PnL) is a GOOD setup the stop gave
+# back; the aggregate must credit it instead of scoring it as a thesis failure. ---
+
+def _outcome_row(rb, pnl, label=None, oc="cancelled_in_trade", weight=1.0):
+    from types import SimpleNamespace
+
+    summary = {"post_exit_label": label} if label is not None else {}
+    return SimpleNamespace(
+        return_bps=rb, realized_pnl_usd=pnl, outcome_class=oc,
+        evidence_weight=weight, extracted_summary_json=summary,
+    )
+
+
+def test_aggregate_credits_shakeout_setup_despite_negative_pnl():
+    from app.services.trading.momentum_neural.evolution import (
+        _aggregate_rows,
+        _viability_delta_from_slices,
+    )
+
+    # Two real-shaped shake-outs: stopped for a loss, then ran +5.5% / +7.6% past target.
+    shakeout_a = {
+        "outcome_class": "shakeout", "setup_quality": 1.0, "stop_too_tight": True,
+        "counterfactual_target_hit": True, "post_exit_mfe_pct": 5.5,
+    }
+    shakeout_b = {
+        "outcome_class": "shakeout", "setup_quality": 1.0, "stop_too_tight": True,
+        "counterfactual_target_hit": True, "post_exit_mfe_pct": 7.6,
+    }
+    rows = [_outcome_row(-32.0, -0.8, shakeout_a), _outcome_row(-258.0, -6.5, shakeout_b)]
+    agg = _aggregate_rows(rows)
+
+    assert agg["mean_return_bps"] < 0                  # raw realized P&L IS negative
+    assert agg["mean_setup_quality"] == 1.0            # ...but the setup score is POSITIVE
+    assert agg["mean_setup_adjusted_return_bps"] > 0   # ...and it is credited, not penalised
+    assert agg["shakeout_count"] == 2
+    assert agg["setup_credited_count"] == 2
+
+    # A shake-out must NOT degrade viability (the delta uses the setup-adjusted mean).
+    live = {
+        "n": 3,
+        "mean_return_bps": agg["mean_return_bps"],
+        "mean_setup_adjusted_return_bps": agg["mean_setup_adjusted_return_bps"],
+    }
+    assert _viability_delta_from_slices({"n": 0}, live) >= 0.0
+
+
+def test_aggregate_does_not_credit_thesis_invalidated():
+    from app.services.trading.momentum_neural.evolution import _aggregate_rows
+
+    bad = {
+        "outcome_class": "thesis_invalidated", "setup_quality": 0.0, "stop_too_tight": False,
+        "counterfactual_target_hit": False, "post_exit_mfe_pct": 0.1,
+    }
+    agg = _aggregate_rows([_outcome_row(-200.0, -5.0, bad)])
+    # Genuinely wrong setup: stays a loss in BOTH channels, contributes no credit.
+    assert agg["mean_return_bps"] < 0
+    assert agg["mean_setup_adjusted_return_bps"] < 0
+    assert agg["mean_setup_quality"] == 0.0
+    assert agg["shakeout_count"] == 0
+    assert agg["setup_credited_count"] == 0
+
+
+def test_aggregate_unlabeled_rows_unchanged():
+    # No post-exit label → setup-adjusted return must equal raw return (back-compat).
+    from app.services.trading.momentum_neural.evolution import _aggregate_rows
+
+    rows = [_outcome_row(120.0, 3.0, None, oc="target_win"), _outcome_row(-80.0, -2.0, None)]
+    agg = _aggregate_rows(rows)
+    assert agg["mean_setup_adjusted_return_bps"] == agg["mean_return_bps"]
+    assert agg["setup_credited_count"] == 0
