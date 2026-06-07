@@ -2002,16 +2002,19 @@ class ExitParityLog(Base):
     """
 
     __tablename__ = "trading_exit_parity_log"
+    # NOTE: this index set deliberately matches the post-migration-301 production
+    # schema. ``_migration_301_exit_parity_log_index_prune_and_autovacuum`` dropped
+    # 6 zero-scan indexes from this firehose-write table -- source, ticker, agree,
+    # strict_agree, action_class and priority_winner (each ``..._created``). They
+    # are intentionally NOT declared here so a fresh-DB ``create_all()`` does not
+    # recreate indexes that mig 301 only drops again (create+drop churn). Four
+    # survive: mode / created_retention / pattern_created are the ones real read
+    # paths use and mig 301 keeps. ``ix_exit_parity_created_pattern`` is the
+    # divergence-discovery probe index from mig 296 -- it is absent on prod only
+    # because mig 296 *defers* it on tables over its size cap, so it stays here as
+    # the canonical (maintenance-window-built) schema, not as mig-301 churn.
     __table_args__ = (
-        Index("ix_exit_parity_source_created", "source", "created_at"),
-        Index("ix_exit_parity_ticker_created", "ticker", "created_at"),
         Index("ix_exit_parity_mode_created", "mode", "created_at"),
-        Index("ix_exit_parity_agree_created", "agree_bool", "created_at"),
-        Index(
-            "ix_exit_parity_strict_agree_created",
-            "agree_strict_bool",
-            "created_at",
-        ),
         Index("ix_exit_parity_created_retention", "created_at", "id"),
         Index(
             "ix_exit_parity_created_pattern",
@@ -2020,9 +2023,6 @@ class ExitParityLog(Base):
             "id",
             postgresql_where=text("scan_pattern_id IS NOT NULL"),
         ),
-        # Migration 230 indices for the verdict/cutover-gate query paths.
-        Index("ix_exit_parity_action_class_created", "action_class", "created_at"),
-        Index("ix_exit_parity_priority_winner_created", "priority_winner", "created_at"),
         Index(
             "ix_exit_parity_pattern_created",
             "scan_pattern_id",
@@ -2032,6 +2032,13 @@ class ExitParityLog(Base):
         ),
     )
 
+    # ``primary_key=True`` is required by SQLAlchemy (every mapped class needs a
+    # mapped PK), but mig 301 dropped the physical
+    # ``trading_exit_parity_log_pkey`` constraint to remove per-insert write
+    # amplification on this hottest-write table. This model<->DB drift is
+    # intentional and unavoidable: the mapping is logical only; inserts still get
+    # ``id`` from the BigSerial sequence default. Do not "fix" it with a migration
+    # that re-adds the constraint.
     id: int = Column(BigInteger, primary_key=True, autoincrement=True)
     source: str = Column(String(16), nullable=False)
     position_id: Optional[int] = Column(BigInteger, nullable=True)
