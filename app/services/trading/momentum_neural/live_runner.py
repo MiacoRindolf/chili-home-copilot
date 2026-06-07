@@ -547,6 +547,24 @@ def _complete_confirmed_live_exit(
     )
     _finalize_live_decision_after_exit(db, sess, le=le, realized_pnl_usd=pnl, slip_bps=slip_bps)
     le["last_exit_reason"] = reason
+    # Shake-out learning: stash the inputs (incl. the REAL momentum stop/target,
+    # still on the position here) so a deferred job can judge whether the thesis
+    # worked AFTER we exited — was the stop too tight? — instead of the learner
+    # seeing a shallow loss. (post_exit_excursion.py; docs/DESIGN/MOMENTUM_LANE.md)
+    _exit_pos = le.get("position") if isinstance(le.get("position"), dict) else {}
+    le["post_exit_excursion_pending"] = {
+        "symbol": sess.symbol,
+        "entry_price": float(entry_price),
+        "exit_price": float(fill_price),
+        "original_stop": _exit_pos.get("stop_price"),
+        "original_target": _exit_pos.get("target_price"),
+        "side_long": True,
+        "exit_reason": reason,
+        "realized_pnl": pnl,
+        "exit_time_utc": _utcnow().isoformat(),
+        "horizon_seconds": int(getattr(settings, "chili_momentum_post_exit_horizon_seconds", 1800) or 1800),
+        "state": "pending",
+    }
     le["position"] = None
     le.pop("pending_exit_reason", None)
     le.pop("pending_exit_quantity", None)
