@@ -378,3 +378,70 @@ def test_dispatcher_uses_extended_mining_lease(monkeypatch) -> None:
 
     assert result["processed"] == 0
     assert captured == [("market_snapshots_batch", 3600)]
+
+
+def test_dispatcher_detaches_claimed_events_before_handlers(db, monkeypatch) -> None:
+    """Claimed BrainWorkEvent rows are detached before handlers run.
+
+    Regression for the idle-in-transaction cascade: if the claimed rows stay
+    attached, the per-event ``ev.id`` / ``ev.payload`` reads reload BrainWorkEvent
+    on the dispatcher session, opening a transaction that sits idle-in-transaction
+    across (often fresh-session) handler compute and trips
+    ``idle_in_transaction_session_timeout``. A detached-with-data row reads its
+    attributes from memory, so no reload / held transaction can occur.
+    """
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.services.trading.brain_work.handlers import (
+        cpcv_gate,
+        profitability,
+        quality_score,
+    )
+
+    captured: dict[str, object] = {}
+
+    def capture_handler(db_arg, ev, user_id) -> None:
+        captured["detached"] = sa_inspect(ev).detached
+        captured["id"] = ev.id  # readable without a reload
+        captured["payload"] = ev.payload
+
+    monkeypatch.setattr(cpcv_gate, "handle_backtest_completed", capture_handler)
+    monkeypatch.setattr(
+        quality_score, "handle_backtest_completed_quality", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        profitability, "handle_recert_rescue_post_backtest", lambda *a, **k: None
+    )
+
+    event_id = enqueue_work_event(
+        db,
+        event_type="backtest_completed",
+        dedupe_key="bt_done:dispatcher-detach-claimed",
+        payload={"scan_pattern_id": 585},
+        max_attempts=1,
+    )
+    db.commit()
+    assert event_id is not None
+
+    result = run_brain_work_dispatch_round(
+        db,
+        max_backtest=0,
+        max_exec_feedback=0,
+        max_edge_reliability=0,
+        max_recert_rescue=0,
+        max_exit_variant=0,
+        max_provenance=0,
+        max_mine=0,
+        max_cpcv_gate=1,
+        max_promote=0,
+        max_trade_close=0,
+        run_thin_evidence_sweep=False,
+        run_time_decay_exit_variant_sweep=False,
+        run_market_snapshots_watchdog=False,
+    )
+    db.commit()
+
+    assert result["processed"] == 1
+    assert captured.get("detached") is True
+    assert captured.get("id") == event_id
+    assert captured.get("payload") == {"scan_pattern_id": 585}
