@@ -875,7 +875,17 @@ def submit_robinhood_trade_exit(
     client_order_id: str,
     adapter: Any | None = None,
     monitor_exit_meta: dict[str, Any] | None = None,
+    price_protected: bool = False,
 ) -> dict[str, Any]:
+    """Submit a Robinhood equity sell to close *trade*.
+
+    ``price_protected=True`` forces a marketable (bid-pegged) limit order even
+    during the regular session instead of a naked market order. The stale-
+    resting-exit re-queue path (``reconcile_pending_exit_liveness``) uses this
+    so a leaked queued market-on-open is replaced by a bounded, marketable
+    exit. Off-hours already uses a protective limit, so the flag only changes
+    regular-hours behaviour.
+    """
     from .venue.robinhood_spot import RobinhoodSpotAdapter
 
     # DDD -- options exit short-circuit. The equity exit path (this
@@ -1053,8 +1063,13 @@ def submit_robinhood_trade_exit(
         "market_hours_override": str(window.get("market_hours") or "regular_hours"),
         "extended_hours_override": bool(window.get("market_hours") != "regular_hours"),
     }
-    if window.get("session") != "regular_hours":
-        if not _is_whole_share_quantity(qty):
+    off_hours = window.get("session") != "regular_hours"
+    # Use a marketable (bid-pegged) limit instead of a naked market order when
+    # off-hours (extended/overnight sessions are limit-only) OR when the caller
+    # asked for price protection. The whole-share constraint is an off-hours
+    # broker rule only; regular-hours protective limits accept fractional size.
+    if off_hours or price_protected:
+        if off_hours and not _is_whole_share_quantity(qty):
             _mark_deferred_exit(
                 db,
                 trade,
@@ -1100,7 +1115,7 @@ def submit_robinhood_trade_exit(
         order_type = "limit"
         limit_price = float(limit_ctx["limit_price"])
         reference_price = _safe_float(limit_ctx.get("reference_price"))
-        submit_base_size = str(int(round(qty)))
+        submit_base_size = str(int(round(qty))) if off_hours else str(round(qty, 8))
 
     if reference_price is None:
         try:
@@ -1615,6 +1630,184 @@ def sync_pending_exit_order(
         return {"state": state}
 
     return {"state": state or "working"}
+
+
+_URGENT_EXIT_REASONS = {
+    "stop",
+    "stop_loss_hit",
+    "pattern_exit_now",
+    "desk_close_now",
+}
+
+
+def _is_urgent_exit_reason(reason: str | None) -> bool:
+    """Whether a pending-exit reason means 'get out now' (re-queue eligible).
+
+    Target / take-profit exits are *meant* to rest at a limit until the
+    favourable price prints; force-converting them to a marketable exit would
+    dump the position below target. Only urgent exits (stop / stop-loss /
+    pattern exit-now / desk close / emergency_*) are escalated when they leak
+    as a stale resting order.
+    """
+    r = (reason or "").strip().lower()
+    return r in _URGENT_EXIT_REASONS or r.startswith("emergency_")
+
+
+def _pending_exit_is_stale_resting(
+    trade: Trade,
+    *,
+    window: dict[str, Any],
+    broker_order: dict[str, Any],
+    now_utc: datetime,
+) -> bool:
+    """True when a resting exit order has lived through a regular-session open
+    without routing — a leaked/stale queue, not normal latency.
+
+    Adaptive by design: the staleness boundary is the market's own regular
+    session open (holiday/weekend-aware via *window*), not a fixed minute
+    threshold. A sell requested before the current session opened that is still
+    ``queued`` with zero fills should have routed at the open; it hasn't, so it
+    is stale.
+    """
+    state = str(broker_order.get("state") or broker_order.get("status") or "").lower()
+    if state in _TERMINAL_PENDING_EXIT_STATES or state not in _ACTIVE_PENDING_EXIT_STATES:
+        return False
+    filled = _order_filled_quantity(broker_order) or 0.0
+    if filled > 1e-9:
+        # Any progress -> leave it to the normal fill / partial reconcile path.
+        return False
+    # Only escalate inside a real, tradeable regular session (the session a
+    # resting equity order is expected to route into).
+    if window.get("session") != "regular_hours" or not window.get("can_submit_now"):
+        return False
+    requested_at = _parse_dt(getattr(trade, "pending_exit_requested_at", None))
+    if requested_at is None:
+        return False
+    # We are inside today's regular session, so its open is today 09:30 ET.
+    now_et = now_utc.astimezone(_ET)
+    session_open_utc = now_et.replace(
+        hour=9, minute=30, second=0, microsecond=0
+    ).astimezone(_UTC)
+    return requested_at < session_open_utc
+
+
+def reconcile_pending_exit_liveness(
+    db: Session,
+    trade: Trade,
+    *,
+    broker_order: dict[str, Any] | None,
+    adapter: Any | None = None,
+    audit_decision_prefix: str = "monitor_exit",
+    now_utc: datetime | None = None,
+) -> dict[str, Any]:
+    """Escalate a pending exit the broker can no longer progress on its own.
+
+    Closes the *leaked queued exit* class for the AutoTrader-v1 / Robinhood
+    lane. ``has_active_pending_exit`` makes the monitor ``continue`` past any
+    trade whose mirror still shows ``queued``, and ``sync_pending_exit_order``
+    only acts on fills / terminal states — so a resting order that never routes
+    (e.g. a gfd market sell placed at Friday's close, queued across the
+    weekend) leaves the stop silently unmanaged. Called by the 24/7 broker-sync
+    right after ``sync_pending_exit_order`` (and safe from any reconcile loop):
+
+      * ``broker_order is None`` — the broker can't surface the order. A gfd
+        expiry keeps a terminal ``state='expired'`` record (handled upstream by
+        ``sync_pending_exit_order``), so a *missing* lookup is almost always a
+        transient broker blip. Act only when broker POSITION truth confirms the
+        position itself is gone: reconcile-close the local envelope (no trade).
+        A live position is left to self-heal on the next tick.
+
+      * a resting order (``queued``/``confirmed``/...) with zero fills, an
+        urgent exit thesis (stop / emergency / desk-close), that has spanned a
+        regular-session open — cancel it and re-submit under price protection
+        (a marketable limit), so a naked resting market-on-open or a stuck
+        queue can't leave the stop unmanaged. Target/limit exits are left to
+        rest (escalating them would dump below target).
+
+    Returns ``{"action": ...}``. ``action='none'`` means no escalation was
+    warranted and the caller should treat the trade as still-working.
+    """
+    now = _coerce_utc(now_utc)
+
+    if broker_order is None:
+        try:
+            from .broker_position_truth import reconcile_stale_robinhood_open_trade
+
+            closed = reconcile_stale_robinhood_open_trade(
+                db, trade, source="pending_exit_liveness:order_missing",
+            )
+        except Exception:
+            logger.debug(
+                "[rh_exit] liveness: position-truth reconcile failed for trade=%s",
+                getattr(trade, "id", None), exc_info=True,
+            )
+            closed = None
+        if closed is not None:
+            logger.warning(
+                "[rh_exit] liveness: closed trade=%s — pending exit order missing "
+                "AND broker position gone",
+                getattr(trade, "id", None),
+            )
+            return {"action": "closed"}
+        return {"action": "none", "reason": "order_missing_position_live_or_grace"}
+
+    if not _is_urgent_exit_reason(getattr(trade, "pending_exit_reason", None)):
+        return {"action": "none", "reason": "non_urgent_exit_left_resting"}
+
+    window = describe_robinhood_equity_execution_window(
+        trade.ticker, adapter=adapter, now_utc=now,
+    )
+    if not _pending_exit_is_stale_resting(
+        trade, window=window, broker_order=broker_order, now_utc=now,
+    ):
+        return {"action": "none"}
+
+    exit_reason = str(trade.pending_exit_reason or "stop").strip() or "stop"
+    logger.warning(
+        "[rh_exit] liveness: stale resting exit detected trade=%s reason=%s "
+        "order=%s requested_at=%s — cancel + re-submit price-protected",
+        getattr(trade, "id", None), exit_reason,
+        trade.pending_exit_order_id, trade.pending_exit_requested_at,
+    )
+    cancelled = cancel_pending_exit_order(
+        db,
+        trade,
+        reason=f"stale_resting_exit_requeue:{exit_reason}",
+        audit_decision_prefix=audit_decision_prefix,
+        adapter=adapter,
+    )
+    if not cancelled.get("ok"):
+        logger.warning(
+            "[rh_exit] liveness: stale-exit cancel FAILED trade=%s: %s "
+            "(leaving original resting order in place)",
+            getattr(trade, "id", None), cancelled.get("error"),
+        )
+        return {"action": "cancel_failed", "error": cancelled.get("error")}
+
+    # Fresh client_order_id: reusing the deterministic atv1-<id>-exit-<reason>
+    # coid would collide with the just-cancelled order in the idempotency store
+    # and route into the duplicate-coid recovery path instead of placing a new
+    # protected order.
+    client_oid = f"atv1-{int(trade.id)}-exit-{exit_reason}-requeue-{int(now.timestamp())}"
+    res = submit_robinhood_trade_exit(
+        db,
+        trade,
+        exit_reason=exit_reason,
+        audit_decision_prefix=audit_decision_prefix,
+        client_order_id=client_oid,
+        adapter=adapter,
+        price_protected=True,
+    )
+    logger.warning(
+        "[rh_exit] liveness: re-submitted stale exit under price protection "
+        "trade=%s reason=%s -> state=%s",
+        getattr(trade, "id", None), exit_reason, res.get("state"),
+    )
+    return {
+        "action": "requeued_price_protected",
+        "submit_state": res.get("state"),
+        "ok": bool(res.get("ok")),
+    }
 
 
 def describe_trade_execution_state(
