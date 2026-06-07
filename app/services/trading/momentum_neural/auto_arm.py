@@ -295,9 +295,12 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     except Exception:
         pass
 
+    from ..execution_family_registry import resolve_execution_family_for_symbol
     from .operator_actions import begin_live_arm, confirm_live_arm
 
+    _exec_family = resolve_execution_family_for_symbol(chosen.symbol)
     out["symbol"] = chosen.symbol
+    out["execution_family"] = _exec_family
     out["viability_score"] = round(float(chosen.viability_score or 0.0), 4)
     out["trigger"] = chosen_reason
 
@@ -306,7 +309,7 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
         user_id=int(uid),
         symbol=chosen.symbol,
         variant_id=int(chosen.variant_id),
-        execution_family="coinbase_spot",
+        execution_family=_exec_family,
     )
     if not begin.get("ok"):
         out["skipped"] = "begin_blocked"

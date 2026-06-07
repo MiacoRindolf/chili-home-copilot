@@ -110,6 +110,37 @@ def momentum_execution_seam_meta() -> dict[str, Any]:
     }
 
 
+def resolve_execution_family_for_symbol(symbol: str) -> str:
+    """Route a symbol to its execution family by asset class.
+
+    Crypto pairs (BASE-USD) -> coinbase_spot (the proven momentum path); equities
+    (bare tickers — ARKK, CLSK, AAPL) -> robinhood_spot (Coinbase cannot trade
+    them). Robinhood is multi-asset, so this is the DEFAULT routing — a future
+    per-symbol override could send crypto via robinhood_spot too.
+    """
+    try:
+        from .venue.robinhood_spot import _is_crypto_product
+
+        if _is_crypto_product(symbol):
+            return EXECUTION_FAMILY_COINBASE_SPOT
+        return EXECUTION_FAMILY_ROBINHOOD_SPOT
+    except Exception:
+        # Fallback heuristic: a "-USD" pair is crypto -> Coinbase, else equity -> RH.
+        return (
+            EXECUTION_FAMILY_COINBASE_SPOT
+            if "-USD" in str(symbol or "").upper()
+            else EXECUTION_FAMILY_ROBINHOOD_SPOT
+        )
+
+
+def venue_for_execution_family(execution_family: str) -> str:
+    """The broker venue string for a session of this execution family."""
+    ef = normalize_execution_family(execution_family)
+    if ef == EXECUTION_FAMILY_ROBINHOOD_SPOT:
+        return "robinhood"
+    return "coinbase"
+
+
 def resolve_live_spot_adapter_factory(execution_family: str) -> Callable[[], Any]:
     """Return a zero-arg factory producing a VenueAdapter for live spot ticks.
 
