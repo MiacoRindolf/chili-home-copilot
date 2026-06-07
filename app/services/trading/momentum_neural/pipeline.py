@@ -97,6 +97,17 @@ def run_momentum_neural_tick(
         except Exception:
             pass
 
+    # E5: news-catalyst set (earnings) for the catalyst viability tilt. Best-effort
+    # + cached; empty -> no-op (degrades gracefully without Benzinga). (catalyst.py)
+    try:
+        from .catalyst import earnings_catalyst_symbols
+
+        _cat = earnings_catalyst_symbols()
+        if _cat:
+            meta["catalyst_symbols"] = _cat
+    except Exception:
+        pass
+
     ctx_meta = {
         k: meta[k]
         for k in (
@@ -112,6 +123,7 @@ def run_momentum_neural_tick(
             "adx",
             "adx_14",
             "ross_scores",
+            "catalyst_symbols",
         )
         if k in meta
     }

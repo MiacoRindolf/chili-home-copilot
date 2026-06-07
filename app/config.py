@@ -2348,6 +2348,14 @@ class Settings(BaseSettings):
         le=5.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_STOP_VOL_FLOOR_MULT"),
     )
+    # E5: how strongly a news catalyst (earnings) tilts equity viability — Ross's
+    # 4th selection pillar. Additive boost for catalyst names; no penalty otherwise.
+    chili_momentum_catalyst_viability_tilt: float = Field(
+        default=0.10,
+        ge=0.0,
+        le=0.5,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_CATALYST_VIABILITY_TILT"),
+    )
     # Entry trigger mode: "hybrid" (Ross pullback-break on 1m/5m, momentum_volume
     # fallback), "pullback_break" (pullback only), or "momentum_volume" (legacy 15m).
     chili_momentum_entry_trigger_mode: str = Field(
