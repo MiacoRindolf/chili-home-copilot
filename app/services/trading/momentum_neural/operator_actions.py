@@ -11,7 +11,11 @@ from sqlalchemy.orm import Session
 
 from ....config import settings
 from ....models.trading import MomentumSymbolViability, TradingAutomationSession
-from ..execution_family_registry import is_momentum_automation_implemented, normalize_execution_family
+from ..execution_family_registry import (
+    EXECUTION_FAMILY_ROBINHOOD_SPOT,
+    is_momentum_automation_implemented,
+    normalize_execution_family,
+)
 from .persistence import append_trading_automation_event, create_trading_automation_session
 from .risk_evaluator import evaluate_proposed_momentum_automation
 from .risk_policy import build_session_risk_snapshot, resolve_effective_risk_policy
@@ -525,10 +529,15 @@ def confirm_live_arm(
 
     rd0 = build_momentum_operator_readiness(execution_family=sess.execution_family, symbol=sess.symbol)
     if not rd0.get("broker_ready_for_live"):
+        _venue_msg = (
+            "connect Robinhood + enable the Robinhood spot adapter"
+            if normalize_execution_family(sess.execution_family) == EXECUTION_FAMILY_ROBINHOOD_SPOT
+            else "connect Coinbase Advanced"
+        )
         return {
             "ok": False,
             "error": "broker_not_ready",
-            "message": "Broker not ready for live (connect Coinbase Advanced).",
+            "message": f"Broker not ready for live ({_venue_msg}).",
             "operator_readiness": rd0,
         }
 
