@@ -59,6 +59,39 @@ NVMe. Future image/build-cache growth now lands on E:.
 
 Postgres data lives separately at `E:\postgres`.
 
+### ⚠️ Rootfs migration is INCOMPLETE — the distro still runs off D: (verified 2026-06-07)
+
+The data disk (`docker_data.vhdx`, 126 GB) successfully moved to E: — because its
+D: copy was **deleted**, forcing WSL onto E:. The **rootfs** (`main\ext4.vhdx`,
+160 MB) did **not** move. It was copied to E: and the registry `BasePath` was
+edited, but the original D: file was left in place, so the live `docker-desktop`
+VM still attaches **`D:\…\main\ext4.vhdx`** as its writable rootfs at the kernel
+level (Restart-Manager lock holder = PID 4 `System`). The E: rootfs copy sits
+stale and unopened.
+
+**A reboot does NOT fix this** (the runbook's earlier assumption was wrong).
+Verified: `BasePath` was already `\\?\E:\…` at 08:57, the box rebooted at 10:50,
+and the post-reboot VM *still* mounted the D: rootfs. Editing `BasePath` + copying
+the file + rebooting is insufficient to repoint an existing distro's writable disk.
+
+**How to tell which copy is live:** compare `LastWriteTime` and exclusive-open
+lock state of the D: vs E: `main\ext4.vhdx` — the live one is **locked** and
+freshly written; the stale one opens cleanly. Do **not** trust the registry value.
+
+**Correct fix (maintenance window — stops the trading stack):**
+1. Quit Docker Desktop, then `wsl --shutdown` (releases the PID-4 kernel locks on
+   the D: rootfs *and* the E: data disk).
+2. Confirm `D:\CHILI-Docker\docker-desktop-wsl\main\ext4.vhdx` is now free.
+3. Refresh the stale E: rootfs from the live one:
+   `copy /Y D:\CHILI-Docker\docker-desktop-wsl\main\ext4.vhdx E:\CHILI-Docker\docker-desktop-wsl\main\ext4.vhdx`
+4. `rmdir /s /q D:\CHILI-Docker\docker-desktop-wsl` — delete D: **before** restart.
+5. Start Docker. With D: gone and `BasePath=E:`, WSL is forced to open the E:
+   rootfs (same deletion-forces-fallback that worked for the data disk). Verify the
+   E: rootfs becomes locked/written and D: stays gone.
+
+Until then, **D: is a live disk, not a deletable leftover** — deleting it while
+Docker is running crashes the stack.
+
 ## Docker Desktop crash recovery (recurring on this host)
 
 **Symptom:** dialog *"An unexpected error occurred … remove `<sock>`: The file
