@@ -90,6 +90,50 @@ def test_storage_maintenance_script_uses_concurrent_indexes_and_dry_run_default(
     assert "action=\"store_true\", help=\"mutate the database\"" in src
 
 
+def test_exit_parity_model_index_set_matches_post_migration_301_schema():
+    """The ORM model must not redeclare the indexes mig 301 dropped.
+
+    ``_migration_301_exit_parity_log_index_prune_and_autovacuum`` dropped 6
+    zero-scan indexes from ``trading_exit_parity_log`` on prod. If the model
+    still declared them, a fresh-DB ``create_all()`` would recreate exactly the
+    indexes mig 301 only drops again -- create+drop churn, and the
+    create_all-built test schema would drift from prod. This guards against
+    re-introducing them.
+    """
+    from app.models.trading import ExitParityLog
+
+    declared = {ix.name for ix in ExitParityLog.__table__.indexes}
+
+    # Dropped by mig 301 -- must NOT be redeclared on the model.
+    dropped_by_mig_301 = {
+        "ix_exit_parity_source_created",
+        "ix_exit_parity_ticker_created",
+        "ix_exit_parity_agree_created",
+        "ix_exit_parity_strict_agree_created",
+        "ix_exit_parity_action_class_created",
+        "ix_exit_parity_priority_winner_created",
+    }
+    assert declared.isdisjoint(dropped_by_mig_301), (
+        "ExitParityLog still declares indexes mig 301 dropped: "
+        f"{sorted(declared & dropped_by_mig_301)}"
+    )
+
+    # Kept by mig 301 (real read paths use these) -- must remain declared.
+    kept_by_mig_301 = {
+        "ix_exit_parity_created_retention",
+        "ix_exit_parity_mode_created",
+        "ix_exit_parity_pattern_created",
+    }
+    assert kept_by_mig_301.issubset(declared), (
+        "ExitParityLog dropped an index mig 301 kept: "
+        f"{sorted(kept_by_mig_301 - declared)}"
+    )
+
+    # SQLAlchemy still needs a mapped PK even though mig 301 dropped the physical
+    # ``trading_exit_parity_log_pkey`` constraint (intentional model<->DB drift).
+    assert [c.name for c in ExitParityLog.__table__.primary_key.columns] == ["id"]
+
+
 def test_exit_parity_prune_drains_in_committed_loop():
     """Regression guard: the exit-parity prune must drain ALL eligible rows in
     a per-batch-committed loop, not one batch per daily sweep (the bug that let
