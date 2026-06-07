@@ -54,16 +54,35 @@ def _active_live_session_count(db: Session, *, user_id: int | None) -> int:
     return int(q.count())
 
 
-def _fresh_live_eligible_candidates(db: Session, *, limit: int) -> list[MomentumSymbolViability]:
-    """Top live-eligible candidates fresh within the LIVE risk gate (600s).
+def _dedupe_by_symbol(rows: list[Any], *, limit: int) -> list[Any]:
+    """Keep the highest-viability variant per SYMBOL (rows must be pre-sorted by
+    viability desc), so the scan covers `limit` DISTINCT symbols — not `limit`
+    variants of the same hot name (each symbol carries ~10 variants)."""
+    seen: set[str] = set()
+    out: list[Any] = []
+    for r in rows:
+        sym = getattr(r, "symbol", None)
+        if not sym or sym in seen:
+            continue
+        seen.add(sym)
+        out.append(r)
+        if len(out) >= int(limit):
+            break
+    return out
 
-    The viability board itself keeps ~1h of rows, but the arm's risk evaluator
-    requires freshness <= viability_max_age, so we filter to that here to never
-    pick a candidate the arm would reject.
+
+def _fresh_live_eligible_candidates(db: Session, *, limit: int) -> list[MomentumSymbolViability]:
+    """Top live-eligible candidates (distinct symbols) fresh within the LIVE risk
+    gate (600s).
+
+    The viability board keeps ~1h of rows, but the arm's risk evaluator requires
+    freshness <= viability_max_age, so we filter to that here to never pick a
+    candidate the arm would reject. Each symbol has many variants; we fetch a
+    generous slice then dedupe to the best variant per distinct symbol.
     """
     max_age = float(getattr(settings, "chili_momentum_risk_viability_max_age_seconds", 600.0) or 600.0)
     cutoff = datetime.utcnow() - timedelta(seconds=max_age)
-    return (
+    rows = (
         db.query(MomentumSymbolViability)
         .filter(
             MomentumSymbolViability.scope == "symbol",
@@ -71,9 +90,10 @@ def _fresh_live_eligible_candidates(db: Session, *, limit: int) -> list[Momentum
             MomentumSymbolViability.freshness_ts >= cutoff,
         )
         .order_by(MomentumSymbolViability.viability_score.desc())
-        .limit(int(limit))
+        .limit(max(int(limit) * 25, 200))
         .all()
     )
+    return _dedupe_by_symbol(rows, limit=int(limit))
 
 
 def _symbol_free(db: Session, symbol: str, user_id: int | None) -> bool:

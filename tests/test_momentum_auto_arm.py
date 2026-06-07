@@ -121,6 +121,25 @@ def test_confirm_blocked_does_not_arm(happy):
     assert out["confirm_error"] == "broker_not_ready"
 
 
+def test_dedupe_by_symbol_keeps_best_variant_distinct_symbols():
+    # 10 RSC variants (top), then FIDA, then SOL — dedupe must yield 3 distinct symbols
+    rows = (
+        [_cand("RSC-USD", v, 0.65) for v in range(1, 11)]
+        + [_cand("FIDA-USD", 2, 0.63)]
+        + [_cand("SOL-USD", 5, 0.61)]
+    )
+    out = aa._dedupe_by_symbol(rows, limit=10)
+    syms = [r.symbol for r in out]
+    assert syms == ["RSC-USD", "FIDA-USD", "SOL-USD"]  # one per symbol, order preserved
+
+
+def test_dedupe_respects_limit():
+    rows = [_cand(f"S{i}-USD", 1, 0.6 - i * 0.01) for i in range(20)]
+    out = aa._dedupe_by_symbol(rows, limit=5)
+    assert len(out) == 5
+    assert [r.symbol for r in out] == [f"S{i}-USD" for i in range(5)]
+
+
 def test_picks_first_firing_candidate(happy):
     cands = [_cand("AAA-USD", 8, 0.70), _cand("BBB-USD", 8, 0.65), _cand("CCC-USD", 8, 0.60)]
     happy.setattr(aa, "_fresh_live_eligible_candidates", lambda db, *, limit: cands)
