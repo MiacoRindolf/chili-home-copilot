@@ -2330,6 +2330,28 @@ class Settings(BaseSettings):
         le=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_DAILY_LOSS_FRACTION_OF_EQUITY"),
     )
+    # Spike guard for the equity-relative per-trade caps above. A frozen per-trade cap
+    # may not exceed this MULTIPLE of its rolling median across recent same-venue
+    # admissions. A transient bad equity read (e.g. a Coinbase get_portfolio spike)
+    # otherwise inflates BOTH per-trade caps at once, releasing the notional ceiling
+    # and 4-6x-ing size + risk (FIDA/KAIO oversized trades = ~60% of the halting
+    # daily loss, 2026-06-06). The rolling median is the derived center; this multiple
+    # is the single documented HEADROOM knob — legitimate equity growth trails the
+    # median so only sudden >Nx jumps clamp.
+    # docs/DESIGN/MOMENTUM_LANE_ENTRY_STOP_REALIGNMENT.md
+    chili_momentum_risk_cap_max_median_multiple: float = Field(
+        default=2.0,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_CAP_MAX_MEDIAN_MULTIPLE"),
+    )
+    # Window (count of recent same-venue admitted sessions) whose frozen per-trade caps
+    # form the rolling median for the spike guard above. Wide enough that a handful of
+    # spiked admissions cannot move the median (median resists outliers). One knob.
+    chili_momentum_risk_cap_median_lookback: int = Field(
+        default=40,
+        ge=1,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_CAP_MEDIAN_LOOKBACK"),
+    )
     # Reward:risk multiple — the TARGET is set this many x the actual stop distance
     # (Ross-style 2:1 floor; the per-instrument/regime learner can raise it). Fixes
     # the old ~1.3-1.5:1 that sat below Ross's strict 2:1. One documented R:R knob.

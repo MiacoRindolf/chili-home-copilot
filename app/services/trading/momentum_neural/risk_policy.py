@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import math
+import statistics
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -10,9 +12,18 @@ from typing import Any
 from ....config import settings
 from ..execution_family_registry import EXECUTION_FAMILY_COINBASE_SPOT
 
+logger = logging.getLogger(__name__)
+
 POLICY_VERSION = 1
 RISK_SNAPSHOT_KEY = "momentum_risk"
 POLICY_SNAPSHOT_KEY = "momentum_risk_policy_summary"
+
+# Per-trade cap keys subject to the rolling-median spike guard (both derive from the
+# same per-venue account-equity read, so a single spiked read inflates both at once).
+_PER_TRADE_CAP_KEYS = ("max_notional_per_trade_usd", "max_loss_per_trade_usd")
+# Statistical sample-size floor before the rolling median is trusted to clamp — mirrors
+# the brain's standing n>=5 evidence floor; below it we never clamp (use the raw cap).
+_CAP_MEDIAN_MIN_HISTORY = 5
 
 
 def policy_float_cap(policy: dict[str, Any], key: str, default: float) -> float:
@@ -305,6 +316,85 @@ def effective_policy_summary() -> dict[str, Any]:
     }
 
 
+def _recent_frozen_per_trade_caps(
+    db: Any, *, execution_family: str | None, lookback: int
+) -> dict[str, list[float]]:
+    """Recent FROZEN per-trade caps for the same venue (rolling-median spike-guard
+    input). Best-effort, read-only: any failure returns empty lists so the caller
+    simply skips clamping — a history-read error never blocks an admission."""
+    out: dict[str, list[float]] = {k: [] for k in _PER_TRADE_CAP_KEYS}
+    if db is None or lookback <= 0:
+        return out
+    try:
+        from ....models.trading import TradingAutomationSession
+
+        q = db.query(TradingAutomationSession.risk_snapshot_json)
+        if execution_family:
+            q = q.filter(TradingAutomationSession.execution_family == execution_family)
+        rows = q.order_by(TradingAutomationSession.id.desc()).limit(int(lookback)).all()
+    except Exception:
+        logger.debug("[momentum_neural] rolling-median cap history read failed", exc_info=True)
+        return out
+    for (row_snap,) in rows:
+        caps = row_snap.get("momentum_policy_caps") if isinstance(row_snap, dict) else None
+        if not isinstance(caps, dict):
+            continue
+        for key in _PER_TRADE_CAP_KEYS:
+            try:
+                fv = float(caps.get(key))
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(fv) and fv > 0:
+                out[key].append(fv)
+    return out
+
+
+def bounded_by_rolling_median(
+    raw_cap: float,
+    recent_caps: list[float],
+    *,
+    multiple: float,
+    min_history: int = _CAP_MEDIAN_MIN_HISTORY,
+) -> tuple[float, dict[str, Any]]:
+    """Clamp a per-trade cap DOWN to ``multiple x rolling_median`` of recent caps.
+
+    Stops a transient spiked equity read from inflating the cap (and, via the shared
+    notional ceiling, position size + risk). Only ever clamps DOWNWARD; legitimate
+    equity growth trails the median so the bound rises with it and is not clamped. A
+    non-positive raw cap (a deliberate operator disable/block) is preserved. Below
+    ``min_history`` samples the median is untrusted and the raw cap passes through.
+    Pure (no I/O); returns ``(value, derivation)``.
+    docs/DESIGN/MOMENTUM_LANE_ENTRY_STOP_REALIGNMENT.md
+    """
+    raw = float(raw_cap)
+    deriv: dict[str, Any] = {"raw": round(raw, 4), "n": len(recent_caps), "clamped": False}
+    if raw <= 0 or not math.isfinite(raw):
+        deriv["reason"] = "nonpositive_or_disabled"
+        return raw, deriv
+    try:
+        mult = float(multiple)
+    except (TypeError, ValueError):
+        mult = 1.0
+    if not math.isfinite(mult) or mult < 1.0:
+        mult = 1.0
+    deriv["multiple"] = round(mult, 4)
+    if len(recent_caps) < int(min_history):
+        deriv["reason"] = "thin_history"
+        return raw, deriv
+    median = float(statistics.median(recent_caps))
+    deriv["median"] = round(median, 4)
+    if median <= 0:
+        deriv["reason"] = "nonpositive_median"
+        return raw, deriv
+    bound = mult * median
+    deriv["bound"] = round(bound, 4)
+    if raw > bound:
+        deriv["clamped"] = True
+        return round(bound, 2), deriv
+    deriv["reason"] = "within_bound"
+    return raw, deriv
+
+
 def build_session_risk_snapshot(
     *,
     policy_full: dict[str, Any],
@@ -313,8 +403,13 @@ def build_session_risk_snapshot(
     readiness_subset: dict[str, Any] | None,
     extra: dict[str, Any] | None = None,
     execution_family: str | None = None,
+    db: Any = None,
 ) -> dict[str, Any]:
-    """Merge operator keys (e.g. arm_token) with frozen policy + evaluation."""
+    """Merge operator keys (e.g. arm_token) with frozen policy + evaluation.
+
+    When ``db`` is supplied the two equity-relative per-trade caps are passed through
+    the rolling-median spike guard (``bounded_by_rolling_median``) before freezing, so
+    a transient bad equity read cannot 4-6x size + risk for the life of the session."""
     snap: dict[str, Any] = dict(extra or {})
     snap[POLICY_SNAPSHOT_KEY] = effective_policy_summary()
     snap["momentum_risk_policy_resolved_utc"] = policy_full.get("resolved_at_utc")
@@ -351,4 +446,34 @@ def build_session_risk_snapshot(
             execution_family,
         ),
     }
+    # Rolling-median spike guard: a transient bad per-venue equity read inflates BOTH
+    # per-trade caps at once (they share the equity input), releasing the notional
+    # ceiling and 4-6x-ing size + risk. Clamp each frozen cap DOWN to a bounded
+    # multiple of its rolling median across recent same-venue admissions, and persist
+    # the derivation for audit. Read-only/best-effort: only active when a db is
+    # supplied; history-read failure leaves caps unclamped (never blocks admission).
+    if db is not None:
+        caps = snap["momentum_policy_caps"]
+        multiple = float(getattr(settings, "chili_momentum_risk_cap_max_median_multiple", 2.0) or 2.0)
+        lookback = int(getattr(settings, "chili_momentum_risk_cap_median_lookback", 40) or 40)
+        history = _recent_frozen_per_trade_caps(db, execution_family=execution_family, lookback=lookback)
+        derivation: dict[str, Any] = {}
+        for key in _PER_TRADE_CAP_KEYS:
+            bounded, d = bounded_by_rolling_median(caps[key], history.get(key, []), multiple=multiple)
+            d["execution_family"] = execution_family
+            caps[key] = bounded
+            derivation[key] = d
+        snap["momentum_policy_caps_derivation"] = derivation
+        clamped = {k: derivation[k] for k in _PER_TRADE_CAP_KEYS if derivation[k].get("clamped")}
+        logger.info(
+            "[momentum_neural] per-trade cap derivation venue=%s clamped=%s detail=%s",
+            execution_family, list(clamped.keys()) or None, derivation,
+        )
+        for k, d in clamped.items():
+            logger.warning(
+                "[momentum_neural] per-trade cap spike CLAMPED key=%s raw=%.4f -> %.4f "
+                "(median=%.4f x%.2f n=%d venue=%s)",
+                k, d["raw"], caps[k], d.get("median", 0.0), d.get("multiple", 0.0),
+                d.get("n", 0), execution_family,
+            )
     return snap
