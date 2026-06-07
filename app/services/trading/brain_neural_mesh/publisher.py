@@ -18,9 +18,20 @@ _log = logging.getLogger(__name__)
 
 
 def _rollback_publish_session(db: Session, *, context: str) -> None:
-    """Clear a failed publisher transaction before returning to the caller."""
+    """Clear a database-error-poisoned publisher transaction before returning.
+
+    Publishers run inside the CALLER's unit of work (pattern monitor, learning
+    cycle, exit engines) on a shared session, so we must not clobber healthy
+    pending writes. Called from inside the publisher's ``except`` block, this
+    rolls back only when the caught exception is a SQLAlchemy/DBAPI error (a
+    mid-statement disconnect that would otherwise make the caller's next query
+    raise ``PendingRollbackError``); non-DB publish failures leave the caller's
+    transaction intact. See ``app.db.rollback_if_poisoned``.
+    """
     try:
-        db.rollback()
+        from ....db import rollback_if_poisoned
+
+        rollback_if_poisoned(db)
     except Exception as exc:
         _log.debug("%s %s rollback failed: %s", LOG_PREFIX, context, exc, exc_info=True)
 
@@ -60,6 +71,7 @@ def publish_market_snapshots_refreshed(db: Session, *, meta: Optional[dict[str, 
         _log.info("%s published snapshot_refresh correlation=%s", LOG_PREFIX, cid)
     except Exception as e:
         _log.warning("%s publish_market_snapshots_refreshed failed: %s", LOG_PREFIX, e)
+        _rollback_publish_session(db, context="publish_market_snapshots_refreshed")
     publish_momentum_context_refresh(db, meta=meta)
 
 
@@ -104,6 +116,7 @@ def publish_setup_vitals_change(
         _log.debug("%s setup_vitals_change trade=%s ticker=%s cur=%s prev=%s", LOG_PREFIX, trade_id, ticker, cur, prev)
     except Exception as e:
         _log.warning("%s publish_setup_vitals_change failed: %s", LOG_PREFIX, e)
+        _rollback_publish_session(db, context="publish_setup_vitals_change")
 
 
 def publish_momentum_context_refresh(db: Session, *, meta: Optional[dict[str, Any]] = None) -> dict[str, Any]:
@@ -144,6 +157,7 @@ def publish_momentum_context_refresh(db: Session, *, meta: Optional[dict[str, An
         }
     except Exception as e:
         _log.warning("%s publish_momentum_context_refresh failed: %s", LOG_PREFIX, e)
+        _rollback_publish_session(db, context="publish_momentum_context_refresh")
         return {"ok": False, "reason": str(e), "correlation_id": None, "activation_event_id": None}
 
 
@@ -233,6 +247,7 @@ def publish_learning_step_completed(
             publish_learning_cluster_completed(db, cluster_id=cluster_id, correlation_id=cid)
     except Exception as e:
         _log.warning("%s publish_learning_step_completed failed: %s", LOG_PREFIX, e)
+        _rollback_publish_session(db, context="publish_learning_step_completed")
 
 
 def publish_learning_cluster_completed(
@@ -260,6 +275,7 @@ def publish_learning_cluster_completed(
         _log.debug("%s published learning_cluster_completed cluster=%s", LOG_PREFIX, cluster_id)
     except Exception as e:
         _log.warning("%s publish_learning_cluster_completed failed: %s", LOG_PREFIX, e)
+        _rollback_publish_session(db, context="publish_learning_cluster_completed")
 
 
 def publish_learning_cycle_completed(db: Session, *, elapsed_s: Optional[float] = None) -> None:
@@ -280,6 +296,7 @@ def publish_learning_cycle_completed(db: Session, *, elapsed_s: Optional[float] 
         _log.debug("%s published learning_cycle_completed correlation=%s", LOG_PREFIX, cid)
     except Exception as e:
         _log.warning("%s publish_learning_cycle_completed failed: %s", LOG_PREFIX, e)
+        _rollback_publish_session(db, context="publish_learning_cycle_completed")
 
 
 def publish_brain_work_outcome(
@@ -387,6 +404,7 @@ def publish_stop_eval(
         get_counters().note_publish(1)
     except Exception as e:
         _log.warning("%s publish_stop_eval failed: %s", LOG_PREFIX, e)
+        _rollback_publish_session(db, context="publish_stop_eval")
 
 
 def publish_pattern_health(
@@ -457,6 +475,7 @@ def publish_pattern_health(
         get_counters().note_publish(1)
     except Exception as e:
         _log.warning("%s publish_pattern_health failed: %s", LOG_PREFIX, e)
+        _rollback_publish_session(db, context="publish_pattern_health")
 
 
 def publish_imminent_eval(
@@ -513,6 +532,7 @@ def publish_imminent_eval(
         get_counters().note_publish(1)
     except Exception as e:
         _log.warning("%s publish_imminent_eval failed: %s", LOG_PREFIX, e)
+        _rollback_publish_session(db, context="publish_imminent_eval")
 
 
 def _now_iso() -> str:
@@ -578,6 +598,7 @@ def publish_trade_lifecycle(
         return cid
     except Exception as e:
         _log.warning("%s publish_trade_lifecycle failed: %s", LOG_PREFIX, e)
+        _rollback_publish_session(db, context="publish_trade_lifecycle")
         return None
 
 
@@ -625,6 +646,7 @@ def publish_exposure_update(
         )
     except Exception as e:
         _log.warning("%s publish_exposure_update failed: %s", LOG_PREFIX, e)
+        _rollback_publish_session(db, context="publish_exposure_update")
 
 
 def publish_exit_decision(
@@ -682,3 +704,4 @@ def publish_exit_decision(
         )
     except Exception as e:
         _log.warning("%s publish_exit_decision failed: %s", LOG_PREFIX, e)
+        _rollback_publish_session(db, context="publish_exit_decision")

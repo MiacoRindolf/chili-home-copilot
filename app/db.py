@@ -255,6 +255,47 @@ engine = create_engine(
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
+
+def rollback_if_poisoned(session) -> bool:
+    """Roll back a session whose transaction a database error has poisoned.
+
+    ``pool_pre_ping`` validates a connection at *checkout*, but a connection that
+    is already checked out and IN USE can still be closed by Postgres
+    mid-transaction (``server closed the connection unexpectedly``). The failing
+    statement raises a DBAPI error and leaves the connection's transaction
+    invalid; every subsequent statement on that *same* session then raises
+    ``PendingRollbackError`` until a rollback is issued — cascading through the
+    rest of a job's catch-and-continue loop.
+
+    **Call this from inside an ``except`` block.** It inspects the exception
+    currently being handled (``sys.exc_info``) and rolls back only for
+    SQLAlchemy/DBAPI errors — the ones that poison the transaction. Non-database
+    errors (a quote fetch, a JSON parse, a ``KeyError``) leave the transaction
+    healthy, so we deliberately do NOT roll back and a batch's earlier pending
+    writes survive to be committed at the end of the loop.
+
+    NOTE: ``Session.is_active`` is NOT a usable signal here. In SQLAlchemy 2.0 an
+    in-flight (mid-statement) disconnect leaves ``is_active`` True even though the
+    next statement raises ``PendingRollbackError`` — only a *flush* failure flips
+    it. Keying off the exception type is what actually distinguishes a poisoned
+    transaction from a healthy one. For job-level recovery that also invalidates
+    the connection, see :func:`recover_session_after_db_error`.
+
+    Returns True if a rollback was performed, False otherwise (including when the
+    rollback itself fails — callers in error handlers must never re-raise).
+    """
+    from sqlalchemy.exc import SQLAlchemyError
+
+    exc = sys.exc_info()[1]
+    if not isinstance(exc, SQLAlchemyError):
+        return False
+    try:
+        session.rollback()
+        return True
+    except Exception:
+        return False
+
+
 if _mp_child:
     import atexit
 

@@ -19,6 +19,7 @@ from typing import Any
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
+from ...db import rollback_if_poisoned
 from ...models.trading import (
     AlertHistory,
     BreakoutAlert,
@@ -594,6 +595,9 @@ def _run_for_trades(
                     reconciled_stale_rows.append(reconciled)
     except Exception:
         logger.warning("[pattern_monitor] broker-truth stale filter failed", exc_info=True)
+        # Recover the shared session if a mid-transaction disconnect poisoned it,
+        # so the per-trade loop below doesn't cascade with PendingRollbackError.
+        rollback_if_poisoned(db)
 
     for trade in trades:
         try:
@@ -623,6 +627,12 @@ def _run_for_trades(
                 skipped += 1
         except Exception:
             logger.warning("[pattern_monitor] error evaluating trade %s", trade.id, exc_info=True)
+            # If the connection dropped mid-transaction the session is poisoned;
+            # roll back so the remaining trades evaluate on a fresh transaction
+            # instead of each raising PendingRollbackError. No-op (and so the
+            # batch's pending writes survive) when the error left the
+            # transaction healthy.
+            rollback_if_poisoned(db)
 
     db.commit()
 

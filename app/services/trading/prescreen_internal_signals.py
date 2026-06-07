@@ -9,6 +9,7 @@ from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
 from ...config import settings
+from ...db import rollback_if_poisoned
 from ...models.trading import ScanPattern, TradingInsight, TradingInsightEvidence
 from ...models.trading_brain_phase1 import BrainPredictionLine, BrainPredictionSnapshot
 from .prescreen_normalize import (
@@ -72,6 +73,10 @@ def tickers_from_latest_predictions(db: Session, limit: int | None = None) -> di
             out.setdefault(tn, []).append(reason)
     except Exception as e:
         logger.warning("[prescreen_internal] predictions: %s", e)
+        # A mid-transaction disconnect poisons the shared session; roll back so
+        # the next bucket in collect_internal_prescreen_tickers doesn't cascade
+        # with PendingRollbackError.
+        rollback_if_poisoned(db)
     return out
 
 
@@ -100,6 +105,7 @@ def tickers_from_insight_evidence(db: Session, limit: int | None = None) -> dict
             out[tn] = [{"kind": "insight_evidence", "insight_id": int(iid)}]
     except Exception as e:
         logger.warning("[prescreen_internal] insight_evidence: %s", e)
+        rollback_if_poisoned(db)
     return out
 
 
@@ -131,6 +137,7 @@ def tickers_from_warming_patterns(db: Session, limit: int | None = None) -> dict
                 out[tn] = [{"kind": "warming_pattern", "scan_pattern_id": int(_row_field(sp, "id", 0))}]
     except Exception as e:
         logger.warning("[prescreen_internal] warming_patterns: %s", e)
+        rollback_if_poisoned(db)
     return out
 
 
