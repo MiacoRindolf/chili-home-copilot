@@ -51,11 +51,14 @@ Docker's WSL data store was moved off D: (which was filling) onto the larger E:
 NVMe. Future image/build-cache growth now lands on E:.
 
 - Data: `E:\CHILI-Docker\docker-desktop-wsl\`
-  - `disk\docker_data.vhdx` — images, layers, build cache
-  - `main\ext4.vhdx` — `docker-desktop` distro rootfs
+  - `disk\docker_data.vhdx` (126 GB) — images, layers, build cache — **on E: ✓**
+  - `main\ext4.vhdx` (160 MB) — `docker-desktop` distro rootfs — **still served from
+    `D:\CHILI-Docker\docker-desktop-wsl\main\ext4.vhdx`** (see the failed-migration
+    note below; the E: copy exists but is NOT used)
 - Junction: `%LOCALAPPDATA%\Docker\wsl` → `E:\CHILI-Docker\docker-desktop-wsl`
 - WSL registry: `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss\{...}\BasePath`
-  → `\\?\E:\CHILI-Docker\docker-desktop-wsl\main`
+  → `\\?\E:\CHILI-Docker\docker-desktop-wsl\main` (**points to E: but WSL ignores it
+  for the rootfs — see below**)
 
 Postgres data lives separately at `E:\postgres`.
 
@@ -78,19 +81,48 @@ the file + rebooting is insufficient to repoint an existing distro's writable di
 lock state of the D: vs E: `main\ext4.vhdx` — the live one is **locked** and
 freshly written; the stale one opens cleanly. Do **not** trust the registry value.
 
-**Correct fix (maintenance window — stops the trading stack):**
-1. Quit Docker Desktop, then `wsl --shutdown` (releases the PID-4 kernel locks on
-   the D: rootfs *and* the E: data disk).
-2. Confirm `D:\CHILI-Docker\docker-desktop-wsl\main\ext4.vhdx` is now free.
-3. Refresh the stale E: rootfs from the live one:
-   `copy /Y D:\CHILI-Docker\docker-desktop-wsl\main\ext4.vhdx E:\CHILI-Docker\docker-desktop-wsl\main\ext4.vhdx`
-4. `rmdir /s /q D:\CHILI-Docker\docker-desktop-wsl` — delete D: **before** restart.
-5. Start Docker. With D: gone and `BasePath=E:`, WSL is forced to open the E:
-   rootfs (same deletion-forces-fallback that worked for the data disk). Verify the
-   E: rootfs becomes locked/written and D: stays gone.
+### ❌ The "delete D: to force fallback" fix does NOT work — ATTEMPTED and rolled back (2026-06-07)
 
-Until then, **D: is a live disk, not a deletable leftover** — deleting it while
-Docker is running crashes the stack.
+An earlier revision of this doc proposed: quit Docker + `wsl --shutdown`, refresh
+the E: rootfs from D:, **delete D: before restart**, and let WSL fall back to
+`BasePath=E:` (the same deletion-forces-fallback that moved the data disk). **This
+was executed and it FAILED.** Do not do it.
+
+What actually happened, step by step:
+1. Stopped the stack gracefully, `docker desktop stop` + `wsl --shutdown` — all
+   three vhdx locks released cleanly.
+2. Copied D: rootfs → E: rootfs and **SHA256-verified them identical**.
+3. Deleted `D:\CHILI-Docker\docker-desktop-wsl`.
+4. Started Docker → the `docker-desktop` distro **failed to boot**, wedging Docker
+   Desktop for 5+ minutes. Direct boot test gave the smoking gun:
+   ```
+   Failed to attach disk '\\?\D:\CHILI-Docker\docker-desktop-wsl\main\ext4.vhdx' to WSL2:
+   The system cannot find the path specified.  (ERROR_PATH_NOT_FOUND)
+   ```
+   WSL attaches the rootfs from an **explicit D: path** and does NOT fall back to
+   `BasePath`. Deleting D: just removes the disk the distro needs.
+5. **Recovery (rollback):** recreated `D:\…\main\` and copied the identical E: rootfs
+   back to `D:\…\main\ext4.vhdx`; the distro then booted (`BOOT_OK`), Docker came up,
+   and all containers were restarted Postgres-first. Stack fully restored.
+
+**Why it's pinned to D::** every value under the Lxss key says E:
+(`BasePath=\\?\E:\…\main`, `VhdFileName=ext4.vhdx`) and **no registry value mentions
+D: at all** — yet WSL still attaches the D: path. The rootfs disk location is held
+**outside the editable registry value** (WSL caches the path the distro was
+registered with) and survives both `BasePath` edits **and** reboots. A manual
+file-move + `BasePath` edit therefore **cannot** relocate the docker-desktop rootfs.
+
+**The only real ways to move the rootfs (both heavy — not worth it for 160 MB):**
+- Use Docker Desktop's supported **Settings → Resources → Advanced → "Disk image
+  location"** move (it re-registers the distro properly), or
+- `wsl --unregister docker-desktop` then re-import onto E: (destroys the distro;
+  Docker Desktop recreates it — loses the writable rootfs layer).
+
+**Recommendation: LEAVE the rootfs on D:.** It is only ~160 MB and is the disposable
+writable layer (rebuilt from `docker-desktop.iso` each boot); the 126 GB data disk —
+the part that actually mattered — is correctly on E:. **Never delete
+`D:\CHILI-Docker\docker-desktop-wsl` while Docker can run** — it is a *live* disk, and
+removing it wedges the whole stack until you restore it.
 
 ## Docker Desktop crash recovery (recurring on this host)
 
