@@ -835,6 +835,71 @@ class TestSyncOrdersToDb:
         assert trade.pending_exit_order_id is None
         assert trade.pending_exit_status is None
 
+    @patch("app.services.broker_service.is_connected", return_value=True)
+    @patch("app.services.broker_service.get_order_by_id")
+    @patch("app.services.trading.robinhood_exit_execution.reconcile_pending_exit_liveness")
+    def test_still_resting_pending_exit_routed_to_liveness(
+        self, mock_liveness, mock_get_order, mock_connected, db,
+    ):
+        """A pending exit still 'queued' on the broker is handed to the liveness
+        reconciler (which decides whether it is a stale, leaked queue)."""
+        from app.services.broker_service import sync_orders_to_db
+
+        now = datetime.utcnow()
+        self._seed_working_trade(
+            db,
+            status="open",
+            broker_order_id=None,
+            pending_exit_order_id="exit-queued-1",
+            pending_exit_status="queued",
+            pending_exit_requested_at=now,
+            pending_exit_reason="stop",
+        )
+        mock_liveness.return_value = {"action": "none"}
+        mock_get_order.return_value = {
+            "id": "exit-queued-1",
+            "state": "queued",
+            "cumulative_quantity": "0",
+        }
+
+        result = sync_orders_to_db(db, user_id=None)
+
+        assert result["synced"] == 1
+        assert result["filled"] == 0
+        assert mock_liveness.call_count == 1
+        _, kwargs = mock_liveness.call_args
+        assert kwargs["broker_order"]["state"] == "queued"
+
+    @patch("app.services.broker_service.is_connected", return_value=True)
+    @patch("app.services.broker_service.get_order_by_id", return_value=None)
+    @patch("app.services.trading.robinhood_exit_execution.reconcile_pending_exit_liveness")
+    def test_missing_pending_exit_order_routed_to_liveness(
+        self, mock_liveness, mock_get_order, mock_connected, db,
+    ):
+        """A pending exit whose broker order can't be surfaced goes to the
+        liveness reconciler with broker_order=None instead of leaking forever."""
+        from app.services.broker_service import sync_orders_to_db
+
+        now = datetime.utcnow()
+        self._seed_working_trade(
+            db,
+            status="open",
+            broker_order_id=None,
+            pending_exit_order_id="exit-missing-1",
+            pending_exit_status="queued",
+            pending_exit_requested_at=now,
+            pending_exit_reason="stop",
+        )
+        mock_liveness.return_value = {"action": "closed"}
+
+        result = sync_orders_to_db(db, user_id=None)
+
+        assert mock_liveness.call_count == 1
+        _, kwargs = mock_liveness.call_args
+        assert kwargs["broker_order"] is None
+        # action="closed" -> counted as cancelled + synced (no longer a leaked error).
+        assert result["cancelled"] == 1
+        assert result["synced"] == 1
 
     @patch("app.services.broker_service.is_connected", return_value=True)
     @patch("app.services.broker_service.get_order_by_id")

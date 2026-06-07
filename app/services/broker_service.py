@@ -4944,7 +4944,10 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     from ..models.trading import Trade, StrategyProposal
     from .trading.decision_ledger import mark_linked_trade_packets_executed, mark_linked_trade_packets_terminal
     from .trading.execution_audit import normalize_robinhood_order_event, record_execution_event
-    from .trading.robinhood_exit_execution import sync_pending_exit_order
+    from .trading.robinhood_exit_execution import (
+        reconcile_pending_exit_liveness,
+        sync_pending_exit_order,
+    )
 
     if not is_connected():
         return {"synced": 0, "filled": 0, "cancelled": 0, "errors": 0}
@@ -5099,26 +5102,49 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
 
     for trade in open_with_pending_exit:
         try:
+            audit_prefix = _pending_exit_audit_prefix(trade.pending_exit_reason)
             rh_order = _robinhood_order_lookup_for_trade(
                 trade,
                 trade.pending_exit_order_id,
             )
             if not rh_order:
-                errors += 1
+                # The broker can't surface this exit order. Don't leak it as
+                # 'queued' forever — the monitor skips has_active_pending_exit
+                # rows, so a stranded mirror leaves the stop unmanaged.
+                # Reconcile against position truth: close the envelope only if
+                # the position is also gone; a live position self-heals next
+                # tick (a transient lookup blip stays an 'error').
+                live_out = reconcile_pending_exit_liveness(
+                    db, trade, broker_order=None, audit_decision_prefix=audit_prefix,
+                )
+                if live_out.get("action") == "closed":
+                    cancelled += 1
+                    synced += 1
+                else:
+                    errors += 1
                 continue
             sync_out = sync_pending_exit_order(
                 db,
                 trade,
                 order={**rh_order, "id": trade.pending_exit_order_id},
-                audit_decision_prefix=_pending_exit_audit_prefix(
-                    trade.pending_exit_reason,
-                ),
+                audit_decision_prefix=audit_prefix,
             )
             st = str(sync_out.get("state") or "").lower()
             if st == "filled":
                 filled += 1
             elif st in ("cancelled", "canceled", "rejected", "failed", "expired"):
                 cancelled += 1
+            else:
+                # Still resting (queued/confirmed/...). If it has leaked past a
+                # regular-session open without routing, escalate: cancel + re-
+                # submit under price protection so the stop stays live. No-op
+                # for fresh, non-urgent, or off-hours resting orders.
+                reconcile_pending_exit_liveness(
+                    db,
+                    trade,
+                    broker_order={**rh_order, "id": trade.pending_exit_order_id},
+                    audit_decision_prefix=audit_prefix,
+                )
             synced += 1
         except Exception as e:
             logger.warning(f"[broker] Pending exit sync failed for {trade.ticker}: {e}")
