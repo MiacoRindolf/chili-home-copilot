@@ -1799,6 +1799,146 @@ def _close_coinbase_absent_no_fill_trade(
     _close_coinbase_position_identity_for_trade(db, trade)
 
 
+def _reconcile_orphan_coinbase_mirrors(
+    db: Session,
+    cb_tickers: "set[str] | list[str]",
+) -> int:
+    """Ticker-keyed reconcile of Coinbase position-identity mirror rows.
+
+    The open-Trade stale loop in :func:`sync_positions_to_db` closes a
+    ``trading_positions`` mirror only as a side effect of closing an
+    *open* ``Trade`` row (via ``_close_coinbase_position_identity_for_trade``).
+    When a Coinbase position is exited off a NON-broker-sync path — the
+    momentum live runner, a stop fill, or a manual sell — the ``Trade``
+    row closes on that path and the ticker-keyed mirror is never
+    reconciled. It sits ``state='open'`` indefinitely, surfacing a phantom
+    holding in the monitoring tab (FIDA-USD id 179, 2026-06-07 audit:
+    Trade 2299 closed stop_loss_hit while mirror 179 stayed open with
+    Coinbase holding zero).
+
+    This sweep closes any ``coinbase`` mirror that is ``state='open'`` but
+    whose ticker is absent from the live balance snapshot, INDEPENDENT of
+    an open Trade, once:
+
+    - the ticker has no open Coinbase ``Trade`` row (that case belongs to
+      the open-Trade loop above, which owns its own grace/streak guards);
+    - the mirror has been stale (absent from the live balance, so
+      ``last_observed_at`` un-bumped) past the confirm window — staleness
+      IS the "absent for N consecutive syncs" signal because
+      ``_ensure_coinbase_position_identity`` only bumps ``last_observed_at``
+      when the ticker is present; and
+    - no working sell order exists for the ticker.
+
+    It NEVER runs off an all-empty snapshot (R32 guard — an empty live set
+    returns 0). Thresholds reuse the same settings-derived constants as the
+    open-Trade absent-no-fill path, so there are no new magic numbers.
+    Stale-but-not-yet-closeable mirrors emit a watchdog WARNING for
+    visibility. Returns the number of mirrors closed.
+    """
+    live = {str(t).upper() for t in (cb_tickers or []) if t}
+    if not live:
+        # Empty/failed snapshot — never reconcile (mirror of the R32 guard
+        # the open-Trade loop applies to mass-closes).
+        return 0
+
+    rows = db.execute(
+        text(
+            "SELECT id, ticker, last_observed_at, current_quantity, "
+            "       current_envelope_id "
+            "  FROM trading_positions "
+            " WHERE broker_source = 'coinbase' AND state = 'open'"
+        )
+    ).fetchall()
+
+    now = datetime.utcnow()
+    closed = 0
+    for r in rows:
+        ticker = str(r.ticker or "")
+        if not ticker or ticker.upper() in live:
+            continue  # still held at the broker
+
+        # The open-Trade stale loop owns any ticker that still has an open
+        # Coinbase Trade — defer to its grace/streak/working-sell guards.
+        has_open_trade = db.execute(
+            text(
+                "SELECT 1 FROM trading_trades "
+                " WHERE broker_source = 'coinbase' AND status = 'open' "
+                "   AND UPPER(ticker) = :tk LIMIT 1"
+            ),
+            {"tk": ticker.upper()},
+        ).first() is not None
+        if has_open_trade:
+            continue
+
+        last_obs = r.last_observed_at
+        staleness = (
+            (now - last_obs).total_seconds() if last_obs is not None else 1e9
+        )
+
+        if staleness < _COINBASE_RECONCILE_CONFIRM_WINDOW:
+            # Too fresh — a single transient partial snapshot can omit a
+            # live product. Wait for the absence to persist.
+            continue
+
+        if _coinbase_has_working_sell_orders(ticker):
+            logger.warning(
+                "[coinbase_mirror_watchdog] %s mirror#%s open+stale %.0fs but "
+                "Coinbase still reports a working sell order; deferring "
+                "orphan-close (treating as transient snapshot gap).",
+                ticker, r.id, staleness,
+            )
+            continue
+
+        if staleness < _COINBASE_ABSENT_NO_FILL_MIN_AGE_SECONDS:
+            logger.warning(
+                "[coinbase_mirror_watchdog] %s mirror#%s state='open' but "
+                "absent from live Coinbase balance for %.0fs (qty=%s, no open "
+                "Trade, no working sell); deferring close until >=%ds.",
+                ticker, r.id, staleness, r.current_quantity,
+                _COINBASE_ABSENT_NO_FILL_MIN_AGE_SECONDS,
+            )
+            continue
+
+        # Strong evidence the broker is flat for this ticker: absent from a
+        # non-empty live snapshot, no open Trade, no working sell, stale past
+        # the absent-no-fill age. Close the phantom mirror.
+        db.execute(
+            text(
+                "UPDATE trading_positions "
+                "SET state = 'closed', current_quantity = 0, "
+                "    last_state_transition_at = NOW(), updated_at = NOW() "
+                "WHERE id = :pid AND state = 'open'"
+            ),
+            {"pid": int(r.id)},
+        )
+        db.execute(
+            text(
+                "INSERT INTO trading_position_events ("
+                "  position_id, event_type, transition_reason, quantity, "
+                "  envelope_id, observed_at"
+                ") VALUES ("
+                "  :pid, 'closed', 'coinbase_mirror_orphan_reconcile', 0, "
+                "  :eid, NOW()"
+                ")"
+            ),
+            {
+                "pid": int(r.id),
+                "eid": int(r.current_envelope_id)
+                if r.current_envelope_id is not None
+                else None,
+            },
+        )
+        closed += 1
+        logger.warning(
+            "[coinbase_mirror_orphan_reconcile] closed phantom mirror#%s %s "
+            "(state='open' but absent from live balance %.0fs, no open Trade, "
+            "no working sell). qty %s -> 0.",
+            r.id, ticker, staleness, r.current_quantity,
+        )
+
+    return closed
+
+
 def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     """Sync Coinbase positions into local Trade model."""
     from ..models.trading import BreakoutAlert, Trade
@@ -2199,13 +2339,21 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
         _close_coinbase_position_identity_for_trade(db, trade)
         closed += 1
 
+    # Ticker-keyed orphan-mirror reconcile: close position-identity rows
+    # whose underlying Coinbase holding is gone but whose Trade closed off
+    # a non-broker-sync path (momentum exit / stop fill / manual sell), so
+    # the open-Trade loop above never reconciled the mirror. (2026-06-07
+    # FIDA-USD id 179 phantom audit.) No-op on an empty/failed snapshot.
+    mirror_orphans_closed = _reconcile_orphan_coinbase_mirrors(db, cb_tickers)
+
     db.commit()
     logger.info(
-        "[coinbase] Position sync: %d created, %d updated, %d reopened, %d closed, %d duplicates cancelled",
+        "[coinbase] Position sync: %d created, %d updated, %d reopened, %d closed, %d mirror-orphans closed, %d duplicates cancelled",
         created,
         updated,
         reopened,
         closed,
+        mirror_orphans_closed,
         cleanup["cancelled"],
     )
     return {
@@ -2213,6 +2361,7 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
         "updated": updated,
         "reopened": reopened,
         "closed": closed,
+        "mirror_orphans_closed": mirror_orphans_closed,
         "deduped": cleanup["cancelled"],
         "_live_tickers": cb_tickers,
     }

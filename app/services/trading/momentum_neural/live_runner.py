@@ -82,6 +82,34 @@ def _utcnow() -> datetime:
     return datetime.utcnow()
 
 
+# ── Bounded momentum exit-submit retries (2026-06-07 audit) ───────────────
+# A wedged exit (an unsellable-dust residual, a stale balance, a transient
+# broker error) used to re-submit the flatten order on EVERY pulse — session
+# 52 burned 1,500+ 'Insufficient balance' submits before being cancelled.
+# Cap the broker submit RATE (exponential backoff between attempts) and the
+# TOTAL attempts, then escalate to the broker-zero / dust reconcile so the
+# wedged session clears itself (or surfaces a terminal error) instead of
+# hammering the venue API. Settings-derived with documented defaults — one
+# knob each, not scattered magic numbers.
+_EXIT_SUBMIT_MAX_ATTEMPTS = int(
+    getattr(settings, "chili_momentum_exit_submit_max_attempts", 8) or 8
+)
+_EXIT_SUBMIT_BACKOFF_BASE_SECONDS = float(
+    getattr(settings, "chili_momentum_exit_submit_backoff_base_seconds", 5.0) or 5.0
+)
+_EXIT_SUBMIT_BACKOFF_MAX_SECONDS = float(
+    getattr(settings, "chili_momentum_exit_submit_backoff_max_seconds", 300.0) or 300.0
+)
+
+
+def _exit_submit_backoff_seconds(attempts: int) -> float:
+    """Exponential backoff (base * 2^(attempts-1)) capped at the max."""
+    if attempts <= 0:
+        return 0.0
+    delay = _EXIT_SUBMIT_BACKOFF_BASE_SECONDS * (2.0 ** (attempts - 1))
+    return min(delay, _EXIT_SUBMIT_BACKOFF_MAX_SECONDS)
+
+
 def _policy_caps(snap: dict[str, Any]) -> dict[str, Any]:
     caps = snap.get("momentum_policy_caps")
     return caps if isinstance(caps, dict) else {}
@@ -372,6 +400,40 @@ def _submit_live_market_exit(
     mid: float | None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    now = _utcnow()
+    attempts = int(le.get("exit_submit_attempts", 0) or 0)
+
+    # Backoff gate — do NOT place another broker order until the scheduled
+    # retry time. Returns a synthetic deferred result (no broker call, no
+    # attempt increment) so the caller stays in its exit state and retries
+    # on a later pulse without hammering the venue API.
+    next_retry_raw = le.get("exit_next_retry_at_utc")
+    if next_retry_raw:
+        try:
+            next_retry = datetime.fromisoformat(
+                str(next_retry_raw).replace("Z", "+00:00")
+            ).replace(tzinfo=None)
+            if now < next_retry:
+                return {
+                    "ok": False,
+                    "error": "exit_retry_backoff",
+                    "deferred": True,
+                    "retry_at_utc": next_retry.isoformat(),
+                    "attempts": attempts,
+                }
+        except Exception:
+            pass
+
+    # Max-attempts cap — stop submitting and signal escalation to the
+    # broker-zero / dust reconcile (handled in _live_exit_submit_succeeded).
+    if attempts >= _EXIT_SUBMIT_MAX_ATTEMPTS:
+        return {
+            "ok": False,
+            "error": "exit_retry_cap_exceeded",
+            "cap_exceeded": True,
+            "attempts": attempts,
+        }
+
     _record_live_exit_intent_safe(
         db,
         sess,
@@ -385,6 +447,11 @@ def _submit_live_market_exit(
         mid=mid,
         extra=extra,
     )
+    attempts += 1
+    le["exit_submit_attempts"] = attempts
+    le["exit_next_retry_at_utc"] = (
+        now + timedelta(seconds=_exit_submit_backoff_seconds(attempts))
+    ).isoformat()
     result = adapter.place_market_order(
         product_id=product_id,
         side="sell",
@@ -397,7 +464,14 @@ def _submit_live_market_exit(
     if result.get("ok"):
         le["pending_exit_reason"] = reason
         le["pending_exit_quantity"] = float(quantity)
-        le["pending_exit_submitted_at_utc"] = _utcnow().isoformat()
+        le["pending_exit_submitted_at_utc"] = now.isoformat()
+        # Accepted by the broker — reset the retry state so a later,
+        # independent exit (e.g. re-exit of a remainder) starts fresh.
+        le["exit_submit_attempts"] = 0
+        le.pop("exit_next_retry_at_utc", None)
+    # Persist the counter/backoff state so it survives across pulses (the
+    # caller's flush/commit writes sess.risk_snapshot_json to the DB).
+    _commit_le(sess, le)
     return result
 
 
@@ -478,6 +552,59 @@ def _live_exit_submit_succeeded(
     result: dict[str, Any],
     reason: str,
 ) -> bool:
+    # Backoff deferral — no broker order was placed this pulse (rate-limited
+    # by _submit_live_market_exit). Not a real failure: stay in the exit
+    # state and retry after the backoff window WITHOUT recording a failure
+    # or emitting an event (avoids the per-pulse event spam that itself was
+    # part of the wedged-session problem). (2026-06-07 audit.)
+    if result.get("deferred"):
+        return False
+
+    # Max-attempts cap reached — stop re-submitting and escalate. If the
+    # broker is flat (or only unsellable dust remains) the position already
+    # left, so reconcile to EXITED; otherwise a real sellable position keeps
+    # failing to flatten for a non-balance reason → surface a terminal error
+    # for operator attention instead of looping forever.
+    if result.get("cap_exceeded"):
+        _emit(
+            db, sess, "live_exit_retry_cap_exceeded",
+            {
+                "reason": reason,
+                "attempts": result.get("attempts"),
+                "max_attempts": _EXIT_SUBMIT_MAX_ATTEMPTS,
+            },
+        )
+        if (
+            normalize_execution_family(sess.execution_family) == EXECUTION_FAMILY_COINBASE_SPOT
+            and _broker_balance_confirms_zero(sess.symbol)
+        ):
+            le["position"] = None
+            le["last_exit_reason"] = (reason or "exit") + "_retry_cap_broker_zero_reconcile"
+            le.pop("pending_exit_reason", None)
+            le.pop("pending_exit_quantity", None)
+            le.pop("pending_exit_submitted_at_utc", None)
+            le["exit_submit_attempts"] = 0
+            le.pop("exit_next_retry_at_utc", None)
+            _commit_le(sess, le)
+            _safe_transition(db, sess, STATE_LIVE_EXITED)
+            _emit(
+                db, sess, "live_exit_reconciled_broker_zero",
+                {
+                    "reason": reason,
+                    "note": "exit retry cap reached and broker holds 0/dust — reconciled to exited",
+                },
+            )
+            return True
+        le["last_exit_submit_failed"] = {
+            "reason": reason,
+            "error": "exit_retry_cap_exceeded",
+            "attempts": result.get("attempts"),
+            "recorded_at_utc": _utcnow().isoformat(),
+        }
+        _commit_le(sess, le)
+        _safe_transition(db, sess, STATE_LIVE_ERROR)
+        return False
+
     if result.get("ok") and le.get("exit_order_id"):
         return True
     missing_order_id = bool(result.get("ok")) and not le.get("exit_order_id")

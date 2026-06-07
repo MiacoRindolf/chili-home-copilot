@@ -5581,23 +5581,31 @@ class Settings(BaseSettings):
     # f-portfolio-vs-pattern-breaker-separation — portfolio-tier drawdown
     # breaker. Gates EVERY entry path (CHILI-attributed, no_pattern, manual,
     # reconcile-inferred) at the venue-adapter boundary against an
-    # all-closed PnL distribution. Default-OFF. Lives next to the pattern
+    # all-closed PnL distribution. Lives next to the pattern
     # tier; the two are independent (D5 in the brief) and each gates only
     # what its trip signal can act on. The pattern tier gates
     # CHILI-attributed entries from the autotrader; the portfolio tier
     # gates every BUY entry from the venue adapters regardless of source.
+    # ARMED 2026-06-07 (Hard Rule 2): the 2026-06-07 momentum-lane audit
+    # found this Hard-Rule-2 guard was wired everywhere but globally
+    # disabled — no entry path enforced portfolio drawdown. History is
+    # ready (≥30 all-closed close-days) so the gate is live, not dormant.
     chili_portfolio_dd_breaker_enabled: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_PORTFOLIO_DD_BREAKER_ENABLED"),
     )
-    # 7-day shadow-soak gate. When enabled=True AND live=False the breaker
-    # computes the "would have tripped" decision, persists a shadow row to
-    # trading_risk_state (regime='portfolio_breaker_shadow'), and logs a
-    # structured INFO line — but DOES NOT block entries. Flip to True
-    # after the operator reviews the shadow-log output and confirms the
-    # tier is calibrated correctly.
+    # Live-blocking gate. When enabled=True AND live=True, a tripped
+    # breaker BLOCKS the entry at the venue-adapter boundary and in the
+    # momentum arm path. When enabled=True AND live=False it runs in
+    # shadow mode (computes "would have tripped", persists a shadow row to
+    # trading_risk_state regime='portfolio_breaker_shadow', logs a
+    # structured INFO line) but DOES NOT block. ARMED LIVE 2026-06-07 per
+    # operator decision (Hard Rule 2): the portfolio tier samples ALL
+    # closed trades, so it hard-blocks only when the whole account is in
+    # real drawdown. Live mode is fail-CLOSED — DB/threshold errors block
+    # the entry with an auditable portfolio_dd_breaker_unavailable reason.
     chili_portfolio_dd_breaker_live: bool = Field(
-        default=False,
+        default=True,
         validation_alias=AliasChoices("CHILI_PORTFOLIO_DD_BREAKER_LIVE"),
     )
     # K — sigma multiplier for the portfolio-tier Gaussian lower-bound.
