@@ -1287,6 +1287,23 @@ def smart_backtest_insight(
                 exc_info=True,
             )
 
+    # FIX (idle-in-transaction cascade, 2026-06-07): the pattern/ticker setup
+    # above issued read-only SELECTs (_find_linked_pattern, ScanPattern lookup,
+    # _select_tickers) on `db`, leaving a transaction open. The dispatch loop
+    # below runs run_pattern_backtest() compute for the FIRST ticker before any
+    # further DB use on `db`, so without releasing here that setup transaction
+    # sits idle-in-transaction across ticker-1's compute (the per-result release
+    # in _persist_result already covers tickers 2..N). Setup is read-only on
+    # `db` (cost derivation uses its own _cost_db session), so this discards
+    # nothing. Mirrors _release_queue_parent_session() in learning.py.
+    try:
+        db.rollback()
+    except Exception:
+        logger.debug(
+            "[backtest_engine] pre-dispatch read-transaction release failed",
+            exc_info=True,
+        )
+
     soft_budget_child = (
         runtime_budget is not None
         and os.environ.get("CHILI_MP_BACKTEST_CHILD", "").strip().lower()

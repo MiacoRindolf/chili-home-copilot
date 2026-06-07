@@ -138,11 +138,12 @@ def test_smart_backtest_persists_completed_tickers_without_order_blocking(monkey
     assert result["lineage_missing_fields"] == []
     assert result["promotion_grade_provenance"] is True
 
-    # idle-in-transaction hygiene: every persisted ticker must release its
-    # read transaction (the param-set lineage SELECT runs AFTER save_backtest
-    # commits) so it does not sit idle-in-transaction across the next ticker's
-    # backtest compute and trip idle_in_transaction_session_timeout.
-    assert session.rollbacks >= _TARGET_TICKERS
+    # idle-in-transaction hygiene: no read transaction may sit open across a
+    # run_pattern_backtest() compute. There is one release before the dispatch
+    # loop (the pattern/ticker setup SELECTs) plus one per persisted ticker (the
+    # param-set lineage SELECT runs AFTER save_backtest commits), so the session
+    # must see at least one + one-per-ticker rollbacks.
+    assert session.rollbacks >= _TARGET_TICKERS + 1
 
     saved_tickers.clear()
     condition_threshold[0] = 55
