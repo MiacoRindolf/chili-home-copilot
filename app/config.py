@@ -5842,6 +5842,12 @@ class Settings(BaseSettings):
     brain_retention_exit_parity_backtest_days: int = 7
     brain_retention_exit_parity_live_days: int = 30
     brain_retention_exit_parity_delete_batch_size: int = 50_000
+    # Per-sweep ceiling for the exit-parity prune drain loop. The sweep now
+    # loops the batch delete (committing each batch) until the eligible set is
+    # drained, so steady-state ingestion is fully cleared daily; this cap only
+    # bounds one-time backlog catch-up so a single sweep cannot spike WAL/dead
+    # tuples for hours. Steady-state volume is far below it.
+    brain_retention_exit_parity_max_rows_per_sweep: int = 5_000_000
     brain_retention_bracket_reconciliation_days: int = 30
     brain_retention_execution_event_days: int = 180
     brain_retention_fast_snapshot_days: int = 30

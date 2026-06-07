@@ -22,6 +22,13 @@ DEFAULT_ALERT_RETAIN_DAYS = 90
 DEFAULT_BACKTEST_RETAIN_DAYS = 180
 DEFAULT_FAST_DELETE_BATCH_SIZE = 50_000
 DEFAULT_OPERATIONAL_LOG_DELETE_BATCH_SIZE = 50_000
+# Upper bound on rows a single retention sweep may delete from
+# ``trading_exit_parity_log``. The prune now drains in a per-batch-committed
+# loop (see ``_prune_exit_parity_log``) so steady-state ingestion is fully
+# cleared every sweep; this cap only bounds the one-time catch-up cost so a
+# single sweep cannot turn into an hour-long WAL/dead-tuple spike on a large
+# backlog. Steady-state (~hundreds of K/day) is far below it.
+DEFAULT_EXIT_PARITY_MAX_ROWS_PER_SWEEP = 5_000_000
 DEFAULT_FAST_PARTITION_DAYS_AHEAD = 7
 
 _IDENT_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
@@ -78,6 +85,7 @@ def run_retention_policy(
         backtest_days=settings.brain_retention_exit_parity_backtest_days,
         live_days=settings.brain_retention_exit_parity_live_days,
         batch_size=settings.brain_retention_exit_parity_delete_batch_size,
+        max_rows_per_sweep=settings.brain_retention_exit_parity_max_rows_per_sweep,
         dry_run=dry_run,
     )
     results["bracket_reconciliation_log"] = _prune_operational_time_log(
@@ -644,14 +652,27 @@ def _prune_exit_parity_log(
     backtest_days: int,
     live_days: int,
     batch_size: int | None = None,
+    max_rows_per_sweep: int | None = None,
     dry_run: bool,
 ) -> dict[str, int]:
-    """Batch-delete old exit parity rows after timestamp index is present.
+    """Drain old exit parity rows in per-batch-committed loops.
 
     Backtest parity rows are high-volume instrumentation, not a source of
     truth. Live parity rows get a longer window because they are useful for
-    drift/cutover review. The function is intentionally batch-capped so a
-    single scheduler tick cannot lock a 10+ GB table.
+    drift/cutover review.
+
+    Historically this issued exactly ONE ``DELETE ... LIMIT batch`` per daily
+    sweep. With ingestion far above one batch/day that is a permanent deficit
+    the prune can never close, so the table grew to dominate the database.
+    The fix is to loop the batch delete *within a single sweep* until either
+    the eligible set is drained or ``max_rows_per_sweep`` is reached.
+
+    Each batch is committed individually. That keeps the prune's prune rate
+    >= ingestion AND bounds transaction size / lock duration: a single
+    scheduler tick never holds a long-running delete transaction open against
+    a multi-GB table (the idle-in-transaction failure mode). The per-sweep
+    cap is a backstop so a one-time backlog cannot turn one sweep into an
+    hour-long WAL/dead-tuple spike.
     """
     if not _retention_has_leading_time_index(
         db, "trading_exit_parity_log", "created_at", require_id_second=True,
@@ -661,11 +682,15 @@ def _prune_exit_parity_log(
             "live_retain_days": live_days,
             "eligible_batch": 0,
             "deleted": 0,
+            "batches": 0,
             "skipped": 1,
         }
 
     resolved_batch = _safe_positive_int(
         batch_size, DEFAULT_OPERATIONAL_LOG_DELETE_BATCH_SIZE,
+    )
+    resolved_cap = _safe_positive_int(
+        max_rows_per_sweep, DEFAULT_EXIT_PARITY_MAX_ROWS_PER_SWEEP,
     )
     backtest_cutoff = datetime.utcnow() - timedelta(days=backtest_days)
     live_cutoff = datetime.utcnow() - timedelta(days=live_days)
@@ -679,52 +704,94 @@ def _prune_exit_parity_log(
             AND created_at < :live_cutoff
         )
     """
-    count_q = text(f"""
-        SELECT COUNT(*)
-        FROM (
-            SELECT 1
-            FROM trading_exit_parity_log
-            WHERE {where_clause}
-            ORDER BY created_at ASC, id ASC
-            LIMIT :limit
-        ) limited
-    """)
-    params = {
-        "backtest_cutoff": backtest_cutoff,
-        "live_cutoff": live_cutoff,
-        "limit": resolved_batch,
-    }
-    try:
-        eligible_batch = int(db.execute(count_q, params).scalar() or 0)
-    except Exception:
-        return {
-            "backtest_retain_days": backtest_days,
-            "live_retain_days": live_days,
-            "eligible_batch": 0,
-            "deleted": 0,
-        }
 
-    deleted = 0
-    if not dry_run and eligible_batch > 0:
-        result = db.execute(text(f"""
-            WITH doomed AS (
-                SELECT ctid
+    if dry_run:
+        # Report how many rows are eligible up to the per-sweep cap without
+        # touching the table; an unbounded COUNT(*) on a huge table is itself
+        # expensive, so we cap the probe at the same ceiling we would delete.
+        count_q = text(f"""
+            SELECT COUNT(*)
+            FROM (
+                SELECT 1
                 FROM trading_exit_parity_log
                 WHERE {where_clause}
                 ORDER BY created_at ASC, id ASC
                 LIMIT :limit
-            )
-            DELETE FROM trading_exit_parity_log t
-            USING doomed
-            WHERE t.ctid = doomed.ctid
-        """), params)
-        deleted = int(result.rowcount or 0)
+            ) limited
+        """)
+        try:
+            eligible = int(db.execute(count_q, {
+                "backtest_cutoff": backtest_cutoff,
+                "live_cutoff": live_cutoff,
+                "limit": resolved_cap,
+            }).scalar() or 0)
+        except Exception:
+            eligible = 0
+        return {
+            "backtest_retain_days": backtest_days,
+            "live_retain_days": live_days,
+            "eligible_batch": eligible,
+            "deleted": 0,
+            "batches": 0,
+        }
+
+    delete_q = text(f"""
+        WITH doomed AS (
+            SELECT ctid
+            FROM trading_exit_parity_log
+            WHERE {where_clause}
+            ORDER BY created_at ASC, id ASC
+            LIMIT :limit
+        )
+        DELETE FROM trading_exit_parity_log t
+        USING doomed
+        WHERE t.ctid = doomed.ctid
+    """)
+
+    deleted_total = 0
+    batches = 0
+    try:
+        while deleted_total < resolved_cap:
+            this_limit = min(resolved_batch, resolved_cap - deleted_total)
+            result = db.execute(delete_q, {
+                "backtest_cutoff": backtest_cutoff,
+                "live_cutoff": live_cutoff,
+                "limit": this_limit,
+            })
+            n = int(result.rowcount or 0)
+            if n <= 0:
+                break
+            # Commit each batch: keeps prune-rate >= ingestion while bounding
+            # transaction size and releasing row locks between batches.
+            db.commit()
+            deleted_total += n
+            batches += 1
+            if n < this_limit:
+                break  # eligible set drained
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.warning(
+            "[retention] exit_parity prune aborted after %d rows (%d batches)",
+            deleted_total, batches,
+        )
+        return {
+            "backtest_retain_days": backtest_days,
+            "live_retain_days": live_days,
+            "eligible_batch": deleted_total,
+            "deleted": deleted_total,
+            "batches": batches,
+            "error": 1,
+        }
 
     return {
         "backtest_retain_days": backtest_days,
         "live_retain_days": live_days,
-        "eligible_batch": eligible_batch,
-        "deleted": deleted,
+        "eligible_batch": deleted_total,
+        "deleted": deleted_total,
+        "batches": batches,
     }
 
 
