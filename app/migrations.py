@@ -20284,6 +20284,85 @@ def _migration_300_realized_ev_clean_window_recompute(conn) -> None:
     )
 
 
+def _migration_301_exit_parity_log_index_prune_and_autovacuum(conn) -> None:
+    """Shrink the runaway ``trading_exit_parity_log`` and make autovacuum work.
+
+    The table grew to dominate the database (~67% / 20 GB, 42M+ rows, 99.5%
+    high-volume ``source='backtest'`` shadow-instrumentation rows). Two
+    structural problems, fixed here at the schema level:
+
+    1. ~10 GB of indexes were never scanned by real code. Verified against
+       ``pg_stat_user_indexes`` (all-time ``idx_scan=0``) AND the code paths:
+       the only readers filter/group by ``created_at`` (covered by
+       ``ix_exit_parity_created_retention``), pattern (``ix_exit_parity_pattern_created``)
+       and mode (``ix_exit_parity_mode_created``) -- those three stay. The
+       primary key is dropped too: no inbound FK references this table's
+       ``id``, no insert path uses ``ON CONFLICT (id)``, the retention delete
+       keys on ``ctid``, and no reader does a by-id lookup -- so the pkey was
+       pure per-insert write-amplification on the hottest-write table. (The
+       ORM model keeps ``primary_key=True`` because SQLAlchemy requires a
+       mapped PK; that is a logical mapping only and does not require the
+       physical DB constraint. Inserts still use the ``id`` sequence default.)
+
+    2. Autovacuum had never completed a pass (``autovacuum_count=0``) despite
+       200k+ dead tuples, because a default-throttled pass over a 20 GB table
+       under the write firehose never finishes and the trigger threshold is
+       computed off ever-growing (and stale) ``reltuples``. We pin per-table
+       settings so autovacuum triggers on an absolute dead-tuple count and
+       runs to completion at full speed.
+
+    Idempotent: ``DROP INDEX IF EXISTS`` / ``DROP CONSTRAINT IF EXISTS`` /
+    ``ALTER TABLE ... SET`` are all safe to re-run. This migration does NOT
+    reclaim the heap (a DELETE/VACUUM FULL heap rewrite needs a maintenance
+    window and cannot run inside a migration transaction -- see
+    ``scripts/reclaim_exit_parity_log.sql``); it removes index bloat (~10 GB,
+    returned to the OS immediately) and the per-insert write amplification.
+    """
+    if "trading_exit_parity_log" not in _tables(conn):
+        conn.commit()
+        return
+
+    # Zero-scan indexes (verified idx_scan=0 + no code path uses them).
+    zero_scan_indexes = (
+        "ix_exit_parity_source_created",
+        "ix_exit_parity_action_class_created",
+        "ix_exit_parity_ticker_created",
+        "ix_exit_parity_strict_agree_created",
+        "ix_exit_parity_priority_winner_created",
+        "ix_exit_parity_agree_created",
+    )
+    for idx in zero_scan_indexes:
+        conn.execute(text(f"DROP INDEX IF EXISTS {idx}"))
+
+    # Primary key: verified safe to drop (no inbound FK / no ON CONFLICT (id)
+    # / no by-id reader / retention deletes by ctid). Dropping the constraint
+    # also drops its ~1 GB backing index.
+    conn.execute(text(
+        "ALTER TABLE trading_exit_parity_log "
+        "DROP CONSTRAINT IF EXISTS trading_exit_parity_log_pkey"
+    ))
+
+    # Make autovacuum trigger on an ABSOLUTE dead-tuple count (not 20% of an
+    # ever-growing reltuples) and run to completion at full speed. The 50k
+    # threshold mirrors the retention delete batch size so a vacuum is queued
+    # roughly once per delete batch worth of dead tuples.
+    conn.execute(text("""
+        ALTER TABLE trading_exit_parity_log SET (
+            autovacuum_vacuum_scale_factor = 0,
+            autovacuum_vacuum_threshold = 50000,
+            autovacuum_analyze_scale_factor = 0,
+            autovacuum_analyze_threshold = 50000,
+            autovacuum_vacuum_cost_delay = 0
+        )
+    """))
+
+    conn.commit()
+    logger.info(
+        "[mig301] dropped 7 zero-scan exit-parity indexes (~10GB) + pinned "
+        "absolute-threshold autovacuum on trading_exit_parity_log"
+    )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -20646,6 +20725,8 @@ MIGRATIONS = [
      _migration_299_breakout_alert_pending_ticker_distinct_index),
     ("300_realized_ev_clean_window_recompute",
      _migration_300_realized_ev_clean_window_recompute),
+    ("301_exit_parity_log_index_prune_and_autovacuum",
+     _migration_301_exit_parity_log_index_prune_and_autovacuum),
 ]
 
 

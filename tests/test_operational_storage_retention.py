@@ -41,6 +41,7 @@ def test_exit_parity_retention_settings_defaults():
     assert s.brain_retention_exit_parity_backtest_days == 7
     assert s.brain_retention_exit_parity_live_days == 30
     assert s.brain_retention_exit_parity_delete_batch_size == 50_000
+    assert s.brain_retention_exit_parity_max_rows_per_sweep == 5_000_000
     assert s.brain_retention_bracket_reconciliation_days == 30
     assert s.brain_retention_execution_event_days == 180
 
@@ -87,3 +88,57 @@ def test_storage_maintenance_script_uses_concurrent_indexes_and_dry_run_default(
     assert "trading_exit_parity_log" in src
     assert "fast_orderbook_default" in src
     assert "action=\"store_true\", help=\"mutate the database\"" in src
+
+
+def test_exit_parity_prune_drains_in_committed_loop():
+    """Regression guard: the exit-parity prune must drain ALL eligible rows in
+    a per-batch-committed loop, not one batch per daily sweep (the bug that let
+    the table grow to dominate the DB). The per-batch commit also bounds the
+    transaction so the sweep cannot become an idle-in-transaction holder.
+    """
+    src = _read("app/services/trading/data_retention.py")
+
+    assert "while deleted_total < resolved_cap:" in src
+    assert "db.commit()" in src
+    assert "max_rows_per_sweep" in src
+    assert "DEFAULT_EXIT_PARITY_MAX_ROWS_PER_SWEEP" in src
+    assert "brain_retention_exit_parity_max_rows_per_sweep" in src
+
+
+def test_exit_parity_max_rows_per_sweep_env_override(monkeypatch):
+    monkeypatch.setenv("BRAIN_RETENTION_EXIT_PARITY_MAX_ROWS_PER_SWEEP", "250000")
+
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert s.brain_retention_exit_parity_max_rows_per_sweep == 250_000
+
+
+def test_migration_301_drops_zero_scan_indexes_and_pins_autovacuum():
+    """Migration 301 reclaims ~10 GB of zero-scan indexes on the parity table
+    and pins absolute-threshold autovacuum. Keeps the 3 indexes real code uses.
+    """
+    src = _read("app/migrations.py")
+
+    assert "_migration_301_exit_parity_log_index_prune_and_autovacuum" in src
+    assert "301_exit_parity_log_index_prune_and_autovacuum" in src  # registered
+
+    # The 6 secondary zero-scan indexes are dropped via a loop over a name
+    # tuple + an f-string template, so assert both pieces.
+    assert "DROP INDEX IF EXISTS {idx}" in src
+    for idx in (
+        "ix_exit_parity_source_created",
+        "ix_exit_parity_action_class_created",
+        "ix_exit_parity_ticker_created",
+        "ix_exit_parity_strict_agree_created",
+        "ix_exit_parity_priority_winner_created",
+        "ix_exit_parity_agree_created",
+    ):
+        assert f'"{idx}"' in src
+
+    # The pkey is dropped via its constraint (also drops its backing index).
+    assert "DROP CONSTRAINT IF EXISTS trading_exit_parity_log_pkey" in src
+
+    # Per-table autovacuum pinned to an absolute dead-tuple threshold.
+    assert "autovacuum_vacuum_scale_factor = 0" in src
+    assert "autovacuum_vacuum_threshold = 50000" in src
+    assert "autovacuum_vacuum_cost_delay = 0" in src
