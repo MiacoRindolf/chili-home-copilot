@@ -15,6 +15,7 @@ from ..execution_family_registry import (
     EXECUTION_FAMILY_ROBINHOOD_SPOT,
     is_momentum_automation_implemented,
     normalize_execution_family,
+    venue_for_execution_family,
 )
 from .persistence import append_trading_automation_event, create_trading_automation_session
 from .risk_evaluator import evaluate_proposed_momentum_automation
@@ -398,7 +399,6 @@ def begin_live_arm(
     )
 
     ef_live = normalize_execution_family(execution_family)
-    from ...execution_family_registry import venue_for_execution_family
 
     sess = create_trading_automation_session(
         db,
