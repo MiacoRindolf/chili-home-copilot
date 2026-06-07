@@ -129,6 +129,35 @@ def _active_live_session_count(db: Session, *, user_id: int | None) -> int:
     return int(q.count())
 
 
+def _symbols_with_active_live_session(db: Session, *, user_id: int | None) -> set[str]:
+    """Symbols that already hold a non-terminal live momentum session.
+
+    Mirrors begin_live_arm's dedup (the SAME _TERMINAL_OPERATOR_STATES — single
+    source of truth) so the auto-arm never re-picks a symbol the operator flow
+    would simply dedup. Without this guard the top-viability name (e.g. one hot
+    crypto) is chosen every pass; begin_live_arm then returns that session's
+    already-watching token, confirm_live_arm fails `invalid_token` (the token's
+    session is no longer arm-pending), and the rest of the explosive board is
+    starved. Skipping busy symbols rotates the lane to the next fresh setup —
+    Ross-style — and removes the confirm noise entirely.
+    """
+    try:
+        from .operator_actions import _TERMINAL_OPERATOR_STATES
+
+        q = db.query(TradingAutomationSession.symbol).filter(
+            TradingAutomationSession.mode == "live",
+            TradingAutomationSession.state.notin_(tuple(_TERMINAL_OPERATOR_STATES)),
+        )
+        if user_id is not None:
+            q = q.filter(TradingAutomationSession.user_id == int(user_id))
+        return {str(s).upper() for (s,) in q.all() if s}
+    except Exception:
+        # Fail-open: no exclusions. begin_live_arm's own dedup still prevents a
+        # true double-arm; this guard is a selection-quality filter, not a safety
+        # gate, so a DB hiccup must not block the pass.
+        return set()
+
+
 def _dedupe_by_symbol(rows: list[Any], *, limit: int) -> list[Any]:
     """Keep the highest-viability variant per SYMBOL (rows must be pre-sorted by
     viability desc), so the scan covers `limit` DISTINCT symbols — not `limit`
@@ -282,12 +311,18 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
         out["skipped"] = "no_fresh_live_eligible"
         return out
 
-    # Cheap pre-filter (no network): venue, market hours, per-symbol mutex.
+    # Cheap pre-filter (no network): venue, market hours, per-symbol mutex,
+    # and self-collision (a symbol we already hold an active live session for).
+    busy_symbols = _symbols_with_active_live_session(db, user_id=uid)
+    out["busy_skipped"] = 0
     eligible: list[MomentumSymbolViability] = []
     for c in candidates:
         out["checked"] += 1
         if _auto_arm_crypto_only() and not _is_coinbase_tradeable_symbol(c.symbol):
             continue  # defensive: never arm an equity via the coinbase_spot lane
+        if c.symbol.upper() in busy_symbols:
+            out["busy_skipped"] += 1
+            continue  # already have a live session for this symbol — rotate to the next setup
         if not _symbol_market_open(c.symbol):
             continue  # equities only during RTH; crypto always passes (24/7)
         if not _symbol_free(db, c.symbol, uid):
@@ -362,6 +397,20 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
         logger.info(
             "[auto_arm] begin_live_arm blocked %s: %s",
             chosen.symbol, begin.get("error"),
+        )
+        return out
+
+    if begin.get("deduped"):
+        # A race created an active session for this symbol after the busy-set
+        # snapshot. begin_live_arm returned the existing session's token, whose
+        # session is no longer arm-pending — confirming it would fail
+        # invalid_token. Treat as already-active and skip; the live runner owns
+        # that session now.
+        out["skipped"] = "already_active"
+        out["session_id"] = begin.get("session_id")
+        logger.info(
+            "[auto_arm] %s already has an active live session (state=%s) — skip confirm",
+            chosen.symbol, begin.get("state"),
         )
         return out
 

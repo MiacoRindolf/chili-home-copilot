@@ -129,6 +129,32 @@ def test_confirm_blocked_does_not_arm(happy):
     assert out["confirm_error"] == "broker_not_ready"
 
 
+def test_deduped_begin_skips_confirm(happy):
+    # begin_live_arm dedups (the symbol already holds an active live session):
+    # it returns that session's token, whose session is no longer arm-pending.
+    # The pass must NOT forward that stale token to confirm_live_arm (which
+    # would fail invalid_token and churn) — it reports already_active instead.
+    def _confirm_must_not_run(*a, **k):
+        raise AssertionError("confirm_live_arm must not run on a deduped begin")
+
+    happy.setattr(
+        operator_actions,
+        "begin_live_arm",
+        lambda db, **k: {
+            "ok": True,
+            "deduped": True,
+            "session_id": 77,
+            "arm_token": "stale-token",
+            "state": "watching_live",
+        },
+    )
+    happy.setattr(operator_actions, "confirm_live_arm", _confirm_must_not_run)
+    out = aa.run_auto_arm_pass(_FakeDB())
+    assert out["skipped"] == "already_active"
+    assert out["session_id"] == 77
+    assert out.get("armed", 0) == 0
+
+
 def test_dedupe_by_symbol_keeps_best_variant_distinct_symbols():
     # 10 RSC variants (top), then FIDA, then SOL — dedupe must yield 3 distinct symbols
     rows = (
