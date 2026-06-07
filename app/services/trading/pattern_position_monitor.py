@@ -599,6 +599,16 @@ def _run_for_trades(
         # so the per-trade loop below doesn't cascade with PendingRollbackError.
         rollback_if_poisoned(db)
 
+    # FIX (idle-in-transaction cascade, 2026-06-07): release the trades-read /
+    # stale-reconcile transaction before the per-trade loop so the first trade's
+    # broker-quote + LLM network I/O does not run inside an open transaction
+    # (idle_in_transaction_session_timeout, db.py default 120s). Any
+    # stale-reconcile writes above are durable after this commit.
+    try:
+        db.commit()
+    except Exception:
+        rollback_if_poisoned(db)
+
     for trade in trades:
         try:
             if trade.related_alert_id:
@@ -625,6 +635,12 @@ def _run_for_trades(
                 actions_taken += 1
             elif result == "skipped":
                 skipped += 1
+            # Commit this trade's decision/mutations before the NEXT trade's
+            # broker-quote + LLM I/O, so the session is not idle-in-transaction
+            # across that I/O. Per-trade decisions are independent (no
+            # cross-trade atomicity); committing per trade also means a later
+            # poisoned trade can no longer discard earlier persisted decisions.
+            db.commit()
         except Exception:
             logger.warning("[pattern_monitor] error evaluating trade %s", trade.id, exc_info=True)
             # If the connection dropped mid-transaction the session is poisoned;
