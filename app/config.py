@@ -2875,6 +2875,14 @@ class Settings(BaseSettings):
         le=86400,
         validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_MAX_WATCH_SECONDS"),
     )
+    # Shake-out learning: how long after an exit to watch the price path to judge
+    # whether the thesis would have worked (was the stop too tight?). 30min.
+    chili_momentum_post_exit_horizon_seconds: int = Field(
+        default=1800,
+        ge=300,
+        le=86400,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_POST_EXIT_HORIZON_SECONDS"),
+    )
 
     chili_auto_execute_stops: bool = Field(
         default=False,

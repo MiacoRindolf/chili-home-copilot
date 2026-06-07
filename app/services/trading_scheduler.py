@@ -838,6 +838,38 @@ def _run_momentum_auto_arm_live_job():
     run_scheduler_job_guarded("momentum_auto_arm_live", _work)
 
 
+def _run_momentum_post_exit_excursion_job():
+    """Label recently-closed momentum trades against their post-exit price path so
+    the learner sees CORRECT data (shake-out vs thesis-fail), not a shallow loss.
+    (trading.momentum_neural.post_exit_excursion.run_post_exit_excursion_pass)"""
+
+    def _work() -> None:
+        from ..config import settings as _settings
+        from ..db import SessionLocal
+
+        if not _settings.chili_momentum_live_runner_enabled:
+            return
+
+        db = SessionLocal()
+        try:
+            from .trading.momentum_neural.post_exit_excursion import run_post_exit_excursion_pass
+
+            summary = run_post_exit_excursion_pass(db)
+            if summary.get("labeled") or summary.get("shakeouts"):
+                logger.info("[scheduler] post_exit_excursion: %s", summary)
+        except Exception:
+            db.rollback()
+            logger.warning("[scheduler] post_exit_excursion pass failed", exc_info=True)
+        finally:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("momentum_post_exit_excursion", _work)
+
+
 def _run_neural_mesh_drain_job():
     """Drain the neural-mesh activation queue.
 
@@ -5448,6 +5480,23 @@ def start_scheduler():
                 max_instances=1,
                 coalesce=True,
                 next_run_time=datetime.now() + timedelta(seconds=40),
+            )
+
+        # Shake-out learning: label closed momentum trades vs their post-exit path
+        # (was the stop too tight?) so the learner sees correct data, not a loss.
+        if (
+            include_web_light
+            and settings.chili_momentum_live_runner_enabled
+        ):
+            _scheduler.add_job(
+                _run_momentum_post_exit_excursion_job,
+                trigger=IntervalTrigger(minutes=2),
+                id="momentum_post_exit_excursion",
+                name="Momentum post-exit excursion labeler (every 2min; shake-out detection)",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now() + timedelta(seconds=110),
             )
 
         # Data retention: archive old snapshots, prune payloads daily at 3:30 AM
