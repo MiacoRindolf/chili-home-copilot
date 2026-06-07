@@ -11339,6 +11339,16 @@ def evolve_pattern_strategies(db: Session) -> dict[str, Any]:
                                     "yes" if parent_loss else "random",
                                 )
 
+        # FIX (idle-in-transaction + lock-holding, 2026-06-07): commit each
+        # parent's promotions/deactivations/mutations before moving to the next
+        # parent, so this write-heavy evolution loop does not hold ONE
+        # transaction (and its row locks) across every parent's fitness compute.
+        # Bounds the idle-in-transaction window and releases locks incrementally
+        # (matters under the known PG write pressure); per-parent evolution
+        # results are independent. Writes are preserved (commit, not rollback);
+        # parents that `continue` early simply defer to the next full iteration.
+        db.commit()
+
     db.commit()
     logger.info("[learning] Pattern evolution complete: %s", stats)
     return stats
