@@ -177,6 +177,41 @@ def _sustained_rvol(vr: list[Any], cur: int, lookback: int) -> float | None:
     return sum(ratios) / len(ratios)
 
 
+# ── Volatility-aware pullback validity ────────────────────────────────────────
+# The lane now SELECTS explosive low-float small-caps (universe profile #531/#533),
+# but the pullback-validity checks were tuned for orderly large-caps: a flat 50%
+# shallowness cap, a 0.1% EMA-9 wick buffer and a 0.2% retest tolerance rejected
+# ~99% of these names' bars (backtest 2026-06-08: 3 fires across 10 small-caps; 0
+# trades on INHD +1700%). These names wick + pull DEEPER in absolute terms while
+# still printing a clean Ross flag — so each tolerance scales with the instrument's
+# OWN ATR%: a calm name keeps the tight Ross floor, a volatile small-cap gets
+# proportional room. No fixed per-name magic; the discipline (shallow pull that
+# holds the 9-EMA, retested, broken on volume) is unchanged — only its yardstick is
+# now volatility-relative. Floors/ceiling are Ross-discipline guards, the single
+# documented place to tune. docs/DESIGN/MOMENTUM_LANE.md
+_VOL_SHALLOW_BASE = 0.50        # calm-name "shallow" retrace cap (Ross floor)
+_VOL_SHALLOW_CEIL = 0.75        # never deeper than this — beyond is a reversal, not a pullback
+_VOL_SHALLOW_ATR_MULT = 1.5     # widen the shallow cap by this x ATR%
+_VOL_EMA_WICK_FLOOR = 0.001     # min EMA-9 wick tolerance (the original 0.1%)
+_VOL_EMA_WICK_ATR_MULT = 0.5    # tolerate a wick this x ATR% below the 9-EMA
+_VOL_RETEST_TOL_ATR_MULT = 0.3  # retest dip/hold tolerance scales this x ATR%
+
+
+def _vol_aware_pullback_tolerances(
+    atr_pct: float | None, base_retrace: float
+) -> tuple[float, float, float]:
+    """``(shallow_retrace_cap, ema9_wick_tol, retest_tol)`` scaled by the
+    instrument's ATR%. ``atr_pct=None``/0 → Ross floors (backward-compatible: the
+    shallow cap = ``base_retrace``, the EMA-9 buffer = 0.1%, no extra retest room),
+    so calm names behave exactly as before and only volatile small-caps get room.
+    """
+    a = float(atr_pct) if (atr_pct is not None and atr_pct > 0) else 0.0
+    shallow = min(_VOL_SHALLOW_CEIL, float(base_retrace) + a * _VOL_SHALLOW_ATR_MULT)
+    ema_wick = max(_VOL_EMA_WICK_FLOOR, a * _VOL_EMA_WICK_ATR_MULT)
+    retest = a * _VOL_RETEST_TOL_ATR_MULT
+    return shallow, ema_wick, retest
+
+
 def _evaluate_raw_break(
     high: pd.Series,
     low: pd.Series,
@@ -186,6 +221,7 @@ def _evaluate_raw_break(
     entry_interval: str,
     max_pullback_bars: int,
     retracement_threshold: float,
+    atr_pct: float | None = None,
 ) -> tuple[bool, str, float | None, float | None, dict[str, Any]]:
     """First-break trigger (Ross's classic rule). Identical to the original logic:
     after an up-impulse, a SHALLOW pullback (holding above EMA-9) whose HIGH the
@@ -206,15 +242,19 @@ def _evaluate_raw_break(
     debug = {"entry_interval": entry_interval, "pullback_high": pb_high, "pullback_low": pb_low,
              "win_high": win_high}
 
-    # Shallow: must not retrace more than the threshold of the impulse range.
+    # Shallow: must not retrace more than the (volatility-aware) threshold of the
+    # impulse range — a volatile small-cap is allowed a proportionally deeper flag.
+    eff_shallow, ema_wick, _ = _vol_aware_pullback_tolerances(atr_pct, retracement_threshold)
     retrace = (win_high - pb_low) / impulse_range
     debug["retrace"] = round(retrace, 3)
-    if retrace > float(retracement_threshold):
+    debug["shallow_cap"] = round(eff_shallow, 3)
+    if retrace > eff_shallow:
         return False, "pullback_too_deep", None, None, debug
 
-    # Held above EMA-9 (structural support) during the pullback.
+    # Held above EMA-9 (structural support) during the pullback — the wick tolerance
+    # scales with ATR% so normal small-cap noise below the 9-EMA isn't read as a break.
     ema_cur = ema9[cur] if cur < len(ema9) and ema9[cur] is not None else None
-    if ema_cur is not None and pb_low < float(ema_cur) * 0.999:
+    if ema_cur is not None and pb_low < float(ema_cur) * (1.0 - ema_wick):
         debug["ema_9"] = float(ema_cur)
         return False, "pullback_below_ema9", None, None, debug
 
@@ -238,6 +278,7 @@ def _evaluate_break_retest(
     retracement_threshold: float,
     retest_tolerance: float,
     retest_lookback_bars: int,
+    atr_pct: float | None = None,
 ) -> tuple[bool, str, float | None, float | None, dict[str, Any]]:
     """Break-AND-retest trigger (Ross's recent refinement: "I almost never buy the
     first break anymore — too many wick out and reverse. I wait for the break AND
@@ -272,21 +313,28 @@ def _evaluate_break_retest(
     debug = {"entry_interval": entry_interval, "pullback_high": level, "pullback_low": base_low,
              "win_high": win_high, "mode": "retest"}
 
+    # Volatility-aware tolerances: a volatile small-cap pulls + wicks deeper while
+    # still printing a clean flag, so scale the shallow cap / EMA-9 wick / retest
+    # tolerance by ATR% (calm name -> Ross floors). See _vol_aware_pullback_tolerances.
+    eff_shallow, ema_wick, vol_retest = _vol_aware_pullback_tolerances(atr_pct, retracement_threshold)
+    debug["shallow_cap"] = round(eff_shallow, 3)
+
     retrace = (win_high - base_low) / impulse_range
     debug["retrace"] = round(retrace, 3)
-    if retrace > float(retracement_threshold):
+    if retrace > eff_shallow:
         return False, "pullback_too_deep", None, None, debug
 
     # EMA-9 support is checked at the BASE (when the consolidation formed), not at
     # the current bar — a strong continuation after the break lifts the current EMA
-    # above the older base low, which would otherwise reject a valid retest.
+    # above the older base low, which would otherwise reject a valid retest. Wick
+    # tolerance scales with ATR% (small-cap noise below the 9-EMA isn't a break).
     ema_idx = base_end - 1
     ema_base = ema9[ema_idx] if 0 <= ema_idx < len(ema9) and ema9[ema_idx] is not None else None
-    if ema_base is not None and base_low < float(ema_base) * 0.999:
+    if ema_base is not None and base_low < float(ema_base) * (1.0 - ema_wick):
         debug["ema_9"] = float(ema_base)
         return False, "pullback_below_ema9", None, None, debug
 
-    tol = max(0.0, float(retest_tolerance))
+    tol = max(0.0, float(retest_tolerance), vol_retest)
 
     # 1) Breakout: a tail bar BEFORE the current pierced the level.
     break_idx: int | None = None
@@ -364,9 +412,22 @@ def pullback_break_confirmation(
     vol = df["Volume"].astype(float)
     n = len(df)
     cur = n - 1
-    arrays = compute_all_from_df(df, needed={"ema_9", "volume_ratio"})
+    arrays = compute_all_from_df(df, needed={"ema_9", "volume_ratio", "atr"})
     ema9 = arrays.get("ema_9") or []
     vr = arrays.get("volume_ratio") or []
+    atr = arrays.get("atr") or []
+
+    # Instrument volatility (ATR / price) drives the volatility-aware pullback
+    # tolerances in the evaluators, so the explosive small-caps the lane selects
+    # get room a flat threshold denied them. None on thin data -> Ross floors.
+    atr_pct = None
+    try:
+        _a = float(atr[cur]) if cur < len(atr) and atr[cur] is not None else None
+        _p = float(close.iloc[cur])
+        if _a is not None and _p > 0:
+            atr_pct = _a / _p
+    except (TypeError, ValueError, IndexError):
+        atr_pct = None
 
     # Trigger: break-and-retest (#1) when enabled, else the classic first break.
     if require_retest:
@@ -377,6 +438,7 @@ def pullback_break_confirmation(
             retracement_threshold=retracement_threshold,
             retest_tolerance=retest_tolerance,
             retest_lookback_bars=retest_lookback_bars,
+            atr_pct=atr_pct,
         )
     else:
         ok_t, reason_t, pb_high, pb_low, debug = _evaluate_raw_break(
@@ -384,6 +446,7 @@ def pullback_break_confirmation(
             entry_interval=entry_interval,
             max_pullback_bars=max_pullback_bars,
             retracement_threshold=retracement_threshold,
+            atr_pct=atr_pct,
         )
     if not ok_t:
         return False, reason_t, debug
