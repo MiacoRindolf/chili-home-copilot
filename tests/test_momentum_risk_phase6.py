@@ -252,3 +252,46 @@ def test_session_detail_includes_risk_status(db: Session) -> None:
     rs = d["session"]["risk_status"]
     assert rs.get("severity") in ("ok", "warn", "block")
     assert "governance" in d and "risk_policy_summary" in d
+
+
+# ── execution_family alignment is symbol-routed, not variant-locked (E-phase) ──
+def _alignment_check(ev: dict) -> dict | None:
+    return next((c for c in ev["checks"] if c["id"] == "execution_family_variant_alignment"), None)
+
+
+def test_equity_symbol_aligns_with_robinhood_spot(db: Session) -> None:
+    """An equity routes to robinhood_spot; arming it on robinhood_spot must pass the
+    alignment check even though every strategy variant is a coinbase_spot template."""
+    vid, _ = _seed_live_eligible_row(db)
+    uid = _uid(db, "rh_align")
+    ev = evaluate_proposed_momentum_automation(
+        db, user_id=uid, symbol="AAPL", variant_id=vid, mode="live", execution_family="robinhood_spot"
+    )
+    chk = _alignment_check(ev)
+    assert chk is not None and chk["ok"] is True, chk
+    assert chk["detail"]["symbol_resolved"] == "robinhood_spot"
+    assert chk["detail"]["variant_execution_family"] == "coinbase_spot"
+
+
+def test_equity_symbol_via_coinbase_is_blocked(db: Session) -> None:
+    """Mis-routing an equity to coinbase_spot must BLOCK (the old variant-only check
+    would have ALLOWED this because the variant template is coinbase_spot)."""
+    vid, _ = _seed_live_eligible_row(db)
+    uid = _uid(db, "rh_misroute")
+    ev = evaluate_proposed_momentum_automation(
+        db, user_id=uid, symbol="AAPL", variant_id=vid, mode="live", execution_family="coinbase_spot"
+    )
+    chk = _alignment_check(ev)
+    assert chk is not None and chk["ok"] is False and chk["severity"] == "block", chk
+
+
+def test_crypto_symbol_aligns_with_coinbase_spot(db: Session) -> None:
+    """Crypto path is unchanged: BASE-USD routes to coinbase_spot and aligns."""
+    vid, _ = _seed_live_eligible_row(db)
+    uid = _uid(db, "cb_align")
+    ev = evaluate_proposed_momentum_automation(
+        db, user_id=uid, symbol="SOL-USD", variant_id=vid, mode="live", execution_family="coinbase_spot"
+    )
+    chk = _alignment_check(ev)
+    assert chk is not None and chk["ok"] is True, chk
+    assert chk["detail"]["symbol_resolved"] == "coinbase_spot"
