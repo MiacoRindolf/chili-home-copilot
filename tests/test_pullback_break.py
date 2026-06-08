@@ -5,6 +5,7 @@ from __future__ import annotations
 import pandas as pd
 
 from app.services.trading.momentum_neural.entry_gates import (
+    _vol_aware_pullback_tolerances,
     breakout_failed_to_hold,
     pullback_break_confirmation,
 )
@@ -190,3 +191,43 @@ def test_breakout_buffer_suppresses_wick_noise() -> None:
     assert breakout_failed_to_hold(
         breakout_level=100.0, bid=99.80, held_seconds=10, window_seconds=600, buffer_pct=0.001
     ) is True
+
+
+# ── volatility-aware pullback tolerances (selection<->entry alignment) ───────
+
+def test_vol_aware_calm_name_is_ross_floor() -> None:
+    # No / zero ATR -> exactly the original Ross floors (backward-compatible: calm
+    # large-caps behave as before; only volatile small-caps get extra room).
+    for atr in (None, 0.0):
+        shallow, ema_wick, retest = _vol_aware_pullback_tolerances(atr, 0.50)
+        assert shallow == 0.50
+        assert ema_wick == 0.001
+        assert retest == 0.0
+
+
+def test_vol_aware_volatile_smallcap_gets_room() -> None:
+    # A 10%-ATR small-cap is allowed a deeper flag, a bigger EMA-9 wick, and retest room.
+    shallow, ema_wick, retest = _vol_aware_pullback_tolerances(0.10, 0.50)
+    assert shallow > 0.50
+    assert ema_wick > 0.001
+    assert retest > 0.0
+    assert shallow <= 0.75  # never beyond the reversal ceiling
+
+
+def test_vol_aware_shallow_cap_respects_ceiling() -> None:
+    # Even at absurd volatility the shallow cap is hard-capped (still a pullback, not a reversal).
+    shallow, _, _ = _vol_aware_pullback_tolerances(5.0, 0.50)
+    assert shallow == 0.75
+
+
+def test_vol_aware_scales_monotonically_with_atr() -> None:
+    s_lo, w_lo, r_lo = _vol_aware_pullback_tolerances(0.02, 0.50)
+    s_hi, w_hi, r_hi = _vol_aware_pullback_tolerances(0.15, 0.50)
+    assert s_hi >= s_lo and w_hi > w_lo and r_hi > r_lo
+
+
+def test_vol_aware_respects_passed_base_threshold() -> None:
+    # The base retrace knob is honored (vol scaling is additive on top of it).
+    shallow_a, _, _ = _vol_aware_pullback_tolerances(0.05, 0.40)
+    shallow_b, _, _ = _vol_aware_pullback_tolerances(0.05, 0.50)
+    assert shallow_b > shallow_a
