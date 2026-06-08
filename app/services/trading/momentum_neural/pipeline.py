@@ -97,12 +97,15 @@ def run_momentum_neural_tick(
         except Exception:
             pass
 
-    # E5: news-catalyst set (earnings) for the catalyst viability tilt. Best-effort
-    # + cached; empty -> no-op (degrades gracefully without Benzinga). (catalyst.py)
+    # E5: news-catalyst set (EARNINGS + fresh general NEWS headlines) for the catalyst
+    # viability tilt. The fresh-news union is what catches Ross's explosive sympathy/
+    # theme movers (a low-float small-cap that just printed a hot headline), not just
+    # scheduled earnings. Best-effort + cached; empty -> no-op (degrades gracefully
+    # without the news/Benzinga feed). (catalyst.py)
     try:
-        from .catalyst import earnings_catalyst_symbols
+        from .catalyst import all_catalyst_symbols
 
-        _cat = earnings_catalyst_symbols()
+        _cat = all_catalyst_symbols()
         if _cat:
             meta["catalyst_symbols"] = _cat
     except Exception:
