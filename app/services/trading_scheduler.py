@@ -3941,7 +3941,13 @@ def _run_momentum_scanner_job():
         )
         db.commit()
 
-        _bridge_scanner_to_viability(db, res_list, source="momentum_scanner")
+        # The broad momentum scanner is an ALERT tool over a WIDE universe (incl.
+        # large-caps / ETFs like AAPL / GDXJ). It must NOT feed the momentum LANE
+        # viability — that is fed exclusively by the Ross-screened sources (the
+        # equity Ross-universe refresh + the crypto venue feed) so the lane only ever
+        # evaluates Ross-class small-caps, not mega-caps at a flat default score that
+        # dilute selection. (Removed the cross-feed; alerts above are unaffected.)
+        # docs/DESIGN/MOMENTUM_LANE.md
     except Exception as e:
         logger.error(f"[scheduler] Momentum scanner failed: {e}")
         if jid:

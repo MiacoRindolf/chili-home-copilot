@@ -2533,6 +2533,20 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_TOPPING_TAIL_ENABLED"),
         description="Exit the TRAILING runner on a topping-tail/shooting-star rejection candle.",
     )
+    # Runaway-break allowance: take a high-conviction break that ran away WITHOUT a
+    # retest (else a vertical runner that never comes back is missed). Strict — only
+    # the retest WAIT is waived; raised volume + candle/VWAP/MACD confirmations stand.
+    chili_momentum_entry_allow_runaway_break: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_ALLOW_RUNAWAY_BREAK"),
+        description="Enter a high-conviction breakout that ran away without offering a retest (don't miss vertical runners).",
+    )
+    chili_momentum_entry_runaway_min_volume_spike: float = Field(
+        default=2.5,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_RUNAWAY_MIN_VOLUME_SPIKE"),
+        description="Raised volume-spike floor for a runaway (no-retest) entry — more conviction than a normal break.",
+    )
     # #2 Breakout-or-bailout fast exit (Ross flat-top): if the broken level fails to
     # hold shortly after entry, cut at market — well inside the structural stop.
     chili_momentum_breakout_bailout_enabled: bool = Field(
