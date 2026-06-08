@@ -4130,32 +4130,48 @@ def _run_equity_viability_refresh_job():
     from ..db import SessionLocal
     from .trading.intraday_signals import scan_momentum_continuation, scan_premarket_gaps
 
-    db = SessionLocal()
+    # The equity momentum scan does per-ticker OHLCV fetches and can run for minutes.
+    # Holding ONE db across the scan AND the bridge write left the connection
+    # idle-in-transaction long enough for PG to drop it ("server closed the connection
+    # unexpectedly"), so the bridge write failed and equities went stale. So: scan on a
+    # short-lived session that is RELEASED before the write, then bridge on a FRESH
+    # connection (the scan's may already be dead). docs/DESIGN/MOMENTUM_LANE.md
+    sweep: dict[str, Any] = {"momentum_signals": [], "premarket_gaps": []}
+    scan_db = SessionLocal()
     try:
-        sweep: dict[str, Any] = {}
         try:
-            sweep["momentum_signals"] = list(scan_momentum_continuation(db=db) or [])
+            sweep["momentum_signals"] = list(scan_momentum_continuation(db=scan_db) or [])
         except Exception:
             sweep["momentum_signals"] = []
         try:
             sweep["premarket_gaps"] = list(scan_premarket_gaps() or [])
         except Exception:
             sweep["premarket_gaps"] = []
-        movers = _equity_movers_for_ross_bridge(sweep)
-        if movers:
-            _bridge_scanner_to_viability(db, movers, source="equity_viability_refresh")
-            logger.info(
-                "[scheduler] equity viability refresh: %d movers -> viability (crypto-parity cadence)",
-                len(movers),
-            )
-    except Exception as e:
-        logger.warning("[scheduler] equity viability refresh failed: %s", e)
     finally:
         try:
-            db.rollback()
+            scan_db.rollback()
         except Exception:
             pass
-        db.close()
+        scan_db.close()
+
+    movers = _equity_movers_for_ross_bridge(sweep)
+    if not movers:
+        return
+    write_db = SessionLocal()  # FRESH connection for the write (the scan's may be dead)
+    try:
+        _bridge_scanner_to_viability(write_db, movers, source="equity_viability_refresh")
+        logger.info(
+            "[scheduler] equity viability refresh: %d movers -> viability (crypto-parity cadence)",
+            len(movers),
+        )
+    except Exception as e:
+        logger.warning("[scheduler] equity viability refresh bridge failed: %s", e)
+    finally:
+        try:
+            write_db.rollback()
+        except Exception:
+            pass
+        write_db.close()
 
 
 def _run_intraday_signal_sweep_job():
