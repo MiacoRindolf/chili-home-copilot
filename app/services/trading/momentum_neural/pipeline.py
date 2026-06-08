@@ -107,7 +107,11 @@ def run_momentum_neural_tick(
 
         _cat = all_catalyst_symbols()
         if _cat:
-            meta["catalyst_symbols"] = _cat
+            # MUST be a list, not a set: meta flows into the brain_node_states
+            # local_state JSONB and a set is not JSON-serializable ("Object of type
+            # set is not JSON serializable"), which would fail the ENTIRE viability
+            # write and leave every symbol stale. (regression guard for #528)
+            meta["catalyst_symbols"] = sorted(_cat)
     except Exception:
         pass
 
