@@ -604,10 +604,12 @@ def _compute_lane_status(db: Session, *, user_id: int) -> dict[str, Any]:
         "halt_reason": None,
         "daily_pnl_usd": None,
         "max_daily_loss_usd": None,
+        "peak_pnl_usd": None,
+        "giveback_fraction": None,
         "resets_at_utc": None,
     }
     try:
-        from .risk_evaluator import _daily_realized_pnl
+        from .risk_evaluator import _daily_realized_pnl, evaluate_profit_giveback_halt
         from .risk_policy import equity_relative_daily_loss_cap
 
         max_dl = equity_relative_daily_loss_cap(
@@ -622,6 +624,18 @@ def _compute_lane_status(db: Session, *, user_id: int) -> dict[str, Any]:
         status["halted"] = bool(daily_pnl <= -max_dl)
         if status["halted"]:
             status["halt_reason"] = "daily_loss_cap"
+        else:
+            # Upside round-trip guard (Ross 50%-giveback rule): the lane ALSO halts
+            # when a meaningful green day has given back >= the giveback fraction of
+            # its peak. Daily-loss cap takes precedence (checked first, more severe).
+            gb = evaluate_profit_giveback_halt(
+                db, user_id=int(user_id), execution_family=EXECUTION_FAMILY_COINBASE_SPOT
+            )
+            status["peak_pnl_usd"] = gb.get("peak_pnl_usd")
+            status["giveback_fraction"] = gb.get("giveback_fraction")
+            if gb.get("halted"):
+                status["halted"] = True
+                status["halt_reason"] = "profit_giveback"
     except Exception:
         pass
     return status

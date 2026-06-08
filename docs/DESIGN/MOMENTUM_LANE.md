@@ -115,6 +115,32 @@ On a screened candidate's recent bars, detect a continuation entry **directly**
   existing `compute_composite_score` so the **pattern lane** also prioritizes
   explosive setups.
 
+### 3.5 Session-level risk: daily-loss cap + profit-giveback halt
+Two equity-relative session circuit-breakers gate **new arming** for the rest of
+the daily window (00:00 UTC reset, the same `date.today()` window
+`_daily_realized_pnl` sums). Both are enforced as a **two-layer pattern**: a cheap
+early-out in `auto_arm` (Guards 4 + 5) and the authoritative re-enforcement in
+`risk_evaluator.evaluate_proposed_momentum_automation` (which `begin_live_arm` /
+`confirm_live_arm` honor). Both surface on the Monitor card.
+
+- **Daily-loss cap (downside).** Halts when today's realized PnL falls to
+  `-(equity × daily_loss_fraction)` (fallback `chili_momentum_risk_max_daily_loss_usd`).
+- **Profit-giveback halt (upside, Ross's rule).** Ross: *"I have a rule that I give
+  back 50% of my profits once I reach a certain threshold... easier to remember half
+  than 40%"* (warriortrading.com/7-day-trading-rules, confirmed in the 2026-06-07
+  research). Once today's **peak** realized PnL (high-water mark, computed live from
+  `momentum_automation_outcomes` — no extra state) reaches an **activation threshold**
+  AND current realized PnL has fallen to `peak × (1 − giveback_fraction)` or below, the
+  lane stops arming for the day (locks in the green day instead of round-tripping it
+  back to flat/red). The **single documented knob** is
+  `chili_momentum_profit_giveback_fraction` (default `0.5`; `0` disables). The
+  activation threshold is **equity-relative with no second magic number** — it reuses
+  the equity-relative daily-loss-cap magnitude (a green day worth protecting is, by
+  symmetry, one that exceeds the day's max tolerable red). Decision helper:
+  `risk_evaluator.evaluate_profit_giveback_halt`. Tunable follow-up flagged to Cowork:
+  whether the activation should be the full daily-loss-cap magnitude or a fraction of
+  it, once soak shows how often it arms.
+
 ## 4. Validation plan (must pass before/with go-live)
 1. **Vs Ross's real trades:** replay his recent actual trades (research M1)
    through the screener on stock data — would it have flagged them? (Does the

@@ -321,6 +321,30 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     except Exception:
         pass
 
+    # Guard 5: profit-giveback session halt (Ross 50%-giveback rule). The UPSIDE mirror
+    # of Guard 4: once today's realized PnL peaked at a meaningful (equity-relative)
+    # green and has since given back >= the giveback fraction of that peak, STOP arming
+    # for the rest of the daily window — lock in the green day instead of round-tripping
+    # it back to flat/red. Authoritatively re-enforced in begin_live_arm (risk_evaluator
+    # profit_giveback check); this is the cheap early-out that mirrors Guard 4 so the
+    # pass reports it clearly instead of churning every candidate into begin_blocked.
+    # Fail-open. MOMENTUM_LANE.md [[project_momentum_lane]] [[feedback_adaptive_no_magic]]
+    try:
+        from .risk_evaluator import evaluate_profit_giveback_halt
+        from ..execution_family_registry import EXECUTION_FAMILY_COINBASE_SPOT
+
+        _gb = evaluate_profit_giveback_halt(
+            db, user_id=int(uid), execution_family=EXECUTION_FAMILY_COINBASE_SPOT
+        )
+        if _gb.get("halted"):
+            out["skipped"] = "profit_giveback"
+            out["daily_pnl_usd"] = _gb.get("daily_pnl_usd")
+            out["peak_pnl_usd"] = _gb.get("peak_pnl_usd")
+            out["giveback_fraction"] = _gb.get("giveback_fraction")
+            return out
+    except Exception:
+        pass
+
     # Clear expired pending arms so they do not pin a concurrency slot.
     try:
         from .automation_query import expire_stale_live_arm_sessions

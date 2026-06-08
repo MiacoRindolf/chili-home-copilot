@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from sqlalchemy.orm import Session
 
@@ -111,6 +111,106 @@ def _daily_realized_pnl(db: Session, user_id: int) -> float:
         .scalar()
     )
     return float(rows or 0.0)
+
+
+def _running_peak_and_total(pnls: Iterable[float]) -> tuple[float, float]:
+    """Pure: ``(high-water mark, final total)`` of a running cumulative sum.
+
+    The peak is floored at 0.0 — you start the day flat, so a day that was never
+    green has no PEAK PROFIT to give back. Walking close-events in time order, the
+    running cumulative sum's max is exactly the peak accumulated realized profit
+    Ross's 50%-giveback rule protects. Separated out (no I/O) so the arithmetic is
+    unit-testable without a DB.
+    """
+    peak = 0.0
+    running = 0.0
+    for p in pnls:
+        try:
+            running += float(p or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if running > peak:
+            peak = running
+    return peak, running
+
+
+def _daily_realized_pnl_peak_and_current(db: Session, user_id: int) -> tuple[float, float]:
+    """``(peak high-water mark, current cumulative)`` of today's realized PnL — one query.
+
+    Walks today's terminated-session outcomes in ``terminal_at`` order accumulating
+    ``realized_pnl_usd``; ``current`` is the final cumulative sum (identical to
+    ``_daily_realized_pnl``) and ``peak`` is its running max floored at 0.0. Same
+    ``date.today()`` window as the daily-loss cap, so both reset together at the
+    daily boundary (00:00 UTC in production containers).
+    """
+    from datetime import date
+
+    today_start = datetime.combine(date.today(), datetime.min.time())
+    rows = (
+        db.query(MomentumAutomationOutcome.realized_pnl_usd)
+        .filter(
+            MomentumAutomationOutcome.user_id == user_id,
+            MomentumAutomationOutcome.terminal_at >= today_start,
+        )
+        .order_by(
+            MomentumAutomationOutcome.terminal_at.asc(),
+            MomentumAutomationOutcome.id.asc(),
+        )
+        .all()
+    )
+    return _running_peak_and_total(r[0] for r in rows)
+
+
+def evaluate_profit_giveback_halt(
+    db: Session, *, user_id: int, execution_family: str = "coinbase_spot"
+) -> dict[str, Any]:
+    """Ross-style profit-giveback session halt for the momentum LIVE lane.
+
+    Ross's rule (warriortrading.com/7-day-trading-rules, confirmed in the 2026-06-07
+    research): once he gives back 50% of his PEAK accumulated daily profit he STOPS
+    trading for the day ("easier to remember half than 40%"). This mirrors it — the
+    UPSIDE counterpart of the daily-loss cap: once today's high-water mark of realized
+    PnL has reached an equity-relative ACTIVATION threshold (a meaningful green day)
+    AND current realized PnL has fallen to ``peak * (1 - giveback_fraction)`` or below,
+    new arming is blocked for the rest of the daily window (lock in the green day).
+    Resets with the SAME ``date.today()`` window as the daily-loss cap.
+
+    The giveback FRACTION is the single documented knob
+    (``chili_momentum_profit_giveback_fraction``, default 0.5). The activation
+    threshold is equity-relative — it reuses the equity-relative daily-loss-cap
+    magnitude so there is no second fixed-$ magic number (a green day worth protecting
+    is, by symmetry, one that exceeds the day's max tolerable red). 0 disables.
+    Read-only; mirror of the daily_loss_cap two-layer pattern.
+    docs/DESIGN/MOMENTUM_LANE.md [[project_momentum_lane]] [[feedback_adaptive_no_magic]]
+    """
+    try:
+        frac = float(getattr(settings, "chili_momentum_profit_giveback_fraction", 0.5))
+    except (TypeError, ValueError):
+        frac = 0.5
+    # Clamp to [0, 1]: <=0 disables the rule; >1 is nonsensical (cap at full giveback).
+    if frac < 0.0 or not (frac == frac):  # NaN-safe
+        frac = 0.0
+    elif frac > 1.0:
+        frac = 1.0
+    # Activation threshold is equity-relative (no second fixed-$ knob): reuse the
+    # daily-loss-cap magnitude. [[feedback_adaptive_no_magic]]
+    activation = equity_relative_daily_loss_cap(
+        float(getattr(settings, "chili_momentum_risk_max_daily_loss_usd", 250.0)),
+        execution_family,
+    )
+    peak, current = _daily_realized_pnl_peak_and_current(db, int(user_id))
+    giveback_floor = peak * (1.0 - frac)
+    armed = bool(frac > 0.0 and activation > 0.0 and peak >= activation)
+    halted = bool(armed and current <= giveback_floor)
+    return {
+        "halted": halted,
+        "armed": armed,
+        "peak_pnl_usd": round(float(peak), 2),
+        "daily_pnl_usd": round(float(current), 2),
+        "activation_threshold_usd": round(float(activation), 2),
+        "giveback_fraction": round(float(frac), 4),
+        "giveback_floor_usd": round(float(giveback_floor), 2),
+    }
 
 
 def evaluate_proposed_momentum_automation(
@@ -506,6 +606,33 @@ def evaluate_proposed_momentum_automation(
             severity="block" if not ok_dloss and m == "live" else ("warn" if not ok_dloss else "ok"),
             message=f"Daily realized PnL ${daily_pnl:+.2f} vs max loss -${max_daily_loss:.2f}.",
             detail={"daily_pnl_usd": daily_pnl, "max_daily_loss_usd": max_daily_loss},
+        )
+    )
+
+    # ── Profit-giveback session halt (Ross 50%-giveback rule) ─────────────
+    # The UPSIDE mirror of the daily-loss cap: once today's realized PnL has PEAKED at
+    # a meaningful equity-relative green AND has since given back >= giveback_fraction
+    # of that peak, block new live arming for the rest of the daily window (lock in the
+    # green day instead of round-tripping it back to flat/red). The single documented
+    # knob is the giveback fraction; the activation threshold is equity-relative (reuses
+    # the daily-loss-cap magnitude — no second fixed-$ number). [[feedback_adaptive_no_magic]]
+    gb = evaluate_profit_giveback_halt(db, user_id=user_id, execution_family=ef)
+    checks.append(
+        _check(
+            "profit_giveback",
+            not gb["halted"],
+            severity="block" if gb["halted"] and m == "live" else ("warn" if gb["halted"] else "ok"),
+            message=(
+                f"Profit giveback halt: realized PnL ${gb['daily_pnl_usd']:+.2f} gave back "
+                f">= {int(round(gb['giveback_fraction'] * 100))}% of ${gb['peak_pnl_usd']:+.2f} peak "
+                f"(halts at <= ${gb['giveback_floor_usd']:+.2f})."
+                if gb["halted"]
+                else (
+                    f"Profit giveback within band (peak ${gb['peak_pnl_usd']:+.2f}, "
+                    f"now ${gb['daily_pnl_usd']:+.2f})."
+                )
+            ),
+            detail=gb,
         )
     )
 

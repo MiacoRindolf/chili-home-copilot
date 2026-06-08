@@ -179,6 +179,46 @@ def test_within_daily_loss_cap_does_not_skip(happy, monkeypatch):
     assert out.get("skipped") != "daily_loss_cap"
 
 
+def test_profit_giveback_halts_scan(happy, monkeypatch):
+    # Today's realized PnL peaked green ($200) then gave back >=50% (down to $90): the
+    # pass must early-out with skipped=profit_giveback (Guard 5) — lock in the green day
+    # instead of churning candidates that begin_live_arm would all risk_block.
+    from app.services.trading.momentum_neural import risk_evaluator
+
+    monkeypatch.setattr(
+        risk_evaluator,
+        "evaluate_profit_giveback_halt",
+        lambda db, **k: {
+            "halted": True, "armed": True, "peak_pnl_usd": 200.0, "daily_pnl_usd": 90.0,
+            "activation_threshold_usd": 110.0, "giveback_fraction": 0.5, "giveback_floor_usd": 100.0,
+        },
+    )
+    out = aa.run_auto_arm_pass(_FakeDB())
+    assert out["skipped"] == "profit_giveback"
+    assert out.get("armed", 0) == 0
+    assert out["peak_pnl_usd"] == 200.0
+    assert out["daily_pnl_usd"] == 90.0
+    assert out["giveback_fraction"] == 0.5
+
+
+def test_within_giveback_band_does_not_skip(happy, monkeypatch):
+    # Peaked $200, only down to $150 (gave back 25% < 50%): Guard 5 must NOT trip — the
+    # pass proceeds to arm the fresh mover.
+    from app.services.trading.momentum_neural import risk_evaluator
+
+    monkeypatch.setattr(
+        risk_evaluator,
+        "evaluate_profit_giveback_halt",
+        lambda db, **k: {
+            "halted": False, "armed": True, "peak_pnl_usd": 200.0, "daily_pnl_usd": 150.0,
+            "activation_threshold_usd": 110.0, "giveback_fraction": 0.5, "giveback_floor_usd": 100.0,
+        },
+    )
+    out = aa.run_auto_arm_pass(_FakeDB())
+    assert out.get("skipped") != "profit_giveback"
+    assert out["armed"] == 1
+
+
 def test_dedupe_by_symbol_keeps_best_variant_distinct_symbols():
     # 10 RSC variants (top), then FIDA, then SOL — dedupe must yield 3 distinct symbols
     rows = (
