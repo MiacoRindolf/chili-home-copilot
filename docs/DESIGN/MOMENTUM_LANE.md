@@ -195,3 +195,89 @@ machinery (`live_runner.py:854`), the safety stack (`risk_evaluator.py:110`),
 **Revised phases:** M2 `RossMomentumScorer` + un-discard bridge signal → M3 validate
 (vs Ross trades + vs CHILI rejections) → M4 trigger + structure stops + fixed-fractional
 sizing → M5 broker reconciliation + go-live wiring → M6 live + compare impact to Ross.
+
+## 8. Ross RECENT (post-book) entry-quality refinements (2026-06-07)
+
+Three of Ross Cameron's recent, live-practice evolutions — beyond the book rules —
+to cut false breakouts and faded-move entries on the `pullback_break` trigger. Each
+is a documented, adaptive knob (no magic numbers) and was validated with an OHLCV
+dry-run BEFORE the defaults were set (the keystone-fix discipline). Code:
+`entry_gates.py` (gates), `live_runner.py` (wiring + fast exit), `config.py` (knobs).
+
+### #1 Break-AND-retest (vs raw first break)
+> Ross: *"I almost never buy the first break anymore. Too many wick out and reverse
+> instantly. Instead I wait for the break AND the retest."*
+
+`pullback_break_confirmation(require_retest=True)` anchors a STABLE breakout level on
+the consolidation that ends `retest_lookback_bars` back (so the level doesn't slide
+across the runner's per-tick re-evaluations), then requires, in the tail: a break
+above it, a shallow pullback that retests it (dips to ~level within
+`retest_tolerance`), the level HOLDING on closes, and the current bar RECLAIMING it.
+EMA-9 support is checked at the base (not the current bar) so a strong continuation
+doesn't reject a valid retest.
+
+### #2 Breakout-or-bailout fast exit
+> Ross (flat-top rule): *"if the stock cannot hold the breakout level after entry,
+> exit IMMEDIATELY"* — rather than waiting for the structural stop.
+
+`breakout_failed_to_hold(...)` + a held-position check in `live_runner`: within
+`breakout_bailout_max_bars` (× entry-interval) seconds of a `pullback_break` entry,
+if the bid falls back below the broken level (minus `breakout_bailout_buffer_pct`),
+transition to `BAILOUT` and flatten. The broken pullback HIGH is stashed as
+`le["breakout_level_price"]` at the entry-candidate transition. Caps the loss on a
+failed breakout well inside the structural pullback-low stop. Guarded so it never
+fights the normal stop/target: only with a recorded level (not the momentum_volume
+fallback), only while plainly `ENTERED`, only inside the early window.
+
+### #3 Sustaining-volume gate (the ESTR guardrail)
+> Ross on his biggest loss (ESTR −$30,942.84): the move had *"almost none of the
+> characteristics I look for"* and *"not enough volume to carry it beyond its initial
+> surge."*
+
+`pullback_break_confirmation(require_sustained_volume=True)` checks that, at the entry
+TICK, recent rel-vol (mean `volume_ratio` over `sustain_lookback_bars`) is still above
+`sustained_rvol_floor` — so a faded 24h mover (hot at selection, dead by entry) is
+rejected. Self-relative per instrument (rel-vol vs its own trailing average), so the
+floor is adaptive (a FLOOR the system can raise), not a fixed share count. Also
+tightens the selection↔entry alignment the audit flagged. Fails OPEN on thin data.
+
+### Knobs (all in `config.py`, defaults below)
+| Setting | Default | Meaning |
+|---|---|---|
+| `chili_momentum_pullback_require_retest` | `True` | #1 require break+retest+hold |
+| `chili_momentum_pullback_retest_tolerance` | `0.002` | retest/hold band around the level (20 bps) |
+| `chili_momentum_pullback_retest_lookback_bars` | `4` | bars reserved for break+retest+reclaim |
+| `chili_momentum_pullback_volume_spike_multiple` | `1.5` | rel-vol floor on the trigger bar |
+| `chili_momentum_entry_require_sustained_volume` | `True` | #3 reject faded movers at entry |
+| `chili_momentum_entry_sustained_rvol_floor` | `1.0` | min mean rel-vol over the sustain window |
+| `chili_momentum_entry_sustain_lookback_bars` | `5` | bars averaged for sustained rel-vol |
+| `chili_momentum_breakout_bailout_enabled` | `True` | #2 enable the fast bail |
+| `chili_momentum_breakout_bailout_max_bars` | `2.0` | fast-bail window in entry-interval bars |
+| `chili_momentum_breakout_bailout_buffer_pct` | `0.001` | wick buffer below the level (10 bps) |
+
+### Dry-run validation (`scripts/dryrun-momentum-entry-refinements.py`)
+Walk-forward replay over recent crypto OHLCV (10 symbols, 5d), each bar treated as the
+live "current" tick; per-fire outcome uses the lane's own risk model (structural stop,
+2:1 target, 24-bar horizon). Captured 2026-06-07:
+
+| Variant | 5m win-rate | 5m avg-ret | 1m win-rate | 1m avg-ret |
+|---|---|---|---|---|
+| baseline (raw) | 29.6% | −0.18% | 28.6% | −0.03% |
+| +retest (#1) | 41.7% | −0.05% | 50.9% | +0.13% |
+| +sustain (#3) | 25.0% | −0.24% | 31.6% | −0.01% |
+| **+both** | **44.1%** | **−0.03%** | **54.3%** | **+0.16%** |
+
+- **#1 retest** lifts win-rate hard on both timeframes (and `+both` is best on every
+  metric) — the clearest quality win; defaulted ON.
+- **#2 breakout-bailout** on 5m (the live timeframe) cut the fast-bail-eligible losers'
+  aggregate loss ~23% (−4.81% → −3.72% over the same 27 fires, triggered on 37%). On
+  noisier 1m it was marginally negative (−0.33%, 8% triggered) — the window is short in
+  real time and 1m single-bar dips revert; tune `..._buffer_pct` up / `..._max_bars`
+  for 1m. Defaulted ON (lane runs 5m).
+- **#3 sustaining** is roughly neutral-to-slightly-negative ALONE in a 5-day sample but
+  improves the combined config and exists for ESTR-class tail risk (a faded mover that
+  won't show up in 5 days of aggregate win-rate). Defaulted ON.
+
+Tests: `tests/test_pullback_break.py` (retest fire / no-retest / failed-hold / raw
+unchanged / sustaining block+off / bailout helper). Raw-mode behavior is byte-identical
+when the knobs are off, so existing callers are unaffected.

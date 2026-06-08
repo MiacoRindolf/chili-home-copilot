@@ -152,41 +152,51 @@ def momentum_volume_confirmation(df: pd.DataFrame) -> tuple[bool, str]:
     return True, "momentum_ok_abs_vol"
 
 
-def pullback_break_confirmation(
-    df: pd.DataFrame,
-    *,
-    entry_interval: str = "5m",
-    max_pullback_bars: int = 3,
-    retracement_threshold: float = 0.50,
-    volume_spike_multiple: float = 1.5,
-) -> tuple[bool, str, dict[str, Any]]:
-    """Ross-style pullback-break entry on intraday (1m/5m) bars.
+def _sustained_rvol(vr: list[Any], cur: int, lookback: int) -> float | None:
+    """Mean per-bar relative-volume over the last ``lookback`` bars (incl. current).
 
-    After an up-impulse, a SHALLOW pullback (retraces < ``retracement_threshold`` of
-    the recent range, holding above EMA-9), fire ENTRY on the first bar that BREAKS
-    the pullback's high with a volume spike — Ross's low-risk continuation point, vs
-    buying mid-trend extension. Returns ``(ok, reason, debug)``; ``debug`` carries
-    ``pullback_low`` (the structural stop) on success. docs/DESIGN/MOMENTUM_LANE.md
+    ``vr`` is the ``volume_ratio`` series (each bar's volume / its trailing average),
+    so this is inherently self-relative per instrument — an adaptive RVOL, not a
+    fixed share count. Returns ``None`` when fewer than 2 valid samples exist so the
+    caller can fail OPEN on thin data rather than block a real setup.
     """
-    if df is None or getattr(df, "empty", True) or len(df) < 10:
-        return False, "insufficient_bars", {"bars": 0 if df is None else len(df), "entry_interval": entry_interval}
-    close = df["Close"].astype(float)
-    high = df["High"].astype(float)
-    low = df["Low"].astype(float)
-    vol = df["Volume"].astype(float)
-    n = len(df)
-    cur = n - 1
-    arrays = compute_all_from_df(df, needed={"ema_9", "volume_ratio"})
-    ema9 = arrays.get("ema_9") or []
-    vr = arrays.get("volume_ratio") or []
+    start = max(0, cur - max(1, int(lookback)) + 1)
+    ratios: list[float] = []
+    for i in range(start, cur + 1):
+        v = vr[i] if 0 <= i < len(vr) else None
+        if v is None:
+            continue
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            continue
+        if fv == fv:  # not NaN
+            ratios.append(fv)
+    if len(ratios) < 2:
+        return None
+    return sum(ratios) / len(ratios)
 
-    # Recent impulse window (excluding the current evaluation bar).
+
+def _evaluate_raw_break(
+    high: pd.Series,
+    low: pd.Series,
+    ema9: list[Any],
+    cur: int,
+    *,
+    entry_interval: str,
+    max_pullback_bars: int,
+    retracement_threshold: float,
+) -> tuple[bool, str, float | None, float | None, dict[str, Any]]:
+    """First-break trigger (Ross's classic rule). Identical to the original logic:
+    after an up-impulse, a SHALLOW pullback (holding above EMA-9) whose HIGH the
+    current bar breaks. Returns ``(ok, reason, pullback_high, pullback_low, debug)``.
+    """
     look = min(20, cur)
     win_high = float(high.iloc[cur - look:cur].max())
     win_low = float(low.iloc[cur - look:cur].min())
     impulse_range = win_high - win_low
     if impulse_range <= 0:
-        return False, "no_range", {"entry_interval": entry_interval}
+        return False, "no_range", None, None, {"entry_interval": entry_interval}
 
     # The pullback = the recent few bars before the current bar: its HIGH is the
     # level to break, its LOW is the structural stop.
@@ -200,20 +210,185 @@ def pullback_break_confirmation(
     retrace = (win_high - pb_low) / impulse_range
     debug["retrace"] = round(retrace, 3)
     if retrace > float(retracement_threshold):
-        return False, "pullback_too_deep", debug
+        return False, "pullback_too_deep", None, None, debug
 
     # Held above EMA-9 (structural support) during the pullback.
     ema_cur = ema9[cur] if cur < len(ema9) and ema9[cur] is not None else None
     if ema_cur is not None and pb_low < float(ema_cur) * 0.999:
         debug["ema_9"] = float(ema_cur)
-        return False, "pullback_below_ema9", debug
+        return False, "pullback_below_ema9", None, None, debug
 
     # Break: current bar's high must exceed the pullback high.
     if float(high.iloc[cur]) <= pb_high:
         debug["cur_high"] = float(high.iloc[cur])
-        return False, "waiting_for_break", debug
+        return False, "waiting_for_break", None, None, debug
 
-    # Volume spike on the break.
+    return True, "raw_break", pb_high, pb_low, debug
+
+
+def _evaluate_break_retest(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    ema9: list[Any],
+    cur: int,
+    *,
+    entry_interval: str,
+    max_pullback_bars: int,
+    retracement_threshold: float,
+    retest_tolerance: float,
+    retest_lookback_bars: int,
+) -> tuple[bool, str, float | None, float | None, dict[str, Any]]:
+    """Break-AND-retest trigger (Ross's recent refinement: "I almost never buy the
+    first break anymore — too many wick out and reverse. I wait for the break AND
+    retest.").
+
+    Anchors a STABLE breakout LEVEL on the consolidation that ends
+    ``retest_lookback_bars`` bars back (so the level doesn't slide across the
+    live runner's per-tick re-evaluations), then requires, within the tail:
+      1. a break above the level,
+      2. a shallow pullback that RETESTS it (price dips back to ~level), and
+      3. the level HOLDS (closes stay above it) with the current bar RECLAIMING it.
+    Cuts the raw-first-break false signals. Returns the same 5-tuple shape as
+    ``_evaluate_raw_break`` (the level becomes ``pullback_high``; the base low the
+    structural stop). docs/DESIGN/MOMENTUM_LANE.md
+    """
+    look_bars = max(2, int(retest_lookback_bars))
+    base_end = cur - look_bars
+    if base_end < max(2, int(max_pullback_bars)):
+        return False, "retest_insufficient_bars", None, None, {"entry_interval": entry_interval}
+
+    # Impulse before the consolidation base.
+    look = min(20, base_end)
+    win_high = float(high.iloc[base_end - look:base_end].max())
+    win_low = float(low.iloc[base_end - look:base_end].min())
+    impulse_range = win_high - win_low
+    if impulse_range <= 0:
+        return False, "no_range", None, None, {"entry_interval": entry_interval}
+
+    base_start = max(0, base_end - int(max_pullback_bars))
+    level = float(high.iloc[base_start:base_end].max())   # stable breakout level
+    base_low = float(low.iloc[base_start:base_end].min())  # structural stop
+    debug = {"entry_interval": entry_interval, "pullback_high": level, "pullback_low": base_low,
+             "win_high": win_high, "mode": "retest"}
+
+    retrace = (win_high - base_low) / impulse_range
+    debug["retrace"] = round(retrace, 3)
+    if retrace > float(retracement_threshold):
+        return False, "pullback_too_deep", None, None, debug
+
+    # EMA-9 support is checked at the BASE (when the consolidation formed), not at
+    # the current bar — a strong continuation after the break lifts the current EMA
+    # above the older base low, which would otherwise reject a valid retest.
+    ema_idx = base_end - 1
+    ema_base = ema9[ema_idx] if 0 <= ema_idx < len(ema9) and ema9[ema_idx] is not None else None
+    if ema_base is not None and base_low < float(ema_base) * 0.999:
+        debug["ema_9"] = float(ema_base)
+        return False, "pullback_below_ema9", None, None, debug
+
+    tol = max(0.0, float(retest_tolerance))
+
+    # 1) Breakout: a tail bar BEFORE the current pierced the level.
+    break_idx: int | None = None
+    for i in range(base_end, cur):
+        if float(high.iloc[i]) > level:
+            break_idx = i
+            break
+    if break_idx is None:
+        return False, "waiting_for_break", None, None, debug
+
+    # 2) Retest: from after the break to now, price dipped back to ~level (came down
+    #    to within +tol of it) — not a runaway that never offered a retest entry.
+    seg_lo = low.iloc[break_idx + 1:cur + 1]
+    seg_cl = close.iloc[break_idx + 1:cur + 1]
+    if len(seg_lo) < 1:
+        return False, "waiting_for_retest", None, None, debug
+    retest_low = float(seg_lo.min())
+    debug["retest_low"] = retest_low
+    if retest_low > level * (1.0 + tol):
+        return False, "waiting_for_retest", None, None, debug
+
+    # 3) Hold: closes after the break stayed above the level (a failed breakout that
+    #    lost the level on a close is rejected, not bought).
+    if float(seg_cl.min()) < level * (1.0 - tol):
+        return False, "retest_failed_hold", None, None, debug
+
+    # 4) Reclaim: the current bar trades back above the level (resuming up).
+    if not (float(high.iloc[cur]) > level and float(close.iloc[cur]) >= level * (1.0 - tol)):
+        debug["cur_high"] = float(high.iloc[cur])
+        return False, "waiting_for_reclaim", None, None, debug
+
+    return True, "break_retest", level, base_low, debug
+
+
+def pullback_break_confirmation(
+    df: pd.DataFrame,
+    *,
+    entry_interval: str = "5m",
+    max_pullback_bars: int = 3,
+    retracement_threshold: float = 0.50,
+    volume_spike_multiple: float = 1.5,
+    require_retest: bool = False,
+    retest_tolerance: float = 0.002,
+    retest_lookback_bars: int = 4,
+    require_sustained_volume: bool = False,
+    sustained_rvol_floor: float = 1.0,
+    sustain_lookback_bars: int = 5,
+) -> tuple[bool, str, dict[str, Any]]:
+    """Ross-style pullback-break entry on intraday (1m/5m) bars.
+
+    After an up-impulse, a SHALLOW pullback (retraces < ``retracement_threshold`` of
+    the recent range, holding above EMA-9), fire ENTRY when price breaks the
+    pullback's high with a volume spike — Ross's low-risk continuation point, vs
+    buying mid-trend extension. Returns ``(ok, reason, debug)``; ``debug`` carries
+    ``pullback_low`` (the structural stop) and ``pullback_high`` (the breakout level,
+    used by the breakout-or-bailout fast exit) on success.
+
+    Two of Ross's RECENT (post-book) refinements are optional, documented knobs
+    (defaults preserve the original first-break behavior; the live runner turns them
+    on via settings):
+
+    * ``require_retest`` (#1) — wait for break AND retest of the broken level instead
+      of buying the raw first break (which wicks out and reverses).
+    * ``require_sustained_volume`` (#3) — at the entry tick the move must STILL be
+      carried by volume (recent rel-vol above ``sustained_rvol_floor``), rejecting a
+      faded 24h mover that was hot at selection but dead by entry (the ESTR guardrail).
+
+    docs/DESIGN/MOMENTUM_LANE.md
+    """
+    if df is None or getattr(df, "empty", True) or len(df) < 10:
+        return False, "insufficient_bars", {"bars": 0 if df is None else len(df), "entry_interval": entry_interval}
+    close = df["Close"].astype(float)
+    high = df["High"].astype(float)
+    low = df["Low"].astype(float)
+    vol = df["Volume"].astype(float)
+    n = len(df)
+    cur = n - 1
+    arrays = compute_all_from_df(df, needed={"ema_9", "volume_ratio"})
+    ema9 = arrays.get("ema_9") or []
+    vr = arrays.get("volume_ratio") or []
+
+    # Trigger: break-and-retest (#1) when enabled, else the classic first break.
+    if require_retest:
+        ok_t, reason_t, pb_high, pb_low, debug = _evaluate_break_retest(
+            high, low, close, ema9, cur,
+            entry_interval=entry_interval,
+            max_pullback_bars=max_pullback_bars,
+            retracement_threshold=retracement_threshold,
+            retest_tolerance=retest_tolerance,
+            retest_lookback_bars=retest_lookback_bars,
+        )
+    else:
+        ok_t, reason_t, pb_high, pb_low, debug = _evaluate_raw_break(
+            high, low, ema9, cur,
+            entry_interval=entry_interval,
+            max_pullback_bars=max_pullback_bars,
+            retracement_threshold=retracement_threshold,
+        )
+    if not ok_t:
+        return False, reason_t, debug
+
+    # Volume spike on the trigger (break / reclaim) bar.
     vol_ratio = float(vr[cur]) if cur < len(vr) and vr[cur] is not None else None
     if vol_ratio is None:
         w = vol.tail(21)
@@ -223,7 +398,51 @@ def pullback_break_confirmation(
     if vol_ratio < float(volume_spike_multiple):
         return False, "break_low_volume", debug
 
+    # #3 Sustaining-volume gate (the ESTR guardrail): the move must STILL be carried
+    # by volume at the entry tick — recent rel-vol above the floor — so a faded 24h
+    # mover (hot at selection, dead by entry) is rejected. Self-relative per
+    # instrument, so the floor is adaptive (a FLOOR the system can raise), not a
+    # fixed magic count. Fails OPEN on thin data.
+    if require_sustained_volume:
+        sustained = _sustained_rvol(vr, cur, int(sustain_lookback_bars))
+        if sustained is not None:
+            debug["sustained_rvol"] = round(sustained, 2)
+            if sustained < float(sustained_rvol_floor):
+                return False, "faded_volume_no_sustain", debug
+
     return True, "pullback_break_ok", debug
+
+
+def breakout_failed_to_hold(
+    *,
+    breakout_level: float | None,
+    bid: float | None,
+    held_seconds: float,
+    window_seconds: float,
+    buffer_pct: float = 0.001,
+) -> bool:
+    """#2 Breakout-or-bailout (Ross flat-top rule: "if the stock cannot hold the
+    breakout level after entry, exit IMMEDIATELY" rather than waiting for the
+    structural stop).
+
+    Pure decision: within ``window_seconds`` of a pullback_break entry, return True
+    when the bid has fallen back below the broken ``breakout_level`` (minus a small
+    wick buffer) — a failed breakout to be cut well inside the structural stop.
+    Guarded so it never fights the normal stop: no level / outside the early window
+    / non-positive inputs all return False. docs/DESIGN/MOMENTUM_LANE.md
+    """
+    try:
+        lvl = float(breakout_level) if breakout_level is not None else 0.0
+        b = float(bid) if bid is not None else 0.0
+        held = float(held_seconds)
+        window = float(window_seconds)
+    except (TypeError, ValueError):
+        return False
+    if lvl <= 0.0 or b <= 0.0 or window <= 0.0:
+        return False
+    if held > window:
+        return False
+    return b < lvl * (1.0 - max(0.0, float(buffer_pct)))
 
 
 def regime_entry_allowed(

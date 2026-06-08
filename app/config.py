@@ -2389,6 +2389,71 @@ class Settings(BaseSettings):
         default="5m",
         validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_ENTRY_INTERVAL"),
     )
+    # ── Ross RECENT (post-book) entry-quality refinements (docs/DESIGN/MOMENTUM_LANE.md §8) ──
+    # #1 Break-AND-retest: don't buy the raw first break (it wicks out / reverses);
+    # wait for the break, a shallow retest of the broken level, and a hold+reclaim.
+    chili_momentum_pullback_require_retest: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_REQUIRE_RETEST"),
+        description="Require break+retest+hold of the pullback high before entry, not the raw first break.",
+    )
+    chili_momentum_pullback_retest_tolerance: float = Field(
+        default=0.002,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_RETEST_TOLERANCE"),
+        description="Fraction band around the broken level that still counts as a retest/hold (0.002 = 20 bps).",
+    )
+    chili_momentum_pullback_retest_lookback_bars: int = Field(
+        default=4,
+        ge=2,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_RETEST_LOOKBACK_BARS"),
+        description="Bars reserved after the consolidation base for the break+retest+reclaim sequence.",
+    )
+    # Volume spike required on the break/reclaim bar (a FLOOR, not a magic cutoff).
+    chili_momentum_pullback_volume_spike_multiple: float = Field(
+        default=1.5,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PULLBACK_VOLUME_SPIKE_MULTIPLE"),
+        description="Min relative-volume on the trigger bar (current bar vol / trailing average).",
+    )
+    # #3 Sustaining-volume gate (the ESTR guardrail): at the entry TICK the move must
+    # still be carried by volume (recent rel-vol above the floor), not a faded 24h mover.
+    chili_momentum_entry_require_sustained_volume: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_REQUIRE_SUSTAINED_VOLUME"),
+        description="Reject entries where recent rel-vol has faded below the floor at entry time.",
+    )
+    chili_momentum_entry_sustained_rvol_floor: float = Field(
+        default=1.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_SUSTAINED_RVOL_FLOOR"),
+        description="Min mean rel-vol over the sustain window (1.0 = still at its own trailing average; a FLOOR).",
+    )
+    chili_momentum_entry_sustain_lookback_bars: int = Field(
+        default=5,
+        ge=2,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_SUSTAIN_LOOKBACK_BARS"),
+        description="Bars over which sustained rel-vol is averaged at the entry tick.",
+    )
+    # #2 Breakout-or-bailout fast exit (Ross flat-top): if the broken level fails to
+    # hold shortly after entry, cut at market — well inside the structural stop.
+    chili_momentum_breakout_bailout_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BREAKOUT_BAILOUT_ENABLED"),
+        description="Enable the early breakout-failed fast exit for pullback_break entries.",
+    )
+    chili_momentum_breakout_bailout_max_bars: float = Field(
+        default=2.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BREAKOUT_BAILOUT_MAX_BARS"),
+        description="Early window for the fast bail, in entry-interval bars (window = bars x interval seconds).",
+    )
+    chili_momentum_breakout_bailout_buffer_pct: float = Field(
+        default=0.001,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_BREAKOUT_BAILOUT_BUFFER_PCT"),
+        description="Small wick buffer below the breakout level before fast-bailing (0.001 = 10 bps).",
+    )
     chili_momentum_order_notional_guard_bps: float = Field(
         default=25.0,
         ge=0.0,

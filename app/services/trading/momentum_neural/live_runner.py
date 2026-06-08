@@ -70,6 +70,7 @@ from .live_fsm import (
 )
 from .session_lifecycle import is_operator_paused
 from .strategy_params import normalize_strategy_params
+from .entry_gates import breakout_failed_to_hold
 
 _log = logging.getLogger(__name__)
 
@@ -987,6 +988,28 @@ def _stop_vol_floor_mult() -> float:
     return v if v >= 0 else 0.0
 
 
+_INTERVAL_SECONDS: dict[str, float] = {
+    "1m": 60.0, "2m": 120.0, "5m": 300.0, "15m": 900.0, "30m": 1800.0,
+    "60m": 3600.0, "90m": 5400.0, "1h": 3600.0, "1d": 86400.0,
+}
+
+
+def _entry_interval_seconds() -> float:
+    iv = str(getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m").lower()
+    return float(_INTERVAL_SECONDS.get(iv, 300.0))
+
+
+def _breakout_bailout_window_seconds() -> float:
+    """Early window (seconds) for the #2 breakout-or-bailout fast exit = N
+    entry-interval bars. One documented knob (bars), derived from the configured
+    timeframe so it stays adaptive to 1m vs 5m. (docs/DESIGN/MOMENTUM_LANE.md §8)"""
+    try:
+        bars = float(getattr(settings, "chili_momentum_breakout_bailout_max_bars", 2.0) or 0.0)
+    except (TypeError, ValueError):
+        bars = 2.0
+    return max(0.0, bars) * _entry_interval_seconds()
+
+
 def _held_position_keeps_exit_on_boundary_fail(state: str, has_position: Any) -> bool:
     """A held momentum position must keep its EXIT/stop management even when the
     entry-oriented boundary risk eval (viability freshness / caps / concurrency)
@@ -1518,8 +1541,32 @@ def tick_live_session(
                     try:
                         _df_pb = fetch_ohlcv_df(sess.symbol, interval=_interval, period="5d")
                         if _df_pb is not None and not getattr(_df_pb, "empty", True):
+                            # Ross RECENT refinements (#1 retest, #3 sustaining vol) —
+                            # documented knobs, default on. (docs/DESIGN/MOMENTUM_LANE.md §8)
                             _trigger_ok, _trigger_reason, _pb_debug = pullback_break_confirmation(
-                                _df_pb, entry_interval=_interval
+                                _df_pb,
+                                entry_interval=_interval,
+                                volume_spike_multiple=float(
+                                    getattr(settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5
+                                ),
+                                require_retest=bool(
+                                    getattr(settings, "chili_momentum_pullback_require_retest", True)
+                                ),
+                                retest_tolerance=float(
+                                    getattr(settings, "chili_momentum_pullback_retest_tolerance", 0.002) or 0.0
+                                ),
+                                retest_lookback_bars=int(
+                                    getattr(settings, "chili_momentum_pullback_retest_lookback_bars", 4) or 4
+                                ),
+                                require_sustained_volume=bool(
+                                    getattr(settings, "chili_momentum_entry_require_sustained_volume", True)
+                                ),
+                                sustained_rvol_floor=float(
+                                    getattr(settings, "chili_momentum_entry_sustained_rvol_floor", 1.0) or 0.0
+                                ),
+                                sustain_lookback_bars=int(
+                                    getattr(settings, "chili_momentum_entry_sustain_lookback_bars", 5) or 5
+                                ),
                             )
                     except Exception:
                         _trigger_ok = False
@@ -1549,8 +1596,17 @@ def tick_live_session(
             # structure -> clear it so the vol-floored ATR stop is used instead.
             if _trigger_reason == "pullback_break_ok" and _pb_debug.get("pullback_low"):
                 le["structural_stop_price"] = float(_pb_debug["pullback_low"])
+                # #2 Breakout-or-bailout: stash the broken pullback HIGH (the breakout
+                # level) so the held-position handler can fast-bail if it fails to hold
+                # shortly after entry. Cleared on the momentum_volume fallback (which
+                # has no structural level). (docs/DESIGN/MOMENTUM_LANE.md §8)
+                if _pb_debug.get("pullback_high"):
+                    le["breakout_level_price"] = float(_pb_debug["pullback_high"])
+                else:
+                    le.pop("breakout_level_price", None)
             else:
                 le.pop("structural_stop_price", None)
+                le.pop("breakout_level_price", None)
             _commit_le(sess, le)
             _safe_transition(db, sess, STATE_LIVE_ENTRY_CANDIDATE)
             _emit(
@@ -2085,6 +2141,37 @@ def tick_live_session(
                 _emit(db, sess, "live_bailout", {"reason": "max_loss_per_trade", "unrealized_pnl": unrealized_pnl})
                 db.flush()
                 return {"ok": True, "session_id": sess.id, "state": sess.state}
+
+        # #2 Breakout-or-bailout fast exit (Ross flat-top): within the early window
+        # after a pullback_break entry, if the broken breakout level fails to HOLD on
+        # the bid, cut NOW — well inside the structural stop — reusing the BAILOUT
+        # machinery (the next tick flattens). Guarded so it never fights the normal
+        # stop/target: only with a recorded breakout level (pullback_break entry, not
+        # the momentum_volume fallback), only while plainly ENTERED (scaling/trailing
+        # are already past target/in profit), and only inside the time window.
+        if (
+            st == STATE_LIVE_ENTERED
+            and bool(getattr(settings, "chili_momentum_breakout_bailout_enabled", True))
+            and breakout_failed_to_hold(
+                breakout_level=le.get("breakout_level_price"),
+                bid=bid,
+                held_seconds=held,
+                window_seconds=_breakout_bailout_window_seconds(),
+                buffer_pct=float(getattr(settings, "chili_momentum_breakout_bailout_buffer_pct", 0.001) or 0.0),
+            )
+        ):
+            le["last_bailout_trigger"] = "breakout_failed_to_hold"
+            _commit_le(sess, le)
+            _safe_transition(db, sess, STATE_LIVE_BAILOUT)
+            _emit(db, sess, "live_bailout", {
+                "reason": "breakout_failed_fast_bail",
+                "breakout_level": le.get("breakout_level_price"),
+                "bid": bid,
+                "held_seconds": held,
+                "window_seconds": _breakout_bailout_window_seconds(),
+            })
+            db.flush()
+            return {"ok": True, "session_id": sess.id, "state": sess.state}
 
         if st == STATE_LIVE_BAILOUT:
             cid = f"chili_ml_b_{sess.id}_{uuid.uuid4().hex[:12]}"
