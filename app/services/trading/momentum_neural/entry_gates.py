@@ -632,6 +632,46 @@ def hurst_proxy_from_closes(close: pd.Series) -> float:
     return max(0.35, min(0.65, h))
 
 
+def momentum_pullback_trigger(
+    df: pd.DataFrame, *, entry_interval: str
+) -> tuple[bool, str, dict[str, Any]]:
+    """The Ross pullback-break trigger resolved from live settings — the SINGLE
+    source BOTH the live runner and the paper runner call, so the two paths make
+    the IDENTICAL entry decision (the dual-path parity contract). Reads every
+    ``chili_momentum_*`` entry knob and runs ``pullback_break_confirmation``;
+    returns its ``(ok, reason, debug)`` (debug carries ``pullback_low`` /
+    ``pullback_high`` on a fire). Centralizing this is what keeps paper a true
+    shadow of live — previously paper used the legacy ``momentum_volume`` gate and
+    the brain trained on a strategy that wasn't live. docs/DESIGN/MOMENTUM_LANE.md
+    """
+    return pullback_break_confirmation(
+        df,
+        entry_interval=entry_interval,
+        volume_spike_multiple=float(
+            getattr(settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5
+        ),
+        require_retest=bool(getattr(settings, "chili_momentum_pullback_require_retest", True)),
+        retest_tolerance=float(getattr(settings, "chili_momentum_pullback_retest_tolerance", 0.002) or 0.0),
+        retest_lookback_bars=int(getattr(settings, "chili_momentum_pullback_retest_lookback_bars", 4) or 4),
+        require_sustained_volume=bool(
+            getattr(settings, "chili_momentum_entry_require_sustained_volume", True)
+        ),
+        sustained_rvol_floor=float(getattr(settings, "chili_momentum_entry_sustained_rvol_floor", 1.0) or 0.0),
+        sustain_lookback_bars=int(getattr(settings, "chili_momentum_entry_sustain_lookback_bars", 5) or 5),
+        require_break_candle=bool(getattr(settings, "chili_momentum_entry_require_break_candle", True)),
+        break_candle_min_close_pos=float(
+            getattr(settings, "chili_momentum_entry_break_candle_min_close_pos", 0.50) or 0.50
+        ),
+        require_vwap_hold=bool(getattr(settings, "chili_momentum_entry_require_vwap_hold", True)),
+        vwap_hold_buffer=float(getattr(settings, "chili_momentum_entry_vwap_hold_buffer", 0.0) or 0.0),
+        require_macd_bullish=bool(getattr(settings, "chili_momentum_entry_require_macd_bullish", True)),
+        allow_runaway_break=bool(getattr(settings, "chili_momentum_entry_allow_runaway_break", True)),
+        runaway_min_volume_spike=float(
+            getattr(settings, "chili_momentum_entry_runaway_min_volume_spike", 2.0) or 2.0
+        ),
+    )
+
+
 def run_paper_entry_gates(
     db: Session,
     *,
@@ -677,9 +717,30 @@ def run_paper_entry_gates(
     if not ok_p:
         return False, reason_p, {"pattern": True}
 
-    ok_m, reason_m = momentum_volume_confirmation(df)
-    if not ok_m:
-        return False, reason_m, {"momentum": True}
+    # Trigger PARITY with the live runner: the Ross pullback-break on the entry
+    # interval (vol-aware shallow/EMA, candle/VWAP/MACD, runaway) via the SHARED
+    # helper — NOT the legacy momentum_volume gate — so paper shadows live and the
+    # brain trains on the strategy that actually trades. The structural stop
+    # (pullback_low) + breakout level (pullback_high) ride out in the debug so the
+    # paper stop can mirror live's structural stop. docs/DESIGN/MOMENTUM_LANE.md
+    _interval = str(getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m")
+    try:
+        df_entry = fetch_ohlcv_df(sym, interval=_interval, period="5d")
+    except Exception as ex:
+        _log.debug("[entry_gates] entry-interval ohlcv failed %s: %s", sym, ex)
+        df_entry = None
+    if df_entry is None or getattr(df_entry, "empty", True):
+        return False, "no_entry_data", {"interval": _interval}
+    ok_t, reason_t, pb = momentum_pullback_trigger(df_entry, entry_interval=_interval)
+    if not ok_t:
+        return False, reason_t, {"trigger": True, "interval": _interval}
 
-    debug = {"bars": len(df), "pattern": reason_p, "momentum": reason_m, "regime": reason_r}
+    debug = {
+        "bars": len(df_entry),
+        "pattern": reason_p,
+        "trigger": reason_t,
+        "regime": reason_r,
+        "pullback_low": pb.get("pullback_low"),
+        "pullback_high": pb.get("pullback_high"),
+    }
     return True, "all_gates_pass", debug

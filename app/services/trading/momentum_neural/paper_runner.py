@@ -38,10 +38,12 @@ from .persistence import (
 )
 from .risk_evaluator import evaluate_proposed_momentum_automation
 from .risk_policy import RISK_SNAPSHOT_KEY, policy_float_cap, policy_int_cap
+from ..indicator_core import compute_atr
 from .paper_execution import (
     breakeven_stop_after_partial,
     build_synthetic_quote,
     default_reference_mid,
+    effective_stop_atr_pct,
     long_entry_fill_price,
     long_exit_fill_price,
     regime_atr_pct,
@@ -50,6 +52,7 @@ from .paper_execution import (
     scale_out_fraction,
     scale_out_quantity,
     stop_target_prices,
+    structural_or_vol_floored_atr_pct,
     utc_iso,
 )
 from .paper_fsm import (
@@ -755,8 +758,24 @@ def tick_paper_session(
                     {"reason": reason_g, "debug": dbg, "mid": mid},
                 )
             else:
+                # Stash the structural stop (pullback low) + breakout level from the
+                # SHARED trigger so PENDING_ENTRY's stop mirrors live's structural stop
+                # (parity). Cleared when the trigger had no structure.
+                _pblow = dbg.get("pullback_low")
+                if _pblow:
+                    pe["structural_stop_price"] = float(_pblow)
+                    _pbhigh = dbg.get("pullback_high")
+                    if _pbhigh:
+                        pe["breakout_level_price"] = float(_pbhigh)
+                    else:
+                        pe.pop("breakout_level_price", None)
+                else:
+                    pe.pop("structural_stop_price", None)
+                    pe.pop("breakout_level_price", None)
+                _commit_pe(sess, pe)
                 _safe_transition(db, sess, STATE_PENDING_ENTRY)
-                _emit(db, sess, "paper_entry_submitted", {"mid": mid})
+                _emit(db, sess, "paper_entry_submitted",
+                      {"mid": mid, "structural_stop": pe.get("structural_stop_price")})
         _sync_runtime_snapshot(db, sess, via=via)
         db.flush()
         return {"ok": True, "session_id": sess.id, "state": sess.state}
@@ -811,12 +830,38 @@ def tick_paper_session(
             db.flush()
             return {"ok": False, "error": "decision_packet_missing"}
         qty = notional / entry_px
-        atrp = regime_atr_pct(regime)
+        # Stop PARITY with live: vol-floored + 0.15-capped ATR (effective_stop_atr_pct),
+        # then the structural pullback stop (take the WIDER) — the SAME chain the live
+        # runner uses, NOT the raw regime ATR. The 2:1 target auto-scales off the
+        # actual stop distance. docs/DESIGN/MOMENTUM_LANE.md
+        _sam = float(params["stop_atr_mult"])
+        _regime_atr = regime_atr_pct(regime)
+        _em_bps = None
+        try:
+            _df15 = fetch_ohlcv_df(sess.symbol, interval="15m", period="5d")
+            if _df15 is not None and not getattr(_df15, "empty", True) and len(_df15) >= 5:
+                _atr15 = compute_atr(_df15["High"], _df15["Low"], _df15["Close"])
+                _last = float(_df15["Close"].iloc[-1])
+                _av = float(_atr15.iloc[-1])
+                if _last > 0 and _av == _av:  # _av == _av: NaN-guard
+                    _em_bps = _av / _last * 10_000.0
+        except Exception:
+            _em_bps = None
+        _eff_atr = effective_stop_atr_pct(
+            _regime_atr, _em_bps, stop_atr_mult=_sam,
+            vol_floor_mult=float(getattr(settings, "chili_momentum_risk_stop_vol_floor_mult", 0.5) or 0.5),
+        )
+        _eff_atr, _stop_model = structural_or_vol_floored_atr_pct(
+            vol_floored_atr_pct=_eff_atr,
+            structural_stop_price=pe.get("structural_stop_price"),
+            entry_price=entry_px,
+            stop_atr_mult=_sam,
+        )
         stop_px, target_px = stop_target_prices(
             entry_px,
-            atr_pct=atrp,
+            atr_pct=_eff_atr,
             side_long=True,
-            stop_atr_mult=float(params["stop_atr_mult"]),
+            stop_atr_mult=_sam,
             target_atr_mult=float(params["target_atr_mult"]),
         )
         fees = roundtrip_fee_usd(notional, fee_ratio, entry=entry_px, target=target_px)
