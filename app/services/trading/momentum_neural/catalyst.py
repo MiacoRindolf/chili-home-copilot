@@ -22,6 +22,10 @@ logger = logging.getLogger(__name__)
 # selection tilt). News is one confirming signal, so a smaller boost.
 CATALYST_VIABILITY_TILT = 0.10
 
+# Freshness window for a NEWS headline to count as a live catalyst (minutes). Ross's
+# sympathy/theme ignition is a recent headline; a stale story is not a catalyst.
+NEWS_CATALYST_MAX_AGE_MIN = 120
+
 
 def _catalyst_tilt() -> float:
     try:
@@ -35,6 +39,18 @@ def _norm(symbol: str) -> str:
     s = str(symbol or "").upper().strip()
     # equities are bare tickers; crypto pairs carry -USD (never have earnings).
     return s.split("-", 1)[0] if "-" in s else s
+
+
+def _news_catalyst_max_age_min() -> int:
+    """How fresh a news headline must be to count as a live catalyst (minutes).
+
+    Ross's sympathy/theme ignition is a RECENT headline; a day-old story is not a
+    catalyst. One documented knob; default 120 min."""
+    try:
+        v = int(getattr(settings, "chili_momentum_news_catalyst_max_age_min", NEWS_CATALYST_MAX_AGE_MIN))
+    except (TypeError, ValueError):
+        return NEWS_CATALYST_MAX_AGE_MIN
+    return max(15, min(v, 720))
 
 
 def earnings_catalyst_symbols() -> set[str]:
@@ -51,6 +67,33 @@ def earnings_catalyst_symbols() -> set[str]:
     except Exception:
         logger.debug("[catalyst] earnings fetch failed; no catalyst boost this pass", exc_info=True)
         return set()
+
+
+def news_catalyst_symbols() -> set[str]:
+    """Tickers with a FRESH general NEWS catalyst (headline within the freshness window).
+
+    Ross's biggest sympathy/theme plays — the +1000-3500% movers, e.g. a low-float
+    small-cap that 10x'd on a 'SpaceX synergies' headline (vid 4tOf-A3MaOE) — are
+    ignited by a fresh news HEADLINE, not just scheduled earnings. This pulls the
+    recent-news tickers so the catalyst tilt prefers explosive movers that ALSO just
+    printed news. Best-effort + cached; empty set (no boost) when news is unavailable.
+    docs/DESIGN/MOMENTUM_LANE.md
+    """
+    try:
+        from ...massive_client import get_recent_news_tickers
+
+        rows = get_recent_news_tickers(limit=200, max_age_min=_news_catalyst_max_age_min()) or []
+        return {_norm(t) for t in rows if t}
+    except Exception:
+        logger.debug("[catalyst] news fetch failed; no news-catalyst boost this pass", exc_info=True)
+        return set()
+
+
+def all_catalyst_symbols() -> set[str]:
+    """Union of EARNINGS + fresh-NEWS catalyst tickers — the full catalyst set the
+    viability tilt boosts. Each source is independently fail-open, so the loss of one
+    feed never zeroes the other. (Ross: RVOL + gap + low-float + a NEWS CATALYST.)"""
+    return earnings_catalyst_symbols() | news_catalyst_symbols()
 
 
 def catalyst_score(symbol: str, catalyst_symbols: set[str] | None) -> float:

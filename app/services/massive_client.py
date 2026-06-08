@@ -1554,6 +1554,48 @@ def get_benzinga_earnings(*, limit: int = 100) -> list[str]:
     return tickers
 
 
+def get_recent_news_tickers(*, limit: int = 200, max_age_min: int = 120) -> list[str]:
+    """Tickers with a FRESH general news headline (Polygon ``/v2/reference/news``).
+
+    The ignition for Ross-style sympathy/theme momentum is a fresh, strong NEWS
+    headline on a (usually low-float) mover — not just scheduled earnings. Returns
+    the de-duped tickers whose latest news is within ``max_age_min`` minutes, because
+    FRESHNESS is the edge (stale news is not a catalyst). Each result carries a
+    ``tickers`` list + ``published_utc``. Gracefully returns ``[]`` when the data plan
+    lacks news access, so the catalyst tilt stays a no-op. docs/DESIGN/MOMENTUM_LANE.md
+    """
+    cache_key = f"massive:recent_news:{int(max_age_min)}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    url = f"{_base()}/v2/reference/news"
+    data = _get(url, {"limit": str(limit), "order": "desc", "sort": "published_utc"})
+    if data is _NOT_FOUND or not data:
+        return []
+    from datetime import datetime, timedelta, timezone
+
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=max(1, int(max_age_min)))
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in data.get("results", []):
+        ts = item.get("published_utc")
+        if ts:
+            try:
+                pub = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+                if pub < cutoff:
+                    continue  # stale headline — not a fresh catalyst
+            except (TypeError, ValueError):
+                pass  # unparseable timestamp — keep (fail-open on freshness)
+        for t in item.get("tickers") or []:
+            tt = str(t or "").upper().strip()
+            if tt and tt not in seen:
+                seen.add(tt)
+                out.append(tt)
+    _cache_set(cache_key, out)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Snapshot-based screener helpers (filter the cached full snapshot)
 # ---------------------------------------------------------------------------
