@@ -3279,6 +3279,51 @@ def _record_breakout_alert(
         logger.warning(f"[scheduler] Failed to record breakout alert: {e}", exc_info=True)
 
 
+# Ross pillars score_universe / _extract_pillars can read off a scanner signal dict
+# (rvol / gap / daily-change). A signal must carry at least one to be RANKABLE — a
+# signal with none would land at a flat 0 score, re-introducing the very flat-equity
+# problem this bridge exists to fix, so we require one.
+_ROSS_PILLAR_KEYS = (
+    "rvol",
+    "vol_ratio",
+    "volume_ratio",
+    "gap_pct",
+    "daily_change_pct",
+    "change_pct",
+    "change_24h",
+)
+
+
+def _equity_movers_for_ross_bridge(sweep_out: dict) -> list[dict]:
+    """LONG equity movers from an intraday-signal sweep that carry a readable Ross
+    pillar (RVOL / gap / daily-change), for the equity Ross-screening bridge.
+
+    The momentum lane is LONG-only, so short ORB breakdowns are dropped; a missing
+    ``direction`` defaults to a long mover (premarket gap-ups). Only signals with a
+    pillar score_universe can rank are kept, so the bridge differentiates equities by
+    momentum quality instead of leaving them at the flat default viability.
+    """
+    if not isinstance(sweep_out, dict):
+        return []
+    movers = (
+        list(sweep_out.get("premarket_gaps") or [])
+        + list(sweep_out.get("orb_signals") or [])
+        + list(sweep_out.get("momentum_signals") or [])
+    )
+    out: list[dict] = []
+    for s in movers:
+        if not isinstance(s, dict):
+            continue
+        if not (s.get("ticker") or s.get("symbol")):
+            continue
+        if str(s.get("direction") or "up").strip().lower() not in ("up", "long", "bull", ""):
+            continue
+        if not any(s.get(k) is not None for k in _ROSS_PILLAR_KEYS):
+            continue
+        out.append(s)
+    return out
+
+
 def _bridge_scanner_to_viability(
     db: "Session",
     results: list[dict],
@@ -4090,6 +4135,24 @@ def _run_intraday_signal_sweep_job():
         out = run_intraday_signal_sweep(db, user_id=uid, auto_paper=auto_paper)
         db.commit()
         logger.info("[scheduler] Intraday signal sweep result: %s", out)
+        # Equity Ross-screening bridge (docs/DESIGN/MOMENTUM_LANE.md): route the
+        # explosive equity movers the sweep just found (gappers / ORB-ups / momentum-
+        # continuation, LONG bias) through the SAME Ross-momentum viability pipeline as
+        # crypto, so equities get real ross_scores from their RVOL/gap pillars instead
+        # of the flat default. Without this every equity sits at one flat viability with
+        # NO ross_score, so the momentum lane cannot SELECT explosive equity movers
+        # Ross-style — it would arm equities arbitrarily once crypto_only is lifted.
+        # Fail-open: a bridge hiccup must never break the sweep.
+        try:
+            _equity_movers = _equity_movers_for_ross_bridge(out)
+            if _equity_movers:
+                _bridge_scanner_to_viability(db, _equity_movers, source="equity_momentum")
+                logger.info(
+                    "[scheduler] equity ross-screening bridge: %d long movers -> viability",
+                    len(_equity_movers),
+                )
+        except Exception:
+            logger.debug("[scheduler] equity ross-screening bridge skipped", exc_info=True)
     finally:
         # FIX 46 pattern: explicit rollback to end implicit read-only
         # transaction so connection returns to pool 'idle' (clean), not
