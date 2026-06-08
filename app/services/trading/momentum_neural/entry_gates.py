@@ -387,6 +387,8 @@ def pullback_break_confirmation(
     require_vwap_hold: bool = False,
     vwap_hold_buffer: float = 0.0,
     require_macd_bullish: bool = False,
+    allow_runaway_break: bool = False,
+    runaway_min_volume_spike: float = 2.0,
 ) -> tuple[bool, str, dict[str, Any]]:
     """Ross-style pullback-break entry on intraday (1m/5m) bars.
 
@@ -459,6 +461,27 @@ def pullback_break_confirmation(
             retracement_threshold=retracement_threshold,
             atr_pct=atr_pct,
         )
+
+    # Runaway-break allowance: a break that RAN without offering a retest
+    # (``waiting_for_retest``) — take the break itself rather than miss a vertical
+    # runner that never comes back. STRICT, not the MRVL loosening: only the retest
+    # WAIT is waived; it must still clear a RAISED volume floor (below) AND the
+    # conviction-candle / VWAP / MACD confirmations. pb_high/pb_low are already the
+    # broken level + structural stop. docs/DESIGN/MOMENTUM_LANE.md §8
+    # (the break-retest evaluator returns None for pb_high/pb_low on a non-fire, but
+    # the broken level + structural stop are carried in ``debug`` — read them there.)
+    _runaway = False
+    if (
+        not ok_t
+        and require_retest
+        and allow_runaway_break
+        and reason_t == "waiting_for_retest"
+        and debug.get("pullback_high") is not None
+        and debug.get("pullback_low") is not None
+    ):
+        ok_t, _runaway = True, True
+        debug["runaway"] = True
+
     if not ok_t:
         return False, reason_t, debug
 
@@ -469,7 +492,10 @@ def pullback_break_confirmation(
         avg = float(w.iloc[:-1].mean()) if len(w) > 1 else float(vol.iloc[-1])
         vol_ratio = (float(vol.iloc[-1]) / avg) if avg > 0 else 0.0
     debug["vol_ratio"] = round(vol_ratio, 2)
-    if vol_ratio < float(volume_spike_multiple):
+    # Runaways need MORE conviction (chasing a break without a retest): raise the
+    # volume floor to runaway_min_volume_spike for them; normal breaks keep the base.
+    _vol_floor = float(runaway_min_volume_spike) if _runaway else float(volume_spike_multiple)
+    if vol_ratio < _vol_floor:
         return False, "break_low_volume", debug
 
     # #3 Sustaining-volume gate (the ESTR guardrail): the move must STILL be carried

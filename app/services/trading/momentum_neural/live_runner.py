@@ -1666,6 +1666,12 @@ def tick_live_session(
                                 require_macd_bullish=bool(
                                     getattr(settings, "chili_momentum_entry_require_macd_bullish", True)
                                 ),
+                                allow_runaway_break=bool(
+                                    getattr(settings, "chili_momentum_entry_allow_runaway_break", True)
+                                ),
+                                runaway_min_volume_spike=float(
+                                    getattr(settings, "chili_momentum_entry_runaway_min_volume_spike", 2.0) or 2.0
+                                ),
                             )
                     except Exception:
                         _trigger_ok = False

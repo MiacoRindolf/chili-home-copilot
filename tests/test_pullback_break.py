@@ -99,6 +99,47 @@ def test_retest_does_not_fire_on_runaway_first_break() -> None:
     assert reason == "waiting_for_retest"
 
 
+def test_runaway_break_fires_when_enabled() -> None:
+    # The broke-then-ran-away rows that return waiting_for_retest (never offered a
+    # retest). With the runaway allowance + enough volume, the high-conviction break
+    # is taken rather than missed — but ONLY the retest WAIT is waived.
+    rows = _retest_rows()[:31] + [
+        (110.5, 110.7, 110.30, 3000.0),
+        (110.9, 111.1, 110.70, 3000.0),
+        (111.3, 111.5, 111.10, 3000.0),
+        (111.7, 111.9, 111.50, 3000.0),
+    ]
+    ok, reason, _ = pullback_break_confirmation(
+        _df(rows), entry_interval="5m", require_retest=True, require_sustained_volume=False
+    )
+    assert ok is False and reason == "waiting_for_retest"  # default: waits
+
+    ok2, reason2, dbg2 = pullback_break_confirmation(
+        _df(rows), entry_interval="5m", require_retest=True, require_sustained_volume=False,
+        allow_runaway_break=True, runaway_min_volume_spike=2.0,
+    )
+    assert ok2 is True, (reason2, dbg2)
+    assert reason2 == "pullback_break_ok"
+    assert dbg2.get("runaway") is True
+    assert "pullback_low" in dbg2 and "pullback_high" in dbg2  # stop + level still set
+
+
+def test_runaway_break_blocked_by_raised_volume_floor() -> None:
+    # Same runaway shape but the break volume can't clear the RAISED runaway floor.
+    rows = _retest_rows()[:31] + [
+        (110.5, 110.7, 110.30, 1100.0),
+        (110.9, 111.1, 110.70, 1100.0),
+        (111.3, 111.5, 111.10, 1100.0),
+        (111.7, 111.9, 111.50, 1100.0),
+    ]
+    ok, reason, _ = pullback_break_confirmation(
+        _df(rows), entry_interval="5m", require_retest=True, require_sustained_volume=False,
+        allow_runaway_break=True, runaway_min_volume_spike=3.0,
+    )
+    assert ok is False
+    assert reason == "break_low_volume"  # runaways demand more conviction
+
+
 def test_retest_rejects_failed_hold() -> None:
     # Broke, retested, but LOST the level on a close (failed breakout) — not bought.
     rows = _retest_rows()[:31] + [
