@@ -1390,22 +1390,37 @@ _snapshot_lock = threading.Lock()
 _snapshot_cache: tuple[float, list[dict[str, Any]]] | None = None
 _TTL_FULL_SNAPSHOT = 1800  # 30 min
 
-def get_full_market_snapshot(*, include_otc: bool = False) -> list[dict[str, Any]]:
+def get_full_market_snapshot(
+    *, include_otc: bool = False, max_age_seconds: float | None = None
+) -> list[dict[str, Any]]:
     """Fetch the entire US stock market snapshot (~10K tickers) in one call.
 
     Returns a list of raw ticker snapshot dicts as returned by Massive.
-    Cached for 30 minutes so all prescreener filters share one API call.
+    Cached for 30 minutes by default so all prescreener filters share one API
+    call. ``max_age_seconds`` lets a freshness-sensitive caller (the momentum
+    universe builder) force a fresher pull: it tightens the effective TTL to
+    ``min(30min, max(60s, max_age_seconds))`` so a name that *started moving in
+    the last few minutes* shows up while a clean first-pullback entry still
+    exists — the screener was otherwise seeing igniters up to 30 min late.
+    Other callers (default) keep the 30-min cache; the fresher pull this caller
+    triggers simply benefits them too (one shared snapshot).
     """
     global _snapshot_cache
+    ttl = _TTL_FULL_SNAPSHOT
+    if max_age_seconds is not None:
+        try:
+            ttl = min(_TTL_FULL_SNAPSHOT, max(60.0, float(max_age_seconds)))
+        except (TypeError, ValueError):
+            ttl = _TTL_FULL_SNAPSHOT
     if _snapshot_cache is not None:
         ts, data = _snapshot_cache
-        if time.time() - ts < _TTL_FULL_SNAPSHOT:
+        if time.time() - ts < ttl:
             return data
 
     with _snapshot_lock:
         if _snapshot_cache is not None:
             ts, data = _snapshot_cache
-            if time.time() - ts < _TTL_FULL_SNAPSHOT:
+            if time.time() - ts < ttl:
                 return data
 
         url = f"{_base()}/v2/snapshot/locale/us/markets/stocks/tickers"

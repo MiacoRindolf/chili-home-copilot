@@ -36,6 +36,7 @@ them. See docs/DESIGN/MOMENTUM_LANE.md.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,9 @@ class UniverseProfile:
     max_universe: int = 50
     low_float_bias: bool = False  # prefer low float (proxy via price when float absent)
     catalyst_required: bool = False
+    # Freshness: tighten the shared snapshot TTL for this profile so newly-igniting
+    # names surface while a clean first-pullback entry still exists (None = 30min default).
+    snapshot_max_age_seconds: float | None = None
     notes: str = ""
 
 
@@ -87,6 +91,10 @@ EQUITY_ROSS_SMALLCAP = UniverseProfile(
     max_universe=50,
     low_float_bias=True,
     catalyst_required=False,
+    # Catch igniters EARLY: re-pull the snapshot at ~the equity-refresh cadence
+    # (5min) instead of riding the shared 30-min cache, so a name that just
+    # started moving is screened while a clean first-pullback entry still exists.
+    snapshot_max_age_seconds=300.0,
     notes="Snapshot-screened Ross universe; replaces the static large-cap list for the momentum lane.",
 )
 
@@ -120,6 +128,25 @@ def _snapshot_price(s: dict) -> float | None:
     return p if (p and p > 0) else None
 
 
+def _pos_in_range(s: dict, price: float | None) -> float:
+    """Cheap intraday freshness proxy from the snapshot's day OHLC: where the
+    current price sits in today's range. ~1.0 = at/near the high-of-day (FRESH,
+    still working — a shallow pullback can still form and break); ~0.0 = rolled
+    to the low (FADED — already ran and reversed). Neutral 0.5 when there is no
+    intraday range yet (premarket / flat). This is the day-level analogue of
+    ``ross_momentum.intraday_impulse_freshness`` (which is precise but needs a
+    per-ticker bar fetch); used here only to RANK the candidate pool so fresh
+    near-high names are preferred into it — the precise recent-bar freshness
+    filter still runs at arm time.
+    """
+    day = s.get("day") or {}
+    hi = _f(day.get("h"))
+    lo = _f(day.get("l"))
+    if price is None or hi is None or lo is None or hi <= lo:
+        return 0.5
+    return max(0.0, min(1.0, (price - lo) / (hi - lo)))
+
+
 def build_equity_universe(
     profile: UniverseProfile = EQUITY_ROSS_SMALLCAP,
     *,
@@ -128,14 +155,18 @@ def build_equity_universe(
     """Resolve an equity ``UniverseProfile`` against the full-market snapshot.
 
     Returns the screened ticker list (uppercased, de-duped, capped at
-    ``profile.max_universe``), sorted by % change descending — the day's
-    strongest LONG movers within the profile's price/liquidity band. The
-    downstream per-ticker enrichment computes true intraday RVOL/gap and
-    ``score_universe`` percentile-ranks; this stage only decides WHICH names.
+    ``profile.max_universe``), ranked **freshest-strongest-mover first** —
+    ``freshness × diminishing-returns(move)``, so a name still pinned near its
+    high-of-day outranks one that ran huge and rolled over (Ross enters EARLY,
+    not after a +1000% fade). The downstream per-ticker enrichment computes true
+    intraday RVOL/gap and ``score_universe`` percentile-ranks; this stage only
+    decides WHICH names make the pool.
 
-    ``snapshot`` is injectable for tests; otherwise pulled (30-min cached) from
-    Massive. Fail-open: any error / empty snapshot → ``[]`` so the caller falls
-    back to its default universe (no regression).
+    ``snapshot`` is injectable for tests; otherwise pulled from Massive at
+    ``profile.snapshot_max_age_seconds`` (the Ross profile forces a ~5-min pull
+    so igniters surface before their first-pullback entry is gone). Fail-open:
+    any error / empty snapshot → ``[]`` so the caller falls back to its default
+    universe (no regression).
     """
     if profile.asset_class != "equity":
         return []
@@ -143,12 +174,14 @@ def build_equity_universe(
         try:
             from ...massive_client import get_full_market_snapshot
 
-            snapshot = get_full_market_snapshot() or []
+            snapshot = get_full_market_snapshot(
+                max_age_seconds=profile.snapshot_max_age_seconds
+            ) or []
         except Exception:
             logger.debug("[universe] snapshot fetch failed", exc_info=True)
             return []
 
-    rows: list[tuple[str, float, float, float]] = []  # (ticker, chg_pct, dollar_vol, price)
+    rows: list[tuple[str, float, float, float]] = []  # (ticker, rank_score, chg_pct, pos_in_range)
     for s in snapshot or []:
         try:
             if not isinstance(s, dict):
@@ -179,13 +212,22 @@ def build_equity_universe(
             if profile.min_change_pct is not None and chg < profile.min_change_pct:
                 continue
 
-            rows.append((ticker, chg, dollar_vol, price))
+            # Ross enters EARLY/fresh, not after a name has run +1000% and rolled
+            # over. Rank by freshness (position in the day's range, ~1.0 = at the
+            # high) × a diminishing-returns view of the move (log1p, so an
+            # over-extended monster does not dwarf a fresh strong mover). A name
+            # that ran huge then faded (low pos) is demoted below a fresh +30%
+            # still pinned near its high. The min_change floor already dropped the
+            # dead tape; this orders WHO makes the capped pool.
+            pos = _pos_in_range(s, price)
+            rank_score = pos * math.log1p(max(0.0, chg))
+            rows.append((ticker, rank_score, chg, pos))
         except Exception:
             continue
 
-    # Adaptive selection: the day's strongest movers first. No fixed RVOL cut —
-    # the percentile ranking in score_universe (RVOL + momentum + low-float) does
-    # the fine selection on the enriched survivors.
+    # Freshest, strongest-WORKING movers first (rank_score = freshness × move).
+    # No fixed RVOL cut — the percentile ranking in score_universe (RVOL +
+    # momentum + low-float) does the fine selection on the enriched survivors.
     rows.sort(key=lambda r: r[1], reverse=True)
     seen: set[str] = set()
     out: list[str] = []

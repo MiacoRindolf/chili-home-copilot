@@ -9,6 +9,7 @@ injected, no DB / no network.
 from app.services.trading.momentum_neural.universe import (
     EQUITY_ROSS_SMALLCAP,
     UniverseProfile,
+    _pos_in_range,
     build_equity_universe,
 )
 
@@ -93,3 +94,32 @@ def test_profile_documents_ross_class_defaults():
     assert EQUITY_ROSS_SMALLCAP.min_dollar_volume == 1_000_000.0
     assert EQUITY_ROSS_SMALLCAP.min_change_pct == 5.0
     assert EQUITY_ROSS_SMALLCAP.low_float_bias is True
+
+
+# ── (B) early-move / freshness ranking — enter fresh, not over-extended ───────
+
+def test_fresh_near_high_ranks_above_faded_big_mover():
+    snap = [
+        # ran +200% but rolled to the BOTTOM of its day range (faded — too late)
+        {"ticker": "FADED", "todaysChangePerc": 200.0,
+         "day": {"c": 5.0, "h": 12.0, "l": 4.5, "v": 3_000_000}},
+        # only +30% but pinned at the TOP of its range (fresh, still working)
+        {"ticker": "FRESH", "todaysChangePerc": 30.0,
+         "day": {"c": 7.9, "h": 8.0, "l": 6.0, "v": 3_000_000}},
+    ]
+    out = build_equity_universe(EQUITY_ROSS_SMALLCAP, snapshot=snap)
+    # Ross enters the fresh near-high name, not the faded monster.
+    assert out.index("FRESH") < out.index("FADED")
+
+
+def test_pos_in_range_helper():
+    assert _pos_in_range({"day": {"h": 10.0, "l": 5.0}}, 10.0) == 1.0  # at the high (fresh)
+    assert _pos_in_range({"day": {"h": 10.0, "l": 5.0}}, 5.0) == 0.0   # at the low (faded)
+    assert _pos_in_range({"day": {"h": 10.0, "l": 5.0}}, 7.5) == 0.5   # mid-range
+    assert _pos_in_range({"day": {}}, 7.5) == 0.5                       # no range -> neutral
+    assert _pos_in_range({"day": {"h": 10.0, "l": 5.0}}, None) == 0.5   # no price -> neutral
+
+
+def test_profile_has_snapshot_freshness_knob():
+    # (A) the documented knob that forces a ~5-min snapshot pull for this profile.
+    assert EQUITY_ROSS_SMALLCAP.snapshot_max_age_seconds == 300.0
