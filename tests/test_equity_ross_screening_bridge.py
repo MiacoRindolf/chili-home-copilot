@@ -14,7 +14,25 @@ viability pipeline as crypto.
 
 from __future__ import annotations
 
-from app.services.trading_scheduler import _equity_movers_for_ross_bridge
+from app.services.trading_scheduler import (
+    _equity_movers_for_ross_bridge,
+    _intraday_sweep_interval_seconds,
+)
+from app.config import settings
+
+
+def test_sweep_cadence_stays_within_viability_freshness_gate():
+    # The equity bridge runs inside the intraday sweep, the ONLY refresher for equity
+    # momentum viability. If the sweep is slower than the live-entry freshness gate,
+    # equities go stale between sweeps and every equity entry is blocked. The cadence
+    # must therefore stay strictly UNDER the gate (with margin), derived from it.
+    gate = float(
+        getattr(settings, "chili_momentum_risk_viability_max_age_seconds", 600.0) or 600.0
+    )
+    interval = _intraday_sweep_interval_seconds()
+    assert interval < gate, f"sweep {interval}s must be < freshness gate {gate}s"
+    assert interval == int(max(120.0, gate / 2.0))  # half the gate, floored at 120s
+    assert interval >= 120
 
 
 def _sweep(premarket=None, orb=None, momentum=None):

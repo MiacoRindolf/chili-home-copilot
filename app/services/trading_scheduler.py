@@ -4118,6 +4118,27 @@ def _run_crypto_viability_refresh_job():
         db.close()
 
 
+def _intraday_sweep_interval_seconds() -> int:
+    """Cadence for the intraday sweep, DERIVED from the live-entry viability freshness
+    gate (``chili_momentum_risk_viability_max_age_seconds``) rather than a fixed value.
+
+    Equity momentum viability is Ross-screened by the bridge that runs INSIDE this
+    sweep, and the sweep is the ONLY refresher for equities (crypto stays fresh via the
+    ~60s fast scanner). If the sweep is slower than the freshness gate, equity viability
+    goes stale BETWEEN sweeps and every live equity entry is blocked "Viability snapshot
+    stale" (live diag 2026-06-08: NOW blocked at age 1668s > 600s after a fixed 15min
+    sweep). Half the gate gives a 2x refresh margin so it never goes stale; floored at
+    120s so a misconfigured tiny gate can't busy-loop the scanners. No magic number —
+    it tracks the gate. (docs/DESIGN/MOMENTUM_LANE.md)
+    """
+    from ..config import settings as _cfg
+
+    gate = float(
+        getattr(_cfg, "chili_momentum_risk_viability_max_age_seconds", 600.0) or 600.0
+    )
+    return int(max(120.0, gate / 2.0))
+
+
 def _run_intraday_signal_sweep_job():
     """Run intraday signal sweep and optionally route into paper automation."""
     from ..config import settings as _settings
@@ -5244,11 +5265,12 @@ def start_scheduler():
                     next_run_time=datetime.now() + timedelta(seconds=45),
                 )
 
+                _sweep_interval_s = _intraday_sweep_interval_seconds()
                 _scheduler.add_job(
                     _run_intraday_signal_sweep_job,
-                    trigger=IntervalTrigger(minutes=15),
+                    trigger=IntervalTrigger(seconds=_sweep_interval_s),
                     id="intraday_signal_sweep",
-                    name="Intraday signal sweep (every 15min)",
+                    name=f"Intraday signal sweep (every {_sweep_interval_s}s = viability gate/2)",
                     replace_existing=True,
                     max_instances=1,
                     next_run_time=datetime.now() + timedelta(seconds=55),
