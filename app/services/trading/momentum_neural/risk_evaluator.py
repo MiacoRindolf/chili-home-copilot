@@ -13,6 +13,7 @@ from ..execution_family_registry import (
     is_documented_execution_family,
     is_momentum_automation_implemented,
     normalize_execution_family,
+    resolve_execution_family_for_symbol,
 )
 from ..governance import get_kill_switch_status, is_kill_switch_active
 from .market_profile import is_coinbase_spot_symbol
@@ -310,31 +311,49 @@ def evaluate_proposed_momentum_automation(
             )
         )
 
+    # The authoritative venue is symbol-routed (E1 per-symbol routing,
+    # ``resolve_execution_family_for_symbol``): crypto BASE-USD -> coinbase_spot,
+    # equities -> robinhood_spot. The strategy variant carries a TEMPLATE
+    # execution_family (all current variants are coinbase_spot) that may legitimately
+    # differ from the symbol's venue — e.g. a coinbase_spot template applied to an
+    # equity that must route to robinhood_spot. So validate the REQUEST against the
+    # symbol-resolved venue, not the static variant. This both (a) unblocks the equity
+    # path and (b) is STRICTER than the old variant check: it blocks the dangerous
+    # "equity requested via coinbase_spot" case the variant check would have allowed.
+    symbol_ef = normalize_execution_family(resolve_execution_family_for_symbol(sym))
     v_row = (
         db.query(MomentumStrategyVariant).filter(MomentumStrategyVariant.id == int(variant_id)).one_or_none()
     )
-    if v_row is not None:
-        vef = normalize_execution_family(v_row.execution_family)
-        if vef != ef:
-            checks.append(
-                _check(
-                    "execution_family_variant_alignment",
-                    False,
-                    severity="block",
-                    message="Requested execution_family does not match variant.execution_family.",
-                    detail={"request": ef, "variant_execution_family": vef, "variant_id": int(variant_id)},
-                )
+    vef = normalize_execution_family(v_row.execution_family) if v_row is not None else None
+    if ef != symbol_ef:
+        checks.append(
+            _check(
+                "execution_family_variant_alignment",
+                False,
+                severity="block",
+                message="Requested execution_family does not match the symbol-resolved venue.",
+                detail={
+                    "request": ef,
+                    "symbol_resolved": symbol_ef,
+                    "variant_execution_family": vef,
+                    "variant_id": int(variant_id),
+                },
             )
-        else:
-            checks.append(
-                _check(
-                    "execution_family_variant_alignment",
-                    True,
-                    severity="ok",
-                    message="execution_family matches variant row.",
-                    detail={"execution_family": ef},
-                )
+        )
+    else:
+        checks.append(
+            _check(
+                "execution_family_variant_alignment",
+                True,
+                severity="ok",
+                message="execution_family matches symbol-resolved venue.",
+                detail={
+                    "execution_family": ef,
+                    "symbol_resolved": symbol_ef,
+                    "variant_execution_family": vef,
+                },
             )
+        )
 
     # ── Viability row ───────────────────────────────────────────────────
     via = (
