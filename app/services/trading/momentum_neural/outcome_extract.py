@@ -112,6 +112,28 @@ def _entry_occurred_from_events(events: list[TradingAutomationEvent], mode: str)
     return False
 
 
+def _entry_occurred_durable(exec_dict: Any) -> bool:
+    """Durable proof a real entry FILL happened, independent of event-window aging
+    or position-dict zeroing.
+
+    The event-based and live-position-quantity signals are both TRANSIENT: a
+    long-held session's ``*_entry_filled`` event can age out of the recent-events
+    window, and the broker-zero-reconcile exit path zeroes ``exec["position"]``.
+    Either alone makes a real round-trip read as "never entered" and mislabels it
+    ``cancelled_pre_entry`` (EIGEN sessions 57/64). A realized P&L or a recorded
+    exit-entry price cannot exist without a real entry fill, so they are durable
+    entry evidence that survives both. Submission markers are intentionally NOT
+    used — a zero-fill submission must stay non-entered.
+    """
+    if not isinstance(exec_dict, dict):
+        return False
+    if exec_dict.get("realized_pnl_usd") is not None:
+        return True
+    if exec_dict.get("last_exit_entry_price") is not None:
+        return True
+    return False
+
+
 def _governance_context_from_events(events: list[TradingAutomationEvent]) -> dict[str, Any]:
     out: dict[str, Any] = {
         "kill_switch_exit": False,
@@ -237,8 +259,10 @@ def extract_momentum_session_outcome(
         if quote_source_raw is not None:
             quote_source_at_entry = str(quote_source_raw).strip() or None
         pos = pe.get("position")
-        entry_occurred = _entry_occurred_from_events(events, "paper") or (
-            isinstance(pos, dict) and float(pos.get("quantity") or 0) > 0
+        entry_occurred = (
+            _entry_occurred_from_events(events, "paper")
+            or _entry_occurred_durable(pe)
+            or (isinstance(pos, dict) and float(pos.get("quantity") or 0) > 0)
         )
         for ev in events:
             if ev.event_type == "paper_partial_exit":
@@ -262,8 +286,10 @@ def extract_momentum_session_outcome(
         if isinstance(exit_reason, str):
             exit_reason = exit_reason.strip() or None
         pos = le.get("position")
-        entry_occurred = _entry_occurred_from_events(events, "live") or (
-            isinstance(pos, dict) and float(pos.get("quantity") or 0) > 0
+        entry_occurred = (
+            _entry_occurred_from_events(events, "live")
+            or _entry_occurred_durable(le)
+            or (isinstance(pos, dict) and float(pos.get("quantity") or 0) > 0)
         )
         for ev in events:
             if ev.event_type in ("live_partial_exit", "live_partial_exit_filled"):
