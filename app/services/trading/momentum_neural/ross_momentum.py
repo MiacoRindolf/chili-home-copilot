@@ -207,3 +207,114 @@ def score_universe(
     for i, s in enumerate(ordered, start=1):
         s.rank = i
     return out
+
+
+# ── Selection→entry alignment: intraday-impulse freshness (M4 keystone) ───────
+# ``score_universe`` ranks the day's movers from 24h-CUMULATIVE pillars (RVOL /
+# gap / daily-change). But by the time the pullback-break entry gate evaluates a
+# top-ranked name, many have already FADED into a deep intraday retracement, so
+# the gate reads ``pullback_too_deep`` and never fires (live diagnostic 2026-06-07:
+# all 10 live-eligible candidates ``pullback_too_deep``; lane = 0 entries). Ross
+# instead enters names moving RIGHT NOW — near their high-of-day with a shallow
+# pullback available. This measures exactly that, from the SAME intraday bars the
+# entry gate uses, so faded 24h movers can be dropped from the live-eligible set
+# and the survivors RE-RANKED by current impulse (the freshest watched first).
+# docs/DESIGN/MOMENTUM_LANE_ENTRY_STOP_REALIGNMENT.md §3 ME-4.
+
+
+@dataclass
+class ImpulseFreshness:
+    """Where the current price sits within the recent intraday range — the
+    structural precondition for a SHALLOW pullback to be available to enter on."""
+
+    is_fresh: bool
+    score: float  # clamped [0,1]: position of current price in the recent range
+    position_in_range: float  # raw (can exceed 1.0 on a fresh new high) — ranking key
+    reason: str
+    win_high: float | None = None
+    win_low: float | None = None
+    last: float | None = None
+    debug: dict = field(default_factory=dict)
+
+
+def _df_col_floats(df, name: str) -> list[float]:
+    """Column as a plain ``list[float]`` (keeps this module pandas-import-free and
+    pure — it operates on whatever OHLCV frame the caller already fetched)."""
+    try:
+        return [float(x) for x in df[name].tolist()]
+    except Exception:
+        return []
+
+
+def intraday_impulse_freshness(
+    df,
+    *,
+    lookback: int = 20,
+    retracement_threshold: float = 0.50,
+) -> ImpulseFreshness:
+    """Is this instrument in a FRESH intraday up-impulse near its recent high
+    (so a shallow pullback can still form and break), or has it already faded?
+
+    Computed from the SAME bars + window the pullback-break entry gate evaluates
+    (``entry_gates.pullback_break_confirmation``: ``look = min(20, cur)`` over the
+    bars BEFORE the current one):
+
+      * ``position_in_range = (last_close - win_low) / (win_high - win_low)`` — 1.0
+        at the recent high (freshest), >1.0 on a fresh new high, ~0 at the low
+        (most faded). Used to RANK candidates so the freshest is watched first.
+      * ``is_fresh = score >= (1 - retracement_threshold)`` — the current price has
+        NOT retraced more than the gate's own shallow/deep boundary below the recent
+        high. This REUSES the entry gate's one documented knob (``retracement_threshold``)
+        rather than inventing a new "near-high" cutoff, so the freshness filter and
+        the gate share a single, self-consistent definition of "shallow". A faded
+        24h mover (price rolled into the lower portion of its range) fails it.
+
+    Adaptive by construction: the bar floats with each name's own intraday range —
+    no fixed % or hardcoded RVOL. Pure + side-effect-free for unit testing.
+    """
+    thr = float(retracement_threshold)
+    if df is None or getattr(df, "empty", True):
+        return ImpulseFreshness(False, 0.0, 0.0, "insufficient_bars", debug={"bars": 0})
+    n = len(df)
+    if n < 5:
+        return ImpulseFreshness(False, 0.0, 0.0, "insufficient_bars", debug={"bars": n})
+    highs = _df_col_floats(df, "High")
+    lows = _df_col_floats(df, "Low")
+    closes = _df_col_floats(df, "Close")
+    if len(highs) != n or len(lows) != n or len(closes) != n:
+        return ImpulseFreshness(False, 0.0, 0.0, "bad_ohlcv", debug={"bars": n})
+    cur = n - 1
+    look = min(int(lookback), cur)
+    if look < 2:
+        return ImpulseFreshness(False, 0.0, 0.0, "insufficient_bars", debug={"bars": n})
+    win_high = max(highs[cur - look:cur])  # excludes the current bar (gate parity)
+    win_low = min(lows[cur - look:cur])
+    rng = win_high - win_low
+    last = closes[cur]
+    if not (rng > 0):
+        # Flat / no intraday impulse to pull back from — not a Ross setup.
+        return ImpulseFreshness(
+            False, 0.0, 0.0, "no_range",
+            win_high=win_high, win_low=win_low, last=last,
+            debug={"win_high": win_high, "win_low": win_low},
+        )
+    pos = (last - win_low) / rng
+    score = min(1.0, max(0.0, pos))
+    is_fresh = score >= (1.0 - thr)
+    return ImpulseFreshness(
+        is_fresh=bool(is_fresh),
+        score=round(score, 4),
+        position_in_range=round(pos, 4),
+        reason="fresh_impulse" if is_fresh else "faded_below_high",
+        win_high=win_high,
+        win_low=win_low,
+        last=last,
+        debug={
+            "win_high": round(win_high, 8),
+            "win_low": round(win_low, 8),
+            "last": round(last, 8),
+            "retrace_from_high": round(max(0.0, (win_high - last) / rng), 4),
+            "threshold": thr,
+            "lookback": int(look),
+        },
+    )

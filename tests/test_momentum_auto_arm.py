@@ -37,6 +37,9 @@ def happy(monkeypatch):
     monkeypatch.setattr(aa, "_fresh_live_eligible_candidates", lambda db, *, limit: [_cand()])
     monkeypatch.setattr(aa, "_symbol_free", lambda db, sym, uid: True)
     monkeypatch.setattr(aa, "_entry_trigger_fires", lambda sym: (True, "pullback_break_ok"))
+    # Default freshness UNKNOWN (None) — keeps existing tests network-free and on the
+    # arm-on-active-break contract; freshness-specific tests override this seam.
+    monkeypatch.setattr(aa, "_candidate_freshness", lambda sym: None)
     monkeypatch.setattr(coinbase_service, "connect", lambda: {"ok": True})
     monkeypatch.setattr(
         operator_actions, "begin_live_arm",
@@ -338,3 +341,84 @@ def test_picks_first_firing_candidate(happy):
     out = aa.run_auto_arm_pass(_FakeDB())
     assert out["armed"] == 1
     assert out["symbol"] == "BBB-USD"
+
+
+# ── Selection->entry alignment (M4 keystone): freshness filter + re-rank ───────
+
+def _fresh(is_fresh: bool, pos: float, score: float | None = None):
+    """Stand-in for ross_momentum.ImpulseFreshness (only the read attrs matter)."""
+    return SimpleNamespace(
+        is_fresh=is_fresh,
+        position_in_range=pos,
+        score=score if score is not None else min(1.0, max(0.0, pos)),
+    )
+
+
+def test_watches_freshest_known_fresh_when_none_firing(happy):
+    """No break is firing, but two names are positively in a fresh up-impulse — arm the
+    FRESHEST one to WATCH (instead of skipping), and prefer it over the lower-position one."""
+    cands = [_cand("LO-USD", 8, 0.80), _cand("HI-USD", 8, 0.55)]
+    happy.setattr(aa, "_fresh_live_eligible_candidates", lambda db, *, limit: cands)
+    happy.setattr(aa, "_symbol_market_open", lambda sym: True)
+    happy.setattr(aa, "_entry_trigger_fires", lambda sym: (False, "waiting_for_break"))
+    # HI-USD is fresher (closer to its recent high) despite lower 24h viability.
+    fr = {"LO-USD": _fresh(True, 0.55), "HI-USD": _fresh(True, 0.97)}
+    happy.setattr(aa, "_candidate_freshness", lambda sym: fr[sym])
+    out = aa.run_auto_arm_pass(_FakeDB())
+    assert out["armed"] == 1
+    assert out["symbol"] == "HI-USD"  # re-ranked by freshness, not viability
+    assert out["chosen_firing"] is False
+    assert str(out["trigger"]).startswith("fresh_watch:")
+
+
+def test_drops_faded_non_firing_candidate(happy):
+    """A faded 24h mover that is not firing is NOT watched — the slot stays free."""
+    happy.setattr(aa, "_fresh_live_eligible_candidates", lambda db, *, limit: [_cand("FADED-USD")])
+    happy.setattr(aa, "_symbol_market_open", lambda sym: True)
+    happy.setattr(aa, "_entry_trigger_fires", lambda sym: (False, "pullback_too_deep"))
+    happy.setattr(aa, "_candidate_freshness", lambda sym: _fresh(False, 0.12))
+    out = aa.run_auto_arm_pass(_FakeDB())
+    assert out.get("armed", 0) == 0
+    assert out["skipped"] == "no_active_trigger"
+    assert out["faded_skipped"] == 1
+
+
+def test_firing_break_beats_fresh_watch_even_if_faded(happy):
+    """An actively-firing break is always a valid entry — it wins over a fresh watch
+    candidate, even if the firing name's current price reads 'faded'."""
+    cands = [_cand("FIRE-USD", 8, 0.50), _cand("WATCH-USD", 8, 0.90)]
+    happy.setattr(aa, "_fresh_live_eligible_candidates", lambda db, *, limit: cands)
+    happy.setattr(aa, "_symbol_market_open", lambda sym: True)
+    happy.setattr(aa, "_entry_trigger_fires", lambda sym: (sym == "FIRE-USD", "pullback_break_ok" if sym == "FIRE-USD" else "waiting_for_break"))
+    fr = {"FIRE-USD": _fresh(False, 0.30), "WATCH-USD": _fresh(True, 0.95)}
+    happy.setattr(aa, "_candidate_freshness", lambda sym: fr[sym])
+    out = aa.run_auto_arm_pass(_FakeDB())
+    assert out["armed"] == 1
+    assert out["symbol"] == "FIRE-USD"
+    assert out["chosen_firing"] is True
+    assert out["trigger"] == "pullback_break_ok"
+
+
+def test_reranks_among_simultaneous_firing_by_freshness(happy):
+    """When several names fire at once, arm the freshest of them."""
+    cands = [_cand("A-USD", 8, 0.80), _cand("B-USD", 8, 0.60)]
+    happy.setattr(aa, "_fresh_live_eligible_candidates", lambda db, *, limit: cands)
+    happy.setattr(aa, "_symbol_market_open", lambda sym: True)
+    happy.setattr(aa, "_entry_trigger_fires", lambda sym: (True, "pullback_break_ok"))
+    fr = {"A-USD": _fresh(True, 0.62), "B-USD": _fresh(True, 0.99)}
+    happy.setattr(aa, "_candidate_freshness", lambda sym: fr[sym])
+    out = aa.run_auto_arm_pass(_FakeDB())
+    assert out["armed"] == 1
+    assert out["symbol"] == "B-USD"  # fresher firing name wins despite lower viability
+
+
+def test_require_fresh_off_restores_arm_on_break_only(happy):
+    """Knob OFF: a fresh-but-not-firing name is NOT watched — old contract preserved."""
+    happy.setattr(aa.settings, "chili_momentum_auto_arm_require_fresh_impulse", False, raising=False)
+    happy.setattr(aa, "_fresh_live_eligible_candidates", lambda db, *, limit: [_cand("HI-USD", 8, 0.7)])
+    happy.setattr(aa, "_symbol_market_open", lambda sym: True)
+    happy.setattr(aa, "_entry_trigger_fires", lambda sym: (False, "waiting_for_break"))
+    happy.setattr(aa, "_candidate_freshness", lambda sym: _fresh(True, 0.98))
+    out = aa.run_auto_arm_pass(_FakeDB())
+    assert out.get("armed", 0) == 0
+    assert out["skipped"] == "no_active_trigger"

@@ -243,6 +243,63 @@ def _entry_trigger_fires(symbol: str) -> tuple[bool, str]:
     return False, "trigger_wait"
 
 
+def _require_fresh_impulse() -> bool:
+    """Selection->entry alignment, ON by default: drop FADED 24h movers from the live
+    slot and watch the FRESHEST in-impulse name instead. One documented knob — set
+    ``CHILI_MOMENTUM_AUTO_ARM_REQUIRE_FRESH_IMPULSE=0`` to restore the prior
+    arm-only-on-an-active-break behaviour. docs/DESIGN/MOMENTUM_LANE_ENTRY_STOP_REALIGNMENT.md ME-4."""
+    return bool(getattr(settings, "chili_momentum_auto_arm_require_fresh_impulse", True))
+
+
+def _freshness_retracement_threshold() -> float:
+    """The 'near recent high' bar reuses the entry gate's OWN shallow/deep boundary
+    (``pullback_break_confirmation``'s ``retracement_threshold``, 0.50) so the freshness
+    filter and the gate share one self-consistent definition of 'shallow' — no separate
+    magic cutoff. Tracks the gate's setting if/when it is wired to one."""
+    try:
+        return float(getattr(settings, "chili_momentum_pullback_retracement_threshold", 0.50) or 0.50)
+    except (TypeError, ValueError):
+        return 0.50
+
+
+def _candidate_freshness(symbol: str):
+    """``ross_momentum.intraday_impulse_freshness`` for a candidate, on the SAME intraday
+    interval the entry trigger uses (a cache-hit OHLCV fetch). Returns the result, or
+    ``None`` on missing data / error — FAIL-OPEN, because the freshness filter is a
+    selection-quality filter, not a safety gate (the entry gate + risk belts still
+    control the actual entry); a market-data hiccup must never block arming."""
+    try:
+        from ..market_data import fetch_ohlcv_df
+        from .ross_momentum import intraday_impulse_freshness
+
+        interval = str(getattr(settings, "chili_momentum_pullback_entry_interval", "5m") or "5m")
+        df = fetch_ohlcv_df(symbol, interval=interval, period="5d")
+        if df is None or getattr(df, "empty", True):
+            return None
+        return intraday_impulse_freshness(df, retracement_threshold=_freshness_retracement_threshold())
+    except Exception:
+        return None
+
+
+def _probe_candidate(symbol: str) -> tuple[bool, str, Any]:
+    """One network-bound pass per candidate: (trigger fires?, reason, freshness)."""
+    fires, reason = _entry_trigger_fires(symbol)
+    return fires, reason, _candidate_freshness(symbol)
+
+
+def _known_fresh(fresh: Any) -> bool:
+    """True only when we POSITIVELY know the name is in a fresh up-impulse (so it is a
+    worthwhile name to WATCH). Unknown freshness (None) is NOT watched proactively —
+    only an actively-firing break arms an unknown (fail-open on the firing path)."""
+    return bool(getattr(fresh, "is_fresh", False)) if fresh is not None else False
+
+
+def _freshness_rank(fresh: Any) -> float:
+    """Ranking key: current price's position in the recent intraday range (higher =
+    closer to / above the recent high = fresher). Unknown ranks last among knowns."""
+    return float(getattr(fresh, "position_in_range", 0.0) or 0.0) if fresh is not None else 0.0
+
+
 def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     """Single auto-arm pass. Returns a summary dict (armed 0/1)."""
     out: dict[str, Any] = {"checked": 0, "scanned": 0, "armed": 0, "skipped": None}
@@ -377,13 +434,13 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
             continue
         eligible.append(c)
 
-    # Check entry triggers CONCURRENTLY. Each _entry_trigger_fires fetches OHLCV
-    # (network-bound), so checking serially made a pass take ~40s — past the 30s
-    # cadence, so the scheduler skipped overlapping runs and the lane reacted
-    # slowly to fresh breaks. Parallel fetch -> a pass is ~the slowest single
-    # fetch (~5s). Selection is unchanged: the FIRST (highest-viability) firing.
+    # Probe entry trigger + intraday-impulse freshness CONCURRENTLY. Each probe fetches
+    # OHLCV (network-bound), so checking serially made a pass take ~40s — past the 30s
+    # cadence, so the scheduler skipped overlapping runs and reacted slowly. Parallel
+    # fetch -> a pass is ~the slowest single fetch (~5s).
     chosen: MomentumSymbolViability | None = None
     chosen_reason: str | None = None
+    out["faded_skipped"] = 0
     if eligible:
         import concurrent.futures
 
@@ -391,25 +448,58 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
             len(eligible),
             max(1, int(getattr(settings, "chili_momentum_auto_arm_trigger_workers", 8))),
         )
-        _results: dict[str, tuple[bool, str]] = {}
+        _results: dict[str, tuple[bool, str, Any]] = {}
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=_workers) as _ex:
-                _futs = {_ex.submit(_entry_trigger_fires, c.symbol): c.symbol for c in eligible}
+                _futs = {_ex.submit(_probe_candidate, c.symbol): c.symbol for c in eligible}
                 for _fut in concurrent.futures.as_completed(_futs):
                     _sym = _futs[_fut]
                     try:
                         _results[_sym] = _fut.result()
                     except Exception:
-                        _results[_sym] = (False, "trigger_error")
+                        _results[_sym] = (False, "trigger_error", None)
         except Exception:
             # Fall back to serial if the pool fails for any reason.
             for c in eligible:
-                _results[c.symbol] = _entry_trigger_fires(c.symbol)
-        for c in eligible:
-            fires, reason = _results.get(c.symbol, (False, "no_result"))
-            if fires:
-                chosen, chosen_reason = c, reason
-                break
+                _results[c.symbol] = _probe_candidate(c.symbol)
+
+        # SELECTION->ENTRY ALIGNMENT (M4 keystone). The viability board ranks the day's
+        # 24h-cumulative movers, but many have FADED into a deep intraday retrace by the
+        # time the pullback gate sees them — over recent bars faded names returned a 0.00%
+        # break fire-rate while every fire came from a still-fresh name (dry-run 2026-06-07).
+        # So: (1) a name whose break is FIRING now is always a valid entry — arm the
+        # freshest of those; (2) otherwise WATCH the freshest name we POSITIVELY know is in
+        # a fresh up-impulse (Ross's "the one moving right now") rather than pinning the
+        # single live slot on the stale 24h leader. The live runner still confirms the
+        # actual break (+ viability + market-open + belts) before any order is placed.
+        # docs/DESIGN/MOMENTUM_LANE_ENTRY_STOP_REALIGNMENT.md ME-4.
+        def _r(_c) -> tuple[bool, str, Any]:
+            return _results.get(_c.symbol, (False, "no_result", None))
+
+        _firing = sorted(
+            (c for c in eligible if _r(c)[0]),
+            key=lambda c: _freshness_rank(_r(c)[2]),
+            reverse=True,
+        )
+        if _firing:
+            chosen = _firing[0]
+            chosen_reason = _r(chosen)[1]
+        elif _require_fresh_impulse():
+            _watch = sorted(
+                (c for c in eligible if _known_fresh(_r(c)[2])),
+                key=lambda c: _freshness_rank(_r(c)[2]),
+                reverse=True,
+            )
+            out["faded_skipped"] = len(eligible) - len(_watch)
+            if _watch:
+                chosen = _watch[0]
+                chosen_reason = "fresh_watch:" + str(_r(chosen)[1])
+        if chosen is not None:
+            _cf = _r(chosen)[2]
+            out["chosen_fresh_score"] = (
+                round(float(getattr(_cf, "score", 0.0) or 0.0), 4) if _cf is not None else None
+            )
+            out["chosen_firing"] = bool(_firing)
 
     if chosen is None:
         out["skipped"] = "no_active_trigger"

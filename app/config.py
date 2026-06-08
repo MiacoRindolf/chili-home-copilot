@@ -2993,6 +2993,18 @@ class Settings(BaseSettings):
         le=100,
         validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_SCAN_LIMIT"),
     )
+    # Selection->entry alignment (M4 keystone): the viability board ranks 24h movers,
+    # but many FADE into a deep intraday retrace before the pullback gate sees them
+    # (faded names = 0.00% break fire-rate over recent bars). When True (default) auto-arm
+    # drops faded names and watches the FRESHEST name positively in an intraday up-impulse
+    # near its recent high — Ross's "the one moving right now" — instead of pinning the
+    # single live slot on the stale 24h leader. The freshness "near-high" bar reuses the
+    # entry gate's own retracement_threshold (no separate magic cutoff). Set False to
+    # restore arm-only-on-an-active-break. docs/DESIGN/MOMENTUM_LANE_ENTRY_STOP_REALIGNMENT.md
+    chili_momentum_auto_arm_require_fresh_impulse: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_REQUIRE_FRESH_IMPULSE"),
+    )
     # Auto-arm checks each candidate's entry trigger via an OHLCV fetch; run them
     # concurrently so a pass is ~the slowest single fetch (not the serial sum).
     chili_momentum_auto_arm_trigger_workers: int = Field(
