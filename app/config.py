@@ -2496,6 +2496,43 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_SUSTAIN_LOOKBACK_BARS"),
         description="Bars over which sustained rel-vol is averaged at the entry tick.",
     )
+    # Ross candle / VWAP / MACD entry confirmations — the tape-reading the structural
+    # pullback gate alone misses. Default ON; each fail-OPEN on thin/missing data.
+    chili_momentum_entry_require_break_candle: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_REQUIRE_BREAK_CANDLE"),
+        description="Require a conviction bull break candle (reject a doji/topping-tail break that wicks out).",
+    )
+    chili_momentum_entry_break_candle_min_close_pos: float = Field(
+        default=0.50,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_BREAK_CANDLE_MIN_CLOSE_POS"),
+        description="Break bar must close at least this fraction up its range (0.5 = upper half).",
+    )
+    chili_momentum_entry_require_vwap_hold: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_REQUIRE_VWAP_HOLD"),
+        description="Require price to hold above session VWAP at entry (Ross stays long above VWAP).",
+    )
+    chili_momentum_entry_vwap_hold_buffer: float = Field(
+        default=0.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_VWAP_HOLD_BUFFER"),
+        description="Tolerance below VWAP still treated as a hold (0 = strict).",
+    )
+    chili_momentum_entry_require_macd_bullish: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_REQUIRE_MACD_BULLISH"),
+        description="Require MACD momentum confirmation (histogram >= 0 OR macd line >= signal); lenient, lagging-safe.",
+    )
+    # Ross topping-tail runner exit: lock the runner (post first-target scale-out) on
+    # an exhaustion / upper-wick rejection candle instead of waiting for the trail stop.
+    chili_momentum_exit_topping_tail_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_EXIT_TOPPING_TAIL_ENABLED"),
+        description="Exit the TRAILING runner on a topping-tail/shooting-star rejection candle.",
+    )
     # #2 Breakout-or-bailout fast exit (Ross flat-top): if the broken level fails to
     # hold shortly after entry, cut at market — well inside the structural stop.
     chili_momentum_breakout_bailout_enabled: bool = Field(
