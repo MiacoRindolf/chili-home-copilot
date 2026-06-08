@@ -2377,6 +2377,20 @@ class Settings(BaseSettings):
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_REWARD_RISK_RATIO"),
     )
+    # Ross asymmetric exit: fraction of the ORIGINAL position sold into the FIRST
+    # (2:1) target — Ross "sell 1/2 into strength". The balance becomes the RUNNER:
+    # its stop moves to breakeven (entry) and trails up the next structural/ATR level.
+    # This ONE documented knob is the only number in the asymmetric exit; breakeven
+    # is derived (= entry) and the runner trail is derived (chandelier off the frozen
+    # entry ATR x stop_atr_mult). Ross = 1/2 (0.5) on the risk-2:1 rule, up to 0.75 on
+    # the micro-pullback; default 0.5 keeps the largest runner (most tail capture).
+    # The learner can raise/lower it per family. docs/DESIGN/MOMENTUM_LANE.md
+    chili_momentum_scale_out_fraction: float = Field(
+        default=0.5,
+        gt=0.0,
+        lt=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_SCALE_OUT_FRACTION"),
+    )
     # Shake-out fix: the stop must clear at least this fraction of the live 15m
     # expected-move so it sits OUTSIDE intraday noise (KAIO: 72bps stop / 400bps
     # move got shaken out, then hit target). Risk-first sizing trims qty to keep

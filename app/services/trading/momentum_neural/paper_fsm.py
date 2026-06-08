@@ -81,6 +81,9 @@ _ALLOWED_TRANSITIONS: frozenset[tuple[str, str]] = frozenset(
         (STATE_ENTERED, STATE_BAILOUT),
         (STATE_SCALING_OUT, STATE_EXITED),
         (STATE_SCALING_OUT, STATE_TRAILING),
+        # Ross first-target scale-out can fire after the runner has begun trailing
+        # (price drifted up past trail-activate, then reached the 2:1 target).
+        (STATE_TRAILING, STATE_SCALING_OUT),
         (STATE_TRAILING, STATE_EXITED),
         (STATE_TRAILING, STATE_BAILOUT),
         (STATE_BAILOUT, STATE_EXITED),

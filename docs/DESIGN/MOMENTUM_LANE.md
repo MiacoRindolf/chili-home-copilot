@@ -307,3 +307,50 @@ live "current" tick; per-fire outcome uses the lane's own risk model (structural
 Tests: `tests/test_pullback_break.py` (retest fire / no-retest / failed-hold / raw
 unchanged / sustaining block+off / bailout helper). Raw-mode behavior is byte-identical
 when the knobs are off, so existing callers are unaffected.
+
+## 9. Asymmetric exit structure (M4 — shipped 2026-06-07)
+
+The single highest-leverage item from the 2026-06-07 Ross research. Ross's edge
+(avg winner ≈4.4× avg loser) is the EXIT structure, not win-rate. CHILI's lane
+did a **2:1-then-flat** exit — it dumped 100% at the first target (live) or 1/3 at
+the 1R-halfway then the rest at target (paper) — capping the upside and forgoing
+the tail. Verified Ross rule (warriortrading.com, adversarially confirmed 3-0):
+
+> "I will sell 1/2 when I hit my first profit target … I then adjust my stop to
+> my entry price on the balance of my position" — and (micro-pullback) "I usually
+> sell 75% of my position into strength and hold the rest for the next breakout
+> level. Once partial profits are taken, I move my stop to breakeven."
+
+**Implemented** (live `live_runner.py` + paper `paper_runner.py`, parity-shared):
+1. **First-target partial.** At the 2:1 target (`STATE_*_SCALING_OUT`), sell
+   `chili_momentum_scale_out_fraction` of the **original** size (default 0.5 =
+   "sell 1/2"; the lane learner can raise it). The 2:1 reward:risk for the first
+   target is unchanged (verified correct).
+2. **Breakeven on the balance.** The runner's stop moves to the entry price
+   (derived, no knob; ratchet-only, never loosens).
+3. **Hold + trail the runner.** Transition to `STATE_*_TRAILING` and trail the
+   stop up via a **chandelier off the high-water mark** at the same ATR distance
+   the initial stop used (`atr_pct × stop_atr_mult`, derived from the frozen entry
+   ATR — no new magic number). Replaces the old static `entry × trail_floor_return`
+   floor that never actually ratcheted. The first-target partial fires from
+   ENTERED **or** TRAILING (price can drift past trail-activate before the target),
+   guarded by `partial_taken` so it fires once.
+
+**One knob, everything else derived:** `chili_momentum_scale_out_fraction` (the
+fraction). Breakeven = entry. Trail = chandelier off the frozen entry ATR. A
+position too small to leave a venue-sellable runner falls back to a flat exit at
+target (never strands un-sellable dust).
+
+**Parity contract.** The exit math lives in `paper_execution.py`
+(`scale_out_fraction`, `breakeven_stop_after_partial`, `scale_out_quantity`,
+`runner_trail_stop`) and BOTH runners import the identical functions — backtest
+and live take the same structural decision by construction.
+
+**Persistence note.** `_commit_le` / `_commit_pe` now call `flag_modified` on
+`risk_snapshot_json`. The scale-out commits twice in one tick around an
+intervening event-emit flush; the reassigned snapshot can compare EQUAL to the
+flush-pinned baseline (shared nested refs), so SQLAlchemy would silently skip the
+second UPDATE and lose the breakeven move. `flag_modified` forces it.
+
+Manifests only once the lane (now in `pullback_break` entry mode) actually enters —
+watch the first post-keystone entries for the scale-out → breakeven → runner path.
