@@ -4129,6 +4129,26 @@ def _run_equity_viability_refresh_job():
     """
     from ..db import SessionLocal
     from .trading.intraday_signals import scan_momentum_continuation, scan_premarket_gaps
+    from .trading.momentum_neural.universe import EQUITY_ROSS_SMALLCAP, build_equity_universe
+
+    # Tailor the equity universe to the Ross small-cap PROFILE (low-priced, in-play,
+    # liquid-enough movers screened from the full-market snapshot) instead of the
+    # static large-cap DEFAULT_SCAN_TICKERS the scans default to. Those mega-caps
+    # (KLAC ~$2,100 / MU ~$950) move 2-8%; Ross trades $1-$20 names moving 20-100%+.
+    # The universe is part of the strategy: build_equity_universe resolves the
+    # profile against the live snapshot; the per-ticker enrichment below + the Ross
+    # score then rank within it. Fail-safe: empty -> tickers=None -> scans use their
+    # own default universe (no regression). docs/DESIGN/MOMENTUM_LANE.md
+    try:
+        ross_tickers = build_equity_universe(EQUITY_ROSS_SMALLCAP)
+    except Exception:
+        ross_tickers = []
+    scan_tickers = ross_tickers or None
+    if ross_tickers:
+        logger.info(
+            "[scheduler] equity Ross universe: %d small-cap movers screened from snapshot",
+            len(ross_tickers),
+        )
 
     # The equity momentum scan does per-ticker OHLCV fetches and can run for minutes.
     # Holding ONE db across the scan AND the bridge write left the connection
@@ -4140,11 +4160,13 @@ def _run_equity_viability_refresh_job():
     scan_db = SessionLocal()
     try:
         try:
-            sweep["momentum_signals"] = list(scan_momentum_continuation(db=scan_db) or [])
+            sweep["momentum_signals"] = list(
+                scan_momentum_continuation(tickers=scan_tickers, db=scan_db) or []
+            )
         except Exception:
             sweep["momentum_signals"] = []
         try:
-            sweep["premarket_gaps"] = list(scan_premarket_gaps() or [])
+            sweep["premarket_gaps"] = list(scan_premarket_gaps(tickers=scan_tickers) or [])
         except Exception:
             sweep["premarket_gaps"] = []
     finally:
