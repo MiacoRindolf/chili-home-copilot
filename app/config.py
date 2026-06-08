@@ -2969,6 +2969,20 @@ class Settings(BaseSettings):
         le=3600,
         validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_SCHEDULER_INTERVAL_SECONDS"),
     )
+    # The live-runner batch ticks each open live session on a small bounded pool
+    # so the batch wall-time is ~the slowest single session, not the SERIAL SUM
+    # of every session's network I/O (Coinbase quote/product + OHLCV trigger
+    # fetch). Serial fan-out over ~5 sessions was overrunning the 30s cadence.
+    # 0 (default) DERIVES the cap from chili_momentum_risk_max_concurrent_live_sessions
+    # — no second magic number; set > 0 only to throttle parallelism independently
+    # (e.g. to be gentler on Coinbase rate limits). Each worker owns its own DB
+    # Session + adapter; entry/exit/risk semantics are unchanged. [[project_momentum_lane]]
+    chili_momentum_live_runner_batch_workers: int = Field(
+        default=0,
+        ge=0,
+        le=20,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_BATCH_WORKERS"),
+    )
     # Auto-arm-live: autonomously arm ONE live session for the fresh, live-
     # eligible candidate whose momentum trigger is firing now (Ross "the one
     # moving right now"). Guarded by kill-switch + drawdown + concurrency=1 +

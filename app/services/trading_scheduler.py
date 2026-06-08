@@ -739,11 +739,67 @@ def _run_momentum_paper_runner_batch_job():
     run_scheduler_job_guarded("momentum_paper_runner_batch", _work)
 
 
+def _dispatch_live_runner_ticks(
+    session_ids: list[int],
+    *,
+    workers: int,
+    tick_one: Callable[[int], tuple[bool, int]],
+) -> tuple[int, dict[int, int]]:
+    """Run ``tick_one(sid) -> (ok, dur_ms)`` over *session_ids* on a bounded pool.
+
+    Each live session is network-bound (Coinbase quote/product + OHLCV
+    entry-trigger fetch, ~seconds each). The legacy implementation ticked them
+    in a serial loop, so a batch took the SERIAL SUM of those latencies and
+    overran the 30s cadence once several live sessions were open. This fans the
+    ticks out across a small pool so the batch wall-time is ~the slowest single
+    session instead of the sum.
+
+    Safety: ``tick_one`` constructs its OWN DB Session + venue adapter per call
+    (so nothing SQLAlchemy/adapter-stateful is shared across threads), the shared
+    Coinbase REST client authenticates per-request over a thread-safe connection
+    pool, and the per-session ``with_for_update(nowait=True)`` row lock inside
+    ``tick_live_session`` still prevents double-processing. This changes ONLY how
+    many sessions advance per wall-clock second — never any entry/exit/risk
+    decision for an individual session. [[project_momentum_lane]]
+
+    With ``workers <= 1`` (or a single session) this degrades to a plain serial
+    loop, byte-identical to the legacy behaviour (pinned by the parity test).
+
+    Returns ``(ticked_count, {sid: dur_ms})``. ``tick_one`` is expected to swallow
+    its own exceptions and report ``ok=False``; a stray raise is contained here so
+    one bad session can never abort the rest of the batch.
+    """
+    results: dict[int, tuple[bool, int]] = {}
+    if workers <= 1 or len(session_ids) <= 1:
+        for sid in session_ids:
+            try:
+                results[sid] = tick_one(sid)
+            except Exception:
+                results[sid] = (False, 0)
+    else:
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as _ex:
+            _futs = {_ex.submit(tick_one, sid): sid for sid in session_ids}
+            for _fut in concurrent.futures.as_completed(_futs):
+                _sid = _futs[_fut]
+                try:
+                    results[_sid] = _fut.result()
+                except Exception:
+                    results[_sid] = (False, 0)
+    ticked = sum(1 for _ok, _ in results.values() if _ok)
+    timings = {sid: ms for sid, (_ok, ms) in results.items()}
+    return ticked, timings
+
+
 def _run_momentum_live_runner_batch_job():
     """Advance queued/active momentum *live* automation sessions (real Coinbase orders — Phase 8).
 
     Each tick gets its own DB session so Coinbase API latency doesn't hold a
-    pooled connection for the entire batch (prevents QueuePool exhaustion).
+    pooled connection for the entire batch (prevents QueuePool exhaustion). The
+    ticks run on a small bounded pool (see ``_dispatch_live_runner_ticks``) so a
+    fleeting Ross break/exit is caught within the 30s cadence even with several
+    live sessions open.
     """
 
     def _work() -> None:
@@ -776,26 +832,58 @@ def _run_momentum_live_runner_batch_job():
         if not session_ids:
             return
 
-        ticked = 0
-        for sid in session_ids:
-            db = SessionLocal()
+        # Bound the pool by the live concurrency cap — no second magic number; an
+        # explicit override knob wins when > 0. Never more workers than sessions.
+        _cap = int(getattr(_settings, "chili_momentum_live_runner_batch_workers", 0) or 0)
+        if _cap <= 0:
+            _cap = int(getattr(_settings, "chili_momentum_risk_max_concurrent_live_sessions", 5) or 5)
+        workers = max(1, min(_cap, len(session_ids)))
+
+        def _tick_one(sid: int) -> tuple[bool, int]:
+            """Tick one live session on its OWN DB Session. Returns (ok, dur_ms)."""
+            _t0 = time.monotonic()
+            db_s = SessionLocal()
+            ok = False
             try:
-                tick_live_session(db, sid)
-                db.commit()
-                ticked += 1
+                tick_live_session(db_s, sid)
+                db_s.commit()
+                ok = True
             except Exception:
-                db.rollback()
+                db_s.rollback()
                 logger.warning("[scheduler] live runner tick failed session=%s", sid, exc_info=True)
             finally:
                 # FIX 46 pattern (rollback before close).
                 try:
-                    db.rollback()
+                    db_s.rollback()
                 except Exception:
                     pass
-                db.close()
+                db_s.close()
+            return ok, int((time.monotonic() - _t0) * 1000)
 
-        if ticked:
-            logger.info("[scheduler] Momentum live runner: ticked %d session(s)", ticked)
+        _wall0 = time.monotonic()
+        ticked, timings = _dispatch_live_runner_ticks(
+            session_ids, workers=workers, tick_one=_tick_one
+        )
+        _wall_ms = int((time.monotonic() - _wall0) * 1000)
+
+        if timings:
+            # Profiling-grade, ONE line per batch (no per-session spam): wall is the
+            # batch wall-clock; work_sum is what the OLD serial loop would have cost;
+            # slowest is the single tail session. Healthy parallelism => wall ~ slowest
+            # << work_sum. Makes a 30s overrun visible the moment it returns.
+            _work_sum = sum(timings.values())
+            _slowest_sid = max(timings, key=timings.get)
+            logger.info(
+                "[scheduler] Momentum live runner: ticked %d/%d session(s) "
+                "wall=%dms work_sum=%dms slowest=%dms(sid=%s) workers=%d",
+                ticked,
+                len(session_ids),
+                _wall_ms,
+                _work_sum,
+                timings[_slowest_sid],
+                _slowest_sid,
+                workers,
+            )
 
     run_scheduler_job_guarded("momentum_live_runner_batch", _work)
 
