@@ -1038,7 +1038,12 @@ def _adaptive_live_max_spread_bps(expected_move_bps: float | None) -> float:
         ratio = 0.5 if raw_ratio is None else float(raw_ratio)
     except (TypeError, ValueError):
         ratio = 0.5
-    return adaptive_max_spread_bps(base, expected_move_bps, ratio)
+    try:
+        raw_cap = getattr(settings, "chili_momentum_risk_max_spread_bps_abs_cap", 300.0)
+        abs_cap = 300.0 if raw_cap is None else float(raw_cap)
+    except (TypeError, ValueError):
+        abs_cap = 300.0
+    return adaptive_max_spread_bps(base, expected_move_bps, ratio, abs_cap_bps=abs_cap)
 
 
 def _live_entry_quote_gate_applies(sess: TradingAutomationSession, le: dict[str, Any]) -> bool:

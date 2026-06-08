@@ -463,7 +463,8 @@ def evaluate_proposed_momentum_automation(
         # back to the documented base floor. Paper keeps its fixed cap.
         if m == "live":
             max_spread = adaptive_max_spread_bps(
-                policy.max_spread_bps_live, expected_move_bps, policy.spread_to_expected_move_ratio
+                policy.max_spread_bps_live, expected_move_bps, policy.spread_to_expected_move_ratio,
+                abs_cap_bps=policy.max_spread_bps_abs_cap,
             )
         else:
             max_spread = policy.max_spread_bps_paper

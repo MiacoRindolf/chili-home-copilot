@@ -51,17 +51,25 @@ def adaptive_max_spread_bps(
     base_max_spread_bps: float,
     expected_move_bps: float | None,
     ratio: float,
+    *,
+    abs_cap_bps: float | None = None,
 ) -> float:
-    """Volatility-relative spread tolerance (no magic fixed cap).
+    """Volatility-relative spread tolerance, with an absolute safety cap.
 
     The BBO/quote spread is a round-trip execution cost; we tolerate
     proportionally more of it when the instrument's expected move (realized
-    volatility) is larger. This ONLY ever loosens above ``base_max_spread_bps``
-    (the documented live floor) — it never tightens below it, so the change is a
-    safe, monotonic relaxation for explosive momentum names while quiet/illiquid
-    names keep the conservative floor. ``ratio`` is the single documented knob:
-    the spread may be at most ``ratio`` x the expected per-bar move. Falls back to
-    the base floor when expected move or ratio is unknown / non-finite / <= 0.
+    volatility) is larger — it loosens above ``base_max_spread_bps`` (the
+    documented live floor) for explosive names while quiet/illiquid names keep the
+    conservative floor. ``ratio`` is the single documented knob: the spread may be
+    at most ``ratio`` x the expected per-bar move.
+
+    BUT capped by ``abs_cap_bps`` — Ross's hard "if the spread is too wide, skip
+    the trade entirely" rule. Uncapped, a name with a huge expected move (an
+    explosive low-float runner) would tolerate an ~8% spread: you start down 8%
+    AND can't exit at your stop on the reversal (the bid vanishes; a thin book
+    gets cleared). Ross *steps back* from those (WHLR halt-resume 30c/$14 ≈ 2%).
+    The cap never forces tolerance BELOW the floor. Falls back to the base floor
+    when expected move / ratio is unusable.
     """
     base = float(base_max_spread_bps)
     try:
@@ -76,7 +84,15 @@ def adaptive_max_spread_bps(
         return base
     if not math.isfinite(r) or r <= 0:
         return base
-    return max(base, r * em)
+    adaptive = max(base, r * em)
+    if abs_cap_bps is not None:
+        try:
+            cap = float(abs_cap_bps)
+            if math.isfinite(cap) and cap > 0:
+                adaptive = min(adaptive, max(base, cap))  # never tolerate above the cap
+        except (TypeError, ValueError):
+            pass
+    return adaptive
 
 
 def _account_equity_usd(execution_family: str | None = None) -> float | None:
@@ -237,6 +253,9 @@ class MomentumAutomationRiskPolicy:
     # may be at most half a typical bar's range). Lets Ross-style explosive names
     # (wide absolute spread, tiny vs. their move) trade without a magic fixed cap.
     spread_to_expected_move_ratio: float = 0.5
+    # Absolute spread cap (Ross "skip if the spread is too wide") — the adaptive
+    # tolerance never exceeds this, blocking the catastrophic-cost wide-spread entry.
+    max_spread_bps_abs_cap: float = 300.0
     max_estimated_slippage_bps: float = 18.0
     max_fee_to_target_ratio: float = 0.35
     max_hold_seconds: int = 86_400
@@ -266,6 +285,9 @@ class MomentumAutomationRiskPolicy:
             max_spread_bps_live=float(getattr(s, "chili_momentum_risk_max_spread_bps_live", 12.0)),
             spread_to_expected_move_ratio=float(
                 getattr(s, "chili_momentum_risk_spread_to_expected_move_ratio", 0.5)
+            ),
+            max_spread_bps_abs_cap=float(
+                getattr(s, "chili_momentum_risk_max_spread_bps_abs_cap", 300.0)
             ),
             max_estimated_slippage_bps=float(getattr(s, "chili_momentum_risk_max_estimated_slippage_bps", 18.0)),
             max_fee_to_target_ratio=float(getattr(s, "chili_momentum_risk_max_fee_to_target_ratio", 0.35)),

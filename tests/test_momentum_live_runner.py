@@ -190,6 +190,23 @@ def test_adaptive_max_spread_bps_floor_and_loosening() -> None:
     assert adaptive_max_spread_bps(base, 400.0, 0.5) == pytest.approx(200.0)
 
 
+def test_adaptive_max_spread_bps_absolute_cap() -> None:
+    """Ross 'skip if the spread is too wide': the adaptive tolerance never exceeds
+    the absolute cap, no matter how explosive the name."""
+    from app.services.trading.momentum_neural.risk_policy import adaptive_max_spread_bps
+
+    base = 12.0
+    # Explosive name (INHD-like): 0.5*1678 = 839 bps uncapped; the cap holds it to 300.
+    assert adaptive_max_spread_bps(base, 1678.0, 0.5) == pytest.approx(839.0)
+    assert adaptive_max_spread_bps(base, 1678.0, 0.5, abs_cap_bps=300.0) == pytest.approx(300.0)
+    # Below the cap -> unaffected.
+    assert adaptive_max_spread_bps(base, 400.0, 0.5, abs_cap_bps=300.0) == pytest.approx(200.0)
+    # The cap never forces tolerance BELOW the documented floor.
+    assert adaptive_max_spread_bps(base, 1678.0, 0.5, abs_cap_bps=5.0) == base
+    # No cap -> prior behavior preserved.
+    assert adaptive_max_spread_bps(base, 1678.0, 0.5, abs_cap_bps=None) == pytest.approx(839.0)
+
+
 def test_adaptive_live_max_spread_bps_reads_settings(monkeypatch) -> None:
     monkeypatch.setattr(settings, "chili_momentum_risk_max_spread_bps_live", 12.0)
     monkeypatch.setattr(settings, "chili_momentum_risk_spread_to_expected_move_ratio", 0.5)
