@@ -800,6 +800,13 @@ def _run_momentum_live_runner_batch_job():
     run_scheduler_job_guarded("momentum_live_runner_batch", _work)
 
 
+# Change-only dedupe for auto-arm SKIP logging: the arm pass runs every 30s, so
+# logging every no-trade tick would audit-spam. We surface a compact line only
+# when the skip decision's SHAPE shifts — making "why isn't the Ross lane
+# trading?" observable without the noise. Process-local; resets on restart.
+_auto_arm_last_skip_sig: "str | None" = None
+
+
 def _run_momentum_auto_arm_live_job():
     """Autonomously arm ONE live momentum session for the candidate whose entry
     trigger is firing now (Ross-style), fully guarded via the operator arm flow.
@@ -824,6 +831,27 @@ def _run_momentum_auto_arm_live_job():
             db.commit()
             if summary.get("armed") or summary.get("begin_error") or summary.get("confirm_error"):
                 logger.info("[scheduler] auto_arm: %s", summary)
+            else:
+                # Observability: surface WHY the lane isn't arming (no_active_trigger
+                # / busy / faded / daily_loss_cap / ...) — the #1 question when tuning
+                # the Ross lane — but change-only so steady "nothing to do" ticks stay
+                # quiet. Emits on every transition (counts or skip-reason shift).
+                global _auto_arm_last_skip_sig
+                _sig = "|".join(
+                    str(summary.get(k))
+                    for k in ("skipped", "scanned", "busy_skipped", "faded_skipped", "chosen_firing")
+                )
+                if _sig != _auto_arm_last_skip_sig:
+                    _auto_arm_last_skip_sig = _sig
+                    logger.info(
+                        "[scheduler] auto_arm skip=%s scanned=%s busy=%s faded=%s near_score=%s firing=%s",
+                        summary.get("skipped"),
+                        summary.get("scanned"),
+                        summary.get("busy_skipped"),
+                        summary.get("faded_skipped"),
+                        summary.get("chosen_fresh_score"),
+                        summary.get("chosen_firing"),
+                    )
         except Exception:
             db.rollback()
             logger.warning("[scheduler] auto_arm pass failed", exc_info=True)
