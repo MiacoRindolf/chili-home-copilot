@@ -187,5 +187,131 @@ def stop_target_prices(
     return stop, target
 
 
+# ── Ross asymmetric exit (scale-out + breakeven + runner trail) ───────────────
+# Shared by BOTH runners (paper_runner + live_runner) so backtest and live take
+# the IDENTICAL structural decision (parity contract): sell ``scale_out_fraction``
+# of the original size into the FIRST (2:1) target, move the balance stop to
+# BREAKEVEN, then HOLD the runner and trail it up. Ross's edge is the asymmetry
+# (avg winner ~4.4x avg loser) — a 2:1-then-flat exit caps the upside and forgoes
+# the tail. The fraction is the ONE documented knob; breakeven (= entry) and the
+# trail (chandelier off the frozen entry ATR) are DERIVED. docs/DESIGN/MOMENTUM_LANE.md
+
+
+def scale_out_fraction(default: float = 0.5) -> float:
+    """Fraction of the ORIGINAL position sold into the first (2:1) target.
+
+    Ross "sell 1/2 into strength" (up to 0.75 on the micro-pullback). ONE
+    documented knob (``chili_momentum_scale_out_fraction``); the breakeven move
+    and runner trail are derived. Bounded to the open interval (0, 1) so a
+    misconfig can never sell 0% (no de-risk) or 100% (no runner)."""
+    try:
+        v = float(getattr(settings, "chili_momentum_scale_out_fraction", default))
+    except (TypeError, ValueError):
+        v = default
+    if not math.isfinite(v):
+        v = default
+    return max(0.05, min(0.95, v))
+
+
+def breakeven_stop_after_partial(
+    entry_price: float, current_stop: float, *, side_long: bool = True
+) -> float:
+    """Move the RUNNER's stop to breakeven (entry) after the first-target partial.
+
+    Ross "I then adjust my stop to my entry price on the balance of my position."
+    Ratchet only — never loosen a stop that already sits tighter than entry.
+    Derived from entry; no knob. Pure for parity testing."""
+    try:
+        e = float(entry_price)
+        s = float(current_stop)
+    except (TypeError, ValueError):
+        return current_stop
+    if not (math.isfinite(e) and math.isfinite(s)):
+        return current_stop
+    return max(s, e) if side_long else min(s, e)
+
+
+def _floor_to_increment(qty: float, increment: float | None) -> float:
+    if increment and increment > 0:
+        return math.floor(qty / increment) * increment
+    return qty
+
+
+def scale_out_quantity(
+    *,
+    current_qty: float,
+    original_qty: float,
+    fraction: float,
+    base_increment: float | None = None,
+    base_min_size: float | None = None,
+) -> tuple[float, float, bool]:
+    """Split a held position for the Ross first-target scale-out.
+
+    Returns ``(scale_qty, remainder_qty, can_split)``. ``scale_qty`` is ``fraction``
+    of the ORIGINAL position (so re-evaluating a later tick can never double-count),
+    floored to the venue base increment and clamped to what is still held.
+    ``can_split`` is False when either leg would round to zero OR fall below the
+    venue minimum sell size — the caller then flattens at target (the old flat
+    behavior) so a tiny position is never stranded as un-sellable dust. Pure +
+    side-effect-free for parity testing. (docs/DESIGN/MOMENTUM_LANE.md)"""
+    try:
+        cur = float(current_qty)
+        orig = float(original_qty)
+        frac = float(fraction)
+    except (TypeError, ValueError):
+        return 0.0, max(0.0, float(current_qty or 0.0)), False
+    if not (math.isfinite(cur) and math.isfinite(orig) and math.isfinite(frac)):
+        return 0.0, max(0.0, cur), False
+    if cur <= 0.0 or orig <= 0.0 or frac <= 0.0 or frac >= 1.0:
+        return 0.0, max(0.0, cur), False
+    raw_scale = min(orig * frac, cur)
+    scale_qty = _floor_to_increment(raw_scale, base_increment)
+    if scale_qty <= 0.0:
+        return 0.0, cur, False
+    remainder = cur - scale_qty
+    # Both legs must be independently sellable; otherwise don't split (flat exit).
+    min_sz = float(base_min_size) if base_min_size else 0.0
+    eps = max(min_sz, 1e-12)
+    if scale_qty + 1e-12 < eps or remainder < eps:
+        return 0.0, cur, False
+    return float(scale_qty), float(remainder), True
+
+
+def runner_trail_stop(
+    *,
+    high_water_mark: float,
+    atr_pct: float,
+    stop_atr_mult: float,
+    breakeven_floor: float,
+    current_stop: float,
+    side_long: bool = True,
+) -> float:
+    """Chandelier ATR trail for the held RUNNER — ratchets the stop up only.
+
+    Ross holds the runner "for the next breakout level" and trails it up. Trail the
+    stop the SAME ATR distance below the high-water mark that the initial stop sat
+    below entry (``atr_pct x stop_atr_mult``) — fully derived from values frozen at
+    entry, no new magic number. Never loosens (``max`` with the current stop) and
+    never falls below ``breakeven_floor`` (the first-target partial already de-risked
+    the runner). Pure for parity testing. docs/DESIGN/MOMENTUM_LANE.md"""
+    try:
+        hwm = float(high_water_mark)
+        ap = float(atr_pct)
+        mult = float(stop_atr_mult)
+        be = float(breakeven_floor)
+        cs = float(current_stop)
+    except (TypeError, ValueError):
+        return current_stop
+    if not (math.isfinite(hwm) and math.isfinite(ap) and math.isfinite(mult) and math.isfinite(cs)):
+        return current_stop
+    dist = max(0.0, ap * mult)
+    if side_long:
+        chandelier = hwm * (1.0 - dist)
+        floors = [c for c in (cs, be, chandelier) if math.isfinite(c)]
+        return max(floors) if floors else cs
+    chandelier = hwm * (1.0 + dist)
+    return min(cs, chandelier)
+
+
 def utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()

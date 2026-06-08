@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from ....config import settings
 from ....models.trading import (
@@ -38,12 +39,16 @@ from .persistence import (
 from .risk_evaluator import evaluate_proposed_momentum_automation
 from .risk_policy import RISK_SNAPSHOT_KEY, policy_float_cap, policy_int_cap
 from .paper_execution import (
+    breakeven_stop_after_partial,
     build_synthetic_quote,
     default_reference_mid,
     long_entry_fill_price,
     long_exit_fill_price,
     regime_atr_pct,
     roundtrip_fee_usd,
+    runner_trail_stop,
+    scale_out_fraction,
+    scale_out_quantity,
     stop_target_prices,
     utc_iso,
 )
@@ -151,6 +156,12 @@ def _commit_pe(sess: TradingAutomationSession, pe: dict[str, Any]) -> None:
     snap = dict(sess.risk_snapshot_json or {})
     snap[KEY_PAPER_EXEC] = pe
     sess.risk_snapshot_json = snap
+    # Force the JSON column dirty so a second in-tick mutation around an intervening
+    # flush is never silently dropped (mirrors live _commit_le; see note there).
+    try:
+        flag_modified(sess, "risk_snapshot_json")
+    except Exception:
+        pass
 
 
 def _emit(
@@ -823,6 +834,10 @@ def tick_paper_session(
             "slippage_bps_used": slip_bps,
             "fee_to_target_ratio": fee_ratio,
             "fees_est_usd": fees,
+            # Ross asymmetric exit: freeze the entry ATR-pct (the runner trail rides
+            # the same ATR distance the initial stop used) + seed the high-water mark.
+            "entry_atr_pct": atrp,
+            "high_water_mark": entry_px,
         }
         pe["entry_regime_snapshot_json"] = dict(regime)
         pe["reference_mid_at_entry"] = ref_mid
@@ -891,9 +906,19 @@ def tick_paper_session(
         atrp = regime_atr_pct(regime_live)
         mult_trail = 1.0 + min(0.5, max(-0.2, (atrp - 0.015) / 0.03))
         base_act = float(params["trail_activate_return_bps"]) * mult_trail
-        base_floor = float(params["trail_floor_return_bps"]) * mult_trail
         trail_activate_return = 1.0 + base_act / 10_000.0
-        trail_floor_return = 1.0 + base_floor / 10_000.0
+
+        # Ross runner: track the high-water mark (peak bid) for the chandelier trail.
+        _hwm_prev = pos.get("high_water_mark")
+        try:
+            _hwm_prev_f = float(_hwm_prev) if _hwm_prev is not None else entry
+        except (TypeError, ValueError):
+            _hwm_prev_f = entry
+        _hwm = max(_hwm_prev_f, float(bid))
+        if _hwm_prev is None or _hwm > _hwm_prev_f:
+            pos["high_water_mark"] = _hwm
+            pe["position"] = pos
+            _commit_pe(sess, pe)
 
         if st == STATE_BAILOUT:
             pnl = (exit_px - entry) * qty - float(pos.get("fees_est_usd") or 0.0)
@@ -1039,7 +1064,41 @@ def tick_paper_session(
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
+        # Ross runner trail: in TRAILING, ratchet the stop UP to a chandelier off the
+        # high-water mark (same ATR distance the initial stop used), floored at
+        # breakeven once the first-target partial de-risked the runner. The stop check
+        # below enforces it SAME tick. Derived from the frozen entry ATR — not a
+        # static floor. (docs/DESIGN/MOMENTUM_LANE.md)
+        if st == STATE_TRAILING:
+            _atr_pct_trail = pos.get("entry_atr_pct")
+            try:
+                _atr_pct_trail = float(_atr_pct_trail) if _atr_pct_trail is not None else atrp
+            except (TypeError, ValueError):
+                _atr_pct_trail = atrp
+            _be_floor = entry if pos.get("partial_taken") else stop_px
+            _trailed = runner_trail_stop(
+                high_water_mark=float(pos.get("high_water_mark") or entry),
+                atr_pct=_atr_pct_trail,
+                stop_atr_mult=float(params.get("stop_atr_mult") or 0.60),
+                breakeven_floor=_be_floor,
+                current_stop=stop_px,
+                side_long=True,
+            )
+            if _trailed > stop_px:
+                pos["stop_price"] = _trailed
+                stop_px = _trailed
+                pe["position"] = pos
+                _commit_pe(sess, pe)
+                _emit(db, sess, "paper_trail_ratchet", {
+                    "new_stop": _trailed,
+                    "high_water_mark": pos.get("high_water_mark"),
+                    "partial_taken": bool(pos.get("partial_taken")),
+                })
+
         if exit_px <= stop_px:
+            # A stop hit while TRAILING (or after the first-target partial) IS the
+            # runner's trailing stop; before that it's the initial protective stop.
+            _stop_reason = "trail_stop" if (st == STATE_TRAILING or pos.get("partial_taken")) else "stop"
             pnl = (exit_px - entry) * qty - float(pos.get("fees_est_usd") or 0.0)
             pe["realized_pnl_usd"] = float(pe.get("realized_pnl_usd") or 0.0) + pnl
             _record_paper_exit_basis(
@@ -1048,7 +1107,7 @@ def tick_paper_session(
                 entry_price=entry,
                 exit_price=exit_px,
                 pnl_usd=pnl,
-                reason="stop",
+                reason=_stop_reason,
             )
             pe["position"] = None
             _safe_transition(db, sess, STATE_EXITED)
@@ -1065,37 +1124,55 @@ def tick_paper_session(
                 pnl_usd=pnl,
                 position_state_before="long",
                 position_state_after="flat",
-                reason="stop",
+                reason=_stop_reason,
                 marker_json={"entry": entry, "stop": stop_px, "target": target_px},
                 decision_packet_id=int(dpid) if dpid else None,
             )
             _finalize_paper_decision_after_exit(db, sess, pe=pe, realized_pnl_usd=pnl, slip_bps=slip_bps)
-            _emit(db, sess, "paper_exit_filled", {"price": exit_px, "pnl_usd": pnl, "reason": "stop"})
+            _emit(db, sess, "paper_exit_filled", {"price": exit_px, "pnl_usd": pnl, "reason": _stop_reason})
             _sync_runtime_snapshot(db, sess, via=via)
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
-        halfway = entry + 0.5 * (target_px - entry)
+        # First-target (2:1) reached and not yet scaled — take the Ross partial.
+        # Fires from ENTERED or TRAILING (price drifted up past trail-activate before
+        # reaching the target); the partial_taken guard ensures it fires once.
         if (
-            st == STATE_ENTERED
+            st in (STATE_ENTERED, STATE_TRAILING)
             and not pos.get("partial_taken")
-            and exit_px >= halfway
-            and qty > 1e-12
+            and exit_px >= target_px * 0.995
         ):
+            _safe_transition(db, sess, STATE_SCALING_OUT)
+            _emit(db, sess, "paper_partial_exit", {"price": exit_px, "note": "target_zone"})
+            _sync_runtime_snapshot(db, sess, via=via)
+            db.flush()
+            return {"ok": True, "session_id": sess.id, "state": sess.state}
+
+        if st == STATE_SCALING_OUT:
+            # Ross asymmetric exit: sell `scale_out_fraction` of the ORIGINAL size into
+            # the first (2:1) target, move the balance stop to breakeven, and HOLD the
+            # runner (-> TRAILING). A position too small to leave a sellable runner is
+            # flattened whole at target (the old flat exit). (docs/DESIGN/MOMENTUM_LANE.md)
             orig_qty = float(pos.get("original_quantity") or qty)
-            partial_qty = orig_qty / 3.0
-            if partial_qty >= 1e-9 and qty + 1e-12 >= partial_qty:
+            frac = scale_out_fraction()
+            scale_qty, runner_qty, can_split = scale_out_quantity(
+                current_qty=qty,
+                original_qty=orig_qty,
+                fraction=frac,
+            )
+            if can_split and not pos.get("partial_taken"):
                 total_fees = float(pos.get("fees_est_usd") or 0.0)
-                fee_part = total_fees * (partial_qty / orig_qty) if orig_qty > 0 else 0.0
-                pnl_p = (exit_px - entry) * partial_qty - fee_part
+                fee_part = total_fees * (scale_qty / orig_qty) if orig_qty > 0 else 0.0
+                pnl_p = (exit_px - entry) * scale_qty - fee_part
                 pe["realized_pnl_usd"] = float(pe.get("realized_pnl_usd") or 0.0) + pnl_p
                 pos["fees_est_usd"] = max(0.0, total_fees - fee_part)
-                remain = max(0.0, qty - partial_qty)
-                pos["quantity"] = remain
+                pos["quantity"] = runner_qty
                 pos["partial_taken"] = True
-                pos["stop_price"] = max(float(pos["stop_price"]), entry)
-                pos.setdefault("original_quantity", orig_qty)
+                pos["stop_price"] = breakeven_stop_after_partial(entry, float(pos["stop_price"]), side_long=True)
+                pos["scaled_out_at_utc"] = utc_iso()
+                pos["scale_out_fraction"] = frac
                 pe["position"] = pos
+                _safe_transition(db, sess, STATE_TRAILING)
                 _commit_pe(sess, pe)
                 dpid = pe.get("last_entry_decision_packet_id")
                 _record_sim_fill(
@@ -1104,33 +1181,25 @@ def tick_paper_session(
                     action="exit_long",
                     fill_type="exit",
                     price=exit_px,
-                    quantity=partial_qty,
+                    quantity=scale_qty,
                     reference_price=mid,
                     pnl_usd=pnl_p,
                     position_state_before="long",
                     position_state_after="long",
-                    reason="partial_profit_halfway",
-                    marker_json={"entry": entry, "partial": True},
+                    reason="scale_out_target",
+                    marker_json={"entry": entry, "partial": True, "runner_qty": runner_qty, "breakeven_stop": pos["stop_price"]},
                     decision_packet_id=int(dpid) if dpid else None,
                 )
                 _emit(
                     db,
                     sess,
-                    "paper_partial_exit",
-                    {"reason": "halfway_target", "qty": partial_qty, "remain": remain},
+                    "paper_scaled_out_to_runner",
+                    {"qty": scale_qty, "runner_qty": runner_qty, "breakeven_stop": pos["stop_price"], "pnl_usd": pnl_p},
                 )
                 _sync_runtime_snapshot(db, sess, via=via)
                 db.flush()
                 return {"ok": True, "session_id": sess.id, "state": sess.state}
-
-        if st == STATE_ENTERED and exit_px >= target_px * 0.995:
-            _safe_transition(db, sess, STATE_SCALING_OUT)
-            _emit(db, sess, "paper_partial_exit", {"price": exit_px, "note": "target_zone"})
-            _sync_runtime_snapshot(db, sess, via=via)
-            db.flush()
-            return {"ok": True, "session_id": sess.id, "state": sess.state}
-
-        if st == STATE_SCALING_OUT:
+            # Un-splittable (tiny) position: flatten whole at target.
             pnl = (exit_px - entry) * qty - float(pos.get("fees_est_usd") or 0.0)
             pe["realized_pnl_usd"] = float(pe.get("realized_pnl_usd") or 0.0) + pnl
             _record_paper_exit_basis(
@@ -1173,43 +1242,8 @@ def tick_paper_session(
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
-        if st == STATE_TRAILING:
-            trail_stop = max(stop_px, entry * trail_floor_return)
-            if exit_px <= trail_stop:
-                pnl = (exit_px - entry) * qty - float(pos.get("fees_est_usd") or 0.0)
-                pe["realized_pnl_usd"] = float(pe.get("realized_pnl_usd") or 0.0) + pnl
-                _record_paper_exit_basis(
-                    pe,
-                    quantity=qty,
-                    entry_price=entry,
-                    exit_price=exit_px,
-                    pnl_usd=pnl,
-                    reason="trail_stop",
-                )
-                pe["position"] = None
-                _safe_transition(db, sess, STATE_EXITED)
-                _commit_pe(sess, pe)
-                dpid = pe.get("last_entry_decision_packet_id")
-                _record_sim_fill(
-                    db,
-                    sess,
-                    action="exit_long",
-                    fill_type="exit",
-                    price=exit_px,
-                    quantity=qty,
-                    reference_price=mid,
-                    pnl_usd=pnl,
-                    position_state_before="long",
-                    position_state_after="flat",
-                    reason="trail_stop",
-                    marker_json={"entry": entry, "stop": trail_stop, "target": target_px},
-                    decision_packet_id=int(dpid) if dpid else None,
-                )
-                _finalize_paper_decision_after_exit(db, sess, pe=pe, realized_pnl_usd=pnl, slip_bps=slip_bps)
-                _emit(db, sess, "paper_exit_filled", {"price": exit_px, "pnl_usd": pnl, "reason": "trail_stop"})
-            _sync_runtime_snapshot(db, sess, via=via)
-            db.flush()
-            return {"ok": True, "session_id": sess.id, "state": sess.state}
+        # TRAILING runs the chandelier ratchet above; the shared stop check enforces
+        # the trailed stop. No dedicated static-floor trail exit remains.
 
         _sync_runtime_snapshot(db, sess, via=via)
         db.flush()
@@ -1275,9 +1309,15 @@ def summarize_paper_execution(snap: Any) -> dict[str, Any]:
         out["in_position"] = True
         out["entry_price"] = pos.get("entry_price")
         out["quantity"] = pos.get("quantity")
+        out["original_quantity"] = pos.get("original_quantity")
         out["notional_usd"] = pos.get("notional_usd")
         out["stop_price"] = pos.get("stop_price")
         out["target_price"] = pos.get("target_price")
+        out["high_water_mark"] = pos.get("high_water_mark")
+        # Ross asymmetric exit state: first-target partial taken yet + runner info.
+        out["partial_taken"] = bool(pos.get("partial_taken"))
+        out["scaled_out_at_utc"] = pos.get("scaled_out_at_utc")
+        out["scale_out_fraction"] = pos.get("scale_out_fraction")
     else:
         out["in_position"] = False
     return out

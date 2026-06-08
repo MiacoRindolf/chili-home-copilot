@@ -102,6 +102,10 @@ _ALLOWED_LIVE: frozenset[tuple[str, str]] = frozenset(
         (STATE_LIVE_ENTERED, STATE_LIVE_BAILOUT),
         (STATE_LIVE_SCALING_OUT, STATE_LIVE_EXITED),
         (STATE_LIVE_SCALING_OUT, STATE_LIVE_TRAILING),
+        # Ross first-target scale-out can fire AFTER the runner has begun trailing
+        # (price drifted up past the trail-activate level, then reached the 2:1
+        # target) — take the partial, then resume trailing the runner.
+        (STATE_LIVE_TRAILING, STATE_LIVE_SCALING_OUT),
         (STATE_LIVE_TRAILING, STATE_LIVE_EXITED),
         (STATE_LIVE_TRAILING, STATE_LIVE_BAILOUT),
         (STATE_LIVE_BAILOUT, STATE_LIVE_EXITED),

@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 from typing import Any, Callable, Optional
 
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from ....config import settings
 from ....models.trading import MomentumSymbolViability, TradingAutomationSession
@@ -44,8 +45,12 @@ from ..deployment_ladder_service import record_trade_outcome_metrics
 from .risk_evaluator import evaluate_proposed_momentum_automation
 from .risk_policy import RISK_SNAPSHOT_KEY, compute_risk_first_quantity, policy_float_cap, policy_int_cap
 from .paper_execution import (
+    breakeven_stop_after_partial,
     effective_stop_atr_pct,
     regime_atr_pct,
+    runner_trail_stop,
+    scale_out_fraction,
+    scale_out_quantity,
     stop_target_prices,
     structural_or_vol_floored_atr_pct,
     utc_iso,
@@ -125,6 +130,18 @@ def _commit_le(sess: TradingAutomationSession, le: dict[str, Any]) -> None:
     snap = dict(sess.risk_snapshot_json or {})
     snap[KEY_LIVE_EXEC] = le
     sess.risk_snapshot_json = snap
+    # Force the JSON column dirty. When two commits happen in one tick around an
+    # intervening flush (e.g. the scale-out: _apply_confirmed_live_partial_exit
+    # flushes via its event emit, THEN the breakeven move mutates the same nested
+    # position dict), the reassigned snapshot can compare EQUAL to the flush-pinned
+    # baseline (shared nested refs) and SQLAlchemy skips the UPDATE — silently
+    # losing the second mutation. flag_modified guarantees it persists.
+    try:
+        flag_modified(sess, "risk_snapshot_json")
+    except Exception:
+        # sess may be a lightweight test double (SimpleNamespace) with no ORM
+        # instance state; the dirty-flag only matters for real mapped sessions.
+        pass
 
 
 def _emit(
@@ -854,6 +871,64 @@ def _apply_confirmed_live_partial_exit(
     return pnl
 
 
+def _scale_out_to_runner(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    le: dict[str, Any],
+    filled_quantity: float,
+    entry_price: float,
+    fill_price: float,
+    reason: str,
+) -> float:
+    """Ross first-target scale-out: bank the partial, move the BALANCE stop to
+    breakeven, and HOLD the remainder as the runner (transition to TRAILING).
+
+    Reuses ``_apply_confirmed_live_partial_exit`` for the partial bookkeeping/ledger,
+    then ratchets the runner's stop to entry ("adjust my stop to my entry price on
+    the balance"), clears the scale-out pending markers, and arms TRAILING so the
+    chandelier trail (above) carries the runner up for the tail. The breakeven move
+    is derived (= entry); the trail is derived (frozen entry ATR). One knob total:
+    the scale-out fraction. (docs/DESIGN/MOMENTUM_LANE.md)"""
+    pnl = _apply_confirmed_live_partial_exit(
+        db,
+        sess,
+        le=le,
+        filled_quantity=filled_quantity,
+        entry_price=entry_price,
+        fill_price=fill_price,
+        reason=reason,
+    )
+    le.pop("pending_exit_is_scale_out", None)
+    pos = le.get("position")
+    if isinstance(pos, dict):
+        old_stop = _float_or_none(pos.get("stop_price"))
+        be_stop = breakeven_stop_after_partial(
+            float(entry_price),
+            float(old_stop if old_stop is not None else entry_price),
+            side_long=True,
+        )
+        pos["stop_price"] = be_stop
+        pos["scaled_out_at_utc"] = _utcnow().isoformat()
+        pos["scale_out_fraction"] = scale_out_fraction()
+        le["position"] = pos
+        _commit_le(sess, le)
+        _safe_transition(db, sess, STATE_LIVE_TRAILING)
+        _emit(
+            db,
+            sess,
+            "live_scaled_out_to_runner",
+            {
+                "reason": reason,
+                "partial_qty": float(filled_quantity),
+                "runner_qty": _float_or_none(pos.get("quantity")),
+                "breakeven_stop": be_stop,
+                "partial_pnl_usd": pnl,
+            },
+        )
+    return pnl
+
+
 def _safe_transition(db: Session, sess: TradingAutomationSession, new_state: str) -> None:
     old = sess.state
     if old == new_state:
@@ -1125,7 +1200,16 @@ def summarize_live_execution(snap: Any) -> dict[str, Any]:
         out["in_position"] = True
         out["avg_entry_price"] = pos.get("avg_entry_price")
         out["quantity"] = pos.get("quantity")
+        out["original_quantity"] = pos.get("original_quantity")
         out["notional_usd"] = pos.get("notional_usd")
+        out["stop_price"] = pos.get("stop_price")
+        out["target_price"] = pos.get("target_price")
+        out["high_water_mark"] = pos.get("high_water_mark")
+        # Ross asymmetric exit state: did we take the first-target partial yet, and
+        # what's the runner riding on?
+        out["partial_taken"] = bool(pos.get("partial_taken"))
+        out["scaled_out_at_utc"] = pos.get("scaled_out_at_utc")
+        out["scale_out_fraction"] = pos.get("scale_out_fraction")
     else:
         out["in_position"] = False
     return out
@@ -1651,9 +1735,11 @@ def tick_live_session(
                     "product_id": product_id,
                     "side": "long",
                     "quantity": filled,
+                    "original_quantity": filled,
                     "avg_entry_price": avg,
                     "notional_usd": filled * avg,
                     "opened_at_utc": _utcnow().isoformat(),
+                    "high_water_mark": avg,
                     "stop_price": None,
                     "target_price": None,
                 }
@@ -2078,12 +2164,21 @@ def tick_live_session(
         avg = float(pos["avg_entry_price"])
         stop_px = float(pos["stop_price"])
         target_px = float(pos["target_price"])
+        # Ross runner: track the high-water mark (peak bid) each tick so the
+        # trailing chandelier stop can ratchet up off it. Frozen in the position.
+        _hwm_prev = _float_or_none(pos.get("high_water_mark"))
+        _hwm = max(_hwm_prev if _hwm_prev is not None else avg, float(bid))
+        if _hwm_prev is None or _hwm > _hwm_prev:
+            pos["high_water_mark"] = _hwm
+            le["position"] = pos
+            _commit_le(sess, le)
         pending_exit_reason = le.get("pending_exit_reason")
         if pending_exit_reason:
             try:
                 pending_qty = float(le.get("pending_exit_quantity") or qty)
             except (TypeError, ValueError):
                 pending_qty = qty
+            is_scale_out = bool(le.get("pending_exit_is_scale_out"))
             poll = _poll_live_exit_fill(
                 db,
                 sess,
@@ -2094,26 +2189,50 @@ def tick_live_session(
             )
             if poll.get("filled"):
                 slip_live = float(le.get("entry_slip_bps_ref") or 6.0)
-                _complete_confirmed_live_exit(
-                    db,
-                    sess,
-                    le=le,
-                    quantity=min(max(pending_qty, 0.0), qty),
-                    entry_price=avg,
-                    fill_price=float(poll["fill_price"]),
-                    reason=str(pending_exit_reason),
-                    slip_bps=slip_live,
-                )
+                if is_scale_out:
+                    # Deliberate first-target scale-out confirmed on a later tick:
+                    # bank the partial, move the balance to breakeven, hold the runner.
+                    _scale_out_to_runner(
+                        db,
+                        sess,
+                        le=le,
+                        filled_quantity=min(max(pending_qty, 0.0), qty),
+                        entry_price=avg,
+                        fill_price=float(poll["fill_price"]),
+                        reason=str(pending_exit_reason),
+                    )
+                else:
+                    _complete_confirmed_live_exit(
+                        db,
+                        sess,
+                        le=le,
+                        quantity=min(max(pending_qty, 0.0), qty),
+                        entry_price=avg,
+                        fill_price=float(poll["fill_price"]),
+                        reason=str(pending_exit_reason),
+                        slip_bps=slip_live,
+                    )
             elif poll.get("partial"):
-                _apply_confirmed_live_partial_exit(
-                    db,
-                    sess,
-                    le=le,
-                    filled_quantity=float(poll["filled_size"]),
-                    entry_price=avg,
-                    fill_price=float(poll["fill_price"]),
-                    reason=str(pending_exit_reason),
-                )
+                if is_scale_out:
+                    _scale_out_to_runner(
+                        db,
+                        sess,
+                        le=le,
+                        filled_quantity=float(poll["filled_size"]),
+                        entry_price=avg,
+                        fill_price=float(poll["fill_price"]),
+                        reason=str(pending_exit_reason),
+                    )
+                else:
+                    _apply_confirmed_live_partial_exit(
+                        db,
+                        sess,
+                        le=le,
+                        filled_quantity=float(poll["filled_size"]),
+                        entry_price=avg,
+                        fill_price=float(poll["fill_price"]),
+                        reason=str(pending_exit_reason),
+                    )
             db.flush()
             return {
                 "ok": bool(poll.get("filled") or poll.get("partial") or poll.get("pending")),
@@ -2130,7 +2249,6 @@ def tick_live_session(
             t0 = _utcnow()
         held = (_utcnow() - t0).total_seconds()
         trail_activate_return = 1.0 + float(params["trail_activate_return_bps"]) / 10_000.0
-        trail_floor_return = 1.0 + float(params["trail_floor_return_bps"]) / 10_000.0
 
         # C1: Per-trade loss enforcement
         max_loss_usd = float(caps.get("max_loss_per_trade_usd") or 0)
@@ -2303,7 +2421,38 @@ def tick_live_session(
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
+        # Ross runner trail: in TRAILING, ratchet the stop UP to a chandelier off
+        # the high-water mark (the same ATR distance the initial stop used), floored
+        # at breakeven once the first-target partial de-risked the runner. The stop
+        # check below then enforces it SAME tick. Derived from the frozen entry ATR —
+        # not a static floor. (docs/DESIGN/MOMENTUM_LANE.md)
+        if st == STATE_LIVE_TRAILING:
+            _atr_pct_trail = _float_or_none(le.get("entry_stop_atr_pct")) or 0.0
+            _hwm_trail = _float_or_none(pos.get("high_water_mark")) or avg
+            _be_floor = avg if pos.get("partial_taken") else stop_px
+            _trailed = runner_trail_stop(
+                high_water_mark=_hwm_trail,
+                atr_pct=_atr_pct_trail,
+                stop_atr_mult=float(params.get("stop_atr_mult") or 0.60),
+                breakeven_floor=_be_floor,
+                current_stop=stop_px,
+                side_long=True,
+            )
+            if _trailed > stop_px:
+                pos["stop_price"] = _trailed
+                stop_px = _trailed
+                le["position"] = pos
+                _commit_le(sess, le)
+                _emit(db, sess, "live_trail_ratchet", {
+                    "new_stop": _trailed,
+                    "high_water_mark": _hwm_trail,
+                    "partial_taken": bool(pos.get("partial_taken")),
+                })
+
         if bid <= stop_px:
+            # A stop hit while TRAILING (or after the first-target partial) IS the
+            # runner's trailing stop; before that it's the initial protective stop.
+            _stop_reason = "trail_stop" if (st == STATE_LIVE_TRAILING or pos.get("partial_taken")) else "stop"
             cid = f"chili_ml_s_{sess.id}_{uuid.uuid4().hex[:12]}"
             sr = _submit_live_market_exit(
                 db,
@@ -2313,16 +2462,16 @@ def tick_live_session(
                 product_id=product_id,
                 quantity=qty,
                 client_order_id=cid,
-                reason="stop",
+                reason=_stop_reason,
                 bid=bid,
                 ask=ask,
                 mid=mid,
-                extra={"stop_price": stop_px},
+                extra={"stop_price": stop_px, "high_water_mark": _float_or_none(pos.get("high_water_mark"))},
             )
-            if not _live_exit_submit_succeeded(db, sess, le=le, result=sr, reason="stop"):
+            if not _live_exit_submit_succeeded(db, sess, le=le, result=sr, reason=_stop_reason):
                 db.flush()
                 return {"ok": False, "session_id": sess.id, "state": sess.state, "exit_submit_failed": True}
-            poll = _poll_live_exit_fill(db, sess, adapter, le=le, reason="stop", quantity=qty)
+            poll = _poll_live_exit_fill(db, sess, adapter, le=le, reason=_stop_reason, quantity=qty)
             if not poll.get("filled"):
                 if poll.get("partial"):
                     _apply_confirmed_live_partial_exit(
@@ -2332,7 +2481,7 @@ def tick_live_session(
                         filled_quantity=float(poll["filled_size"]),
                         entry_price=avg,
                         fill_price=float(poll["fill_price"]),
-                        reason="stop",
+                        reason=_stop_reason,
                     )
                 db.flush()
                 return {
@@ -2351,71 +2500,131 @@ def tick_live_session(
                 quantity=qty,
                 entry_price=avg,
                 fill_price=float(poll["fill_price"]),
-                reason="stop",
+                reason=_stop_reason,
                 slip_bps=slip_live,
             )
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
-        if st == STATE_LIVE_ENTERED and bid >= target_px * 0.995:
+        # First-target (2:1) reached and not yet scaled — take the Ross partial.
+        # Fires from ENTERED or from TRAILING (price drifted up past trail-activate
+        # before reaching the target); the partial_taken guard ensures it fires once.
+        if (
+            st in (STATE_LIVE_ENTERED, STATE_LIVE_TRAILING)
+            and not pos.get("partial_taken")
+            and bid >= target_px * 0.995
+        ):
             _safe_transition(db, sess, STATE_LIVE_SCALING_OUT)
-            _emit(db, sess, "live_partial_exit", {"bid": bid})
+            _emit(db, sess, "live_partial_exit", {"bid": bid, "target_price": target_px})
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
         if st == STATE_LIVE_SCALING_OUT:
-            cid = f"chili_ml_p_{sess.id}_{uuid.uuid4().hex[:12]}"
+            # Ross asymmetric exit: sell `scale_out_fraction` of the ORIGINAL size
+            # into the first (2:1) target, then move the balance stop to breakeven
+            # and HOLD the runner (-> TRAILING). A position too small to leave a
+            # sellable runner is flattened whole at target (the old flat exit) so we
+            # never strand un-sellable dust. (docs/DESIGN/MOMENTUM_LANE.md)
+            inc = prod.base_increment if prod else None
+            mn = prod.base_min_size if prod else None
+            orig_qty = _float_or_none(pos.get("original_quantity")) or qty
+            frac = scale_out_fraction()
+            scale_qty, runner_qty, can_split = scale_out_quantity(
+                current_qty=qty,
+                original_qty=orig_qty,
+                fraction=frac,
+                base_increment=inc,
+                base_min_size=mn,
+            )
+            scaling = can_split and not pos.get("partial_taken")
+            exit_qty = scale_qty if scaling else qty
+            exit_reason = "scale_out_target" if scaling else "target"
+            cid = f"chili_ml_{'so' if scaling else 'p'}_{sess.id}_{uuid.uuid4().hex[:12]}"
             sr = _submit_live_market_exit(
                 db,
                 sess,
                 adapter,
                 le=le,
                 product_id=product_id,
-                quantity=qty,
+                quantity=exit_qty,
                 client_order_id=cid,
-                reason="target",
+                reason=exit_reason,
                 bid=bid,
                 ask=ask,
                 mid=mid,
-                extra={"target_price": target_px},
+                extra={
+                    "target_price": target_px,
+                    "scale_out_fraction": frac if scaling else None,
+                    "runner_qty": runner_qty if scaling else 0.0,
+                },
             )
-            if not _live_exit_submit_succeeded(db, sess, le=le, result=sr, reason="target"):
+            if not _live_exit_submit_succeeded(db, sess, le=le, result=sr, reason=exit_reason):
                 db.flush()
                 return {"ok": False, "session_id": sess.id, "state": sess.state, "exit_submit_failed": True}
-            poll = _poll_live_exit_fill(db, sess, adapter, le=le, reason="target", quantity=qty)
-            if not poll.get("filled"):
-                if poll.get("partial"):
-                    _apply_confirmed_live_partial_exit(
+            if scaling:
+                # Mark the pending exit as a deliberate scale-out so a later-tick
+                # confirmation banks the partial + holds the runner (NOT a flatten).
+                le["pending_exit_is_scale_out"] = True
+                _commit_le(sess, le)
+            poll = _poll_live_exit_fill(db, sess, adapter, le=le, reason=exit_reason, quantity=exit_qty)
+            slip_live = float(le.get("entry_slip_bps_ref") or 6.0)
+            if poll.get("filled"):
+                if scaling:
+                    _scale_out_to_runner(
+                        db,
+                        sess,
+                        le=le,
+                        filled_quantity=exit_qty,
+                        entry_price=avg,
+                        fill_price=float(poll["fill_price"]),
+                        reason=exit_reason,
+                    )
+                else:
+                    _complete_confirmed_live_exit(
+                        db,
+                        sess,
+                        le=le,
+                        quantity=qty,
+                        entry_price=avg,
+                        fill_price=float(poll["fill_price"]),
+                        reason="target",
+                        slip_bps=slip_live,
+                    )
+                db.flush()
+                return {"ok": True, "session_id": sess.id, "state": sess.state}
+            if poll.get("partial"):
+                if scaling:
+                    # Any portion of the scale order filling establishes the runner
+                    # + breakeven; never over-sell. Remaining intent is abandoned.
+                    _scale_out_to_runner(
                         db,
                         sess,
                         le=le,
                         filled_quantity=float(poll["filled_size"]),
                         entry_price=avg,
                         fill_price=float(poll["fill_price"]),
-                        reason="target",
+                        reason=exit_reason,
                     )
-                db.flush()
-                return {
-                    "ok": bool(poll.get("pending") or poll.get("partial")),
-                    "session_id": sess.id,
-                    "state": sess.state,
-                    "pending_exit": bool(poll.get("pending")),
-                    "partial_exit": bool(poll.get("partial")),
-                    "exit_failed": bool(poll.get("failed")),
-                }
-            slip_live = float(le.get("entry_slip_bps_ref") or 6.0)
-            _complete_confirmed_live_exit(
-                db,
-                sess,
-                le=le,
-                quantity=qty,
-                entry_price=avg,
-                fill_price=float(poll["fill_price"]),
-                reason="target",
-                slip_bps=slip_live,
-            )
+                    db.flush()
+                    return {"ok": True, "session_id": sess.id, "state": sess.state}
+                _apply_confirmed_live_partial_exit(
+                    db,
+                    sess,
+                    le=le,
+                    filled_quantity=float(poll["filled_size"]),
+                    entry_price=avg,
+                    fill_price=float(poll["fill_price"]),
+                    reason="target",
+                )
             db.flush()
-            return {"ok": True, "session_id": sess.id, "state": sess.state}
+            return {
+                "ok": bool(poll.get("pending") or poll.get("partial")),
+                "session_id": sess.id,
+                "state": sess.state,
+                "pending_exit": bool(poll.get("pending")),
+                "partial_exit": bool(poll.get("partial")),
+                "exit_failed": bool(poll.get("failed")),
+            }
 
         if st == STATE_LIVE_ENTERED and bid >= avg * trail_activate_return:
             _safe_transition(db, sess, STATE_LIVE_TRAILING)
@@ -2423,62 +2632,8 @@ def tick_live_session(
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
-        if st == STATE_LIVE_TRAILING:
-            trail_stop = max(stop_px, avg * trail_floor_return)
-            if bid <= trail_stop:
-                cid = f"chili_ml_tr_{sess.id}_{uuid.uuid4().hex[:12]}"
-                sr = _submit_live_market_exit(
-                    db,
-                    sess,
-                    adapter,
-                    le=le,
-                    product_id=product_id,
-                    quantity=qty,
-                    client_order_id=cid,
-                    reason="trail_stop",
-                    bid=bid,
-                    ask=ask,
-                    mid=mid,
-                    extra={"trail_stop_price": trail_stop, "trail_floor_return": trail_floor_return},
-                )
-                if not _live_exit_submit_succeeded(db, sess, le=le, result=sr, reason="trail_stop"):
-                    db.flush()
-                    return {"ok": False, "session_id": sess.id, "state": sess.state, "exit_submit_failed": True}
-                poll = _poll_live_exit_fill(db, sess, adapter, le=le, reason="trail_stop", quantity=qty)
-                if not poll.get("filled"):
-                    if poll.get("partial"):
-                        _apply_confirmed_live_partial_exit(
-                            db,
-                            sess,
-                            le=le,
-                            filled_quantity=float(poll["filled_size"]),
-                            entry_price=avg,
-                            fill_price=float(poll["fill_price"]),
-                            reason="trail_stop",
-                        )
-                    db.flush()
-                    return {
-                        "ok": bool(poll.get("pending") or poll.get("partial")),
-                        "session_id": sess.id,
-                        "state": sess.state,
-                        "pending_exit": bool(poll.get("pending")),
-                        "partial_exit": bool(poll.get("partial")),
-                        "exit_failed": bool(poll.get("failed")),
-                    }
-                slip_live = float(le.get("entry_slip_bps_ref") or 6.0)
-                _complete_confirmed_live_exit(
-                    db,
-                    sess,
-                    le=le,
-                    quantity=qty,
-                    entry_price=avg,
-                    fill_price=float(poll["fill_price"]),
-                    reason="trail_stop",
-                    slip_bps=slip_live,
-                )
-            db.flush()
-            return {"ok": True, "session_id": sess.id, "state": sess.state}
-
+        # TRAILING runs the chandelier ratchet above; the shared stop check enforces
+        # the trailed stop. No dedicated static-floor trail exit remains.
         db.flush()
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
