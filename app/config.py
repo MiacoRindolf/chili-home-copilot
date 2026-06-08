@@ -2597,6 +2597,17 @@ class Settings(BaseSettings):
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_SPREAD_TO_EXPECTED_MOVE_RATIO"),
     )
+    # Absolute spread CAP (Ross's "if the spread is too wide, skip the trade" rule):
+    # the adaptive tolerance above never exceeds this, no matter how explosive the
+    # name. Uncapped, a huge-expected-move runner would tolerate an ~8% spread =
+    # start down 8% + can't exit on the reversal (bid vanishes). Ross steps back
+    # at ~2% (WHLR 30c/$14). Default 300bps (3%) — generous: blocks the catastrophic
+    # cost-traps, still lets a name in once its spread compresses at peak volume.
+    chili_momentum_risk_max_spread_bps_abs_cap: float = Field(
+        default=300.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_MAX_SPREAD_BPS_ABS_CAP"),
+    )
     chili_momentum_risk_max_estimated_slippage_bps: float = Field(
         default=18.0,
         ge=0.0,
