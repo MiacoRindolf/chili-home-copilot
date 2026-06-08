@@ -2219,6 +2219,36 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_ROBINHOOD_SPOT_ADAPTER_ENABLED"),
     )
+    # Robinhood Agentic Trading MCP rail — officially-sanctioned execution endpoint
+    # (isolated Agentic account). See docs/DESIGN/ROBINHOOD_AGENTIC_MCP.md.
+    # Activation switch is token-presence (a real dependency, not a default-OFF dark flag);
+    # the bearer token comes from CHILI_ROBINHOOD_AGENTIC_MCP_TOKEN or the token file below.
+    chili_robinhood_agentic_mcp_endpoint: str = Field(
+        default="",  # empty -> client default (https://agent.robinhood.com/mcp/trading)
+        validation_alias=AliasChoices("CHILI_ROBINHOOD_AGENTIC_MCP_ENDPOINT"),
+    )
+    chili_robinhood_agentic_mcp_token_file: str = Field(
+        default="",
+        validation_alias=AliasChoices("CHILI_ROBINHOOD_AGENTIC_MCP_TOKEN_FILE"),
+    )
+    chili_robinhood_agentic_mcp_timeout_seconds: float = Field(
+        default=15.0,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_ROBINHOOD_AGENTIC_MCP_TIMEOUT_SECONDS"),
+    )
+    # Optional JSON map of capability -> real MCP tool name, set after introspection
+    # (e.g. '{"place_order":"submit_equity_order"}'). Empty -> capability keyword matching.
+    chili_robinhood_agentic_mcp_tool_map: str = Field(
+        default="",
+        validation_alias=AliasChoices("CHILI_ROBINHOOD_AGENTIC_MCP_TOOL_MAP"),
+    )
+    # Which rail equities route to: "robinhood_spot" (default, unofficial robin_stocks) or
+    # "robinhood_agentic_mcp" (sanctioned rail; trades the isolated Agentic account). A
+    # conscious account-routing choice — only takes effect when a token is also present.
+    chili_equity_execution_rail: str = Field(
+        default="robinhood_spot",
+        validation_alias=AliasChoices("CHILI_EQUITY_EXECUTION_RAIL"),
+    )
     chili_robinhood_legend_quote_fallback_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_ROBINHOOD_LEGEND_QUOTE_FALLBACK_ENABLED"),
