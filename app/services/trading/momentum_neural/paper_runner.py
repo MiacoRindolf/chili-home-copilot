@@ -881,7 +881,9 @@ def tick_paper_session(
             "fees_est_usd": fees,
             # Ross asymmetric exit: freeze the entry ATR-pct (the runner trail rides
             # the same ATR distance the initial stop used) + seed the high-water mark.
-            "entry_atr_pct": atrp,
+            # = the effective stop ATR-pct from the live-parity stop chain above
+            # (matches the live runner's entry_stop_atr_pct).
+            "entry_atr_pct": _eff_atr,
             "high_water_mark": entry_px,
         }
         pe["entry_regime_snapshot_json"] = dict(regime)
