@@ -2330,6 +2330,23 @@ class Settings(BaseSettings):
         le=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_DAILY_LOSS_FRACTION_OF_EQUITY"),
     )
+    # Ross-style PROFIT-GIVEBACK session halt (the upside mirror of the daily-loss
+    # breaker). Once today's realized PnL has PEAKED at a meaningful, equity-relative
+    # green AND has since given back this FRACTION of that peak, the momentum LIVE lane
+    # STOPS arming for the rest of the daily window — Ross's rule to lock in a green day
+    # instead of round-tripping it back to flat/red ("I give back 50% of my profits once
+    # I reach a certain threshold... easier to remember half than 40%",
+    # warriortrading.com/7-day-trading-rules). This giveback fraction is the SINGLE
+    # documented knob; the activation threshold is equity-relative (it reuses the
+    # equity-relative daily-loss-cap magnitude — no second fixed-$ number: a green day
+    # worth protecting is, by symmetry, one that exceeds the day's max tolerable red).
+    # 0 disables. docs/DESIGN/MOMENTUM_LANE.md [[feedback_adaptive_no_magic]]
+    chili_momentum_profit_giveback_fraction: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PROFIT_GIVEBACK_FRACTION"),
+    )
     # Spike guard for the equity-relative per-trade caps above. A frozen per-trade cap
     # may not exceed this MULTIPLE of its rolling median across recent same-venue
     # admissions. A transient bad equity read (e.g. a Coinbase get_portfolio spike)

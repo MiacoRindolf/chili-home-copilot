@@ -47,9 +47,20 @@
     // setups. Surfaced even when sessions are still open (breaker blocks new arms).
     function haltBanner(ls){
       if(!ls || !ls.halted) return '';
+      var resetPart = ls.resets_at_utc ? (' · resumes '+fmtReset(ls.resets_at_utc)) : '';
+      // Profit-giveback halt (Ross 50%-giveback rule) — a GREEN-day protection, not a
+      // loss. Render it amber + a shield, distinct from the red daily-loss breaker.
+      if(ls.halt_reason === 'profit_giveback'){
+        var pk = ls.peak_pnl_usd, now = ls.daily_pnl_usd;
+        var fracPct = (ls.giveback_fraction!=null && isFinite(Number(ls.giveback_fraction))) ? Math.round(Number(ls.giveback_fraction)*100) : 50;
+        var peakPart = (pk!=null && isFinite(Number(pk))) ? (' from '+pnl(pk)+' peak') : '';
+        return '<div style="display:flex;align-items:center;gap:8px;font-size:.88em;padding:5px 8px;border-radius:4px;'
+          + 'background:rgba(210,153,34,.12);border:1px solid rgba(210,153,34,.45);color:#d29922;font-weight:600;">'
+          + '🛡️ Lane HALTED — profit giveback: locked in '+pnl(now)+peakPart+' (gave back ≥'+fracPct+'%)'+resetPart+'</div>';
+      }
+      // Default: daily-loss breaker (red).
       var dp = ls.daily_pnl_usd, cap = ls.max_daily_loss_usd;
       var capPart = (cap!=null && isFinite(Number(cap))) ? (' of -$'+Math.abs(Number(cap)).toFixed(0)+' cap') : '';
-      var resetPart = ls.resets_at_utc ? (' · resumes '+fmtReset(ls.resets_at_utc)) : '';
       return '<div style="display:flex;align-items:center;gap:8px;font-size:.88em;padding:5px 8px;border-radius:4px;'
         + 'background:rgba(248,81,73,.12);border:1px solid rgba(248,81,73,.4);color:#f85149;font-weight:600;">'
         + '⛔ Lane HALTED — daily loss '+pnl(dp)+capPart+resetPart+'</div>';
