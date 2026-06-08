@@ -1620,7 +1620,7 @@ def tick_live_session(
         _pb_debug = {}
         if _score_ok:
             try:
-                from .entry_gates import momentum_volume_confirmation, pullback_break_confirmation
+                from .entry_gates import momentum_pullback_trigger, momentum_volume_confirmation
                 from ..market_data import fetch_ohlcv_df
 
                 _mode = str(getattr(settings, "chili_momentum_entry_trigger_mode", "hybrid") or "hybrid").lower()
@@ -1630,53 +1630,11 @@ def tick_live_session(
                     try:
                         _df_pb = fetch_ohlcv_df(sess.symbol, interval=_interval, period="5d")
                         if _df_pb is not None and not getattr(_df_pb, "empty", True):
-                            # Ross RECENT refinements (#1 retest, #3 sustaining vol) —
-                            # documented knobs, default on. (docs/DESIGN/MOMENTUM_LANE.md §8)
-                            _trigger_ok, _trigger_reason, _pb_debug = pullback_break_confirmation(
-                                _df_pb,
-                                entry_interval=_interval,
-                                volume_spike_multiple=float(
-                                    getattr(settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5
-                                ),
-                                require_retest=bool(
-                                    getattr(settings, "chili_momentum_pullback_require_retest", True)
-                                ),
-                                retest_tolerance=float(
-                                    getattr(settings, "chili_momentum_pullback_retest_tolerance", 0.002) or 0.0
-                                ),
-                                retest_lookback_bars=int(
-                                    getattr(settings, "chili_momentum_pullback_retest_lookback_bars", 4) or 4
-                                ),
-                                require_sustained_volume=bool(
-                                    getattr(settings, "chili_momentum_entry_require_sustained_volume", True)
-                                ),
-                                sustained_rvol_floor=float(
-                                    getattr(settings, "chili_momentum_entry_sustained_rvol_floor", 1.0) or 0.0
-                                ),
-                                sustain_lookback_bars=int(
-                                    getattr(settings, "chili_momentum_entry_sustain_lookback_bars", 5) or 5
-                                ),
-                                require_break_candle=bool(
-                                    getattr(settings, "chili_momentum_entry_require_break_candle", True)
-                                ),
-                                break_candle_min_close_pos=float(
-                                    getattr(settings, "chili_momentum_entry_break_candle_min_close_pos", 0.50) or 0.50
-                                ),
-                                require_vwap_hold=bool(
-                                    getattr(settings, "chili_momentum_entry_require_vwap_hold", True)
-                                ),
-                                vwap_hold_buffer=float(
-                                    getattr(settings, "chili_momentum_entry_vwap_hold_buffer", 0.0) or 0.0
-                                ),
-                                require_macd_bullish=bool(
-                                    getattr(settings, "chili_momentum_entry_require_macd_bullish", True)
-                                ),
-                                allow_runaway_break=bool(
-                                    getattr(settings, "chili_momentum_entry_allow_runaway_break", True)
-                                ),
-                                runaway_min_volume_spike=float(
-                                    getattr(settings, "chili_momentum_entry_runaway_min_volume_spike", 2.0) or 2.0
-                                ),
+                            # Shared trigger (parity): paper calls the SAME helper, so
+                            # both paths take the identical Ross pullback-break entry
+                            # (vol-aware, candle/VWAP/MACD, runaway). docs/DESIGN/MOMENTUM_LANE.md §8
+                            _trigger_ok, _trigger_reason, _pb_debug = momentum_pullback_trigger(
+                                _df_pb, entry_interval=_interval
                             )
                     except Exception:
                         _trigger_ok = False

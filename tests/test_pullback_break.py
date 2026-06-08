@@ -272,3 +272,23 @@ def test_vol_aware_respects_passed_base_threshold() -> None:
     shallow_a, _, _ = _vol_aware_pullback_tolerances(0.05, 0.40)
     shallow_b, _, _ = _vol_aware_pullback_tolerances(0.05, 0.50)
     assert shallow_b > shallow_a
+
+
+# ── paper<->live trigger parity (the shared helper both runners call) ────────
+
+def test_momentum_pullback_trigger_is_the_live_pullback_break() -> None:
+    """The shared helper both the live runner AND the paper gate call IS the Ross
+    pullback-break trigger (vol-aware + confirmations), not the legacy
+    momentum_volume gate — so paper shadows live and the brain trains on the live
+    strategy. It returns the pullback-break gate's reasons + carries the structural
+    stop, so the paper stop can mirror live's."""
+    from app.services.trading.momentum_neural.entry_gates import momentum_pullback_trigger
+
+    rows = [_base(100.0) for _ in range(14)]
+    rows += [_base(c) for c in (102.0, 104.0, 106.0, 108.0, 110.0)]
+    rows += [_base(109.0, 800.0), _base(108.5, 800.0)]
+    rows.append((110.6, 111.2, 109.6, 3200.0))
+    ok, reason, dbg = momentum_pullback_trigger(_df(rows), entry_interval="5m")
+    # A pullback-break-family reason (never a momentum_volume reason), with structure.
+    assert any(tok in reason for tok in ("pullback", "break", "retest")), reason
+    assert "pullback_low" in dbg and "pullback_high" in dbg
