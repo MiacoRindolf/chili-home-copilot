@@ -4118,25 +4118,44 @@ def _run_crypto_viability_refresh_job():
         db.close()
 
 
-def _intraday_sweep_interval_seconds() -> int:
-    """Cadence for the intraday sweep, DERIVED from the live-entry viability freshness
-    gate (``chili_momentum_risk_viability_max_age_seconds``) rather than a fixed value.
-
-    Equity momentum viability is Ross-screened by the bridge that runs INSIDE this
-    sweep, and the sweep is the ONLY refresher for equities (crypto stays fresh via the
-    ~60s fast scanner). If the sweep is slower than the freshness gate, equity viability
-    goes stale BETWEEN sweeps and every live equity entry is blocked "Viability snapshot
-    stale" (live diag 2026-06-08: NOW blocked at age 1668s > 600s after a fixed 15min
-    sweep). Half the gate gives a 2x refresh margin so it never goes stale; floored at
-    120s so a misconfigured tiny gate can't busy-loop the scanners. No magic number —
-    it tracks the gate. (docs/DESIGN/MOMENTUM_LANE.md)
+def _run_equity_viability_refresh_job():
+    """Equity PARITY with crypto: refresh equity momentum viability on its OWN fast
+    job at the SAME cadence as the crypto venue feed (``_run_crypto_viability_refresh_job``),
+    NOT riding the slow 15min intraday sweep. The Ross-screening bridge needs the
+    equity movers (RVOL/gap) re-scored within the live-entry freshness gate or equity
+    entries are blocked "Viability snapshot stale"; this keeps equities exactly as
+    fresh as crypto (both at ~half the gate). Light: just the equity momentum-continuation
+    + premarket-gap scans (the same movers the sweep finds), bridged. docs/DESIGN/MOMENTUM_LANE.md
     """
-    from ..config import settings as _cfg
+    from ..db import SessionLocal
+    from .trading.intraday_signals import scan_momentum_continuation, scan_premarket_gaps
 
-    gate = float(
-        getattr(_cfg, "chili_momentum_risk_viability_max_age_seconds", 600.0) or 600.0
-    )
-    return int(max(120.0, gate / 2.0))
+    db = SessionLocal()
+    try:
+        sweep: dict[str, Any] = {}
+        try:
+            sweep["momentum_signals"] = list(scan_momentum_continuation(db=db) or [])
+        except Exception:
+            sweep["momentum_signals"] = []
+        try:
+            sweep["premarket_gaps"] = list(scan_premarket_gaps() or [])
+        except Exception:
+            sweep["premarket_gaps"] = []
+        movers = _equity_movers_for_ross_bridge(sweep)
+        if movers:
+            _bridge_scanner_to_viability(db, movers, source="equity_viability_refresh")
+            logger.info(
+                "[scheduler] equity viability refresh: %d movers -> viability (crypto-parity cadence)",
+                len(movers),
+            )
+    except Exception as e:
+        logger.warning("[scheduler] equity viability refresh failed: %s", e)
+    finally:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        db.close()
 
 
 def _run_intraday_signal_sweep_job():
@@ -5265,12 +5284,15 @@ def start_scheduler():
                     next_run_time=datetime.now() + timedelta(seconds=45),
                 )
 
-                _sweep_interval_s = _intraday_sweep_interval_seconds()
+                # Equity momentum viability freshness is handled by the dedicated
+                # _run_equity_viability_refresh_job (crypto-parity cadence); this sweep
+                # only feeds the equity paper/ORB strategies, so it stays on the slower
+                # 15min cadence.
                 _scheduler.add_job(
                     _run_intraday_signal_sweep_job,
-                    trigger=IntervalTrigger(seconds=_sweep_interval_s),
+                    trigger=IntervalTrigger(minutes=15),
                     id="intraday_signal_sweep",
-                    name=f"Intraday signal sweep (every {_sweep_interval_s}s = viability gate/2)",
+                    name="Intraday signal sweep (every 15min)",
                     replace_existing=True,
                     max_instances=1,
                     next_run_time=datetime.now() + timedelta(seconds=55),
@@ -5416,6 +5438,20 @@ def start_scheduler():
                 replace_existing=True,
                 max_instances=1,
                 next_run_time=datetime.now() + timedelta(seconds=20),
+            )
+
+            # Equity parity: refresh equity momentum viability on the SAME fast cadence
+            # as crypto (_cvr_secs, ~half the freshness gate) via its own dedicated job,
+            # so Ross-screened equities stay exactly as fresh as crypto for the live
+            # entry gate — instead of riding the slow intraday sweep. (MOMENTUM_LANE.md)
+            _scheduler.add_job(
+                _run_equity_viability_refresh_job,
+                trigger=IntervalTrigger(seconds=_cvr_secs),
+                id="equity_viability_refresh",
+                name="Equity viability refresh (momentum movers, crypto-parity cadence)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=35),
             )
 
             _scheduler.add_job(
