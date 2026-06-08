@@ -1651,6 +1651,21 @@ def tick_live_session(
                                 sustain_lookback_bars=int(
                                     getattr(settings, "chili_momentum_entry_sustain_lookback_bars", 5) or 5
                                 ),
+                                require_break_candle=bool(
+                                    getattr(settings, "chili_momentum_entry_require_break_candle", True)
+                                ),
+                                break_candle_min_close_pos=float(
+                                    getattr(settings, "chili_momentum_entry_break_candle_min_close_pos", 0.50) or 0.50
+                                ),
+                                require_vwap_hold=bool(
+                                    getattr(settings, "chili_momentum_entry_require_vwap_hold", True)
+                                ),
+                                vwap_hold_buffer=float(
+                                    getattr(settings, "chili_momentum_entry_vwap_hold_buffer", 0.0) or 0.0
+                                ),
+                                require_macd_bullish=bool(
+                                    getattr(settings, "chili_momentum_entry_require_macd_bullish", True)
+                                ),
                             )
                     except Exception:
                         _trigger_ok = False
@@ -2427,6 +2442,27 @@ def tick_live_session(
         # check below then enforces it SAME tick. Derived from the frozen entry ATR —
         # not a static floor. (docs/DESIGN/MOMENTUM_LANE.md)
         if st == STATE_LIVE_TRAILING:
+            # Ross sell-into-strength: a topping-tail / shooting-star on the runner's
+            # candles is momentum exhaustion — lock the tail NOW rather than waiting for
+            # the chandelier trail to be hit on the way back down. Runner-only (post
+            # first-target scale-out); reuses the bars already fetched for the adaptive-
+            # spread check; fail-safe (no candle data -> no exit). docs/DESIGN/MOMENTUM_LANE.md
+            if bool(getattr(settings, "chili_momentum_exit_topping_tail_enabled", True)):
+                try:
+                    from .candles import topping_tail_from_df
+
+                    if topping_tail_from_df(_entry_df):
+                        le["last_bailout_trigger"] = "topping_tail_runner"
+                        _commit_le(sess, le)
+                        _safe_transition(db, sess, STATE_LIVE_BAILOUT)
+                        _emit(db, sess, "live_bailout", {
+                            "reason": "topping_tail_runner_exit", "bid": bid,
+                            "high_water_mark": _float_or_none(pos.get("high_water_mark")),
+                        })
+                        db.flush()
+                        return {"ok": True, "session_id": sess.id, "state": sess.state}
+                except Exception:
+                    pass
             _atr_pct_trail = _float_or_none(le.get("entry_stop_atr_pct")) or 0.0
             _hwm_trail = _float_or_none(pos.get("high_water_mark")) or avg
             _be_floor = avg if pos.get("partial_taken") else stop_px

@@ -382,6 +382,11 @@ def pullback_break_confirmation(
     require_sustained_volume: bool = False,
     sustained_rvol_floor: float = 1.0,
     sustain_lookback_bars: int = 5,
+    require_break_candle: bool = False,
+    break_candle_min_close_pos: float = 0.50,
+    require_vwap_hold: bool = False,
+    vwap_hold_buffer: float = 0.0,
+    require_macd_bullish: bool = False,
 ) -> tuple[bool, str, dict[str, Any]]:
     """Ross-style pullback-break entry on intraday (1m/5m) bars.
 
@@ -412,10 +417,16 @@ def pullback_break_confirmation(
     vol = df["Volume"].astype(float)
     n = len(df)
     cur = n - 1
-    arrays = compute_all_from_df(df, needed={"ema_9", "volume_ratio", "atr"})
+    arrays = compute_all_from_df(
+        df, needed={"ema_9", "volume_ratio", "atr", "vwap", "macd", "macd_signal", "macd_hist"}
+    )
     ema9 = arrays.get("ema_9") or []
     vr = arrays.get("volume_ratio") or []
     atr = arrays.get("atr") or []
+    vwap = arrays.get("vwap") or []
+    macd = arrays.get("macd") or []
+    macd_sig = arrays.get("macd_signal") or []
+    macd_hist = arrays.get("macd_hist") or []
 
     # Instrument volatility (ATR / price) drives the volatility-aware pullback
     # tolerances in the evaluators, so the explosive small-caps the lane selects
@@ -472,6 +483,43 @@ def pullback_break_confirmation(
             debug["sustained_rvol"] = round(sustained, 2)
             if sustained < float(sustained_rvol_floor):
                 return False, "faded_volume_no_sustain", debug
+
+    # ── Ross candle / VWAP / MACD confirmations (the tape-reading the structural
+    # gate alone misses; each optional + live-runner-gated, fail-OPEN so thin data
+    # never blocks an otherwise-valid break). docs/DESIGN/MOMENTUM_LANE.md §8.
+    cur_o = float(df["Open"].iloc[cur])
+    cur_h, cur_l, cur_c = float(high.iloc[cur]), float(low.iloc[cur]), float(close.iloc[cur])
+
+    # Conviction break candle: reject a doji / topping-tail "break" that wicks out.
+    if require_break_candle:
+        from .candles import is_strong_bull_break_candle
+
+        if not is_strong_bull_break_candle(
+            cur_o, cur_h, cur_l, cur_c, min_close_pos=float(break_candle_min_close_pos)
+        ):
+            debug["break_candle"] = {"o": cur_o, "h": cur_h, "l": cur_l, "c": cur_c}
+            return False, "weak_break_candle", debug
+
+    # VWAP hold: Ross stays long ABOVE VWAP. Skip when VWAP unavailable (fail-open).
+    if require_vwap_hold:
+        vwap_cur = vwap[cur] if cur < len(vwap) and vwap[cur] is not None else None
+        if vwap_cur is not None and float(vwap_cur) > 0:
+            debug["vwap"] = round(float(vwap_cur), 6)
+            if cur_c < float(vwap_cur) * (1.0 - max(0.0, float(vwap_hold_buffer))):
+                return False, "below_vwap", debug
+
+    # MACD momentum confirmation (lenient: histogram >= 0 OR macd line >= signal).
+    if require_macd_bullish:
+        hh = macd_hist[cur] if cur < len(macd_hist) and macd_hist[cur] is not None else None
+        m = macd[cur] if cur < len(macd) and macd[cur] is not None else None
+        s = macd_sig[cur] if cur < len(macd_sig) and macd_sig[cur] is not None else None
+        if hh is not None or (m is not None and s is not None):
+            bullish = (hh is not None and float(hh) >= 0.0) or (
+                m is not None and s is not None and float(m) >= float(s)
+            )
+            debug["macd_hist"] = None if hh is None else round(float(hh), 6)
+            if not bullish:
+                return False, "macd_not_bullish", debug
 
     return True, "pullback_break_ok", debug
 
