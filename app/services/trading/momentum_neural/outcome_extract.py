@@ -378,6 +378,85 @@ def extract_momentum_session_outcome(
     return extracted
 
 
+# Broker-zero-reconcile appends a provenance suffix to the real exit reason
+# (e.g. "trail_stop" -> "trail_stop_broker_zero_reconcile"). Strip it before
+# keyword-matching the exit class so a reconciled round-trip is classified by
+# what it actually was. The retry-cap variant is the longer suffix; check first.
+_RECONCILE_SUFFIXES = (
+    "_retry_cap_broker_zero_reconcile",
+    "_broker_zero_reconcile",
+)
+
+# Genuine completed-exit outcome classes. The live_cancelled reroute only ever
+# upgrades to one of these; anything ambiguous stays cancelled_in_trade.
+_REAL_EXIT_OUTCOMES = frozenset(
+    {
+        OUTCOME_STOP_LOSS,
+        OUTCOME_BAILOUT,
+        OUTCOME_TIMED_EXIT,
+        OUTCOME_SUCCESS,
+        OUTCOME_SMALL_WIN,
+        OUTCOME_GOVERNANCE_EXIT,
+    }
+)
+
+
+def _strip_reconcile_suffix(exit_reason: Optional[str]) -> Optional[str]:
+    """Drop the broker-zero-reconcile provenance suffix for class matching.
+
+    Returns the input unchanged when no suffix is present (and None/"" as-is),
+    so it is safe to call on any terminal branch.
+    """
+    if not exit_reason:
+        return exit_reason
+    for suffix in _RECONCILE_SUFFIXES:
+        if exit_reason.endswith(suffix):
+            return exit_reason[: -len(suffix)]
+    return exit_reason
+
+
+def _classify_real_exit(
+    *,
+    exit_reason: Optional[str],
+    return_bps: Optional[float],
+    realized_pnl_usd: Optional[float],
+    entry_occurred: bool,
+    governance_context: dict[str, Any],
+) -> str:
+    """Classify a COMPLETED exit by its reason + economic result.
+
+    Shared by the finished terminal branch and the live_cancelled reconcile
+    reroute so both label a real round-trip identically. The broker-zero-
+    reconcile suffix is stripped before keyword matching.
+    """
+    if governance_context.get("kill_switch_exit"):
+        return OUTCOME_GOVERNANCE_EXIT
+    er = (_strip_reconcile_suffix(exit_reason) or "").lower()
+    if "stop" in er or er == "stop":
+        return OUTCOME_STOP_LOSS
+    if "bailout" in er or er == "bailout":
+        return OUTCOME_BAILOUT
+    if "max_hold" in er or "timed" in er or er == "max_hold":
+        return OUTCOME_TIMED_EXIT
+    rb = return_bps
+    rp = realized_pnl_usd
+    if rb is not None:
+        if rb >= 25.0:
+            return OUTCOME_SUCCESS
+        if rb > 0:
+            return OUTCOME_SMALL_WIN
+        if rb <= -25.0:
+            return OUTCOME_STOP_LOSS
+    if rp is not None:
+        if rp > 0:
+            return OUTCOME_SMALL_WIN
+        if rp < 0:
+            return OUTCOME_STOP_LOSS
+    if entry_occurred:
+        return OUTCOME_FLAT_UNKNOWN
+    return OUTCOME_CANCELLED_PRE_ENTRY
+
+
 def derive_outcome_class(
     *,
     mode: str,
@@ -399,6 +478,27 @@ def derive_outcome_class(
     if st == STATE_ARCHIVED:
         return OUTCOME_ARCHIVED
     if st in (STATE_CANCELLED, STATE_LIVE_CANCELLED):
+        # A reconcile/late cancel that nonetheless completed a REAL round-trip —
+        # a full position-closing exit with a recorded exit reason — is not a
+        # decision-level cancel. The broker-zero-reconcile exit path lands a real
+        # exit (stop/bailout/trail/max_hold), and the session can then terminate
+        # in live_cancelled (e.g. the recycled post-exit watcher is reaped, or a
+        # duplicate claimant is cleaned up) instead of live_finished. Classify it
+        # by its true exit class so the strategy learner sees the win/loss
+        # instead of dropping it as a non-strategy cancel. Only a recorded FULL
+        # exit reason counts here (a partial sets last_partial_exit_reason, not
+        # exit_reason), so a position-neutral operator/dup cancel of a still-open
+        # position correctly stays cancelled_in_trade.
+        if (entry_occurred or partial_exit) and _strip_reconcile_suffix(exit_reason):
+            reclassified = _classify_real_exit(
+                exit_reason=exit_reason,
+                return_bps=return_bps,
+                realized_pnl_usd=realized_pnl_usd,
+                entry_occurred=entry_occurred,
+                governance_context=governance_context,
+            )
+            if reclassified in _REAL_EXIT_OUTCOMES:
+                return reclassified
         if entry_occurred or partial_exit:
             return OUTCOME_CANCELLED_IN_TRADE
         return OUTCOME_CANCELLED_PRE_ENTRY
@@ -421,32 +521,13 @@ def derive_outcome_class(
         return OUTCOME_ERROR_EXIT
 
     if st in (STATE_FINISHED, STATE_LIVE_FINISHED):
-        if governance_context.get("kill_switch_exit"):
-            return OUTCOME_GOVERNANCE_EXIT
-        er = (exit_reason or "").lower()
-        if "stop" in er or er == "stop":
-            return OUTCOME_STOP_LOSS
-        if "bailout" in er or er == "bailout":
-            return OUTCOME_BAILOUT
-        if "max_hold" in er or "timed" in er or er == "max_hold":
-            return OUTCOME_TIMED_EXIT
-        rb = return_bps
-        rp = realized_pnl_usd
-        if rb is not None:
-            if rb >= 25.0:
-                return OUTCOME_SUCCESS
-            if rb > 0:
-                return OUTCOME_SMALL_WIN
-            if rb <= -25.0:
-                return OUTCOME_STOP_LOSS
-        if rp is not None:
-            if rp > 0:
-                return OUTCOME_SMALL_WIN
-            if rp < 0:
-                return OUTCOME_STOP_LOSS
-        if entry_occurred:
-            return OUTCOME_FLAT_UNKNOWN
-        return OUTCOME_CANCELLED_PRE_ENTRY
+        return _classify_real_exit(
+            exit_reason=exit_reason,
+            return_bps=return_bps,
+            realized_pnl_usd=realized_pnl_usd,
+            entry_occurred=entry_occurred,
+            governance_context=governance_context,
+        )
 
     return OUTCOME_FLAT_UNKNOWN
 

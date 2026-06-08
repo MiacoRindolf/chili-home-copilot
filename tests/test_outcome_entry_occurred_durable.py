@@ -66,17 +66,20 @@ def test_empty_and_non_dict_are_non_entered():
 
 def test_live_cancelled_with_entry_is_in_trade_not_pre_entry():
     # The consumer side: once entry_occurred is correctly True, a live_cancelled
-    # terminal (the reconcile path's terminal state) classifies as
-    # cancelled_in_trade — never the self-contradictory cancelled_pre_entry.
+    # terminal classifies as cancelled_in_trade — never the self-contradictory
+    # cancelled_pre_entry. This is the position-neutral cancel of a still-open
+    # position (no recorded FULL exit reason). A reconcile exit that ALSO carries
+    # a full exit reason (e.g. "trail_stop_broker_zero_reconcile") is the deeper
+    # case routed to its true exit class — see test_outcome_reconcile_exit_class.
     assert (
         derive_outcome_class(
             mode="live",
             terminal_state=STATE_LIVE_CANCELLED,
             entry_occurred=True,
             partial_exit=False,
-            realized_pnl_usd=-1.13,
-            return_bps=-52.9,
-            exit_reason="trail_stop_broker_zero_reconcile",
+            realized_pnl_usd=None,
+            return_bps=None,
+            exit_reason=None,
             governance_context={},
             events=[],
         )
