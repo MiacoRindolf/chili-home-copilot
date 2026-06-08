@@ -1,0 +1,199 @@
+"""Per-setup trading universe profiles + builders.
+
+The screener TAILORS the instrument universe to the strategy — the universe is
+PART of the strategy, not one global list. Operator architecture (2026-06-08):
+*"dapat ... kaya niya i-tailor ... yung universe na gagamitin ng lane base sa
+pattern o strategy o lane or setup"*. Each setup/lane declares the instrument
+PROFILE it wants; a builder resolves that profile against the live market.
+
+First instance — the Ross-Cameron momentum lane. Ross trades **low-float
+small-cap GAPPERS** ($1-$20, already in play, liquid-enough to exit), NOT the
+static large-cap ``DEFAULT_SCAN_TICKERS`` (KLAC ~$2,100 / MU ~$950 / NVDA) the
+equity lane was forced onto. Those mega-caps move 2-8%; Ross's names move
+20-100%+ in a day. ``build_equity_universe`` screens the full-market snapshot
+(~12,776 tickers) down to that Ross universe; the existing per-ticker enrichment
+(``intraday_signals.scan_momentum_continuation``) + ``ross_momentum.score_universe``
+then rank within it. The lane's scans accept an explicit ``tickers=`` list, so
+this swaps only the UNIVERSE SOURCE — the entry gate / stop / sizing are unchanged.
+
+Adaptive / no-magic (operator principle #1): the profile carries ONE documented
+knob per instrument dimension and nothing scattered —
+
+  * ``price_min`` / ``price_max``  — the small-cap *definition* (what instrument
+    CLASS this setup trades), NOT a performance cap. Ross's stated $1-$20 range.
+  * ``min_dollar_volume``          — tradability floor (can you actually exit?).
+  * ``min_change_pct``             — an "in play" FLOOR; the percentile ranking
+    in ``score_universe`` does the real selection ABOVE it.
+  * ``max_universe``               — candidate-pool cap; selection is adaptive
+    (top-N by move here → percentile rank downstream), so the system discovers
+    the best names rather than obeying a fixed RVOL cut.
+
+Reference points (Ross $1-$20, 5x RVOL) are FLOORS, not ceilings — other
+lanes/setups register their own ``UniverseProfile`` and the same builder serves
+them. See docs/DESIGN/MOMENTUM_LANE.md.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class UniverseProfile:
+    """The instrument profile a setup/lane wants the screener to build.
+
+    A typed spec so *what kind of instrument* a strategy trades is declared once,
+    as data, decoupled from *what pattern* it then runs. ``None`` on any band/floor
+    means "no constraint on this dimension".
+    """
+
+    profile_id: str
+    asset_class: str  # "equity" | "crypto"
+    label: str
+    price_min: float | None = None
+    price_max: float | None = None
+    min_dollar_volume: float | None = None  # price * shares traded today
+    min_change_pct: float | None = None  # signed % change floor (long bias: positive)
+    max_universe: int = 50
+    low_float_bias: bool = False  # prefer low float (proxy via price when float absent)
+    catalyst_required: bool = False
+    notes: str = ""
+
+
+# ── Ross-Cameron momentum lane: low-float small-cap gappers ───────────────────
+# Each field is a documented Ross criterion, framed as a FLOOR / class-definition,
+# not a magic number. Operator can tune this ONE spec; downstream selection is
+# adaptive (top-N by move → percentile rank in score_universe).
+EQUITY_ROSS_SMALLCAP = UniverseProfile(
+    profile_id="equity_ross_smallcap",
+    asset_class="equity",
+    label="Ross small-cap momentum gappers",
+    # Ross's instrument CLASS: low-priced small-caps. Sub-$1 = manipulative /
+    # halt-prone penny tape; >$20 = retail can't size + not low-float. This is
+    # the strategy's universe DEFINITION, not a performance cap.
+    price_min=1.0,
+    price_max=20.0,
+    # Tradability: a name with < ~$1M of turnover today can't be entered AND
+    # exited cleanly on size. Floor only — the move, not the dollar-volume, ranks.
+    min_dollar_volume=1_000_000.0,
+    # "In play": Ross never trades what isn't already moving. A modest floor so
+    # the dead tape is dropped; score_universe percentile-ranks the survivors.
+    min_change_pct=5.0,
+    # Candidate pool the day's strongest movers; the bridge + ross score keep the
+    # most explosive leaders, the live-eligibility gate narrows further.
+    max_universe=50,
+    low_float_bias=True,
+    catalyst_required=False,
+    notes="Snapshot-screened Ross universe; replaces the static large-cap list for the momentum lane.",
+)
+
+
+def _f(v) -> float | None:
+    try:
+        if v is None or v == "":
+            return None
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _snapshot_price(s: dict) -> float | None:
+    """Robust current price from a Massive snapshot row.
+
+    Prefer the last trade, then today's consolidated close / VWAP, then the
+    latest minute close — premarket rows can have a sparse ``day`` block.
+    """
+    lt = s.get("lastTrade") or {}
+    p = _f(lt.get("p"))
+    if p and p > 0:
+        return p
+    day = s.get("day") or {}
+    for k in ("c", "vw"):
+        p = _f(day.get(k))
+        if p and p > 0:
+            return p
+    mn = s.get("min") or {}
+    p = _f(mn.get("c"))
+    return p if (p and p > 0) else None
+
+
+def build_equity_universe(
+    profile: UniverseProfile = EQUITY_ROSS_SMALLCAP,
+    *,
+    snapshot: list[dict] | None = None,
+) -> list[str]:
+    """Resolve an equity ``UniverseProfile`` against the full-market snapshot.
+
+    Returns the screened ticker list (uppercased, de-duped, capped at
+    ``profile.max_universe``), sorted by % change descending — the day's
+    strongest LONG movers within the profile's price/liquidity band. The
+    downstream per-ticker enrichment computes true intraday RVOL/gap and
+    ``score_universe`` percentile-ranks; this stage only decides WHICH names.
+
+    ``snapshot`` is injectable for tests; otherwise pulled (30-min cached) from
+    Massive. Fail-open: any error / empty snapshot → ``[]`` so the caller falls
+    back to its default universe (no regression).
+    """
+    if profile.asset_class != "equity":
+        return []
+    if snapshot is None:
+        try:
+            from ...massive_client import get_full_market_snapshot
+
+            snapshot = get_full_market_snapshot() or []
+        except Exception:
+            logger.debug("[universe] snapshot fetch failed", exc_info=True)
+            return []
+
+    rows: list[tuple[str, float, float, float]] = []  # (ticker, chg_pct, dollar_vol, price)
+    for s in snapshot or []:
+        try:
+            if not isinstance(s, dict):
+                continue
+            ticker = str(s.get("ticker") or "").strip().upper()
+            if not ticker:
+                continue
+
+            price = _snapshot_price(s)
+            if price is None:
+                continue
+            if profile.price_min is not None and price < profile.price_min:
+                continue
+            if profile.price_max is not None and price > profile.price_max:
+                continue
+
+            day = s.get("day") or {}
+            vol = _f(day.get("v")) or 0.0
+            dollar_vol = price * vol
+            if profile.min_dollar_volume is not None and dollar_vol < profile.min_dollar_volume:
+                continue
+
+            chg = _f(s.get("todaysChangePerc"))
+            if chg is None:
+                continue
+            # Long bias: a positive floor keeps only names moving UP into the day
+            # (the momentum lane is long-only; a high-volume dump is not a buy).
+            if profile.min_change_pct is not None and chg < profile.min_change_pct:
+                continue
+
+            rows.append((ticker, chg, dollar_vol, price))
+        except Exception:
+            continue
+
+    # Adaptive selection: the day's strongest movers first. No fixed RVOL cut —
+    # the percentile ranking in score_universe (RVOL + momentum + low-float) does
+    # the fine selection on the enriched survivors.
+    rows.sort(key=lambda r: r[1], reverse=True)
+    seen: set[str] = set()
+    out: list[str] = []
+    for ticker, *_ in rows:
+        if ticker in seen:
+            continue
+        seen.add(ticker)
+        out.append(ticker)
+        if len(out) >= max(1, int(profile.max_universe)):
+            break
+    return out
