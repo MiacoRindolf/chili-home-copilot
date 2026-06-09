@@ -2327,14 +2327,15 @@ class Settings(BaseSettings):
         le=50,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_MAX_CONCURRENT_POSITIONS"),
     )
-    # Adaptive concurrency: scale the live-session cap with account equity, bounded by a
-    # max SIMULTANEOUS open-risk fraction, instead of a fixed 5. N = clamp(equity * frac /
-    # max_loss_per_trade, base=max_concurrent_live_sessions, 20). Worst-case simultaneous
-    # loss across concurrent sessions <= frac * equity -> auto-de-risks in drawdown, grows
-    # with equity. A 06-08 sweep showed a fixed 5 left ~$2.9k of winners on the table on a
-    # busy day while >=8 captured them. 0 disables (use the fixed cap). One documented knob.
+    # Adaptive concurrency: the number of live slots = the simultaneous-open-risk BUDGET
+    # RATIO. N = clamp(round(this_fraction / loss_fraction_of_equity), max_concurrent_live_
+    # sessions, 15) — i.e. how many per-trade risks fit in the budget. With loss_fraction
+    # 0.01, this 0.10 => 10 slots. INDEPENDENT of account size/margin (growth scales per-
+    # trade SIZE, not the count — so a 2x buying-power basis does NOT also double the slots).
+    # Worst-case simultaneous loss <= this_fraction * basis. A 06-08 sweep showed a fixed 5
+    # left ~$2.9k of winners on the table while >=8 captured them. 0 disables (fixed cap).
     chili_momentum_risk_concurrent_open_risk_fraction: float = Field(
-        default=0.05,
+        default=0.10,
         ge=0.0,
         le=0.5,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_CONCURRENT_OPEN_RISK_FRACTION"),
