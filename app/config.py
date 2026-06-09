@@ -3205,6 +3205,15 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_EQUITY_ONLY"),
     )
+    # Liquidity-bias selection (ON): among the price-band-passed Ross small-caps,
+    # prefer high-dollar-volume (tighter-spread, FILLABLE) names so triggers convert
+    # to fills — the live spread gate blocks wide-spread entries, so a trigger on an
+    # illiquid name never fills. Adaptive rank-blend (viability + dollar-volume),
+    # no fixed threshold. Spread sweep proved the payoff (liquid +$12,818 vs wide +$634).
+    chili_momentum_auto_arm_liquidity_bias: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_LIQUIDITY_BIAS"),
+    )
     # Shake-out learning: how long after an exit to watch the price path to judge
     # whether the thesis would have worked (was the stop too tight?). 30min.
     chili_momentum_post_exit_horizon_seconds: int = Field(

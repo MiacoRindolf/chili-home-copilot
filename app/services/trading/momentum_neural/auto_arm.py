@@ -79,6 +79,14 @@ def _auto_arm_equity_only() -> bool:
     return bool(getattr(settings, "chili_momentum_auto_arm_equity_only", False))
 
 
+def _auto_arm_liquidity_bias() -> bool:
+    """Prefer FILLABLE (high-dollar-volume -> tighter-spread) Ross small-caps at the
+    selection gate so triggers convert to FILLS. ON by default (the live spread gate
+    blocks wide-spread entries, so a trigger on an illiquid name never fills); set
+    CHILI_MOMENTUM_AUTO_ARM_LIQUIDITY_BIAS=0 to rank by viability alone."""
+    return bool(getattr(settings, "chili_momentum_auto_arm_liquidity_bias", True))
+
+
 def _lane_execution_family() -> str:
     """The venue whose ACCOUNT EQUITY the lane's equity-relative caps should scale against.
     crypto-only -> Coinbase; else (equity-only or mixed) -> Robinhood (the equity lane).
@@ -241,6 +249,7 @@ def _fresh_live_eligible_candidates(db: Session, *, limit: int) -> list[Momentum
     )
     if _auto_arm_equity_only() and rows:
         rows = _enforce_ross_price_band(rows)
+        rows = _liquidity_rerank(rows)
     return _dedupe_by_symbol(rows, limit=int(limit))
 
 
@@ -291,6 +300,51 @@ def _enforce_ross_price_band(
             "candidates this pass)", exc_info=True,
         )
         return []
+
+
+def _liquidity_rerank(
+    rows: list[MomentumSymbolViability],
+) -> list[MomentumSymbolViability]:
+    """Re-rank the (price-band-passed) equity candidates by a 50/50 blend of their
+    VIABILITY rank and their DOLLAR-VOLUME rank, so the most FILLABLE high-quality
+    Ross small-caps are armed first.
+
+    The live spread gate blocks wide-spread entries, so a trigger on an illiquid name
+    never fills (06-09: 13 clean triggers, 0 fills — all wide-spread-blocked). Dollar-
+    volume is the cleanest selection-time liquidity proxy (the snapshot has no reliable
+    ask); higher dollar-volume -> tighter, fillable spread. The spread sweep proved the
+    payoff: 06-08 5m at liquid ~100bps = +$12,818 vs wide ~200bps = +$634. ADAPTIVE —
+    a rank-blend WITHIN the batch, no fixed dollar-volume threshold (operator principle
+    #1). FAIL-OPEN: any error / no liquidity data returns the rows unchanged (viability
+    order), so a snapshot hiccup never blocks arming. docs/DESIGN/MOMENTUM_LANE.md"""
+    if not _auto_arm_liquidity_bias() or len(rows) < 2:
+        return rows
+    try:
+        from .universe import snapshot_dollar_volumes
+
+        dvols = snapshot_dollar_volumes([r.symbol for r in rows])
+        if not dvols:
+            return rows  # no liquidity data -> keep viability order (fail-open)
+        # rows already in viability order (desc) -> position = viability rank (0 best).
+        vrank = {id(r): i for i, r in enumerate(rows)}
+        by_dvol = sorted(
+            rows, key=lambda r: dvols.get(str(r.symbol or "").strip().upper(), 0.0), reverse=True
+        )
+        drank = {id(r): i for i, r in enumerate(by_dvol)}
+        reranked = sorted(rows, key=lambda r: vrank[id(r)] + drank[id(r)])
+        if reranked and reranked[0] is not rows[0]:
+            logger.info(
+                "[auto_arm] liquidity-bias: armed-first now %s ($%.0fM dvol) over the "
+                "viability-only top %s ($%.0fM) — preferring fillable",
+                reranked[0].symbol,
+                dvols.get(str(reranked[0].symbol or "").strip().upper(), 0.0) / 1e6,
+                rows[0].symbol,
+                dvols.get(str(rows[0].symbol or "").strip().upper(), 0.0) / 1e6,
+            )
+        return reranked
+    except Exception:
+        logger.debug("[auto_arm] liquidity-bias re-rank errored — viability order", exc_info=True)
+        return rows
 
 
 def _symbol_free(db: Session, symbol: str, user_id: int | None) -> bool:
