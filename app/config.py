@@ -2340,7 +2340,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_CONCURRENT_OPEN_RISK_FRACTION"),
     )
     chili_momentum_risk_max_notional_per_trade_usd: float = Field(
-        default=300.0,
+        default=500.0,
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_MAX_NOTIONAL_PER_TRADE_USD"),
     )
@@ -2348,10 +2348,12 @@ class Settings(BaseSettings):
     # fixed $). Frozen at session admission; scales up as equity grows and DOWN in
     # drawdown. The cap above is the fixed-$ FALLBACK when equity is unavailable.
     # This single fraction is the documented per-trade size risk-appetite knob.
-    # Tuned to ~$300 initial notional at the current equity (e.g. 0.03 * $10.5k RH = ~$315)
-    # and SCALES with the account — bigger equity -> bigger trades, smaller in drawdown.
+    # NOTE: per-trade SIZE is risk-first (qty = max_loss / stop_distance); this is the
+    # upper NOTIONAL ceiling on that. 0.15 -> trades are sized by the ~1% equity loss cap,
+    # capped at 15% of equity. (A brief 0.03/~$300 experiment was reverted — it shrank
+    # positions below the intended risk-first size.)
     chili_momentum_risk_notional_fraction_of_equity: float = Field(
-        default=0.03,
+        default=0.15,
         ge=0.0,
         le=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_NOTIONAL_FRACTION_OF_EQUITY"),
