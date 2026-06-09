@@ -1003,6 +1003,25 @@ def _fmt_base_size(q: float) -> str:
     return s if s else "0"
 
 
+def _fmt_limit_price_buy(p: float) -> str:
+    """Format a BUY limit price as a venue-safe tick string. Prices >= $1 (the
+    equity Ross band is $1-$20) round UP to the penny so the marketable buy stays
+    marketable (limit at/above the ask); sub-$1 (crypto / penny names) passes finer
+    precision for the venue adapter to quantize to its own increment. Rounding UP on
+    a buy never makes the limit LESS marketable, so the fill is not starved. Pure +
+    side-effect-free for unit testing. (docs/DESIGN/MOMENTUM_LANE.md)"""
+    try:
+        if not math.isfinite(p) or p <= 0:
+            return "0"
+        if p >= 1.0:
+            ticked = math.ceil(p * 100.0 - 1e-9) / 100.0
+            return f"{ticked:.2f}"
+        s = f"{p:.8f}".rstrip("0").rstrip(".")
+        return s if s else "0"
+    except Exception:
+        return f"{p}"
+
+
 def _notional_guard_multiplier() -> float:
     try:
         raw_bps = getattr(settings, "chili_momentum_order_notional_guard_bps", 25.0)
@@ -2149,6 +2168,16 @@ def tick_live_session(
                 "blocked": True,
                 "reason": "notional_cap",
             }
+        # Ross-style marketable-LIMIT entry: cap the fill at the guarded ask (ask +
+        # the notional-guard buffer) instead of a market order that can SWEEP a thin
+        # low-float book to a catastrophic price (the live stale_bbo / 300bps-abs-cap
+        # failure mode that blocked every wide-spread name). The limit stays
+        # marketable (at/above the ask) so it fills on the break, but never worse than
+        # guarded_ask — the exact price the notional guard already sized against. If
+        # it does not fill (the price ran away), the entry ack-timeout cancels it and
+        # re-watches: a missed fill, not a chase. (docs/DESIGN/MOMENTUM_LANE.md)
+        entry_limit_px = guarded_ask
+        entry_limit_str = _fmt_limit_price_buy(entry_limit_px)
         le["entry_notional_guard"] = {
             "max_notional_usd": max_notional,
             "ask": ask,
@@ -2157,7 +2186,8 @@ def tick_live_session(
             "guarded_ask": guarded_ask,
             "estimated_guarded_notional_usd": estimated_guarded_notional,
             "quantity": qty,
-            "order_type": "market",
+            "order_type": "limit",
+            "limit_price": entry_limit_str,
             "spread_bps": spread_bps_live,
             "slippage_bps_ref": slip_ref,
         }
@@ -2166,7 +2196,8 @@ def tick_live_session(
             decision_packet_id,
             {
                 "surface": "momentum_live_runner_entry",
-                "order_type": "market",
+                "order_type": "limit",
+                "limit_price": entry_limit_str,
                 "side": "buy",
                 "product_id": product_id,
                 "bid": bid,
@@ -2186,19 +2217,27 @@ def tick_live_session(
         _commit_le(sess, le)
 
         cid = f"chili_ml_e_{sess.id}_{(sess.correlation_id or 'x')[:8]}_{uuid.uuid4().hex[:10]}"[:120]
-        res = adapter.place_market_order(
+        res = adapter.place_limit_order_gtc(
             product_id=product_id,
             side="buy",
             base_size=_fmt_base_size(qty),
+            limit_price=entry_limit_str,
             client_order_id=cid,
         )
         le["entry_submitted"] = True
         le["entry_submit_utc"] = _utcnow().isoformat()
+        le["entry_order_type"] = "limit"
+        le["entry_limit_price"] = entry_limit_str
         le["entry_client_order_id"] = res.get("client_order_id") or cid
         le["entry_order_id"] = res.get("order_id")
         le["entry_place_result"] = {"ok": res.get("ok"), "error": res.get("error")}
         _commit_le(sess, le)
-        _emit(db, sess, "live_entry_submitted", {"client_order_id": le["entry_client_order_id"], "result": res})
+        _emit(db, sess, "live_entry_submitted", {
+            "client_order_id": le["entry_client_order_id"],
+            "order_type": "limit",
+            "limit_price": entry_limit_str,
+            "result": res,
+        })
         if not res.get("ok"):
             _safe_transition(db, sess, STATE_LIVE_ERROR)
             db.flush()

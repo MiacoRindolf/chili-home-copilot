@@ -80,6 +80,8 @@ def _mk_adapter():
     )
     ad.get_product.return_value = (prod, _fresh())
     ad.place_market_order.return_value = {"ok": True, "order_id": "ord-entry-1", "client_order_id": "cid-e1"}
+    # Momentum entries are now marketable-LIMIT orders (sweep-protected); mirror the envelope.
+    ad.place_limit_order_gtc.return_value = {"ok": True, "order_id": "ord-entry-1", "client_order_id": "cid-e1"}
     ad.get_order.return_value = (
         NormalizedOrder(
             order_id="ord-entry-1",
@@ -585,6 +587,7 @@ def test_kill_switch_blocks_before_entry(monkeypatch, db: Session) -> None:
     assert out.get("blocked") or sess.state == STATE_LIVE_ERROR
     assert sess.state == STATE_LIVE_ERROR
     ad.place_market_order.assert_not_called()
+    ad.place_limit_order_gtc.assert_not_called()
 
 
 def test_wide_live_bbo_blocks_market_entry_without_error(monkeypatch, db: Session) -> None:
@@ -631,6 +634,7 @@ def test_wide_live_bbo_blocks_market_entry_without_error(monkeypatch, db: Sessio
     assert out == {"ok": True, "blocked": True, "reason": "wide_bbo_spread"}
     assert sess.state == STATE_WATCHING_LIVE
     ad.place_market_order.assert_not_called()
+    ad.place_limit_order_gtc.assert_not_called()
     gate = (sess.risk_snapshot_json or {})["momentum_live_execution"]["last_quote_quality_gate"]
     assert gate["spread_bps"] == 200.0
 
