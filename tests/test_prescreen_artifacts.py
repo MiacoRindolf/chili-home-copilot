@@ -248,3 +248,54 @@ def test_run_daily_prescreen_recovers_from_connection_drop(
     active = load_active_global_candidate_tickers(db)
     assert "AAPL" in active
     assert "MSFT" in active
+
+
+@patch("app.services.trading.prescreen_job.collect_internal_prescreen_tickers")
+@patch("app.services.trading.prescreen_job.collect_prescreen_with_provenance")
+def test_snapshot_committed_before_collection_survives_midrun_rollback(
+    mock_collect, mock_internal, db,
+) -> None:
+    """Regression for the trading_prescreen_candidates_snapshot_id_fkey storm.
+
+    The real incident: the snapshot was only *flushed* before the multi-minute
+    external collection, so the connection sat idle-in-transaction past the 120s
+    ``idle_in_transaction_session_timeout`` and Postgres killed it. The drop
+    rolled the session back (``rollback_if_poisoned``) — discarding the
+    snapshot — yet ``snap.id`` still held the orphaned value, so the candidate
+    upsert violated the FK. This reproduces that exact sequence by rolling the
+    session back mid-collection and asserts the run still succeeds with no
+    orphaned ``snapshot_id`` (i.e. the snapshot was committed up front and is a
+    durable FK target). Before the fix this raised the FK IntegrityError and the
+    run returned ``ok=False``.
+    """
+    mock_collect.return_value = (
+        ["AAPL", "MSFT"],
+        {"AAPL": ["massive_top_gainers"], "MSFT": ["core_default"]},
+        {"massive_top_gainers": 1, "core_default": 1},
+        0.05,
+    )
+
+    def _rollback_midrun_then_return(session):
+        # Mirror rollback_if_poisoned firing after a mid-transaction disconnect:
+        # the session is rolled back clean, which would discard any
+        # flushed-but-uncommitted snapshot along with it.
+        session.rollback()
+        return {}
+
+    mock_internal.side_effect = _rollback_midrun_then_return
+
+    result = run_daily_prescreen_job(db)
+    assert result.get("ok") is True
+
+    active = load_active_global_candidate_tickers(db)
+    assert "AAPL" in active
+    assert "MSFT" in active
+
+    orphans = db.execute(
+        text(
+            "SELECT count(*) FROM trading_prescreen_candidates c "
+            "WHERE c.snapshot_id IS NOT NULL AND NOT EXISTS ("
+            "SELECT 1 FROM trading_prescreen_snapshots s WHERE s.id = c.snapshot_id)"
+        )
+    ).scalar()
+    assert orphans == 0
