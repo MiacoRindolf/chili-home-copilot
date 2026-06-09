@@ -4124,6 +4124,25 @@ def _run_crypto_viability_refresh_job():
         db.close()
 
 
+def _merge_equity_refresh_universe(ross_tickers, active_session_symbols) -> list[str]:
+    """Pure: build the equity-refresh scan list = the screened Ross movers UNION the
+    EQUITY symbols of currently-active live sessions, de-duped + uppercased + sorted.
+
+    The active-session symbols are folded in so a name that is being WATCHED but has
+    rotated out of the day's top-mover screen still gets re-scored every cycle — its
+    viability snapshot stays fresh and the live boundary gate stops rejecting it as
+    "Viability snapshot stale" (the #1 fill-blocker). Crypto ``-USD`` pairs are
+    excluded (they have their own fast venue feed and are not equity-scanned).
+    Caller maps ``[]`` -> ``None`` (scans fall back to their default universe)."""
+    active_eq = {
+        str(s).upper()
+        for s in (active_session_symbols or [])
+        if s and not str(s).upper().endswith("-USD")
+    }
+    screened = {str(t).upper() for t in (ross_tickers or []) if t}
+    return sorted(screened | active_eq)
+
+
 def _run_equity_viability_refresh_job():
     """Equity PARITY with crypto: refresh equity momentum viability on its OWN fast
     job at the SAME cadence as the crypto venue feed (``_run_crypto_viability_refresh_job``),
@@ -4149,11 +4168,39 @@ def _run_equity_viability_refresh_job():
         ross_tickers = build_equity_universe(EQUITY_ROSS_SMALLCAP)
     except Exception:
         ross_tickers = []
-    scan_tickers = ross_tickers or None
-    if ross_tickers:
+
+    # ALSO always re-score the EQUITY symbols of currently-active live momentum
+    # sessions. The live boundary-risk gate REJECTS an entry when the viability
+    # snapshot is older than the freshness window; the refresh otherwise re-scores
+    # only the day's top movers, so a name that is actively WATCHED but has rotated
+    # out of the top-mover list goes stale and EVERY entry on it is blocked
+    # ("Viability snapshot stale" — ~100% of boundary-risk blocks at the open).
+    # Keeping watched symbols in the scan keeps their snapshot fresh so a setup-in-
+    # progress can actually reach entry. Equity-only (crypto "-USD" has its own fast
+    # venue feed). Fail-open: a query hiccup must never break the refresh.
+    # docs/DESIGN/MOMENTUM_LANE.md
+    _active: set[str] = set()
+    try:
+        from .trading.momentum_neural.auto_arm import _symbols_with_active_live_session
+
+        _ses = SessionLocal()
+        try:
+            _active = _symbols_with_active_live_session(_ses, user_id=None)
+        finally:
+            try:
+                _ses.rollback()
+            except Exception:
+                pass
+            _ses.close()
+    except Exception:
+        _active = set()
+
+    merged = _merge_equity_refresh_universe(ross_tickers, _active)
+    scan_tickers = merged or None
+    if merged:
         logger.info(
-            "[scheduler] equity Ross universe: %d small-cap movers screened from snapshot",
-            len(ross_tickers),
+            "[scheduler] equity Ross universe: %d screened + watched-session symbols -> %d scanned fresh",
+            len(ross_tickers or []), len(merged),
         )
 
     # The equity momentum scan does per-ticker OHLCV fetches and can run for minutes.
