@@ -422,3 +422,46 @@ def test_require_fresh_off_restores_arm_on_break_only(happy):
     out = aa.run_auto_arm_pass(_FakeDB())
     assert out.get("armed", 0) == 0
     assert out["skipped"] == "no_active_trigger"
+
+
+# ── Wide probe net + time budget (a fresh-firing #11+ name is no longer starved by the
+#    old top-10-by-viability truncation; the net is widened but the wave stays bounded) ──
+
+def test_scan_limit_widened_beyond_old_top10():
+    """The candidate probe net must be meaningfully wider than the old top-10 truncation
+    that starved a fresh-firing mid-viability name (NPT Jun-8 ranked #11+)."""
+    assert aa._scan_limit() >= 25
+
+
+def test_probe_time_budget_reads_and_floors(happy):
+    """The probe budget reads the setting and floors at 1.0s (never zero/negative)."""
+    happy.setattr(aa.settings, "chili_momentum_auto_arm_probe_time_budget_seconds", 12.0, raising=False)
+    assert aa._probe_time_budget() == 12.0
+    happy.setattr(aa.settings, "chili_momentum_auto_arm_probe_time_budget_seconds", -1.0, raising=False)
+    assert aa._probe_time_budget() == 1.0
+
+
+def test_probe_budget_arms_fast_firing_despite_slow_straggler(happy, monkeypatch):
+    """A slow-probing HIGHER-viability straggler must NOT block arming a name that probed
+    quickly and is firing — the time budget bounds the wave so the pass returns ~budget,
+    not ~straggler. This is the anti-starvation property behind the NPT arm-timing fix."""
+    import time
+
+    happy.setattr(aa.settings, "chili_momentum_auto_arm_probe_time_budget_seconds", 1.0, raising=False)
+    cands = [_cand("SLOW-USD", 8, 0.90), _cand("FAST-USD", 8, 0.55)]
+    happy.setattr(aa, "_fresh_live_eligible_candidates", lambda db, *, limit: cands)
+    happy.setattr(aa, "_symbol_market_open", lambda sym: True)
+
+    def _probe(sym):
+        if sym == "SLOW-USD":
+            time.sleep(3.0)  # straggler far beyond the 1s budget
+        return (True, "pullback_break_ok", None)
+
+    monkeypatch.setattr(aa, "_probe_candidate", _probe)
+    t0 = time.monotonic()
+    out = aa.run_auto_arm_pass(_FakeDB())
+    elapsed = time.monotonic() - t0
+    assert out["armed"] == 1
+    assert out["symbol"] == "FAST-USD"  # higher-viability SLOW straggler did not block it
+    assert out.get("probe_timed_out") is True
+    assert elapsed < 2.5  # returned ~budget (1s), not ~straggler (3s)

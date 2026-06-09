@@ -3093,11 +3093,31 @@ class Settings(BaseSettings):
         le=3600,
         validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_LIVE_SCHEDULER_INTERVAL_SECONDS"),
     )
+    # Max DISTINCT live-eligible candidates probed for an entry trigger per auto-arm tick.
+    # Was 10, which on a hot day (many 24h movers) truncated the board by viability_score
+    # and STARVED a fresh-firing mid-viability name (NPT Jun-8 was live-eligible at 17:11
+    # but ranked #11+ behind 8 names up >100%, so it was never probed until the board
+    # thinned ~18:51 — after its setup). The M4 freshness picker only re-ranks WITHIN this
+    # slice, so the slice width was the leak. Widened so the freshness picker sees the whole
+    # fresh board; the probe wave itself is bounded by the time budget below (derived
+    # ~= trigger_workers x budget / per-probe-latency), so a larger ceiling never blows the
+    # ~30s scheduler cadence. docs/DESIGN/MOMENTUM_LANE_ENTRY_STOP_REALIGNMENT.md
     chili_momentum_auto_arm_scan_limit: int = Field(
-        default=10,
+        default=40,
         ge=1,
         le=100,
         validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_SCAN_LIMIT"),
+    )
+    # Wall-clock budget for the whole concurrent entry-trigger probe wave. Auto-arm arms
+    # from whatever has COMPLETED within this budget (the freshest-firing of those wins);
+    # any candidate not probed in time defers to the next tick. This is the ADAPTIVE control
+    # on probe breadth (breadth = as many as finish in the budget — no magic candidate count)
+    # AND the safety belt that keeps a wide net inside the scheduler cadence. Kept < 30s.
+    chili_momentum_auto_arm_probe_time_budget_seconds: float = Field(
+        default=18.0,
+        ge=1.0,
+        le=29.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_PROBE_TIME_BUDGET_SECONDS"),
     )
     # Selection->entry alignment (M4 keystone): the viability board ranks 24h movers,
     # but many FADE into a deep intraday retrace before the pullback gate sees them
