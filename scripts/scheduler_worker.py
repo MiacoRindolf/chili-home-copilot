@@ -284,58 +284,6 @@ def main() -> None:
     else:
         logger.info("[code_brain] DISABLED (set CHILI_DISPATCH_ENABLED=1 to turn on)")
 
-    # ── NBBO spread tape (accurate-replay data) ───────────────────────────
-    # Persist the CLEAN consolidated bid/ask (Massive snapshot lastQuote) for the
-    # Ross universe each RTH cycle, so the spread-sensitive replay uses REAL spreads
-    # instead of a proxy (the proxy read PAVS at 53bps vs the 317bps the lane saw).
-    # Own BackgroundScheduler (mirrors the code_brain dispatch pattern); fully
-    # best-effort — a sampler failure never touches the trade path. (nbbo_tape.py)
-    _nbbo_sched = None
-    try:
-        from app.config import settings as _ncfg
-        if bool(getattr(_ncfg, "chili_momentum_nbbo_tape_enabled", True)):
-            from apscheduler.schedulers.background import BackgroundScheduler as _BgSched
-            from apscheduler.triggers.interval import IntervalTrigger as _IntTrig
-            from app.db import SessionLocal as _NSL
-            from app.services.trading.momentum_neural.nbbo_tape import (
-                prune_nbbo_tape as _nbbo_prune,
-                sample_universe_nbbo_spreads as _nbbo_sample,
-            )
-
-            def _nbbo_sample_job():
-                try:
-                    with _NSL() as _ns:
-                        _nbbo_sample(_ns)
-                except Exception as _nex:
-                    logger.debug("[nbbo_tape] sample job failed: %s", _nex)
-
-            def _nbbo_prune_job():
-                try:
-                    with _NSL() as _ns:
-                        _nbbo_prune(_ns)
-                except Exception as _nex:
-                    logger.debug("[nbbo_tape] prune job failed: %s", _nex)
-
-            _samp_secs = int(getattr(_ncfg, "chili_momentum_nbbo_tape_sample_seconds", 60) or 60)
-            _nbbo_sched = _BgSched()
-            _nbbo_sched.add_job(
-                _nbbo_sample_job, _IntTrig(seconds=_samp_secs),
-                id="momentum_nbbo_sample", max_instances=1, coalesce=True, replace_existing=True,
-            )
-            _nbbo_sched.add_job(
-                _nbbo_prune_job, _IntTrig(hours=6),
-                id="momentum_nbbo_prune", max_instances=1, coalesce=True, replace_existing=True,
-            )
-            _nbbo_sched.start()
-            logger.info(
-                "[nbbo_tape] sampler ENABLED (every %ss, RTH-gated; prune every 6h) "
-                "-> accurate spread-sensitive replay", _samp_secs,
-            )
-        else:
-            logger.info("[nbbo_tape] DISABLED (CHILI_MOMENTUM_NBBO_TAPE_ENABLED=0)")
-    except Exception as _ne:
-        logger.warning("[nbbo_tape] wiring failed: %s", _ne)
-
     try:
         while True:
             time.sleep(3600)
@@ -343,12 +291,11 @@ def main() -> None:
         logger.info("[scheduler_worker] Shutting down")
     finally:
         stop_scheduler()
-        for _sched in (_dispatch_sched, _nbbo_sched):
-            if _sched is not None:
-                try:
-                    _sched.shutdown(wait=False)
-                except Exception:
-                    pass
+        if _dispatch_sched is not None:
+            try:
+                _dispatch_sched.shutdown(wait=False)
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
