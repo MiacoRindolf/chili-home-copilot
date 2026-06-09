@@ -313,3 +313,47 @@ def symbols_within_profile_price_band(
             continue
         kept.add(t)
     return kept, True
+
+
+def snapshot_dollar_volumes(
+    symbols,
+    *,
+    snapshot: list[dict] | None = None,
+    max_age_seconds: float | None = EQUITY_ROSS_SMALLCAP.snapshot_max_age_seconds,
+) -> dict[str, float]:
+    """Map each of ``symbols`` to its CURRENT dollar-volume (price * today's share
+    volume) from the full-market snapshot — a selection-time LIQUIDITY proxy.
+
+    Higher dollar-volume correlates with a tighter, FILLABLE BBO spread. The live
+    lane blocks wide-spread entries, so a trigger on an illiquid name never fills;
+    preferring high-dollar-volume movers at the selection gate is the #1 lever for
+    turning triggers into FILLS (spread sweep: 06-08 5m liquid ~100bps = +$12,818
+    vs wide ~200bps = +$634). The snapshot carries no reliable ask, so dollar-volume
+    is the cleanest available proxy. Fail-open: a symbol missing / with no price or
+    volume is simply absent from the map (the caller treats absent as 0.0)."""
+    want = {str(s).strip().upper() for s in (symbols or []) if str(s or "").strip()}
+    if not want:
+        return {}
+    if snapshot is None:
+        try:
+            from ...massive_client import get_full_market_snapshot
+
+            snapshot = get_full_market_snapshot(max_age_seconds=max_age_seconds) or []
+        except Exception:
+            logger.debug("[universe] dollar-volume snapshot fetch failed", exc_info=True)
+            snapshot = []
+    out: dict[str, float] = {}
+    for s in snapshot or []:
+        try:
+            if not isinstance(s, dict):
+                continue
+            t = str(s.get("ticker") or "").strip().upper()
+            if t not in want:
+                continue
+            px = _snapshot_price(s)
+            vol = _f((s.get("day") or {}).get("v")) or 0.0
+            if px and px > 0 and vol > 0:
+                out[t] = float(px) * float(vol)
+        except Exception:
+            continue
+    return out
