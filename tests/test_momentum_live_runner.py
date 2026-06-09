@@ -670,3 +670,55 @@ def test_live_execution_summary_persisted(monkeypatch, db: Session) -> None:
 def test_dev_tick_endpoint_gated(client) -> None:
     r = client.post("/api/trading/momentum/live-runner/tick", json={"session_id": 1})
     assert r.status_code == 404
+
+
+def test_ack_timeout_adopts_filled_order_not_orphan(monkeypatch, db: Session) -> None:
+    """RACE GUARD: when the entry order FILLS between the 10s ack-timeout and the
+    (slow, <=30s-cadence) tick, the session must ADOPT the fill, NOT cancel +
+    abandon it -> orphan. [CTNT 2026-06-09: filled @21s, ack-timeout @22.9s ->
+    orphaned -> -$283.] First get_order (top fill-handler) sees OPEN; the ack-
+    timeout re-fetch sees FILLED -> must return pending (adopt), not re-watch."""
+    from datetime import datetime, timedelta
+    reset_duplicate_client_order_guard_for_tests()
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
+    vid, _ = _seed_live_eligible_row(db, symbol="RACE-USD")
+    db.commit()
+    uid = _uid(db, "race")
+    from app.services.trading.momentum_neural.persistence import create_trading_automation_session
+
+    sess = create_trading_automation_session(
+        db, user_id=uid, symbol="RACE-USD", variant_id=vid, mode="live",
+        state=STATE_LIVE_PENDING_ENTRY,
+        risk_snapshot_json={
+            RISK_SNAPSHOT_KEY: {"allowed": True},
+            "momentum_risk_policy_summary": {"disable_live_if_governance_inhibit": True},
+            "momentum_live_execution": {
+                "entry_submitted": True,
+                "entry_order_id": "o-race",
+                "entry_submit_utc": (datetime.utcnow() - timedelta(seconds=20)).isoformat(),
+            },
+        },
+    )
+    db.commit()
+    ad = _mk_adapter()
+    _open = NormalizedOrder(order_id="o-race", client_order_id="cid", product_id="RACE-USD",
+                            side="buy", status="OPEN", order_type="limit",
+                            filled_size=0.0, average_filled_price=None)
+    _filled = NormalizedOrder(order_id="o-race", client_order_id="cid", product_id="RACE-USD",
+                              side="buy", status="filled", order_type="limit",
+                              filled_size=809.0, average_filled_price=2.21)
+    _calls = {"n": 0}
+    def _get_order(_oid):
+        _calls["n"] += 1
+        return (_open, _fresh()) if _calls["n"] == 1 else (_filled, _fresh())
+    ad.get_order.side_effect = _get_order
+
+    with patch("app.services.trading.momentum_neural.live_runner.is_kill_switch_active", return_value=False):
+        out = tick_live_session(db, sess.id, adapter_factory=lambda: ad)
+    db.commit(); db.refresh(sess)
+
+    # adopted (not abandoned): re-fetch saw the fill -> pending, no cancel, order kept
+    assert out.get("pending") == "ack_timeout_filled_adopt", out
+    ad.cancel_order.assert_not_called()
+    assert sess.state != STATE_WATCHING_LIVE
+    assert (sess.risk_snapshot_json or {})["momentum_live_execution"].get("entry_order_id") == "o-race"
