@@ -964,6 +964,28 @@ def runner_boundary_risk_ok(
     return bool(ev.get("allowed", False)), ev
 
 
+def _only_transient_freshness_block(ev: dict[str, Any]) -> bool:
+    """True iff the boundary-risk evaluation failed EXCLUSIVELY on the transient
+    ``viability_freshness`` check — a stale snapshot the equity refresh will renew —
+    i.e. there is at least one failing check and EVERY failing check is the freshness
+    one. Used to re-watch (retry) a freshly-armed session instead of terminally
+    ERRORing it on a staleness blip. FAIL-SAFE: any unexpected shape / parse error
+    returns False so the caller keeps its conservative hard-error.
+
+    Keys on the structured ``checks`` list (``_check`` dicts: ``id`` + ``ok``), not
+    free-text, so it never matches a kill-switch / drawdown / cap failure."""
+    try:
+        checks = ev.get("checks")
+        if not isinstance(checks, list) or not checks:
+            return False
+        failed = [c for c in checks if isinstance(c, dict) and not c.get("ok", True)]
+        if not failed:
+            return False
+        return all(str(c.get("id") or "") == "viability_freshness" for c in failed)
+    except Exception:
+        return False
+
+
 def _round_base_size(qty: float, increment: Optional[float], min_sz: Optional[float]) -> float:
     if qty <= 0:
         return 0.0
@@ -1520,7 +1542,19 @@ def tick_live_session(
             {"severity": ev.get("severity"), "errors": ev.get("errors")},
         )
         if sess.state in (STATE_ARMED_PENDING_RUNNER, STATE_QUEUED_LIVE):
-            _safe_transition(db, sess, STATE_LIVE_ERROR)
+            # A freshly-armed session whose ONLY boundary-risk failure is a TRANSIENT
+            # `viability_freshness` staleness must NOT be terminally errored — the
+            # equity refresh re-scores it within the freshness window, so re-watch and
+            # retry. Viability staleness was ~100% of boundary-risk blocks at the
+            # open; hard-erroring here discarded freshly-armed setups before they
+            # could enter. Persistent / safety failures (kill-switch, drawdown,
+            # daily-loss cap, concurrency, …) still hard-error. FAIL-SAFE: anything we
+            # cannot confirm is freshness-only keeps the conservative ERROR.
+            # docs/DESIGN/MOMENTUM_LANE.md
+            if _only_transient_freshness_block(ev):
+                _safe_transition(db, sess, STATE_WATCHING_LIVE)
+            else:
+                _safe_transition(db, sess, STATE_LIVE_ERROR)
             db.flush()
             return {"ok": True, "blocked": True, "risk_evaluation": ev}
         if sess.state == STATE_LIVE_PENDING_ENTRY and le.get("entry_order_id") and not le.get("position"):
