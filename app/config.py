@@ -2376,6 +2376,17 @@ class Settings(BaseSettings):
         le=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_DAILY_LOSS_FRACTION_OF_EQUITY"),
     )
+    # SIZING BASIS: use account BUYING POWER (margin-inclusive) rather than just settled
+    # cash/equity as the base for the equity-relative caps above, so the lane utilizes
+    # available margin. When True (default) the per-venue basis is buying_power (falling
+    # back to equity if unavailable); set False to size off settled equity only. NOTE: all
+    # the *_fraction_of_equity caps (notional, per-trade loss, daily-loss) then scale off
+    # buying power — bigger buying power => bigger size AND bigger risk (margin amplifies
+    # both). At a near-cash account buying_power ~= equity so the effect is small.
+    chili_momentum_risk_size_use_buying_power: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_SIZE_USE_BUYING_POWER"),
+    )
     # Ross-style PROFIT-GIVEBACK session halt (the upside mirror of the daily-loss
     # breaker). Once today's realized PnL has PEAKED at a meaningful, equity-relative
     # green AND has since given back this FRACTION of that peak, the momentum LIVE lane

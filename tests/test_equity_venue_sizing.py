@@ -30,3 +30,17 @@ def test_caps_scale_to_the_right_venue_equity(monkeypatch):
 def test_falls_back_to_fixed_when_equity_unavailable(monkeypatch):
     monkeypatch.setattr(broker_service, "get_portfolio", lambda: {})
     assert rp.equity_relative_notional_cap(500.0, "robinhood_spot") == 500.0  # fixed fallback
+
+
+def test_sizing_basis_uses_buying_power(monkeypatch):
+    # Default: the sizing basis is BUYING POWER (margin-inclusive), not settled equity.
+    monkeypatch.setattr(broker_service, "get_portfolio", lambda: {"equity": 10000.0, "buying_power": 21000.0})
+    monkeypatch.setattr(rp.settings, "chili_momentum_risk_size_use_buying_power", True, raising=False)
+    assert rp._account_equity_usd("robinhood_spot") == 21000.0  # buying power utilized
+    # Opt-out -> settled equity only.
+    monkeypatch.setattr(rp.settings, "chili_momentum_risk_size_use_buying_power", False, raising=False)
+    assert rp._account_equity_usd("robinhood_spot") == 10000.0
+    # Buying power missing -> fall back to equity even when the flag is on.
+    monkeypatch.setattr(rp.settings, "chili_momentum_risk_size_use_buying_power", True, raising=False)
+    monkeypatch.setattr(broker_service, "get_portfolio", lambda: {"equity": 10000.0})
+    assert rp._account_equity_usd("robinhood_spot") == 10000.0
