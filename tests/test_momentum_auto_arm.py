@@ -76,7 +76,8 @@ def test_kill_switch_skips(happy):
 
 
 def test_concurrency_skips(happy):
-    # default max_concurrent_live_sessions is now 5 — full at 5 active
+    # at the (adaptive) live-session cap -> skip. Pin the cap deterministically.
+    happy.setattr(aa, "_max_live_sessions", lambda: 5)
     happy.setattr(aa, "_active_live_session_count", lambda db, *, user_id: 5)
     out = aa.run_auto_arm_pass(_FakeDB())
     assert out["skipped"] == "live_session_active"
@@ -85,6 +86,7 @@ def test_concurrency_skips(happy):
 
 def test_arms_when_below_concurrency_cap(happy):
     # 3 active < 5 cap -> still arms a new one
+    happy.setattr(aa, "_max_live_sessions", lambda: 5)
     happy.setattr(aa, "_active_live_session_count", lambda db, *, user_id: 3)
     out = aa.run_auto_arm_pass(_FakeDB())
     assert out["armed"] == 1
@@ -495,26 +497,32 @@ def test_adaptive_concurrency_falls_back_to_base_without_equity(monkeypatch):
     assert rp.adaptive_max_concurrent_live_sessions() == 5
 
 
-def test_adaptive_concurrency_scales_with_equity(monkeypatch):
-    """N = equity * frac / per_trade_loss, clamped to [base, 20]. 10000*0.05/50 = 10."""
+def test_adaptive_concurrency_is_basis_independent_ratio(monkeypatch):
+    """N = open_risk_fraction / loss_fraction (= simultaneous-risk budget ratio) and is
+    INDEPENDENT of account size/margin — growth scales per-trade SIZE, not the slot count.
+    0.10 / 0.01 = 10, the same at $10k, $25k, or $100k (this is what stops a 2x buying-power
+    basis from also doubling the slots)."""
     from app.services.trading.momentum_neural import risk_policy as rp
-    monkeypatch.setattr(rp, "_account_equity_usd", lambda ef=None: 10_000.0)
     monkeypatch.setattr(rp.settings, "chili_momentum_risk_max_concurrent_live_sessions", 5, raising=False)
-    monkeypatch.setattr(rp.settings, "chili_momentum_risk_concurrent_open_risk_fraction", 0.05, raising=False)
+    monkeypatch.setattr(rp.settings, "chili_momentum_risk_concurrent_open_risk_fraction", 0.10, raising=False)
+    monkeypatch.setattr(rp.settings, "chili_momentum_risk_loss_fraction_of_equity", 0.01, raising=False)
     monkeypatch.setattr(rp.settings, "chili_momentum_risk_max_loss_per_trade_usd", 50.0, raising=False)
     monkeypatch.setattr(rp.settings, "chili_momentum_auto_arm_crypto_only", False, raising=False)
-    assert rp.adaptive_max_concurrent_live_sessions() == 10
+    for eq in (10_000.0, 25_000.0, 100_000.0):
+        monkeypatch.setattr(rp, "_account_equity_usd", lambda ef=None, _e=eq: _e)
+        assert rp.adaptive_max_concurrent_live_sessions() == 10, f"eq={eq}"
 
 
 def test_adaptive_concurrency_clamps_to_ceiling(monkeypatch):
-    """A huge equity is clamped at the 20 ceiling (guardrail)."""
+    """A large risk-budget ratio is clamped at the 15 guardrail (0.30 / 0.01 = 30 -> 15)."""
     from app.services.trading.momentum_neural import risk_policy as rp
-    monkeypatch.setattr(rp, "_account_equity_usd", lambda ef=None: 1_000_000.0)
+    monkeypatch.setattr(rp, "_account_equity_usd", lambda ef=None: 100_000.0)
     monkeypatch.setattr(rp.settings, "chili_momentum_risk_max_concurrent_live_sessions", 5, raising=False)
-    monkeypatch.setattr(rp.settings, "chili_momentum_risk_concurrent_open_risk_fraction", 0.05, raising=False)
+    monkeypatch.setattr(rp.settings, "chili_momentum_risk_concurrent_open_risk_fraction", 0.30, raising=False)
+    monkeypatch.setattr(rp.settings, "chili_momentum_risk_loss_fraction_of_equity", 0.01, raising=False)
     monkeypatch.setattr(rp.settings, "chili_momentum_risk_max_loss_per_trade_usd", 50.0, raising=False)
     monkeypatch.setattr(rp.settings, "chili_momentum_auto_arm_crypto_only", False, raising=False)
-    assert rp.adaptive_max_concurrent_live_sessions() == 20
+    assert rp.adaptive_max_concurrent_live_sessions() == 15
 
 
 def test_adaptive_concurrency_zero_fraction_disables(monkeypatch):

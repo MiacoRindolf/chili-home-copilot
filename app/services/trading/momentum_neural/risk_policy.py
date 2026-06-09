@@ -191,14 +191,14 @@ def equity_relative_daily_loss_cap(fixed_fallback_usd: float, execution_family: 
 
 
 def adaptive_max_concurrent_live_sessions() -> int:
-    """Live-session concurrency cap scaled by account equity, bounded by a max SIMULTANEOUS
-    open-risk fraction. N = clamp(equity * frac / max_loss_per_trade, base, 20), where base
-    is the fixed ``max_concurrent_live_sessions`` floor and frac is
-    ``chili_momentum_risk_concurrent_open_risk_fraction``. Worst-case simultaneous loss
-    across concurrent sessions <= frac * equity (auto-de-risks in drawdown, grows with
-    equity). Falls back to the fixed base when equity/fraction is unavailable (never scale
-    against unknown equity). Equity is read per-venue: Coinbase when crypto-only, else
-    Robinhood (the equity lane). docs/DESIGN/MOMENTUM_LANE.md"""
+    """Live-session concurrency cap = the simultaneous-open-risk BUDGET RATIO, bounded.
+    N = clamp(round(frac / loss_fraction), base, 15): with the per-trade risk evaluated
+    equity-relative (eq * loss_fraction), N = chili_momentum_risk_concurrent_open_risk_fraction
+    / chili_momentum_risk_loss_fraction_of_equity — INDEPENDENT of account size/margin, so
+    growing equity/buying-power scales per-trade SIZE, not the slot COUNT. Worst-case
+    simultaneous loss across N sessions <= frac * basis. Falls back to the fixed base
+    (``max_concurrent_live_sessions``) when the account is unavailable. Basis read per-venue:
+    Coinbase when crypto-only, else Robinhood (the equity lane). docs/DESIGN/MOMENTUM_LANE.md"""
     base = max(1, int(getattr(settings, "chili_momentum_risk_max_concurrent_live_sessions", 5) or 5))
     try:
         frac = float(getattr(settings, "chili_momentum_risk_concurrent_open_risk_fraction", 0.05) or 0.0)
@@ -224,7 +224,15 @@ def adaptive_max_concurrent_live_sessions() -> int:
     eq = _account_equity_usd(ef)
     if not eq or eq <= 0:
         return base
-    return max(base, min(20, int(math.floor(eq * frac / per_trade))))
+    # Use the ACTUAL equity-relative per-trade risk (eq * loss_fraction), NOT the fixed $
+    # cap, as the denominator — so N is the simultaneous-open-risk budget RATIO
+    # (frac / loss_fraction), INDEPENDENT of account size/margin. Account/margin growth
+    # scales the per-trade SIZE, not the COUNT: a 2x buying-power basis must NOT also double
+    # the slot count (that would 4x simultaneous risk). 15 is a hard guardrail ceiling.
+    risk = equity_relative_loss_cap(per_trade, ef)
+    if not risk or risk <= 0:
+        return base
+    return max(base, min(15, int(round(eq * frac / risk))))
 
 
 def compute_risk_first_quantity(
