@@ -239,3 +239,77 @@ def build_equity_universe(
         if len(out) >= max(1, int(profile.max_universe)):
             break
     return out
+
+
+def symbols_within_profile_price_band(
+    symbols,
+    profile: UniverseProfile = EQUITY_ROSS_SMALLCAP,
+    *,
+    snapshot: list[dict] | None = None,
+) -> tuple[set[str], bool]:
+    """Keep only ``symbols`` whose CURRENT price sits in the profile's instrument
+    CLASS band ``[price_min, price_max]``.
+
+    This is the LIVE-ARM instrument-class gate. ``build_equity_universe`` price-
+    screens the equity-viability *refresh*, but large-caps still reach
+    ``momentum_symbol_viability`` and go ``live_eligible`` via the BROAD brain
+    momentum scoring (``nm_momentum_crypto_intel``) — e.g. MU/MRVL on an earnings
+    breakout score "High Ross momentum quality" yet are $70-$100 names. That path
+    is NOT price-screened, so without this gate the $1-$20 Ross small-cap lane
+    would arm a $100 semiconductor with real money. Reuses the profile's EXISTING
+    ``price_min``/``price_max`` knobs (the documented instrument-class definition,
+    not a performance cap) — no new thresholds.
+
+    Returns ``(kept, snapshot_ok)``:
+      * ``kept``        — subset of ``symbols`` POSITIVELY confirmed in-band.
+      * ``snapshot_ok`` — ``False`` only when the full-market snapshot was entirely
+        unavailable, so the caller can fail SAFE (a live-money gate must not arm a
+        name it cannot confirm is in-class). A symbol present in the snapshot but
+        priced out-of-band, or absent from it, is dropped with ``snapshot_ok=True``.
+
+    When the profile declares no price band (both bounds ``None``) every symbol is
+    kept — the gate is a no-op for non-price-classed profiles.
+    """
+    want = {str(s).strip().upper() for s in (symbols or []) if str(s or "").strip()}
+    if not want:
+        return set(), True
+    if profile.price_min is None and profile.price_max is None:
+        return want, True  # no instrument-class band declared -> no constraint
+
+    if snapshot is None:
+        try:
+            from ...massive_client import get_full_market_snapshot
+
+            snapshot = get_full_market_snapshot(
+                max_age_seconds=profile.snapshot_max_age_seconds
+            ) or []
+        except Exception:
+            logger.debug("[universe] price-band snapshot fetch failed", exc_info=True)
+            snapshot = []
+    if not snapshot:
+        return set(), False  # total snapshot outage -> caller decides fail-open/safe
+
+    prices: dict[str, float] = {}
+    for s in snapshot:
+        try:
+            if not isinstance(s, dict):
+                continue
+            t = str(s.get("ticker") or "").strip().upper()
+            if t in want:
+                p = _snapshot_price(s)
+                if p is not None and p > 0:
+                    prices[t] = p
+        except Exception:
+            continue
+
+    kept: set[str] = set()
+    for t in want:
+        p = prices.get(t)
+        if p is None:
+            continue  # unknown current price -> drop (fail-safe for a live-arm pool)
+        if profile.price_min is not None and p < profile.price_min:
+            continue
+        if profile.price_max is not None and p > profile.price_max:
+            continue
+        kept.add(t)
+    return kept, True

@@ -239,7 +239,58 @@ def _fresh_live_eligible_candidates(db: Session, *, limit: int) -> list[Momentum
         .limit(max(int(limit) * 25, 200))
         .all()
     )
+    if _auto_arm_equity_only() and rows:
+        rows = _enforce_ross_price_band(rows)
     return _dedupe_by_symbol(rows, limit=int(limit))
+
+
+def _enforce_ross_price_band(
+    rows: list[MomentumSymbolViability],
+) -> list[MomentumSymbolViability]:
+    """Equity-only LIVE-ARM instrument-class gate: keep only candidates whose CURRENT
+    price sits in the Ross small-cap band ($1-$20 per ``EQUITY_ROSS_SMALLCAP``).
+
+    Large-caps (MU/MRVL on an earnings breakout) go ``live_eligible`` in
+    ``momentum_symbol_viability`` via the broad brain momentum scoring
+    (``nm_momentum_crypto_intel``), which is NOT price-screened — and
+    ``_fresh_live_eligible_candidates`` ranks by viability alone, so a $100 semi
+    would out-rank a real $3 Ross gapper and get armed with real money. This
+    enforces the lane's instrument CLASS at the selection gate, reusing the
+    profile's existing price knobs (no new thresholds). docs/DESIGN/MOMENTUM_LANE.md
+
+    Fail-SAFE: on a TOTAL snapshot outage, arm nothing we cannot confirm is in-class
+    (a live-money gate must not arm on unknown data) and log it so the freeze is
+    diagnosable; the lane resumes the instant the snapshot returns (~5min TTL, warm
+    through RTH). A helper error also fails safe rather than leaking large-caps."""
+    try:
+        from .universe import EQUITY_ROSS_SMALLCAP, symbols_within_profile_price_band
+
+        kept, snapshot_ok = symbols_within_profile_price_band(
+            [r.symbol for r in rows], EQUITY_ROSS_SMALLCAP
+        )
+        if not snapshot_ok:
+            logger.warning(
+                "[auto_arm] ross price-band gate: full-market snapshot unavailable — "
+                "holding %d equity candidate(s) (fail-safe; resumes when snapshot returns)",
+                len(rows),
+            )
+            return []
+        filtered = [r for r in rows if str(r.symbol or "").strip().upper() in kept]
+        dropped = len(rows) - len(filtered)
+        if dropped:
+            logger.info(
+                "[auto_arm] ross price-band gate: dropped %d non-small-cap equity "
+                "candidate(s); kept %d in $%s-$%s band",
+                dropped, len(filtered),
+                EQUITY_ROSS_SMALLCAP.price_min, EQUITY_ROSS_SMALLCAP.price_max,
+            )
+        return filtered
+    except Exception:
+        logger.warning(
+            "[auto_arm] ross price-band gate errored — failing safe (holding equity "
+            "candidates this pass)", exc_info=True,
+        )
+        return []
 
 
 def _symbol_free(db: Session, symbol: str, user_id: int | None) -> bool:
