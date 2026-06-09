@@ -124,7 +124,10 @@ def _account_equity_usd(execution_family: str | None = None) -> float | None:
         if use_bp:
             bp = float(pf.get("buying_power") or 0.0)
             if bp > 0:
-                return bp
+                # Apply the account's margin multiple (robin_stocks reports the ~1x base;
+                # e.g. 2.0 recovers the 2x Gold margin the app actually shows).
+                mult = float(getattr(settings, "chili_momentum_risk_buying_power_margin_multiple", 1.0) or 1.0)
+                return bp * max(1.0, mult)
         eq = float(pf.get("equity") or 0.0)
         return eq if eq > 0 else None
     except Exception:

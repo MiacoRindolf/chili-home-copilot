@@ -44,3 +44,15 @@ def test_sizing_basis_uses_buying_power(monkeypatch):
     monkeypatch.setattr(rp.settings, "chili_momentum_risk_size_use_buying_power", True, raising=False)
     monkeypatch.setattr(broker_service, "get_portfolio", lambda: {"equity": 10000.0})
     assert rp._account_equity_usd("robinhood_spot") == 10000.0
+
+
+def test_buying_power_margin_multiple(monkeypatch):
+    # The margin multiple recovers the displayed margin BP (the API under-reports it:
+    # returns the ~1x base; the 2x Gold margin shown in the app = base * 2).
+    monkeypatch.setattr(broker_service, "get_portfolio", lambda: {"equity": 10000.0, "buying_power": 11275.69})
+    monkeypatch.setattr(rp.settings, "chili_momentum_risk_size_use_buying_power", True, raising=False)
+    monkeypatch.setattr(rp.settings, "chili_momentum_risk_buying_power_margin_multiple", 2.0, raising=False)
+    assert abs(rp._account_equity_usd("robinhood_spot") - 22551.38) < 0.5  # 2x Gold margin
+    # multiple 1.0 -> just the API buying power (no extra leverage)
+    monkeypatch.setattr(rp.settings, "chili_momentum_risk_buying_power_margin_multiple", 1.0, raising=False)
+    assert abs(rp._account_equity_usd("robinhood_spot") - 11275.69) < 0.5
