@@ -3214,6 +3214,23 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_LIQUIDITY_BIAS"),
     )
+    # NBBO spread tape (ON): each RTH cycle, persist the CLEAN consolidated bid/ask
+    # (Massive snapshot lastQuote) for the Ross universe so the spread-sensitive
+    # replay uses REAL spreads, not a proxy (the dollar-volume proxy read PAVS at
+    # 53bps vs the 317bps the live lane actually saw). Source = what the lane already
+    # receives; no fragile raw-quote NBBO reconstruction. (nbbo_tape.py)
+    chili_momentum_nbbo_tape_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_NBBO_TAPE_ENABLED"),
+    )
+    chili_momentum_nbbo_tape_sample_seconds: int = Field(
+        default=60, ge=15, le=900,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_NBBO_TAPE_SAMPLE_SECONDS"),
+    )
+    chili_momentum_nbbo_tape_retention_days: int = Field(
+        default=30, ge=1, le=365,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_NBBO_TAPE_RETENTION_DAYS"),
+    )
     # Shake-out learning: how long after an exit to watch the price path to judge
     # whether the thesis would have worked (was the stop too tight?). 30min.
     chili_momentum_post_exit_horizon_seconds: int = Field(
