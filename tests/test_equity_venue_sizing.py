@@ -19,9 +19,9 @@ def test_account_equity_is_venue_aware(monkeypatch):
 
 def test_caps_scale_to_the_right_venue_equity(monkeypatch):
     _patch(monkeypatch)
-    # notional fraction default 0.15
-    assert rp.equity_relative_notional_cap(500.0, "robinhood_spot") == 7500.0   # 0.15 * 50000
-    assert rp.equity_relative_notional_cap(500.0, "coinbase_spot") == 300.0     # 0.15 * 2000
+    # notional fraction default 0.03 (~$300 initial notional, scales with equity)
+    assert rp.equity_relative_notional_cap(500.0, "robinhood_spot") == 1500.0   # 0.03 * 50000
+    assert rp.equity_relative_notional_cap(500.0, "coinbase_spot") == 60.0      # 0.03 * 2000
     # loss fraction default 0.01
     assert rp.equity_relative_loss_cap(50.0, "robinhood_spot") == 500.0         # 0.01 * 50000
     assert rp.equity_relative_loss_cap(50.0, "coinbase_spot") == 20.0           # 0.01 * 2000
