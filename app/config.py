@@ -2387,6 +2387,19 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_SIZE_USE_BUYING_POWER"),
     )
+    # Extra MARGIN MULTIPLE on the buying-power sizing basis. The robin_stocks API
+    # under-reports the displayed Gold/Reg-T margin buying power — it returns the ~1x base
+    # ($11,276) in every buying_power field, while the app shows the 2x margin ($22,551 =
+    # 2 * $11,276). This multiple recovers the account's ACTUAL margin buying power. Code
+    # default 1.0 (no extra leverage — safe for cash/unknown accounts); the operator's live
+    # env sets it per their margin (e.g. 2.0 = 2x Gold margin). WARNING: this multiplies
+    # SIZE and RISK across ALL equity-relative caps (notional, per-trade loss, daily-loss).
+    chili_momentum_risk_buying_power_margin_multiple: float = Field(
+        default=1.0,
+        ge=1.0,
+        le=4.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_BUYING_POWER_MARGIN_MULTIPLE"),
+    )
     # Ross-style PROFIT-GIVEBACK session halt (the upside mirror of the daily-loss
     # breaker). Once today's realized PnL has PEAKED at a meaningful, equity-relative
     # green AND has since given back this FRACTION of that peak, the momentum LIVE lane
