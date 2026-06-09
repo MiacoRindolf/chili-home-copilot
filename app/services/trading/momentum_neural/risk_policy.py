@@ -285,6 +285,47 @@ def compute_risk_first_quantity(
     }
 
 
+def liquidity_capped_notional(
+    equity_notional_cap: float, dollar_volume: float | None, *, fraction: float | None = None
+) -> float:
+    """Cap the per-trade notional at a fraction of the NAME's dollar-volume, so the position
+    never exceeds what can be EXITED cleanly (Ross's "you can't move 500,000 shares in 1-2
+    minutes" rule).
+
+    As the account COMPOUNDS, the equity-relative cap grows — but this liquidity cap binds on
+    THIN names, so CHILI scales up only as far as each name's liquidity allows instead of
+    outgrowing the small-cap universe. Without it, a 15%-of-$1M notional = $150k = ~30,000
+    shares of a thin $5 low-float that cannot be exited on a stop-out (the thin-book sweep /
+    0-fills root cause). At a small account the equity cap binds (unchanged behavior); as the
+    account grows the LIQUIDITY cap binds on thin names. The participation fraction is the ONE
+    documented knob (~1% of daily $-volume ~= a few minutes of an active name's exitable
+    volume). Fail-OPEN: returns the equity cap unchanged when the dollar-volume is unavailable
+    or the fraction is disabled (<=0). Pure + side-effect-free. (docs/DESIGN/SCALING_ENGINE.md)
+    """
+    cap = float(equity_notional_cap or 0.0)
+    if cap <= 0:
+        return cap
+    try:
+        dv = float(dollar_volume or 0.0)
+    except (TypeError, ValueError):
+        return cap
+    if dv <= 0 or not math.isfinite(dv):
+        return cap  # no liquidity data -> fail open (unchanged)
+    if fraction is None:
+        try:
+            fraction = float(getattr(settings, "chili_momentum_risk_liquidity_participation_fraction", 0.01) or 0.0)
+        except (TypeError, ValueError):
+            fraction = 0.0
+    try:
+        frac = float(fraction or 0.0)
+    except (TypeError, ValueError):
+        return cap
+    if frac <= 0 or not math.isfinite(frac):
+        return cap  # disabled -> no liquidity cap
+    liq_cap = frac * dv
+    return min(cap, liq_cap) if liq_cap > 0 else cap
+
+
 @dataclass(frozen=True)
 class MomentumAutomationRiskPolicy:
     """Conservative defaults for short-horizon crypto momentum (pre-runner gates)."""

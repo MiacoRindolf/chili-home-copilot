@@ -43,7 +43,13 @@ from ..decision_ledger import (
 )
 from ..deployment_ladder_service import record_trade_outcome_metrics
 from .risk_evaluator import evaluate_proposed_momentum_automation
-from .risk_policy import RISK_SNAPSHOT_KEY, compute_risk_first_quantity, policy_float_cap, policy_int_cap
+from .risk_policy import (
+    RISK_SNAPSHOT_KEY,
+    compute_risk_first_quantity,
+    liquidity_capped_notional,
+    policy_float_cap,
+    policy_int_cap,
+)
 from .paper_execution import (
     breakeven_stop_after_partial,
     effective_stop_atr_pct,
@@ -2122,6 +2128,24 @@ def tick_live_session(
         le["entry_stop_model"] = _stop_model
         if _stop_model == "structural_pullback":
             le["structural_stop_atr_pct"] = round(_eff_atr_pct, 6)
+        # Liquidity-ceiling (SCALING_ENGINE.md): never size beyond what the NAME can absorb
+        # on EXIT (Ross's "can't move 500k shares in 1-2 min"). As the account COMPOUNDS the
+        # equity notional cap grows, but this binds on thin names so CHILI scales only as far
+        # as each name's liquidity allows — instead of a 15%-of-$1M notional that can't exit a
+        # thin low-float. Best-effort dollar-volume; fail-OPEN (no data / crypto -> unchanged).
+        try:
+            from .universe import snapshot_dollar_volumes as _snap_dvol
+            _dvol = (_snap_dvol([sess.symbol]) or {}).get(str(sess.symbol or "").strip().upper())
+        except Exception:
+            _dvol = None
+        _max_notional_pre_liq = max_notional
+        max_notional = liquidity_capped_notional(max_notional, _dvol)
+        if max_notional < _max_notional_pre_liq - 1e-9:
+            le["liquidity_cap"] = {
+                "dollar_volume_usd": round(float(_dvol), 0) if _dvol else None,
+                "pre_liq_notional_usd": round(_max_notional_pre_liq, 2),
+                "capped_notional_usd": round(max_notional, 2),
+            }
         _rf_qty, _rf_meta = compute_risk_first_quantity(
             entry_price=guarded_ask,
             atr_pct=_eff_atr_pct,

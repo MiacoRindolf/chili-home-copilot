@@ -2359,6 +2359,18 @@ class Settings(BaseSettings):
         le=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_NOTIONAL_FRACTION_OF_EQUITY"),
     )
+    # Liquidity-ceiling sizing (the scaling enabler): cap per-trade notional at this
+    # fraction of the NAME's daily dollar-volume, so the position never exceeds what can
+    # be EXITED cleanly (Ross's "can't move 500k shares in 1-2 min"). At a small account
+    # the equity notional cap binds (unchanged); as the account COMPOUNDS this binds on
+    # thin names so CHILI scales only as far as each name's liquidity allows. ~1% of daily
+    # $-vol ~= a few min of exitable volume. 0 disables (fail-open). (SCALING_ENGINE.md)
+    chili_momentum_risk_liquidity_participation_fraction: float = Field(
+        default=0.01,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_LIQUIDITY_PARTICIPATION_FRACTION"),
+    )
     # Equity-relative per-trade MAX-LOSS cap: a fraction of ACCOUNT EQUITY (not a
     # fixed $). Frozen at admission; scales with equity. The fixed loss cap is the
     # FALLBACK when equity is unavailable. Single documented per-trade RISK knob.
