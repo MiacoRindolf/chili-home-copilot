@@ -1827,6 +1827,23 @@ def tick_live_session(
                     try:
                         t_sub = datetime.fromisoformat(str(submit_raw).replace("Z", "+00:00")).replace(tzinfo=None)
                         if (_utcnow() - t_sub).total_seconds() > 10:
+                            # RACE GUARD: the order may have FILLED between the 10s
+                            # ack timeout and this (<=30s-cadence) tick — illiquid
+                            # small-caps fill slowly (resting limit). Re-fetch FRESH
+                            # before abandoning: a filled order abandoned here is
+                            # ORPHANED — it loses the lane's tight exit management and
+                            # falls to g2's far structural stop. [CTNT 2026-06-09:
+                            # filled @21s, ack-timeout tick @22.9s -> orphaned -> -$283.]
+                            # If it filled, leave the session pending so the entry
+                            # fill-handler above ADOPTS it next tick; only cancel +
+                            # re-watch a genuinely-still-open order. docs/DESIGN/MOMENTUM_LANE.md
+                            _fresh, _ = adapter.get_order(str(le["entry_order_id"]))
+                            if _fresh and _order_done_for_entry(_fresh):
+                                db.flush()
+                                return {
+                                    "ok": True, "session_id": sess.id,
+                                    "state": sess.state, "pending": "ack_timeout_filled_adopt",
+                                }
                             adapter.cancel_order(str(le["entry_order_id"]))
                             _emit(db, sess, "entry_ack_timeout", {"elapsed_sec": (_utcnow() - t_sub).total_seconds()})
                             _safe_transition(db, sess, STATE_WATCHING_LIVE)
