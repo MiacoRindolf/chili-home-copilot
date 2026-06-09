@@ -51,7 +51,18 @@ def _max_live_sessions() -> int:
 
 
 def _scan_limit() -> int:
-    return max(1, int(getattr(settings, "chili_momentum_auto_arm_scan_limit", 10)))
+    return max(1, int(getattr(settings, "chili_momentum_auto_arm_scan_limit", 40)))
+
+
+def _probe_time_budget() -> float:
+    """Wall-clock budget (seconds) for the concurrent entry-trigger probe wave. Auto-arm
+    arms from whatever probes COMPLETE within it; un-probed candidates defer to the next
+    tick. The adaptive control on probe breadth (breadth = as many as finish in the budget,
+    not a magic candidate count) and the belt that keeps a wide net inside the cadence."""
+    return max(
+        1.0,
+        float(getattr(settings, "chili_momentum_auto_arm_probe_time_budget_seconds", 18.0) or 18.0),
+    )
 
 
 def _auto_arm_crypto_only() -> bool:
@@ -448,20 +459,42 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
             len(eligible),
             max(1, int(getattr(settings, "chili_momentum_auto_arm_trigger_workers", 8))),
         )
+        _budget = _probe_time_budget()
         _results: dict[str, tuple[bool, str, Any]] = {}
+        _ex = concurrent.futures.ThreadPoolExecutor(max_workers=_workers)
         try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=_workers) as _ex:
-                _futs = {_ex.submit(_probe_candidate, c.symbol): c.symbol for c in eligible}
-                for _fut in concurrent.futures.as_completed(_futs):
+            _futs = {_ex.submit(_probe_candidate, c.symbol): c.symbol for c in eligible}
+            # Bound the whole wave by wall-clock so a WIDE candidate net never pushes a pass
+            # past the scheduler cadence: arm from whatever COMPLETED within the budget;
+            # un-probed names defer to the next tick. This is what lets a fresh #11+ name
+            # (NPT) get probed at all without the old top-10 truncation, while the pass still
+            # returns in time.
+            try:
+                for _fut in concurrent.futures.as_completed(_futs, timeout=_budget):
                     _sym = _futs[_fut]
                     try:
                         _results[_sym] = _fut.result()
                     except Exception:
                         _results[_sym] = (False, "trigger_error", None)
+            except concurrent.futures.TimeoutError:
+                out["probe_timed_out"] = True
         except Exception:
-            # Fall back to serial if the pool fails for any reason.
+            # Pool failure -> serial fallback (also budget-bounded).
+            import time as _time
+
+            _deadline = _time.monotonic() + _budget
             for c in eligible:
-                _results[c.symbol] = _probe_candidate(c.symbol)
+                if _time.monotonic() >= _deadline:
+                    break
+                if c.symbol not in _results:
+                    _results[c.symbol] = _probe_candidate(c.symbol)
+        finally:
+            # Never block the pass on stragglers: cancel queued probes and DON'T wait on the
+            # running ones (they finish in background threads and are discarded). This is what
+            # makes the budget a real wall-clock bound, not just a collection timeout.
+            _ex.shutdown(wait=False, cancel_futures=True)
+        out["probed"] = len(_results)
+        out["eligible_probed_of"] = len(eligible)
 
         # SELECTION->ENTRY ALIGNMENT (M4 keystone). The viability board ranks the day's
         # 24h-cumulative movers, but many have FADED into a deep intraday retrace by the
