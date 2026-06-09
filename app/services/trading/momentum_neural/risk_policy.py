@@ -96,12 +96,14 @@ def adaptive_max_spread_bps(
 
 
 def _account_equity_usd(execution_family: str | None = None) -> float | None:
-    """Best-effort account equity (USD) for equity-relative sizing, PER VENUE.
+    """Best-effort account SIZING BASIS (USD) for equity-relative caps, PER VENUE.
 
-    robinhood_spot -> Robinhood account equity (equities are bought with RH buying
-    power, not Coinbase crypto equity); else Coinbase portfolio equity (crypto).
-    Returns None when unavailable so callers fall back to the documented fixed cap
-    (never size against unknown equity). docs/DESIGN/MOMENTUM_LANE.md
+    robinhood_spot -> Robinhood account (equities); else Coinbase portfolio (crypto).
+    Basis = BUYING POWER when chili_momentum_risk_size_use_buying_power is True (default)
+    so the lane utilizes available margin for sizing, NOT just settled cash/equity; falls
+    back to equity if buying power is unavailable. Returns None when nothing is available
+    so callers use the documented fixed cap (never size against an unknown account).
+    docs/DESIGN/MOMENTUM_LANE.md
     """
     from ..execution_family_registry import (
         EXECUTION_FAMILY_ROBINHOOD_SPOT,
@@ -109,16 +111,20 @@ def _account_equity_usd(execution_family: str | None = None) -> float | None:
     )
 
     ef = normalize_execution_family(execution_family)
+    use_bp = bool(getattr(settings, "chili_momentum_risk_size_use_buying_power", True))
     try:
         if ef == EXECUTION_FAMILY_ROBINHOOD_SPOT:
             from ...broker_service import get_portfolio as _rh_portfolio
 
             pf = _rh_portfolio() or {}
-            eq = float(pf.get("equity") or 0.0)
-            return eq if eq > 0 else None
-        from ...coinbase_service import get_portfolio
+        else:
+            from ...coinbase_service import get_portfolio
 
-        pf = get_portfolio() or {}
+            pf = get_portfolio() or {}
+        if use_bp:
+            bp = float(pf.get("buying_power") or 0.0)
+            if bp > 0:
+                return bp
         eq = float(pf.get("equity") or 0.0)
         return eq if eq > 0 else None
     except Exception:
