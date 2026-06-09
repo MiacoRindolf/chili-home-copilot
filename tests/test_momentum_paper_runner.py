@@ -321,3 +321,145 @@ def test_paper_runner_writes_runtime_snapshot_and_sim_fill(monkeypatch, db: Sess
         "expected at least one simulated fill after forced high-viability entry path; "
         f"state={sess.state} events={event_types} blocked={blocked_payloads}"
     )
+
+
+def test_paper_runner_npt_0608_real_flow_replay(monkeypatch, db: Session) -> None:
+    """REAL end-to-end paper-trade of NPT's 2026-06-08 tape through tick_paper_session.
+
+    Operator ask: instead of a standalone sim REPLICATING the trade, drive the ACTUAL
+    paper runner (gates -> sizing -> sim fill -> exits -> FSM + DB writes) over the known
+    NPT/BYAH day so flow bugs the sim can't see surface. Slices the real 06-08 OHLCV to an
+    advancing sim-clock; quote is the current bar. Reports the FSM path + any exception
+    (= a flow bug). Network-dependent; skips if NPT 06-08 data is unavailable.
+    """
+    import traceback
+    from collections import Counter
+
+    from app.services.trading.market_data import fetch_ohlcv_df as _real_fetch
+    from app.services.trading.momentum_neural.paper_fsm import (
+        STATE_CANCELLED, STATE_ERROR, STATE_EXPIRED, STATE_FINISHED,
+    )
+
+    monkeypatch.setattr(settings, "chili_momentum_paper_runner_enabled", True)
+    DAY = "2026-06-08"
+    df5_all = _real_fetch("NPT", interval="5m", period="1mo")
+    df15_all = _real_fetch("NPT", interval="15m", period="1mo")
+    if df5_all is None or df15_all is None or len(df5_all) == 0:
+        pytest.skip("NPT market data unavailable")
+    df5 = df5_all[[t.strftime("%Y-%m-%d") == DAY for t in df5_all.index]]  # 06-08 bars to LOOP over
+    if len(df5) < 20:
+        pytest.skip(f"insufficient NPT 06-08 5m data ({len(df5)})")
+
+    sim = {"now": df5.index[0]}
+
+    # The mock returns the FULL multi-day history up to sim_now (not just 06-08), so the
+    # gate's >=30-row requirement + multi-day indicators are satisfied like in production.
+    def _sliced(sym, interval="5m", period=None, **k):
+        d = df15_all if "15" in str(interval) else df5_all
+        return d[[t <= sim["now"] for t in d.index]]
+
+    monkeypatch.setattr("app.services.trading.momentum_neural.entry_gates.fetch_ohlcv_df", _sliced)
+    monkeypatch.setattr("app.services.trading.momentum_neural.paper_runner.fetch_ohlcv_df", _sliced)
+
+    vid, _ = _seed_live_eligible_row(db, symbol="NPT")
+    via = (
+        db.query(MomentumSymbolViability)
+        .filter(MomentumSymbolViability.symbol == "NPT", MomentumSymbolViability.variant_id == vid)
+        .one()
+    )
+    via.viability_score = 0.95
+    via.paper_eligible = True
+    via.live_eligible = True
+    via.regime_snapshot_json = {
+        "atr_pct": 0.06, "chop_expansion": "trend", "volatility_regime": "normal",
+        "meta": {"atr_pct": 0.06, "chop_expansion": "trend"},
+    }
+    db.commit()
+    uid = _uid(db, "npt0608")
+    r = create_paper_draft_session(
+        db, user_id=uid, symbol="NPT", variant_id=vid, execution_family="robinhood_spot"
+    )
+    assert r.get("ok"), f"paper draft session not created (equity paper support?): {r}"
+    sid = r["session_id"]
+    db.commit()
+
+    c = {x.lower(): x for x in df5.columns}
+    Cc = c["close"]
+    path: list = []
+    skips: list = []
+    err = None
+    done = False
+    for i in range(2, len(df5)):
+        sim["now"] = df5.index[i]
+        mid = float(df5[Cc].iloc[i])
+
+        def qfn(_s, _m=mid):
+            return {"mid": _m, "bid": _m * 0.999, "ask": _m * 1.001, "source": "replay"}
+
+        # Multiple ticks per bar: live has ~10 ticks per 5m bar, so the FSM oscillates
+        # watching<->candidate and the trigger is evaluated AT each bar (and a fire can
+        # advance candidate->pending_entry->entered within the bar). One tick/bar would
+        # only sample every other bar and could miss the break bar entirely.
+        for _ in range(6):
+            try:
+                out = tick_paper_session(db, sid, quote_fn=qfn)
+                db.commit()
+            except Exception as e:  # noqa: BLE001 — we WANT to catch flow bugs
+                err = f"{type(e).__name__}: {e}"
+                traceback.print_exc()
+                done = True
+                break
+            if isinstance(out, dict) and out.get("skipped"):
+                skips.append(out["skipped"])
+            s = db.query(TradingAutomationSession).filter_by(id=sid).one()
+            if not path or path[-1][1] != s.state:
+                path.append((df5.index[i].strftime("%H:%M"), s.state))
+            if s.state in (STATE_FINISHED, STATE_CANCELLED, STATE_ERROR, STATE_EXPIRED):
+                done = True
+                break
+        if done:
+            break
+
+    fills = db.query(TradingAutomationSimulatedFill).filter_by(session_id=sid).all()
+    sess = db.query(TradingAutomationSession).filter_by(id=sid).one()
+    evs = db.query(TradingAutomationEvent).filter_by(session_id=sid).all()
+    blocked = [e for e in evs if e.event_type == "paper_entry_gates_blocked"]
+    block_reasons = Counter((e.payload_json or {}).get("reason") for e in blocked)
+    regressed = sum(
+        1 for e in evs
+        if e.event_type == "paper_watch_started" and (e.payload_json or {}).get("reason") == "candidate_regressed"
+    )
+    print("\n=== NPT 06-08 REAL paper-flow replay (tick_paper_session end-to-end) ===")
+    print(f"final    : state={sess.state}  sim_fills={len(fills)}  ticks={len(df5) - 2}")
+    print(f"entry_candidate->WATCHING blocked reasons: {dict(block_reasons)}")
+    print(f"candidate_regressed (viability) count: {regressed}")
+    if blocked:
+        _dbg = (blocked[0].payload_json or {}).get("debug")
+        print(f"sample blocked debug: {_dbg}")
+    if skips:
+        print(f"tick skips: {dict(Counter(skips))}")
+    print(f"exception: {err}")
+
+    # The real flow must not throw (that would be a flow bug).
+    assert err is None, f"FLOW BUG in tick_paper_session: {err}\npath={path}"
+    # After the regime extreme-ATR fix, the explosive Ross name MUST be enterable. It was
+    # 0 fills before — EVERY candidate was regime-blocked ('extreme_atr_block_all'), matching
+    # the live 157 cancelled-pre-entry. A regression here (block reintroduced) -> 0 fills.
+    assert len(fills) > 0, (
+        f"explosive Ross name NPT not entered (sim_fills=0) — regime extreme-ATR regression? "
+        f"final_state={sess.state} blocked={dict(block_reasons)}"
+    )
+
+
+def test_regime_allows_extreme_atr_for_momentum_families() -> None:
+    """Deterministic guard for the regime extreme-ATR fix: the Ross momentum families MUST
+    be allowed to enter explosive (extreme-ATR) names (their edge; risk is sized, not
+    refused), while non-momentum families keep the 4.5% ATR ceiling."""
+    from app.services.trading.momentum_neural.entry_gates import regime_entry_allowed
+
+    for fam in ("impulse_breakout", "momentum_neural", "ross_smallcap"):
+        ok, reason = regime_entry_allowed(fam, atr_pct=0.20, chop_expansion="trend", vol_regime="normal")
+        assert ok, f"{fam} wrongly blocked at extreme ATR: {reason}"
+    # a non-momentum family is still blocked at extreme ATR
+    okx, rx = regime_entry_allowed("mean_reversion", atr_pct=0.20, chop_expansion="trend", vol_regime="normal")
+    assert not okx and rx == "extreme_atr_block_all"

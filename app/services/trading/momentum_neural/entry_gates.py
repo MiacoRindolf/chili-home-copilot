@@ -596,7 +596,15 @@ def regime_entry_allowed(
     vreg = (vol_regime or "").lower()
 
     if ap is not None and ap > 0.045:
-        return False, "extreme_atr_block_all"
+        # The breakout/impulse/momentum families ARE the Ross small-cap lane — explosive,
+        # extreme-ATR names ($1->$66 movers) are the SETUP, not a disqualifier. Their risk is
+        # bounded by the wide vol-floor stop + risk-first sizing + the per-trade notional cap
+        # (extreme ATR -> wide stop -> small size), NOT by refusing the trade. A flat 4.5% ATR
+        # ceiling structurally blocked the lane from ever entering its best names — the real
+        # paper-flow replay on NPT (2026-06-08) hit this on EVERY candidate (0 fills), matching
+        # the live 157 cancelled-pre-entry. So the ceiling applies only to NON-momentum families.
+        if not ("breakout" in fid or "impulse" in fid or "momentum" in fid or "ross" in fid):
+            return False, "extreme_atr_block_all"
     if ap is not None and ap < 0.008:
         if "breakout" in fid or "impulse" in fid:
             return False, "low_atr_block_breakout_family"
