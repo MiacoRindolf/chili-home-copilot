@@ -10,6 +10,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ...config import settings
+from ...db import rollback_if_poisoned
 from ..massive_client import is_crypto
 from ...models.trading import PrescreenCandidate, PrescreenSnapshot
 from .brain_batch_job_log import brain_batch_job_begin, brain_batch_job_finish
@@ -173,7 +174,6 @@ def _candidate_priority(row: PrescreenCandidate) -> tuple[int, int, int, str]:
 def run_daily_prescreen_job(db: Session) -> dict[str, Any]:
     """Collect external + internal tickers, write snapshot row, upsert global candidates."""
     job_id = brain_batch_job_begin(db, "daily_prescreen")
-    db.flush()
     run_id = str(uuid.uuid4())
     tz_label = "America/Los_Angeles"
     started = datetime.utcnow()
@@ -188,7 +188,20 @@ def run_daily_prescreen_job(db: Session) -> dict[str, Any]:
         candidate_count=0,
     )
     db.add(snap)
+    # Commit the snapshot (and the brain_batch_job begin row) BEFORE the long
+    # external-collection phase below. ``collect_prescreen_with_provenance``
+    # hits external providers for several minutes; holding this transaction open
+    # across that window leaves the connection idle-in-transaction past
+    # ``database_idle_in_transaction_timeout_ms`` (120s), so Postgres terminates
+    # it ("server closed the connection unexpectedly"). The dropped connection
+    # discards the snapshot INSERT, yet ``snap.id`` still holds the now-orphaned
+    # value, so the candidate upsert further down violates
+    # ``trading_prescreen_candidates_snapshot_id_fkey``. Committing here makes
+    # the snapshot a durable FK target and keeps the connection merely *idle*
+    # (returned to the pool), not idle-in-transaction, during collection.
     db.flush()
+    snapshot_id = int(snap.id)  # capture before commit expires the attribute
+    db.commit()
 
     try:
         ext_list, ticker_sources, source_counts, elapsed = collect_prescreen_with_provenance(
@@ -248,7 +261,7 @@ def run_daily_prescreen_job(db: Session) -> dict[str, Any]:
             row = existing_candidates.get(tn)
             if row is None:
                 row = PrescreenCandidate(
-                    snapshot_id=snap.id,
+                    snapshot_id=snapshot_id,
                     user_id=None,
                     ticker=tn,
                     ticker_norm=tn,
@@ -263,7 +276,7 @@ def run_daily_prescreen_job(db: Session) -> dict[str, Any]:
                 db.add(row)
                 existing_candidates[tn] = row
             else:
-                row.snapshot_id = snap.id
+                row.snapshot_id = snapshot_id
                 row.ticker = tn
                 row.asset_universe = asset_u
                 row.active = True
@@ -285,7 +298,7 @@ def run_daily_prescreen_job(db: Session) -> dict[str, Any]:
         out = {
             "ok": True,
             "run_id": run_id,
-            "snapshot_id": snap.id,
+            "snapshot_id": snapshot_id,
             "candidate_count": len(all_tickers),
         }
         brain_batch_job_finish(
@@ -294,7 +307,7 @@ def run_daily_prescreen_job(db: Session) -> dict[str, Any]:
             ok=True,
             meta={
                 "run_id": run_id,
-                "snapshot_id": snap.id,
+                "snapshot_id": snapshot_id,
                 "candidate_count": len(all_tickers),
             },
         )
@@ -302,16 +315,44 @@ def run_daily_prescreen_job(db: Session) -> dict[str, Any]:
         return out
     except Exception as e:
         logger.exception("[prescreen_job] failed: %s", e)
-        snap.run_finished_at = datetime.utcnow()
-        snap.status_json = {"phase": "error", "error": str(e)[:500]}
+        # A mid-run disconnect (or a FK/flush failure) aborts the session's
+        # transaction; roll it back before any further ORM I/O so recording the
+        # failure does not cascade into PendingRollbackError. The snapshot row is
+        # already committed, so mark it errored via a targeted UPDATE keyed on
+        # the captured id rather than mutating a now-expired ORM instance.
+        rollback_if_poisoned(db)
+        try:
+            db.query(PrescreenSnapshot).filter(
+                PrescreenSnapshot.id == snapshot_id
+            ).update(
+                {
+                    PrescreenSnapshot.run_finished_at: datetime.utcnow(),
+                    PrescreenSnapshot.status_json: {
+                        "phase": "error",
+                        "error": str(e)[:500],
+                    },
+                },
+                synchronize_session=False,
+            )
+            db.commit()
+        except Exception:
+            logger.warning(
+                "[prescreen_job] could not record error status on snapshot %s",
+                snapshot_id,
+                exc_info=True,
+            )
+            rollback_if_poisoned(db)
         brain_batch_job_finish(
             db,
             job_id,
             ok=False,
             error=str(e),
-            meta={"run_id": run_id, "snapshot_id": snap.id},
+            meta={"run_id": run_id, "snapshot_id": snapshot_id},
         )
-        db.commit()
+        try:
+            db.commit()
+        except Exception:
+            rollback_if_poisoned(db)
         return {"ok": False, "run_id": run_id, "error": str(e)}
 
 
