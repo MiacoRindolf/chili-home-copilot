@@ -21,6 +21,10 @@ EXECUTION_FAMILY_ROBINHOOD_SPOT = "robinhood_spot"
 # Robinhood's officially-sanctioned agentic-trading MCP rail (isolated Agentic account;
 # sanctioned execution). Counterpart to robinhood_spot (unofficial robin_stocks API).
 EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP = "robinhood_agentic_mcp"
+# Alpaca US equities — API-first, commission-free, FREE paper sandbox, and limit orders that
+# route to the market + can REST on the book (post-inside-the-spread, which RH's PFOF routing
+# cannot do). The DMA-style execution upgrade for the momentum lane. (docs/DESIGN/ALPACA_LANE.md)
+EXECUTION_FAMILY_ALPACA_SPOT = "alpaca_spot"
 
 # ── Documented stubs only (no behavior, no jobs, no hidden execution) ────────
 EXECUTION_FAMILY_MULTI_VENUE_ARBITRAGE = "multi_venue_arbitrage"
@@ -32,6 +36,7 @@ DOCUMENTED_EXECUTION_FAMILIES: frozenset[str] = frozenset(
         EXECUTION_FAMILY_COINBASE_SPOT,
         EXECUTION_FAMILY_ROBINHOOD_SPOT,
         EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP,
+        EXECUTION_FAMILY_ALPACA_SPOT,
         EXECUTION_FAMILY_MULTI_VENUE_ARBITRAGE,
         EXECUTION_FAMILY_SAME_VENUE_TRIANGULAR_ARB,
         EXECUTION_FAMILY_BASIS_TRADE,
@@ -42,6 +47,7 @@ IMPLEMENTED_MOMENTUM_AUTOMATION_FAMILIES: frozenset[str] = frozenset({
     EXECUTION_FAMILY_COINBASE_SPOT,
     EXECUTION_FAMILY_ROBINHOOD_SPOT,
     EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP,
+    EXECUTION_FAMILY_ALPACA_SPOT,
 })
 
 
@@ -85,6 +91,11 @@ def execution_family_capabilities() -> list[dict[str, Any]]:
             "Implemented: Robinhood equities via the official Agentic Trading MCP rail "
             "(isolated account; sanctioned execution). Active when a bearer token is configured "
             "AND chili_equity_execution_rail selects it."
+        ),
+        EXECUTION_FAMILY_ALPACA_SPOT: (
+            "Implemented: Alpaca US equities VenueAdapter (alpaca-py) — DMA-style limit-posting, "
+            "FREE paper sandbox. Active when chili_alpaca_enabled AND API keys are set "
+            "(paper until chili_alpaca_paper=False)."
         ),
         EXECUTION_FAMILY_MULTI_VENUE_ARBITRAGE: (
             "Planned seam only — needs multi-venue intelligence, inventory, transfers, risk (not built)."
@@ -175,6 +186,8 @@ def venue_for_execution_family(execution_family: str) -> str:
     ef = normalize_execution_family(execution_family)
     if ef in (EXECUTION_FAMILY_ROBINHOOD_SPOT, EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP):
         return "robinhood"
+    if ef == EXECUTION_FAMILY_ALPACA_SPOT:
+        return "alpaca"
     return "coinbase"
 
 
@@ -197,4 +210,8 @@ def resolve_live_spot_adapter_factory(execution_family: str) -> Callable[[], Any
         from .venue.robinhood_mcp import RobinhoodAgenticMcpAdapter
 
         return RobinhoodAgenticMcpAdapter
+    if ef == EXECUTION_FAMILY_ALPACA_SPOT:
+        from .venue.alpaca_spot import AlpacaSpotAdapter
+
+        return AlpacaSpotAdapter
     raise ExecutionFamilyNotImplementedError(ef)
