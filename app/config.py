@@ -3231,6 +3231,28 @@ class Settings(BaseSettings):
         default=30, ge=1, le=365,
         validation_alias=AliasChoices("CHILI_MOMENTUM_NBBO_TAPE_RETENTION_DAYS"),
     )
+    # Alpaca execution lane (DMA-style limit-posting over RH). Off until keys are set;
+    # PAPER by default — the free sandbox proves fills before any real money. Activation
+    # = enabled flag + keys present (a real dependency, not a dark gate). (ALPACA_LANE.md)
+    chili_alpaca_enabled: bool = Field(
+        default=False, validation_alias=AliasChoices("CHILI_ALPACA_ENABLED"),
+    )
+    chili_alpaca_paper: bool = Field(
+        default=True, validation_alias=AliasChoices("CHILI_ALPACA_PAPER"),
+    )
+    chili_alpaca_api_key: str = Field(
+        default="", validation_alias=AliasChoices("CHILI_ALPACA_API_KEY"),
+    )
+    chili_alpaca_api_secret: str = Field(
+        default="", validation_alias=AliasChoices("CHILI_ALPACA_API_SECRET"),
+    )
+    chili_alpaca_data_feed: str = Field(
+        default="iex", validation_alias=AliasChoices("CHILI_ALPACA_DATA_FEED"),
+    )
+    chili_alpaca_quote_max_age_seconds: float = Field(
+        default=60.0, ge=1.0, le=600.0,
+        validation_alias=AliasChoices("CHILI_ALPACA_QUOTE_MAX_AGE_SECONDS"),
+    )
     # Shake-out learning: how long after an exit to watch the price path to judge
     # whether the thesis would have worked (was the stop too tight?). 30min.
     chili_momentum_post_exit_horizon_seconds: int = Field(

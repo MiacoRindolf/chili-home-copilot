@@ -113,3 +113,7 @@ markdown>=3.5
 # DORMANT by default (mcp_enabled=False); the import is guarded so the client
 # degrades to disabled when the SDK is absent.
 mcp>=1.0
+# Alpaca execution lane (app/services/trading/venue/alpaca_spot.py) — official Python SDK
+# for the DMA-style equity execution upgrade over Robinhood. Imported LAZILY so the adapter
+# module loads even before this is installed (is_enabled() returns False). (ALPACA_LANE.md)
+alpaca-py>=0.30
