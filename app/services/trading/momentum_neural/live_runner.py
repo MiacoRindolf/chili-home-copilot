@@ -1179,9 +1179,27 @@ def _order_done_for_entry(no: NormalizedOrder) -> bool:
     return False
 
 
+# Terminal order statuses (done — never "still working"). Anything NOT in here and
+# not empty is a live/resting order. The old allow-list of OPEN statuses missed
+# Robinhood's "working"/"confirmed"/"queued"/"unconfirmed"/"partially_filled" — a
+# placed-but-unfilled equity order then fell through ``_order_open`` to the
+# ``entry_order_state`` live_error branch and was ORPHANED on the broker (the lane's
+# first real RH equity order, HIHO 2026-06-09, did exactly this). Allow-listing
+# "done" states instead means any current/future broker open status is handled by
+# the ack-timeout (cancel + re-watch) path rather than erroring. docs/DESIGN/MOMENTUM_LANE.md
+_ORDER_TERMINAL_STATUSES = frozenset(
+    {"filled", "done", "closed", "cancelled", "canceled", "expired", "failed", "rejected", "voided"}
+)
+
+
 def _order_open(no: NormalizedOrder) -> bool:
+    """True while an order is still live on the venue (resting / unfilled), so the
+    runner waits or ack-timeout-cancels it instead of erroring + orphaning it. Empty
+    / "unknown" status is treated as open (indeterminate -> never abandon)."""
     st = (no.status or "").lower()
-    return st in ("open", "pending", "active", "unknown", "")
+    if st in ("", "unknown"):
+        return True
+    return st not in _ORDER_TERMINAL_STATUSES
 
 
 def summarize_live_execution(snap: Any) -> dict[str, Any]:
