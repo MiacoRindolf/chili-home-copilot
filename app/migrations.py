@@ -20417,6 +20417,52 @@ def _migration_302_breakout_alert_candidate_select_index(conn) -> None:
     )
 
 
+def _migration_303_momentum_nbbo_spread_tape(conn) -> None:
+    """NBBO spread tape — a lightweight, retention-bounded record of the CLEAN
+    consolidated bid/ask (Massive snapshot ``lastQuote``) for the Ross momentum
+    universe, sampled each cycle. Powers an ACCURATE spread-sensitive replay:
+    OHLCV bars carry no bid/ask, and reconstructing the NBBO from raw per-exchange
+    ``/v3/quotes`` proved unreliable (crossed/locked/stale quotes -> a PAVS rebuild
+    read 60bps vs the 317bps the live lane actually saw). The lane already receives
+    the clean consolidated NBBO from Massive every cycle; this tape simply persists
+    it so every future day has a real intraday spread per name.
+    (project_momentum_zero_fills_root_cause; the replay's optimistic dollar-volume
+    spread proxy is what this replaces.)
+
+    Bloat-bounded by design (the exit_parity_log lesson): a pruning job trims rows
+    older than the retention window, and two narrow indexes keep both the per-symbol
+    replay read and the time-range prune cheap. Idempotent.
+    """
+    conn.execute(text(
+        "CREATE TABLE IF NOT EXISTS momentum_nbbo_spread_tape ("
+        " id BIGSERIAL PRIMARY KEY,"
+        " symbol VARCHAR(32) NOT NULL,"
+        " observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
+        " bid DOUBLE PRECISION,"
+        " ask DOUBLE PRECISION,"
+        " mid DOUBLE PRECISION,"
+        " spread_bps DOUBLE PRECISION,"
+        " day_volume DOUBLE PRECISION,"
+        " source VARCHAR(24) NOT NULL DEFAULT 'massive_snapshot'"
+        ")"
+    ))
+    # Replay read: a name's intraday spread profile over a time range.
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_nbbo_tape_symbol_observed "
+        "ON momentum_nbbo_spread_tape (symbol, observed_at DESC)"
+    ))
+    # Retention prune: DELETE WHERE observed_at < cutoff.
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_nbbo_tape_observed "
+        "ON momentum_nbbo_spread_tape (observed_at)"
+    ))
+    conn.commit()
+    logger.info(
+        "[mig303] ensured momentum_nbbo_spread_tape (+ symbol/observed indexes) "
+        "for the accurate spread-sensitive replay"
+    )
+
+
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
     ("002_add_image_path", _migration_002_add_image_path),
@@ -20783,6 +20829,8 @@ MIGRATIONS = [
      _migration_301_exit_parity_log_index_prune_and_autovacuum),
     ("302_breakout_alert_candidate_select_index",
      _migration_302_breakout_alert_candidate_select_index),
+    ("303_momentum_nbbo_spread_tape",
+     _migration_303_momentum_nbbo_spread_tape),
 ]
 
 
