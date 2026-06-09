@@ -465,3 +465,62 @@ def test_probe_budget_arms_fast_firing_despite_slow_straggler(happy, monkeypatch
     assert out["symbol"] == "FAST-USD"  # higher-viability SLOW straggler did not block it
     assert out.get("probe_timed_out") is True
     assert elapsed < 2.5  # returned ~budget (1s), not ~straggler (3s)
+
+
+# ── Equity-only focus (Ross lane disables crypto) ─────────────────────────────
+
+def test_equity_only_skips_crypto(happy):
+    """Equity-only focus: crypto ('-USD') is excluded; the equity is armed instead."""
+    happy.setattr(aa.settings, "chili_momentum_auto_arm_crypto_only", False, raising=False)
+    happy.setattr(aa.settings, "chili_momentum_auto_arm_equity_only", True, raising=False)
+    happy.setattr(
+        aa, "_fresh_live_eligible_candidates",
+        lambda db, *, limit: [_cand("KAIO-USD", 8, 0.80), _cand("ARKK", 8, 0.55)],
+    )
+    happy.setattr(aa, "_symbol_market_open", lambda sym: True)
+    happy.setattr(aa, "_entry_trigger_fires", lambda sym: (True, "momentum_ok"))
+    out = aa.run_auto_arm_pass(_FakeDB())
+    assert out["armed"] == 1
+    assert out["symbol"] == "ARKK"  # crypto KAIO-USD excluded by equity-only focus
+
+
+# ── Adaptive concurrency (equity-relative, risk-bounded) ──────────────────────
+
+def test_adaptive_concurrency_falls_back_to_base_without_equity(monkeypatch):
+    """No equity available -> use the fixed base cap (never scale against unknown equity)."""
+    from app.services.trading.momentum_neural import risk_policy as rp
+    monkeypatch.setattr(rp, "_account_equity_usd", lambda ef=None: None)
+    monkeypatch.setattr(rp.settings, "chili_momentum_risk_max_concurrent_live_sessions", 5, raising=False)
+    monkeypatch.setattr(rp.settings, "chili_momentum_risk_concurrent_open_risk_fraction", 0.05, raising=False)
+    assert rp.adaptive_max_concurrent_live_sessions() == 5
+
+
+def test_adaptive_concurrency_scales_with_equity(monkeypatch):
+    """N = equity * frac / per_trade_loss, clamped to [base, 20]. 10000*0.05/50 = 10."""
+    from app.services.trading.momentum_neural import risk_policy as rp
+    monkeypatch.setattr(rp, "_account_equity_usd", lambda ef=None: 10_000.0)
+    monkeypatch.setattr(rp.settings, "chili_momentum_risk_max_concurrent_live_sessions", 5, raising=False)
+    monkeypatch.setattr(rp.settings, "chili_momentum_risk_concurrent_open_risk_fraction", 0.05, raising=False)
+    monkeypatch.setattr(rp.settings, "chili_momentum_risk_max_loss_per_trade_usd", 50.0, raising=False)
+    monkeypatch.setattr(rp.settings, "chili_momentum_auto_arm_crypto_only", False, raising=False)
+    assert rp.adaptive_max_concurrent_live_sessions() == 10
+
+
+def test_adaptive_concurrency_clamps_to_ceiling(monkeypatch):
+    """A huge equity is clamped at the 20 ceiling (guardrail)."""
+    from app.services.trading.momentum_neural import risk_policy as rp
+    monkeypatch.setattr(rp, "_account_equity_usd", lambda ef=None: 1_000_000.0)
+    monkeypatch.setattr(rp.settings, "chili_momentum_risk_max_concurrent_live_sessions", 5, raising=False)
+    monkeypatch.setattr(rp.settings, "chili_momentum_risk_concurrent_open_risk_fraction", 0.05, raising=False)
+    monkeypatch.setattr(rp.settings, "chili_momentum_risk_max_loss_per_trade_usd", 50.0, raising=False)
+    monkeypatch.setattr(rp.settings, "chili_momentum_auto_arm_crypto_only", False, raising=False)
+    assert rp.adaptive_max_concurrent_live_sessions() == 20
+
+
+def test_adaptive_concurrency_zero_fraction_disables(monkeypatch):
+    """frac=0 disables the adaptive scaling -> fixed base cap."""
+    from app.services.trading.momentum_neural import risk_policy as rp
+    monkeypatch.setattr(rp, "_account_equity_usd", lambda ef=None: 10_000.0)
+    monkeypatch.setattr(rp.settings, "chili_momentum_risk_max_concurrent_live_sessions", 5, raising=False)
+    monkeypatch.setattr(rp.settings, "chili_momentum_risk_concurrent_open_risk_fraction", 0.0, raising=False)
+    assert rp.adaptive_max_concurrent_live_sessions() == 5

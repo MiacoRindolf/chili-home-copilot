@@ -47,7 +47,11 @@ def _auto_arm_user_id() -> int | None:
 
 
 def _max_live_sessions() -> int:
-    return max(1, int(getattr(settings, "chili_momentum_risk_max_concurrent_live_sessions", 1)))
+    # Adaptive (equity-relative, risk-bounded) — scales the live-session cap with account
+    # equity instead of a fixed 5; falls back to the fixed cap when equity is unavailable.
+    from .risk_policy import adaptive_max_concurrent_live_sessions
+
+    return adaptive_max_concurrent_live_sessions()
 
 
 def _scan_limit() -> int:
@@ -67,6 +71,26 @@ def _probe_time_budget() -> float:
 
 def _auto_arm_crypto_only() -> bool:
     return bool(getattr(settings, "chili_momentum_auto_arm_crypto_only", True))
+
+
+def _auto_arm_equity_only() -> bool:
+    """Equity-only focus (Ross lane): exclude crypto ('-USD') so the lane trades stocks
+    only. Operator-controlled; revisit crypto later. Crypto-only takes precedence if both."""
+    return bool(getattr(settings, "chili_momentum_auto_arm_equity_only", False))
+
+
+def _lane_execution_family() -> str:
+    """The venue whose ACCOUNT EQUITY the lane's equity-relative caps should scale against.
+    crypto-only -> Coinbase; else (equity-only or mixed) -> Robinhood (the equity lane).
+    Fixes the daily-loss / giveback breakers being computed against the SMALL crypto
+    equity — which made them trip on tiny losses and never grow with the (much larger)
+    equities account. docs/DESIGN/MOMENTUM_LANE.md [[feedback_adaptive_no_magic]]"""
+    from ..execution_family_registry import (
+        EXECUTION_FAMILY_COINBASE_SPOT,
+        EXECUTION_FAMILY_ROBINHOOD_SPOT,
+    )
+
+    return EXECUTION_FAMILY_COINBASE_SPOT if _auto_arm_crypto_only() else EXECUTION_FAMILY_ROBINHOOD_SPOT
 
 
 def _is_coinbase_tradeable_symbol(symbol: str) -> bool:
@@ -206,6 +230,10 @@ def _fresh_live_eligible_candidates(db: Session, *, limit: int) -> list[Momentum
         # Exclude equities (ARKK, CLSK...) that go live-eligible at US market open —
         # the coinbase_spot lane cannot trade them. Crypto pairs carry "-USD".
         q = q.filter(MomentumSymbolViability.symbol.like("%-USD%"))
+    elif _auto_arm_equity_only():
+        # Equity-only focus (Ross lane): exclude crypto ("-USD") pairs so the lane trades
+        # stocks only — crypto pre-entry watchers were consuming concurrency + adding noise.
+        q = q.filter(~MomentumSymbolViability.symbol.like("%-USD%"))
     rows = (
         q.order_by(MomentumSymbolViability.viability_score.desc())
         .limit(max(int(limit) * 25, 200))
@@ -374,11 +402,10 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     try:
         from .risk_evaluator import _daily_realized_pnl
         from .risk_policy import equity_relative_daily_loss_cap
-        from ..execution_family_registry import EXECUTION_FAMILY_COINBASE_SPOT
 
         _max_dl = equity_relative_daily_loss_cap(
             float(getattr(settings, "chili_momentum_risk_max_daily_loss_usd", 250.0)),
-            EXECUTION_FAMILY_COINBASE_SPOT,
+            _lane_execution_family(),
         )
         _daily_pnl = _daily_realized_pnl(db, int(uid))
         if _daily_pnl <= -_max_dl:
@@ -399,10 +426,9 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     # Fail-open. MOMENTUM_LANE.md [[project_momentum_lane]] [[feedback_adaptive_no_magic]]
     try:
         from .risk_evaluator import evaluate_profit_giveback_halt
-        from ..execution_family_registry import EXECUTION_FAMILY_COINBASE_SPOT
 
         _gb = evaluate_profit_giveback_halt(
-            db, user_id=int(uid), execution_family=EXECUTION_FAMILY_COINBASE_SPOT
+            db, user_id=int(uid), execution_family=_lane_execution_family()
         )
         if _gb.get("halted"):
             out["skipped"] = "profit_giveback"
@@ -436,6 +462,8 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
         out["checked"] += 1
         if _auto_arm_crypto_only() and not _is_coinbase_tradeable_symbol(c.symbol):
             continue  # defensive: never arm an equity via the coinbase_spot lane
+        if _auto_arm_equity_only() and _is_coinbase_tradeable_symbol(c.symbol):
+            continue  # equity-only focus: never arm crypto in the Ross lane
         if c.symbol.upper() in busy_symbols:
             out["busy_skipped"] += 1
             continue  # already have a live session for this symbol — rotate to the next setup

@@ -181,6 +181,43 @@ def equity_relative_daily_loss_cap(fixed_fallback_usd: float, execution_family: 
     )
 
 
+def adaptive_max_concurrent_live_sessions() -> int:
+    """Live-session concurrency cap scaled by account equity, bounded by a max SIMULTANEOUS
+    open-risk fraction. N = clamp(equity * frac / max_loss_per_trade, base, 20), where base
+    is the fixed ``max_concurrent_live_sessions`` floor and frac is
+    ``chili_momentum_risk_concurrent_open_risk_fraction``. Worst-case simultaneous loss
+    across concurrent sessions <= frac * equity (auto-de-risks in drawdown, grows with
+    equity). Falls back to the fixed base when equity/fraction is unavailable (never scale
+    against unknown equity). Equity is read per-venue: Coinbase when crypto-only, else
+    Robinhood (the equity lane). docs/DESIGN/MOMENTUM_LANE.md"""
+    base = max(1, int(getattr(settings, "chili_momentum_risk_max_concurrent_live_sessions", 5) or 5))
+    try:
+        frac = float(getattr(settings, "chili_momentum_risk_concurrent_open_risk_fraction", 0.05) or 0.0)
+    except (TypeError, ValueError):
+        frac = 0.0
+    if frac <= 0 or not math.isfinite(frac):
+        return base
+    try:
+        per_trade = float(getattr(settings, "chili_momentum_risk_max_loss_per_trade_usd", 50.0) or 50.0)
+    except (TypeError, ValueError):
+        per_trade = 50.0
+    if per_trade <= 0:
+        return base
+    from ..execution_family_registry import (
+        EXECUTION_FAMILY_COINBASE_SPOT,
+        EXECUTION_FAMILY_ROBINHOOD_SPOT,
+    )
+    ef = (
+        EXECUTION_FAMILY_COINBASE_SPOT
+        if bool(getattr(settings, "chili_momentum_auto_arm_crypto_only", True))
+        else EXECUTION_FAMILY_ROBINHOOD_SPOT
+    )
+    eq = _account_equity_usd(ef)
+    if not eq or eq <= 0:
+        return base
+    return max(base, min(20, int(math.floor(eq * frac / per_trade))))
+
+
 def compute_risk_first_quantity(
     *,
     entry_price: float,
@@ -277,7 +314,7 @@ class MomentumAutomationRiskPolicy:
             max_daily_loss_usd=float(getattr(s, "chili_momentum_risk_max_daily_loss_usd", 250.0)),
             max_loss_per_trade_usd=float(getattr(s, "chili_momentum_risk_max_loss_per_trade_usd", 50.0)),
             max_concurrent_sessions=int(getattr(s, "chili_momentum_risk_max_concurrent_sessions", 10)),
-            max_concurrent_live_sessions=int(getattr(s, "chili_momentum_risk_max_concurrent_live_sessions", 5)),
+            max_concurrent_live_sessions=adaptive_max_concurrent_live_sessions(),
             max_concurrent_positions=int(getattr(s, "chili_momentum_risk_max_concurrent_positions", 5)),
             max_notional_per_trade_usd=float(getattr(s, "chili_momentum_risk_max_notional_per_trade_usd", 500.0)),
             max_position_size_base=float(getattr(s, "chili_momentum_risk_max_position_size_base", 1_000_000.0)),

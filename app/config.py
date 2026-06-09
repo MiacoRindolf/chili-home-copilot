@@ -2327,8 +2327,20 @@ class Settings(BaseSettings):
         le=50,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_MAX_CONCURRENT_POSITIONS"),
     )
+    # Adaptive concurrency: scale the live-session cap with account equity, bounded by a
+    # max SIMULTANEOUS open-risk fraction, instead of a fixed 5. N = clamp(equity * frac /
+    # max_loss_per_trade, base=max_concurrent_live_sessions, 20). Worst-case simultaneous
+    # loss across concurrent sessions <= frac * equity -> auto-de-risks in drawdown, grows
+    # with equity. A 06-08 sweep showed a fixed 5 left ~$2.9k of winners on the table on a
+    # busy day while >=8 captured them. 0 disables (use the fixed cap). One documented knob.
+    chili_momentum_risk_concurrent_open_risk_fraction: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=0.5,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_CONCURRENT_OPEN_RISK_FRACTION"),
+    )
     chili_momentum_risk_max_notional_per_trade_usd: float = Field(
-        default=500.0,
+        default=300.0,
         ge=0.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_MAX_NOTIONAL_PER_TRADE_USD"),
     )
@@ -2336,8 +2348,10 @@ class Settings(BaseSettings):
     # fixed $). Frozen at session admission; scales up as equity grows and DOWN in
     # drawdown. The cap above is the fixed-$ FALLBACK when equity is unavailable.
     # This single fraction is the documented per-trade size risk-appetite knob.
+    # Tuned to ~$300 initial notional at the current equity (e.g. 0.03 * $10.5k RH = ~$315)
+    # and SCALES with the account — bigger equity -> bigger trades, smaller in drawdown.
     chili_momentum_risk_notional_fraction_of_equity: float = Field(
-        default=0.15,
+        default=0.03,
         ge=0.0,
         le=1.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_NOTIONAL_FRACTION_OF_EQUITY"),
@@ -3154,6 +3168,15 @@ class Settings(BaseSettings):
     chili_momentum_auto_arm_crypto_only: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_CRYPTO_ONLY"),
+    )
+    # Inverse focus: EQUITY-ONLY (Ross small-cap lane). When True, the lane excludes
+    # crypto ("-USD") pairs entirely and trades stocks only — the Ross thesis is equity
+    # day-trading, and crypto pre-entry watchers were consuming concurrency slots + adding
+    # cancelled-pre-entry noise. Operator-controlled (set via env now; revisit crypto
+    # later). Mutually exclusive with crypto_only (crypto_only takes precedence if both).
+    chili_momentum_auto_arm_equity_only: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_AUTO_ARM_EQUITY_ONLY"),
     )
     # Shake-out learning: how long after an exit to watch the price path to judge
     # whether the thesis would have worked (was the stop too tight?). 30min.
