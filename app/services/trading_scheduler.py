@@ -888,6 +888,54 @@ def _run_momentum_live_runner_batch_job():
     run_scheduler_job_guarded("momentum_live_runner_batch", _work)
 
 
+def _run_nbbo_spread_sample_job():
+    """Persist the CLEAN consolidated bid/ask (Massive snapshot lastQuote) for the
+    Ross universe into the NBBO spread tape, so the spread-sensitive replay uses REAL
+    spreads, not a proxy (the proxy read PAVS at 53bps vs the 317bps the lane saw).
+    RTH-gated + best-effort inside the sampler; own DB session. (nbbo_tape.py)"""
+
+    def _work() -> None:
+        from ..config import settings as _settings
+        from ..db import SessionLocal
+        if not getattr(_settings, "chili_momentum_nbbo_tape_enabled", True):
+            return
+        from .trading.momentum_neural.nbbo_tape import sample_universe_nbbo_spreads
+        db = SessionLocal()
+        try:
+            sample_universe_nbbo_spreads(db)
+        finally:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("momentum_nbbo_sample", _work)
+
+
+def _run_nbbo_spread_prune_job():
+    """Trim NBBO-tape rows older than the retention window (the exit_parity_log bloat
+    lesson). Cheap via the observed_at index; own DB session; best-effort."""
+
+    def _work() -> None:
+        from ..config import settings as _settings
+        from ..db import SessionLocal
+        if not getattr(_settings, "chili_momentum_nbbo_tape_enabled", True):
+            return
+        from .trading.momentum_neural.nbbo_tape import prune_nbbo_tape
+        db = SessionLocal()
+        try:
+            prune_nbbo_tape(db)
+        finally:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            db.close()
+
+    run_scheduler_job_guarded("momentum_nbbo_prune", _work)
+
+
 # Change-only dedupe for auto-arm SKIP logging: the arm pass runs every 30s, so
 # logging every no-trade tick would audit-spam. We surface a compact line only
 # when the skip decision's SHAPE shifts — making "why isn't the Ross lane
@@ -5830,6 +5878,34 @@ def start_scheduler():
                 max_instances=1,
                 coalesce=True,
                 next_run_time=datetime.now() + timedelta(seconds=40),
+            )
+
+        # NBBO spread tape: persist the clean consolidated bid/ask (Massive snapshot
+        # lastQuote) for the Ross universe each RTH cycle, so the spread-sensitive
+        # replay uses REAL spreads (the proxy read PAVS at 53bps vs the 317bps the
+        # lane saw). Independent of live trading (useful in paper/observation too);
+        # RTH-gating + best-effort live in the sampler. (nbbo_tape.py)
+        if include_web_light and getattr(settings, "chili_momentum_nbbo_tape_enabled", True):
+            _nbbo_secs = max(15, int(getattr(settings, "chili_momentum_nbbo_tape_sample_seconds", 60) or 60))
+            _scheduler.add_job(
+                _run_nbbo_spread_sample_job,
+                trigger=IntervalTrigger(seconds=_nbbo_secs),
+                id="momentum_nbbo_sample",
+                name=f"NBBO spread tape sampler (every {_nbbo_secs}s, RTH-gated)",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now() + timedelta(seconds=50),
+            )
+            _scheduler.add_job(
+                _run_nbbo_spread_prune_job,
+                trigger=IntervalTrigger(hours=6),
+                id="momentum_nbbo_prune",
+                name="NBBO spread tape prune (every 6h)",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                next_run_time=datetime.now() + timedelta(seconds=130),
             )
 
         # Shake-out learning: label closed momentum trades vs their post-exit path
