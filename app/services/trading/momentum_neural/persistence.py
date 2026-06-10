@@ -401,6 +401,57 @@ def append_trading_automation_simulated_fill(
     return row
 
 
+def _resolve_viability_upserts(
+    db: Session, row_dicts: list[dict[str, Any]]
+) -> list[tuple[str, int, dict[str, Any]]]:
+    """Resolve each row to ``(symbol, variant_id, row)`` and return them in a
+    DETERMINISTIC ``(symbol, variant_id)`` lock-acquisition order.
+
+    Two momentum ticks fired by DIFFERENT callers — the neural-mesh snapshot
+    activation (``maybe_run_momentum_neural_tick``) and a scanner / viability-
+    refresh bridge (``_bridge_scanner_to_viability``) — routinely upsert
+    OVERLAPPING ``momentum_symbol_viability`` rows. When each acquired the per-row
+    unique-index locks in its OWN (viability-ranked) symbol order they formed a
+    lock cycle, and Postgres aborted one with ``deadlock detected`` mid-persist
+    (observed 25×/48h, 2026-06-10; both parties were this very INSERT…ON CONFLICT).
+    Upserting every tick's rows in ONE global ``(symbol, variant_id)`` order means
+    concurrent ticks acquire the shared locks in the same sequence, so they
+    serialize instead of deadlocking.
+
+    The variant id is resolved ONCE per family here too: the loop used to re-query
+    ``active_variant_for_family`` for every row, i.e. ~300 redundant SELECTs per
+    32-symbol × 10-family tick, each one extending how long the transaction sat
+    idle-in-transaction holding the accumulated viability row locks.
+    """
+    vid_cache: dict[tuple[str, int], Optional[int]] = {}
+
+    def _vid_for(fam_id: str, fam_ver: int) -> Optional[int]:
+        key = (fam_id, fam_ver)
+        if key not in vid_cache:
+            active_variant = active_variant_for_family(db, fam_id)
+            vid_cache[key] = (
+                int(active_variant.id)
+                if active_variant is not None
+                else _variant_id_for_family(db, fam_id, fam_ver)
+            )
+        return vid_cache[key]
+
+    resolved: list[tuple[str, int, dict[str, Any]]] = []
+    for row in row_dicts:
+        fam_id = row.get("family_id")
+        if not fam_id:
+            continue
+        fam_ver = int(row.get("family_version") or 1)
+        vid = _vid_for(str(fam_id), fam_ver)
+        if vid is None:
+            _log.warning("momentum persistence: no variant row for family=%s", fam_id)
+            continue
+        resolved.append((str(row.get("symbol") or ""), int(vid), row))
+
+    resolved.sort(key=lambda t: (t[0], t[1]))
+    return resolved
+
+
 def persist_neural_momentum_tick(
     db: Session,
     *,
@@ -420,20 +471,9 @@ def persist_neural_momentum_tick(
     exec_json = features.to_public_dict()
     now = datetime.utcnow()
     n = 0
-    for row in row_dicts:
-        fam_id = row.get("family_id")
-        fam_ver = int(row.get("family_version") or 1)
-        if not fam_id:
-            continue
-        active_variant = active_variant_for_family(db, str(fam_id))
-        if active_variant is not None:
-            vid = int(active_variant.id)
-        else:
-            vid = _variant_id_for_family(db, str(fam_id), fam_ver)
-        if vid is None:
-            _log.warning("momentum persistence: no variant row for family=%s", fam_id)
-            continue
-
+    # Deterministic (symbol, variant_id) order — prevents the cross-tick deadlock
+    # on the unique index (see _resolve_viability_upserts).
+    for symbol, vid, row in _resolve_viability_upserts(db, row_dicts):
         explain: dict[str, Any] = {
             "rationale": row.get("rationale"),
             "warnings": row.get("warnings") or [],
@@ -447,8 +487,8 @@ def persist_neural_momentum_tick(
         evidence_window: dict[str, Any] = {"note": "phase2_placeholder"}
 
         stmt = pg_insert(MomentumSymbolViability).values(
-            symbol=str(row.get("symbol") or ""),
-            scope=infer_viability_scope(row.get("symbol"), explicit=row.get("scope")),
+            symbol=symbol,
+            scope=infer_viability_scope(symbol, explicit=row.get("scope")),
             variant_id=vid,
             viability_score=float(row.get("viability") or 0.0),
             paper_eligible=bool(row.get("paper_eligible", True)),
@@ -467,7 +507,7 @@ def persist_neural_momentum_tick(
             constraint="uq_momentum_symbol_viability_sym_var",
             set_={
                 "viability_score": float(row.get("viability") or 0.0),
-                "scope": infer_viability_scope(row.get("symbol"), explicit=row.get("scope")),
+                "scope": infer_viability_scope(symbol, explicit=row.get("scope")),
                 "paper_eligible": bool(row.get("paper_eligible", True)),
                 "live_eligible": bool(row.get("live_eligible", False)),
                 "freshness_ts": now,
