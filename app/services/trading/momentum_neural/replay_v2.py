@@ -104,10 +104,29 @@ class Tape:
             ts = _aware(ts)
             self.by_sym[str(sym)].append((ts, float(bid), float(ask), float(sbps or 0), float(dvol or 0)))
         self._times: dict[str, list[datetime]] = {s: [r[0] for r in v] for s, v in self.by_sym.items()}
+        # Global sampler heartbeat: the sampler skips whole minutes for ALL symbols
+        # (cadence jitter / scheduler restarts). A per-symbol gap is a real HALT only
+        # if OTHER symbols were sampled during it — i.e. the sampler was alive but
+        # this symbol had no quote. (06-10 false-positive audit: 4,740 "halts" on 450
+        # symbols collapsed to the real per-symbol LULD halts once discriminated.)
+        global_minutes: set[datetime] = set()
+        for rows2 in self.by_sym.values():
+            for r in rows2:
+                global_minutes.add(r[0].replace(second=0, microsecond=0))
         self.halts: dict[str, list[tuple[datetime, datetime]]] = defaultdict(list)
         for s, times in self._times.items():
             for a, b in zip(times, times[1:]):
-                if (b - a).total_seconds() / 60.0 > HALT_GAP_MIN and (a.hour * 60 + a.minute) >= RTH_START_MIN:
+                if (b - a).total_seconds() / 60.0 <= HALT_GAP_MIN or (a.hour * 60 + a.minute) < RTH_START_MIN:
+                    continue
+                m = a.replace(second=0, microsecond=0) + timedelta(minutes=1)
+                alive = 0
+                while m < b:
+                    if m in global_minutes:
+                        alive += 1
+                        if alive >= 2:
+                            break
+                    m += timedelta(minutes=1)
+                if alive >= 2:   # sampler ran >=2x while this symbol was silent = real halt
                     self.halts[s].append((a, b))
 
     def symbols(self) -> list[str]:
