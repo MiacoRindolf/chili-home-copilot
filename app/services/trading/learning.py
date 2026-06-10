@@ -11451,6 +11451,22 @@ def run_scheduled_market_snapshots(db: Session, user_id: int | None) -> dict[str
         _sw,
     )
     full_universe, _drv = build_snapshot_ticker_universe(db, user_id)
+    # Idle-in-transaction hygiene: build_snapshot_ticker_universe ends on a
+    # SELECT trading_watchlist read (get_watchlist), leaving the caller session
+    # in an OPEN transaction. take_snapshots_parallel below then runs a
+    # minutes-long provider-split OHLCV fetch with NO DB activity, so this
+    # chili-scheduler-cron connection sat idle-in-transaction (wait_event=
+    # ClientRead) on that watchlist SELECT for the whole fetch — pinning the
+    # xmin horizon (blocking VACUUM cluster-wide -> bloat) and tying up a cron
+    # pool slot. Release the read txn BEFORE the network phase (same idiom as
+    # run_full_market_scan's pre-score rollback and mine_patterns).
+    try:
+        db.rollback()
+    except Exception:
+        logger.debug(
+            "[learning] scheduled snapshots: read session release before fetch failed",
+            exc_info=True,
+        )
     max_tickers = max(
         1,
         int(getattr(_snap_sched_settings, "brain_scheduled_snapshot_max_tickers", 120)),

@@ -762,3 +762,70 @@ def test_evaluator_skips_alert_with_missing_pattern(db):
     # SQL prefilter excludes scan_pattern_id IS NULL.
     assert summary["candidates"] == 0
     assert summary["evaluated"] == 0
+
+
+def test_evaluate_directional_outcomes_releases_session_before_fetch(monkeypatch):
+    """Release-before-fetch + write-after-fetch regression (idle-in-transaction
+    hygiene, 2026-06 cron cascade).
+
+    The evaluator used to hold ONE transaction across the whole candidate loop,
+    interleaving a per-alert network OHLCV fetch with a per-alert INSERT +
+    ``UPDATE trading_decision_packets`` packet finalize and committing only after
+    the loop. That left the chili-scheduler-cron connection idle-in-transaction
+    (wait_event=ClientRead) on the held packet UPDATE for the whole run, pinning
+    the xmin horizon (blocking VACUUM cluster-wide). The read txn must be released
+    BEFORE the network phase, and ALL writes must land AFTER ALL fetches so the
+    connection never idles mid-transaction across network I/O.
+    """
+    from app.services.trading import pattern_directional_outcome as pdo
+
+    events: list[str] = []
+    now = datetime(2026, 6, 10, 12, 0, 0)
+    created_at = now - timedelta(days=10)
+    rows = [
+        (1, 10, "AAA", created_at, "~1-2 days", None),
+        (2, 10, "BBB", created_at, "~1-2 days", None),
+    ]
+
+    class _PatQuery:
+        def filter(self, *a):
+            return self
+
+        def all(self):
+            return [SimpleNamespace(id=10, name="ema_breakout", rules_json={})]
+
+    class _FakeSession:
+        def query(self, *a):
+            return _PatQuery()
+
+        def rollback(self):
+            events.append("rollback")
+
+        def execute(self, *a, **k):
+            events.append("execute")
+            return SimpleNamespace(rowcount=0)
+
+        def commit(self):
+            events.append("commit")
+
+    def _fetch(ticker, *, start, end):
+        events.append("fetch")
+        return _build_ohlc_window(start=created_at - timedelta(hours=1))
+
+    monkeypatch.setattr(pdo, "_edge_debt_priority_pattern_ids", lambda *a, **k: [])
+    monkeypatch.setattr(pdo, "_load_candidate_rows", lambda *a, **k: (list(rows), 0))
+
+    summary = evaluate_directional_outcomes(
+        _FakeSession(), now=now, fetch_ohlcv=_fetch, settings_=_settings_stub()
+    )
+
+    assert summary["candidates"] == 2
+    # Read txn released before any network fetch.
+    assert events[0] == "rollback"
+    # No interleaving: every network fetch precedes every write (INSERT / packet
+    # UPDATE). A regression to the per-alert interleaved loop fails here.
+    fetch_idx = [i for i, e in enumerate(events) if e == "fetch"]
+    write_idx = [i for i, e in enumerate(events) if e == "execute"]
+    assert len(fetch_idx) == 2
+    assert len(write_idx) == 2
+    assert max(fetch_idx) < min(write_idx)
