@@ -8,6 +8,7 @@ from ....config import settings
 from app.services.broker_manager import get_all_broker_statuses
 from ..brain_neural_mesh.schema import mesh_enabled
 from ..execution_family_registry import (
+    EXECUTION_FAMILY_ALPACA_SPOT,
     EXECUTION_FAMILY_ROBINHOOD_SPOT,
     is_momentum_automation_implemented,
     normalize_execution_family,
@@ -35,7 +36,9 @@ def build_momentum_operator_readiness(
     neural_on = bool(settings.chili_momentum_neural_enabled)
     coinbase_adapter = bool(settings.chili_coinbase_spot_adapter_enabled)
     robinhood_adapter = bool(getattr(settings, "chili_robinhood_spot_adapter_enabled", False))
+    alpaca_adapter = bool(getattr(settings, "chili_alpaca_enabled", False))
     is_robinhood = ef == EXECUTION_FAMILY_ROBINHOOD_SPOT
+    is_alpaca = ef == EXECUTION_FAMILY_ALPACA_SPOT
 
     paper_runner = bool(settings.chili_momentum_paper_runner_enabled)
     live_runner = bool(settings.chili_momentum_live_runner_enabled)
@@ -65,6 +68,20 @@ def build_momentum_operator_readiness(
     robinhood_connected = bool(brokers.get("robinhood", {}).get("connected"))
     robinhood_can_trade = robinhood_connected
 
+    # Alpaca (equities via the DMA-style limit rail): is_enabled() = adapter on + keys
+    # present + SDK importable (cheap, no network). Paper + live place via the same API,
+    # so an enabled+keyed adapter is the can-trade signal. Critically, Alpaca readiness
+    # must NOT fall through to the Coinbase branch below (that gated alpaca_spot on an
+    # unrelated Coinbase status). docs/DESIGN/ALPACA_LANE.md
+    alpaca_ready = False
+    if is_alpaca and alpaca_adapter:
+        try:
+            from ..venue.alpaca_spot import AlpacaSpotAdapter
+
+            alpaca_ready = bool(AlpacaSpotAdapter().is_enabled())
+        except Exception:
+            alpaca_ready = False
+
     gov = get_kill_switch_status()
     kill_active = bool(gov.get("active"))
     block_paper_ks = bool(settings.chili_momentum_risk_block_paper_when_kill_switch)
@@ -75,6 +92,9 @@ def build_momentum_operator_readiness(
     if is_robinhood:
         broker_ready_for_live = robinhood_connected and robinhood_adapter and robinhood_can_trade
         execution_ready = exec_impl and robinhood_adapter
+    elif is_alpaca:
+        broker_ready_for_live = alpaca_adapter and alpaca_ready
+        execution_ready = exec_impl and alpaca_adapter
     else:
         broker_ready_for_live = coinbase_connected and coinbase_adapter and coinbase_can_trade
         execution_ready = exec_impl and coinbase_adapter
@@ -107,6 +127,8 @@ def build_momentum_operator_readiness(
         "broker_coinbase_can_trade": coinbase_can_trade,
         "broker_robinhood_connected": robinhood_connected,
         "broker_robinhood_can_trade": robinhood_can_trade,
+        "alpaca_spot_adapter_enabled": alpaca_adapter,
+        "broker_alpaca_ready": alpaca_ready,
         "broker_ready_for_live": broker_ready_for_live,
         "paper_runner_enabled": paper_runner,
         "live_runner_enabled": live_runner,
@@ -177,8 +199,11 @@ def next_action_required(
 ) -> str:
     """Short operator-facing CTA string."""
     if blocked == "broker_not_ready":
-        if (readiness.get("execution_family") or "") == EXECUTION_FAMILY_ROBINHOOD_SPOT:
+        _ef_r = (readiness.get("execution_family") or "")
+        if _ef_r == EXECUTION_FAMILY_ROBINHOOD_SPOT:
             return "Connect Robinhood + enable CHILI_ROBINHOOD_SPOT_ADAPTER_ENABLED for live equity execution."
+        if _ef_r == EXECUTION_FAMILY_ALPACA_SPOT:
+            return "Enable CHILI_ALPACA_ENABLED + set valid Alpaca API keys for live equity execution."
         return "Connect Coinbase Advanced (or fix credentials) for live execution."
     if blocked == "paper_runner_disabled" and (mode or "").lower() == "paper":
         return "Enable CHILI_MOMENTUM_PAPER_RUNNER_ENABLED (and optional scheduler) or use dev tick."
