@@ -3,30 +3,48 @@
 
 {% block head_extra %}
 <style>
-.rl-wrap { max-width: 1080px; margin: 0 auto; padding: 18px 16px 60px; color: var(--text); }
+.rl-wrap { max-width: 1180px; margin: 0 auto; padding: 18px 16px 60px; color: var(--text); }
 .rl-head { display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom:14px; }
-.rl-head h1 { font-size:18px; margin:0; }
-.rl-sub { color: var(--text-secondary); font-size:12px; margin:2px 0 0; }
-.rl-card { background: var(--bg-card, rgba(255,255,255,.03)); border:1px solid var(--border); border-radius:10px; padding:14px; margin-bottom:14px; }
+.rl-head h1 { font-size:19px; margin:0; }
+.rl-sub { color: var(--text-secondary); font-size:12px; margin:3px 0 0; }
+.rl-card { background: var(--bg-card, rgba(255,255,255,.03)); border:1px solid var(--border); border-radius:12px; padding:16px; margin-bottom:16px; }
 .rl-row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
-.rl-row input[type=date] { background: var(--bg); color: var(--text); border:1px solid var(--border); border-radius:6px; padding:7px 10px; font-size:13px; }
-.rl-btn { background:#2f81f7; color:#fff; border:0; border-radius:6px; padding:8px 18px; font-size:13px; font-weight:600; cursor:pointer; }
-.rl-btn:disabled { opacity:.5; cursor:default; }
+.rl-row input[type=date] { background: var(--bg); color: var(--text); border:1px solid var(--border); border-radius:8px; padding:8px 12px; font-size:13px; }
+.rl-btn { background:linear-gradient(180deg,#3b8bff,#2f6fe0); color:#fff; border:0; border-radius:8px; padding:9px 20px; font-size:13px; font-weight:600; cursor:pointer; box-shadow:0 2px 8px rgba(47,111,224,.35); }
+.rl-btn:disabled { opacity:.5; cursor:default; box-shadow:none; }
 .rl-status { font-size:12.5px; color: var(--text-secondary); }
-.rl-status.running { color:#d29922; }
-.rl-status.done { color:#3fb950; }
-.rl-status.error { color:#f85149; }
-.rl-kpis { display:flex; gap:18px; flex-wrap:wrap; margin:10px 0 4px; }
-.rl-kpi { min-width:120px; }
-.rl-kpi .v { font-size:20px; font-weight:700; }
+.rl-status.running { color:#d29922; } .rl-status.done { color:#3fb950; } .rl-status.error { color:#f85149; }
+.rl-kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:10px; margin:4px 0 2px; }
+.rl-kpi { background:rgba(255,255,255,.025); border:1px solid var(--border); border-radius:10px; padding:10px 12px; }
+.rl-kpi .v { font-size:21px; font-weight:700; letter-spacing:-.02em; }
 .rl-kpi .v.pos { color:#3fb950; } .rl-kpi .v.neg { color:#f85149; }
-.rl-kpi .k { font-size:11px; color: var(--text-secondary); text-transform:uppercase; letter-spacing:.04em; }
+.rl-kpi .k { font-size:10.5px; color: var(--text-secondary); text-transform:uppercase; letter-spacing:.05em; margin-top:2px; }
 table.rl-t { width:100%; border-collapse:collapse; font-size:12.5px; }
-table.rl-t th { text-align:left; color:var(--text-secondary); font-weight:600; padding:6px 8px; border-bottom:1px solid var(--border); font-size:11px; text-transform:uppercase; }
-table.rl-t td { padding:6px 8px; border-bottom:1px solid rgba(255,255,255,.04); }
-table.rl-t tr.hist { cursor:pointer; } table.rl-t tr.hist:hover { background: rgba(255,255,255,.04); }
-.rl-pos { color:#3fb950; } .rl-neg { color:#f85149; }
-.rl-note { font-size:11.5px; color:var(--text-secondary); margin-top:8px; line-height:1.5; }
+table.rl-t th { text-align:left; color:var(--text-secondary); font-weight:600; padding:6px 8px; border-bottom:1px solid var(--border); font-size:10.5px; text-transform:uppercase; letter-spacing:.04em; }
+table.rl-t td { padding:7px 8px; border-bottom:1px solid rgba(255,255,255,.04); }
+table.rl-t tr.hist { cursor:pointer; } table.rl-t tr.hist:hover { background: rgba(255,255,255,.045); }
+.rl-pos { color:#3fb950; font-weight:600; } .rl-neg { color:#f85149; font-weight:600; }
+.rl-note { font-size:11.5px; color:var(--text-secondary); margin-top:8px; line-height:1.55; }
+.rl-legend { display:flex; gap:16px; flex-wrap:wrap; font-size:11px; color:var(--text-secondary); margin:6px 0 10px; }
+.rl-legend span { display:inline-flex; align-items:center; gap:5px; }
+.rl-sw { display:inline-block; width:14px; height:9px; border-radius:2px; }
+/* ── timeline ── */
+.tl-grid { position:relative; }
+.tl-axis { position:relative; height:18px; margin-left:86px; border-bottom:1px solid var(--border); }
+.tl-axis span { position:absolute; top:0; font-size:10px; color:var(--text-secondary); transform:translateX(-50%); }
+.tl-row { display:flex; align-items:center; min-height:30px; border-bottom:1px solid rgba(255,255,255,.035); cursor:pointer; }
+.tl-row:hover { background:rgba(255,255,255,.035); }
+.tl-row.traded .tl-sym { color:#e8b339; font-weight:700; }
+.tl-sym { width:86px; flex:0 0 86px; font-size:12px; font-weight:600; padding-left:4px; display:flex; align-items:center; gap:5px; }
+.tl-track { position:relative; flex:1; height:20px; background:rgba(255,255,255,.018); border-radius:4px; overflow:hidden; }
+.tl-armed { position:absolute; top:4px; height:12px; background:rgba(63,131,248,.34); border-radius:3px; }
+.tl-halt { position:absolute; top:0; height:100%; background:repeating-linear-gradient(45deg, rgba(248,81,73,.22) 0 4px, transparent 4px 8px); }
+.tl-entry { position:absolute; top:-1px; width:0; height:0; border-left:5px solid transparent; border-right:5px solid transparent; border-bottom:9px solid #3fb950; transform:translateX(-5px); }
+.tl-exit { position:absolute; bottom:-1px; width:0; height:0; border-left:5px solid transparent; border-right:5px solid transparent; border-top:9px solid #f85149; transform:translateX(-5px); }
+.tl-chartbox { margin:4px 0 10px 86px; display:none; }
+.tl-chartbox.open { display:block; }
+.rl-chart-meta { font-size:11.5px; color:var(--text-secondary); margin:2px 0 4px; }
+svg.rl-chart { width:100%; height:230px; background:rgba(0,0,0,.18); border:1px solid var(--border); border-radius:8px; }
 </style>
 {% endblock %}
 
@@ -47,16 +65,28 @@ table.rl-t tr.hist { cursor:pointer; } table.rl-t tr.hist:hover { background: rg
       <span class="rl-status" id="rl-status">idle</span>
     </div>
     <div class="rl-note">
-      Ang replay ay tumatakbo nang ~3–8 min (per-symbol bar fetches). Isang replay lang ang pwede sabay-sabay.
-      Kailangan ng <b>NBBO tape</b> para sa petsa (minute-dense recording simula 2026-06-10; partial 06-08/09) — kung walang tape, mag-eerror ng <code>no_tape_for_date</code>.
+      Tumatakbo nang ~3–8 min (per-symbol bar fetches); isang replay lang sabay-sabay. Kailangan ng <b>NBBO tape</b> para sa petsa
+      (minute-dense simula 2026-06-10; partial 06-08/09) — kung wala, <code>no_tape_for_date</code>.
     </div>
   </div>
 
   <div class="rl-card" id="rl-result-card" style="display:none;">
-    <h3 style="margin:0 0 4px;font-size:14px;" id="rl-result-title"></h3>
+    <h3 style="margin:0 0 10px;font-size:15px;" id="rl-result-title"></h3>
     <div class="rl-kpis" id="rl-kpis"></div>
-    <table class="rl-t" id="rl-trades-t" style="margin-top:8px;">
-      <thead><tr><th>Oras (UTC)</th><th>Symbol</th><th>Entry</th><th>Exit</th><th>Qty</th><th>Spread</th><th>Partial</th><th>Exit reason</th><th>P/L</th></tr></thead>
+
+    <h4 style="margin:18px 0 2px;font-size:13px;">🕐 Activity timeline <span style="font-size:10.5px;color:var(--text-secondary);font-weight:400;">— click ang row para sa annotated chart</span></h4>
+    <div class="rl-legend">
+      <span><span class="rl-sw" style="background:rgba(63,131,248,.5);"></span> armed/watching</span>
+      <span><span class="rl-sw" style="background:repeating-linear-gradient(45deg, rgba(248,81,73,.4) 0 4px, transparent 4px 8px);"></span> HALTED</span>
+      <span style="color:#3fb950;">▲ entry</span>
+      <span style="color:#f85149;">▼ exit</span>
+      <span style="color:#e8b339;">★ may trade</span>
+    </div>
+    <div class="tl-grid" id="rl-timeline"></div>
+
+    <h4 style="margin:18px 0 6px;font-size:13px;">📋 Trades</h4>
+    <table class="rl-t">
+      <thead><tr><th>Entry (UTC)</th><th>Exit</th><th>Symbol</th><th>Entry px</th><th>Exit px</th><th>Qty</th><th>Spread</th><th>Stop</th><th>Target</th><th>Exit reason</th><th>P/L</th></tr></thead>
       <tbody id="rl-trades"></tbody>
     </table>
   </div>
@@ -72,85 +102,162 @@ table.rl-t tr.hist { cursor:pointer; } table.rl-t tr.hist:hover { background: rg
 
 <script>
 const rlEsc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-let rlPoll = null;
+const T0 = 13*60+30, T1 = 20*60;                       // UTC minutes 13:30 → 20:00
+const tMin = t => { const [h,m] = String(t||'').split(':').map(Number); return h*60+(m||0); };
+const tPct = t => Math.max(0, Math.min(100, (tMin(t)-T0)/(T1-T0)*100));
+let rlPoll = null, rlCur = null;
 
-function rlSetStatus(text, cls) {
-  const el = document.getElementById('rl-status');
-  el.textContent = text; el.className = 'rl-status ' + (cls || '');
-}
+function rlSetStatus(text, cls) { const el = document.getElementById('rl-status'); el.textContent = text; el.className = 'rl-status ' + (cls||''); }
 
 async function rlRun() {
   const date = document.getElementById('rl-date').value;
-  if (!date) { rlSetStatus('pumili muna ng petsa', 'error'); return; }
+  if (!date) { rlSetStatus('pumili muna ng petsa','error'); return; }
   document.getElementById('rl-run').disabled = true;
-  rlSetStatus('sinisimulan…', 'running');
+  rlSetStatus('sinisimulan…','running');
   try {
-    const r = await fetch('/api/trading/momentum/replay/run', {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({date})
-    });
-    const j = await r.json();
-    if (!j.ok) { rlSetStatus(j.error === 'replay_already_running' ? 'may tumatakbong replay — hintayin matapos' : (j.error || 'error'), 'error'); document.getElementById('rl-run').disabled = false; return; }
-    rlPoll = setInterval(rlCheck, 5000);
-    rlCheck();
-  } catch (e) { rlSetStatus('request failed: ' + e, 'error'); document.getElementById('rl-run').disabled = false; }
+    const j = await (await fetch('/api/trading/momentum/replay/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({date})})).json();
+    if (!j.ok) { rlSetStatus(j.error==='replay_already_running' ? 'may tumatakbo pa — hintayin' : (j.error||'error'),'error'); document.getElementById('rl-run').disabled = false; return; }
+    rlPoll = setInterval(rlCheck, 5000); rlCheck();
+  } catch (e) { rlSetStatus('request failed: '+e,'error'); document.getElementById('rl-run').disabled = false; }
 }
 
 async function rlCheck() {
   try {
     const j = await (await fetch('/api/trading/momentum/replay/status')).json();
     const job = j.job || {};
-    if (job.state === 'running') { rlSetStatus('tumatakbo… (' + (job.date || '') + ') — bar fetches, ~3-8 min', 'running'); return; }
-    clearInterval(rlPoll); rlPoll = null;
+    if (job.state === 'running') { rlSetStatus('tumatakbo… ('+(job.date||'')+') ~3-8 min','running'); return; }
+    if (rlPoll) { clearInterval(rlPoll); rlPoll = null; }
     document.getElementById('rl-run').disabled = false;
-    if (job.state === 'done') {
-      rlSetStatus('tapos: ' + job.date + ' → $' + Number(job.total_usd||0).toLocaleString() + ' (' + (job.n_trades||0) + ' trades)', 'done');
-      rlLoadResult(job.date); rlLoadHistory();
-    } else if (job.state === 'error') {
-      rlSetStatus('error: ' + (job.error || '?'), 'error'); rlLoadHistory();
-    } else { rlSetStatus(job.state || 'idle'); }
+    if (job.state === 'done') { rlSetStatus('tapos: '+job.date+' → $'+Number(job.total_usd||0).toLocaleString()+' ('+(job.n_trades||0)+' trades)','done'); rlLoadResult(job.date); rlLoadHistory(); }
+    else if (job.state === 'error') { rlSetStatus('error: '+(job.error||'?'),'error'); rlLoadHistory(); }
+    else rlSetStatus(job.state || 'idle');
   } catch (e) { /* transient */ }
 }
 
 async function rlLoadResult(date) {
   try {
-    const j = await (await fetch('/api/trading/momentum/replay/result/' + date)).json();
+    const j = await (await fetch('/api/trading/momentum/replay/result/'+date)).json();
     if (!j.ok) return;
-    const r = j.result;
+    const r = rlCur = j.result;
     document.getElementById('rl-result-card').style.display = '';
     document.getElementById('rl-result-title').textContent = '📊 ' + r.date + ' — high-fidelity result';
-    const tot = Number(r.total_usd || 0);
+    const tot = Number(r.total_usd||0);
     document.getElementById('rl-kpis').innerHTML =
-      '<div class="rl-kpi"><div class="v ' + (tot >= 0 ? 'pos' : 'neg') + '">$' + tot.toLocaleString() + '</div><div class="k">Day P/L</div></div>' +
-      '<div class="rl-kpi"><div class="v">' + (r.trades||[]).length + '</div><div class="k">Trades</div></div>' +
-      '<div class="rl-kpi"><div class="v">' + (r.wins||0) + '/' + (r.losses||0) + '</div><div class="k">W/L</div></div>' +
-      '<div class="rl-kpi"><div class="v">' + (r.candidates||0) + '</div><div class="k">As-of candidates</div></div>' +
-      '<div class="rl-kpi"><div class="v">' + (r.halt_windows||0) + '</div><div class="k">Halt windows masked</div></div>' +
-      '<div class="rl-kpi"><div class="v">' + (r.day_halted || '—') + '</div><div class="k">Day halt</div></div>';
-    document.getElementById('rl-trades').innerHTML = (r.trades || []).map(t =>
-      '<tr><td>' + rlEsc(t.t) + '</td><td><b>' + rlEsc(t.sym) + '</b></td><td>' + rlEsc(t.entry) + '</td><td>' + rlEsc(t.exit) + '</td>' +
-      '<td>' + Number(t.qty||0).toLocaleString() + '</td><td>' + rlEsc(t.spread_bps) + 'bps</td><td>' + rlEsc(t.partial) + '</td>' +
-      '<td>' + rlEsc(t.why) + '</td><td class="' + (Number(t.usd) >= 0 ? 'rl-pos' : 'rl-neg') + '">$' + Number(t.usd||0).toLocaleString() + '</td></tr>'
-    ).join('') || '<tr><td colspan="9" style="color:var(--text-secondary);">Walang trade na pumasa sa real-fidelity gates sa araw na ito.</td></tr>';
+      kpi('$'+tot.toLocaleString(), 'Day P/L', tot>=0?'pos':'neg') +
+      kpi((r.trades||[]).length, 'Trades') + kpi((r.wins||0)+'/'+(r.losses||0), 'W/L') +
+      kpi(r.candidates||0, 'As-of candidates') + kpi((r.armed_timeline||[]).length, 'Symbols watched') +
+      kpi(r.halt_windows||0, 'Halt windows') + kpi(r.day_halted||'—', 'Day halt');
+    rlTimeline(r);
+    rlTradesTable(r);
   } catch (e) { /* ignore */ }
+}
+const kpi = (v,k,cls) => '<div class="rl-kpi"><div class="v '+(cls||'')+'">'+v+'</div><div class="k">'+k+'</div></div>';
+
+function rlTradesTable(r) {
+  document.getElementById('rl-trades').innerHTML = (r.trades||[]).map(t =>
+    '<tr><td>'+rlEsc(t.t)+'</td><td>'+rlEsc(t.exit_t||'—')+'</td><td><b>'+rlEsc(t.sym)+'</b></td><td>'+rlEsc(t.entry)+'</td><td>'+rlEsc(t.exit)+'</td>'+
+    '<td>'+Number(t.qty||0).toLocaleString()+'</td><td>'+rlEsc(t.spread_bps)+'bps</td><td>'+rlEsc(t.stop??'—')+'</td><td>'+rlEsc(t.target??'—')+'</td>'+
+    '<td>'+rlEsc(t.why)+'</td><td class="'+(Number(t.usd)>=0?'rl-pos':'rl-neg')+'">$'+Number(t.usd||0).toLocaleString()+'</td></tr>'
+  ).join('') || '<tr><td colspan="11" style="color:var(--text-secondary);">Walang trade na pumasa sa real-fidelity gates.</td></tr>';
+}
+
+function rlTimeline(r) {
+  const rows = (r.armed_timeline||[]).slice().sort((a,b) => (b.traded?1:0)-(a.traded?1:0) || a.sym.localeCompare(b.sym));
+  const tradesBySym = {}; (r.trades||[]).forEach(t => (tradesBySym[t.sym] = tradesBySym[t.sym]||[]).push(t));
+  // axis hour marks
+  let axis = '<div class="tl-axis">';
+  for (let m = T0; m <= T1; m += 60) axis += '<span style="left:'+((m-T0)/(T1-T0)*100)+'%;">'+String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0')+'</span>';
+  axis += '</div>';
+  document.getElementById('rl-timeline').innerHTML = axis + rows.map((row,i) => {
+    const spans = (row.spans||[]).map(sp => '<div class="tl-armed" style="left:'+tPct(sp[0])+'%;width:'+Math.max(0.7, tPct(sp[1])-tPct(sp[0]))+'%;"></div>').join('');
+    const halts = ((r.halt_spans||{})[row.sym]||[]).map(h => '<div class="tl-halt" style="left:'+tPct(h[0])+'%;width:'+Math.max(0.5, tPct(h[1])-tPct(h[0]))+'%;"></div>').join('');
+    const marks = (tradesBySym[row.sym]||[]).map(t =>
+      '<div class="tl-entry" style="left:'+tPct(t.t)+'%;" title="entry '+t.entry+' @'+t.t+'"></div>' +
+      (t.exit_t ? '<div class="tl-exit" style="left:'+tPct(t.exit_t)+'%;" title="exit '+t.exit+' @'+t.exit_t+'"></div>' : '')).join('');
+    return '<div class="tl-row'+(row.traded?' traded':'')+'" onclick="rlToggleChart('+i+',\''+rlEsc(row.sym)+'\')">' +
+      '<div class="tl-sym">'+(row.traded?'★ ':'')+rlEsc(row.sym)+'</div>' +
+      '<div class="tl-track">'+spans+halts+marks+'</div></div>' +
+      '<div class="tl-chartbox" id="rl-cb-'+i+'"></div>';
+  }).join('');
+  // auto-open charts for traded symbols
+  rows.forEach((row,i) => { if (row.traded) rlToggleChart(i, row.sym, true); });
+}
+
+function rlToggleChart(i, sym, forceOpen) {
+  const box = document.getElementById('rl-cb-'+i);
+  if (!box) return;
+  if (box.classList.contains('open') && !forceOpen) { box.classList.remove('open'); return; }
+  if (!box.innerHTML) box.innerHTML = rlChartSVG(sym);
+  box.classList.add('open');
+}
+
+function rlChartSVG(sym) {
+  const r = rlCur || {};
+  const S = (r.series||{})[sym];
+  if (!S || !S.length) return '<div class="rl-chart-meta">walang bar data para sa '+rlEsc(sym)+'</div>';
+  const W = 1040, H = 230, padL = 46, padR = 8, padT = 10, padB = 18;
+  const lo = Math.min(...S.map(b => b[3])), hi = Math.max(...S.map(b => b[2]));
+  const span = (hi-lo) || 1, y = p => padT + (hi - p) / span * (H-padT-padB);
+  const x = t => padL + (Math.max(T0, Math.min(T1, tMin(t))) - T0) / (T1-T0) * (W-padL-padR);
+  const bw = Math.max(2, (W-padL-padR) / ((T1-T0)/5) - 2);
+  let g = '';
+  // halt shading
+  ((r.halt_spans||{})[sym]||[]).forEach(h => {
+    g += '<rect x="'+x(h[0])+'" y="'+padT+'" width="'+Math.max(2, x(h[1])-x(h[0]))+'" height="'+(H-padT-padB)+'" fill="rgba(248,81,73,.10)"/>' +
+         '<text x="'+(x(h[0])+3)+'" y="'+(padT+10)+'" fill="rgba(248,81,73,.7)" font-size="8">HALT</text>';
+  });
+  // y gridlines + labels
+  for (let k = 0; k <= 4; k++) {
+    const p = lo + span*k/4, yy = y(p);
+    g += '<line x1="'+padL+'" x2="'+(W-padR)+'" y1="'+yy+'" y2="'+yy+'" stroke="rgba(255,255,255,.06)"/>' +
+         '<text x="4" y="'+(yy+3)+'" fill="rgba(255,255,255,.45)" font-size="9">'+p.toFixed(2)+'</text>';
+  }
+  // candles
+  S.forEach(b => {
+    const [t,o,h2,l,c] = b, cx = x(t)+bw/2, up = c >= o, col = up ? '#3fb950' : '#f85149';
+    g += '<line x1="'+cx+'" x2="'+cx+'" y1="'+y(h2)+'" y2="'+y(l)+'" stroke="'+col+'" stroke-width="1"/>' +
+         '<rect x="'+x(t)+'" y="'+y(Math.max(o,c))+'" width="'+bw+'" height="'+Math.max(1, Math.abs(y(o)-y(c)))+'" fill="'+col+'" opacity="0.85"/>';
+  });
+  // trade annotations
+  ((rlCur.trades)||[]).filter(t => t.sym === sym).forEach(t => {
+    const xe = x(t.t)+bw/2, ye = y(t.entry);
+    g += '<circle cx="'+xe+'" cy="'+ye+'" r="5" fill="#3fb950" stroke="#fff" stroke-width="1.2"/>' +
+         '<text x="'+(xe+7)+'" y="'+(ye-7)+'" fill="#3fb950" font-size="10" font-weight="700">▲ entry '+t.entry+' @'+t.t+'</text>';
+    if (t.stop) g += '<line x1="'+xe+'" x2="'+(W-padR)+'" y1="'+y(t.stop)+'" y2="'+y(t.stop)+'" stroke="#f85149" stroke-dasharray="5 4" stroke-width="1"/>' +
+                     '<text x="'+(W-padR-58)+'" y="'+(y(t.stop)-3)+'" fill="#f85149" font-size="9">stop '+t.stop+'</text>';
+    if (t.target) g += '<line x1="'+xe+'" x2="'+(W-padR)+'" y1="'+y(t.target)+'" y2="'+y(t.target)+'" stroke="#3fb950" stroke-dasharray="5 4" stroke-width="1" opacity=".7"/>' +
+                       '<text x="'+(W-padR-66)+'" y="'+(y(t.target)-3)+'" fill="#3fb950" font-size="9">target '+t.target+'</text>';
+    if (t.exit_t) {
+      const xx = x(t.exit_t)+bw/2, yx = y(t.exit);
+      g += '<circle cx="'+xx+'" cy="'+yx+'" r="5" fill="#f85149" stroke="#fff" stroke-width="1.2"/>' +
+           '<text x="'+(xx+7)+'" y="'+(yx+13)+'" fill="#f85149" font-size="10" font-weight="700">▼ exit '+t.exit+' @'+t.exit_t+' ('+t.why+')</text>';
+    }
+  });
+  const meta = ((rlCur.trades)||[]).filter(t => t.sym === sym).map(t => 'P/L $'+Number(t.usd).toLocaleString()+' · spread '+t.spread_bps+'bps · qty '+Number(t.qty).toLocaleString()).join(' | ');
+  return '<div class="rl-chart-meta">'+rlEsc(sym)+' — 5m bars (UTC)'+(meta ? ' · '+meta : ' · watched, walang fill')+'</div>' +
+         '<svg class="rl-chart" viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none">'+g+'</svg>';
 }
 
 async function rlLoadHistory() {
   try {
     const j = await (await fetch('/api/trading/momentum/replay/list')).json();
-    document.getElementById('rl-hist').innerHTML = (j.results || []).map(r =>
-      '<tr class="hist" onclick="rlLoadResult(\'' + rlEsc(r.date) + '\')"><td><b>' + rlEsc(r.date) + '</b></td>' +
-      '<td class="' + (Number(r.total_usd) >= 0 ? 'rl-pos' : 'rl-neg') + '">$' + Number(r.total_usd||0).toLocaleString() + '</td>' +
-      '<td>' + (r.n_trades||0) + '</td><td>' + (r.wins||0) + '/' + (r.losses||0) + '</td>' +
-      '<td>' + (r.tape_symbols||0) + '</td><td>' + (r.candidates||0) + '</td><td>' + (r.halt_windows||0) + '</td>' +
-      '<td style="color:var(--text-secondary);">' + rlEsc((r.ran_at_utc||'').slice(0,16).replace('T',' ')) + '</td></tr>'
-    ).join('') || '<tr><td colspan="8" style="color:var(--text-secondary);">Wala pang replay — patakbuhin ang una sa itaas.</td></tr>';
+    document.getElementById('rl-hist').innerHTML = (j.results||[]).map(r =>
+      '<tr class="hist" onclick="rlLoadResult(\''+rlEsc(r.date)+'\')"><td><b>'+rlEsc(r.date)+'</b></td>'+
+      '<td class="'+(Number(r.total_usd)>=0?'rl-pos':'rl-neg')+'">$'+Number(r.total_usd||0).toLocaleString()+'</td>'+
+      '<td>'+(r.n_trades||0)+'</td><td>'+(r.wins||0)+'/'+(r.losses||0)+'</td>'+
+      '<td>'+(r.tape_symbols||0)+'</td><td>'+(r.candidates||0)+'</td><td>'+(r.halt_windows||0)+'</td>'+
+      '<td style="color:var(--text-secondary);">'+rlEsc((r.ran_at_utc||'').slice(0,16).replace('T',' '))+'</td></tr>'
+    ).join('') || '<tr><td colspan="8" style="color:var(--text-secondary);">Wala pang replay.</td></tr>';
   } catch (e) { /* ignore */ }
 }
 
 (function init() {
-  const d = new Date(); d.setDate(d.getDate());
-  document.getElementById('rl-date').value = d.toISOString().slice(0, 10);
+  document.getElementById('rl-date').value = new Date().toISOString().slice(0,10);
   rlLoadHistory(); rlCheck();
+  // auto-open the newest persisted result kung meron
+  fetch('/api/trading/momentum/replay/list').then(r=>r.json()).then(j => {
+    const first = (j.results||[])[0]; if (first) rlLoadResult(first.date);
+  }).catch(()=>{});
 })();
 </script>
 {% endblock %}

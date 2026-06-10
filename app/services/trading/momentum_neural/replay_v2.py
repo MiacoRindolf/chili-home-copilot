@@ -225,6 +225,7 @@ def run_replay(date: str, *, persist: bool = True) -> dict:
     adv: dict[str, float | None] = {s: avg_daily_vol_before(s) for s in cand}
 
     armed: dict[str, dict] = {}
+    armed_spans: dict[str, list[list[str]]] = defaultdict(list)   # sym -> [[from,to],...] HH:MM UTC
     trades: list[dict] = []
     open_pos: dict[str, dict] = {}
     state = {"cum": 0.0, "peak": 0.0, "halted": None}
@@ -249,11 +250,14 @@ def run_replay(date: str, *, persist: bool = True) -> dict:
         scored = score_universe(sigs, weights=ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED)
         return [r.symbol for r in sorted(scored.values(), key=lambda r: r.rank)]
 
-    def close_trade(s: str, p: dict, exit_px: float, why: str) -> None:
+    def close_trade(s: str, p: dict, exit_px: float, why: str, when=None) -> None:
         pnl = (exit_px - p["entry"]) * p["qty"]
         state["cum"] += pnl
         state["peak"] = max(state["peak"], state["cum"])
         trades.append({**p["meta"], "exit": round(exit_px, 4), "why": why,
+                       "exit_t": (str(when)[11:16] if when is not None else None),
+                       "stop": round(p.get("stop0", p["stop"]), 4),
+                       "target": round(p["target"], 4),
                        "usd": round(pnl + p.get("scale_usd", 0.0), 0)})
         del open_pos[s]
         if state["halted"] is None and state["cum"] <= -DAILY_LOSS_CAP_USD:
@@ -275,11 +279,11 @@ def run_replay(date: str, *, persist: bool = True) -> dict:
                 if bl <= p["stop"]:
                     nxt = tape.first_after(s, now)
                     if nxt:
-                        close_trade(s, p, nxt[1], "stop_through_halt_resume")
+                        close_trade(s, p, nxt[1], "stop_through_halt_resume", when=now)
                 continue
             if bl <= p["stop"]:
                 px = min(p["stop"], tape_bid) if tape_bid else p["stop"]
-                close_trade(s, p, px, "stop")
+                close_trade(s, p, px, "stop", when=now)
                 continue
             if not p["scaled"] and bh >= p["target"]:
                 p["scaled"] = True
@@ -301,12 +305,15 @@ def run_replay(date: str, *, persist: bool = True) -> dict:
             continue
         for s in list(armed):
             if (now - armed[s]["since"]).total_seconds() / 60.0 > REAP_MIN:
+                if armed_spans[s] and armed_spans[s][-1][1] is None:
+                    armed_spans[s][-1][1] = str(now)[11:16]
                 del armed[s]
         for s in asof_rank(now):
             if len(armed) >= MAX_SLOTS:
                 break
             if s not in armed and s not in open_pos:
                 armed[s] = {"since": now}
+                armed_spans[s].append([str(now)[11:16], None])
         for s in list(armed):
             if s in open_pos or tape.in_halt_or_cooldown(s, now):
                 continue
@@ -353,7 +360,7 @@ def run_replay(date: str, *, persist: bool = True) -> dict:
                 if qty <= 0:
                     break
                 open_pos[s] = {
-                    "entry": fill_px, "qty": qty, "stop": stop, "target": target,
+                    "entry": fill_px, "qty": qty, "stop": stop, "stop0": stop, "target": target,
                     "hwm": fill_px, "atrp": eff, "scaled": False, "df": df, "c": c, "scale_usd": 0.0,
                     "meta": {"sym": s, "t": str(later.index[k])[11:16], "entry": round(fill_px, 4),
                              "qty": round(qty, 0), "spread_bps": round(sbps, 0),
@@ -365,7 +372,38 @@ def run_replay(date: str, *, persist: bool = True) -> dict:
     for s in list(open_pos):
         p = open_pos[s]
         last_bid = tape.by_sym[s][-1][1]
-        close_trade(s, p, last_bid, "eod")
+        close_trade(s, p, last_bid, "eod", when=day_grid[-1])
+
+    # close any still-open armed spans at EOD
+    eod_label = str(day_grid[-1])[11:16]
+    for s in armed_spans:
+        for span in armed_spans[s]:
+            if span[1] is None:
+                span[1] = eod_label
+
+    # chart payloads: 5m OHLCV series + halt spans for every symbol with activity
+    traded_syms = {t["sym"] for t in trades}
+    active_syms = list(dict.fromkeys(list(traded_syms) + list(armed_spans.keys())))
+    series: dict[str, list] = {}
+    halt_spans_out: dict[str, list] = {}
+    for s in active_syms:
+        df, c = day_frame(s)
+        if df is None:
+            continue
+        series[s] = [
+            [str(ix)[11:16],
+             round(float(r[c["open"]]), 4), round(float(r[c["high"]]), 4),
+             round(float(r[c["low"]]), 4), round(float(r[c["close"]]), 4),
+             int(r[c["volume"]])]
+            for ix, r in df.iterrows()
+        ]
+        halt_spans_out[s] = [[str(a)[11:16], str(b)[11:16]] for a, b in tape.halts.get(s, [])]
+    result["series"] = series
+    result["halt_spans"] = halt_spans_out
+    result["armed_timeline"] = [
+        {"sym": s, "spans": armed_spans[s], "traded": s in traded_syms}
+        for s in active_syms
+    ]
 
     result["trades"] = sorted(trades, key=lambda z: z["t"])
     result["total_usd"] = round(state["cum"], 0)
