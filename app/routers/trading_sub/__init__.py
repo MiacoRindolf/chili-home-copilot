@@ -8,6 +8,7 @@ from .inspect import router as inspect_router
 from .monitor import router as monitor_router
 from .operator import router as operator_router
 from .patterns import router as patterns_router
+from .replay_api import router as replay_router
 from .scanning import router as scanning_router
 from .trades import router as trades_router
 from .web3 import router as web3_router
@@ -22,6 +23,7 @@ __all__ = [
     "monitor_router",
     "operator_router",
     "patterns_router",
+    "replay_router",
     "scanning_router",
     "trades_router",
     "web3_router",

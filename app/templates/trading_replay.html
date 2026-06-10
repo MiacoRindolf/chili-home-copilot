@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+{% block title %}CHILI Replay Lab{% endblock %}
+
+{% block head_extra %}
+<style>
+.rl-wrap { max-width: 1080px; margin: 0 auto; padding: 18px 16px 60px; color: var(--text); }
+.rl-head { display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom:14px; }
+.rl-head h1 { font-size:18px; margin:0; }
+.rl-sub { color: var(--text-secondary); font-size:12px; margin:2px 0 0; }
+.rl-card { background: var(--bg-card, rgba(255,255,255,.03)); border:1px solid var(--border); border-radius:10px; padding:14px; margin-bottom:14px; }
+.rl-row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+.rl-row input[type=date] { background: var(--bg); color: var(--text); border:1px solid var(--border); border-radius:6px; padding:7px 10px; font-size:13px; }
+.rl-btn { background:#2f81f7; color:#fff; border:0; border-radius:6px; padding:8px 18px; font-size:13px; font-weight:600; cursor:pointer; }
+.rl-btn:disabled { opacity:.5; cursor:default; }
+.rl-status { font-size:12.5px; color: var(--text-secondary); }
+.rl-status.running { color:#d29922; }
+.rl-status.done { color:#3fb950; }
+.rl-status.error { color:#f85149; }
+.rl-kpis { display:flex; gap:18px; flex-wrap:wrap; margin:10px 0 4px; }
+.rl-kpi { min-width:120px; }
+.rl-kpi .v { font-size:20px; font-weight:700; }
+.rl-kpi .v.pos { color:#3fb950; } .rl-kpi .v.neg { color:#f85149; }
+.rl-kpi .k { font-size:11px; color: var(--text-secondary); text-transform:uppercase; letter-spacing:.04em; }
+table.rl-t { width:100%; border-collapse:collapse; font-size:12.5px; }
+table.rl-t th { text-align:left; color:var(--text-secondary); font-weight:600; padding:6px 8px; border-bottom:1px solid var(--border); font-size:11px; text-transform:uppercase; }
+table.rl-t td { padding:6px 8px; border-bottom:1px solid rgba(255,255,255,.04); }
+table.rl-t tr.hist { cursor:pointer; } table.rl-t tr.hist:hover { background: rgba(255,255,255,.04); }
+.rl-pos { color:#3fb950; } .rl-neg { color:#f85149; }
+.rl-note { font-size:11.5px; color:var(--text-secondary); margin-top:8px; line-height:1.5; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="rl-wrap">
+  <div class="rl-head">
+    <div>
+      <h1>🔁 Replay Lab <span style="font-size:11px;color:var(--text-secondary);font-weight:400;">high-fidelity (v2)</span></h1>
+      <p class="rl-sub">Totoong NBBO spreads · limit-touch fills · halt masking · walang lookahead — ang permanenteng benchmark engine</p>
+    </div>
+    <a href="/trading" style="font-size:12px;color:var(--text-secondary);">← Trading</a>
+  </div>
+
+  <div class="rl-card">
+    <div class="rl-row">
+      <input type="date" id="rl-date">
+      <button class="rl-btn" id="rl-run" onclick="rlRun()">▶ Run Replay</button>
+      <span class="rl-status" id="rl-status">idle</span>
+    </div>
+    <div class="rl-note">
+      Ang replay ay tumatakbo nang ~3–8 min (per-symbol bar fetches). Isang replay lang ang pwede sabay-sabay.
+      Kailangan ng <b>NBBO tape</b> para sa petsa (minute-dense recording simula 2026-06-10; partial 06-08/09) — kung walang tape, mag-eerror ng <code>no_tape_for_date</code>.
+    </div>
+  </div>
+
+  <div class="rl-card" id="rl-result-card" style="display:none;">
+    <h3 style="margin:0 0 4px;font-size:14px;" id="rl-result-title"></h3>
+    <div class="rl-kpis" id="rl-kpis"></div>
+    <table class="rl-t" id="rl-trades-t" style="margin-top:8px;">
+      <thead><tr><th>Oras (UTC)</th><th>Symbol</th><th>Entry</th><th>Exit</th><th>Qty</th><th>Spread</th><th>Partial</th><th>Exit reason</th><th>P/L</th></tr></thead>
+      <tbody id="rl-trades"></tbody>
+    </table>
+  </div>
+
+  <div class="rl-card">
+    <h3 style="margin:0 0 8px;font-size:14px;">📜 Nakaraang replays <span style="font-size:11px;color:var(--text-secondary);font-weight:400;">(click para buksan)</span></h3>
+    <table class="rl-t">
+      <thead><tr><th>Petsa</th><th>P/L</th><th>Trades</th><th>W/L</th><th>Tape syms</th><th>Candidates</th><th>Halt windows</th><th>Tumakbo</th></tr></thead>
+      <tbody id="rl-hist"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const rlEsc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let rlPoll = null;
+
+function rlSetStatus(text, cls) {
+  const el = document.getElementById('rl-status');
+  el.textContent = text; el.className = 'rl-status ' + (cls || '');
+}
+
+async function rlRun() {
+  const date = document.getElementById('rl-date').value;
+  if (!date) { rlSetStatus('pumili muna ng petsa', 'error'); return; }
+  document.getElementById('rl-run').disabled = true;
+  rlSetStatus('sinisimulan…', 'running');
+  try {
+    const r = await fetch('/api/trading/momentum/replay/run', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({date})
+    });
+    const j = await r.json();
+    if (!j.ok) { rlSetStatus(j.error === 'replay_already_running' ? 'may tumatakbong replay — hintayin matapos' : (j.error || 'error'), 'error'); document.getElementById('rl-run').disabled = false; return; }
+    rlPoll = setInterval(rlCheck, 5000);
+    rlCheck();
+  } catch (e) { rlSetStatus('request failed: ' + e, 'error'); document.getElementById('rl-run').disabled = false; }
+}
+
+async function rlCheck() {
+  try {
+    const j = await (await fetch('/api/trading/momentum/replay/status')).json();
+    const job = j.job || {};
+    if (job.state === 'running') { rlSetStatus('tumatakbo… (' + (job.date || '') + ') — bar fetches, ~3-8 min', 'running'); return; }
+    clearInterval(rlPoll); rlPoll = null;
+    document.getElementById('rl-run').disabled = false;
+    if (job.state === 'done') {
+      rlSetStatus('tapos: ' + job.date + ' → $' + Number(job.total_usd||0).toLocaleString() + ' (' + (job.n_trades||0) + ' trades)', 'done');
+      rlLoadResult(job.date); rlLoadHistory();
+    } else if (job.state === 'error') {
+      rlSetStatus('error: ' + (job.error || '?'), 'error'); rlLoadHistory();
+    } else { rlSetStatus(job.state || 'idle'); }
+  } catch (e) { /* transient */ }
+}
+
+async function rlLoadResult(date) {
+  try {
+    const j = await (await fetch('/api/trading/momentum/replay/result/' + date)).json();
+    if (!j.ok) return;
+    const r = j.result;
+    document.getElementById('rl-result-card').style.display = '';
+    document.getElementById('rl-result-title').textContent = '📊 ' + r.date + ' — high-fidelity result';
+    const tot = Number(r.total_usd || 0);
+    document.getElementById('rl-kpis').innerHTML =
+      '<div class="rl-kpi"><div class="v ' + (tot >= 0 ? 'pos' : 'neg') + '">$' + tot.toLocaleString() + '</div><div class="k">Day P/L</div></div>' +
+      '<div class="rl-kpi"><div class="v">' + (r.trades||[]).length + '</div><div class="k">Trades</div></div>' +
+      '<div class="rl-kpi"><div class="v">' + (r.wins||0) + '/' + (r.losses||0) + '</div><div class="k">W/L</div></div>' +
+      '<div class="rl-kpi"><div class="v">' + (r.candidates||0) + '</div><div class="k">As-of candidates</div></div>' +
+      '<div class="rl-kpi"><div class="v">' + (r.halt_windows||0) + '</div><div class="k">Halt windows masked</div></div>' +
+      '<div class="rl-kpi"><div class="v">' + (r.day_halted || '—') + '</div><div class="k">Day halt</div></div>';
+    document.getElementById('rl-trades').innerHTML = (r.trades || []).map(t =>
+      '<tr><td>' + rlEsc(t.t) + '</td><td><b>' + rlEsc(t.sym) + '</b></td><td>' + rlEsc(t.entry) + '</td><td>' + rlEsc(t.exit) + '</td>' +
+      '<td>' + Number(t.qty||0).toLocaleString() + '</td><td>' + rlEsc(t.spread_bps) + 'bps</td><td>' + rlEsc(t.partial) + '</td>' +
+      '<td>' + rlEsc(t.why) + '</td><td class="' + (Number(t.usd) >= 0 ? 'rl-pos' : 'rl-neg') + '">$' + Number(t.usd||0).toLocaleString() + '</td></tr>'
+    ).join('') || '<tr><td colspan="9" style="color:var(--text-secondary);">Walang trade na pumasa sa real-fidelity gates sa araw na ito.</td></tr>';
+  } catch (e) { /* ignore */ }
+}
+
+async function rlLoadHistory() {
+  try {
+    const j = await (await fetch('/api/trading/momentum/replay/list')).json();
+    document.getElementById('rl-hist').innerHTML = (j.results || []).map(r =>
+      '<tr class="hist" onclick="rlLoadResult(\'' + rlEsc(r.date) + '\')"><td><b>' + rlEsc(r.date) + '</b></td>' +
+      '<td class="' + (Number(r.total_usd) >= 0 ? 'rl-pos' : 'rl-neg') + '">$' + Number(r.total_usd||0).toLocaleString() + '</td>' +
+      '<td>' + (r.n_trades||0) + '</td><td>' + (r.wins||0) + '/' + (r.losses||0) + '</td>' +
+      '<td>' + (r.tape_symbols||0) + '</td><td>' + (r.candidates||0) + '</td><td>' + (r.halt_windows||0) + '</td>' +
+      '<td style="color:var(--text-secondary);">' + rlEsc((r.ran_at_utc||'').slice(0,16).replace('T',' ')) + '</td></tr>'
+    ).join('') || '<tr><td colspan="8" style="color:var(--text-secondary);">Wala pang replay — patakbuhin ang una sa itaas.</td></tr>';
+  } catch (e) { /* ignore */ }
+}
+
+(function init() {
+  const d = new Date(); d.setDate(d.getDate());
+  document.getElementById('rl-date').value = d.toISOString().slice(0, 10);
+  rlLoadHistory(); rlCheck();
+})();
+</script>
+{% endblock %}
