@@ -44,7 +44,7 @@ table.rl-t tr.hist { cursor:pointer; } table.rl-t tr.hist:hover { background: rg
 .tl-chartbox { margin:4px 0 10px 86px; display:none; }
 .tl-chartbox.open { display:block; }
 .rl-chart-meta { font-size:11.5px; color:var(--text-secondary); margin:2px 0 4px; }
-svg.rl-chart { width:100%; height:230px; background:rgba(0,0,0,.18); border:1px solid var(--border); border-radius:8px; }
+svg.rl-chart { width:100%; height:252px; background:rgba(0,0,0,.18); border:1px solid var(--border); border-radius:8px; }
 </style>
 {% endblock %}
 
@@ -102,7 +102,7 @@ svg.rl-chart { width:100%; height:230px; background:rgba(0,0,0,.18); border:1px 
 
 <script>
 const rlEsc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const T0 = 13*60+30, T1 = 20*60;                       // UTC minutes 13:30 → 20:00
+const T0 = 11*60, T1 = 20*60;                          // UTC 11:00→20:00 = 07:00–16:00 ET (incl. pre-market)
 const tMin = t => { const [h,m] = String(t||'').split(':').map(Number); return h*60+(m||0); };
 const tPct = t => Math.max(0, Math.min(100, (tMin(t)-T0)/(T1-T0)*100));
 let rlPoll = null, rlCur = null;
@@ -200,42 +200,80 @@ function rlChartSVG(sym) {
   const r = rlCur || {};
   const S = (r.series||{})[sym];
   if (!S || !S.length) return '<div class="rl-chart-meta">no bar data for '+rlEsc(sym)+'</div>';
-  const W = 1040, H = 230, padL = 46, padR = 8, padT = 10, padB = 18;
+  S = S.filter(b => { const m = tMin(b[0]); return m >= T0 && m <= T1; });
+  if (!S.length) return '<div class="rl-chart-meta">no bars in the trading window for '+rlEsc(sym)+'</div>';
+  const W = 1040, H = 252, padL = 46, padR = 8, padT = 10, padB = 40;  // padB hosts the volume pane
   const lo = Math.min(...S.map(b => b[3])), hi = Math.max(...S.map(b => b[2]));
   const span = (hi-lo) || 1, y = p => padT + (hi - p) / span * (H-padT-padB);
   const x = t => padL + (Math.max(T0, Math.min(T1, tMin(t))) - T0) / (T1-T0) * (W-padL-padR);
   const bw = Math.max(2, (W-padL-padR) / ((T1-T0)/5) - 2);
   let g = '';
-  // halt shading
-  ((r.halt_spans||{})[sym]||[]).forEach(h => {
-    g += '<rect x="'+x(h[0])+'" y="'+padT+'" width="'+Math.max(2, x(h[1])-x(h[0]))+'" height="'+(H-padT-padB)+'" fill="rgba(248,81,73,.10)"/>' +
-         '<text x="'+(x(h[0])+3)+'" y="'+(padT+10)+'" fill="rgba(248,81,73,.7)" font-size="8">HALT</text>';
-  });
+  // 09:30 ET open marker
+  const xOpen = x('13:30');
+  g += '<line x1="'+xOpen+'" x2="'+xOpen+'" y1="'+padT+'" y2="'+(H-padB)+'" stroke="rgba(255,255,255,.22)" stroke-dasharray="3 4"/>' +
+       '<text x="'+(xOpen+3)+'" y="'+(H-padB-4)+'" fill="rgba(255,255,255,.4)" font-size="8">09:30 ET open</text>';
+  // halt shading: MERGE adjacent windows (gap <= 3 min) and label only wide ones
+  (function(){
+    const spans = ((r.halt_spans||{})[sym]||[]).slice().sort((a,b) => tMin(a[0])-tMin(b[0]));
+    const merged = [];
+    spans.forEach(h => {
+      const last = merged[merged.length-1];
+      if (last && tMin(h[0]) - tMin(last[1]) <= 3) { if (tMin(h[1]) > tMin(last[1])) last[1] = h[1]; }
+      else merged.push([h[0], h[1]]);
+    });
+    merged.forEach(h => {
+      const wpx = Math.max(2, x(h[1])-x(h[0]));
+      g += '<rect x="'+x(h[0])+'" y="'+padT+'" width="'+wpx+'" height="'+(H-padT-padB)+'" fill="rgba(248,81,73,.10)"/>';
+      if (wpx > 26) g += '<text x="'+(x(h[0])+3)+'" y="'+(padT+10)+'" fill="rgba(248,81,73,.7)" font-size="8">HALT</text>';
+    });
+  })();
   // y gridlines + labels
   for (let k = 0; k <= 4; k++) {
     const p = lo + span*k/4, yy = y(p);
     g += '<line x1="'+padL+'" x2="'+(W-padR)+'" y1="'+yy+'" y2="'+yy+'" stroke="rgba(255,255,255,.06)"/>' +
          '<text x="4" y="'+(yy+3)+'" fill="rgba(255,255,255,.45)" font-size="9">'+p.toFixed(2)+'</text>';
   }
+  // volume pane (bottom strip)
+  const vmax = Math.max(...S.map(b => b[5])) || 1;
+  S.forEach(b => {
+    const [t,o,h2,l,c,v] = b, up = c >= o;
+    const vh = Math.max(1, (v / vmax) * 26);
+    g += '<rect x="'+x(t)+'" y="'+(H-12-vh)+'" width="'+bw+'" height="'+vh+'" fill="'+(up?'#3fb950':'#f85149')+'" opacity="0.28"/>';
+  });
   // candles
   S.forEach(b => {
     const [t,o,h2,l,c] = b, cx = x(t)+bw/2, up = c >= o, col = up ? '#3fb950' : '#f85149';
     g += '<line x1="'+cx+'" x2="'+cx+'" y1="'+y(h2)+'" y2="'+y(l)+'" stroke="'+col+'" stroke-width="1"/>' +
          '<rect x="'+x(t)+'" y="'+y(Math.max(o,c))+'" width="'+bw+'" height="'+Math.max(1, Math.abs(y(o)-y(c)))+'" fill="'+col+'" opacity="0.85"/>';
   });
-  // trade annotations
+  // trade annotations w/ collision-aware label placement
+  const placed = [];
+  function labelY(xp, yp) {
+    let yy = yp;
+    for (let tries = 0; tries < 8; tries++) {
+      const hit = placed.some(b => Math.abs(b.x - xp) < 150 && Math.abs(b.y - yy) < 12);
+      if (!hit) break;
+      yy += 13;
+    }
+    placed.push({x: xp, y: yy});
+    return yy;
+  }
   ((rlCur.trades)||[]).filter(t => t.sym === sym).forEach(t => {
     const xe = x(t.t)+bw/2, ye = y(t.entry);
+    const eAnchor = xe > W-180 ? ' text-anchor="end"' : '';
+    const eyl = labelY(xe, ye-7);
     g += '<circle cx="'+xe+'" cy="'+ye+'" r="5" fill="#3fb950" stroke="#fff" stroke-width="1.2"/>' +
-         '<text x="'+(xe+7)+'" y="'+(ye-7)+'" fill="#3fb950" font-size="10" font-weight="700">▲ entry '+t.entry+' @'+t.t+'</text>';
+         '<text x="'+(xe + (eAnchor? -7 : 7))+'" y="'+eyl+'"'+eAnchor+' fill="#3fb950" font-size="10" font-weight="700">▲ entry '+t.entry+' @'+t.t+'</text>';
     if (t.stop) g += '<line x1="'+xe+'" x2="'+(W-padR)+'" y1="'+y(t.stop)+'" y2="'+y(t.stop)+'" stroke="#f85149" stroke-dasharray="5 4" stroke-width="1"/>' +
                      '<text x="'+(W-padR-58)+'" y="'+(y(t.stop)-3)+'" fill="#f85149" font-size="9">stop '+t.stop+'</text>';
     if (t.target) g += '<line x1="'+xe+'" x2="'+(W-padR)+'" y1="'+y(t.target)+'" y2="'+y(t.target)+'" stroke="#3fb950" stroke-dasharray="5 4" stroke-width="1" opacity=".7"/>' +
                        '<text x="'+(W-padR-66)+'" y="'+(y(t.target)-3)+'" fill="#3fb950" font-size="9">target '+t.target+'</text>';
     if (t.exit_t) {
       const xx = x(t.exit_t)+bw/2, yx = y(t.exit);
+      const xAnchor = xx > W-220 ? ' text-anchor="end"' : '';
+      const xyl = labelY(xx, yx+13);
       g += '<circle cx="'+xx+'" cy="'+yx+'" r="5" fill="#f85149" stroke="#fff" stroke-width="1.2"/>' +
-           '<text x="'+(xx+7)+'" y="'+(yx+13)+'" fill="#f85149" font-size="10" font-weight="700">▼ exit '+t.exit+' @'+t.exit_t+' ('+t.why+')</text>';
+           '<text x="'+(xx + (xAnchor? -7 : 7))+'" y="'+xyl+'"'+xAnchor+' fill="#f85149" font-size="10" font-weight="700">▼ exit '+t.exit+' @'+t.exit_t+' ('+t.why+')</text>';
     }
   });
   const meta = ((rlCur.trades)||[]).filter(t => t.sym === sym).map(t => 'P/L $'+Number(t.usd).toLocaleString()+' · spread '+t.spread_bps+'bps · qty '+Number(t.qty).toLocaleString()).join(' | ');
