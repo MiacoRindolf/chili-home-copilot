@@ -323,6 +323,11 @@ def begin_live_arm(
     from ..portfolio_allocator import build_session_allocation_decision
 
     sym = symbol.strip().upper()
+    # Venue-aware dedup: key on (symbol, variant, mode, EXECUTION_FAMILY) so the SAME name can
+    # hold one live session PER VENUE (e.g. an A/B of robinhood_spot real vs alpaca_spot paper).
+    # Same-venue same-symbol+variant still dedups -> no double-arm / double real-money exposure
+    # on a single venue. (docs/DESIGN/ALPACA_LANE.md — the same-name A/B enabler.)
+    _ef_norm = normalize_execution_family(execution_family)
     existing = (
         db.query(TradingAutomationSession)
         .filter(
@@ -330,6 +335,7 @@ def begin_live_arm(
             TradingAutomationSession.symbol == sym,
             TradingAutomationSession.variant_id == int(variant_id),
             TradingAutomationSession.mode == "live",
+            TradingAutomationSession.execution_family == _ef_norm,
             TradingAutomationSession.state != STATE_ARCHIVED,
         )
         .order_by(TradingAutomationSession.updated_at.desc())
