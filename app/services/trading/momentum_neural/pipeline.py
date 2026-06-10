@@ -89,10 +89,19 @@ def run_momentum_neural_tick(
     _ross_signals = meta.get("ross_signals")
     if isinstance(_ross_signals, dict) and _ross_signals:
         try:
+            from .ross_momentum import ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED
             from .ross_momentum import score_universe as _ross_score_universe
 
+            # Liquidity-BIASED weights: prefer movers the lane can actually FILL
+            # (dollar turnover -> tighter spread), not only the most explosive
+            # names that get spread-gated and only ever watched. Validated on the
+            # 11-day previous-days A/B replay: +6 fills, +$914 PnL vs baseline
+            # (scripts/_sim_liquidity_selection.py, 2026-06-10).
             meta["ross_scores"] = {
-                s: rs.score for s, rs in _ross_score_universe(_ross_signals).items()
+                s: rs.score
+                for s, rs in _ross_score_universe(
+                    _ross_signals, weights=ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED
+                ).items()
             }
         except Exception:
             pass

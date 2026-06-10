@@ -3392,12 +3392,44 @@ def _bridge_scanner_to_viability(
     # top _VIABILITY_BRIDGE_MAX_TICKERS. No-op on failure (keeps original order).
     # See docs/DESIGN/MOMENTUM_LANE.md.
     try:
-        from .trading.momentum_neural.ross_momentum import score_universe as _ross_su
+        from .trading.momentum_neural.ross_momentum import (
+            ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED,
+            score_universe as _ross_su,
+        )
 
         def _bsym(_r: dict) -> str:
             return str(_r.get("ticker") or _r.get("symbol") or "").strip().upper()
 
-        _ross_ranked = _ross_su({_bsym(r): r for r in results if _bsym(r)})
+        # Equity signals from the intraday sweep carry no turnover field; enrich with
+        # the snapshot dollar-volume so the tradeable_liquidity pillar has data
+        # (crypto already carries quote_volume_24h). Fail-open: missing symbols are
+        # simply absent and the pillar weight renormalises away for them.
+        try:
+            from .trading.momentum_neural.universe import snapshot_dollar_volumes
+
+            _need_dv = [
+                _bsym(r) for r in results
+                if _bsym(r) and not any(
+                    (r or {}).get(k) for k in ("dollar_volume", "quote_volume_24h", "turnover")
+                )
+            ]
+            if _need_dv:
+                _dvols = snapshot_dollar_volumes(_need_dv)
+                for r in results:
+                    _s = _bsym(r)
+                    if _s in _dvols and not (r or {}).get("dollar_volume"):
+                        r["dollar_volume"] = float(_dvols[_s])
+        except Exception:
+            logger.debug("[scheduler] ross dollar-volume enrichment skipped", exc_info=True)
+
+        # Liquidity-BIASED ranking (same weights as the pipeline tilt): prefer movers
+        # the lane can actually FILL, not only the most explosive spread-gated names.
+        # Validated on the 11-day previous-days A/B replay: +6 fills, +$914 PnL vs
+        # baseline (scripts/_sim_liquidity_selection.py, 2026-06-10).
+        _ross_ranked = _ross_su(
+            {_bsym(r): r for r in results if _bsym(r)},
+            weights=ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED,
+        )
         results = sorted(
             results,
             key=lambda r: (
