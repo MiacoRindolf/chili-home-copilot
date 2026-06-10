@@ -225,11 +225,12 @@ def run_replay(date: str, *, persist: bool = True) -> dict:
     adv: dict[str, float | None] = {s: avg_daily_vol_before(s) for s in cand}
 
     armed: dict[str, dict] = {}
+    trigger_cache: dict[tuple, tuple] = {}
     armed_spans: dict[str, list[list[str]]] = defaultdict(list)   # sym -> [[from,to],...] HH:MM UTC
     trades: list[dict] = []
     open_pos: dict[str, dict] = {}
     state = {"cum": 0.0, "peak": 0.0, "halted": None}
-    day_grid = pd.date_range(f"{date} 13:30:00", f"{date} 19:55:00", freq="5min", tz="UTC")
+    day_grid = pd.date_range(f"{date} 13:30:00", f"{date} 19:59:00", freq="1min", tz="UTC")
 
     def asof_rank(now) -> list[str]:
         sigs = {}
@@ -317,13 +318,25 @@ def run_replay(date: str, *, persist: bool = True) -> dict:
         for s in list(armed):
             if s in open_pos or tape.in_halt_or_cooldown(s, now):
                 continue
+            # per-symbol attempt cooldown: a failed limit-touch attempt rests for the
+            # fill window before retrying (mirrors the live ack-timeout + re-watch)
+            la = armed[s].get("last_try")
+            if la is not None and (now - la).total_seconds() / 60.0 < FILL_WINDOW_BARS * 5:
+                continue
             df, c = day_frame(s)
             if df is None:
                 continue
             upto = df[df.index <= now]
-            if len(upto) < 12 or now not in df.index:
+            if len(upto) < 12:
                 continue
-            ok, _, dbg = momentum_pullback_trigger(upto, entry_interval="5m")
+            # the trigger only changes when a NEW 5m bar completes — cache per
+            # (symbol, last-bar) so the 1-min grid doesn't 5x the trigger cost
+            _bar_key = (s, str(upto.index[-1]))
+            if _bar_key in trigger_cache:
+                ok, dbg = trigger_cache[_bar_key]
+            else:
+                ok, _, dbg = momentum_pullback_trigger(upto, entry_interval="5m")
+                trigger_cache[_bar_key] = (ok, dbg)
             if not ok:
                 continue
             armed[s]["since"] = now
@@ -338,6 +351,7 @@ def run_replay(date: str, *, persist: bool = True) -> dict:
             move_bps = atrp * 10_000.0
             if move_bps <= 0 or sbps > min(GATE_MOVE_FRAC * move_bps, SPREAD_ABS_CAP_BPS):
                 continue
+            armed[s]["last_try"] = now
             limit = ask
             later = df[df.index > now]
             for k in range(min(FILL_WINDOW_BARS, len(later))):
