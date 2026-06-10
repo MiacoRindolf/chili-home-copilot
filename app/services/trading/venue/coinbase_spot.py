@@ -956,6 +956,7 @@ class CoinbaseSpotAdapter(VenueAdapter):
         limit_price: str,
         client_order_id: Optional[str] = None,
         post_only: bool = False,
+        extended_hours: bool = False,  # crypto is 24/7 — no extended-hours concept; ignored
     ) -> dict[str, Any]:
         if not getattr(settings, "chili_coinbase_spot_adapter_enabled", True):
             return {"ok": False, "error": "adapter disabled"}

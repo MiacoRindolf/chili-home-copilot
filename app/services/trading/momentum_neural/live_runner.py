@@ -1725,13 +1725,15 @@ def tick_live_session(
                         _trigger_ok, _trigger_reason = momentum_volume_confirmation(_df)
             except Exception:
                 _trigger_ok, _trigger_reason = False, "trigger_error_wait"
-        # E3: equities can only ENTER during US regular hours; crypto is 24/7.
-        # Never advance a stock to entry outside RTH (the order would not fill).
+        # E3: equities ENTER across the EXTENDED session (pre-market → after-hours,
+        # per config) so the lane catches Ross's pre-market gap-and-go; crypto is 24/7.
+        # Outside-RTH entries are flagged extended_hours at placement (below) so the
+        # venue routes them (Alpaca DAY+ext, RH override) instead of rejecting.
         _mkt_open = True
         try:
-            from .market_profile import market_open_now
+            from .market_profile import is_tradeable_now
 
-            _mkt_open = bool(market_open_now(sess.symbol))
+            _mkt_open = bool(is_tradeable_now(sess.symbol))
         except Exception:
             _mkt_open = True
         if _score_ok and _trigger_ok and _mkt_open:
@@ -2241,12 +2243,23 @@ def tick_live_session(
         _commit_le(sess, le)
 
         cid = f"chili_ml_e_{sess.id}_{(sess.correlation_id or 'x')[:8]}_{uuid.uuid4().hex[:10]}"[:120]
+        # Pre-market / after-hours entries must be flagged so the venue routes them
+        # (Alpaca: limit + DAY tif + extended_hours; RH: extended_hours_override). In
+        # the regular session this is False and the order stays a plain marketable GTC.
+        try:
+            from .market_profile import market_session_now
+
+            _entry_extended = market_session_now(sess.symbol) != "regular"
+        except Exception:
+            _entry_extended = False
+        le["entry_session_extended"] = bool(_entry_extended)
         res = adapter.place_limit_order_gtc(
             product_id=product_id,
             side="buy",
             base_size=_fmt_base_size(qty),
             limit_price=entry_limit_str,
             client_order_id=cid,
+            extended_hours=_entry_extended,
         )
         le["entry_submitted"] = True
         le["entry_submit_utc"] = _utcnow().isoformat()

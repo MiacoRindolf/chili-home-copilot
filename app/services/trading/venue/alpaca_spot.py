@@ -303,10 +303,12 @@ class AlpacaSpotAdapter:
 
     def place_limit_order_gtc(self, *, product_id: str, side: str, base_size: str,
                               limit_price: str, client_order_id: Optional[str] = None,
-                              **_ignored) -> dict[str, Any]:
-        return self._submit(product_id, side, base_size, client_order_id, limit_price=limit_price)
+                              extended_hours: bool = False, **_ignored) -> dict[str, Any]:
+        return self._submit(product_id, side, base_size, client_order_id,
+                            limit_price=limit_price, extended_hours=bool(extended_hours))
 
-    def _submit(self, product_id, side, base_size, client_order_id, *, limit_price) -> dict[str, Any]:
+    def _submit(self, product_id, side, base_size, client_order_id, *, limit_price,
+                extended_hours: bool = False) -> dict[str, Any]:
         sym = _to_symbol(product_id)
         try:
             from alpaca.trading.enums import OrderSide, TimeInForce
@@ -314,10 +316,16 @@ class AlpacaSpotAdapter:
             _side = OrderSide.BUY if str(side).lower() == "buy" else OrderSide.SELL
             qty = float(base_size)
             if limit_price is not None:
-                # GTC marketable/posting limit; extended_hours requires a limit + DAY tif, so use
-                # DAY when extended hours might be in play, GTC otherwise. RTH default = GTC.
-                req = LimitOrderRequest(symbol=sym, qty=qty, side=_side, time_in_force=TimeInForce.GTC,
-                                        limit_price=float(limit_price), client_order_id=client_order_id)
+                # Marketable/posting limit. Alpaca rejects extended_hours unless the order
+                # is a LIMIT with DAY tif — so for pre-/after-market (Ross's gap-and-go) we
+                # send DAY + extended_hours=True; the RTH default stays a plain GTC.
+                if extended_hours:
+                    req = LimitOrderRequest(symbol=sym, qty=qty, side=_side, time_in_force=TimeInForce.DAY,
+                                            limit_price=float(limit_price), client_order_id=client_order_id,
+                                            extended_hours=True)
+                else:
+                    req = LimitOrderRequest(symbol=sym, qty=qty, side=_side, time_in_force=TimeInForce.GTC,
+                                            limit_price=float(limit_price), client_order_id=client_order_id)
             else:
                 req = MarketOrderRequest(symbol=sym, qty=qty, side=_side, time_in_force=TimeInForce.DAY,
                                          client_order_id=client_order_id)

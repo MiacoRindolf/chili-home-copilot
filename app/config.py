@@ -2155,6 +2155,22 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_MOMENTUM_FAMILY_REGIME_PREFILTER_ENABLED"),
     )
+    # ── Extended-hours trading window (Ross trades the pre-market gap-and-go) ──
+    # The momentum equity lane is tradeable from premarket_start → afterhours_end ET.
+    # Regular session (9:30–16:00 ET) is a fixed exchange fact in market_profile.py;
+    # these two settings are the ONLY tunable bounds. Ross streams 7:00am ET — that's
+    # the documented pre-market default. To DISABLE pre-market, set start to "09:30";
+    # to disable after-hours, set end to "16:00" (the window itself is the control —
+    # there is no separate on/off flag). Orders placed outside RTH are flagged
+    # extended_hours so the venue routes them correctly (Alpaca DAY+ext, RH override).
+    chili_momentum_premarket_start_et: str = Field(
+        default="07:00",
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PREMARKET_START_ET"),
+    )
+    chili_momentum_afterhours_end_et: str = Field(
+        default="20:00",
+        validation_alias=AliasChoices("CHILI_MOMENTUM_AFTERHOURS_END_ET"),
+    )
 
     # ── Phase 2C: Hebbian plasticity on neural mesh edges ───────────────────
     # Outcome-driven edge-weight updates. Defaults conservative: feature flag OFF,

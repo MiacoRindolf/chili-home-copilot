@@ -163,7 +163,13 @@ class VenueAdapter(Protocol):
         base_size: str,
         limit_price: str,
         client_order_id: Optional[str] = None,
-    ) -> dict[str, Any]: ...
+        extended_hours: bool = False,
+    ) -> dict[str, Any]:
+        """Place a marketable/posting limit order. When ``extended_hours`` is True the
+        venue must route it to the pre-/after-market session (e.g. Alpaca: limit + DAY
+        tif + extended_hours; Robinhood: extended_hours_override). Crypto venues ignore
+        it (24/7)."""
+        ...
     def cancel_order(self, order_id: str) -> dict[str, Any]: ...
     def preview_market_order(
         self,

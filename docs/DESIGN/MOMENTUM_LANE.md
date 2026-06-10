@@ -354,3 +354,39 @@ second UPDATE and lose the breakeven move. `flag_modified` forces it.
 
 Manifests only once the lane (now in `pullback_break` entry mode) actually enters —
 watch the first post-keystone entries for the scale-out → breakeven → runner path.
+
+## 10. Extended-hours trading window (2026-06-09)
+
+**The gap.** The lane was hard-gated to RTH only — `market_open_now` returned
+`570 <= minute_of_day < 960` (9:30–16:00 ET). But Ross's biggest low-float moves are
+the **pre-market gap-and-go** (he streams at **7:00am ET**); by 9:30 the runner has
+often already made its move and CHILI was arming the faded EOD corpse. Confirmed
+against the 06-09 tape: PAVS ($1.55→$26.69→$1.02), CCTG, MTEN, NPT all peaked and
+round-tripped around/before the open. The original RTH-only gate was correct **for
+Robinhood** (PFOF can't reliably fill low-float pre-market), but the lane now also has
+the **Alpaca** rail (limit orders rest on the book in extended hours) and RH itself
+exposes an `extended_hours_override` path — so RTH-only is no longer the right ceiling.
+
+**The model** (`market_profile.py`). `market_session_now(symbol)` →
+`premarket | regular | afterhours | closed` (crypto → always `regular`, 24/7). The
+**regular session (9:30–16:00 ET) is a fixed exchange fact** named once
+(`_REGULAR_OPEN_MIN` / `_REGULAR_CLOSE_MIN`); the **only tunable bounds** are two
+documented settings — there is NO separate on/off flag, the window itself is the
+control:
+
+| setting | default | meaning |
+| --- | --- | --- |
+| `CHILI_MOMENTUM_PREMARKET_START_ET` | `07:00` | pre-market open (Ross-time). Set `09:30` to disable pre-market. |
+| `CHILI_MOMENTUM_AFTERHOURS_END_ET` | `20:00` | after-hours close. Set `16:00` to disable after-hours. |
+
+**Gating.** `is_tradeable_now(symbol)` (= session in premarket/regular/afterhours) is
+the gate the **auto-arm** (`auto_arm._symbol_market_open`), **live entry**
+(`live_runner` E3), and **opportunities** surface now use. `market_open_now` is kept
+as the regular-session label for display honesty.
+
+**Order routing.** Outside-RTH entries are flagged `extended_hours=True` at placement
+so the venue routes them instead of rejecting: **Alpaca** → limit + `DAY` tif +
+`extended_hours=True` (Alpaca rejects extended GTC); **Robinhood** →
+`market_hours_override="all_day_hours"` + `extended_hours_override=True`; **Coinbase**
+→ ignored (24/7). Threaded through the `VenueAdapter.place_limit_order_gtc` contract
+(`extended_hours: bool = False`). Tests: `tests/test_momentum_market_session.py`.

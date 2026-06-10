@@ -110,12 +110,14 @@ def _is_coinbase_tradeable_symbol(symbol: str) -> bool:
 
 
 def _symbol_market_open(symbol: str) -> bool:
-    """True if the symbol can be entered NOW. Crypto is 24/7; equities only during
-    US regular hours (9:30-16:00 ET) — never arm a stock that can't fill."""
+    """True if the symbol can be entered NOW. Crypto is 24/7; equities during the
+    EXTENDED session (pre-market → after-hours, per config) so the lane catches Ross's
+    pre-market gap-and-go — not just RTH. Outside-RTH orders are flagged extended_hours
+    at placement so the venue routes them (Alpaca DAY+ext, RH override)."""
     try:
-        from .market_profile import market_open_now
+        from .market_profile import is_tradeable_now
 
-        return bool(market_open_now(symbol))
+        return bool(is_tradeable_now(symbol))
     except Exception:
         # Fail safe: crypto (-USD) is always tradeable; if unsure on an equity, skip.
         return "-USD" in str(symbol or "").upper()
