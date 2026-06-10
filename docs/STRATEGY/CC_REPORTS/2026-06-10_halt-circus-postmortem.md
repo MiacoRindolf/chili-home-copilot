@@ -112,15 +112,30 @@ mismatch is a standing follow-up.
 | Halt detections (new) | 9 + 43 resumes |
 | Realized P/L | **+$3,378** |
 
-## Follow-ups
+## Follow-ups (status as of 2026-06-10 EOD — 5 of 7 CLOSED same-day via #571)
 
-1. Bracket catch-all model mismatch (swing-grade 3x-ATR stop on day trades) — fix the
-   stop model for momentum-originated positions.
-2. RH token-expiry monitoring — the 7-week silent disconnect must alarm.
-3. Watch #570 fill-rate evidence as slots rotate to liquidity-biased picks.
-4. UI: paused-state badge on the momentum board.
-5. Alpaca same-name A/B (RH live vs Alpaca paper) — still pending.
-6. Residual idle-in-tx sibling: `tick_live_session` FOR-UPDATE row lock across broker
-   calls on a disconnected venue (low frequency post-#564).
-7. Phantom `live_entry_submitted` events with empty payloads (one per cycle in the
-   BATL trail) — identify the duplicate emit site.
+1. ✅ **DONE (#571)** Bracket catch-all model mismatch — the backfill now detects
+   momentum-day origin (symbol had a LIVE momentum session in the 24h lookback) and
+   resolves `atr_intraday` (1.5x stop / 1.5 trail / 2.5R) instead of the swing
+   default, labeling `trade_type='momentum_day'` for durable provenance.
+2. ✅ **DONE (#571)** RH token-expiry monitoring — `broker_connectivity_watch` job
+   (5min, in the broker-sync container): a configured broker disconnected past
+   `CHILI_BROKER_DISCONNECT_ALARM_MINUTES` (15) fires ONE critical log + websocket
+   ops_alert per episode + an all-clear on reconnect. Verified firing on cadence.
+3. ⏳ **OPEN (monitoring)** #570 fill-rate evidence — the 10 slots were occupied by
+   pre-#570 picks for the rest of the cooling afternoon (0 lane fills). The read
+   comes from the next ACTIVE session: compare fills/armed and spread-block rates vs
+   the 06-09/06-10 baseline during the 06-11 live run.
+4. ✅ **DONE (#571)** UI paused badge — red ⏸ rendered from the existing `is_paused`
+   field on the Momentum Lane panel + automation monitor.
+5. ⏳ **OPEN (scheduled 06-11)** Alpaca same-name A/B — readiness re-verified EOD
+   (broker_ready=True, paper $100k equity / $400k BP). Plan: at the 06-11 open
+   (pre-market or first RTH hour), arm the SAME fresh Ross mover on robinhood_spot
+   (real) + alpaca_spot (paper) via `scripts/_ab_helper.py SYMBOL VARIANT --rh`,
+   compare entry posting + fills; venue-aware dedup (#558) allows the pair.
+6. ✅ **DONE (#571)** Residual idle-in-tx sibling — `_venue_broker_connected`
+   preflight skips the tick (`venue_broker_not_connected`) before any broker call
+   when the venue is disconnected; the FOR-UPDATE row lock is never held across
+   dead-venue calls.
+7. ✅ **DONE (#571)** Phantom submit events — the candidate→pending transition emit
+   renamed `live_entry_pending_place`; submit counts are now accurate.
