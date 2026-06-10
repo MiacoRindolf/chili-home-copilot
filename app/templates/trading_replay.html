@@ -198,7 +198,7 @@ function rlToggleChart(i, sym, forceOpen) {
 
 function rlChartSVG(sym) {
   const r = rlCur || {};
-  const S = (r.series||{})[sym];
+  let S = (r.series||{})[sym];
   if (!S || !S.length) return '<div class="rl-chart-meta">no bar data for '+rlEsc(sym)+'</div>';
   S = S.filter(b => { const m = tMin(b[0]); return m >= T0 && m <= T1; });
   if (!S.length) return '<div class="rl-chart-meta">no bars in the trading window for '+rlEsc(sym)+'</div>';
