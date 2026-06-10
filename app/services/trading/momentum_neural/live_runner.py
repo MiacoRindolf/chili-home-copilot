@@ -1308,6 +1308,76 @@ def _sweep_unresolved_entry_orders(adapter, db, sess, le: dict) -> bool:
     return False
 
 
+# ── Halt awareness (LULD circuit breakers on Ross low-floats) ─────────────────
+# A halt is observable as a SUSTAINED quote freeze: `chili_momentum_halt_stale_ticks`
+# consecutive stale_bbo ticks mark a suspected halt; when quotes return, entries are
+# blocked for `chili_momentum_halt_resume_cooldown_seconds` (the post-resume whipsaw
+# window) while watching continues. A session HOLDING a position into a halt raises a
+# loud `position_halted` event (the software stop cannot execute until resume).
+# [KMRK 2026-06-10: resumed through $6.81→$3.01→$5.13→$4.35→$3.33; the lane bought the
+# middle of the whipsaw and the exit had to rest through the next halt.]
+
+
+def _halt_stale_ticks_threshold() -> int:
+    try:
+        return max(2, int(getattr(settings, "chili_momentum_halt_stale_ticks", 3) or 3))
+    except (TypeError, ValueError):
+        return 3
+
+
+def _halt_resume_cooldown_seconds() -> float:
+    try:
+        return max(0.0, float(getattr(settings, "chili_momentum_halt_resume_cooldown_seconds", 120.0) or 120.0))
+    except (TypeError, ValueError):
+        return 120.0
+
+
+def _register_stale_quote_tick(db, sess, le: dict) -> None:
+    """Count a consecutive stale-quote tick; at the threshold mark a suspected halt
+    (and alert loudly if a real position is held into it)."""
+    streak = int(le.get("halt_stale_streak") or 0) + 1
+    le["halt_stale_streak"] = streak
+    if streak == _halt_stale_ticks_threshold() and not le.get("suspected_halt_since_utc"):
+        le["suspected_halt_since_utc"] = _utcnow().isoformat()
+        _emit(db, sess, "suspected_halt_detected", {"stale_tick_streak": streak})
+        pos = le.get("position")
+        if isinstance(pos, dict) and float(pos.get("quantity") or 0) > 0:
+            _log.warning(
+                "[momentum_live] POSITION HALTED symbol=%s session=%s qty=%s — software stop "
+                "cannot execute until the halt resumes; exit will price at the resume open.",
+                sess.symbol, sess.id, pos.get("quantity"),
+            )
+            _emit(db, sess, "position_halted", {
+                "quantity": pos.get("quantity"),
+                "avg_entry_price": pos.get("avg_entry_price"),
+                "stop_price": pos.get("stop_price"),
+            })
+
+
+def _register_fresh_quote_tick(db, sess, le: dict) -> None:
+    """Quote is live again: clear the streak; if a suspected halt was in force, mark
+    the RESUME (starts the entry cooldown) so the lane does not buy the whipsaw."""
+    le["halt_stale_streak"] = 0
+    if le.get("suspected_halt_since_utc"):
+        le.pop("suspected_halt_since_utc", None)
+        le["halt_resumed_at_utc"] = _utcnow().isoformat()
+        _emit(db, sess, "halt_resumed", {
+            "entry_cooldown_seconds": _halt_resume_cooldown_seconds(),
+        })
+
+
+def _halt_resume_cooldown_active(le: dict) -> bool:
+    """True while we are inside the post-resume whipsaw window (entries blocked)."""
+    raw = le.get("halt_resumed_at_utc")
+    if not raw:
+        return False
+    try:
+        resumed = datetime.fromisoformat(str(raw).replace("Z", "+00:00")).replace(tzinfo=None)
+    except (TypeError, ValueError):
+        return False
+    return (_utcnow() - resumed).total_seconds() < _halt_resume_cooldown_seconds()
+
+
 def summarize_live_execution(snap: Any) -> dict[str, Any]:
     if not isinstance(snap, dict):
         return {}
@@ -1640,6 +1710,13 @@ def tick_live_session(
         )
 
     quote_block = _quote_quality_block(tick, _fr, max_spread_bps=_adaptive_max_spread)
+    # Halt tracking: a SUSTAINED stale-quote streak = suspected LULD halt; quotes
+    # returning = resume (starts the entry whipsaw-cooldown). A wide-but-live quote
+    # is NOT a halt signal — only staleness is.
+    if quote_block is not None and quote_block.get("reason") == "stale_bbo":
+        _register_stale_quote_tick(db, sess, le)
+    else:
+        _register_fresh_quote_tick(db, sess, le)
     if quote_block is not None:
         quote_block["expected_move_bps"] = (
             None if _expected_move_bps is None else round(_expected_move_bps, 4)
@@ -1829,6 +1906,17 @@ def tick_live_session(
             _mkt_open = bool(is_tradeable_now(sess.symbol))
         except Exception:
             _mkt_open = True
+        # Halt-resume whipsaw guard: right after a suspected halt resumes, price
+        # discovery is violent — sit out the cooldown (watching continues, structure
+        # rebuilds with fresh bars), then enter on a clean post-resume setup.
+        if _score_ok and _trigger_ok and _mkt_open and _halt_resume_cooldown_active(le):
+            _emit(db, sess, "live_blocked_by_risk", {
+                "reason": "halt_resume_cooldown",
+                "halt_resumed_at_utc": le.get("halt_resumed_at_utc"),
+                "cooldown_seconds": _halt_resume_cooldown_seconds(),
+            })
+            db.flush()
+            return {"ok": True, "blocked": True, "reason": "halt_resume_cooldown"}
         if _score_ok and _trigger_ok and _mkt_open:
             # Ross structural stop: when the pullback-break trigger fired, stash the
             # pullback low so sizing + placement can stop just UNDER the structure

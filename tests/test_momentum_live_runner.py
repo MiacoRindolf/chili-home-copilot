@@ -895,3 +895,71 @@ def test_void_resolution_unblocks_guard() -> None:
     assert repointed is False
     assert _unresolved_entry_order_ids(le) == []      # void -> guard unblocked
     assert (le.get("entry_orders_resolved") or {}).get("o-dead") == "void"
+
+
+# ── Halt awareness (suspected-halt detect / resume cooldown) ──────────────────
+
+
+def _halt_helpers():
+    from app.services.trading.momentum_neural.live_runner import (
+        _halt_resume_cooldown_active,
+        _register_fresh_quote_tick,
+        _register_stale_quote_tick,
+    )
+    return _register_stale_quote_tick, _register_fresh_quote_tick, _halt_resume_cooldown_active
+
+
+def test_halt_detected_after_stale_streak_and_position_alert():
+    """3 consecutive stale-quote ticks = suspected halt; a held position raises the
+    loud position_halted alert (the software stop cannot execute during a halt)."""
+    _stale, _freshq, _cool = _halt_helpers()
+    sess = SimpleNamespace(id=9, symbol="KMRK", state=STATE_LIVE_ENTERED, risk_snapshot_json={})
+    db = MagicMock()
+    le = {"position": {"quantity": 250.0, "avg_entry_price": 4.35, "stop_price": 4.1}}
+    events = []
+    with patch("app.services.trading.momentum_neural.live_runner._emit",
+               side_effect=lambda _db, _s, et, p: events.append(et)):
+        _stale(db, sess, le); _stale(db, sess, le)
+        assert "suspected_halt_detected" not in events  # below threshold: just a blip
+        _stale(db, sess, le)  # 3rd consecutive -> halt
+    assert le.get("halt_stale_streak") == 3
+    assert le.get("suspected_halt_since_utc")
+    assert "suspected_halt_detected" in events
+    assert "position_halted" in events  # held into the halt -> loud alert
+
+
+def test_halt_resume_starts_cooldown_then_expires():
+    """Fresh quotes after a suspected halt = RESUME: entry cooldown active (whipsaw
+    window), then expires."""
+    from datetime import timedelta
+    from app.services.trading.momentum_neural.live_runner import _utcnow
+
+    _stale, _freshq, _cool = _halt_helpers()
+    sess = SimpleNamespace(id=9, symbol="KMRK", state=STATE_WATCHING_LIVE, risk_snapshot_json={})
+    db = MagicMock()
+    le = {"suspected_halt_since_utc": "2026-06-10T15:50:00", "halt_stale_streak": 5}
+    events = []
+    with patch("app.services.trading.momentum_neural.live_runner._emit",
+               side_effect=lambda _db, _s, et, p: events.append(et)):
+        _freshq(db, sess, le)
+    assert "halt_resumed" in events
+    assert le.get("halt_stale_streak") == 0
+    assert not le.get("suspected_halt_since_utc")
+    assert le.get("halt_resumed_at_utc")
+    assert _cool(le) is True                       # inside the whipsaw window: blocked
+    le["halt_resumed_at_utc"] = (_utcnow() - timedelta(seconds=10_000)).isoformat()
+    assert _cool(le) is False                      # window expired: entries allowed
+
+
+def test_fresh_quote_without_halt_is_noop():
+    _stale, _freshq, _cool = _halt_helpers()
+    sess = SimpleNamespace(id=9, symbol="OK", state=STATE_WATCHING_LIVE, risk_snapshot_json={})
+    db = MagicMock()
+    le = {"halt_stale_streak": 1}
+    events = []
+    with patch("app.services.trading.momentum_neural.live_runner._emit",
+               side_effect=lambda _db, _s, et, p: events.append(et)):
+        _freshq(db, sess, le)
+    assert events == []                            # no halt_resumed: there was no halt
+    assert le.get("halt_stale_streak") == 0        # blip streak cleared
+    assert _cool(le) is False

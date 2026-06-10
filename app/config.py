@@ -2171,6 +2171,23 @@ class Settings(BaseSettings):
         default="20:00",
         validation_alias=AliasChoices("CHILI_MOMENTUM_AFTERHOURS_END_ET"),
     )
+    # ── Halt awareness (Ross low-floats halt constantly: LULD circuit breakers) ──
+    # A trading HALT is observable as a SUSTAINED quote freeze: the stale_bbo gate
+    # already blocks single stale ticks; this many CONSECUTIVE stale-quote ticks on
+    # an armed equity marks a suspected halt (vs a one-tick data blip). Sized in
+    # ticks so it self-scales with the runner cadence.
+    chili_momentum_halt_stale_ticks: int = Field(
+        default=3,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_STALE_TICKS"),
+    )
+    # After a suspected halt RESUMES (quotes fresh again), block new ENTRIES for this
+    # cooldown — the post-resume whipsaw window where price discovery is violent
+    # (KMRK 2026-06-10 resumed through $6.81→$3.01→$5.13→$4.35→$3.33; the lane bought
+    # the middle of it). Watching continues so structure rebuilds; only entry waits.
+    chili_momentum_halt_resume_cooldown_seconds: float = Field(
+        default=120.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_RESUME_COOLDOWN_SECONDS"),
+    )
 
     # ── Phase 2C: Hebbian plasticity on neural mesh edges ───────────────────
     # Outcome-driven edge-weight updates. Defaults conservative: feature flag OFF,
