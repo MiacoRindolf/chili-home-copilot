@@ -101,6 +101,7 @@
               return '<div style="display:flex;align-items:center;gap:8px;font-size:.88em;padding:3px 6px;border-radius:4px;background:rgba(255,255,255,.03);">'
                 + '<strong>'+(s.symbol||'?')+'</strong>'
                 + '<span class="ta-badge" style="font-size:.8em;">'+(s.state||'')+'</span>'
+                + (s.is_paused ? '<span class="ta-badge" style="font-size:.78em;background:rgba(248,81,73,.18);color:#f85149;border:1px solid rgba(248,81,73,.4);" title="Operator-paused: not ticking; symbol blocked from re-arm">&#9208; paused</span>' : '')
                 + inpos + pnlGroup + '</div>';
             }).join('');
           })
