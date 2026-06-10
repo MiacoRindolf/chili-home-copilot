@@ -24,6 +24,7 @@ from app.services.trading.momentum_neural.persistence import (
     default_session_binding,
     ensure_momentum_strategy_variants,
     persist_neural_momentum_tick,
+    _resolve_viability_upserts,
     _strategy_variants_by_key,
     upsert_trading_automation_runtime_snapshot,
     upsert_trading_automation_session_binding,
@@ -153,6 +154,40 @@ def test_viability_upsert_updates_row(db: Session) -> None:
     assert r2.viability_score == 0.99
     assert r2.correlation_id == "corr-b"
     assert "rationale" in (r2.explain_json or {})
+
+
+def test_resolve_viability_upserts_is_deterministically_ordered(db: Session) -> None:
+    """Regression guard for the viability-persist deadlock (25x/48h, 2026-06-10).
+
+    Two momentum ticks fired by different callers (the neural-mesh snapshot
+    activation and a scanner/viability-refresh bridge) upsert OVERLAPPING
+    (symbol, variant_id) rows. When each acquired the per-row unique-index locks
+    in its OWN viability-ranked order they formed a lock cycle and Postgres
+    aborted one mid-persist. ``_resolve_viability_upserts`` imposes ONE global
+    (symbol, variant_id) lock-acquisition order so concurrent ticks serialize
+    instead of deadlocking — and it must do so regardless of input row order.
+    """
+    ensure_momentum_strategy_variants(db)
+    db.commit()
+
+    families = ["impulse_breakout", "vwap_reclaim_continuation", "breakout_reclaim"]
+    symbols = ["VELO", "BESS", "AAPL", "ZZZ-USD"]
+    # Deliberately scrambled input (the bug was each caller persisting in its own
+    # viability-ranked symbol order).
+    rows = [
+        {"symbol": sym, "family_id": fam, "family_version": 1, "viability": 0.5}
+        for sym in reversed(symbols)
+        for fam in reversed(families)
+    ]
+
+    resolved = _resolve_viability_upserts(db, rows)
+    keys = [(sym, vid) for sym, vid, _ in resolved]
+
+    assert len(keys) == len(symbols) * len(families)
+    assert keys == sorted(keys), "viability upserts must be in (symbol, variant_id) order"
+    # Order is input-order-independent: a re-scrambled batch yields the SAME order.
+    resolved2 = _resolve_viability_upserts(db, list(reversed(rows)))
+    assert [(s, v) for s, v, _ in resolved2] == keys
 
 
 def test_automation_session_and_event(db: Session) -> None:

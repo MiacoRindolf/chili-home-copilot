@@ -144,3 +144,91 @@ def test_mine_patterns_releases_session_before_ohlcv_fetch(monkeypatch):
         budget=_Budget(),
     ) == []
     assert events == ["rollback", "fetch"]
+
+
+def test_backfill_future_returns_releases_read_session_before_fetch(monkeypatch):
+    """backfill_future_returns must load the work-list on a SHORT-LIVED session
+    and RELEASE it BEFORE the minutes-long parallel OHLCV fetch.
+
+    Reading 3000 snapshots on the caller session and committing only after the
+    network phase left the connection idle-in-transaction (ClientRead) for
+    minutes, pinning the xmin horizon (blocking VACUUM cluster-wide) and tying up
+    a chili-scheduler-cron pool slot — the residual ``trading_snapshots`` holder
+    in the recurring postgres idle-in-transaction cascade (2026-06). The fetch
+    must run on DETACHED plain records so it holds no DB transaction; the
+    write-back lands on the caller session in one bounded txn.
+    """
+    import app.db as _appdb
+    from app.services.trading import learning
+
+    events: list[str] = []
+
+    class _ReadRow:
+        def __init__(self, i: int):
+            self.id = i
+            self.ticker = f"T{i}"
+            self.snapshot_date = datetime.utcnow()
+            self.bar_start_at = None
+            self.bar_interval = "1d"
+            self.close_price = 10.0 + i
+
+    class _ReadQuery:
+        def filter(self, *a):
+            return self
+
+        def order_by(self, *a):
+            return self
+
+        def limit(self, *a):
+            return self
+
+        def all(self):
+            events.append("read")
+            return [_ReadRow(1), _ReadRow(2)]
+
+    class _ReadSession:
+        def query(self, *a):
+            return _ReadQuery()
+
+        def rollback(self):
+            events.append("read_release")
+
+        def close(self):
+            events.append("read_close")
+
+    captured: dict = {}
+
+    def _fake_fetch(items, worker_fn, settings, **kwargs):
+        events.append("fetch")
+        captured["items"] = list(items)
+        return [(it.id, 1.0, 3.0, 5.0, 10.0) for it in captured["items"]]
+
+    monkeypatch.setattr(_appdb, "SessionLocal", lambda: _ReadSession())
+    monkeypatch.setattr(learning, "_use_massive", lambda: True)
+    monkeypatch.setattr(learning, "_use_polygon", lambda: True)
+    monkeypatch.setattr(learning, "parallel_fetch_by_provider", _fake_fetch)
+
+    class _WriteSession:
+        def __init__(self):
+            self.mappings = None
+            self.committed = False
+
+        def bulk_update_mappings(self, model, mappings):
+            self.mappings = list(mappings)
+
+        def commit(self):
+            self.committed = True
+
+    write_db = _WriteSession()
+    updated = learning.backfill_future_returns(write_db)
+
+    # Read session released (rollback + close) BEFORE the network fetch ran.
+    assert events == ["read", "read_release", "read_close", "fetch"]
+    # The network phase got DETACHED plain records, not live ORM rows.
+    assert not isinstance(captured["items"][0], MarketSnapshot)
+    assert captured["items"][0].ticker == "T1"
+    # Write-back applied on the caller session in one bounded, committed txn.
+    assert updated == 2
+    assert write_db.committed is True
+    assert {m["id"] for m in write_db.mappings} == {1, 2}
+    assert write_db.mappings[0]["future_return_5d"] == 5.0

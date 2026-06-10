@@ -1940,17 +1940,49 @@ def take_all_snapshots(db: Session, user_id: int | None, ticker_list: list[str] 
 
 
 def backfill_future_returns(db: Session) -> int:
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from types import SimpleNamespace
 
+    from ...db import SessionLocal
+
+    # Idle-in-transaction hygiene: load the work-list on a SHORT-LIVED session
+    # and RELEASE it BEFORE the minutes-long parallel OHLCV fetch below. Reading
+    # 3000 snapshots on the caller's session and committing only after the
+    # network phase left the connection idle-in-transaction (wait_event=
+    # ClientRead) for minutes, which pins the xmin horizon (blocking VACUUM
+    # cluster-wide -> bloat) and ties up a chili-scheduler-cron pool slot the
+    # whole time — a residual holder in the recurring idle-in-transaction
+    # cascade. Detach to plain records so the network phase touches NO DB
+    # session; write back on a fresh bounded transaction at the end.
+    #
     # Oldest first: recent snapshots often lack enough *forward* daily bars yet;
     # unordered LIMIT was skewing attempts toward rows that always fail.
-    unfilled = (
-        db.query(MarketSnapshot)
-        .filter(MarketSnapshot.future_return_5d.is_(None))
-        .order_by(MarketSnapshot.snapshot_date.asc())
-        .limit(3000)
-        .all()
-    )
+    read_db = SessionLocal()
+    try:
+        unfilled = [
+            SimpleNamespace(
+                id=s.id,
+                ticker=s.ticker,
+                snapshot_date=s.snapshot_date,
+                bar_start_at=getattr(s, "bar_start_at", None),
+                bar_interval=getattr(s, "bar_interval", None),
+                close_price=s.close_price,
+            )
+            for s in (
+                read_db.query(MarketSnapshot)
+                .filter(MarketSnapshot.future_return_5d.is_(None))
+                .order_by(MarketSnapshot.snapshot_date.asc())
+                .limit(3000)
+                .all()
+            )
+        ]
+    finally:
+        # End the read txn so the connection returns to the pool 'idle' (clean),
+        # not 'idle in transaction', for the whole network phase that follows.
+        try:
+            read_db.rollback()
+        except Exception:
+            pass
+        read_db.close()
 
     if not unfilled:
         return 0
@@ -2077,28 +2109,34 @@ def backfill_future_returns(db: Session) -> int:
     st = _bf_stats
     logger.info(
         f"[learning] Backfill returns fetch: {len(results)}/{len(unfilled)} snapshots "
-        f"in {time.time() - _t0:.1f}s ({_workers} workers, {len(tickers)} tickers) "
+        f"in {time.time() - _t0:.1f}s ({len(tickers)} tickers, provider-split) "
         f"[skip_recent={st['skip_recent']} bad_snap={st['bad_snap']} empty={st['empty']} "
         f"bad_px={st['bad_px']} no_anchor={st['no_anchor']} no_forward={st['no_forward']} "
         f"exc={st['exc']} ok_rows={st['ok']}]"
     )
-    updated = 0
-    snap_map = {s.id: s for s in unfilled}
+    # Write back on the caller's session in ONE bounded transaction. The
+    # snapshots were read+detached on a short-lived session above, so set the
+    # values by primary key (bulk UPDATE) instead of mutating now-detached rows.
+    valid_ids = {s.id for s in unfilled}
+    mappings = []
     for snap_id, r1, r3, r5, r10 in results:
-        snap = snap_map.get(snap_id)
-        if not snap:
+        if snap_id not in valid_ids:
             continue
+        m = {"id": snap_id}
         if r1 is not None:
-            snap.future_return_1d = r1
+            m["future_return_1d"] = r1
         if r3 is not None:
-            snap.future_return_3d = r3
+            m["future_return_3d"] = r3
         if r5 is not None:
-            snap.future_return_5d = r5
+            m["future_return_5d"] = r5
         if r10 is not None:
-            snap.future_return_10d = r10
-        updated += 1
+            m["future_return_10d"] = r10
+        if len(m) > 1:
+            mappings.append(m)
 
-    if updated:
+    updated = len(mappings)
+    if mappings:
+        db.bulk_update_mappings(MarketSnapshot, mappings)
         db.commit()
     return updated
 
