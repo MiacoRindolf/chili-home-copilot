@@ -43,6 +43,20 @@ ROSS_PILLAR_WEIGHTS: dict[str, float] = {
     "liquidity": 0.20,
 }
 
+# Liquidity-BIASED variant (opt-in via `weights=`): adds a fourth pillar that rewards
+# TRADEABLE liquidity (dollar turnover) so the lane prefers movers it can ACTUALLY
+# fill, not just the most explosive (smallest-float) names whose wide BBO spread gets
+# spread-gated and only ever watched. The "liquidity" pillar above rewards explosive
+# SUPPLY (small float); "tradeable_liquidity" rewards FILLABILITY (high $-volume ->
+# tighter spread) — opposite axes, deliberately balanced. Weights validated by the
+# previous-days replay (scripts/_sim_liquidity_selection.py) before becoming default.
+ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED: dict[str, float] = {
+    "rvol": 0.40,
+    "momentum": 0.30,
+    "liquidity": 0.15,
+    "tradeable_liquidity": 0.15,
+}
+
 # Max tilt the Ross momentum quality applies to a momentum-neural viability
 # score. ``ross_score`` in [0,1] is centered at 0.5, so the applied tilt is
 # +/- (TILT/2): at 0.20 a top-decile explosive setup gets +0.10 — enough to
@@ -62,6 +76,7 @@ class RossMomentumScore:
     liquidity_pct: float | None  # percentile rank of supply tier (None if absent)
     rank: int  # 1 = most explosive in this universe
     universe_size: int
+    tradeable_liquidity_pct: float | None = None  # percentile of $-turnover (fillability); None unless the biased weights are used
     breakdown: dict = field(default_factory=dict)
 
     def in_top_fraction(self, frac: float) -> bool:
@@ -102,9 +117,11 @@ def _first_float(signal: dict, *keys) -> float | None:
     return None
 
 
-def _extract_pillars(signal: dict) -> tuple[float | None, float | None, float | None]:
-    """(rvol, momentum, liquidity) raw pillar values from a scanner/breakout
-    result dict (reads the equivalent key from either schema).
+def _extract_pillars(
+    signal: dict,
+) -> tuple[float | None, float | None, float | None, float | None]:
+    """(rvol, momentum, liquidity, tradeable_liquidity) raw pillar values from a
+    scanner/breakout result dict (reads the equivalent key from either schema).
 
     * rvol      — relative volume (``vol_ratio`` | ``rvol`` | ``volume_ratio``).
     * momentum  — signed "already moving" %, the stronger of daily/24h change
@@ -131,7 +148,21 @@ def _extract_pillars(signal: dict) -> tuple[float | None, float | None, float | 
     size = _first_float(signal, "float_shares", "market_cap")
     liquidity = -math.log10(size) if (size and size > 0) else None
 
-    return rvol, momentum, liquidity
+    # tradeable_liquidity — dollar turnover today (price * shares, or an explicit
+    # $-volume / quote-volume field). HIGHER turnover -> tighter BBO spread -> more
+    # FILLABLE. Distinct from (and opposite to) the small-float ``liquidity`` pillar.
+    # log10-scaled (turnover spans many orders of magnitude). None when unavailable.
+    dvol = _first_float(
+        signal, "dollar_volume", "dollar_vol", "turnover",
+        "approximate_quote_24h_volume", "quote_volume_24h", "quote_volume",
+    )
+    if dvol is None:
+        _price = _first_float(signal, "price", "last", "close", "last_price")
+        _vol = _first_float(signal, "volume", "day_volume", "shares", "today_volume")
+        dvol = _price * _vol if (_price and _vol) else None
+    tradeable_liquidity = math.log10(dvol) if (dvol and dvol > 0) else None
+
+    return rvol, momentum, liquidity, tradeable_liquidity
 
 
 def score_universe(
@@ -155,19 +186,22 @@ def score_universe(
         return {}
     w = dict(weights or ROSS_PILLAR_WEIGHTS)
 
-    pillars: dict[str, tuple[float | None, float | None, float | None]] = {
+    pillars: dict[str, tuple[float | None, float | None, float | None, float | None]] = {
         sym: _extract_pillars(sig or {}) for sym, sig in signals.items()
     }
 
     rvol_sorted = sorted(p[0] for p in pillars.values() if p[0] is not None)
     mom_sorted = sorted(p[1] for p in pillars.values() if p[1] is not None)
     liq_sorted = sorted(p[2] for p in pillars.values() if p[2] is not None)
+    tliq_sorted = sorted(p[3] for p in pillars.values() if p[3] is not None)
+    _w_tliq = float(w.get("tradeable_liquidity") or 0.0)  # only an active pillar when weighted
 
     out: dict[str, RossMomentumScore] = {}
-    for sym, (rvol, mom, liq) in pillars.items():
+    for sym, (rvol, mom, liq, tliq) in pillars.items():
         rvol_pct = _percentile_rank(rvol, rvol_sorted) if rvol is not None else None
         mom_pct = _percentile_rank(mom, mom_sorted) if mom is not None else None
         liq_pct = _percentile_rank(liq, liq_sorted) if liq is not None else None
+        tliq_pct = _percentile_rank(tliq, tliq_sorted) if tliq is not None else None
 
         present: list[tuple[float, float]] = []  # (percentile, weight)
         if rvol_pct is not None:
@@ -176,6 +210,8 @@ def score_universe(
             present.append((mom_pct, w["momentum"]))
         if liq_pct is not None:
             present.append((liq_pct, w["liquidity"]))
+        if tliq_pct is not None and _w_tliq > 0:
+            present.append((tliq_pct, _w_tliq))
 
         wsum = sum(wt for _, wt in present)
         score = (sum(pct * wt for pct, wt in present) / wsum) if wsum > 0 else 0.0
@@ -186,15 +222,21 @@ def score_universe(
             rvol_pct=round(rvol_pct, 4) if rvol_pct is not None else 0.0,
             momentum_pct=round(mom_pct, 4) if mom_pct is not None else 0.0,
             liquidity_pct=round(liq_pct, 4) if liq_pct is not None else None,
+            tradeable_liquidity_pct=round(tliq_pct, 4) if tliq_pct is not None else None,
             rank=0,
             universe_size=len(signals),
             breakdown={
                 "rvol": rvol,
                 "momentum": mom,
                 "liquidity_neglog_size": liq,
+                "tradeable_liquidity_log_dvol": tliq,
                 "pillars_present": [
                     name
-                    for name, val in (("rvol", rvol_pct), ("momentum", mom_pct), ("liquidity", liq_pct))
+                    for name, val in (
+                        ("rvol", rvol_pct), ("momentum", mom_pct),
+                        ("liquidity", liq_pct),
+                        ("tradeable_liquidity", tliq_pct if _w_tliq > 0 else None),
+                    )
                     if val is not None
                 ],
             },

@@ -145,3 +145,34 @@ def test_crypto_breakout_schema_keys_work():
     assert res["HOT-USD"].rvol_pct > res["COLD-USD"].rvol_pct
     # must NOT be flat — the bug was both scoring identically at base
     assert res["HOT-USD"].score != res["COLD-USD"].score
+
+
+def test_liquidity_biased_weights_lift_fillable_names():
+    """ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED adds the tradeable_liquidity pillar
+    (dollar turnover -> tighter spread -> FILLABLE): a liquid mover gains rank
+    pressure vs the baseline; the default weights stay byte-identical (no
+    tradeable_liquidity term -> baseline unchanged)."""
+    from app.services.trading.momentum_neural.ross_momentum import (
+        ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED,
+        score_universe,
+    )
+
+    sig = {
+        # explosive but illiquid: tiny float, low $-vol (wide spread, never fills)
+        "EXPLO": {"rvol": 12.0, "daily_change_pct": 40.0, "float_shares": 2_000_000,
+                  "price": 3.0, "volume": 1_500_000},
+        # less explosive but liquid: high $-vol (tight spread, fillable)
+        "LIQ": {"rvol": 6.0, "daily_change_pct": 18.0, "float_shares": 40_000_000,
+                "price": 12.0, "volume": 30_000_000},
+    }
+    base = score_universe(sig)
+    biased = score_universe(sig, weights=ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED)
+
+    # default weights ignore the new pillar entirely (weight absent -> not blended)
+    assert base["EXPLO"].score == 1.0
+    # biased: the liquid name closes the gap (lifted by its top $-turnover percentile)
+    assert biased["LIQ"].score > base["LIQ"].score
+    assert biased["EXPLO"].score < base["EXPLO"].score
+    assert biased["LIQ"].tradeable_liquidity_pct == 1.0
+    # explosiveness still leads (rvol+momentum dominate the blend) — bias, not flip
+    assert biased["EXPLO"].rank == 1
