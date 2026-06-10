@@ -1872,6 +1872,22 @@ def tick_live_session(
                                     "state": sess.state, "pending": "ack_timeout_filled_adopt",
                                 }
                             adapter.cancel_order(str(le["entry_order_id"]))
+                            # The CANCEL ITSELF can lose the race on a slow small-cap: the
+                            # order can fill before/despite the cancel landing. Re-fetch ONCE
+                            # MORE after cancelling and ADOPT a filled order — including a
+                            # cancelled-but-filled (``_order_done_for_entry`` treats
+                            # filled_size>0 + cancelled as done) — rather than abandoning a
+                            # real position to an UNMANAGED orphan (no lane stop). Leave the
+                            # session PENDING so the fill-handler above adopts it next tick.
+                            # [SDOT 2026-06-10: 56sh / $1,608 filled while the ack-timeout
+                            # cancel raced -> orphaned, operator had to exit it by hand.]
+                            _post, _ = adapter.get_order(str(le["entry_order_id"]))
+                            if _post and _order_done_for_entry(_post):
+                                db.flush()
+                                return {
+                                    "ok": True, "session_id": sess.id, "state": sess.state,
+                                    "pending": "ack_timeout_cancel_raced_fill_adopt",
+                                }
                             _emit(db, sess, "entry_ack_timeout", {"elapsed_sec": (_utcnow() - t_sub).total_seconds()})
                             _safe_transition(db, sess, STATE_WATCHING_LIVE)
                             le["entry_submitted"] = False

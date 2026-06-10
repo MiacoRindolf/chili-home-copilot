@@ -726,3 +726,57 @@ def test_ack_timeout_adopts_filled_order_not_orphan(monkeypatch, db: Session) ->
     ad.cancel_order.assert_not_called()
     assert sess.state != STATE_WATCHING_LIVE
     assert (sess.risk_snapshot_json or {})["momentum_live_execution"].get("entry_order_id") == "o-race"
+
+
+def test_ack_timeout_cancel_race_adopts_filled_order(monkeypatch, db: Session) -> None:
+    """The CANCEL ITSELF can lose the race: the ack-timeout re-fetch sees OPEN so it
+    cancels, but the order fills before/despite the cancel landing. The POST-cancel
+    re-fetch must ADOPT the (cancelled-but-)filled order, NOT abandon it to an
+    unmanaged orphan. [SDOT 2026-06-10: 56sh / $1,608 filled while the cancel raced ->
+    orphaned with no lane stop, operator exited it by hand.]"""
+    from datetime import datetime, timedelta
+    reset_duplicate_client_order_guard_for_tests()
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
+    vid, _ = _seed_live_eligible_row(db, symbol="RACE-USD")
+    db.commit()
+    uid = _uid(db, "race2")
+    from app.services.trading.momentum_neural.persistence import create_trading_automation_session
+
+    sess = create_trading_automation_session(
+        db, user_id=uid, symbol="RACE-USD", variant_id=vid, mode="live",
+        state=STATE_LIVE_PENDING_ENTRY,
+        risk_snapshot_json={
+            RISK_SNAPSHOT_KEY: {"allowed": True},
+            "momentum_risk_policy_summary": {"disable_live_if_governance_inhibit": True},
+            "momentum_live_execution": {
+                "entry_submitted": True,
+                "entry_order_id": "o-race2",
+                "entry_submit_utc": (datetime.utcnow() - timedelta(seconds=20)).isoformat(),
+            },
+        },
+    )
+    db.commit()
+    ad = _mk_adapter()
+    _open = NormalizedOrder(order_id="o-race2", client_order_id="cid", product_id="RACE-USD",
+                            side="buy", status="OPEN", order_type="limit",
+                            filled_size=0.0, average_filled_price=None)
+    # cancelled-but-filled: filled_size>0 + 'cancelled' -> _order_done_for_entry() True
+    _raced = NormalizedOrder(order_id="o-race2", client_order_id="cid", product_id="RACE-USD",
+                             side="buy", status="cancelled", order_type="limit",
+                             filled_size=56.0, average_filled_price=23.55)
+    _calls = {"n": 0}
+    def _get_order(_oid):
+        _calls["n"] += 1
+        # 1st (top fill-handler) + 2nd (ack-timeout _fresh) = OPEN -> cancels;
+        # 3rd (post-cancel _post) = raced fill -> must adopt.
+        return (_open, _fresh()) if _calls["n"] <= 2 else (_raced, _fresh())
+    ad.get_order.side_effect = _get_order
+
+    with patch("app.services.trading.momentum_neural.live_runner.is_kill_switch_active", return_value=False):
+        out = tick_live_session(db, sess.id, adapter_factory=lambda: ad)
+    db.commit(); db.refresh(sess)
+
+    ad.cancel_order.assert_called_once()  # it DID cancel (the _fresh re-fetch saw open)
+    assert out.get("pending") == "ack_timeout_cancel_raced_fill_adopt", out
+    assert sess.state != STATE_WATCHING_LIVE  # NOT abandoned to an orphan
+    assert (sess.risk_snapshot_json or {})["momentum_live_execution"].get("entry_order_id") == "o-race2"
