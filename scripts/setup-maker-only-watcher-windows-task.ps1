@@ -18,9 +18,13 @@ $argList = @(
     "Set-Location '$repo'; '$dispatchLine' | Out-File -FilePath '$pendingFile' -Encoding ASCII -Force"
 )
 
+# Launch through the hidden wrapper (wscript GUI host) so the interactive
+# task does not flash a console window on the operator's desktop each run.
+$runHidden = Join-Path $repo 'scripts\run-hidden.vbs'
+
 $action = New-ScheduledTaskAction `
-    -Execute "powershell.exe" `
-    -Argument ($argList -join " ")
+    -Execute "wscript.exe" `
+    -Argument ("`"$runHidden`" powershell.exe " + ($argList -join " "))
 
 # Weekly: Sunday at 18:00 local
 $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At "18:00"

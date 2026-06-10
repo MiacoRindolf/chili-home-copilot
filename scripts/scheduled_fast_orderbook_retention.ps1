@@ -92,7 +92,14 @@ try {
 
     Add-RunLog "scheduled retention starting batch=$batchSize max_batches=$maxBatches max_runtime_minutes=$maxRuntimeMinutes"
 
-    $pgReadyArgs = @("compose", "exec", "-T", "postgres", "pg_isready", "-U", "chili", "-d", "chili")
+    # Deployed container names (raw `docker run` deploy model; the old
+    # compose project is retired - `docker compose exec` here failed every
+    # night with 'service "chili" is not running'). Override via env if a
+    # deploy renames them.
+    $postgresContainer = if ($env:CHILI_POSTGRES_CONTAINER) { $env:CHILI_POSTGRES_CONTAINER } else { "chili-home-copilot-postgres-1" }
+    $appContainer = if ($env:CHILI_APP_CONTAINER) { $env:CHILI_APP_CONTAINER } else { "chili-clean-recovery-scheduler" }
+
+    $pgReadyArgs = @("exec", $postgresContainer, "pg_isready", "-U", "chili", "-d", "chili")
     & docker @pgReadyArgs *> $null
     if ($LASTEXITCODE -ne 0) {
         Add-RunLog "postgres is not ready; skipping"
@@ -100,8 +107,8 @@ try {
     }
 
     $maintenanceArgs = @(
-        "compose", "exec", "-T", "chili",
-        "python", "/workspace/scripts/maintain_fast_orderbook_retention.py",
+        "exec", $appContainer,
+        "python", "/app/scripts/maintain_fast_orderbook_retention.py",
         "--execute",
         "--batch-size", "$batchSize",
         "--max-batches", "$maxBatches",
