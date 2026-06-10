@@ -126,7 +126,13 @@ class Tape:
                         if alive >= 2:
                             break
                     m += timedelta(minutes=1)
-                if alive >= 2:   # sampler ran >=2x while this symbol was silent = real halt
+                gap_min = (b - a).total_seconds() / 60.0
+                # LULD-scale classification: real halts run ~5-15 min. A multi-hour
+                # per-symbol gap is the SAMPLER rotating its universe (the symbol fell
+                # out of the sampled set), not a halt — those polluted the analysis
+                # (operator 2026-06-10). Long gaps still block entries via quote
+                # staleness in .at(); they are just not labeled/masked as halts.
+                if alive >= 2 and gap_min <= 20.0:
                     self.halts[s].append((a, b))
 
     def symbols(self) -> list[str]:
