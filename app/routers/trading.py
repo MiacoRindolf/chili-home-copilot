@@ -119,6 +119,7 @@ from .trading_sub import (
     ai_router, backtest_router, broker_router, data_provider_router,
     fast_path_router,
     inspect_router, momentum_api, monitor_router, operator_router, patterns_router,
+    replay_router,
     scanning_router, trades_router, web3_router,
 )
 from .trading_sub.trades import api_sell_trade  # backwards-compatible import surface
@@ -132,6 +133,7 @@ from ..schemas.trading import (
 router = APIRouter(tags=["trading"])
 router.include_router(ai_router)
 router.include_router(momentum_api.router)
+router.include_router(replay_router)
 router.include_router(inspect_router)
 router.include_router(broker_router)
 router.include_router(data_provider_router)
@@ -371,6 +373,14 @@ def _trading_page_response(
 def trading_page(request: Request, db: Session = Depends(get_db)):
     return _trading_page_response(
         request, db, template_name="trading.html", page_title="Trading"
+    )
+
+
+@router.get("/trading/replay", response_class=HTMLResponse)
+def trading_replay_page(request: Request, db: Session = Depends(get_db)):
+    """Replay Lab — run/inspect high-fidelity (v2) momentum replays from the UI."""
+    return _trading_page_response(
+        request, db, template_name="trading_replay.html", page_title="Replay Lab"
     )
 
 
