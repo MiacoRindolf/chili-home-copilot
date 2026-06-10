@@ -618,6 +618,21 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
             continue
         eligible.append(c)
 
+    # Release the read transaction BEFORE the network-bound probe phase below. The probes
+    # (OHLCV fetches) don't touch the DB, but the still-open read txn — which includes the
+    # trading_automation_sessions SELECT from _symbols_with_active_live_session above —
+    # would otherwise sit idle-in-transaction across the multi-second probe wave, long
+    # enough for the per-connection idle-in-transaction timeout to kill the connection
+    # (the server-closed-connection bursts seen during high-candidate pre-market passes).
+    # Detach the loaded candidate rows first so their already-loaded symbol/variant_id/
+    # viability_score stay usable without a lazy reload (expire_on_commit defaults True);
+    # begin/confirm_live_arm re-open their own txns. (#561/#563 read-release pattern.)
+    try:
+        db.expunge_all()
+        db.rollback()
+    except Exception:
+        logger.debug("[auto_arm] read-txn release before probe failed", exc_info=True)
+
     # Probe entry trigger + intraday-impulse freshness CONCURRENTLY. Each probe fetches
     # OHLCV (network-bound), so checking serially made a pass take ~40s — past the 30s
     # cadence, so the scheduler skipped overlapping runs and reacted slowly. Parallel
