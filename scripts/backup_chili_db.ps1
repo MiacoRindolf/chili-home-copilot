@@ -34,13 +34,26 @@ $log    = Join-Path $logDir "backup_$stamp.log"
 # -Fc = custom format (compressed, selective restore via pg_restore -t).
 # Dump inside the container to /tmp, then docker cp out (preserves binary cleanly on Windows).
 $tmpInContainer = "/tmp/chili_$stamp.dump"
+# The docker calls below redirect stderr into the log. Under
+# $ErrorActionPreference='Stop', PowerShell 5.1 turns any redirected native
+# stderr line into a terminating NativeCommandError - docker cp reports
+# "Successfully copied ..." on stderr, which used to kill the script right
+# here, BEFORE the in-container cleanup and the local prune (so /tmp dumps
+# and >14 local dumps silently accumulated). Exit codes are checked
+# explicitly instead.
+$ErrorActionPreference = 'Continue'
 & docker exec $Container pg_dump -U $DbUser -d $DbName -Fc --no-owner --no-privileges -f $tmpInContainer 2>>$log
 if ($LASTEXITCODE -ne 0) {
     "[$(Get-Date -Format o)] FAILED: pg_dump exit $LASTEXITCODE" | Tee-Object -FilePath $log -Append
     exit 1
 }
 & docker cp "${Container}:$tmpInContainer" $dump 2>>$log
+if ($LASTEXITCODE -ne 0) {
+    "[$(Get-Date -Format o)] FAILED: docker cp exit $LASTEXITCODE" | Tee-Object -FilePath $log -Append
+    exit 1
+}
 & docker exec $Container rm -f $tmpInContainer 2>>$log | Out-Null
+$ErrorActionPreference = 'Stop'
 
 if (-not (Test-Path $dump) -or (Get-Item $dump).Length -lt 1MB) {
     "[$(Get-Date -Format o)] FAILED: dump missing or < 1MB" | Tee-Object -FilePath $log -Append

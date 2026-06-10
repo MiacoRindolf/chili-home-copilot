@@ -4,9 +4,13 @@ $repo = Split-Path -Parent $PSScriptRoot
 $taskName = "CHILI-phase5e-reporting-soak-probe"
 $script = Join-Path $repo "scripts\dispatch-phase5e-reporting-soak-probe.ps1"
 
+# Launch through the hidden wrapper (wscript GUI host) so the interactive
+# task does not flash a console window on the operator's desktop each run.
+$runHidden = Join-Path $repo "scripts\run-hidden.vbs"
+
 $action = New-ScheduledTaskAction `
-    -Execute "powershell.exe" `
-    -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$script`""
+    -Execute "wscript.exe" `
+    -Argument "`"$runHidden`" powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$script`""
 $trigger = New-ScheduledTaskTrigger -Daily -At 6:20pm
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
