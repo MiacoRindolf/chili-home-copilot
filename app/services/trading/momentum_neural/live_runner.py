@@ -1318,6 +1318,27 @@ def _sweep_unresolved_entry_orders(adapter, db, sess, le: dict) -> bool:
 # middle of the whipsaw and the exit had to rest through the next halt.]
 
 
+def _venue_broker_connected(ef: str) -> bool:
+    """Cheap per-venue connectivity probe used as a tick preflight. robinhood:
+    in-memory session flag (+1 local DB read at most when cold — the underlying
+    is_connected may attempt one cooldown-capped re-auth, still far cheaper than a
+    per-tick quote call hanging to network timeout on a dead venue). coinbase:
+    TTL-cached account ping. Other adapters (alpaca: REST-per-call, no session
+    concept) and any probe error return True (fail-open)."""
+    try:
+        if ef == "robinhood_spot":
+            from ...broker_service import is_connected as _rh_connected
+
+            return bool(_rh_connected())
+        if ef == EXECUTION_FAMILY_COINBASE_SPOT:
+            from ...coinbase_service import is_connected as _cb_connected
+
+            return bool(_cb_connected())
+    except Exception:
+        return True
+    return True
+
+
 def _halt_stale_ticks_threshold() -> int:
     try:
         return max(2, int(getattr(settings, "chili_momentum_halt_stale_ticks", 3) or 3))
@@ -1546,6 +1567,15 @@ def tick_live_session(
     adapter = factory()
     if not adapter.is_enabled():
         return {"ok": True, "skipped": "coinbase_adapter_unavailable"}
+
+    # Venue-connectivity preflight: never carry this tick (which HOLDS the session's
+    # FOR-UPDATE row lock) into broker calls against a DISCONNECTED venue — those
+    # calls hang toward network timeout while the transaction sits idle (the residual
+    # #565 sibling holder). Cheap in-memory/cached probes; fail-OPEN (rather tick
+    # than wrongly freeze a session on a probe error). Ticks resume automatically
+    # when the broker reconnects.
+    if not _venue_broker_connected(ef):
+        return {"ok": True, "skipped": "venue_broker_not_connected", "execution_family": ef}
 
     if sess.state not in LIVE_RUNNER_RUNNABLE_STATES:
         return {"ok": True, "skipped": "not_runnable", "state": sess.state}
@@ -1954,7 +1984,11 @@ def tick_live_session(
             _safe_transition(db, sess, STATE_WATCHING_LIVE)
         else:
             _safe_transition(db, sess, STATE_LIVE_PENDING_ENTRY)
-            _emit(db, sess, "live_entry_submitted", {"note": "pending_place"})
+            # State-transition marker ONLY — no broker order exists yet. This used to
+            # emit "live_entry_submitted" with an empty-ish payload, producing TWO
+            # "submitted" events per cycle (one phantom, one real) and corrupting
+            # entries-per-session / time-to-fill analytics (BATL post-mortem).
+            _emit(db, sess, "live_entry_pending_place", {"note": "pending_place"})
         db.flush()
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 

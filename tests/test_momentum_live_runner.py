@@ -963,3 +963,35 @@ def test_fresh_quote_without_halt_is_noop():
     assert events == []                            # no halt_resumed: there was no halt
     assert le.get("halt_stale_streak") == 0        # blip streak cleared
     assert _cool(le) is False
+
+
+def test_tick_skips_disconnected_venue(monkeypatch, db: Session) -> None:
+    """A tick must NOT carry the session row lock into broker calls against a
+    disconnected venue (idle-in-tx holder) — it skips cleanly and resumes when the
+    broker reconnects."""
+    reset_duplicate_client_order_guard_for_tests()
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
+    vid, _ = _seed_live_eligible_row(db, symbol="DEAD-USD")
+    db.commit()
+    uid = _uid(db, "deadvenue")
+    from app.services.trading.momentum_neural.persistence import create_trading_automation_session
+    import app.services.trading.momentum_neural.live_runner as lr
+
+    sess = create_trading_automation_session(
+        db, user_id=uid, symbol="DEAD-USD", variant_id=vid, mode="live",
+        state=STATE_WATCHING_LIVE,
+        risk_snapshot_json={
+            RISK_SNAPSHOT_KEY: {"allowed": True},
+            "momentum_risk_policy_summary": {"disable_live_if_governance_inhibit": True},
+            "momentum_live_execution": {},
+        },
+    )
+    db.commit()
+    ad = _mk_adapter()
+    monkeypatch.setattr(lr, "_venue_broker_connected", lambda ef: False)
+
+    out = tick_live_session(db, sess.id, adapter_factory=lambda: ad)
+
+    assert out.get("skipped") == "venue_broker_not_connected", out
+    ad.get_best_bid_ask.assert_not_called()   # no broker call while the lock is held
+    ad.get_order.assert_not_called()
