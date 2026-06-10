@@ -44,7 +44,7 @@ table.rl-t tr.hist { cursor:pointer; } table.rl-t tr.hist:hover { background: rg
 .tl-chartbox { margin:4px 0 10px 86px; display:none; }
 .tl-chartbox.open { display:block; }
 .rl-chart-meta { font-size:11.5px; color:var(--text-secondary); margin:2px 0 4px; }
-svg.rl-chart { width:100%; height:252px; background:rgba(0,0,0,.18); border:1px solid var(--border); border-radius:8px; }
+svg.rl-chart { cursor:grab; width:100%; height:252px; background:rgba(0,0,0,.18); border:1px solid var(--border); border-radius:8px; }
 </style>
 {% endblock %}
 
@@ -61,6 +61,10 @@ svg.rl-chart { width:100%; height:252px; background:rgba(0,0,0,.18); border:1px 
   <div class="rl-card">
     <div class="rl-row">
       <input type="date" id="rl-date">
+      <select id="rl-mode" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:12.5px;">
+        <option value="live">Live-armed (re-enact the day's actual sessions)</option>
+        <option value="asof">As-of selection (what the system would pick)</option>
+      </select>
       <button class="rl-btn" id="rl-run" onclick="rlRun()">▶ Run Replay</button>
       <span class="rl-status" id="rl-status">idle</span>
     </div>
@@ -115,7 +119,7 @@ async function rlRun() {
   document.getElementById('rl-run').disabled = true;
   rlSetStatus('starting…','running');
   try {
-    const j = await (await fetch('/api/trading/momentum/replay/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({date})})).json();
+    const j = await (await fetch('/api/trading/momentum/replay/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({date, armed_source: document.getElementById('rl-mode').value})})).json();
     if (!j.ok) { rlSetStatus(j.error==='replay_already_running' ? 'a replay is already running — wait for it' : (j.error||'error'),'error'); document.getElementById('rl-run').disabled = false; return; }
     rlPoll = setInterval(rlCheck, 5000); rlCheck();
   } catch (e) { rlSetStatus('request failed: '+e,'error'); document.getElementById('rl-run').disabled = false; }
@@ -128,19 +132,19 @@ async function rlCheck() {
     if (job.state === 'running') { rlSetStatus('running… ('+(job.date||'')+') ~3-8 min','running'); return; }
     if (rlPoll) { clearInterval(rlPoll); rlPoll = null; }
     document.getElementById('rl-run').disabled = false;
-    if (job.state === 'done') { rlSetStatus('done: '+job.date+' → $'+Number(job.total_usd||0).toLocaleString()+' ('+(job.n_trades||0)+' trades)','done'); rlLoadResult(job.date); rlLoadHistory(); }
+    if (job.state === 'done') { rlSetStatus('done: '+job.date+' → $'+Number(job.total_usd||0).toLocaleString()+' ('+(job.n_trades||0)+' trades)','done'); rlLoadResult(job.date, job.armed_source); rlLoadHistory(); }
     else if (job.state === 'error') { rlSetStatus('error: '+(job.error||'?'),'error'); rlLoadHistory(); }
     else rlSetStatus(job.state || 'idle');
   } catch (e) { /* transient */ }
 }
 
-async function rlLoadResult(date) {
+async function rlLoadResult(date, mode) {
   try {
-    const j = await (await fetch('/api/trading/momentum/replay/result/'+date)).json();
+    const j = await (await fetch('/api/trading/momentum/replay/result/'+date+'?armed_source='+(mode||'asof'))).json();
     if (!j.ok) return;
     const r = rlCur = j.result;
     document.getElementById('rl-result-card').style.display = '';
-    document.getElementById('rl-result-title').textContent = '📊 ' + r.date + ' — high-fidelity result';
+    document.getElementById('rl-result-title').textContent = '📊 ' + r.date + ' — high-fidelity result · ' + (r.armed_source === 'live' ? 'live-armed re-enactment' : 'as-of selection');
     const tot = Number(r.total_usd||0);
     document.getElementById('rl-kpis').innerHTML =
       kpi('$'+tot.toLocaleString(), 'Day P/L', tot>=0?'pos':'neg') +
@@ -205,9 +209,9 @@ function rlChartSVG(sym) {
   const cid = 'rlc-'+sym.replace(/[^A-Za-z0-9]/g,'');
   window._rlBars = window._rlBars || {}; window._rlBars[cid] = S;
   window._rlView = window._rlView || {};
-  if (!window._rlView[cid]) window._rlView[cid] = { t0: T0, t1: T1 };
+  if (!window._rlView[cid]) window._rlView[cid] = { t0: 13*60+30, t1: T1 };  // default RTH; drag left to reveal pre-market
   const meta = ((rlCur.trades)||[]).filter(t => t.sym === sym).map(t => 'P/L $'+Number(t.usd).toLocaleString()+' · spread '+t.spread_bps+'bps · qty '+Number(t.qty).toLocaleString()).join(' | ');
-  return '<div class="rl-chart-meta">'+rlEsc(sym)+' — 5m · ET · <span style="color:#58a6ff;">EMA9</span> · <span style="color:#e8b339;">VWAP</span> · scroll=zoom · drag=pan · dbl-click=reset'+(meta ? ' · '+meta : ' · watched, no fill')+'</div>' +
+  return '<div class="rl-chart-meta">'+rlEsc(sym)+' — 5m · ET · <span style="color:#58a6ff;">EMA9</span> · <span style="color:#e8b339;">VWAP</span> · scroll=zoom · drag=pan (pre-market to the left) · dbl-click=full day'+(meta ? ' · '+meta : ' · watched, no fill')+'</div>' +
          '<div style="position:relative;">' +
          '<svg class="rl-chart" id="'+cid+'" viewBox="0 0 1040 252" preserveAspectRatio="none">'+rlChartBody(sym, cid)+'</svg>' +
          '<div id="'+cid+'-tip" style="position:absolute;top:6px;left:8px;background:rgba(8,12,20,.92);border:1px solid var(--border);border-radius:6px;padding:5px 9px;font-size:11px;display:none;pointer-events:none;"></div></div>';
@@ -378,7 +382,7 @@ async function rlLoadHistory() {
   try {
     const j = await (await fetch('/api/trading/momentum/replay/list')).json();
     document.getElementById('rl-hist').innerHTML = (j.results||[]).map(r =>
-      '<tr class="hist" onclick="rlLoadResult(\''+rlEsc(r.date)+'\')"><td><b>'+rlEsc(r.date)+'</b></td>'+
+      '<tr class="hist" onclick="rlLoadResult(\''+rlEsc(r.date)+'\', \''+(r.armed_source||'asof')+'\')"><td><b>'+rlEsc(r.date)+'</b></td>'+
       '<td class="'+(Number(r.total_usd)>=0?'rl-pos':'rl-neg')+'">$'+Number(r.total_usd||0).toLocaleString()+'</td>'+
       '<td>'+(r.n_trades||0)+'</td><td>'+(r.wins||0)+'/'+(r.losses||0)+'</td>'+
       '<td>'+(r.tape_symbols||0)+'</td><td>'+(r.candidates||0)+'</td><td>'+(r.halt_windows||0)+'</td>'+

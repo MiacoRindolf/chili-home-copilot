@@ -27,12 +27,12 @@ _lock = threading.Lock()
 _job: dict[str, Any] = {"state": "idle", "date": None, "started_at": None, "error": None}
 
 
-def _run_in_thread(date: str) -> None:
+def _run_in_thread(date: str, armed_source: str = "asof") -> None:
     global _job
     try:
         from ...services.trading.momentum_neural.replay_v2 import run_replay
 
-        result = run_replay(date)
+        result = run_replay(date, armed_source=armed_source)
         with _lock:
             _job = {
                 "state": "done" if not result.get("error") else "error",
@@ -53,15 +53,18 @@ def _run_in_thread(date: str) -> None:
 @router.post("/run")
 def run_replay_endpoint(payload: dict):
     date = str((payload or {}).get("date") or "").strip()
+    armed_source = str((payload or {}).get("armed_source") or "asof").strip()
+    if armed_source not in ("asof", "live"):
+        raise HTTPException(status_code=400, detail="armed_source must be asof|live")
     if not _DATE_RE.match(date):
         raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
     with _lock:
         if _job.get("state") == "running":
             return {"ok": False, "error": "replay_already_running", "job": _job}
         _job.clear()
-        _job.update({"state": "running", "date": date,
+        _job.update({"state": "running", "date": date, "armed_source": armed_source,
                      "started_at": datetime.now(timezone.utc).isoformat(), "error": None})
-    t = threading.Thread(target=_run_in_thread, args=(date,), name=f"replay-v2-{date}", daemon=True)
+    t = threading.Thread(target=_run_in_thread, args=(date, armed_source), name=f"replay-v2-{date}", daemon=True)
     t.start()
     return {"ok": True, "job": dict(_job)}
 
@@ -80,12 +83,12 @@ def replay_list():
 
 
 @router.get("/result/{date}")
-def replay_result(date: str):
+def replay_result(date: str, armed_source: str = "asof"):
     if not _DATE_RE.match(date):
         raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
     from ...services.trading.momentum_neural.replay_v2 import load_result
 
-    r = load_result(date)
+    r = load_result(date, armed_source=armed_source)
     if r is None:
         raise HTTPException(status_code=404, detail="no result for this date — run it first")
     return {"ok": True, "result": r}
