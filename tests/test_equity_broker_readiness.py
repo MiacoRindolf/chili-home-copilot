@@ -42,6 +42,29 @@ def test_coinbase_session_still_gated_on_coinbase(monkeypatch):
     assert rd["broker_ready_for_live"] is False
 
 
+def test_alpaca_session_ready_via_alpaca_not_coinbase(monkeypatch):
+    # Alpaca readiness must use the ALPACA adapter, NOT fall through to the Coinbase
+    # branch (which gated alpaca_spot on an unrelated Coinbase status -> always False).
+    _patch_common(monkeypatch, rh_connected=False, cb_connected=False)  # both brokers down
+    monkeypatch.setattr(orr.settings, "chili_alpaca_enabled", True, raising=False)
+    monkeypatch.setattr(orr.settings, "chili_coinbase_spot_adapter_enabled", False, raising=False)
+    import app.services.trading.venue.alpaca_spot as alp
+    monkeypatch.setattr(alp.AlpacaSpotAdapter, "is_enabled", lambda self: True)
+    rd = orr.build_momentum_operator_readiness(execution_family="alpaca_spot")
+    assert rd["execution_family"] == "alpaca_spot"
+    assert rd["alpaca_spot_adapter_enabled"] is True
+    assert rd["broker_alpaca_ready"] is True
+    assert rd["broker_ready_for_live"] is True   # NOT gated on Coinbase being down
+    assert rd["execution_ready"] is True
+
+
+def test_alpaca_session_blocked_when_adapter_disabled(monkeypatch):
+    _patch_common(monkeypatch, rh_connected=False, cb_connected=True)
+    monkeypatch.setattr(orr.settings, "chili_alpaca_enabled", False, raising=False)
+    rd = orr.build_momentum_operator_readiness(execution_family="alpaca_spot")
+    assert rd["broker_ready_for_live"] is False  # adapter flag off
+
+
 def test_next_action_message_is_venue_aware():
     rd_rh = {"execution_family": "robinhood_spot"}
     msg = orr.next_action_required(mode="live", state="x", canonical_state="queued_live", readiness=rd_rh, blocked="broker_not_ready")
@@ -49,3 +72,6 @@ def test_next_action_message_is_venue_aware():
     rd_cb = {"execution_family": "coinbase_spot"}
     msg2 = orr.next_action_required(mode="live", state="x", canonical_state="queued_live", readiness=rd_cb, blocked="broker_not_ready")
     assert "Coinbase" in msg2
+    rd_alp = {"execution_family": "alpaca_spot"}
+    msg3 = orr.next_action_required(mode="live", state="x", canonical_state="queued_live", readiness=rd_alp, blocked="broker_not_ready")
+    assert "Alpaca" in msg3
