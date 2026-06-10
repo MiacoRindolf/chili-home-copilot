@@ -5,7 +5,9 @@
 .DESCRIPTION
   Invoked every ~5 min by the "CHILI Docker Socket Watchdog" scheduled task
   (LogonType Interactive as user 'rindo' - required to reach the Docker named
-  pipe; SYSTEM cannot. RunLevel Limited / non-elevated.).
+  pipe; SYSTEM cannot. RunLevel Limited / non-elevated.). The task launches
+  this script through scripts\run-hidden.vbs (wscript.exe) so no console
+  window flashes on the operator's desktop each tick.
 
   Responsibilities:
 
@@ -100,8 +102,14 @@ function Invoke-Docker {
         $psi.UseShellExecute = $false
         $psi.CreateNoWindow = $true
         $p = [System.Diagnostics.Process]::Start($psi)
+        # Drain stdout/stderr ASYNC, *before* waiting. Reading only after
+        # WaitForExit deadlocks once output exceeds the ~4KB pipe buffer
+        # (docker blocks writing, we block waiting -> spurious "timeout 30s"
+        # -> empty stack -> every tick logged as a stack-wide outage).
+        $outTask = $p.StandardOutput.ReadToEndAsync()
+        $errTask = $p.StandardError.ReadToEndAsync()
         if (-not $p.WaitForExit($TimeoutSec * 1000)) { try { $p.Kill() } catch { }; return @{ Ok = $false; Out = ''; Err = "timeout ${TimeoutSec}s" } }
-        return @{ Ok = ($p.ExitCode -eq 0); Out = $p.StandardOutput.ReadToEnd().Trim(); Err = $p.StandardError.ReadToEnd().Trim() }
+        return @{ Ok = ($p.ExitCode -eq 0); Out = $outTask.Result.Trim(); Err = $errTask.Result.Trim() }
     } catch { return @{ Ok = $false; Out = ''; Err = $_.Exception.Message } }
 }
 
