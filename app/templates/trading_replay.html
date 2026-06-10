@@ -193,7 +193,7 @@ function rlToggleChart(i, sym, forceOpen) {
   if (box.classList.contains('open') && !forceOpen) { box.classList.remove('open'); return; }
   if (!box.innerHTML) box.innerHTML = rlChartSVG(sym);
   box.classList.add('open');
-  rlAttachHover('rlc-'+sym.replace(/[^A-Za-z0-9]/g,''));
+  rlAttachHover('rlc-'+sym.replace(/[^A-Za-z0-9]/g,''), sym);
 }
 
 function rlChartSVG(sym) {
@@ -202,17 +202,43 @@ function rlChartSVG(sym) {
   if (!S || !S.length) return '<div class="rl-chart-meta">no bar data for '+rlEsc(sym)+'</div>';
   S = S.filter(b => { const m = tMin(b[0]); return m >= T0 && m <= T1; });
   if (!S.length) return '<div class="rl-chart-meta">no bars in the trading window for '+rlEsc(sym)+'</div>';
-  const W = 1040, H = 252, padL = 46, padR = 8, padT = 10, padB = 40;  // padB hosts the volume pane
+  const cid = 'rlc-'+sym.replace(/[^A-Za-z0-9]/g,'');
+  window._rlBars = window._rlBars || {}; window._rlBars[cid] = S;
+  window._rlView = window._rlView || {};
+  if (!window._rlView[cid]) window._rlView[cid] = { t0: T0, t1: T1 };
+  const meta = ((rlCur.trades)||[]).filter(t => t.sym === sym).map(t => 'P/L $'+Number(t.usd).toLocaleString()+' · spread '+t.spread_bps+'bps · qty '+Number(t.qty).toLocaleString()).join(' | ');
+  return '<div class="rl-chart-meta">'+rlEsc(sym)+' — 5m · ET · <span style="color:#58a6ff;">EMA9</span> · <span style="color:#e8b339;">VWAP</span> · scroll=zoom · drag=pan · dbl-click=reset'+(meta ? ' · '+meta : ' · watched, no fill')+'</div>' +
+         '<div style="position:relative;">' +
+         '<svg class="rl-chart" id="'+cid+'" viewBox="0 0 1040 252" preserveAspectRatio="none">'+rlChartBody(sym, cid)+'</svg>' +
+         '<div id="'+cid+'-tip" style="position:absolute;top:6px;left:8px;background:rgba(8,12,20,.92);border:1px solid var(--border);border-radius:6px;padding:5px 9px;font-size:11px;display:none;pointer-events:none;"></div></div>';
+}
+
+function rlChartBody(sym, cid) {
+  const r = rlCur || {};
+  const view = (window._rlView||{})[cid] || { t0: T0, t1: T1 };
+  const V0 = view.t0, V1 = view.t1;
+  const all = (window._rlBars||{})[cid] || [];
+  const S = all.filter(b => { const m = tMin(b[0]); return m >= V0 - 5 && m <= V1 + 5; });
+  if (!S.length) return '';
+  const W = 1040, H = 252, padL = 46, padR = 8, padT = 10, padB = 40;
   const lo = Math.min(...S.map(b => b[3])), hi = Math.max(...S.map(b => b[2]));
   const span = (hi-lo) || 1, y = p => padT + (hi - p) / span * (H-padT-padB);
-  const x = t => padL + (Math.max(T0, Math.min(T1, tMin(t))) - T0) / (T1-T0) * (W-padL-padR);
-  const bw = Math.max(2, (W-padL-padR) / ((T1-T0)/5) - 2);
+  const x = t => padL + (Math.max(V0, Math.min(V1, tMin(t))) - V0) / (V1-V0) * (W-padL-padR);
+  const bw = Math.max(1.5, (W-padL-padR) / ((V1-V0)/5) - 2);
   let g = '';
-  // 09:30 ET open marker
-  const xOpen = x('13:30');
-  g += '<line x1="'+xOpen+'" x2="'+xOpen+'" y1="'+padT+'" y2="'+(H-padB)+'" stroke="rgba(255,255,255,.22)" stroke-dasharray="3 4"/>' +
-       '<text x="'+(xOpen+3)+'" y="'+(H-padB-4)+'" fill="rgba(255,255,255,.4)" font-size="8">09:30 ET open</text>';
-  // halt shading: MERGE adjacent windows (gap <= 3 min) and label only wide ones
+  const range = V1 - V0;
+  const step = range > 360 ? 60 : range > 150 ? 30 : range > 60 ? 15 : 5;
+  for (let m = Math.ceil(V0/step)*step; m <= V1; m += step) {
+    const xx = padL + (m - V0) / (V1-V0) * (W-padL-padR);
+    const et = (m-240+1440)%1440;
+    g += '<line x1="'+xx+'" x2="'+xx+'" y1="'+(H-padB)+'" y2="'+(H-padB+4)+'" stroke="rgba(255,255,255,.3)"/>' +
+         '<text x="'+xx+'" y="'+(H-padB+14)+'" text-anchor="middle" fill="rgba(255,255,255,.5)" font-size="9">'+String(Math.floor(et/60)).padStart(2,'0')+':'+String(et%60).padStart(2,'0')+'</text>';
+  }
+  if (V0 <= 810 && 810 <= V1) {
+    const xo = padL + (810 - V0)/(V1-V0)*(W-padL-padR);
+    g += '<line x1="'+xo+'" x2="'+xo+'" y1="'+padT+'" y2="'+(H-padB)+'" stroke="rgba(255,255,255,.22)" stroke-dasharray="3 4"/>' +
+         '<text x="'+(xo+3)+'" y="'+(padT+9)+'" fill="rgba(255,255,255,.4)" font-size="8">09:30 open</text>';
+  }
   (function(){
     const spans = ((r.halt_spans||{})[sym]||[]).slice().sort((a,b) => tMin(a[0])-tMin(b[0]));
     const merged = [];
@@ -222,90 +248,123 @@ function rlChartSVG(sym) {
       else merged.push([h[0], h[1]]);
     });
     merged.forEach(h => {
-      const wpx = Math.max(2, x(h[1])-x(h[0]));
-      g += '<rect x="'+x(h[0])+'" y="'+padT+'" width="'+wpx+'" height="'+(H-padT-padB)+'" fill="rgba(248,81,73,.10)"/>';
-      if (wpx > 26) g += '<text x="'+(x(h[0])+3)+'" y="'+(padT+10)+'" fill="rgba(248,81,73,.7)" font-size="8">HALT</text>';
+      if (tMin(h[1]) < V0 || tMin(h[0]) > V1) return;
+      const x0 = x(h[0]), wpx = Math.max(2, x(h[1])-x0);
+      g += '<rect x="'+x0+'" y="'+padT+'" width="'+wpx+'" height="'+(H-padT-padB)+'" fill="rgba(248,81,73,.10)"/>';
+      if (wpx > 30) g += '<text x="'+(x0+3)+'" y="'+(padT+19)+'" fill="rgba(248,81,73,.7)" font-size="8">HALT</text>';
     });
   })();
-  // y gridlines + labels
   for (let k = 0; k <= 4; k++) {
-    const p = lo + span*k/4, yy = y(p);
+    const pp = lo + span*k/4, yy = y(pp);
     g += '<line x1="'+padL+'" x2="'+(W-padR)+'" y1="'+yy+'" y2="'+yy+'" stroke="rgba(255,255,255,.06)"/>' +
-         '<text x="4" y="'+(yy+3)+'" fill="rgba(255,255,255,.45)" font-size="9">'+p.toFixed(2)+'</text>';
+         '<text x="4" y="'+(yy+3)+'" fill="rgba(255,255,255,.45)" font-size="9">'+pp.toFixed(2)+'</text>';
   }
-  // volume pane (bottom strip)
   const vmax = Math.max(...S.map(b => b[5])) || 1;
   S.forEach(b => {
-    const [t,o,h2,l,c,v] = b, up = c >= o;
-    const vh = Math.max(1, (v / vmax) * 26);
-    g += '<rect x="'+x(t)+'" y="'+(H-12-vh)+'" width="'+bw+'" height="'+vh+'" fill="'+(up?'#3fb950':'#f85149')+'" opacity="0.28"/>';
+    const up = b[4] >= b[1];
+    const vh = Math.max(1, (b[5] / vmax) * 24);
+    g += '<rect x="'+(x(b[0])-bw/2)+'" y="'+(H-16-vh)+'" width="'+bw+'" height="'+vh+'" fill="'+(up?'#3fb950':'#f85149')+'" opacity="0.28"/>';
   });
-  // candles
   S.forEach(b => {
-    const [t,o,h2,l,c] = b, cx = x(t)+bw/2, up = c >= o, col = up ? '#3fb950' : '#f85149';
-    g += '<line x1="'+cx+'" x2="'+cx+'" y1="'+y(h2)+'" y2="'+y(l)+'" stroke="'+col+'" stroke-width="1"/>' +
-         '<rect x="'+x(t)+'" y="'+y(Math.max(o,c))+'" width="'+bw+'" height="'+Math.max(1, Math.abs(y(o)-y(c)))+'" fill="'+col+'" opacity="0.85"/>';
+    const cx = x(b[0]), up = b[4] >= b[1], col = up ? '#3fb950' : '#f85149';
+    g += '<line x1="'+cx+'" x2="'+cx+'" y1="'+y(b[2])+'" y2="'+y(b[3])+'" stroke="'+col+'" stroke-width="1"/>' +
+         '<rect x="'+(cx-bw/2)+'" y="'+y(Math.max(b[1],b[4]))+'" width="'+bw+'" height="'+Math.max(1, Math.abs(y(b[1])-y(b[4])))+'" fill="'+col+'" opacity="0.85"/>';
   });
-  // trade annotations w/ collision-aware label placement
+  (function(){
+    const k = 2/(9+1); let ema = null, cumPV = 0, cumV = 0;
+    const ePts = [], vPts = [];
+    all.forEach(b => {
+      const m = tMin(b[0]); const typ = (b[2]+b[3]+b[4])/3;
+      ema = ema === null ? b[4] : b[4]*k + ema*(1-k);
+      cumPV += typ * b[5]; cumV += b[5];
+      if (m >= V0 && m <= V1) {
+        ePts.push(x(b[0]).toFixed(1)+','+y(ema).toFixed(1));
+        if (cumV > 0) vPts.push(x(b[0]).toFixed(1)+','+y(cumPV/cumV).toFixed(1));
+      }
+    });
+    if (ePts.length > 1) g += '<polyline points="'+ePts.join(' ')+'" fill="none" stroke="#58a6ff" stroke-width="1.3" opacity=".85"/>';
+    if (vPts.length > 1) g += '<polyline points="'+vPts.join(' ')+'" fill="none" stroke="#e8b339" stroke-width="1.3" stroke-dasharray="6 3" opacity=".8"/>';
+  })();
   const placed = [];
   function labelY(xp, yp) {
     let yy = yp;
     for (let tries = 0; tries < 8; tries++) {
-      const hit = placed.some(b => Math.abs(b.x - xp) < 150 && Math.abs(b.y - yy) < 12);
-      if (!hit) break;
+      if (!placed.some(b => Math.abs(b.x - xp) < 150 && Math.abs(b.y - yy) < 12)) break;
       yy += 13;
     }
     placed.push({x: xp, y: yy});
     return yy;
   }
   ((rlCur.trades)||[]).filter(t => t.sym === sym).forEach(t => {
-    const xe = x(t.t)+bw/2, ye = y(t.entry);
-    const eAnchor = xe > W-180 ? ' text-anchor="end"' : '';
-    const eyl = labelY(xe, ye-7);
+    if (tMin(t.t) < V0 || tMin(t.t) > V1) return;
+    const xe = x(t.t), ye = y(t.entry);
+    const eA = xe > W-180 ? ' text-anchor="end"' : '';
     g += '<circle cx="'+xe+'" cy="'+ye+'" r="5" fill="#3fb950" stroke="#fff" stroke-width="1.2"/>' +
-         '<text x="'+(xe + (eAnchor? -7 : 7))+'" y="'+eyl+'"'+eAnchor+' fill="#3fb950" font-size="10" font-weight="700">▲ entry '+t.entry+' @'+t.t+'</text>';
+         '<text x="'+(xe + (eA? -7 : 7))+'" y="'+labelY(xe, ye-7)+'"'+eA+' fill="#3fb950" font-size="10" font-weight="700">▲ entry '+t.entry+' @'+t.t+'</text>';
     if (t.stop) g += '<line x1="'+xe+'" x2="'+(W-padR)+'" y1="'+y(t.stop)+'" y2="'+y(t.stop)+'" stroke="#f85149" stroke-dasharray="5 4" stroke-width="1"/>' +
                      '<text x="'+(W-padR-58)+'" y="'+(y(t.stop)-3)+'" fill="#f85149" font-size="9">stop '+t.stop+'</text>';
     if (t.target) g += '<line x1="'+xe+'" x2="'+(W-padR)+'" y1="'+y(t.target)+'" y2="'+y(t.target)+'" stroke="#3fb950" stroke-dasharray="5 4" stroke-width="1" opacity=".7"/>' +
                        '<text x="'+(W-padR-66)+'" y="'+(y(t.target)-3)+'" fill="#3fb950" font-size="9">target '+t.target+'</text>';
-    if (t.exit_t) {
-      const xx = x(t.exit_t)+bw/2, yx = y(t.exit);
-      const xAnchor = xx > W-220 ? ' text-anchor="end"' : '';
-      const xyl = labelY(xx, yx+13);
+    if (t.exit_t && tMin(t.exit_t) >= V0 && tMin(t.exit_t) <= V1) {
+      const xx = x(t.exit_t), yx = y(t.exit);
+      const xA = xx > W-220 ? ' text-anchor="end"' : '';
       g += '<circle cx="'+xx+'" cy="'+yx+'" r="5" fill="#f85149" stroke="#fff" stroke-width="1.2"/>' +
-           '<text x="'+(xx + (xAnchor? -7 : 7))+'" y="'+xyl+'"'+xAnchor+' fill="#f85149" font-size="10" font-weight="700">▼ exit '+t.exit+' @'+t.exit_t+' ('+t.why+')</text>';
+           '<text x="'+(xx + (xA? -7 : 7))+'" y="'+labelY(xx, yx+13)+'"'+xA+' fill="#f85149" font-size="10" font-weight="700">▼ exit '+t.exit+' @'+t.exit_t+' ('+t.why+')</text>';
     }
   });
-  const meta = ((rlCur.trades)||[]).filter(t => t.sym === sym).map(t => 'P/L $'+Number(t.usd).toLocaleString()+' · spread '+t.spread_bps+'bps · qty '+Number(t.qty).toLocaleString()).join(' | ');
-  const cid = 'rlc-'+sym.replace(/[^A-Za-z0-9]/g,'');
-  window._rlBars = window._rlBars || {};
-  window._rlBars[cid] = S;
   g += '<line id="'+cid+'-x" x1="0" x2="0" y1="'+padT+'" y2="'+(H-padB)+'" stroke="rgba(255,255,255,.35)" stroke-dasharray="2 3" visibility="hidden"/>';
-  return '<div class="rl-chart-meta">'+rlEsc(sym)+' — 5m bars · times in ET (UTC−4)'+(meta ? ' · '+meta : ' · watched, no fill')+'</div>' +
-         '<div style="position:relative;">' +
-         '<svg class="rl-chart" id="'+cid+'" viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none">'+g+'</svg>' +
-         '<div id="'+cid+'-tip" style="position:absolute;top:6px;left:8px;background:rgba(8,12,20,.92);border:1px solid var(--border);border-radius:6px;padding:5px 9px;font-size:11px;display:none;pointer-events:none;"></div></div>';
+  return g;
 }
 
 const RL_W = 1040, RL_PADL = 46, RL_PADR = 8;
-function rlAttachHover(cid) {
+function rlRedraw(cid, sym) {
+  const svg = document.getElementById(cid);
+  if (svg) svg.innerHTML = rlChartBody(sym, cid);
+}
+function rlAttachHover(cid, sym) {
   const svg = document.getElementById(cid);
   if (!svg || svg._rlWired) return;
   svg._rlWired = true;
-  svg.addEventListener('mousemove', ev => rlHover(ev, cid));
-  svg.addEventListener('mouseleave', () => rlHoverOff(cid));
+  svg.addEventListener('mousemove', ev => {
+    if (svg._rlDrag) {
+      const view = window._rlView[cid];
+      const r = svg.getBoundingClientRect();
+      const dmin = (svg._rlDrag.x - ev.clientX) / r.width * (svg._rlDrag.v1 - svg._rlDrag.v0);
+      let t0 = svg._rlDrag.v0 + dmin, t1 = svg._rlDrag.v1 + dmin;
+      if (t0 < T0) { t1 += T0-t0; t0 = T0; } if (t1 > T1) { t0 -= t1-T1; t1 = T1; }
+      view.t0 = t0; view.t1 = t1; rlRedraw(cid, sym); return;
+    }
+    rlHover(ev, cid);
+  });
+  svg.addEventListener('mouseleave', () => { svg._rlDrag = null; rlHoverOff(cid); });
+  svg.addEventListener('mousedown', ev => { const v = window._rlView[cid]; svg._rlDrag = { x: ev.clientX, v0: v.t0, v1: v.t1 }; ev.preventDefault(); });
+  svg.addEventListener('mouseup', () => { svg._rlDrag = null; });
+  svg.addEventListener('dblclick', () => { window._rlView[cid] = { t0: T0, t1: T1 }; rlRedraw(cid, sym); });
+  svg.addEventListener('wheel', ev => {
+    ev.preventDefault();
+    const view = window._rlView[cid];
+    const r = svg.getBoundingClientRect();
+    const fx = Math.max(0, Math.min(1, ((ev.clientX - r.left)/r.width*RL_W - RL_PADL) / (RL_W-RL_PADL-RL_PADR)));
+    const cm = view.t0 + fx * (view.t1 - view.t0);
+    const z = ev.deltaY > 0 ? 1.25 : 0.8;
+    let t0 = Math.max(T0, cm - (cm - view.t0) * z), t1 = Math.min(T1, cm + (view.t1 - cm) * z);
+    if (t1 - t0 < 30) return;
+    view.t0 = t0; view.t1 = t1; rlRedraw(cid, sym);
+  }, { passive: false });
 }
 function rlHover(ev, cid) {
-  const bars = (window._rlBars||{})[cid]; if (!bars || !bars.length) return;
+  const view = (window._rlView||{})[cid]; if (!view) return;
+  const bars = ((window._rlBars||{})[cid]||[]).filter(b => tMin(b[0]) >= view.t0 && tMin(b[0]) <= view.t1);
+  if (!bars.length) return;
   const svg = document.getElementById(cid); if (!svg) return;
   const r = svg.getBoundingClientRect();
   const xf = (ev.clientX - r.left) / r.width * RL_W;
   const span = RL_W - RL_PADL - RL_PADR;
   let best = 0, bd = 1e9;
-  bars.forEach((b,i) => { const bx = RL_PADL + (tMin(b[0])-T0)/(T1-T0)*span; const d = Math.abs(bx - xf); if (d < bd) { bd = d; best = i; } });
+  bars.forEach((b,i) => { const bx = RL_PADL + (tMin(b[0])-view.t0)/(view.t1-view.t0)*span; const d = Math.abs(bx - xf); if (d < bd) { bd = d; best = i; } });
   const b = bars[best];
-  const x = RL_PADL + (tMin(b[0])-T0)/(T1-T0)*span;
-  const xl = document.getElementById(cid+'-x'); if (xl) { xl.setAttribute('x1', x); xl.setAttribute('x2', x); xl.setAttribute('visibility','visible'); }
+  const xx = RL_PADL + (tMin(b[0])-view.t0)/(view.t1-view.t0)*span;
+  const xl = document.getElementById(cid+'-x'); if (xl) { xl.setAttribute('x1', xx); xl.setAttribute('x2', xx); xl.setAttribute('visibility','visible'); }
   const m = tMin(b[0]); const et = (m-240+1440)%1440;
   const tip = document.getElementById(cid+'-tip');
   if (tip) { tip.style.display=''; tip.innerHTML = '<b>'+String(Math.floor(et/60)).padStart(2,'0')+':'+String(et%60).padStart(2,'0')+' ET</b> &nbsp; O '+b[1]+' · H '+b[2]+' · L '+b[3]+' · C '+b[4]+' · Vol '+Number(b[5]).toLocaleString(); }
