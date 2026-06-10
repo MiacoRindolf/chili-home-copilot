@@ -193,6 +193,7 @@ function rlToggleChart(i, sym, forceOpen) {
   if (box.classList.contains('open') && !forceOpen) { box.classList.remove('open'); return; }
   if (!box.innerHTML) box.innerHTML = rlChartSVG(sym);
   box.classList.add('open');
+  rlAttachHover('rlc-'+sym.replace(/[^A-Za-z0-9]/g,''));
 }
 
 function rlChartSVG(sym) {
@@ -239,31 +240,37 @@ function rlChartSVG(sym) {
   });
   const meta = ((rlCur.trades)||[]).filter(t => t.sym === sym).map(t => 'P/L $'+Number(t.usd).toLocaleString()+' · spread '+t.spread_bps+'bps · qty '+Number(t.qty).toLocaleString()).join(' | ');
   const cid = 'rlc-'+sym.replace(/[^A-Za-z0-9]/g,'');
-  // interactive layer: crosshair + OHLC tooltip (ET + UTC)
+  window._rlBars = window._rlBars || {};
+  window._rlBars[cid] = S;
   g += '<line id="'+cid+'-x" x1="0" x2="0" y1="'+padT+'" y2="'+(H-padB)+'" stroke="rgba(255,255,255,.35)" stroke-dasharray="2 3" visibility="hidden"/>';
-  const bars = JSON.stringify(S.map(b => [b[0], b[1], b[2], b[3], b[4], b[5]]));
   return '<div class="rl-chart-meta">'+rlEsc(sym)+' — 5m bars · times in ET (UTC−4)'+(meta ? ' · '+meta : ' · watched, no fill')+'</div>' +
          '<div style="position:relative;">' +
-         '<svg class="rl-chart" id="'+cid+'" viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none" ' +
-         'onmousemove="rlHover(event,''+cid+'','+bars.replace(/"/g,'&quot;')+','+padL+','+padR+','+W+')" onmouseleave="rlHoverOff(''+cid+'')">'+g+'</svg>' +
+         '<svg class="rl-chart" id="'+cid+'" viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none">'+g+'</svg>' +
          '<div id="'+cid+'-tip" style="position:absolute;top:6px;left:8px;background:rgba(8,12,20,.92);border:1px solid var(--border);border-radius:6px;padding:5px 9px;font-size:11px;display:none;pointer-events:none;"></div></div>';
 }
 
-function rlHover(ev, cid, bars, padL, padR, W) {
+const RL_W = 1040, RL_PADL = 46, RL_PADR = 8;
+function rlAttachHover(cid) {
+  const svg = document.getElementById(cid);
+  if (!svg || svg._rlWired) return;
+  svg._rlWired = true;
+  svg.addEventListener('mousemove', ev => rlHover(ev, cid));
+  svg.addEventListener('mouseleave', () => rlHoverOff(cid));
+}
+function rlHover(ev, cid) {
+  const bars = (window._rlBars||{})[cid]; if (!bars || !bars.length) return;
   const svg = document.getElementById(cid); if (!svg) return;
   const r = svg.getBoundingClientRect();
-  const xf = (ev.clientX - r.left) / r.width * W;
-  const span = W - padL - padR;
-  const idx = Math.max(0, Math.min(bars.length-1, Math.round((xf - padL) / span * ((T1-T0)/5))));
-  // find the bar nearest in time-position
+  const xf = (ev.clientX - r.left) / r.width * RL_W;
+  const span = RL_W - RL_PADL - RL_PADR;
   let best = 0, bd = 1e9;
-  bars.forEach((b,i) => { const bx = padL + (tMin(b[0])-T0)/(T1-T0)*span; const d = Math.abs(bx - xf); if (d < bd) { bd = d; best = i; } });
+  bars.forEach((b,i) => { const bx = RL_PADL + (tMin(b[0])-T0)/(T1-T0)*span; const d = Math.abs(bx - xf); if (d < bd) { bd = d; best = i; } });
   const b = bars[best];
-  const x = padL + (tMin(b[0])-T0)/(T1-T0)*span;
+  const x = RL_PADL + (tMin(b[0])-T0)/(T1-T0)*span;
   const xl = document.getElementById(cid+'-x'); if (xl) { xl.setAttribute('x1', x); xl.setAttribute('x2', x); xl.setAttribute('visibility','visible'); }
   const m = tMin(b[0]); const et = (m-240+1440)%1440;
   const tip = document.getElementById(cid+'-tip');
-  if (tip) { tip.style.display=''; tip.innerHTML = '<b>'+String(Math.floor(et/60)).padStart(2,'0')+':'+String(et%60).padStart(2,'0')+' ET</b> ('+b[0]+'Z) &nbsp; O '+b[1]+' · H '+b[2]+' · L '+b[3]+' · C '+b[4]+' · Vol '+Number(b[5]).toLocaleString(); }
+  if (tip) { tip.style.display=''; tip.innerHTML = '<b>'+String(Math.floor(et/60)).padStart(2,'0')+':'+String(et%60).padStart(2,'0')+' ET</b> &nbsp; O '+b[1]+' · H '+b[2]+' · L '+b[3]+' · C '+b[4]+' · Vol '+Number(b[5]).toLocaleString(); }
 }
 function rlHoverOff(cid) {
   const xl = document.getElementById(cid+'-x'); if (xl) xl.setAttribute('visibility','hidden');
