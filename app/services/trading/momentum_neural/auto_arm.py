@@ -123,6 +123,38 @@ def _symbol_market_open(symbol: str) -> bool:
         return "-USD" in str(symbol or "").upper()
 
 
+def _venue_broker_ready_for(symbol: str, cache: dict[str, bool]) -> bool:
+    """True if the broker for ``symbol``'s resolved venue can place a live order NOW.
+
+    Memoised per-venue within a pass. The auto-arm picks ONE candidate per pass and
+    arms it with NO fallthrough, so if the chosen name's venue is disconnected (e.g.
+    the Robinhood token expired) ``confirm_live_arm`` fails ``broker_not_ready`` and the
+    pass arms NOTHING — stalling the whole lane, including tradeable crypto/Alpaca names
+    that a later candidate would have used. Dropping not-ready venues at SELECTION lets
+    the pass fall through to a venue that can actually fill. Fail-OPEN on probe error
+    (``confirm_live_arm`` still preflights broker readiness as the backstop)."""
+    try:
+        from ..execution_family_registry import (
+            normalize_execution_family,
+            resolve_execution_family_for_symbol,
+        )
+
+        ef = normalize_execution_family(resolve_execution_family_for_symbol(symbol))
+    except Exception:
+        return True
+    if ef in cache:
+        return cache[ef]
+    try:
+        from .operator_readiness import build_momentum_operator_readiness
+
+        rd = build_momentum_operator_readiness(execution_family=ef, symbol=symbol)
+        ready = bool(rd.get("broker_ready_for_live"))
+    except Exception:
+        ready = True  # fail-open; confirm_live_arm preflights broker readiness too
+    cache[ef] = ready
+    return ready
+
+
 def _max_watch_seconds() -> int:
     return max(60, int(getattr(settings, "chili_momentum_auto_arm_max_watch_seconds", 1800)))
 
@@ -564,6 +596,8 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
     # and self-collision (a symbol we already hold an active live session for).
     busy_symbols = _symbols_with_active_live_session(db, user_id=uid)
     out["busy_skipped"] = 0
+    out["broker_not_ready_skipped"] = 0
+    _broker_ready_cache: dict[str, bool] = {}
     eligible: list[MomentumSymbolViability] = []
     for c in candidates:
         out["checked"] += 1
@@ -575,7 +609,11 @@ def run_auto_arm_pass(db: Session) -> dict[str, Any]:
             out["busy_skipped"] += 1
             continue  # already have a live session for this symbol — rotate to the next setup
         if not _symbol_market_open(c.symbol):
-            continue  # equities only during RTH; crypto always passes (24/7)
+            continue  # equities only during their session; crypto always passes (24/7)
+        if not _venue_broker_ready_for(c.symbol, _broker_ready_cache):
+            out["broker_not_ready_skipped"] += 1
+            continue  # venue disconnected (e.g. RH token expired) — don't burn the single
+            # per-pass arm on a name whose confirm will fail; fall through to a fillable venue
         if not _symbol_free(db, c.symbol, uid):
             continue
         eligible.append(c)
