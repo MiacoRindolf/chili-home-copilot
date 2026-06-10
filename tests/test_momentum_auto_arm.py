@@ -18,6 +18,13 @@ class _FakeDB:
     def commit(self) -> None:
         pass
 
+    def rollback(self) -> None:
+        # Exercised by the read-txn release before the probe phase.
+        pass
+
+    def expunge_all(self) -> None:
+        pass
+
 
 def _cand(symbol="RSC-USD", variant_id=8, score=0.61):
     return SimpleNamespace(symbol=symbol, variant_id=variant_id, viability_score=score)
@@ -130,6 +137,26 @@ def test_broker_not_ready_skips_candidate_at_selection(happy):
     assert out["armed"] == 0
     assert out["broker_not_ready_skipped"] == 1
     assert out["skipped"] == "no_active_trigger"  # only candidate dropped -> nothing eligible
+
+
+def test_read_txn_released_before_probe(happy):
+    # The read transaction (incl. the trading_automation_sessions SELECT from
+    # busy_symbols) MUST be released before the network-bound OHLCV probe phase, else
+    # it sits idle-in-transaction across the multi-second probe wave and the per-
+    # connection idle-in-transaction timeout kills the connection.
+    calls = {"rollback": 0, "expunge_all": 0}
+
+    class _TrackDB(_FakeDB):
+        def rollback(self) -> None:
+            calls["rollback"] += 1
+
+        def expunge_all(self) -> None:
+            calls["expunge_all"] += 1
+
+    out = aa.run_auto_arm_pass(_TrackDB())
+    assert out["armed"] == 1  # happy path still arms
+    assert calls["expunge_all"] >= 1
+    assert calls["rollback"] >= 1
 
 
 def test_begin_blocked_does_not_arm(happy):
