@@ -36,6 +36,9 @@ def happy(monkeypatch):
     monkeypatch.setattr(automation_query, "expire_stale_live_arm_sessions", lambda db, *, user_id: 0)
     monkeypatch.setattr(aa, "_fresh_live_eligible_candidates", lambda db, *, limit: [_cand()])
     monkeypatch.setattr(aa, "_symbol_free", lambda db, sym, uid: True)
+    # Broker for the candidate's venue is connected/ready by default; the
+    # broker-not-ready guard test overrides this seam.
+    monkeypatch.setattr(aa, "_venue_broker_ready_for", lambda sym, cache: True)
     monkeypatch.setattr(aa, "_entry_trigger_fires", lambda sym: (True, "pullback_break_ok"))
     # Default freshness UNKNOWN (None) — keeps existing tests network-free and on the
     # arm-on-active-break contract; freshness-specific tests override this seam.
@@ -116,6 +119,17 @@ def test_symbol_owned_by_other_skips_candidate(happy):
     out = aa.run_auto_arm_pass(_FakeDB())
     # the only candidate is owned by another autopilot -> nothing arms
     assert out["skipped"] == "no_active_trigger"
+
+
+def test_broker_not_ready_skips_candidate_at_selection(happy):
+    # Venue disconnected (e.g. RH token expired): the candidate is dropped at SELECTION
+    # so the single per-pass arm can fall through to a fillable venue instead of being
+    # burned on a name whose confirm would fail broker_not_ready (the lane-stall bug).
+    happy.setattr(aa, "_venue_broker_ready_for", lambda sym, cache: False)
+    out = aa.run_auto_arm_pass(_FakeDB())
+    assert out["armed"] == 0
+    assert out["broker_not_ready_skipped"] == 1
+    assert out["skipped"] == "no_active_trigger"  # only candidate dropped -> nothing eligible
 
 
 def test_begin_blocked_does_not_arm(happy):
