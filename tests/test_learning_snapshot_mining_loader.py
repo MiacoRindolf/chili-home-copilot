@@ -232,3 +232,55 @@ def test_backfill_future_returns_releases_read_session_before_fetch(monkeypatch)
     assert write_db.committed is True
     assert {m["id"] for m in write_db.mappings} == {1, 2}
     assert write_db.mappings[0]["future_return_5d"] == 5.0
+
+
+def test_run_scheduled_market_snapshots_releases_session_before_fetch(monkeypatch):
+    """run_scheduled_market_snapshots must RELEASE the watchlist read txn BEFORE
+    take_snapshots_parallel's minutes-long provider-split OHLCV fetch.
+
+    build_snapshot_ticker_universe ends on a ``SELECT trading_watchlist`` read
+    (get_watchlist), leaving the caller session in an open transaction. Running
+    the snapshot fetch on that same session held the connection
+    idle-in-transaction (wait_event=ClientRead) on the watchlist SELECT for the
+    whole fetch — pinning the xmin horizon (blocking VACUUM cluster-wide) and
+    tying up a chili-scheduler-cron pool slot (2026-06 cascade). The release must
+    precede the fetch, same idiom as run_full_market_scan + mine_patterns.
+    """
+    from app.services.trading import learning
+
+    events: list[str] = []
+
+    class _Session:
+        def rollback(self):
+            events.append("rollback")
+
+    def _build_universe(db, user_id, **kwargs):
+        events.append("build_universe")
+        return ["SPY", "AAPL"], {"snapshot_driver": "test"}
+
+    def _take_snapshots_parallel(db, tickers, **kwargs):
+        events.append("fetch")
+        return len(tickers)
+
+    monkeypatch.setattr(learning, "provider_egress_available_for_brain_work", lambda: True)
+    monkeypatch.setattr(
+        "app.services.trading.scanner.build_snapshot_ticker_universe", _build_universe
+    )
+    monkeypatch.setattr(learning, "take_snapshots_parallel", _take_snapshots_parallel)
+    monkeypatch.setattr(learning, "_take_intraday_crypto_snapshots", lambda *a, **k: 0)
+    # Vitals refresh touches the session; stub it so the test stays session-free.
+    monkeypatch.setattr(
+        "app.services.trading.setup_vitals.monitored_tickers_for_vitals",
+        lambda db: set(),
+    )
+    monkeypatch.setattr(
+        "app.services.trading.setup_vitals.refresh_ticker_vitals_batch",
+        lambda db, batch, interval: {},
+    )
+
+    out = learning.run_scheduled_market_snapshots(_Session(), None)
+
+    assert out["ok"] is True
+    assert out["snapshots_taken_daily"] == 2
+    # Watchlist read txn released BEFORE the snapshot fetch ran.
+    assert events == ["build_universe", "rollback", "fetch"]

@@ -561,10 +561,39 @@ def evaluate_directional_outcomes(
         ):
             pat_by_id[int(p.id)] = p
 
+    # Predicted direction is a pure function of already-loaded pattern columns
+    # (rules_json / name), so resolve it now while the patterns are attached.
+    # The network phase below then touches no ORM/session state at all.
+    direction_by_pattern_id = {
+        pid: _resolve_predicted_direction(pat) for pid, pat in pat_by_id.items()
+    }
+
+    # Idle-in-transaction hygiene: the candidate + pattern reads above opened a
+    # transaction on the caller session. The per-alert OHLCV fetch loop that
+    # follows is minutes of network I/O with NO DB work, and the original code
+    # interleaved that fetch with per-alert INSERT + packet-finalize writes,
+    # committing only once after the whole loop — so this chili-scheduler-cron
+    # connection sat idle-in-transaction (wait_event=ClientRead) across every
+    # network gap, showing as a held ``UPDATE trading_decision_packets SET
+    # ...updated_at`` (the packet finalize) for the whole run. That pinned the
+    # xmin horizon (blocking VACUUM cluster-wide -> bloat) and tied up a cron
+    # pool slot. Release the read txn BEFORE the network phase, fetch + compute
+    # every outcome holding NO session, then write all rows back on one bounded
+    # txn (same idiom as mine_patterns / backfill_future_returns, PR #561).
+    try:
+        db.rollback()
+    except Exception:
+        logger.debug(
+            "[pattern_directional] read session release before fetch failed",
+            exc_info=True,
+        )
+
+    # Phase 1: network fetch + pure compute, holding NO DB transaction.
+    pending: list[dict[str, Any]] = []
     for alert_id, scan_pattern_id, ticker, created_at, _duration, decision_packet_id in rows:
         try:
-            pat = pat_by_id.get(int(scan_pattern_id))
-            if pat is None:
+            direction = direction_by_pattern_id.get(int(scan_pattern_id))
+            if direction is None:
                 skipped_no_pattern += 1
                 continue
             hold_hours = _hold_hours_from_duration_estimate(
@@ -576,7 +605,6 @@ def evaluate_directional_outcomes(
             if window_close_at > now:
                 skipped_window_open += 1
                 continue
-            direction = _resolve_predicted_direction(pat)
             df = fetcher(
                 ticker,
                 start=created_at - timedelta(hours=2),
@@ -600,6 +628,36 @@ def evaluate_directional_outcomes(
             if outcome is None:
                 skipped_window_empty += 1
                 continue
+            pending.append(
+                {
+                    "alert_id": int(alert_id),
+                    "scan_pattern_id": int(scan_pattern_id),
+                    "ticker": str(ticker),
+                    "created_at": created_at,
+                    "window_close_at": window_close_at,
+                    "decision_packet_id": (
+                        int(decision_packet_id) if decision_packet_id is not None else None
+                    ),
+                    "direction": direction,
+                    "entry_price": float(entry_price),
+                    "hold_window_hours": int(math.ceil(hold_hours)),
+                    "outcome": outcome,
+                }
+            )
+        except Exception as e:
+            errors += 1
+            logger.warning(
+                "[pattern_directional] alert_id=%s ticker=%s eval failed: %s",
+                alert_id, ticker, e,
+            )
+
+    # Phase 2: write every computed outcome back on ONE bounded transaction —
+    # no network between writes, so the connection never idles mid-txn.
+    for rec in pending:
+        alert_id = rec["alert_id"]
+        ticker = rec["ticker"]
+        outcome = rec["outcome"]
+        try:
             result = db.execute(
                 text(
                     """
@@ -624,15 +682,15 @@ def evaluate_directional_outcomes(
                     """
                 ),
                 {
-                    "alert_id": int(alert_id),
-                    "scan_pattern_id": int(scan_pattern_id),
-                    "ticker": str(ticker)[:32],
-                    "alert_at": created_at,
-                    "decision_packet_id": int(decision_packet_id) if decision_packet_id is not None else None,
-                    "predicted_direction": direction,
-                    "entry_price": Decimal(str(round(entry_price, 8))),
-                    "hold_window_hours": int(math.ceil(hold_hours)),
-                    "window_close_at": window_close_at,
+                    "alert_id": rec["alert_id"],
+                    "scan_pattern_id": rec["scan_pattern_id"],
+                    "ticker": ticker[:32],
+                    "alert_at": rec["created_at"],
+                    "decision_packet_id": rec["decision_packet_id"],
+                    "predicted_direction": rec["direction"],
+                    "entry_price": Decimal(str(round(rec["entry_price"], 8))),
+                    "hold_window_hours": rec["hold_window_hours"],
+                    "window_close_at": rec["window_close_at"],
                     "max_fav": Decimal(str(outcome["max_favorable_pct"])),
                     "max_adv": Decimal(str(outcome["max_adverse_pct"])),
                     "threshold_pct": Decimal(str(threshold_pct)),
@@ -646,29 +704,29 @@ def evaluate_directional_outcomes(
 
                     finalize_signal_packet_directional_outcome(
                         db,
-                        packet_id=int(decision_packet_id) if decision_packet_id is not None else None,
-                        alert_id=int(alert_id),
-                        ticker=str(ticker),
-                        scan_pattern_id=int(scan_pattern_id) if scan_pattern_id is not None else None,
+                        packet_id=rec["decision_packet_id"],
+                        alert_id=rec["alert_id"],
+                        ticker=ticker,
+                        scan_pattern_id=rec["scan_pattern_id"],
                         directional_correct=bool(outcome["directional_correct"]),
                         max_favorable_pct=float(outcome["max_favorable_pct"]),
                         max_adverse_pct=float(outcome["max_adverse_pct"]),
-                        entry_price=float(entry_price),
-                        hold_window_hours=int(math.ceil(hold_hours)),
+                        entry_price=rec["entry_price"],
+                        hold_window_hours=rec["hold_window_hours"],
                         evaluated_at=now,
                     )
                 except Exception:
                     logger.debug(
                         "[pattern_directional] packet outcome update failed alert_id=%s packet_id=%s",
-                        alert_id,
-                        decision_packet_id,
+                        rec["alert_id"],
+                        rec["decision_packet_id"],
                         exc_info=True,
                     )
                 evaluated += 1
         except Exception as e:
             errors += 1
             logger.warning(
-                "[pattern_directional] alert_id=%s ticker=%s eval failed: %s",
+                "[pattern_directional] alert_id=%s ticker=%s write failed: %s",
                 alert_id, ticker, e,
             )
     try:
