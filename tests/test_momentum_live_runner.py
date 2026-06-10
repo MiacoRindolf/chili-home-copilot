@@ -780,3 +780,118 @@ def test_ack_timeout_cancel_race_adopts_filled_order(monkeypatch, db: Session) -
     assert out.get("pending") == "ack_timeout_cancel_raced_fill_adopt", out
     assert sess.state != STATE_WATCHING_LIVE  # NOT abandoned to an orphan
     assert (sess.risk_snapshot_json or {})["momentum_live_execution"].get("entry_order_id") == "o-race2"
+
+
+def test_late_fill_sweep_repoints_abandoned_order(monkeypatch, db: Session) -> None:
+    """An entry order the ack-timeout abandoned (pointer wiped, id kept in history)
+    that fills SECONDS later must be RE-POINTED + adopted via the late-fill sweep —
+    not left as an unmanaged broker position. [BATL 2026-06-10: 5 such fills stacked
+    ~$8k with no lane stop.]"""
+    reset_duplicate_client_order_guard_for_tests()
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
+    vid, _ = _seed_live_eligible_row(db, symbol="LATE-USD")
+    db.commit()
+    uid = _uid(db, "late")
+    from app.services.trading.momentum_neural.persistence import create_trading_automation_session
+
+    sess = create_trading_automation_session(
+        db, user_id=uid, symbol="LATE-USD", variant_id=vid, mode="live",
+        state=STATE_WATCHING_LIVE,
+        risk_snapshot_json={
+            RISK_SNAPSHOT_KEY: {"allowed": True},
+            "momentum_risk_policy_summary": {"disable_live_if_governance_inhibit": True},
+            "momentum_live_execution": {
+                # abandoned by a previous ack-timeout: pointer wiped, history kept
+                "entry_submitted": False,
+                "entry_order_id": None,
+                "entry_order_ids_all": ["o-lost"],
+            },
+        },
+    )
+    db.commit()
+    ad = _mk_adapter()
+    ad.get_order.return_value = (
+        NormalizedOrder(order_id="o-lost", client_order_id="cid-l", product_id="LATE-USD",
+                        side="buy", status="filled", order_type="limit",
+                        filled_size=56.0, average_filled_price=1.633),
+        _fresh(),
+    )
+
+    with patch("app.services.trading.momentum_neural.live_runner.is_kill_switch_active", return_value=False):
+        out = tick_live_session(db, sess.id, adapter_factory=lambda: ad)
+    db.commit(); db.refresh(sess)
+
+    assert out.get("pending") == "late_fill_repointed", out
+    le = (sess.risk_snapshot_json or {})["momentum_live_execution"]
+    assert le.get("entry_order_id") == "o-lost"       # re-pointed at the real order
+    assert le.get("entry_submitted") is True
+    assert sess.state == STATE_LIVE_PENDING_ENTRY     # the fill-handler adopts next pass
+    assert (le.get("entry_orders_resolved") or {}).get("o-lost") == "adopted"
+
+
+def test_unresolved_entry_order_blocks_new_submit(monkeypatch, db: Session) -> None:
+    """While a previously-placed order is UNRESOLVED (venue still shows it open after
+    an abandon), the runner must NOT place another entry order — stacking guard."""
+    reset_duplicate_client_order_guard_for_tests()
+    monkeypatch.setattr(settings, "chili_momentum_live_runner_enabled", True)
+    vid, _ = _seed_live_eligible_row(db, symbol="STAK-USD")
+    db.commit()
+    uid = _uid(db, "stak")
+    from app.services.trading.momentum_neural.persistence import create_trading_automation_session
+
+    sess = create_trading_automation_session(
+        db, user_id=uid, symbol="STAK-USD", variant_id=vid, mode="live",
+        state=STATE_LIVE_PENDING_ENTRY,
+        risk_snapshot_json={
+            RISK_SNAPSHOT_KEY: {"allowed": True},
+            "momentum_risk_policy_summary": {"disable_live_if_governance_inhibit": True},
+            "momentum_live_execution": {
+                "entry_submitted": False,
+                "entry_order_id": None,
+                "entry_order_ids_all": ["o-openlost"],
+            },
+        },
+    )
+    db.commit()
+    ad = _mk_adapter()
+    ad.get_order.return_value = (
+        NormalizedOrder(order_id="o-openlost", client_order_id="cid-s", product_id="STAK-USD",
+                        side="buy", status="OPEN", order_type="limit",
+                        filled_size=0.0, average_filled_price=None),
+        _fresh(),
+    )
+
+    with patch("app.services.trading.momentum_neural.live_runner.is_kill_switch_active", return_value=False):
+        out = tick_live_session(db, sess.id, adapter_factory=lambda: ad)
+    db.commit(); db.refresh(sess)
+
+    assert out.get("blocked") is True and out.get("reason") == "unresolved_entry_orders", out
+    ad.place_limit_order_gtc.assert_not_called()      # NO second clip
+    ad.place_market_order.assert_not_called()
+
+
+def test_void_resolution_unblocks_guard() -> None:
+    """A history id the venue confirms cancelled-with-zero-fill resolves to void and
+    no longer blocks the pre-submit guard."""
+    from app.services.trading.momentum_neural.live_runner import (
+        _sweep_unresolved_entry_orders, _unresolved_entry_order_ids,
+    )
+
+    le = {"entry_order_ids_all": ["o-dead"], "entry_submitted": False, "entry_order_id": None}
+    assert _unresolved_entry_order_ids(le) == ["o-dead"]
+    ad = MagicMock()
+    ad.get_order.return_value = (
+        NormalizedOrder(order_id="o-dead", client_order_id="c", product_id="X-USD",
+                        side="buy", status="cancelled", order_type="limit",
+                        filled_size=0.0, average_filled_price=None),
+        _fresh(),
+    )
+    sess = SimpleNamespace(id=1, risk_snapshot_json={}, state=STATE_WATCHING_LIVE, symbol="X-USD")
+    db = MagicMock()
+    with patch("app.services.trading.momentum_neural.live_runner._commit_le"), \
+         patch("app.services.trading.momentum_neural.live_runner._emit"), \
+         patch("app.services.trading.momentum_neural.live_runner._safe_transition"):
+        repointed = _sweep_unresolved_entry_orders(ad, db, sess, le)
+    assert repointed is False
+    assert _unresolved_entry_order_ids(le) == []      # void -> guard unblocked
+    assert (le.get("entry_orders_resolved") or {}).get("o-dead") == "void"

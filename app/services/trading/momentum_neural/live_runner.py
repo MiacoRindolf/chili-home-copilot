@@ -1227,6 +1227,87 @@ def _order_open(no: NormalizedOrder) -> bool:
     return st not in _ORDER_TERMINAL_STATUSES
 
 
+# ── Entry-order HISTORY: no fill is ever untracked, no stacking ───────────────
+# Every placed entry order id is kept in le["entry_order_ids_all"] (the ack-timeout
+# may wipe the ACTIVE pointer, never the history) with a per-id resolution map in
+# le["entry_orders_resolved"] ({oid: "adopted"|"void"}). Two invariants follow:
+#   1. LATE-FILL SWEEP — every pre-entry tick re-checks unresolved ids; an order
+#      that filled AFTER the ack-timeout abandoned it (venue cancels are async — the
+#      cancel can lose the race by SECONDS, far past #567's immediate re-fetch) is
+#      re-pointed + adopted instead of becoming an unmanaged orphan.
+#   2. PRE-SUBMIT GUARD — while ANY id is unresolved the runner may NOT place a new
+#      entry order, making position-stacking structurally impossible.
+# [BATL 2026-06-10: 5 ack-timeout cancels all lost the race -> 5 untracked fills
+# stacked 4,954 sh / ~$8k with no lane stop; operator had to manage it by hand.]
+_ENTRY_ORDER_HISTORY_MAX = 20  # bound the json; resolution keeps the live set ~1
+
+
+def _unresolved_entry_order_ids(le: dict) -> list[str]:
+    """Placed entry order ids with no terminal resolution yet, EXCLUDING the active
+    pointer (the normal pending-entry handler owns that one)."""
+    hist = le.get("entry_order_ids_all") or []
+    resolved = le.get("entry_orders_resolved") or {}
+    active = str(le.get("entry_order_id") or "")
+    return [str(o) for o in hist if str(o) not in resolved and str(o) != active]
+
+
+def _record_entry_order_placed(le: dict, order_id) -> None:
+    if not order_id:
+        return
+    hist = [str(o) for o in (le.get("entry_order_ids_all") or [])]
+    if str(order_id) not in hist:
+        hist.append(str(order_id))
+    le["entry_order_ids_all"] = hist[-_ENTRY_ORDER_HISTORY_MAX:]
+
+
+def _mark_entry_order_resolved(le: dict, order_id, outcome: str) -> None:
+    res = dict(le.get("entry_orders_resolved") or {})
+    res[str(order_id)] = outcome
+    le["entry_orders_resolved"] = res
+
+
+def _sweep_unresolved_entry_orders(adapter, db, sess, le: dict) -> bool:
+    """Resolve abandoned entry orders against venue truth. Returns True when a LATE
+    FILL was found and the session was re-pointed at it (state -> PENDING_ENTRY so
+    the existing fill-handler adopts it with the normal stop/target on the next
+    pass). Cancelled-with-zero-fill ids are marked void (unblocks the submit guard);
+    still-open / indeterminate ids stay unresolved (the guard keeps blocking new
+    submits — fail-safe: rather not trade than buy a second clip)."""
+    for oid in _unresolved_entry_order_ids(le):
+        try:
+            no, _ = adapter.get_order(str(oid))
+        except Exception:
+            continue  # indeterminate -> stays unresolved (guard keeps holding)
+        if no is None:
+            continue
+        if _order_done_for_entry(no):
+            # LATE FILL — re-point the session at the real order and let the
+            # hardened pending-entry fill-handler adopt it (position + stop/target).
+            le["entry_order_id"] = str(oid)
+            le["entry_submitted"] = True
+            _mark_entry_order_resolved(le, oid, "adopted")
+            _commit_le(sess, le)
+            _emit(db, sess, "entry_late_fill_repointed", {
+                "order_id": str(oid),
+                "venue_status": no.status,
+                "filled_size": float(no.filled_size or 0.0),
+            })
+            # Walk the LEGAL FSM chain to pending-entry (watching -> candidate ->
+            # pending; the FSM has no watching -> pending shortcut).
+            if sess.state == STATE_WATCHING_LIVE:
+                _safe_transition(db, sess, STATE_LIVE_ENTRY_CANDIDATE)
+            if sess.state == STATE_LIVE_ENTRY_CANDIDATE:
+                _safe_transition(db, sess, STATE_LIVE_PENDING_ENTRY)
+            db.flush()
+            return True
+        if not _order_open(no):
+            # terminal with zero fill (cancelled/expired/rejected clean) — safe to
+            # forget; unblocks the pre-submit guard.
+            _mark_entry_order_resolved(le, oid, "void")
+            _commit_le(sess, le)
+    return False
+
+
 def summarize_live_execution(snap: Any) -> dict[str, Any]:
     if not isinstance(snap, dict):
         return {}
@@ -1667,6 +1748,18 @@ def tick_live_session(
 
     st = sess.state
 
+    # Late-fill sweep (pre-entry states only): an entry order the ack-timeout
+    # abandoned can fill SECONDS later (venue cancels are async) — re-point + adopt
+    # it before doing anything else, so it becomes a managed position instead of an
+    # unmanaged orphan, and so the pre-submit guard below sees venue truth.
+    if st in (STATE_WATCHING_LIVE, STATE_LIVE_ENTRY_CANDIDATE, STATE_LIVE_PENDING_ENTRY) and not le.get(
+        "entry_order_id"
+    ):
+        if _unresolved_entry_order_ids(le) and _sweep_unresolved_entry_orders(adapter, db, sess, le):
+            return {"ok": True, "session_id": sess.id, "state": sess.state, "pending": "late_fill_repointed"}
+        snap = dict(sess.risk_snapshot_json or {})
+        le = _live_exec(snap)
+
     if st == STATE_ARMED_PENDING_RUNNER:
         _safe_transition(db, sess, STATE_QUEUED_LIVE)
         _emit(db, sess, "live_runner_queued", {"symbol": sess.symbol})
@@ -1784,6 +1877,24 @@ def tick_live_session(
             _safe_transition(db, sess, STATE_WATCHING_LIVE)
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
+        # PRE-SUBMIT GUARD: while any previously-placed entry order is UNRESOLVED
+        # (abandoned by an ack-timeout but not yet confirmed cancelled-with-zero-fill
+        # by the venue), placing another order can stack a second real position on a
+        # late fill of the first. Hold the submit; the sweep above resolves the ids
+        # (adopt the fill / void the clean cancel) within a tick or two.
+        # [BATL 2026-06-10: 5 such stacked clips -> ~$8k unmanaged.]
+        if not le.get("entry_submitted"):
+            _stale_oids = _unresolved_entry_order_ids(le)
+            if _stale_oids:
+                _emit(db, sess, "live_entry_blocked_unresolved_orders", {
+                    "unresolved_order_ids": _stale_oids[:5],
+                    "count": len(_stale_oids),
+                })
+                db.flush()
+                return {
+                    "ok": True, "session_id": sess.id, "state": sess.state,
+                    "blocked": True, "reason": "unresolved_entry_orders",
+                }
         if le.get("entry_submitted") and le.get("entry_order_id"):
             no, _ = adapter.get_order(str(le["entry_order_id"]))
             if no and _order_done_for_entry(no):
@@ -1827,6 +1938,7 @@ def tick_live_session(
                 le["position"]["stop_price"] = stop_px
                 le["position"]["target_price"] = target_px
                 le["admission_viability_score"] = float(via.viability_score or 0)
+                _mark_entry_order_resolved(le, le.get("entry_order_id"), "adopted")
                 _commit_le(sess, le)
                 if le.get("entry_decision_packet_id"):
                     try:
@@ -2283,6 +2395,10 @@ def tick_live_session(
         le["entry_limit_price"] = entry_limit_str
         le["entry_client_order_id"] = res.get("client_order_id") or cid
         le["entry_order_id"] = res.get("order_id")
+        # History: the ack-timeout may wipe the ACTIVE pointer later, but this id is
+        # never forgotten — the late-fill sweep + pre-submit guard track it to a
+        # terminal resolution (adopted | void). No fill can become untracked again.
+        _record_entry_order_placed(le, res.get("order_id"))
         le["entry_place_result"] = {"ok": res.get("ok"), "error": res.get("error")}
         _commit_le(sess, le)
         _emit(db, sess, "live_entry_submitted", {
