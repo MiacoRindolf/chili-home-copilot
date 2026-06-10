@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from ....config import settings
 from ....models.trading import MomentumStrategyVariant, MomentumSymbolViability
 from ..scanner import get_crypto_breakout_cache, get_momentum_cache as _get_momentum_cache
-from .market_profile import asset_class_for_symbol, is_coinbase_spot_symbol, market_open_now
+from .market_profile import asset_class_for_symbol, is_coinbase_spot_symbol, is_tradeable_now, market_open_now
 from .operator_readiness import build_momentum_operator_readiness
 from .strategy_params import summarize_strategy_params
 from .viability_health import get_viability_pipeline_health
@@ -159,7 +159,7 @@ def _paper_action_payload(
     elif not top_variant:
         blocked_reason = "no_fresh_viability"
     elif not paper_ready:
-        blocked_reason = "market_closed" if asset_class_for_symbol(symbol) == "stock" and not market_open_now(symbol) else "paper_not_ready"
+        blocked_reason = "market_closed" if asset_class_for_symbol(symbol) == "stock" and not is_tradeable_now(symbol) else "paper_not_ready"
     elif not readiness.get("execution_family_implemented"):
         blocked_reason = "execution_family_not_implemented"
     elif not readiness.get("momentum_neural_enabled"):
@@ -203,7 +203,7 @@ def _live_action_payload(
     elif not top_variant:
         blocked_reason = "no_fresh_viability"
     elif not live_ready:
-        if asset_class_for_symbol(symbol) == "stock" and not market_open_now(symbol):
+        if asset_class_for_symbol(symbol) == "stock" and not is_tradeable_now(symbol):
             blocked_reason = "market_closed"
         elif not is_coinbase_spot_symbol(symbol):
             blocked_reason = "live_symbol_not_coinbase"
@@ -327,7 +327,9 @@ def list_momentum_opportunities(
             })
             continue
 
-        market_open = market_open_now(sym)
+        # "Actionable now" = tradeable now (regular OR extended hours) — so pre-market
+        # Ross runners surface as opportunities, not as "market_closed".
+        market_open = is_tradeable_now(sym)
         top_variant = _top_variant_payload(sym, viability_pair[0], viability_pair[1]) if viability_pair else None
         paper_ready = bool(top_variant and top_variant.get("paper_ready"))
         live_ready = bool(top_variant and top_variant.get("live_ready"))

@@ -795,10 +795,20 @@ class RobinhoodSpotAdapter(VenueAdapter):
         client_order_id: Optional[str] = None,
         market_hours_override: Optional[str] = None,
         extended_hours_override: Optional[bool] = None,
+        extended_hours: bool = False,
     ) -> dict[str, Any]:
         ticker = _to_ticker(product_id)
         qty = float(base_size)
         price = float(limit_price)
+
+        # Pre-/after-market entry (Ross's gap-and-go): route through RH's all-day
+        # session so the order isn't rejected as out-of-hours. Explicit overrides from
+        # the caller still win.
+        if extended_hours:
+            if market_hours_override is None:
+                market_hours_override = "all_day_hours"
+            if extended_hours_override is None:
+                extended_hours_override = True
 
         # f-portfolio-vs-pattern-breaker-separation — BUY-only gate. Portfolio
         # tier blocks every entry path when live + tripped; pass-through when
