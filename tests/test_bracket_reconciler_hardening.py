@@ -691,3 +691,85 @@ class TestMissingStopWatchdog:
         hit = summary.hits[0]
         assert hit.alert_sent is False
         assert hit.alert_skip_reason and hit.alert_skip_reason.startswith("dispatch_error:")
+
+
+# ── Momentum-day origin -> intraday stop model (BATL 2026-06-10 post-mortem) ──
+
+
+def test_backfill_uses_intraday_stop_model_for_momentum_origin(db, monkeypatch):
+    """A sync-adopted trade whose symbol had a LIVE momentum automation session in
+    the lookback is a momentum DAY trade: the backfill must resolve atr_intraday
+    (1.5x stop) instead of the swing-grade default, and label the trade. [BATL:
+    atr_swing gave a $0.54 stop on a $1.63 entry = no real protection.]"""
+    monkeypatch.setattr(
+        "app.services.trading.bracket_reconciliation_service.settings.brain_live_brackets_mode",
+        "shadow", raising=False,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.bracket_intent_writer.settings.brain_live_brackets_mode",
+        "shadow", raising=False,
+    )
+    from app.models.core import User
+    from tests.test_momentum_paper_runner import _seed_live_eligible_row
+
+    u = User(name="BracketMomOrigin")
+    db.add(u); db.commit(); db.refresh(u)
+    vid, _ = _seed_live_eligible_row(db, symbol="BATL")
+    t = _make_trade(db, ticker="BATL", user_id=u.id, qty=100.0, entry=1.63)
+    t.stop_loss = 1.45  # _make_trade's entry-4.0 default is negative at a $1.63 entry
+    db.commit()
+    # the day-trade-origin signal: a live momentum session for the symbol today
+    db.execute(text(
+        "INSERT INTO trading_automation_sessions "
+        "(user_id, venue, symbol, variant_id, mode, state, execution_family, risk_snapshot_json, started_at, created_at, updated_at) "
+        "VALUES (:u, 'robinhood', 'BATL', :vid, 'live', 'live_cancelled', 'robinhood_spot', '{}'::jsonb, now(), now(), now())"
+    ), {"u": u.id, "vid": vid})
+    db.commit()
+
+    backfilled = _stage_backfill_missing_intents(
+        db,
+        [{"trade_id": t.id, "bracket_intent_id": None,
+          "broker_source": "robinhood", "trade_status": "open"}],
+        mode="shadow",
+    )
+
+    assert backfilled == 1
+    row = db.execute(
+        text("SELECT stop_model FROM trading_bracket_intents WHERE trade_id = :tid"),
+        {"tid": t.id},
+    ).fetchone()
+    assert row is not None and row[0] == "atr_intraday"
+    db.refresh(t)
+    assert t.trade_type == "momentum_day"
+
+
+def test_backfill_keeps_default_model_without_momentum_origin(db, monkeypatch):
+    """No momentum session for the symbol -> the trade's own stop_model passes
+    through unchanged (swing positions stay swing-managed)."""
+    monkeypatch.setattr(
+        "app.services.trading.bracket_reconciliation_service.settings.brain_live_brackets_mode",
+        "shadow", raising=False,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.bracket_intent_writer.settings.brain_live_brackets_mode",
+        "shadow", raising=False,
+    )
+    t = _make_trade(db, ticker="SWNG", qty=10.0, entry=100.0)
+    t.stop_model = "atr_swing"
+    db.commit()
+
+    backfilled = _stage_backfill_missing_intents(
+        db,
+        [{"trade_id": t.id, "bracket_intent_id": None,
+          "broker_source": "robinhood", "trade_status": "open"}],
+        mode="shadow",
+    )
+
+    assert backfilled == 1
+    row = db.execute(
+        text("SELECT stop_model FROM trading_bracket_intents WHERE trade_id = :tid"),
+        {"tid": t.id},
+    ).fetchone()
+    assert row is not None and row[0] == "atr_swing"
+    db.refresh(t)
+    assert not t.trade_type  # unlabeled: not momentum-origin
