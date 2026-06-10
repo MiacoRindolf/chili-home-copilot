@@ -50,6 +50,30 @@ IMPLEMENTED_MOMENTUM_AUTOMATION_FAMILIES: frozenset[str] = frozenset({
     EXECUTION_FAMILY_ALPACA_SPOT,
 })
 
+# Asset-class grouping: a symbol may route to ANY venue of its asset class — an EQUITY can go
+# to robinhood_spot OR alpaca_spot (the same-name A/B), a crypto pair only to coinbase_spot.
+# The risk gate validates the requested venue against the symbol's ASSET CLASS (not the single
+# default-resolved venue), while still blocking the dangerous cross-class case (equity routed
+# to the crypto venue, or vice versa). (docs/DESIGN/ALPACA_LANE.md)
+_CRYPTO_EXECUTION_FAMILIES: frozenset[str] = frozenset({EXECUTION_FAMILY_COINBASE_SPOT})
+_EQUITY_EXECUTION_FAMILIES: frozenset[str] = frozenset({
+    EXECUTION_FAMILY_ROBINHOOD_SPOT,
+    EXECUTION_FAMILY_ROBINHOOD_AGENTIC_MCP,
+    EXECUTION_FAMILY_ALPACA_SPOT,
+})
+
+
+def asset_class_of_execution_family(execution_family: str) -> str:
+    """'crypto' for coinbase_spot, 'equity' for the RH/Alpaca/MCP equity venues, else 'other'
+    (the planned stub families). Used to validate a requested venue against the symbol's asset
+    class — an equity may legitimately route to ANY equity venue, not just the default."""
+    ef = normalize_execution_family(execution_family)
+    if ef in _CRYPTO_EXECUTION_FAMILIES:
+        return "crypto"
+    if ef in _EQUITY_EXECUTION_FAMILIES:
+        return "equity"
+    return "other"
+
 
 class ExecutionFamilyNotImplementedError(LookupError):
     """Raised when resolving a venue adapter for an execution_family with no implementation."""

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from ....config import settings
 from ....models.trading import MomentumAutomationOutcome, MomentumStrategyVariant, MomentumSymbolViability, TradingAutomationSession
 from ..execution_family_registry import (
+    asset_class_of_execution_family,
     is_documented_execution_family,
     is_momentum_automation_implemented,
     normalize_execution_family,
@@ -313,28 +314,30 @@ def evaluate_proposed_momentum_automation(
 
     # The authoritative venue is symbol-routed (E1 per-symbol routing,
     # ``resolve_execution_family_for_symbol``): crypto BASE-USD -> coinbase_spot,
-    # equities -> robinhood_spot. The strategy variant carries a TEMPLATE
-    # execution_family (all current variants are coinbase_spot) that may legitimately
-    # differ from the symbol's venue — e.g. a coinbase_spot template applied to an
-    # equity that must route to robinhood_spot. So validate the REQUEST against the
-    # symbol-resolved venue, not the static variant. This both (a) unblocks the equity
-    # path and (b) is STRICTER than the old variant check: it blocks the dangerous
-    # "equity requested via coinbase_spot" case the variant check would have allowed.
+    # equities -> robinhood_spot (the DEFAULT). Validate the REQUEST against the symbol's
+    # ASSET CLASS, not the single default-resolved venue: an EQUITY may legitimately route to
+    # ANY equity venue — robinhood_spot OR alpaca_spot (the same-name A/B), or the sanctioned
+    # MCP rail — while the dangerous CROSS-CLASS case (an equity requested via the crypto
+    # venue coinbase_spot, or a crypto pair via an equity venue) is still BLOCKED. This is the
+    # bug a pre-flight caught: the old exact `ef != symbol_ef` blocked alpaca_spot for equities
+    # because the default resolves to robinhood_spot. (docs/DESIGN/ALPACA_LANE.md)
     symbol_ef = normalize_execution_family(resolve_execution_family_for_symbol(sym))
     v_row = (
         db.query(MomentumStrategyVariant).filter(MomentumStrategyVariant.id == int(variant_id)).one_or_none()
     )
     vef = normalize_execution_family(v_row.execution_family) if v_row is not None else None
-    if ef != symbol_ef:
+    if asset_class_of_execution_family(ef) != asset_class_of_execution_family(symbol_ef):
         checks.append(
             _check(
                 "execution_family_variant_alignment",
                 False,
                 severity="block",
-                message="Requested execution_family does not match the symbol-resolved venue.",
+                message="Requested execution_family is for a different ASSET CLASS than the symbol's venue.",
                 detail={
                     "request": ef,
+                    "request_asset_class": asset_class_of_execution_family(ef),
                     "symbol_resolved": symbol_ef,
+                    "symbol_asset_class": asset_class_of_execution_family(symbol_ef),
                     "variant_execution_family": vef,
                     "variant_id": int(variant_id),
                 },
