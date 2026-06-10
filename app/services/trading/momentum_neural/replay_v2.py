@@ -169,7 +169,7 @@ class Tape:
         return row[0], row[1]
 
 
-def run_replay(date: str, *, persist: bool = True) -> dict:
+def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -> dict:
     """Run the high-fidelity replay for ``date`` (YYYY-MM-DD). Returns the structured
     result dict; persists it to REPLAY_RESULTS_DIR/<date>.json when ``persist``."""
     started = datetime.now(timezone.utc)
@@ -178,6 +178,7 @@ def run_replay(date: str, *, persist: bool = True) -> dict:
     result: dict = {
         "date": date,
         "engine": "v2",
+        "armed_source": armed_source,
         "ran_at_utc": started.isoformat(),
         "tape_symbols": len(syms),
         "halt_windows": sum(len(v) for v in tape.halts.values()),
@@ -248,6 +249,26 @@ def run_replay(date: str, *, persist: bool = True) -> dict:
     cand = sorted(qualify_at, key=lambda s: qualify_at[s])
     result["candidates"] = len(cand)
     adv: dict[str, float | None] = {s: avg_daily_vol_before(s) for s in cand}
+
+    live_spans: dict[str, list] | None = None
+    if armed_source == "live":
+        live_spans = defaultdict(list)
+        db2 = SessionLocal()
+        try:
+            rows2 = db2.execute(
+                text(
+                    "SELECT symbol, created_at, COALESCE(ended_at, updated_at) "
+                    "FROM trading_automation_sessions "
+                    "WHERE mode='live' AND symbol NOT LIKE '%-USD' "
+                    "AND created_at >= :lo AND created_at < :hi"
+                ),
+                {"lo": f"{date} 04:00:00", "hi": f"{date} 23:59:59"},
+            ).fetchall()
+        finally:
+            db2.rollback(); db2.close()
+        for sym2, a2, b2 in rows2:
+            live_spans[str(sym2).upper()].append((_aware(a2), _aware(b2)))
+        result["live_sessions"] = sum(len(v) for v in live_spans.values())
 
     armed: dict[str, dict] = {}
     trigger_cache: dict[tuple, tuple] = {}
@@ -329,17 +350,31 @@ def run_replay(date: str, *, persist: bool = True) -> dict:
         manage_open(now)
         if state["halted"]:
             continue
-        for s in list(armed):
-            if (now - armed[s]["since"]).total_seconds() / 60.0 > REAP_MIN:
-                if armed_spans[s] and armed_spans[s][-1][1] is None:
-                    armed_spans[s][-1][1] = str(now)[11:16]
-                del armed[s]
-        for s in asof_rank(now):
-            if len(armed) >= MAX_SLOTS:
-                break
-            if s not in armed and s not in open_pos:
-                armed[s] = {"since": now}
-                armed_spans[s].append([str(now)[11:16], None])
+        if live_spans is not None:
+            now_a = _aware(now)
+            for s in list(armed):
+                if not any(a <= now_a <= b for a, b in live_spans.get(s, [])):
+                    if armed_spans[s] and armed_spans[s][-1][1] is None:
+                        armed_spans[s][-1][1] = str(now)[11:16]
+                    del armed[s]
+            for s, sp2 in live_spans.items():
+                if s in armed or s in open_pos:
+                    continue
+                if any(a <= now_a <= b for a, b in sp2):
+                    armed[s] = {"since": now}
+                    armed_spans[s].append([str(now)[11:16], None])
+        else:
+            for s in list(armed):
+                if (now - armed[s]["since"]).total_seconds() / 60.0 > REAP_MIN:
+                    if armed_spans[s] and armed_spans[s][-1][1] is None:
+                        armed_spans[s][-1][1] = str(now)[11:16]
+                    del armed[s]
+            for s in asof_rank(now):
+                if len(armed) >= MAX_SLOTS:
+                    break
+                if s not in armed and s not in open_pos:
+                    armed[s] = {"since": now}
+                    armed_spans[s].append([str(now)[11:16], None])
         for s in list(armed):
             if s in open_pos or tape.in_halt_or_cooldown(s, now):
                 continue
@@ -377,7 +412,7 @@ def run_replay(date: str, *, persist: bool = True) -> dict:
             if move_bps <= 0 or sbps > min(GATE_MOVE_FRAC * move_bps, SPREAD_ABS_CAP_BPS):
                 continue
             armed[s]["last_try"] = now
-            limit = ask
+            limit = ask  # marketable limit at the REAL ask
             later = df[df.index > now]
             for k in range(min(FILL_WINDOW_BARS, len(later))):
                 b = later.iloc[k]
@@ -458,7 +493,8 @@ def run_replay(date: str, *, persist: bool = True) -> dict:
 def _persist(result: dict) -> None:
     try:
         os.makedirs(REPLAY_RESULTS_DIR, exist_ok=True)
-        path = os.path.join(REPLAY_RESULTS_DIR, f"{result['date']}.json")
+        suffix = "_live" if result.get("armed_source") == "live" else ""
+        path = os.path.join(REPLAY_RESULTS_DIR, f"{result['date']}{suffix}.json")
         with open(path, "w", encoding="utf-8") as f:
             json.dump(result, f, indent=1)
     except Exception:
@@ -476,7 +512,7 @@ def list_results() -> list[dict]:
                 with open(os.path.join(REPLAY_RESULTS_DIR, name), encoding="utf-8") as f:
                     r = json.load(f)
                 out.append({k: r.get(k) for k in (
-                    "date", "ran_at_utc", "total_usd", "wins", "losses",
+                    "date", "ran_at_utc", "total_usd", "wins", "losses", "armed_source",
                     "tape_symbols", "candidates", "halt_windows", "day_halted", "error")}
                     | {"n_trades": len(r.get("trades") or [])})
             except Exception:
@@ -486,9 +522,10 @@ def list_results() -> list[dict]:
     return sorted(out, key=lambda r: r.get("date") or "", reverse=True)
 
 
-def load_result(date: str) -> dict | None:
+def load_result(date: str, armed_source: str = "asof") -> dict | None:
+    suffix = "_live" if armed_source == "live" else ""
     try:
-        with open(os.path.join(REPLAY_RESULTS_DIR, f"{date}.json"), encoding="utf-8") as f:
+        with open(os.path.join(REPLAY_RESULTS_DIR, f"{date}{suffix}.json"), encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return None
