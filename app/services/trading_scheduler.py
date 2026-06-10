@@ -2445,6 +2445,21 @@ def _run_triple_barrier_label_job():
     run_scheduler_job_guarded("triple_barrier_label", _work)
 
 
+def _run_broker_connectivity_watch_job():
+    """Broker-connectivity alarm: loud alert when a configured broker stays
+    disconnected past the threshold (the RH token died silently for ~7 weeks —
+    post-mortem 2026-06-10). Cheap status reads; no broker mutations."""
+
+    def _work() -> None:
+        from .trading.broker_connectivity_watch import run_broker_connectivity_watch
+
+        summary = run_broker_connectivity_watch()
+        if summary.get("down") or summary.get("alerted") or summary.get("resolved"):
+            logger.info("[scheduler] broker_connectivity_watch: %s", summary)
+
+    run_scheduler_job_guarded("broker_connectivity_watch", _work)
+
+
 def _run_broker_sync_job():
     """Sync Robinhood + Coinbase orders and positions for the session owner.
 
@@ -5344,6 +5359,17 @@ def start_scheduler():
                     trigger=IntervalTrigger(minutes=2),
                     id="broker_sync",
                     name="Robinhood order+position sync (24/7 every 2min — crypto fills 24/7)",
+                    replace_existing=True,
+                    max_instances=1,
+                )
+
+                # Broker-connectivity alarm: a configured-but-disconnected broker must
+                # alert loudly (not just log spam) — RH died silently for ~7 weeks.
+                _scheduler.add_job(
+                    _run_broker_connectivity_watch_job,
+                    trigger=IntervalTrigger(minutes=5),
+                    id="broker_connectivity_watch",
+                    name="Broker connectivity alarm (every 5min; alert past sustained-disconnect threshold)",
                     replace_existing=True,
                     max_instances=1,
                 )
