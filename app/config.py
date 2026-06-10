@@ -2188,6 +2188,13 @@ class Settings(BaseSettings):
         default=120.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_RESUME_COOLDOWN_SECONDS"),
     )
+    # A CONFIGURED broker disconnected this long raises a loud ops alarm (websocket
+    # broadcast + critical log). The RH refresh token died silently for ~7 weeks
+    # (2026-04-19 -> 06-10) with only info-level log spam — never again.
+    chili_broker_disconnect_alarm_minutes: float = Field(
+        default=15.0,
+        validation_alias=AliasChoices("CHILI_BROKER_DISCONNECT_ALARM_MINUTES"),
+    )
 
     # ── Phase 2C: Hebbian plasticity on neural mesh edges ───────────────────
     # Outcome-driven edge-weight updates. Defaults conservative: feature flag OFF,

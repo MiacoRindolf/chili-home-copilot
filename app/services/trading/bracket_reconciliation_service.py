@@ -603,6 +603,29 @@ def _stage_load_local(
 # ── Stage 1.5: backfill_missing_intents ────────────────────────────────
 # f-coinbase-bracket-coverage-fix (2026-05-10) — Bug B safety net.
 
+# A sync-adopted trade counts as momentum-DAY-originated when its symbol had a LIVE
+# momentum automation session within this window of the trade's entry. One documented
+# constant: a day-trade's management horizon is the trading day.
+_MOMENTUM_ORIGIN_LOOKBACK_HOURS = 24.0
+
+
+def _symbol_had_recent_momentum_live_session(db: Session, ticker: str) -> bool:
+    """True when ``ticker`` had a momentum LIVE automation session in the lookback —
+    the day-trade-origin signal for a sync-adopted position (its session lost track
+    of the fill, but the session row proves the intent was a momentum day trade)."""
+    try:
+        row = db.execute(
+            text(
+                "SELECT 1 FROM trading_automation_sessions "
+                "WHERE symbol = :sym AND mode = 'live' "
+                "AND created_at > now() - (:hrs || ' hours')::interval LIMIT 1"
+            ),
+            {"sym": str(ticker or "").strip().upper(), "hrs": _MOMENTUM_ORIGIN_LOOKBACK_HOURS},
+        ).fetchone()
+        return row is not None
+    except Exception:
+        return False
+
 
 def _stage_backfill_missing_intents(
     db: Session,
@@ -702,13 +725,31 @@ def _stage_backfill_missing_intents(
             except Exception:
                 atr_val = None
 
+            # Day-trade-origin detection (data-first): a sync-adopted position whose
+            # symbol had a LIVE momentum session around entry is a momentum DAY trade,
+            # not a swing — the default atr_swing policy (2.0x ATR x lifecycle/regime
+            # factors) produced a catastrophic stop on exactly that case (BATL
+            # 2026-06-10: stop $0.54 on a $1.63 entry = -67%). Use the intraday
+            # policy (1.5x stop, 1.5 trail, 2.5R target) and LABEL the trade so the
+            # provenance is durable + visible downstream.
+            stop_model_resolved = getattr(trade, "stop_model", None)
+            if _symbol_had_recent_momentum_live_session(db, trade.ticker):
+                stop_model_resolved = "atr_intraday"
+                if not getattr(trade, "trade_type", None):
+                    trade.trade_type = "momentum_day"
+                logger.info(
+                    f"{BRACKET_RECONCILIATION} backfill_intent trade=%s ticker=%s "
+                    "momentum-day origin -> stop_model=atr_intraday",
+                    trade.id, trade.ticker,
+                )
+
             bracket_input = BracketIntentInput(
                 ticker=trade.ticker,
                 direction=(trade.direction or "long").lower(),
                 entry_price=float(trade.entry_price or 0.0),
                 quantity=float(trade.quantity or 0.0),
                 atr=float(atr_val) if atr_val else None,
-                stop_model=getattr(trade, "stop_model", None),
+                stop_model=stop_model_resolved,
                 pattern_id=getattr(trade, "scan_pattern_id", None),
                 lifecycle_stage=None,
                 regime="cautious",

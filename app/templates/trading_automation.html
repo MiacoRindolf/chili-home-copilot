@@ -260,7 +260,7 @@
             '<td>' + esc((row.variant && row.variant.label) || row.variant_id) + '</td>' +
             '<td>' + esc(row.mode) + '</td>' +
             '<td><span class="ta-badge draft" title="Derived label">' + esc(canon) + '</span></td>' +
-            '<td><span class="ta-badge ' + taStateBadgeClass(row.state) + '">' + esc(row.state) + '</span></td>' +
+            '<td><span class="ta-badge ' + taStateBadgeClass(row.state) + '">' + esc(row.state) + '</span>' + (row.is_paused ? ' <span class="ta-badge" style="background:rgba(248,81,73,.18);color:#f85149;border:1px solid rgba(248,81,73,.4);" title="Operator-paused: not ticking; symbol blocked from re-arm">&#9208; PAUSED</span>' : '') + '</td>' +
             '<td><span class="ta-badge ' + taRiskBadgeClass(rsev) + '" title="' + esc((rs.reasons || []).join('; ')) + '">' +
             esc(String(rsev).toUpperCase()) + esc(rg) + esc(ptag) + '</span></td>' +
             '<td>' + esc(row.updated_at || '') + '</td>';
