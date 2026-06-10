@@ -53,7 +53,7 @@ svg.rl-chart { width:100%; height:230px; background:rgba(0,0,0,.18); border:1px 
   <div class="rl-head">
     <div>
       <h1>🔁 Replay Lab <span style="font-size:11px;color:var(--text-secondary);font-weight:400;">high-fidelity (v2)</span></h1>
-      <p class="rl-sub">Totoong NBBO spreads · limit-touch fills · halt masking · walang lookahead — ang permanenteng benchmark engine</p>
+      <p class="rl-sub">Real NBBO spreads · limit-touch fills · halt masking · no lookahead — the permanent benchmark engine</p>
     </div>
     <a href="/trading" style="font-size:12px;color:var(--text-secondary);">← Trading</a>
   </div>
@@ -65,8 +65,8 @@ svg.rl-chart { width:100%; height:230px; background:rgba(0,0,0,.18); border:1px 
       <span class="rl-status" id="rl-status">idle</span>
     </div>
     <div class="rl-note">
-      Tumatakbo nang ~3–8 min (per-symbol bar fetches); isang replay lang sabay-sabay. Kailangan ng <b>NBBO tape</b> para sa petsa
-      (minute-dense simula 2026-06-10; partial 06-08/09) — kung wala, <code>no_tape_for_date</code>.
+      Runs for ~3–8 min (per-symbol bar fetches); one replay at a time. Requires the <b>NBBO tape</b> for the date
+      (minute-dense since 2026-06-10; partial 06-08/09) — without it you get <code>no_tape_for_date</code>.
     </div>
   </div>
 
@@ -74,13 +74,13 @@ svg.rl-chart { width:100%; height:230px; background:rgba(0,0,0,.18); border:1px 
     <h3 style="margin:0 0 10px;font-size:15px;" id="rl-result-title"></h3>
     <div class="rl-kpis" id="rl-kpis"></div>
 
-    <h4 style="margin:18px 0 2px;font-size:13px;">🕐 Activity timeline <span style="font-size:10.5px;color:var(--text-secondary);font-weight:400;">— click ang row para sa annotated chart</span></h4>
+    <h4 style="margin:18px 0 2px;font-size:13px;">🕐 Activity timeline <span style="font-size:10.5px;color:var(--text-secondary);font-weight:400;">— click a row for its annotated chart</span></h4>
     <div class="rl-legend">
       <span><span class="rl-sw" style="background:rgba(63,131,248,.5);"></span> armed/watching</span>
       <span><span class="rl-sw" style="background:repeating-linear-gradient(45deg, rgba(248,81,73,.4) 0 4px, transparent 4px 8px);"></span> HALTED</span>
       <span style="color:#3fb950;">▲ entry</span>
       <span style="color:#f85149;">▼ exit</span>
-      <span style="color:#e8b339;">★ may trade</span>
+      <span style="color:#e8b339;">★ traded</span>
     </div>
     <div class="tl-grid" id="rl-timeline"></div>
 
@@ -92,9 +92,9 @@ svg.rl-chart { width:100%; height:230px; background:rgba(0,0,0,.18); border:1px 
   </div>
 
   <div class="rl-card">
-    <h3 style="margin:0 0 8px;font-size:14px;">📜 Nakaraang replays <span style="font-size:11px;color:var(--text-secondary);font-weight:400;">(click para buksan)</span></h3>
+    <h3 style="margin:0 0 8px;font-size:14px;">📜 Past replays <span style="font-size:11px;color:var(--text-secondary);font-weight:400;">(click to open)</span></h3>
     <table class="rl-t">
-      <thead><tr><th>Petsa</th><th>P/L</th><th>Trades</th><th>W/L</th><th>Tape syms</th><th>Candidates</th><th>Halt windows</th><th>Tumakbo</th></tr></thead>
+      <thead><tr><th>Date</th><th>P/L</th><th>Trades</th><th>W/L</th><th>Tape syms</th><th>Candidates</th><th>Halt windows</th><th>Ran at</th></tr></thead>
       <tbody id="rl-hist"></tbody>
     </table>
   </div>
@@ -111,12 +111,12 @@ function rlSetStatus(text, cls) { const el = document.getElementById('rl-status'
 
 async function rlRun() {
   const date = document.getElementById('rl-date').value;
-  if (!date) { rlSetStatus('pumili muna ng petsa','error'); return; }
+  if (!date) { rlSetStatus('pick a date first','error'); return; }
   document.getElementById('rl-run').disabled = true;
-  rlSetStatus('sinisimulan…','running');
+  rlSetStatus('starting…','running');
   try {
     const j = await (await fetch('/api/trading/momentum/replay/run', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({date})})).json();
-    if (!j.ok) { rlSetStatus(j.error==='replay_already_running' ? 'may tumatakbo pa — hintayin' : (j.error||'error'),'error'); document.getElementById('rl-run').disabled = false; return; }
+    if (!j.ok) { rlSetStatus(j.error==='replay_already_running' ? 'a replay is already running — wait for it' : (j.error||'error'),'error'); document.getElementById('rl-run').disabled = false; return; }
     rlPoll = setInterval(rlCheck, 5000); rlCheck();
   } catch (e) { rlSetStatus('request failed: '+e,'error'); document.getElementById('rl-run').disabled = false; }
 }
@@ -125,10 +125,10 @@ async function rlCheck() {
   try {
     const j = await (await fetch('/api/trading/momentum/replay/status')).json();
     const job = j.job || {};
-    if (job.state === 'running') { rlSetStatus('tumatakbo… ('+(job.date||'')+') ~3-8 min','running'); return; }
+    if (job.state === 'running') { rlSetStatus('running… ('+(job.date||'')+') ~3-8 min','running'); return; }
     if (rlPoll) { clearInterval(rlPoll); rlPoll = null; }
     document.getElementById('rl-run').disabled = false;
-    if (job.state === 'done') { rlSetStatus('tapos: '+job.date+' → $'+Number(job.total_usd||0).toLocaleString()+' ('+(job.n_trades||0)+' trades)','done'); rlLoadResult(job.date); rlLoadHistory(); }
+    if (job.state === 'done') { rlSetStatus('done: '+job.date+' → $'+Number(job.total_usd||0).toLocaleString()+' ('+(job.n_trades||0)+' trades)','done'); rlLoadResult(job.date); rlLoadHistory(); }
     else if (job.state === 'error') { rlSetStatus('error: '+(job.error||'?'),'error'); rlLoadHistory(); }
     else rlSetStatus(job.state || 'idle');
   } catch (e) { /* transient */ }
@@ -158,7 +158,7 @@ function rlTradesTable(r) {
     '<tr><td>'+rlEsc(t.t)+'</td><td>'+rlEsc(t.exit_t||'—')+'</td><td><b>'+rlEsc(t.sym)+'</b></td><td>'+rlEsc(t.entry)+'</td><td>'+rlEsc(t.exit)+'</td>'+
     '<td>'+Number(t.qty||0).toLocaleString()+'</td><td>'+rlEsc(t.spread_bps)+'bps</td><td>'+rlEsc(t.stop??'—')+'</td><td>'+rlEsc(t.target??'—')+'</td>'+
     '<td>'+rlEsc(t.why)+'</td><td class="'+(Number(t.usd)>=0?'rl-pos':'rl-neg')+'">$'+Number(t.usd||0).toLocaleString()+'</td></tr>'
-  ).join('') || '<tr><td colspan="11" style="color:var(--text-secondary);">Walang trade na pumasa sa real-fidelity gates.</td></tr>';
+  ).join('') || '<tr><td colspan="11" style="color:var(--text-secondary);">No trades passed the real-fidelity gates this day.</td></tr>';
 }
 
 function rlTimeline(r) {
@@ -194,7 +194,7 @@ function rlToggleChart(i, sym, forceOpen) {
 function rlChartSVG(sym) {
   const r = rlCur || {};
   const S = (r.series||{})[sym];
-  if (!S || !S.length) return '<div class="rl-chart-meta">walang bar data para sa '+rlEsc(sym)+'</div>';
+  if (!S || !S.length) return '<div class="rl-chart-meta">no bar data for '+rlEsc(sym)+'</div>';
   const W = 1040, H = 230, padL = 46, padR = 8, padT = 10, padB = 18;
   const lo = Math.min(...S.map(b => b[3])), hi = Math.max(...S.map(b => b[2]));
   const span = (hi-lo) || 1, y = p => padT + (hi - p) / span * (H-padT-padB);
@@ -234,7 +234,7 @@ function rlChartSVG(sym) {
     }
   });
   const meta = ((rlCur.trades)||[]).filter(t => t.sym === sym).map(t => 'P/L $'+Number(t.usd).toLocaleString()+' · spread '+t.spread_bps+'bps · qty '+Number(t.qty).toLocaleString()).join(' | ');
-  return '<div class="rl-chart-meta">'+rlEsc(sym)+' — 5m bars (UTC)'+(meta ? ' · '+meta : ' · watched, walang fill')+'</div>' +
+  return '<div class="rl-chart-meta">'+rlEsc(sym)+' — 5m bars (UTC)'+(meta ? ' · '+meta : ' · watched, no fill')+'</div>' +
          '<svg class="rl-chart" viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none">'+g+'</svg>';
 }
 
@@ -247,7 +247,7 @@ async function rlLoadHistory() {
       '<td>'+(r.n_trades||0)+'</td><td>'+(r.wins||0)+'/'+(r.losses||0)+'</td>'+
       '<td>'+(r.tape_symbols||0)+'</td><td>'+(r.candidates||0)+'</td><td>'+(r.halt_windows||0)+'</td>'+
       '<td style="color:var(--text-secondary);">'+rlEsc((r.ran_at_utc||'').slice(0,16).replace('T',' '))+'</td></tr>'
-    ).join('') || '<tr><td colspan="8" style="color:var(--text-secondary);">Wala pang replay.</td></tr>';
+    ).join('') || '<tr><td colspan="8" style="color:var(--text-secondary);">No replays yet — run your first one above.</td></tr>';
   } catch (e) { /* ignore */ }
 }
 
