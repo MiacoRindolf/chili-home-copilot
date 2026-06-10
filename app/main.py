@@ -1026,6 +1026,22 @@ async def _sqlalchemy_operational_error_handler(request: Request, exc: Operation
 from .config import settings as _cfg
 app.add_middleware(SessionMiddleware, secret_key=_cfg.session_secret)
 
+
+@app.middleware("http")
+async def _no_cache_html(request, call_next):
+    """Server-rendered HTML must always revalidate. Pages carried NO Cache-Control
+    header, so browsers heuristically cached them — operators saw STALE UIs for
+    hours after deploys (recurring confusion on 2026-06-10: invisible updates,
+    old strings after fixes). Static assets (/static, /uploads) are untouched."""
+    response = await call_next(request)
+    try:
+        ct = response.headers.get("content-type", "")
+        if ct.startswith("text/html") and "cache-control" not in response.headers:
+            response.headers["Cache-Control"] = "no-cache"
+    except Exception:
+        pass
+    return response
+
 # CORS for web and mobile clients (development-friendly defaults).
 app.add_middleware(
     CORSMiddleware,
