@@ -1219,28 +1219,38 @@ def persist_cpcv_shadow_eval(db: Any, scan_pattern: Any, eval_payload: Mapping[s
         would_pass = bool(eval_payload.get("promotion_gate_passed"))
         scanner = infer_scanner_bucket(scan_pattern)
         pname = (getattr(scan_pattern, "name", None) or "")[:500]
-        db.execute(
-            text(
-                """
-                INSERT INTO cpcv_shadow_eval_log (
-                    scan_pattern_id, scanner, would_pass_cpcv, passed_prior_gates,
-                    deflated_sharpe, pbo, cpcv_n_paths, pattern_name, skipped
-                ) VALUES (
-                    :sid, :scanner, :wp, TRUE, :dsr, :pbo, :paths, :pname, :skipped
-                )
-                """
-            ),
-            {
-                "sid": int(sid),
-                "scanner": scanner,
-                "wp": would_pass,
-                "dsr": eval_payload.get("deflated_sharpe"),
-                "pbo": eval_payload.get("pbo"),
-                "paths": eval_payload.get("cpcv_n_paths"),
-                "pname": pname or None,
-                "skipped": skipped,
-            },
+        stmt = text(
+            """
+            INSERT INTO cpcv_shadow_eval_log (
+                scan_pattern_id, scanner, would_pass_cpcv, passed_prior_gates,
+                deflated_sharpe, pbo, cpcv_n_paths, pattern_name, skipped
+            ) VALUES (
+                :sid, :scanner, :wp, TRUE, :dsr, :pbo, :paths, :pname, :skipped
+            )
+            """
         )
+        params = {
+            "sid": int(sid),
+            "scanner": scanner,
+            "wp": would_pass,
+            "dsr": eval_payload.get("deflated_sharpe"),
+            "pbo": eval_payload.get("pbo"),
+            "paths": eval_payload.get("cpcv_n_paths"),
+            "pname": pname or None,
+            "skipped": skipped,
+        }
+        # FIX 46 family (2026-06-11 shadow-vetting finalizer): run the
+        # telemetry INSERT under a SAVEPOINT so a failed statement (missing
+        # migration, timeout) cannot doom the caller's transaction — the
+        # except below swallows the error, and pre-fix the next statement on
+        # the same Session raised PendingRollbackError. getattr guard because
+        # tests pass db-like stubs.
+        begin_nested = getattr(db, "begin_nested", None)
+        if callable(begin_nested):
+            with begin_nested():
+                db.execute(stmt, params)
+        else:
+            db.execute(stmt, params)
     except Exception as exc:
         logger.debug("[cpcv_shadow] persist skipped: %s", exc)
 

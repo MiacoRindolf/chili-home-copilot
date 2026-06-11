@@ -259,37 +259,47 @@ def _load_directional_evidence(
         )
 
     if bool(getattr(settings_, "chili_shadow_vetting_include_paper_dynamic_outcomes", True)):
+        paper_stmt = text(
+            f"""
+            SELECT
+                pt.scan_pattern_id,
+                pt.pnl,
+                ({paper_trade_return_fraction_sql("pt")}) * 100.0 AS realized_return_pct,
+                pt.entry_date,
+                pt.exit_date,
+                pt.exit_reason,
+                EXTRACT(EPOCH FROM (pt.exit_date - pt.entry_date)) / 3600.0 AS hold_window_hours
+            FROM trading_paper_trades pt
+            WHERE pt.status = 'closed'
+              AND pt.scan_pattern_id IS NOT NULL
+              AND pt.scan_pattern_id != -1
+              AND pt.entry_date IS NOT NULL
+              AND pt.exit_date IS NOT NULL
+              AND pt.pnl IS NOT NULL
+              AND pt.entry_price > 0
+              AND pt.quantity > 0
+              AND {paper_dynamic_pattern_ev_exit_filter_sql("pt")}
+              AND (
+                pt.paper_shadow_of_alert_id IS NOT NULL
+                OR COALESCE(pt.signal_json, '{{}}'::jsonb) @> '{{"auto_trader_v1": true}}'::jsonb
+                OR COALESCE(pt.signal_json, '{{}}'::jsonb) @> '{{"paper_shadow": true}}'::jsonb
+              )
+            ORDER BY pt.scan_pattern_id, pt.entry_date DESC
+            """
+        )
         try:
-            paper_rows = db.execute(
-                text(
-                    f"""
-                    SELECT
-                        pt.scan_pattern_id,
-                        pt.pnl,
-                        ({paper_trade_return_fraction_sql("pt")}) * 100.0 AS realized_return_pct,
-                        pt.entry_date,
-                        pt.exit_date,
-                        pt.exit_reason,
-                        EXTRACT(EPOCH FROM (pt.exit_date - pt.entry_date)) / 3600.0 AS hold_window_hours
-                    FROM trading_paper_trades pt
-                    WHERE pt.status = 'closed'
-                      AND pt.scan_pattern_id IS NOT NULL
-                      AND pt.scan_pattern_id != -1
-                      AND pt.entry_date IS NOT NULL
-                      AND pt.exit_date IS NOT NULL
-                      AND pt.pnl IS NOT NULL
-                      AND pt.entry_price > 0
-                      AND pt.quantity > 0
-                      AND {paper_dynamic_pattern_ev_exit_filter_sql("pt")}
-                      AND (
-                        pt.paper_shadow_of_alert_id IS NOT NULL
-                        OR COALESCE(pt.signal_json, '{{}}'::jsonb) @> '{{"auto_trader_v1": true}}'::jsonb
-                        OR COALESCE(pt.signal_json, '{{}}'::jsonb) @> '{{"paper_shadow": true}}'::jsonb
-                      )
-                    ORDER BY pt.scan_pattern_id, pt.entry_date DESC
-                    """
-                )
-            ).mappings().all()
+            # FIX 46 family (2026-06-11 finalizer PendingRollbackError): run the
+            # best-effort evidence query under a SAVEPOINT so a failed statement
+            # (timeout/disconnect) cannot doom the caller's transaction. Pre-fix
+            # the swallowed error left the Session poisoned and every later
+            # query in the same cycle raised PendingRollbackError. getattr guard
+            # because tests pass db-like stubs without begin_nested.
+            begin_nested = getattr(db, "begin_nested", None)
+            if callable(begin_nested):
+                with begin_nested():
+                    paper_rows = db.execute(paper_stmt).mappings().all()
+            else:
+                paper_rows = db.execute(paper_stmt).mappings().all()
         except Exception:
             paper_rows = []
             logger.debug("%s paper dynamic evidence query failed", LOG_PREFIX, exc_info=True)
@@ -1108,6 +1118,11 @@ def _evaluate_shadow_gate_refresh(
     try:
         persist_cpcv_shadow_eval(db, pattern, payload)
     except Exception:
+        # FIX 46 pattern: heal the session before it is reused — a swallowed
+        # failed statement here poisoned the rest of the finalizer cycle
+        # (2026-06-11 PendingRollbackError). Nothing of this candidate has
+        # been applied yet, so the rollback only discards the doomed txn.
+        db.rollback()
         logger.debug(
             "%s cpcv_shadow_log failed during stale gate refresh",
             LOG_PREFIX,
@@ -1196,11 +1211,14 @@ def refresh_blocked_shadow_promotion_gates(
 
     for row in candidates:
         pid = int(row["scan_pattern_id"])
-        pattern = db.get(ScanPattern, pid)
-        if pattern is None:
-            skipped.append({"scan_pattern_id": pid, "reason": "pattern_not_found"})
-            continue
         try:
+            # db.get inside the try: on an expired identity-map entry it emits
+            # SQL, so a poisoned session must hit the rollback handler below
+            # rather than crash the whole refresh (FIX 46).
+            pattern = db.get(ScanPattern, pid)
+            if pattern is None:
+                skipped.append({"scan_pattern_id": pid, "reason": "pattern_not_found"})
+                continue
             gate_rows = _gate_rows_from_pattern_trades(db, pattern)
             if len(gate_rows) < min_trades:
                 skipped.append({
@@ -1388,13 +1406,35 @@ def run_shadow_vetting_cycle(
         return {"ok": False, "error": f"score_refresh_failed:{type(exc).__name__}"}
 
     now = now or datetime.utcnow()
-    initial_candidates = select_shadow_vetting_candidates(db, settings_=settings_, now=now)
-    gate_refresh_result = refresh_blocked_shadow_promotion_gates(
-        db,
-        candidate_rows=initial_candidates,
-        settings_=settings_,
-        now=now,
-    )
+    try:
+        initial_candidates = select_shadow_vetting_candidates(
+            db, settings_=settings_, now=now,
+        )
+    except Exception as exc:
+        # FIX 46 pattern (idle-in-transaction family): roll back before the
+        # session is reused/closed so a failed statement cannot poison the
+        # rest of the cycle with PendingRollbackError.
+        db.rollback()
+        logger.warning("%s candidate select failed: %s", LOG_PREFIX, exc, exc_info=True)
+        return {"ok": False, "error": f"candidate_select_failed:{type(exc).__name__}"}
+    try:
+        gate_refresh_result = refresh_blocked_shadow_promotion_gates(
+            db,
+            candidate_rows=initial_candidates,
+            settings_=settings_,
+            now=now,
+        )
+    except Exception as exc:
+        # Gate refresh is best-effort enrichment — vet with stale gates rather
+        # than abort the cycle, but FIX 46 rollback first so the failure cannot
+        # poison the re-select below.
+        db.rollback()
+        logger.warning("%s blocked-gate refresh failed: %s", LOG_PREFIX, exc, exc_info=True)
+        gate_refresh_result = {
+            "ok": False,
+            "error": f"gate_refresh_failed:{type(exc).__name__}",
+            "refreshed_count": 0,
+        }
     score_result_after_gate_refresh = None
     if int(gate_refresh_result.get("refreshed_count") or 0) > 0:
         try:
@@ -1416,7 +1456,20 @@ def run_shadow_vetting_cycle(
                 "error": f"post_gate_refresh_score_failed:{type(exc).__name__}",
                 "promotion_gate_refresh": gate_refresh_result,
             }
-    candidates = select_shadow_vetting_candidates(db, settings_=settings_, now=now)
+    try:
+        candidates = select_shadow_vetting_candidates(db, settings_=settings_, now=now)
+    except Exception as exc:
+        # FIX 46 pattern: this is where the 2026-06-11 07:10 UTC finalizer
+        # failure surfaced — PendingRollbackError raised here because an
+        # earlier statement failed and was swallowed without rollback.
+        # Roll back and fail clean instead of crashing the scheduler job.
+        db.rollback()
+        logger.warning("%s candidate select failed: %s", LOG_PREFIX, exc, exc_info=True)
+        return {
+            "ok": False,
+            "error": f"candidate_select_failed:{type(exc).__name__}",
+            "promotion_gate_refresh": gate_refresh_result,
+        }
     alpha_gate_snapshot: dict[str, Any] | None = None
     alpha_gate_allows_full_risk = True
     alpha_gate_allows_pilot_risk = True
@@ -1469,151 +1522,111 @@ def run_shadow_vetting_cycle(
     collecting = 0
     held = 0
 
-    for row in candidates:
-        if not alpha_gate_allows_full_risk:
-            row["eligible"] = False
-            row["alpha_portfolio_blocked"] = True
-        if not alpha_gate_allows_pilot_risk:
-            row["pilot_eligible"] = False
-            row["alpha_portfolio_pilot_blocked"] = True
-        pid = int(row["scan_pattern_id"])
-        pattern = db.get(ScanPattern, pid)
-        if pattern is None:
-            continue
-        old_lifecycle = (pattern.lifecycle_stage or "").strip().lower()
-        old_status_for_hold = (pattern.promotion_status or "").strip()
-        realized_gate_hold_reason = _negative_realized_gate_hold_reason(
-            row,
-            settings_=settings_,
-        )
-        if realized_gate_hold_reason:
-            pattern.lifecycle_stage = "challenged"
-            pattern.promotion_status = "shadow_realized_gate_failed"
-            pattern.lifecycle_changed_at = now
-            pattern.active = False
-            pattern.recert_required = False
-            pattern.recert_reason = realized_gate_hold_reason
-            realized_gate_held_ids.append(pid)
-            try:
-                from .brain_work.promotion_surface import emit_promotion_surface_change
-
-                emit_promotion_surface_change(
-                    db,
-                    scan_pattern_id=pid,
-                    old_promotion_status=old_status_for_hold,
-                    old_lifecycle_stage=old_lifecycle,
-                    new_promotion_status=pattern.promotion_status,
-                    new_lifecycle_stage=pattern.lifecycle_stage,
-                    source="shadow_vetting_realized_gate_hold",
-                    extra={
-                        "reason": realized_gate_hold_reason,
-                        "cpcv_n_paths": row.get("cpcv_n_paths"),
-                        "cpcv_median_sharpe": row.get("cpcv_median_sharpe"),
-                        "deflated_sharpe": row.get("deflated_sharpe"),
-                        "pbo": row.get("pbo"),
-                        "promotion_gate_reasons": row.get("promotion_gate_reasons") or [],
-                        "pilot_score": row.get("pilot_score"),
-                        "pilot_score_threshold": row.get("pilot_score_threshold"),
-                    },
-                )
-            except Exception:
-                logger.debug(
-                    "%s realized gate hold surface emit failed",
-                    LOG_PREFIX,
-                    exc_info=True,
-                )
-            continue
-        # Adaptive realized-edge pilot lane: graduate provably-profitable
-        # "grinder" shadows that the CPCV/quality-weighted pilot score
-        # under-credits. Reversible (pilot lane) and subject to the same pilot
-        # risk gate as the score-based path.
-        realized_edge_eligible = False
-        realized_edge_detail: dict[str, Any] | None = None
-        if bool(
-            getattr(settings_, "chili_shadow_vetting_realized_edge_pilot_enabled", True)
-        ):
-            realized_edge_eligible, realized_edge_detail = _realized_edge_pilot_eligible(
-                pattern, settings_=settings_
-            )
-            if not alpha_gate_allows_pilot_risk:
-                realized_edge_eligible = False
-            row["realized_edge_pilot_eligible"] = realized_edge_eligible
-            row["realized_edge_pilot_detail"] = realized_edge_detail
-        if row["eligible"] and bool(
-            getattr(settings_, "chili_shadow_vetting_require_realized_ev_for_full", True)
-        ):
-            try:
-                from .realized_ev_gate import check_realized_ev_blocking
-
-                ev_blocked, ev_reasons, ev_snapshot = check_realized_ev_blocking(pattern)
-            except Exception as exc:
-                ev_blocked = True
-                ev_reasons = [f"realized_ev_gate_failed:{type(exc).__name__}"]
-                ev_snapshot = {"ok": False, "error": str(exc)[:500]}
-                logger.warning(
-                    "%s realized EV full-promotion gate failed pattern_id=%s: %s",
-                    LOG_PREFIX,
-                    pid,
-                    exc,
-                    exc_info=True,
-                )
-            row["realized_ev_gate"] = {
-                "blocked": bool(ev_blocked),
-                "reasons": list(ev_reasons),
-                "snapshot": dict(ev_snapshot or {}),
-            }
-            if ev_blocked:
+    try:
+        for row in candidates:
+            if not alpha_gate_allows_full_risk:
                 row["eligible"] = False
-                row["realized_ev_blocked"] = True
-                realized_ev_blocked_ids.append(pid)
-        if row["eligible"]:
-            old_status = (pattern.promotion_status or "").strip()
-            pattern.lifecycle_stage = "promoted"
-            pattern.promotion_status = "promoted_via_shadow_vetting"
-            pattern.lifecycle_changed_at = now
-            pattern.active = True
-            promoted_ids.append(pid)
-            try:
-                from .brain_work.promotion_surface import emit_promotion_surface_change
+                row["alpha_portfolio_blocked"] = True
+            if not alpha_gate_allows_pilot_risk:
+                row["pilot_eligible"] = False
+                row["alpha_portfolio_pilot_blocked"] = True
+            pid = int(row["scan_pattern_id"])
+            pattern = db.get(ScanPattern, pid)
+            if pattern is None:
+                continue
+            old_lifecycle = (pattern.lifecycle_stage or "").strip().lower()
+            old_status_for_hold = (pattern.promotion_status or "").strip()
+            realized_gate_hold_reason = _negative_realized_gate_hold_reason(
+                row,
+                settings_=settings_,
+            )
+            if realized_gate_hold_reason:
+                pattern.lifecycle_stage = "challenged"
+                pattern.promotion_status = "shadow_realized_gate_failed"
+                pattern.lifecycle_changed_at = now
+                pattern.active = False
+                pattern.recert_required = False
+                pattern.recert_reason = realized_gate_hold_reason
+                realized_gate_held_ids.append(pid)
+                try:
+                    from .brain_work.promotion_surface import emit_promotion_surface_change
 
-                emit_promotion_surface_change(
-                    db,
-                    scan_pattern_id=pid,
-                    old_promotion_status=old_status,
-                    old_lifecycle_stage=old_lifecycle,
-                    new_promotion_status=pattern.promotion_status,
-                    new_lifecycle_stage=pattern.lifecycle_stage,
-                    source="shadow_vetting_finalizer",
-                    extra={
-                        "quality_composite_score": row["quality_composite_score"],
-                        "score_threshold": row["score_threshold"],
-                        "adaptive_full_score": row["adaptive_full_score"],
-                        "adaptive_full_threshold": row["adaptive_full_threshold"],
-                        "quality_full_eligible": row["quality_full_eligible"],
-                        "adaptive_full_eligible": row["adaptive_full_eligible"],
-                        "raw_sample_n": row["raw_sample_n"],
-                        "effective_sample_n": row["effective_sample_n"],
-                        "weighted_directional_wr": row["weighted_directional_wr"],
-                        "recent_directional_wr": row["recent_directional_wr"],
-                        "directional_decay": row["directional_decay"],
-                        "freshness": row["freshness"],
-                        "realized_ev_gate": row.get("realized_ev_gate"),
-                    },
+                    emit_promotion_surface_change(
+                        db,
+                        scan_pattern_id=pid,
+                        old_promotion_status=old_status_for_hold,
+                        old_lifecycle_stage=old_lifecycle,
+                        new_promotion_status=pattern.promotion_status,
+                        new_lifecycle_stage=pattern.lifecycle_stage,
+                        source="shadow_vetting_realized_gate_hold",
+                        extra={
+                            "reason": realized_gate_hold_reason,
+                            "cpcv_n_paths": row.get("cpcv_n_paths"),
+                            "cpcv_median_sharpe": row.get("cpcv_median_sharpe"),
+                            "deflated_sharpe": row.get("deflated_sharpe"),
+                            "pbo": row.get("pbo"),
+                            "promotion_gate_reasons": row.get("promotion_gate_reasons") or [],
+                            "pilot_score": row.get("pilot_score"),
+                            "pilot_score_threshold": row.get("pilot_score_threshold"),
+                        },
+                    )
+                except Exception:
+                    logger.debug(
+                        "%s realized gate hold surface emit failed",
+                        LOG_PREFIX,
+                        exc_info=True,
+                    )
+                continue
+            # Adaptive realized-edge pilot lane: graduate provably-profitable
+            # "grinder" shadows that the CPCV/quality-weighted pilot score
+            # under-credits. Reversible (pilot lane) and subject to the same pilot
+            # risk gate as the score-based path.
+            realized_edge_eligible = False
+            realized_edge_detail: dict[str, Any] | None = None
+            if bool(
+                getattr(settings_, "chili_shadow_vetting_realized_edge_pilot_enabled", True)
+            ):
+                realized_edge_eligible, realized_edge_detail = _realized_edge_pilot_eligible(
+                    pattern, settings_=settings_
                 )
-            except Exception:
-                logger.debug("%s promotion_surface emit failed", LOG_PREFIX, exc_info=True)
-        elif row["pilot_eligible"] or realized_edge_eligible:
-            if old_lifecycle != "pilot_promoted":
+                if not alpha_gate_allows_pilot_risk:
+                    realized_edge_eligible = False
+                row["realized_edge_pilot_eligible"] = realized_edge_eligible
+                row["realized_edge_pilot_detail"] = realized_edge_detail
+            if row["eligible"] and bool(
+                getattr(settings_, "chili_shadow_vetting_require_realized_ev_for_full", True)
+            ):
+                try:
+                    from .realized_ev_gate import check_realized_ev_blocking
+
+                    ev_blocked, ev_reasons, ev_snapshot = check_realized_ev_blocking(pattern)
+                except Exception as exc:
+                    ev_blocked = True
+                    ev_reasons = [f"realized_ev_gate_failed:{type(exc).__name__}"]
+                    ev_snapshot = {"ok": False, "error": str(exc)[:500]}
+                    logger.warning(
+                        "%s realized EV full-promotion gate failed pattern_id=%s: %s",
+                        LOG_PREFIX,
+                        pid,
+                        exc,
+                        exc_info=True,
+                    )
+                row["realized_ev_gate"] = {
+                    "blocked": bool(ev_blocked),
+                    "reasons": list(ev_reasons),
+                    "snapshot": dict(ev_snapshot or {}),
+                }
+                if ev_blocked:
+                    row["eligible"] = False
+                    row["realized_ev_blocked"] = True
+                    realized_ev_blocked_ids.append(pid)
+            if row["eligible"]:
                 old_status = (pattern.promotion_status or "").strip()
-                pattern.lifecycle_stage = "pilot_promoted"
-                pattern.promotion_status = (
-                    "pilot_via_shadow_vetting"
-                    if row["pilot_eligible"]
-                    else "pilot_via_realized_edge"
-                )
+                pattern.lifecycle_stage = "promoted"
+                pattern.promotion_status = "promoted_via_shadow_vetting"
                 pattern.lifecycle_changed_at = now
                 pattern.active = True
-                pilot_ids.append(pid)
+                promoted_ids.append(pid)
                 try:
                     from .brain_work.promotion_surface import emit_promotion_surface_change
 
@@ -1624,52 +1637,107 @@ def run_shadow_vetting_cycle(
                         old_lifecycle_stage=old_lifecycle,
                         new_promotion_status=pattern.promotion_status,
                         new_lifecycle_stage=pattern.lifecycle_stage,
-                        source=(
-                            "shadow_vetting_pilot"
-                            if row["pilot_eligible"]
-                            else "shadow_vetting_realized_edge"
-                        ),
+                        source="shadow_vetting_finalizer",
                         extra={
-                            "realized_edge_pilot_eligible": realized_edge_eligible,
-                            "realized_edge_pilot_detail": realized_edge_detail,
-                            "pilot_score": row["pilot_score"],
-                            "pilot_score_threshold": row["pilot_score_threshold"],
-                            "evidence_maturity": row["evidence_maturity"],
+                            "quality_composite_score": row["quality_composite_score"],
+                            "score_threshold": row["score_threshold"],
+                            "adaptive_full_score": row["adaptive_full_score"],
+                            "adaptive_full_threshold": row["adaptive_full_threshold"],
+                            "quality_full_eligible": row["quality_full_eligible"],
+                            "adaptive_full_eligible": row["adaptive_full_eligible"],
                             "raw_sample_n": row["raw_sample_n"],
                             "effective_sample_n": row["effective_sample_n"],
                             "weighted_directional_wr": row["weighted_directional_wr"],
                             "recent_directional_wr": row["recent_directional_wr"],
                             "directional_decay": row["directional_decay"],
                             "freshness": row["freshness"],
-                            "path_quality": row["path_quality"],
-                            "pilot_min_roster_eligible": row.get(
-                                "pilot_min_roster_eligible"
-                            ),
-                            "pilot_min_roster_reason": row.get(
-                                "pilot_min_roster_reason"
-                            ),
-                            "pilot_min_roster_effective_floor": row.get(
-                                "pilot_min_roster_effective_floor"
-                            ),
+                            "realized_ev_gate": row.get("realized_ev_gate"),
                         },
                     )
                 except Exception:
-                    logger.debug("%s pilot surface emit failed", LOG_PREFIX, exc_info=True)
-            else:
-                pattern.promotion_status = "pilot_collecting_ev"
-        elif row["quality_composite_score"] is None:
-            collecting += 1
-            pattern.lifecycle_stage = "shadow_promoted"
-            pattern.promotion_status = "shadow_collecting_ev"
-        else:
-            held += 1
-            if old_lifecycle == "pilot_promoted":
-                pattern.lifecycle_stage = "shadow_promoted"
-                pattern.promotion_status = "pilot_ev_cooling"
-            else:
-                pattern.promotion_status = "shadow_vetted_hold"
+                    logger.debug("%s promotion_surface emit failed", LOG_PREFIX, exc_info=True)
+            elif row["pilot_eligible"] or realized_edge_eligible:
+                if old_lifecycle != "pilot_promoted":
+                    old_status = (pattern.promotion_status or "").strip()
+                    pattern.lifecycle_stage = "pilot_promoted"
+                    pattern.promotion_status = (
+                        "pilot_via_shadow_vetting"
+                        if row["pilot_eligible"]
+                        else "pilot_via_realized_edge"
+                    )
+                    pattern.lifecycle_changed_at = now
+                    pattern.active = True
+                    pilot_ids.append(pid)
+                    try:
+                        from .brain_work.promotion_surface import emit_promotion_surface_change
 
-    db.commit()
+                        emit_promotion_surface_change(
+                            db,
+                            scan_pattern_id=pid,
+                            old_promotion_status=old_status,
+                            old_lifecycle_stage=old_lifecycle,
+                            new_promotion_status=pattern.promotion_status,
+                            new_lifecycle_stage=pattern.lifecycle_stage,
+                            source=(
+                                "shadow_vetting_pilot"
+                                if row["pilot_eligible"]
+                                else "shadow_vetting_realized_edge"
+                            ),
+                            extra={
+                                "realized_edge_pilot_eligible": realized_edge_eligible,
+                                "realized_edge_pilot_detail": realized_edge_detail,
+                                "pilot_score": row["pilot_score"],
+                                "pilot_score_threshold": row["pilot_score_threshold"],
+                                "evidence_maturity": row["evidence_maturity"],
+                                "raw_sample_n": row["raw_sample_n"],
+                                "effective_sample_n": row["effective_sample_n"],
+                                "weighted_directional_wr": row["weighted_directional_wr"],
+                                "recent_directional_wr": row["recent_directional_wr"],
+                                "directional_decay": row["directional_decay"],
+                                "freshness": row["freshness"],
+                                "path_quality": row["path_quality"],
+                                "pilot_min_roster_eligible": row.get(
+                                    "pilot_min_roster_eligible"
+                                ),
+                                "pilot_min_roster_reason": row.get(
+                                    "pilot_min_roster_reason"
+                                ),
+                                "pilot_min_roster_effective_floor": row.get(
+                                    "pilot_min_roster_effective_floor"
+                                ),
+                            },
+                        )
+                    except Exception:
+                        logger.debug("%s pilot surface emit failed", LOG_PREFIX, exc_info=True)
+                else:
+                    pattern.promotion_status = "pilot_collecting_ev"
+            elif row["quality_composite_score"] is None:
+                collecting += 1
+                pattern.lifecycle_stage = "shadow_promoted"
+                pattern.promotion_status = "shadow_collecting_ev"
+            else:
+                held += 1
+                if old_lifecycle == "pilot_promoted":
+                    pattern.lifecycle_stage = "shadow_promoted"
+                    pattern.promotion_status = "pilot_ev_cooling"
+                else:
+                    pattern.promotion_status = "shadow_vetted_hold"
+
+        db.commit()
+    except Exception as exc:
+        # FIX 46 pattern (idle-in-transaction family; 2026-06-11 finalizer
+        # PendingRollbackError): a failed statement mid-finalize (e.g. a
+        # promotion-surface emit whose DB error is swallowed downstream)
+        # poisons the Session. Roll back so the failure surfaces as a clean
+        # structured result instead of PendingRollbackError on the next
+        # statement of whoever reuses the session.
+        db.rollback()
+        logger.warning("%s finalize loop failed: %s", LOG_PREFIX, exc, exc_info=True)
+        return {
+            "ok": False,
+            "error": f"finalize_failed:{type(exc).__name__}",
+            "promotion_gate_refresh": gate_refresh_result,
+        }
     result = {
         "ok": True,
         "score_result": score_result,
