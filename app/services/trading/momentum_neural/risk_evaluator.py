@@ -49,6 +49,53 @@ def _check(
     return {"id": cid, "ok": ok, "severity": severity, "message": message, "detail": detail or {}}
 
 
+def aggregate_open_risk_usd(db: Session, *, user_id: int) -> tuple[float, list[dict[str, Any]]]:
+    """Sum of entry-to-stop $ at-risk across OPEN live equity momentum positions.
+
+    The 2026-06-11 lesson: three 'independent' losses (CPSH/SNDG/INDP) were ONE
+    correlated regime trade trebled — per-trade risk caps don't see the pile-up.
+    At-risk counts only what can still be LOST below entry (a breakeven/locked
+    stop contributes 0), so winners being managed don't block new entries.
+    Returns (total_usd, per-position breakdown)."""
+    total = 0.0
+    rows: list[dict[str, Any]] = []
+    try:
+        held = (
+            db.query(TradingAutomationSession)
+            .filter(
+                TradingAutomationSession.user_id == int(user_id),
+                TradingAutomationSession.mode == "live",
+                TradingAutomationSession.state.in_(
+                    ("live_entered", "live_scaling_out", "live_trailing", "live_bailout")
+                ),
+                ~TradingAutomationSession.symbol.like("%-USD"),
+            )
+            .all()
+        )
+    except Exception:
+        return 0.0, rows
+    for sess in held:
+        try:
+            snap = sess.risk_snapshot_json or {}
+            le = snap.get("momentum_live_execution") if isinstance(snap, dict) else None
+            pos = (le or {}).get("position") if isinstance(le, dict) else None
+            if not isinstance(pos, dict):
+                continue
+            qty = float(pos.get("quantity") or 0.0)
+            entry = float(pos.get("avg_entry_price") or 0.0)
+            stop = float(pos.get("stop_price") or 0.0)
+            if qty <= 0 or entry <= 0 or stop <= 0:
+                continue
+            at_risk = max(0.0, (entry - stop)) * qty
+            if at_risk > 0:
+                total += at_risk
+                rows.append({"symbol": sess.symbol, "session_id": sess.id,
+                             "at_risk_usd": round(at_risk, 2)})
+        except (TypeError, ValueError):
+            continue
+    return total, rows
+
+
 def count_concurrent_automation_sessions(
     db: Session,
     *,
@@ -690,6 +737,49 @@ def evaluate_proposed_momentum_automation(
     except Exception:
         # Non-fatal: the post-close hook is the real enforcement; this check
         # is additive / informational at pre-entry.
+        pass
+
+    # ── Aggregate open at-risk cap (correlation guard, 2026-06-11) ─────────
+    # Low-float momentum positions are REGIME-correlated: they fade together.
+    # Cap the SUM of entry-to-stop risk across open equity positions at an
+    # equity-relative ceiling; a new entry may not push the pile-up past it.
+    try:
+        _agg_pct = float(getattr(
+            settings, "chili_momentum_max_aggregate_risk_pct_of_equity", 0.03) or 0.0)
+        if _agg_pct > 0 and m == "live":
+            from .risk_policy import _account_equity_usd
+
+            _eq = _account_equity_usd()
+            if _eq and float(_eq) > 0:
+                _agg_cap = _agg_pct * float(_eq)
+                _open_risk, _open_rows = aggregate_open_risk_usd(db, user_id=user_id)
+                # the candidate entry's planned risk = the lane's per-trade loss cap
+                try:
+                    from .risk_policy import equity_relative_loss_cap
+
+                    _planned = float(equity_relative_loss_cap(0.0) or 0.0)
+                except Exception:
+                    _planned = 0.0
+                _ok_agg = (_open_risk + _planned) <= _agg_cap
+                checks.append(
+                    _check(
+                        "aggregate_open_risk_cap",
+                        _ok_agg,
+                        severity="block" if not _ok_agg else "ok",
+                        message=(
+                            f"Open at-risk ${_open_risk:,.0f} + planned ${_planned:,.0f} "
+                            f"vs cap ${_agg_cap:,.0f} ({_agg_pct:.1%} of equity)."
+                        ),
+                        detail={
+                            "open_risk_usd": round(_open_risk, 2),
+                            "planned_risk_usd": round(_planned, 2),
+                            "cap_usd": round(_agg_cap, 2),
+                            "positions": _open_rows,
+                        },
+                    )
+                )
+    except Exception:
+        # Additive guard: never brick entries on its own failure.
         pass
 
     # ── Portfolio drawdown breaker (Hard Rule 2 — spans every entry path) ──

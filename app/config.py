@@ -2694,6 +2694,17 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_SPREAD_STABILITY_WINDOW_BARS"),
         description="Entry-interval bars of tape whose MEDIAN spread must also pass the adaptive max (0 disables).",
     )
+    # Aggregate open at-risk cap (correlation guard, 2026-06-11: three
+    # "independent" losses were ONE regime trade trebled): the SUM of
+    # entry-to-stop risk across open live equity momentum positions may not
+    # exceed this fraction of equity. 3% = three concurrent full-risk (1%)
+    # positions; breakeven-locked winners contribute zero.
+    chili_momentum_max_aggregate_risk_pct_of_equity: float = Field(
+        default=0.03,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_AGGREGATE_RISK_PCT_OF_EQUITY"),
+    )
     # Nightly replay regression tripwire: rerun today through the replay engine
     # on tonight's code and diff vs live actuals (catch behavior drift the
     # evening before the next open, not during it).
