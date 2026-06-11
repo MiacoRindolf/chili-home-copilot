@@ -252,7 +252,7 @@ function rlChartSVG(sym) {
   window._rlView = window._rlView || {};
   if (!window._rlView[cid]) window._rlView[cid] = { t0: 13*60+30, t1: T1 };  // default RTH; drag left to reveal pre-market
   const meta = ((rlCur.trades)||[]).filter(t => t.sym === sym).map(t => 'P/L $'+Number(t.usd).toLocaleString()+' · spread '+t.spread_bps+'bps · qty '+Number(t.qty).toLocaleString()).join(' | ');
-  return '<div class="rl-chart-meta">'+rlEsc(sym)+' — 5m · ET · <span style="color:#58a6ff;">EMA9</span> · <span style="color:#e8b339;">VWAP</span> · scroll=zoom · drag=pan (pre-market to the left) · dbl-click=full day'+(meta ? ' · '+meta : ' · watched, no fill')+'</div>' +
+  return '<div class="rl-chart-meta">'+rlEsc(sym)+' — 5m · ET · <span style="color:#58a6ff;">EMA9</span> · <span style="color:#e8b339;">VWAP</span> · scroll=zoom time · shift+scroll=zoom price · drag=pan · dbl-click=reset'+(meta ? ' · '+meta : ' · watched, no fill')+'</div>' +
          '<div style="position:relative;">' +
          '<svg class="rl-chart" id="'+cid+'" viewBox="0 0 1040 252" preserveAspectRatio="none">'+rlChartBody(sym, cid)+'</svg>' +
          '<div id="'+cid+'-tip" style="position:absolute;top:6px;left:8px;background:rgba(8,12,20,.92);border:1px solid var(--border);border-radius:6px;padding:5px 9px;font-size:11px;display:none;pointer-events:none;"></div></div>';
@@ -266,10 +266,36 @@ function rlChartBody(sym, cid) {
   const S = all.filter(b => { const m = tMin(b[0]); return m >= V0 - 5 && m <= V1 + 5; });
   if (!S.length) return '';
   const W = 1040, H = 252, padL = 46, padR = 8, padT = 10, padB = 40;
-  const lo = Math.min(...S.map(b => b[3])), hi = Math.max(...S.map(b => b[2]));
-  const span = (hi-lo) || 1, y = p => padT + (hi - p) / span * (H-padT-padB);
+  // EMA9/VWAP computed over ALL bars (correct history), kept for in-view points
+  const ov = [];
+  (function(){
+    const k = 2/(9+1); let ema = null, cumPV = 0, cumV = 0;
+    all.forEach(b => {
+      const m = tMin(b[0]); const typ = (b[2]+b[3]+b[4])/3;
+      ema = ema === null ? b[4] : b[4]*k + ema*(1-k);
+      cumPV += typ * b[5]; cumV += b[5];
+      if (m >= V0 && m <= V1) ov.push([b[0], ema, cumV > 0 ? cumPV/cumV : null]);
+    });
+  })();
+  // SMART Y: auto-fit to everything visible — bars, overlays, AND trade annotations
+  let lo = Math.min(...S.map(b => b[3])), hi = Math.max(...S.map(b => b[2]));
+  ov.forEach(p => { const v = p[2] == null ? p[1] : p[2]; lo = Math.min(lo, p[1], v); hi = Math.max(hi, p[1], v); });
+  ((r.trades)||[]).filter(t => t.sym === sym).forEach(t => {
+    const te = tMin(t.t), tx = t.exit_t ? tMin(t.exit_t) : null;
+    const add = p => { if (p != null && isFinite(+p)) { lo = Math.min(lo, +p); hi = Math.max(hi, +p); } };
+    if (te >= V0 && te <= V1) add(t.entry);
+    if (te <= V1) { add(t.stop); add(t.target); }       // stop/target lines extend right
+    if (tx != null && tx >= V0 && tx <= V1) add(t.exit);
+  });
+  const padPr = (hi - lo) * 0.07 || Math.max(hi, 1) * 0.005;
+  let dLo = lo - padPr, dHi = hi + padPr;
+  if (view.p0 != null && view.p1 != null) { dLo = view.p0; dHi = view.p1; }  // manual price view
+  view._dLo = dLo; view._dHi = dHi;                      // handlers read the rendered domain
+  const span = (dHi - dLo) || 1, y = p => padT + (dHi - p) / span * (H-padT-padB);
+  const dec = span < 0.35 ? 3 : (dHi >= 100 ? 1 : 2);
   const x = t => padL + (Math.max(V0, Math.min(V1, tMin(t))) - V0) / (V1-V0) * (W-padL-padR);
   const bw = Math.max(1.5, (W-padL-padR) / ((V1-V0)/5) - 2);
+  const fmtET = t => { const m = (tMin(t)-240+1440)%1440; return String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0'); };
   let g = '';
   const range = V1 - V0;
   const step = range > 360 ? 60 : range > 150 ? 30 : range > 60 ? 15 : 5;
@@ -300,9 +326,9 @@ function rlChartBody(sym, cid) {
     });
   })();
   for (let k = 0; k <= 4; k++) {
-    const pp = lo + span*k/4, yy = y(pp);
+    const pp = dLo + span*k/4, yy = y(pp);
     g += '<line x1="'+padL+'" x2="'+(W-padR)+'" y1="'+yy+'" y2="'+yy+'" stroke="rgba(255,255,255,.06)"/>' +
-         '<text x="4" y="'+(yy+3)+'" fill="rgba(255,255,255,.45)" font-size="9">'+pp.toFixed(2)+'</text>';
+         '<text x="4" y="'+(yy+3)+'" fill="rgba(255,255,255,.45)" font-size="9">'+pp.toFixed(dec)+'</text>';
   }
   const vmax = Math.max(...S.map(b => b[5])) || 1;
   S.forEach(b => {
@@ -316,52 +342,53 @@ function rlChartBody(sym, cid) {
          '<rect x="'+(cx-bw/2)+'" y="'+y(Math.max(b[1],b[4]))+'" width="'+bw+'" height="'+Math.max(1, Math.abs(y(b[1])-y(b[4])))+'" fill="'+col+'" opacity="0.85"/>';
   });
   (function(){
-    const k = 2/(9+1); let ema = null, cumPV = 0, cumV = 0;
     const ePts = [], vPts = [];
-    all.forEach(b => {
-      const m = tMin(b[0]); const typ = (b[2]+b[3]+b[4])/3;
-      ema = ema === null ? b[4] : b[4]*k + ema*(1-k);
-      cumPV += typ * b[5]; cumV += b[5];
-      if (m >= V0 && m <= V1) {
-        ePts.push(x(b[0]).toFixed(1)+','+y(ema).toFixed(1));
-        if (cumV > 0) vPts.push(x(b[0]).toFixed(1)+','+y(cumPV/cumV).toFixed(1));
-      }
+    ov.forEach(p => {
+      ePts.push(x(p[0]).toFixed(1)+','+y(p[1]).toFixed(1));
+      if (p[2] != null) vPts.push(x(p[0]).toFixed(1)+','+y(p[2]).toFixed(1));
     });
     if (ePts.length > 1) g += '<polyline points="'+ePts.join(' ')+'" fill="none" stroke="#58a6ff" stroke-width="1.3" opacity=".85"/>';
     if (vPts.length > 1) g += '<polyline points="'+vPts.join(' ')+'" fill="none" stroke="#e8b339" stroke-width="1.3" stroke-dasharray="6 3" opacity=".8"/>';
   })();
   const placed = [];
+  const clampY = v => Math.max(padT+12, Math.min(H-padB-6, v));   // labels stay INSIDE the plot
   function labelY(xp, yp) {
-    let yy = yp;
+    let yy = clampY(yp);
     for (let tries = 0; tries < 8; tries++) {
       if (!placed.some(b => Math.abs(b.x - xp) < 150 && Math.abs(b.y - yy) < 12)) break;
-      yy += 13;
+      yy = yy + 13 > H-padB-6 ? yy - 13 : yy + 13;                 // push down, flip up at the floor
     }
+    yy = clampY(yy);
     placed.push({x: xp, y: yy});
     return yy;
   }
+  const inPlot = v => v >= padT && v <= H-padB;
   ((rlCur.trades)||[]).filter(t => t.sym === sym).forEach(t => {
     if (tMin(t.t) < V0 || tMin(t.t) > V1) return;
     const xe = x(t.t), ye = y(t.entry);
     const eA = xe > W-180 ? ' text-anchor="end"' : '';
-    g += '<circle cx="'+xe+'" cy="'+ye+'" r="5" fill="#3fb950" stroke="#fff" stroke-width="1.2"/>' +
-         '<text x="'+(xe + (eA? -7 : 7))+'" y="'+labelY(xe, ye-7)+'"'+eA+' fill="#3fb950" font-size="10" font-weight="700">▲ entry '+t.entry+' @'+t.t+'</text>';
-    if (t.stop) g += '<line x1="'+xe+'" x2="'+(W-padR)+'" y1="'+y(t.stop)+'" y2="'+y(t.stop)+'" stroke="#f85149" stroke-dasharray="5 4" stroke-width="1"/>' +
-                     '<text x="'+(W-padR-58)+'" y="'+(y(t.stop)-3)+'" fill="#f85149" font-size="9">stop '+t.stop+'</text>';
-    if (t.target) g += '<line x1="'+xe+'" x2="'+(W-padR)+'" y1="'+y(t.target)+'" y2="'+y(t.target)+'" stroke="#3fb950" stroke-dasharray="5 4" stroke-width="1" opacity=".7"/>' +
-                       '<text x="'+(W-padR-66)+'" y="'+(y(t.target)-3)+'" fill="#3fb950" font-size="9">target '+t.target+'</text>';
+    g += '<circle cx="'+xe+'" cy="'+Math.max(padT, Math.min(H-padB, ye))+'" r="5" fill="#3fb950" stroke="#fff" stroke-width="1.2"/>' +
+         '<text x="'+(xe + (eA? -7 : 7))+'" y="'+labelY(xe, ye-7)+'"'+eA+' fill="#3fb950" font-size="10" font-weight="700">▲ entry '+t.entry+' @'+fmtET(t.t)+' ET</text>';
+    if (t.stop && inPlot(y(t.stop))) {
+      g += '<line x1="'+xe+'" x2="'+(W-padR)+'" y1="'+y(t.stop)+'" y2="'+y(t.stop)+'" stroke="#f85149" stroke-dasharray="5 4" stroke-width="1"/>' +
+           '<text x="'+(W-padR-2)+'" y="'+clampY(y(t.stop)-3)+'" text-anchor="end" fill="#f85149" font-size="9">stop '+t.stop+'</text>';
+    }
+    if (t.target && inPlot(y(t.target))) {
+      g += '<line x1="'+xe+'" x2="'+(W-padR)+'" y1="'+y(t.target)+'" y2="'+y(t.target)+'" stroke="#3fb950" stroke-dasharray="5 4" stroke-width="1" opacity=".7"/>' +
+           '<text x="'+(W-padR-2)+'" y="'+clampY(y(t.target)-3)+'" text-anchor="end" fill="#3fb950" font-size="9">target '+t.target+'</text>';
+    }
     if (t.exit_t && tMin(t.exit_t) >= V0 && tMin(t.exit_t) <= V1) {
       const xx = x(t.exit_t), yx = y(t.exit);
       const xA = xx > W-220 ? ' text-anchor="end"' : '';
-      g += '<circle cx="'+xx+'" cy="'+yx+'" r="5" fill="#f85149" stroke="#fff" stroke-width="1.2"/>' +
-           '<text x="'+(xx + (xA? -7 : 7))+'" y="'+labelY(xx, yx+13)+'"'+xA+' fill="#f85149" font-size="10" font-weight="700">▼ exit '+t.exit+' @'+t.exit_t+' ('+t.why+')</text>';
+      g += '<circle cx="'+xx+'" cy="'+Math.max(padT, Math.min(H-padB, yx))+'" r="5" fill="#f85149" stroke="#fff" stroke-width="1.2"/>' +
+           '<text x="'+(xx + (xA? -7 : 7))+'" y="'+labelY(xx, yx+13)+'"'+xA+' fill="#f85149" font-size="10" font-weight="700">▼ exit '+t.exit+' @'+fmtET(t.exit_t)+' ET ('+t.why+')</text>';
     }
   });
   g += '<line id="'+cid+'-x" x1="0" x2="0" y1="'+padT+'" y2="'+(H-padB)+'" stroke="rgba(255,255,255,.35)" stroke-dasharray="2 3" visibility="hidden"/>';
   return g;
 }
 
-const RL_W = 1040, RL_PADL = 46, RL_PADR = 8;
+const RL_W = 1040, RL_PADL = 46, RL_PADR = 8, RL_H = 252, RL_PADT = 10, RL_PADB = 40;
 function rlRedraw(cid, sym) {
   const svg = document.getElementById(cid);
   if (svg) svg.innerHTML = rlChartBody(sym, cid);
@@ -374,21 +401,43 @@ function rlAttachHover(cid, sym) {
     if (svg._rlDrag) {
       const view = window._rlView[cid];
       const r = svg.getBoundingClientRect();
-      const dmin = (svg._rlDrag.x - ev.clientX) / r.width * (svg._rlDrag.v1 - svg._rlDrag.v0);
-      let t0 = svg._rlDrag.v0 + dmin, t1 = svg._rlDrag.v1 + dmin;
+      const d = svg._rlDrag;
+      const dmin = (d.x - ev.clientX) / r.width * (d.v1 - d.v0);
+      let t0 = d.v0 + dmin, t1 = d.v1 + dmin;
       if (t0 < T0) { t1 += T0-t0; t0 = T0; } if (t1 > T1) { t0 -= t1-T1; t1 = T1; }
-      view.t0 = t0; view.t1 = t1; rlRedraw(cid, sym); return;
+      view.t0 = t0; view.t1 = t1;
+      // vertical pan engages after 8px so a pure time-pan keeps Y on auto-fit
+      if (Math.abs(ev.clientY - d.cy) > 8) d.vy = true;
+      if (d.vy) {
+        const dpr = (ev.clientY - d.cy) / r.height * RL_H / (RL_H-RL_PADT-RL_PADB) * (d.dHi - d.dLo);
+        view.p0 = d.dLo + dpr; view.p1 = d.dHi + dpr;
+      }
+      rlRedraw(cid, sym); return;
     }
     rlHover(ev, cid);
   });
   svg.addEventListener('mouseleave', () => { svg._rlDrag = null; rlHoverOff(cid); });
-  svg.addEventListener('mousedown', ev => { const v = window._rlView[cid]; svg._rlDrag = { x: ev.clientX, v0: v.t0, v1: v.t1 }; ev.preventDefault(); });
+  svg.addEventListener('mousedown', ev => {
+    const v = window._rlView[cid];
+    svg._rlDrag = { x: ev.clientX, cy: ev.clientY, v0: v.t0, v1: v.t1, dLo: v._dLo, dHi: v._dHi, vy: false };
+    ev.preventDefault();
+  });
   svg.addEventListener('mouseup', () => { svg._rlDrag = null; });
-  svg.addEventListener('dblclick', () => { window._rlView[cid] = { t0: T0, t1: T1 }; rlRedraw(cid, sym); });
+  svg.addEventListener('dblclick', () => { window._rlView[cid] = { t0: T0, t1: T1 }; rlRedraw(cid, sym); });  // fresh view = auto-fit price
   svg.addEventListener('wheel', ev => {
     ev.preventDefault();
     const view = window._rlView[cid];
     const r = svg.getBoundingClientRect();
+    if (ev.shiftKey) {                                    // shift+scroll = PRICE zoom anchored at cursor
+      const dLo = view._dLo, dHi = view._dHi;
+      if (dLo == null || dHi == null) return;
+      const fy = Math.max(0, Math.min(1, ((ev.clientY - r.top)/r.height*RL_H - RL_PADT) / (RL_H-RL_PADT-RL_PADB)));
+      const cp = dHi - fy * (dHi - dLo);
+      const z = ev.deltaY > 0 ? 1.25 : 0.8;
+      const p0 = cp - (cp - dLo) * z, p1 = cp + (dHi - cp) * z;
+      if ((p1 - p0) / Math.max(Math.abs(cp), 0.01) < 0.002) return;
+      view.p0 = p0; view.p1 = p1; rlRedraw(cid, sym); return;
+    }
     const fx = Math.max(0, Math.min(1, ((ev.clientX - r.left)/r.width*RL_W - RL_PADL) / (RL_W-RL_PADL-RL_PADR)));
     const cm = view.t0 + fx * (view.t1 - view.t0);
     const z = ev.deltaY > 0 ? 1.25 : 0.8;
