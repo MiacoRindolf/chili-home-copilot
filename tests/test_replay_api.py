@@ -46,3 +46,21 @@ def test_replay_list_and_missing_result(client, tmp_path, monkeypatch):
     assert len(r3.json()["results"]) == 1
     r4 = client.get("/api/trading/momentum/replay/result/2026-06-10")
     assert r4.status_code == 200 and r4.json()["result"]["total_usd"] == -575
+
+
+def test_replay_result_roundtrips_divergence_and_trace(client, tmp_path, monkeypatch):
+    import app.services.trading.momentum_neural.replay_v2 as rv
+    monkeypatch.setattr(rv, "REPLAY_RESULTS_DIR", str(tmp_path))
+    rv._persist({"date": "2026-06-10", "armed_source": "live", "total_usd": 275,
+                 "wins": 2, "losses": 3, "trades": [{"sym": "BATL"}],
+                 "decision_trace": [{"t": "15:16", "sym": "BATL", "stage": "trigger_ok"}],
+                 "divergence": [{"sym": "BATL", "live": "15:17 entry_filled 1.63",
+                                 "replay": "15:16 fill@1.64", "cause": "aligned"}],
+                 "tape_symbols": 694, "candidates": 272, "halt_windows": 592,
+                 "day_halted": None, "error": None,
+                 "ran_at_utc": "2026-06-10T23:00:00+00:00"})
+    r = client.get("/api/trading/momentum/replay/result/2026-06-10?armed_source=live")
+    assert r.status_code == 200
+    res = r.json()["result"]
+    assert res["divergence"][0]["cause"] == "aligned"
+    assert res["decision_trace"][0]["stage"] == "trigger_ok"
