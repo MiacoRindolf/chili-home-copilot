@@ -2213,6 +2213,23 @@ class Settings(BaseSettings):
         default="",
         validation_alias=AliasChoices("CHILI_MOMENTUM_EVENT_THEME_KEYWORDS"),
     )
+    # Ross "Running Up" feeder (the 2026-06-11 SKYQ gap): the viability batch ranks
+    # DAY-change movers, so a name bursting NOW from a flat day never refreshes and
+    # can never arm. The NBBO tape already samples Ross-universe names every minute —
+    # lift symbols whose mid rose >= min_pct over the lookback into the refresh
+    # batch (bounded by max_symbols; every downstream gate still applies).
+    chili_momentum_running_up_lookback_min: float = Field(
+        default=5.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RUNNING_UP_LOOKBACK_MIN"),
+    )
+    chili_momentum_running_up_min_pct: float = Field(
+        default=3.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RUNNING_UP_MIN_PCT"),
+    )
+    chili_momentum_running_up_max_symbols: int = Field(
+        default=6,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RUNNING_UP_MAX_SYMBOLS"),
+    )
     # SHAKE-OUT churn guards (tick-speed entries re-trigger in seconds): a symbol
     # with this many losing live trades today is done for the DAY (Ross's 2-strike
     # walk-away), and any losing trade sits the symbol out for the cooldown below.

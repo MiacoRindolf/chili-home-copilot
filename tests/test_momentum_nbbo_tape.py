@@ -11,11 +11,12 @@ from sqlalchemy.orm import Session
 
 import app.services.massive_client as massive_client
 from app.services.trading.momentum_neural.nbbo_tape import (
-    _is_rth,
+    _in_sampling_window,
     _ross_row,
     prune_nbbo_tape,
     read_spread_profile,
     sample_universe_nbbo_spreads,
+    tape_running_up_symbols,
 )
 
 
@@ -60,20 +61,30 @@ def test_ross_row_rejects_crypto_and_stale_wide() -> None:
     assert _ross_row(_snap_entry("STALE", 1.5, 1.3, 50_000_000, 1.0, 2.0)) is None
 
 
-def test_ross_row_falls_back_to_prevday_when_current_zero() -> None:
+def test_ross_row_premarket_uses_live_tick_not_prevday() -> None:
+    # #595: with the 'day' aggregate zeroed (premarket), the row must come from the
+    # LIVE tick (lastTrade) + accumulated minute volume (min.av) — vs prevDay.c as
+    # the change base. A zeroed day with NO live tick yields no row (the old
+    # prevDay-price fallback graded premarket names by yesterday's move).
     s = {"ticker": "PRE", "day": {"c": 0, "o": 0, "v": 0},
-         "prevDay": {"c": 6.0, "o": 5.0, "v": 2_000_000}, "lastQuote": {"p": 5.95, "P": 6.05}}
+         "lastTrade": {"p": 6.0}, "min": {"av": 2_000_000},
+         "prevDay": {"c": 5.0}, "lastQuote": {"p": 5.95, "P": 6.05}}
     r = _ross_row(s)
-    assert r is not None and r["symbol"] == "PRE"
+    assert r is not None and r["symbol"] == "PRE"  # +20% vs prev close, $12M live vol
+    dead = {"ticker": "GHOST", "day": {"c": 0, "o": 0, "v": 0},
+            "prevDay": {"c": 6.0, "o": 5.0, "v": 2_000_000}, "lastQuote": {"p": 5.95, "P": 6.05}}
+    assert _ross_row(dead) is None
 
 
 # ── pure: RTH gating ─────────────────────────────────────────────────────────
-def test_is_rth_weekday_window() -> None:
-    assert _is_rth(datetime(2026, 6, 9, 14, 0, tzinfo=timezone.utc)) is True       # Tue 14:00 UTC
-    assert _is_rth(datetime(2026, 6, 9, 13, 30, tzinfo=timezone.utc)) is True      # open edge
-    assert _is_rth(datetime(2026, 6, 9, 21, 0, tzinfo=timezone.utc)) is False      # after close
-    assert _is_rth(datetime(2026, 6, 9, 12, 0, tzinfo=timezone.utc)) is False      # pre-open
-    assert _is_rth(datetime(2026, 6, 13, 14, 0, tzinfo=timezone.utc)) is False     # Saturday
+def test_sampling_window_covers_data_session() -> None:
+    # #595: the sampler covers the full US DATA session (04:00-20:00 ET), not RTH —
+    # premarket movers (Ross gap-and-go) must already be on tape by the 7:00 entries.
+    assert _in_sampling_window(datetime(2026, 6, 9, 14, 0, tzinfo=timezone.utc)) is True   # Tue 10:00 ET
+    assert _in_sampling_window(datetime(2026, 6, 9, 9, 0, tzinfo=timezone.utc)) is True    # 05:00 ET premarket
+    assert _in_sampling_window(datetime(2026, 6, 9, 22, 0, tzinfo=timezone.utc)) is True   # 18:00 ET afterhours
+    assert _in_sampling_window(datetime(2026, 6, 9, 7, 0, tzinfo=timezone.utc)) is False   # 03:00 ET overnight
+    assert _in_sampling_window(datetime(2026, 6, 13, 14, 0, tzinfo=timezone.utc)) is False  # Saturday
 
 
 # ── integration: sample -> read -> prune (real test DB) ──────────────────────
@@ -106,12 +117,12 @@ def test_sample_inserts_only_ross_movers_and_reader_reads_back(monkeypatch, db: 
     assert read_spread_profile(db, "BIGCO") == []  # never inserted
 
 
-def test_sample_skipped_outside_rth(monkeypatch, db: Session) -> None:
+def test_sample_skipped_outside_data_session(monkeypatch, db: Session) -> None:
     _ensure_table(db)
     monkeypatch.setattr(massive_client, "get_full_market_snapshot",
                         lambda **k: [_snap_entry("PAVS", 5.0, 4.5, 1_000_000, 4.95, 5.05)])
-    out = sample_universe_nbbo_spreads(db, now_utc=datetime(2026, 6, 9, 22, 0, tzinfo=timezone.utc))
-    assert out.get("skipped") == "outside_rth" and out["inserted"] == 0
+    out = sample_universe_nbbo_spreads(db, now_utc=datetime(2026, 6, 13, 14, 0, tzinfo=timezone.utc))
+    assert out.get("skipped") == "outside_session" and out["inserted"] == 0
 
 
 def test_prune_removes_old_rows(db: Session) -> None:
@@ -125,3 +136,46 @@ def test_prune_removes_old_rows(db: Session) -> None:
     assert res["ok"] and res["pruned"] == 1
     remaining = db.execute(text("SELECT symbol FROM momentum_nbbo_spread_tape ORDER BY symbol")).scalars().all()
     assert remaining == ["NEW"]
+
+
+# ── running-up feeder (the SKYQ gap): burst detection off the tape ───────────
+def _seed_path(db: Session, sym: str, mids: list[float], minutes_ago_start: float = 4.0) -> None:
+    """Insert a mid path for sym, evenly spaced from minutes_ago_start to now."""
+    n = len(mids)
+    for i, m in enumerate(mids):
+        ago = minutes_ago_start * (1 - i / max(n - 1, 1))
+        db.execute(text(
+            "INSERT INTO momentum_nbbo_spread_tape (symbol, observed_at, mid, spread_bps) "
+            "VALUES (:s, now() at time zone 'utc' - make_interval(secs => :ago), :m, 100)"
+        ), {"s": sym, "ago": ago * 60.0, "m": m})
+    db.commit()
+
+
+def test_running_up_detects_burst_and_ignores_flat(db: Session) -> None:
+    _ensure_table(db)
+    _seed_path(db, "SKYQ", [1.80, 1.85, 1.90, 1.95])   # +8.3% over the window
+    _seed_path(db, "FLAT", [5.00, 5.00, 5.01, 5.01])   # +0.2%
+    assert tape_running_up_symbols(db) == ["SKYQ"]
+
+
+def test_running_up_requires_min_samples(db: Session) -> None:
+    _ensure_table(db)
+    _seed_path(db, "ONEPRINT", [1.00, 2.00])  # 2 rows < 3-sample floor
+    assert tape_running_up_symbols(db) == []
+
+
+def test_running_up_orders_by_burst_and_caps(db: Session, monkeypatch) -> None:
+    _ensure_table(db)
+    from app.config import settings as _settings
+    monkeypatch.setattr(_settings, "chili_momentum_running_up_max_symbols", 2, raising=False)
+    _seed_path(db, "FAST", [1.00, 1.05, 1.10, 1.20])   # +20%
+    _seed_path(db, "MED", [2.00, 2.05, 2.10, 2.16])    # +8%
+    _seed_path(db, "SLOW", [3.00, 3.05, 3.08, 3.12])   # +4%
+    assert tape_running_up_symbols(db) == ["FAST", "MED"]
+
+
+def test_running_up_ignores_rows_outside_lookback(db: Session) -> None:
+    _ensure_table(db)
+    # burst happened 30+ minutes ago; only 2 fresh flat rows inside the window
+    _seed_path(db, "OLDPOP", [1.00, 1.40, 1.50], minutes_ago_start=40.0)
+    assert tape_running_up_symbols(db) == []

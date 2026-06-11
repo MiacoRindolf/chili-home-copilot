@@ -3481,6 +3481,27 @@ def _bridge_scanner_to_viability(
         if len(tickers) >= _VIABILITY_BRIDGE_MAX_TICKERS:
             break
 
+    # ROSS "RUNNING UP" FEEDER (2026-06-11, the SKYQ gap): the ranking above is a
+    # Top Gainers clone (day change), so a name bursting NOW from a flat day —
+    # SKYQ +2% on the day yet firing pullback_break_ok with 2,163% 5-min RVOL on
+    # Ross's Running Up scanner — never earns a fresh viability row and can never
+    # arm. Our own NBBO tape already samples these names every minute: lift the
+    # fastest mid-bursts of the last few minutes into the batch (the pin block
+    # below then prepends armed sessions ahead of them, so the head order is
+    # pins -> bursts -> ranked, all inside the pipeline's 32-symbol cut).
+    try:
+        from .trading.momentum_neural.nbbo_tape import tape_running_up_symbols
+
+        _bursts = tape_running_up_symbols(db)
+        if _bursts:
+            tickers = _bursts + [t for t in tickers if t not in _bursts]
+            logger.info(
+                "[scheduler] running-up feeder lifted %d burst symbol(s): %s",
+                len(_bursts), ",".join(_bursts),
+            )
+    except Exception:
+        logger.debug("[scheduler] running-up feeder failed", exc_info=True)
+
     # ARMED-SESSION PIN (2026-06-11, the EDHL kill): an armed symbol that rotates
     # OUT of the scanner's top batch stops getting viability refreshes, its
     # snapshot ages past the 600s freshness gate, and our own staleness check
