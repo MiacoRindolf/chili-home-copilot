@@ -56,6 +56,8 @@ from .paper_fsm import (
     STATE_TRAILING,
     STATE_WATCHING,
 )
+
+logger = logging.getLogger(__name__)
 from .live_fsm import (
     LIVE_CANCELLABLE_STATES,
     LIVE_RUNNER_ACTIVE_SUMMARY_STATES,
@@ -1621,11 +1623,64 @@ def cancel_automation_session(db: Session, *, user_id: int, session_id: int) -> 
 
     from .persistence import append_trading_automation_event
 
+    # ORDER-TRUTH (2026-06-11): a LIVE session must never die with its broker
+    # orders still resting. KMRK: a dead session's GTC buy filled hours later
+    # into a -21.9% dump; CPSH/SNDG: fills raced the ack-timeout cancel and fell
+    # to generic wide brackets because a dead session's late-fill sweep stops
+    # ticking. This is the death chokepoint (operator cancel AND the auto-arm
+    # reaper land here): best-effort cancel every unresolved entry order; if one
+    # already FILLED, surface it loudly so the adoption is visible.
+    _order_cleanup = None
+    if sess.mode == "live":
+        try:
+            _snap = sess.risk_snapshot_json or {}
+            _le = _snap.get("momentum_live_execution") if isinstance(_snap, dict) else None
+            _le = _le if isinstance(_le, dict) else {}
+            _oids: list[str] = []
+            for _o in [_le.get("entry_order_id")] + list(_le.get("entry_order_ids_all") or []):
+                _os = str(_o or "").strip()
+                if _os and _os not in _oids:
+                    _oids.append(_os)
+            if _oids:
+                from ..venue.factory import get_adapter
+
+                _adapter = get_adapter(sess.execution_family)
+                _results = []
+                for _oid in _oids:
+                    _row: dict[str, Any] = {"order_id": _oid}
+                    if _adapter is None:
+                        _row["result"] = "no_adapter"
+                    else:
+                        try:
+                            _no, _ = _adapter.get_order(_oid)
+                            _filled = float(getattr(_no, "filled_size", 0) or 0) if _no else 0.0
+                            _status = str(getattr(_no, "status", "") or "") if _no else "unknown"
+                            _row["status"] = _status
+                            if _filled > 0:
+                                _row["result"] = "FILLED_NEEDS_ADOPTION"
+                                _row["filled_size"] = _filled
+                            elif _status.lower() in (
+                                "filled", "cancelled", "canceled", "rejected", "failed", "expired", "done",
+                            ):
+                                _row["result"] = "already_terminal"
+                            else:
+                                _adapter.cancel_order(_oid)
+                                _row["result"] = "cancelled"
+                        except Exception as _exc:  # pragma: no cover - broker I/O
+                            _row["result"] = f"error:{str(_exc)[:80]}"
+                    _results.append(_row)
+                _order_cleanup = {"orders": _results}
+        except Exception:
+            logger.debug("[automation_query] session-death order sweep failed", exc_info=True)
+
     append_trading_automation_event(
         db,
         sess.id,
         "session_cancelled",
-        {"previous_state": prev, "by": "operator", "terminal_state": sess.state},
+        {
+            "previous_state": prev, "by": "operator", "terminal_state": sess.state,
+            **({"order_cleanup": _order_cleanup} if _order_cleanup else {}),
+        },
         correlation_id=sess.correlation_id,
         source_node_id="momentum_automation_monitor",
     )

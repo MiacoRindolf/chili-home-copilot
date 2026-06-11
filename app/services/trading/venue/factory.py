@@ -47,6 +47,7 @@ _BUILDERS: dict[str, Callable[[], VenueAdapter]] = {
     # Aliases — keeping them centralized means the normalization rule
     # is one lookup, not a scatter of ``.lower().strip()`` calls.
     "coinbase_spot": _build_coinbase,
+    "robinhood_spot": _build_robinhood,
 }
 
 

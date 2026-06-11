@@ -2778,6 +2778,10 @@ def tick_live_session(
             limit_price=entry_limit_str,
             client_order_id=cid,
             extended_hours=_entry_extended,
+            # ORDER-TRUTH (2026-06-11): entry limits are DAY orders, never GTC —
+            # a dead session's resting GTC buy (KMRK) filled hours later into a
+            # -21.9% dump. Equity adapters map this to RH 'gfd'; crypto ignores.
+            time_in_force="gfd",
         )
         le["entry_submitted"] = True
         le["entry_submit_utc"] = _utcnow().isoformat()

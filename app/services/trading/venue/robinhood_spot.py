@@ -825,6 +825,7 @@ class RobinhoodSpotAdapter(VenueAdapter):
         market_hours_override: Optional[str] = None,
         extended_hours_override: Optional[bool] = None,
         extended_hours: bool = False,
+        time_in_force: Optional[str] = None,
     ) -> dict[str, Any]:
         ticker = _to_ticker(product_id)
         qty = float(base_size)
@@ -890,6 +891,7 @@ class RobinhoodSpotAdapter(VenueAdapter):
                 limit_price=price,
                 market_hours_override=market_hours_override,
                 extended_hours_override=extended_hours_override,
+                time_in_force=time_in_force,
             )
         elif side_l == "sell":
             result = place_sell_order(

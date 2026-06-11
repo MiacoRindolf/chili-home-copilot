@@ -46,6 +46,7 @@ migration window — see ``_legacy_state_alias()``.
 from __future__ import annotations
 
 import logging
+import dataclasses
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -334,6 +335,26 @@ class UpsertResult:
     target_price: float | None
 
 
+def clamp_stop_geometry(*, entry: float, stop: float | None, direction: str) -> float | None:
+    """Return the corrected stop when its SIDE is wrong for the trade, else None.
+
+    A long's protective stop must sit BELOW its own entry (short: above) by at
+    least a 0.5% floor — an inverted/too-tight stop self-executes immediately
+    (2026-06-11 AAOG: adopted long, stop 11.81 over entry 11.65, dumped in 51s).
+    Pure + side-effect-free; ``None`` means the input geometry is already sane.
+    """
+    if stop is None or entry is None or entry <= 0:
+        return None
+    s = float(stop)
+    floor = entry * 0.005
+    d = (direction or "long").strip().lower()
+    if d == "long" and s > entry - floor:
+        return entry - floor
+    if d == "short" and s < entry + floor:
+        return entry + floor
+    return None
+
+
 # ── Upsert ──────────────────────────────────────────────────────────────
 
 
@@ -364,6 +385,27 @@ def upsert_bracket_intent(
 
     if bracket_result is None:
         bracket_result = compute_bracket_intent(bracket_input)
+
+    # STOP-GEOMETRY GUARD (2026-06-11 AAOG): an adopted long was written stop
+    # 11.81 against its own 11.65 entry (stale upstream reference price) and was
+    # dumped by its own protective stop 51 seconds later. Whatever upstream
+    # computed, a long intent's stop must sit BELOW this trade's entry (short:
+    # above) by at least a small floor — clamp at the single write chokepoint.
+    try:
+        _clamped = clamp_stop_geometry(
+            entry=float(bracket_input.entry_price or 0.0),
+            stop=bracket_result.stop_price,
+            direction=(bracket_input.direction or "long"),
+        )
+        if _clamped is not None and _clamped != bracket_result.stop_price:
+            logger.warning(
+                "[bracket_intent_ops] geometry clamp trade_id=%s %s: %s stop %s vs entry %s -> %.6f",
+                trade_id, bracket_input.ticker, bracket_input.direction,
+                bracket_result.stop_price, bracket_input.entry_price, _clamped,
+            )
+            bracket_result = dataclasses.replace(bracket_result, stop_price=_clamped)
+    except Exception:
+        logger.debug("[bracket_intent_ops] geometry clamp skipped", exc_info=True)
 
     initial_state_str = "shadow_logged" if mode is IntentMode.SHADOW else "intent"
     shadow_flag = mode in _SHADOWING_MODES
