@@ -17,15 +17,31 @@ from ..brain_neural_mesh.schema import mesh_enabled
 from .context import build_momentum_regime_context
 
 
-def _live_book_imbalance(symbol: str) -> float | None:
+from .evolution import record_evolution_trace
+from .features import ExecutionReadinessFeatures
+from .telemetry import log_tick
+from .variants import iter_momentum_families
+from .viability import score_viability
+from .viability_scope import VIABILITY_SCOPE_AGGREGATE, VIABILITY_SCOPE_SYMBOL
+
+HUB_NODE_ID = "nm_momentum_crypto_intel"
+VIABILITY_NODE_ID = "nm_momentum_viability_pool"
+
+_log = logging.getLogger(__name__)
+
+
+def _live_book_imbalance(symbol: str, db: Any = None) -> float | None:
     """Signed order-book imbalance in [-1, 1] from the LIVE venue feeds.
 
     Crypto: Coinbase Advanced WS ``level2`` ring buffer (true book depth — top
-    bid total vs ask total). Equities: the Massive WS NBBO displayed sizes (the
-    L1 depth a retail rail can see; RH exposes no API L2). Positive = bid-heavy
-    (supportive for the long-only lane) — the sign convention viability's
-    Phase 4a microstructure rules already score (>0.12 boost, <-0.18 penalty +
-    warning). None when no live feed covers the symbol (behavior unchanged).
+    bid total vs ask total). Equities, best-first: a FRESH multi-venue Level 2
+    snapshot from the IQFeed depth bridge (host-side daemon writing
+    ``iqfeed_depth_snapshots``; scripts/iqfeed_depth_bridge.py), else the
+    Massive WS NBBO displayed sizes (the L1 depth the RH rail can see).
+    Positive = bid-heavy (supportive for the long-only lane) — the sign
+    convention viability's Phase 4a microstructure rules already score
+    (>0.12 boost, <-0.18 penalty + warning). None when no live feed covers
+    the symbol (behavior unchanged).
     """
     s = (symbol or "").strip().upper()
     if not s:
@@ -39,6 +55,24 @@ def _live_book_imbalance(symbol: str) -> float | None:
                 return None
             r = float(r)
             return round((r - 1.0) / (r + 1.0), 4)
+        if db is not None:
+            # True 5-level multi-venue depth (fail-open: missing table / stale
+            # bridge -> fall through to the L1 sizes below)
+            try:
+                from sqlalchemy import text as _sql
+
+                row = db.execute(
+                    _sql(
+                        "SELECT imbalance5 FROM iqfeed_depth_snapshots "
+                        "WHERE symbol = :s AND observed_at > (now() at time zone 'utc') - interval '15 seconds' "
+                        "ORDER BY observed_at DESC LIMIT 1"
+                    ),
+                    {"s": s},
+                ).fetchone()
+                if row is not None and row[0] is not None:
+                    return float(row[0])
+            except Exception:
+                pass
         from ...massive_client import get_ws_quote
 
         q = get_ws_quote(s)
@@ -50,17 +84,6 @@ def _live_book_imbalance(symbol: str) -> float | None:
         return round((float(q.bid_size) - float(q.ask_size)) / tot, 4)
     except Exception:
         return None
-from .evolution import record_evolution_trace
-from .features import ExecutionReadinessFeatures
-from .telemetry import log_tick
-from .variants import iter_momentum_families
-from .viability import score_viability
-from .viability_scope import VIABILITY_SCOPE_AGGREGATE, VIABILITY_SCOPE_SYMBOL
-
-HUB_NODE_ID = "nm_momentum_crypto_intel"
-VIABILITY_NODE_ID = "nm_momentum_viability_pool"
-
-_log = logging.getLogger(__name__)
 
 
 def maybe_run_momentum_neural_tick(
@@ -193,7 +216,7 @@ def run_momentum_neural_tick(
         # field. Fill it per-symbol from the LIVE feeds now running in this process
         # (#596): Coinbase level2 ring buffer for crypto, Massive WS NBBO sizes for
         # equities. None (no feed for the symbol) -> unchanged behavior.
-        _imb = _live_book_imbalance(sym)
+        _imb = _live_book_imbalance(sym, db=db)
         sym_feats = replace(feats, book_imbalance=_imb) if _imb is not None else feats
         for family in iter_momentum_families():
             vr = score_viability(sym, family, ctx, sym_feats, db=db)
