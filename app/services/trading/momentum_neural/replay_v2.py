@@ -40,7 +40,11 @@ from ....db import SessionLocal
 from ....config import settings
 from ..indicator_core import compute_atr
 from ..market_data import fetch_ohlcv_df
-from .entry_gates import halt_resume_dip_trigger, momentum_pullback_trigger
+from .entry_gates import (
+    TICK_ARMED_WAIT_REASONS,
+    halt_resume_dip_trigger,
+    momentum_pullback_trigger,
+)
 from .paper_execution import (
     effective_stop_atr_pct,
     runner_trail_stop,
@@ -528,7 +532,7 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
                 # live price so the tick-break path can fire mid-bar like live.
                 if (
                     not ok
-                    and _treason in ("waiting_for_break", "waiting_for_reclaim")
+                    and _treason in TICK_ARMED_WAIT_REASONS
                     and isinstance(dbg, dict)
                     and dbg.get("pullback_high")
                 ):

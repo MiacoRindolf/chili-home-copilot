@@ -2171,7 +2171,10 @@ def tick_live_session(
             # pullback low so sizing + placement can stop just UNDER the structure
             # (not at a noise-tight ATR). The momentum_volume fallback has no
             # structure -> clear it so the vol-floored ATR stop is used instead.
-            if _trigger_reason in ("pullback_break_ok", "pullback_break_tick_ok", "halt_resume_dip_ok") and _pb_debug.get("pullback_low"):
+            if _trigger_reason in (
+                "pullback_break_ok", "pullback_break_tick_ok", "halt_resume_dip_ok",
+                "deep_reclaim_ok", "deep_reclaim_tick_ok",
+            ) and _pb_debug.get("pullback_low"):
                 le["structural_stop_price"] = float(_pb_debug["pullback_low"])
                 # #2 Breakout-or-bailout: stash the broken pullback HIGH (the breakout
                 # level) so the held-position handler can fast-bail if it fails to hold
@@ -2209,8 +2212,10 @@ def tick_live_session(
             # Stash the level we're WAITING to break so the event loop can dispatch
             # a tick-speed re-evaluation the instant a live tick crosses it (the
             # tick-break path above then fires within seconds, like Ross).
+            from .entry_gates import TICK_ARMED_WAIT_REASONS
+
             _wl = _pb_debug.get("pullback_high") if isinstance(_pb_debug, dict) else None
-            if _trigger_reason in ("waiting_for_break", "waiting_for_reclaim") and _wl:
+            if _trigger_reason in TICK_ARMED_WAIT_REASONS and _wl:
                 if le.get("watch_break_level") != float(_wl):
                     le["watch_break_level"] = float(_wl)
                     _commit_le(sess, le)
@@ -2334,7 +2339,15 @@ def tick_live_session(
                 if submit_raw:
                     try:
                         t_sub = datetime.fromisoformat(str(submit_raw).replace("Z", "+00:00")).replace(tzinfo=None)
-                        if (_utcnow() - t_sub).total_seconds() > 10:
+                        # Ack patience (2026-06-11 first live equity attempts): RH
+                        # holds orders in "unconfirmed" review for 10s+ right after
+                        # the open, so a 10s window cancelled MARKETABLE limits
+                        # (SNDG limit 18.36 vs ask 18.25 — never filled). Resting
+                        # longer is bounded risk: the limit caps the price and the
+                        # breakout-or-bailout guards a late fill.
+                        _ack_s = float(getattr(
+                            settings, "chili_momentum_entry_ack_timeout_seconds", 45.0) or 45.0)
+                        if (_utcnow() - t_sub).total_seconds() > _ack_s:
                             # RACE GUARD: the order may have FILLED between the 10s
                             # ack timeout and this (<=30s-cadence) tick — illiquid
                             # small-caps fill slowly (resting limit). Re-fetch FRESH
