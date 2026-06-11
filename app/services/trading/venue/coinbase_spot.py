@@ -1675,6 +1675,41 @@ class CoinbaseWebSocketSeam:
     def _on_close(self) -> None:
         _log.info("[coinbase_ws] connection closed")
         self._running = False
+        # SELF-HEAL (2026-06-11): the SDK's retry=True only covers transient
+        # drops — this callback firing means it GAVE UP (it died twice overnight
+        # ~45min apart, freezing the crypto quote cache + level2 book buffers
+        # until a container restart; every consumer silently fell back to REST
+        # and tripped 429 backoffs). Re-open with capped backoff and re-subscribe
+        # everything we were watching.
+        if self.enabled and not getattr(self, "_reconnecting", False):
+            self._reconnecting = True
+            import threading as _th
+
+            _th.Thread(
+                target=self._reconnect_loop, daemon=True, name="coinbase-ws-reconnect"
+            ).start()
+
+    def _reconnect_loop(self) -> None:
+        import time as _time
+
+        delay = 2.0
+        try:
+            while self.enabled and not self._running:
+                _time.sleep(delay)
+                delay = min(delay * 2.0, 60.0)
+                try:
+                    prev = sorted(self._subscribed)
+                    self._subscribed.clear()
+                    self._ws = None
+                    res = self.start(product_ids=prev or None)
+                    if res.get("ok"):
+                        _log.info("[coinbase_ws] reconnected (resubscribed %d products)", len(prev))
+                        return
+                    _log.warning("[coinbase_ws] reconnect refused: %s", res.get("reason"))
+                except Exception as e:
+                    _log.warning("[coinbase_ws] reconnect attempt failed: %s", e)
+        finally:
+            self._reconnecting = False
 
     def _handle_l2(self, events: list[dict]) -> None:
         from ..microstructure import BookLevel, BookSnapshot, get_book_buffer
