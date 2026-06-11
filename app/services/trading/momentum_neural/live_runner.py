@@ -1260,6 +1260,37 @@ def _entry_interval_seconds() -> float:
     return float(_INTERVAL_SECONDS.get(iv, 300.0))
 
 
+def _pending_entry_cancel_reason(
+    *,
+    bid: float | None,
+    structural_stop: float,
+    limit_px: float,
+    elapsed_s: float | None,
+    rest_bars: float,
+    interval_s: float,
+) -> str | None:
+    """EVENT-DRIVEN pending-entry lifecycle decision (operator 2026-06-11: "the
+    right question is not how many seconds — it is what INVALIDATES the order").
+
+    Returns the cancel reason, or None to keep resting:
+      * ``entry_invalidated_stop_breach`` — live bid broke the structural stop:
+        the setup died; a fill now would be an instant bailout.
+      * ``entry_limit_left_behind`` — live bid is ABOVE our buy limit: the move
+        left without us; the order can only fill on the way back down (adverse
+        selection). Re-watch decides the chase with a fresh limit.
+      * ``entry_rest_backstop`` — the order outlived the bar evidence that
+        produced it (N entry-interval BARS — no free seconds).
+    Pure + side-effect-free.
+    """
+    if bid is not None and structural_stop > 0 and bid < structural_stop:
+        return "entry_invalidated_stop_breach"
+    if bid is not None and limit_px > 0 and bid > limit_px:
+        return "entry_limit_left_behind"
+    if elapsed_s is not None and elapsed_s > max(0.5, rest_bars) * interval_s:
+        return "entry_rest_backstop"
+    return None
+
+
 def _breakout_bailout_window_seconds() -> float:
     """Early window (seconds) for the #2 breakout-or-bailout fast exit = N
     entry-interval bars. One documented knob (bars), derived from the configured
@@ -2334,20 +2365,49 @@ def tick_live_session(
                 db.flush()
                 return {"ok": True, "session_id": sess.id, "state": sess.state}
             if no and _order_open(no):
-                # C3: Ack timeout — cancel if pending too long
+                # C3: EVENT-DRIVEN pending-entry lifecycle (operator 2026-06-11:
+                # "the right question is not how many seconds — it is what
+                # INVALIDATES the order"). Ross cancels when the setup dies, not
+                # when a clock expires. Three triggers, all funneling into the
+                # same race-guarded cancel sequence below:
+                #   1. INVALIDATION — the live bid broke the structural stop:
+                #      the trigger's premise is gone; a fill now would be an
+                #      instant bailout. Event-driven (rides the 15s loop AND the
+                #      LiveRunnerLoop pending-entry fast ticks).
+                #   2. RUNAWAY — the live bid is ABOVE our buy limit: the move
+                #      left without us and the order can only fill on the way
+                #      back down (adverse selection). Re-watch decides the chase
+                #      with a fresh limit.
+                #   3. BACKSTOP — the order must not outlive the bar evidence
+                #      that produced it: N entry-interval bars (knob in BARS,
+                #      like breakout_bailout_max_bars — no free seconds). This
+                #      also outwaits RH's "unconfirmed" review latency by
+                #      construction (2 bars @1m = 120s >> the ~13s review that
+                #      killed the CPSH/SNDG submits at the old 10s window).
+                try:
+                    _ptick, _pfr = adapter.get_best_bid_ask(product_id)
+                    _pbid = float(_ptick.bid) if (_ptick is not None and _ptick.bid) else None
+                except Exception:
+                    _pbid = None
+                _stop_px = float(le.get("structural_stop_price") or 0.0)
+                try:
+                    _lim_px = float(le.get("entry_limit_price") or 0.0)
+                except (TypeError, ValueError):
+                    _lim_px = 0.0
                 submit_raw = le.get("entry_submit_utc")
                 if submit_raw:
                     try:
                         t_sub = datetime.fromisoformat(str(submit_raw).replace("Z", "+00:00")).replace(tzinfo=None)
-                        # Ack patience (2026-06-11 first live equity attempts): RH
-                        # holds orders in "unconfirmed" review for 10s+ right after
-                        # the open, so a 10s window cancelled MARKETABLE limits
-                        # (SNDG limit 18.36 vs ask 18.25 — never filled). Resting
-                        # longer is bounded risk: the limit caps the price and the
-                        # breakout-or-bailout guards a late fill.
-                        _ack_s = float(getattr(
-                            settings, "chili_momentum_entry_ack_timeout_seconds", 45.0) or 45.0)
-                        if (_utcnow() - t_sub).total_seconds() > _ack_s:
+                        _cancel_why = _pending_entry_cancel_reason(
+                            bid=_pbid,
+                            structural_stop=_stop_px,
+                            limit_px=_lim_px,
+                            elapsed_s=(_utcnow() - t_sub).total_seconds(),
+                            rest_bars=float(getattr(
+                                settings, "chili_momentum_entry_max_rest_bars", 2.0) or 2.0),
+                            interval_s=_entry_interval_seconds(),
+                        )
+                        if _cancel_why is not None:
                             # RACE GUARD: the order may have FILLED between the 10s
                             # ack timeout and this (<=30s-cadence) tick — illiquid
                             # small-caps fill slowly (resting limit). Re-fetch FRESH
@@ -2382,7 +2442,12 @@ def tick_live_session(
                                     "ok": True, "session_id": sess.id, "state": sess.state,
                                     "pending": "ack_timeout_cancel_raced_fill_adopt",
                                 }
-                            _emit(db, sess, "entry_ack_timeout", {"elapsed_sec": (_utcnow() - t_sub).total_seconds()})
+                            _emit(db, sess, "entry_ack_timeout", {
+                                "elapsed_sec": (_utcnow() - t_sub).total_seconds(),
+                                "reason": _cancel_why,
+                                "bid": _pbid, "limit": _lim_px or None,
+                                "structural_stop": _stop_px or None,
+                            })
                             _safe_transition(db, sess, STATE_WATCHING_LIVE)
                             le["entry_submitted"] = False
                             le["entry_order_id"] = None
