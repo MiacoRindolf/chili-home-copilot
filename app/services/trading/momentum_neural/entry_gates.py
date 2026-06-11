@@ -680,6 +680,137 @@ def momentum_pullback_trigger(
     )
 
 
+def halt_resume_dip_trigger(
+    df: pd.DataFrame,
+    *,
+    entry_interval: str = "1m",
+    halt_resumed_at_utc: Any,
+    now: Any = None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """Ross's halt-resume DIP BUY (2026-06-10 DSY +$20k leg: "it drops and on the
+    resumption I bought the dip").
+
+    After a halt resumes, price discovery is violent: a pop (or flush), then the
+    FIRST dip that stabilizes and curls back up is the entry — the generic
+    pullback-break needs more bars than the move gives it, and the resume cooldown
+    sat the lane out entirely (DSY 06-10: armed at rank #1 all day, zero entries).
+    This trigger demands STRUCTURE, not a market-chase at the resume tick:
+
+      1. RECENCY — only within ``chili_momentum_halt_resume_dip_window_seconds``
+         of the resume; past it the normal trigger ladder owns the tape.
+      2. A REAL DIP off the post-resume reference high — depth at least the
+         ATR%-scaled noise floor (not jitter) and at most the volatility-scaled
+         deep cap (not a collapse). All bounds derive from the instrument's own
+         ATR%; the absolute floors only guard the thin-data case.
+      3. STABILIZATION + RECLAIM — the entry bar makes no new low under the dip
+         and closes back above the prior bar's high with conviction
+         (``is_strong_bull_break_candle``: topping-tail/doji "reclaims" rejected).
+      4. VOLUME still carries the move (sustained rel-vol, fails open on thin
+         data — the shared `_sustained_rvol` semantics).
+
+    Returns the shared ``(ok, reason, debug)`` 3-tuple; on fire, ``debug`` carries
+    ``pullback_low`` (the dip low = structural stop) and ``pullback_high`` (the
+    post-resume reference high = breakout-or-bailout level) under the SAME keys as
+    the pullback-break trigger, so sizing, stop placement, and the fast-bailout
+    machinery are reused unchanged in live, paper, and replay.
+    """
+    debug: dict[str, Any] = {"entry_interval": entry_interval, "pattern": "halt_resume_dip"}
+    if df is None or getattr(df, "empty", True) or len(df) < 3:
+        return False, "resume_dip_insufficient_bars", debug
+    try:
+        resumed = pd.Timestamp(halt_resumed_at_utc)
+        if resumed.tzinfo is None:
+            resumed = resumed.tz_localize("UTC")
+        else:
+            resumed = resumed.tz_convert("UTC")
+    except Exception:
+        return False, "resume_dip_bad_resume_ts", debug
+    now_ts = pd.Timestamp(now) if now is not None else pd.Timestamp.now(tz="UTC")
+    if now_ts.tzinfo is None:
+        now_ts = now_ts.tz_localize("UTC")
+    window_s = float(getattr(settings, "chili_momentum_halt_resume_dip_window_seconds", 600.0) or 600.0)
+    age_s = (now_ts - resumed).total_seconds()
+    debug["resume_age_seconds"] = round(age_s, 1)
+    if age_s < 0 or age_s > window_s:
+        return False, "resume_dip_window_passed", debug
+
+    idx = df.index
+    try:
+        if getattr(idx, "tz", None) is None:
+            idx = idx.tz_localize("UTC")
+    except Exception:
+        return False, "resume_dip_bad_index", debug
+    post = df.loc[idx >= resumed]
+    debug["bars_post_resume"] = int(len(post))
+    if len(post) < 3:
+        return False, "resume_dip_forming", debug
+
+    high = post["High"].astype(float)
+    low = post["Low"].astype(float)
+    close = post["Close"].astype(float)
+    opn = post["Open"].astype(float)
+
+    ref_pos = int(high.values.argmax())
+    ref_high = float(high.iloc[ref_pos])
+    debug["pullback_high"] = ref_high
+    if ref_pos >= len(post) - 1 or ref_high <= 0:
+        return False, "resume_dip_forming", debug  # still pumping — no dip yet
+
+    after = post.iloc[ref_pos + 1:]
+    if len(after) < 2:
+        return False, "resume_dip_forming", debug  # need at least a dip bar + a reclaim bar
+    # the dip is measured BEFORE the candidate entry bar — the entry bar must HOLD it
+    dip_low = float(after["Low"].astype(float).iloc[:-1].min())
+    debug["pullback_low"] = dip_low
+    dip_depth = (ref_high - dip_low) / ref_high
+    debug["dip_depth_pct"] = round(dip_depth * 100.0, 2)
+
+    # Volatility-relative bounds from the FULL frame's ATR% (same source as the
+    # pullback trigger); absolute floors only protect the thin-data case.
+    atr_pct = None
+    try:
+        arrays = compute_all_from_df(df, needed={"atr", "volume_ratio"})
+        atr = arrays.get("atr") or []
+        cur = len(df) - 1
+        _a = float(atr[cur]) if cur < len(atr) and atr[cur] is not None else None
+        _p = float(df["Close"].astype(float).iloc[-1])
+        if _a is not None and _p > 0:
+            atr_pct = _a / _p
+    except Exception:
+        arrays = {}
+        atr_pct = None
+    noise_floor = max(0.003, 0.5 * (atr_pct or 0.01))
+    deep_cap = min(0.25, max(0.06, 6.0 * (atr_pct or 0.01)))
+    debug["atr_pct"] = round(atr_pct, 5) if atr_pct is not None else None
+    debug["noise_floor_pct"] = round(noise_floor * 100.0, 2)
+    debug["deep_cap_pct"] = round(deep_cap * 100.0, 2)
+    if dip_depth < noise_floor:
+        return False, "resume_dip_too_shallow", debug
+    if dip_depth > deep_cap:
+        return False, "resume_dip_too_deep", debug
+
+    last_o, last_h = float(opn.iloc[-1]), float(high.iloc[-1])
+    last_l, last_c = float(low.iloc[-1]), float(close.iloc[-1])
+    prev_h = float(high.iloc[-2])
+    if last_l < dip_low * (1.0 - 1e-9) or last_c <= prev_h:
+        return False, "resume_dip_no_reclaim", debug
+    from .candles import is_strong_bull_break_candle
+
+    if not is_strong_bull_break_candle(
+        last_o, last_h, last_l, last_c,
+        min_close_pos=float(getattr(settings, "chili_momentum_entry_break_candle_min_close_pos", 0.50) or 0.50),
+    ):
+        return False, "resume_dip_weak_candle", debug
+
+    vr = arrays.get("volume_ratio") or []
+    srv = _sustained_rvol(vr, len(df) - 1, lookback=3)
+    debug["sustained_rvol"] = round(srv, 2) if srv is not None else None
+    if srv is not None and srv < 1.0:
+        return False, "resume_dip_volume_faded", debug
+
+    return True, "halt_resume_dip_ok", debug
+
+
 def run_paper_entry_gates(
     db: Session,
     *,

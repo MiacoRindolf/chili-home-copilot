@@ -40,7 +40,7 @@ from ....db import SessionLocal
 from ....config import settings
 from ..indicator_core import compute_atr
 from ..market_data import fetch_ohlcv_df
-from .entry_gates import momentum_pullback_trigger
+from .entry_gates import halt_resume_dip_trigger, momentum_pullback_trigger
 from .paper_execution import (
     effective_stop_atr_pct,
     runner_trail_stop,
@@ -180,6 +180,12 @@ class Tape:
         """Inside the actual quote gap — no acting on the stale pre-halt quote."""
         t = _aware(ts)
         return any(a <= t < b for a, b in self.halts.get(sym, []))
+
+    def last_halt_end_before(self, sym: str, ts) -> datetime | None:
+        """End of the most recent halt that RESUMED at/before ts (None if none)."""
+        t = _aware(ts)
+        ends = [b for _a, b in self.halts.get(sym, []) if b <= t]
+        return max(ends) if ends else None
 
     def in_halt_or_cooldown(self, sym: str, ts) -> bool:
         t = _aware(ts)
@@ -475,7 +481,19 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
         for s in list(armed):
             if s in open_pos:
                 continue
-            if tape.in_halt_or_cooldown(s, now):
+            if tape.in_halt(s, now):
+                _tr(s, "gate_fail:halt_window", now)
+                continue
+            # Live parity: inside the resume-dip window the halt_resume_dip trigger
+            # owns the tape and may enter DURING the whipsaw cooldown (it demands
+            # dip+hold+reclaim structure); the generic trigger still waits it out.
+            _resume_end = tape.last_halt_end_before(s, now)
+            _dip_window = (
+                _resume_end is not None
+                and (_aware(now) - _resume_end).total_seconds()
+                <= float(getattr(settings, "chili_momentum_halt_resume_dip_window_seconds", 600.0) or 600.0)
+            )
+            if tape.in_halt_or_cooldown(s, now) and not _dip_window:
                 _tr(s, "gate_fail:halt_window", now)
                 continue
             df, c = day_frame(s)
@@ -485,14 +503,23 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
             upto = df[df.index <= now - pd.Timedelta(minutes=ENTRY_BAR_MIN)]
             if len(upto) < 12:
                 continue
-            # the trigger only changes when a NEW 5m bar completes — cache per
-            # (symbol, last-bar) so the 1-min grid doesn't 5x the trigger cost
-            _bar_key = (s, str(upto.index[-1]))
-            if _bar_key in trigger_cache:
-                ok, _treason, dbg = trigger_cache[_bar_key]
-            else:
-                ok, _treason, dbg = momentum_pullback_trigger(upto, entry_interval=ENTRY_INTERVAL)
-                trigger_cache[_bar_key] = (ok, _treason, dbg)
+            ok = False
+            if _dip_window:
+                ok, _treason, dbg = halt_resume_dip_trigger(
+                    upto, entry_interval=ENTRY_INTERVAL,
+                    halt_resumed_at_utc=_resume_end, now=now)
+            if not ok and tape.in_halt_or_cooldown(s, now):
+                _tr(s, "gate_fail:halt_window", now)   # cooldown holds unless the dip fired
+                continue
+            if not ok:
+                # the generic trigger only changes when a NEW bar completes — cache
+                # per (symbol, last-bar) so the 1-min grid doesn't multiply its cost
+                _bar_key = (s, str(upto.index[-1]))
+                if _bar_key in trigger_cache:
+                    ok, _treason, dbg = trigger_cache[_bar_key]
+                else:
+                    ok, _treason, dbg = momentum_pullback_trigger(upto, entry_interval=ENTRY_INTERVAL)
+                    trigger_cache[_bar_key] = (ok, _treason, dbg)
             if not ok:
                 _tr(s, "trigger_fail:" + str(_treason), now)
                 continue

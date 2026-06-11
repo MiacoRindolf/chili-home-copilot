@@ -1385,6 +1385,10 @@ def _register_fresh_quote_tick(db, sess, le: dict) -> None:
         _emit(db, sess, "halt_resumed", {
             "entry_cooldown_seconds": _halt_resume_cooldown_seconds(),
         })
+        # Persist the resume marker NOW — the halt_resume_dip trigger keys its
+        # entry window off it, so it must survive a process restart mid-window
+        # (other le mutations ride the next commit; this one is load-bearing).
+        _commit_le(sess, le)
 
 
 def _halt_resume_cooldown_active(le: dict) -> bool:
@@ -1907,12 +1911,29 @@ def tick_live_session(
                     try:
                         _df_pb = fetch_ohlcv_df(sess.symbol, interval=_interval, period="5d")
                         if _df_pb is not None and not getattr(_df_pb, "empty", True):
-                            # Shared trigger (parity): paper calls the SAME helper, so
-                            # both paths take the identical Ross pullback-break entry
-                            # (vol-aware, candle/VWAP/MACD, runaway). docs/DESIGN/MOMENTUM_LANE.md §8
-                            _trigger_ok, _trigger_reason, _pb_debug = momentum_pullback_trigger(
-                                _df_pb, entry_interval=_interval
-                            )
+                            # Halt-resume DIP first (Ross 06-10 DSY: "on the resumption
+                            # I bought the dip"): when a suspected halt just resumed,
+                            # the specialized dip trigger owns the tape for its window —
+                            # it demands dip+hold+reclaim structure, stronger evidence
+                            # than the generic pullback-break gives this fast a move.
+                            _resumed_at = le.get("halt_resumed_at_utc")
+                            if _resumed_at:
+                                try:
+                                    from .entry_gates import halt_resume_dip_trigger
+
+                                    _trigger_ok, _trigger_reason, _pb_debug = halt_resume_dip_trigger(
+                                        _df_pb, entry_interval=_interval,
+                                        halt_resumed_at_utc=_resumed_at,
+                                    )
+                                except Exception:
+                                    _trigger_ok = False
+                            if not _trigger_ok:
+                                # Shared trigger (parity): paper calls the SAME helper, so
+                                # both paths take the identical Ross pullback-break entry
+                                # (vol-aware, candle/VWAP/MACD, runaway). docs/DESIGN/MOMENTUM_LANE.md §8
+                                _trigger_ok, _trigger_reason, _pb_debug = momentum_pullback_trigger(
+                                    _df_pb, entry_interval=_interval
+                                )
                     except Exception:
                         _trigger_ok = False
                 if not _trigger_ok and _mode != "pullback_break":
@@ -1939,7 +1960,10 @@ def tick_live_session(
         # Halt-resume whipsaw guard: right after a suspected halt resumes, price
         # discovery is violent — sit out the cooldown (watching continues, structure
         # rebuilds with fresh bars), then enter on a clean post-resume setup.
-        if _score_ok and _trigger_ok and _mkt_open and _halt_resume_cooldown_active(le):
+        # EXCEPTION: the halt_resume_dip trigger IS the sanctioned post-resume entry
+        # (dip+hold+reclaim structure) — it may enter inside the cooldown.
+        if (_score_ok and _trigger_ok and _mkt_open and _halt_resume_cooldown_active(le)
+                and _trigger_reason != "halt_resume_dip_ok"):
             _emit(db, sess, "live_blocked_by_risk", {
                 "reason": "halt_resume_cooldown",
                 "halt_resumed_at_utc": le.get("halt_resumed_at_utc"),
@@ -1952,7 +1976,7 @@ def tick_live_session(
             # pullback low so sizing + placement can stop just UNDER the structure
             # (not at a noise-tight ATR). The momentum_volume fallback has no
             # structure -> clear it so the vol-floored ATR stop is used instead.
-            if _trigger_reason == "pullback_break_ok" and _pb_debug.get("pullback_low"):
+            if _trigger_reason in ("pullback_break_ok", "halt_resume_dip_ok") and _pb_debug.get("pullback_low"):
                 le["structural_stop_price"] = float(_pb_debug["pullback_low"])
                 # #2 Breakout-or-bailout: stash the broken pullback HIGH (the breakout
                 # level) so the held-position handler can fast-bail if it fails to hold

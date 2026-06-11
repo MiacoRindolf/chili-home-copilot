@@ -2188,6 +2188,15 @@ class Settings(BaseSettings):
         default=120.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_RESUME_COOLDOWN_SECONDS"),
     )
+    # Window after a halt RESUMES in which the specialized halt_resume_dip entry
+    # pattern owns the tape (Ross 2026-06-10 DSY: "it drops and on the resumption I
+    # bought the dip"). The dip trigger demands dip+hold+reclaim STRUCTURE — strictly
+    # stronger evidence than the generic pullback-break — so it may enter inside the
+    # whipsaw cooldown above. Past the window the normal trigger ladder owns entries.
+    chili_momentum_halt_resume_dip_window_seconds: float = Field(
+        default=600.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_RESUME_DIP_WINDOW_SECONDS"),
+    )
     # A CONFIGURED broker disconnected this long raises a loud ops alarm (websocket
     # broadcast + critical log). The RH refresh token died silently for ~7 weeks
     # (2026-04-19 -> 06-10) with only info-level log spam — never again.
