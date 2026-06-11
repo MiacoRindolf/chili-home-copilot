@@ -21,6 +21,8 @@ from typing import Any, Optional
 
 from sqlalchemy.orm import Session
 
+from .frozen_scope import diff_touches_frozen_scope, is_blocked
+
 logger = logging.getLogger(__name__)
 
 
@@ -119,6 +121,64 @@ def create_dispatch_worktree(repo_root: str, task_id: int) -> WorktreeHandle:
             stderr=diag,
         )
     return WorktreeHandle(branch=branch, path=path)
+
+
+def git_changed_files(worktree: Path) -> list[str]:
+    """Real changed paths from ``git status --porcelain`` (git truth, not the
+    snapshot's claimed file list). ``-uall`` expands untracked directories to
+    individual files (a plain porcelain call collapses a brand-new dir to
+    ``dir/``, which would hide frozen-scope paths inside it). Covers renames
+    (takes the new path)."""
+    try:
+        proc = subprocess.run(
+            ["git", "status", "--porcelain", "-uall"],
+            cwd=str(worktree), capture_output=True, text=True, check=False,
+        )
+    except OSError:
+        return []  # worktree path missing/invalid — nothing to report
+    if proc.returncode != 0:
+        return []
+    files: list[str] = []
+    for line in (proc.stdout or "").splitlines():
+        if len(line) < 4:
+            continue
+        path = line[3:].strip().strip('"')
+        if " -> " in path:  # rename: old -> new
+            path = path.split(" -> ", 1)[1].strip().strip('"')
+        if path:
+            files.append(path.replace("\\", "/"))
+    return files
+
+
+def enforce_frozen_scope_post_apply(
+    worktree: Path, claimed_files: list[str]
+) -> Optional[dict[str, Any]]:
+    """Post-apply frozen-scope gate. Returns a refusal payload (ok=False)
+    when the APPLIED diff touches a blocked-scope path, else None.
+
+    The pre-dispatch check runs on ``intended_files``, which the miner often
+    cannot know — the applied patch is the first moment the real touched
+    paths exist. This gate runs on the union of git truth and the claimed
+    list, BEFORE any commit/push, so a diff touching e.g.
+    app/services/trading/* can never leave the sandbox.
+    """
+    scope_files = sorted({*git_changed_files(worktree), *(str(x) for x in claimed_files)})
+    hits = diff_touches_frozen_scope(scope_files)
+    if not is_blocked(hits):
+        return None
+    h0 = next(h for h in hits if h.severity == "block")
+    return {
+        "ok": False,
+        "message": (
+            f"frozen_scope_blocked: {h0.file_path} (glob {h0.glob}) — {h0.reason}"
+        ),
+        "files": scope_files,
+        "loc": 0,
+        "frozen_hits": [
+            {"glob": h.glob, "severity": h.severity, "reason": h.reason, "file_path": h.file_path}
+            for h in hits
+        ],
+    }
 
 
 def _diff_loc_from_files(files: list[str], worktree: Path) -> int:
@@ -316,6 +376,12 @@ def apply_suggestion_in_worktree(
     if not isinstance(files_changed, list):
         files_changed = []
     loc = _diff_loc_from_files([str(x) for x in files_changed], wt)
+
+    # Post-apply frozen-scope gate — refuses BEFORE commit/push.
+    refusal = enforce_frozen_scope_post_apply(wt, [str(x) for x in files_changed])
+    if refusal is not None:
+        refusal["loc"] = int(loc)
+        return refusal
 
     result: dict[str, Any] = {
         "ok": True,

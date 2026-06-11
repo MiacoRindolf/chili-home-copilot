@@ -298,17 +298,36 @@ def _run_sandboxed(
             adb.close()
         ms_apply = (time.monotonic() - t_apply0) * 1000.0
         if not apply_out.get("ok"):
+            apply_msg = str(apply_out.get("message", "apply failed"))
+            # Post-apply frozen-scope refusal (runner gate, git truth): mirror
+            # the pre-dispatch blocked-scope escalation so the operator sees
+            # it, instead of burying it as a generic validation failure.
+            frozen_blocked = apply_msg.startswith("frozen_scope_blocked")
             if run_id:
                 audit.close_run(
                     run_id,
-                    decision="validation_failed",
-                    escalation_reason=apply_out.get("message", "apply failed")[:2000],
+                    decision="escalate" if frozen_blocked else "validation_failed",
+                    escalation_reason=apply_msg[:2000],
+                    notify_user=frozen_blocked,
                     llm_snapshot=_sandbox_llm_snapshot(
                         tier, cx, suggestion_id, meta, ms_draft, ms_apply, 0.0, meta.get("model", "")
                     ),
-                    diff_summary={"files": apply_out.get("files") or [], "loc": 0},
+                    diff_summary={
+                        "files": apply_out.get("files") or [],
+                        "loc": 0,
+                        "frozen_hits": apply_out.get("frozen_hits") or [],
+                    },
                 )
-            return {"status": "sandboxed_fail", "reason": apply_out.get("message", "apply")}
+                if frozen_blocked:
+                    escalate_to_user(
+                        run_id,
+                        title="Dispatch refused: blocked scope (post-apply)",
+                        body=f"Task {candidate.task_id}: {apply_msg}",
+                        severity="warning",
+                    )
+            if frozen_blocked:
+                return {"status": "blocked_scope", "reason": apply_msg}
+            return {"status": "sandboxed_fail", "reason": apply_msg}
 
         diff_files = list(apply_out.get("files") or [])
         diff_loc = int(apply_out.get("loc") or 0)
