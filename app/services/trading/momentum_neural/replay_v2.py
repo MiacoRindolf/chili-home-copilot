@@ -272,6 +272,14 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
 
     armed: dict[str, dict] = {}
     trigger_cache: dict[tuple, tuple] = {}
+    trace: list[dict] = []
+    _last_stage: dict[str, str] = {}
+
+    def _tr(sym: str, stage: str, t) -> None:
+        if _last_stage.get(sym) == stage or len(trace) >= 2000:
+            return
+        _last_stage[sym] = stage
+        trace.append({"t": str(t)[11:16], "sym": sym, "stage": stage})
     armed_spans: dict[str, list[list[str]]] = defaultdict(list)   # sym -> [[from,to],...] HH:MM UTC
     trades: list[dict] = []
     open_pos: dict[str, dict] = {}
@@ -376,7 +384,10 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
                     armed[s] = {"since": now}
                     armed_spans[s].append([str(now)[11:16], None])
         for s in list(armed):
-            if s in open_pos or tape.in_halt_or_cooldown(s, now):
+            if s in open_pos:
+                continue
+            if tape.in_halt_or_cooldown(s, now):
+                _tr(s, "gate_fail:halt_window", now)
                 continue
             # per-symbol attempt cooldown: a failed limit-touch attempt rests for the
             # fill window before retrying (mirrors the live ack-timeout + re-watch)
@@ -386,22 +397,26 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
             df, c = day_frame(s)
             if df is None:
                 continue
-            upto = df[df.index <= now]
+            # completed-bars-only, like live: a bar indexed by START closes at +5min
+            upto = df[df.index <= now - pd.Timedelta(minutes=5)]
             if len(upto) < 12:
                 continue
             # the trigger only changes when a NEW 5m bar completes — cache per
             # (symbol, last-bar) so the 1-min grid doesn't 5x the trigger cost
             _bar_key = (s, str(upto.index[-1]))
             if _bar_key in trigger_cache:
-                ok, dbg = trigger_cache[_bar_key]
+                ok, _treason, dbg = trigger_cache[_bar_key]
             else:
-                ok, _, dbg = momentum_pullback_trigger(upto, entry_interval="5m")
-                trigger_cache[_bar_key] = (ok, dbg)
+                ok, _treason, dbg = momentum_pullback_trigger(upto, entry_interval="5m")
+                trigger_cache[_bar_key] = (ok, _treason, dbg)
             if not ok:
+                _tr(s, "trigger_fail:" + str(_treason), now)
                 continue
+            _tr(s, "trigger_ok", now)
             armed[s]["since"] = now
             q = tape.at(s, now)
             if q is None:
+                _tr(s, "gate_fail:stale_quote", now)
                 continue
             bid, ask, sbps, dvol = q
             O, H, L, C, V = (c[k] for k in ("open", "high", "low", "close", "volume"))
@@ -410,6 +425,7 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
             atrp = float(atr.iloc[-1]) / mid if (mid > 0 and pd.notna(atr.iloc[-1])) else 0.0
             move_bps = atrp * 10_000.0
             if move_bps <= 0 or sbps > min(GATE_MOVE_FRAC * move_bps, SPREAD_ABS_CAP_BPS):
+                _tr(s, "gate_fail:wide_spread_%.0fbps" % sbps, now)
                 continue
             armed[s]["last_try"] = now
             limit = ask  # marketable limit at the REAL ask
@@ -433,6 +449,7 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
                 qty = min(want_qty, PARTICIPATION_CAP * float(b[V]))
                 if qty <= 0:
                     break
+                _tr(s, "fill@%.4g" % fill_px, now)
                 open_pos[s] = {
                     "entry": fill_px, "qty": qty, "stop": stop, "stop0": stop, "target": target,
                     "hwm": fill_px, "atrp": eff, "scaled": False, "df": df, "c": c, "scale_usd": 0.0,
@@ -479,6 +496,14 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
         for s in active_syms
     ]
 
+    result["decision_trace"] = trace
+    if armed_source == "live":
+        try:
+            result["divergence"] = _build_divergence(date, trace, trades)
+        except Exception:
+            logger.warning("[replay_v2] divergence build failed", exc_info=True)
+            result["divergence"] = []
+
     result["trades"] = sorted(trades, key=lambda z: z["t"])
     result["total_usd"] = round(state["cum"], 0)
     result["wins"] = sum(1 for t in trades if t["usd"] > 0)
@@ -488,6 +513,67 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
     if persist:
         _persist(result)
     return result
+
+
+def _build_divergence(date: str, trace: list[dict], trades: list[dict]) -> list[dict]:
+    """Per-symbol join of LIVE decisions vs REPLAY decisions, with a classified cause."""
+    db = SessionLocal()
+    try:
+        rows = db.execute(
+            text(
+                "SELECT s.symbol, to_char(e.ts,'HH24:MI') AS t, e.event_type, "
+                "coalesce(e.payload_json->>'reason', e.payload_json->>'limit_price','') AS detail "
+                "FROM trading_automation_events e "
+                "JOIN trading_automation_sessions s ON s.id = e.session_id "
+                "WHERE s.mode='live' AND s.symbol NOT LIKE '%-USD' "
+                "AND e.ts >= :lo AND e.ts < :hi "
+                "AND e.event_type IN ('live_entry_candidate_detected','live_entry_submitted',"
+                "'live_entry_filled','live_blocked_by_risk','entry_ack_timeout') "
+                "ORDER BY e.ts"
+            ),
+            {"lo": f"{date} 04:00:00", "hi": f"{date} 23:59:59"},
+        ).fetchall()
+    finally:
+        db.rollback(); db.close()
+    live_by_sym: dict[str, list] = defaultdict(list)
+    for sym, t, et, detail in rows:
+        live_by_sym[str(sym)].append((t, et, str(detail or "")[:40]))
+    replay_by_sym: dict[str, list] = defaultdict(list)
+    for r in trace:
+        replay_by_sym[r["sym"]].append((r["t"], r["stage"]))
+    traded_syms = {t["sym"] for t in trades}
+    out: list[dict] = []
+    for sym in sorted(set(live_by_sym) | set(replay_by_sym)):
+        lv = live_by_sym.get(sym, [])
+        rp = replay_by_sym.get(sym, [])
+        live_submits = [x for x in lv if x[1] == "live_entry_submitted" and x[2]]
+        live_blocks = [x for x in lv if x[1] == "live_blocked_by_risk"]
+        rp_fills = [x for x in rp if x[1].startswith("fill@")]
+        rp_trig_fail = [x for x in rp if x[1].startswith("trigger_fail")]
+        rp_gate_fail = [x for x in rp if x[1].startswith("gate_fail")]
+        if live_submits and sym in traded_syms:
+            cause = "aligned"
+        elif live_submits and not rp_fills:
+            if rp_gate_fail:
+                cause = "replay_gate:" + rp_gate_fail[-1][1].split(":", 1)[1]
+            elif rp_trig_fail:
+                cause = "replay_trigger:" + rp_trig_fail[-1][1].split(":", 1)[1]
+            elif not rp:
+                cause = "arming_timing"
+            else:
+                cause = "fill_model_no_touch"
+        elif rp_fills and not live_submits:
+            lb = live_blocks[-1][2] if live_blocks else "?"
+            cause = "live_blocked:" + lb
+        else:
+            cause = "both_skipped"
+        out.append({
+            "sym": sym,
+            "live": "; ".join(f"{t} {et.replace('live_','')}{(' '+d) if d else ''}" for t, et, d in lv[-4:]) or "-",
+            "replay": "; ".join(f"{t} {st}" for t, st in rp[-4:]) or "-",
+            "cause": cause,
+        })
+    return out
 
 
 def _persist(result: dict) -> None:

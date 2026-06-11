@@ -93,6 +93,16 @@ svg.rl-chart { cursor:grab; width:100%; height:252px; background:rgba(0,0,0,.18)
       <thead><tr><th>Entry (UTC)</th><th>Exit</th><th>Symbol</th><th>Entry px</th><th>Exit px</th><th>Qty</th><th>Spread</th><th>Stop</th><th>Target</th><th>Exit reason</th><th>P/L</th></tr></thead>
       <tbody id="rl-trades"></tbody>
     </table>
+
+    <div id="rl-div-sec" style="display:none;">
+      <h4 style="margin:18px 0 6px;font-size:13px;">🔀 Live vs replay divergence <span style="font-size:10.5px;color:var(--text-secondary);font-weight:400;">— per symbol: what LIVE did vs what the REPLAY did, and why they differ</span></h4>
+      <div id="rl-div-kpis" class="rl-kpis" style="margin-bottom:8px;"></div>
+      <table class="rl-t">
+        <thead><tr><th>Symbol</th><th>Live decisions</th><th>Replay decisions</th><th>Cause</th></tr></thead>
+        <tbody id="rl-div-rows"></tbody>
+      </table>
+      <div id="rl-div-more" style="padding:6px;text-align:center;"></div>
+    </div>
   </div>
 
   <div class="rl-card">
@@ -153,7 +163,38 @@ async function rlLoadResult(date, mode) {
       kpi(r.halt_windows||0, 'Halt windows') + kpi(r.day_halted||'—', 'Day halt');
     rlTimeline(r);
     rlTradesTable(r);
+    rlDivergence(r);
   } catch (e) { /* ignore */ }
+}
+
+function rlCauseChip(cause) {
+  const root = String(cause||'').split(':')[0];
+  const c = {aligned:'#3fb950', replay_trigger:'#e8b339', replay_gate:'#f0883e', arming_timing:'#a371f7',
+             fill_model_no_touch:'#f85149', live_blocked:'#58a6ff', both_skipped:'#8b949e'}[root] || '#8b949e';
+  return '<span style="display:inline-block;padding:1px 7px;border-radius:9px;font-size:10.5px;font-weight:600;'
+       + 'color:'+c+';border:1px solid '+c+'55;background:'+c+'18;white-space:nowrap;">'+rlEsc(cause)+'</span>';
+}
+
+function rlDivergence(r, showAll) {
+  const sec = document.getElementById('rl-div-sec');
+  const rows = r.divergence || [];
+  if (!rows.length) { sec.style.display = 'none'; return; }
+  sec.style.display = '';
+  const interesting = rows.filter(d => d.cause !== 'both_skipped');
+  const counts = {};
+  rows.forEach(d => { const k = String(d.cause||'').split(':')[0]; counts[k] = (counts[k]||0) + 1; });
+  document.getElementById('rl-div-kpis').innerHTML = Object.entries(counts)
+    .sort((a,b) => b[1]-a[1]).map(([k,n]) => kpi(n, k)).join('');
+  const vis = showAll ? rows : interesting;
+  document.getElementById('rl-div-rows').innerHTML = vis.map(d =>
+    '<tr><td><b>'+rlEsc(d.sym)+'</b></td>'+
+    '<td style="font-size:11px;color:var(--text-secondary);max-width:340px;">'+rlEsc(d.live)+'</td>'+
+    '<td style="font-size:11px;color:var(--text-secondary);max-width:340px;">'+rlEsc(d.replay)+'</td>'+
+    '<td>'+rlCauseChip(d.cause)+'</td></tr>'
+  ).join('') || '<tr><td colspan="4" style="color:var(--text-secondary);">No divergent symbols — live and replay agreed everywhere.</td></tr>';
+  document.getElementById('rl-div-more').innerHTML = (!showAll && rows.length > interesting.length)
+    ? '<a href="#" style="font-size:11.5px;color:#3b8bff;" onclick="rlDivergence(rlCur,true); return false;">Show '+(rows.length-interesting.length)+' both-skipped symbols ▾</a>'
+    : (showAll ? '<a href="#" style="font-size:11.5px;color:#3b8bff;" onclick="rlDivergence(rlCur); return false;">Hide both-skipped ▴</a>' : '');
 }
 const kpi = (v,k,cls) => '<div class="rl-kpi"><div class="v '+(cls||'')+'">'+v+'</div><div class="k">'+k+'</div></div>';
 
