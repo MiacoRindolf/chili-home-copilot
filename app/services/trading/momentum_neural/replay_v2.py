@@ -37,6 +37,7 @@ import pandas as pd
 from sqlalchemy import text
 
 from ....db import SessionLocal
+from ....config import settings
 from ..indicator_core import compute_atr
 from ..market_data import fetch_ohlcv_df
 from .entry_gates import momentum_pullback_trigger
@@ -47,13 +48,23 @@ from .paper_execution import (
     stop_target_prices,
     structural_or_vol_floored_atr_pct,
 )
+from .risk_policy import adaptive_max_spread_bps
 from .ross_momentum import ROSS_PILLAR_WEIGHTS_LIQUIDITY_BIASED, score_universe
+from .strategy_params import family_default_params
 
 logger = logging.getLogger(__name__)
 
-# ── live-lane parameters (mirror the live config) ─────────────────────────────
-STOP_ATR_MULT, REWARD_RISK = 0.60, 2.0
+# ── live-lane parameters — read from the SAME sources the live runner uses ────
+_LIVE_PARAMS = family_default_params("default")
+STOP_ATR_MULT = float(_LIVE_PARAMS["stop_atr_mult"])                      # 0.60 default family
+TRAIL_ACTIVATE_BPS = float(_LIVE_PARAMS["trail_activate_return_bps"])     # live arms trailing pre-partial here
+REWARD_RISK = float(settings.chili_momentum_risk_reward_risk_ratio)
 SCALE_FRAC = scale_out_fraction()
+GUARD_BPS = float(settings.chili_momentum_order_notional_guard_bps)       # live marketable-limit premium over ask
+SPREAD_BASE_BPS = float(settings.chili_momentum_risk_max_spread_bps_live)
+SPREAD_EM_RATIO = float(settings.chili_momentum_risk_spread_to_expected_move_ratio)
+SPREAD_ABS_CAP_BPS = float(settings.chili_momentum_risk_max_spread_bps_abs_cap)
+TARGET_FIRE_FRAC = 0.995                                                  # live partial fires at bid >= target*0.995
 BASIS_USD = 22551.0
 RISK_PER_TRADE_USD = BASIS_USD * 0.01
 NOTIONAL_CAP_USD = BASIS_USD * 0.15
@@ -61,11 +72,9 @@ LIQ_FRACTION = 0.01
 MAX_SLOTS = 10
 DAILY_LOSS_CAP_USD = BASIS_USD * 0.05
 GIVEBACK_FRAC = 0.5
-GATE_MOVE_FRAC = 0.5
-SPREAD_ABS_CAP_BPS = 300.0
 REAP_MIN = 30
 PARTICIPATION_CAP = 0.10
-FILL_WINDOW_BARS = 2
+ENTRY_QUOTE_MAX_STALE_MIN = 2.5   # live blocks stale_bbo at 15s; the 1-min tape's best analog (cadence + jitter)
 HALT_GAP_MIN = 3.0
 RESUME_COOLDOWN_MIN = 2.0
 PX_MIN, PX_MAX = 1.0, 20.0
@@ -138,7 +147,7 @@ class Tape:
     def symbols(self) -> list[str]:
         return list(self.by_sym.keys())
 
-    def at(self, sym: str, ts) -> tuple[float, float, float, float] | None:
+    def at(self, sym: str, ts, max_stale_min: float = 5.0) -> tuple[float, float, float, float] | None:
         times = self._times.get(sym)
         if not times:
             return None
@@ -147,9 +156,14 @@ class Tape:
         if i < 0:
             return None
         row = self.by_sym[sym][i]
-        if t - row[0] > timedelta(minutes=5):
+        if t - row[0] > timedelta(minutes=max_stale_min):
             return None
         return row[1], row[2], row[3], row[4]
+
+    def in_halt(self, sym: str, ts) -> bool:
+        """Inside the actual quote gap — no acting on the stale pre-halt quote."""
+        t = _aware(ts)
+        return any(a <= t < b for a, b in self.halts.get(sym, []))
 
     def in_halt_or_cooldown(self, sym: str, ts) -> bool:
         t = _aware(ts)
@@ -158,15 +172,39 @@ class Tape:
                 return True
         return False
 
-    def first_after(self, sym: str, ts) -> tuple[datetime, float] | None:
+    def first_after(self, sym: str, ts) -> tuple | None:
+        """Full next tape row (ts, bid, ask, spread_bps, day_volume) after ts."""
         times = self._times.get(sym)
         if not times:
             return None
         i = bisect.bisect_right(times, _aware(ts))
         if i >= len(times):
             return None
-        row = self.by_sym[sym][i]
-        return row[0], row[1]
+        return self.by_sym[sym][i]
+
+
+def _expected_move_bps_15m(upto: pd.DataFrame, H: str, L: str, C: str) -> float | None:
+    """Live's expected-move basis (live_runner._expected_move_bps_from_ohlcv):
+    mean true range of the last <=14 FIFTEEN-minute bars over the last close, in
+    bps. The live spread gate AND the live stop vol-floor both use this number —
+    deriving it the same way is what makes those two gates replay at parity."""
+    try:
+        h = upto[H].astype(float).resample("15min").max()
+        low = upto[L].astype(float).resample("15min").min()
+        c = upto[C].astype(float).resample("15min").last()
+        ok = c.notna()
+        h, low, c = h[ok], low[ok], c[ok]
+        if len(c) < 2:
+            return None
+        pc = c.shift(1)
+        tr = pd.concat([h - low, (h - pc).abs(), (low - pc).abs()], axis=1).max(axis=1).iloc[1:].tail(14)
+        last_close = float(c.iloc[-1])
+        if not len(tr) or last_close <= 0:
+            return None
+        em = float(tr.mean()) / last_close * 10_000.0
+        return em if em > 0 else None
+    except Exception:
+        return None
 
 
 def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -> dict:
@@ -321,38 +359,40 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
             state["halted"] = "giveback"
 
     def manage_open(now) -> None:
+        # Live manages positions every ~30s tick on NBBO bid (live_runner.py:2550+,
+        # 2837-2924); the tape's 1-min cadence is the replay analog. All live exits
+        # are MARKET sells realized near the bid — exits here price AT the tape bid.
         for s in list(open_pos):
             p = open_pos[s]
-            df, c = p["df"], p["c"]
-            if now not in df.index:
-                continue
-            row = df.loc[now]
-            bh, bl = float(row[c["high"]]), float(row[c["low"]])
+            if tape.in_halt(s, now):
+                continue  # no quotes inside the gap; the resume sample handles any breach
             q = tape.at(s, now)
-            tape_bid = q[0] if q else None
-            if tape.in_halt_or_cooldown(s, now):
-                if bl <= p["stop"]:
-                    nxt = tape.first_after(s, now)
-                    if nxt:
-                        close_trade(s, p, nxt[1], "stop_through_halt_resume", when=now)
+            if q is None:
                 continue
-            if bl <= p["stop"]:
-                px = min(p["stop"], tape_bid) if tape_bid else p["stop"]
-                close_trade(s, p, px, "stop", when=now)
+            bid = q[0]
+            p["hwm"] = max(p["hwm"], bid)
+            if bid <= p["stop"]:
+                why = "trail_stop" if (p["scaled"] or p["trail_armed"]) and p["stop"] > p["stop0"] else "stop"
+                close_trade(s, p, bid, why, when=now)
                 continue
-            if not p["scaled"] and bh >= p["target"]:
+            # partial at the first target — live fires at bid >= target*0.995 and
+            # sells scale_out_fraction of the ORIGINAL qty (live_runner.py:2916-2964)
+            if not p["scaled"] and bid >= p["target"] * TARGET_FIRE_FRAC:
                 p["scaled"] = True
-                px = max(p["target"], tape_bid) if tape_bid else p["target"]
-                part = p["qty"] * SCALE_FRAC
-                p["scale_usd"] = (px - p["entry"]) * part
+                part = min(p["qty"], p["qty0"] * SCALE_FRAC)
+                p["scale_usd"] = (bid - p["entry"]) * part
                 state["cum"] += p["scale_usd"]
                 p["qty"] -= part
-                p["stop"] = p["entry"]
-            if p["scaled"]:
-                p["hwm"] = max(p["hwm"], bh)
+                p["stop"] = max(p["stop"], p["entry"])  # breakeven_stop_after_partial: ratchet only
+            # live also arms trailing pre-partial once bid clears entry by
+            # trail_activate_return_bps (live_runner.py:3033-3037)
+            if not p["trail_armed"] and bid >= p["entry"] * (1.0 + TRAIL_ACTIVATE_BPS / 10_000.0):
+                p["trail_armed"] = True
+            if p["scaled"] or p["trail_armed"]:
                 p["stop"] = runner_trail_stop(
                     high_water_mark=p["hwm"], atr_pct=p["atrp"], stop_atr_mult=STOP_ATR_MULT,
-                    breakeven_floor=p["entry"], current_stop=p["stop"], side_long=True)
+                    breakeven_floor=p["entry"] if p["scaled"] else p["stop0"],
+                    current_stop=p["stop"], side_long=True)
 
     for now in day_grid:
         manage_open(now)
@@ -409,11 +449,6 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
             if tape.in_halt_or_cooldown(s, now):
                 _tr(s, "gate_fail:halt_window", now)
                 continue
-            # per-symbol attempt cooldown: a failed limit-touch attempt rests for the
-            # fill window before retrying (mirrors the live ack-timeout + re-watch)
-            la = armed[s].get("last_try")
-            if la is not None and (now - la).total_seconds() / 60.0 < FILL_WINDOW_BARS * 5:
-                continue
             df, c = day_frame(s)
             if df is None:
                 continue
@@ -434,7 +469,8 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
                 continue
             _tr(s, "trigger_ok", now)
             armed[s]["since"] = now
-            q = tape.at(s, now)
+            # live blocks stale_bbo past 15s — the 1-min tape's analog is a tight window
+            q = tape.at(s, now, max_stale_min=ENTRY_QUOTE_MAX_STALE_MIN)
             if q is None:
                 _tr(s, "gate_fail:stale_quote", now)
                 continue
@@ -443,42 +479,60 @@ def run_replay(date: str, *, persist: bool = True, armed_source: str = "asof") -
             atr = compute_atr(upto[H].astype(float), upto[L].astype(float), upto[C].astype(float))
             mid = (bid + ask) / 2.0
             atrp = float(atr.iloc[-1]) / mid if (mid > 0 and pd.notna(atr.iloc[-1])) else 0.0
-            move_bps = atrp * 10_000.0
-            if move_bps <= 0 or sbps > min(GATE_MOVE_FRAC * move_bps, SPREAD_ABS_CAP_BPS):
+            # LIVE spread gate: clamp(ratio*EM15m, base floor, abs cap) — same function,
+            # same settings, same 15m expected-move basis (live_runner.py:1159-1195)
+            em_bps = _expected_move_bps_15m(upto, H, L, C)
+            max_spread = adaptive_max_spread_bps(
+                SPREAD_BASE_BPS, em_bps, SPREAD_EM_RATIO, abs_cap_bps=SPREAD_ABS_CAP_BPS)
+            if sbps > max_spread:
                 _tr(s, "gate_fail:wide_spread_%.0fbps" % sbps, now)
                 continue
             armed[s]["last_try"] = now
-            limit = ask  # marketable limit at the REAL ask
-            later = df[df.index > now]
-            for k in range(min(FILL_WINDOW_BARS, len(later))):
-                b = later.iloc[k]
-                if float(b[L]) > limit:
-                    continue
-                fill_px = limit
-                pblow = dbg.get("pullback_low")
-                eff = effective_stop_atr_pct(atrp, move_bps, stop_atr_mult=STOP_ATR_MULT, vol_floor_mult=0.5)
-                eff, _ = structural_or_vol_floored_atr_pct(
-                    vol_floored_atr_pct=eff, structural_stop_price=float(pblow) if pblow else None,
-                    entry_price=fill_px, stop_atr_mult=STOP_ATR_MULT)
-                stop, target = stop_target_prices(
-                    fill_px, atr_pct=eff, side_long=True, stop_atr_mult=STOP_ATR_MULT, reward_risk=REWARD_RISK)
-                if not (0 < stop < fill_px):
-                    break
-                max_notional = min(NOTIONAL_CAP_USD, LIQ_FRACTION * mid * dvol)
-                want_qty = min(RISK_PER_TRADE_USD / max(fill_px - stop, 1e-9), max_notional / fill_px)
-                qty = min(want_qty, PARTICIPATION_CAP * float(b[V]))
-                if qty <= 0:
-                    break
-                _tr(s, "fill@%.4g" % fill_px, now)
-                open_pos[s] = {
-                    "entry": fill_px, "qty": qty, "stop": stop, "stop0": stop, "target": target,
-                    "hwm": fill_px, "atrp": eff, "scaled": False, "df": df, "c": c, "scale_usd": 0.0,
-                    "meta": {"sym": s, "t": str(later.index[k])[11:16], "entry": round(fill_px, 4),
-                             "qty": round(qty, 0), "spread_bps": round(sbps, 0),
-                             "partial": round(qty / want_qty if want_qty > 0 else 1.0, 2),
-                             "fidelity": "tape"},
-                }
-                break
+            # LIVE fill semantics: marketable LIMIT at ask*(1+guard_bps), penny-rounded
+            # UP; rests only ~10-40s (ack timeout) then cancels (live_runner.py:2084-2131).
+            # 1-min tape analog: the order takes the offer NOW unless the next sample
+            # shows the market gapped ABOVE the limit (bid > limit -> unfilled).
+            limit = ask * (1.0 + GUARD_BPS / 10_000.0)
+            if ask >= 1.0:
+                limit = float(int(limit * 100.0 + 0.999999)) / 100.0  # ceil to the penny
+            nxt = tape.first_after(s, now)
+            if nxt is None or (nxt[0] - _aware(now)) > timedelta(minutes=2):
+                _tr(s, "gate_fail:no_confirming_quote", now)
+                continue
+            if nxt[1] > limit:  # next bid above our limit: it ran away inside the ack window
+                _tr(s, "gate_fail:ack_timeout", now)
+                continue
+            fill_px = ask  # marketable limit realizes ~the ask (live: 1.66 limit -> 1.63-1.64 fills)
+            pblow = dbg.get("pullback_low")
+            # LIVE stop width: vol-floored by the 15m expected move (the floor can BIND
+            # here, exactly like live_runner.py:2358-2382), then structural pullback-low
+            eff = effective_stop_atr_pct(
+                atrp, em_bps if em_bps else atrp * 10_000.0,
+                stop_atr_mult=STOP_ATR_MULT, vol_floor_mult=0.5)
+            eff, _ = structural_or_vol_floored_atr_pct(
+                vol_floored_atr_pct=eff, structural_stop_price=float(pblow) if pblow else None,
+                entry_price=fill_px, stop_atr_mult=STOP_ATR_MULT)
+            stop, target = stop_target_prices(
+                fill_px, atr_pct=eff, side_long=True, stop_atr_mult=STOP_ATR_MULT, reward_risk=REWARD_RISK)
+            if not (0 < stop < fill_px):
+                continue
+            max_notional = min(NOTIONAL_CAP_USD, LIQ_FRACTION * mid * dvol)
+            want_qty = min(RISK_PER_TRADE_USD / max(fill_px - stop, 1e-9), max_notional / fill_px)
+            minute_vol = max(0.0, float(nxt[4]) - dvol)  # day-volume diff = shares printed next minute
+            qty = min(want_qty, PARTICIPATION_CAP * minute_vol)
+            if qty <= 0:
+                _tr(s, "gate_fail:no_liquidity_printed", now)
+                continue
+            _tr(s, "fill@%.4g" % fill_px, now)
+            open_pos[s] = {
+                "entry": fill_px, "qty": qty, "qty0": qty, "stop": stop, "stop0": stop,
+                "target": target, "hwm": fill_px, "atrp": eff, "scaled": False,
+                "trail_armed": False, "scale_usd": 0.0,
+                "meta": {"sym": s, "t": str(now)[11:16], "entry": round(fill_px, 4),
+                         "qty": round(qty, 0), "spread_bps": round(sbps, 0),
+                         "partial": round(qty / want_qty if want_qty > 0 else 1.0, 2),
+                         "fidelity": "tape"},
+            }
 
     for s in list(open_pos):
         p = open_pos[s]
