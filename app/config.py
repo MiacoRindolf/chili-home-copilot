@@ -2197,6 +2197,14 @@ class Settings(BaseSettings):
         default=600.0,
         validation_alias=AliasChoices("CHILI_MOMENTUM_HALT_RESUME_DIP_WINDOW_SECONDS"),
     )
+    # HOT-tape regime floor: this many simultaneous LULD-scale movers (>=30% day
+    # move among the bridge's scanned candidates) flips the catalyst tilt to the
+    # no-news read (Ross 2026-06-10: hot days = no-news foreign small caps run;
+    # news names fade). Normal days (0-1 big movers) keep the news boost.
+    chili_momentum_hot_tape_min_big_movers: int = Field(
+        default=3,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_HOT_TAPE_MIN_BIG_MOVERS"),
+    )
     # A CONFIGURED broker disconnected this long raises a loud ops alarm (websocket
     # broadcast + critical log). The RH refresh token died silently for ~7 weeks
     # (2026-04-19 -> 06-10) with only info-level log spam — never again.

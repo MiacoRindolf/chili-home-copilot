@@ -1028,6 +1028,10 @@ def get_fundamentals(symbol: str) -> dict[str, Any] | None:
             "short_name": info.get("shortName"),
             "sector": info.get("sector"),
             "industry": info.get("industry"),
+            # HQ country (e.g. "China" for the HK/PRC small caps) — the hot-tape
+            # regime tilt reads this: US-listed foreign small caps are the names
+            # that run on no news in a hot tape (Ross 2026-06-10 recap).
+            "country": info.get("country"),
             "market_cap": _safe_float(info.get("marketCap")),
             "market_cap_fmt": _fmt_large(_safe_float(info.get("marketCap"))),
             # Valuation

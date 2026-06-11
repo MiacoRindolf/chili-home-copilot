@@ -249,10 +249,18 @@ def score_viability(
         if _cat_syms:
             from .catalyst import catalyst_viability_delta
 
-            _cat_delta = catalyst_viability_delta(symbol, _cat_syms)
+            _meta = ctx.meta if isinstance(getattr(ctx, "meta", None), dict) else {}
+            _hot = bool(_meta.get("hot_tape"))
+            _ctry = (_meta.get("symbol_countries") or {}).get(symbol)
+            _cat_delta = catalyst_viability_delta(
+                symbol, _cat_syms, hot_tape=_hot, hq_country=_ctry
+            )
             if _cat_delta:
                 base += _cat_delta
-                warnings.append("News catalyst (earnings) — Ross-style")
+                warnings.append(
+                    "Hot tape — no-news speculation room (Ross-style)"
+                    if _hot else "News catalyst (earnings) — Ross-style"
+                )
     except (TypeError, ValueError, AttributeError):
         pass
 

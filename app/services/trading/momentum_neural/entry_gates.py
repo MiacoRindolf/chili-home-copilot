@@ -389,6 +389,7 @@ def pullback_break_confirmation(
     require_macd_bullish: bool = False,
     allow_runaway_break: bool = False,
     runaway_min_volume_spike: float = 2.0,
+    live_price: float | None = None,
 ) -> tuple[bool, str, dict[str, Any]]:
     """Ross-style pullback-break entry on intraday (1m/5m) bars.
 
@@ -482,6 +483,28 @@ def pullback_break_confirmation(
         ok_t, _runaway = True, True
         debug["runaway"] = True
 
+    # TICK-BREAK (Ross-speed entry): the structure is valid on COMPLETED bars but
+    # the break hasn't printed on a CLOSED bar yet — and the LIVE tick is already
+    # trading through the level. Ross enters on that tick ("first candle to make a
+    # new high"), not a bar-close later. The forming bar's candle quality and
+    # volume spike are unknowable mid-bar, so this path leans on (a) the sustained
+    # rel-vol of the COMPLETED bars below, (b) VWAP/MACD confirmations, and (c)
+    # the breakout-or-bailout fast exit (pullback_high is stashed as the level),
+    # which is exactly Ross's own protection for a tick entry that wicks out.
+    _tick_break = False
+    if (
+        not ok_t
+        and live_price is not None
+        and float(live_price) > 0
+        and reason_t in ("waiting_for_break", "waiting_for_reclaim")
+        and debug.get("pullback_high") is not None
+        and debug.get("pullback_low") is not None
+        and float(live_price) > float(debug["pullback_high"])
+    ):
+        ok_t, _tick_break = True, True
+        debug["tick_break"] = True
+        debug["live_price"] = float(live_price)
+
     if not ok_t:
         return False, reason_t, debug
 
@@ -494,8 +517,10 @@ def pullback_break_confirmation(
     debug["vol_ratio"] = round(vol_ratio, 2)
     # Runaways need MORE conviction (chasing a break without a retest): raise the
     # volume floor to runaway_min_volume_spike for them; normal breaks keep the base.
+    # Tick-breaks skip the per-bar spike check (the breaking bar is still forming —
+    # its volume is unknowable); the sustained-volume gate below still applies.
     _vol_floor = float(runaway_min_volume_spike) if _runaway else float(volume_spike_multiple)
-    if vol_ratio < _vol_floor:
+    if not _tick_break and vol_ratio < _vol_floor:
         return False, "break_low_volume", debug
 
     # #3 Sustaining-volume gate (the ESTR guardrail): the move must STILL be carried
@@ -517,7 +542,9 @@ def pullback_break_confirmation(
     cur_h, cur_l, cur_c = float(high.iloc[cur]), float(low.iloc[cur]), float(close.iloc[cur])
 
     # Conviction break candle: reject a doji / topping-tail "break" that wicks out.
-    if require_break_candle:
+    # Not applicable to a tick-break (the breaking bar is mid-formation) — the
+    # breakout-or-bailout fast exit covers a tick entry that wicks out.
+    if require_break_candle and not _tick_break:
         from .candles import is_strong_bull_break_candle
 
         if not is_strong_bull_break_candle(
@@ -527,11 +554,13 @@ def pullback_break_confirmation(
             return False, "weak_break_candle", debug
 
     # VWAP hold: Ross stays long ABOVE VWAP. Skip when VWAP unavailable (fail-open).
+    # For a tick-break the actionable price is the LIVE tick, not the last close.
     if require_vwap_hold:
         vwap_cur = vwap[cur] if cur < len(vwap) and vwap[cur] is not None else None
         if vwap_cur is not None and float(vwap_cur) > 0:
             debug["vwap"] = round(float(vwap_cur), 6)
-            if cur_c < float(vwap_cur) * (1.0 - max(0.0, float(vwap_hold_buffer))):
+            _px_vs_vwap = float(live_price) if _tick_break else cur_c
+            if _px_vs_vwap < float(vwap_cur) * (1.0 - max(0.0, float(vwap_hold_buffer))):
                 return False, "below_vwap", debug
 
     # MACD momentum confirmation (lenient: histogram >= 0 OR macd line >= signal).
@@ -547,7 +576,7 @@ def pullback_break_confirmation(
             if not bullish:
                 return False, "macd_not_bullish", debug
 
-    return True, "pullback_break_ok", debug
+    return True, ("pullback_break_tick_ok" if _tick_break else "pullback_break_ok"), debug
 
 
 def breakout_failed_to_hold(
@@ -641,7 +670,7 @@ def hurst_proxy_from_closes(close: pd.Series) -> float:
 
 
 def momentum_pullback_trigger(
-    df: pd.DataFrame, *, entry_interval: str
+    df: pd.DataFrame, *, entry_interval: str, live_price: float | None = None
 ) -> tuple[bool, str, dict[str, Any]]:
     """The Ross pullback-break trigger resolved from live settings — the SINGLE
     source BOTH the live runner and the paper runner call, so the two paths make
@@ -655,6 +684,7 @@ def momentum_pullback_trigger(
     return pullback_break_confirmation(
         df,
         entry_interval=entry_interval,
+        live_price=live_price,
         volume_spike_multiple=float(
             getattr(settings, "chili_momentum_pullback_volume_spike_multiple", 1.5) or 1.5
         ),
