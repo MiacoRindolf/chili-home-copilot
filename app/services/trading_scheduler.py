@@ -5929,6 +5929,17 @@ def start_scheduler():
                 coalesce=True,
                 next_run_time=datetime.now() + timedelta(seconds=20),
             )
+            if _bus_on:
+                # Stage 2 websocket rail: event-driven EXITS — a price-bus tick that
+                # breaches a tracked stop/target ticks the session IMMEDIATELY (the
+                # batch above stays as the heartbeat; FOR-UPDATE-nowait makes the
+                # overlap a no-op).
+                try:
+                    from .trading.momentum_neural.live_runner_loop import start_live_runner_loop
+                    start_live_runner_loop()
+                    logger.info("[scheduler] Event-driven LIVE runner loop started (exit-speed ticks)")
+                except Exception as e:
+                    logger.warning("[scheduler] Event-driven LIVE runner loop failed to start: %s", e)
 
         # Auto-arm-live: autonomously arm the surging Ross candidate (one live
         # session at a time). Only runs when the live runner is also on (no point
